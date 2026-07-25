@@ -54,6 +54,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
+import { TicketDuplicateService } from './ticket-duplicate.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -77,6 +78,7 @@ export class TicketsController {
     private readonly presence: PresenceService,
     private readonly ticketRoleAssignments: TicketRoleAssignmentService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
+    private readonly ticketDuplicates: TicketDuplicateService,
   ) {}
 
   @Get('tickets/:id/comment-summary')
@@ -197,7 +199,7 @@ export class TicketsController {
 
   @Post('columns/:columnId/tickets')
   async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset, skip_default_assignments = false } = body;
+    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset, skip_default_assignments = false, source_kind, source_chat_room_id, related_ticket_id } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
     await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
@@ -213,6 +215,10 @@ export class TicketsController {
         prospectiveWorkspaceId = board?.workspace_id || '';
       }
     } catch { /* non-fatal — validateNextTicketId will skip the workspace guard */ }
+
+    const duplicateAssessment = await this.ticketDuplicates.assess(prospectiveWorkspaceId, {
+      title, description, labels, source_kind, source_chat_room_id, related_ticket_id,
+    });
 
     let resolvedNextTicketId: string | null = null;
     if (next_ticket_id !== undefined) {
@@ -283,8 +289,19 @@ export class TicketsController {
       // against the board catalog at dispatch; null = board default.
       effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
       terminal_entered_at: terminalEnteredAt,
+      workspace_id: prospectiveWorkspaceId,
+      source_kind: duplicateAssessment.source_kind,
+      source_chat_room_id: duplicateAssessment.source_chat_room_id,
+      related_ticket_id: duplicateAssessment.related_ticket_id,
+      canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
+      pending_user_action: duplicateAssessment.ambiguous,
+      pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
+      pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
+      pending_set_by: duplicateAssessment.ambiguous ? (creator.created_by || 'Ticket intake') : '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
+
+    await this.ticketDuplicates.record(ticket, duplicateAssessment, creator.created_by, creator.created_by_id);
 
     // Mirror onto TicketRoleAssignment so trigger loop / allocation /
     // mention resolution see the new ticket via the v0.34 path.
@@ -321,7 +338,29 @@ export class TicketsController {
       actor_name: creator.created_by || reporter || assignee,
     });
 
-    return res.status(201).json({ ...ticket, labels, channel_ids, children: [], comments: [] });
+    return res.status(201).json({ ...ticket, labels, channel_ids, duplicate_candidates: duplicateAssessment.candidates, children: [], comments: [] });
+  }
+
+  @Post('tickets/:id/duplicate-decision')
+  async decideDuplicate(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const workspaceId = (req as any).currentWorkspaceId as string;
+    const existing = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
+    if (!existing) return res.status(404).json({ error: 'Ticket not found' });
+    const actor = this.resolveCreator(req, body);
+    try {
+      const ticket = await this.ticketDuplicates.confirm(
+        id,
+        body.action === 'keep_independent' ? null : String(body.candidate_ticket_id || ''),
+        actor.created_by,
+        actor.created_by_id,
+      );
+      if (!ticket.canonical_ticket_id) {
+        await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'duplicate_rejected', actor.created_by_id);
+      }
+      return res.json(ticket);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'Duplicate decision rejected' });
+    }
   }
 
   /**
@@ -1668,6 +1707,10 @@ export class TicketsController {
       where: { id },
       relations: ['children', 'comments'],
     }, 'Ticket not found');
+    const linkedDuplicates = await this.ticketRepo.count({ where: { canonical_ticket_id: ticket.id } });
+    if (linkedDuplicates > 0) {
+      return res.status(409).json({ error: 'canonical_has_duplicates', linked_duplicates: linkedDuplicates });
+    }
 
     const columnId = ticket.column_id;
     const position = ticket.position;

@@ -4,6 +4,7 @@ import { DataSource, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
+import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
@@ -304,6 +305,9 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // wakes a different ticket's roles.
     const isTerminal = (col as any).is_terminal === true || (col as any).kind === 'terminal';
     if (isTerminal) {
+      if (log.action === 'moved') {
+        await this._resolveCanonicalDuplicates(ticket, col, log.actor_id || '');
+      }
       if (log.action === 'moved' && ticket.next_ticket_id) {
         await this._dispatchNextTicket(ticket, log.actor_id || '');
       }
@@ -510,6 +514,48 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
 
         await this._emitTrigger(ticket, targetAgentId, slug, triggerSource, log.actor_id || '');
       }
+    }
+  }
+
+  private async _resolveCanonicalDuplicates(canonical: Ticket, terminalColumn: BoardColumn, actorId: string): Promise<void> {
+    if (canonical.canonical_ticket_id) return;
+    const repo = this.dataSource.getRepository(Ticket);
+    const duplicates = await repo.find({ where: { canonical_ticket_id: canonical.id } });
+    for (const duplicate of duplicates) {
+      // Idempotency: a duplicate already mirrored into this terminal column
+      // has completed this canonical entry and must not emit hooks again.
+      if (duplicate.column_id === terminalColumn.id && duplicate.terminal_entered_at) continue;
+      const priorColumnId = duplicate.column_id;
+      duplicate.column_id = terminalColumn.id;
+      duplicate.status = canonical.status;
+      duplicate.terminal_entered_at = canonical.terminal_entered_at || new Date();
+      duplicate.pending_on_tickets = false;
+      duplicate.pending_user_action = false;
+      duplicate.locked_at = null;
+      duplicate.locked_by_agent_id = null;
+      await repo.save(duplicate);
+      const decisions = this.dataSource.getRepository(TicketDuplicateDecision);
+      await decisions.save(decisions.create({
+        workspace_id: duplicate.workspace_id,
+        report_ticket_id: duplicate.id,
+        candidate_ticket_id: canonical.id,
+        outcome: 'resolved_from_canonical',
+        confidence: 100,
+        matched_signals: JSON.stringify(['canonical_terminal']),
+        actor_id: actorId,
+        actor_name: 'Canonical resolution',
+      }));
+      await this.activityService.logActivity({
+        entity_type: 'ticket',
+        entity_id: duplicate.id,
+        ticket_id: duplicate.id,
+        action: 'moved',
+        field_changed: 'resolved_from_canonical',
+        old_value: priorColumnId,
+        new_value: terminalColumn.id,
+        actor_id: 'system',
+        actor_name: 'Canonical resolution',
+      });
     }
   }
 
@@ -1218,6 +1264,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: ticketId } });
     if (!ticket || !ticket.column_id) return { emitted: 0 };
+
+    if (ticket.canonical_ticket_id) {
+      this.logService.info('MCP', 'dispatchCurrentColumn skipped (duplicate ticket)', {
+        ticket_id: ticket.id, canonical_ticket_id: ticket.canonical_ticket_id, source: triggerSource,
+      });
+      return { emitted: 0 };
+    }
 
     if (ticket.pending_user_action || ticket.pending_on_tickets) {
       this.logService.info('MCP', 'dispatchCurrentColumn skipped (ticket still pending)', {
@@ -1969,6 +2022,23 @@ candidate's branch or move the ticket.
     },
   ): Promise<string> {
     const now = new Date();
+
+    // Final race-safe duplicate gate. Callers may hold a pre-intake snapshot,
+    // so always re-read the link at the single trigger chokepoint.
+    const duplicateGateTicket = await this.dataSource.getRepository(Ticket).findOne({
+      where: { id: ticket.id },
+      select: ['id', 'canonical_ticket_id'],
+    });
+    if (duplicateGateTicket?.canonical_ticket_id) {
+      this.logService.info('MCP', 'agent_trigger dropped (duplicate ticket)', {
+        ticket_id: ticket.id,
+        canonical_ticket_id: duplicateGateTicket.canonical_ticket_id,
+        agent_id: agentId,
+        role,
+        source: triggerSource,
+      });
+      return '';
+    }
 
     // Resolve the ticket's column ONCE up front — needed for board_id
     // (focus selector), the audit-row ranking summary, and any

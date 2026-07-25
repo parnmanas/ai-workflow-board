@@ -43,6 +43,7 @@ export { StuckTicketAlert } from './StuckTicketAlert';
 export { DispatchIntent } from './DispatchIntent';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
+export { TicketDuplicateDecision } from './TicketDuplicateDecision';
 export { BenchmarkScore } from './BenchmarkScore';
 export { BuildArtifact } from './BuildArtifact';
 export { QaScenario } from './QaScenario';

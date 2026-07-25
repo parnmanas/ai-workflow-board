@@ -15,6 +15,8 @@ import { Comment } from './Comment';
 @Index('idx_tickets_parent', ['parent_id'])
 @Index('idx_tickets_workspace', ['workspace_id'])
 @Index('idx_tickets_archived', ['archived_at'])
+@Index('idx_tickets_canonical', ['canonical_ticket_id'])
+@Index('idx_tickets_chat_source', ['workspace_id', 'source_kind', 'source_chat_room_id'])
 export class Ticket {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -22,6 +24,18 @@ export class Ticket {
   @Index('uq_tickets_operational_dedupe_open', { unique: true })
   @Column({ type: 'varchar', nullable: true, default: null })
   operational_dedupe_key: string | null;
+
+  @Column({ type: 'varchar', nullable: true, default: null })
+  canonical_ticket_id: string | null;
+
+  @Column({ type: 'varchar', default: '' })
+  source_kind: string;
+
+  @Column({ type: 'varchar', default: '' })
+  source_chat_room_id: string;
+
+  @Column({ type: 'varchar', nullable: true, default: null })
+  related_ticket_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
   workspace_id: string;

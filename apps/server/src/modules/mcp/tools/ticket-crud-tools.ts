@@ -37,6 +37,7 @@ import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
 import type { ToolContext } from './context';
+import { TicketDuplicateService } from '../../tickets/ticket-duplicate.service';
 
 /**
  * Stable projection of the mutable ticket state that can produce an update
@@ -230,8 +231,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
+      source_kind: z.enum(['chat']).optional().describe('Durable source kind. Set for chat-originated reports.'),
+      source_chat_room_id: z.string().optional().describe('Source chat room id for duplicate matching.'),
+      related_ticket_id: z.string().optional().describe('Related/reproduced ticket id for duplicate matching.'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, handoff_spec, skip_default_assignments, created_by, created_by_type, created_by_id }, extra: { sessionId?: string }) => {
+    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, handoff_spec, skip_default_assignments, created_by, created_by_type, created_by_id, source_kind, source_chat_room_id, related_ticket_id }, extra: { sessionId?: string }) => {
       const __createSanitizeCaller = getCallerAgent(extra);
       // Validate the handoff relay spec up front (throws → clean err) so a typo
       // surfaces as a 400 instead of a silently-dropped relay.
@@ -262,6 +266,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         const board = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
         prospectiveWorkspaceId = board?.workspace_id || '';
       } catch { /* validateNextTicketId will skip the workspace guard if empty */ }
+      const duplicateService = new TicketDuplicateService(dataSource);
+      const duplicateAssessment = await duplicateService.assess(prospectiveWorkspaceId, {
+        title, description, labels, source_kind, source_chat_room_id, related_ticket_id,
+      });
 
       let resolvedNextTicketId: string | null = null;
       if (next_ticket_id !== undefined) {
@@ -340,6 +348,15 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           terminal_entered_at: terminalEnteredAt,
           // Cross-board handoff relay spec (validated above; '' = no handoff).
           handoff_spec: handoffSpecJson,
+          workspace_id: prospectiveWorkspaceId,
+          source_kind: duplicateAssessment.source_kind,
+          source_chat_room_id: duplicateAssessment.source_chat_room_id,
+          related_ticket_id: duplicateAssessment.related_ticket_id,
+          canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
+          pending_user_action: duplicateAssessment.ambiguous,
+          pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
+          pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
+          pending_set_by: duplicateAssessment.ambiguous ? (creatorName || 'Ticket intake') : '',
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 
@@ -355,6 +372,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
         return t;
       });
+      await duplicateService.record(ticket, duplicateAssessment, creatorName, creatorId);
 
       // B1: backfill workspace_id from column → board so the v0.34
       // assignment-table sync below actually fires. The Ticket row's
@@ -410,8 +428,37 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           stage: 'create_result_projection',
         });
       }
-      return ok(full);
+      return ok(full ? { ...full, duplicate_candidates: duplicateAssessment.candidates } : full);
     }
+  );
+
+  server.tool(
+    'decide_ticket_duplicate',
+    'Resolve an ambiguous chat-ticket match. Link it to a listed canonical candidate, or keep it independent and allow one normal dispatch.',
+    {
+      ticket_id: z.string().describe('Ambiguous report ticket id'),
+      action: z.enum(['link', 'keep_independent']),
+      candidate_ticket_id: z.string().optional().describe('Required for action=link'),
+    },
+    async ({ ticket_id, action, candidate_ticket_id }, extra: { sessionId?: string }) => {
+      if (action === 'link' && !candidate_ticket_id) return err('candidate_ticket_id is required for action=link');
+      const caller = getCallerAgent(extra);
+      try {
+        const duplicateService = new TicketDuplicateService(dataSource);
+        const ticket = await duplicateService.confirm(
+          ticket_id,
+          action === 'link' ? candidate_ticket_id! : null,
+          caller?.agentName || '',
+          caller?.agentId || '',
+        );
+        if (action === 'keep_independent' && triggerLoopService) {
+          await triggerLoopService.dispatchCurrentColumn(ticket.id, 'duplicate_rejected', caller?.agentId || '');
+        }
+        return ok(await loadTicketFull(dataSource, ticket.id));
+      } catch (e: any) {
+        return err(e?.message || 'Duplicate decision rejected');
+      }
+    },
   );
 
   server.tool(
@@ -791,6 +838,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         relations: ['children', 'comments'],
       });
       if (!ticket) return err('Ticket not found');
+      const linkedDuplicates = await ticketRepo.count({ where: { canonical_ticket_id: ticket.id } });
+      if (linkedDuplicates > 0) {
+        return err(`canonical_has_duplicates: ${linkedDuplicates} linked report(s) must be relinked first`);
+      }
 
       const caller = getCallerAgent(extra);
       const columnId = ticket.column_id;

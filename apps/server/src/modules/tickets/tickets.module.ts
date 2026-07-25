@@ -11,6 +11,7 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { TicketsController } from './tickets.controller';
 import { TicketArchiverService } from './ticket-archiver.service';
+import { TicketDuplicateService } from './ticket-duplicate.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AgentsModule } from '../agents/agents.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
@@ -23,6 +24,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     WorkspaceRolesModule,
   ],
   controllers: [TicketsController],
-  providers: [AuthGuard, TicketArchiverService],
+  providers: [AuthGuard, TicketArchiverService, TicketDuplicateService],
+  exports: [TicketDuplicateService],
 })
 export class TicketsModule {}

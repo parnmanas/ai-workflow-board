@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository, In } from 'typeorm';
 import { Feature, FeatureChainProposal, FeatureProposedTicket } from '../../entities/Feature';
 import { Ticket } from '../../entities/Ticket';
+import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Agent } from '../../entities/Agent';
@@ -438,6 +439,16 @@ export class FeaturesService {
 
     const effort = (pt.effort_preset || '').trim() || null;
     const priority = pt.priority || 'medium';
+    const duplicateService = new TicketDuplicateService(this.dataSource);
+    const duplicateAssessment = feature.source_chat_room_id
+      ? await duplicateService.assess(feature.workspace_id, {
+          title: pt.title,
+          description: pt.description || '',
+          labels,
+          source_kind: 'chat',
+          source_chat_room_id: feature.source_chat_room_id,
+        })
+      : null;
 
     const ticket = await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
@@ -456,6 +467,15 @@ export class FeaturesService {
         channel_ids: '[]',
         position,
         effort_preset: effort,
+        workspace_id: feature.workspace_id,
+        source_kind: duplicateAssessment?.source_kind || '',
+        source_chat_room_id: duplicateAssessment?.source_chat_room_id || '',
+        related_ticket_id: duplicateAssessment?.related_ticket_id || null,
+        canonical_ticket_id: duplicateAssessment?.canonical_ticket_id || null,
+        pending_user_action: duplicateAssessment?.ambiguous || false,
+        pending_reason: duplicateAssessment?.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
+        pending_set_at: duplicateAssessment?.ambiguous ? new Date() : null,
+        pending_set_by: duplicateAssessment?.ambiguous ? 'Feature Intake' : '',
         // Cross-board handoff relay (ticket ac21a745) — validated at propose time;
         // re-run defensively ('' on the rare re-validation miss so one bad spec
         // never aborts the whole chain build).
@@ -466,6 +486,9 @@ export class FeaturesService {
         created_by_id: '',
       }));
     });
+    if (duplicateAssessment) {
+      await duplicateService.record(ticket, duplicateAssessment, 'Feature Intake', '');
+    }
 
     // Backfill workspace_id then mirror the role trio so the trigger loop /
     // focus selector see the ticket (else the assignee loop never dispatches).
