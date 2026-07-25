@@ -14,6 +14,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerAllTools, type ToolContext } from '../tools';
+import { PendingTicketRefAccumulator } from '../tools/ticket-ref-session';
 
 // Update the version bump target when breaking the MCP surface. Clients read
 // experimental['awb/schemaVersion'].version to detect incompatibilities.
@@ -22,6 +23,7 @@ const MCP_SERVER_VERSION = '1.0.0';
 const MCP_SCHEMA_VERSION = 2;
 
 export function createMcpServerForContext(ctx: ToolContext): McpServer {
+  ctx.pendingTicketRefs = new PendingTicketRefAccumulator();
   const server = new McpServer(
     { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
     { capabilities: { experimental: { 'awb/schemaVersion': { version: MCP_SCHEMA_VERSION } } } },

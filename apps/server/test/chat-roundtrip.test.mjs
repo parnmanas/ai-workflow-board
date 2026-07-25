@@ -63,7 +63,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-roundtrip' });
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-roundtrip' });
 
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
@@ -116,7 +116,13 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   //       stream receives the second chat_room_message. Note the tool takes NO
   //       agent_id — sender identity is the caller's API-key agent, so there is
   //       no impersonation vector to test (the old Test 3 case is moot).
-  const agentText = 'yes — responder here, how can I help?';
+  const createdTicket = await agentMcp.callTool('create_ticket', {
+    title: 'chat artifact round-trip',
+    column_id: columns.todo.id,
+  });
+  assert.ok(createdTicket?.id, `ticket create must succeed: ${JSON.stringify(createdTicket)}`);
+
+  const agentText = 'ticket created — responder here';
   const toolRes = await agentMcp.callTool('send_chat_room_message', {
     room_id: room.id,
     content: agentText,
@@ -137,6 +143,52 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const senderId = replyData?.sender_id ?? replyData?.payload?.sender_id;
   assert.equal(senderType, 'agent', 'reply sender_type is agent');
   assert.equal(senderId, responder.id, 'reply sender_id is the calling agent');
+  assert.deepEqual(
+    replyData.metadata?.ticket_refs,
+    [{ action: 'create', ticket_id: createdTicket.id, title: 'chat artifact round-trip' }],
+    'the final reply SSE carries the server-bound create artifact exactly once',
+  );
+
+  // A real update in the next turn binds an update artifact; an idempotent
+  // no-op update does not manufacture another ref.
+  await agentMcp.callTool('update_ticket', {
+    ticket_id: createdTicket.id,
+    title: 'chat artifact updated',
+  });
+  await agentMcp.callTool('update_ticket', {
+    ticket_id: createdTicket.id,
+  });
+  const updateText = 'ticket updated';
+  await agentMcp.callTool('send_chat_room_message', {
+    room_id: room.id,
+    content: updateText,
+  });
+  const updateFrame = await userStream.waitFor(
+    'chat_room_message',
+    (d) => (d?.content ?? d?.payload?.content) === updateText,
+    4000,
+  );
+  const updateData = updateFrame.data ?? updateFrame;
+  assert.deepEqual(
+    updateData.metadata?.ticket_refs,
+    [{ action: 'update', ticket_id: createdTicket.id, title: 'chat artifact updated' }],
+    'the next reply carries one update artifact despite a following no-op update',
+  );
+
+  const historyRows = await ds.getRepository('ChatRoomMessage').find({
+    where: { room_id: room.id },
+    order: { created_at: 'ASC' },
+  });
+  const artifactRows = historyRows
+    .map((row) => {
+      try { return row.metadata ? JSON.parse(row.metadata) : null; } catch { return null; }
+    })
+    .filter((metadata) => Array.isArray(metadata?.ticket_refs));
+  assert.deepEqual(
+    artifactRows.map((metadata) => metadata.ticket_refs),
+    [replyData.metadata.ticket_refs, updateData.metadata.ticket_refs],
+    'the same create/update metadata is durable for history reload with no duplicate artifact row',
+  );
 
   // No process.exit: the suite runs with --test-force-exit, which hands the real
   // node:test exit code back instead of masking a failed assertion.

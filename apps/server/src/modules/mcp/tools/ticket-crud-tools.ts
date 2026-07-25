@@ -352,6 +352,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       });
 
       const full = await loadTicketFull(dataSource, ticket.id);
+      if (full) {
+        ctx.pendingTicketRefs?.record({
+          action: 'create',
+          ticket_id: ticket.id,
+          title: full.title || ticket.title,
+        });
+      } else {
+        logger.error('TicketArtifact', 'Created ticket could not be projected for chat artifact', {
+          ticket_id: ticket.id,
+          session_id: extra?.sessionId,
+          stage: 'create_result_projection',
+        });
+      }
       return ok(full);
     }
   );
@@ -620,6 +633,19 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       }
 
       const updated = await loadTicketFull(dataSource, ticket.id);
+      if (changes.length > 0 && updated) {
+        ctx.pendingTicketRefs?.record({
+          action: 'update',
+          ticket_id: ticket.id,
+          title: updated.title || ticket.title,
+        });
+      } else if (changes.length > 0) {
+        logger.error('TicketArtifact', 'Updated ticket could not be projected for chat artifact', {
+          ticket_id: ticket.id,
+          session_id: extra?.sessionId,
+          stage: 'update_result_projection',
+        });
+      }
       return ok(updated);
     }
   );

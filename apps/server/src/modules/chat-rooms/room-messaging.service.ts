@@ -65,9 +65,10 @@ const MAX_AGENT_REFS = 10;
 const MAX_BOARD_REFS = 10;
 const TICKET_REF_STR_MAX = 300;
 
-function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
+export function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
   if (!Array.isArray(refsRaw)) return [];
   const refs: ChatMessageTicketRef[] = [];
+  const seen = new Set<string>();
   for (const r of refsRaw) {
     if (refs.length >= MAX_TICKET_REFS) break;
     if (!r || typeof r !== 'object') continue;
@@ -78,6 +79,9 @@ function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
       action: typeof rec.action === 'string' ? rec.action.slice(0, TICKET_REF_STR_MAX) : '',
       ticket_id: ticketId,
     };
+    const dedupeKey = `${ticketId}\u0000${ref.action}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
     if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
     // F2-4 ⓑ: propose/consensus 카드의 대상 컬럼 등 부가 맥락(있으면 보존).
     if (typeof rec.detail === 'string' && rec.detail) ref.detail = rec.detail.slice(0, TICKET_REF_STR_MAX);

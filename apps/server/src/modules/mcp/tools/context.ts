@@ -59,6 +59,7 @@ import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
+import type { PendingTicketRefAccumulator } from './ticket-ref-session';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -171,6 +172,9 @@ export interface ToolContext {
   // standalone builder constructs a thin instance directly (same pattern as
   // ticketPrerequisitesService). Used by benchmark-tools.
   benchmarkService?: BenchmarkService;
+  // Session-scoped bridge from successful create/update tools to the final
+  // send_chat_room_message call. Initialized by createMcpServerForContext.
+  pendingTicketRefs?: PendingTicketRefAccumulator;
 }
 
 /**

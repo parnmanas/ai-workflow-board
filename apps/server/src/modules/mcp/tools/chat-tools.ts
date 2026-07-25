@@ -113,21 +113,43 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // A workspace-less manager posting via MCP is theoretical — it would
         // need an apiKey with workspace_id='', and the chat domain is
         // workspace-scoped — but fall back to '' so the typed contract holds.
-        const msg = await roomMessagingService.sendMessage(
-          room_id,
-          agent.workspace_id ?? '',
-          'agent',
-          agent.id,
-          agent.name,
-          cleanContent,
-          undefined,
-          attachment_ids,
-        );
+        const pendingTicketRefs = ctx.pendingTicketRefs?.drain() ?? [];
+        let msg: any;
+        try {
+          msg = await roomMessagingService.sendMessage(
+            room_id,
+            agent.workspace_id ?? '',
+            'agent',
+            agent.id,
+            agent.name,
+            cleanContent,
+            undefined,
+            attachment_ids,
+            'message',
+            pendingTicketRefs.length > 0
+              ? { metadata: { ticket_refs: pendingTicketRefs } }
+              : undefined,
+          );
+        } catch (sendError) {
+          ctx.pendingTicketRefs?.restore(pendingTicketRefs);
+          if (pendingTicketRefs.length > 0) {
+            logger.error('TicketArtifact', 'Chat message save failed with pending ticket artifacts', {
+              room_id,
+              agent_id: agent.id,
+              session_id: extra?.sessionId,
+              ticket_ids: pendingTicketRefs.map((ref) => ref.ticket_id),
+              stage: 'message_persist',
+              error: sendError instanceof Error ? sendError.message : String(sendError),
+            });
+          }
+          throw sendError;
+        }
         return ok({
           message_id: msg.id,
           room_id: msg.room_id,
           content: msg.content,
           attachments: msg.attachments || [],
+          metadata: msg.metadata,
           created_at: msg.created_at,
         });
       } catch (e: any) {
