@@ -182,6 +182,50 @@ describe('Claude backend profile integration', () => {
     assert.deepEqual(await authoritativeWorkspaceRuntimeProfiles(ds, refreshed), []);
   });
 
+  it('converges legacy-only and mismatched workspace defaults when replacing a profile', async () => {
+    let response = await createProfile(adminToken, 'profile-legacy-b', 'Profile Legacy B');
+    assert.equal(response.status, 201, JSON.stringify(response.data));
+    const legacyProfile = response.data;
+    response = await createProfile(adminToken, 'profile-authoritative-c', 'Profile Authoritative C');
+    assert.equal(response.status, 201, JSON.stringify(response.data));
+    const replacementProfile = response.data;
+
+    const workspaceRepo = ds.getRepository('Workspace');
+    const legacyOnly = await workspaceRepo.save(workspaceRepo.create({
+      name: 'Legacy-only default workspace',
+      default_claude_backend_profile_id: null,
+      default_cli_runtime_profile: legacyProfile.id,
+      claude_backend_profiles_migrated: true,
+    }));
+    const mismatched = await workspaceRepo.save(workspaceRepo.create({
+      name: 'Mismatched default workspace',
+      default_claude_backend_profile_id: replacementProfile.id,
+      default_cli_runtime_profile: legacyProfile.id,
+      claude_backend_profiles_migrated: true,
+    }));
+
+    const replaced = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${legacyProfile.id}`, {
+      token: adminToken,
+      method: 'DELETE',
+      body: { replacement_profile_id: replacementProfile.id },
+    });
+    assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
+
+    for (const workspaceId of [legacyOnly.id, mismatched.id]) {
+      const converged = await workspaceRepo.findOneByOrFail({ id: workspaceId });
+      assert.equal(converged.default_claude_backend_profile_id, replacementProfile.id);
+      assert.equal(converged.default_cli_runtime_profile, replacementProfile.id);
+    }
+
+    const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
+    const resolved = await resolveClaudeBackendProfileForDispatch(
+      ds,
+      await workspaceRepo.findOneByOrFail({ id: legacyOnly.id }),
+      [],
+    );
+    assert.equal(resolved?.id, replacementProfile.id);
+  });
+
   it('blocks referenced deletion, then replaces every selector/default/allow reference transactionally', async () => {
     await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles`, {
       token: ownerToken,

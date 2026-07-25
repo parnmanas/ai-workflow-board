@@ -137,8 +137,25 @@ export class ClaudeBackendProfilesController {
     }
     await this.dataSource.transaction(async manager => {
       const next = replacement || null; // detach means inherit
-      await manager.update(Workspace, { default_claude_backend_profile_id: id }, { default_claude_backend_profile_id: next });
-      await manager.update(Workspace, { default_cli_runtime_profile: id }, { default_cli_runtime_profile: next });
+      const affectedDefaultWorkspaces = await manager.getRepository(Workspace).find({
+        where: [
+          { default_claude_backend_profile_id: id },
+          { default_cli_runtime_profile: id },
+        ],
+      });
+      for (const workspace of affectedDefaultWorkspaces) {
+        // The new selector is authoritative when it already points elsewhere.
+        // Otherwise replace/detach the deleted selector and converge the
+        // one-release legacy mirror to the same final value.
+        const finalDefault = workspace.default_claude_backend_profile_id
+          && workspace.default_claude_backend_profile_id !== id
+          ? workspace.default_claude_backend_profile_id
+          : next;
+        await manager.update(Workspace, { id: workspace.id }, {
+          default_claude_backend_profile_id: finalDefault,
+          default_cli_runtime_profile: finalDefault,
+        });
+      }
       await manager.update(Board, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Agent, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Ticket, { cli_runtime_profile: id }, { cli_runtime_profile: next });
