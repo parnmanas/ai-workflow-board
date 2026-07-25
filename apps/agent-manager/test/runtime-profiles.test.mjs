@@ -196,7 +196,7 @@ createServer(async (request, response) => {
   }
 });
 
-test('credential reference is bound without exposing unrelated env', () => {
+test('credential reference uses the declared auth env without exposing unrelated env', () => {
   const ref = '00000000-0000-4000-8000-000000000001';
   const profile = {
     id: 'secure',
@@ -207,12 +207,29 @@ test('credential reference is bound without exposing unrelated env', () => {
     auth_env: 'BACKEND_API_KEY',
   };
   assert.deepEqual(runtimeCredentialEnv(profile, ref, {
-    ANTHROPIC_API_KEY: 'selected',
-    OPENAI_API_KEY: 'must-not-leak',
+    BACKEND_API_KEY: 'selected',
+    ANTHROPIC_API_KEY: 'must-not-leak',
   }), { BACKEND_API_KEY: 'selected' });
   assert.throws(
     () => runtimeCredentialEnv(profile, '00000000-0000-4000-8000-000000000002', { ANTHROPIC_API_KEY: 'x' }),
     /does not match/,
+  );
+});
+
+test('OpenAI adapter credential binds OPENAI_API_KEY without requiring or exposing Anthropic env', () => {
+  const ref = '00000000-0000-4000-8000-000000000003';
+  const profile = {
+    id: 'secure-openai-adapter',
+    protocol: 'openai-compatible',
+    base_url: 'http://127.0.0.1:1/v1',
+    model: 'm',
+    credential_ref: ref,
+    credential_required: true,
+    auth_env: 'OPENAI_API_KEY',
+  };
+  assert.deepEqual(
+    runtimeCredentialEnv(profile, ref, { OPENAI_API_KEY: 'openai-only' }),
+    { OPENAI_API_KEY: 'openai-only' },
   );
 });
 

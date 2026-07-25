@@ -243,12 +243,14 @@ export function runtimeCredentialEnv(
       'but the selected agent credential does not match',
     );
   }
-  const secret = agentCredentialEnv?.ANTHROPIC_API_KEY;
+  const authEnv = profile.auth_env || 'ANTHROPIC_AUTH_TOKEN';
+  const secret = agentCredentialEnv?.[authEnv]
+    ?? (authEnv === 'ANTHROPIC_AUTH_TOKEN' ? agentCredentialEnv?.ANTHROPIC_API_KEY : undefined);
   if (!secret) {
     if (profile.credential_required) throw new Error(`Claude backend profile "${profile.id}" requires an API-key credential`);
     return {};
   }
-  return { [profile.auth_env || 'ANTHROPIC_AUTH_TOKEN']: secret };
+  return { [authEnv]: secret };
 }
 
 export async function shutdownRuntimeProfiles(): Promise<void> {

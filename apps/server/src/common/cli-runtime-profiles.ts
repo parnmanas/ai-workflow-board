@@ -72,6 +72,79 @@ const ClaudeBackendProfileSchema = z.object({
   }
 });
 
+const LegacyCliRuntimeProfileSchema = z.object({
+  id: z.string(),
+  provider: z.string(),
+  type: z.string().optional(),
+  model: z.string(),
+  command: z.string().optional(),
+  module: z.string().optional(),
+  executable: z.string().optional(),
+  python: z.string().optional(),
+  venv: z.string().optional(),
+  cwd: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  extra_args: z.array(z.string()).optional(),
+  base_url: z.string().optional(),
+  port: z.number().optional(),
+  startup_timeout_ms: z.number().optional(),
+  health_check: z.string().optional(),
+  shutdown_policy: z.string().optional(),
+  credential_required: z.boolean().optional(),
+  credential_ref: z.string().optional(),
+  capabilities: z.array(z.string()).optional(),
+  claude: z.object({
+    env: z.record(z.string(), z.string()).optional(),
+    args: z.array(z.string()).optional(),
+  }).strict().optional(),
+}).strict();
+
+function migrateLegacyProfile(raw: unknown, index: number): unknown {
+  if (!raw || typeof raw !== 'object' || !('provider' in raw) || 'kind' in raw) return raw;
+  const parsed = LegacyCliRuntimeProfileSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      `legacy profile at index ${index} is invalid: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    );
+  }
+  const legacy = parsed.data;
+  const provider = legacy.provider.trim().toLowerCase();
+  const launchesBackend = Boolean(
+    legacy.command || legacy.module || legacy.executable || legacy.python ||
+    legacy.venv || legacy.port || legacy.extra_args?.length,
+  );
+  if (!['anthropic', 'anthropic-compatible', 'claude'].includes(provider) || launchesBackend) {
+    throw new Error(
+      `legacy profile "${legacy.id}" (provider: ${legacy.provider}) cannot be migrated safely because it ` +
+      'represents a backend runtime. Replace it with kind "claude-backend": use protocol ' +
+      '"anthropic-compatible" for a direct endpoint, or protocol "openai-compatible" with a declared adapter; ' +
+      'AWB no longer starts the backend server itself',
+    );
+  }
+  if (!legacy.base_url) {
+    throw new Error(
+      `legacy profile "${legacy.id}" cannot be migrated safely without base_url; add an endpoint and convert it to kind "claude-backend"`,
+    );
+  }
+  return {
+    id: legacy.id,
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: legacy.base_url,
+    model: legacy.model,
+    ...(legacy.claude?.env ? { env: legacy.claude.env } : {}),
+    ...(legacy.claude?.args ? { args: legacy.claude.args } : {}),
+    credential_required: legacy.credential_required,
+    ...(legacy.credential_ref ? { credential_ref: legacy.credential_ref } : {}),
+    auth_env: 'ANTHROPIC_AUTH_TOKEN',
+  };
+}
+
+function normalizeProfiles(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return raw.map(migrateLegacyProfile);
+}
+
 export const CliRuntimeProfilesSchema = z.array(ClaudeBackendProfileSchema).superRefine((profiles, ctx) => {
   const seen = new Set<string>();
   profiles.forEach((profile, index) => {
@@ -85,7 +158,13 @@ export type CliRuntimeProfile = z.infer<typeof ClaudeBackendProfileSchema>;
 export function validateCliRuntimeProfiles(raw: unknown):
   | { ok: true; value: CliRuntimeProfile[] }
   | { ok: false; error: string } {
-  const parsed = CliRuntimeProfilesSchema.safeParse(raw);
+  let normalized: unknown;
+  try {
+    normalized = normalizeProfiles(raw);
+  } catch (error) {
+    return { ok: false, error: `Invalid Claude backend profiles: ${(error as Error).message}` };
+  }
+  const parsed = CliRuntimeProfilesSchema.safeParse(normalized);
   if (parsed.success) return { ok: true, value: parsed.data };
   return {
     ok: false,
@@ -96,10 +175,15 @@ export function validateCliRuntimeProfiles(raw: unknown):
 export function parseCliRuntimeProfiles(raw: string | null | undefined): CliRuntimeProfile[] {
   if (!raw) return [];
   try {
-    const parsed = CliRuntimeProfilesSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : [];
-  } catch {
-    return [];
+    const checked = validateCliRuntimeProfiles(JSON.parse(raw));
+    if (!checked.ok) throw new Error(checked.error);
+    return checked.value;
+  } catch (error) {
+    throw new Error(
+      error instanceof SyntaxError
+        ? `Invalid Claude backend profiles JSON: ${error.message}`
+        : (error as Error).message,
+    );
   }
 }
 

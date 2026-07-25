@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
+  parseCliRuntimeProfiles,
   resolveCliRuntimeProfile,
   validateCliRuntimeProfiles,
 } from '../dist/common/cli-runtime-profiles.js';
@@ -76,6 +77,47 @@ test('missing selected profile fails with its inheritance source', () => {
   assert.throws(
     () => resolveCliRuntimeProfile(profiles, [{ source: 'agent', value: 'deleted' }]),
     /Claude backend profile "deleted".*agent.*does not exist/,
+  );
+});
+
+test('migrates safely reusable legacy Anthropic rows instead of silently dropping the catalog', () => {
+  const migrated = parseCliRuntimeProfiles(JSON.stringify([{
+    id: 'legacy-anthropic',
+    provider: 'anthropic',
+    type: 'server',
+    model: 'legacy-model',
+    base_url: 'http://127.0.0.1:9010',
+    shutdown_policy: 'reuse',
+    claude: { env: { LEGACY_PUBLIC: 'preserved' }, args: ['--legacy-flag'] },
+  }]));
+  assert.deepEqual(migrated, [{
+    id: 'legacy-anthropic',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:9010',
+    model: 'legacy-model',
+    env: { LEGACY_PUBLIC: 'preserved' },
+    args: ['--legacy-flag'],
+    credential_required: false,
+    auth_env: 'ANTHROPIC_AUTH_TOKEN',
+  }]);
+});
+
+test('legacy backend-launch rows fail with an actionable migration error', () => {
+  const legacyVllm = [{
+    id: 'legacy-vllm',
+    provider: 'vllm',
+    type: 'server',
+    model: 'demo',
+    module: 'vllm.entrypoints.openai.api_server',
+    port: 8000,
+  }];
+  const checked = validateCliRuntimeProfiles(legacyVllm);
+  assert.equal(checked.ok, false);
+  assert.match(checked.error, /legacy profile "legacy-vllm".*cannot be migrated safely.*openai-compatible.*adapter.*no longer starts/s);
+  assert.throws(
+    () => parseCliRuntimeProfiles(JSON.stringify(legacyVllm)),
+    /legacy profile "legacy-vllm".*cannot be migrated safely/,
   );
 });
 
