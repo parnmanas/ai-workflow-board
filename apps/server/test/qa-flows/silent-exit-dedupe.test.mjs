@@ -20,7 +20,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createTicket } from '../helpers/fixtures.mjs';
+import { setupKanbanScene, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SILENT_EXIT_PORT || '7822';
 
@@ -208,6 +209,84 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
     1,
     'no silent-exit row is added after the persisted cycle comment',
   );
+
+  step('The typed ask_question writer shares the same Postgres serialization boundary');
+  const typedTicket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id,
+    workspaceId: ws.id,
+    title: 'typed comment silent-exit race test',
+  });
+  const typedAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'typed-race-agent' });
+  const typedKey = await createApiKey(app, getDataSourceToken, typedAgent.id, {
+    workspaceId: ws.id,
+    label: 'typed-race-agent',
+  });
+  const typedTrigger = 'trigger-typed-race';
+  const typedSession = 'session-typed-race';
+  const mcp = new McpClient({
+    baseUrl: `http://127.0.0.1:${port}`,
+    apiKey: typedKey.raw_key,
+    extraHeaders: {
+      'x-awb-subagent-role': 'assignee',
+      'x-awb-subagent-ticket-id': typedTicket.id,
+      'x-awb-subagent-trigger-id': typedTrigger,
+      'x-awb-subagent-session-id': typedSession,
+    },
+  });
+  await mcp.initialize();
+  t.after(() => { void mcp.close().catch(() => {}); });
+
+  const typedAuditBody = {
+    content: 'must not be created for typed writer',
+    exit_code: 0,
+    role: 'assignee',
+    cycle_trigger_id: typedTrigger,
+    agent_id: typedAgent.id,
+    subagent_session_id: typedSession,
+    cycle_started_at: cycleStartedAt.toISOString(),
+  };
+  let typedAudit;
+  if ((process.env.DB_TYPE || 'sqlite') === 'postgres') {
+    let releaseBarrier;
+    const release = new Promise((resolve) => { releaseBarrier = resolve; });
+    let barrierLocked;
+    const locked = new Promise((resolve) => { barrierLocked = resolve; });
+    const barrier = ds.transaction(async (manager) => {
+      await manager.getRepository('Ticket').findOne({
+        where: { id: typedTicket.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      barrierLocked();
+      await release;
+    });
+    await locked;
+
+    // Queue the real typed writer first. Its implementation must acquire the
+    // ticket-row lock before saving; the audit queued behind it must therefore
+    // recheck after the question commits.
+    const writer = mcp.callTool('ask_question', {
+      ticket_id: typedTicket.id,
+      content: 'typed work persisted immediately before exit',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const audit = postSilentExit(port, typedTicket.id, typedAuditBody);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseBarrier();
+    await barrier;
+    await writer;
+    typedAudit = await audit;
+  } else {
+    await mcp.callTool('ask_question', {
+      ticket_id: typedTicket.id,
+      content: 'typed work persisted immediately before exit',
+    });
+    typedAudit = await postSilentExit(port, typedTicket.id, typedAuditBody);
+  }
+  assert.equal(typedAudit.status, 200);
+  assert.equal(typedAudit.body.suppressed, true);
+  const typedRows = await commentRepo.find({ where: { ticket_id: typedTicket.id } });
+  assert.equal(typedRows.length, 1, 'typed writer leaves no false silent-exit warning');
+  assert.equal(typedRows[0].type, 'question');
 
   step('A different trigger does not hide a genuinely silent exit');
   const genuine = await postSilentExit(port, raceTicket.id, {

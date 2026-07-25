@@ -16,10 +16,11 @@ const DEFAULT_CLIENT_INFO = { name: 'qa-virtual-agent', version: '1.0.0' };
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 
 export class McpClient {
-  constructor({ baseUrl, apiKey, clientInfo = DEFAULT_CLIENT_INFO }) {
+  constructor({ baseUrl, apiKey, clientInfo = DEFAULT_CLIENT_INFO, extraHeaders = {} }) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.apiKey = apiKey;
     this.clientInfo = clientInfo;
+    this.extraHeaders = extraHeaders;
     this.sessionId = null;
     this.initialized = false;
     this._nextId = 1;
@@ -33,6 +34,7 @@ export class McpClient {
     const h = {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
+      ...this.extraHeaders,
     };
     if (this.apiKey) h['Authorization'] = `Bearer ${this.apiKey}`;
     if (this.sessionId) h['mcp-session-id'] = this.sessionId;

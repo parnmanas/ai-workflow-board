@@ -593,16 +593,20 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         return ok({ suppressed: true, reason: 'pending_user_action' });
       }
 
-      const comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content,
-        type: 'question' as CommentType,
-        status: 'open',
-        metadata: JSON.stringify(askMetadata),
-      }));
+      const comment = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        return lockedRepo.save(lockedRepo.create({
+          ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content,
+          type: 'question' as CommentType,
+          status: 'open',
+          metadata: JSON.stringify(askMetadata),
+        }));
+      });
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
@@ -724,20 +728,24 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         return ok({ suppressed: true, reason: 'pending_user_action' });
       }
 
-      const answer = await commentRepo.save(commentRepo.create({
-        ticket_id: question.ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content,
-        type: 'answer' as CommentType,
-        parent_id: question.id,
-        metadata: JSON.stringify(answerMetadata),
-      }));
-
-      // Idempotent flip — even if a prior answer already resolved it, this
-      // matches the REST endpoint's behavior so the two paths agree.
-      await commentRepo.update({ id: question.id }, { status: 'resolved' });
+      const answer = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, question.ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        const saved = await lockedRepo.save(lockedRepo.create({
+          ticket_id: question.ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content,
+          type: 'answer' as CommentType,
+          parent_id: question.id,
+          metadata: JSON.stringify(answerMetadata),
+        }));
+        // Keep the answer and the idempotent parent-resolution flip in the
+        // same serialization boundary.
+        await lockedRepo.update({ id: question.id }, { status: 'resolved' });
+        return saved;
+      });
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: answer.id, action: 'created',
@@ -787,7 +795,6 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'record_decision', fieldName: 'content', agentId: resolved.authorId });
 
-      const commentRepo = dataSource.getRepository(Comment);
       const callerCtx = getCallerAgent(extra);
       const resolvedAuthorRole = await resolveAuthorRole(
         ticket_id, author_role, resolved.authorType, resolved.authorId,
@@ -804,15 +811,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         return ok({ suppressed: true, reason: 'pending_user_action' });
       }
 
-      const comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content,
-        type: 'decision' as CommentType,
-        metadata: JSON.stringify(decisionMetadata),
-      }));
+      const comment = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        return lockedRepo.save(lockedRepo.create({
+          ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content,
+          type: 'decision' as CommentType,
+          metadata: JSON.stringify(decisionMetadata),
+        }));
+      });
 
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
@@ -903,16 +914,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         resolvedAuthorRole,
       ), callerCtx);
 
-      const commentRepo = dataSource.getRepository(Comment);
-      const comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content: body,
-        type: 'note' as CommentType,
-        metadata: JSON.stringify(metadata),
-      }));
+      const comment = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        return lockedRepo.save(lockedRepo.create({
+          ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content: body,
+          type: 'note' as CommentType,
+          metadata: JSON.stringify(metadata),
+        }));
+      });
 
       // 이 vote 반영 후 합의 상태 재판정(best-effort — 판정 실패가 시그널 저장을
       // 깨뜨리지 않게). 표준 컨텍스트(role-assignment 서비스 부재)면 생략 —
@@ -1076,16 +1090,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         resolvedAuthorRole,
       ), callerCtx);
 
-      const commentRepo = dataSource.getRepository(Comment);
-      const comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content: body,
-        type: 'note' as CommentType,
-        metadata: JSON.stringify(metadata),
-      }));
+      const comment = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        return lockedRepo.save(lockedRepo.create({
+          ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content: body,
+          type: 'note' as CommentType,
+          metadata: JSON.stringify(metadata),
+        }));
+      });
 
       // 이 제안을 앵커로 재판정 — pending(아직 투표 안 한 홀더)이 드러난다.
       let state: Awaited<ReturnType<typeof getConsensusState>> | null = null;
@@ -1225,15 +1242,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         return ok({ suppressed: true, reason: 'pending_user_action' });
       }
 
-      const comment = await commentRepo.save(commentRepo.create({
-        ticket_id,
-        author_type: resolved.authorType,
-        author_id: resolved.authorId,
-        author: resolved.authorName,
-        content,
-        type: 'handoff' as CommentType,
-        metadata: JSON.stringify(handoffMetadata),
-      }));
+      const comment = await dataSource.transaction(async (manager) => {
+        await lockTicketCommentWrites(manager, ticket_id);
+        const lockedRepo = manager.getRepository(Comment);
+        return lockedRepo.save(lockedRepo.create({
+          ticket_id,
+          author_type: resolved.authorType,
+          author_id: resolved.authorId,
+          author: resolved.authorName,
+          content,
+          type: 'handoff' as CommentType,
+          metadata: JSON.stringify(handoffMetadata),
+        }));
+      });
 
       // 2. Reassign ticket. stale 엔티티 전체를 쓰는 ticketRepo.save(ticket)
       //    대신 조건부 원자 update(ticket f63b5805, L216 ping-pong guard와
