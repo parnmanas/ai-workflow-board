@@ -133,5 +133,55 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
   assert.equal(fifth.status, 201, 'reply in between starts a fresh occurrence row');
   assert.notEqual(fifth.body.id, fourth.body.id, 'new id, not folded into the cycle-4 row');
 
+  step('A persisted exact-trigger agent comment suppresses the conditional warning');
+  const raceTicket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id,
+    workspaceId: ws.id,
+    title: 'silent-exit grace race test',
+  });
+  const cycleStartedAt = new Date(Date.now() - 1_000);
+  await commentRepo.save(commentRepo.create({
+    ticket_id: raceTicket.id,
+    author_type: 'agent',
+    author_id: 'agent-race',
+    author: 'Race Agent',
+    content: 'work persisted immediately before exit',
+    type: 'note',
+    metadata: JSON.stringify({
+      author_role: 'assignee',
+      cycle_trigger_id: 'trigger-race',
+      subagent_session_id: 'session-race',
+    }),
+  }));
+  const suppressed = await postSilentExit(port, raceTicket.id, {
+    content: 'must not be created',
+    exit_code: 0,
+    role: 'assignee',
+    cycle_trigger_id: 'trigger-race',
+    agent_id: 'agent-race',
+    subagent_session_id: 'session-race',
+    cycle_started_at: cycleStartedAt.toISOString(),
+  });
+  assert.equal(suppressed.status, 200);
+  assert.equal(suppressed.body.suppressed, true);
+  assert.equal(
+    (await commentRepo.find({ where: { ticket_id: raceTicket.id } })).length,
+    1,
+    'no silent-exit row is added after the persisted cycle comment',
+  );
+
+  step('A different trigger does not hide a genuinely silent exit');
+  const genuine = await postSilentExit(port, raceTicket.id, {
+    content: 'genuine silent exit',
+    exit_code: 0,
+    role: 'assignee',
+    cycle_trigger_id: 'trigger-genuine-silent',
+    agent_id: 'agent-race',
+    subagent_session_id: 'different-session',
+    cycle_started_at: cycleStartedAt.toISOString(),
+  });
+  assert.equal(genuine.status, 201);
+  assert.equal(JSON.parse(genuine.body.metadata).reason, 'silent_exit');
+
   exitAfterTests(0);
 });

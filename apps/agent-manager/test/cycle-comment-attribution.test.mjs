@@ -152,6 +152,78 @@ test('one-shot: final MCP move after exit but before close suppresses this cycle
   assert.deepEqual(silentExitRequests(), []);
 });
 
+test('persistent: comment persistence completing during exit grace suppresses warning and breaker failure', async () => {
+  const manager = new TicketSessionManager({ ...config, silentExitVerifyDelayMs: 15 });
+  const session = {
+    sessionKey: 'ticket-grace:assignee:agent-grace',
+    pid: 91991,
+    cli_type: 'claude',
+    ticketId: 'ticket-grace',
+    agentId: 'agent-grace',
+    role: 'assignee',
+    startedAt: Date.now(),
+  };
+  let persisted = false;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init?.method || 'GET' });
+    assert.equal(persisted, true, 'conditional audit runs after the bounded grace');
+    const body = JSON.parse(init.body);
+    assert.equal(body.subagent_session_id, session.sessionKey);
+    return new Response(JSON.stringify({ suppressed: true, comment_id: 'comment-late' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  setTimeout(() => { persisted = true; }, 5);
+
+  await manager._onChildExit(session, 0, null);
+
+  assert.equal(silentExitRequests().length, 1, 'one conditional audit request is made');
+  assert.equal(
+    manager.circuitBreaker.shouldBlock('agent-grace:ticket-grace:assignee'),
+    null,
+    'the persisted comment is accounted as success, not a breaker failure',
+  );
+});
+
+test('one-shot: conditional persisted-comment result suppresses warning and breaker accounting', async () => {
+  const manager = new SubagentManager(config);
+  const record = {
+    pid: 91992,
+    kind: 'trigger',
+    cli_type: 'claude',
+    trigger_id: 'trigger-grace',
+    audit_session_id: 'oneshot-grace',
+    chat_request_id: null,
+    ticket_id: 'ticket-grace',
+    agent_id: 'agent-grace',
+    role: 'assignee',
+    room_id: null,
+    started_at: Date.now(),
+    captureOutput: false,
+    outLines: [],
+    tailLines: [],
+    commentSent: false,
+    tap: null,
+  };
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init?.method || 'GET' });
+    return new Response(JSON.stringify({ suppressed: true, comment_id: 'comment-late' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  await manager._handleOneshotExit(record, 1);
+
+  assert.equal(record.commentSent, true);
+  assert.equal(silentExitRequests().length, 1, 'one conditional audit request is made');
+  assert.equal(
+    manager.circuitBreaker.shouldBlock('agent-grace:ticket-grace:assignee'),
+    null,
+  );
+});
+
 test('cycle exit paths do not fall back to ticket-wide time-window attribution', async () => {
   const [persistent, oneshot] = await Promise.all([
     readFile(new URL('ticket-session-manager.ts', root), 'utf8'),
