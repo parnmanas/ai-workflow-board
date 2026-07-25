@@ -8,6 +8,7 @@ import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
+import type { CliRuntimeProfile } from '../cli-runtime-profiles';
 
 export type StreamEventType =
   | 'board_update'
@@ -99,6 +100,10 @@ export interface AgentTriggerPayload {
   // Null when neither layer configures a harness — the manager must treat
   // null as "spawn exactly as before".
   harness_config?: HarnessConfig | null;
+  // Resolved Agent > Board > Workspace Claude backend profile. It remains a
+  // public, declarative snapshot: credential_ref is an id and no secret value
+  // is serialized onto REST/SSE.
+  cli_runtime_profile?: CliRuntimeProfile | null;
   // Resolved abstract effort preset: the board's effort_presets catalog
   // matched against the ticket's effort_preset id (or the catalog default).
   // agent-manager maps this onto per-CLI options at spawn — for claude the

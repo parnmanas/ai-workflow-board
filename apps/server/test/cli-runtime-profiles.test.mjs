@@ -5,58 +5,67 @@ import {
   validateCliRuntimeProfiles,
 } from '../dist/common/cli-runtime-profiles.js';
 
-const profiles = [{
-  id: 'local-vllm',
-  provider: 'vllm',
-  type: 'server',
-  model: 'demo',
-  module: 'vllm.entrypoints.openai.api_server',
-  port: 8000,
-}];
+const profiles = [
+  {
+    id: 'local-anthropic',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:9001',
+    model: 'model-a',
+  },
+  {
+    id: 'local-openai',
+    kind: 'claude-backend',
+    protocol: 'openai-compatible',
+    base_url: 'http://127.0.0.1:9002/v1',
+    model: 'model-b',
+    adapter: {
+      module: 'proxy',
+      base_url: 'http://127.0.0.1:9003',
+    },
+  },
+];
 
-test('validates registry and resolves Agent > Board > Workspace with explicit none', () => {
+test('validates a configuration-only backend catalog and resolves Agent > Board > Workspace', () => {
   const checked = validateCliRuntimeProfiles(profiles);
   assert.equal(checked.ok, true);
-  const profile = resolveCliRuntimeProfile(checked.value, [
-    { source: 'agent', value: null },
-    { source: 'board', value: 'local-vllm' },
-    { source: 'workspace', value: 'none' },
-  ]);
-  assert.equal(profile.id, 'local-vllm');
+  assert.equal(checked.value.length, 2, 'a second backend/model requires only another profile');
   assert.equal(resolveCliRuntimeProfile(checked.value, [
-    { source: 'agent', value: 'none' },
-    { source: 'board', value: 'local-vllm' },
+    { source: 'agent', value: null },
+    { source: 'board', value: 'local-openai' },
+    { source: 'workspace', value: 'local-anthropic' },
+  ]).id, 'local-openai');
+  assert.equal(resolveCliRuntimeProfile(checked.value, [
+    { source: 'run', value: 'none' },
+    { source: 'agent', value: 'local-openai' },
   ]), null);
 });
 
-test('rejects duplicate ids, invalid ports, reserved env and missing credentials', () => {
+test('returns actionable validation errors without accepting plaintext secrets', () => {
   const checked = validateCliRuntimeProfiles([
-    ...profiles,
-    { ...profiles[0], port: 70_000, env: { AWB_API_KEY: 'leak' }, credential_required: true },
+    profiles[0],
+    { ...profiles[0] },
+    {
+      id: 'bad-openai',
+      kind: 'claude-backend',
+      protocol: 'openai-compatible',
+      base_url: 'http://127.0.0.1:9002',
+      model: 'm',
+      env: { AWB_API_KEY: 'reserved', OPENAI_API_KEY: 'plaintext' },
+      credential_required: true,
+    },
   ]);
   assert.equal(checked.ok, false);
   assert.match(checked.error, /duplicate profile id/);
-  assert.match(checked.error, /<=65535/);
+  assert.match(checked.error, /adapter.*required/s);
   assert.match(checked.error, /reserved/);
+  assert.match(checked.error, /sensitive.*credential_ref/s);
   assert.match(checked.error, /credential_ref/);
 });
 
-test('missing selected profile fails with source instead of silently falling back', () => {
+test('missing selected profile fails with its inheritance source', () => {
   assert.throws(
     () => resolveCliRuntimeProfile(profiles, [{ source: 'agent', value: 'deleted' }]),
-    /"deleted".*agent.*does not exist/,
+    /Claude backend profile "deleted".*agent.*does not exist/,
   );
-});
-
-test('rejects plaintext secrets in runtime and Claude env mappings', () => {
-  const checked = validateCliRuntimeProfiles([{
-    id: 'leaky',
-    provider: 'generic',
-    model: 'demo',
-    command: 'server',
-    env: { OPENAI_API_KEY: 'plaintext' },
-    claude: { env: { PROXY_TOKEN: 'plaintext' } },
-  }]);
-  assert.equal(checked.ok, false);
-  assert.match(checked.error, /sensitive.*credential_ref/s);
 });

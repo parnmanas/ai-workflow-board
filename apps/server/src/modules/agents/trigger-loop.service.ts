@@ -2524,7 +2524,7 @@ candidate's branch or move the ticket.
     );
     if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent?.credential_id) {
       throw new Error(
-        `CLI runtime profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
+        `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
         `agent ${agent?.id ?? agentId} must select that credential before dispatch`,
       );
     }

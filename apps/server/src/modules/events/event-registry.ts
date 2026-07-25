@@ -167,6 +167,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
         harness_config: event.harness_config ?? null,
+        cli_runtime_profile: event.cli_runtime_profile ?? null,
         // Resolved abstract effort preset (board catalog × ticket effort_preset);
         // agent-manager maps it onto per-CLI options at spawn. Null = no override.
         // Previously DROPPED by this field-by-field reconstruction (and by flatten
@@ -247,6 +248,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         // as column_prompt: without this line the field never leaves the
         // envelope and the manager sees undefined.
         harness_config: p.harness_config ?? null,
+        // Claude backend profile follows the same explicit map + flatten path
+        // as harness_config. Omitting either copy silently falls back to the
+        // Anthropic default in agent-manager.
+        cli_runtime_profile: p.cli_runtime_profile ?? null,
         // Same flatten rule as harness_config: agent-manager's event-dispatcher
         // reads these off the FLATTENED event (parseEffortPreset(ev.effort_preset),
         // parseEnvironmentConfig(ev.environment_config), ev.force_respawn). Without
