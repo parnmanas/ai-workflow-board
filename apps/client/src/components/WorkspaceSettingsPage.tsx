@@ -77,9 +77,9 @@ export default function WorkspaceSettingsPage() {
                     default_cli_runtime_profile: selected,
                   });
                   await load();
-                  showToast('CLI runtime profiles saved', 'success');
+                  showToast('Claude backend profiles saved', 'success');
                 } catch (err: any) {
-                  showToast(err?.message || 'Failed to save runtime profiles', 'error');
+                  showToast(err?.message || 'Failed to save Claude backend profiles', 'error');
                 }
               }}
             />

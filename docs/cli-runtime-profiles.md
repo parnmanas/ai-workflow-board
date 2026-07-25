@@ -1,90 +1,102 @@
-# CLI runtime profiles
+# Claude backend profiles
 
-Claude agents can start or reuse an external model runtime selected from the
-workspace runtime-profile registry. Selection precedence is run override,
-Agent, Board, Workspace default, then none. The model precedence remains run
-override, effort preset, harness, Agent model, then profile model.
+Claude backend profiles keep the agent type, executable, stream-json session,
+AWB MCP tools, heartbeat, and tool loop on Claude CLI. They change only the LLM
+endpoint and model used by that CLI.
 
-## vLLM in a virtual environment
+Profiles are stored in Workspace Settings. Selection inherits in this order:
+one-run manager override (when supplied), Agent, Board, then Workspace default.
+`none` explicitly keeps Claude's normal Anthropic configuration. A selected
+profile is a public declarative snapshot on SSE; `credential_ref` is an id and
+the referenced secret is resolved only on the manager host.
+
+## Anthropic-compatible endpoint
+
+No backend process is started by AWB. Claude receives `ANTHROPIC_BASE_URL`, the
+profile model through its existing `--model` argument, optional public env/args,
+and the referenced credential:
 
 ```json
 [
   {
-    "id": "local-vllm",
-    "provider": "vllm",
-    "model": "Qwen/Qwen3-8B",
-    "venv": "/models/vllm/.venv",
-    "module": "vllm.entrypoints.openai.api_server",
-    "cwd": "/models/vllm",
-    "port": 8000,
-    "base_url": "http://127.0.0.1:8000",
-    "health_check": "/health",
-    "startup_timeout_ms": 180000,
-    "extra_args": ["--dtype", "auto"],
-    "shutdown_policy": "on_release"
+    "id": "local-anthropic-model-a",
+    "kind": "claude-backend",
+    "protocol": "anthropic-compatible",
+    "base_url": "http://127.0.0.1:8080",
+    "model": "model-a",
+    "credential_ref": "00000000-0000-4000-8000-000000000001",
+    "credential_required": true,
+    "auth_env": "ANTHROPIC_AUTH_TOKEN"
+  },
+  {
+    "id": "remote-anthropic-model-b",
+    "kind": "claude-backend",
+    "protocol": "anthropic-compatible",
+    "base_url": "https://models.example.test/anthropic",
+    "model": "model-b"
   }
 ]
 ```
 
-The manager executes `.venv/bin/python -m ...` (or
-`.venv/Scripts/python.exe` on Windows) directly. It never runs `source` or a
-shell activation script. It waits for the health endpoint before starting
-Claude and terminates the owned process group when Claude exits.
+The second backend/model is configuration only; no core provider registration
+or agent-type change is required.
 
-For a non-persistent run override, save one profile object as JSON and start
-the manager with `--runtime-profile ./profile.json`. Use
-`--runtime-profile none` to disable the server-selected profile. This does not
-modify Workspace, Board, or Agent settings.
+## OpenAI-compatible endpoint through an adapter
 
-Use `"shutdown_policy": "reuse"` with `base_url` to require an already-running
-endpoint. If an owned profile finds a healthy endpoint, it reuses it and does
-not terminate that external process.
-
-## Credentials
-
-Store only the id of an existing workspace Credential:
+Claude CLI does not speak the OpenAI API directly. Declare a small
+OpenAI-to-Anthropic adapter and its Anthropic-facing local URL. AWB supervises
+only this adapter process when needed; it does not start or own the vLLM
+backend:
 
 ```json
-{
-  "credential_required": true,
-  "credential_ref": "00000000-0000-4000-8000-000000000000"
-}
+[
+  {
+    "id": "existing-vllm-via-adapter",
+    "kind": "claude-backend",
+    "protocol": "openai-compatible",
+    "base_url": "http://gpu-host:8000/v1",
+    "model": "Qwen/Qwen3-Coder",
+    "credential_ref": "00000000-0000-4000-8000-000000000001",
+    "auth_env": "OPENAI_API_KEY",
+    "adapter": {
+      "venv": "/opt/claude-openai-adapter/.venv",
+      "module": "claude_openai_adapter",
+      "args": [
+        "--upstream",
+        "{backend_base_url}",
+        "--model",
+        "{model}",
+        "--listen",
+        "127.0.0.1:18080"
+      ],
+      "base_url": "http://127.0.0.1:18080",
+      "health_check": "/health",
+      "startup_timeout_ms": 30000,
+      "lifecycle": "on_release"
+    }
+  }
+]
 ```
 
-The server validates workspace ownership. Dispatch carries only the reference;
-plaintext is never returned by the profile API or printed in runtime logs.
+Adapters also receive non-secret `AWB_BACKEND_BASE_URL` and
+`AWB_BACKEND_MODEL`. The placeholders `{backend_base_url}`, `{model}`, and
+`{adapter_base_url}` can be used in adapter args and public env values.
+`lifecycle: reuse` connects to an already-running adapter after a health check;
+`on_release` and `manager_exit` reuse the existing shared process supervisor
+and process-tree cleanup.
 
-## Adding a provider
+## Claude wrapper and public configuration
 
-Providers implement `RuntimeProvider` and call `registerRuntimeProvider()`.
-They supply validation, command construction, capabilities, and the
-endpoint/model environment injected into Claude. The built-in `generic`
-provider is also usable declaratively for a second server or model:
+`claude_executable` optionally selects Claude CLI or a Claude-compatible
+wrapper. Top-level `cwd`, `env`, and `args` apply to that Claude process.
+Adapter process settings live only under `adapter`, so a vLLM server command is
+never confused with the Claude executable.
 
-```json
-{
-  "id": "second-instance",
-  "provider": "generic",
-  "model": "my-model",
-  "executable": "/opt/runtime/bin/server",
-  "extra_args": ["--port", "8010"],
-  "base_url": "http://127.0.0.1:8010"
-}
-```
+Environment keys containing token/secret/password/key/credential terms are
+rejected. Put the value in a Credential, reference its id with
+`credential_ref`, and name only the destination variable with `auth_env`.
+Reserved AWB and CLI-home variables cannot be overridden. Secrets are not
+returned in profile REST/SSE payloads or logs.
 
-Invalid providers, virtual environments, executables, ports, missing secrets,
-early exits, unhealthy endpoints, and startup timeouts fail before Claude is
-spawned with a field-specific error.
-
-## Live vLLM verification
-
-The default suite uses a hermetic HTTP fixture. On a GPU host with vLLM and a
-model available, run the opt-in compatibility test:
-
-```sh
-AWB_TEST_VLLM_VENV=/models/vllm/.venv \
-AWB_TEST_VLLM_MODEL=Qwen/Qwen3-8B \
-npm run test --workspace apps/agent-manager
-```
-
-`AWB_TEST_VLLM_PORT` may be set when the default test port is unavailable.
+Changing a Workspace, Board, or Agent selection affects newly spawned
+sessions. Restart an already-running managed agent/session to apply it.

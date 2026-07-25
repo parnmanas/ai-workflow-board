@@ -24,9 +24,10 @@ export default function CliRuntimeProfilesEditor({
   const ids = parsed?.map(profile => profile.id).filter(Boolean) ?? [];
   return (
     <section style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
-      <h3 style={{ marginTop: 0 }}>CLI runtime profiles</h3>
+      <h3 style={{ marginTop: 0 }}>Claude backend profiles</h3>
       <p style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
-        Declarative runtime registry. Credential fields accept Credential ids only; active sessions require restart.
+        Keep Claude CLI and its MCP/tool loop, but route model requests to an Anthropic-compatible endpoint
+        or a declared OpenAI-to-Anthropic adapter. Credentials are referenced by id and active sessions require restart.
       </p>
       <textarea rows={16} value={text} onChange={event => setText(event.target.value)}
         style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', borderColor: parsed ? tokens.colors.border : tokens.colors.danger }} />
@@ -40,7 +41,7 @@ export default function CliRuntimeProfilesEditor({
           if (!parsed) return;
           setBusy(true);
           try { await onSave(parsed, defaultId || null); } finally { setBusy(false); }
-        }}>Save runtime profiles</Button>
+        }}>Save Claude backend profiles</Button>
       </div>
     </section>
   );

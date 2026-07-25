@@ -404,15 +404,15 @@ export default function ManagedAgentDialog({
         {mode === 'edit' && cli === 'claude' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
-              CLI runtime profile
+              Claude backend profile
             </label>
             <Select value={runtimeProfile} options={[
               { value: '', label: 'Inherit board/workspace' },
-              { value: 'none', label: 'None — disable runtime' },
+              { value: 'none', label: 'None — Anthropic default' },
               ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.id })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-              Applies after restart. Profiles are managed in Workspace Settings.
+              Keeps the Claude CLI/tool loop and changes only its model backend. Applies after restart.
             </div>
           </div>
         )}
