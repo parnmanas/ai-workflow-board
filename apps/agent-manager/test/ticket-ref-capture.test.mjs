@@ -128,6 +128,7 @@ test('formatTicketRefsContent renders Korean action labels as the text fallback'
 test('trackedTicketTool: expanded ticket-mutation surface is fully tracked', () => {
   const cases = [
     ['update_child_ticket', { ticket_id: 'C-1', status: 'done' }, 'update', 'C-1'],
+    ['decide_ticket_duplicate', { ticket_id: 'T-1', action: 'keep_independent' }, 'update', 'T-1'],
     ['move_ticket_to_board', { ticket_id: 'T-2', target_board_id: 'B-9' }, 'move', 'T-2'],
     ['release_ticket', { ticket_id: 'T-3', agent_id: 'A-1' }, 'release', 'T-3'],
     ['unarchive_ticket', { ticket_id: 'T-4' }, 'unarchive', 'T-4'],

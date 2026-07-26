@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
@@ -246,15 +246,24 @@ test('profile validation reports protocol and adapter mistakes', () => {
 });
 
 test('non-Claude spawn ignores a workspace Claude profile including model, cwd, env, args, and credential contract', async () => {
-  const binDir = join(fixtureRoot, 'codex-bin');
+  const binDir = join(fixtureRoot, 'npm');
   const originalCwd = join(fixtureRoot, 'codex-work');
   const profileCwd = join(fixtureRoot, 'claude-profile-work');
+  const codexCliHome = join(fixtureRoot, 'codex-home-regression');
   const captureFile = join(fixtureRoot, 'codex-regression.json');
   await mkdir(binDir, { recursive: true });
   await mkdir(originalCwd, { recursive: true });
   await mkdir(profileCwd, { recursive: true });
+  await mkdir(codexCliHome, { recursive: true });
+  await writeFile(
+    join(codexCliHome, 'config.toml'),
+    '[mcp_servers.awb]\nurl = "http://127.0.0.1:0/mcp"\n',
+  );
   const executable = join(binDir, 'codex');
-  await writeFile(executable, `#!/usr/bin/env node
+  const fixtureScript = process.platform === 'win32'
+    ? join(binDir, 'codex-fixture.mjs')
+    : executable;
+  await writeFile(fixtureScript, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   argv: process.argv.slice(2),
@@ -264,16 +273,35 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
 }));
 process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
 `);
-  await chmod(executable, 0o755);
+  if (process.platform === 'win32') {
+    await writeFile(
+      `${executable}.cmd`,
+      `@echo off\r\n"${process.execPath}" "%~dp0codex-fixture.mjs" %*\r\n`,
+    );
+  } else {
+    await chmod(executable, 0o755);
+  }
 
   const previous = {
     PATH: process.env.PATH,
     CAPTURE_FILE: process.env.CAPTURE_FILE,
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
     CLAUDE_PROFILE_ONLY: process.env.CLAUDE_PROFILE_ONLY,
+    CODEX_HOME: process.env.CODEX_HOME,
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
   };
-  process.env.PATH = `${binDir}:${previous.PATH ?? ''}`;
+  const isolatedCodexHome = join(fixtureRoot, 'isolated-codex-home');
+  await mkdir(isolatedCodexHome, { recursive: true });
+  process.env.PATH = process.platform === 'win32'
+    ? binDir
+    : `${binDir}${delimiter}${previous.PATH ?? ''}`;
   process.env.CAPTURE_FILE = captureFile;
+  process.env.CODEX_HOME = isolatedCodexHome;
+  if (process.platform === 'win32') {
+    process.env.APPDATA = fixtureRoot;
+    process.env.LOCALAPPDATA = join(fixtureRoot, 'local-appdata');
+  }
   delete process.env.ANTHROPIC_BASE_URL;
   delete process.env.CLAUDE_PROFILE_ONLY;
   try {
@@ -303,6 +331,7 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
         api_key: 'agent-awb-key',
         cwd: originalCwd,
         cli: 'codex',
+        cli_home_dir: codexCliHome,
         model: 'original-codex-model',
       },
     });

@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promises as fsp, statSync, readFileSync, readdirSync } from 'node:fs';
+import { promises as fsp, statSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -136,7 +136,11 @@ test('installRepoCredential: awb-credentials(owner 전용) + credential.helper=s
     const credFile = credentialFileFromHelper(helper);
     // 절대경로여야 링크된 worktree 에서도 해석된다.
     assert.ok(isAbsolute(credFile), `credential 파일이 절대경로가 아님: ${credFile}`);
-    assert.equal(credFile, join(repo.root, '.git', 'awb-credentials'));
+    assert.equal(
+      realpathSync(credFile),
+      realpathSync(join(repo.root, '.git', 'awb-credentials')),
+      'credential helper must resolve to the shared credential file',
+    );
     assert.ok(statSync(credFile).isFile(), 'awb-credentials 파일이 생성돼야 함');
     // 내용에 인증 URL(토큰 포함), POSIX 에서는 파일권한도 owner 전용(그룹/other 비트 0).
     assert.match(readFileSync(credFile, 'utf8'), /token-user:container-secret@git\.example\.test/);

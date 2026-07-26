@@ -24,6 +24,11 @@ function freshHome() {
   return mkdtempSync(join(tmpdir(), 'pi-adapter-test-'));
 }
 
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
 test('configDirEnv is HOME (pi has no dedicated config-dir env var, reads ~/.pi/agent/)', () => {
   const a = new PiCliAdapter();
   assert.equal(a.configDirEnv(), 'HOME');
@@ -122,14 +127,17 @@ test('prepareCliHome creates the .pi/agent subdir even with no operator files to
   const home = freshHome();
   const emptyRealHome = mkdtempSync(join(tmpdir(), 'pi-empty-real-home-'));
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = emptyRealHome;
+  process.env.USERPROFILE = emptyRealHome;
   try {
     await a.prepareCliHome(home);
     const stat = await fsp.stat(join(home, '.pi', 'agent'));
     assert.ok(stat.isDirectory());
     await assert.rejects(fsp.readFile(join(home, '.pi', 'agent', 'auth.json'), 'utf8'));
   } finally {
-    process.env.HOME = prevHome;
+    restoreEnv('HOME', prevHome);
+    restoreEnv('USERPROFILE', prevUserProfile);
   }
 });
 
@@ -140,7 +148,9 @@ test('prepareCliHome symlinks (or copies) auth.json + settings.json from the ope
   await fsp.writeFile(join(realHome, '.pi', 'agent', 'settings.json'), '{"defaultProvider":"llama.cpp"}');
 
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = realHome;
+  process.env.USERPROFILE = realHome;
   try {
     const a = new PiCliAdapter();
     const agentHome = freshHome();
@@ -151,7 +161,8 @@ test('prepareCliHome symlinks (or copies) auth.json + settings.json from the ope
     const settings = await fsp.readFile(join(agentHome, '.pi', 'agent', 'settings.json'), 'utf8');
     assert.equal(settings, '{"defaultProvider":"llama.cpp"}');
   } finally {
-    process.env.HOME = prevHome;
+    restoreEnv('HOME', prevHome);
+    restoreEnv('USERPROFILE', prevUserProfile);
   }
 });
 
@@ -162,7 +173,9 @@ test('prepareCliHome only inherits whichever of auth.json/settings.json actually
   // No auth.json on the operator side (e.g. only env-var auth configured).
 
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = realHome;
+  process.env.USERPROFILE = realHome;
   try {
     const a = new PiCliAdapter();
     const agentHome = freshHome();
@@ -171,7 +184,8 @@ test('prepareCliHome only inherits whichever of auth.json/settings.json actually
     assert.equal(settings, '{"defaultProvider":"anthropic"}');
     await assert.rejects(fsp.readFile(join(agentHome, '.pi', 'agent', 'auth.json'), 'utf8'));
   } finally {
-    process.env.HOME = prevHome;
+    restoreEnv('HOME', prevHome);
+    restoreEnv('USERPROFILE', prevUserProfile);
   }
 });
 

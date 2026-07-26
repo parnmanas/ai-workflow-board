@@ -41,6 +41,7 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   move_ticket_to_board: 'move',
   update_ticket: 'update',
   update_child_ticket: 'update',
+  decide_ticket_duplicate: 'update',
   add_comment: 'comment',
   // Typed-comment mutations — each creates a comment row (ask/decision) or flips a
   // question's status (answer). answer_question carries NO input ticket_id (keys on

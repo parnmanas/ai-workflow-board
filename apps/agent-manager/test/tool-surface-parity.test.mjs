@@ -107,7 +107,7 @@ test('the emit surface actually contains the ticket-mutation tools reviewers fla
   for (const t of [
     'update_child_ticket', 'batch_operations', 'ask_question', 'answer_question',
     'record_decision', 'reject_handoff', 'add_ticket_prerequisites', 'handoff_to_agent',
-    'propose_move', 'record_agreement',
+    'propose_move', 'record_agreement', 'decide_ticket_duplicate',
   ]) {
     const classified = classifiedToolNames();
     assert.ok(classified.has(t), `${t} must be classified`);
