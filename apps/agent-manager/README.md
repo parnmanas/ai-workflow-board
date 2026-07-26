@@ -198,6 +198,9 @@ Notes:
   directories are root-owned). The `--system` flag is implied.
 - Windows user-mode tasks fire at logon only. Re-run with `--system` from
   an elevated PowerShell for a boot-time task running as `LocalSystem`.
+  The task launches through a hidden `wscript.exe` wrapper, so no npm/Node
+  console window appears. When replacing a legacy task that was registered
+  by an Administrator shell, the installer requests UAC approval automatically.
 - macOS uses `launchctl bootstrap` on modern macOS and falls back to
   `launchctl load -w` on older releases. Logs land in `/tmp/awb-agent-manager.log`.
 

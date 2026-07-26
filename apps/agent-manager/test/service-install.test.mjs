@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   systemdUnit,
+  windowsElevatedTaskCreateScript,
   windowsHiddenLauncher,
   windowsTaskXml,
 } from '../dist/lib/service-install.js';
@@ -43,4 +44,19 @@ test('Windows task is hidden and restarts only when the launcher fails', () => {
   assert.match(xml, /<Command>C:\\Windows\\System32\\wscript\.exe<\/Command>/);
   assert.match(xml, /a&amp;b/);
   assert.doesNotMatch(xml, /node\.exe/);
+});
+
+test('Windows elevated task replacement preserves quoted paths and apostrophes', () => {
+  const script = windowsElevatedTaskCreateScript({
+    schtasksPath: 'C:\\Windows\\System32\\schtasks.exe',
+    taskName: 'awb-agent-manager',
+    xmlPath: "C:\\Users\\O'Brien User\\AppData\\Roaming\\awb-agent-manager\\service\\task.xml",
+  });
+
+  assert.match(script, /Start-Process/);
+  assert.match(script, /-Verb RunAs/);
+  assert.match(script, /-Wait -PassThru/);
+  assert.match(script, /\/TN "awb-agent-manager"/);
+  assert.match(script, /\/XML "C:\\Users\\O''Brien User\\AppData/);
+  assert.match(script, /exit \$process\.ExitCode/);
 });

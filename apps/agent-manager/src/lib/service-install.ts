@@ -677,6 +677,24 @@ function vbString(value: string): string {
   return value.replaceAll('"', '""');
 }
 
+function powershellSingleQuoted(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+export function windowsElevatedTaskCreateScript(opts: {
+  schtasksPath: string;
+  taskName: string;
+  xmlPath: string;
+}): string {
+  const argumentLine =
+    `/Create /TN "${opts.taskName}" /XML "${opts.xmlPath}" /F`;
+  return (
+    `$process = Start-Process -FilePath ${powershellSingleQuoted(opts.schtasksPath)} ` +
+    `-Verb RunAs -ArgumentList ${powershellSingleQuoted(argumentLine)} -Wait -PassThru\r\n` +
+    `exit $process.ExitCode\r\n`
+  );
+}
+
 export function windowsHiddenLauncher(opts: { execPath: string; nodeBin: string }): string {
   const nodeBin = vbString(opts.nodeBin);
   const execPath = vbString(opts.execPath);
@@ -808,10 +826,38 @@ async function installWindows(options: ServiceInstallOptions): Promise<ServiceIn
   const createArgs = ['/Create', '/TN', taskName, '/XML', xmlPath, '/F'];
   const createR = spawnSync('schtasks', createArgs, { stdio: 'inherit' });
   if (createR.status !== 0) {
-    throw new Error(
-      `schtasks /Create failed (exit ${createR.status}). ` +
-        (isSystem ? 'System mode requires running this from an elevated (Admin) PowerShell.' : ''),
+    // Legacy installers registered the user-mode task from an elevated shell.
+    // Windows then denies a normal user-mode /Create /F against that task even
+    // though its principal is the same user. Retry through UAC so upgrades can
+    // replace the old visible node.exe action with the hidden wscript launcher.
+    const powershell = which('powershell.exe') ?? which('powershell');
+    if (!powershell) {
+      throw new Error(
+        `schtasks /Create failed (exit ${createR.status}) and PowerShell was not found for the elevated retry.`,
+      );
+    }
+    process.stderr.write(
+      '  warn: task replacement requires administrator approval; requesting Windows UAC elevation...\n',
     );
+    const schtasksPath = systemRoot
+      ? join(systemRoot, 'System32', 'schtasks.exe')
+      : 'schtasks.exe';
+    const elevatedScript = windowsElevatedTaskCreateScript({
+      schtasksPath,
+      taskName,
+      xmlPath,
+    });
+    const elevatedR = spawnSync(
+      powershell,
+      ['-NoLogo', '-NoProfile', '-Command', elevatedScript],
+      { stdio: 'inherit' },
+    );
+    if (elevatedR.status !== 0) {
+      throw new Error(
+        `schtasks /Create failed (exit ${createR.status}); elevated retry also failed ` +
+          `(exit ${elevatedR.status ?? 'unknown'}).`,
+      );
+    }
   }
 
   // Kick off the task right away so the user doesn't have to wait for the
