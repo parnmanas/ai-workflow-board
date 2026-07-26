@@ -42,18 +42,32 @@ async function backdate(repo, id, fields) {
   if (Object.keys(updates).length > 0) await repo.update(id, updates);
 }
 
-async function seedAgentComment(commentRepo, ticketId, workspaceId, agentName, content, createdAt) {
+async function seedAgentComment(commentRepo, ticketId, workspaceId, agentId, agentName, content, createdAt) {
   const saved = await commentRepo.save(commentRepo.create({
     ticket_id: ticketId,
     workspace_id: workspaceId,
     author_type: 'agent',
-    author_id: 'agent-fixture',
+    author_id: agentId,
     author: agentName,
     content,
     type: 'note',
   }));
   await backdate(commentRepo, saved.id, { created_at: createdAt });
   return commentRepo.findOne({ where: { id: saved.id } });
+}
+
+async function seedDispatch(activityRepo, ticket, agentId, createdAt) {
+  const saved = await activityRepo.save(activityRepo.create({
+    workspace_id: ticket.workspace_id,
+    entity_type: 'ticket',
+    entity_id: ticket.id,
+    ticket_id: ticket.id,
+    actor_id: 'system',
+    actor_name: 'qa',
+    action: 'trigger_emitted',
+    new_value: JSON.stringify({ target_agent_id: agentId }),
+  }));
+  await backdate(activityRepo, saved.id, { created_at: createdAt });
 }
 
 async function seedChatRoom(roomRepo, workspaceId) {
@@ -131,10 +145,11 @@ test('ColumnRolePolicy — alert enrichment + gate-label honored', async (t) => 
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, agent.id, new Date(now.getTime() - 4 * HOUR));
 
     step('Seed 4 WAIT comments at 1h spacing over 3h');
     for (let i = 3; i >= 0; i--) {
-      await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
+      await seedAgentComment(commentRepo, ticket.id, ws.id, agent.id, 'alice',
         `WAIT stands — check ${4 - i}`,
         new Date(now.getTime() - i * HOUR));
     }
@@ -174,9 +189,10 @@ test('ColumnRolePolicy — alert enrichment + gate-label honored', async (t) => 
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, agent.id, new Date(now.getTime() - 4 * HOUR));
 
     for (let i = 3; i >= 0; i--) {
-      await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
+      await seedAgentComment(commentRepo, ticket.id, ws.id, agent.id, 'alice',
         `WAIT stands — phase 3 ${4 - i}`,
         new Date(now.getTime() - i * HOUR));
     }
@@ -222,8 +238,9 @@ test('ColumnRolePolicy — alert enrichment + gate-label honored', async (t) => 
       created_at: new Date(now.getTime() - 5 * HOUR),
       updated_at: new Date(now.getTime() - 5 * HOUR),
     });
+    await seedDispatch(activityRepo, ticket, agent.id, new Date(now.getTime() - 4 * HOUR));
     for (let i = 3; i >= 0; i--) {
-      await seedAgentComment(commentRepo, ticket.id, ws.id, 'alice',
+      await seedAgentComment(commentRepo, ticket.id, ws.id, agent.id, 'alice',
         `WAIT stands — disabled-row check ${4 - i}`,
         new Date(now.getTime() - i * HOUR));
     }

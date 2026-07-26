@@ -214,10 +214,11 @@ test('WorkflowFocusSelector — emit gate + promotion gate + ranking + isolation
   assert.ok(auditA, 'expected trigger_emitted audit row for A');
   // Column position 4 (Merging), chain_target=false, priority_index=1 (high),
   // some non-empty created_at.
-  assert.match(auditA.new_value || '', /column_position=4/, `audit must include column_position=4 (got ${auditA.new_value})`);
-  assert.match(auditA.new_value || '', /chain_target=false/, `audit must include chain_target=false (got ${auditA.new_value})`);
-  assert.match(auditA.new_value || '', /priority_index=1/, `audit must include priority_index=1 (got ${auditA.new_value})`);
-  assert.match(auditA.new_value || '', /created_at=2/, `audit must include a non-empty created_at (got ${auditA.new_value})`);
+  const auditPayload = JSON.parse(auditA.new_value || '{}');
+  assert.equal(auditPayload.column_position, 4, `audit must include column_position=4 (got ${auditA.new_value})`);
+  assert.equal(auditPayload.chain_target, false, `audit must include chain_target=false (got ${auditA.new_value})`);
+  assert.equal(auditPayload.priority_index, 1, `audit must include priority_index=1 (got ${auditA.new_value})`);
+  assert.match(auditPayload.ticket_created_at || '', /^2/, `audit must include a non-empty ticket_created_at (got ${auditA.new_value})`);
 
   step('  move A → Done. Focus rotates to the oldest To Do (created_at ASC tiebreaker)');
   await ticketRepo.update(ticketA.id, { column_id: c1.done.id });

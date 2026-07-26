@@ -167,7 +167,7 @@ test('static: hasLiveRoleStrand consults output-liveness as a second liveness si
   const raw = readSrc(['modules', 'agents', 'agent-status.service.ts']);
   assert.match(
     raw,
-    /hasLiveRoleStrand\([\s\S]*?getOutputLivenessAt\(agent_id, ticket_id, role\)[\s\S]*?return false;\n  \}/,
+    /hasLiveRoleStrand\([\s\S]*?getOutputLivenessAt\(agent_id, ticket_id, role\)[\s\S]*?return false;\r?\n\s*\}/,
     'hasLiveRoleStrand must read getOutputLivenessAt(agent_id, ticket_id, role) before returning false',
   );
 });

@@ -46,7 +46,7 @@ function tokenize(command) {
   return command.split(/\s+/).map((tok) => tok.replace(/^["']|["']$/g, ''));
 }
 
-const TEST_PATH_RE = /^test\/(?:qa-flows\/)?[A-Za-z0-9_-]+\.test\.mjs$/;
+const TEST_PATH_RE = /^test\/(?:qa-flows\/)?[A-Za-z0-9_.-]+\.test\.mjs$/;
 
 function collectReferencedTestPaths(scripts) {
   const refs = new Set();

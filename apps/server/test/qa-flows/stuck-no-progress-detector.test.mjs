@@ -48,6 +48,20 @@ function systemMsgs(messages) {
   return messages.filter(m => m.sender_type === 'system');
 }
 
+async function seedDispatch(activityRepo, ticket, agentId, createdAt) {
+  const saved = await activityRepo.save(activityRepo.create({
+    workspace_id: ticket.workspace_id,
+    entity_type: 'ticket',
+    entity_id: ticket.id,
+    ticket_id: ticket.id,
+    actor_id: 'system',
+    actor_name: 'qa',
+    action: 'trigger_emitted',
+    new_value: JSON.stringify({ target_agent_id: agentId }),
+  }));
+  await backdate(activityRepo, saved.id, { created_at: createdAt });
+}
+
 test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) => {
   step('Boot NestJS app on test port');
   process.env.STUCK_DETECTOR_ENABLED = 'true';
@@ -147,6 +161,7 @@ test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) 
 
   await t.test('3: output-liveness suppresses the flag (alive-but-quiet worker)', async () => {
     const ticket = await mkStaleTicket('long build, quiet on ticket');
+    await seedDispatch(activityRepo, ticket, agent.id, new Date(now.getTime() - 4 * HOUR));
     // A subagent for this ticket is actively producing tokens right now.
     agentStatus.recordOutputLiveness(agent.id, ticket.id, 'assignee');
     await detector.sweep(new Date());

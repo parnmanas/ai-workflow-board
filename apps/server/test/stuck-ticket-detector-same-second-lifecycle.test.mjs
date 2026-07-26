@@ -87,14 +87,12 @@ after(async () => {
 // the same second the vast majority of the time; retrying instead of
 // sleeping keeps the test fast while staying fully deterministic (bounded
 // attempts, no arbitrary wait).
-async function insertActivityAlignedTo(fields, targetMs, maxAttempts = 50) {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const saved = await activityRepo.save(activityRepo.create(fields));
-    const reloaded = await activityRepo.findOne({ where: { id: saved.id } });
-    if (reloaded.created_at.getTime() === targetMs) return reloaded;
-    await activityRepo.delete({ id: saved.id });
-  }
-  throw new Error(`failed to align activity insert to target second within ${maxAttempts} attempts`);
+async function insertActivityAlignedTo(fields, targetMs) {
+  const saved = await activityRepo.save(activityRepo.create(fields));
+  await activityRepo.update(saved.id, { created_at: new Date(targetMs) });
+  const reloaded = await activityRepo.findOne({ where: { id: saved.id } });
+  assert.equal(reloaded.created_at.getTime(), targetMs, 'fixture activity must share the oldest comment second');
+  return reloaded;
 }
 
 test('stale-WAIT candidate with a column move in the same wall-clock second as the oldest comment is not falsely flagged', async () => {

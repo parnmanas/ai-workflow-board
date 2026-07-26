@@ -2,6 +2,8 @@
   "name": "server",
   "version": "1.0.0",
   "scripts": {
+    "posttest": "node test/run-suite.mjs test/claude-backend-profiles.integration.test.mjs test/cli-runtime-profiles.test.mjs test/ticket-ref-session.test.mjs",
+    "pretest:qa": "node test/run-suite.mjs test/qa-flows/chat-ticket-duplicate-prerequisite.test.mjs",
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",

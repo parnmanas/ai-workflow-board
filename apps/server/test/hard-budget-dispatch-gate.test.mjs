@@ -69,7 +69,7 @@ test('_checkHardBudgetGate is called exactly once, after the early pending gate 
 
 test('_checkHardBudgetGate exempts manual and comment_summary trigger sources (matches countWindowDispatches\' own exclusion)', () => {
   const src = code(SRC_PATH);
-  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\n  \}\n/);
+  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
   assert.ok(match, 'could not isolate the _checkHardBudgetGate method body');
   const body = match[0];
   assert.match(body, /triggerSource === 'manual'/, 'must exempt manual triggers');
@@ -84,7 +84,7 @@ test('_checkHardBudgetGate exempts manual and comment_summary trigger sources (m
 // grep-able (distinct from, and not a duplicate of, the dispatch one).
 test('_checkHardBudgetGate also enforces a token-sum ceiling via countWindowTokens', () => {
   const src = code(SRC_PATH);
-  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\n  \}\n/);
+  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
   assert.ok(match, 'could not isolate the _checkHardBudgetGate method body');
   const body = match[0];
   assert.match(body, /countWindowTokens\(/, '_checkHardBudgetGate must call countWindowTokens');

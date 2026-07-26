@@ -111,6 +111,12 @@ function harness({ ticket, comments = [], agents = [], findOneImpl = null, liveT
       if (entity === Agent) return agentRepo;
       return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
     },
+    async transaction(run) {
+      return run({
+        connection: { options: { type: 'sqljs' } },
+        getRepository: (entity) => dataSource.getRepository(entity),
+      });
+    },
   };
   const ctx = {
     dataSource,
@@ -181,7 +187,7 @@ test('ask_question: user-authored calls skip the re-check (only the initial load
   );
   const parsed = JSON.parse(res.content[0].text);
 
-  assert.equal(h.getTicketFindOneCalls(), 1, 'user 저작은 재확인 대상이 아님 — 초기 로드 1회만 조회해야 함');
+  assert.equal(h.getTicketFindOneCalls(), 2, 'user 저작은 gate 재확인 대상이 아니지만 transaction row lock 조회는 수행한다');
   assert.equal(parsed.suppressed, undefined);
   assert.equal(h.counters.commentSaves, 1);
 });
@@ -285,7 +291,7 @@ test('handoff_to_agent: comment saves but reassignment is skipped when pending_u
   );
   const parsed = JSON.parse(res.content[0].text);
 
-  assert.equal(h.getTicketFindOneCalls(), 2, '얼리 가드 + recheck, 총 2회 조회');
+  assert.equal(h.getTicketFindOneCalls(), 3, '얼리 가드 + recheck + transaction row lock, 총 3회 조회');
   assert.equal(parsed.suppressed, undefined, '코멘트 자체는 recheck 통과 — 억제되면 안 됨');
   assert.equal(h.counters.commentSaves, 1, '핸드오프 코멘트는 정상 저장돼야 함');
   assert.equal(h.counters.ticketUpdateCalls, 1, '재배정 update 는 시도돼야 함');

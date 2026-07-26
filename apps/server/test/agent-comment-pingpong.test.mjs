@@ -98,12 +98,20 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
     },
   };
   const agentRepo = { async findOne() { return { id: 'reviewer', name: 'Reviewer', workspace_id: ticket.workspace_id, role_prompt: '' }; } };
-  const dataSource = { getRepository(entity) {
-    if (entity === Ticket) return ticketRepo;
-    if (entity === Comment) return commentRepo;
-    if (entity === Agent) return agentRepo;
-    return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
-  } };
+  const dataSource = {
+    getRepository(entity) {
+      if (entity === Ticket) return ticketRepo;
+      if (entity === Comment) return commentRepo;
+      if (entity === Agent) return agentRepo;
+      return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
+    },
+    async transaction(run) {
+      return run({
+        connection: { options: { type: 'sqljs' } },
+        getRepository: (entity) => dataSource.getRepository(entity),
+      });
+    },
+  };
   const ctx = {
     dataSource,
     activityService: { async logActivity() { counters.activities++; } },
@@ -216,7 +224,7 @@ test('add_comment does NOT re-check pending_user_action for user-authored commen
   const res = await harness.addComment(input, {});
   const parsed = JSON.parse(res.content[0].text);
 
-  assert.equal(findOneCalls, 1, 'user-authored comments skip the agent-only re-check — only the initial load reads the ticket');
+  assert.equal(findOneCalls, 2, 'user-authored comments skip the agent-only gate re-check; the transaction still locks the ticket row');
   assert.equal(parsed.suppressed, undefined);
   assert.equal(harness.counters.commentSaves, 1);
 });

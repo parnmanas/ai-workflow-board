@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -183,7 +183,7 @@ test('archive cursor helpers round-trip + accept legacy bare-timestamp', async (
     console.warn('skip: dist/modules/mcp/shared/archive-helpers.js not built — run `nest build` to exercise this');
     return;
   }
-  const mod = await import(distPath);
+  const mod = await import(pathToFileURL(distPath).href);
   const { buildArchiveCursor, parseArchiveCursor } = mod;
 
   const ts = new Date('2026-05-25T12:34:56.789Z');

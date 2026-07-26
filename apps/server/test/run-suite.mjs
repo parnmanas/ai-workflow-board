@@ -20,7 +20,30 @@
 
 import { spawn } from 'node:child_process';
 
-const steps = process.argv.slice(2);
+function normalizeSteps(rawSteps) {
+  const normalized = [];
+  for (let i = 0; i < rawSteps.length; i++) {
+    // POSIX shells use single quotes for grouping, but cmd.exe treats them as
+    // ordinary characters. npm therefore passes `'npm run test:qa'` as three
+    // argv entries on Windows. Reassemble that package.json form so the same
+    // suite definition works on both platforms.
+    if (
+      rawSteps[i].startsWith("'npm")
+      && rawSteps[i + 1] === 'run'
+      && rawSteps[i + 2]?.endsWith("'")
+    ) {
+      normalized.push(
+        `${rawSteps[i].slice(1)} run ${rawSteps[i + 2].slice(0, -1)}`,
+      );
+      i += 2;
+      continue;
+    }
+    normalized.push(rawSteps[i]);
+  }
+  return normalized;
+}
+
+const steps = normalizeSteps(process.argv.slice(2));
 if (steps.length === 0) {
   console.error('usage: node test/run-suite.mjs <test-file-or-"npm run X"> [...]');
   process.exit(1);
@@ -39,7 +62,10 @@ function runStep(step) {
         env: { ...process.env, PORT: '' },
       });
     } else if (step.startsWith('npm run ')) {
-      child = spawn('npm', ['run', step.slice('npm run '.length)], { stdio: 'inherit' });
+      const script = step.slice('npm run '.length);
+      child = process.platform === 'win32'
+        ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm', 'run', script], { stdio: 'inherit' })
+        : spawn('npm', ['run', script], { stdio: 'inherit' });
     } else {
       console.error(`[run-suite] unrecognized step: "${step}"`);
       resolve(1);
