@@ -28,6 +28,11 @@ import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, 
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
 import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
+import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
+import type {
+  RuntimeDispatchResult,
+  RuntimeSupervisor,
+} from './runtime/runtime-supervisor.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
   parseRunProvision,
@@ -362,6 +367,8 @@ export interface AgentExecutionContext {
    *  spec so the spawned subagent / session runs under `--model <id>`.
    *  null/undefined = the CLI's own default (no flag). */
   model?: string | null;
+  /** Required explicit runtime strategy and permission policy. */
+  runtime_config?: AgentRuntimeConfig | null;
 }
 
 // ─── Session manager interfaces ──────────────────────────────────────────
@@ -705,6 +712,8 @@ export interface EventDispatcherDeps {
   // makes an in-memory-only one (fine for tests that inject their own or don't
   // exercise the defer path).
   sessionLimitDeferStore?: SessionLimitDeferStore | null;
+  /** ACP runtime owner. Hermes events never fall back to CLI managers. */
+  runtimeSupervisor?: RuntimeSupervisor | null;
 }
 
 export class EventDispatcher {
@@ -718,6 +727,7 @@ export class EventDispatcher {
   #managedAgentContexts: ManagedAgentContextRegistry | null;
   #worktreeManager: WorktreeManager | null;
   #runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
+  #runtimeSupervisor: RuntimeSupervisor | null;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -921,6 +931,7 @@ export class EventDispatcher {
     this.#managedAgentContexts = deps.managedAgentContexts ?? null;
     this.#worktreeManager = deps.worktreeManager ?? null;
     this.#runtimeProfileOverride = deps.runtimeProfileOverride;
+    this.#runtimeSupervisor = deps.runtimeSupervisor ?? null;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
@@ -1220,7 +1231,32 @@ export class EventDispatcher {
       credential_provider: ctx.credential_provider ?? null,
       credential_id: ctx.credential_id ?? null,
       model: ctx.model ?? null,
+      runtime_config: ctx.runtime_config ?? null,
     };
+  }
+
+  async #dispatchHermes(args: {
+    agentContext: AgentExecutionContext;
+    runId: string;
+    leaseId: string;
+    task: string;
+    systemContext?: string;
+  }): Promise<RuntimeDispatchResult> {
+    if (!this.#runtimeSupervisor) {
+      throw new Error('runtime_supervisor_unavailable');
+    }
+    return this.#runtimeSupervisor.dispatch({
+      agentId: args.agentContext.agent_id,
+      runId: args.runId,
+      leaseId: args.leaseId,
+      cwd: args.agentContext.cwd,
+      apiKey: args.agentContext.api_key,
+      runtimeId: args.agentContext.cli,
+      runtimeConfig: args.agentContext.runtime_config,
+      model: args.agentContext.model,
+      systemContext: args.systemContext,
+      task: args.task,
+    });
   }
 
   /**
@@ -1927,6 +1963,52 @@ export class EventDispatcher {
       ? sharedWorktreeInstructions(agentContext?.cwd || '')
       : '';
 
+    // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
+    // never crosses into the CLI session/subagent fallback paths.
+    if (agentContext?.cli === 'hermes') {
+      try {
+        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        if (ticket && selectedRepo) {
+          ticket.base_repo = {
+            id: selectedRepo.resourceId,
+            name: '',
+            url: selectedRepo.url,
+            default_branch: selectedRepo.branch,
+          };
+          ticket.base_branch = selectedRepo.branch;
+        }
+        const rolePrompt = ev.role_prompt || '';
+        const taskText =
+          this.#prompts?.composeTriggerPrompt(
+            ticket,
+            rolePrompt,
+            ev.ticket_prompt || '',
+            ev.ticket_id,
+            ev.column_prompt || null,
+          ) ?? `[trigger] ${ev.ticket_id}`;
+        const result = await this.#dispatchHermes({
+          agentContext,
+          runId: `ticket:${ev.ticket_id}:${ev.action || '_'}`,
+          leaseId: String(ev.worktree_lease_id || `cwd:${agentContext.cwd}`),
+          systemContext: [
+            rolePrompt,
+            harness?.system_prompt_append || '',
+            `Trigger source: ${ev.trigger_source || 'unknown'}`,
+          ].filter(Boolean).join('\n\n'),
+          task: taskText,
+        });
+        log(
+          `Trigger dispatched through Hermes ACP: ticket=${ev.ticket_id} ` +
+          `session=${result.sessionId} stop=${result.stopReason}`,
+        );
+        this.#ackDispatch(ev, 'processed');
+      } catch (err: any) {
+        log(`Hermes trigger dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+        this.#ackDispatch(ev, 'nack', err?.code || 'runtime_protocol_error');
+      }
+      return;
+    }
+
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
@@ -2107,6 +2189,34 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
+    if (agentContext?.cli === 'hermes') {
+      const rolePrompt = payload.role_prompt || '';
+      const taskText =
+        this.#prompts?.composeChatPrompt(
+          rolePrompt,
+          Array.isArray(payload.history) ? payload.history : [],
+          payload.new_message || '',
+          payload.room_id || '',
+          true,
+        ) ?? `[chat] ${payload.new_message || ''}`;
+      try {
+        const result = await this.#dispatchHermes({
+          agentContext,
+          runId: `chat:${payload.room_id || payload.user_id || 'direct'}:${agentContext.agent_id}`,
+          leaseId: `chat:${agentContext.cwd}`,
+          systemContext: rolePrompt,
+          task: taskText,
+        });
+        log(
+          `Chat request dispatched through Hermes ACP: room=${payload.room_id || ''} ` +
+          `session=${result.sessionId} stop=${result.stopReason}`,
+        );
+      } catch (err: any) {
+        log(`Hermes chat dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+      }
+      return;
+    }
+
     if (
       delegationEnabled &&
       persistentChat &&
@@ -2270,6 +2380,34 @@ export class EventDispatcher {
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
+
+    if (agentContext?.cli === 'hermes') {
+      try {
+        const ticket = ticketId ? await fetchTicketContext(this.#config, ticketId) : null;
+        const rolePrompt = ev.role_prompt || '';
+        const taskText =
+          this.#prompts?.composeCommentMentionPrompt(
+            ticket,
+            rolePrompt,
+            mention,
+            ticketId,
+          ) ?? `[mention] ${ticketId} ${commentId}`;
+        const result = await this.#dispatchHermes({
+          agentContext,
+          runId: `ticket:${ticketId}:${mention.role_shortcut || '_'}`,
+          leaseId: String(ev.worktree_lease_id || `cwd:${agentContext.cwd}`),
+          systemContext: rolePrompt,
+          task: taskText,
+        });
+        log(
+          `Comment mention dispatched through Hermes ACP: ticket=${ticketId} ` +
+          `session=${result.sessionId} stop=${result.stopReason}`,
+        );
+      } catch (err: any) {
+        log(`Hermes mention dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+      }
+      return;
+    }
 
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager && ticketId) {
       try {
@@ -2684,6 +2822,53 @@ export class EventDispatcher {
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
+
+    if (runContext?.cli === 'hermes') {
+      try {
+        const history = await fetchChatRoomHistory(this.#config, p.room_id);
+        const prepared = await prepareChatAttachments(
+          this.#config,
+          p.room_id,
+          Array.isArray(p.attachments) ? p.attachments : [],
+          { fetchImages: false },
+        );
+        const rolePrompt = p.role_prompt || '';
+        const taskText =
+          this.#prompts?.composeChatRoomPrompt(
+            p.room_id,
+            history,
+            {
+              content: p.content || '',
+              sender_name: p.sender_name || '',
+              sender_id: p.sender_id || '',
+            },
+            prepared,
+            true,
+            undefined,
+            typeof p.room_name === 'string' ? p.room_name : '',
+            !!p.is_action_room,
+          ) ?? `[chat_room] ${p.content || ''}`;
+        const runId = runProvision?.run_id
+          || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
+        const result = await this.#dispatchHermes({
+          agentContext: runContext,
+          runId,
+          leaseId: runProvision?.run_id || `chat:${runContext.cwd}`,
+          systemContext: rolePrompt,
+          task: taskText,
+        });
+        this.#chatSessionManager?.recordRoomMessage(p);
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        log(
+          `Chat room dispatched through Hermes ACP: room=${p.room_id || ''} ` +
+          `run=${runId} session=${result.sessionId} stop=${result.stopReason}`,
+        );
+      } catch (err: any) {
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        log(`Hermes room dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+      }
+      return;
+    }
 
     if (delegationEnabled && persistentChat && this.#chatSessionManager && p.room_id) {
       // Responder identity: the matched managed agent when fan-out delivered

@@ -1211,6 +1211,7 @@ export class AgentManagerController {
       manager_agent_id: target.manager_agent_id,
       workspace_id: target.workspace_id,
       credential_id: target.credential_id,
+      runtime_config: target.runtime_config,
       // Per-agent default model — the manager's fetchAgentRecord reads this as
       // remote.model and prefers it over the spawn payload's args.model.
       model: target.model,

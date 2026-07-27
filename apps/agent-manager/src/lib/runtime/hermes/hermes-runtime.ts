@@ -65,7 +65,10 @@ export class HermesRuntime {
     await this.#ensureLoaded();
     const existing = this.#processes.get(options.agentId);
     if (existing) {
-      if ((existing.profile ?? '') !== (options.profile ?? '')) {
+      if (
+        options.profile !== undefined
+        && (existing.profile ?? '') !== options.profile
+      ) {
         throw new Error(`Hermes profile changed for running Agent ${options.agentId}`);
       }
       return existing;
@@ -186,4 +189,3 @@ export class HermesRuntime {
     this.#loaded = true;
   }
 }
-

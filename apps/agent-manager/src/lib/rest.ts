@@ -283,7 +283,16 @@ export async function postOutputLiveness(
 export async function fetchAgentRecord(
   config: AwbConfig,
   agentId: string,
-): Promise<{ id: string; name: string; type: string; working_dir: string; manager_agent_id: string | null; credential_id?: string | null } | null> {
+): Promise<{
+  id: string;
+  name: string;
+  type: string;
+  working_dir: string;
+  manager_agent_id: string | null;
+  credential_id?: string | null;
+  model?: string | null;
+  runtime_config?: import('./runtime/runtime-types.js').AgentRuntimeConfig | null;
+} | null> {
   if (!agentId) return null;
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}`;

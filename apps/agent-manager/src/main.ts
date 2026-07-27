@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
+  MANAGED_AGENTS_DIR,
   SESSION_DEFER_PATH,
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
@@ -27,7 +28,10 @@ import { InflightDispatchTracker, DispatchBlockTracker } from './lib/dispatch-pr
 import { SessionLimitDeferStore } from './lib/session-limit-defer.js';
 import { uploadIfNewErrors } from './lib/error-log-uploader.js';
 import { onFlushThreshold } from './lib/event-log-recorder.js';
-import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
+import {
+  cleanupOrphanHermesProcesses,
+  cleanupOrphanSubagents,
+} from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
 import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index.js';
@@ -51,6 +55,7 @@ import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
+import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -430,6 +435,13 @@ async function runRuntime(
         log(`Orphan subagent cleanup: scanned=${r.scanned} reaped=${r.reaped} skipped=${r.skipped ?? 0}`);
     })
     .catch((err: any) => log(`Orphan subagent cleanup failed: ${err?.message ?? err}`));
+  cleanupOrphanHermesProcesses()
+    .then((r) => {
+      if (r.scanned > 0) {
+        log(`Orphan Hermes cleanup: scanned=${r.scanned} reaped=${r.reaped} skipped=${r.skipped ?? 0}`);
+      }
+    })
+    .catch((err: any) => log(`Orphan Hermes cleanup failed: ${err?.message ?? err}`));
 
   // Shared circuit-breaker across the one-shot (SubagentManager) and persistent
   // (TicketSessionManager) paths (ticket 27806095). A single (agent,ticket,role)
@@ -472,6 +484,26 @@ async function runRuntime(
   // spawn_agent, drained by stop_agent, read by EventDispatcher to route
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
+  const runtimeSupervisor = new RuntimeSupervisor({
+    rootDir: MANAGED_AGENTS_DIR,
+    awbUrl: config.url,
+    onEvent: (context, event) => {
+      if (event.type === 'diagnostic') {
+        log(
+          `[runtime:hermes] diagnostic agent=${context.agentId.slice(0, 8)} ` +
+          `run=${context.runId} method=${event.method}`,
+        );
+      } else if (event.type === 'tool_started' || event.type === 'tool_completed') {
+        log(
+          `[runtime:hermes] ${event.type} agent=${context.agentId.slice(0, 8)} ` +
+          `run=${context.runId} tool=${event.toolCallId}`,
+        );
+      }
+    },
+    onStderr: (agentId, line) => {
+      log(`[runtime:hermes:${agentId.slice(0, 8)}] ${line}`);
+    },
+  });
   // Ticket execution always uses an isolated checkout below the storage root.
   const worktreeManager = new WorktreeManager();
   // Construct the session managers BEFORE the command handler so stop_agent /
@@ -500,6 +532,7 @@ async function runRuntime(
     // triggers aren't blocked by stale breaker state from the old credential.
     // Shared instance covers both the persistent and one-shot paths.
     circuitBreaker,
+    runtimeSupervisor,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
@@ -574,6 +607,7 @@ async function runRuntime(
       // spawn_agent / restart_agent anyway.
       const credential = await readAgentCredential(id);
       let extraEnv: Record<string, string> = {};
+      if (cfg.cli !== 'hermes') {
       try {
         // Same MCP context as spawn_agent so antigravity's mcp_config.json gets
         // refreshed on rehydrate (operator may have rotated the AWB url
@@ -600,6 +634,7 @@ async function runRuntime(
           continue;
         }
       }
+      }
       // Mirror the spawn-time `credential_kind` mapping (see
       // agent-manager-commands.ts → credentialKind). Rehydrate uses the
       // on-disk credential snapshot rather than a fresh AWB fetch, so the
@@ -624,6 +659,7 @@ async function runRuntime(
         // spawn_agent persisted). Restored so post-restart subagents/sessions
         // keep running under the configured model.
         model: (cfg as any).model || null,
+        runtime_config: cfg.runtime_config ?? null,
         extra_env: extraEnv,
         // Pulled from the on-disk credential snapshot — same value spawn_agent
         // wrote at last bootstrap. Lets spawn sites strip operator-inherited
@@ -666,6 +702,7 @@ async function runRuntime(
       dispatchBlockTracker,
       sessionLimitDeferStore,
       runtimeProfileOverride,
+      runtimeSupervisor,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
@@ -1019,6 +1056,11 @@ async function runRuntime(
       await shutdownRuntimeProfiles();
     } catch (err: any) {
       log(`shutdown (runtime profiles): ${err?.message ?? err}`);
+    }
+    try {
+      await runtimeSupervisor.stopAll();
+    } catch (err: any) {
+      log(`shutdown (Hermes runtimes): ${err?.message ?? err}`);
     }
     try {
       subagentMonitor.stop();

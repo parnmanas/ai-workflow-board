@@ -46,6 +46,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { BaseSessionManager } from './base-session-manager.js';
 import type { SubagentManager } from './subagent-manager.js';
 import type { CircuitBreaker } from './circuit-breaker.js';
+import type { RuntimeSupervisor } from './runtime/runtime-supervisor.js';
 import {
   ensureManagedAgentDir,
   readApiKey,
@@ -148,6 +149,8 @@ export interface CommandHandlerDeps {
   /** Circuit-breaker — reset on restart_agent so re-pushed triggers aren't
    * blocked by stale failure counts from the previous credential. */
   circuitBreaker?: CircuitBreaker | null;
+  /** Protocol runtime owner; stops Hermes process trees with the Agent. */
+  runtimeSupervisor?: Pick<RuntimeSupervisor, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
   /** Force-drop and re-establish the SSE connection. Called after a successful
@@ -329,6 +332,7 @@ export class AgentManagerCommandHandler {
       (typeof (remote as any)?.model === 'string' && (remote as any).model.trim()) ||
       (typeof payload.args?.model === 'string' && payload.args.model.trim()) ||
       '';
+    const runtimeConfig = remote?.runtime_config ?? payload.args?.runtime_config ?? null;
 
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
@@ -346,6 +350,7 @@ export class AgentManagerCommandHandler {
       working_dir: workingDir,
       workspace_id: (remote as any)?.workspace_id || '',
       model: model || null,
+      runtime_config: runtimeConfig,
       last_spawn_at: new Date().toISOString(),
     });
 
@@ -402,6 +407,7 @@ export class AgentManagerCommandHandler {
     // spawn — the CLI's own auth error is more actionable than a
     // missing-file abort here.
     let extraEnv: Record<string, string> = {};
+    if (cli !== 'hermes') {
     try {
       // Pass AWB URL + per-agent apiKey so adapters that consume MCP
       // servers via a static config file (antigravity → mcp_config.json) can
@@ -425,6 +431,7 @@ export class AgentManagerCommandHandler {
         throw new Error(detail);
       }
     }
+    }
 
     // 5. context registry — EventDispatcher reads this on every event
     if (this.#deps.contextRegistry) {
@@ -438,6 +445,7 @@ export class AgentManagerCommandHandler {
         subagent_log_path: subagentLogPathFor(agentId),
         cli_home_dir: cliHomeDir,
         model: model || null,
+        runtime_config: runtimeConfig,
         extra_env: extraEnv,
         // Threaded through so spawn sites can strip operator-inherited auth
         // env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY / …) when an agent
@@ -589,6 +597,7 @@ export class AgentManagerCommandHandler {
     let chatKilled = 0;
     let ticketKilled = 0;
     let subagentKilled = 0;
+    let runtimeKilled = 0;
     try {
       const r = await this.#deps.chatSessionManager?.stopForAgent(agentId);
       chatKilled = r?.count ?? 0;
@@ -614,12 +623,25 @@ export class AgentManagerCommandHandler {
     } catch (err: any) {
       log(`${reason}: subagentManager.stopForAgent failed: ${err?.message ?? err}`);
     }
+    try {
+      const r = await this.#deps.runtimeSupervisor?.stopForAgent(agentId);
+      runtimeKilled = r?.count ?? 0;
+    } catch (err: any) {
+      log(`${reason}: runtimeSupervisor.stopForAgent failed: ${err?.message ?? err}`);
+    }
     // Erase on-disk secrets so the next spawn_agent re-provisions a fresh
     // key. This is the expected security posture: an admin stopping an
     // agent invalidates its credentials on the next start.
     await eraseSecrets(agentId).catch(() => undefined);
     const inflight = Array.from(inflightByKey.values());
-    if (!rec && !hadContext && chatKilled === 0 && ticketKilled === 0 && subagentKilled === 0) {
+    if (
+      !rec
+      && !hadContext
+      && chatKilled === 0
+      && ticketKilled === 0
+      && subagentKilled === 0
+      && runtimeKilled === 0
+    ) {
       // Unknown to this manager — likely never spawned here. Treat as a
       // no-op success so the operator's ack reflects "nothing to do".
       return {
@@ -631,7 +653,7 @@ export class AgentManagerCommandHandler {
       summary:
         `stop_agent ok: agent=${agentId.slice(0, 8)} ` +
         `(context dropped, secrets erased, chat_sessions=${chatKilled} ` +
-        `ticket_sessions=${ticketKilled} subagents=${subagentKilled})`,
+        `ticket_sessions=${ticketKilled} subagents=${subagentKilled} runtimes=${runtimeKilled})`,
       inflight,
     };
   }
