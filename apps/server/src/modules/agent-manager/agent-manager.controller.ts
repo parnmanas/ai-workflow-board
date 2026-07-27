@@ -23,7 +23,11 @@ import { LogService } from '../../services/log.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { activityEvents } from '../../services/activity.service';
-import { InstanceRegistryService } from './instance-registry.service';
+import {
+  InstanceRegistryService,
+  type RuntimeCapabilityDescriptor,
+  type RuntimeCapabilityReport,
+} from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
@@ -46,6 +50,63 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'update_manager',
   'restart_manager',
 ] as const);
+
+function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const report: RuntimeCapabilityReport = {};
+  const protocols = new Set(['stream-json', 'jsonl', 'acp']);
+  const sessions = new Set(['oneshot', 'persistent', 'resumable']);
+  const usageModes = new Set(['none', 'tokens', 'tokens-and-cost']);
+  const collaborations = new Set(['delegated', 'swarm']);
+  const skillDelivery = new Set(['prompt', 'filesystem', 'native']);
+
+  for (const [rawRuntimeId, rawStatus] of Object.entries(input as Record<string, unknown>)) {
+    const runtimeId = rawRuntimeId.trim().toLowerCase();
+    if (!runtimeId || runtimeId.length > 64 || !rawStatus || typeof rawStatus !== 'object' || Array.isArray(rawStatus)) {
+      continue;
+    }
+    const status = rawStatus as Record<string, unknown>;
+    const rawCapabilities = status.capabilities;
+    if (!rawCapabilities || typeof rawCapabilities !== 'object' || Array.isArray(rawCapabilities)) {
+      continue;
+    }
+    const capabilities = rawCapabilities as Record<string, unknown>;
+    if (
+      !protocols.has(String(capabilities.protocol))
+      || !sessions.has(String(capabilities.session))
+      || !usageModes.has(String(capabilities.usage))
+    ) {
+      continue;
+    }
+    const descriptor: RuntimeCapabilityDescriptor = {
+      protocol: capabilities.protocol as RuntimeCapabilityDescriptor['protocol'],
+      session: capabilities.session as RuntimeCapabilityDescriptor['session'],
+      native_mcp: capabilities.native_mcp === true,
+      native_approvals: capabilities.native_approvals === true,
+      steering: capabilities.steering === true,
+      cancellation: capabilities.cancellation === true,
+      usage: capabilities.usage as RuntimeCapabilityDescriptor['usage'],
+      collaboration: Array.isArray(capabilities.collaboration)
+        ? capabilities.collaboration
+            .map(String)
+            .filter((value): value is 'delegated' | 'swarm' => collaborations.has(value))
+        : [],
+      skill_delivery: Array.isArray(capabilities.skill_delivery)
+        ? capabilities.skill_delivery
+            .map(String)
+            .filter((value): value is 'prompt' | 'filesystem' | 'native' => skillDelivery.has(value))
+        : [],
+    };
+    report[runtimeId] = {
+      installed: status.installed === true,
+      healthy: status.healthy === true,
+      version: typeof status.version === 'string' ? status.version.slice(0, 160) : null,
+      reason: typeof status.reason === 'string' ? status.reason.slice(0, 160) : null,
+      capabilities: descriptor,
+    };
+  }
+  return Object.keys(report).length > 0 ? report : undefined;
+}
 
 /**
  * Agent Manager — Phase 3 admin dashboard for live daemon/proxy/manager
@@ -112,6 +173,7 @@ export class AgentManagerController {
     const cli_adapters = Array.isArray(body?.cli_adapters)
       ? body.cli_adapters.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : [];
+    const runtime_capabilities = sanitizeRuntimeCapabilities(body?.runtime_capabilities);
 
     // ST-4: manager-mode metadata. Daemons/proxies pass through as undefined.
     const agent_ids = Array.isArray(body?.agent_ids)
@@ -337,6 +399,7 @@ export class AgentManagerController {
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
       cli: typeof body?.cli === 'string' && body.cli ? body.cli : 'claude',
       cli_adapters,
+      runtime_capabilities,
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
       agent_ids,

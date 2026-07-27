@@ -22,6 +22,7 @@ import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
 import type { UpdateChecker } from './self-update.js';
 import type { SpawnFailureSnapshot } from './spawn-failure-tracker.js';
+import type { RuntimeCapabilityReport } from './runtime/runtime-health.js';
 
 export type InstanceMode = 'manager';
 
@@ -30,6 +31,10 @@ export interface InstanceMeta {
   version: string;
   cli: string;
   cliAdapters: string[];
+  // Full registered-runtime health snapshot captured once at boot. Unlike the
+  // deprecated cli_adapters projection, this distinguishes missing, unhealthy,
+  // and healthy runtimes and includes the harness capability contract.
+  runtimeCapabilities?: RuntimeCapabilityReport | null;
   // Per-CLI model enumeration captured once at boot (cliType → model ids),
   // via each adapter's listModels(). Shipped verbatim on every heartbeat as
   // `available_models` so AWB can populate a per-agent model selector from the
@@ -143,6 +148,7 @@ export interface InstanceHeartbeatPayload {
   plugin_version: string;
   cli: string;
   cli_adapters: string[];
+  runtime_capabilities?: RuntimeCapabilityReport;
   pid: number;
   started_at: string;
   // cliType → model ids each installed CLI accepts. Gathered once at boot.
@@ -212,6 +218,10 @@ export class InstanceHeartbeat {
     const availableModels =
       meta?.availableModels && typeof meta.availableModels === 'object'
         ? meta.availableModels
+        : null;
+    const runtimeCapabilities =
+      meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
+        ? meta.runtimeCapabilities
         : null;
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
@@ -299,6 +309,7 @@ export class InstanceHeartbeat {
         plugin_version: String(meta?.version || 'unknown'),
         cli: String(meta?.cli || 'claude'),
         cli_adapters: cliAdapters,
+        ...(runtimeCapabilities ? { runtime_capabilities: runtimeCapabilities } : {}),
         pid: process.pid,
         started_at: this.#startedAt,
         // Only include the managed-agent fields when the snapshot is wired

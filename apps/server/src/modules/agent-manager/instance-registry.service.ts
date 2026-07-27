@@ -21,6 +21,28 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
  * fixing that needs Redis pub/sub and isn't worth doing until AWB scales out.
  */
 
+export interface RuntimeCapabilityDescriptor {
+  protocol: 'stream-json' | 'jsonl' | 'acp';
+  session: 'oneshot' | 'persistent' | 'resumable';
+  native_mcp: boolean;
+  native_approvals: boolean;
+  steering: boolean;
+  cancellation: boolean;
+  usage: 'none' | 'tokens' | 'tokens-and-cost';
+  collaboration: Array<'delegated' | 'swarm'>;
+  skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+}
+
+export interface RuntimeHealthRecord {
+  installed: boolean;
+  healthy: boolean;
+  version: string | null;
+  reason: string | null;
+  capabilities: RuntimeCapabilityDescriptor;
+}
+
+export type RuntimeCapabilityReport = Record<string, RuntimeHealthRecord>;
+
 export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
@@ -32,6 +54,7 @@ export interface InstanceRecord {
   plugin_version: string;
   cli: string;
   cli_adapters: string[];
+  runtime_capabilities?: RuntimeCapabilityReport;
   pid: number;
   started_at: string;
   last_seen_at: string;

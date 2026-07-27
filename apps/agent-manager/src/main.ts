@@ -31,6 +31,7 @@ import { cleanupOrphanSubagents } from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
 import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index.js';
+import { discoverRuntimeCapabilities } from './lib/runtime/runtime-health.js';
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
@@ -813,6 +814,7 @@ async function runRuntime(
     // every heartbeat as `available_models` so AWB's per-agent model selector
     // reflects the CLIs actually installed on this host.
     const availableModels: Record<string, string[]> = {};
+    const runtimeCapabilities = await discoverRuntimeCapabilities();
     await Promise.all(
       KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
         try {
@@ -830,7 +832,10 @@ async function runRuntime(
       // field is a coarse label and 'mixed' beats picking one arbitrary
       // adapter that may not even be in use.
       cli: 'mixed',
-      cliAdapters: KNOWN_ADAPTER_CLI_TYPES.slice() as string[],
+      cliAdapters: Object.entries(runtimeCapabilities)
+        .filter(([, status]) => status.installed && status.healthy)
+        .map(([runtimeId]) => runtimeId),
+      runtimeCapabilities,
       // Per-CLI model lists gathered just above (cliType → model ids).
       availableModels,
       // ST-5b — pass the registry as a snapshot source so each heartbeat

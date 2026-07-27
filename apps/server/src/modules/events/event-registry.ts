@@ -840,6 +840,12 @@ export const EVENT_TYPES: EventDefinition[] = [
           plugin_version: String(inst.plugin_version || 'unknown'),
           cli: String(inst.cli || 'claude'),
           cli_adapters: Array.isArray(inst.cli_adapters) ? inst.cli_adapters.map(String) : [],
+          runtime_capabilities:
+            inst.runtime_capabilities
+            && typeof inst.runtime_capabilities === 'object'
+            && !Array.isArray(inst.runtime_capabilities)
+              ? inst.runtime_capabilities
+              : undefined,
           pid: Number.isFinite(inst.pid) ? Number(inst.pid) : 0,
           started_at: String(inst.started_at || ''),
           last_seen_at: String(inst.last_seen_at || ''),

@@ -1947,6 +1947,7 @@ export interface AgentManagerInstance {
   plugin_version: string;
   cli: string;
   cli_adapters: string[];
+  runtime_capabilities?: Record<string, RuntimeHealth>;
   pid: number;
   started_at: string;
   last_seen_at: string;
@@ -2007,6 +2008,24 @@ export interface AgentManagerInstance {
   last_spawn_error_at?: string | null;
   /** Latest error-log upload among the manager identity and its managed agents. */
   last_error_upload_at?: string | null;
+}
+
+export interface RuntimeHealth {
+  installed: boolean;
+  healthy: boolean;
+  version: string | null;
+  reason: string | null;
+  capabilities: {
+    protocol: 'stream-json' | 'jsonl' | 'acp';
+    session: 'oneshot' | 'persistent' | 'resumable';
+    native_mcp: boolean;
+    native_approvals: boolean;
+    steering: boolean;
+    cancellation: boolean;
+    usage: 'none' | 'tokens' | 'tokens-and-cost';
+    collaboration: Array<'delegated' | 'swarm'>;
+    skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+  };
 }
 
 /**
