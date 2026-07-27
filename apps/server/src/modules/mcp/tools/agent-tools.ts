@@ -13,6 +13,11 @@ import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { CLI_TYPES } from '../../../common/types/cli-types';
+import {
+  AgentRuntimeConfigError,
+  isExecutableRuntime,
+  validateAgentRuntimeConfig,
+} from '../../../common/runtime-config';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
@@ -55,17 +60,67 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     {
       name: z.string().describe('Agent name'),
       description: z.string().optional().default('').describe('Agent description'),
-      type: z.enum(CLI_TYPES).optional().default('custom').describe('Agent type (CLI selector — see ALLOWED_CLI_TYPES)'),
+      workspace_id: z.string().describe('Workspace that owns this executable Agent'),
+      type: z.enum(CLI_TYPES).optional().describe('Explicit Runtime Host runtime id'),
+      manager_agent_id: z.string().optional().describe('Owning Runtime Host Agent id'),
+      runtime_config: z.record(z.string(), z.unknown()).optional().describe(
+        'Explicit runtime strategy and permission policy',
+      ),
       avatar_url: z.string().optional().default('').describe('Avatar URL'),
       is_active: z.number().optional().default(1).describe('Active (1) or inactive (0)'),
+      working_dir: z.string().optional().default('').describe('Runtime Host working directory'),
       model: z.string().optional().describe(
         "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8', 'deepseek-reasoner'). Omit / empty = the CLI's own default (no --model flag)."
       ),
     },
-    async ({ name, description, type, avatar_url, is_active, model }) => {
+    async ({
+      name,
+      description,
+      workspace_id,
+      type,
+      manager_agent_id,
+      runtime_config,
+      avatar_url,
+      is_active,
+      working_dir,
+      model,
+    }) => {
+      const runtimeId = typeof type === 'string' ? type.trim().toLowerCase() : '';
+      if (!runtimeId) return err('runtime_not_configured');
+      if (!isExecutableRuntime(runtimeId)) return err('runtime_unknown');
+      if (!manager_agent_id) return err('runtime_host_required');
+
       const agentRepo = dataSource.getRepository(Agent);
+      const manager = await agentRepo.findOne({ where: { id: manager_agent_id } });
+      if (!manager || manager.type !== 'manager') {
+        return err('runtime_host_invalid', {
+          message: 'manager_agent_id must reference a manager-type agent',
+        });
+      }
+
+      let validatedConfig;
+      try {
+        validatedConfig = validateAgentRuntimeConfig(runtimeId, runtime_config);
+      } catch (error) {
+        if (error instanceof AgentRuntimeConfigError) {
+          return err(error.code, { message: error.message });
+        }
+        throw error;
+      }
+
       const agent = await agentRepo.save(
-        agentRepo.create({ name, description, type, avatar_url, is_active, model: model && model.trim() ? model.trim() : null }),
+        agentRepo.create({
+          name,
+          description,
+          type: runtimeId,
+          avatar_url,
+          is_active,
+          workspace_id,
+          working_dir,
+          manager_agent_id,
+          runtime_config: validatedConfig,
+          model: model && model.trim() ? model.trim() : null,
+        }),
       );
       return ok(agent);
     }
@@ -85,11 +140,29 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       role_prompt_meta: z.record(z.string(), z.unknown()).optional().describe(
         'Optional metadata sidecar: { version?, updated_by?, template_id?, ... } — forward-compat hook, safe to omit'
       ),
+      manager_agent_id: z.string().nullable().optional().describe('Owning Runtime Host Agent id'),
+      runtime_config: z.record(z.string(), z.unknown()).optional().describe(
+        'Explicit runtime strategy and permission policy',
+      ),
+      working_dir: z.string().optional().describe('Runtime Host working directory'),
       model: z.string().optional().describe(
         "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8'). Empty string clears it (CLI default). Takes effect on the next spawn — restart a running agent to apply."
       ),
     },
-    async ({ agent_id, name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, model }) => {
+    async ({
+      agent_id,
+      name,
+      description,
+      type,
+      avatar_url,
+      is_active,
+      role_prompt,
+      role_prompt_meta,
+      manager_agent_id,
+      runtime_config,
+      working_dir,
+      model,
+    }) => {
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
@@ -106,7 +179,31 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (is_active !== undefined) agent.is_active = is_active;
       if (role_prompt !== undefined) agent.role_prompt = role_prompt;              // D-18
       if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta as Record<string, any>; // D-18
+      if (manager_agent_id !== undefined) agent.manager_agent_id = manager_agent_id;
+      if (working_dir !== undefined) agent.working_dir = working_dir;
       if (model !== undefined) agent.model = model && model.trim() ? model.trim() : null;
+
+      const runtimeId = typeof agent.type === 'string' ? agent.type.trim().toLowerCase() : '';
+      if (!runtimeId) return err('runtime_not_configured');
+      if (!isExecutableRuntime(runtimeId)) return err('runtime_unknown');
+      if (!agent.manager_agent_id) return err('runtime_host_required');
+      const manager = await agentRepo.findOne({ where: { id: agent.manager_agent_id } });
+      if (!manager || manager.type !== 'manager') {
+        return err('runtime_host_invalid', {
+          message: 'manager_agent_id must reference a manager-type agent',
+        });
+      }
+      try {
+        agent.runtime_config = validateAgentRuntimeConfig(
+          runtimeId,
+          runtime_config !== undefined ? runtime_config : agent.runtime_config,
+        );
+      } catch (error) {
+        if (error instanceof AgentRuntimeConfigError) {
+          return err(error.code, { message: error.message });
+        }
+        throw error;
+      }
 
       const updated = await agentRepo.save(agent);
 

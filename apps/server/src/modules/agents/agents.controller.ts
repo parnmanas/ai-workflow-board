@@ -27,6 +27,12 @@ import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import {
+  type AgentRuntimeConfig,
+  AgentRuntimeConfigError,
+  isExecutableRuntime,
+  validateAgentRuntimeConfig,
+} from '../../common/runtime-config';
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
@@ -501,8 +507,45 @@ export class AgentsController {
 
   @Post()
   async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const { name, description = '', type = 'custom', avatar_url = '', is_active = 1, working_dir = '', manager_agent_id = null, credential_id = null } = body;
+    const {
+      name,
+      description = '',
+      avatar_url = '',
+      is_active = 1,
+      working_dir = '',
+      credential_id = null,
+    } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
+    const type = typeof body?.type === 'string' ? body.type.trim().toLowerCase() : '';
+    if (!type) return res.status(400).json({ error: 'runtime_not_configured' });
+
+    const managerAgentId = typeof body?.manager_agent_id === 'string' && body.manager_agent_id
+      ? body.manager_agent_id
+      : null;
+    let runtimeConfig: AgentRuntimeConfig | null = null;
+    if (type !== 'manager') {
+      if (!isExecutableRuntime(type)) {
+        return res.status(400).json({ error: 'runtime_unknown' });
+      }
+      if (!managerAgentId) {
+        return res.status(400).json({ error: 'runtime_host_required' });
+      }
+      const manager = await this.agentRepo.findOne({ where: { id: managerAgentId } });
+      if (!manager || manager.type !== 'manager') {
+        return res.status(400).json({
+          error: 'runtime_host_invalid',
+          message: 'manager_agent_id must reference a manager-type agent',
+        });
+      }
+      try {
+        runtimeConfig = validateAgentRuntimeConfig(type, body?.runtime_config);
+      } catch (error) {
+        if (error instanceof AgentRuntimeConfigError) {
+          return res.status(400).json({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }
 
     // Use workspace injected by WorkspaceGuard — ignore body-supplied workspace_id to
     // prevent cross-workspace agent creation by users in other workspaces.
@@ -525,7 +568,8 @@ export class AgentsController {
         name, description, type, avatar_url, is_active,
         workspace_id: type === 'manager' ? null : effectiveWorkspaceId,
         working_dir: typeof working_dir === 'string' ? working_dir : '',
-        manager_agent_id: typeof manager_agent_id === 'string' && manager_agent_id ? manager_agent_id : null,
+        manager_agent_id: type === 'manager' ? null : managerAgentId,
+        runtime_config: runtimeConfig,
         credential_id: typeof credential_id === 'string' && credential_id ? credential_id : null,
       }),
     );
@@ -562,14 +606,30 @@ export class AgentsController {
       (req as any).currentUser?.id || (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
     const actorRole = (req as any).currentUser?.role || null;
 
-    const { name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, working_dir, manager_agent_id, credential_id, model, cli_runtime_profile } = body;
+    const {
+      name,
+      description,
+      type,
+      avatar_url,
+      is_active,
+      role_prompt,
+      role_prompt_meta,
+      working_dir,
+      manager_agent_id,
+      credential_id,
+      model,
+      cli_runtime_profile,
+      runtime_config,
+    } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
       if (!trimmed) return res.status(400).json({ error: 'name cannot be empty' });
       agent.name = trimmed;
     }
     if (description !== undefined) agent.description = description;
-    if (type !== undefined) agent.type = type;
+    if (type !== undefined) {
+      agent.type = typeof type === 'string' ? type.trim().toLowerCase() : '';
+    }
     if (avatar_url !== undefined) agent.avatar_url = avatar_url;
     if (is_active !== undefined) agent.is_active = Number(is_active) ? 1 : 0;
     // Phase 1 role prompt fields (D-14 / ROLE-02)
@@ -621,12 +681,34 @@ export class AgentsController {
       agent.cli_runtime_profile = selected;
     }
 
+    if (agent.type !== 'manager') {
+      if (!isExecutableRuntime(agent.type)) {
+        return res.status(400).json({ error: agent.type ? 'runtime_unknown' : 'runtime_not_configured' });
+      }
+      if (!agent.manager_agent_id) {
+        return res.status(400).json({ error: 'runtime_host_required' });
+      }
+      try {
+        agent.runtime_config = validateAgentRuntimeConfig(
+          agent.type,
+          runtime_config !== undefined ? runtime_config : agent.runtime_config,
+        );
+      } catch (error) {
+        if (error instanceof AgentRuntimeConfigError) {
+          return res.status(400).json({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }
+
     // Operator invariant: manager-type agents are workspace-less. Catches
     // type-flip (non-manager → manager) plus any in-place save where the
     // agent was loaded with a stale workspace_id (the boot cleanup is
     // catch-all but this normalise-on-save makes the rule local).
     if (agent.type === 'manager') {
       agent.workspace_id = null;
+      agent.manager_agent_id = null;
+      agent.runtime_config = null;
     }
 
     const updated = await this.agentRepo.save(agent);

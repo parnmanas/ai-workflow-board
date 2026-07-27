@@ -29,6 +29,10 @@ import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { ALLOWED_CLI_TYPES } from '../../common/types/cli-types';
+import {
+  AgentRuntimeConfigError,
+  validateAgentRuntimeConfig,
+} from '../../common/runtime-config';
 
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
@@ -940,6 +944,18 @@ export class AgentManagerController {
     const manager_agent_id = typeof body?.manager_agent_id === 'string' && body.manager_agent_id
       ? body.manager_agent_id
       : null;
+    if (!manager_agent_id) {
+      return res.status(400).json({ error: 'runtime_host_required' });
+    }
+    let runtime_config;
+    try {
+      runtime_config = validateAgentRuntimeConfig(cli, body?.runtime_config);
+    } catch (error) {
+      if (error instanceof AgentRuntimeConfigError) {
+        return res.status(400).json({ error: error.code, message: error.message });
+      }
+      throw error;
+    }
     const credential_id = typeof body?.credential_id === 'string' && body.credential_id
       ? body.credential_id
       : null;
@@ -987,6 +1003,7 @@ export class AgentManagerController {
         workspace_id: workspaceId,
         working_dir,
         manager_agent_id,
+        runtime_config,
         credential_id,
         model,
         roles: '[]',
