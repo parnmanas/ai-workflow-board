@@ -36,13 +36,12 @@ import {
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
- *  the AI Agents runtime section shows. `supervised` is a derived flag:
- *  true when the matched instance is a manager that lists this agent in
- *  agent_ids[]; false when this agent IS the instance's primary agent (proxy /
- *  daemon / a manager identity itself). */
+ *  the Runtime Host section shows. `supervised` is a derived flag:
+ *  true when the matched Runtime Host lists this agent in agent_ids[]; false
+ *  when this Agent is the Runtime Host identity itself. */
 export interface AgentLiveInstance {
   instance_id: string;
-  mode: 'daemon' | 'proxy' | 'manager';
+  mode: 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -179,10 +178,9 @@ export class AgentsController {
    * Attach `live_instance` (heartbeat snapshot from InstanceRegistry) and a
    * `subagents` rollup (counts + recent preview) to each agent in the input.
    *
-   * For managed agents, the matched instance is the manager process that lists
-   * the agent in its `agent_ids[]`. For standalone agents (proxy/daemon/manager
-   * identities themselves), the match is the instance whose primary `agent_id`
-   * equals the agent. Without this enrichment, the AI Agents admin page shows
+   * For executable agents, the matched instance is the Runtime Host that lists
+   * the agent in its `agent_ids[]`. Runtime Host identities match their own
+   * primary `agent_id`. Without this enrichment, the AI Agents admin page shows
    * essentially nothing for manager-supervised agents — they don't carry their
    * own SSE session, so `is_online`/`last_seen_at` on the Agent row stay zero.
    *
@@ -197,9 +195,8 @@ export class AgentsController {
     if (agents.length === 0) return [];
 
     // ── live_instance ──────────────────────────────────────────────
-    // Build two indexes off the in-memory registry: by primary agent_id
-    // (proxy/daemon/manager-identity case) and by supervised agent_ids[]
-    // (manager-supervised case).
+    // Build two indexes off the Runtime Host registry: host identity and
+    // supervised executable Agent identities.
     const allInstances = this.instanceRegistry.list();
     const primaryByAgentId = new Map<string, InstanceRecord>();
     const supervisorByAgentId = new Map<string, InstanceRecord>();
@@ -208,7 +205,7 @@ export class AgentsController {
       if (!prev || prev.last_seen_at < inst.last_seen_at) {
         primaryByAgentId.set(inst.agent_id, inst);
       }
-      if (inst.mode === 'manager' && Array.isArray(inst.agent_ids)) {
+      if (Array.isArray(inst.agent_ids)) {
         for (const supervisedId of inst.agent_ids) {
           const prevSup = supervisorByAgentId.get(supervisedId);
           if (!prevSup || prevSup.last_seen_at < inst.last_seen_at) {
@@ -636,8 +633,7 @@ export class AgentsController {
     if (role_prompt !== undefined) agent.role_prompt = role_prompt;
     if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta;
     // ST-4 — agent-manager fields. working_dir is plain text; manager_agent_id
-    // can be null to detach an agent from a manager (e.g. moved to a host
-    // running the legacy proxy).
+    // Runtime Host ownership is mandatory for executable Agents.
     if (working_dir !== undefined) {
       agent.working_dir = typeof working_dir === 'string' ? working_dir : '';
     }
@@ -840,7 +836,7 @@ export class AgentsController {
    */
   private _dispatchAgentManagerReload(agentId: string, issuedBy: string): void {
     const supervisors = this.instanceRegistry.list().filter(
-      (i) => i.mode === 'manager' && Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId),
+      (i) => Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId),
     );
     for (const inst of supervisors) {
       const issued_at = new Date().toISOString();

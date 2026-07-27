@@ -43,8 +43,7 @@
  * and a server restart.
  *
  * Scope notes:
- *   - Only `mode === 'manager'` instances are considered. Daemon / proxy don't
- *     self-update at all.
+ *   - Every accepted instance is a Runtime Host and participates in this check.
  *   - Install-mode aware (ticket 9c9b52eb): a 'git' checkout OR an 'npm-global'
  *     install both run a live UpdateChecker and can report update_available ===
  *     true, so both now participate in drift detection (npm-global self-updates
@@ -192,7 +191,6 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
     // and keep a representative instance for the alert text.
     const byAgent = new Map<string, { drift: InstanceRecord | null; error: InstanceRecord | null }>();
     for (const inst of this.registry.list()) {
-      if (inst.mode !== 'manager') continue;
       // Managers that don't ship update-checker telemetry (pre-update builds)
       // leave update_available undefined — nothing to evaluate.
       if (inst.update_available === undefined && !inst.update_last_error) continue;

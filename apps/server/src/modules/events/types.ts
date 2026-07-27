@@ -15,14 +15,7 @@ export interface SubscriberIdentity {
   userId?: string;
   /** boardId query param, scoping board_update delivery. */
   boardId?: string;
-  /**
-   * Server-generated UUID for THIS specific SSE connection. Lets the
-   * controller's filter pipeline route agent-targeted events (triggers,
-   * mentions, chat) to a single "main" session when an agent has 2+
-   * concurrent proxies, instead of fanning out and racing duplicate
-   * subagents. Always set in events.controller.ts; only optional here so
-   * legacy callers building the identity ad-hoc still type-check.
-   */
+  /** Server-generated UUID for this SSE connection. */
   sseSessionId?: string;
   /**
    * ST-6: When this identity is an agent-manager, the set of managed-agent
@@ -89,7 +82,7 @@ export interface EventDefinition<SourceEvent = any, P = any> {
   filter?(envelope: StreamEvent<P>, identity: SubscriberIdentity): boolean;
   /**
    * Transform the envelope into the wire `data` object. Default: envelope as-is.
-   * Some legacy types flatten payload fields up to the top level for proxy.mjs compat.
+   * Some Runtime Host-consumed types flatten payload fields to the top level.
    */
   flatten?(envelope: StreamEvent<P>): any;
 }

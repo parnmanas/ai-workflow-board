@@ -109,12 +109,11 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
 }
 
 /**
- * Agent Manager — Phase 3 admin dashboard for live daemon/proxy/manager
- * instances + ST-4 pairing/control flow for the standalone awb-agent-manager.
+ * Runtime Host dashboard, pairing, capability heartbeat, and control flow.
  *
  * Three audiences:
- *   - Agent Manager (X-Agent-Key): POST `/api/agent/instance-heartbeat`
- *     to register and refresh per-process presence. ST-4 manager mode adds
+ *   - Runtime Host (X-Agent-Key): POST `/api/agent/instance-heartbeat`
+ *     to register and refresh per-process presence. The heartbeat adds
  *     agent_ids[]/working_dirs[]/paired_at to the InstanceRecord.
  *   - Admin user: GET `/api/admin/agent-manager/instances` etc. for the
  *     runtime dashboard embedded in the workspace AI Agents page. ST-4 adds pairing/command endpoints.
@@ -156,26 +155,68 @@ export class AgentManagerController {
   async heartbeat(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const auth = (req as any).apiKey;
     const fallbackAgentId = (req as any).currentAgentId || auth?.agent_id || null;
-    const fallbackWorkspaceId = (req as any).currentWorkspaceId ?? null;
 
     const instance_id = typeof body?.instance_id === 'string' ? body.instance_id.trim() : '';
     if (!instance_id) {
       return res.status(400).json({ error: 'instance_id is required' });
     }
 
-    const agent_id = typeof body?.agent_id === 'string' && body.agent_id ? body.agent_id : fallbackAgentId;
+    if (body?.mode !== 'manager') {
+      return res.status(400).json({ error: 'runtime_host_mode_required' });
+    }
+    const bodyAgentId = typeof body?.agent_id === 'string' && body.agent_id
+      ? body.agent_id
+      : null;
+    const agent_id = fallbackAgentId || bodyAgentId;
     if (!agent_id) {
       return res.status(400).json({ error: 'agent_id is required (and could not be resolved from API key)' });
     }
+    if (fallbackAgentId && bodyAgentId && bodyAgentId !== fallbackAgentId) {
+      return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
+    }
+    let runtimeHost = await this.agentRepo.findOne({ where: { id: agent_id } });
 
-    const mode: 'daemon' | 'proxy' | 'manager' =
-      body?.mode === 'daemon' ? 'daemon' : body?.mode === 'manager' ? 'manager' : 'proxy';
+    // A valid manager API key can outlive an accidentally deleted Agent row.
+    // Recreate only the Runtime Host identity; executable Agents must always
+    // be provisioned and supervised through a host.
+    if (!runtimeHost) {
+      try {
+        const hostname =
+          typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
+        const recreated = this.agentRepo.create({
+          id: agent_id,
+          name: `awb-agent-manager (${hostname})`,
+          description: 'awb-agent-manager — recreated from Runtime Host heartbeat',
+          type: 'manager',
+          is_active: 1,
+          workspace_id: null,
+          roles: '[]',
+        });
+        runtimeHost = await this.agentRepo.save(recreated);
+        this.logService.warn(
+          'AgentManager',
+          `Recreated missing Runtime Host Agent row id=${agent_id.slice(0, 8)} name="${recreated.name}" from heartbeat`,
+          { agent_id, hostname, instance_id, via: 'instance-heartbeat self-heal' },
+        );
+      } catch (err: any) {
+        this.logService.warn(
+          'AgentManager',
+          `Self-heal failed for Runtime Host agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
+          { err: err?.message ?? String(err), agent_id, instance_id },
+        );
+      }
+    }
+    if (!runtimeHost || runtimeHost.type !== 'manager') {
+      return res.status(403).json({ error: 'runtime_host_identity_required' });
+    }
+
+    const mode: 'manager' = 'manager';
     const cli_adapters = Array.isArray(body?.cli_adapters)
       ? body.cli_adapters.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : [];
     const runtime_capabilities = sanitizeRuntimeCapabilities(body?.runtime_capabilities);
 
-    // ST-4: manager-mode metadata. Daemons/proxies pass through as undefined.
+    // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
       ? body.agent_ids.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : undefined;
@@ -341,59 +382,10 @@ export class AgentManagerController {
       dispatch_block_counts = out;
     }
 
-    // Self-heal: a manager heartbeat that authenticates with a valid apiKey
-    // (apiKey.agent_id is the heartbeat's authoritative agent_id) but whose
-    // Agent row has been deleted out from under us would otherwise leave the
-    // admin AgentManager page showing an instance whose detail endpoint 404s
-    // — operator reports "Edit Identity 안 됨, /api/agents/<id> 404". When
-    // mode='manager', re-mint the Agent row from the heartbeat's hostname so
-    // the operator can rename it via Edit Identity instead of being stuck.
-    // workspace_id=null per the workspace-less invariant.
-    if (mode === 'manager') {
-      try {
-        const exists = await this.agentRepo.findOne({ where: { id: agent_id } });
-        if (!exists) {
-          const hostnameStr =
-            typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
-          const recreated = this.agentRepo.create({
-            id: agent_id,
-            name: `awb-agent-manager (${hostnameStr})`,
-            description: 'awb-agent-manager — recreated from heartbeat (Agent row was missing)',
-            type: 'manager',
-            is_active: 1,
-            workspace_id: null,
-            roles: '[]',
-          });
-          await this.agentRepo.save(recreated);
-          this.logService.warn(
-            'AgentManager',
-            `Recreated missing manager Agent row id=${agent_id.slice(0, 8)} name="${recreated.name}" from heartbeat`,
-            { agent_id, hostname: hostnameStr, instance_id, via: 'instance-heartbeat self-heal' },
-          );
-        }
-      } catch (err: any) {
-        this.logService.warn(
-          'AgentManager',
-          `Self-heal failed for manager agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
-          { err: err?.message ?? String(err), agent_id, instance_id },
-        );
-      }
-    }
-
-    // Manager instances are workspace-less by design (operator invariant).
-    // The manager process sends its config.json workspace_id in the heartbeat
-    // body for backwards compat, but we ignore it and force NULL into the
-    // InstanceRegistry record — otherwise the AI Agents runtime section
-    // (`{inst.workspace_id || '—'}`) keeps rendering a workspace badge even
-    // after the DB `agent.workspace_id` was stripped to NULL.
-    const incomingWs =
-      typeof body?.workspace_id === 'string' && body.workspace_id ? body.workspace_id : fallbackWorkspaceId;
-    const effectiveInstanceWs = mode === 'manager' ? null : incomingWs;
-
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
-      workspace_id: effectiveInstanceWs,
+      workspace_id: null,
       mode,
       hostname: typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown',
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
@@ -437,7 +429,7 @@ export class AgentManagerController {
     // so a heartbeat from manager A can never accidentally signal aliveness
     // for agents B owns. Empty/legacy heartbeats from non-manager modes
     // skip the update entirely.
-    if (mode === 'manager' && agent_ids && agent_ids.length > 0) {
+    if (agent_ids && agent_ids.length > 0) {
       try {
         await this.agentRepo.update(
           { id: In(agent_ids), manager_agent_id: agent_id },
@@ -727,7 +719,7 @@ export class AgentManagerController {
   @Get('api/admin/agent-manager/instances')
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
-  @ApiOperation({ summary: 'List currently-heartbeating daemon/proxy/manager instances' })
+  @ApiOperation({ summary: 'List currently-heartbeating Runtime Host instances' })
   async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     const data = workspaceId ? this.registry.listForWorkspace(workspaceId) : this.registry.list();
     // Enrich each instance with the backing Agent.name so the admin list can
@@ -825,9 +817,7 @@ export class AgentManagerController {
   //
   // Dispatches `restart_manager` over the agent_manager_command SSE channel
   // — the manager re-execs itself (no git pull / install / build), so the
-  // new process takes over the agent lockfile from the dying parent. Daemon /
-  // proxy instances don't speak this command and return 409 here rather than
-  // queuing a no-op dispatch the operator would never see acked.
+  // new process takes over the agent lockfile from the dying parent.
   //
   // user-session auth is mandatory because the dispatch carries `issued_by` —
   // we read it through @CurrentUser and 401 on the unauthenticated case
@@ -847,14 +837,6 @@ export class AgentManagerController {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
-    if (inst.mode !== 'manager') {
-      return res.status(409).json({
-        error: 'instance_is_not_manager',
-        message:
-          'Restart is only supported for awb-agent-manager instances; daemon/proxy instances do not have a re-exec hook.',
-      });
-    }
-
     const command_id = randomBytes(8).toString('hex');
     const issued_at = new Date().toISOString();
     const payload: AgentManagerCommandPayload = {
@@ -962,12 +944,6 @@ export class AgentManagerController {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
     const inst = this.registry.get(id);
     if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
-    if (inst.mode !== 'manager') {
-      return res.status(409).json({
-        error: 'instance_is_not_manager',
-        message: 'Control commands only target awb-agent-manager instances; this is a daemon/proxy.',
-      });
-    }
     const command = String(body?.command || '') as AgentManagerCommand;
     if (!ALLOWED_COMMANDS.has(command)) {
       return res.status(400).json({ error: `unknown command "${command}"` });

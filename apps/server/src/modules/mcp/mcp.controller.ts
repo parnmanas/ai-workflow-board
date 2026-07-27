@@ -1,5 +1,5 @@
 import { ApiTags } from '@nestjs/swagger';
-import { Controller, All, Req, Res, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Controller, All, Req, Res, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Request, Response } from 'express';
@@ -37,7 +37,7 @@ import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.serv
 import { HandoffService } from '../handoff/handoff.service';
 import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
-import { ActivityService, activityEvents } from '../../services/activity.service';
+import { ActivityService } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
@@ -138,13 +138,7 @@ function captureToolsListBodyIfFirst(bodyStr: string): void {
 
 @ApiTags('mcp')
 @Controller()
-export class McpController implements OnModuleInit, OnModuleDestroy {
-  // The push-target McpServer is derived on demand from `sessionStore`
-  // (getLatestServerForAgent) rather than kept in a separate agentId-keyed
-  // map. The old map leaked McpServer instances on out-of-order reconnect
-  // close — see SessionStore.getLatestServerForAgent for the full rationale.
-  private triggerListener: ((event: any) => void) | null = null;
-
+export class McpController implements OnModuleInit {
   constructor(
     private readonly apiKeyService: ApiKeyService,
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -192,36 +186,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     this.metricsRegistry.register('mcp.sessions', () => sessionStore.size);
     this.metricsRegistry.register('mcp.connectedAgents', () => sessionStore.distinctAgentCount());
 
-    // Listen for agent_trigger events and push MCP notifications to connected agents
-    this.triggerListener = (event: any) => {
-      const agentId = event.agent_id;
-      if (!agentId) return;
-      const mcpServer = sessionStore.getLatestServerForAgent(agentId);
-      if (!mcpServer) {
-        mcpLog('Trigger push skipped: agent not connected via MCP', { agent_id: agentId });
-        return;
-      }
-      mcpServer.sendLoggingMessage({
-        level: 'info',
-        data: {
-          type: 'agent_trigger',
-          trigger_id: event.trigger_id,
-          ticket_id: event.ticket_id,
-          agent_id: agentId,
-          role: event.role,
-          trigger_source: event.trigger_source,
-          role_prompt: event.role_prompt,
-          ticket_prompt: event.ticket_prompt,
-          column_prompt: event.column_prompt,
-          timestamp: event.timestamp,
-        },
-      }).catch((e: unknown) => {
-        mcpLogError('Failed to push trigger via MCP', { error: String(e), agent_id: agentId });
-      });
-      mcpLog('Trigger pushed via MCP logging notification', { agent_id: agentId, trigger_id: event.trigger_id });
-    };
-    activityEvents.on('agent_trigger', this.triggerListener);
-
     // Register eviction hook to mark agents offline when their session idles out.
     // (Normal close handles this via transport.onclose — this covers abnormal
     // disconnects that never fire onclose.)
@@ -265,12 +229,6 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     if (Number.isFinite(n) && n > 0) {
       sessionStore.setMaxSessions(n);
       mcpLog(`MCP session cap loaded from settings: ${n}`);
-    }
-  }
-
-  onModuleDestroy() {
-    if (this.triggerListener) {
-      activityEvents.removeListener('agent_trigger', this.triggerListener);
     }
   }
 
@@ -399,23 +357,15 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // Inject workspace_id from API key into request context for downstream use
       (req as any).currentWorkspaceId = mcpAuthInfo.workspaceId ?? null;
 
-      // schemaVersion:2 validation — per D-12..D-14
-      // Skip for internal clients (presence heartbeat) that only call ping tool.
-      // Skip for subagents spawned directly via Claude CLI (no proxy.mjs in path):
-      // the gate's purpose is to detect outdated proxy.mjs versions, which is
-      // meaningless when the client isn't a proxy at all. Two flavors emit no
-      // proxy and must both bypass:
+      // schemaVersion:2 validation for general MCP clients. Runtime children
+      // receive a Host-authenticated, run-scoped MCP configuration and bypass
+      // the AWB client-extension check because third-party runtimes do not
+      // advertise AWB-specific initialize capabilities. Supported headers:
       //   - 'subagent'         : SubagentManager one-shots (Claude CLI native MCP)
       //   - 'managed-subagent' : BaseSessionManager persistent chat / ticket
       //                          sessions for managed agents (also Claude CLI
-      //                          native MCP). Without bypassing this one,
-      //                          every chat / ticket subagent spawned by the
-      //                          agent-manager fails `initialize` with
-      //                          "MCP proxy schemaVersion mismatch — upgrade
-      //                          proxy.mjs to v2" and no mcp__awb__* tools
-      //                          ever become available — manifests as silent
-      //                          chat/ticket no-ops even with a fresh
-      //                          credential rotation in place.
+      //                          native MCP).
+      //   - 'runtime-child'    : protocol runtimes such as Hermes ACP.
       if (req.method === 'POST' && req.body?.method === 'initialize') {
         const clientName = req.body?.params?.clientInfo?.name;
         const clientTypeHeader = String(req.headers['x-awb-client-type'] || '').toLowerCase();
@@ -425,15 +375,17 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           ? schemaVerRaw.version
           : schemaVerRaw;
         const isInternalClient = clientName === 'awb-presence-heartbeat';
-        const isSubagent =
-          clientTypeHeader === 'subagent' || clientTypeHeader === 'managed-subagent';
-        if (schemaVer !== 2 && !isInternalClient && !isSubagent) {
+        const isRuntimeChild =
+          clientTypeHeader === 'subagent'
+          || clientTypeHeader === 'managed-subagent'
+          || clientTypeHeader === 'runtime-child';
+        if (schemaVer !== 2 && !isInternalClient && !isRuntimeChild) {
           return res.status(200).json({
             jsonrpc: '2.0',
             id: req.body.id ?? null,
             error: {
               code: -32000,
-              message: 'MCP proxy schemaVersion mismatch — upgrade proxy.mjs to v2',
+              message: 'MCP schemaVersion mismatch — use schemaVersion 2',
             },
           });
         }
@@ -504,11 +456,11 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       }
 
       // Role + ticket context pinned per-spawn by the plugin subagent-manager.
-      // Plugin writes one MCP config file per (ticket, role) subagent and
+      // Runtime Host writes one MCP config per (ticket, role) child and
       // injects these headers there, so every tool call from that child
       // process carries them. Stashing on the session lets add_comment and
       // friends attribute work to the correct role without each tool needing
-      // a role argument. Top-level proxy and chat sessions omit the headers.
+      // a role argument.
       const subagentRoleHeader = String(req.headers['x-awb-subagent-role'] || '').toLowerCase().trim() || undefined;
       const subagentTicketIdHeader = String(req.headers['x-awb-subagent-ticket-id'] || '').trim() || undefined;
       const subagentTriggerSourceHeader = String(req.headers['x-awb-subagent-trigger-source'] || '').trim() || undefined;

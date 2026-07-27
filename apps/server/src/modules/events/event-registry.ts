@@ -93,7 +93,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     // D-07: deliver when subscriber requested this board, or when they subscribed to all.
     filter: (env, id) => !id.boardId || env.scope.board_id === id.boardId,
-    // proxy.mjs reads ticket_id/action/field_changed/actor_name at the top level — flatten.
+    // Runtime Hosts read ticket_id/action/field_changed/actor_name at the top level.
     flatten: (env) => {
       const p = env.payload as BoardUpdatePayload;
       return {
@@ -205,9 +205,8 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
     },
     // Recipient-scoped delivery: only the target agent's SSE stream receives
-    // the trigger. Without this, every connected agent's proxy would process
-    // the event (the "proxy.mjs filters client-side" comment was aspirational
-    // — the proxy had no such filter). Cross-agent leaks caused unrelated
+    // the trigger. Without this, every connected Runtime Host could process
+    // the event. Cross-Agent leaks caused unrelated
     // agents to pick up triggers meant for others; see incident notes.
     filter: (env, identity) => {
       if (identity.type !== 'agent') return false;
@@ -223,13 +222,13 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: p.role,
         field_changed: p.trigger_id,
         actor_name: p.agent_id,
-        // D-20: new fields added at top level. proxy.mjs ignores unknown fields.
+        // D-20: new fields added at top level. Runtime Hosts ignore unknown fields.
         role_prompt: p.role_prompt,
         ticket_prompt: p.ticket_prompt,
         trigger_source: p.trigger_source,
         // phase12: forward column_prompt (PromptTemplate wired to the ticket's
-        // column) so proxy.mjs can include it in composeTriggerPrompt. Without
-        // this, ev.column_prompt stays undefined on the proxy side and the
+        // column) so the Runtime Host can include it in the trigger prompt. Without
+        // this, column_prompt stays undefined on the Host side and the
         // column workflow guide never reaches the agent.
         column_prompt: p.column_prompt,
         // ticket 8c3befa8: the resolved base repo (ticket's own, or backfilled
@@ -369,7 +368,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   },
 
   // ───────── chat_request ─────────
-  // Phase 4 D-71/D-72. Per-agent delivery — only the target agent's proxy spawns the
+  // Phase 4 D-71/D-72. Per-Agent delivery — only the target Agent's Runtime Host starts the
   // chat subagent. Users never see this; they see the persisted 'chat_message' reply.
   {
     eventType: 'chat_request',
@@ -401,7 +400,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   },
 
   // ───────── chat_room_message ─────────
-  // Phase 7. Room participants only. proxy.mjs (and UI) expects the payload at top level.
+  // Phase 7. Room participants only. Runtime Hosts and the UI expect a flat payload.
   {
     eventType: 'chat_room_message',
     emitterEvent: 'chat_room_message',
@@ -534,10 +533,10 @@ export const EVENT_TYPES: EventDefinition[] = [
 
   // ───────── comment_mention ─────────
   // Fired when an @-mention in a ticket comment targets an agent. Only the
-  // mentioned agent's proxy receives this — other agents stay idle so the
+  // mentioned Agent's Runtime Host receives this — other Agents stay idle so the
   // subagent spawn budget isn't spent on bystanders.
   //
-  // proxy.mjs reads fields at the top level (like agent_trigger), so flatten
+  // Runtime Hosts read fields at the top level (like agent_trigger), so flatten
   // is provided explicitly.
   {
     eventType: 'comment_mention',
@@ -581,7 +580,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: 'mention',
         field_changed: p.comment_id,
         actor_name: p.actor_name,
-        // Flat fields proxy.mjs reads:
+        // Flat fields consumed by Runtime Hosts:
         comment_id: p.comment_id,
         agent_id: p.agent_id,
         actor_id: p.actor_id,
@@ -696,7 +695,7 @@ export const EVENT_TYPES: EventDefinition[] = [
 
   // ───────── fs_request ─────────
   // Reverse RPC: server (acting on behalf of a web-UI user) asks a specific
-  // agent's plugin proxy to perform a filesystem op on the agent machine.
+  // Agent's Runtime Host to perform a filesystem operation on its machine.
   // Only the target agent's SSE stream receives the event — same filter shape
   // as agent_trigger. Plugin answers via HTTP POST to
   // `/api/fs/responses/:request_id` (out-of-band) so response bodies aren't
@@ -818,7 +817,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   },
 
   // ───────── agent_instance_update ─────────
-  // Phase 3 Agent Manager — daemon/proxy presence registry change. Workspace-
+  // Runtime Host presence registry change. Workspace-
   // scoped so the admin UI for one workspace doesn't see every other tenant's
   // instance traffic; agent subscribers don't need this (it's pure UI fuel for
   // the human-side dashboard).
@@ -827,15 +826,13 @@ export const EVENT_TYPES: EventDefinition[] = [
     emitterEvent: 'agent_instance_update',
     map(event: any) {
       const inst = event?.instance || {};
-      const mode: 'daemon' | 'proxy' | 'manager' =
-        inst.mode === 'daemon' ? 'daemon' : inst.mode === 'manager' ? 'manager' : 'proxy';
       const payload: AgentInstanceUpdatePayload = {
         action: event?.action === 'registered' || event?.action === 'removed' ? event.action : 'updated',
         instance: {
           instance_id: String(inst.instance_id || ''),
           agent_id: String(inst.agent_id || ''),
           workspace_id: typeof inst.workspace_id === 'string' ? inst.workspace_id : null,
-          mode,
+          mode: 'manager',
           hostname: String(inst.hostname || 'unknown'),
           plugin_version: String(inst.plugin_version || 'unknown'),
           cli: String(inst.cli || 'claude'),

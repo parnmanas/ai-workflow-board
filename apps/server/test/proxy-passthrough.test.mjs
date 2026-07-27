@@ -4,15 +4,10 @@
 // activityEvents bus (the same bus TriggerLoopService uses in production), the
 // SSE stream delivered to the TARGET agent contains `role_prompt` and
 // `ticket_prompt` at the TOP LEVEL of the event data JSON. This is the
-// wire-format contract proxy.mjs depends on, per D-21.
+// wire-format contract the Runtime Host consumes.
 //
-// Recipient scoping (commit 021d7e2): agent_trigger is no longer broadcast to
-// every subscriber — it fans out ONLY to the SSE session whose authenticated
-// identity is an agent with a matching agent_id (event-registry.ts agent_trigger
-// filter). So this test connects to the stream AS THE AGENT (API key passed as
-// ?token=) and emits the trigger with that agent's id. The previous version
-// connected as a plain user and timed out, because a user stream never receives
-// agent_trigger under the current contract (quarantined → ticket 5e5959ef).
+// Recipient scoping: the Runtime Host connects with its own key and receives
+// events for Agent rows linked through manager_agent_id.
 //
 // Design:
 //  - node:test (Node 22+ built-in) — zero new dependencies.
@@ -75,16 +70,30 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
   };
   t.after(closeApp);
 
-  // ─── Agent + API key ───────────────────────────────────────
-  // agent_trigger is recipient-scoped to the target agent's SSE session, so the
-  // subscriber must authenticate as an agent. The events stream accepts an API
-  // key as ?token= and resolves it to an agent identity (events.controller.ts
-  // → ApiKeyService.validateApiKey).
-  const ws = await createWorkspace(app, getDataSourceToken, 'proxy-passthrough');
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'proxy-agent' });
-  const apiKey = await createApiKey(app, getDataSourceToken, agent.id, {
+  // ─── Runtime Host + managed Agent ──────────────────────────
+  const ws = await createWorkspace(app, getDataSourceToken, 'runtime-host-passthrough');
+  const runtimeHost = await createAgent(app, getDataSourceToken, null, {
+    name: 'runtime-host',
+    type: 'manager',
+  });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, {
+    name: 'managed-agent',
+    type: 'hermes',
+  });
+  const dataSource = app.get(getDataSourceToken());
+  await dataSource.getRepository('Agent').update(
+    { id: agent.id },
+    {
+      manager_agent_id: runtimeHost.id,
+      runtime_config: {
+        strategy: 'single',
+        permission_mode: 'approve',
+      },
+    },
+  );
+  const apiKey = await createApiKey(app, getDataSourceToken, runtimeHost.id, {
     workspaceId: ws.id,
-    label: 'proxy',
+    label: 'runtime-host',
   });
 
   // ─── Subscribe to SSE via fetch stream, AS THE AGENT ───────
@@ -120,7 +129,7 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
     setTimeout(() => reject(new Error('Timed out waiting for agent_trigger SSE event (5s)')), 5000).unref();
   });
 
-  // Give the SSE connection a moment to register in agentSseSessions before emitting.
+  // Give the Runtime Host SSE connection a moment to register before emitting.
   await new Promise((r) => setTimeout(r, 300));
 
   // ─── Emit the synthetic trigger ────────────────────────────
@@ -146,14 +155,14 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
   }
 
   // ─── Assertions ─────────────────────────────────────────
-  // Fields proxy.mjs reads at the TOP LEVEL of the data JSON per P-01.
+  // Fields Runtime Host reads at the TOP LEVEL of the data JSON.
 
   // Legacy fields (must survive the envelope refactor)
   assert.equal(data.event_type, 'agent_trigger', 'event_type should be agent_trigger');
   assert.equal(data.ticket_id, 'test-ticket-1', 'ticket_id at top level');
-  assert.equal(data.action, 'assignee', 'action (= role) at top level per proxy.mjs handleTrigger');
-  assert.equal(data.field_changed, 'test-trigger-1', 'field_changed (= trigger_id) at top level per proxy.mjs handleTrigger');
-  assert.equal(data.actor_name, agent.id, 'actor_name (= agent_id) at top level per proxy.mjs handleTrigger');
+  assert.equal(data.action, 'assignee', 'action (= role) at top level');
+  assert.equal(data.field_changed, 'test-trigger-1', 'field_changed (= trigger_id) at top level');
+  assert.equal(data.actor_name, agent.id, 'actor_name (= agent_id) at top level');
   assert.equal(data.board_id, '__trigger__', 'board_id sentinel preserved for backward compat');
 
   // New D-20 fields (the actual contract this test validates)

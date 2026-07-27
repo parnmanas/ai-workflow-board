@@ -43,8 +43,8 @@ export type AgentLifecycleState =
  *   - ok               — a live manager supervises the agent and a working dir
  *                        is set; spawn_agent can be issued.
  *   - already_live     — the agent is already reachable; nothing to start.
- *   - no_manager_linked— the agent has no `manager_agent_id`; nothing can spawn
- *                        it automatically (standalone / bare-proxy agent).
+ *   - runtime_host_required — the executable Agent has no Runtime Host link;
+ *                             execution is refused.
  *   - manager_offline  — a manager is linked but no live manager instance is
  *                        heartbeating, so the spawn command would no-op.
  *   - no_working_dir   — a live manager exists but the agent has no working_dir;
@@ -53,7 +53,7 @@ export type AgentLifecycleState =
 export type AutostartFeasibility =
   | 'ok'
   | 'already_live'
-  | 'no_manager_linked'
+  | 'runtime_host_required'
   | 'manager_offline'
   | 'no_working_dir';
 
@@ -120,8 +120,8 @@ export function autostartFeasibilityLabel(reason: string): string {
   switch (reason) {
     case 'ok': return '자동 시작을 시도합니다';
     case 'already_live': return '이미 온라인입니다';
-    case 'no_manager_linked': return 'Agent Manager 가 연결되어 있지 않아 자동 시작할 수 없습니다 (수동 Start 필요)';
-    case 'manager_offline': return 'Agent Manager 가 오프라인이라 자동 시작할 수 없습니다 (매니저 기동 후 Start 필요)';
+    case 'runtime_host_required': return 'Runtime Host가 연결되어 있지 않아 실행할 수 없습니다';
+    case 'manager_offline': return 'Runtime Host가 오프라인이라 자동 시작할 수 없습니다 (Host 기동 후 Start 필요)';
     case 'no_working_dir': return 'working_dir 가 설정되지 않아 자동 시작할 수 없습니다 (관리자 설정 필요)';
     // Manager-side runtime spawn failure (post-dispatch) — the ack detail is
     // already human-readable; pass it through so the specific cause is shown.

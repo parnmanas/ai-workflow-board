@@ -35,7 +35,7 @@ export interface McpAgentContext {
   // X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers. Lets server-side
   // tools (add_comment, etc.) attribute work to the role the subagent is
   // acting as without making every tool call carry the role explicitly.
-  // Empty when the caller is a top-level agent (proxy.mjs) or a chat session.
+  // Empty when the caller is a top-level Runtime Host session or a chat session.
   subagentRole?: string;
   subagentTicketId?: string;
   // Trigger source the subagent was spawned for, pinned by the agent-manager

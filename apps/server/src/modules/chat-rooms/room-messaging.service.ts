@@ -1120,9 +1120,9 @@ export class RoomMessagingService {
    * there (it finds the agent reachable and does nothing).
    */
   private _flagUnreachableAgent(agent: Agent, roomId: string, workspaceId: string): void {
-    // Reachable via a live SSE session (proxy or supervising manager) OR a
-    // recent heartbeat → the chat_request will be delivered; do nothing.
-    if (agent.is_online || this.connectivity.isReachable(agent.id)) return;
+    // Reachable only through a live Runtime Host delivery session. A persisted
+    // heartbeat bit alone does not authorize execution.
+    if (this.connectivity.isReachable(agent.id)) return;
     const evt: AutostartRequestEvent = {
       agent_id: agent.id,
       agent_name: agent.name,

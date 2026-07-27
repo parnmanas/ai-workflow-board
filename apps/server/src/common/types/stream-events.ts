@@ -16,7 +16,7 @@ export type StreamEventType =
   | 'agent_trigger'
   | 'chat_message'
   | 'agent_status'
-  | 'chat_request'         // Phase 4 D-71/D-72 — proxy.mjs consumes this to spawn chat subagents
+  | 'chat_request'         // Phase 4 D-71/D-72 — Runtime Host consumes this for chat work
   | 'chat_room_message'    // Phase 7: new message in a chat room
   | 'chat_room_update'     // Phase 7: room renamed / participant added / user left
   | 'chat_room_typing'     // Phase 7+: agent typing indicator in a chat room
@@ -28,7 +28,7 @@ export type StreamEventType =
   | 'subagent_registered'  // Subagent monitor: agent-manager spawned a subagent
   | 'subagent_log'         // Subagent monitor: stream-json line in/out
   | 'subagent_ended'       // Subagent monitor: subagent process exited
-  | 'agent_instance_update' // Agent Manager: daemon/proxy instance heartbeat / removal
+  | 'agent_instance_update' // Runtime Host instance heartbeat / removal
   | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
   | 'consensus_update';     // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
 
@@ -40,7 +40,7 @@ export interface StreamEventScope {
   ticket_id?: string; // Phase 2 D-26 — chat thread scoping (global vs ticket-scoped)
   room_id?: string;         // Phase 7: chat room targeting
   member_ids?: Set<string>; // Phase 7: pre-resolved participant user IDs for sync filter
-  agent_member_ids?: Set<string>; // Phase 7: pre-resolved agent participant IDs for proxy delivery
+  agent_member_ids?: Set<string>; // Phase 7: pre-resolved Agent participant IDs for Host delivery
 }
 
 export interface StreamEvent<P = unknown> {
@@ -207,9 +207,8 @@ export interface AgentStatusPayload {
 }
 
 // Phase 4 D-71/D-72/D-73 — emitted by ChatService.sendUserMessage on activityEvents 'chat_request'.
-// Proxy.mjs consumes this envelope-native (NOT flattened) to spawn a dedicated chat subagent per
-// conversation (CHAT-09 completion via Phase 4 delegation path). Per-agent delivery only:
-// only the target agent's connected proxy sees the event.
+// Runtime Hosts consume this envelope-native (NOT flattened) for a dedicated
+// chat worker per conversation. Delivery is scoped to the target Agent.
 export interface ChatRequestHistoryEntry {
   message_id: string;
   sender_type: 'user' | 'agent';
@@ -544,15 +543,15 @@ export interface SubagentEndedPayload {
 // Phase 3 — Agent Manager dashboard. Emitted by InstanceRegistryService on
 // every heartbeat upsert and on TTL eviction, so the admin UI can render
 // live instance state without polling. The full record is shipped on each
-// event because the dashboard list is small (one row per running daemon /
-// proxy on each host) and the diff would be more code than the payload.
+// event because the dashboard list is small (one row per Runtime Host) and the
+// diff would be more code than the payload.
 export interface AgentInstanceUpdatePayload {
   action: 'registered' | 'updated' | 'removed';
   instance: {
     instance_id: string;
     agent_id: string;
     workspace_id: string | null;
-    mode: 'daemon' | 'proxy' | 'manager';
+    mode: 'manager';
     hostname: string;
     plugin_version: string;
     cli: string;

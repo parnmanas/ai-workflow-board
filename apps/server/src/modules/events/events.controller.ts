@@ -1,14 +1,13 @@
 import { ApiTags } from '@nestjs/swagger';
-import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, Post, Delete, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
-import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource, In } from 'typeorm';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
-import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
@@ -65,15 +64,8 @@ export function redactRunProvisionCredential(
 }
 
 interface SseSessionDetail {
-  // Discriminator for unified SESSIONS panel rendering. 'proxy' rows are real
-  // SSE buckets owned by a proxy.mjs process; 'manager' rows are synthesized
-  // from InstanceRegistry at read time so the UI can show managed agents
-  // (which never open their own SSE — the manager mediates) under the same
-  // panel without losing routing semantics. Only 'proxy' rows participate
-  // in main-pin selection (AGENT_ROUTED_EVENTS resolution).
-  source: 'proxy' | 'manager';
-  session_id: string;       // server-generated UUID for this SSE connection
-                            // (proxy); for 'manager' rows, `mgr:<instance_id>`
+  source: 'manager';
+  session_id: string;
   connected_at: string;     // ISO timestamp
   ip: string;               // X-Plugin-Ip header from plugin (preferred);
                             // falls back to x-real-ip / x-forwarded-for /
@@ -83,7 +75,6 @@ interface SseSessionDetail {
   user_agent: string;       // request user-agent header
   board_id: string | null;  // boardId scope from query string (proxies pass 'all')
 
-  // ── Manager-source only (undefined for proxy rows) ───────────────────
   instance_id?: string;        // InstanceRecord.instance_id of the manager
   manager_agent_id?: string;   // Agent.id of the supervising manager
   manager_name?: string;       // Display name of the manager (for row label)
@@ -101,53 +92,15 @@ interface SseSessionDetail {
 export class EventsController implements OnModuleDestroy {
   private readonly eventSubject = new Subject<StreamEvent>();
   private clientCount = 0;
-  // Tracks live SSE connections per agent_id with full per-connection
-  // detail (connect timestamp, peer IP, user-agent, board scope). The
-  // Agent Details modal renders the list so the user can see whether
-  // multiple proxies are actually concurrent — including the case where
-  // a SINGLE Claude Code session opens more than one SSE stream (each
-  // claude CLI MCP-client lifecycle phase can create its own connection),
-  // which a bare count would obscure.
-  private readonly agentSseSessions = new Map<string, Map<string, SseSessionDetail>>();
-  /**
-   * agent_id → session_id of the user-pinned "main" SSE session for that
-   * agent. Populated only when 2+ proxies are concurrently connected for the
-   * same agent and the user explicitly picks one via the Agent Details panel
-   * (POST /events/active-agent-sessions/:agentId/main).
-   *
-   * When this map has no entry for an agent, agent-targeted events default
-   * to the oldest-connected session (auto-main) so the duplicate-subagent
-   * race is avoided even before the user picks. Cleared on disconnect of
-   * the pinned session (cleanup() below) and on explicit DELETE.
-   */
-  private readonly agentMainSession = new Map<string, string>();
+  // Runtime Host API-key SSE connections keyed by the Host Agent identity.
+  // Executable Agent identities are never added to this map.
+  private readonly runtimeHostSseSessions = new Map<string, Set<string>>();
   private readonly listeners: RegisteredListener[] = [];
-
-  /**
-   * Event types whose delivery to an agent's SSE stream causes the proxy to
-   * spawn a subagent or otherwise act on a single-recipient request. With
-   * multiple concurrent proxy sessions for the same agent, delivering these
-   * to every session would fan out into duplicate subagents racing each
-   * other. We pin them to the agent's "main" session (user-picked, or
-   * oldest-connected as auto-fallback). Broadcast/observability events
-   * (board_update, agent_status, subagent_*, ticket_presence, comment_typing)
-   * still flow to every session unchanged.
-   */
-  private static readonly AGENT_ROUTED_EVENTS = new Set<string>([
-    'agent_trigger',
-    'comment_mention',
-    'chat_request',
-    'chat_room_message',
-    'chat_room_typing',
-    'fs_request',
-    'agent_typing',
-  ]);
 
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
-    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
@@ -159,13 +112,10 @@ export class EventsController implements OnModuleDestroy {
     metrics: MemoryMetricsRegistry,
   ) {
     // Memory observability gauges for the SSE maps. `sse.connections` is the
-    // raw live-stream count; `sse.agents` is distinct agents holding at least
-    // one stream (a single agent can hold several — see agentSseSessions);
-    // `sse.mainPins` tracks the pinned-session map, which is the most
-    // leak-prone of the three (entries must be cleared on disconnect/DELETE).
+    // raw live-stream count; `sse.runtimeHosts` is distinct Runtime Host
+    // identities holding at least one stream.
     metrics.register('sse.connections', () => this.clientCount);
-    metrics.register('sse.agents', () => this.agentSseSessions.size);
-    metrics.register('sse.mainPins', () => this.agentMainSession.size);
+    metrics.register('sse.runtimeHosts', () => this.runtimeHostSseSessions.size);
 
     // Table-driven listener registration: EVENT_TYPES drives everything.
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
@@ -205,7 +155,7 @@ export class EventsController implements OnModuleDestroy {
             typeof mapped.scope.agent_id === 'string' &&
             mapped.scope.agent_id
           ) {
-            const subscribers = this.agentSseSessions.get(mapped.scope.agent_id);
+            const subscribers = this.runtimeHostSseSessions.get(mapped.scope.agent_id);
             const subscriberCount = subscribers?.size ?? 0;
             if (subscriberCount === 0) {
               const cmd = (mapped.payload as any)?.command || 'unknown';
@@ -321,6 +271,14 @@ export class EventsController implements OnModuleDestroy {
     if (!authIdentity) {
       throw new UnauthorizedException('Invalid or expired session/API key');
     }
+    if (authIdentity.type === 'agent') {
+      const runtimeHost = authIdentity.agentId
+        ? await this.agentRepo.findOne({ where: { id: authIdentity.agentId } })
+        : null;
+      if (!runtimeHost || runtimeHost.type !== 'manager') {
+        throw new UnauthorizedException('Runtime Host credentials are required');
+      }
+    }
 
     this.clientCount++;
     const sseSessionId = randomUUID();
@@ -357,43 +315,30 @@ export class EventsController implements OnModuleDestroy {
       sseSessionId,
       managedAgentIds,
     };
-    let proxyCountNow = 0;
+    let runtimeHostStreamCount = 0;
     if (identity.agentId) {
-      const detail: SseSessionDetail = {
-        source: 'proxy',
-        session_id: sseSessionId,
-        connected_at: new Date().toISOString(),
-        ip: this._extractIp(req),
-        plugin_version: this._extractPluginVersion(req),
-        user_agent: String(req.headers['user-agent'] || '').slice(0, 200),
-        board_id: identity.boardId || null,
-      };
-      let bucket = this.agentSseSessions.get(identity.agentId);
-      if (!bucket) { bucket = new Map(); this.agentSseSessions.set(identity.agentId, bucket); }
-      bucket.set(sseSessionId, detail);
-      proxyCountNow = bucket.size;
-      // ActivityLog entry so this connect lands in the agent's Recent
-      // Activity feed alongside ticket events.
-      this._recordProxyActivity(identity.agentId, identity.name, 'proxy_connected', detail);
-      // Live reachability (ticket bfdd80b7): this session can deliver events
-      // scoped to its own agent id AND (for a manager identity) to every agent
-      // it supervises — the exact keys the fan-out below routes to.
+      let sessions = this.runtimeHostSseSessions.get(identity.agentId);
+      if (!sessions) {
+        sessions = new Set();
+        this.runtimeHostSseSessions.set(identity.agentId, sessions);
+      }
+      sessions.add(sseSessionId);
+      runtimeHostStreamCount = sessions.size;
       this.connectivity.noteConnected(sseSessionId, identity.agentId, identity.managedAgentIds);
     }
     this.logService.info(
       'SSE',
       `Client connected (${identity.type}: ${identity.name}, board: ${
         identity.boardId || 'all'
-      }, total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${proxyCountNow}` : ''})`,
+      }, total: ${this.clientCount}${identity.agentId ? `, runtime_host_streams=${runtimeHostStreamCount}` : ''})`,
     );
 
     // Idempotent cleanup invoked from EITHER req.on('close') (fires the
     // moment the TCP socket drops, even when a reverse proxy is in the
     // middle) OR the rxjs `finalize` (fallback for cases where the close
     // event doesn't propagate). Without the close hook, a flaky network
-    // / server restart leaves stale entries in agentSseSessions until
-    // the upstream-pool idle timeout, which is exactly the failure mode
-    // the user hit (one live proxy, modal shows two).
+    // / server restart leaves stale Runtime Host session entries until the
+    // upstream-pool idle timeout.
     let cleanedUp = false;
     const cleanup = (source: 'finalize' | 'req-close' | 'req-error' | 'socket-error' | 'socket-close') => {
       if (cleanedUp) return;
@@ -401,32 +346,21 @@ export class EventsController implements OnModuleDestroy {
       this.clientCount--;
       // Drop this session's reachability contribution (ticket bfdd80b7).
       this.connectivity.noteDisconnected(sseSessionId);
-      let endedDetail: SseSessionDetail | undefined;
       let bucketSize = 0;
       if (identity.agentId) {
-        const bucket = this.agentSseSessions.get(identity.agentId);
-        if (bucket) {
-          endedDetail = bucket.get(sseSessionId);
-          bucket.delete(sseSessionId);
-          bucketSize = bucket.size;
-          if (bucketSize === 0) this.agentSseSessions.delete(identity.agentId);
-        }
-        // Clear pinned main if this disconnecting session was it. Without
-        // this, agentMainSession would point at a dead session_id and the
-        // routing fallback ("oldest connected") would never re-engage.
-        if (this.agentMainSession.get(identity.agentId) === sseSessionId) {
-          this.agentMainSession.delete(identity.agentId);
-        }
-        if (endedDetail) {
-          this._recordProxyActivity(identity.agentId, identity.name, 'proxy_disconnected', endedDetail);
+        const sessions = this.runtimeHostSseSessions.get(identity.agentId);
+        if (sessions) {
+          sessions.delete(sseSessionId);
+          bucketSize = sessions.size;
+          if (bucketSize === 0) this.runtimeHostSseSessions.delete(identity.agentId);
         }
       }
-      this.logService.info('SSE', `Client disconnected via ${source} (total: ${this.clientCount}${identity.agentId ? `, agent_proxies=${bucketSize}` : ''})`);
+      this.logService.info('SSE', `Client disconnected via ${source} (total: ${this.clientCount}${identity.agentId ? `, runtime_host_streams=${bucketSize}` : ''})`);
     };
     // Multiple disconnect signals — whichever fires first wins, the rest
     // are no-ops. Express + NestJS @Sse don't surface SSE write failures
     // through any single hook; chasing each underlying signal cuts the
-    // window where a stale entry can sit in agentSseSessions:
+    // window where a stale Runtime Host stream can remain registered:
     //   - req.on('close')   socket-level close, fires fastest in the
     //                       common case (client disconnected, no proxy
     //                       buffer)
@@ -478,13 +412,7 @@ export class EventsController implements OnModuleDestroy {
           // the event is targeted at one of its managed agents, run the
           // per-event filter as if WE are that managed agent. This lets
           // existing agent-targeted filters (`env.scope.agent_id ===
-          // identity.agentId`) match without a per-filter rewrite. Pinning
-          // logic below uses the effective agent_id too — for managed
-          // agents the manager is normally the only stream so pinning is
-          // a no-op (no entry in agentSseSessions for the managed id);
-          // when a legacy proxy is also connected for the same managed
-          // agent, the pinning naturally picks that proxy and skips the
-          // manager, which is the correct precedence.
+          // identity.agentId`) match without a per-filter rewrite.
           //
           // Two shapes of "targeted at a managed agent":
           //   1. Single-recipient events (agent_trigger, comment_mention,
@@ -500,7 +428,6 @@ export class EventsController implements OnModuleDestroy {
           //      agent_member_ids array — for multi-managed-agent rooms it
           //      can spawn one chat session per matching agent.
           let effectiveIdentity = identity;
-          let effectiveAgentId = identity.agentId;
           if (
             identity.type === 'agent' &&
             identity.managedAgentIds
@@ -509,12 +436,10 @@ export class EventsController implements OnModuleDestroy {
               typeof event.scope.agent_id === 'string' &&
               identity.managedAgentIds.has(event.scope.agent_id)
             ) {
-              effectiveAgentId = event.scope.agent_id;
               effectiveIdentity = { ...identity, agentId: event.scope.agent_id };
             } else if (event.scope.agent_member_ids instanceof Set) {
               for (const memberId of event.scope.agent_member_ids) {
                 if (identity.managedAgentIds.has(memberId)) {
-                  effectiveAgentId = memberId;
                   effectiveIdentity = { ...identity, agentId: memberId };
                   break;
                 }
@@ -523,26 +448,12 @@ export class EventsController implements OnModuleDestroy {
           }
 
           if (def.filter && !def.filter(event, effectiveIdentity)) return false;
-          // Per-agent routing: when this agent has 2+ concurrent proxy
-          // sessions, agent-recipient events (triggers, mentions, chat,
-          // fs_request, agent_typing) flow only to the pinned "main"
-          // session — or to the oldest-connected session as auto-fallback
-          // when the user hasn't pinned one. Single-session and user
-          // identities are unaffected.
-          if (
-            identity.type === 'agent' &&
-            effectiveAgentId &&
-            EventsController.AGENT_ROUTED_EVENTS.has(event.event_type)
-          ) {
-            const target = this._resolveRoutingTargetSession(effectiveAgentId);
-            if (target && target !== sseSessionId) return false;
-          }
           return true;
         }),
         map((event: StreamEvent) => {
           const def = registry.get(event.event_type);
-          // Legacy types flatten payload fields up for proxy.mjs; newer types ship the
-          // envelope natively (no flatten fn → envelope as-is).
+          // Runtime Host-consumed types flatten payload fields; newer UI-only
+          // types ship the envelope natively.
           const rawDataObj = def?.flatten ? def.flatten(event) : event;
           // Credential firewall: never ship run_provision.repo.credential to a
           // non-agent (human) SSE recipient — the git token is for an agent
@@ -558,44 +469,17 @@ export class EventsController implements OnModuleDestroy {
     );
   }
 
-  /**
-   * Snapshot of live SSE connections per agent_id with full per-session
-   * detail. The dashboard's Agent Details modal renders the list so the
-   * user can spot multi-proxy situations directly: connect timestamp +
-   * peer IP + user-agent let them tell apart "two terminals on this host"
-   * vs "Claude CLI internally opens two streams for one session" vs
-   * "remote workstation also connected".
-   */
+  /** Runtime Host sessions synthesized per supervised executable Agent. */
   @Get('active-agent-sessions')
   @UseGuards(AuthGuard)
-  async getActiveAgentSessions(): Promise<Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]>> {
-    const out: Record<string, (SseSessionDetail & { is_main: boolean; main_pinned: boolean })[]> = {};
-    for (const [agentId, bucket] of this.agentSseSessions) {
-      const target = this._resolveRoutingTargetSession(agentId);
-      const pinned = this.agentMainSession.get(agentId);
-      out[agentId] = Array.from(bucket.values())
-        .map((s) => ({
-          ...s,
-          // is_main = the session that currently receives agent-routed
-          // events (either user-pinned or auto-elected oldest).
-          is_main: s.session_id === target,
-          // main_pinned = user explicitly picked it (vs. auto-fallback).
-          // The UI uses this to distinguish "MAIN" (pinned) from "MAIN (auto)".
-          main_pinned: !!pinned && s.session_id === pinned,
-        }))
-        .sort((a, b) => a.connected_at.localeCompare(b.connected_at));
-    }
+  async getActiveAgentSessions(): Promise<Record<string, SseSessionDetail[]>> {
+    const out: Record<string, SseSessionDetail[]> = {};
 
-    // Synthesize manager-source rows from InstanceRegistry. A managed agent
-    // never opens its own SSE — the manager mediates everything via its own
-    // proxy/SSE connection plus per-call MCP HTTP — so without this merge
-    // the SESSIONS panel would always be empty for managed agents even
-    // while the manager is actively heartbeating. Each manager InstanceRecord
-    // contributes one row per agent_id it supervises into that agent's
-    // bucket. is_main / main_pinned are forced to false because manager
-    // rows don't participate in AGENT_ROUTED_EVENTS routing (proxy rows do).
+    // Each Runtime Host record contributes one diagnostic row per executable
+    // Agent it supervises. These rows are observability only; routing ownership
+    // is the Agent.manager_agent_id link.
     const managers = this.instanceRegistry.list().filter(
-      (r) => r.mode === 'manager' && Array.isArray(r.agent_ids) && r.agent_ids.length > 0,
+      (r) => Array.isArray(r.agent_ids) && r.agent_ids.length > 0,
     );
     if (managers.length > 0) {
       // Batch-resolve names + per-agent working_dir so the row can show
@@ -627,7 +511,7 @@ export class EventsController implements OnModuleDestroy {
       for (const m of managers) {
         for (const managedId of m.agent_ids ?? []) {
           if (!out[managedId]) out[managedId] = [];
-          const row: SseSessionDetail & { is_main: boolean; main_pinned: boolean } = {
+          const row: SseSessionDetail = {
             source: 'manager',
             // Stable, collision-proof key for React + de-dupe.
             session_id: `mgr:${m.instance_id}`,
@@ -646,154 +530,15 @@ export class EventsController implements OnModuleDestroy {
             started_at: m.started_at,
             paired_at: m.paired_at,
             working_dir: cwdById.get(managedId),
-            is_main: false,
-            main_pinned: false,
           };
           out[managedId].push(row);
         }
       }
-      // Re-sort each touched bucket so manager rows interleave with proxy
-      // rows by connect-time rather than appearing as a trailing block.
       for (const agentId of Object.keys(out)) {
         out[agentId].sort((a, b) => a.connected_at.localeCompare(b.connected_at));
       }
     }
 
     return out;
-  }
-
-  /**
-   * Pin a specific SSE session as the routing target for an agent. Used by
-   * the Agent Details panel when the user has 2+ proxies connected and wants
-   * to direct ticket triggers + chat events to a specific terminal.
-   *
-   * The pinned session must currently be in `agentSseSessions` for this
-   * agent — we don't accept pre-pinning a session that hasn't connected yet
-   * because the session_id is server-generated per-connection and clients
-   * never see one until the SSE stream is open.
-   */
-  @Post('active-agent-sessions/:agentId/main')
-  @UseGuards(AuthGuard)
-  setAgentMainSession(
-    @Param('agentId') agentId: string,
-    @Body() body: { session_id?: string },
-  ) {
-    const sessionId = (body?.session_id || '').trim();
-    if (!sessionId) {
-      return { ok: false, error: 'session_id required' };
-    }
-    const bucket = this.agentSseSessions.get(agentId);
-    if (!bucket || !bucket.has(sessionId)) {
-      return { ok: false, error: 'session not connected for this agent' };
-    }
-    this.agentMainSession.set(agentId, sessionId);
-    this.logService.info(
-      'SSE',
-      `Agent main session pinned (agent=${agentId}, session=${sessionId})`,
-    );
-    return { ok: true, agent_id: agentId, session_id: sessionId };
-  }
-
-  /**
-   * Clear the user-pinned main for an agent. Routing falls back to the
-   * oldest-connected session (auto-main) until the user pins another.
-   */
-  @Delete('active-agent-sessions/:agentId/main')
-  @UseGuards(AuthGuard)
-  clearAgentMainSession(@Param('agentId') agentId: string) {
-    this.agentMainSession.delete(agentId);
-    this.logService.info('SSE', `Agent main session cleared (agent=${agentId})`);
-    return { ok: true, agent_id: agentId };
-  }
-
-  /**
-   * Decide which of an agent's SSE sessions should receive agent-recipient
-   * events (triggers, mentions, chat). Returns null when the agent has no
-   * live sessions — caller skips delivery in that case (the event was a
-   * miss anyway).
-   *
-   * Resolution order:
-   *   1. User-pinned main, if still connected.
-   *   2. Sole live session, when there's only one.
-   *   3. Oldest-connected session (auto-main) — picked deterministically so
-   *      a server restart while two proxies are connected doesn't bounce
-   *      routing between them.
-   *
-   * The single-session case is intentionally a separate branch from the
-   * multi-session fallback so a cold connection (no pinned main yet) still
-   * delivers events from the moment the first SSE stream opens.
-   */
-  private _resolveRoutingTargetSession(agentId: string): string | null {
-    const bucket = this.agentSseSessions.get(agentId);
-    if (!bucket || bucket.size === 0) return null;
-    const pinned = this.agentMainSession.get(agentId);
-    if (pinned && bucket.has(pinned)) return pinned;
-    if (bucket.size === 1) {
-      const [only] = bucket.keys();
-      return only;
-    }
-    let oldestId: string | null = null;
-    let oldestAt = Infinity;
-    for (const [sid, det] of bucket) {
-      const ts = new Date(det.connected_at).getTime();
-      if (Number.isFinite(ts) && ts < oldestAt) {
-        oldestAt = ts;
-        oldestId = sid;
-      }
-    }
-    return oldestId;
-  }
-
-  private _extractIp(req: Request): string {
-    // Plugin-supplied IP wins — the plugin knows what NIC it actually
-    // bound to, which the upstream reverse proxy can mangle. Older
-    // plugins (pre-v0.35.5) don't ship this header; fall back to the
-    // standard reverse-proxy chain inference, then req.ip, then mark
-    // 'unknown' so the dashboard doesn't render an empty cell.
-    const plugin = req.headers['x-plugin-ip'];
-    if (typeof plugin === 'string' && plugin.trim()) return plugin.trim();
-    const xri = req.headers['x-real-ip'];
-    if (typeof xri === 'string' && xri) return xri;
-    const xff = req.headers['x-forwarded-for'];
-    if (typeof xff === 'string' && xff) return xff.split(',')[0].trim();
-    return req.ip || 'unknown';
-  }
-
-  private _extractPluginVersion(req: Request): string {
-    const v = req.headers['x-plugin-version'];
-    if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 32);
-    return 'unknown';
-  }
-
-  /**
-   * Stash the proxy connect/disconnect event on the agent's ActivityLog
-   * timeline. actor_id = agent_id so it surfaces in `getAgentActivity` and
-   * the existing dashboard "Recent Activity" feed without any wiring on
-   * the consumer side. Best-effort: a write failure shouldn't break the
-   * SSE pipeline, so errors are swallowed with a log warning.
-   */
-  private _recordProxyActivity(
-    agentId: string,
-    agentName: string,
-    action: 'proxy_connected' | 'proxy_disconnected',
-    detail: SseSessionDetail,
-  ): void {
-    const repo = this.dataSource.getRepository(ActivityLog);
-    repo
-      .save(
-        repo.create({
-          entity_type: 'agent',
-          entity_id: agentId,
-          actor_id: agentId,
-          actor_name: agentName,
-          action,
-          field_changed: 'proxy_session',
-          old_value: '',
-          new_value: JSON.stringify(detail),
-        }),
-      )
-      .catch((e: unknown) => {
-        this.logService.warn('SSE', 'proxy activity log save failed', { err: e });
-      });
   }
 }

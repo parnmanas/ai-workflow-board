@@ -170,7 +170,7 @@ test('issueSpawnAgent — classifies every failure, only emits when feasible', a
     const { svc } = await buildCommandService(registryOf([]), [a]);
     const cmds = await captureCommands(async () => {
       const r = await svc.issueSpawnAgent('a', 'test');
-      assert.equal(r.ok, false); assert.equal(r.reason, 'no_manager_linked');
+      assert.equal(r.ok, false); assert.equal(r.reason, 'runtime_host_required');
     });
     assert.equal(cmds.length, 0, 'no spawn command emitted when no manager linked');
   }
@@ -256,7 +256,7 @@ test('maybeHandleUnreachableTicket — no manager: failure reason surfaced', asy
   const svc = await buildAutostart({ agentRows: [agent], instances: [], agentStatus, activity, roomMessaging: roomMessagingFake() });
   const handled = await svc.maybeHandleUnreachableTicket({ ticket: { id: 't1', workspace_id: 'w' }, agentId: 'agent-1', role: 'assignee', triggerSource: 'column_move', triggeredBy: 'user' });
   assert.equal(handled, true);
-  assert.equal(agentStatus.getStartError('agent-1'), 'no_manager_linked', 'error marker set with the specific reason');
+  assert.equal(agentStatus.getStartError('agent-1'), 'runtime_host_required', 'error marker set with the specific reason');
   assert.equal(activity.logged.length, 1);
   assert.match(activity.logged[0].new_value, /자동 시작할 수 없습니다/, 'message states auto-start could NOT run');
   assert.match(activity.logged[0].new_value, /연결되어 있지 않아|수동 Start/, 'message names the no-manager reason');
@@ -330,28 +330,22 @@ async function buildAgentStatus({ instances = [], reachable = [] } = {}) {
 }
 
 // ── #2 reachability — the SINGLE isReachable definition ─────────────────────
-test('isReachable — connectivity ‖ live-instance ‖ is_online fallback (ticket 1f750878 #2)', async () => {
-  // SSE-only reachable (is_online=0, no instance) — the exact case _emit used to
-  // mis-badge offline while the dispatch gate correctly considered it reachable.
+test('isReachable — Runtime Host connectivity or supervision only', async () => {
+  // Runtime Host delivery connectivity makes its managed identity reachable.
   const viaSse = await buildAgentStatus({ reachable: ['a'] });
-  assert.equal(viaSse.isReachable('a', false), true, 'live SSE session → reachable despite is_online=0');
-  assert.equal(viaSse.isReachable('other', false), false, 'no signal + no fallback → not reachable');
+  assert.equal(viaSse.isReachable('a', false), true, 'live Runtime Host delivery → reachable');
+  assert.equal(viaSse.isReachable('other', false), false, 'no Runtime Host signal → not reachable');
 
-  // A proxy/daemon instance whose primary agent_id IS the agent carries it.
-  const viaProxy = await buildAgentStatus({ instances: [{ instance_id: 'i', agent_id: 'd', mode: 'proxy', started_at: 't' }] });
-  assert.equal(viaProxy.isReachable('d', false), true, "own proxy/daemon instance → reachable");
-
-  // A manager instance listing the agent in agent_ids[] carries it; the manager's
-  // OWN id is not thereby a reachable managed agent.
+  // A Runtime Host instance listing the agent in agent_ids[] carries it.
   const viaMgr = await buildAgentStatus({ instances: [{ instance_id: 'i', agent_id: 'mgr', mode: 'manager', agent_ids: ['b'], started_at: 't' }] });
-  assert.equal(viaMgr.isReachable('b', false), true, 'manager agent_ids[] carries it → reachable');
-  assert.equal(viaMgr.isReachable('mgr', false), false, 'a manager instance does not make its own id a reachable managed agent');
+  assert.equal(viaMgr.isReachable('b', false), true, 'Runtime Host agent_ids[] carries it → reachable');
+  assert.equal(viaMgr.isReachable('mgr', false), true, 'the Runtime Host identity owns the live instance');
 
-  // is_online fallback alone.
+  // A stale/direct DB online bit is never an execution route.
   const plain = await buildAgentStatus();
-  assert.equal(plain.isReachable('c', true), true, 'is_online fallback → reachable');
+  assert.equal(plain.isReachable('c', true), false, 'is_online alone → unreachable');
   assert.equal(plain.isReachable('c', false), false, 'nothing → not reachable');
-  assert.equal(plain.isReachable('', true), true, 'empty id degrades to the fallback');
+  assert.equal(plain.isReachable('', true), false, 'empty id is never reachable');
 });
 
 // ── #1 error surfacing — markStartError → error state + concrete detail ─────

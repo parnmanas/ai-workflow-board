@@ -123,7 +123,7 @@ export class AgentManagerCommandService {
    * if a live manager instance exists and the agent has a working_dir, issue
    * spawn_agent. Every failure is CLASSIFIED (never thrown) so the caller can
    * surface an accurate reason:
-   *   - no_manager_linked — agent has no manager_agent_id (standalone agent)
+   *   - runtime_host_required — agent has no manager_agent_id
    *   - manager_offline   — a manager is linked but none is heartbeating
    *   - no_working_dir    — a live manager exists but the agent has no working dir
    */
@@ -131,7 +131,7 @@ export class AgentManagerCommandService {
     if (!targetAgentId) return { ok: false, reason: 'agent_not_found' };
     const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
     if (!target) return { ok: false, reason: 'agent_not_found' };
-    if (!target.manager_agent_id) return { ok: false, reason: 'no_manager_linked' };
+    if (!target.manager_agent_id) return { ok: false, reason: 'runtime_host_required' };
     const inst = this.resolveLiveManagerInstance(target.manager_agent_id);
     if (!inst) return { ok: false, reason: 'manager_offline' };
     if (!target.working_dir || !target.working_dir.trim()) {

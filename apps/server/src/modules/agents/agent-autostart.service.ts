@@ -168,14 +168,24 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
   async classify(agentId: string): Promise<ReachabilityClassification> {
     const agent = agentId ? await this.agentRepo.findOne({ where: { id: agentId } }) : null;
     if (!agent) {
-      return { agent: null, reachable: false, state: 'offline', autostart: 'no_manager_linked' };
+      return { agent: null, reachable: false, state: 'offline', autostart: 'runtime_host_required' };
     }
-    // Reachability = the SINGLE shared definition (ticket 1f750878): a live SSE
-    // session (the TRUE signal — covers proxy/SSE + manager-supervised agents
-    // that never ping) OR a live instance OR the DB is_online fallback. is_online
-    // alone is NOT relied upon. This was the canonical of the three previously-
-    // divergent inlinings; it now lives in AgentStatusService.isReachable and the
-    // REST/SSE badges call the same helper.
+    if (!agent.manager_agent_id) {
+      const state = deriveAgentLifecycleState({
+        isOnline: false,
+        connectedAt: agent.connected_at ?? null,
+        isStarting: false,
+        hasRecentStartError: this.agentStatus.getStartError(agent.id) !== undefined,
+      });
+      return {
+        agent,
+        reachable: false,
+        state,
+        autostart: 'runtime_host_required',
+      };
+    }
+    // Reachability = a live Runtime Host delivery session or Host instance. A
+    // DB is_online bit alone is never treated as an execution route.
     const reachable = this.agentStatus.isReachable(agent.id, !!agent.is_online);
     const state = deriveAgentLifecycleState({
       isOnline: reachable,
@@ -186,7 +196,6 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
 
     let autostart: AutostartFeasibility;
     if (reachable) autostart = 'already_live';
-    else if (!agent.manager_agent_id) autostart = 'no_manager_linked';
     else if (!this.managerCommand.resolveLiveManagerInstance(agent.manager_agent_id)) autostart = 'manager_offline';
     else if (!agent.working_dir || !agent.working_dir.trim()) autostart = 'no_working_dir';
     else autostart = 'ok';

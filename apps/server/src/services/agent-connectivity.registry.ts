@@ -9,12 +9,8 @@ import { MemoryMetricsRegistry } from './memory-metrics.registry';
  * the never-started/offline feedback gate needs.
  *
  * WHY NOT `Agent.is_online`
- * `is_online` is a lagging DB flag set only by the MCP `ping` tool or the
- * manager heartbeat. An agent connected over SSE that never pings (e.g. the
- * plugin proxy / the test VirtualAgent, and the ≤90s window while a heartbeat
- * is momentarily stale) receives triggers fine yet reads `is_online = 0`.
- * Gating dispatch on `is_online` would wrongly defer those — the exact
- * false-negative that would break live dispatch.
+ * `is_online` is a lagging DB flag. Only a live Runtime Host delivery channel
+ * proves that an executable Agent can receive a dispatch.
  *
  * WHAT IT TRACKS
  * EventsController owns the live SSE fan-out. On every SSE connect it records

@@ -200,12 +200,10 @@ test('checker-error condition alerts on its own (shorter) threshold', async () =
   assert.equal(h.infos.filter((i) => /checker recovered/i.test(i.msg)).length, 1);
 });
 
-test('non-manager instances and update-checker-less managers are ignored', async () => {
+test('update-checker-less Runtime Hosts are ignored', async () => {
   const h = makeHarness();
   h.setInstances([
-    // daemon/proxy — never considered.
-    { instance_id: 'd1', agent_id: 'a-daemon', mode: 'proxy', hostname: 'x', plugin_version: '1', update_available: true },
-    // manager that ships no update telemetry (pre-update build): update_available
+    // Runtime Host that ships no update telemetry (pre-update build): update_available
     // undefined AND no error → skipped entirely.
     { instance_id: 'm0', agent_id: 'a-old', mode: 'manager', hostname: 'y', plugin_version: '0.1.0' },
     // manager exactly up to date — drift false, no alert.
@@ -215,5 +213,5 @@ test('non-manager instances and update-checker-less managers are ignored', async
   const stats = await h.svc.sweep(at(50 * HOUR)); // far past every threshold
   assert.equal(stats.driftAlerts, 0);
   assert.equal(stats.errorAlerts, 0);
-  assert.equal(h.warns.length, 0, 'no alert for non-manager / up-to-date / telemetry-less');
+  assert.equal(h.warns.length, 0, 'no alert for up-to-date / telemetry-less Runtime Hosts');
 });

@@ -79,7 +79,7 @@ const SUPERVISOR_FORCE_RESPAWN_MAX = 5;
 const SUPERVISOR_LIVENESS_FLOOR_MS = resolveSupervisorLivenessFloorMs();
 // Match AgentStatusService.OFFLINE_THRESHOLD_MS. Agents whose last_seen_at is
 // older than this are considered offline and skipped — no point pushing
-// triggers to a proxy that isn't listening.
+// triggers when there is no live Runtime Host delivery route.
 const ONLINE_THRESHOLD_MS = 90_000;
 
 interface SupervisorEntry {
@@ -249,7 +249,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
           actor_id: 'system',
           actor_name: 'TicketSupervisor',
           action: 'supervisor_skip_agent_offline',
-          new_value: `agent=${agentId} role=${role} reason=agent_offline_no_proxy_to_repush`,
+          new_value: `agent=${agentId} role=${role} reason=agent_offline_no_runtime_host_to_repush`,
           role,
           trigger_source: 'supervisor',
         }));
@@ -365,7 +365,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
 
     for (const agent of agents) {
       if (!agent.last_seen_at || agent.last_seen_at < onlineCutoff) {
-        // Offline agent — no live proxy to re-push to (ticket e7c87517). This
+        // Offline Agent — no live Runtime Host to re-push to (ticket e7c87517). This
         // used to be a SILENT early-return: an assignee whose manager went
         // offline had its stale tickets stop being re-pushed with no trail at
         // all ("why did my agent's ticket freeze?"). Emit ONE structured reason

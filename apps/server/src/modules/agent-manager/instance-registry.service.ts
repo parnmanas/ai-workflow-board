@@ -4,15 +4,9 @@ import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
- * In-memory registry of Agent Manager instances currently
- * heartbeating against this server.
- *
- * One Agent row in the DB can be backed by multiple physical manager processes
- * on different hosts that share one agent identity.
- * The Agent.last_seen_at field collapses that fan-out to a single boolean
- * "any process heartbeated recently?". This registry preserves the per-process
- * detail the admin UI needs: which host, which mode, which manager version,
- * which CLI adapters are registered.
+ * In-memory registry of Runtime Host processes currently heartbeating against
+ * this server. Executable Agent identities never register a process directly;
+ * they are represented only through their owning host's `agent_ids`.
  *
  * Storage is intentionally in-process. Instance presence is high-churn and
  * ephemeral — losing it on restart is fine; the next heartbeat (≤30s by
@@ -47,9 +41,7 @@ export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
   workspace_id: string | null;
-  // ST-4: 'manager' is the standalone awb-agent-manager process and supervises
-  // multiple agent identities (claude/codex/antigravity).
-  mode: 'daemon' | 'proxy' | 'manager';
+  mode: 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -58,7 +50,6 @@ export interface InstanceRecord {
   pid: number;
   started_at: string;
   last_seen_at: string;
-  // ST-4 manager-mode fields. Empty for daemon/proxy.
   agent_ids?: string[];        // identities the manager currently supervises
   working_dirs?: string[];     // distinct working-dir roots known to the manager
   paired_at?: string;          // ISO timestamp when the manager redeemed its pairing token
@@ -78,7 +69,7 @@ export interface InstanceRecord {
   // model ids), gathered via each adapter's listModels() at boot. Powers the
   // per-agent model selector in the admin UI. Older managers leave undefined.
   available_models?: Record<string, string[]>;
-  // Self-update fields — manager-mode only. Daemons/proxies leave undefined.
+  // Self-update fields — Runtime Host heartbeat only.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.
   latest_version?: string | null;       // version on origin/<branch> or npm registry

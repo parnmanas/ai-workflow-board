@@ -310,11 +310,10 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   /**
    * The SINGLE reachability definition (ticket 1f750878). An agent is reachable
    * when ANY of: a live SSE session would deliver an X-scoped event (the TRUE
-   * signal — covers proxy/SSE agents and manager-supervised agents that never
-   * MCP-ping), OR a live instance carries it (its own daemon/proxy, or a manager
-   * whose agent_ids[] includes it), OR the caller's is_online fallback (DB flag /
-   * in-memory status) is set. Any one is enough; is_online alone is NOT relied
-   * upon.
+   * signal for a Runtime Host and its managed Agents), OR a live Runtime Host
+   * instance carries it in agent_ids[]. A DB is_online bit alone is deliberately
+   * insufficient because an old direct Agent heartbeat must not restore the
+   * removed managerless execution route.
    *
    * Synchronous + DB-free so it can run on the hot _emit path (which holds only
    * status.is_online, no Agent row). The connectivity lookup short-circuits O(1)
@@ -325,15 +324,14 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * agent (is_online=0) dispatched fine yet was broadcast offline. All three now
    * delegate here.
    */
-  isReachable(agentId: string, isOnlineFallback: boolean): boolean {
-    if (!agentId) return !!isOnlineFallback;
+  isReachable(agentId: string, _isOnlineFallback: boolean): boolean {
+    if (!agentId) return false;
     if (this.connectivity.isReachable(agentId)) return true;
     const hasLiveInstance = this.instanceRegistry.list().some(
-      (i) =>
-        (i.mode !== 'manager' && i.agent_id === agentId) ||
-        (Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId)),
+      (i) => i.agent_id === agentId
+        || (Array.isArray(i.agent_ids) && i.agent_ids.includes(agentId)),
     );
-    return hasLiveInstance || !!isOnlineFallback;
+    return hasLiveInstance;
   }
 
   /**
@@ -373,8 +371,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
 
     // Note: previously a `agent_trigger` listener auto-set current_task on
     // every trigger emit. That made "processing" indistinguishable from
-    // "trigger queued" — agents that never picked the trigger up (proxy
-    // disconnected, subagent silent-exit, spawn failure) appeared busy
+    // "trigger queued" — Agents whose Runtime Host never picked the trigger
+    // up (Host disconnected, worker silent-exit, spawn failure) appeared busy
     // forever. current_task is now strictly plugin-signal driven via
     // setCurrentTask / clearCurrentTask, so the dashboard reflects what's
     // actually executing rather than what was dispatched.
