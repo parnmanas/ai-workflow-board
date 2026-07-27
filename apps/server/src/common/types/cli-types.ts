@@ -12,8 +12,8 @@
  *     (this list minus 'custom', which has no adapter)
  *   - apps/client .../AgentsPage.tsx + admin/ManagedAgentDialog.tsx → CLI pickers
  *
- * `claude | deepseek | codex | antigravity | pi` each ship a real adapter in
- * the agent-manager; `custom` is a valid identity the manager refuses to
+ * `claude | deepseek | codex | antigravity | pi | hermes` are registered
+ * Runtime Host runtimes; `custom` is a valid identity the manager refuses to
  * auto-spawn (the operator supplies the launch script). Legacy `gpt` /
  * `gemini` were retired — do not re-add them. `manager` is a separate
  * pairing-minted identity (not a CLI selector) so it is intentionally absent.
@@ -21,7 +21,15 @@
  * least supports an optional per-agent credential) — see
  * common/effort-presets.ts and cli-adapters/pi.ts for the rest of its shape.
  */
-export const CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'custom'] as const;
+export const CLI_TYPES = [
+  'claude',
+  'deepseek',
+  'codex',
+  'antigravity',
+  'pi',
+  'hermes',
+  'custom',
+] as const;
 
 export type CliType = (typeof CLI_TYPES)[number];
 

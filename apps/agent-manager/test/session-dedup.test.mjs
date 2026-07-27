@@ -590,6 +590,7 @@ test('chat-session: burst of two messages on same (room, agent) produces ONE spa
     senderName: 'Alice',
     content: 'hello',
     rolePrompt: '',
+    agentContext: { cli: 'claude' },
   };
   // Different createdAt so the per-message dedup table doesn't reject — the
   // in-flight guard is what we want to exercise.
@@ -612,6 +613,7 @@ test('chat-session: second message AFTER first spawn lands collapses to follow-u
     senderId: 'sender-A',
     senderName: 'Alice',
     rolePrompt: '',
+    agentContext: { cli: 'claude' },
   };
   const r1 = await mgr.dispatch({
     ...base,
@@ -643,6 +645,7 @@ test('chat-session: different agents in same room each spawn their own session',
     content: 'hi',
     rolePrompt: '',
     createdAt: '2026-05-24T07:00:00.000Z',
+    agentContext: { cli: 'claude' },
   };
   const r1 = await mgr.dispatch({ ...base, agentId: 'agent-1' });
   const r2 = await mgr.dispatch({ ...base, agentId: 'agent-2' });
@@ -664,6 +667,7 @@ test('chat-session: dedup mark is rolled back when in-flight guard drops the sec
     senderName: 'Alice',
     content: 'first',
     rolePrompt: '',
+    agentContext: { cli: 'claude' },
   };
   const droppedStamp = '2026-05-24T07:00:01.000Z';
   const p1 = mgr.dispatch({ ...base, createdAt: '2026-05-24T07:00:00.000Z' });
