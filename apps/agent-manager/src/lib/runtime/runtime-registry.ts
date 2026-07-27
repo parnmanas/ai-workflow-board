@@ -4,6 +4,10 @@ import {
   type RuntimeDescriptor,
   RuntimeSelectionError,
 } from './runtime-types.js';
+import {
+  HermesRuntime,
+  type HermesRuntimeOptions,
+} from './hermes/hermes-runtime.js';
 
 const CLI_NATIVE_MCP: RuntimeCapabilities = {
   protocol: 'stream-json',
@@ -79,6 +83,23 @@ const DESCRIPTORS = new Map<string, RuntimeDescriptor>([
 ]);
 
 export const KNOWN_RUNTIME_IDS = Object.freeze(Array.from(DESCRIPTORS.keys()));
+
+export type RuntimeOwner = HermesRuntime;
+
+/** Construct protocol-owned runtimes. Traditional CLI adapters continue
+ * through createAdapter(); only ACP runtimes own a long-lived process here. */
+export function createRuntimeOwner(
+  runtimeId: string,
+  options: HermesRuntimeOptions,
+): RuntimeOwner {
+  const descriptor = getRuntimeDescriptor(runtimeId);
+  if (descriptor.id === 'hermes') return new HermesRuntime(options);
+  throw new RuntimeSelectionError(
+    'runtime_unavailable',
+    descriptor.id,
+    `Runtime ${descriptor.id} does not use a protocol process owner`,
+  );
+}
 
 export function getRuntimeDescriptor(runtimeId: string | null | undefined): RuntimeDescriptor {
   const normalized = String(runtimeId ?? '').trim().toLowerCase();

@@ -18,6 +18,7 @@
 // truth for status.
 
 import type { ManagedAgentDiskConfig } from './managed-agent-store.js';
+import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 
 export interface ManagedAgentContext {
   agent_id: string;
@@ -41,6 +42,8 @@ export interface ManagedAgentContext {
    *  build spec so spawned subagents / sessions run under this model
    *  (`--model <id>`). null/undefined = use the CLI's own default. */
   model?: string | null;
+  /** Explicit runtime strategy and permission policy from AWB. */
+  runtime_config?: AgentRuntimeConfig | null;
   /** Extra environment variables exported on every spawn for this agent.
    *  Populated by adapter.prepareCliHome() when the agent's per-agent
    *  credential is the api_key kind (e.g. ANTHROPIC_API_KEY,
@@ -138,6 +141,7 @@ export class ManagedAgentContextRegistry {
       api_key: apiKey,
       subagent_log_path: subagentLogPath,
       cli_home_dir: cliHomeDir,
+      runtime_config: cfg.runtime_config,
       registered_at: new Date().toISOString(),
     };
   }

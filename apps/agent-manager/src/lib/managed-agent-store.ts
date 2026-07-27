@@ -22,6 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MANAGED_AGENTS_DIR } from './constants.js';
 import { resolveSelfCommand } from './self-path.js';
+import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 
 export interface ManagedAgentDiskConfig {
   agent_id: string;
@@ -32,6 +33,8 @@ export interface ManagedAgentDiskConfig {
   /** Per-agent default model (Agent.model). Persisted so a manager restart
    *  rehydrates the same model without re-fetching from AWB. */
   model?: string | null;
+  /** Explicit runtime strategy and permission policy persisted for restart. */
+  runtime_config?: AgentRuntimeConfig | null;
   /** ISO timestamp of the last successful spawn_agent on this manager. */
   last_spawn_at?: string;
 }

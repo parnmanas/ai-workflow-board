@@ -19,7 +19,7 @@
 
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
-import { SUBAGENTS_BASE_DIR } from './constants.js';
+import { MANAGED_AGENTS_DIR, SUBAGENTS_BASE_DIR } from './constants.js';
 import { log } from './logging.js';
 
 const KILL_BACKUP_DELAY_MS = 2000;
@@ -151,4 +151,73 @@ export async function cleanupOrphanSubagents(): Promise<CleanupResult> {
     `[orphan-cleanup] reaped ${reaped}/${pidFiles.length} orphan subagents (${skipped} protected as live-sibling)`,
   );
   return { scanned: pidFiles.length, reaped, skipped };
+}
+
+interface HermesOwnerSidecar {
+  pid: number;
+  ownerPid: number;
+  agentId?: string;
+}
+
+/** Reap Hermes ACP process trees whose owning Runtime Host is no longer
+ * alive. A live owner pid protects sibling hosts that accidentally share a
+ * state directory; a dead owner makes the sidecar authoritative cleanup
+ * evidence. */
+export async function cleanupOrphanHermesProcesses(
+  agentsDir = MANAGED_AGENTS_DIR,
+): Promise<CleanupResult> {
+  let agentIds: string[];
+  try {
+    agentIds = await fsp.readdir(agentsDir);
+  } catch {
+    return { scanned: 0, reaped: 0 };
+  }
+
+  let scanned = 0;
+  let reaped = 0;
+  let skipped = 0;
+  for (const agentId of agentIds) {
+    const sidecarPath = join(agentsDir, agentId, 'hermes', 'runtime-owner.json');
+    let owner: HermesOwnerSidecar;
+    try {
+      owner = JSON.parse(await fsp.readFile(sidecarPath, 'utf8'));
+    } catch {
+      continue;
+    }
+    scanned++;
+    if (
+      !Number.isInteger(owner.pid)
+      || owner.pid <= 0
+      || !Number.isInteger(owner.ownerPid)
+      || owner.ownerPid <= 0
+    ) {
+      await fsp.unlink(sidecarPath).catch(() => undefined);
+      reaped++;
+      continue;
+    }
+    if (isPidAlive(owner.ownerPid)) {
+      skipped++;
+      continue;
+    }
+    if (isPidAlive(owner.pid)) {
+      log(`[orphan-cleanup] killing orphan Hermes ACP tree pid=${owner.pid} agent=${agentId}`);
+      if (process.platform === 'win32') {
+        const { spawn } = await import('node:child_process');
+        await new Promise<void>((resolve) => {
+          const child = spawn(
+            'taskkill',
+            ['/PID', String(owner.pid), '/T', '/F'],
+            { windowsHide: true, stdio: 'ignore' },
+          );
+          child.once('error', () => resolve());
+          child.once('exit', () => resolve());
+        });
+      } else {
+        try { process.kill(-owner.pid, 'SIGTERM'); } catch { /* already gone */ }
+      }
+    }
+    await fsp.unlink(sidecarPath).catch(() => undefined);
+    reaped++;
+  }
+  return { scanned, reaped, skipped };
 }
