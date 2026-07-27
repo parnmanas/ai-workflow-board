@@ -44,7 +44,7 @@ import type {
   FsMkdirResult,
   SubagentSummary,
   SubagentTranscript,
-  AgentProxySession,
+  AgentLiveSession,
   AgentManagerInstance,
   PairingTokenMint,
   PairingTokenSafe,
@@ -1556,10 +1556,7 @@ export const api = {
   runQaFlows: () => request<any>('/admin/qa/run-flows', { method: 'POST' }),
 
   // ─── Admin Agent Manager (Phase 3) ─────────────────────
-  // Live registry of daemon/proxy plugin instances heartbeating against the
-  // server. One Agent row may have multiple instances (a developer running
-  // proxy.mjs on one host and daemon.mjs on another shares one agent id);
-  // this surface preserves the per-process detail.
+  // Live Runtime Hosts heartbeating against the server.
   listAgentManagerInstances: (workspaceId?: string) => {
     const qs = new URLSearchParams();
     if (workspaceId) qs.set('workspace_id', workspaceId);
@@ -1625,7 +1622,7 @@ export const api = {
   },
 
   // Cross-workspace manager picker source — the workspace AI Agents tab
-  // uses this to populate the optional Agent Manager dropdown so an agent
+  // uses this to populate the required Runtime Host dropdown so an Agent
   // in workspace B can be attached to a manager paired in workspace A.
   // MANAGE_AGENTS-gated; returns one row per Agent with type='manager'.
   listAgentManagers: () =>
@@ -1659,30 +1656,10 @@ export const api = {
   getLogCategories: () => request<string[]>('/admin/logs/categories'),
 
   // ─── Live SSE connection detail per agent_id ───────────
-  // Returns the array of live proxy SSE sessions per agent, each entry
-  // carrying connect timestamp + peer IP + user-agent + boardId scope.
-  // The Agent Details modal renders the list so the user can spot
-  // multi-proxy situations directly — e.g., distinguish "two terminals
-  // on this host" from "one Claude CLI internally opening two streams"
-  // by looking at the IPs and connect times. Empty / missing entry = 0
-  // proxies for that agent (modal treats it as offline).
+  // Returns Runtime Host SSE diagnostics keyed by hosted Agent id.
+  // Empty / missing entry means the assigned host is not connected.
   getActiveAgentSessions: () =>
-    request<Record<string, AgentProxySession[]>>('/events/active-agent-sessions'),
-
-  // Pin a specific SSE session as the routing target for an agent. Used by
-  // the Agent Details panel when the user has 2+ proxies connected and wants
-  // to direct ticket triggers + chat events to a specific terminal.
-  setAgentMainSession: (agentId: string, sessionId: string) =>
-    request<{ ok: boolean; agent_id?: string; session_id?: string; error?: string }>(
-      `/events/active-agent-sessions/${encodeURIComponent(agentId)}/main`,
-      { method: 'POST', body: JSON.stringify({ session_id: sessionId }) },
-    ),
-  // Clear the user-pinned main; routing falls back to oldest-connected.
-  clearAgentMainSession: (agentId: string) =>
-    request<{ ok: boolean; agent_id?: string }>(
-      `/events/active-agent-sessions/${encodeURIComponent(agentId)}/main`,
-      { method: 'DELETE' },
-    ),
+    request<Record<string, AgentLiveSession[]>>('/events/active-agent-sessions'),
 
   // ─── Admin Agent Logs (Phase C) ────────────────────────
   listAgentLogs: (params: { agent_id?: string; level?: string; category?: string; since?: string; until?: string; limit?: number } = {}) => {

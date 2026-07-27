@@ -65,16 +65,16 @@ test('managed agent(manager_agent_id 있음) → 관리 정보 섹션(Manager/CL
     working_dir: '/repo/worktree',
   };
   const html = render({ status: 'loaded', agent });
-  assert.match(html, /관리 정보/); // Section 제목
-  assert.match(html, /Manager/);
+  assert.match(html, /Execution/);
+  assert.match(html, /Runtime Host/);
   assert.match(html, /Fleet/); // manager_name
-  assert.match(html, /CLI/);
+  assert.match(html, /Runtime/);
   assert.match(html, /claude/); // type
   assert.match(html, /Working dir/);
   assert.match(html, /\/repo\/worktree/);
 });
 
-test('standalone agent(manager_agent_id·type·working_dir 없음) → 관리 정보 섹션 생략', () => {
+test('historical unhosted agent shows fail-closed Runtime Host status', () => {
   const agent = {
     id: 'a-3',
     name: 'Solo',
@@ -85,5 +85,6 @@ test('standalone agent(manager_agent_id·type·working_dir 없음) → 관리 �
     pending_trigger_count: 0,
   };
   const html = render({ status: 'loaded', agent });
-  assert.doesNotMatch(html, /관리 정보/);
+  assert.match(html, /Runtime Host/);
+  assert.match(html, /Required/);
 });

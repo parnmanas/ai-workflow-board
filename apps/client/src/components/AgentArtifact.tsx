@@ -77,21 +77,26 @@ export function AgentArtifactView({
   }
 
   const a = state.agent;
-  const isManaged = !!a.manager_agent_id;
+  const hasRuntimeHost = !!a.manager_agent_id;
 
   return (
     <div style={{ padding: tokens.spacing.lg, display: 'flex', flexDirection: 'column', gap: tokens.spacing.lg }}>
       <AgentCard agent={a} onOpenDetail={onOpenDetail} />
 
-      {(isManaged || a.type || a.working_dir) && (
-        <Section title="관리 정보">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {isManaged && <InfoRow label="Manager" value={a.manager_name || a.manager_agent_id || '-'} />}
-            {a.type && <InfoRow label="CLI" value={a.type} />}
-            {a.working_dir && <InfoRow label="Working dir" value={a.working_dir} />}
-          </div>
-        </Section>
-      )}
+      <Section title="Execution">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <InfoRow
+            label="Runtime Host"
+            value={hasRuntimeHost ? (a.manager_name || a.manager_agent_id) : 'Required — not assigned'}
+          />
+          {a.type && <InfoRow label="Runtime" value={a.type} />}
+          {a.runtime_config?.strategy && <InfoRow label="Strategy" value={a.runtime_config.strategy} />}
+          {a.runtime_config?.permission_mode && (
+            <InfoRow label="Permission" value={a.runtime_config.permission_mode} />
+          )}
+          {a.working_dir && <InfoRow label="Working dir" value={a.working_dir} />}
+        </div>
+      </Section>
 
       <button
         type="button"

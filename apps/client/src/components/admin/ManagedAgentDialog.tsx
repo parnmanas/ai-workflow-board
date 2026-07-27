@@ -6,6 +6,14 @@ import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
+import RuntimeConfigFields, {
+  buildRuntimeConfig,
+  EMPTY_RUNTIME_SELECTION,
+  RUNTIME_OPTIONS,
+  runtimeSelectionFromAgent,
+  type RuntimeId,
+  type RuntimeSelection,
+} from './RuntimeConfigFields';
 
 /**
  * ManagedAgentDialog — create / edit form for an agent-manager-supervised
@@ -26,17 +34,6 @@ import { credentialFallbackCopy } from '../../utils/credentialFallback';
  * skips the SSE notification in that case and tells the operator the cwd
  * change won't take effect until the agent is restarted.
  */
-
-export type CliKind = 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'custom';
-
-export const MANAGED_CLI_OPTIONS: { value: CliKind; label: string }[] = [
-  { value: 'claude', label: 'Claude Code' },
-  { value: 'deepseek', label: 'DeepSeek (via Claude Code)' },
-  { value: 'codex', label: 'Codex' },
-  { value: 'antigravity', label: 'Antigravity' },
-  { value: 'pi', label: 'PI' },
-  { value: 'custom', label: 'Custom' },
-];
 
 export interface ManagedAgentDialogProps {
   isOpen: boolean;
@@ -60,14 +57,15 @@ export default function ManagedAgentDialog({
   onClose,
   managerAgentId,
   managerInstanceId,
-  defaultCli,
   mode,
   agent,
   onSubmitted,
 }: ManagedAgentDialogProps) {
   const { showToast } = useToast();
   const [name, setName] = useState('');
-  const [cli, setCli] = useState<CliKind>('claude');
+  const [runtimeSelection, setRuntimeSelection] =
+    useState<RuntimeSelection>(EMPTY_RUNTIME_SELECTION);
+  const cli = runtimeSelection.runtime;
   const [workingDir, setWorkingDir] = useState('');
   const [description, setDescription] = useState('');
   const [autoSpawn, setAutoSpawn] = useState(true);
@@ -89,6 +87,7 @@ export default function ManagedAgentDialog({
   const [runtimeProfile, setRuntimeProfile] = useState<string>('');
   const [runtimeProfiles, setRuntimeProfiles] = useState<RuntimeProfileConfig[]>([]);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
+  const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -96,7 +95,7 @@ export default function ManagedAgentDialog({
     setBusy(false);
     if (mode === 'edit' && agent) {
       setName(agent.name);
-      setCli((MANAGED_CLI_OPTIONS.find((o) => o.value === agent.type)?.value as CliKind) || 'custom');
+      setRuntimeSelection(runtimeSelectionFromAgent(agent.type, agent.runtime_config));
       setWorkingDir(agent.working_dir || '');
       setDescription(agent.description || '');
       setAutoSpawn(false);
@@ -111,12 +110,9 @@ export default function ManagedAgentDialog({
       setCredentialId('');
       setModel('');
       setRuntimeProfile('');
-      // Default CLI tracks the manager's primary CLI, but the operator can
-      // override it (e.g., spawn an Antigravity agent under a Claude-default manager).
-      const defaulted = MANAGED_CLI_OPTIONS.find((o) => o.value === defaultCli)?.value || 'claude';
-      setCli(defaulted);
+      setRuntimeSelection(EMPTY_RUNTIME_SELECTION);
     }
-  }, [isOpen, mode, agent, defaultCli]);
+  }, [isOpen, mode, agent]);
 
   // Load workspace-scoped credentials once per open. We keep all of them
   // and filter by the active CLI in the render path so changing CLI
@@ -155,8 +151,18 @@ export default function ManagedAgentDialog({
           instances.find((i) => i.agent_id === managerAgentId) ||
           null;
         setAvailableModelsByCli(match?.available_models || {});
+        setAvailableRuntimeIds(
+          Object.entries(match?.runtime_capabilities || {})
+            .filter(([, health]) => health.installed && health.healthy)
+            .map(([runtimeId]) => runtimeId),
+        );
       })
-      .catch(() => { if (alive) setAvailableModelsByCli({}); });
+      .catch(() => {
+        if (alive) {
+          setAvailableModelsByCli({});
+          setAvailableRuntimeIds([]);
+        }
+      });
     return () => { alive = false; };
   }, [isOpen, managerInstanceId, managerAgentId]);
 
@@ -177,6 +183,11 @@ export default function ManagedAgentDialog({
     const trimmedName = name.trim();
     if (!trimmedName) {
       showToast('Name is required', 'error');
+      return;
+    }
+    const runtimeConfig = buildRuntimeConfig(runtimeSelection);
+    if (!cli || !runtimeConfig) {
+      showToast('Runtime, strategy, and permission mode are required', 'error');
       return;
     }
     const trimmedWorkingDir = workingDir.trim();
@@ -203,15 +214,16 @@ export default function ManagedAgentDialog({
         // whose provider prefix mismatches the new CLI — the manager validates
         // `${cli}_…` and would reject it, silently falling back to
         // operator-HOME auth.
-        const supportsCredential = cli !== 'custom' && cli !== 'pi';
+        const supportsCredential = cli !== 'pi' && cli !== 'hermes';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
           type: cli,
+          runtime_config: runtimeConfig,
           working_dir: trimmedWorkingDir,
           credential_id: supportsCredential && credentialId ? credentialId : null,
           // null clears (CLI default); custom CLIs have no model concept.
-          model: cli !== 'custom' && model.trim() ? model.trim() : null,
+          model: cli !== 'hermes' && model.trim() ? model.trim() : null,
           cli_runtime_profile: cli === 'claude' ? (runtimeProfile || null) : 'none',
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
@@ -260,15 +272,16 @@ export default function ManagedAgentDialog({
         }
       } else {
         // Create flow.
-        const supportsCredential = cli !== 'custom' && cli !== 'pi';
+        const supportsCredential = cli !== 'pi' && cli !== 'hermes';
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
           working_dir: trimmedWorkingDir || undefined,
           manager_agent_id: managerAgentId,
+          runtime_config: runtimeConfig,
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
-          model: cli !== 'custom' && model.trim() ? model.trim() : undefined,
+          model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -333,13 +346,19 @@ export default function ManagedAgentDialog({
         </div>
         <div>
           <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
-            CLI
+            Runtime *
           </label>
           <Select
-            value={cli}
-            options={MANAGED_CLI_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+            value={runtimeSelection.runtime}
+            options={[
+              { value: '', label: availableRuntimeIds.length ? 'Select a runtime' : 'No healthy runtime reported by this Host' },
+              ...RUNTIME_OPTIONS.filter((option) => availableRuntimeIds.includes(option.value)),
+            ]}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
-              setCli(e.target.value as any);
+              setRuntimeSelection({
+                ...EMPTY_RUNTIME_SELECTION,
+                runtime: e.target.value as RuntimeId | '',
+              });
               // Model candidates AND the per-agent credential are per-CLI: a
               // value valid for the old CLI is meaningless (and, for the
               // credential, actively rejected by the manager's `${cli}_…`
@@ -354,7 +373,13 @@ export default function ManagedAgentDialog({
             </div>
           )}
         </div>
-        {cli !== 'custom' && cli !== 'pi' && (
+        <RuntimeConfigFields
+          value={runtimeSelection}
+          availableRuntimeIds={availableRuntimeIds}
+          showRuntime={false}
+          onChange={setRuntimeSelection}
+        />
+        {cli && cli !== 'pi' && cli !== 'hermes' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               CLI credential
@@ -372,7 +397,7 @@ export default function ManagedAgentDialog({
             </div>
           </div>
         )}
-        {cli !== 'custom' && (
+        {cli && cli !== 'hermes' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Default model

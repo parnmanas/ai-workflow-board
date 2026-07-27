@@ -10,6 +10,11 @@ import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
 import { Button, Input, Select, Modal } from './common';
+import RuntimeConfigFields, {
+  buildRuntimeConfig,
+  EMPTY_RUNTIME_SELECTION,
+  type RuntimeSelection,
+} from './admin/RuntimeConfigFields';
 import type {
   DashboardAgent,
   AgentCurrentTask,
@@ -32,22 +37,6 @@ const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   deepseek: 'deepseek_',
 };
 
-/** CLI types the agent-manager spawn pipeline accepts — must match the
- *  server's ALLOWED_CLI_TYPES whitelist in agent-manager.controller.ts. */
-type ManagedCli = ManagedAgentCreateBody['cli'];
-
-/** CLI options surfaced in the Managed Agent picker. Mirrors the server
- *  whitelist so the workspace form offers the same set the server's
- *  createManagedAgent contract accepts. */
-const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-  { value: 'antigravity', label: 'Antigravity' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'pi', label: 'PI' },
-  { value: 'custom', label: 'Custom' },
-];
-
 interface ManagerOption {
   id: string;
   name: string;
@@ -56,13 +45,10 @@ interface ManagerOption {
   is_active: number;
 }
 
-/** Initial state for the Managed Agent create form. Defaulting cli=claude
- *  matches the most common case (claude-code-driven agents) and lets the
- *  Working Directory field surface its required marker immediately. */
 const EMPTY_MANAGED_FORM: {
   name: string;
   description: string;
-  cli: ManagedCli;
+  runtime: RuntimeSelection;
   manager_agent_id: string;
   working_dir: string;
   credential_id: string;
@@ -70,7 +56,7 @@ const EMPTY_MANAGED_FORM: {
 } = {
   name: '',
   description: '',
-  cli: 'claude',
+  runtime: EMPTY_RUNTIME_SELECTION,
   manager_agent_id: '',
   working_dir: '',
   credential_id: '',
@@ -151,14 +137,7 @@ export default function AgentsPage() {
   const openDetail = useCallback((id: string) => {
     if (wsId) navigate(`/ws/${wsId}/agents/${id}`);
   }, [navigate, wsId]);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createForm, setCreateForm] = useState({ name: '', description: '', type: 'custom' });
-
-  // Managed-agent ("via AgentManager") creation surface — separate from the
-  // legacy "+ New Agent" modal because the agent-manager spawn contract
-  // requires extra fields (manager pick, working_dir, optional credential)
-  // that don't apply to plain workspace agents. UI mirrors the managed-mode
-  // form used by the managed-agent runtime contract.
+  // Every executable Agent is created through an explicit Runtime Host.
   const [showManagedModal, setShowManagedModal] = useState(false);
   const [managedForm, setManagedForm] = useState<typeof EMPTY_MANAGED_FORM>(EMPTY_MANAGED_FORM);
   const [managers, setManagers] = useState<ManagerOption[]>([]);
@@ -233,36 +212,6 @@ export default function AgentsPage() {
   });
 
   // ─── Handlers ─────────────────────────────────────────────────
-  // Track in-flight state so double-clicks on Create don't spawn parallel
-  // POSTs, and so the button can disable + show "Creating..." feedback.
-  const [creating, setCreating] = useState(false);
-  const handleCreateAgent = useCallback(async () => {
-    if (!createForm.name.trim() || creating) return;
-    setCreating(true);
-    try {
-      // Pass the URL wsId explicitly so the request always lands in the
-      // workspace the user is looking at, regardless of whether
-      // localStorage.currentWorkspaceId has drifted.
-      await api.createAgent({
-        name: createForm.name.trim(),
-        description: createForm.description.trim() || undefined,
-        type: createForm.type,
-        workspaceId: wsId,
-      });
-      setCreateForm({ name: '', description: '', type: 'custom' });
-      setShowCreateModal(false);
-      await loadSnapshot();
-      showToast('Agent created', 'success');
-    } catch (err: any) {
-      // Surface the failure — prior silent-catch made "New Agent" appear to
-      // do nothing when the POST was rejected (403 from WorkspaceGuard,
-      // auth expiry, etc.). Keep the modal open so the user can retry.
-      showToast(err?.message || 'Failed to create agent', 'error');
-    } finally {
-      setCreating(false);
-    }
-  }, [createForm, creating, loadSnapshot, wsId, showToast]);
-
   // ─── Managed-agent picker data ────────────────────────────────
   // Pull managers + credentials only when the managed modal opens to keep
   // the page boot lean. Managers list is cross-workspace (admins pair them
@@ -285,15 +234,23 @@ export default function AgentsPage() {
   }, [showManagedModal, wsId]);
 
   const eligibleCredentials = useMemo(() => {
-    const prefix = CLI_TO_CREDENTIAL_PREFIX[managedForm.cli];
+    const prefix = CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime];
     if (!prefix) return [];
     return credentials.filter((c) => c.provider.startsWith(prefix));
-  }, [credentials, managedForm.cli]);
+  }, [credentials, managedForm.runtime.runtime]);
+
+  const selectedRuntimeIds = useMemo(() => {
+    if (!managedForm.manager_agent_id) return [];
+    const host = managerInstanceByManagerAgentId.get(managedForm.manager_agent_id);
+    return Object.entries(host?.runtime_capabilities || {})
+      .filter(([, health]) => health.installed && health.healthy)
+      .map(([runtimeId]) => runtimeId);
+  }, [managedForm.manager_agent_id, managerInstanceByManagerAgentId]);
 
   // working_dir is optional for `custom` (the manager doesn't know how to
   // launch a custom CLI without operator-supplied scripts anyway), required
   // otherwise — same rule the admin AgentManager surfaces in its label.
-  const managedWorkingDirRequired = managedForm.cli !== 'custom';
+  const managedWorkingDirRequired = !!managedForm.runtime.runtime;
 
   const resetManagedForm = useCallback(() => {
     setManagedForm(EMPTY_MANAGED_FORM);
@@ -309,7 +266,12 @@ export default function AgentsPage() {
     setManagedForm((f) => (
       f.manager_agent_id === nextManagerId
         ? f
-        : { ...f, manager_agent_id: nextManagerId, working_dir: '' }
+        : {
+            ...f,
+            manager_agent_id: nextManagerId,
+            working_dir: '',
+            runtime: EMPTY_RUNTIME_SELECTION,
+          }
     ));
     setPickerOpen(false);
   }, []);
@@ -318,7 +280,12 @@ export default function AgentsPage() {
     if (creatingManaged) return;
     if (!managedForm.name.trim()) return;
     if (!managedForm.manager_agent_id) {
-      showToast('Pick an Agent Manager', 'error');
+      showToast('Pick a Runtime Host', 'error');
+      return;
+    }
+    const runtimeConfig = buildRuntimeConfig(managedForm.runtime);
+    if (!managedForm.runtime.runtime || !runtimeConfig) {
+      showToast('Runtime, strategy, and permission mode are required', 'error');
       return;
     }
     if (managedWorkingDirRequired && !managedForm.working_dir.trim()) {
@@ -330,14 +297,15 @@ export default function AgentsPage() {
       // Drop credential_id when the CLI doesn't support per-agent
       // credentials (only claude / codex / antigravity do); preserves the
       // server's null contract for `custom` so it doesn't mis-set an FK.
-      const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.cli];
+      const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime];
       const credential_id = supportsCredential && managedForm.credential_id
         ? managedForm.credential_id
         : undefined;
       const body: ManagedAgentCreateBody = {
         name: managedForm.name.trim(),
-        cli: managedForm.cli,
+        cli: managedForm.runtime.runtime,
         manager_agent_id: managedForm.manager_agent_id,
+        runtime_config: runtimeConfig,
         working_dir: managedForm.working_dir.trim() || undefined,
         description: managedForm.description.trim() || undefined,
         credential_id,
@@ -385,10 +353,7 @@ export default function AgentsPage() {
         actions={
           user?.role === 'admin' ? (
             <div style={{ display: 'flex', gap: 8 }}>
-              <Button variant="secondary" size="md" onClick={() => setShowManagedModal(true)}>
-                + New Managed Agent
-              </Button>
-              <Button variant="primary" size="md" onClick={() => setShowCreateModal(true)}>
+              <Button variant="primary" size="md" onClick={() => setShowManagedModal(true)}>
                 + New Agent
               </Button>
             </div>
@@ -410,85 +375,7 @@ export default function AgentsPage() {
       {/* Agent detail surface moved to a real route in v0.32.x —
          see AgentDetailPage. AgentsPage just navigates on click. */}
 
-      {/* Create Agent modal */}
-      {showCreateModal && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }} onClick={() => setShowCreateModal(false)}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: tokens.colors.surfaceCard, borderRadius: tokens.radii.xl, padding: 24, width: 440,
-            border: `1px solid ${tokens.colors.border}`,
-          }}>
-            <h3 style={{ fontSize: '15px', fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 16 }}>
-              New AI Agent
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div>
-                <label style={{ fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Name *</label>
-                <input
-                  value={createForm.name}
-                  onChange={e => setCreateForm(f => ({ ...f, name: e.target.value }))}
-                  placeholder="Agent name"
-                  autoFocus
-                  style={{
-                    width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', outline: 'none', boxSizing: 'border-box',
-                  }}
-                  onKeyDown={e => { if (e.key === 'Enter' && createForm.name.trim()) handleCreateAgent(); }}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Description</label>
-                <input
-                  value={createForm.description}
-                  onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))}
-                  placeholder="What does this agent do?"
-                  style={{
-                    width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', outline: 'none', boxSizing: 'border-box',
-                  }}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '11px', color: tokens.colors.textMuted, fontWeight: 600, textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Type</label>
-                <select
-                  value={createForm.type}
-                  onChange={e => setCreateForm(f => ({ ...f, type: e.target.value }))}
-                  style={{
-                    width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '13px', boxSizing: 'border-box',
-                  }}
-                >
-                  <option value="claude">Claude</option>
-                  <option value="codex">Codex</option>
-                  <option value="antigravity">Antigravity</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="pi">PI</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-              <button onClick={() => setShowCreateModal(false)} style={{
-                background: 'transparent', color: tokens.colors.textSecondary, border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.md, padding: '6px 14px', fontSize: '12px', cursor: 'pointer',
-              }}>Cancel</button>
-              <button
-                onClick={handleCreateAgent}
-                disabled={!createForm.name.trim() || creating}
-                style={{
-                  background: createForm.name.trim() && !creating ? tokens.colors.accent : tokens.colors.border, color: 'white',
-                  border: 'none', borderRadius: tokens.radii.md, padding: '6px 14px', fontSize: '12px',
-                  fontWeight: 600, cursor: createForm.name.trim() && !creating ? 'pointer' : 'not-allowed',
-                }}
-              >{creating ? 'Creating...' : 'Create'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Create Managed Agent modal for agent-manager-spawned identities. */}
+      {/* Every executable Agent is created through a Runtime Host. */}
       <Modal
         isOpen={showManagedModal}
         onClose={resetManagedForm}
@@ -503,6 +390,7 @@ export default function AgentsPage() {
               disabled={
                 !managedForm.name.trim() ||
                 !managedForm.manager_agent_id ||
+                !buildRuntimeConfig(managedForm.runtime) ||
                 (managedWorkingDirRequired && !managedForm.working_dir.trim()) ||
                 creatingManaged
               }
@@ -521,12 +409,6 @@ export default function AgentsPage() {
               placeholder="Agent name"
               autoFocus
             />
-            <Select
-              label="Type"
-              value={managedForm.cli}
-              onChange={e => setManagedForm(f => ({ ...f, cli: (e.target as HTMLSelectElement).value as ManagedCli }))}
-              options={MANAGED_CLI_OPTIONS}
-            />
           </div>
           <Input
             label="Description"
@@ -536,19 +418,25 @@ export default function AgentsPage() {
           />
           <div>
             <Select
-              label="Agent Manager *"
+              label="Runtime Host *"
               value={managedForm.manager_agent_id}
               onChange={e => handleManagerChange((e.target as HTMLSelectElement).value)}
               options={[
-                { value: '', label: managers.length === 0 ? 'No managers paired yet' : 'Select a manager…' },
+                { value: '', label: managers.length === 0 ? 'No Runtime Hosts paired yet' : 'Select a Runtime Host' },
                 ...managers.map(m => ({ value: m.id, label: m.name })),
               ]}
             />
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-              The picked manager spawns this agent's CLI on its host. Changing this clears the working directory — paths are host-specific.
-              {managers.length === 0 && ' Pair one from the Agent Manager Runtime section below first.'}
+              The Runtime Host owns this Agent's execution process. Changing it clears runtime and working-directory choices.
+              {managers.length === 0 && ' Pair a Runtime Host from the Runtime Host section below first.'}
             </div>
           </div>
+          <RuntimeConfigFields
+            value={managedForm.runtime}
+            availableRuntimeIds={selectedRuntimeIds}
+            disabled={!managedForm.manager_agent_id}
+            onChange={(runtime) => setManagedForm((form) => ({ ...form, runtime, credential_id: '' }))}
+          />
           <div>
             <label style={{
               fontSize: '11px',
@@ -596,19 +484,19 @@ export default function AgentsPage() {
               }}
             />
           )}
-          {CLI_TO_CREDENTIAL_PREFIX[managedForm.cli] && (
+          {CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime] && (
             <div>
               <Select
                 label="CLI credential"
                 value={managedForm.credential_id}
                 onChange={e => setManagedForm(f => ({ ...f, credential_id: (e.target as HTMLSelectElement).value }))}
                 options={[
-                  { value: '', label: credentialFallbackCopy(managedForm.cli).optionLabel },
+                  { value: '', label: credentialFallbackCopy(managedForm.runtime.runtime).optionLabel },
                   ...eligibleCredentials.map(c => ({ value: c.id, label: `${c.name} · ${c.provider}` })),
                 ]}
               />
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-                {credentialFallbackCopy(managedForm.cli).meaning} Set a per-agent credential only for isolated auth — subscription credentials drop the OAuth file into this agent's cli-home; API-key credentials export the matching env var on every spawn. Manage values in the Credentials page.
+                {credentialFallbackCopy(managedForm.runtime.runtime).meaning} Set a per-Agent credential only for isolated auth.
               </div>
             </div>
           )}

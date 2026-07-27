@@ -25,13 +25,13 @@ import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 
 /**
- * Admin dashboard for live Agent Manager instances.
+ * Runtime Host administration and observability.
  *
  * Layout: master/detail split. Left column lists every heartbeating instance
  * grouped by host; right column shows the selected instance's subagents,
  * recent server-side logs touching that agent, and a restart button that
  * dispatches `restart_manager` over the agent_manager_command SSE channel
- * (manager-mode only — re-execs the daemon in place, no git pull).
+ * (re-execs the Runtime Host in place, no git pull).
  *
  * Real-time refresh: subscribes to `agent_instance_update` SSE events fired
  * by InstanceRegistryService on every upsert / TTL eviction. Steady-state
@@ -182,12 +182,8 @@ function formatDuration(startIso: string): string {
   }
 }
 
-function modeBadgeColor(mode: 'daemon' | 'proxy' | 'manager'): string {
-  // manager → accent (admin-controllable), daemon → accentLight (legacy daemon),
-  // proxy → success (passive Claude CLI bridge).
-  if (mode === 'manager') return tokens.colors.accent;
-  if (mode === 'daemon') return tokens.colors.accentLight;
-  return tokens.colors.successLight;
+function modeBadgeColor(_mode: 'manager'): string {
+  return tokens.colors.accent;
 }
 
 // ─── Live worktrees (ticket 72fc244f) ──────────────────────────────────────
@@ -513,7 +509,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
   // so the operator can see and edit it. Only loaded for manager-mode
-  // instances since daemon/proxy don't have an editable identity.
+  // Runtime Host identity is editable independently from its OS hostname.
   const [managerInfo, setManagerInfo] = useState<{ name: string; description: string } | null>(null);
   const [editIdentityOpen, setEditIdentityOpen] = useState(false);
   const dashboardAgent = workspaceAgents.find((agent) => agent.id === inst.agent_id);
@@ -1248,8 +1244,8 @@ export default function AgentManagerPage({
                 textAlign: 'center',
               }}
             >
-              No Agent Manager instances are currently heartbeating against this server.
-              Start <code>awb-agent-manager</code> and pair it with this AWB server.
+              No Runtime Host is currently heartbeating against this server.
+              Pair and start <code>awb-agent-manager</code> on an execution host.
             </div>
           )}
           {grouped.map(([host, list]) => (

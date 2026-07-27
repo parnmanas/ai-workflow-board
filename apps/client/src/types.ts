@@ -51,6 +51,18 @@ export type AgentLifecycleState =
   | 'offline'
   | 'error';
 
+export type ExecutionStrategy = 'single' | 'delegated' | 'swarm';
+export type RuntimePermissionMode = 'strict' | 'approve' | 'trusted';
+
+export interface AgentRuntimeConfig {
+  strategy: ExecutionStrategy;
+  permission_mode: RuntimePermissionMode;
+  profile?: string;
+  max_children?: number;
+  max_iterations?: number;
+  extra?: Record<string, unknown>;
+}
+
 export interface Agent {
   id: string; // GUID
   name: string;
@@ -69,6 +81,7 @@ export interface Agent {
   // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
   working_dir?: string;
   manager_agent_id?: string | null;
+  runtime_config?: AgentRuntimeConfig | null;
   /** Workspace this agent identity belongs to. Server populates on every
    *  list/get; the Agent Manager runtime section uses it to render the per-row
    *  workspace picker that lets operators relocate managed agents that
@@ -83,16 +96,13 @@ export interface Agent {
    *  available_models; free-text is also accepted. */
   model?: string | null;
   cli_runtime_profile?: string | null;
-  /** ST-7: name of the manager Agent that supervises this agent. Populated
+  /** Name of the Runtime Host that supervises this agent. Populated
    *  by the server's agent listing endpoints (one DB lookup per request).
    *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
-   *  in the UI; undefined for legacy / standalone agents (no slash prefix). */
+    *  in the UI; undefined only for historical invalid rows. */
   manager_name?: string;
-  /** Live process snapshot from InstanceRegistry. Set by `/api/agents` and
-   *  `/api/agents/:id` when the agent is currently being heartbeated by a
-   *  proxy/daemon process or supervised by an agent-manager instance. The
-   *  AI Agents admin page renders mode/version/host/heartbeat from this so
-   *  managed agents (which have no SSE session of their own) are visible. */
+  /** Live Runtime Host snapshot from InstanceRegistry. Set by `/api/agents`
+    *  and `/api/agents/:id` when the assigned host is heartbeating. */
   live_instance?: AgentLiveInstance;
   /** Subagent rollup attached server-side from SubagentMonitor. Lets the AI
    *  Agents admin page show "5 active / 23 total" without an extra fetch. */
@@ -106,7 +116,7 @@ export interface Agent {
  *  the operator wants the master/detail layout. */
 export interface AgentLiveInstance {
   instance_id: string;
-  mode: 'daemon' | 'proxy' | 'manager';
+  mode: 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -114,9 +124,8 @@ export interface AgentLiveInstance {
   pid: number;
   started_at: string;
   last_seen_at: string;
-  /** True when this agent is supervised by a manager (manager.agent_ids
-   *  includes this id). False when this agent IS the instance's primary
-   *  agent_id (proxy / daemon / a manager identity itself). */
+  /** True when this agent is supervised by the Runtime Host represented by
+    *  this live instance. */
   supervised: boolean;
   working_dirs?: string[];
   agent_ids?: string[];
@@ -1566,21 +1575,17 @@ export interface DashboardAgent {
 export interface AgentDetail extends DashboardAgent {
   description?: string;
   type?: string;
+  runtime_config?: AgentRuntimeConfig | null;
   is_active?: number;
   role_prompt: string;                                // '' when redacted per D-44
   role_prompt_meta: { updated_at: string; updated_by: string } | null;
   redacted: boolean;                                  // true for non-admin viewer per D-44
-  /** Managed-agent fields. Populated for agents created via the agent-manager
-   *  spawn pipeline (manager_agent_id !== null); empty/null on standalone
-   *  agents. The detail modal surfaces these in the INFO tab so the same
-   *  identity reads the same way on the AI Agents page and the AgentManager
-   *  admin page (ticket 7988c041). */
+  /** Runtime-hosted agent fields. Executable agents require
+    *  manager_agent_id, working_dir, and runtime_config. */
   working_dir?: string;
   credential_id?: string | null;
-  /** Set by `_enrichLiveData` server-side when this agent has a heartbeating
-   *  process (proxy / daemon) or a supervising manager. The AgentDetail INFO
-   *  tab uses live_instance.instance_id to dispatch `set_working_dir` SSE
-   *  commands when the operator edits a managed agent's working_dir. */
+  /** Set by `_enrichLiveData` server-side when the assigned Runtime Host is
+    *  heartbeating. */
   live_instance?: AgentLiveInstance;
 }
 
@@ -1737,7 +1742,7 @@ export interface ChatRoomMessageItem {
 }
 
 // ─── Agent Error Logs (Phase C) ──────────────────────────────
-// Error logs uploaded by each agent's MCP plugin (proxy.log tail).
+// Error logs uploaded by a Runtime Host on behalf of an agent.
 // Server source of truth: apps/server/src/modules/agent-logs/*.
 export interface AgentErrorLog {
   id: string;
@@ -1891,31 +1896,15 @@ export interface SubagentTranscript {
   lines: SubagentLogLine[];
 }
 
-// One row in the unified SESSIONS panel for an agent. `source` discriminates
-// real proxy.mjs ↔ AWB SSE buckets ('proxy') from synthesized rows backed by
-// an agent-manager InstanceRegistry record ('manager'). Manager rows surface
-// managed agents — which never open their own SSE connection because the
-// manager mediates everything — under the same panel as legacy proxy rows so
-// the user has a single place to see "what's keeping this agent online".
-// Mirrors SseSessionDetail (+ routing flags) on the server.
+// One Runtime Host session row synthesized from the server's live registry.
 export interface AgentLiveSession {
-  source: 'proxy' | 'manager';
-  session_id: string;       // proxy: server-generated UUID; manager: `mgr:<instance_id>`
-  connected_at: string;     // proxy: SSE connect time; manager: process started_at
-  ip: string;               // proxy: peer IP; manager: 'via manager'
-  plugin_version: string;   // X-Plugin-Version (proxy) or InstanceRecord.plugin_version (manager)
-  user_agent: string;       // empty for manager rows
+  source: 'manager';
+  session_id: string;
+  connected_at: string;
+  ip: string;
+  plugin_version: string;
+  user_agent: string;
   board_id: string | null;
-  // Routing flags filled by the server. `is_main` = this session currently
-  // receives the agent's recipient-scoped events (triggers, mentions, chat,
-  // fs_request) when 2+ proxies are connected. `main_pinned` = the user
-  // explicitly picked it; when false but `is_main` is true the server
-  // auto-selected (oldest-connected). Both are always false for manager rows —
-  // manager rows don't participate in routing; only proxy rows do.
-  is_main: boolean;
-  main_pinned: boolean;
-
-  // ── Manager-source only (undefined for proxy rows) ─────────────────────
   instance_id?: string;
   manager_agent_id?: string;
   manager_name?: string;
@@ -1928,21 +1917,12 @@ export interface AgentLiveSession {
   working_dir?: string;
 }
 
-/** @deprecated Use AgentLiveSession. Kept as an alias for ABI compatibility. */
-export type AgentProxySession = AgentLiveSession;
-
-// Phase 3 — single daemon/proxy/manager instance heartbeating against AWB.
-// Mirrors InstanceRecord in
-// apps/server/src/modules/agent-manager/instance-registry.service.ts.
-// One Agent row can have multiple instances (proxy + daemon, or several
-// machines for the same agent identity); the registry preserves the per-
-// process detail the admin dashboard renders. ST-4 adds the 'manager' mode
-// for the standalone awb-agent-manager process (claude/codex/antigravity parent).
+// One Runtime Host instance heartbeating against AWB.
 export interface AgentManagerInstance {
   instance_id: string;
   agent_id: string;
   workspace_id: string | null;
-  mode: 'daemon' | 'proxy' | 'manager';
+  mode: 'manager';
   hostname: string;
   plugin_version: string;
   cli: string;
@@ -2117,9 +2097,10 @@ export interface AgentManagerCommandResult {
 
 export interface ManagedAgentCreateBody {
   name: string;
-  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'custom';
+  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'hermes';
   working_dir?: string;
-  manager_agent_id?: string | null;
+  manager_agent_id: string;
+  runtime_config: AgentRuntimeConfig;
   description?: string;
   /** Optional per-agent CLI credential — see Agent.credential_id. */
   credential_id?: string | null;

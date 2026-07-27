@@ -57,29 +57,10 @@ const ACTION_VERB: Record<string, string> = {
   agent_trigger: 'claimed',
   trigger_claimed: 'claimed',
   agent_trigger_resolved: 'resolved',
-  proxy_connected: 'proxy connected',
-  proxy_disconnected: 'proxy disconnected',
 };
 
 function actionVerb(action: string): string {
   return ACTION_VERB[action] || 'updated';
-}
-
-/**
- * For proxy_connected / proxy_disconnected ActivityLog rows the server
- * stamps `new_value` with the SseSessionDetail JSON. Pull the session_id
- * out so the Recent Activity row can show which connection the event
- * corresponds to. Returns null on any non-matching row or parse failure.
- */
-function extractProxySessionId(row: { action?: string; new_value?: string | null }): string | null {
-  if (row.action !== 'proxy_connected' && row.action !== 'proxy_disconnected') return null;
-  if (!row.new_value) return null;
-  try {
-    const parsed = JSON.parse(row.new_value);
-    return typeof parsed?.session_id === 'string' ? parsed.session_id : null;
-  } catch {
-    return null;
-  }
 }
 
 function formatClaimedTime(claimedAt: string): string {
@@ -193,9 +174,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const [editAvatarUrl, setEditAvatarUrl] = useState('');
   // Managed-agent edits go through the same ManagedAgentDialog the admin
   // AgentManager page uses (ticket 7988c041 — same agent identity should
-  // expose the same fields and validation in both surfaces). Inline editing
-  // stays the path for legacy / standalone agents whose Agent row doesn't
-  // carry the agent-manager fields (working_dir / credential / cli).
+  // expose the same fields and validation in both surfaces).
   const [managedDialogOpen, setManagedDialogOpen] = useState(false);
   // Cache of credentials keyed by id, populated lazily when a managed
   // agent's INFO tab needs to render a credential name. Keyed on the
@@ -253,61 +232,8 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   };
 
   const [liveSessions, setLiveSessions] = useState<AgentLiveSession[]>([]);
-  // Total rows in the unified SESSIONS panel (proxy + manager-derived).
+  // Runtime Host sessions synthesized by the server.
   const sessionCount = liveSessions.length;
-  // Proxy-only count drives the routing-collision warning ("⚠ multiple")
-  // and the main-pin selector — manager rows don't participate in
-  // AGENT_ROUTED_EVENTS routing, so they don't contribute to that signal.
-  const proxySessions = liveSessions.filter((s) => s.source === 'proxy');
-  const proxyCount = proxySessions.length;
-  // Disable buttons during a pin/clear round-trip so a fast double-click
-  // can't flip the pinning between two sessions before the first POST settles.
-  const [pinningSessionId, setPinningSessionId] = useState<string | null>(null);
-
-  const refreshProxySessions = async () => {
-    try {
-      const map = await api.getActiveAgentSessions();
-      setLiveSessions(map?.[agentId] ?? []);
-    } catch {
-      /* swallow — modal stays usable, surface label keeps last value */
-    }
-  };
-
-  const handlePinMain = async (sessionId: string) => {
-    if (pinningSessionId) return;
-    setPinningSessionId(sessionId);
-    try {
-      const r = await api.setAgentMainSession(agentId, sessionId);
-      if (r?.ok) {
-        showToast('Main session updated', 'success');
-        await refreshProxySessions();
-      } else {
-        showToast(r?.error || 'Failed to pin main session', 'error');
-      }
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to pin main session', 'error');
-    } finally {
-      setPinningSessionId(null);
-    }
-  };
-
-  const handleClearMain = async () => {
-    if (pinningSessionId) return;
-    setPinningSessionId('__clear__');
-    try {
-      const r = await api.clearAgentMainSession(agentId);
-      if (r?.ok) {
-        showToast('Main session cleared (auto)', 'success');
-        await refreshProxySessions();
-      } else {
-        showToast('Failed to clear main session', 'error');
-      }
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to clear main session', 'error');
-    } finally {
-      setPinningSessionId(null);
-    }
-  };
 
   const loadDetail = async () => {
     setLoading(true);
@@ -492,13 +418,9 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const subtitleTail = detail?.last_seen_at
     ? ` · last seen ${formatRelative(detail.last_seen_at)}`
     : ' · never connected';
-  // Surface live-session count (proxy + manager) so the user sees what's
-  // keeping the agent online. The "⚠ multiple" warning still fires only on
-  // 2+ proxy-source rows because that's the orphan-cleanup race scenario
-  // that silently kills subagents mid-turn — manager-source rows don't
-  // collide because they don't pin AGENT_ROUTED_EVENTS.
-  const proxyTail = sessionCount > 0
-    ? ` · ${sessionCount} session${sessionCount === 1 ? '' : 's'}${proxyCount > 1 ? ' ⚠ multiple proxies' : ''}`
+  // Surface the Host count so the user sees which execution route is live.
+  const hostTail = sessionCount > 0
+    ? ` · ${sessionCount} Runtime Host session${sessionCount === 1 ? '' : 's'}`
     : '';
 
   const sectionLabelStyle: React.CSSProperties = {
@@ -659,9 +581,9 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 {subtitleStatusLabel}
               </span>
               <span>{subtitleTail}</span>
-              {proxyTail && (
-                <span style={{ color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted, fontWeight: proxyCount > 1 ? 600 : 400 }}>
-                  {proxyTail}
+              {hostTail && (
+                <span style={{ color: tokens.colors.textMuted }}>
+                  {hostTail}
                 </span>
               )}
             </div>
@@ -1030,21 +952,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             </section>
           )}
 
-          {/* SESSIONS section — what's currently keeping this agent online.
-              Two row sources unified into one panel:
-                • 'proxy' — a real SSE connection from a proxy.mjs instance.
-                  More than one means multiple proxies are concurrently
-                  connected (multi-terminal, or a single Claude CLI opening
-                  more than one stream). This is the orphan-cleanup race
-                  scenario that silently kills subagents mid-turn, so when
-                  proxyCount > 1 the user picks one as "MAIN" and the server
-                  routes ticket triggers + chat events only to that session
-                  (see events.controller.ts AGENT_ROUTED_EVENTS).
-                • 'manager' — synthesized from the agent-manager
-                  InstanceRegistry. Managed agents never open their own SSE,
-                  so without this row the panel would always be empty for
-                  them even while their manager is heartbeating. Manager rows
-                  do not participate in main-pin routing. */}
+          {/* Runtime Host sessions currently able to execute this Agent. */}
           <section>
             <div style={{ ...sectionLabelStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div>
@@ -1052,35 +960,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 {sessionCount > 0 && (
                   <span style={{
                     marginLeft: 8,
-                    color: proxyCount > 1 ? tokens.colors.warning : tokens.colors.textMuted,
-                    fontWeight: proxyCount > 1 ? 700 : 500,
+                    color: tokens.colors.textMuted,
+                    fontWeight: 500,
                   }}>
-                    ({sessionCount}){proxyCount > 1 ? ' ⚠ multiple proxies' : ''}
+                    ({sessionCount})
                   </span>
                 )}
               </div>
-              {proxyCount > 1 && proxySessions.some((s) => s.main_pinned) && (
-                <button
-                  type="button"
-                  onClick={handleClearMain}
-                  disabled={!!pinningSessionId}
-                  title="Clear pinned main; fall back to oldest-connected"
-                  style={{
-                    background: 'transparent',
-                    color: tokens.colors.textSecondary,
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.sm,
-                    padding: '2px 8px',
-                    fontSize: 10,
-                    fontWeight: 500,
-                    letterSpacing: 0.4,
-                    textTransform: 'none',
-                    cursor: pinningSessionId ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  Clear pin (auto)
-                </button>
-              )}
             </div>
             <div style={{ ...cardStyle, maxHeight: 240, overflowY: 'auto' }}>
               {sessionCount === 0 ? (
@@ -1089,59 +975,19 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {proxyCount > 1 && (
-                    <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                      Pick the proxy that should receive ticket triggers and chat messages. Other
-                      proxy sessions stay connected for observability but won't spawn subagents.
-                    </div>
-                  )}
-                  {liveSessions.map((s) => {
-                    const isManager = s.source === 'manager';
-                    // Main-pin selector + MAIN badge are routing-only signals;
-                    // manager rows never participate in routing so they're
-                    // hidden there. Selector also stays hidden when there's
-                    // only one proxy to pick (no ambiguity to resolve).
-                    const showSelector = !isManager && proxyCount > 1;
-                    const isPinned = !isManager && s.main_pinned;
-                    const isAutoMain = !isManager && s.is_main && !s.main_pinned;
-                    const showMainBadge = !isManager && s.is_main;
-                    const rowBusy = pinningSessionId === s.session_id;
-                    return (
+                  {liveSessions.map((s) => (
                       <div
                         key={s.session_id}
                         style={{
                           padding: '8px 10px',
                           borderRadius: 6,
-                          background: showMainBadge ? tokens.colors.surface : tokens.colors.surfaceSubtle,
-                          border: `1px solid ${showMainBadge ? tokens.colors.accent : tokens.colors.border}`,
+                          background: tokens.colors.surfaceSubtle,
+                          border: `1px solid ${tokens.colors.border}`,
                           fontSize: 12,
                           lineHeight: 1.5,
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          {showSelector && (
-                            <label
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 6,
-                                cursor: pinningSessionId ? 'not-allowed' : 'pointer',
-                                userSelect: 'none',
-                              }}
-                              title={isPinned ? 'Pinned as main' : 'Set as main'}
-                            >
-                              <input
-                                type="radio"
-                                name={`proxy-main-${agentId}`}
-                                checked={isPinned}
-                                disabled={!!pinningSessionId}
-                                onChange={() => { handlePinMain(s.session_id); }}
-                              />
-                              <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, letterSpacing: 0.3 }}>
-                                {rowBusy ? 'Pinning...' : 'Set as main'}
-                              </span>
-                            </label>
-                          )}
                           <span
                             style={{
                               fontSize: 10,
@@ -1149,36 +995,17 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                               padding: '1px 6px',
                               borderRadius: tokens.radii.sm,
                               background: 'transparent',
-                              color: isManager ? tokens.colors.textSecondary : tokens.colors.textMuted,
-                              border: `1px solid ${isManager ? tokens.colors.textSecondary : tokens.colors.border}`,
+                              color: tokens.colors.textSecondary,
+                              border: `1px solid ${tokens.colors.textSecondary}`,
                               textTransform: 'uppercase',
                               letterSpacing: 0.6,
                             }}
-                            title={isManager ? 'Synthesized from agent-manager InstanceRegistry' : 'Live proxy.mjs SSE connection'}
+                            title="Synthesized from the Runtime Host registry"
                           >
-                            {isManager ? 'Manager' : 'Proxy'}
+                            Runtime Host
                           </span>
-                          {showMainBadge && (
-                            <span
-                              style={{
-                                fontSize: 10,
-                                fontWeight: 700,
-                                padding: '1px 6px',
-                                borderRadius: tokens.radii.sm,
-                                background: isPinned ? tokens.colors.accent : 'transparent',
-                                color: isPinned ? '#fff' : tokens.colors.accent,
-                                border: `1px solid ${tokens.colors.accent}`,
-                                textTransform: 'uppercase',
-                                letterSpacing: 0.6,
-                              }}
-                              title={isPinned ? 'User-pinned main session' : 'Auto-selected main (oldest connected)'}
-                            >
-                              {isAutoMain ? 'Main · auto' : 'Main'}
-                            </span>
-                          )}
                         </div>
-                        {isManager ? (
-                          <>
+                        <>
                             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4 }}>
                               <span>
                                 <span style={{ color: tokens.colors.textMuted }}>via: </span>
@@ -1234,46 +1061,9 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                                 instance: {s.instance_id}
                               </div>
                             )}
-                          </>
-                        ) : (
-                          <>
-                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: showSelector || showMainBadge ? 4 : 0 }}>
-                              <span>
-                                <span style={{ color: tokens.colors.textMuted }}>connected: </span>
-                                {formatRelative(s.connected_at)}
-                              </span>
-                              <span>
-                                <span style={{ color: tokens.colors.textMuted }}>ip: </span>
-                                <span style={{ fontFamily: 'monospace', color: s.ip === 'unknown' ? tokens.colors.warning : undefined }}>
-                                  {s.ip || 'unknown'}
-                                </span>
-                              </span>
-                              <span>
-                                <span style={{ color: tokens.colors.textMuted }}>plugin: </span>
-                                <span style={{ fontFamily: 'monospace', color: s.plugin_version === 'unknown' ? tokens.colors.warning : undefined }}>
-                                  {s.plugin_version || 'unknown'}
-                                </span>
-                              </span>
-                              {s.board_id && (
-                                <span>
-                                  <span style={{ color: tokens.colors.textMuted }}>board: </span>
-                                  <span style={{ fontFamily: 'monospace' }}>{s.board_id.slice(0, 8)}</span>
-                                </span>
-                              )}
-                            </div>
-                            {s.user_agent && (
-                              <div style={{ marginTop: 4, color: tokens.colors.textMuted, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                                {s.user_agent}
-                              </div>
-                            )}
-                            <div style={{ marginTop: 4, color: tokens.colors.textDisabled, fontFamily: 'monospace', fontSize: 11 }}>
-                              session: {s.session_id}
-                            </div>
-                          </>
-                        )}
+                        </>
                       </div>
-                    );
-                  })}
+                  ))}
                 </div>
               )}
             </div>
@@ -1498,7 +1288,6 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     '';
                   const newColumn =
                     row.action === 'ticket_moved' ? row.new_value || '' : '';
-                  const proxySessionId = extractProxySessionId(row);
                   const isLast = idx === recentActivity.length - 1;
                   return (
                     <div
@@ -1564,14 +1353,6 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                                 {newColumn}
                               </span>
                             ) : null}
-                          </>
-                        ) : null}
-                        {proxySessionId ? (
-                          <>
-                            {' '}
-                            <span style={{ color: tokens.colors.textMuted, fontFamily: 'monospace', fontSize: 11 }}>
-                              {proxySessionId}
-                            </span>
                           </>
                         ) : null}
                       </div>
