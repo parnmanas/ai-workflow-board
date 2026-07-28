@@ -23,7 +23,7 @@ import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
-import { injectWorkFolder } from './prompts.js';
+import { injectWorkFolder, sharedWorktreeInstructions } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
@@ -533,6 +533,10 @@ export interface TicketTriggerArgs {
    *  injected into the spawned CLI's environment at SESSION CREATION. A live
    *  session keeps the env it was born with. Absent → none. */
   envVars?: Record<string, string>;
+  /** Manager-owned worktree policy appended to every initial and follow-up
+   * ticket turn. Unlike repository files, this is present even for a newly
+   * created empty checkout. */
+  worktreeInstructions?: string;
   /** ticket 3d180f85: handleTrigger already reserved this (ticket, role, agent)
    *  key in the authoritative `_inflight` map for the whole provision→spawn
    *  window (via tryReserveDispatch). When true, dispatchTrigger must NOT
@@ -615,6 +619,7 @@ export interface PromptComposer {
     ticketPrompt: string,
     ticketId: string,
     columnPrompt: ColumnPrompt | null,
+    extraInstructions?: string | null,
   ): string;
   composeChatPrompt(
     rolePrompt: string,
@@ -1912,6 +1917,9 @@ export class EventDispatcher {
       worktreeMode,
       ev.ticket_id,
     );
+    const worktreeInstructions = worktreeMode === 'shared'
+      ? sharedWorktreeInstructions(agentContext?.cwd || '')
+      : '';
 
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
@@ -1949,6 +1957,7 @@ export class EventDispatcher {
           runtimeProfile,
           effortPreset,
           envVars,
+          worktreeInstructions,
           maxConcurrentTicketsPerAgent:
             typeof ev.max_concurrent_tickets_per_agent === 'number'
               ? ev.max_concurrent_tickets_per_agent
@@ -2008,6 +2017,7 @@ export class EventDispatcher {
             ticketPrompt,
             ev.ticket_id,
             columnPrompt,
+            worktreeInstructions,
           ) ?? `[trigger] ${ev.ticket_id}`;
 
         const result = await this.#subagentManager.spawn({

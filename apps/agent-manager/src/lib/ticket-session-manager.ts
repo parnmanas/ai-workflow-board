@@ -507,7 +507,7 @@ export class TicketSessionManager
       spec.ticketPrompt || '',
       spec.ticketId,
       spec.columnPrompt || null,
-      null,
+      spec.worktreeInstructions || null,
     );
     const monitorMeta = {
       ticket_id: spec.ticketId,
@@ -853,6 +853,10 @@ export class TicketSessionManager
       lines.push('');
       lines.push('Updated instructions:');
       lines.push(spec.ticketPrompt);
+    }
+    if (spec.worktreeInstructions) {
+      lines.push('');
+      lines.push(spec.worktreeInstructions);
     }
     lines.push('');
     lines.push(

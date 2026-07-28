@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDispatchEnvVars } from '../dist/lib/event-dispatcher.js';
+import { composeTriggerPrompt, sharedWorktreeInstructions } from '../dist/lib/prompts.js';
 
 test('dispatch exports the manager-resolved shared worktree contract', () => {
   assert.deepEqual(
@@ -33,4 +34,22 @@ test('reserved AWB worktree keys cannot be spoofed by board environment variable
   assert.equal(env.AWB_WORK_FOLDER, 'D:\\real\\shared-0');
   assert.equal(env.AWB_WORKTREE_MODE, 'shared');
   assert.equal(env.AWB_TICKET_ID, 'real-ticket');
+});
+
+test('shared policy is AWB-owned and names the assigned checkout', () => {
+  const assigned = 'D:\\AWBAgents\\GameClient\\.awb\\wt\\resource\\shared-0';
+  const policy = sharedWorktreeInstructions(assigned);
+  const prompt = composeTriggerPrompt(
+    { id: 'ticket-123', title: 'Warm build' },
+    '',
+    '',
+    'ticket-123',
+    null,
+    policy,
+  );
+
+  assert.match(prompt, /AWB shared-worktree policy \(mandatory\)/);
+  assert.match(prompt, /Do not create another git worktree/);
+  assert.match(prompt, /Unity Library\/\) remain warm across tickets/);
+  assert.ok(prompt.includes(assigned));
 });

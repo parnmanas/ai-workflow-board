@@ -91,6 +91,23 @@ function appendBaseRepoBlock(
  */
 export const WORK_FOLDER_TOKEN = '{{AWB_WORK_FOLDER}}';
 
+/** Manager-owned policy injected into every ticket turn dispatched through a
+ * shared slot. Keeping this in AWB (rather than a checked-out repository)
+ * makes the contract available from the first agent run, even when the
+ * repository/worktree directory was just created and contains no AWB-specific
+ * helper scripts. */
+export function sharedWorktreeInstructions(workFolder: string): string {
+  if (!workFolder) return '';
+  return [
+    'AWB shared-worktree policy (mandatory):',
+    `- Your assigned repository checkout is exactly: ${workFolder}`,
+    '- Work only in that checkout. Do not create another git worktree, clone, checkout directory, `_compilecheck_*`, `_test_*`, or per-ticket build folder.',
+    '- Run build, test, Unity import, and verification commands in the assigned checkout so its caches (including Unity Library/) remain warm across tickets.',
+    '- Do not delete or recreate the assigned checkout or its cache directories. A clean/cold import requires explicit user instruction.',
+    '- If a repository script attempts to create or select another worktree, stop and report the script as incompatible with AWB shared mode; do not use a fallback directory.',
+  ].join('\n');
+}
+
 /**
  * Substitute the work-folder placeholder in a column-prompt content string with
  * the resolved absolute work folder (worktree 규약 ④), so the trigger prompt
