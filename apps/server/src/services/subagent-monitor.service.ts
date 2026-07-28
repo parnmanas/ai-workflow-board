@@ -9,9 +9,9 @@ import { LogService } from './log.service';
 import { MemoryMetricsRegistry } from './memory-metrics.registry';
 
 /**
- * Persistent registry + live transcript bus for plugin-spawned subagents.
+ * Persistent registry + live transcript bus for Agent Manager subagents.
  *
- * The plugin posts (a) a registration when it spawns a Claude CLI subagent,
+ * Agent Manager posts (a) a registration when it spawns a CLI subagent,
  * (b) every stream-json line in/out, (c) an end record when the process exits,
  * and (d) a periodic reconcile call listing the subagent_ids it currently has
  * alive. End and reconcile-driven termination both stamp expires_at = now +
@@ -20,9 +20,9 @@ import { MemoryMetricsRegistry } from './memory-metrics.registry';
  *
  * Why DB-backed (was in-memory):
  *   - Survives server restarts, so the UI keeps the transcript while the
- *     plugin process is still alive.
- *   - Reconcile path closes the gap left by plugin crashes: previously a
- *     half-finished run sat in memory until the proxy restarted; now it is
+ *     manager process is still alive.
+ *   - Reconcile path closes the gap left by manager crashes: previously a
+ *     half-finished run sat in memory until the manager restarted; now it is
  *     marked ended on the next reconcile tick and reaped 48h later.
  */
 
@@ -95,7 +95,7 @@ function endedRetentionMs(): number {
 export class SubagentMonitorService {
   private readonly retentionMs = endedRetentionMs();
   // appendLines runs `read line_count → INSERT N lines → UPDATE line_count`,
-  // which is racy if two appends for the same subagent overlap. Plugin posts
+  // which is racy if two appends for the same subagent overlap. Manager posts
   // are serialized per subagent today (one-shot taps and session managers
   // each flush behind a single batch timer), but the chain guards against a
   // future change shipping concurrent posts and corrupting `seq`.
@@ -144,7 +144,7 @@ export class SubagentMonitorService {
     role?: string;
   }): Promise<SubagentSummary> {
     const startedAt = input.started_at ? new Date(input.started_at) : new Date();
-    // Re-register of an existing id is a no-op for idempotency: the plugin
+    // Re-register of an existing id is a no-op for idempotency: the manager
     // POSTs `register` fire-and-forget, and a transient retry must not
     // overwrite line_count / ended_at on a record that has been making
     // progress in the meantime.
@@ -274,12 +274,12 @@ export class SubagentMonitorService {
   }
 
   /**
-   * Plugin reports the full set of subagent_ids it currently has alive. Any
+   * Agent Manager reports the full set of subagent_ids it currently has alive. Any
    * record we have for this agent that isn't in that set — and isn't already
    * ended — gets stamped ended with signal='disappeared'. The 48h retention
    * countdown begins from this moment, so the row is reaped on a later sweep.
    *
-   * Empty live_subagent_ids is the post-restart case: plugin lost its tap
+   * Empty live_subagent_ids is the post-restart case: the manager lost its tap
    * registry and reports zero, server marks every previously-registered live
    * record for that agent as disappeared.
    */

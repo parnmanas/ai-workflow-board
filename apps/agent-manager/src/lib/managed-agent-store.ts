@@ -174,8 +174,8 @@ export async function writeApiKey(agentId: string, raw: string): Promise<void> {
  *   - `awb`: the central AWB Streamable HTTP endpoint (`/mcp`). Per-agent
  *     apiKey in the Bearer header so server-side activity logs attribute
  *     every tool call to this managed agent. `X-AWB-Client-Type:
- *     managed-subagent` distinguishes manager-spawned subagents from
- *     legacy plugin spawns.
+ *     managed-subagent` distinguishes manager-spawned subagents from direct
+ *     MCP clients.
  *
  *   - `host`: a stdio MCP server forked from the agent-manager binary
  *     itself (`<this-binary> mcp-host`). Exposes cross-OS host tools

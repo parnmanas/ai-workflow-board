@@ -12,7 +12,6 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **MCP 호환**: @modelcontextprotocol/sdk 기반 Streamable HTTP 유지
 - **DB 호환**: SQLite(개발) + PostgreSQL(운영) 이중 지원 유지
 - **Agent 독립성**: AWB는 Agent의 내부 구현에 의존하지 않음 — MCP 인터페이스만 사용
-- **Plugin version sync**: AWB MCP tool surface 변경 시 동반 stdio MCP plugin (`https://github.com/parnmanas/claude-plugins`, subpath `ai-workflow-board/`) 도 업데이트. 절차 → (1) `proxy.mjs` / MCP tool 수정, (2) `.claude-plugin/plugin.json` version 범프, (3) plugin repo commit + push. 버전을 안 올리면 marketplace 캐시에 반영 안 됨. SSE / subagent / 채널 처리는 plugin 책임이 아님 (plugin v0.40.0 부터 agent-manager 로 이전).
 - **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `.claude/skills/awb-agent-manager-release/SKILL.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Board/Workspace 별 CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
 
 ## Technology Stack
@@ -259,12 +258,6 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Controllers: Explicit res.status(4xx/5xx).json({ error: '...' }) for known cases
 ## Cross-Cutting Concerns
 
-## Claude Plugin (stdio MCP forwarder)
-- Location: separate repo `https://github.com/parnmanas/claude-plugins` (subpath `ai-workflow-board/`)
-- `proxy.mjs` is a pure stdio↔HTTP MCP forwarder. Claude CLI ↔ proxy.mjs ↔ AWB `/mcp`
-- `lib/mcp-forward-session.mjs` owns the AWB MCP session — stale-session recovery, retries
-- The proxy does **not** consume the SSE stream and does **not** spawn subagents (since plugin v0.40.0 — those moved to agent-manager)
-
 ## Agent Manager (standalone subagent runner)
 - Location: `apps/agent-manager/`
 - Standalone Node binary (`awb-agent-manager`) — runs without Claude CLI, drives Claude / Codex / Gemini / custom CLIs
@@ -279,7 +272,6 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness work, ticket 040afa10):
 
 - **awb-ticket-recovery** — stuck / never-dispatching ticket runbook (edge-triggered dispatch, terminal-column births, async create-dispatch, duplicate-instance check)
-- **awb-plugin-sync** — stdio MCP plugin sync procedure incl. the often-missed `plugin.json` version bump
 - **awb-agent-manager-release** — agent-manager build-verify + same-PR SSE contract rule (버전은 publish 시 자동 계산 — 손 범프 금지)
 - **awb-field-wiring** — 5-touch-point checklist for Ticket JSON-array columns
 

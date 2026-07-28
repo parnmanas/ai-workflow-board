@@ -71,9 +71,3 @@
   `GET /api/tickets/:id/consensus`, `POST .../consensus/{propose,vote}` ·
   `consensus_update` SSE(웹 UI 전용, agent 스트림 미전달). E2E:
   `test/qa-flows/consensus-e2e.test.mjs`.
-
-## 4. plugin-sync
-
-MCP tool 목록·입출력 스키마는 불변이고 설명 문자열(`MENTION_SYNTAX_DOC`)만
-갱신됐다. `proxy.mjs` 는 순수 forwarder 로 live 스키마를 실시간 중계하므로
-**plugin 버전 범프 불필요** (DoD #6).

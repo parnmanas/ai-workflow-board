@@ -24,8 +24,8 @@ export type StreamEventType =
   | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
   | 'comment_typing'       // Phase-9 typed comments: someone is composing a comment on a ticket
   | 'ticket_presence'      // Tier-1 E: viewer set for a ticket (who has the panel open)
-  | 'fs_request'           // File browser: server → plugin reverse RPC to read agent-machine files
-  | 'subagent_registered'  // Subagent monitor: plugin spawned a subagent
+  | 'fs_request'           // File browser: server → agent-manager reverse RPC to read agent-machine files
+  | 'subagent_registered'  // Subagent monitor: agent-manager spawned a subagent
   | 'subagent_log'         // Subagent monitor: stream-json line in/out
   | 'subagent_ended'       // Subagent monitor: subagent process exited
   | 'agent_instance_update' // Agent Manager: daemon/proxy instance heartbeat / removal
@@ -83,7 +83,7 @@ export interface AgentTriggerPayload {
   // ticket leaves them unset (pure-discussion / non-code work).
   base_repo: { id: string; name: string; url: string; default_branch: string } | null;
   base_branch: string;
-  // TicketSupervisor signal: plugin should kill any live subagent for this
+  // TicketSupervisor signal: agent-manager should kill any live subagent for this
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
   force_respawn?: boolean;
@@ -164,7 +164,7 @@ export interface AgentActiveTask {
   ticket_id: string;
   ticket_title: string;
   claimed_at: string;  // ISO-8601
-  role?: string;       // role slug the subagent was spawned for; undefined for older plugins
+  role?: string;       // role slug the subagent was spawned for; undefined for older managers
   kind?: 'ticket' | 'qa';
 }
 
@@ -193,7 +193,7 @@ export interface AgentStatusPayload {
     ticket_id: string;
     ticket_title: string;
     claimed_at: string;  // ISO-8601
-    role?: string;       // role slug the subagent was spawned for; undefined for older plugins
+    role?: string;       // role slug the subagent was spawned for; undefined for older managers
   };
   // Full live task list for concurrency N (max_concurrent_tickets_per_agent > 1).
   // Carries board-ticket tasks (kind:'ticket') FOLLOWED BY in-progress QA-run
@@ -339,7 +339,7 @@ export interface ChatRoomMessagePayload {
   created_at: string; // ISO-8601
   // v0.33: trailing consecutive agent-sender count in the room, including this
   // message. user-sent → 0; agent reply to a user → 1; agent reply to that → 2…
-  // Plugin uses it to break agent-to-agent ping-pong loops by skipping
+  // Agent Manager uses it to break agent-to-agent ping-pong loops by skipping
   // delegation once a configurable cap is hit.
   agent_chain_depth?: number;
   // Agent participants of the room. Carried on the wire so an agent-manager
@@ -477,12 +477,12 @@ export interface UserMentionPayload {
 }
 
 // File browser — server emits this toward a specific agent's SSE stream to ask
-// the plugin to perform a filesystem op on the agent's machine. Plugin answers
+// Agent Manager to perform a filesystem op on the agent's machine. The manager answers
 // via HTTP POST to /api/fs/responses/:request_id (out-of-band — not SSE) so
 // response bodies aren't constrained by event-stream framing. Scope root
-// enforcement lives in the plugin, not here — server is a pure forwarder.
+// enforcement lives in Agent Manager, not here — server is a pure forwarder.
 export interface FsRequestPayload {
-  request_id: string;                        // server-generated uuid; plugin echoes it on the response POST
+  request_id: string;                        // server-generated uuid; manager echoes it on the response POST
   agent_id: string;                          // target agent (matches identity for filter)
   op: 'list' | 'stat' | 'read' | 'mkdir' | 'roots' | 'drives';
   path: string;                              // absolute path on the agent machine
@@ -491,13 +491,13 @@ export interface FsRequestPayload {
   name?: string;                             // mkdir: single-segment name of the new folder under `path`
 }
 
-// Subagent monitor — plugin reports subagent lifecycle + stream-json traffic
+// Subagent monitor — Agent Manager reports subagent lifecycle + stream-json traffic
 // to the AWB server so the web UI can render a live transcript across every
 // agent machine. Storage is in-memory only (live debug, not audit log) and a
-// subagent's record is dropped when its process exits or when the plugin
+// subagent's record is dropped when its process exits or when the manager
 // disconnects, so the dataset stays bounded without explicit pruning.
 export interface SubagentRegisteredPayload {
-  subagent_id: string;        // plugin-generated uuid; identifies one transcript
+  subagent_id: string;        // manager-generated uuid; identifies one transcript
   agent_id: string;           // parent registered agent
   workspace_id: string;
   kind: 'chat' | 'ticket' | 'oneshot';
@@ -505,11 +505,11 @@ export interface SubagentRegisteredPayload {
   pid: number;
   started_at: string;
   // Optional human-readable label the UI shows in the list (e.g., ticket title
-  // or room name). Plugin best-effort fills this; server doesn't validate.
+  // or room name). Agent Manager best-effort fills this; server doesn't validate.
   label?: string;
   // v0.34: ticket + role context for ticket-kind subagents. Lets the UI show
   // "Ticket title · reviewer" instead of just an opaque session key. Both
-  // optional — older plugins and chat/oneshot subagents leave them undefined.
+  // optional — older managers and chat/oneshot subagents leave them undefined.
   ticket_id?: string;
   ticket_title?: string;
   role?: string;

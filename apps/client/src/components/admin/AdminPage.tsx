@@ -19,7 +19,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   qa: { title: 'QA Tests', description: 'Run quality assurance tests' },
   logs: { title: 'Server Logs', description: 'View server logs' },
   'agent-logs': { title: 'Agent Logs', description: 'Per-agent plugin error reports' },
-  'agent-manager': { title: 'Agent Manager', description: 'Live daemon/proxy instances heartbeating against this server' },
+  'agent-manager': { title: 'Agent Manager', description: 'Live Agent Manager instances connected to this server' },
   'column-policies': { title: 'Column Policies', description: 'Declarative column×role enforcement that catches stuck tickets' },
   'workflow-health': { title: 'Workflow Health', description: 'Respawn-storm halts, twins, and comment-pingpong suppression stats' },
   'global-credentials': { title: 'Global Credentials', description: 'Instance-level credentials shared across all workspaces' },

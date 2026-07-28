@@ -21,7 +21,7 @@ import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 
 /**
- * Phase 3 — admin dashboard for live daemon/proxy plugin instances.
+ * Admin dashboard for live Agent Manager instances.
  *
  * Layout: master/detail split. Left column lists every heartbeating instance
  * grouped by host; right column shows the selected instance's subagents,
@@ -393,7 +393,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // Dispatch restart_manager SSE command via the /restart admin endpoint.
   // Server returns 202 with command_id + a short message; the manager later
   // re-execs and reappears as an `agent_instance_update` event with the
-  // same plugin_version (no polling needed here).
+  // same manager version (the wire field is plugin_version; no polling needed here).
   const handleRestart = async () => {
     if (restartPending) return;
     const ok = await confirm({
@@ -452,7 +452,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // git pull + npm install + build, acks success, then re-execs with --force;
   // an npm-global install instead reinstalls via `npm i -g` (detached helper)
   // and relaunches. Either way we see the restart on the client as an
-  // `agent_instance_update` event with the new plugin_version — no polling.
+  // `agent_instance_update` event with the new manager version — no polling.
   const handleUpdate = async () => {
     if (updatePending) return;
     const ok = await confirm({
@@ -565,7 +565,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
           </div>
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Plugin
+              Manager
             </dt>
             <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
               v{inst.plugin_version}
@@ -999,8 +999,8 @@ export default function AgentManagerPage() {
                 textAlign: 'center',
               }}
             >
-              No daemon or proxy instances are currently heartbeating against this server.
-              Start <code>daemon.mjs</code> or attach Claude CLI via the AWB proxy plugin.
+              No Agent Manager instances are currently heartbeating against this server.
+              Start <code>awb-agent-manager</code> and pair it with this AWB server.
             </div>
           )}
           {grouped.map(([host, list]) => (
@@ -1360,7 +1360,7 @@ const MAINTENANCE_BUTTONS: {
     kind: 'update_plugins',
     label: 'Update plugins',
     title:
-      'git pull --ff-only on every claude plugin marketplace under the agent\'s ' +
+      'git pull --ff-only on every marketplace checkout under the agent\'s ' +
       'cli-home. Refreshes the marketplace source without restarting the agent.',
   },
   {
@@ -2058,7 +2058,7 @@ function EditAgentManagerDialog({
   );
 }
 
-// ─── ManagerVersionBadge — render `(→ vX.Y.Z available)` next to plugin_version
+// ─── ManagerVersionBadge — render `(→ vX.Y.Z available)` next to the manager version
 // when the manager's UpdateChecker says a newer build is on origin/<branch>. A
 // pre-update manager (no UpdateChecker fields in the heartbeat) renders nothing
 // so we don't gaslight operators on instances that genuinely don't ship the

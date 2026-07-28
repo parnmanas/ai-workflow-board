@@ -5,9 +5,9 @@
 // every running process for one agent down to a single bit. This heartbeat
 // preserves the per-process fan-out the dashboard needs:
 //
-//   - mode             literal 'manager' (was daemon|proxy in claude-plugin)
+//   - mode             literal 'manager'
 //   - hostname         os.hostname()
-//   - plugin_version   read from caller (package.json version)
+//   - plugin_version   manager package version (legacy wire-field name)
 //   - cli              the adapter we booted with (claude, antigravity, …)
 //   - cli_adapters     all known adapters this binary exposes
 //   - pid              process pid

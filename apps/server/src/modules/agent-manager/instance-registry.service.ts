@@ -4,20 +4,19 @@ import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 
 /**
- * In-memory registry of plugin instances (daemon / proxy processes) currently
+ * In-memory registry of Agent Manager instances currently
  * heartbeating against this server.
  *
- * One Agent row in the DB can be backed by multiple physical processes —
- * a developer running both `proxy.mjs` (Claude CLI bridge) and `daemon.mjs`
- * (standalone subagent runner) on different hosts shares one agent identity.
+ * One Agent row in the DB can be backed by multiple physical manager processes
+ * on different hosts that share one agent identity.
  * The Agent.last_seen_at field collapses that fan-out to a single boolean
  * "any process heartbeated recently?". This registry preserves the per-process
- * detail the admin UI needs: which host, which mode, which plugin version,
+ * detail the admin UI needs: which host, which mode, which manager version,
  * which CLI adapters are registered.
  *
  * Storage is intentionally in-process. Instance presence is high-churn and
  * ephemeral — losing it on restart is fine; the next heartbeat (≤30s by
- * default in the plugin) repopulates it. A multi-pod deployment will have
+ * default in Agent Manager) repopulates it. A multi-pod deployment will have
  * split-brain instance views (each pod sees only the heartbeats it received);
  * fixing that needs Redis pub/sub and isn't worth doing until AWB scales out.
  */
@@ -26,8 +25,7 @@ export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
   workspace_id: string | null;
-  // ST-4: 'manager' is the standalone awb-agent-manager process — it is
-  // the AWB-side replacement for the plugin's daemon.mjs and supervises
+  // ST-4: 'manager' is the standalone awb-agent-manager process and supervises
   // multiple agent identities (claude/codex/antigravity).
   mode: 'daemon' | 'proxy' | 'manager';
   hostname: string;
@@ -145,7 +143,7 @@ export interface WorktreeStatusEntry {
   ticket_title?: string | null;
 }
 
-const INSTANCE_TTL_MS = 90_000;     // 3x default plugin heartbeat interval
+const INSTANCE_TTL_MS = 90_000;     // 3x default manager heartbeat interval
 const SWEEP_INTERVAL_MS = 30_000;
 
 @Injectable()

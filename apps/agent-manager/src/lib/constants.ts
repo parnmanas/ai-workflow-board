@@ -31,16 +31,6 @@ export const MANAGED_AGENTS_DIR = join(AGENT_MANAGER_HOME, 'agents');
 export const LOG_DIR = AGENT_MANAGER_HOME;
 export const LOG_PATH = join(LOG_DIR, 'agent-manager.log');
 
-export const LEGACY_PLUGIN_HOME = join(
-  process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'),
-  'channels',
-  'awb',
-);
-export const LEGACY_CONFIG_PATH = join(LEGACY_PLUGIN_HOME, 'config.json');
-export const LEGACY_AGENT_PATH = join(LEGACY_PLUGIN_HOME, 'agent.json');
-export const LEGACY_LOCK_PATH = join(LEGACY_PLUGIN_HOME, 'agent.lock');
-export const LEGACY_MIGRATION_MARKER = join(LEGACY_PLUGIN_HOME, 'MIGRATED-TO-AGENT-MANAGER.txt');
-
 export const RECONNECT_INITIAL_MS = 2000;
 export const RECONNECT_MAX_MS = 30000;
 export const REQUEST_TIMEOUT_MS = 30000;

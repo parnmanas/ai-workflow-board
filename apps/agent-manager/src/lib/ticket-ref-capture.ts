@@ -575,7 +575,7 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *   remote      — create_remote_improvement_ticket: files on ANOTHER AWB instance,
  *                 so a local deep-link would 404.
  *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
- *                 feature / action / user / api-key / benchmark / prompt-template /
+ *                 feature / action / function / user / api-key / benchmark / prompt-template /
  *                 chat / lesson: not a ticket-row mutation. (build / deploy 결과물성
  *                 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관 — EXCLUDE 아님.)
  */
@@ -585,7 +585,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   fetch_github_info: 'read', get_action: 'read',
   get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
   get_board: 'read', get_chat_room_messages: 'read',
-  get_feature: 'read', get_handoff_pipeline: 'read', get_latest_artifact: 'read',
+  get_feature: 'read', get_function: 'read', get_handoff_pipeline: 'read',
+  get_latest_artifact: 'read',
   get_my_tickets: 'read', get_qa_batch: 'read', get_qa_run: 'read', get_qa_scenario: 'read',
   get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',
   get_security_batch: 'read', get_security_profile: 'read', get_security_run: 'read',
@@ -594,7 +595,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
   list_agents: 'read', list_api_keys: 'read', list_archived_tickets: 'read',
   list_board_lessons: 'read', list_boards: 'read', list_channels: 'read',
-  list_chat_rooms: 'read', list_features: 'read', list_prompt_templates: 'read',
+  list_chat_rooms: 'read', list_features: 'read', list_function_runs: 'read',
+  list_functions: 'read', list_prompt_templates: 'read',
   list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',
   list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
   list_security_runs: 'read', list_security_schedules: 'read', list_ticket_attachments: 'read',
@@ -629,18 +631,21 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   delete_agent: 'non-ticket', delete_api_key: 'non-ticket', delete_board: 'non-ticket',
   delete_channel: 'non-ticket', delete_chat_message_attachment: 'non-ticket',
   delete_column: 'non-ticket', delete_prompt_template: 'non-ticket',
+  delete_function: 'non-ticket',
   delete_qa_scenario: 'non-ticket', delete_qa_schedule: 'non-ticket',
   delete_resource: 'non-ticket', delete_security_profile: 'non-ticket',
   delete_security_schedule: 'non-ticket', delete_user: 'non-ticket',
   delete_workspace: 'non-ticket', delete_workspace_schedule: 'non-ticket',
-  embed_resources: 'non-ticket', move_agent_to_workspace: 'non-ticket',
+  embed_resources: 'non-ticket', execute_function: 'non-ticket',
+  move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   qa_run_heartbeat: 'non-ticket', record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
   reject_feature: 'non-ticket',
   revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
   run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
-  save_action: 'non-ticket', save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
+  save_action: 'non-ticket', save_function: 'non-ticket',
+  save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',

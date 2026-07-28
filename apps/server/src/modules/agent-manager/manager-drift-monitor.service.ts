@@ -31,7 +31,7 @@
  * logs a one-line resolution and forgets the agent.
  *
  * This compresses the silent-stall detection window from days → hours without
- * touching the heartbeat wire contract, the agent-manager, or the plugin: it
+ * touching the heartbeat wire contract or the agent-manager: it
  * consumes data the manager already ships on every heartbeat.
  *
  * Persistence model: onset times are tracked in-process, keyed by the manager

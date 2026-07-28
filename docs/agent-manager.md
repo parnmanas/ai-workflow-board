@@ -2,9 +2,7 @@
 
 `apps/agent-manager/` is the standalone subagent runner that drives CLI-based
 AI agents (Claude, DeepSeek, Codex, Antigravity, PI, custom) on behalf of an
-AWB workspace. It
-replaces the daemon that used to live inside the
-`@parnmanas/awb` Claude plugin (≤ v0.39).
+AWB workspace.
 
 For an installation walkthrough, see
 [`apps/agent-manager/README.md`](../apps/agent-manager/README.md). This document is the
@@ -14,16 +12,12 @@ internals / operations reference.
 
 | Concern                                  | Owner                                |
 |------------------------------------------|--------------------------------------|
-| stdio MCP forwarding (Claude CLI → AWB)  | `claude-plugins/ai-workflow-board/proxy.mjs` (separate package) |
 | SSE event delivery to subagents          | `agent-manager` `EventStream` + `EventDispatcher` |
 | Subagent lifecycle (spawn / drain / TTL) | `agent-manager` `SubagentManager`    |
 | Persistent ticket / chat sessions        | `agent-manager` `TicketSessionManager`, `ChatSessionManager` |
 | CLI process supervision                  | `agent-manager` `ManagedAgentRegistry` + cli-adapters |
 | Instance heartbeat for AWB dashboard     | `agent-manager` `InstanceHeartbeat`  |
 | Pairing + agent identity issuance        | AWB server `apps/server/src/modules/agent-manager/` |
-
-The plugin is now a pure stdio↔HTTP MCP forwarder. It does **not** consume the
-SSE stream and does **not** spawn subagents.
 
 ## Process layout
 
@@ -66,15 +60,6 @@ Inside that directory:
 | `subagents/`            | Per-subagent working directories                     |
 | `instances/`            | Per-instance heartbeat state (multi-instance hosts)  |
 | `agent-manager.log`     | Append-only log file                                 |
-
-### Legacy import
-
-On first run, agent-manager copies
-`~/.claude/channels/awb/{config,agent}.json` into the new location if no
-`config.json` exists yet. A `MIGRATED-TO-AGENT-MANAGER.txt` marker is dropped
-in the legacy directory so subsequent runs skip the import. Legacy files are
-**never deleted** — the claude-plugin proxy still reads them for stdio MCP
-forwarding.
 
 ### Schema
 
@@ -406,9 +391,6 @@ start time. On startup:
    `--force` is passed.
 3. If the PID is dead — take it over.
 
-The lockfile is also inspected for the legacy `~/.claude/channels/awb/agent.lock`
-to refuse running concurrently with the old plugin daemon.
-
 ## Worktree isolation (per-(ticket,role) cwd)
 
 A managed agent has a single `working_dir`, and historically every
@@ -583,7 +565,7 @@ out a slot:
 
 - **API key scope** — pairing redeem creates an `ApiKey` bound to the
   manager's Agent row. All subsequent requests use this key as a Bearer
-  header. The key has full agent scope (same as a Claude plugin install).
+  header. The key has full agent scope.
 - **Pairing tokens** — never persisted on the manager. Single-use,
   10-minute TTL, mint endpoint is admin-only.
 - **fs-browser scope** — reverse-RPC fs operations are gated by realpath
@@ -657,13 +639,8 @@ Minimum manual smoke pass before each version bump:
 - Changes to the SSE contract (new `type`, new fields, semantics) require a
   matching server change in `apps/server/src/modules/agent-manager/` and
   must include a smoke-test of the new event end-to-end.
-- The claude-plugin (`submodules/claude-plugins/ai-workflow-board/`) is a
-  separate distribution. Touch only when stdio MCP forwarding behavior
-  itself changes; agent-manager work does not require a plugin version
-  bump.
-
-See the parent repo's `CLAUDE.md` _Agent Manager sync_ rule for how the
-ralf monorepo coordinates submodule ref bumps after these changes land.
+See the repository's `CLAUDE.md` _Agent Manager sync_ rule for the coordinated
+server and agent-manager release requirements.
 
 ## Server-side complements
 

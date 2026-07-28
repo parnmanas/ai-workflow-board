@@ -37,7 +37,7 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('package.json','dist/package.json')\"",
     "start": "node dist/main.js",
-    "test": "npm run build && node --test 'test/*.test.mjs'",
+    "test": "npm run build && node --test",
     "clean": "rimraf dist",
     "prepublishOnly": "npm run build"
   },

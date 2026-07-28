@@ -794,7 +794,7 @@ export class AgentManagerCommandHandler {
   }
 
   /**
-   * Update claude plugin marketplaces in the managed agent's cli-home. Each
+   * Update plugin marketplace checkouts in the managed agent's cli-home. Each
    * marketplace under `<cli-home>/plugins/marketplaces/<id>/` is a git
    * checkout of the marketplace repo, so a `git pull --ff-only` in that dir
    * is the cheapest way to refresh the plugin source without restarting the

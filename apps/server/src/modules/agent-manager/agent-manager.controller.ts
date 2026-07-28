@@ -48,7 +48,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
  * instances + ST-4 pairing/control flow for the standalone awb-agent-manager.
  *
  * Three audiences:
- *   - Plugin / agent-manager (X-Agent-Key): POST `/api/agent/instance-heartbeat`
+ *   - Agent Manager (X-Agent-Key): POST `/api/agent/instance-heartbeat`
  *     to register and refresh per-process presence. ST-4 manager mode adds
  *     agent_ids[]/working_dirs[]/paired_at to the InstanceRecord.
  *   - Admin user: GET `/api/admin/agent-manager/instances` etc. for the
@@ -80,13 +80,13 @@ export class AgentManagerController {
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
   ) {}
 
-  // ─── Plugin / manager → Server ───────────────────────────────────────────
+  // ─── Agent Manager → Server ──────────────────────────────────────────────
 
   @ApiSecurity('agent-api-key')
   @Post('api/agent/instance-heartbeat')
   @UseGuards(AgentAuthGuard)
   @ApiOperation({
-    summary: 'Plugin / awb-agent-manager → server: register / refresh a process instance',
+    summary: 'awb-agent-manager → server: register / refresh a process instance',
   })
   async heartbeat(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const auth = (req as any).apiKey;

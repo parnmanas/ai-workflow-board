@@ -5,12 +5,9 @@ an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Antigrav
 PI, or any custom binary that speaks MCP), and reports liveness back to the AWB
 admin dashboard.
 
-This package replaces the daemon that used to live inside the
-`@parnmanas/awb` Claude plugin. The plugin (in
-[`submodules/claude-plugins/ai-workflow-board/`](../../../claude-plugins/ai-workflow-board/))
-is now a pure stdio↔HTTP MCP forwarder. agent-manager owns everything else:
-SSE event delivery, persistent ticket/chat sessions, subagent supervision, fs
-browser, instance heartbeats, and CLI lifecycle management.
+agent-manager owns SSE event delivery, persistent ticket/chat sessions,
+subagent supervision, fs browser, instance heartbeats, and CLI lifecycle
+management.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -203,22 +200,6 @@ Notes:
   by an Administrator shell, the installer requests UAC approval automatically.
 - macOS uses `launchctl bootstrap` on modern macOS and falls back to
   `launchctl load -w` on older releases. Logs land in `/tmp/awb-agent-manager.log`.
-
-## Migration from the claude-plugin daemon (≤ v0.39)
-
-The plugin daemon is gone as of plugin v0.40.0. Everything it owned moved
-here. Migration is opt-in but easy:
-
-- agent-manager auto-imports `~/.claude/channels/awb/{config,agent}.json` on
-  first run if `~/.config/awb-agent-manager/config.json` is missing. A
-  `MIGRATED-TO-AGENT-MANAGER.txt` marker is dropped next to the legacy files;
-  subsequent starts skip the import. Legacy files are never deleted — the
-  plugin's stdio MCP proxy still reads them.
-- The first run will refuse to start while the legacy daemon's
-  `~/.claude/channels/awb/agent.lock` is owned by a live PID. Stop the old
-  Claude session (or `kill` the daemon) first, then start
-  `awb-agent-manager`. Pass `--force` to take over a stale lock owned by a
-  dead PID.
 
 ## Configuration
 

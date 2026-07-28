@@ -3,9 +3,7 @@
 // subagent manager. Extracted from EventStream so the SSE pipe can stay a thin
 // connect/parse loop.
 //
-// Standalone-mode note: agent-manager does not have a Claude CLI on stdin to
-// notify, so the legacy "sendChannelEvent fallback to main session" branches
-// from claude-plugin's daemon.mjs are intentionally absent. When no delegation
+// agent-manager does not have a CLI on stdin to notify. When no delegation
 // path is available, events are simply logged.
 
 import { log } from './logging.js';

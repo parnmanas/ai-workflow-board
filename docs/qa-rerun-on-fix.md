@@ -114,6 +114,3 @@ manually after you've confirmed the deploy.
 - QaManager scenario editor: **"수정 티켓 Done 시 → 시나리오 자동 재실행"** toggle +
   max-attempts / delay inputs (under "실패 시 → 수정 티켓 자동 생성").
 - QA RunDetail shows a `🔁 재실행 #n` badge plus the existing `→ 생성된 티켓` link.
-
-The companion stdio MCP plugin must be version-bumped whenever this schema
-changes (see CLAUDE.md → "Plugin version sync" / the `awb-plugin-sync` skill).
