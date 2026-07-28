@@ -60,18 +60,12 @@ export default function BoardSubMenu({
 
   const link = (section: string) =>
     wsId && boardId ? `/ws/${wsId}/boards/${boardId}/${section}` : '#';
-  const catalogLink =
-    wsId && boardId
-      ? `/ws/${wsId}/catalog?scope=board&board=${boardId}`
-      : '#';
-
   const navCollapsed = level === 'icon';
   const navInOverflow = level === 'narrow';
 
   // 섹션 nav 항목 정의 (emoji 매핑 §2.3 기준).
   const primaryNav = [
     { key: 'features', icon: '🧩', label: 'Features', to: link('features') },
-    { key: 'catalog', icon: '⚙', label: 'Automation Catalog', to: catalogLink },
   ];
   const overflowNav = [
     ...(benchmarkMode

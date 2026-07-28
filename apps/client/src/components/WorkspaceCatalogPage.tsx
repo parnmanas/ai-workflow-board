@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import type { Board, CatalogScope } from '../types';
 import { tokens } from '../tokens';
+import { useAuth } from '../contexts/AuthContext';
 import PageHeader from './PageHeader';
 import FunctionManager from './admin/FunctionManager';
 import CredentialManager from './admin/CredentialManager';
@@ -12,33 +13,60 @@ import PromptTemplateManager from './admin/PromptTemplateManager';
 import QaManager from './admin/QaManager';
 import SecurityManager from './admin/SecurityManager';
 import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
+import WorkspaceClaudeBackendProfilesEditor from './WorkspaceClaudeBackendProfilesEditor';
+import ClaudeBackendProfilesManager from './admin/ClaudeBackendProfilesManager';
+import QaRunner from './admin/QaRunner';
+import ColumnPoliciesManager from './admin/ColumnPoliciesManager';
+import WorkflowHealthDashboard from './admin/WorkflowHealthDashboard';
 
-type CatalogTab = 'functions' | 'credentials' | 'resources' | 'actions' | 'prompts' | 'qa' | 'security' | 'schedules';
+const CATALOG_SCOPES: CatalogScope[] = ['global', 'workspace', 'board'];
 
-const TABS: Array<{ id: CatalogTab; label: string; scopes: CatalogScope[] }> = [
-  { id: 'functions', label: 'Functions', scopes: ['global', 'workspace', 'board'] },
-  { id: 'credentials', label: 'Credentials', scopes: ['global', 'workspace', 'board'] },
-  { id: 'resources', label: 'Resources', scopes: ['global', 'workspace', 'board'] },
-  { id: 'prompts', label: 'Prompt Templates', scopes: ['global', 'workspace', 'board'] },
-  { id: 'actions', label: 'Actions', scopes: ['workspace', 'board'] },
-  { id: 'qa', label: 'QA', scopes: ['workspace', 'board'] },
-  { id: 'security', label: 'Security', scopes: ['workspace', 'board'] },
-  { id: 'schedules', label: 'Schedules', scopes: ['workspace', 'board'] },
-];
+function CatalogSection({
+  id,
+  title,
+  description,
+  scopes,
+  children,
+}: {
+  id: string;
+  title: string;
+  description: string;
+  scopes: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      id={`catalog-${id}`}
+      style={{
+        scrollMarginTop: 16,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.lg,
+        background: tokens.colors.surface,
+        overflow: 'hidden',
+      }}
+    >
+      <header style={{ padding: '16px 20px', borderBottom: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <h2 style={{ margin: 0, fontSize: 17, color: tokens.colors.textStrong }}>{title}</h2>
+          <span style={{ fontSize: 11, fontWeight: 700, color: tokens.colors.accent, textTransform: 'uppercase' }}>{scopes}</span>
+        </div>
+        <p style={{ margin: '5px 0 0', color: tokens.colors.textMuted, fontSize: 12, lineHeight: 1.5 }}>{description}</p>
+      </header>
+      <div style={{ padding: 20 }}>{children}</div>
+    </section>
+  );
+}
 
 export default function WorkspaceCatalogPage() {
   const { wsId = '' } = useParams<{ wsId: string }>();
+  const { hasPermission } = useAuth();
   const [params, setParams] = useSearchParams();
-  const requestedTab = params.get('tab') as CatalogTab | null;
-  const tab = TABS.some(item => item.id === requestedTab) ? requestedTab! : 'functions';
-  const tabConfig = TABS.find(item => item.id === tab)!;
   const requestedScope = params.get('scope') as CatalogScope | null;
-  const createScope = tabConfig.scopes.includes(requestedScope as CatalogScope)
-    ? requestedScope!
-    : (tabConfig.scopes.includes('workspace') ? 'workspace' : tabConfig.scopes[0]);
+  const createScope = CATALOG_SCOPES.includes(requestedScope as CatalogScope) ? requestedScope! : 'workspace';
   const [boards, setBoards] = useState<Board[]>([]);
   const requestedBoard = params.get('board') || '';
   const boardId = createScope === 'board' ? (requestedBoard || boards[0]?.id || '') : '';
+  const operationalBoardId = createScope === 'board' ? boardId : undefined;
 
   useEffect(() => {
     if (!wsId) return;
@@ -53,76 +81,44 @@ export default function WorkspaceCatalogPage() {
     }
   }, [boardId, createScope, params, requestedBoard, setParams]);
 
-  const setParam = (key: string, value: string) => {
+  useEffect(() => {
+    const legacySection = params.get('section') || params.get('tab');
+    if (!legacySection) return;
+    const target = document.getElementById(`catalog-${legacySection}`);
+    if (target) requestAnimationFrame(() => target.scrollIntoView({ block: 'start' }));
+  }, [params]);
+
+  const setScopeParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
     next.set(key, value);
-    if (key === 'tab') {
-      const nextTab = TABS.find(item => item.id === value)!;
-      const currentScope = next.get('scope') as CatalogScope | null;
-      if (!nextTab.scopes.includes(currentScope as CatalogScope)) next.set('scope', nextTab.scopes[0]);
-    }
+    next.delete('tab');
+    next.delete('section');
     setParams(next);
   };
 
-  const manager = useMemo(() => {
-    const shared = { workspaceId: wsId, createScope, boardId: boardId || undefined };
-    switch (tab) {
-      case 'functions':
-        return <FunctionManager {...shared} catalogMode allScopes />;
-      case 'credentials':
-        return <CredentialManager {...shared} catalogMode allScopes />;
-      case 'resources':
-        return <ResourceManager {...shared} catalogMode allScopes />;
-      case 'prompts':
-        return <PromptTemplateManager {...shared} catalogMode allScopes />;
-      case 'actions':
-        return <ActionManager workspaceId={wsId} boardId={createScope === 'board' ? boardId : undefined} allScopes />;
-      case 'qa':
-        return <QaManager workspaceId={wsId} boardId={createScope === 'board' ? boardId : undefined} allScopes />;
-      case 'security':
-        return <SecurityManager workspaceId={wsId} boardId={createScope === 'board' ? boardId : undefined} allScopes />;
-      case 'schedules':
-        return <WorkspaceSchedulesEditor workspaceId={wsId} boardId={createScope === 'board' ? boardId : undefined} />;
-    }
-  }, [boardId, createScope, tab, wsId]);
+  const sharedDefinitionProps = {
+    workspaceId: wsId,
+    createScope,
+    boardId: boardId || undefined,
+    catalogMode: true,
+    allScopes: true,
+  } as const;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
         title="Automation Catalog"
-        description="Manage reusable definitions and operational automation from one place. Catalog lists include every applicable scope."
+        description="All reusable definitions, operational automation, and scope assignments in one page."
       />
-      <div style={{ padding: '14px 24px 0', borderBottom: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {TABS.map(item => (
-            <button
-              key={item.id}
-              onClick={() => setParam('tab', item.id)}
-              style={{
-                padding: '8px 11px',
-                border: 'none',
-                borderBottom: tab === item.id ? `2px solid ${tokens.colors.accent}` : '2px solid transparent',
-                background: 'transparent',
-                color: tab === item.id ? tokens.colors.textStrong : tokens.colors.textMuted,
-                fontWeight: tab === item.id ? 700 : 500,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
       <div style={{ padding: '14px 24px', display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'end', background: tokens.colors.surfaceSubtle }}>
         <label style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
-          New item scope
+          Default scope for new items
           <select
             value={createScope}
-            onChange={event => setParam('scope', event.target.value)}
+            onChange={event => setScopeParam('scope', event.target.value)}
             style={{ display: 'block', marginTop: 5, minWidth: 180, padding: '8px 10px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
           >
-            {tabConfig.scopes.map(scope => <option key={scope} value={scope}>{scope[0].toUpperCase() + scope.slice(1)}</option>)}
+            {CATALOG_SCOPES.map(scope => <option key={scope} value={scope}>{scope[0].toUpperCase() + scope.slice(1)}</option>)}
           </select>
         </label>
         {createScope === 'board' && (
@@ -130,7 +126,7 @@ export default function WorkspaceCatalogPage() {
             Board
             <select
               value={boardId}
-              onChange={event => setParam('board', event.target.value)}
+              onChange={event => setScopeParam('board', event.target.value)}
               style={{ display: 'block', marginTop: 5, minWidth: 240, padding: '8px 10px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary }}
             >
               {boards.map(board => <option key={board.id} value={board.id}>{board.name}</option>)}
@@ -138,13 +134,56 @@ export default function WorkspaceCatalogPage() {
           </label>
         )}
         <div style={{ color: tokens.colors.textMuted, fontSize: 12, paddingBottom: 8 }}>
-          {tabConfig.scopes.length === 3
-            ? 'Global items are inherited by every workspace; Workspace and Board definitions can override them.'
-            : 'This type binds workspace-owned agents or execution history, so Global scope is intentionally unavailable.'}
+          Lists always show every applicable scope. Actions, QA, Security, and Schedules bind workspace agents or execution history;
+          when Global is selected, their new items remain Workspace-scoped.
         </div>
       </div>
-      <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
-        {manager}
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24, display: 'grid', gap: 20 }}>
+        <CatalogSection id="functions" title="Functions" scopes="Global · Workspace · Board" description="Executable reusable functions, resolved from Board to Workspace to Global.">
+          <FunctionManager {...sharedDefinitionProps} />
+        </CatalogSection>
+        <CatalogSection id="credentials" title="Credentials" scopes="Global · Workspace · Board" description="Secrets and authentication references available to catalog consumers within their scope boundary.">
+          <CredentialManager {...sharedDefinitionProps} />
+        </CatalogSection>
+        <CatalogSection id="resources" title="Resources" scopes="Global · Workspace · Board" description="Repositories, files, links, and resource-to-credential bindings.">
+          <ResourceManager {...sharedDefinitionProps} />
+        </CatalogSection>
+        <CatalogSection id="prompts" title="Prompt Templates" scopes="Global · Workspace · Board" description="Reusable prompts and Board column prompt assignments.">
+          <PromptTemplateManager {...sharedDefinitionProps} />
+        </CatalogSection>
+        <CatalogSection id="actions" title="Actions" scopes="Workspace · Board" description="Reusable agent actions and ticket-done triggers.">
+          <ActionManager workspaceId={wsId} boardId={operationalBoardId} allScopes />
+        </CatalogSection>
+        <CatalogSection id="qa" title="QA Scenarios" scopes="Workspace · Board" description="Scenario definitions, execution history, batches, and QA schedules.">
+          <QaManager workspaceId={wsId} boardId={operationalBoardId} allScopes />
+        </CatalogSection>
+        <CatalogSection id="security" title="Security Profiles" scopes="Workspace · Board" description="Security inspection profiles, runs, batches, and schedules.">
+          <SecurityManager workspaceId={wsId} boardId={operationalBoardId} allScopes />
+        </CatalogSection>
+        <CatalogSection id="schedules" title="Agent Schedules" scopes="Workspace · Board" description="General scheduled agent tasks.">
+          <WorkspaceSchedulesEditor workspaceId={wsId} boardId={operationalBoardId} />
+        </CatalogSection>
+        <CatalogSection id="claude-backends" title="Claude Backend Profiles" scopes="Global · Workspace" description="Define instance backends and assign the allowed/default profiles for this workspace.">
+          {hasPermission('admin.access') && (
+            <div style={{ marginBottom: 20 }}>
+              <ClaudeBackendProfilesManager />
+            </div>
+          )}
+          <WorkspaceClaudeBackendProfilesEditor workspaceId={wsId} />
+        </CatalogSection>
+        {hasPermission('admin.access') && (
+          <>
+            <CatalogSection id="system-qa" title="System QA" scopes="Global" description="Run AWB system-level quality assurance checks.">
+              <QaRunner />
+            </CatalogSection>
+            <CatalogSection id="column-policies" title="Column Policies" scopes="Global" description="Declarative role enforcement and stuck-ticket protection.">
+              <ColumnPoliciesManager />
+            </CatalogSection>
+            <CatalogSection id="workflow-health" title="Workflow Health" scopes="Global" description="Automation suppression, respawn storms, QA trend, and token usage.">
+              <WorkflowHealthDashboard />
+            </CatalogSection>
+          </>
+        )}
       </div>
     </div>
   );

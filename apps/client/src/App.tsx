@@ -26,7 +26,6 @@ const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPag
 const WorkspaceCatalogPage = lazy(() => import('./components/WorkspaceCatalogPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
-const WorkspaceClaudeBackendProfilesPage = lazy(() => import('./components/WorkspaceClaudeBackendProfilesPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 
@@ -75,9 +74,9 @@ export function WorkspaceSectionRedirect() {
   return <Navigate to={`${defaultSectionForMode(mode)}${search}`} replace />;
 }
 
-function CatalogRedirect({ tab, boardScoped = false }: { tab: string; boardScoped?: boolean }) {
+function CatalogRedirect({ section, boardScoped = false }: { section: string; boardScoped?: boolean }) {
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
-  const params = new URLSearchParams({ tab, scope: boardScoped ? 'board' : 'workspace' });
+  const params = new URLSearchParams({ section, scope: boardScoped ? 'board' : 'workspace' });
   if (boardScoped && boardId) params.set('board', boardId);
   return <Navigate to={`/ws/${wsId}/catalog?${params.toString()}`} replace />;
 }
@@ -198,11 +197,11 @@ function AppContent() {
             <Route path="assistant" element={<ChatFirstHome />} />
             <Route path="boards" element={<BoardsIndexPage />} />
             <Route path="boards/:boardId" element={<Board />} />
-            <Route path="boards/:boardId/resources" element={<CatalogRedirect tab="resources" boardScoped />} />
-            <Route path="boards/:boardId/actions" element={<CatalogRedirect tab="actions" boardScoped />} />
+            <Route path="boards/:boardId/resources" element={<CatalogRedirect section="resources" boardScoped />} />
+            <Route path="boards/:boardId/actions" element={<CatalogRedirect section="actions" boardScoped />} />
             <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-            <Route path="boards/:boardId/qa" element={<CatalogRedirect tab="qa" boardScoped />} />
-            <Route path="boards/:boardId/security" element={<CatalogRedirect tab="security" boardScoped />} />
+            <Route path="boards/:boardId/qa" element={<CatalogRedirect section="qa" boardScoped />} />
+            <Route path="boards/:boardId/security" element={<CatalogRedirect section="security" boardScoped />} />
             <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
@@ -213,14 +212,14 @@ function AppContent() {
             <Route path="channels" element={<WorkspaceChannelsPage />} />
             <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
             <Route path="catalog" element={<WorkspaceCatalogPage />} />
-            <Route path="prompt-templates" element={<CatalogRedirect tab="prompts" />} />
-            <Route path="resources" element={<CatalogRedirect tab="resources" />} />
-            <Route path="actions" element={<CatalogRedirect tab="actions" />} />
-            <Route path="functions" element={<CatalogRedirect tab="functions" />} />
-            <Route path="credentials" element={<CatalogRedirect tab="credentials" />} />
+            <Route path="prompt-templates" element={<CatalogRedirect section="prompts" />} />
+            <Route path="resources" element={<CatalogRedirect section="resources" />} />
+            <Route path="actions" element={<CatalogRedirect section="actions" />} />
+            <Route path="functions" element={<CatalogRedirect section="functions" />} />
+            <Route path="credentials" element={<CatalogRedirect section="credentials" />} />
             <Route path="roles" element={<WorkspaceRolesPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
-            <Route path="claude-backend-profiles" element={<WorkspaceClaudeBackendProfilesPage />} />
+            <Route path="claude-backend-profiles" element={<CatalogRedirect section="claude-backends" />} />
           </Route>
         </Route>
       </Routes>

@@ -47,9 +47,11 @@ Claude Backend Profile은 instance registry와 Workspace assignment 관계를 �
 ## UI
 
 `/ws/:workspaceId/catalog`이 단일 관리 진입점이다. Function, Credential,
-Resource, Prompt Template, Action, QA, Security, Schedule을 탭으로 전환하며,
-상단의 공통 scope selector가 새 항목의 scope를 정한다. 목록은 scope badge와
-함께 한 화면에서 전체 scope를 보여준다.
+Resource, Prompt Template, Action, QA, Security, Schedule을 별도 탭으로
+나누지 않고 한 스크롤 화면에 모두 렌더링한다. 상단의 공통 scope selector가
+새 항목의 기본 scope를 정하고, 목록은 scope badge와 함께 전체 scope를
+보여준다. Claude backend 정의/Workspace 할당과 System QA, Column Policies,
+Workflow Health도 같은 화면의 섹션으로 관리한다.
 
 기존 Workspace/Admin/Board별 관리 URL은 이 Catalog로 redirect한다. 이 호환
 경로는 기존 북마크와 외부 링크를 깨지 않기 위해 유지한다.
@@ -61,7 +63,7 @@ Resource, Prompt Template, Action, QA, Security, Schedule을 탭으로 전환하
    `normalizeCatalogScope`, `assertCatalogBoardScope`를 사용한다.
 3. Global 쓰기는 admin 권한으로 제한하고 Workspace 간 read/write를 거부한다.
 4. REST와 MCP가 같은 상속 범위와 Board 검증을 사용하게 한다.
-5. 별도 Sidebar/Admin/Board 메뉴를 추가하지 않고 Automation Catalog에 탭을
-   추가한다.
+5. 별도 Sidebar/Admin/Board 메뉴나 Catalog 탭을 추가하지 않고 Automation
+   Catalog의 동일 화면에 섹션을 추가한다.
 6. PostgreSQL additive/nullable 변경 migration과 SQLite synchronize 양쪽을
    검증한다.

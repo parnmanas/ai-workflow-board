@@ -49,16 +49,21 @@ test('board scope fails closed when the board/workspace pair is invalid', async 
   );
 });
 
-test('client exposes one catalog route and redirects legacy management routes', () => {
+test('client exposes one menu entry and one tabless catalog page for all management sections', () => {
   const app = fs.readFileSync(path.join(ROOT, 'App.tsx'), 'utf8');
   const sidebar = fs.readFileSync(path.join(ROOT, 'components', 'Sidebar.tsx'), 'utf8');
   const boardSubMenu = fs.readFileSync(path.join(ROOT, 'components', 'BoardSubMenu.tsx'), 'utf8');
+  const catalog = fs.readFileSync(path.join(ROOT, 'components', 'WorkspaceCatalogPage.tsx'), 'utf8');
   assert.match(app, /path="catalog" element={<WorkspaceCatalogPage/);
-  assert.match(app, /CatalogRedirect tab="functions"/);
-  assert.match(app, /CatalogRedirect tab="resources"/);
+  assert.match(app, /CatalogRedirect section="functions"/);
+  assert.match(app, /CatalogRedirect section="resources"/);
   assert.match(sidebar, /label: 'Automation Catalog'/);
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
   assert.doesNotMatch(sidebar, /label: 'Global Credentials'/);
-  assert.match(boardSubMenu, /label: 'Automation Catalog'/);
-  assert.doesNotMatch(boardSubMenu, /label: '(QA|Security|Resources)'/);
+  assert.doesNotMatch(sidebar, /label: '(QA Tests|Column Policies|Workflow Health|Claude Profiles|Claude Backend Profiles)'/);
+  assert.doesNotMatch(boardSubMenu, /label: '(Automation Catalog|QA|Security|Resources)'/);
+  assert.doesNotMatch(catalog, /const TABS|requestedTab|setParam\('tab'/);
+  for (const section of ['functions', 'credentials', 'resources', 'prompts', 'actions', 'qa', 'security', 'schedules', 'claude-backends', 'system-qa', 'column-policies', 'workflow-health']) {
+    assert.match(catalog, new RegExp(`CatalogSection id="${section}"`));
+  }
 });

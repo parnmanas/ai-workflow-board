@@ -127,7 +127,6 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
     { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
-    { key: 'claude-backend-profiles', path: `/ws/${wsId}/claude-backend-profiles`, label: 'Claude Profiles', icon: 'B' },
   ];
   // Workspace Settings hosts the workspace-default agent harness — operator
   // surface, so it only renders for admins (the page itself also gates).
@@ -137,13 +136,9 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
 
   const adminNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
     { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U', badge: counts.pendingUsers },
-    { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
     { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
     { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
     { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
-    { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
-    { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
-    { key: 'admin-claude-backend-profiles', path: '/admin/claude-backend-profiles', label: 'Claude Backend Profiles', icon: 'B' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 
@@ -334,49 +329,6 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
                         <NavBadge count={counts.tickets.perBoard[b.id]} />
                       )}
                     </button>
-                    {/* Board-specific automation is managed in the workspace Catalog. */}
-                    {active && (
-                      <>
-                        {[
-                          { label: 'Automation Catalog', path: `/ws/${wsId}/catalog?scope=board&board=${b.id}` },
-                          { label: 'Settings', path: `/ws/${wsId}/boards/${b.id}/settings` },
-                        ].map((sub) => {
-                          const subActive = location.pathname === sub.path;
-                          return (
-                            <button
-                              key={sub.path}
-                              onClick={() => { navigate(sub.path); if (overlay) onClose(); }}
-                              style={{
-                                width: '100%',
-                                padding: '6px 16px 6px 32px',
-                                fontSize: 12,
-                                color: subActive ? tokens.colors.textStrong : tokens.colors.textSecondary,
-                                fontWeight: subActive ? 600 : 400,
-                                cursor: 'pointer',
-                                background: subActive ? tokens.colors.surfaceHover : 'transparent',
-                                border: 'none',
-                                textAlign: 'left',
-                                fontFamily: 'inherit',
-                              }}
-                              onMouseEnter={(e) => {
-                                if (!subActive) {
-                                  (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textStrong;
-                                  (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceHover;
-                                }
-                              }}
-                              onMouseLeave={(e) => {
-                                if (!subActive) {
-                                  (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textSecondary;
-                                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
-                                }
-                              }}
-                            >
-                              {sub.label}
-                            </button>
-                          );
-                        })}
-                      </>
-                    )}
                   </React.Fragment>
                 );
               })

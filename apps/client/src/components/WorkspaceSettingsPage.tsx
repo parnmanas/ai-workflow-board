@@ -6,8 +6,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import HarnessConfigEditor from './HarnessConfigEditor';
-import WorkspaceClaudeBackendProfilesEditor from './WorkspaceClaudeBackendProfilesEditor';
-import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
 import AssistantAgentSetting from './chat/AssistantAgentSetting';
 import { PermissionNotice } from './common';
 import { tokens } from '../tokens';
@@ -67,7 +65,6 @@ export default function WorkspaceSettingsPage() {
         ) : (
           <>
             <AssistantAgentSetting workspace={workspace} onSaved={load} />
-            <WorkspaceClaudeBackendProfilesEditor workspaceId={workspace.id} />
             <HarnessConfigEditor
               raw={workspace.harness_config}
               title="Agent Harness (workspace default)"
@@ -90,7 +87,6 @@ export default function WorkspaceSettingsPage() {
                 }
               }}
             />
-            <WorkspaceSchedulesEditor workspaceId={workspace.id} />
           </>
         )}
       </div>

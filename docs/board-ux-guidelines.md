@@ -10,23 +10,24 @@ The Board header and sub-menu expose only board operations:
 - board status controls such as Pause / Resume;
 - ticket and feature views;
 - Archive, Settings, and Benchmark when enabled;
-- one **Automation Catalog** entry carrying the current `board` query.
+- no reusable-definition manager links.
 
 Resources, Actions, QA, and Security no longer have independent Board
 management pages. Their legacy URLs redirect to:
 
 ```text
-/ws/:workspaceId/catalog?tab=:tab&scope=board&board=:boardId
+/ws/:workspaceId/catalog?section=:section&scope=board&board=:boardId
 ```
 
 Do not add a new board-only manager page for a reusable automation definition.
-Add it as a Catalog tab and make the scope explicit instead.
+Add it as a section on the single Catalog page and make the scope explicit
+instead.
 
 ## Automation Catalog
 
-The Catalog displays applicable scopes together so operators can compare
-inheritance and overrides without navigating between Admin, Workspace, and
-Board pages.
+The Catalog renders every management section together on one scrolling page.
+It has no per-type tabs or separate Board/Admin variants. Operators can compare
+inheritance and overrides without navigating between pages.
 
 - Functions, Credentials, Resources, and Prompt Templates use Global,
   Workspace, and Board scopes.
@@ -36,7 +37,9 @@ Board pages.
 - Board scope always requires a board belonging to the selected workspace.
 - Every row shows a scope badge.
 
-Legacy workspace and Admin routes redirect to the relevant Catalog tab. New
+Claude backend definition/assignment, System QA, Column Policies, and Workflow
+Health are also sections in the same page. Legacy workspace and Admin routes
+redirect to the relevant Catalog section. New
 navigation must link directly to the Catalog rather than relying on redirects.
 
 See [Catalog scopes](catalog-scopes.md) for the data model, inheritance rules,
