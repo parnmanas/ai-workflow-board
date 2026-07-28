@@ -16,6 +16,7 @@ import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
+import { SkillsModule } from '../skills/skills.module';
 
 @Module({
   // AgentsModule re-exports SubagentMonitorService so the same singleton that
@@ -31,7 +32,11 @@ import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
   // (to inject InstanceRegistryService into AgentsController for live-data
   // enrichment of /api/agents). NestJS resolves the cycle via forwardRef on
   // both sides.
-  imports: [forwardRef(() => AgentsModule), TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource])],
+  imports: [
+    forwardRef(() => AgentsModule),
+    SkillsModule,
+    TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource]),
+  ],
   controllers: [AgentManagerController],
   providers: [
     InstanceRegistryService,

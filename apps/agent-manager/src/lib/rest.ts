@@ -202,7 +202,14 @@ export async function postCommandAck(
  */
 export async function postDispatchAck(
   config: AwbConfig,
-  body: { ticket_id: string; role: string; trigger_id: string; outcome: 'processed' | 'nack'; reason?: string },
+  body: {
+    ticket_id: string;
+    role: string;
+    trigger_id: string;
+    outcome: 'processed' | 'nack';
+    reason?: string;
+    skill_snapshot_run_id?: string;
+  },
 ): Promise<void> {
   if (!body.ticket_id || !body.role) return;
   try {
@@ -220,6 +227,7 @@ export async function postDispatchAck(
         trigger_id: body.trigger_id || '',
         outcome: body.outcome,
         reason: body.reason ?? '',
+        skill_snapshot_run_id: body.skill_snapshot_run_id ?? '',
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });

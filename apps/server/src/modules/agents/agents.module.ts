@@ -35,6 +35,7 @@ import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { ColumnPoliciesModule } from '../column-policies/column-policies.module';
+import { SkillsModule } from '../skills/skills.module';
 
 @Module({
   // forwardRef avoids the AgentsModule ↔ AgentManagerModule cycle:
@@ -52,6 +53,7 @@ import { ColumnPoliciesModule } from '../column-policies/column-policies.module'
     // ColumnPoliciesModule exports ColumnRolePolicyService — read-only
     // consumer inside the stuck detector sweep (ticket f886ada7).
     ColumnPoliciesModule,
+    SkillsModule,
   ],
   controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
   providers: [

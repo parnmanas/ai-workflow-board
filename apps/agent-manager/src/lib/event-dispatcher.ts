@@ -53,6 +53,11 @@ import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './subagent-manager.js';
 import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES } from './constants.js';
+import { createHash } from 'node:crypto';
+import {
+  SkillMaterializer,
+  type RuntimeSkillSnapshot,
+} from './skills/skill-materializer.js';
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -1241,9 +1246,24 @@ export class EventDispatcher {
     leaseId: string;
     task: string;
     systemContext?: string;
+    skillSnapshot?: (RuntimeSkillSnapshot & { run_id?: string }) | null;
   }): Promise<RuntimeDispatchResult> {
     if (!this.#runtimeSupervisor) {
       throw new Error('runtime_supervisor_unavailable');
+    }
+    let skillDirectory = '';
+    if (args.skillSnapshot) {
+      const materializationId = `run-${createHash('sha256')
+        .update(args.skillSnapshot.run_id || args.runId)
+        .digest('hex')
+        .slice(0, 32)}`;
+      const root = args.agentContext.cli_home_dir
+        ? `${args.agentContext.cli_home_dir}/runs`
+        : `${args.agentContext.cwd}/.awb/runtime-runs`;
+      skillDirectory = await new SkillMaterializer(root).materialize(
+        materializationId,
+        args.skillSnapshot,
+      );
     }
     return this.#runtimeSupervisor.dispatch({
       agentId: args.agentContext.agent_id,
@@ -1254,7 +1274,12 @@ export class EventDispatcher {
       runtimeId: args.agentContext.cli,
       runtimeConfig: args.agentContext.runtime_config,
       model: args.agentContext.model,
-      systemContext: args.systemContext,
+      systemContext: [
+        args.systemContext,
+        skillDirectory
+          ? `Immutable AWB skill snapshot directory: ${skillDirectory}`
+          : '',
+      ].filter(Boolean).join('\n\n'),
       task: args.task,
     });
   }
@@ -1996,6 +2021,7 @@ export class EventDispatcher {
             `Trigger source: ${ev.trigger_source || 'unknown'}`,
           ].filter(Boolean).join('\n\n'),
           task: taskText,
+          skillSnapshot: ev.skill_snapshot ?? null,
         });
         log(
           `Trigger dispatched through Hermes ACP: ticket=${ev.ticket_id} ` +
@@ -2169,6 +2195,7 @@ export class EventDispatcher {
       trigger_id: String(ev?.field_changed || ''),
       outcome,
       reason: reason ? String(reason).slice(0, 500) : '',
+      skill_snapshot_run_id: String(ev?.skill_snapshot?.run_id || ''),
     });
   }
 

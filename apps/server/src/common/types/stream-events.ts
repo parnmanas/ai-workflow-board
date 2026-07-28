@@ -93,6 +93,22 @@ export interface AgentTriggerPayload {
   // the server gate (set_current_task lags the trigger by the spawn
   // round-trip). Defaults to 1 in the manager when absent.
   max_concurrent_tickets_per_agent?: number;
+  // Immutable skill bundle selected for this logical run. Runtime Hosts must
+  // verify both the snapshot digest and every per-skill digest before exposing
+  // these files to a runtime.
+  skill_snapshot?: {
+    run_id: string;
+    digest: string;
+    manifest: Array<{
+      skill_id: string;
+      skill_version_id: string;
+      slug: string;
+      version: number;
+      digest: string;
+      body: string;
+      support_files: Array<{ path: string; content: string }>;
+    }>;
+  } | null;
   // Resolved harness config (ticket e9c7a896): workspace default merged with
   // the board override via resolveHarnessConfig(). agent-manager maps the
   // keys onto subagent CLI flags at spawn time (--append-system-prompt /

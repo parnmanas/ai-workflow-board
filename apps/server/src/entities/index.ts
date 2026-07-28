@@ -65,3 +65,8 @@ export { Feature } from './Feature';
 export { BoardLesson } from './BoardLesson';
 export { ClaudeBackendProfile } from './ClaudeBackendProfile';
 export { WorkspaceClaudeBackendProfile } from './WorkspaceClaudeBackendProfile';
+export { Skill } from './Skill';
+export { SkillVersion } from './SkillVersion';
+export { AgentSkillAssignment } from './AgentSkillAssignment';
+export { RunSkillSnapshot } from './RunSkillSnapshot';
+export { SkillProposal } from './SkillProposal';

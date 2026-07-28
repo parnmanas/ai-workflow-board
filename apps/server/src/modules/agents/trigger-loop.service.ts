@@ -37,6 +37,7 @@ import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig 
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
+import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -195,6 +196,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // RespawnStormDetectorService's `messaging` — ChatRoomsModule is already
     // imported by AgentsModule, no cycle.
     private readonly roomMessaging: RoomMessagingService,
+    private readonly runSkillSnapshots: RunSkillSnapshotService,
   ) {
     this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
   }
@@ -2751,6 +2753,36 @@ candidate's branch or move the ticket.
 
     // Ephemeral trigger_id — plugin-side dedup key, no server persistence.
     const triggerId = randomUUID();
+    const skillRunId = `ticket:${ticket.id}:${role || '_'}`;
+    let skillSnapshot: {
+      run_id: string;
+      digest: string;
+      manifest: unknown;
+    } | null = null;
+    try {
+      const snapshot = await this.runSkillSnapshots.resolve({
+        workspaceId: ticket.workspace_id || '',
+        runId: skillRunId,
+        agentId,
+        boardId,
+        roleSlug: role,
+      });
+      skillSnapshot = {
+        run_id: snapshot.run_id,
+        digest: snapshot.digest,
+        manifest: snapshot.manifest,
+      };
+    } catch (error) {
+      // Skill selection is part of the execution contract. Dispatching without
+      // the requested snapshot would be an implicit fallback, so fail closed.
+      this.logService.error('MCP', 'skill snapshot resolution failed; trigger not emitted', {
+        err: String(error), ticket_id: ticket.id, agent_id: agentId, role,
+      });
+      throw Object.assign(new Error('Unable to pin run skill snapshot'), {
+        status: 503,
+        code: 'SKILL_SNAPSHOT_FAILED',
+      });
+    }
 
     const forceRespawn = opts?.forceRespawn === true;
 
@@ -2814,6 +2846,7 @@ candidate's branch or move the ticket.
       // the focus-selector cutover. Server-side dispatch is gated by
       // the focus selector, not this field.
       max_concurrent_tickets_per_agent: maxConcurrent,
+      skill_snapshot: skillSnapshot,
     });
 
     this.logService.info('MCP', 'agent_trigger emitted (fire-and-forget)', {

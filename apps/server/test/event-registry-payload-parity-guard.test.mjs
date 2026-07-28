@@ -334,6 +334,7 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
     'max_concurrent_tickets_per_agent',
     'worktree_mode',
     'worktree_rel_path',
+    'skill_snapshot',
   ]) {
     assert.match(
       flat,

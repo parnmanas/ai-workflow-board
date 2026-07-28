@@ -197,6 +197,7 @@ export const EVENT_TYPES: EventDefinition[] = [
           typeof event.max_concurrent_tickets_per_agent === 'number'
             ? event.max_concurrent_tickets_per_agent
             : undefined,
+        skill_snapshot: event.skill_snapshot ?? null,
       };
       return {
         payload,
@@ -272,6 +273,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         // Per-board cap forwarded so the manager can keep a defensive drop
         // alongside the server-side gate.
         max_concurrent_tickets_per_agent: p.max_concurrent_tickets_per_agent,
+        skill_snapshot: p.skill_snapshot ?? null,
         timestamp: env.timestamp,
       };
     },

@@ -37,6 +37,7 @@ import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-
 import { FeaturesModule } from './modules/features/features.module';
 import { HandoffModule } from './modules/handoff/handoff.module';
 import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
+import { SkillsModule } from './modules/skills/skills.module';
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-f
     FeaturesModule,
     HandoffModule,
     WorkflowFunctionsModule,
+    SkillsModule,
   ],
 })
 export class AppModule {}

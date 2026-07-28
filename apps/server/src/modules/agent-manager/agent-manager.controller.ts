@@ -12,6 +12,7 @@ import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
 import { DispatchIntentService } from '../agents/dispatch-intent.service';
+import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -138,6 +139,7 @@ export class AgentManagerController {
     // Durable dispatch outbox ack sink (ticket e7c87517). From AgentsModule
     // (exported), reachable here via the existing forwardRef(AgentsModule).
     private readonly dispatchIntents: DispatchIntentService,
+    private readonly runSkillSnapshots: RunSkillSnapshotService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -662,11 +664,18 @@ export class AgentManagerController {
     const trigger_id = String(body?.trigger_id || '').trim();
     const outcome = body?.outcome === 'processed' ? 'processed' : body?.outcome === 'nack' ? 'nack' : null;
     const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 500) : '';
+    const skillSnapshotRunId = String(body?.skill_snapshot_run_id || '').trim();
     if (!ticket_id || !role || !outcome) {
       return res.status(400).json({ error: 'ticket_id, role and outcome (processed|nack) are required' });
     }
 
     const result = await this.dispatchIntents.applyManagerAck({ ticketId: ticket_id, role, triggerId: trigger_id, outcome, reason });
+    if (outcome === 'processed' && skillSnapshotRunId) {
+      const ticket = await this.ticketRepo.findOne({ where: { id: ticket_id } });
+      if (ticket?.workspace_id) {
+        await this.runSkillSnapshots.lock(ticket.workspace_id, skillSnapshotRunId);
+      }
+    }
     this.logService.info(
       'AgentManager',
       `Dispatch ack ticket=${ticket_id.slice(0, 8)} role=${role} outcome=${outcome} matched=${result.matched} agent=${callerAgentId}`,
