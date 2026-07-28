@@ -391,7 +391,7 @@ export default function ChatRoomView({
             Select a room
           </div>
           <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-            Choose a chat from the list to view messages.
+            Choose a chat from the sidebar to view messages.
           </div>
         </div>
       </div>

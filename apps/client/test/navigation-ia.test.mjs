@@ -35,6 +35,12 @@ test('chat rooms use a bounded scroll area and canonical room paths', () => {
   assert.match(chatPageSource, /navigate\(`\/ws\/\$\{wsId\}\/chat\/\$\{roomId\}`/);
 });
 
+test('the main chat surface does not duplicate the sidebar room list', () => {
+  assert.doesNotMatch(chatPageSource, /import ChatRoomListPanel/);
+  assert.doesNotMatch(chatPageSource, /<ChatRoomListPanel/);
+  assert.match(chatPageSource, /<ChatRoomView/);
+});
+
 test('settings remain one click away and own canonical nested routes', () => {
   for (const segment of [
     'workspace',

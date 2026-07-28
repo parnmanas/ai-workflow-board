@@ -5,7 +5,6 @@ import {
   useCallback,
   useMemo,
 } from 'react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
@@ -25,7 +24,6 @@ import {
   dispatchChatRoomUpdate,
 } from './utils/participantFlow';
 import NewChatModal from './ParticipantPicker';
-import ChatRoomListPanel from './RoomListPanel';
 import ChatRoomView from './RoomDetailPanel';
 import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
 
@@ -37,8 +35,9 @@ import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
  * picker modal (DM / group), markdown rendering, SSE real-time updates,
  * read receipts, and room management actions (rename/leave/add participants).
  *
- * Two-panel layout via react-resizable-panels. Mobile: single-panel with
- * room list default, tap-to-enter room.
+ * The persistent application Sidebar owns room discovery and navigation.
+ * This page only renders the selected room so the room list is not duplicated
+ * in the main content area.
  */
 
 // Page size for both initial load and `before=<id>` history pagination.
@@ -101,8 +100,6 @@ export default function ChatPage() {
   const openTicketArtifact = useOpenTicketArtifact();
 
   const [rooms, setRooms] = useState<ChatRoomListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [roomsError, setRoomsError] = useState<string | null>(null);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatRoomMessageItem[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -112,7 +109,6 @@ export default function ChatPage() {
   // the scroll listener stops asking for more.
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
-  const [mobileView, setMobileView] = useState<'list' | 'room'>('list');
   const [participantCount, setParticipantCount] = useState(0);
   const [roomParticipants, setRoomParticipants] = useState<MentionParticipant[]>([]);
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
@@ -163,13 +159,9 @@ export default function ChatPage() {
   // includes every active room in the workspace, including agent-to-agent
   // DMs the current user isn't a participant in. Off by default; persisted
   // to localStorage so the choice survives reloads.
-  const [showAllRooms, setShowAllRoomsState] = useState<boolean>(() => {
+  const [showAllRooms] = useState<boolean>(() => {
     try { return localStorage.getItem('chat:showAllRooms') === 'true'; } catch { return false; }
   });
-  const setShowAllRooms = useCallback((v: boolean) => {
-    setShowAllRoomsState(v);
-    try { localStorage.setItem('chat:showAllRooms', String(v)); } catch { /* noop */ }
-  }, []);
 
   // Workspace 전환 시 이전 workspace 의 활성 방을 들고 있지 않도록 초기화한다.
   // activeRoomId 가 null 이 되면 아래 "Load messages on room change" effect 가
@@ -184,11 +176,9 @@ export default function ChatPage() {
   // beat the sibling AppLayout effect that syncs the ambient header to the new
   // workspace, so relying on it here could re-fetch under the old workspace.
   useEffect(() => {
-    setLoading(true);
     api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId)
       .then((list) => {
         setRooms(list);
-        setRoomsError(null);
       })
       .catch((err: any) => {
         // Surface the real failure in the console so a future "Could not load
@@ -200,9 +190,7 @@ export default function ChatPage() {
           `[chat] listChatRooms failed (scope=${showAllRooms ? 'workspace' : 'mine'}, status=${err?.status ?? '?'}, code=${err?.code ?? ''})`,
           err,
         );
-        setRoomsError('Could not load chats.');
-      })
-      .finally(() => setLoading(false));
+      });
   }, [showAllRooms, wsId]);
 
   // Keep the persistent shell's compact room list in sync without creating a
@@ -236,9 +224,8 @@ export default function ChatPage() {
     const targetRoomId = routeRoomId || null;
     setActiveRoomId(targetRoomId);
     if (!targetRoomId) return;
-    if (isMobile) setMobileView('room');
     if (messageParam) setScrollToMessageId(messageParam);
-  }, [routeRoomId, searchParams, isMobile, navigate, wsId]);
+  }, [routeRoomId, searchParams, navigate, wsId]);
 
   // Load messages + mark read on room change
   useEffect(() => {
@@ -488,12 +475,6 @@ export default function ChatPage() {
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
     if (wsId) navigate(`/ws/${wsId}/chat/${roomId}`);
-    if (isMobile) setMobileView('room');
-  }
-
-  function handleNavigateToMessage(roomId: string, messageId: string) {
-    selectRoom(roomId);
-    setScrollToMessageId(messageId);
   }
 
   // Older-message loader: fetches a page of history strictly older than
@@ -566,7 +547,6 @@ export default function ChatPage() {
       setActiveRoomId(null);
       setMessages([]);
       if (wsId) navigate(`/ws/${wsId}/chat`);
-      if (isMobile) setMobileView('list');
     }
   }
 
@@ -672,104 +652,29 @@ export default function ChatPage() {
   const activeAgentTasks = normalizeAgentTasks(dashboardAgents.find((agent) => agent.id === dmAgentId));
   const showUpgradeBanner = chatProtocolVersion !== null && chatProtocolVersion < 2;
 
-  // Mobile layout: single panel
-  if (isMobile) {
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {showUpgradeBanner && <ProtocolUpgradeBanner />}
-        {mobileView === 'list' ? (
-          <ChatRoomListPanel
-            rooms={rooms}
-            loading={loading}
-            error={roomsError}
-            activeRoomId={activeRoomId}
-            onSelectRoom={selectRoom}
-            onNewChat={() => setShowNewChat(true)}
-            workspaceId={workspaceId}
-            onNavigateToMessage={handleNavigateToMessage}
-            showAllRooms={showAllRooms}
-            onToggleShowAllRooms={setShowAllRooms}
-            currentUserId={user?.id}
-          />
-        ) : (
-          <ChatRoomView
-            room={activeRoom}
-            messages={messages}
-            loadingMessages={loadingMessages}
-            loadingOlderMessages={loadingOlderMessages}
-            hasMoreMessages={hasMoreMessages}
-            onLoadOlderMessages={handleLoadOlderMessages}
-            onMessageSent={handleMessageSent}
-            onLeaveRoom={handleLeaveRoom}
-            onRoomRenamed={handleRoomRenamed}
-            onParticipantsAdded={handleParticipantsAdded}
-            onRoomCleared={handleRoomCleared}
-            isMobile={true}
-            onBack={() => {
-              setMobileView('list');
-              setActiveRoomId(null);
-            }}
-            participantCount={participantCount}
-            participants={roomParticipants}
-            typingAgents={typingAgents}
-            currentUserId={user?.id}
-            activeTasks={activeAgentTasks}
-            onSelectTask={openTicketArtifact}
-          />
-        )}
-        <NewChatModal
-          open={showNewChat}
-          onClose={() => setShowNewChat(false)}
-          onCreated={handleNewChatCreated}
-        />
-      </div>
-    );
-  }
-
-  // Desktop layout: two-panel
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {showUpgradeBanner && <ProtocolUpgradeBanner />}
-      <Group orientation="horizontal" style={{ height: '100%', flex: 1, overflow: 'hidden' }}>
-        <Panel defaultSize="30" minSize="20">
-          <ChatRoomListPanel
-            rooms={rooms}
-            loading={loading}
-            error={roomsError}
-            activeRoomId={activeRoomId}
-            onSelectRoom={selectRoom}
-            onNewChat={() => setShowNewChat(true)}
-            workspaceId={workspaceId}
-            onNavigateToMessage={handleNavigateToMessage}
-            showAllRooms={showAllRooms}
-            onToggleShowAllRooms={setShowAllRooms}
-            currentUserId={user?.id}
-          />
-        </Panel>
-        <Separator style={{ background: tokens.colors.border, width: 1, cursor: 'col-resize' }} />
-        <Panel defaultSize="70" minSize="40">
-          <ChatRoomView
-            room={activeRoom}
-            messages={messages}
-            loadingMessages={loadingMessages}
-            loadingOlderMessages={loadingOlderMessages}
-            hasMoreMessages={hasMoreMessages}
-            onLoadOlderMessages={handleLoadOlderMessages}
-            onMessageSent={handleMessageSent}
-            onLeaveRoom={handleLeaveRoom}
-            onRoomRenamed={handleRoomRenamed}
-            onParticipantsAdded={handleParticipantsAdded}
-            onRoomCleared={handleRoomCleared}
-            isMobile={false}
-            participantCount={participantCount}
-            participants={roomParticipants}
-            typingAgents={typingAgents}
-            currentUserId={user?.id}
-            activeTasks={activeAgentTasks}
-            onSelectTask={openTicketArtifact}
-          />
-        </Panel>
-      </Group>
+      <ChatRoomView
+        room={activeRoom}
+        messages={messages}
+        loadingMessages={loadingMessages}
+        loadingOlderMessages={loadingOlderMessages}
+        hasMoreMessages={hasMoreMessages}
+        onLoadOlderMessages={handleLoadOlderMessages}
+        onMessageSent={handleMessageSent}
+        onLeaveRoom={handleLeaveRoom}
+        onRoomRenamed={handleRoomRenamed}
+        onParticipantsAdded={handleParticipantsAdded}
+        onRoomCleared={handleRoomCleared}
+        isMobile={isMobile}
+        participantCount={participantCount}
+        participants={roomParticipants}
+        typingAgents={typingAgents}
+        currentUserId={user?.id}
+        activeTasks={activeAgentTasks}
+        onSelectTask={openTicketArtifact}
+      />
 
       <NewChatModal
         open={showNewChat}
