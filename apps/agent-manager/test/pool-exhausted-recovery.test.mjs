@@ -91,6 +91,16 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+test('an existing warm shared slot keeps the normal configured one-shot TTL', async () => {
+  const state = newState({ poolFull: false, slotReused: true });
+  const d = makeDispatcher(state);
+
+  await d.handleTrigger(makeEvent({ field_changed: 'warm-ttl' }));
+
+  assert.equal(state.spawns.length, 1);
+  assert.equal(state.spawns[0].ttlMinutes, undefined);
+});
+
 // Faithful single-flight subagentManager (same as provisioning-block-pend).
 function makeSubagentManager(state) {
   const records = new Map();
@@ -149,7 +159,12 @@ function makeDispatcher(state) {
     async resolveCwd() {
       state.resolveCalls += 1;
       if (state.poolFull) return { isWorktree: false, reason: 'pool_exhausted' };
-      return { isWorktree: true, cwd: '/ws/.awb/wt/shared-0', mode: 'shared', reused: false };
+      return {
+        isWorktree: true,
+        cwd: '/ws/.awb/wt/shared-0',
+        mode: 'shared',
+        reused: state.slotReused ?? false,
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -231,6 +246,7 @@ test('pool_exhausted + reclaimable lease → on-demand reclaim + inline retry re
   assert.equal(state.resolveCalls, 2, 'provisioning retried INLINE after the reclaim freed a slot');
   assert.equal(state.spawns.length, 1, 'the dispatch recovered autonomously — exactly one strand spawned');
   assert.equal(state.spawns[0].ticketId, TICKET);
+  assert.equal(state.spawns[0].ttlMinutes, 600, 'a newly-created shared slot gets a 10-hour cold-import TTL');
   assert.deepEqual(
     d.dispatchBlockCounts(),
     { 'worktree:pool_exhausted': 1 },

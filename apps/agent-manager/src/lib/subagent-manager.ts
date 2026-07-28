@@ -804,7 +804,7 @@ export class SubagentManager implements SubagentManagerContract {
         room_id: spec.roomId || null,
         started_at: Date.now(),
         expected_completion_at:
-          Date.now() + (this.#config.delegation.ttlMinutes ?? 15) * 60_000,
+          Date.now() + (spec.ttlMinutes ?? this.#config.delegation.ttlMinutes ?? 15) * 60_000,
         config_path: configPath,
         config_path_is_temp: configPathIsTemp,
         process_handle: child,

@@ -47,6 +47,7 @@ import { FolderMutex } from './run-execution-lock.js';
 import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './subagent-manager.js';
+import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES } from './constants.js';
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -401,6 +402,8 @@ export interface SubagentSpawnArgs {
    *  spawn site picks the per-CLI slice via selectEffortSlice. Null/absent →
    *  no effort override. */
   effortPreset?: ResolvedEffortPreset | null;
+  /** Per-spawn lifetime override for unusually long initialization work. */
+  ttlMinutes?: number;
   /** Non-secret env vars from the board environment_config (ticket 354d336b),
    *  injected into the spawned CLI's environment. Applied on every spawn (not
    *  persisted on disk like the cloned repos). Absent → none. */
@@ -971,7 +974,7 @@ export class EventDispatcher {
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
     bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string }> {
+  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string; coldSharedWorktree?: boolean }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
       hasAgentContext: Boolean(agentContext),
@@ -1019,7 +1022,10 @@ export class EventDispatcher {
           return { ok: false, reason, blockerKind: `worktree:${reason}`, detail: checkout.detail, path };
         }
         agentContext.cwd = res.cwd;
-        return { ok: true };
+        return {
+          ok: true,
+          coldSharedWorktree: res.mode === 'shared' && res.reused === false,
+        };
       }
       const gate = classifyWorktreeOutcome(res);
       if (gate.blocked) {
@@ -2038,6 +2044,9 @@ export class EventDispatcher {
           runtimeProfile,
           effortPreset,
           envVars,
+          ttlMinutes: worktreeProvision.coldSharedWorktree
+            ? SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES
+            : undefined,
         });
 
         if (result.spawned) {

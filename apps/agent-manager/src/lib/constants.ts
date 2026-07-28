@@ -60,6 +60,11 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   runExecutionLock: true,
 });
 
+/** A new shared slot has no warm build cache yet. Unity's initial Asset Import
+ * can legitimately take hours, so only that first slot run gets a 10-hour
+ * one-shot lifetime. Reused slots keep the normal delegation TTL. */
+export const SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES = 10 * 60;
+
 export const TTL_SWEEP_INTERVAL_MS = 60_000;
 export const SIGTERM_GRACE_MS = 5_000;
 export const STOP_GRACE_MS = 2_000;
