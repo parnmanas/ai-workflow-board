@@ -70,7 +70,7 @@ export interface Agent {
   working_dir?: string;
   manager_agent_id?: string | null;
   /** Workspace this agent identity belongs to. Server populates on every
-   *  list/get; the AgentManager admin page uses it to render the per-row
+   *  list/get; the Agent Manager runtime section uses it to render the per-row
    *  workspace picker that lets operators relocate managed agents that
    *  were created against a global manager. */
   workspace_id?: string;

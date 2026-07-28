@@ -12,7 +12,7 @@ import { credentialFallbackCopy } from '../../utils/credentialFallback';
  * agent. Extracted from `admin/AgentManagerPage.tsx` (where it was the only
  * caller) so the same surface can render from `AgentDetailModal` too.
  *
- * Why share: the AgentManager admin page and the workspace-level AgentDetail
+ * Why share: the Agent Manager Runtime section and workspace-level AgentDetail
  * page both list the same managed agents but used to expose totally
  * different Edit forms (admin: name + working_dir + description + credential
  * with CLI locked; AgentDetail: name + description + avatar_url only). The
@@ -20,7 +20,7 @@ import { credentialFallbackCopy } from '../../utils/credentialFallback';
  * 7988c041 — same agent identity, two different edit shapes. Reusing this
  * component from both surfaces keeps them in lockstep.
  *
- * `managerInstanceId` is optional. The admin page always passes it (so
+ * `managerInstanceId` is optional. The runtime section always passes it (so
  * working_dir changes can ping the running manager via `set_working_dir`),
  * but AgentDetailModal may not have a known instance id — the dialog
  * skips the SSE notification in that case and tells the operator the cwd

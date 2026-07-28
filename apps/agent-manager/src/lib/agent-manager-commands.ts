@@ -536,7 +536,7 @@ export class AgentManagerCommandHandler {
         log(
           `spawn_agent: agent=${agentId.slice(0, 8)} credential=${fetched.provider} ` +
             `(id=${fetched.credential_id.slice(0, 8)}) has empty required field(s) ${required.join(',')} — ` +
-            `re-edit the credential in AWB Admin → Credentials. Falling back to operator HOME.`,
+            `re-edit the credential in AWB Settings → Credentials. Falling back to operator HOME.`,
         );
         return null;
       }

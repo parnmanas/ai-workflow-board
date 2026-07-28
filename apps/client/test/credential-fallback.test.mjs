@@ -1,7 +1,7 @@
 // credential 공란 fallback 안내 순수 로직 회귀 테스트 (티켓 d2360de6).
 //
-// 미러가 아니라 4개 표시 지점(admin/AgentManager, AgentsPage,
-// admin/ManagedAgentDialog, AgentDetailModal)이 실제로 import 하는
+// 여러 화면에서 문구를 복제하지 않고 AgentsPage, ManagedAgentDialog,
+// AgentDetailModal이 실제로 import 하는
 // src/utils/credentialFallback.ts 를 그대로 구동한다. 어댑터별 문구를
 // 오배선하거나(예: deepseek 을 "CLI login" 이라 표기) 반오판 방지 프레이밍을
 // 지우면 이 테스트가 실패한다.

@@ -231,7 +231,7 @@ function ScheduleRow({ s, workspaceId, agentLabel, onEdit, onToggle, onRunNow, o
         {s.last_run_at ? (
           s.last_room_id ? (
             <Link
-              to={`/ws/${workspaceId}/chat?room=${s.last_room_id}`}
+              to={`/ws/${workspaceId}/chat/${s.last_room_id}`}
               title="마지막으로 열린 방으로 이동"
               style={{ color: tokens.colors.accent, textDecoration: 'none' }}
             >

@@ -23,7 +23,7 @@ flows and when to use which.
 
 Symptoms that say a re-login is overdue:
 
-- **AWB Admin → Agent Manager → Managed agents** shows a yellow/red
+- **AWB Workspace → AI Agents → Agent Manager Runtime** shows a yellow/red
   badge next to the agent (`expires in <N>h`, `expired`, `no refresh`,
   `no credential`). The badge is driven by the manager heartbeat reading
   `agents/<id>/cli-home/.credentials.json` every 30s; a yellow badge means
@@ -85,7 +85,7 @@ The script:
 After the script finishes, restart the agent in AWB so the running
 subagent loop picks up the new token:
 
-> Admin → Agent Manager → \<agent\> → **Restart**
+> Workspace → AI Agents → \<agent\> → **Restart**
 
 (Background: agent-manager re-runs `prepareCliHome` on every spawn, so
 any new spawn after the file was rewritten picks up the new token.
@@ -114,7 +114,7 @@ Steps:
    Same content.)*
 
 2. **Save it as a Credential in AWB.**
-   `Admin → Credentials → New`
+   `Settings → Credentials → New`
    - Workspace: the agent's workspace
    - Provider: `Claude (Subscription)`
    - Name: anything memorable (e.g. `claude-gameclient-2026-05`)
@@ -122,11 +122,11 @@ Steps:
    - Save.
 
 3. **Attach the credential to the agent.**
-   `Admin → Agent Manager → <agent> → Edit → CLI credential` → pick the
+   `Workspace → AI Agents → <agent> → Edit → CLI credential` → pick the
    credential saved in step 2 → Save.
 
 4. **Restart the agent.**
-   `Admin → Agent Manager → <agent> → Restart` (sends
+   `Workspace → AI Agents → <agent> → Restart` (sends
    `agent_manager_command: restart_agent` over SSE).
 
 5. agent-manager's `restart_agent` handler stops the running CLI, then
@@ -162,7 +162,7 @@ Steps:
    prints — nothing is persisted to disk. Copy it.
 
 2. **Save it as a Credential in AWB.**
-   `Admin → Credentials → New`
+   `Settings → Credentials → New`
    - Workspace: the agents' workspace
    - Provider: `Claude (OAuth Token)`
    - Name: e.g. `claude-shared-oauth-2026`
@@ -170,11 +170,11 @@ Steps:
    - Save.
 
 3. **Attach to each agent.**
-   `Admin → Agent Manager → <agent> → Edit → CLI credential` → pick the
+   `Workspace → AI Agents → <agent> → Edit → CLI credential` → pick the
    credential from step 2 → Save. The same credential can back any number
    of agents.
 
-4. **Propagate.** `Admin → Agent Manager → Restart all agents` — agents
+4. **Propagate.** `Workspace → AI Agents → Agent Manager Runtime → Restart all agents` — agents
    re-fetch the credential on the next spawn and inject
    `CLAUDE_CODE_OAUTH_TOKEN`. No `.credentials.json` is written, so there
    is nothing to rotate and no daily logout.

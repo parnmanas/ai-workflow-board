@@ -64,7 +64,9 @@ export default function WorkspaceSettingsPage() {
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading…</div>
         ) : (
           <>
-            <AssistantAgentSetting workspace={workspace} onSaved={load} />
+            <div id="assistant-agent">
+              <AssistantAgentSetting workspace={workspace} onSaved={load} />
+            </div>
             <HarnessConfigEditor
               raw={workspace.harness_config}
               title="Agent Harness (workspace default)"

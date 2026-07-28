@@ -7,6 +7,7 @@ import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
 import AgentCard from './AgentCard';
 import DirectoryPicker from './admin/DirectoryPicker';
+import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
 import { Button, Input, Select, Modal } from './common';
@@ -20,7 +21,7 @@ import type {
 } from '../types';
 
 /** Map agent.type → credential provider prefix used to filter the credential
- *  picker. Mirrors the same map in admin/AgentManager.tsx — keep them in sync.
+ *  picker. Keep this aligned with the server adapter credential mapping.
  *  CLIs whose adapter ships in agent-manager (claude / codex / antigravity) show
  *  only credentials with a matching provider prefix; `custom` skips it. `pi`
  *  has no provider prefix at all — it has no credential concept AWB manages
@@ -37,9 +38,9 @@ const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
  *  server's ALLOWED_CLI_TYPES whitelist in agent-manager.controller.ts. */
 type ManagedCli = ManagedAgentCreateBody['cli'];
 
-/** CLI options surfaced in the Managed Agent picker. Mirrors the type
- *  whitelist in admin/AgentManager.tsx so the workspace form offers the same
- *  set the server's createManagedAgent contract accepts. */
+/** CLI options surfaced in the Managed Agent picker. Mirrors the server
+ *  whitelist so the workspace form offers the same set the server's
+ *  createManagedAgent contract accepts. */
 const MANAGED_CLI_OPTIONS: Array<{ value: ManagedCli; label: string }> = [
   { value: 'claude', label: 'Claude' },
   { value: 'codex', label: 'Codex' },
@@ -141,13 +142,14 @@ function mergeAgentStatus(
 
 export default function AgentsPage() {
   const { wsId } = useParams<{ wsId: string }>();
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const { showToast } = useToast();
 
   const [agents, setAgents] = useState<DashboardAgent[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const isAdmin = user?.role === 'admin';
+  const canAccessAgentManager = hasPermission('admin.access');
   // Live manager instances — the running-state source for managed-agent
   // lifecycle controls. `agent_ids[]` on a manager instance lists the agents
   // it currently supervises (running). Admin-only: the list endpoint and the
@@ -164,7 +166,7 @@ export default function AgentsPage() {
   // legacy "+ New Agent" modal because the agent-manager spawn contract
   // requires extra fields (manager pick, working_dir, optional credential)
   // that don't apply to plain workspace agents. UI mirrors the managed-mode
-  // form in admin/AgentManager.tsx.
+  // form used by the managed-agent runtime contract.
   const [showManagedModal, setShowManagedModal] = useState(false);
   const [managedForm, setManagedForm] = useState<typeof EMPTY_MANAGED_FORM>(EMPTY_MANAGED_FORM);
   const [managers, setManagers] = useState<ManagerOption[]>([]);
@@ -243,7 +245,7 @@ export default function AgentsPage() {
   // different workspace than the agent, so we fetch every instance and resolve
   // the owner by manager_agent_id below.
   const loadInstances = useCallback(async () => {
-    if (!isAdmin) {
+    if (!canAccessAgentManager) {
       setManagerInstances([]);
       return;
     }
@@ -255,7 +257,7 @@ export default function AgentsPage() {
       // buttons disable. Errors here shouldn't blank the agent grid.
       setManagerInstances([]);
     }
-  }, [isAdmin]);
+  }, [canAccessAgentManager]);
 
   useEffect(() => {
     loadInstances();
@@ -433,7 +435,7 @@ export default function AgentsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       <PageHeader
         title="AI Agents"
-        description="Live agent status"
+        description="Manage workspace agents and the runtime managers that execute them"
         actions={
           user?.role === 'admin' ? (
             <div style={{ display: 'flex', gap: 8 }}>
@@ -488,6 +490,34 @@ export default function AgentsPage() {
       )}
 
       <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+        <section aria-labelledby="workspace-agents-heading">
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+              gap: 12,
+              marginBottom: 14,
+            }}
+          >
+            <div>
+              <h2
+                id="workspace-agents-heading"
+                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
+              >
+                Workspace Agents
+              </h2>
+              <div style={{ marginTop: 4, fontSize: 12, color: tokens.colors.textMuted }}>
+                Agent identities, status, assignments, and lifecycle controls for this workspace.
+              </div>
+            </div>
+            {agents !== null && (
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>
+                {agentCount} agent{agentCount === 1 ? '' : 's'}
+              </span>
+            )}
+          </div>
+
         {/* Loading skeleton */}
         {agents === null ? (
           <div
@@ -534,7 +564,7 @@ export default function AgentsPage() {
               No agents in this workspace
             </div>
             <div style={{ fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.5, maxWidth: 400, marginTop: 8 }}>
-              Add an agent from the Admin panel to get started.
+              Create an agent here to get started.
             </div>
           </div>
         ) : (
@@ -570,6 +600,40 @@ export default function AgentsPage() {
               </div>
             ))}
           </div>
+        )}
+        </section>
+
+        {canAccessAgentManager && (
+          <section
+            id="agent-manager-runtime"
+            aria-labelledby="agent-manager-runtime-heading"
+            style={{
+              marginTop: 32,
+              paddingTop: 24,
+              borderTop: `1px solid ${tokens.colors.border}`,
+            }}
+          >
+            <div style={{ marginBottom: 14 }}>
+              <h2
+                id="agent-manager-runtime-heading"
+                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
+              >
+                Agent Manager Runtime
+              </h2>
+              <div style={{ marginTop: 4, fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+                Global execution infrastructure shared across workspaces. Pair hosts, inspect live processes and
+                subagents, and run maintenance commands here.
+              </div>
+            </div>
+            <div
+              style={{
+                height: 'clamp(560px, calc(100vh - 220px), 840px)',
+                minHeight: 0,
+              }}
+            >
+              <AgentManagerPage />
+            </div>
+          </section>
         )}
       </div>
 
@@ -654,9 +718,7 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {/* Create Managed Agent modal — mirrors admin/AgentManager.tsx managed
-          mode but as a dedicated surface so the workspace AI Agents tab can
-          add agent-manager-spawned identities without dropping into Admin. */}
+      {/* Create Managed Agent modal for agent-manager-spawned identities. */}
       <Modal
         isOpen={showManagedModal}
         onClose={resetManagedForm}
@@ -714,7 +776,7 @@ export default function AgentsPage() {
             />
             <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
               The picked manager spawns this agent's CLI on its host. Changing this clears the working directory — paths are host-specific.
-              {managers.length === 0 && ' Pair one from the AgentManager admin page first.'}
+              {managers.length === 0 && ' Pair one from the Agent Manager Runtime section below first.'}
             </div>
           </div>
           <div>

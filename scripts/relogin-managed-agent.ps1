@@ -13,7 +13,7 @@
 #   A. Direct injection (what this script does locally): just restart the
 #      agent in AWB UI — the file is re-read on every subagent spawn.
 #   B. Remote injection: pass -ShowCredential to print the new file content,
-#      paste it into AWB Admin -> Credentials -> Claude (Subscription),
+#      paste it into AWB Settings -> Credentials -> Claude (Subscription),
 #      and attach the credential to the agent. Future renewals can then be
 #      done from the AWB UI without shell access to this host.
 #
@@ -216,17 +216,17 @@ if ([string]::IsNullOrEmpty($oauth.refreshToken)) {
 Write-Host ""
 Write-Host "Direct method (Method A) — done." -ForegroundColor Green
 Write-Host "Restart the agent in AWB so the next subagent spawn picks up the new token:"
-Write-Host "  AWB Admin -> Agent Manager -> $($entry.Name) -> Restart"
+Write-Host "  AWB Workspace -> AI Agents -> $($entry.Name) -> Restart"
 Write-Host ""
 
 if ($ShowCredential) {
-  Write-Host "Remote-injection payload (Method B) — paste into AWB Admin -> Credentials -> Claude (Subscription) -> credentials_json:" -ForegroundColor Cyan
+  Write-Host "Remote-injection payload (Method B) — paste into AWB Settings -> Credentials -> Claude (Subscription) -> credentials_json:" -ForegroundColor Cyan
   Write-Host ""
   Write-Host "----- BEGIN credentials_json -----"
   Get-Content -LiteralPath $credPath -Raw
   Write-Host "----- END credentials_json -----"
   Write-Host ""
-  Write-Host "After saving the credential, attach it to agent '$($entry.Name)' in AWB Admin -> Agent Manager -> Edit -> CLI credential, then Restart." -ForegroundColor Cyan
+  Write-Host "After saving the credential, attach it to agent '$($entry.Name)' in AWB Workspace -> AI Agents -> Edit -> CLI credential, then Restart." -ForegroundColor Cyan
 } else {
-  Write-Host "(re-run with -ShowCredential to also print the JSON for AWB Admin -> Credentials remote injection.)"
+  Write-Host "(re-run with -ShowCredential to also print the JSON for AWB Settings -> Credentials remote injection.)"
 }

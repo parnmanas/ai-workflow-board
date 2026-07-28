@@ -1665,7 +1665,7 @@ export const api = {
     ),
 
   // Re-home an existing managed agent into a different workspace. Used by
-  // the AgentManager admin page's per-row workspace picker so pre-existing
+  // the Agent Manager runtime section's per-row workspace picker so pre-existing
   // agents created against a global manager can be relocated to the
   // workspace they actually belong to without recreating them.
   setManagedAgentWorkspace: (agentId: string, workspaceId: string) =>

@@ -36,11 +36,11 @@ export function MentionInboxBadge({ workspaceId }: Props) {
         navigate(`/ws/${workspaceId}/boards?ticket=${ticketParam}&comment=${commentParam}`);
       }
     } else if (item.source_type === 'chat_message' && item.room_id && workspaceId) {
-      // Chat deep link: ChatPage reads `?room=` to select the room and
-      // `?message=` to scroll-and-highlight the targeted message.
+      // Chat deep link: the canonical route selects the room and `?message=`
+      // scrolls to and highlights the targeted message.
       const roomParam = encodeURIComponent(item.room_id);
       const messageParam = encodeURIComponent(item.source_id);
-      navigate(`/ws/${workspaceId}/chat?room=${roomParam}&message=${messageParam}`);
+      navigate(`/ws/${workspaceId}/chat/${roomParam}?message=${messageParam}`);
     }
   };
 

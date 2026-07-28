@@ -16,6 +16,7 @@ import { NotificationProvider } from '../contexts/NotificationContext';
 import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
+import type { ChatRoomListItem } from '../types';
 
 /**
  * Persistent authenticated-user shell — Phase 1 FOUND-03 / FOUND-04 / D-10.
@@ -36,10 +37,9 @@ import { tokens } from '../tokens';
 export default function AppLayout() {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const { mode } = useViewMode();
-  // 드로어 모드: 모바일(항상) + 데스크톱 Chat-first. 이때 사이드바는 햄버거로 여는
-  // off-canvas 오버레이가 되어 Chat-first 에 깔끔한 대화 캔버스를 준다. Advanced
-  // 데스크톱은 drawerMode=false → 기존 상시 사이드바 그대로(회귀 0).
-  const drawerMode = isMobile || mode === 'chat';
+  // Desktop keeps the Hermes-style navigation visible in both Chat and
+  // Advanced modes. Only narrow mobile viewports use the off-canvas drawer.
+  const drawerMode = isMobile;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const navigate = useNavigate();
   const params = useParams<{ wsId?: string }>();
@@ -67,6 +67,8 @@ export default function AppLayout() {
   const [currentBoardId, setCurrentBoardId] = useState<string | null>(null);
   const [currentBoardName, setCurrentBoardName] = useState<string | undefined>(undefined);
   const [sidebarBoards, setSidebarBoards] = useState<{ id: string; name: string }[]>([]);
+  const [sidebarRooms, setSidebarRooms] = useState<ChatRoomListItem[]>([]);
+  const [sidebarRoomsLoading, setSidebarRoomsLoading] = useState(false);
 
   // URL wsId takes precedence for sidebar context
   const urlWsId = params.wsId || currentWorkspaceId;
@@ -157,6 +159,50 @@ export default function AppLayout() {
     return fetchBoards(currentWorkspaceId);
   }, [currentWorkspaceId, fetchBoards]);
 
+  const fetchSidebarRooms = useCallback(async (wsId: string) => {
+    setSidebarRoomsLoading(true);
+    try {
+      const rooms = await api.listChatRooms(undefined, wsId);
+      setSidebarRooms(rooms);
+    } catch {
+      setSidebarRooms([]);
+    } finally {
+      setSidebarRoomsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentWorkspaceId) {
+      setSidebarRooms([]);
+      setSidebarRoomsLoading(false);
+      return;
+    }
+    fetchSidebarRooms(currentWorkspaceId);
+
+    // The Sidebar intentionally does not own an EventSource. A low-frequency
+    // fallback keeps room metadata fresh while other pages are open, and
+    // ChatPage pushes immediate snapshots through chat-rooms-changed.
+    const timer = window.setInterval(() => fetchSidebarRooms(currentWorkspaceId), 30_000);
+    const handleRoomChange = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        workspaceId?: string;
+        rooms?: ChatRoomListItem[];
+      }>).detail;
+      if (detail?.workspaceId !== currentWorkspaceId) return;
+      if (Array.isArray(detail.rooms)) {
+        setSidebarRooms(detail.rooms);
+        setSidebarRoomsLoading(false);
+      } else {
+        fetchSidebarRooms(currentWorkspaceId);
+      }
+    };
+    window.addEventListener('chat-rooms-changed', handleRoomChange);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('chat-rooms-changed', handleRoomChange);
+    };
+  }, [currentWorkspaceId, fetchSidebarRooms]);
+
   // Refresh sidebar boards when boards are created/deleted/updated
   useEffect(() => {
     const handleBoardRefresh = () => {
@@ -214,7 +260,7 @@ export default function AppLayout() {
     if (data.name) setCurrentBoardName(data.name);
   }, []);
 
-  // 드로어 모드를 벗어나면(Chat→Advanced 전환, 데스크톱 확대 등) 열린 드로어를 닫는다.
+  // 모바일 드로어 모드를 벗어나 데스크톱으로 확대되면 열린 드로어를 닫는다.
   useEffect(() => {
     if (!drawerMode) setDrawerOpen(false);
   }, [drawerMode]);
@@ -253,6 +299,8 @@ export default function AppLayout() {
         onClose={() => setDrawerOpen(false)}
         wsId={urlWsId}
         boards={sidebarBoards}
+        rooms={sidebarRooms}
+        roomsLoading={sidebarRoomsLoading}
         containerRef={drawerRef}
       />
       {drawerMode && drawerOpen && (
@@ -263,8 +311,7 @@ export default function AppLayout() {
         />
       )}
       <div className="awb-main">
-        {/* 드로어 모드 톱바(모바일 상시 + 데스크톱 Chat-first) — 햄버거로 사이드바의
-            기존 전체 네비 인벤토리(Boards/Chat/Agents/…)를 오버레이로 연다. */}
+        {/* 모바일 톱바 — 햄버거로 전체 내비게이션을 오버레이로 연다. */}
         {drawerMode && (
           <div className="awb-topbar">
             <button
@@ -292,9 +339,7 @@ export default function AppLayout() {
             </button>
             <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
             <div style={{ flex: 1 }} />
-            {/* 데스크톱 Chat-first 는 상시 톱스트립이 없으므로 여기서 워크스페이스 전환을
-                유지한다. 모바일은 폭 절약을 위해 기존대로 셀렉터를 톱바에 넣지 않는다.
-                Admin 라우트에서도 항상 표시(티켓 28258c75). */}
+            {/* 모바일은 폭 절약을 위해 워크스페이스 셀렉터를 표시하지 않는다. */}
             {!isMobile && (
               <WorkspaceSelector
                 workspaces={workspaces}
@@ -313,10 +358,9 @@ export default function AppLayout() {
           </div>
         )}
 
-        {/* Advanced 데스크톱 상시 톱스트립 — WorkspaceSelector(writer)를 소유. admin
-            라우트에서도 항상 표시한다(티켓 28258c75 — Admin 은 ws 컨텍스트가 없을 뿐,
-            워크스페이스 전환 자체는 여전히 필요). Chat-first·모바일에선 위 드로어
-            톱바가 대신하므로 여기선 렌더하지 않는다(!drawerMode). */}
+        {/* Desktop top bar stays compact because primary navigation lives in
+            the persistent Sidebar. It retains workspace switching, the Chat
+            artifact toggle, and the Chat/Advanced mode control. */}
         {!drawerMode && (
           <div
             style={{
@@ -341,7 +385,10 @@ export default function AppLayout() {
               onUpdate={handleUpdateWorkspace}
               onUpdateBoard={handleUpdateBoard}
             />
-            <ViewModeToggle />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {mode === 'chat' && <ArtifactToggleButton />}
+              <ViewModeToggle />
+            </div>
           </div>
         )}
 

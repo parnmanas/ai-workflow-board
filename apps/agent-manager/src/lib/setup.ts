@@ -172,7 +172,7 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
       if (!url) url = await prompt.ask('AWB server URL', DEFAULT_URL_HINT);
       if (!token) {
         token = await prompt.ask(
-          'Pairing token (paste from AWB Admin → Agent Manager → Pair manager…)',
+          'Pairing token (paste from AWB Workspace → AI Agents → Agent Manager Runtime → Pair manager…)',
         );
       }
       // ST-7: CLI is per-managed-agent now (set in AWB UI when creating

@@ -1,5 +1,5 @@
 // Periodically POST per-process metadata to AWB so the admin
-// `/admin/agent-manager` page can render every running agent-manager.
+// the AI Agents runtime section can render every running agent-manager.
 //
 // PresenceHeartbeat already stamps Agent.last_seen_at, but that flag collapses
 // every running process for one agent down to a single bit. This heartbeat

@@ -30,7 +30,7 @@ import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backe
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
- *  the dedicated AgentManager admin page shows. `supervised` is a derived flag:
+ *  the AI Agents runtime section shows. `supervised` is a derived flag:
  *  true when the matched instance is a manager that lists this agent in
  *  agent_ids[]; false when this agent IS the instance's primary agent (proxy /
  *  daemon / a manager identity itself). */
@@ -535,7 +535,7 @@ export class AgentsController {
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
     // System admins bypass workspace scoping (mirrors GET ?scope=all and the
-    // get-by-id rule above). Fixes the AgentManager admin page edit flow:
+    // get-by-id rule above). Keeps the AI Agents runtime edit flow working:
     // the page lists agents cross-workspace via getAgentsAll() but Edit was
     // 404ing whenever the operator's active workspace differed from the
     // agent's workspace. Workspace-scoped admins stay scoped — but they are

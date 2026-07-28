@@ -183,7 +183,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     if (!ambientContent) return;
 
     const url = process.env.AWB_PUBLIC_URL
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/ws/${ev.workspace_id}/chat?room=${ev.room_id}&message=${ev.message_id}`
+      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/ws/${ev.workspace_id}/chat/${ev.room_id}?message=${ev.message_id}`
       : undefined;
 
     const payload: NotifyPayload = {

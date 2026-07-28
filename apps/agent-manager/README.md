@@ -78,7 +78,7 @@ After redeeming, the manager stores its API key and agent identity in
 `$AWB_AGENT_MANAGER_HOME/config.json` (default
 `~/.config/awb-agent-manager/config.json`).
 
-1. **Mint** — In the AWB admin UI: _Admin → Agent Manager → Pair manager…_.
+1. **Mint** — In the AWB UI: _Workspace → AI Agents → Agent Manager Runtime → Pair manager…_.
    The dialog returns a raw token (long-form) and a 6-char display code; copy
    either. Both are shown only once. TTL 10 minutes, single-use.
 2. **Run the wizard** — On the host that will run the manager:
@@ -123,8 +123,8 @@ After redeeming, the manager stores its API key and agent identity in
    instance dashboard and starts listening for `agent_manager_command` SSE
    events.
 
-4. **Add managed agents** — Back in AWB, _Agent Manager → Managed Agents →
-   Create_. Pick the CLI (`claude` / `codex` / `antigravity` / `pi` / `custom`),
+4. **Add managed agents** — Back in AWB, open _Workspace → AI Agents_ and
+   choose _New Managed Agent_. Pick the CLI (`claude` / `codex` / `antigravity` / `pi` / `custom`),
    point at a working directory, and leave _Spawn on this manager after create_
    on for one-click setup. The manager provisions a per-agent apiKey, writes its
    on-disk config + mcp-config.json, and starts routing matching ticket /

@@ -26,6 +26,7 @@ const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPag
 const WorkspaceManagementPage = lazy(() => import('./components/WorkspaceManagementPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
+const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 
@@ -208,23 +209,31 @@ function AppContent() {
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
             <Route path="chat" element={<ChatPage />} />
-            <Route path="users" element={<WorkspaceUsersPage />} />
+            <Route path="chat/:roomId" element={<ChatPage />} />
+            <Route path="users" element={<Navigate to="settings/members" replace />} />
             <Route path="agents" element={<AgentsPage />} />
             <Route path="agents/:agentId" element={<AgentDetailPage />} />
-            <Route path="channels" element={<WorkspaceChannelsPage />} />
-            <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
+            <Route path="channels" element={<Navigate to="settings/channels" replace />} />
+            <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
             <Route path="catalog" element={<LegacyCatalogRedirect />} />
             <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
             <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
             <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
             <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
-            <Route path="credentials" element={<WorkspaceManagementPage kind="credentials" />} />
+            <Route path="credentials" element={<Navigate to="settings/credentials" replace />} />
             <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
             <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
             <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
-            <Route path="roles" element={<WorkspaceRolesPage />} />
-            <Route path="settings" element={<WorkspaceSettingsPage />} />
-            <Route path="claude-backend-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
+            <Route path="roles" element={<Navigate to="settings/roles" replace />} />
+            <Route path="settings" element={<SettingsOverviewPage />} />
+            <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
+            <Route path="settings/members" element={<WorkspaceUsersPage />} />
+            <Route path="settings/roles" element={<WorkspaceRolesPage />} />
+            <Route path="settings/credentials" element={<WorkspaceManagementPage kind="credentials" />} />
+            <Route path="settings/channels" element={<WorkspaceChannelsPage />} />
+            <Route path="settings/api-keys" element={<WorkspaceApiKeysPage />} />
+            <Route path="settings/claude-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
+            <Route path="claude-backend-profiles" element={<Navigate to="settings/claude-profiles" replace />} />
           </Route>
         </Route>
       </Routes>

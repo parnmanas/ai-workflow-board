@@ -10,7 +10,7 @@
  * each other:
  *   - apps/agent-manager .../cli-adapters/index.ts → KNOWN_ADAPTER_CLI_TYPES
  *     (this list minus 'custom', which has no adapter)
- *   - apps/client .../AgentsPage.tsx + admin/AgentManager.tsx → CLI pickers
+ *   - apps/client .../AgentsPage.tsx + admin/ManagedAgentDialog.tsx → CLI pickers
  *
  * `claude | deepseek | codex | antigravity | pi` each ship a real adapter in
  * the agent-manager; `custom` is a valid identity the manager refuses to

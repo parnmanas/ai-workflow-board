@@ -131,7 +131,7 @@ Options:
 
 Setup options (\`awb-agent-manager setup ...\`):
       --url <url>            AWB server base URL (skip prompt)
-      --token <token>        Pairing token from AWB Admin → Agent Manager
+      --token <token>        Pairing token from AWB Workspace → AI Agents
       --instance-id <id>     Stable id reported on heartbeats (default <hostname>-<rand>)
       --non-interactive      Fail fast on missing fields instead of prompting
       --force                Overwrite an existing config.json
@@ -337,7 +337,7 @@ async function main(): Promise<void> {
         `      awb-agent-manager setup\n\n` +
         `  Or non-interactively (CI / Ansible):\n\n` +
         `      awb-agent-manager setup --url <awb-url> --token <pairing-token>\n\n` +
-        `  The token comes from AWB Admin → Agent Manager → "Pair manager…".\n`,
+        `  The token comes from AWB Workspace → AI Agents → Agent Manager Runtime → "Pair manager…".\n`,
     );
     if (flags.dryRun) {
       log('--dry-run: exiting after config load (config=missing)');
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
   process.stdout.write(`  workspace:   ${config.workspace_id ?? '(none)'}\n`);
   // ST-7 cli refactor: the manager no longer pins to a single CLI. Each
   // managed agent picks its own (claude/codex/antigravity), set per-row in
-  // AWB Admin → Agent Manager → Managed Agents. Legacy `cli` field on
+  // AWB Workspace → AI Agents → New Managed Agent. Legacy `cli` field on
   // config.json is now ignored at runtime.
 
   if (flags.dryRun) {

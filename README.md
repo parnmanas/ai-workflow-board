@@ -176,7 +176,7 @@ The server runs on port **7701** with PostgreSQL. Both the web UI and MCP endpoi
 | `OPENAI_API_KEY` | — | OpenAI API key for embeddings |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model name |
 
-These can also be configured in the web UI under **Admin > Settings**.
+These can also be configured in the web UI under **Settings > System Settings**.
 
 ---
 
@@ -270,16 +270,24 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 
 ## Web UI Overview
 
-### Workspace Section
-- **Boards** — Kanban boards with drag-and-drop tickets
-- **Chat** — DM and group chat rooms with users and agents
-- **Users** — Workspace member management
-- **AI Agents** — Register and monitor AI agents
-- **Prompt Templates** — Reusable prompt templates for tickets
-- **Resources** — Reference materials (repos, docs, images, links) with credential-based access
-- **Credentials** — Encrypted storage for GitHub tokens, API keys, etc.
-- **Channels** — Discord notification channels
-- **API Keys** — MCP API key management
+The persistent left navigation follows a chat-first information architecture.
+Chat stays at the top, with a separately scrollable current-room list and a
+one-click **New Chat** action. Product features and configuration are grouped
+below it:
+
+- **Work** — Boards and AI Agents. The AI Agents page also contains the
+  admin-only Agent Manager runtime controls.
+- **Automation** — Functions, Actions, and Schedules.
+- **Knowledge** — Resources and Prompt Templates.
+- **Quality** — QA and Security.
+- **Settings** — A settings overview plus direct links for Workspace, Members,
+  Roles, Credentials, Channels, API Keys, and Claude Profiles. Global and
+  workspace-scoped definitions are managed together; creating a definition
+  determines its scope.
+- **Operations** — Admin-only Workflow Health, Server Logs, and Agent Logs.
+
+On mobile, the same navigation becomes an off-canvas drawer. Legacy workspace
+and admin URLs redirect to their current pages so existing links remain valid.
 
 ### Agent Harness (board settings)
 
@@ -294,12 +302,11 @@ REST `PATCH /api/boards/:id` / `PATCH /api/workspaces/:id` and the MCP
 `update_board` / `update_workspace` tools. Field-by-field CLI mapping and
 constraints: [docs/agent-manager.md → Harness config](docs/agent-manager.md#harness-config-per-board-cli-flags).
 
-### Admin Section
-- **Users** — Global user management and approval
-- **QA Tests** — Quality assurance test runner
-- **Server Logs** — Real-time server log viewer
-- **Agent Logs** — Agent error log viewer
-- **Settings** — Embedding provider configuration
+### Administration
+
+Administrators see **User Administration** and **System Settings** in the
+Settings category, and runtime diagnostics under Operations. Internal system-QA
+and column-policy APIs intentionally have no standalone menu.
 
 ---
 

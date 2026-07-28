@@ -6,7 +6,7 @@ import {
   useMemo,
 } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
@@ -89,7 +89,8 @@ function ProtocolUpgradeBanner() {
 }
 
 export default function ChatPage() {
-  const { wsId } = useParams<{ wsId: string }>();
+  const { wsId, roomId: routeRoomId } = useParams<{ wsId: string; roomId?: string }>();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const { showToast, playNotifySound } = useToast();
   // Keep sidebar chat badge in lockstep: whenever we POST mark-read we
@@ -204,24 +205,40 @@ export default function ChatPage() {
       .finally(() => setLoading(false));
   }, [showAllRooms, wsId]);
 
-  // Mention deep link: `?room=<id>&message=<id>` selects the room and queues
-  // a scroll-and-highlight on the targeted message. We strip both params from
-  // the URL once applied so back/forward doesn't keep re-firing the highlight.
-  // The message scroll is best-effort — if the row isn't in the initial 50
-  // we'd need history pagination to find it; that's acceptable for v1.
-  const [searchParams, setSearchParams] = useSearchParams();
+  // Keep the persistent shell's compact room list in sync without creating a
+  // second real-time stream subscription in the Sidebar. AppLayout also loads
+  // an initial snapshot, so this event is an immediate local-state refinement
+  // while ChatPage is mounted.
   useEffect(() => {
+    window.dispatchEvent(new CustomEvent('chat-rooms-changed', {
+      detail: { workspaceId: wsId, rooms },
+    }));
+  }, [rooms, wsId]);
+
+  // Canonical room links use /chat/:roomId so the persistent Sidebar can
+  // identify the active room. The old ?room=<id> form remains supported for
+  // mention links and is immediately normalized to the canonical route.
+  const [searchParams] = useSearchParams();
+  useEffect(() => {
+    const newChatParam = searchParams.get('new');
     const roomParam = searchParams.get('room');
     const messageParam = searchParams.get('message');
-    if (!roomParam) return;
-    setActiveRoomId(roomParam);
+    if (newChatParam === '1' && wsId) {
+      setShowNewChat(true);
+      navigate(`/ws/${wsId}/chat`, { replace: true });
+      return;
+    }
+    if (roomParam && wsId) {
+      const messageQuery = messageParam ? `?message=${encodeURIComponent(messageParam)}` : '';
+      navigate(`/ws/${wsId}/chat/${roomParam}${messageQuery}`, { replace: true });
+      return;
+    }
+    const targetRoomId = routeRoomId || null;
+    setActiveRoomId(targetRoomId);
+    if (!targetRoomId) return;
     if (isMobile) setMobileView('room');
     if (messageParam) setScrollToMessageId(messageParam);
-    const next = new URLSearchParams(searchParams);
-    next.delete('room');
-    next.delete('message');
-    setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, isMobile]);
+  }, [routeRoomId, searchParams, isMobile, navigate, wsId]);
 
   // Load messages + mark read on room change
   useEffect(() => {
@@ -470,6 +487,7 @@ export default function ChatPage() {
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
+    if (wsId) navigate(`/ws/${wsId}/chat/${roomId}`);
     if (isMobile) setMobileView('room');
   }
 
@@ -547,6 +565,7 @@ export default function ChatPage() {
     if (activeRoomId === roomId) {
       setActiveRoomId(null);
       setMessages([]);
+      if (wsId) navigate(`/ws/${wsId}/chat`);
       if (isMobile) setMobileView('list');
     }
   }

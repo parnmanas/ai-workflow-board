@@ -1,9 +1,22 @@
 # Board UX guidelines
 
-Board navigation separates operational board pages from reusable automation
-configuration.
+AWB uses a chat-first navigation hierarchy. Board navigation separates
+operational board pages from reusable automation configuration.
 
 ## Navigation
+
+The persistent desktop sidebar is ordered by user intent:
+
+1. Chat and its independently scrollable room list;
+2. Work (Boards and AI Agents);
+3. Automation (Functions, Actions, Schedules);
+4. Knowledge (Resources, Prompt Templates);
+5. Quality (QA, Security);
+6. Settings;
+7. admin-only Operations diagnostics.
+
+Mobile uses the same hierarchy in an off-canvas drawer. Do not create a second
+navigation inventory for mobile or for Chat mode.
 
 The Board header and sub-menu expose only board operations:
 
@@ -24,9 +37,9 @@ Reuse the same type manager and provide the Board context explicitly.
 
 ## Management menus
 
-Functions, Credentials, Resources, Prompt Templates, Actions, QA, Security,
-Schedules, and Claude Profiles are independent Workspace menu entries. There is
-no intermediate Automation Catalog page.
+Functions, Resources, Prompt Templates, Actions, QA, Security, and Schedules are
+independent feature entries. Credentials and Claude Profiles are independent
+Settings entries. There is no intermediate Automation Catalog page.
 
 - Functions, Credentials, Resources, and Prompt Templates use Global,
   Workspace, and Board scopes.
@@ -40,9 +53,15 @@ no intermediate Automation Catalog page.
 - Every row shows a scope badge.
 
 Claude backend definitions and Workspace assignment share the Claude Profiles
-page. System QA, Column Policies, and Workflow Health remain independent Admin
-menus because they are system operations rather than scoped reusable
-definitions.
+page. Workspace and Board QA definitions remain on the QA page. Agent Manager
+runtime operations are integrated into AI Agents, while Workflow Health remains
+an independent Admin diagnostic page. The internal system-QA and column-policy
+APIs have no standalone navigation.
+
+Settings pages use `/ws/:workspaceId/settings/*`. The Settings Overview page
+groups related destinations, while the sidebar keeps direct one-click links to
+each destination. Legacy workspace and Admin management URLs must redirect to
+the canonical Settings route.
 
 See [Catalog scopes](catalog-scopes.md) for the data model, inheritance rules,
 authorization, and implementation checklist.

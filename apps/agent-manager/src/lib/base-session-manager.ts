@@ -1221,7 +1221,7 @@ export class BaseSessionManager {
    * .credentials.json + env at spawn time, and would otherwise keep
    * authenticating with the stale credential until idle timeout or
    * maxTurns retired it on its own (10+ minutes). Without this,
-   * pasting a fresh credential in AWB Admin → Credentials and
+   * pasting a fresh credential in AWB Settings → Credentials and
    * clicking restart_agent only refreshed disk artefacts; the running
    * child kept dispatching turns against the expired OAuth token.
    *

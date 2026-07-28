@@ -1,434 +1,539 @@
 import React from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useNotifications } from '../contexts/NotificationContext';
+import type { ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
 import { NavBadge } from './common/NavBadge';
 import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
-import { useNotifications } from '../contexts/NotificationContext';
 
 interface SidebarProps {
-  /**
-   * true → off-canvas 드로어(햄버거로 여닫음), false → 본문 옆 상시 사이드바.
-   * AppLayout 이 drawerMode(모바일 상시 + 데스크톱 Chat-first)일 때 true 로 넘긴다
-   * (에픽 bf65ca00 · S1). Advanced 데스크톱은 false → 기존 상시 사이드바 그대로.
-   */
   overlay: boolean;
   isOpen: boolean;
   onClose: () => void;
   wsId: string | null;
   boards: { id: string; name: string }[];
-  /** 드로어(overlay) 포커스 트랩용 컨테이너 ref — AppLayout 의 useDialogFocus 가 소유(F2-5). */
+  rooms: ChatRoomListItem[];
+  roomsLoading: boolean;
   containerRef?: React.Ref<HTMLElement>;
 }
 
-/**
- * Responsive left sidebar — Phase 1 FOUND-03 / D-12 / D-13.
- *
- * overlay=false (Advanced 데스크톱): 본문 옆 상시 220px 사이드바.
- * overlay=true (모바일 · Chat-first 데스크톱): off-canvas 드로어; open 상태는
- * 부모(AppLayout)가 isOpen 으로 제어하고, 항목 클릭 시 onClose 로 접힌다.
- *
- * Three sections:
- *  - BOARDS: collapsible list of workspace boards with active board sub-entry
- *  - WORKSPACE: resource links (Chat, Users, Agents, etc.)
- *  - ADMIN: admin-only links, gated by hasPermission('admin.access')
- *
- * CRITICAL: This component MUST NOT import any real-time stream client or activity-bus
- * subscription per UI-SPEC §"SSE Reconnect Contract".
- */
-export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, containerRef }: SidebarProps) {
+interface NavItem {
+  key: string;
+  path: string;
+  label: string;
+  icon: string;
+  badge?: number;
+  exact?: boolean;
+}
+
+function roomDisplayName(room: ChatRoomListItem): string {
+  if (room.type === 'dm') return room.name || room.dm_partner_name || 'Direct Message';
+  return room.name || 'Unnamed Group';
+}
+
+function roomInitials(room: ChatRoomListItem): string {
+  return roomDisplayName(room)
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase() || '#';
+}
+
+export default function Sidebar({
+  overlay,
+  isOpen,
+  onClose,
+  wsId,
+  boards,
+  rooms,
+  roomsLoading,
+  containerRef,
+}: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
+  const { counts } = useNotifications();
   const navigate = useNavigate();
   const location = useLocation();
   const [boardsExpanded, setBoardsExpanded] = React.useState(true);
-  // Badge counts come from NotificationContext (mounted in AppLayout). This
-  // is a read-only consumer — we do not import any stream client here, per
-  // the component header's SSE Reconnect Contract note.
-  const { counts } = useNotifications();
 
-  const isBoardActive = (boardId: string): boolean =>
-    location.pathname.includes('/boards/' + boardId);
+  const workspaceBase = wsId ? `/ws/${wsId}` : '';
+  const canAdmin = hasPermission('admin.access');
 
   const isPathActive = (path: string): boolean =>
-    location.pathname === path || location.pathname.startsWith(path + '/');
+    location.pathname === path || location.pathname.startsWith(`${path}/`);
 
   const handleNavClick = (path: string) => {
+    if (!path) return;
     navigate(path);
     if (overlay) onClose();
   };
 
-  // .awb-sidebar--overlay 가 붙으면 off-canvas 위치/transform 은 main.tsx 의 클래스
-  // 규칙이 담당한다(미디어쿼리 비의존 → 데스크톱 Chat-first 에서도 동일 동작).
+  const workspaceSections: Array<{ title: string; items: NavItem[] }> = [
+    {
+      title: 'Work',
+      items: [
+        {
+          key: 'boards',
+          path: `${workspaceBase}/boards`,
+          label: 'Boards',
+          icon: 'B',
+          badge: counts.tickets.total,
+          exact: true,
+        },
+        {
+          key: 'agents',
+          path: `${workspaceBase}/agents`,
+          label: 'AI Agents',
+          icon: 'A',
+        },
+      ],
+    },
+    {
+      title: 'Automation',
+      items: [
+        { key: 'functions', path: `${workspaceBase}/functions`, label: 'Functions', icon: 'F' },
+        { key: 'actions', path: `${workspaceBase}/actions`, label: 'Actions', icon: 'A' },
+        { key: 'schedules', path: `${workspaceBase}/schedules`, label: 'Schedules', icon: 'S' },
+      ],
+    },
+    {
+      title: 'Knowledge',
+      items: [
+        { key: 'resources', path: `${workspaceBase}/resources`, label: 'Resources', icon: 'R' },
+        {
+          key: 'prompt-templates',
+          path: `${workspaceBase}/prompt-templates`,
+          label: 'Prompt Templates',
+          icon: 'P',
+        },
+      ],
+    },
+    {
+      title: 'Quality',
+      items: [
+        { key: 'qa', path: `${workspaceBase}/qa`, label: 'QA', icon: 'Q' },
+        { key: 'security', path: `${workspaceBase}/security`, label: 'Security', icon: 'S' },
+      ],
+    },
+    {
+      title: 'Settings',
+      items: [
+        {
+          key: 'settings-overview',
+          path: `${workspaceBase}/settings`,
+          label: 'Settings Overview',
+          icon: 'S',
+          exact: true,
+        },
+        ...(canAdmin
+          ? [{ key: 'workspace-settings', path: `${workspaceBase}/settings/workspace`, label: 'Workspace', icon: 'W' }]
+          : []),
+        { key: 'members', path: `${workspaceBase}/settings/members`, label: 'Members', icon: 'M' },
+        { key: 'roles', path: `${workspaceBase}/settings/roles`, label: 'Roles', icon: 'R' },
+        { key: 'credentials', path: `${workspaceBase}/settings/credentials`, label: 'Credentials', icon: 'C' },
+        { key: 'channels', path: `${workspaceBase}/settings/channels`, label: 'Channels', icon: 'N' },
+        { key: 'api-keys', path: `${workspaceBase}/settings/api-keys`, label: 'API Keys', icon: 'K' },
+        {
+          key: 'claude-profiles',
+          path: `${workspaceBase}/settings/claude-profiles`,
+          label: 'Claude Profiles',
+          icon: 'C',
+        },
+        ...(canAdmin
+          ? [
+              {
+                key: 'admin-users',
+                path: '/admin/users',
+                label: 'User Administration',
+                icon: 'U',
+                badge: counts.pendingUsers,
+              },
+              { key: 'system-settings', path: '/admin/settings', label: 'System Settings', icon: 'S' },
+            ]
+          : []),
+      ],
+    },
+  ];
+
+  const operations: NavItem[] = [
+    {
+      key: 'workflow-health',
+      path: '/admin/workflow-health',
+      label: 'Workflow Health',
+      icon: 'H',
+    },
+    { key: 'server-logs', path: '/admin/logs', label: 'Server Logs', icon: 'L' },
+    {
+      key: 'agent-logs',
+      path: '/admin/agent-logs',
+      label: 'Agent Logs',
+      icon: 'G',
+      badge: counts.agentErrors,
+    },
+  ];
+
+  const sectionHeaderStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 28,
+    padding: '10px 12px 5px',
+    color: tokens.colors.textMuted,
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+    userSelect: 'none',
+  };
+
+  const iconStyle = (active: boolean): React.CSSProperties => ({
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    background: active ? `${tokens.colors.accent}26` : `${tokens.colors.border}70`,
+    color: active ? tokens.colors.accentLight : tokens.colors.textSecondary,
+    fontSize: 10,
+    fontWeight: 700,
+  });
+
+  const navRowStyle = (active: boolean, nested = false): React.CSSProperties => ({
+    width: '100%',
+    minHeight: nested ? 32 : 36,
+    padding: nested ? '4px 12px 4px 24px' : '6px 12px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 9,
+    border: 'none',
+    borderLeft: `3px solid ${active ? tokens.colors.accent : 'transparent'}`,
+    background: active ? tokens.colors.surfaceHover : 'transparent',
+    color: active ? tokens.colors.textPrimary : tokens.colors.textSecondary,
+    fontFamily: 'inherit',
+    fontSize: nested ? 12 : 13,
+    fontWeight: active ? 600 : 500,
+    textAlign: 'left',
+    cursor: 'pointer',
+  });
+
+  const renderNavItem = (item: NavItem, nested = false) => {
+    const active = item.exact ? location.pathname === item.path : isPathActive(item.path);
+    return (
+      <button
+        key={item.key}
+        type="button"
+        onClick={() => handleNavClick(item.path)}
+        style={navRowStyle(active, nested)}
+        onMouseEnter={(event) => {
+          if (!active) event.currentTarget.style.background = tokens.colors.surfaceHover;
+        }}
+        onMouseLeave={(event) => {
+          if (!active) event.currentTarget.style.background = 'transparent';
+        }}
+      >
+        <span style={iconStyle(active)} aria-hidden="true">{item.icon}</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {item.label}
+        </span>
+        {!!item.badge && item.badge > 0 && <NavBadge count={item.badge} />}
+      </button>
+    );
+  };
+
   const sidebarClassName = [
     'awb-sidebar',
     overlay ? 'awb-sidebar--overlay' : '',
     overlay && isOpen ? 'awb-sidebar--open' : '',
   ].filter(Boolean).join(' ');
-  const persistentStyle: React.CSSProperties = {
-    width: 220,
-    flexShrink: 0,
-    background: tokens.colors.surfaceCard,
-    borderRight: `1px solid ${tokens.colors.border}`,
-    display: 'flex',
-    flexDirection: 'column',
-  };
-  const overlayStyle: React.CSSProperties = {
-    // 위치/transform/transition/width 은 .awb-sidebar--overlay(main.tsx)가 담당.
-    background: tokens.colors.surfaceCard,
-    borderRight: `1px solid ${tokens.colors.border}`,
-    display: 'flex',
-    flexDirection: 'column',
-  };
-
-  const sectionHeaderStyle: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 700,
-    color: tokens.colors.borderStrong,
-    padding: '12px 16px 6px',
-    letterSpacing: '0.05em',
-    userSelect: 'none',
-    textTransform: 'uppercase',
-  };
-
-  const dividerStyle: React.CSSProperties = {
-    height: 1,
-    background: tokens.colors.border,
-    margin: '8px 12px',
-  };
-
-  const navRowStyle = (active: boolean): React.CSSProperties => ({
-    padding: '8px 16px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    cursor: 'pointer',
-    fontSize: 13,
-    color: active ? tokens.colors.textStrong : tokens.colors.textMuted,
-    fontWeight: active ? 600 : 400,
-    borderLeft: active ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
-    background: active ? tokens.colors.border : 'transparent',
-    width: '100%',
-    border: 'none',
-    borderRight: 'none',
-    textAlign: 'left',
-    fontFamily: 'inherit',
-  });
-
-  // Nav items annotated with a `badge` count pulled from NotificationContext.
-  // undefined (or 0) renders nothing in <NavBadge>, so items without a source
-  // just get no decoration. Keeping the mapping in the item definition makes
-  // it easy to add a new badge source later — one line in one place.
-  const workspaceNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
-    { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C', badge: counts.chat.total },
-    { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
-    { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
-    { key: 'functions',        path: `/ws/${wsId}/functions`,        label: 'Functions',        icon: 'F' },
-    { key: 'credentials',      path: `/ws/${wsId}/credentials`,      label: 'Credentials',      icon: 'K' },
-    { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
-    { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
-    { key: 'actions',          path: `/ws/${wsId}/actions`,          label: 'Actions',          icon: 'X' },
-    { key: 'qa',               path: `/ws/${wsId}/qa`,               label: 'QA',               icon: 'Q' },
-    { key: 'security',         path: `/ws/${wsId}/security`,         label: 'Security',         icon: 'S' },
-    { key: 'schedules',        path: `/ws/${wsId}/schedules`,        label: 'Schedules',        icon: 'T' },
-    { key: 'claude-backend-profiles', path: `/ws/${wsId}/claude-backend-profiles`, label: 'Claude Profiles', icon: 'B' },
-    { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
-    { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
-    { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
-  ];
-  // Workspace Settings hosts the workspace-default agent harness — operator
-  // surface, so it only renders for admins (the page itself also gates).
-  if (hasPermission('admin.access')) {
-    workspaceNavItems.push({ key: 'settings', path: `/ws/${wsId}/settings`, label: 'Settings', icon: 'S' });
-  }
-
-  const adminNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
-    { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U', badge: counts.pendingUsers },
-    { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
-    { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
-    { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
-    { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
-    { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
-    { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
-    { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
-  ];
-
-  const renderNavButton = (
-    item: { key: string; path: string; label: string; icon: string; badge?: number },
-    active: boolean,
-  ) => (
-    <button
-      key={item.key}
-      onClick={() => handleNavClick(item.path)}
-      style={{
-        ...navRowStyle(active),
-        borderLeft: active ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
-      }}
-      onMouseEnter={(e) => {
-        if (!active) {
-          (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceHover;
-          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textDisabled;
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
-          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textMuted;
-        }
-      }}
-    >
-      <div
-        style={{
-          width: 28,
-          height: 28,
-          borderRadius: tokens.radii.md,
-          background: active ? tokens.colors.accent : `${tokens.colors.border}60`,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: '12px',
-          fontWeight: 700,
-          color: active ? 'white' : tokens.colors.textSecondary,
-          flexShrink: 0,
-        }}
-      >
-        {item.icon}
-      </div>
-      <span style={{ flex: 1 }}>{item.label}</span>
-      {typeof item.badge === 'number' && item.badge > 0 && (
-        <NavBadge count={item.badge} />
-      )}
-    </button>
-  );
 
   return (
     <aside
       ref={containerRef}
       className={sidebarClassName}
-      style={overlay ? overlayStyle : persistentStyle}
-      // 드로어 모드는 배경을 가리는 모달성 네비 — 스크린리더/포커스 트랩을 위해 dialog 로 표식.
+      style={{
+        width: overlay ? undefined : 260,
+        flexShrink: 0,
+        background: tokens.colors.surfaceCard,
+        borderRight: `1px solid ${tokens.colors.border}`,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
       role={overlay ? 'dialog' : undefined}
       aria-modal={overlay ? true : undefined}
-      aria-label={overlay ? '내비게이션' : undefined}
+      aria-label={overlay ? 'Navigation' : undefined}
     >
-      {/* Header */}
-      <div style={{ padding: '20px 16px 16px', borderBottom: `1px solid ${tokens.colors.border}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 10,
-              background: tokens.gradients.accent,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '18px',
-              fontWeight: 700,
-              color: 'white',
-              flexShrink: 0,
-            }}
-          >
-            W
-          </div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary, lineHeight: 1.2 }}>AWB</div>
-            <div style={{ fontSize: '11px', color: tokens.colors.textMuted, lineHeight: 1.4 }}>Workflow Board</div>
-          </div>
-          <MentionInboxBadge workspaceId={wsId} />
-          <NotificationSettingsPanel />
-        </div>
-      </div>
-
-      {/* Nav */}
-      <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto' }}>
-
-        {/* BOARDS section */}
-        <div
+      <div
+        style={{
+          minHeight: 64,
+          padding: '12px 12px',
+          borderBottom: `1px solid ${tokens.colors.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          boxSizing: 'border-box',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => handleNavClick(workspaceBase ? `${workspaceBase}/assistant` : '')}
+          aria-label="AWB home"
           style={{
-            ...sectionHeaderStyle,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
+            width: 34,
+            height: 34,
+            border: 'none',
+            borderRadius: 10,
+            background: tokens.gradients.accent,
+            color: 'white',
+            fontSize: 16,
+            fontWeight: 700,
+            cursor: 'pointer',
           }}
         >
-          <span
-            role="link"
-            tabIndex={0}
-            onClick={() => { navigate(`/ws/${wsId}/boards`); if (overlay) onClose(); }}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { navigate(`/ws/${wsId}/boards`); if (overlay) onClose(); } }}
-            style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-          >
-            BOARDS
-            {counts.tickets.total > 0 && <NavBadge count={counts.tickets.total} />}
-          </span>
-          <span
-            role="button"
-            aria-expanded={boardsExpanded}
-            tabIndex={0}
-            onClick={() => setBoardsExpanded((v) => !v)}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setBoardsExpanded((v) => !v); }}
-            style={{ fontSize: 10, color: tokens.colors.borderStrong, cursor: 'pointer', padding: '2px 4px' }}
-          >
-            {boardsExpanded ? '\u25BC' : '\u25B6'}
-          </span>
+          W
+        </button>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
+          <div style={{ marginTop: 1, fontSize: 10, color: tokens.colors.textMuted }}>AI Workflow Board</div>
         </div>
+        <MentionInboxBadge workspaceId={wsId} />
+        <NotificationSettingsPanel />
+      </div>
 
-        {boardsExpanded && (
-          <>
-            {boards.length === 0 ? (
-              <div style={{ padding: '6px 16px', fontSize: 11, color: tokens.colors.textMuted }}>
-                No boards — create one above
+      <nav
+        aria-label="Primary navigation"
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      >
+        <section aria-labelledby="sidebar-chat-heading" style={{ flexShrink: 0 }}>
+          <div style={sectionHeaderStyle}>
+            <span id="sidebar-chat-heading">Chat</span>
+            <button
+              type="button"
+              aria-label="New chat"
+              title="New chat"
+              onClick={() => handleNavClick(`${workspaceBase}/chat?new=1`)}
+              style={{
+                width: 24,
+                height: 24,
+                border: 'none',
+                borderRadius: 6,
+                background: 'transparent',
+                color: tokens.colors.textSecondary,
+                cursor: 'pointer',
+                fontSize: 17,
+                lineHeight: 1,
+              }}
+            >
+              +
+            </button>
+          </div>
+
+          {renderNavItem({
+            key: 'all-chats',
+            path: `${workspaceBase}/chat`,
+            label: 'All chats',
+            icon: 'C',
+            badge: counts.chat.total,
+            exact: true,
+          })}
+
+          <div
+            aria-label="Chat rooms"
+            style={{
+              maxHeight: 220,
+              minHeight: roomsLoading ? 40 : undefined,
+              overflowY: 'auto',
+              paddingBottom: 4,
+            }}
+          >
+            {roomsLoading && rooms.length === 0 ? (
+              <div style={{ padding: '8px 14px 10px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
+                Loading chats...
+              </div>
+            ) : rooms.length === 0 ? (
+              <div style={{ padding: '8px 14px 10px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
+                No chats yet
               </div>
             ) : (
-              boards.map((b) => {
-                const active = isBoardActive(b.id);
+              rooms.map((room) => {
+                const roomPath = `${workspaceBase}/chat/${room.id}`;
+                const active = location.pathname === roomPath;
+                const unread = Math.max(room.unread_count || 0, counts.chat.perRoom[room.id] || 0);
                 return (
-                  <React.Fragment key={b.id}>
-                    <button
-                      onClick={() => { navigate(`/ws/${wsId}/boards/${b.id}`); if (overlay) onClose(); }}
+                  <button
+                    key={room.id}
+                    type="button"
+                    onClick={() => handleNavClick(roomPath)}
+                    aria-current={active ? 'page' : undefined}
+                    title={roomDisplayName(room)}
+                    style={navRowStyle(active, true)}
+                    onMouseEnter={(event) => {
+                      if (!active) event.currentTarget.style.background = tokens.colors.surfaceHover;
+                    }}
+                    onMouseLeave={(event) => {
+                      if (!active) event.currentTarget.style.background = 'transparent';
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
                       style={{
-                        width: '100%',
-                        padding: '8px 16px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        cursor: 'pointer',
-                        fontSize: 13,
-                        color: active ? tokens.colors.textStrong : tokens.colors.textMuted,
-                        fontWeight: active ? 600 : 400,
-                        borderLeft: active ? `3px solid ${tokens.colors.accent}` : '3px solid transparent',
-                        background: active ? tokens.colors.border : 'transparent',
-                        border: 'none',
-                        textAlign: 'left',
-                        fontFamily: 'inherit',
-                      }}
-                      onMouseEnter={(e) => {
-                        if (!active) {
-                          (e.currentTarget as HTMLButtonElement).style.background = tokens.colors.surfaceHover;
-                          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textDisabled;
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (!active) {
-                          (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
-                          (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textMuted;
-                        }
+                        ...iconStyle(active),
+                        borderRadius: '50%',
+                        fontSize: 9,
                       }}
                     >
-                      <div
-                        style={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: tokens.radii.md,
-                          background: active ? tokens.colors.accent : `${tokens.colors.border}60`,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: '12px',
-                          fontWeight: 700,
-                          color: active ? 'white' : tokens.colors.textSecondary,
-                          flexShrink: 0,
-                        }}
-                      >
-                        B
-                      </div>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                        {b.name}
-                      </span>
-                      {counts.tickets.perBoard[b.id] > 0 && (
-                        <NavBadge count={counts.tickets.perBoard[b.id]} />
-                      )}
-                    </button>
-                  </React.Fragment>
+                      {roomInitials(room)}
+                    </span>
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {roomDisplayName(room)}
+                    </span>
+                    {unread > 0 && <NavBadge count={unread} />}
+                  </button>
                 );
               })
             )}
+          </div>
+        </section>
 
-          </>
-        )}
+        <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border, flexShrink: 0 }} />
 
-        {/* Divider */}
-        <div style={dividerStyle} />
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 8 }}>
+          {workspaceSections.map((section) => (
+            <section key={section.title} aria-labelledby={`sidebar-${section.title.toLowerCase()}`}>
+              <div style={sectionHeaderStyle}>
+                <span id={`sidebar-${section.title.toLowerCase()}`}>{section.title}</span>
+                {section.title === 'Work' && (
+                  <button
+                    type="button"
+                    aria-label={boardsExpanded ? 'Collapse board list' : 'Expand board list'}
+                    aria-expanded={boardsExpanded}
+                    onClick={() => setBoardsExpanded((value) => !value)}
+                    style={{
+                      width: 24,
+                      height: 24,
+                      border: 'none',
+                      borderRadius: 6,
+                      background: 'transparent',
+                      color: tokens.colors.textMuted,
+                      cursor: 'pointer',
+                      fontSize: 10,
+                    }}
+                  >
+                    {boardsExpanded ? '\u25BC' : '\u25B6'}
+                  </button>
+                )}
+              </div>
 
-        {/* WORKSPACE section */}
-        <div style={sectionHeaderStyle}>WORKSPACE</div>
-        {workspaceNavItems.map((item) => renderNavButton(item, isPathActive(item.path)))}
+              {section.items.map((item) => (
+                <React.Fragment key={item.key}>
+                  {renderNavItem(item)}
+                  {item.key === 'boards' && boardsExpanded && (
+                    <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                      {boards.length === 0 ? (
+                        <div style={{ padding: '6px 14px 8px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
+                          No boards yet
+                        </div>
+                      ) : (
+                        boards.map((board) => renderNavItem({
+                          key: `board-${board.id}`,
+                          path: `${workspaceBase}/boards/${board.id}`,
+                          label: board.name,
+                          icon: 'B',
+                          badge: counts.tickets.perBoard[board.id],
+                        }, true))
+                      )}
+                    </div>
+                  )}
+                </React.Fragment>
+              ))}
+            </section>
+          ))}
 
-        {/* ADMIN section — role-gated */}
-        {hasPermission('admin.access') && (
-          <>
-            <div style={dividerStyle} />
-            <div style={sectionHeaderStyle}>ADMIN</div>
-            {adminNavItems.map((item) => renderNavButton(item, isPathActive(item.path)))}
-          </>
-        )}
-
+          {canAdmin && (
+            <section aria-labelledby="sidebar-operations">
+              <div style={sectionHeaderStyle}>
+                <span id="sidebar-operations">Operations</span>
+              </div>
+              {operations.map((item) => renderNavItem(item))}
+            </section>
+          )}
+        </div>
       </nav>
 
-      {/* User footer */}
       {user && (
-        <div style={{ padding: '12px 16px', borderTop: `1px solid ${tokens.colors.border}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+        <div
+          style={{
+            padding: '10px 12px',
+            borderTop: `1px solid ${tokens.colors.border}`,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 9,
+          }}
+        >
+          <div
+            aria-hidden="true"
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: '50%',
+              background: tokens.colors.border,
+              color: tokens.colors.textStrong,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            {user.name?.[0]?.toUpperCase() || '?'}
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: tokens.colors.border,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: '13px',
-                fontWeight: 700,
+                fontSize: 12,
+                fontWeight: 600,
                 color: tokens.colors.textStrong,
-                flexShrink: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
               }}
             >
-              {user?.name?.[0]?.toUpperCase() || '?'}
+              {user.name || 'User'}
             </div>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div
-                style={{
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: tokens.colors.textStrong,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {user?.name || 'User'}
-              </div>
-              <div style={{ fontSize: '10px', color: tokens.colors.textMuted }}>
-                {(user?.role || '').toUpperCase()}
-              </div>
+            <div style={{ marginTop: 1, fontSize: 9, color: tokens.colors.textMuted }}>
+              {(user.role || '').toUpperCase()}
             </div>
           </div>
           <button
-            onClick={async () => { await logout(); }}
+            type="button"
+            onClick={async () => logout()}
+            title="Logout"
+            aria-label="Logout"
             style={{
-              width: '100%',
-              padding: '8px 12px',
-              background: 'transparent',
+              width: 30,
+              height: 30,
               border: `1px solid ${tokens.colors.border}`,
-              borderRadius: tokens.radii.md,
-              color: tokens.colors.textSecondary,
-              fontSize: '12px',
-              fontWeight: 500,
+              borderRadius: 7,
+              background: 'transparent',
+              color: tokens.colors.textMuted,
               cursor: 'pointer',
-              fontFamily: 'inherit',
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textStrong;
-              (e.currentTarget as HTMLButtonElement).style.borderColor = tokens.colors.borderStrong;
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = tokens.colors.textSecondary;
-              (e.currentTarget as HTMLButtonElement).style.borderColor = tokens.colors.border;
+              fontSize: 13,
             }}
           >
-            Logout
+            \u2192
           </button>
         </div>
       )}

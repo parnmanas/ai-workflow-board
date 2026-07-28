@@ -52,7 +52,7 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
  *     to register and refresh per-process presence. ST-4 manager mode adds
  *     agent_ids[]/working_dirs[]/paired_at to the InstanceRecord.
  *   - Admin user: GET `/api/admin/agent-manager/instances` etc. for the
- *     dashboard at `/admin/agent-manager`. ST-4 adds pairing/command endpoints.
+ *     runtime dashboard embedded in the workspace AI Agents page. ST-4 adds pairing/command endpoints.
  *   - awb-agent-manager bootstrap: POST `/api/agent-manager/pair/redeem`
  *     swaps a one-time pairing token for an API key + agent identity.
  *   - awb-agent-manager runtime: POST `/api/agent-manager/command/ack`
@@ -317,7 +317,7 @@ export class AgentManagerController {
     // Manager instances are workspace-less by design (operator invariant).
     // The manager process sends its config.json workspace_id in the heartbeat
     // body for backwards compat, but we ignore it and force NULL into the
-    // InstanceRegistry record — otherwise the AgentManager admin page
+    // InstanceRegistry record — otherwise the AI Agents runtime section
     // (`{inst.workspace_id || '—'}`) keeps rendering a workspace badge even
     // after the DB `agent.workspace_id` was stripped to NULL.
     const incomingWs =
@@ -1232,7 +1232,7 @@ export class AgentManagerController {
         'AgentManager',
         `Credential decrypt failed for cred=${cred.id.slice(0, 8)} (provider=${cred.provider}). ` +
           `Likely cause: ENCRYPTION_KEY env / .encryption_key file changed since the credential was saved. ` +
-          `Operator must re-edit the credential in Admin → Credentials to re-encrypt it under the current key.`,
+          `Operator must re-edit the credential in Settings → Credentials to re-encrypt it under the current key.`,
       );
       return res.status(503).json({
         error: 'credential_decrypt_failed',
@@ -1240,7 +1240,7 @@ export class AgentManagerController {
         provider: cred.provider,
         detail:
           'Server failed to decrypt the stored credential. The encryption key may have changed since ' +
-          'the credential was saved. Re-edit the credential in Admin → Credentials to re-encrypt it.',
+          'the credential was saved. Re-edit the credential in Settings → Credentials to re-encrypt it.',
       });
     }
 

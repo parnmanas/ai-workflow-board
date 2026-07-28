@@ -299,7 +299,7 @@ export default function ChatFirstHome() {
         const room = await api.createChatRoom([{ participant_type: 'agent', participant_id: assistantId }]);
         roomId = room.id;
       }
-      navigate(`/ws/${wsId}/chat?room=${roomId}`);
+      navigate(`/ws/${wsId}/chat/${roomId}`);
     } catch (err: any) {
       showToast(err?.message || '대화를 여는 데 실패했습니다', 'error');
       setStarting(false);
@@ -307,7 +307,7 @@ export default function ChatFirstHome() {
   }, [wsId, resolution, starting, navigate, showToast]);
 
   const onOpenSettings = useCallback(() => {
-    if (wsId) navigate(`/ws/${wsId}/settings`);
+    if (wsId) navigate(`/ws/${wsId}/settings/workspace#assistant-agent`);
   }, [wsId, navigate]);
 
   const onQuick = useCallback(

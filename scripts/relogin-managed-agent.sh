@@ -15,7 +15,7 @@
 #   A. Direct injection (what this script does): restart the agent in AWB
 #      UI; the file is re-read on every subagent spawn.
 #   B. Remote injection: pass --show-credential to print the new file
-#      content, paste into AWB Admin -> Credentials -> Claude (Subscription),
+#      content, paste into AWB Settings -> Credentials -> Claude (Subscription),
 #      attach to the agent. Future renewals can be done from the AWB UI.
 #
 # Usage:
@@ -215,18 +215,18 @@ fi
 echo
 echo "Direct method (Method A) — done."
 echo "Restart the agent in AWB so the next subagent spawn picks up the new token:"
-echo "  AWB Admin -> Agent Manager -> $AGENT_NAME -> Restart"
+echo "  AWB Workspace -> AI Agents -> $AGENT_NAME -> Restart"
 echo
 
 if [ "$SHOW_CRED" -eq 1 ]; then
-  echo 'Remote-injection payload (Method B) — paste into AWB Admin -> Credentials -> Claude (Subscription) -> credentials_json:'
+  echo 'Remote-injection payload (Method B) — paste into AWB Settings -> Credentials -> Claude (Subscription) -> credentials_json:'
   echo
   echo '----- BEGIN credentials_json -----'
   cat "$CRED_PATH"
   echo
   echo '----- END credentials_json -----'
   echo
-  echo "After saving the credential, attach it to agent '$AGENT_NAME' in AWB Admin -> Agent Manager -> Edit -> CLI credential, then Restart."
+  echo "After saving the credential, attach it to agent '$AGENT_NAME' in AWB Workspace -> AI Agents -> Edit -> CLI credential, then Restart."
 else
-  echo '(re-run with --show-credential to also print the JSON for AWB Admin -> Credentials remote injection.)'
+  echo '(re-run with --show-credential to also print the JSON for AWB Settings -> Credentials remote injection.)'
 fi

@@ -297,7 +297,7 @@ Idempotency, concurrency, failure:
 
 ## Per-agent credential fallback (empty `credential_id`)
 
-Each managed agent may carry a per-agent `credential_id` (Admin → Agent Manager
+Each managed agent may carry a per-agent `credential_id` (Workspace → AI Agents
 → *agent* → Edit → **CLI credential**). Leaving it **empty selects the adapter's
 host fallback path** — `prepareCliHome` points the agent at the login/env on the
 **manager host** (the codebase calls this **"operator HOME"**) instead of a
@@ -595,7 +595,7 @@ out a slot:
   [`docs/managed-agent-relogin.md`](managed-agent-relogin.md). Covers both
   the direct path (`scripts/relogin-managed-agent.{ps1,sh}` redirecting
   `CLAUDE_CONFIG_DIR` to the per-agent cli-home) and the remote-injection
-  path (paste `.credentials.json` into AWB Admin → Credentials →
+  path (paste `.credentials.json` into AWB Settings → Credentials →
   Claude (Subscription), attach to agent, restart). Required when subagent
   turns return `is_error=true` in 1–2 s and sessions are killed as
   UNHEALTHY every 25 minutes — the canonical signature of an expired
@@ -703,13 +703,13 @@ result:
     cycle count, and gate labels). Re-uses the same `stuck_alerts` dedup
     row so the operator gets one notification per dedup window — not two.
 
-Admin surface — `GET /api/admin/column-policies` lists every board's
+Internal admin API — `GET /api/admin/column-policies` lists every board's
 policies + column metadata; `PUT /api/admin/column-policies/:id` edits a
 single row's `gate_labels` / `max_cycles_without_progress` /
 `on_violation` / `expected_action` / `enabled` toggle. Changes take effect
 on the next sweep — the detector reads policies fresh each tick, no
-restart required. The Admin UI tab lives at
-`/admin/column-policies` (`ColumnPoliciesManager.tsx`).
+restart required. There is no standalone Admin UI menu for this internal
+policy surface.
 
 No new env vars — every knob is per-policy in the DB. `auto_move` and
 `escalate_meta_ticket` are accepted enum values on the row but PR #2
