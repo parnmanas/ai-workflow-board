@@ -123,7 +123,15 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C', badge: counts.chat.total },
     { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
-    { key: 'catalog',          path: `/ws/${wsId}/catalog`,          label: 'Automation Catalog', icon: 'F' },
+    { key: 'functions',        path: `/ws/${wsId}/functions`,        label: 'Functions',        icon: 'F' },
+    { key: 'credentials',      path: `/ws/${wsId}/credentials`,      label: 'Credentials',      icon: 'K' },
+    { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
+    { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
+    { key: 'actions',          path: `/ws/${wsId}/actions`,          label: 'Actions',          icon: 'X' },
+    { key: 'qa',               path: `/ws/${wsId}/qa`,               label: 'QA',               icon: 'Q' },
+    { key: 'security',         path: `/ws/${wsId}/security`,         label: 'Security',         icon: 'S' },
+    { key: 'schedules',        path: `/ws/${wsId}/schedules`,        label: 'Schedules',        icon: 'T' },
+    { key: 'claude-backend-profiles', path: `/ws/${wsId}/claude-backend-profiles`, label: 'Claude Profiles', icon: 'B' },
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
     { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
@@ -136,9 +144,12 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
 
   const adminNavItems: { key: string; path: string; label: string; icon: string; badge?: number }[] = [
     { key: 'admin-users',    path: '/admin/users',    label: 'Users',       icon: 'U', badge: counts.pendingUsers },
+    { key: 'admin-qa',      path: '/admin/qa',      label: 'QA Tests',    icon: 'Q' },
     { key: 'admin-logs',    path: '/admin/logs',    label: 'Server Logs', icon: 'L' },
     { key: 'admin-agent-logs', path: '/admin/agent-logs', label: 'Agent Logs',  icon: 'G', badge: counts.agentErrors },
     { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
+    { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
+    { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
 

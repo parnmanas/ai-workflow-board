@@ -892,7 +892,7 @@ export const api = {
     request<any>(`/keys/${id}`, { method: 'DELETE' }),
 
   // ─── Prompt Templates (Phase 1 ROLE-05) ────────────────
-  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; boardId?: string; includeAllScopes?: boolean }) => {
+  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; boardId?: string | null; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams({ workspace_id });
     if (options?.category) params.set('category', options.category);
     if (options?.id) params.set('id', options.id);
@@ -1137,11 +1137,11 @@ export const api = {
   },
 
   // Functions: workspace_id omitted means global definitions only.
-  listFunctions: (workspaceId?: string | null, includeShadowed = false, boardId?: string) => {
+  listFunctions: (workspaceId?: string | null, includeShadowed = false, boardId?: string | null) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (includeShadowed) params.set('include_shadowed', 'true');
-    if (boardId !== undefined) params.set('board_id', boardId);
+    if (boardId !== undefined) params.set('board_id', boardId || '');
     const query = params.toString();
     return request<WorkflowFunction[]>(`/functions${query ? `?${query}` : ''}`);
   },
@@ -1497,7 +1497,7 @@ export const api = {
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').
   // Pass scope:'global' (no workspace_id) for the Admin global-credentials page.
-  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; boardId?: string; includeAllScopes?: boolean }) => {
+  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; boardId?: string | null; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (opts?.provider) params.set('provider', opts.provider);

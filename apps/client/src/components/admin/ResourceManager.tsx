@@ -40,6 +40,7 @@ interface ResourceManagerProps {
   catalogMode?: boolean;
   createScope?: CatalogScope;
   allScopes?: boolean;
+  canManageGlobal?: boolean;
 }
 
 export default function ResourceManager({
@@ -48,6 +49,7 @@ export default function ResourceManager({
   catalogMode = false,
   createScope = 'workspace',
   allScopes = false,
+  canManageGlobal = false,
 }: ResourceManagerProps) {
   const { showToast } = useToast();
   const [showForm, setShowForm] = useState(false);
@@ -526,6 +528,7 @@ export default function ResourceManager({
       onPreview={openResourceFile}
       onClose={isNarrow ? () => setSelectedId(null) : undefined}
       showToast={showToast}
+      canManage={selectedResource.scope !== 'global' || canManageGlobal}
     />
   ) : (
     emptyDetail

@@ -12,35 +12,37 @@ The Board header and sub-menu expose only board operations:
 - Archive, Settings, and Benchmark when enabled;
 - no reusable-definition manager links.
 
-Resources, Actions, QA, and Security no longer have independent Board
-management pages. Their legacy URLs redirect to:
+Reusable definitions retain independent type routes for direct access:
 
 ```text
-/ws/:workspaceId/catalog?section=:section&scope=board&board=:boardId
+/ws/:workspaceId/:managementType
+/ws/:workspaceId/boards/:boardId/:managementType
 ```
 
 Do not add a new board-only manager page for a reusable automation definition.
-Add it as a section on the single Catalog page and make the scope explicit
-instead.
+Reuse the same type manager and provide the Board context explicitly.
 
-## Automation Catalog
+## Management menus
 
-The Catalog renders every management section together on one scrolling page.
-It has no per-type tabs or separate Board/Admin variants. Operators can compare
-inheritance and overrides without navigating between pages.
+Functions, Credentials, Resources, Prompt Templates, Actions, QA, Security,
+Schedules, and Claude Profiles are independent Workspace menu entries. There is
+no intermediate Automation Catalog page.
 
 - Functions, Credentials, Resources, and Prompt Templates use Global,
   Workspace, and Board scopes.
+- Their Workspace page lists only Global plus the current Workspace rows.
+- New definitions choose between `workspace_id = NULL` (Global) and the current
+  Workspace directly on that page.
 - Actions, QA, Security, and Schedules use Workspace and Board scopes because
   they bind workspace agents and retain workspace execution history.
 - Scope is chosen only when an item is created and is immutable afterward.
 - Board scope always requires a board belonging to the selected workspace.
 - Every row shows a scope badge.
 
-Claude backend definition/assignment, System QA, Column Policies, and Workflow
-Health are also sections in the same page. Legacy workspace and Admin routes
-redirect to the relevant Catalog section. New
-navigation must link directly to the Catalog rather than relying on redirects.
+Claude backend definitions and Workspace assignment share the Claude Profiles
+page. System QA, Column Policies, and Workflow Health remain independent Admin
+menus because they are system operations rather than scoped reusable
+definitions.
 
 See [Catalog scopes](catalog-scopes.md) for the data model, inheritance rules,
 authorization, and implementation checklist.
@@ -52,13 +54,13 @@ authorization, and implementation checklist.
 - Collapse labels before moving navigation into overflow on narrow layouts.
 - Use shared tokens and common UI primitives rather than page-local button
   styles.
-- Preserve the workspace and board context in every Catalog link.
+- Preserve the workspace and board context in every management link.
 
 ## New board UI checklist
 
 - Use `PageHeader` and shared common controls.
 - Keep routes under `/ws/:workspaceId/boards/:boardId`.
-- Put reusable configuration in Automation Catalog.
+- Put reusable configuration in its type-specific Workspace/Board menu.
 - Verify empty, loading, error, and permission-denied states.
 - Verify keyboard focus, narrow layouts, and long names.
 - Verify the target board belongs to the current workspace server-side.

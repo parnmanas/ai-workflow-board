@@ -9,8 +9,9 @@ interface Props {
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string;
+  boardId?: string | null;
   allScopes?: boolean;
+  canManageGlobal?: boolean;
 }
 
 type Draft = {
@@ -93,6 +94,7 @@ export default function FunctionManager({
   createScope = 'workspace',
   boardId,
   allScopes = false,
+  canManageGlobal = false,
 }: Props) {
   const { showToast } = useToast();
   const [rows, setRows] = useState<WorkflowFunction[]>([]);
@@ -293,7 +295,7 @@ export default function FunctionManager({
         ) : rows.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted }}>No Functions defined.</div>
         ) : rows.map(row => {
-          const inherited = !globalMode && !catalogMode && row.workspace_id === null;
+          const inherited = !globalMode && row.workspace_id === null && !canManageGlobal;
           return (
             <div key={row.id} style={{ background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 14, display: 'grid', gridTemplateColumns: 'minmax(240px, 1fr) auto', gap: 14 }}>
               <div>

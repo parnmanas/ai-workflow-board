@@ -24,12 +24,14 @@ export default function PromptTemplateManager({
   createScope = 'workspace',
   boardId,
   allScopes = false,
+  canManageGlobal = false,
 }: {
   workspaceId?: string;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string;
+  boardId?: string | null;
   allScopes?: boolean;
+  canManageGlobal?: boolean;
 } = {}) {
   const { showToast } = useToast();
   const [showForm, setShowForm] = useState(false);
@@ -245,10 +247,14 @@ export default function PromptTemplateManager({
                     {relativeTime(t.updated_at || t.created_at)}
                   </td>
                   <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
-                    <div style={{ display: 'inline-flex', gap: 6 }}>
-                      <Button variant="secondary" size="sm" onClick={() => startEdit(t)}>Edit</Button>
-                      <Button variant="danger" size="sm" onClick={() => setDeleteTarget(t)}>Delete</Button>
-                    </div>
+                    {t.scope === 'global' && !canManageGlobal ? (
+                      <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Inherited (read-only)</span>
+                    ) : (
+                      <div style={{ display: 'inline-flex', gap: 6 }}>
+                        <Button variant="secondary" size="sm" onClick={() => startEdit(t)}>Edit</Button>
+                        <Button variant="danger" size="sm" onClick={() => setDeleteTarget(t)}>Delete</Button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

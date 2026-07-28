@@ -102,13 +102,15 @@ export default function CredentialManager({
   createScope = 'workspace',
   boardId,
   allScopes = false,
+  canManageGlobal = false,
 }: {
   workspaceId?: string;
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string;
+  boardId?: string | null;
   allScopes?: boolean;
+  canManageGlobal?: boolean;
 }) {
   const { showToast } = useToast();
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -376,10 +378,10 @@ export default function CredentialManager({
                       {relativeTime(c.updated_at || c.created_at)}
                     </td>
                     <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
-                      {!catalogMode && !globalMode && c.scope === 'global' ? (
+                      {!globalMode && c.scope === 'global' && !canManageGlobal ? (
                         <span
                           style={{ fontSize: 11, color: tokens.colors.textMuted }}
-                          title="Global credentials are managed in Automation Catalog"
+                          title="Global credentials require global management permission"
                         >
                           Inherited (read-only)
                         </span>

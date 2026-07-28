@@ -23,7 +23,7 @@ const BoardsIndexPage = lazy(() => import('./components/BoardsIndexPage'));
 const WorkspaceUsersPage = lazy(() => import('./components/WorkspaceUsersPage'));
 const WorkspaceChannelsPage = lazy(() => import('./components/WorkspaceChannelsPage'));
 const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPage'));
-const WorkspaceCatalogPage = lazy(() => import('./components/WorkspaceCatalogPage'));
+const WorkspaceManagementPage = lazy(() => import('./components/WorkspaceManagementPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
@@ -74,11 +74,9 @@ export function WorkspaceSectionRedirect() {
   return <Navigate to={`${defaultSectionForMode(mode)}${search}`} replace />;
 }
 
-function CatalogRedirect({ section, boardScoped = false }: { section: string; boardScoped?: boolean }) {
-  const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
-  const params = new URLSearchParams({ section, scope: boardScoped ? 'board' : 'workspace' });
-  if (boardScoped && boardId) params.set('board', boardId);
-  return <Navigate to={`/ws/${wsId}/catalog?${params.toString()}`} replace />;
+function LegacyCatalogRedirect() {
+  const { wsId } = useParams<{ wsId: string }>();
+  return <Navigate to={`/ws/${wsId}/functions`} replace />;
 }
 
 function AppContent() {
@@ -197,11 +195,15 @@ function AppContent() {
             <Route path="assistant" element={<ChatFirstHome />} />
             <Route path="boards" element={<BoardsIndexPage />} />
             <Route path="boards/:boardId" element={<Board />} />
-            <Route path="boards/:boardId/resources" element={<CatalogRedirect section="resources" boardScoped />} />
-            <Route path="boards/:boardId/actions" element={<CatalogRedirect section="actions" boardScoped />} />
+            <Route path="boards/:boardId/functions" element={<WorkspaceManagementPage kind="functions" boardScoped />} />
+            <Route path="boards/:boardId/credentials" element={<WorkspaceManagementPage kind="credentials" boardScoped />} />
+            <Route path="boards/:boardId/resources" element={<WorkspaceManagementPage kind="resources" boardScoped />} />
+            <Route path="boards/:boardId/prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" boardScoped />} />
+            <Route path="boards/:boardId/actions" element={<WorkspaceManagementPage kind="actions" boardScoped />} />
             <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-            <Route path="boards/:boardId/qa" element={<CatalogRedirect section="qa" boardScoped />} />
-            <Route path="boards/:boardId/security" element={<CatalogRedirect section="security" boardScoped />} />
+            <Route path="boards/:boardId/qa" element={<WorkspaceManagementPage kind="qa" boardScoped />} />
+            <Route path="boards/:boardId/security" element={<WorkspaceManagementPage kind="security" boardScoped />} />
+            <Route path="boards/:boardId/schedules" element={<WorkspaceManagementPage kind="schedules" boardScoped />} />
             <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
@@ -211,15 +213,18 @@ function AppContent() {
             <Route path="agents/:agentId" element={<AgentDetailPage />} />
             <Route path="channels" element={<WorkspaceChannelsPage />} />
             <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
-            <Route path="catalog" element={<WorkspaceCatalogPage />} />
-            <Route path="prompt-templates" element={<CatalogRedirect section="prompts" />} />
-            <Route path="resources" element={<CatalogRedirect section="resources" />} />
-            <Route path="actions" element={<CatalogRedirect section="actions" />} />
-            <Route path="functions" element={<CatalogRedirect section="functions" />} />
-            <Route path="credentials" element={<CatalogRedirect section="credentials" />} />
+            <Route path="catalog" element={<LegacyCatalogRedirect />} />
+            <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
+            <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
+            <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
+            <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
+            <Route path="credentials" element={<WorkspaceManagementPage kind="credentials" />} />
+            <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
+            <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
+            <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
             <Route path="roles" element={<WorkspaceRolesPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
-            <Route path="claude-backend-profiles" element={<CatalogRedirect section="claude-backends" />} />
+            <Route path="claude-backend-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
           </Route>
         </Route>
       </Routes>

@@ -49,21 +49,25 @@ test('board scope fails closed when the board/workspace pair is invalid', async 
   );
 });
 
-test('client exposes one menu entry and one tabless catalog page for all management sections', () => {
+test('client exposes individual management menus with mixed Global/current-Workspace pages', () => {
   const app = fs.readFileSync(path.join(ROOT, 'App.tsx'), 'utf8');
   const sidebar = fs.readFileSync(path.join(ROOT, 'components', 'Sidebar.tsx'), 'utf8');
   const boardSubMenu = fs.readFileSync(path.join(ROOT, 'components', 'BoardSubMenu.tsx'), 'utf8');
-  const catalog = fs.readFileSync(path.join(ROOT, 'components', 'WorkspaceCatalogPage.tsx'), 'utf8');
-  assert.match(app, /path="catalog" element={<WorkspaceCatalogPage/);
-  assert.match(app, /CatalogRedirect section="functions"/);
-  assert.match(app, /CatalogRedirect section="resources"/);
-  assert.match(sidebar, /label: 'Automation Catalog'/);
+  const management = fs.readFileSync(path.join(ROOT, 'components', 'WorkspaceManagementPage.tsx'), 'utf8');
+  assert.doesNotMatch(app, /WorkspaceCatalogPage|function CatalogRedirect/);
+  assert.match(app, /path="catalog" element={<LegacyCatalogRedirect/);
+  for (const kind of ['functions', 'credentials', 'resources', 'prompt-templates', 'actions', 'qa', 'security', 'schedules', 'claude-backend-profiles']) {
+    assert.match(app, new RegExp(`path="${kind}" element={<WorkspaceManagementPage kind="${kind}"`));
+  }
+  for (const label of ['Functions', 'Credentials', 'Resources', 'Prompt Templates', 'Actions', 'QA', 'Security', 'Schedules', 'Claude Profiles']) {
+    assert.match(sidebar, new RegExp(`label: '${label}'`));
+  }
+  assert.doesNotMatch(sidebar, /label: 'Automation Catalog'/);
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
   assert.doesNotMatch(sidebar, /label: 'Global Credentials'/);
-  assert.doesNotMatch(sidebar, /label: '(QA Tests|Column Policies|Workflow Health|Claude Profiles|Claude Backend Profiles)'/);
-  assert.doesNotMatch(boardSubMenu, /label: '(Automation Catalog|QA|Security|Resources)'/);
-  assert.doesNotMatch(catalog, /const TABS|requestedTab|setParam\('tab'/);
-  for (const section of ['functions', 'credentials', 'resources', 'prompts', 'actions', 'qa', 'security', 'schedules', 'claude-backends', 'system-qa', 'column-policies', 'workflow-health']) {
-    assert.match(catalog, new RegExp(`CatalogSection id="${section}"`));
-  }
+  assert.doesNotMatch(boardSubMenu, /label: 'Automation Catalog'/);
+  assert.match(management, /Workspace for new item/);
+  assert.match(management, /<option value="global">Not set \(Global\)<\/option>/);
+  assert.match(management, /<option value="workspace">/);
+  assert.match(management, /boardId: boardScoped \? boardId : null/);
 });

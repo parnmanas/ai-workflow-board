@@ -20,6 +20,7 @@ interface ResourceDetailPanelProps {
   workspaceId: string;
   onEdit: (r: Resource) => void;
   onDelete: (r: Resource) => void;
+  canManage?: boolean;
   // 이미지/비디오는 라이트박스, 파일은 새 탭/다운로드 — ResourceManager 의
   // openResourceFile 을 그대로 위임받아 카드 시절 동작을 유지한다.
   onPreview: (r: Resource) => void;
@@ -71,6 +72,7 @@ export default function ResourceDetailPanel({
   workspaceId,
   onEdit,
   onDelete,
+  canManage = true,
   onPreview,
   onClose,
   showToast,
@@ -207,8 +209,14 @@ export default function ResourceDetailPanel({
           {onClose && (
             <Button variant="secondary" size="sm" onClick={onClose}>← 목록</Button>
           )}
-          <Button variant="secondary" size="sm" onClick={() => onEdit(resource)}>Edit</Button>
-          <Button variant="danger" size="sm" onClick={() => onDelete(resource)}>Delete</Button>
+          {canManage ? (
+            <>
+              <Button variant="secondary" size="sm" onClick={() => onEdit(resource)}>Edit</Button>
+              <Button variant="danger" size="sm" onClick={() => onDelete(resource)}>Delete</Button>
+            </>
+          ) : (
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Inherited (read-only)</span>
+          )}
         </div>
       </div>
 

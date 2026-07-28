@@ -17,9 +17,9 @@ Board Function types.
 
 | `workspace_id` | `board_id` | Meaning | Management surface |
 |---|---|---|---|
-| `NULL` | `NULL` | Global, inherited by every workspace | Automation Catalog |
-| workspace UUID | `NULL` | Available only in that workspace | Automation Catalog |
-| workspace UUID | board UUID | Available only on that board | Automation Catalog |
+| `NULL` | `NULL` | Global, inherited by every workspace | Functions menu |
+| workspace UUID | `NULL` | Available only in that workspace | Functions menu |
+| workspace UUID | board UUID | Available only on that board | Board Functions route |
 
 Resolution is by stable `key`: Board overrides Workspace, and Workspace
 overrides Global. Scope cannot be moved in place; create/delete an override
@@ -71,7 +71,7 @@ run user-authored shell text.
 
 Function definitions use the shared catalog scope described in
 [`catalog-scopes.md`](catalog-scopes.md). A key resolves in Board → Workspace →
-Global order. The Automation Catalog requests `include_shadowed=true` so an
+Global order. The Workspace Functions page requests `include_shadowed=true` so an
 operator can inspect and edit every definition instead of seeing only the
 effective winner.
 
@@ -175,5 +175,5 @@ not diverge by caller.
 - `list_function_runs`
 
 Global authoring stays on the authenticated admin REST/UI path inside the
-Automation Catalog. MCP API keys
+Functions menu. MCP API keys
 bound to a workspace cannot manage or execute another workspace's Functions.

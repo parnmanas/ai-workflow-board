@@ -379,7 +379,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       'Drive the real AWB client UI with a headless-Chrome (browser) driver and capture a '
       + 'screenshot of each core screen as image/png evidence: the login page, the board view, '
       + 'a ticket detail panel with comments, a chat room, the board QA manager (table view), the '
-      + 'Automation Catalog resources, and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
+      + 'Workspace resource menus and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
       + 'pixels in the QA detail Gallery/Lightbox. Capture recipe: apps/server/scripts/qa-visual-capture.mjs.',
     qa_driver: BROWSER_DRIVER,
     qa_driver_config: browserDriverConfig(),

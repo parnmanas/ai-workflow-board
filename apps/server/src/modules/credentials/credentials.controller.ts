@@ -62,7 +62,7 @@ function isMaskedValue(value: string): boolean {
 
 // Shared response shape. `scope` lets the client tell workspace credentials
 // apart from inherited global ones. Write permissions are enforced per row in
-// the unified Automation Catalog.
+// the current Workspace management page.
 function serializeCred(c: Credential) {
   let credentialFields: Record<string, string> = {};
   let credentialStatus: 'ok' | 'unreadable' = 'ok';

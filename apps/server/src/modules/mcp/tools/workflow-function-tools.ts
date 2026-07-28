@@ -48,7 +48,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'save_function',
-    'Create or update a Workspace/Board Function. Global Functions are managed by authenticated admins in Automation Catalog. Provide id to update.',
+    'Create or update a Workspace/Board Function. Global Functions are managed by authenticated admins from the Functions menu. Provide id to update.',
     {
       workspace_id: z.string().describe('Workspace scope (required; MCP cannot author global Functions)'),
       board_id: z.string().optional().describe('Set for board scope; omit for workspace scope'),

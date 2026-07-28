@@ -46,7 +46,7 @@ const TD: React.CSSProperties = {
 
 interface WorkspaceSchedulesEditorProps {
   workspaceId: string;
-  boardId?: string;
+  boardId?: string | null;
 }
 
 export default function WorkspaceSchedulesEditor({ workspaceId, boardId }: WorkspaceSchedulesEditorProps) {
@@ -62,7 +62,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId, boardId }: Works
     setLoading(true);
     try {
       const [scheduleList, agentList] = await Promise.all([
-        api.listWorkspaceSchedules(workspaceId).catch(() => []),
+        api.listWorkspaceSchedules(workspaceId, boardId).catch(() => []),
         api.getAgents(workspaceId).catch(() => []),
       ]);
       setSchedules(scheduleList || []);
@@ -72,7 +72,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId, boardId }: Works
     } finally {
       setLoading(false);
     }
-  }, [workspaceId, showToast]);
+  }, [workspaceId, boardId, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -173,7 +173,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId, boardId }: Works
         <ScheduleEditor
           schedule={editing === 'new' ? null : editing}
           workspaceId={workspaceId}
-          boardId={boardId}
+          boardId={boardId || undefined}
           agents={agents}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await load(); }}

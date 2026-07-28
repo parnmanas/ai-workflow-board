@@ -50,6 +50,27 @@ describe('Workflow Functions', () => {
     assert.equal(otherWorkspaceRows.find(row => row.key === 'system.noop').workspace_id, null);
   });
 
+  it('keeps Board Functions out of a Global + current Workspace management query', async () => {
+    const repo = dataSource.getRepository(WorkflowFunction);
+    const source = await repo.findOneByOrFail({ key: 'system.noop', workspace_id: null });
+    await repo.save(repo.create({
+      ...source,
+      id: undefined,
+      key: 'test.board-only',
+      name: 'Board only',
+      builtin: false,
+      workspace_id: 'workspace-a',
+      board_id: 'board-a',
+    }));
+
+    const workspaceManagementRows = await service.list('workspace-a', null, true);
+    assert.equal(workspaceManagementRows.some(row => row.key === 'test.board-only'), false);
+    assert.ok(workspaceManagementRows.every(row => row.board_id === null));
+
+    const boardRows = await service.list('workspace-a', 'board-a', true);
+    assert.equal(boardRows.some(row => row.key === 'test.board-only'), true);
+  });
+
   it('deduplicates key-idempotent executions and persists structured output', async () => {
     const fn = await service.create({
       workspace_id: 'workspace-a',
