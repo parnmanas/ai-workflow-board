@@ -238,9 +238,8 @@ export async function evaluateMergeGate(
 
   // Resolve repo + base branch. Any gap → availability-first pass.
   if (!ticket.base_repo_resource_id || !ticket.workspace_id) return PASS('unresolvable');
-  const resource = await scope.getRepository(Resource).findOne({
-    where: { id: ticket.base_repo_resource_id, workspace_id: ticket.workspace_id },
-  });
+  const resource = await scope.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } });
+  if (resource && resource.workspace_id !== null && resource.workspace_id !== ticket.workspace_id) return PASS('unresolvable');
   if (!resource?.url) return PASS('unresolvable');
   const baseBranch = ticket.base_branch || resource.default_branch || '';
   if (!baseBranch) return PASS('unresolvable');
@@ -251,6 +250,7 @@ export async function evaluateMergeGate(
       scope.getRepository(Credential),
       resource.credential_id,
       ticket.workspace_id,
+      resource.board_id,
     );
   } catch {
     credential = null;

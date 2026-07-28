@@ -23,9 +23,10 @@ interface BoardOption {
 interface ActionManagerProps {
   workspaceId?: string;
   boardId?: string | null;
+  allScopes?: boolean;
 }
 
-export default function ActionManager({ workspaceId, boardId }: ActionManagerProps) {
+export default function ActionManager({ workspaceId, boardId, allScopes = false }: ActionManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -62,7 +63,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     setLoading(true);
     try {
       const [list, agentList, boardList] = await Promise.all([
-        api.listActions(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
+        api.listActions(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
         api.getAgents(effectiveWorkspaceId).catch(() => [] as any[]),
         api.getBoards(effectiveWorkspaceId).catch(() => [] as any[]),
       ]);
@@ -74,7 +75,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, boardId, showToast]);
+  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
 
   useEffect(() => { loadActions(); }, [loadActions]);
 
@@ -147,7 +148,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
           description: formDescription,
           prompt: formPrompt,
           target_agent_id: formAgentId,
-          board_id: effectiveBoardId,
+          board_id: editAction.board_id,
           schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
@@ -284,6 +285,7 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
                     >
                       {a.name}
                     </button>
+                    <Badge variant="info">{a.board_id ? 'board' : 'workspace'}</Badge>
                     {a.enabled ? <Badge variant="success">on</Badge> : <Badge variant="neutral">off</Badge>}
                   </div>
                   {a.description && (
@@ -393,6 +395,8 @@ export default function ActionManager({ workspaceId, boardId }: ActionManagerPro
                 <select
                   value={formTriggerBoardId ?? ''}
                   onChange={(e) => setFormTriggerBoardId(e.target.value || null)}
+                  disabled={!!editAction}
+                  title={editAction ? 'Scope is fixed after creation' : undefined}
                   style={{
                     width: '100%',
                     background: tokens.colors.surface,

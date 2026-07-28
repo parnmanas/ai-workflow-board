@@ -45,7 +45,7 @@ export default function BoardSettingsPage() {
   useEffect(() => {
     if (!wsId) return;
     let cancelled = false;
-    api.listPromptTemplates(wsId)
+    api.listPromptTemplates(wsId, { boardId })
       .then((list) => { if (!cancelled) setPromptTemplates(list); })
       .catch(() => { if (!cancelled) setPromptTemplates([]); });
     api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
@@ -53,7 +53,7 @@ export default function BoardSettingsPage() {
       .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles.filter(p => value.allowed_profile_ids.includes(p.id))); })
       .catch(() => { if (!cancelled) setRuntimeProfiles([]); });
     return () => { cancelled = true; };
-  }, [wsId]);
+  }, [wsId, boardId]);
 
   // Repository resources for the Environment Setup repo dropdown (ticket
   // 354d336b). Workspace-scoped, type='repository'. Silent fall-back to []
@@ -62,11 +62,11 @@ export default function BoardSettingsPage() {
   useEffect(() => {
     if (!wsId) return;
     let cancelled = false;
-    api.listResources(wsId, undefined, 'repository')
+    api.listResources(wsId, boardId, 'repository')
       .then((rows) => { if (!cancelled) setRepoResources(rows || []); })
       .catch(() => { if (!cancelled) setRepoResources([]); });
     return () => { cancelled = true; };
-  }, [wsId]);
+  }, [wsId, boardId]);
 
   // Agents roster for the Default-role-holders picker (ticket d94a1b87). Silent
   // fall-back to [] so a non-privileged user can still view settings.

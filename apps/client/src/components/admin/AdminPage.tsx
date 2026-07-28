@@ -9,10 +9,9 @@ import AgentManagerPage from './AgentManagerPage';
 import SettingsManager from './SettingsManager';
 import ColumnPoliciesManager from './ColumnPoliciesManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
-import CredentialManager from './CredentialManager';
 import ClaudeBackendProfilesManager from './ClaudeBackendProfilesManager';
-import FunctionManager from './FunctionManager';
 import { tokens } from '../../tokens';
+import { useAuth } from '../../contexts/AuthContext';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
   users: { title: 'Users', description: 'Manage user accounts' },
@@ -22,10 +21,8 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   'agent-manager': { title: 'Agent Manager', description: 'Live Agent Manager instances connected to this server' },
   'column-policies': { title: 'Column Policies', description: 'Declarative column×role enforcement that catches stuck tickets' },
   'workflow-health': { title: 'Workflow Health', description: 'Respawn-storm halts, twins, and comment-pingpong suppression stats' },
-  'global-credentials': { title: 'Global Credentials', description: 'Instance-level credentials shared across all workspaces' },
   'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Instance-wide Claude endpoints, models, credentials, and adapters' },
   settings: { title: 'Settings', description: 'System configuration' },
-  functions: { title: 'Global Functions', description: 'Reusable Functions available to every workspace' },
 };
 
 function AdminRoute({ page, children }: { page: string; children: React.ReactNode }) {
@@ -40,6 +37,12 @@ function AdminRoute({ page, children }: { page: string; children: React.ReactNod
   );
 }
 
+function CatalogRedirect({ tab }: { tab: string }) {
+  const { currentWorkspaceId } = useAuth();
+  if (!currentWorkspaceId) return null;
+  return <Navigate to={`/ws/${currentWorkspaceId}/catalog?tab=${tab}&scope=global`} replace />;
+}
+
 export default function AdminPage() {
   return (
     <Routes>
@@ -51,10 +54,10 @@ export default function AdminPage() {
       <Route path="agent-manager" element={<AdminRoute page="agent-manager"><AgentManagerPage /></AdminRoute>} />
       <Route path="column-policies" element={<AdminRoute page="column-policies"><ColumnPoliciesManager /></AdminRoute>} />
       <Route path="workflow-health" element={<AdminRoute page="workflow-health"><WorkflowHealthDashboard /></AdminRoute>} />
-      <Route path="global-credentials" element={<AdminRoute page="global-credentials"><CredentialManager globalMode /></AdminRoute>} />
+      <Route path="global-credentials" element={<CatalogRedirect tab="credentials" />} />
       <Route path="claude-backend-profiles" element={<AdminRoute page="claude-backend-profiles"><ClaudeBackendProfilesManager /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
-      <Route path="functions" element={<AdminRoute page="functions"><FunctionManager globalMode /></AdminRoute>} />
+      <Route path="functions" element={<CatalogRedirect tab="functions" />} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>
   );

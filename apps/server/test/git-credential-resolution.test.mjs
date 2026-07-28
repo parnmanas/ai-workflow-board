@@ -38,6 +38,21 @@ test('a registered credential with an empty token reports the real error', async
   );
 });
 
+test('a Board credential is usable only from the same Board scope', async () => {
+  const repo = repoWith({
+    id: 'cred-board',
+    workspace_id: 'ws-1',
+    board_id: 'board-1',
+    encrypted_data: JSON.stringify({ token: 'board-token' }),
+  });
+  await assert.rejects(
+    resolveGitCredential(repo, 'cred-board', 'ws-1', 'board-2'),
+    /different board scope/,
+  );
+  const resolved = await resolveGitCredential(repo, 'cred-board', 'ws-1', 'board-1');
+  assert.equal(resolved?.token, 'board-token');
+});
+
 test('Git errors expose the cause without leaking registered credentials', () => {
   const safe = sanitizeGitError(
     "fatal: Authentication failed for 'https://x-access-token:ghp_secret_value@github.com/acme/private.git'",

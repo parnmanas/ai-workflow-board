@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { Credential } from '../../types';
+import type { CatalogScope, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
@@ -95,7 +95,21 @@ const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
   },
 };
 
-export default function CredentialManager({ workspaceId, globalMode = false }: { workspaceId?: string; globalMode?: boolean }) {
+export default function CredentialManager({
+  workspaceId,
+  globalMode = false,
+  catalogMode = false,
+  createScope = 'workspace',
+  boardId,
+  allScopes = false,
+}: {
+  workspaceId?: string;
+  globalMode?: boolean;
+  catalogMode?: boolean;
+  createScope?: CatalogScope;
+  boardId?: string;
+  allScopes?: boolean;
+}) {
   const { showToast } = useToast();
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,14 +133,17 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
     try {
       const list = globalMode
         ? await api.listCredentials(undefined, { scope: 'global' })
-        : await api.listCredentials(effectiveWsId);
+        : await api.listCredentials(effectiveWsId, {
+            boardId: allScopes ? undefined : boardId,
+            includeAllScopes: catalogMode && allScopes,
+          });
       setCredentials(list);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load credentials', 'error');
     } finally {
       setLoading(false);
     }
-  }, [globalMode, effectiveWsId, showToast]);
+  }, [globalMode, catalogMode, effectiveWsId, boardId, allScopes, showToast]);
 
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
@@ -170,7 +187,9 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
     try {
       if (editCred) {
         await api.updateCredential(editCred.id, {
-          ...(globalMode ? {} : { workspace_id: effectiveWsId }),
+          scope: editCred.scope,
+          workspace_id: editCred.workspace_id,
+          board_id: editCred.board_id,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -178,8 +197,11 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
         });
         showToast('Credential updated.', 'success');
       } else {
+        const scope = globalMode ? 'global' : createScope;
         await api.createCredential({
-          ...(globalMode ? { scope: 'global' as const } : { workspace_id: effectiveWsId }),
+          scope,
+          workspace_id: scope === 'global' ? undefined : effectiveWsId,
+          board_id: scope === 'board' ? boardId : null,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -200,7 +222,7 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteCredential(deleteTarget.id, globalMode ? undefined : effectiveWsId);
+      await api.deleteCredential(deleteTarget.id, deleteTarget.workspace_id === null ? undefined : effectiveWsId);
       showToast('Credential deleted.', 'success');
       setDeleteTarget(null);
       await loadCredentials();
@@ -322,8 +344,8 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
                     </td>
                     <td style={listCellStyle('left')}>
                       <Badge variant="neutral">{c.provider}</Badge>
-                      {!globalMode && c.scope === 'global' && (
-                        <span style={{ marginLeft: 6 }}><Badge variant="info">Global</Badge></span>
+                      {!globalMode && c.scope && (
+                        <span style={{ marginLeft: 6 }}><Badge variant="info">{c.scope}</Badge></span>
                       )}
                     </td>
                     <td
@@ -354,10 +376,10 @@ export default function CredentialManager({ workspaceId, globalMode = false }: {
                       {relativeTime(c.updated_at || c.created_at)}
                     </td>
                     <td style={{ ...listCellStyle('right'), whiteSpace: 'nowrap' }}>
-                      {!globalMode && c.scope === 'global' ? (
+                      {!catalogMode && !globalMode && c.scope === 'global' ? (
                         <span
                           style={{ fontSize: 11, color: tokens.colors.textMuted }}
-                          title="Global credentials are managed in Admin → Global Credentials"
+                          title="Global credentials are managed in Automation Catalog"
                         >
                           Inherited (read-only)
                         </span>

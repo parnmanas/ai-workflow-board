@@ -625,6 +625,12 @@ export class WorkspaceMoveService {
           delete newMap[colId];
           continue;
         }
+        if (src.workspace_id === null) {
+          destTplId = src.id;
+          items.push({ kind: 'reuse', entity: 'prompt_template', id: src.id, detail: `global template "${src.name}" kept as-is` });
+          tplCache.set(srcTplId, destTplId);
+          continue;
+        }
         const existing = await tplRepo.findOne({ where: { workspace_id: targetWsId, name: src.name } });
         if (existing) {
           destTplId = existing.id;
@@ -667,10 +673,12 @@ export class WorkspaceMoveService {
     let copied = 0, remapped = 0, restamped = 0;
     const actionRepo = mgr.getRepository(Action);
     const resourceRepo = mgr.getRepository(Resource);
+    const credentialRepo = mgr.getRepository(Credential);
 
     // Board-owned rows → re-stamp (they move with the board).
     const ownedActions = await actionRepo.find({ where: { board_id: boardId } });
     const ownedResources = await resourceRepo.find({ where: { board_id: boardId } });
+    const ownedCredentials = await credentialRepo.find({ where: { board_id: boardId } });
     if (ownedActions.length) {
       items.push({ kind: 'restamp', entity: 'action', id: ownedActions.map((a) => a.id).join(','), detail: `${ownedActions.length} board-owned action(s) re-stamped` });
       restamped += ownedActions.length;
@@ -680,6 +688,57 @@ export class WorkspaceMoveService {
       items.push({ kind: 'restamp', entity: 'resource', id: ownedResources.map((r) => r.id).join(','), detail: `${ownedResources.length} board-owned resource(s) re-stamped` });
       restamped += ownedResources.length;
       if (apply) await resourceRepo.update({ id: In(ownedResources.map((r) => r.id)) }, { workspace_id: targetWsId });
+    }
+    if (ownedCredentials.length) {
+      items.push({ kind: 'restamp', entity: 'credential', id: ownedCredentials.map((c) => c.id).join(','), detail: `${ownedCredentials.length} board-owned credential(s) re-stamped` });
+      restamped += ownedCredentials.length;
+      if (apply) await credentialRepo.update({ id: In(ownedCredentials.map((c) => c.id)) }, { workspace_id: targetWsId });
+    }
+    const ownedCredentialIds = new Set(ownedCredentials.map((c) => c.id));
+
+    // Board Resources may inherit Workspace credentials. Carry those
+    // credentials into the destination and remap the Resource reference.
+    // Global and board-owned credentials remain valid without copying.
+    const credentialCache = new Map<string, string>();
+    for (const resource of ownedResources) {
+      const credentialId = resource.credential_id;
+      if (!credentialId || ownedCredentialIds.has(credentialId)) continue;
+      const credential = await credentialRepo.findOne({ where: { id: credentialId } });
+      if (!credential) {
+        items.push({ kind: 'warn', entity: 'credential', id: credentialId, detail: `resource credential ${credentialId} missing — left as-is` });
+        continue;
+      }
+      if (credential.workspace_id === null || credential.workspace_id === targetWsId) continue;
+      let destinationId = credentialCache.get(credential.id);
+      if (!destinationId) {
+        const existing = await credentialRepo.findOne({
+          where: { workspace_id: targetWsId, board_id: IsNull(), name: credential.name },
+        });
+        if (existing) {
+          destinationId = existing.id;
+          items.push({ kind: 'reuse', entity: 'credential', id: existing.id, detail: `credential "${credential.name}" reused in dest` });
+        } else {
+          destinationId = credential.id;
+          items.push({ kind: 'copy', entity: 'credential', id: credential.id, detail: `copy credential "${credential.name}" to dest` });
+          copied++;
+          if (apply) {
+            const created = await credentialRepo.save(credentialRepo.create({
+              workspace_id: targetWsId,
+              board_id: null,
+              name: credential.name,
+              description: credential.description,
+              provider: credential.provider,
+              encrypted_data: credential.encrypted_data,
+            }));
+            destinationId = created.id;
+          }
+        }
+        credentialCache.set(credential.id, destinationId);
+      }
+      if (destinationId !== credential.id) {
+        remapped++;
+        if (apply) await resourceRepo.update({ id: resource.id }, { credential_id: destinationId });
+      }
     }
     const ownedActionIds = new Set(ownedActions.map((a) => a.id));
     const ownedResourceIds = new Set(ownedResources.map((r) => r.id));
@@ -747,6 +806,11 @@ export class WorkspaceMoveService {
     if (cache.has(srcId)) return { id: cache.get(srcId)!, copied: false };
     const src = await repo.findOne({ where: { id: srcId } });
     if (!src) { items.push({ kind: 'warn', entity: 'resource', id: srcId, detail: `resource ${srcId} missing — left as-is` }); return { id: null, copied: false }; }
+    if (src.workspace_id === null) {
+      items.push({ kind: 'reuse', entity: 'resource', id: src.id, detail: `global resource "${src.name}" kept as-is` });
+      cache.set(srcId, srcId);
+      return { id: srcId, copied: false };
+    }
     if (src.workspace_id === targetWsId) { cache.set(srcId, srcId); return { id: srcId, copied: false }; }
     const existing = await repo.findOne({ where: { workspace_id: targetWsId, name: src.name, board_id: IsNull() } });
     if (existing) {

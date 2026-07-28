@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
-import type { WorkflowFunction, WorkflowFunctionExecutor, WorkflowFunctionRisk, WorkflowFunctionRun } from '../../types';
+import type { CatalogScope, WorkflowFunction, WorkflowFunctionExecutor, WorkflowFunctionRisk, WorkflowFunctionRun } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 
 interface Props {
   workspaceId?: string;
   globalMode?: boolean;
+  catalogMode?: boolean;
+  createScope?: CatalogScope;
+  boardId?: string;
+  allScopes?: boolean;
 }
 
 type Draft = {
@@ -82,7 +86,14 @@ const button = (primary = false): React.CSSProperties => ({
   fontWeight: 600,
 });
 
-export default function FunctionManager({ workspaceId, globalMode = false }: Props) {
+export default function FunctionManager({
+  workspaceId,
+  globalMode = false,
+  catalogMode = false,
+  createScope = 'workspace',
+  boardId,
+  allScopes = false,
+}: Props) {
   const { showToast } = useToast();
   const [rows, setRows] = useState<WorkflowFunction[]>([]);
   const [runs, setRuns] = useState<WorkflowFunctionRun[]>([]);
@@ -100,7 +111,7 @@ export default function FunctionManager({ workspaceId, globalMode = false }: Pro
     setLoading(true);
     try {
       const [functions, history] = await Promise.all([
-        api.listFunctions(globalMode ? null : workspaceId),
+        api.listFunctions(globalMode ? null : workspaceId, catalogMode, allScopes ? undefined : boardId),
         !globalMode && workspaceId ? api.listFunctionRuns(workspaceId, { limit: 30 }) : Promise.resolve([]),
       ]);
       setRows(functions);
@@ -110,7 +121,7 @@ export default function FunctionManager({ workspaceId, globalMode = false }: Pro
     } finally {
       setLoading(false);
     }
-  }, [globalMode, workspaceId, showToast]);
+  }, [globalMode, catalogMode, workspaceId, boardId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -152,8 +163,11 @@ export default function FunctionManager({ workspaceId, globalMode = false }: Pro
       return;
     }
     setSaving(true);
+    const effectiveScope = editing?.scope || (globalMode ? 'global' : createScope);
     const payload = {
-      workspace_id: globalMode ? null : workspaceId,
+      scope: effectiveScope,
+      workspace_id: effectiveScope === 'global' ? null : workspaceId,
+      board_id: effectiveScope === 'board' ? (editing?.board_id || boardId || null) : null,
       ...draft,
       input_schema: inputSchema,
       output_schema: outputSchema,
@@ -196,6 +210,7 @@ export default function FunctionManager({ workspaceId, globalMode = false }: Pro
     try {
       const result = await api.runFunction(row.id, {
         workspace_id: workspaceId,
+        board_id: boardId || undefined,
         ticket_id: ticketId || undefined,
         inputs,
         idempotency_key: idempotencyKey || undefined,
@@ -278,7 +293,7 @@ export default function FunctionManager({ workspaceId, globalMode = false }: Pro
         ) : rows.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted }}>No Functions defined.</div>
         ) : rows.map(row => {
-          const inherited = !globalMode && row.workspace_id === null;
+          const inherited = !globalMode && !catalogMode && row.workspace_id === null;
           return (
             <div key={row.id} style={{ background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 14, display: 'grid', gridTemplateColumns: 'minmax(240px, 1fr) auto', gap: 14 }}>
               <div>

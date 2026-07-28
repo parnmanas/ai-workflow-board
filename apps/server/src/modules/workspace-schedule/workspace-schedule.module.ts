@@ -4,6 +4,7 @@ import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
+import { Board } from '../../entities/Board';
 import { WorkspaceScheduleService } from './workspace-schedule.service';
 import { WorkspaceScheduleController } from './workspace-schedule.controller';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
@@ -21,7 +22,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, Agent]),
+    TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, Agent, Board]),
     ChatRoomsModule,
     SharedServicesModule,
   ],

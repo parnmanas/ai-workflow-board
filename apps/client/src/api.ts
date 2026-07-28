@@ -892,10 +892,12 @@ export const api = {
     request<any>(`/keys/${id}`, { method: 'DELETE' }),
 
   // ─── Prompt Templates (Phase 1 ROLE-05) ────────────────
-  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string }) => {
+  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; boardId?: string; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams({ workspace_id });
     if (options?.category) params.set('category', options.category);
     if (options?.id) params.set('id', options.id);
+    if (options?.boardId) params.set('board_id', options.boardId);
+    if (options?.includeAllScopes) params.set('include_all_scopes', 'true');
     return request<PromptTemplate[]>(`/prompt-templates?${params.toString()}`);
   },
   getPromptTemplate: (id: string, workspace_id: string) => {
@@ -903,7 +905,9 @@ export const api = {
     return request<PromptTemplate>(`/prompt-templates/${id}?${params.toString()}`);
   },
   createPromptTemplate: (data: {
-    workspace_id: string;
+    workspace_id?: string | null;
+    board_id?: string | null;
+    scope?: 'global' | 'workspace' | 'board';
     name: string;
     description?: string;
     content: string;
@@ -913,7 +917,9 @@ export const api = {
   updatePromptTemplate: (
     id: string,
     data: {
-      workspace_id: string;
+      workspace_id?: string | null;
+      board_id?: string | null;
+      scope?: 'global' | 'workspace' | 'board';
       name?: string;
       description?: string;
       content?: string;
@@ -932,12 +938,14 @@ export const api = {
     boardId?: string | null,
     type?: string,
     sort?: { by?: string; order?: 'asc' | 'desc' },
+    includeAllScopes = false,
   ) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (boardId !== undefined) params.set('board_id', boardId || '');
     if (type) params.set('type', type);
     if (sort?.by) params.set('sort_by', sort.by);
     if (sort?.order) params.set('sort_order', sort.order);
+    if (includeAllScopes) params.set('include_all_scopes', 'true');
     return request<Resource[]>(`/resources?${params.toString()}`);
   },
   getResource: (id: string) =>
@@ -976,7 +984,8 @@ export const api = {
     return res.json();
   },
   createResource: (data: {
-    workspace_id: string;
+    workspace_id?: string | null;
+    scope?: 'global' | 'workspace' | 'board';
     board_id?: string | null;
     credential_id?: string | null;
     name: string;
@@ -994,7 +1003,8 @@ export const api = {
   updateResource: (
     id: string,
     data: {
-      workspace_id: string;
+      workspace_id?: string | null;
+      scope?: 'global' | 'workspace' | 'board';
       name?: string;
       description?: string;
       type?: string;
@@ -1022,6 +1032,8 @@ export const api = {
   },
   testRepoBranches: (data: {
     workspace_id: string;
+    scope?: 'global' | 'workspace' | 'board';
+    board_id?: string | null;
     url: string;
     credential_id?: string | null;
     default_branch?: string;
@@ -1125,10 +1137,11 @@ export const api = {
   },
 
   // Functions: workspace_id omitted means global definitions only.
-  listFunctions: (workspaceId?: string | null, includeShadowed = false) => {
+  listFunctions: (workspaceId?: string | null, includeShadowed = false, boardId?: string) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (includeShadowed) params.set('include_shadowed', 'true');
+    if (boardId !== undefined) params.set('board_id', boardId);
     const query = params.toString();
     return request<WorkflowFunction[]>(`/functions${query ? `?${query}` : ''}`);
   },
@@ -1484,11 +1497,13 @@ export const api = {
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').
   // Pass scope:'global' (no workspace_id) for the Admin global-credentials page.
-  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global' }) => {
+  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; boardId?: string; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (opts?.provider) params.set('provider', opts.provider);
     if (opts?.scope) params.set('scope', opts.scope);
+    if (opts?.boardId) params.set('board_id', opts.boardId);
+    if (opts?.includeAllScopes) params.set('include_all_scopes', 'true');
     return request<Credential[]>(`/credentials?${params.toString()}`);
   },
   getCredentialProviders: () =>
@@ -1497,7 +1512,8 @@ export const api = {
     // Omit workspace_id and pass scope:'global' to create an instance-level
     // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).
     workspace_id?: string;
-    scope?: 'global';
+    board_id?: string | null;
+    scope?: 'global' | 'workspace' | 'board';
     name: string;
     description?: string;
     provider: string;
@@ -1507,7 +1523,9 @@ export const api = {
   updateCredential: (
     id: string,
     data: {
-      workspace_id?: string;
+      workspace_id?: string | null;
+      board_id?: string | null;
+      scope?: 'global' | 'workspace' | 'board';
       name?: string;
       description?: string;
       provider?: string;

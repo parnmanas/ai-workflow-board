@@ -9,6 +9,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
 import { PromptTemplate } from '../../entities/PromptTemplate';
+import { canUseCatalogItem } from '../../common/catalog-scope';
 import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
@@ -2456,7 +2457,7 @@ candidate's branch or move the ticket.
             const tplId: string | undefined = map?.[ticket.column_id];
             if (tplId) {
               const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-              if (tpl && tpl.workspace_id === board!.workspace_id) {
+              if (tpl && canUseCatalogItem(tpl, board!.workspace_id, board!.id)) {
                 columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
               }
             }

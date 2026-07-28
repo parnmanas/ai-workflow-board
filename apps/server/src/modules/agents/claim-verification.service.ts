@@ -171,9 +171,8 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
    */
   private async _lookupRemoteSha(ticket: Ticket): Promise<string | null> {
     if (!ticket.base_repo_resource_id || !ticket.workspace_id) return null;
-    const repo = await this.dataSource.getRepository(Resource).findOne({
-      where: { id: ticket.base_repo_resource_id, workspace_id: ticket.workspace_id },
-    });
+    const repo = await this.dataSource.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } });
+    if (repo && repo.workspace_id !== null && repo.workspace_id !== ticket.workspace_id) return null;
     if (!repo?.url) return null;
     const branchName = ticket.base_branch || repo.default_branch || '';
     if (!branchName) return null;
@@ -183,6 +182,7 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
         this.dataSource.getRepository(Credential),
         repo.credential_id,
         ticket.workspace_id,
+        repo.board_id,
       );
       const branches = await listRepoBranches({
         url: repo.url,

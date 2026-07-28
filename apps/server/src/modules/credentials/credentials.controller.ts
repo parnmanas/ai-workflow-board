@@ -3,6 +3,8 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, Use
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
+import { DataSource } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -10,6 +12,8 @@ import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { findOrFail } from '../../common/find-or-fail';
+import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
+import { Board } from '../../entities/Board';
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   github: { label: 'GitHub', fields: ['token'] },
@@ -57,8 +61,8 @@ function isMaskedValue(value: string): boolean {
 }
 
 // Shared response shape. `scope` lets the client tell workspace credentials
-// apart from inherited global ones (global = read-only in a workspace view,
-// editable only from the Admin global page).
+// apart from inherited global ones. Write permissions are enforced per row in
+// the unified Automation Catalog.
 function serializeCred(c: Credential) {
   let credentialFields: Record<string, string> = {};
   let credentialStatus: 'ok' | 'unreadable' = 'ok';
@@ -70,7 +74,8 @@ function serializeCred(c: Credential) {
   return {
     id: c.id,
     workspace_id: c.workspace_id,
-    scope: (c.workspace_id ? 'workspace' : 'global') as 'workspace' | 'global',
+    board_id: c.board_id,
+    scope: catalogScopeOf(c),
     name: c.name,
     description: c.description,
     provider: c.provider,
@@ -89,6 +94,7 @@ function serializeCred(c: Credential) {
 export class CredentialsController {
   constructor(
     @InjectRepository(Credential) private readonly credRepo: Repository<Credential>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -108,16 +114,26 @@ export class CredentialsController {
     @Query('workspace_id') workspaceId: string,
     @Query('provider') provider: string | undefined,
     @Query('scope') scope: string | undefined,
+    @Query('board_id') boardId: string | undefined,
+    @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {
-    // scope=global → globals only (Admin global-credentials page). Otherwise a
+    // scope=global → globals only (legacy callers). Otherwise a
     // workspace view returns its own credentials PLUS inherited globals.
     let where: any[];
     if (scope === 'global') {
-      where = [{ workspace_id: IsNull() }];
+      where = [{ workspace_id: IsNull(), board_id: IsNull() }];
     } else {
       if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-      where = [{ workspace_id: workspaceId }, { workspace_id: IsNull() }];
+      where = [
+        { workspace_id: workspaceId, board_id: IsNull() },
+        { workspace_id: IsNull(), board_id: IsNull() },
+      ];
+      if (includeAllScopes === 'true') {
+        where.push({ workspace_id: workspaceId });
+      } else if (boardId) {
+        where.push({ workspace_id: workspaceId, board_id: boardId });
+      }
     }
     if (provider) where = where.map((w) => ({ ...w, provider }));
     const creds = await this.credRepo.find({ where, order: { name: 'ASC' } });
@@ -146,8 +162,18 @@ export class CredentialsController {
 
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { workspace_id, name, description = '', provider, credentials: credData, scope } = body;
-    const isGlobal = scope === 'global' || !workspace_id;
+    const { name, description = '', provider, credentials: credData } = body;
+    let catalogScope;
+    try {
+      catalogScope = normalizeCatalogScope(body);
+      await assertCatalogBoardScope(
+        async (boardId, workspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: boardId, workspace_id: workspaceId } }),
+        catalogScope,
+      );
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
+    }
+    const isGlobal = catalogScope.workspace_id === null;
     if (isGlobal && !this.canManageGlobal(req)) {
       return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
     }
@@ -160,13 +186,15 @@ export class CredentialsController {
     if (decryptStrict(encrypted) !== plaintext) {
       return res.status(500).json({ error: 'Credential encryption verification failed; credential was not saved' });
     }
-    const cred = await this.credRepo.save(this.credRepo.create({
-      workspace_id: isGlobal ? null : workspace_id,
+    const credential = this.credRepo.create();
+    Object.assign(credential, {
+      ...catalogScope,
       name: name.trim(),
       description,
       provider,
       encrypted_data: encrypted,
-    }));
+    });
+    const cred = await this.credRepo.save(credential);
 
     return res.status(201).json(serializeCred(cred));
   }
@@ -184,6 +212,13 @@ export class CredentialsController {
       // Workspace credential — body workspace_id must match the owning one.
       if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
       if (cred.workspace_id !== workspace_id) return res.status(404).json({ error: 'Credential not found' });
+    }
+    if (
+      (body.workspace_id !== undefined && (body.workspace_id || null) !== cred.workspace_id)
+      || (body.board_id !== undefined && (body.board_id || null) !== cred.board_id)
+      || (body.scope !== undefined && body.scope !== catalogScopeOf(cred))
+    ) {
+      return res.status(400).json({ error: 'Credential scope cannot be changed; create a new scoped credential instead' });
     }
 
     if (body.name !== undefined) {

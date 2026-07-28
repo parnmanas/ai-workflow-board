@@ -5,8 +5,11 @@ export class PromptTemplate {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', default: '' })
-  workspace_id: string;
+  @Column({ type: 'varchar', nullable: true, default: null })
+  workspace_id: string | null;
+
+  @Column({ type: 'varchar', nullable: true, default: null })
+  board_id: string | null;
 
   @Column({ type: 'varchar', default: '' })
   name: string;

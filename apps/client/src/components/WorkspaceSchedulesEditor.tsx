@@ -46,9 +46,10 @@ const TD: React.CSSProperties = {
 
 interface WorkspaceSchedulesEditorProps {
   workspaceId: string;
+  boardId?: string;
 }
 
-export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSchedulesEditorProps) {
+export default function WorkspaceSchedulesEditor({ workspaceId, boardId }: WorkspaceSchedulesEditorProps) {
   const { showToast } = useToast();
   const [schedules, setSchedules] = useState<WorkspaceSchedule[]>([]);
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
@@ -172,6 +173,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
         <ScheduleEditor
           schedule={editing === 'new' ? null : editing}
           workspaceId={workspaceId}
+          boardId={boardId}
           agents={agents}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await load(); }}
@@ -212,6 +214,7 @@ function ScheduleRow({ s, workspaceId, agentLabel, onEdit, onToggle, onRunNow, o
     >
       <td style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+        <span style={{ marginLeft: 6 }}><Badge variant="info">{s.board_id ? 'board' : 'workspace'}</Badge></span>
       </td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentLabel}</td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
@@ -255,12 +258,13 @@ function ScheduleRow({ s, workspaceId, agentLabel, onEdit, onToggle, onRunNow, o
 interface ScheduleEditorProps {
   schedule: WorkspaceSchedule | null;
   workspaceId: string;
+  boardId?: string;
   agents: ScheduleAgent[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, workspaceId, boardId, agents, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [targetAgentId, setTargetAgentId] = useState(schedule?.target_agent_id ?? '');
@@ -312,9 +316,7 @@ function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: Sch
       if (schedule) {
         await api.updateWorkspaceSchedule(schedule.id, base);
       } else {
-        // Workspace-scoped schedule (board_id null); board pinning is reserved for
-        // the MCP surface / future board-level editors.
-        await api.createWorkspaceSchedule({ ...base, board_id: null });
+        await api.createWorkspaceSchedule({ ...base, board_id: boardId || null });
       }
       showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
       onSaved();

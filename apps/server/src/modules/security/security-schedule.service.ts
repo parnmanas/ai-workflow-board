@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { SecuritySchedule, SecurityScheduleScope, SecurityScheduleKind, normalizeScheduleKind } from '../../entities/SecuritySchedule';
 import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
+import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { SecurityRunService, RefreshChecklistResult } from './security-run.service';
@@ -106,6 +107,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(SecurityRunBatch) private readonly batchRepo: Repository<SecurityRunBatch>,
     private readonly runService: SecurityRunService,
     private readonly logService: LogService,
+    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
   ) {}
 
   onModuleInit(): void {
@@ -152,6 +154,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateSecurityScheduleInput): Promise<SecuritySchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
+    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const kind = normalizeScheduleKind(input.kind);
     const scope: SecurityScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
@@ -187,7 +190,9 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
     }
-    if (patch.boardId !== undefined) schedule.board_id = patch.boardId ?? null;
+    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
+      throw makeError(400, 'scope cannot be changed after creation');
+    }
     if (patch.kind !== undefined) schedule.kind = normalizeScheduleKind(patch.kind);
     if (patch.stopOnFail !== undefined) schedule.stop_on_fail = !!patch.stopOnFail;
     if (patch.triggeredByType !== undefined) schedule.triggered_by_type = patch.triggeredByType || 'user';
@@ -400,6 +405,15 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       triggeredByType: 'system',
       triggeredById,
     });
+  }
+
+  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
+    if (!boardId) return;
+    const board = await this.boardRepo.findOne({ where: { id: boardId } });
+    if (!board) throw makeError(400, 'board not found');
+    if (board.workspace_id !== workspaceId) {
+      throw makeError(400, 'board belongs to a different workspace');
+    }
   }
 
   private _validateScope(scope: SecurityScheduleScope, profileIds: string[] | null | undefined): string[] | null {

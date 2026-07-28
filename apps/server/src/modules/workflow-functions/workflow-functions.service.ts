@@ -6,6 +6,8 @@ import { WorkflowFunctionRun } from '../../entities/WorkflowFunctionRun';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { ActionsService } from '../actions/actions.service';
+import { assertCatalogBoardScope, catalogScopeOf, canUseCatalogItem, normalizeCatalogScope } from '../../common/catalog-scope';
+import { Board } from '../../entities/Board';
 
 const EXECUTORS = new Set(['builtin', 'pipeline', 'http', 'agent_action']);
 const RISK_LEVELS = new Set(['read', 'write', 'destructive', 'high_impact']);
@@ -104,6 +106,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
       if (existing) continue;
       await repo.save(repo.create({
         workspace_id: null,
+        board_id: null,
         version: 1,
         description: '',
         executor_type: 'builtin',
@@ -125,7 +128,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
   toView(row: WorkflowFunction): Record<string, any> {
     return {
       ...row,
-      scope: row.workspace_id === null ? 'global' : 'workspace',
+      scope: catalogScopeOf(row),
       input_schema: parseJson(row.input_schema),
       output_schema: parseJson(row.output_schema),
       config: parseJson(row.config),
@@ -141,22 +144,33 @@ export class WorkflowFunctionsService implements OnModuleInit {
     };
   }
 
-  async list(workspaceId?: string | null, includeShadowed = false): Promise<Record<string, any>[]> {
+  async list(
+    workspaceId?: string | null,
+    boardId?: string | null,
+    includeShadowed = false,
+  ): Promise<Record<string, any>[]> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     if (!workspaceId) {
-      const rows = await repo.find({ where: { workspace_id: IsNull() }, order: { key: 'ASC' } });
+      const rows = await repo.find({ where: { workspace_id: IsNull(), board_id: IsNull() }, order: { key: 'ASC' } });
       return rows.map(row => this.toView(row));
     }
-    const rows = await repo.createQueryBuilder('f')
+    let qb = repo.createQueryBuilder('f')
       .where('f.workspace_id IS NULL OR f.workspace_id = :workspaceId', { workspaceId })
       .orderBy('f.key', 'ASC')
-      .addOrderBy('f.workspace_id', 'DESC')
-      .getMany();
+      .addOrderBy('f.workspace_id', 'ASC')
+      .addOrderBy('f.board_id', 'ASC');
+    if (boardId !== undefined) {
+      qb = qb.andWhere('f.board_id IS NULL OR f.board_id = :boardId', { boardId: boardId || null });
+    }
+    const rows = await qb.getMany();
     if (includeShadowed) return rows.map(row => this.toView(row));
     const resolved = new Map<string, WorkflowFunction>();
     for (const row of rows) {
+      if (!canUseCatalogItem(row, workspaceId, boardId)) continue;
+      const rank = row.board_id ? 2 : row.workspace_id ? 1 : 0;
       const current = resolved.get(row.key);
-      if (!current || row.workspace_id === workspaceId) resolved.set(row.key, row);
+      const currentRank = current ? (current.board_id ? 2 : current.workspace_id ? 1 : 0) : -1;
+      if (rank > currentRank) resolved.set(row.key, row);
     }
     return Array.from(resolved.values()).sort((a, b) => a.key.localeCompare(b.key)).map(row => this.toView(row));
   }
@@ -167,11 +181,15 @@ export class WorkflowFunctionsService implements OnModuleInit {
     return this.toView(row);
   }
 
-  async resolve(key: string, workspaceId: string): Promise<WorkflowFunction> {
+  async resolve(key: string, workspaceId: string, boardId?: string | null): Promise<WorkflowFunction> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    const local = await repo.findOne({ where: { key, workspace_id: workspaceId } });
+    if (boardId) {
+      const board = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: boardId } });
+      if (board) return board;
+    }
+    const local = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: IsNull() } });
     if (local) return local;
-    const global = await repo.findOne({ where: { key, workspace_id: IsNull() } });
+    const global = await repo.findOne({ where: { key, workspace_id: IsNull(), board_id: IsNull() } });
     if (!global) throw httpError(404, `Function "${key}" not found`);
     return global;
   }
@@ -210,15 +228,23 @@ export class WorkflowFunctionsService implements OnModuleInit {
 
   async create(input: any): Promise<Record<string, any>> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    const workspaceId = input.workspace_id || null;
+    const scope = normalizeCatalogScope(input);
+    await assertCatalogBoardScope(
+      async (boardId, workspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: boardId, workspace_id: workspaceId } }),
+      scope,
+    );
     const normalized = this.normalize(input);
-    const duplicate = workspaceId
-      ? await repo.findOne({ where: { workspace_id: workspaceId, key: normalized.key! } })
-      : await repo.findOne({ where: { workspace_id: IsNull(), key: normalized.key! } });
+    const duplicate = await repo.findOne({
+      where: {
+        workspace_id: scope.workspace_id === null ? IsNull() : scope.workspace_id,
+        board_id: scope.board_id === null ? IsNull() : scope.board_id,
+        key: normalized.key!,
+      },
+    });
     if (duplicate) throw httpError(409, `Function key "${normalized.key}" already exists in this scope`);
     const saved = await repo.save(repo.create({
       ...normalized,
-      workspace_id: workspaceId,
+      ...scope,
       version: 1,
       builtin: false,
     }));
@@ -229,14 +255,22 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     const current = await repo.findOne({ where: { id } });
     if (!current) throw httpError(404, 'Function not found');
-    if (input.workspace_id !== undefined && (input.workspace_id || null) !== current.workspace_id) {
+    if (
+      (input.workspace_id !== undefined && (input.workspace_id || null) !== current.workspace_id)
+      || (input.board_id !== undefined && (input.board_id || null) !== current.board_id)
+      || (input.scope !== undefined && input.scope !== catalogScopeOf(current))
+    ) {
       throw httpError(400, 'Function scope cannot be changed; create a new override instead');
     }
     const normalized = this.normalize(input, current);
     if (normalized.key !== current.key) {
-      const duplicate = current.workspace_id
-        ? await repo.findOne({ where: { workspace_id: current.workspace_id, key: normalized.key! } })
-        : await repo.findOne({ where: { workspace_id: IsNull(), key: normalized.key! } });
+      const duplicate = await repo.findOne({
+        where: {
+          workspace_id: current.workspace_id === null ? IsNull() : current.workspace_id,
+          board_id: current.board_id === null ? IsNull() : current.board_id,
+          key: normalized.key!,
+        },
+      });
       if (duplicate && duplicate.id !== id) throw httpError(409, `Function key "${normalized.key}" already exists in this scope`);
     }
     Object.assign(current, normalized, { version: current.version + 1 });
@@ -272,9 +306,14 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if ((args.depth || 0) > 20) throw httpError(400, 'Function pipeline depth exceeded');
     const fn = args.functionId
       ? await this.dataSource.getRepository(WorkflowFunction).findOne({ where: { id: args.functionId } })
-      : await this.resolve(String(args.functionKey || ''), args.workspaceId);
+      : await this.resolve(String(args.functionKey || ''), args.workspaceId, args.boardId);
     if (!fn) throw httpError(404, 'Function not found');
-    if (fn.workspace_id && fn.workspace_id !== args.workspaceId) throw httpError(403, 'Function belongs to a different workspace');
+    if (fn.workspace_id !== null && fn.workspace_id !== args.workspaceId) {
+      throw httpError(403, 'Function belongs to a different workspace');
+    }
+    if (fn.board_id !== null && fn.board_id !== (args.boardId || null)) {
+      throw httpError(403, 'Function belongs to a different board scope');
+    }
     if (!fn.enabled) throw httpError(409, 'Function is disabled');
     if (fn.approval_policy === 'admin' && args.actorRole !== 'admin') {
       throw httpError(403, 'This Function requires an authenticated admin execution');

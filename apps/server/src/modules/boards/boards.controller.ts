@@ -14,6 +14,8 @@ import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../services/
 import { DEFAULT_COLUMNS } from '../../database/database.module';
 import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
+import { PromptTemplate } from '../../entities/PromptTemplate';
+import { canUseCatalogItem } from '../../common/catalog-scope';
 import { Agent } from '../../entities/Agent';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
@@ -506,7 +508,14 @@ export class BoardsController {
       } else if (typeof column_prompts === 'object') {
         const cleaned: Record<string, string> = {};
         for (const [colId, tplId] of Object.entries(column_prompts)) {
-          if (typeof tplId === 'string' && tplId.length > 0) cleaned[colId] = tplId;
+          if (typeof tplId !== 'string' || tplId.length === 0) continue;
+          const column = await this.colRepo.findOne({ where: { id: colId, board_id: board.id } });
+          if (!column) return res.status(400).json({ error: `column ${colId} does not belong to board` });
+          const template = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
+          if (!template || !canUseCatalogItem(template, board.workspace_id, board.id)) {
+            return res.status(400).json({ error: `prompt template ${tplId} is not available to board` });
+          }
+          cleaned[colId] = tplId;
         }
         board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
       }

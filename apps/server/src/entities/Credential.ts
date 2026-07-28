@@ -12,6 +12,9 @@ export class Credential {
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
+  @Column({ type: 'varchar', nullable: true, default: null })
+  board_id: string | null;
+
   @Column({ type: 'varchar' })
   name: string;
 

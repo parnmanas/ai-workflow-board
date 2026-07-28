@@ -707,10 +707,10 @@ export class TicketsController {
         // attacker who guesses (or scrapes) a Resource id from another
         // workspace could pin it here, and the trigger SSE / loadTicketFull
         // snapshot would happily surface its url to the assignee.
-        const repoExists = await this.dataSource.getRepository(Resource).findOne({
-          where: { id: next, workspace_id: ticket.workspace_id },
-        });
-        if (!repoExists) return res.status(400).json({ error: 'base_repo_resource_id not found in this workspace' });
+        const repoExists = await this.dataSource.getRepository(Resource).findOne({ where: { id: next } });
+        if (!repoExists || (repoExists.workspace_id !== null && repoExists.workspace_id !== ticket.workspace_id)) {
+          return res.status(400).json({ error: 'base_repo_resource_id not found in this workspace' });
+        }
       }
       ticket.base_repo_resource_id = next;
     }
@@ -2031,7 +2031,7 @@ export class TicketsController {
       for (const rid of preIds) {
         const r = found.get(rid);
         if (!r) return res.status(400).json({ error: `attachment_resource_ids contains unknown id: ${rid}` });
-        if (r.workspace_id !== ticket.workspace_id) {
+        if (r.workspace_id !== null && r.workspace_id !== ticket.workspace_id) {
           return res.status(400).json({ error: `attachment resource ${rid} belongs to a different workspace` });
         }
         if (r.type !== 'comment_attachment') {

@@ -9,8 +9,8 @@ export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar' })
-  workspace_id: string;
+  @Column({ type: 'varchar', nullable: true, default: null })
+  workspace_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;

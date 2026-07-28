@@ -3274,7 +3274,7 @@ export default function TicketPanel({
 
                       {onDoneActionIds.length === 0 && candidates.length === 0 && (
                         <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
-                          No actions on this board or workspace yet — create one in Admin → Actions to bind it here.
+                          No actions on this board or workspace yet — create one in Automation Catalog to bind it here.
                         </div>
                       )}
                     </>

@@ -25,6 +25,7 @@ type SecAgent = { id: string; name: string; manager_name?: string };
 interface SecurityManagerProps {
   workspaceId?: string;
   boardId?: string;
+  allScopes?: boolean;
 }
 
 const RUN_STATUS_VARIANT: Record<string, 'success' | 'danger' | 'warning' | 'info' | 'neutral'> = {
@@ -120,7 +121,7 @@ interface ProfileRow extends SecurityProfileListItem {
  * pass-rate), runs them (single or sequential batch), and visualizes each run's
  * findings grouped by severity with evidence galleries + auto-fix-ticket links.
  */
-export default function SecurityManager({ workspaceId, boardId }: SecurityManagerProps) {
+export default function SecurityManager({ workspaceId, boardId, allScopes = false }: SecurityManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -144,9 +145,9 @@ export default function SecurityManager({ workspaceId, boardId }: SecurityManage
     if (!effectiveWorkspaceId) { setProfiles([]); setSchedules([]); return; }
     try {
       const [list, agentList, scheduleList] = await Promise.all([
-        api.listSecurityProfiles(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
+        api.listSecurityProfiles(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
         api.getAgents(effectiveWorkspaceId).catch(() => []),
-        api.listSecuritySchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
+        api.listSecuritySchedules(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.
       // The list projection carries the last-run rollup but not these two; we
@@ -171,7 +172,7 @@ export default function SecurityManager({ workspaceId, boardId }: SecurityManage
     } catch (err: any) {
       showToast(err?.message || 'Failed to load security profiles', 'error');
     }
-  }, [effectiveWorkspaceId, boardId, showToast]);
+  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -766,6 +767,7 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</span>
+          <Pill variant="info">{p.board_id ? 'board' : 'workspace'}</Pill>
           {!p.enabled && <Pill variant="warning">disabled</Pill>}
         </div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id)}</div>

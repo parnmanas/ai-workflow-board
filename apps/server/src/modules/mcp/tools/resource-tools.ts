@@ -10,32 +10,32 @@ import { z } from 'zod';
 import { Resource } from '../../../entities/Resource';
 import { Credential } from '../../../entities/Credential';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
+import { Board } from '../../../entities/Board';
 import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
 import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype } from '../shared/resource-helpers';
 import { listRepoBranches, resolveGitCredential } from '../shared/git-branches';
 import type { ToolContext } from './context';
+import { canUseCatalogItem } from '../../../common/catalog-scope';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, embeddingService } = ctx;
 
   server.tool(
     'list_resources',
-    'List resources in a workspace. Scope rule: omit board_id → returns ALL (workspace+board); ' +
-    'pass board_id="" → workspace-scope only (board_id IS NULL); pass board_id=<uuid> → that board only. ' +
+    'List inherited resources. Omit board_id for Global + Workspace; pass board_id=<uuid> for Global + Workspace + that Board. ' +
     'Types: repository, document, image, link, comment_attachment (auto-managed, hidden from default UI).',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
+      board_id: z.string().optional().describe('Board context; omit for workspace context'),
       type: z.string().optional().describe('Filter by resource type: repository, document, image, link, comment_attachment'),
     },
     async ({ workspace_id, board_id, type }) => {
       const repo = dataSource.getRepository(Resource);
-      const qb = repo.createQueryBuilder('r').where('r.workspace_id = :ws', { ws: workspace_id });
-      if (board_id !== undefined) {
-        if (board_id) qb.andWhere('r.board_id = :bid', { bid: board_id });
-        else qb.andWhere('r.board_id IS NULL');
-      }
+      const qb = repo.createQueryBuilder('r')
+        .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspace_id });
+      if (board_id) qb.andWhere('(r.board_id IS NULL OR r.board_id = :bid)', { bid: board_id });
+      else qb.andWhere('r.board_id IS NULL');
       if (type) qb.andWhere('r.type = :t', { t: type });
       else qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
@@ -45,14 +45,16 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'get_resource',
-    'Get a single resource by ID with full content (including file_data if present).',
+    'Get one inherited resource by ID with full content (including file_data if present).',
     {
+      workspace_id: z.string().describe('Workspace scope boundary'),
+      board_id: z.string().optional().describe('Board context when reading a Board resource'),
       id: z.string().describe('Resource ID'),
     },
-    async ({ id }) => {
+    async ({ workspace_id, board_id, id }) => {
       const repo = dataSource.getRepository(Resource);
       const resource = await repo.findOne({ where: { id } });
-      if (!resource) return err('Resource not found');
+      if (!resource || !canUseCatalogItem(resource, workspace_id, board_id)) return err('Resource not found in scope');
       return ok({
         ...resource,
         tags: parseResourceTags(resource),
@@ -84,6 +86,10 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     async ({ workspace_id, id, board_id, name, description, type, url, content, file_data, file_name, file_mimetype, tags, default_branch }) => {
       const repo = dataSource.getRepository(Resource);
       if (!name || !name.trim()) return err('Resource name is required');
+      if (board_id) {
+        const board = await dataSource.getRepository(Board).findOne({ where: { id: board_id, workspace_id } });
+        if (!board) return err('board_id does not belong to workspace_id');
+      }
 
       if (id) {
         const existing = await repo.findOne({ where: { id, workspace_id } });
@@ -102,7 +108,9 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         if (existing.file_data && !existing.file_mimetype) {
           existing.file_mimetype = inferResourceMimetype(existing.file_data, existing.file_name || existing.name);
         }
-        if (board_id !== undefined) existing.board_id = board_id || null;
+        if (board_id !== undefined && existing.board_id !== (board_id || null)) {
+          return err('Resource scope cannot be changed; create a new scoped Resource instead');
+        }
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
         if (default_branch !== undefined) existing.default_branch = default_branch || '';
         const saved = await repo.save(existing);
@@ -145,8 +153,10 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     },
     async ({ workspace_id, resource_id }) => {
       const repo = dataSource.getRepository(Resource);
-      const resource = await repo.findOne({ where: { id: resource_id, workspace_id } });
-      if (!resource) return err('Resource not found in workspace');
+      const resource = await repo.findOne({ where: { id: resource_id } });
+      if (!resource || (resource.workspace_id !== null && resource.workspace_id !== workspace_id)) {
+        return err('Resource not found in workspace');
+      }
       if (resource.type !== 'repository') return err(`resource type must be 'repository' (got '${resource.type}')`);
       if (!resource.url) return err("resource has no URL — set the repository's URL before listing branches");
       try {
@@ -154,6 +164,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
           dataSource.getRepository(Credential),
           resource.credential_id,
           workspace_id,
+          resource.board_id,
         );
         const branches = await listRepoBranches({
           url: resource.url,
@@ -198,10 +209,12 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     },
     async ({ workspace_id, query, board_id, type, limit }) => {
       const repo = dataSource.getRepository(Resource);
-      const where: any = { workspace_id };
-      if (board_id !== undefined) where.board_id = board_id || null;
-      if (type) where.type = type;
-      const resources = await repo.find({ where, order: { name: 'ASC' } });
+      const qb = repo.createQueryBuilder('r')
+        .where('(r.workspace_id IS NULL OR r.workspace_id = :workspaceId)', { workspaceId: workspace_id });
+      if (board_id) qb.andWhere('(r.board_id IS NULL OR r.board_id = :boardId)', { boardId: board_id });
+      else qb.andWhere('r.board_id IS NULL');
+      if (type) qb.andWhere('r.type = :type', { type });
+      const resources = await qb.orderBy('r.name', 'ASC').getMany();
 
       if (resources.length === 0) return ok({ results: [], search_mode: 'none', total: 0 });
 

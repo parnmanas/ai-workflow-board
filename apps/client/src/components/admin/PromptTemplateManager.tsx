@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { PromptTemplate } from '../../types';
+import type { CatalogScope, PromptTemplate } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
@@ -18,7 +18,19 @@ const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   verticalAlign: 'middle',
 });
 
-export default function PromptTemplateManager({ workspaceId }: { workspaceId?: string } = {}) {
+export default function PromptTemplateManager({
+  workspaceId,
+  catalogMode = false,
+  createScope = 'workspace',
+  boardId,
+  allScopes = false,
+}: {
+  workspaceId?: string;
+  catalogMode?: boolean;
+  createScope?: CatalogScope;
+  boardId?: string;
+  allScopes?: boolean;
+} = {}) {
   const { showToast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editTemplate, setEditTemplate] = useState<PromptTemplate | null>(null);
@@ -44,14 +56,17 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
     }
     setLoading(true);
     try {
-      const list = await api.listPromptTemplates(effectiveWorkspaceId);
+      const list = await api.listPromptTemplates(effectiveWorkspaceId, {
+        boardId: allScopes ? undefined : boardId,
+        includeAllScopes: catalogMode && allScopes,
+      });
       setTemplates(list);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load templates', 'error');
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, showToast]);
+  }, [effectiveWorkspaceId, catalogMode, boardId, allScopes, showToast]);
 
   useEffect(() => {
     loadTemplates();
@@ -100,7 +115,9 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
     try {
       if (editTemplate) {
         await api.updatePromptTemplate(editTemplate.id, {
-          workspace_id: effectiveWorkspaceId,
+          scope: editTemplate.scope,
+          workspace_id: editTemplate.workspace_id,
+          board_id: editTemplate.board_id,
           name: formName.trim(),
           description: formDescription,
           content: formContent,
@@ -109,7 +126,9 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
         showToast('Template updated.', 'success');
       } else {
         await api.createPromptTemplate({
-          workspace_id: effectiveWorkspaceId,
+          scope: createScope,
+          workspace_id: createScope === 'global' ? null : effectiveWorkspaceId,
+          board_id: createScope === 'board' ? boardId : null,
           name: formName.trim(),
           description: formDescription,
           content: formContent,
@@ -204,6 +223,7 @@ export default function PromptTemplateManager({ workspaceId }: { workspaceId?: s
                     title={t.name}
                   >
                     {t.name}
+                    {catalogMode && <span style={{ marginLeft: 8 }}><Badge variant="info">{t.scope}</Badge></span>}
                   </td>
                   <td style={listCellStyle('left')}>
                     {t.category ? <Badge variant="neutral">{t.category}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}

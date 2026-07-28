@@ -12,16 +12,18 @@ They complement Actions:
 
 ## Scope
 
-Functions use one database model. There is no separate “Global Function” type.
+Functions use one database model. There are no separate Global, Workspace, or
+Board Function types.
 
-| `workspace_id` | Meaning | Management surface |
-|---|---|---|
-| `NULL` | Global, inherited by every workspace | Admin → Global Functions |
-| workspace UUID | Available only in that workspace | Workspace → Functions |
+| `workspace_id` | `board_id` | Meaning | Management surface |
+|---|---|---|---|
+| `NULL` | `NULL` | Global, inherited by every workspace | Automation Catalog |
+| workspace UUID | `NULL` | Available only in that workspace | Automation Catalog |
+| workspace UUID | board UUID | Available only on that board | Automation Catalog |
 
-Resolution is by stable `key`. A workspace row with the same key overrides the
-global row. Scope cannot be moved in place; create/delete an override instead so
-run history remains unambiguous.
+Resolution is by stable `key`: Board overrides Workspace, and Workspace
+overrides Global. Scope cannot be moved in place; create/delete an override
+instead so run history remains unambiguous.
 
 ## Definition contract
 
@@ -66,6 +68,12 @@ run user-authored shell text.
   keys have no successful run for the ticket.
 
 ## Function catalogue
+
+Function definitions use the shared catalog scope described in
+[`catalog-scopes.md`](catalog-scopes.md). A key resolves in Board → Workspace →
+Global order. The Automation Catalog requests `include_shadowed=true` so an
+operator can inspect and edit every definition instead of seeing only the
+effective winner.
 
 The following operations should move out of prompts. The implementation order
 is based on failure impact and how often prompt-only behavior has left branches,
@@ -161,10 +169,11 @@ not diverge by caller.
 
 - `list_functions`
 - `get_function`
-- `save_function` (workspace scope only)
-- `delete_function` (workspace-authored only)
+- `save_function` (Workspace or Board scope)
+- `delete_function` (caller Workspace-authored only)
 - `execute_function`
 - `list_function_runs`
 
-Global authoring stays on the authenticated Admin REST/UI path. MCP API keys
+Global authoring stays on the authenticated admin REST/UI path inside the
+Automation Catalog. MCP API keys
 bound to a workspace cannot manage or execute another workspace's Functions.

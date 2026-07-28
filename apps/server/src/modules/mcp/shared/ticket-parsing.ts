@@ -383,10 +383,11 @@ export async function loadTicketFull(
   // a ticket cloned across workspaces) never leaks the foreign url here.
   if (ticket.base_repo_resource_id) {
     try {
-      const repo = ticket.workspace_id
-        ? await scope.getRepository(Resource).findOne({
-            where: { id: ticket.base_repo_resource_id, workspace_id: ticket.workspace_id },
-          })
+      const candidate = ticket.workspace_id
+        ? await scope.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } })
+        : null;
+      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === ticket.workspace_id)
+        ? candidate
         : null;
       out.base_repo = repo
         ? {

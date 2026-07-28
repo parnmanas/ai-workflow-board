@@ -252,14 +252,9 @@ export class QaService {
       existing.target_agent_id = patch.target_agent_id;
     }
     if (patch.board_id !== undefined) {
-      if (patch.board_id) {
-        const board = await this.boardRepo.findOne({ where: { id: patch.board_id } });
-        if (!board) throw makeError(400, 'board not found');
-        if (board.workspace_id !== workspaceId) {
-          throw makeError(400, 'board belongs to a different workspace');
-        }
+      if ((patch.board_id || null) !== existing.board_id) {
+        throw makeError(400, 'scope cannot be changed after creation');
       }
-      existing.board_id = patch.board_id || null;
     }
     if (patch.qa_driver !== undefined) existing.qa_driver = patch.qa_driver ?? '';
     if (patch.qa_driver_config !== undefined) existing.qa_driver_config = patch.qa_driver_config ?? null;

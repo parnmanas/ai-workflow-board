@@ -15,6 +15,7 @@ import { Ticket } from '../../../entities/Ticket';
 import { DEFAULT_COLUMNS, DEFAULT_BOARD_ROUTING } from '../../../db';
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
+import { canUseCatalogItem } from '../../../common/catalog-scope';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
@@ -293,7 +294,14 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
           // Drop null mappings so stored shape stays { [col]: templateId } without nullables
           const cleaned: Record<string, string> = {};
           for (const [colId, tplId] of Object.entries(column_prompts)) {
-            if (tplId) cleaned[colId] = tplId;
+            if (!tplId) continue;
+            const column = await dataSource.getRepository(BoardColumn).findOne({ where: { id: colId, board_id: board.id } });
+            if (!column) return err(`column ${colId} does not belong to board`);
+            const template = await dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
+            if (!template || !canUseCatalogItem(template, board.workspace_id, board.id)) {
+              return err(`prompt template ${tplId} is not available to board`);
+            }
+            cleaned[colId] = tplId;
           }
           board.column_prompts = Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned);
         }

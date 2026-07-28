@@ -22,6 +22,7 @@ type QaAgent = { id: string; name: string; manager_name?: string };
 interface QaManagerProps {
   workspaceId?: string;
   boardId?: string;
+  allScopes?: boolean;
 }
 
 const RUN_STATUS_VARIANT: Record<string, 'success' | 'danger' | 'warning' | 'info' | 'neutral'> = {
@@ -42,7 +43,7 @@ function statusVariant(s: string) {
  * scenarios, runs them, and visualizes each scenario as an ordered step flow
  * with per-step pass/fail badges + screenshot thumbnails, plus run history.
  */
-export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
+export default function QaManager({ workspaceId, boardId, allScopes = false }: QaManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -69,9 +70,9 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); return; }
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
-        api.listQaScenarios(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined),
+        api.listQaScenarios(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
         api.getAgents(effectiveWorkspaceId).catch(() => []),
-        api.listQaSchedules(effectiveWorkspaceId, boardId !== undefined ? (boardId || '') : undefined).catch(() => []),
+        api.listQaSchedules(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)).catch(() => []),
         api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);
       setScenarios(list);
@@ -81,7 +82,7 @@ export default function QaManager({ workspaceId, boardId }: QaManagerProps) {
     } catch (err: any) {
       showToast(err?.message || 'Failed to load QA scenarios', 'error');
     }
-  }, [effectiveWorkspaceId, boardId, showToast]);
+  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -660,6 +661,7 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+          <Badge variant="neutral" size="sm">{s.board_id ? 'board' : 'workspace'}</Badge>
           {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
         </div>
       </td>

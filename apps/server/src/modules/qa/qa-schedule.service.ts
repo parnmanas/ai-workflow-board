@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { QaSchedule, QaScheduleScope } from '../../entities/QaSchedule';
 import { QaRunBatch } from '../../entities/QaRunBatch';
+import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { QaRunService } from './qa-run.service';
@@ -84,6 +85,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(QaRunBatch) private readonly batchRepo: Repository<QaRunBatch>,
     private readonly qaRunService: QaRunService,
     private readonly logService: LogService,
+    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
   ) {}
 
   onModuleInit(): void {
@@ -130,6 +132,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateScheduleInput): Promise<QaSchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
+    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const scope: QaScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
     const scenarioIds = this._validateScope(scope, input.scenarioIds);
@@ -163,7 +166,9 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
     }
-    if (patch.boardId !== undefined) schedule.board_id = patch.boardId ?? null;
+    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
+      throw makeError(400, 'scope cannot be changed after creation');
+    }
     if (patch.stopOnFail !== undefined) schedule.stop_on_fail = !!patch.stopOnFail;
     if (patch.triggeredByType !== undefined) schedule.triggered_by_type = patch.triggeredByType || 'user';
 
@@ -320,6 +325,15 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       triggeredByType: 'system',
       triggeredById,
     });
+  }
+
+  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
+    if (!boardId) return;
+    const board = await this.boardRepo.findOne({ where: { id: boardId } });
+    if (!board) throw makeError(400, 'board not found');
+    if (board.workspace_id !== workspaceId) {
+      throw makeError(400, 'board belongs to a different workspace');
+    }
   }
 
   private _validateScope(scope: QaScheduleScope, scenarioIds: string[] | null | undefined): string[] | null {

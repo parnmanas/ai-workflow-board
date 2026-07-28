@@ -5,6 +5,7 @@ import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
+import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -94,6 +95,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
   ) {}
 
   onModuleInit(): void {
@@ -144,6 +146,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
     const taskPrompt = (input.taskPrompt || '').trim();
     if (!taskPrompt) throw makeError(400, 'task_prompt is required');
+    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
     const enabled = input.enabled !== false;
@@ -174,7 +177,9 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
     }
-    if (patch.boardId !== undefined) schedule.board_id = patch.boardId ?? null;
+    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
+      throw makeError(400, 'scope cannot be changed after creation');
+    }
     if (patch.targetAgentId !== undefined) {
       const next = (patch.targetAgentId || '').trim();
       if (!next) throw makeError(400, 'target_agent_id cannot be empty');
@@ -349,6 +354,15 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
 
     this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → agent ${agent.id} room ${room.id}`);
     return { schedule_id: schedule.id, room_id: room.id, agent_id: agent.id };
+  }
+
+  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
+    if (!boardId) return;
+    const board = await this.boardRepo.findOne({ where: { id: boardId } });
+    if (!board) throw makeError(400, 'board not found');
+    if (board.workspace_id !== workspaceId) {
+      throw makeError(400, 'board belongs to a different workspace');
+    }
   }
 
   private _validateCadence(cron: string | null | undefined, intervalMs: number | null | undefined): { cron: string | null; intervalMs: number | null } {

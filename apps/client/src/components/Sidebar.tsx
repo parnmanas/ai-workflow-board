@@ -123,11 +123,7 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'chat',             path: `/ws/${wsId}/chat`,             label: 'Chat',             icon: 'C', badge: counts.chat.total },
     { key: 'users',            path: `/ws/${wsId}/users`,            label: 'Users',            icon: 'U' },
     { key: 'agents',           path: `/ws/${wsId}/agents`,           label: 'AI Agents',        icon: 'A' },
-    { key: 'prompt-templates', path: `/ws/${wsId}/prompt-templates`, label: 'Prompt Templates', icon: 'P' },
-    { key: 'resources',        path: `/ws/${wsId}/resources`,        label: 'Resources',        icon: 'R' },
-    { key: 'actions',          path: `/ws/${wsId}/actions`,          label: 'Actions',          icon: 'N' },
-    { key: 'functions',        path: `/ws/${wsId}/functions`,        label: 'Functions',        icon: 'F' },
-    { key: 'credentials',      path: `/ws/${wsId}/credentials`,      label: 'Credentials',      icon: 'X' },
+    { key: 'catalog',          path: `/ws/${wsId}/catalog`,          label: 'Automation Catalog', icon: 'F' },
     { key: 'channels',         path: `/ws/${wsId}/channels`,         label: 'Channels',         icon: 'H' },
     { key: 'api-keys',         path: `/ws/${wsId}/api-keys`,         label: 'API Keys',         icon: 'K' },
     { key: 'roles',            path: `/ws/${wsId}/roles`,            label: 'Roles',            icon: 'O' },
@@ -147,8 +143,6 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
     { key: 'admin-agent-manager', path: '/admin/agent-manager', label: 'Agent Manager', icon: 'M' },
     { key: 'admin-column-policies', path: '/admin/column-policies', label: 'Column Policies', icon: 'P' },
     { key: 'admin-workflow-health', path: '/admin/workflow-health', label: 'Workflow Health', icon: 'H' },
-    { key: 'admin-functions', path: '/admin/functions', label: 'Global Functions', icon: 'F' },
-    { key: 'admin-global-credentials', path: '/admin/global-credentials', label: 'Global Credentials', icon: 'K' },
     { key: 'admin-claude-backend-profiles', path: '/admin/claude-backend-profiles', label: 'Claude Backend Profiles', icon: 'B' },
     { key: 'admin-settings', path: '/admin/settings', label: 'Settings',    icon: 'S' },
   ];
@@ -340,15 +334,12 @@ export default function Sidebar({ overlay, isOpen, onClose, wsId, boards, contai
                         <NavBadge count={counts.tickets.perBoard[b.id]} />
                       )}
                     </button>
-                    {/* Board sub-entries (QA, Security, Resources, Actions, Settings) when board is active */}
+                    {/* Board-specific automation is managed in the workspace Catalog. */}
                     {active && (
                       <>
                         {[
-                          { label: 'QA',         path: `/ws/${wsId}/boards/${b.id}/qa`        },
-                          { label: 'Security',   path: `/ws/${wsId}/boards/${b.id}/security`  },
-                          { label: 'Resources',  path: `/ws/${wsId}/boards/${b.id}/resources` },
-                          { label: 'Actions',    path: `/ws/${wsId}/boards/${b.id}/actions`   },
-                          { label: 'Settings',   path: `/ws/${wsId}/boards/${b.id}/settings`  },
+                          { label: 'Automation Catalog', path: `/ws/${wsId}/catalog?scope=board&board=${b.id}` },
+                          { label: 'Settings', path: `/ws/${wsId}/boards/${b.id}/settings` },
                         ].map((sub) => {
                           const subActive = location.pathname === sub.path;
                           return (

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { LoadingProvider } from './contexts/LoadingContext';
@@ -16,22 +16,14 @@ const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
 const AgentsPage = lazy(() => import('./components/AgentsPage'));
 const BoardSettingsPage = lazy(() => import('./components/BoardSettingsPage'));
-const BoardResourcesPage = lazy(() => import('./components/BoardResourcesPage'));
 const BoardArchivePage = lazy(() => import('./components/BoardArchivePage'));
-const BoardActionsPage = lazy(() => import('./components/BoardActionsPage'));
 const BoardFeaturesPage = lazy(() => import('./components/BoardFeaturesPage'));
-const BoardQaPage = lazy(() => import('./components/BoardQaPage'));
-const BoardSecurityPage = lazy(() => import('./components/BoardSecurityPage'));
 const BenchmarkLeaderboardPage = lazy(() => import('./components/BenchmarkLeaderboardPage'));
 const BoardsIndexPage = lazy(() => import('./components/BoardsIndexPage'));
 const WorkspaceUsersPage = lazy(() => import('./components/WorkspaceUsersPage'));
 const WorkspaceChannelsPage = lazy(() => import('./components/WorkspaceChannelsPage'));
 const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPage'));
-const WorkspacePromptTemplatesPage = lazy(() => import('./components/WorkspacePromptTemplatesPage'));
-const WorkspaceResourcesPage = lazy(() => import('./components/WorkspaceResourcesPage'));
-const WorkspaceActionsPage = lazy(() => import('./components/WorkspaceActionsPage'));
-const WorkspaceFunctionsPage = lazy(() => import('./components/WorkspaceFunctionsPage'));
-const WorkspaceCredentialsPage = lazy(() => import('./components/WorkspaceCredentialsPage'));
+const WorkspaceCatalogPage = lazy(() => import('./components/WorkspaceCatalogPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
 const WorkspaceClaudeBackendProfilesPage = lazy(() => import('./components/WorkspaceClaudeBackendProfilesPage'));
@@ -81,6 +73,13 @@ export function WorkspaceSectionRedirect() {
   const { mode } = useViewMode();
   const { search } = useLocation();
   return <Navigate to={`${defaultSectionForMode(mode)}${search}`} replace />;
+}
+
+function CatalogRedirect({ tab, boardScoped = false }: { tab: string; boardScoped?: boolean }) {
+  const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
+  const params = new URLSearchParams({ tab, scope: boardScoped ? 'board' : 'workspace' });
+  if (boardScoped && boardId) params.set('board', boardId);
+  return <Navigate to={`/ws/${wsId}/catalog?${params.toString()}`} replace />;
 }
 
 function AppContent() {
@@ -199,11 +198,11 @@ function AppContent() {
             <Route path="assistant" element={<ChatFirstHome />} />
             <Route path="boards" element={<BoardsIndexPage />} />
             <Route path="boards/:boardId" element={<Board />} />
-            <Route path="boards/:boardId/resources" element={<BoardResourcesPage />} />
-            <Route path="boards/:boardId/actions" element={<BoardActionsPage />} />
+            <Route path="boards/:boardId/resources" element={<CatalogRedirect tab="resources" boardScoped />} />
+            <Route path="boards/:boardId/actions" element={<CatalogRedirect tab="actions" boardScoped />} />
             <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-            <Route path="boards/:boardId/qa" element={<BoardQaPage />} />
-            <Route path="boards/:boardId/security" element={<BoardSecurityPage />} />
+            <Route path="boards/:boardId/qa" element={<CatalogRedirect tab="qa" boardScoped />} />
+            <Route path="boards/:boardId/security" element={<CatalogRedirect tab="security" boardScoped />} />
             <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
@@ -213,11 +212,12 @@ function AppContent() {
             <Route path="agents/:agentId" element={<AgentDetailPage />} />
             <Route path="channels" element={<WorkspaceChannelsPage />} />
             <Route path="api-keys" element={<WorkspaceApiKeysPage />} />
-            <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
-            <Route path="resources" element={<WorkspaceResourcesPage />} />
-            <Route path="actions" element={<WorkspaceActionsPage />} />
-            <Route path="functions" element={<WorkspaceFunctionsPage />} />
-            <Route path="credentials" element={<WorkspaceCredentialsPage />} />
+            <Route path="catalog" element={<WorkspaceCatalogPage />} />
+            <Route path="prompt-templates" element={<CatalogRedirect tab="prompts" />} />
+            <Route path="resources" element={<CatalogRedirect tab="resources" />} />
+            <Route path="actions" element={<CatalogRedirect tab="actions" />} />
+            <Route path="functions" element={<CatalogRedirect tab="functions" />} />
+            <Route path="credentials" element={<CatalogRedirect tab="credentials" />} />
             <Route path="roles" element={<WorkspaceRolesPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
             <Route path="claude-backend-profiles" element={<WorkspaceClaudeBackendProfilesPage />} />

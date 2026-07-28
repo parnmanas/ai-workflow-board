@@ -583,10 +583,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           // Mirror the REST guard: pin only repos that live in the ticket's
           // workspace so a guessed cross-workspace id can't bleed url/name
           // into the SSE prompt.
-          const repoExists = await dataSource.getRepository(Resource).findOne({
-            where: { id: next, workspace_id: ticket.workspace_id },
-          });
-          if (!repoExists) return err('base_repo_resource_id not found in this workspace');
+          const repoExists = await dataSource.getRepository(Resource).findOne({ where: { id: next } });
+          if (!repoExists || (repoExists.workspace_id !== null && repoExists.workspace_id !== ticket.workspace_id)) {
+            return err('base_repo_resource_id not found in this workspace');
+          }
         }
         ticket.base_repo_resource_id = next;
         // Skip the activity-feed entry on idempotent writes — matches REST

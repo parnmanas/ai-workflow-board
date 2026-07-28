@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { Resource, Credential, RepoBranch } from '../../types';
+import type { CatalogScope, Resource, Credential, RepoBranch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
@@ -37,9 +37,18 @@ function typeLabel(type: string): string {
 interface ResourceManagerProps {
   workspaceId?: string;
   boardId?: string | null;
+  catalogMode?: boolean;
+  createScope?: CatalogScope;
+  allScopes?: boolean;
 }
 
-export default function ResourceManager({ workspaceId, boardId }: ResourceManagerProps) {
+export default function ResourceManager({
+  workspaceId,
+  boardId,
+  catalogMode = false,
+  createScope = 'workspace',
+  allScopes = false,
+}: ResourceManagerProps) {
   const { showToast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [editResource, setEditResource] = useState<Resource | null>(null);
@@ -110,11 +119,15 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
       const [list, creds] = await Promise.all([
         api.listResources(
           effectiveWorkspaceId,
-          boardId !== undefined ? (boardId || '') : undefined,
+          allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined),
           filterType || undefined,
           { by: sortBy, order: sortOrder },
+          catalogMode && allScopes,
         ),
-        api.listCredentials(effectiveWorkspaceId).catch(() => [] as Credential[]),
+        api.listCredentials(effectiveWorkspaceId, {
+          boardId: allScopes ? undefined : (boardId || undefined),
+          includeAllScopes: catalogMode && allScopes,
+        }).catch(() => [] as Credential[]),
       ]);
       setResources(list);
       setCredentials(creds);
@@ -123,7 +136,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, boardId, filterType, sortBy, sortOrder, showToast]);
+  }, [effectiveWorkspaceId, boardId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
 
   useEffect(() => {
     loadResources();
@@ -255,6 +268,8 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     try {
       const result = await api.testRepoBranches({
         workspace_id: effectiveWorkspaceId,
+        scope: editResource?.scope || createScope,
+        board_id: editResource?.board_id || (createScope === 'board' ? (boardId || null) : null),
         url: formUrl.trim(),
         credential_id: formCredentialId || null,
         default_branch: formDefaultBranch.trim(),
@@ -308,7 +323,9 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     try {
       if (editResource) {
         await api.updateResource(editResource.id, {
-          workspace_id: effectiveWorkspaceId,
+          scope: editResource.scope,
+          workspace_id: editResource.workspace_id,
+          board_id: editResource.board_id,
           name: formName.trim(),
           description: formDescription,
           type: formType,
@@ -324,8 +341,9 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
         showToast('Resource updated.', 'success');
       } else {
         await api.createResource({
-          workspace_id: effectiveWorkspaceId,
-          board_id: boardId || null,
+          scope: createScope,
+          workspace_id: createScope === 'global' ? null : effectiveWorkspaceId,
+          board_id: createScope === 'board' ? (boardId || null) : null,
           credential_id: formCredentialId || null,
           name: formName.trim(),
           description: formDescription,
@@ -466,7 +484,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
               whiteSpace: 'nowrap',
             }}
           >
-            {typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
+            {catalogMode ? `${r.scope.toUpperCase()} · ` : ''}{typeLabel(r.type)} · {relativeTime(r.updated_at || r.created_at)}
           </div>
         </div>
       </div>
@@ -511,6 +529,17 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
     />
   ) : (
     emptyDetail
+  );
+
+  const resourceFormScope = editResource?.scope || createScope;
+  const resourceFormBoardId = editResource?.board_id || (resourceFormScope === 'board' ? (boardId || null) : null);
+  const availableCredentials = credentials.filter(credential =>
+    credential.scope === 'global'
+    || (
+      resourceFormScope !== 'global'
+      && credential.workspace_id === effectiveWorkspaceId
+      && (credential.board_id === null || credential.board_id === resourceFormBoardId)
+    )
   );
 
   return (
@@ -982,7 +1011,7 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
             </div>
           )}
 
-          {credentials.length > 0 && (
+          {availableCredentials.length > 0 && (
             <div>
               <label style={{
                 fontSize: tokens.typography.fontSizeXs,
@@ -1011,8 +1040,8 @@ export default function ResourceManager({ workspaceId, boardId }: ResourceManage
                 }}
               >
                 <option value="">None</option>
-                {credentials.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
+                {availableCredentials.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.provider}, {c.scope})</option>
                 ))}
               </select>
             </div>

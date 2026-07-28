@@ -379,7 +379,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       'Drive the real AWB client UI with a headless-Chrome (browser) driver and capture a '
       + 'screenshot of each core screen as image/png evidence: the login page, the board view, '
       + 'a ticket detail panel with comments, a chat room, the board QA manager (table view), the '
-      + 'Resources page, and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
+      + 'Automation Catalog resources, and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
       + 'pixels in the QA detail Gallery/Lightbox. Capture recipe: apps/server/scripts/qa-visual-capture.mjs.',
     qa_driver: BROWSER_DRIVER,
     qa_driver_config: browserDriverConfig(),
@@ -389,9 +389,9 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(1, 'Log in, then screenshot the board (kanban columns + ticket cards)', 'Board view shows columns (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}', name: 'board.png', mimetype: 'image/png' }),
       step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
       step(3, 'Open the chat room view and screenshot it', 'Chat room list + message thread render', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/chat', name: 'chat.png', mimetype: 'image/png' }),
-      step(4, 'Open the board QA manager (scenario table) and screenshot it', 'QA scenario table shows scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/qa', name: 'qa-manager.png', mimetype: 'image/png' }),
-      step(5, 'Open the Resources page and screenshot it', 'Resources grid renders (media + documents)', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/resources', name: 'resources.png', mimetype: 'image/png' }),
-      step(6, 'Open the board sub-menu (resources/actions/qa/settings/archive) and screenshot it', 'Board sub-menu navigation is visible', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/settings', name: 'board-submenu.png', mimetype: 'image/png' }),
+      step(4, 'Open the board QA catalog tab and screenshot it', 'QA scenario table shows scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/catalog?tab=qa&scope=board&board={{board_id}}', name: 'qa-manager.png', mimetype: 'image/png' }),
+      step(5, 'Open the Resources catalog tab and screenshot it', 'Resources grid renders Global, Workspace, and Board entries together', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/catalog?tab=resources&scope=board&board={{board_id}}', name: 'resources.png', mimetype: 'image/png' }),
+      step(6, 'Open the board sub-menu (catalog/settings/archive) and screenshot it', 'Board sub-menu navigation is visible', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/settings', name: 'board-submenu.png', mimetype: 'image/png' }),
     ],
   },
 
@@ -411,7 +411,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(0, 'Launch headless Chrome and start screencast recording', 'CDP screencast started; frames accumulating', 'browser_start_video', { fps: 8 }),
       step(1, 'Log in and land on the board view', 'Board renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}' }),
       step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}' }),
-      step(3, 'Visit the board QA manager', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/qa' }),
+      step(3, 'Visit the board QA catalog tab', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/catalog?tab=qa&scope=board&board={{board_id}}' }),
       step(4, 'Stop recording, encode mp4, and record it as THIS step\'s artifact', 'Journey saved as a Resource (file_mimetype=video/mp4) and recorded via record_qa_step on this step so the inline-video tile renders (per-step, not run-level)', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4', record_on_step: 4 }),
     ],
   },

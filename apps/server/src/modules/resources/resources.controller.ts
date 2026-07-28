@@ -1,14 +1,17 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Res, UseGuards, BadRequestException } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, UseGuards, BadRequestException } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
+import { assertCatalogBoardScope, canUseCatalogItem, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
+import { Board } from '../../entities/Board';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
 import {
@@ -31,7 +34,28 @@ export class ResourcesController {
   constructor(
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  private async assertCredentialScope(
+    credentialId: string | null | undefined,
+    workspaceId: string | null,
+    boardId: string | null,
+  ): Promise<void> {
+    if (!credentialId) return;
+    const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
+    if (!credential) throw Object.assign(new Error('credential not found'), { status: 400 });
+    const available =
+      credential.workspace_id === null
+      || (
+        workspaceId !== null
+        && credential.workspace_id === workspaceId
+        && (credential.board_id === null || credential.board_id === boardId)
+      );
+    if (!available) {
+      throw Object.assign(new Error('credential is not available in the Resource scope'), { status: 400 });
+    }
+  }
 
   // NOTE: raw binary upload (POST /api/resources/upload) lives in
   // ResourceMediaController, not here. This controller is admin-gated
@@ -46,19 +70,16 @@ export class ResourcesController {
     @Query('type') type: string | undefined,
     @Query('sort_by') sortBy: string | undefined,
     @Query('sort_order') sortOrder: string | undefined,
+    @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspace_id query parameter is required' });
     }
     const qb = this.resourceRepo.createQueryBuilder('r')
-      .where('r.workspace_id = :ws', { ws: workspaceId });
-    if (boardId !== undefined) {
-      // boardId === '' means "workspace-scope only" (board_id IS NULL);
-      // a concrete uuid filters to that board. The prior `boardId || null`
-      // shortcut silently returned every resource when the client omitted
-      // the param, which bled board-scoped files into the workspace view.
-      if (boardId) qb.andWhere('r.board_id = :bid', { bid: boardId });
+      .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspaceId });
+    if (includeAllScopes !== 'true') {
+      if (boardId) qb.andWhere('(r.board_id IS NULL OR r.board_id = :bid)', { bid: boardId });
       else qb.andWhere('r.board_id IS NULL');
     }
     if (type) {
@@ -89,6 +110,7 @@ export class ResourcesController {
     const resources = await qb.getMany();
     const parsed = resources.map((r) => ({
       ...r,
+      scope: catalogScopeOf(r),
       tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch { return []; } })(),
     }));
     return res.json(parsed);
@@ -97,57 +119,92 @@ export class ResourcesController {
   @Get(':id')
   async get(
     @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('board_id') boardId: string | undefined,
     @Res() res: Response,
   ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
     const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
+    if (!canUseCatalogItem(resource, workspaceId, boardId)) {
+      return res.status(404).json({ error: 'Resource not found in scope' });
+    }
     const parsed = {
       ...resource,
+      scope: catalogScopeOf(resource),
       tags: (() => { try { return JSON.parse(resource.tags || '[]'); } catch { return []; } })(),
     };
     return res.json(parsed);
   }
 
   @Post()
-  async create(@Body() body: any, @Res() res: Response) {
+  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const {
       workspace_id, board_id = null, credential_id = null, name, description = '', type = 'link',
       url = '', content = '', file_data = '', file_name = '', file_mimetype = '',
       tags = [], default_branch = '',
     } = body;
-    if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+    let catalogScope;
+    try {
+      catalogScope = normalizeCatalogScope({ ...body, workspace_id, board_id });
+      await assertCatalogBoardScope(
+        async (targetBoardId, targetWorkspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: targetBoardId, workspace_id: targetWorkspaceId } }),
+        catalogScope,
+      );
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
+    }
+    if (catalogScope.workspace_id === null && (req as any).currentUser?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can create Global Resources' });
+    }
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+    try {
+      await this.assertCredentialScope(credential_id, catalogScope.workspace_id, catalogScope.board_id);
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
+    }
 
     const effectiveMimetype = file_mimetype && file_mimetype.length > 0
       ? file_mimetype
       : (file_data ? inferResourceMimetype(file_data, file_name || name) : '');
-    const resource = await this.resourceRepo.save(
-      this.resourceRepo.create({
-        workspace_id,
-        board_id: board_id || null,
-        credential_id: credential_id || null,
-        name: name.trim(),
-        description,
-        type,
-        url,
-        content,
-        file_data,
-        file_name,
-        file_mimetype: effectiveMimetype,
-        tags: JSON.stringify(Array.isArray(tags) ? tags : []),
-        default_branch: typeof default_branch === 'string' ? default_branch : '',
-      }),
-    );
+    const entity = this.resourceRepo.create();
+    Object.assign(entity, {
+      ...catalogScope,
+      credential_id: credential_id || null,
+      name: name.trim(),
+      description,
+      type,
+      url,
+      content,
+      file_data,
+      file_name,
+      file_mimetype: effectiveMimetype,
+      tags: JSON.stringify(Array.isArray(tags) ? tags : []),
+      default_branch: typeof default_branch === 'string' ? default_branch : '',
+    });
+    const resource = await this.resourceRepo.save(entity);
     return res.status(201).json({
       ...resource,
+      scope: catalogScopeOf(resource),
       tags: (() => { try { return JSON.parse(resource.tags || '[]'); } catch { return []; } })(),
     });
   }
 
   @Patch(':id')
-  async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { workspace_id } = body;
-    if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required in body' });
-    const resource = await findOrFail(this.resourceRepo, { where: { id, workspace_id } }, 'Resource not found in workspace');
+  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
+    if (resource.workspace_id === null && (req as any).currentUser?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can update Global Resources' });
+    }
+    if (resource.workspace_id !== null && body.workspace_id !== resource.workspace_id) {
+      return res.status(404).json({ error: 'Resource not found in workspace' });
+    }
+    if (
+      (body.workspace_id !== undefined && (body.workspace_id || null) !== resource.workspace_id)
+      || (body.board_id !== undefined && (body.board_id || null) !== resource.board_id)
+      || (body.scope !== undefined && body.scope !== catalogScopeOf(resource))
+    ) {
+      return res.status(400).json({ error: 'Resource scope cannot be changed; create a new scoped Resource instead' });
+    }
 
     if (body.name !== undefined) {
       if (!body.name || !body.name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
@@ -163,14 +220,19 @@ export class ResourcesController {
     if (resource.file_data && !resource.file_mimetype) {
       resource.file_mimetype = inferResourceMimetype(resource.file_data, resource.file_name || resource.name);
     }
-    if (body.board_id !== undefined) resource.board_id = body.board_id || null;
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
+    try {
+      await this.assertCredentialScope(resource.credential_id, resource.workspace_id, resource.board_id);
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
+    }
     if (body.tags !== undefined) resource.tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : []);
     if (body.default_branch !== undefined) resource.default_branch = typeof body.default_branch === 'string' ? body.default_branch : '';
 
     const saved = await this.resourceRepo.save(resource);
     return res.json({
       ...saved,
+      scope: catalogScopeOf(saved),
       tags: (() => { try { return JSON.parse(saved.tags || '[]'); } catch { return []; } })(),
     });
   }
@@ -182,7 +244,10 @@ export class ResourcesController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const resource = await findOrFail(this.resourceRepo, { where: { id, workspace_id: workspaceId } }, 'Resource not found in workspace');
+    const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
+    if (resource.workspace_id !== null && resource.workspace_id !== workspaceId) {
+      return res.status(404).json({ error: 'Resource not found in workspace' });
+    }
     if (resource.type !== 'repository') {
       return res.status(400).json({ error: `resource type must be 'repository' (got '${resource.type}')` });
     }
@@ -193,7 +258,7 @@ export class ResourcesController {
       // Earlier this dropped `resource.credential_id` on the floor — private
       // repos failed even when a Credential was attached. Resolve it here so
       // `git ls-remote` runs with the right userinfo for HTTPS auth.
-      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
+      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, resource.board_id);
       const branches = await listRepoBranches({
         url: resource.url,
         credential,
@@ -220,7 +285,13 @@ export class ResourcesController {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
     if (!url) return res.status(400).json({ error: 'url is required' });
     try {
-      const credential = await resolveGitCredential(this.credentialRepo, credentialId, workspaceId);
+      const scope = normalizeCatalogScope(body);
+      await assertCatalogBoardScope(
+        async (targetBoardId, targetWorkspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: targetBoardId, workspace_id: targetWorkspaceId } }),
+        scope,
+      );
+      await this.assertCredentialScope(credentialId, scope.workspace_id, scope.board_id);
+      const credential = await resolveGitCredential(this.credentialRepo, credentialId, workspaceId, scope.board_id);
       const branches = await listRepoBranches({ url, credential, defaultBranch });
       return res.json({ branches, default_branch: defaultBranch });
     } catch (err: any) {
@@ -246,16 +317,19 @@ export class ResourcesController {
   ): Promise<{ repoPath: string }> {
     const resource = await findOrFail(
       this.resourceRepo,
-      { where: { id, workspace_id: workspaceId } },
+      { where: { id } },
       'Resource not found in workspace',
     );
+    if (resource.workspace_id !== null && resource.workspace_id !== workspaceId) {
+      throw Object.assign(new Error('Resource not found in workspace'), { status: 404 });
+    }
     if (resource.type !== 'repository') {
       throw new BadRequestException(`resource type must be 'repository' (got '${resource.type}')`);
     }
     if (!resource.url) {
       throw new BadRequestException("resource has no URL — set the repository's URL before reading git history");
     }
-    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
+    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, resource.board_id);
     const repoPath = await ensureRepoCache({ resourceId: id, url: resource.url, credential, forceFetch });
     return { repoPath };
   }
@@ -390,11 +464,18 @@ export class ResourcesController {
   async remove(
     @Param('id') id: string,
     @Query('workspace_id') workspaceId: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    await findOrFail(this.resourceRepo, { where: { id, workspace_id: workspaceId } }, 'Resource not found in workspace');
-    await this.resourceRepo.delete({ id, workspace_id: workspaceId });
+    const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
+    if (resource.workspace_id === null) {
+      if ((req as any).currentUser?.role !== 'admin') {
+        return res.status(403).json({ error: 'Only admins can delete Global Resources' });
+      }
+    } else if (!workspaceId || resource.workspace_id !== workspaceId) {
+      return res.status(404).json({ error: 'Resource not found in workspace' });
+    }
+    await this.resourceRepo.delete({ id });
     return res.json({ success: true, id });
   }
 }

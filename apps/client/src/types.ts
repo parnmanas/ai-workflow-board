@@ -128,9 +128,13 @@ export interface AgentSubagentRollup {
   recent: SubagentSummary[];
 }
 
+export type CatalogScope = 'global' | 'workspace' | 'board';
+
 export interface PromptTemplate {
   id: string; // GUID
-  workspace_id: string; // GUID — references Workspace.id
+  workspace_id: string | null;
+  board_id: string | null;
+  scope: CatalogScope;
   name: string;
   description: string;
   content: string;
@@ -141,8 +145,9 @@ export interface PromptTemplate {
 
 export interface Resource {
   id: string;
-  workspace_id: string;
+  workspace_id: string | null;
   board_id: string | null;
+  scope: CatalogScope;
   credential_id: string | null;
   name: string;
   description: string;
@@ -303,7 +308,8 @@ export type WorkflowFunctionRisk = 'read' | 'write' | 'destructive' | 'high_impa
 export interface WorkflowFunction {
   id: string;
   workspace_id: string | null;
-  scope: 'global' | 'workspace';
+  board_id: string | null;
+  scope: CatalogScope;
   key: string;
   version: number;
   name: string;
@@ -906,10 +912,11 @@ export interface Credential {
   id: string;
   // null = global (instance-level) credential shared across all workspaces.
   workspace_id: string | null;
+  board_id: string | null;
   // 'global' credentials are read-only inside a workspace view (editable only
   // from the Admin global-credentials page); 'workspace' credentials are owned
   // by the active workspace.
-  scope?: 'workspace' | 'global';
+  scope?: CatalogScope;
   name: string;
   description: string;
   provider: string;

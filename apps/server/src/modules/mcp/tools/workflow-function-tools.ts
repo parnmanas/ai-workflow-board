@@ -13,13 +13,16 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_functions',
-    'List executable Functions resolved for a workspace. Global Functions are included; a workspace Function with the same key overrides the global definition.',
-    { workspace_id: z.string().describe('Workspace ID used to resolve global + workspace overrides') },
-    async ({ workspace_id }, extra: { sessionId?: string }) => {
+    'List executable Functions resolved by Board → Workspace → Global key precedence.',
+    {
+      workspace_id: z.string().describe('Workspace ID used to resolve inherited overrides'),
+      board_id: z.string().optional().describe('Board ID used to resolve board overrides'),
+    },
+    async ({ workspace_id, board_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
       try {
-        return ok(await service.list(workspace_id));
+        return ok(await service.list(workspace_id, board_id));
       } catch (error: any) {
         return err(error?.message || 'Failed to list Functions');
       }
@@ -45,9 +48,10 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'save_function',
-    'Create or update a workspace Function. Global Functions are managed by authenticated admins in Admin → Functions. Provide id to update.',
+    'Create or update a Workspace/Board Function. Global Functions are managed by authenticated admins in Automation Catalog. Provide id to update.',
     {
       workspace_id: z.string().describe('Workspace scope (required; MCP cannot author global Functions)'),
+      board_id: z.string().optional().describe('Set for board scope; omit for workspace scope'),
       id: z.string().optional(),
       key: z.string().describe('Stable lowercase identifier such as git.inspect_repository'),
       name: z.string(),
