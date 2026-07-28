@@ -263,6 +263,20 @@ export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
   return raw === 'per_ticket' || raw === 'shared' ? raw : undefined;
 }
 
+export function buildDispatchEnvVars(
+  boardEnv: Record<string, string> | null | undefined,
+  cwd: string | undefined,
+  worktreeMode: WorktreeMode | undefined,
+  ticketId: unknown,
+): Record<string, string> {
+  return {
+    ...(boardEnv ?? {}),
+    ...(cwd ? { AWB_WORK_FOLDER: cwd } : {}),
+    AWB_WORKTREE_MODE: worktreeMode ?? 'per_ticket',
+    AWB_TICKET_ID: String(ticketId || ''),
+  };
+}
+
 /** Every ticket dispatch is fail-closed until an isolated checkout can be
  * produced. Old events never fall back to the storage container. */
 export function validateWorktreeProvisioningInputs(args: {
@@ -1613,11 +1627,12 @@ export class EventDispatcher {
     const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
       ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
       : null;
+    const worktreeMode = parseWorktreeMode(ev.worktree_mode);
     const applyWorktree = () => this.#applyWorktreeCwd(
       agentContext,
       ev.ticket_id,
       ev.action,
-      parseWorktreeMode(ev.worktree_mode),
+      worktreeMode,
       typeof ev.max_concurrent_tickets_per_agent === 'number'
         ? ev.max_concurrent_tickets_per_agent
         : undefined,
@@ -1885,9 +1900,18 @@ export class EventDispatcher {
 
     // Board environment variables are process-only. Repository checkout is
     // exclusively owned by WT/QA provisioning and never happens here.
-    const envVars = envConfig?.env_vars && Object.keys(envConfig.env_vars).length > 0
-      ? envConfig.env_vars
-      : undefined;
+    //
+    // Also expose the manager-resolved folder contract to child processes.
+    // Prompts alone are not a reliable machine-readable boundary: project build
+    // scripts can otherwise create a second `_compilecheck_*` worktree and throw
+    // away the shared slot's warm Unity Library. Reserved AWB_* keys are layered
+    // last so a board env cannot spoof the actual provisioned cwd/mode.
+    const envVars = buildDispatchEnvVars(
+      envConfig?.env_vars,
+      agentContext?.cwd,
+      worktreeMode,
+      ev.ticket_id,
+    );
 
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
