@@ -170,6 +170,35 @@ export class InstanceRegistryService implements OnModuleDestroy {
   upsert(input: Omit<InstanceRecord, 'last_seen_at'>): InstanceRecord {
     const now = new Date().toISOString();
     const existed = this.instances.has(input.instance_id);
+
+    // A manager restart intentionally creates a fresh instance_id. The old
+    // process cannot still be legitimate on the same host/identity because the
+    // manager lockfile enforces one owner. Remove that predecessor immediately
+    // instead of rendering its old version beside the replacement for the
+    // entire 90-second TTL window (which makes successful self-updates look
+    // failed in the admin UI).
+    if (!existed && input.mode === 'manager') {
+      for (const [id, previous] of this.instances) {
+        if (
+          id !== input.instance_id &&
+          previous.mode === 'manager' &&
+          previous.agent_id === input.agent_id &&
+          previous.hostname === input.hostname
+        ) {
+          this.instances.delete(id);
+          activityEvents.emit('agent_instance_update', {
+            action: 'removed',
+            instance: previous,
+            timestamp: now,
+          });
+          this.logService.debug(
+            'AgentManager',
+            `Superseded restarted manager instance ${id.slice(0, 8)} with ${input.instance_id.slice(0, 8)}`,
+          );
+        }
+      }
+    }
+
     const rec: InstanceRecord = { ...input, last_seen_at: now };
     this.instances.set(input.instance_id, rec);
     activityEvents.emit('agent_instance_update', {
