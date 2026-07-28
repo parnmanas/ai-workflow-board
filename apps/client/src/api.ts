@@ -3,6 +3,8 @@ import type {
   Resource,
   Action,
   ActionRun,
+  WorkflowFunction,
+  WorkflowFunctionRun,
   Feature,
   HandoffPipeline,
   QaScenario,
@@ -1120,6 +1122,31 @@ export const api = {
   getActionRun: (runId: string, workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<ActionRun>(`/actions/runs/${runId}?${params.toString()}`);
+  },
+
+  // Functions: workspace_id omitted means global definitions only.
+  listFunctions: (workspaceId?: string | null, includeShadowed = false) => {
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    if (includeShadowed) params.set('include_shadowed', 'true');
+    const query = params.toString();
+    return request<WorkflowFunction[]>(`/functions${query ? `?${query}` : ''}`);
+  },
+  createFunction: (data: Partial<WorkflowFunction> & { key: string; name: string }) =>
+    request<WorkflowFunction>('/functions', { method: 'POST', body: JSON.stringify(data) }),
+  updateFunction: (id: string, data: Partial<WorkflowFunction>) =>
+    request<WorkflowFunction>(`/functions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteFunction: (id: string) =>
+    request<{ success: true; id: string }>(`/functions/${id}`, { method: 'DELETE' }),
+  runFunction: (
+    id: string,
+    data: { workspace_id: string; board_id?: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
+  ) => request<WorkflowFunctionRun>(`/functions/${id}/run`, { method: 'POST', body: JSON.stringify(data) }),
+  listFunctionRuns: (workspaceId: string, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(options?.limit || 50) });
+    if (options?.functionId) params.set('function_id', options.functionId);
+    if (options?.ticketId) params.set('ticket_id', options.ticketId);
+    return request<WorkflowFunctionRun[]>(`/functions/runs?${params.toString()}`);
   },
 
   // ─── Feature/Epic intake (ticket aae7644c) ────────────

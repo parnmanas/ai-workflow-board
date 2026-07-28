@@ -11,6 +11,7 @@ import ColumnPoliciesManager from './ColumnPoliciesManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
 import CredentialManager from './CredentialManager';
 import ClaudeBackendProfilesManager from './ClaudeBackendProfilesManager';
+import FunctionManager from './FunctionManager';
 import { tokens } from '../../tokens';
 
 const pageTitles: Record<string, { title: string; description?: string }> = {
@@ -24,6 +25,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   'global-credentials': { title: 'Global Credentials', description: 'Instance-level credentials shared across all workspaces' },
   'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Instance-wide Claude endpoints, models, credentials, and adapters' },
   settings: { title: 'Settings', description: 'System configuration' },
+  functions: { title: 'Global Functions', description: 'Reusable Functions available to every workspace' },
 };
 
 function AdminRoute({ page, children }: { page: string; children: React.ReactNode }) {
@@ -52,6 +54,7 @@ export default function AdminPage() {
       <Route path="global-credentials" element={<AdminRoute page="global-credentials"><CredentialManager globalMode /></AdminRoute>} />
       <Route path="claude-backend-profiles" element={<AdminRoute page="claude-backend-profiles"><ClaudeBackendProfilesManager /></AdminRoute>} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
+      <Route path="functions" element={<AdminRoute page="functions"><FunctionManager globalMode /></AdminRoute>} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>
   );

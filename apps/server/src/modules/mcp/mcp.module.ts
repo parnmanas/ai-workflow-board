@@ -15,6 +15,7 @@ import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
 import { FeaturesModule } from '../features/features.module';
 import { HandoffModule } from '../handoff/handoff.module';
+import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { HandoffModule } from '../handoff/handoff.module';
     FeaturesModule,
     // Provides HandoffService for the handoff-tools MCP tools (ticket ac21a745).
     HandoffModule,
+    WorkflowFunctionsModule,
   ],
   controllers: [McpController],
 })

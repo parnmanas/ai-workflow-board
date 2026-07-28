@@ -117,6 +117,13 @@ const EXPECTED_TOOLS = [
   'add_board_lesson',
   'list_board_lessons',
   'update_board_lesson',
+  // AWB Functions: structured, auditable operations callable by agents.
+  'list_functions',
+  'get_function',
+  'save_function',
+  'delete_function',
+  'execute_function',
+  'list_function_runs',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

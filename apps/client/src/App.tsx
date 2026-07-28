@@ -30,6 +30,7 @@ const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPag
 const WorkspacePromptTemplatesPage = lazy(() => import('./components/WorkspacePromptTemplatesPage'));
 const WorkspaceResourcesPage = lazy(() => import('./components/WorkspaceResourcesPage'));
 const WorkspaceActionsPage = lazy(() => import('./components/WorkspaceActionsPage'));
+const WorkspaceFunctionsPage = lazy(() => import('./components/WorkspaceFunctionsPage'));
 const WorkspaceCredentialsPage = lazy(() => import('./components/WorkspaceCredentialsPage'));
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
@@ -215,6 +216,7 @@ function AppContent() {
             <Route path="prompt-templates" element={<WorkspacePromptTemplatesPage />} />
             <Route path="resources" element={<WorkspaceResourcesPage />} />
             <Route path="actions" element={<WorkspaceActionsPage />} />
+            <Route path="functions" element={<WorkspaceFunctionsPage />} />
             <Route path="credentials" element={<WorkspaceCredentialsPage />} />
             <Route path="roles" element={<WorkspaceRolesPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />

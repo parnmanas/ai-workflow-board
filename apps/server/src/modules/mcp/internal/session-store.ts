@@ -28,6 +28,7 @@ import type { WebStandardStreamableHTTPServerTransport } from '@modelcontextprot
 export interface McpAgentContext {
   agentId?: string;
   agentName?: string;
+  workspaceId?: string;
   scope?: string;
   source: 'db' | 'env' | 'dev-mode';
   // Role + ticket context the plugin's subagent-manager pins per spawn via

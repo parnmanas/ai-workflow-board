@@ -60,6 +60,7 @@ import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.s
 import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
+import type { WorkflowFunctionsService } from '../../workflow-functions/workflow-functions.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -172,6 +173,7 @@ export interface ToolContext {
   // standalone builder constructs a thin instance directly (same pattern as
   // ticketPrerequisitesService). Used by benchmark-tools.
   benchmarkService?: BenchmarkService;
+  workflowFunctionsService?: WorkflowFunctionsService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

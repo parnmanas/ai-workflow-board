@@ -55,6 +55,8 @@ export { SecurityRun } from './SecurityRun';
 export { SecurityRunBatch } from './SecurityRunBatch';
 export { SecuritySchedule } from './SecuritySchedule';
 export { WorkspaceSchedule } from './WorkspaceSchedule';
+export { WorkflowFunction } from './WorkflowFunction';
+export { WorkflowFunctionRun } from './WorkflowFunctionRun';
 // Deployment awareness (ticket 8ce72b18) — the current live commit per environment.
 export { Deployment } from './Deployment';
 export { Feature } from './Feature';

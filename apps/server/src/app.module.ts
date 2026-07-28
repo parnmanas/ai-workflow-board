@@ -36,6 +36,7 @@ import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-schedule.module';
 import { FeaturesModule } from './modules/features/features.module';
 import { HandoffModule } from './modules/handoff/handoff.module';
+import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { HandoffModule } from './modules/handoff/handoff.module';
     WorkspaceScheduleModule,
     FeaturesModule,
     HandoffModule,
+    WorkflowFunctionsModule,
   ],
 })
 export class AppModule {}

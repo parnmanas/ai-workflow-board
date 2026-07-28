@@ -297,6 +297,58 @@ export interface ActionRun {
   created_at: string;
 }
 
+export type WorkflowFunctionExecutor = 'builtin' | 'pipeline' | 'http' | 'agent_action';
+export type WorkflowFunctionRisk = 'read' | 'write' | 'destructive' | 'high_impact';
+
+export interface WorkflowFunction {
+  id: string;
+  workspace_id: string | null;
+  scope: 'global' | 'workspace';
+  key: string;
+  version: number;
+  name: string;
+  description: string;
+  executor_type: WorkflowFunctionExecutor;
+  input_schema: Record<string, any>;
+  output_schema: Record<string, any>;
+  config: Record<string, any>;
+  risk_level: WorkflowFunctionRisk;
+  idempotency_mode: 'none' | 'key';
+  timeout_ms: number;
+  max_attempts: number;
+  approval_policy: 'none' | 'admin';
+  enabled: boolean;
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowFunctionRun {
+  id: string;
+  function_id: string;
+  function_key: string;
+  function_version: number;
+  workspace_id: string;
+  board_id: string | null;
+  ticket_id: string | null;
+  parent_run_id: string | null;
+  actor_type: string;
+  actor_id: string;
+  actor_name: string;
+  status: 'running' | 'succeeded' | 'failed';
+  inputs: Record<string, any>;
+  outputs: Record<string, any>;
+  evidence: Record<string, any>;
+  idempotency_key: string;
+  error_code: string;
+  error_message: string;
+  attempt: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  deduplicated?: boolean;
+}
+
 // ─── Feature/Epic intake (ticket aae7644c) ─────────────────────────────────
 export type FeatureStatus =
   | 'draft'

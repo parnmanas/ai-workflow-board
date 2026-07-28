@@ -40,6 +40,7 @@ import { MentionService } from '../../services/mention.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
+import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
 
 interface McpAuthInfo {
   keyHint: string;
@@ -174,6 +175,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly handoffService: HandoffService,
     private readonly benchmarkService: BenchmarkService,
+    private readonly workflowFunctionsService: WorkflowFunctionsService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
   ) {}
 
@@ -302,6 +304,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       handoffService: this.handoffService,
       benchmarkService: this.benchmarkService,
+      workflowFunctionsService: this.workflowFunctionsService,
     };
   }
 
@@ -522,6 +525,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
             sessionStore.register(id, transport, mcpServer, {
               agentId: mcpAuthInfo.agentId,
               agentName: mcpAuthInfo.agentName,
+              workspaceId: mcpAuthInfo.workspaceId,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
               subagentRole: subagentRoleHeader,
