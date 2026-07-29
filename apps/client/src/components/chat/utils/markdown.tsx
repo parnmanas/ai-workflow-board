@@ -153,9 +153,9 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
       let cursor = 0;
       STRUCTURED_TOKEN_RE.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = STRUCTURED_TOKEN_RE.exec(part)) !== null) {
+      while ((m = STRUCTURED_TOKEN_RE.exec(ap.token)) !== null) {
         if (m.index > cursor) {
-          structuredParts.push({ token: part.slice(cursor, m.index) });
+          structuredParts.push({ token: ap.token.slice(cursor, m.index) });
         }
         const type = m[1] as 'user' | 'agent' | 'role' | 'ticket';
         const rawId = m[2];
@@ -168,10 +168,10 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
         }
         cursor = m.index + m[0].length;
       }
-      if (cursor < part.length) {
-        structuredParts.push({ token: part.slice(cursor) });
+      if (cursor < ap.token.length) {
+        structuredParts.push({ token: ap.token.slice(cursor) });
       }
-      if (structuredParts.length === 0) structuredParts.push({ token: part });
+      if (structuredParts.length === 0) structuredParts.push({ token: ap.token });
 
       for (const sp of structuredParts) {
         if (sp.ticket) {
