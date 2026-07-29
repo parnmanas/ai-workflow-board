@@ -1484,6 +1484,15 @@ export const api = {
   },
   getCredentialProviders: () =>
     request<Record<string, { label: string; fields: string[] }>>('/credentials/providers'),
+  revealCredential: (id: string, password: string) =>
+    request<{ credential_fields: Record<string, string>; credential_status: 'ok' }>(
+      `/credentials/${id}/reveal`,
+      {
+        method: 'POST',
+        cache: 'no-store',
+        body: JSON.stringify({ password }),
+      },
+    ),
   createCredential: (data: {
     // Omit workspace_id and pass scope:'global' to create an instance-level
     // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).

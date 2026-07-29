@@ -43,6 +43,16 @@ export class AuthService {
     return bcrypt.compare(plain, hash);
   }
 
+  async verifyUserPassword(userId: string, plain: string): Promise<boolean> {
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .addSelect('user.password_hash')
+      .where('user.id = :userId', { userId })
+      .getOne();
+    if (!user?.password_hash) return false;
+    return this.verifyPassword(plain, user.password_hash);
+  }
+
   generateSessionToken(): string {
     return randomBytes(32).toString('hex');
   }

@@ -14,6 +14,9 @@ import { maskSecret } from '../../common/mask';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
+import { AdminGuard } from '../../common/guards/admin.guard';
+import { AuthService } from '../../services/auth.service';
+import { ActivityService } from '../../services/activity.service';
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   github: { label: 'GitHub', fields: ['token'] },
@@ -95,6 +98,8 @@ export class CredentialsController {
   constructor(
     @InjectRepository(Credential) private readonly credRepo: Repository<Credential>,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly authService: AuthService,
+    private readonly activityService: ActivityService,
   ) {}
 
   /**
@@ -138,6 +143,56 @@ export class CredentialsController {
   @Get('providers')
   async providers(@Res() res: Response) {
     return res.json(PROVIDER_FIELDS);
+  }
+
+  @Post(':id/reveal')
+  @UseGuards(AdminGuard)
+  async reveal(
+    @Param('id') id: string,
+    @Body() body: { password?: string },
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    res.setHeader('Cache-Control', 'no-store, no-cache');
+    res.setHeader('Pragma', 'no-cache');
+
+    const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
+    const actor = (req as any).currentUser;
+    const audit = async (action: 'credential_revealed' | 'credential_reveal_denied', fields: string[] = []) => {
+      await this.activityService.logActivity({
+        entity_type: 'credential',
+        entity_id: cred.id,
+        action,
+        field_changed: fields.join(','),
+        old_value: '',
+        new_value: '',
+        actor_id: actor.id,
+        actor_name: actor.name,
+        ticket_id: '',
+        workspace_id: cred.workspace_id || '',
+        trigger_source: 'admin_ui',
+      });
+    };
+
+    if (!body?.password || !(await this.authService.verifyUserPassword(actor.id, body.password))) {
+      await audit('credential_reveal_denied');
+      return res.status(401).json({ error: 'Re-authentication failed' });
+    }
+
+    let decrypted: Record<string, unknown>;
+    try {
+      decrypted = JSON.parse(decryptStrict(cred.encrypted_data));
+    } catch {
+      return res.status(503).json({ error: 'Credential could not be decrypted' });
+    }
+    const allowedFields = PROVIDER_FIELDS[cred.provider]?.fields || [];
+    const credentialFields = Object.fromEntries(
+      allowedFields
+        .filter((field) => Object.prototype.hasOwnProperty.call(decrypted, field))
+        .map((field) => [field, String(decrypted[field] ?? '')]),
+    );
+    await audit('credential_revealed', Object.keys(credentialFields));
+    return res.json({ credential_fields: credentialFields, credential_status: 'ok' });
   }
 
   @Get(':id')
