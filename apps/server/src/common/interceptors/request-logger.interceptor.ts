@@ -27,6 +27,7 @@ const REDACTED_BODY_KEYS = new Set([
 ]);
 
 const MAX_PAYLOAD_BYTES = 10_000;
+const CREDENTIAL_REVEAL_PATH = /^\/api\/credentials\/[^/]+\/reveal\/?$/;
 
 // Body capture is the dominant CPU cost in this interceptor: capPayload
 // runs `JSON.stringify(responseBody)` on EVERY HTTP response that lands
@@ -106,19 +107,24 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     const userName = (req as any).currentUser?.name || (req as any).currentUser?.email || '-';
     const wsId = req.headers['x-workspace-id'] || '-';
     const start = Date.now();
+    // Reveal accepts a re-authentication password and returns provider-defined
+    // secret fields. Key-based sanitizing cannot safely cover arbitrary
+    // providers, so never capture either body for this route, even when an
+    // operator temporarily enables HTTP body logging.
+    const captureBodies = CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path);
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
     // capPayload runs JSON.stringify on the entire body before truncating —
     // see the CAPTURE_BODIES comment at the top of this file. Compute the
     // capped string only when the operator opted in.
-    const reqBody = CAPTURE_BODIES ? capPayload(sanitizeBody(req.body)) : undefined;
+    const reqBody = captureBodies ? capPayload(sanitizeBody(req.body)) : undefined;
 
     return next.handle().pipe(
       tap((responseBody) => {
         const duration = Date.now() - start;
         const status = res.statusCode;
         const resHeaders = sanitizeHeaders(res.getHeaders() as any);
-        const resBody = CAPTURE_BODIES ? capPayload(responseBody) : undefined;
+        const resBody = captureBodies ? capPayload(responseBody) : undefined;
         this.logService.info('HTTP', `${method} ${url} → ${status} (${duration}ms)`, {
           user: userName,
           userId,

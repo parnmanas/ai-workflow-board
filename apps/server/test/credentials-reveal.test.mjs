@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { lastValueFrom, of } from 'rxjs';
 
 import { CredentialsController } from '../dist/modules/credentials/credentials.controller.js';
 import { AdminGuard } from '../dist/common/guards/admin.guard.js';
@@ -117,4 +118,55 @@ test('ordinary detail/initial response remains masked and never contains the OAu
   assert.equal(res.statusCode, 200);
   assert.doesNotMatch(JSON.stringify(res.body), new RegExp(SECRET));
   assert.match(res.body.credential_fields.oauth_token, /••••/);
+});
+
+test('LOG_HTTP_BODIES=true never captures reveal request or response secrets', async () => {
+  process.env.LOG_HTTP_BODIES = 'true';
+  const { RequestLoggerInterceptor } = await import(
+    '../dist/common/interceptors/request-logger.interceptor.js'
+  );
+  const { LogService } = await import('../dist/services/log.service.js');
+
+  const { instance } = controller();
+  const revealResponse = response();
+  await instance.reveal(
+    credential.id,
+    { password: PASSWORD },
+    { currentUser: { id: 'admin-1', name: 'Admin', role: 'admin' } },
+    revealResponse,
+  );
+  assert.equal(revealResponse.statusCode, 200);
+  assert.equal(revealResponse.body.credential_fields.oauth_token, SECRET);
+
+  const logService = new LogService();
+  const interceptor = new RequestLoggerInterceptor(logService);
+  const req = {
+    path: `/api/credentials/${credential.id}/reveal`,
+    method: 'POST',
+    originalUrl: `/api/credentials/${credential.id}/reveal`,
+    url: `/api/credentials/${credential.id}/reveal`,
+    headers: {},
+    body: { password: PASSWORD },
+    currentUser: { id: 'admin-1', name: 'Admin', role: 'admin' },
+  };
+  const httpResponse = {
+    statusCode: 200,
+    getHeaders: () => ({ 'cache-control': 'no-store, no-cache' }),
+  };
+  const context = {
+    switchToHttp: () => ({
+      getRequest: () => req,
+      getResponse: () => httpResponse,
+    }),
+  };
+
+  await lastValueFrom(interceptor.intercept(context, { handle: () => of(revealResponse.body) }));
+
+  const logs = logService.query({ category: 'HTTP' });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].meta.reqBody, undefined);
+  assert.equal(logs[0].meta.resBody, undefined);
+  const serializedLogs = JSON.stringify(logs);
+  assert.doesNotMatch(serializedLogs, new RegExp(SECRET));
+  assert.doesNotMatch(serializedLogs, new RegExp(PASSWORD));
 });
