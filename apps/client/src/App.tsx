@@ -196,15 +196,7 @@ function AppContent() {
             <Route path="assistant" element={<ChatFirstHome />} />
             <Route path="boards" element={<BoardsIndexPage />} />
             <Route path="boards/:boardId" element={<Board />} />
-            <Route path="boards/:boardId/functions" element={<WorkspaceManagementPage kind="functions" boardScoped />} />
-            <Route path="boards/:boardId/credentials" element={<WorkspaceManagementPage kind="credentials" boardScoped />} />
-            <Route path="boards/:boardId/resources" element={<WorkspaceManagementPage kind="resources" boardScoped />} />
-            <Route path="boards/:boardId/prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" boardScoped />} />
-            <Route path="boards/:boardId/actions" element={<WorkspaceManagementPage kind="actions" boardScoped />} />
             <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-            <Route path="boards/:boardId/qa" element={<WorkspaceManagementPage kind="qa" boardScoped />} />
-            <Route path="boards/:boardId/security" element={<WorkspaceManagementPage kind="security" boardScoped />} />
-            <Route path="boards/:boardId/schedules" element={<WorkspaceManagementPage kind="schedules" boardScoped />} />
             <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />

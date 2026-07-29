@@ -89,7 +89,6 @@ export class ResourceMediaController {
   @Post('upload')
   async upload(
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Query('type') type: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
@@ -118,7 +117,7 @@ export class ResourceMediaController {
     const resource = await this.resourceRepo.save(
       this.resourceRepo.create({
         workspace_id: workspaceId,
-        board_id: boardId || null,
+        board_id: null,
         credential_id: null,
         name: fileName,
         description: '',

@@ -39,7 +39,7 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'security-batch' });
+  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'security-batch' });
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'security-batch-runner' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'sec' });
 
@@ -66,6 +66,7 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   step('start_security_batch — only the first profile dispatches');
   const batch0 = await mcp.callTool('start_security_batch', {
     workspace_id: ws.id,
+    board_id: board.id,
     profile_ids: [p0.id, p1.id, p2.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_security_batch failed: ${JSON.stringify(batch0)}`);
@@ -79,6 +80,8 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   assert.equal((await runCount(p1.id)).length, 0, 'profile 1 NOT dispatched yet');
   assert.equal((await runCount(p2.id)).length, 0, 'profile 2 NOT dispatched yet');
   const run0 = batch0.run_ids[0];
+  const firstRun = await mcp.callTool('get_security_run', { run_id: run0, workspace_id: ws.id });
+  assert.equal(firstRun.board_id, board.id, 'batch Board is execution context, not definition scope');
 
   // ── 2. A failed run still advances to the next profile ───────────────────────
   step('complete run 0 as FAILED → batch advances to profile 1 (chain not broken)');

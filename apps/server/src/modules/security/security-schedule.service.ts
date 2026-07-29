@@ -134,15 +134,13 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, boardId?: string): Promise<SecuritySchedule[]> {
+  async list(workspaceId: string, _boardId?: string): Promise<SecuritySchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const qb = this.scheduleRepo.createQueryBuilder('s').where('s.workspace_id = :ws', { ws: workspaceId });
+    const qb = this.scheduleRepo.createQueryBuilder('s')
+      .where('s.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('s.board_id IS NULL');
     // Scope rule mirrors list_security_profiles: omit board_id → all; "" →
     // workspace (board_id IS NULL); <uuid> → that board.
-    if (boardId !== undefined) {
-      if (boardId) qb.andWhere('s.board_id = :bid', { bid: boardId });
-      else qb.andWhere('s.board_id IS NULL');
-    }
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -164,7 +162,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
 
     const draft = this.scheduleRepo.create({
       workspace_id: input.workspaceId,
-      board_id: input.boardId ?? null,
+      board_id: null,
       name: input.name.trim(),
       kind,
       scope,
@@ -369,7 +367,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     // → whole workspace (boardId undefined); <uuid> → that board.
     return this.runService.startBatch({
       workspaceId: schedule.workspace_id,
-      boardId: schedule.board_id ?? undefined,
       all: true,
       stopOnFail: schedule.stop_on_fail,
       triggeredByType: 'system',
@@ -400,7 +397,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     // snapshot). board_id null → whole workspace (boardId undefined); <uuid> → that board.
     return this.runService.refreshChecklistsForScope({
       workspaceId: schedule.workspace_id,
-      boardId: schedule.board_id ?? undefined,
       all: true,
       triggeredByType: 'system',
       triggeredById,
@@ -408,11 +404,8 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
-    if (!boardId) return;
-    const board = await this.boardRepo.findOne({ where: { id: boardId } });
-    if (!board) throw makeError(400, 'board not found');
-    if (board.workspace_id !== workspaceId) {
-      throw makeError(400, 'board belongs to a different workspace');
+    if (boardId) {
+      throw makeError(400, 'Board-scoped Security schedules are no longer supported; create the schedule in its Workspace');
     }
   }
 

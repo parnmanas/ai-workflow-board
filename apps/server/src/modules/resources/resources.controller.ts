@@ -40,7 +40,7 @@ export class ResourcesController {
   private async assertCredentialScope(
     credentialId: string | null | undefined,
     workspaceId: string | null,
-    boardId: string | null,
+    _boardId: string | null,
   ): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
@@ -50,7 +50,7 @@ export class ResourcesController {
       || (
         workspaceId !== null
         && credential.workspace_id === workspaceId
-        && (credential.board_id === null || credential.board_id === boardId)
+        && credential.board_id === null
       );
     if (!available) {
       throw Object.assign(new Error('credential is not available in the Resource scope'), { status: 400 });
@@ -78,10 +78,7 @@ export class ResourcesController {
     }
     const qb = this.resourceRepo.createQueryBuilder('r')
       .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspaceId });
-    if (includeAllScopes !== 'true') {
-      if (boardId) qb.andWhere('(r.board_id IS NULL OR r.board_id = :bid)', { bid: boardId });
-      else qb.andWhere('r.board_id IS NULL');
-    }
+    qb.andWhere('r.board_id IS NULL');
     if (type) {
       qb.andWhere('r.type = :t', { t: type });
     }
@@ -158,7 +155,7 @@ export class ResourcesController {
     }
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
     try {
-      await this.assertCredentialScope(credential_id, catalogScope.workspace_id, catalogScope.board_id);
+      await this.assertCredentialScope(credential_id, catalogScope.workspace_id, null);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -222,7 +219,7 @@ export class ResourcesController {
     }
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     try {
-      await this.assertCredentialScope(resource.credential_id, resource.workspace_id, resource.board_id);
+      await this.assertCredentialScope(resource.credential_id, resource.workspace_id, null);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -258,7 +255,7 @@ export class ResourcesController {
       // Earlier this dropped `resource.credential_id` on the floor — private
       // repos failed even when a Credential was attached. Resolve it here so
       // `git ls-remote` runs with the right userinfo for HTTPS auth.
-      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, resource.board_id);
+      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, null);
       const branches = await listRepoBranches({
         url: resource.url,
         credential,
@@ -329,7 +326,7 @@ export class ResourcesController {
     if (!resource.url) {
       throw new BadRequestException("resource has no URL — set the repository's URL before reading git history");
     }
-    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, resource.board_id);
+    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, null);
     const repoPath = await ensureRepoCache({ resourceId: id, url: resource.url, credential, forceFetch });
     return { repoPath };
   }

@@ -22,14 +22,12 @@ export default function PromptTemplateManager({
   workspaceId,
   catalogMode = false,
   createScope = 'workspace',
-  boardId,
   allScopes = false,
   canManageGlobal = false,
 }: {
   workspaceId?: string;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string | null;
   allScopes?: boolean;
   canManageGlobal?: boolean;
 } = {}) {
@@ -59,7 +57,6 @@ export default function PromptTemplateManager({
     setLoading(true);
     try {
       const list = await api.listPromptTemplates(effectiveWorkspaceId, {
-        boardId: allScopes ? undefined : boardId,
         includeAllScopes: catalogMode && allScopes,
       });
       setTemplates(list);
@@ -68,7 +65,7 @@ export default function PromptTemplateManager({
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, catalogMode, boardId, allScopes, showToast]);
+  }, [effectiveWorkspaceId, catalogMode, allScopes, showToast]);
 
   useEffect(() => {
     loadTemplates();
@@ -119,7 +116,6 @@ export default function PromptTemplateManager({
         await api.updatePromptTemplate(editTemplate.id, {
           scope: editTemplate.scope,
           workspace_id: editTemplate.workspace_id,
-          board_id: editTemplate.board_id,
           name: formName.trim(),
           description: formDescription,
           content: formContent,
@@ -130,7 +126,6 @@ export default function PromptTemplateManager({
         await api.createPromptTemplate({
           scope: createScope,
           workspace_id: createScope === 'global' ? null : effectiveWorkspaceId,
-          board_id: createScope === 'board' ? boardId : null,
           name: formName.trim(),
           description: formDescription,
           content: formContent,

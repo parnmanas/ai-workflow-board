@@ -132,15 +132,11 @@ export class SecurityProfileService {
     private readonly runService: SecurityRunService,
   ) {}
 
-  async list(workspaceId: string, boardId: string | undefined): Promise<SecurityProfileListItem[]> {
+  async list(workspaceId: string, _boardId?: string): Promise<SecurityProfileListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const qb = this.profileRepo.createQueryBuilder('p').where('p.workspace_id = :ws', { ws: workspaceId });
-    if (boardId !== undefined) {
-      // Mirror QA/Actions/Resources scoping: '' = workspace-scope only
-      // (board_id IS NULL), <uuid> = that board only, omit = all rows.
-      if (boardId) qb.andWhere('p.board_id = :bid', { bid: boardId });
-      else qb.andWhere('p.board_id IS NULL');
-    }
+    const qb = this.profileRepo.createQueryBuilder('p')
+      .where('p.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('p.board_id IS NULL');
     const profiles = await qb.orderBy('p.name', 'ASC').getMany();
     return this._attachLastRun(profiles);
   }
@@ -202,16 +198,12 @@ export class SecurityProfileService {
     }
 
     if (input.board_id) {
-      const board = await this.boardRepo.findOne({ where: { id: input.board_id } });
-      if (!board) throw makeError(400, 'board not found');
-      if (board.workspace_id !== input.workspace_id) {
-        throw makeError(400, 'board belongs to a different workspace');
-      }
+      throw makeError(400, 'Board-scoped Security profiles are no longer supported; create the profile in its Workspace');
     }
 
     const created = this.profileRepo.create({
       workspace_id: input.workspace_id,
-      board_id: input.board_id || null,
+      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       checklist: normalizeChecklist(input.checklist),

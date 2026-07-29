@@ -8,57 +8,47 @@ import {
   catalogScopeOf,
   normalizeCatalogScope,
   canUseCatalogItem,
-  assertCatalogBoardScope,
 } from '../dist/common/catalog-scope.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client', 'src');
 
-test('catalog scope normalizes to the canonical nullable pair', () => {
-  assert.deepEqual(normalizeCatalogScope({ scope: 'global', workspace_id: 'ignored', board_id: 'ignored' }), {
+test('catalog scope normalizes to the canonical Global/Workspace nullable pair', () => {
+  assert.deepEqual(normalizeCatalogScope({ scope: 'global', workspace_id: 'ignored', board_id: null }), {
     workspace_id: null,
     board_id: null,
   });
-  assert.deepEqual(normalizeCatalogScope({ scope: 'workspace', workspace_id: 'ws', board_id: 'ignored' }), {
+  assert.deepEqual(normalizeCatalogScope({ scope: 'workspace', workspace_id: 'ws', board_id: null }), {
     workspace_id: 'ws',
     board_id: null,
   });
-  assert.deepEqual(normalizeCatalogScope({ scope: 'board', workspace_id: 'ws', board_id: 'board' }), {
-    workspace_id: 'ws',
-    board_id: 'board',
-  });
+  assert.throws(
+    () => normalizeCatalogScope({ scope: 'board', workspace_id: 'ws', board_id: 'board' }),
+    /no longer supported/,
+  );
 });
 
-test('scope labels and visibility use Global → Workspace → Board boundaries', () => {
+test('scope labels and visibility use Global and Workspace boundaries only', () => {
   assert.equal(catalogScopeOf({ workspace_id: null, board_id: null }), 'global');
   assert.equal(catalogScopeOf({ workspace_id: 'ws', board_id: null }), 'workspace');
-  assert.equal(catalogScopeOf({ workspace_id: 'ws', board_id: 'board' }), 'board');
   assert.equal(canUseCatalogItem({ workspace_id: null, board_id: null }, 'ws', 'board'), true);
   assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: null }, 'ws', 'board'), true);
-  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'board' }, 'ws', 'board'), true);
+  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'board' }, 'ws', 'board'), false);
   assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'other' }, 'ws', 'board'), false);
   assert.equal(canUseCatalogItem({ workspace_id: 'other', board_id: null }, 'ws', 'board'), false);
 });
 
-test('board scope fails closed when the board/workspace pair is invalid', async () => {
-  await assert.rejects(
-    assertCatalogBoardScope(async () => false, { workspace_id: 'ws', board_id: 'board' }),
-    /does not belong/,
-  );
-  await assert.doesNotReject(
-    assertCatalogBoardScope(async () => true, { workspace_id: 'ws', board_id: 'board' }),
-  );
-});
-
-test('client exposes individual management menus with mixed Global/current-Workspace pages', () => {
+test('client exposes individual management menus with Global/current-Workspace pages only', () => {
   const app = fs.readFileSync(path.join(ROOT, 'App.tsx'), 'utf8');
   const sidebar = fs.readFileSync(path.join(ROOT, 'components', 'Sidebar.tsx'), 'utf8');
   const boardSubMenu = fs.readFileSync(path.join(ROOT, 'components', 'BoardSubMenu.tsx'), 'utf8');
   const management = fs.readFileSync(path.join(ROOT, 'components', 'WorkspaceManagementPage.tsx'), 'utf8');
   assert.doesNotMatch(app, /WorkspaceCatalogPage|function CatalogRedirect/);
   assert.match(app, /path="catalog" element={<LegacyCatalogRedirect/);
-  for (const kind of ['functions', 'credentials', 'resources', 'prompt-templates', 'actions', 'qa', 'security', 'schedules', 'claude-backend-profiles']) {
+  for (const kind of ['functions', 'resources', 'prompt-templates', 'actions', 'qa', 'security', 'schedules']) {
     assert.match(app, new RegExp(`path="${kind}" element={<WorkspaceManagementPage kind="${kind}"`));
   }
+  assert.match(app, /path="settings\/credentials" element={<WorkspaceManagementPage kind="credentials"/);
+  assert.match(app, /path="settings\/claude-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles"/);
   for (const label of ['Functions', 'Credentials', 'Resources', 'Prompt Templates', 'Actions', 'QA', 'Security', 'Schedules', 'Claude Profiles']) {
     assert.match(sidebar, new RegExp(`label: '${label}'`));
   }
@@ -69,5 +59,8 @@ test('client exposes individual management menus with mixed Global/current-Works
   assert.match(management, /Workspace for new item/);
   assert.match(management, /<option value="global">Not set \(Global\)<\/option>/);
   assert.match(management, /<option value="workspace">/);
-  assert.match(management, /boardId: boardScoped \? boardId : null/);
+  assert.doesNotMatch(management, /boardScoped|boardId/);
+  for (const kind of ['functions', 'credentials', 'resources', 'prompt-templates', 'actions', 'qa', 'security', 'schedules']) {
+    assert.doesNotMatch(app, new RegExp(`boards/:boardId/${kind}`));
+  }
 });

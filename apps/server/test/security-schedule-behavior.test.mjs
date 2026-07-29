@@ -143,7 +143,7 @@ test("scope='all' due schedule dispatches startBatch({all}) and advances next_ru
   assert.equal(runService.calls.length, 1, 'startBatch called once');
   const { args } = runService.calls[0];
   assert.equal(args.all, true, 'scope=all → all:true');
-  assert.equal(args.boardId, 'board-9', 'board scope passed through');
+  assert.equal(args.boardId, undefined, 'legacy Board ownership is not propagated');
   assert.equal(args.profileIds, undefined, 'no explicit id list for scope=all');
   assert.equal(args.triggeredByType, 'system');
   assert.equal(sch.last_batch_id, 'batch-1', 'last_batch_id stamped');
@@ -246,7 +246,7 @@ test("checklist_refresh kind: scope='all' due schedule dispatches refresh (NOT a
   assert.equal(runService.refreshCalls.length, 1, 'refreshChecklistsForScope called once');
   const { args } = runService.refreshCalls[0];
   assert.equal(args.all, true, 'scope=all → all:true');
-  assert.equal(args.boardId, 'board-9', 'board scope passed through');
+  assert.equal(args.boardId, undefined, 'legacy Board ownership is not propagated');
   assert.equal(args.profileIds, undefined, 'no explicit id list for scope=all');
   assert.equal(args.triggeredByType, 'system');
   assert.equal(sch.last_batch_id, null, 'last_batch_id stays null — a refresh creates no batch');

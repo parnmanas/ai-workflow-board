@@ -59,10 +59,9 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       workspace_id: z.string().describe('Workspace ID'),
       url: z.string().describe('GitHub repository URL'),
       resource_id: z.string().optional().describe('Existing resource ID to update (omit to create new)'),
-      board_id: z.string().optional().describe('Board ID for board-scoped resource'),
       credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
-    async ({ workspace_id, url, resource_id, board_id, credential_id }) => {
+    async ({ workspace_id, url, resource_id, credential_id }) => {
       const resourceRepo = dataSource.getRepository(Resource);
 
       // Load the target resource up front (when updating) so we can fall back
@@ -117,7 +116,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
 
       const created = resourceRepo.create({
         workspace_id,
-        board_id: board_id || null,
+        board_id: null,
         credential_id: credential_id || null,
         name: info.full_name,
         description: info.description,

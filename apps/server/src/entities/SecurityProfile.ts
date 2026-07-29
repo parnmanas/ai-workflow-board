@@ -37,7 +37,8 @@ export class SecurityProfile {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // null = workspace-scoped (applies to any board); <uuid> = pinned to a board.
+  // Legacy compatibility column. Boot migration clears it; definitions are
+  // Global/Workspace-owned and Board context belongs to SecurityRun.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

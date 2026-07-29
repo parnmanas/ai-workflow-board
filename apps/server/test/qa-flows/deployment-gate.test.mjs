@@ -108,10 +108,10 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── Setup: an env-bound scenario with the deployment gate ON, NO time delay ──
   step('Create scenario: deployment_gate ON, target_environment=gate-env, rerun_delay_seconds=0');
   const sc = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Gated QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Gated QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps, target_environment: 'gate-env',
     on_failure_ticket: {
-      enabled: true, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 5, rerun_delay_seconds: 0, deployment_gate: true,
     },
   });
@@ -162,10 +162,10 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── CASE 4: freshness fallback — no fix-commit label, deploy-ordering un-gates ─
   step('CASE 4: freshness fallback — no fix-commit label; a deploy at/after Done un-gates');
   const scF = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Freshness QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Freshness QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps, target_environment: 'fresh-env',
     on_failure_ticket: {
-      enabled: true, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 5, rerun_delay_seconds: 0, deployment_gate: true,
     },
   });

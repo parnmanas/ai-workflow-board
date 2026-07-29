@@ -245,15 +245,11 @@ export class ActionsService {
 
   // ── CRUD ────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, boardId: string | undefined): Promise<Action[]> {
+  async list(workspaceId: string, _boardId?: string): Promise<Action[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const qb = this.actionRepo.createQueryBuilder('a').where('a.workspace_id = :ws', { ws: workspaceId });
-    if (boardId !== undefined) {
-      // Mirror Resources scoping: '' = workspace-scope only (board_id IS NULL),
-      // <uuid> = that board only, omit = all rows in workspace.
-      if (boardId) qb.andWhere('a.board_id = :bid', { bid: boardId });
-      else qb.andWhere('a.board_id IS NULL');
-    }
+    const qb = this.actionRepo.createQueryBuilder('a')
+      .where('a.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('a.board_id IS NULL');
     return qb.orderBy('a.name', 'ASC').getMany();
   }
 
@@ -275,14 +271,8 @@ export class ActionsService {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 
-    // Same scope rule for the optional board pin: the board must live in this
-    // workspace, otherwise list/scoping queries silently miss the action.
     if (input.board_id) {
-      const board = await this.boardRepo.findOne({ where: { id: input.board_id } });
-      if (!board) throw makeError(400, 'board not found');
-      if (board.workspace_id !== input.workspace_id) {
-        throw makeError(400, 'board belongs to a different workspace');
-      }
+      throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
     }
 
     if (input.schedule_cron && input.schedule_cron.trim()) {
@@ -297,7 +287,7 @@ export class ActionsService {
 
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
-      board_id: input.board_id || null,
+      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       prompt: input.prompt ?? '',
@@ -980,8 +970,8 @@ export class ActionsService {
     // optional pieces best-effort — missing fields render as empty string in
     // the template, which is friendlier than failing the whole Run.
     const workspace = await this.workspaceRepo.findOne({ where: { id: action.workspace_id } });
-    const board = action.board_id
-      ? await this.boardRepo.findOne({ where: { id: action.board_id } })
+    const board = args.ticketContext?.board_id
+      ? await this.boardRepo.findOne({ where: { id: args.ticketContext.board_id } })
       : null;
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })

@@ -128,15 +128,11 @@ export class QaService {
     private readonly runService: QaRunService,
   ) {}
 
-  async list(workspaceId: string, boardId: string | undefined): Promise<QaScenarioListItem[]> {
+  async list(workspaceId: string, _boardId?: string): Promise<QaScenarioListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const qb = this.scenarioRepo.createQueryBuilder('s').where('s.workspace_id = :ws', { ws: workspaceId });
-    if (boardId !== undefined) {
-      // Mirror Actions/Resources scoping: '' = workspace-scope only (board_id
-      // IS NULL), <uuid> = that board only, omit = all rows in the workspace.
-      if (boardId) qb.andWhere('s.board_id = :bid', { bid: boardId });
-      else qb.andWhere('s.board_id IS NULL');
-    }
+    const qb = this.scenarioRepo.createQueryBuilder('s')
+      .where('s.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('s.board_id IS NULL');
     const scenarios = await qb.orderBy('s.name', 'ASC').getMany();
     return this._attachLastRun(scenarios);
   }
@@ -197,16 +193,12 @@ export class QaService {
     }
 
     if (input.board_id) {
-      const board = await this.boardRepo.findOne({ where: { id: input.board_id } });
-      if (!board) throw makeError(400, 'board not found');
-      if (board.workspace_id !== input.workspace_id) {
-        throw makeError(400, 'board belongs to a different workspace');
-      }
+      throw makeError(400, 'Board-scoped QA scenarios are no longer supported; create the scenario in its Workspace');
     }
 
     const created = this.scenarioRepo.create({
       workspace_id: input.workspace_id,
-      board_id: input.board_id || null,
+      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       steps: normalizeSteps(input.steps),

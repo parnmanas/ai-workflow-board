@@ -5,7 +5,6 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
-import AgentCard from './AgentCard';
 import DirectoryPicker from './admin/DirectoryPicker';
 import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
@@ -15,7 +14,6 @@ import type {
   DashboardAgent,
   AgentCurrentTask,
   AgentLifecycleState,
-  AgentManagerInstance,
   Credential,
   ManagedAgentCreateBody,
 } from '../types';
@@ -148,13 +146,7 @@ export default function AgentsPage() {
   const [agents, setAgents] = useState<DashboardAgent[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
-  const isAdmin = user?.role === 'admin';
   const canAccessAgentManager = hasPermission('admin.access');
-  // Live manager instances — the running-state source for managed-agent
-  // lifecycle controls. `agent_ids[]` on a manager instance lists the agents
-  // it currently supervises (running). Admin-only: the list endpoint and the
-  // command endpoint are both ADMIN_ACCESS-gated.
-  const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const navigate = useNavigate();
   const openDetail = useCallback((id: string) => {
     if (wsId) navigate(`/ws/${wsId}/agents/${id}`);
@@ -239,49 +231,6 @@ export default function AgentsPage() {
     }
     setAgents((prev) => (prev ? mergeAgentStatus(prev, update) : prev));
   });
-
-  // ─── Manager instances (running-state source for lifecycle) ───
-  // No workspace filter: a managed agent's owning manager may be paired in a
-  // different workspace than the agent, so we fetch every instance and resolve
-  // the owner by manager_agent_id below.
-  const loadInstances = useCallback(async () => {
-    if (!canAccessAgentManager) {
-      setManagerInstances([]);
-      return;
-    }
-    try {
-      const rows = await api.listAgentManagerInstances();
-      setManagerInstances(rows);
-    } catch {
-      // Non-fatal — the status badge degrades to "manager offline" and the
-      // buttons disable. Errors here shouldn't blank the agent grid.
-      setManagerInstances([]);
-    }
-  }, [canAccessAgentManager]);
-
-  useEffect(() => {
-    loadInstances();
-  }, [loadInstances]);
-
-  // Every manager heartbeat upsert / TTL eviction fires agent_instance_update.
-  // Re-fetching keeps running/stopped badges heartbeat-honest (not optimistic)
-  // and picks up an agent joining/leaving a manager's agent_ids[] after a
-  // spawn/stop/restart lands.
-  useBoardStreamEvent('agent_instance_update', () => {
-    loadInstances();
-  });
-
-  // manager_agent_id → owning manager instance (mode='manager'), newest
-  // heartbeat wins when an identity has more than one live process.
-  const managerInstanceByManagerAgentId = useMemo(() => {
-    const m = new Map<string, AgentManagerInstance>();
-    for (const inst of managerInstances) {
-      if (inst.mode !== 'manager') continue;
-      const prev = m.get(inst.agent_id);
-      if (!prev || prev.last_seen_at < inst.last_seen_at) m.set(inst.agent_id, inst);
-    }
-    return m;
-  }, [managerInstances]);
 
   // ─── Handlers ─────────────────────────────────────────────────
   // Track in-flight state so double-clicks on Create don't spawn parallel
@@ -428,9 +377,6 @@ export default function AgentsPage() {
   ]);
 
   // ─── Render ───────────────────────────────────────────────────
-  const agentsList = agents || [];
-  const agentCount = agentsList.length;
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       <PageHeader
@@ -450,191 +396,15 @@ export default function AgentsPage() {
         }
       />
 
-      {/* Snapshot error banner */}
-      {snapshotError && (
-        <div
-          style={{
-            margin: '0 24px 0 24px',
-            padding: '12px 16px',
-            background: 'transparent',
-            border: `1px solid ${tokens.colors.danger}`,
-            borderRadius: tokens.radii.md,
-            color: tokens.colors.danger,
-            fontSize: 13,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            flexShrink: 0,
-          }}
-          role="alert"
-        >
-          <span>{snapshotError}</span>
-          <button
-            type="button"
-            onClick={loadSnapshot}
-            style={{
-              background: 'transparent',
-              color: tokens.colors.danger,
-              border: `1px solid ${tokens.colors.danger}`,
-              borderRadius: tokens.radii.md,
-              padding: '4px 12px',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
-        <section aria-labelledby="workspace-agents-heading">
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              justifyContent: 'space-between',
-              gap: 12,
-              marginBottom: 14,
-            }}
-          >
-            <div>
-              <h2
-                id="workspace-agents-heading"
-                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
-              >
-                Workspace Agents
-              </h2>
-              <div style={{ marginTop: 4, fontSize: 12, color: tokens.colors.textMuted }}>
-                Agent identities, status, assignments, and lifecycle controls for this workspace.
-              </div>
-            </div>
-            {agents !== null && (
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>
-                {agentCount} agent{agentCount === 1 ? '' : 's'}
-              </span>
-            )}
-          </div>
-
-        {/* Loading skeleton */}
-        {agents === null ? (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-              gap: 16,
-            }}
-          >
-            {[0, 1, 2].map((i) => (
-              <div
-                key={i}
-                style={{
-                  background: tokens.colors.surfaceCard,
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.lg,
-                  padding: 16,
-                  minHeight: 136,
-                }}
-              >
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 20, background: tokens.colors.border }} />
-                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <div style={{ height: 15, background: tokens.colors.border, borderRadius: 2, width: '60%' }} />
-                    <div style={{ height: 11, background: tokens.colors.border, borderRadius: 2, width: '40%' }} />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : agentCount === 0 ? (
-          /* Empty state */
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '48px 24px',
-              textAlign: 'center',
-            }}
-          >
-            <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>
-              No agents in this workspace
-            </div>
-            <div style={{ fontSize: 13, color: tokens.colors.textSecondary, lineHeight: 1.5, maxWidth: 400, marginTop: 8 }}>
-              Create an agent here to get started.
-            </div>
-          </div>
-        ) : (
-          /* Card grid */
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-              gap: 16,
-              alignItems: 'stretch',
-            }}
-          >
-            {agentsList.map((agent) => (
-              <div
-                key={agent.id}
-                onClick={() => openDetail(agent.id)}
-                style={{
-                  cursor: 'pointer',
-                  borderRadius: tokens.radii.lg,
-                }}
-              >
-                <AgentCard
-                  agent={agent}
-                  onOpenDetail={() => openDetail(agent.id)}
-                  isAdmin={isAdmin}
-                  managerInstance={
-                    agent.manager_agent_id
-                      ? managerInstanceByManagerAgentId.get(agent.manager_agent_id) ?? null
-                      : null
-                  }
-                  onLifecycleDispatched={loadInstances}
-                />
-              </div>
-            ))}
-          </div>
-        )}
-        </section>
-
-        {canAccessAgentManager && (
-          <section
-            id="agent-manager-runtime"
-            aria-labelledby="agent-manager-runtime-heading"
-            style={{
-              marginTop: 32,
-              paddingTop: 24,
-              borderTop: `1px solid ${tokens.colors.border}`,
-            }}
-          >
-            <div style={{ marginBottom: 14 }}>
-              <h2
-                id="agent-manager-runtime-heading"
-                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}
-              >
-                Agent Manager Runtime
-              </h2>
-              <div style={{ marginTop: 4, fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
-                Global execution infrastructure shared across workspaces. Pair hosts, inspect live processes and
-                subagents, and run maintenance commands here.
-              </div>
-            </div>
-            <div
-              style={{
-                height: 'clamp(560px, calc(100vh - 220px), 840px)',
-                minHeight: 0,
-              }}
-            >
-              <AgentManagerPage />
-            </div>
-          </section>
-        )}
+      <div id="agent-manager-runtime" style={{ flex: 1, minHeight: 0, padding: 24 }}>
+        <AgentManagerPage
+          workspaceAgents={agents || []}
+          agentsLoading={loading}
+          agentsError={snapshotError}
+          canManageRuntime={canAccessAgentManager}
+          onRetryAgents={loadSnapshot}
+          onOpenAgent={openDetail}
+        />
       </div>
 
       {/* Agent detail surface moved to a real route in v0.32.x —

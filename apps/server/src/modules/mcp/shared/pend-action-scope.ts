@@ -36,10 +36,9 @@ export async function loadPendActionCandidates(
   // both sqlite (0/1) and Postgres. Workspace-level Actions (board_id IS NULL)
   // always apply; board-scoped Actions apply only when they match the ticket's
   // board — an OR expressed as two where-branches.
-  const base: FindOptionsWhere<Action> = { workspace_id: workspaceId, enabled: true };
-  const where: FindOptionsWhere<Action>[] = boardId
-    ? [{ ...base, board_id: IsNull() }, { ...base, board_id: boardId }]
-    : [{ ...base, board_id: IsNull() }];
+  const where: FindOptionsWhere<Action>[] = [
+    { workspace_id: workspaceId, enabled: true, board_id: IsNull() },
+  ];
 
   const actions = await dataSource.getRepository(Action).find({
     where,

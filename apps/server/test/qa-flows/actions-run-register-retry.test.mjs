@@ -126,23 +126,22 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     enabled: false,
   });
   // …and a *different* board's board-scoped Action must NOT count either.
-  const otherBoard = await createBoard(app, getDataSourceToken, ws.id, { name: 'other' });
-  await actions.create({
-    workspace_id: ws.id,
-    board_id: otherBoard.id,
-    name: 'Other board deploy',
-    prompt: 'x',
-    target_agent_id: agent.id,
-  });
+  await assert.rejects(
+    actions.create({
+      workspace_id: ws.id,
+      board_id: board.id,
+      name: 'Legacy board deploy',
+      prompt: 'x',
+      target_agent_id: agent.id,
+    }),
+    /Board-scoped Actions are no longer supported/,
+  );
 
   const candidates = await loadPendActionCandidates(ds, ticket);
   const names = candidates.map((c) => c.name);
   assert.ok(names.includes('Deploy prod'), 'enabled workspace-level Action is a candidate');
   assert.ok(!names.includes('Disabled deploy'), 'disabled Action is excluded');
-  assert.ok(
-    !names.includes('Other board deploy'),
-    "another board's board-scoped Action is excluded",
-  );
+  assert.ok(!names.includes('Legacy board deploy'), 'rejected legacy Action is absent');
 
   step('Pend gate: blocks a bare pend, allows once a reason is supplied');
   const blocked = evaluatePendActionGate(candidates, undefined);

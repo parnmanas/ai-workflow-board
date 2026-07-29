@@ -36,7 +36,6 @@ function typeLabel(type: string): string {
 
 interface ResourceManagerProps {
   workspaceId?: string;
-  boardId?: string | null;
   catalogMode?: boolean;
   createScope?: CatalogScope;
   allScopes?: boolean;
@@ -45,7 +44,6 @@ interface ResourceManagerProps {
 
 export default function ResourceManager({
   workspaceId,
-  boardId,
   catalogMode = false,
   createScope = 'workspace',
   allScopes = false,
@@ -121,13 +119,11 @@ export default function ResourceManager({
       const [list, creds] = await Promise.all([
         api.listResources(
           effectiveWorkspaceId,
-          allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined),
           filterType || undefined,
           { by: sortBy, order: sortOrder },
           catalogMode && allScopes,
         ),
         api.listCredentials(effectiveWorkspaceId, {
-          boardId: allScopes ? undefined : (boardId || undefined),
           includeAllScopes: catalogMode && allScopes,
         }).catch(() => [] as Credential[]),
       ]);
@@ -138,7 +134,7 @@ export default function ResourceManager({
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, boardId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
+  }, [effectiveWorkspaceId, catalogMode, allScopes, filterType, sortBy, sortOrder, showToast]);
 
   useEffect(() => {
     loadResources();
@@ -271,7 +267,6 @@ export default function ResourceManager({
       const result = await api.testRepoBranches({
         workspace_id: effectiveWorkspaceId,
         scope: editResource?.scope || createScope,
-        board_id: editResource?.board_id || (createScope === 'board' ? (boardId || null) : null),
         url: formUrl.trim(),
         credential_id: formCredentialId || null,
         default_branch: formDefaultBranch.trim(),
@@ -327,7 +322,6 @@ export default function ResourceManager({
         await api.updateResource(editResource.id, {
           scope: editResource.scope,
           workspace_id: editResource.workspace_id,
-          board_id: editResource.board_id,
           name: formName.trim(),
           description: formDescription,
           type: formType,
@@ -345,7 +339,6 @@ export default function ResourceManager({
         await api.createResource({
           scope: createScope,
           workspace_id: createScope === 'global' ? null : effectiveWorkspaceId,
-          board_id: createScope === 'board' ? (boardId || null) : null,
           credential_id: formCredentialId || null,
           name: formName.trim(),
           description: formDescription,
@@ -535,13 +528,12 @@ export default function ResourceManager({
   );
 
   const resourceFormScope = editResource?.scope || createScope;
-  const resourceFormBoardId = editResource?.board_id || (resourceFormScope === 'board' ? (boardId || null) : null);
   const availableCredentials = credentials.filter(credential =>
     credential.scope === 'global'
     || (
       resourceFormScope !== 'global'
       && credential.workspace_id === effectiveWorkspaceId
-      && (credential.board_id === null || credential.board_id === resourceFormBoardId)
+      && credential.board_id === null
     )
   );
 

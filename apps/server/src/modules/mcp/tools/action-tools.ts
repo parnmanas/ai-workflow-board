@@ -51,20 +51,15 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_actions',
-    'List actions in a workspace. Scope rule mirrors list_resources: omit board_id → ALL ' +
-    '(workspace+board); pass board_id="" → workspace-scope only (board_id IS NULL); ' +
-    'pass board_id=<uuid> → that board only.',
+    'List reusable Actions in a workspace.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       const repo = dataSource.getRepository(Action);
-      const qb = repo.createQueryBuilder('a').where('a.workspace_id = :ws', { ws: workspace_id });
-      if (board_id !== undefined) {
-        if (board_id) qb.andWhere('a.board_id = :bid', { bid: board_id });
-        else qb.andWhere('a.board_id IS NULL');
-      }
+      const qb = repo.createQueryBuilder('a')
+        .where('a.workspace_id = :ws', { ws: workspace_id })
+        .andWhere('a.board_id IS NULL');
       const rows = await qb.orderBy('a.name', 'ASC').getMany();
       return ok(rows.map(actionToJson));
     },
@@ -87,14 +82,13 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'The `target_agent_id` must reference an agent in the same workspace (or a global agent). ' +
     '`schedule_cron` accepts a 5-field cron expression with `*` and integer values; leave empty for manual-only. ' +
     "`trigger='on_ticket_done'` opts the action into the lifecycle hook — it runs once when a ticket lands on a " +
-    'terminal column (Done), scoped by board_id (omit/null = any board in the workspace) and trigger_label ' +
+    'terminal column (Done), scoped within the workspace and optionally narrowed by trigger_label ' +
     '(empty = any label). The finished ticket is exposed to the prompt as {{ticket.id}}/{{ticket.title}}/{{ticket.board_id}} etc. ' +
     'enabled=false skips the hook too (manual run_action only). ' +
     'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,board,user,agent,ticket,date,time,datetime}.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       id: z.string().optional().describe('Action ID — omit to create, provide to update'),
-      board_id: z.string().optional().describe('Board ID for board-scoped actions. Omit or null for workspace-level.'),
       name: z.string().describe('Action name'),
       description: z.string().optional().describe('Short description'),
       prompt: z.string().optional().describe('Prompt template with {{var}} interpolation'),
@@ -106,7 +100,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       high_impact: z.boolean().optional().describe('Mark deploy/publish/release Actions whose failure may mean a partial external effect. High-impact ticket-driven runs are NOT auto-retried on failure — the failure surfaces to the source ticket for a human decision (bounded retry is not operation idempotency).'),
       max_runs: z.number().optional().describe('FIFO prune budget (default 10)'),
     },
-    async ({ workspace_id, id, board_id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs }) => {
+    async ({ workspace_id, id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
@@ -115,7 +109,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             description,
             prompt,
             target_agent_id,
-            board_id: board_id || null,
+            board_id: null,
             schedule_cron,
             trigger,
             trigger_label,
@@ -128,7 +122,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
         if (!target_agent_id) return err('target_agent_id is required when creating an action');
         const created = await actionsService.create({
           workspace_id,
-          board_id: board_id || null,
+          board_id: null,
           name,
           description: description ?? '',
           prompt: prompt ?? '',
@@ -325,16 +319,13 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       query: z.string().min(1).describe('Search query'),
-      board_id: z.string().optional().describe('Optional board scope ("", uuid, or omit)'),
       limit: z.number().optional().default(20),
     },
-    async ({ workspace_id, query, board_id, limit }) => {
+    async ({ workspace_id, query, limit }) => {
       const repo = dataSource.getRepository(Action);
-      const qb = repo.createQueryBuilder('a').where('a.workspace_id = :ws', { ws: workspace_id });
-      if (board_id !== undefined) {
-        if (board_id) qb.andWhere('a.board_id = :bid', { bid: board_id });
-        else qb.andWhere('a.board_id IS NULL');
-      }
+      const qb = repo.createQueryBuilder('a')
+        .where('a.workspace_id = :ws', { ws: workspace_id })
+        .andWhere('a.board_id IS NULL');
       const pattern = `%${query.toLowerCase()}%`;
       qb.andWhere('(LOWER(a.name) LIKE :q OR LOWER(a.description) LIKE :q OR LOWER(a.prompt) LIKE :q)', { q: pattern });
       qb.orderBy('a.name', 'ASC').limit(Math.min(limit ?? 20, 100));

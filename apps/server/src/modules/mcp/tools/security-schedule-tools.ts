@@ -78,16 +78,14 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_security_schedules',
-    'List security schedules in a workspace. Scope rule mirrors list_security_profiles: omit board_id ' +
-    '→ ALL; board_id="" → workspace-scope only (board_id IS NULL); board_id=<uuid> → that board.',
+    'List reusable security schedules in a workspace.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
-        const rows = await securityScheduleService.list(workspace_id, board_id);
+        const rows = await securityScheduleService.list(workspace_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list security schedules');
@@ -119,8 +117,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'dispatches a checklist refresh (refresh_security_checklist) to each in-scope profile — it updates ' +
     'the profiles\' checklists with the latest security knowledge and creates NO run/batch row (so it ' +
     'never pollutes scan history; safe to run frequently). For BOTH kinds: `scope="all"` targets every ' +
-    'enabled profile in scope at dispatch time (board_id <uuid> = that board, board_id omitted/null = ' +
-    'whole workspace) — no id snapshot, so profile add/remove is reflected automatically; ' +
+    'enabled profile in the Workspace at dispatch time — no id snapshot, so profile add/remove is reflected automatically; ' +
     '`scope="selected"` targets the ordered `profile_ids`. Set EXACTLY ONE of `cron` (5 UTC fields, ' +
     'e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults true. NOTE: a scan run inspects the ' +
     'RUNNING server\'s code — keep the cadence coarser than your main→prod deploy lag so a run lands ' +
@@ -128,7 +125,6 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'such deploy-timing concern.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Board to pin to, or omit/"" for workspace scope'),
       name: z.string().describe('Schedule name (required)'),
       kind: z.enum(['scan', 'checklist_refresh']).optional().describe("'scan' (default, runs an inspection batch) or 'checklist_refresh' (updates profile checklists, no run row)"),
       scope: z.enum(['all', 'selected']).optional().describe("'all' (default) or 'selected'"),
@@ -144,7 +140,6 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       try {
         const row = await securityScheduleService.create({
           workspaceId: args.workspace_id,
-          boardId: args.board_id ?? undefined,
           name: args.name,
           kind: args.kind,
           scope: args.scope,
@@ -169,7 +164,6 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
-      board_id: z.string().optional(),
       name: z.string().optional(),
       kind: z.enum(['scan', 'checklist_refresh']).optional(),
       scope: z.enum(['all', 'selected']).optional(),
@@ -183,7 +177,6 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
         const row = await securityScheduleService.update(schedule_id, workspace_id, {
-          boardId: patch.board_id,
           name: patch.name,
           kind: patch.kind,
           scope: patch.scope,

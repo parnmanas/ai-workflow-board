@@ -202,6 +202,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
         const a = await actionRepo.findOne({ where: { id } });
         if (!a) continue;
         if (a.workspace_id !== ticket.workspace_id) continue;
+        if (a.board_id !== null) continue;
         if (!a.enabled) continue;
         byId.set(a.id, a);
       }
@@ -215,7 +216,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
       .where('a.workspace_id = :ws', { ws: ticket.workspace_id })
       .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
       .andWhere('a.enabled = :en', { en: true })
-      .andWhere('(a.board_id IS NULL OR a.board_id = :bid)', { bid: boardId });
+      .andWhere('a.board_id IS NULL');
     const policyActions = await qb.getMany();
     for (const a of policyActions) {
       if (byId.has(a.id)) continue;

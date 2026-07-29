@@ -9,7 +9,6 @@ interface Props {
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string | null;
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }
@@ -92,7 +91,6 @@ export default function FunctionManager({
   globalMode = false,
   catalogMode = false,
   createScope = 'workspace',
-  boardId,
   allScopes = false,
   canManageGlobal = false,
 }: Props) {
@@ -113,7 +111,7 @@ export default function FunctionManager({
     setLoading(true);
     try {
       const [functions, history] = await Promise.all([
-        api.listFunctions(globalMode ? null : workspaceId, catalogMode, allScopes ? undefined : boardId),
+        api.listFunctions(globalMode ? null : workspaceId, catalogMode),
         !globalMode && workspaceId ? api.listFunctionRuns(workspaceId, { limit: 30 }) : Promise.resolve([]),
       ]);
       setRows(functions);
@@ -123,7 +121,7 @@ export default function FunctionManager({
     } finally {
       setLoading(false);
     }
-  }, [globalMode, catalogMode, workspaceId, boardId, allScopes, showToast]);
+  }, [globalMode, catalogMode, workspaceId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -169,7 +167,6 @@ export default function FunctionManager({
     const payload = {
       scope: effectiveScope,
       workspace_id: effectiveScope === 'global' ? null : workspaceId,
-      board_id: effectiveScope === 'board' ? (editing?.board_id || boardId || null) : null,
       ...draft,
       input_schema: inputSchema,
       output_schema: outputSchema,
@@ -212,7 +209,6 @@ export default function FunctionManager({
     try {
       const result = await api.runFunction(row.id, {
         workspace_id: workspaceId,
-        board_id: boardId || undefined,
         ticket_id: ticketId || undefined,
         inputs,
         idempotency_key: idempotencyKey || undefined,

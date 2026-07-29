@@ -38,7 +38,7 @@ test('a registered credential with an empty token reports the real error', async
   );
 });
 
-test('a Board credential is usable only from the same Board scope', async () => {
+test('a legacy Board credential fails closed until the boot migration promotes it', async () => {
   const repo = repoWith({
     id: 'cred-board',
     workspace_id: 'ws-1',
@@ -46,11 +46,9 @@ test('a Board credential is usable only from the same Board scope', async () => 
     encrypted_data: JSON.stringify({ token: 'board-token' }),
   });
   await assert.rejects(
-    resolveGitCredential(repo, 'cred-board', 'ws-1', 'board-2'),
-    /different board scope/,
+    resolveGitCredential(repo, 'cred-board', 'ws-1', 'board-1'),
+    /has not been migrated to Workspace scope/,
   );
-  const resolved = await resolveGitCredential(repo, 'cred-board', 'ws-1', 'board-1');
-  assert.equal(resolved?.token, 'board-token');
 });
 
 test('Git errors expose the cause without leaking registered credentials', () => {

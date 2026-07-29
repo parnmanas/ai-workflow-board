@@ -158,7 +158,7 @@ const stepSchema = z.object({
 // labels → ['qa-failure','auto'], dedupe → 'per_open_ticket').
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch — when false (or the whole object null) no ticket is filed'),
-  board_id: z.string().optional().describe('Board to file on; default run.board_id → scenario.board_id'),
+  board_id: z.string().optional().describe('Board to file on; defaults to the run Board when present'),
   column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
   column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
@@ -179,20 +179,15 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_qa_scenarios',
-    'List QA scenarios in a workspace. Scope rule mirrors list_actions: omit board_id → ALL ' +
-    '(workspace+board); pass board_id="" → workspace-scope only (board_id IS NULL); ' +
-    'pass board_id=<uuid> → that board only.',
+    'List reusable QA scenarios in a workspace.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       const repo = dataSource.getRepository(QaScenario);
-      const qb = repo.createQueryBuilder('s').where('s.workspace_id = :ws', { ws: workspace_id });
-      if (board_id !== undefined) {
-        if (board_id) qb.andWhere('s.board_id = :bid', { bid: board_id });
-        else qb.andWhere('s.board_id IS NULL');
-      }
+      const qb = repo.createQueryBuilder('s')
+        .where('s.workspace_id = :ws', { ws: workspace_id })
+        .andWhere('s.board_id IS NULL');
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return ok(rows.map(scenarioToJson));
     },
@@ -218,7 +213,6 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     '(start URL, window title, base endpoint…). See docs/qa-driver-guide.md.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Board ID to pin to, or omit/"" for workspace scope'),
       name: z.string().describe('Scenario name (required)'),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional().describe('Ordered step definitions'),
@@ -251,7 +245,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       try {
         const row = await qaService.create({
           workspace_id: args.workspace_id,
-          board_id: args.board_id ?? null,
+          board_id: null,
           name: args.name,
           description: args.description,
           steps: args.steps,
@@ -285,7 +279,6 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     {
       scenario_id: z.string().describe('QaScenario ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
-      board_id: z.string().optional(),
       name: z.string().optional(),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional(),
@@ -350,15 +343,18 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'with the same scenario to re-run — a fresh QaRun is stacked, preserving history.',
     {
       scenario_id: z.string().describe('QaScenario ID to run'),
+      board_id: z.string().optional()
+        .describe('Optional execution Board context; does not change or filter the Workspace-owned scenario'),
       initial_phase: z.string().optional()
         .describe('Optional phase id to stamp on the new run at dispatch (multi-phase QA). Seeds current_phase / current_phase_at and the first phase_history entry so the phase_timeouts reaper measures the opening phase from run start. Typically the first id in the resolved qa_phases (e.g. "import"). Omit for legacy single-running.'),
     },
-    async ({ scenario_id, initial_phase }, extra: { sessionId?: string }) => {
+    async ({ scenario_id, board_id, initial_phase }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const result = await qaRunService.startQaRun({
           scenarioId: scenario_id,
+          boardId: board_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
           initialPhase: initial_phase,
@@ -546,13 +542,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'start_qa_batch',
     'Start a SEQUENTIAL batch run of several QA scenarios — scenario N+1 only dispatches after ' +
     'scenario N reaches a terminal status (passed/failed/error), never all at once. Pass an ordered ' +
-    '`scenario_ids` list, OR `all: true` to expand to every enabled scenario in scope (board_id "" = ' +
-    'workspace-scope, <uuid> = that board, omit = all). `stop_on_fail` (default false) halts the batch ' +
+    '`scenario_ids` list, OR `all: true` to expand to every enabled scenario in the Workspace. ' +
+    '`stop_on_fail` (default false) halts the batch ' +
     'on the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
     'get_qa_batch for progress.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Scope for `all`: "" → workspace-scope, <uuid> → board, omit → all'),
+      board_id: z.string().optional().describe('Optional execution Board context; does not filter reusable scenario definitions'),
       scenario_ids: z.array(z.string()).optional().describe('Ordered scenario ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled scenario in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),

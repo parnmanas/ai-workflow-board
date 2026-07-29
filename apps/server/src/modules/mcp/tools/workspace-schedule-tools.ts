@@ -13,9 +13,8 @@
  *   list_workspace_schedules / get_workspace_schedule / create_workspace_schedule /
  *   update_workspace_schedule / delete_workspace_schedule / run_workspace_schedule_now
  *
- * Scope: list mirrors list_qa_schedules — omit board_id → ALL; board_id="" →
- * workspace-scope only (board_id IS NULL); board_id=<uuid> → that board. Cadence:
- * exactly one of `cron` (5-field, UTC) or `interval_ms` (>= 1000).
+ * Definitions are Workspace-owned. Cadence is exactly one of `cron` (5-field,
+ * UTC) or `interval_ms` (>= 1000).
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -60,16 +59,14 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
 
   server.tool(
     'list_workspace_schedules',
-    'List workspace schedules. Scope rule mirrors list_qa_schedules: omit board_id → ALL; ' +
-    'board_id="" → workspace-scope only (board_id IS NULL); board_id=<uuid> → that board.',
+    'List reusable Workspace schedules.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       if (!workspaceScheduleService) return err('Workspace schedule service unavailable in this MCP context');
       try {
-        const rows = await workspaceScheduleService.list(workspace_id, board_id);
+        const rows = await workspaceScheduleService.list(workspace_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list workspace schedules');
@@ -98,15 +95,13 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
     'create_workspace_schedule',
     'Create a workspace schedule — a general-purpose "do this task at this time" trigger for ONE agent. ' +
     'When due, it opens a fresh chat room, seats `target_agent_id`, and sends `task_prompt` as the opening ' +
-    'message (the QA/Security RUN dispatch shape). `board_id` is optional context (omit/"" = workspace ' +
-    'scope) and does NOT affect when it fires. Set EXACTLY ONE of `cron` (5 UTC fields, e.g. "0 3 * * *") ' +
+    'message (the QA/Security RUN dispatch shape). Set EXACTLY ONE of `cron` (5 UTC fields, e.g. "0 3 * * *") ' +
     'or `interval_ms` (>= 1000). `enabled` defaults true.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       name: z.string().describe('Schedule name (required)'),
       target_agent_id: z.string().describe('The single agent the task is dispatched to (required)'),
       task_prompt: z.string().describe('Free-text task message sent to the agent when the schedule fires (required)'),
-      board_id: z.string().optional().describe('Board to pin context to, or omit/"" for workspace scope'),
       cron: z.string().optional().describe('5-field UTC cron (e.g. "0 3 * * *"). Mutually exclusive with interval_ms'),
       interval_ms: z.number().optional().describe('Fixed interval in ms (>= 1000). Mutually exclusive with cron'),
       enabled: z.boolean().optional().describe('Default true'),
@@ -117,7 +112,6 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       try {
         const row = await workspaceScheduleService.create({
           workspaceId: args.workspace_id,
-          boardId: args.board_id ?? undefined,
           name: args.name,
           targetAgentId: args.target_agent_id,
           taskPrompt: args.task_prompt,
@@ -143,7 +137,6 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       name: z.string().optional(),
       target_agent_id: z.string().optional(),
       task_prompt: z.string().optional(),
-      board_id: z.string().optional(),
       cron: z.string().optional(),
       interval_ms: z.number().optional(),
       enabled: z.boolean().optional(),
@@ -155,7 +148,6 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
           name: patch.name,
           targetAgentId: patch.target_agent_id,
           taskPrompt: patch.task_prompt,
-          boardId: patch.board_id,
           cron: patch.cron,
           intervalMs: patch.interval_ms,
           enabled: patch.enabled,

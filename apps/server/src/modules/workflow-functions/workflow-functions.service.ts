@@ -146,7 +146,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
 
   async list(
     workspaceId?: string | null,
-    boardId?: string | null,
+    _boardId?: string | null,
     includeShadowed = false,
   ): Promise<Record<string, any>[]> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
@@ -156,20 +156,18 @@ export class WorkflowFunctionsService implements OnModuleInit {
     }
     let qb = repo.createQueryBuilder('f')
       .where('f.workspace_id IS NULL OR f.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('f.board_id IS NULL')
       .orderBy('f.key', 'ASC')
       .addOrderBy('f.workspace_id', 'ASC')
       .addOrderBy('f.board_id', 'ASC');
-    if (boardId !== undefined) {
-      qb = qb.andWhere('f.board_id IS NULL OR f.board_id = :boardId', { boardId: boardId || null });
-    }
     const rows = await qb.getMany();
     if (includeShadowed) return rows.map(row => this.toView(row));
     const resolved = new Map<string, WorkflowFunction>();
     for (const row of rows) {
-      if (!canUseCatalogItem(row, workspaceId, boardId)) continue;
-      const rank = row.board_id ? 2 : row.workspace_id ? 1 : 0;
+      if (!canUseCatalogItem(row, workspaceId)) continue;
+      const rank = row.workspace_id ? 1 : 0;
       const current = resolved.get(row.key);
-      const currentRank = current ? (current.board_id ? 2 : current.workspace_id ? 1 : 0) : -1;
+      const currentRank = current ? (current.workspace_id ? 1 : 0) : -1;
       if (rank > currentRank) resolved.set(row.key, row);
     }
     return Array.from(resolved.values()).sort((a, b) => a.key.localeCompare(b.key)).map(row => this.toView(row));
@@ -181,12 +179,8 @@ export class WorkflowFunctionsService implements OnModuleInit {
     return this.toView(row);
   }
 
-  async resolve(key: string, workspaceId: string, boardId?: string | null): Promise<WorkflowFunction> {
+  async resolve(key: string, workspaceId: string, _boardId?: string | null): Promise<WorkflowFunction> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    if (boardId) {
-      const board = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: boardId } });
-      if (board) return board;
-    }
     const local = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: IsNull() } });
     if (local) return local;
     const global = await repo.findOne({ where: { key, workspace_id: IsNull(), board_id: IsNull() } });
@@ -311,9 +305,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (fn.workspace_id !== null && fn.workspace_id !== args.workspaceId) {
       throw httpError(403, 'Function belongs to a different workspace');
     }
-    if (fn.board_id !== null && fn.board_id !== (args.boardId || null)) {
-      throw httpError(403, 'Function belongs to a different board scope');
-    }
+    if (fn.board_id !== null) throw httpError(409, 'Board-scoped Function has not been migrated to Workspace scope');
     if (!fn.enabled) throw httpError(409, 'Function is disabled');
     if (fn.approval_policy === 'admin' && args.actorRole !== 'admin') {
       throw httpError(403, 'This Function requires an authenticated admin execution');

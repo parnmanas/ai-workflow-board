@@ -13,7 +13,7 @@
 //   5. method (a) per-ticket `on_done_action_ids` fires even when the Action
 //      itself has no on_ticket_done trigger.
 //
-// Scenarios are isolated by trigger_label so the board-scoped Actions in one
+// Scenarios are isolated by trigger_label so the Workspace Actions in one
 // scenario can't cross-fire on another scenario's ticket.
 
 import test from 'node:test';
@@ -108,7 +108,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // ── Scenario 1: method (b) + context + idempotency ──────────────────────
   step('S1: on_ticket_done Action (label-scoped) fires once with {{ticket.*}}');
   const a1 = await createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: 'S1 hook', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'S1 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's1',
     prompt: 'Finished ticket {{ticket.id}} titled "{{ticket.title}}" on board {{ticket.board_id}}.',
   });
@@ -129,7 +129,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // ── Scenario 2: enabled=false is skipped ────────────────────────────────
   step('S2: enabled=false Action is skipped by the hook');
   const a2 = await createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: 'S2 disabled', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'S2 disabled', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's2', enabled: false, prompt: 'should not run',
   });
   const t2 = await newTicket('S2 ticket', ['s2']);
@@ -140,7 +140,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // ── Scenario 3: recursion guard label ───────────────────────────────────
   step('S3: ticket labelled no-on-done-hook fires nothing');
   const a3 = await createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: 'S3 hook', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'S3 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's3', prompt: 'should not run',
   });
   const t3 = await newTicket('S3 hook-origin ticket', ['s3', 'no-on-done-hook']);
@@ -151,7 +151,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // ── Scenario 4: method (a) per-ticket binding ───────────────────────────
   step('S4: per-ticket on_done_action_ids fires even without an on_ticket_done trigger');
   const a4 = await createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: 'S4 explicit', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'S4 explicit', target_agent_id: agent.id,
     trigger: '', prompt: 'explicit binding for {{ticket.title}}',
   });
   const t4 = await newTicket('S4 ticket', []);
@@ -166,11 +166,11 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // that is NOT bound to a ticket and is NOT opted into the on_ticket_done
   // policy must fire NOTHING when an unrelated ticket reaches Done. This proves
   //   (c) an empty on_done_action_ids binding dispatches nothing, and
-  //   (d) board-scoped Actions only participate via explicit policy
+  //   (d) Workspace Actions only participate via explicit policy
   //       (trigger='on_ticket_done') — they don't leak onto every completion.
   step('S5: manual Action + empty-binding ticket → zero dispatch (no every-ticket leak)');
   const a5 = await createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: 'S5 manual (unbound)', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'S5 manual (unbound)', target_agent_id: agent.id,
     trigger: '', prompt: 'should never run from a Done event',
   });
   // Default on_done_action_ids is '[]' (empty binding) and no label, so neither
@@ -202,7 +202,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   // product was already correct — only the test's order-recovery was lossy.
   step('S6: on_done_action_ids dispatch in saved array order');
   const mkOrdered = (n) => createAction(ds, {
-    workspace_id: ws.id, board_id: board.id, name: `S6 ordered ${n}`, target_agent_id: agent.id,
+    workspace_id: ws.id, name: `S6 ordered ${n}`, target_agent_id: agent.id,
     trigger: '', prompt: `ordered ${n}`,
   });
   const o1 = await mkOrdered(1);

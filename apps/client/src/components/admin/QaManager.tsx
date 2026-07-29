@@ -21,7 +21,6 @@ type QaAgent = { id: string; name: string; manager_name?: string };
 
 interface QaManagerProps {
   workspaceId?: string;
-  boardId?: string;
   allScopes?: boolean;
 }
 
@@ -43,7 +42,7 @@ function statusVariant(s: string) {
  * scenarios, runs them, and visualizes each scenario as an ordered step flow
  * with per-step pass/fail badges + screenshot thumbnails, plus run history.
  */
-export default function QaManager({ workspaceId, boardId, allScopes = false }: QaManagerProps) {
+export default function QaManager({ workspaceId, allScopes = false }: QaManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -70,9 +69,9 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
     if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); return; }
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
-        api.listQaScenarios(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
+        api.listQaScenarios(effectiveWorkspaceId),
         api.getAgents(effectiveWorkspaceId).catch(() => []),
-        api.listQaSchedules(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)).catch(() => []),
+        api.listQaSchedules(effectiveWorkspaceId).catch(() => []),
         api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);
       setScenarios(list);
@@ -82,7 +81,7 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
     } catch (err: any) {
       showToast(err?.message || 'Failed to load QA scenarios', 'error');
     }
-  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
+  }, [effectiveWorkspaceId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -134,7 +133,6 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
     try {
       const batch = await api.startQaBatch({
         workspace_id: effectiveWorkspaceId,
-        board_id: boardId !== undefined ? (boardId || '') : undefined,
         ...payload,
       });
       setActiveBatch(batch);
@@ -144,7 +142,7 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
     } finally {
       setBatchStarting(false);
     }
-  }, [effectiveWorkspaceId, boardId, showToast]);
+  }, [effectiveWorkspaceId, showToast]);
 
   // Poll the active batch while it's running so the progress banner advances as
   // each scenario finalizes (dispatch is server-driven, one run at a time).
@@ -218,7 +216,6 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
         <ScenarioEditor
           scenario={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
-          boardId={boardId}
           agents={agents}
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
@@ -242,7 +239,6 @@ export default function QaManager({ workspaceId, boardId, allScopes = false }: Q
         <ScheduleEditor
           schedule={editingSchedule === 'new' ? null : editingSchedule}
           workspaceId={effectiveWorkspaceId}
-          boardId={boardId}
           scenarios={scenarios}
           onClose={() => setEditingSchedule(null)}
           onSaved={async () => { setEditingSchedule(null); await load(); }}
@@ -661,7 +657,6 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
-          <Badge variant="neutral" size="sm">{s.board_id ? 'board' : 'workspace'}</Badge>
           {!s.enabled && <Badge variant="warning" size="sm">disabled</Badge>}
         </div>
       </td>
@@ -708,21 +703,9 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ src: string; kind: 'image' | 'video' } | null>(null);
 
-  // Resolve the effective phase config for the run timeline: scenario override
-  // wins over the board default (mirrors the server resolveQaPhases precedence).
-  // The board default is fetched lazily; the timeline degrades gracefully (no
-  // progress bar) when a phase has no matching timeout in the resolved config.
-  const scenarioPhases = parseQaPhasesValue(scenario.qa_phases);
-  const [boardPhases, setBoardPhases] = useState<QaPhasesConfig | null>(null);
-  useEffect(() => {
-    if (scenarioPhases || !scenario.board_id) { setBoardPhases(null); return; }
-    let cancelled = false;
-    api.getBoard(scenario.board_id)
-      .then((b) => { if (!cancelled) setBoardPhases(parseQaPhasesValue((b as any)?.qa_phases)); })
-      .catch(() => { if (!cancelled) setBoardPhases(null); });
-    return () => { cancelled = true; };
-  }, [scenario.board_id, !!scenarioPhases]);
-  const resolvedPhases = scenarioPhases ?? boardPhases;
+  // Definition-level override. A Board execution context can still contribute
+  // phases on the server, but reusable scenarios no longer own a Board.
+  const resolvedPhases = parseQaPhasesValue(scenario.qa_phases);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -1127,13 +1110,12 @@ function DeploymentBadges({ deployments }: { deployments: Deployment[] }) {
 interface ScenarioEditorProps {
   scenario: QaScenario | null;
   workspaceId: string;
-  boardId?: string;
   agents: QaAgent[];
   onClose: () => void;
   onSaved: (s: QaScenario) => void;
 }
 
-function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSaved }: ScenarioEditorProps) {
+function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: ScenarioEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(scenario?.name ?? '');
   const [description, setDescription] = useState(scenario?.description ?? '');
@@ -1177,14 +1159,14 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
   // Board default for the inherit preview. Fetched lazily; null = none/unknown.
   const [boardPhases, setBoardPhases] = useState<QaPhase[] | null>(null);
   useEffect(() => {
-    const bid = scenario?.board_id ?? boardId ?? null;
+    const bid = scenario?.on_failure_ticket?.board_id ?? null;
     if (!bid) { setBoardPhases(null); return; }
     let cancelled = false;
     api.getBoard(bid)
       .then((b) => { if (!cancelled) setBoardPhases(parseQaPhasesValue((b as any)?.qa_phases)?.phases ?? null); })
       .catch(() => { if (!cancelled) setBoardPhases(null); });
     return () => { cancelled = true; };
-  }, [scenario?.board_id, boardId]);
+  }, [scenario?.on_failure_ticket?.board_id]);
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
@@ -1234,7 +1216,7 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
         });
       } else {
         saved = await api.createQaScenario({
-          workspace_id: workspaceId, board_id: boardId || null, name, description,
+          workspace_id: workspaceId, name, description,
           target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
           target_environment: targetEnvironment.trim(),
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
@@ -1477,13 +1459,12 @@ function ScenarioEditor({ scenario, workspaceId, boardId, agents, onClose, onSav
 interface ScheduleEditorProps {
   schedule: QaSchedule | null;
   workspaceId: string;
-  boardId?: string;
   scenarios: QaScenarioListItem[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, boardId, scenarios, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, workspaceId, scenarios, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [scope, setScope] = useState<QaScheduleScope>(schedule?.scope ?? 'all');
@@ -1548,7 +1529,7 @@ function ScheduleEditor({ schedule, workspaceId, boardId, scenarios, onClose, on
       if (schedule) {
         await api.updateQaSchedule(schedule.id, base);
       } else {
-        await api.createQaSchedule({ ...base, board_id: boardId !== undefined ? (boardId || null) : null });
+        await api.createQaSchedule(base);
       }
       showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
       onSaved();

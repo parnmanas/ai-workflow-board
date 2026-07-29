@@ -892,11 +892,10 @@ export const api = {
     request<any>(`/keys/${id}`, { method: 'DELETE' }),
 
   // ─── Prompt Templates (Phase 1 ROLE-05) ────────────────
-  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; boardId?: string | null; includeAllScopes?: boolean }) => {
+  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams({ workspace_id });
     if (options?.category) params.set('category', options.category);
     if (options?.id) params.set('id', options.id);
-    if (options?.boardId) params.set('board_id', options.boardId);
     if (options?.includeAllScopes) params.set('include_all_scopes', 'true');
     return request<PromptTemplate[]>(`/prompt-templates?${params.toString()}`);
   },
@@ -906,8 +905,7 @@ export const api = {
   },
   createPromptTemplate: (data: {
     workspace_id?: string | null;
-    board_id?: string | null;
-    scope?: 'global' | 'workspace' | 'board';
+    scope?: 'global' | 'workspace';
     name: string;
     description?: string;
     content: string;
@@ -918,8 +916,7 @@ export const api = {
     id: string,
     data: {
       workspace_id?: string | null;
-      board_id?: string | null;
-      scope?: 'global' | 'workspace' | 'board';
+      scope?: 'global' | 'workspace';
       name?: string;
       description?: string;
       content?: string;
@@ -935,13 +932,11 @@ export const api = {
   // ─── Resources ─────────────────────────────────────────
   listResources: (
     workspaceId: string,
-    boardId?: string | null,
     type?: string,
     sort?: { by?: string; order?: 'asc' | 'desc' },
     includeAllScopes = false,
   ) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined) params.set('board_id', boardId || '');
     if (type) params.set('type', type);
     if (sort?.by) params.set('sort_by', sort.by);
     if (sort?.order) params.set('sort_order', sort.order);
@@ -956,10 +951,9 @@ export const api = {
   // and rendered through the /raw streaming endpoint (ticket ff3e7337).
   uploadResourceFile: async (
     file: File,
-    opts: { workspace_id: string; board_id?: string | null; type?: string },
+    opts: { workspace_id: string; type?: string },
   ): Promise<{ id: string; file_name: string; file_mimetype: string; size: number }> => {
     const params = new URLSearchParams({ workspace_id: opts.workspace_id });
-    if (opts.board_id) params.set('board_id', opts.board_id);
     params.set('type', opts.type || 'comment_attachment');
     const token = (() => { try { return localStorage.getItem('auth_token'); } catch { return null; } })();
     const headers: Record<string, string> = {
@@ -985,8 +979,7 @@ export const api = {
   },
   createResource: (data: {
     workspace_id?: string | null;
-    scope?: 'global' | 'workspace' | 'board';
-    board_id?: string | null;
+    scope?: 'global' | 'workspace';
     credential_id?: string | null;
     name: string;
     description?: string;
@@ -1004,7 +997,7 @@ export const api = {
     id: string,
     data: {
       workspace_id?: string | null;
-      scope?: 'global' | 'workspace' | 'board';
+      scope?: 'global' | 'workspace';
       name?: string;
       description?: string;
       type?: string;
@@ -1014,7 +1007,6 @@ export const api = {
       file_name?: string;
       file_mimetype?: string;
       tags?: string[];
-      board_id?: string | null;
       credential_id?: string | null;
       default_branch?: string;
     },
@@ -1032,8 +1024,7 @@ export const api = {
   },
   testRepoBranches: (data: {
     workspace_id: string;
-    scope?: 'global' | 'workspace' | 'board';
-    board_id?: string | null;
+    scope?: 'global' | 'workspace';
     url: string;
     credential_id?: string | null;
     default_branch?: string;
@@ -1084,15 +1075,13 @@ export const api = {
   },
 
   // ─── Actions ──────────────────────────────────────────
-  listActions: (workspaceId: string, boardId?: string | null) => {
+  listActions: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined) params.set('board_id', boardId || '');
     return request<Action[]>(`/actions?${params.toString()}`);
   },
   getAction: (id: string) => request<Action>(`/actions/${id}`),
   createAction: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     description?: string;
     prompt?: string;
@@ -1112,7 +1101,6 @@ export const api = {
       description?: string;
       prompt?: string;
       target_agent_id?: string;
-      board_id?: string | null;
       schedule_cron?: string;
       trigger?: string;
       trigger_label?: string;
@@ -1137,11 +1125,10 @@ export const api = {
   },
 
   // Functions: workspace_id omitted means global definitions only.
-  listFunctions: (workspaceId?: string | null, includeShadowed = false, boardId?: string | null) => {
+  listFunctions: (workspaceId?: string | null, includeShadowed = false) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (includeShadowed) params.set('include_shadowed', 'true');
-    if (boardId !== undefined) params.set('board_id', boardId || '');
     const query = params.toString();
     return request<WorkflowFunction[]>(`/functions${query ? `?${query}` : ''}`);
   },
@@ -1186,15 +1173,13 @@ export const api = {
     request<Feature>(`/features/${id}/replan`, { method: 'POST', body: '{}' }),
 
   // ─── Scenario-based QA (ticket 3c655d20) ──────────────
-  listQaScenarios: (workspaceId: string, boardId?: string | null) => {
+  listQaScenarios: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined) params.set('board_id', boardId || '');
     return request<QaScenarioListItem[]>(`/qa/scenarios?${params.toString()}`);
   },
   getQaScenario: (id: string) => request<QaScenario>(`/qa/scenarios/${id}`),
   createQaScenario: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     description?: string;
     steps?: QaScenario['steps'];
@@ -1222,7 +1207,6 @@ export const api = {
       description?: string;
       steps?: QaScenario['steps'];
       target_agent_id?: string;
-      board_id?: string | null;
       qa_driver?: string;
       qa_driver_config?: Record<string, any> | null;
       enabled?: boolean;
@@ -1278,14 +1262,12 @@ export const api = {
   // ─── QA schedules (ticket b6bb7efd) ──────────────────
   // Automatic trigger layer: when due, the server kicks a sequential batch via
   // the same orchestrator as startQaBatch. Exactly one of cron / interval_ms.
-  listQaSchedules: (workspaceId: string, boardId?: string | null) => {
+  listQaSchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
     return request<QaSchedule[]>(`/qa/schedules?${params.toString()}`);
   },
   createQaSchedule: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     scope?: QaScheduleScope;
     scenario_ids?: string[];
@@ -1298,7 +1280,6 @@ export const api = {
     id: string,
     data: {
       workspace_id: string;
-      board_id?: string | null;
       name?: string;
       scope?: QaScheduleScope;
       scenario_ids?: string[];
@@ -1323,14 +1304,12 @@ export const api = {
   // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
   // interval_ms. board_id omitted → all schedules in the workspace; "" → only
   // workspace-scoped (board_id IS NULL); <uuid> → that board's.
-  listWorkspaceSchedules: (workspaceId: string, boardId?: string | null) => {
+  listWorkspaceSchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
     return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);
   },
   createWorkspaceSchedule: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     target_agent_id: string;
     task_prompt: string;
@@ -1342,7 +1321,6 @@ export const api = {
     id: string,
     data: {
       workspace_id: string;
-      board_id?: string | null;
       name?: string;
       target_agent_id?: string;
       task_prompt?: string;
@@ -1365,15 +1343,13 @@ export const api = {
   // Sibling of scenario QA: profile CRUD + run dispatch + history + sequential
   // batches + schedules. Run-result recording (findings, complete) is agent-only
   // via MCP, so it is intentionally not exposed over REST.
-  listSecurityProfiles: (workspaceId: string, boardId?: string | null) => {
+  listSecurityProfiles: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined) params.set('board_id', boardId || '');
     return request<SecurityProfileListItem[]>(`/security/profiles?${params.toString()}`);
   },
   getSecurityProfile: (id: string) => request<SecurityProfile>(`/security/profiles/${id}`),
   createSecurityProfile: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     description?: string;
     checklist?: SecurityProfile['checklist'];
@@ -1400,7 +1376,6 @@ export const api = {
       checklist?: SecurityProfile['checklist'];
       target_agent_id?: string;
       target_resource_id?: string | null;
-      board_id?: string | null;
       scan_driver?: string;
       scan_driver_config?: Record<string, any> | null;
       scope_mode?: SecurityProfile['scope_mode'];
@@ -1445,14 +1420,12 @@ export const api = {
     return request<SecurityRunBatch>(`/security/batches/${batchId}?${params.toString()}`);
   },
   // ─── Security schedules ───────────────────────────────
-  listSecuritySchedules: (workspaceId: string, boardId?: string | null) => {
+  listSecuritySchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
     return request<SecuritySchedule[]>(`/security/schedules?${params.toString()}`);
   },
   createSecuritySchedule: (data: {
     workspace_id: string;
-    board_id?: string | null;
     name: string;
     kind?: SecurityScheduleKind;
     scope?: SecurityScheduleScope;
@@ -1466,7 +1439,6 @@ export const api = {
     id: string,
     data: {
       workspace_id: string;
-      board_id?: string | null;
       name?: string;
       kind?: SecurityScheduleKind;
       scope?: SecurityScheduleScope;
@@ -1497,12 +1469,11 @@ export const api = {
   // ─── Credentials ──────────────────────────────────────
   // A workspace list also returns inherited global credentials (scope:'global').
   // Pass scope:'global' (no workspace_id) for the Admin global-credentials page.
-  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; boardId?: string | null; includeAllScopes?: boolean }) => {
+  listCredentials: (workspaceId?: string, opts?: { provider?: string; scope?: 'global'; includeAllScopes?: boolean }) => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (opts?.provider) params.set('provider', opts.provider);
     if (opts?.scope) params.set('scope', opts.scope);
-    if (opts?.boardId) params.set('board_id', opts.boardId);
     if (opts?.includeAllScopes) params.set('include_all_scopes', 'true');
     return request<Credential[]>(`/credentials?${params.toString()}`);
   },
@@ -1512,8 +1483,7 @@ export const api = {
     // Omit workspace_id and pass scope:'global' to create an instance-level
     // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).
     workspace_id?: string;
-    board_id?: string | null;
-    scope?: 'global' | 'workspace' | 'board';
+    scope?: 'global' | 'workspace';
     name: string;
     description?: string;
     provider: string;
@@ -1524,8 +1494,7 @@ export const api = {
     id: string,
     data: {
       workspace_id?: string | null;
-      board_id?: string | null;
-      scope?: 'global' | 'workspace' | 'board';
+      scope?: 'global' | 'workspace';
       name?: string;
       description?: string;
       provider?: string;

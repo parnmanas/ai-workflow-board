@@ -177,11 +177,12 @@ export class QaScenarioController {
 
   // Start (or re-run) a scenario. Re-run is the same call → a fresh QaRun.
   @Post('scenarios/:id/run')
-  async run(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+  async run(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const result = await this.qaRunService.startQaRun({
         scenarioId: id,
+        boardId: body?.board_id,
         triggeredByType: 'user',
         triggeredById: user?.id || '',
       });

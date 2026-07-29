@@ -6,8 +6,8 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 // the room via the existing chat_room_message SSE flow — no new event type is
 // needed because Run-as-chat-room reuses the room infrastructure verbatim.
 //
-// Scoping mirrors Resource: workspace_id is required, board_id is nullable
-// (NULL = workspace-level). Sidebar surfaces both tiers separately.
+// workspace_id is required. board_id remains as a legacy compatibility column
+// and is always NULL after boot migration.
 @Entity('actions')
 export class Action {
   @PrimaryGeneratedColumn('uuid')
@@ -47,8 +47,7 @@ export class Action {
   // cron/manual-only Action. `'on_ticket_done'` opts the Action into the
   // on-ticket-done hook: when a ticket lands on a terminal column (Done),
   // OnTicketDoneActionService dispatches a Run with the completed ticket as
-  // context. Scope of "which finished tickets fire this Action" is the pair
-  // (board_id, trigger_label):
+  // context. trigger_label optionally narrows the workspace policy:
   //   - board_id (the existing column) NULL → any board in the workspace;
   //     <uuid> → only tickets whose terminal column belongs to that board.
   //   - trigger_label empty → any label; non-empty → the finished ticket must
@@ -59,7 +58,7 @@ export class Action {
   trigger: string;
 
   // Label-scope filter for `trigger='on_ticket_done'` (ticket 16a6339c). Empty
-  // = no label requirement (board-wide). Non-empty = the finished ticket's
+  // = no label requirement (workspace-wide). Non-empty = the finished ticket's
   // `labels` JSON array must include this exact string for the hook to fire.
   // Ignored when `trigger` is not 'on_ticket_done'.
   @Column({ type: 'varchar', default: '' })

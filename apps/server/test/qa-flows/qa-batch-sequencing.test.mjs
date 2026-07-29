@@ -42,7 +42,7 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch' });
+  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch' });
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-batch-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
 
@@ -69,6 +69,7 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   step('start_qa_batch — only the first scenario dispatches');
   const batch0 = await mcp.callTool('start_qa_batch', {
     workspace_id: ws.id,
+    board_id: board.id,
     scenario_ids: [s0.id, s1.id, s2.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_qa_batch failed: ${JSON.stringify(batch0)}`);
@@ -82,6 +83,8 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   assert.equal((await runCount(s1.id)).length, 0, 'scenario 1 NOT dispatched yet');
   assert.equal((await runCount(s2.id)).length, 0, 'scenario 2 NOT dispatched yet');
   const run0 = batch0.run_ids[0];
+  const firstRun = await mcp.callTool('get_qa_run', { run_id: run0, workspace_id: ws.id });
+  assert.equal(firstRun.board_id, board.id, 'batch Board is execution context, not definition scope');
 
   // ── 2. A failed run still advances to the next scenario ──────────────────────
   step('complete run 0 as FAILED → batch advances to scenario 1 (chain not broken)');

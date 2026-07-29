@@ -35,7 +35,7 @@ export async function resolveGitCredential(
   credRepo: Repository<Credential>,
   credentialId: string | null | undefined,
   workspaceId: string,
-  boardId?: string | null,
+  _boardId?: string | null,
 ): Promise<{ username?: string; token?: string } | null> {
   if (!credentialId) return null;
   const cred = await credRepo.findOne({ where: { id: credentialId } });
@@ -43,9 +43,8 @@ export async function resolveGitCredential(
   if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
     throw new GitCredentialResolutionError('Selected credential belongs to a different workspace');
   }
-  const credentialBoardId = cred.board_id || null;
-  if (credentialBoardId !== null && credentialBoardId !== (boardId || null)) {
-    throw new GitCredentialResolutionError('Selected credential belongs to a different board scope');
+  if (cred.board_id !== null && cred.board_id !== undefined) {
+    throw new GitCredentialResolutionError('Selected credential has not been migrated to Workspace scope');
   }
   try {
     const data = JSON.parse(decryptStrict(cred.encrypted_data));

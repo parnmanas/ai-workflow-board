@@ -125,7 +125,7 @@ const checklistItemSchema = z.object({
 
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch for the on-failure auto-ticket policy'),
-  board_id: z.string().optional().describe('Board to file the fix ticket on (falls back to run.board_id → profile.board_id)'),
+  board_id: z.string().optional().describe('Board to file the fix ticket on (falls back to the run Board when present)'),
   column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
   column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Fix ticket priority (default high)'),
@@ -155,20 +155,15 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'list_security_profiles',
-    'List security-inspection profiles in a workspace. Scope rule mirrors list_qa_scenarios: ' +
-    'omit board_id → ALL (workspace+board); pass board_id="" → workspace-scope only ' +
-    '(board_id IS NULL); pass board_id=<uuid> → that board only.',
+    'List reusable security-inspection profiles in a workspace.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       const repo = dataSource.getRepository(SecurityProfile);
-      const qb = repo.createQueryBuilder('p').where('p.workspace_id = :ws', { ws: workspace_id });
-      if (board_id !== undefined) {
-        if (board_id) qb.andWhere('p.board_id = :bid', { bid: board_id });
-        else qb.andWhere('p.board_id IS NULL');
-      }
+      const qb = repo.createQueryBuilder('p')
+        .where('p.workspace_id = :ws', { ws: workspace_id })
+        .andWhere('p.board_id IS NULL');
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return ok(rows.map(profileToJson));
     },
@@ -196,7 +191,6 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'Resource to inspect, or omit for AWB\'s own codebase.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Board ID to pin to, or omit/"" for workspace scope'),
       name: z.string().describe('Profile name (required)'),
       description: z.string().optional(),
       checklist: z.array(checklistItemSchema).optional().describe('Checklist items to inspect against'),
@@ -220,7 +214,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       try {
         const row = await securityProfileService.create({
           workspace_id: args.workspace_id,
-          board_id: args.board_id ?? null,
+          board_id: null,
           name: args.name,
           description: args.description,
           checklist: args.checklist,
@@ -254,7 +248,6 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     {
       profile_id: z.string().describe('SecurityProfile ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
-      board_id: z.string().optional(),
       name: z.string().optional(),
       description: z.string().optional(),
       checklist: z.array(checklistItemSchema).optional(),
@@ -310,13 +303,18 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'profile\'s target agent, and posts the rendered inspection prompt (which carries the ' +
     'incremental baseline when applicable). Returns run_id + room_id. Call again with the same ' +
     'profile to re-run — a fresh SecurityRun is stacked, preserving history.',
-    { profile_id: z.string().describe('SecurityProfile ID to run') },
-    async ({ profile_id }, extra: { sessionId?: string }) => {
+    {
+      profile_id: z.string().describe('SecurityProfile ID to run'),
+      board_id: z.string().optional()
+        .describe('Optional execution Board context; does not change or filter the Workspace-owned profile'),
+    },
+    async ({ profile_id, board_id }, extra: { sessionId?: string }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const result = await securityRunService.startRun({
           profileId: profile_id,
+          boardId: board_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
         });
@@ -466,14 +464,14 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'start_security_batch',
     'Start a SEQUENTIAL batch of several security inspections ("수동 전체 점검") — profile N+1 only ' +
     'dispatches after profile N reaches a terminal status (passed/failed/error), never all at once. ' +
-    'Pass an ordered `profile_ids` list, OR `all: true` to expand to every enabled profile in scope ' +
-    '(board_id "" = workspace-scope, <uuid> = that board, omit = all) RESOLVED AT DISPATCH TIME (so ' +
+    'Pass an ordered `profile_ids` list, OR `all: true` to expand to every enabled profile in the Workspace ' +
+    'RESOLVED AT DISPATCH TIME (so ' +
     'profile add/remove is reflected automatically). `stop_on_fail` (default false) halts the batch on ' +
     'the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
     'get_security_batch for progress.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Scope for `all`: "" → workspace-scope, <uuid> → board, omit → all'),
+      board_id: z.string().optional().describe('Optional execution Board context; does not filter reusable profile definitions'),
       profile_ids: z.array(z.string()).optional().describe('Ordered profile ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled profile in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),

@@ -129,11 +129,6 @@ export class CredentialsController {
         { workspace_id: workspaceId, board_id: IsNull() },
         { workspace_id: IsNull(), board_id: IsNull() },
       ];
-      if (includeAllScopes === 'true') {
-        where.push({ workspace_id: workspaceId });
-      } else if (boardId) {
-        where.push({ workspace_id: workspaceId, board_id: boardId });
-      }
     }
     if (provider) where = where.map((w) => ({ ...w, provider }));
     const creds = await this.credRepo.find({ where, order: { name: 'ASC' } });

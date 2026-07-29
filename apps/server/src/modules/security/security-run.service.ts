@@ -16,6 +16,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { renderSecurityRunPrompt, renderChecklistRefreshPrompt } from './security-prompt';
 import { SecurityFailureTicketService } from './security-failure-ticket.service';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
+import { Board } from '../../entities/Board';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -43,6 +44,8 @@ function normalizeFinding(f: any): SecurityFinding {
 
 export interface StartSecurityRunArgs {
   profileId: string;
+  /** Optional execution Board context. This never changes the reusable profile's ownership. */
+  boardId?: string | null;
   triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
   // Sequential-batch wiring. When present, the dispatched SecurityRun is stamped
@@ -151,6 +154,14 @@ export class SecurityRunService {
 
     const agent = await this.agentRepo.findOne({ where: { id: profile.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
+    const boardId = String(args.boardId ?? profile.on_failure_ticket?.board_id ?? '').trim() || null;
+    if (boardId) {
+      await findOrFail(
+        this.dataSource.getRepository(Board),
+        { where: { id: boardId, workspace_id: profile.workspace_id } },
+        'security execution Board not found in profile workspace',
+      );
+    }
 
     // Scope decision: incremental needs both scope_mode='incremental' and a
     // baseline SHA. Without a baseline (first run, or scope_mode='full') the run
@@ -175,7 +186,7 @@ export class SecurityRunService {
       id: runId,
       profile_id: profile.id,
       workspace_id: profile.workspace_id,
-      board_id: profile.board_id ?? null,
+      board_id: boardId,
       status: 'running',
       room_id: room.id,
       findings: [],
@@ -224,7 +235,7 @@ export class SecurityRunService {
       id: profile.id,
       runId,
       workspaceId: profile.workspace_id,
-      boardId: profile.board_id ?? null,
+      boardId,
       workspaceFolder: profile.workspace_folder,
       repoRef: profile.repo_ref,
       checkoutMode: profile.checkout_mode,
@@ -451,6 +462,13 @@ export class SecurityRunService {
    */
   async startBatch(args: StartSecurityBatchArgs): Promise<SecurityRunBatch> {
     if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (args.boardId) {
+      await findOrFail(
+        this.dataSource.getRepository(Board),
+        { where: { id: args.boardId, workspace_id: args.workspaceId } },
+        'security execution Board not found in batch workspace',
+      );
+    }
     const profileIds = await this._resolveBatchProfileIds(args);
     if (profileIds.length === 0) {
       throw makeError(400, 'no runnable profiles for this batch (none selected, or none enabled in scope)');
@@ -538,21 +556,17 @@ export class SecurityRunService {
       const byId = new Map(found.map((p) => [p.id, p]));
       return args.profileIds.filter((id) => {
         const p = byId.get(id);
-        return !!p && p.enabled !== false;
+        return !!p && !p.board_id && p.enabled !== false;
       });
     }
     if (args.all) {
-      // Expand to every enabled profile in scope, mirroring SecurityProfileService.list:
-      // boardId '' = workspace-scope only (board_id IS NULL), <uuid> = that board,
-      // omit/null = all rows in the workspace. Resolved AT DISPATCH TIME so profile
-      // add/remove is reflected automatically (the schedule keeps no id snapshot).
+      // Definitions are Workspace-owned. boardId is only the execution context
+      // stamped onto the batch and its runs. Resolve definitions at dispatch
+      // time so profile add/remove is reflected without a schedule snapshot.
       const qb = this.profileRepo.createQueryBuilder('p')
         .where('p.workspace_id = :ws', { ws: args.workspaceId })
+        .andWhere('p.board_id IS NULL')
         .andWhere('p.enabled = :en', { en: true });
-      if (args.boardId !== undefined && args.boardId !== null) {
-        if (args.boardId) qb.andWhere('p.board_id = :bid', { bid: args.boardId });
-        else qb.andWhere('p.board_id IS NULL');
-      }
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return rows.map((p) => p.id);
     }
@@ -575,6 +589,7 @@ export class SecurityRunService {
           profileId: ids[i],
           triggeredByType: batch.triggered_by_type as StartSecurityRunArgs['triggeredByType'],
           triggeredById: batch.triggered_by_id,
+          boardId: batch.board_id,
           batchId: batch.id,
           batchIndex: i,
         });

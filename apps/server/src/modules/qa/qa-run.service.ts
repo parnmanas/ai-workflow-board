@@ -20,6 +20,7 @@ import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
+import { Board } from '../../entities/Board';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -43,6 +44,8 @@ function isVisualEvidence(mimetype: string | null | undefined): boolean {
 
 export interface StartQaRunArgs {
   scenarioId: string;
+  /** Optional execution Board context. This never changes the reusable scenario's ownership. */
+  boardId?: string | null;
   triggeredByType: 'user' | 'system' | 'agent';
   triggeredById: string;
   // Rerun generation to stamp on the new QaRun (ticket 467dbc7a). Defaults to 0
@@ -157,6 +160,14 @@ export class QaRunService {
 
     const agent = await this.agentRepo.findOne({ where: { id: scenario.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
+    const boardId = String(args.boardId ?? scenario.on_failure_ticket?.board_id ?? '').trim() || null;
+    if (boardId) {
+      await findOrFail(
+        this.dataSource.getRepository(Board),
+        { where: { id: boardId, workspace_id: scenario.workspace_id } },
+        'QA execution Board not found in scenario workspace',
+      );
+    }
 
     // Pre-allocate the run id so the prompt can reference {{run.id}} and we can
     // write a complete row in one INSERT (same rationale as ActionsService).
@@ -196,7 +207,7 @@ export class QaRunService {
       id: runId,
       scenario_id: scenario.id,
       workspace_id: scenario.workspace_id,
-      board_id: scenario.board_id ?? null,
+      board_id: boardId,
       status: 'running',
       room_id: room.id,
       step_results: [],
@@ -248,7 +259,7 @@ export class QaRunService {
       id: scenario.id,
       runId,
       workspaceId: scenario.workspace_id,
-      boardId: scenario.board_id ?? null,
+      boardId,
       workspaceFolder: scenario.workspace_folder,
       repoRef: scenario.repo_ref,
       checkoutMode: scenario.checkout_mode,
@@ -620,6 +631,13 @@ export class QaRunService {
    */
   async startBatch(args: StartBatchArgs): Promise<QaRunBatch> {
     if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (args.boardId) {
+      await findOrFail(
+        this.dataSource.getRepository(Board),
+        { where: { id: args.boardId, workspace_id: args.workspaceId } },
+        'QA execution Board not found in batch workspace',
+      );
+    }
     const scenarioIds = await this._resolveBatchScenarioIds(args);
     if (scenarioIds.length === 0) {
       throw makeError(400, 'no runnable scenarios for this batch (none selected, or none enabled in scope)');
@@ -715,20 +733,16 @@ export class QaRunService {
       const byId = new Map(found.map((s) => [s.id, s]));
       return args.scenarioIds.filter((id) => {
         const s = byId.get(id);
-        return !!s && s.enabled !== false;
+        return !!s && !s.board_id && s.enabled !== false;
       });
     }
     if (args.all) {
-      // Expand to every enabled scenario in scope, mirroring QaService.list:
-      // boardId '' = workspace-scope only (board_id IS NULL), <uuid> = that
-      // board, omit/null = all rows in the workspace.
+      // Definitions are Workspace-owned. boardId is only the execution context
+      // stamped onto the batch and its runs; it never filters the catalog.
       const qb = this.scenarioRepo.createQueryBuilder('s')
         .where('s.workspace_id = :ws', { ws: args.workspaceId })
+        .andWhere('s.board_id IS NULL')
         .andWhere('s.enabled = :en', { en: true });
-      if (args.boardId !== undefined && args.boardId !== null) {
-        if (args.boardId) qb.andWhere('s.board_id = :bid', { bid: args.boardId });
-        else qb.andWhere('s.board_id IS NULL');
-      }
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return rows.map((s) => s.id);
     }
@@ -751,6 +765,7 @@ export class QaRunService {
           scenarioId: ids[i],
           triggeredByType: batch.triggered_by_type as StartQaRunArgs['triggeredByType'],
           triggeredById: batch.triggered_by_id,
+          boardId: batch.board_id,
           batchId: batch.id,
           batchIndex: i,
         });

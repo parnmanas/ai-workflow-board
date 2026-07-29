@@ -24,7 +24,7 @@ test('security inspection: profile CRUD + run roundtrip + incremental baseline a
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'security' });
+  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'security' });
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
 
@@ -54,13 +54,14 @@ test('security inspection: profile CRUD + run roundtrip + incremental baseline a
   assert.ok(Array.isArray(wsScoped) && wsScoped.some((p) => p.id === profile.id), 'workspace-scoped list returns the profile');
 
   step('start_security_run #1 — first run must be FULL (no baseline)');
-  const start1 = await mcp.callTool('start_security_run', { profile_id: profile.id });
+  const start1 = await mcp.callTool('start_security_run', { profile_id: profile.id, board_id: board.id });
   assert.ok(!start1.isError, `start#1 failed: ${JSON.stringify(start1)}`);
   assert.ok(start1.run_id && start1.room_id, 'run#1 has run_id + room_id (ChatRoom created)');
   assert.match(start1.prompt, /Planned scope: FULL/, 'run#1 prompt says FULL');
 
   const run1a = await mcp.callTool('get_security_run', { run_id: start1.run_id, workspace_id: ws.id });
   assert.equal(run1a.status, 'running');
+  assert.equal(run1a.board_id, board.id, 'Board is stamped as execution context');
   assert.equal(run1a.scope_used, 'full', 'run#1 scope_used=full');
   assert.equal(run1a.baseline_commit, null, 'run#1 has no baseline');
 
@@ -90,7 +91,7 @@ test('security inspection: profile CRUD + run roundtrip + incremental baseline a
   assert.equal(profileAfter.last_passed_commit, SHA1, 'PASS advanced last_passed_commit to scanned_commit');
 
   step('start_security_run #2 — now INCREMENTAL against the new baseline');
-  const start2 = await mcp.callTool('start_security_run', { profile_id: profile.id });
+  const start2 = await mcp.callTool('start_security_run', { profile_id: profile.id, board_id: board.id });
   assert.ok(!start2.isError, `start#2 failed: ${JSON.stringify(start2)}`);
   assert.match(start2.prompt, /Planned scope: INCREMENTAL/, 'run#2 prompt says INCREMENTAL');
   assert.match(start2.prompt, new RegExp(`git diff --stat ${SHA1}\\.\\.HEAD`), 'run#2 prompt diffs baseline..HEAD');

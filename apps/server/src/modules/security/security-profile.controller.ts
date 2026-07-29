@@ -165,11 +165,12 @@ export class SecurityProfileController {
 
   // Start (or re-run) a profile. Re-run is the same call → a fresh SecurityRun.
   @Post('profiles/:id/run')
-  async run(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+  async run(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const result = await this.runService.startRun({
         profileId: id,
+        boardId: body?.board_id,
         triggeredByType: 'user',
         triggeredById: user?.id || '',
       });

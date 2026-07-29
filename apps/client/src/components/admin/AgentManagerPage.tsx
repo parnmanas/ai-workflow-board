@@ -4,9 +4,12 @@ import { tokens } from '../../tokens';
 import type {
   Agent,
   AgentCredentialEntry,
+  AgentCurrentTask,
+  AgentLifecycleState,
   AgentManagerCommandKind,
   AgentManagerInstance,
   Credential,
+  DashboardAgent,
   PairingTokenMint,
   PairingTokenSafe,
   SubagentSummary,
@@ -15,6 +18,7 @@ import type {
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { Button, Input, Modal, Select } from '../common';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
@@ -37,6 +41,94 @@ import ManagedAgentDialog from './ManagedAgentDialog';
 
 const REFRESH_FALLBACK_MS = 15_000;
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
+
+interface AgentManagerPageProps {
+  workspaceAgents?: DashboardAgent[];
+  agentsLoading?: boolean;
+  agentsError?: string | null;
+  canManageRuntime?: boolean;
+  onRetryAgents?: () => void;
+  onOpenAgent?: (agentId: string) => void;
+}
+
+const AGENT_LIFECYCLE_META: Record<
+  AgentLifecycleState,
+  { label: string; color: string; background: string }
+> = {
+  online: { label: 'Online', color: tokens.colors.success, background: tokens.colors.successBg },
+  starting: { label: 'Starting', color: tokens.colors.warning, background: tokens.colors.warningBg },
+  never_started: { label: 'Never started', color: tokens.colors.textMuted, background: tokens.colors.surfaceSubtle },
+  offline: { label: 'Offline', color: tokens.colors.textMuted, background: tokens.colors.surfaceSubtle },
+  error: { label: 'Error', color: tokens.colors.danger, background: tokens.colors.dangerBg },
+};
+
+function resolveAgentLifecycle(agent: DashboardAgent): AgentLifecycleState {
+  if (agent.lifecycle_state) return agent.lifecycle_state;
+  if (agent.is_online) return 'online';
+  return agent.last_seen_at || agent.connected_at ? 'offline' : 'never_started';
+}
+
+function activeAgentTasks(agent: DashboardAgent | undefined): AgentCurrentTask[] {
+  if (!agent) return [];
+  if (agent.active_tasks?.length) return agent.active_tasks;
+  return agent.current_task ? [agent.current_task] : [];
+}
+
+function AgentStatusSummary({ agent }: { agent: DashboardAgent | undefined }) {
+  if (!agent) {
+    return <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>Status unavailable</span>;
+  }
+  const state = resolveAgentLifecycle(agent);
+  const meta = AGENT_LIFECYCLE_META[state];
+  const tasks = activeAgentTasks(agent);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span
+          title={agent.lifecycle_detail || undefined}
+          style={{
+            padding: '2px 7px',
+            borderRadius: 4,
+            fontSize: 10,
+            fontWeight: 700,
+            color: meta.color,
+            background: meta.background,
+            textTransform: 'uppercase',
+          }}
+        >
+          {meta.label}
+        </span>
+        {!agent.is_online && (
+          <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
+            {agent.last_seen_at ? `Last seen ${formatRelative(agent.last_seen_at)}` : 'Never connected'}
+          </span>
+        )}
+        <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
+          {tasks.length === 0 ? 'Idle' : `${tasks.length} active task${tasks.length === 1 ? '' : 's'}`}
+        </span>
+      </div>
+      {agent.lifecycle_detail && state === 'error' && (
+        <div style={{ fontSize: 11, color: tokens.colors.dangerLight }}>{agent.lifecycle_detail}</div>
+      )}
+      {tasks.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {tasks.map((task) => (
+            <div
+              key={`${task.kind || 'ticket'}:${task.ticket_id}:${task.role || ''}`}
+              style={{ fontSize: 11, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={task.ticket_title}
+            >
+              {task.kind === 'qa' ? 'QA · ' : ''}
+              {task.ticket_title}
+              {task.role ? ` · ${task.role}` : ''}
+              {task.claimed_at ? ` · ${formatRelative(task.claimed_at)}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function degradedReason(inst: AgentManagerInstance): string | null {
   // 아예 실행조차 못 하는 CLI 가 가장 심각한 degraded 상태 — 먼저 노출한다
@@ -326,11 +418,89 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
   );
 }
 
-interface InstanceDetailProps {
-  inst: AgentManagerInstance;
+function WorkspaceAgentRows({
+  agents,
+  loading,
+  error,
+  title,
+  emptyMessage,
+  onRetry,
+  onOpenAgent,
+}: {
+  agents: DashboardAgent[];
+  loading?: boolean;
+  error?: string | null;
+  title: string;
+  emptyMessage: string;
+  onRetry?: () => void;
+  onOpenAgent?: (agentId: string) => void;
+}) {
+  return (
+    <section
+      aria-label={title}
+      style={{
+        padding: 12,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 12, color: tokens.colors.textPrimary }}>{title}</h3>
+        <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>{agents.length}</span>
+      </div>
+      {error ? (
+        <div role="alert" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, color: tokens.colors.danger, fontSize: 11 }}>
+          <span>{error}</span>
+          {onRetry && <Button size="sm" variant="ghost" onClick={onRetry}>Retry</Button>}
+        </div>
+      ) : loading ? (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading agents...</div>
+      ) : agents.length === 0 ? (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{emptyMessage}</div>
+      ) : (
+        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {agents.map((agent) => (
+            <li
+              key={agent.id}
+              style={{
+                padding: 10,
+                background: tokens.colors.surface,
+                borderRadius: tokens.radii.sm,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 7,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span
+                  style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}
+                  title={formatAgentDisplayName(agent)}
+                >
+                  {formatAgentDisplayName(agent)}
+                </span>
+                {onOpenAgent && (
+                  <Button size="sm" variant="ghost" onClick={() => onOpenAgent(agent.id)}>
+                    Details
+                  </Button>
+                )}
+              </div>
+              <AgentStatusSummary agent={agent} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
-function InstanceDetail({ inst }: InstanceDetailProps) {
+interface InstanceDetailProps {
+  inst: AgentManagerInstance;
+  workspaceAgents?: DashboardAgent[];
+  onOpenAgent?: (agentId: string) => void;
+}
+
+function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDetailProps) {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const degraded = degradedReason(inst);
@@ -346,6 +516,7 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   // instances since daemon/proxy don't have an editable identity.
   const [managerInfo, setManagerInfo] = useState<{ name: string; description: string } | null>(null);
   const [editIdentityOpen, setEditIdentityOpen] = useState(false);
+  const dashboardAgent = workspaceAgents.find((agent) => agent.id === inst.agent_id);
 
   const loadSubagents = useCallback(async () => {
     try {
@@ -529,6 +700,14 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
             </span>
           )}
         </div>
+        {managerInfo?.description && (
+          <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5, color: tokens.colors.textSecondary }}>
+            {managerInfo.description}
+          </div>
+        )}
+        <div style={{ marginTop: 10 }}>
+          <AgentStatusSummary agent={dashboardAgent} />
+        </div>
         <dl
           style={{
             margin: '12px 0 0 0',
@@ -674,6 +853,24 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
         </dl>
 
         <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+          {onOpenAgent && dashboardAgent && (
+            <button
+              onClick={() => onOpenAgent(inst.agent_id)}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: 'transparent',
+                color: tokens.colors.textStrong,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              Agent details
+            </button>
+          )}
           {inst.mode === 'manager' && (
             <button
               onClick={() => setEditIdentityOpen(true)}
@@ -791,7 +988,13 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
         />
       )}
 
-      {inst.mode === 'manager' && <ManagedAgentsSection inst={inst} />}
+      {inst.mode === 'manager' && (
+        <ManagedAgentsSection
+          inst={inst}
+          workspaceAgents={workspaceAgents}
+          onOpenAgent={onOpenAgent}
+        />
+      )}
 
       {/* Subagents */}
       <section
@@ -905,20 +1108,33 @@ function InstanceDetail({ inst }: InstanceDetailProps) {
   );
 }
 
-export default function AgentManagerPage() {
+export default function AgentManagerPage({
+  workspaceAgents = [],
+  agentsLoading = false,
+  agentsError = null,
+  canManageRuntime = true,
+  onRetryAgents,
+  onOpenAgent,
+}: AgentManagerPageProps) {
+  const isMobile = useMediaQuery('(max-width: 767px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(canManageRuntime);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pairOpen, setPairOpen] = useState(false);
 
   const refresh = useCallback(async () => {
+    if (!canManageRuntime) {
+      setInstances([]);
+      setLoading(false);
+      return;
+    }
     try {
       const data = await api.listAgentManagerInstances();
       setInstances(data);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canManageRuntime]);
 
   useEffect(() => {
     refresh();
@@ -951,21 +1167,54 @@ export default function AgentManagerPage() {
       if (selectedId !== null) setSelectedId(null);
       return;
     }
-    if (!selectedId || !instances.some((i) => i.instance_id === selectedId)) {
+    if (!isMobile && (!selectedId || !instances.some((i) => i.instance_id === selectedId))) {
       setSelectedId(instances[0].instance_id);
     }
-  }, [instances, selectedId]);
+  }, [instances, isMobile, selectedId]);
 
   const selected = instances.find((i) => i.instance_id === selectedId) || null;
+  const representedAgentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const inst of instances) {
+      ids.add(inst.agent_id);
+      for (const agentId of inst.agent_ids ?? []) ids.add(agentId);
+    }
+    for (const agent of workspaceAgents) {
+      if (agent.manager_agent_id && instances.some((inst) => inst.agent_id === agent.manager_agent_id)) {
+        ids.add(agent.id);
+      }
+    }
+    return ids;
+  }, [instances, workspaceAgents]);
+  const agentsWithoutLiveRuntime = useMemo(
+    () => workspaceAgents.filter((agent) => !representedAgentIds.has(agent.id)),
+    [representedAgentIds, workspaceAgents],
+  );
+
+  if (!canManageRuntime) {
+    return (
+      <div style={{ height: '100%', overflow: 'auto' }}>
+        <WorkspaceAgentRows
+          agents={workspaceAgents}
+          loading={agentsLoading}
+          error={agentsError}
+          title="Workspace agents"
+          emptyMessage="No agents in this workspace yet."
+          onRetry={onRetryAgents}
+          onOpenAgent={onOpenAgent}
+        />
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', gap: 16, height: '100%', minHeight: 0 }}>
       {/* Master pane */}
       <div
         style={{
-          width: 320,
+          width: isMobile ? '100%' : 320,
           flexShrink: 0,
-          display: 'flex',
+          display: isMobile && selected ? 'none' : 'flex',
           flexDirection: 'column',
           minHeight: 0,
         }}
@@ -1028,13 +1277,44 @@ export default function AgentManagerPage() {
               ))}
             </div>
           ))}
+          {(agentsWithoutLiveRuntime.length > 0 || instances.length === 0 || agentsLoading || agentsError) && (
+            <div style={{ marginTop: 12 }}>
+              <WorkspaceAgentRows
+                agents={agentsWithoutLiveRuntime}
+                loading={agentsLoading}
+                error={agentsError}
+                title="Without a live runtime"
+                emptyMessage="Every workspace agent is represented by a live runtime."
+                onRetry={onRetryAgents}
+                onOpenAgent={onOpenAgent}
+              />
+            </div>
+          )}
         </div>
       </div>
 
       {/* Detail pane */}
-      <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+      <div
+        style={{
+          display: isMobile && !selected ? 'none' : 'flex',
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        {isMobile && selected && (
+          <Button size="sm" variant="secondary" onClick={() => setSelectedId(null)} style={{ alignSelf: 'flex-start' }}>
+            ← Back to agents
+          </Button>
+        )}
         {selected ? (
-          <InstanceDetail inst={selected} />
+          <InstanceDetail
+            inst={selected}
+            workspaceAgents={workspaceAgents}
+            onOpenAgent={onOpenAgent}
+          />
         ) : (
           <div
             style={{
@@ -1310,6 +1590,8 @@ function CredentialExpiryBadge({ entry }: { entry: AgentCredentialEntry | undefi
 
 interface ManagedAgentsSectionProps {
   inst: AgentManagerInstance;
+  workspaceAgents?: DashboardAgent[];
+  onOpenAgent?: (agentId: string) => void;
 }
 
 // CLI lifecycle is currently stubbed in the manager (registry-only, no
@@ -1372,7 +1654,11 @@ const MAINTENANCE_BUTTONS: {
   },
 ];
 
-function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
+function ManagedAgentsSection({
+  inst,
+  workspaceAgents = [],
+  onOpenAgent,
+}: ManagedAgentsSectionProps) {
   const { showToast } = useToast();
   const [agents, setAgents] = useState<Agent[] | null>(null);
   // Lookup table for inst.agent_credentials by agent_id; rebuilt whenever
@@ -1386,6 +1672,10 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
     }
     return m;
   }, [inst.agent_credentials]);
+  const dashboardByAgentId = useMemo(
+    () => new Map(workspaceAgents.map((agent) => [agent.id, agent])),
+    [workspaceAgents],
+  );
   // null = closed, Agent = editing that row. Edit-only here now — managed
   // agent CREATION moved to the workspace AI Agents tab so the new agent
   // gets created in the operator's actual workspace instead of inheriting
@@ -1530,6 +1820,7 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
           {agents.map((a) => {
             const supervised = inst.agent_ids?.includes(a.id);
+            const dashboardAgent = dashboardByAgentId.get(a.id);
             return (
               <li
                 key={a.id}
@@ -1575,6 +1866,15 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                     <CredentialExpiryBadge entry={credentialsByAgentId.get(a.id)} />
                   </div>
                   <div style={{ display: 'flex', gap: 4 }}>
+                    {onOpenAgent && dashboardAgent && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onOpenAgent(a.id)}
+                      >
+                        Details
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="ghost"
@@ -1600,6 +1900,12 @@ function ManagedAgentsSection({ inst }: ManagedAgentsSectionProps) {
                 <div style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
                   id <code>{a.id.slice(0, 8)}</code> · cwd <code>{a.working_dir || '—'}</code>
                 </div>
+                {a.description && (
+                  <div style={{ fontSize: 11, color: tokens.colors.textSecondary, lineHeight: 1.45 }}>
+                    {a.description}
+                  </div>
+                )}
+                <AgentStatusSummary agent={dashboardAgent} />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted, flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 600 }}>Workspace:</span>
                   <select

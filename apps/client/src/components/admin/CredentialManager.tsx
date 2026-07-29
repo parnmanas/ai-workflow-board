@@ -100,7 +100,6 @@ export default function CredentialManager({
   globalMode = false,
   catalogMode = false,
   createScope = 'workspace',
-  boardId,
   allScopes = false,
   canManageGlobal = false,
 }: {
@@ -108,7 +107,6 @@ export default function CredentialManager({
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
-  boardId?: string | null;
   allScopes?: boolean;
   canManageGlobal?: boolean;
 }) {
@@ -136,7 +134,6 @@ export default function CredentialManager({
       const list = globalMode
         ? await api.listCredentials(undefined, { scope: 'global' })
         : await api.listCredentials(effectiveWsId, {
-            boardId: allScopes ? undefined : boardId,
             includeAllScopes: catalogMode && allScopes,
           });
       setCredentials(list);
@@ -145,7 +142,7 @@ export default function CredentialManager({
     } finally {
       setLoading(false);
     }
-  }, [globalMode, catalogMode, effectiveWsId, boardId, allScopes, showToast]);
+  }, [globalMode, catalogMode, effectiveWsId, allScopes, showToast]);
 
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
@@ -191,7 +188,6 @@ export default function CredentialManager({
         await api.updateCredential(editCred.id, {
           scope: editCred.scope,
           workspace_id: editCred.workspace_id,
-          board_id: editCred.board_id,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -203,7 +199,6 @@ export default function CredentialManager({
         await api.createCredential({
           scope,
           workspace_id: scope === 'global' ? undefined : effectiveWsId,
-          board_id: scope === 'board' ? boardId : null,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,

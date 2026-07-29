@@ -128,7 +128,7 @@ export interface AgentSubagentRollup {
   recent: SubagentSummary[];
 }
 
-export type CatalogScope = 'global' | 'workspace' | 'board';
+export type CatalogScope = 'global' | 'workspace';
 
 export interface PromptTemplate {
   id: string; // GUID

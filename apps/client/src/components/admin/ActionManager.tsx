@@ -15,24 +15,16 @@ interface AgentOption {
   name: string;
 }
 
-interface BoardOption {
-  id: string;
-  name: string;
-}
-
 interface ActionManagerProps {
   workspaceId?: string;
-  boardId?: string | null;
-  allScopes?: boolean;
 }
 
-export default function ActionManager({ workspaceId, boardId, allScopes = false }: ActionManagerProps) {
+export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
   const [actions, setActions] = useState<Action[]>([]);
   const [agents, setAgents] = useState<AgentOption[]>([]);
-  const [boards, setBoards] = useState<BoardOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Action | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -51,7 +43,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
   const [formMaxRuns, setFormMaxRuns] = useState(10);
   const [formTrigger, setFormTrigger] = useState('');
   const [formTriggerLabel, setFormTriggerLabel] = useState('');
-  const [formTriggerBoardId, setFormTriggerBoardId] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<{ name?: string; agent?: string }>({});
 
   const loadActions = useCallback(async () => {
@@ -62,20 +53,18 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
     }
     setLoading(true);
     try {
-      const [list, agentList, boardList] = await Promise.all([
-        api.listActions(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
+      const [list, agentList] = await Promise.all([
+        api.listActions(effectiveWorkspaceId),
         api.getAgents(effectiveWorkspaceId).catch(() => [] as any[]),
-        api.getBoards(effectiveWorkspaceId).catch(() => [] as any[]),
       ]);
       setActions(list);
       setAgents((agentList as any[]).map((a) => ({ id: a.id, name: a.name })));
-      setBoards((boardList as any[]).map((b: any) => ({ id: b.id, name: b.name })));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load actions', 'error');
     } finally {
       setLoading(false);
     }
-  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
+  }, [effectiveWorkspaceId, showToast]);
 
   useEffect(() => { loadActions(); }, [loadActions]);
 
@@ -99,7 +88,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
     setFormMaxRuns(10);
     setFormTrigger('');
     setFormTriggerLabel('');
-    setFormTriggerBoardId(null);
     setFormErrors({});
     setShowForm(true);
   };
@@ -115,7 +103,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
     setFormMaxRuns(a.max_runs);
     setFormTrigger(a.trigger || '');
     setFormTriggerLabel(a.trigger_label || '');
-    setFormTriggerBoardId(a.trigger === 'on_ticket_done' ? (a.board_id || null) : null);
     setFormErrors({});
     setShowForm(true);
   };
@@ -138,9 +125,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
         trigger: formTrigger,
         trigger_label: formTrigger === 'on_ticket_done' ? formTriggerLabel : '',
       };
-      const effectiveBoardId = formTrigger === 'on_ticket_done'
-        ? (formTriggerBoardId || null)
-        : (boardId !== undefined ? (boardId || null) : undefined);
       if (editAction) {
         const updated = await api.updateAction(editAction.id, {
           workspace_id: effectiveWorkspaceId,
@@ -148,7 +132,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
           description: formDescription,
           prompt: formPrompt,
           target_agent_id: formAgentId,
-          board_id: editAction.board_id,
           schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
@@ -159,7 +142,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
       } else {
         await api.createAction({
           workspace_id: effectiveWorkspaceId,
-          board_id: effectiveBoardId ?? null,
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
@@ -285,7 +267,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
                     >
                       {a.name}
                     </button>
-                    <Badge variant="info">{a.board_id ? 'board' : 'workspace'}</Badge>
                     {a.enabled ? <Badge variant="success">on</Badge> : <Badge variant="neutral">off</Badge>}
                   </div>
                   {a.description && (
@@ -388,32 +369,6 @@ export default function ActionManager({ workspaceId, boardId, allScopes = false 
           </div>
           {formTrigger === 'on_ticket_done' && (
             <>
-              <div>
-                <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
-                  Board scope
-                </label>
-                <select
-                  value={formTriggerBoardId ?? ''}
-                  onChange={(e) => setFormTriggerBoardId(e.target.value || null)}
-                  disabled={!!editAction}
-                  title={editAction ? 'Scope is fixed after creation' : undefined}
-                  style={{
-                    width: '100%',
-                    background: tokens.colors.surface,
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md,
-                    padding: '8px 10px',
-                    color: tokens.colors.textStrong,
-                    fontSize: 13,
-                    fontFamily: 'inherit',
-                  }}
-                >
-                  <option value="">Any board in workspace</option>
-                  {boards.map((b) => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
-                  ))}
-                </select>
-              </div>
               <Input
                 label="Trigger label (optional)"
                 value={formTriggerLabel}

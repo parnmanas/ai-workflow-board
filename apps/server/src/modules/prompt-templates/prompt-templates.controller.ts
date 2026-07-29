@@ -42,11 +42,8 @@ export class PromptTemplatesController {
     }
     const qb = this.templateRepo.createQueryBuilder('t')
       .where('(t.workspace_id IS NULL OR t.workspace_id = :workspaceId)', { workspaceId })
+      .andWhere('t.board_id IS NULL')
       .orderBy('t.name', 'ASC');
-    if (includeAllScopes !== 'true') {
-      if (boardId) qb.andWhere('(t.board_id IS NULL OR t.board_id = :boardId)', { boardId });
-      else qb.andWhere('t.board_id IS NULL');
-    }
     if (category) qb.andWhere('t.category = :category', { category });
     const templates = await qb.getMany();
     return res.json(templates.map(t => ({ ...t, scope: catalogScopeOf(t) })));

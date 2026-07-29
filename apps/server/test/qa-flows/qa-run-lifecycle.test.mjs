@@ -95,7 +95,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
 
   // ── 2. start_qa_run ──────────────────────────────────────────────────────────
   step('start_qa_run creates a run + room and returns the rendered prompt');
-  const started = await mcp.callTool('start_qa_run', { scenario_id: scenario.id });
+  const started = await mcp.callTool('start_qa_run', { scenario_id: scenario.id, board_id: board.id });
   assert.ok(!started?.isError, `start_qa_run failed: ${JSON.stringify(started)}`);
   assert.ok(started.run_id && started.room_id, 'run_id + room_id returned');
   assert.ok(started.prompt.includes(started.run_id), 'returned prompt references the live run id');
@@ -105,6 +105,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   // The freshly started run is in `running` with empty results.
   let run = await mcp.callTool('get_qa_run', { run_id: runId, workspace_id: ws.id });
   assert.equal(run.status, 'running');
+  assert.equal(run.board_id, board.id, 'Board is stamped as execution context');
   assert.deepEqual(run.step_results, []);
 
   // ── 3. record_qa_step ────────────────────────────────────────────────────────
@@ -174,7 +175,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
     const sc = await mcp.callTool('create_qa_scenario', createArgs);
     assert.ok(!sc?.isError, `create ${_key}: ${JSON.stringify(sc)}`);
 
-    const run2 = await mcp.callTool('start_qa_run', { scenario_id: sc.id });
+    const run2 = await mcp.callTool('start_qa_run', { scenario_id: sc.id, board_id: board.id });
     assert.ok(!run2?.isError && run2.run_id, `start ${_key}: ${JSON.stringify(run2)}`);
 
     for (const s of sc.steps) {

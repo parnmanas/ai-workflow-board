@@ -96,10 +96,10 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   // ── Setup: a scenario opted into the closed loop, max 2 reruns ───────────────
   step('Create scenario with rerun_on_fix, max_rerun_attempts=2');
   const sc = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Closed loop QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Closed loop QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
-      enabled: true, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 2, rerun_delay_seconds: 0,
     },
   });
@@ -168,9 +168,11 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   // ── CASE 5: negative — rerun_on_fix OFF never reruns on Done ─────────────────
   step('CASE 5: a scenario with rerun_on_fix OFF does not rerun on Done');
   const scOff = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'No-rerun QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'No-rerun QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
-    on_failure_ticket: { enabled: true, column_name: 'Todo', dedupe: 'per_run', rerun_on_fix: false },
+    on_failure_ticket: {
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_run', rerun_on_fix: false,
+    },
   });
   assert.ok(!scOff?.isError && scOff.id);
   await mcp.callTool('start_qa_run', { scenario_id: scOff.id });

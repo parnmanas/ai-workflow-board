@@ -863,7 +863,7 @@ export default function TicketPanel({
   const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
   // Base repository / branch picker state. The repo list is filtered to
-  // type='repository' resources visible from this workspace + board scope.
+  // type='repository' resources visible from this workspace.
   // Branch list is fetched lazily when a repo is selected (git ls-remote).
   const [baseRepoId, setBaseRepoId] = useState<string>(activeTicket.base_repo_resource_id || '');
   const [baseBranch, setBaseBranch] = useState<string>(activeTicket.base_branch || '');
@@ -874,7 +874,7 @@ export default function TicketPanel({
   // the draft set the picker mutates; committed via the Save/Discard footer
   // (dirtyTicketFields) as `update_ticket(on_done_action_ids=[...])`. The
   // candidate list is every Action in the workspace — method (a) dispatch only
-  // checks workspace + enabled, not board scope, so any workspace Action is
+  // checks workspace + enabled, so any workspace Action is
   // validly bindable here.
   const [onDoneActionIds, setOnDoneActionIds] = useState<string[]>(activeTicket.on_done_action_ids || []);
   // Cross-board handoff relay draft (ticket ac21a745). null = no relay. Committed
@@ -1487,9 +1487,8 @@ export default function TicketPanel({
     return () => document.removeEventListener('keydown', handler);
   }, [requestClose]);
 
-  // Load the repository resources visible to this ticket. We pull workspace +
-  // board scope in one shot (no board_id filter) so workspace-wide repos show
-  // up alongside the per-board ones, then dedupe by id.
+  // Load the repository resources visible to this ticket at Workspace scope,
+  // then dedupe by id.
   useEffect(() => {
     const wsId = workspaceId || getActiveWorkspaceId() || '';
     if (!wsId) {
@@ -1497,16 +1496,15 @@ export default function TicketPanel({
       return;
     }
     let cancelled = false;
-    api.listResources(wsId, undefined, 'repository')
+    api.listResources(wsId, 'repository')
       .then(rows => { if (!cancelled) setRepoOptions(rows || []); })
       .catch(() => { if (!cancelled) setRepoOptions([]); });
     return () => { cancelled = true; };
   }, [workspaceId]);
 
-  // Load the Action candidates for the "Run on Done" picker. Omitting board_id
-  // returns every Action in the workspace (board-scoped + workspace-scoped) —
-  // method (a) per-ticket dispatch only checks workspace + enabled, so any of
-  // them is bindable to this ticket regardless of which board it belongs to.
+  // Load the Action candidates for the "Run on Done" picker. Reusable Actions
+  // are Workspace-scoped, and method (a) per-ticket dispatch checks workspace
+  // + enabled.
   useEffect(() => {
     const wsId = workspaceId || getActiveWorkspaceId() || '';
     if (!wsId) {
@@ -1609,14 +1607,11 @@ export default function TicketPanel({
       return;
     }
     try {
-      // Board-scoped files first (most relevant), then workspace-scoped, then
-      // existing comment attachments — de-duped by id, files with bytes only.
-      const [boardRes, wsRes] = await Promise.all([
-        currentBoardId ? api.listResources(ws, currentBoardId).catch(() => [] as Resource[]) : Promise.resolve([] as Resource[]),
-        api.listResources(ws, '').catch(() => [] as Resource[]),
-      ]);
+      // Workspace files first, then existing comment attachments — de-duped
+      // by id, files with bytes only.
+      const wsRes = await api.listResources(ws).catch(() => [] as Resource[]);
       const seen = new Set<string>();
-      const merged = [...boardRes, ...wsRes].filter((r) => {
+      const merged = wsRes.filter((r) => {
         if (seen.has(r.id)) return false;
         seen.add(r.id);
         return !!r.file_name; // only file-backed resources are attachable
@@ -1627,7 +1622,7 @@ export default function TicketPanel({
     } finally {
       setResourcePickerLoading(false);
     }
-  }, [activeTicket, workspaceId, currentBoardId]);
+  }, [activeTicket, workspaceId]);
 
   const addResourceReference = (r: Resource) => {
     setCommentAttachments(prev => {
@@ -1918,7 +1913,6 @@ export default function TicketPanel({
           if (att.file) {
             const uploaded = await api.uploadResourceFile(att.file, {
               workspace_id: ws,
-              board_id: currentBoardId || null,
               type: 'comment_attachment',
             });
             resourceIds.push(uploaded.id);
@@ -3119,9 +3113,8 @@ export default function TicketPanel({
 
                 Two regions: an ordered "selected" list (the array order is the
                 dispatch order — reorder with ↑/↓) and an "add" candidate list.
-                Candidates are scoped to this board + workspace-scoped actions;
-                other boards' board-scoped actions are hidden (criterion a). An
-                already-bound id that's out-of-scope or deleted still shows in
+                Candidates are scoped to this workspace. An already-bound id
+                that's no longer available or deleted still shows in
                 the selected list so it can be unbound (criterion d). */}
             <div style={{ marginBottom: 14 }}>
               <label style={{ ...labelStyle, marginBottom: 6 }}>
@@ -3133,16 +3126,12 @@ export default function TicketPanel({
                 padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5,
               }}>
                 {(() => {
-                  // Candidate add-list scope (ticket 59afc55a, criterion a):
-                  // workspace-scoped Actions (board_id null) + Actions on THIS
-                  // ticket's board only. Board-scoped Actions belonging to a
-                  // DIFFERENT board are excluded from the add list. We still
-                  // keep `actionOptions` as the full workspace fetch so names
-                  // resolve for already-bound ids (incl. out-of-scope/cross-board
-                  // ones) in the selected list below (criterion d).
-                  const inScope = (a: Action) => a.board_id == null || a.board_id === currentBoardId;
+                  // All reusable Actions are Workspace-scoped. Keep
+                  // `actionOptions` as the full Workspace fetch so names
+                  // resolve for already-bound ids that were deleted or are
+                  // otherwise unavailable (criterion d).
                   const actionById = new Map(actionOptions.map(a => [a.id, a]));
-                  const candidates = actionOptions.filter(a => inScope(a) && !onDoneActionIds.includes(a.id));
+                  const candidates = actionOptions.filter(a => !onDoneActionIds.includes(a.id));
 
                   // Reorder helper — moves the id at `from` to `to`, clamped.
                   // The array order IS the dispatch order, saved verbatim via

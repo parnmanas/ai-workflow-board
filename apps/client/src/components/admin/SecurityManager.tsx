@@ -24,7 +24,6 @@ type SecAgent = { id: string; name: string; manager_name?: string };
 
 interface SecurityManagerProps {
   workspaceId?: string;
-  boardId?: string;
   allScopes?: boolean;
 }
 
@@ -121,7 +120,7 @@ interface ProfileRow extends SecurityProfileListItem {
  * pass-rate), runs them (single or sequential batch), and visualizes each run's
  * findings grouped by severity with evidence galleries + auto-fix-ticket links.
  */
-export default function SecurityManager({ workspaceId, boardId, allScopes = false }: SecurityManagerProps) {
+export default function SecurityManager({ workspaceId, allScopes = false }: SecurityManagerProps) {
   const { showToast } = useToast();
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
@@ -145,9 +144,9 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
     if (!effectiveWorkspaceId) { setProfiles([]); setSchedules([]); return; }
     try {
       const [list, agentList, scheduleList] = await Promise.all([
-        api.listSecurityProfiles(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)),
+        api.listSecurityProfiles(effectiveWorkspaceId),
         api.getAgents(effectiveWorkspaceId).catch(() => []),
-        api.listSecuritySchedules(effectiveWorkspaceId, allScopes ? undefined : (boardId !== undefined ? (boardId || '') : undefined)).catch(() => []),
+        api.listSecuritySchedules(effectiveWorkspaceId).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.
       // The list projection carries the last-run rollup but not these two; we
@@ -172,7 +171,7 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
     } catch (err: any) {
       showToast(err?.message || 'Failed to load security profiles', 'error');
     }
-  }, [effectiveWorkspaceId, boardId, allScopes, showToast]);
+  }, [effectiveWorkspaceId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -234,7 +233,6 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
     try {
       const batch = await api.startSecurityBatch({
         workspace_id: effectiveWorkspaceId,
-        board_id: boardId !== undefined ? (boardId || '') : undefined,
         ...payload,
       });
       setActiveBatch(batch);
@@ -244,7 +242,7 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
     } finally {
       setBatchStarting(false);
     }
-  }, [effectiveWorkspaceId, boardId, showToast]);
+  }, [effectiveWorkspaceId, showToast]);
 
   // Poll the active batch while it's running (dispatch is server-driven, one run
   // at a time).
@@ -325,7 +323,6 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
         <ProfileEditor
           profile={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
-          boardId={boardId}
           agents={agents}
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
@@ -349,7 +346,6 @@ export default function SecurityManager({ workspaceId, boardId, allScopes = fals
         <ScheduleEditor
           schedule={editingSchedule === 'new' ? null : editingSchedule}
           workspaceId={effectiveWorkspaceId}
-          boardId={boardId}
           profiles={profiles}
           onClose={() => setEditingSchedule(null)}
           onSaved={async () => { setEditingSchedule(null); await load(); }}
@@ -767,7 +763,6 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       <td style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</span>
-          <Pill variant="info">{p.board_id ? 'board' : 'workspace'}</Pill>
           {!p.enabled && <Pill variant="warning">disabled</Pill>}
         </div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id)}</div>
@@ -1170,13 +1165,12 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 interface ProfileEditorProps {
   profile: SecurityProfile | null;
   workspaceId: string;
-  boardId?: string;
   agents: SecAgent[];
   onClose: () => void;
   onSaved: (p: SecurityProfile) => void;
 }
 
-function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved }: ProfileEditorProps) {
+function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: ProfileEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(profile?.name ?? '');
   const [description, setDescription] = useState(profile?.description ?? '');
@@ -1243,7 +1237,7 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
       if (profile) {
         saved = await api.updateSecurityProfile(profile.id, { workspace_id: workspaceId, ...common });
       } else {
-        saved = await api.createSecurityProfile({ workspace_id: workspaceId, board_id: boardId || null, ...common });
+        saved = await api.createSecurityProfile({ workspace_id: workspaceId, ...common });
       }
       showToast(`프로파일 ${profile ? '수정' : '생성'}됨`, 'success');
       onSaved(saved);
@@ -1397,13 +1391,12 @@ function ProfileEditor({ profile, workspaceId, boardId, agents, onClose, onSaved
 interface ScheduleEditorProps {
   schedule: SecuritySchedule | null;
   workspaceId: string;
-  boardId?: string;
   profiles: SecurityProfileListItem[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, workspaceId, profiles, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   const [kind, setKind] = useState<SecurityScheduleKind>(schedule?.kind ?? 'scan');
@@ -1469,7 +1462,7 @@ function ScheduleEditor({ schedule, workspaceId, boardId, profiles, onClose, onS
       if (schedule) {
         await api.updateSecuritySchedule(schedule.id, base);
       } else {
-        await api.createSecuritySchedule({ ...base, board_id: boardId !== undefined ? (boardId || null) : null });
+        await api.createSecuritySchedule(base);
       }
       showToast(`스케줄 ${schedule ? '수정' : '생성'}됨`, 'success');
       onSaved();

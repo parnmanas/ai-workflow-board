@@ -93,10 +93,10 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 1. failed run → fix ticket with evidence ────────────────────────────────
   step('CASE 1: failed run files a fix ticket with evidence');
   const sc1 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Login flow QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Login flow QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
-      enabled: true, column_name: 'Todo', priority: 'high', assignee_id: qaAgent.id,
+      enabled: true, board_id: board.id, column_name: 'Todo', priority: 'high', assignee_id: qaAgent.id,
       dedupe: 'per_run', labels: ['qa-failure', 'auto'],
     },
   });
@@ -148,9 +148,11 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 4. per_open_ticket dedupe → recurrence comment, no new ticket ───────────
   step('CASE 4: per_open_ticket appends a recurrence comment instead of a new ticket');
   const sc2 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Checkout QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Checkout QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
-    on_failure_ticket: { enabled: true, column_name: 'Todo', dedupe: 'per_open_ticket' },
+    on_failure_ticket: {
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
+    },
   });
   assert.ok(!sc2?.isError && sc2.id, `create sc2: ${JSON.stringify(sc2)}`);
 
@@ -170,7 +172,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 5. scenario WITHOUT on_failure_ticket → nothing filed ───────────────────
   step('CASE 5: a scenario without on_failure_ticket files nothing on failure');
   const sc3 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'No-hook QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'No-hook QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
   });
   assert.ok(!sc3?.isError && sc3.id);
@@ -183,9 +185,9 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 6. dedupe DEFAULTS to per_open_ticket (ticket 64b9cbaf) ─────────────────
   step('CASE 6: dedupe defaults to per_open_ticket — flaky scenario converges to one ticket');
   const sc6 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Default dedupe QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Default dedupe QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
-    on_failure_ticket: { enabled: true, column_name: 'Todo' },   // NO dedupe key → default
+    on_failure_ticket: { enabled: true, board_id: board.id, column_name: 'Todo' },   // NO dedupe key → default
   });
   assert.ok(!sc6?.isError && sc6.id, `create sc6: ${JSON.stringify(sc6)}`);
 
@@ -205,12 +207,12 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 7. a passing run auto-closes all open sibling fix tickets (ticket 64b9cbaf) ──
   step('CASE 7: a passing run auto-closes every open sibling + suppresses rerun-on-fix');
   const sc7 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Auto-close QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Auto-close QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
     // per_run so we build a 2-ticket sibling cluster; rerun_on_fix so the close
     // would fire a rerun UNLESS the qa_rerun_dispatched_at stamp suppresses it.
     on_failure_ticket: {
-      enabled: true, column_name: 'Todo', dedupe: 'per_run',
+      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_run',
       rerun_on_fix: true, max_rerun_attempts: 3, rerun_delay_seconds: 0,
     },
   });
@@ -256,9 +258,9 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 8. auto-close scope guard (ticket 64b9cbaf) ─────────────────────────────
   step('CASE 8: a non-auto ticket carrying only the scenario label is NOT auto-closed');
   const sc8 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, board_id: board.id, name: 'Scope guard QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Scope guard QA', target_agent_id: qaAgent.id,
     qa_driver: 'browser', steps,
-    on_failure_ticket: { enabled: true, column_name: 'Todo', dedupe: 'per_run' },
+    on_failure_ticket: { enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_run' },
   });
   assert.ok(!sc8?.isError && sc8.id, `create sc8: ${JSON.stringify(sc8)}`);
 

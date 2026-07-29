@@ -4,7 +4,7 @@ import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/works
 /**
  * QaScenario — a reusable, step-based QA scenario definition.
  *
- * Mirrors the `Action` entity (workspace/board scope + target_agent_id +
+ * Mirrors the `Action` entity (workspace scope + target_agent_id +
  * max_runs FIFO budget) but adds the scenario-specific pieces: an ordered
  * `steps[]` array (the source of the visualizer), a `qa_driver` selector and
  * its `qa_driver_config`, plus `tags`.
@@ -23,7 +23,8 @@ export class QaScenario {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // null = workspace-scoped (applies to any board); <uuid> = pinned to a board.
+  // Legacy compatibility column. Boot migration clears it; definitions are
+  // Global/Workspace-owned and Board context belongs to QaRun.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

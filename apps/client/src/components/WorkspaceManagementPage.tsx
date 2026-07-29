@@ -39,19 +39,12 @@ const PAGE_INFO: Record<WorkspaceManagementKind, { title: string; description: s
   'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Global backend definitions and their current Workspace assignment.' },
 };
 
-export default function WorkspaceManagementPage({
-  kind,
-  boardScoped = false,
-}: {
-  kind: WorkspaceManagementKind;
-  boardScoped?: boolean;
-}) {
-  const { wsId = '', boardId = '' } = useParams<{ wsId: string; boardId: string }>();
+export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManagementKind }) {
+  const { wsId = '' } = useParams<{ wsId: string }>();
   const { hasPermission } = useAuth();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [createScope, setCreateScope] = useState<CatalogScope>('workspace');
   const info = PAGE_INFO[kind];
-  const effectiveCreateScope: CatalogScope = boardScoped ? 'board' : createScope;
 
   useEffect(() => {
     if (!wsId) return;
@@ -61,8 +54,7 @@ export default function WorkspaceManagementPage({
   const definitionProps = {
     workspaceId: wsId,
     catalogMode: true,
-    createScope: effectiveCreateScope,
-    boardId: boardScoped ? boardId : null,
+    createScope,
     allScopes: false,
     canManageGlobal: hasPermission('admin.access'),
   } as const;
@@ -78,13 +70,13 @@ export default function WorkspaceManagementPage({
       case 'prompt-templates':
         return <PromptTemplateManager {...definitionProps} />;
       case 'actions':
-        return <ActionManager workspaceId={wsId} boardId={boardScoped ? boardId : null} />;
+        return <ActionManager workspaceId={wsId} />;
       case 'qa':
-        return <QaManager workspaceId={wsId} boardId={boardScoped ? boardId : ''} />;
+        return <QaManager workspaceId={wsId} />;
       case 'security':
-        return <SecurityManager workspaceId={wsId} boardId={boardScoped ? boardId : ''} />;
+        return <SecurityManager workspaceId={wsId} />;
       case 'schedules':
-        return <WorkspaceSchedulesEditor workspaceId={wsId} boardId={boardScoped ? boardId : ''} />;
+        return <WorkspaceSchedulesEditor workspaceId={wsId} />;
       case 'claude-backend-profiles':
         return (
           <>
@@ -102,10 +94,10 @@ export default function WorkspaceManagementPage({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title={boardScoped ? `Board ${info.title}` : info.title}
-        description={boardScoped ? `Inherited Global and Workspace items plus definitions owned by this Board.` : info.description}
+        title={info.title}
+        description={info.description}
       />
-      {info.scopedDefinition && !boardScoped && (
+      {info.scopedDefinition && (
         <div
           style={{
             padding: '14px 24px',

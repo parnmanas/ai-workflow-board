@@ -70,16 +70,14 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'list_qa_schedules',
-    'List QA schedules in a workspace. Scope rule mirrors list_qa_scenarios: omit board_id → ALL; ' +
-    'board_id="" → workspace-scope only (board_id IS NULL); board_id=<uuid> → that board.',
+    'List reusable QA schedules in a workspace.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('"" → workspace-scope, <uuid> → board-scope, omit → all'),
     },
-    async ({ workspace_id, board_id }) => {
+    async ({ workspace_id }) => {
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
-        const rows = await qaScheduleService.list(workspace_id, board_id);
+        const rows = await qaScheduleService.list(workspace_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list QA schedules');
@@ -107,13 +105,11 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
   server.tool(
     'create_qa_schedule',
     'Create a QA schedule — an automatic trigger that kicks a SEQUENTIAL batch (start_qa_batch) when ' +
-    'due. `scope="all"` runs every enabled scenario in scope at dispatch time (board_id <uuid> = that ' +
-    'board, board_id omitted/null = whole workspace) — no id snapshot, so scenario add/remove is ' +
+    'due. `scope="all"` runs every enabled scenario in the Workspace at dispatch time — no id snapshot, so scenario add/remove is ' +
     'reflected automatically. `scope="selected"` runs the ordered `scenario_ids`. Set EXACTLY ONE of ' +
     '`cron` (5 UTC fields, e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults true.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Board to pin to, or omit/"" for workspace scope'),
       name: z.string().describe('Schedule name (required)'),
       scope: z.enum(['all', 'selected']).optional().describe("'all' (default) or 'selected'"),
       scenario_ids: z.array(z.string()).optional().describe("Ordered scenario ids — required when scope='selected'"),
@@ -128,7 +124,6 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
       try {
         const row = await qaScheduleService.create({
           workspaceId: args.workspace_id,
-          boardId: args.board_id ?? undefined,
           name: args.name,
           scope: args.scope,
           scenarioIds: args.scenario_ids,
@@ -152,7 +147,6 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
     {
       schedule_id: z.string().describe('QaSchedule ID'),
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
-      board_id: z.string().optional(),
       name: z.string().optional(),
       scope: z.enum(['all', 'selected']).optional(),
       scenario_ids: z.array(z.string()).optional(),
@@ -165,7 +159,6 @@ export function registerQaScheduleTools(server: McpServer, ctx: ToolContext): vo
       if (!qaScheduleService) return err('QA schedule service unavailable in this MCP context');
       try {
         const row = await qaScheduleService.update(schedule_id, workspace_id, {
-          boardId: patch.board_id,
           name: patch.name,
           scope: patch.scope,
           scenarioIds: patch.scenario_ids,
