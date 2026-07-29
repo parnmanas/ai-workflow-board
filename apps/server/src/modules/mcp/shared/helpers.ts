@@ -1,3 +1,5 @@
+import { ARTIFACT_REF_DOC } from '../../../common/artifact-ref';
+
 /**
  * Shared helpers for MCP tools.
  *
@@ -170,4 +172,5 @@ export const MENTION_SYNTAX_DOC =
   'you can safely `@[role:assignee]` to summon your co-assignees for discussion without spawning yourself in a ' +
   'loop. Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) ' +
   'so a phase\'s discussion stays one thread. Keep plain discussion as `note`/`chat`; consensus/vote signals are ' +
-  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.';
+  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.\n\n' +
+  ARTIFACT_REF_DOC;
