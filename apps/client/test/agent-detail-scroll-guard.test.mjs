@@ -19,7 +19,7 @@ test('app content can shrink to the flex-allocated viewport height', () => {
 
 test('agent detail body preserves its bounded vertical scrolling contract', () => {
   const scrollBody = detailSource.match(
-    /\{\/\*\s*Scroll body[\s\S]*?<div\s+style=\{\{(?<body>[\s\S]*?)\}\}/,
+    /data-testid="agent-content-scroll"[\s\S]*?style=\{\{(?<body>[\s\S]*?)\}\}/,
   )?.groups?.body;
 
   assert.ok(scrollBody, 'Agent Content scroll body must exist');

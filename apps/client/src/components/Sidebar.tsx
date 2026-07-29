@@ -259,6 +259,7 @@ export default function Sidebar({
 
   return (
     <aside
+      data-testid="app-sidebar"
       ref={containerRef}
       className={sidebarClassName}
       style={{

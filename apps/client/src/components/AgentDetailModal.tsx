@@ -714,6 +714,9 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             inner two-pane scroll and ignores the outer one because the
             tab content fits within the body height. */}
         <div
+          data-testid="agent-content-scroll"
+          tabIndex={0}
+          aria-label="Agent content"
           style={{
             flex: 1,
             overflowY: 'auto',
@@ -1424,6 +1427,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               />
             </div>
           )}
+          <div data-testid="agent-content-end" aria-hidden="true" style={{ height: 1, flexShrink: 0 }} />
         </div>
       </div>
       {/* Managed-agent edit dialog. Reuses the exact form the admin

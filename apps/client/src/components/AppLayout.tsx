@@ -292,7 +292,7 @@ export default function AppLayout() {
     <ArtifactPanelProvider>
     <TicketMetaProvider>
     <TicketArtifactController>
-    <div className="awb-shell">
+    <div className="awb-shell" data-testid="app-shell">
       <Sidebar
         overlay={drawerMode}
         isOpen={drawerOpen}
@@ -313,7 +313,7 @@ export default function AppLayout() {
       <div className="awb-main">
         {/* 모바일 톱바 — 햄버거로 전체 내비게이션을 오버레이로 연다. */}
         {drawerMode && (
-          <div className="awb-topbar">
+          <div className="awb-topbar" data-testid="app-header">
             <button
               onClick={() => setDrawerOpen(true)}
               aria-label="Open navigation"
@@ -363,6 +363,7 @@ export default function AppLayout() {
             artifact toggle, and the Chat/Advanced mode control. */}
         {!drawerMode && (
           <div
+            data-testid="app-header"
             style={{
               display: 'flex',
               alignItems: 'center',
