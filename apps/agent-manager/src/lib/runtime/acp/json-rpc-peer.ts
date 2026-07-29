@@ -19,17 +19,24 @@ export type AcpProtocolErrorCode =
 export class AcpProtocolError extends Error {
   readonly code: AcpProtocolErrorCode;
   readonly exitCode?: number | null;
+  readonly rpcCode?: number;
   readonly data?: unknown;
 
   constructor(
     code: AcpProtocolErrorCode,
     message: string,
-    options: { cause?: unknown; exitCode?: number | null; data?: unknown } = {},
+    options: {
+      cause?: unknown;
+      exitCode?: number | null;
+      rpcCode?: number;
+      data?: unknown;
+    } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'AcpProtocolError';
     this.code = code;
     this.exitCode = options.exitCode;
+    this.rpcCode = options.rpcCode;
     this.data = options.data;
   }
 }
@@ -289,7 +296,7 @@ export class JsonRpcPeer {
       this.#settle(id, false, new AcpProtocolError(
         'acp_remote_error',
         remote.error?.message || 'ACP peer returned an error',
-        { data: remote.error?.data },
+        { rpcCode: remote.error?.code, data: remote.error?.data },
       ));
     } else if (hasOwn(message, 'result')) {
       this.#settle(id, true, message.result);
@@ -355,4 +362,3 @@ export class JsonRpcPeer {
     if (!this.#child.killed) this.#child.kill();
   }
 }
-

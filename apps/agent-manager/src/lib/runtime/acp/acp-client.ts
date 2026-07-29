@@ -21,6 +21,7 @@ import {
   type JsonRpcPeerOptions,
   type JsonRpcRequestOptions,
 } from './json-rpc-peer.js';
+import { isChildTool } from '../collaboration-governor.js';
 
 export { AcpProtocolError } from './json-rpc-peer.js';
 
@@ -83,7 +84,10 @@ function normalizeUsage(sessionId: string, usageValue: unknown): RuntimeEvent {
   };
 }
 
-function normalizeUpdate(paramsValue: unknown): RuntimeEvent {
+function normalizeUpdate(
+  paramsValue: unknown,
+  childToolCalls: Set<string>,
+): RuntimeEvent {
   const params = objectValue(paramsValue) as unknown as AcpSessionUpdateParams;
   const sessionId = stringValue(
     (params as unknown as Record<string, unknown>).sessionId
@@ -101,23 +105,51 @@ function normalizeUpdate(paramsValue: unknown): RuntimeEvent {
     return { type: 'reasoning_delta', sessionId, text: stringValue(content.text) };
   }
   if (kind === 'tool_call') {
+    const toolCallId = stringValue(field(update, 'toolCallId', 'tool_call_id'));
+    const title = stringValue(update.title);
+    const toolKind = stringValue(update.kind) || undefined;
+    if (isChildTool({ title, kind: toolKind })) {
+      childToolCalls.add(toolCallId);
+      return {
+        type: 'child_started',
+        sessionId,
+        childRunId: toolCallId,
+        title,
+        kind: toolKind,
+        input: field(update, 'rawInput', 'raw_input'),
+      };
+    }
     return {
       type: 'tool_started',
       sessionId,
-      toolCallId: stringValue(field(update, 'toolCallId', 'tool_call_id')),
-      title: stringValue(update.title),
-      kind: stringValue(update.kind) || undefined,
+      toolCallId,
+      title,
+      kind: toolKind,
       input: field(update, 'rawInput', 'raw_input'),
     };
   }
   if (kind === 'tool_call_update') {
     const status = stringValue(update.status);
+    const toolCallId = stringValue(field(update, 'toolCallId', 'tool_call_id'));
+    if (
+      childToolCalls.has(toolCallId)
+      && (status === 'completed' || status === 'failed' || status === 'cancelled')
+    ) {
+      childToolCalls.delete(toolCallId);
+      return {
+        type: 'child_finished',
+        sessionId,
+        childRunId: toolCallId,
+        status: status as 'completed' | 'failed' | 'cancelled',
+        output: field(update, 'rawOutput', 'raw_output'),
+      };
+    }
     return {
       type: status === 'completed' || status === 'failed'
         ? 'tool_completed'
         : 'tool_updated',
       sessionId,
-      toolCallId: stringValue(field(update, 'toolCallId', 'tool_call_id')),
+      toolCallId,
       status: status || undefined,
       output: field(update, 'rawOutput', 'raw_output'),
     };
@@ -142,6 +174,7 @@ export class AcpClient {
   readonly #peer: JsonRpcPeer;
   readonly #onEvent?: (event: RuntimeEvent) => void;
   readonly #onPermissionRequest?: AcpClientSpawnOptions['onPermissionRequest'];
+  readonly #childToolCalls = new Set<string>();
 
   private constructor(
     peer: JsonRpcPeer,
@@ -232,7 +265,7 @@ export class AcpClient {
 
   #handleNotification(method: string, params: unknown): void {
     if (method === 'session/update') {
-      this.#onEvent?.(normalizeUpdate(params));
+      this.#onEvent?.(normalizeUpdate(params, this.#childToolCalls));
       return;
     }
     const data = objectValue(params);

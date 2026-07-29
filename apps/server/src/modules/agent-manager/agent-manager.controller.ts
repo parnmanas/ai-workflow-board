@@ -13,6 +13,7 @@ import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
 import { DispatchIntentService } from '../agents/dispatch-intent.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
+import { ChildRunService } from '../agents/child-run.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
@@ -140,6 +141,7 @@ export class AgentManagerController {
     // (exported), reachable here via the existing forwardRef(AgentsModule).
     private readonly dispatchIntents: DispatchIntentService,
     private readonly runSkillSnapshots: RunSkillSnapshotService,
+    private readonly childRuns: ChildRunService,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -1490,6 +1492,95 @@ export class AgentManagerController {
       agent_id: target.id,
       workspace_id: target.workspace_id,
     });
+  }
+
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/runtime/child-runs/start')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Runtime Host: persist a bounded Hermes ChildRun start' })
+  async runtimeChildStart(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = String((req as any).currentAgentId || '').trim();
+    const parentAgentId = String(body?.parent_agent_id || '').trim();
+    const target = parentAgentId
+      ? await this.agentRepo.findOne({ where: { id: parentAgentId } })
+      : null;
+    if (
+      !callerAgentId
+      || !target
+      || (target.id !== callerAgentId && target.manager_agent_id !== callerAgentId)
+    ) {
+      return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
+    }
+    if (!target.workspace_id) {
+      return res.status(400).json({ error: 'runtime_child_workspace_required' });
+    }
+    const strategy = body?.strategy === 'swarm'
+      ? 'swarm'
+      : body?.strategy === 'delegated'
+        ? 'delegated'
+        : null;
+    if (!strategy) return res.status(400).json({ error: 'runtime_child_strategy_invalid' });
+    try {
+      const child = await this.childRuns.start({
+        workspaceId: target.workspace_id,
+        parentRunId: String(body?.parent_run_id || ''),
+        parentAgentId: target.id,
+        childId: String(body?.child_run_id || ''),
+        strategy,
+        depth: Number(body?.depth || 1),
+        budget: Number(body?.budget || 0),
+        title: String(body?.title || ''),
+        metadata: body?.metadata,
+      });
+      return res.status(201).json(child);
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({
+        error: error?.code || 'runtime_child_start_failed',
+        message: error?.message || String(error),
+      });
+    }
+  }
+
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/runtime/child-runs/finish')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Runtime Host: persist a bounded Hermes ChildRun finish' })
+  async runtimeChildFinish(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = String((req as any).currentAgentId || '').trim();
+    const parentAgentId = String(body?.parent_agent_id || '').trim();
+    const target = parentAgentId
+      ? await this.agentRepo.findOne({ where: { id: parentAgentId } })
+      : null;
+    if (
+      !callerAgentId
+      || !target
+      || (target.id !== callerAgentId && target.manager_agent_id !== callerAgentId)
+    ) {
+      return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
+    }
+    if (!target.workspace_id) {
+      return res.status(400).json({ error: 'runtime_child_workspace_required' });
+    }
+    const status = ['completed', 'failed', 'cancelled'].includes(String(body?.status))
+      ? body.status as 'completed' | 'failed' | 'cancelled'
+      : null;
+    if (!status) return res.status(400).json({ error: 'runtime_child_status_invalid' });
+    try {
+      const child = await this.childRuns.finish({
+        workspaceId: target.workspace_id,
+        parentRunId: String(body?.parent_run_id || ''),
+        childId: String(body?.child_run_id || ''),
+        status,
+        summary: String(body?.summary || ''),
+        metadata: body?.metadata,
+      });
+      return res.json(child);
+    } catch (error: any) {
+      return res.status(error?.status || 400).json({
+        error: error?.code || 'runtime_child_finish_failed',
+        message: error?.message || String(error),
+      });
+    }
   }
 
   /**

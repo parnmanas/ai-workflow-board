@@ -38,5 +38,19 @@ export type RuntimeEvent =
       method: string;
       sessionId?: string;
       data?: unknown;
+    }
+  | {
+      type: 'child_started';
+      sessionId: string;
+      childRunId: string;
+      title: string;
+      kind?: string;
+      input?: unknown;
+    }
+  | {
+      type: 'child_finished';
+      sessionId: string;
+      childRunId: string;
+      status: 'completed' | 'failed' | 'cancelled';
+      output?: unknown;
     };
-

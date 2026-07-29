@@ -70,3 +70,4 @@ export { SkillVersion } from './SkillVersion';
 export { AgentSkillAssignment } from './AgentSkillAssignment';
 export { RunSkillSnapshot } from './RunSkillSnapshot';
 export { SkillProposal } from './SkillProposal';
+export { ChildRun } from './ChildRun';

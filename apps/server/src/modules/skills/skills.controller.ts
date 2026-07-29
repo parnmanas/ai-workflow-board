@@ -20,6 +20,19 @@ export class SkillsController {
     return res.json(await this.service.list(workspaceId));
   }
 
+  @Get('proposals')
+  async listProposals(
+    @Param('workspaceId') workspaceId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const raw = String((req.query as any)?.status || '');
+    const status = raw === 'pending' || raw === 'approved' || raw === 'rejected'
+      ? raw
+      : undefined;
+    return res.json(await this.service.listProposals(workspaceId, status));
+  }
+
   @Get(':skillId')
   async get(
     @Param('workspaceId') workspaceId: string,
@@ -104,6 +117,7 @@ export class SkillsController {
       'approve',
       (req as any).currentUser?.id || '',
       body?.note,
+      String(body?.skill_id || ''),
     ));
   }
 

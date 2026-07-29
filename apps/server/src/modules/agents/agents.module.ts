@@ -7,6 +7,7 @@ import { SubagentLogLine } from '../../entities/SubagentLogLine';
 import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { DispatchIntent } from '../../entities/DispatchIntent';
+import { ChildRun } from '../../entities/ChildRun';
 import { AgentsController } from './agents.controller';
 import { FsBrowserController } from './fs-browser.controller';
 import { SubagentMonitorController } from './subagent-monitor.controller';
@@ -24,6 +25,8 @@ import { AgentUsageService } from './agent-usage.service';
 import { DispatchIntentService } from './dispatch-intent.service';
 import { DispatchReconcilerService } from './dispatch-reconciler.service';
 import { AgentAutostartService } from './agent-autostart.service';
+import { ChildRunService } from './child-run.service';
+import { AgentChildRunsController, ChildRunsController } from './child-runs.controller';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
@@ -43,7 +46,7 @@ import { SkillsModule } from '../skills/skills.module';
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, DispatchIntent]),
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, DispatchIntent, ChildRun]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
@@ -55,7 +58,13 @@ import { SkillsModule } from '../skills/skills.module';
     ColumnPoliciesModule,
     SkillsModule,
   ],
-  controllers: [AgentsController, FsBrowserController, SubagentMonitorController],
+  controllers: [
+    AgentsController,
+    FsBrowserController,
+    SubagentMonitorController,
+    ChildRunsController,
+    AgentChildRunsController,
+  ],
   providers: [
     AuthGuard, PermissionGuard, AgentAuthGuard, AdminGuard,
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
@@ -72,6 +81,7 @@ import { SkillsModule } from '../skills/skills.module';
     DispatchIntentService,
     DispatchReconcilerService,
     AgentAutostartService,
+    ChildRunService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
@@ -85,6 +95,7 @@ import { SkillsModule } from '../skills/skills.module';
     FsBrowserService, SubagentMonitorService,
     DispatchIntentService,
     DispatchReconcilerService,
+    ChildRunService,
   ],
 })
 export class AgentsModule {}

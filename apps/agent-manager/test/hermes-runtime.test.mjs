@@ -12,13 +12,14 @@ const fixture = fileURLToPath(
   new URL('./fixtures/fake-acp-server.mjs', import.meta.url),
 );
 
-async function createHarness(t) {
+async function createHarness(t, options = {}) {
   const rootDir = await mkdtemp(join(tmpdir(), 'awb-hermes-runtime-'));
   const runtime = new HermesRuntime({
     rootDir,
     command: process.execPath,
     args: [fixture],
-    requestTimeoutMs: 500,
+    requestTimeoutMs: 10_000,
+    env: options.env,
   });
   t.after(async () => {
     await runtime.stopAll();
@@ -97,4 +98,19 @@ test('cancel keeps recovery mapping while close removes it', async (t) => {
 
   await runtime.closeRun('agent-a', 'run-cancel');
   assert.equal(runtime.getSession('agent-a', 'run-cancel'), null);
+});
+
+test('close tolerates ACP implementations without session/close', async (t) => {
+  const { runtime } = await createHarness(t, {
+    env: { FAKE_ACP_NO_CLOSE: '1' },
+  });
+  await runtime.openSession({
+    agentId: 'agent-a',
+    runId: 'run-no-close',
+    leaseId: 'lease-a',
+    cwd: process.cwd(),
+  });
+
+  await runtime.closeRun('agent-a', 'run-no-close');
+  assert.equal(runtime.getSession('agent-a', 'run-no-close'), null);
 });

@@ -26,6 +26,17 @@ export class SkillsService {
     return this.skills.find({ where: { workspace_id: workspaceId }, order: { name: 'ASC' } });
   }
 
+  listProposals(workspaceId: string, status?: 'pending' | 'approved' | 'rejected') {
+    return this.proposals.find({
+      where: {
+        workspace_id: workspaceId,
+        ...(status ? { status } : {}),
+      },
+      order: { created_at: 'DESC' },
+      take: 250,
+    });
+  }
+
   async get(workspaceId: string, skillId: string) {
     const skill = await this.requireSkill(workspaceId, skillId);
     const versions = await this.versions.find({
@@ -137,7 +148,14 @@ export class SkillsService {
     }));
   }
 
-  async review(workspaceId: string, proposalId: string, decision: 'approve' | 'reject', actorId: string, note = '') {
+  async review(
+    workspaceId: string,
+    proposalId: string,
+    decision: 'approve' | 'reject',
+    actorId: string,
+    note = '',
+    targetSkillId = '',
+  ) {
     const proposal = await this.proposals.findOne({ where: { id: proposalId, workspace_id: workspaceId } });
     if (!proposal) throw httpError(404, 'skill_proposal_not_found', 'Skill proposal not found');
     if (proposal.status !== 'pending') {
@@ -145,6 +163,10 @@ export class SkillsService {
     }
     let version: SkillVersion | null = null;
     if (decision === 'approve') {
+      if (!proposal.skill_id && targetSkillId) {
+        await this.requireSkill(workspaceId, targetSkillId);
+        proposal.skill_id = targetSkillId;
+      }
       if (!proposal.skill_id) throw httpError(400, 'skill_target_required', 'Approval requires a target skill');
       version = await this.publish(workspaceId, proposal.skill_id, proposal, actorId, proposal.id);
     }

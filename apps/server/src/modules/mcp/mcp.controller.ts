@@ -466,6 +466,19 @@ export class McpController implements OnModuleInit {
       const subagentTriggerSourceHeader = String(req.headers['x-awb-subagent-trigger-source'] || '').trim() || undefined;
       const subagentTriggerIdHeader = String(req.headers['x-awb-subagent-trigger-id'] || '').trim() || undefined;
       const subagentSessionIdHeader = String(req.headers['x-awb-subagent-session-id'] || '').trim() || undefined;
+      const clientTypeRaw = String(req.headers['x-awb-client-type'] || '').toLowerCase().trim();
+      const clientTypeHeader =
+        clientTypeRaw === 'subagent'
+        || clientTypeRaw === 'managed-subagent'
+        || clientTypeRaw === 'runtime-child'
+          ? clientTypeRaw
+          : undefined;
+      const runtimeRunIdHeader = String(req.headers['x-awb-run-id'] || '').trim().slice(0, 256) || undefined;
+      const strategyRaw = String(req.headers['x-awb-execution-strategy'] || '').toLowerCase().trim();
+      const executionStrategyHeader =
+        strategyRaw === 'single' || strategyRaw === 'delegated' || strategyRaw === 'swarm'
+          ? strategyRaw
+          : undefined;
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -485,6 +498,9 @@ export class McpController implements OnModuleInit {
               subagentTriggerSource: subagentTriggerSourceHeader,
               subagentTriggerId: subagentTriggerIdHeader,
               subagentSessionId: subagentSessionIdHeader,
+              clientType: clientTypeHeader,
+              runtimeRunId: runtimeRunIdHeader,
+              executionStrategy: executionStrategyHeader,
             });
             // No separate agentId → server map: the push path derives the
             // live server from sessionStore on demand (getLatestServerForAgent),

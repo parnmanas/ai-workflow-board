@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path';
 
 import type { AcpClientSpawnOptions } from '../acp/acp-client.js';
+import { AcpProtocolError } from '../acp/acp-client.js';
 import type {
   AcpContentBlock,
   AcpMcpServer,
@@ -167,14 +168,24 @@ export class HermesRuntime {
     const record = this.#sessions.get(runId);
     if (!record || record.agentId !== agentId) return;
     const processOwner = await this.ensureAgent({ agentId });
-    await processOwner.closeSession(record.sessionId);
-    await this.#sessions.delete(runId);
+    try {
+      // session/close is an optional extension in current ACP implementations.
+      await processOwner.closeSession(record.sessionId);
+    } catch (error) {
+      if (!(error instanceof AcpProtocolError && error.rpcCode === -32601)) {
+        throw error;
+      }
+    } finally {
+      await this.#sessions.delete(runId);
+    }
   }
 
-  async stopAgent(agentId: string): Promise<void> {
+  async stopAgent(agentId: string): Promise<boolean> {
     const processOwner = this.#processes.get(agentId);
+    if (!processOwner) return false;
     this.#processes.delete(agentId);
-    await processOwner?.stop();
+    await processOwner.stop();
+    return true;
   }
 
   async stopAll(): Promise<void> {

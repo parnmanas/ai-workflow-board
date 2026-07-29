@@ -44,6 +44,11 @@ export interface McpAgentContext {
   subagentTriggerSource?: string;
   subagentTriggerId?: string;
   subagentSessionId?: string;
+  // Protocol-runtime attribution. These values are pinned by the Runtime Host
+  // on its authenticated MCP connection and are used for proposal-only APIs.
+  clientType?: 'subagent' | 'managed-subagent' | 'runtime-child';
+  runtimeRunId?: string;
+  executionStrategy?: 'single' | 'delegated' | 'swarm';
 }
 
 interface SessionEntry {

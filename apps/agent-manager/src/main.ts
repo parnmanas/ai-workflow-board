@@ -56,6 +56,7 @@ import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
+import { postRuntimeChildEvent } from './lib/rest.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -488,6 +489,34 @@ async function runRuntime(
     rootDir: MANAGED_AGENTS_DIR,
     awbUrl: config.url,
     onEvent: (context, event) => {
+      if (event.type === 'child_started') {
+        const input = event.input && typeof event.input === 'object'
+          ? event.input as Record<string, unknown>
+          : {};
+        void postRuntimeChildEvent(config, {
+          phase: 'start',
+          parent_agent_id: context.agentId,
+          parent_run_id: context.runId,
+          child_run_id: event.childRunId,
+          strategy: context.strategy === 'swarm' ? 'swarm' : 'delegated',
+          depth: Number(input.depth ?? input.child_depth ?? 1),
+          budget: Number(input.budget ?? 0),
+          title: event.title,
+          metadata: { kind: event.kind || '' },
+        });
+      } else if (event.type === 'child_finished') {
+        void postRuntimeChildEvent(config, {
+          phase: 'finish',
+          parent_agent_id: context.agentId,
+          parent_run_id: context.runId,
+          child_run_id: event.childRunId,
+          strategy: context.strategy === 'swarm' ? 'swarm' : 'delegated',
+          status: event.status,
+          summary: typeof event.output === 'string'
+            ? event.output
+            : JSON.stringify(event.output ?? ''),
+        });
+      }
       if (event.type === 'diagnostic') {
         log(
           `[runtime:hermes] diagnostic agent=${context.agentId.slice(0, 8)} ` +

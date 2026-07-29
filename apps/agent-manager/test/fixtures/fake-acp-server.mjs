@@ -60,6 +60,40 @@ rl.on('line', (line) => {
       break;
     case 'session/prompt':
       pendingPrompt = message.id;
+      if (JSON.stringify(message.params.prompt).includes('CHILD_EVENT_TEST')) {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: message.params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'child-1',
+              title: 'Delegate research subagent',
+              kind: 'delegate',
+              status: 'in_progress',
+              rawInput: {
+                depth: 1,
+                tools: ['read'],
+                skills: ['review'],
+              },
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: message.params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'child-1',
+              status: 'completed',
+              rawOutput: { summary: 'research complete' },
+            },
+          },
+        });
+      }
       send({
         jsonrpc: '2.0',
         method: 'session/update',
@@ -133,7 +167,15 @@ rl.on('line', (line) => {
       if (Object.hasOwn(message, 'id')) result(message.id, null);
       break;
     case 'session/close':
-      result(message.id, {});
+      if (process.env.FAKE_ACP_NO_CLOSE === '1') {
+        send({
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32601, message: 'Unknown method: session/close' },
+        });
+      } else {
+        result(message.id, {});
+      }
       break;
     case 'test/hang':
       break;

@@ -19,6 +19,48 @@ function trimSlash(url: string): string {
   return url.replace(/\/$/, '');
 }
 
+export async function postRuntimeChildEvent(
+  config: AwbConfig,
+  body: {
+    phase: 'start' | 'finish';
+    parent_agent_id: string;
+    parent_run_id: string;
+    child_run_id: string;
+    strategy: 'delegated' | 'swarm';
+    depth?: number;
+    budget?: number;
+    title?: string;
+    status?: 'completed' | 'failed' | 'cancelled';
+    summary?: string;
+    metadata?: unknown;
+  },
+): Promise<void> {
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/runtime/child-runs/${body.phase}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      log(
+        `ChildRun ${body.phase} POST failed: ${response.status} ` +
+        `(run=${body.parent_run_id} child=${body.child_run_id})`,
+      );
+    }
+  } catch (error: any) {
+    log(
+      `ChildRun ${body.phase} POST error: ${error?.message ?? error} ` +
+      `(run=${body.parent_run_id} child=${body.child_run_id})`,
+    );
+  }
+}
+
 /**
  * Fetch a fresh ticket with comments from AWB REST.
  * Returns null on any failure; caller falls back to embedded trigger payload.
