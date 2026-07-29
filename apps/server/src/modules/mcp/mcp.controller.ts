@@ -41,6 +41,7 @@ import { ActivityService } from '../../services/activity.service';
 import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
+import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 
 interface McpAuthInfo {
   keyHint: string;
@@ -170,6 +171,7 @@ export class McpController implements OnModuleInit {
     private readonly handoffService: HandoffService,
     private readonly benchmarkService: BenchmarkService,
     private readonly workflowFunctionsService: WorkflowFunctionsService,
+    private readonly artifactRefsService: ArtifactRefsService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
   ) {}
 
@@ -257,6 +259,7 @@ export class McpController implements OnModuleInit {
       securityRunService: this.securityRunService,
       securityScheduleService: this.securityScheduleService,
       workspaceScheduleService: this.workspaceScheduleService,
+      artifactRefsService: this.artifactRefsService,
       featuresService: this.featuresService,
       triggerLoopService: this.triggerLoopService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,

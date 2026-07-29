@@ -56,6 +56,7 @@ import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -80,6 +81,7 @@ export class TicketsController {
     private readonly ticketRoleAssignments: TicketRoleAssignmentService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
     private readonly ticketDuplicates: TicketDuplicateService,
+    private readonly artifactRefs: ArtifactRefsService,
   ) {}
 
   @Get('tickets/:id/comment-summary')
@@ -1980,6 +1982,7 @@ export class TicketsController {
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
+    const normalizedContent = await this.artifactRefs.normalizeStoredOutput(ticket.workspace_id, content);
 
     const preIds: string[] = Array.isArray(rawAttachmentIds)
       ? rawAttachmentIds.filter((v: any) => typeof v === 'string' && v)
@@ -2098,7 +2101,7 @@ export class TicketsController {
         author_type: 'user',
         author_id: currentUser.id,
         author: currentUser.name,
-        content,
+        content: normalizedContent,
         attachment_resource_ids: JSON.stringify(allIds),
         type: resolvedType,
         status: resolvedType === 'question' ? 'open' : null,
@@ -2121,7 +2124,7 @@ export class TicketsController {
       ticket_id: id,
       actor_id: currentUser.id,
       actor_name: currentUser.name,
-      new_value: content,
+      new_value: normalizedContent,
       field_changed: resolvedType,
     });
 

@@ -68,6 +68,15 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
 
   useEffect(() => { loadActions(); }, [loadActions]);
 
+  useEffect(() => {
+    const artifactId = typeof window === 'undefined'
+      ? ''
+      : new URLSearchParams(window.location.search).get('artifact') || '';
+    if (!artifactId || loading) return;
+    const target = actions.find((action) => action.id === artifactId);
+    if (target) setSelected(target);
+  }, [actions, loading]);
+
   // Re-sync selected action with the freshly loaded list (so last_run_at
   // updates after a Run, etc.). Without this, the panel keeps showing stale
   // data even after a refresh.

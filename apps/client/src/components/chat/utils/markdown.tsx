@@ -1,9 +1,7 @@
 import React, { useState } from 'react';
 import { tokens } from '../../../tokens';
 import TicketRefCard from '../TicketRefCard';
-import AgentRefCard from '../AgentRefCard';
-import BoardRefCard from '../BoardRefCard';
-import EntityRefLink from '../EntityRefLink';
+import ResolvedArtifactRef from '../ResolvedArtifactRef';
 import { ARTIFACT_TOKEN_RE, ArtifactRefType } from '../../../utils/artifactRef';
 
 // ─── renderMarkdown — XSS-safe inline markdown ───────────────────────────────
@@ -138,10 +136,9 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
       for (const ap of artifactParts) {
         if (ap.artifact) {
           const { type, id, name } = ap.artifact;
-          if (type === 'ticket') nodes.push(<TicketRefCard key={keyIdx++} id={id} title={name} />);
-          else if (type === 'agent') nodes.push(<AgentRefCard key={keyIdx++} id={id} name={name} />);
-          else if (type === 'board') nodes.push(<BoardRefCard key={keyIdx++} id={id} title={name} />);
-          else nodes.push(<EntityRefLink key={keyIdx++} type={type} id={id} name={name} />);
+          nodes.push(
+            <ResolvedArtifactRef key={keyIdx++} type={type} id={id} claimedLabel={name} />,
+          );
           continue;
         }
 

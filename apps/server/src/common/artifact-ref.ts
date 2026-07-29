@@ -18,12 +18,13 @@ export interface ArtifactRef {
 }
 
 const TYPE_PATTERN = ARTIFACT_REF_TYPES.join('|');
+export const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 export const ARTIFACT_TOKEN_RE = new RegExp(
-  `#\\[(${TYPE_PATTERN}):([0-9a-fA-F-]{36})\\|([^\\]\\r\\n]+)\\]`,
-  'g',
+  `#\\[(${TYPE_PATTERN}):(${UUID_PATTERN})\\|([^\\]\\r\\n]+)\\]`,
+  'gi',
 );
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const UUID_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
 
 function cleanLabel(value: string): string {
   return value.replace(/[\]\r\n|]+/g, ' ').trim();

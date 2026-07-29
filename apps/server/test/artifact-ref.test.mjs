@@ -37,6 +37,12 @@ test('rejects shortened ids and missing human-readable labels', () => {
   assert.equal(refs.parseArtifactRefs('#[ticket:11111111|Ticket]').length, 0);
 });
 
+test('rejects malformed 36-character UUID lookalikes', () => {
+  const malformed = '11111111-1111-1111-1111-111111111111';
+  assert.throws(() => refs.formatArtifactRef('ticket', malformed, 'Ticket'));
+  assert.equal(refs.parseArtifactRefs(`#[ticket:${malformed}|Ticket]`).length, 0);
+});
+
 test('unavailable entities are stable text, never fake artifact links', () => {
   const output = refs.formatUnavailableArtifact('action', ids.action, 'Deploy', '권한 없음');
   assert.match(output, new RegExp(ids.action));

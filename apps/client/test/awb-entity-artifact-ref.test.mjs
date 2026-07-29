@@ -3,7 +3,6 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  entityDeepLink,
   parseArtifactRefs,
 } from '../src/utils/artifactRef.ts';
 import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
@@ -17,25 +16,15 @@ const ids = {
   schedule: '66666666-6666-4666-8666-666666666666',
 };
 
-test('parses and renders all six entity artifact types', () => {
+test('parses all six entity artifact types but SSR never creates an unverified link', () => {
   const input = Object.entries(ids).map(([type, id]) => `#[${type}:${id}|Shared name]`).join(' ');
   assert.equal(parseArtifactRefs(input).length, 6);
   const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...renderMarkdown(input)));
-  assert.match(html, new RegExp(`data-ticket-ref="${ids.ticket}"`));
-  assert.match(html, new RegExp(`data-agent-ref="${ids.agent}"`));
-  assert.match(html, new RegExp(`data-board-ref="${ids.board}"`));
-  for (const type of ['action', 'function', 'schedule']) {
+  for (const type of Object.keys(ids)) {
     assert.match(html, new RegExp(`data-entity-ref="${type}:${ids[type]}"`));
   }
-});
-
-test('deep links preserve full ids and route to the correct detail surface', () => {
-  assert.equal(entityDeepLink('agent', ids.agent, 'ws'), `/ws/ws/agents/${ids.agent}`);
-  assert.equal(entityDeepLink('board', ids.board, 'ws'), `/ws/ws/boards/${ids.board}`);
-  assert.equal(entityDeepLink('action', ids.action, 'ws'), `/ws/ws/actions?artifact=${ids.action}`);
-  assert.equal(entityDeepLink('function', ids.function, 'ws'), `/ws/ws/functions?artifact=${ids.function}`);
-  assert.equal(entityDeepLink('schedule', ids.schedule, 'ws'), `/ws/ws/schedules?artifact=${ids.schedule}`);
-  assert.equal(entityDeepLink('ticket', ids.ticket, 'ws'), null);
+  assert.doesNotMatch(html, /<a /);
+  assert.match(html, /workspace context 없음/);
 });
 
 test('short ids remain plain text instead of becoming fake links', () => {
@@ -44,4 +33,12 @@ test('short ids remain plain text instead of becoming fake links', () => {
   const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...renderMarkdown(input)));
   assert.doesNotMatch(html, /data-ticket-ref/);
   assert.match(html, /11111111/);
+});
+
+test('malformed 36-character values remain plain text', () => {
+  const malformed = '11111111-1111-1111-1111-111111111111';
+  const input = `#[ticket:${malformed}|Malformed]`;
+  assert.equal(parseArtifactRefs(input).length, 0);
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null, ...renderMarkdown(input)));
+  assert.doesNotMatch(html, /data-entity-ref/);
 });

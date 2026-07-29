@@ -83,6 +83,7 @@ import type {
   SkillVersion,
   HermesChildRun,
 } from './types';
+import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
 
@@ -187,6 +188,16 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  resolveArtifactRefs: (
+    workspaceId: string,
+    refs: Array<{ type: ArtifactRefType; id: string }>,
+  ) => request<Array<{
+    type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null; reason?: string;
+  }>>('/artifact-refs/resolve', {
+    method: 'POST',
+    body: JSON.stringify({ workspace_id: workspaceId, refs }),
+  }),
+
   // ─── Auth ──────────────────────────────────────────────
   login: (email: string, password: string) =>
     request<any>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),

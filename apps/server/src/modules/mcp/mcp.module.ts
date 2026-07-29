@@ -16,6 +16,7 @@ import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedul
 import { FeaturesModule } from '../features/features.module';
 import { HandoffModule } from '../handoff/handoff.module';
 import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
+import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { WorkflowFunctionsModule } from '../workflow-functions/workflow-function
     // Provides HandoffService for the handoff-tools MCP tools (ticket ac21a745).
     HandoffModule,
     WorkflowFunctionsModule,
+    ArtifactRefsModule,
   ],
   controllers: [McpController],
 })
