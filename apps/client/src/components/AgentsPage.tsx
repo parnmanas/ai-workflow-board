@@ -19,6 +19,7 @@ import type {
   DashboardAgent,
   AgentCurrentTask,
   AgentLifecycleState,
+  AgentManagerInstance,
   Credential,
   ManagedAgentCreateBody,
 } from '../types';
@@ -141,6 +142,7 @@ export default function AgentsPage() {
   const [showManagedModal, setShowManagedModal] = useState(false);
   const [managedForm, setManagedForm] = useState<typeof EMPTY_MANAGED_FORM>(EMPTY_MANAGED_FORM);
   const [managers, setManagers] = useState<ManagerOption[]>([]);
+  const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [creatingManaged, setCreatingManaged] = useState(false);
   // ST-7 directory picker — opens a modal that browses the picked manager's
@@ -223,6 +225,9 @@ export default function AgentsPage() {
     api.listAgentManagers()
       .then((rows) => { if (alive) setManagers(rows); })
       .catch(() => { if (alive) setManagers([]); });
+    api.listAgentManagerInstances()
+      .then((rows) => { if (alive) setManagerInstances(rows); })
+      .catch(() => { if (alive) setManagerInstances([]); });
     if (wsId) {
       api.listCredentials(wsId)
         .then((rows) => { if (alive) setCredentials(rows); })
@@ -241,11 +246,13 @@ export default function AgentsPage() {
 
   const selectedRuntimeIds = useMemo(() => {
     if (!managedForm.manager_agent_id) return [];
-    const host = managerInstanceByManagerAgentId.get(managedForm.manager_agent_id);
+    const host = managerInstances.find(
+      (instance) => instance.agent_id === managedForm.manager_agent_id,
+    );
     return Object.entries(host?.runtime_capabilities || {})
       .filter(([, health]) => health.installed && health.healthy)
       .map(([runtimeId]) => runtimeId);
-  }, [managedForm.manager_agent_id, managerInstanceByManagerAgentId]);
+  }, [managedForm.manager_agent_id, managerInstances]);
 
   // working_dir is optional for `custom` (the manager doesn't know how to
   // launch a custom CLI without operator-supplied scripts anyway), required

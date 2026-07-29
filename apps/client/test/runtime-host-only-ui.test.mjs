@@ -16,7 +16,6 @@ test('client types expose Runtime Host sessions only', () => {
 test('client has no standalone session routing controls or legacy topology choices', () => {
   const source = [
     'apps/client/src/api.ts',
-    'apps/client/src/components/admin/AgentManager.tsx',
     'apps/client/src/components/admin/AgentManagerPage.tsx',
     'apps/client/src/components/AgentDetailModal.tsx',
   ].map(read).join('\n');
@@ -29,7 +28,6 @@ test('client has no standalone session routing controls or legacy topology choic
 test('Agent forms require explicit Runtime Host, runtime, strategy, and permission mode', () => {
   const source = [
     'apps/client/src/components/AgentsPage.tsx',
-    'apps/client/src/components/admin/AgentManager.tsx',
     'apps/client/src/components/admin/ManagedAgentDialog.tsx',
     'apps/client/src/components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
@@ -43,10 +41,18 @@ test('Agent forms require explicit Runtime Host, runtime, strategy, and permissi
   assert.doesNotMatch(source, /strategy:\s*['"]single['"]/);
 });
 
+test('Agent creation resolves healthy runtimes from live Runtime Host instances', () => {
+  const source = read('apps/client/src/components/AgentsPage.tsx');
+
+  assert.match(source, /listAgentManagerInstances\(\)/);
+  assert.match(source, /instance\.agent_id\s*===\s*managedForm\.manager_agent_id/);
+  assert.match(source, /health\.installed\s*&&\s*health\.healthy/);
+  assert.doesNotMatch(source, /managerInstanceByManagerAgentId/);
+});
+
 test('Hermes is explicit and collaboration controls are Hermes-only', () => {
   const source = [
     'apps/client/src/components/AgentsPage.tsx',
-    'apps/client/src/components/admin/AgentManager.tsx',
     'apps/client/src/components/admin/ManagedAgentDialog.tsx',
     'apps/client/src/components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
