@@ -458,7 +458,7 @@ export default function CredentialManager({
                         </span>
                       ) : (
                         <div style={{ display: 'inline-flex', gap: 6 }}>
-                          {user?.role === 'admin' && (
+                          {user?.role === 'admin' && c.provider === 'claude_oauth_token' && (
                             <Button
                               variant="secondary"
                               size="sm"

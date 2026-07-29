@@ -13,7 +13,7 @@ const source = fs.readFileSync(
 const apiSource = fs.readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8');
 
 test('Reveal is rendered only for admin users and requires explicit confirmation', () => {
-  assert.match(source, /user\?\.role === 'admin'/);
+  assert.match(source, /user\?\.role === 'admin' && c\.provider === 'claude_oauth_token'/);
   assert.match(source, /Confirm and Reveal/);
   assert.match(source, /type="password"/);
   assert.match(source, /api\.revealCredential\(targetId, revealPassword\)/);
@@ -57,6 +57,19 @@ const credentials = [
     description: '',
     provider: 'claude_oauth_token',
     credential_fields: { oauth_token: 'sk-b••••tail' },
+    credential_status: 'ok',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 'credential-api-key',
+    workspace_id: 'workspace-1',
+    board_id: null,
+    scope: 'workspace',
+    name: 'Non OAuth API Key',
+    description: '',
+    provider: 'openai',
+    credential_fields: { api_key: 'sk-p••••tail' },
     credential_status: 'ok',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -123,6 +136,15 @@ function enterRevealPassword(container, password = 'admin-password') {
 function domWindowInputPrototype(input) {
   return Object.getPrototypeOf(input);
 }
+
+test('Reveal is not offered for non-OAuth credential providers', async (t) => {
+  const { container } = await mountCredentialManager(t);
+  assert.equal(buttonsByText(container, 'Reveal').length, 2);
+  const nonOAuthRow = [...container.querySelectorAll('tr')]
+    .find((row) => row.textContent?.includes('Non OAuth API Key'));
+  assert.ok(nonOAuthRow);
+  assert.equal(buttonsByText(nonOAuthRow, 'Reveal').length, 0);
+});
 
 test('closing while reveal is pending prevents the stale secret from returning', async (t) => {
   const pending = deferred();

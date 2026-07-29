@@ -46,6 +46,10 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   antigravity_api_key: { label: 'Antigravity (API Key)', fields: ['api_key'] },
 };
 
+const REVEALABLE_OAUTH_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  claude_oauth_token: ['oauth_token'],
+};
+
 function maskCredentialData(decryptedJson: string): Record<string, string> {
   try {
     const data = JSON.parse(decryptedJson);
@@ -157,6 +161,10 @@ export class CredentialsController {
     res.setHeader('Pragma', 'no-cache');
 
     const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
+    const allowedFields = REVEALABLE_OAUTH_FIELDS[cred.provider];
+    if (!allowedFields) {
+      return res.status(400).json({ error: 'Credential is not an OAuth token' });
+    }
     const actor = (req as any).currentUser;
     const audit = async (action: 'credential_revealed' | 'credential_reveal_denied', fields: string[] = []) => {
       await this.activityService.logActivity({
@@ -185,14 +193,13 @@ export class CredentialsController {
     } catch {
       return res.status(503).json({ error: 'Credential could not be decrypted' });
     }
-    const allowedFields = PROVIDER_FIELDS[cred.provider]?.fields || [];
     const credentialFields = Object.fromEntries(
       allowedFields
         .filter((field) => Object.prototype.hasOwnProperty.call(decrypted, field))
         .map((field) => [field, String(decrypted[field] ?? '')]),
     );
     await audit('credential_revealed', Object.keys(credentialFields));
-    return res.json({ credential_fields: credentialFields, credential_status: 'ok' });
+    return res.status(200).json({ credential_fields: credentialFields, credential_status: 'ok' });
   }
 
   @Get(':id')

@@ -91,6 +91,39 @@ test('wrong re-authentication returns 401 and writes a secret-free denial audit'
   assert.doesNotMatch(JSON.stringify(audits), /wrong-password|sk-ant-oat/);
 });
 
+test('non-OAuth providers cannot reveal any registered secret fields', async () => {
+  const apiKeySecret = 'non-oauth-api-key-secret';
+  const nonOAuthCredential = {
+    ...credential,
+    id: 'credential-api-key',
+    provider: 'openai',
+    encrypted_data: JSON.stringify({ api_key: apiKeySecret }),
+  };
+  const audits = [];
+  const credRepo = {
+    findOne: async ({ where }) => where.id === nonOAuthCredential.id ? nonOAuthCredential : null,
+  };
+  const auth = {
+    verifyUserPassword: async () => {
+      assert.fail('non-OAuth credentials must be rejected before re-authentication');
+    },
+  };
+  const activity = { logActivity: async (entry) => audits.push(entry) };
+  const instance = new CredentialsController(credRepo, {}, auth, activity);
+  const res = response();
+
+  await instance.reveal(
+    nonOAuthCredential.id,
+    { password: PASSWORD },
+    { currentUser: { id: 'admin-1', name: 'Admin', role: 'admin' } },
+    res,
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.doesNotMatch(JSON.stringify(res.body), new RegExp(apiKeySecret));
+  assert.equal(audits.length, 0);
+});
+
 test('routed reveal API rejects non-admin with 403 and preserves masked/no-store contracts', async () => {
   process.env.DB_TYPE = 'sqlite';
   process.env.NODE_ENV = 'test';
@@ -151,6 +184,15 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
       provider: 'claude_oauth_token',
       encrypted_data: encrypt(JSON.stringify({ oauth_token: routedSecret })),
     }));
+    const nonOAuthSecret = `routed-api-key-${randomUUID()}`;
+    const nonOAuthCredential = await credentialRepo.save(credentialRepo.create({
+      workspace_id: workspace.id,
+      board_id: null,
+      name: 'Routed API Key',
+      description: '',
+      provider: 'openai',
+      encrypted_data: encrypt(JSON.stringify({ api_key: nonOAuthSecret })),
+    }));
     const adminToken = auth.createSession(admin.id);
     const nonAdminToken = auth.createSession(nonAdmin.id);
     const baseUrl = `http://127.0.0.1:${port}/api/credentials`;
@@ -166,6 +208,18 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
     const deniedBody = await denied.text();
     assert.equal(denied.status, 403);
     assert.doesNotMatch(deniedBody, new RegExp(routedSecret));
+
+    const nonOAuthReveal = await fetch(`${baseUrl}/${nonOAuthCredential.id}/reveal`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password: adminPassword }),
+    });
+    const nonOAuthRevealBody = await nonOAuthReveal.text();
+    assert.equal(nonOAuthReveal.status, 400);
+    assert.doesNotMatch(nonOAuthRevealBody, new RegExp(nonOAuthSecret));
 
     const list = await fetch(`${baseUrl}?workspace_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
@@ -187,7 +241,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
       body: JSON.stringify({ password: adminPassword }),
     });
     const revealedBody = await revealed.json();
-    assert.equal(revealed.status, 201);
+    assert.equal(revealed.status, 200);
     assert.match(revealed.headers.get('cache-control') || '', /no-store/);
     assert.equal(revealedBody.credential_fields.oauth_token, routedSecret);
   } finally {
