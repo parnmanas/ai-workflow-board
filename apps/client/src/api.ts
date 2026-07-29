@@ -77,6 +77,11 @@ import type {
   WorkflowHealthLongTermUsage,
   ClaudeBackendProfile,
   WorkspaceClaudeBackendProfiles,
+  Skill,
+  SkillDetail,
+  SkillProposal,
+  SkillVersion,
+  HermesChildRun,
 } from './types';
 
 const BASE = '/api';
@@ -1641,6 +1646,77 @@ export const api = {
     }),
 
   // ─── Admin Logs ────────────────────────────────────────
+  // Governed, immutable skill catalog and bounded Hermes ChildRuns.
+  listSkills: (workspaceId: string) =>
+    request<Skill[]>(`/workspaces/${encodeURIComponent(workspaceId)}/skills`),
+  getSkill: (workspaceId: string, skillId: string) =>
+    request<SkillDetail>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}`,
+    ),
+  createSkill: (
+    workspaceId: string,
+    body: {
+      slug: string;
+      name: string;
+      description?: string;
+      body: string;
+      support_files?: Array<{ path: string; content: string }>;
+    },
+  ) =>
+    request<Skill & { version: SkillVersion }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  publishSkillVersion: (
+    workspaceId: string,
+    skillId: string,
+    body: { body: string; support_files?: Array<{ path: string; content: string }> },
+  ) =>
+    request<SkillVersion>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/versions`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  assignSkill: (
+    workspaceId: string,
+    skillId: string,
+    body: {
+      skill_version_id: string;
+      agent_id: string;
+      board_id?: string;
+      role_slug?: string;
+    },
+  ) =>
+    request<unknown>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/assignments`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  quarantineSkill: (workspaceId: string, skillId: string) =>
+    request<Skill>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/quarantine`,
+      { method: 'PATCH' },
+    ),
+  listSkillProposals: (
+    workspaceId: string,
+    status?: 'pending' | 'approved' | 'rejected',
+  ) =>
+    request<SkillProposal[]>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/proposals${status ? `?status=${status}` : ''}`,
+    ),
+  reviewSkillProposal: (
+    workspaceId: string,
+    proposalId: string,
+    decision: 'approve' | 'reject',
+    body: { note?: string; skill_id?: string },
+  ) =>
+    request<{ proposal: SkillProposal; version: SkillVersion | null }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/proposals/${encodeURIComponent(proposalId)}/${decision}`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  listAgentChildRuns: (workspaceId: string, agentId: string) =>
+    request<HermesChildRun[]>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/child-runs`,
+    ),
+
   getLogs: (params?: { level?: string; category?: string; since?: string; until?: string; limit?: number; search?: string }) => {
     const qs = new URLSearchParams();
     if (params?.level) qs.set('level', params.level);

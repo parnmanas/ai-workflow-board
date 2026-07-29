@@ -12,6 +12,7 @@ import { credentialFallbackCopy } from '../utils/credentialFallback';
 import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
 import AgentFileBrowser from './AgentFileBrowser';
 import AgentSubagentsPanel from './AgentSubagentsPanel';
+import HermesChildRunsPanel from './HermesChildRunsPanel';
 import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
 import AgentLifecycleControls from './AgentLifecycleControls';
 import ManagedAgentDialog from './admin/ManagedAgentDialog';
@@ -151,7 +152,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
   const [recentActivity, setRecentActivity] = useState<ActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'info' | 'files' | 'subagents'>('info');
+  const [activeTab, setActiveTab] = useState<'info' | 'files' | 'subagents' | 'child-runs'>('info');
   const { wsId } = useParams<{ wsId: string }>();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -780,7 +781,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               zIndex: 1,
             }}
           >
-            {(['info', 'files', 'subagents'] as const).map((tab) => {
+            {(['info', 'files', 'subagents', 'child-runs'] as const).map((tab) => {
               const isActive = activeTab === tab;
               return (
                 <button
@@ -801,7 +802,13 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     cursor: 'pointer',
                   }}
                 >
-                  {tab === 'info' ? 'Info' : tab === 'files' ? 'Files' : 'Subagents'}
+                  {tab === 'info'
+                    ? 'Info'
+                    : tab === 'files'
+                      ? 'Files'
+                      : tab === 'subagents'
+                        ? 'Subagents'
+                        : 'Child Runs'}
                 </button>
               );
             })}
@@ -1407,6 +1414,14 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
             // in lockstep with the outer modal.
             <div style={{ flex: 1, minHeight: 480, display: 'flex', minWidth: 0 }}>
               <AgentSubagentsPanel wsId={wsId} agentId={detail.id} />
+            </div>
+          )}
+          {activeTab === 'child-runs' && detail && (
+            <div style={{ flex: 1, minHeight: 420, display: 'flex', minWidth: 0 }}>
+              <HermesChildRunsPanel
+                workspaceId={wsId || detail.workspace_id || ''}
+                agentId={detail.id}
+              />
             </div>
           )}
         </div>

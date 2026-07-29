@@ -2008,6 +2008,69 @@ export interface RuntimeHealth {
   };
 }
 
+export interface SkillVersion {
+  id: string;
+  workspace_id: string;
+  skill_id: string;
+  version: number;
+  body: string;
+  support_files: Array<{ path: string; content: string }>;
+  digest: string;
+  created_by: string;
+  source_proposal_id: string;
+  created_at: string;
+}
+
+export interface Skill {
+  id: string;
+  workspace_id: string;
+  slug: string;
+  name: string;
+  description: string;
+  status: 'active' | 'quarantined';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillDetail extends Skill {
+  versions: SkillVersion[];
+}
+
+export interface SkillProposal {
+  id: string;
+  workspace_id: string;
+  skill_id: string;
+  title: string;
+  body: string;
+  support_files: Array<{ path: string; content: string }>;
+  digest: string;
+  status: 'pending' | 'approved' | 'rejected';
+  source_agent_id: string;
+  source_run_id: string;
+  reviewed_by: string;
+  review_note: string;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HermesChildRun {
+  id: string;
+  workspace_id: string;
+  parent_run_id: string;
+  parent_agent_id: string;
+  runtime_child_id: string;
+  strategy: 'delegated' | 'swarm';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  depth: number;
+  budget: number;
+  title: string;
+  summary: string;
+  runtime_metadata: Record<string, unknown>;
+  started_at: string;
+  finished_at: string | null;
+}
+
 /**
  * Per-managed-agent CLI credential snapshot, reported on the manager's
  * heartbeat. Mirrors AgentCredentialEntry on the manager + server. Never
