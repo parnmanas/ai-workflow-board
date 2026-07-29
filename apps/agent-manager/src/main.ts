@@ -115,7 +115,7 @@ function parseFlags(argv: string[]): CliFlags {
 }
 
 function printHelp(): void {
-  process.stdout.write(`awb-agent-manager — standalone AWB subagent runner
+  process.stdout.write(`awb-agent-manager — AWB Runtime Host
 
 Usage:
   awb-agent-manager                       start the manager (uses saved config)

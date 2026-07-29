@@ -724,7 +724,7 @@ export function windowsTaskXml(opts: { launcherPath: string; user: string; isSys
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>AWB Agent Manager — standalone subagent runner</Description>
+    <Description>AWB Runtime Host — managed agent execution service</Description>
   </RegistrationInfo>
   <Triggers>
 ${trigger}

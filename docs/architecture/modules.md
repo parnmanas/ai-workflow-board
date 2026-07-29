@@ -29,6 +29,8 @@ AppModule
 ├── TicketsModule           /api/tickets/*
 ├── UsersModule             /api/users/*
 ├── AgentsModule            /api/agents/*
+├── AgentManagerModule       /api/agent-manager/*, /api/admin/agent-manager/*
+├── SkillsModule             /api/workspaces/:workspaceId/skills/*
 ├── PromptTemplatesModule   /api/prompt-templates/*
 ├── ChannelsModule          /api/channels/*
 ├── ApiKeysModule           /api/api-keys/*
@@ -90,10 +92,12 @@ polluting the global exports list.
 
 | Imports | Controllers | Providers | Exports |
 |---|---|---|---|
-| `TypeOrmModule.forFeature([Agent, AgentChannelIdentity, AgentTrigger, Ticket])` | `AgentsController` | `AuthGuard`, `PermissionGuard`, `AgentConnectionService`, `TriggerLoopService`, `AgentStatusService` | `AgentConnectionService`, `TriggerLoopService`, `AgentStatusService` |
+| Agent/workload/dispatch/ChildRun entities, `forwardRef(AgentManagerModule)`, `ChatRoomsModule`, `ColumnPoliciesModule`, `SkillsModule` | `AgentsController`, `FsBrowserController`, `SubagentMonitorController`, `ChildRunsController`, `AgentChildRunsController` | Agent connection, allocation, workload, dispatch, supervision, status, and `ChildRunService` | Shared Agent execution state plus `ChildRunService` |
 
-Imported by `McpModule` so MCP tools can reach trigger / connection /
-status state.
+`ChildRunService` persists bounded Hermes collaboration telemetry. ChildRuns
+are children of a durable run and are deliberately not Agent identities.
+`AgentsModule` is imported by `McpModule` so tools can reach trigger,
+connection, and status state.
 
 ---
 
@@ -122,6 +126,20 @@ status state.
 - Imports: `TypeOrmModule.forFeature([AgentErrorLog, Agent])`
 - Controllers: `AgentLogsUploadController`, `AgentLogsAdminController`
 - Providers: `AgentLogsService`, `AgentAuthGuard`, `AuthGuard`, `AdminGuard`
+
+### `AgentManagerModule`
+
+- Imports: Agent/API-key/credential/ticket/resource repositories,
+  `forwardRef(AgentsModule)`, `SkillsModule`
+- Controller: `AgentManagerController`
+- Providers: pairing, instance/capability registry, command ledger/dispatch,
+  drift monitor, and auth guards
+- Exports: `InstanceRegistryService`, `PairingService`,
+  `AgentManagerCommandService`
+- Architectural name: **Runtime Host**. The module and route names remain
+  compatibility aliases.
+- Runtime-authenticated child start/finish endpoints persist ChildRuns only
+  after verifying that the caller owns the parent Agent.
 
 ### `ApiKeysModule`
 - Controllers: `ApiKeysController`
@@ -193,6 +211,17 @@ status state.
 - Imports: `TypeOrmModule.forFeature([Resource])`
 - Controllers: `ResourcesController`
 - Providers: `AuthGuard`, `PermissionGuard`
+
+### `SkillsModule`
+
+- Imports: `Skill`, `SkillVersion`, `AgentSkillAssignment`,
+  `RunSkillSnapshot`, `SkillProposal`, and `Agent` repositories
+- Controller: `SkillsController`
+- Providers / Exports: `SkillsService`, `RunSkillSnapshotService`
+- Owns immutable version publication, scoped exact-version assignments,
+  quarantine, deterministic run snapshots, and human-reviewed proposals.
+- Runtime MCP clients can propose changes but cannot approve, publish, or
+  assign a skill.
 
 ### `TicketsModule`
 - Imports: `TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, Board, UserMention, TicketReadState, TicketAttachment])`, `AgentsModule` (`/api/tickets/:id/trigger` 의 TriggerLoopService), `WorkspaceRolesModule` (합의 이동 게이트 `evaluateConsensusMoveGate` + `GET /:id/consensus`, `POST /:id/consensus/{propose,vote}` REST 브릿지)

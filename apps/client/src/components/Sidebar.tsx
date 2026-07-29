@@ -165,6 +165,12 @@ export default function Sidebar({
       label: 'Workflow Health',
       icon: 'H',
     },
+    {
+      key: 'skills',
+      path: '/admin/skills',
+      label: 'Skills',
+      icon: 'S',
+    },
     { key: 'server-logs', path: '/admin/logs', label: 'Server Logs', icon: 'L' },
     {
       key: 'agent-logs',

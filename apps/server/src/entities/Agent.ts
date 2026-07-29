@@ -68,11 +68,9 @@ export class Agent {
   @Column({ type: 'text', default: '' })
   working_dir: string;
 
-  // ST-4: id of the agent-manager Agent row that supervises this agent.
-  // null for legacy / standalone agents (e.g. Claude CLI running with the
-  // bare plugin proxy). Set when an admin creates an agent identity through
-  // the agent-manager UI so the manager can route spawn/stop SSE commands
-  // to the right host.
+  // Runtime Host Agent id that owns execution for this Agent. Executable
+  // Agents require this link; null is reserved for non-executable identities
+  // such as humans, integrations, and historical records.
   @Column({ type: 'varchar', nullable: true, default: null })
   manager_agent_id: string | null;
 

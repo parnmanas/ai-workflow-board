@@ -3,8 +3,9 @@
 // subagent manager. Extracted from EventStream so the SSE pipe can stay a thin
 // connect/parse loop.
 //
-// agent-manager does not have a CLI on stdin to notify. When no delegation
-// path is available, events are simply logged.
+// Runtime Host invariant: events run only through an explicitly owned Agent
+// runtime. There is no editor/stdin main-session fallback; unavailable routes
+// fail closed and are logged.
 
 import { log } from './logging.js';
 import { loadAgentInfo } from './config.js';

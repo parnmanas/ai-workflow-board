@@ -1,13 +1,21 @@
 # awb-agent-manager
 
-Standalone subagent runner for [AI Workflow Board](../../README.md). Connects to
-an AWB server over SSE + REST, spawns CLI-driven agents (Claude, Codex, Antigravity,
-PI, or any custom binary that speaks MCP), and reports liveness back to the AWB
-admin dashboard.
+Runtime Host for [AI Workflow Board](../../README.md). It connects to AWB over
+SSE + REST, owns managed Agent execution, advertises runtime capabilities, and
+supports Hermes over the official ACP stdio protocol alongside registered CLI
+adapters.
 
 agent-manager owns SSE event delivery, persistent ticket/chat sessions,
 subagent supervision, fs browser, instance heartbeats, and CLI lifecycle
 management.
+
+The package, binary, config directory, and API retain the `agent-manager` name
+for compatibility. Architecturally it is an execution-plane service: AWB owns
+durable Agent identity, authorization, work state, skills, collaboration
+policy, and audit history. There is no editor/plugin execution fallback.
+
+See [the Runtime Host reference](../../docs/agent-manager.md) and
+[the Hermes runtime guide](../../docs/hermes-runtime.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -22,12 +30,13 @@ management.
 │  awb-agent-manager  (this package)                              ││
 │   ├── EventStream       SSE consumer + reconnect                ││
 │   ├── EventDispatcher   route → ticket / chat / fs / command    ││
-│   ├── ManagedAgents     spawn / stop / restart CLI children     ││
+│   ├── ManagedAgents     isolate / start / stop Agent runtimes   ││
+│   ├── HermesRuntime     one ACP process per durable AWB Agent   ││
 │   └── InstanceHeartbeat per-process registry ping ──────────────┘
 └─────────────────────────────────────────────────────────────────┘
        │ stdio
        ▼
-   claude / codex / antigravity / pi / custom CLI
+   hermes-acp / claude / codex / antigravity / pi / custom CLI
 ```
 
 ## Install

@@ -5,7 +5,7 @@
 //
 // Rendering rules:
 //   - has manager_name → "<manager>/<name>"
-//   - no manager_name (legacy / standalone) → "<name>"
+//   - no manager_name (non-executable or historical identity) → "<name>"
 //   - missing both (defensive) → "(unnamed)"
 
 export interface AgentLike {

@@ -1,7 +1,7 @@
 {
   "name": "awb-agent-manager",
   "version": "1.6.77",
-  "description": "Standalone subagent runner for AWB — drives Claude / DeepSeek / Codex / Antigravity CLIs without a host editor",
+  "description": "Runtime Host for AWB agents, including Hermes ACP and managed CLI runtimes",
   "type": "module",
   "main": "dist/main.js",
   "bin": {

@@ -197,7 +197,7 @@ export function BoardStreamProvider({ children }: ProviderProps) {
         dispatch('ticket_presence', event.data);
       });
 
-      // Phase 3 — Agent Manager dashboard: live daemon/proxy registry updates.
+      // Runtime Host dashboard: live instance capability/health updates.
       eventSource.addEventListener('agent_instance_update', (event: MessageEvent) => {
         dispatch('agent_instance_update', event.data);
       });
