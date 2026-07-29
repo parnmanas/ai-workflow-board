@@ -4,8 +4,8 @@
 // the per-session sessionStore. Keyed by the stable agentId and only deleted on
 // close when no other session remained, it leaked an already-closed McpServer
 // (+79 tool closures) on every out-of-order reconnect close. The fix removes
-// that map and derives the push-target server from the live session set via
-// SessionStore.getLatestServerForAgent().
+// that map. Execution delivery now uses the Runtime Host SSE path exclusively;
+// MCP retains only request-scoped tool sessions.
 //
 // The behavioural proof lives in mcp-session-store-reconnect.test.mjs. This
 // static check is the cheap, refactor-surviving guard that the duplicate
@@ -47,21 +47,21 @@ test('McpController no longer holds an agentId → McpServer map', () => {
   );
 });
 
-test('McpController derives the push-target server from sessionStore', () => {
+test('McpController has no session-derived execution push target', () => {
   const src = code('modules/mcp/mcp.controller.ts');
-  // The trigger push must resolve the server through the single source of
-  // truth, not a side map.
-  assert.match(
+  assert.doesNotMatch(
     src,
     /sessionStore\.getLatestServerForAgent\(/,
-    'trigger push must derive the McpServer from sessionStore.getLatestServerForAgent',
+    'MCP must not select an Agent execution push target',
   );
 });
 
-test('SessionStore exposes getLatestServerForAgent returning the live server', () => {
+test('SessionStore exposes only session-scoped McpServer lookup', () => {
   const src = code('modules/mcp/internal/session-store.ts');
-  assert.match(src, /getLatestServerForAgent\s*\(/, 'SessionStore must expose getLatestServerForAgent');
-  // It must pick by lastActivity (most-recently-active live session) so a
-  // brief reconnect overlap targets the current connection.
-  assert.match(src, /lastActivity/, 'getLatestServerForAgent must select by lastActivity');
+  assert.doesNotMatch(
+    src,
+    /getLatestServerForAgent\s*\(/,
+    'SessionStore must not expose an Agent execution push resolver',
+  );
+  assert.match(src, /get\(sessionId:\s*string\)/, 'tool sessions remain addressable by session id');
 });

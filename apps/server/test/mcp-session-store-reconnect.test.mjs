@@ -8,16 +8,15 @@
 // pinning an already-closed McpServer — an orphan that could never be GC'd,
 // plus a dead push target. Each orphan retained all 79 registered tool closures.
 //
-// Fix: drop the duplicate map; derive the push-target server on demand from
-// the live session set via SessionStore.getLatestServerForAgent(). With no
-// second source of truth, the only McpServer references are the per-session
-// store entries, which are freed unconditionally on close/eviction/cleanup —
-// so storage converges to the active-session count by construction.
+// Fix: drop both the duplicate map and the MCP execution-push resolver.
+// Runtime Host SSE is the sole execution delivery path; MCP servers remain
+// reachable only by their tool-session id and are freed unconditionally on
+// close/eviction/cleanup.
 //
 // This test drives SessionStore directly (a dependency-free singleton) with
 // fake transports/servers, exercising the exact reconnect loop the ticket
 // calls for: same agentId, sessions closed out of order, asserting the store
-// size converges and a CLOSED session's server is never returned.
+// size converges and a CLOSED session's server is no longer addressable.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,39 +48,33 @@ function fakeServer() {
   return { __id: `server-${++seq}` };
 }
 
-// Date.now() has ~1ms resolution; back-to-back register() calls can land in the
-// same millisecond. Await a real tick when a test needs lastActivity to advance
-// so "most-recently-active" ordering is deterministic rather than tie-broken.
-const tick = () => new Promise((r) => setTimeout(r, 2));
-
-test('getLatestServerForAgent returns the newest LIVE session, never a closed one', async () => {
+test('removing a reconnect session makes its McpServer unreachable', async () => {
   const { sessionStore } = await loadSessionStore();
   const agent = `agent-${++seq}`;
   const base = sessionStore.size;
 
   const srv1 = fakeServer();
   sessionStore.register('s1', fakeTransport(), srv1, { agentId: agent, source: 'db' });
-  await tick();
   const srv2 = fakeServer();
   sessionStore.register('s2', fakeTransport(), srv2, { agentId: agent, source: 'db' });
 
-  // Reconnect overlap: both sessions live, newest (s2) is the push target.
+  // Reconnect overlap: each server is reachable only through its own session.
   assert.equal(sessionStore.size, base + 2);
-  assert.equal(sessionStore.getLatestServerForAgent(agent), srv2);
+  assert.equal(sessionStore.get('s1')?.server, srv1);
+  assert.equal(sessionStore.get('s2')?.server, srv2);
 
-  // Out-of-order close: the NEWER session (s2) closes first. The old agentId
-  // map would have kept returning the now-closed srv2; the derived lookup must
-  // fall back to the still-live s1.
+  // Out-of-order close: the newer session closes first. No Agent-level lookup
+  // remains that could keep returning or pinning its now-closed server.
   sessionStore.remove('s2');
   assert.equal(sessionStore.size, base + 1);
-  const afterClose = sessionStore.getLatestServerForAgent(agent);
-  assert.equal(afterClose, srv1, 'must return the live session server');
-  assert.notEqual(afterClose, srv2, 'must NEVER return the closed session server (the orphan-leak bug)');
+  assert.equal(sessionStore.get('s2'), undefined);
+  assert.equal(sessionStore.get('s1')?.server, srv1);
+  assert.equal(sessionStore.hasAgentSession(agent), true);
 
   // Last session closes → no live server, nothing pinned.
   sessionStore.remove('s1');
   assert.equal(sessionStore.size, base);
-  assert.equal(sessionStore.getLatestServerForAgent(agent), undefined);
+  assert.equal(sessionStore.hasAgentSession(agent), false);
 });
 
 test('repeated same-agentId reconnect loop converges to the active-session count', async () => {
@@ -102,7 +95,8 @@ test('repeated same-agentId reconnect loop converges to the active-session count
     if (prev) sessionStore.remove(prev);
     // Exactly one live session for this agent at every step.
     assert.equal(sessionStore.size, base + 1, `iteration ${i}: store must hold one live session`);
-    assert.equal(sessionStore.getLatestServerForAgent(agent), server, `iteration ${i}: latest server is the live one`);
+    assert.equal(sessionStore.get(sid)?.server, server, `iteration ${i}: current session is live`);
+    if (prev) assert.equal(sessionStore.get(prev), undefined, `iteration ${i}: prior session was removed`);
     prev = sid;
     prevServer = server;
   }
@@ -110,11 +104,11 @@ test('repeated same-agentId reconnect loop converges to the active-session count
   // Close the final live session — converges back to baseline, no residue.
   sessionStore.remove(prev);
   assert.equal(sessionStore.size, base);
-  assert.equal(sessionStore.getLatestServerForAgent(agent), undefined);
+  assert.equal(sessionStore.hasAgentSession(agent), false);
   assert.ok(prevServer, 'sanity: loop ran');
 });
 
-test('most-recently-active live session wins; other agents are ignored', async () => {
+test('agent-presence helpers remain scoped across overlapping tool sessions', async () => {
   const { sessionStore } = await loadSessionStore();
   const agentA = `agent-${++seq}`;
   const agentB = `agent-${++seq}`;
@@ -122,26 +116,20 @@ test('most-recently-active live session wins; other agents are ignored', async (
 
   const a1 = fakeServer();
   sessionStore.register('a1', fakeTransport(), a1, { agentId: agentA, source: 'db' });
-  await tick();
   const a2 = fakeServer();
   sessionStore.register('a2', fakeTransport(), a2, { agentId: agentA, source: 'db' });
   const b1 = fakeServer();
   sessionStore.register('b1', fakeTransport(), b1, { agentId: agentB, source: 'db' });
 
-  assert.equal(sessionStore.getLatestServerForAgent(agentA), a2, 'newest A session');
-  assert.equal(sessionStore.getLatestServerForAgent(agentB), b1, 'B unaffected by A');
-
-  // Touch the older A session so it becomes the most-recently-active; the
-  // lookup must follow activity, not insertion order.
-  await tick();
-  sessionStore.touch('a1');
-  assert.equal(sessionStore.getLatestServerForAgent(agentA), a1, 'follows lastActivity');
-
-  // Unknown agent → undefined.
-  assert.equal(sessionStore.getLatestServerForAgent(`nobody-${seq}`), undefined);
+  assert.equal(sessionStore.hasAgentSession(agentA), true);
+  assert.equal(sessionStore.hasAgentSession(agentB), true);
+  assert.equal(sessionStore.hasAgentSession(`nobody-${seq}`), false);
+  assert.equal(sessionStore.distinctAgentCount(), 2);
 
   sessionStore.remove('a1');
   sessionStore.remove('a2');
+  assert.equal(sessionStore.hasAgentSession(agentA), false);
+  assert.equal(sessionStore.hasAgentSession(agentB), true);
   sessionStore.remove('b1');
   assert.equal(sessionStore.size, base);
 });

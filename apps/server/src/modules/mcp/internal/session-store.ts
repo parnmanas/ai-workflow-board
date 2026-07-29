@@ -183,10 +183,9 @@ class SessionStore {
   /**
    * Count of DISTINCT agentIds with at least one live session. Memory
    * observability uses this as the successor to the old controller-side
-   * `agentId → McpServer` map's entry count (that map was removed when its
-   * leak was fixed — see getLatestServerForAgent). `size` counts raw
-   * transport sessions (a single agent can hold several during a reconnect
-   * overlap); this counts unique connected agents.
+   * `agentId → McpServer` map's entry count. Execution push delivery no longer
+   * uses MCP; `size` counts raw tool sessions (a single identity can hold
+   * several during a reconnect overlap), while this counts unique identities.
    */
   distinctAgentCount(): number {
     const agents = new Set<string>();
@@ -212,31 +211,6 @@ class SessionStore {
       if (entry.auth?.agentId === agentId) return true;
     }
     return false;
-  }
-
-  /**
-   * Return the McpServer of the most-recently-active LIVE session for the given
-   * agent, or undefined if the agent has no live session.
-   *
-   * This replaces the controller's old standalone `agentId → McpServer` map,
-   * which leaked: that map was keyed by the stable agentId and overwritten on
-   * every reconnect, then only `delete`d on close when no other session for the
-   * agent remained. An out-of-order close (a reconnect's session closing before
-   * the session it replaced) left the map pinning an already-closed McpServer —
-   * an orphan that could never be GC'd, plus a dead push target. Deriving the
-   * server from the live session set on demand removes that duplicate source of
-   * truth entirely, so the only McpServer references are the per-session
-   * entries this store already frees unconditionally on close/eviction/cleanup.
-   * Picking the most-recently-active session matches the intent of "push to the
-   * agent's current connection" when a reconnect briefly overlaps the old one.
-   */
-  getLatestServerForAgent(agentId: string): McpServer | undefined {
-    let latest: SessionEntry | undefined;
-    for (const entry of this.sessions.values()) {
-      if (entry.auth?.agentId !== agentId) continue;
-      if (!latest || entry.lastActivity >= latest.lastActivity) latest = entry;
-    }
-    return latest?.server;
   }
 
   /** Register a hook to run after each idle-cleanup eviction. */

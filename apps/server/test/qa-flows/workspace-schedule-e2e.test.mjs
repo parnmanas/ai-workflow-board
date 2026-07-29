@@ -23,8 +23,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import {
+  setupKanbanScene,
+  createAgent,
+  runtimeHostKeyForAgent,
+} from '../helpers/fixtures.mjs';
 import { openSseStream } from '../helpers/sse-listener.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,7 +45,7 @@ const TASK_PROMPT = 'E2E: run the scheduled task.';
 
 test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → spawn-trigger SSE (idempotent)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 
   const { WorkspaceScheduleService } = await import(
@@ -53,11 +57,12 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-e2e' });
   // The schedule dispatches to this agent; we also subscribe to SSE as it.
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker' });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'sched-e2e' });
+  const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
+  assert.ok(runtimeHostKey, 'scheduled Agent must be owned by a Runtime Host fixture');
 
   // Stand in for the agent-manager: subscribe to the live event stream AS the
   // target agent. A chat_room_message landing here is the spawn trigger.
-  const sse = await openSseStream(port, key.raw_key);
+  const sse = await openSseStream(port, runtimeHostKey);
   t.after(() => sse.close());
 
   step('create an interval schedule (workspace-scoped, board_id=null)');

@@ -9,6 +9,11 @@ import { randomUUID, createHash } from 'node:crypto';
 import { traceEvent } from './trace.mjs';
 
 const stamp = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const runtimeHostKeysByAgent = new Map();
+
+export function runtimeHostKeyForAgent(agentId) {
+  return runtimeHostKeysByAgent.get(agentId) || null;
+}
 
 // Built-in role slug list mirrored from server-side BUILTIN_ROLES — the
 // fixture path bypasses the workspaces controller which would otherwise
@@ -74,10 +79,21 @@ export async function createAgent(
   app,
   getDataSourceToken,
   workspaceId,
-  { name = 'agent', rolePrompt, type = 'custom' } = {},
+  { name = 'agent', rolePrompt, type = 'custom', hosted = true } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('Agent');
+  const runtimeHost = type !== 'manager' && hosted
+    ? await repo.save(repo.create({
+        name: `runtime-host-${name}-${stamp()}`,
+        description: 'qa Runtime Host',
+        type: 'manager',
+        is_active: 1,
+        is_online: 0,
+        workspace_id: null,
+        role_prompt: '',
+      }))
+    : null;
   const row = await repo.save(
     repo.create({
       name: `${name}-${stamp()}`,
@@ -87,8 +103,19 @@ export async function createAgent(
       is_online: 0,
       workspace_id: workspaceId,
       role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
+      manager_agent_id: runtimeHost?.id ?? null,
+      runtime_config: runtimeHost
+        ? { strategy: 'single', permission_mode: 'strict' }
+        : null,
     }),
   );
+  if (runtimeHost) {
+    const hostKey = await createApiKey(app, getDataSourceToken, runtimeHost.id, {
+      workspaceId,
+      label: `runtime-host-${name}`,
+    });
+    runtimeHostKeysByAgent.set(row.id, hostKey.raw_key);
+  }
   traceEvent('fixture', { kind: 'agent', id: row.id, name: row.name, workspace_id: workspaceId });
   return row;
 }

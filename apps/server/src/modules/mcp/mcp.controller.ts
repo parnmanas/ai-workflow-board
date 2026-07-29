@@ -177,8 +177,8 @@ export class McpController implements OnModuleInit {
     logService = this._logService;
 
     // Memory observability: expose the MCP session store's live size. Since
-    // the leaking agentId→McpServer map was removed (see class header),
-    // sessionStore is the single source of truth for MCP connection state —
+    // the leaking agentId→McpServer map and MCP execution-push path were
+    // removed, so sessionStore is the single source of truth for tool sessions —
     // `mcp.sessions` is raw transport count, `mcp.connectedAgents` collapses
     // reconnect-overlap duplicates to distinct agents. A climbing
     // sessions-vs-agents gap under reconnect churn is exactly the #1-leak
@@ -502,9 +502,8 @@ export class McpController implements OnModuleInit {
               runtimeRunId: runtimeRunIdHeader,
               executionStrategy: executionStrategyHeader,
             });
-            // No separate agentId → server map: the push path derives the
-            // live server from sessionStore on demand (getLatestServerForAgent),
-            // so the McpServer is referenced only by this session's store entry.
+            // No separate agentId → server map or execution-push lookup: the
+            // McpServer is referenced only by this tool session's store entry.
             const who = mcpAuthInfo?.agentName || mcpAuthInfo?.keyHint || 'anonymous';
             mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);
           },

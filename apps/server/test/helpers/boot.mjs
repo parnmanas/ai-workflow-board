@@ -130,6 +130,16 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   return { app, port, modules };
 }
 
+export async function closeTestApp(app) {
+  await app.close().catch(() => {});
+  if (process.platform === 'win32') {
+    // Nest's close promise can settle one libuv turn before the underlying
+    // HTTP server handle finishes closing. Let that callback drain before
+    // node:test's --test-force-exit tears down the worker.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 // Flushes the trace buffer to QA_TRACE_PATH so the parent qa.controller can
 // attach it to the test result. Call at the END of a test's success path.
 //

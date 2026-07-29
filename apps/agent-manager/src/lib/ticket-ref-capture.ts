@@ -639,6 +639,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   embed_resources: 'non-ticket', execute_function: 'non-ticket',
   move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
+  propose_skill_change: 'non-ticket',
   qa_run_heartbeat: 'non-ticket', record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
   reject_feature: 'non-ticket',

@@ -237,10 +237,12 @@ test('executable Agent creation requires a Runtime Host and explicit runtime con
   const legacyHosted = await createAgent(app, getDataSourceToken, workspace.id, {
     name: 'legacy-hosted',
     type: 'codex',
+    hosted: false,
   });
   const legacyStandalone = await createAgent(app, getDataSourceToken, workspace.id, {
     name: 'legacy-standalone',
     type: 'claude',
+    hosted: false,
   });
   await dataSource.getRepository('Agent').update(
     { id: legacyHosted.id },

@@ -41,14 +41,23 @@ const { getDataSourceToken, ActivityService } = modules;
 const ds = app.get(getDataSourceToken());
 
 // ── Shared scene: one workspace, a managed agent (has a manager → prefixed
-//    display), an unmanaged standalone agent (bare display), a human user, and
+//    display), its Runtime Host identity (bare display), a human user, and
 //    a ticket to hang activity / pending state on. ────────────────────────────
 const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'fullname' });
 
 const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'Mgr', type: 'manager' });
-const managed = await createAgent(app, getDataSourceToken, ws.id, { name: 'Coder' });
-await ds.getRepository('Agent').update({ id: managed.id }, { manager_agent_id: manager.id });
-const standalone = await createAgent(app, getDataSourceToken, ws.id, { name: 'Solo' });
+const managed = await createAgent(app, getDataSourceToken, ws.id, {
+  name: 'Coder',
+  type: 'hermes',
+  hosted: false,
+});
+await ds.getRepository('Agent').update(
+  { id: managed.id },
+  {
+    manager_agent_id: manager.id,
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  },
+);
 const user = await createUser(app, getDataSourceToken, { name: 'Human' });
 
 const MANAGED_DISPLAY = `${manager.name}/${managed.name}`;
@@ -72,7 +81,7 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
   });
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
-    field_changed: 'standalone', actor_id: standalone.id, actor_name: 'stale-whatever',
+    field_changed: 'runtime-host', actor_id: manager.id, actor_name: 'stale-whatever',
   });
   // System actor: no actor_id → the stored label must survive verbatim.
   await activityService.logActivity({
@@ -98,10 +107,11 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
     `managed actor must read back as "${MANAGED_DISPLAY}", got "${byField.get('managed')?.actor_name}"`);
   assert.ok(byField.get('managed')?.actor_name.includes('/'), 'managed display must carry the manager prefix');
 
-  // standalone (no manager) → bare name, no prefix
-  assert.equal(byField.get('standalone')?.actor_name, standalone.name,
-    'unmanaged agent must resolve to its bare name');
-  assert.ok(!byField.get('standalone')?.actor_name.includes('/'), 'unmanaged agent must NOT gain a prefix');
+  // Runtime Host (no parent host) → bare name, no prefix
+  assert.equal(byField.get('runtime-host')?.actor_name, manager.name,
+    'Runtime Host must resolve to its bare name');
+  assert.ok(!byField.get('runtime-host')?.actor_name.includes('/'),
+    'Runtime Host must NOT gain a prefix');
 
   // system + user actors keep their stored label
   assert.equal(byField.get('system')?.actor_name, 'BacklogPromotionService',
@@ -189,7 +199,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/
 // event-registry board_update.map projects actor_id→canonical, and the frame
 // lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
 test('Realtime board_update SSE: actor_name is canonical <Manager>/<Agent>', async () => {
-  const key = await createApiKey(app, getDataSourceToken, standalone.id, { workspaceId: ws.id, label: 'sse-sub' });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'sse-sub' });
   // No boardId → the board_update filter (`!id.boardId || …`) delivers all.
   const sse = await openSseStream(BASE_PORT, key.raw_key, {});
   after(() => sse.close());

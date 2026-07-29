@@ -21,7 +21,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createBoard,
@@ -104,6 +104,17 @@ async function mcpCallTool(baseUrl, apiKey, sessionId, name, args) {
   return { status: res.status, body: parsed };
 }
 
+async function mcpClose(baseUrl, apiKey, sessionId) {
+  if (!sessionId) return;
+  await fetch(`${baseUrl}/mcp`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'mcp-session-id': sessionId,
+    },
+  }).catch(() => {});
+}
+
 function parseToolErrorMessage(callResp) {
   const text = callResp?.body?.result?.content?.[0]?.text;
   if (typeof text !== 'string') return null;
@@ -112,10 +123,15 @@ function parseToolErrorMessage(callResp) {
 
 test('create_remote_improvement_ticket rejects spoofed-header non-reviewer', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const baseUrl = `http://localhost:${port}`;
   const ds = app.get(getDataSourceToken());
+  let attackerKey = null;
+  let attackerSession = null;
+  t.after(async () => {
+    await mcpClose(baseUrl, attackerKey?.raw_key, attackerSession);
+    await closeTestApp(app);
+  });
 
   step('Scene: workspace + board(self_improvement_mode=remote_awb) + terminal column');
   const ws = await createWorkspace(app, getDataSourceToken, 'sib-auth');
@@ -128,7 +144,7 @@ test('create_remote_improvement_ticket rejects spoofed-header non-reviewer', asy
   step('Two agents: legitimate reviewer + attacker (both with valid API keys)');
   const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'reviewer' });
   const attacker = await createAgent(app, getDataSourceToken, ws.id, { name: 'attacker' });
-  const attackerKey = await createApiKey(app, getDataSourceToken, attacker.id, {
+  attackerKey = await createApiKey(app, getDataSourceToken, attacker.id, {
     workspaceId: ws.id, label: 'attacker',
   });
 
@@ -151,7 +167,7 @@ test('create_remote_improvement_ticket rejects spoofed-header non-reviewer', asy
   assert.equal(assign?.agent_id, reviewer.id, 'reviewer assignment must point at the reviewer agent');
 
   step('Attacker opens MCP session with spoofed X-AWB-Subagent-* headers');
-  const attackerSession = await mcpInit(baseUrl, attackerKey.raw_key, {
+  attackerSession = await mcpInit(baseUrl, attackerKey.raw_key, {
     'X-AWB-Subagent-Role': 'reviewer',
     'X-AWB-Subagent-Ticket-Id': ticket.id,
     'X-AWB-Subagent-Trigger-Source': 'ticket_done_review',

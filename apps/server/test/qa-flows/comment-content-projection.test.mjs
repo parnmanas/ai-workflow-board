@@ -20,7 +20,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PROJECTION_PORT || '7811';
@@ -35,7 +35,7 @@ const HEAVY_KEYS = ['content', 'author', 'author_type', 'parent_id', 'metadata']
 
 test('comment payload contract: board GET light, ticket GET full thread', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => closeTestApp(app));
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
@@ -44,7 +44,10 @@ test('comment payload contract: board GET light, ticket GET full thread', async 
   });
   const user = await createUser(app, getDataSourceToken, { name: 'reader' });
   const token = app.get(AuthService).createSession(user.id);
-  const authHeaders = { Authorization: `Bearer ${token}` };
+  const authHeaders = {
+    Authorization: `Bearer ${token}`,
+    Connection: 'close',
+  };
 
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.todo.id,

@@ -14,7 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PAGINATION_PORT || '7814';
@@ -24,7 +24,7 @@ const PAGE = 50; // DETAIL_COMMENT_PAGE 와 동일
 
 test('comment dynamic loading: bounded detail GET + cursor pagination', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => closeTestApp(app));
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 

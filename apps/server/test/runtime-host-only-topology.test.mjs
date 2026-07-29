@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
@@ -13,6 +14,7 @@ import { AgentStatusService } from '../dist/modules/agents/agent-status.service.
 import { AgentManagerCommandService } from '../dist/modules/agent-manager/agent-manager-command.service.js';
 
 process.env.PORT = process.env.RUNTIME_HOST_ONLY_PORT || '7909';
+const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
 
 test('only Runtime Hosts can advertise execution presence or receive dispatch streams', async (t) => {
   const { app, port, modules } = await bootApp({
@@ -29,10 +31,12 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   const hosted = await createAgent(app, getDataSourceToken, workspace.id, {
     name: 'hosted',
     type: 'hermes',
+    hosted: false,
   });
   const detached = await createAgent(app, getDataSourceToken, workspace.id, {
     name: 'detached',
     type: 'claude',
+    hosted: false,
   });
   const dataSource = app.get(getDataSourceToken());
   await dataSource.getRepository('Agent').update(
@@ -148,7 +152,9 @@ test('server topology sources contain no executable proxy or daemon modes', () =
     'apps/server/src/modules/agents/agent-status.service.ts',
     'apps/server/src/modules/chat-rooms/room-messaging.service.ts',
   ];
-  const source = files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+  const source = files
+    .map((file) => fs.readFileSync(path.join(repoRoot, file), 'utf8'))
+    .join('\n');
   assert.doesNotMatch(source, /mode:\s*['"]daemon['"]/);
   assert.doesNotMatch(source, /mode:\s*['"]proxy['"]/);
   assert.doesNotMatch(source, /source:\s*['"]proxy['"]/);

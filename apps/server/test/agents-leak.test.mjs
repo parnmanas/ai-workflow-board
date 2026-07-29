@@ -80,6 +80,7 @@ describe('agents-leak: cross-workspace agent isolation', async () => {
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
     const wsRepo = dataSource.getRepository('Workspace');
+    const agentRepo = dataSource.getRepository('Agent');
 
     // ─── Create admin user directly via TypeORM ────────────────────────────────
     const adminUser = await userRepo.save(userRepo.create({
@@ -109,6 +110,19 @@ describe('agents-leak: cross-workspace agent isolation', async () => {
       object_type: 'workspace', object_id: wsB.id,
     }));
 
+    // Executable identities must be owned by a Runtime Host and select their
+    // runtime explicitly. The leak contract below is workspace isolation, so
+    // provision the required host directly and create the subject via HTTP.
+    const runtimeHost = await agentRepo.save(agentRepo.create({
+      name: `Leak Runtime Host ${randomUUID()}`,
+      description: 'Cross-workspace leak test Runtime Host',
+      type: 'manager',
+      workspace_id: null,
+      is_active: 1,
+      is_online: 0,
+      role_prompt: '',
+    }));
+
     // ─── Create an agent in workspace A via HTTP ───────────────────────────────
     // The create endpoint IGNORES body.workspace_id (anti cross-workspace
     // creation) and uses the WorkspaceGuard-resolved workspace from the
@@ -123,8 +137,13 @@ describe('agents-leak: cross-workspace agent isolation', async () => {
       body: {
         name: `Leak Agent WS-A ${randomUUID()}`,
         description: 'Cross-workspace leak test agent',
-        type: 'custom',
+        type: 'hermes',
         workspace_id: wsA.id,
+        manager_agent_id: runtimeHost.id,
+        runtime_config: {
+          strategy: 'single',
+          permission_mode: 'strict',
+        },
       },
     });
     assert.equal(agentRes.status, 201, `Failed to create agent: ${JSON.stringify(agentRes.data)}`);

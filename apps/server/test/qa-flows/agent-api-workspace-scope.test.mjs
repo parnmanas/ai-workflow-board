@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 // validates the X-Agent-Key for real and derives the workspace scope from it.
 process.env.AGENT_DEV_MODE = 'false';
 
-import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createBoard,
@@ -32,7 +32,7 @@ function getTicket(port, ticketId, rawKey) {
 
 test('agent-api enforces workspace scoping on the legacy /api/agent surface', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '7866', 10) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 
   // Two isolated workspaces; the target ticket lives in ws_a.

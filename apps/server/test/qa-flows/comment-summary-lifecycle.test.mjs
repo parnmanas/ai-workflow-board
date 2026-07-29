@@ -2,9 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { bootApp, closeTestApp, exitAfterTests } from '../helpers/boot.mjs';
+import {
+  setupKanbanScene,
+  createAgent,
+  createApiKey,
+  createTicket,
+  createUser,
+  runtimeHostKeyForAgent,
+} from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
+import { openSseStream } from '../helpers/sse-listener.mjs';
 import { apiRequest, makeBaseUrl } from '../test-helpers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,7 +21,7 @@ process.env.PORT = process.env.QA_COMMENT_SUMMARY_PORT || '7898';
 
 test('comment summary is workspace-scoped, idempotent, and preserves originals on every failure path', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
-  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => closeTestApp(app));
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
   const commentRepo = ds.getRepository('Comment');
@@ -22,6 +30,10 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   const sceneB = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-b' });
   const agent = await createAgent(app, getDataSourceToken, sceneA.ws.id, { name: 'summarizer' });
   await ds.getRepository('Agent').update({ id: agent.id }, { is_online: 1 });
+  const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
+  assert.ok(runtimeHostKey, 'summary Agent must be owned by a Runtime Host fixture');
+  const runtimeHostStream = await openSseStream(port, runtimeHostKey);
+  t.after(() => runtimeHostStream.close());
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: sceneA.ws.id, label: 'summarizer' });
   const admin = await createUser(app, getDataSourceToken, { name: 'summary-admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
@@ -183,6 +195,7 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   assert.equal(racedComments.length, 1);
   assert.equal(racedComments[0].content, 'completion won');
 
+  runtimeHostStream.close();
   await Promise.all([mcpA.close(), mcpB.close()]);
   exitAfterTests(0);
 });

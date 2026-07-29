@@ -16,6 +16,7 @@
 import { openSseStream } from './sse-listener.mjs';
 import { McpClient } from './mcp-client.mjs';
 import { traceEvent } from './trace.mjs';
+import { runtimeHostKeyForAgent } from './fixtures.mjs';
 
 export class VirtualAgent {
   /**
@@ -60,9 +61,15 @@ export class VirtualAgent {
   async start() {
     if (this._started) return;
     traceEvent('sse-open', { agent: this.name, agent_id: this.agentId });
+    const runtimeHostApiKey = runtimeHostKeyForAgent(this.agentId);
+    if (!runtimeHostApiKey) {
+      throw new Error(
+        `VirtualAgent ${this.agentId} has no Runtime Host fixture; direct Agent SSE is forbidden`,
+      );
+    }
     // All frame handling happens inside the SSE listener via the onFrame hook
     // so we don't race with test code that also wants to call stream.waitFor.
-    this._stream = await openSseStream(this.port, this.apiKey, {
+    this._stream = await openSseStream(this.port, runtimeHostApiKey, {
       boardId: this.boardId,
       onFrame: (frame) => {
         this.frames.push({ ts: Date.now(), ...frame });
