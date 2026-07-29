@@ -7,6 +7,7 @@ import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
   MANAGED_AGENTS_DIR,
+  OUTBOX_PATH,
   SESSION_DEFER_PATH,
 } from './lib/constants.js';
 import { loadConfig, resolveAgentId } from './lib/config.js';
@@ -54,6 +55,14 @@ import {
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
+import { MessageOutbox } from './lib/outbox.js';
+import {
+  setRestOutbox,
+  postChatRoomMessageRaw,
+  postSilentExitSystemCommentRaw,
+  postDispatchAckRaw,
+  postCommandAckRaw,
+} from './lib/rest.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
 import { postRuntimeChildEvent } from './lib/rest.js';
@@ -469,6 +478,24 @@ async function runRuntime(
     log,
   });
 
+  // Durable send outbox — chat replies / silent-exit comments / acks that
+  // failed with a retryable transport error while AWB was unreachable are
+  // buffered on disk (OUTBOX_PATH) and replayed on SSE (re)connect + a slow
+  // periodic backstop. load() BEFORE setRestOutbox so a fresh live failure
+  // can never race the boot rehydrate. Senders close over `config`, which is
+  // mutated in place on SIGHUP/reload_config — replays always use the
+  // current url/apiKey. Replays go through the *Raw senders (no re-enqueue).
+  const messageOutbox = new MessageOutbox({ persistPath: OUTBOX_PATH, log });
+  messageOutbox.setSenders({
+    chat_message: (p) => postChatRoomMessageRaw(config, p.room_id, p.agent_id, p.content, p.opts),
+    silent_exit_comment: async (p) =>
+      (await postSilentExitSystemCommentRaw(config, p.ticket_id, p.body)).outcome,
+    dispatch_ack: (p) => postDispatchAckRaw(config, p.body),
+    command_ack: (p) => postCommandAckRaw(config, p.command_id, p.status, p.detail),
+  });
+  messageOutbox.load();
+  setRestOutbox(messageOutbox);
+
   const subagentManager = new SubagentManager(config, circuitBreaker);
   // Capture the init promise so the boot-time warm-pool lease reclaim can wait
   // for #reconcileOnStart to revive surviving detached subagents into the
@@ -736,7 +763,13 @@ async function runRuntime(
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
     pluginVersion: version,
-    onConnect: kickPresencePing,
+    onConnect: () => {
+      kickPresencePing();
+      // SSE just (re)connected — the server is reachable again, so drain any
+      // messages buffered while it wasn't. Also covers boot-after-crash: the
+      // first connect after load() replays what a dead manager left behind.
+      void messageOutbox.flush('sse_connect');
+    },
   });
   eventStreamRef = eventStream;
   eventStream.start();
@@ -764,6 +797,15 @@ async function runRuntime(
   };
 
   let uploadTimer: NodeJS.Timeout | null = null;
+
+  // Outbox backstop — a POST can fail transiently while the SSE stream itself
+  // stays up (single dropped request, brief LB hiccup), in which case no
+  // reconnect ever fires to trigger the replay. Sweep on a slow timer;
+  // flush() itself no-ops instantly when the queue is empty.
+  const outboxFlushTimer: NodeJS.Timeout = setInterval(() => {
+    if (messageOutbox.size > 0) void messageOutbox.flush('interval');
+  }, 60_000);
+  outboxFlushTimer.unref?.();
 
   // ticket 9f26f091 — reclaim idle, clean per-(ticket,role) worktrees so a
   // long-lived manager doesn't accumulate dead trees. Conservative: a worktree
@@ -1057,6 +1099,11 @@ async function runRuntime(
       clearInterval(uploadTimer);
       uploadTimer = null;
     }
+    // Outbox sink stays attached through the drain below on purpose: a
+    // silent-exit comment / chat reply that fails while subagents are being
+    // terminated is exactly what should persist to outbox.json for the next
+    // boot's replay. enqueue() is a synchronous file write — safe at shutdown.
+    clearInterval(outboxFlushTimer);
     if (worktreeSweepTimer) {
       clearInterval(worktreeSweepTimer);
       worktreeSweepTimer = null;

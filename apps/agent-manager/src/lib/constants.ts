@@ -22,6 +22,11 @@ export const SUBAGENTS_PERSIST_PATH = join(AGENT_MANAGER_HOME, 'subagents.json')
 // (minutes-to-hours until the CLI session cap resets) survives a manager restart
 // and the resume still fires exactly once.
 export const SESSION_DEFER_PATH = join(AGENT_MANAGER_HOME, 'session-defer.json');
+// Durable send outbox — REST messages (chat replies, silent-exit comments,
+// acks) that failed with a RETRYABLE transport error while the server was
+// unreachable. Persisted so a manager that dies mid-outage still replays the
+// buffered messages on its next boot. See lib/outbox.ts.
+export const OUTBOX_PATH = join(AGENT_MANAGER_HOME, 'outbox.json');
 export const INSTANCES_DIR = join(AGENT_MANAGER_HOME, 'instances');
 // ST-6: per-managed-agent state lives under <home>/agents/<agent_id>/. Each
 // directory holds its own apiKey (issued by the server's provisioning

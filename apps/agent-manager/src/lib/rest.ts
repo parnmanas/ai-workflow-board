@@ -61,6 +61,41 @@ export async function postRuntimeChildEvent(
   }
 }
 
+// ── durable outbox hookup ────────────────────────────────────────────────────
+// Send-failure trichotomy shared by the live wrappers below and the outbox
+// replay path (lib/outbox.ts):
+//   'ok'        — landed.
+//   'retryable' — transport-level failure (fetch threw: refused / DNS / timeout)
+//                 or a server-side 5xx / 408 / 429. The message itself is fine;
+//                 the server just couldn't take it — buffer + replay later.
+//   'permanent' — any other HTTP failure (4xx): a replay would fail identically,
+//                 so buffering it would only wedge the queue.
+export type SendOutcome = 'ok' | 'retryable' | 'permanent';
+
+export function classifyHttpSendFailure(status: number): SendOutcome {
+  return status >= 500 || status === 408 || status === 429 ? 'retryable' : 'permanent';
+}
+
+/** Kinds the wrappers below know how to buffer — mirror of OutboxKind
+ *  (lib/outbox.ts). Declared structurally here so rest.ts does not import the
+ *  outbox module (main.ts injects the live instance at boot). */
+interface RestOutboxSink {
+  enqueue(
+    kind: 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack',
+    payload: unknown,
+  ): void;
+}
+
+let outboxSink: RestOutboxSink | null = null;
+
+/** Wire (or clear) the durable outbox the send wrappers buffer retryable
+ *  failures into. null (the default, and pre-boot state) = old fire-and-log
+ *  behavior. Replays go through the *Raw functions, which never re-enqueue —
+ *  so a replay that fails again cannot duplicate its own entry. */
+export function setRestOutbox(sink: RestOutboxSink | null): void {
+  outboxSink = sink;
+}
+
 /**
  * Fetch a fresh ticket with comments from AWB REST.
  * Returns null on any failure; caller falls back to embedded trigger payload.
@@ -211,6 +246,20 @@ export async function postCommandAck(
   detail?: string,
 ): Promise<void> {
   if (!command_id) return;
+  const outcome = await postCommandAckRaw(config, command_id, status, detail);
+  if (outcome === 'retryable') {
+    outboxSink?.enqueue('command_ack', { command_id, status, detail: detail ?? '' });
+  }
+}
+
+/** Transport-only variant of {@link postCommandAck} — classifies the failure
+ *  instead of buffering it. The outbox replay path calls this directly. */
+export async function postCommandAckRaw(
+  config: AwbConfig,
+  command_id: string,
+  status: 'ok' | 'error',
+  detail?: string,
+): Promise<SendOutcome> {
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/command/ack`;
     const resp = await fetch(url, {
@@ -225,9 +274,12 @@ export async function postCommandAck(
     });
     if (!resp.ok) {
       log(`command ack POST failed: ${resp.status} ${resp.statusText} (command=${command_id})`);
+      return classifyHttpSendFailure(resp.status);
     }
+    return 'ok';
   } catch (err: any) {
     log(`command ack POST error: ${err?.message ?? err} (command=${command_id})`);
+    return 'retryable';
   }
 }
 
@@ -242,18 +294,36 @@ export async function postCommandAck(
  * falls back to its processing-grace timeout before re-dispatching — the
  * durability guarantee never depends on this POST landing.
  */
+export interface DispatchAckBody {
+  ticket_id: string;
+  role: string;
+  trigger_id: string;
+  outcome: 'processed' | 'nack';
+  reason?: string;
+  skill_snapshot_run_id?: string;
+}
+
 export async function postDispatchAck(
   config: AwbConfig,
-  body: {
-    ticket_id: string;
-    role: string;
-    trigger_id: string;
-    outcome: 'processed' | 'nack';
-    reason?: string;
-    skill_snapshot_run_id?: string;
-  },
+  body: DispatchAckBody,
 ): Promise<void> {
   if (!body.ticket_id || !body.role) return;
+  const outcome = await postDispatchAckRaw(config, body);
+  // Buffered with a SHORT TTL (see outbox.ts): a replayed 'processed' ack that
+  // still lands inside the server's processing-grace window prevents a
+  // duplicate re-dispatch of work the manager already spawned; past that
+  // window the server matches trigger_id and drops the stale ack harmlessly.
+  if (outcome === 'retryable') {
+    outboxSink?.enqueue('dispatch_ack', { body });
+  }
+}
+
+/** Transport-only variant of {@link postDispatchAck} — classifies the failure
+ *  instead of buffering it. The outbox replay path calls this directly. */
+export async function postDispatchAckRaw(
+  config: AwbConfig,
+  body: DispatchAckBody,
+): Promise<SendOutcome> {
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/dispatch/ack`;
     const resp = await fetch(url, {
@@ -275,9 +345,12 @@ export async function postDispatchAck(
     });
     if (!resp.ok) {
       log(`dispatch ack POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id.slice(0, 8)} outcome=${body.outcome})`);
+      return classifyHttpSendFailure(resp.status);
     }
+    return 'ok';
   } catch (err: any) {
     log(`dispatch ack POST error: ${err?.message ?? err} (ticket=${body.ticket_id.slice(0, 8)} outcome=${body.outcome})`);
+    return 'retryable';
   }
 }
 
@@ -505,6 +578,31 @@ export async function postChatRoomMessage(
   opts?: { type?: 'message' | 'progress'; metadata?: unknown },
 ): Promise<boolean> {
   if (!roomId || !content) return false;
+  const outcome = await postChatRoomMessageRaw(config, roomId, agentId, content, opts);
+  // Buffer real replies only — a replayed `progress` heartbeat is stale noise
+  // by the time the server is reachable again (and the turn it narrated has
+  // long since ended), so progress stays fire-and-log.
+  if (outcome === 'retryable' && opts?.type !== 'progress') {
+    outboxSink?.enqueue('chat_message', {
+      room_id: roomId,
+      agent_id: agentId,
+      content,
+      opts: opts ?? null,
+    });
+  }
+  return outcome === 'ok';
+}
+
+/** Transport-only variant of {@link postChatRoomMessage} — classifies the
+ *  failure instead of buffering it. The outbox replay path calls this directly. */
+export async function postChatRoomMessageRaw(
+  config: AwbConfig,
+  roomId: string,
+  agentId: string,
+  content: string,
+  opts?: { type?: 'message' | 'progress'; metadata?: unknown } | null,
+): Promise<SendOutcome> {
+  if (!roomId || !content) return 'permanent';
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/messages`;
     const body: Record<string, unknown> = { agent_id: agentId, content };
@@ -522,12 +620,12 @@ export async function postChatRoomMessage(
     });
     if (!resp.ok) {
       log(`chat fallback POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
-      return false;
+      return classifyHttpSendFailure(resp.status);
     }
-    return true;
+    return 'ok';
   } catch (err: any) {
     log(`chat fallback POST error: ${err?.message ?? err} (room=${roomId})`);
-    return false;
+    return 'retryable';
   }
 }
 
@@ -561,6 +659,22 @@ export async function postSilentExitSystemComment(
   if (graceDelayMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, graceDelayMs));
   }
+  const { outcome, result } = await postSilentExitSystemCommentRaw(config, ticketId, body);
+  if (outcome === 'retryable') {
+    outboxSink?.enqueue('silent_exit_comment', { ticket_id: ticketId, body });
+  }
+  return result;
+}
+
+/** Transport-only variant of {@link postSilentExitSystemComment} — no grace
+ *  delay (the exit it narrates is long past by replay time) and classifies the
+ *  failure instead of buffering it. The outbox replay path calls this directly. */
+export async function postSilentExitSystemCommentRaw(
+  config: AwbConfig,
+  ticketId: string,
+  body: Parameters<typeof postSilentExitSystemComment>[2],
+): Promise<{ outcome: SendOutcome; result: 'created' | 'suppressed' | 'failed' }> {
+  if (!ticketId || !body?.content) return { outcome: 'permanent', result: 'failed' };
   try {
     const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
     const resp = await fetch(url, {
@@ -577,13 +691,13 @@ export async function postSilentExitSystemComment(
       log(
         `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,
       );
-      return 'failed';
+      return { outcome: classifyHttpSendFailure(resp.status), result: 'failed' };
     }
     const result = await resp.json().catch(() => null);
-    return result?.suppressed === true ? 'suppressed' : 'created';
+    return { outcome: 'ok', result: result?.suppressed === true ? 'suppressed' : 'created' };
   } catch (err: any) {
     log(`silent-exit comment POST error: ${err?.message ?? err} (ticket=${ticketId})`);
-    return 'failed';
+    return { outcome: 'retryable', result: 'failed' };
   }
 }
 

@@ -146,6 +146,31 @@ For Hermes, a successful ACP `initialize` handshake is the health probe. A
 - ChildRuns cannot perform terminal ticket transitions, consensus actions, or
   skill publication.
 
+## Durable send outbox
+
+Chat replies, silent-exit audit comments, and dispatch/command acknowledgements
+that fail while AWB is temporarily unreachable are persisted to
+`$AWB_AGENT_MANAGER_HOME/outbox.json`. The Runtime Host rehydrates this FIFO
+queue at startup and retries it when SSE reconnects, with a 60-second periodic
+backstop for isolated REST failures.
+
+Only retryable transport failures and HTTP 5xx, 408, or 429 responses enter the
+queue. Other 4xx responses are permanent failures. Time-sensitive progress,
+output-liveness, and filesystem-response traffic is never buffered.
+
+| Kind | Source | TTL |
+|---|---|---|
+| `chat_message` | Real `postChatRoomMessage` replies; progress heartbeats excluded | 24h |
+| `silent_exit_comment` | `postSilentExitSystemComment` | 24h |
+| `dispatch_ack` | `postDispatchAck`, deduplicated by `trigger_id` server-side | 15min |
+| `command_ack` | `postCommandAck` | 1h |
+
+Delivery is at-least-once and FIFO. A flush stops at the first retryable
+failure, entries are persisted after every queue mutation, and the queue is
+capped at 500 entries by dropping the oldest. A corrupt outbox is discarded
+without blocking Runtime Host startup. Replay calls transport-only `*Raw`
+senders so a failed replay cannot enqueue a duplicate copy of itself.
+
 ## Troubleshooting
 
 | Error | Meaning | Operator action |
