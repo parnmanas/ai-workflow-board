@@ -48,6 +48,7 @@ style.textContent = `
   }
   .awb-content {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
   /* Off-canvas(드로어) 사이드바 — 모바일 전용.
