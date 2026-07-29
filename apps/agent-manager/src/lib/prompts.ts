@@ -53,6 +53,11 @@ interface ChatRoomNewMessage {
   sender_id?: string;
 }
 
+const ARTIFACT_REFERENCE_INSTRUCTION =
+  '- When mentioning an AWB Ticket, Agent, Board, Action, Function, or Schedule in user-visible output, use ' +
+  '`#[type:<full-uuid>|Human-readable name]`. Never use only a shortened id. Use `@[agent:...]` only to notify. ' +
+  'If existence or access cannot be verified, do not invent a link; give the name, full stable id, and reason.';
+
 interface BaseRepoLike {
   id?: string;
   name?: string;
@@ -241,6 +246,7 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
       lines.push(...operationalPolicy);
       lines.push('- For non-operational development work, create an AWB ticket with `mcp__awb__create_ticket` (leave roles unset for board defaults). Questions, status/triage, and read-only investigation stay inline.');
     }
+    lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
     return lines;
   }
   const lines = [
@@ -255,6 +261,7 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
     lines.push(...operationalPolicy);
     lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For non-operational development work, describe the ticket needed for the existing manager-side reply flow.');
   }
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
 }
 
@@ -339,6 +346,7 @@ export function composeCommentMentionPrompt(
   lines.push('- Read the comment and respond to the request directly.');
   lines.push('- Use AWB MCP tools (mcp__awb__*) to take action if the comment asks for work.');
   lines.push('- Leave a reply comment on the ticket addressing the user who mentioned you.');
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   lines.push('- Do NOT ignore this — the comment is explicitly addressed to you via @-mention.');
   return lines.join('\n');
 }
