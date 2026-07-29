@@ -127,6 +127,7 @@ export default function CredentialManager({
   const [revealing, setRevealing] = useState(false);
   const [copiedField, setCopiedField] = useState('');
   const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealRequestGeneration = useRef(0);
 
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
@@ -164,27 +165,42 @@ export default function CredentialManager({
     setCopiedField('');
   }, []);
 
-  useEffect(() => () => clearRevealedSecret(), [clearRevealedSecret]);
+  const invalidateRevealRequest = useCallback(() => {
+    revealRequestGeneration.current += 1;
+    setRevealing(false);
+  }, []);
+
+  useEffect(() => () => {
+    revealRequestGeneration.current += 1;
+    clearRevealedSecret();
+  }, [clearRevealedSecret]);
 
   const closeReveal = () => {
+    invalidateRevealRequest();
     clearRevealedSecret();
     setRevealTarget(null);
   };
 
   const handleReveal = async () => {
     if (!revealTarget || !revealPassword) return;
+    const targetId = revealTarget.id;
+    const requestGeneration = ++revealRequestGeneration.current;
     setRevealing(true);
     try {
-      const result = await api.revealCredential(revealTarget.id, revealPassword);
+      const result = await api.revealCredential(targetId, revealPassword);
+      if (revealRequestGeneration.current !== requestGeneration) return;
       setRevealPassword('');
       setRevealedFields(result.credential_fields);
       if (revealTimer.current) clearTimeout(revealTimer.current);
       revealTimer.current = setTimeout(clearRevealedSecret, CREDENTIAL_REVEAL_TTL_MS);
     } catch (err: any) {
+      if (revealRequestGeneration.current !== requestGeneration) return;
       clearRevealedSecret();
       showToast(err?.message || 'Failed to reveal credential', 'error');
     } finally {
-      setRevealing(false);
+      if (revealRequestGeneration.current === requestGeneration) {
+        setRevealing(false);
+      }
     }
   };
 
@@ -447,6 +463,7 @@ export default function CredentialManager({
                               variant="secondary"
                               size="sm"
                               onClick={() => {
+                                invalidateRevealRequest();
                                 clearRevealedSecret();
                                 setRevealTarget(c);
                               }}

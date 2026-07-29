@@ -1,10 +1,12 @@
 import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { lastValueFrom, of } from 'rxjs';
 
 import { CredentialsController } from '../dist/modules/credentials/credentials.controller.js';
-import { AdminGuard } from '../dist/common/guards/admin.guard.js';
 
 const SECRET = 'sk-ant-oat-test-secret-value';
 const PASSWORD = 'correct horse battery staple';
@@ -89,17 +91,108 @@ test('wrong re-authentication returns 401 and writes a secret-free denial audit'
   assert.doesNotMatch(JSON.stringify(audits), /wrong-password|sk-ant-oat/);
 });
 
-test('non-admin direct API access is rejected by AdminGuard with 403', async () => {
-  const guard = new AdminGuard({
-    canActivate: async (context) => {
-      context.switchToHttp().getRequest().currentUser = { id: 'user-1', role: 'user' };
-      return true;
-    },
-  });
-  const context = {
-    switchToHttp: () => ({ getRequest: () => ({}) }),
-  };
-  await assert.rejects(() => guard.canActivate(context), (error) => error.getStatus() === 403);
+test('routed reveal API rejects non-admin with 403 and preserves masked/no-store contracts', async () => {
+  process.env.DB_TYPE = 'sqlite';
+  process.env.NODE_ENV = 'test';
+  process.env.MCP_DEV_MODE = 'true';
+  process.env.AGENT_DEV_MODE = 'true';
+  process.env.SQLJS_DB_PATH = path.join(
+    os.tmpdir(),
+    `awb-credential-reveal-route-${process.pid}-${randomUUID()}.db`,
+  );
+
+  const [
+    { NestFactory },
+    { AppModule },
+    { AuthService },
+    { getDataSourceToken },
+    { encrypt },
+  ] = await Promise.all([
+    import('@nestjs/core'),
+    import('../dist/app.module.js'),
+    import('../dist/services/auth.service.js'),
+    import('@nestjs/typeorm'),
+    import('../dist/services/encryption.service.js'),
+  ]);
+  const app = await NestFactory.create(AppModule, { logger: false });
+
+  try {
+    await app.listen(0, '127.0.0.1');
+    const port = app.getHttpServer().address().port;
+    const auth = app.get(AuthService);
+    const dataSource = app.get(getDataSourceToken());
+    const userRepo = dataSource.getRepository('User');
+    const workspaceRepo = dataSource.getRepository('Workspace');
+    const credentialRepo = dataSource.getRepository('Credential');
+    const routedSecret = `routed-${SECRET}-${randomUUID()}`;
+    const adminPassword = `admin-${PASSWORD}-${randomUUID()}`;
+
+    const admin = await userRepo.save(userRepo.create({
+      name: 'Reveal Admin',
+      email: `reveal-admin-${randomUUID()}@example.test`,
+      role: 'admin',
+      status: 'active',
+      password_hash: await auth.hashPassword(adminPassword),
+    }));
+    const nonAdmin = await userRepo.save(userRepo.create({
+      name: 'Reveal User',
+      email: `reveal-user-${randomUUID()}@example.test`,
+      role: 'user',
+      status: 'active',
+      permissions: JSON.stringify(['admin.credentials']),
+      password_hash: await auth.hashPassword('user-password'),
+    }));
+    const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'Reveal Workspace' }));
+    const routedCredential = await credentialRepo.save(credentialRepo.create({
+      workspace_id: workspace.id,
+      board_id: null,
+      name: 'Routed OAuth',
+      description: '',
+      provider: 'claude_oauth_token',
+      encrypted_data: encrypt(JSON.stringify({ oauth_token: routedSecret })),
+    }));
+    const adminToken = auth.createSession(admin.id);
+    const nonAdminToken = auth.createSession(nonAdmin.id);
+    const baseUrl = `http://127.0.0.1:${port}/api/credentials`;
+
+    const denied = await fetch(`${baseUrl}/${routedCredential.id}/reveal`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${nonAdminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password: 'user-password' }),
+    });
+    const deniedBody = await denied.text();
+    assert.equal(denied.status, 403);
+    assert.doesNotMatch(deniedBody, new RegExp(routedSecret));
+
+    const list = await fetch(`${baseUrl}?workspace_id=${workspace.id}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const listBody = await list.json();
+    assert.equal(list.status, 200);
+    assert.doesNotMatch(JSON.stringify(listBody), new RegExp(routedSecret));
+    assert.match(
+      listBody.find((item) => item.id === routedCredential.id).credential_fields.oauth_token,
+      /••••/,
+    );
+
+    const revealed = await fetch(`${baseUrl}/${routedCredential.id}/reveal`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password: adminPassword }),
+    });
+    const revealedBody = await revealed.json();
+    assert.equal(revealed.status, 201);
+    assert.match(revealed.headers.get('cache-control') || '', /no-store/);
+    assert.equal(revealedBody.credential_fields.oauth_token, routedSecret);
+  } finally {
+    await app.close();
+  }
 });
 
 test('ordinary list response remains masked and never contains the OAuth token', async () => {
