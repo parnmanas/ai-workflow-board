@@ -11,6 +11,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { Agent } from '../../entities/Agent';
 import { ApiKey } from '../../entities/ApiKey';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
@@ -60,6 +61,163 @@ export class AgentApiController {
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
   ) {}
+
+  @Post('tickets/:id/mention-audit-runs/start')
+  async startMentionAuditRun(
+    @Param('id') ticketId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const triggerId = typeof body?.cycle_trigger_id === 'string' ? body.cycle_trigger_id : '';
+    const agentId = typeof body?.agent_id === 'string' ? body.agent_id : '';
+    const attempt = Number(body?.attempt ?? 0);
+    if (!triggerId.startsWith('mention:') || !agentId || ![0, 1].includes(attempt)) {
+      return res.status(400).json({ error: 'invalid mention audit run' });
+    }
+    const familyKey = `${triggerId}:${agentId}`;
+    const marker = await this.dataSource.transaction(async (manager) => {
+      await lockTicketCommentWrites(manager, ticketId);
+      const repo = manager.getRepository(ActivityLog);
+      const existing = await repo.findOne({
+        where: {
+          ticket_id: ticketId,
+          action: 'mention_audit_started',
+          field_changed: familyKey,
+          old_value: String(attempt),
+        },
+      });
+      if (existing) return existing;
+      return repo.save(repo.create({
+        workspace_id: workspaceId || '',
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        action: 'mention_audit_started',
+        field_changed: familyKey,
+        old_value: String(attempt),
+        new_value: typeof body?.subagent_session_id === 'string' ? body.subagent_session_id : '',
+        actor_id: agentId,
+        actor_name: 'agent-manager',
+        role: typeof body?.role === 'string' ? body.role : '',
+        trigger_source: triggerId,
+      }));
+    });
+    return res.json({
+      run_token: marker.id,
+      family_key: familyKey,
+      attempt,
+      baseline_at: marker.created_at,
+    });
+  }
+
+  @Post('tickets/:id/mention-audit-runs/:runToken/complete')
+  async completeMentionAuditRun(
+    @Param('id') ticketId: string,
+    @Param('runToken') runToken: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const outcome = await this.dataSource.transaction(async (manager) => {
+      await lockTicketCommentWrites(manager, ticketId);
+      const activityRepo = manager.getRepository(ActivityLog);
+      const commentRepo = manager.getRepository(Comment);
+      const marker = await activityRepo.findOne({
+        where: { id: runToken, ticket_id: ticketId, action: 'mention_audit_started' },
+      });
+      if (!marker) return null;
+      const attempt = Number(marker.old_value);
+      const terminal = await activityRepo.findOne({
+        where: {
+          ticket_id: ticketId,
+          action: 'mention_audit_completed',
+          field_changed: marker.field_changed,
+          old_value: String(attempt),
+        },
+      });
+      if (terminal) return JSON.parse(terminal.new_value);
+
+      const comments = await commentRepo.find({
+        where: {
+          ticket_id: ticketId,
+          author_type: 'agent',
+          author_id: marker.actor_id,
+        },
+      });
+      const auditCommentCount = comments.filter((comment) => {
+        if (!['note', 'question', 'answer', 'decision', 'chat', 'handoff'].includes(comment.type)) return false;
+        const metadata = this.safeParseMetadata(comment.metadata);
+        return metadata.cycle_trigger_id === marker.trigger_source &&
+          (!marker.new_value || metadata.subagent_session_id === marker.new_value);
+      }).length;
+      const activities = await activityRepo.find({
+        where: {
+          ticket_id: ticketId,
+          actor_id: marker.actor_id,
+        },
+      });
+      const controlActions = new Set([
+        'mention_audit_started', 'mention_audit_completed', 'trigger_emitted',
+        'dispatch_claimed', 'dispatch_acknowledged',
+      ]);
+      const entityChangeCount = activities.filter((row) =>
+        !controlActions.has(row.action) &&
+        row.id !== marker.id &&
+        (row.trigger_source === marker.trigger_source ||
+          (row.role === marker.role && row.created_at >= marker.created_at))
+      ).length;
+      const silent = Number(body?.exit_code) === 0 && auditCommentCount === 0 && entityChangeCount === 0;
+      let result: any = { decision: 'succeeded', attempt, audit_comment_count: auditCommentCount, entity_change_count: entityChangeCount };
+      if (silent && attempt === 0) {
+        const claimed = await activityRepo.findOne({
+          where: { ticket_id: ticketId, action: 'silent_exit_retry_claimed', field_changed: marker.field_changed },
+        });
+        result = { decision: claimed ? 'retry_claimed' : 'retry', attempt: 1, audit_comment_count: 0, entity_change_count: 0 };
+        if (!claimed) {
+          await activityRepo.save(activityRepo.create({
+            workspace_id: marker.workspace_id,
+            entity_type: 'ticket',
+            entity_id: ticketId,
+            ticket_id: ticketId,
+            action: 'silent_exit_retry_claimed',
+            field_changed: marker.field_changed,
+            old_value: '0',
+            new_value: '1',
+            actor_id: marker.actor_id,
+            actor_name: 'agent-manager',
+            role: marker.role,
+            trigger_source: marker.trigger_source,
+          }));
+        }
+      } else if (silent) {
+        result = { decision: 'failed', attempt: 1, reason: 'silent_exit_retry_exhausted', audit_comment_count: 0, entity_change_count: 0 };
+      }
+      await activityRepo.save(activityRepo.create({
+        workspace_id: marker.workspace_id,
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        action: 'mention_audit_completed',
+        field_changed: marker.field_changed,
+        old_value: String(attempt),
+        new_value: JSON.stringify(result),
+        actor_id: marker.actor_id,
+        actor_name: 'agent-manager',
+        role: marker.role,
+        trigger_source: marker.trigger_source,
+      }));
+      return result;
+    });
+    if (!outcome) return res.status(404).json({ error: 'mention audit run not found' });
+    return res.json(outcome);
+  }
 
   // ── Workspace-scoping guards (security finding: authz / cross-workspace IDOR)
   //
@@ -195,6 +353,8 @@ export class AgentApiController {
       exit_code: exitCode,
       cycle_trigger_id: cycleTriggerId || null,
       author_role: role || null,
+      attempt: Number.isFinite(Number(body?.silent_exit_attempt)) ? Number(body.silent_exit_attempt) : null,
+      terminal_reason: typeof body?.terminal_reason === 'string' ? body.terminal_reason : null,
     };
 
     const outcome = await this.dataSource.transaction(async (manager) => {
