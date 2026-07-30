@@ -58,7 +58,8 @@ function collectMatches(text: string, pattern: RegExp, out: Set<string>): void {
 /**
  * Reduce a set of `claude-<family>-<ver>` ids to the single newest per family,
  * dropping dated / -v1 / -fast variants (the pattern that feeds this only
- * matches clean `family-major-minor` / `fable-major` forms). Returns at most
+ * matches clean `family-major` or `family-major-minor` forms). Major-only ids
+ * are required for Claude Code 2.1.220's Opus 5 and Sonnet 5. Returns at most
  * one id per family in a stable opus→sonnet→haiku→fable order for a tidy
  * dropdown.
  */

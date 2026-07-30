@@ -65,11 +65,18 @@ function permissionArgs(harness?: HarnessSpec | null): string[] {
 // claude executable. Kept minimal (one current id per family); the live
 // per-install list from scanBinaryStrings() supersedes this whenever available.
 const CLAUDE_CURATED_MODELS = [
-  'claude-opus-4-8',
-  'claude-sonnet-4-6',
+  'claude-opus-5',
+  'claude-sonnet-5',
   'claude-haiku-4-5',
   'claude-fable-5',
 ];
+
+// Claude Code 2.1.220 embeds the newest opus/sonnet ids as major-only
+// (`claude-opus-5`), while older ids may still carry a minor
+// (`claude-opus-4-8`). Keep each numeric component short and require a clean
+// boundary so dated ids and suffixed variants never enter latestPerFamily().
+export const CLAUDE_MODEL_SCAN_PATTERN =
+  /claude-(?:(?:opus|sonnet|haiku)-\d{1,2}(?:-\d{1,2})?|fable-\d{1,2})(?![\w-])/g;
 
 // Claude `--effort` accepts a fixed tier set that has shifted across CLI
 // releases — the top tier used to be `xhigh`, now it's `max`. Passing a value
@@ -275,13 +282,10 @@ export class ClaudeCliAdapter extends CliAdapter {
     let dynamic: string[] = [];
     try {
       const bin = this.resolveBin();
-      // Clean `family-major-minor` (opus/sonnet/haiku) or `fable-major` forms
-      // only. Versions are capped at 1-2 digits so a dated build id like
-      // `claude-opus-4-20250514` is rejected outright (its 8-digit "minor"
-      // would otherwise sort as the newest and beat `claude-opus-4-8`). The
-      // trailing lookahead also drops -v1/-fast variants.
-      const pattern = /claude-(?:(?:opus|sonnet|haiku)-\d{1,2}-\d{1,2}|fable-\d{1,2})(?![\w-])/g;
-      dynamic = latestPerFamily(await scanBinaryStrings(bin, pattern));
+      // Accept clean `family-major` and `family-major-minor` forms. Numeric
+      // components are capped at 1-2 digits so dated build ids are rejected;
+      // the trailing lookahead also drops -v1/-fast and compound variants.
+      dynamic = latestPerFamily(await scanBinaryStrings(bin, CLAUDE_MODEL_SCAN_PATTERN));
     } catch {
       dynamic = [];
     }
