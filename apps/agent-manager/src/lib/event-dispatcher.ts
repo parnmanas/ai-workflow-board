@@ -400,6 +400,8 @@ export interface SubagentSpawnArgs {
    *  the per-session header to distinguish post-Done retrospective reviewer
    *  runs from other reviewer wake-ups on the same ticket. */
   triggerSource?: string;
+  /** Internal: server-arbitrated retry attempt for a standalone mention. */
+  _silentExitAttempt?: 0 | 1;
   /** Chat room id for one-shot chat spawns. When set, non-MCP adapters
    *  (codex, antigravity) post their collected result to this room via REST
    *  instead of as a ticket comment. */

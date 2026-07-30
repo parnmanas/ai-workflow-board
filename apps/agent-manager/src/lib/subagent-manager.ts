@@ -50,8 +50,10 @@ import {
   type ProcNode,
 } from './process-tree.js';
 import {
+  completeMentionAuditRun,
   postChatRoomMessage,
   postSilentExitSystemComment,
+  startMentionAuditRun,
   type AwbConfig,
 } from './rest.js';
 import { ensureOperationalFallbackTicket, parseOperationalFallback } from './operational-chat-fallback.js';
@@ -234,6 +236,8 @@ interface SubagentRecord {
   cli_type: string;
   trigger_id: string | null;
   audit_session_id?: string;
+  mention_audit_run_token?: string;
+  silent_exit_attempt?: 0 | 1;
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
@@ -729,6 +733,21 @@ export class SubagentManager implements SubagentManagerContract {
       // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
       // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
       // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
+      // The server must establish the audit baseline before the child can
+      // possibly persist a comment or mutation.
+      const mentionAudit =
+        spec.kind === 'trigger' &&
+        spec.triggerId?.startsWith('mention:') &&
+        spec.ticketId &&
+        spec.agentId
+          ? await startMentionAuditRun(this.#config, spec.ticketId, {
+              cycle_trigger_id: spec.triggerId,
+              agent_id: spec.agentId,
+              role: spec.role,
+              attempt: spec._silentExitAttempt ?? 0,
+              subagent_session_id: String(reservationId),
+            })
+          : null;
       const child = crossSpawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
@@ -797,6 +816,8 @@ export class SubagentManager implements SubagentManagerContract {
         cli_type: adapter.cliType,
         trigger_id: spec.triggerId || null,
         audit_session_id: String(reservationId),
+        mention_audit_run_token: mentionAudit?.run_token,
+        silent_exit_attempt: mentionAudit ? (spec._silentExitAttempt ?? 0) : undefined,
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
         agent_id: spec.agentId || null,
@@ -1100,6 +1121,42 @@ export class SubagentManager implements SubagentManagerContract {
     }
 
     if (record.kind === 'trigger' && record.ticket_id && !record.commentSent) {
+      if (code === 0 && record.mention_audit_run_token && record.respawnSpec) {
+        const audit = await completeMentionAuditRun(
+          this.#config,
+          record.ticket_id,
+          record.mention_audit_run_token,
+          code,
+        );
+        if (audit?.decision === 'succeeded') {
+          record.commentSent = true;
+          if (record.agent_id) {
+            this.circuitBreaker.recordSuccess(
+              CircuitBreaker.key(record.agent_id, record.ticket_id, record.role || ''),
+            );
+          }
+          return;
+        }
+        if (audit?.decision === 'retry') {
+          const retry = await this.spawn({
+            ...record.respawnSpec,
+            _silentExitAttempt: 1,
+          });
+          if (retry.spawned) {
+            log(
+              `[subagent] clean mention silent-exit retry started ticket=${record.ticket_id.slice(0, 8)} ` +
+                `trigger=${(record.trigger_id || '').slice(0, 24)}`,
+            );
+            return;
+          }
+          log(
+            `[subagent] clean mention silent-exit retry spawn failed ticket=${record.ticket_id.slice(0, 8)} ` +
+              `reason=${retry.reason || 'unknown'} — recording terminal fallback`,
+          );
+        } else if (audit?.decision === 'retry_claimed') {
+          return;
+        }
+      }
       const auditOutcome = await this.#postSilentExitFallback(record, code);
       if (auditOutcome === 'suppressed') {
         record.commentSent = true;
@@ -1462,6 +1519,10 @@ export class SubagentManager implements SubagentManagerContract {
     const metaParts: string[] = [];
     metaParts.push(`cli=${record.cli_type}`);
     metaParts.push(`exit_code=${exitLabel}`);
+    if (record.silent_exit_attempt !== undefined) {
+      metaParts.push(`attempt=${record.silent_exit_attempt}`);
+      if (record.silent_exit_attempt === 1) metaParts.push('reason=silent_exit_retry_exhausted');
+    }
     // Structured failure reason (usage_limit / auth_failure / codex_error) when
     // the buffered tail matches a known fatal signature — the "structured
     // failure reason" half of the acceptance criteria (ticket ac958c06), even
@@ -1487,6 +1548,8 @@ export class SubagentManager implements SubagentManagerContract {
       agent_id: record.agent_id || undefined,
       subagent_session_id: record.audit_session_id || String(record.pid),
       cycle_started_at: new Date(record.started_at).toISOString(),
+      silent_exit_attempt: record.silent_exit_attempt,
+      terminal_reason: record.silent_exit_attempt === 1 ? 'silent_exit_retry_exhausted' : undefined,
     });
   }
 

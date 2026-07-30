@@ -652,6 +652,8 @@ export async function postSilentExitSystemComment(
     agent_id?: string;
     subagent_session_id?: string;
     cycle_started_at?: string;
+    silent_exit_attempt?: number;
+    terminal_reason?: string;
   },
 ): Promise<'created' | 'suppressed' | 'failed'> {
   if (!ticketId || !body.content) return 'failed';
@@ -664,6 +666,43 @@ export async function postSilentExitSystemComment(
     outboxSink?.enqueue('silent_exit_comment', { ticket_id: ticketId, body });
   }
   return result;
+}
+
+export async function startMentionAuditRun(
+  config: AwbConfig,
+  ticketId: string,
+  body: { cycle_trigger_id: string; agent_id: string; role?: string; attempt: number; subagent_session_id?: string },
+): Promise<{ run_token: string; attempt: number } | null> {
+  try {
+    const resp = await fetch(`${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/mention-audit-runs/start`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    return resp.ok ? await resp.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function completeMentionAuditRun(
+  config: AwbConfig,
+  ticketId: string,
+  runToken: string,
+  exitCode: number | null,
+): Promise<{ decision: 'succeeded' | 'retry' | 'retry_claimed' | 'failed'; attempt: number; reason?: string } | null> {
+  try {
+    const resp = await fetch(`${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/mention-audit-runs/${encodeURIComponent(runToken)}/complete`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ exit_code: exitCode }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    return resp.ok ? await resp.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Transport-only variant of {@link postSilentExitSystemComment} — no grace
