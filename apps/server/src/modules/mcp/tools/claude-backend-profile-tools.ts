@@ -117,6 +117,17 @@ export async function assignWorkspaceBackendProfile(
       where: { id: profileId },
     });
     if (!profile) throw new Error('Claude backend profile not found');
+    if (profile.credential_ref) {
+      const credential = await manager.findOne(Credential, {
+        where: { id: profile.credential_ref },
+      });
+      if (
+        !credential ||
+        (credential.workspace_id !== null && credential.workspace_id !== workspaceId)
+      ) {
+        throw new Error('Claude backend profile credential is not owned by this workspace');
+      }
+    }
 
     const linkRepo = manager.getRepository(WorkspaceClaudeBackendProfile);
     const existingLink = await linkRepo.findOne({

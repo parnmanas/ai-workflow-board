@@ -10,19 +10,17 @@ process.env.SQLJS_DB_PATH = path.join(
 );
 process.env.NODE_ENV = 'test';
 
-let app;
 let ds;
 let tools;
 let managerAgent;
 let workspace;
 
 before(async () => {
-  const { NestFactory } = await import('@nestjs/core');
-  const { getDataSourceToken } = await import('@nestjs/typeorm');
-  const { AppModule } = await import('../dist/app.module.js');
+  const { DataSource } = await import('typeorm');
+  const { buildDataSourceOptions } = await import('../dist/db.js');
   tools = await import('../dist/modules/mcp/tools/claude-backend-profile-tools.js');
-  app = await NestFactory.createApplicationContext(AppModule, { logger: false });
-  ds = app.get(getDataSourceToken());
+  ds = new DataSource(buildDataSourceOptions());
+  await ds.initialize();
 
   managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
     name: 'Profile manager',
@@ -35,7 +33,7 @@ before(async () => {
 });
 
 after(async () => {
-  if (app) await app.close();
+  if (ds?.isInitialized) await ds.destroy();
 });
 
 describe('Claude backend profile MCP operations', () => {
@@ -151,6 +149,42 @@ describe('Claude backend profile MCP operations', () => {
     await assert.rejects(
       tools.assignWorkspaceBackendProfile(ds, workspace.id, 'missing', true),
       /profile not found/,
+    );
+    assert.equal(
+      await ds.getRepository('WorkspaceClaudeBackendProfile').count(),
+      count,
+    );
+  });
+
+  it('rejects assigning a profile backed by another workspace credential', async () => {
+    const otherWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Credential owner' }),
+    );
+    const credential = await ds.getRepository('Credential').save(
+      ds.getRepository('Credential').create({
+        workspace_id: otherWorkspace.id,
+        name: 'Foreign credential',
+        provider: 'anthropic',
+        encrypted_data: 'test-only',
+      }),
+    );
+    const foreign = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Foreign credential profile',
+      base_url: 'http://foreign.invalid',
+      model: 'foreign-model',
+      protocol: 'anthropic-compatible',
+      credential_ref: credential.id,
+    });
+    const count = await ds.getRepository('WorkspaceClaudeBackendProfile').count();
+
+    await assert.rejects(
+      tools.assignWorkspaceBackendProfile(
+        ds,
+        workspace.id,
+        foreign.profile.id,
+        false,
+      ),
+      /credential is not owned by this workspace/,
     );
     assert.equal(
       await ds.getRepository('WorkspaceClaudeBackendProfile').count(),
