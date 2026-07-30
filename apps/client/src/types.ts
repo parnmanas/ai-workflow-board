@@ -1681,7 +1681,7 @@ export interface ChatAttachment {
   created_at?: string;
 }
 
-export type ChatRoomMessageType = 'message' | 'progress';
+export type ChatRoomMessageType = 'message' | 'progress' | 'ticket_action';
 
 // F-1 (ticket 24694916): structured ticket-action reference the agent-manager
 // captured mechanically from an mcp__awb__* tool result. Rendered as a reliable
@@ -1712,11 +1712,17 @@ export interface ChatMessageBoardRef {
   board_id: string;
   title?: string;
 }
+export interface ChatMessageTicketAction {
+  kind: 'unpend';
+  ticket_id: string;
+  title: string;
+}
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   artifact_refs?: ChatMessageArtifactRef[];
   agent_refs?: ChatMessageAgentRef[];
   board_refs?: ChatMessageBoardRef[];
+  ticket_action?: ChatMessageTicketAction;
 }
 
 export interface ChatRoomMessageItem {

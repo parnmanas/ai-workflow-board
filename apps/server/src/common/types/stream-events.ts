@@ -321,6 +321,11 @@ export interface ChatMessageBoardRef {
   // 보드 이름(있으면). get_board_summary 결과의 `board` 필드.
   title?: string;
 }
+export interface ChatMessageTicketAction {
+  kind: 'unpend';
+  ticket_id: string;
+  title: string;
+}
 export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   // F2-4 ⓒ: 빌드/배포 결과물 카드. ticket_refs 와 독립적으로 존재 가능 —
@@ -329,6 +334,9 @@ export interface ChatRoomMessageMetadata {
   // F-3: agent/board 상태 카드. 다른 refs 와 독립적으로 존재 가능.
   agent_refs?: ChatMessageAgentRef[];
   board_refs?: ChatMessageBoardRef[];
+  // Human-session action card. This is display data, not an authorization
+  // credential: the click still goes through the guarded ticket PATCH.
+  ticket_action?: ChatMessageTicketAction;
 }
 
 // Phase 7 — room-based chat
@@ -345,7 +353,7 @@ export interface ChatRoomMessagePayload {
   //                from agent history replay.
   // Optional on the wire so legacy clients/agents that omit it default to
   // 'message' (matches the column default on chat_room_messages).
-  type?: 'message' | 'progress';
+  type?: 'message' | 'progress' | 'ticket_action';
   content: string;
   attachments?: Array<{
     id: string;

@@ -12,7 +12,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
+import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
+import { Ticket } from '../../../entities/Ticket';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { activityEvents } from '../../../services/activity.service';
 import { MAX_TICKET_ATTACHMENT_SIZE } from '../../../common/constants/upload';
@@ -69,6 +71,72 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       }
       return ok({ status: 'ok' });
     }
+  );
+
+  server.tool(
+    'request_ticket_unpend_approval',
+    'Post a Resume (Unpend) approval card to a chat room. This tool never clears pending_user_action. ' +
+    'A human participant must click the card, which uses their authenticated web session to update the ticket.',
+    {
+      room_id: z.string().describe('Chat room that should receive the approval card'),
+      ticket_id: z.string().describe('Pending ticket to resume after human approval'),
+    },
+    async ({ room_id, ticket_id }, extra: { sessionId?: string }) => {
+      if (!roomMessagingService || !roomMembershipService) {
+        return err('Ticket approval cards are unavailable in this MCP context');
+      }
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+
+      try {
+        await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        const [room, ticket] = await Promise.all([
+          dataSource.getRepository(ChatRoom).findOne({ where: { id: room_id } }),
+          dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } }),
+        ]);
+        if (!room) return err('Chat room not found');
+        if (!ticket) return err('Ticket not found');
+        if (room.workspace_id !== agent.workspace_id || ticket.workspace_id !== room.workspace_id) {
+          return err('Ticket and chat room must belong to the caller workspace');
+        }
+        if (!ticket.pending_user_action) {
+          return err('Ticket is not waiting for user action');
+        }
+
+        const msg = await roomMessagingService.sendMessage(
+          room_id,
+          room.workspace_id,
+          'agent',
+          agent.id,
+          agent.name,
+          `Resume approval requested for ${ticket.title}`,
+          undefined,
+          undefined,
+          'ticket_action',
+          {
+            metadata: {
+              ticket_action: {
+                kind: 'unpend',
+                ticket_id: ticket.id,
+                title: ticket.title,
+              },
+            },
+          },
+        );
+        return ok({
+          message_id: msg.id,
+          room_id: msg.room_id,
+          ticket_id: ticket.id,
+          status: 'approval_requested',
+          created_at: msg.created_at,
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to request ticket unpend approval');
+      }
+    },
   );
 
   server.tool(

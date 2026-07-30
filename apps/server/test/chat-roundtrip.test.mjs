@@ -31,6 +31,7 @@ import { setupKanbanScene, createAgent, createApiKey, createUser } from './helpe
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
+import { TriggerLoopService } from '../dist/modules/agents/trigger-loop.service.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '7792';
 
@@ -140,6 +141,110 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     column_id: columns.todo.id,
   });
   assert.ok(createdTicket?.id, `ticket create must succeed: ${JSON.stringify(createdTicket)}`);
+
+  // Agent can only post an approval card. The ticket remains pending until a
+  // browser-authenticated user invokes the existing guarded PATCH.
+  await ds.getRepository('Ticket').update(createdTicket.id, {
+    pending_user_action: true,
+    pending_reason: 'human decision required',
+  });
+  const approvalRes = await agentMcp.callTool('request_ticket_unpend_approval', {
+    room_id: room.id,
+    ticket_id: createdTicket.id,
+  });
+  assert.ok(!approvalRes.isError, `approval-card request must succeed: ${JSON.stringify(approvalRes)}`);
+  const approvalFrame = await userStream.waitFor(
+    'chat_room_message',
+    (d) => (d?.type ?? d?.payload?.type) === 'ticket_action',
+    4000,
+  );
+  const approvalData = approvalFrame?.data ?? approvalFrame;
+  assert.deepEqual(
+    approvalData?.metadata?.ticket_action,
+    { kind: 'unpend', ticket_id: createdTicket.id, title: 'chat artifact round-trip' },
+    'SSE carries the bounded ticket action card payload',
+  );
+  assert.equal(
+    (await ds.getRepository('Ticket').findOneByOrFail({ id: createdTicket.id })).pending_user_action,
+    true,
+    'posting the card must not unpend the ticket',
+  );
+
+  const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider' });
+  const outsiderKey = await createApiKey(app, getDataSourceToken, outsider.id, {
+    workspaceId: ws.id,
+    label: 'outsider',
+  });
+  const outsiderMcp = new McpClient({ baseUrl: base, apiKey: outsiderKey.raw_key });
+  await outsiderMcp.initialize();
+  t.after(async () => { await outsiderMcp.close(); });
+  const outsiderApproval = await outsiderMcp.callTool('request_ticket_unpend_approval', {
+    room_id: room.id,
+    ticket_id: createdTicket.id,
+  });
+  assert.ok(outsiderApproval.isError, 'an agent that is not a room participant cannot post an approval card');
+
+  const { ws: otherWs, columns: otherColumns } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'chat-roundtrip-other',
+  });
+  const crossWorkspaceTicket = await ds.getRepository('Ticket').save(ds.getRepository('Ticket').create({
+    workspace_id: otherWs.id,
+    board_id: otherColumns.todo.board_id,
+    column_id: otherColumns.todo.id,
+    title: 'other workspace pending',
+    pending_user_action: true,
+  }));
+  const crossWorkspaceApproval = await agentMcp.callTool('request_ticket_unpend_approval', {
+    room_id: room.id,
+    ticket_id: crossWorkspaceTicket.id,
+  });
+  assert.ok(crossWorkspaceApproval.isError, 'ticket and room from different workspaces are rejected');
+
+  const agentPatch = await fetch(`${base}/api/tickets/${createdTicket.id}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${responderKey.raw_key}`,
+      'X-Workspace-Id': ws.id,
+    },
+    body: JSON.stringify({ pending_user_action: false }),
+  });
+  assert.equal(agentPatch.status, 401, 'an agent API key cannot use the human-session ticket PATCH');
+
+  const triggerLoop = app.get(TriggerLoopService);
+  const originalDispatch = triggerLoop.dispatchCurrentColumn.bind(triggerLoop);
+  const unpendDispatches = [];
+  triggerLoop.dispatchCurrentColumn = async (...args) => {
+    if (args[1] === 'unpend') unpendDispatches.push(args);
+    return originalDispatch(...args);
+  };
+  t.after(() => { triggerLoop.dispatchCurrentColumn = originalDispatch; });
+
+  const resume = () => fetch(`${base}/api/tickets/${createdTicket.id}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+      'X-Workspace-Id': ws.id,
+    },
+    body: JSON.stringify({ pending_user_action: false }),
+  });
+  const firstResume = await resume();
+  assert.equal(firstResume.status, 200, `human-session resume must succeed: ${await firstResume.text()}`);
+  const secondResume = await resume();
+  assert.equal(secondResume.status, 200, `repeated resume must stay idempotent: ${await secondResume.text()}`);
+  assert.equal(unpendDispatches.length, 1, 'true→false transition dispatches unpend exactly once');
+  assert.equal(unpendDispatches[0][2], user.id, 'dispatch actor is the authenticated user');
+  const activity = await ds.getRepository('ActivityLog').findOne({
+    where: { ticket_id: createdTicket.id, field_changed: 'pending_user_action' },
+    order: { created_at: 'DESC' },
+  });
+  assert.equal(activity?.actor_id, user.id, 'unpend activity actor is the authenticated user');
+  const resolvedApproval = await agentMcp.callTool('request_ticket_unpend_approval', {
+    room_id: room.id,
+    ticket_id: createdTicket.id,
+  });
+  assert.ok(resolvedApproval.isError, 'an already-resumed ticket cannot produce a fresh approval card');
 
   const agentText = 'ticket created — responder here';
   const toolRes = await agentMcp.callTool('send_chat_room_message', {
