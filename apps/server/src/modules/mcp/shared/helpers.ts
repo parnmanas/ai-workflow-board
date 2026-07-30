@@ -1,4 +1,4 @@
-import { ARTIFACT_REF_DOC } from '../../../common/artifact-ref';
+import { ARTIFACT_REF_DOC, ArtifactRefType, formatArtifactRef } from '../../../common/artifact-ref';
 
 /**
  * Shared helpers for MCP tools.
@@ -22,6 +22,15 @@ export function safeJsonParse(val: string | null | undefined, fallback: any = []
  */
 export function ok(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+/** Add the canonical, copy-ready user-visible reference to an MCP entity row. */
+export function withArtifactRef<T extends Record<string, any>>(
+  type: ArtifactRefType,
+  entity: T,
+  displayName: string,
+): T & { _ref: string } {
+  return { ...entity, _ref: formatArtifactRef(type, String(entity.id), displayName) };
 }
 
 /**

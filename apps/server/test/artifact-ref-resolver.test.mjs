@@ -26,6 +26,7 @@ function service(access = true) {
     repo([{ id: ids.action, workspace_id: ws, name: 'Same name' }]),
     repo([{ id: ids.function, workspace_id: ws, name: 'Same name' }]),
     repo([{ id: ids.schedule, workspace_id: ws, name: 'Same name' }]),
+    repo([{ id: ws, name: 'Primary workspace' }]),
     { check: async () => access },
   );
 }
@@ -40,6 +41,8 @@ test('resolves all six types by exact id with canonical links despite duplicate 
   assert.equal(rows.find(row => row.type === 'action').deepLink, `/ws/${ws}/actions?artifact=${ids.action}`);
   assert.equal(rows.find(row => row.type === 'function').deepLink, `/ws/${ws}/functions?artifact=${ids.function}`);
   assert.equal(rows.find(row => row.type === 'schedule').deepLink, `/ws/${ws}/schedules?artifact=${ids.schedule}`);
+  assert.ok(rows.every(row => row.workspaceName === 'Primary workspace'));
+  assert.equal(rows.find(row => row.type === 'ticket').boardName, 'Same name');
 });
 
 test('permission denial and missing ids never return links', async () => {

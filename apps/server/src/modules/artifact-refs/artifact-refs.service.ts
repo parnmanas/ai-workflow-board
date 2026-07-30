@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Action, Agent, Board, BoardColumn, Ticket, WorkflowFunction, WorkspaceSchedule } from '../../entities';
+import { Action, Agent, Board, BoardColumn, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
 import {
   ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact,
 } from '../../common/artifact-ref';
@@ -13,6 +13,8 @@ export interface ResolvedArtifactRef {
   available: boolean;
   label: string;
   deepLink: string | null;
+  workspaceName?: string;
+  boardName?: string;
   reason?: 'malformed_id' | 'workspace_access_denied' | 'not_found' | 'outside_workspace' | 'no_detail_surface';
 }
 
@@ -26,6 +28,7 @@ export class ArtifactRefsService {
     @InjectRepository(Action) private readonly actions: Repository<Action>,
     @InjectRepository(WorkflowFunction) private readonly functions: Repository<WorkflowFunction>,
     @InjectRepository(WorkspaceSchedule) private readonly schedules: Repository<WorkspaceSchedule>,
+    @InjectRepository(Workspace) private readonly workspaces: Repository<Workspace>,
     private readonly rebac: ReBACService,
   ) {}
 
@@ -37,7 +40,12 @@ export class ArtifactRefsService {
     const allowed = !!workspaceId && (user.role === 'admin' ||
       await this.rebac.check({ type: 'user', id: user.id }, 'owner', { type: 'workspace', id: workspaceId }) ||
       await this.rebac.check({ type: 'user', id: user.id }, 'member', { type: 'workspace', id: workspaceId }));
-    return Promise.all(refs.slice(0, 100).map(ref => this.resolveOne(ref, workspaceId, allowed)));
+    const workspace = allowed
+      ? await this.workspaces.findOne({ where: { id: workspaceId } })
+      : null;
+    return Promise.all(refs.slice(0, 100).map(ref =>
+      this.resolveOne(ref, workspaceId, allowed, workspace?.name),
+    ));
   }
 
   async normalizeStoredOutput(workspaceId: string, text: string): Promise<string> {
@@ -67,6 +75,7 @@ export class ArtifactRefsService {
     ref: { type: ArtifactRefType; id: string },
     workspaceId: string,
     workspaceAllowed: boolean,
+    workspaceName?: string,
   ): Promise<ResolvedArtifactRef> {
     if (!ARTIFACT_REF_TYPES.includes(ref.type) || !UUID_RE.test(ref.id)) {
       return this.unavailable(ref.type, ref.id, 'malformed_id');
@@ -77,13 +86,18 @@ export class ArtifactRefsService {
     let entityWorkspace: string | null = null;
     let label = '';
     let deepLink: string | null = null;
+    let boardName: string | undefined;
     if (ref.type === 'ticket') {
       entity = await this.tickets.findOne({ where: { id: ref.id } });
       entityWorkspace = entity?.workspace_id ?? null;
       label = entity?.title || '';
       if (entity) {
         const column = await this.columns.findOne({ where: { id: entity.column_id } });
-        deepLink = column?.board_id ? `/ws/${workspaceId}/boards/${column.board_id}?ticket=${entity.id}` : null;
+        if (column?.board_id) {
+          const board = await this.boards.findOne({ where: { id: column.board_id } });
+          boardName = board?.name;
+          deepLink = `/ws/${workspaceId}/boards/${column.board_id}?ticket=${entity.id}`;
+        }
       }
     } else if (ref.type === 'agent') {
       entity = await this.agents.findOne({ where: { id: ref.id } });
@@ -94,18 +108,23 @@ export class ArtifactRefsService {
       entity = await this.boards.findOne({ where: { id: ref.id } });
       entityWorkspace = entity?.workspace_id ?? null;
       label = entity?.name || '';
+      boardName = entity?.name;
       deepLink = entity ? `/ws/${workspaceId}/boards/${entity.id}` : null;
     } else {
       const repo = ref.type === 'action' ? this.actions : ref.type === 'function' ? this.functions : this.schedules;
       entity = await repo.findOne({ where: { id: ref.id } as any });
       entityWorkspace = entity?.workspace_id ?? (ref.type === 'function' && entity ? workspaceId : null);
       label = entity?.name || entity?.key || '';
+      if (entity?.board_id) {
+        const board = await this.boards.findOne({ where: { id: entity.board_id } });
+        boardName = board?.name;
+      }
       const surface = ref.type === 'action' ? 'actions' : ref.type === 'function' ? 'functions' : 'schedules';
       deepLink = entity ? `/ws/${workspaceId}/${surface}?artifact=${entity.id}` : null;
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
     if (entityWorkspace !== workspaceId) return this.unavailable(ref.type, ref.id, 'outside_workspace');
     if (!deepLink) return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label };
-    return { type: ref.type, id: ref.id, available: true, label, deepLink };
+    return { type: ref.type, id: ref.id, available: true, label, deepLink, workspaceName, boardName };
   }
 }

@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ok, err } from '../shared/helpers';
+import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
@@ -21,7 +21,8 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
       try {
-        return ok(await service.list(workspace_id));
+        const rows = await service.list(workspace_id);
+        return ok(rows.map(row => withArtifactRef('function', row, row.name)));
       } catch (error: any) {
         return err(error?.message || 'Failed to list Functions');
       }
@@ -38,7 +39,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
       try {
         const view = await service.get(id);
         if (view.workspace_id !== null && view.workspace_id !== workspace_id) return err('Function belongs to a different workspace');
-        return ok(view);
+        return ok(withArtifactRef('function', view, view.name));
       } catch (error: any) {
         return err(error?.message || 'Function not found');
       }
@@ -69,9 +70,10 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       if (!scopeAllowed(getCallerAgent(extra), input.workspace_id)) return err('Workspace scope mismatch');
       try {
-        return ok(input.id
+        const saved = input.id
           ? await service.update(input.id, input)
-          : await service.create(input));
+          : await service.create(input);
+        return ok(withArtifactRef('function', saved, saved.name));
       } catch (error: any) {
         return err(error?.message || 'Failed to save Function');
       }

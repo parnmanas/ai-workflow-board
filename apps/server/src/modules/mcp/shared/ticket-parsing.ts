@@ -22,7 +22,7 @@ import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecisi
 import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { safeJsonParse } from './helpers';
+import { safeJsonParse, withArtifactRef } from './helpers';
 import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
 import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
 
@@ -39,7 +39,7 @@ export type CommentAttachment = {
  * recursing into children.
  */
 export function parseTicket(ticket: Ticket) {
-  return {
+  return withArtifactRef('ticket', {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
@@ -49,7 +49,7 @@ export function parseTicket(ticket: Ticket) {
     // Cross-board handoff relay (ticket ac21a745) — decode the JSON-string spec
     // to an object so the detail panel's handoff editor binds against it.
     handoff_spec: parseHandoffSpec(ticket.handoff_spec),
-  };
+  }, ticket.title);
 }
 
 /**

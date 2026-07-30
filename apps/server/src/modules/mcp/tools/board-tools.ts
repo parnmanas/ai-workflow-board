@@ -16,7 +16,7 @@ import { DEFAULT_COLUMNS, DEFAULT_BOARD_ROUTING } from '../../../db';
 import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
-import { ok, err, safeJsonParse } from '../shared/helpers';
+import { ok, err, safeJsonParse, withArtifactRef } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
@@ -45,7 +45,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       const where: any = {};
       if (workspace_id) where.workspace_id = workspace_id;
       const boards = await dataSource.getRepository(Board).find({ where, order: { created_at: 'DESC' } });
-      return ok(boards);
+      return ok(boards.map(board => withArtifactRef('board', board, board.name)));
     }
   );
 
@@ -100,7 +100,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         })
       );
 
-      return ok({ ...board, columns: columnsWithTickets });
+      return ok(withArtifactRef('board', { ...board, columns: columnsWithTickets }, board.name));
     }
   );
 
@@ -141,7 +141,9 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }
 
       const summary = {
+        id: board.id,
         board: board.name,
+        _ref: withArtifactRef('board', board, board.name)._ref,
         description: board.description,
         columns: columns.map(col => {
           const tickets = ticketsByColumn.get(col.id) || [];
@@ -154,6 +156,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
               return {
                 id: t.id,
                 title: t.title,
+                _ref: withArtifactRef('ticket', t, t.title)._ref,
                 priority: t.priority,
                 assignee: t.assignee || 'unassigned',
                 subtasks: `${done}/${children.length} done`,
@@ -423,7 +426,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       if (routingChanged) {
         await writeRoutingConfigThrough(dataSource, board.id);
       }
-      return ok(board);
+      return ok(withArtifactRef('board', board, board.name));
     }
   );
 

@@ -18,7 +18,7 @@ import {
   isExecutableRuntime,
   validateAgentRuntimeConfig,
 } from '../../../common/runtime-config';
-import { ok, err } from '../shared/helpers';
+import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
@@ -37,7 +37,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       const agents = await dataSource.getRepository(Agent).find({
         order: { name: 'ASC' },
       });
-      return ok(agents);
+      return ok(agents.map(agent => withArtifactRef('agent', agent, agent.name)));
     }
   );
 
@@ -50,7 +50,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         where: { id: agent_id },
       });
       if (!agent) return err('Agent not found');
-      return ok(agent);
+      return ok(withArtifactRef('agent', agent, agent.name));
     }
   );
 
@@ -122,7 +122,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
           model: model && model.trim() ? model.trim() : null,
         }),
       );
-      return ok(agent);
+      return ok(withArtifactRef('agent', agent, agent.name));
     }
   );
 
@@ -221,7 +221,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
           },
         );
       }
-      return ok(updated);
+      return ok(withArtifactRef('agent', updated, updated.name));
     }
   );
 

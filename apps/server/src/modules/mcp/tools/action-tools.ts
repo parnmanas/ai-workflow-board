@@ -21,12 +21,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Action } from '../../../entities/Action';
 import { ActionRun } from '../../../entities/ActionRun';
-import { ok, err } from '../shared/helpers';
+import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 function actionToJson(a: Action) {
-  return {
+  return withArtifactRef('action', {
     id: a.id,
     workspace_id: a.workspace_id,
     board_id: a.board_id,
@@ -43,7 +43,7 @@ function actionToJson(a: Action) {
     last_run_at: a.last_run_at,
     created_at: a.created_at,
     updated_at: a.updated_at,
-  };
+  }, a.name);
 }
 
 export function registerActionTools(server: McpServer, ctx: ToolContext): void {
