@@ -243,6 +243,10 @@ export interface ChatRequestHistoryEntry {
 export interface ChatRequestPayload {
   agent_id: string;
   user_id: string;
+  // Stable idempotency anchor shared with the chat_room_message emitted for
+  // the same persisted row. Older emitters may omit it; consumers retain their
+  // timestamp fallback for backward compatibility.
+  message_id?: string;
   ticket_id: string | null;
   role_prompt: string;
   new_message: string;
@@ -366,6 +370,10 @@ export interface ChatRoomMessagePayload {
   // spawned CLI tries to send_chat_room_message into a room it does not
   // belong to.
   agent_member_ids?: string[];
+  // Agent ids whose execution for this persisted message is already owned by
+  // targeted chat_request events. Runtime Hosts must keep this room event for
+  // history/UI fan-out but skip a second delegation when this list is non-empty.
+  dispatch_agent_ids?: string[];
   // ticket 4: run-workspace provisioning hint. Present ONLY on a QA/security run
   // dispatch message (the system 'user' send that opens the run room) — absent on
   // every ordinary chat turn. The agent-manager reads it to prepare the run's

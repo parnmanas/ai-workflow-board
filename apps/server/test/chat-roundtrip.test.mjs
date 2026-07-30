@@ -91,6 +91,11 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   t.after(async () => { userStream.close(); await agentMcp.close(); });
   await new Promise((r) => setTimeout(r, 250));
 
+  const rawChatRequests = [];
+  const onChatRequest = (event) => rawChatRequests.push(event);
+  modules.activityEvents.on('chat_request', onChatRequest);
+  t.after(() => modules.activityEvents.removeListener('chat_request', onChatRequest));
+
   // ── 1. User POSTs a message over REST → 201, and the user's own SSE stream
   //       (a participant) receives the chat_room_message echo.
   const userText = 'hi responder, are you there?';
@@ -105,6 +110,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   });
   const postBody = await postRes.text();
   assert.equal(postRes.status, 201, `user message POST should 201: ${postBody}`);
+  const postedMessage = JSON.parse(postBody);
 
   const echoFrame = await userStream.waitFor(
     'chat_room_message',
@@ -112,6 +118,18 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     4000,
   );
   assert.ok(echoFrame, 'participant user must receive the SSE echo of their own message');
+  assert.equal(rawChatRequests.length, 1, 'a user-to-agent DM emits one canonical chat_request');
+  assert.equal(
+    rawChatRequests[0].message_id,
+    postedMessage.id,
+    'chat_request idempotency is anchored to the persisted chat message id',
+  );
+  const echoData = echoFrame.data ?? echoFrame;
+  assert.deepEqual(
+    echoData.dispatch_agent_ids,
+    [responder.id],
+    'the room broadcast marks the agent whose execution is already owned by chat_request',
+  );
 
   // ── 2. Agent replies via the send_chat_room_message MCP tool → the user's SSE
   //       stream receives the second chat_room_message. Note the tool takes NO

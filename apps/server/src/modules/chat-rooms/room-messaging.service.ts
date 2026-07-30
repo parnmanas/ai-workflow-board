@@ -476,9 +476,11 @@ export class RoomMessagingService {
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
 
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
+    let explicitDispatchAgentIds: string[] = [];
     if (isRealMessage && senderType === 'user') {
       const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
       await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
+      explicitDispatchAgentIds = Array.from(dispatched);
     }
 
     // Get active member IDs for SSE filtering (CRITICAL Pitfall 1)
@@ -515,6 +517,12 @@ export class RoomMessagingService {
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+      // DM/@mention execution is owned by the targeted chat_request event.
+      // The room event still broadcasts the persisted message to participants,
+      // but Runtime Hosts use this marker to avoid a second execution path.
+      ...(explicitDispatchAgentIds.length > 0
+        ? { dispatch_agent_ids: explicitDispatchAgentIds }
+        : {}),
       // ticket e6d32e9d: signal Action Run rooms so the agent-manager gives the
       // subagent "do the work directly" instructions instead of the chat
       // "create a ticket" rule. True whenever the room carries an action_id.
@@ -991,6 +999,7 @@ export class RoomMessagingService {
         activityEvents.emit('chat_request', {
           agent_id: agent.id,
           user_id: senderId,
+          message_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
           role_prompt: agent.role_prompt || '',
           new_message: content,
@@ -1094,6 +1103,7 @@ export class RoomMessagingService {
     activityEvents.emit('chat_request', {
       agent_id: agent.id,
       user_id: senderId,
+      message_id: savedMessage.id,
       ticket_id: null,
       role_prompt: agent.role_prompt || '',
       new_message: content,
@@ -1103,6 +1113,7 @@ export class RoomMessagingService {
       // See _processMentions — required for room-aware reply routing.
       room_id: roomId,
     });
+    alreadyDispatched.add(agent.id);
 
     this.logService.info('ChatRooms', `DM auto-routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);
     // Never-started / offline agent (ticket bfdd80b7) — same flag as the
