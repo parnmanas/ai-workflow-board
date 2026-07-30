@@ -654,6 +654,8 @@ export async function postSilentExitSystemComment(
     cycle_started_at?: string;
     silent_exit_attempt?: number;
     terminal_reason?: string;
+    silent_exit_family_key?: string;
+    silent_exit_retry_count?: number;
   },
 ): Promise<'created' | 'suppressed' | 'failed'> {
   if (!ticketId || !body.content) return 'failed';
@@ -699,6 +701,27 @@ export async function completeMentionAuditRun(
       body: JSON.stringify({ exit_code: exitCode }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    return resp.ok ? await resp.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function failMentionAuditRetrySpawn(
+  config: AwbConfig,
+  ticketId: string,
+  runToken: string,
+): Promise<{ decision: 'failed'; attempt: 1; reason: string; family_key?: string } | null> {
+  try {
+    const resp = await fetch(
+      `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/mention-audit-runs/${encodeURIComponent(runToken)}/retry-spawn-failed`,
+      {
+        method: 'POST',
+        headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      },
+    );
     return resp.ok ? await resp.json() : null;
   } catch {
     return null;

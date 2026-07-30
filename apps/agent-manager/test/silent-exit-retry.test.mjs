@@ -69,3 +69,52 @@ test('second clean silent attempt emits one structured terminal fallback', async
   assert.equal(fallback[0].body.silent_exit_attempt, 1);
   assert.equal(fallback[0].body.terminal_reason, 'silent_exit_retry_exhausted');
 });
+
+test('retry spawn failure is terminalized as attempt one before fallback', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init?.body || '{}');
+    requests.push({ url: String(url), body });
+    if (String(url).endsWith('/complete')) {
+      return Response.json({ decision: 'retry', attempt: 1 });
+    }
+    if (String(url).endsWith('/retry-spawn-failed')) {
+      return Response.json({
+        decision: 'failed', attempt: 1, reason: 'silent_exit_retry_spawn_failed',
+        family_key: 'mention:comment-1:agent-1:agent-1',
+      });
+    }
+    return Response.json({});
+  };
+  const manager = new SubagentManager(config);
+  manager.spawn = async () => ({ spawned: false, reason: 'spawn_failed' });
+  await manager._handleOneshotExit(record(0), 0);
+  assert.equal(requests.filter((r) => r.url.endsWith('/retry-spawn-failed')).length, 1);
+  const fallback = requests.filter((r) => r.url.endsWith('/silent-exit-comment'));
+  assert.equal(fallback.length, 1);
+  assert.equal(fallback[0].body.silent_exit_attempt, 1);
+  assert.equal(fallback[0].body.terminal_reason, 'silent_exit_retry_spawn_failed');
+  assert.equal(fallback[0].body.silent_exit_retry_count, 1);
+  assert.equal(fallback[0].body.silent_exit_family_key, 'mention:comment-1:agent-1:agent-1');
+});
+
+test('retry claimant loser does not spawn or post fallback', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(init?.body || '{}') });
+    return Response.json({ decision: 'retry_claimed', attempt: 1 });
+  };
+  const manager = new SubagentManager(config);
+  let spawnCount = 0;
+  manager.spawn = async () => {
+    spawnCount += 1;
+    return { spawned: true, pid: 456 };
+  };
+  await manager._handleOneshotExit(record(0), 0);
+  assert.equal(spawnCount, 0);
+  assert.equal(requests.filter((r) => r.url.endsWith('/silent-exit-comment')).length, 0);
+});

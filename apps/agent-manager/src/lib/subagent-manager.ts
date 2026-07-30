@@ -51,6 +51,7 @@ import {
 } from './process-tree.js';
 import {
   completeMentionAuditRun,
+  failMentionAuditRetrySpawn,
   postChatRoomMessage,
   postSilentExitSystemComment,
   startMentionAuditRun,
@@ -238,6 +239,8 @@ interface SubagentRecord {
   audit_session_id?: string;
   mention_audit_run_token?: string;
   silent_exit_attempt?: 0 | 1;
+  silent_exit_terminal_reason?: string;
+  silent_exit_family_key?: string;
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
@@ -597,13 +600,33 @@ export class SubagentManager implements SubagentManagerContract {
           `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
         );
       }
+      // Establish the server-owned baseline before creating MCP attribution.
+      // The returned token is the exact provenance attached to every write
+      // performed by this process, isolating concurrent runs of the same
+      // ticket/agent/role.
+      const mentionAudit =
+        spec.kind === 'trigger' &&
+        spec.triggerId?.startsWith('mention:') &&
+        spec.ticketId &&
+        spec.agentId
+          ? await startMentionAuditRun(this.#config, spec.ticketId, {
+              cycle_trigger_id: spec.triggerId,
+              agent_id: spec.agentId,
+              role: spec.role,
+              attempt: spec._silentExitAttempt ?? 0,
+              subagent_session_id: String(reservationId),
+            })
+          : null;
+      const attributedSpec = mentionAudit
+        ? { ...spec, triggerSource: mentionAudit.run_token }
+        : spec;
       const descriptor = adapter.buildOneshotSpawn({
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
         cwd: effectiveCwd,
         cliHomeDir: ctx?.cli_home_dir ?? null,
-        mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
+        mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
         model: attemptModel,
         harness,
         effort: effortFlag,
@@ -647,7 +670,9 @@ export class SubagentManager implements SubagentManagerContract {
           };
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;
-          if (spec.triggerSource) headers['X-AWB-Subagent-Trigger-Source'] = spec.triggerSource;
+          if (attributedSpec.triggerSource) {
+            headers['X-AWB-Subagent-Trigger-Source'] = attributedSpec.triggerSource;
+          }
           if (spec.triggerId) headers['X-AWB-Subagent-Trigger-Id'] = spec.triggerId;
           headers['X-AWB-Subagent-Session-Id'] = String(reservationId);
           const mcpConfig = {
@@ -670,7 +695,7 @@ export class SubagentManager implements SubagentManagerContract {
             mcpConfigPath: configPath,
             cwd: effectiveCwd,
             cliHomeDir: ctx?.cli_home_dir ?? null,
-            mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
+            mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
             model: attemptModel,
             harness,
             effort: effortFlag,
@@ -733,21 +758,6 @@ export class SubagentManager implements SubagentManagerContract {
       // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
       // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
       // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
-      // The server must establish the audit baseline before the child can
-      // possibly persist a comment or mutation.
-      const mentionAudit =
-        spec.kind === 'trigger' &&
-        spec.triggerId?.startsWith('mention:') &&
-        spec.ticketId &&
-        spec.agentId
-          ? await startMentionAuditRun(this.#config, spec.ticketId, {
-              cycle_trigger_id: spec.triggerId,
-              agent_id: spec.agentId,
-              role: spec.role,
-              attempt: spec._silentExitAttempt ?? 0,
-              subagent_session_id: String(reservationId),
-            })
-          : null;
       const child = crossSpawn(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
@@ -1153,6 +1163,15 @@ export class SubagentManager implements SubagentManagerContract {
             `[subagent] clean mention silent-exit retry spawn failed ticket=${record.ticket_id.slice(0, 8)} ` +
               `reason=${retry.reason || 'unknown'} — recording terminal fallback`,
           );
+          const terminal = await failMentionAuditRetrySpawn(
+            this.#config,
+            record.ticket_id,
+            record.mention_audit_run_token,
+          );
+          record.silent_exit_attempt = 1;
+          record.silent_exit_terminal_reason =
+            terminal?.reason || 'silent_exit_retry_spawn_failed';
+          record.silent_exit_family_key = terminal?.family_key;
         } else if (audit?.decision === 'retry_claimed') {
           return;
         }
@@ -1521,7 +1540,9 @@ export class SubagentManager implements SubagentManagerContract {
     metaParts.push(`exit_code=${exitLabel}`);
     if (record.silent_exit_attempt !== undefined) {
       metaParts.push(`attempt=${record.silent_exit_attempt}`);
-      if (record.silent_exit_attempt === 1) metaParts.push('reason=silent_exit_retry_exhausted');
+      if (record.silent_exit_attempt === 1) {
+        metaParts.push(`reason=${record.silent_exit_terminal_reason || 'silent_exit_retry_exhausted'}`);
+      }
     }
     // Structured failure reason (usage_limit / auth_failure / codex_error) when
     // the buffered tail matches a known fatal signature — the "structured
@@ -1549,7 +1570,11 @@ export class SubagentManager implements SubagentManagerContract {
       subagent_session_id: record.audit_session_id || String(record.pid),
       cycle_started_at: new Date(record.started_at).toISOString(),
       silent_exit_attempt: record.silent_exit_attempt,
-      terminal_reason: record.silent_exit_attempt === 1 ? 'silent_exit_retry_exhausted' : undefined,
+      terminal_reason: record.silent_exit_attempt === 1
+        ? record.silent_exit_terminal_reason || 'silent_exit_retry_exhausted'
+        : undefined,
+      silent_exit_family_key: record.silent_exit_family_key,
+      silent_exit_retry_count: record.silent_exit_attempt,
     });
   }
 
