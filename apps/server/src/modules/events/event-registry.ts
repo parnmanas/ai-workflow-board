@@ -379,6 +379,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: ChatRequestPayload = {
         agent_id: event.agent_id,
         user_id: event.user_id,
+        message_id: typeof event.message_id === 'string' ? event.message_id : undefined,
         ticket_id: event.ticket_id || null,
         role_prompt: event.role_prompt || '',
         new_message: event.new_message,
@@ -437,6 +438,13 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_member_ids: event.agent_member_ids
           ? Array.from(event.agent_member_ids as Set<string>)
           : undefined,
+        // A DM/@mention emits a targeted chat_request before this room
+        // broadcast. Preserve the target ids so Runtime Hosts can retain the
+        // broadcast as history without executing the same DB message twice.
+        dispatch_agent_ids:
+          Array.isArray(event.dispatch_agent_ids) && event.dispatch_agent_ids.length > 0
+            ? event.dispatch_agent_ids
+            : undefined,
         // ticket 25db3cc6 / fe297886: forward the run-workspace provisioning
         // hint untouched. RoomMessagingService.sendMessage stamps it ONLY on a
         // QA/security run-dispatch send; the agent-manager reads p.run_provision

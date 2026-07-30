@@ -463,6 +463,9 @@ export interface ChatDispatchArgs {
   agentId: string;
   senderId: string;
   senderName: string;
+  /** Persisted chat_room_messages.id. Preferred over event timestamps for
+   * cross-event idempotency between chat_request and chat_room_message. */
+  messageId?: string;
   createdAt: string;
   content: string;
   rolePrompt: string;
@@ -2261,6 +2264,7 @@ export class EventDispatcher {
           agentId: payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '',
           senderId: payload.user_id || '',
           senderName: '',
+          messageId: payload.message_id || '',
           createdAt: ev.timestamp || '',
           content: payload.new_message || '',
           rolePrompt: payload.role_prompt || '',
@@ -2316,9 +2320,11 @@ export class EventDispatcher {
           kind: 'chat',
           taskText,
           rolePrompt,
-          chatRequestId: payload.user_id
-            ? `msg:${payload.user_id}:${ev.timestamp || ''}`
-            : undefined,
+          chatRequestId: payload.message_id || (
+            payload.user_id
+              ? `msg:${payload.user_id}:${ev.timestamp || ''}`
+              : undefined
+          ),
           ticketId: payload.ticket_id || '',
           agentId: payload.agent_id || '',
           roomId: payload.room_id || '',
@@ -2657,6 +2663,19 @@ export class EventDispatcher {
       return;
     }
 
+    // A targeted chat_request is the canonical execution path for user DMs
+    // and @mentions because it preserves the exact target agent. The matching
+    // chat_room_message remains necessary for UI/history fan-out, but must not
+    // start another subagent for the same persisted message.
+    if (Array.isArray(p.dispatch_agent_ids) && p.dispatch_agent_ids.length > 0) {
+      this.#chatSessionManager?.recordRoomMessage(p);
+      log(
+        `Chat room message already routed by chat_request ` +
+          `(room=${p.room_id || ''} message=${p.message_id || ''}) — skipping delegation`,
+      );
+      return;
+    }
+
     // Resolve which managed agent (if any) should respond. Manager-fan-out
     // delivers chat events for any room where one of this manager's managed
     // agents is a member; the wire payload's agent_member_ids is the set we
@@ -2910,6 +2929,7 @@ export class EventDispatcher {
           agentId: responderAgentId,
           senderId: p.sender_id || '',
           senderName: p.sender_name || '',
+          messageId: p.message_id || p.id || '',
           createdAt: p.created_at || '',
           content: p.content || '',
           rolePrompt: p.role_prompt || '',

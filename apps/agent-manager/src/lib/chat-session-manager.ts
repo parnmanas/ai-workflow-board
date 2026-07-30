@@ -260,11 +260,18 @@ export class ChatSessionManager
   async dispatch(spec: ChatDispatchArgs): Promise<ChatDispatchResult> {
     if (!spec.roomId) return { dispatched: false, reason: 'no_room' };
 
-    // Dedup is per (responder agent, sender, timestamp) so multiple managed
+    // Dedup is per (responder agent, persisted message id) when the server
+    // provides one. Both chat_request and chat_room_message represent the same
+    // DB row but can carry different timestamps, so timestamp-only keys allow
+    // a duplicate turn. Legacy servers fall back to sender + timestamp.
+    //
+    // Keep responder agent in the key so multiple managed
     // agents in the same room each react to the same wire event without
     // colliding on the dedup table. Without agentId in the key, the second
     // matched managed agent would always be skipped as a duplicate.
-    const dedupKey = `msg:${spec.agentId || '_'}:${spec.senderId || ''}:${spec.createdAt || ''}`;
+    const dedupKey = spec.messageId
+      ? `msg:${spec.agentId || '_'}:id:${spec.messageId}`
+      : `msg:${spec.agentId || '_'}:${spec.senderId || ''}:${spec.createdAt || ''}`;
     if (!this._rememberDedup(dedupKey)) {
       return { dispatched: false, reason: 'duplicate_chat' };
     }

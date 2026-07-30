@@ -653,6 +653,35 @@ test('chat-session: different agents in same room each spawn their own session',
   assert.notEqual(r1.pid, r2.pid);
 });
 
+test('chat-session: one persisted message id is deduped across event-specific timestamps', async () => {
+  const mgr = new FakeChatMgr(makeConfig(), 5);
+  const base = {
+    roomId: 'room-cross-event',
+    agentId: 'agent-1',
+    senderId: 'sender-A',
+    senderName: 'Alice',
+    content: 'one stored message',
+    rolePrompt: '',
+    messageId: 'message-db-1',
+    agentContext: { cli: 'claude' },
+  };
+
+  const first = await mgr.dispatch({
+    ...base,
+    createdAt: '2026-07-30T04:36:17.000Z',
+  });
+  const duplicate = await mgr.dispatch({
+    ...base,
+    createdAt: '2026-07-30T04:36:17.137Z',
+  });
+
+  assert.equal(first.dispatched, true);
+  assert.equal(duplicate.dispatched, false);
+  assert.equal(duplicate.reason, 'duplicate_chat');
+  assert.equal(mgr.spawnCount, 1);
+  assert.equal(mgr.followUps.length, 0, 'the duplicate event must not become a second turn');
+});
+
 test('chat-session: dedup mark is rolled back when in-flight guard drops the second dispatch', async () => {
   // Regression: an earlier draft of the chat-session inflight guard would
   // leave the dedup table marked with the dropped event's id, which then
