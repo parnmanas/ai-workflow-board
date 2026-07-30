@@ -1,6 +1,6 @@
 {
   "name": "awb-agent-manager",
-  "version": "1.6.77",
+  "version": "1.6.78",
   "description": "Runtime Host for AWB agents, including Hermes ACP and managed CLI runtimes",
   "type": "module",
   "main": "dist/main.js",
