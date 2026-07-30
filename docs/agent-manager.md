@@ -5,6 +5,14 @@ configuration directory, and HTTP routes keep their existing names for
 compatibility, but the architectural role is **Runtime Host**, not an
 independent Agent and not an agent hierarchy.
 
+## AWB entity references
+
+User-visible Ticket, Agent, Board, Action, Function, and Schedule references use
+`#[type:<full-uuid>|Human-readable name]`, never a shortened ID alone. MCP
+results expose the canonical token as `_ref`; use that value in chat, comments,
+and Run results. See [entity-references.md](entity-references.md) for resolution,
+context, and fallback rules.
+
 The Runtime Host owns the resources that must live on an execution machine:
 
 - the authenticated SSE/REST connection to AWB;

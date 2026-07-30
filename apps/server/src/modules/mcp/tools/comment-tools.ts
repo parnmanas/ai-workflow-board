@@ -48,7 +48,10 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, mentionService, logger, ticketRoleAssignmentService, roomMessagingService } = ctx;
+  const {
+    dataSource, activityService, mentionService, logger, ticketRoleAssignmentService,
+    roomMessagingService, artifactRefsService,
+  } = ctx;
   const hardBudgetDeps = { dataSource, activityService, roomMessagingService, logger };
 
   // `resolveAuthorRole` / `mergeAuthorRoleIntoMetadata` live in ./author-role
@@ -109,6 +112,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // log line so we know which agent is leaking.
       const __callerForSanitize = getCallerAgent(extra);
       content = sanitizeHarnessMarkers(content, { logger, toolName: 'add_comment', fieldName: 'content', agentId: __callerForSanitize?.agentId });
+      if (artifactRefsService && ticket.workspace_id) {
+        content = await artifactRefsService.normalizeStoredOutput(ticket.workspace_id, content);
+      }
 
       // Validate type — REST endpoint shape parity. Zod already restricts to the
       // allowed enum, but we also reject 'system' explicitly so an agent can't

@@ -70,6 +70,11 @@ const WORK_FOLDER_RULE = `> 🗂️ **작업 폴더 규약 (worktree 규약 ④)
 > repo 트리 밖 · 홈 디렉터리 · \`/tmp\` · 다른 드라이브(예: \`D:\\...\`)에 worktree/체크아웃을 **새로 만들지 마라** — AWB 가 이미 폴더를 정해 배정했다.
 > 작업이 끝나면 이 폴더 안에서 정리하라.`;
 
+const ARTIFACT_REFERENCE_RULE = `> 🔗 **AWB Artifact reference 규칙** — Ticket, Agent, Board, Action, Function, Schedule을 출력할 때
+> 반드시 \`#[type:<full-uuid>|사람이 읽을 수 있는 이름]\` 형식을 사용하라. 축약 ID만 단독으로 쓰지 마라.
+> \`@[agent:...]\`는 알림/소환이 필요할 때만 사용한다. 존재 또는 권한을 확인할 수 없는 대상은 가짜 ref를 만들지 말고
+> 이름, 전체 안정 ID, 연결 불가 사유를 평문으로 명시하라.`;
+
 /**
  * Action-우선(before-Pending) 정책 블록 — pend 결정을 다루는 워크플로 가이드
  * (todo / plan / in_progress)에 주입된다. 에이전트가 "배포가 필요하다" 같은
@@ -103,6 +108,7 @@ export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
     column_match: 'backlog',
     content: `# Backlog — Narrate Server-Driven Promotions (reporter)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket sits in an intake column. **Backlog → first-active promotion is now owned by the server's \`BacklogPromotionService\`** — it runs whenever an agent on the board frees up, picks the highest-priority intake ticket whose destination-column role holders are below cap, and moves it in a single transaction.
@@ -136,6 +142,7 @@ Your job here as reporter is **not to scan or schedule** — that path was a per
     column_match: 'to do',
     content: `# To Do — Start-or-Wait Decision (assignee)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the To Do column and you are its assignee. Decide whether to start now or wait.
@@ -197,6 +204,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     column_match: 'plan',
     content: `# Plan — Concrete Plan Before Code (planner)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Plan column and you were triggered as its planner. Your job: turn the ticket's intent into a concrete plan an assignee can execute without re-deriving the design — then hand it off to In Progress. If the requirements are still ambiguous, ask the reporter and wait.
@@ -275,6 +283,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     column_match: 'in progress',
     content: `# In Progress — Branch Work (assignee)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the In Progress column. Implement the work on a feature branch and hand it off to Review.
@@ -372,6 +381,7 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
     column_match: 'review',
     content: `# Review — Code Review + Q&A (reviewer / assignee)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Review column. Both the reviewer **and** the assignee are triggered here so they can iterate on questions without bouncing the ticket back and forth. Your first job is to check which role you hold on this ticket, then follow only the matching branch below.
@@ -477,6 +487,7 @@ You handed the ticket off to Review. You are triggered here because the reviewer
     column_match: 'merging',
     content: `# Merging — Integrate into Default (assignee)
 
+${ARTIFACT_REFERENCE_RULE}
 This ticket is in the Merging column, which means Review approved the diff. Your job: land the feature branch on the default branch, delete the feature branch (local + remote), and advance the ticket to Done.
 
 > **Environment**: assignee has a full local repo. This stage exists because reviewer / reporter may not — so all real merge work happens here.
@@ -601,6 +612,7 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
     column_match: 'done',
     content: `# Done — Completion + Merge Audit (reporter)
 
+${ARTIFACT_REFERENCE_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Done column. Merging *claims* it landed the code and deleted the feature branch — your job is to **independently re-verify that the merge is real and complete before you bless it**, then record completion. A \`"Merged"\` comment is **not** evidence (CLAUDE.md: "'Merged' comment ≠ evidence — always check \`git rev-parse origin/<default>\`"). **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.

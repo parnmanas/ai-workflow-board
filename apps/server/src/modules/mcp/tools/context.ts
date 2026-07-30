@@ -61,6 +61,7 @@ import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
 import type { WorkflowFunctionsService } from '../../workflow-functions/workflow-functions.service';
+import type { ArtifactRefsService } from '../../artifact-refs/artifact-refs.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -144,6 +145,7 @@ export interface ToolContext {
   // run-now). Standalone context omits it; the tools degrade to an explicit error
   // (no background tick in standalone mode).
   workspaceScheduleService?: WorkspaceScheduleService;
+  artifactRefsService?: ArtifactRefsService;
   // Feature/Epic intake (ticket aae7644c) — the entry point of the one-stop
   // automated development loop. Required by feature-tools MCP tools
   // (submit_feature_request / propose_feature_chain / approve_feature / ...).

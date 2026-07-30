@@ -15,11 +15,13 @@ import { RoomMessagingService } from './room-messaging.service';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
+import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention, TicketAttachment]),
     SharedServicesModule,
+    ArtifactRefsModule,
   ],
   controllers: [ChatRoomsController],
   providers: [

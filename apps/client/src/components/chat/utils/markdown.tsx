@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { tokens } from '../../../tokens';
 import TicketRefCard from '../TicketRefCard';
+import ResolvedArtifactRef from '../ResolvedArtifactRef';
+import { ARTIFACT_TOKEN_RE, ArtifactRefType } from '../../../utils/artifactRef';
 
 // ─── renderMarkdown — XSS-safe inline markdown ───────────────────────────────
 // T-07-12: No dangerouslySetInnerHTML. React JSX element construction only.
@@ -106,7 +108,41 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
         </code>,
       );
     } else {
-      // Step 1a: First, split out structured mention tokens. These are
+      // Step 1a: split link-only AWB artifact references before mentions.
+      const artifactParts: Array<{
+        token: string;
+        artifact?: { type: ArtifactRefType; id: string; name: string };
+      }> = [];
+      let artifactCursor = 0;
+      ARTIFACT_TOKEN_RE.lastIndex = 0;
+      let artifactMatch: RegExpExecArray | null;
+      while ((artifactMatch = ARTIFACT_TOKEN_RE.exec(part)) !== null) {
+        if (artifactMatch.index > artifactCursor) {
+          artifactParts.push({ token: part.slice(artifactCursor, artifactMatch.index) });
+        }
+        artifactParts.push({
+          token: artifactMatch[0],
+          artifact: {
+            type: artifactMatch[1] as ArtifactRefType,
+            id: artifactMatch[2],
+            name: artifactMatch[3],
+          },
+        });
+        artifactCursor = artifactMatch.index + artifactMatch[0].length;
+      }
+      if (artifactCursor < part.length) artifactParts.push({ token: part.slice(artifactCursor) });
+      if (artifactParts.length === 0) artifactParts.push({ token: part });
+
+      for (const ap of artifactParts) {
+        if (ap.artifact) {
+          const { type, id, name } = ap.artifact;
+          nodes.push(
+            <ResolvedArtifactRef key={keyIdx++} type={type} id={id} claimedLabel={name} />,
+          );
+          continue;
+        }
+
+      // Step 1b: First, split out structured mention tokens. These are
       // authoritative (they ship an ID), so they render as pills regardless
       // of whether the name collides with another entity.
       const structuredParts: Array<{
@@ -117,9 +153,9 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
       let cursor = 0;
       STRUCTURED_TOKEN_RE.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = STRUCTURED_TOKEN_RE.exec(part)) !== null) {
+      while ((m = STRUCTURED_TOKEN_RE.exec(ap.token)) !== null) {
         if (m.index > cursor) {
-          structuredParts.push({ token: part.slice(cursor, m.index) });
+          structuredParts.push({ token: ap.token.slice(cursor, m.index) });
         }
         const type = m[1] as 'user' | 'agent' | 'role' | 'ticket';
         const rawId = m[2];
@@ -132,10 +168,10 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
         }
         cursor = m.index + m[0].length;
       }
-      if (cursor < part.length) {
-        structuredParts.push({ token: part.slice(cursor) });
+      if (cursor < ap.token.length) {
+        structuredParts.push({ token: ap.token.slice(cursor) });
       }
-      if (structuredParts.length === 0) structuredParts.push({ token: part });
+      if (structuredParts.length === 0) structuredParts.push({ token: ap.token });
 
       for (const sp of structuredParts) {
         if (sp.ticket) {
@@ -147,7 +183,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
           continue;
         }
 
-      // Step 1b: Split on bare @mention tokens. After the structured-token
+      // Step 1c: Split on bare @mention tokens. After the structured-token
       // migration these are legacy or unresolvable — render as muted text
       // unless a participant/role shortcut matches (kept for backward compat).
       const mentionParts = sp.token.split(/(@[a-zA-Z0-9_-]+)/g);
@@ -194,6 +230,7 @@ export function renderMarkdown(text: string, participants?: MentionParticipant[]
             nodes.push(<React.Fragment key={keyIdx++}>{seg}</React.Fragment>);
           }
         }
+      }
       }
       }
     }

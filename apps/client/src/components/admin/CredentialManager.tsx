@@ -1,10 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import type { CatalogScope, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
+import { useAuth } from '../../contexts/AuthContext';
+
+export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
 const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   textAlign: align,
@@ -111,12 +114,20 @@ export default function CredentialManager({
   canManageGlobal?: boolean;
 }) {
   const { showToast } = useToast();
+  const { user } = useAuth();
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editCred, setEditCred] = useState<Credential | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Credential | null>(null);
   const [saving, setSaving] = useState(false);
+  const [revealTarget, setRevealTarget] = useState<Credential | null>(null);
+  const [revealPassword, setRevealPassword] = useState('');
+  const [revealedFields, setRevealedFields] = useState<Record<string, string>>({});
+  const [revealing, setRevealing] = useState(false);
+  const [copiedField, setCopiedField] = useState('');
+  const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealRequestGeneration = useRef(0);
 
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
@@ -145,6 +156,71 @@ export default function CredentialManager({
   }, [globalMode, catalogMode, effectiveWsId, allScopes, showToast]);
 
   useEffect(() => { loadCredentials(); }, [loadCredentials]);
+
+  const clearRevealedSecret = useCallback(() => {
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    revealTimer.current = null;
+    setRevealedFields({});
+    setRevealPassword('');
+    setCopiedField('');
+  }, []);
+
+  const invalidateRevealRequest = useCallback(() => {
+    revealRequestGeneration.current += 1;
+    setRevealing(false);
+  }, []);
+
+  useEffect(() => () => {
+    revealRequestGeneration.current += 1;
+    clearRevealedSecret();
+  }, [clearRevealedSecret]);
+
+  const closeReveal = () => {
+    invalidateRevealRequest();
+    clearRevealedSecret();
+    setRevealTarget(null);
+  };
+
+  const handleReveal = async () => {
+    if (!revealTarget || !revealPassword) return;
+    const targetId = revealTarget.id;
+    const requestGeneration = ++revealRequestGeneration.current;
+    setRevealing(true);
+    try {
+      const result = await api.revealCredential(targetId, revealPassword);
+      if (revealRequestGeneration.current !== requestGeneration) return;
+      setRevealPassword('');
+      setRevealedFields(result.credential_fields);
+      if (revealTimer.current) clearTimeout(revealTimer.current);
+      revealTimer.current = setTimeout(clearRevealedSecret, CREDENTIAL_REVEAL_TTL_MS);
+    } catch (err: any) {
+      if (revealRequestGeneration.current !== requestGeneration) return;
+      clearRevealedSecret();
+      showToast(err?.message || 'Failed to reveal credential', 'error');
+    } finally {
+      if (revealRequestGeneration.current === requestGeneration) {
+        setRevealing(false);
+      }
+    }
+  };
+
+  const copySecret = async (field: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+    setCopiedField(field);
+    showToast('Copied to clipboard.', 'success');
+    setTimeout(() => setCopiedField((current) => current === field ? '' : current), 2_000);
+  };
 
   const getFieldDefs = (provider: string) =>
     PROVIDER_FIELD_LABELS[provider] || PROVIDER_FIELD_LABELS.custom;
@@ -382,6 +458,19 @@ export default function CredentialManager({
                         </span>
                       ) : (
                         <div style={{ display: 'inline-flex', gap: 6 }}>
+                          {user?.role === 'admin' && c.provider === 'claude_oauth_token' && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => {
+                                invalidateRevealRequest();
+                                clearRevealedSecret();
+                                setRevealTarget(c);
+                              }}
+                            >
+                              Reveal
+                            </Button>
+                          )}
                           <Button variant="secondary" size="sm" onClick={() => startEdit(c)}>Edit</Button>
                           <Button variant="danger" size="sm" onClick={() => setDeleteTarget(c)}>Delete</Button>
                         </div>
@@ -456,6 +545,60 @@ export default function CredentialManager({
             </div>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!revealTarget}
+        onClose={closeReveal}
+        title="Reveal credential"
+        maxWidth={520}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeReveal}>Close</Button>
+            {Object.keys(revealedFields).length === 0 && (
+              <Button
+                variant="primary"
+                onClick={handleReveal}
+                disabled={!revealPassword || revealing}
+                loading={revealing}
+              >
+                Confirm and Reveal
+              </Button>
+            )}
+          </>
+        }
+      >
+        {Object.keys(revealedFields).length === 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <p style={{ margin: 0, color: tokens.colors.textSecondary, fontSize: 13 }}>
+              Re-enter your password to reveal {revealTarget?.name}. The value will be hidden again after 30 seconds.
+            </p>
+            <Input
+              label="Password"
+              type="password"
+              autoComplete="current-password"
+              value={revealPassword}
+              onChange={(event) => setRevealPassword(event.target.value)}
+            />
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>Automatically masks again after 30 seconds.</div>
+            {Object.entries(revealedFields).map(([field, value]) => (
+              <div key={field}>
+                <div style={{ color: tokens.colors.textMuted, fontSize: 11, marginBottom: 4 }}>{field}</div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <code style={{ flex: 1, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap', color: tokens.colors.textStrong }}>
+                    {value}
+                  </code>
+                  <Button variant="secondary" size="sm" onClick={() => copySecret(field, value)}>
+                    {copiedField === field ? 'Copied' : 'Copy'}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </Modal>
 
       {/* Delete confirmation */}

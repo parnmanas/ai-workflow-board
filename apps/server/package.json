@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "pretest": "node test/run-suite.mjs test/agent-runtime-config.test.mjs test/hermes-collaboration.test.mjs test/run-skill-snapshot.test.mjs test/runtime-capabilities-heartbeat.test.mjs test/runtime-host-only-topology.test.mjs test/runtime-types.test.mjs test/skill-lifecycle.test.mjs",
-    "posttest": "node test/run-suite.mjs test/catalog-scope.test.mjs test/claude-backend-profiles.integration.test.mjs test/cli-runtime-profiles.test.mjs test/ticket-ref-session.test.mjs test/workflow-functions.test.mjs",
+    "posttest": "node test/run-suite.mjs test/artifact-ref.test.mjs test/artifact-ref-resolver.test.mjs test/ticket-mcp-artifact-ref.test.mjs test/credentials-reveal.test.mjs test/catalog-scope.test.mjs test/claude-backend-profiles.integration.test.mjs test/cli-runtime-profiles.test.mjs test/ticket-ref-session.test.mjs test/workflow-functions.test.mjs",
     "pretest:qa": "node test/run-suite.mjs test/qa-flows/chat-ticket-duplicate-prerequisite.test.mjs test/qa-flows/agent-runtime-config.test.mjs test/qa-flows/hermes-runtime-dispatch.test.mjs",
     "dev": "nest start --watch",
     "build": "nest build",

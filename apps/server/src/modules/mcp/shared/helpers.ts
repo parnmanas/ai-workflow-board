@@ -1,3 +1,5 @@
+import { ARTIFACT_REF_DOC, ArtifactRefType, formatArtifactRef } from '../../../common/artifact-ref';
+
 /**
  * Shared helpers for MCP tools.
  *
@@ -20,6 +22,15 @@ export function safeJsonParse(val: string | null | undefined, fallback: any = []
  */
 export function ok(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+/** Add the canonical, copy-ready user-visible reference to an MCP entity row. */
+export function withArtifactRef<T extends Record<string, any>>(
+  type: ArtifactRefType,
+  entity: T,
+  displayName: string,
+): T & { _ref: string } {
+  return { ...entity, _ref: formatArtifactRef(type, String(entity.id), displayName) };
 }
 
 /**
@@ -170,4 +181,5 @@ export const MENTION_SYNTAX_DOC =
   'you can safely `@[role:assignee]` to summon your co-assignees for discussion without spawning yourself in a ' +
   'loop. Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) ' +
   'so a phase\'s discussion stays one thread. Keep plain discussion as `note`/`chat`; consensus/vote signals are ' +
-  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.';
+  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.\n\n' +
+  ARTIFACT_REF_DOC;

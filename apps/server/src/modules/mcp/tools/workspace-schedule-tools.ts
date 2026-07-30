@@ -21,12 +21,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { WorkspaceSchedule } from '../../../entities/WorkspaceSchedule';
 import type { DispatchResult } from '../../workspace-schedule/workspace-schedule.service';
-import { ok, err } from '../shared/helpers';
+import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 function scheduleToJson(s: WorkspaceSchedule) {
-  return {
+  return withArtifactRef('schedule', {
     id: s.id,
     workspace_id: s.workspace_id,
     board_id: s.board_id,
@@ -43,7 +43,7 @@ function scheduleToJson(s: WorkspaceSchedule) {
     created_by: s.created_by,
     created_at: s.created_at,
     updated_at: s.updated_at,
-  };
+  }, s.name);
 }
 
 function dispatchToJson(d: DispatchResult) {

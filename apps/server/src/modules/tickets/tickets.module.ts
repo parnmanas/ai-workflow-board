@@ -15,6 +15,7 @@ import { TicketDuplicateService } from './ticket-duplicate.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AgentsModule } from '../agents/agents.module';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
+import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     // Exports TriggerLoopService so /api/tickets/:id/trigger can re-engage agents.
     AgentsModule,
     WorkspaceRolesModule,
+    ArtifactRefsModule,
   ],
   controllers: [TicketsController],
   providers: [AuthGuard, TicketArchiverService, TicketDuplicateService],

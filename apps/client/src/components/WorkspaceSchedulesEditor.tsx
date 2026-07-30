@@ -75,6 +75,15 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    const artifactId = typeof window === 'undefined'
+      ? ''
+      : new URLSearchParams(window.location.search).get('artifact') || '';
+    if (!artifactId || loading) return;
+    const target = schedules.find((schedule) => schedule.id === artifactId);
+    if (target) setEditing(target);
+  }, [schedules, loading]);
+
   // manager_name 을 포함한 full name(Manager/Agent)으로 표시. 목록에 없는
   // agent(삭제됨 등)는 id 앞 8자리 fallback.
   const agentName = useCallback((id: string) => {

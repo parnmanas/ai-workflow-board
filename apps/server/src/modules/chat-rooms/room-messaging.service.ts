@@ -19,6 +19,7 @@ import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
+import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 
 const CONTENT_MAX = 10000;
 
@@ -218,6 +219,7 @@ export class RoomMessagingService {
     // Live SSE reachability (ticket bfdd80b7) — the accurate pre-filter for
     // "is this chat target actually reachable?" (global service).
     private readonly connectivity: AgentConnectivityRegistry,
+    private readonly artifactRefs?: ArtifactRefsService,
   ) {}
 
   /**
@@ -362,7 +364,10 @@ export class RoomMessagingService {
     if (content != null && typeof content !== 'string') {
       throw makeError(400, 'content must be a string');
     }
-    const trimmed = (content ?? '').trim();
+    const normalizedContent = this.artifactRefs
+      ? await this.artifactRefs.normalizeStoredOutput(workspaceId, content ?? '')
+      : content ?? '';
+    const trimmed = normalizedContent.trim();
     // Server dispatch (opts.bypassContentLimit) is machine-rendered and may run
     // past the interactive cap; everyone else stays held to CONTENT_MAX.
     const effectiveMax = opts?.bypassContentLimit ? SYSTEM_DISPATCH_CONTENT_MAX : CONTENT_MAX;

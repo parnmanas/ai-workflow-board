@@ -83,6 +83,7 @@ import type {
   SkillVersion,
   HermesChildRun,
 } from './types';
+import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
 
@@ -187,6 +188,17 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  resolveArtifactRefs: (
+    workspaceId: string,
+    refs: Array<{ type: ArtifactRefType; id: string }>,
+  ) => request<Array<{
+    type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null;
+    workspaceName?: string; boardName?: string; reason?: string;
+  }>>('/artifact-refs/resolve', {
+    method: 'POST',
+    body: JSON.stringify({ workspace_id: workspaceId, refs }),
+  }),
+
   // ─── Auth ──────────────────────────────────────────────
   login: (email: string, password: string) =>
     request<any>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
@@ -1484,6 +1496,15 @@ export const api = {
   },
   getCredentialProviders: () =>
     request<Record<string, { label: string; fields: string[] }>>('/credentials/providers'),
+  revealCredential: (id: string, password: string) =>
+    request<{ credential_fields: Record<string, string>; credential_status: 'ok' }>(
+      `/credentials/${id}/reveal`,
+      {
+        method: 'POST',
+        cache: 'no-store',
+        body: JSON.stringify({ password }),
+      },
+    ),
   createCredential: (data: {
     // Omit workspace_id and pass scope:'global' to create an instance-level
     // credential (requires the MANAGE_GLOBAL_CREDENTIALS permission).

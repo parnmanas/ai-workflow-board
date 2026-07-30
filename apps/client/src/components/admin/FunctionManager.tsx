@@ -125,6 +125,18 @@ export default function FunctionManager({
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    const artifactId = typeof window === 'undefined'
+      ? ''
+      : new URLSearchParams(window.location.search).get('artifact') || '';
+    if (!artifactId || loading) return;
+    const target = rows.find((row) => row.id === artifactId);
+    if (target) startEdit(target);
+  // Only react to resolver navigation/list loading; startEdit is intentionally
+  // omitted because it is recreated on render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, loading]);
+
   const startCreate = (source?: WorkflowFunction) => {
     setEditing(null);
     setCreating(true);

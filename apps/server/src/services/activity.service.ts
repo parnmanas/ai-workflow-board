@@ -16,7 +16,7 @@ export interface LogActivityParams {
   // 'workspace' added (ticket 1fcba693) for the workspace config-change audit —
   // a settings PATCH (e.g. supervisor_stale_ms) is workspace-scoped, not tied to
   // a ticket, so `ticket_id` is '' and `workspace_id` carries the scope.
-  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace';
+  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace' | 'credential';
   entity_id: string | number;
   // The three `respawn_*` actions are first-class events written by
   // RespawnStormDetectorService (ticket ab06eac2). ActivityLog.action is a bare
@@ -29,7 +29,7 @@ export interface LogActivityParams {
   action:
     | 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived'
     | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent'
-    | 'config_changed'
+    | 'config_changed' | 'credential_revealed' | 'credential_reveal_denied'
     // 'dispatch_deferred' (ticket bfdd80b7): a dispatch targeted an agent that
     // is not reachable (never-started / offline). Written via logActivity — NOT
     // the raw repo.save the silent drop-gates use — so it rides the live

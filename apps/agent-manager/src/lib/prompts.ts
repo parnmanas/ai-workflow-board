@@ -53,6 +53,20 @@ interface ChatRoomNewMessage {
   sender_id?: string;
 }
 
+const ARTIFACT_REFERENCE_INSTRUCTION =
+  '- When mentioning an AWB Ticket, Agent, Board, Action, Function, or Schedule in user-visible output, use ' +
+  '`#[type:<full-uuid>|Human-readable name]`. Never use only a shortened id. Use `@[agent:...]` only to notify. ' +
+  'If existence or access cannot be verified, do not invent a link; give the name, full stable id, and reason.';
+
+function ticketReferenceLine(ticket: { id?: string; title?: string }): string {
+  const id = String(ticket?.id || '');
+  const title = String(ticket?.title || '').replace(/[\]\r\n|]+/g, ' ').trim();
+  if (title && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return `Ticket: #[ticket:${id}|${title}] (raw id for tools: ${id})`;
+  }
+  return `Ticket: ${title || 'unknown'} (raw id for tools: ${id || 'unknown'}; artifact link unavailable)`;
+}
+
 interface BaseRepoLike {
   id?: string;
   name?: string;
@@ -138,7 +152,7 @@ export function composeTriggerPrompt(
   lines.push('You are an AWB subagent responding to an assigned trigger.');
   lines.push('');
   if (ticket) {
-    lines.push(`Ticket ID: ${ticket.id}`);
+    lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.description) {
       lines.push('');
@@ -174,7 +188,7 @@ export function composeTriggerPrompt(
       }
     }
   } else {
-    lines.push(`Ticket ID: ${fallbackTicketId || 'unknown'}`);
+    lines.push(ticketReferenceLine({ id: fallbackTicketId }));
     lines.push('(Fresh ticket context fetch failed — using embedded trigger payload only.)');
     if (columnPrompt && columnPrompt.content) {
       lines.push('');
@@ -193,6 +207,7 @@ export function composeTriggerPrompt(
   lines.push('- Claim the ticket if not already claimed.');
   lines.push('- Leave a comment on the ticket when done describing what you did.');
   lines.push('- Move the ticket to the next column when the work is complete.');
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   if (extraInstructions) {
     lines.push('');
     lines.push(extraInstructions);
@@ -241,6 +256,7 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
       lines.push(...operationalPolicy);
       lines.push('- For non-operational development work, create an AWB ticket with `mcp__awb__create_ticket` (leave roles unset for board defaults). Questions, status/triage, and read-only investigation stay inline.');
     }
+    lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
     return lines;
   }
   const lines = [
@@ -255,6 +271,7 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
     lines.push(...operationalPolicy);
     lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For non-operational development work, describe the ticket needed for the existing manager-side reply flow.');
   }
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
 }
 
@@ -320,7 +337,7 @@ export function composeCommentMentionPrompt(
   }
   lines.push('');
   if (ticket) {
-    lines.push(`Ticket ID: ${ticket.id}`);
+    lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.description) {
       lines.push('');
@@ -328,7 +345,7 @@ export function composeCommentMentionPrompt(
       lines.push(ticket.description);
     }
   } else {
-    lines.push(`Ticket ID: ${fallbackTicketId || mention.ticket_id || 'unknown'}`);
+    lines.push(ticketReferenceLine({ id: fallbackTicketId || mention.ticket_id }));
     lines.push('(Fresh ticket context fetch failed — using the mention payload only.)');
   }
   lines.push('');
@@ -339,6 +356,7 @@ export function composeCommentMentionPrompt(
   lines.push('- Read the comment and respond to the request directly.');
   lines.push('- Use AWB MCP tools (mcp__awb__*) to take action if the comment asks for work.');
   lines.push('- Leave a reply comment on the ticket addressing the user who mentioned you.');
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   lines.push('- Do NOT ignore this — the comment is explicitly addressed to you via @-mention.');
   return lines.join('\n');
 }

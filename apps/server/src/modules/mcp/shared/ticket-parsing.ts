@@ -22,7 +22,7 @@ import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecisi
 import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { safeJsonParse } from './helpers';
+import { safeJsonParse, withArtifactRef } from './helpers';
 import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
 import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
 
@@ -39,7 +39,7 @@ export type CommentAttachment = {
  * recursing into children.
  */
 export function parseTicket(ticket: Ticket) {
-  return {
+  return withArtifactRef('ticket', {
     ...ticket,
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
@@ -49,7 +49,17 @@ export function parseTicket(ticket: Ticket) {
     // Cross-board handoff relay (ticket ac21a745) — decode the JSON-string spec
     // to an object so the detail panel's handoff editor binds against it.
     handoff_spec: parseHandoffSpec(ticket.handoff_spec),
-  };
+  }, ticket.title);
+}
+
+/** Add canonical refs to a ticket projection and every nested child. */
+export function withTicketTreeArtifactRefs<T extends { id: string; title: string; children?: any[] }>(tree: T): T {
+  const decorate = (node: any): any => ({
+    ...node,
+    _ref: withArtifactRef('ticket', { id: node.id }, node.title)._ref,
+    children: Array.isArray(node.children) ? node.children.map(decorate) : node.children,
+  });
+  return decorate(tree);
 }
 
 /**
@@ -447,7 +457,7 @@ export async function loadTicketFull(
   } catch {
     out.prerequisites = [];
   }
-  return out;
+  return withTicketTreeArtifactRefs(out);
 }
 
 /**

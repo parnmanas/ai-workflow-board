@@ -38,6 +38,7 @@ import { FeaturesModule } from './modules/features/features.module';
 import { HandoffModule } from './modules/handoff/handoff.module';
 import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
 import { SkillsModule } from './modules/skills/skills.module';
+import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { SkillsModule } from './modules/skills/skills.module';
     HandoffModule,
     WorkflowFunctionsModule,
     SkillsModule,
+    ArtifactRefsModule,
   ],
 })
 export class AppModule {}
