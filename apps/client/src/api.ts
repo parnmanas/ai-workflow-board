@@ -192,7 +192,8 @@ export const api = {
     workspaceId: string,
     refs: Array<{ type: ArtifactRefType; id: string }>,
   ) => request<Array<{
-    type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null; reason?: string;
+    type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null;
+    workspaceName?: string; boardName?: string; reason?: string;
   }>>('/artifact-refs/resolve', {
     method: 'POST',
     body: JSON.stringify({ workspace_id: workspaceId, refs }),

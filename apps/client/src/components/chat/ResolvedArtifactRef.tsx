@@ -13,6 +13,8 @@ type Resolution = {
   available: boolean;
   label: string;
   deepLink: string | null;
+  workspaceName?: string;
+  boardName?: string;
   reason?: string;
 };
 
@@ -54,7 +56,12 @@ export default function ResolvedArtifactRef({
   const common = {
     'data-entity-ref': `${type}:${id}`,
     'data-artifact-state': resolved?.available ? 'available' : failure,
-    title: `${resolved?.label || claimedLabel} (${id})`,
+    title: [
+      resolved?.label || claimedLabel,
+      resolved?.workspaceName,
+      resolved?.boardName,
+      id,
+    ].filter(Boolean).join(' · '),
     style: {
       display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 6px',
       borderRadius: tokens.radii.sm, color: resolved?.available ? tokens.colors.accentSubtle : tokens.colors.textMuted,
@@ -64,9 +71,10 @@ export default function ResolvedArtifactRef({
   };
 
   if (resolved?.available && resolved.deepLink) {
+    const context = [resolved.workspaceName, resolved.boardName].filter(Boolean).join(' / ');
     return (
       <a {...common} href={resolved.deepLink} aria-label={`${type} 열기: ${resolved.label}`}>
-        {ICON[type]} {resolved.label}
+        {ICON[type]} {resolved.label}{context ? ` · ${context}` : ''}
       </a>
     );
   }

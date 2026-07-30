@@ -58,6 +58,15 @@ const ARTIFACT_REFERENCE_INSTRUCTION =
   '`#[type:<full-uuid>|Human-readable name]`. Never use only a shortened id. Use `@[agent:...]` only to notify. ' +
   'If existence or access cannot be verified, do not invent a link; give the name, full stable id, and reason.';
 
+function ticketReferenceLine(ticket: { id?: string; title?: string }): string {
+  const id = String(ticket?.id || '');
+  const title = String(ticket?.title || '').replace(/[\]\r\n|]+/g, ' ').trim();
+  if (title && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return `Ticket: #[ticket:${id}|${title}] (raw id for tools: ${id})`;
+  }
+  return `Ticket: ${title || 'unknown'} (raw id for tools: ${id || 'unknown'}; artifact link unavailable)`;
+}
+
 interface BaseRepoLike {
   id?: string;
   name?: string;
@@ -143,7 +152,7 @@ export function composeTriggerPrompt(
   lines.push('You are an AWB subagent responding to an assigned trigger.');
   lines.push('');
   if (ticket) {
-    lines.push(`Ticket ID: ${ticket.id}`);
+    lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.description) {
       lines.push('');
@@ -179,7 +188,7 @@ export function composeTriggerPrompt(
       }
     }
   } else {
-    lines.push(`Ticket ID: ${fallbackTicketId || 'unknown'}`);
+    lines.push(ticketReferenceLine({ id: fallbackTicketId }));
     lines.push('(Fresh ticket context fetch failed — using embedded trigger payload only.)');
     if (columnPrompt && columnPrompt.content) {
       lines.push('');
@@ -198,6 +207,7 @@ export function composeTriggerPrompt(
   lines.push('- Claim the ticket if not already claimed.');
   lines.push('- Leave a comment on the ticket when done describing what you did.');
   lines.push('- Move the ticket to the next column when the work is complete.');
+  lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   if (extraInstructions) {
     lines.push('');
     lines.push(extraInstructions);
@@ -327,7 +337,7 @@ export function composeCommentMentionPrompt(
   }
   lines.push('');
   if (ticket) {
-    lines.push(`Ticket ID: ${ticket.id}`);
+    lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.description) {
       lines.push('');
@@ -335,7 +345,7 @@ export function composeCommentMentionPrompt(
       lines.push(ticket.description);
     }
   } else {
-    lines.push(`Ticket ID: ${fallbackTicketId || mention.ticket_id || 'unknown'}`);
+    lines.push(ticketReferenceLine({ id: fallbackTicketId || mention.ticket_id }));
     lines.push('(Fresh ticket context fetch failed — using the mention payload only.)');
   }
   lines.push('');

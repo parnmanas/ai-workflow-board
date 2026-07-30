@@ -27,10 +27,11 @@ test('uses canonical resolver label and exact deep link, not the claimed label',
   const { dom, root } = await renderWith({
     type: 'action', id, available: true, label: 'Canonical action',
     deepLink: `/ws/workspace-1/actions?artifact=${id}`,
+    workspaceName: 'Platform', boardName: 'Release board',
   });
   const anchor = dom.window.document.querySelector('a');
   assert.ok(anchor);
-  assert.equal(anchor.textContent.trim(), '▶️ Canonical action');
+  assert.equal(anchor.textContent.trim(), '▶️ Canonical action · Platform / Release board');
   assert.equal(anchor.getAttribute('href'), `/ws/workspace-1/actions?artifact=${id}`);
   assert.doesNotMatch(anchor.textContent, /Forged/);
   root.unmount();
