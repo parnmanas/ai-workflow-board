@@ -1204,7 +1204,7 @@ export default function AgentManagerPage({
   }
 
   return (
-    <div style={{ display: 'flex', gap: 16, height: '100%', minHeight: 0 }}>
+    <div style={{ display: 'flex', gap: 16, height: '100%', minHeight: 0, overflow: 'hidden' }}>
       {/* Master pane */}
       <div
         style={{
@@ -1231,7 +1231,10 @@ export default function AgentManagerPage({
             Pair manager…
           </Button>
         </div>
-        <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        <div
+          data-testid="mainframe-agents-list"
+          style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+        >
           {grouped.length === 0 && !loading && (
             <div
               style={{
