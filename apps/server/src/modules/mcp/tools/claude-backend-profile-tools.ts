@@ -108,60 +108,60 @@ export async function assignWorkspaceBackendProfile(
   profileId: string,
   setDefault: boolean,
 ) {
-  return dataSource.transaction(async manager => {
-    const workspace = await manager.findOne(Workspace, {
-      where: { id: workspaceId },
-    });
-    if (!workspace) throw new Error('Workspace not found');
-    const profile = await manager.findOne(ClaudeBackendProfile, {
-      where: { id: profileId },
-    });
-    if (!profile) throw new Error('Claude backend profile not found');
-    if (profile.credential_ref) {
-      const credential = await manager.findOne(Credential, {
-        where: { id: profile.credential_ref },
-      });
-      if (
-        !credential ||
-        (credential.workspace_id !== null && credential.workspace_id !== workspaceId)
-      ) {
-        throw new Error('Claude backend profile credential is not owned by this workspace');
-      }
-    }
-
-    const linkRepo = manager.getRepository(WorkspaceClaudeBackendProfile);
-    const existingLink = await linkRepo.findOne({
-      where: { workspace_id: workspaceId, profile_id: profileId },
-    });
-    let changed = false;
-    if (!existingLink) {
-      await linkRepo.save(linkRepo.create({
-        workspace_id: workspaceId,
-        profile_id: profileId,
-      }));
-      changed = true;
-    }
-
-    if (setDefault && workspace.default_claude_backend_profile_id !== profileId) {
-      workspace.default_claude_backend_profile_id = profileId;
-      workspace.default_cli_runtime_profile = profileId;
-      changed = true;
-    }
-    if (!workspace.claude_backend_profiles_migrated) {
-      workspace.claude_backend_profiles_migrated = true;
-      changed = true;
-    }
-    if (changed) await manager.save(workspace);
-
-    const links = await linkRepo.find({ where: { workspace_id: workspaceId } });
-    return {
-      changed,
-      workspace_id: workspaceId,
-      profile: publicProfile(profile),
-      allowed_profile_ids: links.map(link => link.profile_id).sort(),
-      default_profile_id: workspace.default_claude_backend_profile_id,
-    };
+  const workspaceRepo = dataSource.getRepository(Workspace);
+  const workspace = await workspaceRepo.findOne({
+    where: { id: workspaceId },
   });
+  if (!workspace) throw new Error('Workspace not found');
+  const profile = await dataSource.getRepository(ClaudeBackendProfile).findOne({
+    where: { id: profileId },
+  });
+  if (!profile) throw new Error('Claude backend profile not found');
+  if (profile.credential_ref) {
+    const credential = await dataSource.getRepository(Credential).findOne({
+      where: { id: profile.credential_ref },
+    });
+    if (
+      !credential ||
+      (credential.workspace_id !== null && credential.workspace_id !== workspaceId)
+    ) {
+      throw new Error('Claude backend profile credential is not owned by this workspace');
+    }
+  }
+
+  const linkRepo = dataSource.getRepository(WorkspaceClaudeBackendProfile);
+  const inserted = await linkRepo.createQueryBuilder()
+    .insert()
+    .values({
+      workspace_id: workspaceId,
+      profile_id: profileId,
+    })
+    .orIgnore()
+    .execute();
+  let changed = (
+    inserted.raw?.changes ??
+    (Array.isArray(inserted.raw) ? inserted.raw.length : 0)
+  ) > 0;
+
+  if (setDefault && workspace.default_claude_backend_profile_id !== profileId) {
+    workspace.default_claude_backend_profile_id = profileId;
+    workspace.default_cli_runtime_profile = profileId;
+    changed = true;
+  }
+  if (!workspace.claude_backend_profiles_migrated) {
+    workspace.claude_backend_profiles_migrated = true;
+    changed = true;
+  }
+  if (changed) await workspaceRepo.save(workspace);
+
+  const links = await linkRepo.find({ where: { workspace_id: workspaceId } });
+  return {
+    changed,
+    workspace_id: workspaceId,
+    profile: publicProfile(profile),
+    allowed_profile_ids: links.map(link => link.profile_id).sort(),
+    default_profile_id: workspace.default_claude_backend_profile_id,
+  };
 }
 
 export async function listClaudeBackendProfiles(

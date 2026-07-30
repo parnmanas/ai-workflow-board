@@ -135,6 +135,50 @@ describe('Claude backend profile MCP operations', () => {
     );
   });
 
+  it('assigns concurrent retries successfully with exactly one link', async () => {
+    const concurrentWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({
+        name: 'Concurrent profile assignment workspace',
+      }),
+    );
+    const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+
+    const results = await Promise.all([
+      tools.assignWorkspaceBackendProfile(
+        ds,
+        concurrentWorkspace.id,
+        primary.id,
+        true,
+      ),
+      tools.assignWorkspaceBackendProfile(
+        ds,
+        concurrentWorkspace.id,
+        primary.id,
+        true,
+      ),
+    ]);
+
+    assert.equal(results.length, 2);
+    assert.equal(
+      results.every(result =>
+        result.allowed_profile_ids.includes(primary.id) &&
+        result.default_profile_id === primary.id
+      ),
+      true,
+    );
+    assert.equal(
+      await ds.getRepository('WorkspaceClaudeBackendProfile').count({
+        where: {
+          workspace_id: concurrentWorkspace.id,
+          profile_id: primary.id,
+        },
+      }),
+      1,
+    );
+  });
+
   it('rejects missing workspace and profile ids without writing links', async () => {
     const count = await ds.getRepository('WorkspaceClaudeBackendProfile').count();
     await assert.rejects(
