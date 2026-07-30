@@ -6,6 +6,7 @@ import { ActivityLog } from '../entities/ActivityLog';
 import { Agent } from '../entities/Agent';
 import { LogService } from './log.service';
 import { resolveAgentDisplayNamesByIds } from '../utils/agent-name';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const activityEvents = new EventEmitter();
 
@@ -58,11 +59,19 @@ export interface LogActivityParams {
 
 @Injectable()
 export class ActivityService {
+  private readonly triggerSourceContext = new AsyncLocalStorage<string>();
+
   constructor(
     @InjectRepository(ActivityLog) private readonly repo: Repository<ActivityLog>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly logService: LogService,
   ) {}
+
+  runWithTriggerSource<T>(triggerSource: string | undefined, fn: () => T): T {
+    return triggerSource
+      ? this.triggerSourceContext.run(triggerSource, fn)
+      : fn();
+  }
 
   /**
    * Re-resolve `actor_name` to the canonical `<Manager>/<Agent>` display for
@@ -105,7 +114,7 @@ export class ActivityService {
       ticket_id: params.ticket_id,
       workspace_id: params.workspace_id || '',
       role: params.role || '',
-      trigger_source: params.trigger_source || '',
+      trigger_source: params.trigger_source || this.triggerSourceContext.getStore() || '',
     });
   }
 

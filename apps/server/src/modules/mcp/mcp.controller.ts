@@ -439,7 +439,10 @@ export class McpController implements OnModuleInit {
 
         const isFirstToolsList =
           req.method === 'POST' && req.body?.method === 'tools/list' && !cachedToolsListBody;
-        const webRes = await session.transport.handleRequest(webReq, { parsedBody: req.body });
+        const webRes = await this.activityService.runWithTriggerSource(
+          session.auth?.subagentTriggerSource,
+          () => session.transport.handleRequest(webReq, { parsedBody: req.body }),
+        );
         await sendWebResponse(webRes, res, {
           ...bridgeLogOpts,
           onJsonBody: isFirstToolsList ? captureToolsListBodyIfFirst : undefined,

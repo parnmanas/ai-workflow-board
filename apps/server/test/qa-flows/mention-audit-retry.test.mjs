@@ -37,8 +37,10 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
     post(port, completePath, { exit_code: 0 }),
     post(port, completePath, { exit_code: 0 }),
   ]);
-  assert.equal(a.body.decision, 'retry');
-  assert.equal(b.body.decision, 'retry');
+  assert.deepEqual(
+    [a.body.decision, b.body.decision].sort(),
+    ['retry', 'retry_claimed'],
+  );
 
   const ds = app.get(getDataSourceToken());
   const claims = await ds.getRepository('ActivityLog').find({
@@ -54,7 +56,8 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
     ticket_id: ticket.id, author_type: 'agent', author_id: agent.id,
     author: agent.name, type: 'note', content: 'work completed',
     metadata: JSON.stringify({
-      cycle_trigger_id: trigger, author_role: 'assignee', subagent_session_id: 'retry-session',
+      cycle_trigger_id: trigger, author_role: 'assignee',
+      subagent_session_id: 'retry-session', run_provenance: retry.body.run_token,
     }),
   });
   const success = await post(
@@ -76,7 +79,7 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
     workspace_id: ws.id, entity_type: 'ticket', entity_id: mutationTicket.id,
     ticket_id: mutationTicket.id, action: 'updated', field_changed: 'title',
     old_value: 'before', new_value: 'after', actor_id: agent.id,
-    actor_name: agent.name, role: 'assignee', trigger_source: mutationTrigger,
+    actor_name: agent.name, role: 'assignee', trigger_source: mutationRun.body.run_token,
   });
   const mutationSuccess = await post(
     port,
@@ -100,4 +103,34 @@ test('mention audit run atomically claims one retry and recognizes persisted wor
   );
   assert.equal(exhaustedResult.body.decision, 'failed');
   assert.equal(exhaustedResult.body.reason, 'silent_exit_retry_exhausted');
+
+  const spawnFailedTicket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'retry spawn failed',
+  });
+  const spawnFailed = await post(port, `/api/agent/tickets/${spawnFailedTicket.id}/mention-audit-runs/start`, {
+    cycle_trigger_id: `mention:comment-4:${agent.id}`, agent_id: agent.id,
+    role: 'assignee', attempt: 0,
+  });
+  const failedPath =
+    `/api/agent/tickets/${spawnFailedTicket.id}/mention-audit-runs/${spawnFailed.body.run_token}/retry-spawn-failed`;
+  const [failedA, failedB] = await Promise.all([
+    post(port, failedPath, {}),
+    post(port, failedPath, {}),
+  ]);
+  assert.equal(failedA.body.reason, 'silent_exit_retry_spawn_failed');
+  assert.equal(failedB.body.reason, 'silent_exit_retry_spawn_failed');
+  const failedRows = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: spawnFailedTicket.id, action: 'mention_audit_retry_spawn_failed' },
+  });
+  assert.equal(failedRows.length, 1);
+
+  const { ws: otherWs } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'mention-audit-other-workspace',
+  });
+  const foreignAgent = await createAgent(app, getDataSourceToken, otherWs.id, { name: 'Foreign Agent' });
+  const rejected = await post(port, `/api/agent/tickets/${ticket.id}/mention-audit-runs/start`, {
+    cycle_trigger_id: `mention:foreign:${foreignAgent.id}`,
+    agent_id: foreignAgent.id, role: 'assignee', attempt: 0,
+  });
+  assert.equal(rejected.status, 400);
 });

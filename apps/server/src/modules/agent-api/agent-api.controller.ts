@@ -79,6 +79,10 @@ export class AgentApiController {
     if (!triggerId.startsWith('mention:') || !agentId || ![0, 1].includes(attempt)) {
       return res.status(400).json({ error: 'invalid mention audit run' });
     }
+    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
+    if (!agent || agent.workspace_id !== workspaceId) {
+      return res.status(400).json({ error: 'agent does not belong to ticket workspace' });
+    }
     const familyKey = `${triggerId}:${agentId}`;
     const marker = await this.dataSource.transaction(async (manager) => {
       await lockTicketCommentWrites(manager, ticketId);
@@ -142,7 +146,12 @@ export class AgentApiController {
           old_value: String(attempt),
         },
       });
-      if (terminal) return JSON.parse(terminal.new_value);
+      if (terminal) {
+        const replay = JSON.parse(terminal.new_value);
+        return replay.decision === 'retry'
+          ? { ...replay, decision: 'retry_claimed', run_token: undefined }
+          : replay;
+      }
 
       const comments = await commentRepo.find({
         where: {
@@ -154,8 +163,7 @@ export class AgentApiController {
       const auditCommentCount = comments.filter((comment) => {
         if (!['note', 'question', 'answer', 'decision', 'chat', 'handoff'].includes(comment.type)) return false;
         const metadata = this.safeParseMetadata(comment.metadata);
-        return metadata.cycle_trigger_id === marker.trigger_source &&
-          (!marker.new_value || metadata.subagent_session_id === marker.new_value);
+        return metadata.run_provenance === marker.id;
       }).length;
       const activities = await activityRepo.find({
         where: {
@@ -163,15 +171,16 @@ export class AgentApiController {
           actor_id: marker.actor_id,
         },
       });
-      const controlActions = new Set([
-        'mention_audit_started', 'mention_audit_completed', 'trigger_emitted',
-        'dispatch_claimed', 'dispatch_acknowledged',
+      const mutationActions = new Set([
+        'created', 'updated', 'moved', 'deleted', 'archived', 'restored',
+        'attachment_added', 'attachment_deleted',
       ]);
+      const mutationEntities = new Set(['ticket', 'child_ticket', 'ticket_attachment']);
       const entityChangeCount = activities.filter((row) =>
-        !controlActions.has(row.action) &&
+        mutationActions.has(row.action) &&
+        mutationEntities.has(row.entity_type) &&
         row.id !== marker.id &&
-        (row.trigger_source === marker.trigger_source ||
-          (row.role === marker.role && row.created_at >= marker.created_at))
+        row.trigger_source === marker.id
       ).length;
       const silent = Number(body?.exit_code) === 0 && auditCommentCount === 0 && entityChangeCount === 0;
       let result: any = { decision: 'succeeded', attempt, audit_comment_count: auditCommentCount, entity_change_count: entityChangeCount };
@@ -179,7 +188,13 @@ export class AgentApiController {
         const claimed = await activityRepo.findOne({
           where: { ticket_id: ticketId, action: 'silent_exit_retry_claimed', field_changed: marker.field_changed },
         });
-        result = { decision: claimed ? 'retry_claimed' : 'retry', attempt: 1, audit_comment_count: 0, entity_change_count: 0 };
+        result = {
+          decision: claimed ? 'retry_claimed' : 'retry',
+          attempt: 1,
+          run_token: claimed ? undefined : marker.id,
+          audit_comment_count: 0,
+          entity_change_count: 0,
+        };
         if (!claimed) {
           await activityRepo.save(activityRepo.create({
             workspace_id: marker.workspace_id,
@@ -214,6 +229,56 @@ export class AgentApiController {
         trigger_source: marker.trigger_source,
       }));
       return result;
+    });
+    if (!outcome) return res.status(404).json({ error: 'mention audit run not found' });
+    return res.json(outcome);
+  }
+
+  @Post('tickets/:id/mention-audit-runs/:runToken/retry-spawn-failed')
+  async failMentionAuditRetrySpawn(
+    @Param('id') ticketId: string,
+    @Param('runToken') runToken: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const workspaceId = await this.resolveTicketWorkspaceId(this.dataSource, ticketId);
+    if (this.scopeRejects(req, workspaceId)) return this.denyScope(res);
+    const outcome = await this.dataSource.transaction(async (manager) => {
+      await lockTicketCommentWrites(manager, ticketId);
+      const repo = manager.getRepository(ActivityLog);
+      const marker = await repo.findOne({
+        where: { id: runToken, ticket_id: ticketId, action: 'mention_audit_started', old_value: '0' },
+      });
+      if (!marker) return null;
+      const existing = await repo.findOne({
+        where: {
+          ticket_id: ticketId,
+          action: 'mention_audit_retry_spawn_failed',
+          field_changed: marker.field_changed,
+        },
+      });
+      if (!existing) {
+        await repo.save(repo.create({
+          workspace_id: marker.workspace_id,
+          entity_type: 'ticket',
+          entity_id: ticketId,
+          ticket_id: ticketId,
+          action: 'mention_audit_retry_spawn_failed',
+          field_changed: marker.field_changed,
+          old_value: '1',
+          new_value: 'silent_exit_retry_spawn_failed',
+          actor_id: marker.actor_id,
+          actor_name: 'agent-manager',
+          role: marker.role,
+          trigger_source: marker.id,
+        }));
+      }
+      return {
+        decision: 'failed',
+        attempt: 1,
+        reason: 'silent_exit_retry_spawn_failed',
+        family_key: marker.field_changed,
+      };
     });
     if (!outcome) return res.status(404).json({ error: 'mention audit run not found' });
     return res.json(outcome);
