@@ -22,4 +22,3 @@ for (const [name, output] of [
     assert.match(output, /Never use only a shortened id/);
   });
 }
-

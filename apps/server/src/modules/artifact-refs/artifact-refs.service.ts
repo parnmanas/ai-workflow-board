@@ -124,7 +124,7 @@ export class ArtifactRefsService {
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
     if (entityWorkspace !== workspaceId) {
-      return { ...this.unavailable(ref.type, ref.id, 'outside_workspace'), label, workspaceName, boardName };
+      return this.unavailable(ref.type, ref.id, 'outside_workspace');
     }
     if (!deepLink) {
       return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, workspaceName, boardName };

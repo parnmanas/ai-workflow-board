@@ -32,4 +32,3 @@ Keep the grammar synchronized in:
 - `apps/server/src/common/artifact-ref.ts`
 - `apps/client/src/utils/artifactRef.ts`
 - `apps/agent-manager/src/lib/prompts.ts`
-

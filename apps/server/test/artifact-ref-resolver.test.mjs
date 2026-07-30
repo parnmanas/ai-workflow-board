@@ -74,6 +74,38 @@ test('no-detail fallback preserves canonical label and workspace/board context',
   assert.equal(row.boardName, undefined);
 });
 
+test('outside-workspace targets never expose canonical labels, context, or links', async () => {
+  const foreignWorkspace = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const instance = service();
+  for (const repository of [
+    instance.tickets,
+    instance.agents,
+    instance.boards,
+    instance.actions,
+    instance.functions,
+    instance.schedules,
+  ]) {
+    const originalFindOne = repository.findOne;
+    repository.findOne = async (query) => {
+      const entity = await originalFindOne(query);
+      return entity ? { ...entity, workspace_id: foreignWorkspace } : null;
+    };
+  }
+
+  const refs = Object.entries(ids).map(([type, id]) => ({ type, id }));
+  const rows = await instance.resolveMany({ id: 'user', role: 'user' }, ws, refs);
+
+  assert.equal(rows.length, refs.length);
+  for (const row of rows) {
+    assert.equal(row.available, false);
+    assert.equal(row.reason, 'outside_workspace');
+    assert.equal(row.label, row.type);
+    assert.equal(row.workspaceName, undefined);
+    assert.equal(row.boardName, undefined);
+    assert.equal(row.deepLink, null);
+  }
+});
+
 test('storage normalization replaces forged labels and disables missing targets', async () => {
   const missingId = '77777777-7777-4777-8777-777777777777';
   const output = await service().normalizeStoredOutput(
