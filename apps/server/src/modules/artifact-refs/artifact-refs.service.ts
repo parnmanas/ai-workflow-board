@@ -123,8 +123,12 @@ export class ArtifactRefsService {
       deepLink = entity ? `/ws/${workspaceId}/${surface}?artifact=${entity.id}` : null;
     }
     if (!entity) return this.unavailable(ref.type, ref.id, 'not_found');
-    if (entityWorkspace !== workspaceId) return this.unavailable(ref.type, ref.id, 'outside_workspace');
-    if (!deepLink) return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label };
+    if (entityWorkspace !== workspaceId) {
+      return { ...this.unavailable(ref.type, ref.id, 'outside_workspace'), label, workspaceName, boardName };
+    }
+    if (!deepLink) {
+      return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, workspaceName, boardName };
+    }
     return { type: ref.type, id: ref.id, available: true, label, deepLink, workspaceName, boardName };
   }
 }

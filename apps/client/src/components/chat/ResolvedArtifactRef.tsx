@@ -79,9 +79,11 @@ export default function ResolvedArtifactRef({
     );
   }
   const reason = REASON[resolved?.reason || failure] || resolved?.reason || failure;
+  const context = [resolved?.workspaceName, resolved?.boardName].filter(Boolean).join(' / ');
   return (
     <span {...common} aria-disabled="true">
-      {ICON[type]} {resolved?.label || claimedLabel || type} ({id}) — 연결 불가: {reason}
+      {ICON[type]} {type} · {resolved?.label || claimedLabel || type}
+      {context ? ` · ${context}` : ''} ({id}) — 연결 불가: {reason}
     </span>
   );
 }

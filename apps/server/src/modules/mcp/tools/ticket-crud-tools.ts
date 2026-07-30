@@ -20,7 +20,7 @@ import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
-import { loadTicketFull } from '../shared/ticket-parsing';
+import { loadTicketFull, parseTicket } from '../shared/ticket-parsing';
 import {
   findColumnByName,
   maxTicketPosition,
@@ -954,7 +954,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           myRoles = legacy;
         }
         return {
-          ...t,
+          ...parseTicket(t),
           labels: safeJsonParse(t.labels, []),
           channel_ids: safeJsonParse(t.channel_ids, []),
           my_roles: myRoles,

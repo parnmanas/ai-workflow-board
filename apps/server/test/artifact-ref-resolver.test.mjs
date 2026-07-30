@@ -61,6 +61,19 @@ test('permission denial and missing ids never return links', async () => {
   assert.equal(missing[0].deepLink, null);
 });
 
+test('no-detail fallback preserves canonical label and workspace/board context', async () => {
+  const instance = service();
+  instance.columns = repo([{ id: 'column', board_id: '' }]);
+  const [row] = await instance.resolveMany(
+    { id: 'user', role: 'user' }, ws, [{ type: 'ticket', id: ids.ticket }],
+  );
+  assert.equal(row.available, false);
+  assert.equal(row.reason, 'no_detail_surface');
+  assert.equal(row.label, 'Same name');
+  assert.equal(row.workspaceName, 'Primary workspace');
+  assert.equal(row.boardName, undefined);
+});
+
 test('storage normalization replaces forged labels and disables missing targets', async () => {
   const missingId = '77777777-7777-4777-8777-777777777777';
   const output = await service().normalizeStoredOutput(

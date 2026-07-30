@@ -49,3 +49,17 @@ for (const reason of ['not_found', 'workspace_access_denied']) {
     root.unmount();
   });
 }
+
+test('no_detail_surface renders type, canonical name, context, and unavailable state', async () => {
+  const { dom, root } = await renderWith({
+    type: 'action', id, available: false, label: 'Canonical action', deepLink: null,
+    workspaceName: 'Platform', boardName: 'Release board', reason: 'no_detail_surface',
+  });
+  assert.equal(dom.window.document.querySelector('a'), null);
+  const chip = dom.window.document.querySelector('[aria-disabled="true"]');
+  assert.ok(chip);
+  assert.match(chip.textContent, /action · Canonical action/);
+  assert.match(chip.textContent, /Platform \/ Release board/);
+  assert.match(chip.textContent, /연결 불가: 상세 화면 없음/);
+  root.unmount();
+});

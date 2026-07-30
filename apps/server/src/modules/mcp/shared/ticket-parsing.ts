@@ -52,6 +52,16 @@ export function parseTicket(ticket: Ticket) {
   }, ticket.title);
 }
 
+/** Add canonical refs to a ticket projection and every nested child. */
+export function withTicketTreeArtifactRefs<T extends { id: string; title: string; children?: any[] }>(tree: T): T {
+  const decorate = (node: any): any => ({
+    ...node,
+    _ref: withArtifactRef('ticket', { id: node.id }, node.title)._ref,
+    children: Array.isArray(node.children) ? node.children.map(decorate) : node.children,
+  });
+  return decorate(tree);
+}
+
 /**
  * Sort comments by newest-first and decode JSON-string columns
  * (`attachment_resource_ids` array, `metadata` object). Leaves `attachments`
@@ -447,7 +457,7 @@ export async function loadTicketFull(
   } catch {
     out.prerequisites = [];
   }
-  return out;
+  return withTicketTreeArtifactRefs(out);
 }
 
 /**
