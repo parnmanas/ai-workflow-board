@@ -123,7 +123,6 @@ export class CredentialsController {
     @Query('workspace_id') workspaceId: string,
     @Query('provider') provider: string | undefined,
     @Query('scope') scope: string | undefined,
-    @Query('board_id') boardId: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {

@@ -301,7 +301,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
             const column = await dataSource.getRepository(BoardColumn).findOne({ where: { id: colId, board_id: board.id } });
             if (!column) return err(`column ${colId} does not belong to board`);
             const template = await dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-            if (!template || !canUseCatalogItem(template, board.workspace_id, board.id)) {
+            if (!template || !canUseCatalogItem(template, board.workspace_id)) {
               return err(`prompt template ${tplId} is not available to board`);
             }
             cleaned[colId] = tplId;

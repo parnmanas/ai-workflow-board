@@ -146,7 +146,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
 
   async list(
     workspaceId?: string | null,
-    _boardId?: string | null,
     includeShadowed = false,
   ): Promise<Record<string, any>[]> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
@@ -179,7 +178,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     return this.toView(row);
   }
 
-  async resolve(key: string, workspaceId: string, _boardId?: string | null): Promise<WorkflowFunction> {
+  async resolve(key: string, workspaceId: string): Promise<WorkflowFunction> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     const local = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: IsNull() } });
     if (local) return local;
@@ -300,7 +299,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if ((args.depth || 0) > 20) throw httpError(400, 'Function pipeline depth exceeded');
     const fn = args.functionId
       ? await this.dataSource.getRepository(WorkflowFunction).findOne({ where: { id: args.functionId } })
-      : await this.resolve(String(args.functionKey || ''), args.workspaceId, args.boardId);
+      : await this.resolve(String(args.functionKey || ''), args.workspaceId);
     if (!fn) throw httpError(404, 'Function not found');
     if (fn.workspace_id !== null && fn.workspace_id !== args.workspaceId) {
       throw httpError(403, 'Function belongs to a different workspace');

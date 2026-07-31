@@ -134,13 +134,11 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, _boardId?: string): Promise<SecuritySchedule[]> {
+  async list(workspaceId: string): Promise<SecuritySchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
       .where('s.workspace_id = :ws', { ws: workspaceId })
       .andWhere('s.board_id IS NULL');
-    // Scope rule mirrors list_security_profiles: omit board_id → all; "" →
-    // workspace (board_id IS NULL); <uuid> → that board.
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -355,16 +353,14 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       if (ids.length === 0) throw makeError(400, 'selected schedule has no profile_ids');
       return this.runService.startBatch({
         workspaceId: schedule.workspace_id,
-        // explicit ids: board scope is irrelevant (startBatch ignores boardId when profileIds set)
         profileIds: ids,
         stopOnFail: schedule.stop_on_fail,
         triggeredByType: 'system',
         triggeredById,
       });
     }
-    // scope='all' → resolve enabled profiles in scope AT DISPATCH TIME (no id
-    // snapshot), so profile add/remove is reflected automatically. board_id null
-    // → whole workspace (boardId undefined); <uuid> → that board.
+    // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
+    // TIME (no id snapshot), so profile add/remove is reflected automatically.
     return this.runService.startBatch({
       workspaceId: schedule.workspace_id,
       all: true,
@@ -393,8 +389,8 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
         triggeredById,
       });
     }
-    // scope='all' → resolve enabled profiles in scope AT DISPATCH TIME (no id
-    // snapshot). board_id null → whole workspace (boardId undefined); <uuid> → that board.
+    // scope='all' → resolve every enabled profile in the workspace AT DISPATCH
+    // TIME (no id snapshot).
     return this.runService.refreshChecklistsForScope({
       workspaceId: schedule.workspace_id,
       all: true,

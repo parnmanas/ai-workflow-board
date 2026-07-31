@@ -1,8 +1,10 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
-// Resource pickers list by (workspace_id, board_id [or IS NULL]) on every
-// open; the table holds large file_data/content blobs so an unindexed scan is
-// expensive — perf ticket b3812637.
+// Resource pickers list by (workspace_id, board_id IS NULL) on every open; the
+// table holds large file_data/content blobs so an unindexed scan is expensive
+// — perf ticket b3812637. The board_id half of the index still matches the
+// query (see board_id's own comment below), even though every row now has it
+// NULL.
 @Entity('resources')
 @Index('idx_resources_workspace_board', ['workspace_id', 'board_id'])
 export class Resource {
@@ -12,6 +14,9 @@ export class Resource {
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
+  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
+  // Board-scoped Resources are rejected at create() — always NULL going
+  // forward; Resources are Global/Workspace-owned only.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

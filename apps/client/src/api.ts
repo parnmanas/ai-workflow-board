@@ -1319,8 +1319,7 @@ export const api = {
   // ─── Workspace schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
   // General-purpose agent-task scheduler: when due, the server opens a fresh chat
   // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
-  // interval_ms. board_id omitted → all schedules in the workspace; "" → only
-  // workspace-scoped (board_id IS NULL); <uuid> → that board's.
+  // interval_ms. Workspace-scoped only — board_id is a dead legacy column.
   listWorkspaceSchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);

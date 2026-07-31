@@ -28,7 +28,6 @@ export class PromptTemplatesController {
     @Query('workspace_id') workspaceId: string,
     @Query('id') id: string | undefined,
     @Query('category') category: string | undefined,
-    @Query('board_id') boardId: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {

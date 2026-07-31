@@ -2460,7 +2460,7 @@ candidate's branch or move the ticket.
             const tplId: string | undefined = map?.[ticket.column_id];
             if (tplId) {
               const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-              if (tpl && canUseCatalogItem(tpl, board!.workspace_id, board!.id)) {
+              if (tpl && canUseCatalogItem(tpl, board!.workspace_id)) {
                 columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
               }
             }

@@ -250,7 +250,6 @@ export async function evaluateMergeGate(
       scope.getRepository(Credential),
       resource.credential_id,
       ticket.workspace_id,
-      resource.board_id,
     );
   } catch {
     credential = null;

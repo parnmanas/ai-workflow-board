@@ -19,8 +19,6 @@ export interface PendActionCandidate {
   name: string;
   description: string;
   target_agent_id: string;
-  /** null = workspace-scope Action, uuid = board-scope Action. */
-  board_id: string | null;
 }
 
 export interface PendActionGateResult {
@@ -40,8 +38,7 @@ export function formatPendActionCandidates(candidates: PendActionCandidate[]): s
   const shown = candidates.slice(0, MAX_LISTED);
   const lines = shown.map((a) => {
     const desc = (a.description || '').trim();
-    const scope = a.board_id ? 'board' : 'workspace';
-    return `  - ${a.name} (id: ${a.id}, scope: ${scope})${desc ? ` — ${desc}` : ''}`;
+    return `  - ${a.name} (id: ${a.id})${desc ? ` — ${desc}` : ''}`;
   });
   if (candidates.length > shown.length) {
     lines.push(`  - …and ${candidates.length - shown.length} more (use list_actions to see all)`);

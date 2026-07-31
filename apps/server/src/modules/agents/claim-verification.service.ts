@@ -182,7 +182,6 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
         this.dataSource.getRepository(Credential),
         repo.credential_id,
         ticket.workspace_id,
-        repo.board_id,
       );
       const branches = await listRepoBranches({
         url: repo.url,

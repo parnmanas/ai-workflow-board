@@ -97,7 +97,7 @@ async function resolveRunRepo(
     if (r && r.workspace_id !== null && r.workspace_id !== input.workspaceId) return null;
     const url = (r?.url || '').trim();
     if (url) {
-      const credential = await resolveRepoCredential(ds, r?.credential_id, input.workspaceId, r?.board_id || null);
+      const credential = await resolveRepoCredential(ds, r?.credential_id, input.workspaceId);
       return {
         url,
         branch: ref.branch || (r?.default_branch || '').trim() || undefined,
@@ -122,17 +122,15 @@ async function resolveRunRepo(
   // the direct-url escape hatch above) stays anonymous — its credential, if any,
   // is expected to be embedded in the url by whoever configured it.
   let credentialId: string | null = null;
-  let resourceBoardId: string | null = null;
   if (!url && first.resource_id) {
     const r = await ds.getRepository(Resource).findOne({ where: { id: first.resource_id.trim() } });
     if (r && r.workspace_id !== null && r.workspace_id !== input.workspaceId) return null;
     url = (r?.url || '').trim();
     if (!branch) branch = (r?.default_branch || '').trim();
     credentialId = r?.credential_id || null;
-    resourceBoardId = r?.board_id || null;
   }
   if (!url) return null;
-  const credential = await resolveRepoCredential(ds, credentialId, input.workspaceId, resourceBoardId);
+  const credential = await resolveRepoCredential(ds, credentialId, input.workspaceId);
   return { url, branch: branch || undefined, ...(credential ? { credential } : {}) };
 }
 
@@ -150,11 +148,10 @@ async function resolveRepoCredential(
   ds: DataSource,
   credentialId: string | null | undefined,
   workspaceId: string,
-  boardId: string | null,
 ): Promise<{ username?: string; token: string } | null> {
   if (!credentialId) return null;
   try {
-    const cred = await resolveGitCredential(ds.getRepository(Credential), credentialId, workspaceId, boardId);
+    const cred = await resolveGitCredential(ds.getRepository(Credential), credentialId, workspaceId);
     if (cred && cred.token) {
       return cred.username ? { username: cred.username, token: cred.token } : { token: cred.token };
     }

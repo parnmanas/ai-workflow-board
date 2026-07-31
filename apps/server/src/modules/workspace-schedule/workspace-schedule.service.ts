@@ -122,13 +122,11 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, _boardId?: string): Promise<WorkspaceSchedule[]> {
+  async list(workspaceId: string): Promise<WorkspaceSchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
       .where('s.workspace_id = :ws', { ws: workspaceId })
       .andWhere('s.board_id IS NULL');
-    // Scope rule mirrors list_qa_schedules: omit board_id → all; "" → workspace
-    // (board_id IS NULL); <uuid> → that board.
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 

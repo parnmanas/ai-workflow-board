@@ -43,8 +43,9 @@ export class WorkspaceSchedule {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // null = workspace-scoped (no board context); <uuid> = pinned to a board so the
-  // dispatched task carries that board's context. Does not affect WHEN it fires.
+  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
+  // Board-scoped schedules are rejected at create() — always NULL going
+  // forward; _dispatch() never reads it.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

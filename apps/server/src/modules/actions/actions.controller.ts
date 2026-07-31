@@ -18,11 +18,10 @@ export class ActionsController {
   @Get()
   async list(
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const rows = await this.actionsService.list(workspaceId, boardId);
+    const rows = await this.actionsService.list(workspaceId);
     return res.json(rows);
   }
 

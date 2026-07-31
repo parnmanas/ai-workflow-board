@@ -248,7 +248,7 @@ export class ActionsService {
 
   // ── CRUD ────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, _boardId?: string): Promise<Action[]> {
+  async list(workspaceId: string): Promise<Action[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.actionRepo.createQueryBuilder('a')
       .where('a.workspace_id = :ws', { ws: workspaceId })

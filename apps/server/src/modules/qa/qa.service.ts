@@ -128,7 +128,7 @@ export class QaService {
     private readonly runService: QaRunService,
   ) {}
 
-  async list(workspaceId: string, _boardId?: string): Promise<QaScenarioListItem[]> {
+  async list(workspaceId: string): Promise<QaScenarioListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scenarioRepo.createQueryBuilder('s')
       .where('s.workspace_id = :ws', { ws: workspaceId })

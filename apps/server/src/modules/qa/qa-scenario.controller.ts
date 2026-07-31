@@ -112,11 +112,10 @@ export class QaScenarioController {
   @Get('scenarios')
   async list(
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const rows = await this.qaService.list(workspaceId, boardId);
+    const rows = await this.qaService.list(workspaceId);
     return res.json(rows);
   }
 
@@ -272,12 +271,11 @@ export class QaScenarioController {
   @Get('schedules')
   async listSchedules(
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
     try {
-      const rows = await this.qaScheduleService.list(workspaceId, boardId);
+      const rows = await this.qaScheduleService.list(workspaceId);
       return res.json(rows.map(scheduleToJson));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list QA schedules' });
