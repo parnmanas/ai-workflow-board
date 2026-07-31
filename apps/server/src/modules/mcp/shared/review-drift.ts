@@ -285,7 +285,7 @@ export async function checkReviewDrift(
 
   let credential: GitCredential = null;
   try {
-    credential = await resolveGitCredential(scope.getRepository(Credential), resource.credential_id, ticket.workspace_id, resource.board_id);
+    credential = await resolveGitCredential(scope.getRepository(Credential), resource.credential_id, ticket.workspace_id);
   } catch {
     credential = null;
   }
