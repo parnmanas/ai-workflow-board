@@ -24,6 +24,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 import { DispatchBlockTracker } from '../dist/lib/dispatch-preflight.js';
@@ -128,10 +129,29 @@ function makeSubagentManager(state) {
   };
 }
 
-// A manual scheduler so the backoff timer fires on demand (no real wall-clock). The
-// retry's #attempt is async (verify + handleTrigger replay), so fire() drains enough
-// macrotask cycles to let the whole immediate-fake chain settle.
-const settle = () => new Promise((r) => setImmediate(r));
+// 고정 tick 횟수를 추측하는 대신, 실제 타이머 기반으로 predicate를 폴링한다.
+// 재시도의 #attempt()(verify + handleTrigger replay)는 스케줄러 콜백에서
+// `void this.#attempt(entry)`로 fire-and-forget 구동되므로 fire() 쪽에는 그
+// 완료를 await할 promise가 없다. 고정 `for (let i=0;i<8;i++) await settle()`
+// flush는 전체 스위트 CPU 경합 아래에서 그 fire-and-forget 작업과 경쟁했다
+// (티켓 9c901338 — aafa5883과 동일 클래스: 76개 test 파일 프로세스가 CPU를
+// 두고 경합하면, 마이크로태스크뿐 아니라 mock fetch의 진짜 이벤트루프 턴까지
+// 타는 실제 체인이 끝나기 전에 8회 setImmediate tick이 먼저 소진되는 경우가
+// 있었다). session-limit-defer-dispatch.test.mjs의 waitFor를 그대로 이식.
+async function waitFor(pred, { timeoutMs = 3000, stepMs = 5 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (pred()) return true;
+    await delay(stepMs);
+  }
+  return pred();
+}
+
+// 실제 wall-clock 없이 backoff 타이머를 on-demand로 구동하는 수동 스케줄러.
+// fire()는 무장된 타이머 콜백을 동기적으로 호출할 뿐이다 — 그 안에서 구동되는
+// 재시도의 #attempt는 fire-and-forget이므로(verify + handleTrigger replay),
+// 호출부는 fire()가 완료까지 기다려줬다고 가정하지 말고 각자 관측 가능한
+// 부수효과를 waitFor()로 기다려야 한다.
 function manualScheduler() {
   const timers = new Map();
   let id = 0;
@@ -145,7 +165,6 @@ function manualScheduler() {
       const snap = [...timers.values()];
       timers.clear();
       for (const t of snap) t.fn();
-      for (let i = 0; i < 8; i++) await settle();
     },
   };
 }
@@ -298,6 +317,7 @@ test('queued retry recovers via its own backoff attempt (grace-passed reclaim) �
   // backoff attempt: its OWN on-demand reclaim frees the slot and it recovers inline.
   state.reclaimFrees = 1;
   await state.scheduler.fire();
+  await waitFor(() => state.spawns.length >= 1);
 
   assert.equal(state.spawns.length, 1, 'the queued retry recovered — exactly one strand, no server re-push');
   assert.equal(state.spawns[0].ticketId, TICKET);
@@ -318,7 +338,7 @@ test('queued retry recovers on a slot-release wake — one spawn, no server re-p
   // Another ticket went terminal / a reconcile reclaimed a lease → a slot is free now.
   state.poolFull = false;
   d.wakePoolRetries('slot_release:test');
-  for (let i = 0; i < 8; i++) await settle();
+  await waitFor(() => state.spawns.length >= 1);
 
   assert.equal(state.spawns.length, 1, 'the wake re-drove the queued retry to recovery — exactly one strand');
   assert.equal(d.pendingPoolRetryCount(), 0, 'resolved on recovery');
@@ -345,7 +365,7 @@ test('a duplicate same-key trigger while a retry is queued dedupes (no twin), th
   // Free the pool and wake: exactly ONE strand spawns despite the two triggers.
   state.poolFull = false;
   d.wakePoolRetries('slot_release:test');
-  for (let i = 0; i < 8; i++) await settle();
+  await waitFor(() => state.spawns.length >= 1);
   assert.equal(state.spawns.length, 1, 'exactly one strand across both triggers — no twin');
   assert.equal(d.pendingPoolRetryCount(), 0);
 });
@@ -364,9 +384,10 @@ test('a moved ticket cancels its queued pool_exhausted retry (board_update)', as
   assert.equal(d.pendingPoolRetryCount(), 0, 'the queued retry was cancelled on move');
 
   // Even if a slot frees afterward, there is nothing to re-drive → no spawn.
+  // (위에서 cancelByTicket이 이미 동기적으로 취소했으므로 wake()는 빈 엔트리에서
+  // 즉시 no-op — #attempt로 가는 fire-and-forget 작업 자체가 없어 대기가 불필요하다.)
   state.poolFull = false;
   d.wakePoolRetries('slot_release:test');
-  for (let i = 0; i < 8; i++) await settle();
   assert.equal(state.spawns.length, 0, 'a cancelled retry never spawns');
 });
 
@@ -382,6 +403,7 @@ test('a pended ticket cancels the queued retry at the pre-replay eligibility che
   // A human pends the ticket (no inbound pend SSE — verify is the only signal).
   ticketState.pending_user_action = true;
   await state.scheduler.fire();
+  await waitFor(() => d.pendingPoolRetryCount() === 0);
 
   assert.equal(state.spawns.length, 0, 'a pended ticket never replays');
   assert.equal(d.pendingPoolRetryCount(), 0, 'the queued retry was cancelled by verify');
@@ -396,6 +418,7 @@ test('a terminal ticket cancels the queued retry at the pre-replay eligibility c
 
   ticketState.terminal_entered_at = '2026-07-18T00:00:00.000Z';
   await state.scheduler.fire();
+  await waitFor(() => d.pendingPoolRetryCount() === 0);
 
   assert.equal(state.spawns.length, 0, 'a terminal ticket never replays');
   assert.equal(d.pendingPoolRetryCount(), 0, 'the queued retry was cancelled by verify');
@@ -412,10 +435,15 @@ test('a persistent pool_exhausted gives up after the retry bound → pends for t
   assert.equal(countTool('pend_ticket'), 0, 'no pend while retries remain');
 
   await state.scheduler.fire(); // attempt 1
+  await waitFor(() => state.scheduler.armed() >= 1); // attempt 2를 위해 재무장됨
   assert.equal(countTool('pend_ticket'), 0, 'no pend at attempt 1');
   await state.scheduler.fire(); // attempt 2
+  await waitFor(() => state.scheduler.armed() >= 1); // attempt 3을 위해 재무장됨
   assert.equal(countTool('pend_ticket'), 0, 'no pend at attempt 2');
   await state.scheduler.fire(); // attempt 3 → bound reached → give up
+  // #pendExhaustedPoolRetry는 pend_ticket → add_comment 순으로 순차 await하므로
+  // 둘 다 반영된 뒤에 단언한다.
+  await waitFor(() => countTool('pend_ticket') >= 1 && countTool('add_comment') >= 1);
   assert.equal(countTool('pend_ticket'), 1, 'a sustained exhaustion pends exactly once after the bound');
 
   assert.equal(state.spawns.length, 0, 'no strand across the whole exhausted episode');
