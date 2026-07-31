@@ -11,11 +11,26 @@
 // `--verbose`)으로 전환해, 영속 세션이 이미 내던 것과 동일한 turn별 shape을
 // oneshot도 내게 만드는 것이다.
 
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promises as fsp } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
+
+const tempDirs = [];
+
+async function makeTmpCliHome() {
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'claude-adapter-trust-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
+});
 
 test('Claude declares NATIVE_MCP + PERSISTENT_SESSION', () => {
   const adapter = new ClaudeCliAdapter();
@@ -77,4 +92,63 @@ test('buildSessionSpawn is unaffected — persistent sessions already used strea
     [descriptor.args[descriptor.args.indexOf('--input-format') + 1], descriptor.args[descriptor.args.indexOf('--output-format') + 1]],
     ['stream-json', 'stream-json'],
   );
+});
+
+// ── requiresWorkspaceTrust / readTrustMeta (ticket 48aeab6e dispatch preflight) ─
+
+test('requiresWorkspaceTrust: no harness permission_mode → false (the default --dangerously-skip-permissions bypasses the dialog)', () => {
+  const adapter = new ClaudeCliAdapter();
+  assert.equal(adapter.requiresWorkspaceTrust(), false);
+  assert.equal(adapter.requiresWorkspaceTrust(null), false);
+  assert.equal(adapter.requiresWorkspaceTrust({}), false);
+});
+
+test('requiresWorkspaceTrust: permission_mode explicitly bypassPermissions → false (same effect as the skip flag)', () => {
+  const adapter = new ClaudeCliAdapter();
+  assert.equal(adapter.requiresWorkspaceTrust({ permission_mode: 'bypassPermissions' }), false);
+});
+
+test('requiresWorkspaceTrust: any OTHER permission_mode → true (skip flag dropped, dialog becomes load-bearing)', () => {
+  const adapter = new ClaudeCliAdapter();
+  for (const mode of ['default', 'acceptEdits', 'plan']) {
+    assert.equal(adapter.requiresWorkspaceTrust({ permission_mode: mode }), true, `mode=${mode}`);
+  }
+});
+
+test('readTrustMeta: no .claude.json at all → confident NOT trusted (never ran interactively)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const meta = await adapter.readTrustMeta(cliHomeDir, '/some/cwd');
+  assert.deepEqual(meta, { trusted: false });
+});
+
+test('readTrustMeta: .claude.json present but this cwd has no entry → NOT trusted', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  await fsp.writeFile(
+    join(cliHomeDir, '.claude.json'),
+    JSON.stringify({ projects: { '/some/other/cwd': { hasTrustDialogAccepted: true } } }),
+  );
+  const meta = await adapter.readTrustMeta(cliHomeDir, '/some/cwd');
+  assert.deepEqual(meta, { trusted: false });
+});
+
+test('readTrustMeta: hasTrustDialogAccepted true for this exact cwd → trusted', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const cwd = '/mnt/data/awb-agents/awb.programmer/.awb/wt/repo/ticket';
+  await fsp.writeFile(
+    join(cliHomeDir, '.claude.json'),
+    JSON.stringify({ projects: { [cwd]: { hasTrustDialogAccepted: true } } }),
+  );
+  const meta = await adapter.readTrustMeta(cliHomeDir, cwd);
+  assert.deepEqual(meta, { trusted: true });
+});
+
+test('readTrustMeta: corrupt .claude.json → null (ambiguous, fail open — never wedges a ticket on a bad file)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  await fsp.writeFile(join(cliHomeDir, '.claude.json'), '{ not valid json');
+  const meta = await adapter.readTrustMeta(cliHomeDir, '/some/cwd');
+  assert.equal(meta, null);
 });
