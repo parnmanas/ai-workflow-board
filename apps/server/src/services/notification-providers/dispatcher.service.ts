@@ -35,7 +35,7 @@ interface ChatRoomMessageEvent {
   sender_type: 'user' | 'agent';
   sender_id: string;
   sender_name: string;
-  type?: 'message' | 'progress';
+  type?: 'message' | 'progress' | 'ticket_action';
   content: string;
   // Upstream forwards the Set returned by RoomMembershipService.getRoomMemberIds()
   // unchanged; allow either shape and normalize at the listener.

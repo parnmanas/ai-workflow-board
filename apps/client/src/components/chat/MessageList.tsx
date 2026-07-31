@@ -9,6 +9,7 @@ import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
 import AgentRefCard from './AgentRefCard';
 import BoardRefCard from './BoardRefCard';
+import TicketUnpendActionCard from './TicketUnpendActionCard';
 
 // ─── MessageList ──────────────────────────────────────────────────────────────
 
@@ -123,6 +124,20 @@ export default function MessageList({ messages, participantCount, participants =
           <div style={{ flex: 1, height: 1, background: tokens.colors.border }} />
         </div>,
       );
+    }
+
+    if (msg.type === 'ticket_action' && msg.metadata?.ticket_action?.kind === 'unpend') {
+      rendered.push(
+        <div
+          key={msg.id}
+          data-message-id={msg.id}
+          data-message-type="ticket_action"
+          style={{ padding: '6px 16px', display: 'flex', justifyContent: 'flex-start' }}
+        >
+          <TicketUnpendActionCard action={msg.metadata.ticket_action} />
+        </div>,
+      );
+      continue;
     }
 
     // Progress rows are tool-call heartbeats the agent-manager posts while

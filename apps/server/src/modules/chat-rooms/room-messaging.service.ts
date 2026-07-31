@@ -17,7 +17,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision } from '../../common/workspace-folder-options';
-import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef } from '../../common/types/stream-events';
+import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 
@@ -42,7 +42,7 @@ const AGENT_CHAIN_LOOKBACK = 8;
 // Whitelisted message-type discriminators accepted from external callers
 // (REST / MCP). 'system' is intentionally excluded — only the in-process
 // sendSystemMessage path may stamp that value.
-export const CHAT_MESSAGE_TYPES = ['message', 'progress'] as const;
+export const CHAT_MESSAGE_TYPES = ['message', 'progress', 'ticket_action'] as const;
 export type ChatMessageType = (typeof CHAT_MESSAGE_TYPES)[number];
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -147,18 +147,30 @@ function sanitizeBoardRefs(refsRaw: unknown): ChatMessageBoardRef[] {
   return refs;
 }
 
+function sanitizeTicketAction(raw: unknown): ChatMessageTicketAction | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const rec = raw as Record<string, unknown>;
+  if (rec.kind !== 'unpend') return undefined;
+  const ticketId = typeof rec.ticket_id === 'string' ? rec.ticket_id.slice(0, TICKET_REF_STR_MAX) : '';
+  const title = typeof rec.title === 'string' ? rec.title.slice(0, TICKET_REF_STR_MAX) : '';
+  if (!ticketId || !title) return undefined;
+  return { kind: 'unpend', ticket_id: ticketId, title };
+}
+
 function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | null {
   if (!raw || typeof raw !== 'object') return null;
   const ticketRefs = sanitizeTicketRefs((raw as { ticket_refs?: unknown }).ticket_refs);
   const artifactRefs = sanitizeArtifactRefs((raw as { artifact_refs?: unknown }).artifact_refs);
   const agentRefs = sanitizeAgentRefs((raw as { agent_refs?: unknown }).agent_refs);
   const boardRefs = sanitizeBoardRefs((raw as { board_refs?: unknown }).board_refs);
-  if (ticketRefs.length === 0 && artifactRefs.length === 0 && agentRefs.length === 0 && boardRefs.length === 0) return null;
+  const ticketAction = sanitizeTicketAction((raw as { ticket_action?: unknown }).ticket_action);
+  if (ticketRefs.length === 0 && artifactRefs.length === 0 && agentRefs.length === 0 && boardRefs.length === 0 && !ticketAction) return null;
   const meta: ChatRoomMessageMetadata = {};
   if (ticketRefs.length > 0) meta.ticket_refs = ticketRefs;
   if (artifactRefs.length > 0) meta.artifact_refs = artifactRefs;
   if (agentRefs.length > 0) meta.agent_refs = agentRefs;
   if (boardRefs.length > 0) meta.board_refs = boardRefs;
+  if (ticketAction) meta.ticket_action = ticketAction;
   return meta;
 }
 
@@ -475,7 +487,7 @@ export class RoomMessagingService {
     // mention parsing, DM dispatch, chain-depth accounting, and the
     // sender's read-marker auto-advance — none of those apply to a
     // narration row that the agent itself shouldn't see in history.
-    const isRealMessage = type === 'message';
+    const isRealMessage = type !== 'progress';
 
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });

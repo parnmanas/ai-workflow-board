@@ -417,7 +417,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         // Forward the discriminator so live consumers (web UI + agent-manager
         // history ring) can distinguish real turns from progress heartbeats.
         // Omit when absent so the wire shape stays unchanged for legacy emits.
-        type: event.type === 'progress' || event.type === 'message' ? event.type : undefined,
+        type: event.type === 'progress' || event.type === 'message' || event.type === 'ticket_action'
+          ? event.type
+          : undefined,
         content: event.content,
         // RoomMessagingService projects attachment rows via projectChatAttachment
         // before emit — the array is already in wire shape, so pass it through

@@ -570,17 +570,22 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *   read        — get_/list_/search_ + whoami/ping/subscribe/fetch: feed title cache only.
  *   delete      — delete_ticket / delete_child_ticket: a card would deep-link a 404.
  *   attachment  — ticket-attachment sub-resource I/O, not a lifecycle action.
- *   assistant   — send_chat_room_message: the assistant's own reply, not an action.
+ *   assistant   — send_chat_room_message / request_ticket_unpend_approval: agent-authored
+ *                 chat messages, not a ticket-row mutation. The latter explicitly never
+ *                 clears pending_user_action and already writes its own fully-rendered
+ *                 ticket_action card (TicketUnpendActionCard) — folding it into ticket_refs
+ *                 too would double the signal, not close a gap.
  *   agent-state — set/clear_current_task: the focus seat, not a ticket-row mutation.
  *   remote      — create_remote_improvement_ticket: files on ANOTHER AWB instance,
  *                 so a local deep-link would 404.
  *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
  *                 feature / action / function / user / api-key / benchmark / prompt-template /
- *                 chat / lesson: not a ticket-row mutation. (build / deploy 결과물성
- *                 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관 — EXCLUDE 아님.)
+ *                 chat / lesson / claude-backend-profile: not a ticket-row mutation.
+ *                 (build / deploy 결과물성 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로
+ *                 이관 — EXCLUDE 아님.)
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
-  // read (58) — get_agent 및 get_board_summary 는 F-3(ticket 3ca88253)로 AGENT_ACTION_TOOLS
+  // read (59) — get_agent 및 get_board_summary 는 F-3(ticket 3ca88253)로 AGENT_ACTION_TOOLS
   // / BOARD_ACTION_TOOLS 로 이관됨(EXCLUDE 아님). list_agents/get_board 는 여전히 read.
   fetch_github_info: 'read', get_action: 'read',
   get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
@@ -595,7 +600,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
   list_agents: 'read', list_api_keys: 'read', list_archived_tickets: 'read',
   list_board_lessons: 'read', list_boards: 'read', list_channels: 'read',
-  list_chat_rooms: 'read', list_features: 'read', list_function_runs: 'read',
+  list_chat_rooms: 'read', list_claude_backend_profiles: 'read',
+  list_features: 'read', list_function_runs: 'read',
   list_functions: 'read', list_prompt_templates: 'read',
   list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',
   list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
@@ -607,17 +613,18 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   delete_child_ticket: 'delete', delete_ticket: 'delete',
   // attachment (2)
   add_ticket_attachment: 'attachment', delete_ticket_attachment: 'attachment',
-  // assistant (1)
-  send_chat_room_message: 'assistant',
+  // assistant (2)
+  request_ticket_unpend_approval: 'assistant', send_chat_room_message: 'assistant',
   // agent-state (2)
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
-  // non-ticket (80) — 빌드/배포(register_build_artifact·report_build_failure·
+  // non-ticket (82) — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
   // non-ticket
   add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
   add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
+  assign_workspace_backend_profile: 'non-ticket',
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
   complete_action_run: 'non-ticket', complete_comment_summary: 'non-ticket',
   complete_qa_run: 'non-ticket',
@@ -656,7 +663,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
   update_security_profile: 'non-ticket', update_security_schedule: 'non-ticket',
   update_user: 'non-ticket', update_workspace: 'non-ticket',
-  update_workspace_schedule: 'non-ticket',
+  update_workspace_schedule: 'non-ticket', upsert_claude_backend_profile: 'non-ticket',
 };
 
 /** The full set of bare tool names this module classifies (emit ∪ batch ∪ reject ∪

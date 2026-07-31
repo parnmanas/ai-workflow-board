@@ -292,7 +292,7 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
   // KEYS to exist; this test additionally pins the conditional VALUE so a future
   // refactor can't flip them to unconditional and change the legacy shape.
   const code = read(REGISTRY_REL).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  assert.match(code, /type:\s*event\.type === 'progress' \|\| event\.type === 'message'\s*\?\s*event\.type\s*:\s*undefined/);
+  assert.match(code, /type:\s*event\.type === 'progress' \|\| event\.type === 'message' \|\| event\.type === 'ticket_action'[\s\S]{0,80}\?\s*event\.type\s*:\s*undefined/);
   assert.match(code, /attachments:\s*Array\.isArray\(event\.attachments\)[\s\S]*?:\s*undefined/);
   assert.match(code, /run_provision:\s*event\.run_provision \? event\.run_provision : undefined/);
   // ticket e6d32e9d: Action Run signal — omitted-when-false so ordinary chat

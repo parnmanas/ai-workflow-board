@@ -520,6 +520,38 @@ export abstract class CliAdapter {
   }
 
   /**
+   * True when the CLI would surface an interactive workspace-trust dialog for
+   * THIS dispatch — i.e. the CLI has a trust-dialog concept AND the resolved
+   * harness does not bypass it (ticket 48aeab6e's dispatch preflight consults
+   * this before spending an I/O read on {@link readTrustMeta}).
+   *
+   * Base default false: codex / antigravity / pi always spawn under a
+   * hardcoded dangerously-bypass flag (see their buildOneshotSpawn) with no
+   * analogous trust gate at all, so trust is never a concern for them
+   * regardless of harness. ClaudeCliAdapter overrides.
+   */
+  requiresWorkspaceTrust(_harness?: HarnessSpec | null): boolean {
+    return false;
+  }
+
+  /**
+   * Read whether `cwd` is trust-approved in this agent's CLI config home, for
+   * the dispatch-time preflight gate (ticket 48aeab6e) — a SEPARATE concern
+   * from {@link readCredentialMeta}'s heartbeat-only auth snapshot: this one
+   * gates a spawn BEFORE it happens rather than just informing the admin UI.
+   *
+   * Return `null` to mean "can't tell" (no config file yet, unreadable,
+   * unrecognized shape) — the preflight fails OPEN on null, matching every
+   * other ambiguous-probe convention in this codebase (an I/O hiccup must
+   * never wedge a ticket). Only called when {@link requiresWorkspaceTrust}
+   * returned true. Base default null — only meaningful for adapters that can
+   * return true there.
+   */
+  async readTrustMeta(_cliHomeDir: string, _cwd: string): Promise<CliTrustMeta | null> {
+    return null;
+  }
+
+  /**
    * Optional hook called once per spawn_agent after `ensureCliHomeDir`
    * creates the per-agent dir. Override to copy / symlink any
    * credentials or shared state the CLI needs before it can run — most
@@ -615,4 +647,15 @@ export interface AgentCredentialMeta {
    *  for subscription credentials missing the refresh_token field —
    *  in that second case, expiry is silent failure waiting to happen. */
   refresh_token_present: boolean;
+}
+
+/**
+ * Dispatch-preflight-side trust snapshot. Produced by
+ * `CliAdapter.readTrustMeta(cliHomeDir, cwd)` for the ticket 48aeab6e
+ * dispatch gate — a single boolean, since (unlike credential expiry) there is
+ * nothing else worth surfacing about a workspace-trust decision.
+ */
+export interface CliTrustMeta {
+  /** hasTrustDialogAccepted for this exact cwd, per the CLI's own config. */
+  trusted: boolean;
 }

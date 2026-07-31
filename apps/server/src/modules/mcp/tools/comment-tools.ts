@@ -1335,10 +1335,15 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 }
 function stampCycleProvenance<T extends Record<string, unknown>>(
   metadata: T,
-  caller: { subagentTriggerId?: string; subagentSessionId?: string } | null | undefined,
+  caller: {
+    subagentTriggerId?: string;
+    subagentSessionId?: string;
+    subagentTriggerSource?: string;
+  } | null | undefined,
 ): T {
   return Object.assign(metadata, {
     ...(caller?.subagentTriggerId ? { cycle_trigger_id: caller.subagentTriggerId } : {}),
     ...(caller?.subagentSessionId ? { subagent_session_id: caller.subagentSessionId } : {}),
+    ...(caller?.subagentTriggerSource ? { run_provenance: caller.subagentTriggerSource } : {}),
   });
 }

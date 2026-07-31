@@ -33,6 +33,9 @@ export class ChatRoomMessage {
   //                can tell the agent is working, but stripped from history
   //                replay so the model doesn't condition on its own past
   //                tool-call narration.
+  //   'ticket_action' — human-session action card (currently Resume/Unpend).
+  //                     The row is only a UI affordance; it carries no
+  //                     authorization credential.
   // Default 'message' so existing rows + clients that omit the field keep
   // their pre-discriminator semantics.
   @Column({ type: 'varchar', default: 'message' })

@@ -112,6 +112,108 @@ export function decidePushReadiness(input: PushReadinessInput): PushReadinessDec
   return { ok: true };
 }
 
+// ── CLI workspace-trust / provider-auth preflight (ticket 48aeab6e) ─────────
+//
+// Two more DOOMED-dispatch conditions, same family as push-credential above:
+//   - the checked-out CLI workspace was never trust-approved, and the board's
+//     harness `permission_mode` makes that trust dialog load-bearing (see
+//     CliAdapter.requiresWorkspaceTrust — the common `--dangerously-skip-
+//     permissions` default bypasses the dialog entirely, so this only bites
+//     boards that opt into a stricter mode);
+//   - the CLI's OAuth session already expired and carries no refresh_token,
+//     so it cannot self-heal on the next spawn.
+// Both are OPERATOR-fixable and never self-heal on their own, so — like the
+// push-credential gate — a dispatch that hits either should abort BEFORE
+// spawn rather than burn a CLI session on a doomed run. PURE: the I/O
+// (CliAdapter.readTrustMeta / .readCredentialMeta) lives on the adapter; the
+// probe shapes below are local mirrors (not imports) so this module stays
+// decoupled and unit-testable without touching an adapter.
+
+/** Facts the I/O shell (CliAdapter.readTrustMeta) observed about workspace
+ *  trust for one exact cwd. */
+export interface CliTrustProbe {
+  /** hasTrustDialogAccepted for this exact cwd, per the CLI's own config. */
+  trusted: boolean;
+}
+
+export interface CliTrustInput {
+  /** CliAdapter.requiresWorkspaceTrust(harness) — false means this CLI/mode
+   *  combination never surfaces an interactive trust dialog, so the probe is
+   *  irrelevant and this gate always passes (the common case: no board
+   *  harness permission_mode override). */
+  required: boolean;
+  /** CliAdapter.readTrustMeta() result. Absent/null = the probe couldn't run
+   *  or couldn't be interpreted (no config file yet, I/O error, corrupt
+   *  JSON) — ambiguous, fails OPEN like every other probe in this file. */
+  probe?: CliTrustProbe | null;
+}
+
+export interface CliTrustDecision {
+  ok: boolean;
+  /** Stable string so the blocker de-dup keys on it. */
+  reason?: string;
+  detail?: string;
+}
+
+/** Decide whether a dispatch may proceed w.r.t. CLI workspace trust. Blocks
+ *  ONLY when the trust dialog is load-bearing for this dispatch (`required`)
+ *  AND the probe confidently shows the cwd is not trust-approved. Fails OPEN
+ *  when the dialog is bypassed (the default) or the probe is ambiguous —
+ *  consistent with decidePushReadiness / classifyWorktreeCheckout. */
+export function decideCliTrustReadiness(input: CliTrustInput): CliTrustDecision {
+  if (!input.required) return { ok: true };
+  if (!input.probe || input.probe.trusted) return { ok: true };
+  return {
+    ok: false,
+    reason: 'cli_trust_required',
+    detail:
+      'workspace trust not accepted for this checkout — the configured permission_mode requires an interactive trust dialog this dispatch cannot satisfy',
+  };
+}
+
+/** Facts the I/O shell (CliAdapter.readCredentialMeta) observed about the
+ *  CLI's OAuth credential. Structurally mirrors AgentCredentialMeta without
+ *  importing it (same decoupling rationale as CliTrustProbe above). */
+export interface CliCredentialProbe {
+  kind: 'subscription' | 'api_key' | 'unknown';
+  expires_at_ms: number | null;
+  refresh_token_present: boolean;
+}
+
+export interface CliAuthInput {
+  probe?: CliCredentialProbe | null;
+  /** Injected clock (Date.now()) so the decision is unit-testable without a
+   *  real clock. */
+  now: number;
+}
+
+export interface CliAuthDecision {
+  ok: boolean;
+  reason?: string;
+  detail?: string;
+}
+
+/** Decide whether a dispatch may proceed w.r.t. CLI provider auth. Blocks
+ *  ONLY on a 'subscription' (OAuth) credential that has ALREADY expired AND
+ *  carries no refresh_token — the CLI cannot self-heal that combination on
+ *  its own, so re-dispatching just burns another session on the identical
+ *  failure. Every other shape fails OPEN: 'api_key' credentials have no
+ *  expiry concept, a present refresh_token means the CLI silently
+ *  self-renews (an `expires_at_ms` in the past is then stale metadata, not a
+ *  live failure), and a missing/'unknown' probe can't prove expiry. */
+export function decideCliAuthReadiness(input: CliAuthInput): CliAuthDecision {
+  const probe = input.probe;
+  if (!probe || probe.kind !== 'subscription') return { ok: true };
+  if (probe.expires_at_ms === null) return { ok: true };
+  if (probe.expires_at_ms > input.now) return { ok: true };
+  if (probe.refresh_token_present) return { ok: true };
+  return {
+    ok: false,
+    reason: 'cli_credential_expired',
+    detail: `OAuth credential expired at ${new Date(probe.expires_at_ms).toISOString()} with no refresh token to self-renew`,
+  };
+}
+
 /** A ResolveCwd-style result (only the fields the gate needs). */
 export interface WorktreeOutcome {
   isWorktree?: boolean;
@@ -344,15 +446,18 @@ export const DEFAULT_SPAWN_SUPPRESS_COOLDOWN_MS = 10 * 60_000;
 export const DEFAULT_PEND_AFTER_ABORTS = 3;
 
 /** Dispatch blocker `kind`s that an operator MUST fix by hand — a broken/empty/
- *  foreign checkout or a missing push credential never self-heals, so re-probing
- *  it only burns another CLI session and re-opens the live-twin window. Compared
- *  after stripping an optional `worktree:` prefix so both the `worktree:<reason>`
- *  checkout kinds and the bare `push_credential_unavailable` kind map. */
+ *  foreign checkout, a missing push credential, an unapproved CLI workspace
+ *  trust dialog, or an expired+unrenewable CLI OAuth session never self-heals,
+ *  so re-probing it only burns another CLI session and re-opens the live-twin
+ *  window. Compared after stripping an optional `worktree:` prefix so both the
+ *  `worktree:<reason>` checkout kinds and the bare kinds below map. */
 const DURABLE_BLOCKER_REASONS = new Set<string>([
   'not_a_git_repo',              // empty / clobbered work folder
   'incomplete_checkout',         // half-written clone — HEAD unresolved
   'wrong_repository',            // stale/foreign checkout — working_dir mis-pointed
   'push_credential_unavailable', // remote auth rejected — operator must add a token
+  'cli_trust_required',          // workspace trust dialog unresolved (ticket 48aeab6e)
+  'cli_credential_expired',      // OAuth session expired, no refresh token (ticket 48aeab6e)
 ]);
 
 /** True when a dispatch blocker `kind` is a DURABLE provisioning failure (needs

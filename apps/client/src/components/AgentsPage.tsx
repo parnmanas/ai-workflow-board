@@ -353,7 +353,7 @@ export default function AgentsPage() {
 
   // ─── Render ───────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       <PageHeader
         title="AI Agents"
         description="Manage workspace agents and the runtime managers that execute them"
@@ -368,7 +368,10 @@ export default function AgentsPage() {
         }
       />
 
-      <div id="agent-manager-runtime" style={{ flex: 1, minHeight: 0, padding: 24 }}>
+      <div
+        id="agent-manager-runtime"
+        style={{ flex: 1, minHeight: 0, padding: 24, overflow: 'hidden' }}
+      >
         <AgentManagerPage
           workspaceAgents={agents || []}
           agentsLoading={loading}

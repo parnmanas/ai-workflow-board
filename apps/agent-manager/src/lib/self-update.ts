@@ -371,6 +371,7 @@ function runAsync(
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: isWin,
+      windowsHide: true,
       env: process.env,
     });
     let stdout = '';

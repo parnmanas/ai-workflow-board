@@ -50,7 +50,10 @@ describe('Workflow Functions', () => {
     assert.equal(otherWorkspaceRows.find(row => row.key === 'system.noop').workspace_id, null);
   });
 
-  it('keeps Board Functions out of a Global + current Workspace management query', async () => {
+  it('excludes legacy Board-scoped Function rows from list() regardless of the _boardId argument', async () => {
+    // board_id는 65adf0b(카탈로그 board→workspace 승격)에서 폐지된 레거시 호환 컬럼으로,
+    // 부트 마이그레이션 이후에는 항상 NULL이어야 한다(WorkflowFunction 엔티티 주석 참고).
+    // list()는 만에 하나 남아있는 board-scoped 행도 _boardId 인자 값과 무관하게 항상 제외해야 한다.
     const repo = dataSource.getRepository(WorkflowFunction);
     const source = await repo.findOneByOrFail({ key: 'system.noop', workspace_id: null });
     await repo.save(repo.create({
@@ -68,7 +71,8 @@ describe('Workflow Functions', () => {
     assert.ok(workspaceManagementRows.every(row => row.board_id === null));
 
     const boardRows = await service.list('workspace-a', 'board-a', true);
-    assert.equal(boardRows.some(row => row.key === 'test.board-only'), true);
+    assert.equal(boardRows.some(row => row.key === 'test.board-only'), false);
+    assert.ok(boardRows.every(row => row.board_id === null));
   });
 
   it('deduplicates key-idempotent executions and persists structured output', async () => {

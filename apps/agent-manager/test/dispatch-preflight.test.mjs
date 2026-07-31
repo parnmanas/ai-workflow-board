@@ -15,6 +15,8 @@ import assert from 'node:assert/strict';
 import {
   isGitAuthFailure,
   decidePushReadiness,
+  decideCliTrustReadiness,
+  decideCliAuthReadiness,
   classifyWorktreeOutcome,
   classifyWorktreeCheckout,
   normalizeRemoteUrl,
@@ -106,6 +108,91 @@ test('decidePushReadiness: probe fails on a transient error → ready (fail open
     probe: { ran: true, ok: false, stderr: 'fatal: unable to access: Could not resolve host: github.com' },
   });
   assert.deepEqual(d, { ok: true });
+});
+
+// ── decideCliTrustReadiness (ticket 48aeab6e: interactive trust required) ────
+
+test('decideCliTrustReadiness: trust dialog not required (default --dangerously-skip-permissions) → ready regardless of probe', () => {
+  assert.deepEqual(decideCliTrustReadiness({ required: false }), { ok: true });
+  assert.deepEqual(decideCliTrustReadiness({ required: false, probe: { trusted: false } }), { ok: true });
+});
+
+test('decideCliTrustReadiness: required + no probe (config file never read) → ready (fail open, ambiguous)', () => {
+  assert.deepEqual(decideCliTrustReadiness({ required: true }), { ok: true });
+  assert.deepEqual(decideCliTrustReadiness({ required: true, probe: null }), { ok: true });
+});
+
+test('decideCliTrustReadiness: required + probe confirms trusted → ready', () => {
+  assert.deepEqual(decideCliTrustReadiness({ required: true, probe: { trusted: true } }), { ok: true });
+});
+
+test('decideCliTrustReadiness: required + probe confirms NOT trusted → BLOCK before dispatch', () => {
+  const d = decideCliTrustReadiness({ required: true, probe: { trusted: false } });
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'cli_trust_required');
+  assert.match(d.detail, /trust dialog/);
+});
+
+// ── decideCliAuthReadiness (ticket 48aeab6e: expired/unrenewable OAuth) ──────
+
+test('decideCliAuthReadiness: no probe / api_key / unknown kind → ready (no expiry concept, or ambiguous)', () => {
+  const now = 1_000_000;
+  assert.deepEqual(decideCliAuthReadiness({ now }), { ok: true });
+  assert.deepEqual(decideCliAuthReadiness({ now, probe: null }), { ok: true });
+  assert.deepEqual(
+    decideCliAuthReadiness({ now, probe: { kind: 'api_key', expires_at_ms: null, refresh_token_present: false } }),
+    { ok: true },
+    'api_key credentials have no expiry concept',
+  );
+  assert.deepEqual(
+    decideCliAuthReadiness({ now, probe: { kind: 'unknown', expires_at_ms: null, refresh_token_present: false } }),
+    { ok: true },
+    'an unrecognized credential shape cannot prove expiry — fail open',
+  );
+});
+
+test('decideCliAuthReadiness: subscription with no expiry data → ready (cannot prove expired)', () => {
+  const d = decideCliAuthReadiness({
+    now: 1_000_000,
+    probe: { kind: 'subscription', expires_at_ms: null, refresh_token_present: false },
+  });
+  assert.deepEqual(d, { ok: true });
+});
+
+test('decideCliAuthReadiness: subscription not yet expired → ready', () => {
+  const d = decideCliAuthReadiness({
+    now: 1_000_000,
+    probe: { kind: 'subscription', expires_at_ms: 2_000_000, refresh_token_present: false },
+  });
+  assert.deepEqual(d, { ok: true });
+});
+
+test('decideCliAuthReadiness: subscription expired BUT refresh_token present → ready (CLI self-renews)', () => {
+  const d = decideCliAuthReadiness({
+    now: 2_000_000,
+    probe: { kind: 'subscription', expires_at_ms: 1_000_000, refresh_token_present: true },
+  });
+  assert.deepEqual(d, { ok: true });
+});
+
+test('decideCliAuthReadiness: subscription expired AND no refresh_token → BLOCK before dispatch (expired, unrenewable)', () => {
+  const d = decideCliAuthReadiness({
+    now: 2_000_000,
+    probe: { kind: 'subscription', expires_at_ms: 1_000_000, refresh_token_present: false },
+  });
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'cli_credential_expired');
+  assert.match(d.detail, /expired/);
+  assert.match(d.detail, /no refresh token/);
+});
+
+test('decideCliAuthReadiness: expiry boundary (expires_at_ms === now) counts as expired', () => {
+  const d = decideCliAuthReadiness({
+    now: 1_000_000,
+    probe: { kind: 'subscription', expires_at_ms: 1_000_000, refresh_token_present: false },
+  });
+  assert.equal(d.ok, false);
+  assert.equal(d.reason, 'cli_credential_expired');
 });
 
 // ── classifyWorktreeOutcome (criterion #1: block before dispatch) ────────────
@@ -547,12 +634,14 @@ test('DEFAULT_PEND_AFTER_ABORTS is the small, >1 default (self-heal once, then h
 // DEFAULT_PEND_AFTER_ABORTS times. A TRANSIENT/ambiguous blocker keeps the
 // cooldown self-heal and pends only after the threshold.
 
-test('isDurableProvisioningBlocker: checkout + push-credential kinds are durable (worktree: prefix optional)', () => {
+test('isDurableProvisioningBlocker: checkout + push-credential + CLI trust/auth kinds are durable (worktree: prefix optional)', () => {
   for (const k of [
     'not_a_git_repo', 'worktree:not_a_git_repo',
     'incomplete_checkout', 'worktree:incomplete_checkout',
     'wrong_repository', 'worktree:wrong_repository',
     'push_credential_unavailable',
+    'cli_trust_required',
+    'cli_credential_expired',
   ]) {
     assert.equal(isDurableProvisioningBlocker(k), true, `should be durable: ${k}`);
   }

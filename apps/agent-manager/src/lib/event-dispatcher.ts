@@ -25,7 +25,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, sharedWorktreeInstructions } from './prompts.js';
-import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
 import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
@@ -400,6 +400,8 @@ export interface SubagentSpawnArgs {
    *  the per-session header to distinguish post-Done retrospective reviewer
    *  runs from other reviewer wake-ups on the same ticket. */
   triggerSource?: string;
+  /** Internal: server-arbitrated retry attempt for a standalone mention. */
+  _silentExitAttempt?: 0 | 1;
   /** Chat room id for one-shot chat spawns. When set, non-MCP adapters
    *  (codex, antigravity) post their collected result to this room via REST
    *  instead of as a ticket comment. */
@@ -1856,6 +1858,78 @@ export class EventDispatcher {
       return;
     }
 
+    // Board/workspace harness resolved server-side and flattened onto the
+    // event (e9c7a896). Parsed here (ahead of its original single use-site
+    // below) so the ticket 48aeab6e CLI-readiness gate immediately below can
+    // also read harness.permission_mode.
+    const harness = parseHarnessConfig(ev.harness_config);
+
+    // ticket 48aeab6e: CLI workspace-trust / provider-auth readiness. Unlike
+    // the push-credential gate below (assignee-only — only that role pushes),
+    // this applies to EVERY role: any role's CLI spawn can hit an unapproved
+    // workspace trust dialog or an expired, unrenewable OAuth session, and
+    // both fail the CLI process itself before it does anything useful.
+    // Catching it here (before spawn) saves the session/turn a doomed spawn
+    // would burn and gives the operator ONE actionable comment instead of a
+    // repeating "agent exited immediately" mystery (the incident that
+    // motivated this ticket: a planner dispatch failed repeatedly on
+    // checkout trust + an expired OAuth session while the assignee sat idle
+    // across multiple supervisor cycles).
+    if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir) {
+      const adapter = createAdapter(agentContext.cli);
+      const trustRequired = adapter.requiresWorkspaceTrust(harness);
+      const trustMeta = trustRequired
+        ? await adapter.readTrustMeta(agentContext.cli_home_dir, agentContext.cwd)
+        : null;
+      let readiness = decideCliTrustReadiness({ required: trustRequired, probe: trustMeta });
+      if (readiness.ok) {
+        const credentialMeta = await adapter.readCredentialMeta(agentContext.cli_home_dir);
+        readiness = decideCliAuthReadiness({ probe: credentialMeta, now: Date.now() });
+      }
+      if (!readiness.ok) {
+        const blockerKind = readiness.reason || 'cli_readiness_unavailable';
+        this.#dispatchBlockTracker.record(blockerKind);
+        // Same durable-blocker de-dup + escalation as the worktree/push
+        // gates: record the abort so the next supervisor re-trigger for this
+        // ticket-role is suppressed, then pend on the episode's FIRST abort
+        // (both reasons are in DURABLE_BLOCKER_REASONS — never self-heal).
+        const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+        if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+          const isTrust = blockerKind === 'cli_trust_required';
+          const content = isTrust
+            ? `⚠️ **CLI workspace trust 미승인** — 이 CLI(\`${agentContext.cli}\`)의 workspace trust 승인이 확인되지 않아 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+              `세부: \`${readiness.detail || ''}\`\n\n` +
+              `이 보드/워크스페이스 harness의 \`permission_mode\`를 \`bypassPermissions\`로 되돌리거나, ` +
+              `\`${agentContext.cli_home_dir}/.claude.json\`의 \`projects["${agentContext.cwd}"].hasTrustDialogAccepted\`를 \`true\`로 설정한 뒤 다시 트리거하세요.\n\n` +
+              `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — trust를 수정한 뒤 티켓을 unpend(User 탭의 ▶ Resume) 하세요._`
+            : `⚠️ **CLI 인증 만료** — 이 CLI(\`${agentContext.cli}\`)의 OAuth 세션이 만료되었고 자동 갱신할 refresh token도 없어 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+              `세부: \`${readiness.detail || ''}\`\n\n` +
+              `해당 agent의 CLI 자격 증명을 재발급/재로그인한 뒤 다시 트리거하세요.\n\n` +
+              `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 자격 증명을 고친 뒤 unpend 하세요._`;
+          await fireAndForgetTool(this.#config, 'add_comment', { ticket_id: ev.ticket_id, content });
+        }
+        if (provisionBlock.shouldPend) {
+          await fireAndForgetTool(this.#config, 'pend_ticket', {
+            ticket_id: ev.ticket_id,
+            reason: provisioningPendReason({
+              kind: blockerKind,
+              reason: readiness.reason,
+              detail: readiness.detail,
+              count: provisionBlock.count,
+            }),
+          });
+          log(
+            `[cli-readiness] durable provisioning block — pended ticket=${ev.ticket_id} role=${ev.action} blocker=${blockerKind} aborts=${provisionBlock.count}`,
+          );
+        }
+        log(
+          `Trigger aborted — CLI readiness check failed: ticket=${ev.ticket_id} role=${ev.action} reason=${blockerKind} cli=${agentContext.cli}`,
+        );
+        this.#ackDispatch(ev, 'nack', blockerKind);
+        return;
+      }
+    }
+
     // ticket a3047a86: push-credential readiness. A repo with no usable
     // credential fails `git push` with `could not read Username for
     // 'https://github.com'` — after the agent already did all the work (this
@@ -1949,10 +2023,9 @@ export class EventDispatcher {
       };
     }
 
-    // Board/workspace harness resolved server-side and flattened onto the
-    // event (e9c7a896). Parsed once here; both the persistent-session and
-    // one-shot paths below ship it to their spawn site.
-    const harness = parseHarnessConfig(ev.harness_config);
+    // harness was already parsed above (ahead of the ticket 48aeab6e
+    // CLI-readiness gate); both the persistent-session and one-shot paths
+    // below ship it to their spawn site.
     const runtimeProfile = this.#runtimeProfileOverride !== undefined
       ? this.#runtimeProfileOverride
       : parseRuntimeProfile(ev.cli_runtime_profile);

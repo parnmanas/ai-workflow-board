@@ -50,8 +50,11 @@ import {
   type ProcNode,
 } from './process-tree.js';
 import {
+  completeMentionAuditRun,
+  failMentionAuditRetrySpawn,
   postChatRoomMessage,
   postSilentExitSystemComment,
+  startMentionAuditRun,
   type AwbConfig,
 } from './rest.js';
 import { ensureOperationalFallbackTicket, parseOperationalFallback } from './operational-chat-fallback.js';
@@ -234,6 +237,10 @@ interface SubagentRecord {
   cli_type: string;
   trigger_id: string | null;
   audit_session_id?: string;
+  mention_audit_run_token?: string;
+  silent_exit_attempt?: 0 | 1;
+  silent_exit_terminal_reason?: string;
+  silent_exit_family_key?: string;
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
@@ -593,13 +600,33 @@ export class SubagentManager implements SubagentManagerContract {
           `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
         );
       }
+      // Establish the server-owned baseline before creating MCP attribution.
+      // The returned token is the exact provenance attached to every write
+      // performed by this process, isolating concurrent runs of the same
+      // ticket/agent/role.
+      const mentionAudit =
+        spec.kind === 'trigger' &&
+        spec.triggerId?.startsWith('mention:') &&
+        spec.ticketId &&
+        spec.agentId
+          ? await startMentionAuditRun(this.#config, spec.ticketId, {
+              cycle_trigger_id: spec.triggerId,
+              agent_id: spec.agentId,
+              role: spec.role,
+              attempt: spec._silentExitAttempt ?? 0,
+              subagent_session_id: String(reservationId),
+            })
+          : null;
+      const attributedSpec = mentionAudit
+        ? { ...spec, triggerSource: mentionAudit.run_token }
+        : spec;
       const descriptor = adapter.buildOneshotSpawn({
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
         cwd: effectiveCwd,
         cliHomeDir: ctx?.cli_home_dir ?? null,
-        mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
+        mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
         model: attemptModel,
         harness,
         effort: effortFlag,
@@ -643,7 +670,9 @@ export class SubagentManager implements SubagentManagerContract {
           };
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;
-          if (spec.triggerSource) headers['X-AWB-Subagent-Trigger-Source'] = spec.triggerSource;
+          if (attributedSpec.triggerSource) {
+            headers['X-AWB-Subagent-Trigger-Source'] = attributedSpec.triggerSource;
+          }
           if (spec.triggerId) headers['X-AWB-Subagent-Trigger-Id'] = spec.triggerId;
           headers['X-AWB-Subagent-Session-Id'] = String(reservationId);
           const mcpConfig = {
@@ -666,7 +695,7 @@ export class SubagentManager implements SubagentManagerContract {
             mcpConfigPath: configPath,
             cwd: effectiveCwd,
             cliHomeDir: ctx?.cli_home_dir ?? null,
-            mcpAttribution: this.#mcpAttribution(spec, !!ctx, String(reservationId)),
+            mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
             model: attemptModel,
             harness,
             effort: effortFlag,
@@ -797,6 +826,8 @@ export class SubagentManager implements SubagentManagerContract {
         cli_type: adapter.cliType,
         trigger_id: spec.triggerId || null,
         audit_session_id: String(reservationId),
+        mention_audit_run_token: mentionAudit?.run_token,
+        silent_exit_attempt: mentionAudit ? (spec._silentExitAttempt ?? 0) : undefined,
         chat_request_id: spec.chatRequestId || null,
         ticket_id: spec.ticketId || null,
         agent_id: spec.agentId || null,
@@ -1100,6 +1131,51 @@ export class SubagentManager implements SubagentManagerContract {
     }
 
     if (record.kind === 'trigger' && record.ticket_id && !record.commentSent) {
+      if (code === 0 && record.mention_audit_run_token && record.respawnSpec) {
+        const audit = await completeMentionAuditRun(
+          this.#config,
+          record.ticket_id,
+          record.mention_audit_run_token,
+          code,
+        );
+        if (audit?.decision === 'succeeded') {
+          record.commentSent = true;
+          if (record.agent_id) {
+            this.circuitBreaker.recordSuccess(
+              CircuitBreaker.key(record.agent_id, record.ticket_id, record.role || ''),
+            );
+          }
+          return;
+        }
+        if (audit?.decision === 'retry') {
+          const retry = await this.spawn({
+            ...record.respawnSpec,
+            _silentExitAttempt: 1,
+          });
+          if (retry.spawned) {
+            log(
+              `[subagent] clean mention silent-exit retry started ticket=${record.ticket_id.slice(0, 8)} ` +
+                `trigger=${(record.trigger_id || '').slice(0, 24)}`,
+            );
+            return;
+          }
+          log(
+            `[subagent] clean mention silent-exit retry spawn failed ticket=${record.ticket_id.slice(0, 8)} ` +
+              `reason=${retry.reason || 'unknown'} — recording terminal fallback`,
+          );
+          const terminal = await failMentionAuditRetrySpawn(
+            this.#config,
+            record.ticket_id,
+            record.mention_audit_run_token,
+          );
+          record.silent_exit_attempt = 1;
+          record.silent_exit_terminal_reason =
+            terminal?.reason || 'silent_exit_retry_spawn_failed';
+          record.silent_exit_family_key = terminal?.family_key;
+        } else if (audit?.decision === 'retry_claimed') {
+          return;
+        }
+      }
       const auditOutcome = await this.#postSilentExitFallback(record, code);
       if (auditOutcome === 'suppressed') {
         record.commentSent = true;
@@ -1462,6 +1538,12 @@ export class SubagentManager implements SubagentManagerContract {
     const metaParts: string[] = [];
     metaParts.push(`cli=${record.cli_type}`);
     metaParts.push(`exit_code=${exitLabel}`);
+    if (record.silent_exit_attempt !== undefined) {
+      metaParts.push(`attempt=${record.silent_exit_attempt}`);
+      if (record.silent_exit_attempt === 1) {
+        metaParts.push(`reason=${record.silent_exit_terminal_reason || 'silent_exit_retry_exhausted'}`);
+      }
+    }
     // Structured failure reason (usage_limit / auth_failure / codex_error) when
     // the buffered tail matches a known fatal signature — the "structured
     // failure reason" half of the acceptance criteria (ticket ac958c06), even
@@ -1487,6 +1569,12 @@ export class SubagentManager implements SubagentManagerContract {
       agent_id: record.agent_id || undefined,
       subagent_session_id: record.audit_session_id || String(record.pid),
       cycle_started_at: new Date(record.started_at).toISOString(),
+      silent_exit_attempt: record.silent_exit_attempt,
+      terminal_reason: record.silent_exit_attempt === 1
+        ? record.silent_exit_terminal_reason || 'silent_exit_retry_exhausted'
+        : undefined,
+      silent_exit_family_key: record.silent_exit_family_key,
+      silent_exit_retry_count: record.silent_exit_attempt,
     });
   }
 

@@ -11,6 +11,7 @@ import {
   type AdapterCredential,
   type AgentCredentialMeta,
   CliAdapter,
+  type CliTrustMeta,
   type CliUsageSnapshot,
   HARNESS_SPEC_KEYS,
   type HarnessSpec,
@@ -371,6 +372,52 @@ export class ClaudeCliAdapter extends CliAdapter {
         : null;
     const refresh_token_present = typeof oauth.refreshToken === 'string' && oauth.refreshToken.length > 0;
     return { kind: 'subscription', expires_at_ms: expires, refresh_token_present };
+  }
+
+  /**
+   * `permissionArgs()` above emits `--dangerously-skip-permissions` whenever
+   * no harness `permission_mode` is configured, which also bypasses the
+   * interactive trust dialog — Claude Code merely WARNS "this workspace has
+   * not been trusted" and proceeds (observed on ticket b2e88390: a run that
+   * completed 44 turns despite the warning). Any OTHER `permission_mode`
+   * drops the skip flag, and the dialog becomes load-bearing — a
+   * non-interactive spawn can never satisfy it, so it hangs/fails instead.
+   * Mirrors `permissionArgs()`'s own branch so the two can never disagree
+   * about which mode is actually active.
+   */
+  requiresWorkspaceTrust(harness?: HarnessSpec | null): boolean {
+    return !!harness?.permission_mode && harness.permission_mode !== 'bypassPermissions';
+  }
+
+  /**
+   * Read `<cliHomeDir>/.claude.json` → `projects[cwd].hasTrustDialogAccepted`
+   * — the exact file/key Claude Code's own stderr names as the non-interactive
+   * fix (`Run Claude Code interactively here once and accept the trust
+   * dialog, or set projects["<cwd>"].hasTrustDialogAccepted: true in
+   * <cli-home>/.claude.json`).
+   *
+   * ENOENT is a CONFIDENT negative: no config file means the CLI has never
+   * recorded a trust decision for anything in this cli-home, so `cwd` is
+   * certainly not trusted. Any other read/parse failure is ambiguous and
+   * returns null (fail open), matching readCredentialMeta's own contract.
+   */
+  async readTrustMeta(cliHomeDir: string, cwd: string): Promise<CliTrustMeta | null> {
+    const path = join(cliHomeDir, '.claude.json');
+    let raw: string;
+    try {
+      raw = await fsp.readFile(path, 'utf8');
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') return { trusted: false };
+      return null;
+    }
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    const entry = parsed?.projects?.[cwd];
+    return { trusted: entry?.hasTrustDialogAccepted === true };
   }
 
   async prepareCliHome(
