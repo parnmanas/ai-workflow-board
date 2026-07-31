@@ -366,6 +366,10 @@ test('a duplicate same-key trigger while a retry is queued dedupes (no twin), th
   state.poolFull = false;
   d.wakePoolRetries('slot_release:test');
   await waitFor(() => state.spawns.length >= 1);
+  // waitFor는 predicate가 참이 되는 즉시 반환하므로, "no twin" 회귀가 만드는 두 번째
+  // spawn이 근소하게 늦게 도착해도 놓칠 수 있다(리뷰 지적: 티켓 9c901338). 짧은
+  // 안정화 구간을 더 기다린 뒤에도 정확히 1임을 재확인한다.
+  await delay(20);
   assert.equal(state.spawns.length, 1, 'exactly one strand across both triggers — no twin');
   assert.equal(d.pendingPoolRetryCount(), 0);
 });
@@ -440,10 +444,16 @@ test('a persistent pool_exhausted gives up after the retry bound → pends for t
   await state.scheduler.fire(); // attempt 2
   await waitFor(() => state.scheduler.armed() >= 1); // attempt 3을 위해 재무장됨
   assert.equal(countTool('pend_ticket'), 0, 'no pend at attempt 2');
+  // give-up 코멘트도 같은 add_comment 툴이라, 최초 큐잉 코멘트(attempt 3 이전에
+  // 이미 1) 때문에 `countTool('add_comment') >= 1`은 attempt 3 전부터 참이다
+  // (리뷰 지적: 티켓 9c901338) — pend_ticket이 기록되는 즉시 폴링이 끝나 그 뒤
+  // 순차 await되는 give-up add_comment를 기다리지 못했다. attempt 3 직전 기준선을
+  // 찍어 baseline + 1을 기다린다.
+  const commentsBeforeGiveUp = countTool('add_comment');
   await state.scheduler.fire(); // attempt 3 → bound reached → give up
   // #pendExhaustedPoolRetry는 pend_ticket → add_comment 순으로 순차 await하므로
   // 둘 다 반영된 뒤에 단언한다.
-  await waitFor(() => countTool('pend_ticket') >= 1 && countTool('add_comment') >= 1);
+  await waitFor(() => countTool('pend_ticket') >= 1 && countTool('add_comment') >= commentsBeforeGiveUp + 1);
   assert.equal(countTool('pend_ticket'), 1, 'a sustained exhaustion pends exactly once after the bound');
 
   assert.equal(state.spawns.length, 0, 'no strand across the whole exhausted episode');
