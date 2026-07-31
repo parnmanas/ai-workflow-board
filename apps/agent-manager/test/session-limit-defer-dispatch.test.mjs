@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 import { SessionLimitDeferStore } from '../dist/lib/session-limit-defer.js';
@@ -32,7 +33,23 @@ import { findDuplicateSpawn } from '../dist/lib/subagent-manager.js';
 
 const AGENT = 'agent-rolf';
 const T0 = Date.UTC(2026, 6, 18, 10, 0, 0);
-const settle = () => new Promise((r) => setImmediate(r));
+// Poll a predicate on a real timer instead of guessing a fixed tick count. The
+// replay #fire() kicks off at reset, and the audit-comment POST it (or a
+// coalesced intent) triggers, are both fire-and-forget from the caller's side
+// — there is no promise here to await directly. A fixed `for (let i=0;i<8;i++)
+// await settle()` flush raced that fire-and-forget work under full-suite CPU
+// contention (ticket aafa5883: 76 concurrent test-file processes contending
+// for CPU made 8 setImmediate ticks sometimes elapse before the real chain —
+// itself gated on genuine event-loop/timer turns, not just microtasks —
+// finished). Mirrors dispatch-inflight-guard.test.mjs's waitFor.
+async function waitFor(pred, { timeoutMs = 3000, stepMs = 5 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (pred()) return true;
+    await delay(stepMs);
+  }
+  return pred();
+}
 
 function makeCtx() {
   return {
@@ -157,7 +174,6 @@ function manualScheduler() {
       const snap = [...timers.values()];
       timers.clear();
       for (const t of snap) t.fn();
-      for (let i = 0; i < 8; i++) await settle();
     },
   };
 }
@@ -242,7 +258,7 @@ test('session-limit window: supervisor re-dispatch storm coalesces to ONE pendin
   assert.equal(d.pendingSessionDeferCount(AGENT), 1, 'the six re-dispatches coalesced into exactly one pending intent');
   // The audit comment is fire-and-forget (a failed POST must never affect
   // dispatch) — let the MCP initialize→tools/call chain drain before asserting.
-  for (let i = 0; i < 8; i++) await settle();
+  await waitFor(() => countTool('add_comment') >= 1);
   assert.equal(countTool('add_comment'), 1, 'exactly one audit-visible defer comment for the ticket-role');
 
   const c = commentContent();
@@ -268,6 +284,7 @@ test('reset instant: each coalesced ticket-role resumes EXACTLY ONCE (no twin), 
   // The reset instant arrives.
   nowRef.v = RESET_UNTIL + 1;
   await sched.fire();
+  await waitFor(() => state.spawns.length >= 2);
 
   assert.equal(state.spawns.length, 2, 'exactly one spawn per deferred ticket-role — no twin despite T-1 being triggered 4×');
   assert.equal(state.dedups.length, 0, 'no spawn-level dedup fired — coalescing made each replay unique');
@@ -339,6 +356,7 @@ test('a moved ticket cancels its pending resume intent (board_update), so it nev
 
   nowRef.v = RESET_UNTIL + 1;
   await sched.fire();
+  await waitFor(() => state.spawns.length >= 1);
   assert.equal(state.spawns.length, 1, 'only the un-moved ticket resumed');
   assert.equal(state.spawns[0].ticketId, 'T-2');
 });
@@ -370,7 +388,7 @@ test('blocker #1: a session-limit exit seeds the dead task — it resumes EXACTL
   });
   assert.deepEqual(opened, { opened: true }, 'the exit opened a fresh window');
   assert.equal(d.pendingSessionDeferCount(AGENT), 1, 'the dead task was seeded as ONE pending intent');
-  for (let i = 0; i < 8; i++) await settle();
+  await waitFor(() => countTool('add_comment') >= 1);
   assert.equal(countTool('add_comment'), 1, 'one audit-visible defer comment for the seeded ticket-role');
   assert.match(commentContent(), /정확히 1회/, 'the seed comment states the resume-once contract');
 
@@ -378,6 +396,7 @@ test('blocker #1: a session-limit exit seeds the dead task — it resumes EXACTL
   // re-drive the original ticket-role exactly once.
   nowRef.v = RESET_UNTIL + 1;
   await sched.fire();
+  await waitFor(() => state.spawns.length >= 2);
   assert.equal(state.spawns.length, 2, 'the seeded original re-drove once at reset (no intervening trigger needed)');
   assert.equal(state.spawns[1].ticketId, 'T-orig');
   assert.equal(state.dedups.length, 0, 'no twin — exactly one live re-drive');
@@ -404,12 +423,13 @@ test('blocker #2: a mention arriving during defer (no trigger) is coalesced and 
   );
   assert.equal(state.spawns.length, 0, 'no doomed one-shot spawned while deferred');
   assert.equal(d.pendingSessionDeferCount(AGENT), 1, 'the mention was coalesced into one durable intent');
-  for (let i = 0; i < 8; i++) await settle();
+  await waitFor(() => countTool('add_comment') >= 1);
   assert.equal(countTool('add_comment'), 1, 'one audit-visible defer comment for the deferred mention');
 
   // Reset → the coalesced mention is re-delivered EXACTLY once (via handleCommentMention).
   nowRef.v = RESET_UNTIL + 1;
   await sched.fire();
+  await waitFor(() => state.spawns.length >= 1);
   assert.equal(state.spawns.length, 1, 'the deferred mention resumed once at reset');
   assert.equal(state.spawns[0].ticketId, 'T-m');
   assert.equal(state.dedups.length, 0, 'no twin');
@@ -452,6 +472,7 @@ test('blocker #3: crash-after-spawn-before-ack → restart reaps the survivor, r
     // Reset fires → replay spawns the harness, then the manager "crashes" before ack.
     nowRef.v = RESET_UNTIL + 1;
     await sched1.fire();
+    await waitFor(() => h1.state.spawns.length >= 1);
 
     assert.equal(h1.state.spawns.length, 1, 'the replay spawned exactly one harness before the crash');
     const survivorPid = h1.state.spawns[0].pid;
@@ -477,6 +498,7 @@ test('blocker #3: crash-after-spawn-before-ack → restart reaps the survivor, r
     assert.equal(h2.d.pendingSessionDeferCount(AGENT), 1, 'the un-acked intent rehydrated on boot');
 
     await sched2.fire();
+    await waitFor(() => h2.state.spawns.length >= 1 && h2.state.reaped.length >= 1);
 
     // The survivor was reaped BEFORE the re-drive; exactly one live session remains.
     assert.deepEqual(h2.state.reaped, [survivorPid], 'boot reaped exactly the crash-surviving pid');
