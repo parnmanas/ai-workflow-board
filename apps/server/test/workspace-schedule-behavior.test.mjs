@@ -176,6 +176,11 @@ test('due schedule opens a room, seats agent + system, sends task_prompt, advanc
   assert.equal(roomRepo.created.length, 1, 'one fresh room per run');
   assert.equal(roomRepo.created[0].workspace_id, 'ws-1');
   assert.equal(roomRepo.created[0].type, 'group');
+  // Mirrors qa-schedule-behavior.test.mjs / security-schedule-behavior.test.mjs:
+  // the schedule's legacy board_id (set above) must never reach the dispatched
+  // room — board_id is a dead column post-65adf0b, read by neither list() nor
+  // _dispatch().
+  assert.equal(roomRepo.created[0].board_id, undefined, 'legacy Board ownership is not propagated');
   // agent + synthetic 'system' user seated
   const types = participantRepo.created.map((p) => `${p.participant_type}:${p.participant_id}`).sort();
   assert.deepEqual(types, ['agent:agent-1', 'user:system']);

@@ -252,7 +252,7 @@ test('routed reveal API rejects non-admin with 403 and preserves masked/no-store
 test('ordinary list response remains masked and never contains the OAuth token', async () => {
   const { instance } = controller();
   const res = response();
-  await instance.list('workspace-1', undefined, undefined, undefined, undefined, res);
+  await instance.list('workspace-1', undefined, undefined, undefined, res);
   assert.equal(res.statusCode, 200);
   assert.doesNotMatch(JSON.stringify(res.body), new RegExp(SECRET));
   assert.match(res.body[0].credential_fields.oauth_token, /••••/);
