@@ -1900,7 +1900,8 @@ export class EventDispatcher {
             ? `⚠️ **CLI workspace trust 미승인** — 이 CLI(\`${agentContext.cli}\`)의 workspace trust 승인이 확인되지 않아 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
               `세부: \`${readiness.detail || ''}\`\n\n` +
               `이 보드/워크스페이스 harness의 \`permission_mode\`를 \`bypassPermissions\`로 되돌리거나, ` +
-              `\`${agentContext.cli_home_dir}/.claude.json\`의 \`projects["${agentContext.cwd}"].hasTrustDialogAccepted\`를 \`true\`로 설정한 뒤 다시 트리거하세요.`
+              `\`${agentContext.cli_home_dir}/.claude.json\`의 \`projects["${agentContext.cwd}"].hasTrustDialogAccepted\`를 \`true\`로 설정한 뒤 다시 트리거하세요.\n\n` +
+              `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — trust를 수정한 뒤 티켓을 unpend(User 탭의 ▶ Resume) 하세요._`
             : `⚠️ **CLI 인증 만료** — 이 CLI(\`${agentContext.cli}\`)의 OAuth 세션이 만료되었고 자동 갱신할 refresh token도 없어 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
               `세부: \`${readiness.detail || ''}\`\n\n` +
               `해당 agent의 CLI 자격 증명을 재발급/재로그인한 뒤 다시 트리거하세요.\n\n` +

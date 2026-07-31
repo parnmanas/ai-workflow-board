@@ -63,11 +63,13 @@ function makeCtx(cliHomeDir) {
 
 let originalFetch;
 let mcpToolCalls; // names of tools/call invoked over /mcp (add_comment, pend_ticket, …)
+let addCommentContents; // ticket 48aeab6e review: preserved `content` arg of each add_comment call, in order
 let ticketState;  // the (mocked) server-side ticket row the pend/unpend transition mutates
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
+  addCommentContents = [];
   ticketState = { pending_user_action: false };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
@@ -89,6 +91,7 @@ beforeEach(() => {
         // pending flag (and unpend clears it).
         if (name === 'pend_ticket') ticketState.pending_user_action = true;
         if (name === 'unpend_ticket') ticketState.pending_user_action = false;
+        if (name === 'add_comment') addCommentContents.push(body.params?.arguments?.content ?? '');
         return new Response(
           JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -176,6 +179,20 @@ test('unapproved workspace trust under a non-bypass permission_mode pends on the
   assert.equal(countTool('pend_ticket'), 1, 'a durable CLI-trust blocker pends on the FIRST abort');
   assert.equal(countTool('add_comment'), 1, 'the abort posts a single actionable ticket comment');
   assert.equal(ticketState.pending_user_action, true, 'the pend transition actually set pending_user_action');
+
+  // Review (48aeab6e): pend_ticket suppresses supervisor auto-retrigger, so
+  // "fix trust then re-trigger" alone is a dead end — the comment must also
+  // tell the operator to unpend/Resume before a retrigger can do anything.
+  assert.match(
+    addCommentContents[0],
+    /unpend/i,
+    'the trust blocker comment must name the unpend step, not just the trust fix — pend_ticket already suppressed auto-retrigger',
+  );
+  assert.match(
+    addCommentContents[0],
+    /Resume/,
+    'the trust blocker comment should point at the User-tab ▶ Resume affordance an operator actually sees, not just the raw MCP tool name',
+  );
 
   // Repeated re-trigger while still untrusted must NOT repeat the comment/pend
   // — this is the "trust/credential 상태가 바뀔 때까지 반복 redispatch를
