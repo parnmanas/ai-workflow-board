@@ -416,7 +416,7 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 ## Reviewer branch
 
 <!--awb:no-pr-->
-> **This board merges directly (\`use_pr\`=false — the default): there is usually no PR.** Review the *branch* diff, not a PR. Substitute every \`gh pr …\` command below with its git/branch equivalent: base-freshness via \`git fetch origin && git rev-list --left-right --count origin/<default>...<branch>\` (a non-zero left/behind count = the branch forked from an older base → BEHIND); the diff via \`git diff origin/<default>...<branch>\` (or the GitHub compare URL); and skip \`gh pr checks\` — there is no PR CI gate, so rely on the build/test signal the assignee posted plus your own read.
+> **This board merges directly (\`use_pr\`=false — the default): there is usually no PR.** Review the *branch* diff, not a PR. Substitute every remaining \`gh pr …\` command below with its git/branch equivalent: the diff via \`git diff origin/<default>...<branch>\` (or the GitHub compare URL); and skip \`gh pr checks\` — there is no PR CI gate, so rely on the build/test signal the assignee posted plus your own read. (Base-freshness in step 2 goes through \`check_review_drift\`, which is PR-agnostic — no substitution needed there.)
 <!--/awb:no-pr-->
 <!--awb:pr-only-->
 > **This board uses PRs (\`use_pr\`=true):** the assignee opened a PR in In Progress and its URL is in the comments. Use the \`gh pr …\` commands below (\`gh pr view\`, \`gh pr diff\`, \`gh pr checks\`) directly against it.
@@ -424,11 +424,12 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 
 1. **Identify the branch / PR** — find the branch name (and PR URL if present) the assignee posted in the ticket comments. If missing, \`add_comment\` asking for the branch name (mention the assignee with \`@[role:assignee|<name>]\`) and stop.
 
-2. **Base-freshness gate — review against the current integration target, not the stale fork point.** A \`<default>...<branch>\` comparison is a 3-dot diff computed from the *merge base* (where the branch forked). If the default has moved since — especially when the same area is evolving fast — that diff hides what already landed, so "no regression / existing behaviour unchanged" claims become **unverifiable against what will actually be integrated**. Gate on base freshness *before* reading the diff:
-   - Capture the current integration tip: \`gh api repos/<owner>/<repo>/git/refs/heads/<default> --jq .object.sha\` (or \`gh pr view <pr> --json baseRefOid -q .baseRefOid\`). This SHA is the base you review **against** — it goes in your decision comment.
-   - Check whether the branch is behind it: \`gh pr view <pr> --json mergeStateStatus,baseRefName,headRefOid\`. A \`mergeStateStatus\` of \`BEHIND\` (or \`DIRTY\` for a conflicting branch) means the branch forked from an older base and the diff is stale.
-   - **BEHIND / DIRTY** → do **not** approve backward-compat / "no regression" claims from this diff. \`add_comment\` asking the assignee to \`git rebase origin/<default>\` and re-push (mention \`@[role:assignee|<name>]\`), \`move_ticket\` back to **In Progress**, and stop. Re-review once the branch is current.
-   - **Current** (\`CLEAN\` / \`HAS_HOOKS\` / \`UNSTABLE\` — anything not behind) → proceed; the diff reflects the real integration target.
+2. **Base-freshness gate — review against the current integration target, not the stale fork point.** If the default has moved since this branch forked, that's only a problem when the movement actually touched something this branch also touches — under concurrent merges from other tickets, the default can advance every few minutes, and bouncing on every advance regardless of overlap just manufactures endless rebase/re-review loops on an already-approved diff. Gate on base freshness *before* reading the diff, via the server's classifier rather than a manual mergeStateStatus check:
+   - Call \`mcp__awb__check_review_drift(ticket_id)\`. It diffs this branch's own changed paths against whatever origin/<default> gained since the episode began (or since your last check) and returns \`{classification, recommendation, overlapping_paths, reverification_count, max_reverifications}\`.
+   - **\`recommendation: "rebase_required"\`** (the default moved in a path this branch also touches — or a repo-global file like package.json/tsconfig — and this Review episode hasn't already spent its one reverification bounce) → do **not** approve backward-compat / "no regression" claims from this diff. \`add_comment\` asking the assignee to \`git rebase origin/<default>\` and re-push (mention \`@[role:assignee|<name>]\`), \`move_ticket\` back to **In Progress**, and stop. Re-review once the branch is current.
+   - **\`recommendation: "proceed"\`** (no drift, or the default only moved in paths unrelated to this branch) → proceed; the diff reflects the real integration target closely enough that unrelated movement doesn't invalidate your review.
+   - **\`recommendation: "proceed_no_action"\`** (this episode already bounced once for the same overlapping drift, or the check was unresolvable — no repo configured, git unavailable, branch not found) → proceed rather than bounce again for the same or an unverifiable reason. Merging's own rebase-before-land step is this episode's remaining re-verification point, not another round-trip through Review.
+   - Record the base SHA the tool reports (\`last_checked_base_sha\`) — it goes in your decision comment as \`reviewed against origin/<default>@<sha>\`.
 
 3. **Inspect the diff remotely**
    - Preferred: \`gh pr diff <pr-number-or-branch>\` — works with only a \`gh\` auth token, no local clone.
@@ -533,7 +534,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - \`git checkout <default-branch>\`
    - \`git pull --ff-only origin <default-branch>\`
    - \`git merge --ff-only <feature-branch>\` — after step 2's rebase this fast-forwards cleanly.
-   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below.
+   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below. If Review bounced this ticket back for overlapping main drift (\`check_review_drift\` recommended \`rebase_required\`), this rebase loop **is** that drift's single re-verification point — the episode's reverification budget is already spent, so Review will not bounce it again for the same reason.
 
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
