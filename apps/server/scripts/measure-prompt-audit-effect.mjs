@@ -7,10 +7,17 @@
 //
 //   1. start_rate            — of tickets moved into an active-kind column
 //                               (e.g. In Progress), what fraction ALSO moved
-//                               forward again (Review/Merging/Done) in the
-//                               window, instead of stalling? Proxy for
-//                               29ea479c's "refuses to start without a fresh
-//                               plan" failure mode.
+//                               forward again (Review/Merging/Done) AFTER
+//                               that active entry (earliest one in-window),
+//                               instead of stalling? Proxy for 29ea479c's
+//                               "refuses to start without a fresh plan"
+//                               failure mode. Order matters: a ticket bounced
+//                               back for rework (e.g. Review -> In Progress
+//                               on changes-requested) has an EARLIER forward
+//                               move that must NOT count as "advancing" a
+//                               LATER, unrelated active re-entry — see the
+//                               regression test's Review(t0)->In Progress(t1)
+//                               fixture.
 //   2. unnecessary_questions  — count of agent-authored type='question'
 //                               comments in the window. Proxy for "asks
 //                               instead of investigating".
@@ -104,31 +111,47 @@ export async function computeReport(ds, entities, { since, until, workspaceId } 
   const activeColNames = [...new Set(activeCols.map((c) => c.name).filter(Boolean))];
   const startRate = { entered_active: 0, also_advanced: 0, rate: null };
   if (activeColNames.length > 0) {
+    // Reference "start" instant per ticket = EARLIEST active-column entry in
+    // the window (MIN, not MAX — a ticket may bounce in and out of active
+    // more than once in-window; the first entry is when it started work).
     const enteredRows = await scopeByTicketWorkspace(
       ds.getRepository(ActivityLog).createQueryBuilder('a')
         .innerJoin(Ticket, 't', 't.id = a.ticket_id')
-        .select('DISTINCT a.ticket_id', 'ticket_id')
+        .select('a.ticket_id', 'ticket_id')
+        .addSelect('MIN(a.created_at)', 'entered_at')
         .where("a.action = 'moved' AND a.field_changed = 'column'")
         .andWhere('a.new_value IN (:...activeColNames)', { activeColNames })
-        .andWhere('a.created_at >= :since AND a.created_at < :until', range),
+        .andWhere('a.created_at >= :since AND a.created_at < :until', range)
+        .groupBy('a.ticket_id'),
       't',
     ).getRawMany();
-    const enteredIds = enteredRows.map((r) => r.ticket_id).filter(Boolean);
-    startRate.entered_active = enteredIds.length;
-    if (enteredIds.length > 0) {
+    const enteredAtByTicket = new Map(
+      enteredRows.filter((r) => r.ticket_id).map((r) => [r.ticket_id, new Date(r.entered_at)]),
+    );
+    startRate.entered_active = enteredAtByTicket.size;
+    if (enteredAtByTicket.size > 0) {
       const forwardCols = await ds.getRepository(BoardColumn).find({
         where: [{ kind: 'review' }, { kind: 'merging' }, { kind: 'terminal' }],
       });
       const forwardColNames = [...new Set(forwardCols.map((c) => c.name).filter(Boolean))];
       if (forwardColNames.length > 0) {
         const advancedRows = await ds.getRepository(ActivityLog).createQueryBuilder('a')
-          .select('DISTINCT a.ticket_id', 'ticket_id')
+          .select('a.ticket_id', 'ticket_id')
+          .addSelect('a.created_at', 'advanced_at')
           .where("a.action = 'moved' AND a.field_changed = 'column'")
-          .andWhere('a.ticket_id IN (:...enteredIds)', { enteredIds })
+          .andWhere('a.ticket_id IN (:...enteredIds)', { enteredIds: [...enteredAtByTicket.keys()] })
           .andWhere('a.new_value IN (:...forwardColNames)', { forwardColNames })
           .andWhere('a.created_at >= :since AND a.created_at < :until', range)
           .getRawMany();
-        startRate.also_advanced = advancedRows.length;
+        // >= (not >): a forward move at or after the ticket's earliest active
+        // entry counts. A forward move BEFORE that entry (the Review->In
+        // Progress bounce-back case) must not.
+        const advancedTicketIds = new Set(
+          advancedRows
+            .filter((r) => r.ticket_id && new Date(r.advanced_at) >= enteredAtByTicket.get(r.ticket_id))
+            .map((r) => r.ticket_id),
+        );
+        startRate.also_advanced = advancedTicketIds.size;
       }
       startRate.rate = startRate.also_advanced / startRate.entered_active;
     }

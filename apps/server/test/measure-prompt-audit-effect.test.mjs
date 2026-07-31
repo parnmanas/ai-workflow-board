@@ -107,6 +107,25 @@ test('computeReport: all 4 metrics match a hand-built fixture with known numerat
     old_value: 'true', new_value: 'false', actor_id: 'human1', actor_name: 'Human', created_at: pendTime,
   }));
 
+  // start_rate event-ordering regression (ec498050 review, changes-requested):
+  // H moves to Review at t0, then bounces BACK to In Progress at t1 (t1 > t0)
+  // — a changes-requested rework re-entry, with no forward progress after
+  // that. H must count toward entered_active (it does enter an active column
+  // in-window) but NOT toward also_advanced — its only forward move (t0) is
+  // BEFORE its active entry (t1), not after. The old set-intersection logic
+  // (ignoring event order) wrongly counted this as "advanced".
+  const t0 = new Date(inWindow.getTime() + 500);
+  const t1 = new Date(inWindow.getTime() + 2000);
+  const tH = await ticketRepo.save(ticketRepo.create({ title: 'H', column_id: active.id, workspace_id: wsId, created_at: inWindow }));
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: tH.id, ticket_id: tH.id, action: 'moved', field_changed: 'column',
+    old_value: active.name, new_value: review.name, actor_id: 'system', actor_name: 'test', created_at: t0,
+  }));
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: tH.id, ticket_id: tH.id, action: 'moved', field_changed: 'column',
+    old_value: review.name, new_value: active.name, actor_id: 'system', actor_name: 'test', created_at: t1,
+  }));
+
   // completion_rate: E created in-window and terminal (counted); F created
   // in-window and NOT terminal (denominator only).
   await ticketRepo.save(ticketRepo.create({ title: 'E', column_id: done.id, workspace_id: wsId, created_at: inWindow, terminal_entered_at: inWindow }));
@@ -119,15 +138,18 @@ test('computeReport: all 4 metrics match a hand-built fixture with known numerat
   const until = new Date(inWindow.getTime() + 24 * 60 * 60 * 1000);
   const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn }, { since, until, workspaceId: wsId });
 
-  assert.deepEqual(report.start_rate, { entered_active: 2, also_advanced: 1, rate: 0.5 }, 'start_rate: A advanced, B did not — 1/2');
+  assert.deepEqual(
+    report.start_rate, { entered_active: 3, also_advanced: 1, rate: 1 / 3 },
+    'start_rate: A advanced after entering active, B never advanced, H bounced back into active AFTER an earlier forward move — 1/3',
+  );
   assert.equal(report.unnecessary_questions, 2, 'unnecessary_questions: exactly the 2 agent question comments, not the user note');
   assert.deepEqual(
     report.pending_misclassification_rate, { pend_events: 2, misclassified: 1, rate: 0.5 },
     'pending_misclassification_rate: only C (terminal before pend) counts, D (non-terminal) and the false-transition do not',
   );
   assert.deepEqual(
-    report.completion_rate, { created: 6, completed: 2, rate: 2 / 6 },
-    'completion_rate: 6 in-window root tickets (A,B,C,D,E,F), 2 terminal (C,E) — OldG excluded by window',
+    report.completion_rate, { created: 7, completed: 2, rate: 2 / 7 },
+    'completion_rate: 7 in-window root tickets (A,B,C,D,E,F,H), 2 terminal (C,E) — OldG excluded by window',
   );
   assert.equal(report.window.since, since.toISOString());
   assert.equal(report.window.until, until.toISOString());
