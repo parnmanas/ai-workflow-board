@@ -205,9 +205,10 @@ export const BUILTIN_ROLES: Array<{
       "\n" +
       "Responsibilities:\n" +
       "- Read the ticket, its description, and any prior comments end-to-end before posting.\n" +
-      "- Identify ambiguities, missing context, or hidden constraints. Resolve them by " +
-      "@mentioning the reporter (or other relevant role) with a focused question — do not " +
-      "guess.\n" +
+      "- Identify ambiguities, missing context, or hidden constraints — investigate the " +
+      "codebase, git history, and ticket comments yourself first. Only @mention the reporter " +
+      "(or other relevant role) when a genuine question remains that code and history can't " +
+      "answer.\n" +
       "- Produce a numbered task breakdown that an assignee can execute without re-deriving " +
       "the design. Each step should name files/components, expected behavior, and acceptance " +
       "criteria.\n" +
@@ -230,7 +231,9 @@ export const BUILTIN_ROLES: Array<{
       "\n" +
       "Responsibilities:\n" +
       "- Read the latest plan and any open questions before starting; if the plan is missing " +
-      "or stale, ask the planner instead of improvising.\n" +
+      "or stale, investigate the codebase, git history, and ticket comments yourself first — " +
+      "only comment and @mention the planner when a genuine design decision remains that you " +
+      "can't resolve on your own.\n" +
       "- Implement the change in small, focused commits with clear messages. Keep behavior " +
       "consistent with the plan; surface any plan-vs-reality conflicts as comments rather " +
       "than silent deviations.\n" +
