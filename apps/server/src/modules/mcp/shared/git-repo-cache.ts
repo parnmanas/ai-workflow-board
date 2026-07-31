@@ -719,3 +719,41 @@ export async function countBehindAhead(
   }
   return { behind, ahead };
 }
+
+export interface DiffChangedPathsOptions {
+  /** Use a 3-dot (`from...to`, merge-base-relative) diff instead of the
+   *  default 2-dot (`from..to`, direct range) diff. 3-dot is what "what did
+   *  this branch itself change since it forked" wants; 2-dot is what "what
+   *  moved directly between these two points on the same line" wants (e.g.
+   *  a base branch's own forward movement between two SHAs). */
+  threeDot?: boolean;
+  maxBytes?: number;
+}
+
+/**
+ * List the file paths changed between two refs via `git diff --name-only`.
+ * Same validation discipline as `countBehindAhead`: both refs run through
+ * `isValidRef` (rejects flag-like / `..`-smuggling input — a raw commit SHA
+ * passes this too, so callers may pass either a branch name or a SHA), and
+ * the path list is separated from the ref spec with a `--` terminator.
+ *
+ * Reads only the name list from the cache clone (no patch body), so this is
+ * cheap even for a wide range — unlike `getCommitDetail`'s 1MB per-commit
+ * diff cap, there's no patch text here to bound beyond the name list itself.
+ */
+export async function diffChangedPaths(
+  repoPath: string,
+  fromRef: string,
+  toRef: string,
+  opts: DiffChangedPathsOptions = {},
+): Promise<string[]> {
+  if (!isValidRef(fromRef) || !fromRef.trim()) throw new GitReadError('잘못된 시작 ref 입니다.');
+  if (!isValidRef(toRef) || !toRef.trim()) throw new GitReadError('잘못된 끝 ref 입니다.');
+  const sep = opts.threeDot ? '...' : '..';
+  const spec = `${fromRef.trim()}${sep}${toRef.trim()}`;
+  const { stdout } = await runGit(
+    ['diff', '--name-only', spec, '--'],
+    { cwd: repoPath, maxBytes: opts.maxBytes ?? 4 * 1024 * 1024 },
+  );
+  return stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}

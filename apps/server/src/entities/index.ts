@@ -41,6 +41,11 @@ export { StuckTicketAlert } from './StuckTicketAlert';
 // hardcodes ON in all branches (D-01, never NODE_ENV-gated) — so no hand-written
 // migration is needed, exactly like the sibling StuckTicketAlert (`stuck_alerts`).
 export { DispatchIntent } from './DispatchIntent';
+// Review-episode drift tracking (ticket 59efbde9) — one row per ticket while a
+// Review episode is open. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly
+// like the two sibling tables above; no hand-written migration needed.
+export { ReviewDriftState } from './ReviewDriftState';
+export type { DriftClassification } from './ReviewDriftState';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
 export { TicketDuplicateDecision } from './TicketDuplicateDecision';

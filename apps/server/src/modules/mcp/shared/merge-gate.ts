@@ -35,6 +35,7 @@ import { Comment } from '../../../entities/Comment';
 import { Credential } from '../../../entities/Credential';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
+import { DriftClassification, ReviewDriftState } from '../../../entities/ReviewDriftState';
 import { resolveGitCredential } from './git-branches';
 import {
   BehindAhead,
@@ -81,15 +82,35 @@ export interface MergeDecision {
  * Given the resolved per-board config and the {behind, ahead} counts of the
  * feature branch vs base, decide whether THIS transition is blocked. Pure — no
  * DB / git — so a unit spec can exhaust the truth table without a network.
+ *
+ * `driftClassification` (ticket 59efbde9, Q3) is the review-drift classifier's
+ * verdict for this ticket's Review episode (see `review-drift.ts`), optional
+ * and defaulted to `undefined` by every existing caller — so omitting it is
+ * byte-for-byte the pre-59efbde9 behavior. When it IS supplied and resolves to
+ * `non_overlapping_drift` or `overlapping_drift_budget_exhausted`, a
+ * review_to_merging stale-base block is bypassed: `require_fresh_base`
+ * blocking unconditionally on behind>0 would otherwise deadlock against
+ * review_workflow's classifier recommending `proceed`/`proceed_no_action` for
+ * exactly the same drift. `overlapping_drift` (budget NOT yet spent) and
+ * `fresh` do NOT bypass — an unspent-budget overlap should still funnel
+ * through the intended single rebase-and-reverify cycle, and a stale/unset
+ * classification degrades to the original unconditional block
+ * (availability-first: an unresolved classification must never manufacture a
+ * bypass, only a resolved safe one can).
  */
 export function decideMergeGate(
   transition: MergeTransition,
   gate: ResolvedMergeGate,
   ba: BehindAhead,
+  driftClassification?: DriftClassification | null,
 ): MergeDecision {
   if (transition === 'review_to_merging') {
     if (gate.require_fresh_base && ba.behind > 0) {
-      return { blocked: true, code: 'merge_gate_stale_base' };
+      const driftBypass = driftClassification === 'non_overlapping_drift'
+        || driftClassification === 'overlapping_drift_budget_exhausted';
+      if (!driftBypass) {
+        return { blocked: true, code: 'merge_gate_stale_base' };
+      }
     }
   } else if (transition === 'merging_to_done') {
     if (gate.require_full_merge && ba.ahead > 0) {
@@ -267,7 +288,22 @@ export async function evaluateMergeGate(
   }
   if (!ba) return PASS('unresolvable');
 
-  const decision = decideMergeGate(transition, gate, ba);
+  // Q3 overlap-aware integration (ticket 59efbde9) — only worth a lookup when
+  // this transition's check is actually on AND it's the review_to_merging
+  // side the drift classifier speaks to (merging_to_done doesn't consult it).
+  // Any lookup failure degrades to `undefined` (current behavior, no
+  // bypass) — same availability-first posture as the rest of this function.
+  let driftClassification: DriftClassification | undefined;
+  if (transition === 'review_to_merging' && checkOn) {
+    try {
+      const driftRow = await scope.getRepository(ReviewDriftState).findOne({ where: { ticket_id: ticket.id } });
+      if (driftRow?.last_classification) driftClassification = driftRow.last_classification;
+    } catch {
+      driftClassification = undefined;
+    }
+  }
+
+  const decision = decideMergeGate(transition, gate, ba, driftClassification);
   if (!decision.blocked) return PASS('fresh');
 
   const feature = featureBranchPrefix(ticket.id);
