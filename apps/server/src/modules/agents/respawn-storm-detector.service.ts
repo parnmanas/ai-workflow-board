@@ -67,6 +67,7 @@ import {
   resolveRespawnStormConfig,
 } from '../../common/respawn-storm-config';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
+import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
 
 // Global operational knob (not per-board): how often the background sweep runs.
 // Storms are acute, so we sweep faster than the stuck detector (15 min).
@@ -331,22 +332,44 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
 
     // (a) auto-pend — replicate the pend field writes (no shared service).
     if (cfg.autoPend) {
-      const ticketRepo = this.dataSource.getRepository(Ticket);
-      const wasPending = !!ticket.pending_user_action;
-      ticket.pending_user_action = true;
-      ticket.pending_reason = summary;
-      if (!wasPending) {
-        ticket.pending_set_at = now;
-        ticket.pending_set_by = 'RespawnStormDetector';
+      // Terminal-aware gate (ticket ec498050): a Done ticket death-looping
+      // (e.g. a post-Done self-improvement retrospective) never gets a human
+      // back to its User tab — skip the park, keep the halt-event + notify
+      // below so the storm is still observable.
+      let terminalSkip = false;
+      try {
+        const col = await loadTicketColumnForPendGate(
+          this.dataSource.getRepository(Ticket), this.dataSource.getRepository(BoardColumn), ticket,
+        );
+        terminalSkip = !evaluateTerminalPendGate(col).allowed;
+      } catch (e) {
+        this.logService.warn('RespawnStorm', 'terminal-pend-gate column resolution failed (failing open)', {
+          err: String(e), ticket_id: ticket.id,
+        });
       }
-      await ticketRepo.save(ticket);
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'pending_user_action',
-        old_value: wasPending ? 'true' : 'false', new_value: 'true',
-        ticket_id: ticket.id, actor_id: 'system', actor_name: 'RespawnStormDetector',
-        role, trigger_source: 'respawn_storm',
-      });
+
+      if (terminalSkip) {
+        this.logService.info('RespawnStorm', 'auto-pend skipped, ticket already terminal', {
+          ticket_id: ticket.id, role,
+        });
+      } else {
+        const ticketRepo = this.dataSource.getRepository(Ticket);
+        const wasPending = !!ticket.pending_user_action;
+        ticket.pending_user_action = true;
+        ticket.pending_reason = summary;
+        if (!wasPending) {
+          ticket.pending_set_at = now;
+          ticket.pending_set_by = 'RespawnStormDetector';
+        }
+        await ticketRepo.save(ticket);
+        await this.activityService.logActivity({
+          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+          field_changed: 'pending_user_action',
+          old_value: wasPending ? 'true' : 'false', new_value: 'true',
+          ticket_id: ticket.id, actor_id: 'system', actor_name: 'RespawnStormDetector',
+          role, trigger_source: 'respawn_storm',
+        });
+      }
     }
 
     // (b) first-class event — rides SSE via the board_update event-registry entry.

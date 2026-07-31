@@ -378,6 +378,16 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
    * Pend the ticket the same way the `pend_ticket` MCP tool does, and
    * post a system-styled comment mentioning the reporter and reviewer
    * via structured tokens so the notification fan-out fires.
+   *
+   * Terminal-aware gate audit (ticket ec498050): this site does NOT need the
+   * `terminal-pend-gate.ts` wiring the other 4 system pend sites got. The
+   * sweep that eventually calls this method only ever candidates columns via
+   * `.andWhere("c.kind = 'active'")` (mismatch-sweep query, same file) — a
+   * terminal (or intake/review/merging) column's tickets never enter the
+   * candidate set in the first place, so there is no terminal-ticket pend to
+   * guard against here. `recordSnapshot`'s own `col.kind !== 'active'` check
+   * above is a separate call path (per-trigger snapshotting) with the same
+   * property, for the same reason.
    */
   private async _pendTicket(
     ticket: Ticket,

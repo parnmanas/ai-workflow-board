@@ -40,6 +40,7 @@ import {
   hardBudgetDefaultsFromEnv,
   resolveHardBudgetConfig,
 } from './hard-budget-config';
+import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../modules/mcp/shared/terminal-pend-gate';
 
 export interface HardBudgetLogger {
   warn(category: string, message: string, meta?: Record<string, unknown>): void;
@@ -207,8 +208,26 @@ export async function pendTicketForHardBudget(
   ticket: Ticket,
   reason: string,
   pendSetBy: string,
+  logger?: HardBudgetLogger | null,
 ): Promise<boolean> {
   const ticketRepo = dataSource.getRepository(Ticket);
+
+  // Terminal-aware gate (ticket ec498050): a terminal ticket (Done, or any
+  // kind='terminal' column) is never revisited by a human, so pending it here
+  // just strands it. The caller's ceiling breach is still real — this only
+  // skips the park, not the block itself upstream.
+  try {
+    const col = await loadTicketColumnForPendGate(dataSource.getRepository(Ticket), dataSource.getRepository(BoardColumn), ticket);
+    if (!evaluateTerminalPendGate(col).allowed) {
+      logger?.warn('HardBudget', 'pend skipped, ticket already terminal', { ticket_id: ticket.id });
+      return false;
+    }
+  } catch (e) {
+    logger?.warn('HardBudget', 'terminal-pend-gate column resolution failed (failing open)', {
+      err: String(e), ticket_id: ticket.id,
+    });
+  }
+
   const pendingAt = new Date();
   const claimed = await ticketRepo.update(
     { id: ticket.id, pending_user_action: false },
@@ -292,7 +311,7 @@ export async function enforceAutoResponseBudget(
       `이 티켓의 자동 응답 수가 하드 상한(${cfg.maxAutoResponses}건)을 초과해 자동 중지되었습니다. ` +
       `내용을 확인한 뒤 pending을 해제하세요.`;
     if (cfg.autoPend) {
-      await pendTicketForHardBudget(deps.dataSource, deps.activityService, ticket, reason, 'hard_budget_response_guard');
+      await pendTicketForHardBudget(deps.dataSource, deps.activityService, ticket, reason, 'hard_budget_response_guard', deps.logger);
     }
     if (cfg.notify) {
       await postHardBudgetAlert(deps, ticket, [

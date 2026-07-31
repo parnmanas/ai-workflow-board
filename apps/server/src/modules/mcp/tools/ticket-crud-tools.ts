@@ -20,6 +20,7 @@ import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
+import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { loadTicketFull, parseTicket } from '../shared/ticket-parsing';
 import {
   findColumnByName,
@@ -780,6 +781,31 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       }
       const gate = evaluatePendActionGate(candidates, no_action_reason);
       if (!gate.allowed) return err(gate.message!);
+
+      // ── Terminal-aware gate (ticket ec498050) ───────────────────────────
+      // Pending is "wait for a human to look at this still-active ticket" —
+      // a ticket already in a terminal (Done) column is never revisited by
+      // the dispatch loop, so the park would just strand it invisibly.
+      // Scope: this agent-facing tool only — the human REST PATCH path
+      // (tickets.controller.ts) is untouched, since a human may deliberately
+      // want to flag/reopen an already-Done ticket.
+      let terminalCol: Awaited<ReturnType<typeof loadTicketColumnForPendGate>> = null;
+      try {
+        terminalCol = await loadTicketColumnForPendGate(ticketRepo, dataSource.getRepository(BoardColumn), ticket);
+      } catch (e) {
+        logger.warn('MCP', 'pend_ticket terminal-gate column resolution failed (failing open)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+      }
+      const terminalGate = evaluateTerminalPendGate(terminalCol);
+      if (!terminalGate.allowed) {
+        return err(
+          `pend_ticket blocked: ticket ${ticket.id} is already in a terminal (Done) column. ` +
+          `Pending only matters for a still-active ticket the dispatch loop will revisit — a terminal ` +
+          `ticket's User tab is never surfaced again, so this would strand the park invisibly. If a human ` +
+          `genuinely needs to look at this closed ticket, say so in a comment and mention them instead.`,
+        );
+      }
 
       const wasPending = !!ticket.pending_user_action;
       ticket.pending_user_action = true;

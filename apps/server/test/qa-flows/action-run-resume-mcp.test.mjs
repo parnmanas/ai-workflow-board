@@ -648,6 +648,30 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const t15 = await mcp.callTool('get_ticket', { ticket_id: ticket15.id });
   assert.equal(t15.pending_user_action, false, 'the valid run does NOT re-park the ticket');
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // CASE 16 — terminal-column source ticket: an unapproved high-impact run is
+  // still REJECTED (the approval requirement is unrelated to column state),
+  // but `_parkForApproval` must NOT set pending_user_action (ticket ec498050
+  // — a ticket already Done is never revisited by a human on its User tab, so
+  // parking it there just strands it invisibly).
+  // ─────────────────────────────────────────────────────────────────────────
+  step('CASE 16 — unapproved high-impact run on a terminal (Done) ticket rejects WITHOUT parking it');
+  const doneCol = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Done', position: 5, workspaceId: ws.id, isTerminal: true,
+  });
+  const ticket16 = await createTicket(app, getDataSourceToken, {
+    columnId: doneCol.id, workspaceId: ws.id, title: 'already done — approval gate still trips', assigneeId: agent.id,
+  });
+  const gatedRun16 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket16.id });
+  assert.equal(gatedRun16.isError, true, 'the run is still rejected — no approval grant exists for this (action, ticket) pair');
+  assert.match(JSON.stringify(gatedRun16.error), /approval/i, 'rejection still names the approval requirement');
+  const t16 = await mcp.callTool('get_ticket', { ticket_id: ticket16.id });
+  assert.equal(t16.pending_user_action, false, 'a terminal-column ticket must NOT be parked by the approval gate');
+  const parkActs16 = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: ticket16.id, action: 'action_run_pending_approval' },
+  });
+  assert.equal(parkActs16.length, 0, 'no park-for-approval audit row for a skipped terminal park');
+
   await mcp.close();
   exitAfterTests(0);
 });

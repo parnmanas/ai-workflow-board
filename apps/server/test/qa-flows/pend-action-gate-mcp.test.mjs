@@ -104,6 +104,34 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   assert.ok(acts.length >= 1, 'the no_action_reason justification is recorded on the audit trail');
   assert.match(acts[0].new_value, /human/, 'audit row carries the reason text');
 
+  // ── Terminal-aware gate (ticket ec498050) ────────────────────────────────
+  // pend_ticket is agent-invoked (unlike the human-only REST PATCH path), so
+  // it gets the same terminal check the 5 system pend sites got: a ticket
+  // already in a Done column is never revisited by the dispatch loop, so
+  // parking it there would strand it invisibly. `no_action_reason` is
+  // supplied so the CASE-above's "Deploy prod" Action (still registered on
+  // this same workspace) clears the Action gate first — the terminal gate
+  // runs "Action 게이트 직후" (right after), so it needs a clean pass through
+  // that earlier gate to be observable on its own.
+  step('Terminal gate — pend_ticket on a Done-column ticket is rejected and does NOT park it');
+  const doneCol = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Done', position: 2, workspaceId: ws.id, isTerminal: true,
+  });
+  const terminalTicket = await createTicket(app, getDataSourceToken, {
+    columnId: doneCol.id,
+    workspaceId: ws.id,
+    title: 'already done',
+  });
+  const terminalBlocked = await mcp.callTool('pend_ticket', {
+    ticket_id: terminalTicket.id,
+    reason: 'flag this closed ticket for a human',
+    no_action_reason: 'clearing the unrelated Action gate to isolate the terminal gate',
+  });
+  assert.equal(terminalBlocked.isError, true, 'pend_ticket on a terminal-column ticket is rejected');
+  assert.match(terminalBlocked.error.error, /terminal/i, 'rejection explains the ticket is already terminal');
+  const terminalTicketFresh = await mcp.callTool('get_ticket', { ticket_id: terminalTicket.id });
+  assert.equal(terminalTicketFresh.pending_user_action, false, 'a rejected terminal pend must not park the ticket');
+
   await mcp.close();
   exitAfterTests(0);
 });

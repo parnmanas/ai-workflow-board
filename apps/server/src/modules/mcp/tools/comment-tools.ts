@@ -37,6 +37,7 @@ import { applyAgentCommentPingPongGuard, terminalAckKey, isPendingUserActionBloc
 import { computeTicketCommentChainDepth } from '../../../common/agent-chain-depth';
 import { computeLoopScore } from '../../../common/loop-score';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
+import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -218,6 +219,27 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         next: nextGuardComment,
         recent: recentAgentComments,
         pend: async () => {
+          // Terminal-aware gate (ticket ec498050, root cause of 0709ea7c): a
+          // Done ticket re-triggered for a self-improvement retrospective can
+          // repeat this same "waiting" comment with nothing to retrospect on.
+          // Pending an already-terminal ticket is a no-op that never gets
+          // cleared by a human looking at a Done card — skip the flip and
+          // just log it, same posture as the other 4 system pend sites.
+          let col: Awaited<ReturnType<typeof loadTicketColumnForPendGate>> = null;
+          try {
+            col = await loadTicketColumnForPendGate(ticketRepo, dataSource.getRepository(BoardColumn), ticket);
+          } catch (e) {
+            logger.warn('MCP', 'terminal-pend-gate: column resolution failed (failing open)', {
+              err: String(e), ticket_id: ticket.id,
+            });
+          }
+          if (!evaluateTerminalPendGate(col).allowed) {
+            logger.info('MCP', 'agent_comment_pingpong_guard: pend skipped, ticket already terminal', {
+              ticket_id: ticket.id,
+            });
+            return false;
+          }
+
           const pendingReason = '작업 대상 부재 상태에서 동일 대기 확인이 반복되어 자동 중지되었습니다. 작업 대상을 지정한 뒤 pending을 해제하세요.';
           const pendingAt = new Date();
           // Compare-and-set is the DB serialization point. Concurrent third
@@ -233,12 +255,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
             },
           );
           ticket.pending_user_action = true;
-          if (claimed.affected !== 1) return;
+          if (claimed.affected !== 1) return false;
           await activityService.logActivity({
             entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id,
             field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
             actor_id: 'system', actor_name: 'agent_comment_pingpong_guard',
           });
+          return true;
         },
       });
       if (guard.suppressed) {
