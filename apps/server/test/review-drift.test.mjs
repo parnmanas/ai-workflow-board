@@ -95,6 +95,37 @@ test('classifyDrift: budget gating - overlapping drift is a rebase candidate onl
   );
 });
 
+test('overlappingSubset: returns only the paths that actually overlap, not the whole mainDriftPaths set', () => {
+  const branchPaths = ['apps/server/src/modules/mcp/shared/review-drift.ts'];
+  const mainDriftPaths = [
+    'apps/client/src/unrelated-r2.ts',
+    'apps/client/src/unrelated-r3.ts',
+    'apps/server/src/modules/mcp/shared/review-drift.ts',
+  ];
+  assert.deepEqual(
+    reviewDrift.overlappingSubset(branchPaths, mainDriftPaths),
+    ['apps/server/src/modules/mcp/shared/review-drift.ts'],
+    'must exclude the unrelated paths main also touched',
+  );
+});
+
+test('overlappingSubset: a repo-global hit is included even when the branch never touched that exact path', () => {
+  const branchPaths = ['apps/server/src/modules/mcp/shared/a.ts'];
+  const mainDriftPaths = ['package.json', 'apps/client/src/unrelated.ts'];
+  assert.deepEqual(
+    reviewDrift.overlappingSubset(branchPaths, mainDriftPaths),
+    ['package.json'],
+    'repo-global files are reported, unrelated paths are not',
+  );
+});
+
+test('overlappingSubset: no overlap -> empty array', () => {
+  assert.deepEqual(
+    reviewDrift.overlappingSubset(['apps/server/src/a.ts'], ['apps/client/src/b.ts']),
+    [],
+  );
+});
+
 test('recommendationFor: only overlapping_drift (budget remaining) ever recommends a bounce', () => {
   assert.equal(reviewDrift.recommendationFor('fresh'), 'proceed');
   assert.equal(reviewDrift.recommendationFor('non_overlapping_drift'), 'proceed');
@@ -104,6 +135,10 @@ test('recommendationFor: only overlapping_drift (budget remaining) ever recommen
 
 test('git-repo-cache exports diffChangedPaths for the drift probe', () => {
   assert.equal(typeof gitRepoCache.diffChangedPaths, 'function', 'diffChangedPaths must be exported');
+});
+
+test('git-repo-cache exports mergeBase (blocker 1 fix: seeds base_sha_at_entry from the fork point)', () => {
+  assert.equal(typeof gitRepoCache.mergeBase, 'function', 'mergeBase must be exported');
 });
 
 test('entities barrel exports ReviewDriftState for TypeORM synchronize auto-DDL', () => {

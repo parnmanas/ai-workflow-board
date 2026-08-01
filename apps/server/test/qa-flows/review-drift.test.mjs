@@ -48,33 +48,60 @@ process.env.PORT = process.env.QA_REVIEW_DRIFT_PORT || '7923';
 const DIST_REVIEW_DRIFT = 'file://' + path.resolve(
   __dirname, '..', '..', 'dist', 'modules', 'mcp', 'shared', 'review-drift.js',
 );
+const DIST_MERGE_GATE = 'file://' + path.resolve(
+  __dirname, '..', '..', 'dist', 'modules', 'mcp', 'shared', 'merge-gate.js',
+);
 
 const BRANCH_PATHS = ['apps/server/src/modules/mcp/shared/review-drift.ts'];
 
-// One canned probe result per `check_review_drift` call, in order — mirrors
-// the R1..R5 fixture in the file banner. `baseShaAtEntry` (what the real
-// prober would receive) is ignored: the stub is purely call-index-driven, the
-// orchestrator's DB-persisted counter is what actually gates the outcome.
-const ROUNDS = [
-  { mainDriftPaths: [] }, // R1: fresh
-  { mainDriftPaths: ['apps/client/src/unrelated-r2.ts'] }, // R2: non-overlapping
-  { mainDriftPaths: ['apps/client/src/unrelated-r3.ts'] }, // R3: non-overlapping
-  { mainDriftPaths: ['apps/server/src/modules/mcp/shared/review-drift.ts'] }, // R4: overlapping (exact match)
-  { mainDriftPaths: ['apps/server/src/modules/mcp/shared/review-drift.ts'] }, // R5: overlapping again (budget exhausted)
+// The fork point this fixture's branch forked from. `base_sha_at_entry` is
+// seeded from the merge-base (blocker 1 fix, review-drift.ts's
+// `defaultReviewDriftProbe`) and never changes for the life of the episode,
+// so a faithful stub must always see this same value once the entry call has
+// happened — never the tip sha of a prior call.
+const MERGE_BASE_SHA = 'sha-fork-point';
+
+// Each entry is one main-side advance that lands BEFORE the correspondingly-
+// numbered round's `check_review_drift` call — mirrors the R1..R5 fixture in
+// the file banner (R1 sees zero advances landed, R2 sees the first, etc).
+// The real prober's `mainDriftPaths` is CUMULATIVE from the effective entry
+// point (the merge-base, since `base_sha_at_entry` is fixed) to the CURRENT
+// base tip — never incremental since the last call (see review-drift.ts's
+// `ReviewDriftProbeResult.mainDriftPaths` doc) — so the stub reproduces that
+// by accumulating every landed advance's paths, not handing back one round's
+// paths in isolation the way the old (call-index-only) stub did.
+const ADVANCES = [
+  ['apps/client/src/unrelated-r2.ts'], // lands before R2 (non-overlapping)
+  ['apps/client/src/unrelated-r3.ts'], // lands before R3 (non-overlapping)
+  ['apps/server/src/modules/mcp/shared/review-drift.ts'], // lands before R4 (overlap)
+  ['apps/server/src/modules/mcp/shared/review-drift.ts'], // lands before R5 (overlap again)
 ];
 
 async function installStubSequence() {
   const mod = await import(DIST_REVIEW_DRIFT);
-  let callIndex = 0;
-  mod.__setReviewDriftProbeForTests(async () => {
-    const round = ROUNDS[Math.min(callIndex, ROUNDS.length - 1)];
+  let callIndex = 0; // number of check_review_drift calls made so far
+  mod.__setReviewDriftProbeForTests(async ({ baseShaAtEntry }) => {
+    const landed = ADVANCES.slice(0, callIndex); // advances landed BEFORE this call
     callIndex += 1;
+    const baseTipSha = landed.length ? `sha-base-after-advance-${landed.length}` : MERGE_BASE_SHA;
+    // Mirror the real prober contract: the entry call receives
+    // baseShaAtEntry=null and falls back to the merge-base; every later call
+    // receives whatever base_sha_at_entry the orchestrator persisted, which
+    // must stay MERGE_BASE_SHA for the whole episode (blocker 1 regression
+    // guard — this would fail if the orchestrator ever again persisted the
+    // entry-time base TIP instead of the merge-base).
+    const driftFrom = baseShaAtEntry || MERGE_BASE_SHA;
+    assert.equal(
+      driftFrom, MERGE_BASE_SHA,
+      'base_sha_at_entry must stay fixed at the fork point for the whole episode',
+    );
     return {
-      baseTipSha: `sha-base-${callIndex}`,
+      baseTipSha,
+      mergeBaseSha: MERGE_BASE_SHA,
       featureBranch: 'ticket/59efbde9-review-drift-dedup',
       featureTipSha: `sha-feature-${callIndex}`,
       branchPaths: BRANCH_PATHS,
-      mainDriftPaths: round.mainDriftPaths,
+      mainDriftPaths: [...new Set(landed.flat())],
     };
   });
   return () => callIndex;
@@ -82,6 +109,15 @@ async function installStubSequence() {
 async function resetStub() {
   const mod = await import(DIST_REVIEW_DRIFT);
   mod.__setReviewDriftProbeForTests(null);
+}
+
+async function setMergeGateStub(behind, ahead, baseTipSha) {
+  const mod = await import(DIST_MERGE_GATE);
+  mod.__setMergeGateProbeForTests(async () => ({ behind, ahead, baseTipSha }));
+}
+async function resetMergeGateStub() {
+  const mod = await import(DIST_MERGE_GATE);
+  mod.__setMergeGateProbeForTests(null);
 }
 
 test('review-drift classifies a continuous main-advance fixture with at most one Review round-trip', async (t) => {
@@ -157,7 +193,10 @@ test('review-drift classifies a continuous main-advance fixture with at most one
   assert.equal(r4.classification, 'overlapping_drift', `R4: ${JSON.stringify(r4)}`);
   assert.equal(r4.recommendation, 'rebase_required', 'R4 must recommend a rebase bounce');
   assert.equal(r4.reverification_count, 1, 'R4 must bump the reverification counter to 1');
-  assert.deepEqual(r4.overlapping_paths, BRANCH_PATHS, 'R4 must report the overlapping path');
+  // mainDriftPaths at R4 is the CUMULATIVE set since entry (unrelated-r2,
+  // unrelated-r3, review-drift.ts) — overlapping_paths must report only the
+  // subset that actually overlaps this branch, not the whole cumulative set.
+  assert.deepEqual(r4.overlapping_paths, BRANCH_PATHS, 'R4 must report only the actually-overlapping path, not every path main touched');
 
   step('Bounce Review -> In Progress -> Review (exactly the one round-trip R4 recommended)');
   const bounced = await moveTo('In Progress');
@@ -177,6 +216,7 @@ test('review-drift classifies a continuous main-advance fixture with at most one
   assert.equal(r5.classification, 'overlapping_drift_budget_exhausted', `R5: ${JSON.stringify(r5)}`);
   assert.equal(r5.recommendation, 'proceed_no_action', 'R5 must NOT recommend another bounce — budget already spent');
   assert.equal(r5.reverification_count, 1, 'R5 must not bump the counter past 1');
+  assert.deepEqual(r5.overlapping_paths, BRANCH_PATHS, 'R5 must still name the actually-overlapping path even though the budget is spent');
 
   row = await driftRepo.findOne({ where: { ticket_id: ticket.id } });
   assert.ok(row, 'ReviewDriftState row must still exist — episode has not ended yet');
@@ -232,4 +272,193 @@ test('check_review_drift degrades to proceed_no_action when the git probe is unr
   const driftRepo = ds.getRepository('ReviewDriftState');
   const row = await driftRepo.findOne({ where: { ticket_id: ticket.id } });
   assert.equal(row, null, 'an unresolvable check must not create a ReviewDriftState row');
+});
+
+// ── blocker 1 regression guard ──────────────────────────────────────────────
+// The original bug lived entirely inside `defaultReviewDriftProbe`: on the
+// entry call `baseShaAtEntry` is null, and the buggy probe short-circuited to
+// `mainDriftPaths: []` whenever that was the case — forcing EVERY episode's
+// first `check_review_drift` call to classify `fresh` regardless of how far
+// behind the branch actually was. The fixture above never exercises this
+// axis (its entry call has zero pre-existing drift by design), so this test
+// adds the one the original review flagged as missing: a branch whose fork
+// point is ALREADY behind an overlapping main change before review even
+// starts.
+test('check_review_drift: branch already behind main at review entry -> overlapping_drift on the FIRST call', async (t) => {
+  step('Boot NestJS app on test port');
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) + 2 });
+  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => resetStub());
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+
+  step('Seed a kanban scene + repo Resource');
+  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'review-drift-preexisting',
+  });
+  const resource = await ds.getRepository('Resource').save(
+    ds.getRepository('Resource').create({
+      workspace_id: ws.id, name: 'repo', type: 'repository',
+      url: 'https://example.com/review-drift-preexisting.git', default_branch: 'main',
+    }),
+  );
+  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker3' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
+    workspaceId: ws.id, label: 'worker3',
+  });
+  const ticket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id, workspaceId: ws.id, title: 'Pre-existing drift ticket',
+    assigneeId: worker.id, reporterId: worker.id, reviewerId: worker.id,
+  });
+  const ticketRepo = ds.getRepository('Ticket');
+  await ticketRepo.update(ticket.id, { base_repo_resource_id: resource.id, base_branch: 'main' });
+
+  const va = new VirtualAgent({ name: 'worker3', agentId: worker.id, apiKey: workerKey.raw_key, port });
+  await va.start();
+  t.after(() => va.stop());
+
+  step('Stub: main already advanced past the fork point (touching the branch\'s own file) BEFORE review started');
+  const mod = await import(DIST_REVIEW_DRIFT);
+  let probeCalled = false;
+  mod.__setReviewDriftProbeForTests(async ({ baseShaAtEntry }) => {
+    assert.equal(baseShaAtEntry, null, 'the FIRST call of a fresh episode must receive baseShaAtEntry=null');
+    probeCalled = true;
+    return {
+      baseTipSha: 'sha-base-tip',
+      mergeBaseSha: 'sha-fork-point', // != baseTipSha: main moved since the branch forked
+      featureBranch: 'ticket/59efbde9-review-drift-dedup',
+      featureTipSha: 'sha-feature-tip',
+      branchPaths: BRANCH_PATHS,
+      // What a faithful probe computes from the fork point (the effective
+      // entry point, since baseShaAtEntry is null) to the current base tip:
+      // main already touched the branch's own file before review started.
+      mainDriftPaths: BRANCH_PATHS,
+    };
+  });
+
+  step('Entry call must classify overlapping_drift / rebase_required, NOT fresh');
+  const r1 = await va.mcp.callTool('check_review_drift', { ticket_id: ticket.id });
+  assert.ok(probeCalled, 'the probe must actually run');
+  assert.equal(
+    r1.classification, 'overlapping_drift',
+    `entry call with pre-existing overlapping drift must not default to fresh: ${JSON.stringify(r1)}`,
+  );
+  assert.equal(r1.recommendation, 'rebase_required', `must recommend a rebase, not proceed: ${JSON.stringify(r1)}`);
+  assert.deepEqual(r1.overlapping_paths, BRANCH_PATHS);
+  assert.equal(r1.reverification_count, 1, 'pre-existing overlapping drift spends the episode\'s bounce on the entry call itself');
+
+  const driftRepo = ds.getRepository('ReviewDriftState');
+  const row = await driftRepo.findOne({ where: { ticket_id: ticket.id } });
+  assert.equal(
+    row.base_sha_at_entry, 'sha-fork-point',
+    'base_sha_at_entry must be seeded from the merge-base (fork point), not the base tip at entry time',
+  );
+});
+
+// ── blocker 2 regression guard ──────────────────────────────────────────────
+// Q3's merge-gate bypass (merge-gate.ts's decideMergeGate) only ever sees a
+// classification the ORCHESTRATOR persisted — it never re-runs the drift
+// probe itself. This drove the original deadlock: since blocker 1 forced
+// every entry call to 'fresh', and 'fresh' never manufactures a bypass,
+// require_fresh_base boards blocked Review->Merging right after the reviewer
+// had just been told to proceed. With blocker 1 fixed, this covers the
+// bypass path end to end over the real move_ticket surface, plus the
+// staleness guard (issue 4): a classification computed against an OLDER base
+// tip than the one evaluateMergeGate is deciding against must not bypass.
+test('require_fresh_base gate: Q3 bypasses on a fresh classification, but not a stale one', async (t) => {
+  step('Boot NestJS app on test port');
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) + 3 });
+  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => resetStub());
+  t.after(() => resetMergeGateStub());
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+
+  step('Seed a require_fresh_base-gated board + Merging column + repo Resource');
+  const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'review-drift-gate',
+  });
+  const merging = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Merging', position: 5, workspaceId: ws.id, kind: 'merging', roleRouting: ['assignee'],
+  });
+  await ds.getRepository('Board').update(board.id, {
+    merge_gate_config: JSON.stringify({ enabled: true, require_fresh_base: true }),
+  });
+  const resource = await ds.getRepository('Resource').save(
+    ds.getRepository('Resource').create({
+      workspace_id: ws.id, name: 'repo', type: 'repository',
+      url: 'https://example.com/review-drift-gate.git', default_branch: 'main',
+    }),
+  );
+  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker4' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
+    workspaceId: ws.id, label: 'worker4',
+  });
+  const ticketRepo = ds.getRepository('Ticket');
+  const va = new VirtualAgent({ name: 'worker4', agentId: worker.id, apiKey: workerKey.raw_key, port });
+  await va.start();
+  t.after(() => va.stop());
+  const moveTo = (ticketId, name) => va.mcp.callTool('move_ticket', {
+    ticket_id: ticketId, target_column_name: name, board_id: board.id,
+  });
+
+  step('Ticket A: non_overlapping_drift checked against sha-base-A, then Merging move sees the SAME tip -> bypass, no deadlock');
+  const ticketA = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id, workspaceId: ws.id, title: 'Gate deadlock ticket',
+    assigneeId: worker.id, reporterId: worker.id, reviewerId: worker.id,
+  });
+  await ticketRepo.update(ticketA.id, { base_repo_resource_id: resource.id, base_branch: 'main' });
+  await va.mcp.callTool('add_comment', { ticket_id: ticketA.id, content: 'LGTM — reviewed.', author_role: 'reviewer' });
+
+  const reviewDriftMod = await import(DIST_REVIEW_DRIFT);
+  reviewDriftMod.__setReviewDriftProbeForTests(async () => ({
+    baseTipSha: 'sha-base-A',
+    mergeBaseSha: 'sha-fork-a',
+    featureBranch: 'ticket/59efbde9-review-drift-dedup',
+    featureTipSha: 'sha-feature-a',
+    branchPaths: BRANCH_PATHS,
+    mainDriftPaths: ['apps/client/src/unrelated.ts'],
+  }));
+  const driftA = await va.mcp.callTool('check_review_drift', { ticket_id: ticketA.id });
+  assert.equal(driftA.classification, 'non_overlapping_drift', `ticket A drift check: ${JSON.stringify(driftA)}`);
+
+  await setMergeGateStub(3, 0, 'sha-base-A'); // behind=3, but SAME tip the drift check just verified
+  const bypassed = await moveTo(ticketA.id, 'Merging');
+  assert.ok(!bypassed?.isError, `fresh non_overlapping_drift must bypass the stale-base block: ${JSON.stringify(bypassed)}`);
+  const rowA = await ticketRepo.findOne({ where: { id: ticketA.id } });
+  assert.equal(rowA?.column_id, merging.id, 'ticket A must land in Merging (Q3 bypass, no deadlock)');
+
+  step('Ticket B: same non_overlapping_drift verdict, but main advances AGAIN before the Merging move -> classification is stale, must NOT bypass');
+  const ticketB = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id, workspaceId: ws.id, title: 'Gate staleness ticket',
+    assigneeId: worker.id, reporterId: worker.id, reviewerId: worker.id,
+  });
+  await ticketRepo.update(ticketB.id, { base_repo_resource_id: resource.id, base_branch: 'main' });
+  await va.mcp.callTool('add_comment', { ticket_id: ticketB.id, content: 'LGTM — reviewed.', author_role: 'reviewer' });
+
+  reviewDriftMod.__setReviewDriftProbeForTests(async () => ({
+    baseTipSha: 'sha-base-B',
+    mergeBaseSha: 'sha-fork-b',
+    featureBranch: 'ticket/59efbde9-review-drift-dedup',
+    featureTipSha: 'sha-feature-b',
+    branchPaths: BRANCH_PATHS,
+    mainDriftPaths: ['apps/client/src/unrelated.ts'],
+  }));
+  const driftB = await va.mcp.callTool('check_review_drift', { ticket_id: ticketB.id });
+  assert.equal(driftB.classification, 'non_overlapping_drift', `ticket B drift check: ${JSON.stringify(driftB)}`);
+
+  // Main moved AGAIN (sha-base-C) after that check ran — the stored
+  // last_checked_base_sha (sha-base-B) no longer matches the tip
+  // evaluateMergeGate resolves now, so the classification must be treated as
+  // stale and the original stale-base block must fire.
+  await setMergeGateStub(4, 0, 'sha-base-C');
+  const stillBlocked = await moveTo(ticketB.id, 'Merging');
+  assert.equal(stillBlocked?.isError, true, 'a stale non_overlapping_drift classification must NOT bypass the stale-base block');
+  assert.match(
+    JSON.stringify(stillBlocked?.error ?? stillBlocked),
+    /merge_gate_stale_base|stale/i,
+    'rejection names the stale-base reason',
+  );
+  const rowB = await ticketRepo.findOne({ where: { id: ticketB.id } });
+  assert.equal(rowB?.column_id, columns.review.id, 'ticket B STAYS in Review — no bypass on a stale classification');
 });
