@@ -720,6 +720,31 @@ export async function countBehindAhead(
   return { behind, ahead };
 }
 
+/**
+ * Resolve the merge-base (fork point) of two refs via `git merge-base`. Used
+ * by the review-drift prober to seed a Review episode's entry snapshot from
+ * where the feature branch actually forked, not from whatever the base
+ * branch's tip happens to be at the moment the episode starts — the latter
+ * would hide any drift that landed on base BEFORE the episode began.
+ *
+ * Same validation discipline as `countBehindAhead` / `diffChangedPaths`.
+ */
+export async function mergeBase(
+  repoPath: string,
+  refA: string,
+  refB: string,
+): Promise<string> {
+  if (!isValidRef(refA) || !refA.trim()) throw new GitReadError('잘못된 ref 입니다.');
+  if (!isValidRef(refB) || !refB.trim()) throw new GitReadError('잘못된 ref 입니다.');
+  const { stdout } = await runGit(
+    ['merge-base', refA.trim(), refB.trim(), '--'],
+    { cwd: repoPath, maxBytes: 4 * 1024 },
+  );
+  const sha = stdout.trim();
+  if (!isValidSha(sha)) throw new GitReadError(`merge-base 출력 파싱 실패: "${sha}"`);
+  return sha;
+}
+
 export interface DiffChangedPathsOptions {
   /** Use a 3-dot (`from...to`, merge-base-relative) diff instead of the
    *  default 2-dot (`from..to`, direct range) diff. 3-dot is what "what did

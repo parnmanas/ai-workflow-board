@@ -42,6 +42,7 @@ import {
   countBehindAhead,
   ensureRepoCache,
   GitCredential,
+  listCommits,
   listRefs,
 } from './git-repo-cache';
 import { ResolvedMergeGate, resolveMergeGate } from '../../../common/merge-gate-config';
@@ -151,6 +152,15 @@ export interface MergeGateProbeInput {
   ticketId: string;
 }
 
+export interface MergeGateProbeResult extends BehindAhead {
+  /** Current tip sha of the base branch, when resolvable (undefined only if
+   *  the caller's probe predates this field, e.g. an older test stub) — used
+   *  by `evaluateMergeGate` to judge whether a stored review-drift
+   *  classification (Q3) was computed against the SAME base tip being
+   *  decided against right now, or has gone stale since. */
+  baseTipSha?: string;
+}
+
 /**
  * Resolve the feature branch and compute {behind, ahead} vs base against the
  * per-Resource cache clone. Returns null on ANY unresolvable/failure condition
@@ -158,7 +168,7 @@ export interface MergeGateProbeInput {
  * degrade. Swappable so the E2E spec can inject deterministic counts without a
  * live remote.
  */
-export type MergeGateProbe = (input: MergeGateProbeInput) => Promise<BehindAhead | null>;
+export type MergeGateProbe = (input: MergeGateProbeInput) => Promise<MergeGateProbeResult | null>;
 
 /**
  * Test-only override for the prober the move surfaces use. Production leaves it
@@ -187,7 +197,11 @@ export const defaultMergeGateProbe: MergeGateProbe = async ({ resource, credenti
     const feature = resolveFeatureBranch(ticketId, refs.branches);
     if (!feature) return null;
     if (!refs.branches.includes(baseBranch)) return null;
-    return await countBehindAhead(repoPath, baseBranch, feature);
+    const [ba, baseCommits] = await Promise.all([
+      countBehindAhead(repoPath, baseBranch, feature),
+      listCommits({ repoPath, ref: baseBranch, limit: 1 }),
+    ]);
+    return { ...ba, baseTipSha: baseCommits[0]?.sha };
   } catch {
     // SshUnsupportedError / GitReadError / anything else → unverifiable → pass.
     return null;
@@ -277,7 +291,7 @@ export async function evaluateMergeGate(
   }
 
   const probe = options.probe ?? testProbeOverride ?? defaultMergeGateProbe;
-  let ba: BehindAhead | null;
+  let ba: MergeGateProbeResult | null;
   try {
     ba = await probe({ resource, credential, baseBranch, ticketId: ticket.id });
   } catch (e) {
@@ -293,11 +307,23 @@ export async function evaluateMergeGate(
   // side the drift classifier speaks to (merging_to_done doesn't consult it).
   // Any lookup failure degrades to `undefined` (current behavior, no
   // bypass) — same availability-first posture as the rest of this function.
+  //
+  // Freshness check: a classification is only trusted for the bypass when it
+  // was computed against the SAME base tip this decision is being made
+  // against. Without it, a reviewer's early `non_overlapping_drift` check
+  // could still be sitting in the row after main advanced again with an
+  // OVERLAPPING commit — bypassing on that stale verdict would manufacture
+  // exactly the false pass the classifier's budget/overlap rules exist to
+  // prevent. When `baseTipSha` can't be resolved on either side (an older
+  // probe/stub, or a lookup failure), fall back to trusting the row as
+  // before — same availability-first posture as everywhere else here.
   let driftClassification: DriftClassification | undefined;
   if (transition === 'review_to_merging' && checkOn) {
     try {
       const driftRow = await scope.getRepository(ReviewDriftState).findOne({ where: { ticket_id: ticket.id } });
-      if (driftRow?.last_classification) driftClassification = driftRow.last_classification;
+      const stillFresh = !ba.baseTipSha || !driftRow?.last_checked_base_sha
+        || driftRow.last_checked_base_sha === ba.baseTipSha;
+      if (driftRow?.last_classification && stillFresh) driftClassification = driftRow.last_classification;
     } catch {
       driftClassification = undefined;
     }

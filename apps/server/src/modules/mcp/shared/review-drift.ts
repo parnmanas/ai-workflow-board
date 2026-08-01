@@ -43,6 +43,7 @@ import {
   GitCredential,
   listCommits,
   listRefs,
+  mergeBase,
 } from './git-repo-cache';
 
 type RepoScope = DataSource | EntityManager;
@@ -81,19 +82,23 @@ function parentDir(p: string): string {
   return idx === -1 ? '' : p.slice(0, idx);
 }
 
-/** Rule ① exact path intersection, ② immediate parent directory
- *  intersection, or ③ main touched a repo-global file (Q1). */
-function pathsOverlap(branchPaths: string[], mainDriftPaths: string[]): boolean {
-  if (mainDriftPaths.some(isRepoGlobalPath)) return true;
-  if (branchPaths.length === 0) return false;
-
+/** The subset of `mainDriftPaths` that actually triggers an overlap verdict
+ *  under Q1's three rules: ① exact path intersection, ② immediate parent
+ *  directory intersection, or ③ a repo-global file. This is the same set a
+ *  human needs to see as "why did this classify as overlapping" — returning
+ *  the full `mainDriftPaths` instead (as `checkReviewDrift` used to) tells the
+ *  reviewer main touched N paths without saying which of them collided with
+ *  this branch. */
+export function overlappingSubset(branchPaths: string[], mainDriftPaths: string[]): string[] {
   const branchExact = new Set(branchPaths);
   const branchDirs = new Set(branchPaths.map(parentDir));
-  for (const p of mainDriftPaths) {
-    if (branchExact.has(p)) return true;
-    if (branchDirs.has(parentDir(p))) return true;
-  }
-  return false;
+  return mainDriftPaths.filter(
+    (p) => isRepoGlobalPath(p) || branchExact.has(p) || branchDirs.has(parentDir(p)),
+  );
+}
+
+function pathsOverlap(branchPaths: string[], mainDriftPaths: string[]): boolean {
+  return overlappingSubset(branchPaths, mainDriftPaths).length > 0;
 }
 
 /**
@@ -155,22 +160,32 @@ export interface ReviewDriftProbeInput {
   credential: GitCredential;
   baseBranch: string;
   ticketId: string;
-  /** Base SHA captured at this episode's entry, or null when no
-   *  ReviewDriftState row exists yet (nothing to diff main's movement
-   *  against — the probe should report zero drift). */
+  /** Base SHA captured at this episode's entry (the branch's merge-base with
+   *  base, as of the entry call), or null when no ReviewDriftState row exists
+   *  yet — the probe itself resolves the merge-base in that case, so main
+   *  drift that landed BEFORE the episode began is still visible on the very
+   *  first call instead of being reported as zero drift. */
   baseShaAtEntry: string | null;
 }
 
 export interface ReviewDriftProbeResult {
   baseTipSha: string;
+  /** The feature branch's merge-base with `baseBranch` — the fork point.
+   *  `checkReviewDrift` persists this (not `baseTipSha`) as `base_sha_at_
+   *  entry` on the entry call, so the entry snapshot reflects where the
+   *  branch actually forked rather than wherever base's tip happened to be
+   *  the moment the episode started. */
+  mergeBaseSha: string;
   featureBranch: string;
   featureTipSha: string;
   /** The feature branch's own changed paths vs base (3-dot, merge-base
    *  relative) — what THIS ticket touched. */
   branchPaths: string[];
-  /** Paths main touched between `baseShaAtEntry` and the current base tip
-   *  (2-dot, direct range). Empty when `baseShaAtEntry` is null or main
-   *  hasn't moved since. */
+  /** Paths main touched since the effective entry point (`baseShaAtEntry`,
+   *  or `mergeBaseSha` when this is the entry call) up to the current base
+   *  tip (2-dot, direct range) — cumulative for the whole episode, not
+   *  incremental since the last call. Empty only when base hasn't moved at
+   *  all since that point. */
   mainDriftPaths: string[];
 }
 
@@ -203,20 +218,26 @@ export const defaultReviewDriftProbe: ReviewDriftProbe = async ({ resource, cred
     if (!feature) return null;
     if (!refs.branches.includes(baseBranch)) return null;
 
-    const [baseCommits, featureCommits] = await Promise.all([
+    const [baseCommits, featureCommits, mergeBaseSha] = await Promise.all([
       listCommits({ repoPath, ref: baseBranch, limit: 1 }),
       listCommits({ repoPath, ref: feature, limit: 1 }),
+      mergeBase(repoPath, baseBranch, feature),
     ]);
     const baseTipSha = baseCommits[0]?.sha;
     const featureTipSha = featureCommits[0]?.sha;
     if (!baseTipSha || !featureTipSha) return null;
 
     const branchPaths = await diffChangedPaths(repoPath, baseBranch, feature, { threeDot: true });
-    const mainDriftPaths = baseShaAtEntry && baseShaAtEntry !== baseTipSha
-      ? await diffChangedPaths(repoPath, baseShaAtEntry, baseTipSha, { threeDot: false })
+    // On the entry call `baseShaAtEntry` is null — fall back to the fork
+    // point (mergeBaseSha) so drift that landed on base BEFORE this episode
+    // began is diffed too, not silently reported as zero (blocker: an entry
+    // call must never be structurally forced to `fresh`).
+    const driftFrom = baseShaAtEntry || mergeBaseSha;
+    const mainDriftPaths = driftFrom !== baseTipSha
+      ? await diffChangedPaths(repoPath, driftFrom, baseTipSha, { threeDot: false })
       : [];
 
-    return { baseTipSha, featureBranch: feature, featureTipSha, branchPaths, mainDriftPaths };
+    return { baseTipSha, mergeBaseSha, featureBranch: feature, featureTipSha, branchPaths, mainDriftPaths };
   } catch {
     // SshUnsupportedError / GitReadError / anything else → unverifiable.
     return null;
@@ -267,6 +288,13 @@ const UNRESOLVABLE: CheckReviewDriftResult = {
  * only at episode end (see `ticket-move.ts`). `branchPaths` is still
  * re-probed fresh on every call (a live comparison, not the stored snapshot)
  * so a branch that gains new commits mid-review is still checked accurately.
+ *
+ * `base_sha_at_entry` is the branch's merge-base with base (the fork point),
+ * NOT base's tip at the moment the episode started — every subsequent call's
+ * `mainDriftPaths` is diffed from this fixed fork point to the CURRENT base
+ * tip (cumulative for the whole episode, never "since the last check"), so
+ * drift that landed on base before the episode even began is still visible on
+ * the entry call itself instead of being invisible until some later check.
  */
 export async function checkReviewDrift(
   scope: RepoScope,
@@ -318,7 +346,7 @@ export async function checkReviewDrift(
       workspace_id: ticket.workspace_id,
       board_id: resource.board_id || '',
       base_branch: baseBranch,
-      base_sha_at_entry: probed.baseTipSha,
+      base_sha_at_entry: probed.mergeBaseSha,
       branch_tip_sha_at_entry: probed.featureTipSha,
       changed_paths_at_entry: JSON.stringify(probed.branchPaths),
       last_checked_base_sha: probed.baseTipSha,
@@ -341,7 +369,7 @@ export async function checkReviewDrift(
     classification,
     recommendation,
     overlapping_paths: classification === 'overlapping_drift' || classification === 'overlapping_drift_budget_exhausted'
-      ? probed.mainDriftPaths
+      ? overlappingSubset(probed.branchPaths, probed.mainDriftPaths)
       : [],
     reverification_count: nextCount,
     max_reverifications: MAX_DRIFT_REVERIFICATIONS,

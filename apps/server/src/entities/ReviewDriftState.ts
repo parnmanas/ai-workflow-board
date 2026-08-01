@@ -84,7 +84,11 @@ export class ReviewDriftState {
   branch_tip_sha_at_entry: string;
 
   // JSON string array — the feature branch's own changed paths vs base,
-  // captured at entry (Q1's overlap rules compare against this).
+  // captured at entry. Diagnostic/audit snapshot only: Q1's overlap rules
+  // (`pathsOverlap` in review-drift.ts) always compare against a FRESH
+  // `branchPaths` re-probed on every call, never this stored value — a
+  // branch that gains commits mid-review is still checked accurately. This
+  // column exists so the entry state is inspectable without re-probing git.
   @Column({ type: 'text', default: '[]' })
   changed_paths_at_entry: string;
 
