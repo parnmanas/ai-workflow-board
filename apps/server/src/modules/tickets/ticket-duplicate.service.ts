@@ -243,10 +243,9 @@ export class TicketDuplicateService {
         throw new Error('Assignee is not assigned');
       }
 
-      // Own the correction with a compare-and-swap. Under Postgres READ
-      // COMMITTED two callers may both have read the old canonical above, but
-      // only one can change that exact value to NULL. The loser must stop
-      // before touching intents/audit rows.
+      // compare-and-swap으로 정정 소유권을 획득한다. PostgreSQL READ COMMITTED에서는
+      // 두 호출이 위에서 기존 canonical을 함께 읽을 수 있지만, 그 값을 NULL로 바꾸는
+      // 호출은 하나뿐이어야 한다. 실패한 호출은 intent와 감사 행을 건드리기 전에 중단한다.
       const claimed = await tickets.update({
         id: report.id,
         canonical_ticket_id: previousCanonicalId,
@@ -276,9 +275,9 @@ export class TicketDuplicateService {
         role,
         agent_id: role === 'assignee' ? (report.assignee_id || '') : '',
         trigger_source: 'duplicate_correction',
-        // The correction path owns the first dispatch before this transaction
-        // commits. Publishing a runnable pending row here lets the reconciler
-        // lease it before the MCP emits, producing two wire payloads.
+        // 이 트랜잭션이 커밋되기 전에 정정 경로가 첫 dispatch 소유권을 획득한다.
+        // 실행 가능한 pending 행을 공개하면 MCP emit 전에 reconciler가 lease를
+        // 가져가 wire payload가 두 번 생성될 수 있다.
         status: 'in_flight',
         attempts: 1,
         dispatch_generation: 1,

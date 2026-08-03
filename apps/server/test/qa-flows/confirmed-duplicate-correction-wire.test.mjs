@@ -152,9 +152,9 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
     where: { ticket_id: multiRouted.id, role: 'reviewer' },
   }), 0, 'non-selected routed role must not open an intent');
 
-  // Deterministic MCP-vs-reconciler race: stop the direct path after the
-  // correction transaction committed its claimed intent but before wire emit,
-  // then sweep at a time where retry is due but the first-owner lease is live.
+  // MCP와 reconciler의 경쟁을 결정적으로 재현한다. 정정 트랜잭션이 선점한 intent를
+  // 커밋한 뒤 wire emit 직전에 직접 경로를 멈추고, 첫 소유자의 lease가 유효한
+  // 상태에서 재시도 시각을 넘겨 reconciler sweep을 실행한다.
   const racing = await seedCorrection({ title: 'atomic first-dispatch ownership' });
   const originalEmit = triggerLoop.emitAgentTrigger.bind(triggerLoop);
   let releaseEmit;
