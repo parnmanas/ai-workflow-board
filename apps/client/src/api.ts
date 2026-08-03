@@ -945,6 +945,18 @@ export const api = {
     const params = new URLSearchParams({ workspace_id });
     return request<{ success: true; id: string }>(`/prompt-templates/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  listDefaultPromptTemplates: (workspace_id: string) => {
+    const params = new URLSearchParams({ workspace_id });
+    return request<import('./types').BuiltinPromptDefault[]>(`/prompt-templates/defaults/catalog?${params.toString()}`);
+  },
+  resetDefaultPromptTemplates: (data: {
+    workspace_id: string;
+    names: string[];
+    reset_board_mappings: boolean;
+  }) => request<{ success: true; templates: PromptTemplate[] }>('/prompt-templates/defaults/reset', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 
   // ─── Resources ─────────────────────────────────────────
   listResources: (

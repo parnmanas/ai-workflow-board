@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
 import { DEFAULT_PROMPT_TEMPLATES } from '../../database/default-prompt-templates';
+import { InjectDataSource } from '@nestjs/typeorm';
 
 /**
  * Helpers shared by the workspace-create / board-create paths so a fresh
@@ -22,7 +24,75 @@ export class PromptTemplatesService {
   constructor(
     @InjectRepository(PromptTemplate)
     private readonly templateRepo: Repository<PromptTemplate>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  getDefaultsCatalog() {
+    return DEFAULT_PROMPT_TEMPLATES.map(def => ({ ...def }));
+  }
+
+  async resetDefaults(
+    workspaceId: string,
+    names: string[],
+    resetBoardMappings: boolean,
+  ): Promise<PromptTemplate[]> {
+    if (!workspaceId) throw new Error('workspace_id is required');
+    const requested = new Set((names || []).map(name => String(name || '').trim()).filter(Boolean));
+    if (requested.size === 0) throw new Error('At least one built-in prompt template is required');
+    const defaultsByName = new Map(DEFAULT_PROMPT_TEMPLATES.map(def => [def.name, def]));
+    for (const name of requested) {
+      if (!defaultsByName.has(name)) throw new Error(`Unknown built-in prompt template: ${name}`);
+    }
+    if (resetBoardMappings && requested.size !== DEFAULT_PROMPT_TEMPLATES.length) {
+      throw new Error('Resetting board mappings requires all built-in prompt templates');
+    }
+
+    return this.dataSource.transaction(async manager => {
+      const templateRepo = manager.getRepository(PromptTemplate);
+      const existing = await templateRepo.find({ where: { workspace_id: workspaceId } });
+      const existingByName = new Map(existing.map(row => [row.name, row]));
+      const savedByName = new Map<string, PromptTemplate>();
+
+      for (const name of requested) {
+        const def = defaultsByName.get(name)!;
+        const row = existingByName.get(name) ?? templateRepo.create({ workspace_id: workspaceId });
+        Object.assign(row, {
+          workspace_id: workspaceId,
+          board_id: null,
+          name: def.name,
+          description: def.description,
+          content: def.content,
+          category: def.category,
+        });
+        savedByName.set(name, await templateRepo.save(row));
+      }
+
+      if (resetBoardMappings) {
+        const boardRepo = manager.getRepository(Board);
+        const boards = await boardRepo.find({ where: { workspace_id: workspaceId } });
+        const defByColumn = new Map(DEFAULT_PROMPT_TEMPLATES.map(def => [def.column_match, def]));
+        for (const board of boards) {
+          let mappings: Record<string, string> = {};
+          try {
+            const parsed = JSON.parse(board.column_prompts || '{}');
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) mappings = parsed;
+          } catch {
+            mappings = {};
+          }
+          for (const column of board.columns || []) {
+            const def = defByColumn.get(String(column.name || '').trim().toLowerCase());
+            if (!def) continue;
+            const template = savedByName.get(def.name);
+            if (template) mappings[column.id] = template.id;
+          }
+          board.column_prompts = Object.keys(mappings).length ? JSON.stringify(mappings) : null;
+          await boardRepo.save(board);
+        }
+      }
+
+      return Array.from(savedByName.values());
+    });
+  }
 
   /**
    * Insert any default templates that don't already exist (by name) in the

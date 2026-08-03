@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { BoardCardColumn, PromptTemplate } from '../types';
+import { BoardCardColumn, BuiltinPromptDefault, PromptTemplate } from '../types';
 import { tokens } from '../tokens';
 import { Button, Input } from './common';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { resetAllColumnMappingDrafts, resetColumnMappingDraft } from '../utils/promptResetDraft';
 
 // Routing toggles used to be hardcoded to the legacy assignee/reviewer/reporter
 // trio — replaced in v0.34 with the workspace's actual role catalog so the
@@ -19,12 +20,13 @@ interface ColumnManagerProps {
   routingConfig: Record<string, string[]>;
   columnPrompts: Record<string, string>; // columnId → promptTemplateId
   promptTemplates: PromptTemplate[];
+  defaultPromptTemplates: BuiltinPromptDefault[];
   workspaceRoles?: RoleOption[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
   onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed' }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
   onUpdateRoutingConfig: (config: Record<string, string[]>) => Promise<void>;
-  onUpdateColumnPrompts: (config: Record<string, string>) => Promise<void>;
+  onSaveColumnPrompts: (config: Record<string, string>) => Promise<void>;
 }
 
 // tag/label palette — decorative column color swatches, not tokenized
@@ -35,8 +37,8 @@ const PRESET_COLORS = [
 ];
 
 export default function ColumnManager({
-  columns, boardId, routingConfig, columnPrompts, promptTemplates, workspaceRoles,
-  onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig, onUpdateColumnPrompts,
+  columns, boardId, routingConfig, columnPrompts, promptTemplates, defaultPromptTemplates, workspaceRoles,
+  onCreateColumn, onUpdateColumn, onDeleteColumn, onUpdateRoutingConfig, onSaveColumnPrompts,
 }: ColumnManagerProps) {
   const confirm = useConfirm();
   const sortedRoles: RoleOption[] = (workspaceRoles || []).slice()
@@ -47,6 +49,15 @@ export default function ColumnManager({
   const [editName, setEditName] = useState('');
   const [editColor, setEditColor] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [promptDraft, setPromptDraft] = useState<Record<string, string>>({ ...columnPrompts });
+  const [promptSaving, setPromptSaving] = useState(false);
+
+  const persistedPromptKey = JSON.stringify(columnPrompts);
+  useEffect(() => {
+    setPromptDraft({ ...columnPrompts });
+  }, [persistedPromptKey]);
+
+  const promptDirty = JSON.stringify(promptDraft) !== persistedPromptKey;
 
   const sorted = [...columns].sort((a, b) => a.position - b.position);
 
@@ -104,14 +115,52 @@ export default function ColumnManager({
   const getColRoles = (colName: string): string[] => routingConfig[colName.toLowerCase()] || [];
 
   const setColumnPrompt = (colId: string, tplId: string | '') => {
-    const next = { ...columnPrompts };
+    const next = { ...promptDraft };
     if (tplId) next[colId] = tplId;
     else delete next[colId];
-    onUpdateColumnPrompts(next);
+    setPromptDraft(next);
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>Column prompts</div>
+            <div style={{ fontSize: 11, color: promptDirty ? tokens.colors.warningLight : tokens.colors.textMuted, marginTop: 2 }}>
+              {promptDirty ? 'Unsaved prompt mapping changes' : 'Changes apply only after Save changes.'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPromptDraft(current => resetAllColumnMappingDrafts(current, columns, defaultPromptTemplates, promptTemplates))}
+              disabled={defaultPromptTemplates.length === 0 || promptSaving}
+            >
+              Reset all column mappings
+            </Button>
+            {promptDirty && (
+              <>
+                <Button size="sm" variant="secondary" disabled={promptSaving} onClick={() => setPromptDraft({ ...columnPrompts })}>Cancel</Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={promptSaving}
+                  onClick={async () => {
+                    setPromptSaving(true);
+                    try {
+                      await onSaveColumnPrompts(promptDraft);
+                    } finally {
+                      setPromptSaving(false);
+                    }
+                  }}
+                >
+                  Save changes
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
         {/* Column list */}
         <DragDropContext onDragEnd={handleDragEnd}>
           <Droppable droppableId="column-manager-list">
@@ -265,7 +314,7 @@ export default function ColumnManager({
                                   Prompt
                                 </span>
                                 <select
-                                  value={columnPrompts[col.id] || ''}
+                                  value={promptDraft[col.id] || ''}
                                   onChange={(e) => setColumnPrompt(col.id, e.target.value)}
                                   style={{
                                     padding: '3px 8px', borderRadius: tokens.radii.sm, fontSize: '12px',
@@ -282,7 +331,15 @@ export default function ColumnManager({
                                     </option>
                                   ))}
                                 </select>
-                                {columnPrompts[col.id] && !promptTemplates.some((t) => t.id === columnPrompts[col.id]) && (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={!defaultPromptTemplates.some(def => def.column_match === col.name.trim().toLowerCase())}
+                                  onClick={() => setPromptDraft(current => resetColumnMappingDraft(current, col, defaultPromptTemplates, promptTemplates))}
+                                >
+                                  Reset
+                                </Button>
+                                {promptDraft[col.id] && !promptTemplates.some((t) => t.id === promptDraft[col.id]) && (
                                   <span
                                     title="The currently-linked template is missing from this workspace (deleted or inaccessible). Select a new one or clear."
                                     style={{ fontSize: '11px', color: tokens.colors.danger ?? '#f87171' }}

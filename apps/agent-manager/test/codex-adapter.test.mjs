@@ -147,6 +147,49 @@ test('buildOneshotSpawn omits --cd when no cwd was resolved', () => {
   assert.equal(descriptor.args.includes('--cd'), false);
 });
 
+test('buildOneshotSpawn puts the resolved harness policy before role and task text', () => {
+  const descriptor = new CodexCliAdapter().buildOneshotSpawn({
+    rolePrompt: 'You are the assignee.',
+    taskText: 'Implement this ticket.',
+    mcpConfigPath: null,
+    harness: { system_prompt_append: 'Stay within the current column.' },
+  });
+  let prompt = '';
+  descriptor.writePrompt({
+    stdin: {
+      write(value) { prompt += value; },
+      end() {},
+    },
+  });
+
+  assert.match(prompt, /^AWB managed policy:\nStay within the current column\.\nEnd AWB managed policy\./);
+  assert.ok(prompt.indexOf('AWB managed policy:') < prompt.indexOf('You are the assignee.'));
+  assert.ok(prompt.indexOf('You are the assignee.') < prompt.indexOf('Implement this ticket.'));
+});
+
+test('buildOneshotSpawn maps Codex permission modes without interactive approvals', () => {
+  const plan = new CodexCliAdapter().buildOneshotSpawn({
+    rolePrompt: '', taskText: 'task', mcpConfigPath: null,
+    harness: { permission_mode: 'plan' },
+  }).args;
+  assert.deepEqual(plan.slice(plan.indexOf('--sandbox'), plan.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
+  assert.ok(plan.includes('approval_policy="never"'));
+  assert.equal(plan.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+
+  const edits = new CodexCliAdapter().buildOneshotSpawn({
+    rolePrompt: '', taskText: 'task', mcpConfigPath: null,
+    harness: { permission_mode: 'acceptEdits' },
+  }).args;
+  assert.deepEqual(edits.slice(edits.indexOf('--sandbox'), edits.indexOf('--sandbox') + 2), ['--sandbox', 'workspace-write']);
+  assert.ok(edits.includes('approval_policy="never"'));
+
+  const bypass = new CodexCliAdapter().buildOneshotSpawn({
+    rolePrompt: '', taskText: 'task', mcpConfigPath: null,
+    harness: { permission_mode: 'bypassPermissions' },
+  }).args;
+  assert.ok(bypass.includes('--dangerously-bypass-approvals-and-sandbox'));
+});
+
 test('prepareCliHome writes required AWB and optional host MCP without persisting the API key', async () => {
   const adapter = new CodexCliAdapter();
   const home = await freshDir();

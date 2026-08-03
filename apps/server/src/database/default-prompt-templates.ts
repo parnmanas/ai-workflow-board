@@ -88,6 +88,8 @@ const ARTIFACT_REFERENCE_RULE = `> 🔗 **AWB Artifact reference 규칙** — Ti
  * 실제로 강제한다 — 실행 가능한 Action 이 있으면 `no_action_reason` 없이는 pend 가
  * 거부된다. 단일 소스로 두어 다섯 워크플로에 byte-identical 하게 주입한다.
  */
+const CURRENT_COLUMN_BOUNDARY_RULE = `> **Current-column boundary (mandatory)** — This guide defines the complete stage scope. Perform only the work and completion checks explicitly required here. Do not pre-run review, merge, deployment, release, cleanup, verification, or completion-audit work assigned to a later column. Do not add optional audits, refactors, documentation, or publishing. Inspect the ticket, repository, git history, and available AWB context first; proceed with safe reversible assumptions, and ask only when a concrete product decision, unavailable credential/permission, missing required input, or irreversible risk blocks this stage.`;
+
 const ACTIONS_BEFORE_PENDING_RULE = `## Actions — run a registered Action before you Pending
 
 Before you \`pend_ticket\` for something an automated operation could do — a deploy, a publish, a merge-to-production, kicking a pipeline, running a scripted task — first check whether a registered **Action** already does it. The server enforces this: \`pend_ticket\` is **rejected while runnable Actions exist** unless you pass \`no_action_reason\` explaining why none apply.
@@ -150,6 +152,7 @@ export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
     content: `# Backlog — Narrate Server-Driven Promotions (reporter)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
@@ -185,6 +188,7 @@ Your job here as reporter is **not to scan or schedule** — that path was a per
     content: `# To Do — Start-or-Wait Decision (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
@@ -237,6 +241,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     content: `# Plan — Concrete Plan Before Code (planner)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
@@ -306,6 +311,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     content: `# In Progress — Branch Work (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
@@ -394,6 +400,7 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
     content: `# Review — Code Review + Q&A (reviewer / assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
@@ -506,6 +513,7 @@ You handed the ticket off to Review. You are triggered here because the reviewer
     content: `# Merging — Integrate into Default (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 This ticket is in the Merging column, which means Review approved the diff. Your job: land the feature branch on the default branch, delete the feature branch (local + remote), and advance the ticket to Done.
 
@@ -623,6 +631,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     content: `# Done — Completion + Merge Audit (reporter)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
 ${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 

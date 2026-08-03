@@ -58,6 +58,16 @@ const ARTIFACT_REFERENCE_INSTRUCTION =
   '`#[type:<full-uuid>|Human-readable name]`. Never use only a shortened id. Use `@[agent:...]` only to notify. ' +
   'If existence or access cannot be verified, do not invent a link; give the name, full stable id, and reason.';
 
+export const CURRENT_COLUMN_EXECUTION_CONTRACT = [
+  'AWB current-column execution contract (mandatory):',
+  '- The current column workflow guide is the complete scope for this turn.',
+  '- Perform only the ticket work and completion checks that guide explicitly requires.',
+  '- Do not perform work assigned to a later column, including later-stage review, merge, deployment, release, cleanup, or completion audit.',
+  '- Do not add optional audits, refactors, documentation, publishing, or follow-up work outside the current-column scope.',
+  '- Inspect the ticket, repository, and available AWB context before asking the user.',
+  '- Make safe, reversible assumptions and proceed autonomously. Ask only when the current-column work is blocked by a concrete product decision, unavailable credential or permission, missing required input, or irreversible risk.',
+].join('\n');
+
 function ticketReferenceLine(ticket: { id?: string; title?: string }): string {
   const id = String(ticket?.id || '');
   const title = String(ticket?.title || '').replace(/[\]\r\n|]+/g, ' ').trim();
@@ -150,6 +160,8 @@ export function composeTriggerPrompt(
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB subagent responding to an assigned trigger.');
+  lines.push('');
+  lines.push(CURRENT_COLUMN_EXECUTION_CONTRACT);
   lines.push('');
   if (ticket) {
     lines.push(ticketReferenceLine(ticket));

@@ -55,7 +55,7 @@ export interface HarnessSpec {
    * site reads it off the PRE-partition harness.
    */
   fallback_models?: string[];
-  /** --permission-mode override (claude-family only). */
+  /** Permission policy override; each adapter maps supported values to native flags. */
   permission_mode?: string;
 }
 

@@ -57,8 +57,14 @@ function disallowedToolsArgs(harness?: HarnessSpec | null): string[] {
  *  configured mode a no-op. No permission_mode → the skip flag, exactly as
  *  before. */
 function permissionArgs(harness?: HarnessSpec | null): string[] {
-  return harness?.permission_mode
-    ? ['--permission-mode', harness.permission_mode]
+  const raw = harness?.permission_mode?.trim();
+  const normalized = raw === 'default'
+    ? 'auto'
+    : raw && new Set(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']).has(raw)
+      ? raw
+      : null;
+  return normalized
+    ? ['--permission-mode', normalized]
     : ['--dangerously-skip-permissions'];
 }
 
