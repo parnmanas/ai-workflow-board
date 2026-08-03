@@ -166,6 +166,12 @@ export function composeTriggerPrompt(
   if (ticket) {
     lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
+    if (ticket.current_column_name || ticket.current_column_id) {
+      lines.push(
+        `Current column: ${ticket.current_column_name || 'unknown'} ` +
+          `(kind: ${ticket.current_column_kind || 'unknown'}, id: ${ticket.current_column_id || 'unknown'})`,
+      );
+    }
     if (ticket.description) {
       lines.push('');
       lines.push('Description:');

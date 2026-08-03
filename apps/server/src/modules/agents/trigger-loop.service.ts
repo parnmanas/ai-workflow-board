@@ -2039,7 +2039,7 @@ candidate's branch or move the ticket.
     // so always re-read the link at the single trigger chokepoint.
     const duplicateGateTicket = await this.dataSource.getRepository(Ticket).findOne({
       where: { id: ticket.id },
-      select: ['id', 'canonical_ticket_id'],
+      select: ['id', 'canonical_ticket_id', 'column_id'],
     });
     if (duplicateGateTicket?.canonical_ticket_id) {
       this.logService.info('MCP', 'agent_trigger dropped (duplicate ticket)', {
@@ -2056,8 +2056,9 @@ candidate's branch or move the ticket.
     // (focus selector), the audit-row ranking summary, and any
     // downstream lookup. Cheap, single repo hit, avoids the three
     // separate findOne calls the pre-fix code did.
-    const col = ticket.column_id
-      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+    const currentColumnId = duplicateGateTicket?.column_id || ticket.column_id;
+    const col = currentColumnId
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: currentColumnId } })
       : null;
     const boardId = col?.board_id ?? '';
 
@@ -2805,6 +2806,9 @@ candidate's branch or move the ticket.
       agent_id: agentId,
       role,
       trigger_source: triggerSource,
+      current_column_id: col?.id || '',
+      current_column_name: col?.name || '',
+      current_column_kind: col?.kind || '',
       role_prompt: rolePrompt,
       ticket_prompt: ticketPrompt,
       column_prompt: columnPrompt,

@@ -81,6 +81,10 @@ export const EVENT_TYPES: EventDefinition[] = [
       const canonicalActor = activity.actor_id
         ? await ctx.resolveActorDisplayName(activity.actor_id)
         : null;
+      const currentColumn = await ctx.resolveTicketColumnSnapshot(
+        activity.ticket_id,
+        activity.entity_id,
+      );
       const payload: BoardUpdatePayload = {
         ticket_id: activity.ticket_id,
         repository_resource_id: await ctx.resolveTicketRepositoryResourceId(activity.ticket_id),
@@ -88,6 +92,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: activity.action,
         field_changed: activity.field_changed || '',
         actor_name: canonicalActor || activity.actor_name || '',
+        current_column_id: currentColumn?.id || '',
+        current_column_name: currentColumn?.name || '',
+        current_column_kind: currentColumn?.kind || '',
+        previous_column_name: activity.action === 'moved' ? activity.old_value || '' : '',
+        new_column_name: activity.action === 'moved' ? activity.new_value || '' : '',
       };
       return { payload, scope: { board_id: boardId } };
     },
@@ -105,6 +114,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: p.action,
         field_changed: p.field_changed || '',
         actor_name: p.actor_name || '',
+        current_column_id: p.current_column_id || '',
+        current_column_name: p.current_column_name || '',
+        current_column_kind: p.current_column_kind || '',
+        previous_column_name: p.previous_column_name || '',
+        new_column_name: p.new_column_name || '',
         timestamp: env.timestamp,
       };
     },
@@ -163,6 +177,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: event.role_prompt || '',
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
+        current_column_id: event.current_column_id || '',
+        current_column_name: event.current_column_name || '',
+        current_column_kind: event.current_column_kind || '',
         column_prompt: event.column_prompt ?? null,
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
@@ -227,6 +244,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: p.role_prompt,
         ticket_prompt: p.ticket_prompt,
         trigger_source: p.trigger_source,
+        current_column_id: p.current_column_id || '',
+        current_column_name: p.current_column_name || '',
+        current_column_kind: p.current_column_kind || '',
         // phase12: forward column_prompt (PromptTemplate wired to the ticket's
         // column) so the Runtime Host can include it in the trigger prompt. Without
         // this, column_prompt stays undefined on the Host side and the

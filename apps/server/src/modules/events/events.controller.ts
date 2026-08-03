@@ -122,6 +122,8 @@ export class EventsController implements OnModuleDestroy {
     const mapCtx: EventMapContext = {
       resolveBoardId: (ticketId, entityId) => this.resolveBoardId(ticketId, entityId),
       resolveTicketRepositoryResourceId: (ticketId) => this.resolveTicketRepositoryResourceId(ticketId),
+      resolveTicketColumnSnapshot: (ticketId, entityId) =>
+        this.resolveTicketColumnSnapshot(ticketId, entityId),
       // Same (id → canonical display) resolver ActivityService uses on read, so
       // the realtime board_update frame and a later refetch never disagree.
       resolveActorDisplayName: (actorId) =>
@@ -229,6 +231,20 @@ export class EventsController implements OnModuleDestroy {
     if (!ticketId) return '';
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
     return ticket?.base_repo_resource_id || '';
+  }
+
+  private async resolveTicketColumnSnapshot(ticketId: string, entityId: string): Promise<{
+    id: string;
+    name: string;
+    kind: string;
+  } | null> {
+    let ticket = await this.ticketRepo.findOne({ where: { id: ticketId || entityId } });
+    for (let depth = 0; ticket && !ticket.column_id && ticket.parent_id && depth < 2; depth += 1) {
+      ticket = await this.ticketRepo.findOne({ where: { id: ticket.parent_id } });
+    }
+    if (!ticket?.column_id) return null;
+    const column = await this.colRepo.findOne({ where: { id: ticket.column_id } });
+    return column ? { id: column.id, name: column.name, kind: column.kind || '' } : null;
   }
 
   @Sse('stream')
