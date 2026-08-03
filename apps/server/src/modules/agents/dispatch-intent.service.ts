@@ -129,7 +129,7 @@ export function decideIntentReconcile(opts: {
   return { action: 'dispatch', reason: 'owed' };
 }
 
-function readReconcilerConfig(env: NodeJS.ProcessEnv = process.env): DispatchReconcilerConfig {
+export function readReconcilerConfig(env: NodeJS.ProcessEnv = process.env): DispatchReconcilerConfig {
   const num = (raw: string | undefined, fallback: number): number => {
     if (raw == null || raw === '') return fallback;
     const n = Number(raw);

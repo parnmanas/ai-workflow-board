@@ -1228,7 +1228,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     role: string,
     triggerSource: string,
     triggeredBy: string,
-    opts?: { forceRespawn?: boolean; bypassFocus?: boolean },
+    opts?: { forceRespawn?: boolean; bypassFocus?: boolean; intentAlreadyClaimed?: boolean },
   ): Promise<string> {
     return this._emitTrigger(ticket, agentId, role, triggerSource, triggeredBy, opts);
   }
@@ -2060,6 +2060,7 @@ candidate's branch or move the ticket.
       forceRespawn?: boolean;
       bypassFocus?: boolean;
       bypassTicketPending?: boolean;
+      intentAlreadyClaimed?: boolean;
       // Inline override for `column_prompt` — used by `_dispatchPostDoneReview`
       // to inject the self-improvement analysis prompt onto a terminal-column
       // trigger that the normal `board.column_prompts[column_id]` path can't
@@ -2960,7 +2961,7 @@ candidate's branch or move the ticket.
     // backstop if it somehow doesn't run). Skip the reconciler's own re-dispatch
     // — it already claimed + bumped the intent generation via claimForDispatch,
     // so re-recording here would double-count attempts and drop its lease.
-    if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
+    if (triggerSource !== DISPATCH_RECONCILE_SOURCE && !opts?.intentAlreadyClaimed) {
       await this.dispatchIntents.recordDispatched({
         workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
         role, agentId, triggerSource, triggerId,

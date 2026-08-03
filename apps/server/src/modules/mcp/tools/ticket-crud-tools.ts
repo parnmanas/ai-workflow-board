@@ -491,19 +491,32 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           caller?.agentName || '',
           caller?.agentId || '',
         );
-        const dispatch = await triggerLoopService.dispatchCurrentColumnRole(
-          corrected.ticket.id,
+        const triggerId = await triggerLoopService.emitAgentTrigger(
+          corrected.ticket,
+          corrected.agentId,
           role,
           'duplicate_correction',
           caller?.agentId || '',
+          { intentAlreadyClaimed: true },
         );
+        const recorded = await dataSource.getRepository('DispatchIntent').createQueryBuilder()
+          .update()
+          .set({ last_trigger_id: triggerId })
+          .where('id = :id', { id: corrected.intentId })
+          .andWhere('dispatch_generation = :generation', { generation: corrected.generation })
+          .andWhere('lease_owner = :owner', { owner: corrected.leaseOwner })
+          .execute();
+        if ((recorded.affected ?? 0) !== 1) {
+          throw new Error('Duplicate correction dispatch claim was lost before trigger recording');
+        }
         return ok({
           ticket: await loadTicketFull(dataSource, corrected.ticket.id),
           previous_canonical_ticket_id: corrected.previousCanonicalId,
           dispatch_intent_id: corrected.intentId,
-          dispatch_attempted: dispatch.attempted,
-          dispatch_landed: dispatch.landed,
-          dispatch_trigger_ids: dispatch.triggerIds,
+          dispatch_attempted: 1,
+          dispatch_landed: triggerId ? 1 : 0,
+          dispatch_trigger_ids: triggerId ? [triggerId] : [],
+          dispatch_generation: corrected.generation,
         });
       } catch (e: any) {
         return err(e?.message || 'Confirmed duplicate correction rejected');

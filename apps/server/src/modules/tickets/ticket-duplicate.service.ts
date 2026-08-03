@@ -6,6 +6,8 @@ import { Comment } from '../../entities/Comment';
 import { DispatchIntent } from '../../entities/DispatchIntent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { randomUUID } from 'crypto';
+import { dispatchBackoffMs, readReconcilerConfig } from '../agents/dispatch-intent.service';
 
 export interface DuplicateIntake {
   title: string;
@@ -211,7 +213,7 @@ export class TicketDuplicateService {
     role: string,
     actorName: string,
     actorId: string,
-  ): Promise<{ ticket: Ticket; previousCanonicalId: string; intentId: string }> {
+  ): Promise<{ ticket: Ticket; previousCanonicalId: string; intentId: string; generation: number; leaseOwner: string; agentId: string }> {
     return this.dataSource.transaction(async manager => {
       const tickets = manager.getRepository(Ticket);
       const report = await tickets.findOne({ where: { id: reportId } });
@@ -266,6 +268,7 @@ export class TicketDuplicateService {
         lease_owner: '',
         lease_expires_at: null,
       });
+      const dispatchConfig = readReconcilerConfig();
       const freshIntent = await intents.save(intents.create({
         workspace_id: report.workspace_id,
         board_id: column.board_id || '',
@@ -273,10 +276,15 @@ export class TicketDuplicateService {
         role,
         agent_id: role === 'assignee' ? (report.assignee_id || '') : '',
         trigger_source: 'duplicate_correction',
-        status: 'pending',
-        attempts: 0,
-        dispatch_generation: 0,
-        next_attempt_at: now,
+        // The correction path owns the first dispatch before this transaction
+        // commits. Publishing a runnable pending row here lets the reconciler
+        // lease it before the MCP emits, producing two wire payloads.
+        status: 'in_flight',
+        attempts: 1,
+        dispatch_generation: 1,
+        next_attempt_at: new Date(now.getTime() + dispatchBackoffMs(1, dispatchConfig)),
+        lease_owner: `duplicate-correction:${randomUUID()}`,
+        lease_expires_at: new Date(now.getTime() + dispatchConfig.leaseMs),
         last_reason: 'duplicate_link_corrected',
       }));
       await manager.getRepository(TicketDuplicateDecision).save({
@@ -311,7 +319,14 @@ export class TicketDuplicateService {
         role,
         trigger_source: 'duplicate_correction',
       });
-      return { ticket: saved, previousCanonicalId, intentId: freshIntent.id };
+      return {
+        ticket: saved,
+        previousCanonicalId,
+        intentId: freshIntent.id,
+        generation: freshIntent.dispatch_generation,
+        leaseOwner: freshIntent.lease_owner,
+        agentId: freshIntent.agent_id,
+      };
     });
   }
 }

@@ -63,6 +63,7 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   });
   assert.equal(intent.last_trigger_id, trigger.trigger_id);
   assert.equal(intent.dispatch_generation, 1);
+  assert.equal(result.dispatch_generation, 1);
   const { DispatchIntentService } = await import(
     'file://' + path.join(DIST, 'modules', 'agents', 'dispatch-intent.service.js')
   );
@@ -105,7 +106,7 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   });
   const liveOpenIntents = liveIntents.filter(row => ['pending', 'in_flight'].includes(row.status));
   assert.equal(liveOpenIntents.length, 1, 'live strand keeps exactly one fresh open intent');
-  assert.equal(liveOpenIntents[0].dispatch_generation, 0);
+  assert.equal(liveOpenIntents[0].dispatch_generation, 1);
   triggerLoop.agentStatus.clearCurrentTask(assignee.id, live.id, 'live-correction');
 
   const assertRejectedWithoutMutation = async (ticket, label) => {
@@ -150,6 +151,52 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   assert.equal(await ds.getRepository('DispatchIntent').count({
     where: { ticket_id: multiRouted.id, role: 'reviewer' },
   }), 0, 'non-selected routed role must not open an intent');
+
+  // Deterministic MCP-vs-reconciler race: stop the direct path after the
+  // correction transaction committed its claimed intent but before wire emit,
+  // then sweep at a time where retry is due but the first-owner lease is live.
+  const racing = await seedCorrection({ title: 'atomic first-dispatch ownership' });
+  const originalEmit = triggerLoop.emitAgentTrigger.bind(triggerLoop);
+  let releaseEmit;
+  const emitBarrier = new Promise(resolve => { releaseEmit = resolve; });
+  let reachedBarrier;
+  const barrierReached = new Promise(resolve => { reachedBarrier = resolve; });
+  triggerLoop.emitAgentTrigger = async (...args) => {
+    if (args[0]?.id === racing.id) {
+      reachedBarrier();
+      await emitBarrier;
+    }
+    return originalEmit(...args);
+  };
+  const racingCall = mcp.callTool('correct_confirmed_ticket_duplicate', {
+    ticket_id: racing.id, role: 'assignee',
+  });
+  await barrierReached;
+  const claimed = await ds.getRepository('DispatchIntent').findOneByOrFail({
+    ticket_id: racing.id, role: 'assignee', status: 'in_flight',
+  });
+  assert.equal(claimed.dispatch_generation, 1);
+  assert.match(claimed.lease_owner, /^duplicate-correction:/);
+  const { DispatchReconcilerService } = await import(
+    'file://' + path.join(DIST, 'modules', 'agents', 'dispatch-reconciler.service.js')
+  );
+  const reconciler = app.get(DispatchReconcilerService);
+  await reconciler.reconcile(new Date(new Date(claimed.next_attempt_at).getTime() + 1));
+  releaseEmit();
+  const racingResult = await racingCall;
+  triggerLoop.emitAgentTrigger = originalEmit;
+  const racingTrigger = await va.waitForTrigger(tr => tr.ticket_id === racing.id, 4000);
+  assert.equal(va.triggers.filter(tr => tr.ticket_id === racing.id).length, 1);
+  assert.equal(racingResult.dispatch_generation, 1);
+  assert.deepEqual(racingResult.dispatch_trigger_ids, [racingTrigger.trigger_id]);
+  const racedIntent = await ds.getRepository('DispatchIntent').findOneByOrFail({ id: claimed.id });
+  assert.equal(racedIntent.dispatch_generation, 1);
+  assert.equal(racedIntent.last_trigger_id, racingTrigger.trigger_id);
+  const racedAck = await app.get(DispatchIntentService).applyManagerAck({
+    ticketId: racing.id, role: 'assignee', triggerId: racingTrigger.trigger_id, outcome: 'processed',
+  });
+  assert.equal(racedAck.matched, true);
+  assert.equal(racedAck.applied, true);
 });
 
 exitAfterTests();

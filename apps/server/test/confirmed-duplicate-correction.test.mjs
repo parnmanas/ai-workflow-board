@@ -58,7 +58,9 @@ test('확정 오탐 정정은 관계와 stale intent를 원자적으로 교체�
   const open = intents.filter(row => ['pending', 'in_flight'].includes(row.status));
   assert.equal(open.length, 1);
   assert.equal(open[0].id, corrected.intentId);
-  assert.equal(open[0].attempts, 0);
+  assert.equal(open[0].attempts, 1);
+  assert.equal(open[0].dispatch_generation, 1);
+  assert.match(open[0].lease_owner, /^duplicate-correction:/);
   assert.equal(open[0].trigger_source, 'duplicate_correction');
 
   const decision = await ds.getRepository(entities.TicketDuplicateDecision).findOneByOrFail({
