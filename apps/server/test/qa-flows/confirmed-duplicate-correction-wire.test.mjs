@@ -10,6 +10,10 @@ import { fileURLToPath } from 'node:url';
 process.env.PORT = process.env.QA_DUPLICATE_CORRECTION_PORT || '7854';
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist');
 
+async function waitForNoWire() {
+  await new Promise(resolve => setTimeout(resolve, 700));
+}
+
 test('MCP duplicate correction emits exactly one selected-role wire trigger and preserves canonical', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
   t.after(() => { void app.close().catch(() => {}); });
@@ -21,9 +25,14 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   const assigneeKey = await createApiKey(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id });
   const operator = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'operator' });
   const operatorKey = await createApiKey(app, modules.getDataSourceToken, operator.id, { workspaceId: ws.id });
+  const reviewer = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'reviewer' });
+  const reviewerKey = await createApiKey(app, modules.getDataSourceToken, reviewer.id, { workspaceId: ws.id });
   const va = new VirtualAgent({ name: 'worker', agentId: assignee.id, apiKey: assigneeKey.raw_key, port });
+  const reviewerVa = new VirtualAgent({ name: 'reviewer', agentId: reviewer.id, apiKey: reviewerKey.raw_key, port });
   await va.start();
+  await reviewerVa.start();
   t.after(async () => va.stop());
+  t.after(async () => reviewerVa.stop());
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: operatorKey.raw_key });
   t.after(async () => mcp.close());
 
@@ -65,6 +74,82 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   assert.equal((await ds.getRepository('DispatchIntent').findOneByOrFail({ id: intent.id })).last_ack_kind, 'processed');
   assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: canonical.id })).title, 'unrelated done ticket');
   assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: canonical.id })).column_id, columns.done.id);
+
+  const seedCorrection = async ({ title, columnId = columns.inProgress.id, assigneeId = assignee.id, reviewerId = '' }) => {
+    const ticket = await createTicket(app, modules.getDataSourceToken, {
+      columnId, workspaceId: ws.id, title, assigneeId, reviewerId,
+    });
+    await ds.getRepository('Ticket').update(ticket.id, { canonical_ticket_id: canonical.id });
+    await ds.getRepository('DispatchIntent').save({
+      workspace_id: ws.id, board_id: columns.inProgress.board_id, ticket_id: ticket.id,
+      role: 'assignee', agent_id: assigneeId, trigger_source: 'old', status: 'in_flight',
+      attempts: 209, dispatch_generation: 209, next_attempt_at: new Date(),
+    });
+    return ticket;
+  };
+
+  const { TriggerLoopService } = await import(
+    'file://' + path.join(DIST, 'modules', 'agents', 'trigger-loop.service.js')
+  );
+  const triggerLoop = app.get(TriggerLoopService);
+  const live = await seedCorrection({ title: 'live strand correction' });
+  await triggerLoop.agentStatus.setCurrentTask(assignee.id, live.id, 'assignee', 'live-correction');
+  const beforeLiveTriggers = va.triggers.length;
+  const liveResult = await mcp.callTool('correct_confirmed_ticket_duplicate', { ticket_id: live.id, role: 'assignee' });
+  await waitForNoWire();
+  assert.equal(liveResult.dispatch_attempted, 1);
+  assert.equal(liveResult.dispatch_landed, 0);
+  assert.equal(va.triggers.length, beforeLiveTriggers, 'live strand must suppress the wire payload');
+  const liveIntents = await ds.getRepository('DispatchIntent').find({
+    where: { ticket_id: live.id, role: 'assignee' },
+  });
+  const liveOpenIntents = liveIntents.filter(row => ['pending', 'in_flight'].includes(row.status));
+  assert.equal(liveOpenIntents.length, 1, 'live strand keeps exactly one fresh open intent');
+  assert.equal(liveOpenIntents[0].dispatch_generation, 0);
+  triggerLoop.agentStatus.clearCurrentTask(assignee.id, live.id, 'live-correction');
+
+  const assertRejectedWithoutMutation = async (ticket, label) => {
+    const before = va.triggers.length;
+    const result = await mcp.callTool('correct_confirmed_ticket_duplicate', { ticket_id: ticket.id, role: 'assignee' });
+    assert.equal(result.isError, true, `${label} must fail closed`);
+    await waitForNoWire();
+    assert.equal(va.triggers.length, before, `${label} must not emit a wire payload`);
+    assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).canonical_ticket_id, canonical.id);
+    const intents = await ds.getRepository('DispatchIntent').find({ where: { ticket_id: ticket.id } });
+    assert.equal(intents.length, 1, `${label} must not create an intent`);
+    assert.equal(intents[0].status, 'in_flight', `${label} must leave the stale intent untouched`);
+    assert.equal(intents[0].dispatch_generation, 209, `${label} must leave its generation untouched`);
+  };
+  await assertRejectedWithoutMutation(
+    await seedCorrection({ title: 'unassigned correction', assigneeId: '' }),
+    'unassigned ticket',
+  );
+  await assertRejectedWithoutMutation(
+    await seedCorrection({ title: 'terminal correction', columnId: columns.done.id }),
+    'terminal column',
+  );
+  await assertRejectedWithoutMutation(
+    await seedCorrection({ title: 'non-routed correction', columnId: columns.todo.id }),
+    'non-routed column',
+  );
+
+  await ds.getRepository('BoardColumn').update(columns.inProgress.id, {
+    role_routing: JSON.stringify(['assignee', 'reviewer']),
+  });
+  const multiRouted = await seedCorrection({
+    title: 'selected role correction', reviewerId: reviewer.id,
+  });
+  const beforeReviewerTriggers = reviewerVa.triggers.length;
+  const selectedResult = await mcp.callTool('correct_confirmed_ticket_duplicate', {
+    ticket_id: multiRouted.id, role: 'assignee',
+  });
+  assert.equal(selectedResult.dispatch_landed, 1);
+  await va.waitForTrigger(tr => tr.ticket_id === multiRouted.id, 4000);
+  await waitForNoWire();
+  assert.equal(reviewerVa.triggers.length, beforeReviewerTriggers, 'non-selected routed role must not emit');
+  assert.equal(await ds.getRepository('DispatchIntent').count({
+    where: { ticket_id: multiRouted.id, role: 'reviewer' },
+  }), 0, 'non-selected routed role must not open an intent');
 });
 
 exitAfterTests();
