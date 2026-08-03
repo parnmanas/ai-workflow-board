@@ -60,6 +60,8 @@ const ARTIFACT_REFERENCE_INSTRUCTION =
 
 export const CURRENT_COLUMN_EXECUTION_CONTRACT = [
   'AWB current-column execution contract (mandatory):',
+  '- For root tickets, current_column_id, current_column_name, and current_column_kind are the canonical workflow state.',
+  '- Never interpret legacy_status (or a legacy root status value) as the current column, and never use it to declare a dispatch stale.',
   '- The current column workflow guide is the complete scope for this turn.',
   '- Perform only the ticket work and completion checks that guide explicitly requires.',
   '- Do not perform work assigned to a later column, including later-stage review, merge, deployment, release, cleanup, or completion audit.',

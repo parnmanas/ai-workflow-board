@@ -191,17 +191,28 @@ async function applyRoleAssignments(
   return applied;
 }
 
+/**
+ * MCP 전용 호환성 투영. Ticket.status는 보드 컬럼보다 먼저 생긴 저장 값이며
+ * 루트 티켓의 워크플로 상태가 아니다. API 경계에서 이름을 바꾸되
+ * child/subtask의 status는 그대로 유지한다.
+ */
+export function projectTicketForGetTicket(ticket: any): any {
+  if (!ticket || ticket.parent_id) return ticket;
+  const { status, ...root } = ticket;
+  return { ...root, legacy_status: status };
+}
+
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService, ticketPrerequisitesService } = ctx;
 
   server.tool(
     'get_ticket',
-    'Get a single ticket with its children and comments',
+    'Get a single ticket with its children and comments. For a root ticket, workflow state is column-driven: use current_column_id, current_column_name, and current_column_kind only. legacy_status is retained for diagnostics/backward compatibility and MUST NOT be interpreted as the current workflow column. Child ticket status semantics are unchanged.',
     { ticket_id: z.string().describe('Ticket ID') },
     async ({ ticket_id }) => {
       const ticket = await loadTicketFull(dataSource, ticket_id);
       if (!ticket) return err('Ticket not found');
-      return ok(ticket);
+      return ok(projectTicketForGetTicket(ticket));
     }
   );
 

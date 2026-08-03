@@ -231,8 +231,23 @@ export async function loadTicketFull(
   });
   if (!ticket) return null;
   const currentColumn = ticket.column_id
-    ? await scope.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+    ? await scope.getRepository(BoardColumn).findOne({
+        where: { id: ticket.column_id, workspace_id: ticket.workspace_id },
+        relations: ['board'],
+      })
     : null;
+  // 루트 티켓의 워크플로 상태는 컬럼이 결정한다. 티켓 workspace 안에서 기준
+  // 컬럼을 fail-closed로 해석한다. 빈 값이나 추측한 이름을 반환하면 다른
+  // workspace의 컬럼을 노출하거나 호출자가 레거시 저장 값인 Ticket.status로
+  // 폴백하도록 유도할 수 있다.
+  if (!ticket.parent_id && (
+    !currentColumn ||
+    currentColumn.board?.workspace_id !== ticket.workspace_id
+  )) {
+    throw new Error(
+      `Ticket ${ticket.id} has no current column in workspace ${ticket.workspace_id}`,
+    );
+  }
   const out: any = {
     ...ticket,
     current_column_id: currentColumn?.id || '',

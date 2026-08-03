@@ -2809,6 +2809,10 @@ candidate's branch or move the ticket.
       current_column_id: col?.id || '',
       current_column_name: col?.name || '',
       current_column_kind: col?.kind || '',
+      // 이 해석된 컬럼 필드가 매니저 프롬프트에 전달되는 루트 티켓의 기준
+      // 워크플로 상태다. Ticket.status는 레거시 저장 값이므로 의도적으로
+      // 제외하며, 특히 Merging에서 status='todo'가 남아 있어도 stale dispatch
+      // 판단에 사용해서는 안 된다.
       role_prompt: rolePrompt,
       ticket_prompt: ticketPrompt,
       column_prompt: columnPrompt,
