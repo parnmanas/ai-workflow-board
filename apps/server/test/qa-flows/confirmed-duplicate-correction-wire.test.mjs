@@ -4,8 +4,11 @@ import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.PORT = process.env.QA_DUPLICATE_CORRECTION_PORT || '7854';
+const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist');
 
 test('MCP duplicate correction emits exactly one selected-role wire trigger and preserves canonical', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
@@ -51,6 +54,15 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   });
   assert.equal(intent.last_trigger_id, trigger.trigger_id);
   assert.equal(intent.dispatch_generation, 1);
+  const { DispatchIntentService } = await import(
+    'file://' + path.join(DIST, 'modules', 'agents', 'dispatch-intent.service.js')
+  );
+  const ack = await app.get(DispatchIntentService).applyManagerAck({
+    ticketId: report.id, role: 'assignee', triggerId: trigger.trigger_id, outcome: 'processed',
+  });
+  assert.equal(ack.matched, true);
+  assert.equal(ack.applied, true);
+  assert.equal((await ds.getRepository('DispatchIntent').findOneByOrFail({ id: intent.id })).last_ack_kind, 'processed');
   assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: canonical.id })).title, 'unrelated done ticket');
   assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: canonical.id })).column_id, columns.done.id);
 });
