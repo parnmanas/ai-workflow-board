@@ -47,9 +47,8 @@ export class Action {
   // cron/manual-only Action. `'on_ticket_done'` opts the Action into the
   // on-ticket-done hook: when a ticket lands on a terminal column (Done),
   // OnTicketDoneActionService dispatches a Run with the completed ticket as
-  // context. trigger_label optionally narrows the workspace policy:
-  //   - board_id (the existing column) NULL → any board in the workspace;
-  //     <uuid> → only tickets whose terminal column belongs to that board.
+  // context, applied workspace-wide (board_id is a dead legacy column — see
+  // below). trigger_label optionally narrows the policy further:
   //   - trigger_label empty → any label; non-empty → the finished ticket must
   //     carry that label.
   // `enabled=false` still skips the hook (manual run_action only) — same rule

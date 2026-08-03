@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { CatalogScope, PromptTemplate } from '../../types';
+import type { BuiltinPromptDefault, CatalogScope, PromptTemplate } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
+import { resetAllTemplateDrafts, resetTemplateDraft, type PromptTemplateResetDraft } from '../../utils/promptResetDraft';
 
 const listHeadStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   textAlign: align,
@@ -38,6 +39,10 @@ export default function PromptTemplateManager({
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<PromptTemplate | null>(null);
   const [saving, setSaving] = useState(false);
+  const [defaults, setDefaults] = useState<BuiltinPromptDefault[]>([]);
+  const [resetDraft, setResetDraft] = useState<PromptTemplateResetDraft>({});
+  const [resetAllMappings, setResetAllMappings] = useState(false);
+  const [resetSaving, setResetSaving] = useState(false);
 
   // Form state (create + edit use the same object)
   const [formName, setFormName] = useState('');
@@ -70,6 +75,41 @@ export default function PromptTemplateManager({
   useEffect(() => {
     loadTemplates();
   }, [loadTemplates]);
+
+  useEffect(() => {
+    if (!effectiveWorkspaceId) return;
+    let cancelled = false;
+    api.listDefaultPromptTemplates(effectiveWorkspaceId)
+      .then(rows => { if (!cancelled) setDefaults(rows); })
+      .catch(() => { if (!cancelled) setDefaults([]); });
+    return () => { cancelled = true; };
+  }, [effectiveWorkspaceId]);
+
+  const displayedTemplates = templates.map(template => {
+    const draft = template.scope === 'workspace' ? resetDraft[template.name] : undefined;
+    return draft ? { ...template, ...draft } : template;
+  });
+
+  const saveResetDraft = async () => {
+    const names = Object.keys(resetDraft);
+    if (names.length === 0) return;
+    setResetSaving(true);
+    try {
+      await api.resetDefaultPromptTemplates({
+        workspace_id: effectiveWorkspaceId,
+        names,
+        reset_board_mappings: resetAllMappings,
+      });
+      setResetDraft({});
+      setResetAllMappings(false);
+      await loadTemplates();
+      showToast(resetAllMappings ? 'All column prompts and board mappings reset.' : 'Column prompt reset saved.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to reset column prompts', 'error');
+    } finally {
+      setResetSaving(false);
+    }
+  };
 
   const startCreate = () => {
     setFormName('');
@@ -165,9 +205,39 @@ export default function PromptTemplateManager({
   // ─── List view ───
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{templates.length} templates</span>
-        <Button variant="primary" size="md" onClick={startCreate}>+ New Template</Button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div>
+          <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{templates.length} templates</span>
+          {Object.keys(resetDraft).length > 0 && (
+            <span style={{ marginLeft: 10, fontSize: 12, color: tokens.colors.warning }}>
+              {Object.keys(resetDraft).length} unsaved reset{Object.keys(resetDraft).length === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={defaults.length === 0 || resetSaving}
+            onClick={() => {
+              setResetDraft(current => resetAllTemplateDrafts(current, defaults));
+              setResetAllMappings(true);
+            }}
+          >
+            Reset all column prompts
+          </Button>
+          {Object.keys(resetDraft).length > 0 && (
+            <>
+              <Button variant="secondary" size="sm" disabled={resetSaving} onClick={() => { setResetDraft({}); setResetAllMappings(false); }}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" loading={resetSaving} onClick={saveResetDraft}>
+                Save changes
+              </Button>
+            </>
+          )}
+          <Button variant="primary" size="md" onClick={startCreate}>+ New Template</Button>
+        </div>
       </div>
 
       {loading ? (
@@ -205,7 +275,10 @@ export default function PromptTemplateManager({
               </tr>
             </thead>
             <tbody>
-              {templates.map((t) => (
+              {displayedTemplates.map((t) => {
+                const builtin = defaults.find(def => def.name === t.name);
+                const resetPending = t.scope === 'workspace' && !!resetDraft[t.name];
+                return (
                 <tr key={t.id} style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
                   <td
                     style={{
@@ -221,6 +294,7 @@ export default function PromptTemplateManager({
                   >
                     {t.name}
                     {catalogMode && <span style={{ marginLeft: 8 }}><Badge variant="info">{t.scope}</Badge></span>}
+                    {resetPending && <span style={{ marginLeft: 8 }}><Badge variant="warning">Reset pending</Badge></span>}
                   </td>
                   <td style={listCellStyle('left')}>
                     {t.category ? <Badge variant="neutral">{t.category}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
@@ -246,13 +320,24 @@ export default function PromptTemplateManager({
                       <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>Inherited (read-only)</span>
                     ) : (
                       <div style={{ display: 'inline-flex', gap: 6 }}>
+                        {builtin && t.scope === 'workspace' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={resetPending}
+                            onClick={() => setResetDraft(current => resetTemplateDraft(current, builtin))}
+                          >
+                            Reset
+                          </Button>
+                        )}
                         <Button variant="secondary" size="sm" onClick={() => startEdit(t)}>Edit</Button>
                         <Button variant="danger" size="sm" onClick={() => setDeleteTarget(t)}>Delete</Button>
                       </div>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

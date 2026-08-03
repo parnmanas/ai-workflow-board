@@ -304,7 +304,11 @@ test('seeded review_workflow: reviewer preamble switches PR vs branch per use_pr
   assert.equal(on.includes('<!--awb:'), false);
   // OFF: told to review the branch diff (git equivalents), not a PR
   assert.match(off, /there is usually no PR/i);
-  assert.match(off, /git rev-list --left-right --count/);
+  // ticket 59efbde9: base-freshness moved off a manual git rev-list check and
+  // onto the check_review_drift MCP tool (PR-agnostic either way), so the
+  // git-equivalent evidence left in the no-pr intro is the diff-viewing
+  // command instead.
+  assert.match(off, /git diff origin\/<default>\.\.\.<branch>/);
   // ON: told to use the gh pr commands directly
   assert.match(on, /the assignee opened a PR/i);
 });

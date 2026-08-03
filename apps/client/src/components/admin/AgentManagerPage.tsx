@@ -648,7 +648,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, height: '100%', minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: '100%' }}>
       {/* Header */}
       <div
         style={{
@@ -1308,26 +1308,31 @@ export default function AgentManagerPage({
             ← Back to agents
           </Button>
         )}
-        {selected ? (
-          <InstanceDetail
-            inst={selected}
-            workspaceAgents={workspaceAgents}
-            onOpenAgent={onOpenAgent}
-          />
-        ) : (
-          <div
-            style={{
-              padding: 24,
-              fontSize: 12,
-              color: tokens.colors.textMuted,
-              background: tokens.colors.surfaceCard,
-              border: `1px solid ${tokens.colors.border}`,
-              borderRadius: tokens.radii.md,
-            }}
-          >
-            Select an instance from the list to inspect its subagents and logs.
-          </div>
-        )}
+        <div
+          data-testid="mainframe-detail-scroll"
+          style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+        >
+          {selected ? (
+            <InstanceDetail
+              inst={selected}
+              workspaceAgents={workspaceAgents}
+              onOpenAgent={onOpenAgent}
+            />
+          ) : (
+            <div
+              style={{
+                padding: 24,
+                fontSize: 12,
+                color: tokens.colors.textMuted,
+                background: tokens.colors.surfaceCard,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+              }}
+            >
+              Select an instance from the list to inspect its subagents and logs.
+            </div>
+          )}
+        </div>
       </div>
 
       <PairingDialog isOpen={pairOpen} onClose={() => setPairOpen(false)} />

@@ -69,6 +69,11 @@ async function makeBoard(hardBudgetConfig) {
 async function makeColumn(board) {
   return colRepo.save(colRepo.create({ board_id: board.id, name: 'To Do', position: 1 }));
 }
+async function makeDoneColumn(board) {
+  return colRepo.save(colRepo.create({
+    board_id: board.id, name: 'Done', position: 6, is_terminal: true, kind: 'terminal',
+  }));
+}
 async function makeTicket(col, overrides = {}) {
   return ticketRepo.save(ticketRepo.create({
     title: 'T', column_id: col ? col.id : null, workspace_id: 'w1', pending_user_action: false, ...overrides,
@@ -196,6 +201,43 @@ test('pendTicketForHardBudget: CAS is idempotent — concurrent breaches pend ex
   assert.equal(after - before, 1, 'exactly one audit row — no duplicate pend logging');
   const reloaded = await ticketRepo.findOne({ where: { id: t.id } });
   assert.equal(reloaded.pending_user_action, true);
+});
+
+// ── Terminal-aware pend gate (ticket ec498050) ──────────────────────────────
+// A ticket already in a terminal (Done) column is never revisited by a human
+// — pending it just strands it. The hard-budget ceiling can legitimately trip
+// on a Done ticket (e.g. a post-Done self-improvement retrospective posting
+// repeated agent comments), so this guard needed the same terminal check as
+// the agent-comment-pingpong guard (ticket 0709ea7c's root cause).
+
+test('pendTicketForHardBudget: a terminal-column ticket is NOT pended — the CAS never runs', async () => {
+  const board = await makeBoard();
+  const doneCol = await makeDoneColumn(board);
+  const t = await makeTicket(doneCol);
+  const before = await activityRepo.count({ where: { ticket_id: t.id, field_changed: 'pending_user_action' } });
+
+  const result = await pendTicketForHardBudget(ds, activityService, t, 'ceiling breached', 'test_guard');
+  assert.equal(result, false, 'a terminal ticket must report it did NOT pend');
+
+  const after = await activityRepo.count({ where: { ticket_id: t.id, field_changed: 'pending_user_action' } });
+  assert.equal(after, before, 'no audit row for a skipped terminal pend');
+  const reloaded = await ticketRepo.findOne({ where: { id: t.id } });
+  assert.equal(reloaded.pending_user_action, false);
+});
+
+test('enforceAutoResponseBudget: over the cap on a Done ticket blocks the comment but does NOT pend it', async () => {
+  const board = await makeBoard(JSON.stringify({ max_auto_responses: 2, notify: false }));
+  const doneCol = await makeDoneColumn(board);
+  const t = await makeTicket(doneCol);
+  await addAgentComment(t.id);
+  await addAgentComment(t.id);
+
+  const result = await enforceAutoResponseBudget(deps, t);
+  assert.equal(result.blocked, true, 'the ceiling itself still fires — the block on repeated agent comments is unrelated to terminal state');
+  assert.equal(result.reason, 'max_auto_responses_exceeded');
+
+  const reloaded = await ticketRepo.findOne({ where: { id: t.id } });
+  assert.equal(reloaded.pending_user_action, false, 'blocked but NOT pended, because the ticket is terminal');
 });
 
 test('enforceAutoResponseBudget: under the cap does not block', async () => {

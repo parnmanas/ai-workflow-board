@@ -18,6 +18,7 @@ import { loadTicketFull } from '../shared/ticket-parsing';
 import { findColumnByName, maxTicketPosition, shiftTicketPositions } from '../shared/ticket-helpers';
 import { performColumnMove } from '../shared/ticket-move';
 import { applyTerminalEnteredAtForMove, isTerminalReopen, TerminalReopenError, TicketArchivedError } from '../shared/archive-helpers';
+import { ReviewDriftState } from '../../../entities/ReviewDriftState';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../shared/review-approval-guard';
 import { evaluateMergeGate } from '../shared/merge-gate';
 import { getCallerAgent } from '../shared/session-auth';
@@ -247,6 +248,14 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         // Cross-board move can change terminal status — stamp / clear
         // terminal_entered_at the same way same-board moves do.
         await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, targetCol!);
+
+        // Review-drift episode end (ticket 59efbde9) — same dest-kind-gated
+        // delete as performColumnMove (shared/ticket-move.ts). This is a
+        // SECOND move path (cross-board), so it needs the same gate rather
+        // than relying on the shared helper.
+        if (targetCol!.kind === 'merging' || targetCol!.kind === 'terminal') {
+          await manager.getRepository(ReviewDriftState).delete({ ticket_id: ticket.id });
+        }
       });
 
       const caller = getCallerAgent(extra);

@@ -35,12 +35,14 @@ import { Comment } from '../../../entities/Comment';
 import { Credential } from '../../../entities/Credential';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
+import { DriftClassification, ReviewDriftState } from '../../../entities/ReviewDriftState';
 import { resolveGitCredential } from './git-branches';
 import {
   BehindAhead,
   countBehindAhead,
   ensureRepoCache,
   GitCredential,
+  listCommits,
   listRefs,
 } from './git-repo-cache';
 import { ResolvedMergeGate, resolveMergeGate } from '../../../common/merge-gate-config';
@@ -81,15 +83,35 @@ export interface MergeDecision {
  * Given the resolved per-board config and the {behind, ahead} counts of the
  * feature branch vs base, decide whether THIS transition is blocked. Pure — no
  * DB / git — so a unit spec can exhaust the truth table without a network.
+ *
+ * `driftClassification` (ticket 59efbde9, Q3) is the review-drift classifier's
+ * verdict for this ticket's Review episode (see `review-drift.ts`), optional
+ * and defaulted to `undefined` by every existing caller — so omitting it is
+ * byte-for-byte the pre-59efbde9 behavior. When it IS supplied and resolves to
+ * `non_overlapping_drift` or `overlapping_drift_budget_exhausted`, a
+ * review_to_merging stale-base block is bypassed: `require_fresh_base`
+ * blocking unconditionally on behind>0 would otherwise deadlock against
+ * review_workflow's classifier recommending `proceed`/`proceed_no_action` for
+ * exactly the same drift. `overlapping_drift` (budget NOT yet spent) and
+ * `fresh` do NOT bypass — an unspent-budget overlap should still funnel
+ * through the intended single rebase-and-reverify cycle, and a stale/unset
+ * classification degrades to the original unconditional block
+ * (availability-first: an unresolved classification must never manufacture a
+ * bypass, only a resolved safe one can).
  */
 export function decideMergeGate(
   transition: MergeTransition,
   gate: ResolvedMergeGate,
   ba: BehindAhead,
+  driftClassification?: DriftClassification | null,
 ): MergeDecision {
   if (transition === 'review_to_merging') {
     if (gate.require_fresh_base && ba.behind > 0) {
-      return { blocked: true, code: 'merge_gate_stale_base' };
+      const driftBypass = driftClassification === 'non_overlapping_drift'
+        || driftClassification === 'overlapping_drift_budget_exhausted';
+      if (!driftBypass) {
+        return { blocked: true, code: 'merge_gate_stale_base' };
+      }
     }
   } else if (transition === 'merging_to_done') {
     if (gate.require_full_merge && ba.ahead > 0) {
@@ -130,6 +152,15 @@ export interface MergeGateProbeInput {
   ticketId: string;
 }
 
+export interface MergeGateProbeResult extends BehindAhead {
+  /** Current tip sha of the base branch, when resolvable (undefined only if
+   *  the caller's probe predates this field, e.g. an older test stub) — used
+   *  by `evaluateMergeGate` to judge whether a stored review-drift
+   *  classification (Q3) was computed against the SAME base tip being
+   *  decided against right now, or has gone stale since. */
+  baseTipSha?: string;
+}
+
 /**
  * Resolve the feature branch and compute {behind, ahead} vs base against the
  * per-Resource cache clone. Returns null on ANY unresolvable/failure condition
@@ -137,7 +168,7 @@ export interface MergeGateProbeInput {
  * degrade. Swappable so the E2E spec can inject deterministic counts without a
  * live remote.
  */
-export type MergeGateProbe = (input: MergeGateProbeInput) => Promise<BehindAhead | null>;
+export type MergeGateProbe = (input: MergeGateProbeInput) => Promise<MergeGateProbeResult | null>;
 
 /**
  * Test-only override for the prober the move surfaces use. Production leaves it
@@ -166,7 +197,11 @@ export const defaultMergeGateProbe: MergeGateProbe = async ({ resource, credenti
     const feature = resolveFeatureBranch(ticketId, refs.branches);
     if (!feature) return null;
     if (!refs.branches.includes(baseBranch)) return null;
-    return await countBehindAhead(repoPath, baseBranch, feature);
+    const [ba, baseCommits] = await Promise.all([
+      countBehindAhead(repoPath, baseBranch, feature),
+      listCommits({ repoPath, ref: baseBranch, limit: 1 }),
+    ]);
+    return { ...ba, baseTipSha: baseCommits[0]?.sha };
   } catch {
     // SshUnsupportedError / GitReadError / anything else → unverifiable → pass.
     return null;
@@ -250,14 +285,13 @@ export async function evaluateMergeGate(
       scope.getRepository(Credential),
       resource.credential_id,
       ticket.workspace_id,
-      resource.board_id,
     );
   } catch {
     credential = null;
   }
 
   const probe = options.probe ?? testProbeOverride ?? defaultMergeGateProbe;
-  let ba: BehindAhead | null;
+  let ba: MergeGateProbeResult | null;
   try {
     ba = await probe({ resource, credential, baseBranch, ticketId: ticket.id });
   } catch (e) {
@@ -268,7 +302,34 @@ export async function evaluateMergeGate(
   }
   if (!ba) return PASS('unresolvable');
 
-  const decision = decideMergeGate(transition, gate, ba);
+  // Q3 overlap-aware integration (ticket 59efbde9) — only worth a lookup when
+  // this transition's check is actually on AND it's the review_to_merging
+  // side the drift classifier speaks to (merging_to_done doesn't consult it).
+  // Any lookup failure degrades to `undefined` (current behavior, no
+  // bypass) — same availability-first posture as the rest of this function.
+  //
+  // Freshness check: a classification is only trusted for the bypass when it
+  // was computed against the SAME base tip this decision is being made
+  // against. Without it, a reviewer's early `non_overlapping_drift` check
+  // could still be sitting in the row after main advanced again with an
+  // OVERLAPPING commit — bypassing on that stale verdict would manufacture
+  // exactly the false pass the classifier's budget/overlap rules exist to
+  // prevent. When `baseTipSha` can't be resolved on either side (an older
+  // probe/stub, or a lookup failure), fall back to trusting the row as
+  // before — same availability-first posture as everywhere else here.
+  let driftClassification: DriftClassification | undefined;
+  if (transition === 'review_to_merging' && checkOn) {
+    try {
+      const driftRow = await scope.getRepository(ReviewDriftState).findOne({ where: { ticket_id: ticket.id } });
+      const stillFresh = !ba.baseTipSha || !driftRow?.last_checked_base_sha
+        || driftRow.last_checked_base_sha === ba.baseTipSha;
+      if (driftRow?.last_classification && stillFresh) driftClassification = driftRow.last_classification;
+    } catch {
+      driftClassification = undefined;
+    }
+  }
+
+  const decision = decideMergeGate(transition, gate, ba, driftClassification);
   if (!decision.blocked) return PASS('fresh');
 
   const feature = featureBranchPrefix(ticket.id);

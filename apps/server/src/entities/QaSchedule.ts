@@ -9,7 +9,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *
  * Scope:
  *   - scope='all'      → at dispatch time, expand to every ENABLED scenario in
- *     scope (board_id <uuid> = that board, board_id null = the whole workspace).
+ *     the workspace (board_id is a dead legacy column — see below).
  *     We deliberately store NO scenario id snapshot for 'all' so adding/removing
  *     a scenario is reflected automatically on the next run (the ticket's
  *     "id 스냅샷 말고 실행 시 resolve" requirement — handled by startBatch({all:true})).
@@ -38,9 +38,9 @@ export class QaSchedule {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // null = workspace-scoped schedule (scope='all' runs every enabled scenario in
-  // the workspace); <uuid> = pinned to a board (scope='all' runs that board's
-  // enabled scenarios).
+  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
+  // Board-scoped schedules are rejected at create() — always NULL going
+  // forward; dispatch never reads it.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

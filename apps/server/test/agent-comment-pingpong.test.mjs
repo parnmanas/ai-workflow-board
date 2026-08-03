@@ -9,6 +9,7 @@ import { registerCommentTools } from '../dist/modules/mcp/tools/comment-tools.js
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Agent } from '../dist/entities/Agent.js';
+import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { activityEvents } from '../dist/services/activity.service.js';
 
 const ack = (content, metadata) => ({ author_type: 'agent', content, metadata });
@@ -45,7 +46,7 @@ test('third waiting comment without a work target pends; actionable tickets do n
   assert.equal(shouldPendRepeatedWaiting({ next, recent, ticketDescription: 'apps/server/src/a.ts 구현' }), false);
 });
 
-function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0, findOneImpl = null }) {
+function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0, findOneImpl = null, column = null }) {
   const handlers = new Map();
   const server = { tool(name, _description, _schema, handler) { handlers.set(name, handler); } };
   const stored = [...recent];
@@ -98,11 +99,16 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
     },
   };
   const agentRepo = { async findOne() { return { id: 'reviewer', name: 'Reviewer', workspace_id: ticket.workspace_id, role_prompt: '' }; } };
+  // Terminal-pend-gate column lookup (ticket ec498050) — only wired when a
+  // test passes `column`; every other test's ticket has no column_id, so the
+  // loader short-circuits to null (fail-open) without ever calling this.
+  const columnRepo = { async findOne({ where: { id } }) { return column && column.id === id ? column : null; } };
   const dataSource = {
     getRepository(entity) {
       if (entity === Ticket) return ticketRepo;
       if (entity === Comment) return commentRepo;
       if (entity === Agent) return agentRepo;
+      if (entity === BoardColumn) return columnRepo;
       return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
     },
     async transaction(run) {
@@ -144,6 +150,64 @@ test('registered add_comment boundary atomically pends concurrent third waits wi
   // +1 more: the ticket is now pending, so the 3rd call short-circuits at the
   // guard's "already pending" branch (reason='pending_user_action') — also logged.
   assert.deepEqual(harness.counters, { commentSaves: 0, activities: 4, mentionResolves: 0, pendingUpdates: 1 });
+});
+
+// ── Terminal-aware pend gate (ticket ec498050, root cause of 0709ea7c) ──────
+//
+// 0709ea7c: a Done ticket got re-triggered for a post-Done self-improvement
+// retrospective, the reviewer subagent had nothing to retrospect on and
+// repeated a "waiting" comment, and the THEN-unguarded pend() callback set
+// pending_user_action=true on an already-terminal ticket — stranding it,
+// since nothing ever revisits a Done ticket's User tab. The fix threads the
+// ticket's (terminal) column through the same pend() callback that flips the
+// field; this pins the DB-field-level guarantee the fix promises.
+
+test('a terminal-column ticket does NOT get pended by repeated waiting comments (0709ea7c)', async () => {
+  const doneColumn = { id: 'done-col', kind: 'terminal', is_terminal: true };
+  const ticket = {
+    id: 'tTerminal', workspace_id: 'w1', column_id: doneColumn.id, parent_id: null,
+    title: '대기', description: 'planner 구현 계획 없음; 구현 대상 없음', pending_user_action: false,
+  };
+  const harness = registeredAddCommentHarness({
+    ticket,
+    column: doneColumn,
+    recent: [ack('대기 유지: in-progress 0건'), ack('대기 결정: 작업 대상 없음')],
+  });
+  const input = {
+    ticket_id: ticket.id, author_type: 'agent', author_id: 'assignee', author: 'Assignee', author_role: 'assignee',
+    content: '대기 유지: planner 구현 계획 없음',
+  };
+  const res = await harness.addComment({ ...input }, {});
+  const parsed = JSON.parse(res.content[0].text);
+
+  // The comment is still suppressed (a Done ticket doesn't need a 3rd
+  // identical "waiting" note either) — only the PEND side-effect is skipped.
+  assert.deepEqual(parsed, { suppressed: true, reason: 'repeated_waiting_without_work_target', pending_user_action: false });
+  assert.equal(harness.counters.pendingUpdates, 0, 'a terminal ticket must never have pending_user_action flipped');
+  assert.equal(ticket.pending_user_action, false, 'the ticket object itself must stay unpended');
+  assert.equal(harness.counters.commentSaves, 0, 'the repeated-waiting comment is still suppressed, just not pended');
+});
+
+test('control: the SAME scenario on a non-terminal (active) column still pends — the gate is column-specific, not a global no-op', async () => {
+  const activeColumn = { id: 'active-col', kind: 'active', is_terminal: false };
+  const ticket = {
+    id: 'tActive', workspace_id: 'w1', column_id: activeColumn.id, parent_id: null,
+    title: '대기', description: 'planner 구현 계획 없음; 구현 대상 없음', pending_user_action: false,
+  };
+  const harness = registeredAddCommentHarness({
+    ticket,
+    column: activeColumn,
+    recent: [ack('대기 유지: in-progress 0건'), ack('대기 결정: 작업 대상 없음')],
+  });
+  const input = {
+    ticket_id: ticket.id, author_type: 'agent', author_id: 'assignee', author: 'Assignee', author_role: 'assignee',
+    content: '대기 유지: planner 구현 계획 없음',
+  };
+  const res = await harness.addComment({ ...input }, {});
+  const parsed = JSON.parse(res.content[0].text);
+  assert.deepEqual(parsed, { suppressed: true, reason: 'repeated_waiting_without_work_target', pending_user_action: true });
+  assert.equal(harness.counters.pendingUpdates, 1);
+  assert.equal(ticket.pending_user_action, true);
 });
 
 test('registered add_comment Review to Merging boundary saves/emits one concurrent approval and zero later receipts', async () => {

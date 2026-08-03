@@ -154,7 +154,6 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
           dataSource.getRepository(Credential),
           resource.credential_id,
           workspace_id,
-          null,
         );
         const branches = await listRepoBranches({
           url: resource.url,

@@ -112,13 +112,11 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, _boardId?: string): Promise<QaSchedule[]> {
+  async list(workspaceId: string): Promise<QaSchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
       .where('s.workspace_id = :ws', { ws: workspaceId })
       .andWhere('s.board_id IS NULL');
-    // Scope rule mirrors list_qa_scenarios: omit board_id → all; "" → workspace
-    // (board_id IS NULL); <uuid> → that board.
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -305,16 +303,14 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       if (ids.length === 0) throw makeError(400, 'selected schedule has no scenario_ids');
       return this.qaRunService.startBatch({
         workspaceId: schedule.workspace_id,
-        // explicit ids: board scope is irrelevant (startBatch ignores boardId when scenarioIds set)
         scenarioIds: ids,
         stopOnFail: schedule.stop_on_fail,
         triggeredByType: 'system',
         triggeredById,
       });
     }
-    // scope='all' → resolve enabled scenarios in scope AT DISPATCH TIME (no id
-    // snapshot), so scenario add/remove is reflected automatically. board_id null
-    // → whole workspace (boardId undefined); <uuid> → that board.
+    // scope='all' → resolve every enabled scenario in the workspace AT DISPATCH
+    // TIME (no id snapshot), so scenario add/remove is reflected automatically.
     return this.qaRunService.startBatch({
       workspaceId: schedule.workspace_id,
       all: true,

@@ -59,7 +59,14 @@ export async function applyAgentCommentPingPongGuard(input: {
   ticket: { id: string; title: string; description?: string | null; base_repo_resource_id?: string | null; pending_user_action?: boolean };
   next: PingPongComment;
   recent: PingPongComment[];
-  pend: () => Promise<void>;
+  /**
+   * Attempts the pend side-effect and reports whether it actually flipped
+   * `pending_user_action`. False covers both a lost CAS race AND a caller
+   * that skipped the write entirely (e.g. a terminal-column ticket — see
+   * `terminal-pend-gate.ts`) — either way the guard's own return must not
+   * claim a transition that never happened.
+   */
+  pend: () => Promise<boolean>;
 }): Promise<{ suppressed: boolean; reason?: string; pending_user_action?: boolean }> {
   if (input.next.author_type !== 'agent') return { suppressed: false };
   if (input.ticket.pending_user_action) return { suppressed: true, reason: 'pending_user_action' };
@@ -72,8 +79,8 @@ export async function applyAgentCommentPingPongGuard(input: {
     ticketDescription: `${input.ticket.title}\n${input.ticket.description || ''}`,
     hasBaseRepo: !!input.ticket.base_repo_resource_id,
   })) {
-    await input.pend();
-    return { suppressed: true, reason: 'repeated_waiting_without_work_target', pending_user_action: true };
+    const pended = await input.pend();
+    return { suppressed: true, reason: 'repeated_waiting_without_work_target', pending_user_action: pended };
   }
   return { suppressed: false };
 }

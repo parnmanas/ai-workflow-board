@@ -719,3 +719,66 @@ export async function countBehindAhead(
   }
   return { behind, ahead };
 }
+
+/**
+ * Resolve the merge-base (fork point) of two refs via `git merge-base`. Used
+ * by the review-drift prober to seed a Review episode's entry snapshot from
+ * where the feature branch actually forked, not from whatever the base
+ * branch's tip happens to be at the moment the episode starts — the latter
+ * would hide any drift that landed on base BEFORE the episode began.
+ *
+ * Same validation discipline as `countBehindAhead` / `diffChangedPaths`.
+ */
+export async function mergeBase(
+  repoPath: string,
+  refA: string,
+  refB: string,
+): Promise<string> {
+  if (!isValidRef(refA) || !refA.trim()) throw new GitReadError('잘못된 ref 입니다.');
+  if (!isValidRef(refB) || !refB.trim()) throw new GitReadError('잘못된 ref 입니다.');
+  const { stdout } = await runGit(
+    ['merge-base', refA.trim(), refB.trim(), '--'],
+    { cwd: repoPath, maxBytes: 4 * 1024 },
+  );
+  const sha = stdout.trim();
+  if (!isValidSha(sha)) throw new GitReadError(`merge-base 출력 파싱 실패: "${sha}"`);
+  return sha;
+}
+
+export interface DiffChangedPathsOptions {
+  /** Use a 3-dot (`from...to`, merge-base-relative) diff instead of the
+   *  default 2-dot (`from..to`, direct range) diff. 3-dot is what "what did
+   *  this branch itself change since it forked" wants; 2-dot is what "what
+   *  moved directly between these two points on the same line" wants (e.g.
+   *  a base branch's own forward movement between two SHAs). */
+  threeDot?: boolean;
+  maxBytes?: number;
+}
+
+/**
+ * List the file paths changed between two refs via `git diff --name-only`.
+ * Same validation discipline as `countBehindAhead`: both refs run through
+ * `isValidRef` (rejects flag-like / `..`-smuggling input — a raw commit SHA
+ * passes this too, so callers may pass either a branch name or a SHA), and
+ * the path list is separated from the ref spec with a `--` terminator.
+ *
+ * Reads only the name list from the cache clone (no patch body), so this is
+ * cheap even for a wide range — unlike `getCommitDetail`'s 1MB per-commit
+ * diff cap, there's no patch text here to bound beyond the name list itself.
+ */
+export async function diffChangedPaths(
+  repoPath: string,
+  fromRef: string,
+  toRef: string,
+  opts: DiffChangedPathsOptions = {},
+): Promise<string[]> {
+  if (!isValidRef(fromRef) || !fromRef.trim()) throw new GitReadError('잘못된 시작 ref 입니다.');
+  if (!isValidRef(toRef) || !toRef.trim()) throw new GitReadError('잘못된 끝 ref 입니다.');
+  const sep = opts.threeDot ? '...' : '..';
+  const spec = `${fromRef.trim()}${sep}${toRef.trim()}`;
+  const { stdout } = await runGit(
+    ['diff', '--name-only', spec, '--'],
+    { cwd: repoPath, maxBytes: opts.maxBytes ?? 4 * 1024 * 1024 },
+  );
+  return stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}

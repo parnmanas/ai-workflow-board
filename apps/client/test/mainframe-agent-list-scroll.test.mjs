@@ -29,6 +29,21 @@ test('desktop Mainframe keeps page and detail overflow outside the Agents list',
   );
 });
 
+test('Mainframe detail pane owns vertical scrolling without trapping the mobile Back button', () => {
+  assert.match(
+    agentManagerPageSource,
+    /data-testid="mainframe-detail-scroll"[\s\S]*?flex:\s*1,[\s\S]*?minHeight:\s*0,[\s\S]*?overflowY:\s*'auto',[\s\S]*?overflowX:\s*'hidden'/,
+  );
+  assert.ok(
+    agentManagerPageSource.indexOf('Back to agents') <
+      agentManagerPageSource.indexOf('data-testid="mainframe-detail-scroll"'),
+  );
+  assert.match(
+    agentManagerPageSource,
+    /function InstanceDetail[\s\S]*?display:\s*'flex',\s*flexDirection:\s*'column',\s*gap:\s*16,\s*minHeight:\s*'100%'/,
+  );
+});
+
 test('small viewport preserves the same independently scrollable Agents list', () => {
   assert.match(agentManagerPageSource, /const isMobile = useMediaQuery\('\(max-width: 767px\)'\)/);
   assert.match(

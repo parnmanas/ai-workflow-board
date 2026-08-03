@@ -232,6 +232,40 @@ test('ticket-session: same (ticket, role) but DIFFERENT holder agents get SEPARA
   assert.deepEqual(pids, [rA.pid, rB.pid].sort(), 'board update reaches BOTH holder sessions');
 });
 
+test('ticket-session: a move update does not wake persistent sessions from the previous column', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  await mgr.dispatchTrigger({
+    ticketId: 'ticket-moved', role: 'assignee', triggerId: 'trigger-before-move',
+    agentId: 'agent-1', rolePrompt: '', ticketPrompt: '', columnPrompt: null,
+    ticket: { title: 'Moving ticket', current_column_id: 'column-progress', current_column_name: 'In Progress', current_column_kind: 'active' },
+    forceRespawn: false, maxConcurrentTicketsPerAgent: 5,
+  });
+  const forwarded = mgr.forwardBoardUpdate('ticket-moved', {
+    entity_type: 'ticket', action: 'moved', field_changed: 'column_id',
+    previous_column_name: 'In Progress', current_column_name: 'Review',
+    current_column_kind: 'review', current_column_id: 'column-review',
+  });
+  assert.equal(forwarded, false, 'new-column role routing must happen through agent_trigger only');
+  assert.equal(mgr.followUps.length, 0, 'the old persistent session must not receive a generic move turn');
+});
+
+test('ticket-session: reused trigger and non-move update name the authoritative current column', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-column', role: 'reviewer', agentId: 'agent-1', rolePrompt: '',
+    ticketPrompt: '', columnPrompt: null, forceRespawn: false, maxConcurrentTicketsPerAgent: 5,
+    ticket: { title: 'Review me', current_column_id: 'column-review', current_column_name: 'Review', current_column_kind: 'review' },
+  };
+  await mgr.dispatchTrigger({ ...base, triggerId: 'trigger-1' });
+  await mgr.dispatchTrigger({ ...base, triggerId: 'trigger-2' });
+  assert.match(mgr.followUps[0].turnText, /Current column: Review \(kind: review, id: column-review\)/);
+  mgr.forwardBoardUpdate('ticket-column', {
+    entity_type: 'comment', action: 'created', current_column_id: 'column-review',
+    current_column_name: 'Review', current_column_kind: 'review',
+  });
+  assert.match(mgr.followUps[1].turnText, /Current column: Review \(kind: review, id: column-review\)/);
+});
+
 test('ticket-session: force-respawn (ticket_done_review) terminates a drifted-key twin sibling, spares a distinct co-holder (ticket 7e7e23bf)', async () => {
   // The reviewer-twin gap: a lingering same-(ticket, role) strand survives under
   // a DRIFTED sessionKey (the unknown-agent `_` bucket) while the Done

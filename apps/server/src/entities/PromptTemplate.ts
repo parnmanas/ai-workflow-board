@@ -8,6 +8,9 @@ export class PromptTemplate {
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
+  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
+  // Board-scoped templates are rejected at create() — always NULL going
+  // forward; templates are Global/Workspace-owned only.
   @Column({ type: 'varchar', nullable: true, default: null })
   board_id: string | null;
 

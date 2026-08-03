@@ -2070,6 +2070,11 @@ export class EventDispatcher {
     if (agentContext?.cli === 'hermes') {
       try {
         const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        if (ticket) {
+          ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
+          ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
+          ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
+        }
         if (ticket && selectedRepo) {
           ticket.base_repo = {
             id: selectedRepo.resourceId,
@@ -2119,6 +2124,11 @@ export class EventDispatcher {
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
         const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        if (ticket) {
+          ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
+          ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
+          ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
+        }
         if (ticket && selectedRepo) {
           ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
           ticket.base_branch = selectedRepo.branch;

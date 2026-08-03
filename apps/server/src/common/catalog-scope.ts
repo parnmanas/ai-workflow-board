@@ -28,7 +28,7 @@ export function normalizeCatalogScope(input: {
   return { workspace_id: workspaceId, board_id: null };
 }
 
-export function canUseCatalogItem(row: CatalogScoped, workspaceId: string, _boardId?: string | null): boolean {
+export function canUseCatalogItem(row: CatalogScoped, workspaceId: string): boolean {
   if (row.board_id !== null) return false;
   if (row.workspace_id === null) return true;
   return row.workspace_id === workspaceId;

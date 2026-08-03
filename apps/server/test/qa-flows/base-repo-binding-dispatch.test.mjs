@@ -175,5 +175,41 @@ test('base repo binding: env backfill reaches the wire; repo-less + unresolvable
   assert.equal(!!t3Fresh.pending_user_action, true, 'the ticket must be pended (fail closed)');
   assert.match(t3Fresh.pending_reason || '', /base repo/i, 'the pend reason must explain the unresolved base repo');
 
+  // ── Scenario 4: THE TERMINAL-GATE ACCEPTANCE (ticket ec498050) ──────────────
+  // Same repo-less "must block" shape as Scenario 2, but on a TERMINAL column
+  // routed to assignee — mirroring how the production AWB board's real Done
+  // column routes to assignee for post-Done self-improvement retrospectives
+  // (root cause of ticket 0709ea7c on a sibling guard). The dispatch must
+  // still be BLOCKED (no repo to push from, regardless of column), but
+  // `_pendForMissingBaseRepo` must NOT set pending_user_action — a Done
+  // ticket's User tab is never revisited by a human, so parking it here would
+  // strand it invisibly forever.
+  step('Scenario 4: repo-less board + terminal (Done) column routed to assignee → block emits nothing, but does NOT pend');
+  await ds.getRepository('BoardColumn').update(sceneB.columns.done.id, {
+    role_routing: JSON.stringify(['assignee']),
+  });
+  const t4 = await createTicket(app, getDataSourceToken, {
+    columnId: sceneB.columns.done.id, workspaceId: sceneB.ws.id,
+    title: 'terminal column, no base repo — must block but not pend', assigneeId: assigneeB.id,
+  });
+  const before4 = vaB.triggersFor(t4.id).length;
+  await triggerLoop.dispatchCurrentColumn(t4.id, 'qa-base-repo', 'qa-actor');
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(
+    vaB.triggersFor(t4.id).length, before4,
+    'a terminal-column dispatch with no resolvable repo must still NOT emit an agent_trigger',
+  );
+  const t4Fresh = await ds.getRepository('Ticket').findOne({ where: { id: t4.id } });
+  assert.equal(!!t4Fresh.pending_user_action, false, 'a terminal-column ticket must NOT be pended by the base-repo guard');
+  const pendActs4 = await ds.getRepository('ActivityLog').find({
+    where: { ticket_id: t4.id, field_changed: 'pending_user_action' },
+  });
+  assert.equal(pendActs4.length, 0, 'no pending_user_action audit row for a skipped terminal pend');
+  const t4Comments = await ds.getRepository('Comment').find({ where: { ticket_id: t4.id } });
+  assert.equal(
+    t4Comments.filter((c) => /base repo 미해결/.test(c.content || '')).length, 0,
+    'the explanatory "dispatch blocked, pend for a human" comment is skipped too — there is no park to explain',
+  );
+
   exitAfterTests(0);
 });

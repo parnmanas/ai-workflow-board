@@ -16,11 +16,13 @@ import { User } from '../../entities/User';
 import { Comment } from '../../entities/Comment';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
+import { BoardColumn } from '../../entities/BoardColumn';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
+import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { parseCron } from './cron';
 
@@ -238,6 +240,7 @@ export class ActionsService {
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
+    @InjectRepository(BoardColumn) private readonly columnRepo: Repository<BoardColumn>,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -245,7 +248,7 @@ export class ActionsService {
 
   // ── CRUD ────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string, _boardId?: string): Promise<Action[]> {
+  async list(workspaceId: string): Promise<Action[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.actionRepo.createQueryBuilder('a')
       .where('a.workspace_id = :ws', { ws: workspaceId })
@@ -649,6 +652,24 @@ export class ActionsService {
    * must still surface the rejection error to the caller.
    */
   private async _parkForApproval(ticketId: string, action: Action, byAgentId: string): Promise<void> {
+    // Terminal-aware gate (ticket ec498050): a ticket already Done never gets
+    // a human looking at its User tab again, so pending it here would strand
+    // it — the run rejection above (thrown to the caller) already blocks the
+    // unapproved execution regardless of whether we park the ticket too.
+    // Must actually LOAD the ticket first — the loader resolves column_id off
+    // whatever ticket-shaped object it's given, and this method only starts
+    // with a bare id string.
+    try {
+      const ticketForGate = await this.ticketRepo.findOne({ where: { id: ticketId } });
+      const col = ticketForGate ? await loadTicketColumnForPendGate(this.ticketRepo, this.columnRepo, ticketForGate) : null;
+      if (!evaluateTerminalPendGate(col).allowed) {
+        this.logService.info('Actions', 'park-for-approval skipped, ticket already terminal', { ticket_id: ticketId });
+        return;
+      }
+    } catch (e: any) {
+      this.logService.warn('Actions', `terminal-pend-gate column resolution failed (failing open) for ticket ${ticketId}: ${e?.message || e}`);
+    }
+
     const reason =
       `High-impact Action "${action.name}" requires human approval before it can run. ` +
       `A workspace admin must approve it via POST /api/actions/${action.id}/approvals (or the Actions UI), ` +

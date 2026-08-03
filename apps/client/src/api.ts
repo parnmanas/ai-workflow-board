@@ -945,6 +945,18 @@ export const api = {
     const params = new URLSearchParams({ workspace_id });
     return request<{ success: true; id: string }>(`/prompt-templates/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  listDefaultPromptTemplates: (workspace_id: string) => {
+    const params = new URLSearchParams({ workspace_id });
+    return request<import('./types').BuiltinPromptDefault[]>(`/prompt-templates/defaults/catalog?${params.toString()}`);
+  },
+  resetDefaultPromptTemplates: (data: {
+    workspace_id: string;
+    names: string[];
+    reset_board_mappings: boolean;
+  }) => request<{ success: true; templates: PromptTemplate[] }>('/prompt-templates/defaults/reset', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 
   // ─── Resources ─────────────────────────────────────────
   listResources: (
@@ -1319,8 +1331,7 @@ export const api = {
   // ─── Workspace schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
   // General-purpose agent-task scheduler: when due, the server opens a fresh chat
   // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
-  // interval_ms. board_id omitted → all schedules in the workspace; "" → only
-  // workspace-scoped (board_id IS NULL); <uuid> → that board's.
+  // interval_ms. Workspace-scoped only — board_id is a dead legacy column.
   listWorkspaceSchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);

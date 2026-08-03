@@ -37,6 +37,25 @@ function inlineTomlStringMap(values: Record<string, string>): string {
     .join(', ')} }`;
 }
 
+function codexPermissionArgs(permissionMode?: string | null): string[] {
+  switch (permissionMode) {
+    case 'plan':
+      return ['--sandbox', 'read-only', '-c', 'approval_policy="never"'];
+    case 'acceptEdits':
+    case 'auto':
+    case 'dontAsk':
+    case 'default':
+    case 'manual':
+      return ['--sandbox', 'workspace-write', '-c', 'approval_policy="never"'];
+    case 'bypassPermissions':
+    case undefined:
+    case null:
+    case '':
+    default:
+      return ['--dangerously-bypass-approvals-and-sandbox'];
+  }
+}
+
 // ── MCP transport 검증 (ticket 40d18474) ────────────────────────────────────
 //
 // codex 는 각 `mcp_servers.<name>` 엔트리의 transport 를 모양으로 해석한다 —
@@ -124,6 +143,10 @@ export class CodexCliAdapter extends CliAdapter {
     return resolveCliBin('codex', configured);
   }
 
+  harnessKeys(): ReadonlyArray<'system_prompt_append' | 'model' | 'permission_mode'> {
+    return ['system_prompt_append', 'model', 'permission_mode'];
+  }
+
   buildOneshotSpawn({
     rolePrompt,
     taskText,
@@ -131,8 +154,17 @@ export class CodexCliAdapter extends CliAdapter {
     mcpAttribution,
     cwd,
     cliHomeDir,
+    harness,
   }: OneshotSpec): SpawnDescriptor {
-    const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
+    const promptParts: string[] = [];
+    if (harness?.system_prompt_append?.trim()) {
+      promptParts.push(
+        `AWB managed policy:\n${harness.system_prompt_append.trim()}\nEnd AWB managed policy.`,
+      );
+    }
+    if (rolePrompt?.trim()) promptParts.push(rolePrompt);
+    if (taskText?.trim()) promptParts.push(taskText);
+    const fullPrompt = promptParts.join('\n\n');
     const hasAttribution = !!(
       mcpAttribution?.ticketId ||
       mcpAttribution?.role ||
@@ -213,7 +245,7 @@ export class CodexCliAdapter extends CliAdapter {
         ...(model ? ['--model', model] : []),
         '--skip-git-repo-check',
         '--json',
-        '--dangerously-bypass-approvals-and-sandbox',
+        ...codexPermissionArgs(harness?.permission_mode),
       ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,

@@ -59,6 +59,11 @@ export interface BoardUpdatePayload {
   action: string;
   field_changed?: string;
   actor_name?: string;
+  current_column_id?: string;
+  current_column_name?: string;
+  current_column_kind?: string;
+  previous_column_name?: string;
+  new_column_name?: string;
 }
 
 export interface AgentTypingPayload {
@@ -75,6 +80,9 @@ export interface AgentTriggerPayload {
   role_prompt: string;      // D-20 — populated by trigger-loop in Task 3
   ticket_prompt: string;    // D-20 — populated by trigger-loop in Task 3
   trigger_source: string;
+  current_column_id?: string;
+  current_column_name?: string;
+  current_column_kind?: string;
   // phase12 — board column → prompt-template content; null when no template wired
   column_prompt: { template_id: string; name: string; content: string } | null;
   // Ticket's configured base repository (Resource of type='repository') and

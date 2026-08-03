@@ -230,8 +230,14 @@ export async function loadTicketFull(
       : ['children', 'children.children'],
   });
   if (!ticket) return null;
+  const currentColumn = ticket.column_id
+    ? await scope.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+    : null;
   const out: any = {
     ...ticket,
+    current_column_id: currentColumn?.id || '',
+    current_column_name: currentColumn?.name || '',
+    current_column_kind: currentColumn?.kind || '',
     labels: safeJsonParse(ticket.labels),
     channel_ids: safeJsonParse(ticket.channel_ids),
     // On-ticket-done hook binding (ticket 16a6339c) — decode to an array, same

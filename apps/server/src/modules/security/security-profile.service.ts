@@ -132,7 +132,7 @@ export class SecurityProfileService {
     private readonly runService: SecurityRunService,
   ) {}
 
-  async list(workspaceId: string, _boardId?: string): Promise<SecurityProfileListItem[]> {
+  async list(workspaceId: string): Promise<SecurityProfileListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.profileRepo.createQueryBuilder('p')
       .where('p.workspace_id = :ws', { ws: workspaceId })

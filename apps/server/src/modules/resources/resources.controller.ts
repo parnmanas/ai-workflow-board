@@ -40,7 +40,6 @@ export class ResourcesController {
   private async assertCredentialScope(
     credentialId: string | null | undefined,
     workspaceId: string | null,
-    _boardId: string | null,
   ): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
@@ -66,7 +65,6 @@ export class ResourcesController {
   @Get()
   async list(
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Query('type') type: string | undefined,
     @Query('sort_by') sortBy: string | undefined,
     @Query('sort_order') sortOrder: string | undefined,
@@ -117,12 +115,11 @@ export class ResourcesController {
   async get(
     @Param('id') id: string,
     @Query('workspace_id') workspaceId: string,
-    @Query('board_id') boardId: string | undefined,
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
     const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
-    if (!canUseCatalogItem(resource, workspaceId, boardId)) {
+    if (!canUseCatalogItem(resource, workspaceId)) {
       return res.status(404).json({ error: 'Resource not found in scope' });
     }
     const parsed = {
@@ -155,7 +152,7 @@ export class ResourcesController {
     }
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
     try {
-      await this.assertCredentialScope(credential_id, catalogScope.workspace_id, null);
+      await this.assertCredentialScope(credential_id, catalogScope.workspace_id);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -219,7 +216,7 @@ export class ResourcesController {
     }
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     try {
-      await this.assertCredentialScope(resource.credential_id, resource.workspace_id, null);
+      await this.assertCredentialScope(resource.credential_id, resource.workspace_id);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -255,7 +252,7 @@ export class ResourcesController {
       // Earlier this dropped `resource.credential_id` on the floor — private
       // repos failed even when a Credential was attached. Resolve it here so
       // `git ls-remote` runs with the right userinfo for HTTPS auth.
-      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, null);
+      const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
       const branches = await listRepoBranches({
         url: resource.url,
         credential,
@@ -287,8 +284,8 @@ export class ResourcesController {
         async (targetBoardId, targetWorkspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: targetBoardId, workspace_id: targetWorkspaceId } }),
         scope,
       );
-      await this.assertCredentialScope(credentialId, scope.workspace_id, scope.board_id);
-      const credential = await resolveGitCredential(this.credentialRepo, credentialId, workspaceId, scope.board_id);
+      await this.assertCredentialScope(credentialId, scope.workspace_id);
+      const credential = await resolveGitCredential(this.credentialRepo, credentialId, workspaceId);
       const branches = await listRepoBranches({ url, credential, defaultBranch });
       return res.json({ branches, default_branch: defaultBranch });
     } catch (err: any) {
@@ -326,7 +323,7 @@ export class ResourcesController {
     if (!resource.url) {
       throw new BadRequestException("resource has no URL — set the repository's URL before reading git history");
     }
-    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId, null);
+    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
     const repoPath = await ensureRepoCache({ resourceId: id, url: resource.url, credential, forceFetch });
     return { repoPath };
   }

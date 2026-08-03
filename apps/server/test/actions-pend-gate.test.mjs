@@ -29,7 +29,6 @@ const candidate = (over = {}) => ({
   name: 'Deploy',
   description: 'ships prod',
   target_agent_id: 'ag1',
-  board_id: null,
   ...over,
 });
 
@@ -74,16 +73,16 @@ test('whitespace-only no_action_reason does NOT satisfy the gate', () => {
 
 test('multiple candidates are all reflected in the count', () => {
   const r = evaluatePendActionGate(
-    [candidate({ id: 'a1', name: 'A' }), candidate({ id: 'a2', name: 'B', board_id: 'b1' })],
+    [candidate({ id: 'a1', name: 'A' }), candidate({ id: 'a2', name: 'B' })],
     undefined,
   );
   assert.equal(r.allowed, false);
   assert.equal(r.candidateCount, 2);
   assert.match(r.message, /\bA\b/);
   assert.match(r.message, /\bB\b/);
-  // board-scope candidate is annotated as such
-  assert.match(r.message, /scope: board/);
-  assert.match(r.message, /scope: workspace/);
+  // Every candidate is workspace-scope only (board-scope Actions were removed
+  // by 65adf0b) — the message no longer carries a per-candidate scope label.
+  assert.doesNotMatch(r.message, /scope:/);
 });
 
 test('formatPendActionCandidates truncates beyond 20 and notes the remainder', () => {

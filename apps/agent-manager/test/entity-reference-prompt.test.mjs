@@ -12,6 +12,16 @@ const ticket = {
   comments: [],
 };
 
+test('trigger prompt renders the authoritative current column snapshot', () => {
+  const prompt = composeTriggerPrompt({
+    ...ticket,
+    current_column_id: 'column-review',
+    current_column_name: 'Review',
+    current_column_kind: 'review',
+  }, '', '', ticket.id, null);
+  assert.match(prompt, /Current column: Review \(kind: review, id: column-review\)/);
+});
+
 for (const [name, output] of [
   ['trigger', composeTriggerPrompt(ticket, '', '', ticket.id, null)],
   ['comment', composeCommentMentionPrompt(ticket, '', { content: 'Please check this.' }, ticket.id)],

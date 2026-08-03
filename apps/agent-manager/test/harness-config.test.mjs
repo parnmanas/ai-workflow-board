@@ -20,6 +20,7 @@ import { partitionHarness } from '../dist/lib/cli-adapters/base.js';
 import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { AntigravityCliAdapter } from '../dist/lib/cli-adapters/antigravity.js';
 import { DeepSeekCliAdapter } from '../dist/lib/cli-adapters/deepseek.js';
+import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 
 const FULL_HARNESS = {
   system_prompt_append: 'Always run the linter before committing.',
@@ -79,6 +80,16 @@ test('partitionHarness: model-only adapter keeps model, skips the rest', () => {
     'permission_mode',
     'system_prompt_append',
   ]);
+});
+
+test('partitionHarness: codex keeps representable policy keys and skips Claude-only tool lists', () => {
+  const { applied, skipped } = partitionHarness(new CodexCliAdapter(), FULL_HARNESS);
+  assert.deepEqual(applied, {
+    system_prompt_append: 'Always run the linter before committing.',
+    model: 'claude-sonnet-4-6',
+    permission_mode: 'acceptEdits',
+  });
+  assert.deepEqual(skipped.sort(), ['allowed_tools', 'disallowed_tools']);
 });
 
 test('partitionHarness: null harness stays null with no skips', () => {
@@ -153,6 +164,16 @@ test('claude harness with only system_prompt_append leaves permissions/tools unt
   assert.ok(args.includes('--dangerously-skip-permissions'));
   assert.equal(flagValue(args, '--allowedTools'), 'mcp__awb__*,mcp__host__*');
   assert.equal(flagValue(args, '--append-system-prompt'), 'You are the assignee.\n\nextra');
+});
+
+test('claude normalizes legacy permission modes instead of passing invalid CLI options', () => {
+  const legacy = oneshotArgs({ permission_mode: 'default' });
+  assert.equal(flagValue(legacy, '--permission-mode'), 'auto');
+  assert.ok(!legacy.includes('--dangerously-skip-permissions'));
+
+  const unknown = oneshotArgs({ permission_mode: 'future-mode' });
+  assert.equal(flagValue(unknown, '--permission-mode'), undefined);
+  assert.ok(unknown.includes('--dangerously-skip-permissions'));
 });
 
 // ─── deepseek flag/env agreement ───────────────────────────────────────────

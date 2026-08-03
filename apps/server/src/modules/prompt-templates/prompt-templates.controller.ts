@@ -11,6 +11,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
+import { PromptTemplatesService } from './prompt-templates.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('prompt-templates')
@@ -21,14 +22,43 @@ export class PromptTemplatesController {
   constructor(
     @InjectRepository(PromptTemplate) private readonly templateRepo: Repository<PromptTemplate>,
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly promptTemplatesService: PromptTemplatesService,
   ) {}
+
+  @Get('defaults/catalog')
+  async defaultsCatalog(
+    @Query('workspace_id') workspaceId: string,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    return res.json(this.promptTemplatesService.getDefaultsCatalog());
+  }
+
+  @Post('defaults/reset')
+  async resetDefaults(@Body() body: any, @Res() res: Response) {
+    const workspaceId = String(body?.workspace_id || '').trim();
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!Array.isArray(body?.names)) return res.status(400).json({ error: 'names must be an array' });
+    try {
+      const templates = await this.promptTemplatesService!.resetDefaults(
+        workspaceId,
+        body.names,
+        body.reset_board_mappings === true,
+      );
+      return res.json({
+        success: true,
+        templates: templates.map(template => ({ ...template, scope: catalogScopeOf(template) })),
+      });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Failed to reset prompt templates' });
+    }
+  }
 
   @Get()
   async list(
     @Query('workspace_id') workspaceId: string,
     @Query('id') id: string | undefined,
     @Query('category') category: string | undefined,
-    @Query('board_id') boardId: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {

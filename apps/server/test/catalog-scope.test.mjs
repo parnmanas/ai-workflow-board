@@ -30,11 +30,13 @@ test('catalog scope normalizes to the canonical Global/Workspace nullable pair',
 test('scope labels and visibility use Global and Workspace boundaries only', () => {
   assert.equal(catalogScopeOf({ workspace_id: null, board_id: null }), 'global');
   assert.equal(catalogScopeOf({ workspace_id: 'ws', board_id: null }), 'workspace');
-  assert.equal(canUseCatalogItem({ workspace_id: null, board_id: null }, 'ws', 'board'), true);
-  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: null }, 'ws', 'board'), true);
-  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'board' }, 'ws', 'board'), false);
-  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'other' }, 'ws', 'board'), false);
-  assert.equal(canUseCatalogItem({ workspace_id: 'other', board_id: null }, 'ws', 'board'), false);
+  assert.equal(canUseCatalogItem({ workspace_id: null, board_id: null }, 'ws'), true);
+  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: null }, 'ws'), true);
+  // A legacy Board-scoped row (board_id !== null) is never usable, regardless
+  // of workspace match — board_id is a dead column post-65adf0b.
+  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'board' }, 'ws'), false);
+  assert.equal(canUseCatalogItem({ workspace_id: 'ws', board_id: 'other' }, 'ws'), false);
+  assert.equal(canUseCatalogItem({ workspace_id: 'other', board_id: null }, 'ws'), false);
 });
 
 test('client exposes individual management menus with Global/current-Workspace pages only', () => {

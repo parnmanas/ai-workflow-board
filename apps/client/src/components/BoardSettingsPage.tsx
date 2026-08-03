@@ -5,7 +5,7 @@ import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
   EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
   BoardLesson,
-  Workspace, ClaudeBackendProfile,
+  Workspace, ClaudeBackendProfile, BuiltinPromptDefault,
 } from '../types';
 import MoveBlockerList from './MoveBlockerList';
 import { useBoard } from '../hooks/useBoard';
@@ -40,6 +40,7 @@ export default function BoardSettingsPage() {
   // silently to an empty list so non-privileged users can still view
   // settings without a crash.
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [defaultPromptTemplates, setDefaultPromptTemplates] = useState<BuiltinPromptDefault[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
   useEffect(() => {
@@ -48,6 +49,9 @@ export default function BoardSettingsPage() {
     api.listPromptTemplates(wsId)
       .then((list) => { if (!cancelled) setPromptTemplates(list); })
       .catch(() => { if (!cancelled) setPromptTemplates([]); });
+    api.listDefaultPromptTemplates(wsId)
+      .then((list) => { if (!cancelled) setDefaultPromptTemplates(list); })
+      .catch(() => { if (!cancelled) setDefaultPromptTemplates([]); });
     api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
     api.getWorkspaceClaudeBackendProfiles(wsId)
       .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles.filter(p => value.allowed_profile_ids.includes(p.id))); })
@@ -277,6 +281,7 @@ export default function BoardSettingsPage() {
           routingConfig={routingConfig}
           columnPrompts={columnPrompts}
           promptTemplates={promptTemplates}
+          defaultPromptTemplates={defaultPromptTemplates}
           workspaceRoles={workspaceRoles}
           onCreateColumn={(bid, name, color) => wrap(() => createColumn(bid, name, color), 'Column created')}
           onUpdateColumn={(columnId, data) => wrap(() => updateColumn(columnId, data), 'Column updated')}
@@ -285,11 +290,17 @@ export default function BoardSettingsPage() {
             await api.updateBoard(board.id, { routing_config: config });
             refresh();
           }}
-          onUpdateColumnPrompts={async (next) => {
+          onSaveColumnPrompts={async (next) => {
             // null clears all; empty object is equivalent per server contract.
             const payload = Object.keys(next).length === 0 ? null : next;
-            await api.updateBoard(board.id, { column_prompts: payload });
-            refresh();
+            try {
+              await api.updateBoard(board.id, { column_prompts: payload });
+              await refresh();
+              showToast('Column prompt mappings saved', 'success');
+            } catch (err: any) {
+              showToast(err?.message || 'Failed to save column prompt mappings', 'error');
+              throw err;
+            }
           }}
         />
         <DefaultRoleHoldersEditor
@@ -1131,8 +1142,8 @@ function LanguageSetting({ board, onSave }: LanguageSettingProps) {
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
         Agents dispatched on this board write their ticket comments, chat messages, commit messages,
         and code comments in this language. Leave unset to keep the agent default (English). Applies
-        to every role on the board. Best-effort on the Claude harness (rides
-        <code>--append-system-prompt</code>); other CLIs may not honour it.
+        to every role on the board. Claude receives it through its system prompt and Codex receives
+        the same instruction through the managed policy block.
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 220 }}>

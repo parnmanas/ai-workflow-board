@@ -821,6 +821,10 @@ export class TicketSessionManager
   }
 
   forwardBoardUpdate(ticketId: string, ev: any): boolean {
+    // A move changes role ownership. The server emits targeted agent_trigger
+    // events for the destination column; broadcasting this generic update to
+    // every old persistent session lets stale roles act on obsolete context.
+    if (ev?.entity_type === 'ticket' && ev?.action === 'moved') return false;
     const sessions = this.#sessionsForTicket(ticketId);
     if (sessions.length === 0) return false;
 
@@ -829,6 +833,12 @@ export class TicketSessionManager
     lines.push(`  Event: ${ev.entity_type || 'unknown'}.${ev.action || 'unknown'}`);
     if (ev.field_changed) lines.push(`  Field changed: ${ev.field_changed}`);
     if (ev.actor_name) lines.push(`  By: ${ev.actor_name}`);
+    if (ev.current_column_name || ev.current_column_id) {
+      lines.push(
+        `  Current column: ${ev.current_column_name || 'unknown'} ` +
+          `(kind: ${ev.current_column_kind || 'unknown'}, id: ${ev.current_column_id || 'unknown'})`,
+      );
+    }
     lines.push('');
     lines.push(
       'Review the change and adjust your work if needed. Use mcp__awb__get_ticket to fetch the latest ticket state.',
@@ -844,6 +854,12 @@ export class TicketSessionManager
   #composeTriggerTurn(spec: TicketTriggerArgs): string {
     const lines: string[] = [];
     lines.push('[New Trigger] A new trigger arrived for the ticket you are already working on.');
+    if (spec.ticket?.current_column_name || spec.ticket?.current_column_id) {
+      lines.push(
+        `Current column: ${spec.ticket.current_column_name || 'unknown'} ` +
+          `(kind: ${spec.ticket.current_column_kind || 'unknown'}, id: ${spec.ticket.current_column_id || 'unknown'})`,
+      );
+    }
     if (spec.columnPrompt && (spec.columnPrompt as any).content) {
       lines.push('');
       lines.push(`Column workflow guide (${(spec.columnPrompt as any).name || 'column_prompt'}):`);

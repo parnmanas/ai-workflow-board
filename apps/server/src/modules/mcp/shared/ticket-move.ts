@@ -15,6 +15,7 @@
 import type { DataSource } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
 import { BoardColumn } from '../../../entities/BoardColumn';
+import { ReviewDriftState } from '../../../entities/ReviewDriftState';
 import type { ActivityService } from '../../../services/activity.service';
 import { loadTicketFull } from './ticket-parsing';
 import { shiftTicketPositions } from './ticket-helpers';
@@ -79,6 +80,20 @@ export async function performColumnMove(
       colRepoTx.findOne({ where: { id: destColumnId } }),
     ]);
     await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+
+    // Review-drift episode end (ticket 59efbde9) — delete the
+    // ReviewDriftState row only when this move actually ENDS a review
+    // episode (Review→Merging, or any move into a terminal column). Gated on
+    // the destination ColumnKind, NOT folded into the unconditional ticket
+    // update above — that update runs on EVERY move, including a
+    // Review→In Progress bounce, and clearing the row there would reset
+    // reverification_count, defeating the anti-infinite-bounce counter this
+    // row exists to protect. Any other transition (bounce back, reorder,
+    // any non-terminal/non-merging destination) leaves the row untouched.
+    const destKind = destColForStamp?.kind;
+    if (destKind === 'merging' || destKind === 'terminal') {
+      await manager.getRepository(ReviewDriftState).delete({ ticket_id: ticket.id });
+    }
   });
 
   // 활동 로그용 컬럼 이름 해석.

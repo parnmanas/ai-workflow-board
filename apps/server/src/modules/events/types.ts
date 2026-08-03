@@ -36,6 +36,11 @@ export interface SubscriberIdentity {
 export interface EventMapContext {
   resolveBoardId(ticketId: string, entityId: string): Promise<string | null>;
   resolveTicketRepositoryResourceId(ticketId: string): Promise<string>;
+  resolveTicketColumnSnapshot(ticketId: string, entityId: string): Promise<{
+    id: string;
+    name: string;
+    kind: string;
+  } | null>;
   /**
    * Canonical `<Manager>/<Agent>` display for an actor id, so a live
    * `board_update` SSE frame carries the SAME name the durable read path

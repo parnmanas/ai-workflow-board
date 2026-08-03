@@ -35,7 +35,6 @@ export async function resolveGitCredential(
   credRepo: Repository<Credential>,
   credentialId: string | null | undefined,
   workspaceId: string,
-  _boardId?: string | null,
 ): Promise<{ username?: string; token?: string } | null> {
   if (!credentialId) return null;
   const cred = await credRepo.findOne({ where: { id: credentialId } });

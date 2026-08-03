@@ -152,6 +152,14 @@ export interface PromptTemplate {
   updated_at: string;
 }
 
+export interface BuiltinPromptDefault {
+  name: string;
+  description: string;
+  content: string;
+  category: string;
+  column_match: string;
+}
+
 export interface Resource {
   id: string;
   workspace_id: string | null;

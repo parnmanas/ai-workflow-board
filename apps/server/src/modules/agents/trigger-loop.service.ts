@@ -30,6 +30,7 @@ import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentCo
 import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
 import { pickBaseRepoResourceId, shouldBlockDispatchForMissingRepo } from '../../common/base-repo-binding';
+import { evaluateTerminalPendGate } from '../mcp/shared/terminal-pend-gate';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -1994,7 +1995,7 @@ candidate's branch or move the ticket.
     }
 
     if (cfg.autoPend) {
-      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, pendGuardActor);
+      await pendTicketForHardBudget(this.dataSource, this.activityService, ticket, reason, pendGuardActor, this.logService);
     }
     if (cfg.notify) {
       await postHardBudgetAlert(
@@ -2038,7 +2039,7 @@ candidate's branch or move the ticket.
     // so always re-read the link at the single trigger chokepoint.
     const duplicateGateTicket = await this.dataSource.getRepository(Ticket).findOne({
       where: { id: ticket.id },
-      select: ['id', 'canonical_ticket_id'],
+      select: ['id', 'canonical_ticket_id', 'column_id'],
     });
     if (duplicateGateTicket?.canonical_ticket_id) {
       this.logService.info('MCP', 'agent_trigger dropped (duplicate ticket)', {
@@ -2055,8 +2056,9 @@ candidate's branch or move the ticket.
     // (focus selector), the audit-row ranking summary, and any
     // downstream lookup. Cheap, single repo hit, avoids the three
     // separate findOne calls the pre-fix code did.
-    const col = ticket.column_id
-      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+    const currentColumnId = duplicateGateTicket?.column_id || ticket.column_id;
+    const col = currentColumnId
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: currentColumnId } })
       : null;
     const boardId = col?.board_id ?? '';
 
@@ -2459,7 +2461,7 @@ candidate's branch or move the ticket.
             const tplId: string | undefined = map?.[ticket.column_id];
             if (tplId) {
               const tpl = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-              if (tpl && canUseCatalogItem(tpl, board!.workspace_id, board!.id)) {
+              if (tpl && canUseCatalogItem(tpl, board!.workspace_id)) {
                 columnPrompt = { template_id: tpl.id, name: tpl.name, content: tpl.content };
               }
             }
@@ -2675,7 +2677,7 @@ candidate's branch or move the ticket.
         hasResolvedBaseRepo: !!baseRepo,
       })
     ) {
-      await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);
+      await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource, col);
       if (triggerSource === 'comment_summary') {
         throw Object.assign(new Error('No repository is configured for this dispatch'), {
           status: 503, code: 'SUMMARY_DISPATCH_REPOSITORY_MISSING',
@@ -2804,6 +2806,9 @@ candidate's branch or move the ticket.
       agent_id: agentId,
       role,
       trigger_source: triggerSource,
+      current_column_id: col?.id || '',
+      current_column_name: col?.name || '',
+      current_column_kind: col?.kind || '',
       role_prompt: rolePrompt,
       ticket_prompt: ticketPrompt,
       column_prompt: columnPrompt,
@@ -2939,7 +2944,22 @@ candidate's branch or move the ticket.
     agentId: string,
     role: string,
     triggerSource: string,
+    col: BoardColumn | null,
   ): Promise<void> {
+    // Terminal-aware gate (ticket ec498050): the caller already resolved
+    // `col` for this exact dispatch, so reuse it rather than re-querying.
+    // A terminal ticket (e.g. Done, re-triggered for a self-improvement
+    // retrospective) never gets a human looking at its User tab again — pend
+    // it and the ticket is stuck forever. No-op the whole pend flow (field +
+    // audit + explanatory comment) instead; the emit above is already
+    // blocked either way, so nothing is lost by skipping the park.
+    if (!evaluateTerminalPendGate(col).allowed) {
+      this.logService.info('MCP', 'base_repo guard: pend skipped, ticket already terminal', {
+        ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      });
+      return;
+    }
+
     const reason =
       'base repo 미해결 — assignee 가 push 할 저장소를 확정할 수 없습니다. 티켓 base repo 또는 보드 ' +
       'environment_config repository 가 설정돼 있으나 해결되지 않았습니다(Resource 삭제/타 workspace, ' +

@@ -77,13 +77,19 @@ const ARTIFACT_REFERENCE_RULE = `> 🔗 **AWB Artifact reference 규칙** — Ti
 
 /**
  * Action-우선(before-Pending) 정책 블록 — pend 결정을 다루는 워크플로 가이드
- * (todo / plan / in_progress)에 주입된다. 에이전트가 "배포가 필요하다" 같은
+ * (todo / plan / in_progress / review / merging, 티켓 ec498050 에서 review·merging
+ * 로 확장 — reviewer/assignee 가 실제로 pend_ticket 을 부르는 지점이 있는 컬럼만
+ * 대상. backlog/done 은 pend_ticket 을 쓰지 않아 제외: backlog 는 서버가 스케줄을
+ * 소유하는 순수 관찰 역할이고, done 은 이미 terminal 컬럼이라 pend 을 시도해도
+ * `terminal-pend-gate.ts` 가 거부한다)에 주입된다. 에이전트가 "배포가 필요하다" 같은
  * 이유로 곧장 Pending 하지 않고, 먼저 등록된 Action 을 탐색·실행(없으면 안전
  * 범위 내에서 등록)한 뒤 같은 티켓에서 흐름을 이어가도록 유도하는 안내다.
  * 서버측 pend_ticket 게이트(`modules/mcp/shared/pend-action-gate.ts`)가 이 규칙을
  * 실제로 강제한다 — 실행 가능한 Action 이 있으면 `no_action_reason` 없이는 pend 가
- * 거부된다. 단일 소스로 두어 세 워크플로에 byte-identical 하게 주입한다.
+ * 거부된다. 단일 소스로 두어 다섯 워크플로에 byte-identical 하게 주입한다.
  */
+const CURRENT_COLUMN_BOUNDARY_RULE = `> **Current-column boundary (mandatory)** — This guide defines the complete stage scope. Perform only the work and completion checks explicitly required here. Do not pre-run review, merge, deployment, release, cleanup, verification, or completion-audit work assigned to a later column. Do not add optional audits, refactors, documentation, or publishing. Inspect the ticket, repository, git history, and available AWB context first; proceed with safe reversible assumptions, and ask only when a concrete product decision, unavailable credential/permission, missing required input, or irreversible risk blocks this stage.`;
+
 const ACTIONS_BEFORE_PENDING_RULE = `## Actions — run a registered Action before you Pending
 
 Before you \`pend_ticket\` for something an automated operation could do — a deploy, a publish, a merge-to-production, kicking a pipeline, running a scripted task — first check whether a registered **Action** already does it. The server enforces this: \`pend_ticket\` is **rejected while runnable Actions exist** unless you pass \`no_action_reason\` explaining why none apply.
@@ -100,6 +106,43 @@ An **Action** is a saved, named prompt pinned to a target agent; running one dis
 
 **Then, and only then, Pending** — reserve \`pend_ticket\` for what an Action cannot resolve: a human decision, a credential/secret you cannot obtain, an approval only a person can grant, or a missing requirement only the reporter can supply. When you pend past runnable Actions, pass \`no_action_reason\` with the *specific* reason none apply (e.g. \`"prod approval needs a human signer — no Action covers the sign-off"\`); it is recorded on the ticket's audit trail.`;
 
+/**
+ * Investigate-before-asking rule (ticket ec498050) — injected right after the
+ * Artifact reference rule in every one of the 7 workflow guides, regardless
+ * of role. Counterpart to the pend-side fix in the same ticket: repository
+ * exploration, existing-pattern / recent-history research, implementation
+ * detail decisions, and testing/verification are the agent's own job —
+ * questions to another role or a human are for what code and history
+ * genuinely cannot answer, not a default first move. Single source so the
+ * wording can't drift per-role the way ticket 29ea479c's stale
+ * `WorkspaceRole.role_prompt` text did.
+ */
+const INVESTIGATE_BEFORE_ASKING_RULE = `> 🔎 **선(先) 조사 원칙** — 질문하거나 대기하기 전에 코드, git 이력(\`git log\`, \`git blame\`, \`git show\`), 티켓 코멘트로 먼저 스스로 답을 찾아라. 저장소 탐색·기존 패턴과 최근 이력 조사·구현 세부 결정·테스트와 검증은 이 역할이 자율적으로 수행한다. 코드와 이력으로 해결 가능한 내용을 다른 역할이나 사람에게 재질문하지 마라 — 진짜 설계 판단이나 사람만 답할 수 있는 정보가 남았을 때만 질문하라.`;
+
+/**
+ * Shared mechanics of the multi-holder consensus gate (propose → vote →
+ * server auto-move) — byte-identical across every column that can have 2+
+ * distinct holders on its routing role(s). The one-sentence lead-in that
+ * introduces WHO counts as a holder varies per column (review_workflow calls
+ * out co-reviewers / a distinct reviewer+assignee pair explicitly), so only
+ * the mechanics — not the whole section — are extracted here.
+ */
+const CONSENSUS_GATE_MECHANICS = `To advance a co-held ticket:
+
+1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
+2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
+3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
+4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
+
+The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.`;
+
+/** Full standard section — the 4 columns whose holder-definition sentence needs no column-specific caveat. */
+const MULTI_HOLDER_CONSENSUS_GATE_RULE = `## Multi-holder consensus gate
+
+If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
+
+${CONSENSUS_GATE_MECHANICS}`;
+
 export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
   {
     name: 'backlog_workflow',
@@ -109,6 +152,8 @@ export const DEFAULT_PROMPT_TEMPLATES: DefaultPromptTemplateDef[] = [
     content: `# Backlog — Narrate Server-Driven Promotions (reporter)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket sits in an intake column. **Backlog → first-active promotion is now owned by the server's \`BacklogPromotionService\`** — it runs whenever an agent on the board frees up, picks the highest-priority intake ticket whose destination-column role holders are below cap, and moves it in a single transaction.
@@ -143,6 +188,8 @@ Your job here as reporter is **not to scan or schedule** — that path was a per
     content: `# To Do — Start-or-Wait Decision (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the To Do column and you are its assignee. Decide whether to start now or wait.
@@ -168,22 +215,11 @@ This ticket is in the To Do column and you are its assignee. Decide whether to s
      - A one-line "starting" declaration.
      - If running in parallel: list concurrent ticket ids and the independence rationale (e.g., \`"touching apps/client/src/components/chat/* only — no overlap with ticket 1f92d68"\`).
      Then \`move_ticket\` to **In Progress** (if two or more distinct agents share the assignee role on this ticket, the move is consensus-gated — see **Multi-holder consensus gate** below).
-   - **Wait** → \`add_comment\` with the waiting reason and which ticket you are waiting on. Do **not** \`move_ticket\`.
+   - **Wait** → \`add_comment\` with the waiting reason and which ticket you are waiting on. Do **not** \`move_ticket\` and do **not** \`pend_ticket\` — this is a self-resolving sequencing choice (your own concurrent work), not a human blocker, so parking it would be pointless; you'll be re-triggered and re-check once something changes. Don't repeat the identical "still waiting" note on every re-trigger with nothing new to report — say so once and let the next real event (the other ticket finishing, a new comment) bring you back.
 
 5. **After In Progress** — \`in_progress_workflow\` takes over with the branch → work → push → Review hand-off flow.
 
-## Multi-holder consensus gate
-
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
-
-To advance a co-held ticket:
-
-1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
-
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+${MULTI_HOLDER_CONSENSUS_GATE_RULE}
 
 ${ACTIONS_BEFORE_PENDING_RULE}
 
@@ -191,7 +227,7 @@ ${ACTIONS_BEFORE_PENDING_RULE}
 
 - If you already have **3 or more in-progress tickets**, finish one before starting a new one. Context-switch cost outweighs concurrency.
 - Never start a ticket whose file / module scope overlaps with an active one. Sequential is the default.
-- When in doubt, ask the reviewer or reporter via \`add_comment\` and wait — never start on a guess.
+- When in doubt about a requirement, investigate the code and git history yourself first (see the 선(先) 조사 원칙 above); if a real question remains, ask the reviewer or reporter via \`add_comment\` and, if it's genuinely blocking, \`pend_ticket\` too — see the note below. Never start on a guess.
 - If a \`priority: critical\` ticket enters the queue, finish the current commit boundary (commit + push) on your non-critical work cleanly, then pick the critical. Never abandon mid-file.
 - If you are not the assignee, do not \`move_ticket\`. If this looks like a misassignment, leave a comment and stop.
 - **Don't bounce a ticket back to wait.** If a question to the reporter is the real blocker, leave the comment AND call \`mcp__awb__pend_ticket\` with a \`reason\`. This releases the focus so other tickets get worked on while this one waits, and the User tab on the ticket panel surfaces the ask. Bouncing through To Do ↔ another column without parking just re-triggers you in a loop.
@@ -205,6 +241,8 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     content: `# Plan — Concrete Plan Before Code (planner)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Plan column and you were triggered as its planner. Your job: turn the ticket's intent into a concrete plan an assignee can execute without re-deriving the design — then hand it off to In Progress. If the requirements are still ambiguous, ask the reporter and wait.
@@ -248,18 +286,7 @@ This ticket is in the Plan column and you were triggered as its planner. Your jo
 
 7. **Hand off** — \`mcp__awb__move_ticket\` to **In Progress**. The \`in_progress_workflow\` takes over with the branch → work → push → Review flow. **If two or more distinct agents share the planner role on this ticket, this move is consensus-gated — see _Multi-holder consensus gate_ below.**
 
-## Multi-holder consensus gate
-
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
-
-To advance a co-held ticket:
-
-1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
-
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+${MULTI_HOLDER_CONSENSUS_GATE_RULE}
 
 ${ACTIONS_BEFORE_PENDING_RULE}
 
@@ -284,6 +311,8 @@ ${ACTIONS_BEFORE_PENDING_RULE}
     content: `# In Progress — Branch Work (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the In Progress column. Implement the work on a feature branch and hand it off to Review.
@@ -326,18 +355,7 @@ This ticket is in the In Progress column. Implement the work on a feature branch
 
 7. **Move to Review** — \`move_ticket\` to the **Review** column. **If two or more distinct agents share the assignee role on this ticket, this move is consensus-gated — a direct \`move_ticket\` is rejected; follow the _Multi-holder consensus gate_ section below instead.**
 
-## Multi-holder consensus gate
-
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
-
-To advance a co-held ticket:
-
-1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
-
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+${MULTI_HOLDER_CONSENSUS_GATE_RULE}
 
 ${ACTIONS_BEFORE_PENDING_RULE}
 
@@ -382,6 +400,8 @@ The rule of thumb: **human answer → \`pend_ticket\`; another ticket finishing 
     content: `# Review — Code Review + Q&A (reviewer / assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Review column. Both the reviewer **and** the assignee are triggered here so they can iterate on questions without bouncing the ticket back and forth. Your first job is to check which role you hold on this ticket, then follow only the matching branch below.
@@ -403,7 +423,7 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 ## Reviewer branch
 
 <!--awb:no-pr-->
-> **This board merges directly (\`use_pr\`=false — the default): there is usually no PR.** Review the *branch* diff, not a PR. Substitute every \`gh pr …\` command below with its git/branch equivalent: base-freshness via \`git fetch origin && git rev-list --left-right --count origin/<default>...<branch>\` (a non-zero left/behind count = the branch forked from an older base → BEHIND); the diff via \`git diff origin/<default>...<branch>\` (or the GitHub compare URL); and skip \`gh pr checks\` — there is no PR CI gate, so rely on the build/test signal the assignee posted plus your own read.
+> **This board merges directly (\`use_pr\`=false — the default): there is usually no PR.** Review the *branch* diff, not a PR. Substitute every remaining \`gh pr …\` command below with its git/branch equivalent: the diff via \`git diff origin/<default>...<branch>\` (or the GitHub compare URL); and skip \`gh pr checks\` — there is no PR CI gate, so rely on the build/test signal the assignee posted plus your own read. (Base-freshness in step 2 goes through \`check_review_drift\`, which is PR-agnostic — no substitution needed there.)
 <!--/awb:no-pr-->
 <!--awb:pr-only-->
 > **This board uses PRs (\`use_pr\`=true):** the assignee opened a PR in In Progress and its URL is in the comments. Use the \`gh pr …\` commands below (\`gh pr view\`, \`gh pr diff\`, \`gh pr checks\`) directly against it.
@@ -411,11 +431,12 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
 
 1. **Identify the branch / PR** — find the branch name (and PR URL if present) the assignee posted in the ticket comments. If missing, \`add_comment\` asking for the branch name (mention the assignee with \`@[role:assignee|<name>]\`) and stop.
 
-2. **Base-freshness gate — review against the current integration target, not the stale fork point.** A \`<default>...<branch>\` comparison is a 3-dot diff computed from the *merge base* (where the branch forked). If the default has moved since — especially when the same area is evolving fast — that diff hides what already landed, so "no regression / existing behaviour unchanged" claims become **unverifiable against what will actually be integrated**. Gate on base freshness *before* reading the diff:
-   - Capture the current integration tip: \`gh api repos/<owner>/<repo>/git/refs/heads/<default> --jq .object.sha\` (or \`gh pr view <pr> --json baseRefOid -q .baseRefOid\`). This SHA is the base you review **against** — it goes in your decision comment.
-   - Check whether the branch is behind it: \`gh pr view <pr> --json mergeStateStatus,baseRefName,headRefOid\`. A \`mergeStateStatus\` of \`BEHIND\` (or \`DIRTY\` for a conflicting branch) means the branch forked from an older base and the diff is stale.
-   - **BEHIND / DIRTY** → do **not** approve backward-compat / "no regression" claims from this diff. \`add_comment\` asking the assignee to \`git rebase origin/<default>\` and re-push (mention \`@[role:assignee|<name>]\`), \`move_ticket\` back to **In Progress**, and stop. Re-review once the branch is current.
-   - **Current** (\`CLEAN\` / \`HAS_HOOKS\` / \`UNSTABLE\` — anything not behind) → proceed; the diff reflects the real integration target.
+2. **Base-freshness gate — review against the current integration target, not the stale fork point.** If the default has moved since this branch forked, that's only a problem when the movement actually touched something this branch also touches — under concurrent merges from other tickets, the default can advance every few minutes, and bouncing on every advance regardless of overlap just manufactures endless rebase/re-review loops on an already-approved diff. Gate on base freshness *before* reading the diff, via the server's classifier rather than a manual mergeStateStatus check:
+   - Call \`mcp__awb__check_review_drift(ticket_id)\`. It diffs this branch's own changed paths against whatever origin/<default> gained since the episode began and returns \`{classification, recommendation, overlapping_paths, reverification_count, max_reverifications}\`.
+   - **\`recommendation: "rebase_required"\`** (the default moved in a path this branch also touches — or a repo-global file like package.json/tsconfig — and this Review episode hasn't already spent its one reverification bounce) → do **not** approve backward-compat / "no regression" claims from this diff. \`add_comment\` asking the assignee to \`git rebase origin/<default>\` and re-push (mention \`@[role:assignee|<name>]\`), \`move_ticket\` back to **In Progress**, and stop. Re-review once the branch is current.
+   - **\`recommendation: "proceed"\`** (no drift, or the default only moved in paths unrelated to this branch) → proceed; the diff reflects the real integration target closely enough that unrelated movement doesn't invalidate your review.
+   - **\`recommendation: "proceed_no_action"\`** (this episode already bounced once for the same overlapping drift, or the check was unresolvable — no repo configured, git unavailable, branch not found) → proceed rather than bounce again for the same or an unverifiable reason. Merging's own rebase-before-land step is this episode's remaining re-verification point, not another round-trip through Review.
+   - Record the base SHA the tool reports (\`last_checked_base_sha\`) — it goes in your decision comment as \`reviewed against origin/<default>@<sha>\`.
 
 3. **Inspect the diff remotely**
    - Preferred: \`gh pr diff <pr-number-or-branch>\` — works with only a \`gh\` auth token, no local clone.
@@ -434,20 +455,24 @@ This ticket is in the Review column. Both the reviewer **and** the assignee are 
    - **LGTM** → \`add_comment\` "LGTM — approved for merge." with 1–2 lines of rationale **and the reviewed base SHA** (\`reviewed against origin/<default>@<sha>\` from step 2) so "no regression vs. what?" is auditable. **Before moving**, file any inline follow-up: if you wrote or spotted a "track in a separate ticket" / "follow-up needed" note in this thread that isn't a ticket yet, \`create_ticket\` it **now** (Backlog, \`priority=low\`, \`Source:\` link) — don't defer it to the retrospective. Then \`move_ticket\` to **Merging** (if this column's routing role(s) count two or more distinct holders on this ticket — co-reviewers, or a distinct reviewer + assignee pair on boards that route both roles here — the move is consensus-gated; see **Multi-holder consensus gate** below). (Do not move to Done — Merging handles the actual merge.)
    - **Changes requested** → \`add_comment\` with concrete findings (\`file:line\` citations, "X instead of Y" suggestions), mention the assignee (\`@[role:assignee|<name>]\`) → \`move_ticket\` back to **In Progress** (a bounce-back is a move out of this column too — on a co-held ticket it is consensus-gated the same way; see **Multi-holder consensus gate** below).
    - **Question for the assignee** → \`add_comment\` with a specific question, mention the assignee (\`@[role:assignee|<name>]\`), and stop. Do **not** \`move_ticket\` — the ticket stays in Review so the assignee can answer without a round-trip to In Progress.
-   - **Cannot decide on your own** → \`add_comment\` with a specific question to the **reporter** (use \`@[role:reporter|<name>]\`) and stop. Do not \`move_ticket\`.
+   - **Cannot decide on your own** → \`add_comment\` with a specific question to the **reporter** (use \`@[role:reporter|<name>]\`) and stop. Do not \`move_ticket\`. If it's a genuine human-only call, \`pend_ticket\` too — see **When to park** below.
 
 ## Multi-holder consensus gate
 
 If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — e.g. co-reviewers, or a distinct reviewer + assignee pair when this column routes both roles; the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
 
-To advance a co-held ticket:
+${CONSENSUS_GATE_MECHANICS}
 
-1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
+${ACTIONS_BEFORE_PENDING_RULE}
 
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+## When to park instead of endless waiting (reviewer)
+
+A "Cannot decide on your own" question (step 5) or an unanswered branch/PR request (step 1) can leave the ticket stuck in Review with no one advancing it. Don't just leave it there indefinitely:
+
+- **Genuine human decision needed** (the reporter is unreachable, or the ambiguity is a product/architecture call only a human can settle) — after asking, call \`mcp__awb__pend_ticket\` with a one-line \`reason\`. This releases your focus so other tickets advance, and the User tab on the ticket panel surfaces the ask.
+- **Blocked on another ticket** (the diff can't be judged until some other ticket lands — an upstream refactor, a dependency entity) — call \`mcp__awb__add_ticket_prerequisites(ticket_id, [<prereq id(s)>], reason)\` instead; it auto-resumes the moment every prerequisite reaches a terminal column, no human \`unpend\` needed.
+
+Rule of thumb: human answer → \`pend_ticket\`; another ticket finishing → \`add_ticket_prerequisites\`. A plain "question for the assignee" (they're a co-worker on the same ticket, not a blocked-forever case) does **not** need either — they'll be re-triggered by the mention.
 
 ## Reviewer notes
 
@@ -488,6 +513,8 @@ You handed the ticket off to Review. You are triggered here because the reviewer
     content: `# Merging — Integrate into Default (assignee)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 This ticket is in the Merging column, which means Review approved the diff. Your job: land the feature branch on the default branch, delete the feature branch (local + remote), and advance the ticket to Done.
 
 > **Environment**: assignee has a full local repo. This stage exists because reviewer / reporter may not — so all real merge work happens here.
@@ -515,13 +542,13 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - \`git checkout <default-branch>\`
    - \`git pull --ff-only origin <default-branch>\`
    - \`git merge --ff-only <feature-branch>\` — after step 2's rebase this fast-forwards cleanly.
-   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below.
+   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below. If Review bounced this ticket back for overlapping main drift (\`check_review_drift\` recommended \`rebase_required\`), this rebase loop **is** that drift's single re-verification point — the episode's reverification budget is already spent, so Review will not bounce it again for the same reason.
 
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
    - **Verify the push landed**: \`git rev-parse HEAD\` == \`git rev-parse origin/<default-branch>\`. If they differ, the push did not land — read the error and retry.
    - **Verify completeness (no partial merge)**: \`git fetch origin\`, then \`git merge-base --is-ancestor <feature-branch> origin/<default-branch>\` must exit 0 **and** \`git diff --name-only origin/<default-branch>...<feature-branch>\` must be **empty**. Together they prove *every* feature commit is reachable from the pushed default — not just the tip. If anything still shows as unmerged, the merge is partial: re-integrate the missing commits, or escalate per the boundary below.
-   - If the push is rejected (branch protection, CI gate, …) → **never force-push the default branch**. Skip step 5, go to step 7, record \`"manual merge required — <default> push rejected: <reason>"\`, and stop.
+   - If the push is rejected (branch protection, CI gate, …) → **never force-push the default branch**. Skip step 5, go to step 7, record \`"manual merge required — <default> push rejected: <reason>"\`, call \`mcp__awb__pend_ticket\` with that reason so the User tab surfaces it, and stop.
 
 5. **Delete the feature branch (both sides) — by the name it was *actually pushed as***
    - Local name and remote ref can diverge: push hooks / PR automation sometimes rename \`ticket/<id>-<slug>\` to e.g. \`awb-<id>...\` on the remote. Deleting the *local* name against origin then silently **no-ops** (git happily "succeeds" deleting a ref that was never there) and the real branch leaks forever. So **resolve the real remote ref first**:
@@ -566,23 +593,14 @@ If none of these apply, integrate and proceed — record what you folded in the 
 
 Cleanup — remote branch delete, local branch delete, ticket worktree removal — is part of "merged", not an afterthought. The server's terminal-cleanup (\`#cleanupTerminalTicketWorktrees\`) is fire-and-forget and **never throws**, so if you skip cleanup or die before finishing it, nobody reconciles it later — the ref/worktree leaks permanently. Handle failures here, before Done:
 
-- **Remote delete failed or was a silent no-op** (a ref still shows in \`git ls-remote --heads origin | grep <ticket-id-short>\` after step 5) → re-resolve the real ref name (it was almost certainly renamed, e.g. \`awb-<id>\`) and retry the delete against *that* name. If the ref is protected / the delete is rejected, \`add_comment\` \`"cleanup incomplete — remote ref <name> still present: <reason>"\` and **do not move to Done** — leave the ticket in Merging for a human.
+- **Remote delete failed or was a silent no-op** (a ref still shows in \`git ls-remote --heads origin | grep <ticket-id-short>\` after step 5) → re-resolve the real ref name (it was almost certainly renamed, e.g. \`awb-<id>\`) and retry the delete against *that* name. If the ref is protected / the delete is rejected, \`add_comment\` \`"cleanup incomplete — remote ref <name> still present: <reason>"\`, \`pend_ticket\` with that reason, and **do not move to Done** — leave the ticket in Merging for a human.
 - **Local branch delete failed** → record the exact error in the comment, resolve it (e.g. \`git checkout <default>\` first), and retry. Never advance to Done with the local \`ticket/<id>\` branch still listed.
 - **Ticket worktree** → you are typically *running inside* it, so you cannot remove your own worktree mid-run; that removal is the server's terminal-cleanup job once the ticket lands in Done. Your responsibility is (a) leave no new uncommitted junk in it and (b) state in the step-7 comment that no stray worktree work remains, so Done's audit can trust the state. If you created an *extra* worktree yourself (\`git worktree add\`), remove it with \`git worktree remove\` and confirm via \`git worktree list\`.
 - **Bottom line**: advance to Done only when remote+local branch deletion verifies empty — or you have explicitly recorded in a comment why a human must finish cleanup and left the ticket in Merging. A leaked branch/worktree reaching Done is exactly what this prompt exists to stop.
 
-## Multi-holder consensus gate
+${MULTI_HOLDER_CONSENSUS_GATE_RULE}
 
-If **two or more distinct holders** (agents or users, counted across this column's routing role(s) — the same party wearing several hats counts once) share the ticket here, the server gates **every move out of this column — forward or bounce-back —** on **unanimous explicit agreement**: a direct \`move_ticket\` is rejected with a \`consensus_required\` error naming the holders still pending, and no co-holder may advance the ticket unilaterally. **Single-holder tickets are unaffected: the gate never fires and you move exactly as before.**
-
-To advance a co-held ticket:
-
-1. **Discuss** in normal comments (mention your co-holders so they're triggered). Plain notes are *not* votes.
-2. **Propose** — \`mcp__awb__propose_move\` to the target column. The proposal comment itself fans out to your co-holders (no extra mention needed); its id is the vote anchor, and a newer proposal supersedes it (votes on the old one go stale).
-3. **Vote** — every holder casts \`mcp__awb__record_agreement\` with \`status="agree"\` (or \`"object"\`, rationale in \`content\`). \`proposal_id\` can be omitted — the latest open proposal is the anchor. Vote comments never re-trigger anyone (no echo loop). Silence ≠ consent; only your latest signal counts.
-4. **Server auto-moves** — the instant every required holder has agreed on the current proposal, the server performs the move itself (actor \`Consensus\`). Nobody calls \`move_ticket\`. Unanimous signals without an open proposal never auto-move — open the proposal first.
-
-The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlock — honored only while holding the reporter role, and audit-logged. \`move_ticket(force=true)\` also bypasses the gate (any caller — no reporter check — and it skips the terminal-reopen and review-approval guards too); it is a human/operator escape hatch, never an agent's way around consensus.
+${ACTIONS_BEFORE_PENDING_RULE}
 
 ## Notes
 
@@ -600,7 +618,7 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
   - Then verify with \`gh pr view <pr> --json state,mergeCommit\` (\`state\` must be \`MERGED\`). If \`--delete-branch\` silently failed, fall back to manual \`git push origin --delete\` + \`git branch -d\` — and re-resolve the real remote ref name per step 5 (the PR head ref may differ from your local name). If the PR reports conflicts, integrate them locally first via step 2 (rebase + fold same-meaning changes, push \`--force-with-lease\` on the feature branch), then re-run the merge — same integrate-vs-escalate boundary applies.
   - Leave the PR link in the step-7 ticket comment.
 <!--/awb:pr-only-->
-- **No \`gh\` available and direct push rejected** → stop, record \`"manual merge required"\`, leave the ticket in Merging for a human.
+- **No \`gh\` available and direct push rejected** → stop, record \`"manual merge required"\`, \`pend_ticket\` with that reason, leave the ticket in Merging for a human.
 - **Submodule changes must run through step 6.** Skipping the parent bump leaves every other environment pointing at the old ref.
 - After merge, a quick sanity build on the default branch is cheap insurance. If it's broken, open a follow-up ticket or revert immediately.
 `,
@@ -613,6 +631,8 @@ The reporter may \`record_agreement(..., override=true)\` to force-pass a deadlo
     content: `# Done — Completion + Merge Audit (reporter)
 
 ${ARTIFACT_REFERENCE_RULE}
+${CURRENT_COLUMN_BOUNDARY_RULE}
+${INVESTIGATE_BEFORE_ASKING_RULE}
 ${WORK_FOLDER_RULE}
 
 This ticket is in the Done column. Merging *claims* it landed the code and deleted the feature branch — your job is to **independently re-verify that the merge is real and complete before you bless it**, then record completion. A \`"Merged"\` comment is **not** evidence (CLAUDE.md: "'Merged' comment ≠ evidence — always check \`git rev-parse origin/<default>\`"). **Backlog scheduling is no longer your responsibility** — \`BacklogPromotionService\` runs server-side on the same capacity event the supervisor watches, so a freed agent triggers the next promotion automatically.

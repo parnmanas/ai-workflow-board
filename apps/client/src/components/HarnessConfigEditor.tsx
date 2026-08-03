@@ -25,10 +25,12 @@ interface HarnessConfigEditorProps {
 // text) by appending it to the options at render time.
 const PERMISSION_MODE_OPTIONS = [
   { value: '', label: '(inherit / unset)' },
-  { value: 'default', label: 'default' },
-  { value: 'plan', label: 'plan' },
-  { value: 'acceptEdits', label: 'acceptEdits' },
-  { value: 'bypassPermissions', label: 'bypassPermissions' },
+  { value: 'auto', label: 'auto — Claude autonomous / Codex workspace write' },
+  { value: 'dontAsk', label: 'dontAsk — no clarification prompts' },
+  { value: 'acceptEdits', label: 'acceptEdits — allow workspace edits' },
+  { value: 'plan', label: 'plan — read-only' },
+  { value: 'bypassPermissions', label: 'bypassPermissions — unrestricted' },
+  { value: 'manual', label: 'manual — Claude manual / Codex workspace write' },
 ];
 
 export function parseHarnessConfigRaw(raw: string | null | undefined): HarnessConfig {
@@ -147,19 +149,19 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
-          <label style={fieldLabelStyle}>System prompt append</label>
+          <label style={fieldLabelStyle}>System prompt append · Claude + Codex</label>
           <textarea
             rows={4}
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="Extra system prompt merged into the subagent's --append-system-prompt"
+            placeholder="Managed policy added to every subagent prompt"
             style={textareaStyle}
           />
         </div>
 
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 240 }}>
-            <label style={fieldLabelStyle}>Allowed tools</label>
+            <label style={fieldLabelStyle}>Allowed tools · Claude only</label>
             <textarea
               rows={3}
               value={allowedTools}
@@ -169,7 +171,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
             />
           </div>
           <div style={{ flex: 1, minWidth: 240 }}>
-            <label style={fieldLabelStyle}>Disallowed tools</label>
+            <label style={fieldLabelStyle}>Disallowed tools · Claude only</label>
             <textarea
               rows={3}
               value={disallowedTools}
@@ -198,7 +200,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div style={{ width: 260 }}>
             <Input
-              label="Model"
+              label="Model · Claude + Codex"
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder="e.g. claude-sonnet-4-6 (empty = inherit)"
@@ -206,7 +208,7 @@ export default function HarnessConfigEditor({ raw, title, description, onSave }:
           </div>
           <div style={{ width: 220 }}>
             <Select
-              label="Permission mode"
+              label="Permission mode · Claude + Codex"
               value={permissionMode}
               options={permissionOptions}
               onChange={(e) => setPermissionMode(e.target.value)}

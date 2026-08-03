@@ -25,12 +25,11 @@ export class WorkflowFunctionsController {
   @Get()
   async list(
     @Query('workspace_id') workspaceId: string | undefined,
-    @Query('board_id') boardId: string | undefined,
     @Query('include_shadowed') shadowed: string,
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.functions.list(workspaceId || null, boardId, shadowed === 'true'));
+      return res.json(await this.functions.list(workspaceId || null, shadowed === 'true'));
     } catch (error) {
       return this.fail(res, error, 'Failed to list Functions');
     }

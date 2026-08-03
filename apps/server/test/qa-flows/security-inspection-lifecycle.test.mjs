@@ -49,8 +49,8 @@ test('security inspection: profile CRUD + run roundtrip + incremental baseline a
   assert.equal(profile.last_passed_commit, null, 'fresh profile has no baseline');
   assert.equal(profile.checklist.length, 2);
 
-  step('list_security_profiles scope rule (workspace-scope "" finds it)');
-  const wsScoped = await mcp.callTool('list_security_profiles', { workspace_id: ws.id, board_id: '' });
+  step('list_security_profiles returns the workspace-scoped profile');
+  const wsScoped = await mcp.callTool('list_security_profiles', { workspace_id: ws.id });
   assert.ok(Array.isArray(wsScoped) && wsScoped.some((p) => p.id === profile.id), 'workspace-scoped list returns the profile');
 
   step('start_security_run #1 — first run must be FULL (no baseline)');

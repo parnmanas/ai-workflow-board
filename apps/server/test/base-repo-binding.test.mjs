@@ -142,7 +142,10 @@ test('_emitTrigger pends (does not emit) when a branch-work dispatch has no reso
   // Isolate the block between the pend call and its terminating `return '';`
   // rather than asserting the two are adjacent: a branch may sit between them
   // (e.g. the comment_summary early-throw) as long as it never reaches emit.
-  const pendCall = 'await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource);';
+  // ticket ec498050: the callee now takes the caller's already-resolved `col`
+  // (terminal-aware pend gate) instead of re-querying it — the 5th arg here
+  // tracks that signature, not a re-fetch of the guard's own boolean.
+  const pendCall = 'await this._pendForMissingBaseRepo(ticket, agentId, role, triggerSource, col);';
   const pendIdx = src.indexOf(pendCall);
   assert.ok(pendIdx !== -1, 'pend call must exist verbatim');
   const afterPend = src.slice(pendIdx + pendCall.length);

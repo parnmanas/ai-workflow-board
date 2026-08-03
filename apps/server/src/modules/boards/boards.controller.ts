@@ -512,7 +512,7 @@ export class BoardsController {
           const column = await this.colRepo.findOne({ where: { id: colId, board_id: board.id } });
           if (!column) return res.status(400).json({ error: `column ${colId} does not belong to board` });
           const template = await this.dataSource.getRepository(PromptTemplate).findOne({ where: { id: tplId } });
-          if (!template || !canUseCatalogItem(template, board.workspace_id, board.id)) {
+          if (!template || !canUseCatalogItem(template, board.workspace_id)) {
             return res.status(400).json({ error: `prompt template ${tplId} is not available to board` });
           }
           cleaned[colId] = tplId;
