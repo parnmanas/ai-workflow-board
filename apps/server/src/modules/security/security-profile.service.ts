@@ -6,6 +6,7 @@ import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import {
   normalizeWorkspaceFolder,
   normalizeCheckoutMode,
@@ -193,7 +194,7 @@ export class SecurityProfileService {
 
     const agent = await this.agentRepo.findOne({ where: { id: input.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
-    if (agent.workspace_id && agent.workspace_id !== input.workspace_id) {
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, input.workspace_id)) {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 
@@ -242,7 +243,7 @@ export class SecurityProfileService {
     if (patch.target_agent_id !== undefined) {
       const agent = await this.agentRepo.findOne({ where: { id: patch.target_agent_id } });
       if (!agent) throw makeError(400, 'target agent not found');
-      if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
         throw makeError(400, 'target agent belongs to a different workspace');
       }
       existing.target_agent_id = patch.target_agent_id;

@@ -86,7 +86,7 @@ export interface Agent {
    *  list/get; the Agent Manager runtime section uses it to render the per-row
    *  workspace picker that lets operators relocate managed agents that
    *  were created against a global manager. */
-  workspace_id?: string;
+  workspace_id?: string | null;
   /** Optional Credential row that supplies CLI auth (subscription / API key)
    *  for the spawned agent. null = fall back to the operator's main HOME. */
   credential_id?: string | null;
@@ -2178,6 +2178,7 @@ export interface ManagedAgentCreateBody {
   working_dir?: string;
   manager_agent_id: string;
   runtime_config: AgentRuntimeConfig;
+  workspace_id?: string | null;
   description?: string;
   /** Optional per-agent CLI credential — see Agent.credential_id. */
   credential_id?: string | null;

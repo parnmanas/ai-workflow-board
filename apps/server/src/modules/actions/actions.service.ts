@@ -21,6 +21,7 @@ import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
@@ -270,7 +271,7 @@ export class ActionsService {
     // bypass our SSE recipient filter and silently never deliver.
     const agent = await this.agentRepo.findOne({ where: { id: input.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
-    if (agent.workspace_id && agent.workspace_id !== input.workspace_id) {
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, input.workspace_id)) {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 
@@ -318,7 +319,7 @@ export class ActionsService {
     if (patch.target_agent_id !== undefined) {
       const agent = await this.agentRepo.findOne({ where: { id: patch.target_agent_id } });
       if (!agent) throw makeError(400, 'target agent not found');
-      if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
         throw makeError(400, 'target agent belongs to a different workspace');
       }
       existing.target_agent_id = patch.target_agent_id;

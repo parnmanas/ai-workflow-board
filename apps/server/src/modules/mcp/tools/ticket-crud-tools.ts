@@ -17,6 +17,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
@@ -993,7 +994,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
 
-      if (agent.workspace_id && agent.workspace_id !== workspace_id) {
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspace_id)) {
         return err('Agent does not belong to the requested workspace');
       }
 

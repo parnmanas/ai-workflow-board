@@ -43,7 +43,7 @@ export function isEligibleAssistant(agent: AgentLike | null | undefined, wsId?: 
   if (!agent) return false;
   if (agent.is_active !== 1) return false;
   if (agent.type === 'manager') return false;
-  if (wsId && agent.workspace_id !== wsId) return false;
+  if (wsId && agent.workspace_id && agent.workspace_id !== wsId) return false;
   return true;
 }
 

@@ -10,6 +10,7 @@ import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 const PARTICIPANT_CAP = 50;
 
@@ -299,6 +300,19 @@ export class RoomCrudService {
     // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3). 걸러낸 뒤
     // 남은 인원으로 방을 만든다 — manager 만 상대로 지정하면 아래 최소-2명 가드가 거른다.
     uniqueParticipants = await this.membership.filterOutManagerParticipants(uniqueParticipants);
+    const requestedAgentIds = uniqueParticipants
+      .filter(p => p.participant_type === 'agent')
+      .map(p => p.participant_id)
+      .filter(id => UUID_RE.test(id));
+    if (requestedAgentIds.length > 0) {
+      const agents = await this.agentRepo.findByIds(requestedAgentIds);
+      const byId = new Map(agents.map(agent => [agent.id, agent]));
+      const invalid = requestedAgentIds.find((id) => {
+        const agent = byId.get(id);
+        return !agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId);
+      });
+      if (invalid) throw makeError(400, `Agent ${invalid} does not belong to this workspace`);
+    }
 
     if (uniqueParticipants.length < 2) {
       throw makeError(400, 'At least 2 participants required');

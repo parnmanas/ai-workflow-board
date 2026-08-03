@@ -11,6 +11,7 @@ import { ActivityService } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 // ─── Run lifecycle labels (ticket 5eb459c4) ───────────────────
 // Run state lives on the run ticket's `labels` (a JSON-array field already wired
@@ -160,6 +161,12 @@ export class BenchmarkService {
 
     const { board, runColumn, candidateColumn } = await this._resolveRunColumns(boardId, input.candidate_column_name);
     const workspaceId = board.workspace_id || '';
+    for (const evaluatorId of evaluatorIds) {
+      const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
+      if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, workspaceId)) {
+        throw httpError(`Evaluator agent ${evaluatorId} is not available in this workspace`, 400);
+      }
+    }
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const description = this._composeRunDescription(prompt, input.rubric, input.base_repo);
@@ -303,6 +310,14 @@ export class BenchmarkService {
       .filter((l) => l.startsWith(PREFIX_EVALUATOR))
       .map((l) => l.slice(PREFIX_EVALUATOR.length));
     const boardId = await this._runBoardId(run);
+    if (patch.evaluator_agent_ids !== undefined) {
+      for (const evaluatorId of patch.evaluator_agent_ids.filter(Boolean)) {
+        const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
+        if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, run.workspace_id)) {
+          throw httpError(`Evaluator agent ${evaluatorId} is not available in this workspace`, 400);
+        }
+      }
+    }
 
     if (state === 'started') {
       if (patch.prompt !== undefined && patch.prompt !== current.prompt) {
@@ -491,6 +506,11 @@ export class BenchmarkService {
     const out: Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string; dispatched: number }> = [];
     for (const agentId of agentIds) {
       const agent = await agentRepo.findOne({ where: { id: agentId } });
+      if (!agent) throw httpError(`Candidate agent ${agentId} not found`, 400);
+      if (agent.type === 'manager') throw httpError('Manager agents cannot be benchmark candidates', 400);
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, opts.workspaceId)) {
+        throw httpError(`Candidate agent ${agentId} belongs to a different workspace`, 400);
+      }
       const agentName = agent?.name || agentId;
       const child = await ticketRepo.save(ticketRepo.create({
         parent_id: runId,
@@ -680,6 +700,10 @@ export class BenchmarkService {
     const candidate = await ticketRepo.findOne({ where: { id: candidateId } });
     if (!candidate) {
       throw Object.assign(new Error(`Candidate ticket ${candidateId} not found`), { status: 404 });
+    }
+    const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
+    if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, candidate.workspace_id)) {
+      throw Object.assign(new Error('Evaluator agent is not available in the candidate workspace'), { status: 400 });
     }
     // Run = candidate's parent (the run ticket holds the task). Explicit
     // override wins so a caller can pin the run when candidates are root-level.

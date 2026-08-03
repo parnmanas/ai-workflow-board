@@ -13,8 +13,28 @@ const {
   cliHomeDirFor,
   ensureCliHomeDir,
   writeApiKey,
+  readApiKey,
+  apiKeyPathFor,
+  mcpConfigPathFor,
+  writeMcpConfig,
+  eraseSecrets,
   writeManagedAgentConfig,
 } = await import('../dist/lib/managed-agent-store.js');
+
+test('global agent secrets are isolated by workspace and erased together', async () => {
+  const agentId = 'global-agent-scope';
+  await writeApiKey(agentId, 'key-a', 'workspace-a');
+  await writeApiKey(agentId, 'key-b', 'workspace-b');
+  assert.equal(await readApiKey(agentId, 'workspace-a'), 'key-a');
+  assert.equal(await readApiKey(agentId, 'workspace-b'), 'key-b');
+  assert.notEqual(apiKeyPathFor(agentId, 'workspace-a'), apiKeyPathFor(agentId, 'workspace-b'));
+  assert.notEqual(mcpConfigPathFor(agentId, 'workspace-a'), mcpConfigPathFor(agentId, 'workspace-b'));
+  await writeMcpConfig(agentId, 'https://awb.example', 'key-a', 'workspace-a');
+  await writeMcpConfig(agentId, 'https://awb.example', 'key-b', 'workspace-b');
+  await eraseSecrets(agentId);
+  assert.equal(await readApiKey(agentId, 'workspace-a'), null);
+  assert.equal(await readApiKey(agentId, 'workspace-b'), null);
+});
 
 let originalFetch;
 let requests;

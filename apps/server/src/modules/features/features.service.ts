@@ -7,6 +7,7 @@ import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ActivityService } from '../../services/activity.service';
@@ -177,7 +178,7 @@ export class FeaturesService {
     }
     const agent = await this.agentRepo.findOne({ where: { id: plannerId } });
     if (!agent) throw new BadRequestException('planner agent not found');
-    if (agent.workspace_id && agent.workspace_id !== feature.workspace_id) {
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, feature.workspace_id)) {
       throw new BadRequestException('planner agent belongs to a different workspace');
     }
 

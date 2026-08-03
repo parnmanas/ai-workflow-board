@@ -8,6 +8,7 @@ import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 /**
  * Builtin role slug → the flat legacy Ticket column(s) that mirror it. The
@@ -113,6 +114,19 @@ export class TicketRoleAssignmentService {
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
   ) {}
+
+  private async assertAgentsVisibleForTicket(ticketId: string, agentIds: string[]): Promise<void> {
+    const ids = [...new Set(agentIds.filter(Boolean))];
+    if (ids.length === 0) return;
+    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId }, select: ['id', 'workspace_id'] });
+    if (!ticket) throw makeError(404, `ticket ${ticketId} not found`);
+    const agents = await this.agentRepo.find({ where: { id: In(ids) }, select: ['id', 'workspace_id'] });
+    for (const agent of agents) {
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) {
+        throw makeError(400, `agent ${agent.id} belongs to a different workspace`);
+      }
+    }
+  }
 
   /**
    * Re-project a builtin role's FIRST holder onto the ticket's flat legacy
@@ -363,6 +377,7 @@ export class TicketRoleAssignmentService {
     if (agent_id && await this.isManagerAgent(agent_id)) {
       return this.getOne(ticketId, roleId);
     }
+    if (agent_id) await this.assertAgentsVisibleForTicket(ticketId, [agent_id]);
 
     // Validate role exists (cheap; prevents orphan assignment rows)
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
@@ -410,6 +425,7 @@ export class TicketRoleAssignmentService {
     if (!agent_id && !user_id) return null;
     // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3) — 무시.
     if (agent_id && await this.isManagerAgent(agent_id)) return null;
+    if (agent_id) await this.assertAgentsVisibleForTicket(ticketId, [agent_id]);
 
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
@@ -480,6 +496,10 @@ export class TicketRoleAssignmentService {
     // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
     // 교체 집합에서 미리 걸러낸다 — manager 만 넘어오면 결과적으로 슬롯이 빈다.
     const managerIds = await this.managerAgentIdSet(holders.map(h => h.agent_id));
+    await this.assertAgentsVisibleForTicket(
+      ticketId,
+      holders.map(h => h.agent_id || '').filter(id => id && !managerIds.has(id)),
+    );
 
     // Normalize + de-dupe the desired set, keeping the first occurrence.
     const desired = new Map<string, { agent_id: string | null; user_id: string | null }>();
@@ -601,16 +621,21 @@ export class TicketRoleAssignmentService {
    */
   private async filterExistingHolders(
     holders: Array<{ agent_id?: string | null; user_id?: string | null }>,
+    workspaceId: string,
   ): Promise<Array<{ agent_id: string | null; user_id: string | null }>> {
     const agentIds = [...new Set(holders.map(h => (h.agent_id || '').trim()).filter(Boolean))];
     const userIds = [...new Set(holders.map(h => (h.user_id || '').trim()).filter(Boolean))];
     const [agents, users] = await Promise.all([
-      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id', 'type'] }) : Promise.resolve([] as Agent[]),
+      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id', 'type', 'workspace_id'] }) : Promise.resolve([] as Agent[]),
       userIds.length ? this.userRepo.find({ where: { id: In(userIds) }, select: ['id'] }) : Promise.resolve([] as User[]),
     ]);
     // Manager(type='manager')는 default holder 가 될 수 없다 (ticket 941c72d3) —
     // 존재하는 비-manager agent 만 유효 holder 로 남긴다.
-    const agentSet = new Set(agents.filter(a => a.type !== 'manager').map(a => a.id));
+    const agentSet = new Set(
+      agents
+        .filter(a => a.type !== 'manager' && agentIsVisibleInWorkspace(a.workspace_id, workspaceId))
+        .map(a => a.id),
+    );
     const userSet = new Set(users.map(u => u.id));
     const out: Array<{ agent_id: string | null; user_id: string | null }> = [];
     for (const h of holders) {
@@ -658,7 +683,7 @@ export class TicketRoleAssignmentService {
       // Priority: explicit holder wins — only fill a role that is currently vacant.
       const existing = await this.getAll(ticketId, role.id);
       if (existing.length > 0) continue;
-      const valid = await this.filterExistingHolders(holders);
+      const valid = await this.filterExistingHolders(holders, workspaceId);
       if (valid.length === 0) continue;
       const rows = await this.setHolders(ticketId, role.id, valid);
       if (rows.length > 0) summary.push({ slug, applied: rows.length });
@@ -686,10 +711,13 @@ export class TicketRoleAssignmentService {
         const agent_id = (h.agent_id || '').trim();
         const user_id = (h.user_id || '').trim();
         if (agent_id) {
-          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id', 'type'] });
+          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id', 'type', 'workspace_id'] });
           if (!a) return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} not found` };
           // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
           if (a.type === 'manager') return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} 는 manager 이므로 역할 담당자로 지정할 수 없습니다` };
+          if (!agentIsVisibleInWorkspace(a.workspace_id, workspaceId)) {
+            return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} belongs to a different workspace` };
+          }
         } else if (user_id) {
           const u = await this.userRepo.findOne({ where: { id: user_id }, select: ['id'] });
           if (!u) return { ok: false, error: `default_role_assignments["${slug}"]: user ${user_id} not found` };

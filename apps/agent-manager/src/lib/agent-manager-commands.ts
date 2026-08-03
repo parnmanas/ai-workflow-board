@@ -333,6 +333,7 @@ export class AgentManagerCommandHandler {
       (typeof payload.args?.model === 'string' && payload.args.model.trim()) ||
       '';
     const runtimeConfig = remote?.runtime_config ?? payload.args?.runtime_config ?? null;
+    const workspaceId = String(payload.args?.workspace_id || (remote as any)?.workspace_id || this.#config.workspace_id || '').trim();
 
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
@@ -348,7 +349,7 @@ export class AgentManagerCommandHandler {
       name,
       cli,
       working_dir: workingDir,
-      workspace_id: (remote as any)?.workspace_id || '',
+      workspace_id: workspaceId,
       model: model || null,
       runtime_config: runtimeConfig,
       last_spawn_at: new Date().toISOString(),
@@ -359,18 +360,18 @@ export class AgentManagerCommandHandler {
     // endpoint is idempotent in the "rotate any prior provisioned" sense,
     // so a fresh provision here is also safe — we just don't gratuitously
     // rotate every spawn_agent (e.g. on a manager restart).
-    let rawApiKey = await readApiKey(agentId);
+    let rawApiKey = await readApiKey(agentId, workspaceId);
     let provisioned = false;
     if (!rawApiKey) {
-      const issued = await provisionManagedAgentApiKey(this.#config, agentId);
+      const issued = await provisionManagedAgentApiKey(this.#config, agentId, workspaceId);
       if (!issued?.raw_key) {
         throw new Error('spawn_agent: apiKey provisioning failed (server returned no key)');
       }
       rawApiKey = issued.raw_key;
-      await writeApiKey(agentId, rawApiKey);
+      await writeApiKey(agentId, rawApiKey, workspaceId);
       provisioned = true;
     }
-    const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
+    const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId);
 
     // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
     // CLI (claude/codex/antigravity) writes its sessions / plugins / settings
@@ -391,7 +392,7 @@ export class AgentManagerCommandHandler {
     // claude agent); a mismatch is logged and ignored so a typo on the
     // AWB side doesn't silently start sending OpenAI keys to claude.
     const credentialIdHint = typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '';
-    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint);
+    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint, workspaceId);
     if (credential) {
       await writeAgentCredential(agentId, credential);
     } else {
@@ -437,6 +438,7 @@ export class AgentManagerCommandHandler {
     if (this.#deps.contextRegistry) {
       this.#deps.contextRegistry.upsert({
         agent_id: agentId,
+        workspace_id: workspaceId,
         name,
         cli,
         working_dir: workingDir,
@@ -505,8 +507,9 @@ export class AgentManagerCommandHandler {
     agentId: string,
     cli: string,
     credentialIdHint: string,
+    workspaceId?: string,
   ): Promise<ManagedAgentCredential | null> {
-    const fetched = await fetchAgentCredential(this.#config, agentId);
+    const fetched = await fetchAgentCredential(this.#config, agentId, workspaceId);
     if (!fetched) {
       if (credentialIdHint) {
         log(
@@ -792,16 +795,17 @@ export class AgentManagerCommandHandler {
    */
   async #refreshMcpConfig(payload: AgentManagerCommandPayload): Promise<string> {
     const agentId = this.#targetAgentId(payload, 'refresh_mcp_config');
-    const rawApiKey = await readApiKey(agentId);
+    const ctx = this.#deps.contextRegistry?.get(agentId);
+    const diskConfig = ctx ? null : await readManagedAgentConfig(agentId);
+    const workspaceId = String(payload.args?.workspace_id || ctx?.workspace_id || diskConfig?.workspace_id || '').trim();
+    const rawApiKey = await readApiKey(agentId, workspaceId || undefined);
     if (!rawApiKey) {
       throw new Error(
         `refresh_mcp_config: no apiKey on disk for agent=${agentId.slice(0, 8)} ` +
           `(spawn_agent first to provision)`,
       );
     }
-    const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey);
-    const ctx = this.#deps.contextRegistry?.get(agentId);
-    const diskConfig = ctx ? null : await readManagedAgentConfig(agentId);
+    const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId || undefined);
     const cli = ctx?.cli ?? diskConfig?.cli;
     if (cli) {
       await ensureCliHomeDir(agentId);

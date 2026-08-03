@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
 import { Skill } from '../../entities/Skill';
 import { SkillProposal } from '../../entities/SkillProposal';
@@ -107,7 +108,7 @@ export class SkillsService {
     });
     if (!version) throw httpError(404, 'skill_version_not_found', 'Skill version not found');
     const agent = await this.agents.findOne({ where: { id: String(body.agent_id) } });
-    if (!agent || agent.workspace_id !== workspaceId) {
+    if (!agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       throw httpError(404, 'agent_not_in_workspace', 'Agent does not belong to this workspace');
     }
     const boardId = String(body.board_id || '');

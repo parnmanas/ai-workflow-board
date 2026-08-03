@@ -7,6 +7,7 @@ import { canonicalizeSkillContent } from '../../skills/skill-validation';
 import { err, ok } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
+import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
 
 export function registerSkillProposalTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
@@ -35,12 +36,12 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
       const agent = await ctx.dataSource.getRepository(Agent).findOne({
         where: { id: caller.agentId },
       });
-      if (!agent?.workspace_id) {
-        return err('The runtime Agent is not attached to a workspace.');
-      }
+      if (!agent) return err('The runtime Agent identity was not found.');
+      const workspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!workspaceId) return err('The runtime API key is not scoped to a workspace.');
       if (skill_id) {
         const target = await ctx.dataSource.getRepository(Skill).findOne({
-          where: { id: skill_id, workspace_id: agent.workspace_id },
+          where: { id: skill_id, workspace_id: workspaceId },
         });
         if (!target) return err('Target skill does not exist in the runtime Agent workspace.');
       }
@@ -48,7 +49,7 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
         const canonical = canonicalizeSkillContent(body, support_files);
         const repo = ctx.dataSource.getRepository(SkillProposal);
         const proposal = await repo.save(repo.create({
-          workspace_id: agent.workspace_id,
+          workspace_id: workspaceId,
           skill_id: skill_id || '',
           title: title.trim().slice(0, 200),
           body: canonical.body,

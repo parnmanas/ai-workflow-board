@@ -22,6 +22,7 @@ import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 
 export interface ManagedAgentContext {
   agent_id: string;
+  workspace_id: string;
   name: string;
   cli: string;
   /** Absolute path; used as cwd for subagent spawn. Empty = manager refuses. */
@@ -134,6 +135,7 @@ export class ManagedAgentContextRegistry {
   ): ManagedAgentContext {
     return {
       agent_id: cfg.agent_id,
+      workspace_id: cfg.workspace_id || '',
       name: cfg.name,
       cli: cfg.cli,
       working_dir: cfg.working_dir,

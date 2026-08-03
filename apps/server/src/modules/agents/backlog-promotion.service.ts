@@ -136,10 +136,12 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
   private async _onAgentIdle(agentId: string): Promise<void> {
     const agentRepo = this.dataSource.getRepository(Agent);
     const agent = await agentRepo.findOne({ where: { id: agentId } });
-    if (!agent || !agent.workspace_id) return;
+    if (!agent) return;
 
     const boardRepo = this.dataSource.getRepository(Board);
-    const boards = await boardRepo.find({ where: { workspace_id: agent.workspace_id } });
+    const boards = agent.workspace_id
+      ? await boardRepo.find({ where: { workspace_id: agent.workspace_id } })
+      : await boardRepo.find();
     for (const board of boards) {
       try {
         await this.tryPromote(board.id, { triggerAgentId: agentId });

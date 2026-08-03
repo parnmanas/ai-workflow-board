@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
+import { Workspace } from '../../entities/Workspace';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
@@ -39,6 +40,7 @@ import {
   AgentRuntimeConfigError,
   validateAgentRuntimeConfig,
 } from '../../common/runtime-config';
+import { agentIsVisibleInWorkspace, normalizeAgentWorkspaceId } from '../../common/agent-workspace-scope';
 
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
@@ -146,6 +148,7 @@ export class AgentManagerController {
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
+    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
   ) {}
 
   // ─── Agent Manager → Server ──────────────────────────────────────────────
@@ -950,6 +953,7 @@ export class AgentManagerController {
     @Param('id') id: string,
     @Body() body: any,
     @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentWorkspaceId() workspaceId: string | null,
     @Res() res: Response,
   ) {
     if (!user) return res.status(401).json({ error: 'unauthenticated' });
@@ -960,6 +964,9 @@ export class AgentManagerController {
       return res.status(400).json({ error: `unknown command "${command}"` });
     }
     const args: Record<string, any> = typeof body?.args === 'object' && body.args ? { ...body.args } : {};
+    if (command === 'spawn_agent' && args.workspace_id === undefined && workspaceId) {
+      args.workspace_id = workspaceId;
+    }
 
     // Emit + spawn_agent arg hydration + ledger-record all live in
     // AgentManagerCommandService now, shared with server-side auto-start
@@ -984,6 +991,12 @@ export class AgentManagerController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const agentWorkspaceId = Object.prototype.hasOwnProperty.call(body || {}, 'workspace_id')
+      ? normalizeAgentWorkspaceId(body.workspace_id)
+      : workspaceId;
+    if (agentWorkspaceId && agentWorkspaceId !== workspaceId) {
+      return res.status(403).json({ error: 'workspace_id must match the active workspace or be null' });
+    }
     const name = typeof body?.name === 'string' ? body.name.trim() : '';
     if (!name) return res.status(400).json({ error: 'name is required' });
     const cli = typeof body?.cli === 'string' ? body.cli.trim().toLowerCase() : '';
@@ -1037,7 +1050,7 @@ export class AgentManagerController {
       // instance-wide) or scoped to this agent's workspace. Reject other
       // workspaces' credentials so a binding can't leak secrets.
       const c = await this.credentialRepo.findOne({ where: { id: credential_id } });
-      if (!c || (c.workspace_id !== null && c.workspace_id !== workspaceId)) {
+      if (!c || (c.workspace_id !== null && c.workspace_id !== agentWorkspaceId)) {
         return res.status(400).json({ error: 'credential_id does not exist in this workspace or globally' });
       }
     }
@@ -1050,7 +1063,7 @@ export class AgentManagerController {
         // listings (which key off type) keep working. claude/codex/antigravity/custom.
         type: cli,
         is_active: 1,
-        workspace_id: workspaceId,
+        workspace_id: agentWorkspaceId,
         working_dir,
         manager_agent_id,
         runtime_config,
@@ -1113,9 +1126,14 @@ export class AgentManagerController {
     @Body() body: any,
     @Res() res: Response,
   ) {
-    const target_workspace_id =
-      typeof body?.workspace_id === 'string' && body.workspace_id ? body.workspace_id : '';
-    if (!target_workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!Object.prototype.hasOwnProperty.call(body || {}, 'workspace_id')) {
+      return res.status(400).json({ error: 'workspace_id is required' });
+    }
+    const target_workspace_id = normalizeAgentWorkspaceId(body.workspace_id);
+    if (target_workspace_id) {
+      const workspace = await this.workspaceRepo.findOne({ where: { id: target_workspace_id } });
+      if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
+    }
 
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
     if (!agent) return res.status(404).json({ error: 'agent not found' });
@@ -1125,12 +1143,18 @@ export class AgentManagerController {
     if (agent.type === 'manager') {
       return res.status(400).json({ error: 'cannot move a manager-type agent through this endpoint' });
     }
+    if (!target_workspace_id && agent.credential_id) {
+      const credential = await this.credentialRepo.findOne({ where: { id: agent.credential_id } });
+      if (credential?.workspace_id) {
+        return res.status(409).json({ error: 'global agents require a global credential or no credential' });
+      }
+    }
 
     agent.workspace_id = target_workspace_id;
     const updated = await this.agentRepo.save(agent);
     this.logService.info(
       'AgentManager',
-      `Managed agent moved id=${agent.id.slice(0, 8)} → ws=${target_workspace_id.slice(0, 8)}`,
+      `Managed agent moved id=${agent.id.slice(0, 8)} → ws=${target_workspace_id?.slice(0, 8) || 'global'}`,
     );
     return res.json(updated);
   }
@@ -1156,7 +1180,12 @@ export class AgentManagerController {
   @ApiOperation({
     summary: 'Manager → server: rotate and fetch the apiKey for a managed agent it owns',
   })
-  async provisionManagedAgentKey(@Param('id') targetAgentId: string, @Req() req: Request, @Res() res: Response) {
+  async provisionManagedAgentKey(
+    @Param('id') targetAgentId: string,
+    @Query('workspace_id') requestedWorkspaceId: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
     const callerAgentId = (req as any).currentAgentId as string | null;
     if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
 
@@ -1171,12 +1200,17 @@ export class AgentManagerController {
       return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
     }
 
-    const issued = await this._rotateManagedAgentKey(target);
+    const keyWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (!keyWorkspaceId) return res.status(400).json({ error: 'workspace-scoped API key is required for a global agent' });
+    if (!agentIsVisibleInWorkspace(target.workspace_id, keyWorkspaceId)) {
+      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
+    }
+    const issued = await this._rotateManagedAgentKey(target, keyWorkspaceId);
     return res.status(201).json({
       raw_key: issued.raw_key,
       key_id: issued.key_id,
       agent_id: target.id,
-      workspace_id: target.workspace_id,
+      workspace_id: keyWorkspaceId,
     });
   }
 
@@ -1245,6 +1279,7 @@ export class AgentManagerController {
   })
   async getManagedAgentCredential(
     @Param('id') targetAgentId: string,
+    @Query('workspace_id') requestedWorkspaceId: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -1276,7 +1311,11 @@ export class AgentManagerController {
       );
       return res.status(404).json({ error: 'credential not found' });
     }
-    if (cred.workspace_id !== null && cred.workspace_id !== target.workspace_id) {
+    const targetWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (!targetWorkspaceId || !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
+    }
+    if (cred.workspace_id !== null && cred.workspace_id !== targetWorkspaceId) {
       this.logService.warn(
         'AgentManager',
         `Refused credential fetch: cred=${cred.id.slice(0, 8)} (workspace=${(cred.workspace_id || '').slice(0, 8)}) ` +
@@ -1343,6 +1382,7 @@ export class AgentManagerController {
   async getRepositoryGitCredential(
     @Param('id') resourceId: string,
     @Query('agent_id') targetAgentId: string,
+    @Query('workspace_id') requestedWorkspaceId: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -1351,12 +1391,16 @@ export class AgentManagerController {
     if (!callerAgentId || !target || target.manager_agent_id !== callerAgentId) {
       return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
     }
-    if (!target.workspace_id) return res.status(403).json({ error: 'managed agent has no workspace' });
-    const resource = await this.resourceRepo.findOne({ where: { id: resourceId, workspace_id: target.workspace_id } });
+    const targetWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (!targetWorkspaceId) return res.status(403).json({ error: 'workspace-scoped API key is required for a global agent' });
+    if (!agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
+    }
+    const resource = await this.resourceRepo.findOne({ where: { id: resourceId, workspace_id: targetWorkspaceId } });
     if (!resource) return res.status(404).json({ error: 'repository resource not found in agent workspace' });
     if (!resource.credential_id) return res.status(204).send();
     const cred = await this.credentialRepo.findOne({ where: { id: resource.credential_id } });
-    if (!cred || (cred.workspace_id !== null && cred.workspace_id !== target.workspace_id)) {
+    if (!cred || (cred.workspace_id !== null && cred.workspace_id !== targetWorkspaceId)) {
       return res.status(403).json({ error: 'repository credential is outside the agent workspace' });
     }
     const plaintext = decrypt(cred.encrypted_data || '');
@@ -1482,15 +1526,17 @@ export class AgentManagerController {
     @Res() res: Response,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId, workspace_id: workspaceId } });
-    if (!target) return res.status(404).json({ error: 'target agent not found in this workspace' });
+    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
+    if (!target || !agentIsVisibleInWorkspace(target.workspace_id, workspaceId)) {
+      return res.status(404).json({ error: 'target agent not found in this workspace' });
+    }
 
-    const issued = await this._rotateManagedAgentKey(target);
+    const issued = await this._rotateManagedAgentKey(target, workspaceId);
     return res.status(201).json({
       raw_key: issued.raw_key,
       key_id: issued.key_id,
       agent_id: target.id,
-      workspace_id: target.workspace_id,
+      workspace_id: workspaceId,
     });
   }
 
@@ -1511,7 +1557,11 @@ export class AgentManagerController {
     ) {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
-    if (!target.workspace_id) {
+    const targetWorkspaceId = String(body?.workspace_id || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (targetWorkspaceId && !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+      return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
+    }
+    if (!targetWorkspaceId) {
       return res.status(400).json({ error: 'runtime_child_workspace_required' });
     }
     const strategy = body?.strategy === 'swarm'
@@ -1522,7 +1572,7 @@ export class AgentManagerController {
     if (!strategy) return res.status(400).json({ error: 'runtime_child_strategy_invalid' });
     try {
       const child = await this.childRuns.start({
-        workspaceId: target.workspace_id,
+        workspaceId: targetWorkspaceId,
         parentRunId: String(body?.parent_run_id || ''),
         parentAgentId: target.id,
         childId: String(body?.child_run_id || ''),
@@ -1558,7 +1608,11 @@ export class AgentManagerController {
     ) {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
-    if (!target.workspace_id) {
+    const targetWorkspaceId = String(body?.workspace_id || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (targetWorkspaceId && !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+      return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
+    }
+    if (!targetWorkspaceId) {
       return res.status(400).json({ error: 'runtime_child_workspace_required' });
     }
     const status = ['completed', 'failed', 'cancelled'].includes(String(body?.status))
@@ -1567,7 +1621,7 @@ export class AgentManagerController {
     if (!status) return res.status(400).json({ error: 'runtime_child_status_invalid' });
     try {
       const child = await this.childRuns.finish({
-        workspaceId: target.workspace_id,
+        workspaceId: targetWorkspaceId,
         parentRunId: String(body?.parent_run_id || ''),
         childId: String(body?.child_run_id || ''),
         status,
@@ -1591,7 +1645,7 @@ export class AgentManagerController {
    * rotations only invalidate previous provisioning-path keys (not user-
    * minted ones an operator might have created manually).
    */
-  private async _rotateManagedAgentKey(target: Agent): Promise<{ raw_key: string; key_id: string }> {
+  private async _rotateManagedAgentKey(target: Agent, workspaceId?: string): Promise<{ raw_key: string; key_id: string }> {
     const provisionPrefix = 'agent-manager-provisioned:';
     // Hard-delete previous provisioning rows (not soft-revoke). Each spawn /
     // restart used to add one is_active=0 row and never clean it up, so the
@@ -1599,7 +1653,8 @@ export class AgentManagerController {
     // of normal use. The audit trail for "previous key existed and rotated"
     // is captured in the LogService.info call below; the raw row itself
     // carries no information once it's superseded.
-    const removed = await this.apiKeyService.deleteApiKeysByAgentAndNamePrefix(target.id, provisionPrefix);
+    const effectiveWorkspaceId = workspaceId || target.workspace_id || '';
+    const removed = await this.apiKeyService.deleteApiKeysByAgentAndNamePrefix(target.id, provisionPrefix, effectiveWorkspaceId);
     if (removed > 0) {
       this.logService.info(
         'AgentManager',
@@ -1616,7 +1671,7 @@ export class AgentManagerController {
       // a key for a managed agent that has no workspace falls back to '' so
       // the apiKey row's workspace_id stays a definite string (which the
       // ApiKey entity / query layer expect).
-      workspace_id: target.workspace_id ?? '',
+      workspace_id: effectiveWorkspaceId,
       expires_at: null,
     });
 

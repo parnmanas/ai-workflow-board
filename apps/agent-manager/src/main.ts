@@ -640,7 +640,7 @@ async function runRuntime(
     let skipped = 0;
     for (const id of dirs) {
       const cfg = await readManagedAgentConfig(id);
-      const apiKey = await readApiKey(id);
+      const apiKey = await readApiKey(id, cfg?.workspace_id);
       if (!cfg || !apiKey || !cfg.working_dir) {
         skipped++;
         continue;
@@ -704,10 +704,11 @@ async function runRuntime(
             : 'subscription';
       managedAgentContexts.upsert({
         agent_id: id,
+        workspace_id: cfg.workspace_id || '',
         name: cfg.name,
         cli: cfg.cli,
         working_dir: cfg.working_dir,
-        mcp_config_path: mcpConfigPathFor(id),
+        mcp_config_path: mcpConfigPathFor(id, cfg.workspace_id),
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),

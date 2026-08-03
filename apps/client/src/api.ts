@@ -1663,7 +1663,7 @@ export const api = {
   // in workspace B can be attached to a manager paired in workspace A.
   // MANAGE_AGENTS-gated; returns one row per Agent with type='manager'.
   listAgentManagers: () =>
-    request<Array<{ id: string; name: string; description: string; workspace_id: string; is_active: number }>>(
+    request<Array<{ id: string; name: string; description: string; workspace_id: string | null; is_active: number }>>(
       '/admin/agent-manager/managers',
     ),
 
@@ -1671,7 +1671,7 @@ export const api = {
   // the Agent Manager runtime section's per-row workspace picker so pre-existing
   // agents created against a global manager can be relocated to the
   // workspace they actually belong to without recreating them.
-  setManagedAgentWorkspace: (agentId: string, workspaceId: string) =>
+  setManagedAgentWorkspace: (agentId: string, workspaceId: string | null) =>
     request<Agent>(`/admin/agent-manager/agents/${encodeURIComponent(agentId)}/workspace`, {
       method: 'PATCH',
       body: JSON.stringify({ workspace_id: workspaceId }),

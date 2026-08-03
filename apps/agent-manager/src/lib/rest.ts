@@ -456,10 +456,12 @@ export async function fetchAgentRecord(
 export async function fetchAgentCredential(
   config: AwbConfig,
   agentId: string,
+  workspaceId?: string,
 ): Promise<{ credential_id: string; provider: string; fields: Record<string, string> } | null> {
   if (!agentId) return null;
   try {
-    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/credential`;
+    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/credential${query}`;
     const resp = await fetch(url, {
       headers: {
         'X-Agent-Key': config.apiKey,
@@ -490,10 +492,12 @@ export async function fetchRepositoryCredential(
   config: AwbConfig,
   resourceId: string,
   agentId: string,
+  workspaceId?: string,
 ): Promise<{ username?: string; token: string } | null> {
   if (!resourceId || !agentId) return null;
   try {
-    const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}`;
+    const workspaceQuery = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
     const resp = await fetch(url, {
       headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -766,10 +770,12 @@ export async function postSilentExitSystemCommentRaw(
 export async function provisionManagedAgentApiKey(
   config: AwbConfig,
   agentId: string,
+  workspaceId?: string,
 ): Promise<{ raw_key: string; key_id: string; agent_id: string; workspace_id: string } | null> {
   if (!agentId) return null;
   try {
-    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/apikey/provision`;
+    const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    const url = `${trimSlash(config.url)}/api/agent-manager/managed-agents/${encodeURIComponent(agentId)}/apikey/provision${query}`;
     const resp = await fetch(url, {
       method: 'POST',
       headers: {

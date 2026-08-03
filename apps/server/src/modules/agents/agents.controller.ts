@@ -2,10 +2,11 @@ import { Controller, Get, Post, Patch, Delete, Body, Param, Query, Req, Res, Use
 import { randomBytes } from 'crypto';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In, IsNull } from 'typeorm';
+import { DataSource, Repository, In } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Workspace } from '../../entities/Workspace';
+import { Credential } from '../../entities/Credential';
 import { QaRun } from '../../entities/QaRun';
 import { QaScenario } from '../../entities/QaScenario';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -33,6 +34,7 @@ import {
   isExecutableRuntime,
   validateAgentRuntimeConfig,
 } from '../../common/runtime-config';
+import { agentWorkspaceWhere, normalizeAgentWorkspaceId } from '../../common/agent-workspace-scope';
 
 /** Subset of InstanceRecord surfaced on /api/agents responses so the AI Agents
  *  admin UI can render the same heartbeat / version / supervision metadata that
@@ -137,12 +139,7 @@ export class AgentsController {
     // `type: 'manager'` branch so the listing doesn't depend on the storage
     // shape of workspace_id at all.
     const agents = await this.agentRepo.find({
-      where: [
-        { workspace_id: workspaceId },
-        { workspace_id: '' },
-        { workspace_id: IsNull() as any },
-        { type: 'manager' },
-      ],
+      where: [...agentWorkspaceWhere(workspaceId), { type: 'manager' }],
       order: { name: 'ASC' },
     });
     const named = await this._enrichManagerNames(agents);
@@ -358,12 +355,7 @@ export class AgentsController {
     // up on the dashboard in every workspace, regardless of workspace_id
     // storage shape (NULL post-migration 19, '' pre-19, stale id otherwise).
     const agents = await this.agentRepo.find({
-      where: [
-        { workspace_id: workspaceId },
-        { workspace_id: '' },
-        { workspace_id: IsNull() as any },
-        { type: 'manager' },
-      ],
+      where: [...agentWorkspaceWhere(workspaceId), { type: 'manager' }],
       order: { name: 'ASC' },
     });
 
@@ -420,7 +412,9 @@ export class AgentsController {
     // Workspace-less agents (manager identities) are visible to every
     // workspace's activity view.
     await findOrFail(this.agentRepo, {
-      where: { id, ...(workspaceId ? { workspace_id: In([workspaceId, '']) } : {}) },
+      where: workspaceId
+        ? agentWorkspaceWhere(workspaceId).map((scope) => ({ id, ...scope }))
+        : { id },
     }, 'Agent not found');
 
     const limit = Math.min(Math.max(parseInt(limitRaw) || 50, 1), 200);
@@ -555,6 +549,16 @@ export class AgentsController {
         .findOne({ where: {}, order: { id: 'ASC' } });
       effectiveWorkspaceId = defaultWs?.id || '';
     }
+    const requestedWorkspaceId = Object.prototype.hasOwnProperty.call(body, 'workspace_id')
+      ? normalizeAgentWorkspaceId(body.workspace_id)
+      : effectiveWorkspaceId;
+    if (requestedWorkspaceId && effectiveWorkspaceId && requestedWorkspaceId !== effectiveWorkspaceId) {
+      return res.status(403).json({ error: 'workspace_id must match the active workspace or be null' });
+    }
+    if (requestedWorkspaceId) {
+      const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: requestedWorkspaceId } });
+      if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
+    }
 
     // Manager-type agents MUST be workspace-less (operator invariant — they
     // supervise children across any workspace). Force null here even if the
@@ -563,7 +567,9 @@ export class AgentsController {
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
         name, description, type, avatar_url, is_active,
-        workspace_id: type === 'manager' ? null : effectiveWorkspaceId,
+        workspace_id: type === 'manager'
+          ? null
+          : requestedWorkspaceId,
         working_dir: typeof working_dir === 'string' ? working_dir : '',
         manager_agent_id: type === 'manager' ? null : managerAgentId,
         runtime_config: runtimeConfig,
@@ -617,6 +623,7 @@ export class AgentsController {
       model,
       cli_runtime_profile,
       runtime_config,
+      workspace_id,
     } = body;
     if (name !== undefined) {
       const trimmed = typeof name === 'string' ? name.trim() : '';
@@ -629,6 +636,23 @@ export class AgentsController {
     }
     if (avatar_url !== undefined) agent.avatar_url = avatar_url;
     if (is_active !== undefined) agent.is_active = Number(is_active) ? 1 : 0;
+    if (workspace_id !== undefined) {
+      const nextWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
+      if (nextWorkspaceId && workspaceId && nextWorkspaceId !== workspaceId) {
+        return res.status(403).json({ error: 'workspace_id must match the active workspace or be null' });
+      }
+      if (nextWorkspaceId) {
+        const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: nextWorkspaceId } });
+        if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
+      }
+      if (!nextWorkspaceId && agent.credential_id) {
+        const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: agent.credential_id } });
+        if (credential?.workspace_id) {
+          return res.status(409).json({ error: 'global agents require a global credential or no credential' });
+        }
+      }
+      agent.workspace_id = nextWorkspaceId;
+    }
     // Phase 1 role prompt fields (D-14 / ROLE-02)
     if (role_prompt !== undefined) agent.role_prompt = role_prompt;
     if (role_prompt_meta !== undefined) agent.role_prompt_meta = role_prompt_meta;
