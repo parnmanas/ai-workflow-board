@@ -474,6 +474,41 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
   );
 
   server.tool(
+    'correct_confirmed_ticket_duplicate',
+    'Correct a previously confirmed false-positive canonical link. Atomically clears the link, resolves the stale dispatch intent, opens one fresh intent, and re-dispatches the selected ticket role. The canonical ticket is not modified.',
+    {
+      ticket_id: z.string().describe('Incorrectly linked report ticket id'),
+      role: z.literal('assignee').optional().default('assignee').describe('Role to redispatch (currently assignee)'),
+    },
+    async ({ ticket_id, role }, extra: { sessionId?: string }) => {
+      if (!triggerLoopService) return err('Duplicate correction requires the integrated dispatch service');
+      const caller = getCallerAgent(extra);
+      try {
+        const duplicateService = new TicketDuplicateService(dataSource);
+        const corrected = await duplicateService.correctConfirmedLink(
+          ticket_id,
+          role,
+          caller?.agentName || '',
+          caller?.agentId || '',
+        );
+        const dispatch = await triggerLoopService.dispatchCurrentColumn(
+          corrected.ticket.id,
+          'duplicate_correction',
+          caller?.agentId || '',
+        );
+        return ok({
+          ticket: await loadTicketFull(dataSource, corrected.ticket.id),
+          previous_canonical_ticket_id: corrected.previousCanonicalId,
+          dispatch_intent_id: corrected.intentId,
+          dispatch_emitted: dispatch.emitted,
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Confirmed duplicate correction rejected');
+      }
+    },
+  );
+
+  server.tool(
     'update_ticket',
     'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, role_assignments).\n\n' +
     'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +

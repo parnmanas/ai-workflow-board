@@ -1,8 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { DataSource, IsNull } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { Comment } from '../../entities/Comment';
+import { DispatchIntent } from '../../entities/DispatchIntent';
+import { ActivityLog } from '../../entities/ActivityLog';
+import { BoardColumn } from '../../entities/BoardColumn';
 
 export interface DuplicateIntake {
   title: string;
@@ -195,6 +198,99 @@ export class TicketDuplicateService {
         }));
       }
       return saved;
+    });
+  }
+
+  /**
+   * 확정된 오탐 연결을 해제하고 해당 역할의 dispatch 채무를 새로 연다.
+   * 동일 트랜잭션에서 이전 intent를 종료한 뒤 새 pending intent를 만들므로,
+   * 동시 정정 요청 중 하나만 canonical 전이를 소유하고 재dispatch할 수 있다.
+   */
+  async correctConfirmedLink(
+    reportId: string,
+    role: string,
+    actorName: string,
+    actorId: string,
+  ): Promise<{ ticket: Ticket; previousCanonicalId: string; intentId: string }> {
+    return this.dataSource.transaction(async manager => {
+      const tickets = manager.getRepository(Ticket);
+      const report = await tickets.findOne({ where: { id: reportId } });
+      if (!report) throw new Error('Ticket not found');
+      if (!report.canonical_ticket_id) throw new Error('Ticket has no confirmed canonical link to correct');
+      if (report.pending_user_action || report.pending_on_tickets) {
+        throw new Error('Pending ticket cannot be redispatched');
+      }
+      const previousCanonicalId = report.canonical_ticket_id;
+      const canonical = await tickets.findOne({ where: { id: previousCanonicalId } });
+      if (!canonical || canonical.workspace_id !== report.workspace_id || canonical.id === report.id) {
+        throw new Error('Confirmed canonical link is invalid or outside the ticket workspace');
+      }
+      const column = report.column_id
+        ? await manager.getRepository(BoardColumn).findOne({ where: { id: report.column_id } })
+        : null;
+      if (!column) throw new Error('Ticket has no dispatchable board column');
+
+      report.canonical_ticket_id = null;
+      const saved = await tickets.save(report);
+      const now = new Date();
+      const intents = manager.getRepository(DispatchIntent);
+      await intents.update({
+        ticket_id: report.id,
+        role,
+        status: In(['pending', 'in_flight']),
+      }, {
+        status: 'resolved',
+        last_reason: 'superseded_by_duplicate_correction',
+        resolved_at: now,
+        lease_owner: '',
+        lease_expires_at: null,
+      });
+      const freshIntent = await intents.save(intents.create({
+        workspace_id: report.workspace_id,
+        board_id: column.board_id || '',
+        ticket_id: report.id,
+        role,
+        agent_id: role === 'assignee' ? (report.assignee_id || '') : '',
+        trigger_source: 'duplicate_correction',
+        status: 'pending',
+        attempts: 0,
+        dispatch_generation: 0,
+        next_attempt_at: now,
+        last_reason: 'duplicate_link_corrected',
+      }));
+      await manager.getRepository(TicketDuplicateDecision).save({
+        workspace_id: report.workspace_id,
+        report_ticket_id: report.id,
+        candidate_ticket_id: previousCanonicalId,
+        outcome: 'corrected_independent',
+        confidence: 0,
+        matched_signals: '[]',
+        actor_name: actorName,
+        actor_id: actorId,
+      });
+      await manager.getRepository(Comment).save({
+        workspace_id: report.workspace_id,
+        ticket_id: report.id,
+        author_type: 'system',
+        author: 'Duplicate correction',
+        content: `Incorrect canonical link ${previousCanonicalId} was removed; ${role} dispatch was re-issued.`,
+        type: 'system',
+      });
+      await manager.getRepository(ActivityLog).save({
+        workspace_id: report.workspace_id,
+        entity_type: 'ticket',
+        entity_id: report.id,
+        action: 'duplicate_link_corrected',
+        field_changed: 'canonical_ticket_id',
+        old_value: previousCanonicalId,
+        new_value: '',
+        actor_id: actorId,
+        actor_name: actorName,
+        ticket_id: report.id,
+        role,
+        trigger_source: 'duplicate_correction',
+      });
+      return { ticket: saved, previousCanonicalId, intentId: freshIntent.id };
     });
   }
 }
