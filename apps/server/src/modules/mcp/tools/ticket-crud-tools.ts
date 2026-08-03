@@ -491,8 +491,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           caller?.agentName || '',
           caller?.agentId || '',
         );
-        const dispatch = await triggerLoopService.dispatchCurrentColumn(
+        const dispatch = await triggerLoopService.dispatchCurrentColumnRole(
           corrected.ticket.id,
+          role,
           'duplicate_correction',
           caller?.agentId || '',
         );
@@ -500,7 +501,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           ticket: await loadTicketFull(dataSource, corrected.ticket.id),
           previous_canonical_ticket_id: corrected.previousCanonicalId,
           dispatch_intent_id: corrected.intentId,
-          dispatch_emitted: dispatch.emitted,
+          dispatch_attempted: dispatch.attempted,
+          dispatch_landed: dispatch.landed,
+          dispatch_trigger_ids: dispatch.triggerIds,
         });
       } catch (e: any) {
         return err(e?.message || 'Confirmed duplicate correction rejected');

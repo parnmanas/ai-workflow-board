@@ -194,3 +194,42 @@ test('bare ON CONFLICT DO NOTHING does NOT abort the enclosing transaction (why 
   assert.equal(typeof survivedCount, 'number', 'ON CONFLICT DO NOTHING keeps the tx usable — same-tx query succeeds');
   assert.equal(survivedCount, 1, 'the losing insert added no row — still exactly one open row');
 });
+
+test('two Postgres connections race confirmed-link correction → one owner and one open intent', { skip: SKIP }, async () => {
+  const entities = await import('file://' + path.join(DIST, 'entities', 'index.js'));
+  const { TicketDuplicateService } = await import(
+    'file://' + path.join(DIST, 'modules', 'tickets', 'ticket-duplicate.service.js')
+  );
+  const ws = await ds1.getRepository(entities.Workspace).save({ name: `correction-${randomUUID()}` });
+  const board = await ds1.getRepository(entities.Board).save({ workspace_id: ws.id, name: 'board' });
+  const column = await ds1.getRepository(entities.BoardColumn).save({
+    workspace_id: ws.id, board_id: board.id, name: 'In Progress', position: 0,
+    kind: 'active', role_routing: '["assignee"]',
+  });
+  const canonical = await ds1.getRepository(entities.Ticket).save({
+    workspace_id: ws.id, column_id: column.id, title: 'canonical',
+  });
+  const report = await ds1.getRepository(entities.Ticket).save({
+    workspace_id: ws.id, column_id: column.id, title: 'independent',
+    canonical_ticket_id: canonical.id, assignee_id: 'agent-pg',
+  });
+  await ds1.getRepository(entities.DispatchIntent).save({
+    workspace_id: ws.id, board_id: board.id, ticket_id: report.id, role: 'assignee',
+    agent_id: 'agent-pg', trigger_source: 'old', status: 'in_flight', attempts: 209,
+    dispatch_generation: 209, next_attempt_at: new Date(),
+  });
+
+  const results = await Promise.allSettled([
+    new TicketDuplicateService(ds1).correctConfirmedLink(report.id, 'assignee', 'one', 'one'),
+    new TicketDuplicateService(ds2).correctConfirmedLink(report.id, 'assignee', 'two', 'two'),
+  ]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(r => r.status === 'rejected').length, 1);
+  const rows = await ds1.getRepository(entities.DispatchIntent).find({
+    where: { ticket_id: report.id, role: 'assignee' },
+  });
+  assert.equal(rows.filter(r => r.status !== 'resolved').length, 1);
+  assert.equal(await ds1.getRepository(entities.ActivityLog).count({
+    where: { ticket_id: report.id, action: 'duplicate_link_corrected' },
+  }), 1);
+});

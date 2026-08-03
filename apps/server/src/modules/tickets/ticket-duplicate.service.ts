@@ -229,9 +229,30 @@ export class TicketDuplicateService {
         ? await manager.getRepository(BoardColumn).findOne({ where: { id: report.column_id } })
         : null;
       if (!column) throw new Error('Ticket has no dispatchable board column');
+      if ((column as any).is_terminal === true || (column as any).kind === 'terminal') {
+        throw new Error('Ticket column is terminal or not dispatchable');
+      }
+      let routedRoles: string[] = [];
+      try { routedRoles = JSON.parse((column as any).role_routing || '[]'); } catch { routedRoles = []; }
+      if (!Array.isArray(routedRoles) || !routedRoles.includes(role)) {
+        throw new Error(`Role ${role} is not routed in the current column`);
+      }
+      if (role === 'assignee' && !report.assignee_id) {
+        throw new Error('Assignee is not assigned');
+      }
 
-      report.canonical_ticket_id = null;
-      const saved = await tickets.save(report);
+      // Own the correction with a compare-and-swap. Under Postgres READ
+      // COMMITTED two callers may both have read the old canonical above, but
+      // only one can change that exact value to NULL. The loser must stop
+      // before touching intents/audit rows.
+      const claimed = await tickets.update({
+        id: report.id,
+        canonical_ticket_id: previousCanonicalId,
+      }, { canonical_ticket_id: null });
+      if (claimed.affected !== 1) {
+        throw new Error('Ticket canonical link was already corrected or changed concurrently');
+      }
+      const saved = await tickets.findOneByOrFail({ id: report.id });
       const now = new Date();
       const intents = manager.getRepository(DispatchIntent);
       await intents.update({

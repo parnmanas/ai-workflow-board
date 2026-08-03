@@ -1338,6 +1338,41 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     return { emitted };
   }
 
+  /** Dispatch exactly one selected routed role and report wire landing. */
+  async dispatchCurrentColumnRole(
+    ticketId: string,
+    role: string,
+    triggerSource: string,
+    triggeredBy: string,
+  ): Promise<{ attempted: number; landed: number; triggerIds: string[] }> {
+    const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+    if (!ticket || !ticket.column_id) throw new Error('Ticket has no dispatchable board column');
+    if (ticket.canonical_ticket_id) throw new Error('Duplicate ticket cannot be dispatched independently');
+    if (ticket.pending_user_action || ticket.pending_on_tickets) throw new Error('Pending ticket cannot be redispatched');
+
+    const column = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    if (!column || (column as any).is_terminal === true || (column as any).kind === 'terminal') {
+      throw new Error('Ticket column is terminal or not dispatchable');
+    }
+    const routed = safeJsonParse<string[]>((column as any).role_routing, []);
+    if (!Array.isArray(routed) || !routed.includes(role)) {
+      throw new Error(`Role ${role} is not routed in the current column`);
+    }
+    const holders = await this._resolveRoleHolders(ticket, role);
+    if (!holders || holders.agentIds.length !== 1) {
+      throw new Error(`Role ${role} must have exactly one assigned agent`);
+    }
+
+    const triggerId = await this._emitTrigger(
+      ticket, holders.agentIds[0], role, triggerSource, triggeredBy,
+    );
+    return {
+      attempted: 1,
+      landed: triggerId ? 1 : 0,
+      triggerIds: triggerId ? [triggerId] : [],
+    };
+  }
+
   /** Map key for a queued transition replay — the exact busy (agent, ticket, role) seat. */
   private _transitionReplayKey(agentId: string, ticketId: string, role: string): string {
     return `${agentId}::${ticketId}::${role || ''}`;
