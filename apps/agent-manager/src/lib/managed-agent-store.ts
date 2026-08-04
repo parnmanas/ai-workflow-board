@@ -166,6 +166,30 @@ export async function readApiKey(agentId: string, workspaceId?: string): Promise
   }
 }
 
+/**
+ * Read the workspace-scoped key used during managed-agent rehydration.
+ *
+ * Versions before workspace-scoped global agents stored the only key at
+ * `apikey`. During the first restart after upgrading, config.json already has
+ * a workspace_id but the scoped key does not exist yet. Treat that unscoped
+ * key as belonging to the persisted workspace and copy it forward. This is
+ * intentionally separate from readApiKey(): normal cross-workspace dispatch
+ * must provision a new key instead of reusing the legacy credential.
+ */
+export async function readApiKeyForRehydrate(
+  agentId: string,
+  workspaceId?: string,
+): Promise<string | null> {
+  const scoped = await readApiKey(agentId, workspaceId);
+  if (scoped || !workspaceId) return scoped;
+
+  const legacy = await readApiKey(agentId);
+  if (!legacy) return null;
+
+  await writeApiKey(agentId, legacy, workspaceId);
+  return legacy;
+}
+
 export async function writeApiKey(agentId: string, raw: string, workspaceId?: string): Promise<void> {
   await ensureManagedAgentDir(agentId);
   await fsp.writeFile(apiKeyPathFor(agentId, workspaceId), raw, { mode: 0o600 });

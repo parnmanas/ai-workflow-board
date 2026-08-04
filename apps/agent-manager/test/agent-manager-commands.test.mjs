@@ -14,12 +14,26 @@ const {
   ensureCliHomeDir,
   writeApiKey,
   readApiKey,
+  readApiKeyForRehydrate,
   apiKeyPathFor,
   mcpConfigPathFor,
   writeMcpConfig,
   eraseSecrets,
   writeManagedAgentConfig,
 } = await import('../dist/lib/managed-agent-store.js');
+
+test('rehydration migrates the legacy unscoped key into the persisted workspace', async () => {
+  const agentId = 'legacy-rehydrate-agent';
+  await writeApiKey(agentId, 'legacy-key');
+
+  assert.equal(await readApiKey(agentId, 'workspace-a'), null);
+  assert.equal(await readApiKeyForRehydrate(agentId, 'workspace-a'), 'legacy-key');
+  assert.equal(await readApiKey(agentId, 'workspace-a'), 'legacy-key');
+
+  // Ordinary reads for another workspace remain isolated. Only the explicit
+  // boot migration helper is allowed to consume the legacy key.
+  assert.equal(await readApiKey(agentId, 'workspace-b'), null);
+});
 
 test('global agent secrets are isolated by workspace and erased together', async () => {
   const agentId = 'global-agent-scope';

@@ -45,7 +45,7 @@ import { AgentManagerCommandHandler } from './lib/agent-manager-commands.js';
 import {
   listManagedAgentDirs,
   readManagedAgentConfig,
-  readApiKey,
+  readApiKeyForRehydrate,
   readAgentCredential,
   mcpConfigPathFor,
   subagentLogPathFor,
@@ -640,7 +640,7 @@ async function runRuntime(
     let skipped = 0;
     for (const id of dirs) {
       const cfg = await readManagedAgentConfig(id);
-      const apiKey = await readApiKey(id, cfg?.workspace_id);
+      const apiKey = await readApiKeyForRehydrate(id, cfg?.workspace_id);
       if (!cfg || !apiKey || !cfg.working_dir) {
         skipped++;
         continue;
