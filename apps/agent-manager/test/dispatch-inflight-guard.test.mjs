@@ -427,6 +427,8 @@ test('distinct co-holders dispatch concurrently — neither is suppressed', asyn
 
   const pA = dispatcher.handleTrigger(evJson({ actor_name: 'agentA' }));
   const pB = dispatcher.handleTrigger(evJson({ actor_name: 'agentB' }));
+  const bothReachedSpawn = await waitFor(() => mgr.spawnCount === 2);
+  assert.equal(bothReachedSpawn, true, 'both co-holders reached the gated spawn');
   // Both hold their own key in the real registry.
   assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'agentA').acquired, false);
   assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'agentB').acquired, false);
