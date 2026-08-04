@@ -13,7 +13,7 @@ import { loadTicketFull } from '../dist/modules/mcp/shared/ticket-parsing.js';
 import { EVENT_TYPES } from '../dist/modules/events/event-registry.js';
 
 const { app, modules, port } = await bootApp({ port: 7896 });
-after(() => { void app.close().catch(() => {}); });
+after(async () => { await app.close(); });
 const ds = app.get(modules.getDataSourceToken());
 
 test('get_ticket snapshot names the authoritative current column', async () => {
