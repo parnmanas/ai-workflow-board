@@ -37,29 +37,64 @@ after(async () => {
 });
 
 describe('Claude backend profile MCP operations', () => {
-  it('allows only DB-backed, full-scope manager identities', async () => {
+  it('allows DB-backed full-scope keys bound to any existing Agent', async () => {
+    const managerCaller = {
+      agentId: managerAgent.id,
+      source: 'db',
+      scope: 'full',
+    };
+    assert.equal(
+      await tools.requireAgentRegistryAccess(ds, managerCaller),
+      null,
+    );
+
+    const ordinary = await ds.getRepository('Agent').save(
+      ds.getRepository('Agent').create({
+        name: 'Ordinary profile operator',
+        type: 'claude',
+        workspace_id: workspace.id,
+      }),
+    );
+    assert.equal(
+      await tools.requireAgentRegistryAccess(ds, {
+        agentId: ordinary.id,
+        source: 'db',
+        scope: 'full',
+        workspaceId: '00000000-0000-0000-0000-000000000000',
+      }),
+      null,
+    );
+  });
+
+  it('rejects callers without a DB-backed full-scope existing-Agent identity', async () => {
     const valid = {
       agentId: managerAgent.id,
       source: 'db',
       scope: 'full',
     };
-    assert.equal(await tools.requireManagerRegistryAccess(ds, valid), null);
+    const unauthorized = /DB-backed, full-scope MCP key bound to an Agent/;
     assert.match(
-      await tools.requireManagerRegistryAccess(ds, { ...valid, source: 'env' }),
-      /Unauthorized/,
+      await tools.requireAgentRegistryAccess(ds, { ...valid, source: 'env' }),
+      unauthorized,
     );
     assert.match(
-      await tools.requireManagerRegistryAccess(ds, { ...valid, scope: 'write' }),
-      /Unauthorized/,
+      await tools.requireAgentRegistryAccess(ds, { ...valid, source: 'dev-mode' }),
+      unauthorized,
     );
-    const regular = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-      name: 'Regular agent',
-      type: 'claude',
-      workspace_id: workspace.id,
-    }));
     assert.match(
-      await tools.requireManagerRegistryAccess(ds, { ...valid, agentId: regular.id }),
-      /Unauthorized/,
+      await tools.requireAgentRegistryAccess(ds, { ...valid, scope: 'write' }),
+      unauthorized,
+    );
+    assert.match(
+      await tools.requireAgentRegistryAccess(ds, { source: 'db', scope: 'full' }),
+      unauthorized,
+    );
+    assert.match(
+      await tools.requireAgentRegistryAccess(ds, {
+        ...valid,
+        agentId: '00000000-0000-0000-0000-000000000000',
+      }),
+      unauthorized,
     );
   });
 

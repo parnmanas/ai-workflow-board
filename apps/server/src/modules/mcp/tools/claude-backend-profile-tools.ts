@@ -16,10 +16,10 @@ import { ok, err } from '../shared/helpers';
 import { getCallerAgent, type McpAgentContext } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
-const ADMIN_GATE_ERROR =
-  'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to a manager Agent.';
+const REGISTRY_GATE_ERROR =
+  'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to an Agent.';
 
-export async function requireManagerRegistryAccess(
+export async function requireAgentRegistryAccess(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
 ): Promise<string | null> {
@@ -29,12 +29,12 @@ export async function requireManagerRegistryAccess(
     caller.scope !== 'full' ||
     !caller.agentId
   ) {
-    return ADMIN_GATE_ERROR;
+    return REGISTRY_GATE_ERROR;
   }
   const agent = await dataSource.getRepository(Agent).findOne({
     where: { id: caller.agentId },
   });
-  return agent?.type === 'manager' ? null : ADMIN_GATE_ERROR;
+  return agent ? null : REGISTRY_GATE_ERROR;
 }
 
 export async function upsertClaudeBackendProfile(
@@ -193,7 +193,7 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
     extra: { sessionId?: string },
     operation: () => Promise<unknown>,
   ) => {
-    const denied = await requireManagerRegistryAccess(
+    const denied = await requireAgentRegistryAccess(
       ctx.dataSource,
       getCallerAgent(extra),
     );
@@ -207,7 +207,7 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
 
   server.tool(
     'upsert_claude_backend_profile',
-    'Idempotently create or reuse an instance-global Claude backend profile. Refuses to overwrite a same-name profile whose endpoint, model, or protocol differs. Manager-authenticated MCP only.',
+    'Idempotently create or reuse an instance-global Claude backend profile. Refuses to overwrite a same-name profile whose endpoint, model, or protocol differs. DB-backed, full-scope Agent MCP only.',
     {
       name: z.string().min(1),
       base_url: z.string().url(),
@@ -224,7 +224,7 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
 
   server.tool(
     'assign_workspace_backend_profile',
-    'Idempotently add a Claude backend profile to a workspace allow-set and optionally make it the workspace default. Existing unrelated assignments are preserved. Manager-authenticated MCP only.',
+    'Idempotently add a Claude backend profile to a workspace allow-set and optionally make it the workspace default. Existing unrelated assignments are preserved. DB-backed, full-scope Agent MCP only.',
     {
       workspace_id: z.string().uuid(),
       profile_id: z.string().min(1),
@@ -243,7 +243,7 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
 
   server.tool(
     'list_claude_backend_profiles',
-    'List safe Claude backend profile metadata and, when workspace_id is supplied, its assignment/default verification state. Credential references and secrets are omitted. Manager-authenticated MCP only.',
+    'List safe Claude backend profile metadata and, when workspace_id is supplied, its assignment/default verification state. Credential references and secrets are omitted. DB-backed, full-scope Agent MCP only.',
     {
       workspace_id: z.string().uuid().optional(),
     },
