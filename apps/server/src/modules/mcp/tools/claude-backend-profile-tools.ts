@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { ClaudeBackendProfile } from '../../../entities/ClaudeBackendProfile';
 import { Credential } from '../../../entities/Credential';
@@ -19,6 +19,41 @@ import type { ToolContext } from './context';
 
 const REGISTRY_GATE_ERROR =
   'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to an Agent.';
+
+const profileLocks = new Map<string, Promise<void>>();
+
+async function withProfileWriteLock<T>(
+  dataSource: DataSource,
+  profileId: string,
+  operation: (manager: EntityManager) => Promise<T>,
+): Promise<T> {
+  if (dataSource.options.type === 'postgres') {
+    return dataSource.transaction(manager => operation(manager));
+  }
+
+  const previous = profileLocks.get(profileId) ?? Promise.resolve();
+  let release = () => {};
+  const current = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  profileLocks.set(profileId, current);
+  await previous;
+  try {
+    return await operation(dataSource.manager);
+  } finally {
+    release();
+    if (profileLocks.get(profileId) === current) profileLocks.delete(profileId);
+  }
+}
+
+async function findProfileForUpdate(manager: EntityManager, profileId: string) {
+  return manager.getRepository(ClaudeBackendProfile).findOne({
+    where: { id: profileId },
+    ...(manager.connection.options.type === 'postgres'
+      ? { lock: { mode: 'pessimistic_write' as const } }
+      : {}),
+  });
+}
 
 export async function requireAgentRegistryAccess(
   dataSource: DataSource,
@@ -115,8 +150,9 @@ export async function updateClaudeBackendProfile(
     config?: Record<string, unknown>;
   },
 ) {
-  const repo = dataSource.getRepository(ClaudeBackendProfile);
-  const current = await repo.findOne({ where: { id: profileId } });
+  return withProfileWriteLock(dataSource, profileId, async manager => {
+  const repo = manager.getRepository(ClaudeBackendProfile);
+  const current = await findProfileForUpdate(manager, profileId);
   if (!current) throw new Error('Claude backend profile not found');
 
   const name = input.name === undefined ? current.name : input.name.trim();
@@ -137,12 +173,12 @@ export async function updateClaudeBackendProfile(
   });
 
   if (runtime.credential_ref) {
-    const credential = await dataSource.getRepository(Credential).findOne({
+    const credential = await manager.getRepository(Credential).findOne({
       where: { id: runtime.credential_ref },
     });
     if (!credential) throw new Error('credential_ref does not identify an existing Credential');
     if (credential.workspace_id !== null) {
-      const assignments = await dataSource
+      const assignments = await manager
         .getRepository(WorkspaceClaudeBackendProfile)
         .find({
           where: { profile_id: profileId },
@@ -173,6 +209,7 @@ export async function updateClaudeBackendProfile(
   } catch (error) {
     throw new Error(`profile name already exists: ${error instanceof Error ? error.message : String(error)}`);
   }
+  });
 }
 
 export async function assignWorkspaceBackendProfile(
@@ -181,17 +218,16 @@ export async function assignWorkspaceBackendProfile(
   profileId: string,
   setDefault: boolean,
 ) {
-  const workspaceRepo = dataSource.getRepository(Workspace);
+  return withProfileWriteLock(dataSource, profileId, async manager => {
+  const workspaceRepo = manager.getRepository(Workspace);
   const workspace = await workspaceRepo.findOne({
     where: { id: workspaceId },
   });
   if (!workspace) throw new Error('Workspace not found');
-  const profile = await dataSource.getRepository(ClaudeBackendProfile).findOne({
-    where: { id: profileId },
-  });
+  const profile = await findProfileForUpdate(manager, profileId);
   if (!profile) throw new Error('Claude backend profile not found');
   if (profile.credential_ref) {
-    const credential = await dataSource.getRepository(Credential).findOne({
+    const credential = await manager.getRepository(Credential).findOne({
       where: { id: profile.credential_ref },
     });
     if (
@@ -202,7 +238,7 @@ export async function assignWorkspaceBackendProfile(
     }
   }
 
-  const linkRepo = dataSource.getRepository(WorkspaceClaudeBackendProfile);
+  const linkRepo = manager.getRepository(WorkspaceClaudeBackendProfile);
   const inserted = await linkRepo.createQueryBuilder()
     .insert()
     .values({
@@ -235,6 +271,7 @@ export async function assignWorkspaceBackendProfile(
     allowed_profile_ids: links.map(link => link.profile_id).sort(),
     default_profile_id: workspace.default_claude_backend_profile_id,
   };
+  });
 }
 
 export async function listClaudeBackendProfiles(

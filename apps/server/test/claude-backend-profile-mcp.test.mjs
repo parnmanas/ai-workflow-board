@@ -222,6 +222,66 @@ describe('Claude backend profile MCP operations', () => {
     assert.equal(stored.credential_ref, null);
   });
 
+  it('serializes a credential update against a concurrent foreign workspace assignment', async () => {
+    const ownerWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Race credential owner' }),
+    );
+    const foreignWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Race foreign workspace' }),
+    );
+    const credential = await ds.getRepository('Credential').save(
+      ds.getRepository('Credential').create({
+        workspace_id: ownerWorkspace.id,
+        name: 'Race owner credential',
+        provider: 'anthropic',
+        encrypted_data: 'test-only',
+      }),
+    );
+    const profile = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Concurrent credential profile',
+      base_url: 'http://before-race.invalid',
+      model: 'race-model',
+      protocol: 'anthropic-compatible',
+    });
+    await tools.assignWorkspaceBackendProfile(
+      ds,
+      ownerWorkspace.id,
+      profile.profile.id,
+      false,
+    );
+
+    const [update, assignment] = await Promise.allSettled([
+      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        base_url: 'http://after-race.invalid',
+        credential_ref: credential.id,
+      }),
+      tools.assignWorkspaceBackendProfile(
+        ds,
+        foreignWorkspace.id,
+        profile.profile.id,
+        false,
+      ),
+    ]);
+
+    assert.equal(update.status, 'fulfilled');
+    assert.equal(assignment.status, 'rejected');
+    assert.match(assignment.reason.message, /credential is not owned by this workspace/);
+    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      id: profile.profile.id,
+    });
+    assert.equal(stored.base_url, 'http://after-race.invalid');
+    assert.equal(stored.credential_ref, credential.id);
+    assert.equal(
+      await ds.getRepository('WorkspaceClaudeBackendProfile').count({
+        where: {
+          workspace_id: foreignWorkspace.id,
+          profile_id: profile.profile.id,
+        },
+      }),
+      0,
+    );
+  });
+
   it('assigns idempotently, preserves other links, and exposes safe verification', async () => {
     const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
       name: 'Local vLLM - qwen3-coder-next',
