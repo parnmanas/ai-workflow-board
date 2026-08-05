@@ -98,6 +98,8 @@ test('Postgres row lock serializes update and assign across independent connecti
   await ds1.initialize();
   await ds2.initialize();
   tools2.setProfileQueueBypassForTests(ds2);
+  assert.equal((await ds1.query('SELECT current_schema() AS schema'))[0].schema, SCHEMA);
+  assert.equal((await ds2.query('SELECT current_schema() AS schema'))[0].schema, SCHEMA);
 
   const workspaceRepo = ds1.getRepository('Workspace');
   const owner = await workspaceRepo.save(workspaceRepo.create({ name: 'PG credential owner' }));
