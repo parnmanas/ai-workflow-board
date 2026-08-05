@@ -72,10 +72,10 @@ async function waitForProfileUpdateLockWait(applicationName, timeoutMs = 10_000)
 }
 
 after(async () => {
-  try { if (ds1?.isInitialized) await ds1.destroy(); } catch { /* best effort */ }
-  try { if (ds2?.isInitialized) await ds2.destroy(); } catch { /* best effort */ }
+  try { if (ds1?.isInitialized) await ds1.destroy(); } catch { /* 최선의 정리 시도 */ }
+  try { if (ds2?.isInitialized) await ds2.destroy(); } catch { /* 최선의 정리 시도 */ }
   if (IS_PG) {
-    try { await adminQuery(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`); } catch { /* best effort */ }
+    try { await adminQuery(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`); } catch { /* 최선의 정리 시도 */ }
   }
 });
 
@@ -89,7 +89,7 @@ test('Postgres row lock serializes update and assign across independent connecti
   const { DataSource } = await import('typeorm');
   const { buildDataSourceOptions } = await import(pathToFileURL(path.join(DIST, 'db.js')));
   const toolUrl = pathToFileURL(path.join(DIST, 'modules', 'mcp', 'tools', 'claude-backend-profile-tools.js')).href;
-  // The second DataSource bypasses the process-local queue to model another server process.
+  // 두 번째 DataSource는 프로세스 로컬 큐를 우회해 별도 서버 프로세스를 모델링한다.
   const tools1 = await import(`${toolUrl}?instance=update`);
   const tools2 = await import(`${toolUrl}?instance=assign`);
   ds1 = new DataSource(buildDataSourceOptions());

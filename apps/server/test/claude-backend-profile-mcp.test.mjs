@@ -194,6 +194,52 @@ describe('Claude backend profile MCP operations', () => {
     assert.equal(stored.credential_ref, current.credential_ref);
   });
 
+  it('preserves a non-unique save failure during profile update', async () => {
+    const { Repository } = await import('typeorm');
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+    const originalSave = Repository.prototype.save;
+    const injected = new Error('database connection lost during save');
+    Repository.prototype.save = async function (...args) {
+      if (this.metadata.name === 'ClaudeBackendProfile') throw injected;
+      return originalSave.apply(this, args);
+    };
+
+    try {
+      await assert.rejects(
+        tools.updateClaudeBackendProfile(ds, current.id, {
+          model: 'qwen3-coder-next-save-failure',
+        }),
+        error => error === injected,
+      );
+    } finally {
+      Repository.prototype.save = originalSave;
+    }
+  });
+
+  it('maps only a unique-name save failure to the duplicate-name message', async () => {
+    const existing = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Existing unique profile name',
+      base_url: 'http://existing-name.invalid',
+      model: 'existing-name-model',
+      protocol: 'anthropic-compatible',
+    });
+    const renamed = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Profile to rename',
+      base_url: 'http://rename.invalid',
+      model: 'rename-model',
+      protocol: 'anthropic-compatible',
+    });
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, renamed.profile.id, {
+        name: existing.profile.name,
+      }),
+      /profile name already exists/,
+    );
+  });
+
   it('rejects a workspace credential incompatible with existing assignments without changing the profile', async () => {
     const ownerWorkspace = await ds.getRepository('Workspace').save(
       ds.getRepository('Workspace').create({ name: 'Credential owner workspace' }),

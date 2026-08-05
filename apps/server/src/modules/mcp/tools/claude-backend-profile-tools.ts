@@ -25,6 +25,24 @@ const profileQueueBypassDataSources = new WeakSet<DataSource>();
 let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
 let profileLockAttemptHook: ((operation: 'update' | 'assign', profileId: string) => void) | undefined;
 
+function isUniqueConstraintError(error: unknown): boolean {
+  const value = error as {
+    code?: string;
+    errno?: number;
+    message?: string;
+    driverError?: { code?: string; errno?: number; message?: string };
+  } | null;
+  const driverError = value?.driverError;
+  const code = driverError?.code ?? value?.code;
+  const errno = driverError?.errno ?? value?.errno;
+  const message = driverError?.message ?? value?.message ?? '';
+  return code === '23505'
+    || code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || code === 'ER_DUP_ENTRY'
+    || errno === 1062
+    || /unique constraint failed/i.test(message);
+}
+
 export function setProfileLockHookForTests(
   hook?: (operation: 'update' | 'assign', profileId: string) => Promise<void>,
 ): void {
@@ -62,9 +80,9 @@ async function withProfileWriteLock<T>(
   await previous;
   try {
     return await dataSource.transaction(async manager => {
-      // This no-op UPDATE takes a row write lock for the transaction on server
-      // databases.  The per-process queue above provides the equivalent
-      // serialization for sql.js, which has no SELECT ... FOR UPDATE support.
+      // 이 no-op UPDATE는 서버 DB에서 트랜잭션 동안 행 쓰기 잠금을 잡는다.
+      // SELECT ... FOR UPDATE를 지원하지 않는 sql.js에서는 위 프로세스별
+      // 큐가 같은 직렬화 역할을 한다.
       const locked = await manager.createQueryBuilder()
         .update('claude_backend_profiles')
         .set({ id: () => 'id' })
@@ -152,8 +170,8 @@ export async function upsertClaudeBackendProfile(
     const saved = await repo.save(repo.create(runtimeToProfileEntity(runtime, name)));
     return { created: true, profile: publicProfile(saved) };
   } catch (error) {
-    // A concurrent caller may have won the unique-name insert. Re-read and
-    // apply the same collision guard so retries remain exactly-once.
+    // 동시 호출자가 이름 고유 삽입에 먼저 성공했을 수 있다. 다시 조회한 뒤
+    // 같은 충돌 방어를 적용해 재시도가 정확히 한 번의 결과로 수렴하게 한다.
     const winner = await repo.findOne({ where: { name } });
     if (
       winner &&
@@ -236,7 +254,10 @@ export async function updateClaudeBackendProfile(
     const saved = await repo.save(current);
     return { changed, profile: publicProfile(saved) };
   } catch (error) {
-    throw new Error(`profile name already exists: ${error instanceof Error ? error.message : String(error)}`);
+    if (isUniqueConstraintError(error)) {
+      throw new Error(`profile name already exists: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    throw error;
   }
   });
 }
@@ -247,8 +268,8 @@ export async function assignWorkspaceBackendProfile(
   profileId: string,
   setDefault: boolean,
 ) {
-  // Preserve the public validation order before entering the profile-keyed
-  // critical section; the workspace is re-read inside the transaction.
+  // 프로필별 임계 구역에 진입하기 전 공개 검증 순서를 유지한다.
+  // 트랜잭션 안에서는 workspace를 다시 조회한다.
   const requestedWorkspace = await dataSource.getRepository(Workspace).findOne({
     where: { id: workspaceId },
   });
