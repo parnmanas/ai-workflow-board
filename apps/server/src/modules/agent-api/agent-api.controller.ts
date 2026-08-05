@@ -32,6 +32,7 @@ import {
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
 import {
   applyTerminalEnteredAtForMove,
+  deriveRootTicketStatus,
   getRootArchivedAt,
   isTerminalColumn,
   isTerminalReopen,
@@ -677,6 +678,7 @@ export class AgentApiController {
       const t = await tRepo.save(tRepo.create({
         column_id: col.id, title, description, priority, assignee, labels: '[]', position,
         terminal_entered_at: terminalEnteredAt,
+        status: deriveRootTicketStatus(col),
       }));
 
       if (subtasks.length > 0) {
@@ -917,6 +919,7 @@ export class AgentApiController {
                 column_id: col.id, title: op.title, description: op.description || '',
                 priority: op.priority || 'medium', assignee: op.assignee || '', labels: '[]', position: pos,
                 terminal_entered_at: terminalEnteredAt,
+                status: deriveRootTicketStatus(col),
               }));
               results.push({ success: true, ticketId: r.id });
               break;
