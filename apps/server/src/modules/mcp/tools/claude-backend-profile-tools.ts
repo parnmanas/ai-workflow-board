@@ -1,13 +1,14 @@
 import { randomUUID } from 'crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { ClaudeBackendProfile } from '../../../entities/ClaudeBackendProfile';
 import { Credential } from '../../../entities/Credential';
 import { Workspace } from '../../../entities/Workspace';
 import { WorkspaceClaudeBackendProfile } from '../../../entities/WorkspaceClaudeBackendProfile';
 import {
+  profileEntityToRuntime,
   publicProfile,
   runtimeToProfileEntity,
 } from '../../../common/claude-backend-registry';
@@ -18,6 +19,88 @@ import type { ToolContext } from './context';
 
 const REGISTRY_GATE_ERROR =
   'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to an Agent.';
+
+const profileOperationTails = new Map<string, Promise<void>>();
+const profileQueueBypassDataSources = new WeakSet<DataSource>();
+let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
+let profileLockAttemptHook: ((operation: 'update' | 'assign', profileId: string) => void) | undefined;
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const value = error as {
+    code?: string;
+    errno?: number;
+    message?: string;
+    driverError?: { code?: string; errno?: number; message?: string };
+  } | null;
+  const driverError = value?.driverError;
+  const code = driverError?.code ?? value?.code;
+  const errno = driverError?.errno ?? value?.errno;
+  const message = driverError?.message ?? value?.message ?? '';
+  return code === '23505'
+    || code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || code === 'ER_DUP_ENTRY'
+    || errno === 1062
+    || /unique constraint failed/i.test(message);
+}
+
+export function setProfileLockHookForTests(
+  hook?: (operation: 'update' | 'assign', profileId: string) => Promise<void>,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
+  profileLockHook = hook;
+}
+
+export function setProfileLockAttemptHookForTests(
+  hook?: (operation: 'update' | 'assign', profileId: string) => void,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
+  profileLockAttemptHook = hook;
+}
+
+export function setProfileQueueBypassForTests(dataSource: DataSource, enabled = true): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile queue bypass is test-only');
+  if (enabled) profileQueueBypassDataSources.add(dataSource);
+  else profileQueueBypassDataSources.delete(dataSource);
+}
+
+async function withProfileWriteLock<T>(
+  dataSource: DataSource,
+  profileId: string,
+  operationName: 'update' | 'assign',
+  operation: (manager: EntityManager) => Promise<T>,
+): Promise<T> {
+  const bypassQueue = profileQueueBypassDataSources.has(dataSource);
+  const previous = bypassQueue
+    ? Promise.resolve()
+    : profileOperationTails.get(profileId) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>(resolve => { release = resolve; });
+  if (!bypassQueue) profileOperationTails.set(profileId, tail);
+  profileLockAttemptHook?.(operationName, profileId);
+  await previous;
+  try {
+    return await dataSource.transaction(async manager => {
+      // 이 no-op UPDATE는 서버 DB에서 트랜잭션 동안 행 쓰기 잠금을 잡는다.
+      // SELECT ... FOR UPDATE를 지원하지 않는 sql.js에서는 위 프로세스별
+      // 큐가 같은 직렬화 역할을 한다.
+      const locked = await manager.createQueryBuilder()
+        .update('claude_backend_profiles')
+        .set({ id: () => 'id' })
+        .where('id = :profileId', { profileId })
+        .execute();
+      if ((locked.affected ?? 0) === 0) {
+        throw new Error('Claude backend profile not found');
+      }
+      await profileLockHook?.(operationName, profileId);
+      return operation(manager);
+    });
+  } finally {
+    release();
+    if (!bypassQueue && profileOperationTails.get(profileId) === tail) {
+      profileOperationTails.delete(profileId);
+    }
+  }
+}
 
 export async function requireAgentRegistryAccess(
   dataSource: DataSource,
@@ -87,8 +170,8 @@ export async function upsertClaudeBackendProfile(
     const saved = await repo.save(repo.create(runtimeToProfileEntity(runtime, name)));
     return { created: true, profile: publicProfile(saved) };
   } catch (error) {
-    // A concurrent caller may have won the unique-name insert. Re-read and
-    // apply the same collision guard so retries remain exactly-once.
+    // 동시 호출자가 이름 고유 삽입에 먼저 성공했을 수 있다. 다시 조회한 뒤
+    // 같은 충돌 방어를 적용해 재시도가 정확히 한 번의 결과로 수렴하게 한다.
     const winner = await repo.findOne({ where: { name } });
     if (
       winner &&
@@ -102,23 +185,107 @@ export async function upsertClaudeBackendProfile(
   }
 }
 
+export async function updateClaudeBackendProfile(
+  dataSource: DataSource,
+  profileId: string,
+  input: {
+    name?: string;
+    base_url?: string;
+    model?: string;
+    protocol?: 'anthropic-compatible' | 'openai-compatible';
+    credential_ref?: string | null;
+    config?: Record<string, unknown>;
+  },
+) {
+  return withProfileWriteLock(dataSource, profileId, 'update', async manager => {
+  const repo = manager.getRepository(ClaudeBackendProfile);
+  const current = await repo.findOne({ where: { id: profileId } });
+  if (!current) throw new Error('Claude backend profile not found');
+
+  const name = input.name === undefined ? current.name : input.name.trim();
+  if (!name) throw new Error('name is required');
+  const existingRuntime = profileEntityToRuntime(current);
+  const runtime = ClaudeBackendProfileSchema.parse({
+    ...existingRuntime,
+    ...(input.config ?? {}),
+    id: profileId,
+    ...(input.base_url === undefined ? {} : { base_url: input.base_url }),
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+    ...(input.credential_ref === undefined
+      ? {}
+      : input.credential_ref === null
+        ? { credential_ref: undefined }
+        : { credential_ref: input.credential_ref }),
+  });
+
+  if (runtime.credential_ref) {
+    const credential = await manager.getRepository(Credential).findOne({
+      where: { id: runtime.credential_ref },
+    });
+    if (!credential) throw new Error('credential_ref does not identify an existing Credential');
+    if (credential.workspace_id !== null) {
+      const assignments = await manager
+        .getRepository(WorkspaceClaudeBackendProfile)
+        .find({
+          where: { profile_id: profileId },
+          select: { workspace_id: true },
+        });
+      if (assignments.some(link => link.workspace_id !== credential.workspace_id)) {
+        throw new Error(
+          'Claude backend profile credential is not owned by every assigned workspace',
+        );
+      }
+    }
+  }
+
+  const next = runtimeToProfileEntity(runtime, name);
+  const changed = (
+    current.name !== next.name ||
+    current.base_url !== next.base_url ||
+    current.model !== next.model ||
+    current.protocol !== next.protocol ||
+    current.credential_ref !== next.credential_ref ||
+    current.config !== next.config
+  );
+  if (!changed) return { changed: false, profile: publicProfile(current) };
+  Object.assign(current, next);
+  try {
+    const saved = await repo.save(current);
+    return { changed, profile: publicProfile(saved) };
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      throw new Error(`profile name already exists: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    throw error;
+  }
+  });
+}
+
 export async function assignWorkspaceBackendProfile(
   dataSource: DataSource,
   workspaceId: string,
   profileId: string,
   setDefault: boolean,
 ) {
-  const workspaceRepo = dataSource.getRepository(Workspace);
+  // 프로필별 임계 구역에 진입하기 전 공개 검증 순서를 유지한다.
+  // 트랜잭션 안에서는 workspace를 다시 조회한다.
+  const requestedWorkspace = await dataSource.getRepository(Workspace).findOne({
+    where: { id: workspaceId },
+  });
+  if (!requestedWorkspace) throw new Error('Workspace not found');
+  return withProfileWriteLock(dataSource, profileId, 'assign', async manager => {
+  const workspaceRepo = manager.getRepository(Workspace);
   const workspace = await workspaceRepo.findOne({
     where: { id: workspaceId },
   });
   if (!workspace) throw new Error('Workspace not found');
-  const profile = await dataSource.getRepository(ClaudeBackendProfile).findOne({
+  const profile = await manager.getRepository(ClaudeBackendProfile).findOne({
     where: { id: profileId },
   });
   if (!profile) throw new Error('Claude backend profile not found');
   if (profile.credential_ref) {
-    const credential = await dataSource.getRepository(Credential).findOne({
+    const credential = await manager.getRepository(Credential).findOne({
       where: { id: profile.credential_ref },
     });
     if (
@@ -129,7 +296,7 @@ export async function assignWorkspaceBackendProfile(
     }
   }
 
-  const linkRepo = dataSource.getRepository(WorkspaceClaudeBackendProfile);
+  const linkRepo = manager.getRepository(WorkspaceClaudeBackendProfile);
   const inserted = await linkRepo.createQueryBuilder()
     .insert()
     .values({
@@ -162,6 +329,7 @@ export async function assignWorkspaceBackendProfile(
     allowed_profile_ids: links.map(link => link.profile_id).sort(),
     default_profile_id: workspace.default_claude_backend_profile_id,
   };
+  });
 }
 
 export async function listClaudeBackendProfiles(
@@ -204,6 +372,24 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
       return err(error instanceof Error ? error.message : String(error));
     }
   };
+
+  server.tool(
+    'update_claude_backend_profile',
+    'Update selected fields of an existing instance-global Claude backend profile while preserving its UUID and assignments. Pass credential_ref=null to clear it. DB-backed, full-scope Agent MCP only.',
+    {
+      profile_id: z.string().uuid(),
+      name: z.string().min(1).optional(),
+      base_url: z.string().url().optional(),
+      model: z.string().min(1).optional(),
+      protocol: z.enum(['anthropic-compatible', 'openai-compatible']).optional(),
+      credential_ref: z.string().uuid().nullable().optional(),
+      config: z.record(z.string(), z.unknown()).optional(),
+    },
+    async ({ profile_id, ...input }, extra) => gated(
+      extra,
+      () => updateClaudeBackendProfile(ctx.dataSource, profile_id, input),
+    ),
+  );
 
   server.tool(
     'upsert_claude_backend_profile',

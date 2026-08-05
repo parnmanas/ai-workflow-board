@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
@@ -145,14 +145,32 @@ export default function Board() {
       + '|' + activePanelTicket.updated_at
     : '';
 
+  // Tickets whose thread fetch already failed this session — the effect re-runs
+  // on every projection bump, and a server-side failure is usually persistent,
+  // so without this the user would get one toast per refresh.
+  const threadErrorNotified = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     if (!activePanelTicketId) { setPanelTicketFull(null); return; }
     let cancelled = false;
     api.getTicket(activePanelTicketId)
-      .then(full => { if (!cancelled) setPanelTicketFull(full); })
-      .catch(() => { /* keep last good thread; panel falls back to projection */ });
+      .then(full => {
+        if (cancelled) return;
+        threadErrorNotified.current.delete(activePanelTicketId);
+        setPanelTicketFull(full);
+      })
+      .catch(() => {
+        // The panel falls back to the board-card projection, whose `comments`
+        // is `[]` by construction (perf ticket b3812637) — so a failure here
+        // renders as a silently EMPTY Comments tab. Say so out loud instead of
+        // letting the user read "no comments" off a broken fetch.
+        if (cancelled) return;
+        if (threadErrorNotified.current.has(activePanelTicketId)) return;
+        threadErrorNotified.current.add(activePanelTicketId);
+        showToast('코멘트를 불러오지 못했습니다 — 목록이 비어 보일 수 있습니다', 'error');
+      });
     return () => { cancelled = true; };
-  }, [activePanelTicketId, panelCommentSignal]);
+  }, [activePanelTicketId, panelCommentSignal, showToast]);
 
   // Only adopt the fetched thread when it matches the open ticket — otherwise a
   // mid-switch stale fetch from the previous ticket would flash into the panel.

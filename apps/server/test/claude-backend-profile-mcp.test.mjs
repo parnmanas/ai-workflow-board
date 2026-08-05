@@ -15,6 +15,16 @@ let tools;
 let managerAgent;
 let workspace;
 
+function withTimeout(promise, message, timeoutMs = 1_000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 before(async () => {
   const { DataSource } = await import('typeorm');
   const { buildDataSourceOptions } = await import('../dist/db.js');
@@ -123,6 +133,228 @@ describe('Claude backend profile MCP operations', () => {
       }),
       /refusing to overwrite/,
     );
+  });
+
+  it('updates an existing profile without changing its UUID or assignments', async () => {
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+    await ds.getRepository('WorkspaceClaudeBackendProfile').save(
+      ds.getRepository('WorkspaceClaudeBackendProfile').create({
+        workspace_id: workspace.id,
+        profile_id: current.id,
+      }),
+    );
+
+    const result = await tools.updateClaudeBackendProfile(ds, current.id, {
+      base_url: 'http://127.0.0.1:8000',
+      protocol: 'openai-compatible',
+      config: {
+        adapter: {
+          module: 'claude_openai_adapter',
+          base_url: 'http://127.0.0.1:18080',
+        },
+      },
+    });
+
+    assert.equal(result.changed, true);
+    assert.equal(result.profile.id, current.id);
+    assert.equal(result.profile.base_url, 'http://127.0.0.1:8000');
+    assert.equal(result.profile.protocol, 'openai-compatible');
+    assert.equal(result.profile.model, 'qwen3-coder-next');
+    const retry = await tools.updateClaudeBackendProfile(ds, current.id, {
+      base_url: 'http://127.0.0.1:8000',
+      protocol: 'openai-compatible',
+      config: {
+        adapter: {
+          module: 'claude_openai_adapter',
+          base_url: 'http://127.0.0.1:18080',
+        },
+      },
+    });
+    assert.equal(retry.changed, false);
+    const listed = await tools.listClaudeBackendProfiles(ds, workspace.id);
+    assert.equal(listed.allowed_profile_ids.includes(current.id), true);
+  });
+
+  it('rejects an invalid update without changing the stored profile', async () => {
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, current.id, {
+        credential_ref: '00000000-0000-0000-0000-000000000000',
+      }),
+      /credential_ref does not identify an existing Credential/,
+    );
+    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      id: current.id,
+    });
+    assert.equal(stored.credential_ref, current.credential_ref);
+  });
+
+  it('preserves a non-unique save failure during profile update', async () => {
+    const { Repository } = await import('typeorm');
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+    const originalSave = Repository.prototype.save;
+    const injected = new Error('database connection lost during save');
+    Repository.prototype.save = async function (...args) {
+      if (this.metadata.name === 'ClaudeBackendProfile') throw injected;
+      return originalSave.apply(this, args);
+    };
+
+    try {
+      await assert.rejects(
+        tools.updateClaudeBackendProfile(ds, current.id, {
+          model: 'qwen3-coder-next-save-failure',
+        }),
+        error => error === injected,
+      );
+    } finally {
+      Repository.prototype.save = originalSave;
+    }
+  });
+
+  it('maps only a unique-name save failure to the duplicate-name message', async () => {
+    const existing = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Existing unique profile name',
+      base_url: 'http://existing-name.invalid',
+      model: 'existing-name-model',
+      protocol: 'anthropic-compatible',
+    });
+    const renamed = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Profile to rename',
+      base_url: 'http://rename.invalid',
+      model: 'rename-model',
+      protocol: 'anthropic-compatible',
+    });
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, renamed.profile.id, {
+        name: existing.profile.name,
+      }),
+      /profile name already exists/,
+    );
+  });
+
+  it('rejects a workspace credential incompatible with existing assignments without changing the profile', async () => {
+    const ownerWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Credential owner workspace' }),
+    );
+    const otherWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Other assigned workspace' }),
+    );
+    const profile = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Shared assigned profile',
+      base_url: 'http://shared.invalid',
+      model: 'shared-model',
+      protocol: 'anthropic-compatible',
+    });
+    await tools.assignWorkspaceBackendProfile(ds, ownerWorkspace.id, profile.profile.id, false);
+    await tools.assignWorkspaceBackendProfile(ds, otherWorkspace.id, profile.profile.id, false);
+    const credential = await ds.getRepository('Credential').save(
+      ds.getRepository('Credential').create({
+        workspace_id: ownerWorkspace.id,
+        name: 'First workspace credential',
+        provider: 'anthropic',
+        encrypted_data: 'test-only',
+      }),
+    );
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        base_url: 'http://must-not-be-saved.invalid',
+        credential_ref: credential.id,
+      }),
+      /credential is not owned by every assigned workspace/,
+    );
+    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      id: profile.profile.id,
+    });
+    assert.equal(stored.base_url, 'http://shared.invalid');
+    assert.equal(stored.credential_ref, null);
+  });
+
+  it('serializes an assignment behind an in-flight credential update', async () => {
+    const ownerWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Racing credential owner' }),
+    );
+    const otherWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Racing assignment workspace' }),
+    );
+    const profile = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Contended profile',
+      base_url: 'http://contended.invalid',
+      model: 'contended-model',
+      protocol: 'anthropic-compatible',
+    });
+    const credential = await ds.getRepository('Credential').save(
+      ds.getRepository('Credential').create({
+        workspace_id: ownerWorkspace.id,
+        name: 'Racing owner credential',
+        provider: 'anthropic',
+        encrypted_data: 'test-only',
+      }),
+    );
+
+    let releaseUpdate;
+    const updateBlocked = new Promise(resolve => { releaseUpdate = resolve; });
+    let updateHasLock;
+    const lockObserved = new Promise(resolve => { updateHasLock = resolve; });
+    let assignmentAttempted;
+    const assignmentAttemptObserved = new Promise(resolve => { assignmentAttempted = resolve; });
+    let assignmentEntered = false;
+    tools.setProfileLockAttemptHookForTests((operation, profileId) => {
+      if (operation === 'assign' && profileId === profile.profile.id) assignmentAttempted();
+    });
+    tools.setProfileLockHookForTests(async (operation, profileId) => {
+      if (operation === 'update' && profileId === profile.profile.id) {
+        updateHasLock();
+        await updateBlocked;
+      }
+      if (operation === 'assign' && profileId === profile.profile.id) assignmentEntered = true;
+    });
+
+    try {
+      const update = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        credential_ref: credential.id,
+      });
+      await withTimeout(lockObserved, 'timed out waiting for update lock');
+
+      let assignmentSettled = false;
+      const assignment = tools.assignWorkspaceBackendProfile(
+        ds,
+        otherWorkspace.id,
+        profile.profile.id,
+        false,
+      ).finally(() => { assignmentSettled = true; });
+      await withTimeout(
+        assignmentAttemptObserved,
+        'timed out waiting for assignment lock attempt',
+      );
+      assert.equal(assignmentEntered, false, 'assignment must not enter before update releases');
+      assert.equal(assignmentSettled, false, 'assignment must not settle before update releases');
+
+      releaseUpdate();
+      await withTimeout(update, 'timed out waiting for credential update');
+      await assert.rejects(
+        withTimeout(assignment, 'timed out waiting for assignment'),
+        /credential is not owned by this workspace/,
+      );
+      assert.equal(
+        await ds.getRepository('WorkspaceClaudeBackendProfile').count({
+          where: { workspace_id: otherWorkspace.id, profile_id: profile.profile.id },
+        }),
+        0,
+      );
+    } finally {
+      releaseUpdate?.();
+      tools.setProfileLockAttemptHookForTests();
+      tools.setProfileLockHookForTests();
+    }
   });
 
   it('assigns idempotently, preserves other links, and exposes safe verification', async () => {

@@ -5,6 +5,7 @@ import { tokens } from '../tokens';
 import { renderMarkdown } from './chat/utils/markdown';
 import { ErrorState } from './common';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useCloseArtifactPanel } from '../contexts/ArtifactPanelContext';
 import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
 
 /**
@@ -300,6 +301,7 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
   const [state, setState] = useState<TicketArtifactState>({ status: 'loading' });
   const { isConnected } = useBoardStream();
   const navigate = useNavigate();
+  const closeArtifact = useCloseArtifactPanel();
 
   // showLoading=false 는 이미 로드된 상세의 백그라운드 재조회용 — 성공 시에만
   // 교체하고 실패는 무시해 실시간 갱신이 화면을 깜빡이거나 오류로 덮지 않게 한다.
@@ -344,12 +346,15 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
   // AppLayout 의 URL→state 동기화 effect(티켓 28258c75)가 currentWorkspaceId·
   // X-Workspace-Id 헤더를 그 즉시 맞춰준다. `?ticket=` 쿼리는 Board.tsx 가 이미
   // 소비하는 딥링크 계약(MentionInboxBadge 등과 동일)이라 그대로 재사용한다.
+  // 이동 후 패널을 접는다 — 목적지(보드에서 열린 그 티켓)가 이 아티팩트를 대체하므로
+  // 열린 채로 두면 방금 떠나온 내용이 본문을 덮고 남는다.
   const openOnBoard = useCallback(() => {
     if (state.status !== 'loaded') return;
     const t = state.ticket || {};
     if (!canOpenTicketOnBoard(t)) return;
     navigate(ticketBoardPath(t));
-  }, [state, navigate]);
+    closeArtifact();
+  }, [state, navigate, closeArtifact]);
 
   return (
     <TicketArtifactView

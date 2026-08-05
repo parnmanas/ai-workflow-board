@@ -230,19 +230,31 @@ export async function loadTicketFull(
       : ['children', 'children.children'],
   });
   if (!ticket) return null;
+  // 컬럼은 id 로만 조회한다. `workspace_id` 를 조회 조건에 넣으면 레거시 행
+  // (BoardColumn.workspace_id 는 nullable·default '')이 매칭에 실패해 아래
+  // fail-closed 가드를 오탐으로 때린다 — detail GET 이 500 이 되고, 클라이언트는
+  // 그 에러를 삼킨 뒤 보드 카드 projection(`comments: []`)으로 폴백해 Comments
+  // 탭이 통째로 비어 보였다. 소속 검증은 조회 필터가 아니라 아래에서 명시적으로 한다.
   const currentColumn = ticket.column_id
     ? await scope.getRepository(BoardColumn).findOne({
-        where: { id: ticket.column_id, workspace_id: ticket.workspace_id },
+        where: { id: ticket.column_id },
         relations: ['board'],
       })
     : null;
-  // 루트 티켓의 워크플로 상태는 컬럼이 결정한다. 티켓 workspace 안에서 기준
-  // 컬럼을 fail-closed로 해석한다. 빈 값이나 추측한 이름을 반환하면 다른
-  // workspace의 컬럼을 노출하거나 호출자가 레거시 저장 값인 Ticket.status로
-  // 폴백하도록 유도할 수 있다.
+  // 컬럼의 실효 workspace: 자기 scoping 이 있으면 그것, 없으면 board 의 것.
+  // column → board → workspace 가 권위 있는 연결이고, 두 컬럼 모두 nullable 이라
+  // workspace scoping 도입 이전 행은 빈 값을 들고 board 에서 상속받는다.
+  const columnWorkspaceId = currentColumn
+    ? (currentColumn.workspace_id || currentColumn.board?.workspace_id || '')
+    : '';
+  // 루트 티켓의 워크플로 상태는 컬럼이 결정한다. 기준 컬럼을 fail-closed 로
+  // 해석한다 — 빈 값이나 추측한 이름을 반환하면 다른 workspace 의 컬럼을
+  // 노출하거나 호출자가 레거시 저장 값인 Ticket.status 로 폴백하도록 유도할 수 있다.
+  // 다만 "레거시라 scoping 이 아예 없음"(빈 값)과 "다른 workspace 소속"(실제 불일치)은
+  // 다르다. 전자는 해석하고, 후자만 막는다.
   if (!ticket.parent_id && (
     !currentColumn ||
-    currentColumn.board?.workspace_id !== ticket.workspace_id
+    (columnWorkspaceId !== '' && columnWorkspaceId !== ticket.workspace_id)
   )) {
     throw new Error(
       `Ticket ${ticket.id} has no current column in workspace ${ticket.workspace_id}`,

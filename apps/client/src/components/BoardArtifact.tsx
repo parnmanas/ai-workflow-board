@@ -4,6 +4,7 @@ import { api } from '../api';
 import { tokens } from '../tokens';
 import { Badge, ErrorState } from './common';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useCloseArtifactPanel } from '../contexts/ArtifactPanelContext';
 import { ticketBoardPath } from '../utils/ticketBoardLink';
 import type { BoardWithCards, BoardCardColumn, BoardCardTicket } from '../types';
 
@@ -253,6 +254,7 @@ export default function BoardArtifact({ boardId }: { boardId: string }) {
   const [state, setState] = useState<BoardArtifactState>({ status: 'loading' });
   const { isConnected } = useBoardStream();
   const navigate = useNavigate();
+  const closeArtifact = useCloseArtifactPanel();
 
   const load = useCallback(
     (showLoading: boolean): (() => void) => {
@@ -297,18 +299,22 @@ export default function BoardArtifact({ boardId }: { boardId: string }) {
   // (티켓 7815a958/dc5c0813 이 도입한 공유 유틸 — 손으로 새로 짜지 않는다). 이 카드에
   // 나열되는 티켓은 정의상 이 보드에 실려 있는 미아카이브 티켓뿐이라 canOpenTicketOnBoard
   // 게이트는 불필요하다.
+  // 두 이동 모두 목적지가 이 아티팩트를 대체하므로 패널을 접는다(TicketArtifact 의
+  // "보드에서 열기" 와 동일 규약) — 열린 채로 두면 방금 떠나온 내용이 본문을 덮고 남는다.
   const openTicket = useCallback(
     (ticket: BoardCardTicket) => {
       if (state.status !== 'loaded') return;
       navigate(ticketBoardPath({ id: ticket.id, board_id: boardId, workspace_id: state.board.workspace_id }));
+      closeArtifact();
     },
-    [navigate, state, boardId],
+    [navigate, state, boardId, closeArtifact],
   );
 
   const openBoard = useCallback(() => {
     if (state.status !== 'loaded') return;
     navigate(`/ws/${encodeURIComponent(state.board.workspace_id)}/boards/${encodeURIComponent(boardId)}`);
-  }, [navigate, state, boardId]);
+    closeArtifact();
+  }, [navigate, state, boardId, closeArtifact]);
 
   return (
     <BoardArtifactView

@@ -5,6 +5,7 @@ import { tokens } from '../tokens';
 import { ErrorState } from './common';
 import AgentCard from './AgentCard';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useCloseArtifactPanel } from '../contexts/ArtifactPanelContext';
 import type { AgentDetail } from '../types';
 
 /**
@@ -127,6 +128,7 @@ export function AgentArtifactView({
 export default function AgentArtifact({ agentId }: { agentId: string }) {
   const [state, setState] = useState<AgentArtifactState>({ status: 'loading' });
   const navigate = useNavigate();
+  const closeArtifact = useCloseArtifactPanel();
 
   const load = useCallback(
     (showLoading: boolean): (() => void) => {
@@ -179,13 +181,17 @@ export default function AgentArtifact({ agentId }: { agentId: string }) {
   // AgentCard/the "AI Agents에서 상세 보기" button only render once state is
   // 'loaded' (see AgentArtifactView), so workspace_id is always present in
   // practice — no deep-link fallback needed for an unreachable branch.
+  // 이동에 성공했을 때만 패널을 접는다 — workspace 를 못 구해 이동이 무산되면
+  // 사용자는 아무 데도 가지 않으므로 아티팩트는 열린 채로 둔다.
   const openDetail = useCallback(
     (id: string) => {
       if (state.status !== 'loaded') return;
       const workspaceId = state.agent.workspace_id || getActiveWorkspaceId();
-      if (workspaceId) navigate(`/ws/${workspaceId}/agents/${id}`);
+      if (!workspaceId) return;
+      navigate(`/ws/${workspaceId}/agents/${id}`);
+      closeArtifact();
     },
-    [navigate, state],
+    [navigate, state, closeArtifact],
   );
 
   return <AgentArtifactView state={state} onOpenDetail={openDetail} onRetry={retry} />;
