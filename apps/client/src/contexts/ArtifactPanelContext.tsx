@@ -50,6 +50,7 @@ export function useArtifactPanel(): ArtifactPanelContextValue {
 }
 
 const noopOpenArtifact: ArtifactPanelContextValue['openArtifact'] = () => {};
+const noopCloseArtifact: ArtifactPanelContextValue['closeArtifact'] = () => {};
 
 /**
  * F-3 (ticket 3ca88253) — openArtifact 만 필요한 리프 카드(AgentRefCard/BoardRefCard)용
@@ -61,4 +62,19 @@ const noopOpenArtifact: ArtifactPanelContextValue['openArtifact'] = () => {};
 export function useOpenArtifactPanel(): ArtifactPanelContextValue['openArtifact'] {
   const ctx = useContext(ArtifactPanelContext);
   return ctx ? ctx.openArtifact : noopOpenArtifact;
+}
+
+/**
+ * closeArtifact 만 필요한 아티팩트 본문 컨테이너(TicketArtifact/BoardArtifact/
+ * AgentArtifact)용 안전 접근자. 이들은 실제로는 항상 패널 안(프로바이더 하위)에
+ * 렌더되지만, 렌더 계약 테스트는 프로바이더 없이 마운트하므로 throw 대신 no-op 을
+ * 돌려주는 useOpenArtifactPanel 과 같은 계약을 따른다.
+ *
+ * 용도: 아티팩트에서 실제 화면(보드의 티켓, 보드, 에이전트 상세)으로 이동하면
+ * 목적지가 그 아티팩트를 대체하므로 패널을 접는다 — 이동 후에도 열려 있으면
+ * 방금 떠나온 내용이 본문을 덮은 채 남는다.
+ */
+export function useCloseArtifactPanel(): ArtifactPanelContextValue['closeArtifact'] {
+  const ctx = useContext(ArtifactPanelContext);
+  return ctx ? ctx.closeArtifact : noopCloseArtifact;
 }
