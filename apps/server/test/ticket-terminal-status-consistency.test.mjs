@@ -20,15 +20,25 @@
 // version of this fix, (7) the one-time migration heals rows that drifted
 // out of sync before any of this shipped, and (8) a ticket created into a
 // non-terminal column is actually live for dispatch — not just
-// database-consistent — via the real TriggerLoopService.dispatchCurrentColumn
-// producer→dispatcher path (not just column_id/status inspection).
+// database-consistent — proven through the REAL producer→dispatcher chain:
+// create_ticket (producer, writes only a 'created' ActivityLog — there is no
+// synchronous dispatch call in that path) → DispatchReconcilerService's
+// seed-then-dispatch backstop (the actual first-dispatch mechanism for a
+// brand-new ticket; same service production wires to a setInterval sweep,
+// driven here deterministically via its public reconcile(now) entrypoint,
+// exactly like qa-flows/dispatch-reconciler-loop.test.mjs) → a connected
+// VirtualAgent's real SSE stream. A prior version of this scenario called
+// TriggerLoopService.dispatchCurrentColumn directly, which bypasses
+// create_ticket's producer step entirely (a review finding on this ticket).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createTicket } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
-import { TriggerLoopService } from '../dist/modules/agents/trigger-loop.service.js';
+import { VirtualAgent } from './helpers/virtual-agent.mjs';
+import { DispatchReconcilerService } from '../dist/modules/agents/dispatch-reconciler.service.js';
+import { DISPATCH_RECONCILER_DEFAULTS } from '../dist/modules/agents/dispatch-intent.service.js';
 import { BackfillRootTicketStatusFromColumn1760000000075 } from '../dist/database/migrations/1760000000075-BackfillRootTicketStatusFromColumn.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '7859';
@@ -174,31 +184,68 @@ test('terminal-column ticket create/move keeps status consistent with the column
   );
 
   // 8. Completion criterion 3 — "non-terminal 생성 직후 trigger/dispatch가 정상
-  // 발생한다" — must be proven through the real producer→dispatcher path
-  // (TriggerLoopService.dispatchCurrentColumn), not just by inspecting
-  // column_id/status. Before this ticket's fix, the reported repro's ticket
-  // never dispatched because it landed in a TERMINAL column (dispatch
-  // excludes terminal columns by design); this proves the opposite case now
-  // holds — a ticket created into a routed NON-terminal column is immediately
-  // live for dispatch, and a trigger_emitted audit row lands for it.
-  const triggerLoop = app.get(TriggerLoopService);
+  // 발생한다" — proven through the REAL producer→dispatcher chain (see file
+  // header), not by calling TriggerLoopService.dispatchCurrentColumn
+  // directly. A connected VirtualAgent (real SSE subscriber, exactly how a
+  // live subagent driver observes dispatch) proves the trigger actually
+  // reaches the agent, waiting with a bounded/fail-closed timeout.
+  const virtualAgent = new VirtualAgent({
+    name: 'assignee', agentId: agent.id, apiKey: key.raw_key, port, boardId: board.id,
+  });
+  await virtualAgent.start();
+  t.after(() => virtualAgent.stop());
+  // Let the SSE subscription settle before the create below — avoids a race
+  // between "stream open" and "server emits" (same pattern as the existing
+  // comment-trigger QA flow).
+  await new Promise((r) => setTimeout(r, 200));
+
   const dispatchable = await mcp.callTool('create_ticket', {
     title: 'dispatch-eligible non-terminal create', board_id: board.id, column_name: 'In Progress',
     assignee_id: agent.id,
   });
   assert.ok(dispatchable?.id, JSON.stringify(dispatchable));
-  const dispatchResult = await triggerLoop.dispatchCurrentColumn(dispatchable.id, 'test', agent.id);
-  assert.ok(dispatchResult.emitted >= 1, `expected a live dispatch, got emitted=${dispatchResult.emitted}`);
+
+  // The producer step alone must not fabricate a dispatch — create_ticket
+  // logs only 'created' synchronously, matching the reported repro ("생성
+  // 직후 활동 로그에는 created만 있었다"). The trigger below must come from
+  // the reconciler backstop we drive next, not from create_ticket itself.
+  assert.equal(
+    await activityLogRepo.count({ where: { action: 'trigger_emitted', ticket_id: dispatchable.id } }),
+    0,
+    'create_ticket alone must not synchronously fabricate a trigger_emitted row',
+  );
+
+  // Drive the REAL DispatchReconcilerService (the service production wires
+  // to a setInterval sweep) through its public reconcile(now) entrypoint —
+  // only `now` is synthetic, matching qa-flows/dispatch-reconciler-loop
+  // .test.mjs scenarios 5/7/9. First pass: seed a durable intent for the
+  // routed-but-idle ticket (idle baseline is created_at, so `now` must clear
+  // seedAfterMs). Second pass: dispatch the freshly-seeded intent — this is
+  // the call that reaches TriggerLoopService's real emit chokepoint.
+  const reconciler = app.get(DispatchReconcilerService);
+  const seedAt = new Date(Date.now() + DISPATCH_RECONCILER_DEFAULTS.seedAfterMs + 1_000);
+  await reconciler.reconcile(seedAt);
+  await reconciler.reconcile(new Date(seedAt.getTime() + 1_000));
+
+  const trigger = await virtualAgent.waitForTrigger((tr) => tr.ticket_id === dispatchable.id, 5_000);
+  assert.equal(trigger.role, 'assignee', 'the live SSE trigger routed to the assignee role');
   const triggerRow = await activityLogRepo.findOne({
     where: { action: 'trigger_emitted', ticket_id: dispatchable.id },
   });
-  assert.ok(triggerRow, 'expected a trigger_emitted audit row for the non-terminal create');
+  assert.ok(triggerRow, 'expected a trigger_emitted audit row once the real reconciler dispatch phase ran');
 
-  // Contrast: the SAME dispatch call against a terminal-column ticket
-  // (scenario 2's `retroactive`, already status='done') is correctly
-  // excluded — proving #8 isn't just "dispatchCurrentColumn always emits".
-  const terminalDispatch = await triggerLoop.dispatchCurrentColumn(retroactive.id, 'test', agent.id);
-  assert.equal(terminalDispatch.emitted, 0, 'a terminal-column ticket must stay excluded from dispatch');
+  // Contrast: the terminal-column ticket (scenario 2's `retroactive`, already
+  // status='done') is never even a seed candidate — BoardColumn.kind='terminal'
+  // is structurally excluded from the reconciler's candidate scan — so the
+  // SAME sweep that just dispatched the routed ticket above proves terminal
+  // exclusion holds through the real chain too, not just an explicit check
+  // inside dispatchCurrentColumn.
+  await reconciler.reconcile(new Date(seedAt.getTime() + 2_000));
+  assert.equal(
+    await activityLogRepo.count({ where: { action: 'trigger_emitted', ticket_id: retroactive.id } }),
+    0,
+    'a terminal-column ticket must never be seeded/dispatched by the reconciler backstop',
+  );
 });
 
 test.after(() => exitAfterTests());
