@@ -22,6 +22,7 @@ import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/h
 import { getCallerAgent } from '../shared/session-auth';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
+import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
@@ -89,7 +90,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
 
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       try {
         await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
@@ -99,7 +102,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         ]);
         if (!room) return err('Chat room not found');
         if (!ticket) return err('Ticket not found');
-        if (room.workspace_id !== agent.workspace_id || ticket.workspace_id !== room.workspace_id) {
+        if (room.workspace_id !== callerWorkspaceId || ticket.workspace_id !== room.workspace_id) {
           return err('Ticket and chat room must belong to the caller workspace');
         }
         if (!ticket.pending_user_action) {
@@ -171,6 +174,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         ? await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } })
         : null;
       if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       try {
         // Strip harness markers (see comment-tools.ts add_comment for context
@@ -188,7 +193,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         try {
           msg = await roomMessagingService.sendMessage(
             room_id,
-            agent.workspace_id ?? '',
+            callerWorkspaceId,
             'agent',
             agent.id,
             agent.name,
@@ -278,7 +283,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       const size = approxBase64Size(file_data);
       if (size > MAX_TICKET_ATTACHMENT_SIZE) {
@@ -300,7 +307,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           owner_id: room_id,
           ticket_id: null,
           room_id,
-          workspace_id: agent.workspace_id,
+          workspace_id: callerWorkspaceId,
           file_name,
           file_mimetype: verifiedMime,
           file_data,
@@ -449,7 +456,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       try {
         // participantType='agent' so the participant-scoping subquery matches
@@ -457,7 +466,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // see RoomMessagingService.searchMessages. Results are bounded to the
         // agent's own workspace, so cross-workspace history never leaks.
         const results = await roomMessagingService.searchMessages(
-          agent.workspace_id,
+          callerWorkspaceId,
           agent.id,
           query.trim(),
           Math.min(limit ?? 20, 50),
@@ -488,10 +497,12 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-      if (!agent?.workspace_id) return err('Could not resolve workspace from caller agent');
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
       try {
         const result = await roomCrudService.createRoom(
-          agent.workspace_id,
+          callerWorkspaceId,
           { type: 'agent', id: caller.agentId },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
           name,

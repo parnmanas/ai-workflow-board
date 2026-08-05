@@ -1688,7 +1688,7 @@ function ManagedAgentsSection({
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [pendingCmd, setPendingCmd] = useState<string | null>(null); // `${cmd}:${agentId}`
   // Workspace dropdown source for the per-row workspace picker — managers
-  // are global, but each managed agent must live in exactly one workspace.
+  // are global, and a managed agent may also be global (null workspace).
   // Loaded once per section mount and reused across all rows.
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
 
@@ -1726,7 +1726,7 @@ function ManagedAgentsSection({
   }, []);
 
   const moveWorkspace = useCallback(
-    async (agentId: string, workspaceId: string) => {
+    async (agentId: string, workspaceId: string | null) => {
       try {
         await api.setManagedAgentWorkspace(agentId, workspaceId);
         showToast('Workspace updated', 'success');
@@ -1916,8 +1916,9 @@ function ManagedAgentsSection({
                     value={a.workspace_id || ''}
                     onChange={(e) => {
                       const next = e.target.value;
-                      if (!next || next === a.workspace_id) return;
-                      moveWorkspace(a.id, next);
+                      const workspaceId = next || null;
+                      if (workspaceId === a.workspace_id) return;
+                      moveWorkspace(a.id, workspaceId);
                     }}
                     style={{
                       fontSize: 11,
@@ -1930,8 +1931,9 @@ function ManagedAgentsSection({
                     }}
                     title="Move this managed agent into a different workspace. The manager_agent_id link is preserved."
                   >
-                    {workspaces.length === 0 && (
-                      <option value={a.workspace_id || ''}>{a.workspace_id ? a.workspace_id.slice(0, 8) : '—'}</option>
+                    <option value="">All workspaces</option>
+                    {workspaces.length === 0 && !!a.workspace_id && (
+                      <option value={a.workspace_id || ''}>{a.workspace_id ? a.workspace_id.slice(0, 8) : 'All workspaces'}</option>
                     )}
                     {workspaces.map((w) => (
                       <option key={w.id} value={w.id}>

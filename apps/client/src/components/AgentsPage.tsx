@@ -42,7 +42,7 @@ interface ManagerOption {
   id: string;
   name: string;
   description: string;
-  workspace_id: string;
+  workspace_id: string | null;
   is_active: number;
 }
 

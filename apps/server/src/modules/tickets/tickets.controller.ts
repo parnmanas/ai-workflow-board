@@ -9,6 +9,7 @@ import { Board } from '../../entities/Board';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
@@ -120,7 +121,7 @@ export class TicketsController {
     const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
     if (existing?.status === 'pending' || existing?.status === 'completing') return res.status(200).json(existing);
     const agents = await this.agentRepo.find({
-      where: { workspace_id: ticket.workspace_id, is_active: 1 } as any,
+      where: agentWorkspaceWhere(ticket.workspace_id).map((scope) => ({ ...scope, is_active: 1 })) as any,
       order: { name: 'ASC' },
     });
     const usableAgents = agents.filter(a => a.type !== 'manager' && !!a.is_online).sort((a, b) => {
@@ -1428,6 +1429,9 @@ export class TicketsController {
     if (agent_id) {
       const a = await this.agentRepo.findOne({ where: { id: agent_id } });
       if (!a) return res.status(404).json({ error: 'Agent not found' });
+      if (!agentIsVisibleInWorkspace(a.workspace_id, ticket.workspace_id)) {
+        return res.status(400).json({ error: 'Agent belongs to a different workspace' });
+      }
       // Agent Manager(type='manager')는 절대 작업하지 않는다 (ticket 941c72d3) —
       // supervisor 로서 agent 를 spawn/stop 할 뿐 role holder 가 될 수 없다. 직접
       // 지정 시도는 명시적으로 거부한다(기존 holder 는 건드리지 않음).
@@ -2354,7 +2358,7 @@ export class TicketsController {
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
         if (!agent) continue;
         // Scope safety: an agent in a different workspace should never receive this mention.
-        if (agent.workspace_id && ticket.workspace_id && agent.workspace_id !== ticket.workspace_id) continue;
+        if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
 
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,

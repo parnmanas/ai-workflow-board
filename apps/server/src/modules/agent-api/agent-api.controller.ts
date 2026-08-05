@@ -9,6 +9,7 @@ import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { ApiKey } from '../../entities/ApiKey';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { ActivityLog } from '../../entities/ActivityLog';
@@ -80,7 +81,7 @@ export class AgentApiController {
       return res.status(400).json({ error: 'invalid mention audit run' });
     }
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
-    if (!agent || agent.workspace_id !== workspaceId) {
+    if (!workspaceId || !agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       return res.status(400).json({ error: 'agent does not belong to ticket workspace' });
     }
     const familyKey = `${triggerId}:${agentId}`;

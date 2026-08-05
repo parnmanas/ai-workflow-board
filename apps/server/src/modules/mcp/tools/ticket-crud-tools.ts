@@ -17,6 +17,7 @@ import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
@@ -469,6 +470,57 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         return ok(await loadTicketFull(dataSource, ticket.id));
       } catch (e: any) {
         return err(e?.message || 'Duplicate decision rejected');
+      }
+    },
+  );
+
+  server.tool(
+    'correct_confirmed_ticket_duplicate',
+    'Correct a previously confirmed false-positive canonical link. Atomically clears the link, resolves the stale dispatch intent, opens one fresh intent, and re-dispatches the selected ticket role. The canonical ticket is not modified.',
+    {
+      ticket_id: z.string().describe('Incorrectly linked report ticket id'),
+      role: z.literal('assignee').optional().default('assignee').describe('Role to redispatch (currently assignee)'),
+    },
+    async ({ ticket_id, role }, extra: { sessionId?: string }) => {
+      if (!triggerLoopService) return err('Duplicate correction requires the integrated dispatch service');
+      const caller = getCallerAgent(extra);
+      try {
+        const duplicateService = new TicketDuplicateService(dataSource);
+        const corrected = await duplicateService.correctConfirmedLink(
+          ticket_id,
+          role,
+          caller?.agentName || '',
+          caller?.agentId || '',
+        );
+        const triggerId = await triggerLoopService.emitAgentTrigger(
+          corrected.ticket,
+          corrected.agentId,
+          role,
+          'duplicate_correction',
+          caller?.agentId || '',
+          { intentAlreadyClaimed: true },
+        );
+        const recorded = await dataSource.getRepository('DispatchIntent').createQueryBuilder()
+          .update()
+          .set({ last_trigger_id: triggerId })
+          .where('id = :id', { id: corrected.intentId })
+          .andWhere('dispatch_generation = :generation', { generation: corrected.generation })
+          .andWhere('lease_owner = :owner', { owner: corrected.leaseOwner })
+          .execute();
+        if ((recorded.affected ?? 0) !== 1) {
+          throw new Error('Duplicate correction dispatch claim was lost before trigger recording');
+        }
+        return ok({
+          ticket: await loadTicketFull(dataSource, corrected.ticket.id),
+          previous_canonical_ticket_id: corrected.previousCanonicalId,
+          dispatch_intent_id: corrected.intentId,
+          dispatch_attempted: 1,
+          dispatch_landed: triggerId ? 1 : 0,
+          dispatch_trigger_ids: triggerId ? [triggerId] : [],
+          dispatch_generation: corrected.generation,
+        });
+      } catch (e: any) {
+        return err(e?.message || 'Confirmed duplicate correction rejected');
       }
     },
   );
@@ -942,7 +994,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
 
-      if (agent.workspace_id && agent.workspace_id !== workspace_id) {
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspace_id)) {
         return err('Agent does not belong to the requested workspace');
       }
 

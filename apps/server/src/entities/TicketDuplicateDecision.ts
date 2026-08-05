@@ -5,7 +5,8 @@ export type TicketDuplicateOutcome =
   | 'confirmed_link'
   | 'rejected'
   | 'ambiguous_pending'
-  | 'resolved_from_canonical';
+  | 'resolved_from_canonical'
+  | 'corrected_independent';
 
 @Entity('ticket_duplicate_decisions')
 @Index('idx_ticket_duplicate_report', ['report_ticket_id'])

@@ -54,6 +54,10 @@ test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관
   await agentRepo.update(inactive.id, { is_active: 0 });
   const manager = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'mgr', type: 'manager' });
   const foreign = await createAgent(app, modules.getDataSourceToken, otherWs.id, { name: 'foreign', type: 'custom' });
+  const globalNull = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-null', type: 'custom' });
+  const globalEmpty = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-empty', type: 'custom' });
+  await agentRepo.update(globalNull.id, { workspace_id: null });
+  await agentRepo.update(globalEmpty.id, { workspace_id: '' });
 
   const admin = { id: 'u-admin', name: 'Admin', email: 'a@x', role: 'admin', permissions: [] };
   const nonAdmin = { id: 'u-user', name: 'User', email: 'u@x', role: 'user', permissions: [] };
@@ -72,6 +76,16 @@ test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관
   let res = await patch({ assistant_agent_id: active.id }, admin);
   assert.equal(res._status, 200, 'admin sets active in-ws agent → 200');
   assert.equal(await currentAssistant(), active.id, 'persisted');
+
+  res = await patch({ assistant_agent_id: globalNull.id }, admin);
+  assert.equal(res._status, 200, 'null-workspace global agent is assignable');
+  assert.equal(await currentAssistant(), globalNull.id);
+
+  res = await patch({ assistant_agent_id: globalEmpty.id }, admin);
+  assert.equal(res._status, 200, 'legacy empty-workspace global agent is assignable');
+  assert.equal(await currentAssistant(), globalEmpty.id);
+
+  await patch({ assistant_agent_id: active.id }, admin);
 
   // 비관리자 변경 시도 → 403, 값 불변
   res = await patch({ assistant_agent_id: null }, nonAdmin);

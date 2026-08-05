@@ -17,7 +17,9 @@ import {
   postFsResponse,
   postChatRoomMessage,
   postDispatchAck,
+  provisionManagedAgentApiKey,
 } from './rest.js';
+import { readApiKey, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
@@ -343,6 +345,7 @@ const POOL_EXHAUSTED_RETRY_COMMENT =
 // behavior so single-agent setups keep working unchanged.
 export interface AgentExecutionContext {
   agent_id: string;
+  workspace_id: string;
   api_key: string;
   cwd: string;
   /** Pre-written `claude --mcp-config` file. Manager writes once per agent. */
@@ -1233,6 +1236,7 @@ export class EventDispatcher {
     if (!ctx.api_key || !ctx.working_dir || !ctx.mcp_config_path) return undefined;
     return {
       agent_id: ctx.agent_id,
+      workspace_id: ctx.workspace_id,
       api_key: ctx.api_key,
       cwd: ctx.working_dir,
       mcp_config_path: ctx.mcp_config_path,
@@ -1244,6 +1248,23 @@ export class EventDispatcher {
       model: ctx.model ?? null,
       runtime_config: ctx.runtime_config ?? null,
     };
+  }
+
+  async #scopeAgentContext(
+    context: AgentExecutionContext | undefined,
+    workspaceId: string | undefined | null,
+  ): Promise<AgentExecutionContext | undefined> {
+    const scope = String(workspaceId || '').trim();
+    if (!context || !scope || context.workspace_id === scope) return context;
+    let apiKey = await readApiKey(context.agent_id, scope);
+    if (!apiKey) {
+      const issued = await provisionManagedAgentApiKey(this.#config, context.agent_id, scope);
+      if (!issued?.raw_key) throw new Error(`Could not provision workspace-scoped key for ${scope}`);
+      apiKey = issued.raw_key;
+      await writeApiKey(context.agent_id, apiKey, scope);
+    }
+    const mcpConfigPath = await writeMcpConfig(context.agent_id, this.#config.url, apiKey, scope);
+    return { ...context, workspace_id: scope, api_key: apiKey, mcp_config_path: mcpConfigPath };
   }
 
   async #dispatchHermes(args: {
@@ -1417,7 +1438,8 @@ export class EventDispatcher {
     // than the manager's defaults.
     const selfAgentId = loadAgentInfo()?.agent_id || '';
     const eventAgentId = ev.actor_name || ev.agent_id || '';
-    const agentContext = this.#resolveAgentContext(eventAgentId);
+    let agentContext = this.#resolveAgentContext(eventAgentId);
+    agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
     const envConfig = parseEnvironmentConfig(ev.environment_config);
     if (
       selfAgentId &&
@@ -1703,7 +1725,7 @@ export class EventDispatcher {
     // covers both paths.
     const selectedRepo = resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig);
     const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
-      ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id)
+      ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
       : null;
     const worktreeMode = parseWorktreeMode(ev.worktree_mode);
     const applyWorktree = () => this.#applyWorktreeCwd(
@@ -2298,7 +2320,8 @@ export class EventDispatcher {
     // chat_request envelope-native: fields under ev.payload.* (asymmetric vs
     // agent_trigger which is flatten-on-emit).
     const payload = ev.payload || {};
-    const agentContext = this.#resolveAgentContext(payload.agent_id || '');
+    let agentContext = this.#resolveAgentContext(payload.agent_id || '');
+    agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
@@ -2483,7 +2506,8 @@ export class EventDispatcher {
     const ticketId = ev.ticket_id || '';
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
-    const agentContext = this.#resolveAgentContext(agentId);
+    let agentContext = this.#resolveAgentContext(agentId);
+    agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
     const mention = {
       ticket_id: ticketId,
       comment_id: commentId,
@@ -2766,7 +2790,8 @@ export class EventDispatcher {
     // manager's own identity, which is the right behavior for rooms where
     // the manager itself is a participant.
     const memberIds: string[] = Array.isArray(p.agent_member_ids) ? p.agent_member_ids : [];
-    const agentContext = this.#resolveAgentContextFromMembers(memberIds);
+    let agentContext = this.#resolveAgentContextFromMembers(memberIds);
+    agentContext = await this.#scopeAgentContext(agentContext, p.workspace_id);
 
     // Two early-exit cases for agent-sent messages — both still record into
     // the chat ring so future dispatches see complete history:

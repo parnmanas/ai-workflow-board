@@ -20,6 +20,7 @@ import { RunProvision } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 const CONTENT_MAX = 10000;
 
@@ -1011,7 +1012,7 @@ export class RoomMessagingService {
         // 작업하지 않으므로 @멘션을 받아도 chat_request 를 emit 하지 않는다.
         if (agent.type === 'manager') continue;
         // Workspace-scope safety: never cross-post a mention into the wrong workspace.
-        if (agent.workspace_id && agent.workspace_id !== workspaceId) continue;
+        if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) continue;
 
         activityEvents.emit('chat_request', {
           agent_id: agent.id,

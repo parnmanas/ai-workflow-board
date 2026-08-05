@@ -5,6 +5,7 @@ import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -304,7 +305,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     const agent = await this.agentRepo.findOne({ where: { id: schedule.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
     // Workspace-scope safety: never dispatch into an agent outside this workspace.
-    if (agent.workspace_id && agent.workspace_id !== schedule.workspace_id) {
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, schedule.workspace_id)) {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 

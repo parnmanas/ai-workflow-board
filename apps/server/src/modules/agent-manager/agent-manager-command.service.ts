@@ -9,6 +9,7 @@ import { InstanceRegistryService, InstanceRecord } from './instance-registry.ser
 import { CommandLedgerService } from './command-ledger.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import type { AutostartFeasibility } from '../../common/agent-lifecycle';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 /**
  * Result of an auto-start (spawn_agent) attempt. `ok:true` means the command was
@@ -83,6 +84,7 @@ export class AgentManagerCommandService {
         if (hydrated.manager_agent_id === undefined && target.manager_agent_id) hydrated.manager_agent_id = target.manager_agent_id;
         if (hydrated.credential_id === undefined && target.credential_id) hydrated.credential_id = target.credential_id;
         if (hydrated.model === undefined && target.model) hydrated.model = target.model;
+        if (hydrated.workspace_id === undefined && target.workspace_id) hydrated.workspace_id = target.workspace_id;
       }
     }
 
@@ -127,7 +129,7 @@ export class AgentManagerCommandService {
    *   - manager_offline   — a manager is linked but none is heartbeating
    *   - no_working_dir    — a live manager exists but the agent has no working dir
    */
-  async issueSpawnAgent(targetAgentId: string, issuedBy: string): Promise<SpawnAgentResult> {
+  async issueSpawnAgent(targetAgentId: string, issuedBy: string, workspaceId?: string): Promise<SpawnAgentResult> {
     if (!targetAgentId) return { ok: false, reason: 'agent_not_found' };
     const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
     if (!target) return { ok: false, reason: 'agent_not_found' };
@@ -137,7 +139,15 @@ export class AgentManagerCommandService {
     if (!target.working_dir || !target.working_dir.trim()) {
       return { ok: false, reason: 'no_working_dir' };
     }
-    const { command_id } = await this.issue(inst, 'spawn_agent', { agent_id: targetAgentId }, issuedBy);
+    if (workspaceId && !agentIsVisibleInWorkspace(target.workspace_id, workspaceId)) {
+      return { ok: false, reason: 'agent_not_found' };
+    }
+    const { command_id } = await this.issue(
+      inst,
+      'spawn_agent',
+      { agent_id: targetAgentId, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
+      issuedBy,
+    );
     return { ok: true, reason: 'ok', command_id, instance_id: inst.instance_id };
   }
 }

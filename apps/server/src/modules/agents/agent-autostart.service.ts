@@ -211,12 +211,12 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
    * it. Returns the spawn result, or `null` when suppressed by the debounce
    * (the caller then reads the current markers for its feedback copy).
    */
-  private async _attemptAutostart(agentId: string): Promise<SpawnAgentResult | null> {
+  private async _attemptAutostart(agentId: string, workspaceId?: string): Promise<SpawnAgentResult | null> {
     const last = this.lastSpawnAt.get(agentId);
     if (last !== undefined && Date.now() - last < SPAWN_DEBOUNCE_MS) return null;
     this.lastSpawnAt.set(agentId, Date.now());
 
-    const result = await this.managerCommand.issueSpawnAgent(agentId, AUTOSTART_ISSUED_BY);
+    const result = await this.managerCommand.issueSpawnAgent(agentId, AUTOSTART_ISSUED_BY, workspaceId);
     if (result.ok) {
       this.agentStatus.markStarting(agentId);
       this.logService.info('AgentAutostart', 'auto-start dispatched', {
@@ -283,7 +283,7 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     // feed back about; still skip the emit (there's no live target).
     if (!cls.agent) return true;
 
-    const attempted = await this._attemptAutostart(agentId);
+    const attempted = await this._attemptAutostart(agentId, ticket.workspace_id);
     const outcome = this._effectiveOutcome(agentId, attempted);
     const message = this._composeMessage('담당 에이전트', cls.state, outcome);
 
@@ -332,7 +332,7 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     if (cls.reachable) return; // came online between send and here — nothing to do
     if (!cls.agent) return;    // agent deleted between send and here
 
-    const attempted = await this._attemptAutostart(evt.agent_id);
+    const attempted = await this._attemptAutostart(evt.agent_id, evt.workspace_id);
     const outcome = this._effectiveOutcome(evt.agent_id, attempted);
 
     const key = `${evt.room_id}:${evt.agent_id}`;

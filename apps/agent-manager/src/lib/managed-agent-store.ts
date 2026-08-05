@@ -47,12 +47,17 @@ export function configPathFor(agentId: string): string {
   return join(managedAgentDir(agentId), 'config.json');
 }
 
-export function apiKeyPathFor(agentId: string): string {
-  return join(managedAgentDir(agentId), 'apikey');
+function workspaceSuffix(workspaceId?: string): string {
+  const scope = String(workspaceId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return scope ? `.${scope}` : '';
 }
 
-export function mcpConfigPathFor(agentId: string): string {
-  return join(managedAgentDir(agentId), 'mcp-config.json');
+export function apiKeyPathFor(agentId: string, workspaceId?: string): string {
+  return join(managedAgentDir(agentId), `apikey${workspaceSuffix(workspaceId)}`);
+}
+
+export function mcpConfigPathFor(agentId: string, workspaceId?: string): string {
+  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}.json`);
 }
 
 export function credentialPathFor(agentId: string): string {
@@ -150,8 +155,8 @@ export async function writeManagedAgentConfig(cfg: ManagedAgentDiskConfig): Prom
   await fsp.writeFile(configPathFor(cfg.agent_id), JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
-export async function readApiKey(agentId: string): Promise<string | null> {
-  const path = apiKeyPathFor(agentId);
+export async function readApiKey(agentId: string, workspaceId?: string): Promise<string | null> {
+  const path = apiKeyPathFor(agentId, workspaceId);
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, 'utf8').trim();
@@ -161,9 +166,33 @@ export async function readApiKey(agentId: string): Promise<string | null> {
   }
 }
 
-export async function writeApiKey(agentId: string, raw: string): Promise<void> {
+/**
+ * Read the workspace-scoped key used during managed-agent rehydration.
+ *
+ * Versions before workspace-scoped global agents stored the only key at
+ * `apikey`. During the first restart after upgrading, config.json already has
+ * a workspace_id but the scoped key does not exist yet. Treat that unscoped
+ * key as belonging to the persisted workspace and copy it forward. This is
+ * intentionally separate from readApiKey(): normal cross-workspace dispatch
+ * must provision a new key instead of reusing the legacy credential.
+ */
+export async function readApiKeyForRehydrate(
+  agentId: string,
+  workspaceId?: string,
+): Promise<string | null> {
+  const scoped = await readApiKey(agentId, workspaceId);
+  if (scoped || !workspaceId) return scoped;
+
+  const legacy = await readApiKey(agentId);
+  if (!legacy) return null;
+
+  await writeApiKey(agentId, legacy, workspaceId);
+  return legacy;
+}
+
+export async function writeApiKey(agentId: string, raw: string, workspaceId?: string): Promise<void> {
   await ensureManagedAgentDir(agentId);
-  await fsp.writeFile(apiKeyPathFor(agentId), raw, { mode: 0o600 });
+  await fsp.writeFile(apiKeyPathFor(agentId, workspaceId), raw, { mode: 0o600 });
 }
 
 /**
@@ -196,9 +225,10 @@ export async function writeMcpConfig(
   agentId: string,
   awbUrl: string,
   rawApiKey: string,
+  workspaceId?: string,
 ): Promise<string> {
   await ensureManagedAgentDir(agentId);
-  const path = mcpConfigPathFor(agentId);
+  const path = mcpConfigPathFor(agentId, workspaceId);
   const self = resolveSelfCommand();
   const body = {
     mcpServers: {
@@ -226,11 +256,12 @@ export async function writeMcpConfig(
  *  manager re-fetches it from AWB so a credential-rotation in the AWB UI
  *  takes effect without leaving a stale copy on this host. */
 export async function eraseSecrets(agentId: string): Promise<void> {
-  await Promise.allSettled([
-    fsp.unlink(apiKeyPathFor(agentId)),
-    fsp.unlink(mcpConfigPathFor(agentId)),
-    fsp.unlink(credentialPathFor(agentId)),
-  ]);
+  const dir = managedAgentDir(agentId);
+  const names = await fsp.readdir(dir).catch(() => [] as string[]);
+  const scopedSecrets = names
+    .filter(name => name === 'apikey' || name.startsWith('apikey.') || name === 'mcp-config.json' || name.startsWith('mcp-config.'))
+    .map(name => fsp.unlink(join(dir, name)));
+  await Promise.allSettled([...scopedSecrets, fsp.unlink(credentialPathFor(agentId))]);
 }
 
 /** Convenience: redact an apiKey for log output. Mirrors api-key.service. */

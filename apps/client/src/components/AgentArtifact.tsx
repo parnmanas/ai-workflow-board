@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../api';
+import { api, getActiveWorkspaceId } from '../api';
 import { tokens } from '../tokens';
 import { ErrorState } from './common';
 import AgentCard from './AgentCard';
@@ -182,7 +182,8 @@ export default function AgentArtifact({ agentId }: { agentId: string }) {
   const openDetail = useCallback(
     (id: string) => {
       if (state.status !== 'loaded') return;
-      navigate(`/ws/${state.agent.workspace_id}/agents/${id}`);
+      const workspaceId = state.agent.workspace_id || getActiveWorkspaceId();
+      if (workspaceId) navigate(`/ws/${workspaceId}/agents/${id}`);
     },
     [navigate, state],
   );

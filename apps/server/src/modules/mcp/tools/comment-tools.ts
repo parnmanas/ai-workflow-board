@@ -27,6 +27,7 @@ import { TicketArchivedError, isTerminalColumn } from '../shared/archive-helpers
 import { detectDeferralToTerminal, formatDeferralTerminalWarning } from '../shared/deferral-terminal-guard';
 import { findColumnByName } from '../shared/ticket-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/consensus-state';
@@ -455,7 +456,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
               if (!agent) continue;
               // Same workspace-scope safety as the REST path.
-              if (agent.workspace_id && ticket.workspace_id && agent.workspace_id !== ticket.workspace_id) continue;
+              if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id,
                 comment_id: comment.id,
@@ -662,7 +663,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
             if (m.type === 'agent') {
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
               if (!agent) continue;
-              if (agent.workspace_id && ticket.workspace_id && agent.workspace_id !== ticket.workspace_id) continue;
+              if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
                 agent_id: agent.id,
@@ -1204,7 +1205,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if (!targetAgent) return err('target_agent_id refers to an unknown agent');
       // Cross-workspace handoff would silently leak ticket context to an
       // agent whose API key lives in a different workspace boundary; refuse.
-      if (targetAgent.workspace_id && ticket.workspace_id && targetAgent.workspace_id !== ticket.workspace_id) {
+      if (!agentIsVisibleInWorkspace(targetAgent.workspace_id, ticket.workspace_id)) {
         return err('Target agent is in a different workspace than the ticket');
       }
 

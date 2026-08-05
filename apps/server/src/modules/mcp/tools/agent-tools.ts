@@ -12,6 +12,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Agent } from '../../../entities/Agent';
 import { PromptTemplate } from '../../../entities/PromptTemplate';
+import { Workspace } from '../../../entities/Workspace';
+import { Credential } from '../../../entities/Credential';
 import { CLI_TYPES } from '../../../common/types/cli-types';
 import {
   AgentRuntimeConfigError,
@@ -23,6 +25,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
+import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
 
 export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger } = ctx;
@@ -60,7 +63,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     {
       name: z.string().describe('Agent name'),
       description: z.string().optional().default('').describe('Agent description'),
-      workspace_id: z.string().describe('Workspace that owns this executable Agent'),
+      workspace_id: z.string().nullable().describe('Owning workspace, or null/blank for all workspaces'),
       type: z.enum(CLI_TYPES).optional().describe('Explicit Runtime Host runtime id'),
       manager_agent_id: z.string().optional().describe('Owning Runtime Host Agent id'),
       runtime_config: z.record(z.string(), z.unknown()).optional().describe(
@@ -107,6 +110,11 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         }
         throw error;
       }
+      const normalizedWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
+      if (normalizedWorkspaceId) {
+        const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: normalizedWorkspaceId } });
+        if (!workspace) return err('workspace_id does not exist');
+      }
 
       const agent = await agentRepo.save(
         agentRepo.create({
@@ -115,7 +123,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
           type: runtimeId,
           avatar_url,
           is_active,
-          workspace_id,
+          workspace_id: normalizedWorkspaceId,
           working_dir,
           manager_agent_id,
           runtime_config: validatedConfig,
@@ -148,6 +156,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       model: z.string().optional().describe(
         "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8'). Empty string clears it (CLI default). Takes effect on the next spawn — restart a running agent to apply."
       ),
+      workspace_id: z.string().nullable().optional().describe('Owning workspace, or null/blank for all workspaces'),
     },
     async ({
       agent_id,
@@ -162,6 +171,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       runtime_config,
       working_dir,
       model,
+      workspace_id,
     }) => {
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
@@ -182,6 +192,18 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (manager_agent_id !== undefined) agent.manager_agent_id = manager_agent_id;
       if (working_dir !== undefined) agent.working_dir = working_dir;
       if (model !== undefined) agent.model = model && model.trim() ? model.trim() : null;
+      if (workspace_id !== undefined) {
+        const normalizedWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
+        if (normalizedWorkspaceId) {
+          const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: normalizedWorkspaceId } });
+          if (!workspace) return err('workspace_id does not exist');
+        }
+        if (!normalizedWorkspaceId && agent.credential_id) {
+          const credential = await dataSource.getRepository(Credential).findOne({ where: { id: agent.credential_id } });
+          if (credential?.workspace_id) return err('global agents require a global credential or no credential');
+        }
+        agent.workspace_id = normalizedWorkspaceId;
+      }
 
       const runtimeId = typeof agent.type === 'string' ? agent.type.trim().toLowerCase() : '';
       if (!runtimeId) return err('runtime_not_configured');

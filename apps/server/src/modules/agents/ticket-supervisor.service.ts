@@ -377,7 +377,10 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         await this._auditAgentOfflineSkip(agent.id);
         continue;
       }
-      if (!agent.workspace_id) continue;
+      const workspaceIds = agent.workspace_id
+        ? [agent.workspace_id]
+        : await this.allocationService.getAllocatedWorkspaceIds(agent.id);
+      if (workspaceIds.length === 0) continue;
 
       // On allocation lookup failure (throw or a non-array result) this agent
       // contributes no live keys this tick. Prune its existing keys here so a
@@ -385,12 +388,16 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
       // abort the whole tick and skip the end-of-tick reap for every agent.
       let result: AllocatedTicketRow[];
       try {
-        const raw = await this.allocationService.getAllocatedTickets(agent.id, agent.workspace_id);
-        if (!Array.isArray(raw)) {
-          this._pruneAgentKeys(agent.id);
-          continue;
+        result = [];
+        for (const workspaceId of workspaceIds) {
+          const raw = await this.allocationService.getAllocatedTickets(agent.id, workspaceId);
+          if (!Array.isArray(raw)) {
+            this._pruneAgentKeys(agent.id);
+            result = [];
+            break;
+          }
+          result.push(...raw);
         }
-        result = raw;
       } catch (e) {
         this.logService.warn('TicketSupervisor', 'getAllocatedTickets failed — pruning agent keys', {
           err: String(e), agent_id: agent.id,
@@ -398,8 +405,6 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
         this._pruneAgentKeys(agent.id);
         continue;
       }
-
-      const { staleMs, resendMs } = await resolveCadence(agent.workspace_id);
 
       // Pre-fetch stuck alert rows for this agent's tickets so the
       // per-row loop doesn't need N+1 queries (ticket b55e4421).
@@ -421,6 +426,7 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
       }
 
       for (const row of result) {
+        const { staleMs, resendMs } = await resolveCadence(row.workspace_id);
         const key = this._key(agent.id, row.ticket_id, row.role);
         liveKeys.add(key);
 

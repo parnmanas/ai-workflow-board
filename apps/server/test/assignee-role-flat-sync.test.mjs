@@ -28,6 +28,7 @@ import {
   createAgent,
   createUser,
   createTicket,
+  createWorkspace,
 } from './helpers/fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +145,21 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
   });
 
   // ── 7. Migration heals rows that diverged BEFORE the write-back fix ─────────
+  await step('global agents can hold roles in any workspace while foreign scoped agents cannot', async () => {
+    const globalAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'GlobalRoleAgent' });
+    await ds.getRepository('Agent').update(globalAgent.id, { workspace_id: null });
+    const foreignWs = await createWorkspace(app, getDataSourceToken, 'foreign-role');
+    const foreignAgent = await createAgent(app, getDataSourceToken, foreignWs.id, { name: 'ForeignRoleAgent' });
+    const ticket = await freshTicket('workspace-scope');
+
+    await svc.setHolder(ticket.id, assigneeRole.id, { agent_id: globalAgent.id });
+    assert.equal((await reload(ticket.id)).assignee_id, globalAgent.id);
+    await assert.rejects(
+      () => svc.setHolder(ticket.id, assigneeRole.id, { agent_id: foreignAgent.id }),
+      /different workspace/,
+    );
+  });
+
   await step('migration backfills flat columns from role_assignments', async () => {
     // Reproduce the pre-fix divergence: an assignment row present while the flat
     // columns stay empty (a board-default / role_assignments[] create path that

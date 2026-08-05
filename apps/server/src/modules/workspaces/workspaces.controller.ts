@@ -35,6 +35,7 @@ import { Credential } from '../../entities/Credential';
 import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBackendProfile';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { publicProfile } from '../../common/claude-backend-registry';
+import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
 
 @ApiBearerAuth('user-session')
 @ApiTags('workspaces')
@@ -367,7 +368,7 @@ export class WorkspacesController {
         return res.status(400).json({ error: 'assistant_agent_id must be an agent id string or null' });
       } else {
         const agent = await this.agentRepo.findOne({ where: { id: assistant_agent_id } });
-        if (!agent || agent.is_active !== 1 || agent.type === 'manager' || agent.workspace_id !== id) {
+        if (!agent || agent.is_active !== 1 || agent.type === 'manager' || !agentIsVisibleInWorkspace(agent.workspace_id, id)) {
           return res.status(400).json({ error: 'assistant_agent_id must reference an active agent in this workspace' });
         }
         ws.assistant_agent_id = agent.id;
@@ -541,7 +542,10 @@ export class WorkspacesController {
     const [members, owners, agents] = await Promise.all([
       this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),
       this.rebacService.listSubjects({ type: 'workspace', id }, 'owner'),
-      this.agentRepo.find({ where: { workspace_id: id, is_active: 1 }, order: { name: 'ASC' } }),
+      this.agentRepo.find({
+        where: agentWorkspaceWhere(id).map((scope) => ({ ...scope, is_active: 1 })),
+        order: { name: 'ASC' },
+      }),
     ]);
 
     // ST-7: enrich agents with manager_name so the client autocompleter

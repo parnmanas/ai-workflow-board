@@ -5,6 +5,7 @@ import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
+import { Workspace } from '../../entities/Workspace';
 import { AgentsModule } from '../agents/agents.module';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -35,7 +36,7 @@ import { SkillsModule } from '../skills/skills.module';
   imports: [
     forwardRef(() => AgentsModule),
     SkillsModule,
-    TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource]),
+    TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource, Workspace]),
   ],
   controllers: [AgentManagerController],
   providers: [

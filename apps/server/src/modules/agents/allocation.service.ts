@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Ticket } from '../../entities/Ticket';
@@ -12,6 +13,7 @@ import { priorityIndex } from './priority';
 
 export interface AllocatedTicketRow {
   ticket_id: string;
+  workspace_id: string;
   /** Role slug — workspace-scoped (was hardcoded enum pre-v0.34). */
   role: string;
   column_id: string;
@@ -40,10 +42,21 @@ export class AllocationService {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
+  async getAllocatedWorkspaceIds(agentId: string): Promise<string[]> {
+    const assignments = await this.dataSource.getRepository(TicketRoleAssignment).find({ where: { agent_id: agentId } });
+    const ticketIds = [...new Set(assignments.map(row => row.ticket_id).filter(Boolean))];
+    if (ticketIds.length === 0) return [];
+    const tickets = await this.dataSource.getRepository(Ticket).find({
+      where: { id: In(ticketIds) },
+      select: ['id', 'workspace_id'],
+    });
+    return [...new Set(tickets.map(ticket => ticket.workspace_id).filter(Boolean))];
+  }
+
   async getAllocatedTickets(agentId: string, workspaceId: string): Promise<{ error: string } | AllocatedTicketRow[]> {
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
     if (!agent) return { error: 'Agent not found' };
-    if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       return { error: 'Agent does not belong to the requested workspace' };
     }
 
@@ -138,6 +151,7 @@ export class AllocationService {
         if (!myRoleIds.has(role.id)) continue;
         rows.push({
           ticket_id: ticket.id,
+          workspace_id: ticket.workspace_id,
           role: slug,
           column_id: ticket.column_id,
           column_position: col.position,

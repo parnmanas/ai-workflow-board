@@ -42,6 +42,7 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   update_ticket: 'update',
   update_child_ticket: 'update',
   decide_ticket_duplicate: 'update',
+  correct_confirmed_ticket_duplicate: 'update',
   add_comment: 'comment',
   // Typed-comment mutations — each creates a comment row (ask/decision) or flips a
   // question's status (answer). answer_question carries NO input ticket_id (keys on
@@ -609,6 +610,9 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
   list_workspaces: 'read', ping: 'read', search_actions: 'read', search_chat_messages: 'read',
   search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
+  // review-guard (1) — returns drift classification/recommendation; its internal
+  // reverification budget bookkeeping is not a user-facing ticket mutation card.
+  check_review_drift: 'review-guard',
   // delete (2)
   delete_child_ticket: 'delete', delete_ticket: 'delete',
   // attachment (2)

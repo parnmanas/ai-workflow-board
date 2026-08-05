@@ -118,15 +118,16 @@ export class ApiKeyService {
    *
    * Returns the affected row count.
    */
-  async deleteApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string): Promise<number> {
-    const result = await this.repo
+  async deleteApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string, workspaceId?: string): Promise<number> {
+    const query = this.repo
       .createQueryBuilder()
       .delete()
       .where('agent_id = :agent_id AND name LIKE :prefix', {
         agent_id: agentId,
         prefix: `${namePrefix}%`,
-      })
-      .execute();
+      });
+    if (workspaceId !== undefined) query.andWhere('workspace_id = :workspace_id', { workspace_id: workspaceId });
+    const result = await query.execute();
     return result.affected ?? 0;
   }
 
