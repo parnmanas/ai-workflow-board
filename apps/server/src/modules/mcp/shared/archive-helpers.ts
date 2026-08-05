@@ -1,19 +1,26 @@
 /**
  * Helpers for the ticket auto-archive feature (ticket 9b44526b).
  *
- * Three responsibilities:
+ * Responsibilities:
  *
  *   1. `isTerminalColumn(col)` — single source of truth for "is this a
  *      terminal column?". Reads kind='terminal' OR is_terminal=true. Both
  *      forms are written by different code paths; checking either keeps the
  *      archive logic forward- and backward-compatible.
  *
- *   2. `applyTerminalEnteredAtForMove(repo, ticketId, sourceColumn, destColumn)`
+ *   2. `deriveRootTicketStatus(col)` — the Ticket.status a ROOT ticket should
+ *      carry given its column (ticket 35b43ee9). Root workflow state is
+ *      column-driven (see get_ticket's legacy_status projection); this keeps
+ *      the underlying stored value from silently diverging from the
+ *      column's terminal/non-terminal meaning across create and move.
+ *      Child/subtask status is independent and NOT covered here.
+ *
+ *   3. `applyTerminalEnteredAtForMove(repo, ticketId, sourceColumn, destColumn)`
  *      — stamps or clears Ticket.terminal_entered_at when a move changes the
  *      column's terminal status. Idempotent: a move that doesn't cross the
  *      terminal boundary leaves the column alone.
  *
- *   3. `assertTicketActive(ticket)` — throws a tagged Error when an archived
+ *   4. `assertTicketActive(ticket)` — throws a tagged Error when an archived
  *      ticket reaches a mutation path. The error.status is 409 and message is
  *      stable so REST controllers + MCP tools can map it to a consistent
  *      reply.
@@ -30,13 +37,22 @@ export function isTerminalColumn(col: BoardColumn | null | undefined): boolean {
   return (col as any).is_terminal === true || (col as any).kind === 'terminal';
 }
 
+export function deriveRootTicketStatus(col: BoardColumn | null | undefined): string {
+  return isTerminalColumn(col) ? 'done' : 'todo';
+}
+
 /**
- * Update Ticket.terminal_entered_at to reflect a column transition.
+ * Update Ticket.terminal_entered_at (and, for root tickets, status) to
+ * reflect a column transition.
  *
- *   - moving INTO a terminal column from a non-terminal one → stamp `now`
- *   - moving OUT of a terminal column → null
+ *   - moving INTO a terminal column from a non-terminal one → stamp `now`,
+ *     status → 'done'
+ *   - moving OUT of a terminal column → null, status → 'todo'
  *   - terminal → terminal (e.g. position reorder within Done) → leave alone
  *   - non-terminal → non-terminal → leave alone
+ *
+ * Child tickets never reach this path (column_id is always null for them),
+ * so overwriting `status` here is safe — it only ever touches root rows.
  *
  * The repo is whichever Repository<Ticket> the caller already has (transaction
  * manager's repo for atomic move flows, the bare repo elsewhere).
@@ -52,6 +68,7 @@ export async function applyTerminalEnteredAtForMove(
   if (wasTerminal === isTerminal) return;
   await ticketRepo.update(ticketId, {
     terminal_entered_at: isTerminal ? new Date() : null,
+    status: isTerminal ? 'done' : 'todo',
     ...(isTerminal ? { operational_dedupe_key: null } : {}),
   });
 }
