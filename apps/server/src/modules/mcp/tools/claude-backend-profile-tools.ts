@@ -141,6 +141,19 @@ export async function updateClaudeBackendProfile(
       where: { id: runtime.credential_ref },
     });
     if (!credential) throw new Error('credential_ref does not identify an existing Credential');
+    if (credential.workspace_id !== null) {
+      const assignments = await dataSource
+        .getRepository(WorkspaceClaudeBackendProfile)
+        .find({
+          where: { profile_id: profileId },
+          select: { workspace_id: true },
+        });
+      if (assignments.some(link => link.workspace_id !== credential.workspace_id)) {
+        throw new Error(
+          'Claude backend profile credential is not owned by every assigned workspace',
+        );
+      }
+    }
   }
 
   const next = runtimeToProfileEntity(runtime, name);

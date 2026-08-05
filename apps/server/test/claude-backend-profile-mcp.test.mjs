@@ -184,6 +184,44 @@ describe('Claude backend profile MCP operations', () => {
     assert.equal(stored.credential_ref, current.credential_ref);
   });
 
+  it('rejects a workspace credential incompatible with existing assignments without changing the profile', async () => {
+    const ownerWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Credential owner workspace' }),
+    );
+    const otherWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Other assigned workspace' }),
+    );
+    const profile = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Shared assigned profile',
+      base_url: 'http://shared.invalid',
+      model: 'shared-model',
+      protocol: 'anthropic-compatible',
+    });
+    await tools.assignWorkspaceBackendProfile(ds, ownerWorkspace.id, profile.profile.id, false);
+    await tools.assignWorkspaceBackendProfile(ds, otherWorkspace.id, profile.profile.id, false);
+    const credential = await ds.getRepository('Credential').save(
+      ds.getRepository('Credential').create({
+        workspace_id: ownerWorkspace.id,
+        name: 'First workspace credential',
+        provider: 'anthropic',
+        encrypted_data: 'test-only',
+      }),
+    );
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        base_url: 'http://must-not-be-saved.invalid',
+        credential_ref: credential.id,
+      }),
+      /credential is not owned by every assigned workspace/,
+    );
+    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      id: profile.profile.id,
+    });
+    assert.equal(stored.base_url, 'http://shared.invalid');
+    assert.equal(stored.credential_ref, null);
+  });
+
   it('assigns idempotently, preserves other links, and exposes safe verification', async () => {
     const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
       name: 'Local vLLM - qwen3-coder-next',
