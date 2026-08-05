@@ -8,8 +8,10 @@ test('ticket trigger makes the current column the execution boundary', () => {
     {
       id: '11111111-1111-4111-8111-111111111111',
       title: 'Implement the requested change',
-      current_column_name: 'In Progress',
-      current_column_kind: 'execution',
+      status: 'todo',
+      legacy_status: 'todo',
+      current_column_name: 'Merging',
+      current_column_kind: 'merging',
       current_column_id: 'column-1',
     },
     '',
@@ -19,6 +21,9 @@ test('ticket trigger makes the current column the execution boundary', () => {
   );
 
   assert.match(prompt, /current column workflow guide is the complete scope for this turn/i);
+  assert.match(prompt, /current_column_id, current_column_name, and current_column_kind are the canonical workflow state/i);
+  assert.match(prompt, /never interpret legacy_status.*as the current column/i);
+  assert.match(prompt, /Current column: Merging \(kind: merging, id: column-1\)/);
   assert.match(prompt, /do not perform work assigned to a later column/i);
   assert.match(prompt, /inspect the ticket, repository, and available AWB context before asking/i);
   assert.match(prompt, /ask only when the current-column work is blocked/i);
