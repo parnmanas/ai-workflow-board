@@ -17,8 +17,9 @@
  *
  *   3. `applyTerminalEnteredAtForMove(repo, ticketId, sourceColumn, destColumn)`
  *      — stamps or clears Ticket.terminal_entered_at when a move changes the
- *      column's terminal status. Idempotent: a move that doesn't cross the
- *      terminal boundary leaves the column alone.
+ *      column's terminal status (left alone when a move doesn't cross the
+ *      terminal boundary), and re-derives root `status` from the destination
+ *      column on EVERY move, boundary-crossing or not.
  *
  *   4. `assertTicketActive(ticket)` — throws a tagged Error when an archived
  *      ticket reaches a mutation path. The error.status is 409 and message is
@@ -48,8 +49,18 @@ export function deriveRootTicketStatus(col: BoardColumn | null | undefined): str
  *   - moving INTO a terminal column from a non-terminal one → stamp `now`,
  *     status → 'done'
  *   - moving OUT of a terminal column → null, status → 'todo'
- *   - terminal → terminal (e.g. position reorder within Done) → leave alone
- *   - non-terminal → non-terminal → leave alone
+ *   - terminal → terminal (e.g. position reorder within Done) → leave
+ *     terminal_entered_at alone, but still re-derive status
+ *   - non-terminal → non-terminal → leave terminal_entered_at alone, but
+ *     still re-derive status
+ *
+ * `status` is re-derived on EVERY move, not just boundary crossings (ticket
+ * 35b43ee9 review): a row that drifted out of sync some other way (pre-fix
+ * data, a manual edit, a bug in a path this helper doesn't cover) would
+ * otherwise stay wrong forever once it stops crossing terminal boundaries —
+ * e.g. reordering within Done never used to touch status. Re-deriving is a
+ * cheap, idempotent no-op when status already matches, so this also acts as
+ * a self-healing backfill for any root ticket that moves again.
  *
  * Child tickets never reach this path (column_id is always null for them),
  * so overwriting `status` here is safe — it only ever touches root rows.
@@ -65,10 +76,14 @@ export async function applyTerminalEnteredAtForMove(
 ): Promise<void> {
   const wasTerminal = isTerminalColumn(sourceColumn);
   const isTerminal = isTerminalColumn(destColumn);
-  if (wasTerminal === isTerminal) return;
+  const status = deriveRootTicketStatus(destColumn);
+  if (wasTerminal === isTerminal) {
+    await ticketRepo.update(ticketId, { status });
+    return;
+  }
   await ticketRepo.update(ticketId, {
     terminal_entered_at: isTerminal ? new Date() : null,
-    status: isTerminal ? 'done' : 'todo',
+    status,
     ...(isTerminal ? { operational_dedupe_key: null } : {}),
   });
 }
