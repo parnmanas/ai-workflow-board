@@ -663,6 +663,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',
   submit_feature_request: 'non-ticket', sync_github_resource: 'non-ticket',
   update_agent: 'non-ticket', update_api_key: 'non-ticket', update_board: 'non-ticket',
+  update_claude_backend_profile: 'non-ticket',
   update_board_lesson: 'non-ticket', update_channel: 'non-ticket', update_column: 'non-ticket',
   update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
   update_security_profile: 'non-ticket', update_security_schedule: 'non-ticket',

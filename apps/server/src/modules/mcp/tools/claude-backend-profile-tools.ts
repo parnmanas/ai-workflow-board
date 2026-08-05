@@ -8,6 +8,7 @@ import { Credential } from '../../../entities/Credential';
 import { Workspace } from '../../../entities/Workspace';
 import { WorkspaceClaudeBackendProfile } from '../../../entities/WorkspaceClaudeBackendProfile';
 import {
+  profileEntityToRuntime,
   publicProfile,
   runtimeToProfileEntity,
 } from '../../../common/claude-backend-registry';
@@ -99,6 +100,65 @@ export async function upsertClaudeBackendProfile(
       return { created: false, profile: publicProfile(winner) };
     }
     throw error;
+  }
+}
+
+export async function updateClaudeBackendProfile(
+  dataSource: DataSource,
+  profileId: string,
+  input: {
+    name?: string;
+    base_url?: string;
+    model?: string;
+    protocol?: 'anthropic-compatible' | 'openai-compatible';
+    credential_ref?: string | null;
+    config?: Record<string, unknown>;
+  },
+) {
+  const repo = dataSource.getRepository(ClaudeBackendProfile);
+  const current = await repo.findOne({ where: { id: profileId } });
+  if (!current) throw new Error('Claude backend profile not found');
+
+  const name = input.name === undefined ? current.name : input.name.trim();
+  if (!name) throw new Error('name is required');
+  const existingRuntime = profileEntityToRuntime(current);
+  const runtime = ClaudeBackendProfileSchema.parse({
+    ...existingRuntime,
+    ...(input.config ?? {}),
+    id: profileId,
+    ...(input.base_url === undefined ? {} : { base_url: input.base_url }),
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+    ...(input.credential_ref === undefined
+      ? {}
+      : input.credential_ref === null
+        ? { credential_ref: undefined }
+        : { credential_ref: input.credential_ref }),
+  });
+
+  if (runtime.credential_ref) {
+    const credential = await dataSource.getRepository(Credential).findOne({
+      where: { id: runtime.credential_ref },
+    });
+    if (!credential) throw new Error('credential_ref does not identify an existing Credential');
+  }
+
+  const next = runtimeToProfileEntity(runtime, name);
+  const changed = (
+    current.name !== next.name ||
+    current.base_url !== next.base_url ||
+    current.model !== next.model ||
+    current.protocol !== next.protocol ||
+    current.credential_ref !== next.credential_ref ||
+    current.config !== next.config
+  );
+  if (!changed) return { changed: false, profile: publicProfile(current) };
+  Object.assign(current, next);
+  try {
+    const saved = await repo.save(current);
+    return { changed, profile: publicProfile(saved) };
+  } catch (error) {
+    throw new Error(`profile name already exists: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -204,6 +264,24 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
       return err(error instanceof Error ? error.message : String(error));
     }
   };
+
+  server.tool(
+    'update_claude_backend_profile',
+    'Update selected fields of an existing instance-global Claude backend profile while preserving its UUID and assignments. Pass credential_ref=null to clear it. DB-backed, full-scope Agent MCP only.',
+    {
+      profile_id: z.string().uuid(),
+      name: z.string().min(1).optional(),
+      base_url: z.string().url().optional(),
+      model: z.string().min(1).optional(),
+      protocol: z.enum(['anthropic-compatible', 'openai-compatible']).optional(),
+      credential_ref: z.string().uuid().nullable().optional(),
+      config: z.record(z.string(), z.unknown()).optional(),
+    },
+    async ({ profile_id, ...input }, extra) => gated(
+      extra,
+      () => updateClaudeBackendProfile(ctx.dataSource, profile_id, input),
+    ),
+  );
 
   server.tool(
     'upsert_claude_backend_profile',

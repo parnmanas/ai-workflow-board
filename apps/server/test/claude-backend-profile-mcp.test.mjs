@@ -125,6 +125,65 @@ describe('Claude backend profile MCP operations', () => {
     );
   });
 
+  it('updates an existing profile without changing its UUID or assignments', async () => {
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+    await ds.getRepository('WorkspaceClaudeBackendProfile').save(
+      ds.getRepository('WorkspaceClaudeBackendProfile').create({
+        workspace_id: workspace.id,
+        profile_id: current.id,
+      }),
+    );
+
+    const result = await tools.updateClaudeBackendProfile(ds, current.id, {
+      base_url: 'http://127.0.0.1:8000',
+      protocol: 'openai-compatible',
+      config: {
+        adapter: {
+          module: 'claude_openai_adapter',
+          base_url: 'http://127.0.0.1:18080',
+        },
+      },
+    });
+
+    assert.equal(result.changed, true);
+    assert.equal(result.profile.id, current.id);
+    assert.equal(result.profile.base_url, 'http://127.0.0.1:8000');
+    assert.equal(result.profile.protocol, 'openai-compatible');
+    assert.equal(result.profile.model, 'qwen3-coder-next');
+    const retry = await tools.updateClaudeBackendProfile(ds, current.id, {
+      base_url: 'http://127.0.0.1:8000',
+      protocol: 'openai-compatible',
+      config: {
+        adapter: {
+          module: 'claude_openai_adapter',
+          base_url: 'http://127.0.0.1:18080',
+        },
+      },
+    });
+    assert.equal(retry.changed, false);
+    const listed = await tools.listClaudeBackendProfiles(ds, workspace.id);
+    assert.equal(listed.allowed_profile_ids.includes(current.id), true);
+  });
+
+  it('rejects an invalid update without changing the stored profile', async () => {
+    const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      name: 'Local vLLM - qwen3-coder-next',
+    });
+
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, current.id, {
+        credential_ref: '00000000-0000-0000-0000-000000000000',
+      }),
+      /credential_ref does not identify an existing Credential/,
+    );
+    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+      id: current.id,
+    });
+    assert.equal(stored.credential_ref, current.credential_ref);
+  });
+
   it('assigns idempotently, preserves other links, and exposes safe verification', async () => {
     const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
       name: 'Local vLLM - qwen3-coder-next',
