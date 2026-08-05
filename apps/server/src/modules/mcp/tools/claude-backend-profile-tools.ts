@@ -20,39 +20,49 @@ import type { ToolContext } from './context';
 const REGISTRY_GATE_ERROR =
   'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to an Agent.';
 
-const profileLocks = new Map<string, Promise<void>>();
+const profileOperationTails = new Map<string, Promise<void>>();
+let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
+
+export function setProfileLockHookForTests(
+  hook?: (operation: 'update' | 'assign', profileId: string) => Promise<void>,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
+  profileLockHook = hook;
+}
 
 async function withProfileWriteLock<T>(
   dataSource: DataSource,
   profileId: string,
+  operationName: 'update' | 'assign',
   operation: (manager: EntityManager) => Promise<T>,
 ): Promise<T> {
-  if (dataSource.options.type === 'postgres') {
-    return dataSource.transaction(manager => operation(manager));
-  }
-
-  const previous = profileLocks.get(profileId) ?? Promise.resolve();
-  let release = () => {};
-  const current = new Promise<void>(resolve => {
-    release = resolve;
-  });
-  profileLocks.set(profileId, current);
+  const previous = profileOperationTails.get(profileId) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>(resolve => { release = resolve; });
+  profileOperationTails.set(profileId, tail);
   await previous;
   try {
-    return await operation(dataSource.manager);
+    return await dataSource.transaction(async manager => {
+      // This no-op UPDATE takes a row write lock for the transaction on server
+      // databases.  The per-process queue above provides the equivalent
+      // serialization for sql.js, which has no SELECT ... FOR UPDATE support.
+      const locked = await manager.createQueryBuilder()
+        .update('claude_backend_profiles')
+        .set({ id: () => 'id' })
+        .where('id = :profileId', { profileId })
+        .execute();
+      if ((locked.affected ?? 0) === 0) {
+        throw new Error('Claude backend profile not found');
+      }
+      await profileLockHook?.(operationName, profileId);
+      return operation(manager);
+    });
   } finally {
     release();
-    if (profileLocks.get(profileId) === current) profileLocks.delete(profileId);
+    if (profileOperationTails.get(profileId) === tail) {
+      profileOperationTails.delete(profileId);
+    }
   }
-}
-
-async function findProfileForUpdate(manager: EntityManager, profileId: string) {
-  return manager.getRepository(ClaudeBackendProfile).findOne({
-    where: { id: profileId },
-    ...(manager.connection.options.type === 'postgres'
-      ? { lock: { mode: 'pessimistic_write' as const } }
-      : {}),
-  });
 }
 
 export async function requireAgentRegistryAccess(
@@ -150,9 +160,9 @@ export async function updateClaudeBackendProfile(
     config?: Record<string, unknown>;
   },
 ) {
-  return withProfileWriteLock(dataSource, profileId, async manager => {
+  return withProfileWriteLock(dataSource, profileId, 'update', async manager => {
   const repo = manager.getRepository(ClaudeBackendProfile);
-  const current = await findProfileForUpdate(manager, profileId);
+  const current = await repo.findOne({ where: { id: profileId } });
   if (!current) throw new Error('Claude backend profile not found');
 
   const name = input.name === undefined ? current.name : input.name.trim();
@@ -218,13 +228,21 @@ export async function assignWorkspaceBackendProfile(
   profileId: string,
   setDefault: boolean,
 ) {
-  return withProfileWriteLock(dataSource, profileId, async manager => {
+  // Preserve the public validation order before entering the profile-keyed
+  // critical section; the workspace is re-read inside the transaction.
+  const requestedWorkspace = await dataSource.getRepository(Workspace).findOne({
+    where: { id: workspaceId },
+  });
+  if (!requestedWorkspace) throw new Error('Workspace not found');
+  return withProfileWriteLock(dataSource, profileId, 'assign', async manager => {
   const workspaceRepo = manager.getRepository(Workspace);
   const workspace = await workspaceRepo.findOne({
     where: { id: workspaceId },
   });
   if (!workspace) throw new Error('Workspace not found');
-  const profile = await findProfileForUpdate(manager, profileId);
+  const profile = await manager.getRepository(ClaudeBackendProfile).findOne({
+    where: { id: profileId },
+  });
   if (!profile) throw new Error('Claude backend profile not found');
   if (profile.credential_ref) {
     const credential = await manager.getRepository(Credential).findOne({

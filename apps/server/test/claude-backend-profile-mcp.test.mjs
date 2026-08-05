@@ -222,64 +222,77 @@ describe('Claude backend profile MCP operations', () => {
     assert.equal(stored.credential_ref, null);
   });
 
-  it('serializes a credential update against a concurrent foreign workspace assignment', async () => {
+  it('serializes an assignment behind an in-flight credential update', async () => {
     const ownerWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Race credential owner' }),
+      ds.getRepository('Workspace').create({ name: 'Racing credential owner' }),
     );
-    const foreignWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Race foreign workspace' }),
+    const otherWorkspace = await ds.getRepository('Workspace').save(
+      ds.getRepository('Workspace').create({ name: 'Racing assignment workspace' }),
     );
+    const profile = await tools.upsertClaudeBackendProfile(ds, {
+      name: 'Contended profile',
+      base_url: 'http://contended.invalid',
+      model: 'contended-model',
+      protocol: 'anthropic-compatible',
+    });
     const credential = await ds.getRepository('Credential').save(
       ds.getRepository('Credential').create({
         workspace_id: ownerWorkspace.id,
-        name: 'Race owner credential',
+        name: 'Racing owner credential',
         provider: 'anthropic',
         encrypted_data: 'test-only',
       }),
     );
-    const profile = await tools.upsertClaudeBackendProfile(ds, {
-      name: 'Concurrent credential profile',
-      base_url: 'http://before-race.invalid',
-      model: 'race-model',
-      protocol: 'anthropic-compatible',
-    });
-    await tools.assignWorkspaceBackendProfile(
-      ds,
-      ownerWorkspace.id,
-      profile.profile.id,
-      false,
-    );
 
-    const [update, assignment] = await Promise.allSettled([
-      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
-        base_url: 'http://after-race.invalid',
+    let releaseUpdate;
+    const updateBlocked = new Promise(resolve => { releaseUpdate = resolve; });
+    let updateHasLock;
+    const lockObserved = new Promise(resolve => { updateHasLock = resolve; });
+    tools.setProfileLockHookForTests(async (operation, profileId) => {
+      if (operation === 'update' && profileId === profile.profile.id) {
+        updateHasLock();
+        await updateBlocked;
+      }
+    });
+
+    try {
+      const update = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
         credential_ref: credential.id,
-      }),
-      tools.assignWorkspaceBackendProfile(
+      });
+      await Promise.race([
+        lockObserved,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error('timed out waiting for update lock')),
+          1_000,
+        )),
+      ]);
+
+      let assignmentSettled = false;
+      const assignment = tools.assignWorkspaceBackendProfile(
         ds,
-        foreignWorkspace.id,
+        otherWorkspace.id,
         profile.profile.id,
         false,
-      ),
-    ]);
+      ).finally(() => { assignmentSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(assignmentSettled, false);
 
-    assert.equal(update.status, 'fulfilled');
-    assert.equal(assignment.status, 'rejected');
-    assert.match(assignment.reason.message, /credential is not owned by this workspace/);
-    const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
-      id: profile.profile.id,
-    });
-    assert.equal(stored.base_url, 'http://after-race.invalid');
-    assert.equal(stored.credential_ref, credential.id);
-    assert.equal(
-      await ds.getRepository('WorkspaceClaudeBackendProfile').count({
-        where: {
-          workspace_id: foreignWorkspace.id,
-          profile_id: profile.profile.id,
-        },
-      }),
-      0,
-    );
+      releaseUpdate();
+      await update;
+      await assert.rejects(
+        assignment,
+        /credential is not owned by this workspace/,
+      );
+      assert.equal(
+        await ds.getRepository('WorkspaceClaudeBackendProfile').count({
+          where: { workspace_id: otherWorkspace.id, profile_id: profile.profile.id },
+        }),
+        0,
+      );
+    } finally {
+      releaseUpdate?.();
+      tools.setProfileLockHookForTests();
+    }
   });
 
   it('assigns idempotently, preserves other links, and exposes safe verification', async () => {
