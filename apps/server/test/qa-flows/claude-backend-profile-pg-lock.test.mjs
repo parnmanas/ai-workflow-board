@@ -32,6 +32,45 @@ async function adminQuery(sql) {
   try { await client.query(sql); } finally { await client.end(); }
 }
 
+async function waitForProfileUpdateLockWait(applicationName, timeoutMs = 10_000) {
+  const { Client } = await import('pg');
+  const client = new Client({
+    host: process.env.DB_HOST || 'localhost',
+    port: Number(process.env.DB_PORT || 5432),
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASS || '',
+    database: process.env.DB_NAME || 'ai_workflow',
+  });
+  await client.connect();
+  const deadline = Date.now() + timeoutMs;
+  const observed = new Set();
+  try {
+    while (Date.now() < deadline) {
+      const result = await client.query(`
+        SELECT pid, wait_event_type, wait_event, pg_blocking_pids(pid) AS blocking_pids
+        FROM pg_stat_activity
+        WHERE application_name = $1
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND cardinality(pg_blocking_pids(pid)) > 0
+        ORDER BY query_start DESC
+        LIMIT 1
+      `, [applicationName]);
+      if (result.rows[0]) return result.rows[0];
+      const activity = await client.query(`
+        SELECT state, wait_event_type, wait_event, left(query, 160) AS query
+        FROM pg_stat_activity
+        WHERE application_name = $1
+      `, [applicationName]);
+      for (const row of activity.rows) observed.add(JSON.stringify(row));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`assign UPDATE was not observed waiting on a Postgres row lock; activity=${[...observed].join(',')}`);
+  } finally {
+    await client.end();
+  }
+}
+
 after(async () => {
   try { if (ds1?.isInitialized) await ds1.destroy(); } catch { /* best effort */ }
   try { if (ds2?.isInitialized) await ds2.destroy(); } catch { /* best effort */ }
@@ -50,13 +89,15 @@ test('Postgres row lock serializes update and assign across independent connecti
   const { DataSource } = await import('typeorm');
   const { buildDataSourceOptions } = await import(pathToFileURL(path.join(DIST, 'db.js')));
   const toolUrl = pathToFileURL(path.join(DIST, 'modules', 'mcp', 'tools', 'claude-backend-profile-tools.js')).href;
-  // Query strings create independent module-local queues, modelling two server processes.
+  // The second DataSource bypasses the process-local queue to model another server process.
   const tools1 = await import(`${toolUrl}?instance=update`);
   const tools2 = await import(`${toolUrl}?instance=assign`);
   ds1 = new DataSource(buildDataSourceOptions());
-  ds2 = new DataSource(buildDataSourceOptions());
+  const assignApplicationName = `qa-profile-assign-${process.pid}`;
+  ds2 = new DataSource({ ...buildDataSourceOptions(), applicationName: assignApplicationName });
   await ds1.initialize();
   await ds2.initialize();
+  tools2.setProfileQueueBypassForTests(ds2);
 
   const workspaceRepo = ds1.getRepository('Workspace');
   const owner = await workspaceRepo.save(workspaceRepo.create({ name: 'PG credential owner' }));
@@ -70,38 +111,43 @@ test('Postgres row lock serializes update and assign across independent connecti
     workspace_id: owner.id, name: 'PG owner credential', provider: 'anthropic', encrypted_data: 'test-only',
   }));
 
-  let releaseUpdate;
-  const updateBlocked = new Promise(resolve => { releaseUpdate = resolve; });
-  let updateLocked;
-  const updateLockObserved = new Promise(resolve => { updateLocked = resolve; });
-  let assignAttempted;
-  const assignAttemptObserved = new Promise(resolve => { assignAttempted = resolve; });
   let assignEntered = false;
-  tools1.setProfileLockHookForTests(async (operation, profileId) => {
-    if (operation === 'update' && profileId === created.profile.id) {
-      updateLocked();
-      await updateBlocked;
-    }
-  });
-  tools2.setProfileLockAttemptHookForTests((operation, profileId) => {
-    if (operation === 'assign' && profileId === created.profile.id) assignAttempted();
-  });
   tools2.setProfileLockHookForTests(async (operation, profileId) => {
     if (operation === 'assign' && profileId === created.profile.id) assignEntered = true;
   });
 
+  const updateRunner = ds1.createQueryRunner();
+  await updateRunner.connect();
   try {
-    const update = tools1.updateClaudeBackendProfile(ds1, created.profile.id, { credential_ref: credential.id });
-    await withTimeout(
-      Promise.race([updateLockObserved, update]),
-      'update did not acquire the Postgres row lock',
+    await updateRunner.startTransaction();
+    await updateRunner.manager.createQueryBuilder()
+      .update('claude_backend_profiles')
+      .set({ id: () => 'id' })
+      .where('id = :profileId', { profileId: created.profile.id })
+      .execute();
+    await updateRunner.manager.getRepository('ClaudeBackendProfile').update(
+      { id: created.profile.id },
+      { credential_ref: credential.id },
     );
     const assignment = tools2.assignWorkspaceBackendProfile(ds2, foreign.id, created.profile.id, false);
-    await withTimeout(assignAttemptObserved, 'assign did not attempt the Postgres row lock');
+    let assignmentSettled = false;
+    assignment.then(
+      () => { assignmentSettled = true; },
+      () => { assignmentSettled = true; },
+    );
+    const lockWait = await Promise.race([
+      waitForProfileUpdateLockWait(assignApplicationName),
+      assignment.then(
+        () => { throw new Error('assignment settled before PostgreSQL lock wait was observed'); },
+        error => { throw error; },
+      ),
+    ]);
+    assert.equal(lockWait.wait_event_type, 'Lock');
+    assert.ok(lockWait.blocking_pids.length > 0, 'assign backend must have a PostgreSQL blocker');
     assert.equal(assignEntered, false, 'assign entered while update held the row lock');
+    assert.equal(assignmentSettled, false, 'assign settled while its UPDATE was waiting on the row lock');
 
-    releaseUpdate();
-    await withTimeout(update, 'credential update did not commit');
+    await updateRunner.commitTransaction();
     await assert.rejects(
       withTimeout(assignment, 'assignment did not finish after row-lock release'),
       /credential is not owned by this workspace/,
@@ -111,9 +157,9 @@ test('Postgres row lock serializes update and assign across independent connecti
       where: { workspace_id: foreign.id, profile_id: created.profile.id },
     }), 0, 'foreign workspace link must not be inserted');
   } finally {
-    releaseUpdate?.();
-    tools1.setProfileLockHookForTests();
-    tools2.setProfileLockAttemptHookForTests();
+    if (updateRunner.isTransactionActive) await updateRunner.rollbackTransaction();
+    await updateRunner.release();
     tools2.setProfileLockHookForTests();
+    tools2.setProfileQueueBypassForTests(ds2, false);
   }
 });

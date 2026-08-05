@@ -21,6 +21,7 @@ const REGISTRY_GATE_ERROR =
   'Unauthorized: Claude backend profile registry tools require a DB-backed, full-scope MCP key bound to an Agent.';
 
 const profileOperationTails = new Map<string, Promise<void>>();
+const profileQueueBypassDataSources = new WeakSet<DataSource>();
 let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
 let profileLockAttemptHook: ((operation: 'update' | 'assign', profileId: string) => void) | undefined;
 
@@ -38,16 +39,25 @@ export function setProfileLockAttemptHookForTests(
   profileLockAttemptHook = hook;
 }
 
+export function setProfileQueueBypassForTests(dataSource: DataSource, enabled = true): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile queue bypass is test-only');
+  if (enabled) profileQueueBypassDataSources.add(dataSource);
+  else profileQueueBypassDataSources.delete(dataSource);
+}
+
 async function withProfileWriteLock<T>(
   dataSource: DataSource,
   profileId: string,
   operationName: 'update' | 'assign',
   operation: (manager: EntityManager) => Promise<T>,
 ): Promise<T> {
-  const previous = profileOperationTails.get(profileId) ?? Promise.resolve();
+  const bypassQueue = profileQueueBypassDataSources.has(dataSource);
+  const previous = bypassQueue
+    ? Promise.resolve()
+    : profileOperationTails.get(profileId) ?? Promise.resolve();
   let release!: () => void;
   const tail = new Promise<void>(resolve => { release = resolve; });
-  profileOperationTails.set(profileId, tail);
+  if (!bypassQueue) profileOperationTails.set(profileId, tail);
   profileLockAttemptHook?.(operationName, profileId);
   await previous;
   try {
@@ -68,7 +78,7 @@ async function withProfileWriteLock<T>(
     });
   } finally {
     release();
-    if (profileOperationTails.get(profileId) === tail) {
+    if (!bypassQueue && profileOperationTails.get(profileId) === tail) {
       profileOperationTails.delete(profileId);
     }
   }
