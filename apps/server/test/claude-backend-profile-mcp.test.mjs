@@ -15,6 +15,16 @@ let tools;
 let managerAgent;
 let workspace;
 
+function withTimeout(promise, message, timeoutMs = 1_000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 before(async () => {
   const { DataSource } = await import('typeorm');
   const { buildDataSourceOptions } = await import('../dist/db.js');
@@ -248,24 +258,25 @@ describe('Claude backend profile MCP operations', () => {
     const updateBlocked = new Promise(resolve => { releaseUpdate = resolve; });
     let updateHasLock;
     const lockObserved = new Promise(resolve => { updateHasLock = resolve; });
+    let assignmentAttempted;
+    const assignmentAttemptObserved = new Promise(resolve => { assignmentAttempted = resolve; });
+    let assignmentEntered = false;
+    tools.setProfileLockAttemptHookForTests((operation, profileId) => {
+      if (operation === 'assign' && profileId === profile.profile.id) assignmentAttempted();
+    });
     tools.setProfileLockHookForTests(async (operation, profileId) => {
       if (operation === 'update' && profileId === profile.profile.id) {
         updateHasLock();
         await updateBlocked;
       }
+      if (operation === 'assign' && profileId === profile.profile.id) assignmentEntered = true;
     });
 
     try {
       const update = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
         credential_ref: credential.id,
       });
-      await Promise.race([
-        lockObserved,
-        new Promise((_, reject) => setTimeout(
-          () => reject(new Error('timed out waiting for update lock')),
-          1_000,
-        )),
-      ]);
+      await withTimeout(lockObserved, 'timed out waiting for update lock');
 
       let assignmentSettled = false;
       const assignment = tools.assignWorkspaceBackendProfile(
@@ -274,13 +285,17 @@ describe('Claude backend profile MCP operations', () => {
         profile.profile.id,
         false,
       ).finally(() => { assignmentSettled = true; });
-      await new Promise(resolve => setTimeout(resolve, 20));
-      assert.equal(assignmentSettled, false);
+      await withTimeout(
+        assignmentAttemptObserved,
+        'timed out waiting for assignment lock attempt',
+      );
+      assert.equal(assignmentEntered, false, 'assignment must not enter before update releases');
+      assert.equal(assignmentSettled, false, 'assignment must not settle before update releases');
 
       releaseUpdate();
-      await update;
+      await withTimeout(update, 'timed out waiting for credential update');
       await assert.rejects(
-        assignment,
+        withTimeout(assignment, 'timed out waiting for assignment'),
         /credential is not owned by this workspace/,
       );
       assert.equal(
@@ -291,6 +306,7 @@ describe('Claude backend profile MCP operations', () => {
       );
     } finally {
       releaseUpdate?.();
+      tools.setProfileLockAttemptHookForTests();
       tools.setProfileLockHookForTests();
     }
   });

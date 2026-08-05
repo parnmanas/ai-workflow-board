@@ -22,12 +22,20 @@ const REGISTRY_GATE_ERROR =
 
 const profileOperationTails = new Map<string, Promise<void>>();
 let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
+let profileLockAttemptHook: ((operation: 'update' | 'assign', profileId: string) => void) | undefined;
 
 export function setProfileLockHookForTests(
   hook?: (operation: 'update' | 'assign', profileId: string) => Promise<void>,
 ): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
   profileLockHook = hook;
+}
+
+export function setProfileLockAttemptHookForTests(
+  hook?: (operation: 'update' | 'assign', profileId: string) => void,
+): void {
+  if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
+  profileLockAttemptHook = hook;
 }
 
 async function withProfileWriteLock<T>(
@@ -40,6 +48,7 @@ async function withProfileWriteLock<T>(
   let release!: () => void;
   const tail = new Promise<void>(resolve => { release = resolve; });
   profileOperationTails.set(profileId, tail);
+  profileLockAttemptHook?.(operationName, profileId);
   await previous;
   try {
     return await dataSource.transaction(async manager => {
