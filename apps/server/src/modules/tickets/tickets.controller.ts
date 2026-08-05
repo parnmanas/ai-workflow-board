@@ -35,7 +35,7 @@ import {
 import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
-import { applyTerminalEnteredAtForMove, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
+import { applyTerminalEnteredAtForMove, deriveRootTicketStatus, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import {
@@ -282,12 +282,26 @@ export class TicketsController {
     // stamp those tickets would silently never auto-archive.
     const destColumnForStamp = await this.colRepo.findOne({ where: { id: columnId } });
     const terminalEnteredAt = isTerminalColumn(destColumnForStamp) ? new Date() : null;
+
+    // Guard (ticket 35b43ee9): a ticket carrying related_ticket_id is
+    // explicitly a follow-up/correction to other work — i.e. new, actionable
+    // work. Landing that directly in a terminal column leaves it invisible to
+    // every dispatch path (push trigger, focus-ticket polling, reconciler
+    // seed all exclude terminal columns by design). Direct terminal creation
+    // WITHOUT related_ticket_id (e.g. an operator filing a retroactive
+    // record) is unaffected — see MCP create_ticket for the full rationale.
+    if (duplicateAssessment.related_ticket_id && isTerminalColumn(destColumnForStamp)) {
+      return res.status(400).json({
+        error: `Refusing to create a follow-up ticket (related_ticket_id=${duplicateAssessment.related_ticket_id}) directly in terminal column "${destColumnForStamp?.name || columnId}" — it would never dispatch. Choose a non-terminal column.`,
+      });
+    }
+
     const ticket = await this.ticketRepo.save(this.ticketRepo.create({
       column_id: columnId, title, description, priority,
       assignee: resolvedAssignee, reporter: resolvedReporter,
       assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
       labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
-      position, parent_id: null, depth: 0, status: 'todo',
+      position, parent_id: null, depth: 0, status: deriveRootTicketStatus(destColumnForStamp),
       next_ticket_id: resolvedNextTicketId,
       // Abstract effort preset id (trim → empty becomes null). Resolved
       // against the board catalog at dispatch; null = board default.
