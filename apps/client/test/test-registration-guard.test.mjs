@@ -67,3 +67,15 @@ test('ALLOWLIST 항목이 전부 실재하는 파일을 가리킨다 (stale 항�
     `ALLOWLIST 에 더 이상 존재하지 않는 파일 항목이 있습니다 — 정리하세요:\n${stale.join('\n')}`,
   );
 });
+
+test('ALLOWLIST 값은 모두 공백이 아닌 사유 문자열이다 (무사유 제외 방지)', () => {
+  const unreasoned = Object.entries(ALLOWLIST)
+    .filter(([, reason]) => typeof reason !== 'string' || reason.trim() === '')
+    .map(([file]) => file);
+
+  assert.deepEqual(
+    unreasoned,
+    [],
+    `ALLOWLIST 항목은 공백이 아닌 사유 문자열이 필요합니다(빈 문자열/문자열이 아닌 값은 무사유 제외로 간주) — 사유가 없는 항목:\n${unreasoned.join('\n')}`,
+  );
+});
