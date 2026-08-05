@@ -375,4 +375,74 @@ describe('Claude backend profile integration', () => {
     assert.equal(invalid.status, 400);
     assert.equal(JSON.stringify(invalid.data).includes('plaintext-secret-value'), false);
   });
+
+  it('validates and persists cli_runtime_profile on POST /agents (create), mirroring PATCH', async () => {
+    const response = await createProfile(adminToken, 'profile-create-agent', 'Profile Create Agent');
+    assert.equal(response.status, 201, JSON.stringify(response.data));
+    const createProfileRow = response.data;
+
+    const wsRepo = ds.getRepository('Workspace');
+    const createWorkspace = await wsRepo.save(wsRepo.create({ name: 'Create-agent profile workspace' }));
+    await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: createWorkspace.id });
+    const assigned = await apiRequest(baseUrl, `/workspaces/${createWorkspace.id}/claude-backend-profiles`, {
+      token: ownerToken,
+      method: 'PATCH',
+      body: { allowed_profile_ids: [createProfileRow.id], default_profile_id: createProfileRow.id },
+    });
+    assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
+
+    const managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
+      name: 'Create-agent manager', type: 'manager',
+    }));
+    const runtime_config = { strategy: 'single', permission_mode: 'trusted' };
+
+    const rejected = await apiRequest(baseUrl, '/agents', {
+      token: adminToken,
+      workspaceId: createWorkspace.id,
+      method: 'POST',
+      body: {
+        name: 'bad-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
+        runtime_config, cli_runtime_profile: randomUUID(),
+      },
+    });
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    assert.equal(await ds.getRepository('Agent').countBy({ name: 'bad-profile-agent' }), 0);
+
+    const created = await apiRequest(baseUrl, '/agents', {
+      token: adminToken,
+      workspaceId: createWorkspace.id,
+      method: 'POST',
+      body: {
+        name: 'good-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
+        runtime_config, cli_runtime_profile: createProfileRow.id,
+      },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.cli_runtime_profile, createProfileRow.id);
+
+    const withNone = await apiRequest(baseUrl, '/agents', {
+      token: adminToken,
+      workspaceId: createWorkspace.id,
+      method: 'POST',
+      body: {
+        name: 'none-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
+        runtime_config, cli_runtime_profile: 'none',
+      },
+    });
+    assert.equal(withNone.status, 201, JSON.stringify(withNone.data));
+    assert.equal(withNone.data.cli_runtime_profile, 'none');
+
+    const inherited = await apiRequest(baseUrl, '/agents', {
+      token: adminToken,
+      workspaceId: createWorkspace.id,
+      method: 'POST',
+      body: {
+        name: 'inherit-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
+        runtime_config,
+      },
+    });
+    assert.equal(inherited.status, 201, JSON.stringify(inherited.data));
+    assert.equal(inherited.data.cli_runtime_profile, null);
+  });
+
 });
