@@ -282,6 +282,7 @@ export default function ManagedAgentDialog({
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
           model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
+          cli_runtime_profile: cli === 'claude' && runtimeProfile ? runtimeProfile : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -424,7 +425,7 @@ export default function ManagedAgentDialog({
             </div>
           </div>
         )}
-        {mode === 'edit' && cli === 'claude' && (
+        {cli === 'claude' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Claude backend profile
@@ -435,7 +436,8 @@ export default function ManagedAgentDialog({
               ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.name })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-              Keeps the Claude CLI/tool loop and changes only its model backend. Applies after restart.
+              Keeps the Claude CLI/tool loop and changes only its model backend.
+              {isEdit ? ' Applies after restart.' : ' Applies on first spawn.'}
             </div>
           </div>
         )}
