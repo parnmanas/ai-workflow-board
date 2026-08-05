@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { join } from 'node:path';
 
-const read = (path) => fs.readFileSync(path, 'utf8');
+const root = join(import.meta.dirname, '..', 'src');
+const read = (path) => fs.readFileSync(join(root, path), 'utf8');
 
 test('client types expose Runtime Host sessions only', () => {
-  const source = read('apps/client/src/types.ts');
+  const source = read('types.ts');
 
   assert.match(source, /mode:\s*'manager';/);
   assert.match(source, /source:\s*'manager';/);
@@ -15,9 +17,9 @@ test('client types expose Runtime Host sessions only', () => {
 
 test('client has no standalone session routing controls or legacy topology choices', () => {
   const source = [
-    'apps/client/src/api.ts',
-    'apps/client/src/components/admin/AgentManagerPage.tsx',
-    'apps/client/src/components/AgentDetailModal.tsx',
+    'api.ts',
+    'components/admin/AgentManagerPage.tsx',
+    'components/AgentDetailModal.tsx',
   ].map(read).join('\n');
 
   assert.doesNotMatch(source, /setAgentMainSession|clearAgentMainSession/);
@@ -27,9 +29,9 @@ test('client has no standalone session routing controls or legacy topology choic
 
 test('Agent forms require explicit Runtime Host, runtime, strategy, and permission mode', () => {
   const source = [
-    'apps/client/src/components/AgentsPage.tsx',
-    'apps/client/src/components/admin/ManagedAgentDialog.tsx',
-    'apps/client/src/components/admin/RuntimeConfigFields.tsx',
+    'components/AgentsPage.tsx',
+    'components/admin/ManagedAgentDialog.tsx',
+    'components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
 
   assert.match(source, /Runtime Host \*/);
@@ -42,7 +44,7 @@ test('Agent forms require explicit Runtime Host, runtime, strategy, and permissi
 });
 
 test('Agent creation resolves healthy runtimes from live Runtime Host instances', () => {
-  const source = read('apps/client/src/components/AgentsPage.tsx');
+  const source = read('components/AgentsPage.tsx');
 
   assert.match(source, /listAgentManagerInstances\(\)/);
   assert.match(source, /instance\.agent_id\s*===\s*managedForm\.manager_agent_id/);
@@ -52,9 +54,9 @@ test('Agent creation resolves healthy runtimes from live Runtime Host instances'
 
 test('Hermes is explicit and collaboration controls are Hermes-only', () => {
   const source = [
-    'apps/client/src/components/AgentsPage.tsx',
-    'apps/client/src/components/admin/ManagedAgentDialog.tsx',
-    'apps/client/src/components/admin/RuntimeConfigFields.tsx',
+    'components/AgentsPage.tsx',
+    'components/admin/ManagedAgentDialog.tsx',
+    'components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
 
   assert.match(source, /value:\s*['"]hermes['"]/);
