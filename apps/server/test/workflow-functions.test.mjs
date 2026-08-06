@@ -4,6 +4,12 @@ import { DataSource } from 'typeorm';
 import { WorkflowFunction } from '../dist/entities/WorkflowFunction.js';
 import { WorkflowFunctionRun } from '../dist/entities/WorkflowFunctionRun.js';
 import { WorkflowFunctionsService } from '../dist/modules/workflow-functions/workflow-functions.service.js';
+import { Board } from '../dist/entities/Board.js';
+import { BoardColumn } from '../dist/entities/BoardColumn.js';
+import { Ticket } from '../dist/entities/Ticket.js';
+import { Comment } from '../dist/entities/Comment.js';
+import { ActivityLog } from '../dist/entities/ActivityLog.js';
+import * as entitiesBarrel from '../dist/entities/index.js';
 
 describe('Workflow Functions', () => {
   let dataSource;
@@ -143,6 +149,90 @@ describe('Workflow Functions', () => {
     await assert.rejects(
       service.execute({ functionId: fn.id, workspaceId: 'workspace-b', inputs: {} }),
       /different workspace/,
+    );
+  });
+});
+
+// ticket f3fc298a — agent가 production DB 자격증명 없이 MCP(execute_function)로
+// scripts/measure-prompt-audit-effect.mjs와 동일한 측정을 수행할 수 있게 한다.
+// 이 builtin은 위 Function-only 스위트가 일부러 생략한 전체
+// Board/Ticket/Comment/ActivityLog 메타데이터가 필요해 별도 DataSource/describe
+// 블록으로 분리했다. 이건 얇은 wiring 테스트일 뿐 — 산식 자체는
+// test/measure-prompt-audit-effect.test.mjs가 고정한다.
+describe('Workflow Functions — prompt_audit.measure_effect builtin', () => {
+  let dataSource;
+  let service;
+
+  before(async () => {
+    // Board/Ticket은 이 몇 개 클래스 밖까지 뻗는 관계(예: Board->Workspace)를
+    // 가진다 — TypeORM은 관련된 모든 엔티티의 메타데이터가 함께 등록되어
+    // 있어야 하므로, 관계를 하나씩 "Entity metadata ... was not found"로
+    // 맞닥뜨리며 손으로 골라내는 대신 전체 barrel(db.ts의
+    // buildDataSourceOptions()가 쓰는 것과 동일)을 그대로 쓴다.
+    dataSource = new DataSource({
+      type: 'sqljs',
+      entities: Object.values(entitiesBarrel),
+      synchronize: true,
+      logging: false,
+    });
+    await dataSource.initialize();
+    service = new WorkflowFunctionsService(dataSource, {
+      dispatch: async () => {
+        throw new Error('not used');
+      },
+    });
+    await service.onModuleInit();
+  });
+
+  after(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  it('is seeded as a global builtin Function', async () => {
+    const rows = await service.list(null);
+    const fn = rows.find(row => row.key === 'prompt_audit.measure_effect');
+    assert.ok(fn, 'prompt_audit.measure_effect must be auto-seeded like the other builtins');
+    assert.equal(fn.executor_type, 'builtin');
+    assert.equal(fn.risk_level, 'read');
+    assert.equal(fn.approval_policy, 'none');
+  });
+
+  it('executes without a ticket_id and returns a well-formed report scoped to the caller workspace', async () => {
+    const boardRepo = dataSource.getRepository(Board);
+    const colRepo = dataSource.getRepository(BoardColumn);
+    const ticketRepo = dataSource.getRepository(Ticket);
+
+    const board = await boardRepo.save(boardRepo.create({ name: 'MeasureBuiltinFixture' }));
+    const done = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Done', position: 1, kind: 'terminal', is_terminal: true }));
+    const wsId = `ws-builtin-${Date.now()}`;
+    const inWindow = new Date(Date.now() - 60_000);
+    await ticketRepo.save(ticketRepo.create({ title: 'X', column_id: done.id, workspace_id: wsId, created_at: inWindow, terminal_entered_at: inWindow }));
+    // 다른 workspace의 티켓이 아래 wsId 리포트로 새어 들어가면 안 된다.
+    await ticketRepo.save(ticketRepo.create({ title: 'Y', column_id: done.id, workspace_id: `${wsId}-other`, created_at: inWindow, terminal_entered_at: inWindow }));
+
+    const since = new Date(inWindow.getTime() - 60_000).toISOString();
+    const until = new Date(inWindow.getTime() + 60_000).toISOString();
+    const run = await service.execute({
+      functionKey: 'prompt_audit.measure_effect',
+      workspaceId: wsId,
+      inputs: { since, until },
+    });
+
+    assert.equal(run.status, 'succeeded');
+    assert.equal(run.outputs.workspace_id, wsId);
+    assert.equal(run.outputs.window.since, since);
+    assert.equal(run.outputs.window.until, until);
+    assert.deepEqual(run.outputs.completion_rate, { created: 1, completed: 1, rate: 1 }, 'only the wsId ticket counts, not the other workspace one');
+  });
+
+  it('rejects a non-ISO since/until input instead of silently computing against Invalid Date', async () => {
+    await assert.rejects(
+      service.execute({
+        functionKey: 'prompt_audit.measure_effect',
+        workspaceId: `ws-invalid-${Date.now()}`,
+        inputs: { since: 'not-a-date' },
+      }),
+      /ISO 8601/,
     );
   });
 });

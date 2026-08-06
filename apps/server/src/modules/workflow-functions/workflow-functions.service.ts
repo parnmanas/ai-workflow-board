@@ -5,9 +5,12 @@ import { WorkflowFunction } from '../../entities/WorkflowFunction';
 import { WorkflowFunctionRun } from '../../entities/WorkflowFunctionRun';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { ActivityLog } from '../../entities/ActivityLog';
+import { Comment } from '../../entities/Comment';
 import { ActionsService } from '../actions/actions.service';
 import { assertCatalogBoardScope, catalogScopeOf, canUseCatalogItem, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
+import { computeReport } from '../../common/prompt-audit-report';
 
 const EXECUTORS = new Set(['builtin', 'pipeline', 'http', 'agent_action']);
 const RISK_LEVELS = new Set(['read', 'write', 'destructive', 'high_impact']);
@@ -88,6 +91,25 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
     config: stringifyJson({ handler: 'workflow.verify_required_functions', required_functions: [] }),
     input_schema: stringifyJson({ type: 'object' }),
     output_schema: stringifyJson({ type: 'object', required: ['passed'] }),
+    risk_level: 'read',
+  },
+  {
+    key: 'prompt_audit.measure_effect',
+    name: 'Prompt audit effect report',
+    description: 'Computes the 4 prompt-audit metrics (start_rate, unnecessary_questions, pending_misclassification_rate, completion_rate) over a time window for the calling workspace, via the shared computeReport() formula (see src/common/prompt-audit-report.ts). Read-only. Lets an agent measure production data through MCP instead of needing direct DB credentials (ticket f3fc298a).',
+    executor_type: 'builtin',
+    config: stringifyJson({ handler: 'prompt_audit.measure_effect' }),
+    input_schema: stringifyJson({
+      type: 'object',
+      properties: {
+        since: { type: 'string' },
+        until: { type: 'string' },
+      },
+    }),
+    output_schema: stringifyJson({
+      type: 'object',
+      required: ['window', 'start_rate', 'unnecessary_questions', 'pending_misclassification_rate', 'completion_rate'],
+    }),
     risk_level: 'read',
   },
 ];
@@ -460,6 +482,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     config: Record<string, any>,
   ): Promise<any> {
     if (handler === 'system.noop') return inputs;
+    if (handler === 'prompt_audit.measure_effect') return this.executePromptAuditMeasureEffect(args, inputs);
     if (!args.ticketId) throw httpError(400, `${handler} requires ticket_id`);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const columnRepo = this.dataSource.getRepository(BoardColumn);
@@ -507,6 +530,18 @@ export class WorkflowFunctionsService implements OnModuleInit {
       return { passed: true, required, missing: [] };
     }
     throw httpError(400, `Unknown built-in handler: ${handler}`);
+  }
+
+  // 위 workflow.* builtin들과 달리 ticket 스코프가 아니다 — 항상 호출한
+  // Function-execution 자체의 workspaceId로만 스코프하고 inputs로 넘어온
+  // override는 받지 않는다. workspace A로 인가된 호출이 workspace B의 집계
+  // 통계를 읽지 못하게 하기 위함.
+  private async executePromptAuditMeasureEffect(args: FunctionExecutionArgs, inputs: Record<string, any>): Promise<any> {
+    const since = inputs?.since !== undefined ? new Date(String(inputs.since)) : undefined;
+    const until = inputs?.until !== undefined ? new Date(String(inputs.until)) : undefined;
+    if (since && Number.isNaN(since.getTime())) throw httpError(400, 'inputs.since must be an ISO 8601 timestamp');
+    if (until && Number.isNaN(until.getTime())) throw httpError(400, 'inputs.until must be an ISO 8601 timestamp');
+    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn }, { since, until, workspaceId: args.workspaceId });
   }
 
   async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
