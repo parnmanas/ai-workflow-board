@@ -279,3 +279,44 @@ Planner Q3는 "변경 전 베이스라인 스냅샷까지"를 이 티켓 범위�
   이 티켓은 스크립트 제공까지, 베이스라인 실측은 위 "베이스라인 스냅샷" 절의
   한계로 인해 다음 실행자에게 위임.
 - `harness_config` 구조화 필드 확장은 같은 후속 티켓으로 이관(Q2 결정).
+
+## 후속 판단 — `harness_config` 구조화 필드 확장 (ticket f3fc298a, 2026-08-06)
+
+레이어 5 절의 Q2 결정이 이관한 재판단. **결론: 불필요 — `harness-config.ts` 스키마
+변경 없음.**
+
+검토한 안은 "검증 기대치 / 사용자 질문 허용 기준을 `HarnessConfigSchema`에
+구조화 필드(예: `verification_expectations`, `ask_user_criteria`)로 추가"였다.
+아래 근거로 기각한다.
+
+1. **이미 도달 가능한 채널이 있다**: 이런 정책성 텍스트를 보드/워크스페이스
+   단위로 커스터마이즈하려는 요구는 기존 `system_prompt_append` 필드(자유
+   텍스트)로 이미 100% 충족된다. 이 필드는 `event-dispatcher.ts:2124`에서
+   읽혀 `composeTriggerPrompt`의 `extraInstructions` 인자로 전달되고,
+   `prompts.ts:231-233`에서 트리거 프롬프트에 그대로 삽입된다 — 구조화
+   필드가 없어도 매 dispatch에 도달한다. UI 쪽도 갭이 없다:
+   `HarnessConfigEditor.tsx`가 이미 이 필드를 자유 텍스트 textarea로
+   노출한다.
+2. **Q2가 지적한 배포 의존성 비대칭이 그대로 유효하다**: `composeTriggerPrompt`는
+   `apps/agent-manager/`에 있어 harness_config의 실제 효과는 매니저를
+   업그레이드한 호스트에만 미친다. 반면 이 티켓이 실제로 다루는 전역 정책
+   (`INVESTIGATE_BEFORE_ASKING_RULE`, `ACTIONS_BEFORE_PENDING_RULE` 등 레이어
+   1 공유 상수)은 서버 배포 즉시 전원에 적용된다. 구조화 필드를 신설해도 이
+   비대칭 자체는 사라지지 않는다 — 오히려 같은 성격의 정책 콘텐츠를 더 느린
+   채널로 옮기는 결과만 낳는다.
+3. **프로그램적 소비자가 없다**: 구조화 필드는 어떤 코드가 그 값을 파싱해
+   분기/집행할 때 정당화된다(예: 서버가 필드를 읽어 리뷰 게이트를 바꾸는
+   경우). 리포 전체에서 `verification_expectations`/`ask_user_criteria`류
+   키워드에 대한 기존 참조는 0건이었다 — 값이 결국 프롬프트 텍스트로만
+   소비된다면 `system_prompt_append`와 표현력이 동일하고, 구조화가 주는
+   이점(타입 검증, 서버측 로직 분기)이 발생하지 않는다.
+4. **비용 대비 실익 없음**: `.strict()` zod 스키마에 키를 추가하면
+   `HARNESS_CONFIG_KEYS`/`resolveHarnessConfig` 병합 로직, agent-manager의
+   `composeTriggerPrompt`/어댑터별(Claude/Codex/Gemini/custom) 매핑, 버전
+   범프 + 동일 PR(CLAUDE.md 규약)까지 cross-repo 변경이 필요하다. 위 1~3의
+   이유로 실사용처가 없는 필드에 이 비용을 들일 이유가 없다.
+
+**재고 조건**: 향후 서버 또는 agent-manager 코드가 "검증 기대치"류 값을
+텍스트가 아니라 데이터로 읽어 실제 분기(예: 컬럼별로 다른 검증 강도를
+프로그램적으로 강제)해야 하는 구체적 요구가 생기면 그때 다시 검토한다. 그
+전까지는 `system_prompt_append` + 레이어 1/3 공유 상수 조합이 충분하다.
