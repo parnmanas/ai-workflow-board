@@ -1016,11 +1016,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'get_my_tickets',
-    'Get tickets where this agent is assignee, reporter, or reviewer within the workspace. Each row includes `my_roles` — the role slug(s) the agent holds on that ticket — so an agent juggling multiple roles can see at a glance which hat to wear per ticket.',
+    'Get tickets where this agent is assignee, reporter, or reviewer within the workspace. Each row includes `my_roles` — the role slug(s) the agent holds on that ticket — so an agent juggling multiple roles can see at a glance which hat to wear per ticket. status="in_progress" is resolved against the root ticket\'s actual column (col.kind=\'active\') rather than the legacy status text column, since root workflow state is column-driven and Ticket.status is only ever derived as \'todo\'/\'done\' for root tickets — never \'in_progress\'. Other status values, and all child/subtask tickets, still match the raw status column.',
     {
       agent_id: z.string().describe('Calling agent ID'),
       workspace_id: z.string().describe('Workspace to scope results'),
-      status: z.string().optional().describe('Filter by ticket status (optional, e.g. "todo", "in_progress", "done")'),
+      status: z.string().optional().describe('Filter by ticket status (optional, e.g. "todo", "in_progress", "done"). For root tickets, "in_progress" matches the actual active-kind column placement, not the legacy status column.'),
     },
     async ({ agent_id, workspace_id, status }) => {
       const agentRepo = dataSource.getRepository(Agent);
@@ -1042,7 +1042,25 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         // UI / list_archived_tickets tool covers explicit lookup.
         .andWhere('t.archived_at IS NULL');
 
-      if (status) {
+      if (status === 'in_progress') {
+        // Root workflow state is column-driven (see get_ticket's legacy_status
+        // projection): deriveRootTicketStatus (archive-helpers.ts) only ever
+        // writes 'todo' or 'done' onto a root ticket's Ticket.status, derived
+        // purely from the column's terminal/non-terminal-ness — it never
+        // derives 'in_progress'. So a root ticket actually sitting in an
+        // active-kind column (To Do / Plan / In Progress) can carry a
+        // permanently stale status='todo', and `t.status = 'in_progress'`
+        // would never match any root ticket, no matter where it actually sits.
+        // Resolve root tickets against the already-joined column's kind
+        // instead. Child tickets keep matching the raw status column exactly
+        // as before — spelled out explicitly here rather than relying on the
+        // innerJoin's incidental exclusion of column_id=null rows, so this
+        // predicate stays correct even if that join is ever loosened.
+        qb = qb.andWhere(
+          '(t.parent_id IS NULL AND col.kind = :activeKind) OR (t.parent_id IS NOT NULL AND t.status = :status)',
+          { activeKind: 'active', status },
+        );
+      } else if (status) {
         qb = qb.andWhere('t.status = :status', { status });
       }
 
