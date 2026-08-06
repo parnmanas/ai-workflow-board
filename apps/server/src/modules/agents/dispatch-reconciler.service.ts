@@ -254,16 +254,22 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * `inflight_strand_serialization` marker the in-flight gate stamps (see the
    * `recordOwed` call beside `agent_trigger_dropped_inflight_strand` in
    * trigger-loop.service.ts), name that cause explicitly — including the
-   * blocking strand's start time when it was captured — instead of the
+   * blocking strand's identifier (Subagent.subagent_id, review blocker —
+   * best-effort, may be absent) and start time when captured — instead of the
    * generic checklist. Pure string parsing, no I/O.
    */
   private _buildEscalationRecovery(reason: string, intent: { agent_id: string; role: string }): string {
     if (!reason.startsWith('inflight_strand_serialization')) {
       return 'reconciler keeps re-dispatching at capped backoff; verify agent online / worktree pool / focus capacity';
     }
+    const idMatch = /\bstrand_id=(\S+)/.exec(reason);
     const sinceMatch = /\bstrand_live_since=(\S+)/.exec(reason);
-    const since = sinceMatch ? ` (live since ${sinceMatch[1]})` : '';
-    return `a preceding strand for agent=${intent.agent_id || '?'} role=${intent.role}${since} is still running as a ` +
+    const details = [
+      idMatch ? `strand ${idMatch[1]}` : '',
+      sinceMatch ? `live since ${sinceMatch[1]}` : '',
+    ].filter(Boolean).join(', ');
+    const detailSuffix = details ? ` (${details})` : '';
+    return `a preceding strand for agent=${intent.agent_id || '?'} role=${intent.role}${detailSuffix} is still running as a ` +
       'process — check whether it is genuinely stuck before force-respawning; this is NOT an agent-online / ' +
       'worktree-pool / focus-capacity issue';
   }

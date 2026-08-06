@@ -84,6 +84,7 @@ test('In-flight-strand drop: every trigger source is queued for replay (except t
   });
 
   const activityLogRepo = ds.getRepository('ActivityLog');
+  const subagentRepo = ds.getRepository('Subagent');
   const dropRows = () => activityLogRepo.find({
     where: { ticket_id: ticket.id, action: 'agent_trigger_dropped_inflight_strand' },
   });
@@ -91,6 +92,16 @@ test('In-flight-strand drop: every trigger source is queued for replay (except t
   // ── Phase 1: a live strand drops a 'supervisor' trigger — now QUEUED ──────
   step('PHASE 1: live assignee strand drops a supervisor-sourced trigger, queued for replay');
   await agentStatus.setCurrentTask(worker.id, ticket.id, 'assignee');
+  // Real Subagent row backing the live strand (review blocker, ticket
+  // d35b8ac8) — this is what proves the end-to-end strand-identifier lookup
+  // in trigger-loop.service.ts's drop path actually resolves a row, not just
+  // the AgentStatusService seat this test otherwise drives directly.
+  const blockingSubagentId = 'sub-inflight-replay-probe-1';
+  await subagentRepo.save(subagentRepo.create({
+    subagent_id: blockingSubagentId, agent_id: worker.id, workspace_id: ws.id, kind: 'ticket',
+    session_key: `${ticket.id}:assignee`, pid: 424242, started_at: new Date(), ticket_id: ticket.id,
+    ticket_title: ticket.title, role: 'assignee', ended_at: null,
+  }));
   const dropped = await triggerLoop.emitAgentTrigger(ticket, worker.id, 'assignee', 'supervisor', 'system');
   assert.equal(dropped, '', 'phase1: the supervisor trigger is gated while the strand is in flight');
 
@@ -102,11 +113,21 @@ test('In-flight-strand drop: every trigger source is queued for replay (except t
     /queued_for_replay=true/,
     'phase1: a supervisor-sourced drop is now queued for replay (was false before ticket d35b8ac8)',
   );
+  assert.match(
+    String(drops[0].new_value || ''),
+    new RegExp(`strand_id=${blockingSubagentId}`),
+    'phase1: drop row records the blocking strand identifier (review blocker, ticket d35b8ac8)',
+  );
 
-  step("PHASE 1b: the durable recovery pointer carries the blocking strand's live-since timestamp");
+  step("PHASE 1b: the durable recovery pointer carries the blocking strand's identifier + live-since timestamp");
   const intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
   assert.ok(intent, 'a durable dispatch intent was recorded for the gated dispatch');
   assert.match(intent.last_reason, /inflight_strand_serialization/, 'reason records the in-flight-strand cause');
+  assert.match(
+    intent.last_reason,
+    new RegExp(`strand_id=${blockingSubagentId}`),
+    'reason carries the blocking strand identifier (review blocker, ticket d35b8ac8)',
+  );
   assert.match(
     intent.last_reason,
     /strand_live_since=\d{4}-\d{2}-\d{2}T/,

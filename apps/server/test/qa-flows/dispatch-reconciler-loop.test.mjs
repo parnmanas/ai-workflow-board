@@ -310,10 +310,11 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     // names that cause instead.
     const ticket = await mkTicket('escalation names the inflight strand');
     const liveSince = new Date(Date.now() - 5 * 60_000).toISOString();
+    const strandId = 'sub-blocking-strand-1234';
     await intents.recordOwed({
       workspaceId: ws.id, boardId: board.id, ticketId: ticket.id, role: 'assignee', agentId: agent.id,
       triggerSource: 'supervisor',
-      reason: `inflight_strand_serialization queued_for_replay=true strand_live_since=${liveSince}`,
+      reason: `inflight_strand_serialization queued_for_replay=true strand_id=${strandId} strand_live_since=${liveSince}`,
     });
     const intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
     // Fast-forward straight to the escalation threshold: attempts=2 so
@@ -339,6 +340,10 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     assert.ok(
       payload.recovery.includes(liveSince),
       "the recovery text surfaces the blocking strand's live-since timestamp (strand id/start-time requirement)",
+    );
+    assert.ok(
+      payload.recovery.includes(strandId),
+      'the recovery text surfaces the blocking strand identifier itself (review blocker, ticket d35b8ac8)',
     );
     assert.ok(payload.recovery.includes(agent.id), 'the recovery text names the blocking agent');
   });

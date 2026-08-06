@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { Subagent } from '../../entities/Subagent';
 import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { BoardColumn } from '../../entities/BoardColumn';
@@ -2365,9 +2366,41 @@ candidate's branch or move the ticket.
       // inflight strand as an agent/worktree/focus problem.
       const liveSince = this.agentStatus.getLiveRoleStrandSince(agentId, ticket.id, role);
       const liveSinceSuffix = liveSince ? ` strand_live_since=${liveSince.toISOString()}` : '';
+      // Blocking strand IDENTIFIER (review blocker, ticket d35b8ac8).
+      // AgentStatusService's in-memory seat has no subagent_id to hand back —
+      // its optional task_token is a per-session nonce agent-manager mints
+      // independently of subagent registration (unrelated UUID, confirmed by
+      // inspection; NOT a substitute id). The only durable identifier for
+      // "which strand" is Subagent.subagent_id, so look up the freshest
+      // still-open row for this exact (agent, ticket, role). "Freshest"
+      // mirrors the seat model itself — set_current_task always overwrites
+      // the seat with the newest spawn — so an older open row for the same
+      // seat can never be the one hasLiveRoleStrand is reporting on (same
+      // reasoning RespawnStormDetectorService's twin cross-check now uses).
+      // Best-effort: absent when no matching row exists yet (e.g. the
+      // output-liveness-only path), degrading to start-time-only exactly like
+      // before this fix.
+      let liveStrandId: string | null = null;
+      try {
+        const blockingRow = await this.dataSource.getRepository(Subagent)
+          .createQueryBuilder('s')
+          .where('s.agent_id = :agentId', { agentId })
+          .andWhere('s.ticket_id = :ticketId', { ticketId: ticket.id })
+          .andWhere('s.role = :role', { role })
+          .andWhere('s.ended_at IS NULL')
+          .orderBy('s.started_at', 'DESC')
+          .limit(1)
+          .getOne();
+        liveStrandId = blockingRow?.subagent_id ?? null;
+      } catch (e) {
+        this.logService.warn('MCP', 'inflight-strand-drop strand-id lookup failed (continuing without it)', {
+          err: String(e), ticket_id: ticket.id, agent_id: agentId,
+        });
+      }
+      const liveStrandIdSuffix = liveStrandId ? ` strand_id=${liveStrandId}` : '';
       this.logService.info('MCP', 'agent_trigger dropped (live same-role strand in flight)', {
         ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-        queued_for_replay: queuedForReplay, strand_live_since: liveSince?.toISOString(),
+        queued_for_replay: queuedForReplay, strand_live_since: liveSince?.toISOString(), strand_id: liveStrandId,
       });
       try {
         const activityLogRepo = this.dataSource.getRepository(ActivityLog);
@@ -2379,7 +2412,7 @@ candidate's branch or move the ticket.
           actor_name: 'TriggerLoopService',
           action: 'agent_trigger_dropped_inflight_strand',
           new_value: `agent=${agentId} role=${role} source=${triggerSource} queued_for_replay=${queuedForReplay}` +
-            (queuedForReplay ? '' : ' reason=replay_of_replay_loop_guard') + liveSinceSuffix,
+            (queuedForReplay ? '' : ' reason=replay_of_replay_loop_guard') + liveStrandIdSuffix + liveSinceSuffix,
           role,
           trigger_source: triggerSource,
         }));
@@ -2403,7 +2436,7 @@ candidate's branch or move the ticket.
         await this.dispatchIntents.recordOwed({
           workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
           role, agentId, triggerSource,
-          reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}${liveSinceSuffix}`,
+          reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}${liveStrandIdSuffix}${liveSinceSuffix}`,
         });
       }
       if (triggerSource === 'comment_summary') {
