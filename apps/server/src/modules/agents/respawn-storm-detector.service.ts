@@ -232,12 +232,34 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
       // predicate TriggerLoopService's in-flight dispatch gate uses, updated
       // synchronously (in-process) the moment clear_current_task lands — so a
       // strand this detector and the dispatch gate would disagree about can
-      // no longer be reported as a live twin. Checked per-row (not once per
-      // group) because a multi-holder role can have rows under different
-      // agent_ids.
-      const live = g.rows.filter(r =>
-        r.ended_at == null &&
-        r.started_at.getTime() >= windowStart.getTime() &&
+      // no longer be reported as a live twin.
+      //
+      // hasLiveRoleStrand(agent_id, ticket, role) answers for the SEAT, not
+      // for one particular row (review blocker, ticket d35b8ac8): it cannot
+      // tell WHICH of an agent's several open rows it is reporting on. Naively
+      // applying it to every open row of an agent that has more than one — a
+      // stale not-yet-reconciled row alongside the strand that actually
+      // replaced it — would count BOTH as live (the exact live incident: a
+      // 09:41:32-exited strand still miscounted alongside its 09:41:51-live
+      // successor, same agent_id). The seat model always keeps the NEWEST
+      // spawn's session behind a seat (see the task_token compare-and-swap
+      // note on AgentStatusService.setCurrentTask — "the newest live session
+      // is always the one a matching clear can release"), so only the
+      // freshest still-open row PER AGENT can possibly be the strand
+      // hasLiveRoleStrand is reporting on. Collapse to that one row per
+      // agent_id BEFORE the liveness cross-check so an older same-agent row
+      // can never double-count; a multi-holder role's rows under DIFFERENT
+      // agent_ids are unaffected (one freshest-row slot per agent_id).
+      const freshestOpenByAgent = new Map<string, Subagent>();
+      for (const r of g.rows) {
+        if (r.ended_at != null) continue;
+        if (r.started_at.getTime() < windowStart.getTime()) continue;
+        const prev = freshestOpenByAgent.get(r.agent_id);
+        if (!prev || r.started_at.getTime() > prev.started_at.getTime()) {
+          freshestOpenByAgent.set(r.agent_id, r);
+        }
+      }
+      const live = Array.from(freshestOpenByAgent.values()).filter(r =>
         this.agentStatus.hasLiveRoleStrand(r.agent_id, g.ticketId, g.role));
       if (live.length >= 2) {
         await this._handleTwins(ticket, g.role, live, cfg, windowStart, now, stats);
