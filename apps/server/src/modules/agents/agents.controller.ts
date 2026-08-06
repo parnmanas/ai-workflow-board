@@ -266,7 +266,21 @@ export class AgentsController {
         };
       }
       if (subList.length > 0) {
-        const active = subList.filter((s: any) => !s.ended_at).length;
+        // `ended_at == null` alone is NOT proof of liveness (ticket 6793ce22,
+        // same root cause as d35b8ac8): it only means the agent-manager
+        // hasn't yet POSTed /end or reconciled this row, which can lag the
+        // strand's actual exit by minutes. For ticket-kind rows cross-check
+        // AgentStatusService.hasLiveRoleStrand — the same in-memory seat
+        // TriggerLoopService's dispatch gate and RespawnStormDetectorService's
+        // twin filter use, released synchronously via clear_current_task —
+        // so an already-exited strand isn't miscounted as active. chat/oneshot
+        // subagents don't hold a ticket-role seat, so they keep the
+        // ended_at-only signal.
+        const active = subList.filter((s: any) =>
+          !s.ended_at &&
+          (s.kind !== 'ticket' || !s.ticket_id || !s.role ||
+            this.agentStatusService.hasLiveRoleStrand(s.agent_id, s.ticket_id, s.role)),
+        ).length;
         enriched.subagents = {
           total: subList.length,
           active,
