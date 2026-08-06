@@ -61,6 +61,7 @@ import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { AgentStatusService } from './agent-status.service';
 import {
   ResolvedRespawnStorm,
   respawnStormDefaultsFromEnv,
@@ -108,6 +109,15 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
     private readonly messaging: RoomMessagingService,
+    // Same-source liveness (ticket d35b8ac8): TriggerLoopService's in-flight
+    // dispatch gate and this detector's twin `live_count` used to read
+    // independent signals (AgentStatusService's in-memory seat vs. this
+    // service's own `Subagent.ended_at` DB column, the latter only reliably
+    // updated via the agent-manager's fire-and-forget `/end` POST or the
+    // periodic reconcile backstop). A strand whose seat was already released
+    // (clearCurrentTask fired) but whose Subagent row had not yet caught up
+    // was miscounted as live — see the cross-check in `_evaluateGroup` below.
+    private readonly agentStatus: AgentStatusService,
   ) {
     this.baseline = respawnStormDefaultsFromEnv();
     this.sweepMs = readSweepMs();
@@ -215,7 +225,20 @@ export class RespawnStormDetectorService implements OnModuleInit, OnModuleDestro
 
     // ── Twin detection (independent of storm) ──
     if (cfg.detectTwins) {
-      const live = g.rows.filter(r => r.ended_at == null && r.started_at.getTime() >= windowStart.getTime());
+      // `ended_at == null` alone is NOT proof of liveness (ticket d35b8ac8):
+      // it only means the agent-manager hasn't yet POSTed /end or reconciled
+      // this row, which can lag several minutes behind the strand's actual
+      // exit. Cross-check each candidate against hasLiveRoleStrand — the SAME
+      // predicate TriggerLoopService's in-flight dispatch gate uses, updated
+      // synchronously (in-process) the moment clear_current_task lands — so a
+      // strand this detector and the dispatch gate would disagree about can
+      // no longer be reported as a live twin. Checked per-row (not once per
+      // group) because a multi-holder role can have rows under different
+      // agent_ids.
+      const live = g.rows.filter(r =>
+        r.ended_at == null &&
+        r.started_at.getTime() >= windowStart.getTime() &&
+        this.agentStatus.hasLiveRoleStrand(r.agent_id, g.ticketId, g.role));
       if (live.length >= 2) {
         await this._handleTwins(ticket, g.role, live, cfg, windowStart, now, stats);
       }
