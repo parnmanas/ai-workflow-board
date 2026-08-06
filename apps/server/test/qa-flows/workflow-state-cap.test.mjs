@@ -181,9 +181,20 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
     assert.equal(r, null, `retry #${i + 1} must remain null`);
   }
 
-  step('  audit rows: one backlog_promotion_skipped_focus_held per attempt');
+  step('  audit rows: one backlog_promotion_skipped_focus_held per DISTINCT ticket, not per attempt');
+  // Ticket 9df6c348: skip-audit writes are now suppressed when the
+  // immediately preceding row for the SAME (ticket, action) pair already
+  // carries an identical `new_value` — needed so `levelSweep`'s timer
+  // doesn't spam the feed with an unchanged reason every tick. Call #1
+  // evaluates all 5 backlog candidates (each blocked by Alice's single
+  // occupied focus slot) and writes one row per DISTINCT ticket — 5 rows.
+  // The 5 retries below re-evaluate the same 5 tickets with nothing
+  // changed, so every one of those repeats is suppressed: still 5 rows,
+  // not 5 (tickets) × 6 (attempts) = 30.
   const skip1 = await readSkipAudit(c1.board.id);
-  assert.ok(skip1.length >= 6, `expected ≥6 skip audit rows for case1 (got ${skip1.length})`);
+  assert.equal(skip1.length, 5,
+    `expected exactly 5 skip audit rows for case1 — one per distinct blocked ticket, deduplicated across ` +
+    `the 6 identical tryPromote passes (got ${skip1.length})`);
   for (const row of skip1) {
     assert.match(
       row.new_value || '',
