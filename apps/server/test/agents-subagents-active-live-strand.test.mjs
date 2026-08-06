@@ -1,26 +1,26 @@
-// Regression test — ticket 6793ce22 (follow-up to d35b8ac8).
+// 회귀 테스트 — 티켓 6793ce22 (d35b8ac8의 후속).
 //
-// GET /api/agents (AgentsController.list → _enrichLiveData) used to compute
-// `subagents.active` from `Subagent.ended_at` alone. That column is only
-// updated by the agent-manager's fire-and-forget `/end` POST or its 5-min
-// reconcile backstop, so an already-exited strand whose row hadn't caught up
-// yet was miscounted as active — the same staleness d35b8ac8 already fixed
-// for the dispatch gate (TriggerLoopService) and the twin detector
-// (RespawnStormDetectorService), both via AgentStatusService.hasLiveRoleStrand.
+// GET /api/agents (AgentsController.list → _enrichLiveData)는 REST 응답의
+// `subagents.active`를 `Subagent.ended_at` 단독으로 계산해왔다. 이 컬럼은
+// agent-manager의 fire-and-forget `/end` POST 또는 5분 주기 reconcile
+// 백스톱으로만 갱신되므로, 이미 종료된 strand의 행이 한동안 미종료 상태로
+// 남아 active로 과대 집계됐다 — dispatch 게이트(TriggerLoopService)와 twin
+// detector(RespawnStormDetectorService)에서 d35b8ac8이 이미 고친 것과 동일한
+// staleness다(둘 다 AgentStatusService.hasLiveRoleStrand로 해소).
 //
-// This proves the same cross-check now applies to the REST rollup:
-//   - a ticket-kind row with ended_at=null but a RELEASED seat is excluded
-//     from `active` (the bug repro)
-//   - a ticket-kind row with ended_at=null and a live seat still counts
-//   - a plain ended_at=null/exit-code-set row (no seat ever recorded) keeps
-//     the old ended_at-only behavior unaffected
-//   - a chat-kind row (no ticket_id/role — hasLiveRoleStrand doesn't apply)
-//     also keeps the old ended_at-only behavior, so live chat/oneshot
-//     subagents are never undercounted by the new cross-check
+// 이 테스트는 동일한 교차검증이 REST 응답에도 적용됨을 증명한다:
+//   - ticket-kind 행이 ended_at=null이지만 seat이 해제된 경우 → active에서
+//     제외(핵심 버그 재현)
+//   - ticket-kind 행이 ended_at=null이고 seat이 살아있는 경우 → 그대로 카운트
+//   - ended_at이 설정된(정상 종료, seat 기록 없음) 행 → 기존 ended_at 단독
+//     동작 그대로 유지
+//   - chat-kind 행(ticket_id/role 없음 — hasLiveRoleStrand 적용 대상 아님)도
+//     기존 ended_at 단독 동작을 유지해, 새 교차검증이 살아있는 chat/oneshot을
+//     과소 집계하지 않음을 보장
 //
-// Design mirrors agents-leak.test.mjs (in-process NestJS boot, admin token,
-// GET /api/agents) + respawn-storm-detector.test.mjs's seedSubagent /
-// AgentStatusService.setCurrentTask/clearCurrentTask pattern.
+// 설계는 agents-leak.test.mjs(인프로세스 NestJS 부팅, admin 토큰,
+// GET /api/agents)와 respawn-storm-detector.test.mjs의 seedSubagent /
+// AgentStatusService.setCurrentTask/clearCurrentTask 패턴을 그대로 따른다.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -61,9 +61,9 @@ async function loadServerModules() {
 }
 
 let subCounter = 0;
-// Direct-insert helper (mirrors respawn-storm-detector.test.mjs's
-// seedSubagent) — started_at/ended_at are plain @Column Date fields, not
-// @CreateDateColumn, so a specific value can be written on insert.
+// 직접 삽입 헬퍼(respawn-storm-detector.test.mjs의 seedSubagent를 참고) —
+// started_at/ended_at은 @CreateDateColumn이 아닌 일반 @Column Date 필드라
+// insert 시점에 특정 값을 바로 기록할 수 있다.
 async function seedSubagent(subRepo, { agentId, workspaceId, kind, ticketId = null, role = null, endedAt = null }) {
   subCounter += 1;
   return subRepo.save(subRepo.create({
@@ -119,8 +119,8 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
 
     ws = await wsRepo.save(wsRepo.create({ name: 'Subagents Active WS', description: 'regression test' }));
 
-    // One agent per scenario keeps each subagents.{active,total} assertion
-    // unambiguous (exactly one Subagent row per agent).
+    // 시나리오별로 agent를 하나씩 분리해 subagents.{active,total} 검증을
+    // 모호함 없이 만든다(agent당 Subagent 행이 정확히 1개).
     const mkAgent = (name) => agentRepo.save(agentRepo.create({
       name: `${name}-${randomUUID()}`,
       description: 'regression test agent',
@@ -139,8 +139,8 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
 
     const ticketIdFor = () => randomUUID();
 
-    // ── Scenario 1: genuinely live ticket-kind strand ──────────────────────
-    // Row ended_at=null AND a live AgentStatusService seat → active.
+    // ── 시나리오 1: 실제로 살아있는 ticket-kind strand ──────────────────────
+    // 행이 ended_at=null이고 AgentStatusService seat도 살아있음 → active.
     const liveTicketId = ticketIdFor();
     await agentStatus.setCurrentTask(liveTicket.id, liveTicketId, 'assignee');
     await seedSubagent(subRepo, {
@@ -148,10 +148,10 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
       ticketId: liveTicketId, role: 'assignee', endedAt: null,
     });
 
-    // ── Scenario 2 (the bug repro): exited-but-not-yet-reconciled ──────────
-    // Row ended_at=null (agent-manager hasn't POSTed /end yet) BUT the seat
-    // was already released (clear_current_task fired) — must NOT count as
-    // active under the fix; the OLD ended_at-only check would have counted it.
+    // ── 시나리오 2(핵심 버그 재현): 종료됐지만 아직 reconcile 안 됨 ─────────
+    // 행은 ended_at=null(agent-manager가 아직 /end를 POST하지 않음)이지만
+    // seat은 이미 해제됐다(clear_current_task 발생) — 수정 후에는 active로
+    // 집계되면 안 된다; 기존 ended_at 단독 검사였다면 active로 집계됐을 것.
     const staleTicketId = ticketIdFor();
     await agentStatus.setCurrentTask(staleTicket.id, staleTicketId, 'assignee');
     agentStatus.clearCurrentTask(staleTicket.id, staleTicketId);
@@ -160,19 +160,19 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
       ticketId: staleTicketId, role: 'assignee', endedAt: null,
     });
 
-    // ── Scenario 3 (baseline, unaffected by the fix): properly ended ───────
-    // No seat ever recorded, ended_at set — must NOT count as active, same
-    // as before the fix.
+    // ── 시나리오 3(기존 동작 불변, 정상 종료): ended_at이 설정된 행 ─────────
+    // seat을 기록한 적이 없고 ended_at이 설정됨 — 수정 전과 마찬가지로
+    // active로 집계되면 안 된다.
     await seedSubagent(subRepo, {
       agentId: endedTicket.id, workspaceId: ws.id, kind: 'ticket',
       ticketId: ticketIdFor(), role: 'assignee', endedAt: new Date(),
     });
 
-    // ── Scenario 4 (regression guard): live chat-kind subagent ─────────────
-    // No ticket_id/role at all (chat/oneshot never carry a ticket-role seat),
-    // no AgentStatusService seat ever set — must still count as active via
-    // the ended_at-only fallback, proving the cross-check doesn't undercount
-    // non-ticket subagent kinds.
+    // ── 시나리오 4(회귀 가드): 살아있는 chat-kind 서브에이전트 ──────────────
+    // ticket_id/role 자체가 없고(chat/oneshot은 ticket-role seat을 갖지 않음)
+    // AgentStatusService seat도 설정한 적 없음 — 그래도 기존 ended_at 단독
+    // fallback으로 active로 집계돼야 한다(비-ticket 종류를 과소 집계하지
+    // 않음을 증명).
     await seedSubagent(subRepo, {
       agentId: liveChat.id, workspaceId: ws.id, kind: 'chat', endedAt: null,
     });
@@ -184,8 +184,9 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
     if (app) {
       try { await app.close(); } catch { /* ignore */ }
     }
-    // No process.exit here — see agents-leak.test.mjs; the suite runs with
-    // --test-force-exit, which hands the real node:test exit code through.
+    // 여기서는 process.exit를 호출하지 않는다 — agents-leak.test.mjs 참고;
+    // 스위트가 --test-force-exit로 실행되므로 node:test가 계산한 실제 종료
+    // 코드가 그대로 전달된다.
   });
 
   it('live ticket-kind strand (unended row + live seat) counts as active', async () => {
