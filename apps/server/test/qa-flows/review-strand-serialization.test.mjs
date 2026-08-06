@@ -142,12 +142,17 @@ test('Review same-role strand serialization: a live reviewer strand drops a seco
     'phase2: drop audit row records the reviewer role',
   );
 
-  // ── Phase 3: strand clears → reviewer trigger emits again ─────────────────
-  step('PHASE 3: clear the strand, a fresh reviewer trigger emits again');
+  // ── Phase 3: strand clears → the QUEUED phase-2 drop replays automatically ─
+  // (ticket d35b8ac8 — every dropped inflight-strand trigger, 'comment'
+  // included, is now queued for replay; no fresh comment is needed to prove
+  // recovery, unlike before that fix when a 'comment'-sourced drop was
+  // silently discarded and only a NEW comment could re-fire the seat).
+  step('PHASE 3: clear the strand; the phase-2 drop replays with no new comment needed');
   agentStatus.clearCurrentTask(worker.id, ticket.id);
-  await fireReviewerComment(app, ActivityService, ticket.id, user, 3);
+  // Match on trigger_source specifically — a length-only predicate would also
+  // match phase 1's already-buffered trigger once the buffer grows past 1.
   await va.waitForTrigger(
-    (tr) => tr.ticket_id === ticket.id && tr.role === 'reviewer' && va.triggersFor(ticket.id).length >= 2,
+    (tr) => tr.ticket_id === ticket.id && tr.role === 'reviewer' && tr.trigger_source === 'inflight_strand_replay',
     4000,
   );
   assert.equal(

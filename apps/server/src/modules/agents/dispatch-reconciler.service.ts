@@ -206,10 +206,11 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
     if (intent.attempts + 1 >= this.config.escalateAfterAttempts) {
       const newly = await this.intents.markEscalated(intent.id, now);
       if (newly) {
+        const reason = intent.last_reason || 'repeated_redispatch_no_progress';
         await this._writeAudit(ticket, intent, 'dispatch_intent_escalated', {
           attempts: intent.attempts + 1,
-          reason: intent.last_reason || 'repeated_redispatch_no_progress',
-          recovery: 'reconciler keeps re-dispatching at capped backoff; verify agent online / worktree pool / focus capacity',
+          reason,
+          recovery: this._buildEscalationRecovery(reason, intent),
         });
       }
     }
@@ -240,6 +241,31 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
       next_attempt_at: claim.nextAttemptAt.toISOString(),
     });
     stats.dispatched += 1;
+  }
+
+  /**
+   * Human-facing `recovery` guidance for a `dispatch_intent_escalated` audit
+   * row (ticket d35b8ac8). The generic "verify agent online / worktree pool /
+   * focus capacity" text is accurate for a capacity/reachability stall but
+   * actively misdiagnoses the in-flight-strand case: all three incidents that
+   * motivated this fix had an online agent, a healthy worktree pool, and no
+   * pending gate — the actual blocker was a same-(agent, ticket, role) strand
+   * still running as a process. When `reason` carries the
+   * `inflight_strand_serialization` marker the in-flight gate stamps (see the
+   * `recordOwed` call beside `agent_trigger_dropped_inflight_strand` in
+   * trigger-loop.service.ts), name that cause explicitly — including the
+   * blocking strand's start time when it was captured — instead of the
+   * generic checklist. Pure string parsing, no I/O.
+   */
+  private _buildEscalationRecovery(reason: string, intent: { agent_id: string; role: string }): string {
+    if (!reason.startsWith('inflight_strand_serialization')) {
+      return 'reconciler keeps re-dispatching at capped backoff; verify agent online / worktree pool / focus capacity';
+    }
+    const sinceMatch = /\bstrand_live_since=(\S+)/.exec(reason);
+    const since = sinceMatch ? ` (live since ${sinceMatch[1]})` : '';
+    return `a preceding strand for agent=${intent.agent_id || '?'} role=${intent.role}${since} is still running as a ` +
+      'process — check whether it is genuinely stuck before force-respawning; this is NOT an agent-online / ' +
+      'worktree-pool / focus-capacity issue';
   }
 
   /**

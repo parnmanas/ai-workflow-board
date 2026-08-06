@@ -94,6 +94,19 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   const key3 = `${agent.id}:${ticket.id}:${role}`;
   const outputKey = `${agent.id}:${ticket.id}:${role}`;
 
+  // A dropped supervisor nudge is now QUEUED for replay too (ticket d35b8ac8 —
+  // every in-flight-strand drop is queued, not just one-shot transition
+  // sources). So a `clearCurrentTask` that frees a seat a supervisor tick
+  // already nudged-and-dropped fires an EXTRA automatic `inflight_strand_replay`
+  // trigger, on top of whatever this test's own next `supervisor._tick()` finds.
+  // Wait for that trigger to actually arrive (observable over the VirtualAgent's
+  // SSE stream) before asserting an exact count — `_pendingTransitionReplays`
+  // going empty only proves the drain DEQUEUED the entry, not that the
+  // resulting emit has been delivered yet, so polling the queue map directly
+  // is not a strong enough sync point (see 비동기 테스트 lesson: wait on the
+  // observable invariant, not an internal-state proxy).
+  const waitForTriggerCount = (n) => waitFor(() => va.triggersFor(ticket.id).length === n);
+
   // ── Phase 1: KILL a strand (leaked current_task + stale claim) → reclaim ────
   // Simulate a manager restart / reap that skipped clear_current_task +
   // release_ticket: current_task lingers (backdate past the 15 min TTL) and the
@@ -167,11 +180,25 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   assert.notEqual(agentStatus.outputLiveness.get(reviewerOutputKey), undefined, 'a sibling reviewer-seat badge on the same ticket is NOT cleared by the assignee release (role-precise)');
   assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, 'the released seat reads absent immediately — NOT held for the 4 h output gate');
 
+  // The seat release above ALSO drains whatever the phase-2/3 supervisor
+  // nudges queued (ticket d35b8ac8: every in-flight-strand drop is now queued
+  // for replay, not just one-shot sources) — wait for that auto-replay to
+  // actually ARRIVE (not just be dequeued) as its own accounted step BEFORE
+  // isolating the supervisor's OWN fast-floor recovery below, so the two
+  // independent recovery paths don't get conflated into a flaky exact-count
+  // race.
+  const autoReplayLanded = await waitForTriggerCount(2);
+  assert.equal(
+    autoReplayLanded,
+    true,
+    'the queued phase-2/3 supervisor drop auto-replays once the seat frees (ticket d35b8ac8)',
+  );
+
   await supervisor._tick();
-  const gotTwo = await waitFor(() => va.triggersFor(ticket.id).length === 2);
-  assert.equal(gotTwo, true, 'a released seat is recovered at the fast floor — exactly one MORE re-dispatch, not after the 4 h output gate');
+  const gotOneMore = await waitForTriggerCount(3);
+  assert.equal(gotOneMore, true, 'a released seat is ALSO recovered at the fast floor — exactly one MORE re-dispatch, not after the 4 h output gate');
   await sleep(200);
-  assert.equal(va.triggersFor(ticket.id).length, 2, 'still exactly two total (no respawn storm)');
+  assert.equal(va.triggersFor(ticket.id).length, 3, 'still exactly three total — the auto-replay plus one more (no respawn storm)');
 
   // ── Phase 5: generation CAS — set(A)→set(B same seat)→late clear(A) is a no-op
   //    against live B (ticket 1fcba693, reviewer item 2). active_tasks is keyed by
@@ -196,23 +223,45 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   assert.notEqual(agentStatus.outputLiveness.get(outputKey), undefined, "live B's output badge survives A's late clear");
   assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), true, 'B is still counted live — no false-absent');
 
-  // A fresh supervisor must therefore NOT re-dispatch while B is live.
+  // A fresh supervisor must therefore NOT re-dispatch while B is live. This
+  // tick's non-force nudge IS dropped-and-queued (B is live, and every drop is
+  // now queued per ticket d35b8ac8) — but a QUEUE ENTRY is not an emitted
+  // trigger, so the count must not move yet.
   supervisor.state.clear();
   await supervisor._tick();
   await sleep(150);
-  assert.equal(va.triggersFor(ticket.id).length, 2, "no extra re-dispatch while B is live (A's stale clear caused no duplicate) — still exactly two");
+  assert.equal(
+    va.triggersFor(ticket.id).length,
+    3,
+    "no extra re-dispatch while B is live (A's stale clear caused no duplicate; the queued-not-yet-replayed nudge doesn't count either)",
+  );
 
   // B's OWN token'd clear (its real exit) releases the task + badge → absent →
-  // recovered exactly once more at the floor.
+  // which ALSO drains the nudge the tick above just queued, same as phase 4.
   agentStatus.clearCurrentTask(agent.id, ticket.id, TOKEN_B);
   assert.equal(activeTask(), undefined, "B's matching-token clear releases the task");
   assert.equal(agentStatus.outputLiveness.get(outputKey), undefined, "B's matching-token clear releases the output badge too");
   assert.equal(agentStatus.hasLiveRoleStrand(agent.id, ticket.id, role), false, "seat is absent after B's own release");
 
+  const secondAutoReplayLanded = await waitForTriggerCount(4);
+  assert.equal(
+    secondAutoReplayLanded,
+    true,
+    "B's release auto-replays the nudge queued moments ago (ticket d35b8ac8)",
+  );
+
   supervisor.state.clear();
   await supervisor._tick();
-  const gotThree = await waitFor(() => va.triggersFor(ticket.id).length === 3);
-  assert.equal(gotThree, true, "after B's real release the seat is recovered at the floor — exactly one more (third) re-dispatch");
+  const gotOneMoreStill = await waitForTriggerCount(5);
+  assert.equal(
+    gotOneMoreStill,
+    true,
+    "after B's real release the seat is ALSO recovered at the fast floor — exactly one MORE re-dispatch beyond the auto-replay",
+  );
   await sleep(200);
-  assert.equal(va.triggersFor(ticket.id).length, 3, 'still exactly three total (no respawn storm)');
+  assert.equal(
+    va.triggersFor(ticket.id).length,
+    5,
+    'still exactly five total — two auto-replays plus three floor-recovery dispatches (no respawn storm)',
+  );
 });
