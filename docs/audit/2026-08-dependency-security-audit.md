@@ -1,7 +1,9 @@
-# 의존성 패키지 보안 감사 (2026-08-05)
+# 의존성 패키지 보안 감사 (2026-08-05, 재검증 2026-08-06)
 
 `ai-workflow-board` 모노레포(`apps/server`, `apps/client`, `apps/agent-manager`)가
 사용하는 npm 패키지와 그 버전에 대한 취약점 전수 감사 기록이다.
+
+> 최신 재검증 결과는 문서 끝의 **"재검증 로그"** 절을 볼 것.
 
 - 기준 커밋: `main` @ `995b7f26`
 - 도구: `npm audit` (npm 11.11.0 / Node 24.14.1), GitHub Advisory DB
@@ -104,3 +106,63 @@
 `main`과 완전히 동일했다(직전 merge `f5adb453`). 따라서 `main`에 이 수정을
 반영한 뒤 `production.private`로 merge하면 배포 경로도 동일하게 해소된다.
 라이브 반영에는 운영자의 수동 rebuild + restart가 여전히 필요하다.
+
+---
+
+## 재검증 로그
+
+### 2026-08-06 — 재검증 결과: 신규 취약점 0건, 조치 필요 없음
+
+- 기준 커밋: `main` @ `276c3aa5` / 도구: `npm audit` (npm 11.11.0), GitHub Advisory DB
+- `npm audit` (root, 워크스페이스 3개 전체, 580 packages): **high 2 / 그 외 0**
+  — 위에서 "해당 없음"으로 승인한 `react-router` + `react-router-dom` 한 쌍
+  (동일 advisory 1건)이 전부다. 2026-08-05 이후 **새로 뜬 advisory 없음.**
+- 배포 브랜치 `production.private`: `git diff origin/main origin/production.private`
+  결과가 `.github/workflows/deploy.yml` 1개 파일뿐 —
+  `package.json` / `package-lock.json` / `apps/**` 는 `main`과 **바이트 단위로 동일**.
+  즉 **lockfile drift 없음**, 배포 경로의 취약점 노출도 `main`과 같다.
+- npm 배포 산출물 `awb-agent-manager`(v1.6.80)를 lockfile 없이 독립 해결해
+  단독 감사: **0 vulnerabilities.** (소비자가 `npm i -g` 로 설치할 때의 트리)
+- 재검토 트리거 재확인 — **셋 다 미충족, 예외 유지가 여전히 타당**:
+  - `react-router` 7.x 패치 릴리스: 없음 (7.x 최신 = **7.18.2**, advisory 범위 `< 8.3.0`에 그대로 포함)
+  - React 19 상향: 미실시 (client는 `react@18.3.1`, `react-router@8.3.0`의 peer는 `react >= 19.2.7`)
+  - RSC / SSR 라우팅 도입: 없음 (아래 회귀 가드가 강제)
+- 직접 의존성 40개의 lockfile 버전 대비 registry 최신 비교 — semver 범위 내에서
+  뒤처진 것은 `tsx` 4.23.6 → 4.23.8 (devDependency, advisory 없음) 하나뿐.
+  나머지 격차는 전부 메이저 업(React 19, TypeScript 7, typeorm 1.x 등)이라
+  보안 사유로는 당기지 않는다.
+
+**공급망 위생 점검(추가 실시, lockfile 580 엔트리 전수):**
+
+| 항목 | 결과 |
+| --- | --- |
+| registry.npmjs.org 이외에서 resolve되는 패키지 (git/http/tarball URL) | 0건 |
+| `integrity` 해시 누락 엔트리 | 0건 |
+| install script 보유 패키지 | 5건 — `esbuild`, `fsevents`×3(macOS 전용 optional), `@scarf/scarf`(typeorm 전이 telemetry). 모두 알려진 정상 패키지 |
+| deprecated 경고 | 1건 — `typeorm > glob@10.5.0`. 등록된 advisory 없음(메인테이너의 일괄 deprecate 문구), 상위 패키지가 범위를 올려야 사라짐 |
+| override 고정값이 여전히 유효한가 | `multer@2.2.0`, `@hono/node-server@2.1.0`, `js-yaml@5.2.3`, `picomatch@4.0.5` — **전부 registry 최신과 일치**, 취약 버전으로 되돌아간 흔적 없음 |
+
+**GitHub Actions:** `.github/workflows/` 의 `uses:` 는 전부 1st-party
+`actions/checkout@v4` · `actions/setup-node@v4` (가변 태그 참조). commit SHA
+고정이 더 엄격하긴 하나 GitHub 공식 액션에 한정되므로 이번엔 변경하지 않았다.
+
+### 이번 재검증에서 추가한 것 — 승인된 예외의 회귀 가드
+
+`react-router` 2건을 "해당 없음"으로 남겨둔 근거는 **"client가 unstable RSC API를
+쓰지 않는다"** 는 사실 하나뿐인데, 그 사실을 지키는 장치가 없었다. 위 "재검토
+트리거"는 산문이라 누군가 RSC/SSR 라우팅을 도입해도 아무도 모른 채 승인된
+예외가 실재하는 high 취약점으로 바뀐다.
+
+→ `apps/client/test/react-router-rsc-guard.test.mjs` 추가 (`npm test -w client`에 등록).
+정적 스캔 5건으로 다음을 강제한다:
+
+1. 스캔 대상이 실제로 존재하는지 자체 검증 (가드가 죽은 채 초록불만 내는 것 방지)
+2. `react-router/rsc` 등 RSC 진입점 import 0건
+3. `matchRSCServerRequest` / `RSCHydratedRouter` 등 RSC 서버 심볼 참조 0건
+   (`unstable_` 접두사 형태 포함)
+4. `react-router*` 에서 `unstable_*` 심볼 및 서브패스 import 0건
+5. `apps/server`(NestJS)에 `react-router` 의존성·참조 0건
+
+각 단언은 위반 코드를 임시로 심어 **실제로 실패하는 것까지 확인**했다.
+이 테스트가 깨지면 완화하지 말고 "재검토 트리거" 절차(React 19 상향 후
+`react-router@^8.3.0`, 또는 RSC 도입 철회)를 밟을 것.
