@@ -43,8 +43,23 @@
  * Promotion is best-effort: if no ticket on any intake column has a
  * fully-filled role set with holders whose focus window still has a free
  * slot (i.e. they hold fewer than N non-intake / non-terminal tickets),
- * the call is a no-op. The next capacity event will retry. The supervisor
- * 30-min stale check remains as a final eventual-consistency backstop.
+ * the call is a no-op. The next capacity event will retry.
+ *
+ * Level-triggered backstop (ticket 9df6c348): the two triggers above are
+ * both EDGE-triggered — they only run when something happens. A board
+ * that drains to zero running agents (a state normal operation always
+ * reaches eventually: the last active ticket finishes and nobody is left
+ * to go idle) stops emitting `agent_idle` entirely, so promotion freezes
+ * permanently even with fully-eligible candidates queued in intake, with
+ * no audit row distinguishing "not our turn yet" from "never again".
+ * `onModuleInit` also starts a `BACKLOG_PROMOTION_LEVEL_SWEEP_MS`-interval
+ * (default 5 min) timer that calls `levelSweep()`, which runs `tryPromote`
+ * for every board regardless of agent activity — closing that gap. (An
+ * earlier version of this comment claimed "the supervisor 30-min stale
+ * check remains as a final eventual-consistency backstop" — that was
+ * never true: TicketSupervisorService only re-pushes a trigger for a
+ * ticket that already has an active dispatch; an intake ticket that never
+ * had a trigger to restore was never covered by it.)
  *
  * Promotion gate (ticket 4a6cdfd7 → top-N in 701e5e36, replaces the
  * workflow-load cap):
@@ -81,6 +96,29 @@ function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
   try { return JSON.parse(s) as T; } catch { return fallback; }
 }
 
+// Level-sweep tick interval (ticket 9df6c348). Default 5 min — frequent
+// enough that a drained board doesn't sit stalled for long, infrequent
+// enough that a per-board `tryPromote` no-op call is a non-issue.
+const LEVEL_SWEEP_DEFAULT_MS = 5 * 60_000;
+
+function readLevelSweepMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.BACKLOG_PROMOTION_LEVEL_SWEEP_MS;
+  if (raw == null || raw === '') return LEVEL_SWEEP_DEFAULT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : LEVEL_SWEEP_DEFAULT_MS;
+}
+
+// Exposed for unit tests so a spec can assert env parsing without touching
+// the host environment — mirrors the __test__ export pattern used by
+// StuckTicketDetectorService.
+export const __test__ = { readLevelSweepMsFromEnv, LEVEL_SWEEP_DEFAULT_MS };
+
+// `triggered_by` marker for level-sweep-driven promotions (as opposed to an
+// agent_idle edge event, which stamps the freed agent's id). Exported so
+// tests can assert against the same constant rather than duplicating the
+// string literal.
+export const LEVEL_TICK_TRIGGERED_BY = 'system:level_tick';
+
 @Injectable()
 export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
   // Stored listener ref so OnModuleDestroy can detach. Same rationale as
@@ -89,6 +127,8 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
   // explicit removal. Finding-005 in
   // docs/audit/2026-05-system-cascade-audit.md.
   private _agentIdleListener?: (payload: { agent_id: string }) => void;
+  // Level-sweep tick handle (ticket 9df6c348) — see class docstring.
+  private tickHandle: NodeJS.Timeout | null = null;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -118,6 +158,17 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       });
     };
     activityEvents.on('agent_idle', this._agentIdleListener);
+
+    // Level-triggered backstop (ticket 9df6c348) — see class docstring.
+    // unref() so the interval doesn't keep the process alive on its own,
+    // same as every other tick-based service in this module.
+    const sweepMs = readLevelSweepMsFromEnv();
+    this.tickHandle = setInterval(() => {
+      this.levelSweep().catch((e: unknown) => {
+        this.logService.error('BacklogPromotion', 'level sweep failed', { err: String(e) });
+      });
+    }, sweepMs);
+    if (typeof this.tickHandle?.unref === 'function') this.tickHandle.unref();
   }
 
   onModuleDestroy(): void {
@@ -125,6 +176,38 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       activityEvents.removeListener('agent_idle', this._agentIdleListener);
       this._agentIdleListener = undefined;
     }
+    if (this.tickHandle) {
+      clearInterval(this.tickHandle);
+      this.tickHandle = null;
+    }
+  }
+
+  /**
+   * Level-triggered promotion sweep (ticket 9df6c348) — the timer-driven
+   * counterpart to `_onAgentIdle`. Attempts `tryPromote` on every board
+   * regardless of agent activity, so a fully-drained board (zero running
+   * strands, hence zero `agent_idle` events) still drains its intake
+   * column instead of freezing until a human intervenes. Each call is
+   * already a no-op (no audit row) when nothing is promotable, and
+   * `_writeSkipAuditIfChanged` suppresses repeat skip rows for an
+   * unchanged reason, so calling this on a timer does not reintroduce the
+   * pre-v0.41 self-amplifying scan (see class docstring).
+   */
+  async levelSweep(): Promise<{ scanned: number; promoted: number }> {
+    const boardRepo = this.dataSource.getRepository(Board);
+    const boards = await boardRepo.find();
+    let promoted = 0;
+    for (const board of boards) {
+      try {
+        const ticketId = await this.tryPromote(board.id, { triggerAgentId: LEVEL_TICK_TRIGGERED_BY });
+        if (ticketId) promoted += 1;
+      } catch (e) {
+        this.logService.warn('BacklogPromotion', 'level sweep board promotion failed (continuing)', {
+          err: String(e), board_id: board.id,
+        });
+      }
+    }
+    return { scanned: boards.length, promoted };
   }
 
   /**
@@ -326,12 +409,17 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       // the move commits. Built up alongside the eligibility check so we
       // don't re-walk the role list in the post-save loop.
       const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
-      // Audit-trail material for a focus-held skip — captured up here
-      // so the activity row can record which holder/slug closed the gate.
+      // Audit-trail material for an ineligibility skip — captured up here
+      // so the post-loop write knows which action/new_value to use. Both
+      // the role-unfilled and focus-held branches route through the same
+      // suppressed writer (`_writeSkipAuditIfChanged`) so a persistently
+      // unpromotable candidate can't spam the activity feed once
+      // `levelSweep` starts calling `tryPromote` on a timer instead of
+      // only on `agent_idle` (ticket 9df6c348).
       let skipReason: {
+        action: 'backlog_promotion_skipped_role_unfilled' | 'backlog_promotion_skipped_focus_held';
         slug: string;
-        holderId: string;
-        focusTicketId: string;
+        newValue: string;
       } | null = null;
       for (let i = 0; i < requiredRoleIds.length; i++) {
         const roleId = requiredRoleIds[i];
@@ -341,6 +429,11 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           // Role unfilled on the candidate — can't promote, the trigger
           // would land on no-one.
           eligible = false;
+          skipReason = {
+            action: 'backlog_promotion_skipped_role_unfilled',
+            slug,
+            newValue: `board=${boardId} role=${slug} dest_column_id=${destination.id}`,
+          };
           break;
         }
         // Focus-window gate (ticket 4a6cdfd7 → top-N in 701e5e36) —
@@ -360,37 +453,29 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           eligible = false;
           // Report the head of the full window (the highest-ranked ticket
           // holding a slot) so the audit trail names a concrete occupant.
-          skipReason = { slug, holderId: a.agent_id, focusTicketId: focusWindow[0] || '' };
+          const holderId = a.agent_id;
+          const focusTicketId = focusWindow[0] || '';
+          skipReason = {
+            action: 'backlog_promotion_skipped_focus_held',
+            slug,
+            newValue:
+              `board=${boardId} role=${slug} ` +
+              `holder=${holderId} ` +
+              `focus_ticket_id=${focusTicketId}`,
+          };
           break;
         }
         dispatchTargets.push({ slug, holderId: a.agent_id });
       }
       if (!eligible) {
         // Observability: an audit row for every promotion blocked by a
-        // focus-held holder. Lets ops correlate "this backlog isn't
-        // draining" to the specific (holder, focus_ticket) pair.
+        // vacant role or a focus-held holder. Lets ops correlate "this
+        // backlog isn't draining" to the specific (role, cause) pair
+        // instead of it looking identical to "hasn't been its turn yet".
         if (skipReason) {
-          try {
-            const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-            await activityLogRepo.save(activityLogRepo.create({
-              entity_type: 'ticket',
-              entity_id: ticket.id,
-              ticket_id: ticket.id,
-              actor_id: 'system',
-              actor_name: 'BacklogPromotionService',
-              action: 'backlog_promotion_skipped_focus_held',
-              new_value:
-                `board=${boardId} role=${skipReason.slug} ` +
-                `holder=${skipReason.holderId} ` +
-                `focus_ticket_id=${skipReason.focusTicketId}`,
-              role: skipReason.slug,
-              trigger_source: 'backlog_promotion',
-            }));
-          } catch (e) {
-            this.logService.warn('BacklogPromotion', 'focus-held skip audit write failed (continuing)', {
-              err: String(e), ticket_id: ticket.id,
-            });
-          }
+          await this._writeSkipAuditIfChanged(
+            ticket.id, skipReason.action, skipReason.slug, skipReason.newValue,
+          );
         }
         continue;
       }
@@ -503,5 +588,48 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     }
 
     return null;
+  }
+
+  /**
+   * Write a `backlog_promotion_skipped_*` audit row unless the immediately
+   * preceding row for this (ticket, action) pair already carries the exact
+   * same `new_value` (ticket 9df6c348). Without this, a static vacancy or
+   * a persistently focus-held holder would re-log identically on every
+   * `levelSweep` tick — the same self-amplifying-feed shape the class
+   * docstring warns against, just moved from comments to audit rows.
+   * Scoped strictly to the two skip actions passed in by `tryPromote`;
+   * `backlog_promoted` success rows never go through this method and are
+   * never suppressed.
+   */
+  private async _writeSkipAuditIfChanged(
+    ticketId: string,
+    action: 'backlog_promotion_skipped_role_unfilled' | 'backlog_promotion_skipped_focus_held',
+    role: string,
+    newValue: string,
+  ): Promise<void> {
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      const last = await activityLogRepo.findOne({
+        where: { entity_type: 'ticket', entity_id: ticketId, action },
+        order: { created_at: 'DESC' },
+        select: ['id', 'new_value'],
+      });
+      if (last && last.new_value === newValue) return;
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        ticket_id: ticketId,
+        actor_id: 'system',
+        actor_name: 'BacklogPromotionService',
+        action,
+        new_value: newValue,
+        role,
+        trigger_source: 'backlog_promotion',
+      }));
+    } catch (e) {
+      this.logService.warn('BacklogPromotion', 'skip audit write failed (continuing)', {
+        err: String(e), ticket_id: ticketId, action,
+      });
+    }
   }
 }
