@@ -20,6 +20,7 @@ import type {
   AgentCurrentTask,
   AgentLifecycleState,
   AgentManagerInstance,
+  ClaudeBackendProfile,
   Credential,
   ManagedAgentCreateBody,
 } from '../types';
@@ -54,6 +55,7 @@ const EMPTY_MANAGED_FORM: {
   working_dir: string;
   credential_id: string;
   role_prompt: string;
+  runtime_profile: string;
 } = {
   name: '',
   description: '',
@@ -62,6 +64,7 @@ const EMPTY_MANAGED_FORM: {
   working_dir: '',
   credential_id: '',
   role_prompt: '',
+  runtime_profile: '',
 };
 
 /**
@@ -144,6 +147,7 @@ export default function AgentsPage() {
   const [managers, setManagers] = useState<ManagerOption[]>([]);
   const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [creatingManaged, setCreatingManaged] = useState(false);
   // ST-7 directory picker — opens a modal that browses the picked manager's
   // host filesystem via the existing /api/agents/:id/fs/* reverse-RPC, so
@@ -232,8 +236,14 @@ export default function AgentsPage() {
       api.listCredentials(wsId)
         .then((rows) => { if (alive) setCredentials(rows); })
         .catch(() => { if (alive) setCredentials([]); });
+      api.getWorkspaceClaudeBackendProfiles(wsId)
+        .then((data) => {
+          if (alive) setRuntimeProfiles(data.profiles.filter(p => data.allowed_profile_ids.includes(p.id)));
+        })
+        .catch(() => { if (alive) setRuntimeProfiles([]); });
     } else {
       setCredentials([]);
+      setRuntimeProfiles([]);
     }
     return () => { alive = false; };
   }, [showManagedModal, wsId]);
@@ -308,6 +318,13 @@ export default function AgentsPage() {
       const credential_id = supportsCredential && managedForm.credential_id
         ? managedForm.credential_id
         : undefined;
+      // Only 'claude' agents have a backend profile concept — mirrors
+      // ManagedAgentDialog's create-mode resolution (sentinel 'none' opts
+      // out of board/workspace inheritance; '' / other CLIs omit the field
+      // so the server falls back to inherit).
+      const cli_runtime_profile = managedForm.runtime.runtime === 'claude' && managedForm.runtime_profile
+        ? managedForm.runtime_profile
+        : undefined;
       const body: ManagedAgentCreateBody = {
         name: managedForm.name.trim(),
         cli: managedForm.runtime.runtime,
@@ -316,6 +333,7 @@ export default function AgentsPage() {
         working_dir: managedForm.working_dir.trim() || undefined,
         description: managedForm.description.trim() || undefined,
         credential_id,
+        cli_runtime_profile,
       };
       // Pin to the URL wsId — defensive against per-tab active workspace
       // drift, same pattern as createAgent above.
@@ -507,6 +525,23 @@ export default function AgentsPage() {
               />
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
                 {credentialFallbackCopy(managedForm.runtime.runtime).meaning} Set a per-Agent credential only for isolated auth.
+              </div>
+            </div>
+          )}
+          {managedForm.runtime.runtime === 'claude' && (
+            <div>
+              <Select
+                label="Claude backend profile"
+                value={managedForm.runtime_profile}
+                onChange={e => setManagedForm(f => ({ ...f, runtime_profile: (e.target as HTMLSelectElement).value }))}
+                options={[
+                  { value: '', label: 'Inherit board/workspace' },
+                  { value: 'none', label: 'None — Anthropic default' },
+                  ...runtimeProfiles.map(p => ({ value: p.id, label: p.name })),
+                ]}
+              />
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                Keeps the Claude CLI/tool loop and changes only its model backend. Applies on first spawn.
               </div>
             </div>
           )}

@@ -505,6 +505,7 @@ export class AgentsController {
       is_active = 1,
       working_dir = '',
       credential_id = null,
+      cli_runtime_profile = null,
     } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     const type = typeof body?.type === 'string' ? body.type.trim().toLowerCase() : '';
@@ -555,9 +556,26 @@ export class AgentsController {
     if (requestedWorkspaceId && effectiveWorkspaceId && requestedWorkspaceId !== effectiveWorkspaceId) {
       return res.status(403).json({ error: 'workspace_id must match the active workspace or be null' });
     }
+    let workspace: Workspace | null = null;
     if (requestedWorkspaceId) {
-      const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: requestedWorkspaceId } });
+      workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: requestedWorkspaceId } });
       if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
+    }
+
+    // Mirrors the PATCH handler's cli_runtime_profile validation — accepts a
+    // Claude backend profile id or the 'none' sentinel, scoped to whatever
+    // profiles this agent's workspace can see. null/omitted = inherit
+    // board/workspace default at dispatch time (see resolveCliRuntimeProfile).
+    let resolvedRuntimeProfile: string | null = null;
+    if (cli_runtime_profile !== undefined && cli_runtime_profile !== null) {
+      const selected = String(cli_runtime_profile);
+      if (selected && selected !== 'none') {
+        const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+        if (!profiles.some(profile => profile.id === selected)) {
+          return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in agent workspace` });
+        }
+      }
+      resolvedRuntimeProfile = selected || null;
     }
 
     // Manager-type agents MUST be workspace-less (operator invariant — they
@@ -574,6 +592,7 @@ export class AgentsController {
         manager_agent_id: type === 'manager' ? null : managerAgentId,
         runtime_config: runtimeConfig,
         credential_id: typeof credential_id === 'string' && credential_id ? credential_id : null,
+        cli_runtime_profile: resolvedRuntimeProfile,
       }),
     );
     return res.status(201).json(agent);

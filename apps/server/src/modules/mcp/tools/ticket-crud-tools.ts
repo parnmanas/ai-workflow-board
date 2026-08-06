@@ -35,7 +35,7 @@ import {
   validateNextTicketId,
 } from '../shared/ticket-helpers';
 import { getCallerAgent, HUMAN_ONLY_UNPEND_MESSAGE } from '../shared/session-auth';
-import { isTerminalColumn, TicketArchivedError } from '../shared/archive-helpers';
+import { isTerminalColumn, deriveRootTicketStatus, TicketArchivedError } from '../shared/archive-helpers';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
 import type { ToolContext } from './context';
@@ -219,7 +219,9 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'create_ticket',
-    'Create a new ticket. You can specify either column_id (numeric) or column_name + board_id to find the column by name.\n\n' +
+    'Create a new ticket. You can specify either column_id (numeric) or column_name + board_id to find the column by name. ' +
+    'If you omit both column_id and column_name but pass board_id, the ticket lands on that board\'s first non-terminal column — ' +
+    'new work should never need to name a column just to avoid accidentally landing on a terminal one.\n\n' +
     'Role assignment: prefer the generalized `role_assignments` array (`[{role_slug, agent_id?, user_id?}]`) — it can pin any workspace role including `planner` and custom roles. The legacy `assignee_id` / `reporter_id` / `reviewer_id` fields still work and continue to populate the matching builtin slugs. Name fields (`assignee`, `reporter`) are deprecated; ID-based identification is required because workspaces commonly host multiple agents with the same display name.',
     {
       title: z.string().describe('Ticket title'),
@@ -235,7 +237,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       channel_ids: z.array(z.string()).optional().default([]).describe('Notification channel IDs'),
       column_id: z.string().optional().describe('Column ID (use this OR column_name)'),
       column_name: z.string().optional().describe('Column name (case-insensitive, requires board_id)'),
-      board_id: z.string().optional().describe('Board ID (used with column_name)'),
+      board_id: z.string().optional().describe('Board ID (used with column_name; alone, without column_id/column_name, selects the board\'s first non-terminal column)'),
       subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
@@ -265,7 +267,18 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         if (!col) return err(`Column "${column_name}" not found in board ${board_id}`);
         resolvedColumnId = col.id;
       }
-      if (!resolvedColumnId) return err('Either column_id or column_name is required');
+      if (!resolvedColumnId && board_id) {
+        // Neither column_id nor column_name given — default to the board's
+        // first non-terminal column (position order) instead of erroring, so
+        // filing new work never requires naming a column just to dodge a
+        // terminal one (ticket 35b43ee9). Mirrors the operational-capability
+        // -ticket fallback in agent-api.controller.ts.
+        const candidates = await dataSource.getRepository(BoardColumn).find({ where: { board_id }, order: { position: 'ASC' } });
+        const fallback = candidates.find((c) => !isTerminalColumn(c));
+        if (!fallback) return err(`Board ${board_id} has no active (non-terminal) column to default into — specify column_id or column_name`);
+        resolvedColumnId = fallback.id;
+      }
+      if (!resolvedColumnId) return err('Either column_id, column_name, or board_id is required');
 
       const col = await dataSource.getRepository(BoardColumn).findOne({ where: { id: resolvedColumnId } });
       if (!col) return err('Column not found');
@@ -283,6 +296,21 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       const duplicateAssessment = await duplicateService.assess(prospectiveWorkspaceId, {
         title, description, labels, source_kind, source_chat_room_id, related_ticket_id,
       });
+
+      // Guard (ticket 35b43ee9): a ticket carrying related_ticket_id is
+      // explicitly a follow-up/correction to other work — i.e. new,
+      // actionable work. Landing that directly in a terminal column leaves
+      // it invisible to every dispatch path (push trigger, focus-ticket
+      // polling, reconciler seed all exclude terminal columns by design) with
+      // status still reading non-terminal — exactly the reported repro.
+      // Direct terminal creation WITHOUT related_ticket_id (e.g. an operator
+      // filing a retroactive/already-done record) is unaffected.
+      if (duplicateAssessment.related_ticket_id && isTerminalColumn(col)) {
+        return err(
+          `Refusing to create a follow-up ticket (related_ticket_id=${duplicateAssessment.related_ticket_id}) directly in terminal column "${(col as any).name || col.id}" — ` +
+          'it would never dispatch. Point it at a non-terminal column, or omit column_id/column_name (keep board_id) to use the board default.'
+        );
+      }
 
       let resolvedNextTicketId: string | null = null;
       if (next_ticket_id !== undefined) {
@@ -359,6 +387,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           // against the board catalog at dispatch; null = board default.
           effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
           terminal_entered_at: terminalEnteredAt,
+          // Derive status from the destination column's terminality (ticket
+          // 35b43ee9) instead of leaving the 'todo' entity default — keeps a
+          // ticket created straight into a terminal column from showing a
+          // contradictory non-terminal status forever.
+          status: deriveRootTicketStatus(col),
           // Cross-board handoff relay spec (validated above; '' = no handoff).
           handoff_spec: handoffSpecJson,
           workspace_id: prospectiveWorkspaceId,

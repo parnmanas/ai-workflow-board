@@ -1,8 +1,8 @@
 import { ApiBearerAuth, ApiSecurity, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
@@ -41,6 +41,7 @@ import {
   validateAgentRuntimeConfig,
 } from '../../common/runtime-config';
 import { agentIsVisibleInWorkspace, normalizeAgentWorkspaceId } from '../../common/agent-workspace-scope';
+import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
@@ -149,6 +150,7 @@ export class AgentManagerController {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   // ─── Agent Manager → Server ──────────────────────────────────────────────
@@ -1054,6 +1056,25 @@ export class AgentManagerController {
         return res.status(400).json({ error: 'credential_id does not exist in this workspace or globally' });
       }
     }
+    // Mirrors AgentsController's PATCH :id validation — accepts a Claude
+    // backend profile id or the 'none' sentinel, scoped to whatever profiles
+    // this agent's workspace can see. null/omitted = inherit board/workspace
+    // default at dispatch time (see resolveCliRuntimeProfile). This is the
+    // create-time counterpart the ManagedAgentDialog "create" flow posts to;
+    // without it the UI's profile selector silently had no effect on new
+    // agents (ticket 29ea479c).
+    const cli_runtime_profile = body?.cli_runtime_profile === undefined || body?.cli_runtime_profile === null
+      ? null
+      : String(body.cli_runtime_profile);
+    if (cli_runtime_profile && cli_runtime_profile !== 'none') {
+      const workspace = agentWorkspaceId
+        ? await this.workspaceRepo.findOne({ where: { id: agentWorkspaceId } })
+        : null;
+      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+      if (!profiles.some(profile => profile.id === cli_runtime_profile)) {
+        return res.status(400).json({ error: `cli_runtime_profile "${cli_runtime_profile}" does not exist in agent workspace` });
+      }
+    }
 
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
@@ -1069,6 +1090,7 @@ export class AgentManagerController {
         runtime_config,
         credential_id,
         model,
+        cli_runtime_profile,
         roles: '[]',
       }),
     );

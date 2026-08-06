@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
-import type { Agent, Credential, RuntimeProfileConfig } from '../../types';
+import type { Agent, ClaudeBackendProfile, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
@@ -85,7 +85,7 @@ export default function ManagedAgentDialog({
   // free-text input so the operator can still type a model id.
   const [model, setModel] = useState<string>('');
   const [runtimeProfile, setRuntimeProfile] = useState<string>('');
-  const [runtimeProfiles, setRuntimeProfiles] = useState<RuntimeProfileConfig[]>([]);
+  const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
 
@@ -282,6 +282,7 @@ export default function ManagedAgentDialog({
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
           model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
+          cli_runtime_profile: cli === 'claude' && runtimeProfile ? runtimeProfile : undefined,
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -424,7 +425,7 @@ export default function ManagedAgentDialog({
             </div>
           </div>
         )}
-        {mode === 'edit' && cli === 'claude' && (
+        {cli === 'claude' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Claude backend profile
@@ -432,10 +433,11 @@ export default function ManagedAgentDialog({
             <Select value={runtimeProfile} options={[
               { value: '', label: 'Inherit board/workspace' },
               { value: 'none', label: 'None — Anthropic default' },
-              ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.id })),
+              ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.name })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-              Keeps the Claude CLI/tool loop and changes only its model backend. Applies after restart.
+              Keeps the Claude CLI/tool loop and changes only its model backend.
+              {isEdit ? ' Applies after restart.' : ' Applies on first spawn.'}
             </div>
           </div>
         )}
