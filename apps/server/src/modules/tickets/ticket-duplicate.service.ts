@@ -13,6 +13,8 @@ export interface DuplicateIntake {
   title: string;
   description?: string;
   labels?: string[];
+  // 'chat', or an outreach kind ('reddit' | 'github'); matching only ever
+  // compares candidates that share the same kind (see assess()).
   source_kind?: string;
   source_chat_room_id?: string;
   related_ticket_id?: string | null;
@@ -60,12 +62,16 @@ export class TicketDuplicateService {
       || description.match(new RegExp(`(?:^|\\n)\\s*(?:related|reproduced) ticket\\s*:\\s*(${UUID})`, 'i'))?.[1]
       || null;
     const related = relatedRaw && new RegExp(`^${UUID}$`, 'i').test(relatedRaw) ? relatedRaw : null;
-    return { source_kind: explicitKind === 'chat' || legacyChat || room ? 'chat' : '', source_chat_room_id: room, related_ticket_id: related };
+    // An explicit kind (chat, or an outreach kind like 'reddit'/'github') is trusted as-is;
+    // only an intake with no explicit kind falls back to the legacy chat heuristic
+    // (a bare source room or the old "source: chat" marker implied chat before source_kind existed).
+    const kind = explicitKind || (legacyChat || room ? 'chat' : '');
+    return { source_kind: kind, source_chat_room_id: room, related_ticket_id: related };
   }
 
   async assess(workspaceId: string, input: DuplicateIntake): Promise<DuplicateAssessment> {
     const provenance = this.parseProvenance(input);
-    if (!workspaceId || provenance.source_kind !== 'chat') {
+    if (!workspaceId || !provenance.source_kind) {
       return { ...provenance, canonical_ticket_id: null, ambiguous: false, candidates: [] };
     }
     const tickets = await this.dataSource.getRepository(Ticket).find({
@@ -76,7 +82,9 @@ export class TicketDuplicateService {
     const labels = new Set((input.labels || []).map(v => v.trim().toLowerCase()).filter(Boolean));
     const matches: DuplicateMatch[] = [];
     for (const candidate of tickets) {
-      if (candidate.source_kind !== 'chat') continue;
+      // Same-kind only: a reddit report can match another reddit report but never a
+      // github or chat one — cross-kind similarity is a different (unscoped) problem.
+      if (candidate.source_kind !== provenance.source_kind) continue;
       const signals: string[] = [];
       const sameRoom = !!provenance.source_chat_room_id && candidate.source_chat_room_id === provenance.source_chat_room_id;
       const sameRelated = !!provenance.related_ticket_id && candidate.related_ticket_id === provenance.related_ticket_id;
