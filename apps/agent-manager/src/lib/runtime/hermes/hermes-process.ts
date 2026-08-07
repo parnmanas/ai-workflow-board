@@ -53,10 +53,25 @@ function buildEnvironment(options: HermesProcessOptions): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   Object.assign(env, options.env ?? {});
-  env.HERMES_HOME = options.stateDir;
+  // 선택된 프로파일은 Hermes 자신이 (--profile 로, buildArgs 참고)
+  // ~/.hermes/profiles/<name> 아래 제 home으로 해석한다 — 여기서 HERMES_HOME을
+  // 강제하면 Hermes가 그 경로를 외부 "커스텀 배포 루트"로 취급해 실제 프로파일
+  // 디렉터리를 아예 못 찾는다(hermes_cli main.py _apply_profile_override /
+  // profiles.py get_default_hermes_root). 프로파일 미선택 시에만 agent별
+  // 격리 상태 디렉터리로 폴백한다.
+  if (!options.profile) env.HERMES_HOME = options.stateDir;
   env.AWB_AGENT_ID = options.agentId;
+  // 프로파일 선택에는 쓰이지 않지만(hermes_cli는 --profile/-p 와
+  // ~/.hermes/active_profile 만 읽음) kanban 툴의 assignee/author 라벨이 이
+  // env var를 읽으므로 유지한다.
   if (options.profile) env.HERMES_PROFILE = options.profile;
   return env;
+}
+
+function buildArgs(options: HermesProcessOptions): string[] {
+  const args = [...(options.args ?? [])];
+  if (options.profile) args.push('--profile', options.profile);
+  return args;
 }
 
 export class HermesProcess {
@@ -87,7 +102,7 @@ export class HermesProcess {
     await fsp.mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     const client = await AcpClient.spawn({
       command: this.#options.command,
-      args: this.#options.args,
+      args: buildArgs(this.#options),
       env: buildEnvironment(this.#options),
       requestTimeoutMs: this.#options.requestTimeoutMs,
       onEvent: this.#options.onEvent,

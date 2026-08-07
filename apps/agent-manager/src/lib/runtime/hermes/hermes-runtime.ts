@@ -11,6 +11,7 @@ import type {
 } from '../acp/acp-types.js';
 import type { RuntimeEvent } from '../runtime-events.js';
 import { HermesProcess } from './hermes-process.js';
+import { resolveHermesAcpCommand } from './hermes-command.js';
 import {
   HermesSessionOwnershipError,
   HermesSessionStore,
@@ -45,21 +46,36 @@ export interface HermesRunIdentity extends HermesSessionIdentity {
 }
 
 export class HermesRuntime {
-  readonly #options: Required<Pick<HermesRuntimeOptions, 'command' | 'args'>> & HermesRuntimeOptions;
+  readonly #options: HermesRuntimeOptions;
   readonly #rootDir: string;
   readonly #sessions: HermesSessionStore;
   readonly #processes = new Map<string, HermesProcess>();
   readonly #starting = new Map<string, Promise<HermesProcess>>();
   #loaded = false;
+  #resolvedCommand: Promise<{ command: string; args: string[] }> | null = null;
 
   constructor(options: HermesRuntimeOptions) {
     this.#rootDir = resolve(options.rootDir);
-    this.#options = {
-      ...options,
-      command: options.command?.trim() || process.env.HERMES_ACP_COMMAND?.trim() || 'hermes-acp',
-      args: options.args ?? [],
-    };
+    this.#options = options;
     this.#sessions = new HermesSessionStore(join(this.#rootDir, 'sessions.json'));
+  }
+
+  // 명시적 `command`(테스트, 또는 RuntimeSupervisorOptions로 전달된 operator
+  // override)는 그대로 신뢰하고 동기적으로 해석한다. 그렇지 않으면 공유되는
+  // hermes-acp/`hermes acp` 폴백 프로브에 위임한다 — 실제 프로세스 spawn이
+  // 필요하므로 딱 한 번만 실행되도록 메모이즈한다.
+  #resolveCommand(): Promise<{ command: string; args: string[] }> {
+    const explicit = this.#options.command?.trim();
+    if (explicit) {
+      return Promise.resolve({ command: explicit, args: this.#options.args ?? [] });
+    }
+    if (!this.#resolvedCommand) {
+      this.#resolvedCommand = resolveHermesAcpCommand().then(({ command, argsPrefix }) => ({
+        command,
+        args: [...argsPrefix, ...(this.#options.args ?? [])],
+      }));
+    }
+    return this.#resolvedCommand;
   }
 
   async ensureAgent(options: HermesAgentOptions): Promise<HermesProcess> {
@@ -77,12 +93,13 @@ export class HermesRuntime {
     const inFlight = this.#starting.get(options.agentId);
     if (inFlight) return inFlight;
 
+    const { command, args } = await this.#resolveCommand();
     const processOwner = new HermesProcess({
       agentId: options.agentId,
       stateDir: join(this.#rootDir, options.agentId, 'hermes'),
       profile: options.profile,
-      command: this.#options.command,
-      args: this.#options.args,
+      command,
+      args,
       requestTimeoutMs: this.#options.requestTimeoutMs,
       env: { ...this.#options.env, ...options.env },
       onEvent: (event) => this.#options.onEvent?.(options.agentId, event),

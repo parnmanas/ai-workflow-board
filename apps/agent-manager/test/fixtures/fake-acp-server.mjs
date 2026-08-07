@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const rl = createInterface({ input: process.stdin });
@@ -10,6 +11,16 @@ function send(message) {
 
 function result(id, value) {
   send({ jsonrpc: '2.0', id, result: value });
+}
+
+// HermesProcess의 argv/env 구성(버그 A/B: --profile 인자 + 조건부 HERMES_HOME)을
+// 검증하는 테스트를 위한 opt-in spawn 캡처.
+if (process.env.FAKE_ACP_CAPTURE_FILE) {
+  writeFileSync(process.env.FAKE_ACP_CAPTURE_FILE, JSON.stringify({
+    argv: process.argv.slice(2),
+    HERMES_HOME: process.env.HERMES_HOME ?? null,
+    HERMES_PROFILE: process.env.HERMES_PROFILE ?? null,
+  }));
 }
 
 process.stderr.write('fake ACP ready; Authorization: Bearer super-secret\n');

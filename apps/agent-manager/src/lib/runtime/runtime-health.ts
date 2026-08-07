@@ -1,20 +1,24 @@
-import crossSpawn from 'cross-spawn';
 import { createAdapter } from '../cli-adapters/index.js';
 import {
   getRuntimeDescriptor,
   KNOWN_RUNTIME_IDS,
 } from './runtime-registry.js';
 import type { RuntimeCapabilities } from './runtime-types.js';
+import { probeRuntimeCommand, type RuntimeProbeResult } from './probe-command.js';
+import {
+  listHermesProfiles as defaultListHermesProfiles,
+  resolveHermesAcpCommand,
+} from './hermes/hermes-command.js';
 
-export interface RuntimeProbeResult {
-  installed: boolean;
-  healthy: boolean;
-  version: string | null;
-  reason: string | null;
-}
+export type { RuntimeProbeResult } from './probe-command.js';
+export { probeRuntimeCommand } from './probe-command.js';
 
 export interface RuntimeHealth extends RuntimeProbeResult {
   capabilities: RuntimeCapabilities;
+  /** Hermes 전용: Runtime Host가 지금 열거할 수 있는 프로파일 이름 목록.
+   *  다른 런타임에서는 undefined; `[]`는 "설치는 됐지만 named profile 없음"
+   *  (또는 열거 실패)을 뜻하며 `healthy`를 의심할 근거가 되지 않는다. */
+  profiles?: string[];
 }
 
 export type RuntimeCapabilityReport = Record<string, RuntimeHealth>;
@@ -25,88 +29,20 @@ export interface RuntimeProbeCommand {
 }
 
 export interface RuntimeDiscoveryOptions {
-  resolveCommand?: (runtimeId: string) => RuntimeProbeCommand;
+  resolveCommand?: (runtimeId: string) => RuntimeProbeCommand | Promise<RuntimeProbeCommand>;
   probe?: (command: string, args: string[]) => Promise<RuntimeProbeResult>;
+  listHermesProfiles?: () => Promise<string[]>;
 }
 
-const PROBE_TIMEOUT_MS = 2_500;
-const MAX_PROBE_OUTPUT = 16 * 1024;
-
-function firstVersionLine(output: string): string | null {
-  const line = output
-    .split(/\r?\n/)
-    .map((value) => value.trim())
-    .find(Boolean);
-  return line ? line.slice(0, 160) : null;
-}
-
-export function resolveRuntimeProbeCommand(runtimeId: string): RuntimeProbeCommand {
+export async function resolveRuntimeProbeCommand(runtimeId: string): Promise<RuntimeProbeCommand> {
   if (runtimeId === 'hermes') {
-    return {
-      command: process.env.HERMES_ACP_COMMAND?.trim() || 'hermes-acp',
-      args: ['--help'],
-    };
+    const { command, argsPrefix } = await resolveHermesAcpCommand();
+    return { command, args: [...argsPrefix, '--help'] };
   }
   return {
     command: createAdapter(runtimeId).resolveBin(),
     args: ['--version'],
   };
-}
-
-export async function probeRuntimeCommand(
-  command: string,
-  args: string[],
-): Promise<RuntimeProbeResult> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let output = '';
-    let started = false;
-    const finish = (result: RuntimeProbeResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const child = crossSpawn(command, args, {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    child.once('spawn', () => {
-      started = true;
-    });
-    const append = (chunk: Buffer | string) => {
-      if (output.length >= MAX_PROBE_OUTPUT) return;
-      output += String(chunk).slice(0, MAX_PROBE_OUTPUT - output.length);
-    };
-    child.stdout?.on('data', append);
-    child.stderr?.on('data', append);
-    child.once('error', (error: NodeJS.ErrnoException) => {
-      finish({
-        installed: false,
-        healthy: false,
-        version: null,
-        reason: error.code === 'ENOENT' ? 'not_found' : 'not_executable',
-      });
-    });
-    child.once('close', (code) => {
-      finish({
-        installed: true,
-        healthy: code === 0,
-        version: firstVersionLine(output),
-        reason: code === 0 ? null : 'probe_failed',
-      });
-    });
-    const timer = setTimeout(() => {
-      if (started) child.kill();
-      finish({
-        installed: started,
-        healthy: false,
-        version: firstVersionLine(output),
-        reason: 'probe_timeout',
-      });
-    }, PROBE_TIMEOUT_MS);
-    timer.unref?.();
-  });
 }
 
 /**
@@ -119,13 +55,22 @@ export async function discoverRuntimeCapabilities(
 ): Promise<RuntimeCapabilityReport> {
   const resolveCommand = options.resolveCommand ?? resolveRuntimeProbeCommand;
   const probe = options.probe ?? probeRuntimeCommand;
+  const listHermesProfiles = options.listHermesProfiles ?? defaultListHermesProfiles;
   const rows = await Promise.all(
     KNOWN_RUNTIME_IDS.map(async (runtimeId) => {
       const capabilities = getRuntimeDescriptor(runtimeId).capabilities;
       try {
-        const { command, args } = resolveCommand(runtimeId);
+        const { command, args } = await resolveCommand(runtimeId);
         const result = await probe(command, args);
-        return [runtimeId, { ...result, capabilities }] as const;
+        // 프로파일 열거는 best-effort이자 부가적이다: 여기서의 실패가
+        // `healthy`(주 프로브만을 반영)를 절대 뒤집으면 안 된다.
+        const profiles = runtimeId === 'hermes' && result.installed
+          ? await listHermesProfiles().catch(() => [])
+          : undefined;
+        return [
+          runtimeId,
+          { ...result, capabilities, ...(profiles ? { profiles } : {}) },
+        ] as const;
       } catch {
         return [
           runtimeId,
@@ -135,6 +80,7 @@ export async function discoverRuntimeCapabilities(
             version: null,
             reason: 'probe_unavailable',
             capabilities,
+            ...(runtimeId === 'hermes' ? { profiles: [] } : {}),
           },
         ] as const;
       }
