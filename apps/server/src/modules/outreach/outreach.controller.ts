@@ -5,7 +5,9 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { OutreachChannelService } from './outreach-channel.service';
+import { OutreachPublisherService } from './outreach-publisher.service';
 import { OutreachChannel } from '../../entities/OutreachChannel';
+import { OutreachOutboundPost } from '../../entities/OutreachOutboundPost';
 
 /**
  * Allowlist projection (mirrors resource-helpers.ts's `resourceToJson`) —
@@ -42,6 +44,32 @@ function channelToJson(c: OutreachChannel) {
   };
 }
 
+/** Outbound ledger row projection — no secrets ever land in this table
+ *  (see OutreachOutboundPost docstring), so this is a straight field list
+ *  rather than a strict allowlist, kept explicit for consistency with
+ *  channelToJson and to avoid an unreviewed future column leaking silently. */
+function outboundToJson(p: OutreachOutboundPost) {
+  return {
+    id: p.id,
+    workspace_id: p.workspace_id,
+    channel_id: p.channel_id,
+    kind: p.kind,
+    status: p.status,
+    target: p.target,
+    title: p.title,
+    body: p.body,
+    thread_ref: p.thread_ref,
+    external_item_id: p.external_item_id,
+    permalink: p.permalink,
+    deployed_commit_sha: p.deployed_commit_sha,
+    source_ticket_id: p.source_ticket_id,
+    source_item_id: p.source_item_id,
+    error: p.error,
+    created_at: p.created_at,
+    published_at: p.published_at,
+  };
+}
+
 /**
  * REST surface for OutreachChannel (ticket 2500fea3 step 7) — "채널 등록/상태
  * 확인을 위한 최소 REST 엔드포인트" from the ticket's scope. 2500fea3 itself added
@@ -52,7 +80,11 @@ function channelToJson(c: OutreachChannel) {
  *
  * Gated on MANAGE_RESOURCES — an OutreachChannel is, shape-wise, a workspace
  * catalog item that attaches a Credential exactly like Resource does, so it
- * reuses that permission rather than introducing a new one.
+ * reuses that permission rather than introducing a new one. The outbound
+ * approval endpoints below (ticket d86d0c24 step 6) reuse the SAME gate —
+ * approving/rejecting a draft post is exactly as sensitive as editing the
+ * channel itself, and adding a dedicated permission for one sub-resource of
+ * an already-gated resource would just be more surface to keep in sync.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('outreach-channels')
@@ -60,7 +92,10 @@ function channelToJson(c: OutreachChannel) {
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_RESOURCES)
 export class OutreachController {
-  constructor(private readonly channelService: OutreachChannelService) {}
+  constructor(
+    private readonly channelService: OutreachChannelService,
+    private readonly publisherService: OutreachPublisherService,
+  ) {}
 
   @Get()
   async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
@@ -156,6 +191,65 @@ export class OutreachController {
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete outreach channel' });
+    }
+  }
+
+  // ── Outbound approval queue (ticket d86d0c24 step 6) ──────────────────────
+  // "승인 대기 상태에서는 실제 외부 호출이 일어나지 않음" — these three endpoints
+  // are the ONLY way a 'draft' row ever leaves that state; nothing here calls
+  // a connector directly (OutreachPublisherService.approve does, behind its
+  // own single-winner conditional-UPDATE claim).
+
+  @Get(':id/outbound')
+  async listOutbound(
+    @Param('id') channelId: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('status') status: string | undefined,
+    @Res() res: Response,
+  ) {
+    try {
+      const rows = await this.publisherService.listOutbound(channelId, workspaceId, status);
+      return res.json(rows.map(outboundToJson));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list outbound posts' });
+    }
+  }
+
+  @Post(':id/outbound/:postId/approve')
+  async approveOutbound(
+    @Param('id') channelId: string,
+    @Param('postId') postId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const workspaceId = body?.workspace_id;
+      const post = await this.publisherService.approve(postId, workspaceId, body?.body);
+      if (post.channel_id !== channelId) {
+        return res.status(404).json({ error: 'outbound post does not belong to this channel' });
+      }
+      return res.json(outboundToJson(post));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to approve outbound post' });
+    }
+  }
+
+  @Post(':id/outbound/:postId/reject')
+  async rejectOutbound(
+    @Param('id') channelId: string,
+    @Param('postId') postId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const workspaceId = body?.workspace_id;
+      const post = await this.publisherService.reject(postId, workspaceId);
+      if (post.channel_id !== channelId) {
+        return res.status(404).json({ error: 'outbound post does not belong to this channel' });
+      }
+      return res.json(outboundToJson(post));
+    } catch (e: any) {
+      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to reject outbound post' });
     }
   }
 }

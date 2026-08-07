@@ -1,7 +1,13 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 export type OutreachOutboundKind = 'deploy' | 'resolve';
-export type OutreachOutboundStatus = 'draft' | 'published' | 'rejected' | 'failed';
+// 'approving' is a short-lived transient claim state (step 6): the REST
+// approve endpoint atomically flips draft→approving as its single-winner
+// mutex BEFORE calling the connector, so two concurrent approve calls for
+// the same row can never both reach the external call. It always resolves
+// to 'published' or 'failed' within the same request — no row is ever
+// observed sitting in 'approving' across requests.
+export type OutreachOutboundStatus = 'draft' | 'approving' | 'published' | 'rejected' | 'failed';
 
 /**
  * OutreachOutboundPost — the idempotency ledger + approval queue for every
