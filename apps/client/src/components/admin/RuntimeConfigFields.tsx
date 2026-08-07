@@ -74,6 +74,13 @@ interface RuntimeConfigFieldsProps {
   availableRuntimeIds?: string[];
   disabled?: boolean;
   showRuntime?: boolean;
+  /** 선택된 Runtime Host의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
+   *  `undefined` = Host가 아직 이 값을 리포트하지 않음(오프라인 Host, 또는 이
+   *  기능보다 구버전 manager) — 편집이 막히지 않도록 자유 입력으로 폴백한다.
+   *  `[]` = Host는 리포트했지만 named profile이 없음 — 역시 자유 입력 폴백.
+   *  선택된 Runtime Host가 바뀔 때마다 Host의 `runtime_capabilities.hermes.profiles`
+   *  에서 다시 파생시켜 목록이 최신 상태를 유지하게 할 것. */
+  hermesProfiles?: string[];
 }
 
 export default function RuntimeConfigFields({
@@ -82,6 +89,7 @@ export default function RuntimeConfigFields({
   availableRuntimeIds,
   disabled = false,
   showRuntime = true,
+  hermesProfiles,
 }: RuntimeConfigFieldsProps) {
   const available = availableRuntimeIds
     ? new Set(availableRuntimeIds)
@@ -151,12 +159,36 @@ export default function RuntimeConfigFields({
           border: `1px solid ${tokens.colors.border}`,
           borderRadius: tokens.radii.md,
         }}>
-          <Input
-            label="Hermes profile"
-            value={value.profile}
-            placeholder="optional"
-            onChange={(event) => onChange({ ...value, profile: event.target.value })}
-          />
+          {hermesProfiles && hermesProfiles.length > 0 ? (
+            <div>
+              <Select
+                label="Hermes profile"
+                value={value.profile}
+                options={[
+                  { value: '', label: 'Default — no explicit profile' },
+                  ...hermesProfiles.map((profile) => ({ value: profile, label: profile })),
+                  ...(value.profile && !hermesProfiles.includes(value.profile)
+                    ? [{ value: value.profile, label: `${value.profile} (Host에 없음)`, disabled: true }]
+                    : []),
+                ]}
+                onChange={(event: React.ChangeEvent<HTMLSelectElement>) =>
+                  onChange({ ...value, profile: event.target.value })
+                }
+              />
+              {value.profile && !hermesProfiles.includes(value.profile) && (
+                <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 2, lineHeight: 1.5 }}>
+                  저장된 프로파일 "{value.profile}"이(가) 이 Host에 더 이상 없습니다. 목록에서 다시 선택하거나 그대로 두면 값은 유지됩니다.
+                </div>
+              )}
+            </div>
+          ) : (
+            <Input
+              label="Hermes profile"
+              value={value.profile}
+              placeholder={hermesProfiles ? 'optional — Host에 등록된 프로파일 없음' : 'optional'}
+              onChange={(event) => onChange({ ...value, profile: event.target.value })}
+            />
+          )}
           <Input
             label="Max children"
             type="number"

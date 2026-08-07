@@ -88,6 +88,11 @@ export default function ManagedAgentDialog({
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
+  // 이 manager의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
+  // `undefined`(`[]`이 아님)는 "Host가 아직 이 값을 리포트하지 않음"을 뜻하며,
+  // RuntimeConfigFields가 빈 드롭다운 대신 자유 입력으로 폴백할 수 있도록
+  // 의도적으로 구분한다.
+  const [hermesProfiles, setHermesProfiles] = useState<string[] | undefined>(undefined);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -156,11 +161,13 @@ export default function ManagedAgentDialog({
             .filter(([, health]) => health.installed && health.healthy)
             .map(([runtimeId]) => runtimeId),
         );
+        setHermesProfiles(match?.runtime_capabilities?.hermes?.profiles);
       })
       .catch(() => {
         if (alive) {
           setAvailableModelsByCli({});
           setAvailableRuntimeIds([]);
+          setHermesProfiles(undefined);
         }
       });
     return () => { alive = false; };
@@ -377,6 +384,7 @@ export default function ManagedAgentDialog({
         <RuntimeConfigFields
           value={runtimeSelection}
           availableRuntimeIds={availableRuntimeIds}
+          hermesProfiles={hermesProfiles}
           showRuntime={false}
           onChange={setRuntimeSelection}
         />

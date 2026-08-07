@@ -264,6 +264,16 @@ export default function AgentsPage() {
       .map(([runtimeId]) => runtimeId);
   }, [managedForm.manager_agent_id, managerInstances]);
 
+  // undefined([]가 아님)는 선택된 Host가 아직 hermes 프로파일을 리포트하지
+  // 않았다는 뜻 — 그 경우 RuntimeConfigFields는 자유 입력으로 폴백한다.
+  const selectedHermesProfiles = useMemo(() => {
+    if (!managedForm.manager_agent_id) return undefined;
+    const host = managerInstances.find(
+      (instance) => instance.agent_id === managedForm.manager_agent_id,
+    );
+    return host?.runtime_capabilities?.hermes?.profiles;
+  }, [managedForm.manager_agent_id, managerInstances]);
+
   // working_dir is optional for `custom` (the manager doesn't know how to
   // launch a custom CLI without operator-supplied scripts anyway), required
   // otherwise — same rule the admin AgentManager surfaces in its label.
@@ -462,6 +472,7 @@ export default function AgentsPage() {
           <RuntimeConfigFields
             value={managedForm.runtime}
             availableRuntimeIds={selectedRuntimeIds}
+            hermesProfiles={selectedHermesProfiles}
             disabled={!managedForm.manager_agent_id}
             onChange={(runtime) => setManagedForm((form) => ({ ...form, runtime, credential_id: '' }))}
           />
