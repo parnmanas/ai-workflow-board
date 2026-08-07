@@ -19,16 +19,24 @@
 //   • two overlapping polls racing on the SAME external item (Promise.all,
 //     real sqljs unique index) still produce exactly one ticket and one
 //     ledger row (review fix).
-//   • 리뷰 2차 지적: 티켓 생성 성공 후 ledger 연결(UPDATE)이 실패해도 고아
-//     티켓이 보상삭제되어 남지 않고, 재폴링하면 정확히 티켓 1개·ledger 1개로
-//     끝난다(중복 티켓 없음).
-//   • 리뷰 2차 지적: claim 직후 중단되었거나 보상삭제를 거친 ticket_id=null
+//   • 리뷰 2차 지적, 5차 지적으로 재설계: 티켓 생성 성공 후 ledger 연결
+//     (UPDATE)이 실패해도 커밋된 티켓은 삭제하지 않고 그대로 둔다(보상삭제
+//     자체가 실패할 수 있다는 5차 지적 — fail-open). 대신 operational_dedupe_key
+//     유니크 인덱스가 "이 외부 항목엔 티켓 1개"를 DB 레벨로 보장하므로,
+//     재폴링이 같은 키로 그 티켓을 찾아 연결한다 — 정확히 티켓 1개·ledger
+//     1개로 수렴하고, role assignment/activity도 최초 성공한 시도에서만
+//     한 번 실행된다(재시도가 중복 실행하지 않음).
+//   • 리뷰 2차 지적: claim 직후 중단되었거나 링크에 실패한 ticket_id=null
 //     정체 claim은 다음 poll에서 skip되지 않고 정상적으로 재claim·티켓화된다.
 //   • 리뷰 3차 지적: lease가 아직 유효한(방금 claim된) ticket_id=null 행은
 //     "정체"가 아니라 "처리 중"으로 취급되어 삭제되지 않는다 — 결정론적
 //     barrier로 A가 _createTicket 실행 중일 때 B를 진입시켜, 최종 티켓
 //     1개·ledger 1개만 남는 것을 증명한다(레이스 재현에 우연한 스케줄링에
 //     기대지 않음).
+//   • 리뷰 5차 지적: 두 claim이 동시에 _createTicket()에 도달해도(lease
+//     takeover 등) Ticket 테이블의 operational_dedupe_key 유니크 인덱스가
+//     둘째 INSERT 자체를 막는다 — 이미 존재하는 open 티켓과 dedupe key가
+//     충돌하면 새로 만들지 않고 그 티켓을 찾아 연결한다.
 
 import 'reflect-metadata';
 import test from 'node:test';
@@ -46,6 +54,21 @@ import { OutreachIngestService, STALE_CLAIM_LEASE_MS } from '../dist/modules/out
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 const noopActivity = { async logActivity() { return {}; } };
 const noopRoleAssignment = { async applyBoardDefaults() { return []; } };
+
+// Call-counting variants (리뷰 5차 지적 — "고아 role/activity가 남지 않음")
+// used where a test needs to prove _createTicket's post-commit side effects
+// fire exactly once even across a failed-then-retried creation.
+function countingActivity() {
+  const calls = [];
+  return { stub: { async logActivity(payload) { calls.push(payload); return {}; } }, calls };
+}
+function countingRoleAssignment() {
+  const calls = [];
+  return {
+    stub: { async applyBoardDefaults(ticketId, workspaceId, defaults) { calls.push({ ticketId, workspaceId, defaults }); return []; } },
+    calls,
+  };
+}
 
 function makeClassifier(map, fallback = { category: 'noise', confidence: 60 }) {
   return {
@@ -92,11 +115,11 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedBoard(dataSource, workspaceId) {
+async function seedBoard(dataSource, workspaceId, boardOver = {}) {
   const wsRepo = dataSource.getRepository(Workspace);
   await wsRepo.save(wsRepo.create({ id: workspaceId, name: workspaceId }));
   const boardRepo = dataSource.getRepository(Board);
-  const board = await boardRepo.save(boardRepo.create({ workspace_id: workspaceId, name: 'board' }));
+  const board = await boardRepo.save(boardRepo.create({ workspace_id: workspaceId, name: 'board', ...boardOver }));
   const colRepo = dataSource.getRepository(BoardColumn);
   const col = await colRepo.save(colRepo.create({
     board_id: board.id, workspace_id: workspaceId, name: 'To Do', position: 0, kind: 'active', is_terminal: false,
@@ -126,10 +149,10 @@ async function seedChannel(dataSource, over = {}) {
   }));
 }
 
-function makeService(dataSource, classifier) {
+function makeService(dataSource, classifier, { roleAssignment = noopRoleAssignment, activity = noopActivity } = {}) {
   const itemRepo = dataSource.getRepository(OutreachInboundItem);
   const channelRepo = dataSource.getRepository(OutreachChannel);
-  return new OutreachIngestService(itemRepo, channelRepo, dataSource, noopRoleAssignment, noopActivity, noopLog, classifier);
+  return new OutreachIngestService(itemRepo, channelRepo, dataSource, roleAssignment, activity, noopLog, classifier);
 }
 
 test('a bug item creates a ticket with the fixed description header and source labels', async () => {
@@ -370,20 +393,28 @@ test('two pollChannel sweeps racing on the same external item create exactly one
   }
 });
 
-test('a ledger-link failure after ticket creation compensates the orphaned ticket — retry then lands exactly one ticket', async () => {
+test('a ledger-link failure after ticket creation leaves the ticket intact — retry finds it via the dedupe key, lands exactly one ticket, and never re-runs role/activity side effects', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
+    const { board } = await seedBoard(dataSource, 'ws-1', {
+      default_role_assignments: JSON.stringify({ assignee: [{ agent_id: 'agent-x' }] }),
+    });
     const channel = await seedChannel(dataSource, { target_board_id: board.id });
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
-    const svc = makeService(dataSource, classifier);
+    const { stub: roleAssignment, calls: roleCalls } = countingRoleAssignment();
+    const { stub: activity, calls: activityCalls } = countingActivity();
+    const svc = makeService(dataSource, classifier, { roleAssignment, activity });
 
     // Force the claim → ticket_id UPDATE step to fail on the first attempt,
     // AFTER _createTicket() has genuinely built and committed a real Ticket.
     // This is the review's scenario 1: ticket creation succeeds but linking
-    // it to the claim row fails. The fix compensates by deleting the
-    // orphaned ticket rather than leaving it dangling.
+    // it to the claim row fails.
+    //
+    // 리뷰 5차 지적: 이 실패를 "고아 티켓 보상삭제"로 처리하던 기존 로직은
+    // 그 삭제 자체가 실패하면(fail-open) 중복 방지가 깨졌다. 수정 후에는
+    // 아예 삭제하지 않는다 — 티켓은 operational_dedupe_key를 쥔 채 그대로
+    // 살아남고, 재시도가 같은 키로 그 티켓을 찾아 연결한다.
     const originalUpdate = svc.itemRepo.update.bind(svc.itemRepo);
     let updateAttempts = 0;
     svc.itemRepo.update = async (...args) => {
@@ -395,7 +426,10 @@ test('a ledger-link failure after ticket creation compensates the orphaned ticke
     const first = await svc.pollChannel(channel, makeConnector([fixedItem]), new Date('2026-06-25T12:00:00Z'));
     assert.equal(first.errors, 1, 'the injected failure surfaces as a per-item error, not a silent drop');
     assert.equal(first.ticketed, 0);
-    assert.equal((await dataSource.getRepository(Ticket).find()).length, 0, 'the orphaned ticket was compensated (deleted), not left dangling');
+
+    const ticketsAfterFailure = await dataSource.getRepository(Ticket).find();
+    assert.equal(ticketsAfterFailure.length, 1, 'the ticket that already committed is left intact, not compensated away');
+    assert.ok(ticketsAfterFailure[0].operational_dedupe_key, 'it still carries its dedupe key so a retry can find it');
 
     const staleItems = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(staleItems.length, 1, 'the claim row is left in place as a stale marker');
@@ -406,15 +440,60 @@ test('a ledger-link failure after ticket creation compensates the orphaned ticke
     assert.equal(channelAfterFailure.since_cursor, '', 'cursor did not advance past the failed item');
 
     // Retry: same item, same cursor — the stale-claim recovery path reclaims
-    // the leftover row and this time the link update succeeds.
+    // the leftover row, _createTicket() collides on the dedupe key against
+    // the ticket the first attempt already committed, and the retry links to
+    // THAT ticket instead of building a second one.
     const second = await svc.pollChannel(channelAfterFailure, makeConnector([fixedItem]), new Date('2026-06-25T12:05:00Z'));
     assert.equal(second.ticketed, 1);
 
     const tickets = await dataSource.getRepository(Ticket).find();
-    assert.equal(tickets.length, 1, 'exactly one ticket total after the retry succeeds — the compensated orphan does not become a duplicate');
+    assert.equal(tickets.length, 1, 'exactly one ticket total after the retry succeeds — no duplicate');
+    assert.equal(tickets[0].id, ticketsAfterFailure[0].id, 'the retry reused the SAME ticket row the first attempt created');
     const items = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(items.length, 1);
     assert.equal(items[0].ticket_id, tickets[0].id);
+
+    assert.equal(activityCalls.length, 1, 'created-activity logging ran exactly once — the retry never re-entered the post-commit side effects');
+    assert.equal(roleCalls.length, 1, 'board default role assignment was applied exactly once, not duplicated by the retry');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('ticket creation colliding with an existing open ticket for the same dedupe key links to it instead of creating a duplicate', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board, col } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-collide': { category: 'bug', confidence: 90 } });
+    const collideItem = item({ external_item_id: 'gh-collide', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    // A ticket already holds the exact dedupe key this item would compute —
+    // as if a concurrent claim's poll (lease takeover) already created it.
+    // Nothing in the ledger (OutreachInboundItem) references it yet, so this
+    // isolates the dedupe-key collision path from any particular trigger
+    // (lease takeover, a prior failed link, ...) that could produce it.
+    const ticketRepo = dataSource.getRepository(Ticket);
+    const preExisting = await ticketRepo.save(ticketRepo.create({
+      column_id: col.id,
+      workspace_id: 'ws-1',
+      title: 'pre-existing ticket for this external item',
+      operational_dedupe_key: `outreach:${channel.id}:gh-collide`,
+    }));
+
+    const result = await svc.pollChannel(channel, makeConnector([collideItem]), new Date('2026-06-25T12:00:00Z'));
+
+    assert.equal(result.ticketed, 1, 'the item is recognized as ticketed via the pre-existing ticket');
+    assert.equal(result.errors, 0, 'a dedupe-key collision is handled gracefully, not surfaced as an error');
+
+    const tickets = await ticketRepo.find();
+    assert.equal(tickets.length, 1, 'no duplicate ticket was created — the unique index rejected the second insert');
+    assert.equal(tickets[0].id, preExisting.id);
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].ticket_id, preExisting.id, 'the ledger claim links to the pre-existing winner, not a fresh ticket');
   } finally {
     await dataSource.destroy();
   }
@@ -498,10 +577,12 @@ test('lease fencing: a real takeover after the lease actually expires still land
     // _createTicket's `dataSource.transaction()` calls would otherwise
     // collide if released at the same instant — see the claim-first comment
     // above about that same driver limitation). A is then resumed to prove
-    // the fencing check on A's side: A's own ticket-creation finishes AFTER
-    // B has already taken over and finished, so A's final `itemRepo.update`
-    // must detect it lost ownership (0 rows affected) and compensate its own
-    // now-duplicate ticket instead of counting it.
+    // the fencing check on A's side: A's own _createTicket() runs AFTER B's
+    // has already committed, so A's INSERT collides on operational_dedupe_key
+    // (리뷰 5차 지적) — A never builds a second Ticket row at all. A looks up
+    // B's ticket by the same key, then its final `itemRepo.update` finds it
+    // lost claim ownership (0 rows affected, B's takeover deleted A's claim
+    // row) and backs off with a skip instead of counting a ticket.
     const gateA = deferred();
     const reachedA = deferred();
     const gateB = deferred();
@@ -535,7 +616,7 @@ test('lease fencing: a real takeover after the lease actually expires still land
     const resultA = await pollA;
 
     const tickets = await dataSource.getRepository(Ticket).find();
-    assert.equal(tickets.length, 1, 'exactly one ticket total — A\'s late-finishing duplicate was compensated away');
+    assert.equal(tickets.length, 1, 'exactly one ticket total — A never built a second Ticket row, the dedupe key blocked its INSERT');
 
     const items = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(items.length, 1, 'exactly one ledger row — B\'s takeover claim');

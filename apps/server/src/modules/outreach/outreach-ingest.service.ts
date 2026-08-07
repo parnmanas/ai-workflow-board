@@ -22,13 +22,26 @@
  * Stale-claim lease fencing (review 4th pass): a claim can be reclaimed by
  * another poll once STALE_CLAIM_LEASE_MS elapses (see that constant), which
  * means the original owner can still be mid-_createTicket() when it loses
- * ownership. Losing ownership must never surface as a second ticket, so the
- * claim row's own id is the fencing token — a takeover always deletes and
- * re-inserts (never UPDATEs in place), so the original owner's final
- * `itemRepo.update({ id: claimed.id }, ...)` link step is itself the
- * ownership check: 0 rows affected means the id is gone, i.e. someone else
- * now owns this external item, so the ticket just built is a duplicate and
- * gets compensated away instead of counted.
+ * ownership. Losing ownership must never surface as a second ticket — but
+ * lease fencing alone only protects the LEDGER row, not the Ticket row
+ * _createTicket() may already be building concurrently on the loser's side.
+ *
+ * Ticket-row idempotency (review 5th pass): every ticket this service creates
+ * carries `operational_dedupe_key = "outreach:{channel_id}:{external_item_id}"`
+ * under the pre-existing `uq_tickets_operational_dedupe_open` unique index —
+ * the same mechanism agent-api's operational-capability-ticket fallback uses
+ * for "a background writer, not a single MCP call, must not double-create".
+ * This makes "at most one open ticket per external item" a DB-enforced
+ * invariant instead of something a post-hoc compensating delete has to
+ * maintain: whichever _createTicket() call commits first wins the key; every
+ * other caller's INSERT fails fast — before any role-assignment/activity side
+ * effect runs, since those only fire after the transaction commits — and the
+ * loser looks up the winner's ticket by the same key and links its own claim
+ * to it instead of building a duplicate. It also self-heals a ticket that
+ * committed but then failed to link (claim→ticket_id UPDATE throws): nothing
+ * ever deletes that ticket, so the next poll's stale-claim reclaim finds it
+ * again via the same dedupe key and finishes the link — no orphan, no
+ * retry-forever, no separate cleanup state to keep durable.
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -232,8 +245,9 @@ export class OutreachIngestService {
     // 시도했으나, sql.js 드라이버가 진짜 동시(overlap) 트랜잭션을 지원하지
     // 않아("cannot start a transaction within a transaction") 두 pollChannel이
     // Promise.all로 경쟁하는 순간 양쪽 다 실패하는 것을 직접 재현해 확인했다.
-    // 대신 claim-first 순서(원래 구조)는 유지하고, 아래에서 실패 유형별로
-    // 명시적으로 보상(compensate)해 트랜잭션 결합과 동등한 내구성을 얻는다.
+    // claim-first 순서(원래 구조)는 유지하고, 티켓 자체의 유일성은 아래
+    // operational_dedupe_key로 DB 유니크 제약에 위임한다(리뷰 5차 지적 — 자세한
+    // 배경은 파일 상단 docstring 참고).
     // 리뷰 4차 지적: claimed_at을 이 sweep 전체가 공유하는 `now` 그대로
     // 찍으면, 한 sweep 안에서 앞선 아이템의 _createTicket()이 오래 걸릴 때
     // 뒤쪽 아이템은 방금 claim되었어도 이미 lease가 지난 것처럼 기록되어
@@ -267,40 +281,54 @@ export class OutreachIngestService {
     }
 
     if (needsTicket) {
+      // operational_dedupe_key는 (channel_id, external_item_id) 쌍마다
+      // 유일한 값이다 — Ticket 테이블의 기존 uq_tickets_operational_dedupe_open
+      // 유니크 인덱스(agent-api operational-capability-ticket과 동일 메커니즘)
+      // 가 "이 외부 항목에 대한 open 티켓은 최대 1개"를 DB 레벨에서 강제한다.
+      // 리뷰 5차 지적: 이 키가 없으면 lease takeover로 두 claim이 동시에
+      // _createTicket()을 실행하거나 claim→ticket_id 링크 실패 후 재시도할
+      // 때 실제 중복 Ticket row가 만들어지는 창이 생기고, 그걸 사후에
+      // 보상삭제로 정리하는 로직 자체가 실패하면(fail-open) 중복이 영구히
+      // 남았다. DB 유니크 제약으로 묶으면 애초에 두 번째 INSERT가 커밋되지
+      // 못하므로 정리할 대상 자체가 생기지 않는다.
+      const dedupeKey = `outreach:${channel.id}:${item.external_item_id}`;
       let ticketId: string;
       try {
-        ticketId = await this._createTicket(channel, item, category);
+        ticketId = await this._createTicket(channel, item, category, dedupeKey);
       } catch (e) {
-        // 티켓이 아예 만들어지지 않았으니 보상할 것이 없다 — claim만 지워
-        // 다음 sweep이 이 항목을 처음부터 다시 처리하게 한다.
-        await this.itemRepo.delete({ id: claimed.id });
-        throw e;
+        if (!isUniqueConstraintError(e)) {
+          // 티켓이 아예 만들어지지 않았으니 보상할 것이 없다 — claim만 지워
+          // 다음 sweep이 이 항목을 처음부터 다시 처리하게 한다.
+          await this.itemRepo.delete({ id: claimed.id });
+          throw e;
+        }
+        // dedupe key 충돌 — 이 외부 항목에 대한 open 티켓이 이미 존재한다:
+        // (a) 동시에 claim을 가져간 다른 poll이 방금 만들었거나, (b) 우리
+        // 자신의 이전 시도가 티켓 커밋 후 claim 링크 단계에서만 실패해 남긴
+        // 것이다. 두 경우 모두 새로 만들 필요 없이 그 티켓을 찾아 재사용한다
+        // — INSERT 자체가 실패했으므로 방금 시도는 role assignment/activity
+        // 등 부수효과를 하나도 남기지 않았다(둘 다 트랜잭션 커밋 이후에만
+        // 실행됨).
+        const winner = await this.dataSource.getRepository(Ticket).findOne({
+          where: { operational_dedupe_key: dedupeKey },
+        });
+        if (!winner) {
+          // 극히 드문 경우: 그 사이 승자 티켓이 terminal 컬럼으로 이동해
+          // dedupe key가 이미 비워졌다(archive-helpers.ts). 연결할 대상이
+          // 없으니 claim을 지우고 다음 sweep이 처음부터 다시 처리하게 한다.
+          await this.itemRepo.delete({ id: claimed.id });
+          throw e;
+        }
+        ticketId = winner.id;
       }
 
-      let linkAffected = 0;
-      try {
-        const linkResult = await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
-        linkAffected = linkResult.affected ?? 0;
-      } catch (e) {
-        // 티켓은 커밋됐지만 claim에 연결하는 데 실패했다(리뷰 2차 지적
-        // 시나리오 1). 고아가 된 티켓을 best-effort로 보상삭제하고, claim
-        // 행은 일부러 그대로 둔다 — 이제 이 행은 claim 직후 죽은 크래시와
-        // 구별할 수 없는 모양(status='ticketed', ticket_id=null)이 되고, 위
-        // stale-claim 복구 경로가 다음 poll에서 그대로 재활용해 정리한다.
-        await this._deleteOrphanedTicket(channel, item, ticketId, 'failed to compensate an orphaned ticket after a ledger link failure');
-        throw e;
-      }
-
-      if (linkAffected === 0) {
-        // 리뷰 4차 지적 — lease fencing: UPDATE가 0행에 적중했다는 것은
-        // claim.id가 더는 존재하지 않는다는 뜻이다. 즉 우리가 _createTicket()
-        // 을 실행하는 동안(수 분 걸릴 수 있음) lease가 만료되어 다른 poll이
-        // 이미 이 claim을 회수(delete+재insert)해 갔다 — 그 poll은 자신만의
-        // claim.id로 스스로 티켓을 만들어 정상적으로 연결할 것이다. 우리가
-        // 방금 만든 티켓은 같은 외부 항목에 대한 순수 중복이므로 여기서
-        // 보상삭제하고, 재시도가 필요한 에러가 아니라 skip으로 집계한다 —
-        // 이 외부 항목은 이미(또는 곧) 다른 소유자가 durable하게 처리한다.
-        await this._deleteOrphanedTicket(channel, item, ticketId, 'failed to compensate a duplicate ticket after losing claim ownership to a stale-lease takeover');
+      // claim → ticket 연결. 0행 적중은 우리가 소유했던 claim이 사라졌다는
+      // 뜻이다(다른 poll의 stale takeover). operational_dedupe_key가 이미
+      // "이 외부 항목엔 티켓 1개"를 DB 레벨로 보장했으므로 여기서 보상삭제할
+      // 티켓이 없다 — 새 소유자가 자신의 claim으로 스스로 연결하거나, 위
+      // dedupe-key 충돌 경로로 같은 티켓을 찾아 연결한다.
+      const linkResult = await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
+      if ((linkResult.affected ?? 0) === 0) {
         result.skipped++;
         return;
       }
@@ -312,18 +340,7 @@ export class OutreachIngestService {
     }
   }
 
-  private async _deleteOrphanedTicket(channel: OutreachChannel, item: InboundItem, ticketId: string, context: string): Promise<void> {
-    try {
-      await this.dataSource.getRepository(Ticket).delete({ id: ticketId });
-    } catch (compensateErr: any) {
-      this.logService.error('Outreach', context, {
-        channel_id: channel.id, external_item_id: item.external_item_id, ticket_id: ticketId,
-        err: compensateErr?.message || String(compensateErr),
-      });
-    }
-  }
-
-  private async _createTicket(channel: OutreachChannel, item: InboundItem, category: OutreachCategory): Promise<string> {
+  private async _createTicket(channel: OutreachChannel, item: InboundItem, category: OutreachCategory, dedupeKey: string): Promise<string> {
     const board = await this._resolveBoard(channel);
     if (!board) {
       throw new Error(`no board available for outreach channel ${channel.id} in workspace ${channel.workspace_id}`);
@@ -361,6 +378,7 @@ export class OutreachIngestService {
         created_by: 'Outreach',
         created_by_type: 'system',
         created_by_id: '',
+        operational_dedupe_key: dedupeKey,
       }));
     });
 
