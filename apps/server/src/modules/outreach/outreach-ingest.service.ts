@@ -48,6 +48,24 @@ export interface PollResult {
 
 const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_request']);
 
+function isUniqueConstraintError(error: unknown): boolean {
+  const value = error as {
+    code?: string;
+    errno?: number;
+    message?: string;
+    driverError?: { code?: string; errno?: number; message?: string };
+  } | null;
+  const driverError = value?.driverError;
+  const code = driverError?.code ?? value?.code;
+  const errno = driverError?.errno ?? value?.errno;
+  const message = driverError?.message ?? value?.message ?? '';
+  return code === '23505'
+    || code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || code === 'ER_DUP_ENTRY'
+    || errno === 1062
+    || /unique constraint failed/i.test(message);
+}
+
 @Injectable()
 export class OutreachIngestService {
   constructor(
@@ -113,39 +131,68 @@ export class OutreachIngestService {
 
     const { category, confidence } = await this.classifier.classify(item);
     let status: OutreachItemStatus;
-    let ticketId: string | null = null;
+    let needsTicket = false;
 
     if (confidence < channel.classify_threshold) {
       status = 'held';
-      result.held++;
     } else if (category === 'question') {
       status = 'question';
-      result.question++;
     } else if (!TICKETABLE.has(category)) {
       status = 'noise';
-      result.noise++;
     } else {
-      ticketId = await this._createTicket(channel, item, category);
       status = 'ticketed';
-      result.ticketed++;
+      needsTicket = true;
     }
 
-    // The unique (channel_id, external_item_id) index is the actual dedupe
-    // guard — this INSERT is the only write path for a given external item,
-    // so a concurrent/rewound re-poll of the same item fails here rather than
-    // silently re-ticketing it.
-    await this.itemRepo.save(this.itemRepo.create({
-      workspace_id: channel.workspace_id,
-      channel_id: channel.id,
-      external_item_id: item.external_item_id,
-      classification: category,
-      confidence,
-      status,
-      ticket_id: ticketId,
-      permalink: item.permalink,
-      author: item.author,
-      collected_at: item.created_at,
-    }));
+    // Claim the dedupe row BEFORE creating a ticket. The unique
+    // (channel_id, external_item_id) index is the actual dedupe guard, but
+    // it must be crossed before _createTicket() runs, not after — otherwise
+    // two overlapping polls of the same item (two workers, or two
+    // overlapping poll intervals) can both pass the `existing` check above,
+    // both call _createTicket() (each in its own committed transaction),
+    // and only THEN collide on this insert — by which point two tickets
+    // already exist and only one of them ever gets a dedupe row (review fix,
+    // ticket 2500fea3). A unique violation here means another poll already
+    // claimed this item; treat it exactly like the pre-check hit above.
+    let claimed: OutreachInboundItem;
+    try {
+      claimed = await this.itemRepo.save(this.itemRepo.create({
+        workspace_id: channel.workspace_id,
+        channel_id: channel.id,
+        external_item_id: item.external_item_id,
+        classification: category,
+        confidence,
+        status,
+        ticket_id: null,
+        permalink: item.permalink,
+        author: item.author,
+        collected_at: item.created_at,
+      }));
+    } catch (e) {
+      if (isUniqueConstraintError(e)) {
+        result.skipped++;
+        return;
+      }
+      throw e;
+    }
+
+    if (needsTicket) {
+      try {
+        const ticketId = await this._createTicket(channel, item, category);
+        await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
+      } catch (e) {
+        // Compensate the claim so the item is retried whole on the next
+        // sweep — preserves the pre-fix guarantee that an error leaves no
+        // partial row behind.
+        await this.itemRepo.delete({ id: claimed.id });
+        throw e;
+      }
+      result.ticketed++;
+    } else if (status === 'noise' || status === 'question') {
+      result[status]++;
+    } else {
+      result.held++;
+    }
   }
 
   private async _createTicket(channel: OutreachChannel, item: InboundItem, category: OutreachCategory): Promise<string> {

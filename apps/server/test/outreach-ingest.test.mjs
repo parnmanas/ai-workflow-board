@@ -16,6 +16,9 @@
 //     no gap (restart criterion).
 //   • a per-item processing error does not crash the poll and freezes the
 //     cursor before the failure point, so the item is retried, not lost.
+//   • two overlapping polls racing on the SAME external item (Promise.all,
+//     real sqljs unique index) still produce exactly one ticket and one
+//     ledger row (review fix).
 
 import 'reflect-metadata';
 import test from 'node:test';
@@ -308,6 +311,44 @@ test('a per-item processing error does not crash the poll and freezes the cursor
 
     const items = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(items.length, 0, 'a failed item leaves no partial row — it is safe to retry from scratch');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('two pollChannel sweeps racing on the same external item create exactly one ticket and one ledger row', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-race': { category: 'bug', confidence: 90 } });
+    const raceItem = item({ external_item_id: 'gh-race', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    // Two independent connectors both surface the SAME item, polled through
+    // the SAME service/DataSource via Promise.all — simulates two
+    // overlapping worker sweeps (or two overlapping poll intervals) both
+    // observing the item as unprocessed before either commits a dedupe row.
+    // Against the real sqljs unique index, this is the scenario the review
+    // fix closes: the dedupe row is now claimed BEFORE _createTicket() runs,
+    // so only one sweep can ever reach ticket creation for this item.
+    const [resultA, resultB] = await Promise.all([
+      svc.pollChannel(channel, makeConnector([raceItem]), new Date('2026-06-25T12:00:00Z')),
+      svc.pollChannel(channel, makeConnector([raceItem]), new Date('2026-06-25T12:00:00Z')),
+    ]);
+
+    const tickets = await dataSource.getRepository(Ticket).find();
+    assert.equal(tickets.length, 1, 'exactly one ticket created across both concurrent sweeps');
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1, 'exactly one ledger row across both concurrent sweeps');
+    assert.equal(items[0].status, 'ticketed');
+    assert.equal(items[0].ticket_id, tickets[0].id);
+
+    assert.equal(resultA.ticketed + resultB.ticketed, 1, 'exactly one sweep reports a ticket created');
+    assert.equal(resultA.skipped + resultB.skipped, 1, 'the losing sweep reports a skip, not a silent drop or an error');
+    assert.equal(resultA.errors, 0);
+    assert.equal(resultB.errors, 0);
   } finally {
     await dataSource.destroy();
   }
