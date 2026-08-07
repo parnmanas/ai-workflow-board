@@ -22,6 +22,12 @@ export class OutreachCredentialResolutionError extends Error {
 export interface OutreachCredential {
   username?: string;
   token: string;
+  // Every OTHER string field the credential blob carries beyond
+  // username/token/api_key — e.g. Reddit's `client_id`/`client_secret`
+  // (ticket d86d0c24 C1). A connector that needs channel-specific fields
+  // reads them from here instead of this module growing a per-kind return
+  // shape; fields that aren't plain strings (or are empty) are dropped.
+  extra: Record<string, string>;
 }
 
 /** Accepts a GLOBAL credential (workspace_id=NULL) or one scoped to
@@ -47,7 +53,14 @@ export async function resolveOutreachCredential(
     const data = JSON.parse(decryptStrict(cred.encrypted_data));
     const token = String(data.token || data.api_key || '').trim();
     if (!token) throw new OutreachCredentialResolutionError('Selected credential has no token');
-    return { username: data.username ? String(data.username).trim() : undefined, token };
+    const extra: Record<string, string> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key === 'token' || key === 'api_key' || key === 'username') continue;
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed) extra[key] = trimmed;
+    }
+    return { username: data.username ? String(data.username).trim() : undefined, token, extra };
   } catch (err: any) {
     if (err instanceof OutreachCredentialResolutionError) throw err;
     throw new OutreachCredentialResolutionError(`Selected credential is unreadable: ${String(err?.message || err)}`);

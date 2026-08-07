@@ -28,7 +28,7 @@ test('a GLOBAL credential (workspace_id=null) resolves regardless of caller work
     id: 'cred-1', workspace_id: null,
     encrypted_data: JSON.stringify({ token: 'global-token' }),
   }), 'cred-1', 'ws-1');
-  assert.deepEqual(resolved, { username: undefined, token: 'global-token' });
+  assert.deepEqual(resolved, { username: undefined, token: 'global-token', extra: {} });
 });
 
 test('a credential scoped to the SAME workspace resolves', async () => {
@@ -36,7 +36,58 @@ test('a credential scoped to the SAME workspace resolves', async () => {
     id: 'cred-1', workspace_id: 'ws-1',
     encrypted_data: JSON.stringify({ token: 'ws-token' }),
   }), 'cred-1', 'ws-1');
-  assert.deepEqual(resolved, { username: undefined, token: 'ws-token' });
+  assert.deepEqual(resolved, { username: undefined, token: 'ws-token', extra: {} });
+});
+
+test('extra passthrough: non-standard string fields (e.g. Reddit client_id/client_secret) survive', async () => {
+  const resolved = await resolveOutreachCredential(repoWith({
+    id: 'cred-1', workspace_id: 'ws-1',
+    encrypted_data: JSON.stringify({
+      token: 'refresh-token-abc',
+      username: 'bot-user',
+      client_id: 'reddit-client-id',
+      client_secret: 'reddit-client-secret',
+      auth_mode: 'installed_app',
+    }),
+  }), 'cred-1', 'ws-1');
+  assert.deepEqual(resolved, {
+    username: 'bot-user',
+    token: 'refresh-token-abc',
+    extra: { client_id: 'reddit-client-id', client_secret: 'reddit-client-secret', auth_mode: 'installed_app' },
+  });
+});
+
+test('extra passthrough drops non-string fields and empty strings', async () => {
+  const resolved = await resolveOutreachCredential(repoWith({
+    id: 'cred-1', workspace_id: 'ws-1',
+    encrypted_data: JSON.stringify({ token: 'tok', extra_num: 42, extra_empty: '  ', extra_null: null }),
+  }), 'cred-1', 'ws-1');
+  assert.deepEqual(resolved.extra, {});
+});
+
+test('a credential with no token still throws even when extra fields are present', async () => {
+  await assert.rejects(
+    resolveOutreachCredential(repoWith({
+      id: 'cred-1', workspace_id: 'ws-1',
+      encrypted_data: JSON.stringify({ client_id: 'x', client_secret: 'y' }),
+    }), 'cred-1', 'ws-1'),
+    /has no token/,
+  );
+});
+
+test('client_secret in the blob never leaks into a thrown error message', async () => {
+  const secret = 'super-secret-reddit-client-secret';
+  let caught = null;
+  try {
+    await resolveOutreachCredential(repoWith({
+      id: 'cred-1', workspace_id: 'ws-other',
+      encrypted_data: JSON.stringify({ token: 'tok', client_secret: secret }),
+    }), 'cred-1', 'ws-1');
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught instanceof OutreachCredentialResolutionError);
+  assert.doesNotMatch(caught.message, new RegExp(secret));
 });
 
 test('a credential scoped to a DIFFERENT workspace is rejected, not silently ignored', async () => {
