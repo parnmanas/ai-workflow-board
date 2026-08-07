@@ -39,6 +39,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { ColumnPoliciesModule } from '../column-policies/column-policies.module';
 import { SkillsModule } from '../skills/skills.module';
+import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 
 @Module({
   // forwardRef avoids the AgentsModule ↔ AgentManagerModule cycle:
@@ -57,6 +58,10 @@ import { SkillsModule } from '../skills/skills.module';
     // consumer inside the stuck detector sweep (ticket f886ada7).
     ColumnPoliciesModule,
     SkillsModule,
+    // WorkspaceRolesModule exports TicketRoleAssignmentService — BacklogPromotionService
+    // uses applyBoardDefaults to auto-backfill a vacant role after the ticket bb5b9aed
+    // threshold. No cycle: WorkspaceRolesModule only imports TypeOrmModule.
+    WorkspaceRolesModule,
   ],
   controllers: [
     AgentsController,

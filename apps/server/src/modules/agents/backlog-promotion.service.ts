@@ -74,6 +74,21 @@
  *   ineligible" gate. The audit trail records each skip as
  *   `backlog_promotion_skipped_focus_held` with `holder=` and
  *   `focus_ticket_id=` (the window head) in `new_value`.
+ *
+ * Vacant-role auto-backfill (ticket bb5b9aed): `backlog_promotion_skipped_focus_held`
+ * is a self-resolving wait (the holder will free up), but
+ * `backlog_promotion_skipped_role_unfilled` is NOT — a role nobody holds never
+ * fills itself no matter how many times `levelSweep` retries. Left alone this is
+ * a permanent stall the two triggers above can't break: the ticket sits in
+ * intake, correctly audited, until a human manually assigns the role. Once a
+ * role-unfilled skip has persisted for `BACKLOG_PROMOTION_ROLE_BACKFILL_MS`
+ * (default 30 min — see `_maybeBackfillVacantRole`), the vacant role is filled
+ * ONCE from the board's `default_role_assignments` (same helper + same
+ * never-overwrite-an-existing-holder guarantee as ticket creation's own
+ * backfill). A board with no default for that slug is left alone — no infinite
+ * retry, no silent auto-assignment guess; the promotion-delay alert
+ * (`StuckTicketDetectorService`) says so explicitly so a human knows to staff
+ * the board default.
  */
 import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -87,8 +102,10 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
+import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
+import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { priorityIndex } from './priority';
 
 function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
@@ -108,10 +125,30 @@ function readLevelSweepMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : LEVEL_SWEEP_DEFAULT_MS;
 }
 
+// Vacant-role auto-backfill threshold (ticket bb5b9aed). A destination role
+// that has read `backlog_promotion_skipped_role_unfilled` for at least this
+// long gets ONE auto-backfill attempt from the board's
+// `default_role_assignments`. Measured from the skip audit row's
+// `created_at` — `_writeSkipAuditIfChanged` only rewrites that row when the
+// vacancy's (ticket, role) pair actually changes, so an unchanged row's
+// timestamp IS the vacancy's true start, no separate counter needed.
+// Default 30 min = 6 ticks at the default 5-min level-sweep interval.
+const ROLE_BACKFILL_DEFAULT_MS = 30 * 60_000;
+
+function readRoleBackfillThresholdMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.BACKLOG_PROMOTION_ROLE_BACKFILL_MS;
+  if (raw == null || raw === '') return ROLE_BACKFILL_DEFAULT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : ROLE_BACKFILL_DEFAULT_MS;
+}
+
 // Exposed for unit tests so a spec can assert env parsing without touching
 // the host environment — mirrors the __test__ export pattern used by
 // StuckTicketDetectorService.
-export const __test__ = { readLevelSweepMsFromEnv, LEVEL_SWEEP_DEFAULT_MS };
+export const __test__ = {
+  readLevelSweepMsFromEnv, LEVEL_SWEEP_DEFAULT_MS,
+  readRoleBackfillThresholdMsFromEnv, ROLE_BACKFILL_DEFAULT_MS,
+};
 
 // `triggered_by` marker for level-sweep-driven promotions (as opposed to an
 // agent_idle edge event, which stamps the freed agent's id). Exported so
@@ -135,6 +172,7 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
     private readonly agentWorkload: AgentWorkloadService,
+    private readonly ticketRoleAssignmentService: TicketRoleAssignmentService,
     // forwardRef preserved purely as a defensive measure: BacklogPromotion
     // and TriggerLoop share AgentWorkloadService and don't strictly need
     // a forward edge after the dispatch queue removal, but keeping it
@@ -476,6 +514,12 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           await this._writeSkipAuditIfChanged(
             ticket.id, skipReason.action, skipReason.slug, skipReason.newValue,
           );
+          // Vacant-role auto-backfill (ticket bb5b9aed) — see class docstring.
+          // Only role-unfilled is a candidate; focus-held is a normal,
+          // self-resolving wait and must never trigger a role reassignment.
+          if (skipReason.action === 'backlog_promotion_skipped_role_unfilled') {
+            await this._maybeBackfillVacantRole(ticket, board, skipReason.slug);
+          }
         }
         continue;
       }
@@ -629,6 +673,69 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     } catch (e) {
       this.logService.warn('BacklogPromotion', 'skip audit write failed (continuing)', {
         err: String(e), ticket_id: ticketId, action,
+      });
+    }
+  }
+
+  /**
+   * One-time vacant-role auto-backfill (ticket bb5b9aed) — see class
+   * docstring "Vacant-role auto-backfill" for the rationale. No-op (and
+   * never separately retried — the normal `_writeSkipAuditIfChanged` dedup
+   * already caps how often this is even called) when:
+   *   - the vacancy hasn't persisted for `BACKLOG_PROMOTION_ROLE_BACKFILL_MS`
+   *     yet (measured from the skip audit row's `created_at`), or
+   *   - the board has no `default_role_assignments` entry for this slug, or
+   *   - `applyBoardDefaults` finds the role already filled (a concurrent
+   *     promotion path won the race) or every default holder has since been
+   *     deleted.
+   * Deliberately reuses `TicketRoleAssignmentService.applyBoardDefaults`
+   * rather than writing straight to `TicketRoleAssignment` — that keeps the
+   * "never overwrite an existing holder" guarantee and the deleted-holder
+   * filtering identical to every other board-default call site instead of a
+   * second, potentially-diverging implementation.
+   */
+  private async _maybeBackfillVacantRole(
+    ticket: Ticket,
+    board: Board,
+    slug: string,
+  ): Promise<void> {
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      const firstSkip = await activityLogRepo.findOne({
+        where: {
+          entity_type: 'ticket', entity_id: ticket.id,
+          action: 'backlog_promotion_skipped_role_unfilled', role: slug,
+        },
+        order: { created_at: 'DESC' },
+        select: ['id', 'created_at'],
+      });
+      if (!firstSkip) return;
+      const ageMs = Date.now() - new Date(firstSkip.created_at).getTime();
+      if (ageMs < readRoleBackfillThresholdMsFromEnv()) return;
+
+      const defaults = parseDefaultRoleAssignments(board.default_role_assignments);
+      const holders = defaults[slug];
+      if (!holders || holders.length === 0) return; // no board default — never backfill, never spam-retry
+
+      const applied = await this.ticketRoleAssignmentService.applyBoardDefaults(
+        ticket.id, ticket.workspace_id, { [slug]: holders },
+      );
+      if (!applied.some(a => a.slug === slug && a.applied > 0)) return;
+
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+        actor_id: 'system', actor_name: 'BacklogPromotionService',
+        action: 'backlog_promotion_role_backfilled',
+        role: slug,
+        new_value: `board=${board.id} role=${slug} vacant_ms=${ageMs}`,
+        trigger_source: 'backlog_promotion',
+      }));
+      this.logService.info('BacklogPromotion', 'auto-backfilled vacant role from board default', {
+        ticket_id: ticket.id, board_id: board.id, role: slug, vacant_ms: ageMs,
+      });
+    } catch (e) {
+      this.logService.warn('BacklogPromotion', 'role backfill attempt failed (continuing)', {
+        err: String(e), ticket_id: ticket.id, role: slug,
       });
     }
   }

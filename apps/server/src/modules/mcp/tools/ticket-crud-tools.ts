@@ -242,7 +242,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
       effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
       handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, title_template?, description_template?, assignee_id?, reporter_id?, reviewer_id?, labels?, priority?, effort_preset?, carry_attachments?, carry_attachment_ids? }] }`. When this ticket lands on a terminal column, HandoffService creates a follow-up ticket on the first hop\'s board (carrying this ticket\'s deliverable context) and hands the remaining hops to the follow-up — driving a multi-board relay (기획→그래픽→클라→QA) with zero human intervention. Omit / null / empty hops = no handoff.'),
-      skip_default_assignments: z.boolean().optional().default(false).describe('Opt OUT of the board\'s default_role_assignments backfill (ticket d94a1b87). When the board defines default role holders, any role left unstaffed by this call is auto-filled from that config so the new ticket lands on the loop without manual staffing. Set true to keep the roles you did NOT explicitly assign VACANT — e.g. QA orphan probes that need a true zero-holder ticket. Explicitly-assigned roles are unaffected either way.'),
+      skip_default_assignments: z.boolean().optional().default(false).describe('DEFAULT (false) already means "let the board default_role_assignments auto-staff any role I leave unassigned" (ticket d94a1b87) — do NOT set this true just to ask for that; false already does it. This flag is the opposite: an escape hatch to force a TRUE, PERMANENT zero-holder ticket (e.g. a QA orphan probe that specifically needs no holder) by SUPPRESSING the board-default backfill entirely, even if the board has one configured. Misreading it as "skip assigning myself, let the default handle it" produces the opposite of the intended result — a ticket invisible to BacklogPromotionService that never promotes. Explicitly-assigned roles (assignee_id/reporter_id/reviewer_id/role_assignments) are unaffected either way.'),
       created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
       created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
       created_by_id: z.string().optional().default('').describe('Creator ID'),
@@ -342,6 +342,25 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           const defBoard = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
           boardDefaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
         } catch { /* non-fatal — degrade to "no defaults" */ }
+      } else if ((col as any).kind === 'intake') {
+        // Diagnostic only (ticket bb5b9aed problem 3) — skip_default_assignments=true
+        // on an intake-column ticket, on a board that WOULD have auto-staffed it, is
+        // exactly the shape the 519fad18-trap misreading produces ("skip [my own]
+        // assignments, let the default handle it" — the opposite of what the flag
+        // does). A ticket created this way sits permanently zero-holder and
+        // structurally unpromotable with nothing in the DB distinguishing it from a
+        // deliberate QA orphan probe. Warn so this is visible at creation time
+        // instead of only surfacing hours later as a promotion-delay alert. Never
+        // fails the create — this flag's documented use is legitimate.
+        try {
+          const defBoard = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+          const wouldHaveDefaulted = Object.keys(parseDefaultRoleAssignments(defBoard?.default_role_assignments)).length > 0;
+          if (wouldHaveDefaulted) {
+            logger.warn('MCP', 'create_ticket: skip_default_assignments=true on an intake-column ticket with board defaults configured — this produces a permanent zero-holder ticket unless intentional (e.g. a QA orphan probe); false already auto-staffs unassigned roles from the board default', {
+              board_id: col.board_id, column_id: col.id,
+            });
+          }
+        } catch { /* diagnostic-only — never block the create */ }
       }
       const hasDefaultReporter = Array.isArray(boardDefaults['reporter']) && boardDefaults['reporter'].length > 0;
 

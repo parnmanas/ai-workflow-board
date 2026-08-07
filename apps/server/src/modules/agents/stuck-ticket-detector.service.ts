@@ -39,6 +39,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, LessThan, MoreThanOrEqual } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { ChatRoom } from '../../entities/ChatRoom';
@@ -49,6 +50,7 @@ import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Workspace } from '../../entities/Workspace';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
+import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
 import { AgentStatusService } from './agent-status.service';
@@ -485,7 +487,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       stats.flagged += 1;
     }
 
-    const delivered = await this._postPromotionDelayAlert(ticket, ageMs);
+    const delivered = await this._postPromotionDelayAlert(ticket, ageMs, currentColumn);
     if (delivered) {
       const wasDelivered = !!existingAlert.delivered_at;
       existingAlert.delivered_at = now;
@@ -494,15 +496,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     }
   }
 
-  private async _postPromotionDelayAlert(ticket: Ticket, ageMs: number): Promise<boolean> {
+  private async _postPromotionDelayAlert(ticket: Ticket, ageMs: number, column: BoardColumn): Promise<boolean> {
     const targetRoomId = await this._resolveAlertRoomId(ticket.workspace_id);
     if (!targetRoomId) return false;
     const ageH = Math.max(0, ageMs / 3_600_000);
+    const reasonSuffix = await this._resolvePromotionDelayReasonSuffix(ticket.id, column.board_id);
     try {
       await this.messaging.sendSystemMessage(targetRoomId, ticket.workspace_id, [
         `⛔ **Promotion-delay detected** — \`${ticket.id}\``,
         `**${ticket.title}**`,
-        `Cause: promotion-delay · waiting in intake for ${ageH.toFixed(1)}h`,
+        `Cause: promotion-delay · waiting in intake for ${ageH.toFixed(1)}h${reasonSuffix}`,
         `[Open ticket](/ws/${ticket.workspace_id}/ticket/${ticket.id})`,
       ].join('\n\n'));
       return true;
@@ -511,6 +514,62 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         err: String(e), ticket_id: ticket.id,
       });
       return false;
+    }
+  }
+
+  /**
+   * Compose a `· 사유: …` suffix for the promotion-delay alert from the
+   * ticket's latest `backlog_promotion_skipped_*` audit row (ticket bb5b9aed).
+   * `BacklogPromotionService` already knows precisely why a candidate can't
+   * promote — this just surfaces that instead of making every alert
+   * recipient go dig through activity logs to tell "role never staffed"
+   * (needs a human) apart from "holder's focus window is full" (self-resolves,
+   * no action needed) apart from "not evaluated yet" (no row at all).
+   * Returns '' (message text unchanged, matching the pre-bb5b9aed wording)
+   * when no skip row exists — a candidate can sit un-evaluated when e.g. the
+   * board is paused or the destination column has no routed role, neither of
+   * which writes a per-ticket audit row.
+   */
+  private async _resolvePromotionDelayReasonSuffix(ticketId: string, boardId: string): Promise<string> {
+    try {
+      const row = await this.dataSource.getRepository(ActivityLog).findOne({
+        where: {
+          entity_type: 'ticket',
+          entity_id: ticketId,
+          action: In(['backlog_promotion_skipped_role_unfilled', 'backlog_promotion_skipped_focus_held']),
+        },
+        order: { created_at: 'DESC' },
+        select: ['action', 'role', 'new_value'],
+      });
+      if (!row) return '';
+
+      if (row.action === 'backlog_promotion_skipped_role_unfilled') {
+        const slug = row.role || '역할';
+        const board = await this.dataSource.getRepository(Board)
+          .findOne({ where: { id: boardId }, select: ['id', 'default_role_assignments'] });
+        const defaults = parseDefaultRoleAssignments(board?.default_role_assignments);
+        const hasDefault = Array.isArray(defaults[slug]) && defaults[slug].length > 0;
+        return hasDefault
+          ? ` · 사유: ${slug} 역할 공석 (보드 기본 담당자로 자동 복구 대기 중)`
+          : ` · 사유: ${slug} 역할 공석 — 보드 기본 담당자 미설정, 자동 복구 불가 (담당자 수동 배정 필요)`;
+      }
+
+      // backlog_promotion_skipped_focus_held — new_value shape (see
+      // BacklogPromotionService.tryPromote): "board=… role=… holder=… focus_ticket_id=…".
+      const holderId = /holder=(\S+)/.exec(row.new_value || '')?.[1] || '';
+      const focusTicketId = /focus_ticket_id=(\S+)/.exec(row.new_value || '')?.[1] || '';
+      let holderName = holderId;
+      if (holderId) {
+        const agent = await this.dataSource.getRepository(Agent)
+          .findOne({ where: { id: holderId }, select: ['id', 'name'] });
+        if (agent?.name) holderName = agent.name;
+      }
+      return ` · 사유: ${holderName || '담당자'}의 focus window 포화 (점유 티켓 ${focusTicketId || '미상'}) — 대기 정상, 조치 불필요일 수 있음`;
+    } catch (e) {
+      this.logService.warn('StuckDetector', 'promotion-delay reason lookup failed (continuing)', {
+        err: String(e), ticket_id: ticketId,
+      });
+      return '';
     }
   }
 

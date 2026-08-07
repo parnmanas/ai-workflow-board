@@ -9,11 +9,13 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { Board } from '../../../entities/Board';
 import { Channel } from '../../../entities/Channel';
 import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
-import { findColumnByName, maxTicketPosition, maxChildPosition, shiftTicketPositions } from '../shared/ticket-helpers';
+import { findColumnByName, maxTicketPosition, maxChildPosition, shiftTicketPositions, refreshTicketWorkspaceId } from '../shared/ticket-helpers';
+import { parseDefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import type { ToolContext } from './context';
@@ -113,7 +115,12 @@ export function registerMiscTools(server: McpServer, ctx: ToolContext): void {
     'batch_operations',
     `Execute multiple operations in a single transaction. Each operation object has an "action" field.
 Supported actions:
-  - create-ticket: { action, boardId?, column, title, description?, priority?, assignee? }
+  - create-ticket: { action, boardId?, column, title, description?, priority?, assignee?, assignee_id?, reporter_id?, reviewer_id? }
+    (assignee_id/reporter_id/reviewer_id wire the builtin role-assignment trio — same mechanism create_ticket/REST
+    POST use. Any of the three left unstaffed is then backfilled from the board's default_role_assignments, same
+    auto-staffing every other ticket-creation surface performs. Previously this path skipped both steps entirely,
+    so a ticket created here was always zero-holder — invisible to BacklogPromotionService — even when the board
+    had defaults configured.)
   - move-ticket: { action, boardId?, ticketId, toColumn, position?, force? }
   - add-child: { action, ticketId, title } (also accepts legacy "add-subtask")
   - update-child: { action, ticketId, title?, status? } (also accepts legacy "update-subtask" with subtaskId)
@@ -146,6 +153,30 @@ human/operator escape hatch, not an agent's way around consensus.`,
                   column_id: col.id, title: String(op.title), description: String(op.description || ''),
                   priority: String(op.priority || 'medium'), assignee: String(op.assignee || ''), labels: '[]', position: pos,
                 }));
+
+                // 역할 배선 + 보드 default 백필 (ticket bb5b9aed). 이전에는 tRepo.save()
+                // 직접 insert만 하고 workspace_id 백필도, syncBuiltinTrio/applyBoardDefaults
+                // 호출도 전혀 하지 않아 보드 default가 있어도 이 경로로 만든 티켓은 항상
+                // zero-holder로 남아 승격되지 않았다. MCP create_ticket / REST POST와
+                // 동일한 순서(workspace_id 백필 → 명시적 배선 → board default 백필)로 맞춘다.
+                await refreshTicketWorkspaceId(manager, r);
+                if (ticketRoleAssignmentService && r.workspace_id) {
+                  await ticketRoleAssignmentService.syncBuiltinTrio(r.id, r.workspace_id, {
+                    assignee_id: op.assignee_id !== undefined ? String(op.assignee_id) : undefined,
+                    reporter_id: op.reporter_id !== undefined ? String(op.reporter_id) : undefined,
+                    reviewer_id: op.reviewer_id !== undefined ? String(op.reviewer_id) : undefined,
+                  });
+                  const board = await manager.getRepository(Board).findOne({ where: { id: col.board_id } });
+                  const boardDefaults = parseDefaultRoleAssignments(board?.default_role_assignments);
+                  if (Object.keys(boardDefaults).length > 0) {
+                    await ticketRoleAssignmentService.applyBoardDefaults(r.id, r.workspace_id, boardDefaults);
+                  }
+                }
+                await activityService.logActivity({
+                  entity_type: 'ticket', entity_id: r.id, action: 'created',
+                  ticket_id: r.id, actor_name: String(op.assignee || 'batch_operations'),
+                });
+
                 results.push({ success: true, ticketId: r.id });
                 break;
               }
