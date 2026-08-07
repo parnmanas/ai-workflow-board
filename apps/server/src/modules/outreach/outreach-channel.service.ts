@@ -13,6 +13,7 @@ import { OutreachChannel, OutreachChannelKind, OutreachPublishPolicy } from '../
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { Credential } from '../../entities/Credential';
 import { Board } from '../../entities/Board';
+import { Agent } from '../../entities/Agent';
 import { findOrFail } from '../../common/find-or-fail';
 import { isValidCron } from '../qa/qa-cron';
 import { OutreachPollingService } from './outreach-polling.service';
@@ -41,6 +42,7 @@ export interface CreateChannelInput {
   pollIntervalMs?: number;
   pollCron?: string | null;
   classifyThreshold?: number;
+  classifierAgentId?: string | null;
 }
 
 export type UpdateChannelInput = Partial<Omit<CreateChannelInput, 'workspaceId'>>;
@@ -59,6 +61,7 @@ export class OutreachChannelService {
     @InjectRepository(OutreachInboundItem) private readonly itemRepo: Repository<OutreachInboundItem>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly pollingService: OutreachPollingService,
   ) {}
 
@@ -82,6 +85,7 @@ export class OutreachChannelService {
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     await this._assertCredentialScope(input.credentialId ?? null, input.workspaceId);
     const targetBoardId = await this._assertBoardScope(input.targetBoardId ?? null, input.workspaceId);
+    const classifierAgentId = await this._assertAgentScope(input.classifierAgentId ?? null, input.workspaceId);
 
     const draft = this.channelRepo.create({
       workspace_id: input.workspaceId,
@@ -99,6 +103,7 @@ export class OutreachChannelService {
       last_poll_at: null,
       since_cursor: '',
       classify_threshold: this._validateThreshold(input.classifyThreshold),
+      classifier_agent_id: classifierAgentId,
     });
     draft.next_poll_at = this.pollingService.computeNextPoll(draft, new Date());
     return this.channelRepo.save(draft);
@@ -126,6 +131,9 @@ export class OutreachChannelService {
     if (patch.publishPolicy !== undefined) channel.publish_policy = this._validatePolicy(patch.publishPolicy);
     if (patch.rateLimitPerHour !== undefined) channel.rate_limit_per_hour = this._validateRateLimit(patch.rateLimitPerHour);
     if (patch.classifyThreshold !== undefined) channel.classify_threshold = this._validateThreshold(patch.classifyThreshold);
+    if (patch.classifierAgentId !== undefined) {
+      channel.classifier_agent_id = await this._assertAgentScope(patch.classifierAgentId || null, channel.workspace_id);
+    }
 
     // Cadence / enable-state — recompute next_poll_at whenever any of these
     // could have moved it, same contract QaScheduleService.update documents.
@@ -202,6 +210,18 @@ export class OutreachChannelService {
     const board = await this.boardRepo.findOne({ where: { id: boardId, workspace_id: workspaceId } });
     if (!board) throw makeError(400, 'target_board_id must reference a board in this workspace');
     return board.id;
+  }
+
+  /** A configured classifier_agent_id must belong to the channel's own
+   *  workspace — same "caught at save time, not silently ignored" contract
+   *  as _assertBoardScope. Unlike credentials, there is no "global" agent
+   *  concept to fall back to. */
+  private async _assertAgentScope(agentId: string | null, workspaceId: string): Promise<string | null> {
+    if (!agentId) return null;
+    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+    if (!agent) throw makeError(400, 'classifier_agent_id not found');
+    if (agent.workspace_id !== workspaceId) throw makeError(400, 'classifier_agent_id must belong to this workspace');
+    return agent.id;
   }
 
   private _validateCron(cron: string | null | undefined): string | null {

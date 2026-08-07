@@ -33,6 +33,7 @@ function channelToJson(c: OutreachChannel) {
     next_poll_at: c.next_poll_at,
     last_poll_at: c.last_poll_at,
     classify_threshold: c.classify_threshold,
+    classifier_agent_id: c.classifier_agent_id,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
@@ -40,11 +41,11 @@ function channelToJson(c: OutreachChannel) {
 
 /**
  * REST surface for OutreachChannel (ticket 2500fea3 step 7) — "채널 등록/상태
- * 확인을 위한 최소 REST 엔드포인트" from the ticket's scope. No MCP tools are
- * added for this (ticket's explicit infra decision — see the Plan comment):
- * adding tools would grow qa-flows/mcp-tools-surface.test.mjs's EXPECTED_TOOLS
- * and require an awb-plugin-sync version bump for a feature that has no agent
- * consumer yet (Reddit/GitHub polling is fully automatic).
+ * 확인을 위한 최소 REST 엔드포인트" from the ticket's scope. 2500fea3 itself added
+ * no MCP tools (Reddit/GitHub polling was fully automatic, no agent consumer
+ * yet); ticket 20fa0197's AgentDispatchClassifier is that first consumer, so
+ * `record_outreach_classification` lives in mcp/tools/outreach-tools.ts —
+ * this REST controller only ever handled channel CRUD/status, unaffected.
  *
  * Gated on MANAGE_RESOURCES — an OutreachChannel is, shape-wise, a workspace
  * catalog item that attaches a Credential exactly like Resource does, so it
@@ -104,6 +105,7 @@ export class OutreachController {
         pollIntervalMs: body?.poll_interval_ms,
         pollCron: body?.poll_cron ?? null,
         classifyThreshold: body?.classify_threshold,
+        classifierAgentId: body?.classifier_agent_id ?? null,
       });
       return res.status(201).json(channelToJson(row));
     } catch (e: any) {
@@ -130,6 +132,7 @@ export class OutreachController {
         pollIntervalMs: body?.poll_interval_ms,
         pollCron: body?.poll_cron,
         classifyThreshold: body?.classify_threshold,
+        classifierAgentId: body?.classifier_agent_id,
       });
       return res.json(channelToJson(row));
     } catch (e: any) {
