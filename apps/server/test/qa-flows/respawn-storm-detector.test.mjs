@@ -43,7 +43,7 @@ let subCounter = 0;
 async function seedSubagent(subRepo, {
   workspaceId, ticketId, role, startedAt, endedAt = null,
   exitCode = null, signal = null, durationMs = null, lineCount = 0,
-  agentId = 'agent-fixture',
+  agentId = 'agent-fixture', sessionKey = null,
 }) {
   subCounter += 1;
   return subRepo.save(subRepo.create({
@@ -51,7 +51,7 @@ async function seedSubagent(subRepo, {
     agent_id: agentId,
     workspace_id: workspaceId,
     kind: 'ticket',
-    session_key: `${ticketId}:${role}`,
+    session_key: sessionKey ?? `${ticketId}:${role}`,
     pid: 1000 + subCounter,
     started_at: startedAt,
     ticket_id: ticketId,
@@ -98,6 +98,10 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
     'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'respawn-storm-detector.service.js')
   );
   const detector = app.get(detectorModule.RespawnStormDetectorService);
+  const agentStatusModule = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'agent-status.service.js')
+  );
+  const agentStatus = app.get(agentStatusModule.AgentStatusService);
 
   step('Seed workspace + board + columns + chat alerts room');
   const ws = await createWorkspace(app, getDataSourceToken, 'storm');
@@ -270,6 +274,12 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
       columnId: inProgress.id, workspaceId: ws.id, title: 'twin echo', assigneeId: alice.id,
     });
     const firstStrandStartedAt = new Date(now.getTime() - 3 * MIN);
+    // Both agents also hold a LIVE AgentStatusService seat (set_current_task,
+    // never cleared) — a genuine twin has both signals: an unended Subagent
+    // row AND a live dispatch-gate seat. The false-positive regression below
+    // is what exercises the case where only the (stale) DB signal remains.
+    await agentStatus.setCurrentTask('agent-twin-early', ticket.id, 'assignee');
+    await agentStatus.setCurrentTask('agent-twin-late', ticket.id, 'assignee');
     await seedSubagent(subRepo, {
       workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
       startedAt: firstStrandStartedAt, endedAt: null, agentId: 'agent-twin-early',
@@ -297,6 +307,89 @@ test('RespawnStormDetectorService — storm halt + false-positive regression + t
       payload.first_seen_at,
       firstStrandStartedAt.toISOString(),
       'twin payload records the loop start (earliest-started live strand)',
+    );
+  });
+
+  // ── Twin false-positive regression (ticket d35b8ac8) ────────────────────
+  await t.test('Twin false-positive: a cross-agent exited-but-not-yet-reconciled strand is not counted live', async () => {
+    step('Create ticket + 2 subagent rows (2 distinct agents) both ended_at=null, but only ONE agent still holds a live seat');
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: inProgress.id, workspaceId: ws.id, title: 'twin false-positive cross-agent', assigneeId: alice.id,
+    });
+    // "Exited" strand — the process actually exited and released its
+    // AgentStatusService seat (clear_current_task fired), but the
+    // agent-manager's fire-and-forget /end POST (or the 5-min reconcile
+    // backstop) has not yet reached the server, so the Subagent row still
+    // reads ended_at=null.
+    await agentStatus.setCurrentTask('agent-exited', ticket.id, 'assignee');
+    agentStatus.clearCurrentTask('agent-exited', ticket.id);
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
+      startedAt: new Date(now.getTime() - 3 * MIN), endedAt: null, agentId: 'agent-exited',
+    });
+    // Genuinely live strand of a DIFFERENT agent — both a fresh current_task
+    // AND an unended row.
+    await agentStatus.setCurrentTask('agent-live', ticket.id, 'assignee');
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
+      startedAt: new Date(now.getTime() - 1 * MIN), endedAt: null, agentId: 'agent-live',
+    });
+
+    step('Sweep: the ended_at=null pair alone would have been a twin under the old ended_at-only check');
+    await detector.sweep(now);
+
+    const twinAct = await activityRepo.find({
+      where: { ticket_id: ticket.id, action: 'respawn_twin_detected' },
+    });
+    assert.equal(
+      twinAct.length,
+      0,
+      'no respawn_twin_detected — hasLiveRoleStrand excludes the strand whose seat was already released',
+    );
+  });
+
+  // ── Twin false-positive regression, SAME agent (ticket d35b8ac8 review) ──
+  await t.test('Twin false-positive: a SAME-agent stale strand is not counted live alongside its live respawn', async () => {
+    step('Create ticket + 2 subagent rows for the SAME agent_id (distinct subagent_id/session_key/pid), both ended_at=null');
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: inProgress.id, workspaceId: ws.id, title: 'twin false-positive same-agent', assigneeId: alice.id,
+    });
+    // Reproduces the actual live incident (reviewer blocker 1): a per-row
+    // check that only asks "is this agent_id's SEAT live" can't distinguish a
+    // stale row from the strand that replaced it when BOTH rows share the
+    // same agent_id — hasLiveRoleStrand(agent_id, ticket, role) returns the
+    // same true/false verdict for every row of that agent regardless of which
+    // specific row it is being asked about.
+    //
+    // Strand A — actually exited and released its AgentStatusService seat,
+    // but its Subagent row has not yet been reconciled (ended_at=null).
+    await agentStatus.setCurrentTask('agent-same', ticket.id, 'assignee');
+    agentStatus.clearCurrentTask('agent-same', ticket.id);
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
+      startedAt: new Date(now.getTime() - 3 * MIN), endedAt: null, agentId: 'agent-same',
+      sessionKey: 'session-strand-A',
+    });
+    // Strand B — the genuinely live respawn of the SAME (agent, ticket, role)
+    // seat. set_current_task's "newest wins" compare-and-swap means B's call
+    // overwrote A's seat entry — the seat is live, but only B backs it.
+    await agentStatus.setCurrentTask('agent-same', ticket.id, 'assignee');
+    await seedSubagent(subRepo, {
+      workspaceId: ws.id, ticketId: ticket.id, role: 'assignee',
+      startedAt: new Date(now.getTime() - 1 * MIN), endedAt: null, agentId: 'agent-same',
+      sessionKey: 'session-strand-B',
+    });
+
+    step('Sweep: a per-row hasLiveRoleStrand(agent_id) check alone would count BOTH rows live (same agent_id, seat is live)');
+    await detector.sweep(now);
+
+    const twinAct = await activityRepo.find({
+      where: { ticket_id: ticket.id, action: 'respawn_twin_detected' },
+    });
+    assert.equal(
+      twinAct.length,
+      0,
+      'no respawn_twin_detected — only the freshest same-agent open strand is cross-checked against the live seat',
     );
   });
 

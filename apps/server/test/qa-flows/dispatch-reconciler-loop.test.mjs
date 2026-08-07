@@ -296,6 +296,86 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     await reconciler.reconcile(new Date());
     assert.equal((await intentRepo.findOne({ where: { id: seeded.id } })).status, 'in_flight', 'the seeded review-column intent is dispatched on the next sweep');
   });
+
+  await t.test('12: escalation recovery message names the in-flight-strand cause, not the generic checklist (ticket d35b8ac8)', async () => {
+    // The reconciler's escalation `recovery` text used to be a single
+    // hardcoded string ("verify agent online / worktree pool / focus
+    // capacity") regardless of why the reconciler kept re-dispatching. Three
+    // live incidents all had an online agent, a healthy worktree pool, and no
+    // pending gate — the actual cause was a same-(agent,ticket,role) strand
+    // still running, and the generic text sent a human looking in the wrong
+    // place. Seed an intent with the exact `last_reason` shape
+    // trigger-loop.service.ts's in-flight-strand gate now writes (including
+    // the blocking strand's live-since timestamp) and assert the escalation
+    // names that cause instead.
+    const ticket = await mkTicket('escalation names the inflight strand');
+    const liveSince = new Date(Date.now() - 5 * 60_000).toISOString();
+    const strandId = 'sub-blocking-strand-1234';
+    await intents.recordOwed({
+      workspaceId: ws.id, boardId: board.id, ticketId: ticket.id, role: 'assignee', agentId: agent.id,
+      triggerSource: 'supervisor',
+      reason: `inflight_strand_serialization queued_for_replay=true strand_id=${strandId} strand_live_since=${liveSince}`,
+    });
+    const intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    // Fast-forward straight to the escalation threshold: attempts=2 so
+    // claimForDispatch's +1 crosses the default escalateAfterAttempts=3.
+    await intentRepo.update(intent.id, {
+      attempts: 2, status: 'pending', next_attempt_at: new Date(Date.now() - 1000),
+      lease_owner: '', lease_expires_at: null,
+    });
+
+    await reconciler.reconcile(new Date());
+
+    const escalations = await ds.getRepository('ActivityLog').find({
+      where: { ticket_id: ticket.id, action: 'dispatch_intent_escalated' },
+    });
+    assert.equal(escalations.length, 1, 'exactly one escalation row');
+    const payload = JSON.parse(escalations[0].new_value);
+    assert.doesNotMatch(
+      payload.recovery,
+      /verify agent online \/ worktree pool \/ focus capacity/,
+      'the misdirecting generic checklist must not be used when the real cause is an inflight strand',
+    );
+    assert.match(payload.recovery, /still running as a process/i, 'the recovery text names the actual blocking-strand cause');
+    assert.ok(
+      payload.recovery.includes(liveSince),
+      "the recovery text surfaces the blocking strand's live-since timestamp (strand id/start-time requirement)",
+    );
+    assert.ok(
+      payload.recovery.includes(strandId),
+      'the recovery text surfaces the blocking strand identifier itself (review blocker, ticket d35b8ac8)',
+    );
+    assert.ok(payload.recovery.includes(agent.id), 'the recovery text names the blocking agent');
+  });
+
+  await t.test('13: escalation keeps the generic recovery message for a non-inflight-strand reason', async () => {
+    // Control case: a genuinely capacity/reachability-shaped stall must keep
+    // getting the original generic guidance — this fix is conditional, not a
+    // wholesale replacement of the escalation message.
+    const ticket = await mkTicket('escalation keeps generic guidance');
+    await intents.recordOwed({
+      workspaceId: ws.id, boardId: board.id, ticketId: ticket.id, role: 'assignee', agentId: agent.id,
+      triggerSource: 'supervisor', reason: 'focus_window_capacity cap=1',
+    });
+    const intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    await intentRepo.update(intent.id, {
+      attempts: 2, status: 'pending', next_attempt_at: new Date(Date.now() - 1000),
+      lease_owner: '', lease_expires_at: null,
+    });
+
+    await reconciler.reconcile(new Date());
+
+    const escalations = await ds.getRepository('ActivityLog').find({
+      where: { ticket_id: ticket.id, action: 'dispatch_intent_escalated' },
+    });
+    assert.equal(escalations.length, 1, 'exactly one escalation row');
+    const payload = JSON.parse(escalations[0].new_value);
+    assert.match(
+      payload.recovery,
+      /verify agent online \/ worktree pool \/ focus capacity/,
+      'a genuinely capacity-shaped stall still gets the original generic guidance',
+    );
+  });
 });
 
 test.after?.(() => exitAfterTests(0));

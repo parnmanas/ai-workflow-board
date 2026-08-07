@@ -680,6 +680,87 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     assert.equal((await alertRepo.findOne({ where: { ticket_id: blocked.id } }))?.cause, 'no_progress',
       'stale pending flag without open prerequisite must not hide a stall');
   });
+
+  // ── (E) ticket 9df6c348 — promoted_from_intake must not be attributed to
+  // a manual rescue. A `promotion_delay` alert's resolution used to be
+  // labelled `promoted_from_intake` the instant the ticket left intake, with
+  // no check on WHAT moved it — masking exactly the level-triggered-backstop
+  // gap that ticket exists to fix (a human always having to manually rescue
+  // reads as "auto-promotion eventually succeeded").
+  await t.test('(E) manual column move out of intake reports manually_moved_from_intake, not promoted_from_intake', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: 'manual rescue from intake',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 3 * HOUR) });
+    await detector.sweep(now);
+    assert.equal((await alertRepo.findOne({ where: { ticket_id: ticket.id } }))?.cause, 'promotion_delay');
+
+    const before = await messageRepo.find({ where: { room_id: room.id } });
+    const beforeSystemCount = countSystemMessages(before);
+
+    // Human/operator moves the ticket directly — no BacklogPromotionService
+    // involved, so no `backlog_promoted` audit row exists for this ticket.
+    await ticketRepo.update(ticket.id, { column_id: todoCol.id });
+    await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'moved', field_changed: 'column', old_value: intake.id, new_value: todoCol.id,
+      actor_id: 'operator', actor_name: 'qa-human',
+    }));
+
+    await detector.sweep(new Date());
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
+
+    const after = await messageRepo.find({ where: { room_id: room.id } });
+    assert.equal(countSystemMessages(after) - beforeSystemCount, 1,
+      'exactly one unstuck message posted');
+    const unstuckMsg = after.find(m =>
+      m.sender_type === 'system' && /ticket_unstuck/.test(m.content) && m.content.includes(ticket.id));
+    assert.ok(unstuckMsg, 'unstuck message must reference the ticket');
+    assert.match(unstuckMsg.content, /reason:\s*manually_moved_from_intake/,
+      'a manual column move with no backlog_promoted row must NOT be mislabeled as auto-promotion');
+  });
+
+  await t.test('(E) genuine BacklogPromotionService move reports promoted_from_intake', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: 'genuine auto promotion',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 3 * HOUR) });
+    await detector.sweep(now);
+    assert.equal((await alertRepo.findOne({ where: { ticket_id: ticket.id } }))?.cause, 'promotion_delay');
+
+    const before = await messageRepo.find({ where: { room_id: room.id } });
+    const beforeSystemCount = countSystemMessages(before);
+
+    // Mirror BacklogPromotionService.tryPromote's own writes: the column
+    // move plus the `backlog_promoted` audit row (see backlog-promotion.
+    // service.ts).
+    await ticketRepo.update(ticket.id, { column_id: todoCol.id });
+    await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'moved', field_changed: 'column', old_value: intake.id, new_value: todoCol.id,
+      actor_id: 'system', actor_name: 'BacklogPromotionService', trigger_source: 'backlog_promotion',
+    }));
+    await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'backlog_promoted', actor_id: 'system', actor_name: 'BacklogPromotionService',
+      new_value:
+        `from=${intake.id} to=${todoCol.id} priority_index=2 chain_target=false ` +
+        `triggered_by=system:level_tick holders=`,
+      trigger_source: 'backlog_promotion',
+    }));
+
+    await detector.sweep(new Date());
+    assert.equal(await alertRepo.findOne({ where: { ticket_id: ticket.id } }), null);
+
+    const after = await messageRepo.find({ where: { room_id: room.id } });
+    assert.equal(countSystemMessages(after) - beforeSystemCount, 1,
+      'exactly one unstuck message posted');
+    const unstuckMsg = after.find(m =>
+      m.sender_type === 'system' && /ticket_unstuck/.test(m.content) && m.content.includes(ticket.id));
+    assert.ok(unstuckMsg, 'unstuck message must reference the ticket');
+    assert.match(unstuckMsg.content, /reason:\s*promoted_from_intake/,
+      'a genuine backlog_promoted row must be labeled as auto-promotion');
+  });
 });
 
 test.after?.(() => exitAfterTests(0));

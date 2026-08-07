@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { Subagent } from '../../entities/Subagent';
 import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { BoardColumn } from '../../entities/BoardColumn';
@@ -78,28 +79,30 @@ const AUTO_ADVANCE_ACTOR_NAME = 'Auto-Advance';
 const COMMENT_ACTION = 'created';
 const COMMENT_ENTITY = 'comment';
 
-// Transition-trigger preservation (ticket 1bcb0899). Trigger sources that
-// represent a ONE-SHOT workflow-state transition: they fire exactly once on a
-// move / chain hand-off / prerequisite unblock and are NOT re-fired by any
-// later organic event. If the in-flight-strand gate in `_emitTrigger` drops
-// one of these while a conflicting same-(agent, ticket, role) strand is still
-// live, the transition is lost forever — nothing re-fires it, so the ticket
-// strands until an unrelated event (the ~2.9h prereq-waiter rescue in the
-// source incident) happens to re-dispatch its column. Those sources are queued
-// for replay on the next `agent_idle`; every OTHER source is deliberately
-// excluded because it self-corrects:
-//   - 'comment' / 'ticket_update' re-fire on the next comment / field edit,
-//   - 'supervisor' re-fires every 60s tick (and escalates to force_respawn),
-//   - 'manual' is a deliberate user button press they can repeat,
-//   - 'inflight_strand_replay' is EXCLUDED on purpose so a replay that itself
-//     re-drops does not re-queue — that keeps the drain loop-free (a re-drop by
-//     the in-flight gate means a fresh strand now holds the seat, i.e. the
-//     ticket is being served, so there is nothing left to strand).
-const TRANSITION_TRIGGER_SOURCES = new Set<string>([
-  'column_move',
-  'next_ticket',
-  'prerequisite_resolved',
-]);
+// Transition-trigger preservation (ticket 1bcb0899, widened by d35b8ac8).
+// Originally only ONE-SHOT sources (column_move / next_ticket /
+// prerequisite_resolved) were queued for replay when the in-flight-strand
+// gate in `_emitTrigger` dropped them; every other source was assumed to
+// "self-correct" (a comment/ticket_update re-fires on the next edit, a
+// supervisor tick re-fires in ~60s). That assumption left a real gap: when
+// SEVERAL consecutive supervisor re-pushes land back-to-back while the SAME
+// blocking strand is still alive, none of them were queued, so nothing
+// replays the instant that strand actually frees — recovery depended on
+// whichever unrelated sweep happened to notice the ticket sitting idle
+// afterward (observed gaps of ~10 minutes across three live incidents; see
+// ticket d35b8ac8). A dropped trigger is real owed work regardless of why it
+// fired, so EVERY source is now queued for replay — see
+// REPLAY_LOOP_GUARD_SOURCE below for the one deliberate exception.
+
+// The ONLY trigger source excluded from the replay queue: a replay that
+// itself gets dropped by the in-flight gate must NOT re-queue itself, or a
+// seat that stays busy forever would loop the drain indefinitely. A re-drop
+// of an 'inflight_strand_replay' emit means a FRESH strand now holds the
+// seat (i.e. the ticket is being served), so there is nothing left to
+// strand — that fresh strand's own eventual exit fires its own agent_idle,
+// which is a NEW drop-and-(re)queue cycle if something is still owed, not a
+// re-queue of this stale entry.
+const REPLAY_LOOP_GUARD_SOURCE = 'inflight_strand_replay';
 
 // Upper bound a queued replay lingers if its owning agent never emits another
 // `agent_idle` to drain it. Set well above the strand TTL (CURRENT_TASK_STALE_MS
@@ -2339,25 +2342,65 @@ candidate's branch or move the ticket.
     // manager-side by the same defensive cap that guards the per-ticket limit
     // (stream-events.ts AgentTriggerPayload.max_concurrent_tickets_per_agent).
     if (opts?.forceRespawn !== true && this.agentStatus.hasLiveRoleStrand(agentId, ticket.id, role)) {
-      // Transition-trigger preservation (ticket 1bcb0899). Queue a one-shot
-      // transition (column_move / next_ticket / prerequisite_resolved) so the
-      // agent_idle drain replays it the instant the blocking strand frees,
-      // instead of leaving the ticket stranded until an unrelated event happens
-      // to re-dispatch its column. Enqueue SYNCHRONOUSLY (before any await) so a
-      // same-tick clearCurrentTask can't emit agent_idle between this gate check
-      // and the enqueue and miss it — single-threaded, so the check + set are
-      // atomic. Non-transition sources self-correct (see TRANSITION_TRIGGER_SOURCES)
-      // and are left unqueued.
-      const queuedForReplay = TRANSITION_TRIGGER_SOURCES.has(triggerSource);
+      // Queue for replay (ticket 1bcb0899, widened by d35b8ac8) so the
+      // agent_idle drain replays the drop the instant the blocking strand
+      // frees, instead of leaving the ticket stranded until an unrelated
+      // event happens to re-dispatch its column. Enqueue SYNCHRONOUSLY
+      // (before any await) so a same-tick clearCurrentTask can't emit
+      // agent_idle between this gate check and the enqueue and miss it —
+      // single-threaded, so the check + set are atomic. EVERY source is
+      // queued except REPLAY_LOOP_GUARD_SOURCE (see its definition above) —
+      // the sole exception needed to keep the drain loop-free.
+      const queuedForReplay = triggerSource !== REPLAY_LOOP_GUARD_SOURCE;
       if (queuedForReplay) {
         this._pendingTransitionReplays.set(
           this._transitionReplayKey(agentId, ticket.id, role),
           { agentId, ticketId: ticket.id, role, triggerSource, triggeredBy, queuedAt: Date.now(), attempts: 0 },
         );
       }
+      // Diagnostic-only (ticket d35b8ac8): when the blocking strand's
+      // start time is known, carry it on both the drop audit and the durable
+      // recovery-pointer reason so a human (or the reconciler's escalation
+      // message) can see WHICH strand is holding the seat and since when,
+      // instead of generic capacity-check advice that misdiagnoses an
+      // inflight strand as an agent/worktree/focus problem.
+      const liveSince = this.agentStatus.getLiveRoleStrandSince(agentId, ticket.id, role);
+      const liveSinceSuffix = liveSince ? ` strand_live_since=${liveSince.toISOString()}` : '';
+      // Blocking strand IDENTIFIER (review blocker, ticket d35b8ac8).
+      // AgentStatusService's in-memory seat has no subagent_id to hand back —
+      // its optional task_token is a per-session nonce agent-manager mints
+      // independently of subagent registration (unrelated UUID, confirmed by
+      // inspection; NOT a substitute id). The only durable identifier for
+      // "which strand" is Subagent.subagent_id, so look up the freshest
+      // still-open row for this exact (agent, ticket, role). "Freshest"
+      // mirrors the seat model itself — set_current_task always overwrites
+      // the seat with the newest spawn — so an older open row for the same
+      // seat can never be the one hasLiveRoleStrand is reporting on (same
+      // reasoning RespawnStormDetectorService's twin cross-check now uses).
+      // Best-effort: absent when no matching row exists yet (e.g. the
+      // output-liveness-only path), degrading to start-time-only exactly like
+      // before this fix.
+      let liveStrandId: string | null = null;
+      try {
+        const blockingRow = await this.dataSource.getRepository(Subagent)
+          .createQueryBuilder('s')
+          .where('s.agent_id = :agentId', { agentId })
+          .andWhere('s.ticket_id = :ticketId', { ticketId: ticket.id })
+          .andWhere('s.role = :role', { role })
+          .andWhere('s.ended_at IS NULL')
+          .orderBy('s.started_at', 'DESC')
+          .limit(1)
+          .getOne();
+        liveStrandId = blockingRow?.subagent_id ?? null;
+      } catch (e) {
+        this.logService.warn('MCP', 'inflight-strand-drop strand-id lookup failed (continuing without it)', {
+          err: String(e), ticket_id: ticket.id, agent_id: agentId,
+        });
+      }
+      const liveStrandIdSuffix = liveStrandId ? ` strand_id=${liveStrandId}` : '';
       this.logService.info('MCP', 'agent_trigger dropped (live same-role strand in flight)', {
         ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-        queued_for_replay: queuedForReplay,
+        queued_for_replay: queuedForReplay, strand_live_since: liveSince?.toISOString(), strand_id: liveStrandId,
       });
       try {
         const activityLogRepo = this.dataSource.getRepository(ActivityLog);
@@ -2368,7 +2411,8 @@ candidate's branch or move the ticket.
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
           action: 'agent_trigger_dropped_inflight_strand',
-          new_value: `agent=${agentId} role=${role} source=${triggerSource} queued_for_replay=${queuedForReplay}`,
+          new_value: `agent=${agentId} role=${role} source=${triggerSource} queued_for_replay=${queuedForReplay}` +
+            (queuedForReplay ? '' : ' reason=replay_of_replay_loop_guard') + liveStrandIdSuffix + liveSinceSuffix,
           role,
           trigger_source: triggerSource,
         }));
@@ -2392,7 +2436,7 @@ candidate's branch or move the ticket.
         await this.dispatchIntents.recordOwed({
           workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
           role, agentId, triggerSource,
-          reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}`,
+          reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}${liveStrandIdSuffix}${liveSinceSuffix}`,
         });
       }
       if (triggerSource === 'comment_summary') {

@@ -109,6 +109,19 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   assert.equal(liveOpenIntents[0].dispatch_generation, 1);
   triggerLoop.agentStatus.clearCurrentTask(assignee.id, live.id, 'live-correction');
 
+  // The suppressed correction dispatch above is now queued for replay too
+  // (ticket d35b8ac8: every in-flight-strand drop is queued, not just
+  // one-shot transition sources) — wait for that auto-replay to land as its
+  // own accounted step. Otherwise it can arrive asynchronously during one of
+  // the unrelated-ticket assertions below and pollute the GLOBAL va.triggers
+  // count they diff against.
+  const liveReplay = await va.waitForTrigger(tr => tr.ticket_id === live.id, 4000);
+  assert.equal(
+    liveReplay.trigger_source,
+    'inflight_strand_replay',
+    'the suppressed correction dispatch auto-replays once the strand frees (ticket d35b8ac8)',
+  );
+
   const assertRejectedWithoutMutation = async (ticket, label) => {
     const before = va.triggers.length;
     const result = await mcp.callTool('correct_confirmed_ticket_duplicate', { ticket_id: ticket.id, role: 'assignee' });

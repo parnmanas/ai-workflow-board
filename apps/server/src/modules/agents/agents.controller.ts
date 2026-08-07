@@ -266,7 +266,20 @@ export class AgentsController {
         };
       }
       if (subList.length > 0) {
-        const active = subList.filter((s: any) => !s.ended_at).length;
+        // `ended_at == null`만으로는 liveness를 증명할 수 없다(ticket 6793ce22,
+        // d35b8ac8과 동일 원인): agent-manager가 아직 /end를 POST하지 않았거나
+        // reconcile이 반영되지 않았을 뿐일 수 있고, 이는 strand의 실제 종료보다
+        // 수 분 늦어질 수 있다. ticket-kind 행에 한해 AgentStatusService.
+        // hasLiveRoleStrand로 교차검증한다 — TriggerLoopService의 dispatch
+        // 게이트와 RespawnStormDetectorService의 twin 필터가 쓰는 것과 동일한
+        // 인메모리 seat이며 clear_current_task로 즉시 갱신되므로, 이미 종료된
+        // strand가 active로 오집계되지 않는다. chat/oneshot 서브에이전트는
+        // ticket-role seat 자체가 없으므로 기존 ended_at 단독 신호를 유지한다.
+        const active = subList.filter((s: any) =>
+          !s.ended_at &&
+          (s.kind !== 'ticket' || !s.ticket_id || !s.role ||
+            this.agentStatusService.hasLiveRoleStrand(s.agent_id, s.ticket_id, s.role)),
+        ).length;
         enriched.subagents = {
           total: subList.length,
           active,

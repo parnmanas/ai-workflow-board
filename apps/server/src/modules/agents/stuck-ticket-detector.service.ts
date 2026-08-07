@@ -296,7 +296,17 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         continue;
       }
       if (existing?.cause === 'promotion_delay') {
-        await this._emitUnstuck(ticket, existing, now, stats, 'promoted_from_intake');
+        // Which resolution matters (ticket 9df6c348): only a genuine
+        // BacklogPromotionService move earns `promoted_from_intake`. See
+        // `_promotedViaBacklogService` — a human/operator manually moving
+        // the ticket out must not read as "auto-promotion succeeded".
+        const autoPromoted = await this._promotedViaBacklogService(
+          ticket.id, new Date(existing.last_alerted_at).getTime(),
+        );
+        await this._emitUnstuck(
+          ticket, existing, now, stats,
+          autoPromoted ? 'promoted_from_intake' : 'manually_moved_from_intake',
+        );
         continue;
       }
       // Active dispatch stalls keep the original grace period even when the
@@ -358,10 +368,16 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
           stats.unstuck += 1;
           continue;
         }
-        // Promotion-delay has one meaningful resolution: leaving intake.
-        const reason = alert.cause === 'promotion_delay'
-          ? 'promoted_from_intake'
-          : 'fell_out_of_window';
+        // Promotion-delay has one meaningful resolution: leaving intake —
+        // but WHICH resolution matters (ticket 9df6c348), same distinction
+        // as the in-window path above.
+        let reason = 'fell_out_of_window';
+        if (alert.cause === 'promotion_delay') {
+          const autoPromoted = await this._promotedViaBacklogService(
+            liveTicket.id, new Date(alert.last_alerted_at).getTime(),
+          );
+          reason = autoPromoted ? 'promoted_from_intake' : 'manually_moved_from_intake';
+        }
         await this._emitUnstuck(liveTicket, alert, now, stats, reason);
       } else {
         // Silent prune — no consumer to notify.
@@ -1418,6 +1434,42 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
         err: String(e), ticket_id: ticket.id, reason,
       });
     }
+  }
+
+  /**
+   * Did `BacklogPromotionService` actually promote this ticket, or did it
+   * leave its intake column some other way (ticket 9df6c348)? A
+   * `promotion_delay` alert's resolution used to be labelled
+   * `promoted_from_intake` the instant the ticket left an intake column,
+   * with no check on WHAT moved it — so a human/operator manually dragging
+   * a stalled ticket out reads identically to "auto-promotion succeeded",
+   * hiding the exact level-triggered-backstop gap this ticket exists to
+   * fix. Checks for a `backlog_promoted` audit row at or after `sinceMs`
+   * (the alert's `last_alerted_at` — the last confirmed-still-stuck
+   * evaluation) so a stale row from an earlier stint in intake can't
+   * falsely count.
+   */
+  private async _promotedViaBacklogService(ticketId: string, sinceMs: number): Promise<boolean> {
+    const row = await this.dataSource.getRepository(ActivityLog).findOne({
+      where: { entity_type: 'ticket', entity_id: ticketId, action: 'backlog_promoted' },
+      order: { created_at: 'DESC' },
+      select: ['id', 'created_at'],
+    });
+    if (!row?.created_at) return false;
+    const ts = new Date(row.created_at).getTime();
+    if (!Number.isFinite(ts)) return false;
+    // Floor both sides to whole seconds before comparing (ticket 9df6c348,
+    // same root cause as created-at-since-param.ts / ticket 8fc94adf):
+    // `ActivityLog.created_at` is an unset `@CreateDateColumn()`, so on
+    // sql.js it comes from sqlite's own `datetime('now')` with NO
+    // fractional seconds, while `sinceMs` is derived from an explicitly
+    // bound `Date` (`StuckTicketAlert.last_alerted_at`), which TypeORM's
+    // sqlite driver always formats WITH milliseconds. A millisecond-precise
+    // `sinceMs` landing in the same wall-clock second as a second-truncated
+    // `ts` would otherwise always compare as "before" regardless of true
+    // sub-second ordering — exactly misclassifying a genuine same-second
+    // promotion as a manual move.
+    return Math.floor(ts / 1000) >= Math.floor(sinceMs / 1000);
   }
 
   /**

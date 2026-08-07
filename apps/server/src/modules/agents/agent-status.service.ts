@@ -539,6 +539,31 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     return false;
   }
 
+  /**
+   * Diagnostic companion to `hasLiveRoleStrand` (ticket d35b8ac8) — same two
+   * paths, same cutoff, but returns WHEN the seat became live instead of a
+   * bare boolean, so a human-facing message (dispatch-reconciler's escalation
+   * `recovery` text) can name the blocking strand's start time instead of a
+   * generic "check agent online / worktree pool / focus capacity" that
+   * misdirects when the real cause is a strand that is simply still running.
+   * Returns null when hasLiveRoleStrand(agent_id, ticket_id, role) would be
+   * false — no live strand to report on.
+   */
+  getLiveRoleStrandSince(agent_id: string, ticket_id: string, role: string): Date | null {
+    if (!agent_id || !ticket_id) return null;
+    const cutoff = Date.now() - CURRENT_TASK_STALE_MS;
+
+    const task = this.state.get(agent_id)?.active_tasks?.get(ticket_id);
+    if (task && task.claimed_at.getTime() >= cutoff && (!task.role || task.role === role)) {
+      return task.claimed_at;
+    }
+
+    const lastOutputMs = this.getOutputLivenessAt(agent_id, ticket_id, role);
+    if (lastOutputMs !== undefined && lastOutputMs >= cutoff) return new Date(lastOutputMs);
+
+    return null;
+  }
+
   private _outputLivenessKey(agentId: string, ticketId: string, role: string): string {
     return `${agentId}:${ticketId}:${role || ''}`;
   }
