@@ -13,6 +13,18 @@
  * the cursor (safe: re-fetches and re-tries) and never double-tickets (the
  * unique index rejects a concurrent/rewound re-insert).
  *
+ * Cross-report duplicate gate (ticket 7cf4f936): ticket creation itself runs
+ * through TicketDuplicateService.assess() the same way chat/feature intake do
+ * — source_chat_room_id carries the channel id (the `same_channel` anchor
+ * ebe97316 added), so two differently-worded reports from the same channel
+ * surface as an `ambiguous` candidate (`pending_user_action=true`, parked for
+ * a human same as every other unattended pending_user_action gate in this
+ * codebase — hard-budget-guard, claim-verification, the action-approval gate)
+ * rather than each dispatching independently. An unambiguous single match
+ * (confidence 100) auto-links via `canonical_ticket_id`, which the trigger
+ * loop already treats as "suppress independent dispatch" for every intake
+ * path — no outreach-specific dispatch change needed here.
+ *
  * Ticket creation mirrors QaFailureTicketService._createTicket (the
  * established "a background service, not an MCP tool call, creates a Ticket
  * row directly" precedent) rather than re-entering the MCP create_ticket tool,
@@ -54,6 +66,7 @@ import { OutreachInboundItem, OutreachItemStatus } from '../../entities/Outreach
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
 import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
@@ -357,11 +370,20 @@ export class OutreachIngestService {
 
     const title = this._buildTitle(channel, item);
     const description = this._buildDescription(channel, item);
-    // related_ticket_id is intentionally left unset (ticket 2500fea3 D3): no
-    // inbound signal populates it today (InboundItem carries no such
-    // reference), so there is nothing to pass through yet. A future
-    // classifier/connector that extracts one only needs to set the field —
-    // nothing here blocks it.
+    const labels = ['outreach', `source:${channel.kind}`];
+
+    // source_chat_room_id doubles as a generic source-scope id (see
+    // TicketDuplicateService.assess()) — reusing the channel id here is what
+    // lets the `same_channel` anchor (ticket ebe97316) actually fire for
+    // outreach reports. related_ticket_id is still not passed explicitly
+    // (ticket 2500fea3 D3): no inbound signal populates it today, so assess()
+    // falls through to its description-regex fallback (normally a no-op) —
+    // nothing here blocks a future connector from passing one directly.
+    const duplicateService = new TicketDuplicateService(this.dataSource);
+    const duplicateAssessment = await duplicateService.assess(channel.workspace_id, {
+      title, description, labels, source_kind: channel.kind, source_chat_room_id: channel.id,
+    });
+
     const ticket = await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const position = await maxTicketPosition(manager, column.id);
@@ -371,16 +393,33 @@ export class OutreachIngestService {
         title,
         description,
         priority: category === 'bug' ? 'high' : 'medium',
-        labels: JSON.stringify(['outreach', `source:${channel.kind}`]),
+        labels: JSON.stringify(labels),
         channel_ids: '[]',
         position,
-        source_kind: channel.kind,
+        source_kind: duplicateAssessment.source_kind,
+        source_chat_room_id: duplicateAssessment.source_chat_room_id,
+        related_ticket_id: duplicateAssessment.related_ticket_id,
+        canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
+        // ambiguous(복수/애매 후보) 케이스만 사람 확인 큐로 보낸다 — 무인
+        // 파이프라인이라는 이유로 자동억제 범위를 confidence 100로 좁히지
+        // 않는다: pending_user_action은 이미 hard-budget-guard/claim-verification/
+        // action-approval-gate 등 사람이 실시간으로 보고 있지 않은 백그라운드
+        // 경로에서도 범용으로 쓰는 "사람이 나중에 확인" 큐이므로 outreach도
+        // 그대로 재사용한다.
+        pending_user_action: duplicateAssessment.ambiguous,
+        pending_reason: duplicateAssessment.ambiguous
+          ? `Confirm whether this ${channel.kind} report duplicates one of the suggested tickets.`
+          : '',
+        pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
+        pending_set_by: duplicateAssessment.ambiguous ? 'Outreach' : '',
         created_by: 'Outreach',
         created_by_type: 'system',
         created_by_id: '',
         operational_dedupe_key: dedupeKey,
       }));
     });
+
+    await duplicateService.record(ticket, duplicateAssessment, 'Outreach', '');
 
     // Board default role holders only (mirrors QaFailureTicketService) — an
     // outreach channel names no assignee, so an unstaffed role stays vacant

@@ -47,6 +47,7 @@ import { Board } from '../dist/entities/Board.js';
 import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
+import { TicketDuplicateDecision } from '../dist/entities/TicketDuplicateDecision.js';
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
 import { OutreachIngestService, STALE_CLAIM_LEASE_MS } from '../dist/modules/outreach/outreach-ingest.service.js';
@@ -107,7 +108,7 @@ function item(over = {}) {
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Board, BoardColumn, Ticket, Comment, OutreachChannel, OutreachInboundItem],
+    entities: [Workspace, Board, BoardColumn, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
     synchronize: true,
     logging: false,
   });
@@ -670,6 +671,110 @@ test('a stale ticket_id=null claim from before this fix is reclaimed and tickete
     assert.equal(items.length, 1, 'the stale row was replaced, not left behind alongside a new one');
     assert.equal(items[0].ticket_id, tickets[0].id);
     assert.equal(items[0].status, 'ticketed');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+// 티켓 7cf4f936 — _createTicket이 TicketDuplicateService.assess()/record()에 실제로
+// 배선됐는지 검증한다. same_channel 앵커 자체(신뢰도 계산 로직)는
+// outreach-ticket-duplicate-gate.test.mjs가 이미 커버하므로, 여기서는 프로듀서
+// 쪽 배선(source_chat_room_id=channel.id, 결과 필드가 실제 생성되는 Ticket row에
+// 반영되는지, record()의 감사 흔적)만 검증한다.
+
+test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후보로 표면화되고 pending_user_action이 켜진다', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({
+      'gh-1': { category: 'bug', confidence: 90 },
+      'gh-2': { category: 'bug', confidence: 90 },
+    });
+    const svc = makeService(dataSource, classifier);
+
+    const first = await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'gh-1',
+      title: 'App crashes immediately on launch',
+      created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(first.ticketed, 1);
+
+    const persisted = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+    const second = await svc.pollChannel(persisted, makeConnector([item({
+      external_item_id: 'gh-2',
+      title: 'Cannot start the app, it crashes every time',
+      created_at: new Date('2026-06-25T11:00:00Z'),
+    })]), new Date('2026-06-25T12:05:00Z'));
+    assert.equal(second.ticketed, 1, '애매한 후보라도 티켓 자체는 생성된다 — 완전 무시되지 않는다');
+
+    const tickets = await dataSource.getRepository(Ticket).find({ order: { created_at: 'ASC' } });
+    assert.equal(tickets.length, 2);
+    const [firstTicket, secondTicket] = tickets;
+    assert.equal(firstTicket.source_chat_room_id, channel.id, '채널 배선: source_chat_room_id에 channel.id가 채워진다');
+    assert.equal(secondTicket.source_chat_room_id, channel.id);
+    assert.equal(secondTicket.canonical_ticket_id, null, '애매한 경우 자동링크되지 않는다');
+    assert.equal(secondTicket.pending_user_action, true, '애매한 후보는 사람 확인 큐(pending_user_action)로 표면화된다');
+    assert.match(secondTicket.pending_reason, /github/);
+    assert.equal(secondTicket.pending_set_by, 'Outreach');
+    assert.ok(secondTicket.pending_set_at);
+
+    const decisions = await dataSource.getRepository(TicketDuplicateDecision).find();
+    assert.equal(decisions.length, 1, 'record()가 감사용 TicketDuplicateDecision을 남긴다');
+    assert.equal(decisions[0].report_ticket_id, secondTicket.id);
+    assert.equal(decisions[0].candidate_ticket_id, firstTicket.id);
+    assert.equal(decisions[0].outcome, 'ambiguous_pending');
+    assert.deepEqual(JSON.parse(decisions[0].matched_signals), ['same_channel']);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트는 canonical_ticket_id로 자동링크되어 독립 dispatch가 억제된다', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({
+      'gh-1': { category: 'bug', confidence: 90 },
+      'gh-2': { category: 'bug', confidence: 90 },
+    });
+    const svc = makeService(dataSource, classifier);
+
+    const first = await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'gh-1',
+      title: 'Crash on launch',
+      created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(first.ticketed, 1);
+
+    const persisted = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+    const second = await svc.pollChannel(persisted, makeConnector([item({
+      external_item_id: 'gh-2',
+      title: 'Crash on launch',
+      created_at: new Date('2026-06-25T11:00:00Z'),
+    })]), new Date('2026-06-25T12:05:00Z'));
+    assert.equal(second.ticketed, 1);
+
+    const tickets = await dataSource.getRepository(Ticket).find({ order: { created_at: 'ASC' } });
+    assert.equal(tickets.length, 2, '중복이어도 리포트 자체는 감사를 위해 티켓화된다 — 억제는 dispatch 단계의 몫');
+    const [firstTicket, secondTicket] = tickets;
+    assert.equal(secondTicket.canonical_ticket_id, firstTicket.id, '동일 채널 + 동일 정규화 제목은 confidence 100로 자동링크된다');
+    assert.equal(secondTicket.pending_user_action, false, '자동링크는 사람 확인 큐로 보내지 않는다');
+
+    const decisions = await dataSource.getRepository(TicketDuplicateDecision).find();
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0].outcome, 'auto_linked');
+
+    const comments = await dataSource.getRepository(Comment).find();
+    assert.ok(
+      comments.some((c) => c.ticket_id === secondTicket.id && /independent dispatch is suppressed/.test(c.content)),
+      'record()가 리포트 티켓에 억제 안내 코멘트를 남긴다',
+    );
+    assert.ok(
+      comments.some((c) => c.ticket_id === firstTicket.id && /was linked to this canonical ticket/.test(c.content)),
+      'record()가 canonical 티켓에도 상호 참조 코멘트를 남긴다',
+    );
   } finally {
     await dataSource.destroy();
   }
