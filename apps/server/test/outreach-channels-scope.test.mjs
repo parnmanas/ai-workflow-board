@@ -141,6 +141,20 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.equal(res.body.classifier_agent_id, agent.id);
   });
 
+  it('allows a GLOBAL agent (workspace_id=null) as classifier_agent_id for any workspace channel', async () => {
+    const wsRepo = dataSource.getRepository(Workspace);
+    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-global' }));
+    const agentRepo = dataSource.getRepository(Agent);
+    const globalAgent = await agentRepo.save(agentRepo.create({ name: 'global-agent', workspace_id: null }));
+
+    const res = response();
+    await controller.create({
+      workspace_id: ws.id, kind: 'github', name: 'channel agent global-scope', classifier_agent_id: globalAgent.id,
+    }, res);
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.classifier_agent_id, globalAgent.id);
+  });
+
   it('a channel created in workspace A is not visible when listing workspace B', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-list-a' }));

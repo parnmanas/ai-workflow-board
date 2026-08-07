@@ -15,6 +15,7 @@ import { Credential } from '../../entities/Credential';
 import { Board } from '../../entities/Board';
 import { Agent } from '../../entities/Agent';
 import { findOrFail } from '../../common/find-or-fail';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { isValidCron } from '../qa/qa-cron';
 import { OutreachPollingService } from './outreach-polling.service';
 
@@ -212,15 +213,19 @@ export class OutreachChannelService {
     return board.id;
   }
 
-  /** A configured classifier_agent_id must belong to the channel's own
+  /** A configured classifier_agent_id must be visible in the channel's own
    *  workspace — same "caught at save time, not silently ignored" contract
-   *  as _assertBoardScope. Unlike credentials, there is no "global" agent
-   *  concept to fall back to. */
+   *  as _assertBoardScope, reusing the same agent-workspace-visibility rule
+   *  SecurityProfile.target_agent_id (and 15+ other call sites) already
+   *  standardize on: a workspace-scoped agent must match, but a global
+   *  agent (workspace_id null/'') is visible everywhere. */
   private async _assertAgentScope(agentId: string | null, workspaceId: string): Promise<string | null> {
     if (!agentId) return null;
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
     if (!agent) throw makeError(400, 'classifier_agent_id not found');
-    if (agent.workspace_id !== workspaceId) throw makeError(400, 'classifier_agent_id must belong to this workspace');
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
+      throw makeError(400, 'classifier_agent_id must belong to this workspace');
+    }
     return agent.id;
   }
 
