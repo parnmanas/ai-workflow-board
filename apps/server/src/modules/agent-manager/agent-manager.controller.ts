@@ -108,6 +108,14 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
       version: typeof status.version === 'string' ? status.version.slice(0, 160) : null,
       reason: typeof status.reason === 'string' ? status.reason.slice(0, 160) : null,
       capabilities: descriptor,
+      ...(Array.isArray(status.profiles)
+        ? {
+            profiles: status.profiles
+              .filter((value): value is string => typeof value === 'string' && !!value)
+              .map((value) => value.slice(0, 64))
+              .slice(0, 200),
+          }
+        : {}),
     };
   }
   return Object.keys(report).length > 0 ? report : undefined;

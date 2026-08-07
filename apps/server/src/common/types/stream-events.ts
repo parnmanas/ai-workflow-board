@@ -612,6 +612,7 @@ export interface AgentInstanceUpdatePayload {
         collaboration: Array<'delegated' | 'swarm'>;
         skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
       };
+      profiles?: string[];
     }>;
     pid: number;
     started_at: string;

@@ -33,6 +33,8 @@ export interface RuntimeHealthRecord {
   version: string | null;
   reason: string | null;
   capabilities: RuntimeCapabilityDescriptor;
+  /** Hermes 전용: Runtime Host가 현재 열거할 수 있는 프로파일 이름 목록. */
+  profiles?: string[];
 }
 
 export type RuntimeCapabilityReport = Record<string, RuntimeHealthRecord>;
