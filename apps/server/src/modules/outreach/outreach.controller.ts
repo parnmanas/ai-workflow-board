@@ -224,10 +224,10 @@ export class OutreachController {
   ) {
     try {
       const workspaceId = body?.workspace_id;
-      const post = await this.publisherService.approve(postId, workspaceId, body?.body);
-      if (post.channel_id !== channelId) {
-        return res.status(404).json({ error: 'outbound post does not belong to this channel' });
-      }
+      // channelId is verified atomically inside approve() itself (together
+      // with postId/workspaceId, before any connector call) — see that
+      // method's docstring. No post-hoc check needed here.
+      const post = await this.publisherService.approve(postId, channelId, workspaceId, body?.body);
       return res.json(outboundToJson(post));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to approve outbound post' });
@@ -243,10 +243,7 @@ export class OutreachController {
   ) {
     try {
       const workspaceId = body?.workspace_id;
-      const post = await this.publisherService.reject(postId, workspaceId);
-      if (post.channel_id !== channelId) {
-        return res.status(404).json({ error: 'outbound post does not belong to this channel' });
-      }
+      const post = await this.publisherService.reject(postId, channelId, workspaceId);
       return res.json(outboundToJson(post));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to reject outbound post' });

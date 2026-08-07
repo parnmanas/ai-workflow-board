@@ -56,6 +56,7 @@ import { activityEvents } from '../../services/activity.service';
 import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployments/deployment.service';
 import { resolveChannelConnector } from './connector-resolver';
 import { OUTREACH_RELEASE_SUMMARIZER, ReleaseSummarizer, ReleaseDoneTicket } from './release-summary';
+import { recordChannelSuccess, recordChannelFailure } from './outreach-channel-health';
 
 // Bound how far back a first-ever publish (no prior published row) would
 // otherwise have to scan — kept small since "no previous publish" already
@@ -236,9 +237,18 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
    * of how many approve requests race. The loser throws 409 rather than
    * silently no-op'ing, since this is a direct human action (not a
    * best-effort background sweep).
+   *
+   * `channelId` (the URL path segment) is verified HERE, in the very first
+   * lookup, together with `postId`/`workspaceId` — review fix: the previous
+   * version ran the whole approval (including the external publish call)
+   * before checking `post.channel_id === channelId` in the controller, so a
+   * caller who knew a valid postId/workspaceId but supplied the WRONG
+   * channelId in the URL still triggered the public post; only the response
+   * came back 404. Folding the channel_id into this SELECT means a mismatch
+   * finds no row at all — 404 with zero connector calls, zero mutation.
    */
-  async approve(postId: string, workspaceId: string, bodyOverride?: string): Promise<OutreachOutboundPost> {
-    const existing = await this.postRepo.findOne({ where: { id: postId, workspace_id: workspaceId } });
+  async approve(postId: string, channelId: string, workspaceId: string, bodyOverride?: string): Promise<OutreachOutboundPost> {
+    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, workspace_id: workspaceId } });
     if (!existing) throw makeError(404, 'outbound post not found');
 
     if (typeof bodyOverride === 'string' && bodyOverride.trim()) {
@@ -267,9 +277,13 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Reject a draft — terminal, never calls the connector. Same single-winner
-   *  conditional UPDATE shape as approve() (draft→rejected only). */
-  async reject(postId: string, workspaceId: string): Promise<OutreachOutboundPost> {
-    const existing = await this.postRepo.findOne({ where: { id: postId, workspace_id: workspaceId } });
+   *  conditional UPDATE shape as approve() (draft→rejected only), and the
+   *  same channelId+workspaceId+postId atomic ownership check up front
+   *  (reject has no external call to protect, but a wrong-channel caller
+   *  should still get a clean 404, not silently terminate another channel's
+   *  draft). */
+  async reject(postId: string, channelId: string, workspaceId: string): Promise<OutreachOutboundPost> {
+    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, workspace_id: workspaceId } });
     if (!existing) throw makeError(404, 'outbound post not found');
 
     const result = await this.postRepo
@@ -309,6 +323,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
       post.published_at = new Date();
       post.error = '';
       await this.postRepo.save(post);
+      await recordChannelSuccess(this.channelRepo, channel);
       this.logService.info('Outreach', 'deploy publish succeeded', {
         channel_id: channel.id, post_id: post.id, permalink: result.permalink,
       });
@@ -316,6 +331,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
       post.status = 'failed';
       post.error = String(e?.message || e).slice(0, 2000);
       await this.postRepo.save(post);
+      await recordChannelFailure(this.channelRepo, channel, e);
       this.logService.warn('Outreach', 'deploy publish connector call failed', {
         channel_id: channel.id, post_id: post.id, err: post.error,
       });

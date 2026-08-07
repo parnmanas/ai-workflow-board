@@ -229,7 +229,7 @@ test('approve() on a draft calls the connector exactly once and lands published'
     const fake = installFakeRedditFetch();
     let approved;
     try {
-      approved = await svc.approve(draft.id, channel.workspace_id);
+      approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
     } finally { restoreFetch(); }
 
     assert.equal(approved.status, 'published');
@@ -251,8 +251,8 @@ test('two CONCURRENT approve() calls for the same post result in exactly one ext
     let settled;
     try {
       settled = await Promise.allSettled([
-        svc.approve(draft.id, channel.workspace_id),
-        svc.approve(draft.id, channel.workspace_id),
+        svc.approve(draft.id, channel.id, channel.workspace_id),
+        svc.approve(draft.id, channel.id, channel.workspace_id),
       ]);
     } finally { restoreFetch(); }
 
@@ -276,7 +276,7 @@ test('approve() when the connector call fails lands the post as failed with the 
     await svc._onDeploymentReported(signal());
     const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
 
-    const approved = await svc.approve(draft.id, channel.workspace_id);
+    const approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
     assert.equal(approved.status, 'failed');
     assert.ok(approved.error.length > 0);
   } finally { await dataSource.destroy(); }
@@ -291,12 +291,12 @@ test('reject() is terminal — a later approve() attempt is rejected, connector 
     await svc._onDeploymentReported(signal());
     const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
 
-    const rejected = await svc.reject(draft.id, channel.workspace_id);
+    const rejected = await svc.reject(draft.id, channel.id, channel.workspace_id);
     assert.equal(rejected.status, 'rejected');
 
     const fake = installFakeRedditFetch();
     try {
-      await assert.rejects(svc.approve(draft.id, channel.workspace_id), (err) => err.status === 409);
+      await assert.rejects(svc.approve(draft.id, channel.id, channel.workspace_id), (err) => err.status === 409);
     } finally { restoreFetch(); }
     assert.equal(fake.callCount(), 0);
   } finally { await dataSource.destroy(); }
@@ -359,5 +359,167 @@ test('a GLOBAL deployment (workspace_id=null) never publishes to any workspace c
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
     assert.equal(rows.length, 0);
     assert.equal(fake.callCount(), 0);
+  } finally { await dataSource.destroy(); }
+});
+
+// ── review fix #1: OutreachChannel.rate_limit_per_hour applied end-to-end ────
+
+test('rate_limit_per_hour caps connector calls for the channel — a second publish (different commit) is recorded failed, not published, with no network call for that attempt', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    await seedChannel(dataSource, cred.id, {
+      publish_policy: 'auto', deploy_post_mode: 'new_post', rate_limit_per_hour: 1,
+    });
+    const svc = makeService(dataSource);
+    const fake = installFakeRedditFetch();
+    try {
+      await svc._onDeploymentReported(signal({ deployed_commit_sha: 'sha-aaa' }));
+      await svc._onDeploymentReported(signal({ deployed_commit_sha: 'sha-bbb' })); // different commit — not deduped
+    } finally { restoreFetch(); }
+
+    const rows = await dataSource.getRepository(OutreachOutboundPost).find({ order: { created_at: 'ASC' } });
+    assert.equal(rows.length, 2, 'both attempts claim a ledger row (claim happens before the connector call)');
+    assert.equal(rows[0].status, 'published');
+    assert.equal(rows[1].status, 'failed');
+    assert.match(rows[1].error, /rate_limit_per_hour/);
+    assert.equal(fake.callCount(), 1, 'the second publish never reached the network — blocked by the channel cap');
+  } finally { await dataSource.destroy(); }
+});
+
+// ── review fix #2: 403/rate-limit/error state recorded on the channel ───────
+
+test('a 403 from the connector marks the channel blocked_at/blocked_reason/last_error; a later successful publish clears all of it', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto', deploy_post_mode: 'new_post' });
+    const svc = makeService(dataSource);
+    const channelRepo = dataSource.getRepository(OutreachChannel);
+
+    const okHeaders = { get: () => null };
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u === 'https://www.reddit.com/api/v1/access_token') {
+        return { ok: true, status: 200, headers: okHeaders, json: async () => ({ access_token: 'tok', expires_in: 3600 }), text: async () => '' };
+      }
+      if (u.includes('/api/submit')) {
+        return { ok: false, status: 403, headers: okHeaders, json: async () => ({}), text: async () => 'banned from subreddit' };
+      }
+      throw new Error(`unexpected url in 403 channel-health test: ${u}`);
+    };
+    try {
+      await svc._onDeploymentReported(signal({ deployed_commit_sha: 'sha-403' }));
+    } finally { restoreFetch(); }
+
+    const afterBlock = await channelRepo.findOne({ where: { id: channel.id } });
+    assert.ok(afterBlock.blocked_at, 'channel marked blocked after a 403');
+    assert.match(afterBlock.blocked_reason, /forbidden|403/i);
+    assert.ok(afterBlock.last_error, 'last_error also recorded');
+    assert.equal(afterBlock.rate_limited_until, null, 'a 403 is not a rate-limit — that field stays untouched');
+
+    // A later publish (different commit — not deduped) against a healthy
+    // fake connector succeeds; success clears the blocked/error state.
+    const fake = installFakeRedditFetch();
+    try {
+      await svc._onDeploymentReported(signal({ deployed_commit_sha: 'sha-ok' }));
+    } finally { restoreFetch(); }
+    assert.equal(fake.callCount(), 1);
+
+    const afterRecover = await channelRepo.findOne({ where: { id: channel.id } });
+    assert.equal(afterRecover.blocked_at, null, 'blocked_at cleared after a successful publish');
+    assert.equal(afterRecover.blocked_reason, '');
+    assert.equal(afterRecover.last_error, '');
+  } finally { await dataSource.destroy(); }
+});
+
+test('a generic connector failure (non-403/429) sets last_error but does NOT set blocked_at or rate_limited_until', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto', deploy_post_mode: 'new_post' });
+    const svc = makeService(dataSource);
+    const fake = installFakeRedditFetch({ fail: true }); // 500s on /api/submit
+    try {
+      await svc._onDeploymentReported(signal());
+    } finally { restoreFetch(); }
+    assert.equal(fake.callCount(), 1);
+
+    const row = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    assert.ok(row.last_error, 'last_error recorded');
+    assert.equal(row.blocked_at, null, 'a generic 500 is not classified as blocked');
+    assert.equal(row.rate_limited_until, null, 'a generic 500 is not classified as rate-limited');
+  } finally { await dataSource.destroy(); }
+});
+
+// ── review fix #3: approve()/reject() verify channelId atomically, before ───
+// ── any external call (previously checked AFTER approve() had already      ──
+// ── published) ────────────────────────────────────────────────────────────
+
+test('approve() with a MISMATCHED channelId 404s and makes ZERO connector calls', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval', deploy_post_mode: 'new_post' });
+    // Same workspace, deploy_post_mode='off' so it is never itself a deploy
+    // target — its only role here is to supply a channel id that does NOT
+    // own the draft below.
+    const otherChannel = await seedChannel(dataSource, cred.id, { name: 'other channel', deploy_post_mode: 'off' });
+    const svc = makeService(dataSource);
+    await svc._onDeploymentReported(signal());
+    const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
+    assert.equal(draft.channel_id, channel.id);
+
+    const fake = installFakeRedditFetch();
+    try {
+      await assert.rejects(
+        svc.approve(draft.id, otherChannel.id, channel.workspace_id),
+        (err) => err.status === 404,
+      );
+    } finally { restoreFetch(); }
+    assert.equal(fake.callCount(), 0, 'no connector call for a channelId that does not own this post');
+
+    const stillDraft = await dataSource.getRepository(OutreachOutboundPost).findOne({ where: { id: draft.id } });
+    assert.equal(stillDraft.status, 'draft', 'the post is untouched — not claimed/approving/published');
+  } finally { await dataSource.destroy(); }
+});
+
+test('reject() with a MISMATCHED channelId 404s and leaves the draft untouched', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval', deploy_post_mode: 'new_post' });
+    const otherChannel = await seedChannel(dataSource, cred.id, { name: 'other channel', deploy_post_mode: 'off' });
+    const svc = makeService(dataSource);
+    await svc._onDeploymentReported(signal());
+    const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
+    assert.equal(draft.channel_id, channel.id);
+
+    await assert.rejects(
+      svc.reject(draft.id, otherChannel.id, channel.workspace_id),
+      (err) => err.status === 404,
+    );
+
+    const stillDraft = await dataSource.getRepository(OutreachOutboundPost).findOne({ where: { id: draft.id } });
+    assert.equal(stillDraft.status, 'draft', "a wrong-channel reject must not terminate another channel's draft");
+  } finally { await dataSource.destroy(); }
+});
+
+test('approve()/reject() with the CORRECT channelId still work (positive control for the two tests above)', async () => {
+  const dataSource = await setupDb();
+  try {
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval', deploy_post_mode: 'new_post' });
+    const svc = makeService(dataSource);
+    await svc._onDeploymentReported(signal());
+    const draft = (await dataSource.getRepository(OutreachOutboundPost).find())[0];
+
+    const fake = installFakeRedditFetch();
+    let approved;
+    try {
+      approved = await svc.approve(draft.id, channel.id, channel.workspace_id);
+    } finally { restoreFetch(); }
+    assert.equal(approved.status, 'published');
+    assert.equal(fake.callCount(), 1);
   } finally { await dataSource.destroy(); }
 });
