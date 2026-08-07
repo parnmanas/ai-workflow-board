@@ -518,7 +518,13 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
 // 그 비가시 티켓을 승자로 골라서는 안 된다. 링크되면 새 피드백이 조용히 사라진
 // 것처럼 보인다 — 대신 이번 poll은 에러로 남고(다음 poll이 처음부터 재시도),
 // 기존 archived 티켓은 그대로 둔다.
-test('ticket creation colliding with an ARCHIVED ticket for the same dedupe key does not link to it', async () => {
+// 리뷰 지적(티켓 a565b657) — 이전 버전은 archived 홀더를 winner 조회에서
+// 제외만 하고 키는 그대로 두어, 같은 외부 항목이 매 poll마다 동일 UNIQUE
+// 충돌 → winner 없음 → claim 삭제를 반복하는 영구 루프였다(원래 버그보다
+// 나쁨 — 피드백이 영원히 티켓화되지 않는다). 지금은 archived 홀더를
+// 발견하면 키를 해제하고 정확히 1회 재시도하므로, 이 시나리오는 같은
+// poll 안에서 즉시 해소된다.
+test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key releases the key and lands a fresh, visible ticket in the SAME poll — no permanent retry loop', async () => {
   const dataSource = await setupDb();
   try {
     const { board, col } = await seedBoard(dataSource, 'ws-1');
@@ -531,7 +537,7 @@ test('ticket creation colliding with an ARCHIVED ticket for the same dedupe key 
     // manual archive (or the narrow commit-ordering race archive_ticket's fix
     // can't fully close): archived, but operational_dedupe_key still set.
     const ticketRepo = dataSource.getRepository(Ticket);
-    const archivedWinner = await ticketRepo.save(ticketRepo.create({
+    const archivedHolder = await ticketRepo.save(ticketRepo.create({
       column_id: col.id,
       workspace_id: 'ws-1',
       title: 'archived ticket still holding the dedupe key',
@@ -541,16 +547,101 @@ test('ticket creation colliding with an ARCHIVED ticket for the same dedupe key 
 
     const result = await svc.pollChannel(channel, makeConnector([collideItem]), new Date('2026-06-25T12:00:00Z'));
 
-    assert.equal(result.ticketed, 0, 'the archived ticket must not be counted as a successful ticketing');
-    assert.equal(result.errors, 1, 'no visible winner exists, so this poll surfaces an error instead of silently absorbing the item');
+    assert.equal(result.errors, 0, 'the collision resolves inline via _resolveDedupeCollision — no error surfaces to the poll result');
+    assert.equal(result.ticketed, 1, 'the item lands a fresh ticket in this same poll, not a later one');
 
     const tickets = await ticketRepo.find();
-    assert.equal(tickets.length, 1, 'no new ticket was created — the INSERT still collided with the archived row\'s key');
-    assert.equal(tickets[0].id, archivedWinner.id);
-    assert.ok(tickets[0].archived_at, 'the pre-existing ticket is untouched, still archived');
+    assert.equal(tickets.length, 2, 'the archived ticket is left in place and a second, fresh ticket now exists');
+    const freshTicket = tickets.find((t) => t.id !== archivedHolder.id);
+    assert.ok(freshTicket, 'a new ticket distinct from the archived one was created');
+    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible on the board');
+    assert.equal(freshTicket.operational_dedupe_key, `outreach:${channel.id}:gh-archived-collide`, 'the fresh ticket now holds the key');
+
+    const reloadedHolder = await ticketRepo.findOneBy({ id: archivedHolder.id });
+    assert.equal(reloadedHolder.operational_dedupe_key, null, 'the archived holder\'s key was released — it can never collide again');
+    assert.ok(reloadedHolder.archived_at, 'the archived holder itself is otherwise untouched — still archived, not resurrected (policy C was rejected)');
 
     const items = await dataSource.getRepository(OutreachInboundItem).find();
-    assert.equal(items.length, 0, 'the claim was deleted rather than linked to the archived ticket, so the next poll retries fresh');
+    assert.equal(items.length, 1);
+    assert.equal(items[0].ticket_id, freshTicket.id, 'the claim links to the fresh visible ticket, never to the archived one');
+
+    // Subsequent poll of the SAME external item proves steady state: once
+    // resolved, it stays resolved — no duplicate, no residual stuck state,
+    // no re-processing.
+    const reloadedChannel = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+    const second = await svc.pollChannel(reloadedChannel, makeConnector([collideItem]), new Date('2026-06-25T13:00:00Z'));
+    assert.equal(second.ticketed, 0);
+    assert.equal(second.errors, 0);
+    assert.equal(second.skipped, 1, 'the now-ticketed item is a plain dedupe skip on the next poll');
+    assert.equal((await ticketRepo.find()).length, 2, 'still exactly two tickets — no duplicate created on repoll');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('two pollChannel sweeps racing on the SAME archived-holder collision still land exactly one fresh ticket', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board, col } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-archived-race': { category: 'bug', confidence: 90 } });
+    const raceItem = item({ external_item_id: 'gh-archived-race', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    const ticketRepo = dataSource.getRepository(Ticket);
+    await ticketRepo.save(ticketRepo.create({
+      column_id: col.id,
+      workspace_id: 'ws-1',
+      title: 'archived ticket still holding the dedupe key',
+      operational_dedupe_key: `outreach:${channel.id}:gh-archived-race`,
+      archived_at: new Date('2026-06-25T09:00:00Z'),
+    }));
+
+    // Same deterministic gate-on-reach pattern as the "lease fencing" test
+    // below (board lesson: bounded polling / explicit gates, never guessed
+    // settle counts) — but gating _resolveDedupeCollision instead of
+    // _createTicket: both A and B's FIRST _createTicket() attempt collides
+    // immediately with the pre-seeded archived holder (no need for either
+    // side to finish creating anything first), so both reach the resolution
+    // path and are stalled there before either has cleared the key.
+    const gateA = deferred();
+    const reachedA = deferred();
+    const gateB = deferred();
+    const reachedB = deferred();
+    let callIndex = 0;
+    const originalResolve = svc._resolveDedupeCollision.bind(svc);
+    svc._resolveDedupeCollision = async (...args) => {
+      const isFirst = callIndex === 0;
+      callIndex++;
+      if (isFirst) { reachedA.resolve(); await gateA.promise; }
+      else { reachedB.resolve(); await gateB.promise; }
+      return originalResolve(...args);
+    };
+
+    const nowA = new Date('2026-06-25T12:00:00Z');
+    const pollA = svc.pollChannel(channel, makeConnector([raceItem]), nowA);
+    await reachedA.promise; // A's claim is committed; A is stalled right after its INSERT collided with the archived holder
+
+    const afterLease = new Date(nowA.getTime() + STALE_CLAIM_LEASE_MS + 5000);
+    const pollB = svc.pollChannel(channel, makeConnector([raceItem]), afterLease);
+    await reachedB.promise; // B reclaimed A's expired claim, re-attempted, collided with the SAME archived holder, and is now stalled too
+
+    gateB.resolve();
+    const resultB = await pollB;
+    gateA.resolve();
+    const resultA = await pollA;
+
+    const tickets = await ticketRepo.find();
+    const freshTickets = tickets.filter((t) => !t.archived_at);
+    assert.equal(freshTickets.length, 1, 'exactly one fresh ticket across both racing resolutions — no duplicate');
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1, 'exactly one ledger row');
+    assert.equal(items[0].ticket_id, freshTickets[0].id);
+
+    assert.equal(resultA.ticketed + resultB.ticketed, 1, 'exactly one sweep reports a ticket created');
+    assert.equal(resultA.errors, 0);
+    assert.equal(resultB.errors, 0);
   } finally {
     await dataSource.destroy();
   }
