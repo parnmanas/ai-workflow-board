@@ -99,6 +99,16 @@ export class OutreachChannel {
   @Column({ type: 'int', default: 70 })
   classify_threshold: number;
 
+  // Agent dispatched to classify each new inbound item (ticket 20fa0197's
+  // AgentDispatchClassifier) — a chat room is created per item and this
+  // agent is asked to report category+confidence back via
+  // record_outreach_classification. null (default) keeps classification
+  // fully rule-based (RuleBasedClassifier) — today's behavior, unchanged;
+  // this is also the fallback when the dispatched agent doesn't report back
+  // in time.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  classifier_agent_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

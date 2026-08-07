@@ -33,7 +33,10 @@ const MAX_TICK_MS = 60 * 60_000;       // 1h
 const TICK_BATCH = 100;                // max channels polled per tick
 const DEFAULT_POLL_INTERVAL_MS = 3_600_000; // 1h — matches OutreachChannel.poll_interval_ms's column default
 
-function clampEnv(name: string, def: number, min: number, max: number): number {
+// Exported so other outreach services (e.g. AgentDispatchClassifier's own
+// timeout knob) reuse the same clamp-an-env-var-to-[min,max] helper instead
+// of re-implementing it.
+export function clampEnv(name: string, def: number, min: number, max: number): number {
   const raw = Number.parseInt(process.env[name] || '', 10);
   if (!Number.isFinite(raw) || raw <= 0) return def;
   return Math.min(max, Math.max(min, raw));
