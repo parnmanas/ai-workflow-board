@@ -143,10 +143,19 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
 // 이것까지 큐잉하면 데드락이 난다(바깥 호출은 안쪽이 끝나야 끝나는데, 안쪽은
 // 자기 큐 차례를 기다리며 바깥 뒤에 줄 서게 되므로). AsyncLocalStorage로 그
 // 콜백의 전체 비동기 체인 동안 "이 manager에서 이미 큐를 통과해 실행 중"임을
-// 표시한다 — 평범한 모듈 레벨 boolean과 달리 이후의 await를 계속 타고
-// 전파되면서도 그 체인 하나에만 스코프가 한정되므로, 같은 체인에서의 중첩
-// 호출은 큐를 건너뛰고 즉시 실행되는 반면, 진짜 무관한 동시 호출(다른 비동기
-// 체인, 예: 다른 요청)은 여전히 정상적으로 그 뒤에 줄을 선다.
+// 표시한다.
+//
+// 저장값은 단순 `true`가 아니라 `{ active }` 토큰이어야 한다 — AsyncLocalStorage는
+// run() 콜백이 반환한 프라미스가 settle된 뒤에도, 그 콜백 실행 중에 만들어진
+// 비동기 자손(예: await 없이 던져둔 setTimeout/fire-and-forget 프라미스)에는
+// 계속 같은 store가 전파된다. 그래서 바깥 트랜잭션이 이미 커밋/롤백까지 끝난
+// 뒤에 그 안에서 예약해 둔 지연 작업이 뒤늦게 transaction()을 부르면, 단순
+// boolean 플래그로는 getStore()가 여전히 truthy라 큐를 건너뛰고 즉시 실행돼
+// 버린다 — 그 시점에 이미 다른 트랜잭션이 큐를 통해 실행 중이라면 이 패치가
+// 막으려는 바로 그 shared-runner 중첩 레이스가 재발한다. 대신 실제 원본
+// transaction() 프라미스가 settle되는 순간 token.active를 false로 닫으면,
+// store 참조 자체는 늦게 실행되는 자손에도 계속 전파되더라도 `getStore()?.active`는
+// 그 시점엔 이미 false이므로 재진입으로 오인되지 않고 정상적으로 큐를 다시 탄다.
 export function serializeSqljsTransactions(dataSource: DataSource): void {
   if (dataSource.options.type !== 'sqljs') return;
 
@@ -154,16 +163,24 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
     transaction: (...args: unknown[]) => Promise<unknown>;
   };
   const original = manager.transaction.bind(manager);
-  const reentry = new AsyncLocalStorage<true>();
+  const reentry = new AsyncLocalStorage<{ active: boolean }>();
   let queue: Promise<void> = Promise.resolve();
 
   manager.transaction = (...args: unknown[]) => {
-    if (reentry.getStore()) return original(...args);
-    const run: Promise<unknown> = queue.then(() => reentry.run(true, () => original(...args)));
+    if (reentry.getStore()?.active) return original(...args);
+    const token = { active: true };
+    const run: Promise<unknown> = queue.then(() => reentry.run(token, () => original(...args)));
     // Keep the chain alive regardless of outcome — a failed transaction must
     // not wedge every transaction queued behind it. The rejection itself is
-    // still delivered to this call's own caller via `run`.
-    queue = run.then(() => undefined, () => undefined);
+    // still delivered to this call's own caller via `run`. Closing the token
+    // here (once the real transaction has actually settled) — rather than
+    // relying on run()'s callback scope — is what keeps a stale fire-and-
+    // forget descendant from reading a reentry flag that has outlived the
+    // transaction it was spawned from.
+    queue = run.then(
+      () => { token.active = false; },
+      () => { token.active = false; },
+    );
     return run;
   };
 }
