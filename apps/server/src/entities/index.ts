@@ -76,3 +76,11 @@ export { AgentSkillAssignment } from './AgentSkillAssignment';
 export { RunSkillSnapshot } from './RunSkillSnapshot';
 export { SkillProposal } from './SkillProposal';
 export { ChildRun } from './ChildRun';
+// External-channel outreach intake pipeline (ticket 2500fea3) — OutreachChannel
+// (poll config + cursor) and OutreachInboundItem (dedupe ledger + noise/held
+// audit + ticket backlink). Auto-DDL'd by TypeORM `synchronize` (D-01) exactly
+// like DispatchIntent/ReviewDriftState; no hand-written migration needed.
+export { OutreachChannel } from './OutreachChannel';
+export type { OutreachChannelKind, OutreachPublishPolicy } from './OutreachChannel';
+export { OutreachInboundItem } from './OutreachInboundItem';
+export type { OutreachClassification, OutreachItemStatus } from './OutreachInboundItem';
