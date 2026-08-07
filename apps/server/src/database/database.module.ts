@@ -1,7 +1,7 @@
 import { Module, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../db';
+import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING, serializeSqljsTransactions } from '../db';
 import { DEFAULT_PROMPT_TEMPLATES } from './default-prompt-templates';
 import * as entitiesBarrel from '../entities';
 import { Workspace } from '../entities/Workspace';
@@ -35,7 +35,14 @@ export class DatabaseModule implements OnModuleInit {
   constructor(
     @InjectDataSource() private dataSource: DataSource,
     @Optional() @Inject(LogService) private logService?: LogService,
-  ) {}
+  ) {
+    // onModuleInit이 아니라 생성자에서 패치한다: Nest는 앱 전체 모든 모듈의
+    // provider(생성자)를 어떤 모듈의 onModuleInit이 실행되기 전에 전부
+    // 인스턴스화하므로, 다른 어디에서 나올 수 있는 가장 이른 .transaction()
+    // 호출보다도 먼저 패치되는 것이 보장된다. Postgres/MySQL에서는 no-op —
+    // db.ts의 serializeSqljsTransactions 참고.
+    serializeSqljsTransactions(this.dataSource);
+  }
 
   private dbLog(message: string) {
     if (this.logService) {

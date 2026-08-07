@@ -15,7 +15,8 @@
  * - D-05: This file is the single source of truth for DataSource options.
  */
 import 'reflect-metadata';
-import { DataSource, DataSourceOptions, EntitySubscriberInterface, EventSubscriber } from 'typeorm';
+import { DataSource, DataSourceOptions, EntityManager, EntitySubscriberInterface, EventSubscriber } from 'typeorm';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as entitiesBarrel from './entities';
@@ -102,6 +103,69 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
       markSqljsDirty();
     }
   }
+}
+
+// ── dev sql.js 트랜잭션 직렬화 큐 (ticket 762fbe05) ──────────────────────────
+// 배경: SqljsDriver.createQueryRunner()는 커넥션이 살아있는 동안 단 하나의
+// SqljsQueryRunner를 메모이즈해 재사용한다 — 진짜 풀링이 없고, WASM 인스턴스도
+// 커넥션도 하나뿐이다(node_modules/typeorm/driver/sqljs/SqljsDriver.js).
+// DataSource의 루트 manager에서 EntityManager.transaction()을 호출하면 항상
+// connection.createQueryRunner()로 runner를 얻으므로, 겹치는(overlapping) 두
+// transaction() 호출은 그 하나의 runner를 공유하게 된다. 진 쪽은 단순히
+// 깔끔하게 실패하지 않는다: 이미 하나가 활성 상태인데 raw "BEGIN TRANSACTION"을
+// 또 날리는 startTransaction()이 도중에 throw하고, EntityManager.transaction()은
+// 그 throw에 반응해 같은 SHARED runner에 raw ROLLBACK을 날린다 — 이때 이긴
+// 쪽의 아직 진행 중이던 트랜잭션까지 조용히 중단시켜 버린다. 서로 다른 두
+// 에러 문자열이 동시에 나타나는 이유가 여기 있다(ticket 02c85264):
+// raw BEGIN에서 나는 "cannot start a transaction within a transaction", 그리고
+// 이긴 쪽이 나중에 이미 남이 롤백해버린 runner에 커밋을 시도할 때 나는
+// "Transaction is not started yet, start transaction before committing or
+// rolling it back."
+//
+// 해결: 하나의 sqljs DataSource 인스턴스 범위에서 모든 transaction() 호출을
+// FIFO 큐로 직렬화한다. Postgres/MySQL은 네이티브 풀 기반 동시 트랜잭션을
+// 그대로 유지 — sqljs가 아닌 DataSource에서는 즉시 no-op.
+//
+// `dataSource.transaction`이 아니라 `dataSource.manager.transaction`을
+// 패치한다. `DataSource.prototype.transaction()`(typeorm/data-source/DataSource.js)
+// 자체가 `this.manager.transaction(...)`으로의 위임일 뿐이고, 이 코드베이스의
+// 여러 호출부가 `someRepo.manager.transaction(...)`을 직접 부른다.
+// `someRepo.manager`는 이 DataSource에서 얻은 어떤 repository든
+// `dataSource.manager`와 정확히 같은 EntityManager 인스턴스다(Repository의
+// `manager`는 그 repository를 만든 `getRepository()`를 호출한 EntityManager —
+// node_modules/typeorm/repository/Repository.js 참고). 그래서 manager
+// 인스턴스 하나만 패치하면 기존 ~48개 호출부를 손대지 않고도 두 호출 형태를
+// 전부 커버한다.
+//
+// 재진입(reentrancy): sqlite의 "nested" transactionSupport는 이미 transaction()
+// 콜백 "안에서" 또 다른 transaction()을 호출하는 것을 같은 shared runner 위의
+// SAVEPOINT로 안전하게 중첩시켜 준다 — 이건 이 패치가 고치려는 레이스가 아니고,
+// 이것까지 큐잉하면 데드락이 난다(바깥 호출은 안쪽이 끝나야 끝나는데, 안쪽은
+// 자기 큐 차례를 기다리며 바깥 뒤에 줄 서게 되므로). AsyncLocalStorage로 그
+// 콜백의 전체 비동기 체인 동안 "이 manager에서 이미 큐를 통과해 실행 중"임을
+// 표시한다 — 평범한 모듈 레벨 boolean과 달리 이후의 await를 계속 타고
+// 전파되면서도 그 체인 하나에만 스코프가 한정되므로, 같은 체인에서의 중첩
+// 호출은 큐를 건너뛰고 즉시 실행되는 반면, 진짜 무관한 동시 호출(다른 비동기
+// 체인, 예: 다른 요청)은 여전히 정상적으로 그 뒤에 줄을 선다.
+export function serializeSqljsTransactions(dataSource: DataSource): void {
+  if (dataSource.options.type !== 'sqljs') return;
+
+  const manager = dataSource.manager as EntityManager & {
+    transaction: (...args: unknown[]) => Promise<unknown>;
+  };
+  const original = manager.transaction.bind(manager);
+  const reentry = new AsyncLocalStorage<true>();
+  let queue: Promise<void> = Promise.resolve();
+
+  manager.transaction = (...args: unknown[]) => {
+    if (reentry.getStore()) return original(...args);
+    const run: Promise<unknown> = queue.then(() => reentry.run(true, () => original(...args)));
+    // Keep the chain alive regardless of outcome — a failed transaction must
+    // not wedge every transaction queued behind it. The rejection itself is
+    // still delivered to this call's own caller via `run`.
+    queue = run.then(() => undefined, () => undefined);
+    return run;
+  };
 }
 
 // PRESET — not enforced. New boards seed with these starter columns so the
@@ -393,6 +457,11 @@ export function buildDataSourceOptions(): DataSourceOptions {
 }
 
 export const AppDataSource = new DataSource(buildDataSourceOptions());
+// standalone 진입점(mcp-server.ts, mcp-tools.ts)은 이 인스턴스에 직접
+// .transaction()을 호출한다 — NestJS 서버는 TypeOrmModule.forRoot()가 만든
+// 별도의 DataSource 인스턴스를 쓰므로 database.module.ts의 DatabaseModule
+// 생성자에서 따로 적용한다.
+serializeSqljsTransactions(AppDataSource);
 
 // ── dev sql.js batched flush (ticket d5a8594a) ───────────────────────────────
 // Default cadence for the periodic flush. Tunable via SQLJS_FLUSH_INTERVAL_MS;
