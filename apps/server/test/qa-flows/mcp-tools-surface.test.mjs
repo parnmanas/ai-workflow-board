@@ -124,6 +124,8 @@ const EXPECTED_TOOLS = [
   'delete_function',
   'execute_function',
   'list_function_runs',
+  // Ticket 20fa0197 — outreach LLM 분류 결과 보고(AgentDispatchClassifier 완료 콜백).
+  'record_outreach_classification',
 ];
 
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {

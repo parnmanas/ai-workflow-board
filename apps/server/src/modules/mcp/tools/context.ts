@@ -62,6 +62,7 @@ import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
 import type { WorkflowFunctionsService } from '../../workflow-functions/workflow-functions.service';
 import type { ArtifactRefsService } from '../../artifact-refs/artifact-refs.service';
+import type { ClassificationBridgeService } from '../../outreach/classifier/classification-bridge.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -176,6 +177,14 @@ export interface ToolContext {
   // ticketPrerequisitesService). Used by benchmark-tools.
   benchmarkService?: BenchmarkService;
   workflowFunctionsService?: WorkflowFunctionsService;
+  // Ticket 20fa0197: AgentDispatchClassifier's in-process wait bridge.
+  // Required by outreach-tools' record_outreach_classification — that tool
+  // call is what unblocks the classify() await sitting in the SAME process
+  // (see ClassificationBridgeService's docstring for why this is a narrow
+  // exception to the usual decoupled dispatch/complete pattern). Standalone
+  // context omits it — there is no OutreachModule instance to share a
+  // singleton with in that mode, so the tool degrades to an explicit error.
+  classificationBridgeService?: ClassificationBridgeService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

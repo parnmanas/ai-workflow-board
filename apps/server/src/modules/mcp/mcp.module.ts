@@ -17,6 +17,7 @@ import { FeaturesModule } from '../features/features.module';
 import { HandoffModule } from '../handoff/handoff.module';
 import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
+import { OutreachModule } from '../outreach/outreach.module';
 
 @Module({
   imports: [
@@ -44,6 +45,10 @@ import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
     HandoffModule,
     WorkflowFunctionsModule,
     ArtifactRefsModule,
+    // Provides ClassificationBridgeService for the outreach-tools MCP tool
+    // (ticket 20fa0197) — record_outreach_classification must resolve
+    // against the SAME singleton instance AgentDispatchClassifier awaits on.
+    OutreachModule,
   ],
   controllers: [McpController],
 })

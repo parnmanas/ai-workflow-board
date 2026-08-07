@@ -42,6 +42,7 @@ import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
+import { ClassificationBridgeService } from '../outreach/classifier/classification-bridge.service';
 
 interface McpAuthInfo {
   keyHint: string;
@@ -172,6 +173,7 @@ export class McpController implements OnModuleInit {
     private readonly benchmarkService: BenchmarkService,
     private readonly workflowFunctionsService: WorkflowFunctionsService,
     private readonly artifactRefsService: ArtifactRefsService,
+    private readonly classificationBridgeService: ClassificationBridgeService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
   ) {}
 
@@ -266,6 +268,7 @@ export class McpController implements OnModuleInit {
       handoffService: this.handoffService,
       benchmarkService: this.benchmarkService,
       workflowFunctionsService: this.workflowFunctionsService,
+      classificationBridgeService: this.classificationBridgeService,
     };
   }
 
