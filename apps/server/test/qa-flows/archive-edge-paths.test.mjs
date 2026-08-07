@@ -315,6 +315,37 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
     assert.ok(row.archived_at,
       'once every activity signal predates the cutoff, the ticket archives');
   });
+
+  // ─── Subtest 5 — manual archive of a non-terminal ticket releases its outreach dedupe key (ticket a565b657) ───
+  await t.test('MCP archive_ticket clears operational_dedupe_key when archiving a non-terminal ticket', async () => {
+    step('Create a non-terminal ticket carrying an outreach-style dedupe key');
+    const outreachLike = await createTicket(app, getDataSourceToken, {
+      columnId: todoCol.id, workspaceId: ws.id,
+      title: 'outreach-created ticket', assigneeId: driverAgent.id,
+    });
+    await ticketRepo.update(outreachLike.id, {
+      operational_dedupe_key: `outreach:fixture-channel:${outreachLike.id}`,
+    });
+    const beforeArchive = await ticketRepo.findOne({ where: { id: outreachLike.id } });
+    assert.ok(beforeArchive.operational_dedupe_key, 'fixture ticket must carry a dedupe key before archiving');
+    assert.equal(beforeArchive.archived_at, null, 'fixture ticket starts unarchived on a non-terminal column');
+
+    step('MCP archive_ticket');
+    const mcp = new McpClient({
+      baseUrl: `http://localhost:${port}`,
+      apiKey: driverKey.raw_key,
+      clientInfo: { name: 'qa-archive-edges-dedupe', version: '1.0.0' },
+    });
+    await mcp.initialize();
+    t.after(() => { void mcp.close().catch(() => {}); });
+    const archived = await mcp.callTool('archive_ticket', { ticket_id: outreachLike.id });
+    assert.ok(archived && !archived.isError, `archive_ticket failed: ${JSON.stringify(archived)}`);
+
+    const afterArchive = await ticketRepo.findOne({ where: { id: outreachLike.id } });
+    assert.ok(afterArchive.archived_at, 'ticket must be archived');
+    assert.equal(afterArchive.operational_dedupe_key, null,
+      'archiving a non-terminal ticket must clear operational_dedupe_key so outreach-ingest can never pick it as a dedupe-key winner later');
+  });
 });
 
 test.after?.(() => exitAfterTests(0));

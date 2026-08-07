@@ -302,3 +302,48 @@ test('ticket-archiver.service.ts caps its per-board sweep', () => {
     'ticket-archiver candidate query must require terminal_entered_at to be set — otherwise tickets that never went through Done get swept on first tick.',
   );
 });
+
+// Dedupe-key release on archive (ticket a565b657) — a ticket manually
+// archived while still non-terminal (archive_ticket / REST archive) must
+// give up its operational_dedupe_key the same way entering a terminal column
+// already does (archive-helpers.ts applyTerminalEnteredAtForMove). Otherwise
+// outreach-ingest.service.ts's dedupe-winner lookup can pick an invisible
+// archived ticket as the "open" ticket for a re-processed external item.
+const ARCHIVE_DEDUPE_KEY_RELEASE_SOURCES = [
+  [
+    'modules/mcp/tools/archive-tools.ts',
+    'MCP archive_ticket must clear operational_dedupe_key so an archived ticket can never again be picked as an outreach dedupe-key winner',
+  ],
+  [
+    'modules/tickets/tickets.controller.ts',
+    'REST POST /tickets/:id/archive must clear operational_dedupe_key too — the human-facing UI archive path mirrors the MCP tool',
+  ],
+];
+for (const [relPath, why] of ARCHIVE_DEDUPE_KEY_RELEASE_SOURCES) {
+  test(`${path.basename(relPath)} clears operational_dedupe_key on archive`, () => {
+    const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
+    const src = fs.readFileSync(SOURCE, 'utf8');
+    const code = stripComments(src);
+    assert.match(
+      code,
+      /operational_dedupe_key\s*=\s*null/,
+      `${relPath} must clear operational_dedupe_key when archiving a ticket. ${why}`,
+    );
+  });
+}
+
+// Defense in depth: the outreach dedupe-key winner lookup must also exclude
+// archived rows directly (legacy data / narrow commit-ordering races where
+// the clear above didn't happen) — ticket a565b657.
+test('outreach-ingest.service.ts excludes archived tickets from the dedupe-key winner lookup', () => {
+  const SOURCE = path.resolve(
+    __dirname, '..', 'src', 'modules', 'outreach', 'outreach-ingest.service.ts',
+  );
+  const src = fs.readFileSync(SOURCE, 'utf8');
+  const code = stripComments(src);
+  assert.match(
+    code,
+    /operational_dedupe_key:\s*dedupeKey,\s*archived_at:\s*IsNull\(\)/,
+    'the dedupe-key collision winner lookup must filter archived_at: IsNull() — otherwise an archived ticket can be selected as the winner and silently absorb new feedback.',
+  );
+});

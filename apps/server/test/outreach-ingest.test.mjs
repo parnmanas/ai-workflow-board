@@ -513,6 +513,107 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
   }
 });
 
+// 티켓 a565b657 — 비터미널 수동 아카이브 시 operational_dedupe_key가 남아있으면
+// (레거시 데이터 또는 좁은 commit-ordering 레이스), dedupe key 충돌의 winner 조회가
+// 그 비가시 티켓을 승자로 골라서는 안 된다. 링크되면 새 피드백이 조용히 사라진
+// 것처럼 보인다 — 대신 이번 poll은 에러로 남고(다음 poll이 처음부터 재시도),
+// 기존 archived 티켓은 그대로 둔다.
+test('ticket creation colliding with an ARCHIVED ticket for the same dedupe key does not link to it', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board, col } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-archived-collide': { category: 'bug', confidence: 90 } });
+    const collideItem = item({ external_item_id: 'gh-archived-collide', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    // Simulates a row from before archive_ticket started clearing the key on
+    // manual archive (or the narrow commit-ordering race archive_ticket's fix
+    // can't fully close): archived, but operational_dedupe_key still set.
+    const ticketRepo = dataSource.getRepository(Ticket);
+    const archivedWinner = await ticketRepo.save(ticketRepo.create({
+      column_id: col.id,
+      workspace_id: 'ws-1',
+      title: 'archived ticket still holding the dedupe key',
+      operational_dedupe_key: `outreach:${channel.id}:gh-archived-collide`,
+      archived_at: new Date('2026-06-25T11:00:00Z'),
+    }));
+
+    const result = await svc.pollChannel(channel, makeConnector([collideItem]), new Date('2026-06-25T12:00:00Z'));
+
+    assert.equal(result.ticketed, 0, 'the archived ticket must not be counted as a successful ticketing');
+    assert.equal(result.errors, 1, 'no visible winner exists, so this poll surfaces an error instead of silently absorbing the item');
+
+    const tickets = await ticketRepo.find();
+    assert.equal(tickets.length, 1, 'no new ticket was created — the INSERT still collided with the archived row\'s key');
+    assert.equal(tickets[0].id, archivedWinner.id);
+    assert.ok(tickets[0].archived_at, 'the pre-existing ticket is untouched, still archived');
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 0, 'the claim was deleted rather than linked to the archived ticket, so the next poll retries fresh');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+// End-to-end policy proof: once archive_ticket clears the key (the actual
+// fix, not the legacy-data simulation above), a stale orphaned claim for the
+// same external item reclaims into a BRAND-NEW visible ticket instead of
+// resurrecting/attaching to the archived one.
+test('an item whose original ticket was archived (dedupe key already cleared) reclaims into a fresh, visible ticket', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board, col } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-reopen': { category: 'bug', confidence: 90 } });
+    const fixedItem = item({ external_item_id: 'gh-reopen', created_at: new Date('2026-06-25T10:00:00Z') });
+
+    // First attempt's ticket committed but its claim link never completed
+    // (orphaned, same shape as the "stale claim" test below), and a human
+    // later archived it — archive_ticket's current policy already cleared
+    // operational_dedupe_key on that archive, so it's null here too.
+    const ticketRepo = dataSource.getRepository(Ticket);
+    const archivedTicket = await ticketRepo.save(ticketRepo.create({
+      column_id: col.id,
+      workspace_id: 'ws-1',
+      title: 'orphan-linked ticket, later archived',
+      operational_dedupe_key: null,
+      archived_at: new Date('2026-06-25T11:00:00Z'),
+    }));
+
+    const itemRepo = dataSource.getRepository(OutreachInboundItem);
+    await itemRepo.save(itemRepo.create({
+      workspace_id: 'ws-1',
+      channel_id: channel.id,
+      external_item_id: 'gh-reopen',
+      classification: 'bug',
+      confidence: 90,
+      status: 'ticketed',
+      ticket_id: null,
+      permalink: fixedItem.permalink,
+      author: fixedItem.author,
+      collected_at: fixedItem.created_at,
+    }));
+
+    const svc = makeService(dataSource, classifier);
+    const result = await svc.pollChannel(channel, makeConnector([fixedItem]), new Date('2026-06-25T12:00:00Z'));
+
+    assert.equal(result.ticketed, 1, 'the item is recovered into a brand-new ticket, not lost');
+
+    const tickets = await ticketRepo.find();
+    assert.equal(tickets.length, 2, 'the archived ticket is left untouched and a second, fresh ticket now exists');
+    const freshTicket = tickets.find((t) => t.id !== archivedTicket.id);
+    assert.ok(freshTicket, 'a new ticket distinct from the archived one was created');
+    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible on the board');
+
+    const items = await itemRepo.find();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].ticket_id, freshTicket.id, 'the claim links to the fresh visible ticket, never to the archived one');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
 test('a still-active claim (fresh lease) is NOT reclaimed by a racing second poll — deterministic barrier, exactly one ticket', async () => {
   const dataSource = await setupDb();
   try {
