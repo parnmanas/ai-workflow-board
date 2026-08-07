@@ -50,6 +50,16 @@ export class OutreachInboundItem {
   @Column({ type: 'varchar', nullable: true, default: null })
   ticket_id: string | null;
 
+  // Set when a claim (status='ticketed', ticket_id=null) is INSERTed, i.e.
+  // right before OutreachIngestService starts building the ticket. A NULL
+  // here means the row predates this column (pre-fix data) and is always
+  // treated as expired. See OutreachIngestService's STALE_CLAIM_LEASE_MS —
+  // this is what lets a later poll tell "still actively being processed"
+  // apart from "the process that claimed this crashed" instead of deleting
+  // an in-flight claim out from under its own owner.
+  @Column({ type: Date, nullable: true, default: null })
+  claimed_at: Date | null;
+
   @Column({ type: 'varchar', default: '' })
   permalink: string;
 

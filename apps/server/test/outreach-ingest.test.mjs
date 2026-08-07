@@ -24,6 +24,11 @@
 //     끝난다(중복 티켓 없음).
 //   • 리뷰 2차 지적: claim 직후 중단되었거나 보상삭제를 거친 ticket_id=null
 //     정체 claim은 다음 poll에서 skip되지 않고 정상적으로 재claim·티켓화된다.
+//   • 리뷰 3차 지적: lease가 아직 유효한(방금 claim된) ticket_id=null 행은
+//     "정체"가 아니라 "처리 중"으로 취급되어 삭제되지 않는다 — 결정론적
+//     barrier로 A가 _createTicket 실행 중일 때 B를 진입시켜, 최종 티켓
+//     1개·ledger 1개만 남는 것을 증명한다(레이스 재현에 우연한 스케줄링에
+//     기대지 않음).
 
 import 'reflect-metadata';
 import test from 'node:test';
@@ -403,6 +408,62 @@ test('a ledger-link failure after ticket creation compensates the orphaned ticke
     assert.equal(tickets.length, 1, 'exactly one ticket total after the retry succeeds — the compensated orphan does not become a duplicate');
     const items = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(items.length, 1);
+    assert.equal(items[0].ticket_id, tickets[0].id);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a still-active claim (fresh lease) is NOT reclaimed by a racing second poll — deterministic barrier, exactly one ticket', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-race2': { category: 'bug', confidence: 90 } });
+    const raceItem = item({ external_item_id: 'gh-race2', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+    const now = new Date('2026-06-25T12:00:00Z');
+
+    // Deterministic barrier: A's claim INSERT has already committed (that
+    // line runs BEFORE _createTicket is even called) when this mock's body
+    // starts, so `reachedGate` only resolves once the claim row genuinely
+    // exists with status='ticketed', ticket_id=null. B is only started after
+    // that, so it always observes A's claim mid-flight — no scheduling luck
+    // needed, unlike the earlier Promise.all race test above (which races on
+    // the INSERT itself, not on this reclaim window).
+    let releaseA;
+    const gate = new Promise((resolve) => { releaseA = resolve; });
+    let reachedGateResolve;
+    const reachedGate = new Promise((resolve) => { reachedGateResolve = resolve; });
+    const originalCreateTicket = svc._createTicket.bind(svc);
+    svc._createTicket = async (...args) => {
+      reachedGateResolve();
+      await gate;
+      return originalCreateTicket(...args);
+    };
+
+    const pollA = svc.pollChannel(channel, makeConnector([raceItem]), now);
+    await reachedGate;
+
+    // B starts while A's claim sits at status='ticketed', ticket_id=null,
+    // claimed_at=now — freshly claimed, well inside the lease. Before the
+    // fix, B's stale-claim check only looked at status/ticket_id and would
+    // delete A's live claim here, then insert its own and create a SECOND
+    // ticket while A (unaware) goes on to finish creating its own.
+    const resultB = await svc.pollChannel(channel, makeConnector([raceItem]), now);
+    assert.equal(resultB.ticketed, 0, 'B must not create a ticket for a claim that is still actively in-flight');
+    assert.equal(resultB.skipped, 1, 'B recognizes the fresh claim as owned elsewhere and skips, not deletes');
+
+    releaseA();
+    const resultA = await pollA;
+    assert.equal(resultA.ticketed, 1, 'A completes its own ticket creation undisturbed');
+
+    const tickets = await dataSource.getRepository(Ticket).find();
+    assert.equal(tickets.length, 1, 'exactly one ticket total — B did not fork a duplicate');
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1, 'exactly one ledger row — A\'s claim was never deleted out from under it');
+    assert.equal(items[0].status, 'ticketed');
     assert.equal(items[0].ticket_id, tickets[0].id);
   } finally {
     await dataSource.destroy();

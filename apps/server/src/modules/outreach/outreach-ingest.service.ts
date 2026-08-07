@@ -48,6 +48,14 @@ export interface PollResult {
 
 const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_request']);
 
+// How long a claim (status='ticketed', ticket_id=null) may sit unlinked
+// before a later/racing poll is allowed to treat it as abandoned rather than
+// still in-flight. Ticket creation normally completes in well under a
+// second — this is a generous safety margin against a genuine crash, not a
+// tuned SLA. See the stale-claim reclaim block in _processItem (review 3rd
+// pass): a claim younger than this lease is never deleted, only skipped.
+const STALE_CLAIM_LEASE_MS = 2 * 60 * 1000;
+
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
     code?: string;
@@ -101,7 +109,7 @@ export class OutreachIngestService {
 
     for (const item of sorted) {
       try {
-        await this._processItem(channel, item, result);
+        await this._processItem(channel, item, result, now);
         if (!sawError && item.created_at.getTime() > cursorMax) cursorMax = item.created_at.getTime();
       } catch (e: any) {
         sawError = true;
@@ -120,21 +128,51 @@ export class OutreachIngestService {
     return result;
   }
 
-  private async _processItem(channel: OutreachChannel, item: InboundItem, result: PollResult): Promise<void> {
+  private async _processItem(channel: OutreachChannel, item: InboundItem, result: PollResult, now: Date): Promise<void> {
     const existing = await this.itemRepo.findOne({
       where: { channel_id: channel.id, external_item_id: item.external_item_id },
     });
     if (existing) {
       if (existing.status === 'ticketed' && !existing.ticket_id) {
-        // 정체된 claim — status는 'ticketed'인데 ticket_id가 없다. 두 경로로
-        // 생긴다: (a) claim INSERT 직후 프로세스가 죽어 _createTicket()이
-        // 아예 시작도 못 한 경우, (b) 티켓은 만들어졌지만 아래 ticket_id UPDATE가
-        // 실패해 보상삭제(compensate)까지 거친 경우. 둘 다 그대로 두면 이
-        // 외부 항목이 영원히 skip되어 유실된다(리뷰 2차 지적). 지우고 새
-        // 항목처럼 다시 처리하면 두 경우 모두 깨끗하게 복구된다 — 아래 claim이
-        // 실패 시 만든 티켓을 보상삭제하는 것과 합쳐, 이 한 경로가 두 실패
-        // 시나리오를 함께 커버한다.
-        await this.itemRepo.delete({ id: existing.id });
+        // 정체된 것처럼 "보이는" claim — status는 'ticketed'인데 ticket_id가
+        // 없다. 이 모양은 두 가지 서로 다른 상황에서 나온다: (a) 지금 이
+        // 순간에도 다른 poll이 정상적으로 _createTicket()을 실행 중인 경우
+        // (claim INSERT와 ticket_id UPDATE 사이 — 정상적인 처리 중간 상태),
+        // (b) claim만 남기고 그 poll이 죽었거나 보상삭제까지 거친 경우(진짜
+        // 정체). 리뷰 3차 지적: status/ticket_id만 보고 (a)와 (b)를 구분하지
+        // 않은 채 즉시 삭제하면, 아직 살아서 _createTicket()을 실행 중인
+        // poll의 claim을 빼앗아 같은 외부 항목이 티켓 2개로 중복 생성된다.
+        // claimed_at 기준 lease로 (a)/(b)를 구분한다: lease가 아직 유효하면
+        // "지금 누군가 처리 중"으로 보고 삭제 없이 skip만 기록한다 — 그
+        // poll이 끝나면 ticket_id UPDATE로 이 행이 스스로 정상 상태가 된다.
+        const claimedAtMs = existing.claimed_at ? existing.claimed_at.getTime() : 0;
+        const staleCutoffMs = now.getTime() - STALE_CLAIM_LEASE_MS;
+        if (claimedAtMs > staleCutoffMs) {
+          result.skipped++;
+          return;
+        }
+
+        // lease 만료 — 진짜 정체된 claim으로 보고 회수한다. 다만 우리가 읽은
+        // 시점과 삭제 시점 사이에 다른 poll이 먼저 회수했거나(레이스) 정상
+        // 완료했을 수 있으므로, id뿐 아니라 관측했던 모양(status='ticketed'
+        // AND ticket_id IS NULL) 그대로 남아있을 때만 지우는 조건부 DELETE로
+        // 원자적으로 확인한다. FindOperator(IsNull())를 repo.delete()
+        // criteria에 넘기면 이 TypeORM 버전에서 조건이 조용히 빠지는 사례가
+        // 이미 있었으므로(database.module.ts 참고) QueryBuilder의 raw SQL
+        // WHERE로 우회한다. affected===0이면 이미 남이 처리했다는 뜻이니
+        // 우리는 손대지 않고 skip한다.
+        const { affected } = await this.itemRepo
+          .createQueryBuilder()
+          .delete()
+          .from(OutreachInboundItem)
+          .where('id = :id', { id: existing.id })
+          .andWhere('status = :status', { status: 'ticketed' })
+          .andWhere('ticket_id IS NULL')
+          .execute();
+        if (!affected) {
+          result.skipped++;
+          return;
+        }
       } else {
         result.skipped++;
         return;
@@ -178,6 +216,7 @@ export class OutreachIngestService {
         confidence,
         status,
         ticket_id: null,
+        claimed_at: now,
         permalink: item.permalink,
         author: item.author,
         collected_at: item.created_at,
