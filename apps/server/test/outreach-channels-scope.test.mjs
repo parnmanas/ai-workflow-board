@@ -21,6 +21,7 @@ import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
+import { Agent } from '../dist/entities/Agent.js';
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
 import { OutreachChannelService } from '../dist/modules/outreach/outreach-channel.service.js';
@@ -44,7 +45,7 @@ describe('Outreach channels — workspace scope contract', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, OutreachChannel, OutreachInboundItem],
+      entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, Agent, OutreachChannel, OutreachInboundItem],
       synchronize: true,
       logging: false,
     });
@@ -54,10 +55,11 @@ describe('Outreach channels — workspace scope contract', () => {
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     const credentialRepo = dataSource.getRepository(Credential);
     const boardRepo = dataSource.getRepository(Board);
+    const agentRepo = dataSource.getRepository(Agent);
     // pollingService is only used for computeNextPoll() here (a pure
     // date computation) — its own repo/ingest deps are never exercised.
     const pollingService = new OutreachPollingService(channelRepo, credentialRepo, {}, noopLog);
-    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, pollingService);
+    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, agentRepo, pollingService);
     controller = new OutreachController(channelService);
   });
 
@@ -108,6 +110,35 @@ describe('Outreach channels — workspace scope contract', () => {
     }, res);
     assert.equal(res.statusCode, 400);
     assert.match(res.body.error, /target_board_id must reference a board in this workspace/);
+  });
+
+  it('rejects a classifier_agent_id belonging to a DIFFERENT workspace', async () => {
+    const wsRepo = dataSource.getRepository(Workspace);
+    const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-agent-a' }));
+    const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-agent-b' }));
+    const agentRepo = dataSource.getRepository(Agent);
+    const agentB = await agentRepo.save(agentRepo.create({ name: 'agent-b', workspace_id: wsB.id }));
+
+    const res = response();
+    await controller.create({
+      workspace_id: wsA.id, kind: 'github', name: 'channel agent scope', classifier_agent_id: agentB.id,
+    }, res);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error, /classifier_agent_id must belong to this workspace/);
+  });
+
+  it('accepts a classifier_agent_id belonging to the SAME workspace', async () => {
+    const wsRepo = dataSource.getRepository(Workspace);
+    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-same' }));
+    const agentRepo = dataSource.getRepository(Agent);
+    const agent = await agentRepo.save(agentRepo.create({ name: 'agent-same', workspace_id: ws.id }));
+
+    const res = response();
+    await controller.create({
+      workspace_id: ws.id, kind: 'github', name: 'channel agent same-scope', classifier_agent_id: agent.id,
+    }, res);
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.classifier_agent_id, agent.id);
   });
 
   it('a channel created in workspace A is not visible when listing workspace B', async () => {
