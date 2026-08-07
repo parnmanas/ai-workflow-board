@@ -31,6 +31,7 @@ import { Agent } from '../../../entities/Agent';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { LogService } from '../../../services/log.service';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import { clampEnv } from '../outreach-polling.service';
 import { InboundItem } from '../connectors/types';
@@ -71,11 +72,23 @@ export class AgentDispatchClassifier implements OutreachClassifier {
       });
       return this.fallback.classify(item);
     }
+    // Re-check visibility at dispatch time, not just at channel-save time
+    // (outreach-channel.service.ts's _assertAgentScope): if the agent's
+    // workspace_id changed since classifier_agent_id was configured, a
+    // stale channel must not hand inbound item content to an agent outside
+    // its workspace.
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, context.workspaceId)) {
+      this.logService.warn('Outreach', `classifier_agent_id ${agent.id} is no longer visible in workspace ${context.workspaceId} — falling back to rule-based`, {
+        channel_id: context.channelId,
+      });
+      return this.fallback.classify(item);
+    }
 
     const { runId, result } = this.bridge.register(agent.id, this.timeoutMs);
     try {
       await this._dispatch(context, agent, item, runId);
     } catch (e: any) {
+      this.bridge.cancel(runId);
       this.logService.warn('Outreach', `classification dispatch failed — falling back to rule-based: ${e?.message || e}`, {
         channel_id: context.channelId, run_id: runId,
       });

@@ -20,7 +20,11 @@
  *   - The timeout passed to register() IS the cleanup — when it fires, the
  *     pending entry is dropped right here. Unlike Security/QA runs there is
  *     no separate consumer that could still be waiting on this row past the
- *     timeout, so no reaper sweep is needed.
+ *     timeout, so no reaper sweep is needed. The other cleanup path is
+ *     cancel(): the caller uses it when it gives up on a run *before* the
+ *     timeout (dispatch itself failed, so the agent was never actually told
+ *     the run_id and will never call report() for it) — without it, a run of
+ *     dispatch failures would each sit in `pending` for up to timeoutMs.
  *   - It is NOT durable: a server restart drops every pending entry (same
  *     tradeoff FsBrowserService — apps/server/src/services/fs-browser.service.ts
  *     — accepts for its own in-memory request map). That's safe here
@@ -48,6 +52,7 @@ export interface ClassificationReport {
 interface PendingEntry {
   agentId: string;
   resolve: (report: ClassificationReport) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 @Injectable()
@@ -68,6 +73,7 @@ export class ClassificationBridgeService {
       timer.unref?.();
       this.pending.set(runId, {
         agentId,
+        timer,
         resolve: (report) => {
           clearTimeout(timer);
           resolve(report);
@@ -89,6 +95,21 @@ export class ClassificationBridgeService {
     this.pending.delete(runId);
     entry.resolve({ category, confidence });
     return true;
+  }
+
+  /**
+   * Drop a pending entry without resolving it. Called by the dispatcher when
+   * it gives up on `runId` before report()/timeout — e.g. the dispatch call
+   * itself threw, so the agent was never actually told the run_id and will
+   * never report on it. Clears the timer so the entry doesn't linger in
+   * `pending` for up to timeoutMs; a no-op if `runId` is already gone
+   * (reported or timed out first).
+   */
+  cancel(runId: string): void {
+    const entry = this.pending.get(runId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.pending.delete(runId);
   }
 
   /** Test/observability seam — never used on a live request path. */
