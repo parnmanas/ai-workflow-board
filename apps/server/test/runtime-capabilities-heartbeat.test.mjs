@@ -149,11 +149,13 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
             version: 'hermes 0.3.0',
             reason: null,
             capabilities: hermesCapabilities,
-            // 유효/무효가 섞인 입력: 정상 이름은 통과하고, 문자열이 아닌 값과
-            // 길이 초과 이름은 heartbeat 전체를 거부하지 않고 그 항목만
-            // 버린다 — sanitizeRuntimeCapabilities 다른 곳의 관대한 drop
-            // 관례를 그대로 따른다.
-            profiles: ['coder', 'reviewer', 42, null, 'x'.repeat(200)],
+            // 유효/무효가 섞인 입력: 정상 이름은 통과하고, 문자열이 아닌 값,
+            // Hermes 프로파일 이름 규칙(`[a-z0-9][a-z0-9_-]{0,63}`)을 벗어난
+            // 값(길이 초과·허용되지 않은 문자), 중복 값은 heartbeat 전체를
+            // 거부하지 않고 그 항목만 버린다 — slice로 잘라 새 이름을 만들어
+            // 내지 않는다(잘린 이름은 Host가 보고한 적 없는 프로파일이 되어
+            // 선택 시 Hermes 기동 실패로 이어질 수 있다).
+            profiles: ['coder', 'reviewer', 'coder', 42, null, 'x'.repeat(200), 'Bad Profile!'],
           },
         },
         pid: 123,
@@ -166,7 +168,7 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
   const record = app
     .get(InstanceRegistryService)
     .get('runtime-host-test-profiles');
-  assert.deepEqual(record.runtime_capabilities.hermes.profiles, ['coder', 'reviewer', 'x'.repeat(64)]);
+  assert.deepEqual(record.runtime_capabilities.hermes.profiles, ['coder', 'reviewer']);
 });
 
 exitAfterTests();

@@ -64,6 +64,12 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
   const usageModes = new Set(['none', 'tokens', 'tokens-and-cost']);
   const collaborations = new Set(['delegated', 'swarm']);
   const skillDelivery = new Set(['prompt', 'filesystem', 'native']);
+  // Hermes 자체의 프로파일 이름 규칙(agent-manager 쪽 hermes-command.ts의
+  // PROFILE_NAME_RE와 동일). 이 범위를 벗어나는 값은 Host가 실제로 보유한
+  // 프로파일일 수 없으므로 잘라내지 않고 항목째 버린다 — slice()로 잘라내면
+  // Host가 보고한 적 없는 새 이름을 만들어내 존재하지 않는 프로파일을
+  // 선택 가능하게 만든다.
+  const profileNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 
   for (const [rawRuntimeId, rawStatus] of Object.entries(input as Record<string, unknown>)) {
     const runtimeId = rawRuntimeId.trim().toLowerCase();
@@ -110,10 +116,13 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
       capabilities: descriptor,
       ...(Array.isArray(status.profiles)
         ? {
-            profiles: status.profiles
-              .filter((value): value is string => typeof value === 'string' && !!value)
-              .map((value) => value.slice(0, 64))
-              .slice(0, 200),
+            profiles: Array.from(
+              new Set(
+                status.profiles.filter(
+                  (value): value is string => typeof value === 'string' && profileNamePattern.test(value),
+                ),
+              ),
+            ).slice(0, 200),
           }
         : {}),
     };
