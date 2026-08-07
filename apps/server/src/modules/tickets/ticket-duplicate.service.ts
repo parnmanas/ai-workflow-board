@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DataSource, In, IsNull } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { Comment } from '../../entities/Comment';
@@ -139,8 +139,24 @@ export class TicketDuplicateService {
   }
 
   async record(ticket: Ticket, assessment: DuplicateAssessment, actorName = '', actorId = ''): Promise<void> {
+    return this.recordTx(this.dataSource.manager, ticket, assessment, actorName, actorId);
+  }
+
+  /**
+   * Transaction-scoped write (ticket 7cf4f936 review fix), mirroring
+   * ActivityService.logActivityTx. A caller building the report Ticket row
+   * itself must persist this audit trail via the SAME manager, in the SAME
+   * transaction — otherwise a Decision/Comment write failing after the
+   * Ticket already committed leaves a permanently incomplete ticket behind
+   * (outreach's operational_dedupe_key makes any retry silently reuse that
+   * committed ticket instead of re-running the audit write). Folding both
+   * into one transaction means a record() failure rolls the Ticket insert
+   * back too, so a retry starts _createTicket() from scratch instead of
+   * limping through a partially-done winner.
+   */
+  async recordTx(manager: EntityManager, ticket: Ticket, assessment: DuplicateAssessment, actorName = '', actorId = ''): Promise<void> {
     if (!assessment.candidates.length) return;
-    const repo = this.dataSource.getRepository(TicketDuplicateDecision);
+    const repo = manager.getRepository(TicketDuplicateDecision);
     await repo.save(assessment.candidates.map(candidate => repo.create({
       workspace_id: ticket.workspace_id,
       report_ticket_id: ticket.id,
@@ -152,7 +168,7 @@ export class TicketDuplicateService {
       actor_name: actorName,
     })));
     if (assessment.canonical_ticket_id) {
-      const comments = this.dataSource.getRepository(Comment);
+      const comments = manager.getRepository(Comment);
       await comments.save([
         comments.create({
           workspace_id: ticket.workspace_id, ticket_id: ticket.id, author_type: 'system', author: 'Duplicate intake',

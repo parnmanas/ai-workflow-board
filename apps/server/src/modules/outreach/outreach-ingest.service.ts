@@ -384,10 +384,21 @@ export class OutreachIngestService {
       title, description, labels, source_kind: channel.kind, source_chat_room_id: channel.id,
     });
 
-    const ticket = await this.dataSource.transaction(async (manager) => {
+    // Ticket 생성, duplicate 감사 기록(Decision/Comment), creation Activity를
+    // 한 트랜잭션으로 묶는다(리뷰 지적 — 7cf4f936 3차 리뷰). 이전에는 Ticket
+    // INSERT가 먼저 단독 커밋된 뒤 record()가 트랜잭션 밖에서 별도 실행돼,
+    // record()만 실패해도 이미 커밋된 Ticket이 operational_dedupe_key를 쥔
+    // 채 영구히 남았다 — 다음 poll은 그 키로 "winner" 티켓을 찾아 재사용할
+    // 뿐 나머지 후처리(감사 기록/역할 배정/Activity)를 다시 실행하지 않으므로
+    // 결손이 영구화됐다. 지금은 record()/activity 기록까지 실패하면 Ticket
+    // INSERT 자체가 롤백되므로, 다음 poll의 _createTicket() 호출은 dedupe
+    // key 충돌 없이 처음부터 다시 시도해 전체 후처리를 정상적으로 완주한다.
+    // (activity의 SSE emit만은 트랜잭션 밖에서 커밋 후 실행 — logActivityTx
+    // 자체가 이미 그 패턴을 강제한다, activity.service.ts 참고.)
+    const { ticket, activityLog } = await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
       const position = await maxTicketPosition(manager, column.id);
-      return tRepo.save(tRepo.create({
+      const savedTicket = await tRepo.save(tRepo.create({
         column_id: column.id,
         workspace_id: channel.workspace_id,
         title,
@@ -417,9 +428,17 @@ export class OutreachIngestService {
         created_by_id: '',
         operational_dedupe_key: dedupeKey,
       }));
+      await duplicateService.recordTx(manager, savedTicket, duplicateAssessment, 'Outreach', '');
+      const savedActivity = await this.activityService.logActivityTx(manager, {
+        entity_type: 'ticket',
+        entity_id: savedTicket.id,
+        action: 'created',
+        ticket_id: savedTicket.id,
+        actor_name: 'Outreach',
+      });
+      return { ticket: savedTicket, activityLog: savedActivity };
     });
-
-    await duplicateService.record(ticket, duplicateAssessment, 'Outreach', '');
+    this.activityService.emitLogged([activityLog]);
 
     // Board default role holders only (mirrors QaFailureTicketService) — an
     // outreach channel names no assignee, so an unstaffed role stays vacant
@@ -432,14 +451,6 @@ export class OutreachIngestService {
     } catch {
       /* non-fatal — degrade to "no defaults" */
     }
-
-    await this.activityService.logActivity({
-      entity_type: 'ticket',
-      entity_id: ticket.id,
-      action: 'created',
-      ticket_id: ticket.id,
-      actor_name: 'Outreach',
-    });
 
     return ticket.id;
   }

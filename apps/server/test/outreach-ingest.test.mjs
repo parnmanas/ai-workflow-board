@@ -51,9 +51,16 @@ import { TicketDuplicateDecision } from '../dist/entities/TicketDuplicateDecisio
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
 import { OutreachIngestService, STALE_CLAIM_LEASE_MS } from '../dist/modules/outreach/outreach-ingest.service.js';
+import { TicketDuplicateService } from '../dist/modules/tickets/ticket-duplicate.service.js';
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
-const noopActivity = { async logActivity() { return {}; } };
+// logActivityTx/emitLogged (not logActivity) — _createTicket now writes the
+// creation Activity row via the SAME transaction as the Ticket/duplicate-audit
+// insert (ticket 7cf4f936 review fix), the same manager-scoped pattern
+// ActivityService already uses elsewhere; emitLogged fires the SSE event only
+// after that transaction commits. The stub DataSource here has no ActivityLog
+// entity registered, so these stay pure call-recorders, never touching `manager`.
+const noopActivity = { async logActivityTx() { return {}; }, emitLogged() {} };
 const noopRoleAssignment = { async applyBoardDefaults() { return []; } };
 
 // Call-counting variants (리뷰 5차 지적 — "고아 role/activity가 남지 않음")
@@ -61,7 +68,13 @@ const noopRoleAssignment = { async applyBoardDefaults() { return []; } };
 // fire exactly once even across a failed-then-retried creation.
 function countingActivity() {
   const calls = [];
-  return { stub: { async logActivity(payload) { calls.push(payload); return {}; } }, calls };
+  return {
+    stub: {
+      async logActivityTx(manager, payload) { calls.push(payload); return {}; },
+      emitLogged() {},
+    },
+    calls,
+  };
 }
 function countingRoleAssignment() {
   const calls = [];
@@ -775,6 +788,120 @@ test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트�
       comments.some((c) => c.ticket_id === firstTicket.id && /was linked to this canonical ticket/.test(c.content)),
       'record()가 canonical 티켓에도 상호 참조 코멘트를 남긴다',
     );
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+// 리뷰 지적 (7cf4f936): Ticket INSERT가 record()보다 먼저 단독 커밋되던 구버전
+// 구조에서는 record()(Decision/Comment 저장)만 실패해도 이미 커밋된 Ticket이
+// operational_dedupe_key를 쥔 채 영구히 남았다 — 재폴링은 그 키로 그 "winner"
+// 티켓을 찾아 claim만 연결할 뿐, record()/역할 배정/creation Activity를 다시
+// 실행하지 않으므로 결손이 영구화된다. 수정 후에는 Ticket INSERT와 record()가
+// 하나의 트랜잭션이라 record() 실패가 Ticket INSERT까지 통째로 롤백시키고,
+// 다음 poll은 dedupe key 충돌 없이 _createTicket()을 처음부터 다시 실행해
+// 전체 후처리(Decision/Comment/역할/Activity)를 정확히 한 번 완주한다.
+test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시키고, 재폴링은 전체 후처리를 정확히 한 번 완주한다', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1', {
+      default_role_assignments: JSON.stringify({ assignee: [{ agent_id: 'agent-x' }] }),
+    });
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({
+      'gh-1': { category: 'bug', confidence: 90 },
+      'gh-2': { category: 'bug', confidence: 90 },
+    });
+    const { stub: roleAssignment, calls: roleCalls } = countingRoleAssignment();
+    const { stub: activity, calls: activityCalls } = countingActivity();
+    const svc = makeService(dataSource, classifier, { roleAssignment, activity });
+
+    // First report: nothing to match against yet, so assess() returns no
+    // candidates and record() is a true no-op — this ticket exists purely to
+    // give the second report something to auto-link against.
+    const first = await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'gh-1',
+      title: 'Crash on launch',
+      created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(first.ticketed, 1);
+    const afterFirst = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+
+    // Second report: same channel + identical normalized title as the first
+    // => same_channel + normalized_title => confidence 100 => canonical
+    // auto-link, so recordTx will genuinely attempt BOTH a Decision save and
+    // a pair of Comment saves (not an early-return no-op like the first).
+    // Inject the failure on THIS attempt only, mid-transaction.
+    const secondItem = item({
+      external_item_id: 'gh-2',
+      title: 'Crash on launch',
+      created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const originalRecordTx = TicketDuplicateService.prototype.recordTx;
+    let failedOnce = false;
+    TicketDuplicateService.prototype.recordTx = async function (...args) {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error('simulated duplicate-audit write failure (Decision/Comment save)');
+      }
+      return originalRecordTx.apply(this, args);
+    };
+
+    try {
+      const failedAttempt = await svc.pollChannel(afterFirst, makeConnector([secondItem]), new Date('2026-06-25T12:05:00Z'));
+      assert.equal(failedAttempt.errors, 1, 'the injected record() failure surfaces as a per-item error, not a silent drop');
+      assert.equal(failedAttempt.ticketed, 0);
+
+      const ticketsAfterFailure = await dataSource.getRepository(Ticket).find();
+      assert.equal(
+        ticketsAfterFailure.length, 1,
+        'record() failing rolls back the second Ticket INSERT too — only the first (unrelated) ticket survives, no partial/incomplete ticket',
+      );
+
+      const claimAfterFailure = await dataSource.getRepository(OutreachInboundItem).findOneBy({ external_item_id: 'gh-2' });
+      assert.equal(claimAfterFailure, null, 'the failed claim is deleted so the next poll retries the whole item from scratch');
+
+      const channelAfterFailure = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+      assert.equal(channelAfterFailure.since_cursor, afterFirst.since_cursor, 'cursor does not advance past the failed second item');
+
+      assert.equal(
+        (await dataSource.getRepository(TicketDuplicateDecision).find()).length, 0,
+        'no Decision row survives the rolled-back attempt',
+      );
+      assert.equal(
+        (await dataSource.getRepository(Comment).find()).length, 0,
+        'no Comment row survives the rolled-back attempt',
+      );
+      assert.equal(activityCalls.length, 1, 'only the first (successful) ticket logged an Activity row — the failed attempt logged none');
+      assert.equal(roleCalls.length, 1, 'only the first (successful) ticket applied board default roles — the failed attempt applied none');
+
+      // Retry: record() no longer fails.
+      const retry = await svc.pollChannel(channelAfterFailure, makeConnector([secondItem]), new Date('2026-06-25T12:10:00Z'));
+      assert.equal(retry.ticketed, 1, 'the retry succeeds fully once record() stops failing');
+
+      const tickets = await dataSource.getRepository(Ticket).find({ order: { created_at: 'ASC' } });
+      assert.equal(tickets.length, 2, 'exactly one ticket per report total — the failed attempt left no duplicate or orphan');
+      const [firstTicket, secondTicket] = tickets;
+
+      const items = await dataSource.getRepository(OutreachInboundItem).find();
+      assert.equal(items.length, 2, 'exactly one claim row per report');
+      const secondClaim = items.find((i) => i.external_item_id === 'gh-2');
+      assert.equal(secondClaim.ticket_id, secondTicket.id, 'exactly one claim link for the retried report');
+
+      const decisions = await dataSource.getRepository(TicketDuplicateDecision).find();
+      assert.equal(decisions.length, 1, 'exactly one Decision row exists after the retry — record() ran exactly once for the surviving attempt');
+      assert.equal(decisions[0].report_ticket_id, secondTicket.id);
+      assert.equal(decisions[0].candidate_ticket_id, firstTicket.id);
+      assert.equal(decisions[0].outcome, 'auto_linked');
+
+      const comments = await dataSource.getRepository(Comment).find();
+      assert.equal(comments.length, 2, 'exactly one Comment pair (report + canonical cross-reference) exists after the retry');
+
+      assert.equal(activityCalls.length, 2, 'Activity logged exactly once for the retried report in addition to the first — never duplicated, never skipped');
+      assert.equal(roleCalls.length, 2, 'board default roles applied exactly once for the retried report in addition to the first');
+    } finally {
+      TicketDuplicateService.prototype.recordTx = originalRecordTx;
+    }
   } finally {
     await dataSource.destroy();
   }
