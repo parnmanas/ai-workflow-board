@@ -2,6 +2,12 @@
 // kind로 일반화한 회귀 방지 테스트. 무거운 e2e 픽스처(bootApp/REST/VirtualAgent) 없이
 // DataSource + TicketDuplicateService만 직접 구성하는 confirmed-duplicate-correction.test.mjs
 // 패턴을 따른다 — assess()/parseProvenance()는 순수 서비스 메서드라 이걸로 충분하다.
+//
+// 아래 두 테스트는 1차 리뷰 지적(related_ticket_id를 인위적으로 채워 공백을 가린다는
+// 지적)에 대응해, OutreachIngestService._createTicket이 실제로 만드는 조건(동일 채널,
+// 빈 related_ticket_id, 서로 다른 문구)을 재현한다. source_chat_room_id를 채널 id로
+// 재사용하는 프로듀서 쪽 배선은 아직 없지만(별도 티켓 — 핸드오프 코멘트 참고), 배선됐다고
+// 가정했을 때 이 서비스의 매칭/신뢰도 로직이 올바른지는 여기서 독립적으로 검증 가능하다.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -90,4 +96,70 @@ test('assess()는 outreach kind에서도 이중 게이트를 통과하고 동일
     related_ticket_id: anchor,
   });
   assert.equal(githubAssessment.canonical_ticket_id, githubDecoy.id, 'github 리포트는 github 후보하고만 매칭된다');
+});
+
+test('same_channel 앵커: 실제 outreach 생성 조건(동일 채널, 빈 related_ticket_id, 다른 문구)은 60점 후보로만 잡히고 자동링크되지 않는다', async () => {
+  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws-outreach-channel' });
+  const board = await ds.getRepository(entities.Board).save({ workspace_id: workspace.id, name: 'board' });
+  const column = await ds.getRepository(entities.BoardColumn).save({
+    workspace_id: workspace.id, board_id: board.id, name: 'To Do', position: 0, kind: 'active',
+  });
+  const channelId = randomUUID();
+
+  // OutreachIngestService._createTicket이 오늘 실제로 채우는 필드(source_kind +
+  // 'outreach'/'source:<kind>' 라벨)만 시딩한다. source_chat_room_id는 채널 id를
+  // 담는다고 가정한 값이다 — 프로듀서 배선 자체는 이 티켓 범위 밖(핸드오프 코멘트 참고).
+  const candidate = await ds.getRepository(entities.Ticket).save({
+    workspace_id: workspace.id, column_id: column.id,
+    title: 'App crashes immediately on launch',
+    source_kind: 'reddit', source_chat_room_id: channelId,
+    labels: JSON.stringify(['outreach', 'source:reddit']),
+  });
+
+  const service = new TicketDuplicateService(ds);
+  const assessment = await service.assess(workspace.id, {
+    title: 'Cannot start the app, it crashes every time',
+    source_kind: 'reddit',
+    source_chat_room_id: channelId,
+    labels: ['outreach', 'source:reddit'],
+  });
+
+  assert.equal(
+    assessment.canonical_ticket_id, null,
+    '채널만 같고 문구가 다르면 공용 provenance 라벨만으로는 100점 자동링크되면 안 된다',
+  );
+  const match = assessment.candidates.find(c => c.ticket_id === candidate.id);
+  assert.ok(match, '완전히 무시(no-op)되지 않고 반드시 후보로는 잡혀야 한다');
+  assert.equal(match.confidence, 60);
+  assert.deepEqual(match.matched_signals, ['same_channel']);
+  assert.equal(assessment.ambiguous, true, '사람 확인이 필요한 애매한 후보로 표시되어야 한다');
+});
+
+test('same_channel + provenance 라벨을 제외하고도 실질적으로 겹치는 라벨이 있으면 여전히 100점 자동링크된다', async () => {
+  const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws-outreach-channel-corroborated' });
+  const board = await ds.getRepository(entities.Board).save({ workspace_id: workspace.id, name: 'board' });
+  const column = await ds.getRepository(entities.BoardColumn).save({
+    workspace_id: workspace.id, board_id: board.id, name: 'To Do', position: 0, kind: 'active',
+  });
+  const channelId = randomUUID();
+
+  const candidate = await ds.getRepository(entities.Ticket).save({
+    workspace_id: workspace.id, column_id: column.id,
+    title: 'App crashes immediately on launch',
+    source_kind: 'reddit', source_chat_room_id: channelId,
+    labels: JSON.stringify(['outreach', 'source:reddit', 'crash-on-launch']),
+  });
+
+  const service = new TicketDuplicateService(ds);
+  const assessment = await service.assess(workspace.id, {
+    title: 'Cannot start the app, it crashes every time',
+    source_kind: 'reddit',
+    source_chat_room_id: channelId,
+    labels: ['outreach', 'source:reddit', 'crash-on-launch'],
+  });
+
+  assert.equal(
+    assessment.canonical_ticket_id, candidate.id,
+    'provenance 라벨을 빼고도 실제로 겹치는 라벨(crash-on-launch)이 남으면 정상적으로 자동링크되어야 한다',
+  );
 });

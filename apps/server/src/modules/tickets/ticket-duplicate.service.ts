@@ -79,7 +79,17 @@ export class TicketDuplicateService {
       order: { created_at: 'ASC' },
     });
     const normalized = this.normalizeTitle(input.title);
-    const labels = new Set((input.labels || []).map(v => v.trim().toLowerCase()).filter(Boolean));
+    // Outreach-created tickets from the same channel always carry identical
+    // provenance labels ('outreach', 'source:<kind>') — counting those toward
+    // "corroborating overlap" would auto-link every report from a channel
+    // regardless of actual content, so they never enter the signal.
+    const isProvenanceLabel = (v: string) => v === 'outreach' || v.startsWith('source:');
+    const labels = new Set(
+      (input.labels || [])
+        .map(v => v.trim().toLowerCase())
+        .filter(Boolean)
+        .filter(v => !isProvenanceLabel(v)),
+    );
     const matches: DuplicateMatch[] = [];
     for (const candidate of tickets) {
       // Same-kind only: a reddit report can match another reddit report but never a
@@ -100,7 +110,10 @@ export class TicketDuplicateService {
         const candidateLabels: string[] = JSON.parse(candidate.labels || '[]');
         overlap = candidateLabels.filter(v => labels.has(String(v).toLowerCase())).length;
       } catch { /* malformed legacy labels are not a signal */ }
-      if (sameRoom) signals.push('same_source_room');
+      // 'source_chat_room_id' doubles as a generic source-scope id: for chat it's
+      // literally the room, for outreach kinds a producer can reuse it to carry
+      // the originating channel id — same anchor mechanics, kind-appropriate label.
+      if (sameRoom) signals.push(provenance.source_kind === 'chat' ? 'same_source_room' : 'same_channel');
       if (sameRelated) signals.push('same_related_ticket');
       if (sameTitle) signals.push('normalized_title');
       if (overlap) signals.push('overlapping_scope');
@@ -147,7 +160,7 @@ export class TicketDuplicateService {
         }),
         comments.create({
           workspace_id: ticket.workspace_id, ticket_id: assessment.canonical_ticket_id, author_type: 'system', author: 'Duplicate intake',
-          content: `Duplicate chat report ${ticket.id} was linked to this canonical ticket.`, type: 'system',
+          content: `Duplicate report ${ticket.id} was linked to this canonical ticket.`, type: 'system',
         }),
       ]);
     }
@@ -198,7 +211,7 @@ export class TicketDuplicateService {
           }),
           comments.create({
             workspace_id: report.workspace_id, ticket_id: canonical.id, author_type: 'system', author: 'Duplicate decision',
-            content: `Chat report ${report.id} was confirmed as a duplicate of this ticket.`, type: 'system',
+            content: `Report ${report.id} was confirmed as a duplicate of this ticket.`, type: 'system',
           }),
         ]);
       } else {
