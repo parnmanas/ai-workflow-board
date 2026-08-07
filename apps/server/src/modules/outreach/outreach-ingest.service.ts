@@ -125,8 +125,20 @@ export class OutreachIngestService {
       where: { channel_id: channel.id, external_item_id: item.external_item_id },
     });
     if (existing) {
-      result.skipped++;
-      return;
+      if (existing.status === 'ticketed' && !existing.ticket_id) {
+        // 정체된 claim — status는 'ticketed'인데 ticket_id가 없다. 두 경로로
+        // 생긴다: (a) claim INSERT 직후 프로세스가 죽어 _createTicket()이
+        // 아예 시작도 못 한 경우, (b) 티켓은 만들어졌지만 아래 ticket_id UPDATE가
+        // 실패해 보상삭제(compensate)까지 거친 경우. 둘 다 그대로 두면 이
+        // 외부 항목이 영원히 skip되어 유실된다(리뷰 2차 지적). 지우고 새
+        // 항목처럼 다시 처리하면 두 경우 모두 깨끗하게 복구된다 — 아래 claim이
+        // 실패 시 만든 티켓을 보상삭제하는 것과 합쳐, 이 한 경로가 두 실패
+        // 시나리오를 함께 커버한다.
+        await this.itemRepo.delete({ id: existing.id });
+      } else {
+        result.skipped++;
+        return;
+      }
     }
 
     const { category, confidence } = await this.classifier.classify(item);
@@ -147,13 +159,15 @@ export class OutreachIngestService {
     // Claim the dedupe row BEFORE creating a ticket. The unique
     // (channel_id, external_item_id) index is the actual dedupe guard, but
     // it must be crossed before _createTicket() runs, not after — otherwise
-    // two overlapping polls of the same item (two workers, or two
-    // overlapping poll intervals) can both pass the `existing` check above,
-    // both call _createTicket() (each in its own committed transaction),
-    // and only THEN collide on this insert — by which point two tickets
-    // already exist and only one of them ever gets a dedupe row (review fix,
-    // ticket 2500fea3). A unique violation here means another poll already
-    // claimed this item; treat it exactly like the pre-check hit above.
+    // two overlapping polls of the same item can both pass the `existing`
+    // check above and both build a ticket before either notices the other.
+    //
+    // 티켓 생성 자체와 이 claim INSERT를 하나의 DB 트랜잭션으로 묶는 방안도
+    // 시도했으나, sql.js 드라이버가 진짜 동시(overlap) 트랜잭션을 지원하지
+    // 않아("cannot start a transaction within a transaction") 두 pollChannel이
+    // Promise.all로 경쟁하는 순간 양쪽 다 실패하는 것을 직접 재현해 확인했다.
+    // 대신 claim-first 순서(원래 구조)는 유지하고, 아래에서 실패 유형별로
+    // 명시적으로 보상(compensate)해 트랜잭션 결합과 동등한 내구성을 얻는다.
     let claimed: OutreachInboundItem;
     try {
       claimed = await this.itemRepo.save(this.itemRepo.create({
@@ -177,14 +191,32 @@ export class OutreachIngestService {
     }
 
     if (needsTicket) {
+      let ticketId: string;
       try {
-        const ticketId = await this._createTicket(channel, item, category);
+        ticketId = await this._createTicket(channel, item, category);
+      } catch (e) {
+        // 티켓이 아예 만들어지지 않았으니 보상할 것이 없다 — claim만 지워
+        // 다음 sweep이 이 항목을 처음부터 다시 처리하게 한다.
+        await this.itemRepo.delete({ id: claimed.id });
+        throw e;
+      }
+
+      try {
         await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
       } catch (e) {
-        // Compensate the claim so the item is retried whole on the next
-        // sweep — preserves the pre-fix guarantee that an error leaves no
-        // partial row behind.
-        await this.itemRepo.delete({ id: claimed.id });
+        // 티켓은 커밋됐지만 claim에 연결하는 데 실패했다(리뷰 2차 지적
+        // 시나리오 1). 고아가 된 티켓을 best-effort로 보상삭제하고, claim
+        // 행은 일부러 그대로 둔다 — 이제 이 행은 claim 직후 죽은 크래시와
+        // 구별할 수 없는 모양(status='ticketed', ticket_id=null)이 되고, 위
+        // stale-claim 복구 경로가 다음 poll에서 그대로 재활용해 정리한다.
+        try {
+          await this.dataSource.getRepository(Ticket).delete({ id: ticketId });
+        } catch (compensateErr: any) {
+          this.logService.error('Outreach', 'failed to compensate an orphaned ticket after a ledger link failure', {
+            channel_id: channel.id, external_item_id: item.external_item_id, ticket_id: ticketId,
+            err: compensateErr?.message || String(compensateErr),
+          });
+        }
         throw e;
       }
       result.ticketed++;

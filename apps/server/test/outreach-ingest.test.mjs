@@ -19,6 +19,11 @@
 //   • two overlapping polls racing on the SAME external item (Promise.all,
 //     real sqljs unique index) still produce exactly one ticket and one
 //     ledger row (review fix).
+//   • 리뷰 2차 지적: 티켓 생성 성공 후 ledger 연결(UPDATE)이 실패해도 고아
+//     티켓이 보상삭제되어 남지 않고, 재폴링하면 정확히 티켓 1개·ledger 1개로
+//     끝난다(중복 티켓 없음).
+//   • 리뷰 2차 지적: claim 직후 중단되었거나 보상삭제를 거친 ticket_id=null
+//     정체 claim은 다음 poll에서 skip되지 않고 정상적으로 재claim·티켓화된다.
 
 import 'reflect-metadata';
 import test from 'node:test';
@@ -349,6 +354,99 @@ test('two pollChannel sweeps racing on the same external item create exactly one
     assert.equal(resultA.skipped + resultB.skipped, 1, 'the losing sweep reports a skip, not a silent drop or an error');
     assert.equal(resultA.errors, 0);
     assert.equal(resultB.errors, 0);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a ledger-link failure after ticket creation compensates the orphaned ticket — retry then lands exactly one ticket', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
+    const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    // Force the claim → ticket_id UPDATE step to fail on the first attempt,
+    // AFTER _createTicket() has genuinely built and committed a real Ticket.
+    // This is the review's scenario 1: ticket creation succeeds but linking
+    // it to the claim row fails. The fix compensates by deleting the
+    // orphaned ticket rather than leaving it dangling.
+    const originalUpdate = svc.itemRepo.update.bind(svc.itemRepo);
+    let updateAttempts = 0;
+    svc.itemRepo.update = async (...args) => {
+      updateAttempts++;
+      if (updateAttempts === 1) throw new Error('simulated ledger link failure');
+      return originalUpdate(...args);
+    };
+
+    const first = await svc.pollChannel(channel, makeConnector([fixedItem]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(first.errors, 1, 'the injected failure surfaces as a per-item error, not a silent drop');
+    assert.equal(first.ticketed, 0);
+    assert.equal((await dataSource.getRepository(Ticket).find()).length, 0, 'the orphaned ticket was compensated (deleted), not left dangling');
+
+    const staleItems = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(staleItems.length, 1, 'the claim row is left in place as a stale marker');
+    assert.equal(staleItems[0].status, 'ticketed');
+    assert.equal(staleItems[0].ticket_id, null);
+
+    const channelAfterFailure = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+    assert.equal(channelAfterFailure.since_cursor, '', 'cursor did not advance past the failed item');
+
+    // Retry: same item, same cursor — the stale-claim recovery path reclaims
+    // the leftover row and this time the link update succeeds.
+    const second = await svc.pollChannel(channelAfterFailure, makeConnector([fixedItem]), new Date('2026-06-25T12:05:00Z'));
+    assert.equal(second.ticketed, 1);
+
+    const tickets = await dataSource.getRepository(Ticket).find();
+    assert.equal(tickets.length, 1, 'exactly one ticket total after the retry succeeds — the compensated orphan does not become a duplicate');
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].ticket_id, tickets[0].id);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a stale ticket_id=null claim from before this fix is reclaimed and ticketed on the next poll, not skipped forever', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
+    const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
+
+    // Simulates a row a pre-fix build could have left behind: claimed
+    // (status='ticketed') but the ticket itself never got created/linked
+    // (e.g. the process died between the claim INSERT and the follow-up
+    // UPDATE the old two-step design relied on).
+    const itemRepo = dataSource.getRepository(OutreachInboundItem);
+    await itemRepo.save(itemRepo.create({
+      workspace_id: 'ws-1',
+      channel_id: channel.id,
+      external_item_id: 'gh-1',
+      classification: 'bug',
+      confidence: 90,
+      status: 'ticketed',
+      ticket_id: null,
+      permalink: fixedItem.permalink,
+      author: fixedItem.author,
+      collected_at: fixedItem.created_at,
+    }));
+
+    const svc = makeService(dataSource, classifier);
+    const result = await svc.pollChannel(channel, makeConnector([fixedItem]), new Date('2026-06-25T12:00:00Z'));
+
+    assert.equal(result.ticketed, 1, 'the stuck item is recovered and ticketed, not silently skipped forever');
+    assert.equal(result.skipped, 0);
+
+    const tickets = await dataSource.getRepository(Ticket).find();
+    assert.equal(tickets.length, 1);
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1, 'the stale row was replaced, not left behind alongside a new one');
+    assert.equal(items[0].ticket_id, tickets[0].id);
+    assert.equal(items[0].status, 'ticketed');
   } finally {
     await dataSource.destroy();
   }
