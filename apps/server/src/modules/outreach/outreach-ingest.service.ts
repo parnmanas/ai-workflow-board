@@ -54,10 +54,23 @@
  * ever deletes that ticket, so the next poll's stale-claim reclaim finds it
  * again via the same dedupe key and finishes the link — no orphan, no
  * retry-forever, no separate cleanup state to keep durable.
+ *
+ * Archived winners (ticket a565b657): "open" above means archived_at IS
+ * NULL, not just "non-terminal column". A ticket can be manually archived
+ * while still non-terminal (archive_ticket / REST archive) — a separate
+ * action from the terminal-column transition archive-helpers.ts already
+ * clears the key on. Both archive surfaces now clear operational_dedupe_key
+ * on archive too, so an archived ticket drops out of the dedupe-key
+ * collision space entirely; the `archived_at: IsNull()` filter on the winner
+ * lookup below is defense in depth for any row where that clear didn't
+ * happen (legacy data, a narrow commit-ordering race). Either way, a claim
+ * that would have linked to an archived ticket instead finds no winner,
+ * deletes itself, and lets the next poll file a fresh, visible ticket —
+ * never silently attaches new feedback to a ticket nobody can see.
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -327,13 +340,22 @@ export class OutreachIngestService {
         // — INSERT 자체가 실패했으므로 방금 시도는 role assignment/activity
         // 등 부수효과를 하나도 남기지 않았다(둘 다 트랜잭션 커밋 이후에만
         // 실행됨).
+        // archived_at도 함께 건다(티켓 a565b657) — 정상 경로라면 archive_ticket/
+        // REST archive가 아카이브 시 이 키를 이미 비우므로(archive-tools.ts,
+        // tickets.controller.ts) 여기 걸릴 일이 없지만, 그 정리가 아직 반영되기
+        // 전에 만들어진 레거시 행이나 우연한 레이스로 키가 남아있는 경우까지
+        // 방어한다. 아카이브된 티켓은 보드에서 비가시 상태이므로 승자로 골라
+        // 새 피드백의 claim을 거기 연결하면 그 피드백은 조용히 사라진 것처럼
+        // 보인다 — 승자 후보에서 항상 제외한다.
         const winner = await this.dataSource.getRepository(Ticket).findOne({
-          where: { operational_dedupe_key: dedupeKey },
+          where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() },
         });
         if (!winner) {
-          // 극히 드문 경우: 그 사이 승자 티켓이 terminal 컬럼으로 이동해
-          // dedupe key가 이미 비워졌다(archive-helpers.ts). 연결할 대상이
-          // 없으니 claim을 지우고 다음 sweep이 처음부터 다시 처리하게 한다.
+          // 승자 티켓이 그 사이 terminal 컬럼으로 이동했거나(dedupe key가 이미
+          // 비워짐, archive-helpers.ts) 비터미널 상태로 수동 아카이브됐다(위
+          // archived_at 필터로 제외). 두 경우 모두 연결할 가시 티켓이 없으니
+          // claim을 지우고 다음 sweep이 새 티켓으로 처음부터 다시 처리하게
+          // 한다.
           await this.itemRepo.delete({ id: claimed.id });
           throw e;
         }
