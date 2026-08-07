@@ -2,6 +2,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 
 export type OutreachChannelKind = 'reddit' | 'github';
 export type OutreachPublishPolicy = 'auto' | 'approval' | 'off';
+export type OutreachDeployPostMode = 'new_post' | 'reply_to_existing' | 'auto' | 'off';
 
 /**
  * OutreachChannel — workspace-scoped registration of an external feedback
@@ -108,6 +109,29 @@ export class OutreachChannel {
   // in time.
   @Column({ type: 'varchar', nullable: true, default: null })
   classifier_agent_id: string | null;
+
+  // Deploy-triggered publish behavior (ticket d86d0c24, the ticket's core
+  // request). Default 'off' — an EXISTING channel must never start posting
+  // on deploys just because this column appeared (backward compatibility);
+  // an operator opts in explicitly per channel. See OutreachPublisherService
+  // for how each mode resolves to new_post vs. reply.
+  @Column({ type: 'varchar', default: 'off' })
+  deploy_post_mode: OutreachDeployPostMode;
+
+  // deploy_post_mode='reply_to_existing' only — the fixed thread every deploy
+  // reply targets (a channel-native thread ref, e.g. a Reddit fullname).
+  // Unused by the other three modes.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  reply_thread_ref: string | null;
+
+  // deploy_post_mode='auto' only — "recent" window (days) OutreachPublisherService
+  // looks back across OutreachOutboundPost for a still-fresh kind='deploy'
+  // published row before deciding reply vs. new_post. This is an APPROXIMATION
+  // of "is our post still alive" (recency of our own publish record), not a
+  // live Reddit status check — the connector interface has no such lookup
+  // method (see OutreachPublisherService docstring).
+  @Column({ type: 'int', default: 30 })
+  auto_reuse_window_days: number;
 
   @CreateDateColumn()
   created_at: Date;

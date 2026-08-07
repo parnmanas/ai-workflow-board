@@ -34,6 +34,9 @@ function channelToJson(c: OutreachChannel) {
     last_poll_at: c.last_poll_at,
     classify_threshold: c.classify_threshold,
     classifier_agent_id: c.classifier_agent_id,
+    deploy_post_mode: c.deploy_post_mode,
+    reply_thread_ref: c.reply_thread_ref,
+    auto_reuse_window_days: c.auto_reuse_window_days,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
@@ -106,6 +109,9 @@ export class OutreachController {
         pollCron: body?.poll_cron ?? null,
         classifyThreshold: body?.classify_threshold,
         classifierAgentId: body?.classifier_agent_id ?? null,
+        deployPostMode: body?.deploy_post_mode,
+        replyThreadRef: body?.reply_thread_ref ?? null,
+        autoReuseWindowDays: body?.auto_reuse_window_days,
       });
       return res.status(201).json(channelToJson(row));
     } catch (e: any) {
@@ -133,6 +139,9 @@ export class OutreachController {
         pollCron: body?.poll_cron,
         classifyThreshold: body?.classify_threshold,
         classifierAgentId: body?.classifier_agent_id,
+        deployPostMode: body?.deploy_post_mode,
+        replyThreadRef: body?.reply_thread_ref,
+        autoReuseWindowDays: body?.auto_reuse_window_days,
       });
       return res.json(channelToJson(row));
     } catch (e: any) {

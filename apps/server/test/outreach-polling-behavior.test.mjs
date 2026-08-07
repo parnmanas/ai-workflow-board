@@ -25,6 +25,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OutreachPollingService } from '../dist/modules/outreach/outreach-polling.service.js';
+import { RedditConnector } from '../dist/modules/outreach/connectors/reddit.connector.js';
+import { FakeOutreachConnector } from '../dist/modules/outreach/connectors/fake.connector.js';
 
 const MIN = 60_000;
 const NOW = new Date('2026-06-25T12:00:00Z');
@@ -76,13 +78,14 @@ function makeCredentialRepo(rows = []) {
   };
 }
 
-// pollChannel spy — records every call; throws for channels named in failMap.
+// pollChannel spy — records every call (including the resolved connector, so
+// tests can assert kind→class selection); throws for channels named in failMap.
 function makeIngestService(failMap = {}) {
   const calls = [];
   return {
     calls,
     async pollChannel(channel, connector, now) {
-      calls.push({ channel_id: channel.id, now });
+      calls.push({ channel_id: channel.id, now, connector });
       if (failMap[channel.id]) throw new Error(`simulated failure for ${channel.id}`);
       return { fetched: 0, ticketed: 0, noise: 0, question: 0, held: 0, skipped: 0, errors: 0 };
     },
@@ -191,4 +194,48 @@ test('computeNextPoll: cron overrides interval_ms; falls back to interval_ms oth
   assert.equal(cronNext.toISOString(), '2026-06-25T03:00:00.000Z', 'cron next firing');
   const intervalNext = svc.computeNextPoll({ poll_cron: null, poll_interval_ms: 15 * MIN }, NOW);
   assert.equal(intervalNext.getTime(), NOW.getTime() + 15 * MIN, 'interval next firing');
+});
+
+// ── kind-based connector resolution (ticket d86d0c24 step 7) ────────────────
+
+test('kind=reddit with a valid credential + targets resolves to a real RedditConnector', async () => {
+  const ch = makeChannel({ kind: 'reddit', credential_id: 'cred-1', targets: ['awb'] });
+  const credentialRows = [{
+    id: 'cred-1', workspace_id: null,
+    encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
+  }];
+  const { svc, ingestService } = svcWith([ch], {}, credentialRows);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, ['ch-1']);
+  assert.deepEqual(failed, []);
+  assert.equal(ingestService.calls.length, 1);
+  assert.ok(ingestService.calls[0].connector instanceof RedditConnector, 'kind=reddit resolved to RedditConnector, not the fake');
+});
+
+test('kind=github (or any non-reddit kind) still resolves to FakeOutreachConnector', async () => {
+  const ch = makeChannel({ kind: 'github' });
+  const { svc, ingestService } = svcWith([ch]);
+
+  await svc.runOnce(NOW);
+
+  assert.ok(ingestService.calls[0].connector instanceof FakeOutreachConnector);
+});
+
+test('kind=reddit with an EMPTY target whitelist fails closed — no collection, never falls back to discovery', async () => {
+  const ch = makeChannel({ kind: 'reddit', credential_id: 'cred-1', targets: [] });
+  const credentialRows = [{
+    id: 'cred-1', workspace_id: null,
+    encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
+  }];
+  const { svc, ingestService } = svcWith([ch], {}, credentialRows);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, [], 'an empty whitelist never polls');
+  assert.deepEqual(failed, ['ch-1'], 'surfaced as a failed poll, not a silent no-op, so an operator notices the missing whitelist');
+  assert.equal(ingestService.calls.length, 0, 'pollChannel/connector.fetchInbound is never reached — the failure happens at connector resolution');
+  // Cursor still advances (same "retries next occurrence, not every tick" contract as any other poll failure).
+  assert.ok(new Date(ch.next_poll_at).getTime() > NOW.getTime());
 });

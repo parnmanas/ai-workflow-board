@@ -84,3 +84,7 @@ export { OutreachChannel } from './OutreachChannel';
 export type { OutreachChannelKind, OutreachPublishPolicy } from './OutreachChannel';
 export { OutreachInboundItem } from './OutreachInboundItem';
 export type { OutreachClassification, OutreachItemStatus } from './OutreachInboundItem';
+// Outbound idempotency ledger + approval queue (ticket d86d0c24) — see that
+// entity's docstring for the claim-before-side-effect dedupe contract.
+export { OutreachOutboundPost } from './OutreachOutboundPost';
+export type { OutreachOutboundKind, OutreachOutboundStatus } from './OutreachOutboundPost';

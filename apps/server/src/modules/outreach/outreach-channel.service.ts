@@ -9,7 +9,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { OutreachChannel, OutreachChannelKind, OutreachPublishPolicy } from '../../entities/OutreachChannel';
+import { OutreachChannel, OutreachChannelKind, OutreachPublishPolicy, OutreachDeployPostMode } from '../../entities/OutreachChannel';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { Credential } from '../../entities/Credential';
 import { Board } from '../../entities/Board';
@@ -27,6 +27,7 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 const VALID_KINDS: OutreachChannelKind[] = ['reddit', 'github'];
 const VALID_POLICIES: OutreachPublishPolicy[] = ['auto', 'approval', 'off'];
+const VALID_DEPLOY_MODES: OutreachDeployPostMode[] = ['new_post', 'reply_to_existing', 'auto', 'off'];
 const DEFAULT_POLL_INTERVAL_MS = 3_600_000;
 const MIN_POLL_INTERVAL_MS = 60_000; // 1 minute — a channel polling faster than this is almost certainly a misconfiguration
 
@@ -44,6 +45,9 @@ export interface CreateChannelInput {
   pollCron?: string | null;
   classifyThreshold?: number;
   classifierAgentId?: string | null;
+  deployPostMode?: OutreachDeployPostMode;
+  replyThreadRef?: string | null;
+  autoReuseWindowDays?: number;
 }
 
 export type UpdateChannelInput = Partial<Omit<CreateChannelInput, 'workspaceId'>>;
@@ -87,6 +91,9 @@ export class OutreachChannelService {
     await this._assertCredentialScope(input.credentialId ?? null, input.workspaceId);
     const targetBoardId = await this._assertBoardScope(input.targetBoardId ?? null, input.workspaceId);
     const classifierAgentId = await this._assertAgentScope(input.classifierAgentId ?? null, input.workspaceId);
+    const deployPostMode = this._validateDeployPostMode(input.deployPostMode);
+    const replyThreadRef = this._sanitizeThreadRef(input.replyThreadRef);
+    this._assertReplyThreadRefPresence(deployPostMode, replyThreadRef);
 
     const draft = this.channelRepo.create({
       workspace_id: input.workspaceId,
@@ -105,6 +112,9 @@ export class OutreachChannelService {
       since_cursor: '',
       classify_threshold: this._validateThreshold(input.classifyThreshold),
       classifier_agent_id: classifierAgentId,
+      deploy_post_mode: deployPostMode,
+      reply_thread_ref: replyThreadRef,
+      auto_reuse_window_days: this._validateReuseWindowDays(input.autoReuseWindowDays),
     });
     draft.next_poll_at = this.pollingService.computeNextPoll(draft, new Date());
     return this.channelRepo.save(draft);
@@ -135,6 +145,10 @@ export class OutreachChannelService {
     if (patch.classifierAgentId !== undefined) {
       channel.classifier_agent_id = await this._assertAgentScope(patch.classifierAgentId || null, channel.workspace_id);
     }
+    if (patch.deployPostMode !== undefined) channel.deploy_post_mode = this._validateDeployPostMode(patch.deployPostMode);
+    if (patch.replyThreadRef !== undefined) channel.reply_thread_ref = this._sanitizeThreadRef(patch.replyThreadRef);
+    if (patch.autoReuseWindowDays !== undefined) channel.auto_reuse_window_days = this._validateReuseWindowDays(patch.autoReuseWindowDays);
+    this._assertReplyThreadRefPresence(channel.deploy_post_mode, channel.reply_thread_ref);
 
     // Cadence / enable-state — recompute next_poll_at whenever any of these
     // could have moved it, same contract QaScheduleService.update documents.
@@ -263,5 +277,34 @@ export class OutreachChannelService {
       throw makeError(400, 'classify_threshold must be between 0 and 100');
     }
     return Math.floor(threshold);
+  }
+
+  private _validateDeployPostMode(mode: OutreachDeployPostMode | undefined): OutreachDeployPostMode {
+    if (mode === undefined) return 'off';
+    if (!VALID_DEPLOY_MODES.includes(mode)) {
+      throw makeError(400, `deploy_post_mode must be one of: ${VALID_DEPLOY_MODES.join(', ')}`);
+    }
+    return mode;
+  }
+
+  private _sanitizeThreadRef(ref: string | null | undefined): string | null {
+    if (!ref) return null;
+    const trimmed = ref.trim();
+    return trimmed || null;
+  }
+
+  /** deploy_post_mode='reply_to_existing' has nothing to reply to without a
+   *  fixed thread ref — reject at save time rather than silently no-op'ing
+   *  every deploy. */
+  private _assertReplyThreadRefPresence(mode: OutreachDeployPostMode, replyThreadRef: string | null): void {
+    if (mode === 'reply_to_existing' && !replyThreadRef) {
+      throw makeError(400, "reply_thread_ref is required when deploy_post_mode='reply_to_existing'");
+    }
+  }
+
+  private _validateReuseWindowDays(days: number | undefined): number {
+    if (days === undefined) return 30;
+    if (!Number.isFinite(days) || days <= 0) throw makeError(400, 'auto_reuse_window_days must be > 0');
+    return Math.floor(days);
   }
 }

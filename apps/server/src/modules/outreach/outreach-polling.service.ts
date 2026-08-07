@@ -22,8 +22,7 @@ import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { LogService } from '../../services/log.service';
 import { OutreachIngestService } from './outreach-ingest.service';
-import { resolveOutreachCredential } from './outreach-credential';
-import { FakeOutreachConnector } from './connectors/fake.connector';
+import { resolveChannelConnector } from './connector-resolver';
 import { OutreachConnector } from './connectors/types';
 import { nextCronAfter } from '../qa/qa-cron';
 
@@ -145,15 +144,19 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
     return new Date(from.getTime() + intervalMs);
   }
 
-  /** Reddit/GitHub real connectors are follow-up tickets (ticket 2500fea3
-   *  scope) — every channel kind resolves to the same in-memory fake today.
-   *  Credential resolution happens HERE, outside the connector (D1): the
-   *  connector receives an already-resolved token, never a credential_id —
-   *  and this also fails the poll fast (surfaced via `failed`, retried next
-   *  occurrence) when a credential was revoked or its workspace scope no
-   *  longer matches, instead of the connector silently running unauthenticated. */
+  /** `kind='reddit'` resolves to the real RedditConnector (ticket d86d0c24);
+   *  every other kind (github — follow-up ticket 31e7cd24) still resolves to
+   *  the in-memory fake. Delegates to connector-resolver.ts's
+   *  `resolveChannelConnector` — the ONE place credential resolution +
+   *  kind→class mapping happens, shared with OutreachPublisherService and
+   *  OutreachResolveNotifierService so it isn't copy-pasted three times.
+   *  Credential resolution happens OUTSIDE the connector (D1): the connector
+   *  receives an already-resolved token, never a credential_id — and this
+   *  also fails the poll fast (surfaced via `failed`, retried next
+   *  occurrence) when a credential was revoked, its workspace scope no
+   *  longer matches, or (reddit) the channel has no target whitelist,
+   *  instead of the connector silently running unauthenticated/unscoped. */
   private async _resolveConnector(channel: OutreachChannel): Promise<OutreachConnector> {
-    await resolveOutreachCredential(this.credentialRepo, channel.credential_id, channel.workspace_id);
-    return new FakeOutreachConnector();
+    return resolveChannelConnector(channel, this.credentialRepo);
   }
 }
