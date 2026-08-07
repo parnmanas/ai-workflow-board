@@ -130,6 +130,11 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
       }
 
       ticket.archived_at = new Date();
+      // terminal 진입 시 비우는 applyTerminalEnteredAtForMove(archive-helpers.ts)와 대칭 —
+      // 비터미널 상태에서 아카이브된 티켓이 키를 계속 쥐고 있으면 outreach-ingest.service.ts의
+      // dedupe winner 조회가 이 비가시 티켓을 승자로 골라버릴 수 있다(티켓 a565b657). 이미
+      // terminal이었다면 키는 이미 null이므로 no-op.
+      ticket.operational_dedupe_key = null;
       await ticketRepo.save(ticket);
 
       await activityService.logActivity({

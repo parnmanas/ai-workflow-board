@@ -1682,6 +1682,9 @@ export class TicketsController {
     }
 
     ticket.archived_at = new Date();
+    // dedupe key 정리는 MCP archive_ticket과 동일 정책(티켓 a565b657) — terminal 진입 시
+    // 비우는 applyTerminalEnteredAtForMove와 대칭, 비터미널 아카이브도 키를 남기지 않는다.
+    ticket.operational_dedupe_key = null;
     await this.ticketRepo.save(ticket);
 
     const currentUser = req.currentUser;
