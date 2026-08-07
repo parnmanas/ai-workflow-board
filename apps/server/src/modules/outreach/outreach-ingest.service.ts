@@ -60,13 +60,20 @@
  * while still non-terminal (archive_ticket / REST archive) — a separate
  * action from the terminal-column transition archive-helpers.ts already
  * clears the key on. Both archive surfaces now clear operational_dedupe_key
- * on archive too, so an archived ticket drops out of the dedupe-key
- * collision space entirely; the `archived_at: IsNull()` filter on the winner
- * lookup below is defense in depth for any row where that clear didn't
- * happen (legacy data, a narrow commit-ordering race). Either way, a claim
- * that would have linked to an archived ticket instead finds no winner,
- * deletes itself, and lets the next poll file a fresh, visible ticket —
- * never silently attaches new feedback to a ticket nobody can see.
+ * on archive too, so a freshly-archived ticket drops out of the dedupe-key
+ * collision space immediately. But the unique index itself is NOT scoped to
+ * open tickets (`uq_tickets_operational_dedupe_open` indexes the raw
+ * column — see Ticket.ts), so a legacy archived row from before that clear
+ * existed, or one hit by a narrow commit-ordering race, can still hold a
+ * key and block every future INSERT for that external item. Excluding
+ * archived rows from the winner *lookup* without also releasing the key
+ * they hold would turn that into a permanent per-poll retry loop (this was
+ * caught in review — see git history on this comment). So
+ * `_resolveDedupeCollision` does both: an open winner is reused as before,
+ * and an archived holder has its key released and ticket creation retried
+ * once, so the item ends up in a brand-new, visible ticket instead of
+ * erroring forever. Never silently attaches new feedback to a ticket
+ * nobody can see, and never gets permanently stuck on one either.
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -333,33 +340,16 @@ export class OutreachIngestService {
           await this.itemRepo.delete({ id: claimed.id });
           throw e;
         }
-        // dedupe key 충돌 — 이 외부 항목에 대한 open 티켓이 이미 존재한다:
-        // (a) 동시에 claim을 가져간 다른 poll이 방금 만들었거나, (b) 우리
-        // 자신의 이전 시도가 티켓 커밋 후 claim 링크 단계에서만 실패해 남긴
-        // 것이다. 두 경우 모두 새로 만들 필요 없이 그 티켓을 찾아 재사용한다
-        // — INSERT 자체가 실패했으므로 방금 시도는 role assignment/activity
-        // 등 부수효과를 하나도 남기지 않았다(둘 다 트랜잭션 커밋 이후에만
-        // 실행됨).
-        // archived_at도 함께 건다(티켓 a565b657) — 정상 경로라면 archive_ticket/
-        // REST archive가 아카이브 시 이 키를 이미 비우므로(archive-tools.ts,
-        // tickets.controller.ts) 여기 걸릴 일이 없지만, 그 정리가 아직 반영되기
-        // 전에 만들어진 레거시 행이나 우연한 레이스로 키가 남아있는 경우까지
-        // 방어한다. 아카이브된 티켓은 보드에서 비가시 상태이므로 승자로 골라
-        // 새 피드백의 claim을 거기 연결하면 그 피드백은 조용히 사라진 것처럼
-        // 보인다 — 승자 후보에서 항상 제외한다.
-        const winner = await this.dataSource.getRepository(Ticket).findOne({
-          where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() },
-        });
-        if (!winner) {
-          // 승자 티켓이 그 사이 terminal 컬럼으로 이동했거나(dedupe key가 이미
-          // 비워짐, archive-helpers.ts) 비터미널 상태로 수동 아카이브됐다(위
-          // archived_at 필터로 제외). 두 경우 모두 연결할 가시 티켓이 없으니
-          // claim을 지우고 다음 sweep이 새 티켓으로 처음부터 다시 처리하게
-          // 한다.
+        // dedupe key 충돌 — open 티켓 재사용 또는 archived 홀더 키 해제 후
+        // 재시도(_resolveDedupeCollision 참고, 티켓 a565b657 리뷰 지적).
+        // 그마저 실패하면(레이스로 홀더가 사라진 극히 드문 경우) claim을
+        // 지우고 다음 sweep이 처음부터 다시 처리하게 한다.
+        try {
+          ticketId = await this._resolveDedupeCollision(channel, item, category, dedupeKey, e);
+        } catch (resolveError) {
           await this.itemRepo.delete({ id: claimed.id });
-          throw e;
+          throw resolveError;
         }
-        ticketId = winner.id;
       }
 
       // claim → ticket 연결. 0행 적중은 우리가 소유했던 claim이 사라졌다는
@@ -377,6 +367,76 @@ export class OutreachIngestService {
       result[status]++;
     } else {
       result.held++;
+    }
+  }
+
+  /**
+   * _createTicket()'s INSERT hit the operational_dedupe_key unique index
+   * (`uq_tickets_operational_dedupe_open` on Ticket.ts — despite the name,
+   * it indexes the raw column with no archived_at scoping, so an archived
+   * row can still hold the key). The colliding row is normally another
+   * OPEN ticket — a concurrent poll's fresh commit, or our own prior
+   * attempt's orphaned claim-link (review 5th pass) — reuse it, no new
+   * side effects needed.
+   *
+   * It can also be an ARCHIVED row still holding the key (ticket a565b657):
+   * a legacy row from before archive_ticket / REST archive started
+   * clearing it, or a narrow commit-ordering race. Reusing an archived
+   * winner would silently attach new feedback to an invisible ticket —
+   * but simply excluding it from the winner lookup without releasing the
+   * key (an earlier version of this fix) leaves that same archived row
+   * blocking every future INSERT forever: confirmed in review as a
+   * permanent per-poll retry loop, strictly worse than the bug this ticket
+   * set out to fix, since the feedback never becomes a ticket at all. So
+   * an archived holder gets its key released here — the same cleanup
+   * archive_ticket/REST archive now do eagerly, just applied lazily to a
+   * row that predates or raced past that fix — and ticket creation is
+   * retried exactly once. If the retry itself collides again (another
+   * poll won the freed key first), a final open-winner lookup hands back
+   * that ticket; if even that comes up empty (the holder vanished from
+   * under us — an extremely narrow window), the original error propagates
+   * so the caller deletes the claim and the next poll retries from
+   * scratch. Every branch is bounded — at most one key release and one
+   * retry per call, never a loop.
+   */
+  private async _resolveDedupeCollision(
+    channel: OutreachChannel,
+    item: InboundItem,
+    category: OutreachCategory,
+    dedupeKey: string,
+    originalError: unknown,
+  ): Promise<string> {
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const openWinner = await ticketRepo.findOne({
+      where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() },
+    });
+    if (openWinner) return openWinner.id;
+
+    const holder = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey } });
+    if (!holder) {
+      // 홀더가 그 사이 사라졌다(레이스) — 우리가 볼 수 있는 승자가 없다.
+      // 원래 unique-constraint 에러를 그대로 던져 호출부가 claim을 지우고
+      // 다음 sweep이 처음부터 재시도하게 한다.
+      throw originalError;
+    }
+    if (!holder.archived_at) {
+      // 두 조회 사이에 새로 커밋된 open 티켓 — 재사용한다.
+      return holder.id;
+    }
+
+    holder.operational_dedupe_key = null;
+    await ticketRepo.save(holder);
+    try {
+      return await this._createTicket(channel, item, category, dedupeKey);
+    } catch (retryError) {
+      if (!isUniqueConstraintError(retryError)) throw retryError;
+      // 우리가 키를 해제한 사이 다른 poll이 먼저 그 키로 티켓을 만들었다 —
+      // 그 open winner를 찾아 재사용한다.
+      const fallbackWinner = await ticketRepo.findOne({
+        where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() },
+      });
+      if (fallbackWinner) return fallbackWinner.id;
+      throw retryError;
     }
   }
 
