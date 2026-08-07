@@ -13,6 +13,7 @@ import {
   RedditRateLimitError,
   RedditApiError,
 } from '../dist/modules/outreach/connectors/reddit.connector.js';
+import { OutreachRateLimiter, OutreachChannelRateLimitedError } from '../dist/modules/outreach/outreach-rate-limiter.js';
 
 function fakeResponse({ status = 200, json, text, headers = {} } = {}) {
   const h = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), String(v)]));
@@ -282,4 +283,149 @@ test('every request carries the configured User-Agent header', async () => {
   const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'AwbOutreachBot/1.0 (by u/awb-bot)', fetchImpl });
   await conn.fetchInbound('');
   assert.ok(uas.every((ua) => ua === 'AwbOutreachBot/1.0 (by u/awb-bot)'));
+});
+
+// ── rate_limit_per_hour operator cap (review fix #1) ─────────────────────────
+
+// No username on this credential: fetchInbound then makes exactly ONE
+// internal request per target (the /r/{sub}/new listing) — WITH a username
+// (makeCred()'s default) it would also fetch the bot's own-submissions
+// comment trees, consuming a second rate-limit slot within a single
+// fetchInbound() call and making the cap math below non-obvious.
+function noUsernameCred() {
+  return { token: 'refresh-token-xyz', extra: { client_id: 'cid', client_secret: 'csecret' } };
+}
+
+test('rate_limit_per_hour: the call that would exceed the cap throws OutreachChannelRateLimitedError and makes NO network call', async () => {
+  let apiCalls = 0;
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    apiCalls++;
+    return fakeResponse({ status: 200, json: { data: { children: [] } } });
+  };
+  const rateLimiter = new OutreachRateLimiter();
+  const conn = new RedditConnector(noUsernameCred(), {
+    targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, channelId: 'ch-1', rateLimitPerHour: 1, rateLimiter,
+  });
+  await conn.fetchInbound(''); // consumes the single allowed slot
+  assert.equal(apiCalls, 1);
+  await assert.rejects(conn.fetchInbound(''), OutreachChannelRateLimitedError);
+  assert.equal(apiCalls, 1, 'the blocked call never reached the network');
+});
+
+test('rate_limit_per_hour is shared across DIFFERENT RedditConnector instances for the SAME channel_id (matches production: a fresh connector is built per call site)', async () => {
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    return fakeResponse({ status: 200, json: { data: { children: [] } } });
+  };
+  const rateLimiter = new OutreachRateLimiter();
+  const opts = { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, channelId: 'ch-shared', rateLimitPerHour: 1, rateLimiter };
+  const connA = new RedditConnector(noUsernameCred(), opts);
+  const connB = new RedditConnector(noUsernameCred(), opts);
+  await connA.fetchInbound('');
+  await assert.rejects(connB.fetchInbound(''), OutreachChannelRateLimitedError);
+});
+
+test('rateLimitPerHour omitted (default 0) is unlimited — the operator cap never applies', async () => {
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    return fakeResponse({ status: 200, json: { data: { children: [] } } });
+  };
+  const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, channelId: 'ch-1' });
+  await conn.fetchInbound('');
+  await conn.fetchInbound('');
+  await conn.fetchInbound('');
+  // no throw — reaching here is the assertion.
+});
+
+// ── proactive success-response rate-limit-header handling (review fix #1) ────
+
+test('a SUCCESS response reporting x-ratelimit-remaining=0 makes the NEXT request wait for x-ratelimit-reset, instead of waiting for an actual 429', async () => {
+  const sleeps = [];
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    calls++;
+    if (calls === 1) {
+      return fakeResponse({
+        status: 200,
+        json: { data: { children: [] } },
+        headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '5' },
+      });
+    }
+    return fakeResponse({ status: 200, json: { data: { children: [] } } });
+  };
+  const sleepImpl = async (ms) => { sleeps.push(ms); };
+  // Fixed clock — the proactive wait computes (capturedResetAtMs - now()),
+  // so pinning `now` keeps the expected wait EXACTLY 5000ms regardless of
+  // real wall-clock time elapsed between the two internal _request() calls.
+  const now = () => 1_700_000_000_000;
+  // no username → fetchInbound only hits /r/{sub}/new per target, keeping the
+  // call count deterministic (two targets = two sequential requests).
+  const cred = { token: 'refresh-token-xyz', extra: { client_id: 'cid', client_secret: 'csecret' } };
+  const conn = new RedditConnector(cred, { targets: ['awb', 'awb2'], userAgent: 'ua/1.0', fetchImpl, sleepImpl, now });
+
+  await conn.fetchInbound('');
+
+  assert.equal(calls, 2, 'both subreddits were fetched — no 429 ever occurred');
+  assert.deepEqual(sleeps, [5000], 'waited exactly 5s (x-ratelimit-reset) proactively before the second request');
+});
+
+test('proactive wait is capped at MAX_BACKOFF_MS even when x-ratelimit-reset reports a much longer window', async () => {
+  const sleeps = [];
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    calls++;
+    if (calls === 1) {
+      return fakeResponse({
+        status: 200,
+        json: { data: { children: [] } },
+        headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '600' }, // 10 minutes
+      });
+    }
+    return fakeResponse({ status: 200, json: { data: { children: [] } } });
+  };
+  const sleepImpl = async (ms) => { sleeps.push(ms); };
+  const now = () => 1_700_000_000_000;
+  const cred = { token: 'refresh-token-xyz', extra: { client_id: 'cid', client_secret: 'csecret' } };
+  const conn = new RedditConnector(cred, { targets: ['awb', 'awb2'], userAgent: 'ua/1.0', fetchImpl, sleepImpl, now });
+
+  await conn.fetchInbound('');
+
+  assert.deepEqual(sleeps, [30000], 'capped at the 30s MAX_BACKOFF_MS ceiling, not the full 600s reset window');
+});
+
+test('a SUCCESS response reporting x-ratelimit-remaining > 0 never triggers a proactive wait', async () => {
+  const sleeps = [];
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    return fakeResponse({
+      status: 200,
+      json: { data: { children: [] } },
+      headers: { 'x-ratelimit-remaining': '5', 'x-ratelimit-reset': '30' },
+    });
+  };
+  const sleepImpl = async (ms) => { sleeps.push(ms); };
+  const cred = { token: 'refresh-token-xyz', extra: { client_id: 'cid', client_secret: 'csecret' } };
+  const conn = new RedditConnector(cred, { targets: ['awb', 'awb2'], userAgent: 'ua/1.0', fetchImpl, sleepImpl });
+
+  await conn.fetchInbound('');
+
+  assert.deepEqual(sleeps, [], 'plenty of budget remaining — no wait');
+});
+
+test('RedditRateLimitError thrown after exhausting retries carries a positive retryAfterMs', async () => {
+  const fetchImpl = async (url) => {
+    if (url === 'https://www.reddit.com/api/v1/access_token') return TOKEN_OK();
+    return fakeResponse({ status: 429, headers: { 'retry-after': '3' } });
+  };
+  const conn = new RedditConnector(makeCred(), { targets: ['awb'], userAgent: 'ua/1.0', fetchImpl, sleepImpl: noopSleep });
+  try {
+    await conn.fetchInbound('');
+    assert.fail('expected throw');
+  } catch (e) {
+    assert.ok(e instanceof RedditRateLimitError);
+    assert.equal(e.retryAfterMs, 3000);
+  }
 });

@@ -43,6 +43,8 @@ export async function resolveChannelConnector(
     return new RedditConnector(credential, {
       targets: channel.targets,
       userAgent: REDDIT_USER_AGENT,
+      channelId: channel.id,
+      rateLimitPerHour: channel.rate_limit_per_hour,
     });
   }
   // kind='github' real connector is a separate follow-up ticket (31e7cd24) —

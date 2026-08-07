@@ -22,15 +22,27 @@
  * directly), so this is the first of its kind here rather than an established
  * convention.
  *
- * Rate limiting: Reddit's per-response `x-ratelimit-remaining`/`x-ratelimit-reset`
- * headers are the authoritative signal and are preferred when present; a 429
- * without usable headers falls back to `Retry-After` (seconds), then a fixed
- * exponential backoff. 403 (subreddit ban / suspended account) is NEVER
- * retried — it is surfaced as `RedditForbiddenError` so the caller (the
- * publisher/polling service) can record it on channel state distinctly from a
- * transient rate-limit failure.
+ * Rate limiting has TWO independent layers (review fix — the first pass only
+ * implemented the second one):
+ *   1. `OutreachChannel.rate_limit_per_hour` — an operator-configured cap on
+ *      the total number of requests THIS channel may make in a rolling hour,
+ *      enforced proactively via the shared `OutreachRateLimiter` (a call over
+ *      the cap throws `OutreachChannelRateLimitedError` before any network
+ *      call is made). See outreach-rate-limiter.ts for why this state can't
+ *      live on the connector instance itself.
+ *   2. Reddit's OWN live limit — per-response `x-ratelimit-remaining`/
+ *      `x-ratelimit-reset` headers are captured from EVERY response (not just
+ *      429s) and consulted proactively before the NEXT request on this same
+ *      connector instance, so a request is delayed BEFORE Reddit ever has to
+ *      return 429. A 429 that still occurs (headers absent/stale) falls back
+ *      to `Retry-After`, then a fixed exponential backoff. 403 (subreddit ban
+ *      / suspended account) is NEVER retried — it is surfaced as
+ *      `RedditForbiddenError` so the caller (publisher/polling service) can
+ *      record it on channel state distinctly from a transient rate-limit
+ *      failure.
  */
 import { InboundItem, OutboundPost, OutboundResult, OutreachConnector } from './types';
+import { OutreachRateLimiter, sharedOutreachRateLimiter } from '../outreach-rate-limiter';
 
 export class RedditConnectorConfigError extends Error {
   readonly code = 'config_error';
@@ -45,6 +57,9 @@ export class RedditForbiddenError extends Error {
 
 export class RedditRateLimitError extends Error {
   readonly code = 'rate_limited';
+  constructor(message: string, readonly retryAfterMs: number = 60_000) {
+    super(message);
+  }
 }
 
 export class RedditApiError extends Error {
@@ -74,8 +89,21 @@ export interface RedditCredentialLike {
 export interface RedditConnectorOptions {
   targets: string[];
   userAgent: string;
+  // Operator-configured hourly request cap (OutreachChannel.rate_limit_per_hour,
+  // 0/omitted = unlimited) — see outreach-rate-limiter.ts. channelId is the
+  // cap's counter key, so it must be passed together with rateLimitPerHour
+  // for the cap to mean anything.
+  channelId?: string;
+  rateLimitPerHour?: number;
   fetchImpl?: typeof fetch;
   sleepImpl?: (ms: number) => Promise<void>;
+  // Test seam — defaults to the shared process-wide limiter (see that file's
+  // docstring for why production never overrides this).
+  rateLimiter?: OutreachRateLimiter;
+  // Test seam for the proactive rate-limit-window wait (default Date.now) —
+  // keeps that wait's duration computation deterministic under test instead
+  // of depending on real elapsed wall-clock time between two calls.
+  now?: () => number;
 }
 
 interface AccessToken {
@@ -97,11 +125,21 @@ export class RedditConnector implements OutreachConnector {
   private readonly grantMode: 'refresh_token' | 'password';
   private readonly grantSecret: string; // refresh_token value OR script-app password
   private readonly username: string;
+  private readonly channelId: string;
+  private readonly rateLimitPerHour: number;
+  private readonly rateLimiter: OutreachRateLimiter;
+  private readonly now: () => number;
 
   private accessToken: AccessToken | null = null;
   // Guards a single forced-refresh-and-retry per external call — prevents an
   // infinite loop if the server keeps handing back 401 for a bad credential.
   private refreshInFlight: Promise<void> | null = null;
+  // Last known state of Reddit's OWN rate-limit window, captured from
+  // whichever response (success or 429) most recently carried the headers.
+  // null = unknown (no response with these headers seen yet, or the window
+  // has already been consulted and cleared — see _waitForRateLimitWindowIfNeeded).
+  private rlRemaining: number | null = null;
+  private rlResetAtMs: number | null = null;
 
   constructor(cred: RedditCredentialLike, opts: RedditConnectorOptions) {
     const clientId = (cred.extra?.client_id || '').trim();
@@ -130,6 +168,10 @@ export class RedditConnector implements OutreachConnector {
     this.targets = new Set((opts.targets || []).map((t) => t.trim().toLowerCase()).filter(Boolean));
     this.fetchImpl = opts.fetchImpl || globalThis.fetch;
     this.sleepImpl = opts.sleepImpl || defaultSleep;
+    this.channelId = opts.channelId || '';
+    this.rateLimitPerHour = opts.rateLimitPerHour ?? 0;
+    this.rateLimiter = opts.rateLimiter || sharedOutreachRateLimiter;
+    this.now = opts.now || Date.now;
   }
 
   /**
@@ -307,11 +349,22 @@ export class RedditConnector implements OutreachConnector {
    * "transient").
    */
   private async _request<T>(method: 'GET' | 'POST', path: string, body?: URLSearchParams): Promise<T> {
+    // Proactive slowdown from the LAST response this connector instance saw
+    // (review fix — previously only reacted to an actual 429). Runs once per
+    // logical call, not per retry attempt, so it can't stack with the
+    // reactive 429 backoff below on the same call.
+    await this._waitForRateLimitWindowIfNeeded();
+
     let attempt = 0;
     let forceTokenRefresh = false;
     let didForce401Retry = false;
 
     for (;;) {
+      // Operator-configured hourly cap — checked on EVERY actual attempt
+      // (including 401/429 retries), since each is a real request against
+      // the cap. Throws before any network call when exceeded.
+      this.rateLimiter.checkAndRecord(this.channelId, this.rateLimitPerHour);
+
       const token = await this._ensureToken(forceTokenRefresh);
       forceTokenRefresh = false;
 
@@ -326,6 +379,7 @@ export class RedditConnector implements OutreachConnector {
         headers,
         body: body ? body.toString() : undefined,
       });
+      this._captureRateLimitHeaders(res.headers);
 
       if (res.status === 401 && !didForce401Retry) {
         didForce401Retry = true;
@@ -339,10 +393,10 @@ export class RedditConnector implements OutreachConnector {
       }
 
       if (res.status === 429) {
-        if (attempt >= MAX_RATE_LIMIT_RETRIES) {
-          throw new RedditRateLimitError(`Reddit rate limit exceeded after ${attempt} retries on ${method} ${path}`);
-        }
         const waitMs = this._resolveRateLimitWaitMs(res.headers, attempt);
+        if (attempt >= MAX_RATE_LIMIT_RETRIES) {
+          throw new RedditRateLimitError(`Reddit rate limit exceeded after ${attempt} retries on ${method} ${path}`, waitMs);
+        }
         attempt++;
         await this.sleepImpl(waitMs);
         continue;
@@ -354,6 +408,37 @@ export class RedditConnector implements OutreachConnector {
       }
 
       return (await res.json()) as T;
+    }
+  }
+
+  /** Captures `x-ratelimit-remaining`/`x-ratelimit-reset` from ANY response
+   *  (not just 429s) so the NEXT request on this connector instance can
+   *  proactively slow down instead of waiting to be told via a 429. */
+  private _captureRateLimitHeaders(headers: Headers | undefined): void {
+    const remaining = headers?.get?.('x-ratelimit-remaining');
+    if (remaining !== null && remaining !== undefined) {
+      const n = Number(remaining);
+      if (Number.isFinite(n)) this.rlRemaining = n;
+    }
+    const reset = headers?.get?.('x-ratelimit-reset');
+    if (reset !== null && reset !== undefined) {
+      const seconds = Number(reset);
+      if (Number.isFinite(seconds) && seconds >= 0) this.rlResetAtMs = this.now() + seconds * 1000;
+    }
+  }
+
+  /** If the last captured window shows zero requests remaining, wait for it
+   *  to reset (capped at MAX_BACKOFF_MS — the same ceiling the reactive 429
+   *  backoff uses, since a real Reddit window can exceed it and this is a
+   *  best-effort slowdown, not a guarantee). Clears the captured state
+   *  either way so a stale reading is never consulted twice. */
+  private async _waitForRateLimitWindowIfNeeded(): Promise<void> {
+    if (this.rlRemaining === null || this.rlRemaining > 0 || this.rlResetAtMs === null) return;
+    const waitMs = this.rlResetAtMs - this.now();
+    this.rlRemaining = null;
+    this.rlResetAtMs = null;
+    if (waitMs > 0) {
+      await this.sleepImpl(Math.min(waitMs, MAX_BACKOFF_MS));
     }
   }
 
