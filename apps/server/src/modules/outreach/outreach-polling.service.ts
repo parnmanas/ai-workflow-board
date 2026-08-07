@@ -25,6 +25,7 @@ import { OutreachIngestService } from './outreach-ingest.service';
 import { resolveChannelConnector } from './connector-resolver';
 import { OutreachConnector } from './connectors/types';
 import { nextCronAfter } from '../qa/qa-cron';
+import { recordChannelSuccess, recordChannelFailure } from './outreach-channel-health';
 
 const DEFAULT_TICK_MS = 30_000;        // 30s — same default as QaScheduleService
 const MIN_TICK_MS = 5_000;             // 5s
@@ -111,6 +112,7 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
         const connector = await this._resolveConnector(channel);
         await this.ingestService.pollChannel(channel, connector, now);
         polled.push(channel.id);
+        await recordChannelSuccess(this.channelRepo, channel);
       } catch (e: any) {
         // A bad channel (revoked credential, connector error) must not stall
         // the sweep. next_poll_at is already advanced, so it retries next
@@ -119,6 +121,7 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
         this.logService.warn('OutreachScheduler', 'channel poll failed (continuing)', {
           channel_id: channel.id, err: e?.message || String(e),
         });
+        await recordChannelFailure(this.channelRepo, channel, e);
       }
     }
 

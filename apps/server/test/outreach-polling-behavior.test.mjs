@@ -25,7 +25,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OutreachPollingService } from '../dist/modules/outreach/outreach-polling.service.js';
-import { RedditConnector } from '../dist/modules/outreach/connectors/reddit.connector.js';
+import { RedditConnector, RedditForbiddenError } from '../dist/modules/outreach/connectors/reddit.connector.js';
 import { FakeOutreachConnector } from '../dist/modules/outreach/connectors/fake.connector.js';
 
 const MIN = 60_000;
@@ -238,4 +238,48 @@ test('kind=reddit with an EMPTY target whitelist fails closed — no collection,
   assert.equal(ingestService.calls.length, 0, 'pollChannel/connector.fetchInbound is never reached — the failure happens at connector resolution');
   // Cursor still advances (same "retries next occurrence, not every tick" contract as any other poll failure).
   assert.ok(new Date(ch.next_poll_at).getTime() > NOW.getTime());
+});
+
+// ── review fix #2: 403/error state recorded on the channel from the poll path ─
+
+test('a RedditForbiddenError (403) from pollChannel marks the channel blocked_at/blocked_reason/last_error', async () => {
+  // kind stays the default 'github' — resolveChannelConnector returns the
+  // fake unconditionally for a non-reddit kind (no credential needed), so
+  // _resolveConnector succeeds and the custom pollChannel stub below is what
+  // actually throws. This test is only about runOnce's catch block correctly
+  // classifying whatever error pollChannel raises, independent of channel kind.
+  const ch = makeChannel();
+  const channelRepo = makeChannelRepo([ch]);
+  const credentialRepo = makeCredentialRepo([]);
+  const ingestService = {
+    calls: [],
+    async pollChannel() {
+      throw new RedditForbiddenError('banned from subreddit', 403);
+    },
+  };
+  const svc = new OutreachPollingService(channelRepo, credentialRepo, ingestService, noopLog);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, []);
+  assert.deepEqual(failed, ['ch-1']);
+  assert.ok(ch.blocked_at, 'channel marked blocked after a 403 from pollChannel');
+  assert.match(ch.blocked_reason, /banned from subreddit/);
+  assert.ok(ch.last_error, 'last_error also recorded');
+});
+
+test('a successful poll clears a previously-set blocked_at/last_error on the channel', async () => {
+  const ch = makeChannel({
+    blocked_at: new Date('2026-06-01T00:00:00Z'),
+    blocked_reason: 'previously banned',
+    last_error: 'previously banned',
+    last_error_at: new Date('2026-06-01T00:00:00Z'),
+  });
+  const { svc } = svcWith([ch]);
+
+  await svc.runOnce(NOW);
+
+  assert.equal(ch.blocked_at, null, 'blocked_at cleared after a successful poll');
+  assert.equal(ch.blocked_reason, '');
+  assert.equal(ch.last_error, '');
 });

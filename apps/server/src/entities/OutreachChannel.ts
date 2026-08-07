@@ -133,6 +133,29 @@ export class OutreachChannel {
   @Column({ type: 'int', default: 30 })
   auto_reuse_window_days: number;
 
+  // Connector health state (ticket d86d0c24 review fix #2 — "403/차단 상태가
+  // 채널 상태에 기록되지 않습니다"). Server-managed only (never part of
+  // Create/UpdateChannelInput, same as next_poll_at/last_poll_at) — written by
+  // outreach-channel-health.ts's recordChannelSuccess/recordChannelFailure,
+  // called from every site that actually invokes a connector (poll, deploy-
+  // publish, resolve-notify). Clear-on-success policy: a successful call
+  // clears all five fields, so they always reflect the MOST RECENT outcome
+  // rather than a sticky flag an operator would have to manually clear.
+  @Column({ type: Date, nullable: true, default: null })
+  blocked_at: Date | null;
+
+  @Column({ type: 'varchar', default: '' })
+  blocked_reason: string;
+
+  @Column({ type: Date, nullable: true, default: null })
+  rate_limited_until: Date | null;
+
+  @Column({ type: 'varchar', default: '' })
+  last_error: string;
+
+  @Column({ type: Date, nullable: true, default: null })
+  last_error_at: Date | null;
+
   @CreateDateColumn()
   created_at: Date;
 

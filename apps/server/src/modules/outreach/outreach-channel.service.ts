@@ -57,6 +57,14 @@ export interface ChannelStatus {
   last_poll_at: Date | null;
   next_poll_at: Date | null;
   counts: Record<string, number>;
+  // Connector health (ticket d86d0c24 review fix #2) — see OutreachChannel's
+  // docstring on these columns and outreach-channel-health.ts for the
+  // update/clear policy.
+  blocked_at: Date | null;
+  blocked_reason: string;
+  rate_limited_until: Date | null;
+  last_error: string;
+  last_error_at: Date | null;
 }
 
 @Injectable()
@@ -196,6 +204,11 @@ export class OutreachChannelService {
       last_poll_at: channel.last_poll_at,
       next_poll_at: channel.next_poll_at,
       counts,
+      blocked_at: channel.blocked_at,
+      blocked_reason: channel.blocked_reason,
+      rate_limited_until: channel.rate_limited_until,
+      last_error: channel.last_error,
+      last_error_at: channel.last_error_at,
     };
   }
 
