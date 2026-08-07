@@ -44,7 +44,10 @@ export interface ReleaseSummarizer {
 // Fixed disclosure footer — the ticket's bot-account-convention requirement
 // ("봇임을 밝히는 문구 준수"). Every generated body carries this verbatim;
 // approval-time edits (step 6) may reword it but a template body never omits it.
-const BOT_DISCLOSURE_FOOTER = '*This update was posted automatically by an AWB outreach bot.*';
+// Exported so outreach-resolve-notifier.service.ts's resolution replies carry
+// the SAME disclosure (the requirement applies to every bot-authored post,
+// not only deploy announcements).
+export const BOT_DISCLOSURE_FOOTER = '*This update was posted automatically by an AWB outreach bot.*';
 
 function shortSha(sha: string): string {
   return sha ? sha.slice(0, 12) : '(unknown)';
