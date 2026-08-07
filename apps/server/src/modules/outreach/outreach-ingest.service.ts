@@ -18,6 +18,17 @@
  * row directly" precedent) rather than re-entering the MCP create_ticket tool,
  * which is tightly coupled to an MCP session/caller-agent context this
  * service doesn't have.
+ *
+ * Stale-claim lease fencing (review 4th pass): a claim can be reclaimed by
+ * another poll once STALE_CLAIM_LEASE_MS elapses (see that constant), which
+ * means the original owner can still be mid-_createTicket() when it loses
+ * ownership. Losing ownership must never surface as a second ticket, so the
+ * claim row's own id is the fencing token — a takeover always deletes and
+ * re-inserts (never UPDATEs in place), so the original owner's final
+ * `itemRepo.update({ id: claimed.id }, ...)` link step is itself the
+ * ownership check: 0 rows affected means the id is gone, i.e. someone else
+ * now owns this external item, so the ticket just built is a duplicate and
+ * gets compensated away instead of counted.
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -54,7 +65,7 @@ const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_reque
 // second — this is a generous safety margin against a genuine crash, not a
 // tuned SLA. See the stale-claim reclaim block in _processItem (review 3rd
 // pass): a claim younger than this lease is never deleted, only skipped.
-const STALE_CLAIM_LEASE_MS = 2 * 60 * 1000;
+export const STALE_CLAIM_LEASE_MS = 2 * 60 * 1000;
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
@@ -99,6 +110,13 @@ export class OutreachIngestService {
    */
   async pollChannel(channel: OutreachChannel, connector: OutreachConnector, now: Date = new Date()): Promise<PollResult> {
     const result: PollResult = { fetched: 0, ticketed: 0, noise: 0, question: 0, held: 0, skipped: 0, errors: 0 };
+    // Real wall-clock reading at sweep entry, paired with `now` below to let
+    // per-item claim timestamps track real elapsed processing time within
+    // this sweep (see _processItem's claimed_at comment) while staying in
+    // the SAME clock domain as `now` — callers that pass a synthetic `now`
+    // (tests) get synthetic claimed_at values; production's real default
+    // `now` gets real claimed_at values either way.
+    const pollStartRealMs = Date.now();
     const items = await connector.fetchInbound(channel.since_cursor || '');
     result.fetched = items.length;
     const sorted = items.slice().sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
@@ -109,7 +127,7 @@ export class OutreachIngestService {
 
     for (const item of sorted) {
       try {
-        await this._processItem(channel, item, result, now);
+        await this._processItem(channel, item, result, now, pollStartRealMs);
         if (!sawError && item.created_at.getTime() > cursorMax) cursorMax = item.created_at.getTime();
       } catch (e: any) {
         sawError = true;
@@ -128,7 +146,7 @@ export class OutreachIngestService {
     return result;
   }
 
-  private async _processItem(channel: OutreachChannel, item: InboundItem, result: PollResult, now: Date): Promise<void> {
+  private async _processItem(channel: OutreachChannel, item: InboundItem, result: PollResult, now: Date, pollStartRealMs: number): Promise<void> {
     const existing = await this.itemRepo.findOne({
       where: { channel_id: channel.id, external_item_id: item.external_item_id },
     });
@@ -161,6 +179,15 @@ export class OutreachIngestService {
         // 이미 있었으므로(database.module.ts 참고) QueryBuilder의 raw SQL
         // WHERE로 우회한다. affected===0이면 이미 남이 처리했다는 뜻이니
         // 우리는 손대지 않고 skip한다.
+        //
+        // 리뷰 4차 지적: staleness를 이 DELETE 문의 WHERE 절 자체에도 다시
+        // 넣는다(claimed_at <= cutoff) — 앞선 `if (claimedAtMs > staleCutoffMs)`
+        // 체크만으로는 "읽은 시점엔 stale이었다"만 보장할 뿐, DELETE가 실제로
+        // 실행되는 시점까지도 그 관측이 유효하다는 보장이 없다(check-then-act
+        // TOCTOU). 지금은 claimed_at을 갱신하는 lease 갱신(heartbeat) 경로가
+        // 없어 이 창이 실질적으로는 열리지 않지만, WHERE 절 자체를 CAS
+        // 조건으로 완결시켜 두면 향후 갱신 경로가 생겨도 안전하다.
+        const cutoffDate = new Date(staleCutoffMs);
         const { affected } = await this.itemRepo
           .createQueryBuilder()
           .delete()
@@ -168,6 +195,7 @@ export class OutreachIngestService {
           .where('id = :id', { id: existing.id })
           .andWhere('status = :status', { status: 'ticketed' })
           .andWhere('ticket_id IS NULL')
+          .andWhere('(claimed_at IS NULL OR claimed_at <= :cutoff)', { cutoff: cutoffDate })
           .execute();
         if (!affected) {
           result.skipped++;
@@ -206,6 +234,15 @@ export class OutreachIngestService {
     // Promise.all로 경쟁하는 순간 양쪽 다 실패하는 것을 직접 재현해 확인했다.
     // 대신 claim-first 순서(원래 구조)는 유지하고, 아래에서 실패 유형별로
     // 명시적으로 보상(compensate)해 트랜잭션 결합과 동등한 내구성을 얻는다.
+    // 리뷰 4차 지적: claimed_at을 이 sweep 전체가 공유하는 `now` 그대로
+    // 찍으면, 한 sweep 안에서 앞선 아이템의 _createTicket()이 오래 걸릴 때
+    // 뒤쪽 아이템은 방금 claim되었어도 이미 lease가 지난 것처럼 기록되어
+    // 다른 poll에게 즉시 stale 취급당할 수 있었다. sweep 시작 이후 실제로
+    // 흐른 실시간(real elapsed ms)을 `now`에 더해 claimed_at을 남긴다 —
+    // `now`와 같은 clock domain을 유지하면서도(테스트가 주입한 synthetic
+    // `now`를 쓰는 호출은 synthetic claimed_at을, 운영의 실시각 기본값
+    // `now`를 쓰는 호출은 실시각 claimed_at을 각각 얻는다) 이 항목이 실제로
+    // claim된 시점을 정확히 반영한다.
     let claimed: OutreachInboundItem;
     try {
       claimed = await this.itemRepo.save(this.itemRepo.create({
@@ -216,7 +253,7 @@ export class OutreachIngestService {
         confidence,
         status,
         ticket_id: null,
-        claimed_at: now,
+        claimed_at: new Date(now.getTime() + (Date.now() - pollStartRealMs)),
         permalink: item.permalink,
         author: item.author,
         collected_at: item.created_at,
@@ -240,29 +277,49 @@ export class OutreachIngestService {
         throw e;
       }
 
+      let linkAffected = 0;
       try {
-        await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
+        const linkResult = await this.itemRepo.update({ id: claimed.id }, { ticket_id: ticketId });
+        linkAffected = linkResult.affected ?? 0;
       } catch (e) {
         // 티켓은 커밋됐지만 claim에 연결하는 데 실패했다(리뷰 2차 지적
         // 시나리오 1). 고아가 된 티켓을 best-effort로 보상삭제하고, claim
         // 행은 일부러 그대로 둔다 — 이제 이 행은 claim 직후 죽은 크래시와
         // 구별할 수 없는 모양(status='ticketed', ticket_id=null)이 되고, 위
         // stale-claim 복구 경로가 다음 poll에서 그대로 재활용해 정리한다.
-        try {
-          await this.dataSource.getRepository(Ticket).delete({ id: ticketId });
-        } catch (compensateErr: any) {
-          this.logService.error('Outreach', 'failed to compensate an orphaned ticket after a ledger link failure', {
-            channel_id: channel.id, external_item_id: item.external_item_id, ticket_id: ticketId,
-            err: compensateErr?.message || String(compensateErr),
-          });
-        }
+        await this._deleteOrphanedTicket(channel, item, ticketId, 'failed to compensate an orphaned ticket after a ledger link failure');
         throw e;
+      }
+
+      if (linkAffected === 0) {
+        // 리뷰 4차 지적 — lease fencing: UPDATE가 0행에 적중했다는 것은
+        // claim.id가 더는 존재하지 않는다는 뜻이다. 즉 우리가 _createTicket()
+        // 을 실행하는 동안(수 분 걸릴 수 있음) lease가 만료되어 다른 poll이
+        // 이미 이 claim을 회수(delete+재insert)해 갔다 — 그 poll은 자신만의
+        // claim.id로 스스로 티켓을 만들어 정상적으로 연결할 것이다. 우리가
+        // 방금 만든 티켓은 같은 외부 항목에 대한 순수 중복이므로 여기서
+        // 보상삭제하고, 재시도가 필요한 에러가 아니라 skip으로 집계한다 —
+        // 이 외부 항목은 이미(또는 곧) 다른 소유자가 durable하게 처리한다.
+        await this._deleteOrphanedTicket(channel, item, ticketId, 'failed to compensate a duplicate ticket after losing claim ownership to a stale-lease takeover');
+        result.skipped++;
+        return;
       }
       result.ticketed++;
     } else if (status === 'noise' || status === 'question') {
       result[status]++;
     } else {
       result.held++;
+    }
+  }
+
+  private async _deleteOrphanedTicket(channel: OutreachChannel, item: InboundItem, ticketId: string, context: string): Promise<void> {
+    try {
+      await this.dataSource.getRepository(Ticket).delete({ id: ticketId });
+    } catch (compensateErr: any) {
+      this.logService.error('Outreach', context, {
+        channel_id: channel.id, external_item_id: item.external_item_id, ticket_id: ticketId,
+        err: compensateErr?.message || String(compensateErr),
+      });
     }
   }
 

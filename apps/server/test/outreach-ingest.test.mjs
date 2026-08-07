@@ -41,7 +41,7 @@ import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
-import { OutreachIngestService } from '../dist/modules/outreach/outreach-ingest.service.js';
+import { OutreachIngestService, STALE_CLAIM_LEASE_MS } from '../dist/modules/outreach/outreach-ingest.service.js';
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 const noopActivity = { async logActivity() { return {}; } };
@@ -53,6 +53,12 @@ function makeClassifier(map, fallback = { category: 'noise', confidence: 60 }) {
       return map[item.external_item_id] || fallback;
     },
   };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
 }
 
 function makeConnector(items) {
@@ -465,6 +471,81 @@ test('a still-active claim (fresh lease) is NOT reclaimed by a racing second pol
     assert.equal(items.length, 1, 'exactly one ledger row — A\'s claim was never deleted out from under it');
     assert.equal(items[0].status, 'ticketed');
     assert.equal(items[0].ticket_id, tickets[0].id);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('lease fencing: a real takeover after the lease actually expires still lands exactly one ticket, not two', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'gh-fence': { category: 'bug', confidence: 90 } });
+    const raceItem = item({ external_item_id: 'gh-fence', created_at: new Date('2026-06-25T10:00:00Z') });
+    const svc = makeService(dataSource, classifier);
+
+    // Unlike the fresh-lease barrier test above, this one lets the lease
+    // genuinely expire: A claims and stalls inside _createTicket (gated, so
+    // real elapsed time while paused stays negligible — claimed_at tracks
+    // A's synthetic `now`, review 4th pass). B is then polled with a `now`
+    // STALE_CLAIM_LEASE_MS+ past A's, so B's stale-claim reclaim is a real
+    // lease expiry within the same synthetic clock domain, not simulated by
+    // waiting on the real wall clock. B is released and runs to completion
+    // BEFORE A resumes — matching the reviewer's scenario where A is still
+    // stuck well after B has already taken over and finished (also sidesteps
+    // sql.js's lack of real concurrent-transaction support, since
+    // _createTicket's `dataSource.transaction()` calls would otherwise
+    // collide if released at the same instant — see the claim-first comment
+    // above about that same driver limitation). A is then resumed to prove
+    // the fencing check on A's side: A's own ticket-creation finishes AFTER
+    // B has already taken over and finished, so A's final `itemRepo.update`
+    // must detect it lost ownership (0 rows affected) and compensate its own
+    // now-duplicate ticket instead of counting it.
+    const gateA = deferred();
+    const reachedA = deferred();
+    const gateB = deferred();
+    const reachedB = deferred();
+    let callIndex = 0;
+    const originalCreateTicket = svc._createTicket.bind(svc);
+    svc._createTicket = async (...args) => {
+      const isFirst = callIndex === 0;
+      callIndex++;
+      if (isFirst) {
+        reachedA.resolve();
+        await gateA.promise;
+      } else {
+        reachedB.resolve();
+        await gateB.promise;
+      }
+      return originalCreateTicket(...args);
+    };
+
+    const nowA = new Date('2026-06-25T12:00:00Z');
+    const pollA = svc.pollChannel(channel, makeConnector([raceItem]), nowA);
+    await reachedA.promise; // A's claim row is committed; A is stalled inside _createTicket
+
+    const afterLease = new Date(nowA.getTime() + STALE_CLAIM_LEASE_MS + 5000);
+    const pollB = svc.pollChannel(channel, makeConnector([raceItem]), afterLease);
+    await reachedB.promise; // B has genuinely reclaimed A's expired claim and is now stalled too
+
+    gateB.resolve();
+    const resultB = await pollB;
+    gateA.resolve();
+    const resultA = await pollA;
+
+    const tickets = await dataSource.getRepository(Ticket).find();
+    assert.equal(tickets.length, 1, 'exactly one ticket total — A\'s late-finishing duplicate was compensated away');
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find();
+    assert.equal(items.length, 1, 'exactly one ledger row — B\'s takeover claim');
+    assert.equal(items[0].status, 'ticketed');
+    assert.equal(items[0].ticket_id, tickets[0].id);
+
+    assert.equal(resultA.ticketed + resultB.ticketed, 1, 'exactly one of A/B reports a ticket created');
+    assert.equal(resultA.skipped + resultB.skipped, 1, 'the fenced-out side reports a skip, not a silent drop');
+    assert.equal(resultA.errors, 0, 'losing the ownership race is handled, not surfaced as an error');
+    assert.equal(resultB.errors, 0);
   } finally {
     await dataSource.destroy();
   }
