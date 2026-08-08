@@ -68,8 +68,21 @@ COPY --from=builder /app/apps/server/dist ./apps/server/dist
 # Copy client build output (served by NestJS ServeStaticModule)
 COPY --from=builder /app/apps/client/dist ./apps/client/dist
 
-# Install production dependencies only
-RUN npm install --omit=dev --workspace=server
+# Install production dependencies only.
+#
+# `npm ci`, not `npm install` — 이 스테이지가 배포 이미지의 런타임 트리를
+# 만든다. `npm install` 은 lockfile 을 "제안"으로만 취급해서, 같은 커밋을
+# 두 번 빌드해도 semver 범위 안에서 다른 버전으로 해결될 수 있고,
+# 컨테이너 안의 package-lock.json 을 실제로 덮어쓴다(런너 레이아웃 재현
+# 실험에서 1743 라인 변경 — 워크스페이스가 `extraneous` 로 표시되고 dev
+# 엔트리가 잘려나감). 즉 `npm audit` 으로 감사한 트리와 배포된 트리가
+# 같다는 보장이 없었다. `npm ci` 는 lockfile 을 그대로 강제하고 integrity
+# 해시 불일치 시 실패하므로, 감사 대상 == 배포 대상이 성립한다.
+#
+# 이 레이아웃(루트 package.json + lockfile + apps/server/package.json 만
+# 존재)에서도 `npm ci --workspace=server` 는 정상 동작하며, 설치 결과 트리는
+# 기존 `npm install` 과 패키지 200개 전부 동일하다 — 동작 변화 없음.
+RUN npm ci --omit=dev --workspace=server
 
 # Writable data dir for the server. Currently used by the Credentials
 # encryption service to persist its auto-generated AES key when

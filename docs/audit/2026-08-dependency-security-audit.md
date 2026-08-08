@@ -52,6 +52,16 @@
 
 ### `react-router` / `react-router-dom` — GHSA-qwww-vcr4-c8h2 (high)
 
+> **[2026-08-08 해소됨 — 아래 절은 이력으로만 읽을 것]**
+> GitHub 이 2026-08-07T18:16Z advisory 를 개정해 7.x 취약 범위를
+> `< 8.3.0` → `< 7.18.2` 로 좁히고 7.x first patched version 을 **7.18.2** 로
+> 지정했다. 저장소는 이미 7.18.2 였으므로 **버전 변경 없이 취약 상태에서
+> 벗어났고**, `npm audit` 은 0건이 됐다. `react-router-dom` 은 advisory 대상에서
+> 제외됐다. 따라서 아래의 "해당 없음 승인"과 "재검토 트리거"는 더 이상
+> 유효한 운영 지침이 아니다 — 현재 방어선은 **7.18.2 버전 바닥**이며
+> `apps/client/test/react-router-rsc-guard.test.mjs` 가 이를 강제한다.
+> 상세는 맨 아래 2026-08-08 재검증 로그 참조.
+
 - 내용: "RSC Mode CSRF Bypass Allows Action Execution Before 400 Response"
 - 취약 범위: `>= 7.12.0, < 8.3.0` / 패치 버전: **8.3.0 뿐 (7.x 패치 릴리스 없음)**
 - 현재 버전: `react-router-dom@7.18.2` → `react-router@7.18.2`
@@ -166,3 +176,203 @@
 각 단언은 위반 코드를 임시로 심어 **실제로 실패하는 것까지 확인**했다.
 이 테스트가 깨지면 완화하지 말고 "재검토 트리거" 절차(React 19 상향 후
 `react-router@^8.3.0`, 또는 RSC 도입 철회)를 밟을 것.
+
+### 2026-08-07 — 재검증 결과: 신규 advisory 0건 / **배포 트리 무결성 결함 1건 조치**
+
+- 기준 커밋: `main` @ `5b257202` / 도구: `npm audit` (npm 11.11.0 / Node 24.14.1)
+- `npm audit` (root, 워크스페이스 3개 전체, 580 packages): **high 2 / 그 외 0**
+  — 전부 위에서 "해당 없음"으로 승인한 `react-router` + `react-router-dom`
+  한 쌍(동일 advisory 1건). **신규 advisory 없음.**
+- 배포 브랜치 `production.private`: `package-lock.json` blob 해시가 `main` 과
+  **동일**(`5302708c`) — lockfile drift 없음. `package.json` 차이는
+  `apps/server` 의 `test` / `test:qa` 스크립트 목록뿐(의존성 무관).
+- 재검토 트리거 3종 재확인 — **여전히 셋 다 미충족**:
+  - `react-router` 7.x 패치: 없음 (7.x 최신 = **7.18.2**, `dist-tags.version-7`
+    도 7.18.2. advisory 범위 `>= 7.12.0, < 8.3.0` 에 그대로 포함)
+  - React 19 상향: 미실시 (client `react@18.3.1`)
+  - RSC / SSR 도입: 없음 (`react-router-rsc-guard` 가 강제)
+- override 고정값 재확인: `multer@2.2.0` · `@hono/node-server@2.1.0` ·
+  `js-yaml@5.2.3` · `picomatch@4.0.5` — **전부 registry 최신과 일치.**
+- 직접 의존성 40개 대비 registry 최신 비교: semver 범위 내 지연은
+  `tsx` 4.23.6→4.23.9, `vite` 8.2.0→8.2.1 둘뿐이고 **advisory 없음**.
+  나머지 격차는 전부 의도적 메이저 보류(React 19 / TypeScript 7 / typeorm 1.x /
+  jsdom 30 / @types/node 26). 보안 사유가 없으므로 lockfile 은 건드리지 않았다
+  (근거 없는 재해결은 780라인급 churn 만 만들고 회귀 위험만 늘린다).
+- 공급망 위생 재점검(lockfile 580 엔트리 전수): registry 외부 resolve 0건,
+  `http://` resolve 0건, `integrity` 누락 0건, install script 5건
+  (`esbuild`, `fsevents`×3, `@scarf/scarf`) — 2026-08-06 과 동일.
+
+#### 조치 1 (핵심) — 배포 이미지가 감사한 lockfile 트리가 아니었다
+
+`Dockerfile` 의 runner 스테이지가 런타임 의존성을 이렇게 설치하고 있었다:
+
+```dockerfile
+RUN npm install --omit=dev --workspace=server
+```
+
+`npm install` 은 lockfile 을 **강제하지 않고 제안으로만** 취급한다. 즉:
+
+1. 같은 커밋을 다시 빌드해도 선언 범위(`^`) 안에서 다른 버전이 잡힐 수 있다.
+   → `npm audit` 으로 감사한 트리와 실제로 배포된 트리가 같다는 보장이 없다.
+   감사 결과가 배포본에 대해 아무것도 말해주지 못하는 상태였다.
+2. `integrity` 해시 불일치 시에도 실패하지 않는다 — lockfile 이 갖고 있는
+   tarball 변조 탐지가 배포 경로에서만 무력화돼 있었다.
+
+**재현 검증:** runner 스테이지의 파일 레이아웃(루트 `package.json` +
+`package-lock.json` + `apps/server/package.json` 만)을 그대로 만들어 실행한 결과,
+`npm install` 은 컨테이너 안의 `package-lock.json` 을 **1743 라인 덮어썼다**
+(워크스페이스가 `extraneous` 로 표시되고 dev 엔트리가 제거됨). `npm ci` 는
+같은 레이아웃에서 exit 0, **lockfile 바이트 단위 무변경**.
+
+→ `RUN npm ci --omit=dev --workspace=server` 로 변경.
+
+**동작 변화 없음까지 확인:** 두 방식의 설치 결과 `node_modules` 트리를 전수
+비교(패키지명@버전)한 결과 **양쪽 200개 패키지 완전 일치** — 한쪽에만 있는
+패키지 0건, 버전 불일치 0건. 즉 이 변경은 배포되는 코드를 바꾸지 않고
+"감사 대상 == 배포 대상" 보장만 추가한다.
+
+(`npm ci --workspace=server` 가 이 축소된 레이아웃에서 lockfile out-of-sync
+오류를 낼 것 같지만, 실제로는 나지 않는다는 것을 위 재현으로 확인했다.
+이것이 원래 `npm install` 이 쓰였을 법한 이유다.)
+
+#### 조치 2 — `@scarf/scarf` 설치 시점 telemetry 차단
+
+`swagger-ui-dist` → `@scarf/scarf@1.4.0` 이 **런타임 프로덕션 트리에 포함**되며
+`postinstall: node ./report.js` 로 설치할 때마다 scarf.sh 에 비콘을 쏜다
+(패키지명/버전/OS/arch/CI 여부). 취약점은 아니지만 CI 와 Docker 빌드
+컨테이너에서 나가는 불필요한 아웃바운드다.
+
+→ 루트 `package.json` 에 `"scarfSettings": { "enabled": false }` 추가.
+`report.js:57` 의 공식 opt-out 경로(`rootPackage.scarfSettings.enabled === false`)를
+직접 확인했고, 이 필드가 `npm ci` 의 lockfile 동기화를 깨지 않는 것도
+실제 `npm ci` 실행으로 검증했다(lockfile 무변경, exit 0).
+
+#### 이번 재검증에서 추가한 것 — 공급망 무결성 회귀 가드
+
+`apps/server/test/supply-chain-integrity-guard.test.mjs` (`npm test -w server` 에 등록).
+위 두 조치와 위생 점검 결과를 산문이 아니라 기계 검사로 고정한다:
+
+1. 스캔 대상이 실제로 존재하는지 자체 검증 (가드가 죽은 채 초록불 방지)
+2. `Dockerfile` 에 의존성 설치용 `npm install` 0건 + `npm ci` 최소 2회
+3. lockfile 전 엔트리가 `https://registry.npmjs.org/` 에서 resolve
+4. lockfile 전 엔트리가 `integrity` 해시 보유
+5. install script 보유 패키지가 허용 목록(`esbuild`/`fsevents`/`@scarf/scarf`) 밖으로 안 늘어남
+6. 루트 `package.json` 의 scarf opt-out 유지
+
+단언 6개 각각에 위반을 임시로 심어 **실제로 실패하는 것까지 확인**했다
+(Dockerfile 되돌리기 / scarfSettings 제거 / `resolved` 를 `git+ssh://` 로 변경 /
+`integrity` 제거 / `hasInstallScript` 추가 / lockfile 엔트리 절단).
+
+#### 미조치 — 운영자 승인이 필요한 항목 (배포 브랜치)
+
+`production.private` 전용 `.github/workflows/deploy.yml` 의 마지막 스텝:
+
+```yaml
+- name: Deploy to NAS
+  uses: appleboy/ssh-action@v1        # ← 가변 태그
+  with:
+    key: ${{ secrets.NAS_SSH_KEY }}
+    password: ${{ secrets.NAS_PASSWORD }}
+```
+
+`appleboy/ssh-action` 은 **개인 계정 소유의 서드파티 액션**이고 `@v1` 은
+가변 태그다. 소유자 계정이 탈취되거나 태그가 재지정되면, 그 시점부터
+`NAS_SSH_KEY` / `NAS_PASSWORD` / `NAS_HOST` 가 공격자 코드에 그대로 넘어간다.
+`docker/setup-buildx-action@v4` · `docker/login-action@v4` ·
+`docker/build-push-action@v7` 도 같은 성격(가변 태그)이며 `GHCR_TOKEN` 을 본다.
+표준 완화는 **full commit SHA 고정**이다.
+
+`main` 쪽 워크플로(`ci.yml`, `publish-agent-manager.yml`)는 GitHub 1st-party
+`actions/checkout@v4` · `actions/setup-node@v4` 뿐이라 위험도가 다르다.
+
+**이번에 고치지 않은 이유:** `deploy.yml` 은 `production.private` 에만 있고,
+이 브랜치로의 push 자체가 NAS 실배포를 트리거한다. 보안 위생 목적의 커밋
+하나로 프로덕션 배포를 발생시키는 것은 운영자 승인 사항이라 판단해
+조치를 보류하고 여기에 기록만 남긴다. 승인 시 각 `uses:` 를 해당 태그가
+가리키는 commit SHA 로 치환(`uses: appleboy/ssh-action@<sha>  # v1.2.3`)하면 된다.
+
+#### 검증
+
+- `npm run build` (turbo, 3 tasks) — 통과
+- `npm test -w server` — 통과 (실패 1건은 `tickets-leak.test.mjs` 의 기존 실패,
+  손대지 않은 lockfile 로도 재현되는 사전 결함)
+- `npm ci --omit=dev --workspace=server` 를 runner 레이아웃에서 실제 실행 — exit 0,
+  lockfile 무변경, 설치 트리 200개 패키지 기존과 동일
+
+### 2026-08-08 — 재검증 결과: **취약점 0건** / react-router 건 해소 / 전일 조치 랜딩
+
+- 기준 커밋: `main` @ `b89b39b0` / 도구: `npm audit` (npm 11.11.0 / Node 24.14.1)
+- `npm audit` (root, 워크스페이스 3개 전체, 579 packages):
+  **critical 0 / high 0 / moderate 0 / low 0 — 총 0건.**
+- `apps/agent-manager` 독립 트리: **0건.**
+
+#### 0건이 "감사 실패"가 아님을 먼저 증명했다
+
+전일까지 high 2건이던 것이 0건으로 떨어졌으므로, 이게 진짜 해소인지
+아니면 audit 엔드포인트가 조용히 실패해 빈 결과를 준 것인지부터 갈랐다.
+별도 임시 디렉터리에 **알려진 취약 패키지**(`lodash@4.17.4`)만 있는 트리를
+만들어 `npm audit` 을 돌린 결과 `1 critical severity vulnerability` 를
+정상 보고 — 레지스트리 advisory 조회 경로는 살아 있다. 따라서 0건은 실제 값이다.
+(이 저장소의 `react-router` 버전은 어제와 동일한 7.18.2 로 **변한 게 없다** —
+바뀐 건 advisory 쪽이다. 이 대조 검증 없이는 구분이 불가능했다.)
+
+#### react-router GHSA-qwww-vcr4-c8h2 — 승인된 예외 → **해소**
+
+GitHub advisory API 직접 조회 결과, advisory 가 `2026-08-07T18:16:54Z` 에
+개정되면서 영향 범위가 다음과 같이 바뀌었다:
+
+| | 개정 전 | 개정 후 |
+|---|---|---|
+| `react-router` | `>= 7.12.0, < 8.3.0` | `>= 7.12.0, < 7.18.2` / `>= 8.0.0, < 8.3.0` |
+| 7.x first patched | (없음) | **7.18.2** |
+| `react-router-dom` | 대상 | **대상에서 제외** |
+
+즉 7.x 계열에도 패치 버전이 지정됐고 그게 이 저장소가 이미 쓰던 7.18.2 다.
+**의존성 변경 없이 해소**됐다 — React 19 상향도, 8.3.0 상향도, 7.11.0
+다운그레이드도 필요 없었다. 전일까지 문서가 "패치 릴리스는 8.3.0 뿐"이라고
+적은 것은 그 시점 advisory 메타데이터 기준으로는 옳았다.
+
+**방어선 이동에 따른 가드 갱신** — 예전 근거는 "RSC 를 안 쓰니 해당 없음"
+이었지만 이제 실제 보호막은 **7.18.2 이상이라는 버전 사실**이다. 7.18.1 이하로
+되돌아가면(롤백 / lockfile 수동 편집 / resolution 고정) RSC 사용 여부와 무관하게
+다시 취약 범위다. `apps/client/test/react-router-rsc-guard.test.mjs` 에 단언
+`react-router stays at or above the patched 7.18.2` 를 추가해 이 바닥을 강제한다
+(8.x 로 올라갈 경우의 바닥 8.3.0 도 같이 검사). lockfile 의 `react-router` 를
+7.18.1 로 임시 변조해 **실제로 실패하는 것까지 확인**했고, 변조는 되돌렸다
+(lockfile diff 0라인). 기존 RSC 스캔 단언 4종은 심층 방어로 그대로 유지한다.
+
+#### 전일(2026-08-07) 조치가 랜딩되지 않은 상태였다 — 이번에 랜딩
+
+2026-08-07 감사가 만든 변경(`npm ci` 전환 · scarf opt-out · 공급망 가드
+테스트 · 문서)은 워크트리에 **커밋되지 않은 채 남아 있었고** `main` 에는
+반영돼 있지 않았다(당시 `main` @ `5b257202` → 현재 `b89b39b0`, 45 커밋 진행).
+즉 배포 이미지는 여전히 `RUN npm install --omit=dev --workspace=server` 였다.
+해당 변경을 현재 `main` 위에 재적용해 이번 커밋으로 함께 랜딩한다.
+그 사이 45 커밋에서 `package.json` / `package-lock.json` 은 건드려지지 않아
+(유일한 변경은 `apps/server/package.json` 의 테스트 목록) 전일 분석은 그대로 유효하다.
+
+#### 공급망 위생 — 전일과 동일, 회귀 없음
+
+- lockfile 573 엔트리 전수: registry 외부 resolve **0건**, `integrity` 누락 **0건**,
+  install script **3종**(`esbuild`, `fsevents`, `@scarf/scarf`)으로 허용 목록과 일치.
+- override 고정값 전부 유지·정상 해결: `multer@2.2.0` · `@hono/node-server@2.1.0` ·
+  `js-yaml@5.2.3` · `picomatch@4.0.5`.
+
+#### 배포 브랜치 `production.private`
+
+`package.json` / `package-lock.json` 이 `main` 과 **blob 해시까지 동일**
+(`485b9705` / `5302708c`) — **의존성 drift 없음**. 소스 기준 45 커밋 뒤처져
+있으나 의존성 관련 차이는 0이므로 이번 감사 목적의 머지는 불필요하다.
+
+#### 미조치 — 이월 (운영자 승인 필요)
+
+`production.private` 의 `deploy.yml` 서드파티 액션 가변 태그(`appleboy/ssh-action@v1`
+등) SHA 고정 건은 전일과 동일한 이유(해당 브랜치 push = NAS 실배포 트리거)로
+이월한다. 위 2026-08-07 절의 "미조치" 항목 참조.
+
+#### 검증
+
+- `node --test apps/client/test/react-router-rsc-guard.test.mjs` — 6/6 통과
+- `node --test apps/server/test/supply-chain-integrity-guard.test.mjs` — 6/6 통과
+- 신규 단언 mutation 검증(7.18.1 강등 → 실패 재현 → 원복) 완료
+- `npm run build` / `npm test -w server` — 아래 커밋 검증 절차대로 실행

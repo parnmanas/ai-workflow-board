@@ -1,26 +1,26 @@
 // 의존성 보안 감사 회귀 가드 — GHSA-qwww-vcr4-c8h2
 // ("React Router: RSC Mode CSRF Bypass Allows Action Execution Before 400 Response")
 //
-// `react-router` / `react-router-dom` 7.12.0 ~ 8.2.x 는 위 advisory(high)의
-// 취약 범위이고, 패치 릴리스는 8.3.0 하나뿐이다. 8.3.0 의 peer 는
-// `react >= 19.2.7` 이라 React 18.3 을 쓰는 이 클라이언트는 올라갈 수 없다.
-// 그래서 `docs/audit/2026-08-dependency-security-audit.md` 는 이 2건을
-// **"해당 없음(not applicable)"** 으로 승인하고 남겨두었다.
+// **2026-08-08 상태 변경 — 이 건은 더 이상 "승인된 예외"가 아니라 해소됐다.**
+// GitHub 이 2026-08-07T18:16Z 에 advisory 를 개정하면서 7.x 취약 범위가
+// `>= 7.12.0, < 8.3.0` → `>= 7.12.0, < 7.18.2` 로 좁혀졌고, 7.x 계열의
+// first patched version 이 **7.18.2** 로 지정됐다. 이 저장소는 이미
+// 7.18.2 를 물고 있었으므로(= 패치 버전) `npm audit` 이 0건으로 떨어졌다.
+// `react-router-dom` 은 advisory 대상에서 아예 빠졌다.
 //
-// 그 승인은 단 하나의 사실에 전적으로 기대고 있다:
+// 그래서 방어의 무게중심이 옮겨졌다. 예전 근거는 "RSC 를 안 쓰니 해당 없음"
+// 이었지만, 지금 실제로 우리를 지키는 것은 **7.18.2 이상이라는 사실**이다.
+// 누군가 7.18.1 이하로 되돌리면(롤백, resolution 고정, lockfile 수동 편집)
+// 취약점이 그대로 되살아난다 — 그리고 그건 RSC 를 쓰는지와 무관하게
+// advisory 범위 안이다. 아래 `react-router stays at or above the patched
+// 7.18.2` 가 그 바닥을 지킨다.
 //
-//     apps/client 는 취약 경로인 unstable RSC API 를 전혀 쓰지 않는다.
+// RSC 스캔 단언들은 그대로 남겨둔다. 심층 방어이고(패치 이전 범위로
+// 내려갔을 때 실제 피해 여부를 가르는 조건이 여전히 "RSC 사용 여부"다),
+// 비용은 fs 스캔 몇 번뿐이다.
 //
-// advisory 본문도 "This only affects your application if you are using the
-// unstable RSC APIs" 라고 명시한다. 즉 누군가 RSC/SSR 라우팅을 도입하는 순간
-// 이 감사 결론은 조용히 거짓이 되고, 승인된 예외가 실재하는 high 취약점으로
-// 바뀐다 — 그런데 그걸 알려주는 장치가 이 파일 이전에는 없었다(감사 문서의
-// "재검토 트리거"는 산문일 뿐 아무것도 강제하지 않았다).
-//
-// 이 테스트는 그 산문을 기계 검사로 바꾼다. 실패하면 업그레이드 회피가
-// 더 이상 정당하지 않다는 뜻이므로, 테스트를 완화하지 말고
-// 감사 문서의 "재검토 트리거" 절차를 밟을 것:
-//   React 19 상향 → `react-router@^8.3.0` 으로 올리거나, RSC 도입을 되돌린다.
+// 실패하면 테스트를 완화하지 말고 감사 문서
+// (`docs/audit/2026-08-dependency-security-audit.md`) 의 판단 근거부터 볼 것.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -62,6 +62,58 @@ test('guard actually has client sources to scan', () => {
   assert.ok(
     routerUsers.length > 0,
     'no file imports react-router at all — this guard is scanning the wrong tree',
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 버전 바닥 — GHSA-qwww-vcr4-c8h2 의 7.x first patched version
+// ─────────────────────────────────────────────────────────────────────────────
+
+// advisory 개정 후의 7.x 취약 범위는 `>= 7.12.0, < 7.18.2` 다. 즉 7.18.2 가
+// 바닥이고, 그 아래로 내려가는 순간(수동 다운그레이드 / lockfile 편집 /
+// resolution 고정) 다시 취약 범위 안이다. 8.x 로 올라가는 경우에는 8.3.0 이
+// 바닥이라는 것도 같이 강제한다 — 8.0.0~8.2.x 는 별도 취약 구간이다.
+const PATCHED_7X = [7, 18, 2];
+const PATCHED_8X = [8, 3, 0];
+
+function parseVersion(v) {
+  return v.split('-')[0].split('.').map(Number);
+}
+
+function gte(a, b) {
+  for (let i = 0; i < 3; i += 1) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return true;
+}
+
+test('react-router stays at or above the patched 7.18.2', () => {
+  const lock = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '..', '..', '..', 'package-lock.json'), 'utf8'),
+  );
+
+  const resolved = Object.entries(lock.packages ?? {})
+    .filter(([name]) => /(^|\/)node_modules\/react-router(-dom)?$/.test(name))
+    .map(([name, meta]) => ({ name, version: meta.version }));
+
+  // 가드가 죽은 채 초록불만 내는 것 방지.
+  assert.ok(
+    resolved.length > 0,
+    'no react-router entry found in package-lock.json — this guard is reading the wrong lockfile',
+  );
+
+  const offenders = resolved.filter(({ version }) => {
+    const parsed = parseVersion(version);
+    const floor = parsed[0] >= 8 ? PATCHED_8X : PATCHED_7X;
+    return !gte(parsed, floor);
+  });
+
+  assert.deepEqual(
+    offenders.map((o) => `${o.name}@${o.version}`),
+    [],
+    'react-router resolved below the GHSA-qwww-vcr4-c8h2 patched version (7.18.2 for 7.x, ' +
+      '8.3.0 for 8.x) — the advisory applies again. Do not relax this test; ' +
+      'see docs/audit/2026-08-dependency-security-audit.md',
   );
 });
 

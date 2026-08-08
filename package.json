@@ -35,5 +35,8 @@
     "vite": {
       "picomatch": "^4.0.4"
     }
+  },
+  "scarfSettings": {
+    "enabled": false
   }
 }

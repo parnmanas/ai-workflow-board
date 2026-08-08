@@ -1,0 +1,158 @@
+// 공급망 무결성 회귀 가드 — 2026-08-07 의존성 보안 감사에서 추가.
+// 상세 근거는 `docs/audit/2026-08-dependency-security-audit.md` → 재검증 로그.
+//
+// `npm audit` 은 "lockfile 에 적힌 버전"에 취약점이 있는지만 본다. 그런데
+// 감사한 lockfile 이 실제로 배포/설치되는 트리와 같다는 보장은 audit 이
+// 해주지 않는다. 이 가드는 그 보장을 성립시키는 세 가지 전제를 정적으로
+// 강제한다 — 앱을 띄우지 않고 fs + JSON 파싱만 하므로 매 `npm test` 에
+// 돌려도 싸다.
+//
+//   1. Dockerfile 이 의존성을 `npm ci` 로만 설치한다 (lockfile 강제).
+//   2. lockfile 의 모든 엔트리가 registry.npmjs.org 에서 https 로 resolve 되고
+//      integrity 해시를 갖는다 (dependency confusion / tarball 주입 차단).
+//   3. install script 를 갖는 패키지가 알려진 목록을 벗어나지 않는다.
+//
+// 깨졌을 때 테스트를 완화하지 말고, 위 감사 문서의 판단 근거부터 다시 볼 것.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+const DOCKERFILE = path.join(REPO_ROOT, 'Dockerfile');
+const ROOT_PKG = path.join(REPO_ROOT, 'package.json');
+const LOCKFILE = path.join(REPO_ROOT, 'package-lock.json');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Dockerfile — 배포 이미지는 lockfile 이 강제된 트리여야 한다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// `npm install` 은 lockfile 을 제안으로만 취급한다. 같은 커밋을 두 번 빌드해도
+// semver 범위 안에서 다른 버전이 잡힐 수 있고, 컨테이너 안의 lockfile 자체를
+// 덮어쓴다. 2026-08-07 감사 전까지 runner 스테이지가 정확히 그 상태였다
+// (`RUN npm install --omit=dev --workspace=server`) — 감사한 트리와 배포된
+// 트리가 같다는 보장이 없었다.
+test('Dockerfile installs dependencies only through `npm ci`', () => {
+  const lines = fs.readFileSync(DOCKERFILE, 'utf8').split('\n');
+
+  const installLines = [];
+  const ciLines = [];
+  for (const [i, raw] of lines.entries()) {
+    const line = raw.trim();
+    if (line.startsWith('#')) continue;
+    // `RUN npm install ...` / `&& npm install ...` 둘 다 잡는다.
+    // `npm install -g <tool>` 처럼 lockfile 과 무관한 전역 설치는 제외.
+    if (/\bnpm\s+install\b/.test(line) && !/\bnpm\s+install\b[^\n]*\s-g\b/.test(line)) {
+      installLines.push(`${i + 1}: ${line}`);
+    }
+    if (/\bnpm\s+ci\b/.test(line)) ciLines.push(`${i + 1}: ${line}`);
+  }
+
+  assert.deepEqual(
+    installLines,
+    [],
+    'Dockerfile uses `npm install` for a dependency install — the deployed tree is then ' +
+      'no longer provably the audited lockfile tree. Use `npm ci`. ' +
+      `See docs/audit/2026-08-dependency-security-audit.md: ${installLines.join(' | ')}`,
+  );
+
+  // 가드가 죽은 채 초록불만 내는 것 방지 — Dockerfile 이 실제로 의존성을
+  // 설치하고는 있어야 한다.
+  assert.ok(
+    ciLines.length >= 2,
+    `expected at least 2 \`npm ci\` invocations (deps + runner stage), found ${ciLines.length}`,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. lockfile — 전 엔트리가 공식 registry + integrity 해시
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOCK = JSON.parse(fs.readFileSync(LOCKFILE, 'utf8'));
+// workspace 링크(`apps/*`)는 registry 에서 오지 않으므로 resolved/integrity 가
+// 없는 게 정상이다. 그 외 전부가 검사 대상.
+const REGISTRY_ENTRIES = Object.entries(LOCK.packages ?? {}).filter(
+  ([name, meta]) => name !== '' && !meta.link && !name.startsWith('apps/'),
+);
+
+test('guard actually has lockfile entries to scan', () => {
+  assert.ok(
+    REGISTRY_ENTRIES.length > 400,
+    `expected the full dependency tree, found ${REGISTRY_ENTRIES.length} entries in ${LOCKFILE}`,
+  );
+});
+
+// 하나라도 git+ / http:// / 사설 registry / 임의 tarball URL 로 새면 그 패키지는
+// npm advisory DB 로 감사되지 않고, 소유자가 조용히 내용을 바꿔치기할 수 있다.
+test('every lockfile entry resolves from registry.npmjs.org over https', () => {
+  const offenders = REGISTRY_ENTRIES.filter(
+    ([, meta]) => !meta.resolved || !meta.resolved.startsWith('https://registry.npmjs.org/'),
+  ).map(([name, meta]) => `${name} -> ${meta.resolved ?? '(no resolved field)'}`);
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'lockfile entry resolved outside https://registry.npmjs.org — such a package is not covered ' +
+      `by npm audit and can be swapped out by its host: ${offenders.join(', ')}`,
+  );
+});
+
+// integrity 가 없으면 `npm ci` 가 tarball 내용을 검증하지 못한다 —
+// 위 `npm ci` 강제가 무의미해지는 구멍.
+test('every lockfile entry carries an integrity hash', () => {
+  const offenders = REGISTRY_ENTRIES.filter(([, meta]) => !meta.integrity).map(
+    ([name, meta]) => `${name}@${meta.version ?? '?'}`,
+  );
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `lockfile entry without an integrity hash — \`npm ci\` cannot verify its tarball: ${offenders.join(', ')}`,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. install script — 설치 시점에 임의 코드를 실행하는 패키지 목록 고정
+// ─────────────────────────────────────────────────────────────────────────────
+
+// install script 는 `npm ci` 만으로도 실행되는 임의 코드 실행 지점이다.
+// 전면 금지(`--ignore-scripts`)는 esbuild 가 깨져서 불가하므로, 대신 "새로
+// 생긴 것"을 알아채도록 목록을 고정한다. 여기 목록이 늘어나야 한다면
+// 그 패키지가 왜 설치 시점에 코드를 돌려야 하는지 확인하고 추가할 것.
+const ALLOWED_INSTALL_SCRIPTS = new Set([
+  'esbuild', // 플랫폼별 바이너리 배치 — vite/tsx 빌드 체인 필수
+  'fsevents', // macOS 전용 optional native watcher
+  '@scarf/scarf', // swagger-ui-dist 전이 telemetry — 아래 테스트에서 opt-out 강제
+]);
+
+test('no unexpected package runs an install script', () => {
+  const found = REGISTRY_ENTRIES.filter(([, meta]) => meta.hasInstallScript).map(([name]) =>
+    // `node_modules/tsx/node_modules/fsevents` → `fsevents`
+    name.replace(/^.*node_modules\//, ''),
+  );
+
+  const unexpected = [...new Set(found)].filter((name) => !ALLOWED_INSTALL_SCRIPTS.has(name));
+  assert.deepEqual(
+    unexpected,
+    [],
+    'new package with an install script — it runs arbitrary code on every `npm ci`, including ' +
+      `in CI and in the Docker build. Review before allowlisting: ${unexpected.join(', ')}`,
+  );
+});
+
+// `@scarf/scarf` 의 postinstall 은 설치될 때마다 scarf.sh 로 비콘을 쏜다
+// (패키지명/버전/OS/arch/CI 여부). 취약점은 아니지만 빌드 컨테이너에서
+// 나가는 불필요한 아웃바운드이고, 끄는 비용이 root package.json 3줄이다.
+// scarf 의 opt-out 경로는 `report.js` 가 읽는 rootPackage.scarfSettings.enabled === false.
+test('root package.json opts out of @scarf/scarf install-time telemetry', () => {
+  const pkg = JSON.parse(fs.readFileSync(ROOT_PKG, 'utf8'));
+  assert.equal(
+    pkg.scarfSettings?.enabled,
+    false,
+    'root package.json must set `scarfSettings.enabled: false` — @scarf/scarf ships a postinstall ' +
+      'beacon and is present in the production runtime tree (via swagger-ui-dist)',
+  );
+});
