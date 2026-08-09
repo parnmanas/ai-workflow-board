@@ -376,3 +376,77 @@ GitHub advisory API 직접 조회 결과, advisory 가 `2026-08-07T18:16:54Z` �
 - `node --test apps/server/test/supply-chain-integrity-guard.test.mjs` — 6/6 통과
 - 신규 단언 mutation 검증(7.18.1 강등 → 실패 재현 → 원복) 완료
 - `npm run build` / `npm test -w server` — 아래 커밋 검증 절차대로 실행
+
+---
+
+### 2026-08-09 재검증 — `main` 0건 유지, **배포 브랜치 공급망 하드닝 누락 발견·조치**
+
+- 기준 커밋: `main` @ `120fb6ad`, `production.private` @ `8599097a`
+- 결과: **`main` 0건, `production.private` lockfile 0건** (dev 포함, 579 패키지)
+
+#### 감사 경로 생존 확인 (0건을 믿기 전에)
+
+`npm audit` 이 조용히 실패해도 "0 vulnerabilities" 를 반환하므로, 임시 트리에
+`lodash@4.17.4` 를 심어 별도 감사를 돌렸다 → **critical 1건 정상 검출**.
+따라서 이번 0건은 실제 결과이지 감사 경로 장애가 아니다.
+
+#### 이번 감사의 실제 발견 — 감사 대상 트리 ≠ 배포 트리
+
+전일(2026-08-08) 감사는 `package.json` / `package-lock.json` 이 blob 단위로
+동일하다는 이유로 "의존성 drift 없음 → 머지 불필요" 로 결론냈다. 그러나 **lockfile
+동일성만으로는 배포 트리의 동일성이 보장되지 않는다.** `production.private` 의
+`Dockerfile` 런타임 스테이지는 여전히
+
+    RUN npm install --omit=dev --workspace=server
+
+였다. `npm install` 은 lockfile 을 "제안" 으로만 취급해 semver 범위 안에서 다시
+해결하고 컨테이너 안의 lockfile 을 덮어쓴다. 즉 **`main` 에서 0건으로 감사한 트리와
+실제 배포 이미지의 트리가 같다는 보장이 없었다.** 2026-08-07 에 이 문제를 고친
+`npm ci` 전환은 `main` 에만 랜딩되어 있었고, 배포 브랜치에는 이틀째 반영되지 않은
+상태였다.
+
+같은 이유로 다음 하드닝도 배포 브랜치에 누락되어 있었다.
+
+| 항목 | `main` | 조치 전 `production.private` |
+| --- | --- | --- |
+| `Dockerfile` 런타임 설치 | `npm ci --omit=dev` | `npm install --omit=dev` |
+| `@scarf/scarf` 설치 시점 텔레메트리 옵트아웃 (`scarfSettings`) | 있음 | **없음** |
+| `supply-chain-integrity-guard.test.mjs` | 있음 | **없음** |
+
+**조치:** `origin/main` 을 `production.private` 로 머지해 배포 브랜치를 동기화했다
+(`f0d30185`). 충돌 없음, `deploy.yml` 보존, 머지 후 `git diff origin/main
+origin/production.private` 는 `deploy.yml` 197줄 추가 단독.
+
+교훈: 배포 브랜치 점검은 lockfile 비교만으로 끝내지 말고 **의존성을 설치하는 경로
+(`Dockerfile` / CI)** 까지 함께 볼 것. 이 항목은 위 가드 테스트가 상시 강제한다.
+
+#### 공급망 위생 — 회귀 없음
+
+- lockfile 580 엔트리 전수: registry 외부 resolve **0건**(워크스페이스 링크 3건 제외),
+  `integrity` 누락 **0건**, git/tarball 의존성 **0건**.
+- install script: `esbuild` · `fsevents` · `@scarf/scarf` 3종으로 허용 목록과 일치
+  (`@scarf/scarf` 는 `scarfSettings.enabled=false` 로 무력화됨).
+- override 고정값 전부 레지스트리 최신과 일치하며 정상 해결:
+  `multer@2.2.0` · `@hono/node-server@2.1.0` · `js-yaml@5.2.3` · `picomatch@4.0.5`.
+- deprecated: `typeorm` 하위 전이 의존성 `glob@10.5.0` 1건 — advisory 없음, 직접
+  제어 불가(상위 릴리스 대기). 감시만 한다.
+- 범위 내 지연(in-range lag): `turbo` 2.10.7 → 2.10.9 (dev 전용, advisory 없음).
+  lockfile 재생성은 배포 브랜치 재동기화를 유발하므로 advisory 없는 dev 도구 지연은
+  이번에도 조치하지 않는다.
+
+#### 미조치 — 이월 (운영자 승인 필요)
+
+`production.private` `deploy.yml` 의 서드파티 액션 가변 태그 SHA 고정:
+`docker/setup-buildx-action@v4`, `docker/login-action@v4`,
+`docker/build-push-action@v7`, `appleboy/ssh-action@v1`. 태그는 재배치 가능하므로
+공급망 관점에서는 SHA 고정이 옳지만, 잘못된 SHA 고정은 NAS 실배포 파이프라인을
+망가뜨린다. `main` 의 워크플로는 1st-party `actions/*` 만 사용한다.
+
+#### 검증
+
+- 캐너리 감사(`lodash@4.17.4`) → critical 1건 검출, 감사 경로 정상
+- `npm audit` — `main` 0건 / `production.private` 0건 (머지 후 재감사도 0건)
+- `node --test apps/server/test/supply-chain-integrity-guard.test.mjs
+  apps/client/test/react-router-rsc-guard.test.mjs` — 머지된 배포 브랜치에서 **12/12 통과**
+  (머지 전이라면 `Dockerfile installs dependencies only through npm ci` 가 실패했을 것)
+- `npm run build` — 3/3 성공
