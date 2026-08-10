@@ -2,6 +2,7 @@ import 'dotenv/config';
 import 'reflect-metadata';
 import { join } from 'path';
 import compression from 'compression';
+import helmet from 'helmet';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -43,6 +44,23 @@ async function bootstrap() {
   // every sweep service clear its timers cleanly. No-op effect on prod backends.
   app.enableShutdownHooks();
 
+  // 보안 응답 헤더(M1) — nosniff/frameguard/HSTS 등은 helmet 기본값 그대로 전
+  // 라우트에 적용한다. CSP는 별도 미들웨어로 분리해 /api-docs(Swagger UI, 인라인
+  // script/style 필요)만 예외 처리한다 — helmet()을 두 번 체이닝하면 뒤쪽 인스턴스가
+  // 앞쪽이 뺀 CSP 헤더를 다시 덮어써 예외가 무효화되므로, contentSecurityPolicy를
+  // 아예 끈 기본 인스턴스 + 조건부 CSP 단독 미들웨어 조합으로 구성한다.
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use((req: any, res: any, next: any) => {
+    if (req.path.startsWith('/api-docs')) return next();
+    return helmet.contentSecurityPolicy({
+      useDefaults: true,
+      directives: {
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+      },
+    })(req, res, next);
+  });
+
   // Body parsers (raw media-upload route + 10MB json/urlencoded). Shared with
   // the QA test harness (test/helpers/boot.mjs) via applyHttpBodyParsers so the
   // in-process test app parses bodies exactly like production. See ff3e7337
@@ -69,12 +87,22 @@ async function bootstrap() {
   // where it would conceptually belong (ticket 7ba057fb).
   applySpaFallback(app, join(__dirname, '..', '..', 'client', 'dist'));
 
+  const logService = app.get(LogService);
+
+  // CORS(L1) — CORS_ORIGIN이 설정되면 그 값을 그대로 쓴다(dev/운영 공통). 미설정 시
+  // NODE_ENV=production이면 reflect-all(true)로 열어두지 않고 fail-closed(모든
+  // 크로스오리진 요청 거부)한다 — credentials:true와 결합된 reflect-all은 임의
+  // 사이트가 자격증명 포함 요청을 보낼 수 있게 하는 원인이었다. 개발 환경은
+  // CORS_ORIGIN 없이도 기존처럼 reflect-all을 유지해 로컬 작업을 막지 않는다.
+  const isProduction = process.env.NODE_ENV === 'production';
+  const corsOrigin = process.env.CORS_ORIGIN;
+  if (isProduction && !corsOrigin) {
+    logService.warn('System', 'CORS_ORIGIN is not set in production — failing closed (all cross-origin requests will be rejected). Set CORS_ORIGIN to an explicit allowlist.');
+  }
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || true, // true = reflect request origin (dev); set CORS_ORIGIN in production
+    origin: corsOrigin || (isProduction ? false : true),
     credentials: true,
   });
-
-  const logService = app.get(LogService);
 
   const exceptionFilter = new AllExceptionsFilter();
   exceptionFilter.setLogService(logService);
