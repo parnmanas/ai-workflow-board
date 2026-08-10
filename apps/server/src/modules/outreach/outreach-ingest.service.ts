@@ -435,13 +435,22 @@ export class OutreachIngestService {
 
     try {
       const commentRepo = this.dataSource.getRepository(Comment);
+      // Distinguish "the source item itself was edited" (e.g. a GitHub issue
+      // body update, review round 1 point 2) from "a new reply arrived" —
+      // same append path, clearer wording. Connector-agnostic: any connector
+      // adopting the same `<kind>-update:` id prefix convention gets this
+      // for free.
+      const isSourceUpdate = item.external_item_id.includes('-update:');
+      const header = isSourceUpdate
+        ? `The source ${channel.kind} item was updated (current content, by ${item.author || 'unknown'}):`
+        : `New comment on the source ${channel.kind} thread (by ${item.author || 'unknown'}):`;
       await commentRepo.save(commentRepo.create({
         ticket_id: parent.ticket_id,
         author_type: 'system',
         author_id: '',
         author: `Outreach (${channel.kind})`,
         content: [
-          `New comment on the source ${channel.kind} thread (by ${item.author || 'unknown'}):`,
+          header,
           '',
           item.body || '(empty)',
           '',

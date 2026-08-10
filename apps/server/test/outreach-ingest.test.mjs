@@ -1209,3 +1209,111 @@ test('a threaded comment whose parent has not been ticketed yet (still noise) fa
     await dataSource.destroy();
   }
 });
+
+// Issue-update items (review round 1, point 2 — connector-emitted
+// `issue-update:{...}:{updated_at}`, parent_external_item_id = the issue):
+// same _tryAppendToParent path as a threaded comment, but with distinct
+// wording, and specifically exercising "re-polling the SAME body edit is a
+// no-op, a LATER edit appends again" — the exact idempotency gap the review
+// flagged (an earlier version silently dropped every body edit outright).
+
+test('an issue-update item whose parent is already ticketed appends a Comment with update-specific wording (not "New comment")', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#1', title: 'Crash on save', created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    const ticketId = (await dataSource.getRepository(Ticket).find())[0].id;
+
+    const channelAfterFirst = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const updateItem = item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      author: 'reporter1', body: 'Updated repro steps', created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const result = await svc.pollChannel(channelAfterFirst, makeConnector([updateItem]), new Date('2026-06-25T13:00:00Z'));
+    assert.equal(result.appended, 1);
+    assert.equal(result.ticketed, 0, 'no second ticket for the body edit');
+    assert.equal((await dataSource.getRepository(Ticket).find()).length, 1);
+
+    const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: ticketId } });
+    assert.equal(comments.length, 1);
+    assert.match(comments[0].content, /Updated repro steps/);
+    assert.match(comments[0].content, /updated/i, 'wording distinguishes a source-item update from a plain new comment');
+    assert.doesNotMatch(comments[0].content, /^New comment on/);
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('re-polling the SAME issue-update id (unchanged edit) appends exactly once (idempotent)', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#1', title: 'Crash', created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+
+    const updateItem = item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      body: 'edited body', created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const channelMid = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    await svc.pollChannel(channelMid, makeConnector([updateItem]), new Date('2026-06-25T13:00:00Z'));
+    const channelAfter = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    // The SAME edit (same updated_at → same connector-emitted id) is polled
+    // again — simulates GitHub's `since` window overlapping the previous poll.
+    const second = await svc.pollChannel(channelAfter, makeConnector([updateItem]), new Date('2026-06-25T14:00:00Z'));
+
+    assert.equal(second.appended, 0);
+    assert.equal(second.skipped, 1, 'deduped via the existing OutreachInboundItem row for this exact id');
+
+    const comments = await dataSource.getRepository(Comment).find();
+    assert.equal(comments.length, 1, 'exactly one appended Comment total across both polls');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a LATER edit (different issue-update id) appends AGAIN — not deduped away like the unchanged-edit case', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#1', title: 'Crash', created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    const ticketId = (await dataSource.getRepository(Ticket).find())[0].id;
+
+    const channelAfterFirst = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    await svc.pollChannel(channelAfterFirst, makeConnector([item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      body: 'first edit', created_at: new Date('2026-06-25T11:00:00Z'),
+    })]), new Date('2026-06-25T13:00:00Z'));
+
+    const channelAfterSecond = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const third = await svc.pollChannel(channelAfterSecond, makeConnector([item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T15:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      body: 'second, later edit', created_at: new Date('2026-06-25T15:00:00Z'),
+    })]), new Date('2026-06-25T16:00:00Z'));
+
+    assert.equal(third.appended, 1, 'a genuinely later edit is a NEW id — it appends again, not deduped');
+    const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: ticketId }, order: { created_at: 'ASC' } });
+    assert.equal(comments.length, 2, 'both edits produced their own Comment');
+    assert.match(comments[0].content, /first edit/);
+    assert.match(comments[1].content, /second, later edit/);
+  } finally {
+    await dataSource.destroy();
+  }
+});

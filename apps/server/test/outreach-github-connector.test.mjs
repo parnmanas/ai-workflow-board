@@ -84,13 +84,112 @@ test('fetchInbound: a new comment on an issue is tagged with parent_external_ite
     throw new Error(`unexpected url ${u}`);
   };
   const conn = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl, sleepImpl: noopSleep });
-  // The issue itself was created 06-20 (before the cursor) — only its NEW
-  // comment (06-25 10:30, after the cursor) should survive the since-filter.
+  // The issue itself was created 06-20 (before the cursor); its updated_at
+  // (06-25 10:30) is also past the cursor, so it surfaces too — as an
+  // issue-update item (review round 1, point 2), alongside its NEW comment.
+  const items = await conn.fetchInbound(new Date('2026-06-25T09:00:00Z').toISOString());
+  assert.equal(items.length, 2);
+  const comment = items.find((i) => i.external_item_id.startsWith('comment:'));
+  const issueUpdate = items.find((i) => i.external_item_id.startsWith('issue-update:'));
+  assert.equal(comment.external_item_id, 'comment:x/y#1:555');
+  assert.equal(comment.parent_external_item_id, 'issue:x/y#1');
+  assert.equal(comment.author, 'commenter1');
+  assert.equal(issueUpdate.external_item_id, 'issue-update:x/y#1:2026-06-25T10:30:00Z');
+  assert.equal(issueUpdate.parent_external_item_id, 'issue:x/y#1');
+});
+
+// Review round 1, point 2: an issue created BEFORE the cursor whose body/
+// metadata was edited AFTER it (updated_at past the cursor, created_at not)
+// must not be silently dropped by the trailing since-filter — it becomes an
+// issue-update item threaded onto its own issue via parent_external_item_id.
+test('fetchInbound: an EXISTING issue (created before cursor) whose body was edited (updated_at after cursor) is emitted as an issue-update item, not dropped', async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/user')) return fakeResponse({ json: { login: 'awb-bot' } });
+    if (u.includes('/repos/x/y/issues?')) {
+      return fakeResponse({
+        json: [{
+          number: 1, title: 'Crash on save (updated title)', body: 'edited body text', html_url: 'https://github.com/x/y/issues/1',
+          user: { login: 'reporter1' }, state: 'open', created_at: '2026-06-20T00:00:00Z', updated_at: '2026-06-25T11:00:00Z',
+        }],
+      });
+    }
+    if (u.includes('/issues/1/comments')) return fakeResponse({ json: [] });
+    throw new Error(`unexpected url ${u}`);
+  };
+  const conn = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl, sleepImpl: noopSleep });
+  // Cursor (06-25 09:00) is well after the issue's own created_at (06-20) —
+  // it only shows up in listOpenIssuesSince because updated_at moved past it.
+  const items = await conn.fetchInbound(new Date('2026-06-25T09:00:00Z').toISOString());
+  assert.equal(items.length, 1, 'the body edit was NOT dropped');
+  assert.equal(items[0].external_item_id, 'issue-update:x/y#1:2026-06-25T11:00:00Z');
+  assert.equal(items[0].parent_external_item_id, 'issue:x/y#1');
+  assert.equal(items[0].body, 'edited body text');
+  assert.equal(items[0].author, 'reporter1');
+});
+
+test('fetchInbound: re-fetching the SAME unedited issue with an unchanged updated_at yields the SAME issue-update id (stable identity for dedupe)', async () => {
+  const issueJson = {
+    number: 1, title: 'Crash', body: 'body v2', html_url: 'https://github.com/x/y/issues/1',
+    user: { login: 'reporter1' }, state: 'open', created_at: '2026-06-20T00:00:00Z', updated_at: '2026-06-25T11:00:00Z',
+  };
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/user')) return fakeResponse({ json: { login: 'awb-bot' } });
+    if (u.includes('/repos/x/y/issues?')) return fakeResponse({ json: [issueJson] });
+    if (u.includes('/issues/1/comments')) return fakeResponse({ json: [] });
+    throw new Error(`unexpected url ${u}`);
+  };
+  const conn = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl, sleepImpl: noopSleep });
+  const since = new Date('2026-06-25T09:00:00Z').toISOString();
+  const first = await conn.fetchInbound(since);
+  const second = await conn.fetchInbound(since);
+  assert.equal(first[0].external_item_id, second[0].external_item_id, 'same updated_at → same id, so re-polling dedupes at the ingest layer');
+});
+
+test('fetchInbound: a LATER edit (different updated_at) produces a DIFFERENT issue-update id', async () => {
+  const makeFetch = (updatedAt) => async (url) => {
+    const u = String(url);
+    if (u.endsWith('/user')) return fakeResponse({ json: { login: 'awb-bot' } });
+    if (u.includes('/repos/x/y/issues?')) {
+      return fakeResponse({
+        json: [{
+          number: 1, title: 'Crash', body: 'body', html_url: 'https://github.com/x/y/issues/1',
+          user: { login: 'reporter1' }, state: 'open', created_at: '2026-06-20T00:00:00Z', updated_at: updatedAt,
+        }],
+      });
+    }
+    if (u.includes('/issues/1/comments')) return fakeResponse({ json: [] });
+    throw new Error(`unexpected url ${u}`);
+  };
+  const since = new Date('2026-06-25T09:00:00Z').toISOString();
+  const conn1 = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl: makeFetch('2026-06-25T11:00:00Z'), sleepImpl: noopSleep });
+  const conn2 = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl: makeFetch('2026-06-25T12:30:00Z'), sleepImpl: noopSleep });
+  const first = await conn1.fetchInbound(since);
+  const second = await conn2.fetchInbound(since);
+  assert.notEqual(first[0].external_item_id, second[0].external_item_id, 'a later edit gets a fresh id, so it appends again instead of being deduped away');
+});
+
+test("fetchInbound: a genuinely NEW issue (created_at after cursor) is unaffected by the issue-update path", async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/user')) return fakeResponse({ json: { login: 'awb-bot' } });
+    if (u.includes('/repos/x/y/issues?')) {
+      return fakeResponse({
+        json: [{
+          number: 9, title: 'Brand new issue', body: 'b', html_url: 'https://github.com/x/y/issues/9',
+          user: { login: 'reporter2' }, state: 'open', created_at: '2026-06-25T10:00:00Z', updated_at: '2026-06-25T10:00:00Z',
+        }],
+      });
+    }
+    if (u.includes('/issues/9/comments')) return fakeResponse({ json: [] });
+    throw new Error(`unexpected url ${u}`);
+  };
+  const conn = new GitHubConnector(makeCred(), { targets: ['x/y'], fetchImpl, sleepImpl: noopSleep });
   const items = await conn.fetchInbound(new Date('2026-06-25T09:00:00Z').toISOString());
   assert.equal(items.length, 1);
-  assert.equal(items[0].external_item_id, 'comment:x/y#1:555');
-  assert.equal(items[0].parent_external_item_id, 'issue:x/y#1');
-  assert.equal(items[0].author, 'commenter1');
+  assert.equal(items[0].external_item_id, 'issue:x/y#9');
+  assert.equal(items[0].parent_external_item_id, undefined, 'a genuinely new issue has no parent — it is its own top-level candidate');
 });
 
 test("fetchInbound: the bot's own issues and comments are excluded (self-referential loop prevention)", async () => {

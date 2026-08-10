@@ -8,20 +8,37 @@
  * than a new HTTP client — the ticket's explicit "새 GitHub 클라이언트를 새로
  * 만들지 말 것" constraint.
  *
- * fetchInbound(since) combines two things per whitelisted target repo:
- *   - Genuinely NEW open issues (InboundItem.created_at is the issue's own
- *     creation time, so an issue that merely got updated — e.g. a new
- *     comment bumped its updated_at — is never re-emitted as a "new issue"
- *     item; the trailing since-filter on created_at handles this uniformly).
- *   - New comments on EVERY open issue GitHub's `since`-filtered issues list
- *     returns (both brand-new and merely-updated ones), each tagged with
- *     `parent_external_item_id = issue:{owner}/{repo}#{number}` so
- *     OutreachIngestService appends them to that issue's existing ticket
- *     instead of classifying them as a fresh report (ticket's "이슈 본문/댓글이
- *     갱신되면 기존 티켓에 코멘트로 추가한다").
+ * fetchInbound(since) combines three things per whitelisted target repo, all
+ * sourced from ONE `listOpenIssuesSince` call (GitHub's `since` matches on
+ * UPDATED time, so brand-new AND merely-edited issues come back together):
+ *   - Genuinely NEW open issues (issue.created_at is itself after the cursor)
+ *     become a top-level `issue:{owner}/{repo}#{number}` item — a fresh
+ *     ticket-creation candidate.
+ *   - An EXISTING issue (created_at at/before the cursor) that shows up
+ *     anyway because its updated_at moved past the cursor — a body/metadata
+ *     edit — becomes an `issue-update:{owner}/{repo}#{number}:{updated_at}`
+ *     item tagged with `parent_external_item_id = issue:{owner}/{repo}#{number}`,
+ *     so OutreachIngestService appends it as a Comment on the issue's
+ *     existing ticket instead of dropping it (review round 1, point 2: an
+ *     earlier version stamped `created_at` = the issue's ORIGINAL creation
+ *     time on this case too, which the trailing since-filter on created_at
+ *     then silently discarded — an edited issue's update never reached
+ *     ingest at all). Using `updated_at` as the id's version component makes
+ *     re-polling the SAME edit a no-op (identical id → the existing
+ *     `(channel_id, external_item_id)` dedupe absorbs it) while a LATER edit
+ *     produces a fresh id that appends again.
+ *   - New comments on EVERY open issue the call returns (both brand-new and
+ *     merely-updated ones), each tagged with the same
+ *     `parent_external_item_id` convention (ticket's "이슈 본문/댓글이 갱신되면
+ *     기존 티켓에 코멘트로 추가한다").
  * Issues/comments authored by the bot's own token identity (resolved once
  * via GET /user, cached for this connector instance's lifetime) are filtered
- * out — the ticket's explicit self-referential-loop prevention requirement.
+ * out of the "new issue"/comment cases — the ticket's explicit self-
+ * referential-loop prevention requirement. An issue-update item is NOT
+ * filtered this way: GitHub's issue object only ever names the ORIGINAL
+ * poster, never the latest editor, so there is no editor identity to check
+ * — harmless in practice since the bot itself never edits issue bodies
+ * (only creates/comments/closes).
  *
  * Whitelist-only, same fail-closed contract as RedditConnector: `targets`
  * (OutreachChannel.targets, "owner/repo" strings) is the only universe this
@@ -114,9 +131,10 @@ export class GitHubConnector implements OutreachConnector {
   }
 
   /**
-   * Inbound = new issues + new comments across every whitelisted repo's open
-   * issues. Empty `targets` short-circuits to `[]` without any network call
-   * — fail-closed, never falls back to "everything"/"discover repos".
+   * Inbound = new issues + issue body/metadata updates + new comments across
+   * every whitelisted repo's open issues. Empty `targets` short-circuits to
+   * `[]` without any network call — fail-closed, never falls back to
+   * "everything"/"discover repos".
    */
   async fetchInbound(since: string): Promise<InboundItem[]> {
     if (this.targets.size === 0) return [];
@@ -135,14 +153,32 @@ export class GitHubConnector implements OutreachConnector {
 
       for (const issue of issues) {
         const issueRef = `issue:${owner}/${repo}#${issue.number}`;
-        if (issue.user.toLowerCase() !== botLogin) {
+        const createdAt = new Date(issue.created_at);
+        if (createdAt.getTime() > threshold) {
+          // Genuinely new to us — a fresh ticket-creation candidate.
+          if (issue.user.toLowerCase() !== botLogin) {
+            items.push({
+              external_item_id: issueRef,
+              title: issue.title,
+              body: issue.body,
+              author: issue.user,
+              permalink: issue.html_url,
+              created_at: createdAt,
+            });
+          }
+        } else {
+          // Already known to us (created before our cursor) but returned
+          // anyway because updated_at moved past it — a body/metadata edit.
+          // Threaded onto the issue's own ticket via parent_external_item_id
+          // (review round 1, point 2 — see class docstring).
           items.push({
-            external_item_id: issueRef,
+            external_item_id: `issue-update:${owner}/${repo}#${issue.number}:${issue.updated_at}`,
             title: issue.title,
             body: issue.body,
             author: issue.user,
             permalink: issue.html_url,
-            created_at: new Date(issue.created_at),
+            created_at: new Date(issue.updated_at),
+            parent_external_item_id: issueRef,
           });
         }
 
