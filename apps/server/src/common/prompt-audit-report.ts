@@ -62,6 +62,17 @@ export async function computeReport(
   const sinceResolved = since ?? new Date(untilResolved.getTime() - 30 * 24 * 60 * 60 * 1000);
   const range = { since: sinceResolved, until: untilResolved };
 
+  // Postgres type coercion: Board.id / Ticket.id are uuid PKs
+  // (@PrimaryGeneratedColumn('uuid')) while the FK columns joined against them
+  // below (BoardColumn.board_id, ActivityLog.ticket_id, Comment.ticket_id) are
+  // declared varchar (SQLite compat) — `uuid = varchar` has no implicit cast on
+  // Postgres ("operator does not exist: uuid = character varying"). Cast the
+  // uuid side to text on every join below. SQLite is loose-typed and needs no
+  // cast — txt is empty there. Same pattern as agent-workload.service.ts:196-197
+  // / room-membership.service.ts:56-58.
+  const isPostgres = ds.options.type === 'postgres';
+  const txt = isPostgres ? '::text' : '';
+
   const scopeByTicketWorkspace = (qb: any, ticketAlias: string) => {
     if (workspaceId) qb.andWhere(`${ticketAlias}.workspace_id = :wsId`, { wsId: workspaceId });
     return qb;
@@ -70,7 +81,7 @@ export async function computeReport(
   // BoardColumn.workspace_id is not reliably populated (see doc comment
   // above) — scope through an inner join to Board.workspace_id instead.
   const scopeColumnsByWorkspace = (qb: any, columnAlias: string) => {
-    qb.innerJoin(Board, 'b', `b.id = ${columnAlias}.board_id`);
+    qb.innerJoin(Board, 'b', `b.id${txt} = ${columnAlias}.board_id`);
     if (workspaceId) qb.andWhere('b.workspace_id = :wsId', { wsId: workspaceId });
     return qb;
   };
@@ -92,7 +103,7 @@ export async function computeReport(
     // more than once in-window; the first entry is when it started work).
     const enteredRows = await scopeByTicketWorkspace(
       ds.getRepository(ActivityLog).createQueryBuilder('a')
-        .innerJoin(Ticket, 't', 't.id = a.ticket_id')
+        .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id`)
         .select('a.ticket_id', 'ticket_id')
         .addSelect('MIN(a.created_at)', 'entered_at')
         .where("a.action = 'moved' AND a.field_changed = 'column'")
@@ -140,7 +151,7 @@ export async function computeReport(
   // scope through the ticket join rather than trusting the column directly.
   const unnecessaryQuestions = await scopeByTicketWorkspace(
     ds.getRepository(Comment).createQueryBuilder('c')
-      .innerJoin(Ticket, 't', 't.id = c.ticket_id')
+      .innerJoin(Ticket, 't', `t.id${txt} = c.ticket_id`)
       .where("c.author_type = 'agent' AND c.type = 'question'")
       .andWhere('c.created_at >= :since AND c.created_at < :until', range),
     't',
@@ -151,7 +162,7 @@ export async function computeReport(
   // pend event (avoids the N+1 per-event findOne of an earlier draft).
   const pendRows = await scopeByTicketWorkspace(
     ds.getRepository(ActivityLog).createQueryBuilder('a')
-      .innerJoin(Ticket, 't', 't.id = a.ticket_id')
+      .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id`)
       .select('a.ticket_id', 'ticket_id')
       .addSelect('a.created_at', 'pend_at')
       .addSelect('t.terminal_entered_at', 'terminal_entered_at')
