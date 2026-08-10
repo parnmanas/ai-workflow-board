@@ -24,6 +24,29 @@ export const DEPLOYMENT_SOURCES: DeploymentSource[] = ['self_report', 'webhook',
 /** The environment name the AWB server self-reports its own build under. */
 export const SELF_DEPLOY_ENV_DEFAULT = 'awb-server';
 
+/**
+ * Optional label a merging/assignee step stamps on a fix ticket to name the
+ * exact merged commit — the anchor the deployment-fact gate checks for
+ * inclusion in the target environment's live deployment. Shared by
+ * QaRerunOnFixService and OutreachResolveNotifierService (ticket 31e7cd24) so
+ * the label convention and its parsing live in exactly one place.
+ */
+export const FIX_COMMIT_LABEL_PREFIX = 'fix-commit:';
+
+/** First `fix-commit:<sha>` label → normalized sha, or '' (→ freshness-ordering gate). */
+export function resolveFixCommitLabel(labelsJson: string | null | undefined): string {
+  let labels: unknown;
+  try {
+    labels = JSON.parse(labelsJson || '[]');
+  } catch {
+    return '';
+  }
+  if (!Array.isArray(labels)) return '';
+  const marker = labels.find((l) => typeof l === 'string' && l.startsWith(FIX_COMMIT_LABEL_PREFIX));
+  if (!marker) return '';
+  return normalizeSha(marker.slice(FIX_COMMIT_LABEL_PREFIX.length));
+}
+
 /** Normalize a commit sha for comparison: trim + lowercase (hex is case-insensitive). */
 export function normalizeSha(sha: string | null | undefined): string {
   return (sha || '').trim().toLowerCase();

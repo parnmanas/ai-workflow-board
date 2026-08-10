@@ -12,7 +12,7 @@ import { activityEvents } from '../../services/activity.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { QaRunService } from './qa-run.service';
 import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
-import { deploymentIncludesCommit, findLatestDeployment, normalizeSha } from '../../common/deployment-options';
+import { deploymentIncludesCommit, findLatestDeployment, resolveFixCommitLabel } from '../../common/deployment-options';
 import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployments/deployment.service';
 
 // The marker labels QaFailureTicketService stamps on every fix ticket it files.
@@ -30,12 +30,6 @@ import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployme
 // + 'auto' in the list, or relax this constant to the scenario marker alone.
 const REQUIRED_LABELS = ['qa-failure', 'auto'];
 const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
-
-// Optional label a merging/assignee step stamps on a fix ticket to name the exact
-// merged commit — the anchor the deployment-fact gate (DoD 3) checks for inclusion
-// in the target environment's live deployment. Absent → the gate falls back to
-// deploy-freshness ordering (deployed_at >= the fix ticket's Done instant).
-const FIX_COMMIT_LABEL_PREFIX = 'fix-commit:';
 
 // Default convergence cap when the scenario doesn't set max_rerun_attempts.
 const DEFAULT_MAX_RERUN_ATTEMPTS = 3;
@@ -271,7 +265,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     generation: number,
     environment: string,
   ): Promise<void> {
-    const fixSha = this._resolveFixCommit(ticket);
+    const fixSha = resolveFixCommitLabel(ticket.labels);
     const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), scenario.workspace_id, environment);
     if (this._deploymentSatisfies(dep, fixSha, ticket.terminal_entered_at)) {
       this.logService.info('QA', 'rerun-on-fix deployment gate already satisfied — firing now', {
@@ -348,15 +342,6 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     this._pending.delete(key);
     if (p.fallbackTimer) { clearTimeout(p.fallbackTimer); p.fallbackTimer = undefined; }
     await this._startRerun(p.scenarioId, p.generation, p.fixTicketId);
-  }
-
-  /** `fix-commit:<sha>` label → normalized sha, or '' (→ freshness-ordering gate). */
-  private _resolveFixCommit(ticket: Ticket): string {
-    const labels = safeJsonParse<string[]>(ticket.labels, []);
-    if (!Array.isArray(labels)) return '';
-    const marker = labels.find((l) => typeof l === 'string' && l.startsWith(FIX_COMMIT_LABEL_PREFIX));
-    if (!marker) return '';
-    return normalizeSha(marker.slice(FIX_COMMIT_LABEL_PREFIX.length));
   }
 
   /**

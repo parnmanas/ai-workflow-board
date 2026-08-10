@@ -133,6 +133,25 @@ export class OutreachChannel {
   @Column({ type: 'int', default: 30 })
   auto_reuse_window_days: number;
 
+  // Deployment-fact gate for resolution replies (ticket 31e7cd24 — "판정은
+  // 컬럼 도달만으로 끝내지 말 것"). Mirrors QaScenario.target_environment: the
+  // Deployment.environment name OutreachResolveNotifierService checks before
+  // replying "resolved" on the backlinked external thread. '' (default)
+  // preserves today's Reddit behavior exactly (reply fires on terminal-column
+  // arrival alone, no gate) — an operator opts a channel into the stricter
+  // evidence-gated flow explicitly. See outreach-resolve-notifier.service.ts.
+  @Column({ type: 'varchar', default: '' })
+  target_environment: string;
+
+  // Whether a confirmed resolution reply also closes the native thread (e.g.
+  // a GitHub issue) via OutreachConnector.close(). Default false — the
+  // ticket's explicit "자동 close는 기본 off, 옵션으로만 제공" requirement
+  // (an oversensitive resolve-detection wrongly closing someone else's issue
+  // is a hard-to-reverse mistake). Unused by connectors that don't implement
+  // close() (e.g. Reddit has no equivalent).
+  @Column({ type: 'boolean', default: false })
+  close_on_resolve: boolean;
+
   // Connector health state (ticket d86d0c24 review fix #2 — "403/차단 상태가
   // 채널 상태에 기록되지 않습니다"). Server-managed only (never part of
   // Create/UpdateChannelInput, same as next_poll_at/last_poll_at) — written by

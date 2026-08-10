@@ -48,6 +48,8 @@ export interface CreateChannelInput {
   deployPostMode?: OutreachDeployPostMode;
   replyThreadRef?: string | null;
   autoReuseWindowDays?: number;
+  targetEnvironment?: string | null;
+  closeOnResolve?: boolean;
 }
 
 export type UpdateChannelInput = Partial<Omit<CreateChannelInput, 'workspaceId'>>;
@@ -123,6 +125,8 @@ export class OutreachChannelService {
       deploy_post_mode: deployPostMode,
       reply_thread_ref: replyThreadRef,
       auto_reuse_window_days: this._validateReuseWindowDays(input.autoReuseWindowDays),
+      target_environment: (input.targetEnvironment ?? '').trim(),
+      close_on_resolve: input.closeOnResolve === true,
     });
     draft.next_poll_at = this.pollingService.computeNextPoll(draft, new Date());
     return this.channelRepo.save(draft);
@@ -156,6 +160,8 @@ export class OutreachChannelService {
     if (patch.deployPostMode !== undefined) channel.deploy_post_mode = this._validateDeployPostMode(patch.deployPostMode);
     if (patch.replyThreadRef !== undefined) channel.reply_thread_ref = this._sanitizeThreadRef(patch.replyThreadRef);
     if (patch.autoReuseWindowDays !== undefined) channel.auto_reuse_window_days = this._validateReuseWindowDays(patch.autoReuseWindowDays);
+    if (patch.targetEnvironment !== undefined) channel.target_environment = (patch.targetEnvironment ?? '').trim();
+    if (patch.closeOnResolve !== undefined) channel.close_on_resolve = patch.closeOnResolve === true;
     this._assertReplyThreadRefPresence(channel.deploy_post_mode, channel.reply_thread_ref);
 
     // Cadence / enable-state — recompute next_poll_at whenever any of these

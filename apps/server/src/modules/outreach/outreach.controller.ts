@@ -39,6 +39,8 @@ function channelToJson(c: OutreachChannel) {
     deploy_post_mode: c.deploy_post_mode,
     reply_thread_ref: c.reply_thread_ref,
     auto_reuse_window_days: c.auto_reuse_window_days,
+    target_environment: c.target_environment,
+    close_on_resolve: c.close_on_resolve,
     created_at: c.created_at,
     updated_at: c.updated_at,
   };
@@ -147,6 +149,8 @@ export class OutreachController {
         deployPostMode: body?.deploy_post_mode,
         replyThreadRef: body?.reply_thread_ref ?? null,
         autoReuseWindowDays: body?.auto_reuse_window_days,
+        targetEnvironment: body?.target_environment ?? null,
+        closeOnResolve: body?.close_on_resolve,
       });
       return res.status(201).json(channelToJson(row));
     } catch (e: any) {
@@ -177,6 +181,8 @@ export class OutreachController {
         deployPostMode: body?.deploy_post_mode,
         replyThreadRef: body?.reply_thread_ref,
         autoReuseWindowDays: body?.auto_reuse_window_days,
+        targetEnvironment: body?.target_environment,
+        closeOnResolve: body?.close_on_resolve,
       });
       return res.json(channelToJson(row));
     } catch (e: any) {
