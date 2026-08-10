@@ -12,49 +12,95 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
+import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerWorkspaceId } from '../shared/authz';
 import type { ToolContext } from './context';
+
+const SCOPE_RANK: Record<string, number> = { read: 0, write: 1, full: 2 };
+
+const UNAUTHORIZED_MESSAGE =
+  'Unauthorized: API key management requires a DB-backed MCP key bound to an Agent with a resolvable workspace.';
+
+/**
+ * Every api-key MCP tool is workspace-scoped to the caller — the REST
+ * `/api/keys` path (guarded by PermissionGuard + WorkspaceGuard +
+ * MANAGE_API_KEYS) is the intended cross-workspace admin surface. Resolves
+ * to the caller's real workspace, or null when the gate fails (never trust
+ * a request-supplied workspace_id — there isn't one on these tools, but the
+ * same "unbound caller = deny" rule from workflow-function-tools applies).
+ */
+async function requireCallerWorkspace(
+  ctx: ToolContext,
+  extra: { sessionId?: string },
+): Promise<string | null> {
+  const caller = getCallerAgent(extra);
+  return resolveCallerWorkspaceId(ctx.dataSource, caller);
+}
 
 export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
   const { apiKeyService } = ctx;
 
   server.tool(
     'list_api_keys',
-    'List all API keys (key values are masked). Shows name, scope, agent, status, usage stats.',
+    'List API keys in your workspace (key values are masked). Shows name, scope, agent, status, usage stats.',
     {},
-    async () => {
-      const keys = await apiKeyService.listApiKeys();
+    async (_args: any, extra: { sessionId?: string }) => {
+      const workspaceId = await requireCallerWorkspace(ctx, extra);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
+      const keys = await apiKeyService.listApiKeys(workspaceId);
       return ok(keys);
     }
   );
 
   server.tool(
     'get_api_key',
-    'Get details of a single API key by ID',
+    'Get details of a single API key by ID (must belong to your workspace)',
     { key_id: z.string().describe('API key ID') },
-    async ({ key_id }) => {
+    async ({ key_id }, extra: { sessionId?: string }) => {
+      const workspaceId = await requireCallerWorkspace(ctx, extra);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
       const key = await apiKeyService.getApiKey(key_id);
-      if (!key) return err('API key not found');
+      if (!key || key.workspace_id !== workspaceId) return err('API key not found');
       return ok(key);
     }
   );
 
   server.tool(
     'create_api_key',
-    'Create a new API key for MCP authentication. The raw key is returned ONLY in this response — save it immediately.',
+    'Create a new API key for MCP authentication, scoped to your workspace. The raw key is returned ONLY in this response — save it immediately.',
     {
       name: z.string().describe('Display name for the key (e.g. "claude-prod", "gpt-dev")'),
       agent_id: z.string().optional().describe('Link to an Agent ID (optional)'),
       scope: z.enum(['full', 'read', 'write']).optional().default('full').describe('Permission scope'),
       expires_in_days: z.number().optional().describe('Auto-expire after N days (optional, null = never)'),
     },
-    async ({ name, agent_id, scope, expires_in_days }) => {
+    async ({ name, agent_id, scope, expires_in_days }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const workspaceId = await resolveCallerWorkspaceId(ctx.dataSource, caller);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
+
+      // A caller can never mint a key with a broader scope than its own —
+      // otherwise a workspace-scoped key could hand itself (or anyone) a
+      // full-scope credential (the exact C2 escalation this ticket closes).
+      const requestedScope = scope || 'full';
+      const callerScope = caller?.scope || 'full';
+      if (SCOPE_RANK[requestedScope] > SCOPE_RANK[callerScope]) {
+        return err(`Unauthorized: cannot mint a "${requestedScope}" key from a "${callerScope}"-scoped caller.`);
+      }
+
       let expires_at: Date | null = null;
       if (expires_in_days && expires_in_days > 0) {
         expires_at = new Date();
         expires_at.setDate(expires_at.getDate() + expires_in_days);
       }
 
-      const result = await apiKeyService.createApiKey({ name, agent_id: agent_id ?? null, scope, expires_at });
+      const result = await apiKeyService.createApiKey({
+        name,
+        agent_id: agent_id ?? null,
+        scope: requestedScope,
+        expires_at,
+        workspace_id: workspaceId,
+      });
       return ok({
         ...result.apiKey,
         raw_key: result.raw_key,
@@ -65,9 +111,13 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'revoke_api_key',
-    'Revoke (deactivate) an API key. The key remains in DB but can no longer authenticate.',
+    'Revoke (deactivate) an API key in your workspace. The key remains in DB but can no longer authenticate.',
     { key_id: z.string().describe('API key ID to revoke') },
-    async ({ key_id }) => {
+    async ({ key_id }, extra: { sessionId?: string }) => {
+      const workspaceId = await requireCallerWorkspace(ctx, extra);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
+      const existing = await apiKeyService.getApiKey(key_id);
+      if (!existing || existing.workspace_id !== workspaceId) return err('API key not found');
       const success = await apiKeyService.revokeApiKey(key_id);
       if (!success) return err('API key not found');
       return ok({ success: true, message: 'Key revoked' });
@@ -76,9 +126,13 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'delete_api_key',
-    'Permanently delete an API key from the database',
+    'Permanently delete an API key from your workspace',
     { key_id: z.string().describe('API key ID to delete') },
-    async ({ key_id }) => {
+    async ({ key_id }, extra: { sessionId?: string }) => {
+      const workspaceId = await requireCallerWorkspace(ctx, extra);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
+      const existing = await apiKeyService.getApiKey(key_id);
+      if (!existing || existing.workspace_id !== workspaceId) return err('API key not found');
       const success = await apiKeyService.deleteApiKey(key_id);
       if (!success) return err('API key not found');
       return ok({ success: true });
@@ -87,7 +141,7 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_api_key',
-    'Update an API key\'s metadata (name, scope, active status, expiration, agent link)',
+    'Update an API key\'s metadata (name, scope, active status, expiration, agent link) within your workspace',
     {
       key_id: z.string().describe('API key ID'),
       name: z.string().optional().describe('New display name'),
@@ -96,7 +150,20 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
       agent_id: z.string().optional().describe('Link to Agent ID (null to unlink)'),
       expires_in_days: z.number().optional().describe('Set expiry N days from now (0 or null = never expire)'),
     },
-    async ({ key_id, name, scope, is_active, agent_id, expires_in_days }) => {
+    async ({ key_id, name, scope, is_active, agent_id, expires_in_days }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const workspaceId = await resolveCallerWorkspaceId(ctx.dataSource, caller);
+      if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
+      const existing = await apiKeyService.getApiKey(key_id);
+      if (!existing || existing.workspace_id !== workspaceId) return err('API key not found');
+
+      if (scope !== undefined) {
+        const callerScope = caller?.scope || 'full';
+        if (SCOPE_RANK[scope] > SCOPE_RANK[callerScope]) {
+          return err(`Unauthorized: cannot upgrade this key to "${scope}" scope from a "${callerScope}"-scoped caller.`);
+        }
+      }
+
       const updates: any = {};
       if (name !== undefined) updates.name = name;
       if (scope !== undefined) updates.scope = scope;

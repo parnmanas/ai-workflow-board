@@ -2,10 +2,15 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { callerCanAccessWorkspace } from '../shared/authz';
 import type { ToolContext } from './context';
 
-function scopeAllowed(caller: ReturnType<typeof getCallerAgent>, workspaceId: string): boolean {
-  return !caller?.workspaceId || caller.workspaceId === workspaceId;
+async function scopeAllowed(
+  ctx: ToolContext,
+  caller: ReturnType<typeof getCallerAgent>,
+  workspaceId: string,
+): Promise<boolean> {
+  return callerCanAccessWorkspace(ctx.dataSource, caller, workspaceId);
 }
 
 export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContext): void {
@@ -19,7 +24,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     },
     async ({ workspace_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
       try {
         const rows = await service.list(workspace_id);
         return ok(rows.map(row => withArtifactRef('function', row, row.name)));
@@ -35,7 +40,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     { id: z.string().describe('Function ID'), workspace_id: z.string().describe('Workspace scope boundary') },
     async ({ id, workspace_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
       try {
         const view = await service.get(id);
         if (view.workspace_id !== null && view.workspace_id !== workspace_id) return err('Function belongs to a different workspace');
@@ -68,7 +73,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     },
     async (input, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!scopeAllowed(getCallerAgent(extra), input.workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), input.workspace_id))) return err('Workspace scope mismatch');
       try {
         const saved = input.id
           ? await service.update(input.id, input)
@@ -86,7 +91,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     { id: z.string(), workspace_id: z.string() },
     async ({ id, workspace_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
       try {
         const view = await service.get(id);
         if (view.workspace_id !== workspace_id) return err('Only Functions in the caller workspace can be deleted through MCP');
@@ -113,7 +118,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     async (input, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
-      if (!scopeAllowed(caller, input.workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, caller, input.workspace_id))) return err('Workspace scope mismatch');
       if (!input.function_key && !input.function_id) return err('function_key or function_id is required');
       try {
         return ok(await service.execute({
@@ -145,7 +150,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     },
     async ({ workspace_id, function_id, ticket_id, limit }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!scopeAllowed(getCallerAgent(extra), workspace_id)) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
       try {
         return ok(await service.listRuns(workspace_id, function_id, ticket_id, limit));
       } catch (error: any) {

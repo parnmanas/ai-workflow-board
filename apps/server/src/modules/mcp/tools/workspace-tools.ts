@@ -21,6 +21,7 @@ import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/har
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
+import { callerCanAccessWorkspace, requireFullScopeCaller } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): void {
@@ -167,6 +168,16 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         .describe('Workspace-wide default environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used (server expands it to url / default_branch / credential); legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are accepted for backward compatibility but ignored on save. Boards override this per top-level key via their own environment_config. Pass null to clear.'),
     },
     async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      // getCallerAgent was previously consulted only for the audit rows
+      // below, never as a gate — any authenticated key could rewrite any
+      // OTHER workspace's cadence/harness settings. Require the caller to
+      // actually belong to (or be a global full-scope agent visible from)
+      // the workspace it's editing.
+      if (!(await callerCanAccessWorkspace(dataSource, caller, workspace_id))) {
+        return err('Unauthorized: caller does not belong to this workspace');
+      }
+
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
@@ -210,7 +221,6 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // per changed cadence knob, actor from the MCP session, source=mcp. In
       // standalone mode getCallerAgent returns undefined (empty actor), but the
       // row still records the change + source.
-      const caller = getCallerAgent(extra);
       const auditFields = ['supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms'];
 
       // Persist the settings change + its config_changed rows ATOMICALLY
@@ -256,7 +266,10 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
     'delete_workspace',
     'Delete a workspace and all its boards, columns, tickets (cannot delete the last workspace)',
     { workspace_id: z.string().describe('Workspace ID') },
-    async ({ workspace_id }) => {
+    async ({ workspace_id }, extra: { sessionId?: string }) => {
+      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      if (gateError) return err(gateError);
+
       const wsRepo = dataSource.getRepository(Workspace);
       const ws = await wsRepo.findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');

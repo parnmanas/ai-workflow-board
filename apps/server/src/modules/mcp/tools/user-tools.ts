@@ -14,6 +14,7 @@ import { Agent } from '../../../entities/Agent';
 import { User } from '../../../entities/User';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { requireFullScopeCaller } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerUserTools(server: McpServer, ctx: ToolContext): void {
@@ -52,11 +53,15 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       permissions: z.array(z.string()).optional().default([]).describe('Custom permissions (e.g. ["admin.users","admin.agents"])'),
     },
     async ({ name, email, avatar_url, role, discord_user_id, permissions }) => {
-      const userRepo = dataSource.getRepository(User);
-      const userData: any = { name, email, avatar_url, role, discord_user_id };
-      if (permissions && permissions.length > 0) {
-        userData.permissions = JSON.stringify(permissions);
+      // MCP is an agent-only connection surface (see HUMAN_ONLY_UNPEND_MESSAGE
+      // in shared/session-auth.ts) — no MCP caller, regardless of scope, may
+      // mint an admin AWB user or grant custom permissions through this tool.
+      // Role/permission management is a human-operator (web UI) action.
+      if ((role && role !== 'user') || (permissions && permissions.length > 0)) {
+        return err('Unauthorized: role and permissions cannot be set via MCP. Manage them from the AWB admin UI.');
       }
+      const userRepo = dataSource.getRepository(User);
+      const userData: any = { name, email, avatar_url, role: 'user', discord_user_id };
       const user = await userRepo.save(userRepo.create(userData));
       return ok(user);
     }
@@ -75,6 +80,13 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       permissions: z.array(z.string()).optional().describe('Custom permissions array'),
     },
     async ({ user_id, name, email, avatar_url, role, discord_user_id, permissions }) => {
+      // Same rationale as create_user: role/permissions are a human-operator
+      // concern, never MCP-writable — this closes the privilege-escalation
+      // path where any authenticated key could promote an arbitrary user to
+      // admin or grant custom permissions.
+      if (role !== undefined || permissions !== undefined) {
+        return err('Unauthorized: role and permissions cannot be changed via MCP. Manage them from the AWB admin UI.');
+      }
       const userRepo = dataSource.getRepository(User);
       const user = await userRepo.findOne({ where: { id: user_id } });
       if (!user) return err('User not found');
@@ -82,9 +94,7 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       if (name !== undefined) user.name = name;
       if (email !== undefined) user.email = email;
       if (avatar_url !== undefined) user.avatar_url = avatar_url;
-      if (role !== undefined) user.role = role;
       if (discord_user_id !== undefined) user.discord_user_id = discord_user_id;
-      if (permissions !== undefined) user.permissions = JSON.stringify(permissions);
 
       const updated = await userRepo.save(user);
       return ok(updated);
@@ -95,7 +105,11 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
     'delete_user',
     'Delete a user',
     { user_id: z.string().describe('User ID') },
-    async ({ user_id }) => {
+    async ({ user_id }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const gateError = await requireFullScopeCaller(dataSource, caller);
+      if (gateError) return err(gateError);
+
       const userRepo = dataSource.getRepository(User);
       const user = await userRepo.findOne({ where: { id: user_id } });
       if (!user) return err('User not found');

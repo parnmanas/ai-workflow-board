@@ -22,6 +22,7 @@ import {
 } from '../../../common/runtime-config';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { requireFullScopeCaller } from '../shared/authz';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
@@ -87,7 +88,10 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       is_active,
       working_dir,
       model,
-    }) => {
+    }, extra: { sessionId?: string }) => {
+      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      if (gateError) return err(gateError);
+
       const runtimeId = typeof type === 'string' ? type.trim().toLowerCase() : '';
       if (!runtimeId) return err('runtime_not_configured');
       if (!isExecutableRuntime(runtimeId)) return err('runtime_unknown');
@@ -172,7 +176,10 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       working_dir,
       model,
       workspace_id,
-    }) => {
+    }, extra: { sessionId?: string }) => {
+      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      if (gateError) return err(gateError);
+
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
@@ -251,7 +258,10 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     'delete_agent',
     'Delete an AI agent',
     { agent_id: z.string().describe('Agent ID') },
-    async ({ agent_id }) => {
+    async ({ agent_id }, extra: { sessionId?: string }) => {
+      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      if (gateError) return err(gateError);
+
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
@@ -287,6 +297,14 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     },
     async ({ agent_id, target_workspace_id, dry_run, api_key_policy, cross_ref_policy }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
+      // The docstring has always claimed "Admin-gated" — this was never
+      // actually enforced (caller was only used for audit attribution).
+      // A dry_run preview is harmless (read-only report), so only the
+      // committing call (dry_run=false) requires the full-scope gate.
+      if (dry_run === false) {
+        const gateError = await requireFullScopeCaller(dataSource, caller);
+        if (gateError) return err(gateError);
+      }
       const mover = new WorkspaceMoveService(dataSource as any, ctx.activityService);
       const opts = { api_key_policy, cross_ref_policy, actor_id: caller?.agentId, actor_name: caller?.agentName };
       try {
