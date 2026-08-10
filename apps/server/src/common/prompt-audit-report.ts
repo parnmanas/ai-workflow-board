@@ -66,10 +66,24 @@ export async function computeReport(
   // (@PrimaryGeneratedColumn('uuid')) while the FK columns joined against them
   // below (BoardColumn.board_id, ActivityLog.ticket_id, Comment.ticket_id) are
   // declared varchar (SQLite compat) — `uuid = varchar` has no implicit cast on
-  // Postgres ("operator does not exist: uuid = character varying"). Cast the
-  // uuid side to text on every join below. SQLite is loose-typed and needs no
-  // cast — txt is empty there. Same pattern as agent-workload.service.ts:196-197
-  // / room-membership.service.ts:56-58.
+  // Postgres ("operator does not exist: uuid = character varying").
+  //
+  // The FK side isn't reliably varchar though: BoardColumn.board_id and
+  // Comment.ticket_id are EACH ALSO the @JoinColumn target of a @ManyToOne
+  // relation declared later in the same class (BoardColumn.board,
+  // Comment.ticket). TypeORM's synchronize resolves a column referenced by
+  // both a plain @Column and a @JoinColumn to the RELATION's type — the
+  // referenced uuid PK — silently overriding the earlier explicit varchar
+  // declaration. So on a freshly-synchronized schema those two FK columns
+  // land as `uuid`, not `varchar`, and casting only the PK side
+  // (`b.id::text = board_id`) fails with "operator does not exist:
+  // text = uuid" (confirmed via prompt-audit-report-pg-cast.test.mjs).
+  // ActivityLog.ticket_id has no competing relation and stays varchar either
+  // way. Casting BOTH sides to text sidesteps the ambiguity regardless of
+  // which physical type a given FK column resolved to. SQLite is loose-typed
+  // and needs no cast — txt is empty there. Same pattern as
+  // agent-workload.service.ts:196-197 / room-membership.service.ts:56-58,
+  // extended to both operands.
   const isPostgres = ds.options.type === 'postgres';
   const txt = isPostgres ? '::text' : '';
 
@@ -81,7 +95,7 @@ export async function computeReport(
   // BoardColumn.workspace_id is not reliably populated (see doc comment
   // above) — scope through an inner join to Board.workspace_id instead.
   const scopeColumnsByWorkspace = (qb: any, columnAlias: string) => {
-    qb.innerJoin(Board, 'b', `b.id${txt} = ${columnAlias}.board_id`);
+    qb.innerJoin(Board, 'b', `b.id${txt} = ${columnAlias}.board_id${txt}`);
     if (workspaceId) qb.andWhere('b.workspace_id = :wsId', { wsId: workspaceId });
     return qb;
   };
@@ -103,7 +117,7 @@ export async function computeReport(
     // more than once in-window; the first entry is when it started work).
     const enteredRows = await scopeByTicketWorkspace(
       ds.getRepository(ActivityLog).createQueryBuilder('a')
-        .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id`)
+        .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id${txt}`)
         .select('a.ticket_id', 'ticket_id')
         .addSelect('MIN(a.created_at)', 'entered_at')
         .where("a.action = 'moved' AND a.field_changed = 'column'")
@@ -151,7 +165,7 @@ export async function computeReport(
   // scope through the ticket join rather than trusting the column directly.
   const unnecessaryQuestions = await scopeByTicketWorkspace(
     ds.getRepository(Comment).createQueryBuilder('c')
-      .innerJoin(Ticket, 't', `t.id${txt} = c.ticket_id`)
+      .innerJoin(Ticket, 't', `t.id${txt} = c.ticket_id${txt}`)
       .where("c.author_type = 'agent' AND c.type = 'question'")
       .andWhere('c.created_at >= :since AND c.created_at < :until', range),
     't',
@@ -162,7 +176,7 @@ export async function computeReport(
   // pend event (avoids the N+1 per-event findOne of an earlier draft).
   const pendRows = await scopeByTicketWorkspace(
     ds.getRepository(ActivityLog).createQueryBuilder('a')
-      .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id`)
+      .innerJoin(Ticket, 't', `t.id${txt} = a.ticket_id${txt}`)
       .select('a.ticket_id', 'ticket_id')
       .addSelect('a.created_at', 'pend_at')
       .addSelect('t.terminal_entered_at', 'terminal_entered_at')
