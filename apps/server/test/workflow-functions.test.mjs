@@ -9,6 +9,7 @@ import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { ActivityLog } from '../dist/entities/ActivityLog.js';
+import { Workspace } from '../dist/entities/Workspace.js';
 import * as entitiesBarrel from '../dist/entities/index.js';
 
 describe('Workflow Functions', () => {
@@ -233,6 +234,61 @@ describe('Workflow Functions — prompt_audit.measure_effect builtin', () => {
         inputs: { since: 'not-a-date' },
       }),
       /ISO 8601/,
+    );
+  });
+
+  // Regression (ec498050/f3fc298a review): BoardColumn has no reliable own
+  // workspace_id (columns.controller.ts never sets it), so the active/review/
+  // merging/terminal column-kind lookups in computeReport() must be scoped
+  // through Board.workspace_id, NOT queried globally across every workspace.
+  // Column-kind matching against ActivityLog is by NAME (see
+  // prompt-audit-report.ts doc comment), so a same-named column belonging to
+  // a DIFFERENT workspace can leak its `kind` into this workspace's matching
+  // if the scoping is missing. Here workspace B has an active-kind column
+  // named "Conflict"; workspace A's own "Conflict" column is unclassified
+  // (kind=''). A ticket move into workspace A's "Conflict" column must NOT
+  // be counted as an active-column entry.
+  it('does not let a same-named active-kind column in another workspace pollute start_rate', async () => {
+    const workspaceRepo = dataSource.getRepository(Workspace);
+    const boardRepo = dataSource.getRepository(Board);
+    const colRepo = dataSource.getRepository(BoardColumn);
+    const ticketRepo = dataSource.getRepository(Ticket);
+    const activityRepo = dataSource.getRepository(ActivityLog);
+
+    // Board.workspace_id is a real FK to Workspace (unlike Ticket.workspace_id,
+    // which is a bare indexed string column) — real Workspace rows are required.
+    const wsA = await workspaceRepo.save(workspaceRepo.create({ name: 'ConflictWorkspaceA' }));
+    const wsB = await workspaceRepo.save(workspaceRepo.create({ name: 'ConflictWorkspaceB' }));
+    const wsId = wsA.id;
+
+    const boardA = await boardRepo.save(boardRepo.create({ name: 'ConflictFixtureA', workspace_id: wsA.id }));
+    const conflictColA = await colRepo.save(colRepo.create({ board_id: boardA.id, name: 'Conflict', position: 1, kind: '' }));
+
+    const boardB = await boardRepo.save(boardRepo.create({ name: 'ConflictFixtureB', workspace_id: wsB.id }));
+    await colRepo.save(colRepo.create({ board_id: boardB.id, name: 'Conflict', position: 1, kind: 'active' }));
+
+    const inWindow = new Date(Date.now() - 60_000);
+    const ticket = await ticketRepo.save(ticketRepo.create({
+      title: 'Z', column_id: conflictColA.id, workspace_id: wsId, created_at: inWindow,
+    }));
+    await activityRepo.save(activityRepo.create({
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved', field_changed: 'column',
+      old_value: '', new_value: 'Conflict', actor_id: 'system', actor_name: 'test', created_at: inWindow,
+    }));
+
+    const since = new Date(inWindow.getTime() - 60_000).toISOString();
+    const until = new Date(inWindow.getTime() + 60_000).toISOString();
+    const run = await service.execute({
+      functionKey: 'prompt_audit.measure_effect',
+      workspaceId: wsId,
+      inputs: { since, until },
+    });
+
+    assert.equal(run.status, 'succeeded');
+    assert.deepEqual(
+      run.outputs.start_rate,
+      { entered_active: 0, also_advanced: 0, rate: null },
+      'workspace B\'s active-kind "Conflict" column must not classify workspace A\'s non-active "Conflict" column as active',
     );
   });
 });

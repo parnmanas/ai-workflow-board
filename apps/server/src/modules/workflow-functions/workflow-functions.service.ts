@@ -541,7 +541,7 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const until = inputs?.until !== undefined ? new Date(String(inputs.until)) : undefined;
     if (since && Number.isNaN(since.getTime())) throw httpError(400, 'inputs.since must be an ISO 8601 timestamp');
     if (until && Number.isNaN(until.getTime())) throw httpError(400, 'inputs.until must be an ISO 8601 timestamp');
-    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn }, { since, until, workspaceId: args.workspaceId });
+    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId });
   }
 
   async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {

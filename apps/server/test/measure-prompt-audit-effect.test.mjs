@@ -32,11 +32,13 @@ const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'Bo
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
+const { Workspace } = await import('file://' + path.join(DIST, 'entities', 'Workspace.js'));
 const { computeReport } = await import('file://' + path.resolve(__dirname, '..', 'scripts', 'measure-prompt-audit-effect.mjs'));
 
 const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
+const workspaceRepo = ds.getRepository(Workspace);
 const boardRepo = ds.getRepository(Board);
 const colRepo = ds.getRepository(BoardColumn);
 const ticketRepo = ds.getRepository(Ticket);
@@ -49,13 +51,20 @@ after(async () => {
 });
 
 test('computeReport: all 4 metrics match a hand-built fixture with known numerators/denominators', async () => {
-  const board = await boardRepo.save(boardRepo.create({ name: 'MeasureFixture' }));
+  const inWindow = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+
+  // board.workspace_id (not just ticket.workspace_id) must be set to wsId —
+  // computeReport() scopes BoardColumn lookups through Board.workspace_id
+  // (BoardColumn itself has no reliable own workspace_id), matching real
+  // columns.controller.ts-created boards/columns. Board.workspace_id is a
+  // real FK to Workspace, unlike Ticket.workspace_id, so a real Workspace
+  // row is required here.
+  const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'MeasureFixtureWorkspace' }));
+  const wsId = workspace.id;
+  const board = await boardRepo.save(boardRepo.create({ name: 'MeasureFixture', workspace_id: wsId }));
   const active = await colRepo.save(colRepo.create({ board_id: board.id, name: 'In Progress', position: 3, kind: 'active' }));
   const review = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Review', position: 4, kind: 'review' }));
   const done = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Done', position: 6, kind: 'terminal', is_terminal: true }));
-
-  const inWindow = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
-  const wsId = `ws-${Date.now()}`;
 
   // start_rate: A enters active then advances to review (counts both);
   // B enters active and never advances (denominator only).
@@ -136,7 +145,7 @@ test('computeReport: all 4 metrics match a hand-built fixture with known numerat
 
   const since = new Date(inWindow.getTime() - 24 * 60 * 60 * 1000);
   const until = new Date(inWindow.getTime() + 24 * 60 * 60 * 1000);
-  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn }, { since, until, workspaceId: wsId });
+  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: wsId });
 
   assert.deepEqual(
     report.start_rate, { entered_active: 3, also_advanced: 1, rate: 1 / 3 },
@@ -159,7 +168,7 @@ test('computeReport: all 4 metrics match a hand-built fixture with known numerat
 test('computeReport: empty window returns zero counts and null rates (no crash on zero denominators)', async () => {
   const since = new Date('2020-01-01T00:00:00Z');
   const until = new Date('2020-01-02T00:00:00Z');
-  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn }, { since, until, workspaceId: `empty-${Date.now()}` });
+  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: `empty-${Date.now()}` });
   assert.deepEqual(report.start_rate, { entered_active: 0, also_advanced: 0, rate: null });
   assert.equal(report.unnecessary_questions, 0);
   assert.deepEqual(report.pending_misclassification_rate, { pend_events: 0, misclassified: 0, rate: null });
@@ -168,7 +177,7 @@ test('computeReport: empty window returns zero counts and null rates (no crash o
 
 test('computeReport: default window is [now-30d, now) when since/until are omitted', async () => {
   const before = Date.now();
-  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn }, { workspaceId: `defaultwindow-${before}` });
+  const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { workspaceId: `defaultwindow-${before}` });
   const untilMs = new Date(report.window.until).getTime();
   const sinceMs = new Date(report.window.since).getTime();
   assert.ok(untilMs - before < 5000, 'until defaults to ~now');

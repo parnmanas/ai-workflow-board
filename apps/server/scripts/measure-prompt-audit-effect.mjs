@@ -82,11 +82,12 @@ async function main() {
   const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
   const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
   const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'BoardColumn.js'));
+  const { Board } = await import('file://' + path.join(DIST, 'entities', 'Board.js'));
 
   const ds = new DataSource(buildDataSourceOptions());
   await ds.initialize();
   try {
-    const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn }, {
+    const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, {
       since, until, workspaceId: args.workspace,
     });
     if (args.json) {

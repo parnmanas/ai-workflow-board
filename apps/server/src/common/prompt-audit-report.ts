@@ -30,11 +30,23 @@ import { DataSource } from 'typeorm';
 //
 // Two non-obvious ActivityLog shape gotchas this works around:
 //   - `field_changed='column'` rows store the COLUMN NAME in old/new_value
-//     (`ticket-move.ts`), NOT the column id — matching must be by name.
+//     (`ticket-move.ts`), NOT the column id — matching must be by name. This
+//     means the column-KIND lookup itself must also be scoped to the calling
+//     workspace's boards — otherwise a same-named column belonging to a
+//     DIFFERENT workspace can leak its `kind` classification into this
+//     workspace's name-matching (e.g. workspace B has an `active`-kind column
+//     named "Conflict"; workspace A's ActivityLog rows recording a move into
+//     ITS OWN, differently-classified "Conflict" column would then be
+//     misclassified as an active-column entry). BoardColumn has no reliable
+//     own `workspace_id` (see below) so scoping goes through an inner join to
+//     Board.workspace_id instead.
 //   - ActivityLog.workspace_id is frequently left at its '' default — never
 //     filter ActivityLog by its own `workspace_id` column; always scope
 //     through an inner join to Ticket.workspace_id instead, which IS reliably
-//     populated on every ticket row.
+//     populated on every ticket row. BoardColumn.workspace_id has the same
+//     problem (columns.controller.ts never sets it on create) — scope
+//     BoardColumn queries through Board.workspace_id instead, which IS set
+//     at board creation.
 //
 // `entities` is passed in (rather than imported here) so callers with their
 // own DataSource + entity metadata (compiled dist/ classes on both the CLI
@@ -42,10 +54,10 @@ import { DataSource } from 'typeorm';
 // DataSource instance.
 export async function computeReport(
   ds: DataSource,
-  entities: { ActivityLog: any; Comment: any; Ticket: any; BoardColumn: any },
+  entities: { ActivityLog: any; Comment: any; Ticket: any; BoardColumn: any; Board: any },
   { since, until, workspaceId }: { since?: Date; until?: Date; workspaceId?: string } = {},
 ): Promise<Record<string, any>> {
-  const { ActivityLog, Comment, Ticket, BoardColumn } = entities;
+  const { ActivityLog, Comment, Ticket, BoardColumn, Board } = entities;
   const untilResolved = until ?? new Date();
   const sinceResolved = since ?? new Date(untilResolved.getTime() - 30 * 24 * 60 * 60 * 1000);
   const range = { since: sinceResolved, until: untilResolved };
@@ -55,12 +67,23 @@ export async function computeReport(
     return qb;
   };
 
+  // BoardColumn.workspace_id is not reliably populated (see doc comment
+  // above) — scope through an inner join to Board.workspace_id instead.
+  const scopeColumnsByWorkspace = (qb: any, columnAlias: string) => {
+    qb.innerJoin(Board, 'b', `b.id = ${columnAlias}.board_id`);
+    if (workspaceId) qb.andWhere('b.workspace_id = :wsId', { wsId: workspaceId });
+    return qb;
+  };
+
   // ── Metric 1: start_rate ────────────────────────────────────────────────
   // `field_changed='column'` stores the COLUMN NAME (not id) in old/new_value
   // (ticket-move.ts) — match by name. Scope by workspace via an inner join to
   // Ticket, since ActivityLog.workspace_id is not reliably populated for
   // these rows.
-  const activeCols = await ds.getRepository(BoardColumn).find({ where: { kind: 'active' } });
+  const activeCols = await scopeColumnsByWorkspace(
+    ds.getRepository(BoardColumn).createQueryBuilder('c').where("c.kind = 'active'"),
+    'c',
+  ).getMany();
   const activeColNames = [...new Set(activeCols.map((c: any) => c.name).filter(Boolean))];
   const startRate: { entered_active: number; also_advanced: number; rate: number | null } = { entered_active: 0, also_advanced: 0, rate: null };
   if (activeColNames.length > 0) {
@@ -83,9 +106,11 @@ export async function computeReport(
     );
     startRate.entered_active = enteredAtByTicket.size;
     if (enteredAtByTicket.size > 0) {
-      const forwardCols = await ds.getRepository(BoardColumn).find({
-        where: [{ kind: 'review' }, { kind: 'merging' }, { kind: 'terminal' }],
-      });
+      const forwardCols = await scopeColumnsByWorkspace(
+        ds.getRepository(BoardColumn).createQueryBuilder('c')
+          .where('c.kind IN (:...kinds)', { kinds: ['review', 'merging', 'terminal'] }),
+        'c',
+      ).getMany();
       const forwardColNames = [...new Set(forwardCols.map((c: any) => c.name).filter(Boolean))];
       if (forwardColNames.length > 0) {
         const advancedRows = await ds.getRepository(ActivityLog).createQueryBuilder('a')
