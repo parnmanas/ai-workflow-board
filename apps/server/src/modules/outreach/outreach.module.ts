@@ -17,6 +17,7 @@ import { OutreachPollingService } from './outreach-polling.service';
 import { OutreachChannelService } from './outreach-channel.service';
 import { OutreachPublisherService } from './outreach-publisher.service';
 import { OutreachResolveNotifierService } from './outreach-resolve-notifier.service';
+import { ReleaseConsistencyService } from './release-consistency.service';
 import { OutreachController } from './outreach.controller';
 import { OUTREACH_CLASSIFIER } from './classifier/types';
 import { AgentDispatchClassifier } from './classifier/agent-dispatch.classifier';
@@ -51,6 +52,9 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     // them as providers is what makes Nest instantiate + call onModuleInit.
     OutreachPublisherService,
     OutreachResolveNotifierService,
+    // ReleaseConsistencyService (ticket 31e7cd24 범위 3) is the same shape —
+    // an OnModuleInit activityEvents(DEPLOYMENT_REPORTED_EVENT) listener.
+    ReleaseConsistencyService,
     { provide: OUTREACH_RELEASE_SUMMARIZER, useClass: TemplateReleaseSummarizer },
     AuthGuard,
     PermissionGuard,

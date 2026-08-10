@@ -1,6 +1,12 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
-export type OutreachOutboundKind = 'deploy' | 'resolve';
+// 'release_report' (ticket 31e7cd24): a release-consistency check (candidate
+// resolved issues / undocumented changes / CHANGELOG gaps) generated on
+// deploy for a kind='github' channel. Unlike 'deploy'/'resolve' it is never
+// posted through OutreachConnector — delivery is an internal ticket comment
+// (release-consistency.service.ts) — so `status='published'` here means
+// "the report was generated and delivered", not "an external call succeeded".
+export type OutreachOutboundKind = 'deploy' | 'resolve' | 'release_report';
 // 'approving' is a short-lived transient claim state (step 6): the REST
 // approve endpoint atomically flips draft→approving as its single-winner
 // mutex BEFORE calling the connector, so two concurrent approve calls for
