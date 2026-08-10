@@ -581,7 +581,7 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 so a local deep-link would 404.
  *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
  *                 feature / action / function / user / api-key / benchmark / prompt-template /
- *                 chat / lesson / claude-backend-profile: not a ticket-row mutation.
+ *                 chat / lesson / claude-backend-profile / outreach: not a ticket-row mutation.
  *                 (build / deploy 결과물성 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로
  *                 이관 — EXCLUDE 아님.)
  */
@@ -651,7 +651,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   propose_skill_change: 'non-ticket',
-  qa_run_heartbeat: 'non-ticket', record_qa_step: 'non-ticket',
+  qa_run_heartbeat: 'non-ticket', record_outreach_classification: 'non-ticket',
+  record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
   reject_feature: 'non-ticket',
   revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
