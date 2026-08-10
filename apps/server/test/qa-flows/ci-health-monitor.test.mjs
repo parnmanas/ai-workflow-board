@@ -41,6 +41,19 @@ function fakeResponse(json) {
   return { ok: true, status: 200, async json() { return json; }, async text() { return JSON.stringify(json); } };
 }
 
+function fakeErrorResponse(status, body) {
+  // headers.get() must be present (even with nothing set) — assertGitHubOk
+  // always reads 'retry-after' before branching on status, so a response
+  // fixture without it would TypeError before ever reaching the intended
+  // 401/403/429 branch (matches outreach-github-connector.test.mjs's fakeResponse).
+  return {
+    ok: false, status,
+    async json() { try { return JSON.parse(body); } catch { return {}; } },
+    async text() { return body; },
+    headers: { get: () => null },
+  };
+}
+
 /** Builds a fake `fetch` bound to a mutable `state.runs` array (newest-first)
  *  so a test can swap the fixture between sweeps without re-wiring anything. */
 function makeFakeGitHubFetch(state) {
@@ -56,6 +69,47 @@ function makeFakeGitHubFetch(state) {
       return fakeResponse({ jobs: [{ name: 'agent-manager-tests (ubuntu-latest)', conclusion: 'failure' }, { name: 'server-tests', conclusion: 'failure' }] });
     }
     throw new Error(`unexpected GitHub URL in CiHealthMonitorService qa-flow test: ${u}`);
+  };
+}
+
+/** Records the Authorization header of the last call so a test can prove
+ *  which credential actually got used, on top of the usual fixture routing. */
+function makeFakeGitHubFetchWithAuth(state) {
+  return async (url, opts) => {
+    state.lastAuthHeader = opts?.headers?.Authorization;
+    const u = String(url);
+    if (u.includes('/actions/workflows/') && u.includes('/runs?')) {
+      return fakeResponse({ workflow_runs: state.runs });
+    }
+    if (u.endsWith('/actions/workflows')) {
+      return fakeResponse({ workflows: [{ id: state.workflowId, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }] });
+    }
+    if (u.includes('/actions/runs/') && u.endsWith('/jobs')) {
+      return fakeResponse({ jobs: [{ name: 'gizmo-job', conclusion: 'failure' }] });
+    }
+    throw new Error(`unexpected GitHub URL in credential-auth test: ${u}`);
+  };
+}
+
+/** Routes STRICTLY by repo name (acme/broken → 401, acme/healthy2 → the red
+ *  fixture) and throws for anything else — deliberately unrouted, so a call
+ *  against any OTHER already-seeded board in this suite surfaces as its own
+ *  fetch failure instead of accidentally being answered by this fixture and
+ *  polluting this test's alert-count assertions. */
+function makeFakeGitHubFetchMixed(state) {
+  return async (url) => {
+    const u = String(url);
+    if (u.includes('acme/broken')) {
+      if (u.endsWith('/actions/workflows')) return fakeErrorResponse(401, 'Bad credentials');
+      throw new Error(`unexpected GitHub URL for broken repo: ${u}`);
+    }
+    if (u.includes('acme/healthy2')) {
+      if (u.includes('/actions/workflows/') && u.includes('/runs?')) return fakeResponse({ workflow_runs: state.runs });
+      if (u.endsWith('/actions/workflows')) return fakeResponse({ workflows: [{ id: state.workflowId, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }] });
+      if (u.includes('/actions/runs/') && u.endsWith('/jobs')) return fakeResponse({ jobs: [{ name: 'healthy-job', conclusion: 'failure' }] });
+      throw new Error(`unexpected GitHub URL for healthy repo: ${u}`);
+    }
+    throw new Error(`unrouted GitHub URL in mixed-failure isolation test (expected only acme/broken or acme/healthy2): ${u}`);
   };
 }
 
@@ -82,6 +136,9 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     'file://' + path.join(DIST_ROOT, 'modules', 'agents', 'ci-health-monitor.service.js')
   );
   const monitor = app.get(monitorModule.CiHealthMonitorService);
+  const { encrypt } = await import('file://' + path.join(DIST_ROOT, 'services', 'encryption.service.js'));
+  const { LogService } = await import('file://' + path.join(DIST_ROOT, 'services', 'log.service.js'));
+  const logService = app.get(LogService);
 
   step('Seed workspace + alerts room + board (Backlog/active columns) + env-configured GitHub repo');
   const ws = await createWorkspace(app, getDataSourceToken, 'ci-health');
@@ -188,6 +245,104 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const ticket = await ticketRepo.findOne({ where: { id: trackedTicketId } });
     assert.ok(ticket, 'ticket must still exist');
     assert.equal(ticket.column_id, backlog.id, 'recovery must NOT move/close the ticket — that decision is left to whoever holds it');
+  });
+
+  await t.test('4. env GITHUB_TOKEN absent but this board\'s Resource carries its own credential: sweep must still call GitHub and detect the red streak (review blocker #1 — global env-only gate must not blind the sweep to a board credential)', async () => {
+    const savedEnvToken = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      const credentialRepo = ds.getRepository('Credential');
+      const credential = await credentialRepo.save(credentialRepo.create({
+        workspace_id: ws.id, name: 'gizmos cred', provider: 'github',
+        encrypted_data: encrypt(JSON.stringify({ token: 'cred-only-token' })),
+      }));
+
+      const board2 = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-cred' });
+      await createColumn(app, getDataSourceToken, board2.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
+      await createColumn(app, getDataSourceToken, board2.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
+
+      const resource2 = await resourceRepo.save(resourceRepo.create({
+        workspace_id: ws.id, name: 'gizmos repo', type: 'repository',
+        url: 'https://github.com/acme/gizmos', default_branch: 'main', credential_id: credential.id,
+      }));
+      await ds.getRepository('Board').update(board2.id, {
+        environment_config: JSON.stringify({ repositories: [{ resource_id: resource2.id }] }),
+      });
+
+      const authState = {
+        workflowId: 777,
+        runs: [
+          run('g-run-3', 'failure', minutesAgo(5)),
+          run('g-run-2', 'failure', minutesAgo(15)),
+          run('g-run-1', 'failure', minutesAgo(25)),
+        ],
+      };
+      globalThis.fetch = makeFakeGitHubFetchWithAuth(authState);
+
+      const stats = await monitor.sweep(NOW);
+
+      assert.ok(authState.lastAuthHeader, 'a GitHub call must actually have fired this sweep');
+      assert.equal(authState.lastAuthHeader, 'Bearer cred-only-token', 'must auth with the Resource credential, not env (which is unset for this test)');
+      assert.equal(stats.alerts_created, 1, 'sweep must not globally skip when env token is absent but a board credential resolves');
+      assert.equal(stats.tickets_created, 1);
+
+      const credDedupeKey = `ci_red:${board2.id}:acme/gizmos:main:777`;
+      const ticket = await ticketRepo.findOne({ where: { operational_dedupe_key: credDedupeKey } });
+      assert.ok(ticket, 'auto-created ticket must exist for the credential-only board');
+    } finally {
+      if (savedEnvToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedEnvToken;
+    }
+  });
+
+  await t.test('5. one board\'s GitHub call 401s: sweep records the failure observably and keeps monitoring the other board in the same pass (review blocker #2 — a fetch failure must not be indistinguishable from "nothing to report")', async () => {
+    const boardBroken = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-broken' });
+    await createColumn(app, getDataSourceToken, boardBroken.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
+    const resourceBroken = await resourceRepo.save(resourceRepo.create({
+      workspace_id: ws.id, name: 'broken repo', type: 'repository',
+      url: 'https://github.com/acme/broken', default_branch: 'main',
+    }));
+    await ds.getRepository('Board').update(boardBroken.id, {
+      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceBroken.id }] }),
+    });
+
+    const boardHealthy = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-healthy2' });
+    await createColumn(app, getDataSourceToken, boardHealthy.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
+    await createColumn(app, getDataSourceToken, boardHealthy.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
+    const resourceHealthy = await resourceRepo.save(resourceRepo.create({
+      workspace_id: ws.id, name: 'healthy2 repo', type: 'repository',
+      url: 'https://github.com/acme/healthy2', default_branch: 'main',
+    }));
+    await ds.getRepository('Board').update(boardHealthy.id, {
+      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceHealthy.id }] }),
+    });
+
+    const mixedState = {
+      workflowId: 888,
+      runs: [
+        run('h-run-3', 'failure', minutesAgo(5)),
+        run('h-run-2', 'failure', minutesAgo(15)),
+        run('h-run-1', 'failure', minutesAgo(25)),
+      ],
+    };
+    globalThis.fetch = makeFakeGitHubFetchMixed(mixedState);
+
+    const warnLogsBefore = logService.query({ level: 'warn', category: 'CI' }).length;
+    const stats = await monitor.sweep(NOW);
+
+    assert.ok(stats.fetch_failures >= 1, 'the broken board\'s 401 must be counted, not silently absorbed into "no signal"');
+    const warnLogsAfter = logService.query({ level: 'warn', category: 'CI' });
+    assert.ok(warnLogsAfter.length > warnLogsBefore, 'the fetch failure must be logged under the CI category, not silent');
+    const brokenLog = warnLogsAfter.find((e) => JSON.stringify(e.meta || {}).includes('acme/broken'));
+    assert.ok(brokenLog, 'the logged failure must identify which board/repo it came from');
+
+    assert.equal(stats.alerts_created, 1, 'the OTHER board must still be evaluated and alerted in the same sweep');
+    const healthyDedupeKey = `ci_red:${boardHealthy.id}:acme/healthy2:main:888`;
+    const healthyTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: healthyDedupeKey } });
+    assert.ok(healthyTicket, 'the healthy board\'s ticket must still be auto-created despite the other board\'s GitHub call failing');
+
+    const brokenAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/broken' } });
+    assert.equal(brokenAlert, null, 'no alert row for the board whose GitHub call failed — there was nothing to evaluate');
   });
 
 });
