@@ -87,6 +87,13 @@ test('fetchInbound: a new comment on an issue is tagged with parent_external_ite
   // The issue itself was created 06-20 (before the cursor); its updated_at
   // (06-25 10:30) is also past the cursor, so it surfaces too — as an
   // issue-update item (review round 1, point 2), alongside its NEW comment.
+  // This connector-level result is intentionally still 2 (review round 2):
+  // fetchInbound is a stateless translator and cannot know the issue-update
+  // candidate's body is unchanged from what ingest already has on file — the
+  // content-hash comparison that suppresses the resulting duplicate ticket
+  // comment lives in OutreachIngestService._tryAppendToParent, exercised in
+  // outreach-ingest.test.mjs (see the "does not also emit a spurious ..."
+  // test there), not here.
   const items = await conn.fetchInbound(new Date('2026-06-25T09:00:00Z').toISOString());
   assert.equal(items.length, 2);
   const comment = items.find((i) => i.external_item_id.startsWith('comment:'));

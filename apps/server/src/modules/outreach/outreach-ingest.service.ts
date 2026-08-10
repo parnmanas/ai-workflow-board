@@ -75,6 +75,7 @@
  * erroring forever. Never silently attaches new feedback to a ticket
  * nobody can see, and never gets permanently stuck on one either.
  */
+import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, Repository } from 'typeorm';
@@ -117,6 +118,14 @@ const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_reque
 // tuned SLA. See the stale-claim reclaim block in _processItem (review 3rd
 // pass): a claim younger than this lease is never deleted, only skipped.
 export const STALE_CLAIM_LEASE_MS = 2 * 60 * 1000;
+
+// See OutreachInboundItem.content_hash's docstring — a normalized sha256 of
+// an item's body, compared to tell a genuine content edit apart from GitHub
+// merely bumping an issue's updated_at for unrelated activity (ticket
+// 31e7cd24 review round 2).
+function hashContent(body: string): string {
+  return createHash('sha256').update(body || '', 'utf8').digest('hex');
+}
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
@@ -325,6 +334,7 @@ export class OutreachIngestService {
         permalink: item.permalink,
         author: item.author,
         collected_at: item.created_at,
+        content_hash: hashContent(item.body),
       }));
     } catch (e) {
       if (isUniqueConstraintError(e)) {
@@ -424,6 +434,7 @@ export class OutreachIngestService {
         permalink: item.permalink,
         author: item.author,
         collected_at: item.created_at,
+        content_hash: hashContent(item.body),
       }));
     } catch (e) {
       if (isUniqueConstraintError(e)) {
@@ -433,14 +444,35 @@ export class OutreachIngestService {
       throw e;
     }
 
+    // Distinguish "the source item itself was edited" (e.g. a GitHub issue
+    // body update, review round 1 point 2) from "a new reply arrived" — same
+    // append path, clearer wording. Connector-agnostic: any connector
+    // adopting the same `<kind>-update:` id prefix convention gets this for
+    // free.
+    const isSourceUpdate = item.external_item_id.includes('-update:');
+
+    if (isSourceUpdate) {
+      // Review round 2: GitHub (and any future connector reusing this id
+      // convention) bumps the source item's updated_at on ANY activity,
+      // including a new comment that already gets its OWN `comment:...`
+      // append in the same poll — so an `-update:` candidate reaching here is
+      // not proof the body/metadata itself changed. Compare against the
+      // parent's last-known content hash and skip the append when they
+      // match, so a comment-only change doesn't ALSO produce a spurious
+      // "source item was updated" duplicate. A null parent.content_hash
+      // (legacy row predating this column) is treated as "unknown" — append
+      // rather than silently swallow a possibly-real edit.
+      const newHash = hashContent(item.body);
+      if (parent.content_hash && parent.content_hash === newHash) {
+        result.skipped++;
+        return true;
+      }
+      parent.content_hash = newHash;
+      await this.itemRepo.save(parent);
+    }
+
     try {
       const commentRepo = this.dataSource.getRepository(Comment);
-      // Distinguish "the source item itself was edited" (e.g. a GitHub issue
-      // body update, review round 1 point 2) from "a new reply arrived" —
-      // same append path, clearer wording. Connector-agnostic: any connector
-      // adopting the same `<kind>-update:` id prefix convention gets this
-      // for free.
-      const isSourceUpdate = item.external_item_id.includes('-update:');
       const header = isSourceUpdate
         ? `The source ${channel.kind} item was updated (current content, by ${item.author || 'unknown'}):`
         : `New comment on the source ${channel.kind} thread (by ${item.author || 'unknown'}):`;

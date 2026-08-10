@@ -77,6 +77,22 @@ export class OutreachInboundItem {
   @Column({ type: Date })
   collected_at: Date;
 
+  // sha256 hex digest of this item's body at claim time (ticket 31e7cd24
+  // review round 2). Only meaningfully consulted on a top-level `issue:...`
+  // row, which acts as the parent an `issue-update:...` candidate compares
+  // against: GitHub bumps an issue's updated_at on ANY activity, including a
+  // new comment, so GitHubConnector.fetchInbound emits an issue-update
+  // candidate even when the body itself didn't change.
+  // OutreachIngestService._tryAppendToParent compares that candidate's body
+  // hash against this column and skips the Comment append when they match —
+  // otherwise a comment-only update would append both the real new comment
+  // AND a spurious "the source item was updated" duplicate. Updated whenever
+  // a genuine change is confirmed (initial claim, and each accepted
+  // issue-update); null on legacy rows predating this column, which the
+  // comparison treats as "unknown → assume changed" rather than suppressing.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  content_hash: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 }

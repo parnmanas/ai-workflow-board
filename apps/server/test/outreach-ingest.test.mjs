@@ -1317,3 +1317,107 @@ test('a LATER edit (different issue-update id) appends AGAIN — not deduped awa
     await dataSource.destroy();
   }
 });
+
+// Review round 2: GitHub bumps an issue's updated_at on ANY activity —
+// including a plain new comment — so GitHubConnector.fetchInbound surfaces an
+// `issue-update:...` candidate in the SAME poll as the comment's own
+// `comment:...` item, even though the issue's body itself never changed. The
+// pre-fix behavior appended both as separate Comments (a spurious "source
+// item was updated" duplicate alongside the real new comment); this test
+// exercises the content_hash guard that fixes that. The mirror scenario — a
+// genuine body edit still appends, re-polling the SAME edit is a no-op, and a
+// LATER distinct edit appends again — is already covered by the three
+// "issue-update" tests just above (their update bodies all differ from the
+// parent's seed body, so they already exercise the "changed → append" branch
+// of this same guard); nothing new needed there.
+test('a new comment on an old issue does not ALSO emit a spurious "source item was updated" comment when the issue body itself is unchanged', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    const issueBody = 'Steps to reproduce: click save while offline.';
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#1', title: 'Crash on save', body: issueBody, created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    const ticketId = (await dataSource.getRepository(Ticket).find())[0].id;
+
+    // Same poll surfaces BOTH the real new comment AND an issue-update
+    // candidate whose body is IDENTICAL to what was already ticketed — the
+    // exact shape GitHubConnector.fetchInbound produces when only a comment
+    // triggered the issue's updated_at to move (its body always reflects the
+    // CURRENT issue body, unedited here).
+    const channelAfterFirst = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const commentItem = item({
+      external_item_id: 'comment:x/y#1:555', parent_external_item_id: 'issue:x/y#1',
+      author: 'commenter1', body: 'More details here', created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const staleUpdateItem = item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      author: 'reporter1', body: issueBody, created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const result = await svc.pollChannel(channelAfterFirst, makeConnector([commentItem, staleUpdateItem]), new Date('2026-06-25T13:00:00Z'));
+
+    assert.equal(result.appended, 1, 'only the real comment is appended');
+    assert.equal(result.skipped, 1, 'the unchanged issue-update is recognized and skipped, not silently dropped or errored');
+    assert.equal(result.ticketed, 0);
+    assert.equal(result.errors, 0);
+
+    const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: ticketId } });
+    assert.equal(comments.length, 1, 'exactly one Comment — no spurious "source item was updated" duplicate');
+    assert.match(comments[0].content, /More details here/);
+    assert.ok(!comments.some((c) => /was updated/.test(c.content)), 'no "source item was updated" comment for an unchanged body');
+
+    // The dedupe/audit ledger still records the issue-update candidate (so a
+    // re-poll within the same `since` window can't reprocess it) — it just
+    // never turns into a Comment.
+    const updateLedgerRow = await dataSource.getRepository(OutreachInboundItem).findOne({
+      where: { channel_id: channel.id, external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z' },
+    });
+    assert.ok(updateLedgerRow, 'the unchanged issue-update is still claimed for dedupe purposes');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+// Defends the OTHER direction of the same guard: an issue-update whose
+// parent row predates the content_hash column (null) must still append —
+// "unknown" is treated as "assume changed", never as "assume unchanged".
+test('an issue-update compared against a parent with no recorded content_hash (legacy row) still appends — unknown is never treated as unchanged', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board, col } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    // Simulates a parent ticketed BEFORE this column existed: same shape
+    // _processItem's claim would leave, but with content_hash left at its
+    // column default (null) instead of going through the current code path.
+    const itemRepo = dataSource.getRepository(OutreachInboundItem);
+    const ticketRepo = dataSource.getRepository(Ticket);
+    const legacyTicket = await ticketRepo.save(ticketRepo.create({
+      column_id: col.id, workspace_id: 'ws-1', title: 'pre-existing legacy ticket',
+    }));
+    await itemRepo.save(itemRepo.create({
+      workspace_id: 'ws-1', channel_id: channel.id, external_item_id: 'issue:x/y#1',
+      classification: 'bug', confidence: 90, status: 'ticketed', ticket_id: legacyTicket.id,
+      permalink: 'https://github.com/x/y/issues/1', author: 'reporter1', collected_at: new Date('2026-06-25T10:00:00Z'),
+      content_hash: null,
+    }));
+
+    const updateItem = item({
+      external_item_id: 'issue-update:x/y#1:2026-06-25T11:00:00Z', parent_external_item_id: 'issue:x/y#1',
+      body: 'some body', created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const result = await svc.pollChannel(channel, makeConnector([updateItem]), new Date('2026-06-25T13:00:00Z'));
+
+    assert.equal(result.appended, 1, 'an unknown prior state must not be treated as "unchanged" — it still appends');
+    const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: legacyTicket.id } });
+    assert.equal(comments.length, 1);
+  } finally {
+    await dataSource.destroy();
+  }
+});

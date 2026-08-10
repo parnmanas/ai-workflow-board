@@ -26,7 +26,18 @@
  *     ingest at all). Using `updated_at` as the id's version component makes
  *     re-polling the SAME edit a no-op (identical id → the existing
  *     `(channel_id, external_item_id)` dedupe absorbs it) while a LATER edit
- *     produces a fresh id that appends again.
+ *     produces a fresh id that appends again. NOTE (review round 2): GitHub
+ *     bumps an issue's updated_at on ANY activity, not just a body/metadata
+ *     edit — a plain new comment (handled by the bullet below) does too — so
+ *     this candidate is emitted here EVEN WHEN the body content itself is
+ *     unchanged. That is intentional: this connector stays a stateless
+ *     translator with no persisted state of its own. The actual "did the
+ *     content really change" decision is made downstream, in
+ *     OutreachIngestService._tryAppendToParent, which compares this
+ *     candidate's body against the parent OutreachInboundItem's persisted
+ *     `content_hash` and skips the append when they match — see that
+ *     method's docstring, and outreach-ingest.test.mjs's "does not also emit
+ *     a spurious ... comment when the issue body is unchanged" test.
  *   - New comments on EVERY open issue the call returns (both brand-new and
  *     merely-updated ones), each tagged with the same
  *     `parent_external_item_id` convention (ticket's "이슈 본문/댓글이 갱신되면
