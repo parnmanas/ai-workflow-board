@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { WorkflowFunction } from '../dist/entities/WorkflowFunction.js';
@@ -150,6 +151,53 @@ describe('Workflow Functions', () => {
     await assert.rejects(
       service.execute({ functionId: fn.id, workspaceId: 'workspace-b', inputs: {} }),
       /different workspace/,
+    );
+  });
+
+  // 티켓 f177aeb3 H1 — executor_type:'http'는 config.url/headers를 워크스페이스
+  // 스코프 에이전트가 자유롭게 지정하는 Function 정의에서 그대로 받는다. 이전에는
+  // fetch()에 곧장 넘겨 응답 본문 전체를 반환했으므로(full-read SSRF), 실제
+  // 로컬 리스너를 겨냥해도 이 실행 경로 전체(execute → executeOnce → guardedFetch)가
+  // 거부하고 run.status가 'failed'로 남는지 wire 경로로 검증한다.
+  it('rejects the http executor when config.url targets a loopback listener (SSRF guard)', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ secret: 'should-never-be-returned' }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      const fn = await service.create({
+        workspace_id: 'workspace-a',
+        key: 'test.ssrf-loopback',
+        name: 'SSRF loopback probe',
+        executor_type: 'http',
+        config: { url: `http://127.0.0.1:${port}/secret`, method: 'GET' },
+      });
+      await assert.rejects(
+        service.execute({ functionId: fn.id, workspaceId: 'workspace-a', inputs: {} }),
+        /not an allowed outbound target/,
+      );
+      const runs = await dataSource.getRepository(WorkflowFunctionRun).find({ where: { function_id: fn.id } });
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].status, 'failed');
+      assert.match(runs[0].error_message, /not an allowed outbound target/);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  it('rejects the http executor for a cloud-metadata-style link-local target', async () => {
+    const fn = await service.create({
+      workspace_id: 'workspace-a',
+      key: 'test.ssrf-metadata',
+      name: 'SSRF metadata probe',
+      executor_type: 'http',
+      config: { url: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/', method: 'GET' },
+    });
+    await assert.rejects(
+      service.execute({ functionId: fn.id, workspaceId: 'workspace-a', inputs: {} }),
+      /not an allowed outbound target/,
     );
   });
 });

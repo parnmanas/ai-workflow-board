@@ -11,6 +11,7 @@ import { ActionsService } from '../actions/actions.service';
 import { assertCatalogBoardScope, catalogScopeOf, canUseCatalogItem, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
 import { computeReport } from '../../common/prompt-audit-report';
+import { guardedFetch, sanitizeOutboundHeaders } from '../../common/ssrf-guard';
 
 const EXECUTORS = new Set(['builtin', 'pipeline', 'http', 'agent_action']);
 const RISK_LEVELS = new Set(['read', 'write', 'destructive', 'high_impact']);
@@ -448,9 +449,12 @@ export class WorkflowFunctionsService implements OnModuleInit {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), fn.timeout_ms);
       try {
-        const response = await fetch(config.url, {
+        // SSRF 방어: 스킴/호스트 allowlist + redirect 재검증 + connect-time DNS
+        // 재검증은 guardedFetch가 담당한다 (config.url/headers는 Function 정의
+        // 작성자가 자유롭게 지정하는 신뢰할 수 없는 입력이다). ssrf-guard.ts 참고.
+        const response = await guardedFetch(config.url, {
           method: config.method || 'POST',
-          headers: { 'content-type': 'application/json', ...(config.headers || {}) },
+          headers: { 'content-type': 'application/json', ...sanitizeOutboundHeaders(config.headers) },
           body: ['GET', 'HEAD'].includes(String(config.method || 'POST').toUpperCase())
             ? undefined
             : JSON.stringify(config.body ?? inputs),
