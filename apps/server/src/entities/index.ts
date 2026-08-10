@@ -35,6 +35,11 @@ export { Action } from './Action';
 export { ActionRun } from './ActionRun';
 export { ActionApproval } from './ActionApproval';
 export { StuckTicketAlert } from './StuckTicketAlert';
+// CI red-streak dedup + delivery-state row (ticket cc1c494e) — sibling of
+// StuckTicketAlert, see that entity's docstring for the durable-delivery
+// contract. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly like the other
+// tables in this comment block; no hand-written migration needed.
+export { CiRedAlert } from './CiRedAlert';
 // Durable dispatch outbox (ticket e7c87517) — one row per owed agent_trigger,
 // driven to `resolved` only by real forward progress. The table is auto-DDL'd
 // on EVERY backend (sqlite + Postgres) by TypeORM `synchronize`, which db.ts

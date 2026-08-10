@@ -23,6 +23,24 @@ export interface GitHubSearchResult {
   items: any[];
 }
 
+export interface GitHubWorkflow {
+  id: string;
+  name: string;
+  path: string;
+  state: string;
+}
+
+// conclusion is null while a run is still in progress — only 'completed'
+// status runs (queried by CiHealthMonitorService) ever carry a non-null one.
+export interface GitHubWorkflowRun {
+  id: string;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // Pure helpers — no DB, no config. Kept as standalone exports.
 
 export function parseGitHubUrl(url: string): { owner: string; repo: string } | null {
@@ -320,11 +338,15 @@ export class GitHubConnectorService {
     return !!token;
   }
 
-  private async githubFetch(path: string, credentialId?: string | null): Promise<any> {
+  private async githubFetch(
+    path: string,
+    credentialId?: string | null,
+    fetchImpl: typeof fetch = fetch,
+  ): Promise<any> {
     const token = await this.resolveToken(credentialId);
     if (!token) throw new Error('GitHub token not configured');
 
-    const res = await fetch(`${GITHUB_API}${path}`, {
+    const res = await fetchImpl(`${GITHUB_API}${path}`, {
       headers: {
         'Accept': 'application/vnd.github.v3+json',
         'Authorization': `Bearer ${token}`,
@@ -360,6 +382,77 @@ export class GitHubConnectorService {
       return typeof sha === 'string' ? sha : '';
     } catch {
       return '';
+    }
+  }
+
+  /**
+   * Active workflows for a repo (ticket cc1c494e — `CiHealthMonitorService`
+   * needs to enumerate what to sweep without a hardcoded workflow id, since
+   * one is repo-specific and this connector serves every board's repo).
+   * Degrades to `[]` on missing token / 404 / any failure — the sweep treats
+   * an empty result as "nothing to check this pass", never throws.
+   */
+  async listWorkflows(
+    owner: string, repo: string, credentialId?: string | null, fetchImpl?: typeof fetch,
+  ): Promise<GitHubWorkflow[]> {
+    if (!owner || !repo) return [];
+    try {
+      const data = await this.githubFetch(`/repos/${owner}/${repo}/actions/workflows`, credentialId, fetchImpl);
+      const workflows: any[] = Array.isArray(data?.workflows) ? data.workflows : [];
+      return workflows
+        .filter((w) => w?.state === 'active')
+        .map((w) => ({ id: String(w.id), name: w.name || '', path: w.path || '', state: w.state || '' }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Most recent COMPLETED runs of one workflow on one branch, newest first
+   * (GitHub's default order) — `evaluateRedStreak` only ever needs a short
+   * recent window, not full history. Degrades to `[]` on any failure, same
+   * contract as `listWorkflows`.
+   */
+  async listWorkflowRuns(
+    owner: string, repo: string, workflowId: string, branch: string,
+    credentialId?: string | null, fetchImpl?: typeof fetch,
+  ): Promise<GitHubWorkflowRun[]> {
+    if (!owner || !repo || !workflowId || !branch) return [];
+    try {
+      const qs = new URLSearchParams({ branch, status: 'completed', per_page: '5' });
+      const data = await this.githubFetch(
+        `/repos/${owner}/${repo}/actions/workflows/${encodeURIComponent(workflowId)}/runs?${qs}`,
+        credentialId,
+        fetchImpl,
+      );
+      const runs: any[] = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
+      return runs.map((r) => ({
+        id: String(r.id),
+        status: r.status || '',
+        conclusion: r.conclusion ?? null,
+        html_url: r.html_url || '',
+        created_at: r.created_at || '',
+        updated_at: r.updated_at || '',
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Names of the non-successful jobs within one run (for the alert message
+   *  body — "which job(s) actually failed"). Degrades to `[]` on any failure. */
+  async listRunFailedJobs(
+    owner: string, repo: string, runId: string, credentialId?: string | null, fetchImpl?: typeof fetch,
+  ): Promise<string[]> {
+    if (!owner || !repo || !runId) return [];
+    try {
+      const data = await this.githubFetch(`/repos/${owner}/${repo}/actions/runs/${encodeURIComponent(runId)}/jobs`, credentialId, fetchImpl);
+      const jobs: any[] = Array.isArray(data?.jobs) ? data.jobs : [];
+      return jobs
+        .filter((j) => j?.conclusion && j.conclusion !== 'success')
+        .map((j) => j.name || '(unnamed job)');
+    } catch {
+      return [];
     }
   }
 

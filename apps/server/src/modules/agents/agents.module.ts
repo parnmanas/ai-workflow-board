@@ -6,6 +6,7 @@ import { Subagent } from '../../entities/Subagent';
 import { SubagentLogLine } from '../../entities/SubagentLogLine';
 import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
+import { CiRedAlert } from '../../entities/CiRedAlert';
 import { DispatchIntent } from '../../entities/DispatchIntent';
 import { ChildRun } from '../../entities/ChildRun';
 import { AgentsController } from './agents.controller';
@@ -20,6 +21,7 @@ import { AgentWorkloadService } from './agent-workload.service';
 import { BacklogPromotionService } from './backlog-promotion.service';
 import { ClaimVerificationService } from './claim-verification.service';
 import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
+import { CiHealthMonitorService } from './ci-health-monitor.service';
 import { RespawnStormDetectorService } from './respawn-storm-detector.service';
 import { AgentUsageService } from './agent-usage.service';
 import { DispatchIntentService } from './dispatch-intent.service';
@@ -47,7 +49,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, DispatchIntent, ChildRun]),
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
@@ -77,6 +79,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     BacklogPromotionService,
     AgentWorkloadService,
     StuckTicketDetectorService,
+    CiHealthMonitorService,
     RespawnStormDetectorService,
     AgentUsageService,
     ClaimVerificationService,
@@ -93,6 +96,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     BacklogPromotionService,
     AgentWorkloadService,
     StuckTicketDetectorService,
+    CiHealthMonitorService,
     RespawnStormDetectorService,
     AgentUsageService,
     ClaimVerificationService,
