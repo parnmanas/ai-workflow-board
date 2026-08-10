@@ -54,6 +54,224 @@ export function buildSyncContent(info: RepoInfo): string {
   return parts.join('\n');
 }
 
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string;
+  html_url: string;
+  user: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubIssueComment {
+  id: number;
+  body: string;
+  html_url: string;
+  user: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export class GitHubApiError extends Error {
+  readonly code = 'api_error';
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
+
+export class GitHubForbiddenError extends Error {
+  readonly code = 'forbidden';
+  /** Present when the response carried a `Retry-After` header — GitHub's
+   *  signal that this 403 is a retryable secondary rate limit / abuse-detection
+   *  block, not a permission failure. Absent → the caller should treat this as
+   *  a hard failure (bad token scope, private repo, etc.), never retried. */
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
+    super(message);
+  }
+}
+
+export class GitHubRateLimitError extends Error {
+  readonly code = 'rate_limited';
+  constructor(message: string, readonly retryAfterMs: number = 60_000) {
+    super(message);
+  }
+}
+
+export interface GitHubApiCallOptions {
+  method?: 'GET' | 'POST' | 'PATCH';
+  body?: unknown;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Single-shot GitHub REST call taking an already-resolved token directly (no
+ * credential_id, no DB) — extends this file's existing "pure helpers, no
+ * DB/config" section rather than introducing a second GitHub HTTP client
+ * (ticket 31e7cd24's explicit constraint). `GitHubConnectorService.githubFetch`
+ * below stays as-is for the credential_id-resolving MCP tools
+ * (fetch_github_info/search_github/sync_github_resource); this is the same
+ * REST surface, parameterized by a raw token for a caller (the outreach
+ * GitHubConnector) that resolves auth through a different, workspace-scope-
+ * checked path (outreach-credential.ts) and must never touch the Credential
+ * table itself (connectors/types.ts's documented connector boundary).
+ *
+ * No retry here — single call only, so the caller can inspect response
+ * headers (x-ratelimit-remaining/x-ratelimit-reset) between its own retries.
+ */
+export async function githubApiCall(path: string, token: string, opts: GitHubApiCallOptions = {}): Promise<Response> {
+  const fetchImpl = opts.fetchImpl || globalThis.fetch;
+  const headers: Record<string, string> = {
+    'Accept': 'application/vnd.github.v3+json',
+    'Authorization': `Bearer ${token}`,
+    'User-Agent': 'AWB-GitHub-Connector',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  let body: string | undefined;
+  if (opts.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(opts.body);
+  }
+  return fetchImpl(`${GITHUB_API}${path}`, { method: opts.method || 'GET', headers, body });
+}
+
+/**
+ * Throws the appropriately-typed error for a non-ok response — 403 (secondary
+ * rate limit / abuse detection) as GitHubForbiddenError, 429 (primary rate
+ * limit exceeded) as GitHubRateLimitError (retryAfterMs from the `Retry-After`
+ * header when present), everything else as GitHubApiError. No-op for ok responses.
+ */
+export async function assertGitHubOk(res: Response, context: string): Promise<void> {
+  if (res.ok) return;
+  const text = await res.text().catch(() => '');
+  // headers.get() returns null when the header is absent — Number(null) is 0
+  // (a valid, truthy-adjacent number), NOT NaN, so the absent case must be
+  // checked explicitly before converting; otherwise "no Retry-After header"
+  // silently becomes "retry after 0ms" instead of "not retryable" (403) /
+  // "fall back to the 60s default" (429).
+  const retryAfterHeader = res.headers.get('retry-after');
+  const retryAfterSeconds = retryAfterHeader !== null ? Number(retryAfterHeader) : NaN;
+  const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0 ? retryAfterSeconds * 1000 : undefined;
+  if (res.status === 403) {
+    throw new GitHubForbiddenError(`GitHub forbidden (403) on ${context}: ${text.slice(0, 200)}`, 403, retryAfterMs);
+  }
+  if (res.status === 429) {
+    throw new GitHubRateLimitError(`GitHub rate limit exceeded on ${context}`, retryAfterMs ?? 60_000);
+  }
+  throw new GitHubApiError(`GitHub API ${context} failed (${res.status}): ${text.slice(0, 200)}`, res.status);
+}
+
+/**
+ * Open issues updated at/after `since` (ISO timestamp, '' = all), oldest
+ * first, PRs filtered out (GitHub's issues endpoint includes pull requests —
+ * each carries a `pull_request` key issues never do). `since` matches on
+ * UPDATED time, not created time, so one call naturally covers both brand-new
+ * issues and issues whose body/comments changed — the connector layer decides
+ * "new" vs. "already ticketed" from OutreachInboundItem, not from this endpoint.
+ */
+export async function listOpenIssuesSince(
+  owner: string, repo: string, since: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<GitHubIssue[]> {
+  const qs = new URLSearchParams({ state: 'open', sort: 'updated', direction: 'asc', per_page: '100' });
+  if (since) qs.set('since', since);
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues?${qs}`, token, { fetchImpl: opts.fetchImpl });
+  await assertGitHubOk(res, `GET issues ${owner}/${repo}`);
+  const data: any[] = await res.json();
+  return data
+    .filter((i) => !('pull_request' in i))
+    .map((i) => ({
+      number: i.number,
+      title: i.title || '',
+      body: i.body || '',
+      html_url: i.html_url,
+      user: i.user?.login || '',
+      state: i.state,
+      created_at: i.created_at,
+      updated_at: i.updated_at,
+    }));
+}
+
+/** Comments on one issue created at/after `since` ('' = all), oldest first. */
+export async function listIssueCommentsSince(
+  owner: string, repo: string, issueNumber: number, since: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<GitHubIssueComment[]> {
+  const qs = new URLSearchParams({ per_page: '100' });
+  if (since) qs.set('since', since);
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}/comments?${qs}`, token, { fetchImpl: opts.fetchImpl });
+  await assertGitHubOk(res, `GET issue comments ${owner}/${repo}#${issueNumber}`);
+  const data: any[] = await res.json();
+  return data.map((c) => ({
+    id: c.id,
+    body: c.body || '',
+    html_url: c.html_url,
+    user: c.user?.login || '',
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  }));
+}
+
+/**
+ * Files changed between two commits (paths only, oldest→newest semantics N/A
+ * — order matches GitHub's response). Used by the release-consistency check
+ * (ticket 31e7cd24 범위 3) to detect doc-vs-code drift; `base`/`head` accept
+ * any git ref GitHub's compare endpoint does (full sha, short sha, branch).
+ */
+export async function compareCommits(
+  owner: string, repo: string, base: string, head: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<string[]> {
+  const res = await githubApiCall(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, token, { fetchImpl: opts.fetchImpl });
+  await assertGitHubOk(res, `GET compare ${owner}/${repo} ${base}...${head}`);
+  const data = await res.json();
+  const files: any[] = Array.isArray(data.files) ? data.files : [];
+  return files.map((f) => f.filename).filter((f) => typeof f === 'string');
+}
+
+/** Posts a new comment on an issue; returns its id + permalink. */
+export async function createIssueComment(
+  owner: string, repo: string, issueNumber: number, body: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<{ id: number; html_url: string }> {
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, token, {
+    method: 'POST', body: { body }, fetchImpl: opts.fetchImpl,
+  });
+  await assertGitHubOk(res, `POST issue comment ${owner}/${repo}#${issueNumber}`);
+  const data = await res.json();
+  return { id: data.id, html_url: data.html_url };
+}
+
+/** Opens a new issue; returns its number + permalink (the closest GitHub
+ *  analog to OutreachConnector.publish's "new top-level post"). */
+export async function createIssue(
+  owner: string, repo: string, title: string, body: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<{ number: number; html_url: string }> {
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues`, token, {
+    method: 'POST', body: { title, body }, fetchImpl: opts.fetchImpl,
+  });
+  await assertGitHubOk(res, `POST issue ${owner}/${repo}`);
+  const data = await res.json();
+  return { number: data.number, html_url: data.html_url };
+}
+
+/** Closes an issue. Never called unless the owning OutreachChannel opted in
+ *  (close_on_resolve=true, default false) — see connectors/github.connector.ts. */
+export async function closeIssue(
+  owner: string, repo: string, issueNumber: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
+): Promise<void> {
+  const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}`, token, {
+    method: 'PATCH', body: { state: 'closed' }, fetchImpl: opts.fetchImpl,
+  });
+  await assertGitHubOk(res, `PATCH close issue ${owner}/${repo}#${issueNumber}`);
+}
+
+/** The authenticated user's own login — used to filter the bot's own
+ *  comments out of fetchInbound (self-referential loop prevention). */
+export async function getAuthenticatedLogin(token: string, opts: { fetchImpl?: typeof fetch } = {}): Promise<string> {
+  const res = await githubApiCall('/user', token, { fetchImpl: opts.fetchImpl });
+  await assertGitHubOk(res, 'GET authenticated user');
+  const data = await res.json();
+  return data.login || '';
+}
+
 /**
  * GitHub REST v3 client with DB-backed credential resolution.
  *
