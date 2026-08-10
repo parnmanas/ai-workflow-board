@@ -59,7 +59,7 @@ import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
-import { GitHubConnectorService, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl } from '../../services/github-connector.service';
+import { GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl } from '../../services/github-connector.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
@@ -197,6 +197,11 @@ interface CiSweepStats {
   delivery_failures: number;
   recovered: number;
   skipped_disabled: boolean;
+  /** GitHub reads that failed non-degradably (401/403/429/5xx/network) — see
+   *  isGitHubDegradableError. Each one is also logged under 'CI' with
+   *  board/repo/workflow context; a nonzero count here means the sweep did
+   *  NOT get a full picture this pass, even though it didn't throw. */
+  fetch_failures: number;
 }
 
 @Injectable()
@@ -260,21 +265,18 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       boards_scanned: 0, targets_checked: 0, alerts_created: 0, alerts_updated: 0,
       tickets_created: 0, delivery_failures: 0, recovered: 0,
       skipped_disabled: !this.config.enabled,
+      fetch_failures: 0,
     };
     if (!this.config.enabled) return stats;
-    if (!(await this.github.isEnabled())) {
-      // No GITHUB_TOKEN anywhere (env or any board's env-repo credential) —
-      // every call below would just degrade to [] per-board; skip the whole
-      // sweep quietly rather than log a warning per board (dev-without-a-
-      // token is the common case, not an error).
-      return stats;
-    }
 
     const boards = await this.dataSource.getRepository(Board).find();
     // Cache API responses per (owner/repo) and (owner/repo/workflow/branch)
     // for the DURATION of this sweep only — several boards can point at the
     // same repo, and each still needs its own per-board alert/ticket
-    // evaluation, but the underlying GitHub calls should fire once.
+    // evaluation, but the underlying GitHub calls should fire once. A
+    // rejected promise is cached too — a second board hitting the same
+    // broken repo/workflow this sweep reuses the failure instead of hammering
+    // an endpoint already known to be down this pass.
     const workflowsCache = new Map<string, Promise<GitHubWorkflow[]>>();
     const runsCache = new Map<string, Promise<GitHubWorkflowRun[]>>();
 
@@ -282,12 +284,28 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       stats.boards_scanned += 1;
       const target = await this._resolveMonitorTarget(board);
       if (!target) continue;
+      // No token resolves for THIS target — neither its own Resource
+      // credential nor the env fallback. Checked per-target (never globally
+      // up front): env GITHUB_TOKEN being unset must not blind the sweep to
+      // every OTHER board whose Resource carries its own working credential
+      // (ticket cc1c494e review — this was the bug: a global env-only check
+      // skipped the entire sweep even when a board credential was valid).
+      if (!(await this.github.isEnabled(target.credentialId))) continue;
 
       const wfKey = `${target.owner}/${target.repo}`;
       if (!workflowsCache.has(wfKey)) {
         workflowsCache.set(wfKey, this.github.listWorkflows(target.owner, target.repo, target.credentialId));
       }
-      const workflows = await workflowsCache.get(wfKey)!;
+      let workflows: GitHubWorkflow[];
+      try {
+        workflows = await workflowsCache.get(wfKey)!;
+      } catch (e) {
+        stats.fetch_failures += 1;
+        this.logService.warn('CI', 'GitHub workflow list fetch failed — skipping this board this sweep', {
+          board_id: board.id, repo: target.repoFullName, branch: target.branch, ...this._describeFetchError(e),
+        });
+        continue;
+      }
 
       for (const workflow of workflows) {
         stats.targets_checked += 1;
@@ -298,7 +316,17 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
             this.github.listWorkflowRuns(target.owner, target.repo, workflow.id, target.branch, target.credentialId),
           );
         }
-        const runs = await runsCache.get(runsKey)!;
+        let runs: GitHubWorkflowRun[];
+        try {
+          runs = await runsCache.get(runsKey)!;
+        } catch (e) {
+          stats.fetch_failures += 1;
+          this.logService.warn('CI', 'GitHub workflow runs fetch failed — skipping this workflow this sweep', {
+            board_id: board.id, repo: target.repoFullName, branch: target.branch,
+            workflow_id: workflow.id, workflow_name: workflow.name, ...this._describeFetchError(e),
+          });
+          continue;
+        }
         const evalResult = evaluateRedStreak(runs, now, {
           minConsecutiveRuns: this.config.minRuns,
           minAgeMs: this.config.minAgeMs,
@@ -307,6 +335,15 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       }
     }
     return stats;
+  }
+
+  /** Loggable fields for a caught GitHub fetch error — surfaces the
+   *  Retry-After hint on a rate-limit error since that's actionable context
+   *  a plain message string would bury. */
+  private _describeFetchError(e: unknown): { err: string; retry_after_ms?: number } {
+    const out: { err: string; retry_after_ms?: number } = { err: e instanceof Error ? e.message : String(e) };
+    if (e instanceof GitHubRateLimitError) out.retry_after_ms = e.retryAfterMs;
+    return out;
   }
 
   /**
@@ -432,9 +469,19 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       });
       return false;
     }
-    const failedJobs = evalResult.lastRun
-      ? await this.github.listRunFailedJobs(target.owner, target.repo, evalResult.lastRun.id, target.credentialId)
-      : [];
+    let failedJobs: string[] = [];
+    if (evalResult.lastRun) {
+      try {
+        failedJobs = await this.github.listRunFailedJobs(target.owner, target.repo, evalResult.lastRun.id, target.credentialId);
+      } catch (e) {
+        // Decorative only (job names in the alert body) — post the alert
+        // without them rather than losing the whole alert over this, but the
+        // failure must still be logged, not silently dropped.
+        this.logService.warn('CI', 'GitHub failed-jobs fetch failed — posting alert without job detail', {
+          board_id: board.id, repo: target.repoFullName, run_id: evalResult.lastRun.id, ...this._describeFetchError(e),
+        });
+      }
+    }
     const ageH = evalResult.firstFailedRun
       ? Math.max(0, (now.getTime() - new Date(evalResult.firstFailedRun.updated_at).getTime()) / 3_600_000)
       : 0;

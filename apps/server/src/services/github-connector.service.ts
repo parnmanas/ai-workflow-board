@@ -117,6 +117,34 @@ export class GitHubRateLimitError extends Error {
   }
 }
 
+/** No token resolved for the request (neither the given credential_id nor
+ *  the env fallback) — the one failure mode every caller of `githubFetch`
+ *  has always treated as a quiet "nothing configured" degrade, never a real
+ *  error worth surfacing (ticket cc1c494e review — kept that contract). */
+export class GitHubNoTokenError extends Error {
+  readonly code = 'no_token';
+  constructor() {
+    super('GitHub token not configured');
+  }
+}
+
+/**
+ * True for the two failure modes `listWorkflows`/`listWorkflowRuns`/
+ * `listRunFailedJobs` are allowed to swallow into `[]`: no token resolved,
+ * or a 404 (repo/workflow/run doesn't exist — not a monitoring failure).
+ * Everything else (401/403/429/5xx, network errors) is NOT degradable and
+ * must propagate so the caller can observe and log the failure instead of
+ * silently treating a broken credential or a GitHub outage as "nothing to
+ * report" (ticket cc1c494e review — this exact silence was the bug: a
+ * watchdog whose own reads fail open reproduces the silent-red failure mode
+ * it exists to catch).
+ */
+export function isGitHubDegradableError(error: unknown): boolean {
+  if (error instanceof GitHubNoTokenError) return true;
+  if (error instanceof GitHubApiError && error.status === 404) return true;
+  return false;
+}
+
 export interface GitHubApiCallOptions {
   method?: 'GET' | 'POST' | 'PATCH';
   body?: unknown;
@@ -344,7 +372,7 @@ export class GitHubConnectorService {
     fetchImpl: typeof fetch = fetch,
   ): Promise<any> {
     const token = await this.resolveToken(credentialId);
-    if (!token) throw new Error('GitHub token not configured');
+    if (!token) throw new GitHubNoTokenError();
 
     const res = await fetchImpl(`${GITHUB_API}${path}`, {
       headers: {
@@ -354,12 +382,10 @@ export class GitHubConnectorService {
         'X-GitHub-Api-Version': '2022-11-28',
       },
     });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`);
-    }
-
+    // Typed errors (GitHubForbiddenError/GitHubRateLimitError/GitHubApiError)
+    // so callers can tell "not found" apart from an auth/rate-limit/server
+    // failure — see isGitHubDegradableError.
+    await assertGitHubOk(res, path);
     return res.json();
   }
 
@@ -389,8 +415,11 @@ export class GitHubConnectorService {
    * Active workflows for a repo (ticket cc1c494e — `CiHealthMonitorService`
    * needs to enumerate what to sweep without a hardcoded workflow id, since
    * one is repo-specific and this connector serves every board's repo).
-   * Degrades to `[]` on missing token / 404 / any failure — the sweep treats
-   * an empty result as "nothing to check this pass", never throws.
+   * Degrades to `[]` on missing token / 404 — "nothing configured" / "repo
+   * doesn't have this" are not failures. Any other error (401/403/429/5xx,
+   * network) PROPAGATES — the caller must observe and log it, not treat a
+   * broken credential or a GitHub outage as "nothing to check this pass"
+   * (ticket cc1c494e review — see `isGitHubDegradableError`).
    */
   async listWorkflows(
     owner: string, repo: string, credentialId?: string | null, fetchImpl?: typeof fetch,
@@ -402,16 +431,17 @@ export class GitHubConnectorService {
       return workflows
         .filter((w) => w?.state === 'active')
         .map((w) => ({ id: String(w.id), name: w.name || '', path: w.path || '', state: w.state || '' }));
-    } catch {
-      return [];
+    } catch (e) {
+      if (isGitHubDegradableError(e)) return [];
+      throw e;
     }
   }
 
   /**
    * Most recent COMPLETED runs of one workflow on one branch, newest first
    * (GitHub's default order) — `evaluateRedStreak` only ever needs a short
-   * recent window, not full history. Degrades to `[]` on any failure, same
-   * contract as `listWorkflows`.
+   * recent window, not full history. Same degrade/propagate contract as
+   * `listWorkflows`.
    */
   async listWorkflowRuns(
     owner: string, repo: string, workflowId: string, branch: string,
@@ -434,13 +464,17 @@ export class GitHubConnectorService {
         created_at: r.created_at || '',
         updated_at: r.updated_at || '',
       }));
-    } catch {
-      return [];
+    } catch (e) {
+      if (isGitHubDegradableError(e)) return [];
+      throw e;
     }
   }
 
   /** Names of the non-successful jobs within one run (for the alert message
-   *  body — "which job(s) actually failed"). Degrades to `[]` on any failure. */
+   *  body — "which job(s) actually failed"). Same degrade/propagate contract
+   *  as `listWorkflows` — this one is decorative (the caller still posts the
+   *  alert without job names on failure), but the failure itself must still
+   *  reach the caller to log, not vanish into an empty array. */
   async listRunFailedJobs(
     owner: string, repo: string, runId: string, credentialId?: string | null, fetchImpl?: typeof fetch,
   ): Promise<string[]> {
@@ -451,8 +485,9 @@ export class GitHubConnectorService {
       return jobs
         .filter((j) => j?.conclusion && j.conclusion !== 'success')
         .map((j) => j.name || '(unnamed job)');
-    } catch {
-      return [];
+    } catch (e) {
+      if (isGitHubDegradableError(e)) return [];
+      throw e;
     }
   }
 
