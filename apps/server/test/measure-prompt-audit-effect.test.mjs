@@ -183,3 +183,44 @@ test('computeReport: default window is [now-30d, now) when since/until are omitt
   assert.ok(untilMs - before < 5000, 'until defaults to ~now');
   assert.equal(untilMs - sinceMs, 30 * 24 * 60 * 60 * 1000, 'since defaults to exactly 30 days before until');
 });
+
+test('computeReport: maturationBufferHours excludes tickets that had no time to mature from completion_rate (right-censoring mitigation, ticket c936cee7)', async () => {
+  const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'MaturationFixtureWorkspace' }));
+  const wsId = workspace.id;
+  const board = await boardRepo.save(boardRepo.create({ name: 'MaturationFixture', workspace_id: wsId }));
+  const active = await colRepo.save(colRepo.create({ board_id: board.id, name: 'In Progress', position: 0, kind: 'active' }));
+  const done = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Done', position: 1, kind: 'terminal', is_terminal: true }));
+
+  const until = new Date();
+  const since = new Date(until.getTime() - 72 * 60 * 60 * 1000);
+
+  // X: created 10h before `until` — under a 24h buffer, must be excluded
+  // from both created and completed regardless of its own terminal state.
+  await ticketRepo.save(ticketRepo.create({
+    title: 'X', column_id: active.id, workspace_id: wsId,
+    created_at: new Date(until.getTime() - 10 * 60 * 60 * 1000),
+  }));
+  // Y: created 48h before `until`, terminal — matured, counts as completed.
+  await ticketRepo.save(ticketRepo.create({
+    title: 'Y', column_id: done.id, workspace_id: wsId,
+    created_at: new Date(until.getTime() - 48 * 60 * 60 * 1000),
+    terminal_entered_at: new Date(until.getTime() - 47 * 60 * 60 * 1000),
+  }));
+  // Z: created 48h before `until`, NOT terminal — matured, counts as incomplete.
+  await ticketRepo.save(ticketRepo.create({
+    title: 'Z', column_id: active.id, workspace_id: wsId,
+    created_at: new Date(until.getTime() - 48 * 60 * 60 * 1000),
+  }));
+
+  const unbuffered = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: wsId });
+  assert.deepEqual(
+    unbuffered.completion_rate, { created: 3, completed: 1, rate: 1 / 3 },
+    'without a buffer, X counts in the denominator despite having had almost no time to complete (the bias this ticket documents)',
+  );
+
+  const buffered = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: wsId, maturationBufferHours: 24 });
+  assert.deepEqual(
+    buffered.completion_rate, { created: 2, completed: 1, rate: 0.5, excluded_for_maturation: 1 },
+    'a 24h buffer excludes X (created 10h before until) but keeps Y and Z (created 48h before until)',
+  );
+});

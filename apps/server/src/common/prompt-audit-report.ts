@@ -28,6 +28,18 @@ import { DataSource } from 'typeorm';
 //                               window, what fraction have terminal_entered_at
 //                               set by measurement time (reached Done)?
 //
+// completion_rate 우측 절단(right-censoring) 경고 (ticket c936cee7): `completed`는
+// "쿼리 실행 시점(now) 기준으로 terminal_entered_at이 set 되어 있는가"만 보고
+// `until`로 bound되지 않는다. `until`이 실제 now에 가까운 호출(예: before/after
+// 비교에서 after 윈도우의 until=측정 시각)에서는 창 끝자락에 생성된 티켓이
+// 완료할 시간을 거의 못 받은 채 "미완료"로 잡혀, 실제 프로세스 품질과 무관하게
+// completion_rate가 구조적으로 낮게 나올 수 있다. 완전히 과거로 지나간 창은 이
+// 편향이 없다 — 두 창을 나란히 비교할 때 이 비대칭이 착시를 만든다.
+// `maturationBufferHours`를 넘기면 `created_at`이 `until - buffer`보다 늦은
+// (즉 창 끝까지 buffer만큼의 여유를 못 받은) 티켓을 분모·분자에서 제외해
+// 완화할 수 있다 — 비교하는 두 창 모두에 동일한 버퍼를 적용해야 공정하다.
+// 넘기지 않으면 기존 동작과 100% 동일(하위호환 기본값).
+//
 // Two non-obvious ActivityLog shape gotchas this works around:
 //   - `field_changed='column'` rows store the COLUMN NAME in old/new_value
 //     (`ticket-move.ts`), NOT the column id — matching must be by name. This
@@ -55,7 +67,7 @@ import { DataSource } from 'typeorm';
 export async function computeReport(
   ds: DataSource,
   entities: { ActivityLog: any; Comment: any; Ticket: any; BoardColumn: any; Board: any },
-  { since, until, workspaceId }: { since?: Date; until?: Date; workspaceId?: string } = {},
+  { since, until, workspaceId, maturationBufferHours }: { since?: Date; until?: Date; workspaceId?: string; maturationBufferHours?: number } = {},
 ): Promise<Record<string, any>> {
   const { ActivityLog, Comment, Ticket, BoardColumn, Board } = entities;
   const untilResolved = until ?? new Date();
@@ -198,13 +210,22 @@ export async function computeReport(
     .where('t.depth = 0 AND t.parent_id IS NULL')
     .andWhere('t.created_at >= :since AND t.created_at < :until', range);
   if (workspaceId) createdQb.andWhere('t.workspace_id = :wsId', { wsId: workspaceId });
-  const created = await createdQb.getMany();
+  const createdInWindow = await createdQb.getMany();
+  // maturationBufferHours 완화(ticket c936cee7, 위 우측 절단 경고 참고) — 명시
+  // 전달했을 때만 적용, 미전달 시 createdInWindow 전체를 그대로 쓴다(기존 동작).
+  const maturationCutoff = maturationBufferHours !== undefined && maturationBufferHours !== null
+    ? new Date(untilResolved.getTime() - Math.max(0, maturationBufferHours) * 60 * 60 * 1000)
+    : null;
+  const created = maturationCutoff
+    ? createdInWindow.filter((t: any) => new Date(t.created_at) < maturationCutoff)
+    : createdInWindow;
   const completed = created.filter((t: any) => !!t.terminal_entered_at).length;
-  const completionRate = {
+  const completionRate: Record<string, any> = {
     created: created.length,
     completed,
     rate: created.length > 0 ? completed / created.length : null,
   };
+  if (maturationCutoff) completionRate.excluded_for_maturation = createdInWindow.length - created.length;
 
   return {
     window: { since: sinceResolved.toISOString(), until: untilResolved.toISOString() },
