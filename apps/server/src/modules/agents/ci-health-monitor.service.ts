@@ -270,13 +270,16 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     if (!this.config.enabled) return stats;
 
     const boards = await this.dataSource.getRepository(Board).find();
-    // Cache API responses per (owner/repo) and (owner/repo/workflow/branch)
-    // for the DURATION of this sweep only — several boards can point at the
-    // same repo, and each still needs its own per-board alert/ticket
-    // evaluation, but the underlying GitHub calls should fire once. A
+    // Cache API responses per (owner/repo/credential) and
+    // (owner/repo/credential/workflow/branch) for the DURATION of this sweep
+    // only — several boards can point at the same repo, and each still needs
+    // its own per-board alert/ticket evaluation, but the underlying GitHub
+    // calls should fire once PER CREDENTIAL. credentialId is part of the key
+    // (ticket cc1c494e review) — two boards on the same repo with different
+    // credentials must never share a cached success or a cached rejection. A
     // rejected promise is cached too — a second board hitting the same
-    // broken repo/workflow this sweep reuses the failure instead of hammering
-    // an endpoint already known to be down this pass.
+    // broken repo/workflow/credential this sweep reuses the failure instead
+    // of hammering an endpoint already known to be down this pass.
     const workflowsCache = new Map<string, Promise<GitHubWorkflow[]>>();
     const runsCache = new Map<string, Promise<GitHubWorkflowRun[]>>();
 
@@ -292,7 +295,16 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       // skipped the entire sweep even when a board credential was valid).
       if (!(await this.github.isEnabled(target.credentialId))) continue;
 
-      const wfKey = `${target.owner}/${target.repo}`;
+      // credentialId is part of the cache key (with an explicit sentinel for
+      // the env-token fallback) — two boards can point at the SAME repo with
+      // DIFFERENT credentials, and each credential's success/failure must
+      // stay independent. Keying by owner/repo alone made the first board's
+      // cached promise (success OR rejection) get reused for a second board's
+      // different credential (ticket cc1c494e review — a private repo watched
+      // by an invalid credential on one board would poison a valid credential
+      // on another board of the same repo).
+      const credKey = target.credentialId ?? '__env__';
+      const wfKey = `${target.owner}/${target.repo}/${credKey}`;
       if (!workflowsCache.has(wfKey)) {
         workflowsCache.set(wfKey, this.github.listWorkflows(target.owner, target.repo, target.credentialId));
       }
