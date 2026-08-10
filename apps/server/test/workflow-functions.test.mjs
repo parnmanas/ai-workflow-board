@@ -237,6 +237,24 @@ describe('Workflow Functions — prompt_audit.measure_effect builtin', () => {
     );
   });
 
+  // maturation_buffer_hours 파라미터 자체의 산식 검증(버퍼가 completion_rate를
+  // 어떻게 바꾸는지)은 measure-prompt-audit-effect.test.mjs가 고정한다 — 여기는
+  // executePromptAuditMeasureEffect()의 Number.isFinite() 검증 분기만 확인하는
+  // 얇은 wiring 테스트다(ticket c936cee7). 문자열 등 typeof가 다른 입력은
+  // execute()의 스키마 검증(validateInputs, typeof number 체크)이 먼저 막아
+  // 핸들러까지 도달하지 않으므로, 그 스키마 체크를 typeof로는 통과하지만
+  // 산술에 쓸 수 없는 Infinity로 핸들러 자체의 방어 분기를 겨냥한다.
+  it('rejects a non-finite maturation_buffer_hours input that passes the number typeof check', async () => {
+    await assert.rejects(
+      service.execute({
+        functionKey: 'prompt_audit.measure_effect',
+        workspaceId: `ws-invalid-buffer-${Date.now()}`,
+        inputs: { maturation_buffer_hours: Infinity },
+      }),
+      /maturation_buffer_hours must be a number/,
+    );
+  });
+
   // Regression (ec498050/f3fc298a review): BoardColumn has no reliable own
   // workspace_id (columns.controller.ts never sets it), so the active/review/
   // merging/terminal column-kind lookups in computeReport() must be scoped

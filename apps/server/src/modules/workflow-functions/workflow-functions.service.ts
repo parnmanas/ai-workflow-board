@@ -96,7 +96,7 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
   {
     key: 'prompt_audit.measure_effect',
     name: 'Prompt audit effect report',
-    description: 'Computes the 4 prompt-audit metrics (start_rate, unnecessary_questions, pending_misclassification_rate, completion_rate) over a time window for the calling workspace, via the shared computeReport() formula (see src/common/prompt-audit-report.ts). Read-only. Lets an agent measure production data through MCP instead of needing direct DB credentials (ticket f3fc298a).',
+    description: 'Computes the 4 prompt-audit metrics (start_rate, unnecessary_questions, pending_misclassification_rate, completion_rate) over a time window for the calling workspace, via the shared computeReport() formula (see src/common/prompt-audit-report.ts). Read-only. Lets an agent measure production data through MCP instead of needing direct DB credentials (ticket f3fc298a). Caution: completion_rate is right-censored when `until` is close to real time (e.g. a before/after comparison where the after-window\'s `until` = now) — tickets created near the tail of the window have had little time to complete and read as unfinished regardless of process quality. Pass `maturation_buffer_hours` to exclude tickets created less than that many hours before `until` from the completion_rate denominator (apply the same buffer to both windows of a comparison) (ticket c936cee7).',
     executor_type: 'builtin',
     config: stringifyJson({ handler: 'prompt_audit.measure_effect' }),
     input_schema: stringifyJson({
@@ -104,6 +104,7 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
       properties: {
         since: { type: 'string' },
         until: { type: 'string' },
+        maturation_buffer_hours: { type: 'number' },
       },
     }),
     output_schema: stringifyJson({
@@ -541,7 +542,12 @@ export class WorkflowFunctionsService implements OnModuleInit {
     const until = inputs?.until !== undefined ? new Date(String(inputs.until)) : undefined;
     if (since && Number.isNaN(since.getTime())) throw httpError(400, 'inputs.since must be an ISO 8601 timestamp');
     if (until && Number.isNaN(until.getTime())) throw httpError(400, 'inputs.until must be an ISO 8601 timestamp');
-    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId });
+    let maturationBufferHours: number | undefined;
+    if (inputs?.maturation_buffer_hours !== undefined) {
+      maturationBufferHours = Number(inputs.maturation_buffer_hours);
+      if (!Number.isFinite(maturationBufferHours)) throw httpError(400, 'inputs.maturation_buffer_hours must be a number');
+    }
+    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId, maturationBufferHours });
   }
 
   async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {
