@@ -31,7 +31,12 @@
 // Usage:
 //   node apps/server/scripts/measure-prompt-audit-effect.mjs \
 //     [--since 2026-07-01T00:00:00Z] [--until 2026-07-31T00:00:00Z] \
-//     [--workspace <workspace_id>] [--json]
+//     [--workspace <workspace_id>] [--maturation-buffer-hours 24] [--json]
+//
+// --maturation-buffer-hours completion_rate 우측 절단 편향 완화(ticket
+// c936cee7) — `until - buffer`보다 늦게 생성된 티켓을 completion_rate
+// 분모·분자에서 제외한다. before/after를 나란히 비교할 때는 양쪽 창에
+// 동일한 값을 넘겨야 공정하다. computeReport() 상단 doc comment 참고.
 //
 //   DB_TYPE=postgres DB_HOST=... DB_PORT=... DB_USER=... DB_PASS=... DB_NAME=... \
 //     node apps/server/scripts/measure-prompt-audit-effect.mjs --since ... --until ...
@@ -63,7 +68,8 @@ function printReport(report) {
   console.log(`1. 착수율(start_rate): ${report.start_rate.also_advanced}/${report.start_rate.entered_active} = ${pct(report.start_rate.rate)}`);
   console.log(`2. 불필요 질문 수(unnecessary_questions): ${report.unnecessary_questions}건`);
   console.log(`3. pending 오분류율(pending_misclassification_rate): ${report.pending_misclassification_rate.misclassified}/${report.pending_misclassification_rate.pend_events} = ${pct(report.pending_misclassification_rate.rate)}`);
-  console.log(`4. 완료율(completion_rate): ${report.completion_rate.completed}/${report.completion_rate.created} = ${pct(report.completion_rate.rate)}\n`);
+  const excluded = report.completion_rate.excluded_for_maturation;
+  console.log(`4. 완료율(completion_rate): ${report.completion_rate.completed}/${report.completion_rate.created} = ${pct(report.completion_rate.rate)}${excluded !== undefined ? ` (성숙 버퍼로 ${excluded}건 분모 제외)` : ''}\n`);
   console.log('JSON 전체 출력: --json 플래그 사용');
 }
 
@@ -73,6 +79,12 @@ async function main() {
   const since = args.since ? new Date(args.since) : undefined;
   if ((args.since && Number.isNaN(new Date(args.since).getTime())) || (args.until && Number.isNaN(new Date(args.until).getTime()))) {
     console.error('Invalid --since/--until — expected an ISO 8601 timestamp.');
+    process.exit(1);
+  }
+  const maturationBufferHoursRaw = args['maturation-buffer-hours'];
+  const maturationBufferHours = maturationBufferHoursRaw !== undefined ? Number(maturationBufferHoursRaw) : undefined;
+  if (maturationBufferHoursRaw !== undefined && !Number.isFinite(maturationBufferHours)) {
+    console.error('Invalid --maturation-buffer-hours — expected a number.');
     process.exit(1);
   }
 
@@ -88,7 +100,7 @@ async function main() {
   await ds.initialize();
   try {
     const report = await computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, {
-      since, until, workspaceId: args.workspace,
+      since, until, workspaceId: args.workspace, maturationBufferHours,
     });
     if (args.json) {
       console.log(JSON.stringify(report, null, 2));
