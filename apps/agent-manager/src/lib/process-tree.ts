@@ -260,10 +260,17 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+// Every call site here is on a path its caller `await`s for a real result
+// (reaped pids, drained tree) — unref'ing this timer let the grace period go
+// unfulfilled whenever it was the last thing holding the event loop open
+// (observed as Node's test runner reporting "Promise resolution is still
+// pending but the event loop has already resolved" for the awaiting
+// terminateDetachedProcessTree() caller). Keep it ref'd so the wait is
+// deterministic; the explicit SIGTERM/SIGINT shutdown path in main.ts is
+// what bounds overall shutdown time, not this timer.
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 
