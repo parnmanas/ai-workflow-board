@@ -337,7 +337,14 @@ test('github kind, target_environment configured, NO matching deployment yet: no
   } finally { await dataSource.destroy(); }
 });
 
-test('github kind, freshness-ordering fallback (no fix-commit label): a deployment at/after Done satisfies the gate and includes evidence in the body', async () => {
+// Review round 1, point 1 — regression: a freshness-only match (some
+// deployment landed after Done) must NEVER be accepted as evidence, since it
+// only proves timing, not that the deployment actually includes this
+// ticket's fix. Without a fix-commit:<sha> label, this must stay pending
+// forever — not just on the first _handleActivity call, but also across
+// every later deployment-event reconcile pass (the exact misattribution the
+// review caught: an unrelated deployment must not get cited as "processed").
+test('github kind, NO fix-commit label: a deployment at/after Done does NOT satisfy the gate — freshness-only timing is never accepted as evidence', async () => {
   const dataSource = await setupDb();
   try {
     const { doneCol } = await seedTerminalColumn(dataSource);
@@ -355,14 +362,16 @@ test('github kind, freshness-ordering fallback (no fix-commit label): a deployme
     const fake = installFakeGithubFetch();
     try {
       await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
-    } finally { restoreFetch(); }
+      let rows = await dataSource.getRepository(OutreachOutboundPost).find();
+      assert.equal(rows.length, 0, 'no fix-commit label — an unrelated-looking deployment must not be cited as evidence');
 
-    const rows = await dataSource.getRepository(OutreachOutboundPost).find();
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].status, 'published');
-    assert.match(rows[0].body, /prod/);
-    assert.match(rows[0].body, /b{12}/);
-    assert.equal(fake.comment, 1);
+      // A LATER deployment event for the same environment must not retroactively
+      // accept the same unproven timing match either.
+      await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: 'b'.repeat(40) });
+      rows = await dataSource.getRepository(OutreachOutboundPost).find();
+      assert.equal(rows.length, 0, 'still no ledger row after a reconcile pass — remains a human-confirm candidate forever without a fix-commit label');
+      assert.equal(fake.comment, 0);
+    } finally { restoreFetch(); }
   } finally { await dataSource.destroy(); }
 });
 
@@ -400,7 +409,7 @@ test('github kind, fix-commit label + matching ancestor_shas satisfies the gate 
   } finally { await dataSource.destroy(); }
 });
 
-test('github kind: a deployment reported AFTER the ticket reached Done fires the previously-pending resolve', async () => {
+test('github kind: a deployment reported AFTER the ticket reached Done fires the previously-pending resolve once its sha matches the fix-commit label', async () => {
   const dataSource = await setupDb();
   try {
     const { doneCol } = await seedTerminalColumn(dataSource);
@@ -408,7 +417,10 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
+    const fixSha = 'e'.repeat(40);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
@@ -416,18 +428,88 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id }); // no deployment yet — registers pending
+      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id }); // no deployment yet — stays a standing candidate
       let rows = await dataSource.getRepository(OutreachOutboundPost).find();
-      assert.equal(rows.length, 0, 'still pending — no evidence yet');
+      assert.equal(rows.length, 0, 'still no evidence yet');
 
-      await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: 'e'.repeat(40) });
-      await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: 'e'.repeat(40) });
+      await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
+      await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: fixSha });
 
       rows = await dataSource.getRepository(OutreachOutboundPost).find();
-      assert.equal(rows.length, 1, 'the pending resolve fired once the deployment landed');
+      assert.equal(rows.length, 1, 'the reconcile pass fired once the matching deployment landed');
       assert.equal(rows[0].status, 'published');
       assert.equal(fake.comment, 1);
     } finally { restoreFetch(); }
+  } finally { await dataSource.destroy(); }
+});
+
+// Review round 1, point 3 — restart durability: a fresh service instance
+// (no shared in-memory state — simulates a server restart between the
+// ticket reaching Done and the satisfying deployment landing) must still
+// find and fire the resolve, purely by re-deriving candidates from the DB.
+test('restart durability: a BRAND-NEW service instance (no prior _handleActivity call) still finds and fires an already-satisfied candidate via reconcile', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { doneCol } = await seedTerminalColumn(dataSource);
+    const cred = await seedGithubCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, {
+      kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
+    });
+    const fixSha = 'f1'.repeat(20);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
+    await seedInboundItem(dataSource, channel, ticket.id, {
+      external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
+    });
+    // The deployment already satisfies the gate BEFORE any service instance
+    // ever saw this ticket reach Done — e.g. the server was down when it
+    // happened, so no in-memory registration (old design) could ever exist.
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
+
+    // A brand-new instance — never called _handleActivity, so under the OLD
+    // in-memory-map design this candidate would be invisible to it forever.
+    const { notifier } = makeServices(dataSource);
+    const fake = installFakeGithubFetch();
+    try {
+      await notifier._reconcileGithubResolves(); // the same call onModuleInit() fires at boot
+    } finally { restoreFetch(); }
+
+    const rows = await dataSource.getRepository(OutreachOutboundPost).find();
+    assert.equal(rows.length, 1, 'boot-time reconcile found the terminal+backlinked+already-satisfied candidate straight from the DB');
+    assert.equal(rows[0].status, 'published');
+    assert.equal(fake.comment, 1);
+  } finally { await dataSource.destroy(); }
+});
+
+test('reconcile is idempotent: calling it twice against an already-published item makes no second external call', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { doneCol } = await seedTerminalColumn(dataSource);
+    const cred = await seedGithubCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, {
+      kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
+    });
+    const fixSha = 'a3'.repeat(20);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
+    await seedInboundItem(dataSource, channel, ticket.id, {
+      external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
+    });
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
+    const { notifier } = makeServices(dataSource);
+
+    const fake = installFakeGithubFetch();
+    try {
+      await notifier._reconcileGithubResolves();
+      await notifier._reconcileGithubResolves();
+      await notifier._reconcileGithubResolves('prod');
+    } finally { restoreFetch(); }
+
+    const rows = await dataSource.getRepository(OutreachOutboundPost).find();
+    assert.equal(rows.length, 1, 'still exactly one ledger row across three reconcile passes');
+    assert.equal(fake.comment, 1, 'still exactly one external call');
   } finally { await dataSource.destroy(); }
 });
 
@@ -439,11 +521,14 @@ test('close_on_resolve=false (default): the issue is never closed even under pub
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: false,
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
+    const fixSha = 'f'.repeat(40);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
-    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: 'f'.repeat(40) });
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeGithubFetch();
@@ -464,11 +549,14 @@ test('close_on_resolve=true + publish_policy=auto: the issue is closed after a s
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: true,
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
+    const fixSha = 'a1'.repeat(20);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
-    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: 'a1'.repeat(20) });
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeGithubFetch();
@@ -489,11 +577,14 @@ test('close_on_resolve=true but publish_policy=approval: the draft is never auto
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'approval', target_environment: 'prod', close_on_resolve: true,
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
+    const fixSha = 'a2'.repeat(20);
+    const ticket = await seedDoneTicket(dataSource, doneCol, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
-    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: 'a2'.repeat(20) });
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeGithubFetch();

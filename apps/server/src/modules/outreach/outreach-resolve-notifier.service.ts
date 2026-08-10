@@ -31,24 +31,45 @@
  *
  * Deployment-fact gate (ticket 31e7cd24 — "판정은 컬럼 도달만으로 끝내지 말 것":
  * reaching Done is necessary but not sufficient; the fix must actually be
- * live before the external thread hears "resolved"). Mirrors
- * QaRerunOnFixService's deployment-fact gate exactly (same
- * `fix-commit:<sha>` label anchor + freshness-ordering fallback via the
- * shared `deployment-options.ts` helpers), scoped to `kind='github'` only —
- * Reddit's existing "fire on terminal-column arrival alone" behavior is
- * UNCHANGED, since that ticket never asked for this stricter evidence
+ * live before the external thread hears "resolved"), scoped to `kind='github'`
+ * only — Reddit's existing "fire on terminal-column arrival alone" behavior
+ * is UNCHANGED, since that ticket never asked for this stricter evidence
  * requirement. `OutreachChannel.target_environment` (default '') names the
  * `Deployment.environment` to check; unset behaves as "evidence permanently
- * unavailable" (registers as pending, never fires) rather than skipping the
- * gate — an unconfigured GitHub channel must never post without evidence
- * just because nobody named an environment yet. No fallback-fire-anyway cap
- * (unlike QA's rerun gate) — the ticket's explicit risk item ("판정 근거가
- * 불충분하면 코멘트 대신 사람 확인 대기로 보낼 것") means a resolve reply that
- * can never be evidenced should simply never fire, not eventually fire
- * blind. Same "not durable across a server restart" limitation as
- * QaRerunOnFixService's `_pending` map — a restart while a resolve is
- * pending drops it (the 'moved' activity that would re-register it fired
- * once and won't fire again without the ticket leaving and re-entering Done).
+ * unavailable" (never fires) rather than skipping the gate — an unconfigured
+ * GitHub channel must never post without evidence just because nobody named
+ * an environment yet.
+ *
+ * UNLIKE QaRerunOnFixService's gate, there is NO freshness-ordering fallback
+ * (review round 1, point 1): a `fix-commit:<sha>` ticket label — proving the
+ * deployed commit actually INCLUDES this ticket's fix — is the only accepted
+ * evidence. "some deployment landed after this ticket reached Done" was
+ * REMOVED as evidence; it never proved inclusion, only timing, so an
+ * unrelated deployment landing right after Done could get cited as proof
+ * this ticket's fix shipped. QaRerunOnFixService keeps its own freshness
+ * fallback deliberately (out of scope here) — a wrong QA rerun is cheap and
+ * reversible, but this notifier posts an irreversible "resolved" claim to a
+ * THIRD PARTY's public GitHub issue, matching the ticket's own explicit risk
+ * note: "판정 근거가 불충분하면 코멘트 대신 사람 확인 대기로 보낼 것". No
+ * fix-commit label on the ticket ⇒ evidence can never be proven ⇒ this
+ * backlink simply never auto-fires (stays a standing candidate for the
+ * periodic/event-driven reconcile below, and ultimately for a human to
+ * confirm manually) — never eventually-fire-blind.
+ *
+ * Durable across restarts (review round 1, point 3): candidates are NOT
+ * tracked in an in-memory map (an earlier version did this and lost pending
+ * entries on restart, identical to QaRerunOnFixService's own acknowledged
+ * limitation). Instead `_reconcileGithubResolves()` re-derives candidates
+ * straight from the DB — every terminal-column ticket with a `kind='github'`
+ * backlink and no existing `OutreachOutboundPost` row yet — and is called
+ * from three points: (1) synchronously the moment a ticket reaches Done
+ * (`_handleActivity`, unchanged), (2) on every `DEPLOYMENT_REPORTED_EVENT`
+ * (scoped to that event's environment), and (3) once at `onModuleInit()` so
+ * a deployment that already satisfied the gate while the server was down
+ * gets picked up on the next boot instead of silently requiring a brand-new
+ * deployment event to ever fire. Idempotency still rides `OutreachOutboundPost`'s
+ * `(channel_id, dedupe_key)` unique index, so re-running reconcile against an
+ * already-published item is always a safe no-op.
  */
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -69,22 +90,6 @@ import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployme
 import { OutreachPublisherService } from './outreach-publisher.service';
 import { resolveChannelConnector } from './connector-resolver';
 import { BOT_DISCLOSURE_FOOTER } from './release-summary';
-
-/**
- * A resolve reply deferred by the deployment-fact gate: the backlinked
- * ticket reached Done but `channel.target_environment`'s live deployment
- * does not yet prove the fix is live. Held in-memory keyed by the
- * OutreachInboundItem id (unique per item, so a duplicate 'moved' can't
- * double-register — mirrors QaRerunOnFixService's PendingRerun map).
- */
-interface PendingResolve {
-  itemId: string;
-  ticket: Ticket;
-  channel: OutreachChannel;
-  environment: string;
-  fixCommitSha: string;
-  notBefore: Date | null;
-}
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
@@ -108,7 +113,6 @@ function isUniqueConstraintError(error: unknown): boolean {
 export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDestroy {
   private _activityListener?: (log: ActivityLog) => void;
   private _deploymentListener?: (signal: DeploymentReportedSignal) => void;
-  private readonly _pending = new Map<string, PendingResolve>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -136,6 +140,14 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
       });
     };
     activityEvents.on(DEPLOYMENT_REPORTED_EVENT, this._deploymentListener);
+
+    // Restart durability (review round 1, point 3): re-derive candidates
+    // from the DB once at boot too — a deployment may already have landed
+    // (and satisfied the gate) while the server was down, with no future
+    // DEPLOYMENT_REPORTED_EVENT ever guaranteed to re-trigger it otherwise.
+    this._reconcileGithubResolves().catch((e: unknown) => {
+      this.logService.error('Outreach', 'OutreachResolveNotifierService boot reconcile error', { err: String(e) });
+    });
   }
 
   onModuleDestroy(): void {
@@ -147,7 +159,6 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
       activityEvents.removeListener(DEPLOYMENT_REPORTED_EVENT, this._deploymentListener);
       this._deploymentListener = undefined;
     }
-    this._pending.clear();
   }
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
@@ -188,9 +199,15 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
     if (channel.kind === 'github') {
       const environment = channel.target_environment || '';
       const fixCommitSha = resolveFixCommitLabel(ticket.labels);
-      const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), channel.workspace_id, environment);
-      if (!this._deploymentSatisfies(dep, fixCommitSha, ticket.terminal_entered_at)) {
-        this._registerPending(item, ticket, channel, environment, fixCommitSha);
+      const dep = environment
+        ? await findLatestDeployment(this.dataSource.getRepository(Deployment), channel.workspace_id, environment)
+        : null;
+      if (!dep || !this._deploymentSatisfies(dep, fixCommitSha)) {
+        this.logService.info('Outreach', 'resolve notify waiting for deployment evidence — never auto-fires without a fix-commit:<sha> label match', {
+          item_id: item.id, ticket_id: ticket.id, channel_id: channel.id,
+          environment: environment || '(unset — will never fire until an operator configures target_environment)',
+          fix_commit: fixCommitSha || '(none — this ticket has no fix-commit:<sha> label; freshness-only timing is not accepted as evidence)',
+        });
         return;
       }
       await this._claimAndPublish(item, ticket, channel, this._evidenceOf(dep, fixCommitSha));
@@ -200,59 +217,83 @@ export class OutreachResolveNotifierService implements OnModuleInit, OnModuleDes
     await this._claimAndPublish(item, ticket, channel, null);
   }
 
-  /** Does `dep` prove the ticket's fix is live? Identical contract to
-   *  QaRerunOnFixService's gate: a known fix-commit sha requires the
-   *  deployment to INCLUDE it; otherwise fall back to deploy-freshness
-   *  ordering (a deployment at/after the ticket's Done instant). */
-  private _deploymentSatisfies(dep: Deployment | null, fixSha: string, doneAt: Date | null): boolean {
-    if (!dep) return false;
-    if (fixSha) return deploymentIncludesCommit(dep, fixSha);
-    if (!doneAt || !dep.deployed_at) return false;
-    return new Date(dep.deployed_at).getTime() >= new Date(doneAt).getTime();
+  /** Does `dep` prove the ticket's fix is live? Requires an EXACT match — a
+   *  `fix-commit:<sha>` ticket label naming the commit that must be the
+   *  deployed commit itself or a known ancestor of it (deploymentIncludesCommit).
+   *  No freshness-ordering fallback (review round 1, point 1 — see class
+   *  docstring): without a fix-commit label there is no way to PROVE
+   *  inclusion, only to guess from timing, which this notifier no longer
+   *  accepts. */
+  private _deploymentSatisfies(dep: Deployment, fixSha: string): boolean {
+    return !!fixSha && deploymentIncludesCommit(dep, fixSha);
   }
 
   /** Human-readable evidence line for the resolve body — the ticket's
-   *  explicit "근거(커밋 SHA / 릴리스 버전)를 코멘트 본문에 포함한다" requirement. */
-  private _evidenceOf(dep: Deployment | null, fixCommitSha: string): string | null {
-    if (!dep) return null;
+   *  explicit "근거(커밋 SHA / 릴리스 버전)를 코멘트 본문에 포함한다" requirement.
+   *  Only ever called once _deploymentSatisfies has confirmed an exact
+   *  fix-commit match, so `fixCommitSha` is always non-empty here. */
+  private _evidenceOf(dep: Deployment, fixCommitSha: string): string {
     const sha = (dep.deployed_commit_sha || '').slice(0, 12) || '(unknown)';
-    return fixCommitSha
-      ? `Environment "${dep.environment}" deployed commit ${sha}, which includes the fix commit ${fixCommitSha.slice(0, 12)}.`
-      : `Environment "${dep.environment}" deployed commit ${sha} at ${dep.deployed_at?.toISOString() || '(unknown time)'}, after this ticket reached Done.`;
+    return `Environment "${dep.environment}" deployed commit ${sha}, which includes the fix commit ${fixCommitSha.slice(0, 12)}.`;
   }
 
-  private _registerPending(item: OutreachInboundItem, ticket: Ticket, channel: OutreachChannel, environment: string, fixCommitSha: string): void {
-    if (this._pending.has(item.id)) return; // duplicate 'moved' for the same entry — already registered.
-    this._pending.set(item.id, {
-      itemId: item.id, ticket, channel, environment, fixCommitSha,
-      notBefore: ticket.terminal_entered_at ?? null,
-    });
-    this.logService.info('Outreach', 'resolve notify waiting for deployment evidence', {
-      item_id: item.id, ticket_id: ticket.id, channel_id: channel.id,
-      environment: environment || '(unset — will never fire until an operator configures target_environment)',
-      fix_commit: fixCommitSha || '(freshness-ordering: deployed_at >= ticket Done)',
-    });
-  }
-
-  /** A deployment landed — re-evaluate every pending resolve bound to that
-   *  environment and fire the ones it now satisfies. */
+  /** A deployment landed for `signal.environment` — re-derive every github
+   *  channel's still-unpublished, terminal-ticket backlinks from the DB and
+   *  fire the ones the gate now satisfies (review round 1, point 3: replaces
+   *  the old in-memory-pending re-evaluation, which lost its candidate set
+   *  on every server restart). */
   private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
-    if (this._pending.size === 0) return;
     const env = (signal.environment || '').trim();
     if (!env) return;
-    for (const [key, p] of [...this._pending.entries()]) {
-      if (p.environment !== env) continue;
-      const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), p.channel.workspace_id, env);
-      if (!this._deploymentSatisfies(dep, p.fixCommitSha, p.notBefore)) continue;
-      this._pending.delete(key);
-      const item = await this.dataSource.getRepository(OutreachInboundItem).findOne({ where: { id: p.itemId } });
-      if (!item) continue; // deleted since registration — nothing to reply on.
-      try {
-        await this._claimAndPublish(item, p.ticket, p.channel, this._evidenceOf(dep, p.fixCommitSha));
-      } catch (e: any) {
-        this.logService.warn('Outreach', 'resolve notify failed after deployment gate satisfied', {
-          item_id: p.itemId, ticket_id: p.ticket.id, err: e?.message || String(e),
-        });
+    await this._reconcileGithubResolves(env);
+  }
+
+  /**
+   * Re-derives resolve-notify candidates straight from the DB instead of
+   * relying on any in-memory state: every `kind='github'` channel with a
+   * configured `target_environment` (unset can never satisfy the gate —
+   * skipped entirely), every `OutreachInboundItem` on that channel that
+   * already resolved to a ticket (`status='ticketed'`), whose ticket is on a
+   * terminal column, filtered to `envFilter` when given. `_notifyItem`
+   * itself re-checks the gate and is a safe no-op for an item that's already
+   * published (the `(channel_id, dedupe_key)` unique index absorbs the
+   * duplicate claim attempt) — so calling this repeatedly, or for items that
+   * turn out already-satisfied, is always safe.
+   */
+  private async _reconcileGithubResolves(envFilter?: string): Promise<void> {
+    const channelRepo = this.dataSource.getRepository(OutreachChannel);
+    const allGithubChannels = await channelRepo.find({ where: { kind: 'github' } });
+    const channels = allGithubChannels.filter((c) => c.target_environment
+      && (envFilter === undefined || c.target_environment === envFilter));
+    if (channels.length === 0) return;
+
+    const itemRepo = this.dataSource.getRepository(OutreachInboundItem);
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    const columnRepo = this.dataSource.getRepository(BoardColumn);
+    const postRepo = this.dataSource.getRepository(OutreachOutboundPost);
+
+    for (const channel of channels) {
+      const items = await itemRepo.find({ where: { channel_id: channel.id, status: 'ticketed' } });
+      for (const item of items) {
+        if (!item.ticket_id) continue;
+        // Cheap pre-check to skip already-published items without an
+        // unnecessary ticket/column lookup — not load-bearing for
+        // correctness, _claimAndPublish's unique index still guards it.
+        const alreadyClaimed = await postRepo.findOne({ where: { channel_id: channel.id, dedupe_key: `resolve:${item.id}` } });
+        if (alreadyClaimed) continue;
+
+        const ticket = await ticketRepo.findOne({ where: { id: item.ticket_id } });
+        if (!ticket || !ticket.column_id || !ticket.terminal_entered_at) continue;
+        const col = await columnRepo.findOne({ where: { id: ticket.column_id } });
+        if (!isTerminalColumn(col)) continue;
+
+        try {
+          await this._notifyItem(item, ticket);
+        } catch (e: any) {
+          this.logService.warn('Outreach', 'resolve reconcile failed for backlinked item (continuing)', {
+            item_id: item.id, ticket_id: ticket.id, channel_id: channel.id, err: e?.message || String(e),
+          });
+        }
       }
     }
   }
