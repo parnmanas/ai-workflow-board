@@ -1,7 +1,12 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 export type OutreachClassification = 'bug' | 'feature_request' | 'question' | 'noise' | '';
-export type OutreachItemStatus = 'ticketed' | 'noise' | 'question' | 'held' | 'error';
+// 'appended' (ticket 31e7cd24): a threaded child item (InboundItem.parent_external_item_id
+// set, e.g. a new GitHub issue comment) whose parent already resolved to a
+// ticket — recorded here purely for dedupe/audit, never carries ticket_id
+// (see OutreachIngestService._processItem), distinct from 'ticketed' which
+// means THIS item itself caused a new ticket to be created.
+export type OutreachItemStatus = 'ticketed' | 'noise' | 'question' | 'held' | 'error' | 'appended';
 
 /**
  * OutreachInboundItem — one row per external comment/issue an OutreachChannel

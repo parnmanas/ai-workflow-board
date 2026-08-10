@@ -1098,3 +1098,114 @@ test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시�
     await dataSource.destroy();
   }
 });
+
+// Threaded child items (ticket 31e7cd24 — e.g. a new GitHub issue comment):
+// InboundItem.parent_external_item_id opts an item into "append to the
+// parent's existing ticket" instead of classify/ticket-creation.
+
+test('a threaded comment item (parent_external_item_id) whose parent is already ticketed appends a Comment instead of creating a new ticket', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    const issueItem = item({
+      external_item_id: 'issue:x/y#1', title: 'Crash on save', permalink: 'https://github.com/x/y/issues/1',
+      created_at: new Date('2026-06-25T10:00:00Z'),
+    });
+    await svc.pollChannel(channel, makeConnector([issueItem]), new Date('2026-06-25T12:00:00Z'));
+    const channelAfterFirst = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const ticketsAfterFirst = await dataSource.getRepository(Ticket).find();
+    assert.equal(ticketsAfterFirst.length, 1);
+    const ticketId = ticketsAfterFirst[0].id;
+
+    const commentItem = item({
+      external_item_id: 'comment:x/y#1:555', parent_external_item_id: 'issue:x/y#1',
+      author: 'commenter1', body: 'More details here', permalink: 'https://github.com/x/y/issues/1#issuecomment-555',
+      created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const result = await svc.pollChannel(channelAfterFirst, makeConnector([commentItem]), new Date('2026-06-25T13:00:00Z'));
+    assert.equal(result.appended, 1);
+    assert.equal(result.ticketed, 0);
+
+    const ticketsAfterSecond = await dataSource.getRepository(Ticket).find();
+    assert.equal(ticketsAfterSecond.length, 1, 'no new ticket was created for the threaded comment');
+
+    const comments = await dataSource.getRepository(Comment).find({ where: { ticket_id: ticketId } });
+    assert.equal(comments.length, 1);
+    assert.match(comments[0].content, /More details here/);
+    assert.match(comments[0].content, /commenter1/);
+
+    const items = await dataSource.getRepository(OutreachInboundItem).find({ where: { external_item_id: 'comment:x/y#1:555' } });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].status, 'appended');
+    assert.equal(items[0].ticket_id, null, 'appended child rows never carry ticket_id — resolve-notify only reacts to the root ticketed item');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('re-polling the SAME threaded comment appends exactly one Comment (idempotent)', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
+    const svc = makeService(dataSource, classifier);
+
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#1', title: 'Crash', created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+
+    const commentItem = item({
+      external_item_id: 'comment:x/y#1:555', parent_external_item_id: 'issue:x/y#1',
+      created_at: new Date('2026-06-25T11:00:00Z'),
+    });
+    const channelMid = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    await svc.pollChannel(channelMid, makeConnector([commentItem]), new Date('2026-06-25T13:00:00Z'));
+    const channelAfter = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const second = await svc.pollChannel(channelAfter, makeConnector([commentItem]), new Date('2026-06-25T14:00:00Z'));
+
+    assert.equal(second.appended, 0);
+    assert.equal(second.skipped, 1, 'the second poll dedupes via the existing OutreachInboundItem row');
+
+    const comments = await dataSource.getRepository(Comment).find();
+    assert.equal(comments.length, 1, 'exactly one appended Comment total across both polls');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a threaded comment whose parent has not been ticketed yet (still noise) falls through and is classified as a standalone item', async () => {
+  const dataSource = await setupDb();
+  try {
+    const { board } = await seedBoard(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    // Parent issue classifies as noise (never ticketed); the threaded comment
+    // classifies as a bug on its own.
+    const classifier = makeClassifier({
+      'issue:x/y#2': { category: 'noise', confidence: 90 },
+      'comment:x/y#2:9': { category: 'bug', confidence: 90 },
+    });
+    const svc = makeService(dataSource, classifier);
+
+    await svc.pollChannel(channel, makeConnector([item({
+      external_item_id: 'issue:x/y#2', title: 'Not really a bug', created_at: new Date('2026-06-25T10:00:00Z'),
+    })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal((await dataSource.getRepository(Ticket).find()).length, 0, 'the parent issue itself was noise — no ticket');
+
+    const channelMid = await dataSource.getRepository(OutreachChannel).findOne({ where: { id: channel.id } });
+    const result = await svc.pollChannel(channelMid, makeConnector([item({
+      external_item_id: 'comment:x/y#2:9', parent_external_item_id: 'issue:x/y#2',
+      title: '', body: 'Actually this is a real bug', created_at: new Date('2026-06-25T11:00:00Z'),
+    })]), new Date('2026-06-25T13:00:00Z'));
+
+    assert.equal(result.appended, 0);
+    assert.equal(result.ticketed, 1, 'the comment was classified standalone since its parent never resolved to a ticket');
+    assert.equal((await dataSource.getRepository(Ticket).find()).length, 1);
+  } finally {
+    await dataSource.destroy();
+  }
+});

@@ -81,6 +81,7 @@ import { DataSource, IsNull, Repository } from 'typeorm';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
+import { Comment } from '../../entities/Comment';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { OutreachInboundItem, OutreachItemStatus } from '../../entities/OutreachInboundItem';
 import { LogService } from '../../services/log.service';
@@ -101,6 +102,10 @@ export interface PollResult {
   held: number;
   skipped: number;
   errors: number;
+  // Threaded child items appended as a Comment on an already-ticketed parent
+  // instead of running through classify/ticket-creation (ticket 31e7cd24 —
+  // e.g. a new comment on an already-ticketed GitHub issue).
+  appended: number;
 }
 
 const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_request']);
@@ -155,7 +160,7 @@ export class OutreachIngestService {
    * catches so one broken channel can't block the others.
    */
   async pollChannel(channel: OutreachChannel, connector: OutreachConnector, now: Date = new Date()): Promise<PollResult> {
-    const result: PollResult = { fetched: 0, ticketed: 0, noise: 0, question: 0, held: 0, skipped: 0, errors: 0 };
+    const result: PollResult = { fetched: 0, ticketed: 0, noise: 0, question: 0, held: 0, skipped: 0, errors: 0, appended: 0 };
     // Real wall-clock reading at sweep entry, paired with `now` below to let
     // per-item claim timestamps track real elapsed processing time within
     // this sweep (see _processItem's claimed_at comment) while staying in
@@ -251,6 +256,17 @@ export class OutreachIngestService {
         result.skipped++;
         return;
       }
+    }
+
+    // Threaded child item (ticket 31e7cd24 — e.g. a new comment on an
+    // already-ticketed GitHub issue): if the parent already resolved to a
+    // ticket, append this item as a Comment there instead of classifying it
+    // as a fresh report. Falls through to the normal path below when the
+    // parent isn't found yet or hasn't been ticketed (still noise/held/
+    // question) — never silently drops the item.
+    if (item.parent_external_item_id) {
+      const appended = await this._tryAppendToParent(channel, item, result, now, pollStartRealMs);
+      if (appended) return;
     }
 
     const { category, confidence } = await this.classifier.classify(item, {
@@ -368,6 +384,78 @@ export class OutreachIngestService {
     } else {
       result.held++;
     }
+  }
+
+  /**
+   * Threaded child item support (ticket 31e7cd24). Claims a dedupe/audit row
+   * for `item` FIRST (status='appended', ticket_id left null — same
+   * claim-before-side-effect discipline as _processItem's ticket path, and
+   * the same reason: a re-poll must never append the same comment twice),
+   * THEN appends its body as a Comment on the parent's ticket. Returns false
+   * without claiming anything when the parent item doesn't exist yet or
+   * hasn't resolved to a ticket (still noise/held/question) — the caller
+   * falls through and treats `item` as a standalone report instead.
+   *
+   * A failure appending the Comment (after the claim succeeded) is logged
+   * and swallowed rather than retried — the claim already makes this item
+   * permanently "seen", and re-throwing here would freeze the poll cursor at
+   * this item forever (the next poll's dedupe lookup would just skip the
+   * now-claimed row without ever retrying the append). Losing an occasional
+   * informational comment update is an acceptable trade against that.
+   */
+  private async _tryAppendToParent(
+    channel: OutreachChannel, item: InboundItem, result: PollResult, now: Date, pollStartRealMs: number,
+  ): Promise<boolean> {
+    const parent = await this.itemRepo.findOne({
+      where: { channel_id: channel.id, external_item_id: item.parent_external_item_id! },
+    });
+    if (!parent || !parent.ticket_id) return false;
+
+    try {
+      await this.itemRepo.save(this.itemRepo.create({
+        workspace_id: channel.workspace_id,
+        channel_id: channel.id,
+        external_item_id: item.external_item_id,
+        classification: '',
+        confidence: 0,
+        status: 'appended',
+        ticket_id: null,
+        claimed_at: new Date(now.getTime() + (Date.now() - pollStartRealMs)),
+        permalink: item.permalink,
+        author: item.author,
+        collected_at: item.created_at,
+      }));
+    } catch (e) {
+      if (isUniqueConstraintError(e)) {
+        result.skipped++;
+        return true;
+      }
+      throw e;
+    }
+
+    try {
+      const commentRepo = this.dataSource.getRepository(Comment);
+      await commentRepo.save(commentRepo.create({
+        ticket_id: parent.ticket_id,
+        author_type: 'system',
+        author_id: '',
+        author: `Outreach (${channel.kind})`,
+        content: [
+          `New comment on the source ${channel.kind} thread (by ${item.author || 'unknown'}):`,
+          '',
+          item.body || '(empty)',
+          '',
+          item.permalink,
+        ].join('\n'),
+        type: 'note',
+      }));
+      result.appended++;
+    } catch (e: any) {
+      this.logService.warn('Outreach', 'failed to append threaded comment to existing ticket (claim recorded, comment lost)', {
+        channel_id: channel.id, external_item_id: item.external_item_id, parent_ticket_id: parent.ticket_id, err: e?.message || String(e),
+      });
+    }
+    return true;
   }
 
   /**
