@@ -11,6 +11,8 @@
 //   2. lockfile 의 모든 엔트리가 registry.npmjs.org 에서 https 로 resolve 되고
 //      integrity 해시를 갖는다 (dependency confusion / tarball 주입 차단).
 //   3. install script 를 갖는 패키지가 알려진 목록을 벗어나지 않는다.
+//   4. 우리가 **발행하는** 패키지(awb-agent-manager)가 provenance 와 함께 나간다
+//      — 위 1~3 은 "받는 쪽" 방어, 이건 "주는 쪽" 방어다 (2026-08-10 추가).
 //
 // 깨졌을 때 테스트를 완화하지 말고, 위 감사 문서의 판단 근거부터 다시 볼 것.
 
@@ -25,6 +27,8 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const DOCKERFILE = path.join(REPO_ROOT, 'Dockerfile');
 const ROOT_PKG = path.join(REPO_ROOT, 'package.json');
 const LOCKFILE = path.join(REPO_ROOT, 'package-lock.json');
+const PUBLISH_WORKFLOW = path.join(REPO_ROOT, '.github', 'workflows', 'publish-agent-manager.yml');
+const AGENT_MANAGER_PKG = path.join(REPO_ROOT, 'apps', 'agent-manager', 'package.json');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Dockerfile — 배포 이미지는 lockfile 이 강제된 트리여야 한다
@@ -154,5 +158,77 @@ test('root package.json opts out of @scarf/scarf install-time telemetry', () => 
     false,
     'root package.json must set `scarfSettings.enabled: false` — @scarf/scarf ships a postinstall ' +
       'beacon and is present in the production runtime tree (via swagger-ui-dist)',
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. 발행 측 공급망 — awb-agent-manager 는 provenance 와 함께 나가야 한다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 위 가드들은 전부 "우리가 남의 패키지를 받을 때"의 방어다. 그런데 이 저장소는
+// npm 에 `awb-agent-manager` 를 **발행**하고, live host 들이 그걸 `npm i -g` 로
+// 깔아서 fleet 전체를 돌린다 — 즉 우리 패키지가 남의 신뢰 루트다.
+// provenance 없이 발행하면 NPM_TOKEN 이 유출됐을 때 공격자가 같은 이름으로 임의
+// tarball 을 올려도 소비자가 구분할 수단이 없다. `--provenance` 는 Sigstore 에
+// "이 tarball 은 이 repo 의 이 커밋에서 이 워크플로로 빌드됐다"는 서명을 남기고,
+// 소비자는 `npm audit signatures` 로 검증한다.
+// (2026-08-10 감사에서 발견: 워크플로에 --provenance 도 id-token 권한도 없었다.)
+
+/** YAML 주석(`#` 로 시작하는 줄)을 제거한다 — 주석 안의 `--provenance` 가 통과시키면 안 된다. */
+function stripYamlComments(text) {
+  return text
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+}
+
+test('agent-manager publish workflow publishes with npm provenance', () => {
+  const yaml = stripYamlComments(fs.readFileSync(PUBLISH_WORKFLOW, 'utf8'));
+
+  // 실제로 **실행되는** 줄만 본다. `name: compute version + npm publish` 같은
+  // job/step 표시 이름에도 "npm publish" 가 들어가므로 단순 substring 은 오탐이다.
+  // 실행 형태는 둘 뿐 — `run: npm publish …` (한 줄) 또는 `run: |` 블록 안의 줄.
+  const publishLines = yaml
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^(run:\s*)?npm publish\b/.test(l));
+
+  assert.ok(
+    publishLines.length > 0,
+    'no `npm publish` invocation found in publish-agent-manager.yml — this guard has gone stale, ' +
+      'update it to match however the package is published now',
+  );
+
+  const missing = publishLines.filter((l) => !l.includes('--provenance'));
+  assert.deepEqual(
+    missing,
+    [],
+    'every `npm publish` in publish-agent-manager.yml must pass `--provenance` so consumers can ' +
+      `verify the tarball against this repo via \`npm audit signatures\`: ${missing.join(' | ')}`,
+  );
+});
+
+// --provenance 는 OIDC 토큰 없이는 publish 를 **실패**시킨다. 두 설정은 항상 같이
+// 움직여야 하므로 별도 assert 로 묶어둔다.
+test('publish workflow grants the id-token permission provenance requires', () => {
+  const yaml = stripYamlComments(fs.readFileSync(PUBLISH_WORKFLOW, 'utf8'));
+  assert.match(
+    yaml,
+    /^\s*id-token:\s*write\s*$/m,
+    'publish-agent-manager.yml passes `npm publish --provenance`, which mints a Sigstore ' +
+      'attestation from a GitHub OIDC token — without `permissions: id-token: write` the ' +
+      'publish step fails outright',
+  );
+});
+
+// npm 은 provenance 발급 전에 package.json 의 repository URL 이 실제 빌드 중인
+// 저장소와 일치하는지 확인한다. 불일치하면 publish 가 깨진다.
+test('agent-manager package.json declares the repository provenance verifies against', () => {
+  const pkg = JSON.parse(fs.readFileSync(AGENT_MANAGER_PKG, 'utf8'));
+  const url = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url;
+  assert.ok(
+    typeof url === 'string' && url.includes('github.com/parnmanas/ai-workflow-board'),
+    'apps/agent-manager/package.json must carry a `repository` field pointing at this repo — ' +
+      `npm refuses to generate provenance when it disagrees with the build repo (got: ${url})`,
   );
 });

@@ -53,8 +53,12 @@ on:
   workflow_dispatch:
 
 # "Record release tag" 단계가 GITHUB_TOKEN 으로 경량 태그를 push 한다.
+# id-token:write 는 npm provenance(--provenance) 전용 — npm CLI 가 이 OIDC 토큰으로
+# Sigstore 에 "이 tarball 은 이 repo/워크플로/커밋에서 빌드됐다"는 서명된 증명을
+# 남긴다. 없으면 provenance 생성이 조용히 실패하는 게 아니라 publish 자체가 실패한다.
 permissions:
   contents: write
+  id-token: write
 
 # 같은 레지스트리 최신값을 읽은 두 run 이 동일 patch 를 밀지 않도록 직렬화.
 # cancel-in-progress:false — 진행 중 run 을 죽이지 않는다(선형 main 에서 뒤 run 이
@@ -143,9 +147,16 @@ jobs:
           V: ${{ steps.plan.outputs.version }}
         run: node apps/agent-manager/scripts/compute-publish-version.mjs probe-exists "$V"
 
+      # --provenance: tarball 과 함께 Sigstore 서명 증명을 publish 한다. 소비자(=이
+      # 저장소의 live host 들, `npm i -g awb-agent-manager`)가 `npm audit signatures`
+      # 로 "레지스트리의 이 버전이 정말 parnmanas/ai-workflow-board 의 이 커밋에서
+      # 이 워크플로로 빌드됐는지" 검증할 수 있다. 없으면 NPM_TOKEN 이 유출됐을 때
+      # 공격자가 임의 tarball 을 같은 이름으로 올려도 구분할 방법이 없다.
+      # 전제조건(모두 충족 확인함): repo public, package.json.repository 가 실제
+      # 저장소를 가리킴, GitHub Actions 에서 publish, permissions.id-token=write.
       - name: Publish to npm
         if: steps.plan.outputs.action == 'publish'
-        run: npm publish -w awb-agent-manager --access public
+        run: npm publish -w awb-agent-manager --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

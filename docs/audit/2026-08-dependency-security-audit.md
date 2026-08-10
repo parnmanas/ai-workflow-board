@@ -450,3 +450,114 @@ origin/production.private` 는 `deploy.yml` 197줄 추가 단독.
   apps/client/test/react-router-rsc-guard.test.mjs` — 머지된 배포 브랜치에서 **12/12 통과**
   (머지 전이라면 `Dockerfile installs dependencies only through npm ci` 가 실패했을 것)
 - `npm run build` — 3/3 성공
+
+---
+
+### 2026-08-10 재감사 — `npm audit` 0건, 발행 측 공급망 구멍 1건 조치
+
+`main` 은 `68035c51` 기준. **`npm audit` 은 0건이고 lockfile 도 직전 감사 이후
+바뀌지 않았다** — 그래서 이번 발견은 audit 바깥에 있다.
+
+#### 발견 — `awb-agent-manager` 가 provenance 없이 발행되고 있었다
+
+이 저장소의 기존 공급망 가드는 전부 **받는 쪽** 방어다(레지스트리 고정, integrity
+해시, install script 허용목록, `npm ci`). 그런데 이 저장소는 npm 에
+`awb-agent-manager` 를 **발행**하고, live host 들이 그것을 `npm i -g` 로 설치해
+fleet 전체를 돌린다. 즉 우리 패키지가 남의 신뢰 루트다. 그쪽은 무방비였다.
+
+레지스트리 조회 결과 (`npm view awb-agent-manager`, 당시 latest `1.6.95`):
+
+    dist.signatures    : 있음   ← 레지스트리가 서명한 것 (npm 이 자동으로 함)
+    dist.attestations  : 없음   ← provenance. 우리가 발행해야 하는 것
+
+`dist.signatures` 는 "레지스트리가 이 바이트를 갖고 있다"만 증명한다. 발행 주체가
+정말 이 저장소인지는 말해주지 않는다. `NPM_TOKEN`(Automation 토큰, 2FA 우회) 이
+유출되면 공격자가 동일한 이름으로 임의 tarball 을 올려도 소비자가 구분할 수단이
+없고, self-update 경로상 fleet 전체가 그것을 자동으로 집어간다.
+
+원인은 워크플로 2줄이었다.
+
+    permissions:
+      contents: write            # id-token: write 없음
+    ...
+    run: npm publish -w awb-agent-manager --access public   # --provenance 없음
+
+#### 조치
+
+`.github/workflows/publish-agent-manager.yml`:
+
+- `permissions` 에 `id-token: write` 추가 (Sigstore 증명 발급용 OIDC 토큰)
+- publish 명령에 `--provenance` 추가
+
+이제 소비자가 `npm audit signatures` 로 "레지스트리의 이 버전이 정말
+`parnmanas/ai-workflow-board` 의 이 커밋에서 이 워크플로로 빌드됐는지" 검증할 수 있다.
+
+**전제조건 사전 확인 (하나라도 어긋나면 publish 가 실패하므로 코드 수정 전에 확인함):**
+
+| 전제 | 확인 결과 |
+| --- | --- |
+| 저장소가 public (provenance 는 Sigstore 공개 투명성 로그에 기록됨) | ✅ `visibility: PUBLIC` |
+| `package.json.repository` 가 실제 빌드 저장소를 가리킴 | ✅ `git+https://github.com/parnmanas/ai-workflow-board.git` |
+| GitHub Actions 에서 발행 | ✅ |
+| npm ≥ 9.5 | ✅ node 22 (npm 10.x) |
+
+저장소가 private 였다면 `--provenance` 는 발행을 **깨뜨린다**. 이 확인 없이 넣지 말 것.
+
+#### 회귀 가드
+
+`apps/server/test/supply-chain-integrity-guard.test.mjs` 에 3건 추가 (6 → 9 asserts):
+
+1. 워크플로의 모든 `npm publish` 실행 줄이 `--provenance` 를 넘긴다
+2. `permissions.id-token: write` 가 있다 (없으면 provenance publish 가 실패)
+3. agent-manager `package.json.repository` 가 이 저장소를 가리킨다
+
+YAML 주석은 파싱 전에 제거한다 — 주석 안의 `--provenance` 가 가드를 통과시키면
+안 된다. job 표시 이름(`name: compute version + npm publish`) 오탐도 있어서
+실행 줄(`run:` 또는 `run: |` 블록 내부)만 검사한다.
+
+**가드가 실제로 무는지 확인함:** 워크플로 변경을 되돌리고 돌리면 새 assert 2건이
+정확히 실패하고, 복원하면 9/9 통과한다.
+
+#### 그 외 — 회귀 없음
+
+- **캐너리 먼저:** `lodash@4.17.4` 임시 트리 → critical 1건. advisory 경로가 살아
+  있음을 확인한 뒤에야 `main` 의 0건을 신뢰했다.
+- `npm audit`: `main` 0건 (prod 270 / dev 308 / optional 63, 총 579).
+- `awb-agent-manager` 독립 트리(발행되는 그 패키지) 단독 감사: 135 의존성, **0건**.
+- lockfile 580 엔트리 전수: registry 외부 resolve 0건, `integrity` 누락 0건,
+  미해결 엔트리 0건. install script 는 허용목록(`esbuild`/`fsevents`/`@scarf/scarf`)과 일치.
+- override 4종 전부 유효: `multer` · `@hono/node-server` · `js-yaml` · `picomatch`.
+- 직접 의존성 버전 지연 중 advisory 있는 것 **없음**. 범위 밖 major 지연은 전부 기존
+  판단 유지 — `react`/`react-dom` 18.3.1(→19.x), `typeorm` 0.3.31(→1.1.0),
+  `@hello-pangea/dnd` 17(→18). `turbo` 2.10.7→2.10.9 in-range dev 지연도 종전대로 미조치.
+- `main` 워크플로의 액션은 여전히 1st-party `actions/*` 만 사용.
+
+#### 배포 브랜치 (`production.private`)
+
+- `package.json` · `package-lock.json` · `apps/client/package.json` — `main` 과 **바이트 동일**.
+- `apps/server/package.json` 차이는 테스트 등록 목록뿐 — **의존성 변경 없음**.
+- `Dockerfile` 은 차이 없음 (양쪽 스테이지 모두 `npm ci`). 2026-08-09 에 지적한
+  설치 경로 드리프트는 재발하지 않았다.
+- **이번 변경은 배포 브랜치에 머지하지 않았다.** 바뀐 것은 발행 워크플로와 테스트뿐이고
+  발행 워크플로는 `main` push 에만 트리거된다 — 런타임 영향이 0인 변경 때문에
+  `production.private` 를 push 해 NAS 실배포를 유발할 이유가 없다. 다음 기능 머지 때
+  자연히 따라간다.
+
+#### 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
+SHA 고정 — 잘못된 SHA 는 실배포 파이프라인을 깨므로 여전히 승인 대기.
+
+#### 검증
+
+- 캐너리(`lodash@4.17.4`) → critical 1건 — 감사 경로 정상 확인
+- `npm audit` — `main` 0건 / agent-manager 독립 트리 0건
+- `node --test apps/server/test/supply-chain-integrity-guard.test.mjs` — **9/9 통과**
+  (변경 되돌리면 새 assert 2건이 실패하는 것까지 확인)
+- `node --test apps/client/test/react-router-rsc-guard.test.mjs` — 6/6 통과
+- 워크플로 YAML 파싱 확인: `permissions={contents:write,id-token:write}`,
+  publish 명령 = `npm publish -w awb-agent-manager --access public --provenance`
+
+> **참고:** 이 커밋은 `publish-agent-manager.yml` 을 건드리므로 워크플로의 `paths`
+> 필터에 걸려 `main` 랜딩 시 publish 가 1회 트리거된다(버전 자동 계산). 이는 이
+> 저장소의 정상 동작이며, 그 run 이 곧 provenance 변경의 실검증이 된다.
