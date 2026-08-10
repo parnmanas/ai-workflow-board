@@ -45,6 +45,8 @@ export function classify(
   if (/stdout error:|EPIPE/.test(msg)) return { level: 'error', category: 'ipc' };
   if (/result subtype=error|is_error=true/.test(msg))
     return { level: 'error', category: 'subagent' };
+  if (/^Hermes .* dispatch failed closed:/.test(msg))
+    return { level: 'error', category: 'hermes' };
 
   // 구조화된 성공/무실패 신호는 아래 느슨한 catch-all 보다 우선한다. 멀쩡한
   // 로그도 "error"/"failed" 부분문자열을 포함할 수 있다:

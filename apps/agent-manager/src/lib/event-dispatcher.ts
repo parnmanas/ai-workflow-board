@@ -2349,7 +2349,18 @@ export class EventDispatcher {
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
       } catch (err: any) {
-        log(`Hermes chat dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+        const reason = err?.code || 'runtime_dispatch_error';
+        log(`Hermes chat dispatch failed closed: ${reason} ${err?.message ?? err}`);
+        if (payload.room_id && agentContext.agent_id) {
+          await postChatRoomMessage(
+            this.#config,
+            payload.room_id,
+            agentContext.agent_id,
+            `⚠️ **Hermes 런타임 실행 실패** — 이 메시지에 응답하지 못했습니다.\n\n` +
+              `\`\`\`\n${reason}: ${err?.message ?? err}\n\`\`\`\n\n` +
+              `Agent Manager 로그를 확인한 뒤 다시 시도하세요.`,
+          ).catch(() => {});
+        }
       }
       return;
     }
@@ -3020,7 +3031,18 @@ export class EventDispatcher {
         );
       } catch (err: any) {
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
-        log(`Hermes room dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+        const reason = err?.code || 'runtime_dispatch_error';
+        log(`Hermes room dispatch failed closed: ${reason} ${err?.message ?? err}`);
+        if (p.room_id && runContext.agent_id) {
+          await postChatRoomMessage(
+            this.#config,
+            p.room_id,
+            runContext.agent_id,
+            `⚠️ **Hermes 런타임 실행 실패** — 이 메시지에 응답하지 못했습니다.\n\n` +
+              `\`\`\`\n${reason}: ${err?.message ?? err}\n\`\`\`\n\n` +
+              `Agent Manager 로그를 확인한 뒤 다시 시도하세요.`,
+          ).catch(() => {});
+        }
       }
       return;
     }
