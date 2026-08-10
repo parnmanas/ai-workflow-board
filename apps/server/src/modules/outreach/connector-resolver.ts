@@ -17,6 +17,7 @@ import { OutreachChannel } from '../../entities/OutreachChannel';
 import { resolveOutreachCredential } from './outreach-credential';
 import { FakeOutreachConnector } from './connectors/fake.connector';
 import { RedditConnector } from './connectors/reddit.connector';
+import { GitHubConnector } from './connectors/github.connector';
 import { OutreachConnector } from './connectors/types';
 
 // Reddit requires a descriptive, non-default User-Agent identifying the
@@ -47,8 +48,19 @@ export async function resolveChannelConnector(
       rateLimitPerHour: channel.rate_limit_per_hour,
     });
   }
-  // kind='github' real connector is a separate follow-up ticket (31e7cd24) —
-  // every other kind keeps using the in-memory fake, same as before this
-  // ticket.
+  if (channel.kind === 'github') {
+    if (!credential) throw new Error(`outreach channel ${channel.id} (github) has no credential configured`);
+    // Fail-closed, same contract as Reddit above — an empty repo whitelist
+    // must surface as a failed poll/publish, never a silent no-op.
+    if (!Array.isArray(channel.targets) || channel.targets.length === 0) {
+      throw new Error(`outreach channel ${channel.id} (github) has no target repo whitelist configured — refusing to poll/publish (fail-closed)`);
+    }
+    return new GitHubConnector(credential, {
+      targets: channel.targets,
+      channelId: channel.id,
+      rateLimitPerHour: channel.rate_limit_per_hour,
+    });
+  }
+  // Every other kind keeps using the in-memory fake.
   return new FakeOutreachConnector();
 }

@@ -15,6 +15,13 @@ export interface OutreachConnector {
   publish(post: OutboundPost): Promise<OutboundResult>;
   /** Reply to an existing thread/issue on the channel. Real implementations follow. */
   reply(threadRef: string, body: string): Promise<OutboundResult>;
+  /**
+   * Optional: close/resolve the native thread (e.g. a GitHub issue). Reddit
+   * has no equivalent concept, so this is opt-in — callers must feature-test
+   * (`connector.close?.(...)`) rather than assume every connector implements
+   * it (ticket 31e7cd24, GitHub's off-by-default issue-close option).
+   */
+  close?(threadRef: string): Promise<void>;
 }
 
 export interface InboundItem {
@@ -24,6 +31,16 @@ export interface InboundItem {
   author: string;
   permalink: string;
   created_at: Date;
+  /**
+   * Opt-in threading (ticket 31e7cd24): when set AND the referenced parent's
+   * OutreachInboundItem already resolved to a ticket, OutreachIngestService
+   * appends this item as a ticket COMMENT instead of running it through
+   * classify/ticket-creation — e.g. a new comment on an already-ticketed
+   * GitHub issue. Unset (the FakeOutreachConnector/RedditConnector default)
+   * preserves today's "every item is a standalone classify candidate"
+   * behavior exactly — purely additive, no existing connector is affected.
+   */
+  parent_external_item_id?: string;
 }
 
 export interface OutboundPost {

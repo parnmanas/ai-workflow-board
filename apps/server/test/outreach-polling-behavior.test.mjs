@@ -26,6 +26,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OutreachPollingService } from '../dist/modules/outreach/outreach-polling.service.js';
 import { RedditConnector, RedditForbiddenError } from '../dist/modules/outreach/connectors/reddit.connector.js';
+import { GitHubConnector } from '../dist/modules/outreach/connectors/github.connector.js';
 import { FakeOutreachConnector } from '../dist/modules/outreach/connectors/fake.connector.js';
 
 const MIN = 60_000;
@@ -96,7 +97,12 @@ function makeChannel(over = {}) {
   return {
     id: 'ch-1',
     workspace_id: 'ws-1',
-    kind: 'github',
+    // A generic, deliberately-unimplemented kind — resolveChannelConnector's
+    // catch-all FakeOutreachConnector fallback, so tests that aren't about
+    // connector selection itself don't need a credential/targets fixture.
+    // NOT 'github' — since ticket 31e7cd24, kind='github' resolves to a real
+    // GitHubConnector and requires both (see the dedicated tests below).
+    kind: 'discord',
     credential_id: null,
     enabled: true,
     poll_interval_ms: 30 * MIN,
@@ -214,8 +220,8 @@ test('kind=reddit with a valid credential + targets resolves to a real RedditCon
   assert.ok(ingestService.calls[0].connector instanceof RedditConnector, 'kind=reddit resolved to RedditConnector, not the fake');
 });
 
-test('kind=github (or any non-reddit kind) still resolves to FakeOutreachConnector', async () => {
-  const ch = makeChannel({ kind: 'github' });
+test('kind=discord (or any not-specially-handled kind) still resolves to FakeOutreachConnector', async () => {
+  const ch = makeChannel({ kind: 'discord' });
   const { svc, ingestService } = svcWith([ch]);
 
   await svc.runOnce(NOW);
@@ -240,14 +246,59 @@ test('kind=reddit with an EMPTY target whitelist fails closed — no collection,
   assert.ok(new Date(ch.next_poll_at).getTime() > NOW.getTime());
 });
 
+// ── ticket 31e7cd24: kind=github connector resolution (mirrors kind=reddit above) ──
+
+test('kind=github with a valid credential + targets resolves to a real GitHubConnector', async () => {
+  const ch = makeChannel({ kind: 'github', credential_id: 'cred-gh', targets: ['x/y'] });
+  const credentialRows = [{
+    id: 'cred-gh', workspace_id: null,
+    encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
+  }];
+  const { svc, ingestService } = svcWith([ch], {}, credentialRows);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, ['ch-1']);
+  assert.deepEqual(failed, []);
+  assert.equal(ingestService.calls.length, 1);
+  assert.ok(ingestService.calls[0].connector instanceof GitHubConnector, 'kind=github resolved to GitHubConnector, not the fake');
+});
+
+test('kind=github with an EMPTY target whitelist fails closed — no collection, never falls back to discovery', async () => {
+  const ch = makeChannel({ kind: 'github', credential_id: 'cred-gh', targets: [] });
+  const credentialRows = [{
+    id: 'cred-gh', workspace_id: null,
+    encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
+  }];
+  const { svc, ingestService } = svcWith([ch], {}, credentialRows);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, [], 'an empty whitelist never polls');
+  assert.deepEqual(failed, ['ch-1'], 'surfaced as a failed poll, not a silent no-op');
+  assert.equal(ingestService.calls.length, 0, 'pollChannel/connector.fetchInbound is never reached — the failure happens at connector resolution');
+});
+
+test('kind=github with NO credential configured fails closed', async () => {
+  const ch = makeChannel({ kind: 'github', credential_id: null, targets: ['x/y'] });
+  const { svc, ingestService } = svcWith([ch]);
+
+  const { polled, failed } = await svc.runOnce(NOW);
+
+  assert.deepEqual(polled, []);
+  assert.deepEqual(failed, ['ch-1']);
+  assert.equal(ingestService.calls.length, 0, 'connector resolution fails before pollChannel is ever reached');
+});
+
 // ── review fix #2: 403/error state recorded on the channel from the poll path ─
 
 test('a RedditForbiddenError (403) from pollChannel marks the channel blocked_at/blocked_reason/last_error', async () => {
-  // kind stays the default 'github' — resolveChannelConnector returns the
-  // fake unconditionally for a non-reddit kind (no credential needed), so
-  // _resolveConnector succeeds and the custom pollChannel stub below is what
-  // actually throws. This test is only about runOnce's catch block correctly
-  // classifying whatever error pollChannel raises, independent of channel kind.
+  // kind stays the default (a generic, not-specially-handled kind) —
+  // resolveChannelConnector returns the fake unconditionally (no credential
+  // needed), so _resolveConnector succeeds and the custom pollChannel stub
+  // below is what actually throws. This test is only about runOnce's catch
+  // block correctly classifying whatever error pollChannel raises,
+  // independent of channel kind.
   const ch = makeChannel();
   const channelRepo = makeChannelRepo([ch]);
   const credentialRepo = makeCredentialRepo([]);
