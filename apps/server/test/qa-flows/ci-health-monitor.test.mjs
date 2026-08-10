@@ -113,6 +113,32 @@ function makeFakeGitHubFetchMixed(state) {
   };
 }
 
+/** Routes by Authorization header rather than by repo — both boards in the
+ *  cache-collision test point at the SAME owner/repo/branch, so the only way
+ *  to tell "which board's call is this" apart is which credential's token
+ *  came through. Records every header seen so a test can assert BOTH
+ *  credentials' calls actually fired against GitHub (a cache keyed only by
+ *  owner/repo would serve the second board's call from the first board's
+ *  cached promise and this header would never appear). */
+function makeFakeGitHubFetchSharedRepoByCredential(state) {
+  return async (url, opts) => {
+    const auth = opts?.headers?.Authorization;
+    state.authHeaders.push(auth);
+    const u = String(url);
+    if (auth === 'Bearer shared-bad-token') {
+      if (u.endsWith('/actions/workflows')) return fakeErrorResponse(401, 'Bad credentials');
+      throw new Error(`unexpected GitHub URL for bad-credential shared-repo call: ${u}`);
+    }
+    if (auth === 'Bearer shared-good-token') {
+      if (u.includes('/actions/workflows/') && u.includes('/runs?')) return fakeResponse({ workflow_runs: state.runs });
+      if (u.endsWith('/actions/workflows')) return fakeResponse({ workflows: [{ id: state.workflowId, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }] });
+      if (u.includes('/actions/runs/') && u.endsWith('/jobs')) return fakeResponse({ jobs: [{ name: 'shared-job', conclusion: 'failure' }] });
+      throw new Error(`unexpected GitHub URL for good-credential shared-repo call: ${u}`);
+    }
+    throw new Error(`unrouted Authorization header in shared-repo credential-isolation test: ${auth}`);
+  };
+}
+
 function run(id, conclusion, isoTime) {
   return { id, status: 'completed', conclusion, html_url: `https://github.com/acme/widgets/actions/runs/${id}`, created_at: isoTime, updated_at: isoTime };
 }
@@ -343,6 +369,70 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
 
     const brokenAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/broken' } });
     assert.equal(brokenAlert, null, 'no alert row for the board whose GitHub call failed — there was nothing to evaluate');
+  });
+
+  await t.test('6. two boards watch the SAME owner/repo/branch with DIFFERENT credentials: an invalid credential on one board must not poison the sweep for the other board\'s valid credential (review blocker #3 — per-sweep cache keys must include credentialId)', async () => {
+    const credentialRepo = ds.getRepository('Credential');
+    const badCred = await credentialRepo.save(credentialRepo.create({
+      workspace_id: ws.id, name: 'shared repo bad cred', provider: 'github',
+      encrypted_data: encrypt(JSON.stringify({ token: 'shared-bad-token' })),
+    }));
+    const goodCred = await credentialRepo.save(credentialRepo.create({
+      workspace_id: ws.id, name: 'shared repo good cred', provider: 'github',
+      encrypted_data: encrypt(JSON.stringify({ token: 'shared-good-token' })),
+    }));
+
+    // Created in this order deliberately — the bad-credential board must be
+    // the one whose (rejected) promise would land in the cache FIRST under
+    // the old owner/repo-only key, so this reproduces the exact poisoning
+    // order the reviewer described rather than relying on scan order luck.
+    const boardBad = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-shared-bad' });
+    await createColumn(app, getDataSourceToken, boardBad.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
+    const resourceBad = await resourceRepo.save(resourceRepo.create({
+      workspace_id: ws.id, name: 'shared repo (bad cred)', type: 'repository',
+      url: 'https://github.com/acme/shared', default_branch: 'main', credential_id: badCred.id,
+    }));
+    await ds.getRepository('Board').update(boardBad.id, {
+      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceBad.id }] }),
+    });
+
+    const boardGood = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-shared-good' });
+    await createColumn(app, getDataSourceToken, boardGood.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
+    await createColumn(app, getDataSourceToken, boardGood.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
+    const resourceGood = await resourceRepo.save(resourceRepo.create({
+      workspace_id: ws.id, name: 'shared repo (good cred)', type: 'repository',
+      url: 'https://github.com/acme/shared', default_branch: 'main', credential_id: goodCred.id,
+    }));
+    await ds.getRepository('Board').update(boardGood.id, {
+      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceGood.id }] }),
+    });
+
+    const sharedState = {
+      workflowId: 999,
+      authHeaders: [],
+      runs: [
+        run('s-run-3', 'failure', minutesAgo(5)),
+        run('s-run-2', 'failure', minutesAgo(15)),
+        run('s-run-1', 'failure', minutesAgo(25)),
+      ],
+    };
+    globalThis.fetch = makeFakeGitHubFetchSharedRepoByCredential(sharedState);
+
+    const stats = await monitor.sweep(NOW);
+
+    assert.ok(sharedState.authHeaders.includes('Bearer shared-bad-token'), 'the bad-credential board\'s own call must fire');
+    assert.ok(
+      sharedState.authHeaders.includes('Bearer shared-good-token'),
+      'the good-credential board\'s call must fire with ITS OWN credential — a cache keyed only by owner/repo would reuse the bad board\'s cached rejection and this header would never appear',
+    );
+    assert.ok(stats.fetch_failures >= 1, 'the bad-credential board\'s failure must still be counted');
+
+    const goodDedupeKey = `ci_red:${boardGood.id}:acme/shared:main:999`;
+    const goodTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: goodDedupeKey } });
+    assert.ok(goodTicket, 'the good-credential board must still get its own alert/ticket despite sharing owner/repo/branch/workflow with a board whose credential 401s');
+
+    const badAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/shared', board_id: boardBad.id } });
+    assert.equal(badAlert, null, 'no alert row for the bad-credential board — its call genuinely failed');
   });
 
 });
