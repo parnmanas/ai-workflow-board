@@ -1,7 +1,7 @@
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { LoginDto, RegisterDto, SetupDto } from './auth.dto';
-import { Controller, Post, Get, Body, Headers, Res, HttpStatus } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Post, Get, Body, Headers, Req, Res, HttpStatus } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { User } from '../../entities/User';
@@ -57,18 +57,19 @@ export class AuthController {
   @Post('login')
   @ApiOperation({ summary: 'Log in with email + password. Returns { token, user, workspaces }. Put the token in the "user-session" Authorize slot at the top of this page.' })
   @ApiBody({ type: LoginDto })
-  async login(@Body() body: any, @Res() res: Response) {
+  async login(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const { email, password } = body;
     if (!email || !password) {
       return res.status(400).json({ error: 'email and password are required' });
     }
 
-    const result = await this.authService.login(email, password);
+    // M2: 브루트포스 스로틀은 이메일+IP를 함께 추적한다 (auth.service.ts login() 참고).
+    const result = await this.authService.login(email, password, req.ip);
     if (!result) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     if ('error' in result) {
-      return res.status(403).json({ error: result.error });
+      return res.status(result.status || 403).json({ error: result.error });
     }
 
     const user = result.user as any;
