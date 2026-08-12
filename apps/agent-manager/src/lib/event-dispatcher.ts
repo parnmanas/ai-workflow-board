@@ -2275,7 +2275,19 @@ export class EventDispatcher {
     // motivated this ticket: a planner dispatch failed repeatedly on
     // checkout trust + an expired OAuth session while the assignee sat idle
     // across multiple supervisor cycles).
-    if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir) {
+    //
+    // ticket 73772059: hermes 는 이 게이트에서 제외한다. createAdapter('hermes')
+    // 는 무조건 RuntimeSelectionError('runtime_unavailable') 를 던진다 — Hermes
+    // 는 파일 기반 CLI trust dialog/credential 파일을 조회할 개념 자체가 없는
+    // ACP 런타임이라 이 게이트의 전제가 애초에 성립하지 않는다. 이 가드가
+    // 없으면 cli_home_dir 가 cli 타입과 무관하게 모든 agent 에 대해 채워져
+    // 있어서(agent-manager-commands.ts 참고) hermes-cli role 디스패치가 항상 이
+    // 블록에 진입했고, 잡히지 않은 throw 가 #ackDispatch 실행 전에
+    // #dispatchTriggerBody 를 크래시시켰다(ack 자체가 없음 — 'processed'도
+    // 'nack'도 아님). Hermes 는 자체 readiness 개념(RuntimeSupervisor/ACP
+    // 세션의 runtime_config.permission_mode)을 따로 갖고 있으며, 아래 Hermes
+    // 분기에서 별도로 처리된다.
+    if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
       const adapter = createAdapter(agentContext.cli);
       const trustRequired = adapter.requiresWorkspaceTrust(harness);
       const trustMeta = trustRequired
