@@ -1552,6 +1552,91 @@ test('fallback mode (ticket 13160d20 follow-up, closed by fdf6714e): past the TT
   );
 });
 
+// ───── Part H: handleTrigger's OWN one-shot spawn must hold its seat until exit (ticket f0d1da19) ─────
+//
+// Parts F/G above proved handleCommentMention's claimed seat survives past
+// spawn() resolving (held via onExit). But handleTrigger's OWN reservation for
+// its OWN one-shot spawn — the fallback-mode column trigger, and a declined
+// persistent dispatch falling back to one-shot — used to release
+// UNCONDITIONALLY the instant #dispatchTriggerBody returned, i.e. moments
+// after spawn() merely resolved a pid, not when the spawned process actually
+// exits. A role-mention for the IDENTICAL (ticket, role, agent) seat arriving
+// in that window (real order: a reviewer's single "change requested" comment
+// fires both an agent_trigger and a comment_mention near-simultaneously —
+// ticket da4358ee) found the seat already free and twin-spawned a second
+// one-shot racing the trigger's own. No TTL wait needed — the window opens the
+// instant spawn() resolves.
+//
+// Non-vacuous: reverting the `onExit`/`triggerSeat` wiring in
+// #dispatchTriggerBody's one-shot spawn branch (and handleTrigger's matching
+// finally) back to an unconditional release makes both 'does not twin-spawn'
+// tests below spawn a SECOND one-shot — calls.spawn.length would be 2 instead
+// of 1.
+
+test('ticket f0d1da19: fallback mode — once handleTrigger\'s one-shot spawn resolves, the fallback seat stays held until the process exits, so an immediately-following mention does not twin-spawn', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(calls.spawn.length, 1, 'the column trigger dispatched its one-shot');
+  assert.equal(
+    typeof calls.spawn[0].onExit,
+    'function',
+    "the fallback seat is held via onExit for the trigger's one-shot's full lifetime, not released the instant spawn() resolves",
+  );
+
+  // The same reviewer comment's @[role:assignee] mention arrives moments later.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(
+    calls.spawn.length,
+    1,
+    "gap closed (ticket f0d1da19): the trigger's one-shot is still running — the mention found the fallback seat still held and did not twin-spawn",
+  );
+});
+
+test('ticket f0d1da19: fallback mode — once the trigger\'s one-shot exits (onExit fires), the fallback seat is free again for a later mention', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(calls.spawn.length, 1);
+  const onExit = calls.spawn[0].onExit;
+  assert.equal(typeof onExit, 'function');
+
+  // Simulate the trigger's one-shot subagent process actually exiting.
+  onExit();
+
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(
+    calls.spawn.length,
+    2,
+    "the fallback seat was released on the trigger's one-shot exit, so the later mention dispatched normally",
+  );
+});
+
+test('ticket f0d1da19: authoritative-declined one-shot — once handleTrigger\'s spawn resolves, the seat stays held until the process exits, so an immediately-following mention does not twin-spawn', async () => {
+  // dispatchTrigger declines for an unrelated reason (its own _spawnSession
+  // fails) — event-dispatcher falls back to the SAME one-shot spawn branch
+  // fallback mode uses, still holding handleTrigger's fresh AUTHORITATIVE
+  // _inflight reservation (canAuthoritative && reservedFresh — persistent
+  // sessions are on by default here).
+  const mgr = new RealTicketMgrStub(makeConfig(), { failSpawn: true });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(calls.spawn.length, 1, "dispatchTrigger declined — fell back to the trigger's own one-shot spawn");
+  assert.equal(
+    typeof calls.spawn[0].onExit,
+    'function',
+    "the authoritative seat is held via onExit for the trigger's one-shot's full lifetime, not released the instant spawn() resolves",
+  );
+
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(
+    calls.spawn.length,
+    1,
+    "gap closed (ticket f0d1da19): the trigger's one-shot is still running — the mention found the authoritative seat still held and did not twin-spawn",
+  );
+});
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);
