@@ -19,6 +19,7 @@ import { readdirSync } from 'fs';
 import { join } from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolContext } from './context';
+import { installToolAuthzGate } from '../shared/tool-authz-gate';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
@@ -74,6 +75,11 @@ function findRegisterFn(mod: Record<string, unknown>, base: string): RegisterFn 
 }
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
+  // Central authz gate FIRST — every server.tool() call made by every
+  // module registered below (and any future *-tools.ts file discovered by
+  // name alone) is checked against the destructive-tool table before its
+  // own handler runs. See shared/tool-authz-gate.ts for the rationale.
+  installToolAuthzGate(server, ctx.dataSource);
   for (const mod of discoverToolModules()) {
     mod.register(server, ctx);
   }
