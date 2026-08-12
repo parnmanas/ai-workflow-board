@@ -297,6 +297,19 @@ export class TicketSessionManager
     this.#reserveSuppress.delete(key);
   }
 
+  /** Read-only peek for a DIFFERENT dispatch path (ticket e90294e7) — the
+   *  one-shot comment_mention fallback in EventDispatcher.handleCommentMention
+   *  consults this before spawning, so a role-shortcut mention doesn't race a
+   *  column-move trigger that already owns this exact (ticket, role, agent)
+   *  seat (live session OR still-provisioning reservation). Deliberately does
+   *  NOT reserve — the caller only needs a yes/no to decide whether to skip
+   *  its own spawn, not ownership of the key, so there is nothing for it to
+   *  release afterwards. */
+  hasInflightOrLiveDispatch(ticketId: string, role: string, agentId: string): boolean {
+    const key = this.#makeKey(ticketId, role || '', agentId || '');
+    return !!this._getLiveSession(key) || this._inflight.has(key);
+  }
+
   async dispatchTrigger(spec: TicketTriggerArgs): Promise<TicketDispatchResult> {
     if (!spec.ticketId) return { dispatched: false, reason: 'no_ticket' };
     const role = spec.role || '';

@@ -641,6 +641,17 @@ export interface TicketSessionManager {
    *  반환해 one-shot 스폰 경로를 살린다(멘션 swallow/오배달 방지, T7 리뷰 #3). */
   forwardCommentMention(ticketId: string, mention: any, targetAgentId?: string): boolean;
   forwardBoardUpdate(ticketId: string, ev: any): boolean;
+  /** Read-only peek — true when (ticketId, role, agentId) already owns a LIVE
+   *  session OR an in-flight provisioning reservation (ticket e90294e7).
+   *  `forwardCommentMention` only sees sessions that finished spawning, so it
+   *  misses a column-move trigger for the SAME (ticket, role, agent) seat that
+   *  is still provisioning (worktree checkout / rebase). `handleCommentMention`
+   *  consults this right before its one-shot spawn fallback so a role-shortcut
+   *  mention doesn't race a second, independent session into that seat. Does
+   *  NOT reserve anything — the caller only needs to know whether to skip its
+   *  own spawn. Optional so a minimal/legacy contract (or test fake) that omits
+   *  it just keeps today's behavior (never suppresses on this check).*/
+  hasInflightOrLiveDispatch?(ticketId: string, role: string, agentId: string): boolean;
 }
 
 export interface FsBrowserResult {
@@ -3016,6 +3027,39 @@ export class EventDispatcher {
       );
       if (created) this.#postDeferAuditComment(ticketId, mentionDefer.resetLabel ?? '');
       return;
+    }
+
+    // ticket e90294e7: a role-shortcut mention (@[role:assignee]) targets the
+    // exact same (ticket, role, agent) seat a column-move trigger dispatches
+    // to. A reviewer's single "change requested" comment that both moves the
+    // ticket's column AND @-mentions that same role fires two independent
+    // triggers (agent_trigger + comment_mention) for one seat; the live-session
+    // check above (forwardCommentMention) only sees a column trigger AFTER it
+    // finishes spawning, so during its provisioning window (worktree checkout /
+    // rebase) this mention would otherwise fall through to a redundant one-shot
+    // spawn — a second, independent session racing the first inside the same
+    // worktree (observed live in ticket da4358ee: both sessions exited without
+    // committing). Only role-shortcut mentions can collide this way — a direct
+    // @[agent:id] mention carries no role and can't be matched against a column
+    // trigger's (ticket, role) seat.
+    if (mention.mention_source === 'role' && mention.role_shortcut) {
+      const targetAgentId = ev.agent_id || '';
+      if (this.#ticketSessionManager?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)) {
+        log(
+          `Comment mention suppressed — column-move trigger already owns this (ticket, role, agent) seat: ` +
+            `ticket=${ticketId.slice(0, 8) || '_'} role=${mention.role_shortcut} agent=${targetAgentId.slice(0, 8) || '_'}`,
+        );
+        fireAndForgetTool(this.#config, 'add_comment', {
+          ticket_id: ticketId,
+          content:
+            '⚠️ **중복 dispatch 억제 (role-mention vs 컬럼 트리거)** — 이 코멘트의 ' +
+            `@[role:${mention.role_shortcut}] 멘션과 동시에 발화된 컬럼 이동 트리거가 이미 같은 ` +
+            '(ticket, role) seat 를 프로비저닝/실행 중이라, 중복 세션을 만들지 않고 멘션 dispatch 를 ' +
+            '억제했습니다. 이 코멘트 내용은 진행 중인 세션이 티켓 상태를 다시 조회할 때 함께 반영됩니다. ' +
+            '(ticket e90294e7)',
+        });
+        return;
+      }
     }
 
     const canDelegate =
