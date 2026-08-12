@@ -904,8 +904,8 @@ export class SubagentManager implements SubagentManagerContract {
       // reproduces identically on every retry. Preserving that here lets the
       // caller route it through the durable-blocker pend path instead of the
       // ordinary cooldown-backoff retry that let it retry-storm for ~2 days.
-      const { reason, detail } = classifySpawnException(err);
-      return { spawned: false, reason, detail };
+      const { reason, detail, serverKey } = classifySpawnException(err);
+      return { spawned: false, reason, detail, serverKey };
     }
   }
 

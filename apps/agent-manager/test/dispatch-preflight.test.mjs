@@ -708,6 +708,22 @@ test('classifySpawnException: an InvalidMcpTransportError-named error is classif
   assert.match(c.detail, /config\.toml/, 'detail names the config path');
 });
 
+test('classifySpawnException: preserves a structured serverKey off the error for a NON-awb server (review round 2 — the notification must not hardcode "awb")', () => {
+  const err = Object.assign(new Error(
+    'Refusing to launch subagent: mcp_servers.github in /home/agent/config.toml has no resolvable transport.',
+  ), { name: 'InvalidMcpTransportError', serverKey: 'github' });
+  const c = classifySpawnException(err);
+  assert.equal(c.reason, 'invalid_mcp_transport');
+  assert.equal(c.serverKey, 'github');
+});
+
+test('classifySpawnException: a missing/non-string serverKey on the error is omitted, not coerced (caller falls back safely)', () => {
+  for (const bad of [undefined, null, 42, '']) {
+    const err = Object.assign(new Error('x'), { name: 'InvalidMcpTransportError', serverKey: bad });
+    assert.equal(classifySpawnException(err).serverKey, undefined, `serverKey=${JSON.stringify(bad)}`);
+  }
+});
+
 test('classifySpawnException: an ordinary exception keeps the pre-existing generic bucket (no behavior change for other failures)', () => {
   assert.deepEqual(classifySpawnException(new Error('ECONNRESET')), { reason: 'exception' });
   assert.deepEqual(classifySpawnException(new TypeError('boom')), { reason: 'exception' });

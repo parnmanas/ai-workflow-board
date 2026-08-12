@@ -484,6 +484,11 @@ export function isDurableProvisioningBlocker(kind: string | undefined | null): b
 export interface SpawnExceptionClassification {
   reason: string;
   detail?: string;
+  /** The offending `mcp_servers.<name>` bare name for an `invalid_mcp_transport`
+   *  classification (ticket da4358ee review round 2) — lets the caller name the
+   *  exact config key an operator must fix instead of assuming it's always
+   *  `awb`. Absent for every other reason. */
+  serverKey?: string;
 }
 
 /** Classify a spawn-time exception (ticket da4358ee).
@@ -508,7 +513,12 @@ export function classifySpawnException(err: unknown): SpawnExceptionClassificati
   const name = (err as { name?: unknown } | null | undefined)?.name;
   if (name === 'InvalidMcpTransportError') {
     const message = (err as { message?: unknown } | null | undefined)?.message;
-    return { reason: 'invalid_mcp_transport', detail: String(message ?? '').slice(0, 500) };
+    const serverKey = (err as { serverKey?: unknown } | null | undefined)?.serverKey;
+    return {
+      reason: 'invalid_mcp_transport',
+      detail: String(message ?? '').slice(0, 500),
+      serverKey: typeof serverKey === 'string' && serverKey ? serverKey : undefined,
+    };
   }
   return { reason: 'exception' };
 }

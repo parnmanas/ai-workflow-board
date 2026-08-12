@@ -87,9 +87,17 @@ function codexPermissionArgs(permissionMode?: string | null): string[] {
 export const CODEX_MCP_TRANSPORTS = Object.freeze(['stdio', 'streamable_http'] as const);
 
 export class InvalidMcpTransportError extends Error {
-  constructor(message: string) {
+  /** The offending `mcp_servers.<name>` table's bare `name` (never the full
+   *  `mcp_servers.` prefix) — kept structured so callers building an operator
+   *  notification don't have to parse it back out of `message` (ticket
+   *  da4358ee review round 2: a hardcoded `mcp_servers.awb` in the
+   *  notification text was wrong for every non-`awb` server key). */
+  readonly serverKey: string;
+
+  constructor(message: string, serverKey: string) {
     super(message);
     this.name = 'InvalidMcpTransportError';
+    this.serverKey = serverKey;
   }
 }
 
@@ -111,6 +119,7 @@ export function validateCodexMcpServers(config: unknown, configPath: string): vo
       throw new InvalidMcpTransportError(
         `Refusing to launch subagent: ${where} in ${configPath} is not a valid MCP server table — ` +
           `define a "url" (streamable_http) or a "command" (stdio). Allowed transports: ${allowed}.`,
+        name,
       );
     }
     const entry = raw as Record<string, unknown>;
@@ -122,24 +131,28 @@ export function validateCodexMcpServers(config: unknown, configPath: string): vo
         throw new InvalidMcpTransportError(
           `Refusing to launch subagent: ${where}.transport = ${JSON.stringify(declared)} in ${configPath} ` +
             `is not a supported MCP transport. Allowed transports: ${allowed}.`,
+          name,
         );
       }
       if (declared === 'streamable_http' && !hasUrl) {
         throw new InvalidMcpTransportError(
           `Refusing to launch subagent: ${where}.transport = "streamable_http" in ${configPath} requires a "url". ` +
             `Allowed transports: ${allowed}.`,
+          name,
         );
       }
       if (declared === 'stdio' && !hasCommand) {
         throw new InvalidMcpTransportError(
           `Refusing to launch subagent: ${where}.transport = "stdio" in ${configPath} requires a "command". ` +
             `Allowed transports: ${allowed}.`,
+          name,
         );
       }
     } else if (!hasUrl && !hasCommand) {
       throw new InvalidMcpTransportError(
         `Refusing to launch subagent: ${where} in ${configPath} has no resolvable transport — ` +
           `set a "url" (streamable_http) or a "command" (stdio). Allowed transports: ${allowed}.`,
+        name,
       );
     }
   }

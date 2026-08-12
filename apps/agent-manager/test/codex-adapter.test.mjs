@@ -154,6 +154,7 @@ test('buildOneshotSpawn rejects attribution before spawn when effective awb is h
       assert.match(err.message, /mcp_servers\.awb/);
       assert.ok(err.message.includes(join(cliHomeDir, 'config.toml')));
       assert.match(err.message, /stdio, streamable_http/);
+      assert.equal(err.serverKey, 'awb', 'structured serverKey lets a notification name this table without parsing message text');
       return true;
     },
   );
@@ -532,7 +533,9 @@ test('validateCodexMcpServers rejects an explicit transport inconsistent with it
   // A non-table entry is rejected too.
   assert.throws(
     () => validateCodexMcpServers({ mcp_servers: { junk: 'nope' } }, '/c'),
-    (err) => err instanceof InvalidMcpTransportError && /mcp_servers\.junk/.test(err.message),
+    (err) => err instanceof InvalidMcpTransportError
+      && /mcp_servers\.junk/.test(err.message)
+      && err.serverKey === 'junk', // structured key survives for a NON-awb server too (ticket da4358ee review round 2)
   );
 });
 

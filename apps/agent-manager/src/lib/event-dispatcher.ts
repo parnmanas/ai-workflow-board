@@ -471,6 +471,10 @@ export interface SubagentSpawnResult {
    *  `mcp_servers.<name>` config key an `invalid_mcp_transport` reason names) —
    *  ticket da4358ee. Absent for reasons that carry no extra detail. */
   detail?: string;
+  /** Bare `mcp_servers.<name>` key for an `invalid_mcp_transport` reason
+   *  (ticket da4358ee review round 2) — the operator notification must name
+   *  THIS key, not assume it's always `awb`. Absent for every other reason. */
+  serverKey?: string;
 }
 
 export interface SubagentManager {
@@ -2579,12 +2583,23 @@ export class EventDispatcher {
           this.#dispatchBlockTracker.record(blockerKind);
           const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
           if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+            // ticket da4358ee review round 2: the offending key is NOT always
+            // `awb` — validateCodexMcpServers() reports on every `mcp_servers.<name>`
+            // table, so a broken `mcp_servers.github` must name `github`, not a
+            // hardcoded `awb`. result.serverKey carries the exact name from
+            // InvalidMcpTransportError; strip backticks/newlines before splicing
+            // it into a backtick-quoted span so a pathological key can't break
+            // out of the code span or inject extra markdown.
+            const safeServerKey = String(result.serverKey || 'awb')
+              .replace(/[`\r\n]/g, '')
+              .slice(0, 200);
+            const mcpServerPath = `mcp_servers.${safeServerKey}`;
             await fireAndForgetTool(this.#config, 'add_comment', {
               ticket_id: ev.ticket_id,
               content:
-                `⚠️ **MCP transport 설정 오류** — 이 CLI(\`${agentContext?.cli ?? 'codex'}\`)가 \`mcp_servers.awb\` 설정에서 해석 가능한 transport(\`url\` 또는 \`command\`)를 찾지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
-                `마지막 오류: \`${result.detail || 'invalid transport in mcp_servers.awb'}\`\n\n` +
-                `이 agent의 CLI 홈(config.toml)의 \`mcp_servers.awb\` 테이블(또는 harness/자격 증명 설정)을 점검해 고친 뒤 이 티켓을 unpend 하세요.\n\n` +
+                `⚠️ **MCP transport 설정 오류** — 이 CLI(\`${agentContext?.cli ?? 'codex'}\`)가 \`${mcpServerPath}\` 설정에서 해석 가능한 transport(\`url\` 또는 \`command\`)를 찾지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+                `마지막 오류: \`${result.detail || `invalid transport in ${mcpServerPath}`}\`\n\n` +
+                `이 agent의 CLI 홈(config.toml)의 \`${mcpServerPath}\` 테이블(또는 harness/자격 증명 설정)을 점검해 고친 뒤 이 티켓을 unpend 하세요.\n\n` +
                 `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 설정을 고친 뒤 unpend 하세요._`,
             });
           }
