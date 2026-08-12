@@ -36,6 +36,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   setupKanbanScene, createAgent, createTicket, createApiKey,
 } from '../helpers/fixtures.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
@@ -384,8 +385,12 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     // dispatch_reconcile_redispatch rows / ~2 days observed on the source ticket.
     // The agent-manager side of the fix (event-dispatcher.ts, this same PR)
     // classifies that spawn failure as the durable blocker `invalid_mcp_transport`
-    // and pends the ticket on the FIRST abort. This proves the RECONCILER half:
-    // once parked, dispatch_generation freezes instead of climbing without bound.
+    // and pends the ticket on the FIRST abort by calling the real pend_ticket MCP
+    // tool (driven below over the real MCP protocol — see review round 2 blocker
+    // #2 — the manager side's comment/pend/nack wiring itself is covered
+    // end-to-end in apps/agent-manager/test/invalid-mcp-transport-notification.test.mjs).
+    // This subtest proves the RECONCILER half: once parked via that real tool,
+    // dispatch_generation freezes instead of climbing without bound.
     const ticket = await mkTicket('invalid mcp transport storm');
     const tid = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
     let intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
@@ -415,9 +420,24 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
     // The manager's durable-blocker handling (RoleSpawnSuppressor.note treats
     // invalid_mcp_transport as durable — pends on the very FIRST abort in
-    // production, event-dispatcher.ts) parks the ticket. Drive the ticket to
-    // that post-pend state directly to isolate and prove the reconciler side.
-    await ticketRepo.update(ticket.id, { pending_user_action: true });
+    // production, event-dispatcher.ts) parks the ticket by calling the REAL
+    // pend_ticket MCP tool (review round 2, blocker #2: a raw
+    // `ticketRepo.update(..., { pending_user_action: true })` here would only
+    // re-prove "a parked ticket freezes dispatch_generation" without ever
+    // exercising the actual pend_ticket tool's action-gate / terminal-gate /
+    // audit-log path production traffic goes through — a regression there
+    // could pass this test while the real chokepoint stayed broken). Drive it
+    // over the real MCP protocol, exactly as the manager's
+    // fireAndForgetTool(this.#config, 'pend_ticket', ...) call does.
+    const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: (await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'mcp-transport-pend' })).raw_key });
+    await mcp.initialize();
+    const pendResult = await mcp.callTool('pend_ticket', {
+      ticket_id: ticket.id,
+      reason: 'invalid MCP transport config — operator must fix mcp_servers.<name> and unpend',
+    });
+    assert.ok(!pendResult.isError, 'the real pend_ticket tool call succeeded');
+    assert.equal(pendResult.pending_user_action, true, 'the tool actually parked the ticket');
+    await mcp.close();
 
     const next = new Date(intent.next_attempt_at).getTime() + 1000;
     await reconciler.reconcile(new Date(next));
