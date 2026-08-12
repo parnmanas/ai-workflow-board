@@ -15,6 +15,7 @@ import {
   fetchChatRoomHistory,
   fetchAgentRecord,
   fetchRepositoryCredential,
+  hasAgentCommentSince,
   postFsResponse,
   postChatRoomMessage,
   postDispatchAck,
@@ -1399,6 +1400,10 @@ export class EventDispatcher {
     // 참고.
     'hermes_empty_reply',
     'hermes_reply_post_failed',
+    // ticket e8105c84 리뷰 라운드1 지적 — end_turn 자체는 코멘트 멘션에 대한
+    // add_comment 응답의 증거가 아니라는 지적에 대응해 신설. #reportHermesMentionOutcome
+    // 참고.
+    'hermes_mention_no_reply',
   ]);
 
   // 실패를 세 곳에 일관되게 노출한다: (a) 매니저 로그(전체 detail, classify()가
@@ -1527,11 +1532,17 @@ export class EventDispatcher {
   // 케이스를 log()만 남기고 spawnFailureTracker/티켓 어느 쪽에도 신호를 남기지
   // 않았다. 이 경로는 replyText를 관측하지 않으므로(Hermes가 add_comment MCP
   // 도구를 직접 호출) #reportHermesDispatchOutcome을 그대로 재사용할 수 없고,
-  // stopReason 검사만 골라 재사용한다. "실제로 새 코멘트가 달렸는지"까지 확인하는
-  // 강한 검증(코멘트 스냅샷/diff)은 티켓 본문에서 별도 설계가 필요하다고 명시한
-  // 범위 밖이다.
+  // stopReason 검사만 골라 재사용한다.
+  //
+  // 리뷰 라운드1 지적: stopReason이 'end_turn'이어도 Hermes가 실제로
+  // add_comment를 호출했다는 보장은 아니다 — 이 티켓이 막아야 하는 바로 그
+  // "무응답인데 성공 처리" 케이스가 'end_turn' 경로 안에도 남아있었다.
+  // hasAgentCommentSince로 디스패치 시작 시각 이후 이 agent가 실제로 새
+  // 코멘트를 남겼는지 재확인해, 없으면 non-end_turn과 동일하게 실패로 다룬다.
   async #reportHermesMentionOutcome(
     ticketId: string,
+    agentId: string,
+    dispatchStartedAt: number,
     result: RuntimeDispatchResult,
   ): Promise<void> {
     if (result.stopReason !== 'end_turn') {
@@ -1543,6 +1554,18 @@ export class EventDispatcher {
         `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
       );
       await this.#notifyHermesMentionFailureOnTicket(ticketId, result.stopReason);
+      return;
+    }
+    const replied = await hasAgentCommentSince(this.#config, ticketId, agentId, dispatchStartedAt);
+    if (!replied) {
+      await this.#reportHermesDispatchFailure(
+        'Hermes mention dispatch',
+        undefined,
+        undefined,
+        'hermes_mention_no_reply',
+        `session ${result.sessionId} ended with end_turn but agent=${agentId} posted no new comment on ticket=${ticketId}`,
+      );
+      await this.#notifyHermesMentionFailureOnTicket(ticketId, 'hermes_mention_no_reply');
       return;
     }
     spawnFailureTracker.recordSuccess('hermes');
@@ -2989,6 +3012,7 @@ export class EventDispatcher {
             mention,
             ticketId,
           ) ?? `[mention] ${ticketId} ${commentId}`;
+        const dispatchStartedAt = Date.now();
         const result = await this.#dispatchHermes({
           agentContext,
           runId: `ticket:${ticketId}:${mention.role_shortcut || '_'}`,
@@ -3000,7 +3024,7 @@ export class EventDispatcher {
           `Comment mention dispatched through Hermes ACP: ticket=${ticketId} ` +
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
-        await this.#reportHermesMentionOutcome(ticketId, result);
+        await this.#reportHermesMentionOutcome(ticketId, agentContext.agent_id, dispatchStartedAt, result);
       } catch (err: any) {
         const code = err?.code || 'runtime_dispatch_error';
         // 채팅 경로(handleChatRequest/handleChatRoomMessage)와 동일한 로그

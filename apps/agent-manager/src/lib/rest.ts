@@ -175,6 +175,45 @@ export async function hasAuditTrailSince(
   });
 }
 
+/** Same clock-skew rationale as SILENT_EXIT_VERIFY_BUFFER_MS, kept as its own
+ *  constant since this gates a different call site (comment-mention reply
+ *  confirmation, ticket e8105c84) that may evolve independently. */
+const MENTION_REPLY_VERIFY_BUFFER_MS = 5_000;
+
+/**
+ * Did `agentId` post a NEW comment on `ticketId` at/after `sinceMs`? Confirms
+ * a Hermes comment-mention dispatch that ended stopReason='end_turn' actually
+ * produced the `add_comment` MCP call it was asked to make — 'end_turn' only
+ * means the ACP session ended cleanly, not that any tool call inside it
+ * landed (ticket e8105c84).
+ *
+ * Unlike `hasAuditTrailSince`, this has no grace delay: the ACP
+ * session/prompt response that #dispatchHermes() resolves on only arrives
+ * after Hermes's own add_comment call has already round-tripped, so the
+ * write is already committed by the time this runs (no exited-process-vs-
+ * in-flight-write race like the silent-exit case). The clock-skew buffer
+ * still applies since `sinceMs` is stamped by this host's clock while
+ * `created_at` is stamped by the AWB server's.
+ *
+ * Fails CLOSED (returns false — "no reply seen") on any fetch error.
+ */
+export async function hasAgentCommentSince(
+  config: AwbConfig,
+  ticketId: string | undefined,
+  agentId: string | undefined,
+  sinceMs: number,
+): Promise<boolean> {
+  if (!ticketId || !agentId) return false;
+  const ticket = await fetchTicketContext(config, ticketId);
+  const comments = Array.isArray(ticket?.comments) ? ticket.comments : [];
+  const cutoff = sinceMs - MENTION_REPLY_VERIFY_BUFFER_MS;
+  return comments.some((c: any) => {
+    if (c?.author_id !== agentId) return false;
+    const createdAt = new Date(c?.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt >= cutoff;
+  });
+}
+
 /**
  * Fetch recent chat room messages from AWB REST API.
  * Returns array (possibly empty) on success or empty on failure.
