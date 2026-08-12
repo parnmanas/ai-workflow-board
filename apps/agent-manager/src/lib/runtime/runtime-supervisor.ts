@@ -48,6 +48,12 @@ export interface RuntimeDispatchRequest {
   systemContext?: string;
   task: string;
   model?: string | null;
+  // ticket a837879c 2차 재리뷰 지적 #1: this dispatch's own RuntimeEvent stream
+  // (scoped to just this call, unlike the constructor-level `onEvent` which
+  // fans out across every session). Lets a caller collect e.g. `message_delta`
+  // text to confirm what was actually said, instead of inferring delivery
+  // from `stopReason` alone.
+  onEvent?: (event: RuntimeEvent) => void;
 }
 
 export interface RuntimeDispatchContext {
@@ -81,6 +87,7 @@ export interface RuntimeSupervisorOptions
 interface SessionPolicy {
   context: RuntimeDispatchContext;
   config: AgentRuntimeConfig;
+  onEvent?: (event: RuntimeEvent) => void;
 }
 
 function normalizedUsage(value?: AcpUsage): RuntimeDispatchResult['usage'] {
@@ -177,6 +184,7 @@ export class RuntimeSupervisor {
     this.#policies.set(this.#sessionKey(request.agentId, record.sessionId), {
       context,
       config,
+      onEvent: request.onEvent,
     });
 
     const prompt = [
@@ -296,6 +304,7 @@ export class RuntimeSupervisor {
       this.#collaboration.finish(key, event.childRunId);
     }
     this.#onEvent?.(policy.context, event);
+    policy.onEvent?.(event);
   }
 
   async #handlePermission(

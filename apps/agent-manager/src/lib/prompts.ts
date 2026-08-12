@@ -235,6 +235,10 @@ export function composeTriggerPrompt(
   return lines.join('\n');
 }
 
+/** See `chatReplyInstructions` below for what each state means; `'agent_manager_delivers'`
+ *  is the Hermes-only third state added by ticket a837879c. */
+export type ChatReplyMode = boolean | 'agent_manager_delivers';
+
 /** The delivery instruction for a chat reply depends on whether the responding
  *  CLI can call AWB MCP tools itself (NATIVE_MCP — claude) or whether the agent
  *  manager harvests its stdout and posts the reply on its behalf (non-NATIVE_MCP
@@ -243,10 +247,20 @@ export function composeTriggerPrompt(
  *  such tool, and the "do NOT print to stdout" line starves the exact channel
  *  the manager reads. So the channel instruction has to track adapter capability.
  *
- *  When `usesNativeMcp` is true (default — preserves prior claude behavior) the
- *  subagent is told to call the MCP tool with the explicit room id. When false
- *  it is told to emit the reply as its final plain-text answer; the manager
- *  captures that and posts it to the room.
+ *  `mode` has three states:
+ *  - `true` (default — preserves prior claude behavior): the subagent is told
+ *    to call the MCP tool with the explicit room id.
+ *  - `false`: the subagent has no MCP access; it emits the reply as its final
+ *    plain-text answer and the manager captures that from stdout and posts it.
+ *  - `'agent_manager_delivers'` (ticket a837879c, Hermes only): the subagent
+ *    DOES have the MCP tool available (all other instructions below are the
+ *    native ones — operational policy, artifact refs, auto-title) but is told
+ *    not to call it for the reply itself. The agent manager instead collects
+ *    the ACP `agent_message_chunk` delta stream for this turn and posts the
+ *    assembled text to the room itself, then only records success once that
+ *    POST is confirmed — closing the gap where an ACP session could end
+ *    normally (`stopReason==='end_turn'`) without ever actually delivering a
+ *    reply (e.g. the tool call silently cancelled by permission_mode).
  *
  *  `isActionRoom` (ticket e6d32e9d) flips the WORK-POLICY line only — the reply
  *  CHANNEL lines are identical. An Action Run reuses the chat-room pipeline but
@@ -255,7 +269,7 @@ export function composeTriggerPrompt(
  *  the "this is a CHAT channel, create a ticket" rule and substitute a
  *  "do the work directly, do NOT create a ticket" rule. Ordinary chat rooms
  *  (isActionRoom = false, the default) keep the prior behavior verbatim. */
-function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionRoom = false): string[] {
+function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false): string[] {
   const operationalPolicy = [
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
     '- For an operational request, first search workspace/board Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
@@ -263,14 +277,22 @@ function chatReplyInstructions(usesNativeMcp: boolean, roomId: string, isActionR
     '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
     '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
   ];
-  if (usesNativeMcp) {
-    const lines = [
-      `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
-      '- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.',
-    ];
+  if (mode) {
+    const managerDelivers = mode === 'agent_manager_delivers';
+    const lines = managerDelivers
+      ? [
+          '- Write your reply as your final message for this turn — a plain-text answer.',
+          '- Do NOT call the send_chat_room_message MCP tool for this reply. The agent manager captures your final message and delivers it to the room on your behalf.',
+        ]
+      : [
+          `- Reply ONLY via the mcp__awb__send_chat_room_message MCP tool (room_id: "${roomId}").`,
+          '- Do NOT print your reply to stdout — it must go through send_chat_room_message so the user sees it in the web UI.',
+        ];
     if (isActionRoom) {
       lines.push(
-        '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then use send_chat_room_message to report your result / progress / summary.',
+        managerDelivers
+          ? '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then write your result / progress / summary as your final message.'
+          : '- This is an ACTION run, NOT a chat. The message above is a task assigned specifically to YOU — carry it out DIRECTLY (code edits, feature implementation, bug fixes, refactors, migrations, config changes, and any committing/merging/branch work the task calls for). Do NOT create an AWB ticket to defer it and do NOT tell anyone to file one — you ARE the agent meant to do this work. Perform the requested task, then use send_chat_room_message to report your result / progress / summary.',
       );
     } else {
       lines.push(...operationalPolicy);
@@ -312,7 +334,7 @@ export function composeChatPrompt(
   history: ChatHistoryEntry[],
   newMessage: string,
   roomId = '',
-  usesNativeMcp = true,
+  usesNativeMcp: ChatReplyMode = true,
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a live conversation.');
@@ -386,7 +408,7 @@ export function composeChatRoomPrompt(
   history: ChatHistoryEntry[],
   newMessage: ChatRoomNewMessage,
   attachments?: PreparedAttachment[],
-  usesNativeMcp = true,
+  usesNativeMcp: ChatReplyMode = true,
   // Prepared attachments for past messages, keyed by the history entry object
   // reference. Slicing/filtering the history array below preserves those
   // references, so a Map keyed by identity stays aligned with the rendered

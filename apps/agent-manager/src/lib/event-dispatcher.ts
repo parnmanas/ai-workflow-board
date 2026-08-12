@@ -28,6 +28,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, sharedWorktreeInstructions } from './prompts.js';
+import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
@@ -37,6 +38,7 @@ import type {
   RuntimeDispatchResult,
   RuntimeSupervisor,
 } from './runtime/runtime-supervisor.js';
+import type { RuntimeEvent } from './runtime/runtime-events.js';
 import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
 import {
   parseRunProvision,
@@ -651,14 +653,14 @@ export interface PromptComposer {
     history: any[],
     newMessage: string,
     roomId?: string,
-    usesNativeMcp?: boolean,
+    usesNativeMcp?: ChatReplyMode,
   ): string;
   composeChatRoomPrompt(
     roomId: string,
     history: any[],
     msg: { content: string; sender_name: string; sender_id: string },
     attachments?: any[],
-    usesNativeMcp?: boolean,
+    usesNativeMcp?: ChatReplyMode,
     historyAttachments?: Map<any, any[]>,
     roomName?: string,
     isActionRoom?: boolean,
@@ -1275,6 +1277,11 @@ export class EventDispatcher {
     task: string;
     systemContext?: string;
     skillSnapshot?: (RuntimeSkillSnapshot & { run_id?: string }) | null;
+    // ticket a837879c 2차 재리뷰 지적 #1 — this dispatch's own event stream,
+    // scoped to just this call. Chat call sites use it to collect
+    // `message_delta` text so delivery can be confirmed by what Hermes
+    // actually said, not by `stopReason` alone.
+    onEvent?: (event: RuntimeEvent) => void;
   }): Promise<RuntimeDispatchResult> {
     if (!this.#runtimeSupervisor) {
       const err: any = new Error('Hermes runtime supervisor is not available on this Runtime Host');
@@ -1311,6 +1318,7 @@ export class EventDispatcher {
           : '',
       ].filter(Boolean).join('\n\n'),
       task: args.task,
+      onEvent: args.onEvent,
     });
   }
 
@@ -1344,6 +1352,11 @@ export class EventDispatcher {
     'max_turn_requests',
     'refusal',
     'cancelled',
+    // ticket a837879c 리뷰 지적 #1(2차) — end_turn 자체는 send_chat_room_message
+    // 성공의 증거가 아니라는 지적에 대응해 신설한 두 코드. #reportHermesDispatchOutcome
+    // 참고.
+    'hermes_empty_reply',
+    'hermes_reply_post_failed',
   ]);
 
   // 실패를 세 곳에 일관되게 노출한다: (a) 매니저 로그(전체 detail, classify()가
@@ -1381,29 +1394,69 @@ export class EventDispatcher {
   }
 
   // dispatch()가 throw 없이 resolve해도 ACP session/prompt 가 'end_turn' 이외의
-  // stopReason 으로 끝나면 응답 전달이 실제로 완료됐다는 보장이 없다 — 특히
-  // permission_mode 가 'trusted' 가 아니면 Hermes 가 응답을 위해 호출해야 하는
-  // MCP 도구(send_chat_room_message) 자체가 RuntimeSupervisor#handlePermission 에서
-  // 조용히 cancel 된다. 이걸 무조건 성공으로 로그만 남기던 것이 리뷰 지적 #1의 핵심
-  // ("무응답인데 성공 처리됨") — stopReason 을 확인해 'end_turn' 이 아니면 실패와
-  // 동일하게 다룬다.
+  // stopReason 으로 끝나면 응답 전달이 실제로 완료됐다는 보장이 없다 — stopReason
+  // 을 확인해 'end_turn' 이 아니면 실패와 동일하게 다룬다.
+  //
+  // ticket a837879c 리뷰 지적 #1(2차 재리뷰) — 'end_turn' 자체도 send_chat_room_message
+  // 호출이 실제로 성공했다는 증거는 아니라는 지적. Hermes 자신이 그 MCP 도구를
+  // 호출했는지를 ACP tool-call 관측으로 추정하는 대신(Hermes ACP 구현이 MCP 도구
+  // 호출을 tool_call 알림의 title/kind 에 어떻게 담는지는 벤더 재량이라 검증 불가),
+  // 채팅 응답 채널 자체를 Manager 소유로 바꿨다 — Hermes 는 이제 최종 답변을 일반
+  // 텍스트로만 작성하고(prompts.ts 의 'agent_manager_delivers' 모드,
+  // chatReplyInstructions 참고), 그 세션에서 관측된 agent_message_chunk 델타를
+  // 호출부가 모아 넘긴 replyText 를 여기서 직접 postChatRoomMessage 로 방에
+  // 게시한다. recordSuccess 는 그 POST 가 실제로 성공했을 때만 호출되므로,
+  // "정상 종료처럼 보이지만 채팅 응답 없음"이 성공으로 잘못 기록될 수 없다.
   async #reportHermesDispatchOutcome(
     logPrefix: string,
     roomId: string | undefined,
     agentId: string | undefined,
     result: RuntimeDispatchResult,
+    replyText: string,
   ): Promise<void> {
-    if (result.stopReason === 'end_turn') {
+    if (result.stopReason !== 'end_turn') {
+      await this.#reportHermesDispatchFailure(
+        logPrefix,
+        roomId,
+        agentId,
+        result.stopReason,
+        `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
+      );
+      return;
+    }
+    const trimmed = replyText.trim();
+    if (!trimmed) {
+      await this.#reportHermesDispatchFailure(
+        logPrefix,
+        roomId,
+        agentId,
+        'hermes_empty_reply',
+        `session ${result.sessionId} ended with end_turn but produced no reply text`,
+      );
+      return;
+    }
+    if (!roomId || !agentId) {
+      // No chat room to deliver into (e.g. a future non-chat caller) — the
+      // ACP session itself completed normally, nothing left to confirm.
       spawnFailureTracker.recordSuccess('hermes');
       return;
     }
-    await this.#reportHermesDispatchFailure(
-      logPrefix,
-      roomId,
-      agentId,
-      result.stopReason,
-      `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
-    );
+    const posted = await postChatRoomMessage(this.#config, roomId, agentId, trimmed)
+      .catch((postErr: any) => {
+        log(`${logPrefix} reply POST threw: room=${roomId} ${postErr?.message ?? postErr}`);
+        return false;
+      });
+    if (!posted) {
+      await this.#reportHermesDispatchFailure(
+        logPrefix,
+        roomId,
+        agentId,
+        'hermes_reply_post_failed',
+        `session ${result.sessionId} completed but reply POST to room=${roomId} failed`,
+      );
+      return;
+    }
+    spawnFailureTracker.recordSuccess('hermes');
   }
 
   /**
@@ -2429,8 +2482,9 @@ export class EventDispatcher {
           Array.isArray(payload.history) ? payload.history : [],
           payload.new_message || '',
           payload.room_id || '',
-          true,
+          'agent_manager_delivers',
         ) ?? `[chat] ${payload.new_message || ''}`;
+      let replyText = '';
       try {
         const result = await this.#dispatchHermes({
           agentContext,
@@ -2438,6 +2492,9 @@ export class EventDispatcher {
           leaseId: `chat:${agentContext.cwd}`,
           systemContext: rolePrompt,
           task: taskText,
+          onEvent: (event) => {
+            if (event.type === 'message_delta') replyText += event.text;
+          },
         });
         log(
           `Chat request dispatched through Hermes ACP: room=${payload.room_id || ''} ` +
@@ -2448,6 +2505,7 @@ export class EventDispatcher {
           payload.room_id,
           agentContext.agent_id,
           result,
+          replyText,
         );
       } catch (err: any) {
         await this.#reportHermesDispatchFailure(
@@ -3105,19 +3163,23 @@ export class EventDispatcher {
               sender_id: p.sender_id || '',
             },
             prepared,
-            true,
+            'agent_manager_delivers',
             undefined,
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
+        let replyText = '';
         const result = await this.#dispatchHermes({
           agentContext: runContext,
           runId,
           leaseId: runProvision?.run_id || `chat:${runContext.cwd}`,
           systemContext: rolePrompt,
           task: taskText,
+          onEvent: (event) => {
+            if (event.type === 'message_delta') replyText += event.text;
+          },
         });
         this.#chatSessionManager?.recordRoomMessage(p);
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
@@ -3130,6 +3192,7 @@ export class EventDispatcher {
           p.room_id,
           runContext.agent_id,
           result,
+          replyText,
         );
       } catch (err: any) {
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
