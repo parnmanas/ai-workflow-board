@@ -20,7 +20,8 @@ export class AgentErrorLog {
   level: string;  // 'error' | 'warn' | 'fatal'
 
   @Column({ type: 'varchar' })
-  category: string;  // 'crash' | 'sse' | 'presence' | 'subagent' | 'ipc' | 'misc'
+  category: string;  // classify() in agent-manager/src/lib/error-log-uploader.ts (crash/sse/presence/subagent/ipc/hermes/agent-context/misc)
+                      // + recordEvent() eventType in agent-manager/src/lib/event-dispatcher.ts (agent_trigger/board_update/chat_request/chat_room_message/comment_mention/fs_request/agent_manager_command)
 
   @Column({ type: 'text' })
   message: string;

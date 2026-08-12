@@ -17,12 +17,16 @@ const CATEGORIES = [
   'presence',
   'subagent',
   'ipc',
+  'hermes',
+  'agent-context',
   'misc',
   'agent_trigger',
   'board_update',
   'chat_request',
   'chat_room_message',
   'comment_mention',
+  'fs_request',
+  'agent_manager_command',
 ] as const;
 const LEVELS = ['fatal', 'error', 'warn', 'info'] as const;
 
