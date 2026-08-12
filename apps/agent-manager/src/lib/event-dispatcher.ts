@@ -9,6 +9,7 @@
 
 import { log } from './logging.js';
 import { loadAgentInfo } from './config.js';
+import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   fetchTicketContext,
   fetchChatRoomHistory,
@@ -1276,7 +1277,9 @@ export class EventDispatcher {
     skillSnapshot?: (RuntimeSkillSnapshot & { run_id?: string }) | null;
   }): Promise<RuntimeDispatchResult> {
     if (!this.#runtimeSupervisor) {
-      throw new Error('runtime_supervisor_unavailable');
+      const err: any = new Error('Hermes runtime supervisor is not available on this Runtime Host');
+      err.code = 'runtime_supervisor_unavailable';
+      throw err;
     }
     let skillDirectory = '';
     if (args.skillSnapshot) {
@@ -1309,6 +1312,98 @@ export class EventDispatcher {
       ].filter(Boolean).join('\n\n'),
       task: args.task,
     });
+  }
+
+  // ticket a837879c 리뷰 지적 #2 — Hermes 디스패치 실패의 err.message 원문(실행 경로,
+  // 명령 인자, ACP 프로토콜 data 등을 포함할 수 있음)을 채팅에 그대로 노출하지 않기
+  // 위한 allowlist. #dispatchHermes()/RuntimeSupervisor가 던지는 Error.code 값과
+  // ACP session/prompt의 stopReason 값만 통과시키고, 목록 밖은 전부
+  // 'runtime_dispatch_error'로 뭉뚱그린다. err.message 는 로그/spawnFailureTracker
+  // 에만 남는다.
+  static readonly #HERMES_CHAT_ERROR_CODES = new Set([
+    'runtime_supervisor_unavailable',
+    'runtime_not_configured',
+    'runtime_unknown',
+    'runtime_unavailable',
+    'runtime_config_invalid',
+    'runtime_not_supported',
+    'runtime_collaboration_denied',
+    'hermes_session_not_found',
+    'hermes_session_owner_mismatch',
+    'hermes_session_lease_mismatch',
+    'hermes_session_cwd_mismatch',
+    'acp_timeout',
+    'acp_aborted',
+    'acp_closed',
+    'acp_process_exited',
+    'acp_malformed_message',
+    'acp_message_too_large',
+    'acp_remote_error',
+    'acp_write_failed',
+    'max_tokens',
+    'max_turn_requests',
+    'refusal',
+    'cancelled',
+  ]);
+
+  // 실패를 세 곳에 일관되게 노출한다: (a) 매니저 로그(전체 detail, classify()가
+  // category='hermes'로 잡도록 "Hermes <prefix> failed closed:" 형식 고정),
+  // (b) spawnFailureTracker(대시보드 degraded 배지 — base-session-manager.ts/
+  // subagent-manager.ts의 CLI spawn 실패와 동일한 신호 경로 재사용, 리뷰 지적 #3),
+  // (c) 채팅방(allowlist 코드 + 일반 안내만, 리뷰 지적 #2). 채팅 POST 자체의 실패는
+  // 빈 catch로 삼키지 않고 로그로 남긴다(리뷰 지적 #3).
+  async #reportHermesDispatchFailure(
+    logPrefix: string,
+    roomId: string | undefined,
+    agentId: string | undefined,
+    code: string,
+    detail: string,
+  ): Promise<void> {
+    log(`${logPrefix} failed closed: ${code} ${detail}`);
+    spawnFailureTracker.record({ cli: 'hermes', code, message: detail });
+    if (!roomId || !agentId) return;
+    const chatCode = EventDispatcher.#HERMES_CHAT_ERROR_CODES.has(code)
+      ? code
+      : 'runtime_dispatch_error';
+    const posted = await postChatRoomMessage(
+      this.#config,
+      roomId,
+      agentId,
+      `⚠️ **Hermes 런타임 실행 실패** (\`${chatCode}\`)\n\n` +
+        `이 메시지에 응답하지 못했습니다. Agent Manager 로그를 확인한 뒤 다시 시도하세요.`,
+    ).catch((postErr: any) => {
+      log(`${logPrefix} failure notice POST threw: room=${roomId} ${postErr?.message ?? postErr}`);
+      return false;
+    });
+    if (!posted) {
+      log(`${logPrefix} failure notice did not reach room=${roomId} (code=${chatCode})`);
+    }
+  }
+
+  // dispatch()가 throw 없이 resolve해도 ACP session/prompt 가 'end_turn' 이외의
+  // stopReason 으로 끝나면 응답 전달이 실제로 완료됐다는 보장이 없다 — 특히
+  // permission_mode 가 'trusted' 가 아니면 Hermes 가 응답을 위해 호출해야 하는
+  // MCP 도구(send_chat_room_message) 자체가 RuntimeSupervisor#handlePermission 에서
+  // 조용히 cancel 된다. 이걸 무조건 성공으로 로그만 남기던 것이 리뷰 지적 #1의 핵심
+  // ("무응답인데 성공 처리됨") — stopReason 을 확인해 'end_turn' 이 아니면 실패와
+  // 동일하게 다룬다.
+  async #reportHermesDispatchOutcome(
+    logPrefix: string,
+    roomId: string | undefined,
+    agentId: string | undefined,
+    result: RuntimeDispatchResult,
+  ): Promise<void> {
+    if (result.stopReason === 'end_turn') {
+      spawnFailureTracker.recordSuccess('hermes');
+      return;
+    }
+    await this.#reportHermesDispatchFailure(
+      logPrefix,
+      roomId,
+      agentId,
+      result.stopReason,
+      `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
+    );
   }
 
   /**
@@ -2348,19 +2443,20 @@ export class EventDispatcher {
           `Chat request dispatched through Hermes ACP: room=${payload.room_id || ''} ` +
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
+        await this.#reportHermesDispatchOutcome(
+          'Hermes chat dispatch',
+          payload.room_id,
+          agentContext.agent_id,
+          result,
+        );
       } catch (err: any) {
-        const reason = err?.code || 'runtime_dispatch_error';
-        log(`Hermes chat dispatch failed closed: ${reason} ${err?.message ?? err}`);
-        if (payload.room_id && agentContext.agent_id) {
-          await postChatRoomMessage(
-            this.#config,
-            payload.room_id,
-            agentContext.agent_id,
-            `⚠️ **Hermes 런타임 실행 실패** — 이 메시지에 응답하지 못했습니다.\n\n` +
-              `\`\`\`\n${reason}: ${err?.message ?? err}\n\`\`\`\n\n` +
-              `Agent Manager 로그를 확인한 뒤 다시 시도하세요.`,
-          ).catch(() => {});
-        }
+        await this.#reportHermesDispatchFailure(
+          'Hermes chat dispatch',
+          payload.room_id,
+          agentContext.agent_id,
+          err?.code || 'runtime_dispatch_error',
+          err?.message ?? String(err),
+        );
       }
       return;
     }
@@ -3029,20 +3125,21 @@ export class EventDispatcher {
           `Chat room dispatched through Hermes ACP: room=${p.room_id || ''} ` +
           `run=${runId} session=${result.sessionId} stop=${result.stopReason}`,
         );
+        await this.#reportHermesDispatchOutcome(
+          'Hermes room dispatch',
+          p.room_id,
+          runContext.agent_id,
+          result,
+        );
       } catch (err: any) {
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
-        const reason = err?.code || 'runtime_dispatch_error';
-        log(`Hermes room dispatch failed closed: ${reason} ${err?.message ?? err}`);
-        if (p.room_id && runContext.agent_id) {
-          await postChatRoomMessage(
-            this.#config,
-            p.room_id,
-            runContext.agent_id,
-            `⚠️ **Hermes 런타임 실행 실패** — 이 메시지에 응답하지 못했습니다.\n\n` +
-              `\`\`\`\n${reason}: ${err?.message ?? err}\n\`\`\`\n\n` +
-              `Agent Manager 로그를 확인한 뒤 다시 시도하세요.`,
-          ).catch(() => {});
-        }
+        await this.#reportHermesDispatchFailure(
+          'Hermes room dispatch',
+          p.room_id,
+          runContext.agent_id,
+          err?.code || 'runtime_dispatch_error',
+          err?.message ?? String(err),
+        );
       }
       return;
     }
