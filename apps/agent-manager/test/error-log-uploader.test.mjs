@@ -123,6 +123,47 @@ test('specific error rules still fire', () => {
   assert.deepEqual(classify('stdout error: broken pipe'), { level: 'error', category: 'ipc' });
 });
 
+// ── Hermes dispatch 실패 로그 → error/hermes (ticket a837879c 리뷰 지적 #4) ──
+// event-dispatcher.ts#reportHermesDispatchFailure() 가 예외 경로/stopReason 경로
+// 양쪽에서 남기는 "Hermes <prefix> failed closed: ..." 형식이 admin Agent Logs
+// 뷰어에서 catch-all(warn/misc) 이 아니라 error/hermes 로 잡히는지 고정한다.
+test('Hermes chat dispatch fail-closed (thrown-error path) → error/hermes', () => {
+  assert.deepEqual(
+    classify(
+      'Hermes chat dispatch failed closed: runtime_supervisor_unavailable Hermes runtime supervisor is not available on this Runtime Host',
+    ),
+    { level: 'error', category: 'hermes' },
+  );
+});
+
+test('Hermes room dispatch fail-closed (thrown-error path) → error/hermes', () => {
+  assert.deepEqual(
+    classify('Hermes room dispatch failed closed: acp_timeout ACP request timed out: session/prompt'),
+    { level: 'error', category: 'hermes' },
+  );
+});
+
+test('Hermes dispatch fail-closed (unconfirmed-delivery / stopReason path) → error/hermes', () => {
+  // #reportHermesDispatchOutcome()이 stopReason!=='end_turn'일 때 남기는 형식 —
+  // 예외 없이 resolve됐지만 응답 전달이 확인되지 않은 경우(리뷰 지적 #1).
+  assert.deepEqual(
+    classify(
+      'Hermes chat dispatch failed closed: refusal session session-1 ended without confirming delivery (stop=refusal)',
+    ),
+    { level: 'error', category: 'hermes' },
+  );
+});
+
+test('Hermes trigger dispatch fail-closed (pre-existing ticket-trigger path, unchanged) → error/hermes', () => {
+  // event-dispatcher.ts의 #dispatchTriggerBody 경로는 이번 티켓에서 손대지 않았다 —
+  // 이미 #ackDispatch를 통한 durable nack이 있기 때문. 같은 정규식으로 계속
+  // 잡히는지만 회귀 확인한다.
+  assert.deepEqual(
+    classify('Hermes trigger dispatch failed closed: acp_process_exited Hermes terminated'),
+    { level: 'error', category: 'hermes' },
+  );
+});
+
 test('uploader / DIAG / claude-bin traces are skipped', () => {
   assert.equal(classify('[uploader] uploaded 3 entries (errors=0 events=3)'), null);
   assert.equal(classify('[DIAG] heartbeat ok'), null);
