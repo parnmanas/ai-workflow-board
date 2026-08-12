@@ -255,6 +255,40 @@ describe('Workflow Functions — prompt_audit.measure_effect builtin', () => {
     );
   });
 
+  // Review blocker (ticket c936cee7): the handler/CLI used to accept a
+  // negative maturation_buffer_hours and let computeReport() silently clamp
+  // it to 0 via Math.max(0, x) instead of rejecting the bad input outright.
+  // The Function's input_schema now declares `minimum: 0`, enforced generically
+  // by validateInputs() — this pins that the schema-level rejection actually
+  // fires (not just documents the constraint) before the handler ever runs.
+  it('rejects a negative maturation_buffer_hours input at the schema boundary instead of silently clamping to 0', async () => {
+    await assert.rejects(
+      service.execute({
+        functionKey: 'prompt_audit.measure_effect',
+        workspaceId: `ws-negative-buffer-${Date.now()}`,
+        inputs: { maturation_buffer_hours: -1 },
+      }),
+      /must be >= 0/,
+    );
+  });
+
+  // Review blocker (ticket c936cee7): a huge-but-finite buffer (e.g.
+  // Number.MAX_VALUE) passes both the typeof and minimum>=0 checks, but
+  // `* 60 * 60 * 1000` overflows to Infinity inside computeReport() and used
+  // to build an Invalid Date cutoff that silently excluded every ticket from
+  // completion_rate instead of erroring. The handler now converts
+  // computeReport()'s thrown Error into a proper 400 instead of a bare 500.
+  it('rejects an out-of-Date-range maturation_buffer_hours input instead of silently excluding every ticket', async () => {
+    await assert.rejects(
+      service.execute({
+        functionKey: 'prompt_audit.measure_effect',
+        workspaceId: `ws-huge-buffer-${Date.now()}`,
+        inputs: { maturation_buffer_hours: Number.MAX_VALUE },
+      }),
+      /out-of-range cutoff date/,
+    );
+  });
+
   // Regression (ec498050/f3fc298a review): BoardColumn has no reliable own
   // workspace_id (columns.controller.ts never sets it), so the active/review/
   // merging/terminal column-kind lookups in computeReport() must be scoped

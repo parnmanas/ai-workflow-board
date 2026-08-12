@@ -213,9 +213,22 @@ export async function computeReport(
   const createdInWindow = await createdQb.getMany();
   // maturationBufferHours 완화(ticket c936cee7, 위 우측 절단 경고 참고) — 명시
   // 전달했을 때만 적용, 미전달 시 createdInWindow 전체를 그대로 쓴다(기존 동작).
-  const maturationCutoff = maturationBufferHours !== undefined && maturationBufferHours !== null
-    ? new Date(untilResolved.getTime() - Math.max(0, maturationBufferHours) * 60 * 60 * 1000)
-    : null;
+  // 경계에서 엄격 검증: 음수/NaN/Infinity/Number.MAX_VALUE류를 조용히 0으로
+  // 보정하거나 Invalid Date cutoff를 만들면 "모든 티켓이 조용히 제외"되는
+  // 사고로 이어진다(ticket c936cee7 리뷰 코멘트) — 호출측(핸들러/CLI)이
+  // 이미 걸러내더라도 computeReport()를 직접 호출하는 경로(테스트 등)에도
+  // 동일하게 적용되도록 여기서도 명시적으로 throw한다.
+  let maturationCutoff: Date | null = null;
+  if (maturationBufferHours !== undefined && maturationBufferHours !== null) {
+    if (!Number.isFinite(maturationBufferHours) || maturationBufferHours < 0) {
+      throw new Error('maturationBufferHours must be a finite number >= 0');
+    }
+    const cutoffMs = untilResolved.getTime() - maturationBufferHours * 60 * 60 * 1000;
+    maturationCutoff = new Date(cutoffMs);
+    if (Number.isNaN(maturationCutoff.getTime())) {
+      throw new Error('maturationBufferHours produces an out-of-range cutoff date');
+    }
+  }
   const created = maturationCutoff
     ? createdInWindow.filter((t: any) => new Date(t.created_at) < maturationCutoff)
     : createdInWindow;

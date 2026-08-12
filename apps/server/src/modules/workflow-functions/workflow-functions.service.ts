@@ -104,7 +104,7 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
       properties: {
         since: { type: 'string' },
         until: { type: 'string' },
-        maturation_buffer_hours: { type: 'number' },
+        maturation_buffer_hours: { type: 'number', minimum: 0 },
       },
     }),
     output_schema: stringifyJson({
@@ -314,6 +314,13 @@ export class WorkflowFunctionsService implements OnModuleInit {
       const value = inputs[field];
       const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
       if (actual !== property.type) throw httpError(400, `Input "${field}" must be ${property.type}`);
+      // NaN/Infinity are `typeof 'number'` but not usable arithmetic inputs — left to
+      // per-handler Number.isFinite() checks (e.g. executePromptAuditMeasureEffect)
+      // rather than rejected here generically, since `NaN < minimum` / `Infinity <
+      // minimum` are both false and would otherwise slip past this check silently.
+      if (property.type === 'number' && typeof property.minimum === 'number' && value < property.minimum) {
+        throw httpError(400, `Input "${field}" must be >= ${property.minimum}`);
+      }
     }
   }
 
@@ -546,8 +553,14 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (inputs?.maturation_buffer_hours !== undefined) {
       maturationBufferHours = Number(inputs.maturation_buffer_hours);
       if (!Number.isFinite(maturationBufferHours)) throw httpError(400, 'inputs.maturation_buffer_hours must be a number');
+      if (maturationBufferHours < 0) throw httpError(400, 'inputs.maturation_buffer_hours must be >= 0');
     }
-    return computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId, maturationBufferHours });
+    try {
+      return await computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId, maturationBufferHours });
+    } catch (e: any) {
+      if (e?.message?.startsWith('maturationBufferHours')) throw httpError(400, e.message);
+      throw e;
+    }
   }
 
   async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {

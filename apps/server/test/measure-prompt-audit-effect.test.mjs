@@ -224,3 +224,32 @@ test('computeReport: maturationBufferHours excludes tickets that had no time to 
     'a 24h buffer excludes X (created 10h before until) but keeps Y and Z (created 48h before until)',
   );
 });
+
+test('computeReport: maturationBufferHours boundary rejects negative/non-finite/out-of-range values instead of silently corrupting completion_rate (ticket c936cee7 review blocker)', async () => {
+  const since = new Date('2020-01-01T00:00:00Z');
+  const until = new Date('2020-01-02T00:00:00Z');
+  const wsId = `maturation-guard-${Date.now()}`;
+  const call = (maturationBufferHours) =>
+    computeReport(ds, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: wsId, maturationBufferHours });
+
+  // Negative: must be rejected, not silently clamped to 0 (the previous
+  // Math.max(0, x) behavior masked caller bugs instead of surfacing them).
+  await assert.rejects(() => call(-1), /must be a finite number >= 0/);
+
+  // NaN / Infinity: Math.max(0, NaN) === NaN and untilResolved - Infinity ===
+  // -Infinity, both of which used to build `new Date(NaN)` — an Invalid Date
+  // cutoff that fails every `<` comparison, silently excluding ALL tickets
+  // from the denominator instead of erroring.
+  await assert.rejects(() => call(NaN), /must be a finite number >= 0/);
+  await assert.rejects(() => call(Infinity), /must be a finite number >= 0/);
+
+  // Number.MAX_VALUE: finite and >= 0, but `* 60 * 60 * 1000` overflows to
+  // Infinity and pushes the cutoff outside the representable Date range —
+  // must be rejected explicitly rather than producing another Invalid Date.
+  await assert.rejects(() => call(Number.MAX_VALUE), /out-of-range cutoff date/);
+
+  // A large but still in-range buffer must continue to work normally (not
+  // over-rejected by the range guard).
+  const report = await call(24);
+  assert.deepEqual(report.completion_rate, { created: 0, completed: 0, rate: null, excluded_for_maturation: 0 });
+});

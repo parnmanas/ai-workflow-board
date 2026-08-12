@@ -87,6 +87,10 @@ async function main() {
     console.error('Invalid --maturation-buffer-hours — expected a number.');
     process.exit(1);
   }
+  if (maturationBufferHours !== undefined && maturationBufferHours < 0) {
+    console.error('Invalid --maturation-buffer-hours — must be >= 0.');
+    process.exit(1);
+  }
 
   const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.js'));
   const { DataSource } = await import('typeorm');
