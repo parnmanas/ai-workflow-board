@@ -61,7 +61,7 @@ test('listModels degrades to free-text mode when Codex has no cache yet', async 
   assert.deepEqual(await new CodexCliAdapter().listModels(), []);
 });
 
-test('buildOneshotSpawn adds ticket attribution as a TOML config override', async () => {
+test('buildOneshotSpawn adds ticket attribution as a self-contained TOML config override (ticket 702d0ebe)', async () => {
   const cliHomeDir = await freshDir();
   await fsp.writeFile(
     join(cliHomeDir, 'config.toml'),
@@ -82,15 +82,61 @@ test('buildOneshotSpawn adds ticket attribution as a TOML config override', asyn
   const configIndex = descriptor.args.indexOf('-c');
   assert.ok(configIndex >= 0);
   const override = descriptor.args[configIndex + 1];
-  const prefix = 'mcp_servers.awb.http_headers=';
+  // The override now assigns the WHOLE `mcp_servers.awb` table (not just
+  // `.http_headers`) so it stays valid whether the CLI merges or replaces
+  // the table on `-c` — see the wholesale-replace regression test below.
+  const prefix = 'mcp_servers.awb=';
   assert.ok(override.startsWith(prefix));
-  const headers = parse(`headers = ${override.slice(prefix.length)}`).headers;
-  assert.deepEqual(headers, {
+  const table = parse(`awb = ${override.slice(prefix.length)}`).awb;
+  assert.equal(table.url, 'https://awb.example/mcp');
+  assert.deepEqual(table.http_headers, {
     'X-AWB-Client-Type': 'managed-subagent',
     'X-AWB-Subagent-Ticket-Id': 'ticket-123',
     'X-AWB-Subagent-Role': 'reviewer',
     'X-AWB-Subagent-Trigger-Source': 'ticket_done_review',
   });
+});
+
+test('buildOneshotSpawn override survives CLI wholesale-replace semantics, not just merge (ticket 702d0ebe: snap codex-cli 0.114.0 regression)', async () => {
+  // Incident repro: `-c mcp_servers.awb.http_headers=…` (dotted-path
+  // override) assumes Codex table-*merges* the override into the file's
+  // `awb` entry. codex-cli 0.146.0 does; the stale snap 0.114.0 that won
+  // PATH lookup on the live host instead *replaces* `mcp_servers.awb`
+  // wholesale, dropping `url` and aborting config load with
+  // `invalid transport in mcp_servers.awb`. The override must be a
+  // complete, self-sufficient table so it is valid under EITHER semantics.
+  const cliHomeDir = await freshDir();
+  await fsp.writeFile(
+    join(cliHomeDir, 'config.toml'),
+    [
+      '[mcp_servers.awb]',
+      'url = "https://awb.example/mcp"',
+      'bearer_token_env_var = "AWB_API_KEY"',
+      'required = true',
+      '',
+    ].join('\n'),
+  );
+  const adapter = new CodexCliAdapter();
+  const descriptor = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+    cliHomeDir,
+    mcpAttribution: { ticketId: 'ticket-123', role: 'reviewer' },
+  });
+  const configIndex = descriptor.args.indexOf('-c');
+  const override = descriptor.args[configIndex + 1];
+  const value = override.slice(override.indexOf('=') + 1);
+
+  // Simulate a CLI that *replaces* mcp_servers.awb wholesale with only what
+  // the -c override carries — nothing merged in from the file.
+  const wholesaleConfig = parse(`[mcp_servers]\nawb = ${value}\n`);
+  assert.doesNotThrow(() =>
+    validateCodexMcpServers(wholesaleConfig, join(cliHomeDir, 'config.toml')),
+  );
+  assert.equal(wholesaleConfig.mcp_servers.awb.url, 'https://awb.example/mcp');
+  assert.equal(wholesaleConfig.mcp_servers.awb.bearer_token_env_var, 'AWB_API_KEY');
+  assert.equal(wholesaleConfig.mcp_servers.awb.required, true);
 });
 
 test('buildOneshotSpawn rejects attribution before spawn when effective awb is headers-only', async () => {

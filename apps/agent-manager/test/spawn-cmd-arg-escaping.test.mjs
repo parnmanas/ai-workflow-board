@@ -21,11 +21,14 @@ import { writeFileSync, chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// CodexCliAdapter.buildOneshotSpawn 이 `-c` attribution 으로 내보내는 정확한 형태.
+// CodexCliAdapter.buildOneshotSpawn 이 `-c` attribution 으로 내보내는 형태(ticket
+// 702d0ebe 이후: 부분 경로 `.http_headers` 가 아니라 `mcp_servers.awb` 전체를
+// 자기완결형 테이블로 오버라이드 — CLI 버전별 병합/치환 시맨틱 차이에 안전).
 const CODEX_ATTRIBUTION_ARG =
-  'mcp_servers.awb.http_headers={ "X-AWB-Client-Type" = "managed-subagent", ' +
+  'mcp_servers.awb={ "url" = "https://awb.example/mcp", ' +
+  '"http_headers" = { "X-AWB-Client-Type" = "managed-subagent", ' +
   '"X-AWB-Subagent-Ticket-Id" = "d7513e04-527e-44d5-8dd2-e561690cecc2", ' +
-  '"X-AWB-Subagent-Role" = "reviewer" }';
+  '"X-AWB-Subagent-Role" = "reviewer" } }';
 const CWD_WITH_SPACE = '/tmp/awb wt/ticket dir';
 const CLI_ARGS = ['exec', '-c', CODEX_ATTRIBUTION_ARG, '--cd', CWD_WITH_SPACE, '--json'];
 

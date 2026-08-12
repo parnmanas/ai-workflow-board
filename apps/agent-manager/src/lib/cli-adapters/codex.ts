@@ -31,10 +31,20 @@ import {
 // provider preferences. Sessions / history / caches stay isolated.
 const SHARED_FROM_MAIN_HOME = ['auth.json', 'config.toml'];
 
-function inlineTomlStringMap(values: Record<string, string>): string {
-  return `{ ${Object.entries(values)
-    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
-    .join(', ')} }`;
+// Serializes an arbitrary JS value as an inline TOML value so a whole
+// `mcp_servers.awb` table (strings, booleans, and a nested `http_headers`
+// table) can be handed to `-c key=<inline>` in one shot — not just the
+// flat string map the attribution headers used to need on their own.
+function inlineTomlValue(value: unknown): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+  if (Array.isArray(value)) return `[ ${value.map(inlineTomlValue).join(', ')} ]`;
+  if (value && typeof value === 'object') {
+    return `{ ${Object.entries(value as Record<string, unknown>)
+      .map(([key, v]) => `${JSON.stringify(key)} = ${inlineTomlValue(v)}`)
+      .join(', ')} }`;
+  }
+  return 'null';
 }
 
 function codexPermissionArgs(permissionMode?: string | null): string[] {
@@ -64,10 +74,14 @@ function codexPermissionArgs(permissionMode?: string | null): string[] {
 //   Error loading config.toml: invalid transport in `mcp_servers.<name>`
 // (exit 1) 로 중단시키는데, 이는 오직 silent subagent exit 로만 드러났다
 // (인시던트 26a92722: managed codex 리뷰어가 이 오류로 두 번 즉사해 리뷰 지연).
-// 함정은 `buildOneshotSpawn` 이 항상 `-c mcp_servers.awb.http_headers=…`
-// 오버라이드를 주입한다는 점이다 — config.toml 에 완전한 `awb` 서버가 없으면
-// 이 오버라이드가 header 만 있고 transport 없는 `awb` 를 *새로 만들어* codex 가
-// 로드를 거부한다. codex 에 넘기기 직전의 config 를 검증해, 잘못된/누락된
+// 함정은 `buildOneshotSpawn` 이 항상 attribution 헤더를 담은 `-c
+// mcp_servers.awb=…` 오버라이드를 주입한다는 점이다(ticket 702d0ebe 이전엔
+// `-c mcp_servers.awb.http_headers=…` 로 부분 경로만 오버라이드했는데, 이는
+// codex-cli 버전에 따라 병합/치환 시맨틱이 갈려 치환 시맨틱(구버전 snap
+// 0.114.0)에서 `url` 이 사라지는 결함이 있었다 — 지금은 항상 자기완결형
+// 전체 테이블을 넘긴다) — config.toml 에 완전한 `awb` 서버가 없으면 이
+// 오버라이드가 header 만 있고 transport 없는 `awb` 가 되어 codex 가 로드를
+// 거부한다. codex 에 넘기기 직전의 config 를 검증해, 잘못된/누락된
 // transport 를 애매한 crash 대신 정확한 키와 허용 스키마를 담은 spawn 이전
 // 매니저 오류로 바꾼다.
 export const CODEX_MCP_TRANSPORTS = Object.freeze(['stdio', 'streamable_http'] as const);
@@ -190,14 +204,9 @@ export class CodexCliAdapter extends CliAdapter {
       if (mcpAttribution?.sessionId) {
         headers['X-AWB-Subagent-Session-Id'] = mcpAttribution.sessionId;
       }
-      attributionArgs.push(
-        '-c',
-        `mcp_servers.awb.http_headers=${inlineTomlStringMap(headers)}`,
-      );
 
-      // Validate what Codex will actually see, not only the file prepared
-      // earlier. The attribution override creates an `awb` table when the
-      // file has none; that headers-only table has no valid transport.
+      // Read what Codex will actually load, not only the file prepared
+      // earlier, so the override below can be a *self-contained* table.
       const configPath = join(
         cliHomeDir ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
         'config.toml',
@@ -215,11 +224,29 @@ export class CodexCliAdapter extends CliAdapter {
           ? { ...servers }
           : {};
       const awb = effectiveConfig.mcp_servers.awb;
-      effectiveConfig.mcp_servers.awb = {
+
+      // ticket 702d0ebe: `-c mcp_servers.awb.http_headers=…` (dotted-path
+      // override) assumes Codex table-merges the override into the file's
+      // `awb` entry — true for npm codex-cli 0.146.0, but codex-cli 0.114.0
+      // (a stale snap that wins PATH lookup on some hosts) instead
+      // *replaces* `mcp_servers.awb` wholesale with a headers-only table,
+      // dropping `url` and killing config load (`invalid transport in
+      // mcp_servers.awb`, exit 1 — a silent subagent death). Build the
+      // override as the FULL table (existing url/bearer_token_env_var/
+      // required + the fresh headers) so it stays valid under either
+      // merge or replace semantics, independent of the installed CLI
+      // version.
+      const overrideTable: Record<string, unknown> = {
         ...(awb && typeof awb === 'object' && !Array.isArray(awb) ? awb : {}),
         http_headers: headers,
       };
+      effectiveConfig.mcp_servers.awb = overrideTable;
+      // Validate what Codex will actually see before spawning — the
+      // headers-only case above (file has no complete `awb`) still has no
+      // resolvable transport and must fail fast instead of a mystery exit 1.
       validateCodexMcpServers(effectiveConfig, configPath);
+
+      attributionArgs.push('-c', `mcp_servers.awb=${inlineTomlValue(overrideTable)}`);
     }
     // `codex` with no subcommand is the interactive TUI and refuses piped
     // stdin ("stdin is not a terminal"). `codex exec` is the non-interactive
@@ -572,8 +599,9 @@ export class CodexCliAdapter extends CliAdapter {
     // `bearer_token_env_var = "AWB_API_KEY"` 에서 읽음). 따라서 apiKey 누락은
     // awb 생성을 건너뛸 이유가 못 된다 — 오직 URL 로만 게이트해야 매니저에
     // AWB 엔드포인트가 있는 한 config.toml 이 항상 완전한 awb 를 갖는다. 그렇지
-    // 않으면 항상 주입되는 `-c mcp_servers.awb.http_headers` spawn 오버라이드가
-    // transport 없는 awb 를 만들어 codex 가 config 로드를 중단한다(ticket 40d18474).
+    // 않으면 항상 주입되는 `-c mcp_servers.awb=…` spawn 오버라이드(ticket 702d0ebe
+    // 이전엔 `-c mcp_servers.awb.http_headers`)가 transport 없는 awb 를 만들어
+    // codex 가 config 로드를 중단한다(ticket 40d18474).
     // 아래 verbatim 분기는 매니저에 AWB URL 이 아예 없을 때만 실행된다.
     if (!mcp?.url) {
       await this.#unlinkIfPresent(dst);
