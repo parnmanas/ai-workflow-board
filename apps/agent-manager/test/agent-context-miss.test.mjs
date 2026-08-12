@@ -13,6 +13,7 @@ import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 // notice spam for ordinary filtering).
 
 const AGENT = 'agent-not-bootstrapped';
+const UNMANAGED = 'agent-not-managed-by-this-manager';
 let originalFetch;
 let chatMessagePosts;
 
@@ -64,6 +65,53 @@ function harness(managedAgentContexts) {
   return { dispatcher };
 }
 
+// ticket c0c0b1e4 (리뷰 라운드2 지적 #1,#2): fallback managers that WOULD
+// dispatch/spawn "successfully" if invoked — proves the not_bootstrapped
+// short-circuit fires BEFORE any of them run, not merely when they're absent
+// (the gap the round-1 review found: the old harness() above always has
+// chatSessionManager/subagentManager/ticketSessionManager null, so it could
+// only ever exercise the final-drop fallthrough, never a fallback that
+// actually gets a chance to run under the wrong identity).
+function fallbackManagers() {
+  const chatSessionManager = {
+    dispatchCalls: 0,
+    dispatch: async () => {
+      chatSessionManager.dispatchCalls++;
+      return { dispatched: true, pid: 4242, firstTurn: true };
+    },
+    recordRoomMessage: () => {},
+  };
+  const subagentManager = {
+    spawnCalls: 0,
+    canSpawn: () => true,
+    spawn: async () => {
+      subagentManager.spawnCalls++;
+      return { spawned: true, pid: 4343 };
+    },
+  };
+  const ticketSessionManager = {
+    forwardCalls: 0,
+    forwardCommentMention: () => {
+      ticketSessionManager.forwardCalls++;
+      return true;
+    },
+  };
+  return { chatSessionManager, subagentManager, ticketSessionManager };
+}
+
+function harnessWithFallback(managedAgentContexts) {
+  const managers = fallbackManagers();
+  const dispatcher = new EventDispatcher(
+    {
+      url: 'http://127.0.0.1:0',
+      apiKey: 'test-key',
+      delegation: { enabled: true, persistentTicketSessions: true, persistentChatSessions: true },
+    },
+    { managedAgentContexts, ...managers },
+  );
+  return { dispatcher, ...managers };
+}
+
 function chatRequest(roomId) {
   return JSON.stringify({
     event_type: 'chat_request',
@@ -89,6 +137,18 @@ function chatRoomMessage(roomId, memberIds) {
       sender_type: 'user',
       content: 'hello room?',
     },
+  });
+}
+
+function commentMention(ticketId, agentId) {
+  return JSON.stringify({
+    event_type: 'comment_mention',
+    ticket_id: ticketId,
+    comment_id: 'comment-1',
+    agent_id: agentId,
+    actor_id: 'user-1',
+    actor_type: 'user',
+    content: '@mention hello',
   });
 }
 
@@ -150,4 +210,68 @@ test('chat room message with no managed member at all stays silent (manager-is-p
   await dispatcher.handleChatRoomMessage(chatRoomMessage('room-group', []));
 
   assert.equal(chatMessagePosts.length, 0);
+});
+
+test('chat request against a not-bootstrapped agent never reaches chatSessionManager/subagentManager even though they would succeed', async () => {
+  const managedAgentContexts = {
+    get: (id) => (id === AGENT ? brokenContext() : null),
+    has: (id) => id === AGENT,
+    list: () => [brokenContext()],
+  };
+  const { dispatcher, chatSessionManager, subagentManager } = harnessWithFallback(managedAgentContexts);
+
+  await dispatcher.handleChatRequest(chatRequest('room-dm'));
+
+  assert.equal(chatSessionManager.dispatchCalls, 0, 'persistent chat session must not run under an unresolved identity');
+  assert.equal(subagentManager.spawnCalls, 0, 'subagent spawn must not run under an unresolved identity');
+  assert.equal(chatMessagePosts.length, 1);
+  assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
+  assert.match(chatMessagePosts[0].body.content, /에이전트 실행 정보를 찾을 수 없습니다/);
+});
+
+test('chat room message against a not-bootstrapped member never reaches chatSessionManager/subagentManager even though they would succeed', async () => {
+  const managedAgentContexts = {
+    get: (id) => (id === AGENT ? brokenContext() : null),
+    has: (id) => id === AGENT,
+    list: () => [brokenContext()],
+  };
+  const { dispatcher, chatSessionManager, subagentManager } = harnessWithFallback(managedAgentContexts);
+
+  await dispatcher.handleChatRoomMessage(chatRoomMessage('room-group', [AGENT]));
+
+  assert.equal(chatSessionManager.dispatchCalls, 0, 'persistent chat session must not run under an unresolved identity');
+  assert.equal(subagentManager.spawnCalls, 0, 'subagent spawn must not run under an unresolved identity');
+  assert.equal(chatMessagePosts.length, 1);
+  assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
+});
+
+test('chat room message notice names the actual broken managed member, not memberIds[0]', async () => {
+  const managedAgentContexts = {
+    get: (id) => (id === AGENT ? brokenContext() : null),
+    has: (id) => id === AGENT,
+    list: () => [brokenContext()],
+  };
+  const { dispatcher } = harness(managedAgentContexts);
+
+  // UNMANAGED is first in the member list (routine "not this manager's agent"
+  // noise), AGENT (the genuinely broken one) is second — the notice must still
+  // be attributed to AGENT, not to memberIds[0].
+  await dispatcher.handleChatRoomMessage(chatRoomMessage('room-group', [UNMANAGED, AGENT]));
+
+  assert.equal(chatMessagePosts.length, 1);
+  assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
+});
+
+test('comment mention against a not-bootstrapped agent never reaches ticketSessionManager/subagentManager even though they would succeed', async () => {
+  const managedAgentContexts = {
+    get: (id) => (id === AGENT ? brokenContext() : null),
+    has: (id) => id === AGENT,
+    list: () => [brokenContext()],
+  };
+  const { dispatcher, ticketSessionManager, subagentManager } = harnessWithFallback(managedAgentContexts);
+
+  await dispatcher.handleCommentMention(commentMention('ticket-1', AGENT));
+
+  assert.equal(ticketSessionManager.forwardCalls, 0, 'ticket session forward must not run under an unresolved identity');
+  assert.equal(subagentManager.spawnCalls, 0, 'subagent spawn must not run under an unresolved identity');
 });

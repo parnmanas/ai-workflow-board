@@ -1509,18 +1509,21 @@ export class EventDispatcher {
   /** Members variant of {@link #agentContextMissReason} for
    *  #resolveAgentContextFromMembers callers — reports 'not_bootstrapped' if
    *  ANY candidate is a registered-but-broken managed agent, even when other
-   *  members in the list are simply unmanaged. */
+   *  members in the list are simply unmanaged. Also returns the specific
+   *  member id that triggered a 'not_bootstrapped' verdict (ticket c0c0b1e4
+   *  리뷰 지적 #3) — callers must notify using THAT id, not memberIds[0], since
+   *  the broken member need not be first in the list. */
   #agentContextMissReasonForMembers(
     memberIds: string[],
-  ): 'no_id' | 'unmanaged' | 'not_bootstrapped' {
-    if (!memberIds.length || !this.#managedAgentContexts) return 'no_id';
+  ): { reason: 'no_id' | 'unmanaged' | 'not_bootstrapped'; brokenId: string } {
+    if (!memberIds.length || !this.#managedAgentContexts) return { reason: 'no_id', brokenId: '' };
     let sawUnmanaged = false;
     for (const id of memberIds) {
       const reason = this.#agentContextMissReason(id);
-      if (reason === 'not_bootstrapped') return 'not_bootstrapped';
+      if (reason === 'not_bootstrapped') return { reason, brokenId: id };
       if (reason === 'unmanaged') sawUnmanaged = true;
     }
-    return sawUnmanaged ? 'unmanaged' : 'no_id';
+    return { reason: sawUnmanaged ? 'unmanaged' : 'no_id', brokenId: '' };
   }
 
   /**
@@ -2603,6 +2606,20 @@ export class EventDispatcher {
     const payload = ev.payload || {};
     let agentContext = this.#resolveAgentContext(payload.agent_id || '');
     agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
+
+    // ticket c0c0b1e4 (리뷰 지적 #1): a registered-but-not-bootstrapped miss must
+    // be reported HERE, before any fallback dispatch is attempted — the hermes /
+    // chatSessionManager / subagentManager attempts below can "succeed" using an
+    // undefined agentContext (manager-default identity) and return early, which
+    // would hide the miss entirely and run the turn under the wrong identity.
+    if (!agentContext) {
+      const missReason = this.#agentContextMissReason(payload.agent_id);
+      if (this.#reportAgentContextMiss('Chat request', missReason, payload.agent_id)) {
+        await this.#notifyAgentContextMissInRoom('Chat request', payload.room_id, payload.agent_id);
+        return;
+      }
+    }
+
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
@@ -2752,15 +2769,6 @@ export class EventDispatcher {
     log(
       `Chat request dropped (no delegation path): agent=${payload.agent_id} user=${payload.user_id}`,
     );
-    if (
-      this.#reportAgentContextMiss(
-        'Chat request',
-        this.#agentContextMissReason(payload.agent_id),
-        payload.agent_id,
-      )
-    ) {
-      await this.#notifyAgentContextMissInRoom('Chat request', payload.room_id, payload.agent_id);
-    }
   }
 
   /**
@@ -2815,6 +2823,16 @@ export class EventDispatcher {
     const agentId = ev.agent_id || ev.actor_name || '';
     let agentContext = this.#resolveAgentContext(agentId);
     agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
+
+    // ticket c0c0b1e4 (handleChatRequest 리뷰 지적 #1과 동일 구조): fallback
+    // 시도(hermes/ticketSessionManager/subagentManager) 전에 여기서 먼저
+    // not_bootstrapped 미스를 걸러낸다 — room_id가 없는 호출부라 알림은 못
+    // 띄우지만, 로그 승격만큼은 fallback 성공 여부와 무관하게 항상 일어나야 한다.
+    if (!agentContext) {
+      const missReason = this.#agentContextMissReason(agentId);
+      if (this.#reportAgentContextMiss('Comment mention', missReason, agentId)) return;
+    }
+
     const mention = {
       ticket_id: ticketId,
       comment_id: commentId,
@@ -2951,11 +2969,6 @@ export class EventDispatcher {
     }
 
     log(`Comment mention dropped (no delegation path): ticket=${ticketId} comment=${commentId}`);
-    this.#reportAgentContextMiss(
-      'Comment mention',
-      this.#agentContextMissReason(agentId),
-      agentId,
-    );
   }
 
   handleBoardUpdate(raw: string): void {
@@ -3126,6 +3139,25 @@ export class EventDispatcher {
           `Chat room message from agent (${p.sender_name || p.sender_id}) — agent_chain_depth=${depth} ` +
             `>= cap ${AGENT_CHAIN_DEPTH_CAP}, skipping delegation to break loop`,
         );
+        return;
+      }
+    }
+
+    // ticket c0c0b1e4 (리뷰 지적 #1,#3): registered-but-not-bootstrapped 미스는
+    // 아래 run-provisioning/hermes/chatSessionManager/subagentManager fallback이
+    // (매니저 자신의 cwd/신원으로) "성공"해 조용히 return 하기 전에 여기서 먼저
+    // 걸러낸다 — self-message/chain-depth 스킵은 이미 위에서 끝났으므로 이 아래는
+    // 전부 실제 dispatch 시도다. 알림의 agent_id는 memberIds[0]이 아니라 실제
+    // broken managed member id를 쓴다(첫 멤버가 unmanaged이고 broken member가
+    // 뒤에 있는 경우 잘못된 발신 id가 되는 것을 방지).
+    // agentContext가 이미 정상 resolve됐다면(다른 멤버가 완전히 부팅됨) 절대
+    // 여기 들어오면 안 된다 — #agentContextMissReasonForMembers는 "레지스트리에
+    // 있는가"만 보고 재판정하므로, 이 가드 없이 무조건 호출하면 정상 resolve된
+    // 케이스까지 not_bootstrapped로 오탐한다(라운드2 리뷰 대응 중 회귀 테스트로 발견).
+    if (!agentContext) {
+      const membersMiss = this.#agentContextMissReasonForMembers(memberIds);
+      if (this.#reportAgentContextMiss('Chat room message', membersMiss.reason, memberIds.join(','))) {
+        await this.#notifyAgentContextMissInRoom('Chat room message', p.room_id, membersMiss.brokenId);
         return;
       }
     }
@@ -3502,19 +3534,6 @@ export class EventDispatcher {
     log(
       `Chat room message dropped (no delegation path): room=${p.room_id} sender=${p.sender_name || p.sender_id}`,
     );
-    if (
-      this.#reportAgentContextMiss(
-        'Chat room message',
-        this.#agentContextMissReasonForMembers(memberIds),
-        memberIds.join(','),
-      )
-    ) {
-      await this.#notifyAgentContextMissInRoom(
-        'Chat room message',
-        p.room_id,
-        memberIds[0] || p.sender_id || '',
-      );
-    }
     } finally {
       // Release the run lock unless a spawned subagent took ownership above (its
       // exit hook releases it then). Idempotent + no-op for ordinary chat turns
