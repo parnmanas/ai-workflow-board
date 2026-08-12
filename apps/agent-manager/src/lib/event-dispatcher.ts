@@ -3196,7 +3196,10 @@ export class EventDispatcher {
     // SubagentSpawnArgs.onExit (not just until spawn() returns a pid), so the
     // column trigger can't slip in and re-claim the seat while the one-shot is
     // still mid-turn.
-    let mentionSeat: { role: string; agentId: string; nonce?: string } | null = null;
+    let mentionSeat:
+      | { kind: 'authoritative'; role: string; agentId: string; nonce?: string }
+      | { kind: 'fallback'; key: string; nonce?: string }
+      | null = null;
     let mentionSeatTransferred = false;
     if (mention.mention_source === 'role' && mention.role_shortcut) {
       const targetAgentId = ev.agent_id || '';
@@ -3216,7 +3219,17 @@ export class EventDispatcher {
             '(ticket e90294e7)',
         });
       };
-      if (typeof tsm?.tryReserveDispatch === 'function') {
+      // ticket 13160d20: handleTrigger 자신의 authoritative-vs-fallback 선택
+      // (그쪽의 canAuthoritative)을 그대로 거울처럼 따른다 — 객체에
+      // tryReserveDispatch가 존재하는지만 확인하는 방식이 아니라. main.ts는
+      // TicketSessionManager를 항상 무조건 생성하므로, 메서드 존재 여부만
+      // 확인하는 방식은 persistentTicketSessions:false 에서도 계속 true였다 —
+      // TicketSessionManager._inflight에 조용히 예약해버리는데, 이 레지스트리는
+      // handleTrigger의 fallback 경로(아래 InflightDispatchTracker)가 그
+      // 모드에서 전혀 쓰지 않는 곳이다. 서로 겹치지 않는 두 예약 맵 때문에
+      // 어느 dispatch 경로도 상대의 점유를 볼 수 없어, persistentTicketSessions:false
+      // 에서는 도착 순서와 무관하게 e90294e7의 twin이 재현됐다.
+      if (delegationEnabled && persistentTicket && typeof tsm?.tryReserveDispatch === 'function') {
         const reservation = tsm.tryReserveDispatch(ticketId, mention.role_shortcut, targetAgentId);
         // !acquired: a column trigger already holds the provisioning/spawn
         // window for this seat. live: a session went live in the narrow race
@@ -3228,12 +3241,47 @@ export class EventDispatcher {
         }
         // Fresh reservation — WE now own this seat until the one-shot spawned
         // below exits (or we bail out before spawning it).
-        mentionSeat = { role: mention.role_shortcut, agentId: targetAgentId, nonce: reservation.nonce };
-      } else if (tsm?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)) {
+        mentionSeat = {
+          kind: 'authoritative',
+          role: mention.role_shortcut,
+          agentId: targetAgentId,
+          nonce: reservation.nonce,
+        };
+      } else if (
+        persistentTicket &&
+        tsm?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)
+      ) {
         // Legacy/test double without tryReserveDispatch — best-effort peek,
-        // same as before this fix.
+        // 이 fix 이전과 동일한 동작. persistentTicket으로 게이팅한 이유:
+        // persistentTicketSessions:false 에서는 handleTrigger가 애초에 이
+        // 레지스트리에 예약하지 않으므로(아래 fallback 분기 참고), 여기서
+        // peek해봤자 항상 false negative만 반환하는 무의미한 가드가 된다.
         suppressForSeat();
         return;
+      } else if (!persistentTicket) {
+        // Fallback 모드 (persistentTicketSessions:false, ticket 3d180f85의
+        // 설계): handleTrigger는 컬럼 이동 트리거의 (ticket, role, agent) seat를
+        // TicketSessionManager._inflight가 아니라 바로 이 SAME InflightDispatchTracker
+        // 인스턴스에 예약한다(위쪽의 tryAcquireFallback 호출, event-dispatcher.ts).
+        // 두 dispatch 경로가 하나의 공유 레지스트리에 대해 single-flight 하도록
+        // 여기서도 동일한 key를 claim한다 — 위 authoritative 분기와 동일한 방식.
+        // 알려진 잔여 gap (ticket 13160d20 후속): authoritative 경로의
+        // attachDispatchPid와 달리 InflightDispatchTracker에는 pid-liveness
+        // 탈출구가 없어, one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래
+        // 실행되면 이 예약이 그 아래에서 age-out될 수 있다 — 이는 handleTrigger
+        // 자신의 fallback 예약도 항상 겪어온 동일한 한계이지, 새로 생긴
+        // 회귀가 아니다.
+        const fallbackKey = InflightDispatchTracker.key(ticketId, mention.role_shortcut, targetAgentId);
+        const acq = this.#inflightDispatch.tryAcquireFallback(fallbackKey, {
+          ticketId,
+          role: mention.role_shortcut,
+          agentId: targetAgentId,
+        });
+        if (!acq.acquired) {
+          suppressForSeat();
+          return;
+        }
+        mentionSeat = { kind: 'fallback', key: fallbackKey, nonce: acq.nonce };
       }
     }
 
@@ -3273,7 +3321,13 @@ export class EventDispatcher {
             // — the column trigger must stay locked out for the seat's whole
             // lifetime, not just the synchronous spawn call.
             onExit: seat
-              ? () => this.#ticketSessionManager?.releaseDispatch?.(ticketId, seat.role, seat.agentId, seat.nonce)
+              ? () => {
+                  if (seat.kind === 'authoritative') {
+                    this.#ticketSessionManager?.releaseDispatch?.(ticketId, seat.role, seat.agentId, seat.nonce);
+                  } else {
+                    this.#inflightDispatch.releaseFallback(seat.key, seat.nonce);
+                  }
+                }
               : undefined,
           });
           if (result.spawned) {
@@ -3284,9 +3338,11 @@ export class EventDispatcher {
             // tryReserveDispatch trusts _isPidAlive over the TTL/safety-valve
             // aged out for a long-running one-shot (see ticket-session-
             // manager.ts). onExit (above) still releases it on exit either way.
-            if (seat && result.pid) {
+            if (seat && result.pid && seat.kind === 'authoritative') {
               this.#ticketSessionManager?.attachDispatchPid?.(ticketId, seat.role, seat.agentId, seat.nonce, result.pid);
             }
+            // fallback 종류의 seat는 pid-liveness 탈출구가 없다(InflightDispatchTracker는
+            // pid를 추적하지 않음) — 위 가드 코멘트 참고, TTL에 계속 종속된다.
             log(
               `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
             );
@@ -3307,7 +3363,11 @@ export class EventDispatcher {
       // delegation path). Idempotent; releaseDispatch no-ops on a missing/
       // stale-generation key.
       if (mentionSeat && !mentionSeatTransferred) {
-        this.#ticketSessionManager?.releaseDispatch?.(ticketId, mentionSeat.role, mentionSeat.agentId, mentionSeat.nonce);
+        if (mentionSeat.kind === 'authoritative') {
+          this.#ticketSessionManager?.releaseDispatch?.(ticketId, mentionSeat.role, mentionSeat.agentId, mentionSeat.nonce);
+        } else {
+          this.#inflightDispatch.releaseFallback(mentionSeat.key, mentionSeat.nonce);
+        }
       }
     }
   }
