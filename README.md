@@ -353,6 +353,10 @@ npm run mcp              # Start MCP server (stdio mode)
 npm run mcp:http         # Start MCP server (HTTP mode)
 ```
 
+> **`mcp:http` requires authentication**, same as the integrated `/mcp` endpoint: present
+> `Authorization: Bearer <api-key>` (DB-managed key or an `MCP_API_KEYS` env entry), or set
+> `MCP_DEV_MODE=true` (non-production only, and only while no API keys exist yet) to skip it.
+
 ### Troubleshooting
 
 **Boot fails with `dev sql.js database is corrupt` / `database disk image is malformed`**

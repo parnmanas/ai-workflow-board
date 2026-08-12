@@ -29,10 +29,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource, startSqljsAutoFlush } from './db';
 import { preSyncPostgres } from './database/pre-sync-postgres';
-import { createStandaloneContext } from './modules/mcp/tools';
+import { createStandaloneContext, type ToolContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { sessionStore } from './modules/mcp/internal/session-store';
+import { authenticateMcpRequest } from './modules/mcp/shared/mcp-http-auth';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -42,8 +43,8 @@ function mcpLog(...args: unknown[]) {
 
 // ─── Create & configure MCP server ─────────────────────────
 
-function createMcpServer(): McpServer {
-  return createMcpServerForContext(createStandaloneContext(AppDataSource));
+function createMcpServer(ctx: ToolContext = createStandaloneContext(AppDataSource)): McpServer {
+  return createMcpServerForContext(ctx);
 }
 
 // ─── STDIO mode ─────────────────────────────────────────────
@@ -64,6 +65,12 @@ async function startHttp() {
   const app = express();
   const PORT = parseInt(process.env.MCP_PORT || '7702');
 
+  // Built once and shared for the life of this process — every session's
+  // MCP tool calls AND every request's auth check run against the same
+  // DataSource-backed services (also avoids re-instantiating ~8 stateless
+  // services per session).
+  const toolCtx = createStandaloneContext(AppDataSource);
+
   app.use(cors({
     origin: process.env.CORS_ORIGIN || true,
     credentials: true,
@@ -82,6 +89,13 @@ async function startHttp() {
   // ── MCP endpoint ────────────────────────────────────────
   app.all('/mcp', express.json(), async (req: any, res: any) => {
     try {
+      // Same credential check as the NestJS-integrated /mcp endpoint
+      // (mcp.controller.ts) — every request, including DELETE and
+      // existing-session calls, must present a valid key. Writes the 401/403
+      // response itself and returns null on failure.
+      const mcpAuthInfo = await authenticateMcpRequest(req, res, toolCtx.apiKeyService, bridgeErr);
+      if (!mcpAuthInfo) return; // Response already sent
+
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       mcpLog(`${req.method} /mcp`, {
@@ -134,8 +148,18 @@ async function startHttp() {
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (id) => {
-            sessionStore.register(id, transport, mcpServer);
-            mcpLog(`New session: ${id}  (active: ${sessionStore.size})`);
+            // Register transport + auth context atomically, same as
+            // mcp.controller.ts — tools resolve the caller via
+            // getCallerAgent(extra) off this session's auth entry.
+            sessionStore.register(id, transport, mcpServer, {
+              agentId: mcpAuthInfo.agentId,
+              agentName: mcpAuthInfo.agentName,
+              workspaceId: mcpAuthInfo.workspaceId,
+              scope: mcpAuthInfo.scope,
+              source: mcpAuthInfo.source,
+            });
+            const who = mcpAuthInfo.agentName || mcpAuthInfo.keyHint || 'anonymous';
+            mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);
           },
         });
 
@@ -151,7 +175,7 @@ async function startHttp() {
           }
         };
 
-        const mcpServer = createMcpServer();
+        const mcpServer = createMcpServer(toolCtx);
         await mcpServer.connect(transport);
 
         const webRes = await transport.handleRequest(webReq, {
