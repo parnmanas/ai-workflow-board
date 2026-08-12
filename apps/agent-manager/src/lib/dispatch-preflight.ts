@@ -447,9 +447,10 @@ export const DEFAULT_PEND_AFTER_ABORTS = 3;
 
 /** Dispatch blocker `kind`s that an operator MUST fix by hand — a broken/empty/
  *  foreign checkout, a missing push credential, an unapproved CLI workspace
- *  trust dialog, or an expired+unrenewable CLI OAuth session never self-heals,
- *  so re-probing it only burns another CLI session and re-opens the live-twin
- *  window. Compared after stripping an optional `worktree:` prefix so both the
+ *  trust dialog, an expired+unrenewable CLI OAuth session, or an unresolvable
+ *  MCP transport in the CLI's own config never self-heals, so re-probing it
+ *  only burns another CLI session and re-opens the live-twin window. Compared
+ *  after stripping an optional `worktree:` prefix so both the
  *  `worktree:<reason>` checkout kinds and the bare kinds below map. */
 const DURABLE_BLOCKER_REASONS = new Set<string>([
   'not_a_git_repo',              // empty / clobbered work folder
@@ -458,6 +459,7 @@ const DURABLE_BLOCKER_REASONS = new Set<string>([
   'push_credential_unavailable', // remote auth rejected — operator must add a token
   'cli_trust_required',          // workspace trust dialog unresolved (ticket 48aeab6e)
   'cli_credential_expired',      // OAuth session expired, no refresh token (ticket 48aeab6e)
+  'invalid_mcp_transport',       // CLI config's mcp_servers.<name> has no resolvable transport (ticket da4358ee)
 ]);
 
 /** True when a dispatch blocker `kind` is a DURABLE provisioning failure (needs
@@ -473,6 +475,42 @@ export function isDurableProvisioningBlocker(kind: string | undefined | null): b
   if (!kind) return false;
   const reason = kind.startsWith('worktree:') ? kind.slice('worktree:'.length) : kind;
   return DURABLE_BLOCKER_REASONS.has(reason);
+}
+
+/** Result of classifying an exception thrown out of a spawn attempt into a
+ *  stable dispatch-outbox nack reason. `detail`, when set, is the exact
+ *  offending-key message an operator needs (never a secret — adapter
+ *  validation errors are config-shape descriptions, not credential dumps). */
+export interface SpawnExceptionClassification {
+  reason: string;
+  detail?: string;
+}
+
+/** Classify a spawn-time exception (ticket da4358ee).
+ *
+ *  Motivation: `SubagentManager.spawn()`'s catch-all used to collapse EVERY
+ *  thrown error — a transient I/O hiccup as much as a deterministic,
+ *  never-self-healing config error — into the same generic `reason:
+ *  'exception'`. A codex CLI adapter validates its own `mcp_servers.<name>`
+ *  transport before spawn (`InvalidMcpTransportError` —
+ *  cli-adapters/codex.ts, ticket 40d18474) and throws when it cannot resolve
+ *  one; that specific config error will reproduce IDENTICALLY on every retry,
+ *  so treating it the same as an ordinary exception left the durable dispatch
+ *  outbox re-emitting the same doomed trigger forever (the `invalid transport
+ *  in mcp_servers.awb` retry storm this ticket reports — 196 redispatches
+ *  over ~2 days). Recognizing it here lets the caller route it through
+ *  {@link isDurableProvisioningBlocker}'s pend-on-first-abort path instead of
+ *  the ordinary cooldown-backoff retry. Every other thrown error keeps the
+ *  existing generic bucket — matching `isDurableProvisioningBlocker`'s
+ *  fail-safe default, an unrecognised failure is treated as transient rather
+ *  than instantly parking a ticket on an error class we don't understand. */
+export function classifySpawnException(err: unknown): SpawnExceptionClassification {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  if (name === 'InvalidMcpTransportError') {
+    const message = (err as { message?: unknown } | null | undefined)?.message;
+    return { reason: 'invalid_mcp_transport', detail: String(message ?? '').slice(0, 500) };
+  }
+  return { reason: 'exception' };
 }
 
 export interface SpawnSuppressDecision {

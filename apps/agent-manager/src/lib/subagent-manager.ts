@@ -39,6 +39,7 @@ import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
+import { classifySpawnException } from './dispatch-preflight.js';
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
@@ -897,7 +898,14 @@ export class SubagentManager implements SubagentManagerContract {
       }
       await runtimeLease?.close();
       log(`Subagent spawn error: ${err?.message ?? err}`);
-      return { spawned: false, reason: 'exception' };
+      // ticket da4358ee: classify BEFORE collapsing into the generic bucket —
+      // a codex InvalidMcpTransportError (thrown by buildOneshotSpawn's
+      // pre-spawn config validation) is a deterministic config error that
+      // reproduces identically on every retry. Preserving that here lets the
+      // caller route it through the durable-blocker pend path instead of the
+      // ordinary cooldown-backoff retry that let it retry-storm for ~2 days.
+      const { reason, detail } = classifySpawnException(err);
+      return { spawned: false, reason, detail };
     }
   }
 

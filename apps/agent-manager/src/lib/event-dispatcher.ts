@@ -467,6 +467,10 @@ export interface SubagentSpawnResult {
   spawned: boolean;
   pid?: number;
   reason?: string;
+  /** Secret-free detail for a classified failure reason (e.g. the exact
+   *  `mcp_servers.<name>` config key an `invalid_mcp_transport` reason names) —
+   *  ticket da4358ee. Absent for reasons that carry no extra detail. */
+  detail?: string;
 }
 
 export interface SubagentManager {
@@ -2558,6 +2562,50 @@ export class EventDispatcher {
           // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
           // processed (grace extension, not resolution).
           this.#ackDispatch(ev, 'processed');
+          return;
+        }
+        if (result.reason === 'invalid_mcp_transport') {
+          // ticket da4358ee: the CLI (codex) refused to launch because its own
+          // config's mcp_servers.<name> has no resolvable transport (pre-spawn
+          // validation, ticket 40d18474 — InvalidMcpTransportError). That is a
+          // deterministic config error that reproduces IDENTICALLY on every
+          // retry, so it gets the SAME durable-blocker treatment as a broken
+          // worktree / missing push credential / unapproved CLI trust above:
+          // comment once, pend on the FIRST abort (never wait out the cooldown
+          // threshold), and nack so the server's dispatch outbox stops treating
+          // it as owed — instead of retry-storming (the exact ~2-day,
+          // 196-redispatch incident this ticket reports).
+          const blockerKind = 'invalid_mcp_transport';
+          this.#dispatchBlockTracker.record(blockerKind);
+          const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+          if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+            await fireAndForgetTool(this.#config, 'add_comment', {
+              ticket_id: ev.ticket_id,
+              content:
+                `⚠️ **MCP transport 설정 오류** — 이 CLI(\`${agentContext?.cli ?? 'codex'}\`)가 \`mcp_servers.awb\` 설정에서 해석 가능한 transport(\`url\` 또는 \`command\`)를 찾지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+                `마지막 오류: \`${result.detail || 'invalid transport in mcp_servers.awb'}\`\n\n` +
+                `이 agent의 CLI 홈(config.toml)의 \`mcp_servers.awb\` 테이블(또는 harness/자격 증명 설정)을 점검해 고친 뒤 이 티켓을 unpend 하세요.\n\n` +
+                `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 설정을 고친 뒤 unpend 하세요._`,
+            });
+          }
+          if (provisionBlock.shouldPend) {
+            await fireAndForgetTool(this.#config, 'pend_ticket', {
+              ticket_id: ev.ticket_id,
+              reason: provisioningPendReason({
+                kind: blockerKind,
+                reason: blockerKind,
+                detail: result.detail,
+                count: provisionBlock.count,
+              }),
+            });
+            log(
+              `[mcp-transport] durable provisioning block — pended ticket=${ev.ticket_id} role=${ev.action} blocker=${blockerKind} aborts=${provisionBlock.count}`,
+            );
+          }
+          log(
+            `Trigger aborted — invalid MCP transport config: ticket=${ev.ticket_id} role=${ev.action} detail=${result.detail || ''}`,
+          );
+          this.#ackDispatch(ev, 'nack', blockerKind);
           return;
         }
         log(`Subagent spawn declined (${result.reason}); no further fallback in standalone mode`);

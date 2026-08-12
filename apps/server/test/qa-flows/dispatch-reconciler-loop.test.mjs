@@ -376,6 +376,62 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       'a genuinely capacity-shaped stall still gets the original generic guidance',
     );
   });
+
+  await t.test('14: invalid_mcp_transport repeats then the ticket is parked — dispatch_generation stops climbing (ticket da4358ee)', async () => {
+    // Reproduces the incident this ticket reports: Codex exits immediately every
+    // time on `Error loading config.toml: invalid transport in mcp_servers.awb`,
+    // and (pre-fix) the reconciler kept re-dispatching forever — 196
+    // dispatch_reconcile_redispatch rows / ~2 days observed on the source ticket.
+    // The agent-manager side of the fix (event-dispatcher.ts, this same PR)
+    // classifies that spawn failure as the durable blocker `invalid_mcp_transport`
+    // and pends the ticket on the FIRST abort. This proves the RECONCILER half:
+    // once parked, dispatch_generation freezes instead of climbing without bound.
+    const ticket = await mkTicket('invalid mcp transport storm');
+    const tid = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
+    let intent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    await intentRepo.update(intent.id, { created_at: new Date(Date.now() - HOUR) });
+
+    // The manager aborts the spawn every time — the config error is
+    // deterministic, so it nacks with the same reason on every attempt.
+    await intents.applyManagerAck({ ticketId: ticket.id, role: 'assignee', triggerId: tid, outcome: 'nack', reason: 'invalid_mcp_transport' });
+    intent = await intentRepo.findOne({ where: { id: intent.id } });
+    assert.equal(intent.status, 'pending', 'nack re-opened as pending');
+
+    // Baseline (pre-fix shape): without an intervening pend, repeated
+    // past-backoff sweeps keep re-dispatching and dispatch_generation keeps
+    // climbing — this is the storm the ticket reports.
+    for (let i = 0; i < 3; i++) {
+      const next = new Date(intent.next_attempt_at).getTime() + 1000;
+      await reconciler.reconcile(new Date(next));
+      intent = await intentRepo.findOne({ where: { id: intent.id } });
+      assert.equal(intent.status, 'in_flight', `sweep ${i}: re-dispatched again — a config error never shows forward progress`);
+      // The manager immediately nacks the fresh dispatch with the same
+      // deterministic reason (mirrors the real incident's repeated identical error).
+      await intents.applyManagerAck({ ticketId: ticket.id, role: 'assignee', triggerId: intent.last_trigger_id, outcome: 'nack', reason: 'invalid_mcp_transport' });
+      intent = await intentRepo.findOne({ where: { id: intent.id } });
+    }
+    const generationBeforePend = intent.dispatch_generation;
+    assert.ok(generationBeforePend >= 3, 'generation climbed across the unrepaired repeats — the storm this fix must stop');
+
+    // The manager's durable-blocker handling (RoleSpawnSuppressor.note treats
+    // invalid_mcp_transport as durable — pends on the very FIRST abort in
+    // production, event-dispatcher.ts) parks the ticket. Drive the ticket to
+    // that post-pend state directly to isolate and prove the reconciler side.
+    await ticketRepo.update(ticket.id, { pending_user_action: true });
+
+    const next = new Date(intent.next_attempt_at).getTime() + 1000;
+    await reconciler.reconcile(new Date(next));
+    intent = await intentRepo.findOne({ where: { id: intent.id } });
+    assert.equal(intent.status, 'resolved', 'a parked ticket resolves the intent — the reconciler stops treating it as owed');
+    assert.equal(intent.last_reason, 'parked');
+    assert.equal(intent.dispatch_generation, generationBeforePend, 'generation is frozen the moment the durable block pends the ticket');
+
+    // A later sweep never revisits it — generation stays bounded forever, not
+    // just for the one sweep right after the pend.
+    await reconciler.reconcile(new Date(next + 10 * 60_000));
+    intent = await intentRepo.findOne({ where: { id: intent.id } });
+    assert.equal(intent.dispatch_generation, generationBeforePend, 'still frozen on a later sweep — no infinite generation growth');
+  });
 });
 
 test.after?.(() => exitAfterTests(0));

@@ -30,6 +30,7 @@ import {
   DEFAULT_PEND_AFTER_ABORTS,
   isDurableProvisioningBlocker,
   provisioningPendReason,
+  classifySpawnException,
   firstLine,
 } from '../dist/lib/dispatch-preflight.js';
 
@@ -642,6 +643,7 @@ test('isDurableProvisioningBlocker: checkout + push-credential + CLI trust/auth 
     'push_credential_unavailable',
     'cli_trust_required',
     'cli_credential_expired',
+    'invalid_mcp_transport',
   ]) {
     assert.equal(isDurableProvisioningBlocker(k), true, `should be durable: ${k}`);
   }
@@ -683,6 +685,49 @@ test('note(): durable vs transient — same threshold, opposite first-abort beha
   assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 0).shouldPend, false, 'transient abort 1');
   assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 1).shouldPend, false, 'transient abort 2');
   assert.equal(transient.note('t', 'assignee', 'worktree:path_conflict', 2).shouldPend, true, 'transient abort 3 → pend');
+});
+
+// ── classifySpawnException + invalid_mcp_transport durable pend (ticket da4358ee) ─
+// A codex InvalidMcpTransportError (pre-spawn mcp_servers.<name> transport
+// validation, ticket 40d18474) is a deterministic config error — it reproduces
+// identically on every retry. classifySpawnException must recognise it (instead
+// of collapsing it into the generic 'exception' bucket the reconciler cannot
+// distinguish from a transient hiccup), and the recognised kind must pend on the
+// FIRST abort like the other durable blockers — this is what stops the
+// invalid-transport dispatch-reconcile retry storm (196 redispatches / ~2 days)
+// this ticket reports.
+
+test('classifySpawnException: an InvalidMcpTransportError-named error is classified as invalid_mcp_transport with its message as detail', () => {
+  const err = Object.assign(new Error(
+    'Refusing to launch subagent: mcp_servers.awb in /home/agent/config.toml is not a valid MCP server table — ' +
+      'define a "url" (streamable_http) or a "command" (stdio). Allowed transports: stdio, streamable_http.',
+  ), { name: 'InvalidMcpTransportError' });
+  const c = classifySpawnException(err);
+  assert.equal(c.reason, 'invalid_mcp_transport');
+  assert.match(c.detail, /mcp_servers\.awb/, 'detail names the offending config key');
+  assert.match(c.detail, /config\.toml/, 'detail names the config path');
+});
+
+test('classifySpawnException: an ordinary exception keeps the pre-existing generic bucket (no behavior change for other failures)', () => {
+  assert.deepEqual(classifySpawnException(new Error('ECONNRESET')), { reason: 'exception' });
+  assert.deepEqual(classifySpawnException(new TypeError('boom')), { reason: 'exception' });
+  assert.deepEqual(classifySpawnException('not an Error object'), { reason: 'exception' });
+  assert.deepEqual(classifySpawnException(null), { reason: 'exception' });
+  assert.deepEqual(classifySpawnException(undefined), { reason: 'exception' });
+});
+
+test('classifySpawnException: detail is truncated to 500 chars (bounded ticket-comment/log payload)', () => {
+  const err = Object.assign(new Error('x'.repeat(1000)), { name: 'InvalidMcpTransportError' });
+  const c = classifySpawnException(err);
+  assert.equal(c.detail.length, 500);
+});
+
+test('note(): invalid_mcp_transport pends on the FIRST abort, same as the other durable blockers (ticket da4358ee)', () => {
+  const s = new RoleSpawnSuppressor(1000, 3);
+  const first = s.note('t', 'assignee', 'invalid_mcp_transport', 0);
+  assert.deepEqual(first, { count: 1, shouldPend: true }, 'a deterministic config error must not wait out the cooldown threshold');
+  // A second abort of the SAME episode does not re-pend (one pend per episode).
+  assert.equal(s.note('t', 'assignee', 'invalid_mcp_transport', 1).shouldPend, false);
 });
 
 // ── provisioningPendReason (User-tab durable-block copy) ──────────────────────
