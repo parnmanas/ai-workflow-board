@@ -32,7 +32,7 @@
 // authoritative `_inflight` registry so the fallback slot and the authoritative
 // registry recover a hung-provisioning holder on the same clock (ticket 7c3ba9cf).
 // A pure value import (a number); pulls in no I/O.
-import { INFLIGHT_RESERVATION_STALE_MS } from './base-session-manager.js';
+import { INFLIGHT_RESERVATION_STALE_MS, isPidAlive } from './base-session-manager.js';
 import { randomUUID } from 'node:crypto';
 
 /** git stderr fragments (lowercased) that mean "the remote rejected us for lack
@@ -697,6 +697,14 @@ export interface InflightDispatchMeta {
    *  (CAS). authoritative `_inflight` 경로와 동일하게, evict 후 재예약된 슬롯을
    *  좀비 홀더의 지연 release 가 지우지 못하게 한다. */
   nonce?: string;
+  /** ticket fdf6714e: 이 예약을 실제로 보유 중인 프로세스의 OS pid — authoritative
+   *  `InflightReservation.pid`(ticket e90294e7)와 동일한 목적. provisioning 창
+   *  (아직 프로세스가 없는 짧은 구간)은 비워두고, one-shot 이 spawn 되어 실제 pid 를
+   *  얻은 뒤(handleTrigger/handleCommentMention 의 fallback 분기가 attachDispatchPid
+   *  로) 채워진다. 채워지면 TTL 나이 기반 회수 대신 OS 레벨 liveness probe
+   *  (`isPidAlive`)가 좀비 판정을 대신해, 오래 실행되는 one-shot 이 살아있는 한
+   *  이 예약이 age-out 되지 않는다. */
+  pid?: number;
 }
 
 /** Why a dispatch was suppressed by the provision-spanning single-flight guard.
@@ -777,9 +785,27 @@ export class InflightDispatchTracker {
    *  not-acquired; the caller suppresses. Pure/synchronous: no `await` between
    *  the `has` and the `set`, so under Node's single thread the check-and-set
    *  cannot interleave with another dispatch. */
-  tryAcquireFallback(key: string, meta: InflightDispatchMeta): { acquired: boolean; nonce?: string } {
+  tryAcquireFallback(
+    key: string,
+    meta: InflightDispatchMeta,
+  ): { acquired: boolean; nonce?: string; evicted?: 'dead_pid' } {
     const existing = this.#fallback.get(key);
     if (existing) {
+      // Pid-liveness escape hatch (ticket fdf6714e, mirrors TicketSessionManager
+      // .tryReserveDispatch's e90294e7 round-3 check): once attachDispatchPid has
+      // recorded the owning process's pid, an OS-level liveness probe is
+      // authoritative over the reservation's age — a one-shot that runs past
+      // INFLIGHT_RESERVATION_STALE_MS is NEVER age-evicted while its process is
+      // still alive, closing the twin gap the ticket 13160d20 characterization
+      // test recorded. A confirmed-dead pid is reclaimed immediately instead of
+      // waiting out the TTL — a stronger-than-timer signal, same as the
+      // authoritative 'dead_pid' backstop.
+      if (existing.pid != null) {
+        if (isPidAlive(existing.pid)) return { acquired: false };
+        const nonce = randomUUID();
+        this.#fallback.set(key, { ...meta, reservedAt: Date.now(), nonce });
+        return { acquired: true, nonce, evicted: 'dead_pid' };
+      }
       // Zombie recovery (ticket 7c3ba9cf): a holder that hung mid-provisioning
       // never calls releaseFallback, so without a TTL the slot blocks every
       // retry forever. Evict a reservation older than the shared stale window
@@ -793,6 +819,26 @@ export class InflightDispatchTracker {
     const nonce = randomUUID();
     this.#fallback.set(key, { ...meta, reservedAt: Date.now(), nonce });
     return { acquired: true, nonce };
+  }
+
+  /** Promote a fallback reservation to a pid-verified one once the caller's
+   *  spawn() resolves with a real OS pid (ticket fdf6714e — mirrors
+   *  TicketSessionManager.attachDispatchPid, ticket e90294e7 round 3). Called
+   *  by BOTH handleTrigger's (`#dispatchTriggerBody`) and handleCommentMention's
+   *  fallback branches right after their one-shot spawn succeeds, so
+   *  tryAcquireFallback's zombie recovery switches from the provisioning-window
+   *  TTL to an authoritative OS-level liveness probe for the one-shot's
+   *  remaining (possibly many-minute) lifetime. Nonce-CAS guarded like
+   *  releaseFallback: if the reservation was evicted and re-claimed by a new
+   *  generation between tryAcquireFallback and this call, attaching the old
+   *  caller's pid to the successor's reservation would be wrong, so a nonce
+   *  mismatch is a no-op. */
+  attachDispatchPid(key: string, nonce: string | undefined, pid: number): void {
+    if (!pid || pid <= 0) return;
+    const existing = this.#fallback.get(key);
+    if (!existing) return;
+    if (nonce !== undefined && existing.nonce !== nonce) return;
+    existing.pid = pid;
   }
 
   /** Release the process-local fallback slot. Idempotent. `nonce` (ticket
