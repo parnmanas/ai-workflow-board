@@ -205,7 +205,13 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
   const mgr = ticketMgr ?? new RealTicketMgrStub(makeConfig({ persistentTicketSessions: persistent }));
   const config = makeConfig({ persistentTicketSessions: persistent });
   const dispatcher = new EventDispatcher(config, {
-    ticketSessionManager: persistent ? mgr : null,
+    // ticket 13160d20: main.ts는 TicketSessionManager를 항상 무조건 생성한다
+    // (persistentTicketSessions는 handleTrigger/#dispatchTriggerBody가 dispatch를
+    // 그것을 통해 라우팅할지만 게이팅할 뿐 — 인스턴스 자체와 _inflight 맵은
+    // 항상 존재한다). 여기서 persistent:false일 때 null로 처리해버리면, 매니저의
+    // 단순 존재 여부로만(config 플래그가 아니라) 잘못 분기하는 가드를 숨겨버렸다
+    // — 정확히 이 티켓이 고치는 handleCommentMention 버그다.
+    ticketSessionManager: mgr,
     subagentManager: sub,
     worktreeManager: wt,
     managedAgentContexts,
@@ -1332,6 +1338,159 @@ test('reverse order + long-running one-shot (round 3): past the TTL/safety-valve
   }
   assert.equal(mgr.spawnCount, 0, 'the persistent column-triggered session did not twin-spawn — the live one-shot still owns the seat');
   assert.equal(calls.spawn.length, 1, 'total one-shot spawns across both dispatch paths stays at 1');
+});
+
+// ───────── Part G: persistentTicketSessions:false 에서도 동일한 충돌 (ticket 13160d20) ─────────
+//
+// Part F는 handleTrigger가 컬럼 이동 dispatch를 TicketSessionManager.dispatchTrigger
+// (authoritative _inflight 레지스트리)로 라우팅할 때의 가드를 증명했다. Fallback
+// 모드(persistentTicketSessions:false, ticket 3d180f85의 설계)에서는 handleTrigger가
+// provisioning 구간을 아우르는 (ticket, role, agent) seat를 대신 프로세스-로컬
+// InflightDispatchTracker에 예약한다 — handleCommentMention의 mention-seat 가드가
+// (config와 무관하게 무조건, TicketSessionManager가 main.ts에서 항상 생성되므로)
+// 조회하던 레지스트리와는 DIFFERENT 한 곳이다. 서로 겹치지 않는 두 맵 때문에 어느
+// dispatch 경로도 상대의 점유를 볼 수 없어서, 기본 설정에서는 e90294e7이 닫은 바로
+// 그 da4358ee twin이 persistentTicketSessions:false 에서는 도착 순서와 무관하게
+// (EITHER order) 다시 재현 가능했다.
+//
+// Non-vacuous: handleCommentMention의 fallback-모드 분기를(이 티켓의 fix를) 되돌려
+// TicketSessionManager.tryReserveDispatch만 무조건 쓰게 하면, 아래 테스트들은 1번이
+// 아니라 2번 spawn한다 — mention-seat 가드가 handleTrigger의 fallback 경로가 전혀
+// 쓰지 않는 레지스트리를 조회하게 되기 때문이다.
+
+function makeGatedSubagentManager(gate) {
+  const calls = [];
+  return {
+    stub: {
+      canSpawn: () => true,
+      async spawn(spec) {
+        const child = spawnDummyChild();
+        calls.push({ ...spec, pid: child.pid });
+        await gate.promise;
+        return { spawned: true, pid: child.pid };
+      },
+    },
+    calls,
+  };
+}
+
+test('fallback mode: role-mention is suppressed while a column-move trigger for the SAME seat is still provisioning/spawning', async () => {
+  const gate = deferred();
+  const { stub: subagentManager, calls: spawnCalls } = makeGatedSubagentManager(gate);
+  const { dispatcher, tracker } = makeDispatcher({ persistent: false, subagentManager });
+
+  // 컬럼 이동 트리거는 handleTrigger 내부에서(#dispatchTriggerBody가 worktree를
+  // resolve하기도 전에) fallback seat를 동기적으로 예약한 뒤, one-shot spawn()
+  // 호출에서 블록된다 — Part F의 첫 테스트가 게이팅하는 ticket-session provisioning
+  // hang과 동일한 구조다.
+  const pTrigger = dispatcher.handleTrigger(evJson());
+  await waitFor(() => spawnCalls.length === 1, { timeoutMs: 2000 });
+  assert.equal(
+    tracker.isFallbackInflight(KEY('t1', 'assignee', 'a1')),
+    true,
+    'the column trigger holds the fallback reservation while its one-shot spawn is in flight',
+  );
+
+  // 같은 리뷰어 코멘트의 @[role:assignee] 멘션이 같은 seat에 대해 도착한다.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(spawnCalls.length, 1, 'the mention did not spawn a competing one-shot session');
+
+  gate.resolve();
+  await pTrigger;
+  assert.equal(spawnCalls.length, 1, 'only the column-triggered one-shot ever spawned');
+});
+
+test('fallback mode reverse order: role-mention arrives FIRST and claims the fallback seat; the column-move trigger that follows is suppressed — total spawns stays 1', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  // 실제 wire payload 순서(da4358ee): 리뷰어의 "변경 요청" 코멘트는 role
+  // 멘션을 담고 있으며, 같은 seat에 대한 컬럼 이동 agent_trigger보다 먼저
+  // comment_mention으로 전달된다.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1, 'the mention is first to the seat — it claims the fallback slot and spawns its one-shot');
+  assert.equal(
+    typeof calls.spawn[0].onExit,
+    'function',
+    'the claimed fallback seat is held via onExit for the one-shot\'s full lifetime, not released when spawn() merely returns a pid',
+  );
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(
+    calls.spawn.length,
+    1,
+    'the column trigger found the fallback seat already claimed by the mention\'s one-shot and did not twin-spawn',
+  );
+});
+
+test('fallback mode: once the mention\'s one-shot exits (onExit fires), the fallback seat is free again for a later trigger', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1);
+  const onExit = calls.spawn[0].onExit;
+  assert.equal(typeof onExit, 'function');
+
+  // one-shot subagent 프로세스가 실제로 종료되는 상황을 시뮬레이션한다.
+  onExit();
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(
+    calls.spawn.length,
+    2,
+    "the fallback seat was released on the one-shot's exit, so the later column trigger dispatched normally",
+  );
+});
+
+test('fallback mode baseline: a role-mention with no concurrent column trigger dispatches exactly as before', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1, 'nothing in flight to collide with — the mention spawns its one-shot session');
+});
+
+test('fallback mode a direct @[agent:id] mention (no role) is NOT suppressed by an in-flight column trigger — it has no role to collide on', async () => {
+  const gate = deferred();
+  const { stub: subagentManager, calls: spawnCalls } = makeGatedSubagentManager(gate);
+  const { dispatcher } = makeDispatcher({ persistent: false, subagentManager });
+
+  const pTrigger = dispatcher.handleTrigger(evJson());
+  await waitFor(() => spawnCalls.length === 1, { timeoutMs: 2000 });
+
+  await dispatcher.handleCommentMention(mentionEvJson({ mention_source: 'direct', role_shortcut: '' }));
+  assert.equal(spawnCalls.length, 2, 'a direct mention still dispatches its own one-shot session');
+
+  gate.resolve();
+  await pTrigger;
+});
+
+// 이 티켓의 fix가 닫지 않는, 받아들여진 잔여 gap을 기록한다(event-dispatcher.ts의
+// fallback 분기 코멘트, 그리고 그걸 위해 파일링한 ticket 13160d20 후속 참고):
+// InflightDispatchTracker에는 TicketSessionManager.attachDispatchPid 같은
+// pid-liveness 탈출구가 없어서, 오래 실행되는 one-shot이 점유한 fallback-모드
+// seat도 INFLIGHT_RESERVATION_STALE_MS가 지나면 age-out되어 이후 트리거가
+// 되찾아갈 수 있다 — handleTrigger 자신의 fallback 예약이 항상 겪어온 것과
+// 동일한 한계다(오히려 그쪽은 동기적인 spawn() 호출이 반환되는 즉시 풀리므로
+// 더 일찍 풀린다). 이것은 원하는 동작을 검증하는 테스트가 아니라 현재 동작을
+// 기록하는 characterization 테스트다 — 후속 작업이 fallback tracker에
+// pid-liveness parity를 추가하면 마지막 assertion을 `1`로 바꿀 것.
+test('fallback mode known gap (ticket 13160d20 follow-up): past the TTL, a column trigger CAN reclaim a fallback seat still held by a live mention one-shot', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1, 'the mention claimed the fallback seat and spawned its one-shot');
+  // onExit을 의도적으로 호출하지 않는다 — one-shot이 아직 "실행 중"인 상태를 유지.
+
+  const realNow = Date.now;
+  Date.now = () => realNow() + INFLIGHT_RESERVATION_STALE_MS + 1;
+  try {
+    await dispatcher.handleTrigger(evJson());
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(
+    calls.spawn.length,
+    2,
+    'known gap: unlike the authoritative path, the fallback seat has no pid-liveness escape and was reclaimed past the TTL',
+  );
 });
 
 function isDead(pid) {
