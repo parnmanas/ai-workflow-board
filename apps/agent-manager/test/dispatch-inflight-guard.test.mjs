@@ -1455,11 +1455,18 @@ test('fallback mode a direct @[agent:id] mention (no role) is NOT suppressed by 
   const pTrigger = dispatcher.handleTrigger(evJson());
   await waitFor(() => spawnCalls.length === 1, { timeoutMs: 2000 });
 
-  await dispatcher.handleCommentMention(mentionEvJson({ mention_source: 'direct', role_shortcut: '' }));
+  // 트리거와 멘션이 같은 게이트를 공유하는 stub이므로, 멘션 호출을 여기서 바로
+  // await 해버리면 그 spawn()도 같은 gate.promise에서 블록되어 절대 안 풀리는
+  // 데드락이 된다(gate.resolve()는 이 아래에서만 호출됨) — pTrigger와 동일하게
+  // 완료를 기다리지 않고 캡처만 한다.
+  const pMention = dispatcher.handleCommentMention(
+    mentionEvJson({ mention_source: 'direct', role_shortcut: '' }),
+  );
+  await waitFor(() => spawnCalls.length === 2, { timeoutMs: 2000 });
   assert.equal(spawnCalls.length, 2, 'a direct mention still dispatches its own one-shot session');
 
   gate.resolve();
-  await pTrigger;
+  await Promise.all([pTrigger, pMention]);
 });
 
 // 이 티켓의 fix가 닫지 않는, 받아들여진 잔여 gap을 기록한다(event-dispatcher.ts의
