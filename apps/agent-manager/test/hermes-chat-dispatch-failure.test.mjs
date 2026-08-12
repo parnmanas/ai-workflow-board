@@ -2,6 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
+import { spawnFailureTracker } from '../dist/lib/spawn-failure-tracker.js';
 
 // ticket a837879c: Hermes 채팅 디스패치 실패가 로컬 로그로만 남고 사용자/채팅방에는
 // 아무 신호도 가지 않아 "Hermes Agent가 온라인인데 응답이 없음"처럼 보였다.
@@ -117,4 +118,77 @@ test('Hermes chat room dispatch failure posts a visible error into the chat room
   assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
   assert.match(chatMessagePosts[0].body.content, /Hermes 런타임 실행 실패/);
   assert.match(chatMessagePosts[0].body.content, /runtime_supervisor_unavailable/);
+});
+
+// ticket 7a4b14b4: the two tests above only exercise the path where
+// #dispatchHermes() itself throws because runtimeSupervisor is entirely absent
+// (always the allowlisted 'runtime_supervisor_unavailable' code). The two tests
+// below give #dispatchHermes() a working fake runtimeSupervisor so dispatch()
+// can RESOLVE (not throw) with an empty reply, or throw a code that was never
+// added to the allowlist — reproducing the two properties ticket a837879c's
+// review explicitly required and that were previously unverified: (a) an
+// empty/whitespace-only reply after end_turn is never recorded as success, and
+// (b) any code outside #HERMES_CHAT_ERROR_CODES collapses to the safe
+// 'runtime_dispatch_error' fallback with the raw code/message never reaching
+// the chat room.
+
+function harnessWithSupervisor(dispatchImpl) {
+  const managedAgentContexts = {
+    get: (id) => (id === AGENT ? context() : null),
+    has: (id) => id === AGENT,
+    list: () => [context()],
+  };
+  const dispatcher = new EventDispatcher(
+    {
+      url: 'http://127.0.0.1:0',
+      apiKey: 'test-key',
+      delegation: { enabled: true, persistentTicketSessions: false, persistentChatSessions: false },
+    },
+    { managedAgentContexts, runtimeSupervisor: { dispatch: dispatchImpl } },
+  );
+  return { dispatcher };
+}
+
+test('Hermes dispatch resolving end_turn with a whitespace-only reply is NOT recorded as success (hermes_empty_reply, allowlisted)', async () => {
+  const { dispatcher } = harnessWithSupervisor(async (args) => {
+    args.onEvent?.({ type: 'message_delta', sessionId: 'session-empty', text: '   ' });
+    return {
+      sessionId: 'session-empty',
+      stopReason: 'end_turn',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    };
+  });
+
+  await dispatcher.handleChatRoomMessage(chatRoomMessage('room-empty-reply'));
+
+  assert.equal(chatMessagePosts.length, 1);
+  assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
+  assert.equal(
+    chatMessagePosts[0].body.content,
+    '⚠️ **Hermes 런타임 실행 실패** (`hermes_empty_reply`)\n\n' +
+      '이 메시지에 응답하지 못했습니다. Agent Manager 로그를 확인한 뒤 다시 시도하세요.',
+  );
+
+  // Not recorded as success — the degraded signal must reflect this failure.
+  const snap = spawnFailureTracker.snapshot();
+  assert.equal(snap.last_spawn_error_cli, 'hermes');
+  assert.match(snap.last_spawn_error, /hermes_empty_reply/);
+});
+
+test('Hermes dispatch failing with a code outside the allowlist is redacted to runtime_dispatch_error — raw code/message never reach the chat room', async () => {
+  const { dispatcher } = harnessWithSupervisor(async () => {
+    const err = new Error('internal path leak: /home/parn/.awb/secret-detail sensitive-stack-trace');
+    err.code = 'some_never_allowlisted_internal_code';
+    throw err;
+  });
+
+  await dispatcher.handleChatRoomMessage(chatRoomMessage('room-unlisted-code'));
+
+  assert.equal(chatMessagePosts.length, 1);
+  assert.equal(chatMessagePosts[0].body.agent_id, AGENT);
+  assert.match(chatMessagePosts[0].body.content, /Hermes 런타임 실행 실패/);
+  assert.match(chatMessagePosts[0].body.content, /runtime_dispatch_error/);
+  assert.doesNotMatch(chatMessagePosts[0].body.content, /some_never_allowlisted_internal_code/);
+  assert.doesNotMatch(chatMessagePosts[0].body.content, /secret-detail/);
+  assert.doesNotMatch(chatMessagePosts[0].body.content, /sensitive-stack-trace/);
 });
