@@ -201,6 +201,81 @@ test('half-open probe allowed after cooldown', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ticket 970d6692 — shouldBlock() must be a PURE read. TicketSessionManager.
+// dispatchTrigger and SubagentManager.spawn share ONE CircuitBreaker instance
+// and both call shouldBlock() on the same key for the same logical spawn
+// attempt (dispatchTrigger declines for an unrelated reason → event-dispatcher
+// falls back to a one-shot spawn, which re-checks the breaker). Before the
+// fix, shouldBlock() stamped `entry.openedAt = Date.now()` the instant it
+// allowed a half-open probe, so the first gate's "allowed" call consumed the
+// probe and reset the cooldown clock to ~0 — the second gate, checking the
+// SAME key moments later, always saw "opened 0s ago" and blocked. Every
+// future attempt repeated the identical two-gate sequence, so the breaker
+// could never self-heal short of a manager restart.
+// ---------------------------------------------------------------------------
+
+test('two independent shouldBlock() checks on the same key after cooldown both allow (probe decision is consistent)', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'reviewer');
+
+  cb.record(key, 1);
+  cb.record(key, 1); // opens
+
+  const entry = cb.getOpenBreakers()[0].entry;
+  entry.openedAt = Date.now() - 200; // simulate cooldown elapsed
+
+  // Gate ①: e.g. TicketSessionManager.dispatchTrigger's circuit-breaker check.
+  const gate1 = cb.shouldBlock(key);
+  // Gate ②: e.g. SubagentManager.spawn's check, moments later for the SAME attempt.
+  const gate2 = cb.shouldBlock(key);
+
+  assert.equal(gate1, null, 'first gate allows the half-open probe');
+  assert.equal(gate2, null, 'second gate must agree and also reach the actual spawn');
+});
+
+test('shouldBlock() does not mutate openedAt — repeated blocked checks do not reset the cooldown', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  cb.record(key, 1);
+  cb.record(key, 1); // opens
+  const entry = cb.getOpenBreakers()[0].entry;
+  const openedAt = entry.openedAt;
+
+  // Several re-triggers arrive while still within cooldown (blocked).
+  cb.shouldBlock(key);
+  cb.shouldBlock(key);
+  cb.shouldBlock(key);
+
+  assert.equal(entry.openedAt, openedAt, 'repeated blocked checks must not reset openedAt / extend the cooldown');
+});
+
+test('a half-open probe that fails again restarts the cooldown via record(), not shouldBlock()', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  cb.record(key, 1);
+  const opened = cb.record(key, 1); // opens
+  assert.equal(opened.justOpened, true);
+
+  const entry = cb.getOpenBreakers()[0].entry;
+  entry.openedAt = Date.now() - 200; // simulate cooldown elapsed
+  const preProbeOpenedAt = entry.openedAt;
+
+  assert.equal(cb.shouldBlock(key), null, 'half-open probe allowed — reaches spawn');
+  assert.equal(entry.openedAt, preProbeOpenedAt, 'shouldBlock() must not have touched openedAt');
+
+  // The probe actually spawned and the retry failed again.
+  const retried = cb.record(key, 1);
+  assert.equal(retried.justOpened, false, 'repeat open must not re-fire pend_ticket');
+  assert.ok(entry.openedAt > preProbeOpenedAt, 'a real post-probe failure restarts the cooldown');
+
+  const reason = cb.shouldBlock(key);
+  assert.ok(reason, 'freshly re-opened breaker blocks again with a fresh cooldown');
+  assert.ok(reason.includes('circuit_breaker_open'));
+});
+
+// ---------------------------------------------------------------------------
 // mem-leak v2 (f500ee56): #state must stay bounded over uptime. A key that
 // fails below threshold then is abandoned, or an open breaker whose ticket is
 // gone, used to persist forever. sweep()/the on-insert sweep + LRU cap fix it.

@@ -98,6 +98,12 @@ export class CircuitBreaker {
    * cannot self-heal, so burning the full N-failure budget would just spin the
    * trigger loop N more times. The failure is still counted first so the
    * reported `consecutiveFailures` reflects reality.
+   *
+   * ticket 970d6692: if the entry is ALREADY open, reaching this call means a
+   * half-open probe (see shouldBlock()) was allowed through, actually spawned,
+   * and failed again — so `openedAt` is re-stamped to restart the cooldown from
+   * this real failure. `justOpened` stays false on that repeat path (the caller
+   * already pend_ticket'd on the original open; don't re-fire it every probe).
    */
   record(
     key: string,
@@ -132,14 +138,20 @@ export class CircuitBreaker {
 
     let justOpened = false;
     const crossedThreshold = entry.consecutiveFailures >= this.#threshold;
-    if (!entry.open && (crossedThreshold || opts?.forceOpen)) {
+    if (crossedThreshold || opts?.forceOpen) {
+      justOpened = !entry.open;
       entry.open = true;
+      // (Re)stamp on every real failure that keeps/puts the breaker open —
+      // including a failed half-open probe — never on a mere shouldBlock()
+      // check (see shouldBlock()). This is what actually restarts the cooldown.
       entry.openedAt = now;
-      justOpened = true;
       log(
-        `[circuit-breaker] OPEN key=${key} failures=${entry.consecutiveFailures} ` +
-          `exit=${exitCode}${opts?.forceOpen ? ' (forced — non-retryable)' : ''} — ` +
-          `blocking re-dispatch until operator intervenes`,
+        justOpened
+          ? `[circuit-breaker] OPEN key=${key} failures=${entry.consecutiveFailures} ` +
+              `exit=${exitCode}${opts?.forceOpen ? ' (forced — non-retryable)' : ''} — ` +
+              `blocking re-dispatch until operator intervenes`
+          : `[circuit-breaker] RE-OPEN key=${key} — half-open probe failed again ` +
+              `(failures=${entry.consecutiveFailures}, exit=${exitCode}) — cooldown restarted`,
       );
     } else {
       log(
@@ -153,21 +165,31 @@ export class CircuitBreaker {
   /**
    * Check whether dispatch should be blocked for the given key.
    * Returns a reason string if blocked, or null if dispatch is allowed.
+   *
+   * PURE READ — must not mutate `entry` (ticket 970d6692). The persistent
+   * (TicketSessionManager.dispatchTrigger) and one-shot (SubagentManager.spawn)
+   * paths share ONE CircuitBreaker instance and each call shouldBlock() on the
+   * SAME key for the SAME logical spawn attempt (dispatchTrigger declines for
+   * an unrelated reason → event-dispatcher falls back to a one-shot spawn,
+   * which re-checks). This used to stamp `entry.openedAt = Date.now()` the
+   * moment a half-open probe was allowed, so the first gate's "allowed" call
+   * consumed the probe and reset the cooldown clock to ~0 — the second gate,
+   * checking moments later, always saw "opened 0s ago" and blocked, forever
+   * (the breaker could never self-heal without a manager restart). Two
+   * independent reads of unmutated state always agree; only a confirmed
+   * post-spawn failure (record()) may advance `openedAt`.
    */
   shouldBlock(key: string): string | null {
     const entry = this.#state.get(key);
     if (!entry || !entry.open) return null;
 
-    // Allow a single "half-open" probe after the cooldown period
+    // Allow a single "half-open" probe after the cooldown period.
     const elapsed = Date.now() - entry.openedAt;
     if (elapsed >= this.#cooldownMs) {
       log(
         `[circuit-breaker] HALF-OPEN probe allowed key=${key} ` +
           `(${Math.round(elapsed / 60_000)}min since open)`,
       );
-      // Don't auto-close — if the probe silent-exits again, record() will
-      // bump consecutiveFailures and re-stamp openedAt via a fresh open.
-      entry.openedAt = Date.now(); // reset cooldown for next probe
       return null;
     }
 
