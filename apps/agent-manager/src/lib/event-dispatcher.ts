@@ -1521,6 +1521,33 @@ export class EventDispatcher {
     });
   }
 
+  // ticket e8105c84: #dispatchHermes()가 throw 없이 resolve하는 성공 경로도
+  // #reportHermesDispatchOutcome과 마찬가지로 stopReason이 'end_turn'이 아니면
+  // 응답이 실제로 완료됐다는 보장이 없다 — 종전에는 handleCommentMention이 이
+  // 케이스를 log()만 남기고 spawnFailureTracker/티켓 어느 쪽에도 신호를 남기지
+  // 않았다. 이 경로는 replyText를 관측하지 않으므로(Hermes가 add_comment MCP
+  // 도구를 직접 호출) #reportHermesDispatchOutcome을 그대로 재사용할 수 없고,
+  // stopReason 검사만 골라 재사용한다. "실제로 새 코멘트가 달렸는지"까지 확인하는
+  // 강한 검증(코멘트 스냅샷/diff)은 티켓 본문에서 별도 설계가 필요하다고 명시한
+  // 범위 밖이다.
+  async #reportHermesMentionOutcome(
+    ticketId: string,
+    result: RuntimeDispatchResult,
+  ): Promise<void> {
+    if (result.stopReason !== 'end_turn') {
+      await this.#reportHermesDispatchFailure(
+        'Hermes mention dispatch',
+        undefined,
+        undefined,
+        result.stopReason,
+        `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
+      );
+      await this.#notifyHermesMentionFailureOnTicket(ticketId, result.stopReason);
+      return;
+    }
+    spawnFailureTracker.recordSuccess('hermes');
+  }
+
   /**
    * Chat-event variant: events.controller delivers a chat_room_message to a
    * manager whenever any of its managed agents participates in the room, but
@@ -2973,6 +3000,7 @@ export class EventDispatcher {
           `Comment mention dispatched through Hermes ACP: ticket=${ticketId} ` +
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
+        await this.#reportHermesMentionOutcome(ticketId, result);
       } catch (err: any) {
         const code = err?.code || 'runtime_dispatch_error';
         // 채팅 경로(handleChatRequest/handleChatRoomMessage)와 동일한 로그
