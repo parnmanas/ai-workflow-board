@@ -1480,6 +1480,26 @@ export class EventDispatcher {
     spawnFailureTracker.recordSuccess('hermes');
   }
 
+  // ticket d946862a: handleCommentMention의 Hermes 분기는 채팅방이 없는
+  // 호출부라 #reportHermesDispatchFailure의 (c) 채팅 POST leg가 항상
+  // no-op이다(roomId/agentId를 undefined로 넘김) — 로그 classify()/
+  // spawnFailureTracker 신호는 거기서 이미 커버되지만, 멘션을 남긴 사람은
+  // 티켓 자체를 보지 않는 한 실패를 알 방법이 없었다. 이 티켓 코멘트 leg를
+  // 별도로 둔다. #postDeferAuditComment와 동일하게 평문(멘션 없음)이라
+  // agent 재트리거 체인을 새로 만들지 않는다.
+  async #notifyHermesMentionFailureOnTicket(ticketId: string, code: string): Promise<void> {
+    if (!ticketId) return;
+    const chatCode = EventDispatcher.#HERMES_CHAT_ERROR_CODES.has(code)
+      ? code
+      : 'runtime_dispatch_error';
+    await fireAndForgetTool(this.#config, 'add_comment', {
+      ticket_id: ticketId,
+      content:
+        `⚠️ **Hermes 런타임 실행 실패** (\`${chatCode}\`)\n\n` +
+        '이 멘션에 응답하지 못했습니다. Agent Manager 로그를 확인한 뒤 다시 멘션해 주세요.',
+    });
+  }
+
   /**
    * Chat-event variant: events.controller delivers a chat_room_message to a
    * manager whenever any of its managed agents participates in the room, but
@@ -2933,7 +2953,18 @@ export class EventDispatcher {
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
       } catch (err: any) {
-        log(`Hermes mention dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
+        const code = err?.code || 'runtime_dispatch_error';
+        // 채팅 경로(handleChatRequest/handleChatRoomMessage)와 동일한 로그
+        // classify()/spawnFailureTracker 신호 — ticket a837879c 가 이미 검증한
+        // "Hermes <prefix> failed closed:" 포맷을 그대로 재사용한다.
+        await this.#reportHermesDispatchFailure(
+          'Hermes mention dispatch',
+          undefined,
+          undefined,
+          code,
+          err?.message ?? String(err),
+        );
+        await this.#notifyHermesMentionFailureOnTicket(ticketId, code);
       }
       return;
     }
