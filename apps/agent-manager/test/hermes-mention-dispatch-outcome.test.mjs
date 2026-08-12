@@ -13,14 +13,22 @@ import { spawnFailureTracker } from '../dist/lib/spawn-failure-tracker.js';
 // #dispatchHermes() throwing (runtime_supervisor_unavailable). It does not cover the
 // success path — dispatch() resolving without throwing — where an ACP session/prompt
 // can still end on a stopReason other than 'end_turn' (e.g. 'refusal', a tool-call
-// permission silently denied). Before this ticket, handleCommentMention only logged
-// that stopReason and never told spawnFailureTracker or the ticket, so a mention that
-// got no reply looked identical to a successful one. This mirrors
-// hermes-chat-dispatch-success.test.mjs's stopReason-driven cases, but for the
-// comment-mention path's ticket-comment failure channel instead of the chat-room POST
-// channel (handleCommentMention doesn't accumulate replyText — Hermes answers via the
-// add_comment MCP tool directly, which this test does not need to observe beyond
-// counting failure-notice comments).
+// permission silently denied), or end on 'end_turn' without Hermes ever having called
+// add_comment (the exact "silent success" this ticket exists to close). This mirrors
+// hermes-chat-dispatch-success.test.mjs's stopReason-driven cases via the same real
+// RuntimeSupervisor + fake-acp-server.mjs fixture, but for the comment-mention path's
+// ticket-comment failure channel instead of the chat-room POST channel — and, since
+// handleCommentMention doesn't accumulate replyText (Hermes answers via the add_comment
+// MCP tool directly, not observed session deltas), the mocked ticket-fetch response
+// below stands in for "did the agent's own add_comment call actually land" the same way
+// permission_mode stands in for stopReason.
+//
+// Review round 1 caught that the first version of this file asserted 'end_turn' alone
+// was success, without the fake ACP ever calling add_comment — codifying the exact bug
+// this ticket fixes as a passing regression test. The fix (event-dispatcher.ts's
+// #reportHermesMentionOutcome calling rest.ts's hasAgentCommentSince) re-checks the
+// ticket's real comments after dispatch; these tests now drive that check explicitly via
+// the mocked GET instead of asserting on stopReason alone.
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const AGENT = 'agent-hermes-mention-outcome';
@@ -29,11 +37,21 @@ const TICKET = 'ticket-hermes-mention-outcome';
 let originalFetch;
 let mcpToolCalls;
 let addCommentContents;
+let ticketGetCount;
+/** 'never' — the mocked ticket GET never carries a reply from AGENT (simulates
+ *  Hermes never calling add_comment). 'after_first_get' — only GETs after the
+ *  first (i.e. the post-dispatch hasAgentCommentSince re-check; the first GET
+ *  is handleCommentMention's own pre-dispatch prompt-composition fetch, which
+ *  in any real sequence happens before Hermes could have replied) carry one —
+ *  simulates a genuine add_comment call landing during the dispatch. */
+let replyMode;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
   addCommentContents = [];
+  ticketGetCount = 0;
+  replyMode = 'never';
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
@@ -57,7 +75,18 @@ beforeEach(() => {
       }
       return new Response('', { status: 202 }); // notifications/initialized, etc.
     }
-    // REST GETs (fetchTicketContext 등): ok with an empty body.
+    if (target.includes('/api/agent/tickets/')) {
+      ticketGetCount += 1;
+      const includeReply = replyMode === 'after_first_get' && ticketGetCount > 1;
+      return new Response(
+        JSON.stringify({
+          comments: includeReply
+            ? [{ id: 'reply-1', author_id: AGENT, created_at: new Date().toISOString() }]
+            : [],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 });
@@ -126,21 +155,40 @@ function commentMentionEvent() {
 
 const countTool = (name) => mcpToolCalls.filter((n) => n === name).length;
 
-test('Hermes comment-mention dispatch that ends cleanly (stop=end_turn) posts no failure comment and clears the degraded signal', async (t) => {
+test('case 1: stop=end_turn WITH a genuine reply comment from the agent → success, no failure comment, degraded signal clears', async (t) => {
   const { dispatcher } = await harness(t, 'trusted');
+  replyMode = 'after_first_get';
   // Simulate a still-open degraded badge from an earlier failure — success must clear it.
   spawnFailureTracker.record({ cli: 'hermes', code: 'acp_timeout', message: 'prior failure' });
 
   await dispatcher.handleCommentMention(commentMentionEvent());
 
-  assert.equal(countTool('add_comment'), 0, 'a clean end_turn mention dispatch must not post a failure comment');
+  assert.equal(countTool('add_comment'), 0, 'a genuinely-answered end_turn mention dispatch must not post a failure comment');
+  assert.ok(ticketGetCount >= 2, 'expected both the pre-dispatch prompt fetch and the post-dispatch reply re-check');
 
   const snap = spawnFailureTracker.snapshot();
   assert.equal(snap.last_spawn_error_cli, null);
   assert.equal(snap.last_spawn_error, null);
 });
 
-test('Hermes comment-mention dispatch that resolves without a confirmed reply (stop=refusal) posts a visible ticket comment and records degraded', async (t) => {
+test('case 2: stop=end_turn but the agent never actually replied → treated as failure, NOT success (the bug this ticket fixes)', async (t) => {
+  const { dispatcher } = await harness(t, 'trusted');
+  // replyMode stays 'never' — the fake ACP ends cleanly (end_turn) but, like a
+  // real Hermes session whose add_comment call silently no-ops, never
+  // produces a new ticket comment.
+
+  await dispatcher.handleCommentMention(commentMentionEvent());
+
+  assert.equal(countTool('add_comment'), 1, 'an unanswered end_turn mention dispatch must post exactly one failure comment');
+  assert.match(addCommentContents[0], /Hermes 런타임 실행 실패/);
+  assert.match(addCommentContents[0], /hermes_mention_no_reply/);
+
+  const snap = spawnFailureTracker.snapshot();
+  assert.equal(snap.last_spawn_error_cli, 'hermes');
+  assert.match(snap.last_spawn_error || '', /hermes_mention_no_reply/);
+});
+
+test('case 3: stop=refusal (non-end_turn) → existing failure path, unaffected by the reply check', async (t) => {
   const { dispatcher } = await harness(t, 'strict');
 
   await dispatcher.handleCommentMention(commentMentionEvent());
@@ -148,6 +196,9 @@ test('Hermes comment-mention dispatch that resolves without a confirmed reply (s
   assert.equal(countTool('add_comment'), 1, 'a non-end_turn mention dispatch must post exactly one failure comment');
   assert.match(addCommentContents[0], /Hermes 런타임 실행 실패/);
   assert.match(addCommentContents[0], /refusal/);
+  // The reply check must never run for a non-end_turn stop — only one ticket
+  // GET (the pre-dispatch prompt-composition fetch) should have happened.
+  assert.equal(ticketGetCount, 1);
 
   const snap = spawnFailureTracker.snapshot();
   assert.equal(snap.last_spawn_error_cli, 'hermes');
