@@ -10,6 +10,7 @@ import { type ToolContext } from './tools';
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
+import { authenticateMcpRequest } from './shared/mcp-http-auth';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -43,40 +44,6 @@ import { GitHubConnectorService } from '../../services/github-connector.service'
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { ClassificationBridgeService } from '../outreach/classifier/classification-bridge.service';
-
-interface McpAuthInfo {
-  keyHint: string;
-  agentName?: string;
-  agentId?: string;
-  keyId?: string;
-  scope?: string;
-  workspaceId?: string;
-  source: 'db' | 'env' | 'dev-mode';
-}
-
-interface EnvKeyEntry {
-  key: string;
-  agentName?: string;
-}
-
-function loadEnvKeys(): EnvKeyEntry[] {
-  const raw = process.env.MCP_API_KEYS || '';
-  if (!raw.trim()) return [];
-  return raw.split(',').map(entry => {
-    const trimmed = entry.trim();
-    if (!trimmed) return null;
-    const colonIdx = trimmed.indexOf(':');
-    if (colonIdx > 0) {
-      return { agentName: trimmed.slice(0, colonIdx).trim(), key: trimmed.slice(colonIdx + 1).trim() };
-    }
-    return { key: trimmed };
-  }).filter(Boolean) as EnvKeyEntry[];
-}
-
-function maskKey(key: string): string {
-  if (key.length <= 12) return key.slice(0, 4) + '***';
-  return key.slice(0, 8) + '***' + key.slice(-4);
-}
 
 // Module-level log reference, set from McpController.onModuleInit
 let logService: LogService | null = null;
@@ -276,88 +243,10 @@ export class McpController implements OnModuleInit {
     return createMcpServerForContext(this.buildToolContext());
   }
 
-  private async authenticate(req: Request, res: Response): Promise<McpAuthInfo | null> {
-    const authHeader = req.headers['authorization'];
-    let token: string | undefined;
-    if (authHeader) {
-      token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim();
-    }
-    if (!token) token = req.headers['x-api-key'] as string | undefined;
-
-    if (token) {
-      // DB validation
-      try {
-        const dbResult = await this.apiKeyService.validateApiKey(token);
-        if (dbResult.valid && dbResult.apiKey) {
-          const ak = dbResult.apiKey;
-          return {
-            // ak.key is now a SHA-256 hash, not the raw key — use the stored
-            // display prefix for the hint.
-            keyHint: ak.key_prefix || 'awb_***',
-            agentName: ak.agent?.name,
-            agentId: ak.agent_id ?? undefined,
-            keyId: ak.id,
-            scope: ak.scope,
-            workspaceId: ak.workspace_id || undefined,
-            source: 'db',
-          };
-        }
-        if (dbResult.reason && dbResult.reason !== 'Key not found') {
-          res.status(403).json({ jsonrpc: '2.0', error: { code: -32002, message: `API key rejected: ${dbResult.reason}` }, id: null });
-          return null;
-        }
-      } catch (dbErr) {
-        mcpLogError('DB key validation failed', { error: String(dbErr) });
-      }
-
-      // ENV validation
-      const envKeys = loadEnvKeys();
-      const envMatch = envKeys.find(k => k.key === token);
-      if (envMatch) {
-        return { keyHint: maskKey(envMatch.key), agentName: envMatch.agentName, scope: 'full', source: 'env' };
-      }
-
-      res.status(403).json({ jsonrpc: '2.0', error: { code: -32002, message: 'Invalid API key.' }, id: null });
-      return null;
-    }
-
-    // No token - check dev mode
-    const envKeys = loadEnvKeys();
-    let dbKeyCount = 0;
-    try {
-      dbKeyCount = (await this.apiKeyService.listApiKeys()).filter((k: any) => k.is_active).length;
-    } catch (dbErr) {
-      mcpLogError('Failed to count DB keys', { error: String(dbErr) });
-    }
-
-    if (envKeys.length === 0 && dbKeyCount === 0) {
-      // HARD-gate the dev-mode fallback behind NODE_ENV !== 'production'. A
-      // fresh prod deploy with no keys yet must not expose full-scope MCP
-      // tooling unauthenticated just because MCP_DEV_MODE leaked into the
-      // environment (security finding: authz).
-      if (process.env.MCP_DEV_MODE === 'true' && process.env.NODE_ENV !== 'production') {
-        return { keyHint: 'dev-mode', scope: 'full', source: 'dev-mode' };
-      }
-      res.status(401).json({
-        jsonrpc: '2.0',
-        error: { code: -32001, message: 'No API keys configured. Create API keys or set MCP_DEV_MODE=true for development.' },
-        id: null,
-      });
-      return null;
-    }
-
-    res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Authentication required. Provide Authorization: Bearer <api-key> header.' },
-      id: null,
-    });
-    return null;
-  }
-
   @All('mcp')
   async handleMcp(@Req() req: Request, @Res() res: Response) {
     try {
-      const mcpAuthInfo = await this.authenticate(req, res);
+      const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError);
       if (!mcpAuthInfo) return; // Response already sent
 
       // Inject workspace_id from API key into request context for downstream use
