@@ -1469,17 +1469,69 @@ test('fallback mode a direct @[agent:id] mention (no role) is NOT suppressed by 
   await Promise.all([pTrigger, pMention]);
 });
 
-// 이 티켓의 fix가 닫지 않는, 받아들여진 잔여 gap을 기록한다(event-dispatcher.ts의
-// fallback 분기 코멘트, 그리고 그걸 위해 파일링한 ticket 13160d20 후속 참고):
-// InflightDispatchTracker에는 TicketSessionManager.attachDispatchPid 같은
-// pid-liveness 탈출구가 없어서, 오래 실행되는 one-shot이 점유한 fallback-모드
-// seat도 INFLIGHT_RESERVATION_STALE_MS가 지나면 age-out되어 이후 트리거가
-// 되찾아갈 수 있다 — handleTrigger 자신의 fallback 예약이 항상 겪어온 것과
-// 동일한 한계다(오히려 그쪽은 동기적인 spawn() 호출이 반환되는 즉시 풀리므로
-// 더 일찍 풀린다). 이것은 원하는 동작을 검증하는 테스트가 아니라 현재 동작을
-// 기록하는 characterization 테스트다 — 후속 작업이 fallback tracker에
-// pid-liveness parity를 추가하면 마지막 assertion을 `1`로 바꿀 것.
-test('fallback mode known gap (ticket 13160d20 follow-up): past the TTL, a column trigger CAN reclaim a fallback seat still held by a live mention one-shot', async () => {
+// ───────────── Part G round 2 (ticket fdf6714e, 13160d20 후속): fallback tracker pid-liveness parity ─────────────
+//
+// Part F round 3 gave the AUTHORITATIVE `_inflight` registry a pid-liveness
+// escape hatch (TicketSessionManager.attachDispatchPid + _isPidAlive) so a
+// long-running one-shot's reservation is never TTL-evicted while its process
+// stays alive. InflightDispatchTracker (the process-local registry fallback
+// mode — persistentTicketSessions:false — uses instead) had no equivalent: a
+// fallback seat still held by a live one-shot could be reclaimed by a later
+// trigger past INFLIGHT_RESERVATION_STALE_MS. The two direct tests below prove
+// InflightDispatchTracker.attachDispatchPid closes that gap on the tracker
+// itself (mirroring Part F's low-level round-3 tests); the end-to-end test
+// after them proves it through the real dispatcher.
+//
+// Non-vacuous: reverting the pid-liveness check in tryAcquireFallback's
+// existing-reservation branch (back to the bare age-based TTL) makes both
+// direct tests below fail, and flips the end-to-end test's final assertion
+// back from 1 to 2 (twin-spawn).
+
+test('fallback tracker: pid-verified reservation survives the TTL while the process stays alive (ticket fdf6714e)', () => {
+  withClock((advance) => {
+    const tracker = new InflightDispatchTracker();
+    const key = KEY('t', 'assignee', 'a');
+    const meta = { ticketId: 't', role: 'assignee', agentId: 'a' };
+    const child = spawnDummyChild();
+    try {
+      const r1 = tracker.tryAcquireFallback(key, meta);
+      assert.equal(r1.acquired, true);
+      tracker.attachDispatchPid(key, r1.nonce, child.pid);
+
+      advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+      const r2 = tracker.tryAcquireFallback(key, meta);
+      assert.equal(r2.acquired, false, 'a live pid overrides age-based eviction, even past the TTL');
+      assert.equal(r2.evicted, undefined, 'a confirmed-alive pid is never TTL evicted');
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+});
+
+test('fallback tracker: a pid-verified reservation whose process died without releasing is reclaimed immediately as dead_pid (ticket fdf6714e)', async () => {
+  const tracker = new InflightDispatchTracker();
+  const key = KEY('t', 'assignee', 'a');
+  const meta = { ticketId: 't', role: 'assignee', agentId: 'a' };
+  const child = spawnDummyChild();
+  const r1 = tracker.tryAcquireFallback(key, meta);
+  tracker.attachDispatchPid(key, r1.nonce, child.pid);
+
+  // Proves the check is pid-based, not age-based: refused even at ~0ms age
+  // because the pid is alive.
+  assert.equal(tracker.tryAcquireFallback(key, meta).acquired, false);
+
+  // The owning process is killed WITHOUT its onExit release running (a crash
+  // bypassing the normal releaseFallback path) — this must not wedge the seat
+  // for the full 10-minute TTL the way a bare (no-pid) hang would.
+  child.kill('SIGKILL');
+  await waitFor(() => isDead(child.pid), { timeoutMs: 3000 });
+
+  const reclaimed = tracker.tryAcquireFallback(key, meta);
+  assert.equal(reclaimed.acquired, true, 'a confirmed-dead pid is reclaimed immediately, no TTL wait needed');
+  assert.equal(reclaimed.evicted, 'dead_pid', 'evicted for the dead-pid reason, distinct from a bare TTL evict');
+});
+
+test('fallback mode (ticket 13160d20 follow-up, closed by fdf6714e): past the TTL, a column trigger can NO LONGER reclaim a fallback seat still held by a live mention one-shot', async () => {
   const { dispatcher, calls } = makeDispatcher({ persistent: false });
 
   await dispatcher.handleCommentMention(mentionEvJson());
@@ -1495,8 +1547,8 @@ test('fallback mode known gap (ticket 13160d20 follow-up): past the TTL, a colum
   }
   assert.equal(
     calls.spawn.length,
-    2,
-    'known gap: unlike the authoritative path, the fallback seat has no pid-liveness escape and was reclaimed past the TTL',
+    1,
+    'fixed: the mention attached its one-shot\'s pid to the fallback seat, so the column trigger found it still alive past the TTL and stayed suppressed — no twin',
   );
 });
 
