@@ -24,6 +24,26 @@ on:
     branches:
       - main
 
+# 최소권한 GITHUB_TOKEN (2026-08-12 의존성 감사에서 발견).
+#
+# `permissions:` 블록이 없으면 잡의 GITHUB_TOKEN 은 **저장소 기본값**을 물려받는다.
+# 기본값이 "read and write" 인 저장소에서는 이 워크플로의 모든 잡이 contents/packages/
+# issues 등에 write 가능한 토큰을 들고 돌게 된다. 이 워크플로가 하는 일을 보면 그게
+# 왜 위험한지 분명하다 — `npm ci` 로 서드파티 의존성의 install script 를 실행하고
+# (허용목록: esbuild/fsevents/@scarf/scarf), PR 브랜치에서 온 전체 테스트 스위트를
+# 실행한다. 즉 **신뢰할 수 없는 코드가 write 토큰과 같은 프로세스 트리에 있다.**
+# 의존성 하나가 탈취되면 그 install script 가 $GITHUB_TOKEN 으로 main 에 푸시하거나
+# 릴리스를 조작할 수 있고, 그건 publish 워크플로를 통해 fleet 전체로 번진다.
+#
+# 이 워크플로의 어떤 잡도 쓰기를 하지 않는다 — checkout / setup-node / npm ci /
+# build / test 뿐이고 secrets 도 참조하지 않는다. 따라서 `contents: read` 하나면
+# 충분하고(=checkout 에 필요한 최소), 명시하지 않은 나머지 스코프는 전부 none 으로
+# 떨어진다. 저장소 기본값이 나중에 바뀌어도 이 선언이 이겨서 blast radius 가 고정된다.
+# (발행 측 publish-agent-manager.yml 은 릴리스 태그 push + provenance 때문에
+#  contents:write + id-token:write 가 실제로 필요하며, 이미 명시돼 있다.)
+permissions:
+  contents: read
+
 jobs:
   # Fast static guard — runs everywhere, no DB. Catches the bare-join regression
   # class deterministically in seconds.

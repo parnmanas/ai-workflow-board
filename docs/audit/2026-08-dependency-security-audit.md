@@ -561,3 +561,81 @@ SHA 고정 — 잘못된 SHA 는 실배포 파이프라인을 깨므로 여전�
 > **참고:** 이 커밋은 `publish-agent-manager.yml` 을 건드리므로 워크플로의 `paths`
 > 필터에 걸려 `main` 랜딩 시 publish 가 1회 트리거된다(버전 자동 계산). 이는 이
 > 저장소의 정상 동작이며, 그 run 이 곧 provenance 변경의 실검증이 된다.
+
+---
+
+## 2026-08-12 재감사 — CI 워크플로 GITHUB_TOKEN 최소권한 누락
+
+### 결론
+
+`npm audit` 기준 취약점은 **`main` · 배포 브랜치 · 발행 패키지 모두 0건**이고, 종전 조치
+(`npm ci` 설치 경로, lockfile 무결성, scarf opt-out, npm provenance)는 전부 유지되고 있다.
+이번 조치 대상은 **패키지 버전이 아니라 그 패키지들을 설치·실행하는 CI 잡의 권한**이다.
+
+### 발견 — `ci.yml` 에 `permissions:` 블록이 없었다
+
+`permissions:` 를 선언하지 않은 워크플로의 `GITHUB_TOKEN` 은 **저장소 기본 설정**을
+물려받는다. 기본값이 "read and write" 인 저장소에서는 `ci.yml` 의 5개 잡 전부가
+contents/packages 등에 쓰기 가능한 토큰을 들고 돌게 된다.
+
+이 워크플로가 무엇을 실행하는지가 문제다:
+
+- `npm ci` — 서드파티 의존성의 install script 실행(`esbuild`/`fsevents`/`@scarf/scarf`)
+- `apps/server` 전체 스위트 · agent-manager 전체 스위트 · client 스위트 — **PR 브랜치의 코드**
+- 트리거에 `pull_request` 포함
+
+즉 **신뢰할 수 없는 코드가 쓰기 토큰과 같은 프로세스 트리 안에 있었다.** 의존성 하나가
+탈취되면 그 install script 가 `$GITHUB_TOKEN` 으로 `main` 을 밀거나 릴리스를 조작할 수 있고,
+`main` push 는 `publish-agent-manager.yml` 을 트리거해 npm 으로, 다시 live host 의
+`npm i -g` self-update 를 통해 fleet 전체로 번진다. 지금까지의 감사가 공들여 막아온
+공급망 경로(provenance·lockfile 무결성)를 **우회하는** 경로였다.
+
+이 저장소의 발행 워크플로는 이미 최소권한을 지키고 있었다(`contents: write` +
+`id-token: write`, 태그 push 와 provenance 때문에 실제로 필요). 소비 측 `ci.yml` 만
+빠져 있었다.
+
+### 조치
+
+1. `.github/workflows/ci.yml` 에 top-level `permissions: contents: read` 선언.
+   명시하지 않은 나머지 스코프는 전부 `none` 으로 떨어진다. `ci.yml` 의 어떤 잡도
+   쓰기를 하지 않고 secrets 도 참조하지 않으므로 동작 변화는 없다. 저장소 기본값이
+   나중에 바뀌어도 이 선언이 이겨서 blast radius 가 파일 안에 고정된다 — 저장소 설정은
+   코드 리뷰에 잡히지 않으므로 방어는 워크플로 파일에 있어야 한다.
+2. `apps/server/test/supply-chain-integrity-guard.test.mjs` 에 assert 3건 추가(9 → 12):
+   - 모든 워크플로가 `permissions:` 를 명시할 것 (주석 안의 `permissions:` 는 불인정)
+   - `ci.yml` 은 top-level `contents: read` 로 고정 + write 스코프 0건
+   - `ci.yml` 이 secrets 를 참조하기 시작하면 실패 — `pull_request` 워크플로가 secrets 를
+     다루기 시작하면 이 read-only 판단 자체를 재검토해야 하기 때문
+
+### 감사 범위 및 결과
+
+- **캐너리** (`lodash@4.17.4` → critical 1건): advisory 경로 정상 동작 확인 후에만 0건을 신뢰.
+- **`npm audit` (`main`)**: 0건 (prod 270 / dev 308 / optional 63, 총 579).
+- **`awb-agent-manager` 독립 트리**(실제 발행되는 그 패키지): 135 의존성, **0건**.
+- **lockfile 580 엔트리 전수**: registry 외부 resolve 0건, `integrity` 누락 0건,
+  install script 는 허용목록과 정확히 일치.
+- **발행 provenance 유지 확인**: `awb-agent-manager@1.6.97` 이
+  `attestations.provenance` (SLSA v1) 보유 — 2026-08-10 조치가 계속 살아 있다.
+- **`npm audit signatures`**: 검증 실패 0건 (단 이 명령은 트리 전체가 아니라 서명이
+  게시된 일부만 감사한다 — "전수 검증" 으로 읽지 말 것).
+- **배포 브랜치 (`production.private`)**: `package.json` · `package-lock.json` ·
+  `Dockerfile` 모두 `main` 과 **바이트 동일**(양 스테이지 `npm ci` 유지).
+  `apps/server/package.json` 차이는 테스트 등록 목록뿐 — 의존성 변경 없음.
+  나머지 차이는 미머지 기능(CI red 감시)과 `deploy.yml` 로 보안 무관.
+- **이번 변경은 배포 브랜치에 머지하지 않았다.** 바뀐 것은 `main` 전용 CI 워크플로와
+  테스트뿐이고 런타임 산출물 영향이 0이다 — NAS 실배포를 유발할 이유가 없다.
+
+### 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
+SHA 고정. 잘못된 SHA 는 실배포 파이프라인을 깨고, 그 브랜치 push 자체가 실배포를
+트리거하므로 여전히 승인 대기.
+
+### 검증
+
+- `node --test apps/server/test/supply-chain-integrity-guard.test.mjs` — **12/12 통과**.
+  `ci.yml` 수정을 되돌리면 **새 assert 정확히 2건만** 실패하는 것까지 확인(가드가 실제로 문다).
+- `node --test apps/client/test/react-router-rsc-guard.test.mjs` — 6/6 통과.
+- 워크플로 YAML 파싱 확인: `ci.yml` → `{contents: read}`, 잡 5개 그대로.
+  `publish-agent-manager.yml` → `{contents: write, id-token: write}` 변동 없음.
+- 이 커밋은 `publish-agent-manager.yml` 을 건드리지 않으므로 publish 를 트리거하지 않는다.

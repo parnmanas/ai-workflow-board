@@ -221,6 +221,79 @@ test('publish workflow grants the id-token permission provenance requires', () =
   );
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. CI 토큰 blast radius — 모든 워크플로는 permissions 를 명시해야 한다
+// ─────────────────────────────────────────────────────────────────────────────
+
+// (2026-08-12 감사에서 발견: ci.yml 에 permissions 블록이 아예 없었다.)
+//
+// `permissions:` 가 없는 워크플로의 GITHUB_TOKEN 은 저장소 기본값을 물려받는다.
+// 기본값이 read-write 인 저장소에서 ci.yml 은 `npm ci`(서드파티 install script) 와
+// PR 브랜치 테스트 코드를 write 토큰과 같은 프로세스 트리에서 돌리게 된다 —
+// 의존성 하나만 탈취돼도 main push / 릴리스 조작이 가능해진다.
+//
+// 저장소 설정(기본 권한)은 이 저장소 밖에서 바뀔 수 있고 코드 리뷰에도 안 잡히므로,
+// 방어는 반드시 워크플로 파일 안에 선언으로 박혀 있어야 한다.
+
+const WORKFLOW_DIR = path.join(REPO_ROOT, '.github', 'workflows');
+
+test('guard actually has workflows to scan', () => {
+  const files = fs.readdirSync(WORKFLOW_DIR).filter((f) => /\.ya?ml$/.test(f));
+  assert.ok(
+    files.length > 0,
+    `no workflow files found under ${WORKFLOW_DIR} — this guard has gone stale`,
+  );
+});
+
+test('every GitHub Actions workflow declares an explicit permissions block', () => {
+  const files = fs.readdirSync(WORKFLOW_DIR).filter((f) => /\.ya?ml$/.test(f));
+
+  // 주석 안의 `permissions:` 가 통과시키면 안 된다. top-level(들여쓰기 없음) 또는
+  // job-level(들여쓰기 있음) 어느 쪽이든 실제 선언이면 인정한다.
+  const missing = files.filter((f) => {
+    const yaml = stripYamlComments(fs.readFileSync(path.join(WORKFLOW_DIR, f), 'utf8'));
+    return !/^\s*permissions:\s*$/m.test(yaml);
+  });
+
+  assert.deepEqual(
+    missing,
+    [],
+    'these workflows declare no `permissions:` block, so their GITHUB_TOKEN silently inherits the ' +
+      'repository default (write-capable on many repos) while running untrusted dependency install ' +
+      `scripts and PR code — declare least privilege explicitly: ${missing.join(', ')}`,
+  );
+});
+
+test('the CI workflow keeps its GITHUB_TOKEN read-only', () => {
+  const yaml = stripYamlComments(fs.readFileSync(path.join(WORKFLOW_DIR, 'ci.yml'), 'utf8'));
+
+  assert.match(
+    yaml,
+    /^permissions:\n\s+contents:\s*read\s*$/m,
+    'ci.yml must pin `permissions: contents: read` at the top level — it runs `npm ci` (third-party ' +
+      'install scripts) and full test suites from PR branches, so its token must not be able to write',
+  );
+
+  // read 로 고정한 의미가 사라지므로 어떤 스코프도 write 여선 안 된다.
+  const writeScopes = yaml
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^[a-z-]+:\s*write$/.test(l));
+  assert.deepEqual(
+    writeScopes,
+    [],
+    `ci.yml grants write scopes (${writeScopes.join(', ')}); no job in it writes anything — ` +
+      'if a job genuinely needs write, scope it to that job rather than the whole workflow',
+  );
+
+  // 쓰기 권한이 필요해지는 유일한 이유는 secrets 사용인데, 이 워크플로는 쓰지 않는다.
+  assert.ok(
+    !/secrets\./.test(yaml),
+    'ci.yml now references a secret — re-evaluate this read-only guard, since a workflow that ' +
+      'handles secrets on `pull_request` is exposed to PR-authored code',
+  );
+});
+
 // npm 은 provenance 발급 전에 package.json 의 repository URL 이 실제 빌드 중인
 // 저장소와 일치하는지 확인한다. 불일치하면 publish 가 깨진다.
 test('agent-manager package.json declares the repository provenance verifies against', () => {
