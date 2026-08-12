@@ -21,32 +21,38 @@
  *     purpose. If a future edit ever drops the per-file check (the exact
  *     failure mode d6b56237 fixed), this still catches it.
  *   - Tools NOT in the table but named like a destructive operation
- *     (`delete_*` / `revoke_*`) fall back to a safe default tier.
+ *     (`delete_*` / `revoke_*`) fall back to a safe default tier — this
+ *     remains 'caller' deliberately, see DEFAULT_DESTRUCTIVE_TIER below.
  *   - Every OTHER tool name is checked against KNOWN_EXISTING_TOOLS, a
  *     snapshot of every tool that existed when this gate was written. A name
  *     in the snapshot passes through untouched (today's ~163 non-tabled,
  *     non-destructive-looking tools keep their exact current behavior — this
  *     gate does not re-audit them, that stays out of this ticket's scope).
- *     A name NOT in the snapshot — i.e. a tool that did not exist yet — gets
- *     DEFAULT_UNCLASSIFIED_TIER instead of running completely ungated.
+ *     A name NOT in the snapshot — i.e. a tool that did not exist yet — is
+ *     UNCLASSIFIED_TIER ('deny'): rejected unconditionally, before the
+ *     handler runs, independent of caller identity or scope.
  *
- *     This last branch is what review round 1 found missing: the original
- *     version of this file only caught a future admin tool if its name
- *     happened to start with `delete_` / `revoke_`. A tool named
- *     `rotate_credential`, `grant_admin_role`, `set_user_role`, or
- *     `purge_workspace_secrets` matched neither TOOL_AUTHZ_TABLE nor
- *     DESTRUCTIVE_NAME_PATTERN and fell through to `null` — fully ungated,
- *     the exact failure mode this ticket exists to close. The snapshot
- *     inverts the default for anything outside today's known surface: an
- *     unrecognized name is now guilty (gated) until a maintainer
- *     consciously adds it to KNOWN_EXISTING_TOOLS (if it's safe) or
- *     TOOL_AUTHZ_TABLE (if it needs a specific tier), rather than innocent
- *     (ungated) until someone happens to notice. The completeness guard in
- *     `test/mcp-tool-authz.test.mjs` fails the build the moment a real tool
- *     name drifts out of sync with this snapshot, so that decision can't be
- *     silently skipped — but the runtime default here is the actual
- *     security boundary; the test is a hygiene aid on top of it, not a
- *     substitute for it.
+ *     This last branch is what review round 1 found missing entirely (the
+ *     original version of this file only caught a future admin tool if its
+ *     name happened to start with `delete_` / `revoke_` — anything else,
+ *     e.g. `rotate_credential` / `grant_admin_role` / `set_user_role` /
+ *     `purge_workspace_secrets`, fell through to `null` and ran completely
+ *     ungated) and what review round 2 found still under-strict: the branch
+ *     existed but resolved to the 'caller' tier, an identity floor rather
+ *     than a deny — any session with a resolvable caller reached the
+ *     handler regardless of scope ('read' was enough for an unclassified
+ *     admin-grade tool). An allowlist gate has to default-deny an
+ *     unclassified name outright, not merely require *some* caller. The
+ *     snapshot inverts the default for anything outside today's known
+ *     surface: an unrecognized name is now guilty (denied) until a
+ *     maintainer consciously adds it to KNOWN_EXISTING_TOOLS (if it's safe)
+ *     or TOOL_AUTHZ_TABLE (if it needs a specific tier), rather than
+ *     innocent (ungated, or merely identity-gated) until someone happens to
+ *     notice. The completeness guard in `test/mcp-tool-authz.test.mjs` fails
+ *     the build the moment a real tool name drifts out of sync with this
+ *     snapshot, so that decision can't be silently skipped — but the
+ *     runtime default here is the actual security boundary; the test is a
+ *     hygiene aid on top of it, not a substitute for it.
  *
  * Tier semantics reuse shared/authz.ts exactly so behavior never diverges
  * from what the per-file gates already enforce:
@@ -59,14 +65,18 @@
  *                update_user already use — safe as a universal default
  *                because every legitimately authenticated session already
  *                has one by the time a tool handler runs; it only rejects
- *                sessionless / stale / malformed calls. Both
- *                DEFAULT_DESTRUCTIVE_TIER and DEFAULT_UNCLASSIFIED_TIER use
- *                'caller' rather than 'full' for the same reason the
- *                original delete_* / revoke_* fallback did: we have no
- *                evidence a brand-new tool actually needs full scope, and
- *                defaulting to 'full' would risk breaking a legitimate new
- *                lower-privilege tool. 'caller' is the floor every
- *                genuinely authenticated session already clears.
+ *                sessionless / stale / malformed calls. DEFAULT_DESTRUCTIVE_TIER
+ *                uses 'caller' rather than 'full' for the same reason the
+ *                original delete_* / revoke_* fallback did: today's ~16
+ *                uncovered delete_* tools run with zero caller check today,
+ *                and defaulting them straight to full-scope-required would
+ *                be a production-breaking behavior change out of this
+ *                ticket's scope (see "범위가 아닌 것"). This does NOT apply to
+ *                UNCLASSIFIED_TIER — a name that isn't even delete_ / revoke_
+ *                shaped has no such existing-behavior constraint to preserve,
+ *                so it denies outright instead of picking a floor.
+ *   - 'deny'   → (UNCLASSIFIED_TIER) rejected unconditionally; caller/scope
+ *                is never consulted. See the branch discussion above.
  *
  * Deliberately NOT tiered here (left to their existing per-file logic):
  * update_workspace (a workspace-bound non-full-scope caller is intentionally
@@ -153,10 +163,11 @@ const DEFAULT_DESTRUCTIVE_TIER: AuthzTier = 'caller';
  * A name in this set is pre-existing and out of this ticket's audit scope —
  * resolveAuthzTier returns null (untouched), exactly like before review
  * round 2. A name NOT in this set is either a typo or a tool that did not
- * exist when this snapshot was taken; either way it gets
- * DEFAULT_UNCLASSIFIED_TIER instead of a free pass. See the file-level
- * comment above for why this exists and `test/mcp-tool-authz.test.mjs`'s
- * completeness guard for how drift against the real tool surface is caught.
+ * exist when this snapshot was taken; either way it gets UNCLASSIFIED_TIER
+ * ('deny', unconditional — not a caller/scope floor, see review round 3)
+ * instead of a free pass. See the file-level comment above for why this
+ * exists and `test/mcp-tool-authz.test.mjs`'s completeness guard for how
+ * drift against the real tool surface is caught.
  */
 export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'add_board_lesson', 'add_chat_message_attachment', 'add_chat_participants',
@@ -211,28 +222,43 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Safe universal floor for a tool name that is neither tabled, nor
- * destructive-looking, nor present in KNOWN_EXISTING_TOOLS — i.e. it did not
- * exist when this gate was last synced with the real tool surface. Same
- * 'caller' rationale as DEFAULT_DESTRUCTIVE_TIER (see file header): no
- * evidence the new tool needs full scope, so 'caller' is the safe floor
- * rather than a guess.
+ * A tool name that is neither tabled, nor destructive-looking, nor present
+ * in KNOWN_EXISTING_TOOLS did not exist when this gate was last synced with
+ * the real tool surface — i.e. it is a genuinely new registration nobody has
+ * consciously classified yet. Review round 2 found this branch defaulting to
+ * a 'caller' tier, which is an identity floor, not a deny: any session with
+ * a resolvable caller — regardless of scope ('read' is enough) — reached the
+ * handler. That is not the fail-closed behavior an allowlist requires. This
+ * branch now resolves to 'deny' unconditionally, independent of caller/scope,
+ * so a brand-new tool is unreachable until a maintainer consciously adds it
+ * to KNOWN_EXISTING_TOOLS (if it's safe to leave ungated) or
+ * TOOL_AUTHZ_TABLE (if it needs a specific tier).
  */
-export const DEFAULT_UNCLASSIFIED_TIER: AuthzTier = 'caller';
+export const UNCLASSIFIED_TIER = 'deny';
 
-/** Resolves the tier a tool name must satisfy, or null if this gate does not apply to it. */
-export function resolveAuthzTier(toolName: string): AuthzTier | null {
+/**
+ * Resolves the tier a tool name must satisfy: an AuthzTier to check against
+ * the caller, 'deny' to reject unconditionally before the handler ever runs
+ * (regardless of caller identity or scope), or null if this gate does not
+ * apply to the name at all (KNOWN_EXISTING_TOOLS / untabled non-destructive
+ * names — unchanged, existing behavior).
+ */
+export function resolveAuthzTier(toolName: string): AuthzTier | typeof UNCLASSIFIED_TIER | null {
   const mapped = TOOL_AUTHZ_TABLE[toolName];
   if (mapped) return mapped;
   if (DESTRUCTIVE_NAME_PATTERN.test(toolName)) return DEFAULT_DESTRUCTIVE_TIER;
-  return KNOWN_EXISTING_TOOLS.has(toolName) ? null : DEFAULT_UNCLASSIFIED_TIER;
+  return KNOWN_EXISTING_TOOLS.has(toolName) ? null : UNCLASSIFIED_TIER;
 }
 
 async function checkAuthzTier(
-  tier: AuthzTier,
+  tier: AuthzTier | typeof UNCLASSIFIED_TIER,
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
 ): Promise<string | null> {
+  if (tier === UNCLASSIFIED_TIER) {
+    return 'Unauthorized: this tool is not classified in the MCP authorization gate — '
+      + 'add it to TOOL_AUTHZ_TABLE or KNOWN_EXISTING_TOOLS in shared/tool-authz-gate.ts before it can be called.';
+  }
   if (tier === 'full') {
     return requireFullScopeCaller(dataSource, caller);
   }

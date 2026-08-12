@@ -796,17 +796,26 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.equal(resolveAuthzTier('revoke_some_future_credential'), 'caller');
   });
 
-  it('falls back to the caller tier for an unknown tool whose name does NOT match delete_*/revoke_* either (review round 1 gap)', () => {
-    // The original version of this gate only caught a future admin tool if
-    // its name happened to start with delete_/revoke_ — anything else
-    // (create_*, update_*, set_*, grant_*, rotate_*, purge_*, ...) resolved
-    // to null and ran completely unchecked. KNOWN_EXISTING_TOOLS closes
-    // that: none of these names exist today, so none are in the snapshot.
-    assert.equal(resolveAuthzTier('rotate_credential'), 'caller');
-    assert.equal(resolveAuthzTier('grant_admin_role'), 'caller');
-    assert.equal(resolveAuthzTier('set_user_role'), 'caller');
-    assert.equal(resolveAuthzTier('purge_workspace_secrets'), 'caller');
-    assert.equal(resolveAuthzTier('impersonate_user'), 'caller');
+  it('denies unconditionally for an unknown tool whose name does NOT match delete_*/revoke_* either (review round 1 gap, tightened in round 2)', () => {
+    // Round 1: the original gate only caught a future admin tool if its name
+    // happened to start with delete_/revoke_ — anything else (create_*,
+    // update_*, set_*, grant_*, rotate_*, purge_*, ...) resolved to null and
+    // ran completely unchecked.
+    //
+    // Round 2: the fix for that (KNOWN_EXISTING_TOOLS) resolved these to the
+    // 'caller' tier — an identity floor, not a deny. Any session with a
+    // resolvable caller reached the handler regardless of scope, so a
+    // read-scoped key could still call an unclassified admin-grade tool like
+    // rotate_credential. resolveAuthzTier must return the 'deny' sentinel
+    // instead, so installToolAuthzGate rejects before the handler runs no
+    // matter what caller/scope is presented — see the
+    // 'installToolAuthzGate: unclassified tools deny regardless of caller'
+    // block below for the end-to-end proof across all four caller states.
+    assert.equal(resolveAuthzTier('rotate_credential'), 'deny');
+    assert.equal(resolveAuthzTier('grant_admin_role'), 'deny');
+    assert.equal(resolveAuthzTier('set_user_role'), 'deny');
+    assert.equal(resolveAuthzTier('purge_workspace_secrets'), 'deny');
+    assert.equal(resolveAuthzTier('impersonate_user'), 'deny');
   });
 
   it('does not gate non-destructive-looking tool names that are on the known-existing snapshot', () => {
@@ -917,11 +926,12 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const { fakeServer, tools } = makeGatedFakeServer();
     let handlerRan = false;
     // 'list_users' is a real, pre-existing, non-tabled tool name — it must
-    // stay exactly as ungated as it was before review round 2. (A made-up
-    // name like 'list_something_new' is no longer a valid fixture for this
-    // assertion: it is NOT on KNOWN_EXISTING_TOOLS, so it would now be
-    // gated by DEFAULT_UNCLASSIFIED_TIER — see the "review round 1 gap"
-    // tests below for that behavior.)
+    // stay exactly as ungated as before. (A made-up name like
+    // 'list_something_new' is no longer a valid fixture for this assertion:
+    // it is NOT on KNOWN_EXISTING_TOOLS, so it would now be denied outright
+    // by UNCLASSIFIED_TIER — see the
+    // 'installToolAuthzGate: unclassified tools deny regardless of caller'
+    // block below for that behavior across all caller states.)
     fakeServer.tool('list_users', 'test', {}, async () => {
       handlerRan = true;
       return { content: [{ type: 'text', text: '{"success":true}' }] };
@@ -932,41 +942,56 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.equal(handlerRan, true);
   });
 
-  it('blocks an unmapped, non-delete/revoke-named tool (review round 1 gap) from a sessionless caller', async () => {
-    const { fakeServer, tools } = makeGatedFakeServer();
-    let handlerRan = false;
-    fakeServer.tool('rotate_credential', 'test', {}, async () => {
-      handlerRan = true;
-      return { content: [{ type: 'text', text: '{"success":true}' }] };
+  // ─── Review round 2 (comment on ticket 838f43c4): round 1's fix resolved
+  // an unmapped, non-delete/revoke-named tool to the 'caller' tier — an
+  // identity floor, not a deny. Any session with a resolvable caller reached
+  // the handler regardless of scope, so 'read' was enough to call an
+  // unclassified admin-grade tool. These four cases must ALL end with
+  // handlerRan=false: no session, read scope, write scope, and even a
+  // full-scope caller — an unclassified name is denied unconditionally,
+  // independent of caller identity or scope. Only explicit classification
+  // (TOOL_AUTHZ_TABLE or KNOWN_EXISTING_TOOLS) can make the call succeed. ───
+
+  describe('installToolAuthzGate: unclassified tools deny regardless of caller', () => {
+    async function assertDenied(auth) {
+      const { fakeServer, tools } = makeGatedFakeServer();
+      let handlerRan = false;
+      fakeServer.tool('rotate_credential', 'test', {}, async () => {
+        handlerRan = true;
+        return { content: [{ type: 'text', text: '{"success":true}' }] };
+      });
+
+      let extra = {};
+      let cleanup = () => {};
+      if (auth) {
+        const agent = auth.workspaceId !== undefined ? await makeAgent(auth.workspaceId) : null;
+        const sessionId = `session-${randomUUID()}`;
+        cleanup = registerSession(sessionId, { ...auth, agentId: agent?.id });
+        extra = { sessionId };
+      }
+
+      const result = await tools.rotate_credential.handler({}, extra);
+      cleanup();
+
+      assert.equal(result.isError, true);
+      assert.equal(handlerRan, false, 'an unclassified tool must deny before the handler runs');
+    }
+
+    it('(1) no session at all', async () => {
+      await assertDenied(null);
     });
 
-    const result = await tools.rotate_credential.handler({}, {});
-    assert.equal(result.isError, true);
-    assert.equal(handlerRan, false, 'the central gate must short-circuit before the handler body runs even for a name outside delete_*/revoke_*');
-  });
-
-  it('allows an unmapped, non-delete/revoke-named tool through the unclassified floor once ANY caller is resolvable, regardless of scope', async () => {
-    const { fakeServer, tools } = makeGatedFakeServer();
-    let handlerRan = false;
-    fakeServer.tool('rotate_credential', 'test', {}, async () => {
-      handlerRan = true;
-      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    it('(2) read-scoped caller', async () => {
+      await assertDenied({ workspaceId: 'workspace-a', scope: 'read', source: 'db' });
     });
 
-    // Deliberately read-scoped, not full — DEFAULT_UNCLASSIFIED_TIER is
-    // 'caller' (identity-only), not 'full' (scope-checked), by design: see
-    // the file header for why a brand-new tool defaults to the same floor
-    // as the delete_*/revoke_* fallback rather than a scope guess.
-    const agent = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: agent.id, workspaceId: 'workspace-a', scope: 'read', source: 'db',
+    it('(3) write-scoped caller', async () => {
+      await assertDenied({ workspaceId: 'workspace-a', scope: 'write', source: 'db' });
     });
-    const result = await tools.rotate_credential.handler({}, { sessionId });
-    cleanup();
 
-    assert.equal(result.isError, undefined);
-    assert.equal(handlerRan, true);
+    it('(4) full-scope, DB-backed, agent-bound caller — the strongest caller this gate ever accepts for a tabled tool', async () => {
+      await assertDenied({ workspaceId: 'workspace-a', scope: 'full', source: 'db' });
+    });
   });
 
   it('wires correctly through a real tool file (registerUserTools) — central gate covers delete_user even standalone', async () => {
