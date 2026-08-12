@@ -82,9 +82,9 @@ test('buildOneshotSpawn adds ticket attribution as a self-contained TOML config 
   const configIndex = descriptor.args.indexOf('-c');
   assert.ok(configIndex >= 0);
   const override = descriptor.args[configIndex + 1];
-  // The override now assigns the WHOLE `mcp_servers.awb` table (not just
-  // `.http_headers`) so it stays valid whether the CLI merges or replaces
-  // the table on `-c` — see the wholesale-replace regression test below.
+  // 이제 오버라이드는 (`.http_headers` 만이 아니라) `mcp_servers.awb`
+  // 테이블 전체를 할당한다 — CLI 가 `-c` 로 테이블을 병합하든 치환하든
+  // 유효하도록. 아래 wholesale-replace 회귀 테스트 참고.
   const prefix = 'mcp_servers.awb=';
   assert.ok(override.startsWith(prefix));
   const table = parse(`awb = ${override.slice(prefix.length)}`).awb;
@@ -98,13 +98,13 @@ test('buildOneshotSpawn adds ticket attribution as a self-contained TOML config 
 });
 
 test('buildOneshotSpawn override survives CLI wholesale-replace semantics, not just merge (ticket 702d0ebe: snap codex-cli 0.114.0 regression)', async () => {
-  // Incident repro: `-c mcp_servers.awb.http_headers=…` (dotted-path
-  // override) assumes Codex table-*merges* the override into the file's
-  // `awb` entry. codex-cli 0.146.0 does; the stale snap 0.114.0 that won
-  // PATH lookup on the live host instead *replaces* `mcp_servers.awb`
-  // wholesale, dropping `url` and aborting config load with
-  // `invalid transport in mcp_servers.awb`. The override must be a
-  // complete, self-sufficient table so it is valid under EITHER semantics.
+  // 인시던트 재현: `-c mcp_servers.awb.http_headers=…` (dotted-path
+  // 오버라이드)는 Codex 가 오버라이드를 파일의 `awb` 엔트리에 *병합*한다고
+  // 가정한다. codex-cli 0.146.0 은 그렇지만, 라이브 호스트에서 PATH
+  // lookup 을 이긴 구버전 snap 0.114.0 은 대신 `mcp_servers.awb` 를
+  // 통째로 *치환*해 `url` 이 사라지고 `invalid transport in
+  // mcp_servers.awb` 로 config 로드가 중단된다. 오버라이드는 병합/치환
+  // 어느 시맨틱에서도 유효하도록 완전하고 자기충족적인 테이블이어야 한다.
   const cliHomeDir = await freshDir();
   await fsp.writeFile(
     join(cliHomeDir, 'config.toml'),
@@ -128,8 +128,8 @@ test('buildOneshotSpawn override survives CLI wholesale-replace semantics, not j
   const override = descriptor.args[configIndex + 1];
   const value = override.slice(override.indexOf('=') + 1);
 
-  // Simulate a CLI that *replaces* mcp_servers.awb wholesale with only what
-  // the -c override carries — nothing merged in from the file.
+  // -c 오버라이드가 담은 내용만으로 mcp_servers.awb 를 통째로 *치환*하는
+  // CLI 를 시뮬레이션한다 — 파일에서 병합되는 내용은 없다.
   const wholesaleConfig = parse(`[mcp_servers]\nawb = ${value}\n`);
   assert.doesNotThrow(() =>
     validateCodexMcpServers(wholesaleConfig, join(cliHomeDir, 'config.toml')),
