@@ -91,3 +91,47 @@ test('resolveCliBin: the codexBin sentinel default ("codex") is ignored, same as
   assert.equal(withSentinel, withoutOverride);
   _resetResolverCache();
 });
+
+test('resolveCliBin hot-reload: override set/change/remove takes effect on the very next call, WITHOUT resetting the cache', () => {
+  // 리뷰 지적(ce65cf25 라운드1): 캐시가 cliType으로만 키잉되면 codex가 한 번
+  // resolve된 뒤 reload_config/SIGHUP으로 delegation.codexBin을 설정·변경·
+  // 해제해도 다음 spawn까지 stale 캐시가 계속 반환됐다. 위의 다른 테스트들은
+  // 매번 _resetResolverCache() 후 override를 넣어 이 실패를 가렸으므로, 이
+  // 테스트는 의도적으로 리셋 없이 연속 호출만으로 hot-reload 시나리오를
+  // 재현한다.
+  _resetResolverCache();
+
+  // 1) override 없이 한 번 resolve해 "no override" 캐시 엔트리를 채운다.
+  const noOverride = resolveCliBin('codex');
+
+  // 2) delegation.codexBin을 새 절대경로로 설정(reload_config 시뮬레이션) →
+  //    리셋 없이 재호출해도 stale 캐시가 아니라 새 override 값을 즉시 반영.
+  const overrideA = resolveCliBin('codex', '/custom/reload-a/codex');
+  assert.equal(overrideA, '/custom/reload-a/codex');
+  assert.notEqual(overrideA, noOverride);
+
+  // 3) override 값을 다시 변경해도(리셋 없이) 최신 값을 반영해야 한다 — 첫
+  //    override에 고착되면 안 된다.
+  const overrideB = resolveCliBin('codex', '/custom/reload-b/codex');
+  assert.equal(overrideB, '/custom/reload-b/codex');
+
+  // 4) override 제거(override 없이 재호출) → 원래의 no-override 결과로
+  //    정확히 복귀해야 한다 — 제거 후에도 override 캐시가 새면 안 된다.
+  const afterRemoval = resolveCliBin('codex');
+  assert.equal(afterRemoval, noOverride);
+
+  _resetResolverCache();
+});
+
+test('resolveCliBin hot-reload: removing an override via the sentinel default resolves identically to true no-override, without a cache reset', () => {
+  _resetResolverCache();
+  const noOverride = resolveCliBin('codex');
+  resolveCliBin('codex', '/custom/reload-c/codex');
+  // 오퍼레이터가 codexBin을 지우면 config 병합이 delegation.codexBin을
+  // sentinel 기본값("codex")으로 되돌린다 — configured==='codex'는 ct와
+  // 같아 "override 없음"과 동일하게 취급되고, 리셋 없이도 원래 결과로
+  // 복귀해야 한다.
+  const afterSentinelReset = resolveCliBin('codex', 'codex');
+  assert.equal(afterSentinelReset, noOverride);
+  _resetResolverCache();
+});

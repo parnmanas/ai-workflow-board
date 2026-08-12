@@ -149,13 +149,19 @@ function parentExeMatching(nameRegex: RegExp): string | null {
   }
 }
 
+// ct 만으로 키잉하면, 오퍼레이터가 reload_config/SIGHUP으로 delegation.*Bin을
+// 바꿔도(설정·변경·해제) 해당 CLI가 이미 한 번 resolve된 뒤에는 stale 캐시가
+// 계속 반환돼 "재기동 없는 고정"이 첫 spawn 이후엔 조용히 무시됐다(리뷰 지적,
+// ticket ce65cf25). effective override(대체 CLI 이름으로 새는 값은 무시한
+// 후의 실질 override)까지 키에 포함해, override 값이 달라지면 다음 spawn부터
+// 캐시 미스로 새 값을 즉시 반영하고, override를 제거하면 원래의 no-override
+// 키로 돌아가 정상 탐색(또는 그 키의 기존 캐시)으로 복귀한다.
 const cache = new Map<string, string>();
 
 export function resolveCliBin(cliType: string, configured?: string | null): string {
   const ct = String(cliType || 'claude').toLowerCase();
-  const cached = cache.get(ct);
-  if (cached) return cached;
 
+  let effectiveOverride: string | null = null;
   if (configured && configured !== ct) {
     // Defense: if `configured` is the literal name of a *different* known
     // CLI (e.g. "claude" passed for codex), it's almost certainly the
@@ -167,16 +173,24 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
         `[cli-resolver:${ct}] ignoring configured="${configured}" — it names a different known CLI; falling through to lookup`,
       );
     } else {
-      cache.set(ct, configured);
-      log(`[cli-resolver:${ct}] using configured path: ${configured}`);
-      return configured;
+      effectiveOverride = configured;
     }
+  }
+
+  const key = `${ct}:${effectiveOverride ?? ''}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+
+  if (effectiveOverride) {
+    cache.set(key, effectiveOverride);
+    log(`[cli-resolver:${ct}] using configured path: ${effectiveOverride}`);
+    return effectiveOverride;
   }
 
   if (ct === 'claude') {
     const viaParent = parentExeMatching(/claude/i);
     if (viaParent) {
-      cache.set(ct, viaParent);
+      cache.set(key, viaParent);
       log(`[cli-resolver:claude] resolved via parent /proc/${process.ppid}/exe: ${viaParent}`);
       return viaParent;
     }
@@ -214,7 +228,7 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
 
   const sources = orderResolutionSources(wellKnown, pathHits);
   const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable });
-  cache.set(ct, picked.bin);
+  cache.set(key, picked.bin);
   if (picked.kind === 'literal') {
     log(
       `[cli-resolver:${ct}] resolution failed; falling back to literal "${ct}" (expect ENOENT unless PATH is set)`,
