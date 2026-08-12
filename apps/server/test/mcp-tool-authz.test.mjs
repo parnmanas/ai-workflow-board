@@ -36,6 +36,7 @@ import { registerWorkspaceTools } from '../dist/modules/mcp/tools/workspace-tool
 
 import { ApiKeyService } from '../dist/services/api-key.service.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
+import { installToolAuthzGate, resolveAuthzTier, TOOL_AUTHZ_TABLE } from '../dist/modules/mcp/shared/tool-authz-gate.js';
 
 describe('MCP tool authorization (ticket d6b56237)', () => {
   let dataSource;
@@ -694,5 +695,223 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, undefined);
     const body = JSON.parse(result.content[0].text);
     assert.equal(body.agent_id, linked.id);
+  });
+});
+
+// ─── Central gate (ticket 838f43c4, follow-up to d6b56237) ───
+//
+// d6b56237 fixed four specific tool files after they shipped with zero
+// caller-identity checks. The structural hole stayed open: registerAllTools
+// (tools/index.ts) auto-discovers every *-tools.ts file by filename
+// convention alone, so a fifth admin-grade file added tomorrow would ship
+// exposed the exact same way. These tests exercise installToolAuthzGate
+// directly — the wrapper that now runs inside registerAllTools before any
+// tool file's own handler — rather than the per-file logic covered above.
+
+describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
+  let dataSource;
+
+  before(async () => {
+    dataSource = new DataSource({
+      type: 'sqljs',
+      entities: [Agent],
+      synchronize: true,
+      logging: false,
+    });
+    await dataSource.initialize();
+  });
+
+  after(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  async function makeAgent(workspaceId) {
+    const repo = dataSource.getRepository(Agent);
+    return repo.save(repo.create({
+      name: `agent-${randomUUID().slice(0, 8)}`,
+      type: 'claude',
+      workspace_id: workspaceId ?? '',
+    }));
+  }
+
+  function registerSession(sessionId, auth) {
+    const transport = { close: async () => {} };
+    sessionStore.register(sessionId, transport, {}, auth);
+    return () => sessionStore.remove(sessionId);
+  }
+
+  function makeGatedFakeServer() {
+    const tools = {};
+    const fakeServer = {
+      tool(name, description, schema, handler) {
+        tools[name] = { description, schema, handler };
+      },
+    };
+    installToolAuthzGate(fakeServer, dataSource);
+    return { fakeServer, tools };
+  }
+
+  // ─── resolveAuthzTier: pure mapping unit tests ───
+
+  it('maps the d6b56237 role/credential/cascade tools to their verified tier', () => {
+    assert.equal(resolveAuthzTier('delete_user'), 'full');
+    assert.equal(resolveAuthzTier('create_agent'), 'full');
+    assert.equal(resolveAuthzTier('update_agent'), 'full');
+    assert.equal(resolveAuthzTier('delete_agent'), 'full');
+    assert.equal(resolveAuthzTier('delete_workspace'), 'full');
+    assert.equal(resolveAuthzTier('create_user'), 'caller');
+    assert.equal(resolveAuthzTier('update_user'), 'caller');
+    assert.equal(resolveAuthzTier('create_api_key'), 'caller');
+    assert.equal(resolveAuthzTier('update_api_key'), 'caller');
+    assert.equal(resolveAuthzTier('revoke_api_key'), 'caller');
+    assert.equal(resolveAuthzTier('delete_api_key'), 'caller');
+  });
+
+  it('falls back to the caller tier for existing delete_* tools outside the explicit table', () => {
+    // These ship today with zero caller-identity check in their own handler
+    // (confirmed by reading source, not inferred from tests) — the fallback
+    // is what now covers them without touching each tool file.
+    const uncoveredDeleteTools = [
+      'delete_board', 'delete_action', 'delete_ticket', 'delete_qa_scenario',
+      'delete_security_profile', 'delete_child_ticket', 'delete_qa_schedule',
+      'delete_workspace_schedule', 'delete_security_schedule', 'delete_ticket_attachment',
+      'delete_function', 'delete_channel', 'delete_resource', 'delete_column',
+      'delete_prompt_template', 'delete_chat_message_attachment',
+    ];
+    for (const name of uncoveredDeleteTools) {
+      assert.equal(resolveAuthzTier(name), 'caller', `${name} should fall back to 'caller'`);
+      assert.equal(TOOL_AUTHZ_TABLE[name], undefined, `${name} should rely on the fallback, not an explicit table entry`);
+    }
+  });
+
+  it('falls back to the caller tier for a tool name that does not exist yet (the actual "5th admin file" case)', () => {
+    assert.equal(resolveAuthzTier('delete_some_future_admin_resource'), 'caller');
+    assert.equal(resolveAuthzTier('revoke_some_future_credential'), 'caller');
+  });
+
+  it('does not gate non-destructive-looking tool names', () => {
+    assert.equal(resolveAuthzTier('list_users'), null);
+    assert.equal(resolveAuthzTier('get_ticket'), null);
+    assert.equal(resolveAuthzTier('create_ticket'), null);
+  });
+
+  it('leaves update_workspace and move_agent_to_workspace to their own nuanced per-file logic', () => {
+    // update_workspace intentionally allows a workspace-bound NON-full-scope
+    // caller; move_agent_to_workspace only gates when dry_run=false. A
+    // static per-name tier would misgate both, so neither is in the table —
+    // and neither matches the delete_* / revoke_* fallback pattern, so
+    // neither is touched by the fallback either.
+    assert.equal(resolveAuthzTier('update_workspace'), null);
+    assert.equal(resolveAuthzTier('move_agent_to_workspace'), null);
+  });
+
+  // ─── installToolAuthzGate: end-to-end wrapping behavior ───
+
+  it('blocks a table-tiered ("full") tool BEFORE its own handler runs, even if that handler forgot its own check', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('delete_user', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const result = await tools.delete_user.handler({ user_id: 'x' }, {});
+    assert.equal(result.isError, true);
+    assert.equal(handlerRan, false, 'the central gate must short-circuit before the handler body runs');
+  });
+
+  it('lets a full-scope caller reach the handler for a "full"-tiered tool', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('delete_user', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const agent = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agent.id, workspaceId: 'workspace-a', scope: 'full', source: 'db',
+    });
+    const result = await tools.delete_user.handler({ user_id: 'x' }, { sessionId });
+    cleanup();
+
+    assert.equal(result.isError, undefined);
+    assert.equal(handlerRan, true);
+  });
+
+  it('rejects a "full"-tiered tool call from a non-full-scope caller even when the handler has no check of its own', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    fakeServer.tool('delete_agent', 'test', {}, async () => (
+      { content: [{ type: 'text', text: '{"success":true}' }] }
+    ));
+
+    const agent = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agent.id, workspaceId: 'workspace-a', scope: 'write', source: 'db',
+    });
+    const result = await tools.delete_agent.handler({ agent_id: 'x' }, { sessionId });
+    cleanup();
+
+    assert.equal(result.isError, true);
+  });
+
+  it('blocks an unmapped delete_* tool (simulating a brand-new admin file) from a sessionless caller via the fallback tier', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('delete_something_nobody_has_written_yet', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const result = await tools.delete_something_nobody_has_written_yet.handler({}, {});
+    assert.equal(result.isError, true);
+    assert.equal(handlerRan, false);
+  });
+
+  it('allows an unmapped delete_* tool through the fallback tier once the caller is resolvable', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('delete_something_nobody_has_written_yet', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const agent = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agent.id, workspaceId: 'workspace-a', scope: 'read', source: 'db',
+    });
+    const result = await tools.delete_something_nobody_has_written_yet.handler({}, { sessionId });
+    cleanup();
+
+    assert.equal(result.isError, undefined);
+    assert.equal(handlerRan, true);
+  });
+
+  it('does not gate a non-destructive-looking tool at all, even for a sessionless caller', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('list_something_new', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const result = await tools.list_something_new.handler({}, {});
+    assert.equal(result.isError, undefined);
+    assert.equal(handlerRan, true);
+  });
+
+  it('wires correctly through a real tool file (registerUserTools) — central gate covers delete_user even standalone', async () => {
+    const tools = {};
+    const fakeServer = { tool(name, description, schema, handler) { tools[name] = { handler }; } };
+    installToolAuthzGate(fakeServer, dataSource);
+
+    const noopLogger = { info() {}, warn() {}, error() {} };
+    registerUserTools(fakeServer, { dataSource, logger: noopLogger });
+
+    const result = await tools.delete_user.handler({ user_id: 'nonexistent' }, {});
+    assert.equal(result.isError, true);
   });
 });
