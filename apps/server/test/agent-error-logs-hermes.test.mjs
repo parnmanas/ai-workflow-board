@@ -54,7 +54,7 @@ test('Hermes error-log entry survives POST /api/agent/error-logs → GET (agent-
     }),
   });
   const uploadBody = await uploadRes.text();
-  assert.equal(uploadRes.status, 200, `error-log upload should 200: ${uploadBody}`);
+  assert.equal(uploadRes.status, 201, `error-log upload should 201: ${uploadBody}`);
   assert.equal(JSON.parse(uploadBody).accepted, 1);
 
   // Read side 1 — agent-key auth (what an external automation script realistically holds).
