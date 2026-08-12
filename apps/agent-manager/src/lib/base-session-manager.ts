@@ -294,6 +294,14 @@ export interface InflightReservation {
    *  CAS(nonce 일치 시에만 삭제)하면 옛 세대의 지연 release 는 no-op 가 된다 —
    *  세션 seat 의 taskToken CAS 와 동일한 패턴(ticket 1fcba693). */
   nonce?: string;
+  /** ticket e90294e7 round 3: 이 예약을 실제로 보유 중인 프로세스의 OS pid.
+   *  provisioning 창(아직 프로세스가 없는 짧은 구간)은 비워두고, 프로세스가
+   *  뜬 뒤(예: comment_mention one-shot 의 spawn() 이 pid 를 반환한 시점)
+   *  주입된다. 채워지면 TTL/safety-valve 나이 기반 회수 대신 OS 레벨 liveness
+   *  probe(`_isPidAlive`)가 좀비 판정을 대신한다 — one-shot 이 몇 분이고
+   *  실행 중이어도(원래 TTL 은 짧은 provisioning 창 전용으로 설계됨) 살아있는
+   *  한 회수되지 않는다. */
+  pid?: number;
 }
 
 /** 프로비저닝→spawn 예약이 이 시간을 넘겨 살아있으면 좀비로 판정한다.

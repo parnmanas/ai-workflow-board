@@ -178,8 +178,14 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
     {
       canSpawn: () => true,
       async spawn(spec) {
-        calls.spawn.push(spec);
-        return { spawned: true, pid: 4242 };
+        // A REAL child (not a fake pid number) so tryReserveDispatch's
+        // OS-level liveness probe (round 3, ticket e90294e7) sees a genuinely
+        // alive process, matching production where SubagentManager.spawn()
+        // always forks a real one-shot. spawnDummyChild() is tracked in
+        // liveChildren and hard-killed by the suite's `after()`.
+        const child = spawnDummyChild();
+        calls.spawn.push({ ...spec, pid: child.pid });
+        return { spawned: true, pid: child.pid };
       },
     };
   const managedAgentContexts = {
@@ -1225,6 +1231,107 @@ test('reverse order (round 2): once the mention\'s one-shot exits (onExit fires)
   // stale reservation the mention forgot to release.
   await dispatcher.handleTrigger(evJson());
   assert.equal(mgr.spawnCount, 1, 'the seat was released on the one-shot\'s exit, so the later trigger dispatched normally');
+});
+
+// ───── Part F round 3 (reviewer 지적, e90294e7): a long-running one-shot outlives the TTL/safety-valve ─────
+//
+// Round 2 holds the claimed seat in the SAME `_inflight` map the column-move
+// path's provisioning reservation uses — but that map's zombie recovery
+// (INFLIGHT_RESERVATION_STALE_MS 10min TTL, INFLIGHT_SUPPRESS_SAFETY_VALVE
+// after INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS 5min) was calibrated for the
+// short provisioning window (seconds), not a one-shot mention session that may
+// run many minutes of real agentic work. Without a fix, a one-shot older than
+// the TTL — or hit by 3 suppressed retries past the 5-min gate — has its
+// "provisioning" reservation reclaimed by a later trigger even though the
+// process never released it, twin-spawning right on top of the still-running
+// one-shot: round 2's bug again, just arriving late instead of immediately.
+//
+// Fix: once handleCommentMention's spawn() resolves with a real pid, it
+// promotes the reservation via attachDispatchPid so tryReserveDispatch trusts
+// an OS-level liveness probe (_isPidAlive) instead of age for the rest of that
+// pid's life — only the pid's own release (onExit) or CONFIRMED death (a new
+// 'dead_pid' evicted reason, a stronger-than-timer backstop for a crash that
+// bypasses onExit) frees the seat.
+//
+// Non-vacuous: reverting the pid-liveness check in tryReserveDispatch's
+// existing-reservation branch (back to the bare age-based TTL/safety-valve)
+// makes the first two tests below fail — the reservation gets evicted despite
+// the process being alive — and the third test's spawnCount/spawn-count
+// assertions flip from 0/1 to 1/2 (twin-spawn).
+
+test('pid-verified reservation survives TTL + safety-valve while the process stays alive (round 3)', () => {
+  withClock(() => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    const child = spawnDummyChild();
+    try {
+      const r1 = mgr.tryReserveDispatch('t', 'assignee', 'a');
+      assert.equal(r1.acquired, true);
+      mgr.attachDispatchPid('t', 'assignee', 'a', r1.nonce, child.pid);
+
+      // Past BOTH the safety-valve min-age gate and the full TTL, repeatedly —
+      // a bare (no-pid) reservation would already have been force-evicted by
+      // the very first of these retries.
+      for (let i = 0; i < INFLIGHT_SUPPRESS_SAFETY_VALVE + 3; i++) {
+        const r = mgr.tryReserveDispatch('t', 'assignee', 'a');
+        assert.equal(r.acquired, false, `attempt #${i + 1} stays refused — a live pid overrides age-based eviction`);
+        assert.equal(r.evicted, undefined, 'a confirmed-alive pid is never TTL/safety-valve evicted');
+      }
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+});
+
+test('a pid-verified reservation whose process died without releasing is reclaimed immediately as dead_pid — not wedged for the TTL (round 3 backstop)', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const child = spawnDummyChild();
+  const r1 = mgr.tryReserveDispatch('t', 'assignee', 'a');
+  mgr.attachDispatchPid('t', 'assignee', 'a', r1.nonce, child.pid);
+
+  // Proves the check is pid-based, not age-based: refused even at ~0ms age
+  // because the pid is alive.
+  assert.equal(mgr.tryReserveDispatch('t', 'assignee', 'a').acquired, false);
+
+  // The owning process is killed WITHOUT its onExit release running (a crash
+  // bypassing the normal round-2 release path) — this must not wedge the
+  // ticket for the full 10-minute TTL the way a bare (no-pid) hang would.
+  child.kill('SIGKILL');
+  await waitFor(() => isDead(child.pid), { timeoutMs: 3000 });
+
+  const reclaimed = mgr.tryReserveDispatch('t', 'assignee', 'a');
+  assert.equal(reclaimed.acquired, true, 'a confirmed-dead pid is reclaimed immediately, no TTL wait needed');
+  assert.equal(reclaimed.evicted, 'dead_pid', 'evicted for the dead-pid reason, distinct from stale/safety_valve');
+});
+
+test('reverse order + long-running one-shot (round 3): past the TTL/safety-valve window while still alive, a column-move trigger for the same seat stays suppressed — total spawns stays 1', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  // The default subagentManager stub spawns a REAL dummy child (see
+  // makeDispatcher above), so its pid is genuinely alive at the OS level —
+  // exercising the actual attachDispatchPid wiring in handleCommentMention,
+  // not a synthetic pid.
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  // Role-mention arrives first (the real da4358ee ordering) and claims the seat.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1, 'the mention claimed the seat and spawned its one-shot');
+  assert.equal(mgr._isPidAlive(calls.spawn[0].pid), true, "sanity: the one-shot's real child is alive");
+
+  // Fast-forward past both the safety-valve min-age gate and the full TTL
+  // while the one-shot is STILL running and has released nothing — the exact
+  // fake-clock scenario the reviewer asked for.
+  const realNow = Date.now;
+  Date.now = () => realNow() + INFLIGHT_RESERVATION_STALE_MS + 5 * 60_000;
+  try {
+    // The SAME reviewer comment's column move now lands for the identical
+    // seat. Pre-round-3 this reservation was purely age-based, so this
+    // trigger would find it "aged out" and twin-spawn a persistent session
+    // right on top of the still-running one-shot.
+    await dispatcher.handleTrigger(evJson());
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(mgr.spawnCount, 0, 'the persistent column-triggered session did not twin-spawn — the live one-shot still owns the seat');
+  assert.equal(calls.spawn.length, 1, 'total one-shot spawns across both dispatch paths stays at 1');
 });
 
 function isDead(pid) {

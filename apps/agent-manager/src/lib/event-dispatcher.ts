@@ -606,8 +606,10 @@ export interface DispatchReservation {
   /** 좀비 예약을 강제 회수하고 이 dispatch 가 새 예약을 잡았다는 신호
    *  (ticket 7c3ba9cf). 'stale' = TTL(`INFLIGHT_RESERVATION_STALE_MS`) 초과
    *  예약을 evict, 'safety_valve' = TTL 미도달이나 연속 억제가 임계에 도달해
-   *  강제 해제. dispatcher 는 이때 티켓에 경고를 남긴다. 정상 취득이면 undefined. */
-  evicted?: 'stale' | 'safety_valve';
+   *  강제 해제, 'dead_pid' = pid 부착된 예약의 소유 프로세스가 OS 레벨에서
+   *  이미 종료됨을 확인해 즉시 회수(ticket e90294e7 round 3). dispatcher 는
+   *  이때 티켓에 경고를 남긴다. 정상 취득이면 undefined. */
+  evicted?: 'stale' | 'safety_valve' | 'dead_pid';
   /** generation nonce (ticket 26a92722). 예약이 실제로 배치된 경우(acquired &&
    *  !live)에만 채워진다. dispatcher 는 이 값을 finally 의 releaseDispatch 에
    *  그대로 넘겨, 이 예약이 이후 evict 되고 슬롯이 재예약된 뒤 지연 도착한
@@ -636,6 +638,14 @@ export interface TicketSessionManager {
    *  현재 예약의 nonce 와 일치할 때만 삭제하는 CAS 가 적용된다 — evict 된 좀비
    *  홀더의 지연 release 가 새 예약을 지우는 no-op 이 되도록. */
   releaseDispatch?(ticketId: string, role: string, agentId: string, nonce?: string): void;
+  /** ticket e90294e7 round 3 — promote a provisioning reservation to a
+   *  pid-verified one once a caller's spawn() resolves with a real OS pid, so
+   *  tryReserveDispatch's zombie recovery trusts an OS-level liveness probe
+   *  instead of the provisioning-window TTL/safety-valve for the remainder of
+   *  that process's lifetime. Nonce-CAS guarded like releaseDispatch. Optional
+   *  so a minimal/legacy contract (or test fake) that omits it just keeps
+   *  today's TTL-only behavior. */
+  attachDispatchPid?(ticketId: string, role: string, agentId: string, nonce: string | undefined, pid: number): void;
   /** targetAgentId — comment_mention 이벤트의 수신 agent(per-agent 스코프).
    *  식별되면 그 agent 의 세션에만 주입하고, 라이브 세션이 없으면 false 를
    *  반환해 one-shot 스폰 경로를 살린다(멘션 swallow/오배달 방지, T7 리뷰 #3). */
@@ -3141,6 +3151,15 @@ export class EventDispatcher {
           });
           if (result.spawned) {
             mentionSeatTransferred = !!mentionSeat;
+            // ticket e90294e7 round 3: promote the claimed seat from a bare
+            // provisioning-window reservation to a pid-verified one now that
+            // we have the one-shot's real OS pid — from here on
+            // tryReserveDispatch trusts _isPidAlive over the TTL/safety-valve
+            // aged out for a long-running one-shot (see ticket-session-
+            // manager.ts). onExit (above) still releases it on exit either way.
+            if (seat && result.pid) {
+              this.#ticketSessionManager?.attachDispatchPid?.(ticketId, seat.role, seat.agentId, seat.nonce, result.pid);
+            }
             log(
               `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
             );

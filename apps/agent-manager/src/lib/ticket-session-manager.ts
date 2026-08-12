@@ -233,6 +233,36 @@ export class TicketSessionManager
     //      still climbing past MIN_AGE is a genuine zombie, never a live provision.
     const existing = this._inflight.get(key);
     if (existing) {
+      // ticket e90294e7 round 3: a reservation with an attached pid is held for
+      // a SPAWNED PROCESS'S FULL LIFETIME (round 2's comment_mention one-shot,
+      // kept alive via SubagentSpawnArgs.onExit), not the short provisioning
+      // window the TTL/safety-valve below were calibrated for (seconds, at
+      // most a few minutes for a large clone). Blindly aging out a
+      // pid-verified reservation would let a later trigger steal the seat out
+      // from under a genuinely still-running one-shot and twin-spawn — the
+      // same bug round 2 fixed, just manifesting after the TTL/valve window
+      // instead of immediately. An OS-level liveness probe is authoritative
+      // and needs no guessed timeout: while the pid is alive, this reservation
+      // is NEVER TTL/safety-valve evicted — only the pid's own release
+      // (onExit) or confirmed death (below) frees the seat.
+      if (existing.pid != null) {
+        if (this._isPidAlive(existing.pid)) {
+          return { acquired: false, live: false };
+        }
+        // pid attached but confirmed dead at the OS level — the owner
+        // crashed/was killed without its onExit release running. A
+        // stronger-than-timer signal, so evict immediately instead of
+        // waiting out the TTL (a real backstop, distinct from the no-pid
+        // provisioning-hang path below).
+        const nonce = randomUUID();
+        log(
+          `[ticket-session] tryReserveDispatch evicted DEAD-PID reservation key=${key} ` +
+            `pid=${existing.pid} — 소유 프로세스 종료 확인, 재-dispatch 허용`,
+        );
+        this.#reserveSuppress.delete(key);
+        this._inflight.set(key, { agentId: agentId || '', ticketId, reservedAt: Date.now(), nonce });
+        return { acquired: true, live: false, evicted: 'dead_pid', nonce };
+      }
       const age = Date.now() - (existing.reservedAt ?? 0);
       if (age >= INFLIGHT_RESERVATION_STALE_MS) {
         const nonce = randomUUID();
@@ -295,6 +325,31 @@ export class TicketSessionManager
     }
     this._inflight.delete(key);
     this.#reserveSuppress.delete(key);
+  }
+
+  /** ticket e90294e7 round 3: promote a provisioning reservation to a
+   *  pid-verified one once the caller's spawn() resolves with a real OS pid —
+   *  called by EventDispatcher.handleCommentMention right after its one-shot
+   *  spawn succeeds, so tryReserveDispatch's zombie recovery switches from
+   *  the provisioning-window TTL/safety-valve to an authoritative OS-level
+   *  liveness probe for the one-shot's remaining (possibly many-minute)
+   *  lifetime. Nonce-CAS guarded like releaseDispatch (ticket 26a92722): if
+   *  the reservation was evicted and re-claimed by a new generation between
+   *  tryReserveDispatch and this call, attaching the old caller's pid to the
+   *  successor's reservation would be wrong, so a nonce mismatch is a no-op. */
+  attachDispatchPid(
+    ticketId: string,
+    role: string,
+    agentId: string,
+    nonce: string | undefined,
+    pid: number,
+  ): void {
+    if (!pid || pid <= 0) return;
+    const key = this.#makeKey(ticketId, role || '', agentId || '');
+    const existing = this._inflight.get(key);
+    if (!existing) return;
+    if (nonce !== undefined && existing.nonce !== nonce) return;
+    existing.pid = pid;
   }
 
   /** Read-only peek for a DIFFERENT dispatch path (ticket e90294e7) — the
