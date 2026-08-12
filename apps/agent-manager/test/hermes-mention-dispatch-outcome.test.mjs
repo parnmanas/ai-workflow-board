@@ -25,10 +25,15 @@ import { spawnFailureTracker } from '../dist/lib/spawn-failure-tracker.js';
 //
 // Review round 1 caught that the first version of this file asserted 'end_turn' alone
 // was success, without the fake ACP ever calling add_comment — codifying the exact bug
-// this ticket fixes as a passing regression test. The fix (event-dispatcher.ts's
-// #reportHermesMentionOutcome calling rest.ts's hasAgentCommentSince) re-checks the
-// ticket's real comments after dispatch; these tests now drive that check explicitly via
-// the mocked GET instead of asserting on stopReason alone.
+// this ticket fixes as a passing regression test.
+//
+// Review round 2 caught that the round-1 fix (a `created_at >= dispatchStartedAt -
+// 5s` cutoff) had its own false positive: if the SAME agent already had a comment on
+// the ticket from just before dispatch started, it would fall inside the clock-skew
+// buffer and be mistaken for this dispatch's reply. The fix (event-dispatcher.ts's
+// #reportHermesMentionOutcome calling rest.ts's hasNewAgentComment) now diffs against
+// the exact comment-id set seen on the PRE-dispatch ticket fetch instead of any
+// timestamp window. Case 4 below pins down exactly the scenario round 2 found.
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const AGENT = 'agent-hermes-mention-outcome';
@@ -38,20 +43,22 @@ let originalFetch;
 let mcpToolCalls;
 let addCommentContents;
 let ticketGetCount;
-/** 'never' — the mocked ticket GET never carries a reply from AGENT (simulates
- *  Hermes never calling add_comment). 'after_first_get' — only GETs after the
- *  first (i.e. the post-dispatch hasAgentCommentSince re-check; the first GET
- *  is handleCommentMention's own pre-dispatch prompt-composition fetch, which
- *  in any real sequence happens before Hermes could have replied) carry one —
- *  simulates a genuine add_comment call landing during the dispatch. */
-let replyMode;
+/** Comments already on the ticket BEFORE dispatch — the pre-dispatch fetch
+ *  (prompt composition) and, when replyAppears is false, every later fetch
+ *  too return exactly this array. */
+let priorComments;
+/** Whether a genuinely NEW comment from AGENT (an id not in priorComments)
+ *  appears on ticket-GETs after the first — simulates a real add_comment
+ *  call landing during the dispatch. */
+let replyAppears;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
   addCommentContents = [];
   ticketGetCount = 0;
-  replyMode = 'never';
+  priorComments = [];
+  replyAppears = false;
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
@@ -77,13 +84,11 @@ beforeEach(() => {
     }
     if (target.includes('/api/agent/tickets/')) {
       ticketGetCount += 1;
-      const includeReply = replyMode === 'after_first_get' && ticketGetCount > 1;
+      const comments = replyAppears && ticketGetCount > 1
+        ? [...priorComments, { id: 'reply-new-1', author_id: AGENT, created_at: new Date().toISOString() }]
+        : priorComments;
       return new Response(
-        JSON.stringify({
-          comments: includeReply
-            ? [{ id: 'reply-1', author_id: AGENT, created_at: new Date().toISOString() }]
-            : [],
-        }),
+        JSON.stringify({ comments }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }
@@ -155,9 +160,9 @@ function commentMentionEvent() {
 
 const countTool = (name) => mcpToolCalls.filter((n) => n === name).length;
 
-test('case 1: stop=end_turn WITH a genuine reply comment from the agent → success, no failure comment, degraded signal clears', async (t) => {
+test('case 1: stop=end_turn WITH a genuine new reply comment from the agent → success, no failure comment, degraded signal clears', async (t) => {
   const { dispatcher } = await harness(t, 'trusted');
-  replyMode = 'after_first_get';
+  replyAppears = true;
   // Simulate a still-open degraded badge from an earlier failure — success must clear it.
   spawnFailureTracker.record({ cli: 'hermes', code: 'acp_timeout', message: 'prior failure' });
 
@@ -171,11 +176,11 @@ test('case 1: stop=end_turn WITH a genuine reply comment from the agent → succ
   assert.equal(snap.last_spawn_error, null);
 });
 
-test('case 2: stop=end_turn but the agent never actually replied → treated as failure, NOT success (the bug this ticket fixes)', async (t) => {
+test('case 2: stop=end_turn but the agent never actually replied (no prior comments either) → treated as failure, NOT success', async (t) => {
   const { dispatcher } = await harness(t, 'trusted');
-  // replyMode stays 'never' — the fake ACP ends cleanly (end_turn) but, like a
-  // real Hermes session whose add_comment call silently no-ops, never
-  // produces a new ticket comment.
+  // priorComments stays [] and replyAppears stays false — the fake ACP ends
+  // cleanly (end_turn) but, like a real Hermes session whose add_comment
+  // call silently no-ops, never produces a new ticket comment.
 
   await dispatcher.handleCommentMention(commentMentionEvent());
 
@@ -203,4 +208,25 @@ test('case 3: stop=refusal (non-end_turn) → existing failure path, unaffected 
   const snap = spawnFailureTracker.snapshot();
   assert.equal(snap.last_spawn_error_cli, 'hermes');
   assert.match(snap.last_spawn_error || '', /refusal/);
+});
+
+test('case 4 (review round 2): stop=end_turn, agent has a PRE-EXISTING comment from just before dispatch, but no genuinely new one → still failure', async (t) => {
+  const { dispatcher } = await harness(t, 'trusted');
+  // The agent already has a comment on this ticket — e.g. its reply to an
+  // earlier, unrelated mention — created moments before this dispatch even
+  // started. replyAppears stays false: nothing new lands during THIS
+  // dispatch. A timestamp-window check with any clock-skew buffer would
+  // mistake this old comment for evidence of a reply; the id-diff must not.
+  priorComments = [
+    { id: 'old-reply-1', author_id: AGENT, created_at: new Date(Date.now() - 2_000).toISOString() },
+  ];
+
+  await dispatcher.handleCommentMention(commentMentionEvent());
+
+  assert.equal(countTool('add_comment'), 1, 'a pre-existing comment must not be mistaken for this dispatch\'s reply');
+  assert.match(addCommentContents[0], /hermes_mention_no_reply/);
+
+  const snap = spawnFailureTracker.snapshot();
+  assert.equal(snap.last_spawn_error_cli, 'hermes');
+  assert.match(snap.last_spawn_error || '', /hermes_mention_no_reply/);
 });
