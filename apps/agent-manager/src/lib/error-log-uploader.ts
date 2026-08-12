@@ -47,6 +47,13 @@ export function classify(
     return { level: 'error', category: 'subagent' };
   if (/^Hermes .* dispatch failed closed:/.test(msg))
     return { level: 'error', category: 'hermes' };
+  // ticket c0c0b1e4: #resolveAgentContext(...)/#resolveAgentContextFromMembers(...)
+  // returning undefined for a genuinely-registered-but-not-bootstrapped managed
+  // agent (manager-restart rehydration miss, etc.) used to fall through to a
+  // "dropped (no delegation path)" line this classifier never matched — a fully
+  // silent drop. event-dispatcher.ts now tags that specific case so it surfaces here.
+  if (/agent context unresolved \(registered but not bootstrapped/.test(msg))
+    return { level: 'error', category: 'agent-context' };
 
   // 구조화된 성공/무실패 신호는 아래 느슨한 catch-all 보다 우선한다. 멀쩡한
   // 로그도 "error"/"failed" 부분문자열을 포함할 수 있다:

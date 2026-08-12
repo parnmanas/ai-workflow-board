@@ -164,6 +164,37 @@ test('Hermes trigger dispatch fail-closed (pre-existing ticket-trigger path, unc
   );
 });
 
+// ── agent context miss (ticket c0c0b1e4) → error/agent-context ──────────
+// event-dispatcher.ts#reportAgentContextMiss() 가 registered-but-not-bootstrapped
+// (rehydration 미스 등) 케이스에서 남기는 태그 라인이 admin Agent Logs 뷰어에서
+// catch-all(warn/misc) 이 아니라 error/agent-context 로 잡히는지 고정한다.
+test('agent context unresolved (Trigger) → error/agent-context', () => {
+  assert.deepEqual(
+    classify(
+      'Trigger: agent context unresolved (registered but not bootstrapped — possible rehydration miss) agent=agent-1',
+    ),
+    { level: 'error', category: 'agent-context' },
+  );
+});
+
+test('agent context unresolved (Chat request) → error/agent-context', () => {
+  assert.deepEqual(
+    classify(
+      'Chat request: agent context unresolved (registered but not bootstrapped — possible rehydration miss) agent=agent-1',
+    ),
+    { level: 'error', category: 'agent-context' },
+  );
+});
+
+test('agent context unresolved (Chat room message, multiple candidates) → error/agent-context', () => {
+  assert.deepEqual(
+    classify(
+      'Chat room message: agent context unresolved (registered but not bootstrapped — possible rehydration miss) agent=agent-1,agent-2',
+    ),
+    { level: 'error', category: 'agent-context' },
+  );
+});
+
 test('uploader / DIAG / claude-bin traces are skipped', () => {
   assert.equal(classify('[uploader] uploaded 3 entries (errors=0 events=3)'), null);
   assert.equal(classify('[DIAG] heartbeat ok'), null);
