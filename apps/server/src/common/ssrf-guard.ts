@@ -2,7 +2,7 @@
 // 아웃바운드 요청 전용 가드. config.url/method/headers/body는 워크스페이스
 // 스코프 에이전트가 자유롭게 지정한 Function 정의에서 오므로, 클라우드 메타데이터
 // (169.254.169.254)나 내부 서비스로 향하는 요청과 그 응답 본문 전체 노출(full-read
-// SSRF)을 막는다. (티켓 f177aeb3 H1)
+// SSRF)을 막는다. (티켓 f177aeb3 H1, 리뷰 승인 차단 반영)
 //
 // 방어 계층:
 //  1. 스킴 allowlist(http/https) — file:/gopher:/dict: 등 프로토콜 스머글링 차단
@@ -11,9 +11,12 @@
 //     — 사전 검증과 실제 연결 사이의 DNS rebinding을 완화
 //  4. redirect:'manual' + 매 홉마다 재검증 — 첫 홉만 안전하고 리다이렉트로
 //     내부망에 도달하는 것을 차단
-//  5. 호출자 제공 헤더에서 hop-by-hop/연결 제어 헤더만 제거(allowlist가 아니라
-//     denylist) — 대상 호스트가 이미 공인 IP로 제한되므로 Authorization/X-Api-Key
-//     같은 애플리케이션 헤더는 제3자 웹훅 인증에 필요해 허용
+//  5. 호출자 제공 헤더는 이름 allowlist(denylist 아님)로만 통과시킨다. hop-by-hop
+//     헤더는 allowlist에 없으므로 자동으로 제거된다. Authorization/X-Api-Key 같은
+//     credential 헤더는 제3자 웹훅 인증에 필요해 allowlist에 있지만 SENSITIVE로
+//     표시되며, 리다이렉트 홉의 origin이 최초 요청과 달라지는 순간 guardedFetch가
+//     제거한다 — 허용된 웹훅 호스트의 오픈 리다이렉트만으로 credential이 제3자
+//     호스트로 새는 것을 막는다.
 import { BlockList, isIP } from 'net';
 import * as dns from 'dns';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
@@ -22,14 +25,19 @@ export const ALLOWED_SCHEMES = new Set(['http:', 'https:']);
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-// RFC 7230 hop-by-hop / connection-control 헤더. 이름을 그대로 허용하면
-// 프록시 계층 동작을 조작하거나(Connection/Upgrade), Host를 위조해 가상호스트
-// 라우팅을 우회하거나, Content-Length/Transfer-Encoding으로 요청 밀수(smuggling)를
-// 시도할 수 있다. 나머지 헤더(Authorization, X-Api-Key 등)는 목적지가 이미
-// 공인 호스트로 제한되므로 그대로 통과시킨다.
-const BLOCKED_HEADER_NAMES = new Set([
-  'host', 'connection', 'content-length', 'transfer-encoding', 'upgrade',
-  'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
+// 비-credential 애플리케이션 헤더 — 항상 통과. hop-by-hop/connection-control
+// 헤더(Host/Connection/Content-Length/Transfer-Encoding/Upgrade/Keep-Alive/
+// Proxy-Authenticate/Proxy-Authorization/TE/Trailer)와 Cookie는 이 목록에
+// 없으므로 자동으로 제거된다 — Function http 실행기가 브라우저 세션 쿠키나
+// 프록시 인증을 다룰 정당한 이유가 없다.
+const ALLOWED_HEADER_NAMES = new Set([
+  'content-type', 'accept', 'user-agent', 'x-request-id', 'x-idempotency-key',
+]);
+
+// 제3자 웹훅 인증에 필요해 allowlist에는 있지만 credential을 담는 헤더.
+// guardedFetch가 리다이렉트 홉의 origin이 바뀌면 이 헤더들을 제거한다.
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization', 'x-api-key', 'x-webhook-secret', 'x-hub-signature', 'x-hub-signature-256', 'x-signature',
 ]);
 
 function httpError(status: number, message: string): Error & { status: number } {
@@ -40,11 +48,23 @@ export function sanitizeOutboundHeaders(headers: unknown): Record<string, string
   const out: Record<string, string> = {};
   if (!headers || typeof headers !== 'object') return out;
   for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
-    if (typeof key !== 'string' || BLOCKED_HEADER_NAMES.has(key.toLowerCase())) continue;
+    if (typeof key !== 'string') continue;
+    const lower = key.toLowerCase();
+    if (!ALLOWED_HEADER_NAMES.has(lower) && !SENSITIVE_HEADER_NAMES.has(lower)) continue;
     if (value === undefined || value === null) continue;
     out[key] = String(value);
   }
   return out;
+}
+
+function originOf(url: URL): string {
+  return `${url.protocol}//${url.host}`;
+}
+
+function stripSensitiveHeaders(headers: Record<string, string>): void {
+  for (const key of Object.keys(headers)) {
+    if (SENSITIVE_HEADER_NAMES.has(key.toLowerCase())) delete headers[key];
+  }
 }
 
 const blockedIPv4 = new BlockList();
@@ -166,14 +186,25 @@ export interface GuardedFetchInit {
  * SSRF 가드가 적용된 fetch. 최초 URL과 매 리다이렉트 홉을 모두 스킴/호스트
  * 검증한 뒤에만 요청을 보낸다 — redirect:'manual'로 자동 추적을 막고 직접
  * 각 홉을 재검증하며 따라간다. 301/302(비-GET/HEAD)와 303은 스펙대로 GET+본문
- * 제거로 다운그레이드하고, 307/308은 메서드·본문을 그대로 유지한다.
+ * 제거로 다운그레이드하고, 307/308은 메서드·본문을 그대로 유지한다. 리다이렉트가
+ * origin을 바꾸면(scheme/host/port 중 하나라도 다르면) SENSITIVE_HEADER_NAMES
+ * 헤더(Authorization 등)를 다음 홉으로 넘기기 전에 제거한다.
+ *
+ * `dispatcher`는 테스트에서 undici MockAgent를 주입해 실제 소켓 연결 없이
+ * 리다이렉트/헤더 로직을 검증할 수 있게 하는 훅이다 — 프로덕션 호출부는
+ * 절대 넘기지 말 것(기본값이 guardedLookup이 꽂힌 실제 SSRF 가드 Agent다).
  */
-export async function guardedFetch(rawUrl: string, init: GuardedFetchInit): Promise<Response> {
+export async function guardedFetch(
+  rawUrl: string,
+  init: GuardedFetchInit,
+  opts?: { dispatcher?: Dispatcher },
+): Promise<Response> {
   let currentUrl = await validateOutboundUrl(rawUrl);
   let method = (init.method || 'GET').toUpperCase();
   let body = init.body;
   const headers = { ...(init.headers || {}) };
-  const dispatcher = getGuardedAgent();
+  const dispatcher = opts?.dispatcher ?? getGuardedAgent();
+  let currentOrigin = originOf(currentUrl);
 
   for (let hop = 0; ; hop++) {
     const response = await undiciFetch(currentUrl, {
@@ -193,6 +224,9 @@ export async function guardedFetch(rawUrl: string, init: GuardedFetchInit): Prom
 
     const nextUrl = new URL(location, currentUrl);
     currentUrl = await validateOutboundUrl(nextUrl.toString());
+    const nextOrigin = originOf(currentUrl);
+    if (nextOrigin !== currentOrigin) stripSensitiveHeaders(headers);
+    currentOrigin = nextOrigin;
     if (response.status === 303 || ((response.status === 301 || response.status === 302) && method !== 'GET' && method !== 'HEAD')) {
       method = 'GET';
       body = undefined;

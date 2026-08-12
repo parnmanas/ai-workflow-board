@@ -74,17 +74,31 @@ test('validateOutboundUrl — accepts a public IP-literal target without making 
   assert.equal(url.hostname, '8.8.8.8');
 });
 
-test('sanitizeOutboundHeaders — drops hop-by-hop/connection headers but keeps application headers', () => {
+test('sanitizeOutboundHeaders — drops hop-by-hop/connection/cookie/unknown headers, keeps allowlisted application headers', () => {
   const out = sanitizeOutboundHeaders({
     Host: 'attacker.internal',
     Connection: 'keep-alive',
     'Content-Length': '0',
     'Transfer-Encoding': 'chunked',
+    Cookie: 'session=abc',
+    'Proxy-Authorization': 'Basic xyz',
     Authorization: 'Bearer secret-token',
     'X-Api-Key': 'abc123',
+    'X-Webhook-Secret': 'whsec_1',
     'X-Custom': 'value',
+    Accept: 'application/json',
   });
-  assert.deepEqual(out, { Authorization: 'Bearer secret-token', 'X-Api-Key': 'abc123', 'X-Custom': 'value' });
+  assert.deepEqual(out, {
+    Authorization: 'Bearer secret-token',
+    'X-Api-Key': 'abc123',
+    'X-Webhook-Secret': 'whsec_1',
+    Accept: 'application/json',
+  });
+});
+
+test('sanitizeOutboundHeaders — drops arbitrary unrecognized header names entirely (allowlist, not denylist)', () => {
+  const out = sanitizeOutboundHeaders({ 'X-Totally-Unknown': 'value', 'X-Custom': 'other' });
+  assert.deepEqual(out, {});
 });
 
 test('sanitizeOutboundHeaders — tolerates non-object input', () => {
@@ -116,4 +130,91 @@ test('guardedFetch — re-validates the Location target on redirect (blocks a re
   // hop would itself require live public network access unavailable in CI.
   const redirectTarget = new URL('http://169.254.169.254/latest/meta-data/iam/security-credentials/', 'https://example.com/webhook');
   await assert.rejects(validateOutboundUrl(redirectTarget.toString()), /not an allowed outbound target/);
+});
+
+// The tests below drive guardedFetch through its REAL first hop (an actual
+// undici fetch call, not a call to validateOutboundUrl in isolation) by
+// injecting an undici MockAgent as the dispatcher. This is the only way to
+// exercise the real header-forwarding path end-to-end without live network
+// access, since guardedFetch's own IP blocklist forbids targeting a local
+// http.createServer() listener (127.0.0.1 is loopback). The mock origins use
+// TEST-NET-3 (203.0.113.0/24, RFC 5737) — public/documentation-only IP
+// literals that pass the SSRF guard's allowlist without a DNS lookup and
+// without ever reaching a real network.
+test('guardedFetch — keeps allowlisted headers (including sensitive ones) across a same-origin redirect', async () => {
+  const { MockAgent } = await import('undici');
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  const pool = mockAgent.get('https://203.0.113.7');
+
+  let secondHopHeaders = null;
+  pool.intercept({ path: '/start', method: 'POST' }).reply(() => ({
+    statusCode: 302,
+    data: '',
+    responseOptions: { headers: { location: 'https://203.0.113.7/finish' } },
+  }));
+  pool.intercept({ path: '/finish', method: 'GET' }).reply((opts) => {
+    secondHopHeaders = opts.headers;
+    return { statusCode: 200, data: JSON.stringify({ ok: true }), responseOptions: { headers: { 'content-type': 'application/json' } } };
+  });
+
+  const response = await guardedFetch('https://203.0.113.7/start', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer secret-token', 'X-Api-Key': 'abc123', 'X-Request-Id': 'req-1' },
+    body: JSON.stringify({ hello: 'world' }),
+  }, { dispatcher: mockAgent });
+
+  assert.equal(response.status, 200);
+  assert.equal(secondHopHeaders.Authorization, 'Bearer secret-token');
+  assert.equal(secondHopHeaders['X-Api-Key'], 'abc123');
+  assert.equal(secondHopHeaders['X-Request-Id'], 'req-1');
+});
+
+test('guardedFetch — strips sensitive (credential) headers on a cross-origin redirect but keeps non-sensitive ones', async () => {
+  const { MockAgent } = await import('undici');
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  const originA = mockAgent.get('https://203.0.113.7');
+  const originB = mockAgent.get('https://203.0.113.8');
+
+  let secondHopHeaders = null;
+  originA.intercept({ path: '/webhook', method: 'POST' }).reply(() => ({
+    statusCode: 302,
+    data: '',
+    responseOptions: { headers: { location: 'https://203.0.113.8/webhook' } },
+  }));
+  originB.intercept({ path: '/webhook', method: 'GET' }).reply((opts) => {
+    secondHopHeaders = opts.headers;
+    return { statusCode: 200, data: JSON.stringify({ ok: true }), responseOptions: { headers: { 'content-type': 'application/json' } } };
+  });
+
+  const response = await guardedFetch('https://203.0.113.7/webhook', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer secret-token', 'X-Api-Key': 'abc123', 'X-Webhook-Secret': 'whsec_1', 'X-Request-Id': 'req-1' },
+    body: JSON.stringify({ hello: 'world' }),
+  }, { dispatcher: mockAgent });
+
+  assert.equal(response.status, 200);
+  assert.equal(secondHopHeaders.Authorization, undefined);
+  assert.equal(secondHopHeaders['X-Api-Key'], undefined);
+  assert.equal(secondHopHeaders['X-Webhook-Secret'], undefined);
+  assert.equal(secondHopHeaders['X-Request-Id'], 'req-1');
+});
+
+test('guardedFetch — the real first hop still rejects a redirect Location pointing at cloud metadata', async () => {
+  const { MockAgent } = await import('undici');
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  const pool = mockAgent.get('https://203.0.113.7');
+
+  pool.intercept({ path: '/webhook', method: 'GET' }).reply(() => ({
+    statusCode: 302,
+    data: '',
+    responseOptions: { headers: { location: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' } },
+  }));
+
+  await assert.rejects(
+    guardedFetch('https://203.0.113.7/webhook', { method: 'GET' }, { dispatcher: mockAgent }),
+    /not an allowed outbound target/,
+  );
 });
