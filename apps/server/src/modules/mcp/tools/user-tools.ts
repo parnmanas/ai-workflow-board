@@ -52,7 +52,16 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       discord_user_id: z.string().optional().default('').describe('Discord user ID for @mentions'),
       permissions: z.array(z.string()).optional().default([]).describe('Custom permissions (e.g. ["admin.users","admin.agents"])'),
     },
-    async ({ name, email, avatar_url, role, discord_user_id, permissions }) => {
+    async ({ name, email, avatar_url, role, discord_user_id, permissions }, extra: { sessionId?: string }) => {
+      // Fail-closed caller identity gate (ticket d6b56237 review round 2):
+      // a request with no session, or a sessionId that resolves to nothing,
+      // must be rejected rather than silently treated as an anonymous-but-
+      // permitted create. This does NOT require full scope — any resolvable
+      // caller identity is enough — role/permissions stay fully blocked below
+      // regardless of who's calling.
+      if (!getCallerAgent(extra)) {
+        return err('Unauthorized: create_user requires a resolvable MCP caller identity.');
+      }
       // MCP is an agent-only connection surface (see HUMAN_ONLY_UNPEND_MESSAGE
       // in shared/session-auth.ts) — no MCP caller, regardless of scope, may
       // mint an admin AWB user or grant custom permissions through this tool.
@@ -79,7 +88,13 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       discord_user_id: z.string().optional().describe('New Discord user ID'),
       permissions: z.array(z.string()).optional().describe('Custom permissions array'),
     },
-    async ({ user_id, name, email, avatar_url, role, discord_user_id, permissions }) => {
+    async ({ user_id, name, email, avatar_url, role, discord_user_id, permissions }, extra: { sessionId?: string }) => {
+      // Same fail-closed caller identity gate as create_user — a request
+      // with no session, or an unresolvable sessionId, is rejected outright
+      // rather than allowed to rename/re-email/re-link a user anonymously.
+      if (!getCallerAgent(extra)) {
+        return err('Unauthorized: update_user requires a resolvable MCP caller identity.');
+      }
       // Same rationale as create_user: role/permissions are a human-operator
       // concern, never MCP-writable — this closes the privilege-escalation
       // path where any authenticated key could promote an arbitrary user to

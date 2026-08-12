@@ -14,7 +14,30 @@ import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveCallerWorkspaceId } from '../shared/authz';
+import { Agent } from '../../../entities/Agent';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import type { ToolContext } from './context';
+
+const FOREIGN_AGENT_MESSAGE =
+  'Unauthorized: agent_id must reference an Agent visible in your workspace.';
+
+/**
+ * An api key's agent_id link must point at an Agent the caller's own
+ * workspace can actually see — otherwise workspace A could bind its key to
+ * a workspace B Agent id, muddying audit/attribution across the tenant
+ * boundary (ticket d6b56237 review round 2). Reuses the same visibility
+ * rule artifacts already use (`agentIsVisibleInWorkspace`): workspace-local
+ * or genuinely global Agents pass, anything bound to a DIFFERENT workspace
+ * does not.
+ */
+async function agentIdVisibleInWorkspace(
+  ctx: ToolContext,
+  agentId: string,
+  workspaceId: string,
+): Promise<boolean> {
+  const agent = await ctx.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
+  return !!agent && agentIsVisibleInWorkspace(agent.workspace_id, workspaceId);
+}
 
 const SCOPE_RANK: Record<string, number> = { read: 0, write: 1, full: 2 };
 
@@ -86,6 +109,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
       const callerScope = caller?.scope || 'full';
       if (SCOPE_RANK[requestedScope] > SCOPE_RANK[callerScope]) {
         return err(`Unauthorized: cannot mint a "${requestedScope}" key from a "${callerScope}"-scoped caller.`);
+      }
+
+      if (agent_id && !(await agentIdVisibleInWorkspace(ctx, agent_id, workspaceId))) {
+        return err(FOREIGN_AGENT_MESSAGE);
       }
 
       let expires_at: Date | null = null;
@@ -162,6 +189,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
         if (SCOPE_RANK[scope] > SCOPE_RANK[callerScope]) {
           return err(`Unauthorized: cannot upgrade this key to "${scope}" scope from a "${callerScope}"-scoped caller.`);
         }
+      }
+
+      if (agent_id !== undefined && agent_id && !(await agentIdVisibleInWorkspace(ctx, agent_id, workspaceId))) {
+        return err(FOREIGN_AGENT_MESSAGE);
       }
 
       const updates: any = {};

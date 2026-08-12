@@ -22,7 +22,7 @@ import {
 } from '../../../common/runtime-config';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { requireFullScopeCaller } from '../shared/authz';
+import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
@@ -89,7 +89,13 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       working_dir,
       model,
     }, extra: { sessionId?: string }) => {
-      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      const caller = getCallerAgent(extra);
+      // The requested workspace_id is the resource's OWN workspace here, not
+      // a caller-supplied filter — a workspace A caller must not be able to
+      // mint an agent in workspace B (or a global agent, workspace_id null)
+      // just by naming it in the request (ticket d6b56237 review round 2).
+      const normalizedWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
+      const gateError = await requireWorkspaceScopedFullAccess(dataSource, caller, normalizedWorkspaceId);
       if (gateError) return err(gateError);
 
       const runtimeId = typeof type === 'string' ? type.trim().toLowerCase() : '';
@@ -114,7 +120,6 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         }
         throw error;
       }
-      const normalizedWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
       if (normalizedWorkspaceId) {
         const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: normalizedWorkspaceId } });
         if (!workspace) return err('workspace_id does not exist');
@@ -177,12 +182,19 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       model,
       workspace_id,
     }, extra: { sessionId?: string }) => {
-      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
-      if (gateError) return err(gateError);
-
+      const caller = getCallerAgent(extra);
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
+
+      // Gate against the TARGET agent's own workspace, not merely "some
+      // full-scope caller called this" — otherwise a full-scope key bound to
+      // workspace A could reach into workspace B's agents (ticket d6b56237
+      // review round 2).
+      const gateError = await requireWorkspaceScopedFullAccess(
+        dataSource, caller, normalizeAgentWorkspaceId(agent.workspace_id),
+      );
+      if (gateError) return err(gateError);
 
       // Snapshot pre-update name so a rename leaves an audit line. Past
       // incident: manager Agent names silently flipped without any record
@@ -201,6 +213,13 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       if (model !== undefined) agent.model = model && model.trim() ? model.trim() : null;
       if (workspace_id !== undefined) {
         const normalizedWorkspaceId = normalizeAgentWorkspaceId(workspace_id);
+        // Reassigning the agent to a DIFFERENT workspace is itself a
+        // cross-workspace write — the caller must be able to reach the
+        // destination too (same policy as move_agent_to_workspace).
+        if (normalizedWorkspaceId !== normalizeAgentWorkspaceId(agent.workspace_id)
+          && !(await callerCanAccessWorkspace(dataSource, caller, normalizedWorkspaceId))) {
+          return err('Unauthorized: caller cannot reassign this agent into the requested workspace');
+        }
         if (normalizedWorkspaceId) {
           const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: normalizedWorkspaceId } });
           if (!workspace) return err('workspace_id does not exist');
@@ -259,12 +278,15 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
     'Delete an AI agent',
     { agent_id: z.string().describe('Agent ID') },
     async ({ agent_id }, extra: { sessionId?: string }) => {
-      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
-      if (gateError) return err(gateError);
-
       const agentRepo = dataSource.getRepository(Agent);
       const agent = await agentRepo.findOne({ where: { id: agent_id } });
       if (!agent) return err('Agent not found');
+
+      const gateError = await requireWorkspaceScopedFullAccess(
+        dataSource, getCallerAgent(extra), normalizeAgentWorkspaceId(agent.workspace_id),
+      );
+      if (gateError) return err(gateError);
+
       await agentRepo.delete(agent.id);
       return ok({ success: true });
     }
@@ -300,10 +322,21 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       // The docstring has always claimed "Admin-gated" — this was never
       // actually enforced (caller was only used for audit attribution).
       // A dry_run preview is harmless (read-only report), so only the
-      // committing call (dry_run=false) requires the full-scope gate.
+      // committing call (dry_run=false) requires the full-scope gate — AND,
+      // since this crosses a workspace boundary by definition, the caller
+      // must actually be able to reach BOTH the source and the destination
+      // workspace (ticket d6b56237 review round 2: full-scope alone doesn't
+      // prove that, only DB-backed/full/live).
       if (dry_run === false) {
-        const gateError = await requireFullScopeCaller(dataSource, caller);
-        if (gateError) return err(gateError);
+        const sourceAgent = await dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
+        if (!sourceAgent) return err('Agent not found');
+        const sourceGateError = await requireWorkspaceScopedFullAccess(
+          dataSource, caller, normalizeAgentWorkspaceId(sourceAgent.workspace_id),
+        );
+        if (sourceGateError) return err(sourceGateError);
+        if (!(await callerCanAccessWorkspace(dataSource, caller, normalizeAgentWorkspaceId(target_workspace_id)))) {
+          return err('Unauthorized: caller cannot reach the destination workspace');
+        }
       }
       const mover = new WorkspaceMoveService(dataSource as any, ctx.activityService);
       const opts = { api_key_policy, cross_ref_policy, actor_id: caller?.agentId, actor_name: caller?.agentName };

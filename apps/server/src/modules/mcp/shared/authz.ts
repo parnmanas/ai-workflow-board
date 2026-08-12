@@ -83,7 +83,7 @@ export async function resolveCallerWorkspaceId(
 export async function callerCanAccessWorkspace(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
-  targetWorkspaceId: string,
+  targetWorkspaceId: string | null,
 ): Promise<boolean> {
   if (!caller) return false;
   if (caller.workspaceId) {
@@ -99,4 +99,29 @@ export async function callerCanAccessWorkspace(
     return caller.scope === 'full';
   }
   return agentWorkspaceId === targetWorkspaceId;
+}
+
+export const WORKSPACE_SCOPE_GATE_ERROR =
+  'Unauthorized: this operation requires a full-scope caller bound to (or a genuinely global Agent spanning) the target workspace.';
+
+/**
+ * Combines `requireFullScopeCaller` with a workspace-boundary check against
+ * a specific target resource's workspace (ticket d6b56237 review round 2:
+ * `requireFullScopeCaller` alone only proves "some live, full-scope Agent
+ * called this," never that the caller belongs to the workspace it's about
+ * to mutate — so a full-scope key bound to workspace A could update/delete
+ * an Agent in workspace B, or cascade-delete workspace B itself).
+ * `targetWorkspaceId` is the resource's OWN workspace (null for a genuinely
+ * global resource) — never a caller-supplied parameter parroted back.
+ * Returns an error string when either gate fails, or null when both pass.
+ */
+export async function requireWorkspaceScopedFullAccess(
+  dataSource: DataSource,
+  caller: McpAgentContext | undefined,
+  targetWorkspaceId: string | null,
+): Promise<string | null> {
+  const gateError = await requireFullScopeCaller(dataSource, caller);
+  if (gateError) return gateError;
+  const allowed = await callerCanAccessWorkspace(dataSource, caller, targetWorkspaceId);
+  return allowed ? null : WORKSPACE_SCOPE_GATE_ERROR;
 }

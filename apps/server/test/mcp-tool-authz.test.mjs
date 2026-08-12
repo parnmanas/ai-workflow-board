@@ -467,4 +467,232 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
 
     assert.equal(result.isError, true);
   });
+
+  // ─── Review round 2 (ticket d6b56237 comment b647d97e): the 19 tests above
+  // never exercised a workspace-A full-scope caller reaching into workspace
+  // B — every prior "allows ..." positive test kept caller and target in the
+  // SAME workspace, so requireFullScopeCaller's missing workspace-boundary
+  // check went uncaught. These add the cross-tenant destructive paths, plus
+  // the sessionless user-tools gate and foreign agent_id linking. ───
+
+  it('rejects update_agent / delete_agent from a workspace-A full-scope caller targeting a workspace-B agent', async () => {
+    const caller = await makeAgent('workspace-a');
+    const victim = await makeAgent('workspace-b');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const updateResult = await tools.update_agent.handler(
+      { agent_id: victim.id, name: 'renamed-by-outsider' },
+      { sessionId },
+    );
+    assert.equal(updateResult.isError, true);
+
+    const deleteResult = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
+    assert.equal(deleteResult.isError, true);
+    cleanup();
+
+    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
+    assert.ok(stillThere, 'workspace-B victim agent must survive a workspace-A full-scope caller');
+    assert.equal(stillThere.name, victim.name);
+  });
+
+  it('rejects create_agent into a foreign workspace from a workspace-A full-scope caller', async () => {
+    const caller = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.create_agent.handler(
+      { name: 'planted-in-b', workspace_id: 'workspace-b', type: 'claude', manager_agent_id: 'whatever' },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, true);
+  });
+
+  it('rejects the committing move_agent_to_workspace call from a workspace-A full-scope caller moving a workspace-B agent', async () => {
+    const caller = await makeAgent('workspace-a');
+    const victim = await makeAgent('workspace-b');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.move_agent_to_workspace.handler(
+      { agent_id: victim.id, target_workspace_id: 'workspace-c', dry_run: false },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, true);
+    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
+    assert.equal(stillThere.workspace_id, 'workspace-b');
+  });
+
+  it('rejects the committing move_agent_to_workspace call when the DESTINATION is foreign, even for the caller\'s own agent', async () => {
+    const caller = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.move_agent_to_workspace.handler(
+      { agent_id: caller.id, target_workspace_id: 'workspace-b', dry_run: false },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, true);
+  });
+
+  it('rejects delete_workspace of workspace B from a workspace-A full-scope caller', async () => {
+    const caller = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.delete_workspace.handler({ workspace_id: 'workspace-b' }, { sessionId });
+    cleanup();
+
+    assert.equal(result.isError, true);
+  });
+
+  it('allows a genuinely global full-scope Agent to update/delete an agent in any workspace (explicit escape hatch)', async () => {
+    const globalAgent = await makeAgent(''); // '' normalizes to null (global)
+    const victim = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: globalAgent.id,
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
+    cleanup();
+
+    assert.equal(result.isError, undefined);
+    const gone = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
+    assert.equal(gone, null);
+  });
+
+  // ─── DoD (b): sessionless / unresolvable-session create_user / update_user ───
+
+  it('rejects create_user and update_user with no session at all', async () => {
+    const createResult = await tools.create_user.handler({ name: 'Ghost User' }, {});
+    assert.equal(createResult.isError, true);
+
+    const userRepo = dataSource.getRepository(User);
+    const target = await userRepo.save(userRepo.create({ name: 'Existing User', role: 'user' }));
+    const updateResult = await tools.update_user.handler(
+      { user_id: target.id, name: 'Renamed Anonymously' },
+      {},
+    );
+    assert.equal(updateResult.isError, true);
+    const reloaded = await userRepo.findOne({ where: { id: target.id } });
+    assert.equal(reloaded.name, 'Existing User');
+  });
+
+  it('rejects create_user and update_user with a sessionId that resolves to nothing', async () => {
+    const createResult = await tools.create_user.handler(
+      { name: 'Ghost User 2' },
+      { sessionId: `session-${randomUUID()}` }, // never registered
+    );
+    assert.equal(createResult.isError, true);
+
+    const userRepo = dataSource.getRepository(User);
+    const target = await userRepo.save(userRepo.create({ name: 'Existing User 2', role: 'user' }));
+    const updateResult = await tools.update_user.handler(
+      { user_id: target.id, name: 'Renamed Anonymously 2' },
+      { sessionId: `session-${randomUUID()}` },
+    );
+    assert.equal(updateResult.isError, true);
+  });
+
+  it('allows create_user / update_user from a resolvable caller with no role/permissions in the request', async () => {
+    const agent = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agent.id,
+      workspaceId: 'workspace-a',
+      scope: 'read',
+      source: 'db',
+    });
+
+    const createResult = await tools.create_user.handler({ name: 'Legit User' }, { sessionId });
+    assert.equal(createResult.isError, undefined);
+    cleanup();
+  });
+
+  // ─── DoD (c): api-key create/update must reject a foreign agent_id ───
+
+  it('rejects create_api_key / update_api_key linking a foreign-workspace agent_id', async () => {
+    const agentA = await makeAgent('workspace-a');
+    const agentB = await makeAgent('workspace-b');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agentA.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const createResult = await tools.create_api_key.handler(
+      { name: 'cross-linked-key', agent_id: agentB.id },
+      { sessionId },
+    );
+    assert.equal(createResult.isError, true);
+
+    const ownKey = await apiKeyService.createApiKey({ name: 'ws-a-key-2', workspace_id: 'workspace-a' });
+    const updateResult = await tools.update_api_key.handler(
+      { key_id: ownKey.apiKey.id, agent_id: agentB.id },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(updateResult.isError, true);
+    const reloaded = await apiKeyService.getApiKey(ownKey.apiKey.id);
+    assert.notEqual(reloaded.agent_id, agentB.id);
+  });
+
+  it('allows create_api_key linking an agent_id that belongs to the caller\'s own workspace', async () => {
+    const agentA = await makeAgent('workspace-a');
+    const linked = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agentA.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.create_api_key.handler(
+      { name: 'same-workspace-link', agent_id: linked.id },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, undefined);
+    const body = JSON.parse(result.content[0].text);
+    assert.equal(body.agent_id, linked.id);
+  });
 });

@@ -21,7 +21,8 @@ import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/har
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
-import { callerCanAccessWorkspace, requireFullScopeCaller } from '../shared/authz';
+import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
+import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
 import type { ToolContext } from './context';
 
 export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): void {
@@ -267,7 +268,13 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
     'Delete a workspace and all its boards, columns, tickets (cannot delete the last workspace)',
     { workspace_id: z.string().describe('Workspace ID') },
     async ({ workspace_id }, extra: { sessionId?: string }) => {
-      const gateError = await requireFullScopeCaller(dataSource, getCallerAgent(extra));
+      // requireFullScopeCaller alone only proves "some live, full-scope
+      // Agent called this" — it never checked that the caller BELONGS to
+      // the workspace being cascade-deleted, so a full-scope key bound to
+      // workspace A could delete workspace B (ticket d6b56237 review round 2).
+      const gateError = await requireWorkspaceScopedFullAccess(
+        dataSource, getCallerAgent(extra), normalizeAgentWorkspaceId(workspace_id),
+      );
       if (gateError) return err(gateError);
 
       const wsRepo = dataSource.getRepository(Workspace);
