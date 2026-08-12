@@ -2509,7 +2509,27 @@ export class EventDispatcher {
           `Trigger dispatched through Hermes ACP: ticket=${ev.ticket_id} ` +
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
-        this.#ackDispatch(ev, 'processed');
+        // ticket 38fba2d3: dispatch() resolving without throwing isn't proof the
+        // trigger was actually handled — mirrors e8105c84's #reportHermesMentionOutcome
+        // stopReason check on the comment-mention path. This call site has no chat
+        // room or comment channel to signal into (a column trigger, not a chat/mention),
+        // so a non-end_turn stop folds into the #ackDispatch('nack', ...) channel this
+        // function already uses for every other pre-spawn failure — dispatch-intent.service.ts
+        // treats 'nack' as retryable (bounded backoff), so this self-heals instead of
+        // acking 'processed' with no signal anywhere.
+        if (result.stopReason !== 'end_turn') {
+          await this.#reportHermesDispatchFailure(
+            'Hermes trigger dispatch',
+            undefined,
+            undefined,
+            result.stopReason,
+            `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason}) ticket=${ev.ticket_id} role=${ev.action}`,
+          );
+          this.#ackDispatch(ev, 'nack', result.stopReason);
+        } else {
+          spawnFailureTracker.recordSuccess('hermes');
+          this.#ackDispatch(ev, 'processed');
+        }
       } catch (err: any) {
         log(`Hermes trigger dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
         this.#ackDispatch(ev, 'nack', err?.code || 'runtime_protocol_error');
