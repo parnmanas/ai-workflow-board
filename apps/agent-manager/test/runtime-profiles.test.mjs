@@ -305,7 +305,15 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
   delete process.env.ANTHROPIC_BASE_URL;
   delete process.env.CLAUDE_PROFILE_ONLY;
   try {
-    const manager = new SubagentManager(config);
+    // ticket ce65cf25: well-known install paths now resolve before a bare
+    // PATH lookup, so a host with a real codex under e.g. ~/.npm-global/bin
+    // would otherwise shadow this PATH-only fixture. Pin the fixture via the
+    // new delegation.codexBin override instead — deterministic regardless of
+    // what's actually installed on the runner.
+    const manager = new SubagentManager({
+      ...config,
+      delegation: { ...config.delegation, codexBin: executable },
+    });
     const exited = new Promise(resolve => { manager.onExit = resolve; });
     const result = await manager.spawn({
       kind: 'trigger',
