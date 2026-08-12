@@ -448,6 +448,19 @@ export interface SubagentSpawnArgs {
    *  persistent chat path carries on ChatDispatchArgs (89716f04). Undefined for
    *  an ordinary chat / non-run spawn. */
   run?: RunSessionBinding;
+  /** ticket 970d6692 (review round 2): precomputed circuit-breaker verdict for
+   *  THIS logical spawn attempt. Set (including explicit `null`) only by
+   *  event-dispatcher.ts's dispatchTrigger→one-shot fallback, where
+   *  dispatchTrigger already called CircuitBreaker.shouldBlock() for the same
+   *  (agent, ticket, role) key moments earlier and did NOT decline with
+   *  `circuit_breaker_open` — meaning the breaker already cleared this
+   *  attempt. SubagentManager.spawn() trusts this instead of re-querying,
+   *  because a second shouldBlock() call for the SAME attempt would consume
+   *  the just-granted half-open probe's `lastProbeAt` stamp and re-block it
+   *  (the original bug). `undefined` (the default for every other spawn()
+   *  call site — chat one-shots, mention triggers) preserves the original
+   *  self-contained check. */
+  circuitBreakerDecision?: string | null;
 }
 
 export interface SubagentSpawnResult {
@@ -2291,6 +2304,17 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
 
+    // ticket 970d6692 (review round 2): true once dispatchTrigger below has
+    // run its OWN CircuitBreaker.shouldBlock() check for this (agent, ticket,
+    // role) and NOT declined with `circuit_breaker_open` (that reason returns
+    // immediately, never reaching the one-shot fallback at all) — so by the
+    // time control reaches the fallback spawn() below, the breaker has
+    // already cleared this exact logical attempt. Passed through so spawn()
+    // trusts that verdict instead of calling shouldBlock() again, which would
+    // consume the just-granted half-open probe's cooldown stamp a second time
+    // and re-block the attempt it was meant to allow (the original bug).
+    let circuitBreakerClearedByDispatchTrigger = false;
+
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
         const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
@@ -2358,10 +2382,17 @@ export class EventDispatcher {
           log(`Trigger blocked by circuit-breaker: ticket=${ev.ticket_id} — not falling back to one-shot`);
           return;
         }
+        // Reaching here means dispatchTrigger's own circuit-breaker gate did
+        // NOT decline — see the comment on the declaration above.
+        circuitBreakerClearedByDispatchTrigger = true;
         log(
           `Ticket session dispatch declined (${result.reason}), falling back to one-shot subagent`,
         );
       } catch (err: any) {
+        // dispatchTrigger's circuit-breaker check runs first and synchronously
+        // (no I/O) before anything fallible, so a thrown exception here also
+        // implies it already passed.
+        circuitBreakerClearedByDispatchTrigger = true;
         log(
           `Ticket session path failed: ${err?.message ?? err}, falling back to one-shot subagent`,
         );
@@ -2409,6 +2440,10 @@ export class EventDispatcher {
           runtimeProfile,
           effortPreset,
           envVars,
+          // ticket 970d6692: reuse dispatchTrigger's own circuit-breaker
+          // verdict for this SAME attempt instead of letting spawn() query
+          // shouldBlock() a second time — see the flag's declaration above.
+          circuitBreakerDecision: circuitBreakerClearedByDispatchTrigger ? null : undefined,
           ttlMinutes: worktreeProvision.coldSharedWorktree
             ? SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES
             : undefined,

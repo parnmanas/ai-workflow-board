@@ -497,9 +497,23 @@ export class SubagentManager implements SubagentManagerContract {
     // in 1–2s can't spin the trigger loop indefinitely. Mirrors the persistent
     // TicketSessionManager.dispatchTrigger gate. Restricted to ticket triggers
     // (chat one-shots have no role/loop to break).
+    //
+    // ticket 970d6692 (review round 2): when the caller already resolved this
+    // for the SAME logical attempt (event-dispatcher's dispatchTrigger→
+    // one-shot fallback — dispatchTrigger's own shouldBlock() already passed),
+    // `spec.circuitBreakerDecision` carries that verdict and this gate MUST
+    // NOT call shouldBlock() again. shouldBlock() grants at most one half-open
+    // probe per cooldown window by stamping `lastProbeAt`; a second call here
+    // for the same attempt would see its own just-granted stamp and re-block
+    // the very attempt that was just cleared. Every other spawn() call site
+    // (chat one-shots, mention triggers) never sets this field, so `undefined`
+    // preserves the original self-contained check for them.
     if (spec.kind === 'trigger' && spec.ticketId && spec.agentId) {
       const cbKey = CircuitBreaker.key(spec.agentId, spec.ticketId, spec.role || '');
-      const blockReason = this.circuitBreaker.shouldBlock(cbKey);
+      const blockReason =
+        spec.circuitBreakerDecision !== undefined
+          ? spec.circuitBreakerDecision
+          : this.circuitBreaker.shouldBlock(cbKey);
       if (blockReason) {
         log(
           `[subagent] spawn blocked by circuit-breaker: ticket=${spec.ticketId.slice(0, 8)} ` +

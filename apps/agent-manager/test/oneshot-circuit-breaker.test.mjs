@@ -260,6 +260,83 @@ test('② open breaker blocks re-spawn (no fork, returns circuit_breaker_open)',
   assert.equal(res.reason, 'circuit_breaker_open');
 });
 
+test('ticket 970d6692: a precomputed circuitBreakerDecision=null bypasses spawn()\'s own shouldBlock() re-check', async () => {
+  // event-dispatcher.ts's dispatchTrigger→one-shot fallback (ticket 970d6692
+  // review round 2) threads dispatchTrigger's OWN already-granted verdict
+  // into the fallback spawn() call instead of letting spawn() re-query the
+  // breaker — a second independent shouldBlock() call for the SAME attempt
+  // would see the lastProbeAt the first call just stamped and re-block it.
+  // maxConcurrent: 0 makes canSpawn() fail deterministically right after the
+  // breaker gate, isolating exactly that boundary without forking a real CLI.
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+  cb.record(key, 1);
+  cb.record(key, 1); // opens
+  cb.getOpenBreakers()[0].entry.openedAt = Date.now() - 200; // cooldown elapsed
+
+  // Simulates gate ① (e.g. dispatchTrigger) already having consumed the
+  // single half-open probe grant for this logical attempt.
+  assert.equal(cb.shouldBlock(key), null, "precondition: gate ①'s own check granted the probe");
+
+  const mgr = new SubagentManager(
+    { url: 'http://127.0.0.1:0', apiKey: 'k', delegation: { enabled: true, maxConcurrent: 0 } },
+    cb,
+  );
+  const res = await mgr.spawn({
+    kind: 'trigger',
+    taskText: 'x',
+    rolePrompt: '',
+    triggerId: 'trig-2',
+    ticketId: 'ticket-1',
+    agentId: 'agent-1',
+    role: 'assignee',
+    circuitBreakerDecision: null, // event-dispatcher's fallback hand-off
+  });
+
+  assert.equal(res.spawned, false);
+  assert.equal(
+    res.reason,
+    'cap_reached',
+    'reached past the circuit-breaker gate (blocked by an unrelated cap check, not re-blocked by the breaker)',
+  );
+});
+
+test('ticket 970d6692: WITHOUT a precomputed decision, a second shouldBlock() call re-blocks the just-granted probe', async () => {
+  // Contrast case documenting the bug the fix above avoids: calling spawn()
+  // with no circuitBreakerDecision makes it query shouldBlock() itself — the
+  // SAME key gate ① (e.g. dispatchTrigger) already granted moments earlier.
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+  cb.record(key, 1);
+  cb.record(key, 1); // opens
+  cb.getOpenBreakers()[0].entry.openedAt = Date.now() - 200; // cooldown elapsed
+
+  assert.equal(cb.shouldBlock(key), null, 'gate ① granted the probe');
+
+  const mgr = new SubagentManager(
+    { url: 'http://127.0.0.1:0', apiKey: 'k', delegation: { enabled: true, maxConcurrent: 0 } },
+    cb,
+  );
+  const res = await mgr.spawn({
+    kind: 'trigger',
+    taskText: 'x',
+    rolePrompt: '',
+    triggerId: 'trig-2',
+    ticketId: 'ticket-1',
+    agentId: 'agent-1',
+    role: 'assignee',
+    // circuitBreakerDecision intentionally omitted.
+  });
+
+  assert.equal(res.spawned, false);
+  assert.equal(
+    res.reason,
+    'circuit_breaker_open',
+    "gate ②'s own fresh shouldBlock() call sees the lastProbeAt gate ① just stamped and re-blocks — " +
+      'exactly why event-dispatcher.ts must thread the decision instead of letting spawn() re-query',
+  );
+});
+
 test('② generic exit-1 (no signature) opens only after 5 consecutive failures', async () => {
   const cb = new CircuitBreaker(); // threshold 5
   const mgr = new SubagentManager(makeConfig(), cb);

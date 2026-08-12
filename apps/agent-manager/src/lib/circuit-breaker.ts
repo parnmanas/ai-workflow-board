@@ -51,6 +51,12 @@ export interface CircuitBreakerEntry {
   /** True once threshold is crossed — stays true until reset. */
   open: boolean;
   openedAt: number;
+  /** Timestamp of the last half-open probe GRANT (ticket 970d6692 review) —
+   *  distinct from `openedAt` (the real trip time, only advanced by a
+   *  confirmed post-probe failure via record()). Anchors the "one probe per
+   *  cooldown window" throttle in shouldBlock() without needing a separate
+   *  in-flight latch: 0 until the first probe is granted after (re)opening. */
+  lastProbeAt: number;
 }
 
 export class CircuitBreaker {
@@ -127,6 +133,7 @@ export class CircuitBreaker {
         lastExitTail: '',
         open: false,
         openedAt: 0,
+        lastProbeAt: 0,
       };
       this.#state.set(key, entry);
     }
@@ -166,36 +173,57 @@ export class CircuitBreaker {
    * Check whether dispatch should be blocked for the given key.
    * Returns a reason string if blocked, or null if dispatch is allowed.
    *
-   * PURE READ — must not mutate `entry` (ticket 970d6692). The persistent
-   * (TicketSessionManager.dispatchTrigger) and one-shot (SubagentManager.spawn)
-   * paths share ONE CircuitBreaker instance and each call shouldBlock() on the
-   * SAME key for the SAME logical spawn attempt (dispatchTrigger declines for
-   * an unrelated reason → event-dispatcher falls back to a one-shot spawn,
-   * which re-checks). This used to stamp `entry.openedAt = Date.now()` the
-   * moment a half-open probe was allowed, so the first gate's "allowed" call
-   * consumed the probe and reset the cooldown clock to ~0 — the second gate,
-   * checking moments later, always saw "opened 0s ago" and blocked, forever
-   * (the breaker could never self-heal without a manager restart). Two
-   * independent reads of unmutated state always agree; only a confirmed
-   * post-spawn failure (record()) may advance `openedAt`.
+   * Pure while the entry is closed or still cooling down. Granting a
+   * half-open probe DOES mutate `entry.lastProbeAt` (ticket 970d6692 review
+   * round 2) — that stamp is what limits the breaker to a single probe per
+   * cooldown window when independent callers share one CircuitBreaker
+   * instance (e.g. a genuinely separate, concurrent second trigger for the
+   * same key). `entry.openedAt` itself is never touched here — only a
+   * confirmed post-probe failure (record()) may advance it — so "opened Xs
+   * ago" in the blocked message always reflects the real trip time, never a
+   * mere query, and a granted probe that later succeeds (recordSuccess())
+   * leaves the breaker open for another full cooldown window before the
+   * NEXT probe, exactly like today's non-consecutive-failure policy
+   * (ticket b2e88390 — one success is not an operator sign-off).
+   *
+   * Callers that chain two checks for the SAME logical spawn attempt
+   * (dispatchTrigger declining for an unrelated reason → event-dispatcher
+   * falling back to a one-shot spawn) MUST NOT call shouldBlock() twice —
+   * the second call would see the `lastProbeAt` the first call just stamped
+   * and read "probed moments ago, still cooling down", re-blocking the very
+   * attempt that was just granted (the original ticket 970d6692 bug). Thread
+   * the FIRST call's decision into the fallback instead — see
+   * `SubagentSpawnArgs.circuitBreakerDecision` and its use in
+   * event-dispatcher.ts. Two independent shouldBlock() calls are only
+   * correct when they represent two independent attempts.
    */
   shouldBlock(key: string): string | null {
     const entry = this.#state.get(key);
     if (!entry || !entry.open) return null;
 
-    // Allow a single "half-open" probe after the cooldown period.
-    const elapsed = Date.now() - entry.openedAt;
+    // Allow a single "half-open" probe per cooldown window, anchored to
+    // whichever is more recent: the real (re)open time, or the last probe
+    // grant. This is what stops a second, independent concurrent attempt
+    // from also being waved through while the first probe's real spawn is
+    // still in flight — or was reaped without ever reporting back, since
+    // there is no separate "probe in progress" latch that could get stuck;
+    // it is just a rolling per-cooldown throttle that self-heals on the next
+    // window regardless of how the previous probe resolved.
+    const anchor = Math.max(entry.openedAt, entry.lastProbeAt);
+    const elapsed = Date.now() - anchor;
     if (elapsed >= this.#cooldownMs) {
+      entry.lastProbeAt = Date.now();
       log(
         `[circuit-breaker] HALF-OPEN probe allowed key=${key} ` +
-          `(${Math.round(elapsed / 60_000)}min since open)`,
+          `(${Math.round((Date.now() - entry.openedAt) / 60_000)}min since open)`,
       );
       return null;
     }
 
     return (
       `circuit_breaker_open (${entry.consecutiveFailures} consecutive non-transient exits, ` +
-      `last exit=${entry.lastExitCode}, opened ${Math.round((Date.now() - entry.openedAt) / 1000)}s ago)`
+      `last exit=${entry.lastExitCode}, opened ${Math.round((Date.now() - entry.openedAt) / 1000)}s ago, ` +
+      `next probe in ${Math.round((this.#cooldownMs - elapsed) / 1000)}s)`
     );
   }
 

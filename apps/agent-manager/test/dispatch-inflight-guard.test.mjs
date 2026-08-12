@@ -130,15 +130,21 @@ function makeSessionRecord(sessionKey, child) {
 // actually kills it. Every guard path — _inflight reservation, _getLiveSession
 // reuse, dispatchReserved hand-off, force-respawn — is the production code.
 class RealTicketMgrStub extends RealTicketMgr {
-  constructor(cfg, { spawnGate = null } = {}) {
-    super(cfg);
+  constructor(cfg, { spawnGate = null, failSpawn = false, circuitBreaker } = {}) {
+    super(cfg, circuitBreaker);
     this.spawnCount = 0;
     this.followUps = [];
     this.spawnGate = spawnGate; // optional deferred to hold a spawn in-flight
+    // ticket 970d6692: force dispatchTrigger to decline with 'spawn_failed'
+    // — an UNRELATED reason reached only AFTER its own circuit-breaker gate
+    // already passed — so tests can drive the real dispatchTrigger→one-shot
+    // fallback event-dispatcher.ts takes on any non-breaker decline.
+    this.failSpawn = failSpawn;
   }
   async _spawnSession(sessionKey, _rolePrompt, _firstTurnText, _opts) {
     this.spawnCount++;
     if (this.spawnGate) await this.spawnGate.promise;
+    if (this.failSpawn) return null;
     const child = spawnDummyChild();
     const sess = makeSessionRecord(sessionKey, child);
     this._sessions.set(sessionKey, sess);
@@ -391,6 +397,36 @@ test('gate releases on circuit_breaker_open (no wedge, no fall-through to one-sh
   assert.equal(calls.spawn.length, 0, 'circuit-open does NOT fall back to a one-shot');
   // Slot released → not wedged.
   assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'a1').acquired, true, 'slot released on the circuit-open exit');
+});
+
+test("dispatchTrigger's circuit-breaker pass is honored by the one-shot fallback, not re-queried (ticket 970d6692)", async () => {
+  // Reproduces the reported production sequence: the breaker is OPEN and past
+  // cooldown, dispatchTrigger's OWN circuit-breaker gate grants the single
+  // half-open probe (stamping lastProbeAt), but dispatchTrigger declines
+  // anyway for an UNRELATED reason (here: its _spawnSession fails), so
+  // event-dispatcher falls back to a one-shot spawn — the SAME logical
+  // attempt reaching a SECOND internal gate. Before the fix, that second gate
+  // called shouldBlock() again, saw the lastProbeAt gate ① had just stamped,
+  // and re-blocked with "opened 0s ago" — the breaker could never self-heal.
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('a1', 't1', 'assignee');
+  cb.record(key, 1, 'x');
+  cb.record(key, 1, 'x'); // opens
+  cb.getOpenBreakers()[0].entry.openedAt = Date.now() - 200; // cooldown elapsed
+
+  const mgr = new RealTicketMgrStub(makeConfig(), { failSpawn: true, circuitBreaker: cb });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  await dispatcher.handleTrigger(evJson());
+
+  assert.equal(mgr.spawnCount, 1, "dispatchTrigger's own gate passed and it attempted (and failed) its own spawn");
+  assert.equal(calls.spawn.length, 1, 'declined for an unrelated reason → fell back to the one-shot spawn');
+  assert.equal(
+    calls.spawn[0].circuitBreakerDecision,
+    null,
+    "the fallback must carry dispatchTrigger's already-granted verdict (null = allowed) instead of leaving " +
+      'spawn() to re-query shouldBlock() and re-block the attempt it was meant to allow',
+  );
 });
 
 test('gate releases on a provisioning abort so a post-recovery retry proceeds', async () => {

@@ -201,20 +201,25 @@ test('half-open probe allowed after cooldown', () => {
 });
 
 // ---------------------------------------------------------------------------
-// ticket 970d6692 — shouldBlock() must be a PURE read. TicketSessionManager.
-// dispatchTrigger and SubagentManager.spawn share ONE CircuitBreaker instance
-// and both call shouldBlock() on the same key for the same logical spawn
-// attempt (dispatchTrigger declines for an unrelated reason → event-dispatcher
-// falls back to a one-shot spawn, which re-checks the breaker). Before the
-// fix, shouldBlock() stamped `entry.openedAt = Date.now()` the instant it
-// allowed a half-open probe, so the first gate's "allowed" call consumed the
-// probe and reset the cooldown clock to ~0 — the second gate, checking the
-// SAME key moments later, always saw "opened 0s ago" and blocked. Every
-// future attempt repeated the identical two-gate sequence, so the breaker
-// could never self-heal short of a manager restart.
+// ticket 970d6692 — round 1 made shouldBlock() a fully pure read so both
+// gates checking the SAME logical spawn attempt would agree. Review round 2
+// caught that a FULLY pure read also lets a genuinely SEPARATE concurrent
+// attempt for the same key sail through during the same half-open window
+// (breaking the "single probe" invariant), and that recordSuccess() leaving
+// `openedAt` untouched meant the elapsed-since-open condition, once true,
+// stayed true forever — a permanent bypass, not a permanent block.
+//
+// The fix: `entry.lastProbeAt` anchors a rolling "one probe granted per
+// cooldown window" throttle (see shouldBlock() in circuit-breaker.ts), and
+// event-dispatcher.ts now calls shouldBlock() at most ONCE per logical
+// attempt — dispatchTrigger's own check result is threaded into the one-shot
+// fallback spawn() via `SubagentSpawnArgs.circuitBreakerDecision` instead of
+// letting spawn() re-query (see the integration test in
+// dispatch-inflight-guard.test.mjs: 'dispatchTrigger's circuit-breaker pass
+// is honored by the one-shot fallback, not re-blocked').
 // ---------------------------------------------------------------------------
 
-test('two independent shouldBlock() checks on the same key after cooldown both allow (probe decision is consistent)', () => {
+test('a second, independent shouldBlock() check right after cooldown is blocked — only one probe per window', () => {
   const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
   const key = CircuitBreaker.key('agent-1', 'ticket-1', 'reviewer');
 
@@ -224,13 +229,44 @@ test('two independent shouldBlock() checks on the same key after cooldown both a
   const entry = cb.getOpenBreakers()[0].entry;
   entry.openedAt = Date.now() - 200; // simulate cooldown elapsed
 
-  // Gate ①: e.g. TicketSessionManager.dispatchTrigger's circuit-breaker check.
-  const gate1 = cb.shouldBlock(key);
-  // Gate ②: e.g. SubagentManager.spawn's check, moments later for the SAME attempt.
-  const gate2 = cb.shouldBlock(key);
+  // Attempt A: the first caller to check after cooldown elapses — e.g. the
+  // ticket-trigger dispatch path.
+  const attemptA = cb.shouldBlock(key);
+  // Attempt B: a genuinely SEPARATE, concurrent attempt for the SAME key
+  // (e.g. a comment-mention one-shot racing the ticket trigger) — NOT a
+  // second gate re-checking attempt A's own already-granted spawn.
+  const attemptB = cb.shouldBlock(key);
 
-  assert.equal(gate1, null, 'first gate allows the half-open probe');
-  assert.equal(gate2, null, 'second gate must agree and also reach the actual spawn');
+  assert.equal(attemptA, null, 'the first attempt is granted the half-open probe');
+  assert.ok(attemptB, 'a second, independent concurrent attempt must NOT also get a probe');
+  assert.ok(attemptB.includes('circuit_breaker_open'));
+});
+
+test('after a granted probe succeeds, the breaker stays open and the NEXT probe still needs a fresh cooldown', () => {
+  const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+  const key = CircuitBreaker.key('agent-1', 'ticket-1', 'assignee');
+
+  cb.record(key, 1);
+  cb.record(key, 1); // opens
+  const entry = cb.getOpenBreakers()[0].entry;
+  entry.openedAt = Date.now() - 200; // cooldown elapsed
+
+  assert.equal(cb.shouldBlock(key), null, 'half-open probe granted');
+  cb.recordSuccess(key); // the probed spawn posted a real comment
+
+  // Immediately after: still open (ticket b2e88390 — one success is not an
+  // operator sign-off), and the next probe is a fresh cooldown away from the
+  // grant, not immediately available again — recordSuccess() must not have
+  // reopened the window early.
+  assert.ok(cb.shouldBlock(key), 'still open right after a single success');
+  assert.equal(cb.getOpenBreakers().length, 1, 'recordSuccess must not auto-close an open breaker');
+
+  // Once another full cooldown has elapsed since that probe's grant, the
+  // breaker allows exactly one more — repeating indefinitely until an
+  // operator calls resetAgent() (restart_agent) or a real post-probe failure
+  // re-stamps openedAt via record().
+  entry.lastProbeAt = Date.now() - 200;
+  assert.equal(cb.shouldBlock(key), null, 'a fresh cooldown since the last grant allows another probe');
 });
 
 test('shouldBlock() does not mutate openedAt — repeated blocked checks do not reset the cooldown', () => {
