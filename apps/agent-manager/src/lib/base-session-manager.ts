@@ -330,6 +330,27 @@ export const INFLIGHT_SUPPRESS_SAFETY_VALVE = 3;
  *  보다 일찍 잡아 경고를 남기는 것이 목적. */
 export const INFLIGHT_SUPPRESS_SAFETY_VALVE_MIN_AGE_MS = 5 * 60_000; // 5분
 
+/** OS-level liveness probe for a child pid. `process.kill(pid, 0)` is a
+ *  non-destructive existence check — ESRCH means the kernel has reaped the
+ *  process, EPERM means it exists but we lack permission to signal it (treat
+ *  as alive — same uid in practice for us). Exported as a standalone pure
+ *  function (ticket fdf6714e) so `dispatch-preflight.ts`'s process-local
+ *  `InflightDispatchTracker` — which has no `BaseSessionManager` instance to
+ *  call `_isPidAlive` on — can reuse the SAME probe for its own pid-liveness
+ *  escape hatch, mirroring `INFLIGHT_RESERVATION_STALE_MS`'s existing
+ *  single-source-of-truth sharing between the two registries. */
+export function isPidAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    // EPERM means the process exists but we can't signal it — count as
+    // alive. Anything else (ESRCH most commonly) means dead.
+    return err?.code === 'EPERM';
+  }
+}
+
 export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
@@ -397,24 +418,14 @@ export class BaseSessionManager {
     return this._sessions.get(sessionKey);
   }
 
-  /** OS-level liveness probe for a child pid. `process.kill(pid, 0)` is a
-   *  non-destructive existence check — ESRCH means the kernel has reaped the
-   *  process, EPERM means it exists but we lack permission to signal it
-   *  (treat as alive — same uid in practice for us). Used by
-   *  `_getLiveSession` to detect a stale `_sessions` entry whose child died
-   *  without the exit handler firing (defensive — shouldn't happen with
-   *  `#wireExit` always attached, but cheap to verify and we've observed the
-   *  failure mode in operator reports). */
+  /** Instance-method wrapper over the standalone {@link isPidAlive}, kept for
+   *  existing subclass call sites. Used by `_getLiveSession` to detect a
+   *  stale `_sessions` entry whose child died without the exit handler firing
+   *  (defensive — shouldn't happen with `#wireExit` always attached, but
+   *  cheap to verify and we've observed the failure mode in operator
+   *  reports). */
   protected _isPidAlive(pid: number): boolean {
-    if (!pid || pid <= 0) return false;
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err: any) {
-      // EPERM means the process exists but we can't signal it — count as
-      // alive. Anything else (ESRCH most commonly) means dead.
-      return err?.code === 'EPERM';
-    }
+    return isPidAlive(pid);
   }
 
   /** Return the SessionRecord under `sessionKey` only when its child pid is
