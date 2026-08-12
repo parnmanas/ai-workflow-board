@@ -42,7 +42,11 @@ export class AuthService {
   ) {
     // Expose the live login-session count for memory observability.
     metrics.register('auth.sessions', () => this.sessions.size);
-    // Clean expired sessions and stale login-attempt counters every 5 minutes
+    // Clean expired sessions and stale login-attempt counters every 5 minutes.
+    // unref() — this cleanup timer must never be the thing keeping the process
+    // alive (the HTTP server's listening socket already does that in prod);
+    // without it, every AuthService instance leaves a live timer behind, which
+    // hangs `node --test` once nothing else is pending (리뷰 지적, 티켓 f177aeb3).
     setInterval(() => {
       const now = new Date();
       for (const [token, session] of this.sessions) {
@@ -52,7 +56,7 @@ export class AuthService {
       }
       this._sweepAttempts(this.loginAttemptsByEmail);
       this._sweepAttempts(this.loginAttemptsByIp);
-    }, 5 * 60 * 1000);
+    }, 5 * 60 * 1000).unref();
   }
 
   private _sweepAttempts(map: Map<string, LoginAttemptState>) {

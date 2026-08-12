@@ -36,8 +36,8 @@ describe('Auth login throttle (M2)', () => {
 
   beforeEach(async () => {
     // 매 테스트마다 새 AuthService 인스턴스 — 실패 카운터 Map이 테스트 간에
-    // 새지 않도록 한다 (setInterval 청소 타이머는 등록되지만 unref는 프로덕션
-    // 코드 책임이 아니라 여기선 그냥 인스턴스 폐기로 충분).
+    // 새지 않도록 한다. 생성자가 등록하는 5분 청소 setInterval은 unref()되어
+    // 있어(auth.service.ts) 인스턴스를 몇 개를 만들든 프로세스 종료를 막지 않는다.
     authService = new AuthService(userRepo, new MemoryMetricsRegistry(), new LogService());
     await userRepo.clear();
     await userRepo.save(userRepo.create({
