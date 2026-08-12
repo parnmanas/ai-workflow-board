@@ -3042,9 +3042,29 @@ export class EventDispatcher {
     // committing). Only role-shortcut mentions can collide this way — a direct
     // @[agent:id] mention carries no role and can't be matched against a column
     // trigger's (ticket, role) seat.
+    //
+    // Round 2 (reviewer 리뷰): a PEEK (hasInflightOrLiveDispatch) only catches
+    // the "column trigger first" ordering. The real dispatch order from a
+    // review-change-request comment is comment POSTED, then the column moves
+    // — so comment_mention's one-shot provisioning is usually the FIRST of the
+    // two to run, and a peek finds nothing to suppress against. The one-shot
+    // spawn below never registered itself anywhere, so the column trigger that
+    // follows moments later (dispatchTrigger's own tryReserveDispatch) finds
+    // the seat free too — twin spawn either order. Fix: CLAIM the seat with
+    // the SAME atomic tryReserveDispatch the column-trigger path uses (ticket
+    // 3d180f85's `_inflight` CAS map), instead of merely peeking. Whichever of
+    // the two dispatch paths reaches tryReserveDispatch first wins the seat;
+    // the other — regardless of which one it is — sees it occupied and
+    // suppresses. The reservation is held for the one-shot's FULL lifetime via
+    // SubagentSpawnArgs.onExit (not just until spawn() returns a pid), so the
+    // column trigger can't slip in and re-claim the seat while the one-shot is
+    // still mid-turn.
+    let mentionSeat: { role: string; agentId: string; nonce?: string } | null = null;
+    let mentionSeatTransferred = false;
     if (mention.mention_source === 'role' && mention.role_shortcut) {
       const targetAgentId = ev.agent_id || '';
-      if (this.#ticketSessionManager?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)) {
+      const tsm = this.#ticketSessionManager;
+      const suppressForSeat = (): void => {
         log(
           `Comment mention suppressed — column-move trigger already owns this (ticket, role, agent) seat: ` +
             `ticket=${ticketId.slice(0, 8) || '_'} role=${mention.role_shortcut} agent=${targetAgentId.slice(0, 8) || '_'}`,
@@ -3058,55 +3078,92 @@ export class EventDispatcher {
             '억제했습니다. 이 코멘트 내용은 진행 중인 세션이 티켓 상태를 다시 조회할 때 함께 반영됩니다. ' +
             '(ticket e90294e7)',
         });
+      };
+      if (typeof tsm?.tryReserveDispatch === 'function') {
+        const reservation = tsm.tryReserveDispatch(ticketId, mention.role_shortcut, targetAgentId);
+        // !acquired: a column trigger already holds the provisioning/spawn
+        // window for this seat. live: a session went live in the narrow race
+        // window between forwardCommentMention (above) and this reserve call
+        // — same seat, already owned. Either way we don't spawn.
+        if (!reservation.acquired || reservation.live) {
+          suppressForSeat();
+          return;
+        }
+        // Fresh reservation — WE now own this seat until the one-shot spawned
+        // below exits (or we bail out before spawning it).
+        mentionSeat = { role: mention.role_shortcut, agentId: targetAgentId, nonce: reservation.nonce };
+      } else if (tsm?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)) {
+        // Legacy/test double without tryReserveDispatch — best-effort peek,
+        // same as before this fix.
+        suppressForSeat();
         return;
       }
     }
 
-    const canDelegate =
-      delegationEnabled && this.#subagentManager && this.#subagentManager.canSpawn();
-    if (canDelegate && this.#subagentManager) {
-      try {
-        const ticket = ticketId ? await fetchTicketContext(this.#config, ticketId) : null;
-        const rolePrompt = ev.role_prompt || '';
-        const taskText =
-          this.#prompts?.composeCommentMentionPrompt(
-            ticket,
-            rolePrompt,
-            mention,
-            ticketId,
-          ) ?? `[mention] ${ticketId} ${commentId}`;
+    try {
+      const canDelegate =
+        delegationEnabled && this.#subagentManager && this.#subagentManager.canSpawn();
+      if (canDelegate && this.#subagentManager) {
+        try {
+          const ticket = ticketId ? await fetchTicketContext(this.#config, ticketId) : null;
+          const rolePrompt = ev.role_prompt || '';
+          const taskText =
+            this.#prompts?.composeCommentMentionPrompt(
+              ticket,
+              rolePrompt,
+              mention,
+              ticketId,
+            ) ?? `[mention] ${ticketId} ${commentId}`;
 
-        const result = await this.#subagentManager.spawn({
-          kind: 'trigger',
-          taskText,
-          rolePrompt,
-          // per-(comment, target agent) — role 멘션의 공동 홀더 팬아웃(per-agent
-          // SSE × 같은 commentId)이 rule 1 dedup 에 drop 되지 않게 agent 차원 포함.
-          triggerId: mentionTriggerId(commentId, agentId),
-          ticketId,
-          agentId,
-          // Pin role only for role-shortcut mentions (@assignee / @reviewer).
-          // Direct @-mentions don't carry a role, so leaving it empty lets
-          // server-side resolveAuthorRole pick the agent's single held role
-          // (or stay null when ambiguous) instead of pinning a guess.
-          role: mention.mention_source === 'role' ? mention.role_shortcut || '' : '',
-          agentContext,
-        });
-        if (result.spawned) {
+          const seat = mentionSeat;
+          const result = await this.#subagentManager.spawn({
+            kind: 'trigger',
+            taskText,
+            rolePrompt,
+            // per-(comment, target agent) — role 멘션의 공동 홀더 팬아웃(per-agent
+            // SSE × 같은 commentId)이 rule 1 dedup 에 drop 되지 않게 agent 차원 포함.
+            triggerId: mentionTriggerId(commentId, agentId),
+            ticketId,
+            agentId,
+            // Pin role only for role-shortcut mentions (@assignee / @reviewer).
+            // Direct @-mentions don't carry a role, so leaving it empty lets
+            // server-side resolveAuthorRole pick the agent's single held role
+            // (or stay null when ambiguous) instead of pinning a guess.
+            role: mention.mention_source === 'role' ? mention.role_shortcut || '' : '',
+            agentContext,
+            // ticket e90294e7 round 2: release the claimed seat when this
+            // one-shot's process exits, not when spawn() merely returns a pid
+            // — the column trigger must stay locked out for the seat's whole
+            // lifetime, not just the synchronous spawn call.
+            onExit: seat
+              ? () => this.#ticketSessionManager?.releaseDispatch?.(ticketId, seat.role, seat.agentId, seat.nonce)
+              : undefined,
+          });
+          if (result.spawned) {
+            mentionSeatTransferred = !!mentionSeat;
+            log(
+              `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
+            );
+            return;
+          }
           log(
-            `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
+            `Comment mention subagent spawn declined (${result.reason}); no further fallback in standalone mode`,
           );
-          return;
+        } catch (err: any) {
+          log(`Comment mention delegation failed: ${err?.message ?? err}; dropping`);
         }
-        log(
-          `Comment mention subagent spawn declined (${result.reason}); no further fallback in standalone mode`,
-        );
-      } catch (err: any) {
-        log(`Comment mention delegation failed: ${err?.message ?? err}; dropping`);
+      }
+
+      log(`Comment mention dropped (no delegation path): ticket=${ticketId} comment=${commentId}`);
+    } finally {
+      // Release the claimed seat on every exit path that did NOT hand it off
+      // to the spawned one-shot's onExit hook above (decline, throw, no
+      // delegation path). Idempotent; releaseDispatch no-ops on a missing/
+      // stale-generation key.
+      if (mentionSeat && !mentionSeatTransferred) {
+        this.#ticketSessionManager?.releaseDispatch?.(ticketId, mentionSeat.role, mentionSeat.agentId, mentionSeat.nonce);
       }
     }
-
-    log(`Comment mention dropped (no delegation path): ticket=${ticketId} comment=${commentId}`);
   }
 
   handleBoardUpdate(raw: string): void {

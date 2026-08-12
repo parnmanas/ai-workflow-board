@@ -1162,6 +1162,71 @@ test('baseline: a role-mention with no concurrent column trigger dispatches exac
   assert.equal(calls.spawn.length, 1, 'nothing in flight to collide with — the mention spawns its one-shot session');
 });
 
+// ───── Part F round 2 (reviewer 지적, e90294e7): the REVERSE dispatch order ─────
+//
+// The tests above only prove the "column trigger first" ordering is safe. The
+// reviewer pointed out the real-world order from a review "change requested"
+// comment is the OPPOSITE: the comment (carrying `@[role:assignee]`) posts
+// FIRST, and the Review→In Progress column move — and its agent_trigger — land
+// a moment AFTER. In that order, comment_mention's one-shot fallback is the
+// FIRST of the two dispatch paths to reach the seat. A PEEK-only guard
+// (hasInflightOrLiveDispatch) finds nothing to suppress against at that point
+// — there IS no reservation yet, because nothing has claimed one — so the
+// mention falls through to a one-shot spawn that (pre-fix) never registered
+// itself in TicketSessionManager._inflight. The column trigger that follows
+// then finds the seat free too and twin-spawns a persistent session, exactly
+// reproducing da4358ee's sibling-session incident with the order flipped.
+//
+// Non-vacuous: reverting handleCommentMention back to a `hasInflightOrLiveDispatch`
+// peek (instead of an atomic `tryReserveDispatch` claim held across the
+// one-shot's full lifetime via `onExit`) makes the trigger below also spawn —
+// mgr.spawnCount would be 1 instead of 0, and total spawns 2 instead of 1.
+
+test('reverse order (round 2): role-mention arrives FIRST and claims the seat; the column-move trigger for the SAME seat that follows is suppressed — total spawns stays 1', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  // Real wire payload: the reviewer's "change requested" comment carries the
+  // role mention and is delivered as comment_mention BEFORE the column-move
+  // agent_trigger for the same (ticket=t1, role=assignee, agent=a1) seat.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1, 'the mention is first to the seat — it claims it and spawns its one-shot');
+  assert.equal(
+    typeof calls.spawn[0].onExit,
+    'function',
+    'the claimed seat is held via onExit for the one-shot\'s full lifetime, not released when spawn() merely returns a pid',
+  );
+
+  // The SAME reviewer comment's column move now lands, firing agent_trigger
+  // for the identical seat.
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(
+    mgr.spawnCount,
+    0,
+    'the column trigger found the seat already claimed by the mention\'s one-shot and did not twin-spawn a persistent session',
+  );
+});
+
+test('reverse order (round 2): once the mention\'s one-shot exits (onExit fires), the seat is free again for a later trigger', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 1);
+  const onExit = calls.spawn[0].onExit;
+  assert.equal(typeof onExit, 'function');
+
+  // Simulate the one-shot subagent process actually exiting — SubagentManager
+  // invokes this hook once, on process close, never on spawn() merely
+  // returning a pid.
+  onExit();
+
+  // A later, unrelated trigger for the same seat is no longer blocked by a
+  // stale reservation the mention forgot to release.
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(mgr.spawnCount, 1, 'the seat was released on the one-shot\'s exit, so the later trigger dispatched normally');
+});
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);
