@@ -1014,6 +1014,154 @@ test('CAS: the fallback slot rejects an evicted holder’s stale-generation rele
   });
 });
 
+// ───────── Part F: comment_mention vs column-move trigger collision (ticket e90294e7) ─────────
+//
+// da4358ee's postmortem: a reviewer's single "change requested" comment that
+// both (a) moves the ticket Review→In Progress AND (b) carries
+// `@[role:assignee]` fires TWO independent triggers — agent_trigger
+// (handleTrigger) and comment_mention (handleCommentMention) — for the exact
+// same (ticket, role, agent) seat. Part A–E above proved handleTrigger's OWN
+// twin (another agent_trigger for the same key) is caught by the authoritative
+// _inflight reservation. But handleCommentMention's one-shot fallback never
+// consulted that registry — it only asked forwardCommentMention for a LIVE
+// session, which is blind to a column trigger still mid-provisioning (worktree
+// checkout/rebase, no pid yet) — so the mention fell through and spawned an
+// independent one-shot session racing the column trigger's session inside the
+// SAME worktree (observed live: both exited without committing).
+//
+// Non-vacuous: reverting the `hasInflightOrLiveDispatch` gate in
+// handleCommentMention (or TicketSessionManager's implementation of it) makes
+// the first test below spawn a second (competing) session — calls.spawn.length
+// would be 1 instead of 0.
+
+function mentionEvJson(fields = {}) {
+  return JSON.stringify({
+    ticket_id: 't1',
+    comment_id: 'c1',
+    agent_id: 'a1',
+    actor_id: 'reviewer-1',
+    actor_type: 'agent',
+    actor_name: 'Reviewer',
+    content: '변경 요청 — 지적사항을 반영해 주세요.',
+    role_prompt: '',
+    mention_source: 'role',
+    role_shortcut: 'assignee',
+    ...fields,
+  });
+}
+
+test('role-mention is suppressed while a column-move trigger for the SAME (ticket, role, agent) seat is still provisioning', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  // The column-move trigger reserves the seat synchronously inside
+  // handleTrigger and then blocks in _spawnSession (worktree provisioning) —
+  // the session is NOT live yet, so forwardCommentMention alone would miss it.
+  const pTrigger = dispatcher.handleTrigger(evJson());
+  await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+  assert.equal(mgr._getLiveSession(KEY('t1', 'assignee', 'a1')), undefined, 'still provisioning — not live yet');
+
+  // The SAME reviewer comment's @[role:assignee] mention arrives for the same seat.
+  await dispatcher.handleCommentMention(mentionEvJson());
+  assert.equal(calls.spawn.length, 0, 'the mention did not spawn a competing one-shot session');
+
+  gate.resolve();
+  await pTrigger;
+  assert.equal(mgr.spawnCount, 1, 'only the column-triggered session ever spawned');
+  assert.ok(mgr._getLiveSession(KEY('t1', 'assignee', 'a1')), 'the column-triggered session completed normally');
+});
+
+test('the suppression posts a ticket comment so the mention is not silently lost', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+
+  const captured = [];
+  const savedFetchLocal = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (body.includes('"initialize"')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h.toLowerCase() === 'mcp-session-id' ? 'sess-1' : null) },
+        async text() { return ''; },
+        async json() { return {}; },
+      };
+    }
+    if (body.includes('"tools/call"')) {
+      try { captured.push(JSON.parse(body)); } catch { /* ignore */ }
+    }
+    return {
+      ok: true, status: 200, headers: { get: () => null },
+      async text() { return ''; }, async json() { return {}; },
+    };
+  };
+  try {
+    const pTrigger = dispatcher.handleTrigger(evJson());
+    await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+    await dispatcher.handleCommentMention(mentionEvJson());
+
+    const posted = await waitFor(
+      () =>
+        captured.some(
+          (c) =>
+            c?.params?.name === 'add_comment' &&
+            c?.params?.arguments?.ticket_id === 't1' &&
+            String(c?.params?.arguments?.content ?? '').includes('중복 dispatch 억제'),
+        ),
+      { timeoutMs: 3000 },
+    );
+    assert.equal(posted, true, 'a suppression notice was posted to the ticket');
+
+    gate.resolve();
+    await pTrigger;
+  } finally {
+    globalThis.fetch = savedFetchLocal;
+  }
+});
+
+test('a direct @[agent:id] mention (no role) is NOT suppressed by an in-flight column trigger — it has no role to collide on', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  const pTrigger = dispatcher.handleTrigger(evJson());
+  await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+
+  await dispatcher.handleCommentMention(mentionEvJson({ mention_source: 'direct', role_shortcut: '' }));
+  assert.equal(calls.spawn.length, 1, 'a direct mention still dispatches its own one-shot session');
+
+  gate.resolve();
+  await pTrigger;
+});
+
+test('a role-mention for a DIFFERENT role than the in-flight column trigger is NOT suppressed', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  const pTrigger = dispatcher.handleTrigger(evJson()); // role: assignee
+  await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+
+  await dispatcher.handleCommentMention(mentionEvJson({ role_shortcut: 'reviewer' }));
+  assert.equal(calls.spawn.length, 1, 'a different-role mention is an unrelated seat — dispatches normally');
+
+  gate.resolve();
+  await pTrigger;
+});
+
+test('baseline: a role-mention with no concurrent column trigger dispatches exactly as before', async () => {
+  const { calls } = await (async () => {
+    const mgr = new RealTicketMgrStub(makeConfig());
+    const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+    await dispatcher.handleCommentMention(mentionEvJson());
+    return { calls };
+  })();
+  assert.equal(calls.spawn.length, 1, 'nothing in flight to collide with — the mention spawns its one-shot session');
+});
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);
