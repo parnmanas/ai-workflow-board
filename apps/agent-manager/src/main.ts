@@ -413,7 +413,7 @@ async function runRuntime(
     `agent-manager starting (server=${config.url} version=${version})`,
   );
   log(
-    `Delegation: maxConcurrent=${config.delegation.maxConcurrent} ttl=${config.delegation.ttlMinutes}min idle=${config.delegation.idleMinutes}min cliBin=${config.delegation.claudeBin}`,
+    `Delegation: maxConcurrent=${config.delegation.maxConcurrent} ttl=${config.delegation.ttlMinutes}min idle=${config.delegation.idleMinutes}min claudeBin=${config.delegation.claudeBin} codexBin=${config.delegation.codexBin}`,
   );
 
   const agentIdReady = resolveAgentId(config).then((id) => {

@@ -52,6 +52,11 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   maxConcurrent: 15,
   ttlMinutes: 15,
   claudeBin: 'claude',
+  // ticket ce65cf25: codex 전용 bin override. 기본값은 CLI 타입 이름 그 자체
+  // (claudeBin 과 동일한 sentinel 관례) — cli-resolver 의 `configured !== ct`
+  // 체크가 이 값을 "override 없음"으로 취급해 정상 PATH/well-known 해석으로
+  // 빠진다. 오퍼레이터가 절대경로로 덮어쓰면 그 경로가 그대로 쓰인다.
+  codexBin: 'codex',
   appendSystemPromptMode: 'role_only',
   persistentChatSessions: true,
   persistentTicketSessions: true,

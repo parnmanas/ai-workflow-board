@@ -17,6 +17,7 @@ import crossSpawn from 'cross-spawn';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
+import { resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -75,6 +76,7 @@ export interface SessionDelegationConfig {
   idleMinutes?: number;
   maxTurnsPerSession?: number;
   claudeBin?: string;
+  codexBin?: string;
   persistentChatSessions?: boolean;
   persistentTicketSessions?: boolean;
   /** ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
@@ -650,13 +652,17 @@ export class BaseSessionManager {
         descriptor.args.push(...claudeRuntimeProfile.args);
       }
 
-      // `delegation.claudeBin` is the legacy operator override for the
-      // claude binary path only — passing it to non-claude adapters
-      // caused codex / antigravity spawns to launch the literal "claude" bin
-      // (resolver short-circuits on `configured`, returning it verbatim).
-      const binOverride = adapter.cliType === 'claude'
-        ? runtimeLease?.claudeExecutable() ?? this._config.delegation.claudeBin
-        : null;
+      // `delegation.claudeBin`/`delegation.codexBin` 은 CLI 별 오퍼레이터
+      // override(ticket ce65cf25). claudeBin 을 non-claude adapter 에 흘리면
+      // 잘못된 바이너리를 스폰하던 과거 사고 때문에 CLI 타입 게이팅이
+      // 필요했다 — resolveBinOverride 가 그 게이팅과 claude 의 runtime-lease
+      // 우선순위를 한 곳에 모아, 이 파일과 SubagentManager 가 같은 ternary 를
+      // 각자 구현하며 드리프트하지 않게 한다.
+      const binOverride = resolveBinOverride(
+        adapter.cliType,
+        this._config.delegation,
+        runtimeLease?.claudeExecutable(),
+      );
       const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();

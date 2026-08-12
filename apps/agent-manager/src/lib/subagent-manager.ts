@@ -23,6 +23,7 @@ import {
   STOP_GRACE_MS,
 } from './constants.js';
 import { log } from './logging.js';
+import { resolveBinOverride } from './cli-resolver.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -209,6 +210,7 @@ export interface SubagentDelegationConfig {
   maxConcurrent?: number;
   ttlMinutes?: number;
   claudeBin?: string;
+  codexBin?: string;
 }
 
 export interface SubagentAwareConfig extends AwbConfig {
@@ -722,11 +724,13 @@ export class SubagentManager implements SubagentManagerContract {
         descriptor.args.push(...claudeRuntimeProfile.args);
       }
 
-      // See base-session-manager: `delegation.claudeBin` is claude-only;
-      // forwarding it to codex / antigravity spawned the wrong binary.
-      const binOverride = adapter.cliType === 'claude'
-        ? runtimeLease?.claudeExecutable() ?? this.#config.delegation.claudeBin
-        : null;
+      // base-session-manager 와 동일 — resolveBinOverride 가 CLI 타입 게이팅과
+      // claude 의 runtime-lease 우선순위를 공유한다(ticket ce65cf25).
+      const binOverride = resolveBinOverride(
+        adapter.cliType,
+        this.#config.delegation,
+        runtimeLease?.claudeExecutable(),
+      );
       const resolvedBin = adapter.resolveBin(binOverride);
       // ST-7 follow-up: inject the per-agent CLI home dir via the
       // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
