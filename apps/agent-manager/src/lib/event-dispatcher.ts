@@ -1404,6 +1404,9 @@ export class EventDispatcher {
     // add_comment 응답의 증거가 아니라는 지적에 대응해 신설. #reportHermesMentionOutcome
     // 참고.
     'hermes_mention_no_reply',
+    // ticket e8105c84 리뷰 라운드3 지적 — pre-dispatch baseline 자체를 못 구한
+    // 경우를 "코멘트 0개"와 구분하기 위해 신설. #reportHermesMentionOutcome 참고.
+    'hermes_mention_baseline_unavailable',
   ]);
 
   // 실패를 세 곳에 일관되게 노출한다: (a) 매니저 로그(전체 detail, classify()가
@@ -1546,10 +1549,17 @@ export class EventDispatcher {
   // fetch에서 그대로 스냅샷)에 없는 새 id가 이 agent 이름으로 나타났는지만
   // 본다. 시간 폭 없이 정확한 집합 멤버십이라 클록 스큐도, "그냥 예전
   // 코멘트" 오인도 둘 다 없다.
+  //
+  // 리뷰 라운드3 지적: knownCommentIds가 null이면(pre-dispatch fetch 실패
+  // 또는 응답에 comments 누락) diff 자체를 신뢰할 수 없다 — 빈 Set으로
+  // 취급해 diff를 강행하면 이미 있던 동일 agent 코멘트가 전부 "새 응답"으로
+  // 오탐된다. baseline을 못 구한 경우는 정상적으로 코멘트가 0개인 경우와
+  // 구분해 별도 코드(hermes_mention_baseline_unavailable)로 fail-closed —
+  // diff를 아예 시도하지 않는다.
   async #reportHermesMentionOutcome(
     ticketId: string,
     agentId: string,
-    knownCommentIds: ReadonlySet<string>,
+    knownCommentIds: ReadonlySet<string> | null,
     result: RuntimeDispatchResult,
   ): Promise<void> {
     if (result.stopReason !== 'end_turn') {
@@ -1561,6 +1571,18 @@ export class EventDispatcher {
         `session ${result.sessionId} ended without confirming delivery (stop=${result.stopReason})`,
       );
       await this.#notifyHermesMentionFailureOnTicket(ticketId, result.stopReason);
+      return;
+    }
+    if (!knownCommentIds) {
+      await this.#reportHermesDispatchFailure(
+        'Hermes mention dispatch',
+        undefined,
+        undefined,
+        'hermes_mention_baseline_unavailable',
+        `session ${result.sessionId} ended with end_turn but the pre-dispatch comment baseline for ` +
+          `ticket=${ticketId} could not be captured — cannot verify agent=${agentId} actually replied`,
+      );
+      await this.#notifyHermesMentionFailureOnTicket(ticketId, 'hermes_mention_baseline_unavailable');
       return;
     }
     const replied = await hasNewAgentComment(this.#config, ticketId, agentId, knownCommentIds);
@@ -3024,11 +3046,16 @@ export class EventDispatcher {
         // 클록 스큐를 흡수할 만큼 넓으면서 동시에 같은 agent의 "그냥 예전
         // 코멘트"를 오탐하지 않을 만큼 좁을 수 없다. id 집합 멤버십은 두 실패
         // 모드 모두 없다.
-        const knownCommentIds = new Set<string>(
-          Array.isArray(ticket?.comments)
-            ? ticket.comments.map((c: any) => c?.id).filter(Boolean)
-            : [],
-        );
+        //
+        // 리뷰 라운드3 지적: fetchTicketContext()가 실패(ticket===null)하거나
+        // 응답에 comments가 없으면 위 로직이 빈 Set을 만드는데, 이는 "코멘트가
+        // 실제로 0개"와 구별이 안 된다 — baseline을 못 구한 것뿐인데 빈
+        // 집합으로 diff하면 이미 있던 동일 agent 코멘트가 전부 "새 응답"으로
+        // 오탐된다. null로 구분해 baseline 확보 실패 자체를 별도 실패
+        // 경로(#reportHermesMentionOutcome)로 fail-closed 처리한다.
+        const knownCommentIds: Set<string> | null = Array.isArray(ticket?.comments)
+          ? new Set<string>(ticket.comments.map((c: any) => c?.id).filter(Boolean))
+          : null;
         const result = await this.#dispatchHermes({
           agentContext,
           runId: `ticket:${ticketId}:${mention.role_shortcut || '_'}`,
