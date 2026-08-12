@@ -2314,6 +2314,13 @@ export class EventDispatcher {
     // consume the just-granted half-open probe's cooldown stamp a second time
     // and re-block the attempt it was meant to allow (the original bug).
     let circuitBreakerClearedByDispatchTrigger = false;
+    // ticket 970d6692 (review round 3): the try block below also awaits
+    // fetchTicketContext() and mutates the fetched ticket BEFORE calling
+    // dispatchTrigger() — either of those failing must not be mistaken for
+    // "dispatchTrigger's gate already ran". This flips true only immediately
+    // before the dispatchTrigger() call itself, so the catch below can tell
+    // a pre-dispatch failure apart from a failure inside/after the gate.
+    let dispatchTriggerInvoked = false;
 
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
@@ -2331,6 +2338,7 @@ export class EventDispatcher {
         const ticketPrompt = ev.ticket_prompt || '';
         const columnPrompt = ev.column_prompt || null;
 
+        dispatchTriggerInvoked = true;
         const result = await this.#ticketSessionManager.dispatchTrigger({
           ticketId: ev.ticket_id || '',
           role: ev.action || '',
@@ -2389,10 +2397,14 @@ export class EventDispatcher {
           `Ticket session dispatch declined (${result.reason}), falling back to one-shot subagent`,
         );
       } catch (err: any) {
-        // dispatchTrigger's circuit-breaker check runs first and synchronously
-        // (no I/O) before anything fallible, so a thrown exception here also
-        // implies it already passed.
-        circuitBreakerClearedByDispatchTrigger = true;
+        // Only trust the gate if dispatchTrigger() was actually called: its
+        // circuit-breaker check runs first and synchronously (no await)
+        // before anything fallible inside dispatchTrigger, so once the call
+        // has started, the check has definitely run. But fetchTicketContext()
+        // and the ticket mutation above run BEFORE that call — a failure
+        // there means dispatchTrigger, and its gate, never ran at all, so the
+        // one-shot fallback below must re-query the breaker itself.
+        circuitBreakerClearedByDispatchTrigger = dispatchTriggerInvoked;
         log(
           `Ticket session path failed: ${err?.message ?? err}, falling back to one-shot subagent`,
         );

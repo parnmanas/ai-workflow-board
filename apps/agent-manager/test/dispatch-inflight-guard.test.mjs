@@ -429,6 +429,67 @@ test("dispatchTrigger's circuit-breaker pass is honored by the one-shot fallback
   );
 });
 
+test("a pre-dispatchTrigger failure must NOT borrow dispatchTrigger's gate verdict — the one-shot fallback re-queries its own shouldBlock() (ticket 970d6692 round 3)", async () => {
+  // Round-2 fix trusted dispatchTrigger's verdict whenever the WHOLE
+  // try-block threw, including a failure BEFORE dispatchTrigger() was ever
+  // called — fetchTicketContext() and the ticket-context mutation that
+  // follows it both run first. That would silently bypass an OPEN breaker
+  // that dispatchTrigger's shouldBlock() never actually got to consult.
+  // Reproduce the pre-dispatch failure with a frozen ticket object:
+  // fetchTicketContext() resolves fine, but the very next statement
+  // (`ticket.current_column_id = ...`) throws (strict-mode write to a
+  // frozen object) before dispatchTrigger is reached at all. Only the FIRST
+  // ticket fetch (the persistent-session path) is frozen — the one-shot
+  // fallback below makes its OWN independent fetchTicketContext call and
+  // must get a normal mutable ticket, or it would fail closed for an
+  // unrelated reason before ever reaching spawn().
+  const savedFetchLocal = globalThis.fetch;
+  let ticketFetchCount = 0;
+  globalThis.fetch = async (url) => {
+    if (typeof url !== 'string' || !url.includes('/api/agent/tickets/')) {
+      return { ok: false, status: 503, async json() { return {}; }, async text() { return ''; } };
+    }
+    ticketFetchCount++;
+    const ticket = ticketFetchCount === 1 ? Object.freeze({ id: 't1', title: 'x' }) : { id: 't1', title: 'x' };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return ticket;
+      },
+      async text() {
+        return '';
+      },
+    };
+  };
+  try {
+    // Cooldown-elapsed OPEN breaker: if dispatchTrigger's gate HAD run, a
+    // real probe would be allowed (null) — so passing that verdict through
+    // unexamined is indistinguishable from the fix working, unless we check
+    // the exact value received below.
+    const cb = new CircuitBreaker({ threshold: 2, cooldownMs: 100 });
+    const key = CircuitBreaker.key('a1', 't1', 'assignee');
+    cb.record(key, 1, 'x');
+    cb.record(key, 1, 'x'); // opens
+    cb.getOpenBreakers()[0].entry.openedAt = Date.now() - 200; // cooldown elapsed
+
+    const mgr = new RealTicketMgrStub(makeConfig(), { circuitBreaker: cb });
+    const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+    await dispatcher.handleTrigger(evJson());
+
+    assert.equal(mgr.spawnCount, 0, "dispatchTrigger's own gate never ran — the throw happened before its call");
+    assert.equal(calls.spawn.length, 1, 'still falls back to the one-shot spawn on the pre-dispatch failure');
+    assert.equal(
+      calls.spawn[0].circuitBreakerDecision,
+      undefined,
+      'must NOT borrow a verdict that was never actually computed — spawn() has to re-query shouldBlock() itself',
+    );
+  } finally {
+    globalThis.fetch = savedFetchLocal;
+  }
+});
+
 test('gate releases on a provisioning abort so a post-recovery retry proceeds', async () => {
   // No worktreeManager → provisioning fails closed and #dispatchTriggerBody
   // aborts before any spawn. The slot must still release.
