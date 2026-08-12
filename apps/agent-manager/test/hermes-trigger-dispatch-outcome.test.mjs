@@ -20,12 +20,15 @@ import { spawnFailureTracker } from '../dist/lib/spawn-failure-tracker.js';
 // fixture, but through handleTrigger()/#ackDispatch (the trigger path's existing ack
 // channel) instead of a ticket comment (the mention path has no ack channel).
 //
-// NOTE: this test's agent context deliberately omits `cli_home_dir` — with it set
-// (the real production shape; agent-manager-commands.ts always populates it
-// regardless of cli type), #dispatchTriggerBody's CLI-readiness gate (~line 2278)
-// calls createAdapter('hermes'), which throws before ever reaching the Hermes branch
-// this ticket fixes. That's a separate, pre-existing bug, filed as
-// #[ticket:73772059-fd17-486f-b195-ca7ed6db75bb|#dispatchTriggerBody CLI-readiness 게이트가 Hermes cli 트리거를 spawn 전에 무조건 크래시시킴 (ack 전무)].
+// NOTE: 아래 case 1-2 는 agent context 에서 `cli_home_dir` 를 의도적으로
+// 생략한다. case 3(ticket 73772059)은 실제 프로덕션 shape 대로 이 값을
+// 채운다 — agent-manager-commands.ts 는 cli 타입과 무관하게 cli_home_dir 를
+// 항상 채우므로, hermes-cli role 디스패치는 항상 이 값이 설정돼 있다. 그
+// 티켓의 수정 이전에는 이 때문에 #dispatchTriggerBody 의 CLI-readiness
+// 게이트(~line 2278)가 createAdapter('hermes') 를 호출했고, 이는 무조건
+// throw 하여(Hermes 는 파일 기반 CLI trust dialog/credential 파일이 없음)
+// #ackDispatch 실행 전에 handleTrigger 를 크래시시켰다 — ack 자체가 없음,
+// 'nack'조차 없음.
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const AGENT = 'agent-hermes-trigger-outcome';
@@ -81,7 +84,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function context(permissionMode) {
+function context(permissionMode, cliHomeDir) {
   return {
     agent_id: AGENT,
     name: 'Hermes trigger outcome agent',
@@ -89,7 +92,7 @@ function context(permissionMode) {
     working_dir: '/workspace',
     mcp_config_path: '/config/mcp.json',
     api_key: 'agent-api-key',
-    // deliberately no cli_home_dir — see file header note.
+    cli_home_dir: cliHomeDir,
     extra_env: {},
     credential_provider: null,
     model: null,
@@ -97,7 +100,7 @@ function context(permissionMode) {
   };
 }
 
-async function harness(t, permissionMode) {
+async function harness(t, permissionMode, cliHomeDir) {
   const rootDir = await mkdtemp(join(tmpdir(), 'awb-hermes-trigger-outcome-'));
   const runtimeSupervisor = new RuntimeSupervisor({
     rootDir,
@@ -110,9 +113,9 @@ async function harness(t, permissionMode) {
     await rm(rootDir, { recursive: true, force: true });
   });
   const managedAgentContexts = {
-    get: (id) => (id === AGENT ? context(permissionMode) : null),
+    get: (id) => (id === AGENT ? context(permissionMode, cliHomeDir) : null),
     has: (id) => id === AGENT,
-    list: () => [context(permissionMode)],
+    list: () => [context(permissionMode, cliHomeDir)],
   };
   const worktreeManager = {
     enabled: true,
@@ -195,4 +198,23 @@ test('case 2 (ticket 38fba2d3): stop=refusal (non-end_turn) → ack nack, spawnF
   // #ackDispatch('nack', ...) is the whole signal, matching every other in-function
   // failure path's existing convention (e.g. the runtime_protocol_error catch below).
   assert.equal(mcpToolCalls.filter((name) => name === 'add_comment').length, 0);
+});
+
+test('case 3 (ticket 73772059): cli_home_dir populated (real production shape) → CLI-readiness gate no longer crashes handleTrigger, dispatch still reaches Hermes branch and acks', async (t) => {
+  const { dispatcher } = await harness(t, 'trusted', '/home/agent/.claude');
+
+  // 이전에는: CLI-readiness 게이트(~line 2278)의 createAdapter('hermes') 가
+  // cli_home_dir 가 설정되기만 하면(실제 프로덕션 shape — agent-manager-commands.ts
+  // 는 cli 타입과 무관하게 항상 채움) 무조건 RuntimeSelectionError 를 던졌다.
+  // handleTrigger 가 #ackDispatch 실행 전에 reject 되어 서버는 'processed'도
+  // 'nack'도 받지 못했다 — 완전한 침묵. 게이트가 회귀하면 이 `await` 가 reject
+  // 되어 아래 assertion 에 도달하기도 전에 테스트가 실패한다.
+  await dispatcher.handleTrigger(ticketTrigger());
+  await waitForAck();
+
+  assert.deepEqual(
+    dispatchAcks.map((ack) => ({ outcome: ack.outcome, reason: ack.reason })),
+    [{ outcome: 'processed', reason: '' }],
+  );
+  assert.ok(ticketGetCount >= 1, 'expected the prompt-composition ticket fetch (proves the Hermes branch ran)');
 });
