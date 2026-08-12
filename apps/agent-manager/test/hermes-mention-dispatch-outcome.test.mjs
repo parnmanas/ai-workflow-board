@@ -34,6 +34,16 @@ import { spawnFailureTracker } from '../dist/lib/spawn-failure-tracker.js';
 // #reportHermesMentionOutcome calling rest.ts's hasNewAgentComment) now diffs against
 // the exact comment-id set seen on the PRE-dispatch ticket fetch instead of any
 // timestamp window. Case 4 below pins down exactly the scenario round 2 found.
+//
+// Review round 3 caught a gap in THAT fix: if the pre-dispatch ticket fetch itself
+// fails (network error, non-2xx) or returns a payload with no `comments` array,
+// knownCommentIds silently became an empty Set — indistinguishable from "this ticket
+// genuinely has zero prior comments". An empty-by-failure baseline then makes ANY
+// pre-existing same-agent comment look brand new once the post-dispatch fetch
+// succeeds. The fix makes the baseline nullable: only a ticket response that actually
+// contains a `comments` array produces a Set; anything else produces `null`, and
+// #reportHermesMentionOutcome fails closed on null without even attempting a diff.
+// Cases 5a/5b below cover both ways the reviewer named for the baseline to go missing.
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
 const AGENT = 'agent-hermes-mention-outcome';
@@ -51,6 +61,13 @@ let priorComments;
  *  appears on ticket-GETs after the first — simulates a real add_comment
  *  call landing during the dispatch. */
 let replyAppears;
+/** undefined (default) — the first ticket GET behaves normally, returning
+ *  priorComments. 'http_error' — the first GET returns a 500 (simulates
+ *  fetchTicketContext() failing, ticket===null). 'missing_comments' — the
+ *  first GET returns 200 with a body that has no `comments` field. Both
+ *  non-default modes leave the baseline snapshot unable to see priorComments
+ *  even though they're set — exactly the review-round-3 scenario. */
+let preFetchMode;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
@@ -59,6 +76,7 @@ beforeEach(() => {
   ticketGetCount = 0;
   priorComments = [];
   replyAppears = false;
+  preFetchMode = undefined;
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
@@ -84,6 +102,18 @@ beforeEach(() => {
     }
     if (target.includes('/api/agent/tickets/')) {
       ticketGetCount += 1;
+      if (ticketGetCount === 1 && preFetchMode === 'http_error') {
+        return new Response(JSON.stringify({ error: 'boom' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (ticketGetCount === 1 && preFetchMode === 'missing_comments') {
+        return new Response(JSON.stringify({ id: TICKET }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       const comments = replyAppears && ticketGetCount > 1
         ? [...priorComments, { id: 'reply-new-1', author_id: AGENT, created_at: new Date().toISOString() }]
         : priorComments;
@@ -229,4 +259,42 @@ test('case 4 (review round 2): stop=end_turn, agent has a PRE-EXISTING comment f
   const snap = spawnFailureTracker.snapshot();
   assert.equal(snap.last_spawn_error_cli, 'hermes');
   assert.match(snap.last_spawn_error || '', /hermes_mention_no_reply/);
+});
+
+test('case 5a (review round 3): pre-dispatch ticket GET fails (HTTP error) — baseline unavailable → fail-closed, NOT success, even with an old same-agent comment on the ticket', async (t) => {
+  const { dispatcher } = await harness(t, 'trusted');
+  preFetchMode = 'http_error';
+  // The ticket genuinely already has an old comment from this same agent. If
+  // the implementation fell back to an empty baseline on fetch failure
+  // (instead of a null one), this would look brand new once the
+  // post-dispatch fetch succeeds, and get wrongly reported as success.
+  priorComments = [
+    { id: 'old-reply-1', author_id: AGENT, created_at: new Date(Date.now() - 2_000).toISOString() },
+  ];
+
+  await dispatcher.handleCommentMention(commentMentionEvent());
+
+  assert.equal(countTool('add_comment'), 1, 'an unverifiable baseline must never be reported as success');
+  assert.match(addCommentContents[0], /hermes_mention_baseline_unavailable/);
+
+  const snap = spawnFailureTracker.snapshot();
+  assert.equal(snap.last_spawn_error_cli, 'hermes');
+  assert.match(snap.last_spawn_error || '', /hermes_mention_baseline_unavailable/);
+});
+
+test('case 5b (review round 3): pre-dispatch ticket response has no comments field — baseline unavailable → fail-closed, NOT success', async (t) => {
+  const { dispatcher } = await harness(t, 'trusted');
+  preFetchMode = 'missing_comments';
+  priorComments = [
+    { id: 'old-reply-1', author_id: AGENT, created_at: new Date(Date.now() - 2_000).toISOString() },
+  ];
+
+  await dispatcher.handleCommentMention(commentMentionEvent());
+
+  assert.equal(countTool('add_comment'), 1, 'a malformed pre-dispatch response must not be treated as "zero prior comments"');
+  assert.match(addCommentContents[0], /hermes_mention_baseline_unavailable/);
+
+  const snap = spawnFailureTracker.snapshot();
+  assert.equal(snap.last_spawn_error_cli, 'hermes');
+  assert.match(snap.last_spawn_error || '', /hermes_mention_baseline_unavailable/);
 });
