@@ -1991,16 +1991,77 @@ export class EventDispatcher {
     // We placed a reservation to release only when live===false (a fresh spawn);
     // a live reuse placed nothing.
     const reservedFresh = !!reservation && reservation.acquired && !reservation.live;
-    // ticket fdf6714e: when this trigger's OWN reservation lives in the fallback
-    // tracker (not canAuthoritative — true fallback mode), hand its key/nonce
-    // into #dispatchTriggerBody so a successful one-shot spawn there can attach
-    // its pid, symmetric with handleCommentMention's fallback branch. Fresh
-    // authoritative reservations are excluded — TicketSessionManager's own
-    // attachDispatchPid wiring is a separate, pre-existing concern.
-    const fallbackSeat =
-      reservedFresh && !canAuthoritative && inflightKey
-        ? { key: inflightKey, nonce: reservation!.nonce }
-        : null;
+    // ticket f0d1da19: release handle for THIS reservation, shared between the
+    // finally below and (when #dispatchTriggerBody's one-shot spawn succeeds)
+    // the spawned process's onExit hook — see `triggerSeat` below. Pulled out
+    // of finally so both callers run the identical release + force-respawn-
+    // replay sequence exactly once, whichever of them ends up firing it.
+    const releaseTriggerReservation = (): void => {
+      if (reservedFresh) {
+        // nonce 를 함께 넘겨 CAS release: 이 dispatch 의 예약이 진행 중
+        // evict 되고 슬롯이 재예약됐다면, 뒤늦게 실행되는 이 release 는
+        // 세대가 달라 no-op 이 되어 새 예약을 지우지 않는다 (ticket 26a92722).
+        if (canAuthoritative) {
+          this.#ticketSessionManager!.releaseDispatch!(
+            ev.ticket_id,
+            ev.action || '',
+            dispatchAgentId,
+            reservation!.nonce,
+          );
+        } else {
+          this.#inflightDispatch.releaseFallback(inflightKey!, reservation!.nonce);
+        }
+      }
+      if (!inflightKey) return;
+      // Re-arm activity surfacing and replay a single suppressed force-respawn
+      // (blocker #1): a force_respawn that arrived while this dispatch held the
+      // slot had its fresh-session intent suppressed, and the server may not
+      // re-send it (a prior dispatch refreshing the live session can clear the
+      // stale supervisor condition). Replay it exactly once now, coalescing a
+      // whole burst into one fresh respawn. Re-parse the SUPPRESSED FORCE
+      // event's OWN payload (captured at suppression time), NOT the holder's
+      // `raw`: the holder already recorded `trigger:<its field_changed>` in the
+      // dedup set (kept until child exit), so replaying the holder identity here
+      // is dropped as `duplicate_trigger` and the respawn silently never
+      // happens. The suppressed force never reached dispatchTrigger, so its own
+      // identity is un-deduped and re-enters cleanly to force-respawn.
+      const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
+      if (pendingForceRaw) {
+        log(
+          `[dispatch] replaying suppressed force_respawn after holder released: ` +
+            `ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'}`,
+        );
+        let forcedRaw: string | null = null;
+        try {
+          forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
+        } catch {
+          forcedRaw = null;
+        }
+        if (forcedRaw) {
+          // Fire-and-forget so we don't extend this finally; the replay re-enters
+          // handleTrigger cleanly (re-acquires the slot, force-respawns fresh).
+          this.handleTrigger(forcedRaw).catch((err: any) =>
+            log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
+          );
+        }
+      }
+    };
+    // ticket f0d1da19: handleCommentMention holds its claimed seat via
+    // SubagentSpawnArgs.onExit for the one-shot's FULL lifetime (ticket
+    // e90294e7 round 2) — but handleTrigger's OWN fallback/authoritative
+    // reservation used to release unconditionally right here, the instant
+    // #dispatchTriggerBody returned (i.e. moments after spawn() merely resolved
+    // a pid, not when the spawned one-shot actually exits). A role-mention for
+    // the identical (ticket, role, agent) seat arriving in that few-ms window
+    // found the seat already free and twin-spawned a second one-shot racing the
+    // first. `triggerSeat` is only set when this trigger placed a FRESH
+    // reservation (`reservedFresh`); #dispatchTriggerBody flips `.transferred`
+    // the instant its one-shot spawn succeeds, wiring the SAME release above
+    // into that process's onExit hook — from then on this outer finally must
+    // not release out from under the still-running one-shot.
+    const triggerSeat: { transferred: boolean; release: () => void } | null = reservedFresh
+      ? { transferred: false, release: releaseTriggerReservation }
+      : null;
     try {
       await this.#dispatchTriggerBody(
         ev,
@@ -2009,57 +2070,11 @@ export class EventDispatcher {
         canAuthoritative && reservedFresh,
         raw,
         opts,
-        fallbackSeat,
+        triggerSeat,
       );
     } finally {
-      if (inflightKey) {
-        if (reservedFresh) {
-          // nonce 를 함께 넘겨 CAS release: 이 dispatch 의 예약이 진행 중
-          // evict 되고 슬롯이 재예약됐다면, 뒤늦게 실행되는 이 finally 는
-          // 세대가 달라 no-op 이 되어 새 예약을 지우지 않는다 (ticket 26a92722).
-          if (canAuthoritative) {
-            this.#ticketSessionManager!.releaseDispatch!(
-              ev.ticket_id,
-              ev.action || '',
-              dispatchAgentId,
-              reservation!.nonce,
-            );
-          } else {
-            this.#inflightDispatch.releaseFallback(inflightKey, reservation!.nonce);
-          }
-        }
-        // Re-arm activity surfacing and replay a single suppressed force-respawn
-        // (blocker #1): a force_respawn that arrived while this dispatch held the
-        // slot had its fresh-session intent suppressed, and the server may not
-        // re-send it (a prior dispatch refreshing the live session can clear the
-        // stale supervisor condition). Replay it exactly once now, coalescing a
-        // whole burst into one fresh respawn. Re-parse the SUPPRESSED FORCE
-        // event's OWN payload (captured at suppression time), NOT the holder's
-        // `raw`: the holder already recorded `trigger:<its field_changed>` in the
-        // dedup set (kept until child exit), so replaying the holder identity here
-        // is dropped as `duplicate_trigger` and the respawn silently never
-        // happens. The suppressed force never reached dispatchTrigger, so its own
-        // identity is un-deduped and re-enters cleanly to force-respawn.
-        const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
-        if (pendingForceRaw) {
-          log(
-            `[dispatch] replaying suppressed force_respawn after holder released: ` +
-              `ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'}`,
-          );
-          let forcedRaw: string | null = null;
-          try {
-            forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
-          } catch {
-            forcedRaw = null;
-          }
-          if (forcedRaw) {
-            // Fire-and-forget so we don't extend this finally; the replay re-enters
-            // handleTrigger cleanly (re-acquires the slot, force-respawns fresh).
-            this.handleTrigger(forcedRaw).catch((err: any) =>
-              log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
-            );
-          }
-        }
+      if (inflightKey && !triggerSeat?.transferred) {
+        releaseTriggerReservation();
       }
     }
   }
@@ -2067,13 +2082,21 @@ export class EventDispatcher {
   /** Provision → spawn body of a ticket trigger (ticket 3d180f85), run under the
    *  single-flight reservation handleTrigger acquired. Split out so one
    *  try/finally in handleTrigger straddles the whole provisioning window —
-   *  every `return` / `throw` in here releases the slot. `dispatchReserved` is
-   *  true when handleTrigger holds the authoritative `_inflight` reservation for
-   *  this key, so the persistent dispatchTrigger below must defer `_inflight`
-   *  ownership to the dispatcher. `fallbackSeat` (ticket fdf6714e) is set instead
-   *  when handleTrigger's reservation lives in the process-local fallback
-   *  tracker (true fallback mode) — the one-shot spawn branch below attaches its
-   *  pid to that seat on success, mirroring handleCommentMention. */
+   *  every `return` / `throw` in here releases the slot, UNLESS the one-shot
+   *  spawn branch below claims `triggerSeat` (ticket f0d1da19 — see below).
+   *  `dispatchReserved` is true when handleTrigger holds the authoritative
+   *  `_inflight` reservation for this key, so the persistent dispatchTrigger
+   *  below must defer `_inflight` ownership to the dispatcher. `triggerSeat` is
+   *  handleTrigger's OWN reservation release handle, set only when it acquired
+   *  a FRESH reservation; the one-shot spawn branch below (fallback mode, or a
+   *  declined persistent dispatch falling back to one-shot) transfers ownership
+   *  to the spawned process's `onExit` hook on success
+   *  (`triggerSeat.transferred = true`) instead of letting handleTrigger's
+   *  finally release the seat while the one-shot is still running — mirroring
+   *  handleCommentMention's mentionSeat pattern (ticket e90294e7 round 2). A
+   *  successful PERSISTENT dispatch (below) does NOT set `.transferred`: that
+   *  session's liveness is tracked separately (`_getLiveSession`), so releasing
+   *  `_inflight` the instant dispatch succeeds is correct as before. */
   async #dispatchTriggerBody(
     ev: any,
     agentContext: AgentExecutionContext | undefined,
@@ -2081,7 +2104,7 @@ export class EventDispatcher {
     dispatchReserved: boolean,
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
-    fallbackSeat?: { key: string; nonce: string | undefined } | null,
+    triggerSeat?: { transferred: boolean; release: () => void } | null,
   ): Promise<void> {
     // Stock pi intentionally has no MCP client. A ticket session therefore
     // cannot read its ticket or leave the add_comment / move_ticket audit trail
@@ -2723,6 +2746,13 @@ export class EventDispatcher {
           ttlMinutes: worktreeProvision.coldSharedWorktree
             ? SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES
             : undefined,
+          // ticket f0d1da19: hold handleTrigger's OWN reservation (if any) for
+          // this one-shot's FULL lifetime, not just until spawn() resolves a
+          // pid — mirrors handleCommentMention's mentionSeat/onExit (ticket
+          // e90294e7 round 2). Without this, a role-mention for the identical
+          // seat arriving moments after this spawn() call resolves finds the
+          // seat already free and twin-spawns a second one-shot racing this one.
+          onExit: triggerSeat ? () => triggerSeat.release() : undefined,
         });
 
         if (result.spawned) {
@@ -2730,13 +2760,10 @@ export class EventDispatcher {
           // ticket 467f714a blocker #3: report the one-shot pid so a session-defer
           // replay records a durable, reapable survivor handle (crash-after-spawn).
           opts?.onDispatched?.(typeof result.pid === 'number' ? result.pid : null);
-          // ticket fdf6714e: this trigger's own fallback-tracker seat (if any) is
-          // released moments from now in handleTrigger's outer finally regardless
-          // — but attach the pid anyway for parity with handleCommentMention and
-          // to protect the seat for whatever remains of this window.
-          if (fallbackSeat && typeof result.pid === 'number') {
-            this.#inflightDispatch.attachDispatchPid(fallbackSeat.key, fallbackSeat.nonce, result.pid);
-          }
+          // ticket f0d1da19: ownership of the reservation (if any) now belongs to
+          // the spawned process's onExit hook above — handleTrigger's finally
+          // must not also release it.
+          if (triggerSeat) triggerSeat.transferred = true;
           // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
           // processed (grace extension, not resolution).
           this.#ackDispatch(ev, 'processed');

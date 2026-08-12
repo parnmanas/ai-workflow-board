@@ -121,7 +121,16 @@ function makeSubagentManager(state, liveSet, pidBase = 4200) {
   // window). Test-only handle surfaced on `state`.
   state.reapTicket = (ticketId) => {
     for (const [id, rec] of [...records]) {
-      if (rec.ticket_id === ticketId) records.delete(id);
+      if (rec.ticket_id === ticketId) {
+        records.delete(id);
+        // ticket f0d1da19: production releases handleTrigger's own provision-span
+        // reservation via SubagentSpawnArgs.onExit on the SPAWNED PROCESS'S actual
+        // exit, not the instant spawn() resolves a pid — mirror that here so a
+        // reaped (dead) ticket's reservation is freed the same way, letting a
+        // later re-drive for the same (ticket, role, agent) actually dispatch
+        // instead of being suppressed as a twin of a corpse.
+        rec.onExit?.();
+      }
     }
   };
   // Reap a crash-surviving detached harness by pid (blocker #3): drop its OS-live
@@ -130,7 +139,10 @@ function makeSubagentManager(state, liveSet, pidBase = 4200) {
     let killed = false;
     if (liveSet && liveSet.delete(pid)) killed = true;
     for (const [id, rec] of [...records]) {
-      if (rec.pid === pid) records.delete(id);
+      if (rec.pid === pid) {
+        records.delete(id);
+        rec.onExit?.(); // ticket f0d1da19: same onExit parity as reapTicket above.
+      }
     }
     state.reaped.push(pid);
     return killed;
@@ -153,6 +165,7 @@ function makeSubagentManager(state, liveSet, pidBase = 4200) {
         role: spec.role || null,
         agent_id: spec.agentId || null,
         pid,
+        onExit: spec.onExit, // ticket f0d1da19: so reapTicket/reapPid can fire it
       });
       if (liveSet) liveSet.add(pid); // detached child is now an alive OS process
       state.spawns.push({ ...spec, pid });

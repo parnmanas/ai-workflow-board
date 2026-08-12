@@ -308,6 +308,13 @@ test('a recovered ticket-role re-arms: a later durable break pends afresh (no st
   ticketState.pending_user_action = false;
   await d.handleTrigger(makeEvent({ field_changed: 'recover' }));
   assert.equal(state.spawns.length, 1, 'recovered with one strand');
+  // ticket f0d1da19: production holds handleTrigger's own provision-span
+  // reservation via SubagentSpawnArgs.onExit until the spawned one-shot ACTUALLY
+  // exits, not the instant spawn() resolves a pid. The recovered strand finishing
+  // is what the next step's "fresh break" assumes, so fire its onExit the same
+  // way dispatch-inflight-guard.test.mjs does — otherwise the still-"held" seat
+  // suppresses the next trigger below as a twin before it ever reaches preflight.
+  state.spawns[state.spawns.length - 1].onExit?.();
 
   // A brand-new durable break after recovery pends afresh (episode re-armed) —
   // exactly once, not a stale double-count.
