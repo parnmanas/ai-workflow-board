@@ -23,6 +23,9 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Agent } from '../dist/entities/Agent.js';
 import { User } from '../dist/entities/User.js';
@@ -36,7 +39,11 @@ import { registerWorkspaceTools } from '../dist/modules/mcp/tools/workspace-tool
 
 import { ApiKeyService } from '../dist/services/api-key.service.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
-import { installToolAuthzGate, resolveAuthzTier, TOOL_AUTHZ_TABLE } from '../dist/modules/mcp/shared/tool-authz-gate.js';
+import {
+  installToolAuthzGate, resolveAuthzTier, TOOL_AUTHZ_TABLE, KNOWN_EXISTING_TOOLS,
+} from '../dist/modules/mcp/shared/tool-authz-gate.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe('MCP tool authorization (ticket d6b56237)', () => {
   let dataSource;
@@ -789,10 +796,26 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.equal(resolveAuthzTier('revoke_some_future_credential'), 'caller');
   });
 
-  it('does not gate non-destructive-looking tool names', () => {
+  it('falls back to the caller tier for an unknown tool whose name does NOT match delete_*/revoke_* either (review round 1 gap)', () => {
+    // The original version of this gate only caught a future admin tool if
+    // its name happened to start with delete_/revoke_ — anything else
+    // (create_*, update_*, set_*, grant_*, rotate_*, purge_*, ...) resolved
+    // to null and ran completely unchecked. KNOWN_EXISTING_TOOLS closes
+    // that: none of these names exist today, so none are in the snapshot.
+    assert.equal(resolveAuthzTier('rotate_credential'), 'caller');
+    assert.equal(resolveAuthzTier('grant_admin_role'), 'caller');
+    assert.equal(resolveAuthzTier('set_user_role'), 'caller');
+    assert.equal(resolveAuthzTier('purge_workspace_secrets'), 'caller');
+    assert.equal(resolveAuthzTier('impersonate_user'), 'caller');
+  });
+
+  it('does not gate non-destructive-looking tool names that are on the known-existing snapshot', () => {
     assert.equal(resolveAuthzTier('list_users'), null);
     assert.equal(resolveAuthzTier('get_ticket'), null);
     assert.equal(resolveAuthzTier('create_ticket'), null);
+    assert.ok(KNOWN_EXISTING_TOOLS.has('list_users'));
+    assert.ok(KNOWN_EXISTING_TOOLS.has('get_ticket'));
+    assert.ok(KNOWN_EXISTING_TOOLS.has('create_ticket'));
   });
 
   it('leaves update_workspace and move_agent_to_workspace to their own nuanced per-file logic', () => {
@@ -890,15 +913,58 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.equal(handlerRan, true);
   });
 
-  it('does not gate a non-destructive-looking tool at all, even for a sessionless caller', async () => {
+  it('does not gate a tool that is on the known-existing snapshot, even for a sessionless caller', async () => {
     const { fakeServer, tools } = makeGatedFakeServer();
     let handlerRan = false;
-    fakeServer.tool('list_something_new', 'test', {}, async () => {
+    // 'list_users' is a real, pre-existing, non-tabled tool name — it must
+    // stay exactly as ungated as it was before review round 2. (A made-up
+    // name like 'list_something_new' is no longer a valid fixture for this
+    // assertion: it is NOT on KNOWN_EXISTING_TOOLS, so it would now be
+    // gated by DEFAULT_UNCLASSIFIED_TIER — see the "review round 1 gap"
+    // tests below for that behavior.)
+    fakeServer.tool('list_users', 'test', {}, async () => {
       handlerRan = true;
       return { content: [{ type: 'text', text: '{"success":true}' }] };
     });
 
-    const result = await tools.list_something_new.handler({}, {});
+    const result = await tools.list_users.handler({}, {});
+    assert.equal(result.isError, undefined);
+    assert.equal(handlerRan, true);
+  });
+
+  it('blocks an unmapped, non-delete/revoke-named tool (review round 1 gap) from a sessionless caller', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('rotate_credential', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    const result = await tools.rotate_credential.handler({}, {});
+    assert.equal(result.isError, true);
+    assert.equal(handlerRan, false, 'the central gate must short-circuit before the handler body runs even for a name outside delete_*/revoke_*');
+  });
+
+  it('allows an unmapped, non-delete/revoke-named tool through the unclassified floor once ANY caller is resolvable, regardless of scope', async () => {
+    const { fakeServer, tools } = makeGatedFakeServer();
+    let handlerRan = false;
+    fakeServer.tool('rotate_credential', 'test', {}, async () => {
+      handlerRan = true;
+      return { content: [{ type: 'text', text: '{"success":true}' }] };
+    });
+
+    // Deliberately read-scoped, not full — DEFAULT_UNCLASSIFIED_TIER is
+    // 'caller' (identity-only), not 'full' (scope-checked), by design: see
+    // the file header for why a brand-new tool defaults to the same floor
+    // as the delete_*/revoke_* fallback rather than a scope guess.
+    const agent = await makeAgent('workspace-a');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: agent.id, workspaceId: 'workspace-a', scope: 'read', source: 'db',
+    });
+    const result = await tools.rotate_credential.handler({}, { sessionId });
+    cleanup();
+
     assert.equal(result.isError, undefined);
     assert.equal(handlerRan, true);
   });
@@ -913,5 +979,55 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
 
     const result = await tools.delete_user.handler({ user_id: 'nonexistent' }, {});
     assert.equal(result.isError, true);
+  });
+
+  // ─── Completeness guard: every real tool name must be accounted for ───
+  //
+  // Review round 1 found the original gate's default silently gave a free
+  // pass to any tool name outside TOOL_AUTHZ_TABLE and DESTRUCTIVE_NAME_PATTERN.
+  // KNOWN_EXISTING_TOOLS closes that at runtime (see resolveAuthzTier), but
+  // the snapshot itself can drift — this test fails the build the moment a
+  // real tool name in the source tree is neither tabled, nor
+  // destructive-pattern-matched, nor present in the snapshot, forcing a
+  // conscious classification decision instead of letting drift go unnoticed.
+  it('every real *-tools.ts registration is covered by TOOL_AUTHZ_TABLE, the destructive-name pattern, or KNOWN_EXISTING_TOOLS', () => {
+    const toolsSrcDir = join(__dirname, '..', 'src', 'modules', 'mcp', 'tools');
+    const files = readdirSync(toolsSrcDir).filter(f => /-tools\.ts$/.test(f));
+    assert.ok(files.length >= 30, `sanity: expected 30+ *-tools.ts files, found ${files.length}`);
+
+    const liveNames = new Set();
+    for (const file of files) {
+      const src = readFileSync(join(toolsSrcDir, file), 'utf8');
+      for (const m of src.matchAll(/\.tool\(\s*\r?\n\s*['"]([a-zA-Z0-9_]+)['"]/g)) {
+        liveNames.add(m[1]);
+      }
+    }
+    assert.ok(liveNames.size >= 150, `sanity: expected 150+ live tool names, found ${liveNames.size}`);
+
+    const destructivePattern = /^(delete_|revoke_)/;
+    const unaccounted = [...liveNames].filter(name => (
+      TOOL_AUTHZ_TABLE[name] === undefined
+      && !destructivePattern.test(name)
+      && !KNOWN_EXISTING_TOOLS.has(name)
+    ));
+    assert.deepEqual(
+      unaccounted,
+      [],
+      `New tool(s) registered without an authz classification decision — add each to `
+      + `TOOL_AUTHZ_TABLE (if it needs 'full'/'caller') or KNOWN_EXISTING_TOOLS (if it is safe `
+      + `to leave ungated) in shared/tool-authz-gate.ts: ${unaccounted.join(', ')}`,
+    );
+
+    // Symmetric check: nothing in the snapshot should be stale (a name that
+    // was removed/renamed but left behind would silently narrow real
+    // coverage without anyone noticing, since a removed name can never be
+    // called anyway — but a rename means the NEW name is unaccounted-for,
+    // which the check above already catches).
+    const staleSnapshotEntries = [...KNOWN_EXISTING_TOOLS].filter(name => !liveNames.has(name));
+    assert.deepEqual(
+      staleSnapshotEntries,
+      [],
+      `KNOWN_EXISTING_TOOLS has name(s) with no matching live registration (removed/renamed?): ${staleSnapshotEntries.join(', ')}`,
+    );
   });
 });
