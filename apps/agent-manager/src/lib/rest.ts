@@ -175,43 +175,42 @@ export async function hasAuditTrailSince(
   });
 }
 
-/** Same clock-skew rationale as SILENT_EXIT_VERIFY_BUFFER_MS, kept as its own
- *  constant since this gates a different call site (comment-mention reply
- *  confirmation, ticket e8105c84) that may evolve independently. */
-const MENTION_REPLY_VERIFY_BUFFER_MS = 5_000;
-
 /**
- * Did `agentId` post a NEW comment on `ticketId` at/after `sinceMs`? Confirms
- * a Hermes comment-mention dispatch that ended stopReason='end_turn' actually
- * produced the `add_comment` MCP call it was asked to make — 'end_turn' only
- * means the ACP session ended cleanly, not that any tool call inside it
- * landed (ticket e8105c84).
+ * Did `agentId` post a comment on `ticketId` whose id is NOT in
+ * `knownCommentIds`? Confirms a Hermes comment-mention dispatch that ended
+ * stopReason='end_turn' actually produced the `add_comment` MCP call it was
+ * asked to make — 'end_turn' only means the ACP session ended cleanly, not
+ * that any tool call inside it landed (ticket e8105c84).
  *
- * Unlike `hasAuditTrailSince`, this has no grace delay: the ACP
- * session/prompt response that #dispatchHermes() resolves on only arrives
- * after Hermes's own add_comment call has already round-tripped, so the
- * write is already committed by the time this runs (no exited-process-vs-
- * in-flight-write race like the silent-exit case). The clock-skew buffer
- * still applies since `sinceMs` is stamped by this host's clock while
- * `created_at` is stamped by the AWB server's.
+ * `knownCommentIds` is the id set from the ticket fetch taken BEFORE
+ * dispatch (handleCommentMention already fetches the ticket once for prompt
+ * composition — callers snapshot ids from that same response, no extra round
+ * trip). This is exact id-set membership, not a timestamp window: an earlier
+ * version of this check used `created_at >= sinceMs - buffer`, but no buffer
+ * is simultaneously wide enough to absorb inter-host clock skew and narrow
+ * enough to not also match a genuinely OLDER comment the same agent posted
+ * moments before this dispatch started (review round 2) — id membership has
+ * neither failure mode.
  *
- * Fails CLOSED (returns false — "no reply seen") on any fetch error.
+ * No grace delay: the ACP session/prompt response that #dispatchHermes()
+ * resolves on only arrives after Hermes's own add_comment call has already
+ * round-tripped, so the write is already committed by the time this runs (no
+ * exited-process-vs-in-flight-write race like the silent-exit case).
+ *
+ * Fails CLOSED (returns false — "no new reply seen") on any fetch error.
  */
-export async function hasAgentCommentSince(
+export async function hasNewAgentComment(
   config: AwbConfig,
   ticketId: string | undefined,
   agentId: string | undefined,
-  sinceMs: number,
+  knownCommentIds: ReadonlySet<string>,
 ): Promise<boolean> {
   if (!ticketId || !agentId) return false;
   const ticket = await fetchTicketContext(config, ticketId);
   const comments = Array.isArray(ticket?.comments) ? ticket.comments : [];
-  const cutoff = sinceMs - MENTION_REPLY_VERIFY_BUFFER_MS;
-  return comments.some((c: any) => {
-    if (c?.author_id !== agentId) return false;
-    const createdAt = new Date(c?.created_at).getTime();
-    return Number.isFinite(createdAt) && createdAt >= cutoff;
-  });
+  return comments.some(
+    (c: any) => c?.author_id === agentId && c?.id && !knownCommentIds.has(c.id),
+  );
 }
 
 /**

@@ -15,7 +15,7 @@ import {
   fetchChatRoomHistory,
   fetchAgentRecord,
   fetchRepositoryCredential,
-  hasAgentCommentSince,
+  hasNewAgentComment,
   postFsResponse,
   postChatRoomMessage,
   postDispatchAck,
@@ -1537,12 +1537,19 @@ export class EventDispatcher {
   // 리뷰 라운드1 지적: stopReason이 'end_turn'이어도 Hermes가 실제로
   // add_comment를 호출했다는 보장은 아니다 — 이 티켓이 막아야 하는 바로 그
   // "무응답인데 성공 처리" 케이스가 'end_turn' 경로 안에도 남아있었다.
-  // hasAgentCommentSince로 디스패치 시작 시각 이후 이 agent가 실제로 새
-  // 코멘트를 남겼는지 재확인해, 없으면 non-end_turn과 동일하게 실패로 다룬다.
+  //
+  // 리뷰 라운드2 지적: 최초 구현은 timestamp 커트오프(+클록 스큐 버퍼)로
+  // "새 코멘트"를 판정했는데, 그러면 같은 agent가 디스패치 직전(버퍼 이내)에
+  // 남긴 그냥 예전 코멘트를 이번 응답으로 오인해 false positive가 났다.
+  // hasNewAgentComment로 교체 — 디스패치 직전 실제 코멘트 id 집합
+  // (knownCommentIds, handleCommentMention이 prompt 구성용으로 이미 수행한
+  // fetch에서 그대로 스냅샷)에 없는 새 id가 이 agent 이름으로 나타났는지만
+  // 본다. 시간 폭 없이 정확한 집합 멤버십이라 클록 스큐도, "그냥 예전
+  // 코멘트" 오인도 둘 다 없다.
   async #reportHermesMentionOutcome(
     ticketId: string,
     agentId: string,
-    dispatchStartedAt: number,
+    knownCommentIds: ReadonlySet<string>,
     result: RuntimeDispatchResult,
   ): Promise<void> {
     if (result.stopReason !== 'end_turn') {
@@ -1556,7 +1563,7 @@ export class EventDispatcher {
       await this.#notifyHermesMentionFailureOnTicket(ticketId, result.stopReason);
       return;
     }
-    const replied = await hasAgentCommentSince(this.#config, ticketId, agentId, dispatchStartedAt);
+    const replied = await hasNewAgentComment(this.#config, ticketId, agentId, knownCommentIds);
     if (!replied) {
       await this.#reportHermesDispatchFailure(
         'Hermes mention dispatch',
@@ -3012,7 +3019,16 @@ export class EventDispatcher {
             mention,
             ticketId,
           ) ?? `[mention] ${ticketId} ${commentId}`;
-        const dispatchStartedAt = Date.now();
+        // ticket e8105c84 리뷰 라운드2 지적: 이 스냅샷은 dispatch 시각이 아니라
+        // dispatch 직전 실제 코멘트 id 집합이어야 한다 — timestamp 커트오프는
+        // 클록 스큐를 흡수할 만큼 넓으면서 동시에 같은 agent의 "그냥 예전
+        // 코멘트"를 오탐하지 않을 만큼 좁을 수 없다. id 집합 멤버십은 두 실패
+        // 모드 모두 없다.
+        const knownCommentIds = new Set<string>(
+          Array.isArray(ticket?.comments)
+            ? ticket.comments.map((c: any) => c?.id).filter(Boolean)
+            : [],
+        );
         const result = await this.#dispatchHermes({
           agentContext,
           runId: `ticket:${ticketId}:${mention.role_shortcut || '_'}`,
@@ -3024,7 +3040,7 @@ export class EventDispatcher {
           `Comment mention dispatched through Hermes ACP: ticket=${ticketId} ` +
           `session=${result.sessionId} stop=${result.stopReason}`,
         );
-        await this.#reportHermesMentionOutcome(ticketId, agentContext.agent_id, dispatchStartedAt, result);
+        await this.#reportHermesMentionOutcome(ticketId, agentContext.agent_id, knownCommentIds, result);
       } catch (err: any) {
         const code = err?.code || 'runtime_dispatch_error';
         // 채팅 경로(handleChatRequest/handleChatRoomMessage)와 동일한 로그
