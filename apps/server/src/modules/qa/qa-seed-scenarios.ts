@@ -462,6 +462,43 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
       step(12, 'Clean up the probe fixtures', 'Archive the three probe tickets off the throwaway board (repeat for probe1..3); the throwaway board + inert sink carry no live manager, so no probe residue affects real dispatch', 'archive_ticket', { ticket_id: '{{probeN}}' }),
     ],
   },
+  // 16 ───────────────────────────────────────────────────────────────────────
+  {
+    key: 'hermes-live-chat-delivery',
+    name: 'Hermes live chat delivery — real deployed-host smoke test',
+    description:
+      'Send ONE chat message to the live, deployed Hermes-type Agent and observe how the reply actually '
+      + 'lands, instead of trusting a verbal "it works" after deploy. Source: ticket a837879c hardened the '
+      + 'Hermes reply path (Manager-owned reply POST, hermes_empty_reply / hermes_reply_post_failed '
+      + 'fail-closed, an error-code allowlist so failure notices never leak raw exception text, and '
+      + 'error-log-uploader classify() tagging failures level=error/category=hermes) — this scenario is the '
+      + 'reproducible, re-runnable proof that behavior holds against the REAL host, not just the '
+      + 'fake-ACP-fixture unit tests (apps/agent-manager/test/hermes-chat-dispatch-success.test.mjs / '
+      + '-failure.test.mjs).\n\n'
+      + 'This is a live external system, not a mock: the QA agent cannot force which branch happens (a '
+      + 'genuine reply vs. a fail-closed notice) — it can only observe and grade whichever branch the real '
+      + 'Hermes run produced. Steps 3-5 branch accordingly: exactly one of "genuine reply" or "failure '
+      + 'notice" must be observed (passed either way — both are contractually valid outcomes), while total '
+      + 'silence past the timeout is a real failure. The allowlist / Agent-Logs assertions (steps 4-5) only '
+      + 'apply — and are recorded `skipped` otherwise — when the observed branch is a failure notice, since '
+      + 'there is nothing to check on a clean reply.\n\n'
+      + 'PRECONDITION the scenario cannot control: the target Hermes Agent (type=hermes) and its owning '
+      + 'Runtime Host manager instance must both be online (list_agents / GET '
+      + '/api/admin/agent-manager/instances). If none is online, fail step 0 immediately with that reason '
+      + 'rather than waiting out the timeout — an offline host is an operational precondition gap, not a '
+      + 'dispatch-path regression.',
+    qa_driver: AWB_MCP_DRIVER,
+    qa_driver_config: driverConfig({ requires_live_agent: true }),
+    tags: ['hermes', 'e2e', 'chat', 'live-host', 'self-improvement'],
+    steps: [
+      step(0, 'Resolve the target Hermes Agent: list_agents, filter type==\'hermes\', and require is_online==1 (its manager_agent_id\'s Runtime Host row must also show is_online==1). Capture its id as {{hermes_agent_id}}. If none is online, record THIS step failed with that reason and stop the run — do not wait out the timeout for an offline host.', 'Exactly one online hermes-type Agent resolved (or a clear, immediate failure naming the offline precondition)', 'list_agents', {}),
+      step(1, 'Create (or reuse) a DM room with the resolved Hermes Agent and capture {{room_id}}; generate a short random nonce now and reuse it as {{probe_nonce}} in later steps', 'create_chat_room returns a 2-participant (caller + Hermes) room', 'create_chat_room', { participants: [{ type: 'agent', id: '{{hermes_agent_id}}' }] }),
+      step(2, 'Send exactly ONE message into the room asking for a short acknowledgement, embedding {{probe_nonce}} so the reply is unambiguous', 'send_chat_room_message returns a message id', 'send_chat_room_message', { room_id: '{{room_id}}', content: 'QA Hermes live-delivery probe ({{probe_nonce}}) — please reply with any short acknowledgement.' }),
+      step(3, 'Poll get_chat_room_messages (e.g. every ~15s up to ~5 minutes) until a NEW message from sender_type==\'agent\' AND sender_id=={{hermes_agent_id}} appears', 'Exactly one of two contractually-valid outcomes is observed within the timeout: (A) a genuine reply — non-empty, does NOT start with the "⚠️ **Hermes 런타임 실행 실패**" prefix; or (B) a fail-closed notice — starts with that exact prefix. Total silence past the timeout is a real failure (not a valid third outcome)', 'get_chat_room_messages', { room_id: '{{room_id}}' }),
+      step(4, 'IF branch (B) was observed: extract the backtick-quoted code from the notice and confirm it is one of the allowlisted codes (runtime_supervisor_unavailable, runtime_not_configured, runtime_unknown, runtime_unavailable, runtime_config_invalid, runtime_not_supported, runtime_collaboration_denied, hermes_session_not_found, hermes_session_owner_mismatch, hermes_session_lease_mismatch, hermes_session_cwd_mismatch, acp_timeout, acp_aborted, acp_closed, acp_process_exited, acp_malformed_message, acp_message_too_large, acp_remote_error, acp_write_failed, max_tokens, max_turn_requests, refusal, cancelled, hermes_empty_reply, hermes_reply_post_failed) or the fallback literal runtime_dispatch_error, AND confirm the notice text contains no other raw exception/stack detail. IF branch (A) was observed instead, record this step `skipped` (nothing to check on a clean reply)', 'The exposed code is allowlisted (or the safe fallback) with zero raw internal detail leaked — matches apps/agent-manager/src/lib/event-dispatcher.ts #HERMES_CHAT_ERROR_CODES', 'get_chat_room_messages', { room_id: '{{room_id}}' }),
+      step(5, 'IF branch (B) was observed: query GET /api/admin/agent-logs?level=error&category=hermes&agent_id={{hermes_agent_id}} (admin session; or GET /api/agent/error-logs with an agent key) and confirm a fresh row landed for this run — note error-log-uploader.ts uploads on its own periodic cycle, so allow a few minutes and retry rather than a single immediate check. IF branch (A) was observed instead, record this step `skipped`', 'A matching level=error/category=hermes row appears within a reasonable upload-cycle window (or the step is correctly skipped for a clean-reply run)', undefined, { level: 'error', category: 'hermes', agent_id: '{{hermes_agent_id}}' }),
+    ],
+  },
 ];
 
 export interface BuildScenarioOptions {

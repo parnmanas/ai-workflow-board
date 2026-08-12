@@ -34,6 +34,7 @@ and seeded into a live workspace with
 | 10 | `column-role-policy-auto-advance` | Column role routing + auto-advance vs HALT-unassigned | `auto-advance-unassigned`, `auto-advance-halt-unassigned`, `column-role-policy` |
 | 11 | `backlog-promotion` | Focus-gated, chain-aware backlog promotion | `backlog-promotion-chain`, `workflow-state-cap`, `focus-selector-chain-head` |
 | 12 | `resource-media-attachment` | Resource upload + comment media attachment (evidence path) | `comment-media-e2e` |
+| 13 | `hermes-live-chat-delivery` | Live-host smoke test: one real chat message to the deployed Hermes Agent, graded for genuine reply vs. allowlisted fail-closed notice (ticket 7a4b14b4, hardening from a837879c) | `apps/agent-manager/test/hermes-chat-dispatch-success.test.mjs` / `-failure.test.mjs` |
 
 ### Self-test coverage NOT yet mirrored as a scenario
 
