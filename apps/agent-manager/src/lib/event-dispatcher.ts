@@ -1491,6 +1491,87 @@ export class EventDispatcher {
   }
 
   /**
+   * ticket c0c0b1e4: classify why #resolveAgentContext(id) came back undefined
+   * for a single candidate id. 'unmanaged'/'no_id' are routine (the id was
+   * never this manager's to resolve) — only 'not_bootstrapped' means the
+   * registry HAS an entry (this manager does own the agent) but it never
+   * finished bootstrapping (missing api_key/working_dir/mcp_config_path,
+   * e.g. a manager-restart rehydration miss). Only that case is worth
+   * surfacing as an error; the rest is filtering noise.
+   */
+  #agentContextMissReason(
+    eventAgentId: string | undefined | null,
+  ): 'no_id' | 'unmanaged' | 'not_bootstrapped' {
+    if (!eventAgentId || !this.#managedAgentContexts) return 'no_id';
+    return this.#managedAgentContexts.get(eventAgentId) ? 'not_bootstrapped' : 'unmanaged';
+  }
+
+  /** Members variant of {@link #agentContextMissReason} for
+   *  #resolveAgentContextFromMembers callers — reports 'not_bootstrapped' if
+   *  ANY candidate is a registered-but-broken managed agent, even when other
+   *  members in the list are simply unmanaged. */
+  #agentContextMissReasonForMembers(
+    memberIds: string[],
+  ): 'no_id' | 'unmanaged' | 'not_bootstrapped' {
+    if (!memberIds.length || !this.#managedAgentContexts) return 'no_id';
+    let sawUnmanaged = false;
+    for (const id of memberIds) {
+      const reason = this.#agentContextMissReason(id);
+      if (reason === 'not_bootstrapped') return 'not_bootstrapped';
+      if (reason === 'unmanaged') sawUnmanaged = true;
+    }
+    return sawUnmanaged ? 'unmanaged' : 'no_id';
+  }
+
+  /**
+   * ticket c0c0b1e4: previously an unresolved agent context (undefined from
+   * #resolveAgentContext/#resolveAgentContextFromMembers) skipped every
+   * downstream identity check and fell through to a generic "dropped (no
+   * delegation path)" log line that classify() never picks up — a fully
+   * silent drop with no signal beyond the local log file. Logs a
+   * classify()-matchable line (category='agent-context', level='error' — see
+   * error-log-uploader.ts) whenever the miss is the genuine 'not_bootstrapped'
+   * case; routine 'unmanaged'/'no_id' misses are left as-is. Returns whether
+   * it reported, so callers know whether a user-facing notice is also worth
+   * posting.
+   */
+  #reportAgentContextMiss(
+    logPrefix: string,
+    reason: 'no_id' | 'unmanaged' | 'not_bootstrapped',
+    idLabel: string,
+  ): boolean {
+    if (reason !== 'not_bootstrapped') return false;
+    log(
+      `${logPrefix}: agent context unresolved (registered but not bootstrapped — possible rehydration miss) agent=${idLabel}`,
+    );
+    return true;
+  }
+
+  /** Best-effort chat-room notice for a #reportAgentContextMiss(...) hit —
+   *  mirrors #reportHermesDispatchFailure's fire-and-log POST pattern. */
+  async #notifyAgentContextMissInRoom(
+    logPrefix: string,
+    roomId: string | undefined,
+    agentId: string,
+  ): Promise<void> {
+    if (!roomId || !agentId) return;
+    const posted = await postChatRoomMessage(
+      this.#config,
+      roomId,
+      agentId,
+      '⚠️ **에이전트 실행 정보를 찾을 수 없습니다**\n\n' +
+        '이 메시지에 응답하지 못했습니다. Agent Manager가 이 에이전트의 실행 컨텍스트를 ' +
+        '아직 준비하지 못한 상태입니다(재시작 직후 rehydration 미완료 등). 잠시 후 다시 시도해 주세요.',
+    ).catch((postErr: any) => {
+      log(`${logPrefix} agent-context-miss notice POST threw: room=${roomId} ${postErr?.message ?? postErr}`);
+      return false;
+    });
+    if (!posted) {
+      log(`${logPrefix} agent-context-miss notice did not reach room=${roomId}`);
+    }
+  }
+
+  /**
    * Self-gate for chat replies. A message counts as "self" when the sender is
    * either this manager's own agent_id OR one of the managed agents it
    * supervises — the latter is what stops a managed agent's reply from
@@ -1609,6 +1690,11 @@ export class EventDispatcher {
       !agentContext
     ) {
       log(`Trigger dropped (not for this agent): target=${eventAgentId} self=${selfAgentId}`);
+      this.#reportAgentContextMiss(
+        'Trigger',
+        this.#agentContextMissReason(eventAgentId),
+        eventAgentId,
+      );
       return;
     }
 
@@ -2666,6 +2752,15 @@ export class EventDispatcher {
     log(
       `Chat request dropped (no delegation path): agent=${payload.agent_id} user=${payload.user_id}`,
     );
+    if (
+      this.#reportAgentContextMiss(
+        'Chat request',
+        this.#agentContextMissReason(payload.agent_id),
+        payload.agent_id,
+      )
+    ) {
+      await this.#notifyAgentContextMissInRoom('Chat request', payload.room_id, payload.agent_id);
+    }
   }
 
   /**
@@ -2856,6 +2951,11 @@ export class EventDispatcher {
     }
 
     log(`Comment mention dropped (no delegation path): ticket=${ticketId} comment=${commentId}`);
+    this.#reportAgentContextMiss(
+      'Comment mention',
+      this.#agentContextMissReason(agentId),
+      agentId,
+    );
   }
 
   handleBoardUpdate(raw: string): void {
@@ -3402,6 +3502,19 @@ export class EventDispatcher {
     log(
       `Chat room message dropped (no delegation path): room=${p.room_id} sender=${p.sender_name || p.sender_id}`,
     );
+    if (
+      this.#reportAgentContextMiss(
+        'Chat room message',
+        this.#agentContextMissReasonForMembers(memberIds),
+        memberIds.join(','),
+      )
+    ) {
+      await this.#notifyAgentContextMissInRoom(
+        'Chat room message',
+        p.room_id,
+        memberIds[0] || p.sender_id || '',
+      );
+    }
     } finally {
       // Release the run lock unless a spawned subagent took ownership above (its
       // exit hook releases it then). Idempotent + no-op for ordinary chat turns
