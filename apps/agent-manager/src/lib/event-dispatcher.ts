@@ -1991,6 +1991,16 @@ export class EventDispatcher {
     // We placed a reservation to release only when live===false (a fresh spawn);
     // a live reuse placed nothing.
     const reservedFresh = !!reservation && reservation.acquired && !reservation.live;
+    // ticket fdf6714e: when this trigger's OWN reservation lives in the fallback
+    // tracker (not canAuthoritative — true fallback mode), hand its key/nonce
+    // into #dispatchTriggerBody so a successful one-shot spawn there can attach
+    // its pid, symmetric with handleCommentMention's fallback branch. Fresh
+    // authoritative reservations are excluded — TicketSessionManager's own
+    // attachDispatchPid wiring is a separate, pre-existing concern.
+    const fallbackSeat =
+      reservedFresh && !canAuthoritative && inflightKey
+        ? { key: inflightKey, nonce: reservation!.nonce }
+        : null;
     try {
       await this.#dispatchTriggerBody(
         ev,
@@ -1999,6 +2009,7 @@ export class EventDispatcher {
         canAuthoritative && reservedFresh,
         raw,
         opts,
+        fallbackSeat,
       );
     } finally {
       if (inflightKey) {
@@ -2059,7 +2070,10 @@ export class EventDispatcher {
    *  every `return` / `throw` in here releases the slot. `dispatchReserved` is
    *  true when handleTrigger holds the authoritative `_inflight` reservation for
    *  this key, so the persistent dispatchTrigger below must defer `_inflight`
-   *  ownership to the dispatcher. */
+   *  ownership to the dispatcher. `fallbackSeat` (ticket fdf6714e) is set instead
+   *  when handleTrigger's reservation lives in the process-local fallback
+   *  tracker (true fallback mode) — the one-shot spawn branch below attaches its
+   *  pid to that seat on success, mirroring handleCommentMention. */
   async #dispatchTriggerBody(
     ev: any,
     agentContext: AgentExecutionContext | undefined,
@@ -2067,6 +2081,7 @@ export class EventDispatcher {
     dispatchReserved: boolean,
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
+    fallbackSeat?: { key: string; nonce: string | undefined } | null,
   ): Promise<void> {
     // Stock pi intentionally has no MCP client. A ticket session therefore
     // cannot read its ticket or leave the add_comment / move_ticket audit trail
@@ -2715,6 +2730,13 @@ export class EventDispatcher {
           // ticket 467f714a blocker #3: report the one-shot pid so a session-defer
           // replay records a durable, reapable survivor handle (crash-after-spawn).
           opts?.onDispatched?.(typeof result.pid === 'number' ? result.pid : null);
+          // ticket fdf6714e: this trigger's own fallback-tracker seat (if any) is
+          // released moments from now in handleTrigger's outer finally regardless
+          // — but attach the pid anyway for parity with handleCommentMention and
+          // to protect the seat for whatever remains of this window.
+          if (fallbackSeat && typeof result.pid === 'number') {
+            this.#inflightDispatch.attachDispatchPid(fallbackSeat.key, fallbackSeat.nonce, result.pid);
+          }
           // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
           // processed (grace extension, not resolution).
           this.#ackDispatch(ev, 'processed');
@@ -3265,12 +3287,11 @@ export class EventDispatcher {
         // 인스턴스에 예약한다(위쪽의 tryAcquireFallback 호출, event-dispatcher.ts).
         // 두 dispatch 경로가 하나의 공유 레지스트리에 대해 single-flight 하도록
         // 여기서도 동일한 key를 claim한다 — 위 authoritative 분기와 동일한 방식.
-        // 알려진 잔여 gap (ticket 13160d20 후속): authoritative 경로의
-        // attachDispatchPid와 달리 InflightDispatchTracker에는 pid-liveness
-        // 탈출구가 없어, one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래
-        // 실행되면 이 예약이 그 아래에서 age-out될 수 있다 — 이는 handleTrigger
-        // 자신의 fallback 예약도 항상 겪어온 동일한 한계이지, 새로 생긴
-        // 회귀가 아니다.
+        // ticket fdf6714e (13160d20 후속 gap 해소): authoritative 경로의
+        // attachDispatchPid와 대칭으로 InflightDispatchTracker도 이제 pid-liveness
+        // 탈출구를 갖는다 — 아래 spawn 성공 시 attachDispatchPid로 pid를 연결하면,
+        // one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래 실행돼도 살아있는 한
+        // 이 예약은 age-out되지 않는다.
         const fallbackKey = InflightDispatchTracker.key(ticketId, mention.role_shortcut, targetAgentId);
         const acq = this.#inflightDispatch.tryAcquireFallback(fallbackKey, {
           ticketId,
@@ -3341,8 +3362,13 @@ export class EventDispatcher {
             if (seat && result.pid && seat.kind === 'authoritative') {
               this.#ticketSessionManager?.attachDispatchPid?.(ticketId, seat.role, seat.agentId, seat.nonce, result.pid);
             }
-            // fallback 종류의 seat는 pid-liveness 탈출구가 없다(InflightDispatchTracker는
-            // pid를 추적하지 않음) — 위 가드 코멘트 참고, TTL에 계속 종속된다.
+            // ticket fdf6714e: fallback 종류의 seat도 이제 동일하게 pid를 attach한다 —
+            // InflightDispatchTracker.tryAcquireFallback이 TTL 나이 대신 pid-liveness를
+            // 우선 판정해, 이 one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래 실행돼도
+            // 살아있는 한 나중 트리거가 이 seat를 재claim하지 못한다(13160d20 후속 gap 해소).
+            if (seat && result.pid && seat.kind === 'fallback') {
+              this.#inflightDispatch.attachDispatchPid(seat.key, seat.nonce, result.pid);
+            }
             log(
               `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
             );
