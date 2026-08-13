@@ -1847,6 +1847,171 @@ test('ticket f0d1da19: fallback mode — handleTrigger\'s own promoted fallback 
   );
 });
 
+// ─────────── Part I: 2×2 dispatch seat contract parity table (ticket 8c15e7f7) ───────────
+//
+// 이 티켓 이전까지, 위에서 증명한 필수 assertion 세트 —
+//   (1) spawn 성공 후 프로세스가 살아있는 동안 같은 (ticket, role, agent) seat 의
+//       다른 경로 dispatch 가 억제된다 (twin 0)
+//   (2) 그 억제가 INFLIGHT_RESERVATION_STALE_MS 및 safety-valve(연속 억제 N회 +
+//       min-age)를 넘겨도 pid-liveness 로 유지된다 (= promote 가 실제로 배선돼 있다)
+//   (3) onExit 발화 후엔 seat 가 풀려 다음 dispatch 가 정상 진행된다
+// 는 handleTrigger/handleCommentMention × authoritative/fallback 4칸에 대해
+// "발견한 순서대로, 각자 다른 티켓에서" 흩어져 쌓였다 — 13160d20(mention
+// fallback), fdf6714e(fallback pid-liveness), f0d1da19(trigger 자신의 one-shot
+// occupancy + pid 승격) 순서로, 매번 반대쪽 칸의 동일 결함을 뒤늦게 재발견했다
+// (티켓 본문 "왜" 표 참고). 아래 표는 그 동일 assertion 세트를 4칸에 명시적으로,
+// 균일하게 적용한다 — 칸이 늘면 SEAT_CELLS 에 행만 추가하면 된다.
+//
+// 각 셀은 claim(자기 경로로 seat 를 선점)과 probe(반대 경로로 같은 seat 를 재시도)
+// 를 정의한다. 두 dispatch 경로가 서로의 점유를 못 보는 것이 이 계열 티켓들의
+// 반복된 결함 패턴이었으므로 cross-path probe 가 이 계약을 검증하는 데 가장
+// 직접적이다 — 같은 이유로 Part F/G/H 의 기존 테스트도 전부 cross-path 로
+// 검증한다. 같은 경로끼리의 twin(같은 supervisor 가 같은 트리거를 재전송)
+// 억제는 Part A/B 가 이미 별도로 증명했으므로 여기서 반복하지 않는다.
+// 4칸 모두 동일한 mgr(failSpawn:true)로 통일한다 — authoritative 모드에서
+// handleTrigger 가 probe 로 쓰일 때(handleCommentMention 행들) dispatchTrigger 의
+// PERSISTENT 세션 경로가 그대로 성공해버리면 calls.spawn(one-shot 카운터)이 아니라
+// mgr.spawnCount(영구 세션 카운터)만 늘어 이 테이블의 공통 신호(calls.spawn.length)가
+// 거짓으로 안 늘어난 것처럼 보인다 — 실제 결함이 아니라 두 카운터를 섞어 쓴
+// 테스트 자체의 구멍이었다(seat 가 풀리면 트리거는 어느 경로로든 정상 진행되는
+// 것이 맞고, 그 자체는 이 티켓의 관심사가 아니다). failSpawn:true 는 fallback 모드
+// 셀에서는 persistentTicket=false 라 dispatchTrigger 시도 자체가 스킵되므로
+// 완전히 무해하다 — 그래서 4칸 모두에 안전하게 통일할 수 있다.
+function makeSeatHarness(persistent) {
+  return makeDispatcher({
+    persistent,
+    ticketMgr: new RealTicketMgrStub(makeConfig(), { failSpawn: true }),
+  });
+}
+
+const SEAT_CELLS = [
+  {
+    label: 'handleTrigger — authoritative (persistent dispatch declined → one-shot, ticket f0d1da19)',
+    makeHarness: () => makeSeatHarness(true),
+    claim: (h) => h.dispatcher.handleTrigger(evJson()),
+    probe: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    tryReserve: (h) => h.mgr.tryReserveDispatch('t1', 'assignee', 'a1'),
+  },
+  {
+    label: 'handleTrigger — fallback (persistentTicketSessions:false one-shot, ticket 3d180f85/f0d1da19)',
+    makeHarness: () => makeSeatHarness(false),
+    claim: (h) => h.dispatcher.handleTrigger(evJson()),
+    probe: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    tryReserve: (h) =>
+      h.tracker.tryAcquireFallback(KEY('t1', 'assignee', 'a1'), {
+        ticketId: 't1',
+        role: 'assignee',
+        agentId: 'a1',
+      }),
+  },
+  {
+    label: 'handleCommentMention — authoritative (role-mention one-shot, ticket e90294e7)',
+    makeHarness: () => makeSeatHarness(true),
+    claim: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    probe: (h) => h.dispatcher.handleTrigger(evJson()),
+    tryReserve: (h) => h.mgr.tryReserveDispatch('t1', 'assignee', 'a1'),
+  },
+  {
+    label:
+      'handleCommentMention — fallback (persistentTicketSessions:false role-mention one-shot, ticket 13160d20/fdf6714e)',
+    makeHarness: () => makeSeatHarness(false),
+    claim: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    probe: (h) => h.dispatcher.handleTrigger(evJson()),
+    tryReserve: (h) =>
+      h.tracker.tryAcquireFallback(KEY('t1', 'assignee', 'a1'), {
+        ticketId: 't1',
+        role: 'assignee',
+        agentId: 'a1',
+      }),
+  },
+];
+
+for (const cell of SEAT_CELLS) {
+  // Non-vacuous: 이 경로/모드의 seat 클레임을 onExit 대신 spawn() 직후 즉시
+  // release 하도록 되돌리면(f0d1da19/e90294e7 이전 상태), 아래 probe 가 억제되지
+  // 않고 두 번째 one-shot 을 spawn 해 calls.spawn.length 가 1이 아니라 2가 된다.
+  test(`[8c15e7f7 seat parity] ${cell.label}: claimed seat suppresses the SAME (ticket,role,agent) seat's dispatch through the other path while the process is alive`, async () => {
+    const h = cell.makeHarness();
+    await cell.claim(h);
+    assert.equal(h.calls.spawn.length, 1, 'the claim spawned exactly one one-shot');
+    assert.equal(
+      typeof h.calls.spawn[0].onExit,
+      'function',
+      "the seat is held via onExit for the one-shot's full lifetime, not released the instant spawn() resolves",
+    );
+
+    await cell.probe(h);
+    assert.equal(
+      h.calls.spawn.length,
+      1,
+      'the cross-path probe found the seat still held and did not twin-spawn',
+    );
+  });
+
+  // Non-vacuous: 이 경로/모드의 spawn-성공 분기에서 promote()/attachDispatchPid
+  // 호출을 지우면(fdf6714e 이전 상태), pid 가 붙지 않은 예약은 나이만으로
+  // 판정돼 아래 루프의 첫 반복부터 evicted:'stale'(또는 안전밸브 통과 후
+  // evicted:'safety_valve')로 재claim 되어 acquired:false 검증이 즉시 깨지고,
+  // 뒤이은 실 dispatcher 호출들도 twin-spawn 해 calls.spawn.length 가 커진다.
+  test(`[8c15e7f7 seat parity] ${cell.label}: the suppression survives past INFLIGHT_RESERVATION_STALE_MS and the safety-valve window while the process stays alive`, async () => {
+    const h = cell.makeHarness();
+    await cell.claim(h);
+    assert.equal(h.calls.spawn.length, 1);
+    assert.equal(
+      h.mgr._isPidAlive(h.calls.spawn[0].pid),
+      true,
+      "sanity: the claimed one-shot's real child is alive",
+    );
+
+    const realNow = Date.now;
+    Date.now = () => realNow() + INFLIGHT_RESERVATION_STALE_MS + 5 * 60_000;
+    try {
+      for (let i = 0; i < INFLIGHT_SUPPRESS_SAFETY_VALVE + 3; i++) {
+        const r = cell.tryReserve(h);
+        assert.equal(
+          r.acquired,
+          false,
+          `attempt #${i + 1} stays refused — a live pid overrides age-based eviction`,
+        );
+        assert.equal(r.evicted, undefined, 'a confirmed-alive pid is never TTL/safety-valve evicted');
+      }
+      // 위 루프는 registry 자체만 증명한다 — 실제 handleTrigger/
+      // handleCommentMention 이 그 registry 를 올바르게 consult 하는지는 같은
+      // 경로의 재시도(supervisor resend)와 반대 경로 dispatch 를 real
+      // dispatcher 호출로 한 번씩 더 확인해야 증명된다.
+      await cell.claim(h);
+      await cell.probe(h);
+    } finally {
+      Date.now = realNow;
+    }
+    assert.equal(
+      h.calls.spawn.length,
+      1,
+      'past the TTL/safety-valve window the still-alive one-shot kept the seat — neither the same-path retry nor the cross-path probe twin-spawned',
+    );
+  });
+
+  // Non-vacuous: onExit 로 이어지는 release 배선을 통째로 지우면(seat 가 다시는
+  // 풀리지 않으면), 아래 probe 가 영원히 억제된 채로 남아 calls.spawn.length 가
+  // 2 가 아니라 1에 멈춘다.
+  test(`[8c15e7f7 seat parity] ${cell.label}: once the one-shot exits (onExit fires), the seat is free again for the next dispatch`, async () => {
+    const h = cell.makeHarness();
+    await cell.claim(h);
+    assert.equal(h.calls.spawn.length, 1);
+    const onExit = h.calls.spawn[0].onExit;
+    assert.equal(typeof onExit, 'function');
+
+    onExit();
+
+    await cell.probe(h);
+    assert.equal(
+      h.calls.spawn.length,
+      2,
+      'the seat was released on exit, so the following cross-path dispatch proceeded normally',
+    );
+  });
+}
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);
