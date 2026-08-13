@@ -639,3 +639,110 @@ SHA 고정. 잘못된 SHA 는 실배포 파이프라인을 깨고, 그 브랜치
 - 워크플로 YAML 파싱 확인: `ci.yml` → `{contents: read}`, 잡 5개 그대로.
   `publish-agent-manager.yml` → `{contents: write, id-token: write}` 변동 없음.
 - 이 커밋은 `publish-agent-manager.yml` 을 건드리지 않으므로 publish 를 트리거하지 않는다.
+
+---
+
+## 2026-08-13 재감사 — 의존성은 깨끗, 발견은 **GitHub API path injection**
+
+`npm audit` 은 `main` · `production.private` · 발행 패키지 모두 **0건**이었고, 이전
+감사가 세운 가드도 전부 살아 있었다. 이번 발견은 의존성이 아니라 **우리 코드가
+호출자 입력을 REST 경로에 그대로 보간하던 자리**에서 나왔다.
+
+### 취약점 (수정됨)
+
+`apps/server/src/services/github-connector.service.ts` 는 GitHub REST 경로를 전부
+템플릿 문자열로 조립하면서, `branch` · `workflowId` · `runId` · `base` · `head` 는
+`encodeURIComponent` 로 감쌌지만 **`owner` 와 `repo` 는 18개 호출 지점 어디에서도
+검증하거나 인코딩하지 않았다.**
+
+진입점인 `fetch_github_info` MCP 도구는 `owner` / `repo` 를 자유 문자열
+(`z.string()`)로 받는다. WHATWG URL 정규화가 `..` 세그먼트를 조용히 접기 때문에:
+
+```
+owner = "x"
+repo  = "../../user/repos?visibility=private&"
+  → https://api.github.com/repos/x/../../user/repos?visibility=private&
+  → https://api.github.com/user/repos?visibility=private&    (실측 확인)
+```
+
+요청은 `/repos/...` 밖의 **임의 GitHub 엔드포인트로 재조준**되며, 그대로 서버가
+보관한 GitHub 토큰(또는 호출자가 지정한 `credential_id` 의 자격증명)을 달고 나간다.
+즉 **MCP 키를 가진 호출자가 직접 쥘 수 없는 토큰의 권한으로 비공개 저장소 목록 등을
+읽어낼 수 있었다.** `createIssue` / `closeIssue` 같은 POST·PATCH 경로도 같은 방식으로
+재조준 가능했다. `parseGitHubUrl` 의 `owner` 패턴(`[^/]+`)도 `..` 를 허용해 URL
+경로로 들어오는 값에 같은 구멍이 있었다.
+
+### 조치 — 2겹 방어
+
+1. **진입점 charset 검증** — `assertRepoRef()` / `isValidRepoRef()` 를 추가하고
+   `owner`(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`) · `repo`(`^[A-Za-z0-9_.-]{1,100}$`,
+   `.`·`..` 제외)를 GitHub 자체 명명 규칙에 맞춰 고정했다. 모듈 함수 6개
+   (`listOpenIssuesSince` · `listIssueCommentsSince` · `compareCommits` ·
+   `createIssueComment` · `createIssue` · `closeIssue`)는 throw 하고,
+   기존에 `''`/`[]` 로 degrade 하던 서비스 메서드 4개는 **degrade 계약을 유지한 채**
+   기존 인자 가드 옆에 검증을 붙였다(동작 호환). MCP 도구가 직접 타는
+   `fetchRepoInfo` 는 throw — "not found" 가 아니라 잘못된 입력으로 보고된다.
+   이 층이 반드시 필요한 이유: 중앙 가드는 `?` 이후를 보지 않으므로
+   `repo="y?foo=bar"` 같은 **질의 주입은 진입점에서만 막힌다.**
+2. **송신 직전 최종 가드** — `assertGitHubApiUrl()` 이 정규화 후 origin 과
+   traversal 세그먼트(`.` · `..` · `%2e` · `%2e%2e`)를 재검사하고 절대 URL 을
+   반환한다. `githubApiCall`, `githubFetch`, 그리고 유일하게 남아 있던 raw
+   `fetch`(README 조회)까지 **모든 송신 경로가 이 함수를 통과**하므로 앞으로 추가될
+   호출 지점도 자동으로 덮인다. traversal 만 명시적으로 거부하고 정규화 결과를
+   원문과 문자열 비교하지는 않는다 — 그러면 `encodeURIComponent` 로 이미 인코딩된
+   세그먼트(`release%2F1.0`)에서 오탐이 난다.
+
+`parseGitHubUrl` 도 같은 charset 을 적용해, 파싱은 되지만 규칙을 벗어나는 값은
+REST 경로로 넘기지 않고 `null` 로 거부한다.
+
+### 검증
+
+- 새 회귀 테스트 `apps/server/test/github-repo-ref-injection.test.mjs` (6 테스트) —
+  `npm test -w server` 의 `posttest` 목록에 등록(`ssrf-guard` · `auth-login-throttle` 옆).
+- **가드가 실제로 무는지 확인**: traversal 검사와 `repo` charset 을 일부러 무력화해
+  재빌드 → **정확히 주입 관련 3건만** 실패, 나머지 3건은 통과. 원복 후 6/6 통과.
+- 익스플로잇 자체를 실측: 수정 전 URL 이 `https://api.github.com/user/repos?visibility=private&`
+  로 정규화되는 것을 확인한 뒤, 수정 후 같은 입력이 거부되는 것을 테스트로 고정했다.
+- 회귀 없음: `ssrf-guard` · `supply-chain-integrity-guard` · `outreach-github-connector` ·
+  `github-sync-credential` · `ci-health-monitor`(+presence) · `outreach-ingest` ·
+  `outreach-publish-behavior` · `outreach-release-consistency` ·
+  `test-registration-completeness` — 합계 **128 테스트 전건 통과**.
+
+### 의존성 감사 결과 (변동 없음)
+
+- `main` · `production.private` 추출 트리 · `awb-agent-manager` 단독 트리 — 모두 **0건**.
+- **카나리 확인**: 임시 트리 `lodash@4.17.4` → critical 1건 정상 보고 —
+  "0건" 이 감사 경로 무응답이 아님을 증명.
+- 락파일 위생: 581 항목, 전부 `registry.npmjs.org` + integrity 보유
+  (워크스페이스 심링크 3건 제외). 설치 스크립트는 허용 목록
+  (`@scarf/scarf` · `esbuild` · `fsevents`) 그대로. deprecated 는 typeorm 하위
+  `glob@10.5.0` 뿐 — 어드바이저리 없음, 직접 통제 불가.
+- 발행 provenance 유지: `awb-agent-manager@1.6.115` 가 `attestations.provenance`
+  (SLSA v1) 보유.
+- `main` 워크플로는 여전히 1st-party `actions/*` 만 사용.
+
+### 배포 브랜치 드리프트 — **운영자 판단 필요 (미조치)**
+
+이번에는 `production.private` 이 `main` 과 **바이트 동일하지 않다.** 락파일이
+15줄 벌어져 있고, 그 정체는 배포 브랜치에 **보안 통제 3종이 통째로 빠져 있다**는 것:
+
+| 통제 | `main` | `production.private` |
+|---|---|---|
+| helmet 보안 응답 헤더 (nosniff/frameguard/HSTS/CSP) | 있음 (`main.ts`) | **없음** (의존성조차 없음) |
+| SSRF 가드 (`common/ssrf-guard.ts`) | 있음 | **없음** |
+| 로그인 무차별 대입 잠금 (5회/15분, email+IP) | 있음 (`auth.service.ts`) | **없음** |
+
+회귀 테스트 `ssrf-guard` · `auth-login-throttle` · `mcp-tool-authz` ·
+`mcp-standalone-http-auth` · `supply-chain-integrity-guard` 도 배포 브랜치에 없다.
+두 브랜치의 `package.json` / 락파일은 각자 일관되므로 `npm ci` 는 정상 동작한다 —
+**깨진 상태가 아니라 "뒤처진" 상태**다.
+
+조치(= `main` → `production.private` 머지)는 **하지 않았다.** 이 머지는 보안 통제
+3종만이 아니라 진행 중인 기능 커밋 79개 파일을 함께 실 NAS 로 내보내며, 브랜치
+push 자체가 실배포를 트리거한다. 보안 감사가 단독으로 결정할 범위가 아니라고 판단해
+운영자 승인 대기로 남긴다.
+
+### 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
+SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.

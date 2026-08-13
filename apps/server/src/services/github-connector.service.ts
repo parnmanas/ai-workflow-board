@@ -43,10 +43,89 @@ export interface GitHubWorkflowRun {
 
 // Pure helpers — no DB, no config. Kept as standalone exports.
 
+/**
+ * owner/repo are caller-supplied (the `fetch_github_info` MCP tool takes them as
+ * free-form strings) and get interpolated straight into the REST path. Without a
+ * charset check a value like `../../user/repos?visibility=private&` normalizes the
+ * URL away from /repos/... entirely and re-points the request at another GitHub
+ * endpoint — still carrying the server's stored token. Anchored to GitHub's own
+ * naming rules so the segment cannot contain `/`, `.`, `?`, `#` or whitespace and
+ * path traversal / query injection is structurally impossible.
+ */
+const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]{1,100}$/;
+
+export class GitHubInvalidRepoRefError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GitHubInvalidRepoRefError';
+  }
+}
+
+/**
+ * Validates an owner/repo pair before it reaches the REST path. Returns the pair
+ * unchanged so call sites can inline it. Throws GitHubInvalidRepoRefError — callers
+ * surface it as a normal "invalid input" error, never as a GitHub API failure.
+ */
+export function assertRepoRef(owner: unknown, repo: unknown): { owner: string; repo: string } {
+  if (typeof owner !== 'string' || !GITHUB_OWNER_RE.test(owner)) {
+    throw new GitHubInvalidRepoRefError(`Invalid GitHub owner: ${JSON.stringify(owner)}`);
+  }
+  // `.` and `..` are valid per the charset but are path-traversal segments.
+  if (typeof repo !== 'string' || !GITHUB_REPO_RE.test(repo) || repo === '.' || repo === '..') {
+    throw new GitHubInvalidRepoRefError(`Invalid GitHub repo: ${JSON.stringify(repo)}`);
+  }
+  return { owner, repo };
+}
+
+/** Non-throwing form of {@link assertRepoRef}, for call sites that degrade
+ *  (return ''/[]) on an unusable repo ref rather than surfacing an error. */
+export function isValidRepoRef(owner: unknown, repo: unknown): boolean {
+  try {
+    assertRepoRef(owner, repo);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Last line of defense before any request leaves for GitHub. Every REST path in
+ * this file is assembled by template-string interpolation, so a single unvalidated
+ * segment anywhere re-points the request. Normalizing here and re-checking the
+ * origin *and* prefix means a traversal that slips past an entry-point check still
+ * cannot reach an unintended endpoint with the server's token. Returns the
+ * normalized absolute URL for the caller to fetch.
+ */
+export function assertGitHubApiUrl(path: string): string {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    throw new GitHubInvalidRepoRefError(`Invalid GitHub API path: ${JSON.stringify(path)}`);
+  }
+  const url = new URL(`${GITHUB_API}${path}`);
+  if (url.origin !== GITHUB_API) {
+    throw new GitHubInvalidRepoRefError(`GitHub API path escaped the API origin: ${JSON.stringify(path)}`);
+  }
+  // `..` segments normalize away silently — and the origin survives that, so the
+  // check above cannot see it. Reject traversal segments explicitly instead of
+  // comparing normalized-vs-raw, which would false-positive on percent-encoding.
+  const segments = path.split(/[?#]/)[0].split('/');
+  if (segments.some((s) => s === '.' || s === '..' || s === '%2e' || s.toLowerCase() === '%2e%2e')) {
+    throw new GitHubInvalidRepoRefError(`GitHub API path contains traversal: ${JSON.stringify(path)}`);
+  }
+  return url.href;
+}
+
 export function parseGitHubUrl(url: string): { owner: string; repo: string } | null {
-  const match = url.match(/github\.com\/([^/]+)\/([^/\s#?]+)/);
+  const match = url.match(/github\.com\/([^/\s#?]+)\/([^/\s#?]+)/);
   if (!match) return null;
-  return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
+  const owner = match[1];
+  const repo = match[2].replace(/\.git$/, '');
+  // A URL that parses but carries an out-of-charset segment is rejected here
+  // rather than being handed to the REST path — same guarantee as assertRepoRef.
+  if (!GITHUB_OWNER_RE.test(owner) || !GITHUB_REPO_RE.test(repo) || repo === '.' || repo === '..') {
+    return null;
+  }
+  return { owner, repo };
 }
 
 export function buildSyncContent(info: RepoInfo): string {
@@ -179,7 +258,7 @@ export async function githubApiCall(path: string, token: string, opts: GitHubApi
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(opts.body);
   }
-  return fetchImpl(`${GITHUB_API}${path}`, { method: opts.method || 'GET', headers, body });
+  return fetchImpl(assertGitHubApiUrl(path), { method: opts.method || 'GET', headers, body });
 }
 
 /**
@@ -219,6 +298,7 @@ export async function assertGitHubOk(res: Response, context: string): Promise<vo
 export async function listOpenIssuesSince(
   owner: string, repo: string, since: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<GitHubIssue[]> {
+  assertRepoRef(owner, repo);
   const qs = new URLSearchParams({ state: 'open', sort: 'updated', direction: 'asc', per_page: '100' });
   if (since) qs.set('since', since);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues?${qs}`, token, { fetchImpl: opts.fetchImpl });
@@ -242,6 +322,7 @@ export async function listOpenIssuesSince(
 export async function listIssueCommentsSince(
   owner: string, repo: string, issueNumber: number, since: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<GitHubIssueComment[]> {
+  assertRepoRef(owner, repo);
   const qs = new URLSearchParams({ per_page: '100' });
   if (since) qs.set('since', since);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}/comments?${qs}`, token, { fetchImpl: opts.fetchImpl });
@@ -266,6 +347,7 @@ export async function listIssueCommentsSince(
 export async function compareCommits(
   owner: string, repo: string, base: string, head: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<string[]> {
+  assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, token, { fetchImpl: opts.fetchImpl });
   await assertGitHubOk(res, `GET compare ${owner}/${repo} ${base}...${head}`);
   const data = await res.json();
@@ -277,6 +359,7 @@ export async function compareCommits(
 export async function createIssueComment(
   owner: string, repo: string, issueNumber: number, body: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<{ id: number; html_url: string }> {
+  assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, token, {
     method: 'POST', body: { body }, fetchImpl: opts.fetchImpl,
   });
@@ -290,6 +373,7 @@ export async function createIssueComment(
 export async function createIssue(
   owner: string, repo: string, title: string, body: string, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<{ number: number; html_url: string }> {
+  assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues`, token, {
     method: 'POST', body: { title, body }, fetchImpl: opts.fetchImpl,
   });
@@ -303,6 +387,7 @@ export async function createIssue(
 export async function closeIssue(
   owner: string, repo: string, issueNumber: number, token: string, opts: { fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
+  assertRepoRef(owner, repo);
   const res = await githubApiCall(`/repos/${owner}/${repo}/issues/${issueNumber}`, token, {
     method: 'PATCH', body: { state: 'closed' }, fetchImpl: opts.fetchImpl,
   });
@@ -374,7 +459,7 @@ export class GitHubConnectorService {
     const token = await this.resolveToken(credentialId);
     if (!token) throw new GitHubNoTokenError();
 
-    const res = await fetchImpl(`${GITHUB_API}${path}`, {
+    const res = await fetchImpl(assertGitHubApiUrl(path), {
       headers: {
         'Accept': 'application/vnd.github.v3+json',
         'Authorization': `Bearer ${token}`,
@@ -398,7 +483,9 @@ export class GitHubConnectorService {
    * gracefully — the sweep is informational, not gating, on the SHA.
    */
   async fetchBranchTipSha(owner: string, repo: string, branch: string, credentialId?: string | null): Promise<string> {
-    if (!owner || !repo || !branch) return '';
+    // Same degrade contract as the missing-arg guard above it: an out-of-charset
+    // ref is not a usable repo, and must never reach the REST path.
+    if (!owner || !repo || !branch || !isValidRepoRef(owner, repo)) return '';
     try {
       const data = await this.githubFetch(
         `/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`,
@@ -424,7 +511,7 @@ export class GitHubConnectorService {
   async listWorkflows(
     owner: string, repo: string, credentialId?: string | null, fetchImpl?: typeof fetch,
   ): Promise<GitHubWorkflow[]> {
-    if (!owner || !repo) return [];
+    if (!owner || !repo || !isValidRepoRef(owner, repo)) return [];
     try {
       const data = await this.githubFetch(`/repos/${owner}/${repo}/actions/workflows`, credentialId, fetchImpl);
       const workflows: any[] = Array.isArray(data?.workflows) ? data.workflows : [];
@@ -447,7 +534,7 @@ export class GitHubConnectorService {
     owner: string, repo: string, workflowId: string, branch: string,
     credentialId?: string | null, fetchImpl?: typeof fetch,
   ): Promise<GitHubWorkflowRun[]> {
-    if (!owner || !repo || !workflowId || !branch) return [];
+    if (!owner || !repo || !workflowId || !branch || !isValidRepoRef(owner, repo)) return [];
     try {
       const qs = new URLSearchParams({ branch, status: 'completed', per_page: '5' });
       const data = await this.githubFetch(
@@ -478,7 +565,7 @@ export class GitHubConnectorService {
   async listRunFailedJobs(
     owner: string, repo: string, runId: string, credentialId?: string | null, fetchImpl?: typeof fetch,
   ): Promise<string[]> {
-    if (!owner || !repo || !runId) return [];
+    if (!owner || !repo || !runId || !isValidRepoRef(owner, repo)) return [];
     try {
       const data = await this.githubFetch(`/repos/${owner}/${repo}/actions/runs/${encodeURIComponent(runId)}/jobs`, credentialId, fetchImpl);
       const jobs: any[] = Array.isArray(data?.jobs) ? data.jobs : [];
@@ -492,13 +579,17 @@ export class GitHubConnectorService {
   }
 
   async fetchRepoInfo(owner: string, repo: string, credentialId?: string | null): Promise<RepoInfo> {
+    // Reached straight from the `fetch_github_info` MCP tool, whose owner/repo are
+    // free-form caller input — validate before it becomes a REST path. Throws
+    // (rather than degrading) so the tool reports bad input instead of "not found".
+    assertRepoRef(owner, repo);
     const repoData = await this.githubFetch(`/repos/${owner}/${repo}`, credentialId);
 
     let readmeContent = '';
     try {
       const token = await this.resolveToken(credentialId);
       const readmeRes = await fetch(
-        `${GITHUB_API}/repos/${owner}/${repo}/readme`,
+        assertGitHubApiUrl(`/repos/${owner}/${repo}/readme`),
         {
           headers: {
             'Accept': 'application/vnd.github.v3.raw',
