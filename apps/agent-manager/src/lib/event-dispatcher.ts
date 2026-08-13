@@ -706,9 +706,9 @@ export interface CreateDispatchSeatArgs {
   /** The InflightDispatchTracker.key(...) this seat was reserved under.
    *  Required when kind==='fallback'. */
   inflightKey?: string | null;
-  /** Extra step run AFTER the core release — e.g. handleTrigger's
-   *  force-respawn replay (ticket f0d1da19). mentionSeat has no equivalent
-   *  and omits this. */
+  /** Extra step run AFTER the core release — e.g. the shared
+   *  #replayPendingForce force-respawn replay (ticket f0d1da19, shared with
+   *  handleCommentMention's mentionSeat since ticket 3b8f24ec). */
   onReleased?: () => void;
 }
 
@@ -1867,6 +1867,47 @@ export class EventDispatcher {
     );
   }
 
+  /** ticket 3b8f24ec: shared by handleTrigger's own `triggerSeat` AND
+   *  handleCommentMention's `mentionSeat` (both via createDispatchSeat's
+   *  `onReleased` hook, ticket 77b28217) — replay a single suppressed
+   *  force-respawn once whichever (ticket, role, agent) seat held
+   *  `inflightKey` releases, so a force_respawn suppressed while a MENTION
+   *  held the seat (not only a trigger, ticket f0d1da19) still gets its one
+   *  guaranteed re-run instead of sitting stuck until some later trigger for
+   *  the same key happens to consume it. Re-parses the SUPPRESSED event's OWN
+   *  captured raw (`recordSuppression`'s `raw`, captured inside handleTrigger's
+   *  own reservation gate — a mention never carries force_respawn and never
+   *  calls recordSuppression itself), never the releasing holder's own
+   *  identity: replaying THAT would re-enter dispatchTrigger with an
+   *  already-remembered `field_changed` and get dropped as `duplicate_trigger`
+   *  (the exact regression ticket f0d1da19 fixed). Always re-enters
+   *  handleTrigger — a mention holder never registers a trigger identity with
+   *  dispatchTrigger's own dedup set, so there is nothing here for the replay
+   *  to collide with. */
+  #replayPendingForce(inflightKey: string | null, ticketId: string, role: string): void {
+    if (!inflightKey) return;
+    const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
+    if (!pendingForceRaw) return;
+    log(
+      `[dispatch] replaying suppressed force_respawn after holder released: ` +
+        `ticket=${ticketId.slice(0, 8)} role=${role || '_'}`,
+    );
+    let forcedRaw: string | null = null;
+    try {
+      forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
+    } catch {
+      forcedRaw = null;
+    }
+    if (forcedRaw) {
+      // Fire-and-forget so we don't extend the caller's finally/onExit; the
+      // replay re-enters handleTrigger cleanly (re-acquires the slot,
+      // force-respawns fresh).
+      this.handleTrigger(forcedRaw).catch((err: any) =>
+        log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
+      );
+    }
+  }
+
   async handleTrigger(
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
@@ -2072,42 +2113,10 @@ export class EventDispatcher {
     // dispatch's hold on `inflightKey` ends — shared between the finally below
     // and (via the seat's `onReleased` hook, ticket 77b28217) the spawned
     // process's onExit hook, so whichever of them ends up firing the release
-    // runs this exactly once. Re-arm activity surfacing and replay a single
-    // suppressed force-respawn (blocker #1): a force_respawn that arrived
-    // while this dispatch held the slot had its fresh-session intent
-    // suppressed, and the server may not re-send it (a prior dispatch
-    // refreshing the live session can clear the stale supervisor condition).
-    // Replay it exactly once now, coalescing a whole burst into one fresh
-    // respawn. Re-parse the SUPPRESSED FORCE event's OWN payload (captured at
-    // suppression time), NOT the holder's `raw`: the holder already recorded
-    // `trigger:<its field_changed>` in the dedup set (kept until child exit),
-    // so replaying the holder identity here is dropped as `duplicate_trigger`
-    // and the respawn silently never happens. The suppressed force never
-    // reached dispatchTrigger, so its own identity is un-deduped and
-    // re-enters cleanly to force-respawn.
-    const replayPendingForce = (): void => {
-      if (!inflightKey) return;
-      const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
-      if (pendingForceRaw) {
-        log(
-          `[dispatch] replaying suppressed force_respawn after holder released: ` +
-            `ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'}`,
-        );
-        let forcedRaw: string | null = null;
-        try {
-          forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
-        } catch {
-          forcedRaw = null;
-        }
-        if (forcedRaw) {
-          // Fire-and-forget so we don't extend this finally; the replay re-enters
-          // handleTrigger cleanly (re-acquires the slot, force-respawns fresh).
-          this.handleTrigger(forcedRaw).catch((err: any) =>
-            log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
-          );
-        }
-      }
-    };
+    // runs this exactly once. Logic lives in #replayPendingForce (ticket
+    // 3b8f24ec), shared with handleCommentMention's mentionSeat.
+    const replayPendingForce = (): void =>
+      this.#replayPendingForce(inflightKey, ev.ticket_id, ev.action || '');
     // ticket f0d1da19: handleCommentMention holds its claimed seat via
     // SubagentSpawnArgs.onExit for the one-shot's FULL lifetime (ticket
     // e90294e7 round 2) — but handleTrigger's OWN fallback/authoritative
@@ -3368,6 +3377,17 @@ export class EventDispatcher {
     if (mention.mention_source === 'role' && mention.role_shortcut) {
       const targetAgentId = ev.agent_id || '';
       const tsm = this.#ticketSessionManager;
+      // ticket 3b8f24ec: computed unconditionally, mirroring handleTrigger's
+      // own unconditional `inflightKey` (this same bookkeeping key is
+      // backend-agnostic — see InflightDispatchTracker.recordSuppression's
+      // doc comment) — so a force-respawn trigger suppressed while THIS
+      // mention holds the seat still replays once mentionSeat releases,
+      // instead of sitting stuck until some later trigger for the same key
+      // happens to consume it (mentionSeat previously omitted createDispatchSeat's
+      // `onReleased` hook entirely).
+      const mentionInflightKey = InflightDispatchTracker.key(ticketId, mention.role_shortcut, targetAgentId);
+      const replayPendingForceForMention = (): void =>
+        this.#replayPendingForce(mentionInflightKey, ticketId, mention.role_shortcut);
       const suppressForSeat = (): void => {
         log(
           `Comment mention suppressed — column-move trigger already owns this (ticket, role, agent) seat: ` +
@@ -3413,6 +3433,7 @@ export class EventDispatcher {
           nonce: reservation.nonce,
           tsm,
           inflightDispatch: this.#inflightDispatch,
+          onReleased: replayPendingForceForMention,
         });
       } else if (
         persistentTicket &&
@@ -3437,8 +3458,7 @@ export class EventDispatcher {
         // 탈출구를 갖는다 — 아래 spawn 성공 시 attachDispatchPid로 pid를 연결하면,
         // one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래 실행돼도 살아있는 한
         // 이 예약은 age-out되지 않는다.
-        const fallbackKey = InflightDispatchTracker.key(ticketId, mention.role_shortcut, targetAgentId);
-        const acq = this.#inflightDispatch.tryAcquireFallback(fallbackKey, {
+        const acq = this.#inflightDispatch.tryAcquireFallback(mentionInflightKey, {
           ticketId,
           role: mention.role_shortcut,
           agentId: targetAgentId,
@@ -3466,7 +3486,8 @@ export class EventDispatcher {
           nonce: acq.nonce,
           tsm,
           inflightDispatch: this.#inflightDispatch,
-          inflightKey: fallbackKey,
+          inflightKey: mentionInflightKey,
+          onReleased: replayPendingForceForMention,
         });
       }
     }

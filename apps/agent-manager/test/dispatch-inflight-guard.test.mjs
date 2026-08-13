@@ -2010,6 +2010,42 @@ for (const cell of SEAT_CELLS) {
       'the seat was released on exit, so the following cross-path dispatch proceeded normally',
     );
   });
+
+  // ticket 3b8f24ec: 4th assertion in the parity table — a force-respawn
+  // TRIGGER suppressed while THIS cell's path holds the seat must replay
+  // once that seat releases, regardless of whether the holder is a trigger
+  // or a mention. The force probe is always handleTrigger (only a column
+  // trigger ever carries force_respawn — mentions don't), unlike claim/probe
+  // above which alternate by cell.
+  //
+  // Non-vacuous: before ticket 3b8f24ec, handleCommentMention's mentionSeat
+  // omitted createDispatchSeat's `onReleased` hook, so cells 3/4 (mention
+  // holder) never called InflightDispatchTracker.onRelease() on release —
+  // the suppressed force stayed pending and calls.spawn.length stuck at 1
+  // instead of reaching 2. Cells 1/2 (trigger holder) already wired this
+  // (ticket f0d1da19) and pass either way — applying the assertion to all 4
+  // cells uniformly is the point (board lesson: this bug class recurs one
+  // cell at a time — 13160d20 → fdf6714e → f0d1da19 → 6de97a41 → 3b8f24ec).
+  test(`[8c15e7f7 seat parity] ${cell.label}: a force-respawn trigger suppressed while this seat is held replays once the seat releases`, async () => {
+    const h = cell.makeHarness();
+    await cell.claim(h);
+    assert.equal(h.calls.spawn.length, 1);
+    const onExit = h.calls.spawn[0].onExit;
+    assert.equal(typeof onExit, 'function');
+
+    await h.dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-force-F' }));
+    assert.equal(h.calls.spawn.length, 1, 'the force-respawn was suppressed, not twin-spawned');
+    assert.equal(h.tracker.suppressedCount('inflight_dispatch'), 1, 'the suppression was recorded');
+
+    onExit();
+
+    const replayed = await waitFor(() => h.calls.spawn.length === 2, { timeoutMs: 4000 });
+    assert.equal(
+      replayed,
+      true,
+      'the suppressed force_respawn replayed exactly once after the holder released its seat',
+    );
+  });
 }
 
 function isDead(pid) {
