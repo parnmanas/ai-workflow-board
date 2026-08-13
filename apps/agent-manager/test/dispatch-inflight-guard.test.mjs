@@ -1637,6 +1637,57 @@ test('ticket f0d1da19: authoritative-declined one-shot — once handleTrigger\'s
   );
 });
 
+// Reviewer-requested (round 3 parity, ticket f0d1da19): the test above only
+// proves the immediate (~0ms age) window. handleTrigger's authoritative seat
+// is now held via onExit for the one-shot's FULL turn (possibly many minutes)
+// — like handleCommentMention's mentionSeat, it must also be PROMOTED via
+// attachDispatchPid (`triggerSeat.promote`) once spawn() resolves a real pid,
+// or it stays pid:null and is reclaimed by the SAME TTL/safety-valve backstop
+// meant for a hung, never-actually-spawned provisioning reservation — evicting
+// a perfectly healthy one-shot and twin-spawning on top of it.
+//
+// Non-vacuous: dropping the `triggerSeat.promote(result.pid)` call in
+// #dispatchTriggerBody's spawn-success branch (event-dispatcher.ts) makes the
+// very first loop iteration below fail — the pid:null seat is immediately
+// evicted as 'stale' (the fast-forwarded age already exceeds
+// INFLIGHT_RESERVATION_STALE_MS) instead of staying refused with
+// evicted:undefined — and the trailing handleTrigger/handleCommentMention
+// calls twin-spawn, pushing calls.spawn.length to 3 instead of 1.
+test('ticket f0d1da19: authoritative-declined one-shot — the promoted seat survives TTL + safety-valve while the process stays alive, so later triggers/mentions stay suppressed', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig(), { failSpawn: true });
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(calls.spawn.length, 1, "dispatchTrigger declined — fell back to the trigger's own one-shot spawn");
+  assert.equal(mgr._isPidAlive(calls.spawn[0].pid), true, "sanity: the trigger's one-shot real child is alive");
+
+  // Fast-forward past both the safety-valve min-age gate and the full TTL
+  // while the trigger's one-shot is STILL running and has released nothing.
+  const realNow = Date.now;
+  Date.now = () => realNow() + INFLIGHT_RESERVATION_STALE_MS + 5 * 60_000;
+  try {
+    for (let i = 0; i < INFLIGHT_SUPPRESS_SAFETY_VALVE + 3; i++) {
+      const r = mgr.tryReserveDispatch('t1', 'assignee', 'a1');
+      assert.equal(r.acquired, false, `attempt #${i + 1} stays refused — a live pid overrides age-based eviction`);
+      assert.equal(r.evicted, undefined, 'a confirmed-alive pid is never TTL/safety-valve evicted');
+    }
+
+    // A later supervisor re-send for the same seat through the real
+    // handleTrigger path also stays suppressed instead of twin-spawning...
+    await dispatcher.handleTrigger(evJson());
+    // ...and so does a same-seat role-mention through the real
+    // handleCommentMention path.
+    await dispatcher.handleCommentMention(mentionEvJson());
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(
+    calls.spawn.length,
+    1,
+    "past the TTL/safety-valve window, the still-alive trigger one-shot's authoritative seat stayed held — neither the later trigger nor the mention twin-spawned",
+  );
+});
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);

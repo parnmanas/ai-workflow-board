@@ -2058,9 +2058,33 @@ export class EventDispatcher {
     // reservation (`reservedFresh`); #dispatchTriggerBody flips `.transferred`
     // the instant its one-shot spawn succeeds, wiring the SAME release above
     // into that process's onExit hook — from then on this outer finally must
-    // not release out from under the still-running one-shot.
-    const triggerSeat: { transferred: boolean; release: () => void } | null = reservedFresh
-      ? { transferred: false, release: releaseTriggerReservation }
+    // not release out from under the still-running one-shot. `promote` mirrors
+    // handleCommentMention's round-3 pid attach (event-dispatcher.ts mentionSeat,
+    // attachDispatchPid): without it an AUTHORITATIVE seat held via onExit for
+    // the one-shot's full (possibly many-minute) turn stays pid:null in
+    // TicketSessionManager._inflight, so its zombie recovery only sees a
+    // provisioning-window TTL/safety-valve (ticket-session-manager.ts) and can
+    // force-evict a perfectly healthy one-shot out from under itself.
+    const triggerSeat: {
+      transferred: boolean;
+      release: () => void;
+      promote: (pid: number) => void;
+    } | null = reservedFresh
+      ? {
+          transferred: false,
+          release: releaseTriggerReservation,
+          promote: (pid: number) => {
+            if (canAuthoritative) {
+              this.#ticketSessionManager!.attachDispatchPid?.(
+                ev.ticket_id,
+                ev.action || '',
+                dispatchAgentId,
+                reservation!.nonce,
+                pid,
+              );
+            }
+          },
+        }
       : null;
     try {
       await this.#dispatchTriggerBody(
@@ -2093,10 +2117,15 @@ export class EventDispatcher {
    *  to the spawned process's `onExit` hook on success
    *  (`triggerSeat.transferred = true`) instead of letting handleTrigger's
    *  finally release the seat while the one-shot is still running — mirroring
-   *  handleCommentMention's mentionSeat pattern (ticket e90294e7 round 2). A
-   *  successful PERSISTENT dispatch (below) does NOT set `.transferred`: that
-   *  session's liveness is tracked separately (`_getLiveSession`), so releasing
-   *  `_inflight` the instant dispatch succeeds is correct as before. */
+   *  handleCommentMention's mentionSeat pattern (ticket e90294e7 round 2), INCLUDING
+   *  its round-3 pid promotion (`triggerSeat.promote`, mirroring `attachDispatchPid`):
+   *  an AUTHORITATIVE seat transferred to onExit without also being promoted stays
+   *  pid:null for the one-shot's whole turn, so TicketSessionManager's zombie
+   *  recovery only ever sees a provisioning-window TTL/safety-valve for it instead
+   *  of an OS-level liveness probe (ticket f0d1da19). A successful PERSISTENT
+   *  dispatch (below) does NOT set `.transferred`: that session's liveness is
+   *  tracked separately (`_getLiveSession`), so releasing `_inflight` the instant
+   *  dispatch succeeds is correct as before. */
   async #dispatchTriggerBody(
     ev: any,
     agentContext: AgentExecutionContext | undefined,
@@ -2104,7 +2133,11 @@ export class EventDispatcher {
     dispatchReserved: boolean,
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
-    triggerSeat?: { transferred: boolean; release: () => void } | null,
+    triggerSeat?: {
+      transferred: boolean;
+      release: () => void;
+      promote: (pid: number) => void;
+    } | null,
   ): Promise<void> {
     // Stock pi intentionally has no MCP client. A ticket session therefore
     // cannot read its ticket or leave the add_comment / move_ticket audit trail
@@ -2752,18 +2785,38 @@ export class EventDispatcher {
           // e90294e7 round 2). Without this, a role-mention for the identical
           // seat arriving moments after this spawn() call resolves finds the
           // seat already free and twin-spawns a second one-shot racing this one.
+          // Fallback-mode seats (persistentTicketSessions:false) still have no
+          // pid-liveness escape hatch here — InflightDispatchTracker doesn't
+          // track a pid, so a fallback triggerSeat held past
+          // INFLIGHT_RESERVATION_STALE_MS can still age out from under a
+          // healthy one-shot, same as handleCommentMention's fallback seat
+          // (event-dispatcher.ts:3313-3321, ticket 13160d20 follow-up). Tracked
+          // by ticket fdf6714e (InflightDispatchTracker pid-liveness escape
+          // hatch) — confirm this trigger seat's pid gets wired too when that
+          // lands.
           onExit: triggerSeat ? () => triggerSeat.release() : undefined,
         });
 
         if (result.spawned) {
+          // ticket f0d1da19: ownership of the reservation (if any) now belongs
+          // to the spawned process's onExit hook above — set `.transferred`
+          // (and promote it to a pid-verified authoritative reservation,
+          // mirroring handleCommentMention's round-3 attachDispatchPid) BEFORE
+          // any callback below that could throw. If `opts.onDispatched` threw
+          // with `.transferred` still false, handleTrigger's outer `finally`
+          // would release the seat out from under the still-running one-shot —
+          // reopening the exact twin window this ticket closes — and an
+          // authoritative seat left un-promoted stays pid:null for the
+          // one-shot's whole turn, subject to the provisioning-window
+          // TTL/safety-valve instead of real OS-level liveness.
+          if (triggerSeat) {
+            triggerSeat.transferred = true;
+            if (typeof result.pid === 'number') triggerSeat.promote(result.pid);
+          }
           log(`Trigger dispatched to subagent: ticket=${ev.ticket_id} pid=${result.pid}${agentContext ? ` agent=${agentContext.agent_id.slice(0, 8)}` : ''}`);
           // ticket 467f714a blocker #3: report the one-shot pid so a session-defer
           // replay records a durable, reapable survivor handle (crash-after-spawn).
           opts?.onDispatched?.(typeof result.pid === 'number' ? result.pid : null);
-          // ticket f0d1da19: ownership of the reservation (if any) now belongs to
-          // the spawned process's onExit hook above — handleTrigger's finally
-          // must not also release it.
-          if (triggerSeat) triggerSeat.transferred = true;
           // Durable dispatch ack (ticket e7c87517): one-shot subagent spawned →
           // processed (grace extension, not resolution).
           this.#ackDispatch(ev, 'processed');
