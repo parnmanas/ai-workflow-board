@@ -665,6 +665,81 @@ export interface TicketSessionManager {
   hasInflightOrLiveDispatch?(ticketId: string, role: string, agentId: string): boolean;
 }
 
+/** Which registry backs a claimed dispatch seat — the REAL
+ *  TicketSessionManager `_inflight` map (persistent ticket sessions on) or the
+ *  process-local InflightDispatchTracker fallback slot (sessions off).
+ *  Mirrors the branch handleTrigger's own `canAuthoritative` already makes. */
+export type DispatchSeatKind = 'authoritative' | 'fallback';
+
+/** A claimed (ticket, role, agent) dispatch seat (ticket 77b28217 — common
+ *  factory for handleTrigger's `triggerSeat` and handleCommentMention's
+ *  `mentionSeat`, which independently hand-rolled this same contract and let
+ *  the same twin-dispatch bug recur across four tickets: 13160d20 → fdf6714e
+ *  → f0d1da19 → 6de97a41. Ticket 8c15e7f7's `SEAT_CELLS` parity table
+ *  (dispatch-inflight-guard.test.mjs Part I) is the safety net this factory is
+ *  built to keep green). Held for the spawned one-shot's FULL lifetime via
+ *  `SubagentSpawnArgs.onExit`, not just until `spawn()` resolves a pid. */
+export interface DispatchSeat {
+  /** Set by the caller once ownership hands off to the spawned process's
+   *  `onExit` hook, so the caller's own provisioning-window `finally` no
+   *  longer releases out from under the still-running one-shot. */
+  transferred: boolean;
+  /** Release the underlying reservation. Idempotent; CAS-guarded by `nonce`
+   *  on the backing registry (a stale-generation release is a no-op). */
+  release: () => void;
+  /** Promote the provisioning-window reservation to a pid-verified one, so
+   *  the backing registry's zombie recovery trusts OS-level liveness over its
+   *  TTL/safety-valve for the rest of the one-shot's lifetime. */
+  promote: (pid: number) => void;
+}
+
+export interface CreateDispatchSeatArgs {
+  kind: DispatchSeatKind;
+  ticketId: string;
+  role: string;
+  agentId: string;
+  nonce?: string;
+  /** Consulted only when kind==='authoritative'. */
+  tsm?: TicketSessionManager | null;
+  /** Consulted only when kind==='fallback'. */
+  inflightDispatch: InflightDispatchTracker;
+  /** The InflightDispatchTracker.key(...) this seat was reserved under.
+   *  Required when kind==='fallback'. */
+  inflightKey?: string | null;
+  /** Extra step run AFTER the core release — e.g. handleTrigger's
+   *  force-respawn replay (ticket f0d1da19). mentionSeat has no equivalent
+   *  and omits this. */
+  onReleased?: () => void;
+}
+
+/** Build a `{transferred, release, promote}` seat handle over whichever
+ *  registry backs this dispatch. Pure registry dispatch: callers still decide
+ *  WHEN to construct one (only on a freshly-placed reservation, never a live-
+ *  session reuse) and wire `release`/`promote` into
+ *  `SubagentSpawnArgs.onExit` / the spawn-success branch themselves — this
+ *  factory only unifies the authoritative-vs-fallback branching both call
+ *  sites previously duplicated. */
+export function createDispatchSeat(args: CreateDispatchSeatArgs): DispatchSeat {
+  return {
+    transferred: false,
+    release: () => {
+      if (args.kind === 'authoritative') {
+        args.tsm?.releaseDispatch?.(args.ticketId, args.role, args.agentId, args.nonce);
+      } else {
+        args.inflightDispatch.releaseFallback(args.inflightKey!, args.nonce);
+      }
+      args.onReleased?.();
+    },
+    promote: (pid: number) => {
+      if (args.kind === 'authoritative') {
+        args.tsm?.attachDispatchPid?.(args.ticketId, args.role, args.agentId, args.nonce, pid);
+      } else {
+        args.inflightDispatch.attachDispatchPid(args.inflightKey!, args.nonce, pid);
+      }
+    },
+  };
+}
+
 export interface FsBrowserResult {
   ok: boolean;
   error?: string;
