@@ -1928,7 +1928,9 @@ export class EventDispatcher {
           role: ev.action || '',
           agentId: dispatchAgentId,
         });
-        reservation = { acquired: acq.acquired, live: false, nonce: acq.nonce };
+        // ticket 6de97a41 (fdf6714e 후속): acq.evicted를 버리지 않고 그대로 전파해야
+        // 아래의 zombie reservation reclaimed 로그가 fallback 모드에서도 발화한다.
+        reservation = { acquired: acq.acquired, live: false, nonce: acq.nonce, evicted: acq.evicted };
       }
       if (!reservation.acquired) {
         // A fresh spawn for this exact key is already provisioning/spawning →
@@ -3384,6 +3386,17 @@ export class EventDispatcher {
         if (!acq.acquired) {
           suppressForSeat();
           return;
+        }
+        // ticket 6de97a41 (fdf6714e 후속): handleTrigger의 zombie reservation
+        // reclaimed 로그와 동등하게, fallback seat가 dead-pid 회수로 재claim된
+        // 경우를 여기서도 남긴다 — 이전에는 acq.evicted를 아무도 읽지 않아
+        // silent-exit 계열 신호(직전 one-shot이 onExit 없이 죽음)가 무로그였다.
+        if (acq.evicted) {
+          log(
+            `[dispatch] zombie reservation reclaimed (${acq.evicted}): ` +
+              `재-dispatch 진행 ticket=${ticketId.slice(0, 8) || '_'} role=${mention.role_shortcut} ` +
+              `agent=${targetAgentId.slice(0, 8) || '_'}`,
+          );
         }
         mentionSeat = { kind: 'fallback', key: fallbackKey, nonce: acq.nonce };
       }
