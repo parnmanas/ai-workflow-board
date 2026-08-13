@@ -832,14 +832,18 @@ test('fallback slot (persistent sessions off) gets the same TTL zombie recovery'
     const tracker = new InflightDispatchTracker();
     const key = InflightDispatchTracker.key('t', 'assignee', 'a');
     const meta = { ticketId: 't', role: 'assignee', agentId: 'a' };
-    assert.equal(tracker.tryAcquireFallback(key, meta).acquired, true, 'free fallback slot → acquired');
+    const fresh = tracker.tryAcquireFallback(key, meta);
+    assert.equal(fresh.acquired, true, 'free fallback slot → acquired');
+    assert.equal(fresh.evicted, undefined, 'ticket 5e0f272d: a genuinely first-time claim is not "evicted" from anything');
     assert.equal(tracker.tryAcquireFallback(key, meta).acquired, false, 'held fallback slot → twin refused');
 
     advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+    const reclaimed = tracker.tryAcquireFallback(key, meta);
+    assert.equal(reclaimed.acquired, true, 'past the TTL the fallback zombie is evicted and re-claimed');
     assert.equal(
-      tracker.tryAcquireFallback(key, meta).acquired,
-      true,
-      'past the TTL the fallback zombie is evicted and re-claimed',
+      reclaimed.evicted,
+      'stale',
+      "ticket 5e0f272d: the TTL path now reports evicted:'stale' — parity with the authoritative tryReserveDispatch's 'stale' case",
     );
     assert.equal(tracker.tryAcquireFallback(key, meta).acquired, false, 'reclaimed fallback slot is a fresh hold');
   });
@@ -1630,6 +1634,47 @@ test('ticket 6de97a41: handleCommentMention logs the eviction reason when it rec
     /\[dispatch\] zombie reservation reclaimed \(dead_pid\)/,
     'previously silent: handleCommentMention never read acq.evicted at all, so this log never fired in fallback mode',
   );
+});
+
+// ───── Part G.2 (ticket 5e0f272d, 6de97a41 후속): the TTL/stale fallback
+// reclaim must be OBSERVABLE too, not just dead_pid ─────
+//
+// Part G.1 above proved the dead-pid propagation. But tryAcquireFallback's
+// OTHER eviction path — a holder that hung mid-provisioning and never got a
+// pid attached, aged out past INFLIGHT_RESERVATION_STALE_MS (ticket
+// 7c3ba9cf's zombie recovery) — still returned `{ acquired: true, nonce }`
+// with no `evicted` field, so the same (now-wired-up) log block never fired
+// for THIS reason in fallback mode. The authoritative tryReserveDispatch
+// already reports 'stale' for the identical situation.
+//
+// Non-vacuous: reverting the dispatch-preflight.ts fix (dropping the new
+// `evicted: 'stale'` return in the TTL branch back to the old shared
+// fallthrough) makes the stderr assertion below fail — the reclaim still
+// succeeds (calls.spawn still reaches 1) but the log line is gone, exactly
+// like Part G.1's dead_pid case pre-6de97a41.
+
+test('ticket 5e0f272d: handleTrigger logs the eviction reason when it reclaims a TTL-stale fallback seat', async () => {
+  await withClock(async (advance) => {
+    const { dispatcher, tracker, calls } = makeDispatcher({ persistent: false });
+    const key = KEY('t1', 'assignee', 'a1');
+    // A holder that hung mid-provisioning (ticket 7c3ba9cf) — no pid ever
+    // attached, so only the TTL clock (not the dead_pid backstop above) can
+    // reclaim this seat.
+    tracker.tryAcquireFallback(key, { ticketId: 't1', role: 'assignee', agentId: 'a1' });
+
+    advance(INFLIGHT_RESERVATION_STALE_MS + 1);
+    const stderr = await captureStderr(() => dispatcher.handleTrigger(evJson()));
+    assert.equal(
+      calls.spawn.length,
+      1,
+      'past the TTL the zombie fallback seat was evicted and a fresh one-shot spawned',
+    );
+    assert.match(
+      stderr,
+      /\[dispatch\] zombie reservation reclaimed \(stale\)/,
+      'previously silent: tryAcquireFallback returned evicted:undefined for the TTL path, so this log never fired for a stale (non-dead_pid) fallback reclaim',
+    );
+  });
 });
 
 // ───── Part H: handleTrigger's OWN one-shot spawn must hold its seat until exit (ticket f0d1da19) ─────

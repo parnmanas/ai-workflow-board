@@ -788,7 +788,7 @@ export class InflightDispatchTracker {
   tryAcquireFallback(
     key: string,
     meta: InflightDispatchMeta,
-  ): { acquired: boolean; nonce?: string; evicted?: 'dead_pid' } {
+  ): { acquired: boolean; nonce?: string; evicted?: 'stale' | 'dead_pid' } {
     const existing = this.#fallback.get(key);
     if (existing) {
       // Pid-liveness escape hatch (ticket fdf6714e, mirrors TicketSessionManager
@@ -812,6 +812,15 @@ export class InflightDispatchTracker {
       // and re-claim it for THIS dispatch.
       const age = Date.now() - (existing.reservedAt ?? 0);
       if (age < INFLIGHT_RESERVATION_STALE_MS) return { acquired: false };
+      // ticket 5e0f272d (6de97a41 후속): report the reason the same way the
+      // dead_pid branch above does (own nonce/set/return), instead of falling
+      // into the generic tail below — that tail is ALSO reached by a
+      // genuinely-fresh key (no `existing` at all) and must stay evicted-less
+      // for that case, mirroring authoritative tryReserveDispatch's split
+      // between its 'stale' branch and its plain free-slot branch.
+      const nonce = randomUUID();
+      this.#fallback.set(key, { ...meta, reservedAt: Date.now(), nonce });
+      return { acquired: true, nonce, evicted: 'stale' };
     }
     // Fresh generation nonce (ticket 26a92722): if this reservation later gets
     // evicted and the slot is re-claimed, the evicted holder's late
