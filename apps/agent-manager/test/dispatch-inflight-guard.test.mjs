@@ -1552,6 +1552,86 @@ test('fallback mode (ticket 13160d20 follow-up, closed by fdf6714e): past the TT
   );
 });
 
+// ───── Part G.1 (ticket 6de97a41, fdf6714e 후속): a fallback dead-pid reclaim
+// must be OBSERVABLE, not just correct ─────
+//
+// The two direct tracker tests above (fdf6714e) prove tryAcquireFallback
+// itself reclaims a dead-pid seat immediately and reports why via
+// `evicted: 'dead_pid'`. But neither dispatcher call site read that field
+// back: handleTrigger discarded it while reassembling its local `reservation`
+// object (`{ acquired, live, nonce }` — no `evicted`), and handleCommentMention
+// never inspected `acq.evicted` at all. So the ONE observable signal a
+// fallback-mode dead-pid reclaim produces — the
+// `[dispatch] zombie reservation reclaimed (dead_pid)` log the authoritative
+// path already emits for the identical event (ticket-session-manager.ts) —
+// never fired in fallback mode. A crashed one-shot's silent-exit recovery left
+// no trace in the manager log.
+//
+// Non-vacuous: reverting either propagation (dropping `evicted` from
+// handleTrigger's reassembled `reservation`, or removing the `acq.evicted`
+// check in handleCommentMention's fallback branch) makes the matching test
+// below fail on the stderr assertion — the reclaim still succeeds
+// (calls.spawn.length still reaches 1) but the log line is gone.
+
+async function captureStderr(fn) {
+  const real = process.stderr.write.bind(process.stderr);
+  let buf = '';
+  process.stderr.write = (chunk) => {
+    buf += typeof chunk === 'string' ? chunk : chunk.toString();
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = real;
+  }
+  return buf;
+}
+
+test('ticket 6de97a41: handleTrigger logs the eviction reason when it reclaims a dead-pid fallback seat', async () => {
+  const { dispatcher, tracker, calls } = makeDispatcher({ persistent: false });
+  const key = KEY('t1', 'assignee', 'a1');
+  const zombie = spawnDummyChild();
+  const seed = tracker.tryAcquireFallback(key, { ticketId: 't1', role: 'assignee', agentId: 'a1' });
+  tracker.attachDispatchPid(key, seed.nonce, zombie.pid);
+  zombie.kill('SIGKILL');
+  await waitFor(() => isDead(zombie.pid), { timeoutMs: 3000 });
+
+  const stderr = await captureStderr(() => dispatcher.handleTrigger(evJson()));
+  assert.equal(
+    calls.spawn.length,
+    1,
+    'the dead-pid seat was reclaimed immediately (no TTL wait) and a fresh one-shot spawned',
+  );
+  assert.match(
+    stderr,
+    /\[dispatch\] zombie reservation reclaimed \(dead_pid\)/,
+    'previously silent: handleTrigger dropped acq.evicted while reassembling `reservation`, so this log never fired in fallback mode',
+  );
+});
+
+test('ticket 6de97a41: handleCommentMention logs the eviction reason when it reclaims a dead-pid fallback seat', async () => {
+  const { dispatcher, tracker, calls } = makeDispatcher({ persistent: false });
+  const key = KEY('t1', 'assignee', 'a1');
+  const zombie = spawnDummyChild();
+  const seed = tracker.tryAcquireFallback(key, { ticketId: 't1', role: 'assignee', agentId: 'a1' });
+  tracker.attachDispatchPid(key, seed.nonce, zombie.pid);
+  zombie.kill('SIGKILL');
+  await waitFor(() => isDead(zombie.pid), { timeoutMs: 3000 });
+
+  const stderr = await captureStderr(() => dispatcher.handleCommentMention(mentionEvJson()));
+  assert.equal(
+    calls.spawn.length,
+    1,
+    'the dead-pid seat was reclaimed immediately (no TTL wait) and a fresh one-shot spawned',
+  );
+  assert.match(
+    stderr,
+    /\[dispatch\] zombie reservation reclaimed \(dead_pid\)/,
+    'previously silent: handleCommentMention never read acq.evicted at all, so this log never fired in fallback mode',
+  );
+});
+
 // ───── Part H: handleTrigger's OWN one-shot spawn must hold its seat until exit (ticket f0d1da19) ─────
 //
 // Parts F/G above proved handleCommentMention's claimed seat survives past
