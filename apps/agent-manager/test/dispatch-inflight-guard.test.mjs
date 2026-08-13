@@ -1688,6 +1688,40 @@ test('ticket f0d1da19: authoritative-declined one-shot — the promoted seat sur
   );
 });
 
+// Rebase-time addition (ticket f0d1da19 landed after ticket fdf6714e merged to
+// main): `triggerSeat.promote` now attaches the pid to InflightDispatchTracker
+// in fallback mode too (mirroring the authoritative branch above and
+// fdf6714e's own attachDispatchPid wiring for handleCommentMention's fallback
+// seat), so handleTrigger's OWN fallback seat gets the same TTL/safety-valve
+// escape hatch as the authoritative one.
+//
+// Non-vacuous: dropping the fallback branch of `triggerSeat.promote` (the
+// `else if (inflightKey) { this.#inflightDispatch.attachDispatchPid(...) }` in
+// event-dispatcher.ts) makes this seat stay pid:null in the fallback tracker,
+// so it age-outs past INFLIGHT_RESERVATION_STALE_MS exactly like the
+// characterization test above did before fdf6714e — calls.spawn.length would
+// go to 2 instead of staying at 1.
+test('ticket f0d1da19: fallback mode — handleTrigger\'s own promoted fallback seat survives the TTL while the process stays alive, so later triggers/mentions stay suppressed', async () => {
+  const { dispatcher, calls } = makeDispatcher({ persistent: false });
+
+  await dispatcher.handleTrigger(evJson());
+  assert.equal(calls.spawn.length, 1, 'the column trigger dispatched its one-shot');
+
+  const realNow = Date.now;
+  Date.now = () => realNow() + INFLIGHT_RESERVATION_STALE_MS + 1;
+  try {
+    await dispatcher.handleTrigger(evJson());
+    await dispatcher.handleCommentMention(mentionEvJson());
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(
+    calls.spawn.length,
+    1,
+    "past the TTL, the still-alive trigger one-shot's fallback seat stayed held (pid-verified, ticket fdf6714e's escape hatch) — neither the later trigger nor the mention twin-spawned",
+  );
+});
+
 function isDead(pid) {
   try {
     process.kill(pid, 0);

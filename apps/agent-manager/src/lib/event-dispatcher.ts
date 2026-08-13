@@ -2060,11 +2060,13 @@ export class EventDispatcher {
     // into that process's onExit hook — from then on this outer finally must
     // not release out from under the still-running one-shot. `promote` mirrors
     // handleCommentMention's round-3 pid attach (event-dispatcher.ts mentionSeat,
-    // attachDispatchPid): without it an AUTHORITATIVE seat held via onExit for
-    // the one-shot's full (possibly many-minute) turn stays pid:null in
-    // TicketSessionManager._inflight, so its zombie recovery only sees a
-    // provisioning-window TTL/safety-valve (ticket-session-manager.ts) and can
-    // force-evict a perfectly healthy one-shot out from under itself.
+    // attachDispatchPid) for BOTH reservation kinds: without it, a seat held via
+    // onExit for the one-shot's full (possibly many-minute) turn stays pid:null
+    // in whichever registry backs it — TicketSessionManager._inflight
+    // (authoritative) or InflightDispatchTracker (fallback, ticket fdf6714e's
+    // pid-liveness escape hatch) — so its zombie recovery only ever sees a
+    // provisioning-window TTL/safety-valve and can force-evict a perfectly
+    // healthy one-shot out from under itself.
     const triggerSeat: {
       transferred: boolean;
       release: () => void;
@@ -2082,6 +2084,8 @@ export class EventDispatcher {
                 reservation!.nonce,
                 pid,
               );
+            } else if (inflightKey) {
+              this.#inflightDispatch.attachDispatchPid(inflightKey, reservation!.nonce, pid);
             }
           },
         }
@@ -2118,14 +2122,15 @@ export class EventDispatcher {
    *  (`triggerSeat.transferred = true`) instead of letting handleTrigger's
    *  finally release the seat while the one-shot is still running — mirroring
    *  handleCommentMention's mentionSeat pattern (ticket e90294e7 round 2), INCLUDING
-   *  its round-3 pid promotion (`triggerSeat.promote`, mirroring `attachDispatchPid`):
-   *  an AUTHORITATIVE seat transferred to onExit without also being promoted stays
-   *  pid:null for the one-shot's whole turn, so TicketSessionManager's zombie
-   *  recovery only ever sees a provisioning-window TTL/safety-valve for it instead
-   *  of an OS-level liveness probe (ticket f0d1da19). A successful PERSISTENT
-   *  dispatch (below) does NOT set `.transferred`: that session's liveness is
-   *  tracked separately (`_getLiveSession`), so releasing `_inflight` the instant
-   *  dispatch succeeds is correct as before. */
+   *  its round-3 pid promotion (`triggerSeat.promote`, mirroring `attachDispatchPid` /
+   *  ticket fdf6714e's fallback-tracker equivalent) for BOTH reservation kinds: a
+   *  seat transferred to onExit without also being promoted stays pid:null for
+   *  the one-shot's whole turn, so its backing registry's zombie recovery only
+   *  ever sees a provisioning-window TTL/safety-valve instead of an OS-level
+   *  liveness probe (ticket f0d1da19). A successful PERSISTENT dispatch (below)
+   *  does NOT set `.transferred`: that session's liveness is tracked separately
+   *  (`_getLiveSession`), so releasing `_inflight` the instant dispatch succeeds
+   *  is correct as before. */
   async #dispatchTriggerBody(
     ev: any,
     agentContext: AgentExecutionContext | undefined,
@@ -2785,30 +2790,28 @@ export class EventDispatcher {
           // e90294e7 round 2). Without this, a role-mention for the identical
           // seat arriving moments after this spawn() call resolves finds the
           // seat already free and twin-spawns a second one-shot racing this one.
-          // Fallback-mode seats (persistentTicketSessions:false) still have no
-          // pid-liveness escape hatch here — InflightDispatchTracker doesn't
-          // track a pid, so a fallback triggerSeat held past
-          // INFLIGHT_RESERVATION_STALE_MS can still age out from under a
-          // healthy one-shot, same as handleCommentMention's fallback seat
-          // (event-dispatcher.ts:3313-3321, ticket 13160d20 follow-up). Tracked
-          // by ticket fdf6714e (InflightDispatchTracker pid-liveness escape
-          // hatch) — confirm this trigger seat's pid gets wired too when that
-          // lands.
+          // A fallback-mode seat held this way is promoted with a pid below
+          // (`triggerSeat.promote`) the same as an authoritative one — ticket
+          // fdf6714e's InflightDispatchTracker.attachDispatchPid gives it the
+          // same OS-level liveness escape hatch, so it isn't purely age-based
+          // either (both kinds still ultimately release via `triggerSeat.release`
+          // above on process exit, not on a timer).
           onExit: triggerSeat ? () => triggerSeat.release() : undefined,
         });
 
         if (result.spawned) {
           // ticket f0d1da19: ownership of the reservation (if any) now belongs
           // to the spawned process's onExit hook above — set `.transferred`
-          // (and promote it to a pid-verified authoritative reservation,
-          // mirroring handleCommentMention's round-3 attachDispatchPid) BEFORE
-          // any callback below that could throw. If `opts.onDispatched` threw
-          // with `.transferred` still false, handleTrigger's outer `finally`
-          // would release the seat out from under the still-running one-shot —
-          // reopening the exact twin window this ticket closes — and an
-          // authoritative seat left un-promoted stays pid:null for the
-          // one-shot's whole turn, subject to the provisioning-window
-          // TTL/safety-valve instead of real OS-level liveness.
+          // (and promote it to a pid-verified reservation, mirroring
+          // handleCommentMention's round-3 attachDispatchPid, for whichever
+          // registry backs this seat) BEFORE any callback below that could
+          // throw. If `opts.onDispatched` threw with `.transferred` still
+          // false, handleTrigger's outer `finally` would release the seat out
+          // from under the still-running one-shot — reopening the exact twin
+          // window this ticket closes — and a seat left un-promoted stays
+          // pid:null for the one-shot's whole turn, subject to the
+          // provisioning-window TTL/safety-valve instead of real OS-level
+          // liveness.
           if (triggerSeat) {
             triggerSeat.transferred = true;
             if (typeof result.pid === 'number') triggerSeat.promote(result.pid);
