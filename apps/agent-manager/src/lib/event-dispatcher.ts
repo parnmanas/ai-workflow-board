@@ -2068,40 +2068,25 @@ export class EventDispatcher {
     // We placed a reservation to release only when live===false (a fresh spawn);
     // a live reuse placed nothing.
     const reservedFresh = !!reservation && reservation.acquired && !reservation.live;
-    // ticket f0d1da19: release handle for THIS reservation, shared between the
-    // finally below and (when #dispatchTriggerBody's one-shot spawn succeeds)
-    // the spawned process's onExit hook — see `triggerSeat` below. Pulled out
-    // of finally so both callers run the identical release + force-respawn-
-    // replay sequence exactly once, whichever of them ends up firing it.
-    const releaseTriggerReservation = (): void => {
-      if (reservedFresh) {
-        // nonce 를 함께 넘겨 CAS release: 이 dispatch 의 예약이 진행 중
-        // evict 되고 슬롯이 재예약됐다면, 뒤늦게 실행되는 이 release 는
-        // 세대가 달라 no-op 이 되어 새 예약을 지우지 않는다 (ticket 26a92722).
-        if (canAuthoritative) {
-          this.#ticketSessionManager!.releaseDispatch!(
-            ev.ticket_id,
-            ev.action || '',
-            dispatchAgentId,
-            reservation!.nonce,
-          );
-        } else {
-          this.#inflightDispatch.releaseFallback(inflightKey!, reservation!.nonce);
-        }
-      }
+    // ticket f0d1da19: replay a single suppressed force-respawn once this
+    // dispatch's hold on `inflightKey` ends — shared between the finally below
+    // and (via the seat's `onReleased` hook, ticket 77b28217) the spawned
+    // process's onExit hook, so whichever of them ends up firing the release
+    // runs this exactly once. Re-arm activity surfacing and replay a single
+    // suppressed force-respawn (blocker #1): a force_respawn that arrived
+    // while this dispatch held the slot had its fresh-session intent
+    // suppressed, and the server may not re-send it (a prior dispatch
+    // refreshing the live session can clear the stale supervisor condition).
+    // Replay it exactly once now, coalescing a whole burst into one fresh
+    // respawn. Re-parse the SUPPRESSED FORCE event's OWN payload (captured at
+    // suppression time), NOT the holder's `raw`: the holder already recorded
+    // `trigger:<its field_changed>` in the dedup set (kept until child exit),
+    // so replaying the holder identity here is dropped as `duplicate_trigger`
+    // and the respawn silently never happens. The suppressed force never
+    // reached dispatchTrigger, so its own identity is un-deduped and
+    // re-enters cleanly to force-respawn.
+    const replayPendingForce = (): void => {
       if (!inflightKey) return;
-      // Re-arm activity surfacing and replay a single suppressed force-respawn
-      // (blocker #1): a force_respawn that arrived while this dispatch held the
-      // slot had its fresh-session intent suppressed, and the server may not
-      // re-send it (a prior dispatch refreshing the live session can clear the
-      // stale supervisor condition). Replay it exactly once now, coalescing a
-      // whole burst into one fresh respawn. Re-parse the SUPPRESSED FORCE
-      // event's OWN payload (captured at suppression time), NOT the holder's
-      // `raw`: the holder already recorded `trigger:<its field_changed>` in the
-      // dedup set (kept until child exit), so replaying the holder identity here
-      // is dropped as `duplicate_trigger` and the respawn silently never
-      // happens. The suppressed force never reached dispatchTrigger, so its own
-      // identity is un-deduped and re-enters cleanly to force-respawn.
       const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
       if (pendingForceRaw) {
         log(
@@ -2133,40 +2118,45 @@ export class EventDispatcher {
     // found the seat already free and twin-spawned a second one-shot racing the
     // first. `triggerSeat` is only set when this trigger placed a FRESH
     // reservation (`reservedFresh`); #dispatchTriggerBody flips `.transferred`
-    // the instant its one-shot spawn succeeds, wiring the SAME release above
-    // into that process's onExit hook — from then on this outer finally must
-    // not release out from under the still-running one-shot. `promote` mirrors
-    // handleCommentMention's round-3 pid attach (event-dispatcher.ts mentionSeat,
-    // attachDispatchPid) for BOTH reservation kinds: without it, a seat held via
+    // the instant its one-shot spawn succeeds, wiring the seat's `release`
+    // (ticket 77b28217's `createDispatchSeat` — the same factory
+    // handleCommentMention's mentionSeat now uses) into that process's onExit
+    // hook — from then on this outer finally must not release out from under
+    // the still-running one-shot. `promote` mirrors handleCommentMention's
+    // round-3 pid attach for BOTH reservation kinds: without it, a seat held via
     // onExit for the one-shot's full (possibly many-minute) turn stays pid:null
     // in whichever registry backs it — TicketSessionManager._inflight
     // (authoritative) or InflightDispatchTracker (fallback, ticket fdf6714e's
     // pid-liveness escape hatch) — so its zombie recovery only ever sees a
     // provisioning-window TTL/safety-valve and can force-evict a perfectly
     // healthy one-shot out from under itself.
-    const triggerSeat: {
-      transferred: boolean;
-      release: () => void;
-      promote: (pid: number) => void;
-    } | null = reservedFresh
-      ? {
-          transferred: false,
-          release: releaseTriggerReservation,
-          promote: (pid: number) => {
-            if (canAuthoritative) {
-              this.#ticketSessionManager!.attachDispatchPid?.(
-                ev.ticket_id,
-                ev.action || '',
-                dispatchAgentId,
-                reservation!.nonce,
-                pid,
-              );
-            } else if (inflightKey) {
-              this.#inflightDispatch.attachDispatchPid(inflightKey, reservation!.nonce, pid);
-            }
-          },
-        }
+    const triggerSeat: DispatchSeat | null = reservedFresh
+      ? createDispatchSeat({
+          kind: canAuthoritative ? 'authoritative' : 'fallback',
+          ticketId: ev.ticket_id,
+          role: ev.action || '',
+          agentId: dispatchAgentId,
+          nonce: reservation!.nonce,
+          tsm: this.#ticketSessionManager,
+          inflightDispatch: this.#inflightDispatch,
+          inflightKey,
+          onReleased: replayPendingForce,
+        })
       : null;
+    // Release handle for THIS reservation, shared between the finally below
+    // and (via the seat above) the spawned process's onExit hook: the seat's
+    // release (core CAS release + the force-respawn replay) when a fresh
+    // reservation exists, or just the replay when this dispatch instead
+    // reused a live session (reservedFresh===false — nothing to CAS-release,
+    // but a suppressed force under `inflightKey` from an earlier holder may
+    // still be pending).
+    const releaseTriggerReservation = (): void => {
+      if (triggerSeat) {
+        triggerSeat.release();
+      } else {
+        replayPendingForce();
+      }
+    };
     try {
       await this.#dispatchTriggerBody(
         ev,
@@ -2215,11 +2205,7 @@ export class EventDispatcher {
     dispatchReserved: boolean,
     raw: string,
     opts?: { onDispatched?: (pid: number | null) => void },
-    triggerSeat?: {
-      transferred: boolean;
-      release: () => void;
-      promote: (pid: number) => void;
-    } | null,
+    triggerSeat?: DispatchSeat | null,
   ): Promise<void> {
     // Stock pi intentionally has no MCP client. A ticket session therefore
     // cannot read its ticket or leave the add_comment / move_ticket audit trail
