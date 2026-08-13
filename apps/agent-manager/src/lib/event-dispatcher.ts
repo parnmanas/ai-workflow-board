@@ -3364,11 +3364,7 @@ export class EventDispatcher {
     // SubagentSpawnArgs.onExit (not just until spawn() returns a pid), so the
     // column trigger can't slip in and re-claim the seat while the one-shot is
     // still mid-turn.
-    let mentionSeat:
-      | { kind: 'authoritative'; role: string; agentId: string; nonce?: string }
-      | { kind: 'fallback'; key: string; nonce?: string }
-      | null = null;
-    let mentionSeatTransferred = false;
+    let mentionSeat: DispatchSeat | null = null;
     if (mention.mention_source === 'role' && mention.role_shortcut) {
       const targetAgentId = ev.agent_id || '';
       const tsm = this.#ticketSessionManager;
@@ -3409,12 +3405,15 @@ export class EventDispatcher {
         }
         // Fresh reservation — WE now own this seat until the one-shot spawned
         // below exits (or we bail out before spawning it).
-        mentionSeat = {
+        mentionSeat = createDispatchSeat({
           kind: 'authoritative',
+          ticketId,
           role: mention.role_shortcut,
           agentId: targetAgentId,
           nonce: reservation.nonce,
-        };
+          tsm,
+          inflightDispatch: this.#inflightDispatch,
+        });
       } else if (
         persistentTicket &&
         tsm?.hasInflightOrLiveDispatch?.(ticketId, mention.role_shortcut, targetAgentId)
@@ -3459,7 +3458,16 @@ export class EventDispatcher {
               `agent=${targetAgentId.slice(0, 8) || '_'}`,
           );
         }
-        mentionSeat = { kind: 'fallback', key: fallbackKey, nonce: acq.nonce };
+        mentionSeat = createDispatchSeat({
+          kind: 'fallback',
+          ticketId,
+          role: mention.role_shortcut,
+          agentId: targetAgentId,
+          nonce: acq.nonce,
+          tsm,
+          inflightDispatch: this.#inflightDispatch,
+          inflightKey: fallbackKey,
+        });
       }
     }
 
@@ -3498,33 +3506,20 @@ export class EventDispatcher {
             // one-shot's process exits, not when spawn() merely returns a pid
             // — the column trigger must stay locked out for the seat's whole
             // lifetime, not just the synchronous spawn call.
-            onExit: seat
-              ? () => {
-                  if (seat.kind === 'authoritative') {
-                    this.#ticketSessionManager?.releaseDispatch?.(ticketId, seat.role, seat.agentId, seat.nonce);
-                  } else {
-                    this.#inflightDispatch.releaseFallback(seat.key, seat.nonce);
-                  }
-                }
-              : undefined,
+            onExit: seat ? () => seat.release() : undefined,
           });
           if (result.spawned) {
-            mentionSeatTransferred = !!mentionSeat;
-            // ticket e90294e7 round 3: promote the claimed seat from a bare
-            // provisioning-window reservation to a pid-verified one now that
-            // we have the one-shot's real OS pid — from here on
-            // tryReserveDispatch trusts _isPidAlive over the TTL/safety-valve
-            // aged out for a long-running one-shot (see ticket-session-
-            // manager.ts). onExit (above) still releases it on exit either way.
-            if (seat && result.pid && seat.kind === 'authoritative') {
-              this.#ticketSessionManager?.attachDispatchPid?.(ticketId, seat.role, seat.agentId, seat.nonce, result.pid);
-            }
-            // ticket fdf6714e: fallback 종류의 seat도 이제 동일하게 pid를 attach한다 —
-            // InflightDispatchTracker.tryAcquireFallback이 TTL 나이 대신 pid-liveness를
-            // 우선 판정해, 이 one-shot이 INFLIGHT_RESERVATION_STALE_MS보다 오래 실행돼도
-            // 살아있는 한 나중 트리거가 이 seat를 재claim하지 못한다(13160d20 후속 gap 해소).
-            if (seat && result.pid && seat.kind === 'fallback') {
-              this.#inflightDispatch.attachDispatchPid(seat.key, seat.nonce, result.pid);
+            // ticket e90294e7 round 3 (fallback seats: ticket fdf6714e):
+            // promote the claimed seat from a bare provisioning-window
+            // reservation to a pid-verified one now that we have the
+            // one-shot's real OS pid — from here on the backing registry
+            // trusts OS-level liveness over its TTL/safety-valve for a
+            // long-running one-shot (see ticket-session-manager.ts /
+            // InflightDispatchTracker). onExit (above) still releases it on
+            // exit either way.
+            if (seat) {
+              seat.transferred = true;
+              if (result.pid) seat.promote(result.pid);
             }
             log(
               `Comment mention dispatched to subagent: ticket=${ticketId} comment=${commentId} pid=${result.pid}`,
@@ -3545,12 +3540,8 @@ export class EventDispatcher {
       // to the spawned one-shot's onExit hook above (decline, throw, no
       // delegation path). Idempotent; releaseDispatch no-ops on a missing/
       // stale-generation key.
-      if (mentionSeat && !mentionSeatTransferred) {
-        if (mentionSeat.kind === 'authoritative') {
-          this.#ticketSessionManager?.releaseDispatch?.(ticketId, mentionSeat.role, mentionSeat.agentId, mentionSeat.nonce);
-        } else {
-          this.#inflightDispatch.releaseFallback(mentionSeat.key, mentionSeat.nonce);
-        }
+      if (mentionSeat && !mentionSeat.transferred) {
+        mentionSeat.release();
       }
     }
   }
