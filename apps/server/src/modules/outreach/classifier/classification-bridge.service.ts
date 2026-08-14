@@ -72,10 +72,11 @@ export class ClassificationBridgeService {
       // thing holding the event loop open (same class as fc917f2b's
       // process-tree.ts delay(): Node's test runner reports it as "Promise
       // resolution is still pending but the event loop has already
-      // resolved"). Outside tests this is a live hang risk too, not just a
-      // CI artifact — an idle process has nothing else to keep the timer
-      // alive. Keep it ref'd so the wait is deterministic; graceful-shutdown
-      // duration is bounded by the SIGTERM/SIGINT path, not by this timer.
+      // resolved"). That shutdown race IS the defect surface — a live
+      // server's listening handle keeps the loop ref'd, so this timer fires
+      // normally in production. Keep it ref'd so the wait is deterministic;
+      // graceful-shutdown duration is bounded by the SIGTERM/SIGINT path,
+      // not by this timer.
       const timer = setTimeout(() => {
         if (this.pending.delete(runId)) resolve(null);
       }, timeoutMs);
