@@ -242,8 +242,12 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
           this.logService.error('QA', 'rerun-on-fix delayed start failed', { err: String(e), ticket_id: ticket.id });
         });
       }, delayMs);
-      // Don't keep the event loop alive purely for a pending rerun timer.
-      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+      // Keep this timer ref'd — its callback is the only path that starts the
+      // rerun. unref'ing it risks the same silent-drop class fixed in a22862c6's
+      // classification-bridge.service.ts: once it's the event loop's last handle
+      // (a `node --test --test-force-exit` run, or a process mid-shutdown), the
+      // process can exit before the callback fires. Overall shutdown latency is
+      // bounded by main.ts's SIGTERM/SIGINT handling, not by this timer.
       this._timers.add(timer);
     } else {
       await this._startRerun(scenarioId, nextGen, ticket.id);
@@ -300,7 +304,8 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
           this.logService.error('QA', 'rerun-on-fix fallback fire failed', { err: String(e), ticket_id: ticket.id });
         });
       }, capMs);
-      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+      // Ref'd for the same reason as the legacy rerun timer above — this is the
+      // only path that fires the fallback if no deployment event ever arrives.
       pending.fallbackTimer = timer;
     }
     this._pending.set(key, pending);
