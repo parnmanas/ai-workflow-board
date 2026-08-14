@@ -67,10 +67,18 @@ export class ClassificationBridgeService {
   register(agentId: string, timeoutMs: number): { runId: string; result: Promise<ClassificationReport | null> } {
     const runId = randomUUID();
     const result = new Promise<ClassificationReport | null>((resolve) => {
+      // classify()'s caller always awaits this promise for a real result —
+      // unref'ing let the timeout go unfulfilled whenever it was the last
+      // thing holding the event loop open (same class as fc917f2b's
+      // process-tree.ts delay(): Node's test runner reports it as "Promise
+      // resolution is still pending but the event loop has already
+      // resolved"). Outside tests this is a live hang risk too, not just a
+      // CI artifact — an idle process has nothing else to keep the timer
+      // alive. Keep it ref'd so the wait is deterministic; graceful-shutdown
+      // duration is bounded by the SIGTERM/SIGINT path, not by this timer.
       const timer = setTimeout(() => {
         if (this.pending.delete(runId)) resolve(null);
       }, timeoutMs);
-      timer.unref?.();
       this.pending.set(runId, {
         agentId,
         timer,
