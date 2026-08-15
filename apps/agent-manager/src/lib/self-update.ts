@@ -8,11 +8,12 @@
 //   - 'npm-global' — installed via `npm i -g awb-agent-manager` (no checkout,
 //                    running file lives under `npm root -g`). Version-check =
 //                    `npm view awb-agent-manager version` (registry);
-//                    self-update = a detached temp helper that waits for this
-//                    process to exit, runs `npm install -g
-//                    awb-agent-manager@latest`, then relaunches the manager
-//                    (install-after-exit dodges the Windows self-overwrite
-//                    EBUSY/EPERM).
+//                    self-update = verify the published SLSA provenance, then
+//                    `npm install -g awb-agent-manager@<verified version>` and
+//                    relaunch (Windows routes that through a detached
+//                    install-after-exit helper to dodge the self-overwrite
+//                    EBUSY/EPERM). The provenance gate is fail-closed — see
+//                    parseProvenanceView() below.
 //   - 'unknown'    — neither (packaged/vendored copy): auto-update impossible,
 //                    the admin UI shows a manual-upgrade hint.
 //
@@ -1242,6 +1243,122 @@ function writeNpmGlobalUpdater(out: (msg: string) => void): string {
   return helperPath;
 }
 
+// ---------------------------------------------------------------------------
+// npm-global self-update: SLSA provenance gate (2026-08-15 보안 감사)
+// ---------------------------------------------------------------------------
+// publish 쪽은 2026-08-10 감사 이후 `npm publish --provenance` 로 Sigstore SLSA
+// 증명을 남긴다. 하지만 **소비 쪽은 그 증명을 한 번도 확인하지 않았다** — 이
+// 경로는 `npm install -g awb-agent-manager@latest` 를 그대로 실행하고, 받은
+// tarball 이 우리 CI 에서 나온 것인지 묻지 않은 채 fleet 전체를 재시작한다.
+// 즉 publish 워크플로의 NPM_TOKEN(Automation, 2FA bypass)이 유출되면 공격자가
+// 올린 임의 tarball 이 self-update 를 타고 모든 매니저 호스트에서 실행된다.
+//
+// 왜 이 게이트가 실효가 있나: provenance 증명은 GitHub Actions 의 OIDC 토큰으로
+// Sigstore 에 서명해야만 만들어진다. 유출된 npm 토큰만 쥔 공격자는 tarball 은
+// 올릴 수 있어도 provenance 는 만들 수 없다. 따라서 "증명 없는 버전은 설치하지
+// 않는다"는 규칙 하나가 그 시나리오를 통째로 막는다.
+//
+// fail-closed: 레지스트리 조회 실패/파싱 실패/증명 없음 — 전부 설치 거부다.
+// 애매한 오류에 설치를 강행하는 fail-open 은 publish 워크플로의 probe-exists
+// 단계에서 이미 한 번 막은 실수라 여기서도 반복하지 않는다. 거부의 결과는
+// "업데이트가 안 된다"일 뿐 매니저는 계속 돌아가므로 안전한 실패 방향이다.
+// 복구용 탈출구는 AWB_SELF_UPDATE_ALLOW_UNVERIFIED=1 (명시적 opt-in) 하나뿐.
+const PROVENANCE_BYPASS_ENV = 'AWB_SELF_UPDATE_ALLOW_UNVERIFIED';
+const SLSA_PREDICATE_PREFIX = 'https://slsa.dev/provenance/';
+
+export interface ProvenanceVerdict {
+  /** true = 레지스트리 최신 버전이 SLSA provenance 증명을 갖고 있다. */
+  ok: boolean;
+  /** 검증에 성공한 정확한 버전. 설치 spec 을 이 값으로 고정한다. */
+  version: string | null;
+  /** 사람이 읽는 판정 사유 (거부 시 그대로 SelfUpdateResult.summary 에 실린다). */
+  reason: string;
+}
+
+/**
+ * `npm view <pkg>@latest version dist.attestations --json` 의 stdout 을 판정.
+ *
+ * 순수 함수로 분리한 이유: 네트워크 없이 "공격자가 만들 수 있는 응답"들
+ * (증명 필드 없음 / provenance 없음 / predicateType 위조)을 단위 테스트로
+ * 직접 먹여볼 수 있어야 게이트가 실제로 무는지 증명된다.
+ */
+export function parseProvenanceView(stdout: string): ProvenanceVerdict {
+  const text = String(stdout ?? '');
+  // npm 은 warn 을 stderr 로 보내지만, 셸 래퍼가 섞어 넘길 수 있으니 첫 `{` 부터 판다.
+  const start = text.indexOf('{');
+  if (start < 0) {
+    return { ok: false, version: null, reason: 'npm view returned no JSON object' };
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text.slice(start));
+  } catch {
+    return { ok: false, version: null, reason: 'npm view output was not valid JSON' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, version: null, reason: 'npm view output was not a metadata object' };
+  }
+
+  const version = typeof parsed.version === 'string' ? parsed.version.trim() : '';
+  if (!/^\d+\.\d+\.\d+/.test(version)) {
+    return { ok: false, version: null, reason: `npm view returned no usable version (${JSON.stringify(parsed.version)?.slice(0, 60)})` };
+  }
+
+  // 필드를 여러 개 요청하면 npm 은 평평한 `"dist.attestations"` 키로 준다.
+  // 단일 필드/전체 문서 조회 형태(dist.attestations 중첩)도 같이 받아준다.
+  const attestations =
+    parsed['dist.attestations'] ??
+    (parsed.dist && typeof parsed.dist === 'object' ? parsed.dist.attestations : undefined);
+  if (!attestations || typeof attestations !== 'object') {
+    return { ok: false, version, reason: `${MANAGER_PACKAGE_NAME}@${version} has no npm attestations (unsigned publish — refusing)` };
+  }
+  const provenance = (attestations as any).provenance;
+  if (!provenance || typeof provenance !== 'object') {
+    return { ok: false, version, reason: `${MANAGER_PACKAGE_NAME}@${version} has attestations but no provenance predicate (refusing)` };
+  }
+  const predicateType = typeof provenance.predicateType === 'string' ? provenance.predicateType : '';
+  if (!predicateType.startsWith(SLSA_PREDICATE_PREFIX)) {
+    return { ok: false, version, reason: `${MANAGER_PACKAGE_NAME}@${version} provenance predicate is not SLSA (${predicateType.slice(0, 80) || 'absent'}) — refusing` };
+  }
+  const url = typeof (attestations as any).url === 'string' ? (attestations as any).url : '';
+  if (!url.startsWith('https://')) {
+    return { ok: false, version, reason: `${MANAGER_PACKAGE_NAME}@${version} attestation bundle is not served over https — refusing` };
+  }
+
+  return { ok: true, version, reason: `${MANAGER_PACKAGE_NAME}@${version} carries SLSA provenance (${predicateType})` };
+}
+
+/** 명시적 opt-in 탈출구. 레지스트리가 증명을 못 내주는 장애 상황의 운영 복구용. */
+function provenanceGateBypassed(): boolean {
+  const v = String(process.env[PROVENANCE_BYPASS_ENV] ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * 레지스트리에서 최신 버전 + 그 버전의 provenance 증명을 함께 읽어 판정한다.
+ * 조회 자체가 실패하면 fail-closed (ok=false).
+ */
+async function verifyNpmGlobalProvenance(out: (msg: string) => void): Promise<ProvenanceVerdict> {
+  const r = await runAsync(
+    'npm',
+    ['view', NPM_GLOBAL_LATEST_SPEC, 'version', 'dist.attestations', '--json'],
+    tmpdir(),
+    NPM_VIEW_TIMEOUT_MS,
+  );
+  if (!r.ok) {
+    const detail =
+      (r.stderr.trim() || r.stdout.trim() || 'unknown')
+        .split('\n')
+        .filter(Boolean)
+        .pop()
+        ?.slice(0, 200) || 'npm view failed';
+    return { ok: false, version: null, reason: `could not read publish provenance: ${detail}` };
+  }
+  const verdict = parseProvenanceView(r.stdout);
+  out(`Self-update: provenance check — ${verdict.reason}`);
+  return verdict;
+}
+
 /**
  * npm-global self-update: stage a detached helper, hand it our pid + restart
  * command, then shut ourselves down so it can reinstall + relaunch. This is the
@@ -1256,9 +1373,28 @@ async function runNpmGlobalSelfUpdate(
   const current = readBundledVersion();
   out(`Self-update: npm-global mode (current v${current}) — target ${NPM_GLOBAL_LATEST_SPEC}`);
 
+  // 설치 전에 증명을 먼저 본다. dry-run 보다도 앞에 두는 이유: dry-run 의 목적이
+  // "이 업데이트가 실제로 진행될지"를 보고하는 것이라, 거부될 업데이트를
+  // "would run" 이라고 보고하면 거짓말이 된다.
+  const verdict = await verifyNpmGlobalProvenance(out);
+  if (!verdict.ok) {
+    if (!provenanceGateBypassed()) {
+      const summary = `npm-global update refused: ${verdict.reason}`;
+      out(`Self-update: ${summary}`);
+      return { changed: false, summary };
+    }
+    out(`Self-update: ${PROVENANCE_BYPASS_ENV} set — proceeding despite unverified provenance`);
+  }
+
+  // 검증된 정확한 버전으로 설치 spec 을 고정한다. `@latest` 를 검증한 뒤 다시
+  // `@latest` 로 설치하면 그 사이 태그가 옮겨간 tarball 이 들어오는 TOCTOU 구멍이
+  // 남는다 — 검증한 바이트와 설치하는 바이트가 같아야 게이트가 의미를 갖는다.
+  const installSpec =
+    verdict.ok && verdict.version ? `${MANAGER_PACKAGE_NAME}@${verdict.version}` : NPM_GLOBAL_LATEST_SPEC;
+
   // Dry-run / test hook: report intent without spawning the helper or exiting.
   if (opts.noReExec) {
-    const summary = `npm-global update: would run \`npm install -g ${NPM_GLOBAL_LATEST_SPEC}\` + restart (re-exec skipped)`;
+    const summary = `npm-global update: would run \`npm install -g ${installSpec}\` + restart (re-exec skipped)`;
     out(`Self-update: ${summary}`);
     return { changed: true, summary, willReExec: false };
   }
@@ -1269,10 +1405,10 @@ async function runNpmGlobalSelfUpdate(
   // package after five seconds while the detached helper was still waiting or
   // installing, yet the command had already reported success.
   if (process.platform !== 'win32') {
-    out(`Self-update: npm install -g ${NPM_GLOBAL_LATEST_SPEC}`);
+    out(`Self-update: npm install -g ${installSpec}`);
     const installed = await runAsync(
       'npm',
-      ['install', '-g', NPM_GLOBAL_LATEST_SPEC],
+      ['install', '-g', installSpec],
       tmpdir(),
       BUILD_TIMEOUT_MS,
       (line) => out(`  [npm-global] ${line}`),
@@ -1284,7 +1420,7 @@ async function runNpmGlobalSelfUpdate(
       out(`Self-update: ${summary}`);
       return { changed: false, summary };
     }
-    const summary = `npm-global update installed ${NPM_GLOBAL_LATEST_SPEC}; restarting manager`;
+    const summary = `npm-global update installed ${installSpec}; restarting manager`;
     out(`Self-update: ${summary}`);
     _lastReExecScheduled = true;
     setTimeout(() => reExecManager(out), 1500).unref?.();
@@ -1310,7 +1446,7 @@ async function runNpmGlobalSelfUpdate(
   const helperArgs = [
     helperPath,
     String(process.pid),
-    NPM_GLOBAL_LATEST_SPEC,
+    installSpec,
     nodePath,
     scriptPath,
     ...baseArgs,
@@ -1335,7 +1471,7 @@ async function runNpmGlobalSelfUpdate(
     return { changed: false, summary };
   }
 
-  const summary = `npm-global update scheduled: detached helper runs \`npm install -g ${NPM_GLOBAL_LATEST_SPEC}\` after exit, then restarts`;
+  const summary = `npm-global update scheduled: detached helper runs \`npm install -g ${installSpec}\` after exit, then restarts`;
   out(`Self-update: ${summary}`);
 
   // Same 1.5s tail as the git path: let the caller finish its ack POST + log

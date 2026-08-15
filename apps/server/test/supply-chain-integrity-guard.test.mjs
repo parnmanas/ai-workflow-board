@@ -13,6 +13,10 @@
 //   3. install script 를 갖는 패키지가 알려진 목록을 벗어나지 않는다.
 //   4. 우리가 **발행하는** 패키지(awb-agent-manager)가 provenance 와 함께 나간다
 //      — 위 1~3 은 "받는 쪽" 방어, 이건 "주는 쪽" 방어다 (2026-08-10 추가).
+//   5. 발행 가능한 워크스페이스가 그 하나뿐이고, 그 tarball 이 `files` 로 좁혀진다
+//      (2026-08-15 추가).
+//   6. 그 provenance 를 매니저 self-update 가 실제로 **검증**한다 — 증명을 만들어만
+//      놓고 아무도 읽지 않으면 방어가 아니다 (2026-08-15 추가).
 //
 // 깨졌을 때 테스트를 완화하지 말고, 위 감사 문서의 판단 근거부터 다시 볼 것.
 
@@ -303,5 +307,74 @@ test('agent-manager package.json declares the repository provenance verifies aga
     typeof url === 'string' && url.includes('github.com/parnmanas/ai-workflow-board'),
     'apps/agent-manager/package.json must carry a `repository` field pointing at this repo — ' +
       `npm refuses to generate provenance when it disagrees with the build repo (got: ${url})`,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. 발행 표면 최소화 — 발행 대상이 아닌 워크스페이스는 발행될 수 없어야 한다
+//    (2026-08-15 감사 추가)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 루트는 `private: true` 지만 `server` / `client` 워크스페이스는 아무 표시가
+// 없었다. `npm publish --workspaces` 한 번이면(또는 워크스페이스 안에서 무심코
+// 친 `npm publish` 한 번이면) 발행 의도가 없는 두 패키지가 공개 레지스트리로
+// 나간다 — 둘 다 `files` 필드도 없어 tarball 은 디렉터리 전체가 된다.
+// `private: true` 는 npm 이 publish 를 하드 거부하게 만드는 유일한 in-repo 통제라,
+// 발행 가능한 이름을 의도한 하나(awb-agent-manager)로 고정한다.
+test('only the intended workspace is publishable', () => {
+  const publishable = [];
+  for (const rel of ['apps/server', 'apps/client', 'apps/agent-manager']) {
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel, 'package.json'), 'utf8'));
+    if (pkg.private !== true) publishable.push(`${rel} (${pkg.name})`);
+  }
+  assert.deepEqual(
+    publishable,
+    ['apps/agent-manager (awb-agent-manager)'],
+    'exactly one workspace may be publishable; mark every other workspace `"private": true` ' +
+      `so npm refuses to publish it (currently publishable: ${publishable.join(', ') || 'none'})`,
+  );
+
+  const root = JSON.parse(fs.readFileSync(ROOT_PKG, 'utf8'));
+  assert.equal(root.private, true, 'the monorepo root must stay `"private": true`');
+});
+
+// 발행되는 유일한 패키지는 tarball 내용물을 명시적으로 좁혀야 한다. `files` 가
+// 없으면 npm 은 gitignore 되지 않은 모든 것을 담는다 — 테스트 픽스처, 로컬
+// 스크립트, 미래에 추가될 무엇이든. `["dist"]` 는 publish 워크플로의 산출물
+// 검증 단계(dist/package.json + dist/main.js)가 전제하는 값이기도 하다.
+test('the published package narrows its tarball with an explicit `files` allowlist', () => {
+  const pkg = JSON.parse(fs.readFileSync(AGENT_MANAGER_PKG, 'utf8'));
+  assert.ok(
+    Array.isArray(pkg.files) && pkg.files.length > 0,
+    'apps/agent-manager/package.json must declare `files` — without it the tarball is the whole directory',
+  );
+  assert.deepEqual(pkg.files, ['dist'], 'the agent-manager tarball is meant to be dist/ only');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. 설치(소비) 측 provenance 검증 — 발행 측 증명이 실제로 쓰이는지
+//    (2026-08-15 감사 추가)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 위 4번이 "우리 tarball 에 SLSA 증명을 붙인다"를 보장한다. 그런데 매니저의
+// npm-global self-update 는 그 증명을 확인하지 않고 `npm i -g …@latest` 를 그대로
+// 실행하고 있었다 — 증명을 만들어만 놓고 아무도 읽지 않으면 NPM_TOKEN 유출
+// 시나리오는 그대로 열려 있다. 상세 단위 테스트는
+// apps/agent-manager/test/self-update-provenance-gate.test.mjs 에 있고,
+// 여기서는 발행 측 가드 바로 옆에서 "소비 측 배선이 살아 있는지"만 확인한다.
+test('the manager self-update consumes that provenance instead of installing blind', () => {
+  const src = fs.readFileSync(
+    path.join(REPO_ROOT, 'apps', 'agent-manager', 'src', 'lib', 'self-update.ts'),
+    'utf8',
+  );
+  assert.match(
+    src,
+    /await verifyNpmGlobalProvenance\(out\)/,
+    'the npm-global self-update path must verify published provenance before installing',
+  );
+  assert.match(
+    src,
+    /npm-global update refused:/,
+    'an unverified provenance verdict must abort the self-update (fail-closed), not just warn',
   );
 });

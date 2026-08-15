@@ -1,6 +1,7 @@
 {
   "name": "server",
   "version": "1.0.0",
+  "private": true,
   "scripts": {
     "pretest:qa:pg": "node test/run-suite.mjs test/qa-flows/confirmed-duplicate-correction-wire.test.mjs test/qa-flows/claude-backend-profile-pg-lock.test.mjs test/qa-flows/prompt-audit-report-pg-cast.test.mjs",
     "pretest": "npm run build && node test/run-suite.mjs test/confirmed-duplicate-correction.test.mjs test/outreach-ticket-duplicate-gate.test.mjs test/agent-workspace-scope.test.mjs test/global-agent-workspace-mutation.test.mjs test/agent-column-state-sync.test.mjs test/prompt-template-reset.integration.test.mjs test/agent-runtime-config.test.mjs test/hermes-collaboration.test.mjs test/run-skill-snapshot.test.mjs test/runtime-capabilities-heartbeat.test.mjs test/runtime-host-only-topology.test.mjs test/runtime-types.test.mjs test/skill-lifecycle.test.mjs",

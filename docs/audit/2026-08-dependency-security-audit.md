@@ -746,3 +746,95 @@ push 자체가 실배포를 트리거한다. 보안 감사가 단독으로 결�
 
 `production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
 SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.
+
+---
+
+## 재검증 로그 — 2026-08-15 (`main` @ `d5f2e31c`)
+
+**결론: `npm audit` 은 전 트리 0건. 이번 지적은 "우리가 발행한 증명을 아무도
+읽지 않고 있었다" — 발행 측 provenance 방어의 소비 측 배선 누락이다.**
+
+### 1. 의존성 감사 결과 (변동 없음)
+
+- `main` — **0건** (dep 580: prod 272 / dev 307 / optional 63).
+- `production.private` — `main` 과의 차이가 `.github/workflows/deploy.yml`(197줄
+  추가) **하나뿐**. 2026-08-13 에 남겨뒀던 보안 통제 3종 드리프트는 그 뒤
+  머지(`4577d0f7`)로 해소됐다. `package.json` · 락파일 · `Dockerfile` 전부 동일하므로
+  별도 추출 감사 불필요 — 이번 감사 결과가 그대로 배포 브랜치에 적용된다.
+- `awb-agent-manager` 단독 트리 (135 deps) — **0건**.
+- **카나리 확인**: 임시 트리 `lodash@4.17.4` → critical 1건 정상 보고. "0건" 이
+  감사 경로 무응답이 아님을 증명.
+- 락파일 위생: 581 항목 전부 `registry.npmjs.org` https + integrity 보유,
+  비-레지스트리 resolve 0건. 설치 스크립트는 허용 목록(`@scarf/scarf` · `esbuild` ·
+  `fsevents`) 그대로. deprecated 는 typeorm 하위 `glob` 뿐 — 어드바이저리 없음.
+- 발행 provenance 유지: `awb-agent-manager@1.6.115` 가 `attestations.provenance`
+  (SLSA v1) 보유.
+- 버전 지연 중 조치 대상 없음: `turbo` 2.10.9→2.10.10 (dev 전용, 어드바이저리
+  없음 — 락파일 재생성이 실 NAS 재배포를 유발하므로 계속 미조치),
+  `react` 18.3 / `typeorm` 0.3 메이저 지연은 기존 판단 유지.
+- 컨테이너 베이스 이미지: `node:22-slim`, `postgres:16-alpine` — 플로팅 태그라
+  재빌드 때마다 배포판 보안 패치를 받는다. 의도된 상태로 유지.
+
+### 2. 이번 조치 — npm-global self-update 의 SLSA provenance 게이트 (fail-closed)
+
+2026-08-10 감사가 발행 측에 `--provenance` 를 붙여 tarball 마다 Sigstore SLSA
+증명을 남기게 했다. 그런데 **소비 측이 그 증명을 한 번도 읽지 않았다.**
+`apps/agent-manager/src/lib/self-update.ts` 의 npm-global 경로는
+`npm install -g awb-agent-manager@latest` 를 그대로 실행하고 매니저를 재시작한다 —
+받은 tarball 이 우리 CI 에서 나온 것인지 묻지 않는다.
+
+공격 경로: publish 워크플로의 `NPM_TOKEN`(Automation, 2FA bypass)이 유출되면
+공격자가 같은 이름으로 임의 tarball 을 올릴 수 있고, 그것이 self-update 를 타고
+매니저 호스트 전체에서 실행된다. 즉 **증명은 만들어졌지만 방어로 쓰이지 않았다.**
+
+게이트가 실효를 갖는 근거: provenance 증명은 GitHub Actions 의 OIDC 토큰으로
+Sigstore 에 서명해야만 생성된다. 유출된 npm 토큰만 쥔 공격자는 tarball 은 올려도
+증명은 위조할 수 없다. 따라서 "증명 없는 버전은 설치하지 않는다" 한 줄이 그
+시나리오를 통째로 막는다.
+
+구현:
+
+1. `npm view awb-agent-manager@latest version dist.attestations --json` 으로 최신
+   버전과 그 버전의 증명을 함께 읽고, `parseProvenanceView()` 가 판정한다
+   (`predicateType` 이 `https://slsa.dev/provenance/` 로 시작 + 증명 번들이 https).
+2. **fail-closed**: 조회 실패 · 파싱 실패 · 증명 없음 · 위조된 predicate — 전부
+   설치 거부. 애매한 오류에 강행하는 fail-open 은 publish 워크플로의
+   `probe-exists` 단계에서 이미 한 번 막은 실수라 반복하지 않는다. 거부의 결과는
+   "업데이트가 안 된다"일 뿐 매니저는 계속 돌아가므로 안전한 실패 방향이다.
+3. **TOCTOU 차단**: `@latest` 를 검증한 뒤 다시 `@latest` 로 설치하면 그 사이 태그가
+   옮겨간 tarball 이 들어온다. 검증된 **정확한 버전**으로 설치 spec 을 고정했고
+   (`awb-agent-manager@1.6.115` 형태), POSIX 즉시 설치 경로와 Windows 분리 헬퍼
+   경로 **양쪽 모두**에 같은 pinned spec 을 넘긴다.
+4. 복구용 탈출구는 `AWB_SELF_UPDATE_ALLOW_UNVERIFIED=1` 명시적 opt-in 하나뿐.
+5. dry-run(`noReExec`)도 게이트 뒤에 두었다 — 거부될 업데이트를 "would run" 이라고
+   보고하면 거짓 보고가 된다.
+
+### 3. 부수 조치 — 발행 표면 최소화
+
+루트 `package.json` 은 `private: true` 지만 `apps/server`(`server`) ·
+`apps/client`(`client`) 워크스페이스에는 아무 표시가 없었다. `npm publish
+--workspaces` 한 번, 혹은 워크스페이스 안에서 무심코 친 `npm publish` 한 번이면
+발행 의도가 없는 두 패키지가 공개 레지스트리로 나간다 — 둘 다 `files` 필드도
+없어 tarball 은 디렉터리 전체가 된다. 두 곳에 `"private": true` 를 추가해 npm 이
+publish 를 하드 거부하게 했다. 락파일은 워크스페이스의 `private` 를 기록하지
+않으므로 lockfile 드리프트 없음(`npm ci` 정상).
+
+### 4. 가드 (기계 강제)
+
+- **신규** `apps/agent-manager/test/self-update-provenance-gate.test.mjs` (10 테스트).
+  공격자가 만들 수 있는 응답 모양을 직접 먹인다 — 증명 없음 / provenance 없음 /
+  위조된 `predicateType` / 비-https 번들 / JSON 아님 / 버전 위조. 배선 확인
+  (검증 호출 · fail-closed · pinned spec · Windows 헬퍼) 포함. agent-manager 의
+  `test` 스크립트는 `test/*.test.mjs` 글롭이라 CI(양 OS)가 자동으로 집는다.
+- `apps/server/test/supply-chain-integrity-guard.test.mjs` **12 → 15**: 발행 가능한
+  워크스페이스가 정확히 하나일 것, 그 tarball 이 `files: ["dist"]` 로 좁혀질 것,
+  self-update 가 provenance 를 검증할 것.
+- **가드가 실제로 무는지 확인**: 설치 spec 을 `@latest` 로 되돌려 재빌드 →
+  배선 테스트 1건만 실패(나머지 9건 통과), 원복 후 10/10 통과.
+- 회귀 없음: agent-manager 전체 스위트 **950 테스트 (948 pass / 0 fail / 2 skip)**,
+  `supply-chain-integrity-guard` 15/15, `react-router-rsc-guard` 6/6, `tsc` 0 에러.
+
+### 5. 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
+SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.
