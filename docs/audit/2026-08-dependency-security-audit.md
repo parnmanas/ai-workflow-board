@@ -838,3 +838,90 @@ publish 를 하드 거부하게 했다. 락파일은 워크스페이스의 `priv
 
 `production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
 SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.
+
+---
+
+## 재검증 로그 — 2026-08-16 (`main` @ `40a131be`)
+
+### 결론
+
+`npm audit` 은 `main` / 발행 패키지 / 매니저 트리 전부 **0건**. 이번 발견은
+advisory 가 아니라 **설치 경로**에 있었다 — git 체크아웃으로 도는 에이전트
+매니저의 self-update 가 저장소 루트에서 bare `npm install` 을 돌려,
+**감사한 lockfile 트리 == 매니저가 실제로 실행하는 트리** 가 성립하지 않았다.
+`npm ci` 로 교체 + fail-closed + 회귀 가드로 조치 완료.
+
+### 1. 의존성 감사 결과 (변동 없음)
+
+| 대상 | 결과 |
+| --- | --- |
+| `main` (`npm audit`) | **0 vulnerabilities** (prod 272 / dev 307 / opt 63, total 580) |
+| advisory 경로 카나리 (`lodash@4.17.4`) | **1 critical** — 레지스트리 advisory 조회 정상 (0건이 침묵 실패가 아님을 증명) |
+| 발행 패키지 격리 트리 (`awb-agent-manager@latest`) | **0 vulnerabilities** |
+| lockfile 위생 | 581 엔트리 — 비-npmjs resolve 0, integrity 누락 0, install script 5개 전부 허용목록(`@scarf/scarf`/`esbuild`/`fsevents`×3) 내 |
+| provenance | `awb-agent-manager@1.6.116` 에 SLSA v1 `dist.attestations` 생존 |
+| `production.private` | `package.json` / `package-lock.json` **완전 동일** (`git diff` 에 lockfile 없음). 차이는 `deploy.yml`(prod 전용) + 2026-08-15 조치(self-update provenance 게이트 · 워크스페이스 `private` · 문서)뿐 — 런타임 아티팩트 영향 없음 |
+| 버전 지연 | 유일한 in-range 지연은 `turbo` 2.10.9→2.10.10 (dev 전용, advisory 없음). 락파일 재생성은 prod 재동기화(=실배포)를 강제하므로 기존 판단대로 **미조치** |
+
+`react-router` 는 7.18.2 유지(버전 바닥 가드 통과), `overrides` 핀(`multer`
+2.2.0 / `picomatch` ^4.0.4 / `js-yaml` ^5.2.3 / `@hono/node-server` ^2.0.10) 전부
+advisory 없는 범위.
+
+### 2. 발견 — git-checkout self-update 가 lockfile 을 우회했다
+
+`apps/agent-manager/src/lib/self-update.ts` 의 git 모드 경로:
+
+```
+git fetch → origin/<branch> detached checkout → npm install → npm run build → 재실행
+```
+
+`npm install` 은 lockfile 을 **제안**으로만 취급한다. 모든 `^`/`~` 범위를 그 시점
+레지스트리에 대고 다시 해결하고, 체크아웃의 `package-lock.json` 자체를 덮어쓴다.
+따라서:
+
+- CI 가 `npm ci` 로 검증하고 `npm audit` 이 0으로 승인한 트리가, self-update 후
+  매니저가 올라탈 트리와 같다는 보장이 **없었다**.
+- 방금 발행된 in-range 악성 패치 버전(전이 의존성 포함, 580개 중 아무거나)이
+  조용히 들어온다. 그 트리는 **운영자 자격증명으로 에이전트 CLI 를 띄우는
+  호스트**에서 돌고, install script 도 같이 실행된다.
+- npm-global 경로는 2026-08-15 provenance 게이트가 막았지만 **git 경로는 그 게이트를
+  타지 않는다** — 이쪽의 유일한 방어가 lockfile 강제였고, 그게 없었다.
+
+이건 2026-08-09 감사가 Dockerfile runner 스테이지에서 고친 것과 **같은 결함**이다
+(`RUN npm install --omit=dev` → `npm ci`). 그때 배포 이미지는 굳혔지만, 플릿의
+git-checkout 매니저를 갱신하는 이 경로만 남아 있었다. 패턴 재확인: **어떤 방어를
+세웠으면, 같은 명제를 깨는 다른 설치 경로가 남아 있는지 전부 훑을 것.**
+
+### 3. 조치
+
+`['install']` → `['ci']` (저장소 루트에서 실행하는 이유는 그대로 — monorepo 에서
+`-w apps/agent-manager` 는 hoist 된 devDeps 를 항상 다시 깔지 않는다).
+
+- **fail-closed**: `npm ci` 실패 시 예전 버전으로 계속 도는 쪽을 택한다. 검증되지
+  않은 트리로 빌드/재실행까지 진행하지 않는다.
+- **전제 성립**: `npm ci` 는 lockfile↔`package.json` 불일치에서 실패하는데, 바로
+  앞 `adoptRemoteBranch()` 가 `origin/<branch>` 를 통째로 detached 체크아웃하므로
+  둘은 같은 커밋에서 나온 짝이다. 더티 트리는 그 앞 단계가 auto-stash 한다.
+- **알려진 부작용**: `npm ci` 는 `node_modules` 를 지우고 새로 깐다 — 설치 중에는
+  이 체크아웃의 `node_modules` 를 symlink 로 공유하는 워크트리도 잠시 비어 보인다.
+  self-update 는 어차피 매니저 재실행으로 끝나므로 그 중단 구간은 이미 전제되어 있다.
+- 관리자 UI 문구(`AgentManagerPage.tsx`)의 "git pull + npm install + build" 도
+  실제 동작에 맞춰 `npm ci` 로 정정.
+
+### 4. 가드 (기계 강제)
+
+`apps/server/test/supply-chain-integrity-guard.test.mjs` **15 → 16**: git-checkout
+self-update 가 `npm ci` 로만 설치하고(로컬 설치용 `['install']` spawn 금지 — 주석
+속 언급이나 provenance 게이트가 붙은 `npm install -g` 는 별개), 설치 자체는 여전히
+존재하며(가드가 죽은 채 초록불 내는 것 방지), 실패 시 fail-closed 인지 확인.
+
+- **가드가 실제로 무는지 확인**: `['ci']` 를 `['install']` 로 되돌리면 새 테스트
+  1건만 정확히 실패, 원복 후 16/16 통과.
+- 회귀 없음: agent-manager 전체 스위트 **950 테스트 (948 pass / 0 fail / 2 skip)**,
+  `supply-chain-integrity-guard` 16/16, `react-router-rsc-guard` 6/6,
+  agent-manager `tsc` 빌드 통과, client `tsc` 0 에러.
+
+### 5. 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
+SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.

@@ -3,8 +3,9 @@
 // Two install modes, selected by detectInstallMode() (see InstallMode):
 //   - 'git'        — running from an AWB monorepo checkout. Version-check =
 //                    `git fetch` + read `origin/<branch>:.../package.json`;
-//                    self-update = fetch → detached checkout → npm build →
-//                    detached re-exec with `--force`.
+//                    self-update = fetch → detached checkout → `npm ci`
+//                    (lockfile-enforced, fail-closed) → npm build → detached
+//                    re-exec with `--force`.
 //   - 'npm-global' — installed via `npm i -g awb-agent-manager` (no checkout,
 //                    running file lives under `npm root -g`). Version-check =
 //                    `npm view awb-agent-manager version` (registry);
@@ -1091,21 +1092,40 @@ async function runSelfUpdateLocked(
     return { changed: false, summary: adopt.summary };
   }
 
-  // 2. npm install (workspace root — installs everything for monorepo).
-  // Note: we install at repo root because `npm install -w apps/agent-manager`
-  // doesn't always re-run hoisted devDeps install in a monorepo. A bare
-  // `npm install` is the cheapest universally-correct option.
-  out('Self-update: npm install');
+  // 2. npm ci (workspace root — installs everything for monorepo).
+  //
+  // `npm ci`, NOT `npm install` — 이 스테이지가 매니저가 실제로 실행할 의존성
+  // 트리를 만든다. `npm install` 은 lockfile 을 "제안"으로만 취급해서 모든
+  // `^`/`~` 범위를 레지스트리에 대고 다시 해결하고, 체크아웃의
+  // package-lock.json 자체를 덮어쓴다. 즉 CI 가 `npm ci` 로 테스트하고
+  // 감사(`npm audit`)가 0 으로 승인한 그 트리가 self-update 후 매니저가 돌리는
+  // 트리와 같다는 보장이 없었다 — 방금 발행된 in-range 악성 버전이 조용히
+  // 들어오고, 그 트리는 운영자 자격증명으로 에이전트 CLI 를 띄우는 호스트에서
+  // 돌아간다. Dockerfile 은 2026-08-09 감사에서 이미 같은 이유로 `npm ci` 로
+  // 바꿨는데(runner 스테이지), 플릿의 git-checkout 매니저를 갱신하는 이 경로만
+  // 남아 있었다. (2026-08-16 감사)
+  //
+  // 루트에서 도는 이유는 그대로다: `npm ci -w apps/agent-manager` 는 monorepo
+  // 에서 hoist 된 devDeps 를 항상 다시 깔지는 않는다.
+  //
+  // 실패하면 fail-closed — 예전 버전으로 계속 도는 편이, 검증되지 않은 트리로
+  // 올라가는 것보다 낫다. `npm ci` 는 lockfile↔package.json 불일치와 integrity
+  // 불일치에서 실패하는데, 바로 위 adoptRemoteBranch() 가 origin/<branch> 를
+  // 통째로 detached 체크아웃하므로 둘은 같은 커밋에서 나온 짝이다.
+  // 주의: `npm ci` 는 node_modules 를 지우고 새로 깐다 — 설치 중에는 이 체크아웃
+  // 의 node_modules 를 공유(symlink)하는 워크트리도 잠시 비어 보인다. self-update
+  // 는 어차피 매니저 재실행으로 끝나므로 그 중단 구간은 이미 전제되어 있다.
+  out('Self-update: npm ci');
   const installResult = await runAsync(
     'npm',
-    ['install'],
+    ['ci'],
     repoRoot,
     BUILD_TIMEOUT_MS,
-    (line) => out(`  [npm-install] ${line}`),
+    (line) => out(`  [npm-ci] ${line}`),
   );
   if (!installResult.ok) {
     const detail = (installResult.stderr.trim() || installResult.stdout.trim() || 'unknown').split('\n').pop() || '';
-    const summary = `npm install failed: ${detail.slice(0, 240)}`;
+    const summary = `npm ci failed: ${detail.slice(0, 240)}`;
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }

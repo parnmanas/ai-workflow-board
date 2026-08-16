@@ -616,7 +616,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
   };
 
   // Dispatch update_manager SSE command. In a git checkout the manager runs
-  // git pull + npm install + build, acks success, then re-execs with --force;
+  // git pull + npm ci + build, acks success, then re-execs with --force;
   // an npm-global install instead reinstalls via `npm i -g` (detached helper)
   // and relaunches. Either way we see the restart on the client as an
   // `agent_instance_update` event with the new manager version — no polling.
@@ -906,7 +906,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
               title={
                 inst.install_mode === 'npm-global'
                   ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g awb-agent-manager@latest, then restart).`
-                  : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm install + build, then re-exec).`
+                  : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm ci + build, then re-exec).`
               }
             >
               {updatePending
