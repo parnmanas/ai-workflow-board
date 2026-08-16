@@ -329,17 +329,15 @@ export class AgentManagerController {
       ? (typeof body.latest_version === 'string' ? body.latest_version : null)
       : undefined;
     const update_available = hasField('update_available') ? Boolean(body.update_available) : undefined;
-    // Install mode ('git' | 'npm-global' | 'unknown'). Passed through verbatim
-    // (string) so a newer manager reporting a mode this server doesn't enumerate
-    // still round-trips to the UI. Omitted by managers that predate it.
+    // Install mode ('npm-global' | 'unknown'). Passed through verbatim (string)
+    // so a mode this server doesn't enumerate — including the retired 'git' from
+    // a not-yet-updated manager — still round-trips to the UI. Omitted by
+    // managers that predate it.
     const install_mode = hasField('install_mode')
       ? (typeof body.install_mode === 'string' ? body.install_mode : null)
       : undefined;
-    const repo_root = hasField('repo_root')
-      ? (typeof body.repo_root === 'string' ? body.repo_root : null)
-      : undefined;
-    const default_branch = hasField('default_branch')
-      ? (typeof body.default_branch === 'string' ? body.default_branch : null)
+    const update_channel = hasField('update_channel')
+      ? (typeof body.update_channel === 'string' ? body.update_channel : null)
       : undefined;
     const update_last_checked_at = hasField('update_last_checked_at')
       ? (typeof body.update_last_checked_at === 'string' ? body.update_last_checked_at : null)
@@ -429,8 +427,7 @@ export class AgentManagerController {
       latest_version,
       update_available,
       install_mode,
-      repo_root,
-      default_branch,
+      update_channel,
       update_last_checked_at,
       update_last_error,
       open_breaker_count,

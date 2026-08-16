@@ -632,8 +632,7 @@ export interface AgentInstanceUpdatePayload {
     // managers leave them undefined; the admin UI handles the missing case.
     latest_version?: string | null;
     update_available?: boolean;
-    repo_root?: string | null;
-    default_branch?: string | null;
+    update_channel?: string | null;
     update_last_checked_at?: string | null;
     update_last_error?: string | null;
   };

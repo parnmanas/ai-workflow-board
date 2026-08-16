@@ -61,10 +61,45 @@ for the first-ever publish and is expected to trail npm's `latest` — a lower
 value here is **by design, not drift** (ticket 433f6cbd removed the old
 manual-bump model).
 
-> A git-checkout launch migrates to the npm-global package on self-update and
-> never moves or stashes the source checkout; git update is fallback-only when npm is unavailable.
-> a plain `npm i -g` install upgrades via `npm i -g awb-agent-manager@latest` and
-> the admin badge reads "manual updates only" for it (no git checkout to pull).
+> **npm is the only distribution channel.** Self-update never fetches, checks
+> out, or builds from a git remote — it verifies the published SLSA provenance
+> and then runs `npm install -g awb-agent-manager@<verified version>`. When npm
+> isn't reachable the admin badge reads "manual updates only" and nothing is
+> updated automatically.
+
+### Update channel
+
+`AWB_AGENT_MANAGER_UPDATE_CHANNEL` selects what self-update tracks:
+
+| Value | Behavior |
+|---|---|
+| _(unset)_ / `latest` | Track the published release line (default). |
+| any dist-tag (e.g. `next`) | Track a pre-release line published by the same provenance-signed workflow. |
+| exact version (e.g. `1.6.99`) | Pin to one published build. |
+| `off` | Disable auto-update entirely; the admin badge reads "(pinned)". |
+
+The value is validated against the npm dist-tag/version charset — anything else
+falls back to `latest`, so the env var can't inject arguments into the
+`npm view` / `npm install -g` calls.
+
+### Testing an unpublished build
+
+Use npm's own local-tarball install — no git checkout, no registry publish:
+
+```bash
+npm run build -w apps/agent-manager
+npm pack -w apps/agent-manager                  # → awb-agent-manager-<v>.tgz
+npm i -g ./awb-agent-manager-<v>.tgz
+export AWB_AGENT_MANAGER_UPDATE_CHANNEL=off     # keep your build installed
+awb-agent-manager --version
+```
+
+The install still classifies as `npm-global`, so everything except auto-update
+behaves exactly like a released build. Drop the env var (or set it back to
+`latest`) to rejoin the release line. For a shared pre-release, publish to a
+dist-tag instead (`npm publish --tag next`) and point testers at
+`AWB_AGENT_MANAGER_UPDATE_CHANNEL=next` — that path keeps the provenance gate
+armed, which a local tarball does not.
 
 ### Docker
 

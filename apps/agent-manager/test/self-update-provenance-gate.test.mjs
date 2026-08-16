@@ -129,9 +129,13 @@ test('REFUSES a response whose version field is missing or bogus', () => {
 test('the npm-global install path is gated and pins the verified exact version', () => {
   const src = readFileSync(SELF_UPDATE_SRC, 'utf8');
 
-  // 1. 설치 전에 증명을 검증한다.
-  assert.match(src, /await verifyNpmGlobalProvenance\(out\)/,
-    'runNpmGlobalSelfUpdate must verify provenance before installing');
+  // 1. 설치 전에 증명을 검증한다. 검증 대상은 활성 채널(latest / next / 고정
+  //    버전)이어야 한다 — 채널을 무시하고 항상 @latest 를 검증하면 실제로 설치할
+  //    tarball 과 다른 것을 검증하게 되어 게이트가 헛돈다.
+  assert.match(src, /await verifyNpmGlobalProvenance\(out, channel\)/,
+    'runNpmGlobalSelfUpdate must verify provenance for the ACTIVE channel before installing');
+  assert.match(src, /\['view', npmChannelSpec\(channel\), 'version', 'dist\.attestations'/,
+    'the provenance read must target the active channel spec');
 
   // 2. 검증 실패 시 fail-closed — 명시적 opt-in 없이는 설치하지 않는다.
   assert.match(src, /if \(!verdict\.ok\)/, 'a failed verdict must be handled');
@@ -149,8 +153,8 @@ test('the npm-global install path is gated and pins the verified exact version',
   assert.ok(installLines.length > 0, 'expected to find the global install invocation');
   for (const line of installLines) {
     assert.ok(
-      !/NPM_GLOBAL_LATEST_SPEC/.test(line),
-      `global install must use the pinned installSpec, not @latest: ${line.trim()}`,
+      !/npmChannelSpec\(/.test(line) && !/channelSpec/.test(line),
+      `global install must use the pinned installSpec, not the moving channel tag: ${line.trim()}`,
     );
   }
 

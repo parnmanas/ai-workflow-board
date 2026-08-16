@@ -369,8 +369,9 @@ test('the manager self-update consumes that provenance instead of installing bli
   );
   assert.match(
     src,
-    /await verifyNpmGlobalProvenance\(out\)/,
-    'the npm-global self-update path must verify published provenance before installing',
+    /await verifyNpmGlobalProvenance\(out, channel\)/,
+    'the npm-global self-update path must verify published provenance before installing, ' +
+      'for the ACTIVE update channel (verifying @latest while installing @next would be a hole)',
   );
   assert.match(
     src,
@@ -380,48 +381,42 @@ test('the manager self-update consumes that provenance instead of installing bli
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. git-checkout 매니저 self-update 도 lockfile 을 강제해야 한다
-//    (2026-08-16 감사 추가)
+// 7. 매니저 self-update 는 npm 단일 채널이어야 한다 (git 배포 경로 제거)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 1번(Dockerfile)이 세운 명제 — "감사한 트리 == 배포된 트리" — 에는 구멍이 하나
-// 남아 있었다. 서버 이미지는 `npm ci` 로 굳혔지만, git 체크아웃에서 도는
-// 에이전트 매니저는 self-update 때 저장소 루트에서 bare `npm install` 을 돌렸다.
-// `npm install` 은 lockfile 을 제안으로만 취급해 모든 `^`/`~` 를 레지스트리에
-// 대고 다시 해결하고 체크아웃의 package-lock.json 을 덮어쓴다. 즉 CI 가
-// `npm ci` 로 검증하고 `npm audit` 이 0 으로 승인한 트리가 아니라, 그 시점
-// 레지스트리 최신 in-range 조합이 설치됐다 — 방금 발행된 악성 패치 버전이
-// 조용히 들어올 수 있고, 그 트리는 운영자 자격증명으로 에이전트 CLI 를 띄우는
-// 호스트에서 돈다. npm-global 경로는 2026-08-15 provenance 게이트가 막았지만
-// git 경로는 그 게이트를 타지 않으므로 이쪽 방어는 lockfile 강제뿐이다.
-test('the git-checkout manager self-update installs via `npm ci`, not `npm install`', () => {
+// 이전에는 self-update 에 git 체크아웃 경로가 하나 더 있었다: `git fetch` →
+// detached checkout → `npm ci` → build → re-exec. 그 경로는 provenance 게이트를
+// 타지 않으므로(서명된 tarball 이 아니라 브랜치 tip 을 그대로 실행) "감사한 트리
+// == 실행되는 트리" 명제에 구멍이었고, 방어 수단이 lockfile 강제뿐이었다.
+// 지금은 경로 자체가 제거돼 npm(provenance 게이트 통과) 만 남았다. 이 가드는 그
+// 두 번째 배포 채널이 조용히 되살아나지 않는지 본다 — 되살아나면 게이트를 우회하는
+// 설치 경로가 다시 생기는 것이므로 공급망 관점에서는 회귀다.
+test('the manager self-update has exactly one distribution channel (npm, no git path)', () => {
   const src = fs.readFileSync(
     path.join(REPO_ROOT, 'apps', 'agent-manager', 'src', 'lib', 'self-update.ts'),
     'utf8',
   );
 
-  // 주석은 `npm install` 을 설명 목적으로 계속 언급한다(npm-global 경로 포함).
-  // 실제 spawn 인자 배열만 본다: runAsync('npm', ['install'], …) 형태.
-  const localInstall = /\[\s*'install'\s*\]/.test(src);
+  // 실제 spawn 인자만 본다 — 주석은 제거된 git 경로를 설명 목적으로 계속 언급한다.
   assert.ok(
-    !localInstall,
-    "self-update spawns `npm install` for a local dependency install — the tree the manager " +
-      'then runs is no longer provably the audited lockfile tree. Use `npm ci`. ' +
-      '(`npm install -g` for the npm-global mode is a different, provenance-gated path.)',
+    !/runAsync\(\s*'git'|runSync\(\s*'git'|spawn\(\s*'git'/.test(src),
+    'self-update must not spawn git — that reintroduces a distribution channel ' +
+      'that bypasses the npm provenance gate',
   );
 
-  // 가드가 죽은 채 초록불만 내는 것 방지 — 설치 자체는 여전히 있어야 한다.
-  assert.match(
-    src,
-    /\[\s*'ci'\s*\]/,
-    'the git-checkout self-update must still install dependencies, via `npm ci`',
+  // 로컬 의존성 설치(`npm install` / `npm ci`)는 git 체크아웃을 빌드할 때만 필요했다.
+  // 그 경로가 없으므로 남아 있으면 안 된다. (`npm install -g` 은 provenance 게이트를
+  // 통과한 별개의 전역 설치 경로다.)
+  assert.ok(
+    !/\[\s*'install'\s*\]/.test(src) && !/\[\s*'ci'\s*\]/.test(src),
+    'self-update must not run a local dependency install — it installs the published, ' +
+      'provenance-verified package instead of building a tree from source',
   );
 
-  // 실패 시 fail-closed: 설치가 깨지면 옛 버전으로 남아야지, 검증 안 된 트리로
-  // 빌드/재실행까지 진행하면 안 된다.
+  // 가드가 죽은 채 초록불만 내는 것 방지 — 전역 설치 자체는 여전히 있어야 한다.
   assert.match(
     src,
-    /`npm ci failed: \$\{detail/,
-    'a failed `npm ci` must abort the self-update (fail-closed) rather than fall through to build',
+    /\[\s*'install',\s*'-g',\s*installSpec\s*\]/,
+    'the npm-global install must still be wired, pinned to the verified installSpec',
   );
 });

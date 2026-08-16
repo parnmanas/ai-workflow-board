@@ -892,11 +892,9 @@ export const EVENT_TYPES: EventDefinition[] = [
               : undefined,
           update_available:
             typeof inst.update_available === 'boolean' ? inst.update_available : undefined,
-          repo_root:
-            typeof inst.repo_root === 'string' || inst.repo_root === null ? inst.repo_root : undefined,
-          default_branch:
-            typeof inst.default_branch === 'string' || inst.default_branch === null
-              ? inst.default_branch
+          update_channel:
+            typeof inst.update_channel === 'string' || inst.update_channel === null
+              ? inst.update_channel
               : undefined,
           update_last_checked_at:
             typeof inst.update_last_checked_at === 'string' || inst.update_last_checked_at === null

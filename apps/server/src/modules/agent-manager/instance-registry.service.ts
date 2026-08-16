@@ -76,13 +76,12 @@ export interface InstanceRecord {
   // package.json on a slow timer; older managers leave them undefined.
   latest_version?: string | null;       // version on origin/<branch> or npm registry
   update_available?: boolean;           // latest > current (semver-aware)
-  // How the manager was installed: 'git' | 'npm-global' | 'unknown'. Passed
-  // through verbatim (typed as string for forward-compat with modes a newer
-  // manager might report). Drives the admin UI's Update-button vs
-  // "manual updates only" decision. Undefined from managers that predate it.
+  // How the manager was installed: 'npm-global' | 'unknown'. Passed through
+  // verbatim (typed as string for forward-compat, and because managers predating
+  // the git-mode removal still report 'git'). Drives the admin UI's Update-button
+  // vs "manual updates only" decision. Undefined from managers that predate it.
   install_mode?: string | null;
-  repo_root?: string | null;            // absolute path of the manager's git checkout (null for npm-global)
-  default_branch?: string | null;       // branch the checker is tracking ('main')
+  update_channel?: string | null;       // npm channel: 'latest' | dist-tag | version | 'off'
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
   // Live count reported by the manager's in-memory circuit breaker.

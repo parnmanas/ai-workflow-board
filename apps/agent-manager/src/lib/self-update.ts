@@ -1,85 +1,114 @@
 // Self-update for agent-manager.
 //
+// npm is the ONLY distribution channel. The manager never fetches, checks out,
+// or builds from a git remote to update itself — an earlier 'git' install mode
+// did exactly that and was removed (see the update-channel note below for how
+// to run an unpublished build instead).
+//
 // Two install modes, selected by detectInstallMode() (see InstallMode):
-//   - 'git'        — running from an AWB monorepo checkout. Version-check =
-//                    `git fetch` + read `origin/<branch>:.../package.json`;
-//                    self-update = fetch → detached checkout → `npm ci`
-//                    (lockfile-enforced, fail-closed) → npm build → detached
-//                    re-exec with `--force`.
-//   - 'npm-global' — installed via `npm i -g awb-agent-manager` (no checkout,
-//                    running file lives under `npm root -g`). Version-check =
-//                    `npm view awb-agent-manager version` (registry);
+//   - 'npm-global' — installed via `npm i -g awb-agent-manager` (the running
+//                    file lives under `npm root -g`). Version-check =
+//                    `npm view awb-agent-manager@<channel> version` (registry);
 //                    self-update = verify the published SLSA provenance, then
 //                    `npm install -g awb-agent-manager@<verified version>` and
 //                    relaunch (Windows routes that through a detached
 //                    install-after-exit helper to dodge the self-overwrite
 //                    EBUSY/EPERM). The provenance gate is fail-closed — see
 //                    parseProvenanceView() below.
-//   - 'unknown'    — neither (packaged/vendored copy): auto-update impossible,
-//                    the admin UI shows a manual-upgrade hint.
+//   - 'unknown'    — npm is unreachable (packaged/vendored copy, no npm on
+//                    PATH): auto-update impossible, the admin UI shows a
+//                    manual-upgrade hint.
 //
-// Cadence (both modes):
+// Update channel (AWB_AGENT_MANAGER_UPDATE_CHANNEL, default 'latest'):
+//   - 'latest'      — track the published release line.
+//   - any dist-tag  — e.g. 'next': track a pre-release line published by the
+//                     same provenance-signed workflow.
+//   - exact version — e.g. '1.6.99': pin to one published build.
+//   - 'off'         — disable auto-update entirely. This is the knob for
+//                     TESTING AN UNPUBLISHED BUILD without any git involvement:
+//                       npm pack -w awb-agent-manager           # → .tgz
+//                       npm i -g ./awb-agent-manager-<v>.tgz    # install it
+//                       AWB_AGENT_MANAGER_UPDATE_CHANNEL=off    # keep it
+//                     The install stays 'npm-global' (it sits under `npm root
+//                     -g`), so everything except auto-update behaves normally.
+//
+// Cadence:
 //   - UpdateChecker (slow timer, default 5 min) refreshes the cached
 //     `latest_version` / `update_available` snapshot so InstanceHeartbeat can
 //     attach it to every payload without paying the network cost each tick.
 //   - runSelfUpdate() (one-shot, fired by `update_manager` SSE command or
-//     SIGUSR1) does the heavy lifting for the active install mode.
+//     SIGUSR1) does the heavy lifting.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve, join, relative, isAbsolute } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
-import { AGENT_MANAGER_HOME } from './constants.js';
 
-const PACKAGE_JSON_REL = 'apps/agent-manager/package.json';
-// Our own npm package name. detectRepoRoot() uses this to tell an actual AWB
-// monorepo checkout apart from an *unrelated* ancestor `.git` (a home dotfiles
-// repo, a git-tracked prefix an `npm i -g` install happens to sit under). It is
-// also the registry spec the npm-global mode reads / installs.
+// Our own npm package name — the registry spec npm-global mode reads/installs.
 const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
-// `npm install -g <this>` / `npm view <pkg> version` target for npm-global mode.
-const NPM_GLOBAL_LATEST_SPEC = `${MANAGER_PACKAGE_NAME}@latest`;
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const FETCH_TIMEOUT_MS = 30_000;
 const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
-const MANAGED_GIT_RUNTIME = join(AGENT_MANAGER_HOME, 'runtime');
+
+/** Env var selecting the update channel. See the file header for the values. */
+export const UPDATE_CHANNEL_ENV = 'AWB_AGENT_MANAGER_UPDATE_CHANNEL';
+const DEFAULT_UPDATE_CHANNEL = 'latest';
+/** Sentinel channel that pins the installed build (no auto-update at all). */
+export const UPDATE_CHANNEL_OFF = 'off';
 
 /**
  * How this manager binary was installed — decides the self-update strategy.
- *   - 'git'        — running from an AWB monorepo checkout (detectRepoRoot != null).
- *   - 'npm-global' — no checkout, but the running file sits under `npm root -g`
- *                    (installed via `npm i -g awb-agent-manager`).
- *   - 'unknown'    — neither (packaged / vendored copy): auto-update impossible.
+ *   - 'npm-global' — installed via `npm i -g awb-agent-manager` (npm is
+ *                    reachable, so the registry channel is usable).
+ *   - 'unknown'    — npm unreachable (packaged / vendored copy): auto-update
+ *                    impossible, upgrade manually.
  */
-export type InstallMode = 'git' | 'npm-global' | 'unknown';
+export type InstallMode = 'npm-global' | 'unknown';
 
-export interface RepoInfo {
-  root: string;
-  branch: string;
+/**
+ * Resolve the configured update channel, sanitized.
+ *
+ * The result is interpolated into an `npm view` / `npm install -g` spec that
+ * runs with `shell:true` on Windows, so an unvalidated value would be a command
+ * -injection vector via the environment. Only npm dist-tag / version characters
+ * survive; anything else falls back to the default channel.
+ */
+export function resolveUpdateChannel(raw?: string | null): string {
+  const v = String(raw ?? process.env[UPDATE_CHANNEL_ENV] ?? '').trim();
+  if (!v) return DEFAULT_UPDATE_CHANNEL;
+  if (v.toLowerCase() === UPDATE_CHANNEL_OFF) return UPDATE_CHANNEL_OFF;
+  // npm dist-tags and versions: start alphanumeric, then [A-Za-z0-9._-].
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v) ? v : DEFAULT_UPDATE_CHANNEL;
+}
+
+/** True when the channel pins the current build (auto-update disabled). */
+export function isAutoUpdateDisabled(channel: string): boolean {
+  return channel === UPDATE_CHANNEL_OFF;
+}
+
+/** `awb-agent-manager@<channel>` — the npm spec for the active channel. */
+function npmChannelSpec(channel: string): string {
+  return `${MANAGER_PACKAGE_NAME}@${channel}`;
 }
 
 export interface UpdateStatus {
   /** Currently-running manager version (from package.json on disk). */
   current_version: string;
-  /** Latest version from `origin/<branch>:apps/agent-manager/package.json`,
-   *  or null when we couldn't read it (no repo / network error / first tick
-   *  hasn't run yet). */
+  /** Latest version published on the active channel, or null when we couldn't
+   *  read it (network error / auto-update off / first tick hasn't run yet). */
   latest_version: string | null;
   /** True when latest_version > current_version (semver-aware). False when
-   *  equal or current is ahead (dev branch). */
+   *  equal or current is ahead (locally-packed build). */
   update_available: boolean;
   /** How this manager was installed — the self-update strategy selector.
-   *  'git' checks a git remote; 'npm-global' checks the npm registry and can
-   *  auto-update via `npm i -g`; 'unknown' can only be upgraded manually. */
+   *  'npm-global' checks the npm registry and can auto-update via `npm i -g`;
+   *  'unknown' can only be upgraded manually. */
   install_mode: InstallMode;
-  /** Absolute repo root, or null when not running from a git checkout. */
-  repo_root: string | null;
-  /** Default-branch the checker is tracking ('main' typically). null when
-   *  not running from a git checkout. */
-  branch: string | null;
+  /** Active npm update channel: 'latest', a dist-tag, an exact version, or
+   *  'off' when the operator pinned this build (see UPDATE_CHANNEL_ENV). */
+  update_channel: string;
   /** ISO-8601 timestamp of the last successful remote check; null until the
    *  first check completes. */
   last_checked_at: string | null;
@@ -113,62 +142,6 @@ interface RunResult {
 }
 
 /**
- * True when `dir` is the root of THIS monorepo — it carries
- * `apps/agent-manager/package.json` whose name is our own package. This is
- * the guard that keeps detectRepoRoot() from latching onto an *unrelated*
- * ancestor `.git`: a home-dir dotfiles repo, or any git-tracked prefix an
- * `npm i -g awb-agent-manager` install happens to sit beneath.
- *
- * Without it, a false-positive repo root feeds the self-update machinery
- * someone else's checkout, where `git fetch` + `git show
- * origin/<branch>:apps/agent-manager/package.json` both fail. That drives the
- * admin badge to a scary "(update check failed)" on what is really a plain
- * npm-global install that should read "(manual updates only)".
- */
-function isAwbRepoRoot(dir: string): boolean {
-  try {
-    const pkgPath = join(dir, PACKAGE_JSON_REL);
-    if (!existsSync(pkgPath)) return false;
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-    return pkg?.name === MANAGER_PACKAGE_NAME;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Walk up from this file's location until we hit the root of THIS monorepo —
- * a directory that both contains `.git` AND carries our own
- * `apps/agent-manager/package.json`. Returns null when the manager isn't
- * running from an AWB checkout (npm-global install, packaged binary, or an
- * install nested under an unrelated git repo).
- *
- * The `.git`-plus-package check is deliberate: a bare `.git` test alone
- * false-positives on an ancestor dotfiles/monorepo `.git` above an
- * `npm i -g` prefix, handing self-update a foreign checkout it can't fetch
- * from (see isAwbRepoRoot). When a `.git` belongs to someone else's repo we
- * keep walking up rather than returning it, so the traversal ends at null and
- * the install is correctly reported as "manual updates only".
- */
-export function detectRepoRoot(_startDir?: string): string | null {
-  // Self-update must never infer ownership from the running script's parents.
-  // Only the manager-owned fallback runtime is disposable/updateable.
-  return existsSync(join(MANAGED_GIT_RUNTIME, '.git')) && isAwbRepoRoot(MANAGED_GIT_RUNTIME)
-    ? MANAGED_GIT_RUNTIME
-    : null;
-}
-
-/**
- * True when `child` is `parent` itself or nested beneath it. Path-segment safe
- * (a `relative()` that stays within the tree has no leading `..` and isn't
- * absolute) so `.../npm/node_modules` does NOT match `.../npm/node_modules-x`.
- */
-function isPathInside(parent: string, child: string): boolean {
-  const rel = relative(resolve(parent), resolve(child));
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
-/**
  * Absolute path of npm's GLOBAL `node_modules` (`npm root -g`), or null when
  * npm can't be reached. Best-effort + bounded: a slow/absent npm just yields a
  * null root → the caller falls back to install mode 'unknown', never throws.
@@ -183,53 +156,23 @@ function detectNpmGlobalRoot(): string | null {
 
 /**
  * Pure install-mode classifier — separated from the detectors so it can be
- * unit-tested without spawning `git` / `npm`. See InstallMode for the meaning
- * of each result.
- *   - repoRoot present            → 'git'
- *   - running file under npmRoot  → 'npm-global'
- *   - otherwise                   → 'unknown'
+ * unit-tested without spawning `npm`. See InstallMode for the meaning of each
+ * result.
+ *   - npm reachable → 'npm-global' (the registry channel is usable)
+ *   - otherwise     → 'unknown'    (manual upgrade only)
+ *
+ * Reachable npm is the whole test, deliberately — it is NOT narrowed to
+ * "the running file sits under `npm root -g`". A locally-packed tarball
+ * installed to a custom prefix is still moved by `npm i -g`, so it belongs on
+ * the same path.
  */
-export function classifyInstallMode(
-  runningDir: string,
-  repoRoot: string | null,
-  npmGlobalRoot: string | null,
-): InstallMode {
-  // npm is the canonical distribution channel even when an older service is
-  // still launched from a source checkout. This prevents self-update from
-  // moving/stashing the operator's repository. Git is fallback-only when npm
-  // is genuinely unavailable.
-  if (npmGlobalRoot) return 'npm-global';
-  if (repoRoot) return 'git';
-  if (npmGlobalRoot && isPathInside(npmGlobalRoot, runningDir)) return 'npm-global';
-  return 'unknown';
+export function classifyInstallMode(npmGlobalRoot: string | null): InstallMode {
+  return npmGlobalRoot ? 'npm-global' : 'unknown';
 }
 
-/**
- * Classify how this manager was installed. Wires the real detectors into
- * classifyInstallMode(): detectRepoRoot() for 'git', and `npm root -g` +
- * a path-containment check for 'npm-global'. npm is probed even for a checkout
- * because it is the preferred update channel; git is fallback-only.
- */
-export function detectInstallMode(startDir?: string): InstallMode {
-  const runningDir = resolve(startDir || dirname(fileURLToPath(import.meta.url)));
-  const repoRoot = detectRepoRoot(startDir);
-  const npmGlobalRoot = detectNpmGlobalRoot();
-  return classifyInstallMode(runningDir, repoRoot, npmGlobalRoot);
-}
-
-/**
- * Read `apps/agent-manager/package.json` from a working tree (current
- * checkout). The manager's own version lives here; we use this when the
- * manager is invoked from a binary build that doesn't carry its source pkg.
- */
-function readWorkingTreeVersion(repoRoot: string): string | null {
-  try {
-    const pkgPath = join(repoRoot, PACKAGE_JSON_REL);
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-    return typeof pkg?.version === 'string' ? pkg.version : null;
-  } catch {
-    return null;
-  }
+/** Classify how this manager was installed by probing `npm root -g`. */
+export function detectInstallMode(): InstallMode {
+  return classifyInstallMode(detectNpmGlobalRoot());
 }
 
 /**
@@ -238,9 +181,8 @@ function readWorkingTreeVersion(repoRoot: string): string | null {
  *
  * Priority:
  *   1. `dist/package.json`  — copied by the build script, frozen at build
- *      time. Immune to subsequent `git pull` / `git checkout` touching the
- *      working-tree package.json while the process is still running the old
- *      dist.
+ *      time, so it always describes the code actually loaded into this
+ *      process rather than whatever the working tree currently holds.
  *   2. `../../package.json` — fallback for dev mode (`tsx watch src/…`)
  *      where dist/ doesn't exist yet; in that case the working tree IS the
  *      running code, so reading the live file is correct.
@@ -266,30 +208,6 @@ export function readBundledVersion(): string {
 }
 
 /**
- * Detect the remote's default branch (usually 'main') from the local
- * `origin/HEAD` symbolic ref. This is what the UpdateChecker should
- * track — not the currently-checked-out branch, which on a dev machine
- * could be anything (`production.private`, a feature branch, …).
- *
- * Falls back to 'main' when `origin/HEAD` is unset (bare clone, fresh
- * remote, `git remote set-head origin --delete`).
- */
-function detectDefaultBranch(repoRoot: string): string {
-  // `git symbolic-ref refs/remotes/origin/HEAD` → refs/remotes/origin/main
-  const r = runSync(
-    'git',
-    ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'],
-    5_000,
-  );
-  if (r.ok) {
-    const ref = r.stdout.trim(); // e.g. "refs/remotes/origin/main"
-    const match = ref.match(/^refs\/remotes\/origin\/(.+)$/);
-    if (match?.[1]) return match[1];
-  }
-  return 'main';
-}
-
-/**
  * Compare two semver-ish strings. Returns -1, 0, 1 for a<b, a==b, a>b.
  * Tolerates any prerelease / build suffix by stripping it (we only care
  * about the numeric core).
@@ -310,27 +228,7 @@ export function compareSemver(a: string, b: string): number {
 }
 
 /**
- * Run a shell command synchronously, capturing stdout / stderr. Used for
- * the bounded git lookups that feed the heartbeat — async would just
- * complicate the cadence loop without any gain on these sub-second calls.
- */
-function runSync(cmd: string, args: string[], timeoutMs: number): RunResult {
-  const r = spawnSync(cmd, args, {
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  return {
-    ok: r.status === 0 && !r.error,
-    stdout: r.stdout || '',
-    stderr: r.stderr || '',
-    exitCode: r.status,
-    signal: r.signal,
-  };
-}
-
-/**
- * Like runSync but with `shell:true` on Windows so `npm`/`npm.cmd` resolves via
+ * Run a bounded command synchronously with `shell:true` on Windows so `npm`/`npm.cmd` resolves via
  * PATH (a bare `spawnSync('npm', …)` can't exec a `.cmd` shim without a shell).
  * Used for the bounded npm lookups (`npm root -g`) that feed install-mode
  * detection at construction time. Args here are fixed literals — no user input —
@@ -415,137 +313,6 @@ function runAsync(
 }
 
 /**
- * Read `apps/agent-manager/package.json` from `origin/<branch>` without
- * checking out anything. Returns the parsed version, or null on any
- * failure.
- */
-function readRemoteVersion(repoRoot: string, branch: string): string | null {
-  // First try origin/<branch>; falls back to the default ref of `origin`
-  // in case `origin/<branch>` doesn't exist yet (fresh clone, no fetch).
-  const refs = [`origin/${branch}:${PACKAGE_JSON_REL}`, `origin/HEAD:${PACKAGE_JSON_REL}`];
-  for (const ref of refs) {
-    const r = runSync('git', ['-C', repoRoot, 'show', ref], 10_000);
-    if (!r.ok) continue;
-    try {
-      const pkg = JSON.parse(r.stdout);
-      const v = typeof pkg?.version === 'string' ? pkg.version : null;
-      if (v) return v;
-    } catch {
-      /* try next ref */
-    }
-  }
-  return null;
-}
-
-export interface GitUpdateState {
-  /** True when `origin/<branch>` carries commits this build's checkout lacks. */
-  update_available: boolean;
-  /** Running checkout's HEAD sha, or null when it couldn't be read. */
-  head_sha: string | null;
-  /** `origin/<branch>` tip sha, or null when the ref is missing. */
-  remote_sha: string | null;
-  /** Number of commits in `origin/<branch>` not reachable from HEAD (0 when
-   *  converged or when HEAD is ahead). null when it couldn't be computed. */
-  ahead: number | null;
-  /** Set when git couldn't answer (no HEAD, missing origin ref, spawn error). */
-  error?: string;
-}
-
-/**
- * Determine git-mode update availability by REMOTE COMMIT DIFFERENCE — NOT by
- * comparing package.json versions.
- *
- * Why not version compare: under publish-time versioning (ticket 433f6cbd) the
- * source `apps/agent-manager/package.json` version is frozen at the seed floor
- * (nobody hand-bumps it anymore; the real version is computed at `npm publish`
- * time and lives only in the npm tarball + git tag). So `origin/<branch>`'s
- * package.json version stays equal to the running build's version forever, and
- * a `compareSemver(remoteVersion, current)` would report "no update available"
- * even after arbitrarily many code changes landed on the branch. That silently
- * freezes the git fallback channel (the exact regression this replaces).
- *
- * The honest git-mode signal is "origin/<branch> advanced past the commit this
- * build was built from". After a git self-update (fetch → `checkout --detach
- * origin/<branch>` → build → re-exec) HEAD == origin/<branch>, so this returns
- * update_available=false — i.e. it CONVERGES on rebuild, unlike the frozen
- * version compare.
- *
- * Assumes the caller already ran `git fetch` (this only reads local refs), so
- * it also yields a best-effort answer against the stale cached ref when a fetch
- * fails. Pure git, no registry dependency — correct for git mode, which is
- * selected precisely when the npm channel is unavailable.
- */
-export function computeGitUpdateState(repoRoot: string, branch: string): GitUpdateState {
-  const head = runSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], 5_000);
-  if (!head.ok) {
-    const detail = (head.stderr.trim() || head.stdout.trim() || 'git rev-parse HEAD failed')
-      .split('\n')
-      .filter(Boolean)
-      .pop();
-    return { update_available: false, head_sha: null, remote_sha: null, ahead: null, error: detail };
-  }
-  const headSha = head.stdout.trim();
-  const remote = runSync('git', ['-C', repoRoot, 'rev-parse', `origin/${branch}`], 5_000);
-  if (!remote.ok) {
-    const detail = (remote.stderr.trim() || remote.stdout.trim() || `origin/${branch} ref missing`)
-      .split('\n')
-      .filter(Boolean)
-      .pop();
-    return { update_available: false, head_sha: headSha, remote_sha: null, ahead: null, error: detail };
-  }
-  const remoteSha = remote.stdout.trim();
-  if (headSha === remoteSha) {
-    // Converged: running the branch tip. (Also the post-self-update steady state.)
-    return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: 0 };
-  }
-  // Symmetric-difference counts: `left` = commits reachable from HEAD but not
-  // origin/<branch> (local-only), `right` = commits reachable from origin but
-  // not HEAD (remote-only). `--left-right --count HEAD...origin` prints them as
-  // "left<TAB>right" in a single call.
-  //
-  // We only adopt when the remote is a *fast-forward descendant* of HEAD — i.e.
-  // local-only == 0 && remote-only > 0. Requiring local-only == 0 is the crux:
-  //   • remote strictly ahead (A→B on origin, HEAD at A): 0<TAB>N → update
-  //   • HEAD strictly ahead (local dev commit): N<TAB>0 → no update
-  //   • DIVERGED (HEAD and origin each carry unique commits): N<TAB>M, N>0 → no
-  //     update. A plain `HEAD..origin` count would be M>0 here and wrongly claim
-  //     an update, and self-update's `checkout --detach origin/<branch>` would
-  //     then abandon the local-only commits. Gating on local-only == 0 keeps
-  //     the "diverged → no update" contract honest.
-  const revList = runSync(
-    'git',
-    ['-C', repoRoot, 'rev-list', '--left-right', '--count', `HEAD...origin/${branch}`],
-    5_000,
-  );
-  if (!revList.ok) {
-    const detail = (revList.stderr.trim() || revList.stdout.trim() || 'git rev-list failed')
-      .split('\n')
-      .filter(Boolean)
-      .pop();
-    return { update_available: false, head_sha: headSha, remote_sha: remoteSha, ahead: null, error: detail };
-  }
-  const [localRaw, remoteRaw] = revList.stdout.trim().split(/\s+/);
-  const localOnly = Number.parseInt(localRaw, 10);
-  const remoteOnly = Number.parseInt(remoteRaw, 10);
-  if (!Number.isFinite(localOnly) || !Number.isFinite(remoteOnly)) {
-    return {
-      update_available: false,
-      head_sha: headSha,
-      remote_sha: remoteSha,
-      ahead: null,
-      error: `unparseable rev-list output: ${JSON.stringify(revList.stdout.trim())}`,
-    };
-  }
-  return {
-    // Fast-forward only: remote ahead AND no local-only commits (not diverged).
-    update_available: localOnly === 0 && remoteOnly > 0,
-    head_sha: headSha,
-    remote_sha: remoteSha,
-    ahead: remoteOnly,
-  };
-}
-
-/**
  * Periodically refresh the remote version cache so the heartbeat can
  * advertise an up-to-date `latest_version` without paying the round-trip
  * cost on every 30s tick.
@@ -561,46 +328,32 @@ export class UpdateChecker {
     opts: {
       intervalMs?: number;
       log?: (msg: string) => void;
-      /** Test-only injection: drive #tick against a fixture repo without real
-       *  detection. Production callers pass none of these — everything below is
+      /** Test-only injection: drive #tick without the real detectors.
+       *  Production callers pass none of these — everything below is
        *  auto-detected. */
-      repoRoot?: string | null;
-      branch?: string | null;
       installMode?: InstallMode;
+      updateChannel?: string;
       currentVersion?: string;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
-    const repoRoot = opts.repoRoot !== undefined ? opts.repoRoot : detectRepoRoot();
-    // Classify the install once at boot. In git mode we skip the `npm root -g`
-    // spawn entirely; in the no-checkout case it decides npm-global vs unknown.
-    const runningDir = resolve(dirname(fileURLToPath(import.meta.url)));
-    const install_mode =
-      opts.installMode ?? classifyInstallMode(runningDir, repoRoot, detectNpmGlobalRoot());
-    const branch =
-      opts.branch !== undefined ? opts.branch : repoRoot ? detectDefaultBranch(repoRoot) : null;
-    // Prefer the build-time snapshot (dist/package.json) over the working-tree
-    // file. On dev machines the repo root is also the running source tree, so
-    // `readWorkingTreeVersion(repoRoot)` returns whatever version the working
-    // tree currently has — which drifts ahead of the actually-running dist
-    // after a `git pull` that wasn't followed by a rebuild. The bundled
-    // version is frozen at build time and always matches the running code.
-    const current_version =
-      opts.currentVersion ??
-      (readBundledVersion() || (repoRoot && readWorkingTreeVersion(repoRoot)) || '0.0.0');
-    // last_error is reserved for actionable failures (fetch couldn't reach
-    // the remote, package.json couldn't be read, …). The "not running from
-    // a git checkout" case is signalled via repo_root === null + a one-line
-    // log on start; the UI uses the null repo_root to render a distinct
-    // "manual updates only" badge instead of a misleading "check failed".
+    const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
+    const update_channel = resolveUpdateChannel(opts.updateChannel);
+    // The build-time snapshot (dist/package.json) is the running code's own
+    // version — frozen at build, so it always matches what is actually loaded.
+    const current_version = opts.currentVersion ?? (readBundledVersion() || '0.0.0');
+    // last_error is reserved for actionable failures (registry unreachable,
+    // unparseable response, …). "npm not available" is signalled via
+    // install_mode='unknown' + a one-line log on start; the UI uses that to
+    // render a "manual updates only" badge instead of a misleading
+    // "check failed".
     this.#status = {
       current_version,
       latest_version: null,
       update_available: false,
       install_mode,
-      repo_root: repoRoot,
-      branch,
+      update_channel,
       last_checked_at: null,
       last_error: null,
     };
@@ -614,24 +367,14 @@ export class UpdateChecker {
 
   start(): void {
     if (this.#stopped || this.#timer) return;
-    // npm-global mode polls the npm registry instead of a git remote — no
-    // repo_root, but still a live checker. Must be handled before the
-    // repo_root guard below or it would be misfiled as "auto-update disabled".
-    if (this.#status.install_mode === 'npm-global') {
-      this.#tick().catch(() => undefined);
-      this.#timer = setInterval(() => {
-        this.#tick().catch(() => undefined);
-      }, this.#intervalMs);
-      this.#timer.unref?.();
-      this.#log(
-        `UpdateChecker started (npm-global mode: npm view ${MANAGER_PACKAGE_NAME} ` +
-          `interval=${Math.round(this.#intervalMs / 1000)}s)`,
-      );
+    if (this.#status.install_mode !== 'npm-global') {
+      this.#log('UpdateChecker: npm is not reachable — auto-update disabled (upgrade manually)');
       return;
     }
-    if (!this.#status.repo_root) {
+    if (isAutoUpdateDisabled(this.#status.update_channel)) {
       this.#log(
-        'UpdateChecker: not running from a git checkout or npm-global install — auto-update disabled',
+        `UpdateChecker: ${UPDATE_CHANNEL_ENV}=${UPDATE_CHANNEL_OFF} — auto-update disabled, ` +
+          `pinned to v${this.#status.current_version}`,
       );
       return;
     }
@@ -642,7 +385,8 @@ export class UpdateChecker {
     }, this.#intervalMs);
     this.#timer.unref?.();
     this.#log(
-      `UpdateChecker started (root=${this.#status.repo_root} branch=${this.#status.branch} ` +
+      `UpdateChecker started (npm-global mode: npm view ` +
+        `${npmChannelSpec(this.#status.update_channel)} ` +
         `interval=${Math.round(this.#intervalMs / 1000)}s)`,
     );
   }
@@ -664,75 +408,15 @@ export class UpdateChecker {
 
   async #tick(): Promise<void> {
     if (this.#stopped) return;
-    // npm-global mode reads the registry, not a git remote.
-    if (this.#status.install_mode === 'npm-global') {
-      await this.#tickNpmGlobal();
-      return;
-    }
-    const repoRoot = this.#status.repo_root;
-    const branch = this.#status.branch;
-    if (!repoRoot || !branch) return;
-    try {
-      // git fetch is the slow step. Run it async so we don't block the
-      // event loop; restrict to the single branch we care about so an
-      // operator with a 100-branch fork doesn't pay for the full fetch.
-      const fetchResult = await runAsync(
-        'git',
-        ['-C', repoRoot, 'fetch', '--quiet', 'origin', branch],
-        repoRoot,
-        FETCH_TIMEOUT_MS,
-      );
-      const fetchDetail = fetchResult.ok
-        ? null
-        : (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown')
-            .split('\n')
-            .filter(Boolean)
-            .pop()
-            ?.slice(0, 240) || 'fetch failed';
-
-      // Update availability is by COMMIT DIFFERENCE against origin/<branch>, not
-      // a package.json version compare. Under publish-time versioning the source
-      // version is frozen at seed (see computeGitUpdateState) so a version
-      // compare would report "no update" forever and silently freeze the git
-      // fallback channel. This reads local refs, so it still yields a best-effort
-      // answer against the stale cached ref when the fetch above failed.
-      const git = computeGitUpdateState(repoRoot, branch);
-      if (git.error && git.head_sha == null) {
-        // Couldn't even read our own HEAD — nothing trustworthy to report.
-        this.#status = {
-          ...this.#status,
-          last_error: fetchDetail ? `git fetch failed: ${fetchDetail}` : git.error,
-        };
-        return;
-      }
-
-      // latest_version is informational only now (the source version is frozen,
-      // so it typically equals current). The update signal is commit-diff. Keep
-      // showing the remote package.json version when readable; otherwise leave
-      // the prior value untouched.
-      const latest = readRemoteVersion(repoRoot, branch);
-      this.#status = {
-        ...this.#status,
-        latest_version: latest ?? this.#status.latest_version,
-        update_available: git.update_available,
-        // Fresh timestamp only when the fetch actually reached the remote; a
-        // commit-diff computed off a stale ref is not a fresh check.
-        last_checked_at: fetchResult.ok ? new Date().toISOString() : this.#status.last_checked_at,
-        last_error: fetchResult.ok
-          ? git.error ?? null
-          : `git fetch failed (using cached ref): ${fetchDetail}`,
-      };
-    } catch (err: any) {
-      this.#status = {
-        ...this.#status,
-        last_error: err?.message ?? String(err),
-      };
-    }
+    if (this.#status.install_mode !== 'npm-global') return;
+    if (isAutoUpdateDisabled(this.#status.update_channel)) return;
+    await this.#tickNpmGlobal();
   }
 
   /**
    * npm-global mode tick: read the latest published version from the npm
-   * registry (`npm view awb-agent-manager version`) and refresh the cache.
+   * registry (`npm view awb-agent-manager@<channel> version`) and refresh the
+   * cache.
    * current_version is the build-time bundled version (dist/package.json) — the
    * actually-installed build — so the semver compare is apples-to-apples.
    */
@@ -741,7 +425,7 @@ export class UpdateChecker {
       // shell:true on Windows (npm.cmd). cwd is irrelevant for a registry read.
       const r = await runAsync(
         'npm',
-        ['view', MANAGER_PACKAGE_NAME, 'version'],
+        ['view', npmChannelSpec(this.#status.update_channel), 'version'],
         process.cwd(),
         NPM_VIEW_TIMEOUT_MS,
       );
@@ -863,312 +547,24 @@ export function isSystemdReExecPending(): boolean {
   return _systemdReExecPending;
 }
 
-/**
- * Adopt `origin/<branch>` into the working tree WITHOUT occupying or moving any
- * local branch ref. This is the structural fix for ticket dc38dce6.
- *
- * The previous self-update flow did `git checkout <branch>` followed by
- * `git pull --ff-only origin <branch>`. In agent-manager's per-(ticket,role)
- * worktree-pool setup that fails *permanently*: a ticket worktree can hold
- * `<branch>` checked out — an agent ran `git checkout main` inside its worktree
- * per the column workflow, then the worktree was left behind — and git allows a
- * branch to be checked out in at most ONE worktree. So `git checkout main` in
- * this shared base repo aborts with
- *   fatal: '<branch>' is already used by worktree at <path>
- * and the manager self-locks into its current version forever (it can never
- * pull + build the new release; see the field reports in ticket dc38dce6).
- *
- * `git fetch` + `git checkout --detach origin/<branch>` sidesteps the whole
- * class of conflict:
- *   - a detached HEAD never *holds* the `<branch>` ref, so it cannot collide
- *     with a ticket worktree that has `<branch>` checked out;
- *   - it never *moves* a local branch ref, so it cannot silently clobber an
- *     unrelated branch the operator left checked out (e.g. production.private)
- *     the way `git reset --hard origin/<branch>` would;
- *   - it unconditionally adopts the published commit — exactly the "run the
- *     latest released code" semantic self-update wants.
- * Detached HEAD is also the manager checkout's documented steady state, so the
- * post-update tree matches what the worktree pool already expects.
- *
- * Tracked-file safety is handled by the caller's earlier steps (lockfile reset
- * + auto-stash), so the checkout has a clean tree to move by the time we get
- * here; a genuine conflict still surfaces as { ok:false } rather than being
- * force-discarded.
- */
-export async function adoptRemoteBranch(
-  repoRoot: string,
-  branch: string,
-  out: (msg: string) => void,
-): Promise<{ ok: true } | { ok: false; summary: string }> {
-  out(`Self-update: git fetch --quiet origin ${branch}`);
-  const fetchResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'fetch', '--quiet', 'origin', branch],
-    repoRoot,
-    FETCH_TIMEOUT_MS,
-    (line) => out(`  [git] ${line}`),
-  );
-  if (!fetchResult.ok) {
-    const detail =
-      (fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown').split('\n').pop() || '';
-    return { ok: false, summary: `git fetch failed: ${detail.slice(0, 240)}` };
-  }
-
-  out(`Self-update: git checkout --detach origin/${branch}`);
-  const checkoutResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'checkout', '--detach', `origin/${branch}`],
-    repoRoot,
-    15_000,
-    (line) => out(`  [git] ${line}`),
-  );
-  if (!checkoutResult.ok) {
-    const detail =
-      (checkoutResult.stderr.trim() || checkoutResult.stdout.trim() || 'unknown')
-        .split('\n')
-        .pop() || '';
-    return {
-      ok: false,
-      summary: `git checkout --detach origin/${branch} failed: ${detail.slice(0, 240)}`,
-    };
-  }
-  return { ok: true };
-}
-
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
 ): Promise<SelfUpdateResult> {
-  const repoRoot = detectRepoRoot();
-  // npm-first policy: availability of an npm global root is enough to migrate
-  // a legacy checkout-run manager onto the published package. Never mutate the
-  // checkout merely because process.argv[1] currently lives inside it.
-  if (detectNpmGlobalRoot()) {
-    return await runNpmGlobalSelfUpdate(opts, out);
-  }
-  if (!repoRoot) {
-    // No checkout — either an npm-global install (auto-updatable via
-    // `npm i -g`) or an unknown build (manual upgrade only). Reuse the already
-    // known repoRoot=null so we don't detectRepoRoot() a second time.
-    const runningDir = resolve(dirname(fileURLToPath(import.meta.url)));
-    const mode = classifyInstallMode(runningDir, null, null);
-    if (mode === 'npm-global') {
-      return await runNpmGlobalSelfUpdate(opts, out);
-    }
+  const channel = resolveUpdateChannel();
+  if (isAutoUpdateDisabled(channel)) {
     const summary =
-      'self-update skipped: not a git checkout or npm-global install (upgrade this build manually)';
+      `self-update skipped: ${UPDATE_CHANNEL_ENV}=${UPDATE_CHANNEL_OFF} pins this build ` +
+      `(v${readBundledVersion()})`;
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
-
-  const branch = detectDefaultBranch(repoRoot);
-  out(`Self-update: git fallback in manager-owned runtime (root=${repoRoot} branch=${branch})`);
-
-  // The fallback runtime is disposable. Never preserve, merge, or stash its
-  // contents: fetch the selected ref, replace tracked state, and remove every
-  // untracked/ignored build artifact before rebuilding.
-  const fetched = await runAsync(
-    'git', ['-C', repoRoot, 'fetch', '--quiet', 'origin', branch], repoRoot, FETCH_TIMEOUT_MS,
-    (line) => out(`  [git] ${line}`),
-  );
-  if (!fetched.ok) {
-    const detail = fetched.stderr.trim() || fetched.stdout.trim() || 'unknown';
-    return { changed: false, summary: `git fallback fetch failed: ${detail.slice(0, 240)}` };
-  }
-  for (const args of [
-    ['checkout', '--detach', `origin/${branch}`],
-    ['reset', '--hard', `origin/${branch}`],
-    ['clean', '-fdx'],
-  ]) {
-    const replaced = await runAsync('git', ['-C', repoRoot, ...args], repoRoot, 30_000);
-    if (!replaced.ok) {
-      const detail = replaced.stderr.trim() || replaced.stdout.trim() || 'unknown';
-      return { changed: false, summary: `git fallback overwrite failed: ${detail.slice(0, 240)}` };
-    }
-  }
-
-  // 0. Reset package-lock.json before adopting origin/<branch>.
-  //
-  // The previous self-update's step 2 (`npm install` at workspace root) can
-  // silently rewrite the lockfile — npm reorders sub-deps, recomputes
-  // integrity hashes, and resolves optionalDependencies differently across
-  // platforms (Windows vs Linux npm both legitimately produce non-identical
-  // lockfiles from the same package.json). The lockfile is then dirty in
-  // the working tree, which makes the NEXT `git checkout --detach
-  // origin/<branch>` (step 0c+1) abort with `Your local changes to the
-  // following files would be overwritten by checkout: package-lock.json` and
-  // self-locks the manager into its current version forever. Operators see
-  // "update_manager: ... failed" with a one-line tail that doesn't make the
-  // trap obvious.
-  //
-  // The reset is safe: step 2 regenerates package-lock.json from the
-  // workspace's package.json files anyway, so any local lockfile diff is
-  // disposable. We narrowly target this one file (vs e.g. `git reset
-  // --hard` or `git stash`) so a real local mod elsewhere — service-install.ts
-  // hand-edits, operator config tweaks — is still protected by the dirty-tree
-  // guard below.
-  out('Self-update: git checkout -- package-lock.json (regenerated by npm install)');
-  const lockResetResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'checkout', '--', 'package-lock.json'],
-    repoRoot,
-    10_000,
-    (line) => out(`  [git] ${line}`),
-  );
-  if (!lockResetResult.ok) {
-    // Non-fatal: a missing lockfile (fresh clone before first install) means
-    // there's nothing to reset; a real failure here would also be caught by
-    // the next git pull's own error path. Log and continue.
-    const detail =
-      (lockResetResult.stderr.trim() || lockResetResult.stdout.trim() || 'unknown')
-        .split('\n')
-        .pop() || '';
-    out(`Self-update: lockfile reset returned non-zero (continuing): ${detail.slice(0, 200)}`);
-  }
-
-  // 0b. Auto-stash any remaining dirty tracked files. Previous version
-  // aborted here and the operator was expected to commit/stash/revert by
-  // hand — in practice that means update_manager fails on every run when
-  // any session has uncommitted edits in the shared worktree, and the user
-  // has to interrupt to fix it. Self-update is a non-interactive context;
-  // stash the changes ourselves with a timestamped message so they survive
-  // in the stash list (`git stash list`) and can be recovered manually.
-  //
-  // Untracked files (`??`) are excluded — `git pull` never touches them.
-  const statusResult = await runAsync(
-    'git',
-    ['-C', repoRoot, 'status', '--porcelain'],
-    repoRoot,
-    10_000,
-  );
-  if (statusResult.ok) {
-    const dirty = statusResult.stdout
-      .split('\n')
-      .map((s) => s.trimEnd())
-      .filter(Boolean)
-      .filter((line) => !line.startsWith('??'));
-    if (dirty.length > 0) {
-      const stashMsg = `self-update auto-stash ${new Date().toISOString()}`;
-      out(
-        `Self-update: working tree has ${dirty.length} dirty file(s); auto-stashing as "${stashMsg}" (recover via: git stash list / git stash pop)`,
-      );
-      for (const line of dirty.slice(0, 10)) out(`  [dirty] ${line}`);
-      if (dirty.length > 10) out(`  [dirty] (+${dirty.length - 10} more)`);
-
-      const stashResult = await runAsync(
-        'git',
-        ['-C', repoRoot, 'stash', 'push', '-u', '-m', stashMsg],
-        repoRoot,
-        15_000,
-        (l) => out(`  [git] ${l}`),
-      );
-      if (!stashResult.ok) {
-        const detail =
-          (stashResult.stderr.trim() || stashResult.stdout.trim() || 'unknown')
-            .split('\n')
-            .pop() || '';
-        const summary = `auto-stash failed: ${detail.slice(0, 240)}`;
-        out(`Self-update: ${summary}`);
-        return { changed: false, summary };
-      }
-    }
-  }
-
-  // 0c + 1. Adopt origin/<branch> WITHOUT occupying or moving any branch ref.
-  //
-  // The agent-manager runs from a shared worktree the operator may also use
-  // interactively (current branch could be production.private, a ticket
-  // branch, …) AND its per-(ticket,role) worktree pool can hold <branch>
-  // checked out in another worktree. The old `git checkout <branch>` +
-  // `git pull --ff-only` flow collided with both: a branch is checkable-out in
-  // only one worktree, so the checkout aborted with "already used by worktree"
-  // and self-locked the manager forever. `git fetch` + detached checkout of
-  // origin/<branch> never holds or moves a branch ref, so it is immune to the
-  // worktree conflict and never clobbers an unrelated local branch. See
-  // adoptRemoteBranch() for the full rationale (ticket dc38dce6).
-  const adopt = await adoptRemoteBranch(repoRoot, branch, out);
-  if (!adopt.ok) {
-    out(`Self-update: ${adopt.summary}`);
-    return { changed: false, summary: adopt.summary };
-  }
-
-  // 2. npm ci (workspace root — installs everything for monorepo).
-  //
-  // `npm ci`, NOT `npm install` — 이 스테이지가 매니저가 실제로 실행할 의존성
-  // 트리를 만든다. `npm install` 은 lockfile 을 "제안"으로만 취급해서 모든
-  // `^`/`~` 범위를 레지스트리에 대고 다시 해결하고, 체크아웃의
-  // package-lock.json 자체를 덮어쓴다. 즉 CI 가 `npm ci` 로 테스트하고
-  // 감사(`npm audit`)가 0 으로 승인한 그 트리가 self-update 후 매니저가 돌리는
-  // 트리와 같다는 보장이 없었다 — 방금 발행된 in-range 악성 버전이 조용히
-  // 들어오고, 그 트리는 운영자 자격증명으로 에이전트 CLI 를 띄우는 호스트에서
-  // 돌아간다. Dockerfile 은 2026-08-09 감사에서 이미 같은 이유로 `npm ci` 로
-  // 바꿨는데(runner 스테이지), 플릿의 git-checkout 매니저를 갱신하는 이 경로만
-  // 남아 있었다. (2026-08-16 감사)
-  //
-  // 루트에서 도는 이유는 그대로다: `npm ci -w apps/agent-manager` 는 monorepo
-  // 에서 hoist 된 devDeps 를 항상 다시 깔지는 않는다.
-  //
-  // 실패하면 fail-closed — 예전 버전으로 계속 도는 편이, 검증되지 않은 트리로
-  // 올라가는 것보다 낫다. `npm ci` 는 lockfile↔package.json 불일치와 integrity
-  // 불일치에서 실패하는데, 바로 위 adoptRemoteBranch() 가 origin/<branch> 를
-  // 통째로 detached 체크아웃하므로 둘은 같은 커밋에서 나온 짝이다.
-  // 주의: `npm ci` 는 node_modules 를 지우고 새로 깐다 — 설치 중에는 이 체크아웃
-  // 의 node_modules 를 공유(symlink)하는 워크트리도 잠시 비어 보인다. self-update
-  // 는 어차피 매니저 재실행으로 끝나므로 그 중단 구간은 이미 전제되어 있다.
-  out('Self-update: npm ci');
-  const installResult = await runAsync(
-    'npm',
-    ['ci'],
-    repoRoot,
-    BUILD_TIMEOUT_MS,
-    (line) => out(`  [npm-ci] ${line}`),
-  );
-  if (!installResult.ok) {
-    const detail = (installResult.stderr.trim() || installResult.stdout.trim() || 'unknown').split('\n').pop() || '';
-    const summary = `npm ci failed: ${detail.slice(0, 240)}`;
+  if (classifyInstallMode(detectNpmGlobalRoot()) !== 'npm-global') {
+    const summary = 'self-update skipped: npm is not reachable (upgrade this build manually)';
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
-
-  // 3. npm run build -w apps/agent-manager — builds JUST the manager's
-  // dist/. We don't need to rebuild the server / client; the operator only
-  // restarted us, not those.
-  out('Self-update: npm run build -w apps/agent-manager');
-  const buildResult = await runAsync(
-    'npm',
-    ['run', 'build', '-w', 'apps/agent-manager'],
-    repoRoot,
-    BUILD_TIMEOUT_MS,
-    (line) => out(`  [build] ${line}`),
-  );
-  if (!buildResult.ok) {
-    const detail = (buildResult.stderr.trim() || buildResult.stdout.trim() || 'unknown').split('\n').pop() || '';
-    const summary = `npm run build failed: ${detail.slice(0, 240)}`;
-    out(`Self-update: ${summary}`);
-    return { changed: false, summary };
-  }
-
-  const newVersion = readWorkingTreeVersion(repoRoot) || '?';
-  const summary = `pulled + built (now v${newVersion})${opts.noReExec ? ' — re-exec skipped' : ' — re-execing'}`;
-  out(`Self-update: ${summary}`);
-
-  if (opts.noReExec) return { changed: true, summary, willReExec: false };
-
-  // 4. Schedule the detached re-exec on a short timer so the caller can
-  // finish its ack POST + final log line before we exit. 1.5s is plenty
-  // for the local POST round-trip on the loopback that the manager uses.
-  // Mark the re-exec so runSelfUpdate's finally{} keeps the in-flight flag
-  // set during the 1.5s grace window — see comment there.
-  _lastReExecScheduled = true;
-  setTimeout(() => {
-    try {
-      reExecManager(out);
-    } catch (err: any) {
-      out(`Self-update: re-exec failed: ${err?.stack || err?.message || err}`);
-    }
-  }, 1500).unref?.();
-
-  return { changed: true, summary, willReExec: true };
+  return await runNpmGlobalSelfUpdate(opts, out, channel);
 }
 
 /**
@@ -1219,8 +615,10 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
   });
   const ok = install.status === 0 && !install.error;
 
-  // 3. Relaunch the globally installed manager. A legacy service may have
-  // started this update from a git checkout; do not jump back into that tree.
+  // 3. Relaunch the globally installed manager. A legacy service unit may still
+  // point at a source checkout's main.js; resolve npm root -g and relaunch the
+  // package we just installed rather than jumping back into that stale tree.
+  // (No backticks in this string — it is embedded in a template literal.)
   let restartScript = managerScript;
   if (ok) {
     const root = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: isWin, windowsHide: true });
@@ -1296,7 +694,7 @@ export interface ProvenanceVerdict {
 }
 
 /**
- * `npm view <pkg>@latest version dist.attestations --json` 의 stdout 을 판정.
+ * `npm view <pkg>@<channel> version dist.attestations --json` 의 stdout 을 판정.
  *
  * 순수 함수로 분리한 이유: 네트워크 없이 "공격자가 만들 수 있는 응답"들
  * (증명 필드 없음 / provenance 없음 / predicateType 위조)을 단위 테스트로
@@ -1358,10 +756,13 @@ function provenanceGateBypassed(): boolean {
  * 레지스트리에서 최신 버전 + 그 버전의 provenance 증명을 함께 읽어 판정한다.
  * 조회 자체가 실패하면 fail-closed (ok=false).
  */
-async function verifyNpmGlobalProvenance(out: (msg: string) => void): Promise<ProvenanceVerdict> {
+async function verifyNpmGlobalProvenance(
+  out: (msg: string) => void,
+  channel: string,
+): Promise<ProvenanceVerdict> {
   const r = await runAsync(
     'npm',
-    ['view', NPM_GLOBAL_LATEST_SPEC, 'version', 'dist.attestations', '--json'],
+    ['view', npmChannelSpec(channel), 'version', 'dist.attestations', '--json'],
     tmpdir(),
     NPM_VIEW_TIMEOUT_MS,
   );
@@ -1382,21 +783,22 @@ async function verifyNpmGlobalProvenance(out: (msg: string) => void): Promise<Pr
 /**
  * npm-global self-update: stage a detached helper, hand it our pid + restart
  * command, then shut ourselves down so it can reinstall + relaunch. This is the
- * npm-mode analogue of adoptRemoteBranch()+build+reExecManager(), split across a
  * helper process specifically so the `npm i -g` runs AFTER we exit (Windows
  * can't replace a running node process's own package dir — EBUSY/EPERM).
  */
 async function runNpmGlobalSelfUpdate(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
+  channel: string,
 ): Promise<SelfUpdateResult> {
   const current = readBundledVersion();
-  out(`Self-update: npm-global mode (current v${current}) — target ${NPM_GLOBAL_LATEST_SPEC}`);
+  const channelSpec = npmChannelSpec(channel);
+  out(`Self-update: npm-global mode (current v${current}) — target ${channelSpec}`);
 
   // 설치 전에 증명을 먼저 본다. dry-run 보다도 앞에 두는 이유: dry-run 의 목적이
   // "이 업데이트가 실제로 진행될지"를 보고하는 것이라, 거부될 업데이트를
   // "would run" 이라고 보고하면 거짓말이 된다.
-  const verdict = await verifyNpmGlobalProvenance(out);
+  const verdict = await verifyNpmGlobalProvenance(out, channel);
   if (!verdict.ok) {
     if (!provenanceGateBypassed()) {
       const summary = `npm-global update refused: ${verdict.reason}`;
@@ -1406,11 +808,12 @@ async function runNpmGlobalSelfUpdate(
     out(`Self-update: ${PROVENANCE_BYPASS_ENV} set — proceeding despite unverified provenance`);
   }
 
-  // 검증된 정확한 버전으로 설치 spec 을 고정한다. `@latest` 를 검증한 뒤 다시
-  // `@latest` 로 설치하면 그 사이 태그가 옮겨간 tarball 이 들어오는 TOCTOU 구멍이
-  // 남는다 — 검증한 바이트와 설치하는 바이트가 같아야 게이트가 의미를 갖는다.
+  // 검증된 정확한 버전으로 설치 spec 을 고정한다. dist-tag(`@latest`/`@next`) 를
+  // 검증한 뒤 다시 같은 태그로 설치하면 그 사이 태그가 옮겨간 tarball 이 들어오는
+  // TOCTOU 구멍이 남는다 — 검증한 바이트와 설치하는 바이트가 같아야 게이트가
+  // 의미를 갖는다.
   const installSpec =
-    verdict.ok && verdict.version ? `${MANAGER_PACKAGE_NAME}@${verdict.version}` : NPM_GLOBAL_LATEST_SPEC;
+    verdict.ok && verdict.version ? `${MANAGER_PACKAGE_NAME}@${verdict.version}` : channelSpec;
 
   // Dry-run / test hook: report intent without spawning the helper or exiting.
   if (opts.noReExec) {

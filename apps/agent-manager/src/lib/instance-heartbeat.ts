@@ -171,12 +171,14 @@ export interface InstanceHeartbeatPayload {
   // Older AWB servers ignore them; newer ones surface them on the admin UI.
   latest_version?: string | null;
   update_available?: boolean;
-  // Install mode ('git' | 'npm-global' | 'unknown') — lets the admin UI show a
-  // working Update button for npm-global installs instead of "manual updates
-  // only". Older managers omit it; the server/UI degrade to the repo_root check.
+  // Install mode ('npm-global' | 'unknown') — lets the admin UI show a working
+  // Update button for npm-global installs instead of "manual updates only".
+  // Older managers omit it, or report the retired 'git' mode; either way the UI
+  // falls back to "manual updates only".
   install_mode?: string | null;
-  repo_root?: string | null;
-  default_branch?: string | null;
+  // Active npm update channel ('latest', a dist-tag, an exact version, or 'off'
+  // when the operator pinned this build). Undefined from managers predating it.
+  update_channel?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
   open_breaker_count?: number;
@@ -341,8 +343,7 @@ export class InstanceHeartbeat {
               latest_version: updateStatus.latest_version,
               update_available: updateStatus.update_available,
               install_mode: updateStatus.install_mode,
-              repo_root: updateStatus.repo_root,
-              default_branch: updateStatus.branch,
+              update_channel: updateStatus.update_channel,
               update_last_checked_at: updateStatus.last_checked_at,
               update_last_error: updateStatus.last_error,
             }

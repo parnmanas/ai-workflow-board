@@ -2380,18 +2380,29 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
   // (silent fallback), false === checker ran and there's no update, true ===
   // checker ran and an update is on origin.
   if (inst.update_available === undefined) return null;
-  // No git checkout under the manager process. An npm-global install still
-  // auto-updates (via `npm i -g` on the Update button), so only fall back to
-  // the "manual updates only" hint when the install is genuinely un-updatable —
-  // 'unknown' mode, or a manager too old to report install_mode at all. For
-  // npm-global we drop through to the normal update/up-to-date/available badges.
-  if (inst.repo_root === null && inst.install_mode !== 'npm-global') {
+  // npm-global is the only auto-updatable install (the Update button runs
+  // `npm i -g`). Everything else — 'unknown' mode, the retired 'git' mode from a
+  // manager that hasn't updated yet, or a manager too old to report install_mode
+  // at all — gets the "manual updates only" hint instead.
+  if (inst.install_mode !== 'npm-global') {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
-        title="Manager isn't running from a git checkout — upgrade it manually (e.g. npm i -g awb-agent-manager@latest)."
+        title="This manager can't auto-update — upgrade it manually with npm i -g awb-agent-manager@latest."
       >
         (manual updates only)
+      </span>
+    );
+  }
+  // Operator pinned this build (AWB_AGENT_MANAGER_UPDATE_CHANNEL=off) — the
+  // checker is deliberately idle, so no update badge would be honest.
+  if (inst.update_channel === 'off') {
+    return (
+      <span
+        style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
+        title="Auto-update is off (AWB_AGENT_MANAGER_UPDATE_CHANNEL=off) — this build is pinned."
+      >
+        (pinned)
       </span>
     );
   }
@@ -2424,9 +2435,8 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
     <span
       style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: tokens.colors.success }}
       title={
-        inst.install_mode === 'npm-global'
-          ? `Latest on npm: v${inst.latest_version}. Use the Update button to reinstall (npm i -g) + restart.`
-          : `Latest on ${inst.default_branch || 'main'}: v${inst.latest_version}. Use the Update button to pull + rebuild.`
+        `Latest on the ${inst.update_channel || 'latest'} npm channel: v${inst.latest_version}. ` +
+        'Use the Update button to reinstall (npm i -g) + restart.'
       }
     >
       → v{inst.latest_version} available

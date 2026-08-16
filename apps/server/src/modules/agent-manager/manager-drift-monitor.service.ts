@@ -290,13 +290,14 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
   private _emitAlert(kind: DriftKind, inst: InstanceRecord, ageMs: number, now: Date): void {
     const ageH = (ageMs / 3_600_000).toFixed(1);
     const who = `${inst.hostname} (agent ${inst.agent_id.slice(0, 8)})`;
-    const branch = inst.default_branch || 'main';
+    const channel = inst.update_channel || 'latest';
 
     let message: string;
     if (kind === 'drift') {
       message =
         `agent-manager version drift: ${who} running v${inst.plugin_version} has been behind ` +
-        `latest v${inst.latest_version || '?'} on ${branch} for ${ageH}h — self-update is not landing. ` +
+        `latest v${inst.latest_version || '?'} on the ${channel} channel for ${ageH}h — ` +
+        `self-update is not landing. ` +
         `Check the manager's update logs / re-run update_manager.`;
     } else {
       message =
@@ -312,7 +313,7 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
       hostname: inst.hostname,
       current_version: inst.plugin_version,
       latest_version: inst.latest_version ?? null,
-      default_branch: inst.default_branch ?? null,
+      update_channel: inst.update_channel ?? null,
       update_last_error: inst.update_last_error ?? null,
       age_hours: Number(ageH),
     });
@@ -336,7 +337,7 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
             hostname: inst.hostname,
             current_version: inst.plugin_version,
             latest_version: inst.latest_version ?? null,
-            default_branch: inst.default_branch ?? null,
+            update_channel: inst.update_channel ?? null,
             update_last_error: inst.update_last_error ?? null,
             age_hours: Number(ageH),
           }),

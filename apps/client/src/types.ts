@@ -1973,13 +1973,15 @@ export interface AgentManagerInstance {
   // version compare degrades to "no info" in that case.
   latest_version?: string | null;
   update_available?: boolean;
-  // How the manager was installed. 'npm-global' installs can auto-update via
-  // `npm i -g` (Update button works), so only 'unknown' (or a manager too old
-  // to report this) falls back to "manual updates only". Older managers that
-  // omit it are treated as git-checkout-or-unknown by the repo_root check.
-  install_mode?: 'git' | 'npm-global' | 'unknown';
-  repo_root?: string | null;
-  default_branch?: string | null;
+  // How the manager was installed. npm is the only distribution channel, so
+  // 'npm-global' is the sole auto-updatable mode (Update button works).
+  // Anything else renders "manual updates only": 'unknown' (npm unreachable),
+  // the retired 'git' mode still reported by managers that haven't updated
+  // yet, or a manager too old to send the field at all.
+  install_mode?: 'npm-global' | 'unknown' | 'git';
+  // Active npm update channel: 'latest', a dist-tag, an exact version, or
+  // 'off' when the operator pinned the build (badge reads "(pinned)").
+  update_channel?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
   open_breaker_count?: number;
