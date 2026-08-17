@@ -18,6 +18,7 @@ import { HandoffModule } from '../handoff/handoff.module';
 import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 import { OutreachModule } from '../outreach/outreach.module';
+import { OrchestrationModule } from '../orchestration/orchestration.module';
 
 @Module({
   imports: [
@@ -49,6 +50,9 @@ import { OutreachModule } from '../outreach/outreach.module';
     // (ticket 20fa0197) — record_outreach_classification must resolve
     // against the SAME singleton instance AgentDispatchClassifier awaits on.
     OutreachModule,
+    // Provides the orchestration runner / mission / team services for the
+    // orchestration-tools MCP tools (팀 기반 자율 업무 오케스트레이션).
+    OrchestrationModule,
   ],
   controllers: [McpController],
 })

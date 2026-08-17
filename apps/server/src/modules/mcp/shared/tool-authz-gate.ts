@@ -219,6 +219,16 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'update_qa_scenario', 'update_qa_schedule', 'update_security_profile',
   'update_security_schedule', 'update_ticket', 'update_user', 'update_workspace',
   'update_workspace_schedule', 'upsert_claude_backend_profile', 'whoami',
+  // Orchestration mode (팀 기반 자율 업무 오케스트레이션). These are listed here
+  // rather than in TOOL_AUTHZ_TABLE because none of them is gated on API-key
+  // scope: every mutating one checks the CALLING AGENT against the mission's
+  // orchestrator / the step's assignee inside the runner service, which is a
+  // strictly stronger check than any tier here could express (a full-scope key
+  // still cannot report on another agent's step). The read-only ones apply the
+  // same membership check before returning anything.
+  'add_orchestration_note', 'complete_orchestration_mission', 'get_orchestration_mission',
+  'get_orchestration_step', 'list_my_orchestration_steps', 'report_orchestration_progress',
+  'report_orchestration_step', 'submit_orchestration_plan', 'update_orchestration_step',
 ]);
 
 /**

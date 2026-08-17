@@ -86,6 +86,11 @@ export class RoomCrudService {
       // keeps the chat sidebar from filling up with one row per Run as the
       // FIFO ring grows.
       .andWhere('r.action_id IS NULL')
+      // Orchestration Mission / Step rooms are surfaced inside the Mission
+      // detail view for the same reason Action-Run rooms are hidden here: a
+      // single mission can open a dozen step rooms, which would bury the
+      // user's real conversations in the sidebar.
+      .andWhere('r.orchestration_mission_id IS NULL')
       // Unread count: messages after last_read_at (datetime comparison per CHAT-12).
       // Progress rows are agent-manager tool-call heartbeats — the user
       // sees them live but they shouldn't pump the unread badge, which is
@@ -471,10 +476,12 @@ export class RoomCrudService {
    */
   async listAllWorkspaceRooms(workspaceId: string): Promise<any[]> {
     // Same action_id IS NULL filter as listRooms — observer view also wants to
-    // skip Action-Run rooms because they belong to the Actions surface.
+    // skip Action-Run rooms because they belong to the Actions surface, and
+    // orchestration rooms because they belong to the Mission detail view.
     const rooms = await this.roomRepo.createQueryBuilder('r')
       .where('r.workspace_id = :wsId', { wsId: workspaceId })
       .andWhere('r.action_id IS NULL')
+      .andWhere('r.orchestration_mission_id IS NULL')
       .orderBy('r.last_message_at', 'DESC')
       .getMany();
     if (rooms.length === 0) return [];

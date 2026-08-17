@@ -623,6 +623,25 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
+  // orchestration (9) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
+  // 전부 EXCLUDE 인 이유: 이 툴들은 티켓 row 를 하나도 건드리지 않고 Mission/Step
+  // 상태만 바꾼다. 그리고 그 상태는 이미 전용 관찰면 — AWB 의 Mission 상세 화면
+  // (Plan 그래프 + append-only 타임라인, `orchestration_update` SSE 로 라이브) —
+  // 에서 훨씬 풍부하게 보인다. 여기서 채팅 카드로도 캡처하면 같은 사실이 두 곳에
+  // 중복 렌더되고, 특히 report_orchestration_progress 는 하트비트라 장시간 step
+  // 하나가 채팅을 카드로 도배하게 된다. ARTIFACT 버킷(빌드/배포)과 대비되는
+  // 판단이다: 저기엔 결과를 보여줄 다른 화면이 없지만, 여기엔 있다.
+  // (step 이 만들어낸 PR/티켓 등 산출물은 report_orchestration_step 의 `artifacts`
+  //  로 Mission 화면에 남으므로 이 경로로 잃는 정보도 없다.)
+  add_orchestration_note: 'orchestration',
+  complete_orchestration_mission: 'orchestration',
+  get_orchestration_mission: 'orchestration',
+  get_orchestration_step: 'orchestration',
+  list_my_orchestration_steps: 'orchestration',
+  report_orchestration_progress: 'orchestration',
+  report_orchestration_step: 'orchestration',
+  submit_orchestration_plan: 'orchestration',
+  update_orchestration_step: 'orchestration',
   // non-ticket (82) — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
   // non-ticket

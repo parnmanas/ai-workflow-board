@@ -41,7 +41,8 @@ type StreamNamedEventType =
   | 'ticket_presence'  // Tier-1 E — viewer set for a ticket (panel-open indicator)
   | 'subagent_registered' | 'subagent_log' | 'subagent_ended'  // v0.32 subagent monitor
   | 'agent_instance_update'  // Phase 3 Agent Manager dashboard
-  | 'consensus_update';  // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
+  | 'consensus_update'   // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
+  | 'orchestration_update';  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -206,6 +207,13 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // 재조회 없이 갱신하고, 필요 시 getTicketConsensus 로 상세를 당긴다.
       eventSource.addEventListener('consensus_update', (event: MessageEvent) => {
         dispatch('consensus_update', event.data);
+      });
+
+      // 오케스트레이션 — Mission 목록/상세가 재조회 없이 진행 상황을 반영한다.
+      // 서버는 헤드라인만 보내므로(카운트 + 마지막 이벤트) 상세 화면은 이 신호를
+      // 받고 스스로 detail 을 다시 당긴다.
+      eventSource.addEventListener('orchestration_update', (event: MessageEvent) => {
+        dispatch('orchestration_update', event.data);
       });
 
       eventSource.onerror = () => {

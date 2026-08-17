@@ -93,3 +93,12 @@ export type { OutreachClassification, OutreachItemStatus } from './OutreachInbou
 // entity's docstring for the claim-before-side-effect dedupe contract.
 export { OutreachOutboundPost } from './OutreachOutboundPost';
 export type { OutreachOutboundKind, OutreachOutboundStatus } from './OutreachOutboundPost';
+// Orchestration mode (팀 기반 자율 업무 오케스트레이션) — a Team of Agents led by
+// one orchestrator plans a Mission at runtime and delegates its Steps to
+// members. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly like the sibling
+// tables above; no hand-written migration needed.
+export { OrchestrationTeam } from './OrchestrationTeam';
+export { OrchestrationTeamMember } from './OrchestrationTeamMember';
+export { OrchestrationMission } from './OrchestrationMission';
+export { OrchestrationStep } from './OrchestrationStep';
+export { OrchestrationEvent } from './OrchestrationEvent';

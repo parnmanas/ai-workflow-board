@@ -7,6 +7,9 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { type ToolContext } from './tools';
+import { OrchestrationRunnerService } from '../orchestration/orchestration-runner.service';
+import { OrchestrationMissionService } from '../orchestration/orchestration-mission.service';
+import { OrchestrationTeamService } from '../orchestration/orchestration-team.service';
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
@@ -141,6 +144,9 @@ export class McpController implements OnModuleInit {
     private readonly workflowFunctionsService: WorkflowFunctionsService,
     private readonly artifactRefsService: ArtifactRefsService,
     private readonly classificationBridgeService: ClassificationBridgeService,
+    private readonly orchestrationRunnerService: OrchestrationRunnerService,
+    private readonly orchestrationMissionService: OrchestrationMissionService,
+    private readonly orchestrationTeamService: OrchestrationTeamService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
   ) {}
 
@@ -236,6 +242,9 @@ export class McpController implements OnModuleInit {
       benchmarkService: this.benchmarkService,
       workflowFunctionsService: this.workflowFunctionsService,
       classificationBridgeService: this.classificationBridgeService,
+      orchestrationRunnerService: this.orchestrationRunnerService,
+      orchestrationMissionService: this.orchestrationMissionService,
+      orchestrationTeamService: this.orchestrationTeamService,
     };
   }
 

@@ -82,6 +82,10 @@ import type {
   SkillProposal,
   SkillVersion,
   HermesChildRun,
+  OrchestrationTeam,
+  OrchestrationMissionListItem,
+  OrchestrationMissionDetail,
+  OrchestrationAssignableAgent,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2067,6 +2071,135 @@ export const api = {
     const qs = since ? `?since=${encodeURIComponent(since)}` : '';
     return request<{ count: number }>(`/admin/agent-logs/unseen-count${qs}`);
   },
+
+  // ─── Orchestration mode ────────────────────────────────────────────────
+  // Teams + Missions. Note the asymmetry with the agent-facing surface: there
+  // is no client call that assigns or completes a STEP — the plan belongs to
+  // the orchestrator agent and is only mutated through its MCP tools. Human
+  // intervention is start / pause / resume / cancel / nudge.
+  listOrchestrationTeams: (workspaceId: string) =>
+    request<OrchestrationTeam[]>(`/orchestration/teams?workspace_id=${encodeURIComponent(workspaceId)}`),
+  getOrchestrationTeam: (id: string, workspaceId: string) =>
+    request<OrchestrationTeam>(`/orchestration/teams/${id}?workspace_id=${encodeURIComponent(workspaceId)}`),
+  createOrchestrationTeam: (data: {
+    workspace_id: string;
+    name: string;
+    description?: string;
+    orchestrator_agent_id: string;
+    orchestrator_prompt?: string;
+    max_parallel_steps?: number;
+  }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
+  updateOrchestrationTeam: (
+    id: string,
+    data: {
+      workspace_id: string;
+      name?: string;
+      description?: string;
+      orchestrator_agent_id?: string;
+      orchestrator_prompt?: string;
+      max_parallel_steps?: number;
+      enabled?: boolean;
+    },
+  ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteOrchestrationTeam: (id: string, workspaceId: string) =>
+    request<{ success: true; id: string }>(
+      `/orchestration/teams/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      { method: 'DELETE' },
+    ),
+  addOrchestrationTeamMember: (
+    teamId: string,
+    data: { workspace_id: string; agent_id: string; role_label?: string; capabilities?: string; max_concurrent?: number },
+  ) => request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify(data) }),
+  updateOrchestrationTeamMember: (
+    teamId: string,
+    memberId: string,
+    data: { workspace_id: string; role_label?: string; capabilities?: string; max_concurrent?: number; position?: number },
+  ) =>
+    request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members/${memberId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  removeOrchestrationTeamMember: (teamId: string, memberId: string, workspaceId: string) =>
+    request<OrchestrationTeam>(
+      `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      { method: 'DELETE' },
+    ),
+  listOrchestrationAgents: (workspaceId: string) =>
+    request<OrchestrationAssignableAgent[]>(
+      `/orchestration/assignable-agents?workspace_id=${encodeURIComponent(workspaceId)}`,
+    ),
+
+  listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.teamId) params.set('team_id', opts.teamId);
+    if (opts?.status) params.set('status', opts.status);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    return request<OrchestrationMissionListItem[]>(`/orchestration/missions?${params.toString()}`);
+  },
+  getOrchestrationMission: (id: string, workspaceId: string) =>
+    request<OrchestrationMissionDetail>(
+      `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+    ),
+  createOrchestrationMission: (data: {
+    workspace_id: string;
+    team_id: string;
+    title: string;
+    objective: string;
+    context?: string;
+    acceptance_criteria?: string;
+    max_parallel_steps?: number;
+    max_steps?: number;
+    step_timeout_minutes?: number;
+    /** Brief the orchestrator immediately instead of leaving the mission a draft. */
+    start?: boolean;
+  }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
+  updateOrchestrationMission: (
+    id: string,
+    data: {
+      workspace_id: string;
+      title?: string;
+      objective?: string;
+      context?: string;
+      acceptance_criteria?: string;
+      max_parallel_steps?: number;
+      max_steps?: number;
+      step_timeout_minutes?: number;
+    },
+  ) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteOrchestrationMission: (id: string, workspaceId: string) =>
+    request<{ success: true; id: string }>(
+      `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
+      { method: 'DELETE' },
+    ),
+  startOrchestrationMission: (id: string, workspaceId: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
+  pauseOrchestrationMission: (id: string, workspaceId: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/pause`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
+  resumeOrchestrationMission: (id: string, workspaceId: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/resume`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
+  cancelOrchestrationMission: (id: string, workspaceId: string, reason?: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, reason: reason || '' }),
+    }),
+  nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, note: note || '' }),
+    }),
 };
 
 // ─── Ticket role assignment types ─────────────────────────

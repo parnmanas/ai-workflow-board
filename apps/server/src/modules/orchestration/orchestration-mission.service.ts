@@ -1,0 +1,600 @@
+/**
+ * Mission reads, timeline writes, and the live-update fan-out.
+ *
+ * Split from the runner so that "what does the UI see" and "how does work get
+ * dispatched" stay independently reviewable: this file never sends a chat
+ * message or changes a step's status, and the runner never assembles a view
+ * model. The one thing they share is `recordEvent`, which is deliberately here
+ * because every timeline write must be paired with the same SSE push — putting
+ * it anywhere else invites a state change that the board never learns about.
+ */
+
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In, Not } from 'typeorm';
+import { OrchestrationMission } from '../../entities/OrchestrationMission';
+import { OrchestrationStep } from '../../entities/OrchestrationStep';
+import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
+import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
+import { Agent } from '../../entities/Agent';
+import { activityEvents } from '../../services/activity.service';
+import { LogService } from '../../services/log.service';
+import { orchestrationError } from './orchestration-errors';
+import {
+  MAX_PARALLEL_CEILING,
+  MAX_STEPS_CEILING,
+  TERMINAL_MISSION_STATUSES,
+  computePlanProgress,
+  isInFlight,
+  isTerminalStepStatus,
+} from './orchestration.constants';
+
+export interface MissionCounts {
+  total: number;
+  done: number;
+  failed: number;
+  inFlight: number;
+  pending: number;
+}
+
+export interface MissionListItem {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  team_name: string;
+  title: string;
+  status: string;
+  orchestrator_agent_id: string | null;
+  orchestrator_name: string;
+  plan_version: number;
+  counts: MissionCounts;
+  started_at: Date | null;
+  finished_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface MissionStepView {
+  id: string;
+  step_key: string;
+  title: string;
+  instructions: string;
+  acceptance_criteria: string;
+  depends_on: string[];
+  assignee_agent_id: string | null;
+  assignee_name: string;
+  assignee_online: boolean;
+  status: string;
+  position: number;
+  plan_version: number;
+  room_id: string | null;
+  result_summary: string;
+  artifacts: Array<{ kind: string; ref: string; label: string }>;
+  attempt: number;
+  max_attempts: number;
+  dispatched_at: Date | null;
+  started_at: Date | null;
+  finished_at: Date | null;
+}
+
+export interface MissionDetail extends MissionListItem {
+  objective: string;
+  context: string;
+  acceptance_criteria: string;
+  plan_summary: string;
+  result_summary: string;
+  failure_reason: string;
+  room_id: string | null;
+  max_parallel_steps: number;
+  max_steps: number;
+  max_plan_versions: number;
+  step_timeout_minutes: number;
+  created_by_type: string;
+  created_by: string;
+  steps: MissionStepView[];
+  events: Array<{
+    id: string;
+    type: string;
+    step_id: string | null;
+    step_key: string;
+    actor_type: string;
+    actor_id: string;
+    actor_name: string;
+    message: string;
+    data: Record<string, any> | null;
+    created_at: Date;
+  }>;
+}
+
+@Injectable()
+export class OrchestrationMissionService {
+  constructor(
+    @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
+    @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
+    @InjectRepository(OrchestrationEvent) private readonly eventRepo: Repository<OrchestrationEvent>,
+    @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
+    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    private readonly logService: LogService,
+  ) {}
+
+  // ── Lookups ───────────────────────────────────────────────────────────────
+
+  async requireMission(missionId: string, workspaceId?: string): Promise<OrchestrationMission> {
+    const where: any = { id: missionId };
+    if (workspaceId) where.workspace_id = workspaceId;
+    const mission = await this.missionRepo.findOne({ where });
+    if (!mission) throw orchestrationError(404, 'mission not found');
+    return mission;
+  }
+
+  async requireStep(stepId: string, workspaceId?: string): Promise<OrchestrationStep> {
+    const where: any = { id: stepId };
+    if (workspaceId) where.workspace_id = workspaceId;
+    const step = await this.stepRepo.findOne({ where });
+    if (!step) throw orchestrationError(404, 'step not found');
+    return step;
+  }
+
+  listSteps(missionId: string): Promise<OrchestrationStep[]> {
+    return this.stepRepo.find({ where: { mission_id: missionId }, order: { position: 'ASC', created_at: 'ASC' } });
+  }
+
+  /**
+   * Steps an agent still owes a report on. The recovery path for a member whose
+   * session died with the work order in it — without this, its only route back
+   * to an in-flight assignment is the room history the manager may no longer
+   * replay. Uses the repository API rather than raw SQL because parameter
+   * placeholders differ between the sql.js and Postgres backends.
+   */
+  async listOpenStepsForAgent(agentId: string): Promise<Array<Record<string, any>>> {
+    if (!agentId) return [];
+    const steps = await this.stepRepo.find({
+      where: { assignee_agent_id: agentId, status: In(['dispatched', 'running']) },
+      order: { dispatched_at: 'ASC' },
+      take: 50,
+    });
+    if (steps.length === 0) return [];
+    const missions = await this.missionRepo.find({
+      where: { id: In(Array.from(new Set(steps.map((s) => s.mission_id)))) },
+    });
+    const missionById = new Map(missions.map((m) => [m.id, m]));
+    return steps.map((s) => ({
+      step_id: s.id,
+      step_key: s.step_key,
+      title: s.title,
+      status: s.status,
+      dispatched_at: s.dispatched_at,
+      mission_id: s.mission_id,
+      mission_title: missionById.get(s.mission_id)?.title ?? '',
+      mission_status: missionById.get(s.mission_id)?.status ?? '',
+    }));
+  }
+
+  // ── CRUD ──────────────────────────────────────────────────────────────────
+
+  async createMission(input: {
+    workspace_id: string;
+    team_id: string;
+    title: string;
+    objective?: string;
+    context?: string;
+    acceptance_criteria?: string;
+    max_parallel_steps?: number;
+    max_steps?: number;
+    max_plan_versions?: number;
+    step_timeout_minutes?: number;
+    created_by_type?: string;
+    created_by?: string;
+  }): Promise<OrchestrationMission> {
+    const workspaceId = (input.workspace_id || '').trim();
+    const title = (input.title || '').trim();
+    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+    if (!title) throw orchestrationError(400, 'title is required');
+
+    const team = await this.teamRepo.findOne({ where: { id: input.team_id, workspace_id: workspaceId } });
+    if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
+    if (!team.orchestrator_agent_id) {
+      throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
+    }
+
+    const objective = (input.objective || '').trim();
+    if (!objective) throw orchestrationError(400, 'objective is required — the orchestrator plans from it');
+
+    const mission = await this.missionRepo.save(
+      this.missionRepo.create({
+        workspace_id: workspaceId,
+        team_id: team.id,
+        title,
+        objective,
+        context: (input.context || '').trim(),
+        acceptance_criteria: (input.acceptance_criteria || '').trim(),
+        status: 'draft',
+        orchestrator_agent_id: null,
+        max_parallel_steps: clampInt(input.max_parallel_steps, team.max_parallel_steps, 1, MAX_PARALLEL_CEILING),
+        max_steps: clampInt(input.max_steps, 60, 1, MAX_STEPS_CEILING),
+        max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
+        step_timeout_minutes: clampInt(input.step_timeout_minutes, 90, 0, 60 * 24 * 7),
+        created_by_type: input.created_by_type || 'user',
+        created_by: input.created_by || '',
+      }),
+    );
+
+    await this.recordEvent(mission, {
+      type: 'mission_created',
+      actor_type: input.created_by_type || 'user',
+      actor_id: input.created_by || '',
+      actor_name: '',
+      message: `Mission "${mission.title}" created for team ${team.name}`,
+    });
+
+    return mission;
+  }
+
+  async updateMission(
+    missionId: string,
+    workspaceId: string,
+    patch: {
+      title?: string;
+      objective?: string;
+      context?: string;
+      acceptance_criteria?: string;
+      max_parallel_steps?: number;
+      max_steps?: number;
+      max_plan_versions?: number;
+      step_timeout_minutes?: number;
+    },
+  ): Promise<OrchestrationMission> {
+    const mission = await this.requireMission(missionId, workspaceId);
+    if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+      throw orchestrationError(409, `mission is ${mission.status} and can no longer be edited`);
+    }
+    // The brief (title/objective/context/criteria) is only editable before the
+    // orchestrator has been briefed. Once the mission prompt has been posted,
+    // editing it here would silently desync what the orchestrator was told from
+    // what the UI shows — the orchestrator has no way to learn about the edit.
+    const briefLocked = mission.status !== 'draft';
+    const touchesBrief =
+      patch.title !== undefined ||
+      patch.objective !== undefined ||
+      patch.context !== undefined ||
+      patch.acceptance_criteria !== undefined;
+    if (briefLocked && touchesBrief) {
+      throw orchestrationError(
+        409,
+        'the mission brief can only be edited while the mission is a draft — the orchestrator has already ' +
+          'been briefed. Add direction through the mission room instead, or cancel and create a new mission.',
+      );
+    }
+
+    if (patch.title !== undefined) {
+      const t = String(patch.title).trim();
+      if (!t) throw orchestrationError(400, 'title cannot be empty');
+      mission.title = t;
+    }
+    if (patch.objective !== undefined) {
+      const o = String(patch.objective).trim();
+      if (!o) throw orchestrationError(400, 'objective cannot be empty');
+      mission.objective = o;
+    }
+    if (patch.context !== undefined) mission.context = String(patch.context).trim();
+    if (patch.acceptance_criteria !== undefined) mission.acceptance_criteria = String(patch.acceptance_criteria).trim();
+    if (patch.max_parallel_steps !== undefined) {
+      mission.max_parallel_steps = clampInt(patch.max_parallel_steps, mission.max_parallel_steps, 1, MAX_PARALLEL_CEILING);
+    }
+    if (patch.max_steps !== undefined) {
+      mission.max_steps = clampInt(patch.max_steps, mission.max_steps, 1, MAX_STEPS_CEILING);
+    }
+    if (patch.max_plan_versions !== undefined) {
+      mission.max_plan_versions = clampInt(patch.max_plan_versions, mission.max_plan_versions, 1, 50);
+    }
+    if (patch.step_timeout_minutes !== undefined) {
+      mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
+    }
+
+    await this.missionRepo.save(mission);
+    this.emitUpdate(mission);
+    return mission;
+  }
+
+  async deleteMission(missionId: string, workspaceId: string): Promise<void> {
+    const mission = await this.requireMission(missionId, workspaceId);
+    if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status) && mission.status !== 'draft') {
+      throw orchestrationError(409, `mission is ${mission.status} — cancel it before deleting`);
+    }
+    await this.stepRepo.delete({ mission_id: mission.id });
+    await this.eventRepo.delete({ mission_id: mission.id });
+    await this.missionRepo.delete({ id: mission.id });
+    this.logService.info('Orchestration', `mission deleted ${mission.id}`, { workspace_id: workspaceId });
+  }
+
+  // ── Projections ───────────────────────────────────────────────────────────
+
+  async listMissions(
+    workspaceId: string,
+    opts?: { teamId?: string; status?: string; limit?: number },
+  ): Promise<MissionListItem[]> {
+    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+    const where: any = { workspace_id: workspaceId };
+    if (opts?.teamId) where.team_id = opts.teamId;
+    if (opts?.status === 'active') where.status = Not(In(TERMINAL_MISSION_STATUSES as unknown as string[]));
+    else if (opts?.status) where.status = opts.status;
+
+    const missions = await this.missionRepo.find({
+      where,
+      order: { created_at: 'DESC' },
+      take: Math.min(Math.max(opts?.limit ?? 100, 1), 500),
+    });
+    if (missions.length === 0) return [];
+
+    const steps = await this.stepRepo.find({
+      where: { mission_id: In(missions.map((m) => m.id)) },
+      select: ['id', 'mission_id', 'status'],
+    });
+    const teams = await this.teamRepo.find({ where: { id: In(missions.map((m) => m.team_id)) } });
+    const teamById = new Map(teams.map((t) => [t.id, t]));
+    const orchIds = missions.map((m) => m.orchestrator_agent_id).filter((v): v is string => !!v);
+    const agents = orchIds.length ? await this.agentRepo.find({ where: { id: In(orchIds) } }) : [];
+    const agentById = new Map(agents.map((a) => [a.id, a]));
+
+    return missions.map((m) => ({
+      id: m.id,
+      workspace_id: m.workspace_id,
+      team_id: m.team_id,
+      team_name: teamById.get(m.team_id)?.name ?? '(deleted team)',
+      title: m.title,
+      status: m.status,
+      orchestrator_agent_id: m.orchestrator_agent_id,
+      orchestrator_name: m.orchestrator_agent_id ? agentById.get(m.orchestrator_agent_id)?.name ?? '' : '',
+      plan_version: m.plan_version,
+      counts: countSteps(steps.filter((s) => s.mission_id === m.id)),
+      started_at: m.started_at,
+      finished_at: m.finished_at,
+      created_at: m.created_at,
+      updated_at: m.updated_at,
+    }));
+  }
+
+  async getMissionDetail(missionId: string, workspaceId: string, eventLimit = 200): Promise<MissionDetail> {
+    const mission = await this.requireMission(missionId, workspaceId);
+    const steps = await this.listSteps(mission.id);
+    const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
+
+    const agentIds = new Set<string>();
+    if (mission.orchestrator_agent_id) agentIds.add(mission.orchestrator_agent_id);
+    for (const s of steps) if (s.assignee_agent_id) agentIds.add(s.assignee_agent_id);
+    const agents = agentIds.size ? await this.agentRepo.find({ where: { id: In(Array.from(agentIds)) } }) : [];
+    const agentById = new Map(agents.map((a) => [a.id, a]));
+
+    const events = await this.eventRepo.find({
+      where: { mission_id: mission.id },
+      order: { created_at: 'DESC' },
+      take: Math.min(Math.max(eventLimit, 1), 1000),
+    });
+    const stepKeyById = new Map(steps.map((s) => [s.id, s.step_key]));
+
+    return {
+      id: mission.id,
+      workspace_id: mission.workspace_id,
+      team_id: mission.team_id,
+      team_name: team?.name ?? '(deleted team)',
+      title: mission.title,
+      status: mission.status,
+      orchestrator_agent_id: mission.orchestrator_agent_id,
+      orchestrator_name: mission.orchestrator_agent_id
+        ? agentById.get(mission.orchestrator_agent_id)?.name ?? ''
+        : '',
+      plan_version: mission.plan_version,
+      counts: countSteps(steps),
+      started_at: mission.started_at,
+      finished_at: mission.finished_at,
+      created_at: mission.created_at,
+      updated_at: mission.updated_at,
+      objective: mission.objective,
+      context: mission.context,
+      acceptance_criteria: mission.acceptance_criteria,
+      plan_summary: mission.plan_summary,
+      result_summary: mission.result_summary,
+      failure_reason: mission.failure_reason,
+      room_id: mission.room_id,
+      max_parallel_steps: mission.max_parallel_steps,
+      max_steps: mission.max_steps,
+      max_plan_versions: mission.max_plan_versions,
+      step_timeout_minutes: mission.step_timeout_minutes,
+      created_by_type: mission.created_by_type,
+      created_by: mission.created_by,
+      steps: steps.map((s) => {
+        const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
+        return {
+          id: s.id,
+          step_key: s.step_key,
+          title: s.title,
+          instructions: s.instructions,
+          acceptance_criteria: s.acceptance_criteria,
+          depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
+          assignee_agent_id: s.assignee_agent_id,
+          assignee_name: a?.name ?? (s.assignee_agent_id ? '(deleted agent)' : ''),
+          assignee_online: !!a?.is_online,
+          status: s.status,
+          position: s.position,
+          plan_version: s.plan_version,
+          room_id: s.room_id,
+          result_summary: s.result_summary,
+          artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
+          attempt: s.attempt,
+          max_attempts: s.max_attempts,
+          dispatched_at: s.dispatched_at,
+          started_at: s.started_at,
+          finished_at: s.finished_at,
+        };
+      }),
+      // Oldest-first for rendering; the DESC + take above is only there so the
+      // limit keeps the RECENT tail rather than the first N events of a long run.
+      events: events.reverse().map((e) => ({
+        id: e.id,
+        type: e.type,
+        step_id: e.step_id,
+        step_key: e.step_id ? stepKeyById.get(e.step_id) ?? '' : '',
+        actor_type: e.actor_type,
+        actor_id: e.actor_id,
+        actor_name: e.actor_name,
+        message: e.message,
+        data: e.data,
+        created_at: e.created_at,
+      })),
+    };
+  }
+
+  /**
+   * The compact state block handed to the orchestrator by
+   * `get_orchestration_mission`. Deliberately not the same shape as the UI
+   * detail view: the orchestrator needs dependency edges and per-step results,
+   * not room ids or timestamps it cannot act on, and every extra field is
+   * context budget spent on something it will not use.
+   */
+  async getMissionForOrchestrator(missionId: string): Promise<Record<string, any>> {
+    const mission = await this.requireMission(missionId);
+    const steps = await this.listSteps(mission.id);
+    const progress = computePlanProgress(
+      steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
+    );
+    const agentIds = Array.from(new Set(steps.map((s) => s.assignee_agent_id).filter((v): v is string => !!v)));
+    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
+    const agentById = new Map(agents.map((a) => [a.id, a]));
+
+    const events = await this.eventRepo.find({
+      where: { mission_id: mission.id },
+      order: { created_at: 'DESC' },
+      take: 40,
+    });
+
+    return {
+      mission_id: mission.id,
+      title: mission.title,
+      status: mission.status,
+      objective: mission.objective,
+      context: mission.context,
+      acceptance_criteria: mission.acceptance_criteria,
+      plan_version: mission.plan_version,
+      plan_summary: mission.plan_summary,
+      limits: {
+        max_steps: mission.max_steps,
+        max_parallel_steps: mission.max_parallel_steps,
+        max_plan_versions: mission.max_plan_versions,
+        plan_versions_used: mission.plan_version,
+        steps_used: steps.length,
+      },
+      counts: countSteps(steps),
+      dispatchable_now: progress.dispatchable,
+      waiting_on_dependencies: progress.waiting,
+      steps: steps.map((s) => ({
+        step_id: s.id,
+        step_key: s.step_key,
+        title: s.title,
+        status: s.status,
+        depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
+        assignee_agent_id: s.assignee_agent_id,
+        assignee_name: s.assignee_agent_id ? agentById.get(s.assignee_agent_id)?.name ?? '' : '',
+        attempt: s.attempt,
+        max_attempts: s.max_attempts,
+        result_summary: s.result_summary,
+        artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
+      })),
+      recent_timeline: events
+        .reverse()
+        .map((e) => ({ at: e.created_at, type: e.type, actor: e.actor_name, message: e.message })),
+    };
+  }
+
+  // ── Timeline + live updates ───────────────────────────────────────────────
+
+  /**
+   * Append a timeline row AND push the matching live update. Always use this —
+   * a bare `eventRepo.save` leaves the mission board stale until a refetch.
+   */
+  async recordEvent(
+    mission: OrchestrationMission,
+    input: {
+      type: string;
+      message: string;
+      step_id?: string | null;
+      step_key?: string;
+      actor_type?: string;
+      actor_id?: string;
+      actor_name?: string;
+      data?: Record<string, any> | null;
+    },
+  ): Promise<void> {
+    try {
+      await this.eventRepo.save(
+        this.eventRepo.create({
+          mission_id: mission.id,
+          workspace_id: mission.workspace_id,
+          step_id: input.step_id ?? null,
+          type: input.type,
+          actor_type: input.actor_type || 'system',
+          actor_id: input.actor_id || '',
+          actor_name: input.actor_name || '',
+          message: (input.message || '').slice(0, 4000),
+          data: input.data ?? null,
+        }),
+      );
+    } catch (e: any) {
+      // A timeline write must never take down a dispatch — losing one audit row
+      // is strictly better than stranding a step because the log table hiccuped.
+      this.logService.error('Orchestration', `failed to record event for mission ${mission.id}: ${e?.message || e}`);
+    }
+    this.emitUpdate(mission, { type: input.type, message: input.message, step_key: input.step_key || '' });
+  }
+
+  /**
+   * Push an `orchestration_update` SSE frame.
+   *
+   * UI fuel only (the event-registry filter restricts it to `user` subscribers),
+   * exactly like `consensus_update` — agents learn about mission state through
+   * their MCP tools and their room messages, never through this stream, so this
+   * event type is outside the agent-manager SSE contract.
+   */
+  emitUpdate(
+    mission: OrchestrationMission,
+    lastEvent?: { type: string; message: string; step_key: string },
+  ): void {
+    // Counts are read fresh rather than threaded through every caller: the
+    // frame is a "something changed, here is the headline" nudge and the client
+    // refetches the detail view for anything it renders in depth.
+    this.stepRepo
+      .find({ where: { mission_id: mission.id }, select: ['id', 'mission_id', 'status'] })
+      .then((steps) => {
+        activityEvents.emit('orchestration_update', {
+          mission_id: mission.id,
+          workspace_id: mission.workspace_id,
+          team_id: mission.team_id,
+          title: mission.title,
+          status: mission.status,
+          plan_version: mission.plan_version,
+          counts: countSteps(steps),
+          last_event: lastEvent ?? null,
+          timestamp: new Date().toISOString(),
+        });
+      })
+      .catch(() => {
+        /* live nudge is best-effort; the client polls the detail view anyway */
+      });
+  }
+}
+
+export function countSteps(steps: Array<{ status: string }>): MissionCounts {
+  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0 };
+  for (const s of steps) {
+    if (s.status === 'done' || s.status === 'skipped') counts.done += 1;
+    else if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') counts.failed += 1;
+    else if (isInFlight(s.status)) counts.inFlight += 1;
+    else if (!isTerminalStepStatus(s.status)) counts.pending += 1;
+  }
+  return counts;
+}
+
+function clampInt(value: any, fallback: number, min: number, max: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}

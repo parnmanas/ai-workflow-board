@@ -40,6 +40,7 @@ import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-f
 import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
 import { OutreachModule } from './modules/outreach/outreach.module';
+import { OrchestrationModule } from './modules/orchestration/orchestration.module';
 
 @Module({
   imports: [
@@ -106,6 +107,7 @@ import { OutreachModule } from './modules/outreach/outreach.module';
     SkillsModule,
     ArtifactRefsModule,
     OutreachModule,
+    OrchestrationModule,
   ],
 })
 export class AppModule {}

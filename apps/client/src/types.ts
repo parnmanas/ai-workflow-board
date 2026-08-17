@@ -2374,3 +2374,166 @@ export interface WorkflowHealthLongTermUsage {
   priced_runs: number;
   avg_cost_per_run_usd_priced_only: number | null;
 }
+
+// ─── Orchestration mode (팀 기반 자율 업무 오케스트레이션) ────────────────────
+// A Team of Agents led by one orchestrator plans a Mission at runtime and
+// delegates its Steps to members. Mirrors the server projections in
+// modules/orchestration/orchestration-{team,mission}.service.ts.
+
+export type OrchestrationMissionStatus =
+  | 'draft'
+  | 'planning'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type OrchestrationStepStatus =
+  | 'pending'
+  | 'ready'
+  | 'dispatched'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'blocked'
+  | 'skipped'
+  | 'cancelled';
+
+export interface OrchestrationTeamMember {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  agent_type: string;
+  is_online: boolean;
+  role_label: string;
+  capabilities: string;
+  max_concurrent: number;
+  position: number;
+}
+
+export interface OrchestrationTeam {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  orchestrator_agent_id: string | null;
+  orchestrator_name: string;
+  orchestrator_online: boolean;
+  orchestrator_prompt: string;
+  max_parallel_steps: number;
+  enabled: boolean;
+  members: OrchestrationTeamMember[];
+  active_mission_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrchestrationStepArtifact {
+  kind: string;
+  ref: string;
+  label: string;
+}
+
+export interface OrchestrationCounts {
+  total: number;
+  done: number;
+  failed: number;
+  inFlight: number;
+  pending: number;
+}
+
+export interface OrchestrationMissionListItem {
+  id: string;
+  workspace_id: string;
+  team_id: string;
+  team_name: string;
+  title: string;
+  status: OrchestrationMissionStatus;
+  orchestrator_agent_id: string | null;
+  orchestrator_name: string;
+  plan_version: number;
+  counts: OrchestrationCounts;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrchestrationStep {
+  id: string;
+  step_key: string;
+  title: string;
+  instructions: string;
+  acceptance_criteria: string;
+  depends_on: string[];
+  assignee_agent_id: string | null;
+  assignee_name: string;
+  assignee_online: boolean;
+  status: OrchestrationStepStatus;
+  position: number;
+  plan_version: number;
+  room_id: string | null;
+  result_summary: string;
+  artifacts: OrchestrationStepArtifact[];
+  attempt: number;
+  max_attempts: number;
+  dispatched_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface OrchestrationTimelineEvent {
+  id: string;
+  type: string;
+  step_id: string | null;
+  step_key: string;
+  actor_type: string;
+  actor_id: string;
+  actor_name: string;
+  message: string;
+  data: Record<string, any> | null;
+  created_at: string;
+}
+
+export interface OrchestrationMissionDetail extends OrchestrationMissionListItem {
+  objective: string;
+  context: string;
+  acceptance_criteria: string;
+  plan_summary: string;
+  result_summary: string;
+  failure_reason: string;
+  room_id: string | null;
+  max_parallel_steps: number;
+  max_steps: number;
+  max_plan_versions: number;
+  step_timeout_minutes: number;
+  created_by_type: string;
+  created_by: string;
+  steps: OrchestrationStep[];
+  events: OrchestrationTimelineEvent[];
+  /** Present only on the create-with-start response when the brief failed to send. */
+  start_error?: string;
+}
+
+export interface OrchestrationAssignableAgent {
+  id: string;
+  name: string;
+  type: string;
+  is_online: boolean;
+  description: string;
+}
+
+/** Payload of the `orchestration_update` SSE frame (UI-only event). */
+export interface OrchestrationUpdateEvent {
+  event_type: 'orchestration_update';
+  mission_id: string;
+  workspace_id: string;
+  team_id: string;
+  title: string;
+  status: OrchestrationMissionStatus;
+  plan_version: number;
+  counts: OrchestrationCounts;
+  last_event: { type: string; message: string; step_key: string } | null;
+  timestamp: string;
+}

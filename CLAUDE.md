@@ -268,6 +268,15 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Field mapping (AWB SSE → handlers): `action`→role, `field_changed`→trigger_id, `actor_name`→agent_id
 - Reference: `docs/agent-manager.md` (internals), `apps/agent-manager/README.md` (quickstart)
 
+## Orchestration mode (팀 기반 자율 업무 오케스트레이션)
+
+- 칸반 보드와 같은 레벨의 두 번째 작업 표면. Team(오케스트레이터 1 + 멤버 N) 에게 Mission 을 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 Step DAG 계획을 세우고 팀원에게 배분한다.
+- Location: `apps/server/src/modules/orchestration/` · MCP 툴 `modules/mcp/tools/orchestration-tools.ts` · UI `apps/client/src/components/orchestration/`
+- **디스패치는 QA/Action 런과 같은 ChatRoom 파이프라인을 재사용한다** — `chat_rooms.orchestration_mission_id/_step_id` 로 표시하고 기존 `is_action_room` SSE 마커를 켠다. 따라서 **agent-manager 변경 없음, SSE contract 변경 없음**. `run_provision` 은 v1 범위 밖 (붙이려면 `RunProvision.kind` 에 `'orchestration'` 추가 → agent-manager `run-provisioner.ts` 파서와 같은 PR).
+- `orchestration_update` SSE 는 `consensus_update` 와 같은 **UI 전용** 이벤트 (user-only filter) — agent 비소비이므로 agent-manager contract 무관.
+- 미션은 **암묵적으로 끝나지 않는다**: `complete_orchestration_mission` (또는 운영자 cancel) 만이 종료 경로. 엔진은 스스로 진행 못 할 때만 오케스트레이터를 깨운다(실패/차단, 디스패치 불가, 전 step 종료).
+- Reference: `docs/orchestration.md`
+
 ## Project Skills
 
 Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness work, ticket 040afa10):

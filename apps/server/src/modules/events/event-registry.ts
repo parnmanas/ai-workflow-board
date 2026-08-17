@@ -33,6 +33,7 @@ import {
   AgentInstanceUpdatePayload,
   AgentManagerCommandPayload,
   ConsensusUpdatePayload,
+  OrchestrationUpdatePayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -992,5 +993,51 @@ export const EVENT_TYPES: EventDefinition[] = [
     // consensus state (the gate recomputes server-side at move time).
     filter: (_env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'consensus_update', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── orchestration_update ─────────
+  // 오케스트레이션 모드. Mission/Step 상태가 바뀔 때마다 서버가 헤드라인을 밀어
+  // 넣는다. UI 전용 — 오케스트레이터는 방 wake-up + get_orchestration_mission 으로,
+  // 멤버는 자기 step 프롬프트로만 상태를 알기 때문에 agent(agent-manager 포함)는 이
+  // 타입을 구독할 필요가 없다. 따라서 consensus_update 와 동일한 user-only filter:
+  // agent-manager 스위치는 이 타입을 받지 않고 SSE contract 무관.
+  {
+    eventType: 'orchestration_update',
+    emitterEvent: 'orchestration_update',
+    map(event: any) {
+      const payload: OrchestrationUpdatePayload = {
+        mission_id: event.mission_id,
+        workspace_id: event.workspace_id || '',
+        team_id: event.team_id || '',
+        title: event.title || '',
+        status: event.status || '',
+        plan_version: Number.isFinite(event.plan_version) ? Number(event.plan_version) : 0,
+        counts: {
+          total: Number(event.counts?.total ?? 0),
+          done: Number(event.counts?.done ?? 0),
+          failed: Number(event.counts?.failed ?? 0),
+          inFlight: Number(event.counts?.inFlight ?? 0),
+          pending: Number(event.counts?.pending ?? 0),
+        },
+        last_event: event.last_event
+          ? {
+              type: String(event.last_event.type ?? ''),
+              message: String(event.last_event.message ?? ''),
+              step_key: String(event.last_event.step_key ?? ''),
+            }
+          : null,
+      };
+      return {
+        payload,
+        scope: { workspace_id: event.workspace_id || undefined },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (_env, identity) => identity.type === 'user',
+    flatten: (env) => ({
+      event_type: 'orchestration_update',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
   },
 ];

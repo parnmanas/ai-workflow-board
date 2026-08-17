@@ -51,6 +51,23 @@ export class ChatRoom {
   @Column({ type: 'varchar', nullable: true, default: null })
   action_id: string | null;
 
+  // Orchestration mode. Exactly one of these two shapes when non-null:
+  //   - mission room:  orchestration_mission_id set, orchestration_step_id null
+  //                    (the orchestrator's own conversation for the Mission)
+  //   - step room:     BOTH set (one room per delegated Step, per member agent)
+  // Same rationale as action_id: the regular chat list filters these out so
+  // machine-driven run rooms don't pile up next to user DMs/groups, and the
+  // Mission detail view resolves its rooms without joining through the step
+  // table. Also drives the `is_action_room` SSE marker (see room-messaging) —
+  // an orchestration room is task execution, not conversation, so the subagent
+  // must get "do the work directly" instructions rather than the chat
+  // "file a ticket" rule.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  orchestration_mission_id: string | null;
+
+  @Column({ type: 'varchar', nullable: true, default: null })
+  orchestration_step_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

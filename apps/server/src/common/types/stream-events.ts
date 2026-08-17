@@ -30,7 +30,8 @@ export type StreamEventType =
   | 'subagent_ended'       // Subagent monitor: subagent process exited
   | 'agent_instance_update' // Runtime Host instance heartbeat / removal
   | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
-  | 'consensus_update';     // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
+  | 'consensus_update'      // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
+  | 'orchestration_update';  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
 
 export interface StreamEventScope {
   board_id?: string;
@@ -696,4 +697,30 @@ export interface ConsensusUpdatePayload {
   override: boolean;          // reporter 강제 통과 여부.
   actor_id: string;           // 시그널을 남긴 홀더.
   actor_name: string;
+}
+
+/**
+ * Orchestration mode live nudge (UI-only, like `consensus_update`).
+ *
+ * Deliberately a HEADLINE, not a full state dump: the mission board re-fetches
+ * `GET /api/orchestration/missions/:id` for anything it renders in depth, so
+ * this frame only has to carry enough to update a list row, animate a progress
+ * bar, and decide whether the currently-open mission needs a refetch. Keeping
+ * it small also keeps it honest — a fat payload would race the DB and let the
+ * UI render a state that was already stale when it was serialized.
+ *
+ * Agents never consume this: an orchestrator learns about step results from its
+ * room wake-up + `get_orchestration_mission`, and a member only ever knows about
+ * its own step. That makes this event type UI fuel outside the agent-manager
+ * SSE contract, exactly like consensus_update / subagent_* / agent_instance_update.
+ */
+export interface OrchestrationUpdatePayload {
+  mission_id: string;
+  workspace_id: string;
+  team_id: string;
+  title: string;
+  status: string;
+  plan_version: number;
+  counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
+  last_event: { type: string; message: string; step_key: string } | null;
 }

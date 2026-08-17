@@ -84,6 +84,12 @@ export default function Sidebar({
           exact: true,
         },
         {
+          key: 'orchestration',
+          path: `${workspaceBase}/orchestration`,
+          label: 'Orchestration',
+          icon: 'O',
+        },
+        {
           key: 'agents',
           path: `${workspaceBase}/agents`,
           label: 'AI Agents',

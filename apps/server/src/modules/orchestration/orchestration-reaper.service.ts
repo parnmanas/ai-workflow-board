@@ -1,0 +1,223 @@
+/**
+ * OrchestrationReaperService — the safety net that keeps a mission from sitting
+ * "in progress" forever when an agent dies without reporting.
+ *
+ * Two rots this closes, both observed on every other dispatch surface in this
+ * codebase (QaRunReaperService, StuckTicketDetectorService):
+ *
+ *   1. A dispatched step whose subagent died before calling
+ *      `report_orchestration_step`. Nothing else will ever move it — its
+ *      dependents stay pending and the mission looks alive while doing nothing.
+ *      Past `mission.step_timeout_minutes` it is failed, which runs the normal
+ *      downstream handling (block dependents, dispatch what became ready, wake
+ *      the orchestrator to decide).
+ *
+ *   2. A mission stuck in `planning` because the orchestrator never submitted a
+ *      plan. It is re-briefed up to PLANNING_NUDGE_LIMIT times (the count is
+ *      read back off the timeline, so it survives a restart) and only then
+ *      failed — a silent auto-fail on the first timeout would throw away
+ *      recoverable missions whose orchestrator was merely offline.
+ *
+ * Pattern matches the sibling reapers exactly: OnModuleInit plants a plain
+ * setInterval (no @Cron / scheduler dependency), one immediate sweep at boot so
+ * a restart clears standing phantoms within seconds, and `runOnce()` is public
+ * so an operator can force a sweep over REST.
+ *
+ * Env: ORCHESTRATION_REAPER_ENABLED (default on),
+ *      ORCHESTRATION_REAPER_SWEEP_MS (default 5m, clamped 30s..1h),
+ *      ORCHESTRATION_PLANNING_TIMEOUT_MS (default 20m, clamped 1m..24h).
+ */
+
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In } from 'typeorm';
+import { OrchestrationMission } from '../../entities/OrchestrationMission';
+import { OrchestrationStep } from '../../entities/OrchestrationStep';
+import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
+import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
+import { LogService } from '../../services/log.service';
+import { OrchestrationMissionService } from './orchestration-mission.service';
+import { OrchestrationRunnerService } from './orchestration-runner.service';
+import { IN_FLIGHT_STEP_STATUSES } from './orchestration.constants';
+
+const PLANNING_NUDGE_LIMIT = 2;
+
+function envMs(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(raw)));
+}
+
+@Injectable()
+export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy {
+  private tickHandle: ReturnType<typeof setInterval> | null = null;
+  private sweeping = false;
+
+  private readonly sweepMs = envMs('ORCHESTRATION_REAPER_SWEEP_MS', 5 * 60_000, 30_000, 60 * 60_000);
+  private readonly planningTimeoutMs = envMs(
+    'ORCHESTRATION_PLANNING_TIMEOUT_MS',
+    20 * 60_000,
+    60_000,
+    24 * 60 * 60_000,
+  );
+
+  constructor(
+    @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
+    @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
+    @InjectRepository(OrchestrationEvent) private readonly eventRepo: Repository<OrchestrationEvent>,
+    @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
+    private readonly missions: OrchestrationMissionService,
+    private readonly runner: OrchestrationRunnerService,
+    private readonly logService: LogService,
+  ) {}
+
+  onModuleInit(): void {
+    if (process.env.ORCHESTRATION_REAPER_ENABLED === 'false') {
+      this.logService.info('Orchestration', 'reaper disabled via ORCHESTRATION_REAPER_ENABLED=false');
+      return;
+    }
+    void this.runOnce();
+    this.tickHandle = setInterval(() => {
+      void this.runOnce();
+    }, this.sweepMs);
+    this.tickHandle.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.tickHandle) clearInterval(this.tickHandle);
+    this.tickHandle = null;
+  }
+
+  /** One sweep. Safe to call concurrently — overlapping calls are dropped. */
+  async runOnce(): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number }> {
+    if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0 };
+    this.sweeping = true;
+    try {
+      const stepsFailed = await this.reapStuckSteps();
+      const { nudged, failed } = await this.reapStalledPlanning();
+      if (stepsFailed || nudged || failed) {
+        this.logService.info(
+          'Orchestration',
+          `reaper sweep: ${stepsFailed} step(s) timed out, ${nudged} mission(s) re-briefed, ${failed} failed`,
+        );
+      }
+      return { steps_failed: stepsFailed, missions_nudged: nudged, missions_failed: failed };
+    } catch (e: any) {
+      this.logService.error('Orchestration', `reaper sweep failed: ${e?.message || e}`);
+      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0 };
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
+  private async reapStuckSteps(): Promise<number> {
+    const inFlight = await this.stepRepo.find({
+      where: { status: In(IN_FLIGHT_STEP_STATUSES as unknown as string[]) },
+      order: { dispatched_at: 'ASC' },
+      take: 200,
+    });
+    if (inFlight.length === 0) return 0;
+
+    const missions = await this.missionRepo.find({
+      where: { id: In(Array.from(new Set(inFlight.map((s) => s.mission_id)))) },
+    });
+    const missionById = new Map(missions.map((m) => [m.id, m]));
+    const now = Date.now();
+    let failed = 0;
+
+    for (const step of inFlight) {
+      const mission = missionById.get(step.mission_id);
+      // `running` only: a paused mission's in-flight steps are still legitimately
+      // executing and their operator deliberately stopped the clock on new work,
+      // so timing them out would punish the pause.
+      if (!mission || mission.status !== 'running') continue;
+      const timeoutMs = mission.step_timeout_minutes * 60_000;
+      if (timeoutMs <= 0) continue;
+      // A member that reported progress resets the clock — `started_at` is
+      // stamped on the first progress call, so a long-but-alive step survives.
+      const baseline = step.started_at ?? step.dispatched_at;
+      if (!baseline) continue;
+      if (now - new Date(baseline).getTime() < timeoutMs) continue;
+
+      await this.runner.failStepExternally(
+        step.id,
+        `[timed out] no result was reported within ${mission.step_timeout_minutes} minutes of the last sign of ` +
+          `life. The assignee's session most likely died before it could call report_orchestration_step. ` +
+          `Retry the step (possibly with a different assignee) or restructure the plan around it.`,
+      );
+      failed += 1;
+    }
+    return failed;
+  }
+
+  private async reapStalledPlanning(): Promise<{ nudged: number; failed: number }> {
+    const planning = await this.missionRepo.find({ where: { status: 'planning' }, take: 100 });
+    if (planning.length === 0) return { nudged: 0, failed: 0 };
+
+    const now = Date.now();
+    let nudged = 0;
+    let failed = 0;
+
+    for (const mission of planning) {
+      const baseline = mission.started_at ?? mission.created_at;
+      if (!baseline || now - new Date(baseline).getTime() < this.planningTimeoutMs) continue;
+
+      // Attempt bookkeeping lives in the timeline so it survives a restart and
+      // needs no extra column. `data.reason` is read rather than the event type
+      // because an OPERATOR nudge writes the same type — counting those as
+      // reaper attempts would fail a mission the reaper never actually
+      // re-briefed. (data is a simple-json column; on sqlite it round-trips as
+      // an object, so filter in memory rather than with a JSON predicate that
+      // differs per backend.)
+      const wakeEvents = await this.eventRepo.find({
+        where: { mission_id: mission.id, type: 'orchestrator_woken' },
+        order: { created_at: 'DESC' },
+        take: 20,
+      });
+      const priorPlanningNudges = wakeEvents.filter((e) => e.data?.reason === 'planning_timeout').length;
+
+      // Back off a full timeout window from the LAST wake of any kind — an
+      // operator who just nudged deserves a chance to be answered before the
+      // reaper piles another brief on top.
+      const lastWake = wakeEvents[0];
+      if (lastWake && now - new Date(lastWake.created_at).getTime() < this.planningTimeoutMs) continue;
+
+      if (priorPlanningNudges >= PLANNING_NUDGE_LIMIT) {
+        mission.status = 'failed';
+        mission.failure_reason =
+          `orchestrator never submitted a plan — re-briefed ${priorPlanningNudges} time(s) without a ` +
+          `submit_orchestration_plan call`;
+        mission.finished_at = new Date();
+        await this.missionRepo.save(mission);
+        await this.missions.recordEvent(mission, {
+          type: 'mission_failed',
+          message: `Mission failed: ${mission.failure_reason}. Check that the orchestrator agent is online and connected.`,
+          actor_type: 'system',
+        });
+        failed += 1;
+        continue;
+      }
+
+      const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
+      try {
+        await this.runner.nudgeOrchestrator(
+          mission.id,
+          mission.workspace_id,
+          { type: 'system', id: '', name: 'Reaper' },
+          `No plan has been submitted for this mission yet (${Math.round(
+            (now - new Date(baseline).getTime()) / 60_000,
+          )} minutes since it was briefed). Team: ${team?.name ?? 'unknown'}. Submit a plan with ` +
+            `submit_orchestration_plan, or complete the mission as failed if it cannot be planned.`,
+          'planning_timeout',
+        );
+        nudged += 1;
+      } catch (e: any) {
+        this.logService.warn(
+          'Orchestration',
+          `planning nudge failed for mission ${mission.id}: ${e?.message || e}`,
+        );
+      }
+    }
+    return { nudged, failed };
+  }
+}

@@ -29,6 +29,10 @@ const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsP
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
+// 오케스트레이션 모드 — 칸반 보드와 같은 최상위 작업 표면.
+const OrchestrationPage = lazy(() => import('./components/orchestration/OrchestrationPage'));
+const OrchestrationTeamsPage = lazy(() => import('./components/orchestration/OrchestrationTeamsPage'));
+const MissionDetailPage = lazy(() => import('./components/orchestration/MissionDetailPage'));
 
 // 지연 로드되는 라우트 청크를 가져오는 동안 보여줄 폴백.
 function RouteFallback() {
@@ -200,6 +204,9 @@ function AppContent() {
             <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
             <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
             <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
+            <Route path="orchestration" element={<OrchestrationPage />} />
+            <Route path="orchestration/teams" element={<OrchestrationTeamsPage />} />
+            <Route path="orchestration/missions/:missionId" element={<MissionDetailPage />} />
             <Route path="chat" element={<ChatPage />} />
             <Route path="chat/:roomId" element={<ChatPage />} />
             <Route path="users" element={<Navigate to="settings/members" replace />} />

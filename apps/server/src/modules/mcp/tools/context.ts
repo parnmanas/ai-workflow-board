@@ -63,6 +63,9 @@ import type { PendingTicketRefAccumulator } from './ticket-ref-session';
 import type { WorkflowFunctionsService } from '../../workflow-functions/workflow-functions.service';
 import type { ArtifactRefsService } from '../../artifact-refs/artifact-refs.service';
 import type { ClassificationBridgeService } from '../../outreach/classifier/classification-bridge.service';
+import type { OrchestrationRunnerService } from '../../orchestration/orchestration-runner.service';
+import type { OrchestrationMissionService } from '../../orchestration/orchestration-mission.service';
+import type { OrchestrationTeamService } from '../../orchestration/orchestration-team.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -185,6 +188,16 @@ export interface ToolContext {
   // context omits it — there is no OutreachModule instance to share a
   // singleton with in that mode, so the tool degrades to an explicit error.
   classificationBridgeService?: ClassificationBridgeService;
+  // Orchestration mode. Required by orchestration-tools: the orchestrator's
+  // plan/step/complete calls and the members' progress/result reports all go
+  // through the runner, and `get_orchestration_mission` reads through the
+  // mission service. Standalone context omits all three — the dispatch engine
+  // posts into chat rooms and wakes agents over SSE, neither of which exists in
+  // the standalone MCP entry point, so the tools degrade to an explicit error
+  // rather than silently recording state nobody will ever act on.
+  orchestrationRunnerService?: OrchestrationRunnerService;
+  orchestrationMissionService?: OrchestrationMissionService;
+  orchestrationTeamService?: OrchestrationTeamService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;
