@@ -44,6 +44,7 @@ process.env.NODE_ENV = 'test';
 const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.js'));
 const { DataSource } = await import('typeorm');
 const { Workspace } = await import('file://' + path.join(DIST, 'entities', 'Workspace.js'));
+const { ChatRoom } = await import('file://' + path.join(DIST, 'entities', 'ChatRoom.js'));
 const { QaRun } = await import('file://' + path.join(DIST, 'entities', 'QaRun.js'));
 const { ActionRun } = await import('file://' + path.join(DIST, 'entities', 'ActionRun.js'));
 const { OrchestrationMission } = await import('file://' + path.join(DIST, 'entities', 'OrchestrationMission.js'));
@@ -193,4 +194,62 @@ test('enforceRunBudget: enabled=false never throws regardless of count', async (
 
 test('enforceRunBudget: an unconfigured workspace (no row) fails open against the env baseline', async () => {
   await assert.doesNotReject(() => enforceRunBudget(deps, 'qa', 'nonexistent-ws'));
+});
+
+// ── alert de-dupe (review a51ec6d9 blocking #2) ─────────────────────────────
+// A run-scoped reject is stateless — nothing pends anything to cut off further
+// triggers — so a caller that retries in a tight loop (QA batch walk-forward,
+// action-scheduler cron tick, on-ticket-done-action's per-action loop) would
+// otherwise re-enter enforceRunBudget and fire one chat alert PER rejected
+// call for as long as the breach persists. That's the exact chat-room
+// dispatch fanout this guard exists to prevent, self-inflicted. The reject
+// itself must stay unconditional; only the chat send should be damped to one
+// per breach episode.
+const roomRepo = ds.getRepository(ChatRoom);
+async function makeAlertsRoom(workspaceId) {
+  return roomRepo.save(roomRepo.create({ workspace_id: workspaceId, type: 'group', name: 'alerts' }));
+}
+
+test('enforceRunBudget: repeated breaches in the same episode send only ONE chat alert', async () => {
+  const ws = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, window_minutes: 30, notify: true }));
+  await makeAlertsRoom(ws.id);
+  await makeQaRun(ws.id); // consumes the only slot in the window
+
+  const sent = [];
+  const roomMessagingService = {
+    async sendSystemMessage(roomId, workspaceId, content) {
+      sent.push({ roomId, workspaceId, content });
+    },
+  };
+  const notifyDeps = { dataSource: ds, roomMessagingService, logger: logStub };
+
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', ws.id));
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', ws.id));
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', ws.id));
+
+  assert.equal(sent.length, 1, 'only the first breach in the episode posted a chat alert');
+});
+
+test('enforceRunBudget: breaches in DIFFERENT workspaces (or kinds) each get their own alert', async () => {
+  const wsA = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
+  const wsB = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
+  await makeAlertsRoom(wsA.id);
+  await makeAlertsRoom(wsB.id);
+  await makeQaRun(wsA.id);
+  await makeActionRun(wsA.id);
+  await makeQaRun(wsB.id);
+
+  const sent = [];
+  const roomMessagingService = {
+    async sendSystemMessage(roomId, workspaceId, content) {
+      sent.push({ roomId, workspaceId, content });
+    },
+  };
+  const notifyDeps = { dataSource: ds, roomMessagingService, logger: logStub };
+
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', wsA.id));
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'action', wsA.id)); // different kind, same workspace
+  await assert.rejects(() => enforceRunBudget(notifyDeps, 'qa', wsB.id)); // different workspace
+
+  assert.equal(sent.length, 3, 'each distinct workspace|kind episode gets its own alert');
 });

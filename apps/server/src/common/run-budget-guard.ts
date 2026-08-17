@@ -34,6 +34,7 @@ import { Workspace } from '../entities/Workspace';
 import { ChatRoom } from '../entities/ChatRoom';
 import type { RoomMessagingService } from '../modules/chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from './hard-budget-config';
+import { sinceBoundaryParam } from './created-at-since-param';
 
 export type RunBudgetKind = 'qa' | 'action' | 'orchestration';
 
@@ -91,7 +92,7 @@ export async function countRunsInWindow(
 ): Promise<number> {
   return runRepo(dataSource, kind).createQueryBuilder('r')
     .where('r.workspace_id = :wsId', { wsId: workspaceId })
-    .andWhere('r.created_at >= :since', { since })
+    .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .getCount();
 }
 
@@ -115,7 +116,7 @@ async function oldestRunAt(
 ): Promise<Date | null> {
   const oldest = await runRepo(dataSource, kind).createQueryBuilder('r')
     .where('r.workspace_id = :wsId', { wsId: workspaceId })
-    .andWhere('r.created_at >= :since', { since })
+    .andWhere('r.created_at >= :since', { since: sinceBoundaryParam(dataSource, since) })
     .orderBy('r.created_at', 'ASC')
     .limit(1)
     .getOne();
@@ -153,6 +154,30 @@ export async function postRunBudgetAlert(
   } catch (e) {
     deps.logger?.warn('HardBudget', 'run-budget alert post failed (non-fatal)', { err: String(e), workspace_id: workspaceId });
   }
+}
+
+/**
+ * De-dupe key → last-alert epoch ms, one chat alert per breach EPISODE
+ * (kind+workspace) rather than one per rejected dispatch. The ticket-scoped
+ * guard (hard-budget-guard.ts) gets this damping for free because a confirmed
+ * breach there auto-pends the ticket, which cuts off further triggers; a run-
+ * scoped reject is stateless, so a tight retry loop (QA batch walk-forward,
+ * action-scheduler's cron tick, on-ticket-done-action's per-action loop) would
+ * otherwise fire one `postRunBudgetAlert` — and therefore one chat-room SSE
+ * dispatch — per rejected call for as long as the breach persists, recreating
+ * the exact fanout this guard exists to prevent. The reject itself and
+ * `logger.warn` stay unconditional; only the chat send is damped, using the
+ * SAME window length as the rate limiter (so the next alert is eligible right
+ * when a fresh breach could first happen on its own terms).
+ */
+const lastAlertSentAt = new Map<string, number>();
+
+function shouldSendRunBudgetAlert(kind: RunBudgetKind, workspaceId: string, windowMs: number, now: number): boolean {
+  const key = `${workspaceId}|${kind}`;
+  const last = lastAlertSentAt.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  lastAlertSentAt.set(key, now);
+  return true;
 }
 
 /** Thrown by `enforceRunBudget` on a confirmed breach. `status = 429` so every REST/MCP error surface that already special-cases `err.status` renders it correctly. */
@@ -224,7 +249,7 @@ export async function enforceRunBudget(
   deps.logger?.warn('HardBudget', `run budget exceeded — ${kind} run rejected`, {
     workspace_id: workspaceId, kind, count, limit: cfg.maxRunsPerWindow, window_minutes: windowMin,
   });
-  if (cfg.notify) {
+  if (cfg.notify && shouldSendRunBudgetAlert(kind, workspaceId, cfg.windowMs, Date.now())) {
     await postRunBudgetAlert(deps, workspaceId, [
       `🚦 **Hard budget 초과 (run 생성 빈도)** — kind=\`${kind}\``,
       `워크스페이스: \`${workspaceId}\``,
