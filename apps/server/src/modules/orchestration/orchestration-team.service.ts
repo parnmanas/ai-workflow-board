@@ -21,7 +21,7 @@ import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember'
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { Agent } from '../../entities/Agent';
 import { LogService } from '../../services/log.service';
-import { MAX_PARALLEL_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
+import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
 import { orchestrationError } from './orchestration-errors';
 
 export interface TeamMemberView {
@@ -46,6 +46,7 @@ export interface TeamView {
   orchestrator_online: boolean;
   orchestrator_prompt: string;
   max_parallel_steps: number;
+  max_open_missions: number;
   enabled: boolean;
   members: TeamMemberView[];
   active_mission_count: number;
@@ -197,6 +198,7 @@ export class OrchestrationTeamService {
         orchestrator_online: !!orch?.is_online,
         orchestrator_prompt: t.orchestrator_prompt,
         max_parallel_steps: t.max_parallel_steps,
+        max_open_missions: t.max_open_missions,
         enabled: t.enabled !== 0,
         members: members
           .filter((m) => m.team_id === t.id)
@@ -230,6 +232,7 @@ export class OrchestrationTeamService {
     orchestrator_agent_id: string;
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
+    max_open_missions?: number;
     created_by?: string;
   }): Promise<TeamView> {
     const workspaceId = (input.workspace_id || '').trim();
@@ -251,6 +254,7 @@ export class OrchestrationTeamService {
         orchestrator_agent_id: orchestrator.id,
         orchestrator_prompt: (input.orchestrator_prompt || '').trim(),
         max_parallel_steps: clampParallel(input.max_parallel_steps),
+        max_open_missions: clampOpenMissions(input.max_open_missions),
         enabled: 1,
         created_by: input.created_by || '',
       }),
@@ -271,6 +275,7 @@ export class OrchestrationTeamService {
       orchestrator_agent_id?: string;
       orchestrator_prompt?: string;
       max_parallel_steps?: number;
+      max_open_missions?: number;
       enabled?: boolean;
     },
   ): Promise<TeamView> {
@@ -284,6 +289,7 @@ export class OrchestrationTeamService {
     if (patch.description !== undefined) team.description = String(patch.description).trim();
     if (patch.orchestrator_prompt !== undefined) team.orchestrator_prompt = String(patch.orchestrator_prompt).trim();
     if (patch.max_parallel_steps !== undefined) team.max_parallel_steps = clampParallel(patch.max_parallel_steps);
+    if (patch.max_open_missions !== undefined) team.max_open_missions = clampOpenMissions(patch.max_open_missions);
     if (patch.orchestrator_agent_id !== undefined) {
       const agent = await this.requireWorkspaceAgent(
         patch.orchestrator_agent_id,
@@ -394,4 +400,12 @@ function clampConcurrent(value: any): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1;
   return Math.min(MAX_PARALLEL_CEILING, Math.max(1, Math.floor(n)));
+}
+
+/** Floor is 0, not 1 — see OrchestrationTeam.max_open_missions: 0 is a deliberate
+ *  "no agent-created missions" value, not an unset/invalid one. */
+function clampOpenMissions(value: any): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(MAX_OPEN_MISSIONS_CEILING, Math.max(0, Math.floor(n)));
 }
