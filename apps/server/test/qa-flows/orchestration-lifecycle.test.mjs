@@ -751,4 +751,88 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   assert.match(recursionAttempt.error.error, /in flight/);
 });
 
+test('Orchestration: an orchestrator who is also a roster member can self-assign a step (regression guard)', async (t) => {
+  // Not a hypothetical: ticket b7127aae's own smoke mission assigns its rollup
+  // step to the orchestrator itself. createTeam/addMember allow the duplicate
+  // by design (decision thread on b7127aae) — this locks in that a plan step
+  // assigned to the orchestrator actually dispatches, not just that adding the
+  // member doesn't throw.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const runner = app.get(OrchestrationRunnerService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-self-assign');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'self-assign-orch' });
+  const helper = await createAgent(app, getDataSourceToken, ws.id, { name: 'self-assign-helper' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'self-assign-orch');
+
+  step('Team roster includes the orchestrator itself, mirroring a rollup-style mission');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Self-assign squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: helper.id });
+  await teams.addMember(team.id, ws.id, { agent_id: orch.id });
+
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Fan out then roll up',
+    objective: 'A helper reports, the orchestrator rolls the result up itself.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  await runner.startMission(mission.id, ws.id, HUMAN);
+
+  step('A plan step assigned to the orchestrator (who is also a member) is accepted, not "not a member"');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [
+      { step_key: 'gather', title: 'Gather', instructions: 'Report a fact.', assignee_agent_id: helper.id },
+      {
+        step_key: 'rollup',
+        title: 'Roll up',
+        instructions: 'Summarize.',
+        depends_on: ['gather'],
+        assignee_agent_id: orch.id,
+      },
+    ],
+  });
+  assert.ok(!plan?.isError, `plan failed: ${JSON.stringify(plan)}`);
+  assert.deepEqual(plan.dispatched_now, ['gather'], 'rollup only waits on its dependency — it was accepted, not rejected');
+
+  step('Once gather reports, the orchestrator-assigned rollup step dispatches to the orchestrator itself');
+  const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
+  const gather = afterPlan.steps.find((s) => s.step_key === 'gather');
+  const reported = await orchMcp.callTool('report_orchestration_step', {
+    step_id: gather.id,
+    status: 'done',
+    summary: 'Gathered the fact.',
+  });
+  assert.ok(!reported?.isError, `report failed: ${JSON.stringify(reported)}`);
+  assert.deepEqual(
+    reported.next_steps_dispatched,
+    ['rollup'],
+    'the orchestrator-assigned step dispatches like any other assignee\'s',
+  );
+
+  const final = await missions.getMissionDetail(mission.id, ws.id);
+  const rollup = final.steps.find((s) => s.step_key === 'rollup');
+  assert.equal(rollup.status, 'dispatched');
+  assert.equal(rollup.assignee_agent_id, orch.id);
+  assert.ok(rollup.room_id, 'the orchestrator gets a real work-order room for its own step, like any assignee');
+});
+
 exitAfterTests();
