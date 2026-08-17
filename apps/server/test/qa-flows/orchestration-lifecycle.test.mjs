@@ -751,6 +751,105 @@ test('Orchestration: create_orchestration_mission — ownership, caps, recursion
   assert.match(recursionAttempt.error.error, /in flight/);
 });
 
+test('Orchestration: create_orchestration_mission — max_open_missions = 0 forbids self-created missions with a clean 409, not a TypeError', async (t) => {
+  // Regression coverage for ticket d5a545c4: before the fix, `cap <= 0` fell
+  // through to `openForTeam[openForTeam.length - 1]` on an EMPTY array
+  // (openForTeam[-1] is undefined), so the very first agent-created-mission
+  // attempt against a cap-0 team crashed with "Cannot read properties of
+  // undefined (reading 'id')" instead of the clear 409 the cap is meant to
+  // produce. There was no product path to set the value to 0 until this
+  // ticket wired max_open_missions into createTeam/updateTeam, so this is
+  // also the first test that can reach cap 0 at all.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-zero');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'cap-zero-orch' });
+
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-zero-orch' });
+  const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+  t.after(() => { void orchMcp.close().catch(() => {}); });
+
+  step('A team created with max_open_missions: 0 persists the deliberate zero, not the ?? 1 default');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Cap-zero squad',
+    orchestrator_agent_id: orch.id,
+    max_open_missions: 0,
+    created_by: HUMAN.id,
+  });
+  assert.equal(team.max_open_missions, 0, 'createTeam must not silently promote an explicit 0 to the default 1');
+
+  step('create_orchestration_mission on a cap-0 team returns a 409 naming the team, never a raw TypeError');
+  const blocked = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should be blocked', objective: 'Should be blocked.',
+  });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.error.status, 409);
+  assert.match(blocked.error.error, /does not allow agent-created missions/);
+  assert.match(blocked.error.error, /max_open_missions = 0/);
+
+  step('Raising the cap via updateTeam immediately un-blocks the same team');
+  const raised = await teams.updateTeam(team.id, ws.id, { max_open_missions: 1 });
+  assert.equal(raised.max_open_missions, 1);
+  const allowed = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Now allowed', objective: 'Now allowed.',
+  });
+  assert.ok(!allowed.isError, `create failed after raising the cap: ${JSON.stringify(allowed)}`);
+});
+
+test('Orchestration: create_orchestration_mission — max_open_missions = 2 allows two concurrent missions; a third names the OLDEST one', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-two');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'cap-two-orch' });
+
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-two-orch' });
+  const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+  t.after(() => { void orchMcp.close().catch(() => {}); });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Cap-two squad',
+    orchestrator_agent_id: orch.id,
+    max_open_missions: 2,
+    created_by: HUMAN.id,
+  });
+  assert.equal(team.max_open_missions, 2);
+
+  step('Two missions can be open at once under cap 2');
+  const first = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'First (oldest)', objective: 'First.',
+  });
+  assert.ok(!first.isError, `first create failed: ${JSON.stringify(first)}`);
+  const second = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Second (newest)', objective: 'Second.',
+  });
+  assert.ok(!second.isError, `second create failed: ${JSON.stringify(second)}`);
+
+  // Force a deterministic created_at ordering — two inserts a few
+  // milliseconds apart are not a safe ordering signal on every DB backend,
+  // and the whole point of this test is which one the cap guard names.
+  const missionRepo = ds.getRepository('OrchestrationMission');
+  await missionRepo.update({ id: first.mission_id }, { created_at: new Date(Date.now() - 60_000) });
+  await missionRepo.update({ id: second.mission_id }, { created_at: new Date(Date.now() - 30_000) });
+
+  step('A third attempt is rejected, naming the OLDEST open mission (openForTeam[length-1] under DESC order), not the newest');
+  const third = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Third (should be rejected)', objective: 'Third.',
+  });
+  assert.equal(third.isError, true);
+  assert.equal(third.error.status, 409);
+  assert.equal(third.error.existing_mission_id, first.mission_id, 'the oldest mission is named, not the most recent');
+  assert.notEqual(third.error.existing_mission_id, second.mission_id);
+});
+
 test('Orchestration: an orchestrator who is also a roster member can self-assign a step (regression guard)', async (t) => {
   // Not a hypothetical: ticket b7127aae's own smoke mission assigns its rollup
   // step to the orchestrator itself. createTeam/addMember allow the duplicate
