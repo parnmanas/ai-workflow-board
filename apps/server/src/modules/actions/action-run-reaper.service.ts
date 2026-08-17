@@ -39,6 +39,19 @@
  *
  * Env: ACTION_RUN_REAPER_ENABLED(기본 on), ACTION_RUN_REAPER_SWEEP_MS(기본
  * 15분, 1분~1시간 clamp), ACTION_RUN_TTL_MS(기본 2시간, 5분~24시간 clamp).
+ *
+ * 스윕 후보는 `source_ticket_id`가 있는 run으로 한정한다 —
+ * `complete_action_run` 완료 계약은 `sourceTicketId`가 있을 때만 프롬프트에
+ * 주입되므로(actions.service.ts renderPrompt), cron(action-scheduler.service.ts)·
+ * 수동 UI 실행(actions.controller.ts)·on-ticket-done(on-ticket-done-action.
+ * service.ts) 경로로 디스패치된 run은 대상 에이전트가 run_id 자체를 모른다.
+ * 이런 run의 `status='running'`은 좀비가 아니라 이 run 타입의 영구적으로
+ * 정상인 종착 상태이므로, 이 게이트 없이 스윕하면 정상 이력을 전부 거짓
+ * failed로 오염시킨다. 이 게이트를 통과하는 대상은 티켓 구동 run으로
+ * 좁혀지므로, 형제 리퍼(QA/Security 6시간)보다 짧은 2시간 기본 TTL도 방어
+ * 가능하다고 판단했다 — zero-progress 같은 빠른 퓨즈나 room 최근 메시지
+ * (`ChatRoom.last_message_at`) 기반 liveness 신호는 넣지 않았다(over-eng 회피).
+ * TTL을 6시간으로 올리고 싶으면 `ACTION_RUN_TTL_MS`로 바로 조정 가능하다.
  */
 
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
@@ -131,6 +144,13 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
       const reaped: string[] = [];
       const details: Array<{ id: string; age_min: number }> = [];
       for (const run of candidates) {
+        // complete_action_run's completion contract is only rendered into the
+        // prompt when source_ticket_id is set (actions.service.ts renderPrompt).
+        // cron/manual/on-ticket-done dispatches never pass a source ticket, so
+        // their target agent never learns the run_id and 'running' is a
+        // permanent, correct terminal-for-this-run-type state — not a zombie.
+        // Reaping those would mass-mislabel healthy history as failed.
+        if (!(run.source_ticket_id || '').trim()) continue;
         const ageMs = now.getTime() - new Date(run.created_at).getTime();
         if (ageMs < this.ttlMs) continue;
         const ageMin = Math.round(ageMs / 60_000);

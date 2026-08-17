@@ -44,6 +44,17 @@ test('ActionRunReaperService source defines the sweep loop, TTL gate, and env co
   // Only the non-terminal 'running' status may be reaped (ActionRun has no
   // 'pending' stage, unlike QaRun).
   assert.match(code, /status\s*:\s*['"]running['"]/, 'must scope the sweep to running runs');
+  // Runs without a source_ticket_id never received the complete_action_run
+  // completion contract (actions.service.ts only renders it when a source
+  // ticket is present), so their target agent never learned the run_id and
+  // 'running' is a permanent, correct state for them — not a zombie. A
+  // refactor that drops this gate would mass-mislabel cron/manual/
+  // on-ticket-done history as failed.
+  assert.match(
+    code,
+    /if\s*\(\s*!\s*\(\s*run\.source_ticket_id\s*\|\|\s*['"]['"]\s*\)\.trim\(\)\s*\)\s*continue/,
+    'runOnce must skip candidates with no source_ticket_id before applying the TTL gate',
+  );
   // Age gate: ActionRun has no started_at column, so age is measured from
   // created_at only (not a started_at ?? created_at fallback like QaRun/
   // OrchestrationMission).

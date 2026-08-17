@@ -16,7 +16,9 @@
 //                                                    -> reaped AND source ticket resumed
 //   - age >= TTL, has source ticket, mid-retry (shouldResume=false)
 //                                                    -> reaped, ticket NOT resumed (retry run owns it)
-//   - age >= TTL, no source ticket (cron/manual run) -> reaped, no resume attempted
+//   - no source ticket (cron/manual/on-ticket-done run) -> preserved regardless
+//     of age; those runs never received the completion contract, so 'running'
+//     is a permanent, correct state, not a zombie
 //   - age >= TTL, but completeRun reports previouslyCompleted (a real
 //     complete_action_run raced the sweep)           -> NOT counted as reaped, no resume
 //   - a second sweep after a reap is idempotent (row already terminal)
@@ -171,7 +173,7 @@ test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT r
   assert.equal(triggerLoop.calls.length, 0, 'no resume dispatch — completeRun said shouldResume=false');
 });
 
-test('stuck run with no source ticket (cron/manual dispatch) is reaped without attempting a resume', async () => {
+test('run with no source ticket (cron/manual/on-ticket-done dispatch) is preserved even past the TTL — its target agent never received the completion contract, so running is a permanent, correct state, not a zombie', async () => {
   const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '' })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
@@ -180,8 +182,10 @@ test('stuck run with no source ticket (cron/manual dispatch) is reaped without a
 
   const { reaped } = await svc.runOnce(NOW);
 
-  assert.deepEqual(reaped, ['cron-stuck']);
+  assert.deepEqual(reaped, [], 'no source ticket -> not a reap candidate, regardless of age');
+  assert.equal(actionsService.calls.length, 0, 'completeRun must never be called for a run without a source ticket');
   assert.equal(triggerLoop.calls.length, 0, 'no source ticket to resume');
+  assert.equal(rows[0].status, 'running', 'untouched');
 });
 
 test('a run completed by a real concurrent complete_action_run between SELECT and reap is not double-counted', async () => {
