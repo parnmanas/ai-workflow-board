@@ -18,7 +18,7 @@ description: Checklist for adding a new MCP tool under apps/server/src/modules/m
 
 새 도구를 등록만 하고 분류(b)를 빠뜨리면 4번 분기에 떨어진다. `test/mcp-tool-authz.test.mjs`의 완전성 가드가 이걸 CI에서 잡아주지만(아래 (f)), 그 실패를 무시하고 넘어가면 "런타임에서 caller/scope와 무관하게 무조건 deny"인 도구가 그대로 배포될 수 있다.
 
-## 5-touch-point 체크리스트
+## 6-touch-point 체크리스트
 
 | # | Touch point | 파일 | 빠뜨렸을 때 증상 |
 |---|---|---|---|
