@@ -20,11 +20,11 @@
  * uncovered two; a "creations in the last N minutes" ceiling never does,
  * since it only ever looks backward from now.
  *
- * Call `enforceRunBudget` at the HEAD of each chokepoint (qa-run.service.ts
- * startQaRun, actions.service.ts dispatch, orchestration-mission.service.ts
- * createMission — the last one wired in a follow-up once ticket b7127aae
- * lands, see that ticket's plan comment), before any side effect (ChatRoom
- * creation, run-row save).
+ * Called at the HEAD of each of the three run-dispatch chokepoints —
+ * qa-run.service.ts startQaRun, actions.service.ts dispatch,
+ * orchestration-mission.service.ts createMission — before any side effect
+ * (ChatRoom creation, run-row save). See run-budget-dispatch-gate.test.mjs
+ * for the static call-site/ordering guard pinning that placement.
  */
 import type { DataSource, Repository } from 'typeorm';
 import { OrchestrationMission } from '../entities/OrchestrationMission';
