@@ -18,7 +18,7 @@ description: Checklist for adding a new MCP tool under apps/server/src/modules/m
 
 새 도구를 등록만 하고 분류(b)를 빠뜨리면 4번 분기에 떨어진다. `test/mcp-tool-authz.test.mjs`의 완전성 가드가 이걸 CI에서 잡아주지만(아래 (f)), 그 실패를 무시하고 넘어가면 "런타임에서 caller/scope와 무관하게 무조건 deny"인 도구가 그대로 배포될 수 있다.
 
-## 6-touch-point 체크리스트
+## 7-touch-point 체크리스트
 
 | # | Touch point | 파일 | 빠뜨렸을 때 증상 |
 |---|---|---|---|
@@ -28,6 +28,7 @@ description: Checklist for adding a new MCP tool under apps/server/src/modules/m
 | d | 소유권 검사 | 핸들러 또는 그 서비스 (게이트가 아님) | 게이트로는 표현 불가 — 빠뜨리면 아무나 남의 리소스 조작 |
 | e | description 명시 | 같은 `server.tool()` 호출의 2번째 인자 | 호출자가 403을 실제로 받아보고서야 권한 경계를 앎 |
 | f | 테스트 재실행 | `apps/server/test/mcp-tool-authz.test.mjs` 등 | 회귀를 CI가 못 잡음 |
+| g | agent-manager 카드-캡처 분류 | `apps/agent-manager/src/lib/ticket-ref-capture.ts` → `TICKET_ACTION_TOOLS`/`TICKET_TOOL_EXCLUSIONS` | 도구 호출이 채팅에 카드로 조용히 드롭됨(authz와 무관한 별도 가드) |
 
 ### (a) `*-tools.ts` 등록
 
@@ -104,6 +105,18 @@ if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
 - 새 `*.test.mjs` **파일**을 추가했다면(기존 파일에 `it()`만 추가한 게 아니라) → `apps/server/test/test-registration-completeness.test.mjs`도 통과해야 한다. `apps/server/package.json`의 `test`(또는 `pretest`) 스크립트 인자 목록에 파일 경로를 직접 추가하지 않으면 `npm test`가 그 파일을 영원히 실행하지 않는다 — 등록을 빠뜨리면 이 가드 자체가 실패로 알려준다.
 - 도구가 속한 도메인에 전용 테스트 파일이 있다면 그것도 같이 실행(예: orchestration 계열이면 `orchestration-plan-dag.test.mjs`).
 
+### (g) agent-manager 카드-캡처 분류 (authz와 무관한 별도 가드)
+
+새 도구가 티켓을 만들거나 바꾸는 동작이면(EMIT이든 EXCLUDE든), `apps/agent-manager/src/lib/ticket-ref-capture.ts`에서 반드시 분류한다 — `TICKET_ACTION_TOOLS`(채팅에 카드로 캡처) 또는 `TICKET_TOOL_EXCLUSIONS`(캡처 제외, `read`/`non-ticket`/`orchestration` 등 기존 카테고리 중 하나로 사유 명시). (a)-(f)는 전부 **서버 authz 가드**고 이건 **agent-manager 쪽 카드-캡처 완전성 가드**로 완전히 별개다 — 도구가 (b)/(c)에서 authz 티어를 정상적으로 받아도 여기서 빠지면 그 도구 호출 결과가 채팅에서 카드로 조용히 드롭된다.
+
+`apps/agent-manager/test/tool-surface-parity.test.mjs`가 서버에 등록된 도구 전체와 `classifiedToolNames()`(EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪ EXCLUDE)가 정확히 일치하는지 검사해 미분류 도구를 CI에서 잡는다. 실제 사례 — 신규 orchestration 도구 3종이 이 분류를 빠뜨려 CI가 7회 연속 red였다(#[ticket:c13db9e7-fec3-42e8-a7ef-36f784f2be8a|CI red: parnmanas/ai-workflow-board@main — CI]).
+
+이 테스트는 소스가 아니라 `dist/lib/ticket-ref-capture.js`(컴파일된 산출물)를 import하므로 **먼저 빌드**해야 한다:
+
+```sh
+cd apps/agent-manager && npm run build && node --test --test-force-exit test/tool-surface-parity.test.mjs
+```
+
 ## 컴패니언 stdio 플러그인 sync — 불필요 (단정)
 
 새 MCP 도구를 추가/삭제/개명해도 별개 저장소 `claude-plugins`(subpath `ai-workflow-board/`)의 `plugin.json` 버전 범프나 `proxy.mjs` 수정은 **필요 없다.**
@@ -121,3 +134,4 @@ if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
 - 정상 권한의 caller가 403 → (c) 티어를 너무 세게 잡았거나, 원래 (d)에 있어야 할 소유권 검사가 게이트 티어로 잘못 새어 들어감.
 - 아무나 남의 팀/미션/티켓을 조작할 수 있음 → (d) 빠뜨림. 게이트 티어를 올리는 걸로 때우려 하지 마라 — 위 항목과 정반대 실수다.
 - `npm test`가 새 테스트 파일을 조용히 건너뜀 → (f)의 `test-registration-completeness.test.mjs` 참고.
+- 도구 호출은 성공(200)했는데 채팅에 카드가 안 뜸 → (g) 빠뜨림. authz 문제가 아니므로 (b)/(c)를 아무리 봐도 원인이 안 보인다 — `ticket-ref-capture.ts`의 두 분류 테이블부터 확인.
