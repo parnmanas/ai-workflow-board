@@ -21,6 +21,7 @@ import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
 import { Board } from '../../entities/Board';
+import { enforceRunBudget } from '../../common/run-budget-guard';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -155,6 +156,13 @@ export class QaRunService {
 
   async startQaRun(args: StartQaRunArgs): Promise<StartQaRunResult> {
     const scenario = await findOrFail(this.scenarioRepo, { where: { id: args.scenarioId } }, 'QA scenario not found');
+    // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
+    // before any side effect below. Workspace-scoped; throws 429 on breach.
+    await enforceRunBudget(
+      { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
+      'qa',
+      scenario.workspace_id,
+    );
     if (!scenario.target_agent_id) throw makeError(400, 'QA scenario has no target agent set');
     if (scenario.enabled === false) throw makeError(400, 'QA scenario is disabled');
 

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
@@ -26,6 +26,7 @@ import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { parseCron } from './cron';
+import { enforceRunBudget } from '../../common/run-budget-guard';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -242,6 +243,7 @@ export class ActionsService {
     @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly columnRepo: Repository<BoardColumn>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -913,6 +915,17 @@ export class ActionsService {
    */
   async dispatch(args: DispatchActionArgs): Promise<DispatchActionResult> {
     const action = await findOrFail(this.actionRepo, { where: { id: args.actionId } }, 'Action not found');
+    // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
+    // before any side effect below. Workspace-scoped; throws 429 on breach.
+    // Placed INSIDE dispatch() (not around the retry call site in
+    // completeRun) so a retry that trips this guard is naturally caught by
+    // completeRun's existing try/catch and treated as exhaustion — no
+    // separate retry-bypass flag needed (ticket a51ec6d9 plan "정정 2").
+    await enforceRunBudget(
+      { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
+      'action',
+      action.workspace_id,
+    );
     if (!action.target_agent_id) throw makeError(400, 'Action has no target agent set');
 
     const agent = await this.agentRepo.findOne({ where: { id: action.target_agent_id } });
