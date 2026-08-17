@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 const rl = createInterface({ input: process.stdin });
 let nextSession = 1;
 let pendingPrompt = null;
+let lastNewSessionParams = null;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -11,6 +12,42 @@ function send(message) {
 
 function result(id, value) {
   send({ jsonrpc: '2.0', id, result: value });
+}
+
+function invalidParams(id, detail) {
+  send({
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32602, message: 'Invalid params', data: detail },
+  });
+}
+
+// 실제 hermes-agent(acp.schema)는 mcpServers를 http/sse/stdio 판별 유니온으로
+// 검증한다. transport 판별자가 빠진 서버 항목은 어떤 variant에도 매칭되지 않아
+// session/new가 -32602로 실패한다. fixture가 무조건 성공을 돌려주면 이 계약
+// 위반이 테스트를 통과해버리므로(무-transport 사고), 동일하게 검증한다.
+function validateMcpServers(servers) {
+  if (!Array.isArray(servers)) return 'mcpServers must be an array';
+  for (const server of servers) {
+    if (!server || typeof server.name !== 'string') {
+      return 'mcpServers[].name is required';
+    }
+    if (server.type === 'http' || server.type === 'sse') {
+      if (typeof server.url !== 'string') return `${server.name}: url is required`;
+      if (!Array.isArray(server.headers)) return `${server.name}: headers is required`;
+      continue;
+    }
+    if (server.type !== undefined) {
+      return `${server.name}: unknown transport ${server.type}`;
+    }
+    // type이 없으면 stdio variant로만 해석된다.
+    if (typeof server.command !== 'string'
+      || !Array.isArray(server.args)
+      || !Array.isArray(server.env)) {
+      return `${server.name}: no matching transport variant`;
+    }
+  }
+  return null;
 }
 
 // HermesProcess의 argv/env 구성(버그 A/B: --profile 인자 + 조건부 HERMES_HOME)을
@@ -63,11 +100,33 @@ rl.on('line', (line) => {
         authMethods: [],
       });
       break;
-    case 'session/new':
+    case 'session/new': {
+      const invalid = validateMcpServers(message.params?.mcpServers);
+      if (invalid) {
+        invalidParams(message.id, invalid);
+        break;
+      }
+      lastNewSessionParams = message.params;
+      if (process.env.FAKE_ACP_SESSION_CAPTURE_FILE) {
+        writeFileSync(
+          process.env.FAKE_ACP_SESSION_CAPTURE_FILE,
+          JSON.stringify(message.params),
+        );
+      }
       result(message.id, { sessionId: `session-${nextSession++}` });
       break;
-    case 'session/load':
+    }
+    case 'session/load': {
+      const invalid = validateMcpServers(message.params?.mcpServers);
+      if (invalid) {
+        invalidParams(message.id, invalid);
+        break;
+      }
       result(message.id, {});
+      break;
+    }
+    case 'test/last-new-session':
+      result(message.id, lastNewSessionParams);
       break;
     case 'session/prompt':
       pendingPrompt = message.id;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -62,6 +62,36 @@ test('Hermes dispatch binds cwd, MCP attribution, prompt context, events and usa
   const record = supervisor.getSession(base.agentId, base.runId);
   assert.equal(record.cwd, process.cwd());
   assert.equal(record.leaseId, base.leaseId);
+});
+
+// 회귀: AWB가 awb MCP 서버를 transport 판별자 없이 `{name,url,headers}`로만
+// 보내 hermes-agent가 session/new를 -32602 Invalid params로 거절했고, Hermes
+// 채팅이 "acp_remote_error Invalid params"로 전부 실패했다. codex의 무-transport
+// 사고(26a92722)와 같은 계열이다.
+test('session/new sends the awb MCP server with an explicit http transport', async (t) => {
+  const captureDir = await mkdtemp(join(tmpdir(), 'awb-acp-session-'));
+  const capturePath = join(captureDir, 'session-new.json');
+  t.after(() => rm(captureDir, { recursive: true, force: true }));
+
+  const { supervisor } = await harness(t, {
+    env: { ...process.env, FAKE_ACP_SESSION_CAPTURE_FILE: capturePath },
+  });
+  // fixture가 transport 없는 항목을 -32602로 거절하므로, dispatch 성공 자체가
+  // 판별자 회귀를 막는다.
+  const result = await supervisor.dispatch(base);
+  assert.equal(result.stopReason, 'end_turn');
+
+  const params = JSON.parse(await readFile(capturePath, 'utf8'));
+  assert.equal(isAbsolute(params.cwd), true);
+
+  const [awb] = params.mcpServers;
+  assert.equal(awb.type, 'http');
+  assert.equal(awb.name, 'awb');
+  assert.equal(awb.url, 'https://awb.example.test/mcp');
+  assert.equal(
+    awb.headers.find((h) => h.name === 'Authorization').value,
+    `Bearer ${base.apiKey}`,
+  );
 });
 
 test('permission mode is explicit: strict denies, approve bridges, trusted selects allow once', async (t) => {

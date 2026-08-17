@@ -164,6 +164,7 @@ export class RuntimeSupervisor {
       leaseId: request.leaseId,
       cwd: request.cwd,
       mcpServers: [{
+        type: 'http',
         name: 'awb',
         url: `${this.#awbUrl}/mcp`,
         headers: [
