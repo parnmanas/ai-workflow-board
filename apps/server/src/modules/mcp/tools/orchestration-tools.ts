@@ -552,9 +552,21 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         // budget gate this entity has no board_id/ticket to hang one off of.
         // `?? 1`, not `|| 1` — 0 is a valid operator-set "no agent-created
         // missions for this team" value and must not be silently promoted to 1.
+        const cap = team.max_open_missions ?? 1;
+        if (cap <= 0) {
+          // Must short-circuit before ever listing/indexing openForTeam: at
+          // cap 0 that list is legitimately empty, so openForTeam[length - 1]
+          // below would read openForTeam[-1] (undefined) and throw a raw
+          // TypeError instead of this 409.
+          return err(
+            `team "${team.name}" does not allow agent-created missions (max_open_missions = 0) — ` +
+              `a human operator must raise the limit for this team before it can self-create missions.`,
+            { status: 409 },
+          );
+        }
+
         const openMissions = await missionSvc.listMissionsForAgent(agentId, { status: 'active', limit: 500 });
         const openForTeam = openMissions.filter((m) => m.team_id === team.id);
-        const cap = team.max_open_missions ?? 1;
         if (openForTeam.length >= cap) {
           // Oldest first (listMissionsForAgent orders created_at DESC) — the
           // oldest open mission is the one most likely stuck; at the default
