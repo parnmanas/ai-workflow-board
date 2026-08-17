@@ -103,6 +103,26 @@ export class OrchestrationTeamService {
     return this.projectTeams(teams);
   }
 
+  /**
+   * Teams an agent belongs to, as orchestrator or member — the agent-scoped
+   * counterpart to `listTeams` (workspace-scoped, human/REST use). No
+   * workspace filter: orchestrator/member agents are frequently workspace-less
+   * manager identities (visible everywhere by design, see
+   * `requireWorkspaceAgent`), so scoping by the caller's own workspace would
+   * hide teams they legitimately belong to.
+   */
+  async listTeamsForAgent(agentId: string): Promise<TeamView[]> {
+    if (!agentId) return [];
+    const [orchTeams, memberRows] = await Promise.all([
+      this.teamRepo.find({ where: { orchestrator_agent_id: agentId }, select: ['id'] }),
+      this.memberRepo.find({ where: { agent_id: agentId }, select: ['team_id'] }),
+    ]);
+    const teamIds = Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
+    if (teamIds.length === 0) return [];
+    const teams = await this.teamRepo.find({ where: { id: In(teamIds) }, order: { created_at: 'DESC' } });
+    return this.projectTeams(teams);
+  }
+
   async getTeam(teamId: string, workspaceId: string): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
     const [view] = await this.projectTeams([team]);

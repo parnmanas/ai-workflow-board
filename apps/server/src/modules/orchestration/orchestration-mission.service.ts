@@ -16,6 +16,7 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
+import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -113,6 +114,7 @@ export class OrchestrationMissionService {
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
     @InjectRepository(OrchestrationEvent) private readonly eventRepo: Repository<OrchestrationEvent>,
     @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
+    @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly logService: LogService,
   ) {}
@@ -324,6 +326,57 @@ export class OrchestrationMissionService {
       order: { created_at: 'DESC' },
       take: Math.min(Math.max(opts?.limit ?? 100, 1), 500),
     });
+    return this.projectMissionList(missions);
+  }
+
+  /**
+   * Missions an agent belongs to, as orchestrator or team member — the
+   * agent-scoped counterpart to `listMissions` (workspace-scoped, human/REST
+   * use). No workspace_id input, same rationale as `listTeamsForAgent`: the
+   * caller may be a workspace-less manager identity. Defaults to non-terminal
+   * missions only (an orchestrator recovering a lost mission_id cares about
+   * what's still open); pass status to widen it.
+   */
+  async listMissionsForAgent(
+    agentId: string,
+    opts?: { status?: string; limit?: number },
+  ): Promise<MissionListItem[]> {
+    if (!agentId) return [];
+    const teamIds = await this.teamIdsForAgent(agentId);
+    if (teamIds.length === 0) return [];
+
+    // 'all' (list_orchestration_missions' include_finished:true) means no status
+    // filter at all; anything else (including omitted, the default) means
+    // non-terminal only. Deliberately NOT `opts?.status ?? 'active'` — that
+    // collapses "caller wants everything" and "caller wants the default" onto
+    // the same undefined value and silently drops the include_finished case.
+    const where: any = { team_id: In(teamIds) };
+    if (opts?.status === 'all') {
+      // no status filter
+    } else if (opts?.status && opts.status !== 'active') {
+      where.status = opts.status;
+    } else {
+      where.status = Not(In(TERMINAL_MISSION_STATUSES as unknown as string[]));
+    }
+
+    const missions = await this.missionRepo.find({
+      where,
+      order: { created_at: 'DESC' },
+      take: Math.min(Math.max(opts?.limit ?? 100, 1), 500),
+    });
+    return this.projectMissionList(missions);
+  }
+
+  /** team_ids where `agentId` is the orchestrator or a roster member. */
+  private async teamIdsForAgent(agentId: string): Promise<string[]> {
+    const [orchTeams, memberRows] = await Promise.all([
+      this.teamRepo.find({ where: { orchestrator_agent_id: agentId }, select: ['id'] }),
+      this.memberRepo.find({ where: { agent_id: agentId }, select: ['team_id'] }),
+    ]);
+    return Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
+  }
+
+  private async projectMissionList(missions: OrchestrationMission[]): Promise<MissionListItem[]> {
     if (missions.length === 0) return [];
 
     const steps = await this.stepRepo.find({

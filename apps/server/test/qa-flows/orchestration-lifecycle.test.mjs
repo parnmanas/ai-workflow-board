@@ -520,4 +520,81 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
   assert.equal(detail.counts.pending, 1, 'the third waits for a free slot, not for a dependency');
 });
 
+test('Orchestration: list_orchestration_teams / list_orchestration_missions scope strictly to the caller', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService, OrchestrationMissionService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-discovery');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-member' });
+  const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-stranger' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'discovery-orch');
+  const memberMcp = await mcpFor(member, 'discovery-member');
+  const strangerMcp = await mcpFor(stranger, 'discovery-stranger');
+
+  step('list_orchestration_teams is empty before any team exists');
+  const beforeTeams = await orchMcp.callTool('list_orchestration_teams', {});
+  assert.deepEqual(beforeTeams.teams, []);
+
+  step('Create a team; orchestrator and roster member both see it, a stranger does not');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Discovery squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const orchTeams = await orchMcp.callTool('list_orchestration_teams', {});
+  assert.equal(orchTeams.teams.length, 1);
+  assert.equal(orchTeams.teams[0].id, team.id);
+
+  const memberTeams = await memberMcp.callTool('list_orchestration_teams', {});
+  assert.equal(memberTeams.teams.length, 1, 'a roster member sees the team too, not just the orchestrator');
+
+  const strangerTeamsResult = await strangerMcp.callTool('list_orchestration_teams', {});
+  assert.deepEqual(strangerTeamsResult.teams, [], 'an agent on no team sees nothing');
+
+  step('Create a mission; only the orchestrator/member see it via list_orchestration_missions');
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Discovery mission',
+    objective: 'Prove discovery tools are scoped correctly.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+
+  const orchMissions = await orchMcp.callTool('list_orchestration_missions', {});
+  assert.equal(orchMissions.missions.length, 1);
+  assert.equal(orchMissions.missions[0].id, mission.id);
+
+  const memberMissions = await memberMcp.callTool('list_orchestration_missions', {});
+  assert.equal(memberMissions.missions.length, 1, 'a roster member sees the mission too');
+
+  const strangerMissionsResult = await strangerMcp.callTool('list_orchestration_missions', {});
+  assert.deepEqual(strangerMissionsResult.missions, [], 'a non-member sees nothing, even in the same workspace');
+
+  step('Finished missions are hidden by default and shown with include_finished');
+  await ds.getRepository('OrchestrationMission').update({ id: mission.id }, { status: 'completed' });
+
+  const activeOnly = await orchMcp.callTool('list_orchestration_missions', {});
+  assert.deepEqual(activeOnly.missions, [], 'a completed mission is hidden by default');
+
+  const withFinished = await orchMcp.callTool('list_orchestration_missions', { include_finished: true });
+  assert.equal(withFinished.missions.length, 1);
+  assert.equal(withFinished.missions[0].status, 'completed');
+});
+
 exitAfterTests();

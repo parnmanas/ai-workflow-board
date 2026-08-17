@@ -16,6 +16,10 @@
  *     report_orchestration_progress   — heartbeat; resets the step timeout clock
  *     report_orchestration_step       — terminal result; unblocks dependents
  *
+ *   DISCOVERY (orchestrator or member — read-only)
+ *     list_orchestration_teams        — teams you belong to (rosters stay human-authored in the AWB UI)
+ *     list_orchestration_missions     — missions you're on; recovers a mission_id a lost session forgot
+ *
  * Authorization is per-mission, not per-scope: the runner checks the calling
  * agent id against `mission.orchestrator_agent_id` / `step.assignee_agent_id`
  * on every mutating call. That is stricter than an API-key scope check would
@@ -44,6 +48,7 @@ function toolError(e: any, fallback: string) {
 export function registerOrchestrationTools(server: McpServer, ctx: ToolContext): void {
   const runner = () => ctx.orchestrationRunnerService;
   const missions = () => ctx.orchestrationMissionService;
+  const teams = () => ctx.orchestrationTeamService;
 
   // ── Orchestrator ──────────────────────────────────────────────────────────
 
@@ -384,6 +389,57 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         });
       } catch (e: any) {
         return toolError(e, 'failed to report step');
+      }
+    },
+  );
+
+  // ── Discovery ─────────────────────────────────────────────────────────────
+
+  server.tool(
+    'list_orchestration_teams',
+    'Teams and their rosters are authored by humans in the AWB UI — this tool only reads them. List the ' +
+      'orchestration teams you belong to, as orchestrator or member. Use it to find the team_id you need for ' +
+      'create_orchestration_mission, or to see who your teammates are.',
+    {},
+    async (_args, extra) => {
+      const svc = teams();
+      if (!svc) return err(NO_RUNTIME);
+      const agentId = callerAgentId(extra);
+      if (!agentId) return err('this tool requires an authenticated agent session');
+      try {
+        return ok({ teams: await svc.listTeamsForAgent(agentId) });
+      } catch (e: any) {
+        return toolError(e, 'failed to list teams');
+      }
+    },
+  );
+
+  server.tool(
+    'list_orchestration_missions',
+    'Teams and their rosters are authored by humans in the AWB UI; this tool only reads missions. List ' +
+      'orchestration missions where you are the orchestrator or a team member — the way to recover a ' +
+      'mission_id if your session lost the brief (e.g. it is still "planning" with no steps yet for ' +
+      'list_my_orchestration_steps to find). Returns non-terminal missions by default.',
+    {
+      include_finished: z
+        .boolean()
+        .optional()
+        .describe('Include completed/failed/cancelled missions too (default: only active ones)'),
+      limit: z.number().optional().describe('Max results, 1-500 (default 100)'),
+    },
+    async ({ include_finished, limit }, extra) => {
+      const svc = missions();
+      if (!svc) return err(NO_RUNTIME);
+      const agentId = callerAgentId(extra);
+      if (!agentId) return err('this tool requires an authenticated agent session');
+      try {
+        const list = await svc.listMissionsForAgent(agentId, {
+          status: include_finished ? 'all' : 'active',
+          limit,
+        });
+        return ok({ missions: list });
+      } catch (e: any) {
+        return toolError(e, 'failed to list missions');
       }
     },
   );
