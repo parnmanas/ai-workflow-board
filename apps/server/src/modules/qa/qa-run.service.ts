@@ -669,9 +669,33 @@ export class QaRunService {
 
     // Dispatch index 0. _dispatchBatchIndex walks forward past any scenario
     // whose dispatch throws (deleted/disabled), so a bad first scenario can't
-    // wedge the whole batch.
-    await this._dispatchBatchIndex(batch, 0);
+    // wedge the whole batch. throwOnBudget=true here (unlike the internal
+    // onRunFinalized/resumeWedgedBatch re-entries): nothing in this batch has
+    // dispatched yet, so there's no partial progress to protect by swallowing
+    // the rejection — the caller should see the 429 instead of a
+    // misleadingly "successful" empty batch (ticket a51ec6d9 review round 2,
+    // subsidiary point).
+    await this._dispatchBatchIndex(batch, 0, { throwOnBudget: true });
     return this.getBatch(batch.id, args.workspaceId);
+  }
+
+  /**
+   * Retry the dispatch `_dispatchBatchIndex` parked on a transient
+   * RunBudgetExceededError (ticket a51ec6d9 review round 2 — the rolling-
+   * window guard's own escape hatch is "wait for the window to clear", but
+   * nothing was re-driving that retry, so a batch hitting the guard mid-walk
+   * stayed `running` forever with no live run at its current index, and a
+   * schedule pointing at it via last_batch_id skipped every tick permanently).
+   * Called from QaScheduleService.runOnce. No-op unless the batch is actually
+   * wedged that way — a batch that's `done`/`aborted`, or `running` with a
+   * live run already recorded at current_index, is left alone.
+   */
+  async resumeWedgedBatch(batchId: string): Promise<void> {
+    const batch = await this.batchRepo.findOne({ where: { id: batchId } });
+    if (!batch || batch.status !== 'running') return;
+    const runIds = Array.isArray(batch.run_ids) ? batch.run_ids : [];
+    if (runIds[batch.current_index]) return; // live run already dispatched — not wedged
+    await this._dispatchBatchIndex(batch, batch.current_index);
   }
 
   /**
@@ -774,7 +798,7 @@ export class QaRunService {
    * at this index instead so a later retrigger can resume once the window
    * clears.
    */
-  private async _dispatchBatchIndex(batch: QaRunBatch, index: number): Promise<void> {
+  private async _dispatchBatchIndex(batch: QaRunBatch, index: number, opts?: { throwOnBudget?: boolean }): Promise<void> {
     const ids = Array.isArray(batch.scenario_ids) ? batch.scenario_ids : [];
     let i = index;
     while (i < ids.length) {
@@ -795,6 +819,17 @@ export class QaRunService {
         return;
       } catch (e: any) {
         if (e instanceof RunBudgetExceededError) {
+          if (opts?.throwOnBudget) {
+            // startBatch's fresh dispatch (throwOnBudget=true, always index 0):
+            // on this thrown path the caller never receives the batch's id (see
+            // startBatch/_dispatchBatch call sites — neither stores it before
+            // the throw), so nothing can ever look this row up to resume or
+            // inspect it. Remove it instead of leaving an unreachable orphan
+            // stuck `running` forever.
+            await this.batchRepo.delete(batch.id);
+            this.logService.warn('QA', `batch ${batch.id} hit run budget on first dispatch — removed (429 propagated, nothing to resume): ${e.message}`);
+            throw e;
+          }
           batch.current_index = i;
           await this.batchRepo.save(batch);
           this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} hit run budget — leaving batch running for retry: ${e.message}`);

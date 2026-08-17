@@ -89,3 +89,62 @@ test('QA batch: a run-budget breach on the next index leaves the batch running, 
 
   exitAfterTests(0);
 });
+
+// review a51ec6d9 round 2, subsidiary (non-blocking) point: when the run-budget
+// guard rejects the batch's very FIRST dispatch (index 0), nothing has
+// progressed yet — there's no partial batch to protect by parking it silently,
+// so start_qa_batch should propagate the 429 instead of returning a
+// misleadingly "successful" batch with run_ids: []. Contrast with the test
+// above, where index 0 already succeeded and the batch is genuinely resumable
+// (and does get resumed — see qa-batch-run-budget-resume.test.mjs).
+test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejection, not a silent empty-batch success', async (t) => {
+  step('Boot app + MCP');
+  const { app, port, modules } = await bootApp({ port: 7917 });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+
+  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch-budget-first' });
+  await ds.getRepository('Workspace').update(ws.id, {
+    hard_budget_config: JSON.stringify({ max_runs_per_window: 1, window_minutes: 60, notify: false }),
+  });
+
+  const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-batch-budget-first-runner' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+
+  const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
+  t.after(() => { void mcp.close().catch(() => {}); });
+
+  step('Create scenarios: one to consume the only run-budget slot ahead of time, two for the batch itself');
+  const warm = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, 'budget-first-warm'));
+  const s0 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, 'budget-first-s0'));
+  const s1 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, 'budget-first-s1'));
+  assert.ok(!warm?.isError && warm.id, `create warm failed: ${JSON.stringify(warm)}`);
+  assert.ok(!s0?.isError && s0.id, `create s0 failed: ${JSON.stringify(s0)}`);
+  assert.ok(!s1?.isError && s1.id, `create s1 failed: ${JSON.stringify(s1)}`);
+
+  step('Consume the only run-budget slot with an unrelated single run BEFORE the batch starts');
+  const warmRun = await mcp.callTool('start_qa_run', { scenario_id: warm.id, board_id: board.id });
+  assert.ok(!warmRun?.isError && warmRun.run_id, `warm run failed: ${JSON.stringify(warmRun)}`);
+
+  step('start_qa_batch — index 0 itself hits the guard, since the window is already exhausted');
+  const batchResp = await mcp.callTool('start_qa_batch', {
+    workspace_id: ws.id,
+    board_id: board.id,
+    scenario_ids: [s0.id, s1.id],
+  });
+  assert.ok(batchResp?.isError, 'start_qa_batch must surface the rejection, not a fake success');
+  assert.match(JSON.stringify(batchResp.error || ''), /run budget exceeded/i, 'the propagated error is the run-budget rejection, not something else');
+
+  const s0Runs = await mcp.callTool('list_qa_runs', { scenario_id: s0.id, workspace_id: ws.id });
+  assert.equal((Array.isArray(s0Runs) ? s0Runs : []).length, 0, 'no run was created for scenario 0 — nothing partially started');
+
+  // start_qa_batch never returns a batch id on this thrown path, so nothing
+  // could ever look up or resume the row _dispatchBatchIndex persisted before
+  // hitting the guard — it must be removed rather than left as an unreachable
+  // orphan stuck `running` forever (no schedule/reaper covers QaRunBatch rows).
+  const orphanBatches = await ds.getRepository('QaRunBatch').count({ where: { workspace_id: ws.id } });
+  assert.equal(orphanBatches, 0, 'the just-created batch row is cleaned up too, not left as an unreachable orphan');
+
+  exitAfterTests(0);
+});

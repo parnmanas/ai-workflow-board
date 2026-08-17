@@ -10,8 +10,13 @@
 //   • run-now manual trigger fires regardless of `enabled` and does NOT disturb
 //     next_run_at.
 //   • disabled schedule is never swept (negative case).
-//   • SKIP-if-running — a schedule whose previous batch is still 'running' is
-//     skipped (next_run_at still advanced, no overlapping dispatch).
+//   • SKIP-if-running — a schedule whose previous batch is still 'running' with
+//     a LIVE run at current_index is skipped (next_run_at still advanced, no
+//     overlapping dispatch).
+//   • RESUME-if-wedged (ticket a51ec6d9 review round 2) — a schedule whose
+//     previous batch is 'running' but has NO live run at current_index (parked
+//     by a transient run-budget rejection) is resumed via
+//     QaRunService.resumeWedgedBatch instead of skipped forever.
 //   • orphan self-heal — an enabled schedule with next_run_at=null gets a cursor
 //     computed forward WITHOUT firing on the same sweep.
 //
@@ -79,16 +84,27 @@ function makeBatchRepo(batches = []) {
 }
 
 // startBatch spy — records every call and returns a fake running batch.
-function makeQaRunService() {
+// resumeWedgedBatch is a spy too — it records the batch id it was asked to
+// resume and, by default, just flips that batch to 'done' (a stand-in for a
+// real _dispatchBatchIndex retry succeeding). Pass `resumeOutcome` to make it
+// leave the batch 'running' instead (still wedged — window hasn't cleared).
+function makeQaRunService(batches, { resumeOutcome = 'done' } = {}) {
   const calls = [];
+  const resumeCalls = [];
   let seq = 0;
   return {
     calls,
+    resumeCalls,
     async startBatch(args) {
       seq += 1;
       const id = `batch-${seq}`;
       calls.push({ id, args });
       return { id, scenario_ids: args.scenarioIds || ['a', 'b'], status: 'running' };
+    },
+    async resumeWedgedBatch(batchId) {
+      resumeCalls.push(batchId);
+      const batch = batches.find((b) => b.id === batchId);
+      if (batch && resumeOutcome === 'done') batch.status = 'done';
     },
   };
 }
@@ -114,10 +130,10 @@ function makeSchedule(over = {}) {
   };
 }
 
-function svcWith(rows, batches = []) {
+function svcWith(rows, batches = [], qaRunServiceOpts = {}) {
   const scheduleRepo = makeScheduleRepo(rows);
   const batchRepo = makeBatchRepo(batches);
-  const qaRunService = makeQaRunService();
+  const qaRunService = makeQaRunService(batches, qaRunServiceOpts);
   const svc = new QaScheduleService(scheduleRepo, batchRepo, qaRunService, noopLog);
   return { svc, scheduleRepo, batchRepo, qaRunService };
 }
@@ -175,16 +191,56 @@ test('disabled schedule is never swept even when overdue', async () => {
   assert.equal(qaRunService.calls.length, 0, 'startBatch never called');
 });
 
-test('SKIP-if-running: previous batch still running → skipped, next_run_at still advanced', async () => {
+test('SKIP-if-running: previous batch has a LIVE run at current_index → skipped, next_run_at still advanced', async () => {
   const sch = makeSchedule({ last_batch_id: 'prev-batch' });
-  const { svc, qaRunService } = svcWith([sch], [{ id: 'prev-batch', status: 'running' }]);
+  const { svc, qaRunService } = svcWith([sch], [
+    { id: 'prev-batch', status: 'running', run_ids: ['run-x'], current_index: 0 },
+  ]);
 
   const { dispatched, skipped } = await svc.runOnce(NOW);
   assert.deepEqual(dispatched, [], 'no dispatch while previous batch runs');
   assert.deepEqual(skipped, ['sch-1'], 'this occurrence is skipped');
   assert.equal(qaRunService.calls.length, 0, 'startBatch not called');
+  assert.equal(qaRunService.resumeCalls.length, 0, 'a genuinely in-flight batch is not treated as wedged');
   assert.ok(new Date(sch.next_run_at).getTime() > NOW.getTime(), 'cursor still advanced so it retries next occurrence');
   assert.equal(sch.last_batch_id, 'prev-batch', 'last_batch_id untouched on skip');
+});
+
+// ticket a51ec6d9 review round 2: _dispatchBatchIndex parks a batch 'running'
+// with NO run recorded at current_index when it hits a transient
+// RunBudgetExceededError. Before this fix, SKIP-if-running treated that
+// indistinguishably from a genuinely in-flight batch — this schedule's
+// next_run_at kept advancing every tick and skipped forever, since nothing
+// else ever re-drove the retry.
+test('RESUME-if-wedged: previous batch running with NO live run at current_index → resumed, not permanently skipped', async () => {
+  const sch = makeSchedule({ last_batch_id: 'prev-batch' });
+  const { svc, qaRunService } = svcWith([sch], [
+    { id: 'prev-batch', status: 'running', run_ids: [], current_index: 0 },
+  ]);
+
+  const { dispatched, skipped } = await svc.runOnce(NOW);
+  assert.deepEqual(dispatched, [], 'this tick does not ALSO start a fresh batch alongside the resume');
+  assert.deepEqual(skipped, ['sch-1'], 'no fresh dispatch happened this tick');
+  assert.equal(qaRunService.calls.length, 0, 'startBatch not called — resume reuses the existing batch');
+  assert.deepEqual(qaRunService.resumeCalls, ['prev-batch'], 'resumeWedgedBatch called with the wedged batch id');
+  assert.ok(new Date(sch.next_run_at).getTime() > NOW.getTime(), 'cursor still advances to the next occurrence');
+});
+
+test('RESUME-if-wedged self-heals: once the resumed batch reaches a terminal status, the NEXT due tick dispatches fresh (reappears in `dispatched`)', async () => {
+  const sch = makeSchedule({ last_batch_id: 'prev-batch', interval_ms: 10 * MIN });
+  const batches = [{ id: 'prev-batch', status: 'running', run_ids: [], current_index: 1 }];
+  const { svc, qaRunService } = svcWith([sch], batches, { resumeOutcome: 'done' });
+
+  const first = await svc.runOnce(NOW);
+  assert.deepEqual(first.dispatched, [], 'first tick only resumes — the resumed batch reaches done as a side effect');
+  assert.deepEqual(first.skipped, ['sch-1']);
+  assert.equal(batches[0].status, 'done', 'the resume call (stubbed) drove the wedged batch to a terminal status');
+
+  const secondNow = new Date(sch.next_run_at.getTime() + MIN);
+  const second = await svc.runOnce(secondNow);
+  assert.deepEqual(second.dispatched, ['sch-1'], 'schedule is NOT permanently skipped — it dispatches fresh once last_batch_id is no longer running');
+  assert.deepEqual(second.skipped, [], 'no skip this time — the old batch is terminal');
+  assert.equal(qaRunService.calls.length, 1, 'a brand-new startBatch call, not a further resume');
 });
 
 test('a finished previous batch does NOT block the next dispatch', async () => {
