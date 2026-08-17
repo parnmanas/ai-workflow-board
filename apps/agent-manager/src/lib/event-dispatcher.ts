@@ -1845,13 +1845,17 @@ export class EventDispatcher {
     // belt that misled operators into thinking they needed to enable
     // fs_browser in config — but config gating was already removed in
     // fs-browser.ts. If main.ts somehow forgot to wire a FsBrowser, lazy-
-    // construct one here with empty config so browsing still works (the
-    // FsBrowser default is unrestricted-from-$HOME). Logged once when it
+    // construct one here so browsing still works. Logged once when it
     // happens so the wiring bug is visible.
+    //
+    // 2026-08-17 보안 감사: 이 폴백은 fsSection 으로 `null` 을 넘겨서 운영자가
+    // 설정한 `fs_browser.roots` 를 통째로 버리고 있었다 — main.ts 배선이 빠진
+    // 순간 스코프 제한이 조용히 사라져 호스트 전체가 열린다. 반드시 main.ts 와
+    // 동일한 섹션을 넘겨서 폴백 경로에서도 스코프가 유지되게 한다.
     if (!this.#fsBrowser) {
       log('handleFsRequest: no FsBrowser wired — lazy-constructing a default. Fix main.ts wiring.');
       const { FsBrowser } = await import('./fs-browser.js');
-      this.#fsBrowser = new FsBrowser(this.#config, null);
+      this.#fsBrowser = new FsBrowser(this.#config, (this.#config as any)?.fs_browser || null);
     }
 
     const result = await this.#fsBrowser.handle({

@@ -46,6 +46,8 @@ export class FsBrowser implements FsBrowserContract {
   private rawRoots: string[];
   private roots: string[] = [];
   private hasExplicitRoots: boolean;
+  /** Dedupes the fail-closed denial log across per-request retries. */
+  private scopeUnavailableLogged = false;
 
   constructor(_config: AwbConfig, fsSection?: FsBrowserSection | null) {
     this.rawRoots = Array.isArray(fsSection?.roots)
@@ -55,23 +57,64 @@ export class FsBrowser implements FsBrowserContract {
     this.resolveRootsSync();
   }
 
-  private resolveRootsSync(): void {
+  /**
+   * Resolve the configured roots to realpaths.
+   *
+   * Re-runnable: an operator-pinned root can be *temporarily* unreachable
+   * (unmounted volume, directory not created yet), so `ensureRootsResolved()`
+   * retries this on each request and the picker recovers on its own once the
+   * path comes back. `quiet` suppresses the per-root drop log on those retries.
+   */
+  private resolveRootsSync(quiet = false): void {
+    const resolved: string[] = [];
     for (const root of this.rawRoots) {
       try {
         const abs = pathResolve(root);
-        const real = realpathSync(abs);
-        this.roots.push(real);
+        resolved.push(realpathSync(abs));
       } catch (err: any) {
-        log(`[fs-browser] scope root unreachable, dropped: ${root} (${err?.code || err?.message})`);
+        if (!quiet) {
+          log(`[fs-browser] scope root unreachable, dropped: ${root} (${err?.code || err?.message})`);
+        }
       }
     }
+    this.roots = resolved;
+    if (quiet) return;
+
     if (this.hasExplicitRoots && this.roots.length === 0) {
-      log('[fs-browser] explicit roots configured but none resolved — falling back to unrestricted browsing');
+      // 2026-08-17 보안 감사: 예전에는 여기서 "unrestricted browsing" 으로
+      // 폴백했다. 운영자가 roots 를 명시했다는 것은 "이 밖은 보이면 안 된다"는
+      // 정책 선언인데, 마운트가 빠졌다거나 디렉터리 이름이 바뀐 것 같은 일시적
+      // 사유로 그 정책이 조용히 사라지고 호스트 전체(~/.ssh, ~/.npmrc,
+      // ~/.config/awb-agent-manager/config.json …)가 읽기 가능해졌다.
+      // fail-closed 로 뒤집는다 — 못 좁힐 바에는 아무것도 내주지 않는다.
+      log('[fs-browser] explicit roots configured but none resolved — DENYING all filesystem ops (fail-closed)');
     } else if (this.roots.length > 0) {
       log(`[fs-browser] enabled with ${this.roots.length} configured root(s): ${this.roots.join(', ')}`);
     } else {
       log('[fs-browser] enabled (unrestricted — no fs_browser.roots configured; UI starts at $HOME)');
     }
+  }
+
+  /**
+   * Retry root resolution when an explicitly-configured scope is currently
+   * empty, so a transient outage self-heals instead of permanently bricking
+   * the picker (the price of the fail-closed policy above).
+   */
+  private ensureRootsResolved(): void {
+    if (!this.hasExplicitRoots || this.roots.length > 0) return;
+    this.resolveRootsSync(true);
+    if (this.roots.length > 0) {
+      this.scopeUnavailableLogged = false;
+      log(`[fs-browser] scope root(s) reachable again: ${this.roots.join(', ')}`);
+    }
+  }
+
+  /**
+   * True when the operator pinned roots but none currently resolve. Every
+   * filesystem op is refused while this holds.
+   */
+  private get scopeUnavailable(): boolean {
+    return this.hasExplicitRoots && this.roots.length === 0;
   }
 
   /**
@@ -128,7 +171,11 @@ export class FsBrowser implements FsBrowserContract {
       // points (home + cwd) so the picker has somewhere meaningful to land.
       // `enabled` is always true now — the field is kept on the wire for
       // back-compat with older clients that gate UI on it.
-      const advertisedRoots = this.roots.length > 0 ? this.roots.slice() : this.defaultStartingPoints();
+      // When roots are pinned, advertise ONLY those (possibly an empty list
+      // while they're unreachable). Falling back to $HOME/cwd here would hand
+      // the picker a starting point the operator deliberately excluded.
+      this.ensureRootsResolved();
+      const advertisedRoots = this.hasExplicitRoots ? this.roots.slice() : this.defaultStartingPoints();
       return {
         ok: true,
         data: {
@@ -159,6 +206,24 @@ export class FsBrowser implements FsBrowserContract {
       return { ok: false, error: 'path must be absolute', code: 'PATH_INVALID' };
     }
 
+    // Fail closed BEFORE touching the filesystem: while a pinned scope is
+    // unresolvable we must not even leak existence via realpath's ENOENT.
+    this.ensureRootsResolved();
+    if (this.scopeUnavailable) {
+      if (!this.scopeUnavailableLogged) {
+        log(
+          `[fs-browser] DENY ${op}: configured fs_browser.roots (${this.rawRoots.join(', ')}) ` +
+            'are unreachable — refusing all filesystem ops until they resolve',
+        );
+        this.scopeUnavailableLogged = true;
+      }
+      return {
+        ok: false,
+        error: 'Configured fs_browser.roots are unreachable — browsing refused',
+        code: 'SCOPE_DENIED',
+      };
+    }
+
     let realPath: string;
     try {
       realPath = await fsp.realpath(pathResolve(rawPath));
@@ -168,8 +233,10 @@ export class FsBrowser implements FsBrowserContract {
 
     // Scope enforcement only kicks in when roots are explicitly configured.
     // Without a roots list, the picker can browse anywhere on the manager
-    // host (intentional default for ST-7 single-operator setups).
-    if (this.roots.length > 0 && !this.inScope(realPath)) {
+    // host (intentional default for ST-7 single-operator setups). Gate on
+    // hasExplicitRoots — NOT on roots.length — so an empty resolved list can
+    // never read as "no scope configured, allow everything".
+    if (this.hasExplicitRoots && !this.inScope(realPath)) {
       return { ok: false, error: `Path outside configured roots: ${rawPath}`, code: 'SCOPE_DENIED' };
     }
 

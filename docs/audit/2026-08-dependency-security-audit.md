@@ -925,3 +925,72 @@ self-update 가 `npm ci` 로만 설치하고(로컬 설치용 `['install']` spaw
 
 `production.private` `deploy.yml` 서드파티 액션(`docker/*`, `appleboy/ssh-action`)
 SHA 고정 — 브랜치 push 가 실배포를 유발하므로 여전히 승인 대기.
+
+---
+
+## 재검증 로그 — 2026-08-17 (`main` @ `df4c5961`)
+
+의존성은 여전히 깨끗했고, 발견은 **fs-browser 스코프의 fail-open** 이었다.
+
+### 1. 정기 점검 (모두 통과, 변동 없음)
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (main) | **0 vulnerabilities** (prod 272 / dev 307 / opt 63, total 580) |
+| 카나리아 (`lodash@4.17.4`) | 1 critical 검출 — 어드바이저리 경로 살아있음 확인 |
+| lockfile 위생 | 581 엔트리, 비-npmjs 0 (워크스페이스 link 3건 제외), integrity 누락 0, install script 5건 전부 allowlist |
+| publish provenance | `awb-agent-manager@1.6.117` SLSA v1 증명 유지 |
+| `production.private` | `package.json`/`package-lock.json`/`Dockerfile` **바이트 동일** — 런타임 드리프트 없음 |
+| 기존 가드 | supply-chain 16/16, react-router 6/6 |
+
+`main` 이 전날 감사 커밋(`df4c5961`)에서 전진하지 않았으므로 새 의존성 발견은
+기대할 수 없었다. 그래서 **이전 감사들이 건드리지 않은 표면**을 골라 들어갔다 —
+AWB 서버가 SSE `fs_request` 로 구동하는 reverse-RPC, 즉 매니저 호스트의 파일시스템.
+
+### 2. 발견 — 운영자가 지정한 스코프가 조용히 증발하는 두 경로
+
+`fs_browser.roots` 미설정 시 호스트 전체 브라우징은 ST-7 의 **의도된 기본값**이라
+그대로 둔다. 문제는 운영자가 roots 를 **명시했는데도** 그 정책이 사라지던 두 지점이다.
+
+1. **`fs-browser.ts` `resolveRootsSync()` — 설정한 roots 가 하나도 realpath 되지
+   않으면 "falling back to unrestricted browsing".** 마운트 해제, 디렉터리 개명,
+   아직 생성 전인 경로 같은 *일시적* 사유로 confinement 가 통째로 풀린다. 스코프
+   판정이 `this.roots.length > 0 && !inScope(...)` 라서 "해결된 root 0개" 가
+   "스코프 설정 없음 = 전부 허용" 으로 읽혔다. 이 상태에서 열리는 것:
+   `~/.ssh/id_*`, `~/.npmrc`(NPM_TOKEN), `~/.config/awb-agent-manager/config.json`
+   (매니저의 AWB 자격증명) — 즉 이전 감사들이 쌓아온 공급망 방어의 **열쇠**들이다.
+2. **`event-dispatcher.ts` lazy-construct 폴백이 `new FsBrowser(this.#config, null)`.**
+   main.ts 배선이 빠진 순간 설정된 roots 를 통째로 버리고 무제한으로 뜬다.
+   `fs_browser` 가 `AwbConfig` 에 타입으로 없고 `(config as any)` 로만 읽히는 탓에
+   이 `null` 이 타입 검사에 걸리지 않았다.
+
+### 3. 조치 — fail-closed + 자동 복구
+
+- 스코프 판정을 `roots.length` 가 아니라 **`hasExplicitRoots`** 기준으로 변경.
+  운영자가 좁히겠다고 선언했으면, 좁히지 못할 때는 **아무것도 내주지 않는다.**
+- 거부는 `realpath` **이전**에 수행 — 스코프 불능 상태에서 ENOENT/성공 차이로
+  스코프 밖 경로의 존재 여부가 새는 것까지 막는다.
+- fail-closed 의 대가(일시 장애 시 picker 영구 정지)는 **요청마다 재해결**
+  (`ensureRootsResolved()`)로 상쇄 — 마운트가 돌아오면 스스로 복구된다.
+- `roots` op 이 스코프 불능일 때 `$HOME`/cwd 를 광고하던 것도 제거 (빈 목록 반환).
+  운영자가 일부러 배제한 지점을 picker 시작점으로 건네주면 안 된다.
+- dispatcher 폴백이 `(this.#config as any)?.fs_browser` 를 넘기도록 수정.
+
+### 4. 가드 (기계 강제)
+
+신규 `apps/agent-manager/test/fs-browser-scope.test.mjs` **10건** — 이 표면은
+그동안 테스트가 **0건**이었다. 동작 8건(in/out-of-scope, 미해결 스코프 전면 거부,
+빈 roots 광고, 자동 복구, symlink 탈출, mkdir name traversal, 기본값 무제한 유지,
+상대경로 거부) + 소스 가드 2건(무제한 폴백 부활 금지, dispatcher 폴백의 roots 보존).
+
+- **가드가 실제로 무는지 확인**: 수정 원복 시 정확히 **5건 실패**(그중
+  "미해결 스코프 전면 거부" 는 스코프 밖 비밀 파일 읽기가 `ok:true` 로 성공 —
+  취약점이 실재했음을 증명), 복원 후 10/10 통과.
+- 회귀 없음: agent-manager 전체 스위트 **960 테스트 (958 pass / 0 fail / 2 skip)**,
+  supply-chain 16/16, react-router 6/6.
+
+### 5. 이월 (변동 없음, 운영자 승인 필요)
+
+`production.private` `deploy.yml` 서드파티 액션 SHA 고정 — 브랜치 push 가 실배포를
+유발하므로 여전히 승인 대기. 이번 변경은 agent-manager 전용이라 webapp 런타임
+영향이 없어 `production.private` 병합은 하지 않았다.
