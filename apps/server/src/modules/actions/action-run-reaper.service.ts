@@ -134,23 +134,30 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
     try {
       // Only non-terminal ActionRun status: 'running'. 'succeeded'/'failed' are
       // terminal (see ActionRun.status doc comment) and never candidates.
-      const candidates = await this.runRepo.find({
-        where: { status: 'running' },
-        order: { created_at: 'ASC' },
-        take: ACTION_RUN_REAPER_BATCH,
-      });
+      // source_ticket_id-less runs (cron/manual/on-ticket-done — see class doc)
+      // are excluded HERE, at the query stage, rather than via a skip inside the
+      // loop below: a JS-loop skip still spends its take(ACTION_RUN_REAPER_BATCH)
+      // budget on them, so once permanently-'running' contract-less rows
+      // outnumber the batch size, a created_at-ASC sweep fills entirely with
+      // always-skipped rows and a real, newer zombie is never reached — silently,
+      // since the "reaped stale runs" log only fires when something was actually
+      // reaped. Filtering before take() keeps the budget scoped to real
+      // candidates. IS NOT NULL is required alongside != '' because Postgres's
+      // three-valued NULL comparison would otherwise silently drop legacy NULL
+      // rows out of the "has a ticket" side too (Not('') was avoided for the
+      // same reason when this gate was first added).
+      const candidates = await this.runRepo
+        .createQueryBuilder('r')
+        .where('r.status = :status', { status: 'running' })
+        .andWhere("r.source_ticket_id IS NOT NULL AND r.source_ticket_id != ''")
+        .orderBy('r.created_at', 'ASC')
+        .take(ACTION_RUN_REAPER_BATCH)
+        .getMany();
       if (candidates.length === 0) return { reaped: [], details: [] };
 
       const reaped: string[] = [];
       const details: Array<{ id: string; age_min: number }> = [];
       for (const run of candidates) {
-        // complete_action_run's completion contract is only rendered into the
-        // prompt when source_ticket_id is set (actions.service.ts renderPrompt).
-        // cron/manual/on-ticket-done dispatches never pass a source ticket, so
-        // their target agent never learns the run_id and 'running' is a
-        // permanent, correct terminal-for-this-run-type state — not a zombie.
-        // Reaping those would mass-mislabel healthy history as failed.
-        if (!(run.source_ticket_id || '').trim()) continue;
         const ageMs = now.getTime() - new Date(run.created_at).getTime();
         if (ageMs < this.ttlMs) continue;
         const ageMin = Math.round(ageMs / 60_000);

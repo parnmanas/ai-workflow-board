@@ -22,6 +22,9 @@
 //   - age >= TTL, but completeRun reports previouslyCompleted (a real
 //     complete_action_run raced the sweep)           -> NOT counted as reaped, no resume
 //   - a second sweep after a reap is idempotent (row already terminal)
+//   - a batch full of contract-less running rows never starves out a real,
+//     newer zombie ordered after them (ticket 23dfc38a — the exclusion must
+//     live in the candidate QUERY, before take(), not a JS-loop skip after)
 //
 // Imports the compiled service from dist/ (built by `npm run build` in the
 // test script), matching the qa-run-reaper-behavior.test.mjs precedent.
@@ -34,12 +37,38 @@ const HOUR = 60 * 60_000;
 const MIN = 60_000;
 const NOW = new Date('2026-08-18T12:00:00Z');
 
+// Fake TypeORM query builder — covers exactly the where/andWhere/orderBy/take
+// chain runOnce() calls. getMany() applies status + source_ticket_id filtering
+// BEFORE take(), mirroring real SQL (WHERE runs before LIMIT) — this is the
+// property the batch-starvation regression test below depends on.
 function makeRunRepo(rows) {
   return {
     rows,
-    async find({ where, take }) {
-      const status = where?.status;
-      return rows.filter((r) => r.status === status).slice(0, take ?? rows.length);
+    createQueryBuilder() {
+      let status = null;
+      let requireSourceTicket = false;
+      let takeN = rows.length;
+      const qb = {
+        where(_expr, params) {
+          if (params && 'status' in params) status = params.status;
+          return qb;
+        },
+        andWhere(expr) {
+          if (typeof expr === 'string' && expr.includes('source_ticket_id')) requireSourceTicket = true;
+          return qb;
+        },
+        orderBy() { return qb; },
+        take(n) { takeN = n; return qb; },
+        async getMany() {
+          let out = rows.filter((r) => r.status === status);
+          if (requireSourceTicket) {
+            out = out.filter((r) => r.source_ticket_id != null && r.source_ticket_id !== '');
+          }
+          out = out.slice().sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          return out.slice(0, takeN);
+        },
+      };
+      return qb;
     },
   };
 }
@@ -193,9 +222,12 @@ test('a run completed by a real concurrent complete_action_run between SELECT an
   // Simulate the race: by the time completeRun runs, the row is already terminal.
   rows[0].status = 'succeeded';
   const runRepo = {
-    // find() still returns it (it was 'running' at SELECT time in the real DB
-    // race window) — the guard lives in completeRun's previouslyCompleted path.
-    async find() { return rows; },
+    // getMany() still returns it (it was 'running' at SELECT time in the real
+    // DB race window) — the guard lives in completeRun's previouslyCompleted path.
+    createQueryBuilder() {
+      const qb = { where: () => qb, andWhere: () => qb, orderBy: () => qb, take: () => qb, getMany: async () => rows };
+      return qb;
+    },
   };
   const actionsService = makeActionsService(rows);
   const triggerLoop = makeTriggerLoopService();
@@ -218,6 +250,43 @@ test('runOnce is idempotent — a second sweep reaps nothing once the row is ter
   assert.deepEqual(first.reaped, ['zombie-2']);
 
   const second = await svc.runOnce(NOW);
-  assert.deepEqual(second.reaped, [], 'row is now status=failed, so find({status:running}) no longer selects it');
+  assert.deepEqual(second.reaped, [], 'row is now status=failed, so the running-only candidate query no longer selects it');
   assert.equal(triggerLoop.calls.length, 1, 'no duplicate resume on the second, no-op sweep');
+});
+
+test('batch starvation regression: 200 contract-less running rows ahead of a real zombie in created_at order do not starve it out of the sweep', async () => {
+  // Mirrors the private ACTION_RUN_REAPER_BATCH=200 in
+  // action-run-reaper.service.ts. Before ticket 23dfc38a, the contract-less
+  // gate was a skip INSIDE the loop, after take(200) had already run — so
+  // once contract-less (cron/manual/on-ticket-done) running rows outnumbered
+  // the batch size, the oldest-first candidate batch filled entirely with
+  // rows that are always skipped, and a real, newer ticket-driven zombie was
+  // never even fetched. The fix excludes them in the candidate query itself,
+  // before take() spends its budget — this test proves that ordering holds
+  // by placing 200 contract-less rows, all older than the one real zombie,
+  // ahead of it in created_at ASC order.
+  const BATCH = 200;
+  const rows = [];
+  for (let i = 0; i < BATCH; i++) {
+    rows.push(makeRun(`cron-${i}`, { ageMs: (10 + i) * HOUR, sourceTicketId: '' }));
+  }
+  rows.push(makeRun('real-zombie', { ageMs: 3 * HOUR, sourceTicketId: 'tkt-starved', shouldResume: true }));
+
+  const runRepo = makeRunRepo(rows);
+  const actionsService = makeActionsService(rows);
+  const triggerLoop = makeTriggerLoopService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+
+  const { reaped } = await svc.runOnce(NOW);
+
+  assert.deepEqual(
+    reaped,
+    ['real-zombie'],
+    'the real zombie must still be reaped even though 200 older contract-less rows precede it in created_at order',
+  );
+  assert.deepEqual(
+    triggerLoop.calls,
+    [{ ticketId: 'tkt-starved', triggerSource: 'action_run_reaped', triggeredBy: '' }],
+    'source ticket is resumed exactly once, unblocked by the contract-less rows ahead of it',
+  );
 });

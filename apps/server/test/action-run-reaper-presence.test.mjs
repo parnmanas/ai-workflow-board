@@ -47,13 +47,18 @@ test('ActionRunReaperService source defines the sweep loop, TTL gate, and env co
   // Runs without a source_ticket_id never received the complete_action_run
   // completion contract (actions.service.ts only renders it when a source
   // ticket is present), so their target agent never learned the run_id and
-  // 'running' is a permanent, correct state for them — not a zombie. A
-  // refactor that drops this gate would mass-mislabel cron/manual/
-  // on-ticket-done history as failed.
+  // 'running' is a permanent, correct state for them — not a zombie. This must
+  // be excluded at the candidate QUERY (not a JS-loop skip after the fact) —
+  // a loop skip still spends the take(ACTION_RUN_REAPER_BATCH) budget on
+  // contract-less rows, so once they outnumber the batch size a real, newer
+  // zombie is silently never reached (ticket 23dfc38a). IS NOT NULL must sit
+  // alongside != '' since a bare != '' would silently drop legacy NULL rows
+  // under Postgres's three-valued NULL comparison.
+  assert.match(code, /createQueryBuilder\(/, 'candidate selection must use createQueryBuilder, not repo.find(), so the source_ticket_id gate can live in SQL before take()');
   assert.match(
     code,
-    /if\s*\(\s*!\s*\(\s*run\.source_ticket_id\s*\|\|\s*['"]['"]\s*\)\.trim\(\)\s*\)\s*continue/,
-    'runOnce must skip candidates with no source_ticket_id before applying the TTL gate',
+    /source_ticket_id\s+IS\s+NOT\s+NULL\s+AND\s+r?\.?source_ticket_id\s*!=\s*['"]{2}/,
+    'candidate query must filter out contract-less runs (source_ticket_id IS NOT NULL AND != \'\') before take(), not inside the reap loop',
   );
   // Age gate: ActionRun has no started_at column, so age is measured from
   // created_at only (not a started_at ?? created_at fallback like QaRun/
