@@ -190,18 +190,27 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       // reaper attempts would fail a mission the reaper never actually
       // re-briefed. (data is a simple-json column; on sqlite it round-trips as
       // an object, so filter in memory rather than with a JSON predicate that
-      // differs per backend.)
+      // differs per backend.) `type:'error'` rows are pulled in too so a nudge
+      // that failed to send (room deleted, sender participant gone — see the
+      // catch below) still counts as an attempt; a reason filter keeps out any
+      // unrelated error event (e.g. a failed initial mission briefing).
       const wakeEvents = await this.eventRepo.find({
-        where: { mission_id: mission.id, type: 'orchestrator_woken' },
+        where: { mission_id: mission.id, type: In(['orchestrator_woken', 'error']) },
         order: { created_at: 'DESC' },
         take: 20,
       });
-      const priorPlanningNudges = wakeEvents.filter((e) => e.data?.reason === 'planning_timeout').length;
+      const planningAttempts = wakeEvents.filter(
+        (e) => e.type === 'orchestrator_woken' || e.data?.reason === 'planning_timeout_nudge_failed',
+      );
+      const priorPlanningNudges = planningAttempts.filter(
+        (e) => e.data?.reason === 'planning_timeout' || e.data?.reason === 'planning_timeout_nudge_failed',
+      ).length;
 
-      // Back off a full timeout window from the LAST wake of any kind — an
-      // operator who just nudged deserves a chance to be answered before the
-      // reaper piles another brief on top.
-      const lastWake = wakeEvents[0];
+      // Back off a full timeout window from the LAST attempt of any kind,
+      // delivered or failed — an operator who just nudged, or a reaper attempt
+      // that merely couldn't be delivered, both deserve a chance to be
+      // answered before the reaper piles another brief on top.
+      const lastWake = planningAttempts[0];
       if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.planningTimeoutMs) continue;
 
       if (priorPlanningNudges >= PLANNING_NUDGE_LIMIT) {
@@ -238,6 +247,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
           'Orchestration',
           `planning nudge failed for mission ${mission.id}: ${e?.message || e}`,
         );
+        await this.missions.recordEvent(mission, {
+          type: 'error',
+          message: `Could not re-brief the orchestrator for planning (${e?.message || e}). The mission needs operator attention.`,
+          actor_type: 'system',
+          data: { reason: 'planning_timeout_nudge_failed' },
+        });
       }
     }
     return { nudged, failed };
@@ -280,16 +295,22 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       // Same bookkeeping as reapStalledPlanning: count prior reaper attempts off
       // the timeline (`data.reason`) rather than a column, and back off a full
       // window from the LAST wake of any kind (including decideWake's own
-      // 'stalled' / 'all_steps_terminal' wakes) so a fresh wake gets its own
-      // chance to be answered before the reaper piles another one on top.
+      // 'stalled' / 'all_steps_terminal' wakes, and the reaper's own failed
+      // attempts — see the catch below) so a fresh wake gets its own chance to
+      // be answered before the reaper piles another one on top.
       const wakeEvents = await this.eventRepo.find({
-        where: { mission_id: mission.id, type: 'orchestrator_woken' },
+        where: { mission_id: mission.id, type: In(['orchestrator_woken', 'error']) },
         order: { created_at: 'DESC' },
         take: 20,
       });
-      const priorStallNudges = wakeEvents.filter((e) => e.data?.reason === 'running_stall').length;
+      const stallAttempts = wakeEvents.filter(
+        (e) => e.type === 'orchestrator_woken' || e.data?.reason === 'running_stall_nudge_failed',
+      );
+      const priorStallNudges = stallAttempts.filter(
+        (e) => e.data?.reason === 'running_stall' || e.data?.reason === 'running_stall_nudge_failed',
+      ).length;
 
-      const lastWake = wakeEvents[0];
+      const lastWake = stallAttempts[0];
       if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.runningStallTimeoutMs) continue;
 
       if (priorStallNudges >= RUNNING_STALL_NUDGE_LIMIT) {
@@ -335,6 +356,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
           'Orchestration',
           `running-stall nudge failed for mission ${mission.id}: ${e?.message || e}`,
         );
+        await this.missions.recordEvent(mission, {
+          type: 'error',
+          message: `Could not re-brief the orchestrator for the running stall (${e?.message || e}). The mission needs operator attention.`,
+          actor_type: 'system',
+          data: { reason: 'running_stall_nudge_failed' },
+        });
       }
     }
     return { nudged, failed };
