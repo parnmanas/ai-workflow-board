@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, parse } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { FsBrowser } from '../dist/lib/fs-browser.js';
@@ -137,6 +137,35 @@ test('relative paths are rejected before any scope logic', async () => {
   const r = await fsb.handle({ op: 'read', path: 'etc/passwd' });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'PATH_INVALID');
+});
+
+// --- containment boundary --------------------------------------------------
+// win32 단축명 불일치(위 가드)와 같은 부류의 "스코프가 조용히 전부 막는" 두 번째
+// 경로: 파일시스템/드라이브 루트는 이미 구분자로 끝나므로(`/`, `C:\`)
+// `root + sep` 이 `//` · `C:\\` 가 되어 안쪽 어떤 경로와도 매칭되지 않았다.
+// 운영자가 호스트 전체를 스코프로 못박으면 전부 SCOPE_DENIED 였다.
+
+test('a filesystem root as the pinned scope admits paths inside it', async () => {
+  const { inside } = sandbox();
+  const fsRoot = parse(inside).root; // POSIX '/' · win32 'C:\\'
+  const fsb = new FsBrowser(CFG, { roots: [fsRoot] });
+
+  const r = await fsb.handle({ op: 'read', path: join(inside, 'ok.txt') });
+  assert.equal(r.ok, true, `root=${JSON.stringify(fsRoot)} must admit files inside it: ${JSON.stringify(r)}`);
+  assert.equal(r.data.content, 'in-scope');
+});
+
+// 위 수정이 경계를 느슨하게 만들지 않았는지 — 접두사만 공유하는 형제는 여전히 밖이다.
+test('a sibling sharing the root name prefix is still out of scope', async () => {
+  const { inside } = sandbox();
+  const sibling = `${inside}-extra`;
+  mkdirSync(sibling);
+  writeFileSync(join(sibling, 'x.txt'), 'nope');
+
+  const fsb = new FsBrowser(CFG, { roots: [inside] });
+  const r = await fsb.handle({ op: 'read', path: join(sibling, 'x.txt') });
+  assert.equal(r.ok, false, 'prefix-sharing sibling must not be admitted');
+  assert.equal(r.code, 'SCOPE_DENIED');
 });
 
 // --- source-level guards: keep these regressions from coming back ---

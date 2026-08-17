@@ -268,7 +268,15 @@ export class FsBrowser implements FsBrowserContract {
   private inScope(realPath: string): boolean {
     for (const root of this.roots) {
       if (realPath === root) return true;
-      if (realPath.startsWith(root + PATH_SEP)) return true;
+      // A filesystem/drive root already ends in a separator (`/`, `C:\`), so
+      // `root + PATH_SEP` would build `//` / `C:\\` and match nothing — pinning
+      // the whole filesystem as the scope denied everything inside it, the same
+      // silent "scope admits nothing" class as the win32 short-name mismatch.
+      // Normalize the trailing separator, then append exactly one so the test
+      // still lands on a path-component boundary (`/data` never matches
+      // `/database`).
+      const prefix = root.endsWith(PATH_SEP) ? root : root + PATH_SEP;
+      if (realPath.startsWith(prefix)) return true;
     }
     return false;
   }
