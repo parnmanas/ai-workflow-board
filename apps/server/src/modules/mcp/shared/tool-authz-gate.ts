@@ -248,9 +248,9 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   // file-level comment above), never a home for new registrations, however
   // similar their authorization story is. They are registered in
   // TOOL_AUTHZ_TABLE with an explicit 'caller' tier instead — the same floor
-  // as this block for the same reason (the real check is this file's own
-  // identity/ownership logic; 'caller' only rejects a sessionless caller
-  // before the handler runs).
+  // as this block for the same reason (the real check is the handler/service
+  // layer's own identity/ownership logic, not anything in this gate file;
+  // 'caller' only rejects a sessionless caller before the handler runs).
   'add_orchestration_note', 'complete_orchestration_mission', 'get_orchestration_mission',
   'get_orchestration_step', 'list_my_orchestration_steps', 'report_orchestration_progress',
   'report_orchestration_step', 'submit_orchestration_plan', 'update_orchestration_step',

@@ -187,6 +187,20 @@ export class OrchestrationMissionService {
     step_timeout_minutes?: number;
     created_by_type?: string;
     created_by?: string;
+    /**
+     * Stamp the orchestrator at creation time rather than leaving it null
+     * until startMission runs (ticket b7127aae review round 2). Without this,
+     * a mission that is left `draft` (start:false, or startMission throwing
+     * before it stamps this field — e.g. an empty roster) has
+     * orchestrator_agent_id=null forever: requireOrchestrator's `!==
+     * callerAgentId` check then 403s EVERY caller, including the real
+     * orchestrator, so complete_orchestration_mission/get_orchestration_mission
+     * can't reach it either — a team-slot wedge with no MCP escape hatch.
+     * Must equal team.orchestrator_agent_id (checked below); startMission
+     * overwrites this with the same value when it actually starts, so
+     * pre-stamping it here is idempotent with that path.
+     */
+    orchestrator_agent_id?: string;
   }): Promise<OrchestrationMission> {
     const workspaceId = (input.workspace_id || '').trim();
     const title = (input.title || '').trim();
@@ -197,6 +211,9 @@ export class OrchestrationMissionService {
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     if (!team.orchestrator_agent_id) {
       throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
+    }
+    if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
+      throw orchestrationError(403, 'orchestrator_agent_id must match the team\'s own orchestrator');
     }
 
     const objective = (input.objective || '').trim();
@@ -211,7 +228,7 @@ export class OrchestrationMissionService {
         context: (input.context || '').trim(),
         acceptance_criteria: (input.acceptance_criteria || '').trim(),
         status: 'draft',
-        orchestrator_agent_id: null,
+        orchestrator_agent_id: input.orchestrator_agent_id || null,
         max_parallel_steps: clampInt(input.max_parallel_steps, team.max_parallel_steps, 1, MAX_PARALLEL_CEILING),
         max_steps: clampInt(input.max_steps, 60, 1, MAX_STEPS_CEILING),
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),

@@ -835,4 +835,73 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   assert.ok(rollup.room_id, 'the orchestrator gets a real work-order room for its own step, like any assignee');
 });
 
+test('Orchestration: a draft mission is never an unrecoverable wedge (review round 2)', async (t) => {
+  // Before this fix, createMission always left orchestrator_agent_id=null —
+  // only startMission ever stamped it, and it is never called for
+  // start:false (or skipped when startMission itself throws, e.g. an empty
+  // roster). requireOrchestrator's `!== callerAgentId` check then 403s EVERY
+  // caller on a null orchestrator_agent_id, including the real orchestrator —
+  // so the draft permanently occupied the team's one-open-mission slot with
+  // no MCP escape hatch: not even complete_orchestration_mission could reach
+  // it. create_orchestration_mission now stamps the orchestrator at creation.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-draft-wedge');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'draft-wedge-orch' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'draft-wedge-orch');
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Draft-wedge squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+
+  step('start:false leaves a draft mission the orchestrator can still read');
+  const created = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Never started', objective: 'Stay a draft on purpose.', start: false,
+  });
+  assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
+  assert.equal(created.status, 'draft');
+  const draftId = created.mission_id;
+
+  const readBack = await orchMcp.callTool('get_orchestration_mission', { mission_id: draftId });
+  assert.ok(!readBack?.isError, `orchestrator could not read its own draft: ${JSON.stringify(readBack)}`);
+  assert.equal(readBack.status, 'draft');
+
+  step('A second attempt for the same team is rejected — the draft counts against the cap');
+  const capped = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should not be created', objective: 'Should not be created.',
+  });
+  assert.equal(capped.isError, true);
+  assert.equal(capped.error.status, 409);
+  assert.equal(capped.error.existing_mission_id, draftId);
+  assert.equal(capped.error.existing_mission_status, 'draft');
+  assert.equal(capped.error.open_step_count, 0);
+
+  step('The escape hatch the 409 names actually works: the orchestrator can close its own draft');
+  const closed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: draftId, status: 'failed', summary: 'Closing the unstarted draft to free the team slot.',
+  });
+  assert.ok(!closed?.isError, `complete failed: ${JSON.stringify(closed)}`);
+  assert.equal(closed.status, 'failed');
+
+  step('Creation succeeds again once the draft is closed');
+  const retried = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after closing the draft', objective: 'Retry after closing the draft.',
+  });
+  assert.ok(!retried.isError, `retry after closing the draft failed: ${JSON.stringify(retried)}`);
+  assert.notEqual(retried.mission_id, draftId);
+});
+
 exitAfterTests();

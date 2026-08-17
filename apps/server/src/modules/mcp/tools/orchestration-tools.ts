@@ -488,8 +488,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       'membership is still entirely human-controlled. Each team allows one open (non-terminal) mission at a ' +
       'time; a second attempt is rejected with a 409 naming the existing mission_id, its status and how many ' +
       'of its steps are still in flight — if that count is 0 while status is "running", every step already ' +
-      'finished and you just need to call complete_orchestration_mission on it before retrying. On success the ' +
-      'returned mission_id works immediately with submit_orchestration_plan.',
+      'finished and you just need to call complete_orchestration_mission on it before retrying; if status is ' +
+      '"draft" (pass start:false, or the initial briefing failed) it was never briefed, so close it with ' +
+      'complete_orchestration_mission(status:"failed") instead — there is no tool to brief an existing draft. ' +
+      'On success the returned mission_id works immediately with submit_orchestration_plan.',
     {
       team_id: z.string().describe('Team id from list_orchestration_teams — you must be its orchestrator'),
       title: z.string().describe('Short mission title'),
@@ -527,10 +529,11 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           return err(
             'you are not the orchestrator of this team — only the agent named as team.orchestrator_agent_id ' +
               'may create a mission for it. Use list_orchestration_teams to see teams you actually belong to.',
+            { status: 403 },
           );
         }
         if (team.enabled === 0) {
-          return err(`team "${team.name}" is disabled`);
+          return err(`team "${team.name}" is disabled`, { status: 409 });
         }
 
         // Guard: an agent already mid-step should not also spin up a new
@@ -547,22 +550,36 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
 
         // Guard: one open mission per team on this path, substituting for a
         // budget gate this entity has no board_id/ticket to hang one off of.
+        // `?? 1`, not `|| 1` — 0 is a valid operator-set "no agent-created
+        // missions for this team" value and must not be silently promoted to 1.
         const openMissions = await missionSvc.listMissionsForAgent(agentId, { status: 'active', limit: 500 });
         const openForTeam = openMissions.filter((m) => m.team_id === team.id);
-        const cap = team.max_open_missions || 1;
+        const cap = team.max_open_missions ?? 1;
         if (openForTeam.length >= cap) {
-          const existing = openForTeam[0];
+          // Oldest first (listMissionsForAgent orders created_at DESC) — the
+          // oldest open mission is the one most likely stuck; at the default
+          // cap of 1 there is only ever one candidate so this is a no-op.
+          const existing = openForTeam[openForTeam.length - 1];
           const existingSteps = await missionSvc.listSteps(existing.id);
           const openStepCount = existingSteps.filter((s) => isInFlight(s.status)).length;
-          const stuck = existing.status === 'running' && openStepCount === 0;
+          // Two distinct "nothing left to wait for" shapes need distinct advice:
+          // a never-started draft has no deliverable (only "failed" makes sense),
+          // while a running mission with every step finished likely succeeded
+          // (the orchestrator should look at the results and pick "completed" or
+          // "failed" itself, not be told which).
+          const isDraftWedge = existing.status === 'draft';
+          const isRunningWedge = existing.status === 'running' && openStepCount === 0;
           return err(
             `team "${team.name}" already has ${openForTeam.length} open mission(s) (limit ${cap}). ` +
-              (stuck
-                ? `Mission ${existing.id} is "running" with no steps in flight — every step already finished. ` +
-                  `Call complete_orchestration_mission on it, then retry.`
-                : `Wait for mission ${existing.id} (status "${existing.status}") to finish, or close it with ` +
-                  `complete_orchestration_mission if it can no longer make progress.`),
-            { existing_mission_id: existing.id, existing_mission_status: existing.status, open_step_count: openStepCount },
+              (isDraftWedge
+                ? `Mission ${existing.id} is "draft" and was never briefed — call ` +
+                  `complete_orchestration_mission(status:"failed") on it to free the slot, then retry.`
+                : isRunningWedge
+                  ? `Mission ${existing.id} is "running" with no steps in flight — every step already finished. ` +
+                    `Call complete_orchestration_mission on it, then retry.`
+                  : `Wait for mission ${existing.id} (status "${existing.status}") to finish, or close it with ` +
+                    `complete_orchestration_mission if it can no longer make progress.`),
+            { status: 409, existing_mission_id: existing.id, existing_mission_status: existing.status, open_step_count: openStepCount },
           );
         }
 
@@ -582,6 +599,12 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           step_timeout_minutes: args.step_timeout_minutes,
           created_by_type: 'agent',
           created_by: agentId,
+          // Stamp the orchestrator NOW, not only on a successful startMission —
+          // already proven above to equal team.orchestrator_agent_id. Without
+          // this a mission left `draft` (start:false, or startMission throwing
+          // below) has orchestrator_agent_id=null forever and no caller can ever
+          // pass requireOrchestrator on it again — not even to close it.
+          orchestrator_agent_id: agentId,
         });
 
         let current = mission;
@@ -603,9 +626,14 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           status: current.status,
           start_error: startError,
           note: startError
-            ? 'Mission was created but briefing failed — call get_orchestration_mission and retry, or start it manually.'
+            ? 'Mission was created but briefing failed (see start_error) — you own it (get_orchestration_mission ' +
+              'to inspect it). There is no tool to retry starting an existing draft; once the cause is fixed ' +
+              '(e.g. the team now has members), close this one with complete_orchestration_mission(status:' +
+              '"failed") and call create_orchestration_mission again.'
             : args.start === false
-              ? 'Mission created as a draft — you will not be briefed until it is started.'
+              ? 'Mission created as a draft — you will not be briefed until a human starts it in the AWB UI. ' +
+                'You can still get_orchestration_mission to inspect it or complete_orchestration_mission to ' +
+                'close it and free your team\'s mission slot.'
               : 'You are now briefed in the mission room. Call submit_orchestration_plan next.',
         });
       } catch (e: any) {
