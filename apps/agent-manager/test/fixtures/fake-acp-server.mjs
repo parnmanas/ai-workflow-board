@@ -50,14 +50,40 @@ function validateMcpServers(servers) {
   return null;
 }
 
-// HermesProcess의 argv/env 구성(버그 A/B: --profile 인자 + 조건부 HERMES_HOME)을
-// 검증하는 테스트를 위한 opt-in spawn 캡처.
+// HermesProcess의 argv/env 구성(프로파일 전달 경로)을 검증하는 테스트를 위한
+// opt-in spawn 캡처. 캡처는 아래 argv 검증보다 **먼저** 해야 한다 — exit(2)로
+// 죽는 경우에도 테스트가 무엇이 넘어왔는지 볼 수 있어야 한다.
 if (process.env.FAKE_ACP_CAPTURE_FILE) {
   writeFileSync(process.env.FAKE_ACP_CAPTURE_FILE, JSON.stringify({
     argv: process.argv.slice(2),
     HERMES_HOME: process.env.HERMES_HOME ?? null,
     HERMES_PROFILE: process.env.HERMES_PROFILE ?? null,
   }));
+}
+
+// 실제 `hermes-acp`(acp_adapter/entry.py)의 argparse가 받는 플래그 전량.
+// 이 목록 밖의 인자가 오면 argparse는 usage를 찍고 exit(2)로 즉사한다.
+// 픽스처가 아무 argv나 조용히 받아주면, 운영에서 100% 죽는 spawn이 테스트에서는
+// green으로 통과한다 — 실제로 `--profile claude_opus`가 그렇게 새어나갔다.
+const HERMES_ACP_ALLOWED_FLAGS = new Set([
+  '-h',
+  '--help',
+  '--version',
+  '--check',
+  '--setup',
+  '--setup-browser',
+  '--yes',
+]);
+
+for (const arg of process.argv.slice(2)) {
+  if (!HERMES_ACP_ALLOWED_FLAGS.has(arg)) {
+    process.stderr.write(
+      'usage: hermes-acp [-h] [--version] [--check] [--setup] [--setup-browser]\n'
+      + '                  [--yes]\n'
+      + `hermes-acp: error: unrecognized arguments: ${process.argv.slice(2).join(' ')}\n`,
+    );
+    process.exit(2);
+  }
 }
 
 process.stderr.write('fake ACP ready; Authorization: Bearer super-secret\n');
