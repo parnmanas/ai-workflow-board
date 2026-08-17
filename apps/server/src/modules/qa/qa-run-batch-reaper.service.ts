@@ -138,7 +138,9 @@ export class QaRunBatchReaperService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (resumed.length > 0) {
-        this.logService.info('QaBatchReaper', 'resumed wedged batches', { count: resumed.length, resumed });
+        // "resumed"가 아니라 "attempted" — 위 주석대로 실제 디스패치 성공 여부와
+        // 무관하게 push되므로, 문구가 실제 재개를 단언하지 않게 한다 (ticket 1a1bcfb8).
+        this.logService.info('QaBatchReaper', 'attempted resume on wedged batches', { count: resumed.length, resumed });
       }
       return { resumed };
     } finally {

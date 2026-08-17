@@ -139,10 +139,11 @@ test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejec
   const s0Runs = await mcp.callTool('list_qa_runs', { scenario_id: s0.id, workspace_id: ws.id });
   assert.equal((Array.isArray(s0Runs) ? s0Runs : []).length, 0, 'no run was created for scenario 0 — nothing partially started');
 
-  // start_qa_batch never returns a batch id on this thrown path, so nothing
-  // could ever look up or resume the row _dispatchBatchIndex persisted before
-  // hitting the guard — it must be removed rather than left as an unreachable
-  // orphan stuck `running` forever (no schedule/reaper covers QaRunBatch rows).
+  // start_qa_batch는 이 throw 경로에서 배치 id를 절대 반환하지 않으므로, caller는
+  // 이미 429 거부를 받아 배치가 시작되지 않았다고 알고 있다. QaRunBatchReaperService
+  // (ticket 5a0593ae) 도입 이후로 이 running 행은 리퍼 술어에 그대로 걸리므로 "아무도
+  // 조회 못 하는 고아"라서 지우는 게 아니라, 거부를 이미 통지했으므로 나중에
+  // 되살아나면 그 거부 계약과 모순된다는 이유로 지운다 — 동작(제거)은 그대로다.
   const orphanBatches = await ds.getRepository('QaRunBatch').count({ where: { workspace_id: ws.id } });
   assert.equal(orphanBatches, 0, 'the just-created batch row is cleaned up too, not left as an unreachable orphan');
 

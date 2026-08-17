@@ -822,7 +822,10 @@ export class QaRunService {
     // points (startBatch, onRunFinalized, resumeWedgedBatch). Test-and-set is
     // race-free here: no `await` separates the `has` check from the `add`, so
     // nothing can interleave on Node's single-threaded event loop between them.
-    if (this._inFlightBatchIds.has(batch.id)) return;
+    if (this._inFlightBatchIds.has(batch.id)) {
+      this.logService.debug('QA', `batch ${batch.id} dispatch index ${index} skipped — already in flight`);
+      return;
+    }
     this._inFlightBatchIds.add(batch.id);
     try {
       const ids = Array.isArray(batch.scenario_ids) ? batch.scenario_ids : [];
@@ -846,12 +849,12 @@ export class QaRunService {
         } catch (e: any) {
           if (e instanceof RunBudgetExceededError) {
             if (opts?.throwOnBudget) {
-              // startBatch's fresh dispatch (throwOnBudget=true, always index 0):
-              // on this thrown path the caller never receives the batch's id (see
-              // startBatch/_dispatchBatch call sites — neither stores it before
-              // the throw), so nothing can ever look this row up to resume or
-              // inspect it. Remove it instead of leaving an unreachable orphan
-              // stuck `running` forever.
+              // startBatch의 최초 디스패치(throwOnBudget=true, 항상 index 0)에서 예산
+              // 초과가 나면 caller는 이미 429 거부를 받아 배치가 시작되지 않았다고
+              // 알고 있다. QaRunBatchReaperService(ticket 5a0593ae) 도입 이후로 이
+              // running 행은 "아무도 조회 못 하는 고아"가 아니라 리퍼 술어에 그대로
+              // 걸린다 — 남겨두면 리퍼가 조용히 되살려 위 429 거부 계약과 모순되므로,
+              // 조회 불가가 아니라 거부를 이미 통지했다는 이유로 지운다.
               await this.batchRepo.delete(batch.id);
               this.logService.warn('QA', `batch ${batch.id} hit run budget on first dispatch — removed (429 propagated, nothing to resume): ${e.message}`);
               throw e;
