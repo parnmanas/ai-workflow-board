@@ -9,6 +9,7 @@ import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { PromptTemplate } from '../entities/PromptTemplate';
+import { checkPromptTemplateDrift } from './prompt-template-drift-check';
 import { LogService } from '../services/log.service';
 import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
 import { seedDefaultColumnRolePolicies } from '../modules/column-policies/seed-helper';
@@ -71,6 +72,26 @@ export class DatabaseModule implements OnModuleInit {
     } catch (e) {
       this.dbLog(`Migration run failed: ${(e as Error).message}`);
       throw e;
+    }
+
+    // ── Prompt template drift check (ticket 4a48a0b8, 623400e7 follow-up) ──
+    // Non-fatal, log-only: catches a content-refresh migration that IS
+    // recorded as applied yet left a workspace's template row byte-exact
+    // stuck on the pre-migration snapshot. A migration that simply hasn't
+    // run yet (ordinary deploy lag) is not drift and is never flagged here.
+    try {
+      const drift = await checkPromptTemplateDrift(this.dataSource);
+      if (drift.drifted.length > 0) {
+        this.logService?.warn('DB', 'Prompt template drift detected — migration applied but row content did not update', {
+          drifted: drift.drifted,
+        });
+      }
+      this.dbLog(
+        `Prompt template drift check: ${drift.migrations_applied}/${drift.migrations_registered} refresh migration(s) applied, ` +
+          `${drift.rows_checked} row(s) checked, ${drift.drifted.length} drifted`,
+      );
+    } catch (e) {
+      this.dbLog(`Prompt template drift check FAILED (non-fatal): ${(e as Error).message}`);
     }
 
     // ── Boot-time defensive cleanup — strip workspace_id from manager rows ──
