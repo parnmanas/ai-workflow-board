@@ -23,6 +23,15 @@ on:
   push:
     branches:
       - main
+  # use_pr=false 보드에선 feature 브랜치를 push 해도 PR 이 생기지 않아 pull_request
+  # 트리거가 걸리지 않는다 — CI(windows 축 포함)가 main 랜딩 전엔 한 번도 돌지 않는
+  # 구조적 사각지대가 있었다(ticket 34a6281a, 사례: 61b2ee51). workflow_dispatch 를
+  # 추가하면 병합 직전 특정 브랜치(ref)를 지정해 수동으로 전체 매트릭스를 돌릴 수
+  # 있다. 수동 dispatch 는 저장소 쓰기 권한이 있는 주체만 트리거할 수 있으므로
+  # (GitHub 기본 동작) 신뢰할 수 없는 코드가 자동 실행되는 새 경로는 아니다 — 아래
+  # permissions: contents: read 는 트리거 종류와 무관하게 이 워크플로의 모든 잡에
+  # 그대로 적용된다.
+  workflow_dispatch:
 
 # 최소권한 GITHUB_TOKEN (2026-08-12 의존성 감사에서 발견).
 #
