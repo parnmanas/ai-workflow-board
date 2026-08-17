@@ -18,6 +18,7 @@ import { QaScenarioController } from './qa-scenario.controller';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
+import { QaRunBatchReaperService } from './qa-run-batch-reaper.service';
 import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { QaRerunOnFixService } from './qa-rerun-on-fix.service';
 import { QaScheduleService } from './qa-schedule.service';
@@ -40,7 +41,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],
-  providers: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaRerunOnFixService, QaScheduleService, AuthGuard, PermissionGuard],
-  exports: [QaService, QaRunService, QaRunReaperService, QaFailureTicketService, QaScheduleService],
+  providers: [QaService, QaRunService, QaRunReaperService, QaRunBatchReaperService, QaFailureTicketService, QaRerunOnFixService, QaScheduleService, AuthGuard, PermissionGuard],
+  exports: [QaService, QaRunService, QaRunReaperService, QaRunBatchReaperService, QaFailureTicketService, QaScheduleService],
 })
 export class QaScenarioModule {}
