@@ -125,6 +125,20 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   update_api_key: 'caller',
   revoke_api_key: 'caller',
   delete_api_key: 'caller',
+
+  // Orchestration discovery (ticket b7127aae). Unlike the nine pre-existing
+  // orchestration tools (KNOWN_EXISTING_TOOLS below), these did not exist when
+  // this gate's snapshot was taken, so they need a conscious tier — not
+  // KNOWN_EXISTING_TOOLS, which is a frozen historical snapshot, never a home
+  // for new registrations (see its docstring). 'caller' mirrors what each
+  // handler already enforces on its own: list_orchestration_teams /
+  // list_orchestration_missions filter strictly by the caller's own agent id
+  // (orchestrator-of or member-of), so the tier only needs to reject an
+  // unresolvable/sessionless caller — the real authorization is the identity
+  // filter inside the handler, exactly like the nine tools below.
+  list_orchestration_teams: 'caller',
+  list_orchestration_missions: 'caller',
+  create_orchestration_mission: 'caller',
 };
 
 /**
@@ -226,6 +240,17 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   // strictly stronger check than any tier here could express (a full-scope key
   // still cannot report on another agent's step). The read-only ones apply the
   // same membership check before returning anything.
+  //
+  // Ticket b7127aae added three MORE orchestration tools afterward
+  // (list_orchestration_teams, list_orchestration_missions,
+  // create_orchestration_mission) — those do NOT belong here. This set is a
+  // frozen snapshot of what existed when this gate was written (see the
+  // file-level comment above), never a home for new registrations, however
+  // similar their authorization story is. They are registered in
+  // TOOL_AUTHZ_TABLE with an explicit 'caller' tier instead — the same floor
+  // as this block for the same reason (the real check is the handler/service
+  // layer's own identity/ownership logic, not anything in this gate file;
+  // 'caller' only rejects a sessionless caller before the handler runs).
   'add_orchestration_note', 'complete_orchestration_mission', 'get_orchestration_mission',
   'get_orchestration_step', 'list_my_orchestration_steps', 'report_orchestration_progress',
   'report_orchestration_step', 'submit_orchestration_plan', 'update_orchestration_step',

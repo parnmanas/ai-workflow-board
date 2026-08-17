@@ -18,20 +18,27 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { ActionsController } from './actions.controller';
 import { ActionsService } from './actions.service';
 import { ActionSchedulerService } from './action-scheduler.service';
+import { ActionRunReaperService } from './action-run-reaper.service';
 import { OnTicketDoneActionService } from './on-ticket-done-action.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
+// ActionRunReaperService needs TriggerLoopService.dispatchCurrentColumn to
+// resume a stuck run's source ticket — same precedent TicketsModule /
+// FeaturesModule / BenchmarksModule use to reach TriggerLoopService from
+// outside AgentsModule. No cycle: AgentsModule does not import ActionsModule.
+import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, Workspace, User, Ticket, BoardColumn, Comment, ActivityLog]),
     ChatRoomsModule,
     SharedServicesModule,
+    AgentsModule,
   ],
   controllers: [ActionsController],
-  providers: [ActionsService, ActionSchedulerService, OnTicketDoneActionService, AuthGuard, PermissionGuard],
+  providers: [ActionsService, ActionSchedulerService, ActionRunReaperService, OnTicketDoneActionService, AuthGuard, PermissionGuard],
   exports: [ActionsService],
 })
 export class ActionsModule {}

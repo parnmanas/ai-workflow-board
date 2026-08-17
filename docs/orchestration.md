@@ -99,6 +99,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 | Mission 단위 뮤텍스 | `withMissionLock()` | 동시 report 가 병렬 슬롯을 중복 소비 / 같은 step 이중 디스패치 |
 | Step 타임아웃 | `OrchestrationReaperService` | 보고 없이 죽은 subagent (기본 90분, progress 가 시계 리셋) |
 | Planning 타임아웃 | 동상 | 계획을 끝내 제출하지 않는 오케스트레이터 → 2회 재브리핑 후 failed |
+| Running-stall 타임아웃 | 동상 | 전 step 종료 후 `complete_orchestration_mission` 을 안 부르는 오케스트레이터 → 2회 재브리핑 후 failed |
 | 예산 상한 | `max_steps` / `max_plan_versions` / `max_attempts` | 계획 폭주·재계획 루프·무한 재시도 |
 | 병렬 상한 | `max_parallel_steps` + 멤버별 `max_concurrent` | 한 번에 20개 subagent 스폰 |
 
@@ -110,6 +111,37 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
   `mission.orchestrator_agent_id` 인지, 또는 `step.assignee_agent_id` 인지를
   런너에서 확인한다. full-scope API 키를 가진 Agent 도 남의 step 을 보고할 수 없다.
   (그래서 `tool-authz-gate.ts` 의 `KNOWN_EXISTING_TOOLS` 에 등재만 하고 tier 는 두지 않았다.)
+  이후 추가된 3종(아래 "미션 생성 주체" 참고)은 같은 논리를 `TOOL_AUTHZ_TABLE` 에
+  `'caller'` 로 명시 등록해 표현한다 — `KNOWN_EXISTING_TOOLS` 는 게이트 작성 시점의
+  동결 스냅샷이라 신규 도구의 자리가 아니다.
+
+### 미션 생성 주체 (ticket b7127aae)
+
+**"Team = 사람이 부여한 권한 grant, Mission = 그 권한의 행사"** 로 경계를 나눈다.
+
+| 대상 | 생성 경로 | 비고 |
+| --- | --- | --- |
+| **Team**(로스터·오케스트레이터 지정) | **영구히 사람 전용** — UI/REST만 | 로스터는 "이 Agent 가 누구에게 일을 시켜도 되는가"라는 권한 범위 그 자체라, Agent 가 자기 지휘 범위를 스스로 넓히는 것은 어떤 가드로도 정당화하지 않는다. `create_orchestration_team` MCP 툴은 존재하지 않고, 앞으로도 추가하지 않는다. |
+| **Mission** | 사람(UI, `start:true` 로 즉시 브리핑) **또는** 그 Team 의 오케스트레이터 Agent 자신(`create_orchestration_mission` MCP 툴) | 사람이 이미 Team 을 만들며 권한을 승인해 둔 상태이므로, 오케스트레이터의 Mission 자기-생성은 새 자율성 표면이 아니라 **이미 승인된 권한의 반복 행사**다. |
+
+`create_orchestration_mission` 입력은 `team_id` / `title` / `objective` / `context?` /
+`acceptance_criteria?` / `max_steps?` / `max_parallel_steps?` / `step_timeout_minutes?` /
+`start?` 뿐이다. **`orchestrator_agent_id` · `members[]` · `team_name` 입력은 없다** —
+오케스트레이터는 팀에서 파생되고(호출자 자신만 가능), 로스터는 여전히 사람의 것이다.
+`list_orchestration_teams` / `list_orchestration_missions` 로 자기 소속 team_id·기존
+미션을 먼저 조회한다.
+
+에이전트 생성 경로는 사람(REST) 경로보다 좁은 가드 4종을 추가로 통과해야 한다 —
+이 엔티티엔 `board_id`/`ticket` 이 없어 `hard_budget_config` 예산 가드를 못 걸기
+때문에(스코프 설계는 별도 티켓), 대신 다음이 팬아웃 상한 역할을 한다:
+
+| 가드 | 내용 |
+| --- | --- |
+| 소유권 | `team.orchestrator_agent_id` 가 호출자 자신이어야 함(null 팀 거부) |
+| 비활성 팀 | `team.enabled === 0` 이면 거부 |
+| 팀당 열린 미션 상한 | `OrchestrationTeam.max_open_missions`(기본 1) 초과 시 생성 대신 **409** — `existing_mission_id` / `existing_mission_status` / `open_step_count` 를 실어 반환한다. `status:"running"` 이면서 `open_step_count:0` 이면(전 step 종료 후 오케스트레이터가 `complete_orchestration_mission` 을 안 부른 상태) 409 메시지가 그 사실과 탈출 경로를 그대로 알려준다 — 이 상태는 `OrchestrationReaperService` 의 running-stall 분기가 최대 `ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS`(기본 20분) 후 재브리핑, 2회 무응답 후 `failed` 로 자동 승격해 슬롯을 회수하므로 수동 개입은 그전에 쓸 수 있는 지름길일 뿐이다. |
+| 재귀 차단 | 호출자가 어떤 미션에서든 `dispatched`/`running` step 을 보유 중이면 생성 거부(`listOpenStepsForAgent` 재사용) — orchestrator 가 자기 팀의 member 이기까지 한 것은 정상 패턴이라 막지 않는다(브리핑 재발행은 `startMission` 이 1회만 발행 + `updateMission` 이 `status≠draft` 이면 409 로 거부해 이미 구조적으로 불가능). |
+| 낮은 기본값 | `max_steps` 기본/상한 20 (사람 경로 60/`MAX_STEPS_CEILING=200`), `max_parallel_steps` 기본/상한 `min(team.max_parallel_steps, 4)` — 명시 인자로도 이 상한을 못 넘는다. |
 
 ### 사람이 step 을 직접 못 만지는 이유
 
@@ -141,6 +173,14 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `report_orchestration_progress` | 하트비트 (타임아웃 시계 리셋, step 을 끝내지 않음) |
 | `report_orchestration_step` | **최종 보고** — 하위 step 을 여는 유일한 신호 |
 
+**조회 / 자기-생성** (오케스트레이터 또는 멤버, ticket b7127aae)
+
+| 툴 | 용도 |
+| --- | --- |
+| `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로) |
+| `list_orchestration_missions` | 내가 속한 Mission 목록·상태 (기본 non-terminal 만, `include_finished` 로 확장) |
+| `create_orchestration_mission` | 내가 오케스트레이터인 Team 에 한해 Mission 생성(+즉시 브리핑) — "미션 생성 주체" 절 참고 |
+
 `submit_orchestration_plan` 이 병합(추가적)인 이유: 누락 키를 삭제하면 이미 끝난
 작업과 그 결과 컨텍스트가 조용히 사라진다. 제거는 `skip` 으로 명시해야 한다.
 진행 중이거나 종료된 step 은 재계획이 **덮어쓰지 않는다** — 실행 중인 subagent 밑에서
@@ -170,6 +210,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `ORCHESTRATION_REAPER_ENABLED` | on | `false` 로 리퍼 비활성화 |
 | `ORCHESTRATION_REAPER_SWEEP_MS` | 5m | 스윕 주기 (30s~1h clamp) |
 | `ORCHESTRATION_PLANNING_TIMEOUT_MS` | 20m | 계획 미제출 재브리핑 간격 (1m~24h clamp) |
+| `ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS` | 20m | `running` + in-flight step 0개 재브리핑 간격 (1m~24h clamp) |
 
 미션별 `step_timeout_minutes` (기본 90, `0` = 무제한)은 REST 로 조정한다.
 
@@ -180,6 +221,10 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 **Mission 이 `planning` 에서 안 움직인다**
 → 오케스트레이터 Agent 가 online 인지(팀 화면의 점), agent-manager 가 붙어 있는지 확인.
 리퍼가 20분마다 최대 2회 재브리핑 후 `failed` 로 떨군다. 즉시 재시도는 **Nudge**.
+
+**Mission 이 `running` 인데 아무 step 도 안 움직인다**
+→ 전 step 이 이미 terminal 인데 오케스트레이터가 `complete_orchestration_mission` 을 안 부른 경우다.
+planning 과 동일하게 리퍼가 20분마다 최대 2회 재브리핑 후 `failed` 로 떨군다. 즉시 재시도는 **Nudge**.
 
 **step 이 계속 `dispatched` 다**
 → subagent 가 `report_orchestration_step` 을 안 불렀다. step 룸을 열어(상세 → 룸)

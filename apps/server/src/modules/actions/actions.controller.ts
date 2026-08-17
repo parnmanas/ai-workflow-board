@@ -6,6 +6,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { ActionsService } from './actions.service';
+import { ActionRunReaperService } from './action-run-reaper.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('actions')
@@ -13,7 +14,10 @@ import { ActionsService } from './actions.service';
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_ACTIONS)
 export class ActionsController {
-  constructor(private readonly actionsService: ActionsService) {}
+  constructor(
+    private readonly actionsService: ActionsService,
+    private readonly actionRunReaperService: ActionRunReaperService,
+  ) {}
 
   @Get()
   async list(
@@ -161,6 +165,19 @@ export class ActionsController {
       return res.json(run);
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'Run not found' });
+    }
+  }
+
+  // Operator lever: fire one ActionRunReaperService sweep on demand (no server
+  // restart needed) — mirrors qa-scenario.controller's POST runs/reap and
+  // orchestration.controller's POST reap.
+  @Post('runs/reap')
+  async reapRuns(@Res() res: Response) {
+    try {
+      const { reaped, details } = await this.actionRunReaperService.runOnce();
+      return res.json({ reaped_count: reaped.length, reaped, details });
+    } catch (e: any) {
+      return res.status(e?.status || 500).json({ error: e?.message || 'Failed to run action-run reaper sweep' });
     }
   }
 }

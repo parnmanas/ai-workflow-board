@@ -33,7 +33,17 @@ import { z } from 'zod';
  *   (c) max_dispatches_per_window — rolling-window cap on successful
  *       `_emitTrigger` dispatches for a single ticket (trigger-loop.service.ts).
  *
- * All three counters share one "epoch" rule: only events AFTER the ticket's
+ * A fourth, independent ceiling shares this schema but is NOT ticket-scoped:
+ *   (d) max_runs_per_window — rolling-window cap on new QaRun/ActionRun/
+ *       OrchestrationMission creations, scoped to the WORKSPACE rather than a
+ *       ticket (common/run-budget-guard.ts, ticket a51ec6d9). Those three
+ *       entities are not Tickets — no ticket_id/board_id to key a per-ticket
+ *       ceiling off of — so (d) is resolved via `resolveHardBudget` below
+ *       (workspace config only, no board layer) instead of
+ *       `resolveHardBudgetForTicket`. It shares `window_minutes` with (c) for
+ *       the same reason (b) does: one rolling window is simpler than several.
+ *
+ * All three PER-TICKET counters (a, b, c) share one "epoch" rule: only events AFTER the ticket's
  * most recent human-driven unpend count (see `lastHumanUnpendAt` in
  * hard-budget-guard.ts). Without this, a breach auto-pends the ticket, a
  * human clears it, and the very next agent comment/dispatch/token re-trips
@@ -56,6 +66,8 @@ export const HardBudgetConfigSchema = z
     max_dispatches_per_window: z.number().int().positive().max(1000).optional(),
     /** (b) Summed input+output tokens inside the SAME window (window_minutes above) that trips the breaker. */
     max_tokens_per_window: z.number().int().positive().max(100_000_000).optional(),
+    /** (d) New QaRun/ActionRun/OrchestrationMission creations inside the SAME window (window_minutes above), counted per-workspace and independently per run type. */
+    max_runs_per_window: z.number().int().positive().max(1000).optional(),
     /** On breach: auto-pend the ticket (surfaces on the User tab, drops future triggers). */
     auto_pend: z.boolean().optional(),
     /** On breach: post a chat-room alert to the workspace. */
@@ -71,6 +83,7 @@ export const HARD_BUDGET_CONFIG_KEYS = [
   'window_minutes',
   'max_dispatches_per_window',
   'max_tokens_per_window',
+  'max_runs_per_window',
   'auto_pend',
   'notify',
 ] as const;
@@ -82,17 +95,33 @@ export interface ResolvedHardBudget {
   windowMs: number;
   maxDispatchesPerWindow: number;
   maxTokensPerWindow: number;
+  maxRunsPerWindow: number;
   autoPend: boolean;
   notify: boolean;
 }
 
-/** Built-in defaults — conservative on purpose (see file header). */
+/**
+ * Built-in defaults — conservative on purpose (see file header).
+ * maxRunsPerWindow is workspace-wide (aggregated across every ticket/
+ * scenario/action/team in scope), unlike maxDispatchesPerWindow which is
+ * PER TICKET — so despite a run being a much heavier unit of work than a
+ * single dispatch, the workspace-wide default still needs headroom above a
+ * single ticket's dispatch cap to clear ordinary aggregate load (a QA batch
+ * across many scenarios, an Action's bounded retries across several source
+ * tickets, etc. — empirically, the existing action-run-resume-mcp.test.mjs
+ * integration test alone drives more than 10 Action dispatches, including
+ * retries, inside one shared test workspace). 50/hour stays a meaningful
+ * emergency brake against an actual runaway create loop (which fires far
+ * more densely than any legitimate batch) while not tripping on normal
+ * aggregate usage; operators can tune it tighter or looser per workspace.
+ */
 export const DEFAULT_HARD_BUDGET: ResolvedHardBudget = {
   enabled: true,
   maxAutoResponses: 100,
   windowMs: 60 * 60_000,
   maxDispatchesPerWindow: 30,
   maxTokensPerWindow: 2_000_000,
+  maxRunsPerWindow: 50,
   autoPend: true,
   notify: true,
 };
@@ -124,6 +153,7 @@ export function hardBudgetDefaultsFromEnv(
     windowMs: num(env.HARD_BUDGET_WINDOW_MINUTES, DEFAULT_HARD_BUDGET.windowMs / 60_000) * 60_000,
     maxDispatchesPerWindow: num(env.HARD_BUDGET_MAX_DISPATCHES_PER_WINDOW, DEFAULT_HARD_BUDGET.maxDispatchesPerWindow),
     maxTokensPerWindow: num(env.HARD_BUDGET_MAX_TOKENS_PER_WINDOW, DEFAULT_HARD_BUDGET.maxTokensPerWindow),
+    maxRunsPerWindow: num(env.HARD_BUDGET_MAX_RUNS_PER_WINDOW, DEFAULT_HARD_BUDGET.maxRunsPerWindow),
     autoPend: bool(env.HARD_BUDGET_AUTO_PEND, DEFAULT_HARD_BUDGET.autoPend),
     notify: bool(env.HARD_BUDGET_NOTIFY, DEFAULT_HARD_BUDGET.notify),
   };
@@ -163,9 +193,40 @@ export function resolveHardBudgetConfig(
     windowMs: cfg.window_minutes != null ? cfg.window_minutes * 60_000 : base.windowMs,
     maxDispatchesPerWindow: cfg.max_dispatches_per_window ?? base.maxDispatchesPerWindow,
     maxTokensPerWindow: cfg.max_tokens_per_window ?? base.maxTokensPerWindow,
+    maxRunsPerWindow: cfg.max_runs_per_window ?? base.maxRunsPerWindow,
     autoPend: cfg.auto_pend ?? base.autoPend,
     notify: cfg.notify ?? base.notify,
   };
+}
+
+/**
+ * Key-level merge of the workspace default with the board override — the
+ * `hard_budget_config` analogue of `resolveHarnessConfig`
+ * (common/harness-config.ts). The board wins per key it explicitly sets;
+ * unset keys inherit from the workspace; both unset inherit `base` (the
+ * env-folded baseline) verbatim.
+ *
+ * Implemented as two chained `resolveHardBudgetConfig` folds rather than a
+ * from-scratch key loop: `resolveHardBudgetConfig(raw, base)` already IS a
+ * one-level "override folds onto a fully-resolved base" operation, so
+ * folding the workspace onto `base` first and then the board onto THAT
+ * result produces exactly the same board > workspace > base precedence
+ * `resolveHarnessConfig` computes explicitly.
+ *
+ * Callers insert this as a layer INTO the existing board→env chain
+ * (`resolveHardBudgetForTicket`, common/hard-budget-guard.ts) or use it
+ * workspace-only for the run-creation-rate ceiling, which has no board layer
+ * (`resolveHardBudgetForWorkspace`, common/run-budget-guard.ts — see (d)
+ * above / docs/catalog-scopes.md for why QaRun/ActionRun/OrchestrationMission
+ * are not board-scoped).
+ */
+export function resolveHardBudget(
+  workspaceRaw: string | null | undefined,
+  boardRaw: string | null | undefined,
+  base: ResolvedHardBudget = DEFAULT_HARD_BUDGET,
+): ResolvedHardBudget {
+  const workspaceResolved = resolveHardBudgetConfig(workspaceRaw, base);
+  return resolveHardBudgetConfig(boardRaw, workspaceResolved);
 }
 
 /**

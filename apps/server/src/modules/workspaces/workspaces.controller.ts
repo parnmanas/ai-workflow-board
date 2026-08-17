@@ -26,6 +26,7 @@ import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-pa
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
 import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import { hasPermission } from '../../common/types/permissions';
 import { PERMISSIONS } from '../../common/types/permissions';
@@ -262,6 +263,7 @@ export class WorkspacesController {
       claim_verification_enabled, claim_verification_grace_ms,
       harness_config, environment_config, assistant_agent_id,
       cli_runtime_profiles, default_cli_runtime_profile,
+      hard_budget_config,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -311,6 +313,22 @@ export class WorkspacesController {
         const checked = validateHarnessConfigInput(harness_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.harness_config = serializeHarnessConfig(checked.value);
+      }
+    }
+
+    // Workspace-wide default hard-budget ceiling (ticket a51ec6d9). Same
+    // contract as the board PATCH: null clears, objects are strict-zod-
+    // validated → 400. Also the sole scope axis for the QA/Action/
+    // Orchestration run-creation-rate ceiling (common/run-budget-guard.ts) —
+    // those entities have no board_id, so this workspace column is their
+    // only override point.
+    if (hard_budget_config !== undefined) {
+      if (hard_budget_config === null) {
+        ws.hard_budget_config = null;
+      } else {
+        const checked = validateHardBudgetConfigInput(hard_budget_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        ws.hard_budget_config = serializeHardBudgetConfig(checked.value);
       }
     }
 

@@ -2,7 +2,7 @@
  * OrchestrationReaperService — the safety net that keeps a mission from sitting
  * "in progress" forever when an agent dies without reporting.
  *
- * Two rots this closes, both observed on every other dispatch surface in this
+ * Three rots this closes, all observed on every other dispatch surface in this
  * codebase (QaRunReaperService, StuckTicketDetectorService):
  *
  *   1. A dispatched step whose subagent died before calling
@@ -18,6 +18,15 @@
  *      failed — a silent auto-fail on the first timeout would throw away
  *      recoverable missions whose orchestrator was merely offline.
  *
+ *   3. A mission stuck `running` with zero in-flight steps because every step
+ *      reached a terminal status (or was never assigned) but the orchestrator
+ *      never called `complete_orchestration_mission`. `decideWake` already
+ *      posts a wake the moment this happens, but that wake is one-shot and
+ *      best-effort — if it goes unanswered nothing else ever revisits the
+ *      mission, so it sits `running` forever and keeps occupying the team's
+ *      open-mission slot. Re-briefed up to RUNNING_STALL_NUDGE_LIMIT times via
+ *      the same timeline bookkeeping as (2), then failed.
+ *
  * Pattern matches the sibling reapers exactly: OnModuleInit plants a plain
  * setInterval (no @Cron / scheduler dependency), one immediate sweep at boot so
  * a restart clears standing phantoms within seconds, and `runOnce()` is public
@@ -25,7 +34,8 @@
  *
  * Env: ORCHESTRATION_REAPER_ENABLED (default on),
  *      ORCHESTRATION_REAPER_SWEEP_MS (default 5m, clamped 30s..1h),
- *      ORCHESTRATION_PLANNING_TIMEOUT_MS (default 20m, clamped 1m..24h).
+ *      ORCHESTRATION_PLANNING_TIMEOUT_MS (default 20m, clamped 1m..24h),
+ *      ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS (default 20m, clamped 1m..24h).
  */
 
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
@@ -38,9 +48,10 @@ import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
-import { IN_FLIGHT_STEP_STATUSES } from './orchestration.constants';
+import { IN_FLIGHT_STEP_STATUSES, isInFlight } from './orchestration.constants';
 
 const PLANNING_NUDGE_LIMIT = 2;
+const RUNNING_STALL_NUDGE_LIMIT = 2;
 
 function envMs(name: string, fallback: number, min: number, max: number): number {
   const raw = Number(process.env[name]);
@@ -56,6 +67,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
   private readonly sweepMs = envMs('ORCHESTRATION_REAPER_SWEEP_MS', 5 * 60_000, 30_000, 60 * 60_000);
   private readonly planningTimeoutMs = envMs(
     'ORCHESTRATION_PLANNING_TIMEOUT_MS',
+    20 * 60_000,
+    60_000,
+    24 * 60 * 60_000,
+  );
+  private readonly runningStallTimeoutMs = envMs(
+    'ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS',
     20 * 60_000,
     60_000,
     24 * 60 * 60_000,
@@ -89,12 +106,17 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
   }
 
   /** One sweep. Safe to call concurrently — overlapping calls are dropped. */
-  async runOnce(): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number }> {
+  async runOnce(
+    now: Date = new Date(),
+  ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number }> {
     if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0 };
     this.sweeping = true;
     try {
-      const stepsFailed = await this.reapStuckSteps();
-      const { nudged, failed } = await this.reapStalledPlanning();
+      const stepsFailed = await this.reapStuckSteps(now);
+      const planning = await this.reapStalledPlanning(now);
+      const running = await this.reapStalledRunning(now);
+      const nudged = planning.nudged + running.nudged;
+      const failed = planning.failed + running.failed;
       if (stepsFailed || nudged || failed) {
         this.logService.info(
           'Orchestration',
@@ -110,7 +132,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     }
   }
 
-  private async reapStuckSteps(): Promise<number> {
+  private async reapStuckSteps(now: Date): Promise<number> {
     const inFlight = await this.stepRepo.find({
       where: { status: In(IN_FLIGHT_STEP_STATUSES as unknown as string[]) },
       order: { dispatched_at: 'ASC' },
@@ -122,7 +144,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       where: { id: In(Array.from(new Set(inFlight.map((s) => s.mission_id)))) },
     });
     const missionById = new Map(missions.map((m) => [m.id, m]));
-    const now = Date.now();
+    const nowMs = now.getTime();
     let failed = 0;
 
     for (const step of inFlight) {
@@ -137,7 +159,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       // stamped on the first progress call, so a long-but-alive step survives.
       const baseline = step.started_at ?? step.dispatched_at;
       if (!baseline) continue;
-      if (now - new Date(baseline).getTime() < timeoutMs) continue;
+      if (nowMs - new Date(baseline).getTime() < timeoutMs) continue;
 
       await this.runner.failStepExternally(
         step.id,
@@ -150,17 +172,17 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     return failed;
   }
 
-  private async reapStalledPlanning(): Promise<{ nudged: number; failed: number }> {
+  private async reapStalledPlanning(now: Date): Promise<{ nudged: number; failed: number }> {
     const planning = await this.missionRepo.find({ where: { status: 'planning' }, take: 100 });
     if (planning.length === 0) return { nudged: 0, failed: 0 };
 
-    const now = Date.now();
+    const nowMs = now.getTime();
     let nudged = 0;
     let failed = 0;
 
     for (const mission of planning) {
       const baseline = mission.started_at ?? mission.created_at;
-      if (!baseline || now - new Date(baseline).getTime() < this.planningTimeoutMs) continue;
+      if (!baseline || nowMs - new Date(baseline).getTime() < this.planningTimeoutMs) continue;
 
       // Attempt bookkeeping lives in the timeline so it survives a restart and
       // needs no extra column. `data.reason` is read rather than the event type
@@ -168,33 +190,42 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       // reaper attempts would fail a mission the reaper never actually
       // re-briefed. (data is a simple-json column; on sqlite it round-trips as
       // an object, so filter in memory rather than with a JSON predicate that
-      // differs per backend.)
+      // differs per backend.) `type:'error'` rows are pulled in too so a nudge
+      // that failed to send (room deleted, sender participant gone — see the
+      // catch below) still counts as an attempt; a reason filter keeps out any
+      // unrelated error event (e.g. a failed initial mission briefing).
       const wakeEvents = await this.eventRepo.find({
-        where: { mission_id: mission.id, type: 'orchestrator_woken' },
+        where: { mission_id: mission.id, type: In(['orchestrator_woken', 'error']) },
         order: { created_at: 'DESC' },
         take: 20,
       });
-      const priorPlanningNudges = wakeEvents.filter((e) => e.data?.reason === 'planning_timeout').length;
+      const planningAttempts = wakeEvents.filter(
+        (e) => e.type === 'orchestrator_woken' || e.data?.reason === 'planning_timeout_nudge_failed',
+      );
+      const priorPlanningNudges = planningAttempts.filter(
+        (e) => e.data?.reason === 'planning_timeout' || e.data?.reason === 'planning_timeout_nudge_failed',
+      ).length;
 
-      // Back off a full timeout window from the LAST wake of any kind — an
-      // operator who just nudged deserves a chance to be answered before the
-      // reaper piles another brief on top.
-      const lastWake = wakeEvents[0];
-      if (lastWake && now - new Date(lastWake.created_at).getTime() < this.planningTimeoutMs) continue;
+      // Back off a full timeout window from the LAST attempt of any kind,
+      // delivered or failed — an operator who just nudged, or a reaper attempt
+      // that merely couldn't be delivered, both deserve a chance to be
+      // answered before the reaper piles another brief on top.
+      const lastWake = planningAttempts[0];
+      if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.planningTimeoutMs) continue;
 
       if (priorPlanningNudges >= PLANNING_NUDGE_LIMIT) {
-        mission.status = 'failed';
-        mission.failure_reason =
+        // failMissionExternally 내부의 withMissionLock 안에서 재검증된다 — 이
+        // 스냅샷과 give-up 결정 사이에 submit_orchestration_plan 호출이 끼어들
+        // 수 있으므로, 위에서 읽은 `planning` 상태를 그대로 믿고 승격하면 안
+        // 된다. 티켓 bf350dc8 참고.
+        const wasFailed = await this.runner.failMissionExternally(
+          mission.id,
+          'planning',
           `orchestrator never submitted a plan — re-briefed ${priorPlanningNudges} time(s) without a ` +
-          `submit_orchestration_plan call`;
-        mission.finished_at = new Date();
-        await this.missionRepo.save(mission);
-        await this.missions.recordEvent(mission, {
-          type: 'mission_failed',
-          message: `Mission failed: ${mission.failure_reason}. Check that the orchestrator agent is online and connected.`,
-          actor_type: 'system',
-        });
-        failed += 1;
+            `submit_orchestration_plan call`,
+          now,
+        );
+        if (wasFailed) failed += 1;
         continue;
       }
 
@@ -205,7 +236,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
           mission.workspace_id,
           { type: 'system', id: '', name: 'Reaper' },
           `No plan has been submitted for this mission yet (${Math.round(
-            (now - new Date(baseline).getTime()) / 60_000,
+            (nowMs - new Date(baseline).getTime()) / 60_000,
           )} minutes since it was briefed). Team: ${team?.name ?? 'unknown'}. Submit a plan with ` +
             `submit_orchestration_plan, or complete the mission as failed if it cannot be planned.`,
           'planning_timeout',
@@ -216,6 +247,111 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
           'Orchestration',
           `planning nudge failed for mission ${mission.id}: ${e?.message || e}`,
         );
+        await this.missions.recordEvent(mission, {
+          type: 'error',
+          message: `Could not re-brief the orchestrator for planning (${e?.message || e}). The mission needs operator attention.`,
+          actor_type: 'system',
+          data: { reason: 'planning_timeout_nudge_failed' },
+        });
+      }
+    }
+    return { nudged, failed };
+  }
+
+  /**
+   * A mission stuck `running` with nothing in flight: every step reached a
+   * terminal status (or none is assigned), so `reapStuckSteps` has nothing to
+   * time out, yet the orchestrator never called `complete_orchestration_mission`
+   * to close the mission out. `decideWake` already posted a wake the instant
+   * this happened — this only fires once that wake has gone unanswered for a
+   * full timeout window, then re-briefs, then gives up, mirroring
+   * `reapStalledPlanning` exactly (same timeline-bookkeeping trick, same
+   * back-off-from-last-wake rule, same nudge-limit-then-fail escalation).
+   */
+  private async reapStalledRunning(now: Date): Promise<{ nudged: number; failed: number }> {
+    const running = await this.missionRepo.find({ where: { status: 'running' }, take: 100 });
+    if (running.length === 0) return { nudged: 0, failed: 0 };
+
+    const nowMs = now.getTime();
+    let nudged = 0;
+    let failed = 0;
+
+    for (const mission of running) {
+      const steps = await this.stepRepo.find({ where: { mission_id: mission.id } });
+      // Legitimately busy — reapStuckSteps owns timing these out.
+      if (steps.some((s) => isInFlight(s.status))) continue;
+
+      // Baseline is the last time any step finished; if none ever has (every
+      // step is still unassigned, say) fall back to when the mission started —
+      // submitPlan always requires a non-empty plan, so a `running` mission has
+      // always been briefed.
+      const lastFinishedMs = steps.reduce((max, s) => {
+        const t = s.finished_at ? new Date(s.finished_at).getTime() : 0;
+        return t > max ? t : max;
+      }, 0);
+      const baselineMs = lastFinishedMs || (mission.started_at ? new Date(mission.started_at).getTime() : 0);
+      if (!baselineMs || nowMs - baselineMs < this.runningStallTimeoutMs) continue;
+
+      // Same bookkeeping as reapStalledPlanning: count prior reaper attempts off
+      // the timeline (`data.reason`) rather than a column, and back off a full
+      // window from the LAST wake of any kind (including decideWake's own
+      // 'stalled' / 'all_steps_terminal' wakes, and the reaper's own failed
+      // attempts — see the catch below) so a fresh wake gets its own chance to
+      // be answered before the reaper piles another one on top.
+      const wakeEvents = await this.eventRepo.find({
+        where: { mission_id: mission.id, type: In(['orchestrator_woken', 'error']) },
+        order: { created_at: 'DESC' },
+        take: 20,
+      });
+      const stallAttempts = wakeEvents.filter(
+        (e) => e.type === 'orchestrator_woken' || e.data?.reason === 'running_stall_nudge_failed',
+      );
+      const priorStallNudges = stallAttempts.filter(
+        (e) => e.data?.reason === 'running_stall' || e.data?.reason === 'running_stall_nudge_failed',
+      ).length;
+
+      const lastWake = stallAttempts[0];
+      if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.runningStallTimeoutMs) continue;
+
+      if (priorStallNudges >= RUNNING_STALL_NUDGE_LIMIT) {
+        // failMissionExternally 내부의 withMissionLock 안에서 재검증된다 —
+        // 타임아웃 직전에 응답된 nudge 가 이 스냅샷과 give-up 결정 사이에
+        // replan/dispatch 로 새 스텝을 만들 수 있으므로, 위에서 읽은
+        // "in-flight 없음" 을 그대로 믿고 승격하면 안 된다. 티켓 bf350dc8 참고.
+        const wasFailed = await this.runner.failMissionExternally(
+          mission.id,
+          'running',
+          `mission stalled in running with no in-flight work — re-briefed ${priorStallNudges} time(s) without a ` +
+            `complete_orchestration_mission call`,
+          now,
+        );
+        if (wasFailed) failed += 1;
+        continue;
+      }
+
+      try {
+        await this.runner.nudgeOrchestrator(
+          mission.id,
+          mission.workspace_id,
+          { type: 'system', id: '', name: 'Reaper' },
+          `No step has been in flight for ${Math.round(
+            (nowMs - baselineMs) / 60_000,
+          )} minutes and the mission is still running. Review the plan and either add more work with ` +
+            `submit_orchestration_plan, or finish the mission with complete_orchestration_mission.`,
+          'running_stall',
+        );
+        nudged += 1;
+      } catch (e: any) {
+        this.logService.warn(
+          'Orchestration',
+          `running-stall nudge failed for mission ${mission.id}: ${e?.message || e}`,
+        );
+        await this.missions.recordEvent(mission, {
+          type: 'error',
+          message: `Could not re-brief the orchestrator for the running stall (${e?.message || e}). The mission needs operator attention.`,
+          actor_type: 'system',
+          data: { reason: 'running_stall_nudge_failed' },
+        });
       }
     }
     return { nudged, failed };

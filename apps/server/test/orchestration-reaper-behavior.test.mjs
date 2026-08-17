@@ -1,0 +1,440 @@
+// Behavioral test for OrchestrationReaperService.runOnce() — drives the reaper
+// against in-memory fake OrchestrationMission/Step/Event repositories (no DB)
+// with a fixed `now`, exactly the seam the sibling reapers expose
+// (qa-run-reaper-behavior.test.mjs, security-run-reaper-behavior.test.mjs).
+//
+// Focus: the mission-level "running + zero in-flight steps" wedge (ticket
+// 954259e6) — every step reached a terminal status (or none is assigned) but
+// the orchestrator never called complete_orchestration_mission, so the mission
+// sits `running` forever with no in-flight step for reapStuckSteps to time out
+// and no `planning` status for reapStalledPlanning to catch. reapStalledRunning
+// closes that gap with the same re-brief/give-up loop reapStalledPlanning uses
+// for the planning-phase equivalent:
+//
+//   • running, 0 in-flight, last activity past the timeout, no prior reaper
+//     nudge                          -> nudged (reasonTag 'running_stall')
+//   • running, 0 in-flight, within the timeout window            -> spared
+//   • running, has an in-flight step (any age)                   -> spared,
+//     belongs to reapStuckSteps instead
+//   • not `running` (e.g. paused)                                -> never selected
+//   • a wake of ANY kind (operator manual nudge, decideWake's own stall
+//     message, or the reaper's prior attempt) inside the timeout window backs
+//     off further reaper action
+//   • RUNNING_STALL_NUDGE_LIMIT prior reaper nudges exhausted -> mission
+//     failed, any dangling non-terminal steps cancelled, idempotent afterward
+//
+// Imports the compiled service from dist/ (built by `npm run build` in the
+// test script) and injects fake repos + stub missions/runner services + a stub
+// logger — the constructor seams the service exposes, mirroring how the QA/
+// security reaper tests bypass Nest DI entirely.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { OrchestrationReaperService } from '../dist/modules/orchestration/orchestration-reaper.service.js';
+
+const MIN = 60_000;
+
+function matches(row, where) {
+  return Object.entries(where || {}).every(([key, cond]) => {
+    if (cond && typeof cond === 'object' && ('_value' in cond || '_type' in cond)) {
+      const values = cond._value ?? cond._object ?? [];
+      return values.includes(row[key]);
+    }
+    return row[key] === cond;
+  });
+}
+
+function makeRepo(rows) {
+  return {
+    rows,
+    saved: [],
+    async find(opts = {}) {
+      const { where, order, take } = opts;
+      let out = rows.filter((r) => matches(r, where));
+      if (order) {
+        const [[key, dir]] = Object.entries(order);
+        out = [...out].sort((a, b) => {
+          const av = a[key] ? new Date(a[key]).getTime() : 0;
+          const bv = b[key] ? new Date(b[key]).getTime() : 0;
+          return dir === 'ASC' ? av - bv : bv - av;
+        });
+      }
+      return typeof take === 'number' ? out.slice(0, take) : out;
+    },
+    async findOne({ where }) {
+      return rows.find((r) => matches(r, where)) ?? null;
+    },
+    // Rows returned by find()/findOne() are the same object references stored
+    // in `rows`, so the service's in-place mutations are already reflected;
+    // save() only needs to record that a write happened (mirrors the QA/
+    // security fakes).
+    async save(rowOrRows) {
+      for (const r of Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows]) this.saved.push(r.id);
+      return rowOrRows;
+    },
+  };
+}
+
+const noopLog = { info() {}, warn() {}, error() {} };
+
+function makeMission(id, overrides = {}) {
+  return {
+    id,
+    workspace_id: 'ws-1',
+    team_id: 'team-1',
+    title: `Mission ${id}`,
+    status: 'running',
+    room_id: 'room-1',
+    result_summary: '',
+    failure_reason: '',
+    step_timeout_minutes: 90,
+    started_at: null,
+    finished_at: null,
+    created_at: new Date('2026-06-01T00:00:00Z'),
+    ...overrides,
+  };
+}
+
+function makeStep(id, missionId, status, overrides = {}) {
+  return {
+    id,
+    mission_id: missionId,
+    status,
+    assignee_agent_id: 'agent-member',
+    finished_at: null,
+    started_at: null,
+    dispatched_at: null,
+    ...overrides,
+  };
+}
+
+function makeEvent(id, missionId, type, data, createdAt) {
+  return { id, mission_id: missionId, type, data, created_at: createdAt };
+}
+
+// `clock.now` is what the harness's nudgeOrchestrator stub stamps on the
+// `orchestrator_woken` event it appends — the test sets it to whatever `now`
+// it is about to pass into the matching runOnce() call, mirroring the real
+// nudgeOrchestrator -> recordEvent -> eventRepo.save side effect.
+// give-up 분기가 실제 mission/step을 승격시킬 때 cancelMission과 같은 방식으로
+// 정리해야 하는 non-terminal 스텝 상태 집합 — orchestration.constants.ts의
+// TERMINAL_STEP_STATUSES와 동일한 값을 이 파일 안에서 독립적으로 흉내낸다.
+const TERMINAL_STEP_STATUSES_FIXTURE = new Set(['done', 'failed', 'blocked', 'skipped', 'cancelled']);
+
+function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator, failMissionExternally } = {}) {
+  const missionRepo = makeRepo(missions);
+  const stepRepo = makeRepo(steps);
+  const eventRepo = makeRepo(events);
+  const teamRepo = makeRepo([]);
+  const clock = { now: new Date() };
+  const recordedEvents = [];
+  let recordSeq = 0;
+  const missionsStub = {
+    async recordEvent(mission, input) {
+      recordedEvents.push({ mission_id: mission.id, type: input.type, data: input.data ?? null });
+      // Mirrors the real OrchestrationMissionService.recordEvent's eventRepo.save
+      // side effect (fda9c820) — without this, a reaper-authored event (e.g. the
+      // failed-nudge 'error' event) would never be visible to the NEXT sweep's
+      // eventRepo queries, same as the nudgeOrchestrator stub's event below.
+      events.push(makeEvent(`ev-record-${++recordSeq}`, mission.id, input.type, input.data ?? null, clock.now));
+    },
+  };
+  const nudges = [];
+  let seq = 0;
+  const runnerStub = {
+    nudgeOrchestrator:
+      nudgeOrchestrator ??
+      (async (missionId, _workspaceId, _actor, note, reasonTag) => {
+        nudges.push({ missionId, note, reasonTag });
+        events.push(makeEvent(`ev-nudge-${++seq}`, missionId, 'orchestrator_woken', { reason: reasonTag }, clock.now));
+      }),
+    async failStepExternally() {
+      throw new Error('unexpected failStepExternally call — this fixture has no in-flight step past its timeout');
+    },
+    // 기본값은 실제 orchestration-runner.service.ts의 failMissionExternally가
+    // 하는 승격+취소를 그대로 흉내낸다(락/fresh-read 재검증 자체는 스텁 밖 —
+    // 그 분기 로직은 orchestration-fail-mission-externally.test.mjs가 실제
+    // 구현으로 검증한다). 개별 테스트는 레이스로 스킵되는 경우(false 반환)를
+    // 흉내내기 위해 이 옵션을 오버라이드한다.
+    failMissionExternally:
+      failMissionExternally ??
+      (async (missionId, _expectedStatus, reason, now) => {
+        const mission = missions.find((m) => m.id === missionId);
+        const open = steps.filter((s) => s.mission_id === missionId && !TERMINAL_STEP_STATUSES_FIXTURE.has(s.status));
+        for (const s of open) {
+          s.status = 'cancelled';
+          s.finished_at = now;
+        }
+        mission.status = 'failed';
+        mission.failure_reason = reason;
+        mission.finished_at = now;
+        await missionsStub.recordEvent(mission, { type: 'mission_failed', data: null });
+        return true;
+      }),
+  };
+  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog);
+  return { svc, missionRepo, stepRepo, eventRepo, nudges, recordedEvents, clock };
+}
+
+test('reapStalledRunning: nudges exactly the stale zero-in-flight mission; fresh/busy/paused missions are spared', async () => {
+  const NOW = new Date('2026-06-22T21:00:00Z');
+  const missions = [
+    makeMission('stale-done', { started_at: new Date(NOW.getTime() - 200 * MIN) }),
+    makeMission('fresh-done', { started_at: new Date(NOW.getTime() - 200 * MIN) }),
+    // Has an in-flight step — reapStuckSteps' turf, not this branch's. Timeout
+    // disabled (0) so reapStuckSteps itself stays a no-op in this fixture.
+    makeMission('busy', { started_at: new Date(NOW.getTime() - 200 * MIN), step_timeout_minutes: 0 }),
+    makeMission('paused-mission', { status: 'paused', started_at: new Date(NOW.getTime() - 200 * MIN) }),
+  ];
+  const steps = [
+    makeStep('s-stale', 'stale-done', 'done', { finished_at: new Date(NOW.getTime() - 100 * MIN) }), // 100m > 20m default -> nudge
+    makeStep('s-fresh', 'fresh-done', 'done', { finished_at: new Date(NOW.getTime() - 5 * MIN) }),    // 5m < 20m -> spare
+    makeStep('s-busy', 'busy', 'dispatched', { dispatched_at: new Date(NOW.getTime() - 999 * MIN) }),  // in flight -> spare
+    makeStep('s-paused', 'paused-mission', 'done', { finished_at: new Date(NOW.getTime() - 100 * MIN) }), // mission not running -> never selected
+  ];
+  const h = makeHarness({ missions, steps, events: [] });
+  h.clock.now = NOW;
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_nudged, 1, 'exactly one mission is nudged');
+  assert.equal(result.missions_failed, 0, 'nothing is failed on the first stale window');
+  assert.deepEqual(h.nudges.map((n) => n.missionId), ['stale-done']);
+  assert.equal(h.nudges[0].reasonTag, 'running_stall');
+
+  const byId = Object.fromEntries(missions.map((m) => [m.id, m]));
+  assert.equal(byId['stale-done'].status, 'running', 'nudged, not failed, on the first stale window');
+  assert.equal(byId['fresh-done'].status, 'running', 'within the timeout window — untouched');
+  assert.equal(byId['busy'].status, 'running', 'in-flight work present — left to reapStuckSteps');
+  assert.equal(byId['paused-mission'].status, 'paused', 'not running — never selected');
+});
+
+test('reapStalledRunning: a wake of ANY kind inside the timeout window backs off reaper action', async () => {
+  const NOW = new Date('2026-06-22T21:00:00Z');
+  const mission = makeMission('m-recently-nudged', { started_at: new Date(NOW.getTime() - 200 * MIN) });
+  const steps = [makeStep('s1', 'm-recently-nudged', 'failed', { finished_at: new Date(NOW.getTime() - 100 * MIN) })];
+  // An operator's manual nudge 5 minutes ago — not counted toward the reaper's
+  // own attempt limit (reason !== 'running_stall'), but still earns the
+  // mission a fresh window to be answered before the reaper acts.
+  const events = [makeEvent('ev-manual', 'm-recently-nudged', 'orchestrator_woken', { reason: 'manual' }, new Date(NOW.getTime() - 5 * MIN))];
+  const h = makeHarness({ missions: [mission], steps, events });
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_nudged, 0, 'a recent wake of any kind blocks a reaper nudge');
+  assert.equal(result.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+});
+
+test('wedge round trip: stalled running mission is nudged, backs off, nudges again, then fails once the limit is exhausted — and stays terminal after', async () => {
+  const T0 = new Date('2026-06-22T21:00:00Z');
+  const mission = makeMission('m-wedge', { started_at: new Date(T0.getTime() - 200 * MIN) });
+  const steps = [
+    makeStep('s-done', 'm-wedge', 'done', { finished_at: new Date(T0.getTime() - 100 * MIN) }),
+    // Never got picked up — dangling non-terminal work that must be cancelled
+    // when the mission is finally failed.
+    makeStep('s-dangling', 'm-wedge', 'pending', { assignee_agent_id: null }),
+  ];
+  const h = makeHarness({ missions: [mission], steps, events: [] });
+
+  // Sweep 1: stale past the 20m default timeout, no prior nudges -> nudge.
+  h.clock.now = T0;
+  const r1 = await h.svc.runOnce(T0);
+  assert.equal(r1.missions_nudged, 1, 'first sweep nudges the stalled mission');
+  assert.equal(r1.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+
+  // Sweep 2: immediately after — the nudge just recorded backs off a repeat.
+  const r2 = await h.svc.runOnce(T0);
+  assert.equal(r2.missions_nudged, 0, 'an immediate re-sweep does not pile a second nudge on top');
+  assert.equal(r2.missions_failed, 0);
+
+  // Sweep 3: a full window later with still no answer -> second nudge.
+  const T1 = new Date(T0.getTime() + 21 * MIN);
+  h.clock.now = T1;
+  const r3 = await h.svc.runOnce(T1);
+  assert.equal(r3.missions_nudged, 1, 'a second stale window earns a second nudge');
+  assert.equal(mission.status, 'running');
+
+  // Sweep 4: another full window later, still no answer -> nudge limit (2)
+  // exhausted, mission fails and the dangling step is cancelled.
+  const T2 = new Date(T1.getTime() + 21 * MIN);
+  const r4 = await h.svc.runOnce(T2);
+  assert.equal(r4.missions_nudged, 0);
+  assert.equal(r4.missions_failed, 1, 'the mission is failed once the nudge limit is exhausted');
+  assert.equal(mission.status, 'failed', 'mission escaped the running wedge via forced failure');
+  assert.match(mission.failure_reason, /re-briefed 2 time\(s\)/);
+  assert.ok(mission.finished_at instanceof Date && mission.finished_at.getTime() === T2.getTime());
+  const dangling = steps.find((s) => s.id === 's-dangling');
+  assert.equal(dangling.status, 'cancelled', 'the unassigned/never-dispatched step is closed out on fail');
+  assert.equal(dangling.finished_at.getTime(), T2.getTime());
+  assert.ok(
+    h.recordedEvents.some((e) => e.mission_id === 'm-wedge' && e.type === 'mission_failed'),
+    'a mission_failed timeline event is recorded',
+  );
+
+  // Sweep 5: the mission is terminal now — the team's open-mission slot is
+  // free and a later sweep never revisits it (idempotent).
+  const r5 = await h.svc.runOnce(new Date(T2.getTime() + 100 * MIN));
+  assert.equal(r5.missions_nudged, 0);
+  assert.equal(r5.missions_failed, 0, 'idempotent — a terminal mission is never revisited');
+});
+
+test('wedge round trip: nudge always fails (mission room broken) — failed attempts still count, error events land on the timeline, and the mission still reaches failed', async () => {
+  // ticket fda9c820: nudgeOrchestrator throws when postToRoom -> requireActiveParticipant
+  // fails (room deleted, or the system sender's participant row is gone). Before this
+  // fix that meant `orchestrator_woken` never got recorded, the reaper's attempt
+  // counter sat at 0 forever, and the mission stayed `running` for good.
+  const T0 = new Date('2026-06-22T21:00:00Z');
+  const mission = makeMission('m-wedge-broken-room', { started_at: new Date(T0.getTime() - 200 * MIN) });
+  const steps = [
+    makeStep('s-done-2', 'm-wedge-broken-room', 'done', { finished_at: new Date(T0.getTime() - 100 * MIN) }),
+    // Never got picked up — must still be cancelled when the mission is
+    // finally failed, exactly like the delivered-nudge wedge above.
+    makeStep('s-dangling-2', 'm-wedge-broken-room', 'pending', { assignee_agent_id: null }),
+  ];
+  let attempts = 0;
+  const h = makeHarness({
+    missions: [mission],
+    steps,
+    events: [],
+    // Real nudgeOrchestrator never gets to record its own `orchestrator_woken`
+    // event when postToRoom throws — it propagates straight out.
+    nudgeOrchestrator: async () => {
+      attempts += 1;
+      throw new Error('mission room participant missing');
+    },
+  });
+
+  // Sweep 1: stale past the timeout, no prior attempts -> first nudge attempt.
+  // It fails and is recorded as a `type:'error'` event instead of
+  // `orchestrator_woken`, matching decideWake's own failure observability.
+  h.clock.now = T0;
+  const r1 = await h.svc.runOnce(T0);
+  assert.equal(r1.missions_nudged, 0, 'a failed delivery is never counted as a successful nudge');
+  assert.equal(r1.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+  assert.equal(attempts, 1);
+  const errorsSoFar = () =>
+    h.recordedEvents.filter((e) => e.mission_id === 'm-wedge-broken-room' && e.type === 'error');
+  assert.equal(errorsSoFar().length, 1, 'the failed attempt is recorded on the timeline');
+  assert.equal(errorsSoFar()[0].data?.reason, 'running_stall_nudge_failed');
+
+  // Sweep 2: immediately after — the failed attempt still backs off a retry,
+  // exactly like a delivered nudge would.
+  const r2 = await h.svc.runOnce(T0);
+  assert.equal(r2.missions_nudged, 0);
+  assert.equal(r2.missions_failed, 0);
+  assert.equal(attempts, 1, 'no retry inside the back-off window');
+
+  // Sweep 3: a full window later, still broken -> second failed attempt.
+  const T1 = new Date(T0.getTime() + 21 * MIN);
+  h.clock.now = T1;
+  const r3 = await h.svc.runOnce(T1);
+  assert.equal(r3.missions_nudged, 0);
+  assert.equal(r3.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+  assert.equal(attempts, 2);
+  assert.equal(errorsSoFar().length, 2);
+
+  // Sweep 4: another full window later — both prior attempts counted even
+  // though neither was ever delivered, so the mission escapes the wedge on
+  // its own instead of staying `running` forever.
+  const T2 = new Date(T1.getTime() + 21 * MIN);
+  const r4 = await h.svc.runOnce(T2);
+  assert.equal(r4.missions_nudged, 0);
+  assert.equal(r4.missions_failed, 1, 'the mission is failed once the attempt limit is exhausted, delivered or not');
+  assert.equal(mission.status, 'failed', 'mission escaped the running wedge despite every nudge failing to send');
+  assert.match(mission.failure_reason, /re-briefed 2 time\(s\)/);
+  const dangling = steps.find((s) => s.id === 's-dangling-2');
+  assert.equal(dangling.status, 'cancelled', 'dangling work is still closed out on a failed-attempt escalation');
+  assert.ok(
+    h.recordedEvents.some((e) => e.mission_id === 'm-wedge-broken-room' && e.type === 'mission_failed'),
+    'a mission_failed timeline event is recorded',
+  );
+  assert.equal(errorsSoFar().length, 2, 'both failed attempts left an error event on the timeline');
+
+  // Sweep 5: terminal now — idempotent, no further attempts.
+  const r5 = await h.svc.runOnce(new Date(T2.getTime() + 100 * MIN));
+  assert.equal(r5.missions_nudged, 0);
+  assert.equal(r5.missions_failed, 0, 'idempotent — a terminal mission is never revisited');
+  assert.equal(attempts, 2, 'no further attempts once terminal');
+});
+
+// 티켓 bf350dc8 — reapStalledPlanning/reapStalledRunning의 give-up 분기는 더
+// 이상 스스로 mission/step을 mutate하지 않고, 락으로 보호된
+// OrchestrationRunnerService.failMissionExternally 호출 결과(boolean)에
+// 전적으로 의존한다. 아래 두 테스트는 그 위임 배선(어떤 expectedStatus로
+// 호출하는지, true/false 반환값을 어떻게 반영하는지)을 검증한다 — 락+fresh-read
+// 재검증 자체의 분기 로직은 실제 구현을 스텁 없이 구동하는
+// orchestration-fail-mission-externally.test.mjs가 검증한다.
+
+test('reapStalledPlanning: give-up branch is wired through failMissionExternally with expectedStatus "planning", and respects its true/false result', async () => {
+  const NOW = new Date('2026-06-22T21:00:00Z');
+  const missionFail = makeMission('m-plan-fail', { status: 'planning', started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const missionRaced = makeMission('m-plan-raced', { status: 'planning', started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const events = [
+    makeEvent('evA1', 'm-plan-fail', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('evA2', 'm-plan-fail', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 21 * MIN)),
+    makeEvent('evB1', 'm-plan-raced', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('evB2', 'm-plan-raced', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 21 * MIN)),
+  ];
+  const calls = [];
+  const h = makeHarness({
+    missions: [missionFail, missionRaced],
+    steps: [],
+    events,
+    failMissionExternally: async (missionId, expectedStatus, reason, now) => {
+      calls.push({ missionId, expectedStatus, reason, now });
+      // m-plan-raced만 레이스로 스킵된 것처럼 흉내낸다 — fresh 재조회 시점에
+      // 이미 submit_orchestration_plan이 들어와 running으로 바뀐 상황.
+      return missionId === 'm-plan-fail';
+    },
+  });
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_failed, 1, '실제로 승격된 미션만 집계된다');
+  assert.equal(calls.length, 2, '두 미션 모두 failMissionExternally가 호출된다');
+  assert.ok(calls.every((c) => c.expectedStatus === 'planning'), 'planning 분기는 항상 expectedStatus="planning"으로 호출한다');
+  assert.ok(
+    calls.every((c) => /submit_orchestration_plan call/.test(c.reason)),
+    'planning 분기 고유의 사유 문구가 그대로 전달된다',
+  );
+});
+
+test('reapStalledRunning: give-up branch respects a failMissionExternally race-skip — not counted as failed, and the reaper never mutates mission/step state itself', async () => {
+  const NOW = new Date('2026-06-22T22:42:00Z');
+  const mission = makeMission('m-raced', { started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const steps = [makeStep('s-done-3', 'm-raced', 'done', { finished_at: new Date(NOW.getTime() - 100 * MIN) })];
+  const events = [
+    makeEvent('ev1', 'm-raced', 'orchestrator_woken', { reason: 'running_stall' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('ev2', 'm-raced', 'orchestrator_woken', { reason: 'running_stall' }, new Date(NOW.getTime() - 21 * MIN)),
+  ];
+  let call = null;
+  const h = makeHarness({
+    missions: [mission],
+    steps,
+    events,
+    failMissionExternally: async (missionId, expectedStatus, reason, now) => {
+      call = { missionId, expectedStatus, reason, now };
+      // 프로덕션 구현이 fresh 재조회에서 레이스를 감지한(예: 마지막 nudge에
+      // 응답한 replan이 막 새 스텝을 dispatch한) 상황을 흉내낸다 — 미션/스텝을
+      // 전혀 건드리지 않고 false만 반환한다.
+      return false;
+    },
+  });
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_failed, 0, '레이스로 스킵된 승격은 실패로 집계되지 않는다');
+  assert.equal(result.missions_nudged, 0);
+  assert.ok(call, 'failMissionExternally가 실제로 호출됐다');
+  assert.equal(call.expectedStatus, 'running');
+  assert.equal(
+    mission.status,
+    'running',
+    '리퍼는 더 이상 mission.status를 직접 건드리지 않는다 — 승격은 오직 failMissionExternally 내부에서만 일어난다',
+  );
+  assert.equal(steps[0].status, 'done', '스텝도 리퍼가 직접 취소하지 않는다');
+});

@@ -19,6 +19,7 @@ import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
+import { HardBudgetConfigSchema, serializeHardBudgetConfig } from '../../../common/hard-budget-config';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
@@ -148,7 +149,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'update_workspace',
-    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), or the default agent harness (harness_config)',
+    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), the default agent harness (harness_config), or the default hard-budget ceiling (hard_budget_config)',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().optional().describe('New name'),
@@ -167,8 +168,10 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
         .describe('Workspace-wide default environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used (server expands it to url / default_branch / credential); legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are accepted for backward compatibility but ignored on save. Boards override this per top-level key via their own environment_config. Pass null to clear.'),
+      hard_budget_config: HardBudgetConfigSchema.nullable().optional()
+        .describe('Workspace-wide default hard-budget ceiling: { enabled?, max_auto_responses?, window_minutes?, max_dispatches_per_window?, max_tokens_per_window?, max_runs_per_window?, auto_pend?, notify? }. Boards override the ticket-scoped keys per key via their own hard_budget_config; max_runs_per_window has no board layer — it is the sole ceiling on new QA/Action/Orchestration run creations, scoped to this workspace. Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config, hard_budget_config }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       // getCallerAgent was previously consulted only for the audit rows
       // below, never as a gate — any authenticated key could rewrite any
@@ -217,6 +220,9 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
           ws.environment_config = serializeEnvironmentConfig(checked.value);
         }
       }
+      // Default hard-budget ceiling (ticket a51ec6d9) — strict-validated by
+      // the arg schema; empty objects collapse to null via the serializer.
+      if (hard_budget_config !== undefined) ws.hard_budget_config = serializeHardBudgetConfig(hard_budget_config);
 
       // Config-change audit (ticket 1fcba693): one grep-able config_changed row
       // per changed cadence knob, actor from the MCP session, source=mcp. In

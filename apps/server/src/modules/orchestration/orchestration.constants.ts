@@ -99,6 +99,9 @@ export const MAX_PARALLEL_CEILING = 12;
 export const INSTRUCTIONS_MAX = 8000;
 export const SUMMARY_MAX = 8000;
 export const MAX_ARTIFACTS_PER_STEP = 30;
+/** Upper bound on OrchestrationTeam.max_open_missions. The floor is 0 (a deliberate
+ *  "no agent-created missions" value), enforced separately by the clamp that uses this. */
+export const MAX_OPEN_MISSIONS_CEILING = 20;
 
 // ── Plan validation ──────────────────────────────────────────────────────────
 

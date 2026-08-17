@@ -63,7 +63,11 @@ export type UpdateScheduleInput = Partial<Omit<CreateScheduleInput, 'workspaceId
  *     reschedules forward.
  *   - SKIP (not queue): if the schedule's previous batch (last_batch_id) is
  *     still `running`, this occurrence is dropped (next_run_at already advanced)
- *     and logged — a slow batch can never pile up overlapping runs.
+ *     and logged — a slow batch can never pile up overlapping runs. Exception:
+ *     a `running` batch with no live run at current_index isn't in flight —
+ *     it's parked on a transient run-budget rejection (see
+ *     QaRunService.resumeWedgedBatch) — so this tick resumes it instead of
+ *     skipping forever (ticket a51ec6d9 review round 2).
  *
  * Deployment timing (same footgun as #467dbc7a): a scheduled run hits the
  * RUNNING server, which auto-deploys from production.private only AFTER main
@@ -250,10 +254,29 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
         schedule.next_run_at = this.computeNextRun(schedule, now);
         await this.scheduleRepo.save(schedule);
 
-        // SKIP-if-running: never let a slow previous batch overlap.
+        // SKIP-if-running: never let a slow previous batch overlap. Exception:
+        // a `running` batch with NO live run recorded at current_index isn't
+        // actually in flight — it's parked there by QaRunService._dispatchBatchIndex
+        // after a transient RunBudgetExceededError (ticket a51ec6d9 review round
+        // 2). Skipping that forever would never resolve, since nothing else
+        // re-drives the retry and next_run_at keeps advancing past it every tick.
+        // Resume it instead; this tick still doesn't dispatch a FRESH batch for
+        // the schedule (that would double-dispatch alongside the resume), but
+        // once the resumed batch reaches a terminal status, the next due tick
+        // sees last_batch_id no longer 'running' and dispatches normally — no
+        // new entry point added, self-heals through the existing cadence.
         if (schedule.last_batch_id) {
           const prev = await this.batchRepo.findOne({ where: { id: schedule.last_batch_id } });
           if (prev && prev.status === 'running') {
+            const prevRunIds = Array.isArray(prev.run_ids) ? prev.run_ids : [];
+            if (!prevRunIds[prev.current_index]) {
+              await this.qaRunService.resumeWedgedBatch(prev.id);
+              skipped.push(schedule.id);
+              this.logService.info('QaScheduler', 'resumed budget-wedged batch', {
+                schedule_id: schedule.id, batch_id: prev.id, index: prev.current_index,
+              });
+              continue;
+            }
             skipped.push(schedule.id);
             this.logService.info('QaScheduler', 'skip — previous batch still running', {
               schedule_id: schedule.id, batch_id: prev.id,

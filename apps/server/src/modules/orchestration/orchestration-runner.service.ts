@@ -1112,6 +1112,77 @@ export class OrchestrationRunnerService {
     });
   }
 
+  /**
+   * 리퍼가 락 밖 스냅샷만으로 stalled 라고 판단한 미션을 실패 처리한다 — 단,
+   * `withMissionLock` 안에서 실제로 다시 검증한 뒤에만. 리퍼는 give-up 을
+   * 결정하기까지 여러 번의 락 없는 await(타임라인 집계, nudge 횟수 조회)를
+   * 거치는데, 그 틈에 `submit_orchestration_plan` 호출이나 nudge 로 촉발된
+   * dispatch 가 끼어들어 리퍼가 덮어쓰려는 바로 그 미션을 바꿔놓을 수 있다.
+   * `submitPlan`/`reportStep` 이 쓰는 것과 동일한 락 안에서 상태(그리고
+   * `running` 케이스는 in-flight 스텝까지)를 새로 재조회하면, 이미 단일
+   * 스텝에 대해 `failStepExternally` 가 제공하는 것과 같은 충돌-안전성을
+   * 미션 승격에도 그대로 갖게 된다.
+   *
+   * 실제로 미션을 실패시켰는지 여부를 반환한다 — false 면 fresh 재조회에서
+   * 스냅샷이 이미 stale 해진 것을 발견했다는 뜻(다른 경로가 먼저 미션을
+   * 처리함)이므로, 호출자는 이를 리퍼발 실패로 집계하면 안 된다.
+   */
+  async failMissionExternally(
+    missionId: string,
+    expectedStatus: 'planning' | 'running',
+    reason: string,
+    now: Date = new Date(),
+  ): Promise<boolean> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = await this.missions.requireMission(missionId);
+      if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+        this.logService.warn(
+          'Orchestration',
+          `reaper give-up on mission ${missionId} skipped — already ${mission.status}`,
+        );
+        return false;
+      }
+      if (mission.status !== expectedStatus) {
+        this.logService.warn(
+          'Orchestration',
+          `reaper give-up on mission ${missionId} skipped — expected ${expectedStatus} but found ` +
+            `${mission.status} (changed between the reaper's snapshot and this check)`,
+        );
+        return false;
+      }
+
+      const steps = await this.missions.listSteps(mission.id);
+      if (expectedStatus === 'running' && steps.some((s) => isInFlight(s.status))) {
+        this.logService.warn(
+          'Orchestration',
+          `reaper give-up on mission ${missionId} skipped — a step is now in flight (just dispatched, no longer stalled)`,
+        );
+        return false;
+      }
+
+      // cancelMission 과 동일한 방식으로 남은 것을 정리한다 — 아직 픽업되지
+      // 않은(미배정, 혹은 replan 으로 고아가 된) 스텝은 in-flight 가 아니므로
+      // 위 체크를 통과했더라도 이대로 두면 terminal 미션 아래 계속 남는다.
+      const open = steps.filter((s) => !isTerminalStepStatus(s.status));
+      for (const s of open) {
+        s.status = 'cancelled';
+        s.finished_at = now;
+      }
+      if (open.length) await this.stepRepo.save(open);
+
+      mission.status = 'failed';
+      mission.failure_reason = reason.slice(0, 2000);
+      mission.finished_at = now;
+      await this.missionRepo.save(mission);
+      await this.missions.recordEvent(mission, {
+        type: 'mission_failed',
+        message: `Mission failed: ${mission.failure_reason}. Check that the orchestrator agent is online and connected.`,
+        actor_type: 'system',
+      });
+      return true;
+    });
+  }
+
   // ── Small helpers ─────────────────────────────────────────────────────────
 
   private requireOrchestrator(mission: OrchestrationMission, callerAgentId: string): void {

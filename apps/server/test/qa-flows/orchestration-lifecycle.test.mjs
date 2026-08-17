@@ -520,4 +520,487 @@ test('Orchestration: parallelism is capped by the mission setting', async (t) =>
   assert.equal(detail.counts.pending, 1, 'the third waits for a free slot, not for a dependency');
 });
 
+test('Orchestration: list_orchestration_teams / list_orchestration_missions scope strictly to the caller', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService, OrchestrationMissionService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-discovery');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-member' });
+  const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'discovery-stranger' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'discovery-orch');
+  const memberMcp = await mcpFor(member, 'discovery-member');
+  const strangerMcp = await mcpFor(stranger, 'discovery-stranger');
+
+  step('list_orchestration_teams is empty before any team exists');
+  const beforeTeams = await orchMcp.callTool('list_orchestration_teams', {});
+  assert.deepEqual(beforeTeams.teams, []);
+
+  step('Create a team; orchestrator and roster member both see it, a stranger does not');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Discovery squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const orchTeams = await orchMcp.callTool('list_orchestration_teams', {});
+  assert.equal(orchTeams.teams.length, 1);
+  assert.equal(orchTeams.teams[0].id, team.id);
+
+  const memberTeams = await memberMcp.callTool('list_orchestration_teams', {});
+  assert.equal(memberTeams.teams.length, 1, 'a roster member sees the team too, not just the orchestrator');
+
+  const strangerTeamsResult = await strangerMcp.callTool('list_orchestration_teams', {});
+  assert.deepEqual(strangerTeamsResult.teams, [], 'an agent on no team sees nothing');
+
+  step('Create a mission; only the orchestrator/member see it via list_orchestration_missions');
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Discovery mission',
+    objective: 'Prove discovery tools are scoped correctly.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+
+  const orchMissions = await orchMcp.callTool('list_orchestration_missions', {});
+  assert.equal(orchMissions.missions.length, 1);
+  assert.equal(orchMissions.missions[0].id, mission.id);
+
+  const memberMissions = await memberMcp.callTool('list_orchestration_missions', {});
+  assert.equal(memberMissions.missions.length, 1, 'a roster member sees the mission too');
+
+  const strangerMissionsResult = await strangerMcp.callTool('list_orchestration_missions', {});
+  assert.deepEqual(strangerMissionsResult.missions, [], 'a non-member sees nothing, even in the same workspace');
+
+  step('Finished missions are hidden by default and shown with include_finished');
+  await ds.getRepository('OrchestrationMission').update({ id: mission.id }, { status: 'completed' });
+
+  const activeOnly = await orchMcp.callTool('list_orchestration_missions', {});
+  assert.deepEqual(activeOnly.missions, [], 'a completed mission is hidden by default');
+
+  const withFinished = await orchMcp.callTool('list_orchestration_missions', { include_finished: true });
+  assert.equal(withFinished.missions.length, 1);
+  assert.equal(withFinished.missions[0].status, 'completed');
+});
+
+test('Orchestration: create_orchestration_mission — ownership, caps, recursion guard, and the reaper-blind-spot recovery', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService, OrchestrationMissionService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-create');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-member' });
+  const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-stranger' });
+  const otherOrch = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-other-orch' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'create-orch');
+  const memberMcp = await mcpFor(member, 'create-member');
+  const strangerMcp = await mcpFor(stranger, 'create-stranger');
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Create-mission squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+  const otherTeam = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'A team orch does not run',
+    orchestrator_agent_id: otherOrch.id,
+    created_by: HUMAN.id,
+  });
+
+  step('A roster member (not the orchestrator) cannot create a mission for the team');
+  const memberAttempt = await memberMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(memberAttempt.isError, true);
+  assert.match(memberAttempt.error.error, /not the orchestrator/);
+
+  step('A stranger with no relationship to the team cannot either');
+  const strangerAttempt = await strangerMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(strangerAttempt.isError, true);
+
+  step('Being an orchestrator SOMEWHERE does not grant rights over a team you do not run');
+  const wrongTeamAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: otherTeam.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(wrongTeamAttempt.isError, true);
+  assert.match(wrongTeamAttempt.error.error, /not the orchestrator/);
+
+  step('A disabled team refuses creation');
+  await ds.getRepository('OrchestrationTeam').update({ id: team.id }, { enabled: 0 });
+  const disabledAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(disabledAttempt.isError, true);
+  assert.match(disabledAttempt.error.error, /disabled/);
+  await ds.getRepository('OrchestrationTeam').update({ id: team.id }, { enabled: 1 });
+
+  step('Orchestrator creates a mission; explicit max_steps/max_parallel_steps are clamped to the agent ceiling');
+  const created = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id,
+    title: 'Agent-created mission',
+    objective: 'Prove the self-service creation path works end to end.',
+    max_steps: 999,
+    max_parallel_steps: 999,
+  });
+  assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
+  assert.equal(created.status, 'planning', 'start:true (default) briefs immediately');
+  const missionId = created.mission_id;
+
+  const detail = await missions.getMissionDetail(missionId, ws.id);
+  assert.equal(detail.max_steps, 20, 'clamped down from 999 to the agent-path ceiling, not just defaulted');
+  assert.equal(detail.max_parallel_steps, 3, 'clamped to min(team.max_parallel_steps=3, agent ceiling=4)');
+
+  step('The returned mission_id works immediately with submit_orchestration_plan');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: missionId,
+    steps: [{ step_key: 'only-step', title: 'Only step', instructions: 'do it', assignee_agent_id: member.id }],
+  });
+  assert.ok(!plan?.isError, `plan failed: ${JSON.stringify(plan)}`);
+  assert.equal(plan.dispatched_now.length, 1);
+
+  step('A second creation attempt for the same team is rejected — one open mission at a time');
+  const capped = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should not be created', objective: 'Should not be created.',
+  });
+  assert.equal(capped.isError, true);
+  assert.equal(capped.error.existing_mission_id, missionId);
+  assert.equal(capped.error.existing_mission_status, 'running', 'submit_orchestration_plan already advanced it past planning');
+  assert.equal(capped.error.open_step_count, 1, 'the just-dispatched step counts as in flight');
+
+  step('The reaper-blind-spot edge case self-recovers: running + 0 in-flight steps names its own escape hatch');
+  // Neither reaper branch covers this: reapStuckSteps only looks at in-flight
+  // steps (there are none once the last one finishes) and reapStalledPlanning
+  // only looks at status:'planning' (this mission already advanced past it).
+  await ds.getRepository('OrchestrationStep').update({ mission_id: missionId }, { status: 'done' });
+  await ds.getRepository('OrchestrationMission').update({ id: missionId }, { status: 'running' });
+
+  const stuckAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after unwedging', objective: 'Retry after unwedging.',
+  });
+  assert.equal(stuckAttempt.isError, true);
+  assert.equal(stuckAttempt.error.existing_mission_status, 'running');
+  assert.equal(stuckAttempt.error.open_step_count, 0, 'every step already finished — this is the wedge');
+  assert.match(stuckAttempt.error.error, /complete_orchestration_mission/, 'the 409 names its own escape hatch');
+
+  const closed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: missionId, status: 'completed', summary: 'Closing the wedged mission so the team can create a new one.',
+  });
+  assert.ok(!closed?.isError, `complete failed: ${JSON.stringify(closed)}`);
+
+  const retried = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after unwedging', objective: 'Retry after unwedging.',
+  });
+  assert.ok(!retried.isError, `retry after unwedge failed: ${JSON.stringify(retried)}`);
+  assert.notEqual(retried.mission_id, missionId);
+
+  step('The recursion guard: an agent with an in-flight step elsewhere cannot also start a new mission');
+  // A different team orch also orchestrates — proves the guard is keyed on the
+  // AGENT holding in-flight work, not on the target team's own open-mission cap
+  // (team3 has zero open missions of its own, so only guard (b) can be firing).
+  const team3 = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Second team orch also runs',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await ds.getRepository('OrchestrationStep').save(
+    ds.getRepository('OrchestrationStep').create({
+      mission_id: retried.mission_id,
+      workspace_id: ws.id,
+      team_id: team.id,
+      step_key: 'busy-work',
+      title: 'Busy work',
+      assignee_agent_id: orch.id,
+      status: 'dispatched',
+    }),
+  );
+  const recursionAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team3.id, title: 'Should be blocked by recursion guard', objective: 'Should be blocked.',
+  });
+  assert.equal(recursionAttempt.isError, true);
+  assert.match(recursionAttempt.error.error, /in flight/);
+});
+
+test('Orchestration: create_orchestration_mission — max_open_missions = 0 forbids self-created missions with a clean 409, not a TypeError', async (t) => {
+  // Regression coverage for ticket d5a545c4: before the fix, `cap <= 0` fell
+  // through to `openForTeam[openForTeam.length - 1]` on an EMPTY array
+  // (openForTeam[-1] is undefined), so the very first agent-created-mission
+  // attempt against a cap-0 team crashed with "Cannot read properties of
+  // undefined (reading 'id')" instead of the clear 409 the cap is meant to
+  // produce. There was no product path to set the value to 0 until this
+  // ticket wired max_open_missions into createTeam/updateTeam, so this is
+  // also the first test that can reach cap 0 at all.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-zero');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'cap-zero-orch' });
+
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-zero-orch' });
+  const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+  t.after(() => { void orchMcp.close().catch(() => {}); });
+
+  step('A team created with max_open_missions: 0 persists the deliberate zero, not the ?? 1 default');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Cap-zero squad',
+    orchestrator_agent_id: orch.id,
+    max_open_missions: 0,
+    created_by: HUMAN.id,
+  });
+  assert.equal(team.max_open_missions, 0, 'createTeam must not silently promote an explicit 0 to the default 1');
+
+  step('create_orchestration_mission on a cap-0 team returns a 409 naming the team, never a raw TypeError');
+  const blocked = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should be blocked', objective: 'Should be blocked.',
+  });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.error.status, 409);
+  assert.match(blocked.error.error, /does not allow agent-created missions/);
+  assert.match(blocked.error.error, /max_open_missions = 0/);
+
+  step('Raising the cap via updateTeam immediately un-blocks the same team');
+  const raised = await teams.updateTeam(team.id, ws.id, { max_open_missions: 1 });
+  assert.equal(raised.max_open_missions, 1);
+  const allowed = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Now allowed', objective: 'Now allowed.',
+  });
+  assert.ok(!allowed.isError, `create failed after raising the cap: ${JSON.stringify(allowed)}`);
+});
+
+test('Orchestration: create_orchestration_mission — max_open_missions = 2 allows two concurrent missions; a third names the OLDEST one', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-cap-two');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'cap-two-orch' });
+
+  const key = await createApiKey(app, getDataSourceToken, orch.id, { workspaceId: ws.id, label: 'cap-two-orch' });
+  const orchMcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+  t.after(() => { void orchMcp.close().catch(() => {}); });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Cap-two squad',
+    orchestrator_agent_id: orch.id,
+    max_open_missions: 2,
+    created_by: HUMAN.id,
+  });
+  assert.equal(team.max_open_missions, 2);
+
+  step('Two missions can be open at once under cap 2');
+  const first = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'First (oldest)', objective: 'First.',
+  });
+  assert.ok(!first.isError, `first create failed: ${JSON.stringify(first)}`);
+  const second = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Second (newest)', objective: 'Second.',
+  });
+  assert.ok(!second.isError, `second create failed: ${JSON.stringify(second)}`);
+
+  // Force a deterministic created_at ordering — two inserts a few
+  // milliseconds apart are not a safe ordering signal on every DB backend,
+  // and the whole point of this test is which one the cap guard names.
+  const missionRepo = ds.getRepository('OrchestrationMission');
+  await missionRepo.update({ id: first.mission_id }, { created_at: new Date(Date.now() - 60_000) });
+  await missionRepo.update({ id: second.mission_id }, { created_at: new Date(Date.now() - 30_000) });
+
+  step('A third attempt is rejected, naming the OLDEST open mission (openForTeam[length-1] under DESC order), not the newest');
+  const third = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Third (should be rejected)', objective: 'Third.',
+  });
+  assert.equal(third.isError, true);
+  assert.equal(third.error.status, 409);
+  assert.equal(third.error.existing_mission_id, first.mission_id, 'the oldest mission is named, not the most recent');
+  assert.notEqual(third.error.existing_mission_id, second.mission_id);
+});
+
+test('Orchestration: an orchestrator who is also a roster member can self-assign a step (regression guard)', async (t) => {
+  // Not a hypothetical: ticket b7127aae's own smoke mission assigns its rollup
+  // step to the orchestrator itself. createTeam/addMember allow the duplicate
+  // by design (decision thread on b7127aae) — this locks in that a plan step
+  // assigned to the orchestrator actually dispatches, not just that adding the
+  // member doesn't throw.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const runner = app.get(OrchestrationRunnerService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-self-assign');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'self-assign-orch' });
+  const helper = await createAgent(app, getDataSourceToken, ws.id, { name: 'self-assign-helper' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'self-assign-orch');
+
+  step('Team roster includes the orchestrator itself, mirroring a rollup-style mission');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Self-assign squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: helper.id });
+  await teams.addMember(team.id, ws.id, { agent_id: orch.id });
+
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Fan out then roll up',
+    objective: 'A helper reports, the orchestrator rolls the result up itself.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  await runner.startMission(mission.id, ws.id, HUMAN);
+
+  step('A plan step assigned to the orchestrator (who is also a member) is accepted, not "not a member"');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [
+      { step_key: 'gather', title: 'Gather', instructions: 'Report a fact.', assignee_agent_id: helper.id },
+      {
+        step_key: 'rollup',
+        title: 'Roll up',
+        instructions: 'Summarize.',
+        depends_on: ['gather'],
+        assignee_agent_id: orch.id,
+      },
+    ],
+  });
+  assert.ok(!plan?.isError, `plan failed: ${JSON.stringify(plan)}`);
+  assert.deepEqual(plan.dispatched_now, ['gather'], 'rollup only waits on its dependency — it was accepted, not rejected');
+
+  step('Once gather reports, the orchestrator-assigned rollup step dispatches to the orchestrator itself');
+  const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
+  const gather = afterPlan.steps.find((s) => s.step_key === 'gather');
+  const reported = await orchMcp.callTool('report_orchestration_step', {
+    step_id: gather.id,
+    status: 'done',
+    summary: 'Gathered the fact.',
+  });
+  assert.ok(!reported?.isError, `report failed: ${JSON.stringify(reported)}`);
+  assert.deepEqual(
+    reported.next_steps_dispatched,
+    ['rollup'],
+    'the orchestrator-assigned step dispatches like any other assignee\'s',
+  );
+
+  const final = await missions.getMissionDetail(mission.id, ws.id);
+  const rollup = final.steps.find((s) => s.step_key === 'rollup');
+  assert.equal(rollup.status, 'dispatched');
+  assert.equal(rollup.assignee_agent_id, orch.id);
+  assert.ok(rollup.room_id, 'the orchestrator gets a real work-order room for its own step, like any assignee');
+});
+
+test('Orchestration: a draft mission is never an unrecoverable wedge (review round 2)', async (t) => {
+  // Before this fix, createMission always left orchestrator_agent_id=null —
+  // only startMission ever stamped it, and it is never called for
+  // start:false (or skipped when startMission itself throws, e.g. an empty
+  // roster). requireOrchestrator's `!== callerAgentId` check then 403s EVERY
+  // caller on a null orchestrator_agent_id, including the real orchestrator —
+  // so the draft permanently occupied the team's one-open-mission slot with
+  // no MCP escape hatch: not even complete_orchestration_mission could reach
+  // it. create_orchestration_mission now stamps the orchestrator at creation.
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-draft-wedge');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'draft-wedge-orch' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'draft-wedge-orch');
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Draft-wedge squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+
+  step('start:false leaves a draft mission the orchestrator can still read');
+  const created = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Never started', objective: 'Stay a draft on purpose.', start: false,
+  });
+  assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
+  assert.equal(created.status, 'draft');
+  const draftId = created.mission_id;
+
+  const readBack = await orchMcp.callTool('get_orchestration_mission', { mission_id: draftId });
+  assert.ok(!readBack?.isError, `orchestrator could not read its own draft: ${JSON.stringify(readBack)}`);
+  assert.equal(readBack.status, 'draft');
+
+  step('A second attempt for the same team is rejected — the draft counts against the cap');
+  const capped = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should not be created', objective: 'Should not be created.',
+  });
+  assert.equal(capped.isError, true);
+  assert.equal(capped.error.status, 409);
+  assert.equal(capped.error.existing_mission_id, draftId);
+  assert.equal(capped.error.existing_mission_status, 'draft');
+  assert.equal(capped.error.open_step_count, 0);
+
+  step('The escape hatch the 409 names actually works: the orchestrator can close its own draft');
+  const closed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: draftId, status: 'failed', summary: 'Closing the unstarted draft to free the team slot.',
+  });
+  assert.ok(!closed?.isError, `complete failed: ${JSON.stringify(closed)}`);
+  assert.equal(closed.status, 'failed');
+
+  step('Creation succeeds again once the draft is closed');
+  const retried = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after closing the draft', objective: 'Retry after closing the draft.',
+  });
+  assert.ok(!retried.isError, `retry after closing the draft failed: ${JSON.stringify(retried)}`);
+  assert.notEqual(retried.mission_id, draftId);
+});
+
 exitAfterTests();

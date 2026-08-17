@@ -7,6 +7,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { QaService } from './qa.service';
 import { QaRunService } from './qa-run.service';
 import { QaRunReaperService } from './qa-run-reaper.service';
+import { QaRunBatchReaperService } from './qa-run-batch-reaper.service';
 import { QaScheduleService } from './qa-schedule.service';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { QaSchedule } from '../../entities/QaSchedule';
@@ -104,6 +105,7 @@ export class QaScenarioController {
     private readonly qaService: QaService,
     private readonly qaRunService: QaRunService,
     private readonly qaRunReaperService: QaRunReaperService,
+    private readonly qaRunBatchReaperService: QaRunBatchReaperService,
     private readonly qaScheduleService: QaScheduleService,
   ) {}
 
@@ -221,6 +223,20 @@ export class QaScenarioController {
       return res.json({ reaped_count: reaped.length, reaped, details });
     } catch (e: any) {
       return res.status(e?.status || 500).json({ error: e?.message || 'Failed to run QA reaper sweep' });
+    }
+  }
+
+  // Operator lever: fire one QaRunBatch resume sweep on demand (ticket
+  // 5a0593ae). Mirrors POST runs/reap — resumes any batch wedged `running`
+  // with no live run at current_index regardless of whether a QaSchedule
+  // tracks it (ad-hoc batches, orphaned last_batch_id, disabled schedules).
+  @Post('batches/reap')
+  async reapBatches(@Res() res: Response) {
+    try {
+      const { resumed } = await this.qaRunBatchReaperService.runOnce();
+      return res.json({ resumed_count: resumed.length, resumed });
+    } catch (e: any) {
+      return res.status(e?.status || 500).json({ error: e?.message || 'Failed to run QA batch reaper sweep' });
     }
   }
 

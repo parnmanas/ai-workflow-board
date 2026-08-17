@@ -55,14 +55,41 @@ export interface AcpInitializeResponse {
   authMethods?: unknown[];
 }
 
-export interface AcpMcpServer {
+export interface AcpNameValue {
   name: string;
-  command?: string;
-  args?: string[];
-  env?: Array<{ name: string; value: string }>;
-  url?: string;
-  headers?: Array<{ name: string; value: string }>;
+  value: string;
 }
+
+// ACP models mcpServers as a union discriminated on `type`: the http/sse
+// variants REQUIRE the literal, and the stdio variant (which carries no
+// `type`) REQUIRES command/args/env. A transport-less `{ name, url, headers }`
+// matches no variant and the agent rejects session/new with -32602 Invalid
+// params, so these fields must not be optional on a single flat interface.
+export interface AcpHttpMcpServer {
+  type: 'http';
+  name: string;
+  url: string;
+  headers: AcpNameValue[];
+}
+
+export interface AcpSseMcpServer {
+  type: 'sse';
+  name: string;
+  url: string;
+  headers: AcpNameValue[];
+}
+
+export interface AcpStdioMcpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: AcpNameValue[];
+}
+
+export type AcpMcpServer =
+  | AcpHttpMcpServer
+  | AcpSseMcpServer
+  | AcpStdioMcpServer;
 
 export interface AcpNewSessionRequest {
   cwd: string;

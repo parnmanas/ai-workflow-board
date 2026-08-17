@@ -10,16 +10,18 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
+import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
+import { enforceRunBudget } from '../../common/run-budget-guard';
 import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
@@ -113,7 +115,9 @@ export class OrchestrationMissionService {
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
     @InjectRepository(OrchestrationEvent) private readonly eventRepo: Repository<OrchestrationEvent>,
     @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
+    @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
 
@@ -185,16 +189,41 @@ export class OrchestrationMissionService {
     step_timeout_minutes?: number;
     created_by_type?: string;
     created_by?: string;
+    /**
+     * Stamp the orchestrator at creation time rather than leaving it null
+     * until startMission runs (ticket b7127aae review round 2). Without this,
+     * a mission that is left `draft` (start:false, or startMission throwing
+     * before it stamps this field — e.g. an empty roster) has
+     * orchestrator_agent_id=null forever: requireOrchestrator's `!==
+     * callerAgentId` check then 403s EVERY caller, including the real
+     * orchestrator, so complete_orchestration_mission/get_orchestration_mission
+     * can't reach it either — a team-slot wedge with no MCP escape hatch.
+     * Must equal team.orchestrator_agent_id (checked below); startMission
+     * overwrites this with the same value when it actually starts, so
+     * pre-stamping it here is idempotent with that path.
+     */
+    orchestrator_agent_id?: string;
   }): Promise<OrchestrationMission> {
     const workspaceId = (input.workspace_id || '').trim();
     const title = (input.title || '').trim();
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
     if (!title) throw orchestrationError(400, 'title is required');
 
+    // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
+    // before any side effect below (mission row save, recordEvent). No
+    // roomMessagingService here deliberately — this file's own header
+    // contract is "never sends a chat message" (that's the runner's job), so
+    // a breach still rejects/logs via logService but skips the optional chat
+    // alert rather than crossing that boundary for one notify call.
+    await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', workspaceId);
+
     const team = await this.teamRepo.findOne({ where: { id: input.team_id, workspace_id: workspaceId } });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     if (!team.orchestrator_agent_id) {
       throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
+    }
+    if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
+      throw orchestrationError(403, 'orchestrator_agent_id must match the team\'s own orchestrator');
     }
 
     const objective = (input.objective || '').trim();
@@ -209,7 +238,7 @@ export class OrchestrationMissionService {
         context: (input.context || '').trim(),
         acceptance_criteria: (input.acceptance_criteria || '').trim(),
         status: 'draft',
-        orchestrator_agent_id: null,
+        orchestrator_agent_id: input.orchestrator_agent_id || null,
         max_parallel_steps: clampInt(input.max_parallel_steps, team.max_parallel_steps, 1, MAX_PARALLEL_CEILING),
         max_steps: clampInt(input.max_steps, 60, 1, MAX_STEPS_CEILING),
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
@@ -324,6 +353,57 @@ export class OrchestrationMissionService {
       order: { created_at: 'DESC' },
       take: Math.min(Math.max(opts?.limit ?? 100, 1), 500),
     });
+    return this.projectMissionList(missions);
+  }
+
+  /**
+   * Missions an agent belongs to, as orchestrator or team member — the
+   * agent-scoped counterpart to `listMissions` (workspace-scoped, human/REST
+   * use). No workspace_id input, same rationale as `listTeamsForAgent`: the
+   * caller may be a workspace-less manager identity. Defaults to non-terminal
+   * missions only (an orchestrator recovering a lost mission_id cares about
+   * what's still open); pass status to widen it.
+   */
+  async listMissionsForAgent(
+    agentId: string,
+    opts?: { status?: string; limit?: number },
+  ): Promise<MissionListItem[]> {
+    if (!agentId) return [];
+    const teamIds = await this.teamIdsForAgent(agentId);
+    if (teamIds.length === 0) return [];
+
+    // 'all' (list_orchestration_missions' include_finished:true) means no status
+    // filter at all; anything else (including omitted, the default) means
+    // non-terminal only. Deliberately NOT `opts?.status ?? 'active'` — that
+    // collapses "caller wants everything" and "caller wants the default" onto
+    // the same undefined value and silently drops the include_finished case.
+    const where: any = { team_id: In(teamIds) };
+    if (opts?.status === 'all') {
+      // no status filter
+    } else if (opts?.status && opts.status !== 'active') {
+      where.status = opts.status;
+    } else {
+      where.status = Not(In(TERMINAL_MISSION_STATUSES as unknown as string[]));
+    }
+
+    const missions = await this.missionRepo.find({
+      where,
+      order: { created_at: 'DESC' },
+      take: Math.min(Math.max(opts?.limit ?? 100, 1), 500),
+    });
+    return this.projectMissionList(missions);
+  }
+
+  /** team_ids where `agentId` is the orchestrator or a roster member. */
+  private async teamIdsForAgent(agentId: string): Promise<string[]> {
+    const [orchTeams, memberRows] = await Promise.all([
+      this.teamRepo.find({ where: { orchestrator_agent_id: agentId }, select: ['id'] }),
+      this.memberRepo.find({ where: { agent_id: agentId }, select: ['team_id'] }),
+    ]);
+    return Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
+  }
+
+  private async projectMissionList(missions: OrchestrationMission[]): Promise<MissionListItem[]> {
     if (missions.length === 0) return [];
 
     const steps = await this.stepRepo.find({

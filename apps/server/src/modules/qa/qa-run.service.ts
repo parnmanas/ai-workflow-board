@@ -21,6 +21,7 @@ import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
 import { Board } from '../../entities/Board';
+import { enforceRunBudget, RunBudgetExceededError } from '../../common/run-budget-guard';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -118,6 +119,18 @@ export interface RecordHeartbeatArgs {
  */
 @Injectable()
 export class QaRunService {
+  // In-flight batch-dispatch guard (ticket 5a0593ae, reviewer handoff on
+  // a51ec6d9 round 3). _dispatchBatchIndex now has THREE entry points —
+  // onRunFinalized, resumeWedgedBatch (schedule tick), and
+  // QaRunBatchReaperService (schedule-agnostic sweep) — none of which
+  // mutually excluded before this. onRunFinalized persists the advanced
+  // current_index BEFORE awaiting the (slow) dispatch, so during that window
+  // the batch's DB state (running + no run recorded at current_index) is
+  // indistinguishable from a genuine wedge. Without this guard, a
+  // resume-style entry point racing that window would dispatch the SAME
+  // index a second time. See _dispatchBatchIndex / resumeWedgedBatch.
+  private readonly _inFlightBatchIds = new Set<string>();
+
   constructor(
     @InjectRepository(QaScenario) private readonly scenarioRepo: Repository<QaScenario>,
     @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
@@ -155,6 +168,13 @@ export class QaRunService {
 
   async startQaRun(args: StartQaRunArgs): Promise<StartQaRunResult> {
     const scenario = await findOrFail(this.scenarioRepo, { where: { id: args.scenarioId } }, 'QA scenario not found');
+    // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
+    // before any side effect below. Workspace-scoped; throws 429 on breach.
+    await enforceRunBudget(
+      { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
+      'qa',
+      scenario.workspace_id,
+    );
     if (!scenario.target_agent_id) throw makeError(400, 'QA scenario has no target agent set');
     if (scenario.enabled === false) throw makeError(400, 'QA scenario is disabled');
 
@@ -661,9 +681,40 @@ export class QaRunService {
 
     // Dispatch index 0. _dispatchBatchIndex walks forward past any scenario
     // whose dispatch throws (deleted/disabled), so a bad first scenario can't
-    // wedge the whole batch.
-    await this._dispatchBatchIndex(batch, 0);
+    // wedge the whole batch. throwOnBudget=true here (unlike the internal
+    // onRunFinalized/resumeWedgedBatch re-entries): nothing in this batch has
+    // dispatched yet, so there's no partial progress to protect by swallowing
+    // the rejection — the caller should see the 429 instead of a
+    // misleadingly "successful" empty batch (ticket a51ec6d9 review round 2,
+    // subsidiary point).
+    await this._dispatchBatchIndex(batch, 0, { throwOnBudget: true });
     return this.getBatch(batch.id, args.workspaceId);
+  }
+
+  /**
+   * Retry the dispatch `_dispatchBatchIndex` parked on a transient
+   * RunBudgetExceededError (ticket a51ec6d9 review round 2 — the rolling-
+   * window guard's own escape hatch is "wait for the window to clear", but
+   * nothing was re-driving that retry, so a batch hitting the guard mid-walk
+   * stayed `running` forever with no live run at its current index, and a
+   * schedule pointing at it via last_batch_id skipped every tick permanently).
+   * Called from QaScheduleService.runOnce AND QaRunBatchReaperService (ticket
+   * 5a0593ae — the schedule-agnostic sweep for batches no schedule tracks).
+   * No-op unless the batch is actually wedged that way — a batch that's
+   * `done`/`aborted`, or `running` with a live run already recorded at
+   * current_index, is left alone. Also a no-op while `_dispatchBatchIndex` is
+   * already in flight for this batch (see the in-flight guard comment on
+   * `_inFlightBatchIds`) — that window looks identical to a wedge in DB state
+   * alone, so checking the in-memory set first (before even reading the row)
+   * is what keeps a concurrent resume from double-dispatching the same index.
+   */
+  async resumeWedgedBatch(batchId: string): Promise<void> {
+    if (this._inFlightBatchIds.has(batchId)) return;
+    const batch = await this.batchRepo.findOne({ where: { id: batchId } });
+    if (!batch || batch.status !== 'running') return;
+    const runIds = Array.isArray(batch.run_ids) ? batch.run_ids : [];
+    if (runIds[batch.current_index]) return; // live run already dispatched — not wedged
+    await this._dispatchBatchIndex(batch, batch.current_index);
   }
 
   /**
@@ -754,43 +805,84 @@ export class QaRunService {
    * index whose dispatch throws (scenario deleted/disabled since the batch was
    * built) so one bad scenario can't stall the rest. If every remaining index
    * fails, the batch is finalized as done.
+   *
+   * `RunBudgetExceededError` is deliberately NOT treated as one of those
+   * permanent failures (ticket a51ec6d9 review): the guard's own escape hatch
+   * is "wait for the window to roll over", but the walk-forward has no such
+   * wait — every remaining index would hit the SAME breach deterministically
+   * (not a race, the count only grows), burning the whole rest of the batch as
+   * `errored` and finalizing it `done` off one transient rejection, with no
+   * documented recovery path for a batch (unlike a ticket, which the ticket-
+   * scoped guard auto-pends instead of destroying). Leave the batch `running`
+   * at this index instead so a later retrigger can resume once the window
+   * clears.
    */
-  private async _dispatchBatchIndex(batch: QaRunBatch, index: number): Promise<void> {
-    const ids = Array.isArray(batch.scenario_ids) ? batch.scenario_ids : [];
-    let i = index;
-    while (i < ids.length) {
-      batch.current_index = i;
-      try {
-        const result = await this.startQaRun({
-          scenarioId: ids[i],
-          triggeredByType: batch.triggered_by_type as StartQaRunArgs['triggeredByType'],
-          triggeredById: batch.triggered_by_id,
-          boardId: batch.board_id,
-          batchId: batch.id,
-          batchIndex: i,
-        });
-        const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
-        runIds[i] = result.run.id;
-        batch.run_ids = runIds;
-        await this.batchRepo.save(batch);
-        return;
-      } catch (e: any) {
-        // Scenario gone/disabled at dispatch time — record the skip, count it as
-        // errored, and try the next index.
-        this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} failed: ${e?.message || e}`);
-        const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
-        runIds[i] = '';
-        batch.run_ids = runIds;
-        batch.errored += 1;
-        i += 1;
-      }
+  private async _dispatchBatchIndex(batch: QaRunBatch, index: number, opts?: { throwOnBudget?: boolean }): Promise<void> {
+    // In-flight guard (ticket 5a0593ae) — shared by all three dispatch entry
+    // points (startBatch, onRunFinalized, resumeWedgedBatch). Test-and-set is
+    // race-free here: no `await` separates the `has` check from the `add`, so
+    // nothing can interleave on Node's single-threaded event loop between them.
+    if (this._inFlightBatchIds.has(batch.id)) {
+      this.logService.debug('QA', `batch ${batch.id} dispatch index ${index} skipped — already in flight`);
+      return;
     }
-    // Walked off the end — every remaining index failed to dispatch.
-    batch.current_index = Math.max(0, ids.length - 1);
-    batch.status = 'done';
-    batch.finished_at = new Date();
-    await this.batchRepo.save(batch);
-    this.logService.info('QA', `batch ${batch.id} done — no further runnable scenarios from index ${index}`);
+    this._inFlightBatchIds.add(batch.id);
+    try {
+      const ids = Array.isArray(batch.scenario_ids) ? batch.scenario_ids : [];
+      let i = index;
+      while (i < ids.length) {
+        batch.current_index = i;
+        try {
+          const result = await this.startQaRun({
+            scenarioId: ids[i],
+            triggeredByType: batch.triggered_by_type as StartQaRunArgs['triggeredByType'],
+            triggeredById: batch.triggered_by_id,
+            boardId: batch.board_id,
+            batchId: batch.id,
+            batchIndex: i,
+          });
+          const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
+          runIds[i] = result.run.id;
+          batch.run_ids = runIds;
+          await this.batchRepo.save(batch);
+          return;
+        } catch (e: any) {
+          if (e instanceof RunBudgetExceededError) {
+            if (opts?.throwOnBudget) {
+              // startBatch의 최초 디스패치(throwOnBudget=true, 항상 index 0)에서 예산
+              // 초과가 나면 caller는 이미 429 거부를 받아 배치가 시작되지 않았다고
+              // 알고 있다. QaRunBatchReaperService(ticket 5a0593ae) 도입 이후로 이
+              // running 행은 "아무도 조회 못 하는 고아"가 아니라 리퍼 술어에 그대로
+              // 걸린다 — 남겨두면 리퍼가 조용히 되살려 위 429 거부 계약과 모순되므로,
+              // 조회 불가가 아니라 거부를 이미 통지했다는 이유로 지운다.
+              await this.batchRepo.delete(batch.id);
+              this.logService.warn('QA', `batch ${batch.id} hit run budget on first dispatch — removed (429 propagated, nothing to resume): ${e.message}`);
+              throw e;
+            }
+            batch.current_index = i;
+            await this.batchRepo.save(batch);
+            this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} hit run budget — leaving batch running for retry: ${e.message}`);
+            return;
+          }
+          // Scenario gone/disabled at dispatch time — record the skip, count it as
+          // errored, and try the next index.
+          this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} failed: ${e?.message || e}`);
+          const runIds = Array.isArray(batch.run_ids) ? [...batch.run_ids] : [];
+          runIds[i] = '';
+          batch.run_ids = runIds;
+          batch.errored += 1;
+          i += 1;
+        }
+      }
+      // Walked off the end — every remaining index failed to dispatch.
+      batch.current_index = Math.max(0, ids.length - 1);
+      batch.status = 'done';
+      batch.finished_at = new Date();
+      await this.batchRepo.save(batch);
+      this.logService.info('QA', `batch ${batch.id} done — no further runnable scenarios from index ${index}`);
+    } finally {
+      this._inFlightBatchIds.delete(batch.id);
+    }
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
