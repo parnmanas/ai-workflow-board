@@ -116,25 +116,33 @@ function makeEvent(id, missionId, type, data, createdAt) {
 // `orchestrator_woken` event it appends — the test sets it to whatever `now`
 // it is about to pass into the matching runOnce() call, mirroring the real
 // nudgeOrchestrator -> recordEvent -> eventRepo.save side effect.
-function makeHarness({ missions = [], steps = [], events = [] } = {}) {
+function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator } = {}) {
   const missionRepo = makeRepo(missions);
   const stepRepo = makeRepo(steps);
   const eventRepo = makeRepo(events);
   const teamRepo = makeRepo([]);
   const clock = { now: new Date() };
   const recordedEvents = [];
+  let recordSeq = 0;
   const missionsStub = {
     async recordEvent(mission, input) {
       recordedEvents.push({ mission_id: mission.id, type: input.type, data: input.data ?? null });
+      // Mirrors the real OrchestrationMissionService.recordEvent's eventRepo.save
+      // side effect (fda9c820) — without this, a reaper-authored event (e.g. the
+      // failed-nudge 'error' event) would never be visible to the NEXT sweep's
+      // eventRepo queries, same as the nudgeOrchestrator stub's event below.
+      events.push(makeEvent(`ev-record-${++recordSeq}`, mission.id, input.type, input.data ?? null, clock.now));
     },
   };
   const nudges = [];
   let seq = 0;
   const runnerStub = {
-    async nudgeOrchestrator(missionId, _workspaceId, _actor, note, reasonTag) {
-      nudges.push({ missionId, note, reasonTag });
-      events.push(makeEvent(`ev-nudge-${++seq}`, missionId, 'orchestrator_woken', { reason: reasonTag }, clock.now));
-    },
+    nudgeOrchestrator:
+      nudgeOrchestrator ??
+      (async (missionId, _workspaceId, _actor, note, reasonTag) => {
+        nudges.push({ missionId, note, reasonTag });
+        events.push(makeEvent(`ev-nudge-${++seq}`, missionId, 'orchestrator_woken', { reason: reasonTag }, clock.now));
+      }),
     async failStepExternally() {
       throw new Error('unexpected failStepExternally call — this fixture has no in-flight step past its timeout');
     },
@@ -245,4 +253,85 @@ test('wedge round trip: stalled running mission is nudged, backs off, nudges aga
   const r5 = await h.svc.runOnce(new Date(T2.getTime() + 100 * MIN));
   assert.equal(r5.missions_nudged, 0);
   assert.equal(r5.missions_failed, 0, 'idempotent — a terminal mission is never revisited');
+});
+
+test('wedge round trip: nudge always fails (mission room broken) — failed attempts still count, error events land on the timeline, and the mission still reaches failed', async () => {
+  // ticket fda9c820: nudgeOrchestrator throws when postToRoom -> requireActiveParticipant
+  // fails (room deleted, or the system sender's participant row is gone). Before this
+  // fix that meant `orchestrator_woken` never got recorded, the reaper's attempt
+  // counter sat at 0 forever, and the mission stayed `running` for good.
+  const T0 = new Date('2026-06-22T21:00:00Z');
+  const mission = makeMission('m-wedge-broken-room', { started_at: new Date(T0.getTime() - 200 * MIN) });
+  const steps = [
+    makeStep('s-done-2', 'm-wedge-broken-room', 'done', { finished_at: new Date(T0.getTime() - 100 * MIN) }),
+    // Never got picked up — must still be cancelled when the mission is
+    // finally failed, exactly like the delivered-nudge wedge above.
+    makeStep('s-dangling-2', 'm-wedge-broken-room', 'pending', { assignee_agent_id: null }),
+  ];
+  let attempts = 0;
+  const h = makeHarness({
+    missions: [mission],
+    steps,
+    events: [],
+    // Real nudgeOrchestrator never gets to record its own `orchestrator_woken`
+    // event when postToRoom throws — it propagates straight out.
+    nudgeOrchestrator: async () => {
+      attempts += 1;
+      throw new Error('mission room participant missing');
+    },
+  });
+
+  // Sweep 1: stale past the timeout, no prior attempts -> first nudge attempt.
+  // It fails and is recorded as a `type:'error'` event instead of
+  // `orchestrator_woken`, matching decideWake's own failure observability.
+  h.clock.now = T0;
+  const r1 = await h.svc.runOnce(T0);
+  assert.equal(r1.missions_nudged, 0, 'a failed delivery is never counted as a successful nudge');
+  assert.equal(r1.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+  assert.equal(attempts, 1);
+  const errorsSoFar = () =>
+    h.recordedEvents.filter((e) => e.mission_id === 'm-wedge-broken-room' && e.type === 'error');
+  assert.equal(errorsSoFar().length, 1, 'the failed attempt is recorded on the timeline');
+  assert.equal(errorsSoFar()[0].data?.reason, 'running_stall_nudge_failed');
+
+  // Sweep 2: immediately after — the failed attempt still backs off a retry,
+  // exactly like a delivered nudge would.
+  const r2 = await h.svc.runOnce(T0);
+  assert.equal(r2.missions_nudged, 0);
+  assert.equal(r2.missions_failed, 0);
+  assert.equal(attempts, 1, 'no retry inside the back-off window');
+
+  // Sweep 3: a full window later, still broken -> second failed attempt.
+  const T1 = new Date(T0.getTime() + 21 * MIN);
+  h.clock.now = T1;
+  const r3 = await h.svc.runOnce(T1);
+  assert.equal(r3.missions_nudged, 0);
+  assert.equal(r3.missions_failed, 0);
+  assert.equal(mission.status, 'running');
+  assert.equal(attempts, 2);
+  assert.equal(errorsSoFar().length, 2);
+
+  // Sweep 4: another full window later — both prior attempts counted even
+  // though neither was ever delivered, so the mission escapes the wedge on
+  // its own instead of staying `running` forever.
+  const T2 = new Date(T1.getTime() + 21 * MIN);
+  const r4 = await h.svc.runOnce(T2);
+  assert.equal(r4.missions_nudged, 0);
+  assert.equal(r4.missions_failed, 1, 'the mission is failed once the attempt limit is exhausted, delivered or not');
+  assert.equal(mission.status, 'failed', 'mission escaped the running wedge despite every nudge failing to send');
+  assert.match(mission.failure_reason, /re-briefed 2 time\(s\)/);
+  const dangling = steps.find((s) => s.id === 's-dangling-2');
+  assert.equal(dangling.status, 'cancelled', 'dangling work is still closed out on a failed-attempt escalation');
+  assert.ok(
+    h.recordedEvents.some((e) => e.mission_id === 'm-wedge-broken-room' && e.type === 'mission_failed'),
+    'a mission_failed timeline event is recorded',
+  );
+  assert.equal(errorsSoFar().length, 2, 'both failed attempts left an error event on the timeline');
+
+  // Sweep 5: terminal now — idempotent, no further attempts.
+  const r5 = await h.svc.runOnce(new Date(T2.getTime() + 100 * MIN));
+  assert.equal(r5.missions_nudged, 0);
+  assert.equal(r5.missions_failed, 0, 'idempotent — a terminal mission is never revisited');
+  assert.equal(attempts, 2, 'no further attempts once terminal');
 });
