@@ -21,7 +21,7 @@ import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
 import { Board } from '../../entities/Board';
-import { enforceRunBudget } from '../../common/run-budget-guard';
+import { enforceRunBudget, RunBudgetExceededError } from '../../common/run-budget-guard';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -762,6 +762,17 @@ export class QaRunService {
    * index whose dispatch throws (scenario deleted/disabled since the batch was
    * built) so one bad scenario can't stall the rest. If every remaining index
    * fails, the batch is finalized as done.
+   *
+   * `RunBudgetExceededError` is deliberately NOT treated as one of those
+   * permanent failures (ticket a51ec6d9 review): the guard's own escape hatch
+   * is "wait for the window to roll over", but the walk-forward has no such
+   * wait — every remaining index would hit the SAME breach deterministically
+   * (not a race, the count only grows), burning the whole rest of the batch as
+   * `errored` and finalizing it `done` off one transient rejection, with no
+   * documented recovery path for a batch (unlike a ticket, which the ticket-
+   * scoped guard auto-pends instead of destroying). Leave the batch `running`
+   * at this index instead so a later retrigger can resume once the window
+   * clears.
    */
   private async _dispatchBatchIndex(batch: QaRunBatch, index: number): Promise<void> {
     const ids = Array.isArray(batch.scenario_ids) ? batch.scenario_ids : [];
@@ -783,6 +794,12 @@ export class QaRunService {
         await this.batchRepo.save(batch);
         return;
       } catch (e: any) {
+        if (e instanceof RunBudgetExceededError) {
+          batch.current_index = i;
+          await this.batchRepo.save(batch);
+          this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} hit run budget — leaving batch running for retry: ${e.message}`);
+          return;
+        }
         // Scenario gone/disabled at dispatch time — record the skip, count it as
         // errored, and try the next index.
         this.logService.warn('QA', `batch ${batch.id} dispatch index ${i} failed: ${e?.message || e}`);
