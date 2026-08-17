@@ -144,8 +144,8 @@ test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejec
   // (ticket 5a0593ae) 도입 이후로 이 running 행은 리퍼 술어에 그대로 걸리므로 "아무도
   // 조회 못 하는 고아"라서 지우는 게 아니라, 거부를 이미 통지했으므로 나중에
   // 되살아나면 그 거부 계약과 모순된다는 이유로 지운다 — 동작(제거)은 그대로다.
-  const orphanBatches = await ds.getRepository('QaRunBatch').count({ where: { workspace_id: ws.id } });
-  assert.equal(orphanBatches, 0, 'the just-created batch row is cleaned up too, not left as an unreachable orphan');
+  const leftoverBatches = await ds.getRepository('QaRunBatch').count({ where: { workspace_id: ws.id } });
+  assert.equal(leftoverBatches, 0, 'the just-created batch row is cleaned up too — leaving it would let the reaper silently resume a batch whose caller already got a 429 rejection');
 
   exitAfterTests(0);
 });
