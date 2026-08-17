@@ -3,20 +3,14 @@
 // Mirrors hard-budget-dispatch-gate.test.mjs's structural/static-guard
 // technique over the compiled TypeScript source (same "not cheaply
 // unit-testable in isolation — too many injected NestJS dependencies"
-// tradeoff): asserts `enforceRunBudget` is called EXACTLY ONCE inside each
-// run-dispatch chokepoint we've wired so far (QA's startQaRun, Action's
-// dispatch), and that the call sits BEFORE that chokepoint's ChatRoom
-// creation and run-row save — the "before any side effect" requirement the
-// ticket a51ec6d9 plan's work-breakdown item 5 spells out. A refactor that
-// drops the guard, duplicates it, or reorders it past either side effect
-// fails this test immediately.
-//
-// The THIRD chokepoint (orchestration-mission.service.ts's createMission) is
-// deliberately NOT covered here yet — the plan sequences that wiring after
-// ticket b7127aae lands on main (file-conflict avoidance + its temporary
-// per-team-mission guard needs to be re-evaluated against the landed code).
-// See the ticket a51ec6d9 plan comment's "시퀀싱" section and the follow-up
-// ticket it is prerequisite'd on.
+// tradeoff): asserts `enforceRunBudget` is called EXACTLY ONCE inside each of
+// the three run-dispatch chokepoints (QA's startQaRun, Action's dispatch,
+// Orchestration's createMission), and that the call sits BEFORE that
+// chokepoint's own side effects (ChatRoom creation / run-row / mission-row
+// save) — the "before any side effect" requirement the ticket a51ec6d9
+// plan's work-breakdown item 5 spells out. A refactor that drops the guard,
+// duplicates it, or reorders it past a side effect fails this test
+// immediately.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -36,7 +30,7 @@ function code(relPath) {
 
 const ENFORCE_CALL_RE = /await enforceRunBudget\(/g;
 
-function assertGuardedChokepoint(t, { file, methodOpenRe, roomSaveMarker, runSaveMarker, methodLabel }) {
+function assertGuardedChokepoint({ file, methodOpenRe, sideEffectMarkers, methodLabel }) {
   const src = code(file);
   const match = src.match(methodOpenRe);
   assert.ok(match, `could not isolate the ${methodLabel} method body`);
@@ -44,38 +38,43 @@ function assertGuardedChokepoint(t, { file, methodOpenRe, roomSaveMarker, runSav
 
   const calls = [...body.matchAll(ENFORCE_CALL_RE)];
   assert.equal(calls.length, 1, `expected exactly 1 enforceRunBudget call site in ${methodLabel}, found ${calls.length}`);
-
-  const roomSaveIdx = body.indexOf(roomSaveMarker);
-  const runSaveIdx = body.indexOf(runSaveMarker);
-  assert.ok(roomSaveIdx > -1, `${methodLabel} must still create the ChatRoom`);
-  assert.ok(runSaveIdx > -1, `${methodLabel} must still save the run row`);
-
   const callIdx = calls[0].index;
-  assert.ok(callIdx < roomSaveIdx, `enforceRunBudget must run before ${methodLabel} creates the ChatRoom`);
-  assert.ok(callIdx < runSaveIdx, `enforceRunBudget must run before ${methodLabel} saves the run row`);
+
+  for (const marker of sideEffectMarkers) {
+    const idx = body.indexOf(marker);
+    assert.ok(idx > -1, `${methodLabel} must still contain the side effect: ${marker}`);
+    assert.ok(callIdx < idx, `enforceRunBudget must run before ${methodLabel}'s side effect: ${marker}`);
+  }
 }
 
 test('qa-run.service.ts startQaRun calls enforceRunBudget exactly once, before the ChatRoom and QaRun row saves', () => {
-  assertGuardedChokepoint(null, {
+  assertGuardedChokepoint({
     file: 'modules/qa/qa-run.service.ts',
     methodOpenRe: /async startQaRun\(args: StartQaRunArgs\): Promise<StartQaRunResult> \{[\s\S]*?\r?\n  \}\r?\n/,
-    roomSaveMarker: 'this.roomRepo.save(',
-    runSaveMarker: 'this.runRepo.save(',
+    sideEffectMarkers: ['this.roomRepo.save(', 'this.runRepo.save('],
     methodLabel: 'startQaRun',
   });
 });
 
 test('actions.service.ts dispatch calls enforceRunBudget exactly once, before the ChatRoom and ActionRun row saves', () => {
-  assertGuardedChokepoint(null, {
+  assertGuardedChokepoint({
     file: 'modules/actions/actions.service.ts',
     methodOpenRe: /async dispatch\(args: DispatchActionArgs\): Promise<DispatchActionResult> \{[\s\S]*?\r?\n  \}\r?\n/,
-    roomSaveMarker: 'this.roomRepo.save(',
-    runSaveMarker: 'this.runRepo.save(',
+    sideEffectMarkers: ['this.roomRepo.save(', 'this.runRepo.save('],
     methodLabel: 'dispatch',
   });
 });
 
-test('the QA chokepoint passes kind "qa" and the Action chokepoint passes kind "action"', () => {
+test('orchestration-mission.service.ts createMission calls enforceRunBudget exactly once, before the mission row save', () => {
+  assertGuardedChokepoint({
+    file: 'modules/orchestration/orchestration-mission.service.ts',
+    methodOpenRe: /async createMission\(input: \{[\s\S]*?\r?\n  \}\r?\n/,
+    sideEffectMarkers: ['this.missionRepo.save('],
+    methodLabel: 'createMission',
+  });
+});
+
+test('each chokepoint passes its own kind: "qa" / "action" / "orchestration"', () => {
   const qaSrc = code('modules/qa/qa-run.service.ts');
   assert.match(
     qaSrc, /enforceRunBudget\(\s*\{[\s\S]*?\},\s*'qa',/,
@@ -86,6 +85,12 @@ test('the QA chokepoint passes kind "qa" and the Action chokepoint passes kind "
   assert.match(
     actionsSrc, /enforceRunBudget\(\s*\{[\s\S]*?\},\s*'action',/,
     'actions.service.ts must call enforceRunBudget with kind "action"',
+  );
+
+  const orchestrationSrc = code('modules/orchestration/orchestration-mission.service.ts');
+  assert.match(
+    orchestrationSrc, /enforceRunBudget\(\s*\{[\s\S]*?\},\s*'orchestration',/,
+    'orchestration-mission.service.ts must call enforceRunBudget with kind "orchestration"',
   );
 });
 

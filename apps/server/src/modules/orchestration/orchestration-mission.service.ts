@@ -10,8 +10,8 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
@@ -21,6 +21,7 @@ import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
+import { enforceRunBudget } from '../../common/run-budget-guard';
 import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
@@ -116,6 +117,7 @@ export class OrchestrationMissionService {
     @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
     @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
 
@@ -206,6 +208,14 @@ export class OrchestrationMissionService {
     const title = (input.title || '').trim();
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
     if (!title) throw orchestrationError(400, 'title is required');
+
+    // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
+    // before any side effect below (mission row save, recordEvent). No
+    // roomMessagingService here deliberately — this file's own header
+    // contract is "never sends a chat message" (that's the runner's job), so
+    // a breach still rejects/logs via logService but skips the optional chat
+    // alert rather than crossing that boundary for one notify call.
+    await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', workspaceId);
 
     const team = await this.teamRepo.findOne({ where: { id: input.team_id, workspace_id: workspaceId } });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
