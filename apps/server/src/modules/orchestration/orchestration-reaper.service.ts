@@ -48,7 +48,7 @@ import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
-import { IN_FLIGHT_STEP_STATUSES, isInFlight, isTerminalStepStatus } from './orchestration.constants';
+import { IN_FLIGHT_STEP_STATUSES, isInFlight } from './orchestration.constants';
 
 const PLANNING_NUDGE_LIMIT = 2;
 const RUNNING_STALL_NUDGE_LIMIT = 2;
@@ -214,18 +214,18 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.planningTimeoutMs) continue;
 
       if (priorPlanningNudges >= PLANNING_NUDGE_LIMIT) {
-        mission.status = 'failed';
-        mission.failure_reason =
+        // failMissionExternally 내부의 withMissionLock 안에서 재검증된다 — 이
+        // 스냅샷과 give-up 결정 사이에 submit_orchestration_plan 호출이 끼어들
+        // 수 있으므로, 위에서 읽은 `planning` 상태를 그대로 믿고 승격하면 안
+        // 된다. 티켓 bf350dc8 참고.
+        const wasFailed = await this.runner.failMissionExternally(
+          mission.id,
+          'planning',
           `orchestrator never submitted a plan — re-briefed ${priorPlanningNudges} time(s) without a ` +
-          `submit_orchestration_plan call`;
-        mission.finished_at = now;
-        await this.missionRepo.save(mission);
-        await this.missions.recordEvent(mission, {
-          type: 'mission_failed',
-          message: `Mission failed: ${mission.failure_reason}. Check that the orchestrator agent is online and connected.`,
-          actor_type: 'system',
-        });
-        failed += 1;
+            `submit_orchestration_plan call`,
+          now,
+        );
+        if (wasFailed) failed += 1;
         continue;
       }
 
@@ -314,28 +314,18 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       if (lastWake && nowMs - new Date(lastWake.created_at).getTime() < this.runningStallTimeoutMs) continue;
 
       if (priorStallNudges >= RUNNING_STALL_NUDGE_LIMIT) {
-        // Close out whatever is left the same way cancelMission does — a step
-        // that never got picked up (unassigned, or orphaned by a replan) is not
-        // in flight, so it wasn't touched above and would otherwise dangle.
-        const open = steps.filter((s) => !isTerminalStepStatus(s.status));
-        for (const s of open) {
-          s.status = 'cancelled';
-          s.finished_at = now;
-        }
-        if (open.length) await this.stepRepo.save(open);
-
-        mission.status = 'failed';
-        mission.failure_reason =
+        // failMissionExternally 내부의 withMissionLock 안에서 재검증된다 —
+        // 타임아웃 직전에 응답된 nudge 가 이 스냅샷과 give-up 결정 사이에
+        // replan/dispatch 로 새 스텝을 만들 수 있으므로, 위에서 읽은
+        // "in-flight 없음" 을 그대로 믿고 승격하면 안 된다. 티켓 bf350dc8 참고.
+        const wasFailed = await this.runner.failMissionExternally(
+          mission.id,
+          'running',
           `mission stalled in running with no in-flight work — re-briefed ${priorStallNudges} time(s) without a ` +
-          `complete_orchestration_mission call`;
-        mission.finished_at = now;
-        await this.missionRepo.save(mission);
-        await this.missions.recordEvent(mission, {
-          type: 'mission_failed',
-          message: `Mission failed: ${mission.failure_reason}. Check that the orchestrator agent is online and connected.`,
-          actor_type: 'system',
-        });
-        failed += 1;
+            `complete_orchestration_mission call`,
+          now,
+        );
+        if (wasFailed) failed += 1;
         continue;
       }
 
