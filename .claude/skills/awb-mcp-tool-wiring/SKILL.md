@@ -1,6 +1,6 @@
 ---
 name: awb-mcp-tool-wiring
-description: Checklist for adding a new MCP tool under apps/server/src/modules/mcp/tools/*-tools.ts — registration, the TOOL_AUTHZ_TABLE tier decision, service-layer ownership checks, description authoring, and which tests to rerun. Use whenever a new server.tool(...) call is added, or an existing tool's authorization is revisited — skipping the tier-classification step ships a tool that always returns "Unauthorized", regardless of caller.
+description: Checklist for adding a new MCP tool under apps/server/src/modules/mcp/tools/*-tools.ts — registration, the TOOL_AUTHZ_TABLE tier decision, service-layer ownership checks, description authoring, agent-manager ticket-ref-capture classification, and which tests to rerun. Use whenever a new server.tool(...) call is added, or an existing tool's authorization is revisited — skipping the tier-classification step ships a tool that always returns "Unauthorized", regardless of caller; skipping the capture-classification step ships one whose card silently vanishes from chat instead.
 ---
 
 # MCP Tool Wiring Checklist
@@ -104,12 +104,13 @@ if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
   ```
 - 새 `*.test.mjs` **파일**을 추가했다면(기존 파일에 `it()`만 추가한 게 아니라) → `apps/server/test/test-registration-completeness.test.mjs`도 통과해야 한다. `apps/server/package.json`의 `test`(또는 `pretest`) 스크립트 인자 목록에 파일 경로를 직접 추가하지 않으면 `npm test`가 그 파일을 영원히 실행하지 않는다 — 등록을 빠뜨리면 이 가드 자체가 실패로 알려준다.
 - 도구가 속한 도메인에 전용 테스트 파일이 있다면 그것도 같이 실행(예: orchestration 계열이면 `orchestration-plan-dag.test.mjs`).
+- **`apps/agent-manager/test/tool-surface-parity.test.mjs`** — 필수, (g) 참고. authz와 별개인 agent-manager 카드-캡처 완전성 가드라 위 authz 테스트를 통과해도 이건 따로 돌려야 한다. 마찬가지로 **먼저 빌드**해야 한다.
 
 ### (g) agent-manager 카드-캡처 분류 (authz와 무관한 별도 가드)
 
-새 도구가 티켓을 만들거나 바꾸는 동작이면(EMIT이든 EXCLUDE든), `apps/agent-manager/src/lib/ticket-ref-capture.ts`에서 반드시 분류한다 — `TICKET_ACTION_TOOLS`(채팅에 카드로 캡처) 또는 `TICKET_TOOL_EXCLUSIONS`(캡처 제외, `read`/`non-ticket`/`orchestration` 등 기존 카테고리 중 하나로 사유 명시). (a)-(f)는 전부 **서버 authz 가드**고 이건 **agent-manager 쪽 카드-캡처 완전성 가드**로 완전히 별개다 — 도구가 (b)/(c)에서 authz 티어를 정상적으로 받아도 여기서 빠지면 그 도구 호출 결과가 채팅에서 카드로 조용히 드롭된다.
+`server.tool()`로 새 도구를 등록했다면 **도구 종류와 무관하게** `apps/agent-manager/src/lib/ticket-ref-capture.ts`에서 반드시 분류한다 — `TICKET_ACTION_TOOLS`(채팅에 카드로 캡처) 또는 `TICKET_TOOL_EXCLUSIONS`(캡처 제외, `read`/`non-ticket`/`orchestration` 등 기존 카테고리 중 하나로 사유 명시). **티켓을 만들거나 바꾸지 않는 도구도 예외가 아니다** — EXCLUDE에 사유를 달아 분류하는 것 자체가 "이 도구는 해당 없음"의 정식 표현이고, 분류 자체를 건너뛰는 것과는 다르다(실제로 전체 등록 도구의 대다수가 EXCLUDE다). (a)-(f)는 전부 **서버 authz 가드**고 이건 **agent-manager 쪽 카드-캡처 완전성 가드**로 완전히 별개다 — 도구가 (b)/(c)에서 authz 티어를 정상적으로 받아도 여기서 빠지면 그 도구 호출 결과가 채팅에서 카드로 조용히 드롭된다.
 
-`apps/agent-manager/test/tool-surface-parity.test.mjs`가 서버에 등록된 도구 전체와 `classifiedToolNames()`(EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪ EXCLUDE)가 정확히 일치하는지 검사해 미분류 도구를 CI에서 잡는다. 실제 사례 — 신규 orchestration 도구 3종이 이 분류를 빠뜨려 CI가 7회 연속 red였다(#[ticket:c13db9e7-fec3-42e8-a7ef-36f784f2be8a|CI red: parnmanas/ai-workflow-board@main — CI]).
+`apps/agent-manager/test/tool-surface-parity.test.mjs`가 **서버에 등록된 도구 전체**와 `classifiedToolNames()`(EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪ EXCLUDE)가 정확히 일치하는지 검사해 미분류 도구를 CI에서 잡는다 — "티켓 관련 도구만 분류하면 된다"는 판단은 이 가드의 실제 조건과 다르다. 실제 사례 — 티켓을 전혀 만들거나 바꾸지 않는 신규 orchestration 도구 3종(`create_orchestration_mission`/`list_orchestration_missions`/`list_orchestration_teams`, 셋 다 결국 `TICKET_TOOL_EXCLUSIONS`의 `orchestration` 카테고리로 분류)조차 이 분류를 빠뜨려 CI가 7회 연속 red였다(#[ticket:c13db9e7-fec3-42e8-a7ef-36f784f2be8a|CI red: parnmanas/ai-workflow-board@main — CI]).
 
 이 테스트는 소스가 아니라 `dist/lib/ticket-ref-capture.js`(컴파일된 산출물)를 import하므로 **먼저 빌드**해야 한다:
 

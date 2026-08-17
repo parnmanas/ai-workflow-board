@@ -284,7 +284,7 @@ Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness wo
 - **awb-ticket-recovery** — stuck / never-dispatching ticket runbook (edge-triggered dispatch, terminal-column births, async create-dispatch, duplicate-instance check)
 - **awb-agent-manager-release** — agent-manager build-verify + same-PR SSE contract rule (버전은 publish 시 자동 계산 — 손 범프 금지)
 - **awb-field-wiring** — 5-touch-point checklist for Ticket JSON-array columns
-- **awb-mcp-tool-wiring** — 6-touch-point checklist for new MCP tool registration (TOOL_AUTHZ_TABLE tier classification — skipping it ships a tool that always denies)
+- **awb-mcp-tool-wiring** — 7-touch-point checklist for new MCP tool registration (TOOL_AUTHZ_TABLE tier classification, plus agent-manager ticket-ref-capture classification — skipping the former ships a tool that always denies, skipping the latter ships one whose card silently vanishes from chat)
 
 `.claude/settings.json` carries the read-only permission allowlist generated via `/fewer-permission-prompts` — extend it there rather than ad-hoc allowing in session.
 
