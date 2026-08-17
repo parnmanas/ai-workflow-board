@@ -35,7 +35,7 @@ import { evaluateTerminalPendGate } from '../mcp/shared/terminal-pend-gate';
 import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
-import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudgetConfig } from '../../common/hard-budget-config';
+import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from '../../common/hard-budget-config';
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
@@ -1942,7 +1942,13 @@ candidate's branch or move the ticket.
       const board = boardId
         ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
         : null;
-      const cfg = resolveHardBudgetConfig(board?.hard_budget_config ?? null, this._hardBudgetBaseline);
+      // Workspace layer (ticket a51ec6d9) inserted INTO the existing
+      // board→env chain — an unconfigured workspace resolves to the exact
+      // same value board→env already did.
+      const workspace = ticket.workspace_id
+        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+        : null;
+      const cfg = resolveHardBudget(workspace?.hard_budget_config ?? null, board?.hard_budget_config ?? null, this._hardBudgetBaseline);
       if (!cfg.enabled) return false;
 
       const now = new Date();

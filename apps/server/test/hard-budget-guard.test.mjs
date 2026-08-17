@@ -39,6 +39,7 @@ const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Commen
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { Subagent } = await import('file://' + path.join(DIST, 'entities', 'Subagent.js'));
 const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+const { Workspace } = await import('file://' + path.join(DIST, 'entities', 'Workspace.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const {
   lastHumanUnpendAt,
@@ -47,6 +48,7 @@ const {
   countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
+  resolveHardBudgetForTicket,
 } = await import('file://' + path.join(DIST, 'common', 'hard-budget-guard.js'));
 
 const ds = new DataSource(buildDataSourceOptions());
@@ -62,9 +64,13 @@ const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
 const subagentRepo = ds.getRepository(Subagent);
+const wsRepo = ds.getRepository(Workspace);
 
 async function makeBoard(hardBudgetConfig) {
   return boardRepo.save(boardRepo.create({ name: 'B', hard_budget_config: hardBudgetConfig ?? null }));
+}
+async function makeWorkspace(hardBudgetConfig) {
+  return wsRepo.save(wsRepo.create({ name: 'W', hard_budget_config: hardBudgetConfig ?? null }));
 }
 async function makeColumn(board) {
   return colRepo.save(colRepo.create({ board_id: board.id, name: 'To Do', position: 1 }));
@@ -342,4 +348,36 @@ test('enforceAutoResponseBudget: fails open (never blocks) when the ticket carri
   await addAgentComment(t.id);
   const result = await enforceAutoResponseBudget(deps, t);
   assert.equal(result.blocked, false);
+});
+
+// ── Workspace layer (ticket a51ec6d9) — resolveHardBudgetForTicket now
+// inserts Workspace.hard_budget_config as a middle layer in the existing
+// board→env chain. These pin: (1) a boardless ticket (the ActionRun/
+// OrchestrationMission shape) still gets a workspace override, (2) the board
+// still wins per-key over the workspace, and (3) an unset/unresolvable
+// workspace changes nothing — the exact prior board→env behavior every test
+// above this section already exercises.
+test('resolveHardBudgetForTicket: a workspace override applies even with no board (boardless ticket, mirrors ActionRun/OrchestrationMission scope)', async () => {
+  const ws = await makeWorkspace(JSON.stringify({ max_auto_responses: 7 }));
+  const t = await makeTicket(null, { workspace_id: ws.id });
+  const resolved = await resolveHardBudgetForTicket(ds, t);
+  assert.equal(resolved.maxAutoResponses, 7);
+});
+
+test('resolveHardBudgetForTicket: board wins over workspace per key; workspace fills the keys the board leaves unset', async () => {
+  const ws = await makeWorkspace(JSON.stringify({ max_auto_responses: 55, notify: true }));
+  const board = await makeBoard(JSON.stringify({ notify: false }));
+  const col = await makeColumn(board);
+  const t = await makeTicket(col, { workspace_id: ws.id });
+  const resolved = await resolveHardBudgetForTicket(ds, t);
+  assert.equal(resolved.notify, false, 'board explicitly sets notify — board wins over the workspace value');
+  assert.equal(resolved.maxAutoResponses, 55, 'board leaves max_auto_responses unset — inherits from the workspace layer');
+});
+
+test('resolveHardBudgetForTicket: an unresolvable workspace id keeps the exact prior board→env behavior (regression safety)', async () => {
+  const board = await makeBoard(JSON.stringify({ max_auto_responses: 42 }));
+  const col = await makeColumn(board);
+  const t = await makeTicket(col, { workspace_id: 'nonexistent-ws' });
+  const resolved = await resolveHardBudgetForTicket(ds, t);
+  assert.equal(resolved.maxAutoResponses, 42, 'the board override still applies unchanged when the workspace layer resolves to nothing');
 });

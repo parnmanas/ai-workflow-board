@@ -38,7 +38,7 @@ import { Workspace } from '../entities/Workspace';
 import {
   ResolvedHardBudget,
   hardBudgetDefaultsFromEnv,
-  resolveHardBudgetConfig,
+  resolveHardBudget,
 } from './hard-budget-config';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../modules/mcp/shared/terminal-pend-gate';
 
@@ -70,14 +70,23 @@ export async function resolveTicketBoardId(dataSource: DataSource, ticket: Ticke
   return col?.board_id || null;
 }
 
-/** Resolve the effective hard-budget config for a ticket (board override, folded onto the env baseline). */
+/**
+ * Resolve the effective hard-budget config for a ticket: board override,
+ * folded onto the workspace default (ticket a51ec6d9), folded onto the env
+ * baseline. A ticket/workspace with no `hard_budget_config` set keeps the
+ * exact prior board→env behaviour — this only inserts a layer, it never
+ * changes what an unconfigured board resolves to.
+ */
 export async function resolveHardBudgetForTicket(
   dataSource: DataSource,
   ticket: Ticket,
 ): Promise<ResolvedHardBudget> {
   const boardId = await resolveTicketBoardId(dataSource, ticket);
   const board = boardId ? await dataSource.getRepository(Board).findOne({ where: { id: boardId } }) : null;
-  return resolveHardBudgetConfig(board?.hard_budget_config ?? null, hardBudgetDefaultsFromEnv());
+  const workspace = ticket.workspace_id
+    ? await dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+    : null;
+  return resolveHardBudget(workspace?.hard_budget_config ?? null, board?.hard_budget_config ?? null, hardBudgetDefaultsFromEnv());
 }
 
 /**
