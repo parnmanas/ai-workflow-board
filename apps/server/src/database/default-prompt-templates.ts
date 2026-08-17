@@ -591,11 +591,13 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 
 If none of these apply, integrate and proceed — record what you folded in the step-7 comment. If one does apply, escalate with a precise comment naming which boundary you hit, then bounce or pend; do not guess a resolution through a semantic or data-loss conflict.
 
+<!--awb:no-pr-->
 ## CI dispatch before landing
 
 This board's \`ci.yml\` only runs automatically on \`pull_request\` / \`push:main\` — a \`use_pr=false\` feature branch never gets a CI signal until *after* it lands (ticket 34a6281a). \`workflow_dispatch\` closes that gap, but only if something actually fires it — this step is that something. **Skipping it is not a shortcut; it reopens the exact hole 34a6281a exists to close.**
 
 - **Precondition (normally already satisfied by step 2)** — \`workflow_dispatch\` must exist in *both* the default branch's \`ci.yml\` **and** the target ref's \`ci.yml\`. Step 2 already rebases the feature branch onto the latest default before you reach here, so this holds automatically for any branch rebased after \`workflow_dispatch\` landed on the default (main, commit \`0585837b\`, 2026-08-17). If dispatch fails with "workflow does not have a \`workflow_dispatch\` trigger" or similar, the rebase is stale — re-run step 2 and retry; do not work around it another way.
+- **Capture the SHA before dispatching** — \`SHA=$(git rev-parse <feature-branch>)\`. The next step matches the CI run against this SHA, not against recency, so capture it before you dispatch.
 - **Dispatch** — target the rebased feature branch (the ref, not the default):
   - If \`gh\` is installed (\`command -v gh\`): \`gh workflow run ci.yml --ref <feature-branch>\`.
   - Otherwise, use the REST API directly with a resolved token (never echo the token itself):
@@ -606,15 +608,21 @@ This board's \`ci.yml\` only runs automatically on \`pull_request\` / \`push:mai
       -d "{\\"ref\\":\\"<feature-branch>\\"}"
     \`\`\`
     A \`204\` with an empty body means it was accepted. \`<owner>/<repo>\` comes from \`git remote get-url origin\`.
-- **Find the run and wait for it** — a dispatch call does not return a run id. Poll for the newest run on that branch/event, then wait for completion:
-  - \`gh\`: \`gh run list --workflow=ci.yml --branch=<feature-branch> --event=workflow_dispatch --limit=1\` for the run id, then \`gh run watch <run-id> --exit-status\`.
-  - REST fallback: poll \`GET /repos/<owner>/<repo>/actions/runs?branch=<feature-branch>&event=workflow_dispatch&per_page=1\` until \`status=completed\`, then read \`conclusion\`.
-  - Poll at a sensible interval (e.g. every 30–60s). The full matrix (6 jobs incl. \`agent-manager tests (windows-latest)\`) can take several minutes — stay on this step until it resolves rather than moving on with an unknown result.
+- **Find *your* run and wait for it — match by SHA, never by recency.** A dispatch call does not return a run id, and run creation is asynchronous: immediately after dispatch, the newest run on that branch/event can still be the *previous* dispatch's run, not yours. Under the rebase-and-retry loop in step 3 ("this loop is normal under concurrent merges"), that stale run is very often \`success\` — polling by recency alone would report green without your rebased commit ever having been tested, landing un-CI'd code. Match on the SHA you captured instead:
+  - \`gh\`: \`gh run list --workflow=ci.yml --branch=<feature-branch> --event=workflow_dispatch --limit=10 --json databaseId,headSha,status,conclusion\`, then select the entry whose \`headSha == $SHA\`. If none exists yet, the run hasn't been created — sleep and re-poll the same list; do not fall back to the newest entry. Once found, \`gh run watch <that run's databaseId> --exit-status\`.
+  - REST fallback: poll \`GET /repos/<owner>/<repo>/actions/runs?branch=<feature-branch>&event=workflow_dispatch&per_page=10\`, filter \`workflow_runs[]\` for \`head_sha == $SHA\`, and wait on *that* entry's \`status=completed\`, then read its \`conclusion\`.
+  - Poll at a sensible interval (e.g. every 30–60s). The full matrix (6 jobs incl. \`agent-manager tests (windows-latest)\`) can take several minutes — stay on this step until your SHA's run resolves rather than moving on with an unknown or stale result.
 - **Result**:
   - **\`success\`** → proceed to step 3; note the run URL + conclusion in the step-7 comment.
-  - **Anything else** (\`failure\`, \`cancelled\`, \`timed_out\`) → do **not** proceed to step 3. Treat it exactly like a post-integration test failure under "When to integrate vs. escalate" above: an obvious, mechanical fix → fix it, re-push, re-dispatch; otherwise \`move_ticket\` back to In Progress (or \`pend_ticket\`) with the run URL and failing job name(s) in the comment.
+  - **Anything else** (\`failure\`, \`cancelled\`, \`timed_out\`) → do **not** proceed to step 3. Treat it exactly like a post-integration test failure under "When to integrate vs. escalate" above: an obvious, mechanical fix → fix it, re-push, re-dispatch (capturing a fresh SHA); otherwise \`move_ticket\` back to In Progress (or \`pend_ticket\`) with the run URL and failing job name(s) in the comment.
 - **Exemption (narrow)** — skip dispatch only when the diff has zero effect on any executed code path or build/test surface: e.g. a typo fix in a stray \`*.md\` doc, or a comment-only change in a file nothing imports/executes. Judge by whether a build or test actually exercises the changed file — a \`.ts\` string constant (like this very guide's own \`default-prompt-templates.ts\`) is usually covered by tests (compiled dist + assertions on its content) and does **not** qualify. Record which exemption applies in the step-7 comment (\`"CI dispatch skipped — <reason>"\`) — never skip silently.
 - **Can't dispatch at all** (no \`gh\`, and the credential-based curl fallback also fails to resolve a usable token) → this is a tooling/credential blocker, not a CI result. Record exactly what you tried (commands + errors) in a comment, then \`pend_ticket\` with that reason — do not fast-forward with CI unverified, and do not silently skip. Mirrors the "No \`gh\` available and direct push rejected" escape hatch in Notes below.
+<!--/awb:no-pr-->
+<!--awb:pr-only-->
+## CI dispatch before landing
+
+This board uses PRs (\`use_pr\`=true) — \`ci.yml\`'s \`pull_request\` trigger already runs the full matrix automatically against this branch's open PR, so there is nothing to dispatch here; a manual \`workflow_dispatch\` would just duplicate that run at extra CI cost every landing. Before proceeding to step 3 (which on this board is \`gh pr merge\`, per the \`use_pr\`=true block below), confirm the PR's own CI run is green: \`gh pr checks <pr>\` (or the PR's Checks tab). If the PR's check is stale — the branch was force-pushed since it last ran — wait for GitHub to re-trigger it, or push again to force a fresh run; never merge on a stale check. Record that run's URL + conclusion in the step-7 comment in place of a dispatch result.
+<!--/awb:pr-only-->
 
 ## Cleanup failure recovery
 
