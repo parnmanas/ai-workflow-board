@@ -70,7 +70,10 @@ export class FsBrowser implements FsBrowserContract {
     for (const root of this.rawRoots) {
       try {
         const abs = pathResolve(root);
-        resolved.push(realpathSync(abs));
+        // native 필수: JS realpathSync 는 win32 8.3 단축명(RUNNER~1)과 대소문자를
+        // 그대로 남기는데, 요청 경로는 fsp.realpath(=native)로 정규화되므로 실제로는
+        // 같은 경로여도 inScope() 의 startsWith 비교가 영구히 어긋난다.
+        resolved.push(realpathSync.native(abs));
       } catch (err: any) {
         if (!quiet) {
           log(`[fs-browser] scope root unreachable, dropped: ${root} (${err?.code || err?.message})`);
@@ -150,11 +153,12 @@ export class FsBrowser implements FsBrowserContract {
   private defaultStartingPoints(): string[] {
     const out = new Set<string>();
     try {
-      const home = realpathSync(pathResolve(homedir()));
+      // resolveRootsSync() 의 native 코멘트 참고 — 여기도 동일한 이유로 native.
+      const home = realpathSync.native(pathResolve(homedir()));
       if (home) out.add(home);
     } catch { /* no $HOME available */ }
     try {
-      const cwd = realpathSync(process.cwd());
+      const cwd = realpathSync.native(process.cwd());
       if (cwd) out.add(cwd);
     } catch { /* unlikely */ }
     return Array.from(out);

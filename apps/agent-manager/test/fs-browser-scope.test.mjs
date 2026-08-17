@@ -20,7 +20,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -139,7 +139,24 @@ test('relative paths are rejected before any scope logic', async () => {
   assert.equal(r.code, 'PATH_INVALID');
 });
 
-// --- source-level guards: keep the two fail-open shapes from coming back ---
+// --- source-level guards: keep these regressions from coming back ---
+
+test('fs-browser.ts resolves roots/home/cwd via realpathSync.native (win32 8.3-short-name parity with fsp.realpath)', () => {
+  const src = readFileSync(join(SRC, 'fs-browser.ts'), 'utf8');
+  const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+
+  // CI red 2026-08-17: JS realpathSync leaves win32 8.3 short names (RUNNER~1) and
+  // case unresolved, but the request-path side (fsp.realpath) is already native —
+  // the mismatch made inScope()'s startsWith comparison fail permanently on windows-latest.
+  assert.ok(
+    !/realpathSync\(/.test(code),
+    'realpathSync must always be called as realpathSync.native(...) in this file',
+  );
+  assert.ok(
+    /realpathSync\.native\(/.test(code),
+    'expected at least one realpathSync.native(...) call (root/home/cwd resolution)',
+  );
+});
 
 test('fs-browser.ts has no unrestricted fallback for a configured-but-unresolved scope', () => {
   const src = readFileSync(join(SRC, 'fs-browser.ts'), 'utf8');
