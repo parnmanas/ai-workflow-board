@@ -22,6 +22,7 @@ import {
   hardBudgetDefaultsFromEnv,
   parseHardBudgetConfig,
   resolveHardBudgetConfig,
+  resolveHardBudget,
   validateHardBudgetConfigInput,
   serializeHardBudgetConfig,
 } from '../dist/common/hard-budget-config.js';
@@ -33,6 +34,7 @@ test('defaults are the documented conservative safety-net baseline', () => {
     windowMs: 60 * 60_000,
     maxDispatchesPerWindow: 30,
     maxTokensPerWindow: 2_000_000,
+    maxRunsPerWindow: 50,
     autoPend: true,
     notify: true,
   });
@@ -68,6 +70,7 @@ test('resolveHardBudgetConfig: a board override replaces only the keys it sets',
     windowMs: base.windowMs,
     maxDispatchesPerWindow: base.maxDispatchesPerWindow,
     maxTokensPerWindow: base.maxTokensPerWindow,
+    maxRunsPerWindow: base.maxRunsPerWindow,
     autoPend: true,
     notify: false,
   });
@@ -104,6 +107,8 @@ test('validateHardBudgetConfigInput: rejects unknown keys and out-of-range value
   assert.equal(validateHardBudgetConfigInput({ window_minutes: 2000 }).ok, false, 'must be <= 1440 (24h)');
   assert.equal(validateHardBudgetConfigInput({ max_tokens_per_window: 0 }).ok, false, 'must be positive');
   assert.equal(validateHardBudgetConfigInput({ max_tokens_per_window: 200_000_000 }).ok, false, 'must be <= 100,000,000');
+  assert.equal(validateHardBudgetConfigInput({ max_runs_per_window: 0 }).ok, false, 'must be positive');
+  assert.equal(validateHardBudgetConfigInput({ max_runs_per_window: 1001 }).ok, false, 'must be <= 1000');
 });
 
 test('validateHardBudgetConfigInput: accepts a well-formed partial config', () => {
@@ -123,7 +128,7 @@ test('serializeHardBudgetConfig: empty/undefined collapses to null; a real value
 
 test('HARD_BUDGET_CONFIG_KEYS matches the schema surface (drift guard)', () => {
   assert.deepEqual([...HARD_BUDGET_CONFIG_KEYS].sort(), [
-    'auto_pend', 'enabled', 'max_auto_responses', 'max_dispatches_per_window', 'max_tokens_per_window', 'notify', 'window_minutes',
+    'auto_pend', 'enabled', 'max_auto_responses', 'max_dispatches_per_window', 'max_runs_per_window', 'max_tokens_per_window', 'notify', 'window_minutes',
   ]);
 });
 
@@ -134,6 +139,7 @@ test('hardBudgetDefaultsFromEnv: env overrides fold onto the built-in defaults',
     HARD_BUDGET_WINDOW_MINUTES: '10',
     HARD_BUDGET_MAX_DISPATCHES_PER_WINDOW: '3',
     HARD_BUDGET_MAX_TOKENS_PER_WINDOW: '500000',
+    HARD_BUDGET_MAX_RUNS_PER_WINDOW: '4',
     HARD_BUDGET_AUTO_PEND: '0',
     HARD_BUDGET_NOTIFY: 'off',
   };
@@ -143,6 +149,7 @@ test('hardBudgetDefaultsFromEnv: env overrides fold onto the built-in defaults',
     windowMs: 10 * 60_000,
     maxDispatchesPerWindow: 3,
     maxTokensPerWindow: 500000,
+    maxRunsPerWindow: 4,
     autoPend: false,
     notify: false,
   });
@@ -150,4 +157,47 @@ test('hardBudgetDefaultsFromEnv: env overrides fold onto the built-in defaults',
 
 test('hardBudgetDefaultsFromEnv: unset/blank env falls back to DEFAULT_HARD_BUDGET', () => {
   assert.deepEqual(hardBudgetDefaultsFromEnv({}), DEFAULT_HARD_BUDGET);
+});
+
+// ── (d) max_runs_per_window (ticket a51ec6d9) ───────────────────────────────
+test('resolveHardBudgetConfig: max_runs_per_window overrides independently and shares window_minutes, not its own window', () => {
+  const resolved = resolveHardBudgetConfig(
+    JSON.stringify({ window_minutes: 20, max_runs_per_window: 2 }),
+    DEFAULT_HARD_BUDGET,
+  );
+  assert.equal(resolved.windowMs, 20 * 60_000, 'the run-rate ceiling has no separate window field — it reads the same windowMs');
+  assert.equal(resolved.maxRunsPerWindow, 2);
+
+  const untouched = resolveHardBudgetConfig(JSON.stringify({ max_auto_responses: 5 }), DEFAULT_HARD_BUDGET);
+  assert.equal(untouched.maxRunsPerWindow, DEFAULT_HARD_BUDGET.maxRunsPerWindow, 'unset keeps the baseline');
+});
+
+// ── resolveHardBudget: workspace→board→base precedence (ticket a51ec6d9) ───
+// The `hard_budget_config` analogue of harness-config.ts's resolveHarnessConfig
+// — a board wins per key it sets, unset keys fall to the workspace, both unset
+// fall to `base` (the env-folded baseline).
+test('resolveHardBudget: both workspace and board null inherits base verbatim', () => {
+  const base = hardBudgetDefaultsFromEnv({});
+  assert.deepEqual(resolveHardBudget(null, null, base), base);
+});
+
+test('resolveHardBudget: a workspace-only override applies when the board is null (the ActionRun/OrchestrationMission shape — no board layer)', () => {
+  const resolved = resolveHardBudget(JSON.stringify({ max_runs_per_window: 3 }), null, DEFAULT_HARD_BUDGET);
+  assert.equal(resolved.maxRunsPerWindow, 3);
+  assert.equal(resolved.maxAutoResponses, DEFAULT_HARD_BUDGET.maxAutoResponses, 'keys the workspace does not set keep the base');
+});
+
+test('resolveHardBudget: a board-only override applies when the workspace is null', () => {
+  const resolved = resolveHardBudget(null, JSON.stringify({ notify: false }), DEFAULT_HARD_BUDGET);
+  assert.equal(resolved.notify, false);
+});
+
+test('resolveHardBudget: the board wins per key over the workspace; unset board keys fall through to the workspace', () => {
+  const resolved = resolveHardBudget(
+    JSON.stringify({ max_auto_responses: 55, notify: true }),
+    JSON.stringify({ notify: false }),
+    DEFAULT_HARD_BUDGET,
+  );
+  assert.equal(resolved.notify, false, 'board explicitly sets notify — board wins');
+  assert.equal(resolved.maxAutoResponses, 55, 'board leaves max_auto_responses unset — inherits from the workspace layer');
 });

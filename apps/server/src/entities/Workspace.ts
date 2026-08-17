@@ -120,6 +120,17 @@ export class Workspace {
   @Column({ type: 'text', nullable: true, default: null })
   environment_config: string | null;
 
+  // Workspace-wide default hard-budget ceiling (ticket a51ec6d9). Same JSON
+  // shape as Board.hard_budget_config; boards override it per key via
+  // resolveHardBudget (common/hard-budget-config.ts). Also the ONLY scope
+  // axis for the QA/Action/Orchestration run-creation-rate ceiling
+  // (common/run-budget-guard.ts) — those three entities have no board_id
+  // (docs/catalog-scopes.md), so this column is their sole override point.
+  // null = no default — boards/runs without a workspace override keep the
+  // env-folded baseline.
+  @Column({ type: 'text', nullable: true, default: null })
+  hard_budget_config: string | null;
+
   // ─────────────────────────────────────────────────────────────────────
   // Claim-verification (ticket dcb9d661): detect assignees who post an
   // "I'm done" comment in an active column without actually pushing a
