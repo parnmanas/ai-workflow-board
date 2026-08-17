@@ -116,7 +116,12 @@ function makeEvent(id, missionId, type, data, createdAt) {
 // `orchestrator_woken` event it appends — the test sets it to whatever `now`
 // it is about to pass into the matching runOnce() call, mirroring the real
 // nudgeOrchestrator -> recordEvent -> eventRepo.save side effect.
-function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator } = {}) {
+// give-up 분기가 실제 mission/step을 승격시킬 때 cancelMission과 같은 방식으로
+// 정리해야 하는 non-terminal 스텝 상태 집합 — orchestration.constants.ts의
+// TERMINAL_STEP_STATUSES와 동일한 값을 이 파일 안에서 독립적으로 흉내낸다.
+const TERMINAL_STEP_STATUSES_FIXTURE = new Set(['done', 'failed', 'blocked', 'skipped', 'cancelled']);
+
+function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator, failMissionExternally } = {}) {
   const missionRepo = makeRepo(missions);
   const stepRepo = makeRepo(steps);
   const eventRepo = makeRepo(events);
@@ -146,6 +151,26 @@ function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator
     async failStepExternally() {
       throw new Error('unexpected failStepExternally call — this fixture has no in-flight step past its timeout');
     },
+    // 기본값은 실제 orchestration-runner.service.ts의 failMissionExternally가
+    // 하는 승격+취소를 그대로 흉내낸다(락/fresh-read 재검증 자체는 스텁 밖 —
+    // 그 분기 로직은 orchestration-fail-mission-externally.test.mjs가 실제
+    // 구현으로 검증한다). 개별 테스트는 레이스로 스킵되는 경우(false 반환)를
+    // 흉내내기 위해 이 옵션을 오버라이드한다.
+    failMissionExternally:
+      failMissionExternally ??
+      (async (missionId, _expectedStatus, reason, now) => {
+        const mission = missions.find((m) => m.id === missionId);
+        const open = steps.filter((s) => s.mission_id === missionId && !TERMINAL_STEP_STATUSES_FIXTURE.has(s.status));
+        for (const s of open) {
+          s.status = 'cancelled';
+          s.finished_at = now;
+        }
+        mission.status = 'failed';
+        mission.failure_reason = reason;
+        mission.finished_at = now;
+        await missionsStub.recordEvent(mission, { type: 'mission_failed', data: null });
+        return true;
+      }),
   };
   const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog);
   return { svc, missionRepo, stepRepo, eventRepo, nudges, recordedEvents, clock };
@@ -334,4 +359,82 @@ test('wedge round trip: nudge always fails (mission room broken) — failed atte
   assert.equal(r5.missions_nudged, 0);
   assert.equal(r5.missions_failed, 0, 'idempotent — a terminal mission is never revisited');
   assert.equal(attempts, 2, 'no further attempts once terminal');
+});
+
+// 티켓 bf350dc8 — reapStalledPlanning/reapStalledRunning의 give-up 분기는 더
+// 이상 스스로 mission/step을 mutate하지 않고, 락으로 보호된
+// OrchestrationRunnerService.failMissionExternally 호출 결과(boolean)에
+// 전적으로 의존한다. 아래 두 테스트는 그 위임 배선(어떤 expectedStatus로
+// 호출하는지, true/false 반환값을 어떻게 반영하는지)을 검증한다 — 락+fresh-read
+// 재검증 자체의 분기 로직은 실제 구현을 스텁 없이 구동하는
+// orchestration-fail-mission-externally.test.mjs가 검증한다.
+
+test('reapStalledPlanning: give-up branch is wired through failMissionExternally with expectedStatus "planning", and respects its true/false result', async () => {
+  const NOW = new Date('2026-06-22T21:00:00Z');
+  const missionFail = makeMission('m-plan-fail', { status: 'planning', started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const missionRaced = makeMission('m-plan-raced', { status: 'planning', started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const events = [
+    makeEvent('evA1', 'm-plan-fail', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('evA2', 'm-plan-fail', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 21 * MIN)),
+    makeEvent('evB1', 'm-plan-raced', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('evB2', 'm-plan-raced', 'orchestrator_woken', { reason: 'planning_timeout' }, new Date(NOW.getTime() - 21 * MIN)),
+  ];
+  const calls = [];
+  const h = makeHarness({
+    missions: [missionFail, missionRaced],
+    steps: [],
+    events,
+    failMissionExternally: async (missionId, expectedStatus, reason, now) => {
+      calls.push({ missionId, expectedStatus, reason, now });
+      // m-plan-raced만 레이스로 스킵된 것처럼 흉내낸다 — fresh 재조회 시점에
+      // 이미 submit_orchestration_plan이 들어와 running으로 바뀐 상황.
+      return missionId === 'm-plan-fail';
+    },
+  });
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_failed, 1, '실제로 승격된 미션만 집계된다');
+  assert.equal(calls.length, 2, '두 미션 모두 failMissionExternally가 호출된다');
+  assert.ok(calls.every((c) => c.expectedStatus === 'planning'), 'planning 분기는 항상 expectedStatus="planning"으로 호출한다');
+  assert.ok(
+    calls.every((c) => /submit_orchestration_plan call/.test(c.reason)),
+    'planning 분기 고유의 사유 문구가 그대로 전달된다',
+  );
+});
+
+test('reapStalledRunning: give-up branch respects a failMissionExternally race-skip — not counted as failed, and the reaper never mutates mission/step state itself', async () => {
+  const NOW = new Date('2026-06-22T22:42:00Z');
+  const mission = makeMission('m-raced', { started_at: new Date(NOW.getTime() - 300 * MIN) });
+  const steps = [makeStep('s-done-3', 'm-raced', 'done', { finished_at: new Date(NOW.getTime() - 100 * MIN) })];
+  const events = [
+    makeEvent('ev1', 'm-raced', 'orchestrator_woken', { reason: 'running_stall' }, new Date(NOW.getTime() - 42 * MIN)),
+    makeEvent('ev2', 'm-raced', 'orchestrator_woken', { reason: 'running_stall' }, new Date(NOW.getTime() - 21 * MIN)),
+  ];
+  let call = null;
+  const h = makeHarness({
+    missions: [mission],
+    steps,
+    events,
+    failMissionExternally: async (missionId, expectedStatus, reason, now) => {
+      call = { missionId, expectedStatus, reason, now };
+      // 프로덕션 구현이 fresh 재조회에서 레이스를 감지한(예: 마지막 nudge에
+      // 응답한 replan이 막 새 스텝을 dispatch한) 상황을 흉내낸다 — 미션/스텝을
+      // 전혀 건드리지 않고 false만 반환한다.
+      return false;
+    },
+  });
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_failed, 0, '레이스로 스킵된 승격은 실패로 집계되지 않는다');
+  assert.equal(result.missions_nudged, 0);
+  assert.ok(call, 'failMissionExternally가 실제로 호출됐다');
+  assert.equal(call.expectedStatus, 'running');
+  assert.equal(
+    mission.status,
+    'running',
+    '리퍼는 더 이상 mission.status를 직접 건드리지 않는다 — 승격은 오직 failMissionExternally 내부에서만 일어난다',
+  );
+  assert.equal(steps[0].status, 'done', '스텝도 리퍼가 직접 취소하지 않는다');
 });
