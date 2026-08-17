@@ -2088,6 +2088,7 @@ export const api = {
     orchestrator_agent_id: string;
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
+    max_open_missions?: number;
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
     id: string,
@@ -2098,6 +2099,7 @@ export const api = {
       orchestrator_agent_id?: string;
       orchestrator_prompt?: string;
       max_parallel_steps?: number;
+      max_open_missions?: number;
       enabled?: boolean;
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

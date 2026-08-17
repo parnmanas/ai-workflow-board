@@ -169,7 +169,10 @@ export default function OrchestrationTeamsPage() {
                     <OnlineDot online={team.orchestrator_online} />
                     {team.orchestrator_name || '(agent missing)'}
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                      · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel
+                      · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
+                      {team.max_open_missions > 0
+                        ? `up to ${team.max_open_missions} self-created mission(s) open at once`
+                        : 'agent-created missions disabled'}
                     </span>
                   </div>
                   {team.orchestrator_prompt && (
@@ -310,6 +313,7 @@ function TeamFormModal({
   const [orchestratorId, setOrchestratorId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [parallel, setParallel] = useState(3);
+  const [openMissionsCap, setOpenMissionsCap] = useState(1);
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -320,6 +324,7 @@ function TeamFormModal({
     setOrchestratorId(team?.orchestrator_agent_id || agents[0]?.id || '');
     setPrompt(team?.orchestrator_prompt || '');
     setParallel(team?.max_parallel_steps ?? 3);
+    setOpenMissionsCap(team?.max_open_missions ?? 1);
     setEnabled(team?.enabled ?? true);
   }, [isOpen, team, agents]);
 
@@ -338,6 +343,7 @@ function TeamFormModal({
             orchestrator_agent_id: orchestratorId,
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
+            max_open_missions: openMissionsCap,
             enabled,
           })
         : await api.createOrchestrationTeam({
@@ -347,6 +353,7 @@ function TeamFormModal({
             orchestrator_agent_id: orchestratorId,
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
+            max_open_missions: openMissionsCap,
           });
       showToast(team ? 'Team updated' : 'Team created', 'success');
       onSaved(saved);
@@ -399,6 +406,18 @@ function TeamFormModal({
           value={parallel}
           onChange={(e) => setParallel(Number(e.target.value))}
         />
+        <Input
+          label="Max open self-created missions"
+          type="number"
+          min={0}
+          max={20}
+          value={openMissionsCap}
+          onChange={(e) => setOpenMissionsCap(Number(e.target.value))}
+        />
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8 }}>
+          How many missions this team&apos;s orchestrator may have open at once via create_orchestration_mission.
+          Set to 0 to forbid the orchestrator from self-creating missions for this team entirely.
+        </div>
         {team && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />

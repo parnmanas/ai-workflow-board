@@ -2422,6 +2422,7 @@ export interface OrchestrationTeam {
   orchestrator_online: boolean;
   orchestrator_prompt: string;
   max_parallel_steps: number;
+  max_open_missions: number;
   enabled: boolean;
   members: OrchestrationTeamMember[];
   active_mission_count: number;
