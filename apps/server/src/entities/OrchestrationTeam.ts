@@ -53,6 +53,17 @@ export class OrchestrationTeam {
   @Column({ type: 'int', default: 3 })
   max_parallel_steps: number;
 
+  /**
+   * Ceiling on missions this team has open (non-terminal) at once, enforced
+   * only on the agent-created path (`create_orchestration_mission` MCP tool —
+   * ticket b7127aae). The human/REST path (`POST /api/orchestration/missions`)
+   * does not check this; it substitutes for a per-mission budget gate that
+   * agent-created missions don't otherwise have (OrchestrationMission has no
+   * board_id/ticket to hang `hard_budget_config` off of).
+   */
+  @Column({ type: 'int', default: 1 })
+  max_open_missions: number;
+
   /** 0 = disabled; a disabled team cannot start new Missions. */
   @Column({ type: 'int', default: 1 })
   enabled: number;

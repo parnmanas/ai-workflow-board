@@ -138,6 +138,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // filter inside the handler, exactly like the nine tools below.
   list_orchestration_teams: 'caller',
   list_orchestration_missions: 'caller',
+  create_orchestration_mission: 'caller',
 };
 
 /**
@@ -239,6 +240,17 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   // strictly stronger check than any tier here could express (a full-scope key
   // still cannot report on another agent's step). The read-only ones apply the
   // same membership check before returning anything.
+  //
+  // Ticket b7127aae added three MORE orchestration tools afterward
+  // (list_orchestration_teams, list_orchestration_missions,
+  // create_orchestration_mission) — those do NOT belong here. This set is a
+  // frozen snapshot of what existed when this gate was written (see the
+  // file-level comment above), never a home for new registrations, however
+  // similar their authorization story is. They are registered in
+  // TOOL_AUTHZ_TABLE with an explicit 'caller' tier instead — the same floor
+  // as this block for the same reason (the real check is this file's own
+  // identity/ownership logic; 'caller' only rejects a sessionless caller
+  // before the handler runs).
   'add_orchestration_note', 'complete_orchestration_mission', 'get_orchestration_mission',
   'get_orchestration_step', 'list_my_orchestration_steps', 'report_orchestration_progress',
   'report_orchestration_step', 'submit_orchestration_plan', 'update_orchestration_step',

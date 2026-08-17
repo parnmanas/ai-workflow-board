@@ -597,4 +597,158 @@ test('Orchestration: list_orchestration_teams / list_orchestration_missions scop
   assert.equal(withFinished.missions[0].status, 'completed');
 });
 
+test('Orchestration: create_orchestration_mission — ownership, caps, recursion guard, and the reaper-blind-spot recovery', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+  const { OrchestrationTeamService, OrchestrationMissionService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-create');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-member' });
+  const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-stranger' });
+  const otherOrch = await createAgent(app, getDataSourceToken, ws.id, { name: 'create-other-orch' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'create-orch');
+  const memberMcp = await mcpFor(member, 'create-member');
+  const strangerMcp = await mcpFor(stranger, 'create-stranger');
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Create-mission squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+  const otherTeam = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'A team orch does not run',
+    orchestrator_agent_id: otherOrch.id,
+    created_by: HUMAN.id,
+  });
+
+  step('A roster member (not the orchestrator) cannot create a mission for the team');
+  const memberAttempt = await memberMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(memberAttempt.isError, true);
+  assert.match(memberAttempt.error.error, /not the orchestrator/);
+
+  step('A stranger with no relationship to the team cannot either');
+  const strangerAttempt = await strangerMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(strangerAttempt.isError, true);
+
+  step('Being an orchestrator SOMEWHERE does not grant rights over a team you do not run');
+  const wrongTeamAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: otherTeam.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(wrongTeamAttempt.isError, true);
+  assert.match(wrongTeamAttempt.error.error, /not the orchestrator/);
+
+  step('A disabled team refuses creation');
+  await ds.getRepository('OrchestrationTeam').update({ id: team.id }, { enabled: 0 });
+  const disabledAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'nope', objective: 'nope',
+  });
+  assert.equal(disabledAttempt.isError, true);
+  assert.match(disabledAttempt.error.error, /disabled/);
+  await ds.getRepository('OrchestrationTeam').update({ id: team.id }, { enabled: 1 });
+
+  step('Orchestrator creates a mission; explicit max_steps/max_parallel_steps are clamped to the agent ceiling');
+  const created = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id,
+    title: 'Agent-created mission',
+    objective: 'Prove the self-service creation path works end to end.',
+    max_steps: 999,
+    max_parallel_steps: 999,
+  });
+  assert.ok(!created.isError, `create failed: ${JSON.stringify(created)}`);
+  assert.equal(created.status, 'planning', 'start:true (default) briefs immediately');
+  const missionId = created.mission_id;
+
+  const detail = await missions.getMissionDetail(missionId, ws.id);
+  assert.equal(detail.max_steps, 20, 'clamped down from 999 to the agent-path ceiling, not just defaulted');
+  assert.equal(detail.max_parallel_steps, 3, 'clamped to min(team.max_parallel_steps=3, agent ceiling=4)');
+
+  step('The returned mission_id works immediately with submit_orchestration_plan');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: missionId,
+    steps: [{ step_key: 'only-step', title: 'Only step', instructions: 'do it', assignee_agent_id: member.id }],
+  });
+  assert.ok(!plan?.isError, `plan failed: ${JSON.stringify(plan)}`);
+  assert.equal(plan.dispatched_now.length, 1);
+
+  step('A second creation attempt for the same team is rejected — one open mission at a time');
+  const capped = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Should not be created', objective: 'Should not be created.',
+  });
+  assert.equal(capped.isError, true);
+  assert.equal(capped.error.existing_mission_id, missionId);
+  assert.equal(capped.error.existing_mission_status, 'running', 'submit_orchestration_plan already advanced it past planning');
+  assert.equal(capped.error.open_step_count, 1, 'the just-dispatched step counts as in flight');
+
+  step('The reaper-blind-spot edge case self-recovers: running + 0 in-flight steps names its own escape hatch');
+  // Neither reaper branch covers this: reapStuckSteps only looks at in-flight
+  // steps (there are none once the last one finishes) and reapStalledPlanning
+  // only looks at status:'planning' (this mission already advanced past it).
+  await ds.getRepository('OrchestrationStep').update({ mission_id: missionId }, { status: 'done' });
+  await ds.getRepository('OrchestrationMission').update({ id: missionId }, { status: 'running' });
+
+  const stuckAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after unwedging', objective: 'Retry after unwedging.',
+  });
+  assert.equal(stuckAttempt.isError, true);
+  assert.equal(stuckAttempt.error.existing_mission_status, 'running');
+  assert.equal(stuckAttempt.error.open_step_count, 0, 'every step already finished — this is the wedge');
+  assert.match(stuckAttempt.error.error, /complete_orchestration_mission/, 'the 409 names its own escape hatch');
+
+  const closed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: missionId, status: 'completed', summary: 'Closing the wedged mission so the team can create a new one.',
+  });
+  assert.ok(!closed?.isError, `complete failed: ${JSON.stringify(closed)}`);
+
+  const retried = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team.id, title: 'Retry after unwedging', objective: 'Retry after unwedging.',
+  });
+  assert.ok(!retried.isError, `retry after unwedge failed: ${JSON.stringify(retried)}`);
+  assert.notEqual(retried.mission_id, missionId);
+
+  step('The recursion guard: an agent with an in-flight step elsewhere cannot also start a new mission');
+  // A different team orch also orchestrates — proves the guard is keyed on the
+  // AGENT holding in-flight work, not on the target team's own open-mission cap
+  // (team3 has zero open missions of its own, so only guard (b) can be firing).
+  const team3 = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Second team orch also runs',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await ds.getRepository('OrchestrationStep').save(
+    ds.getRepository('OrchestrationStep').create({
+      mission_id: retried.mission_id,
+      workspace_id: ws.id,
+      team_id: team.id,
+      step_key: 'busy-work',
+      title: 'Busy work',
+      assignee_agent_id: orch.id,
+      status: 'dispatched',
+    }),
+  );
+  const recursionAttempt = await orchMcp.callTool('create_orchestration_mission', {
+    team_id: team3.id, title: 'Should be blocked by recursion guard', objective: 'Should be blocked.',
+  });
+  assert.equal(recursionAttempt.isError, true);
+  assert.match(recursionAttempt.error.error, /in flight/);
+});
+
 exitAfterTests();

@@ -136,6 +136,21 @@ export class OrchestrationTeamService {
     return team;
   }
 
+  /**
+   * Workspace-unscoped team lookup for the agent-created mission path
+   * (`create_orchestration_mission`), which — like the other 9 orchestration
+   * MCP tools — never takes a workspace_id input. The ownership check the
+   * caller must still pass (team.orchestrator_agent_id === callerAgentId) is
+   * a strictly stronger scope than a workspace match would add.
+   */
+  async requireTeamById(teamId: string): Promise<OrchestrationTeam> {
+    const id = (teamId || '').trim();
+    if (!id) throw orchestrationError(400, 'team_id is required');
+    const team = await this.teamRepo.findOne({ where: { id } });
+    if (!team) throw orchestrationError(404, 'orchestration team not found');
+    return team;
+  }
+
   /** Members of a team, ordered, with the agent row joined in. */
   async listMembers(teamId: string): Promise<Array<OrchestrationTeamMember & { agent: Agent | null }>> {
     const members = await this.memberRepo.find({
