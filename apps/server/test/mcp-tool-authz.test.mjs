@@ -45,6 +45,13 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Scrapes a live `.tool('name', ...)` registration out of a *-tools.ts
+// source file. `\s*` alone (no forced `\r?\n`) matches zero-or-more
+// whitespace of ANY kind, so it covers both a same-line registration
+// (`server.tool('foo', ...)`) and a multi-line one (`.tool(\n  'foo',`)
+// uniformly — see the non-vacuous regression test below (ticket 3f744b6d).
+const LIVE_TOOL_NAME_PATTERN = /\.tool\(\s*['"]([a-zA-Z0-9_]+)['"]/g;
+
 describe('MCP tool authorization (ticket d6b56237)', () => {
   let dataSource;
   let apiKeyService;
@@ -1023,7 +1030,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const liveNames = new Set();
     for (const file of files) {
       const src = readFileSync(join(toolsSrcDir, file), 'utf8');
-      for (const m of src.matchAll(/\.tool\(\s*\r?\n\s*['"]([a-zA-Z0-9_]+)['"]/g)) {
+      for (const m of src.matchAll(LIVE_TOOL_NAME_PATTERN)) {
         liveNames.add(m[1]);
       }
     }
@@ -1054,5 +1061,48 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
       [],
       `KNOWN_EXISTING_TOOLS has name(s) with no matching live registration (removed/renamed?): ${staleSnapshotEntries.join(', ')}`,
     );
+  });
+
+  // ─── Non-vacuous regression: a one-line `.tool(` registration must not be
+  // a completeness-guard blind spot ───
+  //
+  // Before ticket 3f744b6d, the scraper required a newline between `.tool(`
+  // and the opening quote, so `server.tool('foo', ...)` written on a single
+  // line silently fell out of `liveNames` above — the completeness guard
+  // could never flag it as unaccounted-for even if it were missing from
+  // both TOOL_AUTHZ_TABLE and KNOWN_EXISTING_TOOLS, producing a "build
+  // green + runtime deny" blind spot for exactly the kind of drift that
+  // test exists to catch. This proves the fix is non-vacuous: the old
+  // pattern really did miss the fixture, and the current one does not.
+  describe('completeness guard regex: one-line .tool() registration is not a blind spot', () => {
+    const ONE_LINE_FIXTURE = `server.tool('example_one_line_tool', 'desc', {}, async () => ({}));`;
+    const MULTI_LINE_FIXTURE = [
+      "server.tool(",
+      "  'example_multi_line_tool',",
+      "  'desc',",
+      "  {},",
+      "  async () => ({}),",
+      ");",
+    ].join('\n');
+    // The pre-fix pattern this ticket replaced — reproduced here (not
+    // imported, since the fix deleted it from the source) only to prove the
+    // fixture below is a genuine regression case, not a vacuous one.
+    const PRE_FIX_PATTERN = /\.tool\(\s*\r?\n\s*['"]([a-zA-Z0-9_]+)['"]/g;
+
+    function namesMatching(pattern, src) {
+      return [...src.matchAll(pattern)].map(m => m[1]);
+    }
+
+    it('non-vacuous: the pre-fix pattern misses a one-line registration', () => {
+      assert.deepEqual(namesMatching(PRE_FIX_PATTERN, ONE_LINE_FIXTURE), []);
+    });
+
+    it('the current pattern catches a one-line registration', () => {
+      assert.deepEqual(namesMatching(LIVE_TOOL_NAME_PATTERN, ONE_LINE_FIXTURE), ['example_one_line_tool']);
+    });
+
+    it('the current pattern still catches a multi-line registration (no regression)', () => {
+      assert.deepEqual(namesMatching(LIVE_TOOL_NAME_PATTERN, MULTI_LINE_FIXTURE), ['example_multi_line_tool']);
+    });
   });
 });
