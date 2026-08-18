@@ -25,6 +25,8 @@ interface NavItem {
   label: string;
   icon: string;
   badge?: number;
+  /** What the badge number means, for the tooltip / screen reader. */
+  badgeLabel?: string;
   exact?: boolean;
 }
 
@@ -54,7 +56,7 @@ export default function Sidebar({
   containerRef,
 }: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
-  const { counts } = useNotifications();
+  const { counts, countsLoaded } = useNotifications();
   const navigate = useNavigate();
   const location = useLocation();
   const [boardsExpanded, setBoardsExpanded] = React.useState(true);
@@ -81,6 +83,7 @@ export default function Sidebar({
           label: 'Boards',
           icon: 'B',
           badge: counts.tickets.total,
+          badgeLabel: `읽지 않은 티켓 코멘트 ${counts.tickets.total}건`,
           exact: true,
         },
         {
@@ -156,6 +159,7 @@ export default function Sidebar({
                 label: 'User Administration',
                 icon: 'U',
                 badge: counts.pendingUsers,
+                badgeLabel: `승인 대기 중인 가입 요청 ${counts.pendingUsers}건`,
               },
               { key: 'system-settings', path: '/admin/settings', label: 'System Settings', icon: 'S' },
             ]
@@ -184,6 +188,7 @@ export default function Sidebar({
       label: 'Agent Logs',
       icon: 'G',
       badge: counts.agentErrors,
+      badgeLabel: `마지막 확인 이후 새 에러 로그 ${counts.agentErrors}건`,
     },
   ];
 
@@ -252,7 +257,7 @@ export default function Sidebar({
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {item.label}
         </span>
-        {!!item.badge && item.badge > 0 && <NavBadge count={item.badge} />}
+        {!!item.badge && item.badge > 0 && <NavBadge count={item.badge} label={item.badgeLabel} />}
       </button>
     );
   };
@@ -351,6 +356,7 @@ export default function Sidebar({
             label: 'All chats',
             icon: 'C',
             badge: counts.chat.total,
+            badgeLabel: `읽지 않은 채팅 메시지 ${counts.chat.total}건`,
             exact: true,
           })}
 
@@ -375,7 +381,16 @@ export default function Sidebar({
               rooms.map((room) => {
                 const roomPath = `${workspaceBase}/chat/${room.id}`;
                 const active = location.pathname === roomPath;
-                const unread = Math.max(room.unread_count || 0, counts.chat.perRoom[room.id] || 0);
+                // One source of truth once the counts have loaded. Taking the
+                // max of the two sources meant a room read on another tab
+                // (which clears perRoom via the read event) kept showing the
+                // stale number from this tab's up-to-30s-old room snapshot —
+                // and a badge you cannot clear by reading is exactly the
+                // "wrong number" complaint. Before the first fetch the room
+                // snapshot is all we have, so use it then.
+                const unread = countsLoaded
+                  ? counts.chat.perRoom[room.id] || 0
+                  : room.unread_count || 0;
                 return (
                   <button
                     key={room.id}
@@ -412,7 +427,12 @@ export default function Sidebar({
                     >
                       {roomDisplayName(room)}
                     </span>
-                    {unread > 0 && <NavBadge count={unread} />}
+                    {unread > 0 && (
+                      <NavBadge
+                        count={unread}
+                        label={`${roomDisplayName(room)} 읽지 않은 메시지 ${unread}건`}
+                      />
+                    )}
                   </button>
                 );
               })
@@ -465,6 +485,7 @@ export default function Sidebar({
                           label: board.name,
                           icon: 'B',
                           badge: counts.tickets.perBoard[board.id],
+                          badgeLabel: `${board.name} 읽지 않은 코멘트 ${counts.tickets.perBoard[board.id] || 0}건`,
                         }, true))
                       )}
                     </div>

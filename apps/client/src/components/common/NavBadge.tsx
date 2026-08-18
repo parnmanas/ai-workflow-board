@@ -19,6 +19,10 @@ export interface NavBadgeProps {
   variant?: 'danger' | 'warning' | 'info';
   // Inline-adjust size for tiny spots (nav icon corner vs. a wider row).
   size?: 'sm' | 'md';
+  // Accessible description of what the number counts. Defaults to "N unread",
+  // which is wrong for the badges that count pending users or agent errors —
+  // pass the real meaning so screen readers don't announce a lie.
+  label?: string;
 }
 
 const variantStyles: Record<NonNullable<NavBadgeProps['variant']>, { bg: string; fg: string }> = {
@@ -33,6 +37,7 @@ export function NavBadge({
   dot,
   variant = 'danger',
   size = 'md',
+  label,
 }: NavBadgeProps) {
   if (!dot && count <= 0) return null;
   const colors = variantStyles[variant];
@@ -51,10 +56,13 @@ export function NavBadge({
       />
     );
   }
-  const label = count > max ? `${max}+` : String(count);
+  // Display text is capped; the aria-label always carries the exact number so
+  // "99+" is never the only thing a screen-reader user gets.
+  const text = count > max ? `${max}+` : String(count);
   return (
     <span
-      aria-label={`${count} unread`}
+      aria-label={label ?? `${count} unread`}
+      title={label}
       style={{
         minWidth: size === 'sm' ? 14 : 16,
         height: size === 'sm' ? 14 : 16,
@@ -71,7 +79,7 @@ export function NavBadge({
         flexShrink: 0,
       }}
     >
-      {label}
+      {text}
     </span>
   );
 }

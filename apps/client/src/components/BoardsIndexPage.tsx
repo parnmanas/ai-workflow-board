@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import PageHeader from './PageHeader';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import { Modal, Input, Button, Card, ConfirmDialog } from './common';
 
@@ -10,6 +11,8 @@ export default function BoardsIndexPage() {
   const { wsId } = useParams<{ wsId: string }>();
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
+  const { showToast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isAdmin = hasPermission('admin.access');
 
   const [boards, setBoards] = useState<any[]>([]);
@@ -45,6 +48,45 @@ export default function BoardsIndexPage() {
       setLoading(false);
     });
   }, [wsId]);
+
+  // `?ticket=<id>[&comment=<id>]` deep-link forwarding.
+  //
+  // Notifications and the mention inbox fall back to this board-less URL when
+  // they can't resolve the ticket's board (a mention on a subtask, a ticket
+  // that changed boards, an SSE row that never carried board_id). The page
+  // used to ignore the params outright, so those clicks dead-ended on the
+  // board list with no indication anything was meant to open. Resolve the
+  // board from the ticket and forward to the real deep link.
+  useEffect(() => {
+    const ticketParam = searchParams.get('ticket');
+    if (!ticketParam || !wsId) return;
+    const commentParam = searchParams.get('comment');
+    // Consume immediately so a failed lookup can't re-trigger on re-render.
+    const next = new URLSearchParams(searchParams);
+    next.delete('ticket');
+    next.delete('comment');
+    setSearchParams(next, { replace: true });
+
+    let cancelled = false;
+    api.getTicket(ticketParam)
+      .then((ticket: any) => {
+        if (cancelled) return;
+        if (!ticket?.board_id) {
+          showToast('링크된 티켓의 보드를 찾을 수 없습니다', 'error');
+          return;
+        }
+        const qs = new URLSearchParams({ ticket: ticketParam });
+        if (commentParam) qs.set('comment', commentParam);
+        navigate(`/ws/${wsId}/boards/${encodeURIComponent(ticket.board_id)}?${qs.toString()}`, {
+          replace: true,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        showToast('링크된 티켓을 열 수 없습니다 (삭제되었거나 접근 권한이 없습니다)', 'error');
+      });
+    return () => { cancelled = true; };
+  }, [searchParams, setSearchParams, wsId, navigate, showToast]);
 
   const handleCreate = async () => {
     if (!createName.trim() || !wsId) return;

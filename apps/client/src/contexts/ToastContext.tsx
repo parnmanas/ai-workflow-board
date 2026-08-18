@@ -1,14 +1,33 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { tokens } from '../tokens';
+import {
+  getNotificationPrefs,
+  setNotificationPref,
+  subscribeNotificationPrefs,
+} from './notificationPrefs';
 
 interface Toast {
   id: number;
   message: string;
   type: 'success' | 'error' | 'info';
+  /** Optional click target — set for notification toasts so the toast is a
+   *  navigable link to whatever it is announcing, not a dead banner. */
+  onClick?: () => void;
+}
+
+export interface ToastOptions {
+  /** Click handler; makes the toast interactive (pointer cursor + role=button). */
+  onClick?: () => void;
+  /** Auto-dismiss delay in ms. Default 4000. */
+  durationMs?: number;
 }
 
 interface ToastContextType {
-  showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  showToast: (
+    message: string,
+    type?: 'success' | 'error' | 'info',
+    options?: ToastOptions,
+  ) => void;
   muted: boolean;
   toggleMute: () => void;
   playNotifySound: () => void;
@@ -26,8 +45,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextIdRef = useRef(0);
 
-  // Mute state persisted in localStorage
-  const [muted, setMuted] = useState<boolean>(() => localStorage.getItem('chat_notify_muted') === 'true');
+  // Mute state is a projection of the shared notification prefs record — the
+  // same value the "Audio cue" toggle in NotificationSettingsPanel writes.
+  // Keeping a private copy of `chat_notify_muted` here is what let the two
+  // controls drift apart (see notificationPrefs.ts header).
+  const [muted, setMuted] = useState<boolean>(() => !getNotificationPrefs().audio);
+  useEffect(() => subscribeNotificationPrefs((p) => setMuted(!p.audio)), []);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUnlockedRef = useRef(false);
 
@@ -56,11 +79,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const toggleMute = useCallback(() => {
-    setMuted(prev => {
-      const next = !prev;
-      localStorage.setItem('chat_notify_muted', String(next));
-      return next;
-    });
+    // Write through the shared record so the settings panel's Audio toggle
+    // reflects the change immediately (and vice versa).
+    setNotificationPref('audio', !getNotificationPrefs().audio);
   }, []);
 
   const playNotifySound = useCallback(() => {
@@ -70,12 +91,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     }
   }, [muted]);
 
-  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const showToast = useCallback((
+    message: string,
+    type: 'success' | 'error' | 'info' = 'info',
+    options?: ToastOptions,
+  ) => {
     const id = ++nextIdRef.current;
-    setToasts(prev => [...prev, { id, message, type }]);
+    setToasts(prev => [...prev, { id, message, type, onClick: options?.onClick }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4000);
+    }, options?.durationMs ?? 4000);
   }, []);
 
   const typeStyles: Record<string, { border: string; color: string }> = {
@@ -124,14 +149,31 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {/* Toast list */}
         {toasts.map(toast => {
           const s = typeStyles[toast.type] || typeStyles.info;
+          const clickable = !!toast.onClick;
+          const dismiss = () => setToasts(prev => prev.filter(t => t.id !== toast.id));
           return (
-            <div key={toast.id} style={{
-              padding: '10px 16px', borderRadius: tokens.radii.lg,
-              background: tokens.colors.surfaceCard, border: `1px solid ${s.border}`,
-              color: s.color, fontSize: '13px', fontWeight: 500,
-              boxShadow: tokens.shadows.dropdown,
-              maxWidth: 360, pointerEvents: 'auto',
-            }}>
+            <div
+              key={toast.id}
+              role={clickable ? 'button' : undefined}
+              tabIndex={clickable ? 0 : undefined}
+              onClick={clickable ? () => { toast.onClick?.(); dismiss(); } : undefined}
+              onKeyDown={clickable ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  toast.onClick?.();
+                  dismiss();
+                }
+              } : undefined}
+              style={{
+                padding: '10px 16px', borderRadius: tokens.radii.lg,
+                background: tokens.colors.surfaceCard, border: `1px solid ${s.border}`,
+                color: s.color, fontSize: '13px', fontWeight: 500,
+                boxShadow: tokens.shadows.dropdown,
+                maxWidth: 360, pointerEvents: 'auto',
+                cursor: clickable ? 'pointer' : 'default',
+                textAlign: 'left',
+              }}
+            >
               {toast.type === 'error' && '\u26A0 '}
               {toast.type === 'success' && '\u2713 '}
               {toast.message}

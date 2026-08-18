@@ -53,17 +53,13 @@ export default function UserManager({ workspaceId }: { workspaceId?: string } = 
     setWorkspaces(workspacesData);
   };
 
-  // Reaching the admin Users page counts as "I've seen the pending queue"
-  // for the sidebar badge — approving/rejecting from here will then
-  // re-trigger refresh() via their own handlers, which pick up the
-  // decremented real count from /admin/pending-users/count. If this is a
-  // workspace-scoped invocation (workspaceId given), skip — the pending
-  // list isn't shown there and the admin hasn't actually addressed anything.
-  const { markRead, refresh: refreshBadges } = useNotifications();
+  // The pending-users badge is a live count of accounts still awaiting a
+  // decision — not a "have you seen it?" marker. Zeroing it on page-open made
+  // the badge vanish and then come back on the next 60 s poll while the queue
+  // was still full. It now clears only when the queue actually empties, which
+  // the approve/reject handlers force via refreshBadges().
+  const { refresh: refreshBadges } = useNotifications();
   useEffect(() => { load(); }, [workspaceId]);
-  useEffect(() => {
-    if (!workspaceId) markRead('pendingUsers');
-  }, [workspaceId, markRead]);
 
   const resetForm = () => {
     setForm({ name: '', email: '', role: 'user', discord_user_id: '', password: '', permissions: [] });

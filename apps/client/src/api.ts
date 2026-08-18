@@ -2049,6 +2049,28 @@ export const api = {
   markMentionRead: (mentionId: string): Promise<UserMentionItem> =>
     request<UserMentionItem>(`/mentions/${encodeURIComponent(mentionId)}/read`, { method: 'POST' }),
 
+  // Viewport-based mention clearing. `unread-by-source` answers "which
+  // mentions are still pending inside THIS ticket / room", projected to the
+  // comment / chat-message they live in so the client can match them against
+  // the rows on screen. `markMentionsRead` reports back the ones the reader
+  // actually saw, batched.
+  getUnreadMentionsBySource: (
+    source: { ticketId?: string; roomId?: string },
+  ): Promise<{ items: Array<{ id: string; source_id: string }> }> => {
+    const qs = new URLSearchParams();
+    if (source.ticketId) qs.set('ticket_id', source.ticketId);
+    if (source.roomId) qs.set('room_id', source.roomId);
+    return request<{ items: Array<{ id: string; source_id: string }> }>(
+      `/mentions/unread-by-source?${qs.toString()}`,
+    );
+  },
+
+  markMentionsRead: (ids: string[]): Promise<{ updated: number }> =>
+    request<{ updated: number }>('/mentions/read-batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+
   markAllMentionsRead: (workspaceId: string): Promise<{ updated: number }> =>
     request<{ updated: number }>(
       `/workspaces/${encodeURIComponent(workspaceId)}/mentions/read-all`,
@@ -2063,8 +2085,21 @@ export const api = {
   // `{ total, perX }` so the client bookkeeping stays uniform.
   getChatUnreadCounts: (): Promise<{ total: number; perRoom: Record<string, number> }> =>
     request<{ total: number; perRoom: Record<string, number> }>('/chat-rooms/unread-counts'),
-  getTicketUnreadCounts: (): Promise<{ total: number; perTicket: Record<string, number>; perBoard: Record<string, number> }> =>
-    request<{ total: number; perTicket: Record<string, number>; perBoard: Record<string, number> }>('/tickets/unread-counts'),
+  // `ticketBoard` maps each unread ticket to the board its badge rolls up
+  // into, so the client can decrement the right board when a single ticket
+  // is marked read instead of waiting for the next full refresh.
+  getTicketUnreadCounts: (): Promise<{
+    total: number;
+    perTicket: Record<string, number>;
+    perBoard: Record<string, number>;
+    ticketBoard: Record<string, string>;
+  }> =>
+    request<{
+      total: number;
+      perTicket: Record<string, number>;
+      perBoard: Record<string, number>;
+      ticketBoard: Record<string, string>;
+    }>('/tickets/unread-counts'),
   getPendingUsersCount: (): Promise<{ count: number }> =>
     request<{ count: number }>('/admin/pending-users/count'),
   getAgentErrorsUnseenCount: (since?: string | null): Promise<{ count: number }> => {

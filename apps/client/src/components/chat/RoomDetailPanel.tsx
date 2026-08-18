@@ -4,6 +4,8 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import type { AgentCurrentTask, ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
+import { useMentionViewportReader } from '../../hooks/useMentionViewportReader';
+import { useNotifications } from '../../contexts/NotificationContext';
 import NewChatModal from './ParticipantPicker';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { type MentionParticipant } from './utils/markdown';
@@ -205,10 +207,25 @@ export default function ChatRoomView({
   onSelectTask = () => {},
 }: ChatRoomViewProps) {
   const confirm = useConfirm();
+  const { noteMentionsCleared } = useNotifications();
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // @-mentions in this room clear when the message carrying them is actually
+  // on screen. Deliberately NOT tied to the room's read marker: a room opens
+  // scrolled to the newest message, so marking the room read says nothing
+  // about a mention 200 messages up. No observer guard needed — the pending
+  // set is scoped to the caller's own user_id server-side, so a non-member
+  // watching someone else's room simply gets an empty list.
+  useMentionViewportReader({
+    containerRef: scrollRef,
+    source: { roomId: room?.id },
+    anchorAttribute: 'data-message-id',
+    renderSignal: messages.length,
+    onCleared: noteMentionsCleared,
+  });
 
   // ── Scroll management (ticket abd1ce81) ─────────────────────────────────────
   // Three deliberately-separated behaviours:

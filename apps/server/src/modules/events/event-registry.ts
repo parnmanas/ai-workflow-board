@@ -93,6 +93,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: activity.action,
         field_changed: activity.field_changed || '',
         actor_name: canonicalActor || activity.actor_name || '',
+        actor_id: activity.actor_id || '',
         current_column_id: currentColumn?.id || '',
         current_column_name: currentColumn?.name || '',
         current_column_kind: currentColumn?.kind || '',
@@ -115,6 +116,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         action: p.action,
         field_changed: p.field_changed || '',
         actor_name: p.actor_name || '',
+        // Web UI unread badge: "was this me?" check. Runtime Hosts ignore it.
+        actor_id: p.actor_id || '',
         current_column_id: p.current_column_id || '',
         current_column_name: p.current_column_name || '',
         current_column_kind: p.current_column_kind || '',
@@ -431,6 +434,12 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: ChatRoomMessagePayload = {
         room_id: event.room_id,
+        // Room membership — not workspace — decides SSE delivery, so a
+        // multi-workspace user sees both workspaces' room traffic on one
+        // stream. Carry the workspace so the web UI can scope its per-
+        // workspace unread badge. RoomMessagingService already stamps it on
+        // every emit; this map() used to drop it on the floor.
+        workspace_id: event.workspace_id || undefined,
         message_id: event.message_id,
         sender_type: event.sender_type,
         sender_id: event.sender_id,
@@ -663,6 +672,25 @@ export const EVENT_TYPES: EventDefinition[] = [
       if (identity.type !== 'user') return false;
       return env.scope.user_id === identity.userId;
     },
+    // MUST stay flat. Every consumer of this event is the web UI
+    // (useMentions + NotificationContext), and both read `mention_id`,
+    // `source_type`, `ticket_id`, `board_id`, `room_id`, `preview` … at the
+    // top level — the same shape the sibling UI-only events (consensus_update,
+    // orchestration_update) ship.
+    //
+    // Without this the controller fell through to `event` (the raw envelope),
+    // so a live mention reached the inbox with EVERY field undefined: the row
+    // rendered "someone · chat · Invalid Date · (no preview)", clicking it
+    // matched neither the comment nor the chat branch so it navigated nowhere,
+    // its `id` was undefined so a second mention was deduped away while the
+    // badge kept counting, and mark-read POSTed to /mentions/undefined/read.
+    // Only a page reload (which re-fetches the list over REST) made mentions
+    // look right — which is exactly why it read as "sometimes wrong".
+    flatten: (env) => ({
+      event_type: 'user_mention',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
   },
 
   // ───────── ticket_presence ─────────

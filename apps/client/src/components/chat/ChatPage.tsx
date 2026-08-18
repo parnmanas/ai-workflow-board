@@ -9,7 +9,6 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
-import { useToast } from '../../contexts/ToastContext';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
@@ -91,7 +90,8 @@ export default function ChatPage() {
   const { wsId, roomId: routeRoomId } = useParams<{ wsId: string; roomId?: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { showToast, playNotifySound } = useToast();
+  // Announcements (toast / sound / OS notification) belong to
+  // NotificationContext so they behave the same on every route.
   // Keep sidebar chat badge in lockstep: whenever we POST mark-read we
   // also tell the NotificationContext so the badge clears without
   // waiting for the 60 s refresh. Room-scoped (per-room unread zeros).
@@ -119,7 +119,6 @@ export default function ChatPage() {
   // would 403 server-side for non-members.
   const [isObserver, setIsObserver] = useState<boolean>(false);
   const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
-  const originalTitleRef = useRef(document.title);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
   // Mirror of `messages` for use inside async callbacks (older-page dedup) that
@@ -324,16 +323,10 @@ export default function ChatPage() {
     }
   }, []));
 
-  // Reset document title when tab becomes visible
-  useEffect(() => {
-    function handleVisibilityForTitle() {
-      if (document.visibilityState === 'visible') {
-        document.title = originalTitleRef.current;
-      }
-    }
-    document.addEventListener('visibilitychange', handleVisibilityForTitle);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityForTitle);
-  }, []);
+  // The document title (unread counter) is owned by NotificationContext, which
+  // derives it from the live badge totals for every route. This page used to
+  // snapshot the title at mount and restore that snapshot on focus, which
+  // fought the counter — the snapshot could itself be a stale "(1) AWB".
 
   // Scroll to a specific message after room loads
   useEffect(() => {
@@ -394,30 +387,12 @@ export default function ChatPage() {
             : r,
         ),
       );
-
-      // Toast notification for non-active room (CHAT-14)
-      setRooms((prevRooms) => {
-        const room = prevRooms.find((r) => r.id === msg.room_id);
-        // Custom room name wins for DMs (see ticket 1ae77f55 — DM rename).
-        const roomDisplayName = room
-          ? (room.type === 'dm'
-              ? (room.name || room.dm_partner_name || 'Direct Message')
-              : (room.name || 'Chat'))
-          : 'Chat';
-        const senderName = (msg as any).sender_name || 'Someone';
-        const preview = msg.content.length > 60 ? msg.content.slice(0, 57) + '...' : msg.content;
-        showToast(`${roomDisplayName}: ${senderName}: ${preview}`, 'info');
-
-        // Background tab title notification
-        if (document.hidden) {
-          document.title = '(1) AWB';
-        }
-
-        // Play sound via ToastContext (handles autoplay unlock + mute state)
-        playNotifySound();
-
-        return prevRooms; // no state change, just side effects
-      });
+      // Announcing the message (toast / OS notification / sound / tab title)
+      // is NOT done here any more — NotificationContext subscribes to the
+      // same event and does it for every route. Doing it here as well meant
+      // the exact same message was announced twice while the chat page was
+      // open and not at all from anywhere else, and the tab title was pinned
+      // to a hard-coded "(1) AWB" that nothing ever cleared.
     }
 
     // Re-sort: move room to top
@@ -428,7 +403,7 @@ export default function ChatPage() {
       const [room] = updated.splice(idx, 1);
       return [room, ...updated];
     });
-  }, [showToast, playNotifySound]));
+  }, []));
 
   // SSE: chat_room_typing — agent typing indicator with optional status
   useBoardStreamEvent('chat_room_typing', useCallback((data: any) => {

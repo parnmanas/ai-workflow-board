@@ -6,6 +6,8 @@ import { tokens } from '../tokens';
 import { renderMarkdown, handleMentionAwareCopy } from './chat/utils/markdown';
 import { effectiveMime } from './chat/utils/attachments';
 import { COMMENT_TYPE_STYLES, resolveCommentType } from './comment-types';
+import { useMentionViewportReader } from '../hooks/useMentionViewportReader';
+import { useNotifications } from '../contexts/NotificationContext';
 
 interface CommentListProps {
   comments: Comment[];
@@ -41,10 +43,15 @@ interface CommentListProps {
   onLoadOlder?: () => void;
   hasMoreOlder?: boolean;
   loadingOlder?: boolean;
+  // Ticket whose @-mentions should clear as their comments come into view.
+  // Set by TicketPanel; omitted wherever this list is rendered outside a
+  // ticket context, which simply disables the viewport reader.
+  ticketIdForMentions?: string;
 }
 
-export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed, onLoadOlder, hasMoreOlder, loadingOlder }: CommentListProps) {
+export default function CommentList({ comments, onImagePreview, onSetCommentStatus, onReply, replyingToCommentId, lastReadAt, mutedTypes, scrollToCommentId, onScrollToCommentConsumed, onLoadOlder, hasMoreOlder, loadingOlder, ticketIdForMentions }: CommentListProps) {
   const lastReadMs = lastReadAt ? new Date(lastReadAt).getTime() : null;
+  const { noteMentionsCleared } = useNotifications();
   const parentRef = useRef<HTMLDivElement>(null);
 
   // Phase 2D — visual threading. Comments arrive newest-first from the server.
@@ -109,6 +116,24 @@ export default function CommentList({ comments, onImagePreview, onSetCommentStat
     // leaving large blank gaps between cards.
     getItemKey: (index) => flatRows[index].comment.id,
     overscan: 5,
+  });
+
+  // @-mentions on this ticket clear when the comment carrying them is
+  // actually on screen — not when the panel is opened. The virtual window is
+  // the render signal so newly mounted rows get observed; note that overscan
+  // mounts rows that are NOT visible, which is exactly why this is an
+  // IntersectionObserver against the scroll container and not a "did it
+  // render?" check.
+  const virtualWindowKey = virtualizer
+    .getVirtualItems()
+    .map((v) => v.key)
+    .join(',');
+  useMentionViewportReader({
+    containerRef: parentRef,
+    source: { ticketId: ticketIdForMentions },
+    anchorAttribute: 'data-comment-id',
+    renderSignal: virtualWindowKey,
+    onCleared: noteMentionsCleared,
   });
 
   // 하단 근접 시 older-page 로드. onScroll 과, 페이지가 뷰포트를 못 채워 스크롤이

@@ -780,6 +780,10 @@ export class RoomMessagingService {
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
+    // NOTE: this marker deliberately does NOT clear @-mentions in the room.
+    // A room is marked read on open, which scrolls to the newest message —
+    // that says nothing about a mention 200 messages up. Mentions clear when
+    // their own message enters the viewport (useMentionViewportReader).
   }
 
   /**
@@ -1003,7 +1007,17 @@ export class RoomMessagingService {
       }
     }
 
-    const resolved: ResolvedMention[] = await this.mentionService.resolveMentions(refs, ticket);
+    // Self-exclusion, same as every ticket-comment path (T3). This call used
+    // to omit it, so a sender who wrote `@[user:<self>]` — or `@[role:…]` in a
+    // ticket-bound room where they hold that role — persisted a UserMention
+    // row addressed to themselves and got an unread mention badge for their
+    // own message, which nothing but opening the inbox could clear.
+    // `_processMentions` only runs for sender_type === 'user' (CHAT-18), so
+    // scoping the exclusion to the user domain is exact; agent dispatch below
+    // is unaffected.
+    const resolved: ResolvedMention[] = await this.mentionService.resolveMentions(refs, ticket, {
+      excludeActor: { type: 'user', id: senderId },
+    });
     if (resolved.length === 0) return dispatched;
 
     const preview = (content || '').slice(0, 500);
