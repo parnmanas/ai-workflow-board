@@ -40,9 +40,11 @@ const variantDotColors: Record<string, string> = {
 };
 
 export function Badge({ variant = 'neutral', size = 'md', dot, children }: BadgeProps) {
-  const isDot = dot || size === 'sm';
-
-  if (isDot) {
+  // `dot` is the ONLY thing that makes this a dot. `size` used to imply it,
+  // so every `<Badge size="sm">pass 12</Badge>` rendered as a bare coloured
+  // dot and threw its label away — the caller asked for a small pill and got
+  // an unlabelled marker instead. Callers that want a dot pass `dot`.
+  if (dot) {
     return (
       <span
         style={{
@@ -62,7 +64,7 @@ export function Badge({ variant = 'neutral', size = 'md', dot, children }: Badge
       style={{
         fontSize: tokens.typography.fontSizeXs,
         fontWeight: tokens.typography.fontWeightSemibold,
-        padding: '2px 8px',
+        padding: size === 'sm' ? '1px 6px' : '2px 8px',
         borderRadius: tokens.radii.sm,
         textTransform: 'uppercase',
         display: 'inline-block',

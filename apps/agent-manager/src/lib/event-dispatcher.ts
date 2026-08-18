@@ -1684,9 +1684,16 @@ export class EventDispatcher {
    * Returns undefined when no match exists (manager itself is the participant
    * and the spawn should fall back to manager defaults).
    */
-  #resolveAgentContextFromMembers(memberIds: string[]): AgentExecutionContext | undefined {
+  #resolveAgentContextFromMembers(
+    memberIds: string[],
+    excludeAgentId?: string | null,
+  ): AgentExecutionContext | undefined {
     if (!memberIds.length || !this.#managedAgentContexts) return undefined;
     for (const id of memberIds) {
+      // The sender never answers its own message. Skipping it here (rather
+      // than dropping the whole event) is what lets a SIBLING managed agent
+      // on the same host pick the message up.
+      if (excludeAgentId && id === excludeAgentId) continue;
       const ctx = this.#resolveAgentContext(id);
       if (ctx) return ctx;
     }
@@ -1778,12 +1785,18 @@ export class EventDispatcher {
   }
 
   /**
-   * Self-gate for chat replies. A message counts as "self" when the sender is
-   * either this manager's own agent_id OR one of the managed agents it
-   * supervises — the latter is what stops a managed agent's reply from
-   * triggering yet another spawn (until the chain-depth cap finally kicks in).
+   * True when the sender is an identity this host owns — the manager itself or
+   * one of its managed agents.
+   *
+   * This used to be the whole self-gate: any message from an owned identity was
+   * dropped before dispatch, which meant two agents hosted by the same manager
+   * could never talk to each other (the sibling's runtime was never spawned).
+   * It is now only half the gate — the caller drops the message solely when NO
+   * other managed member of the room can take it, i.e. when the only remaining
+   * candidate would be the sender answering itself. Loop prevention across a
+   * real two-agent conversation is the `agent_chain_depth` cap's job.
    */
-  #senderIsSelf(senderId: string | undefined | null): boolean {
+  #senderIsOwnedIdentity(senderId: string | undefined | null): boolean {
     if (!senderId) return false;
     const selfAgentId = loadAgentInfo()?.agent_id || '';
     if (selfAgentId && senderId === selfAgentId) return true;
@@ -3715,20 +3728,27 @@ export class EventDispatcher {
     // manager's own identity, which is the right behavior for rooms where
     // the manager itself is a participant.
     const memberIds: string[] = Array.isArray(p.agent_member_ids) ? p.agent_member_ids : [];
-    let agentContext = this.#resolveAgentContextFromMembers(memberIds);
+    // An agent never answers its own message, so the sender is excluded from
+    // candidate selection. Any OTHER managed member — including a sibling
+    // hosted by this same manager — is still eligible.
+    const senderAgentId = p.sender_type === 'agent' ? p.sender_id || '' : '';
+    let agentContext = this.#resolveAgentContextFromMembers(memberIds, senderAgentId);
     agentContext = await this.#scopeAgentContext(agentContext, p.workspace_id);
 
     // Two early-exit cases for agent-sent messages — both still record into
     // the chat ring so future dispatches see complete history:
-    //   1. Self-message: never reply to a send from this manager OR any of
-    //      its own managed agents (otherwise a managed agent's reply would
-    //      trigger another spawn until the chain-depth cap kicks in).
+    //   1. Self-message this host cannot hand to anybody else. A managed
+    //      SIBLING is a legitimate target and must be allowed to pick the
+    //      message up (that is the agent-to-agent case). We only drop when no
+    //      other managed member resolved — then the spawn would fall back to
+    //      the manager's own identity and answer the sender's own message.
     //   2. Loop guard: server-stamped `agent_chain_depth` reached the cap.
     if (p.sender_type === 'agent') {
-      if (this.#senderIsSelf(p.sender_id)) {
+      if (!agentContext && this.#senderIsOwnedIdentity(p.sender_id)) {
         this.#chatSessionManager?.recordRoomMessage(p);
         log(
-          `Chat room message from self (${p.sender_name || p.sender_id}) — skipping delegation`,
+          `Chat room message from self (${p.sender_name || p.sender_id}) ` +
+            `with no other managed member in room=${p.room_id || ''} — skipping delegation`,
         );
         return;
       }
@@ -3755,8 +3775,11 @@ export class EventDispatcher {
     // 있는가"만 보고 재판정하므로, 이 가드 없이 무조건 호출하면 정상 resolve된
     // 케이스까지 not_bootstrapped로 오탐한다(라운드2 리뷰 대응 중 회귀 테스트로 발견).
     if (!agentContext) {
-      const membersMiss = this.#agentContextMissReasonForMembers(memberIds);
-      if (this.#reportAgentContextMiss('Chat room message', membersMiss.reason, memberIds.join(','))) {
+      // Same exclusion as the resolve above: the sender was skipped on purpose,
+      // so it must not be re-judged here as a broken candidate.
+      const candidateIds = senderAgentId ? memberIds.filter((id) => id !== senderAgentId) : memberIds;
+      const membersMiss = this.#agentContextMissReasonForMembers(candidateIds);
+      if (this.#reportAgentContextMiss('Chat room message', membersMiss.reason, candidateIds.join(','))) {
         await this.#notifyAgentContextMissInRoom('Chat room message', p.room_id, membersMiss.brokenId);
         return;
       }

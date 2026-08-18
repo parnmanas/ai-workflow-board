@@ -149,9 +149,11 @@ export class MentionService {
    * re-spawns the author's own subagent → recursive loop. Excluding the actor
    * lets `@[role:slug]` mean "every OTHER holder of slug" safely.
    *
-   * Callers on ticket-comment paths pass their resolved author as
-   * `excludeActor`; the chat path leaves it unset (out of scope, different
-   * event) and behaves exactly as before.
+   * Every dispatch path passes its resolved author as `excludeActor`. The
+   * chat path used to omit it, which meant a sender could persist a
+   * UserMention row addressed to themselves (self token, or a role fan-out in
+   * a ticket-bound room where they hold the role) and end up with an unread
+   * mention badge for their own message.
    */
   async resolveMentions(
     refs: MentionRef[],

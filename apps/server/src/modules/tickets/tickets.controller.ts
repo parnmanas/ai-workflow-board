@@ -529,11 +529,28 @@ export class TicketsController {
       .where('r.user_id = :uid AND r.workspace_id = :wsId', { uid: currentUser.id, wsId })
       .getRawMany();
 
+    // A ticket the user once read and that has since been archived must not
+    // keep pinging the badge — role-derived involvement already filters on
+    // archived_at, so filter the read-state-derived half the same way instead
+    // of trusting the read-state row on its own.
+    const readOnlyIds = readRows
+      .map((r) => r.id)
+      .filter((id: string) => !roleTickets.some((t) => t.id === id));
+    const liveReadOnlyIds = readOnlyIds.length > 0
+      ? (await this.ticketRepo
+          .createQueryBuilder('t')
+          .select('t.id', 'id')
+          .where('t.id IN (:...ids)', { ids: readOnlyIds })
+          .andWhere('t.workspace_id = :wsId', { wsId })
+          .andWhere('t.archived_at IS NULL')
+          .getRawMany()).map((r) => r.id as string)
+      : [];
+
     const involvedIds = new Set<string>([
       ...roleTickets.map((r) => r.id),
-      ...readRows.map((r) => r.id),
+      ...liveReadOnlyIds,
     ]);
-    if (involvedIds.size === 0) return res.json({ total: 0, perTicket: {}, perBoard: {} });
+    if (involvedIds.size === 0) return res.json({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} });
 
     const readBy: Record<string, Date | null> = {};
     for (const r of readRows) readBy[r.id] = r.last_read_at ? new Date(r.last_read_at) : null;
@@ -553,8 +570,13 @@ export class TicketsController {
       total++;
     }
 
-    // Roll up perTicket → perBoard (sidebar per-board badges).
+    // Roll up perTicket → perBoard (sidebar per-board badges). `ticketBoard`
+    // exposes the same resolution to the client so that marking ONE ticket
+    // read can decrement the right board's badge locally — without it the
+    // per-board number stayed stale until the next full refresh while the
+    // per-ticket number had already dropped, i.e. the two badges disagreed.
     const perBoard: Record<string, number> = {};
+    const ticketBoard: Record<string, string> = {};
     const ticketIdsWithUnread = Object.keys(perTicket);
     if (ticketIdsWithUnread.length > 0) {
       // Load only the unread tickets and their ancestor chain — not every
@@ -602,12 +624,15 @@ export class TicketsController {
         for (const id of ticketIdsWithUnread) {
           const colId = resolveBoardColumn(id);
           const boardId = colId ? boardByColumn.get(colId) : undefined;
-          if (boardId) perBoard[boardId] = (perBoard[boardId] || 0) + perTicket[id];
+          if (boardId) {
+            perBoard[boardId] = (perBoard[boardId] || 0) + perTicket[id];
+            ticketBoard[id] = boardId;
+          }
         }
       }
     }
 
-    return res.json({ total, perTicket, perBoard });
+    return res.json({ total, perTicket, perBoard, ticketBoard });
   }
 
   @Get('tickets/:id')
@@ -2202,6 +2227,11 @@ export class TicketsController {
       }
     }
     const saved = await this.readStateRepo.save(row);
+    // NOTE: this marker deliberately does NOT clear @-mentions on the ticket.
+    // Opening a thread is not proof the user saw a specific mention buried in
+    // it. Mentions clear when their own comment actually enters the viewport
+    // — see useMentionViewportReader on the client, which reads the pending
+    // set from GET /mentions/unread-by-source and POSTs /mentions/read-batch.
     return res.json({ ticket_id: id, last_read_at: saved.last_read_at });
   }
 
@@ -2358,10 +2388,25 @@ export class TicketsController {
     // /ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id> without a
     // second round-trip. Lookup is best-effort — if the column row is
     // missing for any reason the inbox falls back to the boards index.
+    //
+    // Subtasks carry no column_id (only the root ancestor does), so walk the
+    // parent chain — resolving from ticket.column_id alone emitted board_id
+    // = null for every mention on a subtask comment and the inbox click had
+    // nowhere to go. Mirrors MentionsService.listUnread's cold-load path.
     let boardId: string | null = null;
-    if (ticket.column_id) {
-      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-      boardId = col?.board_id ?? null;
+    {
+      let cursorColumnId = ticket.column_id as string | null;
+      let cursorParentId = ticket.parent_id as string | null;
+      for (let i = 0; !cursorColumnId && cursorParentId && i < 5; i++) {
+        const parent: Ticket | null = await this.ticketRepo.findOne({ where: { id: cursorParentId } });
+        if (!parent) break;
+        cursorColumnId = parent.column_id;
+        cursorParentId = parent.parent_id;
+      }
+      if (cursorColumnId) {
+        const col = await this.colRepo.findOne({ where: { id: cursorColumnId } });
+        boardId = col?.board_id ?? null;
+      }
     }
 
     // Ticket-comment analog of room-messaging.service.ts's chat chain-depth

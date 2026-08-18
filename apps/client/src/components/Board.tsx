@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DragDropContext, Droppable, DragStart, DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { Ticket, BoardCardTicket, BoardWithCards } from '../types';
@@ -52,6 +52,7 @@ export default function Board() {
 
   // Board and workspace identity come from the URL — no localStorage reads needed.
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
+  const navigate = useNavigate();
 
   // Deep-link query params (`?ticket=<id>&comment=<id>`) drive the mention
   // inbox jump-to-comment flow. The ticket id opens the right-hand panel and
@@ -187,15 +188,53 @@ export default function Board() {
     if (!board) return;
     const ticketParam = searchParams.get('ticket');
     if (!ticketParam) return;
-    if (!findTicketById(board, ticketParam)) return;
-    setActivePanelTicketId(ticketParam);
-    const commentParam = searchParams.get('comment');
-    setScrollToCommentId(commentParam || null);
-    const next = new URLSearchParams(searchParams);
-    next.delete('ticket');
-    next.delete('comment');
-    setSearchParams(next, { replace: true });
-  }, [board, searchParams, setSearchParams]);
+
+    const consumeParams = () => {
+      const next = new URLSearchParams(searchParams);
+      next.delete('ticket');
+      next.delete('comment');
+      setSearchParams(next, { replace: true });
+    };
+
+    if (findTicketById(board, ticketParam)) {
+      setActivePanelTicketId(ticketParam);
+      setScrollToCommentId(searchParams.get('comment') || null);
+      consumeParams();
+      return;
+    }
+
+    // The ticket isn't on this board. Previously this returned silently and
+    // left the params in the URL, so following a notification for a ticket
+    // that had since moved boards (or that was linked with a stale board id)
+    // just landed on some board with nothing open and no explanation.
+    // Ask the server where the ticket lives now and forward there.
+    let cancelled = false;
+    api.getTicket(ticketParam)
+      .then((ticket: any) => {
+        if (cancelled) return;
+        const targetBoardId = ticket?.board_id;
+        if (targetBoardId && targetBoardId !== boardId && wsId) {
+          const qs = new URLSearchParams();
+          qs.set('ticket', ticketParam);
+          const commentParam = searchParams.get('comment');
+          if (commentParam) qs.set('comment', commentParam);
+          navigate(`/ws/${wsId}/boards/${encodeURIComponent(targetBoardId)}?${qs.toString()}`, {
+            replace: true,
+          });
+          return;
+        }
+        // Right board, but the ticket isn't rendered here — archived, or the
+        // board hasn't caught up yet. Say so instead of doing nothing.
+        consumeParams();
+        showToast('링크된 티켓을 이 보드에서 찾을 수 없습니다 (보관되었거나 삭제되었을 수 있습니다)', 'error');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        consumeParams();
+        showToast('링크된 티켓을 열 수 없습니다', 'error');
+      });
+    return () => { cancelled = true; };
+  }, [board, boardId, wsId, searchParams, setSearchParams, navigate, showToast]);
 
   // --- Wrapped action handlers ---
 

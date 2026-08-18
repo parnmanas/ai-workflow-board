@@ -1,4 +1,5 @@
 import { promises as fsp } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { terminateDetachedProcessTree } from '../../process-tree.js';
@@ -47,31 +48,67 @@ export interface HermesProcessOptions
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Hermes 루트 디렉터리 — 프로파일이 사는 곳의 부모.
+ *
+ * hermes_constants._get_platform_default_hermes_home() 의 이식이다:
+ * win32 는 `%LOCALAPPDATA%\hermes`, 그 외는 `~/.hermes`. 여기서 벗어나면
+ * Hermes 가 우리가 넘긴 HERMES_HOME 을 "커스텀 배포 루트"로 오인하므로
+ * 계산식을 그쪽과 반드시 일치시킨다.
+ */
+function hermesRoot(): string {
+  if (process.platform === 'win32') {
+    const localAppData = (process.env.LOCALAPPDATA ?? '').trim();
+    return join(localAppData || join(homedir(), 'AppData', 'Local'), 'hermes');
+  }
+  return join(homedir(), '.hermes');
+}
+
+/** hermes_cli.profiles.normalize_profile_name 이식 — 디스크상 id 는 소문자. */
+function normalizeProfileName(name: string): string {
+  const stripped = name.trim();
+  return stripped.toLowerCase();
+}
+
+/**
+ * 프로파일 이름을 실제 HERMES_HOME 경로로 해석한다.
+ *
+ * 우리가 띄우는 실행 파일은 `hermes` CLI 가 아니라 **`hermes-acp`**(acp_adapter/
+ * entry.py)이고, 이쪽 argparse 는 `--version/--check/--setup/--setup-browser/
+ * --yes` 만 받는다. `--profile` 을 넘기면 argparse 가 exit(2) 로 즉사한다.
+ * hermes-acp 가 프로파일을 인식하는 유일한 통로는 HERMES_HOME 이며, 프로파일
+ * home 은 `<root>/profiles/<name>` 이다(profiles.py `_get_profiles_root`).
+ * `default` 는 루트 home 자체를 가리키는 별칭이라 profiles/ 아래가 아니다.
+ */
+function resolveProfileHome(profile: string): string {
+  const name = normalizeProfileName(profile);
+  if (!name || name === 'default') return hermesRoot();
+  return join(hermesRoot(), 'profiles', name);
+}
+
 function buildEnvironment(options: HermesProcessOptions): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of SAFE_INHERITED_ENV) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   Object.assign(env, options.env ?? {});
-  // 선택된 프로파일은 Hermes 자신이 (--profile 로, buildArgs 참고)
-  // ~/.hermes/profiles/<name> 아래 제 home으로 해석한다 — 여기서 HERMES_HOME을
-  // 강제하면 Hermes가 그 경로를 외부 "커스텀 배포 루트"로 취급해 실제 프로파일
-  // 디렉터리를 아예 못 찾는다(hermes_cli main.py _apply_profile_override /
-  // profiles.py get_default_hermes_root). 프로파일 미선택 시에만 agent별
-  // 격리 상태 디렉터리로 폴백한다.
-  if (!options.profile) env.HERMES_HOME = options.stateDir;
+  // 프로파일이 지정되면 그 프로파일의 home 을, 아니면 agent 별 격리 상태
+  // 디렉터리를 HERMES_HOME 으로 넘긴다. 예전 구현은 프로파일이 있으면
+  // HERMES_HOME 을 아예 세팅하지 않고 `--profile` 로 넘겼는데, 그건 `hermes`
+  // CLI 의 계약이지 `hermes-acp` 의 계약이 아니었다(resolveProfileHome 주석).
+  env.HERMES_HOME = options.profile ? resolveProfileHome(options.profile) : options.stateDir;
   env.AWB_AGENT_ID = options.agentId;
-  // 프로파일 선택에는 쓰이지 않지만(hermes_cli는 --profile/-p 와
-  // ~/.hermes/active_profile 만 읽음) kanban 툴의 assignee/author 라벨이 이
-  // env var를 읽으므로 유지한다.
+  // 프로파일 선택에는 쓰이지 않지만(선택은 위의 HERMES_HOME 이 전담한다)
+  // kanban 툴의 assignee/author 라벨이 이 env var 를 읽으므로 유지한다.
   if (options.profile) env.HERMES_PROFILE = options.profile;
   return env;
 }
 
 function buildArgs(options: HermesProcessOptions): string[] {
-  const args = [...(options.args ?? [])];
-  if (options.profile) args.push('--profile', options.profile);
-  return args;
+  // `hermes-acp` 에는 프로파일 플래그가 없다 — 프로파일은 buildEnvironment 의
+  // HERMES_HOME 으로만 전달한다. 여기에 `--profile` 을 다시 넣으면 argparse
+  // exit(2) 로 spawn 자체가 실패한다.
+  return [...(options.args ?? [])];
 }
 
 export class HermesProcess {

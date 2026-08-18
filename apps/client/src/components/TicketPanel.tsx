@@ -1998,6 +1998,11 @@ export default function TicketPanel({
     // Opening the panel already counts as "read up to here" for the badge
     // system. The server marker is still written on unmount below, but
     // clearing the sidebar badge immediately makes the UI feel right.
+    //
+    // This marker covers ticket-comment UNREAD counts only. @-mentions are
+    // deliberately NOT cleared by it — they clear per-comment once the
+    // comment carrying them is actually on screen (useMentionViewportReader,
+    // wired below).
     markBadgeRead('tickets', ticketId);
     return () => {
       cancelled = true;
@@ -3748,6 +3753,7 @@ export default function TicketPanel({
               onLoadOlder={handleLoadOlder}
               hasMoreOlder={activeHasMore}
               loadingOlder={loadingOlderPanel === activePanelId}
+              ticketIdForMentions={activeTicket.id}
             />
 
             <TypingIndicator agentName={typingIndicators[navStack[navStack.length - 1]] ?? null} />

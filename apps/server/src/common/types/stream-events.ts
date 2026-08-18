@@ -60,6 +60,12 @@ export interface BoardUpdatePayload {
   action: string;
   field_changed?: string;
   actor_name?: string;
+  // Raw actor id behind `actor_name`. The web UI needs it to tell "someone
+  // else commented" from "I commented" — without it the unread-badge listener
+  // counted the viewer's own comments as unread (names are not unique and
+  // agent actors get re-projected to `<Manager>/<Agent>`, so name comparison
+  // is not a substitute). Empty string for system actors.
+  actor_id?: string;
   current_column_id?: string;
   current_column_name?: string;
   current_column_kind?: string;
@@ -351,6 +357,12 @@ export interface ChatRoomMessageMetadata {
 // Phase 7 — room-based chat
 export interface ChatRoomMessagePayload {
   room_id: string;
+  // Workspace the room belongs to. SSE delivery is scoped by room membership,
+  // NOT by workspace — a user who belongs to two workspaces receives room
+  // events from both on the same stream. The web UI's unread badge is
+  // per-workspace, so without this field it counted foreign-workspace
+  // messages into the workspace currently on screen.
+  workspace_id?: string;
   message_id: string;
   sender_type: 'user' | 'agent' | 'system';
   sender_id: string;

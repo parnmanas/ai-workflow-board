@@ -1,5 +1,5 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Param, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { MentionsService } from './mentions.service';
@@ -35,6 +35,47 @@ export class MentionsController {
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
 
     const updated = await this.mentionsService.markAllRead(wsId, currentUser.id);
+    return res.json({ updated });
+  }
+
+  // Viewport-based clearing (see MentionsService.listUnreadBySource): the
+  // client asks which mentions are pending inside ONE ticket / room, watches
+  // the matching rows with an IntersectionObserver, and reports back the ones
+  // that were actually on screen. Exactly one of ticket_id / room_id.
+  //
+  // NOTE: must be declared BEFORE `mentions/:id/read` is irrelevant (different
+  // verb + path), but it IS declared before nothing that could shadow it —
+  // 'unread-by-source' is a GET on its own literal path.
+  @Get('mentions/unread-by-source')
+  async listUnreadBySource(
+    @Query('ticket_id') ticketId: string | undefined,
+    @Query('room_id') roomId: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    if (!ticketId && !roomId) {
+      return res.status(400).json({ error: 'ticket_id or room_id is required' });
+    }
+    const items = await this.mentionsService.listUnreadBySource(currentUser.id, {
+      ticketId: ticketId || undefined,
+      roomId: roomId || undefined,
+    });
+    return res.json({ items });
+  }
+
+  // Batch mark-read. The viewport reader flushes everything that became
+  // visible together, so a screenful with several mentions costs one request.
+  @Post('mentions/read-batch')
+  async markManyRead(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const currentUser = (req as any).currentUser;
+    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
+    const ids = Array.isArray(body?.ids) ? body.ids : null;
+    if (!ids) return res.status(400).json({ error: 'ids must be an array' });
+    // Bounded so a malformed/hostile caller can't hand us an unbounded IN list.
+    if (ids.length > 200) return res.status(400).json({ error: 'ids may contain at most 200 entries' });
+    const updated = await this.mentionsService.markManyRead(ids, currentUser.id);
     return res.json({ updated });
   }
 
