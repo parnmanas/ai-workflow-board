@@ -60,12 +60,15 @@ jobs:
   # 방식이라 감사와 감사 사이에 취약한 의존성이 조용히 랜딩할 수 있었다. 실제로
   # react-router 건은 그 공백에서 발견됐다. 이 잡이 그 공백을 닫는다.
   #
-  # 두 가지를 본다:
+  # 세 가지를 본다:
   #   1) npm audit — lockfile 대비 advisory. moderate 이상이면 실패시킨다.
   #      (현재 트리는 main/production.private 모두 0건이므로 이 문턱은 새로 들어오는
   #       취약점만 잡는다. `npm audit fix` 는 금지 — 루트 overrides 를 날린다.)
   #   2) install-script 허용목록 — `npm ci` 가 실행하게 될 서드파티 스크립트 집합이
   #      늘어나면 실패. ci.yml 주석에만 있던 허용목록을 실행 가능한 검사로 만든 것.
+  #   3) 액션 SHA 고정 (2026-08-19 감사) — `uses:` 가 가변 태그(@v4)면 실패.
+  #      업스트림이 태그를 옮기면 우리 워크플로가 조용히 새 코드를 실행하는데,
+  #      publish-agent-manager.yml 은 NPM_TOKEN + contents:write 를 들고 돈다.
   #
   # 의도적으로 `npm ci` 를 하지 않는다. 둘 다 package-lock.json 만 읽으면 되고,
   # 설치를 생략하면 "취약점을 찾는 잡이 그 취약점의 install script 를 먼저 실행하는"
@@ -74,14 +77,16 @@ jobs:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - name: npm audit (moderate 이상 실패)
         run: npm audit --audit-level=moderate
       - name: install-script 허용목록 가드
         run: node scripts/audit-install-scripts.mjs
+      - name: 액션 SHA 고정 가드
+        run: node scripts/audit-action-pins.mjs
 
   # Fast static guard — runs everywhere, no DB. Catches the bare-join regression
   # class deterministically in seconds.
@@ -89,8 +94,8 @@ jobs:
     name: chat-rooms join cast guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -144,8 +149,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -168,8 +173,8 @@ jobs:
     name: client unit + interaction tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -194,8 +199,8 @@ jobs:
     name: apps/server full test suite (sqlite)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -237,8 +242,8 @@ jobs:
       MCP_DEV_MODE: 'true'
       AGENT_DEV_MODE: 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
