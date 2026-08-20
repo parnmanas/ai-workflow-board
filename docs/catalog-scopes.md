@@ -49,6 +49,26 @@ Workspace Schedule의 실행 기록(`ActionRun`, dispatch가 여는 ChatRoom)에
 | QA Scenario / Schedule | no | yes | `QaRun`/`QaRunBatch.board_id` |
 | Security Profile / Schedule | no | yes | `SecurityRun`/`SecurityRunBatch.board_id` |
 | Workspace Schedule | no | yes | 없음 |
+| Skill | yes | yes | `RunSkillSnapshot.run_id` (board_id 컬럼 없음) |
+
+Skill은 이 모델을 뒤늦게(마이그레이션 `1760000000077`) 채택했다. 그 전까지
+`skills.workspace_id`는 NOT NULL이었고 모든 조회가 단순 equality였기 때문에
+global skill은 "없었다"가 아니라 **표현 자체가 불가능**했다. 채택하면서 두 가지가
+다른 카탈로그 타입과 다르다:
+
+- `board_id` 컬럼을 아예 만들지 않았다(신규 엔티티 규칙). `canUseCatalogItem()`
+  호출부는 `board_id: null` 리터럴로 어댑트한다 —
+  `apps/server/src/modules/skills/skill-scope.ts`.
+- Global 유일성은 데코레이터의 복합 unique index가 아니라 **partial unique
+  index** 두 개(`uq_skills_global_slug` / `uq_skills_workspace_slug`)가 보장한다.
+  Postgres에서 `NULL != NULL` 이라 `(workspace_id, slug)` 복합 index는 global 행을
+  전혀 제약하지 못한다 — `workflow_functions`가 쓰는 것과 같은 분리다. 데코레이터
+  쪽 index는 partial index를 모르는 sql.js 개발 백엔드용으로만 남아 있다.
+
+Skill은 slug 기준으로 Workspace가 Global을 **shadow** 한다(Function의 key와 같은
+우선순위). 그래서 built-in을 커스터마이즈하는 방법은 global을 직접 고치는 것이
+아니라 workspace로 **fork** 하는 것이다 — fork가 계속 이기는 동안 그 아래의
+global은 업스트림 갱신을 계속 받는다. 상세는 `docs/skills.md`.
 
 Feature, Ticket, Board, Role, User, Agent, Channel, API key는 카탈로그가 아니다.
 이들은 업무 상태나 보안 주체를 소유하므로 상속하지 않는다.

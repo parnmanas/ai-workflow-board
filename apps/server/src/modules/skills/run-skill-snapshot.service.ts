@@ -46,13 +46,16 @@ export class RunSkillSnapshotService {
       && (!assignment.role_slug || assignment.role_slug === (args.roleSlug || '')),
     );
     const versionIds = selected.map((assignment) => assignment.skill_version_id);
+    // Scope-free lookup by id. The assignment row is already workspace-scoped
+    // and its skill_version_id was validated at assign time, so re-filtering by
+    // workspace here adds no authorization — it only DROPS global skills
+    // (workspace_id NULL) out of the manifest, which silently ships a run
+    // without the built-in skills the operator assigned to that agent.
     const versions = versionIds.length
-      ? await this.versions.find({ where: { id: In(versionIds), workspace_id: args.workspaceId } })
+      ? await this.versions.find({ where: { id: In(versionIds) } })
       : [];
     const skills = versions.length
-      ? await this.skills.find({
-          where: { id: In(versions.map((version) => version.skill_id)), workspace_id: args.workspaceId },
-        })
+      ? await this.skills.find({ where: { id: In(versions.map((version) => version.skill_id)) } })
       : [];
     const skillById = new Map(skills.filter((skill) => skill.status === 'active').map((skill) => [skill.id, skill]));
     const manifest: PinnedSkillManifestEntry[] = versions

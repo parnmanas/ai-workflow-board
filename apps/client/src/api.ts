@@ -80,6 +80,8 @@ import type {
   Skill,
   SkillDetail,
   SkillProposal,
+  SkillSyncSummary,
+  SkillTap,
   SkillVersion,
   HermesChildRun,
   OrchestrationTeam,
@@ -1683,8 +1685,20 @@ export const api = {
 
   // ─── Admin Logs ────────────────────────────────────────
   // Governed, immutable skill catalog and bounded Hermes ChildRuns.
-  listSkills: (workspaceId: string) =>
-    request<Skill[]>(`/workspaces/${encodeURIComponent(workspaceId)}/skills`),
+  /** Global + this workspace's skills. `includeShadowed` also returns global
+   *  rows a workspace fork overrides, each flagged `shadowed: true`. */
+  listSkills: (workspaceId: string, includeShadowed = false) =>
+    request<Skill[]>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills`
+      + (includeShadowed ? '?include_shadowed=1' : ''),
+    ),
+  /** Copy a global skill into this workspace, where it shadows the global by
+   *  slug while the global keeps receiving upstream updates. */
+  forkSkill: (workspaceId: string, skillId: string, skillVersionId?: string) =>
+    request<Skill>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/fork`,
+      { method: 'POST', body: JSON.stringify({ skill_version_id: skillVersionId || '' }) },
+    ),
   getSkill: (workspaceId: string, skillId: string) =>
     request<SkillDetail>(
       `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}`,
@@ -1731,6 +1745,53 @@ export const api = {
       `/workspaces/${encodeURIComponent(workspaceId)}/skills/${encodeURIComponent(skillId)}/quarantine`,
       { method: 'PATCH' },
     ),
+  // ─── Skill registry (admin — global scope + git taps) ────
+  listGlobalSkills: () => request<Skill[]>('/admin/skill-registry/skills'),
+  getGlobalSkill: (skillId: string) =>
+    request<SkillDetail>(`/admin/skill-registry/skills/${encodeURIComponent(skillId)}`),
+  quarantineGlobalSkill: (skillId: string) =>
+    request<Skill>(
+      `/admin/skill-registry/skills/${encodeURIComponent(skillId)}/quarantine`,
+      { method: 'PATCH' },
+    ),
+  /** Re-run the in-repo built-in pack seeding without a restart. Idempotent. */
+  reseedBuiltinSkills: () =>
+    request<SkillSyncSummary & { dir: string | null }>(
+      '/admin/skill-registry/builtin/reseed',
+      { method: 'POST' },
+    ),
+  listSkillTaps: () => request<SkillTap[]>('/admin/skill-registry/taps'),
+  createSkillTap: (body: {
+    name: string;
+    repo_url: string;
+    ref?: string;
+    path?: string;
+    enabled?: boolean;
+    allowed_licenses?: string[];
+  }) => request<SkillTap>('/admin/skill-registry/taps', { method: 'POST', body: JSON.stringify(body) }),
+  updateSkillTap: (tapId: string, body: Record<string, unknown>) =>
+    request<SkillTap>(`/admin/skill-registry/taps/${encodeURIComponent(tapId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteSkillTap: (tapId: string) =>
+    request<{ removed: true }>(`/admin/skill-registry/taps/${encodeURIComponent(tapId)}`, {
+      method: 'DELETE',
+    }),
+  /** `dryRun` previews what would change without writing — run this before
+   *  enabling a third-party tap, since every skill becomes agent prompt text. */
+  syncSkillTap: (tapId: string, opts: { dryRun?: boolean; force?: boolean } = {}) =>
+    request<{
+      commit: string;
+      summary: SkillSyncSummary;
+      skipped: Array<{ path: string; reason: string }>;
+      loaded: number;
+      dry_run: boolean;
+    }>(`/admin/skill-registry/taps/${encodeURIComponent(tapId)}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: !!opts.dryRun, force: !!opts.force }),
+    }),
+
   listSkillProposals: (
     workspaceId: string,
     status?: 'pending' | 'approved' | 'rejected',

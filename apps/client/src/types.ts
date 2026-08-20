@@ -2041,13 +2041,55 @@ export interface SkillVersion {
 
 export interface Skill {
   id: string;
-  workspace_id: string;
+  /** null = global (inherited by every workspace). See docs/catalog-scopes.md. */
+  workspace_id: string | null;
+  /** Server-computed from workspace_id — render this rather than re-deriving. */
+  scope?: 'global' | 'workspace';
+  /** true when this GLOBAL row is overridden by a workspace fork of the same
+   *  slug. Only present with `?include_shadowed=1`. */
+  shadowed?: boolean;
   slug: string;
   name: string;
   description: string;
   status: 'active' | 'quarantined';
+  /** Where the definition came from: authored here, the in-repo built-in pack,
+   *  or an external git tap. Determines whether a sync may republish it. */
+  source_kind?: 'local' | 'builtin' | 'tap';
+  source_id?: string;
+  source_path?: string;
+  source_version?: string;
+  source_license?: string;
+  source_author?: string;
   created_at: string;
   updated_at: string;
+}
+
+/** An external git registry AWB can pull global skills from. Admin-only. */
+export interface SkillTap {
+  id: string;
+  name: string;
+  repo_url: string;
+  ref: string;
+  path: string;
+  enabled: number;
+  allowed_licenses: string;
+  last_synced_at: string | null;
+  last_sync_status: '' | 'ok' | 'error';
+  last_sync_error: string;
+  last_synced_commit: string;
+  last_sync_summary: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillSyncSummary {
+  created: number;
+  updated: number;
+  alreadyCurrent: number;
+  quarantined: number;
+  conflicted: number;
+  skipped: number;
+  details: string[];
 }
 
 export interface SkillDetail extends Skill {
