@@ -6,6 +6,7 @@ import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import ResourceDetailPanel from './ResourceDetailPanel';
+import CliCredentialImport from './CliCredentialImport';
 
 // master/detail 레이아웃: 이 폭 미만이면 리스트만 보여주고 detail 은
 // 풀폭 오버레이로 전환한다(반응형). 24px 패딩 컨테이너 안에서 리스트(좌)와
@@ -574,7 +575,14 @@ export default function ResourceManager({
             <option value="asc">{sortBy === 'name' || sortBy === 'type' ? 'A → Z' : 'Oldest first'}</option>
           </select>
         </div>
-        <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <CliCredentialImport
+            workspaceId={effectiveWorkspaceId}
+            createScope={createScope}
+            onCreated={loadResources}
+          />
+          <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>
+        </div>
       </div>
 
       {loading ? (
