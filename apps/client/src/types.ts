@@ -2520,6 +2520,9 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
 export interface OrchestrationAssignableAgent {
   id: string;
   name: string;
+  /** ST-7 — required for the `<Manager>/<Agent>` render via formatAgentDisplayName. */
+  manager_agent_id?: string | null;
+  manager_name?: string | null;
   type: string;
   is_online: boolean;
   description: string;

@@ -1,5 +1,10 @@
 // Server-side mirror of apps/client/src/utils/agentName.ts.
 //
+// CONTRACT + CHECKLIST: .claude/skills/awb-agent-display-name/SKILL.md — read it
+// before adding any surface that renders an agent name. Rendering a bare
+// `agent.name` (or a raw agent id) is a bug: the same leaf name legitimately
+// exists under multiple managers, so the prefix is what disambiguates them.
+//
 // Whenever the server returns an agent display string the UI will render
 // (chat sender_name / dm_partner_name / participant.name, comment author,
 // focus badge, agent log row, agent-manager instance label, …) it must use

@@ -48,6 +48,7 @@ import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
 import { orchestrationError } from './orchestration-errors';
+import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import {
   DEPENDENCY_SATISFYING_STATUSES,
   MAX_ARTIFACTS_PER_STEP,
@@ -190,7 +191,7 @@ export class OrchestrationRunnerService {
 
       await this.missions.recordEvent(mission, {
         type: 'mission_started',
-        message: `Mission briefed to orchestrator ${orchestrator.name} (${roster.length} member(s) available)`,
+        message: `Mission briefed to orchestrator ${await this.agentName(orchestrator.id)} (${roster.length} member(s) available)`,
         actor_type: actor.type,
         actor_id: actor.id,
         actor_name: actor.name,
@@ -871,13 +872,14 @@ export class OrchestrationRunnerService {
     );
     const depAgents = depAgentIds.length ? await this.agentRepo.find({ where: { id: In(depAgentIds) } }) : [];
     const depAgentById = new Map(depAgents.map((a) => [a.id, a]));
+    const depDisplayById = await resolveAgentDisplayMap(this.agentRepo, depAgents);
     const dependencies: DependencyContext[] = depSteps
       .filter((s) => (DEPENDENCY_SATISFYING_STATUSES as readonly string[]).includes(s.status))
       .map((s) => ({
         step_key: s.step_key,
         title: s.title,
         status: s.status,
-        assignee_name: s.assignee_agent_id ? depAgentById.get(s.assignee_agent_id)?.name ?? '' : '',
+        assignee_name: s.assignee_agent_id ? depDisplayById.get(s.assignee_agent_id) ?? '' : '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
       }));
@@ -907,7 +909,7 @@ export class OrchestrationRunnerService {
       type: 'step_dispatched',
       step_id: step.id,
       step_key: step.step_key,
-      message: `Step "${step.title}" dispatched to ${agent.name} (attempt ${step.attempt}/${step.max_attempts})`,
+      message: `Step "${step.title}" dispatched to ${await this.agentName(agent.id)} (attempt ${step.attempt}/${step.max_attempts})`,
       actor_type: 'system',
       data: { room_id: room.id, assignee_agent_id: agentId, attempt: step.attempt },
     });
@@ -1210,19 +1212,32 @@ export class OrchestrationRunnerService {
     );
   }
 
+  /**
+   * Canonical `<Manager>/<Agent>` display for an agent id. EVERY user-visible
+   * agent name the runner produces (timeline actor, dispatch message, prompt
+   * roster) must come through here or resolveAgentDisplayMap — never through a
+   * bare `agent.name`. See .claude/skills/awb-agent-display-name.
+   */
   private async agentName(agentId: string | null | undefined): Promise<string> {
     if (!agentId) return '';
-    const a = await this.agentRepo.findOne({ where: { id: agentId }, select: ['id', 'name'] });
-    return a?.name ?? '';
+    return (await resolveAgentDisplayName(this.agentRepo, agentId)) ?? '';
   }
 
   private async buildRoster(teamId: string): Promise<RosterEntry[]> {
     const members = await this.teams.listMembers(teamId);
-    return members
-      .filter((m) => m.agent)
+    const present = members.filter((m) => m.agent);
+    // The roster is what the orchestrator reads in its brief prompt, so it must
+    // carry the same full name the operator sees in the UI — otherwise two
+    // managers running an agent with the same short name are indistinguishable
+    // to the orchestrator when it assigns steps.
+    const displayById = await resolveAgentDisplayMap(
+      this.agentRepo,
+      present.map((m) => m.agent!),
+    );
+    return present
       .map((m) => ({
         agent_id: m.agent_id,
-        agent_name: m.agent!.name,
+        agent_name: displayById.get(m.agent_id) ?? m.agent!.name,
         role_label: m.role_label,
         capabilities: m.capabilities,
         max_concurrent: m.max_concurrent,

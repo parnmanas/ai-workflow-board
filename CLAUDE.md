@@ -285,6 +285,7 @@ Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness wo
 - **awb-agent-manager-release** — agent-manager build-verify + same-PR SSE contract rule (버전은 publish 시 자동 계산 — 손 범프 금지)
 - **awb-field-wiring** — 5-touch-point checklist for Ticket JSON-array columns
 - **awb-mcp-tool-wiring** — 7-touch-point checklist for new MCP tool registration (TOOL_AUTHZ_TABLE tier classification, plus agent-manager ticket-ref-capture classification — skipping the former ships a tool that always denies, skipping the latter ships one whose card silently vanishes from chat)
+- **awb-agent-display-name** — the `<Manager>/<Agent>` display contract: 6 touch points for ANY surface that shows an agent (picker, roster, typing/status indicator, timeline, SSE frame, agent-facing prompt). Rendering a bare `agent.name` — or a raw agent id — is a bug: the same leaf name legitimately exists under multiple managers. **Read this before adding any agent picker or agent-name label.**
 
 `.claude/settings.json` carries the read-only permission allowlist generated via `/fewer-permission-prompts` — extend it there rather than ad-hoc allowing in session.
 

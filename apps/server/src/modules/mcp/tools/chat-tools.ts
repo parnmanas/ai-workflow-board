@@ -23,6 +23,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../shared/ticket-helpers';
 import type { ToolContext } from './context';
 import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
+import { resolveAgentDisplayName } from '../../../utils/agent-name';
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, roomCrudService, roomMembershipService, roomMessagingService } = ctx;
@@ -48,7 +49,12 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     },
     async ({ agent_id, ticket_id, is_typing }) => {
       const timestamp = new Date().toISOString();
-      activityEvents.emit('agent_typing', { agent_id, ticket_id, is_typing, timestamp });
+      // Resolve the canonical `<Manager>/<Agent>` display once, at emit time.
+      // The ticket panel used to render the raw agent UUID here because the
+      // event carried no name at all — see .claude/skills/awb-agent-display-name.
+      const agentName =
+        (await resolveAgentDisplayName(dataSource.getRepository(Agent), agent_id)) || 'Agent';
+      activityEvents.emit('agent_typing', { agent_id, agent_name: agentName, ticket_id, is_typing, timestamp });
       const key = `${agent_id}:${ticket_id}`;
       const prev = typingTimers.get(key);
       if (prev) {
@@ -63,6 +69,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           typingTimers.delete(key);
           activityEvents.emit('agent_typing', {
             agent_id,
+            agent_name: agentName,
             ticket_id,
             is_typing: false,
             timestamp: new Date().toISOString(),

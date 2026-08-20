@@ -3084,9 +3084,11 @@ export class EventDispatcher {
       this.#chatSessionManager &&
       payload.room_id
     ) {
+      const chatResponderId =
+        payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
       const onProgress = (stage: string): void => {
         const status = stage === 'thinking' ? 'thinking' : 'composing reply';
-        this.#setChatRoomTyping(payload.room_id, true, status).catch(() => {});
+        this.#setChatRoomTyping(payload.room_id, true, status, chatResponderId).catch(() => {});
       };
       try {
         const result = await this.#chatSessionManager.dispatch({
@@ -3654,13 +3656,25 @@ export class EventDispatcher {
     }
   }
 
+  /**
+   * Post the room typing/status indicator.
+   *
+   * `agentId` MUST be the agent that is actually answering (the resolved
+   * managed member), never this manager's own identity. The server renders the
+   * indicator as `<Manager>/<Agent>` by resolving whatever agent_id it gets —
+   * so passing the manager id made the UI say "<manager> is typing", losing the
+   * agent half of the name. Falling back to loadAgentInfo() is a last resort
+   * for the standalone case where no managed context resolved.
+   */
   async #setChatRoomTyping(
     roomId: string,
     isTyping: boolean,
     status: string | null = null,
+    agentId?: string,
   ): Promise<void> {
     try {
       const agentInfo = loadAgentInfo();
+      const responderId = agentId || agentInfo?.agent_id || '';
       const url = `${this.#config.url.replace(/\/$/, '')}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/typing`;
       await fetch(url, {
         method: 'POST',
@@ -3669,9 +3683,13 @@ export class EventDispatcher {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          agent_id: agentInfo?.agent_id || '',
+          agent_id: responderId,
+          // Hint only — the server re-resolves the canonical display name from
+          // agent_id and this value is used solely when that lookup misses.
           agent_name:
-            agentInfo?.agent_name || (agentInfo as any)?.name || 'Agent',
+            responderId === agentInfo?.agent_id
+              ? agentInfo?.agent_name || (agentInfo as any)?.name || 'Agent'
+              : '',
           is_typing: isTyping,
           status,
         }),
@@ -3794,6 +3812,15 @@ export class EventDispatcher {
     // room message — the chat-room twin of the ticket-trigger provisioning abort.
     // An ordinary chat turn carries no run_provision → runContext stays untouched.
     let runContext = agentContext;
+    // Always attribute the typing/status indicator to the agent that will
+    // answer, not to this manager — otherwise the UI shows "<manager> is
+    // thinking" instead of "<manager>/<agent>". Computed once and reused by
+    // EVERY set AND clear call below: the client keys the indicator by
+    // agent_id, so a clear sent under a different id leaves it stuck until the
+    // 15s safety timeout. Provisioning may rebind runContext.cwd later, but
+    // never its agent_id, so hoisting this here is safe.
+    const roomResponderId =
+      runContext?.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
     const runProvision = parseRunProvision(p.run_provision);
     // ticket e9d0e8bc: run-lifetime folder lock for a QA/security run. Acquired
     // below (before provisioning) and held until the spawned run subagent's
@@ -3898,7 +3925,7 @@ export class EventDispatcher {
           status: 'error',
           summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
         });
-        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
         log(`Chat room run dispatch aborted — provisioning failed: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
         return;
       }
@@ -3931,13 +3958,13 @@ export class EventDispatcher {
     //   thinking  — first stdout from subagent
     //   composing — first assistant content
     if (p.room_id) {
-      await this.#setChatRoomTyping(p.room_id, true, '👀 reading context');
+      await this.#setChatRoomTyping(p.room_id, true, '👀 reading context', roomResponderId);
     }
 
     const onProgress = p.room_id
       ? (stage: string): void => {
           const status = stage === 'thinking' ? 'thinking' : 'composing reply';
-          this.#setChatRoomTyping(p.room_id, true, status).catch(() => {});
+          this.#setChatRoomTyping(p.room_id, true, status, roomResponderId).catch(() => {});
         }
       : undefined;
 
@@ -3984,7 +4011,7 @@ export class EventDispatcher {
           },
         });
         this.#chatSessionManager?.recordRoomMessage(p);
-        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
         log(
           `Chat room dispatched through Hermes ACP: room=${p.room_id || ''} ` +
           `run=${runId} session=${result.sessionId} stop=${result.stopReason}`,
@@ -3997,7 +4024,7 @@ export class EventDispatcher {
           replyText,
         );
       } catch (err: any) {
-        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '').catch(() => {});
+        if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
         await this.#reportHermesDispatchFailure(
           'Hermes room dispatch',
           p.room_id,
@@ -4078,7 +4105,7 @@ export class EventDispatcher {
 
     if (canDelegate && this.#subagentManager) {
       try {
-        await this.#setChatRoomTyping(p.room_id, true, 'thinking');
+        await this.#setChatRoomTyping(p.room_id, true, 'thinking', roomResponderId);
         const history = await fetchChatRoomHistory(this.#config, p.room_id);
         const rolePrompt = p.role_prompt || '';
         // Oneshot fallback path (Codex / Antigravity / non-persistent Claude):
@@ -4140,7 +4167,7 @@ export class EventDispatcher {
         if (result.spawned) {
           // The oneshot now owns the run lock; its exit hook releases it.
           runLockTransferred = !!runLock;
-          await this.#setChatRoomTyping(p.room_id, true, 'composing reply');
+          await this.#setChatRoomTyping(p.room_id, true, 'composing reply', roomResponderId);
           log(
             `Chat room message dispatched to subagent: room=${p.room_id} pid=${result.pid}`,
           );

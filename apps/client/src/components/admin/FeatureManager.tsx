@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
+import { formatAgentDisplayName } from '../../utils/agentName';
 import type { Feature, FeatureStatus } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge } from '../common';
@@ -25,7 +26,9 @@ const STATUS_BADGE: Record<FeatureStatus, { variant: 'success' | 'danger' | 'war
   rejected: { variant: 'danger', label: 'Rejected' },
 };
 
-interface AgentOpt { id: string; name: string; }
+// manager_name must ride along — every agent label renders as
+// `<Manager>/<Agent>` via formatAgentDisplayName.
+interface AgentOpt { id: string; name: string; manager_name?: string | null; }
 
 export default function FeatureManager({ workspaceId, boardId }: { workspaceId?: string; boardId?: string }) {
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -62,7 +65,7 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
     (async () => {
       try {
         const list = await api.getAgents(workspaceId);
-        setAgents((list || []).map((a: any) => ({ id: a.id, name: a.name })));
+        setAgents((list || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
       } catch { /* non-fatal — planner defaults server-side */ }
     })();
   }, [workspaceId]);
@@ -202,7 +205,7 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
             value={plannerId}
             onChange={(e) => setPlannerId(e.target.value)}
             placeholder="미지정 시 서버 기본값(호출자)"
-            options={agents.map((a) => ({ value: a.id, label: a.name }))}
+            options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
           />
           <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
             제출하면 planner 에게 전용 기획 방이 열리고, 구조화된 티켓 체인 제안이 돌아오면 여기서 승인/거부합니다.
