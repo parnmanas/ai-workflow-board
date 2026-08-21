@@ -82,6 +82,24 @@ export function pushBranches(yaml) {
   return out;
 }
 
+// deploy.yml 은 production.private 브랜치에만 있다(main 에는 없음). 없으면 검사할
+// 배포 대상이 없다는 뜻이므로, main 기준의 알려진 배포 브랜치를 대신 확인한다.
+export const KNOWN_DEPLOY_BRANCHES = ['production.private'];
+
+/**
+ * 이 저장소가 실제로 배포하는 브랜치 목록. deploy.yml 이 있으면 그 push 트리거를
+ * 신뢰하고, 없으면(=main 체크아웃) 알려진 목록으로 떨어진다.
+ *
+ * scripts/audit-deploy-branch-deps.mjs 도 같은 목록을 써야 한다 — "배포되는 곳은
+ * 전부 감사한다" 는 불변식의 출처가 하나여야 두 가드가 갈라지지 않는다.
+ */
+export function deployBranches() {
+  const deployPath = join(dir, 'deploy.yml');
+  return existsSync(deployPath)
+    ? (pushBranches(readFileSync(deployPath, 'utf8')) ?? [])
+    : KNOWN_DEPLOY_BRANCHES;
+}
+
 // 이 파일은 CLI 가드이면서 동시에 파서를 export 한다(테스트가 `pushBranches` 를
 // 직접 단언한다 — apps/server/test/ci-branch-coverage-guard.test.mjs). import 만으로
 // 아래 검사가 돌면 안 된다: 검사가 실패할 때 `process.exit(1)` 이 테스트 러너 전체를
@@ -92,20 +110,13 @@ if (isMain) main();
 
 function main() {
 const ciPath = join(dir, 'ci.yml');
-const deployPath = join(dir, 'deploy.yml');
 
 if (!existsSync(ciPath)) {
   console.error('FAIL .github/workflows/ci.yml 이 없다 — 의존성 감사 잡의 근거가 사라졌다.');
   process.exit(1);
 }
 
-// deploy.yml 은 production.private 브랜치에만 있다(main 에는 없음). 없으면 검사할
-// 배포 대상이 없다는 뜻이므로, main 기준의 알려진 배포 브랜치를 대신 확인한다.
-const KNOWN_DEPLOY_BRANCHES = ['production.private'];
-
-const deployBranches = existsSync(deployPath)
-  ? (pushBranches(readFileSync(deployPath, 'utf8')) ?? [])
-  : KNOWN_DEPLOY_BRANCHES;
+const deployBranchList = deployBranches();
 
 const ciBranches = pushBranches(readFileSync(ciPath, 'utf8'));
 
@@ -115,7 +126,7 @@ if (ciBranches === null) {
 }
 
 const missing = [];
-for (const b of deployBranches) {
+for (const b of deployBranchList) {
   if (ciBranches.includes(b)) {
     console.log(`ok   ${b} — ci.yml push 트리거에 포함 (dependency-audit 실행됨)`);
   } else {
@@ -137,5 +148,5 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-console.log(`\n배포 브랜치 ${deployBranches.length}개 — 전부 의존성 감사 커버.`);
+console.log(`\n배포 브랜치 ${deployBranchList.length}개 — 전부 의존성 감사 커버.`);
 }

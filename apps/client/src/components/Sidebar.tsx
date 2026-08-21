@@ -181,6 +181,12 @@ export default function Sidebar({
       label: 'Skills',
       icon: 'S',
     },
+    {
+      key: 'skill-registry',
+      path: '/admin/skill-registry',
+      label: 'Skill Registry',
+      icon: 'R',
+    },
     { key: 'server-logs', path: '/admin/logs', label: 'Server Logs', icon: 'L' },
     {
       key: 'agent-logs',

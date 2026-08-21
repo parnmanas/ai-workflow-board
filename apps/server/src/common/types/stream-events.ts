@@ -76,6 +76,8 @@ export interface BoardUpdatePayload {
 export interface AgentTypingPayload {
   ticket_id: string;
   agent_id: string;
+  /** Canonical `<Manager>/<Agent>` display, resolved at emit time. */
+  agent_name: string;
   is_typing: boolean;
 }
 

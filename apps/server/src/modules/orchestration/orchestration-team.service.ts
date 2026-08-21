@@ -23,6 +23,7 @@ import { Agent } from '../../entities/Agent';
 import { LogService } from '../../services/log.service';
 import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
 import { orchestrationError } from './orchestration-errors';
+import { resolveAgentDisplayMap } from '../../utils/agent-name';
 
 export interface TeamMemberView {
   id: string;
@@ -34,6 +35,16 @@ export interface TeamMemberView {
   capabilities: string;
   max_concurrent: number;
   position: number;
+}
+
+export interface AssignableAgentView {
+  id: string;
+  name: string;
+  manager_agent_id: string | null;
+  manager_name: string | null;
+  type: string;
+  is_online: boolean;
+  description: string;
 }
 
 export interface TeamView {
@@ -177,6 +188,11 @@ export class OrchestrationTeamService {
       ? await this.agentRepo.find({ where: { id: In(Array.from(agentIds)) } })
       : [];
     const byId = new Map(agents.map((a) => [a.id, a]));
+    // Agent identity is ALWAYS `<Manager>/<Agent>` on every surface — see
+    // utils/agent-name.ts. Resolving here (once, batched) means the whole
+    // orchestration UI + the orchestrator's own prompt roster read the same
+    // name the AI Agents listing shows.
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     // One grouped count instead of a per-team query.
     const liveMissions = await this.missionRepo.find({
@@ -194,7 +210,7 @@ export class OrchestrationTeamService {
         name: t.name,
         description: t.description,
         orchestrator_agent_id: t.orchestrator_agent_id,
-        orchestrator_name: orch?.name ?? '',
+        orchestrator_name: orch ? displayById.get(orch.id) ?? orch.name : '',
         orchestrator_online: !!orch?.is_online,
         orchestrator_prompt: t.orchestrator_prompt,
         max_parallel_steps: t.max_parallel_steps,
@@ -207,7 +223,7 @@ export class OrchestrationTeamService {
             return {
               id: m.id,
               agent_id: m.agent_id,
-              agent_name: a?.name ?? '(deleted agent)',
+              agent_name: a ? displayById.get(a.id) ?? a.name : '(deleted agent)',
               agent_type: a?.type ?? '',
               is_online: !!a?.is_online,
               role_label: m.role_label,
@@ -376,7 +392,7 @@ export class OrchestrationTeamService {
   }
 
   /** Agents already used as orchestrator or member anywhere in the workspace — UI hint only. */
-  async listAssignableAgents(workspaceId: string): Promise<Agent[]> {
+  async listAssignableAgents(workspaceId: string): Promise<AssignableAgentView[]> {
     // Workspace agents plus workspace-less ones (see Agent.workspace_id doc),
     // minus manager identities which are not executable workers.
     const agents = await this.agentRepo.find({
@@ -386,7 +402,26 @@ export class OrchestrationTeamService {
       ],
       order: { name: 'ASC' },
     });
-    return agents.filter((a) => a.type !== 'manager');
+    const assignable = agents.filter((a) => a.type !== 'manager');
+    // Carry the manager identity so the orchestration pickers can render the
+    // canonical `<Manager>/<Agent>` name. A bare `name` is ambiguous the moment
+    // two managers each run an agent called "coder".
+    const managerIds = Array.from(
+      new Set(assignable.map((a) => a.manager_agent_id).filter((id): id is string => !!id)),
+    );
+    const managers = managerIds.length
+      ? await this.agentRepo.find({ where: { id: In(managerIds) }, select: { id: true, name: true } as any })
+      : [];
+    const managerNameById = new Map(managers.map((m) => [m.id, m.name]));
+    return assignable.map((a) => ({
+      id: a.id,
+      name: a.name,
+      manager_agent_id: a.manager_agent_id ?? null,
+      manager_name: a.manager_agent_id ? managerNameById.get(a.manager_agent_id) ?? null : null,
+      type: a.type,
+      is_online: !!a.is_online,
+      description: a.description,
+    }));
   }
 }
 

@@ -16,7 +16,10 @@ import {
 } from '../src/components/chat/assistantEntry.ts';
 
 const WS = 'ws-1';
-const activeAgent = { id: 'a1', name: 'Rolf/AWB', is_active: 1, type: 'claude', workspace_id: WS };
+// api.getAgents() 가 주는 실제 모양: bare name + manager_name 분리.
+// (예전 픽스처는 name 에 'Rolf/AWB' 처럼 이미 합쳐진 문자열을 넣었는데, 그건
+//  어떤 서버 응답과도 일치하지 않아 full-name 회귀를 잡아낼 수 없었다.)
+const activeAgent = { id: 'a1', name: 'Zeta', manager_name: 'Rolf', is_active: 1, type: 'claude', workspace_id: WS };
 const inactiveAgent = { id: 'a2', name: 'Old', is_active: 0, type: 'claude', workspace_id: WS };
 const managerAgent = { id: 'm1', name: 'Mgr', is_active: 1, type: 'manager', workspace_id: null };
 const otherWsAgent = { id: 'a3', name: 'Foreign', is_active: 1, type: 'claude', workspace_id: 'ws-2' };
@@ -35,7 +38,7 @@ test('eligibleAssistantAgents: 적격만 남기고 이름 정렬', () => {
     [managerAgent, activeAgent, inactiveAgent, { id: 'a0', name: 'Aaron', is_active: 1, type: 'codex', workspace_id: WS }],
     WS,
   );
-  assert.deepEqual(out.map((a) => a.id), ['a0', 'a1']); // Aaron, Rolf/AWB — 매니저·비활성 제외
+  assert.deepEqual(out.map((a) => a.id), ['a0', 'a1']); // Aaron, Zeta — 매니저·비활성 제외
   assert.equal(out[0].name, 'Aaron');
 });
 
@@ -66,7 +69,21 @@ test('resolveAssistant: 지정 id 가 목록에 없거나 무효 → invalid', (
 test('resolveAssistant: 유효한 지정 → ready + 최소 에이전트 정보', () => {
   const r = resolveAssistant({ assistant_agent_id: 'a1' }, [activeAgent], WS);
   assert.equal(r.status, 'ready');
-  assert.deepEqual(r.agent, { id: 'a1', name: 'Rolf/AWB', avatar_url: undefined });
+  // manager_name 이 투영에 실려야 ChatFirstHome 이 `<Manager>/<Agent>` 로 렌더할 수
+  // 있다. 이 필드를 떨어뜨리면 랜딩 화면만 조용히 bare name 으로 되돌아간다.
+  assert.deepEqual(r.agent, { id: 'a1', name: 'Zeta', manager_name: 'Rolf', avatar_url: undefined });
+});
+
+test('eligibleAssistantAgents/resolveAssistant: manager 없는 에이전트는 manager_name 없이 통과', () => {
+  // 계약상 Runtime Host 에 매여 있지 않은 에이전트는 prefix 없이 bare name 이 정답이다.
+  const standalone = { id: 'a9', name: 'Solo', is_active: 1, type: 'claude', workspace_id: WS };
+  const [projected] = eligibleAssistantAgents([standalone], WS);
+  assert.equal(projected.name, 'Solo');
+  assert.equal(projected.manager_name, undefined);
+
+  const r = resolveAssistant({ assistant_agent_id: 'a9' }, [standalone], WS);
+  assert.equal(r.status, 'ready');
+  assert.equal(r.agent.manager_name, undefined);
 });
 
 test('findAssistantDmRoomId: 에이전트가 참여한 DM 룸을 찾는다', () => {

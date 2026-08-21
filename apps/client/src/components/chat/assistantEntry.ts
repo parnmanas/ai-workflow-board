@@ -16,6 +16,8 @@
 export interface AssistantAgentInfo {
   id: string;
   name: string;
+  /** ST-7 — 어시스턴트도 다른 모든 표면과 같은 `<Manager>/<Agent>` 로 렌더한다. */
+  manager_name?: string | null;
   avatar_url?: string;
 }
 
@@ -23,6 +25,7 @@ export interface AssistantAgentInfo {
 export interface AgentLike {
   id: string;
   name?: string;
+  manager_name?: string | null;
   avatar_url?: string;
   is_active?: number;
   type?: string;
@@ -51,7 +54,7 @@ export function isEligibleAssistant(agent: AgentLike | null | undefined, wsId?: 
 export function eligibleAssistantAgents(agents: AgentLike[] | null | undefined, wsId?: string): AssistantAgentInfo[] {
   return (agents || [])
     .filter((a) => isEligibleAssistant(a, wsId))
-    .map((a) => ({ id: a.id, name: a.name || a.id, avatar_url: a.avatar_url }))
+    .map((a) => ({ id: a.id, name: a.name || a.id, manager_name: a.manager_name, avatar_url: a.avatar_url }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -69,7 +72,15 @@ export function resolveAssistant(
   if (!id) return { status: 'unset' };
   const match = (agents || []).find((a) => a.id === id);
   if (!isEligibleAssistant(match, wsId)) return { status: 'invalid', agentId: id };
-  return { status: 'ready', agent: { id: match!.id, name: match!.name || match!.id, avatar_url: match!.avatar_url } };
+  return {
+    status: 'ready',
+    agent: {
+      id: match!.id,
+      name: match!.name || match!.id,
+      manager_name: match!.manager_name,
+      avatar_url: match!.avatar_url,
+    },
+  };
 }
 
 /** DM 룸 목록 항목의 부분 구조 — find-or-create 판정용. */

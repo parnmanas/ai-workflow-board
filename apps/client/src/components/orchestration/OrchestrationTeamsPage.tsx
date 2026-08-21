@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../../api';
 import type { OrchestrationAssignableAgent, OrchestrationTeam } from '../../types';
+import { formatAgentDisplayName } from '../../utils/agentName';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
@@ -386,7 +387,7 @@ function TeamFormModal({
         <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
         <Select
           label="Orchestrator agent (required)"
-          options={agents.map((a) => ({ value: a.id, label: `${a.name}${a.is_online ? '' : ' (offline)'}` }))}
+          options={agents.map((a) => ({ value: a.id, label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}` }))}
           value={orchestratorId}
           onChange={(e) => setOrchestratorId(e.target.value)}
           placeholder={agents.length ? undefined : 'No assignable agents in this workspace'}
@@ -505,7 +506,7 @@ function AddMemberModal({
         ) : (
           <Select
             label="Agent"
-            options={available.map((a) => ({ value: a.id, label: `${a.name}${a.is_online ? '' : ' (offline)'}` }))}
+            options={available.map((a) => ({ value: a.id, label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}` }))}
             value={agentId}
             onChange={(e) => setAgentId(e.target.value)}
           />

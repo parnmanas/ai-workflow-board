@@ -1,4 +1,11 @@
 // ─── Agent display name (ST-7) ───────────────────────────────────────
+//
+// CONTRACT + CHECKLIST: .claude/skills/awb-agent-display-name/SKILL.md — read it
+// before adding any agent picker, roster, or label. Never render `{a.name}` and
+// never hand-roll `${a.manager_name}/${a.name}`; always call
+// formatAgentDisplayName. Note the usual trap: mapping an agent list to
+// `{ id, name }` silently DROPS manager_name, so the label goes bare even
+// though the API returned it.
 // Single source of truth for the `<ManagerName>/<AgentName>` rendering of
 // managed agents across the AWB UI. Centralized here so changing the
 // separator (or adding badges, icons, etc.) is a one-line edit.

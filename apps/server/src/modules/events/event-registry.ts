@@ -136,6 +136,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: AgentTypingPayload = {
         ticket_id: event.ticket_id,
         agent_id: event.agent_id,
+        agent_name: event.agent_name || '',
         is_typing: !!event.is_typing,
       };
       return {
@@ -162,7 +163,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_id: p.ticket_id,
         entity_type: 'agent',
         action: p.is_typing ? 'started' : 'stopped',
-        actor_name: p.agent_id,
+        // `<Manager>/<Agent>`, resolved by the emitter. Falling back to the raw
+        // id would put a UUID in the ticket panel's "… is typing" line, which
+        // is exactly the regression this field exists to prevent.
+        actor_name: p.agent_name || p.agent_id,
         timestamp: env.timestamp,
       };
     },

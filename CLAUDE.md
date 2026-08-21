@@ -277,6 +277,14 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - 미션은 **암묵적으로 끝나지 않는다**: `complete_orchestration_mission` (또는 운영자 cancel) 만이 종료 경로. 엔진은 스스로 진행 못 할 때만 오케스트레이터를 깨운다(실패/차단, 디스패치 불가, 전 step 종료).
 - Reference: `docs/orchestration.md`
 
+## Skills (AWB 기능)
+
+- Global(`workspace_id NULL`) / Workspace 2계층. 같은 slug면 Workspace가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.
+- Global 쓰기는 admin 전용(`/api/admin/skill-registry`). Workspace 사용자는 global을 읽고 배정만 할 수 있다.
+- Global을 채우는 소스 두 개: 저장소 안의 **내장 팩** `skills/` (부팅 시 멱등 시드, 네트워크 불필요 — "최신"은 서버 업그레이드로 따라온다)과 **tap**(외부 git repo, **기본 비활성**, 부팅 시 절대 동기화 안 함).
+- 동기화는 **append-only**: 변경은 새 불변 버전을 추가할 뿐이고, assignment는 특정 버전을 핀하므로 이미 배정된 에이전트가 읽는 내용은 절대 바뀌지 않는다. `quarantined` 는 운영자 거부권이라 동기화가 되살리지 않는다.
+- 새 SKILL.md 레이아웃/스코프/동기화 규칙은 `docs/skills.md`, 스코프 모델 전반은 `docs/catalog-scopes.md`.
+
 ## Project Skills
 
 Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness work, ticket 040afa10):
@@ -285,6 +293,7 @@ Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness wo
 - **awb-agent-manager-release** — agent-manager build-verify + same-PR SSE contract rule (버전은 publish 시 자동 계산 — 손 범프 금지)
 - **awb-field-wiring** — 5-touch-point checklist for Ticket JSON-array columns
 - **awb-mcp-tool-wiring** — 7-touch-point checklist for new MCP tool registration (TOOL_AUTHZ_TABLE tier classification, plus agent-manager ticket-ref-capture classification — skipping the former ships a tool that always denies, skipping the latter ships one whose card silently vanishes from chat)
+- **awb-agent-display-name** — the `<Manager>/<Agent>` display contract: 6 touch points for ANY surface that shows an agent (picker, roster, typing/status indicator, timeline, SSE frame, agent-facing prompt). Rendering a bare `agent.name` — or a raw agent id — is a bug: the same leaf name legitimately exists under multiple managers. **Read this before adding any agent picker or agent-name label.**
 
 `.claude/settings.json` carries the read-only permission allowlist generated via `/fewer-permission-prompts` — extend it there rather than ad-hoc allowing in session.
 

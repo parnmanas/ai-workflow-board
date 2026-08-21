@@ -68,6 +68,15 @@ COPY --from=builder /app/apps/server/dist ./apps/server/dist
 # Copy client build output (served by NestJS ServeStaticModule)
 COPY --from=builder /app/apps/client/dist ./apps/client/dist
 
+# Built-in global skill pack. Plain markdown, seeded into the GLOBAL skill
+# scope at boot (BuiltinSkillPackService) so a fresh install has a usable skill
+# set with no network access and no operator action. Seeding is idempotent and
+# append-only, so re-running it on every container start is free — "always
+# latest" is a property of upgrading this image, not of a runtime fetch.
+# Operators tracking their own pack override the path with
+# AWB_BUILTIN_SKILLS_DIR (typically a mounted git checkout).
+COPY skills ./skills
+
 # Install production dependencies only.
 #
 # `npm ci`, not `npm install` — 이 스테이지가 배포 이미지의 런타임 트리를

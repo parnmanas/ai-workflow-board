@@ -15,9 +15,15 @@ import { SkillsService } from './skills.service';
 export class SkillsController {
   constructor(private readonly service: SkillsService) {}
 
+  /**
+   * Global + this workspace's skills. `?include_shadowed=1` also returns the
+   * global rows a workspace fork is overriding (each flagged `shadowed: true`),
+   * which the management UI needs to explain "why isn't the built-in applying".
+   */
   @Get()
-  async list(@Param('workspaceId') workspaceId: string, @Res() res: Response) {
-    return res.json(await this.service.list(workspaceId));
+  async list(@Param('workspaceId') workspaceId: string, @Req() req: Request, @Res() res: Response) {
+    const includeShadowed = String((req.query as any)?.include_shadowed || '') === '1';
+    return res.json(await this.service.list(workspaceId, { includeShadowed }));
   }
 
   @Get('proposals')
@@ -49,9 +55,37 @@ export class SkillsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
+    // Workspace route → workspace scope, always. Creating a GLOBAL skill goes
+    // through the admin registry controller, so a workspace-scoped caller can
+    // never mint a definition every other workspace inherits.
     return this.respond(
       res,
-      () => this.service.create(workspaceId, body, (req as any).currentUser?.id || ''),
+      () => this.service.create(workspaceId, body, (req as any).currentUser?.id || '', 'workspace'),
+      201,
+    );
+  }
+
+  /**
+   * Fork a global skill into this workspace. The fork shadows the global by
+   * slug while the global keeps receiving upstream updates — the supported way
+   * to diverge from a built-in without freezing it.
+   */
+  @Post(':skillId/fork')
+  async fork(
+    @Param('workspaceId') workspaceId: string,
+    @Param('skillId') skillId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    return this.respond(
+      res,
+      () => this.service.fork(
+        workspaceId,
+        skillId,
+        (req as any).currentUser?.id || '',
+        String(body?.skill_version_id || ''),
+      ),
       201,
     );
   }

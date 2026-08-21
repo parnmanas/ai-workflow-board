@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { formatAgentDisplayName } from '../../utils/agentName';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { Select } from '../common/Select';
@@ -36,7 +37,7 @@ export function AssistantAgentSettingView({
 }) {
   const options = [
     { value: UNSET_VALUE, label: '— 지정 안 함 —' },
-    ...agents.map((a) => ({ value: a.id, label: a.name })),
+    ...agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) })),
   ];
   // 현재 지정값이 적격 목록에 없으면(삭제·비활성) 무효 지정임을 명시적으로 표시한다.
   const staleValue = value !== UNSET_VALUE && !agents.some((a) => a.id === value);
