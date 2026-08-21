@@ -64,20 +64,32 @@ export function restoreSessionStatusSnapshot(rows: SessionStatusSnapshotRow[]): 
  * races the live SSE push — GET can read stale state A, a newer SSE B can
  * land first, and then the deferred GET(A) response would otherwise
  * unconditionally replace the map and stomp B back to A (or drop an agent B
- * added that A never had). `updatedAt` is the caller's per-agent map of
- * "epoch ms `prev` was last set by SSE for this agent"; `requestStartedAt` is
- * the epoch ms the GET was issued. Any agent SSE has touched since the GET
- * began keeps whatever `prev` currently holds instead of the snapshot row.
+ * added that A never had). `updatedAtSeq` is the caller's per-agent map of
+ * "the monotonic sequence number assigned when `prev` was last set by SSE for
+ * this agent"; `requestStartedSeq` is the sequence number captured when the
+ * GET was issued.
+ *
+ * Review round 2 follow-up (P1 #2, second pass): this used to compare
+ * `Date.now()` epoch-ms timestamps. Two events that land in the same
+ * millisecond — a real possibility, not just a theoretical one, since a GET
+ * can be issued and an SSE frame can be handled in the same tick — produced
+ * equal timestamps, and `<=` then classified the SSE event as "not newer",
+ * letting the snapshot wrongly stomp it. A caller-maintained monotonic
+ * counter (see ChatPage.tsx's `sessionStatusSeqRef`) has no resolution floor:
+ * every event gets its own strictly-increasing integer, so two events can
+ * never tie, and "happened after the GET began" is always decidable. Any
+ * agent SSE has touched since the GET began keeps whatever `prev` currently
+ * holds instead of the snapshot row.
  */
 export function mergeSessionStatusSnapshot(
   prev: SessionStatusByAgent,
   rows: SessionStatusSnapshotRow[],
-  updatedAt: Record<string, number>,
-  requestStartedAt: number,
+  updatedAtSeq: Record<string, number>,
+  requestStartedSeq: number,
 ): SessionStatusByAgent {
   const next = restoreSessionStatusSnapshot(rows);
-  for (const agentId of Object.keys(updatedAt)) {
-    if (updatedAt[agentId] <= requestStartedAt) continue;
+  for (const agentId of Object.keys(updatedAtSeq)) {
+    if (updatedAtSeq[agentId] <= requestStartedSeq) continue;
     if (prev[agentId]) {
       next[agentId] = prev[agentId];
     } else {

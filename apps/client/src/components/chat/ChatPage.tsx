@@ -126,12 +126,21 @@ export default function ChatPage() {
   const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
-  // Review round 2, P1 #2 — per-agent "epoch ms the SSE handler last set
-  // sessionStatusByAgent for this agent". Lets the room-entry GET snapshot
-  // below tell whether a newer SSE push already landed while the GET was in
-  // flight, so it can keep that newer state instead of stomping it back to
-  // the (by then stale) snapshot row. See mergeSessionStatusSnapshot.
+  // Review round 2, P1 #2 — per-agent "sequence number the SSE handler last
+  // set sessionStatusByAgent for this agent". Lets the room-entry GET
+  // snapshot below tell whether a newer SSE push already landed while the GET
+  // was in flight, so it can keep that newer state instead of stomping it
+  // back to the (by then stale) snapshot row. See mergeSessionStatusSnapshot.
   const sessionStatusUpdatedAtRef = useRef<Record<string, number>>({});
+  // Review round 2 follow-up, P1 #2 — a shared monotonic counter backing the
+  // comparison above. Date.now() was tried first, but a GET-issued and an
+  // SSE-handled event landing in the same millisecond produced equal
+  // timestamps, which the merge treated as "not newer" and let the snapshot
+  // wrongly stomp a same-tick SSE update. Every read of this ref via
+  // `nextSessionStatusSeq()` hands out a distinct, strictly-increasing
+  // integer, so two events can never tie regardless of wall-clock resolution.
+  const sessionStatusSeqRef = useRef<number>(0);
+  const nextSessionStatusSeq = useCallback(() => (sessionStatusSeqRef.current += 1), []);
   // Mirror of `messages` for use inside async callbacks (older-page dedup) that
   // run between renders and can't rely on the closed-over state snapshot.
   const messagesRef = useRef<ChatRoomMessageItem[]>([]);
@@ -313,18 +322,25 @@ export default function ChatPage() {
     // entry — the SSE push that would otherwise populate this is
     // fire-and-forget, so opening/re-entering the room between pushes would
     // otherwise show nothing until the next progress recheck (ticket
-    // e18be8ff review round 1, P1 #2). requestStartedAt + the merge below
+    // e18be8ff review round 1, P1 #2). requestStartedSeq + the merge below
     // guard against a newer SSE push landing before this resolves (review
     // round 2, P1 #2) — a plain replace would stomp it back to this stale
     // snapshot. observer=true matches the getChatRoom/getChatRoomMessages
     // calls above so a non-participant workspace-wide viewer isn't 404'd by
     // the server's new room-access check (review round 2, P1 #1).
-    const requestStartedAt = Date.now();
+    //
+    // requestStartedSeq captures the shared monotonic counter's CURRENT value
+    // (no increment) as a marker: any SSE handler run afterward calls
+    // nextSessionStatusSeq(), which always produces something strictly
+    // greater than whatever was current at this point — unlike Date.now(),
+    // which can tie with the SSE handler's own Date.now() in the same
+    // millisecond (review round 2 follow-up, P1 #2).
+    const requestStartedSeq = sessionStatusSeqRef.current;
     api.getChatRoomSessionStatus(activeRoomId, initialObserver)
       .then((entries) => {
         if (cancelled) return;
         setSessionStatusByAgent((prev) =>
-          mergeSessionStatusSnapshot(prev, entries, sessionStatusUpdatedAtRef.current, requestStartedAt),
+          mergeSessionStatusSnapshot(prev, entries, sessionStatusUpdatedAtRef.current, requestStartedSeq),
         );
       })
       .catch(() => {});
@@ -463,7 +479,9 @@ export default function ChatPage() {
     // Recorded before the state update so a room-entry GET snapshot that was
     // already in flight knows this agent's `prev` is newer than whatever the
     // snapshot read (review round 2, P1 #2 — see mergeSessionStatusSnapshot).
-    sessionStatusUpdatedAtRef.current[data.agent_id] = Date.now();
+    // Uses the shared monotonic counter, not Date.now() — see
+    // requestStartedSeq above for why (review round 2 follow-up, P1 #2).
+    sessionStatusUpdatedAtRef.current[data.agent_id] = nextSessionStatusSeq();
     setSessionStatusByAgent((prev) => {
       const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
       const backgroundTaskCount = data.background_task_count || 0;

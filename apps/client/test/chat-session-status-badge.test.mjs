@@ -89,23 +89,33 @@ test('restoreSessionStatusSnapshot on an empty snapshot (no live sessions) clear
 // does, and a plain `setSessionStatusByAgent(restoreSessionStatusSnapshot(...))`
 // replace would then stomp the newer SSE-derived state back to the stale
 // snapshot. mergeSessionStatusSnapshot is what ChatPage.tsx now calls instead.
+//
+// Review round 2 follow-up, P1 #2: the caller originally stamped both sides
+// of this race with `Date.now()`. Millisecond resolution means a GET issued
+// and an SSE frame handled in the same tick produce EQUAL timestamps, and
+// `updatedAt <= requestStartedAt` then classifies that same-tick SSE as
+// "not newer" — the exact bug this guard exists to prevent. ChatPage.tsx now
+// stamps both sides with a shared monotonic counter instead (see
+// `sessionStatusSeqRef`/`nextSessionStatusSeq` there), so the values below
+// are sequence numbers, not epoch ms — but mergeSessionStatusSnapshot's
+// contract is unchanged: it just compares whatever ordinal it's handed.
 
 test('mergeSessionStatusSnapshot keeps a newer SSE-added entry the GET snapshot predates', () => {
-  const requestStartedAt = 1_000_000;
+  const requestStartedSeq = 1_000_000;
   // SSE granted agentA a keep-alive AFTER the GET request began reading, so
   // the snapshot it read back (rows) never saw it.
   const prev = {
     agentA: { name: 'A', keepAliveUntilMs: 1_010_000, backgroundTaskCount: 0 },
   };
   const rows = [];
-  const updatedAt = { agentA: requestStartedAt + 1 };
-  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  const updatedAt = { agentA: requestStartedSeq + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedSeq);
   assert.deepEqual(merged, { agentA: prev.agentA },
     'an agent SSE added after the GET began must survive the GET response, not be dropped by the snapshot replace');
 });
 
 test('mergeSessionStatusSnapshot does not resurrect an entry a newer SSE clear already removed', () => {
-  const requestStartedAt = 1_000_000;
+  const requestStartedSeq = 1_000_000;
   // SSE cleared agentA (session ended) after the GET began reading; `prev`
   // no longer has it, but the stale snapshot row the GET read before the
   // clear still shows it as live.
@@ -113,35 +123,64 @@ test('mergeSessionStatusSnapshot does not resurrect an entry a newer SSE clear a
   const rows = [
     { agent_id: 'agentA', agent_name: 'A', keep_alive_until_ms: 1_010_000, background_task_count: 0 },
   ];
-  const updatedAt = { agentA: requestStartedAt + 1 };
-  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  const updatedAt = { agentA: requestStartedSeq + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedSeq);
   assert.deepEqual(merged, {},
     'a deferred stale GET row must not bring back an agent whose session a newer SSE already ended');
 });
 
+test('mergeSessionStatusSnapshot does not resurrect an entry whose SSE clear lands in the exact same tick the GET started', () => {
+  // The bug this guards against: under the old Date.now()-based caller,
+  // a GET issued and an SSE clear handled in the SAME millisecond produced
+  // requestStartedAt === updatedAt, and `<=` treated that tie as "SSE is not
+  // newer" — silently resurrecting an agent whose session had just ended.
+  // With a monotonic sequence, "started" and "touched afterward" can never
+  // land on the same ordinal: the caller captures requestStartedSeq as the
+  // counter's value BEFORE any increment, and every SSE touch increments it
+  // first — so the smallest possible "after" value is requestStartedSeq + 1,
+  // never requestStartedSeq itself. This test locks in that boundary: an
+  // updatedAt exactly EQUAL to requestStartedSeq (the tie point under the old
+  // scheme) must still resolve as "not newer" (i.e. it represents "at/before
+  // the GET began", never a real post-GET event), and a genuinely later SSE
+  // touch (+1) must resolve as "newer" — proving there's no dead zone where a
+  // same-tick clear could fall through and get stomped.
+  const requestStartedSeq = 1_000_000;
+  const rows = [
+    { agent_id: 'agentA', agent_name: 'A', keep_alive_until_ms: 1_010_000, background_task_count: 0 },
+  ];
+
+  const tie = mergeSessionStatusSnapshot({}, rows, { agentA: requestStartedSeq }, requestStartedSeq);
+  assert.deepEqual(tie, { agentA: { name: 'A', keepAliveUntilMs: 1_010_000, backgroundTaskCount: 0 } },
+    'a touch stamped at exactly requestStartedSeq is "at/before GET start" by construction, so the snapshot row applies');
+
+  const afterTie = mergeSessionStatusSnapshot({}, rows, { agentA: requestStartedSeq + 1 }, requestStartedSeq);
+  assert.deepEqual(afterTie, {},
+    'the very next sequence value after the tie point must still be honored as a real post-GET SSE clear');
+});
+
 test('mergeSessionStatusSnapshot prefers a newer SSE deadline extension over a stale GET snapshot row', () => {
-  const requestStartedAt = 1_000_000;
+  const requestStartedSeq = 1_000_000;
   const prev = {
     agentC: { name: 'C', keepAliveUntilMs: 2_000_000, backgroundTaskCount: 0 }, // SSE extended the deadline
   };
   const rows = [
     { agent_id: 'agentC', agent_name: 'C', keep_alive_until_ms: 1_010_000, background_task_count: 0 }, // pre-extension
   ];
-  const updatedAt = { agentC: requestStartedAt + 1 };
-  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  const updatedAt = { agentC: requestStartedSeq + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedSeq);
   assert.deepEqual(merged, { agentC: prev.agentC });
 });
 
 test('mergeSessionStatusSnapshot applies the snapshot row as-is when no newer SSE touched that agent', () => {
-  const requestStartedAt = 1_000_000;
+  const requestStartedSeq = 1_000_000;
   const prev = {};
   const rows = [
     { agent_id: 'agentB', agent_name: 'B', keep_alive_until_ms: 1_010_000, background_task_count: 0 },
   ];
   // Last SSE touch for agentB predates this GET request (or never happened) —
   // the ordinary room-entry-restore case with nothing racing it.
-  const updatedAt = { agentB: requestStartedAt - 500 };
-  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  const updatedAt = { agentB: requestStartedSeq - 500 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedSeq);
   assert.deepEqual(merged, {
     agentB: { name: 'B', keepAliveUntilMs: 1_010_000, backgroundTaskCount: 0 },
   });
