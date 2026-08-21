@@ -25,6 +25,7 @@ import {
 import NewChatModal from './ParticipantPicker';
 import ChatRoomView from './RoomDetailPanel';
 import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
+import { isSessionStatusLive, pruneExpiredSessionStatus, restoreSessionStatusSnapshot } from './utils/sessionStatusFlow';
 
 /**
  * ChatPage — Phase 7 room-based chat surface.
@@ -301,6 +302,18 @@ export default function ChatPage() {
       })
       .catch(() => {});
 
+    // Restore currently-active keep-alive/background-task badges on room
+    // entry — the SSE push that would otherwise populate this is
+    // fire-and-forget, so opening/re-entering the room between pushes would
+    // otherwise show nothing until the next progress recheck (ticket
+    // e18be8ff review round 1, P1 #2).
+    api.getChatRoomSessionStatus(activeRoomId)
+      .then((entries) => {
+        if (cancelled) return;
+        setSessionStatusByAgent(restoreSessionStatusSnapshot(entries));
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
@@ -435,28 +448,32 @@ export default function ChatPage() {
     setSessionStatusByAgent((prev) => {
       const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
       const backgroundTaskCount = data.background_task_count || 0;
-      const isLive = (keepAliveUntilMs !== null && keepAliveUntilMs > Date.now()) || backgroundTaskCount > 0;
-      if (!isLive) {
+      const entry = { name: data.agent_name || 'Agent', keepAliveUntilMs, backgroundTaskCount };
+      if (!isSessionStatusLive(entry, Date.now())) {
         if (!prev[data.agent_id]) return prev;
         const next = { ...prev };
         delete next[data.agent_id];
         return next;
       }
-      return {
-        ...prev,
-        [data.agent_id]: { name: data.agent_name || 'Agent', keepAliveUntilMs, backgroundTaskCount },
-      };
+      return { ...prev, [data.agent_id]: entry };
     });
   }, []));
 
   // The keep-alive countdown is computed from an absolute deadline at render
   // time, so a badge showing "잔여 XX분" needs periodic re-renders between SSE
-  // pushes (pushes only fire when the deadline itself changes). Only runs
-  // while there's something to show.
+  // pushes (pushes only fire when the deadline itself changes) — hence the
+  // tick counter. Each tick also prunes any entry whose deadline has already
+  // passed and that has no live background tasks: a lost/late exit or
+  // follow-up SSE push would otherwise leave a "잔여 0분" badge stuck forever
+  // (ticket e18be8ff review round 1, P1 #1). Only runs while there's
+  // something to show.
   const [, setStatusTick] = useState(0);
   useEffect(() => {
     if (Object.keys(sessionStatusByAgent).length === 0) return;
-    const timer = setInterval(() => setStatusTick((t) => t + 1), 30000);
+    const timer = setInterval(() => {
+      setStatusTick((t) => t + 1);
+      setSessionStatusByAgent((prev) => pruneExpiredSessionStatus(prev, Date.now()));
+    }, 30000);
     return () => clearInterval(timer);
   }, [sessionStatusByAgent]);
 

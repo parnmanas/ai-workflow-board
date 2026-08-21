@@ -1993,6 +1993,14 @@ export const api = {
     );
   },
 
+  getChatRoomSessionStatus: (roomId: string) =>
+    request<Array<{
+      agent_id: string;
+      agent_name: string;
+      keep_alive_until_ms: number | null;
+      background_task_count: number;
+    }>>(`/chat-rooms/${roomId}/session-status`),
+
   sendChatRoomMessage: (
     roomId: string,
     content: string,

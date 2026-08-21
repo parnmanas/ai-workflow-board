@@ -668,8 +668,13 @@ export default function ChatRoomView({
           {Object.entries(sessionStatusByAgent).map(([agentId, s]) => {
             const parts: string[] = [];
             if (s.backgroundTaskCount > 0) parts.push(`백그라운드 작업 ${s.backgroundTaskCount}개 실행 중`);
-            if (s.keepAliveUntilMs) {
-              const remainMin = Math.max(0, Math.round((s.keepAliveUntilMs - Date.now()) / 60_000));
+            // Only render a still-future deadline — a stale/expired one (SSE
+            // exit push lost or delayed) must not surface as "잔여 0분"
+            // (ticket e18be8ff review round 1, P1 #1). The countdown-tick
+            // effect in ChatPage prunes these on its own cadence; this guard
+            // covers the gap before the next prune runs.
+            if (s.keepAliveUntilMs && s.keepAliveUntilMs > Date.now()) {
+              const remainMin = Math.max(1, Math.round((s.keepAliveUntilMs - Date.now()) / 60_000));
               parts.push(`keep-alive 잔여 ${remainMin}분`);
             }
             if (parts.length === 0) return null;
