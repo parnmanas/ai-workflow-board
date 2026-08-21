@@ -153,3 +153,48 @@ test('snapshotRunWorkspaces: projects path/kind/leaf/lastUsedAt/live for the ins
 test('snapshotRunWorkspaces: an empty baseWorkingDir yields [] (never throws)', async () => {
   assert.deepEqual(await manager.snapshotRunWorkspaces(''), []);
 });
+
+// 중첩 workspace_folder(예: 'deploy/scripts') 회귀 테스트 — 리뷰 지적(ticket
+// 9fd27487): 기존 코드는 root의 직계 자식('deploy')만 leaf로 보고, 마커가 실제로
+// 찍히는 최종 디렉터리('deploy/scripts')를 못 찾아 부모의 mtime으로 폴백했다.
+// 부모는 자식의 git 활동으로 mtime이 갱신되지 않으므로, 방금 쓰인 자손 폴더가
+// 안에 있어도 부모 전체가 통째로 재귀 삭제될 수 있었다.
+
+test('sweepRunWorkspaces: nested workspace_folder — a stale PARENT mtime does not sweep a fresh nested leaf', async () => {
+  const base = await makeBase();
+  const actRoot = actionWorkspaceRootFor(base);
+  const dir = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+  // plantWorkspace의 mkdir(recursive)가 만든 중간 디렉터리('deploy')는 방금
+  // 생성되어 fresh하다 — 실제 버그 상황(오래전에 만들어진 뒤로 자식 git
+  // 활동으로는 한 번도 갱신되지 않은 부모)을 재현하려면 인위적으로 되돌려야 한다.
+  const parentDir = join(actRoot, 'deploy');
+  const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  await fsp.utimes(parentDir, old, old);
+
+  const removed = await manager.sweepRunWorkspaces(base);
+  assert.equal(removed, 0, '부모 mtime이 아니라 최종 leaf(scripts)의 마커로 판단해야 한다');
+  await assert.doesNotReject(() => fsp.access(dir), '중첩 leaf가 부모째로 삭제되면 안 된다');
+});
+
+test('sweepRunWorkspaces: nested workspace_folder — a stale marker on the final nested leaf IS reclaimed', async () => {
+  const base = await makeBase();
+  const chatRoot = chatWorkspaceRootFor(base);
+  const dir = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+
+  const removed = await manager.sweepRunWorkspaces(base);
+  assert.equal(removed, 1, '최종 leaf 자체가 idle이면(부모가 아니라) 정확히 회수되어야 한다');
+  await assert.rejects(() => fsp.access(dir));
+});
+
+test('snapshotRunWorkspaces: nested workspace_folder projects leaf/path at the FINAL segment, not the parent container', async () => {
+  const base = await makeBase();
+  const actRoot = actionWorkspaceRootFor(base);
+  await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+
+  const entries = await manager.snapshotRunWorkspaces(base);
+  assert.equal(entries.length, 1, '중첩 부모(deploy)를 별도 leaf로 이중 계산하면 안 된다');
+  const [entry] = entries;
+  assert.equal(entry.leaf, 'deploy/scripts');
+  assert.equal(entry.path, join(actRoot, 'deploy', 'scripts'));
+  assert.equal(entry.lastUsedAt, WELL_WITHIN_IDLE);
+});

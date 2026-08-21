@@ -276,8 +276,11 @@ export interface RunWorkspaceSnapshotEntry {
   /** 절대경로(`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
   path: string;
   kind: 'action' | 'chat';
-  /** 경로의 마지막 세그먼트 — action/room id의 앞 8자리, 또는 명시적으로 지정한
-   *  커스텀 `workspace_folder` leaf. */
+  /** root(`.awb/act` 또는 `.awb/chat`) 기준 상대경로 — action/room id의 앞 8자리
+   *  단일 세그먼트가 기본값이지만, 커스텀 `workspace_folder`가 `deploy/scripts`처럼
+   *  중첩 경로면(기존 QA/security workspace_folder 옵션이 이미 허용하던 값) 그
+   *  전체 상대경로가 그대로 leaf가 된다 — 마지막 세그먼트만 잘라내면 `path`가
+   *  `join(root, leaf)`로 재구성되지 않는다(리뷰 지적, ticket 9fd27487). */
   leaf: string;
   /** provisionRunWorkspace() 호출이 성공할 때마다 갱신되는 `.awb-last-used`
    *  마커의 타임스탬프. 폴더가 이 마커 도입 이전부터 있었다면 null(이 경우도
@@ -1565,6 +1568,13 @@ export class WorktreeManager {
    * reconcilePoolLeases가 쓰는 것과 같은 가드) 회수한다. 마커가 아예 없는 폴더는
    * (이 기능 이전부터 있었거나, 첫 프로비저닝이 마커를 찍기 전에 죽은 경우)
    * 디렉터리 자체의 mtime으로 폴백한다.
+   *
+   * leaf 목록은 root의 직계 자식이 아니라 #listRunWorkspaceLeaves가 재귀적으로
+   * 찾은 실제 작업공간 디렉터리다 — 중첩 `workspace_folder`(예: `deploy/scripts`)는
+   * provisionRunWorkspace가 그 최종 디렉터리에만 체크아웃하고 마커도 거기에만
+   * 찍으므로, 직계 자식(`deploy`)만 보면 그 mtime(자식 git 활동으로는 갱신되지
+   * 않는다)으로 폴백하다가 방금 쓰인 자손 폴더까지 통째로 삭제해버린다(리뷰 지적,
+   * ticket 9fd27487).
    */
   async sweepRunWorkspaces(baseWorkingDir: string): Promise<number> {
     if (!baseWorkingDir) return 0;
@@ -1601,13 +1611,36 @@ export class WorktreeManager {
     return removed;
   }
 
-  async #listRunWorkspaceLeaves(root: string): Promise<string[]> {
+  /**
+   * root 아래 실제 작업공간 leaf들을 root-상대경로로 재귀 나열한다(리뷰 지적,
+   * ticket 9fd27487). root의 직계 자식만 보면 안 되는 이유 — 중첩
+   * `workspace_folder`(예: `deploy/scripts`, 기존 QA/security workspace_folder
+   * 옵션이 이미 허용하던 값)는 provisionRunWorkspace가 `<root>/deploy/scripts`에
+   * 직접 체크아웃하고 `.awb-last-used` 마커도 그 최종 디렉터리에만 남긴다. 직계
+   * 자식만 보면 `deploy`를 leaf로 오인해 마커를 못 찾고 `deploy` 자체의
+   * mtime(자식 git 활동으로는 갱신되지 않는다)으로 폴백하다가, 방금 쓰인
+   * `deploy/scripts`가 안에 있어도 `deploy` 전체를 재귀 삭제할 수 있다.
+   *
+   * 그래서 하위 디렉터리 "만" 있고 그 외엔 아무것도 없는 순수 경로 세그먼트
+   * 컨테이너만 한 단계씩 내려가고, `.git`/파일/마커가 하나라도 있거나 완전히
+   * 빈 디렉터리를 만나면 그 디렉터리 자체를 leaf로 확정한다.
+   */
+  async #listRunWorkspaceLeaves(root: string, relDir = ''): Promise<string[]> {
+    const abs = relDir ? join(root, relDir) : root;
+    let entries;
     try {
-      const entries = await fsp.readdir(root, { withFileTypes: true });
-      return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      entries = await fsp.readdir(abs, { withFileTypes: true });
     } catch {
-      return []; // 루트가 아직 없다는 뜻 — 이 kind로는 아직 아무것도 프로비저닝되지 않음
+      return []; // 루트(또는 중간 경로)가 아직 없다는 뜻 — 아직 아무것도 프로비저닝되지 않음
     }
+    const isLeaf = entries.length === 0 || entries.some((e) => e.isFile() || e.name === '.git');
+    if (relDir && isLeaf) return [relDir];
+    const out: string[] = [];
+    for (const sub of entries.filter((e) => e.isDirectory())) {
+      const childRel = relDir ? `${relDir}/${sub.name}` : sub.name;
+      out.push(...(await this.#listRunWorkspaceLeaves(root, childRel)));
+    }
+    return out;
   }
 
   async #readLastUsedMarker(dir: string): Promise<string | null> {
