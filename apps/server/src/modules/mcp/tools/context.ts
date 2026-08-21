@@ -258,6 +258,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(UserMention),
     dataSource.getRepository(TicketAttachment),
     dataSource.getRepository(Workspace),
+    dataSource,
     logService,
     roomMembershipService,
     mentionService,

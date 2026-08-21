@@ -91,7 +91,9 @@ function makeSvc({ room, workspace }) {
   const agentRepo = { async findOne() { return null; } };
   const svc = new RoomMessagingService(
     roomRepo, {}, messageRepo, agentRepo, {}, {}, {},
-    workspaceRepo, noopLog, membership, mentionService, {}, undefined,
+    // dataSource (티켓 7d8ea7c9): _resolveChatRuntimeProfile 전용이며, 이 파일의
+    // 시나리오는 전부 group room(@mention 없음, DM 아님)이라 도달하지 않는다.
+    workspaceRepo, {}, noopLog, membership, mentionService, {}, undefined,
   );
   return { svc, workspaceRepo };
 }

@@ -284,6 +284,14 @@ export interface ChatRequestPayload {
   // 필드 자체가 생략되어 DM의 wire shape가 기본적으로 byte 단위까지 그대로
   // 유지된다.
   run_provision?: RunProvision;
+  // ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+  // this chat dispatch — same resolution RoomMessagingService applies as
+  // trigger-loop.service.ts does for ticket dispatch, but agent-only (a chat
+  // turn has no ticket/board to layer). agent-manager's handleChatRequest
+  // reads payload.cli_runtime_profile to pick the CLI backend. Omitted when
+  // the responder isn't a Claude agent or nothing resolves, so a chat turn
+  // with no configured profile keeps today's wire shape unchanged.
+  cli_runtime_profile?: CliRuntimeProfile | null;
 }
 
 // F-1 (ticket 24694916) — structured ticket-action reference. The agent-manager

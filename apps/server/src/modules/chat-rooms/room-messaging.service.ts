@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, IsNull, In, DataSource } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -22,6 +22,8 @@ import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, 
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
+import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 
 const CONTENT_MAX = 10000;
 
@@ -226,6 +228,9 @@ export class RoomMessagingService {
 
     @InjectRepository(Workspace)
     private readonly workspaceRepo: Repository<Workspace>,
+
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
 
     private readonly logService: LogService,
 
@@ -1041,6 +1046,45 @@ export class RoomMessagingService {
   // --- Private helpers (mention dispatch) ---
 
   /**
+   * Resolve the agent > workspace Claude backend profile for a chat dispatch
+   * (ticket 7d8ea7c9). Mirrors trigger-loop.service.ts's ticket-dispatch
+   * resolution, but agent-only — a chat turn carries no ticket/board to layer
+   * on top. Claude backend profiles must stay invisible to every non-Claude
+   * CLI, and a profile the agent's own credential can't satisfy must not be
+   * silently handed to the wire — skip (with a warn log) instead of
+   * dispatching a chat turn agent-manager cannot actually honor.
+   */
+  private async _resolveChatRuntimeProfile(
+    agent: Agent,
+    workspaceId: string,
+  ): Promise<CliRuntimeProfile | null> {
+    if (agent.type !== 'claude') return null;
+    try {
+      const workspace = workspaceId
+        ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
+        : null;
+      const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, workspace, [
+        { source: 'agent', value: agent.cli_runtime_profile },
+      ]);
+      if (!profile) return null;
+      if (profile.credential_required && profile.credential_ref !== agent.credential_id) {
+        this.logService.warn(
+          'ChatRooms',
+          `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
+            `but agent ${agent.id} does not have it selected — dispatching without a runtime profile`,
+        );
+        return null;
+      }
+      return profile;
+    } catch (err) {
+      this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+        err: String(err), agent_id: agent.id,
+      });
+      return null;
+    }
+  }
+
+  /**
    * Parse structured @[type:id|name] tokens from a user message, dispatch
    * agent mentions as chat_request events, and persist user mentions for the
    * sidebar unread badge.
@@ -1102,6 +1146,7 @@ export class RoomMessagingService {
         // Workspace-scope safety: never cross-post a mention into the wrong workspace.
         if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) continue;
 
+        const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
         activityEvents.emit('chat_request', {
           agent_id: agent.id,
           user_id: senderId,
@@ -1119,6 +1164,7 @@ export class RoomMessagingService {
           // room_id from the chat request context" with no such field.
           room_id: roomId,
           ...(runProvision ? { run_provision: runProvision } : {}),
+          ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
         });
 
         dispatched.add(agent.id);
@@ -1211,6 +1257,7 @@ export class RoomMessagingService {
     // Dedup: skip if @mention already dispatched to this agent
     if (alreadyDispatched.has(agent.id)) return;
 
+    const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
     activityEvents.emit('chat_request', {
       agent_id: agent.id,
       user_id: senderId,
@@ -1224,6 +1271,7 @@ export class RoomMessagingService {
       // See _processMentions — required for room-aware reply routing.
       room_id: roomId,
       ...(runProvision ? { run_provision: runProvision } : {}),
+      ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
     });
     alreadyDispatched.add(agent.id);
 

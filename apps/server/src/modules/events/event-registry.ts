@@ -423,6 +423,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         // 생략해서, 아직 opt-in 하지 않은 워크스페이스의 DM wire shape 이
         // byte-for-byte 그대로 유지되게 한다.
         run_provision: event.run_provision ? event.run_provision : undefined,
+        // Same map-through rule as agent_trigger's cli_runtime_profile
+        // (ticket 7d8ea7c9) — RoomMessagingService resolves it server-side;
+        // this field-by-field reconstruction must not drop it on the floor.
+        cli_runtime_profile: event.cli_runtime_profile ?? null,
       };
       return {
         payload,
