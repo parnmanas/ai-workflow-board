@@ -28,7 +28,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveTriggerRuntimeProfile } from '../dist/lib/event-dispatcher.js';
+import { resolveRoomBroadcastRuntimeProfile, resolveTriggerRuntimeProfile } from '../dist/lib/event-dispatcher.js';
 
 // 두 픽스처 모두 `provider` 필드를 갖고 있는데, 이는 순전히 티켓 7d8ea7c9
 // (parseRuntimeProfile의 `provider` 요구를 없앤다 — 이 파일이 다루는
@@ -89,5 +89,52 @@ test('resolveTriggerRuntimeProfile: no per-agent profile and no instance overrid
 
 test('resolveTriggerRuntimeProfile: no per-agent profile and explicit `--runtime-profile none` -> null (CLI default)', () => {
   const out = resolveTriggerRuntimeProfile(undefined, null);
+  assert.equal(out, null);
+});
+
+// resolveRoomBroadcastRuntimeProfile (review round 2, P1) — chat_room_message
+// broadcast의 agent별 map 짝. round 1 구현은 responder의 map 항목만 쓰고
+// instanceOverride를 전혀 참조하지 않았는데, 이는 chat_request에서 지운
+// 것과 동일한 회귀다: per-agent 프로필이 없는 responder가 인스턴스
+// `--runtime-profile` 플래그까지 무시하고 CLI 기본값으로 떨어졌다. 이제는
+// map 조회 결과에 위와 동일한 `?? instanceOverride ?? null` 폴백을 적용한다
+// — 커버 범위는 위 resolveTriggerRuntimeProfile 스위트와 동일한 3가지 축을
+// map 기반 조회에 대해 재확인한다(round 1의 map-selection 자체 계약은
+// runtime-profile-parse.test.mjs가 계속 다룬다).
+const ROOM_RESPONDER = 'agent-1';
+
+test('resolveRoomBroadcastRuntimeProfile: responder\'s own map entry wins over a DIFFERENT instance override (round 2 cross-contamination fix)', () => {
+  const payload = { cli_runtime_profiles: { [ROOM_RESPONDER]: AGENT_PROFILE } };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, ROOM_RESPONDER, INSTANCE_OVERRIDE_PROFILE);
+  assert.deepEqual(out, AGENT_PROFILE);
+});
+
+test('resolveRoomBroadcastRuntimeProfile: no entry for this responder falls back to the instance override', () => {
+  const payload = { cli_runtime_profiles: {} };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, ROOM_RESPONDER, INSTANCE_OVERRIDE_PROFILE);
+  assert.deepEqual(out, INSTANCE_OVERRIDE_PROFILE);
+});
+
+test('resolveRoomBroadcastRuntimeProfile: malformed entry for this responder is treated as absent and falls back to the instance override', () => {
+  const payload = { cli_runtime_profiles: { [ROOM_RESPONDER]: { id: 'incomplete' } } };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, ROOM_RESPONDER, INSTANCE_OVERRIDE_PROFILE);
+  assert.deepEqual(out, INSTANCE_OVERRIDE_PROFILE);
+});
+
+test('resolveRoomBroadcastRuntimeProfile: no entry for this responder and no instance override (unset) -> null (CLI default)', () => {
+  const payload = { cli_runtime_profiles: {} };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, ROOM_RESPONDER, undefined);
+  assert.equal(out, null);
+});
+
+test('resolveRoomBroadcastRuntimeProfile: no entry for this responder and explicit `--runtime-profile none` -> null (CLI default)', () => {
+  const payload = { cli_runtime_profiles: {} };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, ROOM_RESPONDER, null);
+  assert.equal(out, null);
+});
+
+test('resolveRoomBroadcastRuntimeProfile: empty responderAgentId still short-circuits to null without inspecting the map or the override (round 1 contract preserved)', () => {
+  const payload = { cli_runtime_profiles: { [ROOM_RESPONDER]: AGENT_PROFILE } };
+  const out = resolveRoomBroadcastRuntimeProfile(payload, '', INSTANCE_OVERRIDE_PROFILE);
   assert.equal(out, null);
 });
