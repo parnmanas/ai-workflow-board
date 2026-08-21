@@ -443,17 +443,17 @@ export interface ChatRoomMessagePayload {
   // reliable ticket-action card render on the client. Conditional-omit on the
   // wire (absent for ordinary chat turns) so the legacy shape is unchanged.
   metadata?: ChatRoomMessageMetadata;
-  // ticket 7d8ea7c9 (review round 1): agent_id → resolved Claude backend
-  // profile map for THIS broadcast. Unlike chat_request (single target
-  // agent), chat_room_message fans out to every room member — a flat
-  // single-profile field can't represent "the right backend for whichever
-  // member responds" when different Claude-type members carry different
-  // cli_runtime_profile settings (or none). RoomMessagingService resolves one
-  // entry per Claude-type member (mirrors chat_request's per-agent
-  // resolution); each manager instance picks its own managed responder's
-  // entry out of the map by agent_id. Conditional-omit on the wire (absent
-  // when no member resolves any profile) so ordinary chat turns / non-Claude
-  // rooms keep the legacy shape unchanged.
+  // ticket 7d8ea7c9 (review round 1): 이 broadcast에 대해 agent_id → 해석된
+  // Claude backend profile 맵. chat_request(단일 대상 agent)와 달리
+  // chat_room_message는 방의 모든 멤버에게 팬아웃되므로 — Claude-type
+  // 멤버마다 cli_runtime_profile 설정이 다르거나(또는 없거나) 할 때 평면
+  // single-profile 필드로는 "지금 응답할 그 멤버에게 맞는 backend"를
+  // 표현할 수 없다. RoomMessagingService가 Claude-type 멤버마다 하나씩
+  // 항목을 해석하고(chat_request의 agent별 해석을 그대로 미러링), 각
+  // 매니저 인스턴스가 자신이 관리하는 responder의 항목을 agent_id로
+  // 맵에서 골라 쓴다. wire에서는 조건부 생략(어떤 멤버도 profile이
+  // 해석되지 않으면 필드 자체가 없음)이라 일반 채팅 턴/비-Claude 방은
+  // 기존 shape 그대로 유지된다.
   cli_runtime_profiles?: Record<string, CliRuntimeProfile>;
 }
 

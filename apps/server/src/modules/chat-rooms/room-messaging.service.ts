@@ -579,13 +579,13 @@ export class RoomMessagingService {
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
 
-    // ticket 7d8ea7c9 (review round 1): per-agent Claude backend profile map
-    // for this broadcast, so a room's Claude-type members can each pick up
-    // their own configured backend — not just DM/@mention targets (see
-    // _resolveChatRuntimeProfilesForMembers doc comment). Progress heartbeats
-    // are excluded (same reasoning as the mention/DM skip above): a
-    // chat_room_message fires on every tool-call narration, and a heartbeat
-    // never opens a new dispatch turn that could use it.
+    // ticket 7d8ea7c9 (review round 1): 이 broadcast용 agent별 Claude backend
+    // profile 맵 — 방의 Claude-type 멤버 각자가 DM/@mention 대상일 때뿐
+    // 아니라 이 경우에도 자기 설정된 backend를 쓸 수 있도록 한다
+    // (_resolveChatRuntimeProfilesForMembers doc 코멘트 참고). progress
+    // 하트비트는 제외한다(위 mention/DM skip과 같은 이유): chat_room_message는
+    // 모든 tool-call narration마다 발생하는데, 하트비트는 그 profile을 쓸 새
+    // dispatch 턴을 여는 게 아니기 때문이다.
     let cliRuntimeProfiles: Record<string, CliRuntimeProfile> | undefined;
     if (isRealMessage && agentMemberIds.size > 0) {
       const resolved = await this._resolveChatRuntimeProfilesForMembers(
@@ -1090,16 +1090,16 @@ export class RoomMessagingService {
   }
 
   /**
-   * Batch twin of _resolveChatRuntimeProfile for a chat_room_message
-   * broadcast (ticket 7d8ea7c9 review round 1). A group room fans out to
-   * every member, so a single flat profile field can't represent "the right
-   * backend for whichever agent responds" — different Claude-type members
-   * may carry different cli_runtime_profile settings (or none). Resolves one
-   * entry per Claude-type member, keyed by agent_id, so each manager instance
-   * (which may host several of this room's agent identities) can pick its own
-   * responder's entry out of the map at dispatch time. Fetches the workspace
-   * once and reuses it across members instead of repeating
-   * _resolveChatRuntimeProfile's per-call lookup.
+   * chat_room_message broadcast(ticket 7d8ea7c9 review round 1)를 위한
+   * _resolveChatRuntimeProfile의 배치 버전. 그룹방은 모든 멤버에게
+   * 팬아웃되므로 평면 profile 필드 하나로는 "지금 응답할 그 agent에게
+   * 맞는 backend"를 표현할 수 없다 — Claude-type 멤버마다 cli_runtime_profile
+   * 설정이 다르거나(또는 없을) 수 있기 때문이다. Claude-type 멤버마다 하나씩
+   * agent_id로 키잉된 항목을 해석해서, 각 매니저 인스턴스(이 방의 agent
+   * identity를 여럿 호스팅할 수도 있음)가 dispatch 시점에 자기 responder의
+   * 항목을 맵에서 직접 고를 수 있게 한다. workspace는 한 번만 가져와
+   * 멤버 전체에 재사용한다 — _resolveChatRuntimeProfile처럼 호출마다
+   * 반복 조회하지 않는다.
    */
   private async _resolveChatRuntimeProfilesForMembers(
     agentIds: string[],
@@ -1125,11 +1125,12 @@ export class RoomMessagingService {
     return out;
   }
 
-  /** Shared resolve+credential-check core behind both the single-agent
-   *  (_resolveChatRuntimeProfile) and batch (_resolveChatRuntimeProfilesForMembers)
-   *  paths — kept in one place so a credential-mismatch warn / null-return rule
-   *  change never has to be made twice. Caller has already confirmed
-   *  agent.type === 'claude' and fetched `workspace`. */
+  /** 단일 agent 경로(_resolveChatRuntimeProfile)와 배치 경로
+   *  (_resolveChatRuntimeProfilesForMembers) 둘 다가 공유하는 resolve+
+   *  credential-check 코어 — credential 불일치 warn / null 반환 규칙을
+   *  바꿀 때 두 곳을 따로 고치지 않도록 한 곳에 모았다. 호출자가 이미
+   *  agent.type === 'claude'를 확인하고 `workspace`를 가져온 상태여야
+   *  한다. */
   private async _resolveChatRuntimeProfileCore(
     agent: Agent,
     workspace: Workspace | null,

@@ -29,11 +29,12 @@ function findDef(eventType) {
   return def;
 }
 
-// Mirrors events.controller.ts's handler + SSE map() pipeline exactly:
-// def.map() alone is NOT what ships — the controller wraps it into
-// {event_type, scope, payload, timestamp} and, for types that declare
-// flatten(), re-derives the actual wire object from THAT envelope before
-// JSON.stringify. Skipping either step would test a shape nothing ever sends.
+// events.controller.ts의 핸들러 + SSE map() 파이프라인을 그대로 미러링한다:
+// def.map()만으로는 실제로 나가는 게 아니다 — 컨트롤러가 이를
+// {event_type, scope, payload, timestamp}로 감싸고, flatten()을 선언한
+// 타입이면 그 envelope에서 JSON.stringify 전에 실제 wire 객체를 다시
+// 도출한다. 둘 중 하나라도 건너뛰면 실제로는 아무도 보내지 않는 shape를
+// 테스트하는 셈이 된다.
 async function wireBytes(eventType, rawEvent) {
   const def = findDef(eventType);
   const mapped = await def.map(rawEvent, {});
@@ -95,10 +96,10 @@ test('chat_room_message final SSE bytes carry the per-agent cli_runtime_profiles
     cli_runtime_profiles: { 'agent-1': PROFILE },
   };
   const bytes = await wireBytes('chat_room_message', raw);
-  // chat_room_message's flatten() spreads payload fields to the top level
-  // (`{ ...p, id: p.message_id }`), so the map lands at the top level too —
-  // this is the shape agent-manager's handleChatRoomMessage actually reads
-  // (resolveRoomBroadcastRuntimeProfile(p, roomResponderId) off `p`).
+  // chat_room_message의 flatten()은 payload 필드를 최상위로 spread하므로
+  // (`{ ...p, id: p.message_id }`), 이 맵도 최상위에 놓인다 — 이게 바로
+  // agent-manager의 handleChatRoomMessage가 실제로 읽는 shape다
+  // (`p`에서 resolveRoomBroadcastRuntimeProfile(p, roomResponderId)로 읽음).
   const parsed = JSON.parse(bytes);
   assert.deepEqual(parsed.cli_runtime_profiles, { 'agent-1': PROFILE });
 });

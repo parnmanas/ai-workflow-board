@@ -187,12 +187,13 @@ test('DM to a Claude agent whose resolved profile requires a credential it does 
   }
 });
 
-// ── Group-room broadcast (review round 1): chat_room_message's per-agent
-// cli_runtime_profiles map ─────────────────────────────────────────────────
-// Unlike a DM's single chat_request, a group room's chat_room_message fans
-// out to every member — RoomMessagingService must resolve one map entry per
-// Claude-type member (not just an explicit @mention/DM target) so each
-// manager instance can pick its own responder's profile off the broadcast.
+// ── 그룹방 broadcast (review round 1): chat_room_message의 agent별
+// cli_runtime_profiles 맵 ────────────────────────────────────────────────
+// DM의 단일 chat_request와 달리, 그룹방의 chat_room_message는 모든
+// 멤버에게 팬아웃된다 — RoomMessagingService는 (명시적 @mention/DM
+// 대상뿐 아니라) Claude-type 멤버마다 맵 항목을 하나씩 해석해야, 각
+// 매니저 인스턴스가 broadcast에서 자기 responder의 profile을 골라 쓸 수
+// 있다.
 
 function captureRoomMessageEmit() {
   let captured = null;
@@ -210,10 +211,10 @@ function makeGroupSvc({ agents, workspace, onAgentFind }) {
     async findOne() { return groupRoom; },
     async update() {},
   };
-  // markRead's own participant/latest-message lookups — a group test doesn't
-  // exercise read-marker behavior, so a working-but-inert stub is enough
-  // (getOne() -> null means markRead returns right after the participant
-  // check, same as the DM tests' tolerated markRead no-op).
+  // markRead 자체의 participant/latest-message 조회 — 그룹 테스트는
+  // read-marker 동작을 검증하지 않으므로 동작은 하되 아무 일도 안 하는
+  // stub이면 충분하다(getOne() -> null이면 markRead가 participant 체크
+  // 직후 바로 리턴한다, DM 테스트에서 허용한 markRead no-op과 동일).
   const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
   const workspaceRepo = { async findOne() { return workspace; } };
   const messageRepo = {
@@ -238,12 +239,12 @@ function makeGroupSvc({ agents, workspace, onAgentFind }) {
     async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
     async getRoomAgentMemberIds() { return agentMemberIds; },
   };
-  const mentionService = { parseMentions: () => [] }; // plain text, no @[...] tokens
+  const mentionService = { parseMentions: () => [] }; // 평문 텍스트, @[...] 토큰 없음
   const agentRepo = {
     async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
-    // Loose stub: real TypeORM filters `id IN (:...ids) AND type = 'claude'`
-    // server-side; this fixture's `agents` list already only contains the ids
-    // under test, so filtering on `type` alone reproduces the same result.
+    // 느슨한 stub: 실제 TypeORM은 서버단에서 `id IN (:...ids) AND type =
+    // 'claude'`로 필터링한다 — 이 fixture의 `agents` 목록은 이미 테스트
+    // 대상 id만 담고 있으므로 `type`만 필터링해도 동일한 결과가 나온다.
     async find({ where }) {
       onAgentFind?.();
       return agents.filter((a) => a.type === (where.type ?? a.type));
@@ -293,8 +294,9 @@ test('Group room broadcast: cli_runtime_profiles is omitted entirely when no mem
 
 test('Group room broadcast: a progress heartbeat never triggers profile resolution (cli_runtime_profiles absent, agentRepo.find not called)', async () => {
   const claudeAgent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
-  // onAgentFind proves the isRealMessage gate skips resolution ENTIRELY for a
-  // progress row, not just that it happens to resolve to an empty map.
+  // onAgentFind는 isRealMessage 게이트가 progress row에 대해 단순히 빈
+  // 맵으로 해석되는 게 아니라 resolution 자체를 완전히 건너뛴다는 것을
+  // 증명한다.
   let findCalls = 0;
   const svc = makeGroupSvc({ agents: [claudeAgent], workspace: optedOutWs, onAgentFind: () => { findCalls += 1; } });
   const capture = captureRoomMessageEmit();

@@ -309,9 +309,9 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
   // F-1 (ticket 24694916): structured ticket-action refs — omitted-when-absent so
   // ordinary chat turns keep the wire byte-for-byte unchanged.
   assert.match(code, /metadata:\s*event\.metadata \? event\.metadata : undefined/);
-  // ticket 7d8ea7c9 (review round 1): per-agent Claude backend profile map —
-  // omitted-when-empty so ordinary chat turns / non-Claude rooms keep the
-  // wire byte-for-byte unchanged.
+  // ticket 7d8ea7c9 (review round 1): agent별 Claude backend profile 맵 —
+  // 비어 있으면 생략되어 일반 채팅 턴/비-Claude 방은 wire가 byte-for-byte
+  // 그대로 유지된다.
   assert.match(
     code,
     /cli_runtime_profiles:\s*event\.cli_runtime_profiles[\s\S]{0,120}\?\s*event\.cli_runtime_profiles\s*:\s*undefined/,
@@ -319,12 +319,12 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
 });
 
 test('chat_request conditional-omit fields are preserved (legacy wire-shape)', () => {
-  // Same intent as the chat_room_message test above, scoped to chat_request's
-  // own conditional-omit fields. cli_runtime_profile previously used `?? null`
-  // here, which — unlike `?? undefined` — survives JSON.stringify as an
-  // explicit `null` and silently reintroduces the key on every unresolved
-  // chat turn (review round 1, ticket 7d8ea7c9). Locking `?? undefined` so a
-  // future refactor can't flip it back.
+  // 위 chat_room_message 테스트와 같은 취지를, chat_request 자신의 조건부
+  // 생략 필드로 범위를 좁혀 검증한다. cli_runtime_profile은 예전에 여기서
+  // `?? null`을 썼는데 — `?? undefined`와 달리 — JSON.stringify를 거쳐도
+  // 명시적 `null`로 살아남아 해석되지 않은 모든 채팅 턴마다 키를 조용히
+  // 되살렸다(review round 1, ticket 7d8ea7c9). 이후 리팩터링이 다시 되돌릴
+  // 수 없도록 `?? undefined`를 고정한다.
   const code = read(REGISTRY_REL).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   const chatRequestBlock = code.slice(code.indexOf("eventType: 'chat_request'"), code.indexOf("eventType: 'chat_room_message'"));
   assert.match(chatRequestBlock, /run_provision:\s*event\.run_provision \? event\.run_provision : undefined/);
