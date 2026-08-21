@@ -672,6 +672,41 @@ export async function postChatRoomMessageRaw(
 }
 
 /**
+ * ticket e18be8ff — push a chat session's current keep-alive / live
+ * background-task-count snapshot so the room UI can render "백그라운드 작업
+ * N개 실행 중 · keep-alive 잔여 XX분". Same posture as the room typing
+ * indicator: fire-and-log, no outbox buffering — a dropped push just means
+ * the badge is stale until the next recheck (idle timer / applyKeepAlive),
+ * never a correctness issue for the session itself.
+ */
+export async function postChatRoomSessionStatus(
+  config: AwbConfig,
+  roomId: string,
+  agentId: string,
+  body: { keep_alive_until_ms: number | null; background_task_count: number },
+): Promise<void> {
+  if (!roomId || !agentId) return;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/session-status`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ agent_id: agentId, ...body }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`session-status POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
+    }
+  } catch (err: any) {
+    log(`session-status POST error: ${err?.message ?? err} (room=${roomId})`);
+  }
+}
+
+/**
  * Post a silent-exit system comment on a ticket. Used by the agent-manager
  * when a ticket subagent (persistent or one-shot) exits without ever
  * calling `add_comment` OR with a non-zero exit code — leaving no audit

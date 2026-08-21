@@ -50,6 +50,11 @@ import { log } from './logging.js';
 export interface ProgressCheckResult {
   alive: boolean;
   reasons: string[];
+  /** ticket e18be8ff — live background descendant count from this same
+   *  signal-2 scan, exposed as a number (not just folded into `reasons`) so
+   *  callers can surface it verbatim in a status badge without re-parsing a
+   *  human-readable string. 0 when the scan failed or found none. */
+  backgroundTaskCount: number;
 }
 
 export interface ProgressCheckOptions {
@@ -158,9 +163,11 @@ export async function checkSessionProgress(
     scanRoot ? newestMtimeUnder(scanRoot) : Promise.resolve(null),
   ]);
 
+  let backgroundTaskCount = 0;
   if (bgResult.status === 'fulfilled') {
-    if (bgResult.value.length > 0) {
-      reasons.push(`${bgResult.value.length} live background task(s)`);
+    backgroundTaskCount = bgResult.value.length;
+    if (backgroundTaskCount > 0) {
+      reasons.push(`${backgroundTaskCount} live background task(s)`);
     }
   } else {
     log(`[session-progress] background task check failed pid=${opts.pid}: ${bgResult.reason?.message ?? bgResult.reason}`);
@@ -175,5 +182,5 @@ export async function checkSessionProgress(
     log(`[session-progress] cli-home mtime check failed dir=${scanRoot}: ${mtimeResult.reason?.message ?? mtimeResult.reason}`);
   }
 
-  return { alive: reasons.length > 0, reasons };
+  return { alive: reasons.length > 0, reasons, backgroundTaskCount };
 }
