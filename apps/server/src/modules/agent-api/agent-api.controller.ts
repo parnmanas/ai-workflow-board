@@ -1200,6 +1200,29 @@ export class AgentApiController {
     return res.json({ ok: true });
   }
 
+  @Post('chat-rooms/:roomId/session-status')
+  async setChatRoomSessionStatus(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
+    const { agent_id, keep_alive_until_ms, background_task_count } = body;
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    // Same display-name resolution as setChatRoomTyping — the badge must be
+    // attributed to the responding agent's resolved `<Manager>/<Agent>` name.
+    const resolvedName =
+      (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id)) || 'Agent';
+    const memberIds = await this.membership.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+    activityEvents.emit('chat_room_session_status', {
+      room_id: roomId,
+      agent_id,
+      agent_name: resolvedName,
+      keep_alive_until_ms: typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null,
+      background_task_count: Number.isFinite(background_task_count) ? Math.max(0, background_task_count) : 0,
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+    return res.json({ ok: true });
+  }
+
   @Post('chat-rooms/:roomId/messages')
   async sendChatRoomMessage(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
     const { agent_id, content } = body;
