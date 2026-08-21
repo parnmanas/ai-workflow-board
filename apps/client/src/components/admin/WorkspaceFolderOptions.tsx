@@ -81,11 +81,24 @@ const BUILD_OPTIONS: { value: BuildMode; label: string }[] = [
   { value: 'always_warm', label: 'always_warm (매번 증분 빌드)' },
 ];
 
+// 서버 runWorkspaceRootForKind()와 동일한 매핑(티켓 9fd27487). qa/security는
+// .awb/qa 를 공유한다 — kind 문자열을 그대로 경로에 쓰면(예: "security/<id>")
+// 실제 기본 폴더와 어긋난다.
+const FOLDER_ROOT_BY_KIND: Record<'qa' | 'security' | 'action', string> = {
+  qa: '.awb/qa',
+  security: '.awb/qa',
+  action: '.awb/act',
+};
+
 interface WorkspaceFolderOptionsProps {
-  /** 'qa' | 'security' — 기본 폴더 예시 placeholder 에 쓴다. */
-  kind: 'qa' | 'security';
+  /** 'qa' | 'security' | 'action' — 기본 폴더 예시 placeholder 에 쓴다
+   *  (티켓 9fd27487 이 'action' 을 추가; Action Run 은 `.awb/act/<leaf>`). */
+  kind: 'qa' | 'security' | 'action';
   state: WorkspaceFolderFormState;
   onChange: (patch: Partial<WorkspaceFolderFormState>) => void;
+  /** Action 은 cold/warm 빌드 개념이 없다(QaScenario.build_mode 상당 컬럼 없음) —
+   *  build_mode 셀렉트를 숨긴다. 기본 true(QA/Security 는 계속 표시). */
+  showBuildMode?: boolean;
 }
 
 const fieldLabel: React.CSSProperties = {
@@ -99,8 +112,8 @@ const helpText: React.CSSProperties = {
  * QA 시나리오 / 보안 프로파일 편집 폼에 끼워 넣는 작업폴더 옵션 블록.
  * read 표시 + 변경 시 onChange(patch) 로 상위 상태를 갱신한다(저장은 상위 폼이).
  */
-export function WorkspaceFolderOptions({ kind, state, onChange }: WorkspaceFolderOptionsProps) {
-  const defaultFolderHint = `${kind}/<id>`;
+export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = true }: WorkspaceFolderOptionsProps) {
+  const defaultFolderHint = `${FOLDER_ROOT_BY_KIND[kind]}/<id>`;
   return (
     <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>작업폴더 옵션</div>
@@ -133,15 +146,17 @@ export function WorkspaceFolderOptions({ kind, state, onChange }: WorkspaceFolde
             />
             <div style={helpText}>reuse = 폴더 유지, fresh = run 마다 새로 체크아웃.</div>
           </div>
-          <div style={{ flex: 1 }}>
-            <Select
-              label="build_mode"
-              value={state.buildMode}
-              options={BUILD_OPTIONS}
-              onChange={(e) => onChange({ buildMode: (e.target as HTMLSelectElement).value as BuildMode })}
-            />
-            <div style={helpText}>cold = 클린 빌드, warm = 증분 빌드.</div>
-          </div>
+          {showBuildMode && (
+            <div style={{ flex: 1 }}>
+              <Select
+                label="build_mode"
+                value={state.buildMode}
+                options={BUILD_OPTIONS}
+                onChange={(e) => onChange({ buildMode: (e.target as HTMLSelectElement).value as BuildMode })}
+              />
+              <div style={helpText}>cold = 클린 빌드, warm = 증분 빌드.</div>
+            </div>
+          )}
         </div>
 
         <div>

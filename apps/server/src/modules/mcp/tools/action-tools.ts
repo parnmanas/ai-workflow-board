@@ -23,6 +23,7 @@ import { Action } from '../../../entities/Action';
 import { ActionRun } from '../../../entities/ActionRun';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { repoRefSchema, checkoutModeSchema } from '../../../common/workspace-folder-options';
 import type { ToolContext } from './context';
 
 function actionToJson(a: Action) {
@@ -41,6 +42,10 @@ function actionToJson(a: Action) {
     high_impact: a.high_impact,
     max_runs: a.max_runs,
     last_run_at: a.last_run_at,
+    // 작업 폴더 옵션(티켓 9fd27487) — common/workspace-folder-options.ts 참고.
+    workspace_folder: a.workspace_folder ?? '',
+    repo_ref: a.repo_ref ?? null,
+    checkout_mode: a.checkout_mode,
     created_at: a.created_at,
     updated_at: a.updated_at,
   }, a.name);
@@ -99,8 +104,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       enabled: z.boolean().optional().describe('When false, scheduler/hook skips this action (manual run still works)'),
       high_impact: z.boolean().optional().describe('Mark deploy/publish/release Actions whose failure may mean a partial external effect. High-impact ticket-driven runs are NOT auto-retried on failure — the failure surfaces to the source ticket for a human decision (bounded retry is not operation idempotency).'),
       max_runs: z.number().optional().describe('FIFO prune budget (default 10)'),
+      workspace_folder: z.string().optional().describe('agent-home-relative Run folder under `.awb/act/`. Omit/"" → deterministic default act/<action_id8>. Every Run of this action reuses the same folder (action-keyed, not run-keyed).'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to check out into the Run folder. Omit/null → no clone, the provisioner just ensures the folder exists.'),
+      checkout_mode: checkoutModeSchema.optional(),
     },
-    async ({ workspace_id, id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs }) => {
+    async ({ workspace_id, id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs, workspace_folder, repo_ref, checkout_mode }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
@@ -116,6 +124,9 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             enabled,
             high_impact,
             max_runs,
+            workspace_folder,
+            repo_ref,
+            checkout_mode,
           } as any);
           return ok(actionToJson(updated));
         }
@@ -133,6 +144,9 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           enabled: enabled !== false,
           high_impact: high_impact === true,
           max_runs: typeof max_runs === 'number' ? max_runs : 10,
+          workspace_folder,
+          repo_ref,
+          checkout_mode,
         } as any);
         return ok(actionToJson(created));
       } catch (e: any) {

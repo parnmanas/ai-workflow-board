@@ -30,6 +30,7 @@ import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { UserMention } from '../../../entities/UserMention';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
+import { Workspace } from '../../../entities/Workspace';
 import { ActivityService } from '../../../services/activity.service';
 import { ApiKeyService } from '../../../services/api-key.service';
 import { LogService } from '../../../services/log.service';
@@ -248,6 +249,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(Ticket),
     dataSource.getRepository(UserMention),
     dataSource.getRepository(TicketAttachment),
+    dataSource.getRepository(Workspace),
     logService,
     roomMembershipService,
     mentionService,

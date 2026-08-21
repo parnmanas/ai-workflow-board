@@ -1126,6 +1126,9 @@ export const api = {
     trigger_label?: string;
     enabled?: boolean;
     max_runs?: number;
+    workspace_folder?: string;
+    repo_ref?: Action['repo_ref'];
+    checkout_mode?: Action['checkout_mode'];
   }) =>
     request<Action>('/actions', { method: 'POST', body: JSON.stringify(data) }),
   updateAction: (
@@ -1141,6 +1144,9 @@ export const api = {
       trigger_label?: string;
       enabled?: boolean;
       max_runs?: number;
+      workspace_folder?: string;
+      repo_ref?: Action['repo_ref'];
+      checkout_mode?: Action['checkout_mode'];
     },
   ) =>
     request<Action>(`/actions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

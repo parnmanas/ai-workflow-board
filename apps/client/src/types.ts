@@ -304,6 +304,12 @@ export interface Action {
   enabled: boolean;
   max_runs: number;
   last_run_at: string | null;
+  // 작업 폴더 옵션(티켓 9fd27487) — QaScenario/SecurityProfile과 동일한 형태이되
+  // build_mode는 제외한다(Action Run에는 cold/warm 빌드 개념이 없음).
+  // WorkspaceFolderOptions.tsx 참고.
+  workspace_folder: string;
+  repo_ref: WorkspaceFolderRepoRef | null;
+  checkout_mode: CheckoutMode;
   created_at: string;
   updated_at: string;
 }

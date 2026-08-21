@@ -7,6 +7,15 @@
 
 const TOKEN_RE = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
 
+// 패키지 간 wire contract (티켓 9fd27487): agent-manager의 prompts.ts에 있는
+// WORK_FOLDER_TOKEN과 짝을 이룬다. 서버는 에이전트의 절대경로 working_dir을
+// 알 수 없으므로, 다른 모든 `{{var.path}}`와 달리 이 토큰만은 일부러 여기서
+// 해석하지 않는다 — agent-manager가 `.awb/act/<leaf>` cwd를 확정한 뒤
+// (composeChatRoomPrompt의 injectWorkFolder 호출) 그 하위 단계에서 이 토큰을
+// 치환한다. 티켓 트리거 경로에서 column-workflow-guide 템플릿이 이미 의존하고
+// 있는 것과 같은 패턴이다.
+const AWB_WORK_FOLDER_PATH = 'AWB_WORK_FOLDER';
+
 // Finished-ticket context exposed to on-ticket-done hook Actions (ticket
 // 16a6339c). Lets the hook prompt reference the ticket that just completed via
 // `{{ticket.id}}`, `{{ticket.title}}`, `{{ticket.board_id}}`, etc. Only the
@@ -64,7 +73,12 @@ function resolvePath(ctx: ActionRenderContext, path: string): string {
 
 export function renderActionPrompt(template: string, ctx: ActionRenderContext): string {
   if (!template) return '';
-  return template.replace(TOKEN_RE, (_full, path) => resolvePath(ctx, path));
+  return template.replace(TOKEN_RE, (full, path) => {
+    // {{AWB_WORK_FOLDER}}는 그대로 둔다 — 위 AWB_WORK_FOLDER_PATH 설명 참고.
+    // 그 외 해석되지 않는 경로는 이 모듈 상단 설명대로 여전히 ''로 접힌다.
+    if (path === AWB_WORK_FOLDER_PATH) return full;
+    return resolvePath(ctx, path);
+  });
 }
 
 // Build the standard render context out of the loaded entity rows. Centralized
