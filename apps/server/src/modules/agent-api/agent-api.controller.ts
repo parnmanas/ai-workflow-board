@@ -45,6 +45,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { enforceAutoResponseBudget } from '../../common/hard-budget-guard';
 import { lockTicketCommentWrites } from '../../common/ticket-comment-write-lock';
+import { setChatRoomSessionStatus } from './chat-session-status.store';
 import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
@@ -1211,12 +1212,23 @@ export class AgentApiController {
       (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id)) || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+    const resolvedKeepAliveUntilMs = typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null;
+    const resolvedBackgroundTaskCount = Number.isFinite(background_task_count) ? Math.max(0, background_task_count) : 0;
+    // Cache the last-known status so a client that opens/re-enters this room
+    // between SSE pushes can ask for the current snapshot instead of waiting
+    // for the next progress recheck (ticket e18be8ff review round 1, P1 #2).
+    setChatRoomSessionStatus(roomId, {
+      agent_id,
+      agent_name: resolvedName,
+      keep_alive_until_ms: resolvedKeepAliveUntilMs,
+      background_task_count: resolvedBackgroundTaskCount,
+    });
     activityEvents.emit('chat_room_session_status', {
       room_id: roomId,
       agent_id,
       agent_name: resolvedName,
-      keep_alive_until_ms: typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null,
-      background_task_count: Number.isFinite(background_task_count) ? Math.max(0, background_task_count) : 0,
+      keep_alive_until_ms: resolvedKeepAliveUntilMs,
+      background_task_count: resolvedBackgroundTaskCount,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });

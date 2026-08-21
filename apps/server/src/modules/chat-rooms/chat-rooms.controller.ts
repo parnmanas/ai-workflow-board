@@ -25,6 +25,7 @@ import { RoomMessagingService } from './room-messaging.service';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../mcp/shared/ticket-helpers';
+import { getChatRoomSessionStatus } from '../agent-api/chat-session-status.store';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -135,6 +136,18 @@ export class ChatRoomsController {
     } catch (err: any) {
       return res.status(err.status || 404).json({ error: err.message });
     }
+  }
+
+  // Snapshot of the currently-live chat_room_session_status push(es) for this
+  // room (keep-alive deadline / background-task count per agent). The SSE
+  // push is fire-and-forget, so a client opening or re-entering the room
+  // between pushes needs this to show "currently active" state immediately
+  // instead of waiting for the next progress recheck or session exit
+  // (ticket e18be8ff review round 1, P1 #2).
+  @Get(':roomId/session-status')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async getSessionStatus(@Res() res: Response, @Param('roomId') roomId: string) {
+    return res.json(getChatRoomSessionStatus(roomId));
   }
 
   @Get(':roomId/messages')
