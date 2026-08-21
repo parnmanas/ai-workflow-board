@@ -9,6 +9,7 @@ import { useDragToScroll } from '../hooks/useDragToScroll';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { useNotifications } from '../contexts/NotificationContext';
 import PageHeader from './PageHeader';
 import BoardSubMenu from './BoardSubMenu';
 import Column from './Column';
@@ -49,6 +50,7 @@ export default function Board() {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const { withLoading } = useLoading();
+  const { counts, markTicketsReadForBoard } = useNotifications();
 
   // Board and workspace identity come from the URL — no localStorage reads needed.
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
@@ -473,6 +475,16 @@ export default function Board() {
     }
   };
 
+  // Board-scoped "모두 읽음" (ticket 628f4b39) — same optimistic-then-persist
+  // shape as wrapAction's other calls: server upsert first, then the local
+  // badge state so the sidebar/board number and every TicketCard on this
+  // board drop to 0 together instead of waiting for the next 60s poll.
+  const handleMarkBoardRead = () => wrapAction(async () => {
+    if (!boardId) return;
+    await api.markAllTicketsRead(boardId);
+    markTicketsReadForBoard(boardId);
+  }, '이 보드의 읽지 않은 코멘트를 모두 읽음으로 표시했습니다');
+
   // Cross-board drop strip. Each board entry is a Droppable; handleDragEnd
   // routes `move-to-board-<id>` to the cross-board endpoint.
   //
@@ -596,6 +608,52 @@ export default function Board() {
             <strong>Board is paused.</strong> Agent triggers are suspended (since{' '}
             {new Date(board.paused_at).toLocaleString()}). Click <em>▶ Resume Board</em> to wake agents.
           </span>
+        </div>
+      )}
+
+      {/*
+        Unread-comment banner (ticket 628f4b39) — spells out what the sidebar
+        badge number means in plain text instead of leaving it to a hover
+        tooltip, and gives a one-click board-level "모두 읽음". The exact
+        count (perBoard is never capped, unlike the "99+" pill) is what makes
+        this trustworthy as the source of truth for "how many, really".
+      */}
+      {boardId && (counts.tickets.perBoard[boardId] || 0) > 0 && (
+        <div
+          role="status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '6px 16px',
+            background: `${tokens.colors.accent}12`,
+            color: tokens.colors.textSecondary,
+            fontSize: 12,
+            borderBottom: `1px solid ${tokens.colors.border}`,
+          }}
+        >
+          <span>
+            이 보드에 <strong>읽지 않은 코멘트 {counts.tickets.perBoard[boardId]}건</strong>이 있습니다 —
+            카드 오른쪽 위 숫자가 원인 티켓입니다.
+          </span>
+          <button
+            type="button"
+            onClick={handleMarkBoardRead}
+            style={{
+              background: 'transparent',
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+              padding: '3px 10px',
+              color: tokens.colors.accent,
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            모두 읽음
+          </button>
         </div>
       )}
 

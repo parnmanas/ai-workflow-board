@@ -2,6 +2,8 @@ import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
+import { useToast } from '../contexts/ToastContext';
+import { api } from '../api';
 import type { ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
@@ -61,11 +63,29 @@ export default function Sidebar({
   containerRef,
 }: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
-  const { counts, countsLoaded } = useNotifications();
+  const { counts, countsLoaded, markTicketsReadForBoard } = useNotifications();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const [boardsExpanded, setBoardsExpanded] = React.useState(true);
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
+  const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
+
+  // Workspace-wide "모두 읽음" (ticket 628f4b39) — the board-scoped version
+  // lives on the Board page itself (Board.tsx), where "board" is unambiguous;
+  // this is the only place a "every board at once" action makes sense.
+  const handleMarkAllTicketsRead = async () => {
+    setMarkingAllTicketsRead(true);
+    try {
+      await api.markAllTicketsRead();
+      markTicketsReadForBoard();
+      showToast('모든 보드의 읽지 않은 코멘트를 읽음으로 표시했습니다', 'success');
+    } catch (err: any) {
+      showToast(err?.message || '읽음 처리에 실패했습니다', 'error');
+    } finally {
+      setMarkingAllTicketsRead(false);
+    }
+  };
 
   const workspaceBase = wsId ? `/ws/${wsId}` : '';
   const canAdmin = hasPermission('admin.access');
@@ -501,24 +521,55 @@ export default function Sidebar({
               <div style={sectionHeaderStyle}>
                 <span id={`sidebar-${section.title.toLowerCase()}`}>{section.title}</span>
                 {section.title === 'Work' && (
-                  <button
-                    type="button"
-                    aria-label={boardsExpanded ? 'Collapse board list' : 'Expand board list'}
-                    aria-expanded={boardsExpanded}
-                    onClick={() => setBoardsExpanded((value) => !value)}
-                    style={{
-                      width: 24,
-                      height: 24,
-                      border: 'none',
-                      borderRadius: 6,
-                      background: 'transparent',
-                      color: tokens.colors.textMuted,
-                      cursor: 'pointer',
-                      fontSize: 10,
-                    }}
-                  >
-                    {boardsExpanded ? '\u25BC' : '\u25B6'}
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {/* Workspace-wide bulk read (\uC694\uAD6C\uC0AC\uD56D 2) \u2014 only worth
+                       showing once there's something to clear. Text stays
+                       lowercase/non-uppercase unlike the section title so it
+                       doesn't visually compete with it despite sharing a row. */}
+                    {counts.tickets.total > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleMarkAllTicketsRead}
+                        disabled={markingAllTicketsRead}
+                        title={`\uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4 \uC804\uCCB4 \uC77D\uC9C0 \uC54A\uC740 \uD2F0\uCF13 \uCF54\uBA58\uD2B8 ${counts.tickets.total}\uAC74\uC744 \uBAA8\uB450 \uC77D\uC74C\uC73C\uB85C \uD45C\uC2DC`}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: tokens.colors.accent,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          textTransform: 'none',
+                          letterSpacing: 'normal',
+                          cursor: markingAllTicketsRead ? 'default' : 'pointer',
+                          opacity: markingAllTicketsRead ? 0.5 : 1,
+                          padding: '2px 4px',
+                        }}
+                      >
+                        {/* Exact, never-capped count as plain text (\uC694\uAD6C\uC0AC\uD56D 3) \u2014
+                           the "99+" pill on the badge below hides the real
+                           number behind a hover tooltip; this button doesn't. */}
+                        {`${counts.tickets.total}\uAC74 \uBAA8\uB450 \uC77D\uC74C`}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={boardsExpanded ? 'Collapse board list' : 'Expand board list'}
+                      aria-expanded={boardsExpanded}
+                      onClick={() => setBoardsExpanded((value) => !value)}
+                      style={{
+                        width: 24,
+                        height: 24,
+                        border: 'none',
+                        borderRadius: 6,
+                        background: 'transparent',
+                        color: tokens.colors.textMuted,
+                        cursor: 'pointer',
+                        fontSize: 10,
+                      }}
+                    >
+                      {boardsExpanded ? '\u25BC' : '\u25B6'}
+                    </button>
+                  </div>
                 )}
               </div>
 
