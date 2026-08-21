@@ -1096,8 +1096,17 @@ AWB 서버가 SSE `fs_request` 로 구동하는 reverse-RPC, 즉 매니저 호�
 - 워크플로 YAML 파싱 검증: `ci.yml` / `publish-agent-manager.yml` 둘 다
   `js-yaml` 로 로드 성공, 트리거 4종(`pull_request`/`push`/`schedule`/
   `workflow_dispatch`)·잡 6개·조건 5개 확인.
-- 회귀 없음: supply-chain 16/16, ci-branch-coverage 6/6, cron-coverage 6/6,
+- 로컬 회귀 확인: supply-chain 16/16, ci-branch-coverage 6/6, cron-coverage 6/6,
   react-router 6/6, 기존 가드 스크립트 5개 전부 PASS.
+- **CI 전체 확인(그리고 로컬만으로는 못 잡은 것 하나)**: 첫 푸시(`4ee954c7`)에서
+  `apps/server full test suite` 가 red 였다 — `test-registration-completeness`
+  가드가 신규 `cron-coverage-guard.test.mjs` 를 "package.json `test` 스크립트에
+  없어 `npm test` 가 조용히 건너뛰는 고아 테스트"(ticket 0b4f089d 버그 계열)로
+  잡았다. 관련 가드만 골라 돌린 로컬 실행으로는 드러나지 않는 종류다. `686ccd56`
+  에서 등록해 해소했고, 그 커밋의 CI 는 **7개 잡 전부 success**.
+- `dependency-audit` 잡 스텝 실측(`686ccd56`): npm audit / install-script /
+  액션 SHA / 배포 브랜치 커버리지 / **정기 감사 커버리지** 전부 success,
+  **배포 브랜치 lockfile 재감사는 skipped** — push 이벤트에서 의도대로 건너뛴다.
 
 ### 6. 이월
 
