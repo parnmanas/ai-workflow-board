@@ -143,11 +143,22 @@ export class ChatRoomsController {
   // push is fire-and-forget, so a client opening or re-entering the room
   // between pushes needs this to show "currently active" state immediately
   // instead of waiting for the next progress recheck or session exit
-  // (ticket e18be8ff review round 1, P1 #2).
+  // (ticket e18be8ff review round 1, P1 #2). requireRoomAccess enforces the
+  // same participant/observer + workspace boundary as getRoom before serving
+  // the in-memory store, which is keyed only by roomId and otherwise has no
+  // notion of who's allowed to read it (review round 2, P1 #1).
   @Get(':roomId/session-status')
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
-  async getSessionStatus(@Res() res: Response, @Param('roomId') roomId: string) {
-    return res.json(getChatRoomSessionStatus(roomId));
+  async getSessionStatus(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    try {
+      const observe = req.query.observer === 'true';
+      await this.membership.requireRoomAccess(roomId, wsId, user.id, { observer: observe });
+      return res.json(getChatRoomSessionStatus(roomId));
+    } catch (err: any) {
+      return res.status(err.status || 500).json({ error: err.message });
+    }
   }
 
   @Get(':roomId/messages')
