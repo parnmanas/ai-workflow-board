@@ -21,6 +21,8 @@ import { resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
+import { checkSessionProgress } from './session-progress.js';
+import { findLiveBackgroundTasks } from './process-tree.js';
 import {
   ADAPTER_CAPABILITIES,
   PARSE_STAGE,
@@ -75,6 +77,17 @@ export interface SessionDelegationConfig {
   ttlMinutes?: number;
   idleMinutes?: number;
   maxTurnsPerSession?: number;
+  /** ticket 6ff827cb: recheck cadence (seconds) once idle/maxTurns expiry
+   *  finds progress evidence and defers the reap. Default 60 — see constants.ts. */
+  idleRecheckSeconds?: number;
+  /** ticket 6ff827cb gap 4: age (hours) at which a session that keeps passing
+   *  the progress gate gets ONE visible "still alive, check for a runaway
+   *  loop" escalation. Never causes a kill by itself. Default 4. */
+  progressEscalationHours?: number;
+  /** ticket 6ff827cb requirement 3: hard ceiling (minutes) on
+   *  mcp__awb__keep_chat_session_alive, measured from a session's first
+   *  declaration. Default 120. */
+  chatKeepAliveMaxMinutes?: number;
   claudeBin?: string;
   codexBin?: string;
   persistentChatSessions?: boolean;
@@ -274,6 +287,35 @@ export interface SessionRecord {
    *  session's late/stale exit can never wipe a live successor (the
    *  set(A)→set(B)→late-clear(A) race). */
   taskToken?: string;
+  /** ticket 6ff827cb signal 1 — last epoch-ms ANY model output (thinking/
+   *  composing stage or a final result) was observed on stdout. Updated
+   *  unconditionally (not throttled) in #wireStdio, independent of the
+   *  server-facing `_lastLivenessPostAtMs` heartbeat above — that field
+   *  throttles a POST, this one is the manager's own idle-gate evidence and
+   *  must never be stale by more than one stdout line. */
+  _lastOutputAtMs?: number;
+  /** ticket 6ff827cb signal 3 — the per-agent CLI home dir this session was
+   *  spawned with (agentContext.cli_home_dir). Scanned for the freshest file
+   *  mtime as the only observable progress signal for an in-process
+   *  Workflow/subagent tool call (see session-progress.ts). Null for
+   *  operator-direct sessions with no managed cli-home. */
+  _cliHomeDir?: string | null;
+  /** ticket 6ff827cb requirement 3 — epoch-ms this session's CURRENT keep-alive
+   *  grant expires. Null when no grant is active (never declared, released, or
+   *  naturally lapsed). While set and unexpired, the idle/maxTurns reapers
+   *  defer unconditionally regardless of the progress gate. */
+  _keepAliveUntilMs?: number | null;
+  /** ticket 6ff827cb requirement 3 — epoch-ms of this session's FIRST-EVER
+   *  keep-alive declaration. Set once, never reset by release() — the hard
+   *  ceiling (chatKeepAliveMaxMinutes) is measured from here so a
+   *  release-then-re-extend loop can't restart the clock. */
+  _keepAliveFirstDeclaredAtMs?: number | null;
+  /** Human-readable reason from the latest keep-alive declaration, surfaced
+   *  in the forced-termination room message when the ceiling is hit. */
+  _keepAliveReason?: string | null;
+  /** ticket 6ff827cb gap 4 — epoch-ms the long-running escalation was already
+   *  posted, so #maybeEscalateLongRunning fires at most once per session. */
+  _progressEscalatedAt?: number | null;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
@@ -796,6 +838,7 @@ export class BaseSessionManager {
         usage: null,
         modelChain,
         chainAttempt,
+        _cliHomeDir: agentContext?.cli_home_dir || null,
       };
       sess.tap =
         this.#monitor?.register({
@@ -860,14 +903,55 @@ export class BaseSessionManager {
     if (!checkMaxTurns) return;
     const maxTurns = this._config.delegation.maxTurnsPerSession ?? 30;
     if (sess.turnCount >= maxTurns) {
+      void this._maybeCloseForMaxTurns(sess, maxTurns);
+    }
+  }
+
+  /** ticket 6ff827cb requirement 4 — maxTurns hit the same progress gate as
+   *  the idle timer before closing stdin (respawn on the next dispatch is
+   *  graceful, not a hard kill, but a session mid in-process Workflow should
+   *  still not be cut off just because it dispatched 30 follow-up turns). An
+   *  active keep-alive grant defers unconditionally, same as idle. If
+   *  deferred, this naturally re-checks on the next follow-up turn (turnCount
+   *  stays >= maxTurns), and the independent idle timer remains the backstop
+   *  for a session with no new incoming turns.
+   *
+   *  `protected` (not `#private`), like `_writeTurn`/`_resetIdleTimer` — a
+   *  test seam so a regression test can await this directly instead of
+   *  waiting on a real (unref'd) timer. */
+  protected async _maybeCloseForMaxTurns(sess: SessionRecord, maxTurns: number): Promise<void> {
+    const key = sess[this.#keyField];
+    if (this._sessions.get(key) !== sess) return;
+
+    if (sess._keepAliveUntilMs && Date.now() < sess._keepAliveUntilMs) {
       log(
-        `${this.#logTag} ${this.#keyField}=${sess[this.#keyField]} hit maxTurns=${maxTurns}, closing stdin for respawn`,
+        `${this.#logTag} maxTurns=${maxTurns} reached but keep-alive active — deferring respawn ${this.#keyField}=${key} pid=${sess.pid}`,
       );
-      try {
-        sess.child.stdin.end();
-      } catch {
-        /* already closed */
-      }
+      return;
+    }
+
+    const idleWindowMs = (this._config.delegation.idleMinutes ?? 10) * 60_000;
+    const verdict = await checkSessionProgress(
+      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, freshMs: idleWindowMs },
+      sess._lastOutputAtMs,
+    );
+    if (this._sessions.get(key) !== sess) return;
+
+    if (verdict.alive) {
+      log(
+        `${this.#logTag} maxTurns=${maxTurns} reached but progress detected (${verdict.reasons.join('; ')}) — ` +
+          `deferring respawn ${this.#keyField}=${key} pid=${sess.pid}`,
+      );
+      return;
+    }
+
+    log(
+      `${this.#logTag} ${this.#keyField}=${key} hit maxTurns=${maxTurns}, closing stdin for respawn (no progress evidence)`,
+    );
+    try {
+      sess.child.stdin.end();
+    } catch {
+      /* already closed */
     }
   }
 
@@ -983,6 +1067,13 @@ export class BaseSessionManager {
         if (parsed.stage || parsed.isResult) {
           sess.unrespondedTurnCount = 0;
           sess.unrespondedSince = null;
+          // ticket 6ff827cb signal 1 — record unconditionally (unthrottled).
+          // This is deliberately a SEPARATE field from `_lastLivenessPostAtMs`
+          // below (ticket fdc69c13's server-facing heartbeat, throttled to
+          // OUTPUT_LIVENESS_MIN_INTERVAL_MS via _onStdoutParsed): that field
+          // throttles an outbound POST, this one is the manager's own
+          // idle-gate evidence and must never be stale by more than one line.
+          sess._lastOutputAtMs = Date.now();
         }
         this.#advanceTurn(sess, parsed);
         // Buffer stdout into the tail ring so subclasses can surface "what
@@ -1113,20 +1204,217 @@ export class BaseSessionManager {
   protected _resetIdleTimer(sess: SessionRecord): void {
     if (sess.idleTimer) clearTimeout(sess.idleTimer);
     const mins = this._config.delegation.idleMinutes ?? 10;
-    sess.idleTimer = setTimeout(
-      () => {
-        log(
-          `${this.#logTag} idle, closing stdin ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid}`,
-        );
-        try {
-          sess.child.stdin.end();
-        } catch {
-          /* already closed */
-        }
-      },
-      mins * 60_000,
-    );
+    const idleWindowMs = mins * 60_000;
+    sess.idleTimer = setTimeout(() => void this._onIdleTimerFired(sess, idleWindowMs), idleWindowMs);
     sess.idleTimer.unref?.();
+  }
+
+  /**
+   * ticket 6ff827cb — idle timer fired. Governing principle: a timer
+   * expiring means CHECK, not KILL. `stdin.end()` only happens when NEGATIVE
+   * evidence is confirmed (no model output, no live background task, no
+   * cli-home activity in the last `idleWindowMs`) — clock elapsed alone is
+   * never sufficient. A session with progress evidence is re-armed at the
+   * shorter `idleRecheckSeconds` cadence instead of waiting a full idle
+   * window again, so a session that goes quiet mid-Workflow is still caught
+   * promptly.
+   *
+   * `protected` (not `#private`) — a test seam so a regression test can
+   * await this directly instead of waiting on a real (unref'd) timer.
+   */
+  protected async _onIdleTimerFired(sess: SessionRecord, idleWindowMs: number): Promise<void> {
+    const key = sess[this.#keyField];
+    if (this._sessions.get(key) !== sess) return; // exited between fire and this tick
+
+    if (sess._keepAliveUntilMs) {
+      const now = Date.now();
+      const ceilingMs = (sess._keepAliveFirstDeclaredAtMs ?? now)
+        + (this._config.delegation.chatKeepAliveMaxMinutes ?? 120) * 60_000;
+      if (now >= ceilingMs) {
+        log(
+          `${this.#logTag} keep-alive ceiling reached ${this.#keyField}=${key} pid=${sess.pid} — force terminating`,
+        );
+        await this.#forceTerminate(sess, 'keep_alive_ceiling');
+        return;
+      }
+      if (now < sess._keepAliveUntilMs) {
+        const remainMin = Math.round((sess._keepAliveUntilMs - now) / 60_000);
+        log(
+          `${this.#logTag} keep-alive active ${this.#keyField}=${key} pid=${sess.pid} remaining=${remainMin}m — deferring reap`,
+        );
+        this.#rearmIdleTimer(sess, idleWindowMs, sess._keepAliveUntilMs - now);
+        return;
+      }
+      // Grant lapsed but the hard ceiling wasn't reached — keep-alive is over,
+      // fall through to the ordinary progress gate below (still may survive
+      // on real signals; just no longer unconditionally protected).
+      sess._keepAliveUntilMs = null;
+    }
+
+    const verdict = await checkSessionProgress(
+      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, freshMs: idleWindowMs },
+      sess._lastOutputAtMs,
+    );
+    if (this._sessions.get(key) !== sess) return; // exited during the async check
+
+    if (verdict.alive) {
+      log(
+        `${this.#logTag} idle expired but progress detected (${verdict.reasons.join('; ')}) — ` +
+          `deferring reap ${this.#keyField}=${key} pid=${sess.pid}`,
+      );
+      this.#maybeEscalateLongRunning(sess);
+      this.#rearmIdleTimer(sess, idleWindowMs);
+      return;
+    }
+
+    log(
+      `${this.#logTag} idle, closing stdin ${this.#keyField}=${key} pid=${sess.pid} (no progress evidence)`,
+    );
+    try {
+      sess.child.stdin.end();
+    } catch {
+      /* already closed */
+    }
+  }
+
+  /** Re-arm the idle timer at the recheck cadence (or sooner, if `capMs` — a
+   *  keep-alive grant's remaining time — is shorter). Always at least 1s so a
+   *  near-expired keep-alive grant can't busy-loop the check. */
+  #rearmIdleTimer(sess: SessionRecord, idleWindowMs: number, capMs?: number): void {
+    if (sess.idleTimer) clearTimeout(sess.idleTimer);
+    const recheckMs = (this._config.delegation.idleRecheckSeconds ?? 60) * 1000;
+    const delay = capMs !== undefined ? Math.max(1000, Math.min(recheckMs, capMs)) : recheckMs;
+    sess.idleTimer = setTimeout(() => void this._onIdleTimerFired(sess, idleWindowMs), delay);
+    sess.idleTimer.unref?.();
+  }
+
+  /** ticket 6ff827cb gap 4 — a session that keeps producing progress evidence
+   *  forever is the one real risk this design opens up (a genuine runaway
+   *  loop looks identical to real work from the outside). Past
+   *  progressEscalationHours it is NOT killed — that would violate the
+   *  governing principle for a session with real evidence — but it gets ONE
+   *  visible escalation so a human can look. */
+  #maybeEscalateLongRunning(sess: SessionRecord): void {
+    if (sess._progressEscalatedAt) return; // already escalated once
+    const hours = this._config.delegation.progressEscalationHours ?? 4;
+    const ageMs = Date.now() - sess.startedAt;
+    if (ageMs < hours * 3_600_000) return;
+    sess._progressEscalatedAt = Date.now();
+    const ageHours = (ageMs / 3_600_000).toFixed(1);
+    log(
+      `${this.#logTag} ESCALATION ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid} — ` +
+        `session has been running ${ageHours}h with continuous progress evidence; verify this isn't a runaway loop`,
+    );
+    this._onLongRunningEscalation(sess, ageHours);
+  }
+
+  /** Override in subclasses to surface a long-running-session escalation
+   *  somewhere a human will see it (e.g. a chat room notice). No-op in base. */
+  protected _onLongRunningEscalation(_sess: SessionRecord, _ageHours: string): void {}
+
+  /** ticket 6ff827cb requirement 3 — force-terminate a session whose
+   *  explicit keep-alive grant exceeded the hard ceiling. This is the ONE
+   *  path that kills despite possible live progress evidence — the agent's
+   *  own declaration set an expectation it then exceeded. Never silent: logs
+   *  + the `_onForcedTermination` hook (chat rooms get a system message). */
+  async #forceTerminate(sess: SessionRecord, reason: string): Promise<void> {
+    const key = sess[this.#keyField];
+    if (this._sessions.get(key) !== sess) return;
+    sess._keepAliveUntilMs = null;
+    let liveTaskCount = 0;
+    try {
+      liveTaskCount = (await findLiveBackgroundTasks(sess.pid)).length;
+    } catch {
+      /* best-effort — never block a forced termination on enumeration */
+    }
+    if (this._sessions.get(key) !== sess) return; // exited during the async check
+    log(
+      `${this.#logTag} FORCED TERMINATION ${this.#keyField}=${key} pid=${sess.pid} reason=${reason} ` +
+        `liveBackgroundTasks=${liveTaskCount}`,
+    );
+    this._onForcedTermination(sess, reason, { liveTaskCount });
+    // Drop-first, same as #killUnhealthy: flag + remove from `_sessions`
+    // BEFORE signalling so a follow-up dispatch that lands mid-teardown
+    // fresh-spawns instead of reusing a dying stdin, and `_getLiveSession`'s
+    // existing `unhealthyKilled` purge covers any lookup that races this.
+    sess.unhealthyKilled = true;
+    if (this._sessions.get(key) === sess) this._sessions.delete(key);
+    if (sess.idleTimer) {
+      clearTimeout(sess.idleTimer);
+      sess.idleTimer = null;
+    }
+    try {
+      sess.child.stdin.end();
+    } catch {
+      /* already closed */
+    }
+    try {
+      process.kill(sess.pid, 'SIGTERM');
+    } catch {
+      /* already dead */
+    }
+    setTimeout(() => {
+      try {
+        process.kill(sess.pid, 'SIGKILL');
+      } catch {
+        /* gone */
+      }
+    }, STOP_GRACE_MS).unref?.();
+  }
+
+  /** Override in subclasses to surface a forced termination somewhere a
+   *  human will see it (e.g. a chat room system message). No-op in base —
+   *  ticket-session forced terminations rely on existing manager-log +
+   *  silent-exit-comment visibility. */
+  protected _onForcedTermination(
+    _sess: SessionRecord,
+    _reason: string,
+    _info: { liveTaskCount: number },
+  ): void {}
+
+  /**
+   * ticket 6ff827cb requirement 3 — explicit "don't reap me yet" declaration
+   * from mcp__awb__keep_chat_session_alive. Implemented in the base class
+   * since the fields + the idle-timer gate that respects them live here, but
+   * only meaningful in practice for chat sessions (keyed by room_id).
+   *
+   * `extend` clamps the grant to the hard ceiling measured from this
+   * session's FIRST-EVER declaration (`_keepAliveFirstDeclaredAtMs`, which
+   * `release` deliberately does NOT reset — a release-then-re-extend loop
+   * must not restart the clock; "무기한 keep-alive 금지" is the one
+   * non-negotiable in the ticket). `release` clears the active grant only.
+   */
+  applyKeepAlive(
+    sessionKey: string,
+    opts: { action: 'extend' | 'release'; minutes?: number; reason?: string },
+  ): { ok: boolean; error?: string; until?: number; ceilingMs?: number } {
+    const sess = this._getLiveSession(sessionKey);
+    if (!sess) return { ok: false, error: 'no live session for this key' };
+
+    if (opts.action === 'release') {
+      log(`${this.#logTag} keep-alive released ${this.#keyField}=${sessionKey} pid=${sess.pid}`);
+      sess._keepAliveUntilMs = null;
+      sess._keepAliveReason = null;
+      return { ok: true };
+    }
+
+    const now = Date.now();
+    const ceilingMinutes = this._config.delegation.chatKeepAliveMaxMinutes ?? 120;
+    if (!sess._keepAliveFirstDeclaredAtMs) sess._keepAliveFirstDeclaredAtMs = now;
+    const ceilingMs = sess._keepAliveFirstDeclaredAtMs + ceilingMinutes * 60_000;
+    if (now >= ceilingMs) {
+      return { ok: false, error: `keep-alive ceiling (${ceilingMinutes}m) already reached for this session`, ceilingMs };
+    }
+    const requestedMinutes = Math.max(1, Math.min(opts.minutes ?? ceilingMinutes, ceilingMinutes));
+    const grantMs = now + requestedMinutes * 60_000;
+    sess._keepAliveUntilMs = Math.min(grantMs, ceilingMs);
+    sess._keepAliveReason = opts.reason || sess._keepAliveReason || '';
+    log(
+      `${this.#logTag} keep-alive extended ${this.#keyField}=${sessionKey} pid=${sess.pid} ` +
+        `until=${new Date(sess._keepAliveUntilMs).toISOString()} ceiling=${new Date(ceilingMs).toISOString()} ` +
+        `reason="${sess._keepAliveReason}"`,
+    );
+    return { ok: true, until: sess._keepAliveUntilMs, ceilingMs };
   }
 
   /** Override in subclasses to react to each parsed stdout line. */
