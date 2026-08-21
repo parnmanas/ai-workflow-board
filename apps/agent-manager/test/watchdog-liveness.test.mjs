@@ -33,6 +33,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // Compiled JS — agent-manager builds via `npm run build`; `node --test` runs
 // against the dist tree, mirroring session-dedup.test.mjs.
@@ -105,7 +106,7 @@ function applyLivenessReset(sess, parsed) {
   }
 }
 
-test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still works)', () => {
+test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still works)', async () => {
   const origKill = process.kill;
   const signals = [];
   process.kill = (pid, sig) => {
@@ -122,8 +123,12 @@ test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still work
       assert.equal(sess.unrespondedTurnCount, i, `counter tracks turn ${i}`);
       assert.equal(sess.unhealthyKilled, false, `must not kill before threshold (turn ${i})`);
     }
-    // The fifth silent turn reaches the threshold → kill for respawn.
+    // The fifth silent turn reaches the threshold. ticket 6ff827cb round-1
+    // review: the kill now goes through the async _maybeKillUnhealthy
+    // progress gate (checkSessionProgress) instead of killing synchronously
+    // inline — let that fire-and-forget check resolve before asserting.
     mgr.pump(sess);
+    await delay(30);
     assert.equal(sess.unhealthyKilled, true, 'killed at threshold');
     assert.ok(
       signals.some((s) => s.pid === DEAD_PID && s.sig === 'SIGTERM'),

@@ -24,13 +24,23 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, writeFile, rm, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
 import { ChatSessionManager } from '../dist/lib/chat-session-manager.js';
 import { createAdapter } from '../dist/lib/cli-adapters/index.js';
+import { encodeProjectDirName } from '../dist/lib/session-progress.js';
+
+// Every cli-home fixture below writes into THIS session-scoped subtree —
+// signal 3 is scoped to `<cliHomeDir>/projects/<encodeProjectDirName(cwd)>/`
+// (ticket 6ff827cb round-1 review, P1), not the cli-home root, so a fixture
+// must supply BOTH `_cliHomeDir` and `_cwd` and write under this helper's
+// path, or it is testing a directory signal 3 no longer scans.
+function scopedCliHomeDir(cliHomeDir, cwd) {
+  return join(cliHomeDir, 'projects', encodeProjectDirName(cwd));
+}
 
 const DEAD_PID = 0x7fffffff;
 
@@ -103,6 +113,12 @@ class Harness extends BaseSessionManager {
   }
   checkMaxTurns(sess, maxTurns) {
     return this._maybeCloseForMaxTurns(sess, maxTurns);
+  }
+  checkUnhealthy(sess, reason) {
+    return this._maybeKillUnhealthy(sess, reason);
+  }
+  writeTurn(sess, text) {
+    return this._writeTurn(sess, text);
   }
 }
 
@@ -186,6 +202,33 @@ test('any stdout line unconditionally records signal 1 and alone defers the reap
   assert.equal(ended, false, 'fresh model output alone (no background task, no cli-home) defers the reap');
 });
 
+test('stdout activity actually resets the idle timer itself (non-blocking review observation)', async () => {
+  // Requirement 1 asks for idle = time since last ACTIVITY. Signal 1 alone
+  // (previous test) makes the progress GATE defer correctly, but without
+  // this the idle timer still fires on the old cadence and re-scans the
+  // whole process-tree + cli-home every recheck interval even while output
+  // keeps flowing. Resetting the timer on real output avoids that.
+  const mgr = new Harness(makeConfig());
+  const child = fakeChild();
+  const sess = makeFakeSession({ pid: child.pid, child });
+  mgr._trackSessionForTest(sess.sessionKey, sess);
+  mgr._resetIdleTimer(sess);
+  const timerBefore = sess.idleTimer;
+  assert.ok(timerBefore, 'idle timer armed');
+
+  child.stdout.write(
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'still working' }] },
+    }) + '\n',
+  );
+  await delay(30); // let the readline 'line' handler run
+
+  assert.notEqual(sess.idleTimer, timerBefore, 'a fresh stdout line rearms the idle timer, not just _lastOutputAtMs');
+  assert.equal(sess.idleTimer.hasRef(), false, 'the freshly-armed timer stays unref-ed');
+  clearTimeout(sess.idleTimer);
+});
+
 // ── 3b. cli-home mtime (signal 3) — the ★최우선 fix: an in-process Workflow ──
 // tool call blocks the parent turn (no stdout) and runs in-process (no child
 // process), so signals 1+2 are BOTH blind to it — this was the exact blind
@@ -196,19 +239,23 @@ test('any stdout line unconditionally records signal 1 and alone defers the reap
 test('fresh cli-home activity alone defers the reap — the in-process Workflow blind spot', async () => {
   const mgr = new Harness(makeConfig());
   const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
+  const cwd = '/workspace/ticket-6ff827cb';
   let ended = false;
   let sess;
   try {
     sess = makeFakeSession({
       pid: DEAD_PID,
       _cliHomeDir: cliHomeDir,
+      _cwd: cwd,
       child: { pid: DEAD_PID, stdin: { end: () => { ended = true; } }, stdout: null, stderr: null, once: () => {} },
     });
     mgr._sessions.set(sess.sessionKey, sess);
     // Simulate an in-process Workflow subagent still appending its transcript
-    // — zero stdout on the parent turn, zero child processes, but the file
-    // just changed.
-    await writeFile(join(cliHomeDir, 'agent-abc123.jsonl'), '{"line":1}\n');
+    // under THIS session's own scoped subtree — zero stdout on the parent
+    // turn, zero child processes, but the file just changed.
+    const scopedDir = scopedCliHomeDir(cliHomeDir, cwd);
+    await mkdir(scopedDir, { recursive: true });
+    await writeFile(join(scopedDir, 'agent-abc123.jsonl'), '{"line":1}\n');
 
     await mgr.checkIdle(sess, 10 * 60_000);
     assert.equal(ended, false, 'a session with no output/tasks but fresh cli-home activity must not be reaped');
@@ -221,9 +268,12 @@ test('fresh cli-home activity alone defers the reap — the in-process Workflow 
 test('stale cli-home (no recent writes) does NOT count as progress (regression: an old dir alone can\'t immortalize a session)', async () => {
   const mgr = new Harness(makeConfig());
   const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
+  const cwd = '/workspace/ticket-6ff827cb';
   let ended = false;
   try {
-    const oldFile = join(cliHomeDir, 'old.json');
+    const scopedDir = scopedCliHomeDir(cliHomeDir, cwd);
+    await mkdir(scopedDir, { recursive: true });
+    const oldFile = join(scopedDir, 'old.json');
     await writeFile(oldFile, '{}');
     // Backdate the mtime deterministically (not a wall-clock race against a
     // tiny freshness window — mtime resolution/scheduling jitter made an
@@ -233,6 +283,7 @@ test('stale cli-home (no recent writes) does NOT count as progress (regression: 
     const sess = makeFakeSession({
       pid: DEAD_PID,
       _cliHomeDir: cliHomeDir,
+      _cwd: cwd,
       child: { pid: DEAD_PID, stdin: { end: () => { ended = true; } }, stdout: null, stderr: null, once: () => {} },
     });
     mgr._sessions.set(sess.sessionKey, sess);
@@ -241,6 +292,62 @@ test('stale cli-home (no recent writes) does NOT count as progress (regression: 
   } finally {
     await rm(cliHomeDir, { recursive: true, force: true });
   }
+});
+
+// ── 3c. P1 fix — signal 3 is SESSION-scoped, not agent-scoped (round-1 review) ──
+// Two sessions of the same agent normally run in two different cwds (each
+// ticket/room gets its own dedicated workspace folder), so they land in two
+// different `projects/<encoded-cwd>/` subtrees under the SAME shared
+// cli-home root. Session B's writes must not read as session A's evidence.
+
+test('P1 regression: a busy sibling session sharing the same cli-home does NOT keep an idle session alive', async () => {
+  const mgr = new Harness(makeConfig());
+  const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
+  const cwdA = '/workspace/ticket-aaaaaaaa';
+  const cwdB = '/workspace/ticket-bbbbbbbb';
+  let endedA = false;
+  let sessA;
+  try {
+    sessA = makeFakeSession({
+      pid: DEAD_PID,
+      _cliHomeDir: cliHomeDir,
+      _cwd: cwdA,
+      child: { pid: DEAD_PID, stdin: { end: () => { endedA = true; } }, stdout: null, stderr: null, once: () => {} },
+    });
+    mgr._sessions.set(sessA.sessionKey, sessA);
+
+    // Session B (a different ticket, same agent/cli-home) is busy RIGHT NOW —
+    // fresh write in ITS OWN scoped subtree only.
+    const scopedDirB = scopedCliHomeDir(cliHomeDir, cwdB);
+    await mkdir(scopedDirB, { recursive: true });
+    await writeFile(join(scopedDirB, 'agent-busy.jsonl'), '{"line":1}\n');
+
+    await mgr.checkIdle(sessA, 10 * 60_000);
+    assert.equal(
+      endedA,
+      true,
+      'session A must still be reaped — a sibling session B writing under the shared cli-home root is not A\'s evidence',
+    );
+  } finally {
+    if (sessA?.idleTimer) clearTimeout(sessA.idleTimer);
+    await rm(cliHomeDir, { recursive: true, force: true });
+  }
+});
+
+test('P1 control: encodeProjectDirName pins the exact Claude Code directory-name convention', () => {
+  // Real cwd → cli-home directory-name pairs observed on disk (dash-encodes
+  // every non-alphanumeric character; consecutive dashes are NOT collapsed).
+  // This is an external CLI convention, not something AWB defines — pin it so
+  // a silent mismatch degrades to "signal 3 finds nothing" instead of
+  // resurrecting the cross-session bug this test file guards against.
+  assert.equal(
+    encodeProjectDirName('/mnt/data/awb-agents/awb.programmer/.awb/wt/c76a8201-968c-4dec-8b03-f5d19421c227/6ff827cb'),
+    '-mnt-data-awb-agents-awb-programmer--awb-wt-c76a8201-968c-4dec-8b03-f5d19421c227-6ff827cb',
+  );
+  assert.equal(
+    encodeProjectDirName('/mnt/data/awb-agents/awb.programmer/.awb/base/c76a8201-968c-4dec-8b03-f5d19421c227'),
+    '-mnt-data-awb-agents-awb-programmer--awb-base-c76a8201-968c-4dec-8b03-f5d19421c227',
+  );
 });
 
 // ── 4. maxTurns hits the same progress gate (requirement 4) ──
@@ -268,6 +375,153 @@ test('maxTurns reached + zero progress evidence → closes stdin for respawn (re
   mgr._sessions.set(sess.sessionKey, sess);
   await mgr.checkMaxTurns(sess, 30);
   assert.equal(ended, true, 'a genuinely idle session at maxTurns still respawns as before');
+});
+
+// ── 4b. unhealthy watchdog hits the same progress gate (P0, round-1 review) ──
+// Both unhealthy-kill triggers (#healthSweep's 30m time threshold and
+// _writeTurn's 5-consecutive-turn threshold) used to call #killUnhealthy
+// directly, bypassing checkSessionProgress/_keepAliveUntilMs entirely — a
+// session blocked on a long in-process Workflow tool call emits ZERO stdout
+// by definition, so the exact blind spot fixed for the idle timer (section
+// 3b) was still wide open here. `checkUnhealthy` drives the SAME
+// `_maybeKillUnhealthy` gate both `#healthSweep` and `_writeTurn` call.
+
+test('P0 regression: unhealthy time-threshold hit but fresh cli-home activity → defers the kill', async () => {
+  const mgr = new Harness(makeConfig());
+  const origKill = process.kill;
+  let killed = false;
+  process.kill = () => { killed = true; };
+  const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
+  const cwd = '/workspace/ticket-unhealthy-a';
+  let sess;
+  try {
+    sess = makeFakeSession({
+      pid: DEAD_PID,
+      _cliHomeDir: cliHomeDir,
+      _cwd: cwd,
+      unrespondedSince: Date.now() - 31 * 60_000, // 31m silent — past UNHEALTHY_DURATION_MS (30m)
+    });
+    mgr._sessions.set(sess.sessionKey, sess);
+    const scopedDir = scopedCliHomeDir(cliHomeDir, cwd);
+    await mkdir(scopedDir, { recursive: true });
+    await writeFile(join(scopedDir, 'agent-workflow.jsonl'), '{"line":1}\n'); // in-process Workflow still writing
+
+    await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
+    assert.equal(killed, false, 'must NOT SIGTERM a session with fresh cli-home (in-process Workflow) evidence');
+    assert.equal(sess.unhealthyKilled, false, 'not flagged unhealthy-killed');
+    assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
+  } finally {
+    process.kill = origKill;
+    await rm(cliHomeDir, { recursive: true, force: true });
+  }
+});
+
+test('P0 regression: unhealthy turn-threshold hit but active keep-alive → defers the kill', async () => {
+  const mgr = new Harness(makeConfig({ chatKeepAliveMaxMinutes: 120 }));
+  const origKill = process.kill;
+  let killed = false;
+  // applyKeepAlive resolves through _getLiveSession's OS-level liveness probe
+  // (process.kill(pid, 0), signal 0 — "does this pid exist?", never a real
+  // kill). Only flag a REAL termination signal, or this stub would also trip
+  // on that harmless probe and false-fail the test before the actual gate
+  // under test ever runs.
+  process.kill = (_pid, sig) => { if (sig) killed = true; };
+  try {
+    // applyKeepAlive resolves through the OS-level _getLiveSession check —
+    // use this test process's own (genuinely alive) pid, same as the
+    // existing applyKeepAlive tests above.
+    const sess = makeFakeSession({ pid: process.pid, unrespondedTurnCount: 5 });
+    mgr._sessions.set(sess.sessionKey, sess);
+    const grant = mgr.applyKeepAlive(sess.sessionKey, { action: 'extend', minutes: 60, reason: 'long workflow' });
+    assert.equal(grant.ok, true);
+
+    await mgr.checkUnhealthy(sess, '5 consecutive turns without an LLM response');
+    assert.equal(killed, false, 'must NOT SIGTERM a session with an active keep-alive grant');
+    assert.equal(sess.unhealthyKilled, false, 'not flagged unhealthy-killed');
+    assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
+  } finally {
+    process.kill = origKill;
+  }
+});
+
+test('P0 control: unhealthy hit + zero progress evidence + no keep-alive → still kills exactly like before (no regression)', async () => {
+  const mgr = new Harness(makeConfig());
+  const origKill = process.kill;
+  let killed = null;
+  process.kill = (pid, sig) => { killed = { pid, sig }; };
+  try {
+    const sess = makeFakeSession({ pid: DEAD_PID, unrespondedSince: Date.now() - 31 * 60_000 });
+    mgr._sessions.set(sess.sessionKey, sess);
+    await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
+    assert.ok(killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM', 'a genuinely silent session is still SIGTERM-ed');
+    assert.equal(sess.unhealthyKilled, true);
+    assert.equal(mgr._sessions.has(sess.sessionKey), false, 'session record dropped');
+  } finally {
+    process.kill = origKill;
+  }
+});
+
+// ── 4c. P0 integration — the same gate through the REAL _writeTurn wiring, ──
+// not just the extracted _maybeKillUnhealthy method, so a future refactor
+// that stops _writeTurn from calling the gate at all still gets caught.
+
+test('P0 integration: 5 consecutive unresponded turns via _writeTurn + fresh cli-home evidence → session survives', async () => {
+  const mgr = new Harness(makeConfig());
+  const origKill = process.kill;
+  let killed = false;
+  process.kill = () => { killed = true; };
+  const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
+  const cwd = '/workspace/ticket-unhealthy-b';
+  let sess;
+  try {
+    sess = makeFakeSession({
+      pid: DEAD_PID,
+      _cliHomeDir: cliHomeDir,
+      _cwd: cwd,
+      child: { pid: DEAD_PID, stdin: { write: () => true, end: () => {} }, stdout: null, stderr: null, once: () => {} },
+    });
+    mgr._sessions.set(sess.sessionKey, sess);
+    const scopedDir = scopedCliHomeDir(cliHomeDir, cwd);
+    await mkdir(scopedDir, { recursive: true });
+    await writeFile(join(scopedDir, 'agent-workflow.jsonl'), '{"line":1}\n');
+
+    for (let i = 0; i < 5; i++) mgr.writeTurn(sess, `turn ${i}`); // UNHEALTHY_TURN_THRESHOLD = 5
+    assert.equal(sess.unrespondedTurnCount, 5, 'threshold reached');
+    await settle(); // let the fire-and-forget _maybeKillUnhealthy gate resolve
+
+    assert.equal(killed, false, 'progress evidence must defer the kill even through the real dispatch path');
+    assert.equal(sess.unhealthyKilled, false);
+    assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
+  } finally {
+    process.kill = origKill;
+    await rm(cliHomeDir, { recursive: true, force: true });
+  }
+});
+
+test('P0 integration control: 5 consecutive unresponded turns via _writeTurn + zero evidence → session still killed (no regression)', async () => {
+  const mgr = new Harness(makeConfig());
+  const origKill = process.kill;
+  let killed = null;
+  process.kill = (pid, sig) => { killed = { pid, sig }; };
+  try {
+    const sess = makeFakeSession({
+      pid: DEAD_PID,
+      child: { pid: DEAD_PID, stdin: { write: () => true, end: () => {} }, stdout: null, stderr: null, once: () => {} },
+    });
+    mgr._sessions.set(sess.sessionKey, sess);
+
+    for (let i = 0; i < 5; i++) mgr.writeTurn(sess, `turn ${i}`);
+    await settle();
+
+    assert.ok(
+      killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM',
+      'a genuinely silent session at the turn threshold is still SIGTERM-ed',
+    );
+    assert.equal(sess.unhealthyKilled, true);
+    assert.equal(mgr._sessions.has(sess.sessionKey), false);
+  } finally {
+    process.kill = origKill;
+  }
 });
 
 // ── 5. explicit keep-alive: grant clamps to the hard ceiling, defers unconditionally ──
