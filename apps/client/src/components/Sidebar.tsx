@@ -670,7 +670,7 @@ export default function Sidebar({
               fontSize: 13,
             }}
           >
-            \u2192
+            {'\u2192'}
           </button>
         </div>
       )}
