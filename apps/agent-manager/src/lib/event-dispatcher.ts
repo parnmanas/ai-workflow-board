@@ -163,6 +163,23 @@ export function resolveTriggerRuntimeProfile(
   return parseRuntimeProfile(rawCliRuntimeProfile) ?? instanceOverride ?? null;
 }
 
+/** ticket 7d8ea7c9 (review round 1): resolve THIS responder's Claude backend
+ *  profile out of a chat_room_message broadcast's per-agent profile map.
+ *  Unlike chat_request (single target agent → a flat cli_runtime_profile
+ *  field), chat_room_message fans out to every room member, so the server
+ *  keys resolved profiles by agent_id (RoomMessagingService resolves one
+ *  entry per Claude-type member) — each manager picks its own responder's
+ *  entry out of the map instead of relying on a single ambient field. */
+export function resolveRoomBroadcastRuntimeProfile(
+  payload: any,
+  responderAgentId: string,
+): RuntimeProfileSpec | null {
+  if (!responderAgentId) return null;
+  const map = payload?.cli_runtime_profiles;
+  if (!map || typeof map !== 'object') return null;
+  return parseRuntimeProfile(map[responderAgentId]);
+}
+
 /** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
  *  carrying anything else has its `effort` dropped (the rest of the slice
  *  survives) so a malformed level can never reach the CLI flag. */
@@ -4107,15 +4124,16 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    // ticket 7d8ea7c9: group-room broadcasts aren't resolved to a single
-    // profile server-side yet (chat_room_message fans out to every member;
-    // RoomMessagingService only resolves the one target agent of chat_request
-    // today). Parsing here is forward-compatible and a no-op until a server
-    // change stamps p.cli_runtime_profile — same plumbing as chat_request
-    // below, kept symmetric so this path picks up profile support for free.
+    // ticket 7d8ea7c9 (review round 1): RoomMessagingService now resolves a
+    // per-agent profile map for group-room broadcasts (p.cli_runtime_profiles,
+    // keyed by agent_id) — chat_room_message fans out to every member, so a
+    // single flat field can't represent "the right backend for whichever
+    // agent responds" the way chat_request's single-target field can.
+    // roomResponderId (computed above for the typing indicator) is exactly
+    // the agent this dispatch will spawn under, so it doubles as the map key.
     // Also does NOT fall back to `this.#runtimeProfileOverride` — see the
     // longer note at the chat_request call site below for why.
-    const runtimeProfile = parseRuntimeProfile(p.cli_runtime_profile);
+    const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId);
 
     if (runContext?.cli === 'hermes') {
       try {
