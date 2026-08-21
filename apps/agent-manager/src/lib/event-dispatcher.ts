@@ -118,6 +118,27 @@ export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
   return value as RuntimeProfileSpec;
 }
 
+/** 티켓 0fbe802c: ticket-dispatch 경로(#dispatchTriggerBody)의 runtime profile
+ *  우선순위 결정 — per-agent DB 프로필(rawCliRuntimeProfile로 전달된
+ *  ev.cli_runtime_profile)이 정상 파싱되면 그것을 최우선으로 쓰고, 없을 때만
+ *  인스턴스 전역 `--runtime-profile` 오버라이드(instanceOverride)로 폴백한다.
+ *  오버라이드조차 없으면(undefined) null → CLI 기본값.
+ *
+ *  이전에는 인스턴스 오버라이드가 설정되어 있으면(!== undefined) 항상
+ *  최우선이라 다중-agent 호스트에서 오버라이드가 모든 agent의 티켓 작업을
+ *  자신의 per-agent 프로필과 무관하게 그 백엔드로 강제했다 — chat 경로에서
+ *  7d8ea7c9가 고친 것과 동일한 교차 오염. chat 경로는 오버라이드를 아예
+ *  참조하지 않지만(전적으로 per-agent 소스), ticket-dispatch 경로는 per-agent
+ *  프로필이 없는 agent에게는 여전히 인스턴스 단위 오버라이드가 유효한
+ *  폴백으로 남는다 — 단일-agent 호스트가 `--runtime-profile <file>`로 DB
+ *  변경 없이 전체를 그 백엔드로 돌리는 기존 용법을 보존하기 위함. */
+export function resolveTriggerRuntimeProfile(
+  rawCliRuntimeProfile: unknown,
+  instanceOverride: RuntimeProfileSpec | null | undefined,
+): RuntimeProfileSpec | null {
+  return parseRuntimeProfile(rawCliRuntimeProfile) ?? instanceOverride ?? null;
+}
+
 /** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
  *  carrying anything else has its `effort` dropped (the rest of the slice
  *  survives) so a malformed level can never reach the CLI flag. */
@@ -2613,9 +2634,10 @@ export class EventDispatcher {
     // harness was already parsed above (ahead of the ticket 48aeab6e
     // CLI-readiness gate); both the persistent-session and one-shot paths
     // below ship it to their spawn site.
-    const runtimeProfile = this.#runtimeProfileOverride !== undefined
-      ? this.#runtimeProfileOverride
-      : parseRuntimeProfile(ev.cli_runtime_profile);
+    //
+    // 티켓 0fbe802c: 우선순위는 resolveTriggerRuntimeProfile 참고 — per-agent
+    // cli_runtime_profile > 인스턴스 --runtime-profile 오버라이드 > null.
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
     if (harness) {
       log(
         `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,
