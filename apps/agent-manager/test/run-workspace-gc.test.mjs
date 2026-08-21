@@ -198,3 +198,51 @@ test('snapshotRunWorkspaces: nested workspace_folder projects leaf/path at the F
   assert.equal(entry.path, join(actRoot, 'deploy', 'scripts'));
   assert.equal(entry.lastUsedAt, WELL_WITHIN_IDLE);
 });
+
+// 접두(prefix) 관계인 두 workspace_folder가 동시에 유효한 경우 회귀 테스트 —
+// 리뷰 지적 2라운드(ticket 9fd27487): Action A가 workspace_folder='deploy',
+// Action B가 workspace_folder='deploy/scripts'를 쓰면 둘 다 자기 자신의
+// `.awb-last-used`를 갖는다. 1라운드 수정은 파일이 하나라도 있으면(마커 포함)
+// 즉시 leaf로 확정하고 멈췄으므로 'deploy' 안에 중첩된 'deploy/scripts'를 별도
+// leaf로 못 찾았다 — 'deploy'가 stale이면 재귀 삭제로 fresh한 'deploy/scripts'
+// 까지 함께 날아가고, 'deploy'가 fresh이면 stale한 'deploy/scripts'가 영영
+// 독립 회수되지 않았다.
+
+test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale ANCESTOR does not sweep a fresh/live descendant', async () => {
+  const base = await makeBase();
+  const actRoot = actionWorkspaceRootFor(base);
+  const parent = await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+  const child = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+
+  const removed = await manager.sweepRunWorkspaces(base);
+  assert.equal(removed, 0, '자손이 살아남으면 조상도 함께 지우면 안 된다(재귀 삭제가 자손까지 날린다)');
+  await assert.doesNotReject(() => fsp.access(child), 'fresh 자손은 보존되어야 한다');
+  await assert.doesNotReject(() => fsp.access(parent), 'stale 조상도 자손을 보호하느라 함께 보존되어야 한다');
+});
+
+test('sweepRunWorkspaces: sibling markers in a prefix relationship — a stale DESCENDANT is reclaimed independently of a fresh ancestor', async () => {
+  const base = await makeBase();
+  const chatRoot = chatWorkspaceRootFor(base);
+  const parent = await plantWorkspace(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
+  const child = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+
+  const removed = await manager.sweepRunWorkspaces(base);
+  assert.equal(removed, 1, 'stale 자손은 fresh 조상과 무관하게 독립적으로 회수되어야 한다');
+  await assert.rejects(() => fsp.access(child), 'stale 자손은 제거되어야 한다');
+  await assert.doesNotReject(() => fsp.access(parent), 'fresh 조상 자신(과 그 마커)은 보존되어야 한다');
+});
+
+test('snapshotRunWorkspaces: sibling markers in a prefix relationship both report as independent boundaries', async () => {
+  const base = await makeBase();
+  const actRoot = actionWorkspaceRootFor(base);
+  await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+  await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+
+  const entries = await manager.snapshotRunWorkspaces(base);
+  assert.equal(entries.length, 2, "'deploy'와 'deploy/scripts' 둘 다 독립 경계로 보고되어야 한다");
+  const byLeaf = Object.fromEntries(entries.map((e) => [e.leaf, e]));
+  assert.equal(byLeaf['deploy'].path, join(actRoot, 'deploy'));
+  assert.equal(byLeaf['deploy'].lastUsedAt, WELL_PAST_IDLE);
+  assert.equal(byLeaf['deploy/scripts'].path, join(actRoot, 'deploy', 'scripts'));
+  assert.equal(byLeaf['deploy/scripts'].lastUsedAt, WELL_WITHIN_IDLE);
+});

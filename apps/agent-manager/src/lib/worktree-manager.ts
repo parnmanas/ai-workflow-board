@@ -1575,6 +1575,15 @@ export class WorktreeManager {
    * 찍으므로, 직계 자식(`deploy`)만 보면 그 mtime(자식 git 활동으로는 갱신되지
    * 않는다)으로 폴백하다가 방금 쓰인 자손 폴더까지 통째로 삭제해버린다(리뷰 지적,
    * ticket 9fd27487).
+   *
+   * `deploy`와 `deploy/scripts`처럼 서로 접두 관계인 두 leaf가 동시에 존재할 때
+   * (리뷰 지적, 2라운드) — 가장 깊은 leaf부터 처리해 얕은 leaf를 지우기 전에
+   * 그 자손이 살아남았는지(fresh거나 live거나, 혹은 자손의 자손을 보호하느라
+   * 남았거나) 먼저 안다. 자손이 하나라도 살아남았으면 조상은 자기 마커가
+   * stale이어도 지우지 않는다 — `fsp.rm(recursive)`는 자손까지 통째로 지우므로,
+   * 조상을 지우면서 방금 쓰인 자손을 함께 날려버리는 걸 막기 위해서다. 반대로
+   * 자손이 이미 정리됐거나(또는 애초에 없었으면) 조상은 평소처럼 자기 마커
+   * 기준으로 독립적으로 판정된다.
    */
   async sweepRunWorkspaces(baseWorkingDir: string): Promise<number> {
     if (!baseWorkingDir) return 0;
@@ -1584,11 +1593,20 @@ export class WorktreeManager {
     for (const kind of ['action', 'chat'] as const) {
       const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
       const leaves = await this.#listRunWorkspaceLeaves(root);
+      leaves.sort((a, b) => b.split('/').length - a.split('/').length);
+      const survived: string[] = [];
       for (const leaf of leaves) {
         const path = join(root, leaf);
         // 다중 방어책(defense-in-depth) — removeTicketRunWorkspace의 컨테인먼트 가드를 그대로 따른다.
         if (!isUnder(path, root)) continue;
-        if (this.#isPathLive(path, liveCwds)) continue;
+        if (survived.some((s) => s.startsWith(`${leaf}/`))) {
+          survived.push(leaf); // 살아남은 자손을 보호하기 위해 나도 지우지 않는다 — 위쪽 조상에도 전이된다
+          continue;
+        }
+        if (this.#isPathLive(path, liveCwds)) {
+          survived.push(leaf);
+          continue;
+        }
         let idleMs: number;
         const markerAt = await this.#readLastUsedMarker(path);
         if (markerAt) {
@@ -1598,13 +1616,17 @@ export class WorktreeManager {
           const st = await fsp.stat(path).catch(() => null);
           idleMs = st ? now - st.mtimeMs : Infinity;
         }
-        if (idleMs < RUN_WORKSPACE_IDLE_MS) continue;
+        if (idleMs < RUN_WORKSPACE_IDLE_MS) {
+          survived.push(leaf);
+          continue;
+        }
         try {
           await fsp.rm(path, { recursive: true, force: true });
           removed++;
           log(`[worktree] swept idle ${kind} workspace ${path} (idle ${Math.round(idleMs / 60000)}min)`);
         } catch (err: any) {
           log(`[worktree] sweep failed for ${kind} workspace ${path}: ${err?.message ?? err}`);
+          survived.push(leaf); // 삭제 실패 — 조상이 이 경로를 함께 지우지 않도록 살아남은 것으로 취급
         }
       }
     }
@@ -1624,6 +1646,21 @@ export class WorktreeManager {
    * 그래서 하위 디렉터리 "만" 있고 그 외엔 아무것도 없는 순수 경로 세그먼트
    * 컨테이너만 한 단계씩 내려가고, `.git`/파일/마커가 하나라도 있거나 완전히
    * 빈 디렉터리를 만나면 그 디렉터리 자체를 leaf로 확정한다.
+   *
+   * 그런데 leaf로 확정됐다고 항상 거기서 멈추면 안 된다(리뷰 지적, ticket
+   * 9fd27487 2라운드) — `workspace_folder='deploy'`(Action A)와
+   * `workspace_folder='deploy/scripts'`(Action B)처럼 서로 접두(prefix) 관계인
+   * 두 값이 **동시에** 유효해서, `deploy`도 자기 자신의 `.awb-last-used`를 갖고
+   * 있으면서 그 안에 또 다른 독립 프로비저닝된 `deploy/scripts`가 중첩될 수
+   * 있다. 그래서 "우리가 직접 마커를 남겼고(hasMarker) `.git`은 없는" 경우에만
+   * — 즉 그 디렉터리가 우리 자신의 프로비저닝 산출물이라고 확신할 수 있을 때만
+   * — leaf로 push한 뒤에도 계속 내려가 자손 leaf를 마저 찾는다. `.git`이 있는
+   * 디렉터리는 절대 더 내려가지 않는다: 그 밑은 전부 체크아웃된 저장소 자신의
+   * 콘텐츠이지 별개 workspace 경계일 수 없고, 서브디렉터리마다 파일이 있다는
+   * 이유로 leaf 취급하면(예: `src/`, `node_modules/`) 실제로 살아있는 저장소의
+   * 일부를 독립 sweep 대상으로 오인해 지워버리는, 원래 버그보다 더 나쁜 상황을
+   * 만든다. 마커도 `.git`도 없이 파일만 있어서 leaf로 폴백 판정된 경우(스크래치
+   * 콘텐츠 — 우리가 프로비저닝했다는 보장이 없다)도 같은 이유로 내려가지 않는다.
    */
   async #listRunWorkspaceLeaves(root: string, relDir = ''): Promise<string[]> {
     const abs = relDir ? join(root, relDir) : root;
@@ -1633,12 +1670,18 @@ export class WorktreeManager {
     } catch {
       return []; // 루트(또는 중간 경로)가 아직 없다는 뜻 — 아직 아무것도 프로비저닝되지 않음
     }
-    const isLeaf = entries.length === 0 || entries.some((e) => e.isFile() || e.name === '.git');
-    if (relDir && isLeaf) return [relDir];
+    const hasMarker = entries.some((e) => e.isFile() && e.name === '.awb-last-used');
+    const hasGit = entries.some((e) => e.name === '.git');
+    const isLeaf = hasMarker || hasGit || entries.length === 0 || entries.some((e) => e.isFile());
     const out: string[] = [];
-    for (const sub of entries.filter((e) => e.isDirectory())) {
-      const childRel = relDir ? `${relDir}/${sub.name}` : sub.name;
-      out.push(...(await this.#listRunWorkspaceLeaves(root, childRel)));
+    if (relDir && isLeaf) out.push(relDir);
+    const shouldDescend = !isLeaf || (hasMarker && !hasGit);
+    if (shouldDescend) {
+      for (const sub of entries.filter((e) => e.isDirectory())) {
+        if (sub.name === '.git') continue;
+        const childRel = relDir ? `${relDir}/${sub.name}` : sub.name;
+        out.push(...(await this.#listRunWorkspaceLeaves(root, childRel)));
+      }
     }
     return out;
   }
