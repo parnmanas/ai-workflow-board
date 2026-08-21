@@ -17,6 +17,7 @@ import { createAdapter } from './cli-adapters/index.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
   trackedTicketTool,
   parseStreamToolResult,
@@ -389,6 +390,7 @@ export class ChatSessionManager
       historyAttachments,
       spec.roomName || '',
       spec.isActionRoom || false,
+      spec.provisionedWorkFolder || '',
     );
     // Vision blocks: history images first (chronological), current turn last
     // so the freshest image is the most salient.
@@ -655,18 +657,23 @@ export class ChatSessionManager
 
     // Never overwrite a run the agent already finalized. Availability-first: an
     // unreadable status is treated as non-terminal so a transient server hiccup
-    // doesn't leave the trap uncaught.
+    // 트랩을 놓치는 일이 없게 한다. ticket 9fd27487: 'action' 은 getTool 이
+    // null 이므로(get_action_run tool 이 없음) 항상 아래 reap 경로로 빠진다 —
+    // complete_action_run 의 terminal 전이는 멱등이라 안전하다(이미 terminal 인
+    // run 에 걸리는 stray finalize 는 no-op).
+    const route = resolveRunCompletionRoute(run.kind);
     let status: string | null = null;
-    try {
-      const getTool = run.kind === 'qa' ? 'get_qa_run' : 'get_security_run';
-      const resp = await callMcpTool(this._config, getTool, {
-        run_id: run.run_id,
-        workspace_id: run.workspace_id,
-      });
-      const rec = unwrapToolResult(resp);
-      if (rec && typeof rec.status === 'string') status = rec.status;
-    } catch (err: any) {
-      log(`[chat-session] orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+    if (route.getTool) {
+      try {
+        const resp = await callMcpTool(this._config, route.getTool, {
+          run_id: run.run_id,
+          workspace_id: run.workspace_id,
+        });
+        const rec = unwrapToolResult(resp);
+        if (rec && typeof rec.status === 'string') status = rec.status;
+      } catch (err: any) {
+        log(`[chat-session] orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+      }
     }
     if (status === 'passed' || status === 'failed' || status === 'error') {
       // Run already finalized — the strays are the agent's own leftovers, not a
@@ -695,11 +702,10 @@ export class ChatSessionManager
       `session cleanup killed ${orphans.length} live background task(s) — ` +
       `run 세션이 재호출 계약 없이 살아있는 백그라운드 태스크를 남긴 채 턴을 종료했습니다. ` +
       `reaped pids: ${pidList}. ${detail}`;
-    const completeTool = run.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
-    await fireAndForgetTool(this._config, completeTool, {
+    await fireAndForgetTool(this._config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,
-      status: 'error',
+      status: route.failureStatus,
       summary,
     });
     sess._run = undefined; // finalized — don't sweep this session again

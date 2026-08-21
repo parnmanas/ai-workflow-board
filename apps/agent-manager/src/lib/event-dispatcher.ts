@@ -46,6 +46,7 @@ import {
   provisionRunWorkspace,
   reconcileRunBaseWorkingDir,
   resolveRunFolder,
+  resolveRunCompletionRoute,
 } from './run-provisioner.js';
 
 interface ResolvedEnvironmentConfig {
@@ -508,6 +509,13 @@ export interface ChatDispatchArgs {
    *  prompt then tells the subagent to perform the task DIRECTLY instead of
    *  filing an AWB ticket, and skips the auto-title instruction. */
   isActionRoom?: boolean;
+  /** ticket 9fd27487: 이번 디스패치가 실제로 프로비저닝된 절대경로 cwd
+   *  (`.awb/act/<action8>` 또는 `.awb/chat/<room8>`) — opt-in하지 않은 채팅
+   *  workspace라면 그냥 에이전트의 통상적인 working_dir 루트일 뿐인 `agentContext.cwd`와는
+   *  다르다. 프로비저닝이 실행되어 성공했을 때만 값이 설정되므로, 기본값(여기서는
+   *  undefined)일 때는 첫 턴 프롬프트의 폴더 경계 블록이 working_dir 루트 자체를
+   *  "네게 배정된 작업폴더"라고 잘못 주장하지 않고 그대로 부재 상태를 유지한다. */
+  provisionedWorkFolder?: string;
   onProgress?: (stage: string) => void;
   /** ST-6: per-event managed-agent runtime context. When set, the chat
    *  session spawns under this agent's identity (apiKey + cwd + cli) so the
@@ -772,6 +780,7 @@ export interface PromptComposer {
     newMessage: string,
     roomId?: string,
     usesNativeMcp?: ChatReplyMode,
+    workFolder?: string,
   ): string;
   composeChatRoomPrompt(
     roomId: string,
@@ -782,6 +791,7 @@ export interface PromptComposer {
     historyAttachments?: Map<any, any[]>,
     roomName?: string,
     isActionRoom?: boolean,
+    workFolder?: string,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -3035,7 +3045,39 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    if (agentContext?.cli === 'hermes') {
+    // ticket 9fd27487: handleChatRoomMessage의 run-workspace 프로비저닝에 대응하는
+    // DM / @-멘션 쪽 짝. `chat_request`는 (chat_room_message와 달리) DM이나 명시적
+    // @-멘션의 정식(canonical) 디스패치 경로다 — manager 에이전트 자신의 운영 채팅이
+    // 바로 이 경우이므로, chat_room_message가 처리하는 그룹룸 턴만으로는 부족하고
+    // 이 경로도 자체적인 cwd 고정이 필요하다. `run_provision`은 대상 workspace가
+    // chat_workspace_folder_enabled를 켰을 때만 존재하며(서버 측 게이트), 채팅용
+    // RunProvision은 항상 repo:null을 갖는다(ChatRoom에는 repo_ref 옵션이 없다) —
+    // 그래서 여기서의 프로비저닝은 저비용 best-effort mkdir 수준으로 낮춰 처리한다.
+    // QA/action 경로의 완전한 락 + "실패하면 디스패치 자체를 중단"하는 절차까지는
+    // 쓸 필요가 없다(폴더 mkdir 하나 실패했다고 DM 답장을 통째로 버리는 쪽이 그냥
+    // working_dir 루트에서 답하는 것보다 더 나쁜 결과다).
+    let runContext = agentContext;
+    // runContext.cwd와는 별도로 추적한다: composeChatPrompt에 폴더 경계 블록의
+    // 트리거로 전달되는데, opt-in하지 않은 workspace라면 반드시 ''(블록 없음,
+    // {{AWB_WORK_FOLDER}} 치환도 없음)을 유지해야 하기 때문이다 — 위에서
+    // 프로비저닝이 실패한 뒤에는 runContext.cwd만 봐서는 "프로비저닝됨"과
+    // "그냥 에이전트의 통상적인 working_dir 루트"를 구분할 수 없다.
+    let provisionedWorkFolder = '';
+    const runProvision = parseRunProvision(payload.run_provision);
+    if (runProvision && agentContext) {
+      const result = await provisionRunWorkspace(runProvision, agentContext.cwd);
+      if (result.ok) {
+        runContext = { ...agentContext, cwd: result.dir };
+        provisionedWorkFolder = result.dir;
+      } else {
+        log(
+          `[chat-request] run-workspace provisioning failed for room=${payload.room_id || ''} ` +
+            `(continuing at working_dir root): ${result.error || 'unknown error'}`,
+        );
+      }
+    }
+
+    if (runContext?.cli === 'hermes') {
       const rolePrompt = payload.role_prompt || '';
       const taskText =
         this.#prompts?.composeChatPrompt(
@@ -3044,13 +3086,14 @@ export class EventDispatcher {
           payload.new_message || '',
           payload.room_id || '',
           'agent_manager_delivers',
+          provisionedWorkFolder,
         ) ?? `[chat] ${payload.new_message || ''}`;
       let replyText = '';
       try {
         const result = await this.#dispatchHermes({
-          agentContext,
-          runId: `chat:${payload.room_id || payload.user_id || 'direct'}:${agentContext.agent_id}`,
-          leaseId: `chat:${agentContext.cwd}`,
+          agentContext: runContext,
+          runId: `chat:${payload.room_id || payload.user_id || 'direct'}:${runContext.agent_id}`,
+          leaseId: runProvision?.run_id || `chat:${runContext.cwd}`,
           systemContext: rolePrompt,
           task: taskText,
           onEvent: (event) => {
@@ -3064,7 +3107,7 @@ export class EventDispatcher {
         await this.#reportHermesDispatchOutcome(
           'Hermes chat dispatch',
           payload.room_id,
-          agentContext.agent_id,
+          runContext.agent_id,
           result,
           replyText,
         );
@@ -3072,7 +3115,7 @@ export class EventDispatcher {
         await this.#reportHermesDispatchFailure(
           'Hermes chat dispatch',
           payload.room_id,
-          agentContext.agent_id,
+          runContext.agent_id,
           err?.code || 'runtime_dispatch_error',
           err?.message ?? String(err),
         );
@@ -3087,7 +3130,7 @@ export class EventDispatcher {
       payload.room_id
     ) {
       const chatResponderId =
-        payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
+        payload.agent_id || runContext?.agent_id || loadAgentInfo()?.agent_id || '';
       const onProgress = (stage: string): void => {
         const status = stage === 'thinking' ? 'thinking' : 'composing reply';
         this.#setChatRoomTyping(payload.room_id, true, status, chatResponderId).catch(() => {});
@@ -3095,7 +3138,7 @@ export class EventDispatcher {
       try {
         const result = await this.#chatSessionManager.dispatch({
           roomId: payload.room_id,
-          agentId: payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '',
+          agentId: payload.agent_id || runContext?.agent_id || loadAgentInfo()?.agent_id || '',
           senderId: payload.user_id || '',
           senderName: '',
           messageId: payload.message_id || '',
@@ -3103,7 +3146,8 @@ export class EventDispatcher {
           content: payload.new_message || '',
           rolePrompt: payload.role_prompt || '',
           onProgress,
-          agentContext,
+          agentContext: runContext,
+          provisionedWorkFolder,
         });
         if (result.dispatched) {
           log(
@@ -3139,7 +3183,7 @@ export class EventDispatcher {
       // and posts the reply. Compose the channel instruction to match so the
       // subagent isn't told to use a tool it lacks (or to suppress the stdout
       // the manager reads).
-      const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+      const usesNativeMcp = createAdapter(runContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
       const taskText =
         this.#prompts?.composeChatPrompt(
           rolePrompt,
@@ -3147,6 +3191,7 @@ export class EventDispatcher {
           newMessage,
           payload.room_id || '',
           usesNativeMcp,
+          provisionedWorkFolder,
         ) ?? `[chat] ${newMessage}`;
 
       try {
@@ -3162,7 +3207,7 @@ export class EventDispatcher {
           ticketId: payload.ticket_id || '',
           agentId: payload.agent_id || '',
           roomId: payload.room_id || '',
-          agentContext,
+          agentContext: runContext,
         });
 
         if (result.spawned) {
@@ -3920,13 +3965,19 @@ export class EventDispatcher {
         }
         // Finalize the run as error so it doesn't hang waiting on the liveness
         // reaper — the run subagent never spawns, so nothing else will close it.
-        const completeTool = runProvision.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
-        await fireAndForgetTool(this.#config, completeTool, {
-          run_id: runProvision.run_id,
-          workspace_id: runProvision.workspace_id,
-          status: 'error',
-          summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
-        });
+        // ticket 9fd27487: 'chat'에는 complete_*_run 툴 자체가 없다(일반 채팅방은
+        // one-shot run이 아니다 — RunProvisionKind 참고); qa/security/action은
+        // 공통 kind→tool 계약을 그대로 타고 간다(chat-session-manager.ts /
+        // subagent-manager.ts의 orphan-sweep에서도 동일하게 사용).
+        if (runProvision.kind !== 'chat') {
+          const route = resolveRunCompletionRoute(runProvision.kind);
+          await fireAndForgetTool(this.#config, route.completeTool, {
+            run_id: runProvision.run_id,
+            workspace_id: runProvision.workspace_id,
+            status: route.failureStatus,
+            summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
+          });
+        }
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
         log(`Chat room run dispatch aborted — provisioning failed: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
         return;
@@ -3954,6 +4005,13 @@ export class EventDispatcher {
       if (agentContext) runContext = { ...agentContext, cwd: result.dir };
       log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
     }
+    // ticket 9fd27487: composeChatRoomPrompt에 폴더 경계 블록 트리거로 전달된다.
+    // 프로비저닝 실패(FAILURE)라면 위에서 이미 "런 작업폴더 프로비저닝 실패" abort
+    // 경로로 return했으므로, 여기까지 도달했는데 runProvision이 truthy라는 것은
+    // 항상 바로 위 줄의 cwd 고정이 성공했다는 뜻이다 — runContext.cwd를 그대로
+    // 읽어도 안전하다. runProvision이 null/부재(opt-in하지 않은 workspace의
+    // 일반 채팅 턴)라면 이 값은 ''로 유지된다.
+    const provisionedWorkFolder = runProvision ? (runContext?.cwd || '') : '';
 
     // Three-stage typing contract:
     //   reading   — set immediately on receive
@@ -3998,6 +4056,7 @@ export class EventDispatcher {
             undefined,
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
+            provisionedWorkFolder,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
@@ -4059,10 +4118,15 @@ export class EventDispatcher {
           isActionRoom: !!p.is_action_room,
           onProgress,
           agentContext: runContext,
+          provisionedWorkFolder,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
           // ticket 89716f04 — thread run identity so the session's turn end is
           // swept for orphaned background tasks (one-shot run, no re-invocation).
-          run: runProvision
+          // ticket 9fd27487: kind:'chat'은 의도적으로 제외한다 — 일반 채팅방은
+          // complete_*_run 생명주기가 없는 계속 진행 중인 대화이므로(RunSessionBinding
+          // 참고), 여기서 바인딩해 버리면 sweep이 에이전트의 정당한 장기 백그라운드
+          // 작업까지 걷어가 버린다.
+          run: runProvision && runProvision.kind !== 'chat'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
@@ -4141,6 +4205,7 @@ export class EventDispatcher {
             undefined,
             '',
             !!p.is_action_room,
+            provisionedWorkFolder,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({
@@ -4157,7 +4222,9 @@ export class EventDispatcher {
           // ticket 55d3063f: thread run identity so the oneshot exit handler
           // sweeps this turn end for orphaned background tasks (one-shot run,
           // no re-invocation) — the twin of the persistent path's `run` above.
-          run: runProvision
+          // ticket 9fd27487: kind:'chat' 제외 — persistent 경로 위쪽의 동일한
+          // 가드 참고(RunSessionBinding에는 'chat' 멤버가 없다).
+          run: runProvision && runProvision.kind !== 'chat'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,

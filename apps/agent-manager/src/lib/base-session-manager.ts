@@ -158,11 +158,17 @@ interface TurnState {
   heartbeatTimer: NodeJS.Timeout | null;
 }
 
-/** Identity of a one-shot QA/security run bound to a chat session (ticket
- *  89716f04). Only ChatSessionManager stamps this — its presence marks a
- *  session whose turn end must be swept for live background tasks. */
+/** 채팅 세션에 바인딩된 one-shot QA/security/Action run 의 식별자
+ *  (ticket 89716f04, ticket 9fd27487 에서 'action' 으로 확장). ChatSessionManager
+ *  만 이 값을 찍는다 — 이 값이 있다는 것은 턴이 끝날 때 살아있는 백그라운드
+ *  태스크가 있는지 스윕해야 하는 세션이라는 표시다. 'chat'(RunProvisionKind 의
+ *  네 번째 멤버)은 의도적으로 제외한다: 일반 채팅방은 진행 중인 대화일 뿐,
+ *  complete_*_run 생명주기를 향해 스윕해야 할 one-shot run 이 아니다 — 호출자는
+ *  RunProvision → RunSessionBinding 경계(event-dispatcher 의
+ *  handleChatRoomMessage 참고)에서 이를 걸러내야 하며, kind:'chat' 을 이
+ *  경계 너머로 절대 넘기면 안 된다. */
 export interface RunSessionBinding {
-  kind: 'qa' | 'security';
+  kind: 'qa' | 'security' | 'action';
   run_id: string;
   workspace_id: string;
 }

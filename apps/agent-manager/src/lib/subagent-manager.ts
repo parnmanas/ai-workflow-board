@@ -46,6 +46,7 @@ import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
   findLiveGroupBackgroundTasks,
   reapProcessTrees,
@@ -1336,18 +1337,23 @@ export class SubagentManager implements SubagentManagerContract {
 
     // Never overwrite a run the agent already finalized. Availability-first: an
     // unreadable status is treated as non-terminal so a transient server hiccup
-    // doesn't leave the trap uncaught.
+    // 트랩을 놓치는 일이 없게 한다. ticket 9fd27487: 'action' 은 getTool 이
+    // null 이므로(get_action_run tool 이 없음) 항상 아래 reap 경로로 빠진다 —
+    // complete_action_run 의 terminal 전이는 멱등이라 안전하다(이미 terminal 인
+    // run 에 걸리는 stray finalize 는 no-op).
+    const route = resolveRunCompletionRoute(run.kind);
     let status: string | null = null;
-    try {
-      const getTool = run.kind === 'qa' ? 'get_qa_run' : 'get_security_run';
-      const resp = await callMcpTool(this.#config, getTool, {
-        run_id: run.run_id,
-        workspace_id: run.workspace_id,
-      });
-      const rec = unwrapToolResult(resp);
-      if (rec && typeof rec.status === 'string') status = rec.status;
-    } catch (err: any) {
-      log(`[subagent] run orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+    if (route.getTool) {
+      try {
+        const resp = await callMcpTool(this.#config, route.getTool, {
+          run_id: run.run_id,
+          workspace_id: run.workspace_id,
+        });
+        const rec = unwrapToolResult(resp);
+        if (rec && typeof rec.status === 'string') status = rec.status;
+      } catch (err: any) {
+        log(`[subagent] run orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+      }
     }
     if (status === 'passed' || status === 'failed' || status === 'error') {
       // Run already finalized — the strays are the agent's own leftovers, not a
@@ -1376,11 +1382,10 @@ export class SubagentManager implements SubagentManagerContract {
       `session cleanup killed ${orphans.length} live background task(s) — ` +
       `원샷 run 세션이 재호출 계약 없이 살아있는 백그라운드 태스크를 남긴 채 턴을 종료했습니다. ` +
       `reaped pids: ${pidList}. ${detail}`;
-    const completeTool = run.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
-    await fireAndForgetTool(this.#config, completeTool, {
+    await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,
-      status: 'error',
+      status: route.failureStatus,
       summary,
     });
     record.run = null; // finalized — belt-and-suspenders against a double sweep
