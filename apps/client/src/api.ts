@@ -2161,6 +2161,15 @@ export const api = {
       perBoard: Record<string, number>;
       ticketBoard: Record<string, string>;
     }>('/tickets/unread-counts'),
+  // Bulk mark-read for ticket comments — same idea as markAllMentionsRead but
+  // upserts TicketReadState instead of touching UserMention rows. `boardId`
+  // narrows to one board's involved tickets; omitted marks every involved
+  // ticket in the current workspace (X-Workspace-Id header) read.
+  markAllTicketsRead: (boardId?: string): Promise<{ updated: number }> =>
+    request<{ updated: number }>('/tickets/read-all', {
+      method: 'POST',
+      body: JSON.stringify(boardId ? { board_id: boardId } : {}),
+    }),
   getPendingUsersCount: (): Promise<{ count: number }> =>
     request<{ count: number }>('/admin/pending-users/count'),
   getAgentErrorsUnseenCount: (since?: string | null): Promise<{ count: number }> => {

@@ -92,6 +92,12 @@ interface NotificationContextValue {
    */
   markRead: (source: NotificationSource, key?: string) => void;
   /**
+   * Zero out every ticket-comment badge that rolls up into one board (the
+   * sidebar / board-page "모두 읽음" action) — optimistic, tells other tabs.
+   * `boardId` omitted clears every board (workspace-wide "모두 읽음").
+   */
+  markTicketsReadForBoard: (boardId?: string) => void;
+  /**
    * Drop `count` mentions from the badge because the server cleared them as a
    * side effect of the caller reading their source (a ticket thread or a chat
    * room). Pass the `mentions_cleared` the read endpoint returned; 0 is a
@@ -170,6 +176,7 @@ function fireBrowserNotification(req: NotiRequest) {
 // per-browser, not per-user, and every message runs on every tab.
 type BroadcastMsg =
   | { type: 'mark-read'; source: NotificationSource; key?: string }
+  | { type: 'mark-tickets-read-for-board'; boardId?: string }
   | { type: 'mentions-cleared'; count: number }
   | { type: 'refresh' };
 
@@ -366,6 +373,36 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => ({ ...prev, mentions: Math.max(0, prev.mentions - count) }));
   }, [mutateCounts]);
 
+  // Pure state mutation for the board-scoped (or, boardId omitted,
+  // workspace-wide) "모두 읽음" action. Unlike applyMarkRead('tickets', key)
+  // — which clears ONE ticket — this walks ticketBoard to find every ticket
+  // that rolls up into the given board and clears all of them at once, so
+  // the board badge and every affected TicketCard badge drop to 0 together
+  // instead of the board number lagging behind N individual clears.
+  const applyMarkTicketsReadForBoard = useCallback((boardId?: string) => {
+    mutateCounts((prev) => {
+      if (!boardId) {
+        return { ...prev, tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} } };
+      }
+      const perTicket = { ...prev.tickets.perTicket };
+      const ticketBoard = { ...prev.tickets.ticketBoard };
+      let removed = 0;
+      for (const [ticketId, tBoardId] of Object.entries(prev.tickets.ticketBoard)) {
+        if (tBoardId !== boardId) continue;
+        removed += perTicket[ticketId] || 0;
+        delete perTicket[ticketId];
+        delete ticketBoard[ticketId];
+      }
+      if (removed === 0) return prev;
+      const perBoard = { ...prev.tickets.perBoard };
+      delete perBoard[boardId];
+      return {
+        ...prev,
+        tickets: { total: Math.max(0, prev.tickets.total - removed), perTicket, perBoard, ticketBoard },
+      };
+    });
+  }, [mutateCounts]);
+
   // ─── BroadcastChannel cross-tab sync ────────────────────────────────
   useEffect(() => {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
@@ -378,6 +415,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         void refresh();
       } else if (msg.type === 'mark-read') {
         applyMarkRead(msg.source, msg.key);
+      } else if (msg.type === 'mark-tickets-read-for-board') {
+        applyMarkTicketsReadForBoard(msg.boardId);
       } else if (msg.type === 'mentions-cleared') {
         applyMentionsCleared(msg.count);
       }
@@ -386,7 +425,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       bc.close();
       bcRef.current = null;
     };
-  }, [refresh, applyMarkRead, applyMentionsCleared]);
+  }, [refresh, applyMarkRead, applyMarkTicketsReadForBoard, applyMentionsCleared]);
 
   const broadcast = useCallback((msg: BroadcastMsg) => {
     try {
@@ -402,6 +441,14 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       broadcast({ type: 'mark-read', source, key });
     },
     [applyMarkRead, broadcast],
+  );
+
+  const markTicketsReadForBoard = useCallback(
+    (boardId?: string) => {
+      applyMarkTicketsReadForBoard(boardId);
+      broadcast({ type: 'mark-tickets-read-for-board', boardId });
+    },
+    [applyMarkTicketsReadForBoard, broadcast],
   );
 
   const noteMentionsCleared = useCallback(
@@ -648,10 +695,11 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       requestNotificationPermission,
       refresh,
       markRead,
+      markTicketsReadForBoard,
       noteMentionsCleared,
       markAgentErrorsSeen,
     }),
-    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, noteMentionsCleared, markAgentErrorsSeen],
+    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markTicketsReadForBoard, noteMentionsCleared, markAgentErrorsSeen],
   );
 
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
