@@ -67,6 +67,11 @@ export interface InstanceRecord {
   // ticket_title is joined server-side (see AgentManagerController.list()), so
   // the stored record carries only ticket_id.
   active_worktrees?: WorktreeStatusEntry[];
+  // manager의 `.awb/act` / `.awb/chat` 아래에 있는 라이브 Action-Run / 채팅방
+  // 워크스페이스(티켓 9fd27487). active_worktrees와 동일한 presence 계약을 따른다
+  // — 구버전 manager는 undefined로 남기며, 이 경우 관리자 UI는 "run-workspace
+  // 텔레메트리 없음"으로 축소 표시한다.
+  active_run_workspaces?: RunWorkspaceStatusEntry[];
   // Per-CLI model lists this manager's installed CLIs accept (cliType →
   // model ids), gathered via each adapter's listModels() at boot. Powers the
   // per-agent model selector in the admin UI. Older managers leave undefined.
@@ -156,6 +161,26 @@ export interface WorktreeStatusEntry {
   /** Human ticket title, joined server-side from `ticket_id`. Absent on the
    *  wire; undefined when the ticket_id is null or the ticket row is gone. */
   ticket_title?: string | null;
+}
+
+/**
+ * manager heartbeat 에서 보고되는 라이브 Action-Run 또는 채팅방 워크스페이스 하나
+ * (티켓 9fd27487). `apps/agent-manager/src/lib/instance-heartbeat.ts` 의
+ * RunWorkspaceStatusEntry 를 그대로 미러링한다 — wire shape 이 바뀌면 두 곳을
+ * 함께 동기화할 것.
+ */
+export interface RunWorkspaceStatusEntry {
+  /** 이 경로가 속한 `.awb/act|chat/` 루트를 가진 managed-agent 의 기준 working_dir. */
+  working_dir: string;
+  /** 절대 경로 (`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
+  path: string;
+  kind: 'action' | 'chat';
+  /** 마지막 경로 세그먼트 — action/room id 앞 8자리, 또는 커스텀 `workspace_folder` leaf. */
+  leaf: string;
+  /** 마지막으로 성공한 프로비저닝의 ISO 타임스탬프, 폴더가 liveness 마커보다 먼저 생성됐다면 null. */
+  last_used_at: string | null;
+  /** 지금 이 폴더 안에 라이브 프로세스가 있음을 의미한다(manager 측 `/proc` 교차 확인). */
+  live: boolean;
 }
 
 const INSTANCE_TTL_MS = 90_000;     // 3x default manager heartbeat interval

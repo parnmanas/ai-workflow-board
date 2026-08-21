@@ -63,6 +63,11 @@ export interface InstanceMeta {
   // means older servers see no change; newer ones render the "Live worktrees"
   // panel with the shared slot→task mapping.
   worktreeStatusProvider?: WorktreeStatusProvider | null;
+  // 매니저가 파악 중인 Action-Run / 채팅방 작업폴더(`.awb/act` / `.awb/chat`
+  // 아래)를 매 tick마다 열거하는 provider (ticket 9fd27487). worktreeStatusProvider와
+  // 동일한 best-effort 계약 — 에러는 삼켜지고, []를 반환하거나(혹은 아예
+  // 생략하면) 필드를 건너뛴다.
+  runWorkspaceStatusProvider?: RunWorkspaceStatusProvider | null;
   // Per-tick count of currently-open dispatch circuit breakers. Kept as a
   // provider so the heartbeat always reflects the live in-memory state.
   openBreakerCountProvider?: (() => number) | null;
@@ -139,6 +144,31 @@ export interface WorktreeStatusEntry {
  *  best-effort — must never throw; returning [] skips the heartbeat field. */
 export type WorktreeStatusProvider = () => Promise<WorktreeStatusEntry[]>;
 
+/** 매니저가 현재 파악하고 있는 살아있는 Action-Run 또는 채팅방 작업폴더 하나
+ *  (ticket 9fd27487) — 관리자용 "Run workspaces" 화면에 쓰인다. worktree-manager.ts의
+ *  RunWorkspaceSnapshotEntry를 그대로 미러링하되 snake_case wire 키로 평탄화하고,
+ *  자신이 속한 managed-agent 의 working_dir 를 태그로 붙인다 — WorktreeStatusEntry와
+ *  동일한 형태 관례다. worktree와 달리 이들은 평범한 디렉터리일 뿐이다(branch 없음,
+ *  pool lease 없음, `git worktree list` 항목도 없음). */
+export interface RunWorkspaceStatusEntry {
+  /** 이 작업폴더의 `.awb/act|chat/` 루트가 속한 managed-agent 기준 working_dir. */
+  working_dir: string;
+  /** 절대경로 (`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
+  path: string;
+  kind: 'action' | 'chat';
+  /** 경로 마지막 세그먼트 — action/room id 의 앞 8자리, 또는 커스텀 `workspace_folder` leaf. */
+  leaf: string;
+  /** 마지막으로 성공한 provision 의 ISO 타임스탬프. liveness 마커보다 먼저 있던 폴더라면 null. */
+  last_used_at: string | null;
+  /** 현재 이 폴더 안에 살아있는 프로세스가 있음을 나타낸다(`/proc` cross-check). */
+  live: boolean;
+}
+
+/** 감독 중인 모든 managed agent 전체에서 살아있는 Action-Run / 채팅방 작업폴더를
+ *  매 tick마다 열거하는 provider (ticket 9fd27487). WorktreeStatusProvider와 동일한
+ *  async / best-effort 계약을 따른다. */
+export type RunWorkspaceStatusProvider = () => Promise<RunWorkspaceStatusEntry[]>;
+
 export interface InstanceHeartbeatPayload {
   instance_id: string;
   agent_id: string | null;
@@ -167,6 +197,10 @@ export interface InstanceHeartbeatPayload {
   // rows. Older AWB servers ignore it; newer ones render the "Live worktrees"
   // panel with the shared slot→task mapping.
   active_worktrees?: WorktreeStatusEntry[];
+  // 살아있는 Action-Run / 채팅방 작업폴더 목록 (ticket 9fd27487). active_worktrees와
+  // 동일한 presence 계약 — provider 가 배선되어 있고 row 를 반환할 때만 설정된다.
+  // 이전 버전 AWB 서버는 이 필드를 무시한다.
+  active_run_workspaces?: RunWorkspaceStatusEntry[];
   // Self-update fields — populated when InstanceMeta carries an UpdateChecker.
   // Older AWB servers ignore them; newer ones surface them on the admin UI.
   latest_version?: string | null;
@@ -228,6 +262,7 @@ export class InstanceHeartbeat {
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
     const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
+    const runWorkspaceStatusProvider = meta?.runWorkspaceStatusProvider ?? null;
     const openBreakerCountProvider = meta?.openBreakerCountProvider ?? null;
     const dispatchSuppressionCountsProvider = meta?.dispatchSuppressionCountsProvider ?? null;
     const dispatchBlockCountsProvider = meta?.dispatchBlockCountsProvider ?? null;
@@ -302,6 +337,17 @@ export class InstanceHeartbeat {
           activeWorktrees = [];
         }
       }
+      // 동일한 best-effort 계약: run-workspace provider 가 throw 하더라도 heartbeat 이
+      // 절대 wedge 되어서는 안 된다 — 실패는 "이번 tick 에는 run workspace 없음"으로 취급한다.
+      let activeRunWorkspaces: RunWorkspaceStatusEntry[] = [];
+      if (runWorkspaceStatusProvider) {
+        try {
+          activeRunWorkspaces = await runWorkspaceStatusProvider();
+        } catch (err: any) {
+          log(`Instance heartbeat: run-workspace-status provider failed: ${err?.message ?? err}`);
+          activeRunWorkspaces = [];
+        }
+      }
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -323,6 +369,7 @@ export class InstanceHeartbeat {
           : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
+        ...(activeRunWorkspaces.length ? { active_run_workspaces: activeRunWorkspaces } : {}),
         ...(openBreakerCountProvider ? { open_breaker_count: openBreakerCount } : {}),
         ...(dispatchSuppressionCountsProvider && Object.keys(dispatchSuppressionCounts).length > 0
           ? { dispatch_suppression_counts: dispatchSuppressionCounts }
