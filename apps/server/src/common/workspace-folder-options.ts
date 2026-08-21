@@ -45,6 +45,11 @@ export const BUILD_MODES: BuildMode[] = ['cold_then_warm', 'always_cold', 'alway
 export const DEFAULT_CHECKOUT_MODE: CheckoutMode = 'reuse';
 export const DEFAULT_BUILD_MODE: BuildMode = 'cold_then_warm';
 
+/** 서버가 프로비저닝하는 모든 run/dispatch 작업공간의 종류(ticket 9fd27487에서
+ *  기존 'qa'|'security' 두 개뿐이던 조합을 확장한 것). 각 kind는 각자 고정된
+ *  `.awb/<root>` 폴더를 루트로 삼는다 — `runWorkspaceRootForKind` 참고. */
+export type RunWorkspaceKind = 'qa' | 'security' | 'action' | 'chat';
+
 /**
  * Fixed root (relative to the agent's working_dir) for every QA/security run
  * folder: `.awb/qa` (worktree 규약 ③). Mirrors the worktree convention's
@@ -55,6 +60,29 @@ export const DEFAULT_BUILD_MODE: BuildMode = 'cold_then_warm';
  * server never knows), and the run prompt names the same relative path.
  */
 export const RUN_WORKSPACE_ROOT = '.awb/qa';
+
+/** Action Run 루트(ticket 9fd27487) — run-keyed가 아니라 action-keyed라서
+ *  같은 Action의 모든 Run이 하나의 warm 폴더를 재사용한다(QA/security가
+ *  run-keyed가 아니라 scenario/profile-keyed인 것과 같은 방식). */
+export const ACTION_WORKSPACE_ROOT = '.awb/act';
+
+/** 일반 채팅방 루트(ticket 9fd27487) — room-keyed. qa/security/action과
+ *  달리 채팅방 폴더는 기본적으로 repo checkout이 전혀 없다('chat'에 대한
+ *  `resolveRepoRef` 호출부 참고 — 향후 호출부가 명시적으로 opt-in하지 않는 한
+ *  채팅 디스패치의 RunProvision.repo는 항상 null로 유지된다), 그래서 이
+ *  루트는 항상 에이전트가 만든 빈 scratch 폴더만 담는다. */
+export const CHAT_WORKSPACE_ROOT = '.awb/chat';
+
+/** 주어진 run-workspace kind에 대해 고정된 `.awb/<root>`를 반환한다. QA와
+ *  security는 의도적으로 루트 하나를 공유하며(`.awb/qa`, 이 타입이 생기기
+ *  전부터 변함없음 — resolveWorkspaceFolder의 doc comment 참고), action과
+ *  chat은 각자 별도의 루트를 가져서 이 티켓이 폴더를 추가하는 세 가지
+ *  "run 유사" 실행 경로가 디스크상에서 시각적으로 구분되도록 한다. */
+export function runWorkspaceRootForKind(kind: RunWorkspaceKind): string {
+  if (kind === 'action') return ACTION_WORKSPACE_ROOT;
+  if (kind === 'chat') return CHAT_WORKSPACE_ROOT;
+  return RUN_WORKSPACE_ROOT;
+}
 
 /**
  * The in-prompt shell token for a run's working folder. The agent-manager
@@ -124,12 +152,12 @@ export function normalizeRepoRef(input: any): WorkspaceFolderRepoRef | null {
  */
 export function resolveWorkspaceFolder(
   folder: string | null | undefined,
-  kind: 'qa' | 'security',
+  kind: RunWorkspaceKind,
   id: string,
 ): string {
   const explicit = normalizeWorkspaceFolder(folder);
   const leaf = explicit || String(id || '').slice(0, 8) || kind;
-  return `${RUN_WORKSPACE_ROOT}/${leaf}`;
+  return `${runWorkspaceRootForKind(kind)}/${leaf}`;
 }
 
 export interface RunFreshnessInput {
@@ -185,24 +213,31 @@ export interface RunRepoSpec {
 }
 
 /**
- * The structured provisioning hint the server ships on the QA/security run
- * dispatch (`chat_room_message` payload). It tells the agent-manager exactly
- * which folder to prepare and how, BEFORE the run subagent spawns — closing the
- * gap that ticket (3) left to the prompt alone:
- *   - `workspace_folder` is the resolved working_dir-relative folder under
- *     `.awb/qa` (`resolveWorkspaceFolder` output, e.g. `.awb/qa/<scenario8>`);
- *     the agent-manager joins it onto the agent's working_dir (규약 ③).
+ * 서버가 run/dispatch의 `chat_room_message` payload에 실어 보내는 구조화된
+ * 프로비저닝 힌트다. run subagent가 spawn되기 전에 agent-manager에게 어느
+ * 폴더를 어떻게 준비해야 하는지 정확히 알려줘서 — ticket (3)이 prompt에만
+ * 맡겨뒀던 공백을 메운다:
+ *   - `workspace_folder`는 이 kind의 root 아래로 해석된 working_dir-relative
+ *     폴더다(`resolveWorkspaceFolder` 출력, 예: `.awb/qa/<scenario8>`,
+ *     `.awb/act/<action8>`, `.awb/chat/<room8>`); agent-manager가 이를
+ *     에이전트의 working_dir에 결합한다(규약 ③).
  *   - `repo` is the already-resolved clone source (or null = nothing to clone,
  *     just ensure the folder exists; the prompt still tells the agent what to do).
+ *     일반 채팅 디스패치(`kind:'chat'`)는 항상 `repo: null`을 실어 보낸다 —
+ *     ticket 9fd27487은 대화형 세션이 원치 않는 clone을 강제로 겪지 않도록
+ *     채팅방에는 의도적으로 repo_ref 노브를 주지 않았다.
  *   - `checkout_mode` drives reuse (fetch+ff-pull / clone) vs fresh (wipe + clone).
  *   - `run_id` / `workspace_id` let the manager finalize the run as `error` if
- *     provisioning fails (the "dispatch 중단 + 코멘트" path).
+ *     프로비저닝이 실패하는 경우다(the "dispatch 중단 + 코멘트" 경로).
+ *     `kind:'chat'`에는 애초에 종료 처리할 run이 없다 — agent-manager는
+ *     채팅용 RunProvision을 one-shot run으로 취급해서는 안 된다(event-dispatcher의
+ *     handleChatRoomMessage 참고).
  *
  * Provisioner = source sync only (checkout). Build/test stays the agent's job
  * (the responsibility boundary agreed with ticket (3)).
  */
 export interface RunProvision {
-  kind: 'qa' | 'security';
+  kind: RunWorkspaceKind;
   run_id: string;
   workspace_id: string;
   workspace_folder: string;

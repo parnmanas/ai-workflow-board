@@ -1126,6 +1126,9 @@ export const api = {
     trigger_label?: string;
     enabled?: boolean;
     max_runs?: number;
+    workspace_folder?: string;
+    repo_ref?: Action['repo_ref'];
+    checkout_mode?: Action['checkout_mode'];
   }) =>
     request<Action>('/actions', { method: 'POST', body: JSON.stringify(data) }),
   updateAction: (
@@ -1141,6 +1144,9 @@ export const api = {
       trigger_label?: string;
       enabled?: boolean;
       max_runs?: number;
+      workspace_folder?: string;
+      repo_ref?: Action['repo_ref'];
+      checkout_mode?: Action['checkout_mode'];
     },
   ) =>
     request<Action>(`/actions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -2161,6 +2167,15 @@ export const api = {
       perBoard: Record<string, number>;
       ticketBoard: Record<string, string>;
     }>('/tickets/unread-counts'),
+  // 티켓 코멘트 일괄 읽음 처리 — markAllMentionsRead와 같은 아이디어를,
+  // UserMention 행 대신 TicketReadState에 upsert하는 방식으로 적용한다.
+  // `boardId`는 그 보드의 관여 티켓만 좁히고, 생략하면 현재 워크스페이스
+  // (X-Workspace-Id 헤더)의 관여 티켓 전체를 읽음 처리한다.
+  markAllTicketsRead: (boardId?: string): Promise<{ updated: number }> =>
+    request<{ updated: number }>('/tickets/read-all', {
+      method: 'POST',
+      body: JSON.stringify(boardId ? { board_id: boardId } : {}),
+    }),
   getPendingUsersCount: (): Promise<{ count: number }> =>
     request<{ count: number }>('/admin/pending-users/count'),
   getAgentErrorsUnseenCount: (since?: string | null): Promise<{ count: number }> => {
@@ -2185,6 +2200,10 @@ export const api = {
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
+    /** 글로벌(workspace 비종속) 팀으로 생성. 기본값 false. */
+    is_global?: boolean;
+    /** 글로벌 팀 전용: orchestrator가 미션을 만들 수 있는 workspace 목록. */
+    allowed_workspace_ids?: string[];
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
     id: string,
@@ -2197,6 +2216,8 @@ export const api = {
       max_parallel_steps?: number;
       max_open_missions?: number;
       enabled?: boolean;
+      /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
+      allowed_workspace_ids?: string[];
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteOrchestrationTeam: (id: string, workspaceId: string) =>
@@ -2222,10 +2243,11 @@ export const api = {
       `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
       { method: 'DELETE' },
     ),
-  listOrchestrationAgents: (workspaceId: string) =>
-    request<OrchestrationAssignableAgent[]>(
-      `/orchestration/assignable-agents?workspace_id=${encodeURIComponent(workspaceId)}`,
-    ),
+  listOrchestrationAgents: (workspaceId: string, opts?: { globalOnly?: boolean }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.globalOnly) params.set('global_only', 'true');
+    return request<OrchestrationAssignableAgent[]>(`/orchestration/assignable-agents?${params.toString()}`);
+  },
 
   listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });

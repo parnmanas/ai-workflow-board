@@ -117,6 +117,28 @@ test('resource with no credential_id → anonymous (no credential field)', async
   assert.equal(rp.repo.credential, undefined);
 });
 
+// ── 티켓 9fd27487: kind:'action' 엔드투엔드 (폴더 루트 + credential 포함 repo) ──
+// buildRunProvision 자체에는 resolveWorkspaceFolder의 루트 결정(이미
+// workspace-folder-traversal-guard.test.mjs에 고정돼 있음) 외에 kind별 분기가
+// 따로 없다 — 이 테스트는 폴더 해석과, 위 'qa'에서 이미 증명된 credential 포함
+// repo 경로가 각각 따로가 아니라 새로운 'action' kind에 대해 전체 파이프라인
+// 차원에서 엔드투엔드로 함께 성립함을 증명한다.
+test('kind:"action" resolves the .awb/act/ folder AND still ships a credentialed repo', async () => {
+  const ds = makeDataSource({ resources: [resourceRow()], credentials: [credRow()] });
+  const rp = await buildRunProvision(ds, {
+    ...baseInput,
+    kind: 'action',
+    id: 'action-1234',
+    repoRef: { resource_id: 'res-1' },
+  });
+
+  assert.equal(rp.kind, 'action');
+  assert.equal(rp.workspace_folder, '.awb/act/action-1');
+  assert.ok(rp.repo, 'repo must resolve');
+  assert.equal(rp.repo.url, 'https://github.com/parnmanas/private.git');
+  assert.deepEqual(rp.repo.credential, { username: 'x-access-token', token: 'ghp_SECRET_TOKEN' });
+});
+
 test('resource path: branch falls back to the resource default_branch; explicit ref.branch wins', async () => {
   // Guards the rewritten resource-path return object — a regression to
   // `branch: ref.branch || undefined` (dropping the default_branch fallback)

@@ -34,6 +34,7 @@ import {
   AgentManagerCommandPayload,
   ConsensusUpdatePayload,
   OrchestrationUpdatePayload,
+  TicketReadsClearedPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -417,6 +418,22 @@ export const EVENT_TYPES: EventDefinition[] = [
         // it the request falls through to the legacy one-shot subagent
         // path that has no room context to reply into.
         room_id: typeof event.room_id === 'string' ? event.room_id : undefined,
+        // 티켓 9fd27487: chat_room_message 의 run_provision 과 짝을 이루는
+        // DM/@-멘션 버전 — 전체 이유는 아래 그 필드의 코멘트를 참고. 값이 없으면
+        // 생략해서, 아직 opt-in 하지 않은 워크스페이스의 DM wire shape 이
+        // byte-for-byte 그대로 유지되게 한다.
+        run_provision: event.run_provision ? event.run_provision : undefined,
+        // RoomMessagingService가 서버단에서 이 값을 해석하고, 아무것도
+        // 해석되지 않으면 키 자체를 생략한다(room-messaging.service.ts 참고) —
+        // 그래야 profile 미설정인 chat 턴에서 DM/@mention wire shape이
+        // byte-for-byte 그대로 유지된다. `?? null`이 아니라 `?? undefined`를
+        // 쓰는 이유가 바로 이거다: JSON.stringify는 undefined 값 키는
+        // 드롭하지만 명시적 null은 유지한다 — 여기서 `?? null`을 쓰면
+        // 해석되지 않은 모든 턴에 null 값으로 키가 조용히 되살아난다
+        // (review round 1, ticket 7d8ea7c9). 다만 이 필드 자체는
+        // event-registry-payload-parity-guard의 field-by-field 체크를 위해
+        // 이 리터럴에 여전히 나타나야 한다.
+        cli_runtime_profile: event.cli_runtime_profile ?? undefined,
       };
       return {
         payload,
@@ -501,6 +518,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         // mcp__awb__* tool results). Omit when absent so ordinary chat turns keep
         // the wire byte-for-byte unchanged. flatten() spreads it through to clients.
         metadata: event.metadata ? event.metadata : undefined,
+        // ticket 7d8ea7c9 (review round 1): 이 broadcast용 agent별 Claude
+        // backend profile 맵(ChatRoomMessagePayload.cli_runtime_profiles 참고).
+        // RoomMessagingService가 어떤 멤버에 대해서도 profile을 해석하지
+        // 못하면 생략된다 — 일반 채팅 턴/비-Claude 방은 위 run_provision /
+        // is_action_room / metadata와 같은 조건부 생략 관례로 wire가
+        // byte-for-byte 그대로 유지된다.
+        cli_runtime_profiles: event.cli_runtime_profiles && Object.keys(event.cli_runtime_profiles).length > 0
+          ? event.cli_runtime_profiles
+          : undefined,
       };
       return {
         payload,
@@ -692,6 +718,40 @@ export const EVENT_TYPES: EventDefinition[] = [
     // look right — which is exactly why it read as "sometimes wrong".
     flatten: (env) => ({
       event_type: 'user_mention',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
+  },
+
+  // ───────── ticket_reads_cleared ─────────
+  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음"(POST tickets/read-all) 처리 직후
+  // 발행. 처리를 실행한 본인의 세션에만 전달되어(user_mention과 동일한 스코프
+  // 패턴) 다른 브라우저/기기가 폴링 없이 즉시 뱃지를 수렴시키게 한다.
+  {
+    eventType: 'ticket_reads_cleared',
+    emitterEvent: 'ticket_reads_cleared',
+    map(event: any) {
+      const payload: TicketReadsClearedPayload = {
+        user_id: event.user_id,
+        workspace_id: event.workspace_id,
+        board_id: event.board_id ?? null,
+        updated: event.updated,
+        read_at: event.read_at,
+      };
+      return {
+        payload,
+        scope: { user_id: event.user_id, workspace_id: event.workspace_id },
+        timestamp: event.read_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'user') return false;
+      return env.scope.user_id === identity.userId;
+    },
+    // user_mention과 동일하게 flat 유지 — NotificationContext가 payload
+    // 필드(user_id/board_id/…)를 최상위에서 그대로 읽는다.
+    flatten: (env) => ({
+      event_type: 'ticket_reads_cleared',
       ...(env.payload as object),
       timestamp: env.timestamp,
     }),

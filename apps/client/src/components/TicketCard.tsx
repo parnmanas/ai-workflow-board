@@ -3,6 +3,7 @@ import { Draggable } from '@hello-pangea/dnd';
 import { BoardCardTicket } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
+import { NavBadge } from './common/NavBadge';
 import { hasStaleOpenQuestion } from './comment-types';
 
 interface TicketCardProps {
@@ -13,6 +14,10 @@ interface TicketCardProps {
   index: number;
   onClick: () => void;
   focusHolders?: Array<{ agent_name: string; role: string }>;
+  /** 이 티켓의 미읽음 코멘트 수 — 서브태스크까지 롤업된 값(Column.tsx의
+   *  sumUnread 참고). "어느 티켓이 보드 뱃지 숫자를 만들었나" 드릴다운
+   *  (티켓 628f4b39). undefined/0 이면 아무것도 렌더하지 않는다. */
+  unreadCount?: number;
 }
 
 const priorityVariants: Record<string, 'neutral' | 'info' | 'warning' | 'danger'> = {
@@ -29,7 +34,7 @@ const priorityLabels: Record<string, string> = {
   critical: 'CRIT',
 };
 
-export default function TicketCard({ ticket, index, onClick, focusHolders }: TicketCardProps) {
+export default function TicketCard({ ticket, index, onClick, focusHolders, unreadCount }: TicketCardProps) {
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
@@ -156,7 +161,16 @@ export default function TicketCard({ ticket, index, onClick, focusHolders }: Tic
                 >FOCUS</span>
               )}
             </div>
-            <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {!!unreadCount && unreadCount > 0 && (
+                <NavBadge
+                  count={unreadCount}
+                  size="sm"
+                  label={`읽지 않은 코멘트 ${unreadCount}건`}
+                />
+              )}
+              <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
+            </div>
           </div>
 
           {/* Title */}

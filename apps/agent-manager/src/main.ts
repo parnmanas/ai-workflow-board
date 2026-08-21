@@ -18,7 +18,7 @@ import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
-import type { WorktreeStatusEntry } from './lib/instance-heartbeat.js';
+import type { WorktreeStatusEntry, RunWorkspaceStatusEntry } from './lib/instance-heartbeat.js';
 import { spawnFailureTracker } from './lib/spawn-failure-tracker.js';
 import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
@@ -849,6 +849,31 @@ async function runRuntime(
   worktreeSweepTimer = setInterval(() => void sweepWorktrees(), 10 * 60 * 1000);
   worktreeSweepTimer.unref?.();
 
+  // ticket 9fd27487 — idle 상태인 Action-Run / 채팅방 작업폴더(`.awb/act`,
+  // `.awb/chat`)를 회수한다 — 그래야 오래 실행되는 매니저가 action 이 돌고
+  // 채팅방이 쌓이는 만큼 이 폴더들을 무한정 누적시키지 않는다. 위쪽의
+  // ticket-worktree 스윕보다 훨씬 느린 별도 타이머다: 이 폴더들은
+  // action-keyed/room-keyed 라서(많은 run/메시지에 걸쳐 재사용된다) idle 기준
+  // (RUN_WORKSPACE_IDLE_MS, 7일)을 "지금 당장 idle" 이 아니라 일 단위로 재는
+  // 것이 맞다 — 그러니 한 시간마다 도는 tick 이면 충분하고도 남는다.
+  let runWorkspaceSweepTimer: NodeJS.Timeout | null = null;
+  const sweepRunWorkspaces = async (): Promise<void> => {
+    try {
+      let total = 0;
+      const seenDirs = new Set<string>();
+      for (const ctx of managedAgentContexts.list()) {
+        if (!ctx.working_dir || seenDirs.has(ctx.working_dir)) continue;
+        seenDirs.add(ctx.working_dir);
+        total += await worktreeManager.sweepRunWorkspaces(ctx.working_dir);
+      }
+      if (total > 0) log(`[worktree] run-workspace sweep reclaimed ${total} idle action/chat workspace(s)`);
+    } catch (err: any) {
+      log(`[worktree] run-workspace sweep failed: ${err?.message ?? err}`);
+    }
+  };
+  runWorkspaceSweepTimer = setInterval(() => void sweepRunWorkspaces(), 60 * 60 * 1000);
+  runWorkspaceSweepTimer.unref?.();
+
   // ticket 4ed77ad5 — crash-tolerant warm-pool lease reclaim. reset-on-acquire
   // cleans a slot's tree, but a worker that dies uncleanly (exit-143) before its
   // ticket reaches terminal/archive never runs the release path, so its slot
@@ -1080,6 +1105,31 @@ async function runRuntime(
         }
         return out;
       },
+      // 감독 중인 모든 agent 전체에서 살아있는 Action-Run / 채팅방 작업폴더
+      // (ticket 9fd27487). 위 worktreeStatusProvider와 동일한 best-effort/async
+      // 계약을 따른다. 이 작업폴더들은 평범한 디렉터리라 매니저 자신이 직접
+      // `/proc` cross-check 하므로(WorktreeManager.snapshotRunWorkspaces 참고)
+      // 티켓 기준 liveness 뷰가 따로 필요 없다.
+      runWorkspaceStatusProvider: async (): Promise<RunWorkspaceStatusEntry[]> => {
+        const out: RunWorkspaceStatusEntry[] = [];
+        const seenDirs = new Set<string>();
+        for (const ctx of managedAgentContexts.list()) {
+          if (!ctx.working_dir || seenDirs.has(ctx.working_dir)) continue;
+          seenDirs.add(ctx.working_dir);
+          const entries = await worktreeManager.snapshotRunWorkspaces(ctx.working_dir);
+          for (const e of entries) {
+            out.push({
+              working_dir: ctx.working_dir,
+              path: e.path,
+              kind: e.kind,
+              leaf: e.leaf,
+              last_used_at: e.lastUsedAt,
+              live: e.live,
+            });
+          }
+        }
+        return out;
+      },
     });
     instanceHeartbeat._real.start();
     const fireUpload = (): void => {
@@ -1108,6 +1158,10 @@ async function runRuntime(
     if (worktreeSweepTimer) {
       clearInterval(worktreeSweepTimer);
       worktreeSweepTimer = null;
+    }
+    if (runWorkspaceSweepTimer) {
+      clearInterval(runWorkspaceSweepTimer);
+      runWorkspaceSweepTimer = null;
     }
     if (poolReclaimTimer) {
       clearInterval(poolReclaimTimer);

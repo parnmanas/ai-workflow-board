@@ -54,6 +54,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
+import { readRunWorkspaceLeaves, forgetRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   decidePushReadiness,
   classifyWorktreeCheckout,
@@ -149,6 +150,21 @@ export interface PoolRegistry {
  */
 const POOL_LEASE_RECLAIM_GRACE_MS = 20 * 60 * 1000;
 
+/**
+ * Action-Run/채팅방 작업폴더 회수를 위한 idle 임계값(ticket 9fd27487,
+ * `sweepRunWorkspaces`). 티켓-워크트리 스윕의 "지금 당장 idle"이라는 기준보다
+ * 의도적으로 훨씬 길게 잡았다: `.awb/act`/`.awb/chat` 폴더는 동일한 action/room에
+ * 대한 여러 run/메시지에 걸쳐(run-keyed가 아니라 action-keyed / room-keyed) 워밍업된
+ * 체크아웃을 유지하기 위해 존재하므로, idle tick마다 회수해버리면 바로 다음 사용
+ * 시점에 재-clone 또는 재-프로비저닝을 강제하게 된다 — 이는 정확히 ticket
+ * 9fd27487의 `.awb/act` 설계가 피하려 했던 "warm 재사용 비용"이다.
+ * 7일이면 정상적인 간헐적 사용 간격(주 몇 번 방문하는 채팅방, 야간/주간 cron
+ * Action)은 여유 있게 넘기면서도, 티켓이 지적한 무한 증식 실패 모드는 여전히
+ * 억제한다 — 진짜로 방치된 채팅방은 "영원히 회수 안 됨"이 아니라 일주일 안에
+ * 결국 회수되는 쪽으로 수렴한다.
+ */
+const RUN_WORKSPACE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -167,6 +183,23 @@ export function worktreesRootFor(baseWorkingDir: string): string {
  *  `<root>/<ticket8>` without re-deriving the segment layout. */
 export function runWorkspaceRootFor(baseWorkingDir: string): string {
   return join(baseWorkingDir, '.awb', 'qa');
+}
+
+/** Action-Run 작업폴더의 고정 루트(ticket 9fd27487): `<working_dir>/.awb/act`
+ *  — 서버의 `ACTION_WORKSPACE_ROOT`와 대응된다. `.awb/qa`처럼 run-keyed가 아니라
+ *  action-keyed라, 같은 Action의 모든 Run이 폴더 하나를 재사용한다. */
+export function actionWorkspaceRootFor(baseWorkingDir: string): string {
+  return join(baseWorkingDir, '.awb', 'act');
+}
+
+/** 순수 채팅방(plain chat room) 작업폴더의 고정 루트(ticket 9fd27487):
+ *  `<working_dir>/.awb/chat` — 서버의 `CHAT_WORKSPACE_ROOT`와 대응된다.
+ *  room-keyed이며, qa/action과 달리 이 폴더들은 기본적으로 repo 체크아웃을
+ *  전혀 받지 않는다(run-provisioner 참고 — 채팅용 RunProvision은 항상
+ *  `repo: null`을 실어보낸다). 그래서 이 폴더들은 항상 비어 있는, 에이전트가
+ *  만든 스크래치 폴더로만 남는다. */
+export function chatWorkspaceRootFor(baseWorkingDir: string): string {
+  return join(baseWorkingDir, '.awb', 'chat');
 }
 
 interface GitResult {
@@ -231,6 +264,31 @@ export interface WorktreeSnapshotEntry {
   branch: string | null;
   state: WorktreeState;
   /** True when a live worker session / subagent currently holds this worktree's ticket. */
+  live: boolean;
+}
+
+/** `<working_dir>/.awb/act/` 또는 `<working_dir>/.awb/chat/` 아래에 있는
+ *  Action-Run 또는 채팅방 작업폴더 하나에 대한 읽기 전용 관전(observability) 뷰
+ *  (ticket 9fd27487). WorktreeSnapshotEntry와 달리 이것들은 git 워크트리가 아니라
+ *  일반 디렉터리다(`git worktree list` 항목도, 브랜치도, 풀 lease도 없다) —
+ *  티켓-워크트리 형태를 억지로 끼워 맞춘 변형이 아니라, 별개의 병렬 projection이다.
+ *  인스턴스 heartbeat를 위해 snapshotRunWorkspaces()가 생성한다. */
+export interface RunWorkspaceSnapshotEntry {
+  /** 절대경로(`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
+  path: string;
+  kind: 'action' | 'chat';
+  /** root(`.awb/act` 또는 `.awb/chat`) 기준 상대경로 — action/room id의 앞 8자리
+   *  단일 세그먼트가 기본값이지만, 커스텀 `workspace_folder`가 `deploy/scripts`처럼
+   *  중첩 경로면(기존 QA/security workspace_folder 옵션이 이미 허용하던 값) 그
+   *  전체 상대경로가 그대로 leaf가 된다 — 마지막 세그먼트만 잘라내면 `path`가
+   *  `join(root, leaf)`로 재구성되지 않는다(리뷰 지적, ticket 9fd27487). */
+  leaf: string;
+  /** provisionRunWorkspace() 호출이 성공할 때마다 갱신되는 `.awb-last-used`
+   *  마커의 타임스탬프. 폴더가 이 마커 도입 이전부터 있었다면 null(이 경우도
+   *  보수적으로 스윕 대상에 포함된다 — sweepRunWorkspaces 참고). */
+  lastUsedAt: string | null;
+  /** 살아있는 프로세스의 cwd가 현재 이 폴더 안에 있으면 true(`/proc` 교차 확인) —
+   *  마커가 아무리 오래됐어도 이 경우엔 절대 회수하지 않는다. */
   live: boolean;
 }
 
@@ -1467,6 +1525,200 @@ export class WorktreeManager {
       if (removedHere > 0) await this.prune(entry.repo);
     }
     return removed;
+  }
+
+  /**
+   * `<working_dir>/.awb/act`와 `<working_dir>/.awb/chat` 아래에 있는 Action-Run +
+   * 채팅방 작업폴더들의 읽기 전용 스냅샷(ticket 9fd27487) — 인스턴스 heartbeat용,
+   * snapshotWorktrees의 일반-디렉터리 버전 형제 함수다(WorktreeSnapshotEntry의
+   * 변형이 아니라 별도 타입으로 둔 이유는 RunWorkspaceSnapshotEntry 문서 참고).
+   * Best-effort: 아직 존재하지 않는 루트는 해당 kind에 대해 그냥 []을 반환할 뿐,
+   * 절대 throw하지 않는다.
+   */
+  async snapshotRunWorkspaces(baseWorkingDir: string): Promise<RunWorkspaceSnapshotEntry[]> {
+    if (!baseWorkingDir) return [];
+    const liveCwds = await this.#liveProcessCwds();
+    const out: RunWorkspaceSnapshotEntry[] = [];
+    for (const kind of ['action', 'chat'] as const) {
+      const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
+      const leaves = await this.#listAllRunWorkspaceLeaves(root);
+      for (const leaf of leaves) {
+        const path = join(root, leaf);
+        out.push({
+          path,
+          kind,
+          leaf,
+          lastUsedAt: await this.#readLastUsedMarker(path),
+          live: this.#isPathLive(path, liveCwds),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Action-Run + 채팅방 작업폴더용 idle-GC(ticket 9fd27487, AC7): `.awb/act`/
+   * `.awb/chat`에 대한 sweep()의 일반-디렉터리 버전. idle+clean이 되는 즉시
+   * 제거되는 티켓 워크트리와는 다르다(브랜치는 어차피 base repo에 남아있으니까) —
+   * 이 폴더들은 오직 동일한 action/room에 대한 여러 run/메시지에 걸쳐(run-keyed가
+   * 아니라 action-keyed / room-keyed) warm 체크아웃/빌드를 유지하기 위해서만
+   * 존재하므로, 아무도 디스패치하지 않는 그 순간 바로 회수해버리면 존재 의미가
+   * 없어진다. RUN_WORKSPACE_IDLE_MS만큼 비활성 상태가 지속되고(모든
+   * provisionRunWorkspace 성공 호출이 갱신하는 `.awb-last-used` 마커 — run-provisioner
+   * 참고) 동시에 그 폴더 안에 살아있는 프로세스가 전혀 없을 때만(`/proc` 교차 확인,
+   * reconcilePoolLeases가 쓰는 것과 같은 가드) 회수한다. 마커가 아예 없는 폴더는
+   * (이 기능 이전부터 있었거나, 첫 프로비저닝이 마커를 찍기 전에 죽은 경우)
+   * 디렉터리 자체의 mtime으로 폴백한다.
+   *
+   * leaf 목록은 root의 직계 자식이 아니라 #listRunWorkspaceLeaves가 재귀적으로
+   * 찾은 실제 작업공간 디렉터리다 — 중첩 `workspace_folder`(예: `deploy/scripts`)는
+   * provisionRunWorkspace가 그 최종 디렉터리에만 체크아웃하고 마커도 거기에만
+   * 찍으므로, 직계 자식(`deploy`)만 보면 그 mtime(자식 git 활동으로는 갱신되지
+   * 않는다)으로 폴백하다가 방금 쓰인 자손 폴더까지 통째로 삭제해버린다(리뷰 지적,
+   * ticket 9fd27487).
+   *
+   * `deploy`와 `deploy/scripts`처럼 서로 접두 관계인 두 leaf가 동시에 존재할 때
+   * (리뷰 지적, 2라운드) — 가장 깊은 leaf부터 처리해 얕은 leaf를 지우기 전에
+   * 그 자손이 살아남았는지(fresh거나 live거나, 혹은 자손의 자손을 보호하느라
+   * 남았거나) 먼저 안다. 자손이 하나라도 살아남았으면 조상은 자기 마커가
+   * stale이어도 지우지 않는다 — `fsp.rm(recursive)`는 자손까지 통째로 지우므로,
+   * 조상을 지우면서 방금 쓰인 자손을 함께 날려버리는 걸 막기 위해서다. 반대로
+   * 자손이 이미 정리됐거나(또는 애초에 없었으면) 조상은 평소처럼 자기 마커
+   * 기준으로 독립적으로 판정된다.
+   */
+  async sweepRunWorkspaces(baseWorkingDir: string): Promise<number> {
+    if (!baseWorkingDir) return 0;
+    const liveCwds = await this.#liveProcessCwds();
+    const now = Date.now();
+    let removed = 0;
+    for (const kind of ['action', 'chat'] as const) {
+      const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
+      const leaves = await this.#listAllRunWorkspaceLeaves(root);
+      leaves.sort((a, b) => b.split('/').length - a.split('/').length);
+      const survived: string[] = [];
+      for (const leaf of leaves) {
+        const path = join(root, leaf);
+        // 다중 방어책(defense-in-depth) — removeTicketRunWorkspace의 컨테인먼트 가드를 그대로 따른다.
+        if (!isUnder(path, root)) continue;
+        if (survived.some((s) => s.startsWith(`${leaf}/`))) {
+          survived.push(leaf); // 살아남은 자손을 보호하기 위해 나도 지우지 않는다 — 위쪽 조상에도 전이된다
+          continue;
+        }
+        if (this.#isPathLive(path, liveCwds)) {
+          survived.push(leaf);
+          continue;
+        }
+        let idleMs: number;
+        const markerAt = await this.#readLastUsedMarker(path);
+        if (markerAt) {
+          const parsed = Date.parse(markerAt);
+          idleMs = Number.isFinite(parsed) ? now - parsed : Infinity;
+        } else {
+          const st = await fsp.stat(path).catch(() => null);
+          idleMs = st ? now - st.mtimeMs : Infinity;
+        }
+        if (idleMs < RUN_WORKSPACE_IDLE_MS) {
+          survived.push(leaf);
+          continue;
+        }
+        try {
+          await fsp.rm(path, { recursive: true, force: true });
+          removed++;
+          await forgetRunWorkspaceLeaf(root, leaf);
+          log(`[worktree] swept idle ${kind} workspace ${path} (idle ${Math.round(idleMs / 60000)}min)`);
+        } catch (err: any) {
+          log(`[worktree] sweep failed for ${kind} workspace ${path}: ${err?.message ?? err}`);
+          survived.push(leaf); // 삭제 실패 — 조상이 이 경로를 함께 지우지 않도록 살아남은 것으로 취급
+        }
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * `#listRunWorkspaceLeaves`의 디렉터리-내용 휴리스틱과, provisionRunWorkspace가
+   * 직접 기록한 manifest(`run-workspace-manifest.ts`)를 합집합(union)한 leaf
+   * 목록(ticket 9fd27487, 리뷰 3라운드). 휴리스틱 단독으로는 조상이 `.git`을
+   * 갖는 순간(체크아웃된 repo) 그 밑으로 절대 내려가지 않으므로, 그 안에
+   * 독립적으로 프로비저닝된 중첩 workspace_folder 경계(예: `deploy`에 자기
+   * repo가 있고 그 밑에 `deploy/scripts`가 별도로 프로비저닝된 경우)를 영원히
+   * 못 찾는다 — manifest가 정확히 그 경계를 알고 있으므로 여기서 보충한다.
+   * manifest가 아직 비어있는(이 기능 이전에 프로비저닝된) 폴더는 휴리스틱이
+   * 그대로 커버하므로 기존 동작과 100% 호환이다. 두 소스 모두 같은 leaf를
+   * 찾아내는 일반적인 경우(매니페스트 도입 이후)는 Set으로 중복 제거된다.
+   */
+  async #listAllRunWorkspaceLeaves(root: string): Promise<string[]> {
+    const [heuristic, manifest] = await Promise.all([
+      this.#listRunWorkspaceLeaves(root),
+      readRunWorkspaceLeaves(root),
+    ]);
+    return Array.from(new Set([...heuristic, ...manifest]));
+  }
+
+  /**
+   * root 아래 실제 작업공간 leaf들을 root-상대경로로 재귀 나열한다(리뷰 지적,
+   * ticket 9fd27487). root의 직계 자식만 보면 안 되는 이유 — 중첩
+   * `workspace_folder`(예: `deploy/scripts`, 기존 QA/security workspace_folder
+   * 옵션이 이미 허용하던 값)는 provisionRunWorkspace가 `<root>/deploy/scripts`에
+   * 직접 체크아웃하고 `.awb-last-used` 마커도 그 최종 디렉터리에만 남긴다. 직계
+   * 자식만 보면 `deploy`를 leaf로 오인해 마커를 못 찾고 `deploy` 자체의
+   * mtime(자식 git 활동으로는 갱신되지 않는다)으로 폴백하다가, 방금 쓰인
+   * `deploy/scripts`가 안에 있어도 `deploy` 전체를 재귀 삭제할 수 있다.
+   *
+   * 그래서 하위 디렉터리 "만" 있고 그 외엔 아무것도 없는 순수 경로 세그먼트
+   * 컨테이너만 한 단계씩 내려가고, `.git`/파일/마커가 하나라도 있거나 완전히
+   * 빈 디렉터리를 만나면 그 디렉터리 자체를 leaf로 확정한다.
+   *
+   * 그런데 leaf로 확정됐다고 항상 거기서 멈추면 안 된다(리뷰 지적, ticket
+   * 9fd27487 2라운드) — `workspace_folder='deploy'`(Action A)와
+   * `workspace_folder='deploy/scripts'`(Action B)처럼 서로 접두(prefix) 관계인
+   * 두 값이 **동시에** 유효해서, `deploy`도 자기 자신의 `.awb-last-used`를 갖고
+   * 있으면서 그 안에 또 다른 독립 프로비저닝된 `deploy/scripts`가 중첩될 수
+   * 있다. 그래서 "우리가 직접 마커를 남겼고(hasMarker) `.git`은 없는" 경우에만
+   * — 즉 그 디렉터리가 우리 자신의 프로비저닝 산출물이라고 확신할 수 있을 때만
+   * — leaf로 push한 뒤에도 계속 내려가 자손 leaf를 마저 찾는다. `.git`이 있는
+   * 디렉터리는 절대 더 내려가지 않는다: 그 밑은 전부 체크아웃된 저장소 자신의
+   * 콘텐츠이지 별개 workspace 경계일 수 없고, 서브디렉터리마다 파일이 있다는
+   * 이유로 leaf 취급하면(예: `src/`, `node_modules/`) 실제로 살아있는 저장소의
+   * 일부를 독립 sweep 대상으로 오인해 지워버리는, 원래 버그보다 더 나쁜 상황을
+   * 만든다. 마커도 `.git`도 없이 파일만 있어서 leaf로 폴백 판정된 경우(스크래치
+   * 콘텐츠 — 우리가 프로비저닝했다는 보장이 없다)도 같은 이유로 내려가지 않는다.
+   */
+  async #listRunWorkspaceLeaves(root: string, relDir = ''): Promise<string[]> {
+    const abs = relDir ? join(root, relDir) : root;
+    let entries;
+    try {
+      entries = await fsp.readdir(abs, { withFileTypes: true });
+    } catch {
+      return []; // 루트(또는 중간 경로)가 아직 없다는 뜻 — 아직 아무것도 프로비저닝되지 않음
+    }
+    const hasMarker = entries.some((e) => e.isFile() && e.name === '.awb-last-used');
+    const hasGit = entries.some((e) => e.name === '.git');
+    const isLeaf = hasMarker || hasGit || entries.length === 0 || entries.some((e) => e.isFile());
+    const out: string[] = [];
+    if (relDir && isLeaf) out.push(relDir);
+    const shouldDescend = !isLeaf || (hasMarker && !hasGit);
+    if (shouldDescend) {
+      for (const sub of entries.filter((e) => e.isDirectory())) {
+        if (sub.name === '.git') continue;
+        const childRel = relDir ? `${relDir}/${sub.name}` : sub.name;
+        out.push(...(await this.#listRunWorkspaceLeaves(root, childRel)));
+      }
+    }
+    return out;
+  }
+
+  async #readLastUsedMarker(dir: string): Promise<string | null> {
+    try {
+      const raw = await fsp.readFile(join(dir, '.awb-last-used'), 'utf8');
+      return raw.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  #isPathLive(path: string, liveCwds: string[]): boolean {
+    return liveCwds.some((cwd) => samePath(cwd, path) || isUnder(cwd, path));
   }
 }
 

@@ -19,6 +19,7 @@ import { WorkflowFunctionsModule } from '../workflow-functions/workflow-function
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 import { OutreachModule } from '../outreach/outreach.module';
 import { OrchestrationModule } from '../orchestration/orchestration.module';
+import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 
 @Module({
   imports: [
@@ -53,6 +54,10 @@ import { OrchestrationModule } from '../orchestration/orchestration.module';
     // Provides the orchestration runner / mission / team services for the
     // orchestration-tools MCP tools (팀 기반 자율 업무 오케스트레이션).
     OrchestrationModule,
+    // Provides AgentManagerCommandService for the keep_chat_session_alive
+    // MCP tool (ticket 6ff827cb) — routes an extend/release grant to the
+    // calling agent's own live manager instance over agent_manager_command.
+    AgentManagerModule,
   ],
   controllers: [McpController],
 })

@@ -9,6 +9,7 @@ import { useDragToScroll } from '../hooks/useDragToScroll';
 import { useToast } from '../contexts/ToastContext';
 import { useLoading } from '../contexts/LoadingContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { useNotifications } from '../contexts/NotificationContext';
 import PageHeader from './PageHeader';
 import BoardSubMenu from './BoardSubMenu';
 import Column from './Column';
@@ -49,6 +50,7 @@ export default function Board() {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const { withLoading } = useLoading();
+  const { counts, markTicketsReadForBoard } = useNotifications();
 
   // Board and workspace identity come from the URL — no localStorage reads needed.
   const { wsId, boardId } = useParams<{ wsId: string; boardId: string }>();
@@ -473,6 +475,16 @@ export default function Board() {
     }
   };
 
+  // 보드 스코프 "모두 읽음" (티켓 628f4b39) — wrapAction의 다른 호출들과
+  // 같은 optimistic-then-persist 형태: 서버 upsert가 먼저, 그다음 로컬
+  // 뱃지 상태를 지워서 사이드바/보드 숫자와 이 보드의 모든 TicketCard가
+  // 다음 60초 폴링을 기다리지 않고 함께 0으로 떨어지게 한다.
+  const handleMarkBoardRead = () => wrapAction(async () => {
+    if (!boardId) return;
+    await api.markAllTicketsRead(boardId);
+    markTicketsReadForBoard(boardId);
+  }, '이 보드의 읽지 않은 코멘트를 모두 읽음으로 표시했습니다');
+
   // Cross-board drop strip. Each board entry is a Droppable; handleDragEnd
   // routes `move-to-board-<id>` to the cross-board endpoint.
   //
@@ -596,6 +608,51 @@ export default function Board() {
             <strong>Board is paused.</strong> Agent triggers are suspended (since{' '}
             {new Date(board.paused_at).toLocaleString()}). Click <em>▶ Resume Board</em> to wake agents.
           </span>
+        </div>
+      )}
+
+      {/*
+        미읽음 코멘트 배너 (티켓 628f4b39) — 사이드바 뱃지 숫자가 무엇을
+        뜻하는지 호버 툴팁에 맡기지 않고 평문으로 드러내고, 원클릭 보드
+        단위 "모두 읽음"을 제공한다. 정확한 수치(perBoard는 "99+" 필과
+        달리 절대 캡되지 않음)라서 "실제로 몇 건인지"의 근거로 신뢰할 수 있다.
+      */}
+      {boardId && (counts.tickets.perBoard[boardId] || 0) > 0 && (
+        <div
+          role="status"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '6px 16px',
+            background: `${tokens.colors.accent}12`,
+            color: tokens.colors.textSecondary,
+            fontSize: 12,
+            borderBottom: `1px solid ${tokens.colors.border}`,
+          }}
+        >
+          <span>
+            이 보드에 <strong>읽지 않은 코멘트 {counts.tickets.perBoard[boardId]}건</strong>이 있습니다 —
+            카드 오른쪽 위 숫자가 원인 티켓입니다.
+          </span>
+          <button
+            type="button"
+            onClick={handleMarkBoardRead}
+            style={{
+              background: 'transparent',
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+              padding: '3px 10px',
+              color: tokens.colors.accent,
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            모두 읽음
+          </button>
         </div>
       )}
 

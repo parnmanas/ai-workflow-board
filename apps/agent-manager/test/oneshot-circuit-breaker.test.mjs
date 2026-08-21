@@ -903,10 +903,15 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
       'record is tracked before the sweep',
     );
 
-    mgr._sweepNow();
+    // ticket b972b28c: #sweep now awaits an async live-task probe
+    // (findLiveBackgroundTasks) before reaping a TTL-expired record — this
+    // fake pid has no real descendants, so the probe finds none and the
+    // TTL branch proceeds exactly as before, just after that await.
+    await mgr._sweepNow();
 
-    // Drop-first proven: the record is gone from #map synchronously, BEFORE the
-    // exit event — which is exactly what makes the exit handler early-return.
+    // Drop-first proven: the record is gone from #map (by the time the probe
+    // resolved and the kill branch ran), BEFORE the exit event — which is
+    // exactly what makes the exit handler early-return.
     assert.equal(
       mgr._snapshot().some((r) => r.pid === child.pid),
       false,

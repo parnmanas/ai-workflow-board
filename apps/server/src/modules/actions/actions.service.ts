@@ -27,6 +27,8 @@ import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/sh
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { parseCron } from './cron';
 import { enforceRunBudget } from '../../common/run-budget-guard';
+import { normalizeWorkspaceFolder, normalizeCheckoutMode, normalizeRepoRef } from '../../common/workspace-folder-options';
+import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -304,6 +306,9 @@ export class ActionsService {
       max_runs: typeof input.max_runs === 'number' && input.max_runs > 0 ? input.max_runs : 10,
       trigger: input.trigger ?? '',
       trigger_label: input.trigger_label ?? '',
+      workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
+      repo_ref: normalizeRepoRef(input.repo_ref),
+      checkout_mode: normalizeCheckoutMode(input.checkout_mode),
     });
     return this.actionRepo.save(created);
   }
@@ -351,6 +356,9 @@ export class ActionsService {
       existing.trigger = patch.trigger;
     }
     if (patch.trigger_label !== undefined) existing.trigger_label = patch.trigger_label ?? '';
+    if (patch.workspace_folder !== undefined) existing.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
+    if (patch.repo_ref !== undefined) existing.repo_ref = normalizeRepoRef(patch.repo_ref);
+    if (patch.checkout_mode !== undefined) existing.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
     return this.actionRepo.save(existing);
   }
 
@@ -1021,6 +1029,27 @@ export class ActionsService {
       runId,
       ticket: args.ticketContext ?? null,
     });
+    // 런-워크스페이스 프로비저닝 힌트 (티켓 9fd27487 — 비-티켓 실행 경로에는
+    // 폴더 규칙이 아예 없었다). Action의 workspace_folder + repo_ref +
+    // checkout_mode를 QA/security와 똑같은 방식으로(buildRunProvision) 구체적인
+    // RunProvision으로 해석해서, agent-manager가 run subagent를 스폰하기 전에
+    // `.awb/act/<leaf>`를 미리 준비하도록 한다 — working_dir 루트에서 그냥
+    // 실행되던 것 대신. Action 자체는 고유한 board_id가 없지만(레거시로 항상
+    // null — Action 엔티티 참고), 티켓 완료 훅(ticket-done-hook) 디스패치는
+    // 위에서 여전히 `board`를 해석해두므로, 그 id를 넘기면 repo_ref가 비어있을
+    // 때 그 board의 environment_config repo를 티켓 트리거와 동일하게 상속받을
+    // 수 있다.
+    const runProvision = await buildRunProvision(this.dataSource, {
+      kind: 'action',
+      id: action.id,
+      runId,
+      workspaceId: action.workspace_id,
+      boardId: board?.id ?? null,
+      workspaceFolder: action.workspace_folder,
+      repoRef: action.repo_ref,
+      checkoutMode: action.checkout_mode,
+    });
+
     const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
     const withLanguage = prependBoardLanguageInstruction(renderedPrompt, board?.language);
     // When a ticket dispatched this run, append the completion contract so the
@@ -1140,6 +1169,10 @@ export class ActionsService {
         senderId,
         senderName,
         rendered || `Run action "${action.name}".`,
+        undefined,
+        undefined,
+        'message',
+        { runProvision },
       );
     } catch (e: any) {
       // Best-effort: even if SSE delivery fails, the run row + room exist so

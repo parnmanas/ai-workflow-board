@@ -304,6 +304,12 @@ export interface Action {
   enabled: boolean;
   max_runs: number;
   last_run_at: string | null;
+  // 작업 폴더 옵션(티켓 9fd27487) — QaScenario/SecurityProfile과 동일한 형태이되
+  // build_mode는 제외한다(Action Run에는 cold/warm 빌드 개념이 없음).
+  // WorkspaceFolderOptions.tsx 참고.
+  workspace_folder: string;
+  repo_ref: WorkspaceFolderRepoRef | null;
+  checkout_mode: CheckoutMode;
   created_at: string;
   updated_at: string;
 }
@@ -2456,7 +2462,13 @@ export interface OrchestrationTeamMember {
 
 export interface OrchestrationTeam {
   id: string;
-  workspace_id: string;
+  workspace_id: string | null;
+  /** workspace_id가 null이면 true — 모든 workspace에서 보이는 글로벌 팀. */
+  is_global: boolean;
+  /** 이 팀을 만든 workspace; 글로벌 팀을 편집할 수 있는 유일한 workspace. */
+  owner_workspace_id: string | null;
+  /** 글로벌 팀 전용: orchestrator가 create_orchestration_mission으로 대상 지정 가능한 workspace 목록. */
+  allowed_workspace_ids: string[];
   name: string;
   description: string;
   orchestrator_agent_id: string | null;

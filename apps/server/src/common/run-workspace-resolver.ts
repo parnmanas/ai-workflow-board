@@ -33,6 +33,7 @@ import { mergeEnvironmentConfig } from './environment-config';
 import {
   RunProvision,
   RunRepoSpec,
+  RunWorkspaceKind,
   WorkspaceFolderRepoRef,
   CheckoutMode,
   normalizeCheckoutMode,
@@ -41,8 +42,8 @@ import {
 } from './workspace-folder-options';
 
 export interface BuildRunProvisionInput {
-  kind: 'qa' | 'security';
-  /** Scenario / profile id — feeds the deterministic default folder. */
+  kind: RunWorkspaceKind;
+  /** scenario / profile / action / room id — 결정론적 기본 폴더 계산에 사용된다. */
   id: string;
   runId: string;
   workspaceId: string;

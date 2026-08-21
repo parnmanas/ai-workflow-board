@@ -11,6 +11,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { IsNull } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
@@ -582,5 +583,79 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         return err(e?.message || 'Failed to add participants');
       }
     }
+  );
+
+  // ticket 6ff827cb: explicit keep-alive declaration. The idle/maxTurns/TTL
+  // reapers already defer on their own when they detect model output, a live
+  // background task, or fresh cli-home activity (see agent-manager's
+  // session-progress.ts) — this tool exists for the one case those signals
+  // CANNOT observe: a session blocked purely on an external wait (an MCP/API
+  // call with no output and no child process). It is deliberately
+  // self-service and self-scoped — an agent may only extend/release the
+  // keep-alive for a room IT is an active participant of, which the manager
+  // then applies only to that same agent's own live session for that room.
+  server.tool(
+    'keep_chat_session_alive',
+    'Declare that THIS agent\'s own live chat session in room_id is doing long-running work ' +
+    '(e.g. an in-process multi-agent Workflow, or waiting on a slow external call) and must not be ' +
+    'idle/maxTurns-reaped for `minutes`. Call action="extend" before/during long work and again if more ' +
+    'time is needed; call action="release" when done so normal idle reaping resumes immediately. Only ' +
+    'useful for work invisible to the manager\'s automatic progress gate — most long-running work (model ' +
+    'output, a live background process, an in-process Workflow writing transcripts) already defers reaping ' +
+    'on its own; you do not need to call this for those. Grants are clamped to a hard ceiling (default 120 ' +
+    'minutes total, manager-configured) measured from your FIRST call for this session and never reset — ' +
+    'this cannot be used to keep a session alive indefinitely. Reaching the ceiling force-terminates the ' +
+    'session with a visible room notice, even if you call extend again. Requires the calling agent to have ' +
+    'a live agent-manager instance and be an active participant of room_id; the grant is issued ' +
+    'fire-and-forget over the manager control channel (this tool does not wait for the manager to ack it).',
+    {
+      room_id: z.string().describe('The chat room this agent\'s own live session is running in'),
+      action: z.enum(['extend', 'release']).default('extend')
+        .describe('extend = request/renew a keep-alive grant; release = clear an active grant early'),
+      minutes: z.number().int().positive().max(24 * 60).optional()
+        .describe('Requested grant length in minutes (extend only). Clamped to the configured hard ceiling. Omit to request the full remaining ceiling.'),
+      reason: z.string().max(500).optional()
+        .describe('Short human-readable reason, surfaced in the forced-termination room notice if the ceiling is later reached'),
+    },
+    async ({ room_id, action, minutes, reason }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      if (!ctx.agentManagerCommandService) {
+        return err('keep_chat_session_alive is unavailable in this MCP context (no AgentManagerCommandService)');
+      }
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent) return err('Agent identity not found for this session');
+
+      const participant = await dataSource.getRepository(ChatRoomParticipant).findOne({
+        where: { room_id, participant_type: 'agent', participant_id: agent.id, left_at: IsNull() },
+      });
+      if (!participant) {
+        return err('This agent is not an active participant of that room — keep-alive only covers your own live session');
+      }
+
+      if (!agent.manager_agent_id) {
+        return err('This agent has no manager_agent_id — it is not run by an agent-manager instance');
+      }
+      const instance = ctx.agentManagerCommandService.resolveLiveManagerInstance(agent.manager_agent_id);
+      if (!instance) {
+        return err('No live agent-manager instance for this agent — is the manager online?');
+      }
+
+      const command = action === 'release' ? 'release_chat_keepalive' : 'extend_chat_keepalive';
+      const { command_id } = await ctx.agentManagerCommandService.issue(
+        instance,
+        command,
+        { agent_id: agent.id, room_id, minutes, reason },
+        agent.id,
+      );
+      return ok({
+        ok: true,
+        issued: true,
+        command_id,
+        action,
+        room_id,
+        note: 'Issued to the manager over the async control channel — this does not confirm the grant was applied; check the manager log or the room for the forced-termination notice if the ceiling is later reached.',
+      });
+    },
   );
 }

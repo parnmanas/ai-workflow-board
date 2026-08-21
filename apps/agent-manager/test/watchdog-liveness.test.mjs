@@ -33,6 +33,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // Compiled JS — agent-manager builds via `npm run build`; `node --test` runs
 // against the dist tree, mirroring session-dedup.test.mjs.
@@ -105,7 +106,20 @@ function applyLivenessReset(sess, parsed) {
   }
 }
 
-test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still works)', () => {
+// windows-latest CI: findLiveBackgroundTasks() shells out to PowerShell
+// (Get-CimInstance Win32_Process) on win32, which routinely takes well over
+// 30ms to spawn/complete — a fixed delay(30) races the fire-and-forget
+// _maybeKillUnhealthy gate on that platform. Poll for the actual outcome
+// instead, bounded so a real hang still fails fast.
+async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('waitUntil: condition not met within timeout');
+    await delay(intervalMs);
+  }
+}
+
+test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still works)', async () => {
   const origKill = process.kill;
   const signals = [];
   process.kill = (pid, sig) => {
@@ -122,8 +136,12 @@ test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still work
       assert.equal(sess.unrespondedTurnCount, i, `counter tracks turn ${i}`);
       assert.equal(sess.unhealthyKilled, false, `must not kill before threshold (turn ${i})`);
     }
-    // The fifth silent turn reaches the threshold → kill for respawn.
+    // The fifth silent turn reaches the threshold. ticket 6ff827cb round-1
+    // review: the kill now goes through the async _maybeKillUnhealthy
+    // progress gate (checkSessionProgress) instead of killing synchronously
+    // inline — let that fire-and-forget check resolve before asserting.
     mgr.pump(sess);
+    await waitUntil(() => sess.unhealthyKilled === true);
     assert.equal(sess.unhealthyKilled, true, 'killed at threshold');
     assert.ok(
       signals.some((s) => s.pid === DEAD_PID && s.sig === 'SIGTERM'),

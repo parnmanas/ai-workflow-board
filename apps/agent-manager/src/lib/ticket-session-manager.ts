@@ -22,6 +22,7 @@ import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
 import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
 import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
+import { findLiveBackgroundTasks } from './process-tree.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import { detectHarnessSessionLimit } from './session-limit-defer.js';
@@ -801,8 +802,16 @@ export class TicketSessionManager
    *  inflight gate can miss. Terminated sessions are flagged `_twinTerminated`
    *  so their exit hook skips the silent-exit fallback — we killed them on
    *  purpose. A DISTINCT co-holder's strand (a different, non-empty agentId) is
-   *  preserved (다중담당자 fan-out). Runs synchronously so the kill lands before
-   *  the fresh spawn below can register a racing sibling. */
+   *  preserved (다중담당자 fan-out). Runs synchronously so the kill lands
+   *  before the fresh spawn below can register a racing sibling — this is a
+   *  correctness invariant (sole-strand guarantee), not an idle/TTL resource
+   *  reap, so unlike BaseSessionManager's progress gate (ticket 6ff827cb) a
+   *  live background task on the twin does NOT save it from termination:
+   *  letting two strands survive risks the double-post bug this guard exists
+   *  to prevent. The kill itself stays synchronous/unblocked (no `await`
+   *  before it — delaying it would reopen the exact race this docstring
+   *  warns about); background-task visibility (ticket 6ff827cb requirement 5)
+   *  is a fire-and-forget follow-up log line instead. */
   #terminateTwinSiblings(
     ticketId: string,
     role: string,
@@ -819,10 +828,23 @@ export class TicketSessionManager
       // Only collapse THIS agent's own siblings and the unknown-agent (`_`)
       // bucket that no distinct co-holder owns; never a different named holder.
       if (agentId && sessAgent && sessAgent !== agentId) continue;
+      const pid = sess.pid;
       log(
         `[ticket-session] terminating twin sibling ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
-          `pid=${sess.pid} key=${key} reason=${reason}`,
+          `pid=${pid} key=${key} reason=${reason}`,
       );
+      void findLiveBackgroundTasks(pid)
+        .then((tasks) => {
+          if (tasks.length > 0) {
+            log(
+              `[ticket-session] WARNING: twin sibling pid=${pid} (ticket=${ticketId.slice(0, 8)}) ` +
+                `carried ${tasks.length} live background task(s) that were killed with it`,
+            );
+          }
+        })
+        .catch(() => {
+          /* best-effort — enumeration failure never blocks or delays the kill above */
+        });
       sess._twinTerminated = true;
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);

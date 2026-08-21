@@ -681,6 +681,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
   save_action: 'non-ticket', save_function: 'non-ticket',
   save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
+  keep_chat_session_alive: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',

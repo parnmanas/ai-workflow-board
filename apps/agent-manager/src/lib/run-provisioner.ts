@@ -26,10 +26,11 @@
 // one fetch+ff-pull per run, which is the whole point.
 
 import { promises as fsp } from 'node:fs';
-import { join, dirname, resolve, sep } from 'node:path';
+import { join, dirname, resolve, relative, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
+import { recordRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   authenticatedCloneUrl,
   installRepoCredential,
@@ -54,11 +55,48 @@ export interface RunRepoSpec {
   credential?: RepoCredential | null;
 }
 
+/** 서버가 프로비저닝하는 모든 종류의 run/dispatch 작업폴더(ticket 9fd27487가
+ *  원래 'qa'|'security' 두 가지였던 것을 확장했다). 'chat'은 one-shot run이
+ *  아니다 — 순수 채팅방에는 complete_*_run 생명주기가 없으므로 — 호출자는
+ *  run-completion / orphan-sweep 관련 바인딩을 반드시 `kind !== 'chat'`으로
+ *  걸러야 한다(event-dispatcher의 handleChatRoomMessage 참고). */
+export type RunProvisionKind = 'qa' | 'security' | 'action' | 'chat';
+
+/** kind별 one-shot run의 MCP 완료-도구(completion-tool) 계약(ticket 9fd27487 —
+ *  ticket 89716f04의 orphan-sweep 라우팅을 확장한 것으로, 그 전엔 qa|security만
+ *  다루는 삼항연산자라 'action'을 조용히 complete_security_run으로 잘못
+ *  라우팅하고 있었다). run을 종료 처리해야 하는 모든 호출자가 kind별로 도구
+ *  이름/상태 enum을 다시 유도할 필요 없이 공유해서 쓴다: chat-session-manager /
+ *  subagent-manager의 orphan-sweep, 그리고 event-dispatcher의 spawn 이전
+ *  프로비저닝-실패 중단(abort) 처리. 'chat'에는 항목이 없다 — 순수 채팅방에는
+ *  complete_*_run 생명주기가 없으므로, 호출자는 이걸 호출하기 전에 반드시
+ *  걸러내야 한다(RunSessionBinding의 타입 자체가 구조적으로 이미 chat을
+ *  제외한다). */
+export interface RunCompletionRoute {
+  /** reap 하거나 최종 종료(finalize) 처리하기 전에 현재 상태를 읽어올 MCP
+   *  도구이며, 존재하지 않으면 null이다. 'action'에는 get_action_run 도구가
+   *  없다 — 호출자는 항상 종료 처리 쪽으로 폴백하며, complete_action_run의
+   *  terminal 전이는 멱등(idempotent)이라(actions.service.ts의 completeRun
+   *  참고) 이 폴백은 안전하다. */
+  getTool: 'get_qa_run' | 'get_security_run' | null;
+  completeTool: 'complete_qa_run' | 'complete_security_run' | 'complete_action_run';
+  /** 이 completeTool의 스키마가 받아들이는 실패 상태값. QA/security는 'error'를
+   *  받지만, complete_action_run의 스키마는 'succeeded'|'failed'만 허용한다
+   *  (action-tools.ts 참고). */
+  failureStatus: 'error' | 'failed';
+}
+
+export function resolveRunCompletionRoute(kind: 'qa' | 'security' | 'action'): RunCompletionRoute {
+  if (kind === 'action') return { getTool: null, completeTool: 'complete_action_run', failureStatus: 'failed' };
+  if (kind === 'security') return { getTool: 'get_security_run', completeTool: 'complete_security_run', failureStatus: 'error' };
+  return { getTool: 'get_qa_run', completeTool: 'complete_qa_run', failureStatus: 'error' };
+}
+
 /** Wire shape of the `run_provision` hint (mirror of the server's RunProvision —
  *  agent-manager is a separate package and only consumes the wire shape, same
  *  pattern as ResolvedEnvironmentConfig / HarnessSpec). */
 export interface RunProvision {
-  kind: 'qa' | 'security';
+  kind: RunProvisionKind;
   run_id: string;
   workspace_id: string;
   workspace_folder: string;
@@ -143,10 +181,12 @@ function parseRepoCredential(raw: unknown): RepoCredential | null {
  * when absent/malformed — an ordinary chat turn carries no such field). Mirrors
  * the env-config parser pattern: never throws, drops anything it can't validate.
  */
+const RUN_PROVISION_KINDS: RunProvisionKind[] = ['qa', 'security', 'action', 'chat'];
+
 export function parseRunProvision(raw: unknown): RunProvision | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  const kind = o.kind === 'security' ? 'security' : o.kind === 'qa' ? 'qa' : null;
+  const kind = RUN_PROVISION_KINDS.includes(o.kind as RunProvisionKind) ? (o.kind as RunProvisionKind) : null;
   const run_id = typeof o.run_id === 'string' ? o.run_id : '';
   const workspace_id = typeof o.workspace_id === 'string' ? o.workspace_id : '';
   const folderRaw = typeof o.workspace_folder === 'string' ? o.workspace_folder : '';
@@ -344,6 +384,38 @@ export function resolveRunFolder(p: RunProvision, baseWorkingDir: string): strin
 }
 
 /**
+ * idle-GC용 liveness 마커(ticket 9fd27487) — provisionRunWorkspace가 프로비저닝에
+ * 성공할 때마다 갱신하며, 그와 더불어 기존 clone의(느릴 수 있는) fetch/pull이
+ * 시작되기 직전에도(`haveClone` 재사용 분기) 갱신한다. 그래야 주기적 스윕
+ * (worktree-manager의 sweepRunWorkspaces)이, 이미 티켓 생명주기에 묶여
+ * 회수되는 게 아니라 폴더가 무기한 재사용되는 kind(action/chat)에 대해
+ * "최근에 사용됨"과 "방치됨"을 구분할 수 있다. 이 "이른 시점의 touch"는
+ * 마지막 touch 못지않게 중요하다: 느린 fetch로 이제 막 워밍업되려는, 오래
+ * idle 상태였던 폴더야말로 정확히 마커가 stale한 그 폴더이고, 스윕은 진행
+ * 중인 프로비저닝과 별다른 조율 수단이 없다(withFolderLock은 같은 폴더에
+ * 대한 동시 프로비저닝끼리만 서로 직렬화할 뿐, 스윕 타이머에 대해서는 아무
+ * 역할도 하지 않는다) — 미리 touch해두면 fetch/pull이 끝난 뒤가 아니라 그
+ * 작업 전체 구간 동안 마커가 fresh하게 유지된다. fresh clone 전에는 touch하지
+ * 않는다: `git clone`은 비어 있지 않은 대상을 거부하므로, 곧 clone될
+ * 디렉터리에 마커 파일을 미리 써두면 clone이 깨진다 — 방금 비워졌거나 아직
+ * 존재하지 않는 폴더는 애초에 stale-마커 레이스 케이스가 아니다(그 폴더
+ * 자체의 mtime이 최근이라, sweepRunWorkspaces의 마커-없음 폴백이 이미 이를
+ * 커버한다). 폴더 자체의 mtime이 아니라 별도의 마커 파일을 쓰는 이유: 재사용
+ * 되는 git clone은 fetch/pull을 해도 바깥쪽 디렉터리의 mtime이 갱신되지
+ * 않으므로(git은 `.git/` 내부 항목만 건드린다), `dir` 자체의 mtime에
+ * 의존하면 warm하게 재사용되는 폴더가 첫 프로비저닝 직후부터 영원히 stale한
+ * 것처럼 보이게 된다. Best-effort다 — 마커 쓰기 실패가, 이 프로비저닝이
+ * 애초에 풀어주려는 디스패치 자체를 실패시켜서는 절대 안 된다.
+ */
+async function touchLastUsedMarker(dir: string): Promise<void> {
+  try {
+    await fsp.writeFile(join(dir, '.awb-last-used'), new Date().toISOString());
+  } catch {
+    /* best-effort — 실패해도 무시한다 */
+  }
+}
+
+/**
  * Prepare the run's working folder per its `run_provision`. Never throws — a
  * git failure is captured into `{ ok:false, error, steps }` so the caller can
  * abort the dispatch and surface the reason (the "dispatch 중단 + 코멘트" path).
@@ -382,6 +454,18 @@ export async function provisionRunWorkspace(
   const dir = join(root, rel);
   const gitDir = join(dir, '.git');
 
+  // Record the exact provisioned boundary for 'action'/'chat' (the two kinds
+  // worktree-manager's idle-sweep/snapshot walk) — see run-workspace-manifest.ts
+  // for why the directory-content heuristic alone cannot see a nested
+  // workspace_folder once an ancestor holds a `.git` (ticket 9fd27487, review
+  // round 3). Called only after a successful provisioning below.
+  const recordManifestLeaf = async (): Promise<void> => {
+    if (p.kind !== 'action' && p.kind !== 'chat') return;
+    const kindRoot = join(root, '.awb', p.kind === 'action' ? 'act' : 'chat');
+    const leaf = relative(kindRoot, resolve(dir)).split(sep).join('/');
+    await recordRunWorkspaceLeaf(kindRoot, leaf).catch(() => {});
+  };
+
   // Defense-in-depth path-traversal guard: this provisioner runs `rm -rf` on
   // `dir` for a fresh checkout (and to clear a non-git reuse folder), and it
   // trusts a wire value the server already normalized. Re-assert here that the
@@ -418,9 +502,11 @@ export async function provisionRunWorkspace(
       }
 
       if (!p.repo) {
-        // No clone source — just ensure the folder exists; the rendered prompt
-        // still tells the agent what to do inside it.
+        // clone할 소스가 없음 — 폴더 존재만 보장한다; 렌더링된 프롬프트가
+        // 그 안에서 뭘 해야 하는지는 에이전트에게 여전히 알려준다.
         await fsp.mkdir(dir, { recursive: true });
+        await touchLastUsedMarker(dir);
+        await recordManifestLeaf();
         steps.push(`ensure folder ${rel} (no repo to clone) → ok`);
         log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} folder ready (no repo): ${dir}`);
         return { ok: true, dir, steps, notes };
@@ -433,6 +519,20 @@ export async function provisionRunWorkspace(
       const mask = (s: string) => tail(maskCredential(s, cred));
       const haveClone = p.checkout_mode === 'reuse' && (await pathExists(gitDir));
       if (haveClone) {
+        // idle-GC 레이스 가드(ticket 9fd27487 리뷰 후속조치): 아래의(대형 repo에서는
+        // 몇 분씩 걸릴 수 있는) fetch/pull보다 먼저 liveness 마커를 touch한다 —
+        // 이 함수가 반환된 다음이 아니라. sweepRunWorkspaces의 기준을 넘겨 idle
+        // 상태였던 reuse-모드 폴더는 정확히 여기 도달하는 그 케이스다 — 오래
+        // idle이었던 마커에 이제 막 fetch가 시작되려는 상황 — 그리고 주기적
+        // 스윕은 자체 타이머로 돌아갈 뿐 이 폴더별 락과는 아무 조율도 하지
+        // 않는다(withFolderLock은 같은 폴더에 대한 동시 PROVISION끼리만 서로
+        // 직렬화할 뿐, 스윕에 대해서는 아니다). 지금 touch해두면 git 작업이
+        // 끝난 뒤뿐 아니라 전체 진행 구간 내내 스윕이 fresh한 마커를 보게
+        // 된다. haveClone(fetch/pull) 분기에만 한정한 이유 — 아래의 clone
+        // 분기는 EMPTY한(또는 존재하지 않는) 디렉터리를 그대로 `git clone`에
+        // 넘기는데, `git clone`은 비어 있지 않은 대상을 거부하므로 마커
+        // 파일을 먼저 써버리면 모든 fresh/최초 clone이 깨진다.
+        await touchLastUsedMarker(dir);
         // Proactively clear a stale index.lock a prior crashed run may have left,
         // so the first index-writing op below doesn't trip over a crash remnant.
         await recoverStaleIndexLock(gitDir, steps, notes);
@@ -477,6 +577,8 @@ export async function provisionRunWorkspace(
       }
 
       log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);
+      await touchLastUsedMarker(dir);
+      await recordManifestLeaf();
       return { ok: true, dir, steps, notes };
     } catch (err: any) {
       const error = String(err?.message ?? err);

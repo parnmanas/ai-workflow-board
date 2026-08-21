@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
 
-const { normalizeWorkspaceFolder, resolveWorkspaceFolder } = await import(
+const { normalizeWorkspaceFolder, resolveWorkspaceFolder, runWorkspaceRootForKind } = await import(
   'file://' + path.join(DIST_ROOT, 'common', 'workspace-folder-options.js')
 );
 
@@ -57,4 +57,26 @@ test('resolveWorkspaceFolder: every folder is rooted under .awb/qa/ (worktree �
   // A traversal segment in an explicit folder is stripped, so it cannot climb
   // out of .awb/qa/ — the normalize guard + the fixed root both hold.
   assert.equal(resolveWorkspaceFolder('../../etc/passwd', 'qa', 'x'), '.awb/qa/etc/passwd');
+});
+
+// ── 티켓 9fd27487: 티켓이 아닌 실행 경로 (Action Run / 채팅방) ──────────────────
+
+test('runWorkspaceRootForKind: qa/security share .awb/qa; action and chat get their own root', () => {
+  assert.equal(runWorkspaceRootForKind('qa'), '.awb/qa');
+  assert.equal(runWorkspaceRootForKind('security'), '.awb/qa');
+  assert.equal(runWorkspaceRootForKind('action'), '.awb/act');
+  assert.equal(runWorkspaceRootForKind('chat'), '.awb/chat');
+});
+
+test('resolveWorkspaceFolder: action Runs are action-keyed under .awb/act/ (not run-keyed — every Run of the same Action reuses one folder)', () => {
+  assert.equal(resolveWorkspaceFolder('', 'action', 'action-id-1234'), '.awb/act/action-i');
+  assert.equal(resolveWorkspaceFolder(null, 'action', 'abcdef1234567890'), '.awb/act/abcdef12');
+  // workspace_folder를 명시적으로 지정해도 여전히 .awb/act/ 아래에 중첩되며, traversal은 제거된다.
+  assert.equal(resolveWorkspaceFolder('deploy-scripts', 'action', 'a-1'), '.awb/act/deploy-scripts');
+  assert.equal(resolveWorkspaceFolder('../../etc/passwd', 'action', 'a-1'), '.awb/act/etc/passwd');
+});
+
+test('resolveWorkspaceFolder: chat rooms are room-keyed under .awb/chat/', () => {
+  assert.equal(resolveWorkspaceFolder('', 'chat', 'room-id-56789'), '.awb/chat/room-id-');
+  assert.equal(resolveWorkspaceFolder(null, 'chat', 'abcdef1234567890'), '.awb/chat/abcdef12');
 });

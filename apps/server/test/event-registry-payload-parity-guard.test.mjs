@@ -220,9 +220,17 @@ function computeViolations(registrySource, typesSource) {
 
 // Remove the first top-level `<field>: ...,` property line from the source —
 // used by the mutation test to prove the guard has teeth.
-function dropFieldLine(source, field) {
+// `fromIndex`는 검색 범위를 특정 map() 블록(예: `eventType: 'chat_room_message'`의
+// 오프셋)으로 한정한다 — run_provision(티켓 9fd27487이 chat_request의 map()에도
+// 추가함)이나 effort_preset(map() + flatten())처럼 하나의 필드명이 둘 이상의
+// map()에 정당하게 등장하는 경우, 파일에서 먼저 매치되는 위치가 아니라 의도한
+// 위치의 필드를 제거하도록 한다.
+function dropFieldLine(source, field, fromIndex = 0) {
   const re = new RegExp(`^[ \\t]*${field}:[^\\n]*\\n`, 'm');
-  return source.replace(re, '');
+  const match = source.slice(fromIndex).match(re);
+  if (!match) return source;
+  const idx = fromIndex + match.index;
+  return source.slice(0, idx) + source.slice(idx + match[0].length);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -301,6 +309,26 @@ test('chat_room_message conditional-omit fields are preserved (legacy wire-shape
   // F-1 (ticket 24694916): structured ticket-action refs — omitted-when-absent so
   // ordinary chat turns keep the wire byte-for-byte unchanged.
   assert.match(code, /metadata:\s*event\.metadata \? event\.metadata : undefined/);
+  // ticket 7d8ea7c9 (review round 1): agent별 Claude backend profile 맵 —
+  // 비어 있으면 생략되어 일반 채팅 턴/비-Claude 방은 wire가 byte-for-byte
+  // 그대로 유지된다.
+  assert.match(
+    code,
+    /cli_runtime_profiles:\s*event\.cli_runtime_profiles[\s\S]{0,120}\?\s*event\.cli_runtime_profiles\s*:\s*undefined/,
+  );
+});
+
+test('chat_request conditional-omit fields are preserved (legacy wire-shape)', () => {
+  // 위 chat_room_message 테스트와 같은 취지를, chat_request 자신의 조건부
+  // 생략 필드로 범위를 좁혀 검증한다. cli_runtime_profile은 예전에 여기서
+  // `?? null`을 썼는데 — `?? undefined`와 달리 — JSON.stringify를 거쳐도
+  // 명시적 `null`로 살아남아 해석되지 않은 모든 채팅 턴마다 키를 조용히
+  // 되살렸다(review round 1, ticket 7d8ea7c9). 이후 리팩터링이 다시 되돌릴
+  // 수 없도록 `?? undefined`를 고정한다.
+  const code = read(REGISTRY_REL).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const chatRequestBlock = code.slice(code.indexOf("eventType: 'chat_request'"), code.indexOf("eventType: 'chat_room_message'"));
+  assert.match(chatRequestBlock, /run_provision:\s*event\.run_provision \? event\.run_provision : undefined/);
+  assert.match(chatRequestBlock, /cli_runtime_profile:\s*event\.cli_runtime_profile\s*\?\?\s*undefined/);
 });
 
 test('agent_trigger flatten() forwards every manager-consumed field', () => {
@@ -353,7 +381,11 @@ test('mutation: dropping a forwarded field is detected, and ONLY that field', ()
   assert.deepEqual(base, [], `baseline parity must be clean, got: ${JSON.stringify(base)}`);
 
   // Mutate: drop run_provision from the chat_room_message map literal.
-  const mutated = dropFieldLine(registry, 'run_provision');
+  // 티켓 9fd27487이 chat_request의 map()에도 run_provision을 추가했는데(DM /
+  // @-멘션 run-workspace 프로비저닝), 이게 파일에서 더 앞쪽에 나타나게 됐다 —
+  // 그래서 검색 범위를 chat_room_message 자신의 블록으로 한정해야, 필드 선언
+  // 순서와 무관하게 mutation이 의도한 위치를 정확히 맞힌다.
+  const mutated = dropFieldLine(registry, 'run_provision', registry.indexOf("eventType: 'chat_room_message'"));
   assert.notEqual(mutated, registry, 'mutation must actually change the source');
 
   const after = computeViolations(mutated, types).violations;

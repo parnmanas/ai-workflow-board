@@ -139,6 +139,16 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   list_orchestration_teams: 'caller',
   list_orchestration_missions: 'caller',
   create_orchestration_mission: 'caller',
+
+  // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
+  // what the handler already enforces on its own: it resolves the caller's
+  // own Agent row, requires it be an ACTIVE PARTICIPANT of the target room_id
+  // (ChatRoomParticipant lookup — real ownership check, same posture as
+  // add_chat_participants/send_chat_room_message below in KNOWN_EXISTING_TOOLS),
+  // and routes the grant only to that same agent's own live manager instance —
+  // there is no cross-agent/cross-resource surface here for a stricter tier
+  // to protect, only a resolvable caller requirement.
+  keep_chat_session_alive: 'caller',
 };
 
 /**

@@ -40,7 +40,7 @@ function credentialFileFromHelper(helper) {
   return JSON.parse(match[1]);
 }
 
-const { parseRunProvision, provisionRunWorkspace, reconcileRunBaseWorkingDir } = await import('../dist/lib/run-provisioner.js');
+const { parseRunProvision, provisionRunWorkspace, reconcileRunBaseWorkingDir, resolveRunCompletionRoute } = await import('../dist/lib/run-provisioner.js');
 
 // ── Build a local bare "remote" with one commit, return its path + a push helper.
 function git(cwd, args) {
@@ -108,6 +108,98 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
   // repo without a usable url → repo null.
   const noUrl = parseRunProvision({ kind: 'qa', run_id: 'r', workspace_id: 'w', workspace_folder: 'f', repo: { branch: 'x' } });
   assert.equal(noUrl.repo, null);
+});
+
+// ── ticket 9fd27487: 티켓이 아닌 실행 경로(Action Run / 채팅방) ──────
+
+test('parseRunProvision: accepts the new action/chat kinds', () => {
+  const action = parseRunProvision({
+    kind: 'action',
+    run_id: 'run-a1',
+    workspace_id: 'w1',
+    workspace_folder: '.awb/act/abc12345',
+    checkout_mode: 'reuse',
+    repo: { url: 'https://x/r.git' },
+  });
+  assert.equal(action.kind, 'action');
+  assert.equal(action.workspace_folder, '.awb/act/abc12345');
+  assert.deepEqual(action.repo, { url: 'https://x/r.git' });
+
+  // 채팅은 wire 상에서 항상 repo:null 로 전달된다(ChatRoom 에는 repo_ref 노브가 없음) —
+  // parseRunProvision 은 이 경우도 (repo 누락이지 형식 오류가 아니므로) 정상 수용해야 한다.
+  const chat = parseRunProvision({
+    kind: 'chat',
+    run_id: 'room-c1',
+    workspace_id: 'w1',
+    workspace_folder: '.awb/chat/def67890',
+    checkout_mode: 'reuse',
+  });
+  assert.equal(chat.kind, 'chat');
+  assert.equal(chat.repo, null);
+});
+
+test('resolveRunCompletionRoute: routes qa/security/action to their MCP tool + status contract', () => {
+  assert.deepEqual(resolveRunCompletionRoute('qa'), {
+    getTool: 'get_qa_run',
+    completeTool: 'complete_qa_run',
+    failureStatus: 'error',
+  });
+  assert.deepEqual(resolveRunCompletionRoute('security'), {
+    getTool: 'get_security_run',
+    completeTool: 'complete_security_run',
+    failureStatus: 'error',
+  });
+  // Action 은 get_action_run 툴이 없다(getTool: null — 호출자는 항상 reap/finalize 로
+  // 폴백해야 하며, complete_action_run 의 멱등한 종료 전이에 의존한다) 그리고 실패
+  // status enum 도 다르다('error' 가 아니라 'failed' — complete_action_run 은
+  // 'succeeded'|'failed' 만 허용한다).
+  assert.deepEqual(resolveRunCompletionRoute('action'), {
+    getTool: null,
+    completeTool: 'complete_action_run',
+    failureStatus: 'failed',
+  });
+});
+
+test('provisionRunWorkspace: touches a .awb-last-used marker on every successful provision (idle-GC liveness signal)', async () => {
+  const markerPath = (dir) => join(dir, '.awb-last-used');
+
+  // repo 없는 경로(모든 채팅 프로비저닝이 취하는 형태 — repo:null).
+  const noRepo = await provisionRunWorkspace(
+    { kind: 'chat', run_id: 'room-m1', workspace_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
+    BASE,
+  );
+  assert.equal(noRepo.ok, true);
+  assert.ok(existsSync(markerPath(noRepo.dir)), 'marker written on the no-repo path');
+  const firstStamp = readFileSync(markerPath(noRepo.dir), 'utf8');
+  assert.ok(!Number.isNaN(Date.parse(firstStamp)), 'marker holds a parseable ISO timestamp');
+
+  // 같은 폴더를 재프로비저닝하면 마커를 (최초 1회만 생성하는 게 아니라) 매번
+  // 다시 touch 해야 한다 — sweepRunWorkspaces 는 이를 "마지막 사용"으로 읽지 "최초 사용"으로 읽지 않는다.
+  await new Promise((r) => setTimeout(r, 5));
+  const again = await provisionRunWorkspace(
+    { kind: 'chat', run_id: 'room-m1', workspace_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
+    BASE,
+  );
+  assert.equal(again.ok, true);
+  const secondStamp = readFileSync(markerPath(again.dir), 'utf8');
+  assert.notEqual(secondStamp, firstStamp, 'marker re-touched on a later provision of the same folder');
+
+  // 클론(action) 경로도 마커를 받는다.
+  const remote = makeRemote();
+  const cloned = await provisionRunWorkspace(
+    { kind: 'action', run_id: 'run-m2', workspace_id: 'w1', workspace_folder: '.awb/act/marker-clone', checkout_mode: 'reuse', repo: { url: remote.url } },
+    BASE,
+  );
+  assert.equal(cloned.ok, true);
+  assert.ok(existsSync(markerPath(cloned.dir)), 'marker written on the clone path too');
+
+  // 실패한 프로비저닝(path traversal 거부)은 마커를 써서는 안 된다 —
+  // 최근 사용됨으로 표시할 폴더 자체가 없기 때문이다.
+  const failed = await provisionRunWorkspace(
+    { kind: 'action', run_id: 'run-m3', workspace_id: 'w1', workspace_folder: '../../../../etc/awb-marker-traversal', checkout_mode: 'fresh', repo: null },
+    BASE,
+  );
+  assert.equal(failed.ok, false);
 });
 
 test('reuse: rooted at working_dir; first clones, second fetch+ff-pulls the same folder', async () => {

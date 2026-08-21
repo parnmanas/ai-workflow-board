@@ -319,6 +319,29 @@ export class AgentManagerController {
           }))
       : undefined;
 
+    // 라이브 Action-Run / 채팅방 워크스페이스(티켓 9fd27487). 위 active_worktrees와
+    // 동일한 best-effort 축소 방식을 적용한다. 여기서는 티켓 범위가 아니므로
+    // ticket_id 조인이 필요 없다 — 그래서 active_worktrees와 달리 아래 enriched
+    // 응답에서는 `...inst` 스프레드를 통해 그대로 전달하기만 한다.
+    const active_run_workspaces = Array.isArray(body?.active_run_workspaces)
+      ? body.active_run_workspaces
+          .filter(
+            (row: any) =>
+              row &&
+              typeof row === 'object' &&
+              typeof row.path === 'string' && row.path &&
+              (row.kind === 'action' || row.kind === 'chat'),
+          )
+          .map((row: any) => ({
+            working_dir: typeof row.working_dir === 'string' ? row.working_dir : '',
+            path: String(row.path),
+            kind: row.kind === 'action' ? 'action' : 'chat',
+            leaf: typeof row.leaf === 'string' ? row.leaf : '',
+            last_used_at: typeof row.last_used_at === 'string' && row.last_used_at ? row.last_used_at : null,
+            live: row.live === true,
+          }))
+      : undefined;
+
     // Self-update fields — manager fills these via its UpdateChecker. Older
     // managers omit them and we leave the registry record's fields undefined.
     // `null` here is a meaningful "checker has run but couldn't read the
@@ -423,6 +446,7 @@ export class AgentManagerController {
       paired_at,
       agent_credentials,
       active_worktrees,
+      active_run_workspaces,
       available_models,
       latest_version,
       update_available,

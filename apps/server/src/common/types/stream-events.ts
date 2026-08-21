@@ -31,7 +31,8 @@ export type StreamEventType =
   | 'agent_instance_update' // Runtime Host instance heartbeat / removal
   | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
   | 'consensus_update'      // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
-  | 'orchestration_update';  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
+  | 'orchestration_update'  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
+  | 'ticket_reads_cleared';  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
 
 export interface StreamEventScope {
   board_id?: string;
@@ -275,6 +276,22 @@ export interface ChatRequestPayload {
   // in agent-manager will fall through to the legacy one-shot subagent
   // (which can only guess the room).
   room_id?: string;
+  // ticket 9fd27487: DM / @-멘션 디스패치를 위한 run-workspace 프로비저닝
+  // 힌트 — chat_room_message의 run_provision에 대응하는 `chat_request` 쪽
+  // 짝이다. 대상 workspace가 chat_workspace_folder_enabled를 opt-in한
+  // 경우에만 RoomMessagingService가 채워 넣으며(room-messaging.service.ts
+  // 참고), opt-in하지 않은 workspace에서는 (kind로만 걸러지는 게 아니라)
+  // 필드 자체가 생략되어 DM의 wire shape가 기본적으로 byte 단위까지 그대로
+  // 유지된다.
+  run_provision?: RunProvision;
+  // ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+  // this chat dispatch — same resolution RoomMessagingService applies as
+  // trigger-loop.service.ts does for ticket dispatch, but agent-only (a chat
+  // turn has no ticket/board to layer). agent-manager's handleChatRequest
+  // reads payload.cli_runtime_profile to pick the CLI backend. Omitted when
+  // the responder isn't a Claude agent or nothing resolves, so a chat turn
+  // with no configured profile keeps today's wire shape unchanged.
+  cli_runtime_profile?: CliRuntimeProfile | null;
 }
 
 // F-1 (ticket 24694916) — structured ticket-action reference. The agent-manager
@@ -426,6 +443,18 @@ export interface ChatRoomMessagePayload {
   // reliable ticket-action card render on the client. Conditional-omit on the
   // wire (absent for ordinary chat turns) so the legacy shape is unchanged.
   metadata?: ChatRoomMessageMetadata;
+  // ticket 7d8ea7c9 (review round 1): 이 broadcast에 대해 agent_id → 해석된
+  // Claude backend profile 맵. chat_request(단일 대상 agent)와 달리
+  // chat_room_message는 방의 모든 멤버에게 팬아웃되므로 — Claude-type
+  // 멤버마다 cli_runtime_profile 설정이 다르거나(또는 없거나) 할 때 평면
+  // single-profile 필드로는 "지금 응답할 그 멤버에게 맞는 backend"를
+  // 표현할 수 없다. RoomMessagingService가 Claude-type 멤버마다 하나씩
+  // 항목을 해석하고(chat_request의 agent별 해석을 그대로 미러링), 각
+  // 매니저 인스턴스가 자신이 관리하는 responder의 항목을 agent_id로
+  // 맵에서 골라 쓴다. wire에서는 조건부 생략(어떤 멤버도 profile이
+  // 해석되지 않으면 필드 자체가 없음)이라 일반 채팅 턴/비-Claude 방은
+  // 기존 shape 그대로 유지된다.
+  cli_runtime_profiles?: Record<string, CliRuntimeProfile>;
 }
 
 export interface ChatRoomUpdatePayload {
@@ -528,6 +557,17 @@ export interface UserMentionPayload {
   actor_name: string;
   preview: string;
   created_at: string; // ISO-8601
+}
+
+// 티켓 628f4b39 — 티켓 코멘트 일괄 읽음("모두 읽음") 처리 결과. 처리한 본인의
+// 다른 탭/기기 세션에만 전달되어, BroadcastChannel(같은 브라우저 탭 전용)이
+// 닿지 않는 다른 기기의 사이드바/보드 뱃지도 재조회 없이 즉시 수렴시킨다.
+export interface TicketReadsClearedPayload {
+  user_id: string;           // 처리를 실행한 사용자
+  workspace_id: string;
+  board_id: string | null;   // 보드 스코프 지정 시 해당 보드, 생략(워크스페이스 전체)이면 null
+  updated: number;           // TicketReadState 로 upsert 된 티켓 수
+  read_at: string;           // ISO-8601
 }
 
 // File browser — server emits this toward a specific agent's SSE stream to ask
@@ -668,7 +708,14 @@ export type AgentManagerCommand =
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
   | 'update_manager'     // pull + install + build the manager itself, then re-exec
-  | 'restart_manager';   // re-exec the manager in place (no git pull / build) so a fresh process takes over the lockfile
+  | 'restart_manager'    // re-exec the manager in place (no git pull / build) so a fresh process takes over the lockfile
+  // ticket 6ff827cb — the ONLY two verbs issued by an MCP tool call (from the
+  // calling agent's own live session) rather than an admin action. args:
+  // { agent_id, room_id, minutes?, reason? }. Routed to the chat session for
+  // that room_id on the target manager instance; see ChatSessionManager's
+  // applyKeepAlive (inherited from BaseSessionManager).
+  | 'extend_chat_keepalive'  // defer idle/maxTurns reap for a live chat session, up to the hard ceiling
+  | 'release_chat_keepalive'; // clear an active grant early
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

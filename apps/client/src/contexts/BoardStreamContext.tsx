@@ -42,7 +42,8 @@ type StreamNamedEventType =
   | 'subagent_registered' | 'subagent_log' | 'subagent_ended'  // v0.32 subagent monitor
   | 'agent_instance_update'  // Phase 3 Agent Manager dashboard
   | 'consensus_update'   // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
-  | 'orchestration_update';  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
+  | 'orchestration_update'  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
+  | 'ticket_reads_cleared';  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -214,6 +215,12 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // 받고 스스로 detail 을 다시 당긴다.
       eventSource.addEventListener('orchestration_update', (event: MessageEvent) => {
         dispatch('orchestration_update', event.data);
+      });
+
+      // 티켓 628f4b39 — 다른 탭/기기에서 "모두 읽음" 처리 시 이 탭의 배지도
+      // 폴링 없이 즉시 수렴하도록.
+      eventSource.addEventListener('ticket_reads_cleared', (event: MessageEvent) => {
+        dispatch('ticket_reads_cleared', event.data);
       });
 
       eventSource.onerror = () => {

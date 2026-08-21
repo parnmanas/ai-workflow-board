@@ -92,6 +92,12 @@ interface NotificationContextValue {
    */
   markRead: (source: NotificationSource, key?: string) => void;
   /**
+   * 한 보드로 롤업되는 모든 티켓-코멘트 뱃지를 0으로 만든다(사이드바/보드
+   * 페이지의 "모두 읽음" 액션) — optimistic, 다른 탭에도 알린다.
+   * `boardId` 를 생략하면 모든 보드를 지운다(워크스페이스 전체 "모두 읽음").
+   */
+  markTicketsReadForBoard: (boardId?: string) => void;
+  /**
    * Drop `count` mentions from the badge because the server cleared them as a
    * side effect of the caller reading their source (a ticket thread or a chat
    * room). Pass the `mentions_cleared` the read endpoint returned; 0 is a
@@ -170,6 +176,7 @@ function fireBrowserNotification(req: NotiRequest) {
 // per-browser, not per-user, and every message runs on every tab.
 type BroadcastMsg =
   | { type: 'mark-read'; source: NotificationSource; key?: string }
+  | { type: 'mark-tickets-read-for-board'; boardId?: string }
   | { type: 'mentions-cleared'; count: number }
   | { type: 'refresh' };
 
@@ -366,6 +373,35 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => ({ ...prev, mentions: Math.max(0, prev.mentions - count) }));
   }, [mutateCounts]);
 
+  // 보드 스코프(또는 boardId 생략 시 워크스페이스 전체) "모두 읽음" 액션을
+  // 위한 순수 상태 변경. 티켓 하나만 지우는 applyMarkRead('tickets', key)
+  // 와 달리, ticketBoard 를 훑어 주어진 보드로 롤업되는 모든 티켓을 한 번에
+  // 지운다 — 그래야 보드 뱃지와 그 보드의 모든 TicketCard 뱃지가 N번의
+  // 개별 클리어에 뒤처지지 않고 함께 0으로 떨어진다.
+  const applyMarkTicketsReadForBoard = useCallback((boardId?: string) => {
+    mutateCounts((prev) => {
+      if (!boardId) {
+        return { ...prev, tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} } };
+      }
+      const perTicket = { ...prev.tickets.perTicket };
+      const ticketBoard = { ...prev.tickets.ticketBoard };
+      let removed = 0;
+      for (const [ticketId, tBoardId] of Object.entries(prev.tickets.ticketBoard)) {
+        if (tBoardId !== boardId) continue;
+        removed += perTicket[ticketId] || 0;
+        delete perTicket[ticketId];
+        delete ticketBoard[ticketId];
+      }
+      if (removed === 0) return prev;
+      const perBoard = { ...prev.tickets.perBoard };
+      delete perBoard[boardId];
+      return {
+        ...prev,
+        tickets: { total: Math.max(0, prev.tickets.total - removed), perTicket, perBoard, ticketBoard },
+      };
+    });
+  }, [mutateCounts]);
+
   // ─── BroadcastChannel cross-tab sync ────────────────────────────────
   useEffect(() => {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
@@ -378,6 +414,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         void refresh();
       } else if (msg.type === 'mark-read') {
         applyMarkRead(msg.source, msg.key);
+      } else if (msg.type === 'mark-tickets-read-for-board') {
+        applyMarkTicketsReadForBoard(msg.boardId);
       } else if (msg.type === 'mentions-cleared') {
         applyMentionsCleared(msg.count);
       }
@@ -386,7 +424,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       bc.close();
       bcRef.current = null;
     };
-  }, [refresh, applyMarkRead, applyMentionsCleared]);
+  }, [refresh, applyMarkRead, applyMarkTicketsReadForBoard, applyMentionsCleared]);
 
   const broadcast = useCallback((msg: BroadcastMsg) => {
     try {
@@ -402,6 +440,14 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       broadcast({ type: 'mark-read', source, key });
     },
     [applyMarkRead, broadcast],
+  );
+
+  const markTicketsReadForBoard = useCallback(
+    (boardId?: string) => {
+      applyMarkTicketsReadForBoard(boardId);
+      broadcast({ type: 'mark-tickets-read-for-board', boardId });
+    },
+    [applyMarkTicketsReadForBoard, broadcast],
   );
 
   const noteMentionsCleared = useCallback(
@@ -537,6 +583,21 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     applyMarkRead('chat', roomId);
   });
 
+  // 티켓 628f4b39 — ticket_reads_cleared 는 이 "모두 읽음"을 실행한 본인의
+  // 다른 탭/기기 세션에만 전달된다(서버 필터가 user_id 로 스코프). 로컬에서
+  // 직접 누른 경우엔 markTicketsReadForBoard 가 이미 상태를 지우고 이
+  // BroadcastChannel 로도 알렸으므로, 여기선 순수 mutator(applyMark...)만
+  // 불러 재브로드캐스트 루프를 만들지 않는다 — chat_room_update 읽음 동기화와
+  // 동일한 패턴.
+  useBoardStreamEvent('ticket_reads_cleared', (rawFrame: any) => {
+    if (!user) return;
+    const raw = unwrapStreamEvent(rawFrame);
+    if (!raw?.user_id || raw.user_id !== user.id) return;
+    const wsId = wsIdRef.current;
+    if (raw?.workspace_id && wsId && raw.workspace_id !== wsId) return;
+    applyMarkTicketsReadForBoard(raw?.board_id || undefined);
+  });
+
   // board_update carrying an 'activity' with entity_type='comment' and
   // action='created' → a new comment landed on a ticket.
   useBoardStreamEvent('board_update', (raw: any) => {
@@ -648,10 +709,11 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       requestNotificationPermission,
       refresh,
       markRead,
+      markTicketsReadForBoard,
       noteMentionsCleared,
       markAgentErrorsSeen,
     }),
-    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, noteMentionsCleared, markAgentErrorsSeen],
+    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markTicketsReadForBoard, noteMentionsCleared, markAgentErrorsSeen],
   );
 
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;

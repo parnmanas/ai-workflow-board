@@ -23,6 +23,7 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
 import { enforceRunBudget } from '../../common/run-budget-guard';
+import { visibleScopeWhere } from '../skills/skill-scope';
 import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
@@ -218,10 +219,34 @@ export class OrchestrationMissionService {
     // alert rather than crossing that boundary for one notify call.
     await enforceRunBudget({ dataSource: this.dataSource, logger: this.logService }, 'orchestration', workspaceId);
 
-    const team = await this.teamRepo.findOne({ where: { id: input.team_id, workspace_id: workspaceId } });
+    // 이 workspace 소유 팀 OR 글로벌 팀(티켓 1b62b437)에 매칭된다 — 글로벌 팀의
+    // 로스터는 workspace 비종속이지만, 이 팀이 실행하는 MISSION은 여전히 호출자가
+    // 해석한 workspace에 귀속/과금된다.
+    const team = await this.teamRepo.findOne({
+      where: visibleScopeWhere<OrchestrationTeam>(workspaceId, { id: input.team_id }),
+    });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     if (!team.orchestrator_agent_id) {
       throw orchestrationError(400, `team "${team.name}" has no orchestrator agent set`);
+    }
+    // 글로벌 팀의 allowed_workspace_ids를 권위 있게 강제하는 지점 — "MANAGE_ACTIONS을
+    // 가진 아무 호출자"와 "팀이 허가받은 적 없는 workspace에 미션을 과금"을 가르는
+    // 유일한 게이트(티켓 1b62b437). create_orchestration_mission의 사전 검사만이
+    // 아니라 여기에도 있어야, team-scope 검사가 따로 없는 REST/human 경로
+    // (POST /orchestration/missions)에도 똑같이 적용된다 — 안 그러면 그 컨트롤러는
+    // 글로벌 팀에 대해 호출자가 준 workspace_id를 아무 검증 없이 그대로 통과시킨다.
+    if (team.workspace_id === null) {
+      const allowed = Array.isArray(team.allowed_workspace_ids) ? team.allowed_workspace_ids : [];
+      if (allowed.length === 0) {
+        throw orchestrationError(
+          409,
+          `team "${team.name}" is global but has no allowed workspaces configured — a human operator must ` +
+            `set the team's workspace allow-list before it can create missions.`,
+        );
+      }
+      if (!allowed.includes(workspaceId)) {
+        throw orchestrationError(400, `workspace_id "${workspaceId}" is not on team "${team.name}"'s allowed workspace list.`);
+      }
     }
     if (input.orchestrator_agent_id && input.orchestrator_agent_id !== team.orchestrator_agent_id) {
       throw orchestrationError(403, 'orchestrator_agent_id must match the team\'s own orchestrator');

@@ -28,7 +28,7 @@ import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
-import { injectWorkFolder, sharedWorktreeInstructions } from './prompts.js';
+import { injectWorkFolder, worktreeInstructionsFor } from './prompts.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
@@ -46,6 +46,7 @@ import {
   provisionRunWorkspace,
   reconcileRunBaseWorkingDir,
   resolveRunFolder,
+  resolveRunCompletionRoute,
 } from './run-provisioner.js';
 
 interface ResolvedEnvironmentConfig {
@@ -110,11 +111,84 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/** Required fields of RuntimeProfileSpec (cli-adapters/base.ts) — NOT
+ *  `provider`, which was never part of the actual wire/DB schema (ticket
+ *  7d8ea7c9 root cause B). The old `provider` check meant every real profile
+ *  failed validation and silently returned null, so no per-agent Claude
+ *  backend profile could ever apply. */
+function isRuntimeProfileShape(value: any): value is RuntimeProfileSpec {
+  return (
+    typeof value.id === 'string'
+    && (value.protocol === 'anthropic-compatible' || value.protocol === 'openai-compatible')
+    && typeof value.base_url === 'string'
+    && typeof value.model === 'string'
+  );
+}
+
 export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    log(`parseRuntimeProfile: expected an object, got ${Array.isArray(raw) ? 'array' : typeof raw} — dropping`);
+    return null;
+  }
   const value = raw as any;
-  if (typeof value.id !== 'string' || typeof value.provider !== 'string' || typeof value.model !== 'string') return null;
+  if (!isRuntimeProfileShape(value)) {
+    log(
+      `parseRuntimeProfile: malformed runtime profile (id=${String(value?.id ?? '')}) — ` +
+        `missing/invalid required field(s), dropping and spawning without a runtime profile`,
+    );
+    return null;
+  }
   return value as RuntimeProfileSpec;
+}
+
+/** 티켓 0fbe802c: ticket-dispatch 경로(#dispatchTriggerBody)의 runtime profile
+ *  우선순위 결정 — per-agent DB 프로필(rawCliRuntimeProfile로 전달된
+ *  ev.cli_runtime_profile)이 정상 파싱되면 그것을 최우선으로 쓰고, 없을 때만
+ *  인스턴스 전역 `--runtime-profile` 오버라이드(instanceOverride)로 폴백한다.
+ *  오버라이드조차 없으면(undefined) null → CLI 기본값.
+ *
+ *  이전에는 인스턴스 오버라이드가 설정되어 있으면(!== undefined) 항상
+ *  최우선이라 다중-agent 호스트에서 오버라이드가 모든 agent의 티켓 작업을
+ *  자신의 per-agent 프로필과 무관하게 그 백엔드로 강제했다 — chat 경로에서
+ *  7d8ea7c9가 고친 것과 동일한 교차 오염. chat 경로는 오버라이드를 아예
+ *  참조하지 않지만(전적으로 per-agent 소스), ticket-dispatch 경로는 per-agent
+ *  프로필이 없는 agent에게는 여전히 인스턴스 단위 오버라이드가 유효한
+ *  폴백으로 남는다 — 단일-agent 호스트가 `--runtime-profile <file>`로 DB
+ *  변경 없이 전체를 그 백엔드로 돌리는 기존 용법을 보존하기 위함. */
+export function resolveTriggerRuntimeProfile(
+  rawCliRuntimeProfile: unknown,
+  instanceOverride: RuntimeProfileSpec | null | undefined,
+): RuntimeProfileSpec | null {
+  return parseRuntimeProfile(rawCliRuntimeProfile) ?? instanceOverride ?? null;
+}
+
+/** ticket 7d8ea7c9 (review round 1 + round 2): chat_room_message broadcast의
+ *  agent별 profile map에서 바로 이 responder의 Claude backend profile을
+ *  골라낸다. chat_request(단일 대상 agent → 평면 cli_runtime_profile
+ *  필드)와 달리 chat_room_message는 방의 모든 멤버에게 팬아웃되므로, 서버는
+ *  해석된 profile을 agent_id로 키잉해 보낸다(RoomMessagingService가
+ *  Claude-type 멤버마다 하나씩 항목을 해석) — 각 매니저는 단일 ambient
+ *  필드에 의존하는 대신 맵에서 자기 responder의 항목을 먼저 골라 쓴다.
+ *
+ *  라운드 2 P1: 이 responder의 map 항목이 없거나(또는 형식 오류) 해석
+ *  실패하면 resolveTriggerRuntimeProfile과 동일하게 instanceOverride로
+ *  폴백한다 — 라운드 1은 오버라이드를 아예 참조하지 않아 per-agent 프로필이
+ *  없는 chat agent가 인스턴스 `--runtime-profile` 플래그까지 무시하고
+ *  CLI 기본값(Anthropic 클라우드)으로 떨어지는 회귀가 있었다. 우선순위는
+ *  동일: 이 responder의 map 항목 > 인스턴스 오버라이드 > null.
+ *  responderAgentId가 빈 값(매니저 자신의 ambient identity, 해석된 managed
+ *  agent 없음)인 경우는 이 라운드의 논의 대상이 아니었으므로 라운드 1의
+ *  기존 계약(map을 보지 않고 즉시 null)을 그대로 보존한다. */
+export function resolveRoomBroadcastRuntimeProfile(
+  payload: any,
+  responderAgentId: string,
+  instanceOverride: RuntimeProfileSpec | null | undefined,
+): RuntimeProfileSpec | null {
+  if (!responderAgentId) return null;
+  const map = payload?.cli_runtime_profiles;
+  const raw = map && typeof map === 'object' ? map[responderAgentId] : undefined;
+  return parseRuntimeProfile(raw) ?? instanceOverride ?? null;
 }
 
 /** Valid claude `--effort` levels (current AWB vocabulary). A preset slice
@@ -508,12 +582,25 @@ export interface ChatDispatchArgs {
    *  prompt then tells the subagent to perform the task DIRECTLY instead of
    *  filing an AWB ticket, and skips the auto-title instruction. */
   isActionRoom?: boolean;
+  /** ticket 9fd27487: 이번 디스패치가 실제로 프로비저닝된 절대경로 cwd
+   *  (`.awb/act/<action8>` 또는 `.awb/chat/<room8>`) — opt-in하지 않은 채팅
+   *  workspace라면 그냥 에이전트의 통상적인 working_dir 루트일 뿐인 `agentContext.cwd`와는
+   *  다르다. 프로비저닝이 실행되어 성공했을 때만 값이 설정되므로, 기본값(여기서는
+   *  undefined)일 때는 첫 턴 프롬프트의 폴더 경계 블록이 working_dir 루트 자체를
+   *  "네게 배정된 작업폴더"라고 잘못 주장하지 않고 그대로 부재 상태를 유지한다. */
+  provisionedWorkFolder?: string;
   onProgress?: (stage: string) => void;
   /** ST-6: per-event managed-agent runtime context. When set, the chat
    *  session spawns under this agent's identity (apiKey + cwd + cli) so the
    *  reply is attributed to the right agent and lands in the room they're
    *  a member of. Undefined when the manager itself is the participant. */
   agentContext?: AgentExecutionContext;
+  /** ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+   *  this chat turn — the chat-path twin of TicketTriggerArgs.runtimeProfile.
+   *  Undefined/null when the responder isn't a Claude agent or no profile
+   *  resolves; BaseSessionManager then spawns exactly as before (Anthropic
+   *  default endpoint, agentContext.model / harness / CLI default). */
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** Per-message attachments as projected by the server in the SSE / history
    *  payload. ChatSessionManager fetches the bytes it needs (vision content
    *  blocks for Claude, inline text for text-ish mime) before assembling the
@@ -772,6 +859,7 @@ export interface PromptComposer {
     newMessage: string,
     roomId?: string,
     usesNativeMcp?: ChatReplyMode,
+    workFolder?: string,
   ): string;
   composeChatRoomPrompt(
     roomId: string,
@@ -782,6 +870,7 @@ export interface PromptComposer {
     historyAttachments?: Map<any, any[]>,
     roomName?: string,
     isActionRoom?: boolean,
+    workFolder?: string,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -2603,9 +2692,10 @@ export class EventDispatcher {
     // harness was already parsed above (ahead of the ticket 48aeab6e
     // CLI-readiness gate); both the persistent-session and one-shot paths
     // below ship it to their spawn site.
-    const runtimeProfile = this.#runtimeProfileOverride !== undefined
-      ? this.#runtimeProfileOverride
-      : parseRuntimeProfile(ev.cli_runtime_profile);
+    //
+    // 티켓 0fbe802c: 우선순위는 resolveTriggerRuntimeProfile 참고 — per-agent
+    // cli_runtime_profile > 인스턴스 --runtime-profile 오버라이드 > null.
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
     if (harness) {
       log(
         `Trigger carries harness_config: ticket=${ev.ticket_id} keys=${Object.keys(harness).join(',')}`,
@@ -2638,9 +2728,11 @@ export class EventDispatcher {
       worktreeMode,
       ev.ticket_id,
     );
-    const worktreeInstructions = worktreeMode === 'shared'
-      ? sharedWorktreeInstructions(agentContext?.cwd || '')
-      : '';
+    // 티켓 41e69c91: per_ticket(보드 기본값)에는 지금까지 폴더 경계 정책이
+    // 전혀 전달되지 않았다 — prompts.ts 호출은 'shared'에만 있었다. 두 모드
+    // 모두 worktreeInstructionsFor를 거치게 해서, leaf 문구 함수뿐 아니라
+    // 모드 선택 로직 자체도 테스트로 검증되게 한다.
+    const worktreeInstructions = worktreeInstructionsFor(worktreeMode, agentContext?.cwd || '');
 
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.
@@ -3033,7 +3125,58 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    if (agentContext?.cli === 'hermes') {
+    // ticket 7d8ea7c9: RoomMessagingService resolves agent > workspace Claude
+    // backend profile server-side (mirrors trigger-loop.service.ts's ticket
+    // resolution) and stamps it on chat_request. chat_request is
+    // envelope-native (see comment above), so this reads payload.* — NOT the
+    // ev.cli_runtime_profile flattened field, which is agent_trigger-only.
+    //
+    // (리뷰 라운드 2, P1): 라운드 1은 여기서 멈추고 `this.#runtimeProfileOverride`를
+    // 전혀 참조하지 않았다 — 인스턴스 전역 `--runtime-profile` 플래그가 켜져 있으면
+    // 모든 채팅 참가자가 자신의 cli_runtime_profile과 무관하게 같은 backend로
+    // 강제된다는 논리였다(root cause C). 그 논리는 "오버라이드로 절대 폴백하지
+    // 않는다"와 "둘 다 설정됐을 때 per-agent가 오버라이드를 이긴다"를 혼동한 것이다
+    // — 후자만이 실제로 교차 오염을 막으면서도, per-agent DB 프로필이 없는
+    // agent에게는 여전히 오버라이드가 폴백으로 남는다. ticket-dispatch 경로의
+    // resolveTriggerRuntimeProfile(티켓 0fbe802c, trigger-runtime-profile-priority.test.mjs로
+    // 우선순위 검증됨)과 정확히 같은 방식이므로 여기서도 그대로 재사용해, 두 진입점이
+    // 하나의 우선순위 계약(agent cli_runtime_profile > 인스턴스 오버라이드 > null)을
+    // 공유하도록 한다.
+    const runtimeProfile = resolveTriggerRuntimeProfile(payload.cli_runtime_profile, this.#runtimeProfileOverride);
+
+    // ticket 9fd27487: handleChatRoomMessage의 run-workspace 프로비저닝에 대응하는
+    // DM / @-멘션 쪽 짝. `chat_request`는 (chat_room_message와 달리) DM이나 명시적
+    // @-멘션의 정식(canonical) 디스패치 경로다 — manager 에이전트 자신의 운영 채팅이
+    // 바로 이 경우이므로, chat_room_message가 처리하는 그룹룸 턴만으로는 부족하고
+    // 이 경로도 자체적인 cwd 고정이 필요하다. `run_provision`은 대상 workspace가
+    // chat_workspace_folder_enabled를 켰을 때만 존재하며(서버 측 게이트), 채팅용
+    // RunProvision은 항상 repo:null을 갖는다(ChatRoom에는 repo_ref 옵션이 없다) —
+    // 그래서 여기서의 프로비저닝은 저비용 best-effort mkdir 수준으로 낮춰 처리한다.
+    // QA/action 경로의 완전한 락 + "실패하면 디스패치 자체를 중단"하는 절차까지는
+    // 쓸 필요가 없다(폴더 mkdir 하나 실패했다고 DM 답장을 통째로 버리는 쪽이 그냥
+    // working_dir 루트에서 답하는 것보다 더 나쁜 결과다).
+    let runContext = agentContext;
+    // runContext.cwd와는 별도로 추적한다: composeChatPrompt에 폴더 경계 블록의
+    // 트리거로 전달되는데, opt-in하지 않은 workspace라면 반드시 ''(블록 없음,
+    // {{AWB_WORK_FOLDER}} 치환도 없음)을 유지해야 하기 때문이다 — 위에서
+    // 프로비저닝이 실패한 뒤에는 runContext.cwd만 봐서는 "프로비저닝됨"과
+    // "그냥 에이전트의 통상적인 working_dir 루트"를 구분할 수 없다.
+    let provisionedWorkFolder = '';
+    const runProvision = parseRunProvision(payload.run_provision);
+    if (runProvision && agentContext) {
+      const result = await provisionRunWorkspace(runProvision, agentContext.cwd);
+      if (result.ok) {
+        runContext = { ...agentContext, cwd: result.dir };
+        provisionedWorkFolder = result.dir;
+      } else {
+        log(
+          `[chat-request] run-workspace provisioning failed for room=${payload.room_id || ''} ` +
+            `(continuing at working_dir root): ${result.error || 'unknown error'}`,
+        );
+      }
+    }
+
+    if (runContext?.cli === 'hermes') {
       const rolePrompt = payload.role_prompt || '';
       const taskText =
         this.#prompts?.composeChatPrompt(
@@ -3042,13 +3185,14 @@ export class EventDispatcher {
           payload.new_message || '',
           payload.room_id || '',
           'agent_manager_delivers',
+          provisionedWorkFolder,
         ) ?? `[chat] ${payload.new_message || ''}`;
       let replyText = '';
       try {
         const result = await this.#dispatchHermes({
-          agentContext,
-          runId: `chat:${payload.room_id || payload.user_id || 'direct'}:${agentContext.agent_id}`,
-          leaseId: `chat:${agentContext.cwd}`,
+          agentContext: runContext,
+          runId: `chat:${payload.room_id || payload.user_id || 'direct'}:${runContext.agent_id}`,
+          leaseId: runProvision?.run_id || `chat:${runContext.cwd}`,
           systemContext: rolePrompt,
           task: taskText,
           onEvent: (event) => {
@@ -3062,7 +3206,7 @@ export class EventDispatcher {
         await this.#reportHermesDispatchOutcome(
           'Hermes chat dispatch',
           payload.room_id,
-          agentContext.agent_id,
+          runContext.agent_id,
           result,
           replyText,
         );
@@ -3070,7 +3214,7 @@ export class EventDispatcher {
         await this.#reportHermesDispatchFailure(
           'Hermes chat dispatch',
           payload.room_id,
-          agentContext.agent_id,
+          runContext.agent_id,
           err?.code || 'runtime_dispatch_error',
           err?.message ?? String(err),
         );
@@ -3085,7 +3229,7 @@ export class EventDispatcher {
       payload.room_id
     ) {
       const chatResponderId =
-        payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '';
+        payload.agent_id || runContext?.agent_id || loadAgentInfo()?.agent_id || '';
       const onProgress = (stage: string): void => {
         const status = stage === 'thinking' ? 'thinking' : 'composing reply';
         this.#setChatRoomTyping(payload.room_id, true, status, chatResponderId).catch(() => {});
@@ -3093,7 +3237,7 @@ export class EventDispatcher {
       try {
         const result = await this.#chatSessionManager.dispatch({
           roomId: payload.room_id,
-          agentId: payload.agent_id || agentContext?.agent_id || loadAgentInfo()?.agent_id || '',
+          agentId: payload.agent_id || runContext?.agent_id || loadAgentInfo()?.agent_id || '',
           senderId: payload.user_id || '',
           senderName: '',
           messageId: payload.message_id || '',
@@ -3101,7 +3245,9 @@ export class EventDispatcher {
           content: payload.new_message || '',
           rolePrompt: payload.role_prompt || '',
           onProgress,
-          agentContext,
+          agentContext: runContext,
+          runtimeProfile,
+          provisionedWorkFolder,
         });
         if (result.dispatched) {
           log(
@@ -3137,7 +3283,7 @@ export class EventDispatcher {
       // and posts the reply. Compose the channel instruction to match so the
       // subagent isn't told to use a tool it lacks (or to suppress the stdout
       // the manager reads).
-      const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+      const usesNativeMcp = createAdapter(runContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
       const taskText =
         this.#prompts?.composeChatPrompt(
           rolePrompt,
@@ -3145,6 +3291,7 @@ export class EventDispatcher {
           newMessage,
           payload.room_id || '',
           usesNativeMcp,
+          provisionedWorkFolder,
         ) ?? `[chat] ${newMessage}`;
 
       try {
@@ -3160,7 +3307,8 @@ export class EventDispatcher {
           ticketId: payload.ticket_id || '',
           agentId: payload.agent_id || '',
           roomId: payload.room_id || '',
-          agentContext,
+          agentContext: runContext,
+          runtimeProfile,
         });
 
         if (result.spawned) {
@@ -3918,13 +4066,19 @@ export class EventDispatcher {
         }
         // Finalize the run as error so it doesn't hang waiting on the liveness
         // reaper — the run subagent never spawns, so nothing else will close it.
-        const completeTool = runProvision.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
-        await fireAndForgetTool(this.#config, completeTool, {
-          run_id: runProvision.run_id,
-          workspace_id: runProvision.workspace_id,
-          status: 'error',
-          summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
-        });
+        // ticket 9fd27487: 'chat'에는 complete_*_run 툴 자체가 없다(일반 채팅방은
+        // one-shot run이 아니다 — RunProvisionKind 참고); qa/security/action은
+        // 공통 kind→tool 계약을 그대로 타고 간다(chat-session-manager.ts /
+        // subagent-manager.ts의 orphan-sweep에서도 동일하게 사용).
+        if (runProvision.kind !== 'chat') {
+          const route = resolveRunCompletionRoute(runProvision.kind);
+          await fireAndForgetTool(this.#config, route.completeTool, {
+            run_id: runProvision.run_id,
+            workspace_id: runProvision.workspace_id,
+            status: route.failureStatus,
+            summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
+          });
+        }
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
         log(`Chat room run dispatch aborted — provisioning failed: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
         return;
@@ -3952,6 +4106,13 @@ export class EventDispatcher {
       if (agentContext) runContext = { ...agentContext, cwd: result.dir };
       log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
     }
+    // ticket 9fd27487: composeChatRoomPrompt에 폴더 경계 블록 트리거로 전달된다.
+    // 프로비저닝 실패(FAILURE)라면 위에서 이미 "런 작업폴더 프로비저닝 실패" abort
+    // 경로로 return했으므로, 여기까지 도달했는데 runProvision이 truthy라는 것은
+    // 항상 바로 위 줄의 cwd 고정이 성공했다는 뜻이다 — runContext.cwd를 그대로
+    // 읽어도 안전하다. runProvision이 null/부재(opt-in하지 않은 workspace의
+    // 일반 채팅 턴)라면 이 값은 ''로 유지된다.
+    const provisionedWorkFolder = runProvision ? (runContext?.cwd || '') : '';
 
     // Three-stage typing contract:
     //   reading   — set immediately on receive
@@ -3971,6 +4132,20 @@ export class EventDispatcher {
     const delegation = (this.#config as any)?.delegation ?? {};
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
+
+    // ticket 7d8ea7c9 (review round 1): RoomMessagingService가 이제 그룹방
+    // broadcast용 agent별 profile map(p.cli_runtime_profiles, agent_id로
+    // 키잉)을 해석해 보낸다 — chat_room_message는 모든 멤버에게 팬아웃되므로,
+    // chat_request의 단일 대상 필드처럼 평면 필드 하나로는 "지금 응답할 그
+    // agent에게 맞는 backend"를 표현할 수 없다. roomResponderId(타이핑
+    // 표시용으로 위에서 이미 계산됨)가 정확히 이 dispatch가 spawn할 그
+    // agent이므로, 맵 키로 그대로 재사용한다.
+    //
+    // (리뷰 라운드 2, P1): resolveRoomBroadcastRuntimeProfile은 이제
+    // chat_request와 동일하게 인스턴스 오버라이드로 폴백한다 — 위
+    // handleChatRequest 호출부의 상세 사유 참고. 우선순위: 이 responder의
+    // map 항목 > 인스턴스 오버라이드 > null.
+    const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId, this.#runtimeProfileOverride);
 
     if (runContext?.cli === 'hermes') {
       try {
@@ -3996,6 +4171,7 @@ export class EventDispatcher {
             undefined,
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
+            provisionedWorkFolder,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
@@ -4057,10 +4233,16 @@ export class EventDispatcher {
           isActionRoom: !!p.is_action_room,
           onProgress,
           agentContext: runContext,
+          runtimeProfile,
+          provisionedWorkFolder,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
           // ticket 89716f04 — thread run identity so the session's turn end is
           // swept for orphaned background tasks (one-shot run, no re-invocation).
-          run: runProvision
+          // ticket 9fd27487: kind:'chat'은 의도적으로 제외한다 — 일반 채팅방은
+          // complete_*_run 생명주기가 없는 계속 진행 중인 대화이므로(RunSessionBinding
+          // 참고), 여기서 바인딩해 버리면 sweep이 에이전트의 정당한 장기 백그라운드
+          // 작업까지 걷어가 버린다.
+          run: runProvision && runProvision.kind !== 'chat'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
@@ -4139,6 +4321,7 @@ export class EventDispatcher {
             undefined,
             '',
             !!p.is_action_room,
+            provisionedWorkFolder,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({
@@ -4150,12 +4333,15 @@ export class EventDispatcher {
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',
           agentContext: runContext,
+          runtimeProfile,
           // ticket e9d0e8bc: release the run lock when this oneshot exits.
           onExit: runLock ? () => runLock!.release() : undefined,
           // ticket 55d3063f: thread run identity so the oneshot exit handler
           // sweeps this turn end for orphaned background tasks (one-shot run,
           // no re-invocation) — the twin of the persistent path's `run` above.
-          run: runProvision
+          // ticket 9fd27487: kind:'chat' 제외 — persistent 경로 위쪽의 동일한
+          // 가드 참고(RunSessionBinding에는 'chat' 멤버가 없다).
+          run: runProvision && runProvision.kind !== 'chat'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,

@@ -17,6 +17,7 @@ import { createAdapter } from './cli-adapters/index.js';
 import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
 import { log } from './logging.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
+import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
   trackedTicketTool,
   parseStreamToolResult,
@@ -190,6 +191,19 @@ export class ChatSessionManager
    *  (snapshot, monitor) can still slice by either dimension. */
   #makeKey(roomId: string, agentId: string): string {
     return `${roomId}|${agentId || '_'}`;
+  }
+
+  /** ticket 6ff827cb requirement 3 — public entry point for the
+   *  extend_chat_keepalive/release_chat_keepalive agent_manager_command
+   *  handler, which only knows (roomId, agentId) from the MCP tool call — not
+   *  this class's private `#makeKey` composite session-key format. Delegates
+   *  to BaseSessionManager#applyKeepAlive once the real key is built. */
+  applyRoomKeepAlive(
+    roomId: string,
+    agentId: string,
+    opts: { action: 'extend' | 'release'; minutes?: number; reason?: string },
+  ): { ok: boolean; error?: string; until?: number; ceilingMs?: number } {
+    return this.applyKeepAlive(this.#makeKey(roomId, agentId), opts);
   }
 
   /** Drop oldest (least-recently-touched) room buckets until the map is back
@@ -389,6 +403,7 @@ export class ChatSessionManager
       historyAttachments,
       spec.roomName || '',
       spec.isActionRoom || false,
+      spec.provisionedWorkFolder || '',
     );
     // Vision blocks: history images first (chronological), current turn last
     // so the freshest image is the most salient.
@@ -406,7 +421,17 @@ export class ChatSessionManager
         sessionKey,
         spec.rolePrompt || '',
         firstTurnText,
-        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext, firstTurnImages },
+        {
+          onProgress: spec.onProgress,
+          monitorMeta,
+          agentContext: spec.agentContext,
+          firstTurnImages,
+          // ticket 7d8ea7c9: chat dispatch never forwarded runtimeProfile to
+          // the actual spawn — BaseSessionManager already reads this option
+          // (ticket path has passed it correctly all along), the chat path
+          // just never filled it in.
+          runtimeProfile: spec.runtimeProfile ?? null,
+        },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight
       // reservation — `_spawnSession` lands the record in `_sessions`
@@ -504,6 +529,49 @@ export class ChatSessionManager
 
   protected _onStderrLine(_sess: SessionRecord, _line: string): void {
     // Stderr buffering handled in BaseSessionManager#wireStdio (shared ring).
+  }
+
+  // -- Visibility overrides (ticket 6ff827cb) --------------------------------
+  // Requirement 5: "조용히 죽는 게 이번 사고의 본질" — a manager-initiated
+  // forced termination must never be silent. Both hooks are fire-and-forget,
+  // same posture as the existing fallback-message path above.
+
+  /** A keep-alive-ceiling kill (the one path that terminates despite possible
+   *  live progress evidence) posts a room notice so the user sees WHY the
+   *  session stopped instead of it just going quiet. */
+  protected _onForcedTermination(
+    sess: SessionRecord,
+    reason: string,
+    info: { liveTaskCount: number },
+  ): void {
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+    const reasonLabel = reason === 'keep_alive_ceiling' ? 'keep-alive 상한 도달' : reason;
+    const reasonDetail = sess._keepAliveReason ? ` (사유: ${sess._keepAliveReason})` : '';
+    const taskNote =
+      info.liveTaskCount > 0
+        ? ` 살아있던 백그라운드 작업 ${info.liveTaskCount}개도 함께 종료됐습니다.`
+        : '';
+    const message =
+      `⚠️ [System] ${reasonLabel}으로 세션을 종료했습니다.${reasonDetail}${taskNote} ` +
+      `계속 작업이 필요하면 새 메시지를 보내 세션을 다시 시작하세요.`;
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    void postChatRoomMessage(cfg, roomId, agentId, message);
+  }
+
+  /** gap 4 — a session past progressEscalationHours is NOT killed (it still
+   *  has real progress evidence), but a human should be able to notice it's
+   *  been running unusually long in case it's actually a runaway loop. */
+  protected _onLongRunningEscalation(sess: SessionRecord, ageHours: string): void {
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+    const message =
+      `ℹ️ [System] 이 세션이 ${ageHours}시간째 계속 실행 중입니다(진행 신호는 계속 감지됨). ` +
+      `정상적인 장시간 작업이면 무시해도 되지만, 무한 루프가 의심되면 확인해주세요.`;
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    void postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
   protected async _onChildExit(
@@ -655,18 +723,23 @@ export class ChatSessionManager
 
     // Never overwrite a run the agent already finalized. Availability-first: an
     // unreadable status is treated as non-terminal so a transient server hiccup
-    // doesn't leave the trap uncaught.
+    // 트랩을 놓치는 일이 없게 한다. ticket 9fd27487: 'action' 은 getTool 이
+    // null 이므로(get_action_run tool 이 없음) 항상 아래 reap 경로로 빠진다 —
+    // complete_action_run 의 terminal 전이는 멱등이라 안전하다(이미 terminal 인
+    // run 에 걸리는 stray finalize 는 no-op).
+    const route = resolveRunCompletionRoute(run.kind);
     let status: string | null = null;
-    try {
-      const getTool = run.kind === 'qa' ? 'get_qa_run' : 'get_security_run';
-      const resp = await callMcpTool(this._config, getTool, {
-        run_id: run.run_id,
-        workspace_id: run.workspace_id,
-      });
-      const rec = unwrapToolResult(resp);
-      if (rec && typeof rec.status === 'string') status = rec.status;
-    } catch (err: any) {
-      log(`[chat-session] orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+    if (route.getTool) {
+      try {
+        const resp = await callMcpTool(this._config, route.getTool, {
+          run_id: run.run_id,
+          workspace_id: run.workspace_id,
+        });
+        const rec = unwrapToolResult(resp);
+        if (rec && typeof rec.status === 'string') status = rec.status;
+      } catch (err: any) {
+        log(`[chat-session] orphan sweep status read failed run=${run8}: ${err?.message ?? err}`);
+      }
     }
     if (status === 'passed' || status === 'failed' || status === 'error') {
       // Run already finalized — the strays are the agent's own leftovers, not a
@@ -695,11 +768,10 @@ export class ChatSessionManager
       `session cleanup killed ${orphans.length} live background task(s) — ` +
       `run 세션이 재호출 계약 없이 살아있는 백그라운드 태스크를 남긴 채 턴을 종료했습니다. ` +
       `reaped pids: ${pidList}. ${detail}`;
-    const completeTool = run.kind === 'qa' ? 'complete_qa_run' : 'complete_security_run';
-    await fireAndForgetTool(this._config, completeTool, {
+    await fireAndForgetTool(this._config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,
-      status: 'error',
+      status: route.failureStatus,
       summary,
     });
     sess._run = undefined; // finalized — don't sweep this session again

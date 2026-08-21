@@ -4,6 +4,8 @@ import { BoardCardColumn, BoardCardTicket } from '../types';
 import TicketCard from './TicketCard';
 import CreateTicketForm from './CreateTicketForm';
 import { useDragToScroll } from '../hooks/useDragToScroll';
+import { useNotifications } from '../contexts/NotificationContext';
+import { sumUnread } from './ticketUnreadRollup';
 import { tokens } from '../tokens';
 
 interface ColumnProps {
@@ -18,6 +20,7 @@ interface ColumnProps {
 export default function Column({ column, onTicketClick, onCreateTicket, focusTicketMap }: ColumnProps) {
   const [showForm, setShowForm] = useState(false);
   const columnScrollRef = useDragToScroll<HTMLDivElement>({ axis: 'y' });
+  const { counts } = useNotifications();
 
   return (
     <div style={{
@@ -104,6 +107,7 @@ export default function Column({ column, onTicketClick, onCreateTicket, focusTic
                 index={index}
                 onClick={() => onTicketClick(ticket)}
                 focusHolders={focusTicketMap?.[ticket.id]}
+                unreadCount={sumUnread(ticket, counts.tickets.perTicket)}
               />
             ))}
             {provided.placeholder}

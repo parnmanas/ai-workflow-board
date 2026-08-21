@@ -62,12 +62,36 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   persistentTicketSessions: true,
   idleMinutes: 10,
   maxTurnsPerSession: 30,
+  // ticket 6ff827cb: once idle/maxTurns expiry finds progress evidence (see
+  // session-progress.ts) and defers the reap, this is the recheck cadence —
+  // short, so a session that goes quiet is caught quickly instead of waiting
+  // a full idleMinutes again.
+  idleRecheckSeconds: 60,
+  // ticket 6ff827cb gap 4: a session that keeps producing progress evidence
+  // forever (a genuine runaway loop, not real work) is the one real risk of
+  // "never kill while alive". Past this age it is NOT killed — killing
+  // something with real progress evidence would violate the governing
+  // principle — but it gets ONE visible escalation (chat room notice + a
+  // log line) so a human can look. See BaseSessionManager#maybeEscalateLongRunning.
+  progressEscalationHours: 4,
+  // ticket 6ff827cb requirement 3: hard ceiling on mcp__awb__keep_chat_session_alive.
+  // Measured from a session's FIRST keep-alive declaration and never reset by
+  // a release+re-extend cycle (see BaseSessionManager#applyKeepAlive) — once
+  // reached the session is force-terminated regardless of what the progress
+  // gate says. "무기한 keep-alive 금지" is the one non-negotiable in the ticket.
+  chatKeepAliveMaxMinutes: 120,
   // ticket e9d0e8bc: hold a folder-keyed lock across a QA/security run's whole
   // provision→execute lifetime so two runs of the SAME scenario never execute
   // concurrently in the shared `.awb/qa/<scenario>` folder and clobber each
   // other's checkout/build artifacts. Same folder serializes; different
   // scenarios stay parallel. Set false to revert to provisioning-only locking.
   runExecutionLock: true,
+  // ticket b972b28c: mirrors BaseSessionManager's progressEscalationHours
+  // (ticket 6ff827cb) for the one-shot #sweep TTL-slide gate — past this
+  // age, a one-shot that's still sliding its TTL on live background-task
+  // evidence gets ONE log-line escalation, never a kill (same governing
+  // principle: real progress evidence is never grounds to reap).
+  subagentProgressEscalationHours: 4,
 });
 
 /** A new shared slot has no warm build cache yet. Unity's initial Asset Import

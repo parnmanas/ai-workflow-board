@@ -6,6 +6,7 @@ import { tokens } from '../../tokens';
 import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { useAuth } from '../../contexts/AuthContext';
+import CliCredentialImport from './CliCredentialImport';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -137,6 +138,7 @@ export default function CredentialManager({
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
   const effectiveWsId = globalMode ? '' : (workspaceId || (getActiveWorkspaceId() || ''));
+  const effectiveCreateScope: CatalogScope = globalMode ? 'global' : createScope;
 
   const loadCredentials = useCallback(async () => {
     if (!globalMode && !effectiveWsId) { setCredentials([]); setLoading(false); return; }
@@ -271,10 +273,9 @@ export default function CredentialManager({
         });
         showToast('Credential updated.', 'success');
       } else {
-        const scope = globalMode ? 'global' : createScope;
         await api.createCredential({
-          scope,
-          workspace_id: scope === 'global' ? undefined : effectiveWsId,
+          scope: effectiveCreateScope,
+          workspace_id: effectiveCreateScope === 'global' ? undefined : effectiveWsId,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -330,7 +331,14 @@ export default function CredentialManager({
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
-        <Button variant="primary" size="md" onClick={startCreate}>+ New Credential</Button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <CliCredentialImport
+            workspaceId={effectiveWsId}
+            createScope={effectiveCreateScope}
+            onCreated={loadCredentials}
+          />
+          <Button variant="primary" size="md" onClick={startCreate}>+ New Credential</Button>
+        </div>
       </div>
 
       {loading ? (

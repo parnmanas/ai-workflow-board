@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, IsNull, In, DataSource } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
@@ -16,11 +17,13 @@ import { MentionService, ResolvedMention } from '../../services/mention.service'
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
-import { RunProvision } from '../../common/workspace-folder-options';
+import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
+import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 
 const CONTENT_MAX = 10000;
 
@@ -222,6 +225,12 @@ export class RoomMessagingService {
 
     @InjectRepository(TicketAttachment)
     private readonly attachmentRepo: Repository<TicketAttachment>,
+
+    @InjectRepository(Workspace)
+    private readonly workspaceRepo: Repository<Workspace>,
+
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
 
     private readonly logService: LogService,
 
@@ -493,17 +502,98 @@ export class RoomMessagingService {
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
 
+    // 방 메타데이터: agent-manager는 이름이 비어 있을 때만 첫 chat-subagent
+    // 턴에 "제목을 생성하라"는 지시를 주입하고(그래서 이름 없는 방은 첫
+    // 대화 내용으로 이름이 붙는다), action_id를 읽어 Action Run을 일반
+    // 채팅과 구분한다(티켓 e6d32e9d).
+    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
+
+    // 티켓 9fd27487 — 일반 채팅방에는 애초에 run_provision이 전혀 없어서,
+    // agent-manager가 이들을 working_dir 루트에서 디스패치했다(티켓
+    // 41e69c91이 티켓에 대해 고쳤던 것과 같은 반스프롤(sprawl) 버그).
+    // Action/QA/security 디스패처는 이미 자체적으로 `opts.runProvision`을
+    // 명시적으로 넘기고 있고, 이 코드는 그 나머지 전부(일반 사용자 채팅 /
+    // DM / @멘션)를 위한 FALLBACK이다 — 모든 전송 경로(REST, MCP,
+    // agent-api)가 이미 통과하는 단일 병목 지점인 여기서 계산해두므로,
+    // 호출자가 각자 사본을 들고 있을 필요가 없다. 티켓의 단계적 롤아웃
+    // 권고에 따라 opt-in Workspace 플래그(기본값 OFF)로 게이팅한다: manager
+    // 에이전트 자신의 운영용 채팅도 이 경로를 함께 타기 때문에, 폴더 고정
+    // (pinning) 동작 변경을 모든 워크스페이스에 조용히 강제해서는 안 된다.
+    // Action Run / Orchestration Mission / QA / security 방은 제외한다 —
+    // 이미 자체 runProvision을 갖고 있거나(Action/QA/security, 방을 여는
+    // 첫 전송에서만) 의도적으로 아예 없다(Mission step은 대신 티켓
+    // 워크트리를 쓴다). QA/security 디스패치가 자신의 전송에서는 항상
+    // opts.runProvision을 넘기더라도 run_kind 체크는 여전히 중요하다: 같은
+    // 방에서 나중에 오는 메시지(예: QA 에이전트가 send_chat_room_message로
+    // 올리는 런 도중 상태 업데이트)는 자체 opts.runProvision이 없고, 이
+    // 제외 처리가 없으면 런의 실제 `.awb/qa/<scenario>` 체크아웃이 아니라
+    // 무관한 `.awb/chat/<room>` 폴더를 가리키는 엉뚱한 kind:'chat'
+    // provision으로 흘러 들어가 버린다(리뷰 후속 조치). progress 하트비트는
+    // 아래 조회 대상에서 제외된다(위 chain-depth 스킵과 같은 이유): 새로운
+    // 디스패치 턴을 여는 일이 절대 없다 — 그 하트비트가 서술하는 런은 이미
+    // 최초 디스패치 시점에 자신의 cwd를 확정했다 — 그래서 모든 tool-call
+    // 하트비트마다 Workspace 조회를 소비하면, 앱에서 가장 트래픽이 많은
+    // 메시지 타입에 아무도 읽지 않는 값을 위한 비용을 물리는 셈이 된다.
+    //
+    // _processMentions/_handleDmAgentRequest보다 먼저 계산한다(원래 아래
+    // emit 바로 앞에 있던 것을 위로 옮김) — DM이나 @멘션은 이 함수 자체의
+    // `chat_room_message` emit이 아니라, 그 두 헬퍼가 발생시키는 별도의
+    // `chat_request` 이벤트를 통해 디스패치되기 때문이다. `chat_room_message`
+    // 쪽은 dispatch_agent_ids가 설정되면 handleChatRoomMessage가 건너뛴다
+    // ("canonical execution path" 코멘트 참고). 두 헬퍼 모두 동일한
+    // provision을 그대로 전달받아야, 워크스페이스 자신의 운영용 에이전트에게
+    // 보낸 DM도 — 티켓 9fd27487의 리스크 섹션이 이름으로 콕 짚은 시나리오다 —
+    // 명시적 대상이 없는 그룹방 턴뿐 아니라 실제로 함께 고정(pin)된다.
+    let effectiveRunProvision = opts?.runProvision ?? null;
+    if (
+      !effectiveRunProvision &&
+      isRealMessage &&
+      !roomForName?.action_id &&
+      !roomForName?.orchestration_mission_id &&
+      !roomForName?.run_kind
+    ) {
+      const ws = await this.workspaceRepo.findOne({ where: { id: workspaceId } });
+      if (ws?.chat_workspace_folder_enabled) {
+        effectiveRunProvision = {
+          kind: 'chat',
+          run_id: roomId,
+          workspace_id: workspaceId,
+          workspace_folder: resolveWorkspaceFolder(null, 'chat', roomId),
+          checkout_mode: 'reuse',
+          // ChatRoom에는 repo_ref 노브가 없다(티켓 9fd27487 인수 기준 3) —
+          // 대화형 세션은 암묵적 clone을 절대 받지 않는다.
+          repo: null,
+        };
+      }
+    }
+
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
     let explicitDispatchAgentIds: string[] = [];
     if (isRealMessage && senderType === 'user') {
-      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
-      await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
+      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg, effectiveRunProvision);
+      await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision);
       explicitDispatchAgentIds = Array.from(dispatched);
     }
 
     // Get active member IDs for SSE filtering (CRITICAL Pitfall 1)
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+
+    // ticket 7d8ea7c9 (review round 1): 이 broadcast용 agent별 Claude backend
+    // profile 맵 — 방의 Claude-type 멤버 각자가 DM/@mention 대상일 때뿐
+    // 아니라 이 경우에도 자기 설정된 backend를 쓸 수 있도록 한다
+    // (_resolveChatRuntimeProfilesForMembers doc 코멘트 참고). progress
+    // 하트비트는 제외한다(위 mention/DM skip과 같은 이유): chat_room_message는
+    // 모든 tool-call narration마다 발생하는데, 하트비트는 그 profile을 쓸 새
+    // dispatch 턴을 여는 게 아니기 때문이다.
+    let cliRuntimeProfiles: Record<string, CliRuntimeProfile> | undefined;
+    if (isRealMessage && agentMemberIds.size > 0) {
+      const resolved = await this._resolveChatRuntimeProfilesForMembers(
+        Array.from(agentMemberIds),
+        workspaceId,
+      );
+      if (Object.keys(resolved).length > 0) cliRuntimeProfiles = resolved;
+    }
 
     // Trailing consecutive agent-sender count in this room INCLUDING the
     // just-saved message. Plugin uses it to short-circuit dispatch once
@@ -512,12 +602,6 @@ export class RoomMessagingService {
     // Progress rows are excluded from the lookback inside _computeAgentChainDepth
     // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
-
-    // Room metadata: the agent-manager injects a "generate a title" instruction
-    // into the first chat-subagent turn only when the name is empty (so an
-    // untitled room gets named from its opening conversation), and reads
-    // action_id to tell Action Runs from ordinary chats (ticket e6d32e9d).
-    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
 
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
@@ -554,7 +638,8 @@ export class RoomMessagingService {
       // stringified column) so the event-registry map() + client get the shape
       // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
       ...(sanitizedMeta ? { metadata: sanitizedMeta } : {}),
-      ...(opts?.runProvision ? { run_provision: opts.runProvision } : {}),
+      ...(effectiveRunProvision ? { run_provision: effectiveRunProvision } : {}),
+      ...(cliRuntimeProfiles ? { cli_runtime_profiles: cliRuntimeProfiles } : {}),
     });
 
     // B1 fix: auto-advance the sender's read marker so their own message never
@@ -978,6 +1063,94 @@ export class RoomMessagingService {
   // --- Private helpers (mention dispatch) ---
 
   /**
+   * Resolve the agent > workspace Claude backend profile for a chat dispatch
+   * (ticket 7d8ea7c9). Mirrors trigger-loop.service.ts's ticket-dispatch
+   * resolution, but agent-only — a chat turn carries no ticket/board to layer
+   * on top. Claude backend profiles must stay invisible to every non-Claude
+   * CLI, and a profile the agent's own credential can't satisfy must not be
+   * silently handed to the wire — skip (with a warn log) instead of
+   * dispatching a chat turn agent-manager cannot actually honor.
+   */
+  private async _resolveChatRuntimeProfile(
+    agent: Agent,
+    workspaceId: string,
+  ): Promise<CliRuntimeProfile | null> {
+    if (agent.type !== 'claude') return null;
+    try {
+      const workspace = workspaceId
+        ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
+        : null;
+      return await this._resolveChatRuntimeProfileCore(agent, workspace);
+    } catch (err) {
+      this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+        err: String(err), agent_id: agent.id,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * chat_room_message broadcast(ticket 7d8ea7c9 review round 1)를 위한
+   * _resolveChatRuntimeProfile의 배치 버전. 그룹방은 모든 멤버에게
+   * 팬아웃되므로 평면 profile 필드 하나로는 "지금 응답할 그 agent에게
+   * 맞는 backend"를 표현할 수 없다 — Claude-type 멤버마다 cli_runtime_profile
+   * 설정이 다르거나(또는 없을) 수 있기 때문이다. Claude-type 멤버마다 하나씩
+   * agent_id로 키잉된 항목을 해석해서, 각 매니저 인스턴스(이 방의 agent
+   * identity를 여럿 호스팅할 수도 있음)가 dispatch 시점에 자기 responder의
+   * 항목을 맵에서 직접 고를 수 있게 한다. workspace는 한 번만 가져와
+   * 멤버 전체에 재사용한다 — _resolveChatRuntimeProfile처럼 호출마다
+   * 반복 조회하지 않는다.
+   */
+  private async _resolveChatRuntimeProfilesForMembers(
+    agentIds: string[],
+    workspaceId: string,
+  ): Promise<Record<string, CliRuntimeProfile>> {
+    const out: Record<string, CliRuntimeProfile> = {};
+    if (agentIds.length === 0) return out;
+    const agents = await this.agentRepo.find({ where: { id: In(agentIds), type: 'claude' } });
+    if (agents.length === 0) return out;
+    const workspace = workspaceId
+      ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
+      : null;
+    for (const agent of agents) {
+      try {
+        const profile = await this._resolveChatRuntimeProfileCore(agent, workspace);
+        if (profile) out[agent.id] = profile;
+      } catch (err) {
+        this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+          err: String(err), agent_id: agent.id,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** 단일 agent 경로(_resolveChatRuntimeProfile)와 배치 경로
+   *  (_resolveChatRuntimeProfilesForMembers) 둘 다가 공유하는 resolve+
+   *  credential-check 코어 — credential 불일치 warn / null 반환 규칙을
+   *  바꿀 때 두 곳을 따로 고치지 않도록 한 곳에 모았다. 호출자가 이미
+   *  agent.type === 'claude'를 확인하고 `workspace`를 가져온 상태여야
+   *  한다. */
+  private async _resolveChatRuntimeProfileCore(
+    agent: Agent,
+    workspace: Workspace | null,
+  ): Promise<CliRuntimeProfile | null> {
+    const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, workspace, [
+      { source: 'agent', value: agent.cli_runtime_profile },
+    ]);
+    if (!profile) return null;
+    if (profile.credential_required && profile.credential_ref !== agent.credential_id) {
+      this.logService.warn(
+        'ChatRooms',
+        `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
+          `but agent ${agent.id} does not have it selected — dispatching without a runtime profile`,
+      );
+      return null;
+    }
+    return profile;
+  }
+
+  /**
    * Parse structured @[type:id|name] tokens from a user message, dispatch
    * agent mentions as chat_request events, and persist user mentions for the
    * sidebar unread badge.
@@ -993,6 +1166,12 @@ export class RoomMessagingService {
     senderName: string,
     content: string,
     savedMessage: ChatRoomMessage,
+    // 티켓 9fd27487 — 호출자가 이미 해석해둔 chat run-workspace 힌트(또는
+    // Action/QA/security가 제공한 값)를, 이 함수가 발생시키는 모든
+    // chat_request에 그대로 전달해서 @멘션 디스패치도 그룹방 턴과 동일한
+    // cwd 고정(pinning)을 받게 한다. opt-in하지 않은 워크스페이스라면(또는
+    // non-real/에이전트가 보낸 메시지에서 파싱된 멘션이라면) null이다.
+    runProvision: RunProvision | null = null,
   ): Promise<Set<string>> {
     const dispatched = new Set<string>();
     const refs = this.mentionService.parseMentions(content);
@@ -1033,6 +1212,7 @@ export class RoomMessagingService {
         // Workspace-scope safety: never cross-post a mention into the wrong workspace.
         if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) continue;
 
+        const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
         activityEvents.emit('chat_request', {
           agent_id: agent.id,
           user_id: senderId,
@@ -1049,6 +1229,8 @@ export class RoomMessagingService {
           // the legacy fallback prompt asks the agent to "use the
           // room_id from the chat request context" with no such field.
           room_id: roomId,
+          ...(runProvision ? { run_provision: runProvision } : {}),
+          ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
         });
 
         dispatched.add(agent.id);
@@ -1111,6 +1293,10 @@ export class RoomMessagingService {
     content: string,
     savedMessage: ChatRoomMessage,
     alreadyDispatched: Set<string>,
+    // 티켓 9fd27487 — _processMentions의 동일한 파라미터 참고. 이 경로가
+    // 바로 이 값이 정말로 필요했던 주된 경로다: DM은 티켓의 리스크 섹션이
+    // 명시적으로 이름 붙인 "manager 에이전트 자신의 운영용 채팅" 시나리오다.
+    runProvision: RunProvision | null = null,
   ): Promise<void> {
     // Look up the room to confirm it's a DM
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
@@ -1137,6 +1323,7 @@ export class RoomMessagingService {
     // Dedup: skip if @mention already dispatched to this agent
     if (alreadyDispatched.has(agent.id)) return;
 
+    const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
     activityEvents.emit('chat_request', {
       agent_id: agent.id,
       user_id: senderId,
@@ -1149,6 +1336,8 @@ export class RoomMessagingService {
       mention_depth: 1,
       // See _processMentions — required for room-aware reply routing.
       room_id: roomId,
+      ...(runProvision ? { run_provision: runProvision } : {}),
+      ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
     });
     alreadyDispatched.add(agent.id);
 

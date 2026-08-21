@@ -11,6 +11,7 @@ import {
   type PreparedAttachment,
   type RawChatAttachment,
 } from './chat-attachment-prep.js';
+import type { WorktreeMode } from './worktree-manager.js';
 
 interface CommentLike {
   author_name?: string;
@@ -132,6 +133,73 @@ export function sharedWorktreeInstructions(workFolder: string): string {
     '- Do not delete or recreate the assigned checkout or its cache directories. A clean/cold import requires explicit user instruction.',
     '- If a repository script attempts to create or select another worktree, stop and report the script as incompatible with AWB shared mode; do not use a fallback directory.',
   ].join('\n');
+}
+
+/** "전용 폴더 하나를 계속 재사용한다"는 정책 변형들 — per-ticket 워크트리, Action Run,
+ * 채팅방 — 전체가 공유하는 반스프롤 불릿 목록. 단, 캐시 보존 문구가 따로 있는 shared
+ * 웜풀 체크아웃(sharedWorktreeInstructions)은 예외. 앞으로 반스프롤 규칙 문구가 바뀔 때
+ * 이 변형들 사이에서 드리프트가 생기지 않도록 별도 함수로 뽑아냈다 — ticket 9fd27487
+ * 리뷰에서 실제로 걸렸던 문제(runWorkspaceInstructions가 자기만의 거의 동일한 사본을
+ * 몰래 따로 만들어 두고 있었다)가 재발하지 않도록 하기 위함이다. */
+function dedicatedFolderBoundaryBullets(): string[] {
+  return [
+    '- Work only inside that folder. Do not create another git worktree, clone, checkout directory, `_compilecheck_*`, `_test_*`, or a new build folder.',
+    '- Never create anything above working_dir (the agent-home container) or inside another agent\'s home directory — that is exactly how the shared container gets polluted.',
+    '- If a dependency install is missing (e.g. node_modules), symlink it from the shared `.awb/base/<repo>` checkout instead of running a fresh install or clone.',
+  ];
+}
+
+/** per_ticket 모드(보드 기본값)에서 매 티켓 턴에 주입되는 폴더 경계 정책. shared
+ * 모드와 목적(반스프롤)은 같지만 문구가 다르다 — per_ticket 워크트리는 티켓마다
+ * 새로 배정되는 전용 폴더이므로 "캐시를 데워 유지하라"는 shared 전용 문구는 여기
+ * 해당하지 않는다. 이 문구가 per_ticket에는 한 번도 전달된 적이 없었던 것이 ticket
+ * 41e69c91의 근본 원인(working_dir 상위 에이전트 홈 컨테이너로 새는 clone/worktree
+ * 스프롤)이었다. */
+export function perTicketWorktreeInstructions(workFolder: string): string {
+  if (!workFolder) return '';
+  return [
+    'AWB per-ticket worktree policy (mandatory):',
+    `- Your assigned work folder for this ticket is exactly: ${workFolder}`,
+    ...dedicatedFolderBoundaryBullets(),
+  ].join('\n');
+}
+
+/** 트리거 프롬프트에 주입할 폴더 경계 정책 문구를 보드 worktree_mode에 따라 고른다.
+ * mode가 없는 보드(worktree 규약 이전, worktree_mode 필드 자체가 없음)는 반드시 빈
+ * 문자열을 반환해야 한다 — injectWorkFolder와 동일한 byte-identity 보장(수용 기준 4). */
+export function worktreeInstructionsFor(mode: WorktreeMode | undefined, workFolder: string): string {
+  if (mode === 'shared') return sharedWorktreeInstructions(workFolder);
+  if (mode === 'per_ticket') return perTicketWorktreeInstructions(workFolder);
+  return '';
+}
+
+/** Action Run / 채팅방 프롬프트에 주입되는 폴더 경계 정책
+ * (ticket 9fd27487 — 41e69c91의 per-ticket 정책을, 그 정책이 없었던 나머지 두 실행
+ * 경로로 확장한다). perTicketWorktreeInstructions와 동일한 불릿이되, 티켓 워크트리가
+ * 아니라 안정적인 action/chat 폴더에 맞게 문구만 바꿨다 — 둘 다 공유 풀이 아니라
+ * action/room당 하나씩 배정되는 전용 폴더를 계속 재사용한다는 점은 같으므로 "다른
+ * 워크트리/clone을 만들지 말라"는 규칙이 동일하게 적용된다. */
+export function runWorkspaceInstructions(workFolder: string, kind: 'action' | 'chat'): string {
+  if (!workFolder) return '';
+  const subject = kind === 'action' ? 'this Action' : 'this chat room';
+  const bullets = [
+    `- Your assigned work folder for ${subject} is exactly: ${workFolder}`,
+    ...dedicatedFolderBoundaryBullets(),
+  ];
+  // ticket 9fd27487 AC6 — 하위호환: 이 자동 배정 이전부터 자기만의 절대경로
+  // worktree(예: 기존 linked worktree)를 프롬프트에 직접 못 박아 둔 Action이
+  // 이미 존재한다(예: "Package 보안 점검", "Merge To Production.Private and
+  // PUSH"). 위 "정확히 이 폴더" 문구가 그런 프롬프트와 문자 그대로 충돌하므로,
+  // action kind에 한해 이 프롬프트 자신의 지시가 우선한다는 것을 명시해
+  // 에이전트가 이미 준비된 기존 worktree를 버리고 빈 `.awb/act/<leaf>`로
+  // 갈아타지 않도록 한다. chat에는 해당 없음 — 채팅방 프롬프트는 사용자 대화일
+  // 뿐, 자기 자신의 작업폴더 지시를 담고 있지 않다.
+  if (kind === 'action') {
+    bullets.push(
+      "- If this Action's own prompt above (under \"Latest user message\") already names a different existing working folder (e.g. a pre-existing linked worktree), follow that instruction instead — this default only applies when the prompt doesn't already pin one.",
+    );
+  }
+  return ['AWB work-folder policy (mandatory):', ...bullets].join('\n');
 }
 
 /**
@@ -335,6 +403,12 @@ export function composeChatPrompt(
   newMessage: string,
   roomId = '',
   usesNativeMcp: ChatReplyMode = true,
+  // ticket 9fd27487 — 대상 workspace가 chat_workspace_folder_enabled를 켰고
+  // 프로비저닝까지 성공했을 때의 절대경로 `.awb/chat/<room8>` cwd. '' (기본값) →
+  // 폴더 경계 블록 없음, 그리고 아래 injectWorkFolder는 byte-identity no-op이
+  // 되므로 opt-in하지 않은 workspace로 가는 DM은 이 티켓 이전과 완전히 동일하게
+  // 렌더링된다.
+  workFolder = '',
 ): string {
   const lines: string[] = [];
   lines.push('You are an AWB chat subagent responding to a user message in a live conversation.');
@@ -359,7 +433,12 @@ export function composeChatPrompt(
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
   for (const ln of chatReplyInstructions(usesNativeMcp, roomId)) lines.push(ln);
-  return lines.join('\n');
+  const workInstructions = runWorkspaceInstructions(workFolder, 'chat');
+  if (workInstructions) {
+    lines.push('');
+    lines.push(workInstructions);
+  }
+  return injectWorkFolder(lines.join('\n'), workFolder);
 }
 
 export function composeCommentMentionPrompt(
@@ -424,6 +503,13 @@ export function composeChatRoomPrompt(
   // the task directly" and suppresses the auto-title prompt (Action rooms are
   // already named `Action: … · <id>`). Default false → ordinary chat behavior.
   isActionRoom = false,
+  // ticket 9fd27487 — 이번 턴이 실제로 프로비저닝된 절대경로 cwd:
+  // Action Run이면 `.awb/act/<action8>` (opt-in 없이 항상 프로비저닝됨),
+  // 일반 채팅방이면 `.awb/chat/<room8>` (workspace가 chat_workspace_folder_enabled를
+  // 켠 경우에만). '' → 폴더 경계 블록 없음, 그리고 아래 injectWorkFolder는
+  // byte-identity no-op이 되므로 opt-in하지 않은 workspace/QA-security 디스패치
+  // (별도로 자기만의 프롬프트를 조립하는 경로)는 영향받지 않는다.
+  workFolder = '',
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -482,7 +568,12 @@ export function composeChatRoomPrompt(
         'Do not mention the titling in your reply.',
     );
   }
-  return lines.join('\n');
+  const workInstructions = runWorkspaceInstructions(workFolder, isActionRoom ? 'action' : 'chat');
+  if (workInstructions) {
+    lines.push('');
+    lines.push(workInstructions);
+  }
+  return injectWorkFolder(lines.join('\n'), workFolder);
 }
 
 export const promptComposer: PromptComposer = {

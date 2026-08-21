@@ -10,6 +10,7 @@ import { relativeTime } from '../../utils/time';
 import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
 import type { MentionParticipant } from '../chat/utils/markdown';
+import { WorkspaceFolderOptions, initWorkspaceFolderState, buildWorkspaceFolderPayload, type WorkspaceFolderFormState } from './WorkspaceFolderOptions';
 
 interface AgentOption {
   id: string;
@@ -46,6 +47,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const [formMaxRuns, setFormMaxRuns] = useState(10);
   const [formTrigger, setFormTrigger] = useState('');
   const [formTriggerLabel, setFormTriggerLabel] = useState('');
+  const [formFolder, setFormFolder] = useState<WorkspaceFolderFormState>(initWorkspaceFolderState(null));
   const [formErrors, setFormErrors] = useState<{ name?: string; agent?: string }>({});
 
   const loadActions = useCallback(async () => {
@@ -100,6 +102,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormMaxRuns(10);
     setFormTrigger('');
     setFormTriggerLabel('');
+    setFormFolder(initWorkspaceFolderState(null));
     setFormErrors({});
     setShowForm(true);
   };
@@ -115,6 +118,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormMaxRuns(a.max_runs);
     setFormTrigger(a.trigger || '');
     setFormTriggerLabel(a.trigger_label || '');
+    setFormFolder(initWorkspaceFolderState(a));
     setFormErrors({});
     setShowForm(true);
   };
@@ -137,6 +141,9 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
         trigger: formTrigger,
         trigger_label: formTrigger === 'on_ticket_done' ? formTriggerLabel : '',
       };
+      // build_mode는 Action 엔티티에 대응하는 개념이 없다(cold/warm build 개념 자체가 없음)
+      // — 제거하고 workspace_folder/repo_ref/checkout_mode만 유지한다.
+      const { build_mode: _buildMode, ...folderPayload } = buildWorkspaceFolderPayload(formFolder);
       if (editAction) {
         const updated = await api.updateAction(editAction.id, {
           workspace_id: effectiveWorkspaceId,
@@ -148,6 +155,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
+          ...folderPayload,
         });
         showToast('Action updated', 'success');
         if (selected?.id === updated.id) setSelected(updated);
@@ -162,6 +170,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
+          ...folderPayload,
         });
         showToast('Action created', 'success');
       }
@@ -420,6 +429,12 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{workspace.name}}`}</code> <code>{`{{board.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
             </div>
           </div>
+          <WorkspaceFolderOptions
+            kind="action"
+            state={formFolder}
+            onChange={(patch) => setFormFolder((s) => ({ ...s, ...patch }))}
+            showBuildMode={false}
+          />
           <div style={{ display: 'flex', gap: 12 }}>
             {formTrigger !== 'on_ticket_done' && (
               <Input
