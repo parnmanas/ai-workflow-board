@@ -20,6 +20,7 @@ import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { Agent } from '../../entities/Agent';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
 import { orchestrationError } from './orchestration-errors';
@@ -76,8 +77,26 @@ export class OrchestrationTeamService {
     @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     private readonly logService: LogService,
   ) {}
+
+  /**
+   * `allowed_workspace_ids`가 실존하는 workspace만 가리키도록 원자적으로 검증한다.
+   * 정규화(중복/공백 제거)만으로는 REST 호출자가 임의 UUID를 허용목록에 저장하는 걸
+   * 막지 못한다 — `createMission`은 이 목록에 대해 문자열 포함 여부만 확인하므로,
+   * 존재하지 않는 workspace를 대상으로 미션(그리고 그 budget/room)이 생성되어 고아
+   * 스코프가 남을 수 있다. 저장 전에 거절해 그 경로를 원천 차단한다.
+   */
+  private async assertWorkspacesExist(ids: string[] | null): Promise<void> {
+    if (!ids || ids.length === 0) return;
+    const found = await this.workspaceRepo.find({ where: { id: In(ids) }, select: { id: true } });
+    const foundIds = new Set(found.map((w) => w.id));
+    const missing = ids.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      throw orchestrationError(400, `allowed_workspace_ids references workspace(s) that do not exist: ${missing.join(', ')}`);
+    }
+  }
 
   // ── Agent resolution ──────────────────────────────────────────────────────
 
@@ -324,11 +343,14 @@ export class OrchestrationTeamService {
       'orchestrator_agent_id',
     );
 
+    const allowedWorkspaceIds = isGlobal ? normalizeWorkspaceIds(input.allowed_workspace_ids) : null;
+    await this.assertWorkspacesExist(allowedWorkspaceIds);
+
     const team = await this.teamRepo.save(
       this.teamRepo.create({
         workspace_id: teamWorkspaceId,
         owner_workspace_id: callerWorkspaceId,
-        allowed_workspace_ids: isGlobal ? normalizeWorkspaceIds(input.allowed_workspace_ids) : null,
+        allowed_workspace_ids: allowedWorkspaceIds,
         name,
         description: (input.description || '').trim(),
         orchestrator_agent_id: orchestrator.id,
@@ -392,7 +414,9 @@ export class OrchestrationTeamService {
     // 없으므로(createMission이 그 팀에는 이 값을 참조하지 않는다) 여기서 조용히
     // 저장해봤자 아무도 손댈 수 없는 죽은 데이터가 된다.
     if (patch.allowed_workspace_ids !== undefined && team.workspace_id === null) {
-      team.allowed_workspace_ids = normalizeWorkspaceIds(patch.allowed_workspace_ids);
+      const normalized = normalizeWorkspaceIds(patch.allowed_workspace_ids);
+      await this.assertWorkspacesExist(normalized);
+      team.allowed_workspace_ids = normalized;
     }
 
     await this.teamRepo.save(team);
@@ -529,8 +553,8 @@ function clampConcurrent(value: any): number {
   return Math.min(MAX_PARALLEL_CEILING, Math.max(1, Math.floor(n)));
 }
 
-/** Floor is 0, not 1 — see OrchestrationTeam.max_open_missions: 0 is a deliberate
- *  "no agent-created missions" value, not an unset/invalid one. */
+/** 하한은 1이 아니라 0이다 — OrchestrationTeam.max_open_missions 참고: 0은 "에이전트가
+ *  미션을 만들 수 없음"을 의도적으로 나타내는 값이지, 미설정/무효값이 아니다. */
 function clampOpenMissions(value: any): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1;

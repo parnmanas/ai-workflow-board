@@ -2185,9 +2185,9 @@ export const api = {
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
-    /** Create as a global (workspace-less) team. Default false. */
+    /** 글로벌(workspace 비종속) 팀으로 생성. 기본값 false. */
     is_global?: boolean;
-    /** Global-team-only: workspaces its orchestrator may create missions in. */
+    /** 글로벌 팀 전용: orchestrator가 미션을 만들 수 있는 workspace 목록. */
     allowed_workspace_ids?: string[];
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
@@ -2201,7 +2201,7 @@ export const api = {
       max_parallel_steps?: number;
       max_open_missions?: number;
       enabled?: boolean;
-      /** Global-team-only: replaces the workspace allow-list wholesale. */
+      /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
       allowed_workspace_ids?: string[];
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
