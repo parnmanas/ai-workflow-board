@@ -196,7 +196,7 @@ export function runWorkspaceInstructions(workFolder: string, kind: 'action' | 'c
   // 뿐, 자기 자신의 작업폴더 지시를 담고 있지 않다.
   if (kind === 'action') {
     bullets.push(
-      "- If this Action's own prompt below already names a different existing working folder (e.g. a pre-existing linked worktree), follow that instruction instead — this default only applies when the prompt doesn't already pin one.",
+      "- If this Action's own prompt above (under \"Latest user message\") already names a different existing working folder (e.g. a pre-existing linked worktree), follow that instruction instead — this default only applies when the prompt doesn't already pin one.",
     );
   }
   return ['AWB work-folder policy (mandatory):', ...bullets].join('\n');
