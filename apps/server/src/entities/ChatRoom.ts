@@ -68,6 +68,19 @@ export class ChatRoom {
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestration_step_id: string | null;
 
+  // 이 방이 QA 또는 security의 scenario/profile Run(또는 security
+  // checklist-refresh Run)을 호스팅할 때 채워지며, 방 생성 시점에
+  // qa-run.service.ts / security-run.service.ts가 찍어 넣는다(ticket
+  // 9fd27487 리뷰 후속). 이 디스패처들은 방을 여는 최초 전송에서만 자체
+  // `run_provision`(kind:'qa'|'security')을 실어 보낸다 —
+  // room-messaging.service.ts의 chat_workspace_folder_enabled 폴백이 같은
+  // 방에서 이후에 오는 메시지를, 무관한 `.awb/chat/<room>` 폴더를 가리키는
+  // 가짜 kind:'chat' provision으로 덮어써서는 절대 안 되므로, action_id /
+  // orchestration_mission_id를 이미 제외하는 것과 같은 방식으로 이 값이
+  // 설정된 방도 제외한다.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  run_kind: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

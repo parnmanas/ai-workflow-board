@@ -220,9 +220,17 @@ function computeViolations(registrySource, typesSource) {
 
 // Remove the first top-level `<field>: ...,` property line from the source —
 // used by the mutation test to prove the guard has teeth.
-function dropFieldLine(source, field) {
+// `fromIndex`는 검색 범위를 특정 map() 블록(예: `eventType: 'chat_room_message'`의
+// 오프셋)으로 한정한다 — run_provision(티켓 9fd27487이 chat_request의 map()에도
+// 추가함)이나 effort_preset(map() + flatten())처럼 하나의 필드명이 둘 이상의
+// map()에 정당하게 등장하는 경우, 파일에서 먼저 매치되는 위치가 아니라 의도한
+// 위치의 필드를 제거하도록 한다.
+function dropFieldLine(source, field, fromIndex = 0) {
   const re = new RegExp(`^[ \\t]*${field}:[^\\n]*\\n`, 'm');
-  return source.replace(re, '');
+  const match = source.slice(fromIndex).match(re);
+  if (!match) return source;
+  const idx = fromIndex + match.index;
+  return source.slice(0, idx) + source.slice(idx + match[0].length);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -353,7 +361,11 @@ test('mutation: dropping a forwarded field is detected, and ONLY that field', ()
   assert.deepEqual(base, [], `baseline parity must be clean, got: ${JSON.stringify(base)}`);
 
   // Mutate: drop run_provision from the chat_room_message map literal.
-  const mutated = dropFieldLine(registry, 'run_provision');
+  // 티켓 9fd27487이 chat_request의 map()에도 run_provision을 추가했는데(DM /
+  // @-멘션 run-workspace 프로비저닝), 이게 파일에서 더 앞쪽에 나타나게 됐다 —
+  // 그래서 검색 범위를 chat_room_message 자신의 블록으로 한정해야, 필드 선언
+  // 순서와 무관하게 mutation이 의도한 위치를 정확히 맞힌다.
+  const mutated = dropFieldLine(registry, 'run_provision', registry.indexOf("eventType: 'chat_room_message'"));
   assert.notEqual(mutated, registry, 'mutation must actually change the source');
 
   const after = computeViolations(mutated, types).violations;

@@ -156,6 +156,21 @@ export class Workspace {
   @Column({ type: 'int', default: 600000 })
   claim_verification_grace_ms: number;
 
+  /**
+   * ticket 9fd27487(비-티켓 실행 경로에는 workspace-folder 컨벤션이
+   * 없었다)을 위한 opt-in 스위치다. 0(기본값)이면 일반 채팅방의 디스패치
+   * cwd는 변경되지 않는다(에이전트 working_dir 루트 그대로) — manager
+   * 에이전트 자신의 운영용 채팅을 포함해 오늘날의 동작을 그대로 보존한다.
+   * 1이면 RoomMessagingService가 일반(Action도 mission도 아닌) 채팅방의
+   * 디스패치도 `.awb/chat/<room8>`에 고정한다(기본적으로 repo checkout 없음
+   * — common/workspace-folder-options.ts 참고). 위의
+   * claim_verification_enabled와 마찬가지로 SQLite 호환을 위해 boolean이
+   * 아니라 int를 쓴다. Action Run 방은 이 플래그의 영향을 받지 않는다 —
+   * 항상 자신의 `.awb/act/<leaf>` 폴더를 그대로 받는다.
+   */
+  @Column({ type: 'int', default: 0 })
+  chat_workspace_folder_enabled: number;
+
   @CreateDateColumn()
   created_at: Date;
 

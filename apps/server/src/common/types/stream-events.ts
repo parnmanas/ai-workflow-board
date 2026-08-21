@@ -276,6 +276,14 @@ export interface ChatRequestPayload {
   // in agent-manager will fall through to the legacy one-shot subagent
   // (which can only guess the room).
   room_id?: string;
+  // ticket 9fd27487: DM / @-멘션 디스패치를 위한 run-workspace 프로비저닝
+  // 힌트 — chat_room_message의 run_provision에 대응하는 `chat_request` 쪽
+  // 짝이다. 대상 workspace가 chat_workspace_folder_enabled를 opt-in한
+  // 경우에만 RoomMessagingService가 채워 넣으며(room-messaging.service.ts
+  // 참고), opt-in하지 않은 workspace에서는 (kind로만 걸러지는 게 아니라)
+  // 필드 자체가 생략되어 DM의 wire shape가 기본적으로 byte 단위까지 그대로
+  // 유지된다.
+  run_provision?: RunProvision;
 }
 
 // F-1 (ticket 24694916) — structured ticket-action reference. The agent-manager

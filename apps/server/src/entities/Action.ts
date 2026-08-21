@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { CheckoutMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 
 // User-defined "Action": a saved prompt addressed to a target Agent. When a
 // user (or scheduler) runs the action, AWB creates a fresh ChatRoom and posts
@@ -89,6 +90,28 @@ export class Action {
   // Bookkeeping for the scheduler so it doesn't double-fire across restarts.
   @Column({ type: Date, nullable: true, default: null })
   last_run_at: Date | null;
+
+  // ── 작업폴더 옵션 (ticket 9fd27487) ──────────────────────────────────────
+  // QaScenario/SecurityProfile과 동일한 필드 구성 + 정규화 방식이다(참고:
+  // common/workspace-folder-options.ts). Run은 `.awb/act/<leaf>`로
+  // 디스패치된다(run-keyed가 아니라 action-keyed — 이 Action의 모든 Run이
+  // 같은 폴더를 재사용해서 warm checkout이 run 사이에도 유지된다).
+
+  // `.awb/act/` 아래의 working_dir-relative run 폴더다(worktree 규약 ③의
+  // action 버전). '' = 미설정 → 디스패치 시점에 결정론적 기본값
+  // `.awb/act/<action8>`로 해석된다(resolveWorkspaceFolder).
+  @Column({ type: 'varchar', default: '' })
+  workspace_folder: string;
+
+  // 실행 대상 repo. null = clone 없음 — provisioner는 폴더 존재만 보장한다
+  // (대부분의 Action은 특정 repo checkout이 아니라 운영용 스크립트이기
+  // 때문이다). simple-json(자동으로 직렬화된다).
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  repo_ref: WorkspaceFolderRepoRef | null;
+
+  // run 전에 working folder를 어떻게 준비할지. 기본값 'reuse'.
+  @Column({ type: 'varchar', default: 'reuse' })
+  checkout_mode: CheckoutMode;
 
   @CreateDateColumn()
   created_at: Date;

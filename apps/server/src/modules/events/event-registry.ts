@@ -418,6 +418,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         // it the request falls through to the legacy one-shot subagent
         // path that has no room context to reply into.
         room_id: typeof event.room_id === 'string' ? event.room_id : undefined,
+        // 티켓 9fd27487: chat_room_message 의 run_provision 과 짝을 이루는
+        // DM/@-멘션 버전 — 전체 이유는 아래 그 필드의 코멘트를 참고. 값이 없으면
+        // 생략해서, 아직 opt-in 하지 않은 워크스페이스의 DM wire shape 이
+        // byte-for-byte 그대로 유지되게 한다.
+        run_provision: event.run_provision ? event.run_provision : undefined,
       };
       return {
         payload,
