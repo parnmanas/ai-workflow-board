@@ -28,6 +28,11 @@ export default function OrchestrationTeamsPage() {
 
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
   const [agents, setAgents] = useState<OrchestrationAssignableAgent[]>([]);
+  // 글로벌 팀 로스터에는 글로벌(workspace 비종속) 에이전트만 들어갈 수 있다 — 별도
+  // 목록으로 유지하는 이유는 OrchestrationAssignableAgent가 workspace_id를
+  // 갖고 있지 않아 클라이언트 쪽에서 필터링할 수 없기 때문.
+  const [globalAgents, setGlobalAgents] = useState<OrchestrationAssignableAgent[]>([]);
+  const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<OrchestrationTeam | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -38,18 +43,25 @@ export default function OrchestrationTeamsPage() {
     if (!wsId) return;
     setLoading(true);
     try {
-      const [teamList, agentList] = await Promise.all([
+      const [teamList, agentList, globalAgentList, workspaceList] = await Promise.all([
         api.listOrchestrationTeams(wsId),
         api.listOrchestrationAgents(wsId).catch(() => [] as OrchestrationAssignableAgent[]),
+        api.listOrchestrationAgents(wsId, { globalOnly: true }).catch(() => [] as OrchestrationAssignableAgent[]),
+        api.getWorkspaces().catch(() => [] as any[]),
       ]);
       setTeams(teamList);
       setAgents(agentList);
+      setGlobalAgents(globalAgentList);
+      setWorkspaces(workspaceList.map((w: any) => ({ id: w.id, name: w.name })));
     } catch (e: any) {
       showToast(e?.message || 'Failed to load teams', 'error');
     } finally {
       setLoading(false);
     }
   }, [wsId, showToast]);
+
+  /** 글로벌 팀은 소유 workspace만, workspace 종속 팀은 자기 workspace만 편집할 수 있다. */
+  const canWrite = (team: OrchestrationTeam) => !team.is_global || team.owner_workspace_id === wsId;
 
   useEffect(() => {
     load();
@@ -128,6 +140,27 @@ export default function OrchestrationTeamsPage() {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}>{team.name}</span>
+                      {team.is_global && (
+                        <span
+                          title={
+                            canWrite(team)
+                              ? 'Global team — visible from every workspace; this workspace created it and may edit it'
+                              : 'Global team — visible from every workspace; only the workspace that created it may edit it'
+                          }
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            color: tokens.colors.accentLight,
+                            border: `1px solid ${tokens.colors.accent}55`,
+                            borderRadius: 4,
+                            padding: '1px 6px',
+                            textTransform: 'uppercase',
+                          }}
+                        >
+                          global
+                        </span>
+                      )}
                       {!team.enabled && (
                         <span style={{ fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase' }}>
                           disabled
@@ -143,13 +176,31 @@ export default function OrchestrationTeamsPage() {
                       <div style={{ marginTop: 3, fontSize: 12, color: tokens.colors.textSecondary }}>{team.description}</div>
                     )}
                   </div>
-                  <Button variant="secondary" size="sm" onClick={() => { setEditing(team); setShowForm(true); }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!canWrite(team)}
+                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit it'}
+                    onClick={() => { setEditing(team); setShowForm(true); }}
+                  >
                     Edit
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => setMemberTarget(team)}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!canWrite(team)}
+                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit its roster'}
+                    onClick={() => setMemberTarget(team)}
+                  >
                     Add member
                   </Button>
-                  <Button variant="danger" size="sm" onClick={() => setDeleteTarget(team)}>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={!canWrite(team)}
+                    title={canWrite(team) ? undefined : 'Only the workspace that created this global team may delete it'}
+                    onClick={() => setDeleteTarget(team)}
+                  >
                     Delete
                   </Button>
                 </div>
@@ -172,7 +223,8 @@ export default function OrchestrationTeamsPage() {
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                       · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
                       {team.max_open_missions > 0
-                        ? `up to ${team.max_open_missions} self-created mission(s) open at once`
+                        ? `up to ${team.max_open_missions} self-created mission(s) open at once per workspace` +
+                          (team.is_global ? ` (× ${team.allowed_workspace_ids.length || 0} allowed workspace(s))` : '')
                         : 'agent-created missions disabled'}
                     </span>
                   </div>
@@ -228,8 +280,15 @@ export default function OrchestrationTeamsPage() {
                             wsId={wsId}
                             initial={{ role_label: m.role_label, capabilities: m.capabilities, max_concurrent: m.max_concurrent }}
                             onSaved={replaceTeam}
+                            disabled={!canWrite(team)}
                           />
-                          <Button variant="ghost" size="sm" onClick={() => removeMember(team, m.id)}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={!canWrite(team)}
+                            title={canWrite(team) ? undefined : 'Only the workspace that created this global team may edit its roster'}
+                            onClick={() => removeMember(team, m.id)}
+                          >
                             Remove
                           </Button>
                         </div>
@@ -247,6 +306,8 @@ export default function OrchestrationTeamsPage() {
         isOpen={showForm}
         wsId={wsId}
         agents={agents}
+        globalAgents={globalAgents}
+        workspaces={workspaces}
         team={editing}
         onClose={() => setShowForm(false)}
         onSaved={(team) => {
@@ -258,7 +319,7 @@ export default function OrchestrationTeamsPage() {
       <AddMemberModal
         team={memberTarget}
         wsId={wsId}
-        agents={agents}
+        agents={memberTarget?.is_global ? globalAgents : agents}
         onClose={() => setMemberTarget(null)}
         onSaved={(team) => {
           setMemberTarget(null);
@@ -297,6 +358,8 @@ function TeamFormModal({
   isOpen,
   wsId,
   agents,
+  globalAgents,
+  workspaces,
   team,
   onClose,
   onSaved,
@@ -304,6 +367,8 @@ function TeamFormModal({
   isOpen: boolean;
   wsId: string;
   agents: OrchestrationAssignableAgent[];
+  globalAgents: OrchestrationAssignableAgent[];
+  workspaces: { id: string; name: string }[];
   team: OrchestrationTeam | null;
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
@@ -316,18 +381,43 @@ function TeamFormModal({
   const [parallel, setParallel] = useState(3);
   const [openMissionsCap, setOpenMissionsCap] = useState(1);
   const [enabled, setEnabled] = useState(true);
+  // 스코프는 생성 시점에만 정해진다 — 기존 팀의 workspace_id는 절대 바뀌지 않으므로
+  // 이 상태는 새 팀(`!team`) UI에서만 의미가 있다.
+  const [isGlobal, setIsGlobal] = useState(false);
+  const [allowedWorkspaceIds, setAllowedWorkspaceIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+
+  const effectiveGlobal = team ? team.is_global : isGlobal;
+  const orchestratorPool = effectiveGlobal ? globalAgents : agents;
 
   useEffect(() => {
     if (!isOpen) return;
     setName(team?.name || '');
     setDescription(team?.description || '');
-    setOrchestratorId(team?.orchestrator_agent_id || agents[0]?.id || '');
     setPrompt(team?.orchestrator_prompt || '');
     setParallel(team?.max_parallel_steps ?? 3);
     setOpenMissionsCap(team?.max_open_missions ?? 1);
     setEnabled(team?.enabled ?? true);
-  }, [isOpen, team, agents]);
+    setIsGlobal(team?.is_global ?? false);
+    setAllowedWorkspaceIds(team?.allowed_workspace_ids ?? []);
+  }, [isOpen, team]);
+
+  // 위 effect와 분리한 이유는 후보 POOL이 바뀔 때도(open/team 변경 때뿐 아니라)
+  // 다시 실행되어야 하기 때문이다. 두 가지를 모두 커버한다: 모달이 열릴 때 부모의
+  // agents/globalAgents fetch가 아직 진행 중인 경우(New team 버튼은 그 로딩 완료를
+  // 기다리지 않는다), 그리고 스코프 토글이 새 팀 생성 중 현재 선택값 아래에서 pool을
+  // 바꿔버리는 경우. functional update는 현재 선택값이 더 이상 유효하지 않을 때만
+  // 교체하므로, 사용자가 의도적으로 고른 값을 덮어쓰는 일은 없다.
+  useEffect(() => {
+    if (!isOpen) return;
+    setOrchestratorId((prev) =>
+      orchestratorPool.some((a) => a.id === prev) ? prev : team?.orchestrator_agent_id || orchestratorPool[0]?.id || '',
+    );
+  }, [isOpen, team, orchestratorPool]);
+
+  const toggleAllowedWorkspace = (id: string) => {
+    setAllowedWorkspaceIds((prev) => (prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id]));
+  };
 
   const submit = async () => {
     if (!name.trim() || !orchestratorId) {
@@ -346,6 +436,7 @@ function TeamFormModal({
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
             enabled,
+            ...(team.is_global ? { allowed_workspace_ids: allowedWorkspaceIds } : {}),
           })
         : await api.createOrchestrationTeam({
             workspace_id: wsId,
@@ -355,6 +446,8 @@ function TeamFormModal({
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
+            is_global: isGlobal,
+            ...(isGlobal ? { allowed_workspace_ids: allowedWorkspaceIds } : {}),
           });
       showToast(team ? 'Team updated' : 'Team created', 'success');
       onSaved(saved);
@@ -385,12 +478,38 @@ function TeamFormModal({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input label="Team name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Platform squad" />
         <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+        {team ? (
+          team.is_global && (
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+              Global team — its roster scope cannot be changed after creation.
+            </div>
+          )
+        ) : (
+          <Select
+            label="Scope"
+            options={[
+              { value: 'workspace', label: 'This workspace' },
+              { value: 'global', label: 'Global — visible to every workspace, global agents only' },
+            ]}
+            value={isGlobal ? 'global' : 'workspace'}
+            onChange={(e) => setIsGlobal(e.target.value === 'global')}
+          />
+        )}
         <Select
           label="Orchestrator agent (required)"
-          options={agents.map((a) => ({ value: a.id, label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}` }))}
+          options={orchestratorPool.map((a) => ({
+            value: a.id,
+            label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}`,
+          }))}
           value={orchestratorId}
           onChange={(e) => setOrchestratorId(e.target.value)}
-          placeholder={agents.length ? undefined : 'No assignable agents in this workspace'}
+          placeholder={
+            orchestratorPool.length
+              ? undefined
+              : effectiveGlobal
+                ? 'No global agents available'
+                : 'No assignable agents in this workspace'
+          }
         />
         <LabeledTextarea
           label="Standing instructions (optional)"
@@ -416,9 +535,37 @@ function TeamFormModal({
           onChange={(e) => setOpenMissionsCap(Number(e.target.value))}
         />
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: -8 }}>
-          How many missions this team&apos;s orchestrator may have open at once via create_orchestration_mission.
-          Set to 0 to forbid the orchestrator from self-creating missions for this team entirely.
+          How many missions this team&apos;s orchestrator may have open at once per workspace via
+          create_orchestration_mission. Set to 0 to forbid the orchestrator from self-creating missions for this
+          team entirely.
         </div>
+        {effectiveGlobal && (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
+              Allowed workspaces
+            </div>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 8 }}>
+              Which workspace&apos;s run-budget this team&apos;s orchestrator may bill a self-created mission to.
+              Empty means the orchestrator cannot create missions at all until a workspace is checked here.
+            </div>
+            {workspaces.length === 0 ? (
+              <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No workspaces found.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
+                {workspaces.map((w) => (
+                  <label key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
+                    <input
+                      type="checkbox"
+                      checked={allowedWorkspaceIds.includes(w.id)}
+                      onChange={() => toggleAllowedWorkspace(w.id)}
+                    />
+                    {w.name}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {team && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
@@ -544,12 +691,14 @@ function MemberEditButton({
   wsId,
   initial,
   onSaved,
+  disabled,
 }: {
   team: OrchestrationTeam;
   memberId: string;
   wsId: string;
   initial: { role_label: string; capabilities: string; max_concurrent: number };
   onSaved: (team: OrchestrationTeam) => void;
+  disabled?: boolean;
 }) {
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
@@ -585,7 +734,13 @@ function MemberEditButton({
 
   return (
     <>
-      <Button variant="ghost" size="sm" onClick={() => setOpen(true)}>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={disabled}
+        title={disabled ? 'Only the workspace that created this global team may edit its roster' : undefined}
+        onClick={() => setOpen(true)}
+      >
         Edit
       </Button>
       <Modal

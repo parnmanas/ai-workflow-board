@@ -2185,6 +2185,10 @@ export const api = {
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
+    /** Create as a global (workspace-less) team. Default false. */
+    is_global?: boolean;
+    /** Global-team-only: workspaces its orchestrator may create missions in. */
+    allowed_workspace_ids?: string[];
   }) => request<OrchestrationTeam>('/orchestration/teams', { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeam: (
     id: string,
@@ -2197,6 +2201,8 @@ export const api = {
       max_parallel_steps?: number;
       max_open_missions?: number;
       enabled?: boolean;
+      /** Global-team-only: replaces the workspace allow-list wholesale. */
+      allowed_workspace_ids?: string[];
     },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteOrchestrationTeam: (id: string, workspaceId: string) =>
@@ -2222,10 +2228,11 @@ export const api = {
       `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
       { method: 'DELETE' },
     ),
-  listOrchestrationAgents: (workspaceId: string) =>
-    request<OrchestrationAssignableAgent[]>(
-      `/orchestration/assignable-agents?workspace_id=${encodeURIComponent(workspaceId)}`,
-    ),
+  listOrchestrationAgents: (workspaceId: string, opts?: { globalOnly?: boolean }) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.globalOnly) params.set('global_only', 'true');
+    return request<OrchestrationAssignableAgent[]>(`/orchestration/assignable-agents?${params.toString()}`);
+  },
 
   listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });

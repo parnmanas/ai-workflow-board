@@ -242,7 +242,7 @@ export class OrchestrationRunnerService {
         actor_id: actor.id,
         actor_name: actor.name,
       });
-      await this.pump(mission);
+      await this.wakeAfterPump(mission, await this.pump(mission));
       return mission;
     });
   }
@@ -493,8 +493,9 @@ export class OrchestrationRunnerService {
         data: { plan_version: nextVersion, created, updated },
       });
 
-      const dispatched = await this.pump(mission);
-      return { mission, created, updated, dispatched };
+      const pumped = await this.pump(mission);
+      await this.wakeAfterPump(mission, pumped);
+      return { mission, created, updated, dispatched: pumped.dispatched };
     });
   }
 
@@ -638,13 +639,14 @@ export class OrchestrationRunnerService {
       // blocking a subtree. Re-derive blocking before dispatching so the board
       // never shows a step as merely "waiting" when it can never run.
       await this.propagateBlocking(mission);
-      const dispatched = await this.pump(mission);
+      const pumped = await this.pump(mission);
+      await this.wakeAfterPump(mission, pumped);
       // Re-read: pump() loads its own entity instances, so a step it just
       // dispatched has a newer status / attempt / room_id than the `fresh`
       // object we mutated above. Returning the stale one would tell the
       // orchestrator its retry is still `pending` on attempt N — the exact
       // state it would then try to "fix" again.
-      return { step: await this.missions.requireStep(stepId), dispatched };
+      return { step: await this.missions.requireStep(stepId), dispatched: pumped.dispatched };
     });
   }
 
@@ -733,33 +735,39 @@ export class OrchestrationRunnerService {
       });
 
       const blocked = await this.propagateBlocking(mission);
-      const dispatched = await this.pump(mission);
-      const woken = await this.decideWake(mission, {
-        justFinished: step,
-        blockedKeys: blocked,
-        dispatched,
-      });
+      const pumped = await this.pump(mission);
+      const woken = await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
 
-      return { step, dispatched, orchestrator_woken: woken };
+      return { step, dispatched: pumped.dispatched, orchestrator_woken: woken };
     });
   }
 
   // ── Engine internals ──────────────────────────────────────────────────────
 
   /**
-   * Dispatch every step that is dispatchable, subject to the mission-wide
-   * parallelism cap and each member's own `max_concurrent`.
+   * 디스패치 가능한 모든 스텝을 미션 전체 병렬 상한과 각 member 자신의
+   * `max_concurrent` 안에서 디스패치한다.
    *
-   * Returns the step keys actually dispatched. Callers hold the mission lock.
+   * 실제로 디스패치된 step key들과, 디스패치에 실패한 스텝들(여기서 `failed`로
+   * 표시, 이벤트 기록됨)을 함께 반환한다. 의도적으로 `decideWake`를 직접 호출하지
+   * 않는다 — 모든 호출자가 어차피 자기 자신의 이유(리포트, 외부 실패 등)로 오케스트레이터를
+   * 깨울지 스스로 판단해야 하는데, 여기서도 독자적으로 판단해버리면 디스패치 실패가
+   * 이미 그 뒤에서 깨우는 호출자의 같은 pump() 호출 안에서 발생했을 때 wake가
+   * 두 번(room 포스트 2회, subagent spawn 2회) 발화한다. 대신 호출자들이 `failed`를
+   * 자기 자신의 단일 decideWake 호출에 합쳐 넣는다 — submitPlan/updateStep/
+   * resumeMission(티켓 1b62b437 이전에는 decideWake 호출이 아예 없어서 새로 추가해야
+   * 했다)과 reportStep/failStepExternally(원래 있었고, 이제는 pump()가 실패를
+   * 보고하면 자기 자신의 `justFinished`보다 그 최신 실패를 우선한다) 참고.
+   * 호출자는 mission lock을 쥐고 있어야 한다.
    */
-  private async pump(mission: OrchestrationMission): Promise<string[]> {
-    if (mission.status !== 'running') return [];
+  private async pump(mission: OrchestrationMission): Promise<{ dispatched: string[]; failed: OrchestrationStep[] }> {
+    if (mission.status !== 'running') return { dispatched: [], failed: [] };
 
     const steps = await this.missions.listSteps(mission.id);
     const progress = computePlanProgress(
       steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
     );
-    if (progress.dispatchable.length === 0) return [];
+    if (progress.dispatchable.length === 0) return { dispatched: [], failed: [] };
 
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
     const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
@@ -776,9 +784,10 @@ export class OrchestrationRunnerService {
       }
     }
     let slots = mission.max_parallel_steps - progress.inFlight.length;
-    if (slots <= 0) return [];
+    if (slots <= 0) return { dispatched: [], failed: [] };
 
     const dispatched: string[] = [];
+    const failed: OrchestrationStep[] = [];
     const candidates = progress.dispatchable
       .map((k) => byKey.get(k)!)
       .filter(Boolean)
@@ -813,8 +822,9 @@ export class OrchestrationRunnerService {
         slots -= 1;
         dispatched.push(step.step_key);
       } catch (e: any) {
-        // A dispatch failure is a step failure, not a mission crash: record it,
-        // let blocking propagate, and let decideWake hand it to the orchestrator.
+        // 디스패치 실패는 스텝 실패이지 미션 크래시가 아니다: 기록하고, blocking을
+        // 전파시키고, 오케스트레이터에게 알리는 건 호출자의 decideWake에 맡긴다
+        // (왜 여기서 하지 않는지는 이 메서드의 docstring 참고).
         step.status = 'failed';
         step.result_summary =
           `[dispatch failed] the work order could not be delivered to the assignee: ${e?.message || e}`;
@@ -832,10 +842,35 @@ export class OrchestrationRunnerService {
           `dispatch failed for step ${step.id} (${step.step_key}): ${e?.message || e}`,
           { mission_id: mission.id },
         );
+        failed.push(step);
       }
     }
 
-    return dispatched;
+    return { dispatched, failed };
+  }
+
+  /**
+   * pump() 결과에 대해 오케스트레이터를 정확히 한 번만 깨운다: pump()가 드러낸
+   * 가장 최신 디스패치 실패(엔진 자신의 최신 문제)를 옵션으로 주어진 호출자
+   * fallback(예: reportStep/failStepExternally가 마무리 짓던 스텝)보다 우선한다 —
+   * 절대 둘 다는 아니다. 그래서 pump() 호출 한 번이 하나의 논리적 이벤트에 대해
+   * room 포스트 2회 / subagent spawn 2회를 유발하는 일이 없다. pump 실패도
+   * fallback도 없으면 false(깨우지 않음)를 반환한다 — submitPlan/updateStep/
+   * resumeMission의 흔한 경우로, 이들은 "방금 스텝이 X를 보고했다" 같은 자기
+   * 자신의 이유가 없다.
+   */
+  private async wakeAfterPump(
+    mission: OrchestrationMission,
+    pumped: { dispatched: string[]; failed: OrchestrationStep[] },
+    fallback?: { justFinished: OrchestrationStep; blockedKeys: string[] },
+  ): Promise<boolean> {
+    const justFinished = pumped.failed.length > 0 ? pumped.failed[pumped.failed.length - 1] : fallback?.justFinished;
+    if (!justFinished) return false;
+    return this.decideWake(mission, {
+      justFinished,
+      blockedKeys: fallback?.blockedKeys ?? [],
+      dispatched: pumped.dispatched,
+    });
   }
 
   /** Create the step's room, add the member, and post the work order. */
@@ -847,6 +882,22 @@ export class OrchestrationRunnerService {
     const agentId = step.assignee_agent_id!;
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
     if (!agent) throw orchestrationError(400, `assignee agent ${agentId} no longer exists`);
+    // 방어적 재검사(티켓 1b62b437): 스텝이 미션 workspace 밖 에이전트에게 디스패치되지
+    // 않도록 지금까지 막아온 유일한 장치는 addMember 시점의 로스터 게이트
+    // (requireWorkspaceAgent)뿐이었다 — 그 외엔 아무 검사도 없다. 그 게이트의 보장이
+    // stale해지는 경로는 두 가지다: (1) 글로벌 팀의 member가 가입 후
+    // move_agent_to_workspace로 어느 workspace로 옮겨지거나, (2) workspace 종속
+    // 팀의 member가 같은 방식으로 다른 workspace로 옮겨지는 경우(글로벌 팀 이전부터
+    // 있던 버그 — 티켓 참고). 둘 다 멤버십 행이 그대로 남고 지금까지는 재검증이
+    // 없었다. 이걸 못 잡으면 workspace B의 에이전트에게 workspace A 미션으로 지어진
+    // room — 그 objective, context, 선행 스텝 결과까지 — 을 조용히 넘겨주게 된다.
+    if (agent.workspace_id && agent.workspace_id !== mission.workspace_id) {
+      throw orchestrationError(
+        400,
+        `assignee agent ${agent.name} no longer belongs to this mission's workspace (moved to a different ` +
+          `workspace after joining the team) — refusing to dispatch`,
+      );
+    }
 
     const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
     const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
@@ -1109,8 +1160,8 @@ export class OrchestrationRunnerService {
       });
 
       const blocked = await this.propagateBlocking(mission);
-      const dispatched = await this.pump(mission);
-      await this.decideWake(mission, { justFinished: step, blockedKeys: blocked, dispatched });
+      const pumped = await this.pump(mission);
+      await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
     });
   }
 

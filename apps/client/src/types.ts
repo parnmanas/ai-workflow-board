@@ -2456,7 +2456,13 @@ export interface OrchestrationTeamMember {
 
 export interface OrchestrationTeam {
   id: string;
-  workspace_id: string;
+  workspace_id: string | null;
+  /** true when workspace_id is null — a global team, visible from every workspace. */
+  is_global: boolean;
+  /** Workspace that created this team; the only one that may edit a global team. */
+  owner_workspace_id: string | null;
+  /** Global-team-only: workspaces its orchestrator may target with create_orchestration_mission. */
+  allowed_workspace_ids: string[];
   name: string;
   description: string;
   orchestrator_agent_id: string | null;
