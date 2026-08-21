@@ -58,3 +58,31 @@ export function restoreSessionStatusSnapshot(rows: SessionStatusSnapshotRow[]): 
   }
   return next;
 }
+
+/**
+ * Review round 2, P1 #2 fix: the room-entry GET above is a snapshot read that
+ * races the live SSE push — GET can read stale state A, a newer SSE B can
+ * land first, and then the deferred GET(A) response would otherwise
+ * unconditionally replace the map and stomp B back to A (or drop an agent B
+ * added that A never had). `updatedAt` is the caller's per-agent map of
+ * "epoch ms `prev` was last set by SSE for this agent"; `requestStartedAt` is
+ * the epoch ms the GET was issued. Any agent SSE has touched since the GET
+ * began keeps whatever `prev` currently holds instead of the snapshot row.
+ */
+export function mergeSessionStatusSnapshot(
+  prev: SessionStatusByAgent,
+  rows: SessionStatusSnapshotRow[],
+  updatedAt: Record<string, number>,
+  requestStartedAt: number,
+): SessionStatusByAgent {
+  const next = restoreSessionStatusSnapshot(rows);
+  for (const agentId of Object.keys(updatedAt)) {
+    if (updatedAt[agentId] <= requestStartedAt) continue;
+    if (prev[agentId]) {
+      next[agentId] = prev[agentId];
+    } else {
+      delete next[agentId];
+    }
+  }
+  return next;
+}

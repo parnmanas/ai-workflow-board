@@ -25,7 +25,7 @@ import {
 import NewChatModal from './ParticipantPicker';
 import ChatRoomView from './RoomDetailPanel';
 import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
-import { isSessionStatusLive, pruneExpiredSessionStatus, restoreSessionStatusSnapshot } from './utils/sessionStatusFlow';
+import { isSessionStatusLive, pruneExpiredSessionStatus, restoreSessionStatusSnapshot, mergeSessionStatusSnapshot } from './utils/sessionStatusFlow';
 
 /**
  * ChatPage — Phase 7 room-based chat surface.
@@ -126,6 +126,12 @@ export default function ChatPage() {
   const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
+  // Review round 2, P1 #2 — per-agent "epoch ms the SSE handler last set
+  // sessionStatusByAgent for this agent". Lets the room-entry GET snapshot
+  // below tell whether a newer SSE push already landed while the GET was in
+  // flight, so it can keep that newer state instead of stomping it back to
+  // the (by then stale) snapshot row. See mergeSessionStatusSnapshot.
+  const sessionStatusUpdatedAtRef = useRef<Record<string, number>>({});
   // Mirror of `messages` for use inside async callbacks (older-page dedup) that
   // run between renders and can't rely on the closed-over state snapshot.
   const messagesRef = useRef<ChatRoomMessageItem[]>([]);
@@ -235,6 +241,7 @@ export default function ChatPage() {
   useEffect(() => {
     setTypingAgents({}); // clear stale typing indicators when switching rooms
     setSessionStatusByAgent({}); // clear stale keep-alive/background-task badges when switching rooms
+    sessionStatusUpdatedAtRef.current = {};
     // Reset pagination state on every room switch so the new room starts
     // with a clean "no older fetched yet" slate. Without this, switching
     // from a fully-loaded room (hasMoreMessages=false) to a new room
@@ -306,11 +313,19 @@ export default function ChatPage() {
     // entry — the SSE push that would otherwise populate this is
     // fire-and-forget, so opening/re-entering the room between pushes would
     // otherwise show nothing until the next progress recheck (ticket
-    // e18be8ff review round 1, P1 #2).
-    api.getChatRoomSessionStatus(activeRoomId)
+    // e18be8ff review round 1, P1 #2). requestStartedAt + the merge below
+    // guard against a newer SSE push landing before this resolves (review
+    // round 2, P1 #2) — a plain replace would stomp it back to this stale
+    // snapshot. observer=true matches the getChatRoom/getChatRoomMessages
+    // calls above so a non-participant workspace-wide viewer isn't 404'd by
+    // the server's new room-access check (review round 2, P1 #1).
+    const requestStartedAt = Date.now();
+    api.getChatRoomSessionStatus(activeRoomId, initialObserver)
       .then((entries) => {
         if (cancelled) return;
-        setSessionStatusByAgent(restoreSessionStatusSnapshot(entries));
+        setSessionStatusByAgent((prev) =>
+          mergeSessionStatusSnapshot(prev, entries, sessionStatusUpdatedAtRef.current, requestStartedAt),
+        );
       })
       .catch(() => {});
 
@@ -445,6 +460,10 @@ export default function ChatPage() {
   useBoardStreamEvent('chat_room_session_status', useCallback((data: any) => {
     if (!data || !data.room_id) return;
     if (data.room_id !== activeRoomIdRef.current) return;
+    // Recorded before the state update so a room-entry GET snapshot that was
+    // already in flight knows this agent's `prev` is newer than whatever the
+    // snapshot read (review round 2, P1 #2 — see mergeSessionStatusSnapshot).
+    sessionStatusUpdatedAtRef.current[data.agent_id] = Date.now();
     setSessionStatusByAgent((prev) => {
       const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
       const backgroundTaskCount = data.background_task_count || 0;

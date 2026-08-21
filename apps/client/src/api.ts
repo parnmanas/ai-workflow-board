@@ -1993,13 +1993,13 @@ export const api = {
     );
   },
 
-  getChatRoomSessionStatus: (roomId: string) =>
+  getChatRoomSessionStatus: (roomId: string, observer = false) =>
     request<Array<{
       agent_id: string;
       agent_name: string;
       keep_alive_until_ms: number | null;
       background_task_count: number;
-    }>>(`/chat-rooms/${roomId}/session-status`),
+    }>>(`/chat-rooms/${roomId}/session-status${observer ? '?observer=true' : ''}`),
 
   sendChatRoomMessage: (
     roomId: string,
