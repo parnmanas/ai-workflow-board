@@ -19,6 +19,7 @@ import {
   isSessionStatusLive,
   pruneExpiredSessionStatus,
   restoreSessionStatusSnapshot,
+  mergeSessionStatusSnapshot,
 } from '../src/components/chat/utils/sessionStatusFlow.ts';
 
 test('pruneExpiredSessionStatus removes an expired keep-alive entry with no live background tasks', () => {
@@ -79,4 +80,69 @@ test('restoreSessionStatusSnapshot maps a GET session-status snapshot into room 
 test('restoreSessionStatusSnapshot on an empty snapshot (no live sessions) clears any stale local state', () => {
   const restored = restoreSessionStatusSnapshot([]);
   assert.deepEqual(restored, {});
+});
+
+// Regression for ticket e18be8ff review round 2, P1 #2 — "방 진입 중 GET 스냅샷
+// 응답이 더 최신 SSE 상태를 덮어쓸 수 있습니다." The room-entry GET above is a
+// snapshot read that races the live chat_room_session_status SSE push: GET
+// can read stale state, a newer SSE frame can land before the GET response
+// does, and a plain `setSessionStatusByAgent(restoreSessionStatusSnapshot(...))`
+// replace would then stomp the newer SSE-derived state back to the stale
+// snapshot. mergeSessionStatusSnapshot is what ChatPage.tsx now calls instead.
+
+test('mergeSessionStatusSnapshot keeps a newer SSE-added entry the GET snapshot predates', () => {
+  const requestStartedAt = 1_000_000;
+  // SSE granted agentA a keep-alive AFTER the GET request began reading, so
+  // the snapshot it read back (rows) never saw it.
+  const prev = {
+    agentA: { name: 'A', keepAliveUntilMs: 1_010_000, backgroundTaskCount: 0 },
+  };
+  const rows = [];
+  const updatedAt = { agentA: requestStartedAt + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  assert.deepEqual(merged, { agentA: prev.agentA },
+    'an agent SSE added after the GET began must survive the GET response, not be dropped by the snapshot replace');
+});
+
+test('mergeSessionStatusSnapshot does not resurrect an entry a newer SSE clear already removed', () => {
+  const requestStartedAt = 1_000_000;
+  // SSE cleared agentA (session ended) after the GET began reading; `prev`
+  // no longer has it, but the stale snapshot row the GET read before the
+  // clear still shows it as live.
+  const prev = {};
+  const rows = [
+    { agent_id: 'agentA', agent_name: 'A', keep_alive_until_ms: 1_010_000, background_task_count: 0 },
+  ];
+  const updatedAt = { agentA: requestStartedAt + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  assert.deepEqual(merged, {},
+    'a deferred stale GET row must not bring back an agent whose session a newer SSE already ended');
+});
+
+test('mergeSessionStatusSnapshot prefers a newer SSE deadline extension over a stale GET snapshot row', () => {
+  const requestStartedAt = 1_000_000;
+  const prev = {
+    agentC: { name: 'C', keepAliveUntilMs: 2_000_000, backgroundTaskCount: 0 }, // SSE extended the deadline
+  };
+  const rows = [
+    { agent_id: 'agentC', agent_name: 'C', keep_alive_until_ms: 1_010_000, background_task_count: 0 }, // pre-extension
+  ];
+  const updatedAt = { agentC: requestStartedAt + 1 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  assert.deepEqual(merged, { agentC: prev.agentC });
+});
+
+test('mergeSessionStatusSnapshot applies the snapshot row as-is when no newer SSE touched that agent', () => {
+  const requestStartedAt = 1_000_000;
+  const prev = {};
+  const rows = [
+    { agent_id: 'agentB', agent_name: 'B', keep_alive_until_ms: 1_010_000, background_task_count: 0 },
+  ];
+  // Last SSE touch for agentB predates this GET request (or never happened) —
+  // the ordinary room-entry-restore case with nothing racing it.
+  const updatedAt = { agentB: requestStartedAt - 500 };
+  const merged = mergeSessionStatusSnapshot(prev, rows, updatedAt, requestStartedAt);
+  assert.deepEqual(merged, {
+    agentB: { name: 'B', keepAliveUntilMs: 1_010_000, backgroundTaskCount: 0 },
+  });
 });
