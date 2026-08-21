@@ -92,14 +92,14 @@ test('resolveTriggerRuntimeProfile: no per-agent profile and explicit `--runtime
   assert.equal(out, null);
 });
 
-// resolveRoomBroadcastRuntimeProfile (review round 2, P1) — chat_room_message
-// broadcast의 agent별 map 짝. round 1 구현은 responder의 map 항목만 쓰고
+// resolveRoomBroadcastRuntimeProfile (리뷰 라운드 2, P1) — chat_room_message
+// broadcast의 agent별 map 짝. 라운드 1 구현은 responder의 map 항목만 쓰고
 // instanceOverride를 전혀 참조하지 않았는데, 이는 chat_request에서 지운
 // 것과 동일한 회귀다: per-agent 프로필이 없는 responder가 인스턴스
 // `--runtime-profile` 플래그까지 무시하고 CLI 기본값으로 떨어졌다. 이제는
 // map 조회 결과에 위와 동일한 `?? instanceOverride ?? null` 폴백을 적용한다
 // — 커버 범위는 위 resolveTriggerRuntimeProfile 스위트와 동일한 3가지 축을
-// map 기반 조회에 대해 재확인한다(round 1의 map-selection 자체 계약은
+// map 기반 조회에 대해 재확인한다(라운드 1의 map-selection 자체 계약은
 // runtime-profile-parse.test.mjs가 계속 다룬다).
 const ROOM_RESPONDER = 'agent-1';
 
