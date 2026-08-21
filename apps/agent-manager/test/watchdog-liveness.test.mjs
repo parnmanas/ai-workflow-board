@@ -106,6 +106,19 @@ function applyLivenessReset(sess, parsed) {
   }
 }
 
+// windows-latest CI: findLiveBackgroundTasks() shells out to PowerShell
+// (Get-CimInstance Win32_Process) on win32, which routinely takes well over
+// 30ms to spawn/complete — a fixed delay(30) races the fire-and-forget
+// _maybeKillUnhealthy gate on that platform. Poll for the actual outcome
+// instead, bounded so a real hang still fails fast.
+async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('waitUntil: condition not met within timeout');
+    await delay(intervalMs);
+  }
+}
+
 test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still works)', async () => {
   const origKill = process.kill;
   const signals = [];
@@ -128,7 +141,7 @@ test('silent turns kill at exactly UNHEALTHY_TURN_THRESHOLD (watchdog still work
     // progress gate (checkSessionProgress) instead of killing synchronously
     // inline — let that fire-and-forget check resolve before asserting.
     mgr.pump(sess);
-    await delay(30);
+    await waitUntil(() => sess.unhealthyKilled === true);
     assert.equal(sess.unhealthyKilled, true, 'killed at threshold');
     assert.ok(
       signals.some((s) => s.pid === DEAD_PID && s.sig === 'SIGTERM'),

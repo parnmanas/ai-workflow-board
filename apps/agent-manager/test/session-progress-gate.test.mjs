@@ -141,6 +141,22 @@ afterEach(() => {
 });
 const settle = () => delay(30);
 
+// `settle()`'s fixed 30ms assumes the fire-and-forget `_maybeKillUnhealthy`
+// gate (checkSessionProgress → findLiveBackgroundTasks) resolves within that
+// window. On windows-latest CI, findLiveBackgroundTasks shells out to
+// PowerShell (`Get-CimInstance Win32_Process`) to enumerate every process,
+// which routinely takes well over 30ms to spawn/complete — the fixed delay
+// races a genuinely slow-but-correct gate and asserts before it resolves.
+// Poll for the actual outcome instead, bounded so a real hang still fails
+// fast.
+async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('waitUntil: condition not met within timeout');
+    await delay(intervalMs);
+  }
+}
+
 // ── 1. idle expired + live background task → does not close stdin, rearms ──
 
 test('idle expired + a live background task → stdin stays open, timer rearms (defer, not kill)', async () => {
@@ -511,7 +527,7 @@ test('P0 integration control: 5 consecutive unresponded turns via _writeTurn + z
     mgr._sessions.set(sess.sessionKey, sess);
 
     for (let i = 0; i < 5; i++) mgr.writeTurn(sess, `turn ${i}`);
-    await settle();
+    await waitUntil(() => killed !== null);
 
     assert.ok(
       killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM',
