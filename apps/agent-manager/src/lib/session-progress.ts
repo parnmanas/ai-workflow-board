@@ -11,16 +11,30 @@
 //   2. background tasks — live non-benign descendant processes of the CLI
 //      child (findLiveBackgroundTasks). Catches long build/test children the
 //      agent spawned and is waiting on.
-//   3. cli-home activity — newest mtime under the session's per-agent CLI
-//      home directory. This is the ONLY observable signal for an in-process
-//      Workflow/subagent tool call: it runs in the SAME OS process as the
-//      parent turn, so it produces neither new stdout (the parent turn is
-//      blocked awaiting the tool call) nor a child process (signal 2 sees
-//      nothing) — but it DOES keep writing transcript files under cli-home.
-//      This was the exact blind spot in the incident that opened this
-//      ticket: a dead session's subagents/workflows/<id>/agent-*.jsonl files
-//      kept growing until the moment stdin was closed, while zero processes
-//      and zero stdout lines proved it.
+//   3. cli-home activity — newest mtime under THIS SESSION's own subtree of
+//      the per-agent CLI home directory. This is the ONLY observable signal
+//      for an in-process Workflow/subagent tool call: it runs in the SAME OS
+//      process as the parent turn, so it produces neither new stdout (the
+//      parent turn is blocked awaiting the tool call) nor a child process
+//      (signal 2 sees nothing) — but it DOES keep writing transcript files
+//      under cli-home. This was the exact blind spot in the incident that
+//      opened this ticket: a dead session's subagents/workflows/<id>/
+//      agent-*.jsonl files kept growing until the moment stdin was closed,
+//      while zero processes and zero stdout lines proved it.
+//
+//      ticket 6ff827cb round-1 review (P1) — signal 3 originally scanned
+//      the WHOLE per-agent cli-home root, which every chat/ticket session of
+//      that agent shares. Claude Code nests each cwd's own state under
+//      `<cliHomeDir>/projects/<dash-encoded-cwd>/` (its own convention, see
+//      encodeProjectDirName below), so scanning the root meant a busy
+//      session B in a different ticket/room kept an actually-idle session A
+//      "fresh" forever — a real resource-leak regression, not just noise.
+//      Scoping the scan to THIS session's own cwd subtree (every managed
+//      chat/ticket session gets its own dedicated workspace folder, so two
+//      sessions of the same agent normally have two different cwds) fixes
+//      the cross-session false positive while still covering the exact
+//      subagents/workflows/<id>/ files that motivated signal 3 — they nest
+//      under the same cwd subtree, not outside it.
 //
 // A session with none of the three signals fresh is NOT necessarily dead
 // (see gap 3 in the ticket — a pure external wait has no observable
@@ -44,10 +58,36 @@ export interface ProgressCheckOptions {
    *  Signal 3 is skipped when unset (legacy / operator-direct sessions with
    *  no managed cli-home) — the gate degrades to signals 1+2 only. */
   cliHomeDir?: string | null;
+  /** The cwd this session's CLI was actually spawned with — REQUIRED to
+   *  scope signal 3 to this session alone (see encodeProjectDirName).
+   *  Signal 3 is skipped (not widened back to the whole cli-home) when this
+   *  is unset, same posture as a missing cliHomeDir. */
+  cwd?: string | null;
   /** How recent a signal must be to count as "fresh". Callers pass the
    *  configured idle window so "was there activity in the last idle period"
    *  is the single freshness definition shared by every caller. */
   freshMs: number;
+}
+
+/** Claude Code's own `~/.claude/projects/<dir>/` naming convention: every
+ *  character outside `[A-Za-z0-9]` in the absolute cwd becomes `-` (no
+ *  collapsing of consecutive dashes). Exported for unit testing against
+ *  known cwd → directory-name pairs — this is an external CLI convention,
+ *  not something AWB defines, so a test pins it against drift. */
+export function encodeProjectDirName(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/** Resolve the session-scoped subtree for signal 3, or null when it can't be
+ *  scoped (missing cliHomeDir or cwd) — callers must SKIP the signal in
+ *  that case rather than fall back to scanning the whole cli-home root,
+ *  which is the exact cross-session false-positive this fixes. */
+function sessionScopedScanRoot(
+  cliHomeDir: string | null | undefined,
+  cwd: string | null | undefined,
+): string | null {
+  if (!cliHomeDir || !cwd) return null;
+  return join(cliHomeDir, 'projects', encodeProjectDirName(cwd));
 }
 
 const MTIME_SCAN_MAX_ENTRIES = 2000;
@@ -112,9 +152,10 @@ export async function checkSessionProgress(
     reasons.push(`model output ${Math.round((now - lastOutputAtMs) / 1000)}s ago`);
   }
 
+  const scanRoot = sessionScopedScanRoot(opts.cliHomeDir, opts.cwd);
   const [bgResult, mtimeResult] = await Promise.allSettled([
     findLiveBackgroundTasks(opts.pid),
-    opts.cliHomeDir ? newestMtimeUnder(opts.cliHomeDir) : Promise.resolve(null),
+    scanRoot ? newestMtimeUnder(scanRoot) : Promise.resolve(null),
   ]);
 
   if (bgResult.status === 'fulfilled') {
@@ -131,7 +172,7 @@ export async function checkSessionProgress(
       reasons.push(`cli-home activity ${Math.round((now - mtime) / 1000)}s ago`);
     }
   } else {
-    log(`[session-progress] cli-home mtime check failed dir=${opts.cliHomeDir}: ${mtimeResult.reason?.message ?? mtimeResult.reason}`);
+    log(`[session-progress] cli-home mtime check failed dir=${scanRoot}: ${mtimeResult.reason?.message ?? mtimeResult.reason}`);
   }
 
   return { alive: reasons.length > 0, reasons };

@@ -300,6 +300,14 @@ export interface SessionRecord {
    *  Workflow/subagent tool call (see session-progress.ts). Null for
    *  operator-direct sessions with no managed cli-home. */
   _cliHomeDir?: string | null;
+  /** ticket 6ff827cb round-1 review (P1) — the cwd this session's CLI was
+   *  actually spawned with (mirrors the `cwd:` passed to crossSpawn).
+   *  Required alongside `_cliHomeDir` to SCOPE signal 3 to this session's
+   *  own subtree instead of the whole per-agent cli-home root — without it,
+   *  any other chat/ticket session of the same agent writing anywhere under
+   *  cli-home falsely reads as "this session is still active" (see
+   *  session-progress.ts's sessionScopedScanRoot). */
+  _cwd?: string | null;
   /** ticket 6ff827cb requirement 3 — epoch-ms this session's CURRENT keep-alive
    *  grant expires. Null when no grant is active (never declared, released, or
    *  naturally lapsed). While set and unexpired, the idle/maxTurns reapers
@@ -839,6 +847,7 @@ export class BaseSessionManager {
         modelChain,
         chainAttempt,
         _cliHomeDir: agentContext?.cli_home_dir || null,
+        _cwd: claudeRuntimeProfile?.cwd || effectiveCwd || null,
       };
       sess.tap =
         this.#monitor?.register({
@@ -932,7 +941,7 @@ export class BaseSessionManager {
 
     const idleWindowMs = (this._config.delegation.idleMinutes ?? 10) * 60_000;
     const verdict = await checkSessionProgress(
-      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, freshMs: idleWindowMs },
+      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, cwd: sess._cwd, freshMs: idleWindowMs },
       sess._lastOutputAtMs,
     );
     if (this._sessions.get(key) !== sess) return;
@@ -1042,7 +1051,7 @@ export class BaseSessionManager {
       return;
     }
     if (sess.unrespondedTurnCount >= UNHEALTHY_TURN_THRESHOLD) {
-      this.#killUnhealthy(
+      void this._maybeKillUnhealthy(
         sess,
         `${sess.unrespondedTurnCount} consecutive turns without an LLM response`,
       );
@@ -1074,6 +1083,15 @@ export class BaseSessionManager {
           // throttles an outbound POST, this one is the manager's own
           // idle-gate evidence and must never be stale by more than one line.
           sess._lastOutputAtMs = Date.now();
+          // ticket 6ff827cb round-1 review (non-blocking observation) —
+          // requirement 1 asks for idle = time since last ACTIVITY, not just
+          // "checkSessionProgress happens to see _lastOutputAtMs". Actually
+          // resetting the timer here (instead of relying solely on the
+          // progress-gate recheck loop) means a session that keeps emitting
+          // output never even reaches the recheck cadence's periodic
+          // process-tree + cli-home scan — it goes back to a full idle
+          // window, exactly like a real user turn would.
+          this._resetIdleTimer(sess);
         }
         this.#advanceTurn(sess, parsed);
         // Buffer stdout into the tail ring so subclasses can surface "what
@@ -1252,7 +1270,7 @@ export class BaseSessionManager {
     }
 
     const verdict = await checkSessionProgress(
-      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, freshMs: idleWindowMs },
+      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, cwd: sess._cwd, freshMs: idleWindowMs },
       sess._lastOutputAtMs,
     );
     if (this._sessions.get(key) !== sess) return; // exited during the async check
@@ -1455,9 +1473,57 @@ export class BaseSessionManager {
       if (!sess.unrespondedSince) continue;
       const elapsed = now - sess.unrespondedSince;
       if (elapsed >= UNHEALTHY_DURATION_MS) {
-        this.#killUnhealthy(sess, `${Math.round(elapsed / 60_000)}m elapsed without an LLM response`);
+        void this._maybeKillUnhealthy(sess, `${Math.round(elapsed / 60_000)}m elapsed without an LLM response`);
       }
     }
+  }
+
+  /** ticket 6ff827cb round-1 review (P0) — both unhealthy-kill triggers
+   *  (the turn-threshold check in `_writeTurn` and the time-threshold sweep
+   *  in `#healthSweep`) used to call `#killUnhealthy` directly, bypassing
+   *  the same progress gate the idle/maxTurns reapers already honor. A
+   *  session blocked on a long in-process Workflow tool call emits ZERO
+   *  stdout by definition (the parent turn is blocked awaiting the tool
+   *  call), so `unrespondedSince`/`unrespondedTurnCount` only grow — the
+   *  unhealthy watchdog killed it at 30m / 5 turns even though
+   *  findLiveBackgroundTasks or cli-home mtime showed real progress, and
+   *  even with an active explicit keep-alive grant. Route both triggers
+   *  through the identical checkSessionProgress verdict (plus the same
+   *  active-keep-alive short-circuit `_maybeCloseForMaxTurns` uses) before
+   *  handing off to the actual kill.
+   *
+   *  `protected` (not `#private`), like `_writeTurn`/`_resetIdleTimer` — a
+   *  test seam so a regression test can await this directly instead of
+   *  waiting on the real 60s health-sweep interval. */
+  protected async _maybeKillUnhealthy(sess: SessionRecord, reason: string): Promise<void> {
+    const key = sess[this.#keyField];
+    if (this._sessions.get(key) !== sess) return;
+    if (sess.unhealthyKilled) return;
+
+    if (sess._keepAliveUntilMs && Date.now() < sess._keepAliveUntilMs) {
+      log(
+        `${this.#logTag} unhealthy threshold hit but keep-alive active — deferring kill ${this.#keyField}=${key} pid=${sess.pid} (${reason})`,
+      );
+      return;
+    }
+
+    const idleWindowMs = (this._config.delegation.idleMinutes ?? 10) * 60_000;
+    const verdict = await checkSessionProgress(
+      { pid: sess.pid, cliHomeDir: sess._cliHomeDir, cwd: sess._cwd, freshMs: idleWindowMs },
+      sess._lastOutputAtMs,
+    );
+    if (this._sessions.get(key) !== sess) return; // exited during the async check
+    if (sess.unhealthyKilled) return; // killed by the other trigger while we awaited
+
+    if (verdict.alive) {
+      log(
+        `${this.#logTag} unhealthy threshold hit but progress detected (${verdict.reasons.join('; ')}) — ` +
+          `deferring kill ${this.#keyField}=${key} pid=${sess.pid} (${reason})`,
+      );
+      return;
+    }
+
+    this.#killUnhealthy(sess, reason);
   }
 
   #killUnhealthy(sess: SessionRecord, reason: string): void {
