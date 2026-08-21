@@ -38,10 +38,25 @@ async function readManifestRaw(kindRoot: string): Promise<string[]> {
   try {
     const raw = await fsp.readFile(manifestPath(kindRoot), 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string' && x.length > 0) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string' && isValidLeaf(x)) : [];
   } catch {
     return []; // absent / corrupt / unreadable — never blocks the caller
   }
+}
+
+// A manifest entry must have the exact shape `provisionRunWorkspace`'s
+// `relative(kindRoot, resolve(dir)).split(sep).join('/')` can ever produce: a
+// kind-root-relative, forward-slash-joined path with no `.`/`..` segment, no
+// leading slash, and no backslash. Every value feeds straight into
+// `join(kindRoot, leaf)` for stat/snapshot/sweep, so a corrupt or hand-edited
+// manifest file must never smuggle a traversal or absolute path past this
+// read boundary — GC's `isUnder` guard already stops an escape from becoming a
+// destructive delete, but closing it here too keeps the read side honest
+// (review round 4, ticket 9fd27487).
+function isValidLeaf(candidate: string): boolean {
+  if (!candidate || candidate.includes('\\') || /^[a-zA-Z]:/.test(candidate)) return false;
+  if (candidate.startsWith('/')) return false;
+  return candidate.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }
 
 async function writeManifestRaw(kindRoot: string, leaves: string[]): Promise<void> {
@@ -111,17 +126,28 @@ export async function forgetRunWorkspaceLeaf(kindRoot: string, leaf: string): Pr
  * other than `forgetRunWorkspaceLeaf` — a manual rm, or a folder that predates
  * this manifest and was later cleaned up by the old heuristic-only sweep).
  * Never throws; an absent/corrupt manifest yields `[]`.
+ *
+ * The whole read→stat→write self-heal sequence runs inside ONE
+ * `withManifestLock` acquisition (review round 4, ticket 9fd27487) — an
+ * earlier version read+stat'd outside the lock and only took it for the final
+ * write, so a `recordRunWorkspaceLeaf` landing in that gap got silently
+ * overwritten by this function's stale (pre-record) snapshot the moment it
+ * self-healed. Holding the lock across the stat calls too makes this
+ * function and every writer (`recordRunWorkspaceLeaf`/`forgetRunWorkspaceLeaf`)
+ * strictly serialize, so no interleaving can drop a concurrently-recorded leaf.
  */
 export async function readRunWorkspaceLeaves(kindRoot: string): Promise<string[]> {
-  const leaves = await readManifestRaw(kindRoot);
-  if (leaves.length === 0) return [];
-  const alive: string[] = [];
-  for (const leaf of leaves) {
-    const st = await fsp.stat(join(kindRoot, leaf)).catch(() => null);
-    if (st?.isDirectory()) alive.push(leaf);
-  }
-  if (alive.length !== leaves.length) {
-    await withManifestLock(kindRoot, () => writeManifestRaw(kindRoot, alive)).catch(() => {});
-  }
-  return alive;
+  return withManifestLock(kindRoot, async () => {
+    const leaves = await readManifestRaw(kindRoot);
+    if (leaves.length === 0) return [];
+    const alive: string[] = [];
+    for (const leaf of leaves) {
+      const st = await fsp.stat(join(kindRoot, leaf)).catch(() => null);
+      if (st?.isDirectory()) alive.push(leaf);
+    }
+    if (alive.length !== leaves.length) {
+      await writeManifestRaw(kindRoot, alive).catch(() => {});
+    }
+    return alive;
+  }).catch(() => []);
 }
