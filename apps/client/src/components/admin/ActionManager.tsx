@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
+import { formatAgentDisplayName } from '../../utils/agentName';
 import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -13,6 +14,8 @@ import type { MentionParticipant } from '../chat/utils/markdown';
 interface AgentOption {
   id: string;
   name: string;
+  /** Required for the `<Manager>/<Agent>` render — see utils/agentName.ts. */
+  manager_name?: string | null;
 }
 
 interface ActionManagerProps {
@@ -58,7 +61,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
         api.getAgents(effectiveWorkspaceId).catch(() => [] as any[]),
       ]);
       setActions(list);
-      setAgents((agentList as any[]).map((a) => ({ id: a.id, name: a.name })));
+      setAgents((agentList as any[]).map((a) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load actions', 'error');
     } finally {
@@ -199,7 +202,12 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     }
   };
 
-  const agentName = (id: string): string => agents.find((a) => a.id === id)?.name ?? id.slice(0, 8);
+  // `<Manager>/<Agent>` — never the bare name, so two managers running an
+  // agent with the same short name stay distinguishable.
+  const agentName = (id: string): string => {
+    const a = agents.find((x) => x.id === id);
+    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+  };
 
   if (selected) {
     return (
@@ -350,7 +358,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             >
               <option value="">— select an agent —</option>
               {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}</option>
+                <option key={a.id} value={a.id}>{formatAgentDisplayName(a)}</option>
               ))}
             </select>
           </div>

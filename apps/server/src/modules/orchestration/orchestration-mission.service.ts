@@ -18,6 +18,7 @@ import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { Agent } from '../../entities/Agent';
+import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
@@ -415,6 +416,7 @@ export class OrchestrationMissionService {
     const orchIds = missions.map((m) => m.orchestrator_agent_id).filter((v): v is string => !!v);
     const agents = orchIds.length ? await this.agentRepo.find({ where: { id: In(orchIds) } }) : [];
     const agentById = new Map(agents.map((a) => [a.id, a]));
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     return missions.map((m) => ({
       id: m.id,
@@ -424,7 +426,7 @@ export class OrchestrationMissionService {
       title: m.title,
       status: m.status,
       orchestrator_agent_id: m.orchestrator_agent_id,
-      orchestrator_name: m.orchestrator_agent_id ? agentById.get(m.orchestrator_agent_id)?.name ?? '' : '',
+      orchestrator_name: m.orchestrator_agent_id ? displayById.get(m.orchestrator_agent_id) ?? '' : '',
       plan_version: m.plan_version,
       counts: countSteps(steps.filter((s) => s.mission_id === m.id)),
       started_at: m.started_at,
@@ -444,6 +446,7 @@ export class OrchestrationMissionService {
     for (const s of steps) if (s.assignee_agent_id) agentIds.add(s.assignee_agent_id);
     const agents = agentIds.size ? await this.agentRepo.find({ where: { id: In(Array.from(agentIds)) } }) : [];
     const agentById = new Map(agents.map((a) => [a.id, a]));
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     const events = await this.eventRepo.find({
       where: { mission_id: mission.id },
@@ -461,7 +464,7 @@ export class OrchestrationMissionService {
       status: mission.status,
       orchestrator_agent_id: mission.orchestrator_agent_id,
       orchestrator_name: mission.orchestrator_agent_id
-        ? agentById.get(mission.orchestrator_agent_id)?.name ?? ''
+        ? displayById.get(mission.orchestrator_agent_id) ?? ''
         : '',
       plan_version: mission.plan_version,
       counts: countSteps(steps),
@@ -492,7 +495,7 @@ export class OrchestrationMissionService {
           acceptance_criteria: s.acceptance_criteria,
           depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
           assignee_agent_id: s.assignee_agent_id,
-          assignee_name: a?.name ?? (s.assignee_agent_id ? '(deleted agent)' : ''),
+          assignee_name: a ? displayById.get(a.id) ?? a.name : (s.assignee_agent_id ? '(deleted agent)' : ''),
           assignee_online: !!a?.is_online,
           status: s.status,
           position: s.position,
@@ -540,6 +543,7 @@ export class OrchestrationMissionService {
     const agentIds = Array.from(new Set(steps.map((s) => s.assignee_agent_id).filter((v): v is string => !!v)));
     const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
     const agentById = new Map(agents.map((a) => [a.id, a]));
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
     const events = await this.eventRepo.find({
       where: { mission_id: mission.id },
@@ -573,7 +577,7 @@ export class OrchestrationMissionService {
         status: s.status,
         depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
         assignee_agent_id: s.assignee_agent_id,
-        assignee_name: s.assignee_agent_id ? agentById.get(s.assignee_agent_id)?.name ?? '' : '',
+        assignee_name: s.assignee_agent_id ? displayById.get(s.assignee_agent_id) ?? '' : '',
         attempt: s.attempt,
         max_attempts: s.max_attempts,
         result_summary: s.result_summary,
@@ -604,6 +608,15 @@ export class OrchestrationMissionService {
       data?: Record<string, any> | null;
     },
   ): Promise<void> {
+    // Choke point for agent identity in the mission timeline: whatever name the
+    // caller passed (MCP `agentName`, a bare `agent.name`, or nothing at all) is
+    // replaced by the canonical `<Manager>/<Agent>` display. Doing it here means
+    // no recordEvent call site can ever regress the format — see
+    // utils/agent-name.ts and .claude/skills/awb-agent-display-name.
+    let actorName = input.actor_name || '';
+    if (input.actor_type === 'agent' && input.actor_id) {
+      actorName = (await resolveAgentDisplayName(this.agentRepo, input.actor_id)) || actorName;
+    }
     try {
       await this.eventRepo.save(
         this.eventRepo.create({
@@ -613,7 +626,7 @@ export class OrchestrationMissionService {
           type: input.type,
           actor_type: input.actor_type || 'system',
           actor_id: input.actor_id || '',
-          actor_name: input.actor_name || '',
+          actor_name: actorName,
           message: (input.message || '').slice(0, 4000),
           data: input.data ?? null,
         }),

@@ -136,3 +136,7 @@ cd apps/agent-manager && npm run build && node --test --test-force-exit test/too
 - 아무나 남의 팀/미션/티켓을 조작할 수 있음 → (d) 빠뜨림. 게이트 티어를 올리는 걸로 때우려 하지 마라 — 위 항목과 정반대 실수다.
 - `npm test`가 새 테스트 파일을 조용히 건너뜀 → (f)의 `test-registration-completeness.test.mjs` 참고.
 - 도구 호출은 성공(200)했는데 채팅에 카드가 안 뜸 → (g) 빠뜨림. authz 문제가 아니므로 (b)/(c)를 아무리 봐도 원인이 안 보인다 — `ticket-ref-capture.ts`의 두 분류 테이블부터 확인.
+
+## Related
+
+- `.claude/skills/awb-agent-display-name/SKILL.md` — if the tool returns, stamps, or emits an agent name (`actor_name`, `agent_name`, `assignee_name`, `pending_set_by`, …), it must be the canonical `<Manager>/<Agent>` display, resolved through `apps/server/src/utils/agent-name.ts`. A bare `agent.name` is a bug.

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
+import { formatAgentDisplayName } from '../../utils/agentName';
 import type { Agent, Skill, SkillDetail, SkillProposal } from '../../types';
 import { tokens } from '../../tokens';
 import { useAuth } from '../../contexts/AuthContext';
@@ -37,6 +38,7 @@ export default function SkillsPage() {
   const [assignmentBoard, setAssignmentBoard] = useState('');
   const [assignmentRole, setAssignmentRole] = useState('');
   const [saving, setSaving] = useState(false);
+  const [forking, setForking] = useState(false);
 
   const load = useCallback(async () => {
     if (!currentWorkspaceId) {
@@ -46,7 +48,9 @@ export default function SkillsPage() {
     setLoading(true);
     try {
       const [skillRows, proposalRows, agentRows] = await Promise.all([
-        api.listSkills(currentWorkspaceId),
+        // include_shadowed: an overridden global must stay visible, otherwise
+        // "why isn't the built-in applying" has no answer in the UI.
+        api.listSkills(currentWorkspaceId, true),
         api.listSkillProposals(currentWorkspaceId),
         api.getAgents(currentWorkspaceId),
       ]);
@@ -66,6 +70,10 @@ export default function SkillsPage() {
   }, [currentWorkspaceId, selected?.id, showToast]);
 
   useEffect(() => { void load(); }, [currentWorkspaceId]);
+
+  // Global skills are inherited by every workspace; publishing/quarantining
+  // one from a workspace is refused server-side, so the UI offers Fork instead.
+  const isGlobal = !!selected && !selected.workspace_id;
 
   const openSkill = async (skill: Skill) => {
     if (!currentWorkspaceId) return;
@@ -197,6 +205,21 @@ export default function SkillsPage() {
                   <Badge variant={skill.status === 'active' ? 'success' : 'danger'}>{skill.status}</Badge>
                 </div>
                 <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginTop: 6 }}>{skill.slug}</div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                  {/* Scope is the first thing to know about a row: a global
+                      skill is read-only here and is edited by forking. */}
+                  <Badge variant={skill.workspace_id ? 'info' : 'neutral'} size="sm">
+                    {skill.workspace_id ? 'workspace' : 'global'}
+                  </Badge>
+                  {skill.source_kind && skill.source_kind !== 'local' && (
+                    <Badge variant="neutral" size="sm">{skill.source_kind}</Badge>
+                  )}
+                  {skill.shadowed && (
+                    <span title="A workspace skill with this slug overrides it">
+                      <Badge variant="warning" size="sm">shadowed</Badge>
+                    </span>
+                  )}
+                </div>
               </Card>
             ))}
           </div>
@@ -204,22 +227,58 @@ export default function SkillsPage() {
           {selected ? (
             <div style={{ display: 'grid', gap: 14, alignContent: 'start' }}>
               <Card style={{ display: 'grid', gap: 10 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <strong style={{ color: tokens.colors.textPrimary }}>{selected.name}</strong>
-                  {selected.status === 'active' && (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={async () => {
-                        await api.quarantineSkill(currentWorkspaceId, selected.id);
-                        showToast('Skill quarantined for future snapshots', 'success');
-                        await load();
-                      }}
-                    >
-                      Quarantine
-                    </Button>
-                  )}
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {/* A global skill is inherited by every workspace, so it is
+                        read-only from here — diverging means forking it, which
+                        leaves the global free to keep receiving updates. */}
+                    {isGlobal ? (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        loading={forking}
+                        onClick={async () => {
+                          setForking(true);
+                          try {
+                            await api.forkSkill(currentWorkspaceId, selected.id, selected.versions[0]?.id);
+                            showToast('Forked into this workspace — it now shadows the global skill', 'success');
+                            setSelected(null);
+                            await load();
+                          } catch (error: any) {
+                            showToast(error?.message || 'Fork failed', 'error');
+                          } finally {
+                            setForking(false);
+                          }
+                        }}
+                      >
+                        Fork into workspace
+                      </Button>
+                    ) : selected.status === 'active' && (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={async () => {
+                          await api.quarantineSkill(currentWorkspaceId, selected.id);
+                          showToast('Skill quarantined for future snapshots', 'success');
+                          await load();
+                        }}
+                      >
+                        Quarantine
+                      </Button>
+                    )}
+                  </div>
                 </div>
+                {isGlobal && (
+                  <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
+                    Global skill{selected.source_kind && selected.source_kind !== 'local'
+                      ? ` · managed by the ${selected.source_kind === 'builtin' ? 'built-in pack' : 'skill tap'} it came from`
+                      : ''}
+                    {selected.source_author ? ` · ${selected.source_author}` : ''}
+                    {selected.source_license ? ` · ${selected.source_license}` : ''}
+                    . Read-only here — fork it to diverge, or manage it in Admin → Skill registry.
+                  </div>
+                )}
                 <div style={{ color: tokens.colors.textMuted }}>{selected.description || 'No description'}</div>
                 {selected.versions.map((version) => (
                   <div key={version.id} style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10 }}>
@@ -247,7 +306,7 @@ export default function SkillsPage() {
                 <select value={assignmentAgent} onChange={(event) => setAssignmentAgent(event.target.value)} style={textareaStyle}>
                   <option value="">Select Agent</option>
                   {agents.filter((agent) => agent.type !== 'manager').map((agent) => (
-                    <option key={agent.id} value={agent.id}>{agent.name}</option>
+                    <option key={agent.id} value={agent.id}>{formatAgentDisplayName(agent)}</option>
                   ))}
                 </select>
                 <select value={assignmentVersion} onChange={(event) => setAssignmentVersion(event.target.value)} style={textareaStyle}>

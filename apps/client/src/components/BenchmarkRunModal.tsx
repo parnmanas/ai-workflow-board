@@ -3,6 +3,7 @@ import { api } from '../api';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import { Modal, Button, Input } from './common';
+import { formatAgentDisplayName } from '../utils/agentName';
 import type { Agent, BenchmarkRunDetail } from '../types';
 
 /**
@@ -118,7 +119,7 @@ function AgentMultiSelect({
                 disabled={isLocked}
                 onChange={() => onToggle(a.id)}
               />
-              <span>{a.manager_name ? `${a.manager_name}/${a.name}` : a.name}</span>
+              <span>{formatAgentDisplayName(a)}</span>
             </label>
           );
         })
@@ -380,7 +381,7 @@ export default function BenchmarkRunModal({
                   ? 'None'
                   : agents
                       .filter((a) => evaluatorIds.has(a.id))
-                      .map((a) => a.name)
+                      .map((a) => formatAgentDisplayName(a))
                       .join(', ')}
               </div>
             ) : (

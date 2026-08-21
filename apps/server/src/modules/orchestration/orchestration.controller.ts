@@ -155,15 +155,9 @@ export class OrchestrationController {
   async assignableAgents(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     try {
       const agents = await this.teams.listAssignableAgents(workspaceId);
-      return res.json(
-        agents.map((a) => ({
-          id: a.id,
-          name: a.name,
-          type: a.type,
-          is_online: !!a.is_online,
-          description: a.description,
-        })),
-      );
+      // The service already carries manager_name so the picker can render the
+      // canonical `<Manager>/<Agent>` identity — pass the rows through as-is.
+      return res.json(agents);
     } catch (e: any) {
       return fail(res, e, 'Failed to list agents');
     }

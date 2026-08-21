@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { api } from '../api';
+import { formatAgentDisplayName } from '../utils/agentName';
 import { tokens } from '../tokens';
 import {
   resolveAssistant,
@@ -244,7 +245,7 @@ function viewStateFor(resolution: AssistantResolution | null, loading: boolean, 
   if (loading) return { status: 'loading' };
   if (error) return { status: 'error', message: error };
   if (!resolution) return { status: 'loading' };
-  if (resolution.status === 'ready') return { status: 'ready', assistantName: resolution.agent.name };
+  if (resolution.status === 'ready') return { status: 'ready', assistantName: formatAgentDisplayName(resolution.agent) };
   return { status: resolution.status };
 }
 

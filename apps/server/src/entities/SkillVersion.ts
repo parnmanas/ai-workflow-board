@@ -5,7 +5,13 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 @Index(['skill_id', 'digest'], { unique: true })
 export class SkillVersion {
   @PrimaryGeneratedColumn('uuid') id: string;
-  @Column({ type: 'varchar' }) workspace_id: string;
+  /**
+   * Mirrors the parent Skill's scope — NULL for a version of a global skill.
+   * Kept denormalized (rather than joined through skill_id) so the hot
+   * snapshot-resolution query can filter versions without a join; the invariant
+   * is "a version's workspace_id always equals its skill's".
+   */
+  @Column({ type: 'varchar', nullable: true, default: null }) workspace_id: string | null;
   @Column({ type: 'varchar' }) skill_id: string;
   @Column({ type: 'integer' }) version: number;
   @Column({ type: 'text' }) body: string;
