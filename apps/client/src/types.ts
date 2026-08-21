@@ -2457,11 +2457,11 @@ export interface OrchestrationTeamMember {
 export interface OrchestrationTeam {
   id: string;
   workspace_id: string | null;
-  /** true when workspace_id is null — a global team, visible from every workspace. */
+  /** workspace_id가 null이면 true — 모든 workspace에서 보이는 글로벌 팀. */
   is_global: boolean;
-  /** Workspace that created this team; the only one that may edit a global team. */
+  /** 이 팀을 만든 workspace; 글로벌 팀을 편집할 수 있는 유일한 workspace. */
   owner_workspace_id: string | null;
-  /** Global-team-only: workspaces its orchestrator may target with create_orchestration_mission. */
+  /** 글로벌 팀 전용: orchestrator가 create_orchestration_mission으로 대상 지정 가능한 workspace 목록. */
   allowed_workspace_ids: string[];
   name: string;
   description: string;

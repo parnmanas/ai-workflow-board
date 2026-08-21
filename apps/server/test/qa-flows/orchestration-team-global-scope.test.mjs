@@ -129,6 +129,61 @@ test('Orchestration Team: global roster integrity — only global agents may orc
   assert.equal(withMember.members[0].agent_id, globalMember.id);
 });
 
+test('Orchestration Team: allowed_workspace_ids is validated against real workspace rows, not just normalized', async (t) => {
+  const { app, modules, services } = await sharedApp(t);
+  const { getDataSourceToken } = modules;
+  const { OrchestrationTeamService } = services;
+  const teams = app.get(OrchestrationTeamService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'allowlist-fk');
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'allowlist-fk-other');
+  const orch = await createAgent(app, getDataSourceToken, null, { name: 'allowlist-fk-orch' });
+  const bogusWorkspaceId = '00000000-0000-4000-8000-000000000000';
+
+  step('createTeam rejects an allowed_workspace_ids entry that is not a real workspace row — 400, no orphan team persisted');
+  await assert.rejects(
+    () => teams.createTeam({
+      workspace_id: ws.id,
+      is_global: true,
+      name: 'Bogus allow-list team',
+      orchestrator_agent_id: orch.id,
+      created_by: HUMAN.id,
+      allowed_workspace_ids: [ws.id, bogusWorkspaceId],
+    }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, new RegExp(bogusWorkspaceId));
+      return true;
+    },
+  );
+  const ds = app.get(getDataSourceToken());
+  const orphan = await ds.getRepository('OrchestrationTeam').findOne({ where: { name: 'Bogus allow-list team' } });
+  assert.equal(orphan, null, 'a team with an unvalidated allowed_workspace_ids entry must not be persisted');
+
+  step('createTeam accepts allowed_workspace_ids once every entry is a real workspace');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    is_global: true,
+    name: 'Valid allow-list team',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+    allowed_workspace_ids: [ws.id, otherWs.id],
+  });
+  assert.deepEqual(new Set(team.allowed_workspace_ids), new Set([ws.id, otherWs.id]));
+
+  step('updateTeam rejects the same bogus id on the allow-list-replace path — 400, previous allow-list untouched');
+  await assert.rejects(
+    () => teams.updateTeam(team.id, ws.id, { allowed_workspace_ids: [bogusWorkspaceId] }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, new RegExp(bogusWorkspaceId));
+      return true;
+    },
+  );
+  const unchanged = await teams.getTeam(team.id, ws.id);
+  assert.deepEqual(new Set(unchanged.allowed_workspace_ids), new Set([ws.id, otherWs.id]));
+});
+
 test('Orchestration Team: create_orchestration_mission for a global team — workspace_id required + allow-listed', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;

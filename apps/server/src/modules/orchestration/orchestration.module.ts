@@ -9,6 +9,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
+import { Workspace } from '../../entities/Workspace';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -39,6 +40,7 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       ChatRoomParticipant,
       ChatRoomMessage,
       Agent,
+      Workspace,
     ]),
     ChatRoomsModule,
     SharedServicesModule,
