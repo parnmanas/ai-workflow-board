@@ -18,6 +18,26 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { ChatSessionManager } from '../dist/lib/chat-session-manager.js';
 import { createAdapter } from '../dist/lib/cli-adapters/index.js';
+import { findLiveBackgroundTasks } from '../dist/lib/process-tree.js';
+
+// Review round 2, P1 #1 — a fixed `delay(200)` before asserting on a spawned
+// child's OS-process visibility races the real enumeration (on windows-latest
+// CI, findLiveBackgroundTasks shells out to PowerShell/CIM and can routinely
+// take well over 200ms). Poll the actual observable condition instead,
+// bounded so a genuine hang still fails fast, and report what was last
+// observed so a timeout is diagnosable.
+async function waitUntil(predicate, describe, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (true) {
+    last = await predicate();
+    if (last.ok) return last;
+    if (Date.now() >= deadline) {
+      throw new Error(`waitUntil: condition not met within ${timeoutMs}ms — last observed: ${describe(last)}`);
+    }
+    await delay(intervalMs);
+  }
+}
 
 function makeConfig(overrides = {}) {
   return {
@@ -134,7 +154,18 @@ test('idle recheck with a live background task pushes the SAME count the reap-ga
   const sess = makeFakeChatSession({ pid: process.pid });
   mgr._sessions.set(sess.sessionKey, sess);
   try {
-    await delay(200); // let the spawned child register in the OS process table
+    // Poll findLiveBackgroundTasks itself (the same enumeration
+    // _onIdleTimerFired's progress gate calls) until the spawned child is
+    // actually observable, instead of guessing a fixed delay.
+    const seen = await waitUntil(
+      async () => {
+        const tasks = await findLiveBackgroundTasks(process.pid);
+        return { ok: tasks.some((t) => t.pid === child.pid), tasks };
+      },
+      (last) => `${last.tasks.length} live descendant(s) of pid ${process.pid}: [${last.tasks.map((t) => t.pid).join(', ')}], waiting for child pid ${child.pid}`,
+    );
+    assert.ok(seen.ok, 'spawned child must become visible to findLiveBackgroundTasks before proceeding');
+
     await mgr._onIdleTimerFired(sess, 10 * 60_000);
 
     const last = statusPosts[statusPosts.length - 1];
