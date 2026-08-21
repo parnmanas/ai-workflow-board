@@ -114,6 +114,10 @@ export default function ChatPage() {
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
   const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
   const [typingAgents, setTypingAgents] = useState<Record<string, { name: string; status?: string }>>({}); // agent_id -> { name, status }
+  // ticket e18be8ff — agent_id -> live keep-alive/background-task snapshot for
+  // the active room's session(s). keepAliveUntilMs is an absolute deadline so
+  // the badge can tick a live countdown between SSE pushes.
+  const [sessionStatusByAgent, setSessionStatusByAgent] = useState<Record<string, { name: string; keepAliveUntilMs: number | null; backgroundTaskCount: number }>>({});
   // Observer mode: viewer is *not* a participant of the active room (only
   // possible when showAllRooms is on). Used to skip mark-read calls that
   // would 403 server-side for non-members.
@@ -229,6 +233,7 @@ export default function ChatPage() {
   // Load messages + mark read on room change
   useEffect(() => {
     setTypingAgents({}); // clear stale typing indicators when switching rooms
+    setSessionStatusByAgent({}); // clear stale keep-alive/background-task badges when switching rooms
     // Reset pagination state on every room switch so the new room starts
     // with a clean "no older fetched yet" slate. Without this, switching
     // from a fully-loaded room (hasMoreMessages=false) to a new room
@@ -418,6 +423,42 @@ export default function ChatPage() {
       return next;
     });
   }, []));
+
+  // SSE: chat_room_session_status — keep-alive / live background-task-count
+  // badge. Pushed on keep-alive grant/release and on every progress recheck
+  // (idle timer / maxTurns / unhealthy gate) — NOT on a fixed clock, so an
+  // entry with no live grant and no background tasks means "nothing to show"
+  // and is removed rather than rendered as "0".
+  useBoardStreamEvent('chat_room_session_status', useCallback((data: any) => {
+    if (!data || !data.room_id) return;
+    if (data.room_id !== activeRoomIdRef.current) return;
+    setSessionStatusByAgent((prev) => {
+      const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
+      const backgroundTaskCount = data.background_task_count || 0;
+      const isLive = (keepAliveUntilMs !== null && keepAliveUntilMs > Date.now()) || backgroundTaskCount > 0;
+      if (!isLive) {
+        if (!prev[data.agent_id]) return prev;
+        const next = { ...prev };
+        delete next[data.agent_id];
+        return next;
+      }
+      return {
+        ...prev,
+        [data.agent_id]: { name: data.agent_name || 'Agent', keepAliveUntilMs, backgroundTaskCount },
+      };
+    });
+  }, []));
+
+  // The keep-alive countdown is computed from an absolute deadline at render
+  // time, so a badge showing "잔여 XX분" needs periodic re-renders between SSE
+  // pushes (pushes only fire when the deadline itself changes). Only runs
+  // while there's something to show.
+  const [, setStatusTick] = useState(0);
+  useEffect(() => {
+    if (Object.keys(sessionStatusByAgent).length === 0) return;
+    const timer = setInterval(() => setStatusTick((t) => t + 1), 30000);
+    return () => clearInterval(timer);
+  }, [sessionStatusByAgent]);
 
   // Safety timeout: clear all typing indicators after 15s in case is_typing:false is lost
   useEffect(() => {
@@ -646,6 +687,7 @@ export default function ChatPage() {
         participantCount={participantCount}
         participants={roomParticipants}
         typingAgents={typingAgents}
+        sessionStatusByAgent={sessionStatusByAgent}
         currentUserId={user?.id}
         activeTasks={activeAgentTasks}
         onSelectTask={openTicketArtifact}

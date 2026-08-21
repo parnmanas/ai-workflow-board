@@ -165,6 +165,9 @@ export interface ChatRoomViewProps {
   participantCount?: number;
   participants?: MentionParticipant[];
   typingAgents?: Record<string, { name: string; status?: string }>; // agent_id -> { name, status }
+  // ticket e18be8ff — agent_id -> live keep-alive/background-task snapshot.
+  // keepAliveUntilMs is an absolute deadline; render computes the countdown.
+  sessionStatusByAgent?: Record<string, { name: string; keepAliveUntilMs: number | null; backgroundTaskCount: number }>;
   currentUserId?: string;
   activeTasks?: AgentCurrentTask[];
   onSelectTask?: (ticketId: string, title: string) => void;
@@ -202,6 +205,7 @@ export default function ChatRoomView({
   participantCount = 0,
   participants = [],
   typingAgents = {} as Record<string, { name: string; status?: string }>,
+  sessionStatusByAgent = {} as Record<string, { name: string; keepAliveUntilMs: number | null; backgroundTaskCount: number }>,
   currentUserId,
   activeTasks = [],
   onSelectTask = () => {},
@@ -650,6 +654,28 @@ export default function ChatRoomView({
             return `${names.join(', ')}${entries.length === 1 ? ' is typing' : ' are typing'}`;
           })()}
           <span style={{ display: 'inline-block', width: 20 }}>...</span>
+        </div>
+      )}
+
+      {/* ticket e18be8ff — keep-alive / background-task-count badge */}
+      {Object.keys(sessionStatusByAgent).length > 0 && (
+        <div style={{
+          padding: '4px 16px',
+          fontSize: '13px',
+          color: tokens.colors.textSecondary,
+          flexShrink: 0,
+        }}>
+          {Object.entries(sessionStatusByAgent).map(([agentId, s]) => {
+            const parts: string[] = [];
+            if (s.backgroundTaskCount > 0) parts.push(`백그라운드 작업 ${s.backgroundTaskCount}개 실행 중`);
+            if (s.keepAliveUntilMs) {
+              const remainMin = Math.max(0, Math.round((s.keepAliveUntilMs - Date.now()) / 60_000));
+              parts.push(`keep-alive 잔여 ${remainMin}분`);
+            }
+            if (parts.length === 0) return null;
+            const namePrefix = Object.keys(sessionStatusByAgent).length > 1 ? `${s.name} — ` : '';
+            return <div key={agentId}>{namePrefix}{parts.join(' · ')}</div>;
+          })}
         </div>
       )}
 

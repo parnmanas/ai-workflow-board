@@ -35,6 +35,7 @@ type StreamNamedEventType =
   | 'board_update' | 'agent_typing' | 'agent_trigger'
   | 'chat_message' | 'agent_status'
   | 'chat_room_message' | 'chat_room_update' | 'chat_room_typing'  // Phase 7
+  | 'chat_room_session_status'  // ticket e18be8ff — keep-alive / background-task badge
   | 'server_meta'   // Phase 8 — protocol version handshake (CHAT-20)
   | 'user_mention'  // Mention feature — sidebar unread badge sync
   | 'comment_typing'   // Phase-9 typed comments — "user is composing" indicator
@@ -180,6 +181,10 @@ export function BoardStreamProvider({ children }: ProviderProps) {
 
       eventSource.addEventListener('chat_room_typing', (event: MessageEvent) => {
         dispatch('chat_room_typing', event.data);
+      });
+
+      eventSource.addEventListener('chat_room_session_status', (event: MessageEvent) => {
+        dispatch('chat_room_session_status', event.data);
       });
 
       // Phase 8 CHAT-20: protocol version handshake — dispatch to subscribers
