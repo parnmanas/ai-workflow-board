@@ -2638,10 +2638,10 @@ export class EventDispatcher {
       worktreeMode,
       ev.ticket_id,
     );
-    // ticket 41e69c91: per_ticket (board default) previously got no folder-
-    // boundary policy at all — only 'shared' called into prompts.ts. Route
-    // both through worktreeInstructionsFor so mode selection itself is
-    // exercised by a test, not just the leaf instruction-text functions.
+    // 티켓 41e69c91: per_ticket(보드 기본값)에는 지금까지 폴더 경계 정책이
+    // 전혀 전달되지 않았다 — prompts.ts 호출은 'shared'에만 있었다. 두 모드
+    // 모두 worktreeInstructionsFor를 거치게 해서, leaf 문구 함수뿐 아니라
+    // 모드 선택 로직 자체도 테스트로 검증되게 한다.
     const worktreeInstructions = worktreeInstructionsFor(worktreeMode, agentContext?.cwd || '');
 
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
