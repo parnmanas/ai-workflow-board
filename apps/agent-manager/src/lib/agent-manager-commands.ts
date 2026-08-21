@@ -44,6 +44,7 @@ import {
 import type { ManagedAgentRegistry } from './managed-agents.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { BaseSessionManager } from './base-session-manager.js';
+import type { ChatSessionManager } from './chat-session-manager.js';
 import type { SubagentManager } from './subagent-manager.js';
 import type { CircuitBreaker } from './circuit-breaker.js';
 import type { RuntimeSupervisor } from './runtime/runtime-supervisor.js';
@@ -78,7 +79,11 @@ type CommandKind =
   | 'update_plugins'
   | 'refresh_mcp_config'
   | 'update_manager'
-  | 'restart_manager';
+  | 'restart_manager'
+  // ticket 6ff827cb — issued by the keep_chat_session_alive MCP tool, not an
+  // admin action. args: { agent_id, room_id, minutes?, reason? }.
+  | 'extend_chat_keepalive'
+  | 'release_chat_keepalive';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -109,6 +114,8 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'refresh_mcp_config',
   'update_manager',
   'restart_manager',
+  'extend_chat_keepalive',
+  'release_chat_keepalive',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -137,7 +144,12 @@ export interface CommandHandlerDeps {
    * the in-memory child keeps authenticating with the stale credential until
    * its idle / maxTurns timer expires (10+ minutes). Optional so the legacy
    * test harness (deps without session managers) keeps wiring up. */
-  chatSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
+  /** ticket 6ff827cb: also needs applyRoomKeepAlive for
+   *  extend/release_chat_keepalive. Typed against ChatSessionManager
+   *  specifically (not BaseSessionManager) because that method encapsulates
+   *  the `roomId|agentId` composite session-key format — a detail this
+   *  handler must not need to know. */
+  chatSessionManager?: Pick<ChatSessionManager, 'stopForAgent' | 'applyRoomKeepAlive'> | null;
   ticketSessionManager?: Pick<BaseSessionManager, 'stopForAgent'> | null;
   /** SubagentManager — wired so stop_agent / restart_agent also reap the
    * agent's one-shot trigger / chat / mention subagents. These spawn detached
@@ -238,6 +250,10 @@ export class AgentManagerCommandHandler {
         return this.#updateManager();
       case 'restart_manager':
         return this.#restartManager();
+      case 'extend_chat_keepalive':
+        return this.#applyChatKeepalive(payload, 'extend');
+      case 'release_chat_keepalive':
+        return this.#applyChatKeepalive(payload, 'release');
     }
   }
 
@@ -775,6 +791,36 @@ export class AgentManagerCommandHandler {
     // has no live context yet (never spawned since this manager booted).
     const healed = this.#deps.contextRegistry?.setWorkingDir(agentId, workingDir) ?? false;
     return `set_working_dir: agent=${agentId.slice(0, 8)} cwd=${workingDir}${healed ? ' (context cache healed)' : ''}`;
+  }
+
+  /**
+   * ticket 6ff827cb requirement 3 — apply an extend/release keep-alive grant
+   * to the calling agent's own live chat session. Unlike every other command
+   * here, this one is issued by the keep_chat_session_alive MCP tool (not an
+   * admin action) from WITHIN a live session's own turn — args.agent_id is
+   * that session's own agent, not an arbitrary target. The server already
+   * checked the caller is an active ChatRoomParticipant of args.room_id
+   * before issuing this; #applyChatKeepalive just routes it to the matching
+   * (roomId, agentId) session via ChatSessionManager#applyRoomKeepAlive,
+   * which encapsulates the `roomId|agentId` composite session-key format.
+   */
+  #applyChatKeepalive(payload: AgentManagerCommandPayload, action: 'extend' | 'release'): string {
+    const agentId = this.#targetAgentId(payload, `${action}_chat_keepalive`);
+    const roomId = typeof payload.args?.room_id === 'string' ? payload.args.room_id.trim() : '';
+    if (!roomId) throw new Error(`${action}_chat_keepalive: args.room_id is required`);
+    if (!this.#deps.chatSessionManager) {
+      throw new Error(`${action}_chat_keepalive: no chat session manager wired on this deployment`);
+    }
+    const minutes = typeof payload.args?.minutes === 'number' ? payload.args.minutes : undefined;
+    const reason = typeof payload.args?.reason === 'string' ? payload.args.reason : undefined;
+    const result = this.#deps.chatSessionManager.applyRoomKeepAlive(roomId, agentId, { action, minutes, reason });
+    if (!result.ok) {
+      throw new Error(`${action}_chat_keepalive: ${result.error ?? 'failed (no live session for this room/agent?)'}`);
+    }
+    return action === 'release'
+      ? `release_chat_keepalive ok: agent=${agentId.slice(0, 8)} room=${roomId.slice(0, 8)}`
+      : `extend_chat_keepalive ok: agent=${agentId.slice(0, 8)} room=${roomId.slice(0, 8)} ` +
+          `until=${result.until ? new Date(result.until).toISOString() : '-'}`;
   }
 
   async #reloadConfig(): Promise<string> {

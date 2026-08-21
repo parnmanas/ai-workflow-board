@@ -67,6 +67,7 @@ import type { ClassificationBridgeService } from '../../outreach/classifier/clas
 import type { OrchestrationRunnerService } from '../../orchestration/orchestration-runner.service';
 import type { OrchestrationMissionService } from '../../orchestration/orchestration-mission.service';
 import type { OrchestrationTeamService } from '../../orchestration/orchestration-team.service';
+import type { AgentManagerCommandService } from '../../agent-manager/agent-manager-command.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -199,6 +200,13 @@ export interface ToolContext {
   orchestrationRunnerService?: OrchestrationRunnerService;
   orchestrationMissionService?: OrchestrationMissionService;
   orchestrationTeamService?: OrchestrationTeamService;
+  // ticket 6ff827cb: keep_chat_session_alive routes an extend/release grant
+  // to the calling agent's own live agent-manager instance over the same
+  // agent_manager_command SSE channel spawn_agent/stop_agent already use.
+  // Standalone context omits it — the tool degrades to an explicit error
+  // (there is no live manager instance concept without the DI-wired
+  // InstanceRegistry this service wraps).
+  agentManagerCommandService?: AgentManagerCommandService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

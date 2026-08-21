@@ -688,7 +688,14 @@ export type AgentManagerCommand =
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url
   | 'update_manager'     // pull + install + build the manager itself, then re-exec
-  | 'restart_manager';   // re-exec the manager in place (no git pull / build) so a fresh process takes over the lockfile
+  | 'restart_manager'    // re-exec the manager in place (no git pull / build) so a fresh process takes over the lockfile
+  // ticket 6ff827cb — the ONLY two verbs issued by an MCP tool call (from the
+  // calling agent's own live session) rather than an admin action. args:
+  // { agent_id, room_id, minutes?, reason? }. Routed to the chat session for
+  // that room_id on the target manager instance; see ChatSessionManager's
+  // applyKeepAlive (inherited from BaseSessionManager).
+  | 'extend_chat_keepalive'  // defer idle/maxTurns reap for a live chat session, up to the hard ceiling
+  | 'release_chat_keepalive'; // clear an active grant early
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

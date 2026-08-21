@@ -10,6 +10,7 @@ import { type ToolContext } from './tools';
 import { OrchestrationRunnerService } from '../orchestration/orchestration-runner.service';
 import { OrchestrationMissionService } from '../orchestration/orchestration-mission.service';
 import { OrchestrationTeamService } from '../orchestration/orchestration-team.service';
+import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
@@ -148,6 +149,7 @@ export class McpController implements OnModuleInit {
     private readonly orchestrationMissionService: OrchestrationMissionService,
     private readonly orchestrationTeamService: OrchestrationTeamService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
+    private readonly agentManagerCommandService: AgentManagerCommandService,
   ) {}
 
   onModuleInit() {
@@ -245,6 +247,7 @@ export class McpController implements OnModuleInit {
       orchestrationRunnerService: this.orchestrationRunnerService,
       orchestrationMissionService: this.orchestrationMissionService,
       orchestrationTeamService: this.orchestrationTeamService,
+      agentManagerCommandService: this.agentManagerCommandService,
     };
   }
 
