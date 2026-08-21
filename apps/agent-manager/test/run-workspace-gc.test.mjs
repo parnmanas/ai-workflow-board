@@ -26,6 +26,7 @@ import {
   chatWorkspaceRootFor,
   runWorkspaceRootFor,
 } from '../dist/lib/worktree-manager.js';
+import { recordRunWorkspaceLeaf } from '../dist/lib/run-workspace-manifest.js';
 
 const manager = new WorktreeManager();
 
@@ -246,3 +247,64 @@ test('snapshotRunWorkspaces: sibling markers in a prefix relationship both repor
   assert.equal(byLeaf['deploy/scripts'].path, join(actRoot, 'deploy', 'scripts'));
   assert.equal(byLeaf['deploy/scripts'].lastUsedAt, WELL_WITHIN_IDLE);
 });
+
+// 부모가 repo checkout(`.git` 보유)인 경우의 접두(prefix) 관계 회귀 테스트 —
+// 리뷰 지적 3라운드(ticket 9fd27487): #listRunWorkspaceLeaves 는 `.git` 을 만나면
+// 무조건 하강을 멈춘다. 저장/프로비저닝 어느 단계도 접두 충돌 자체를 거부하지
+// 않으므로, Action A(workspace_folder='deploy', repo_ref 설정)가 `.awb/act/deploy`
+// 를 자기 repo로 체크아웃한 뒤 Action B(workspace_folder='deploy/scripts')가 그
+// 밑에 독립적으로 프로비저닝되는 상태가 실제로 허용된다 — 휴리스틱 단독으로는
+// 'deploy/scripts' 를 절대 못 찾는다. run-workspace-manifest.ts 가 정확한 경계를
+// 별도로 기록해 이 사각지대를 없앤다: 자식을 심을 때 provisionRunWorkspace가
+// 실제로 하는 일(recordRunWorkspaceLeaf 호출)을 그대로 재현한다.
+//
+// `.git` 이 디렉터리(일반 clone)든 파일(linked worktree 의 gitdir 포인터)이든
+// 휴리스틱은 이름만 보고 판정하므로 두 형태 모두 커버한다.
+for (const gitAsFile of [false, true]) {
+  const label = gitAsFile ? '.git 이 worktree형 파일인 경우' : '.git 이 디렉터리인 경우';
+
+  test(`sweepRunWorkspaces + snapshotRunWorkspaces: repo-checkout 부모(${label}) 안에 manifest로 기록된 자식 — stale 부모는 fresh 자식과 함께 두 snapshot entry로 보고되고, 자식이 살아남으면 부모도 보존된다`, async () => {
+    const base = await makeBase();
+    const actRoot = actionWorkspaceRootFor(base);
+    const parent = await plantWorkspace(actRoot, 'deploy', { marker: WELL_PAST_IDLE });
+    if (gitAsFile) {
+      await fsp.writeFile(join(parent, '.git'), 'gitdir: /elsewhere/.git/worktrees/deploy\n');
+    } else {
+      await fsp.mkdir(join(parent, '.git'), { recursive: true });
+    }
+    const child = await plantWorkspace(actRoot, 'deploy/scripts', { marker: WELL_WITHIN_IDLE });
+    // provisionRunWorkspace가 Action B를 프로비저닝할 때마다 실제로 하는 일 —
+    // 이 leaf를 manifest에 등록해서 부모의 `.git`이 하강을 막아도 독립 경계로
+    // 남는다.
+    await recordRunWorkspaceLeaf(actRoot, 'deploy/scripts');
+
+    const snapshot = await manager.snapshotRunWorkspaces(base);
+    assert.equal(snapshot.length, 2, "부모의 .git 이 하강을 막아도 'deploy/scripts' 가 별도 entry로 보고되어야 한다");
+    const byLeaf = Object.fromEntries(snapshot.map((e) => [e.leaf, e]));
+    assert.ok(byLeaf['deploy'], "'deploy' 자신도 독립 경계로 남아있어야 한다");
+    assert.ok(byLeaf['deploy/scripts'], "'deploy/scripts' 가 manifest로 발견되어야 한다");
+
+    const removed = await manager.sweepRunWorkspaces(base);
+    assert.equal(removed, 0, '자손(deploy/scripts)이 fresh하면 stale 조상도 함께 지우면 안 된다');
+    await assert.doesNotReject(() => fsp.access(child), 'fresh 자손은 보존되어야 한다');
+    await assert.doesNotReject(() => fsp.access(parent), '자손을 보호하느라 stale 조상도 보존되어야 한다');
+  });
+
+  test(`sweepRunWorkspaces: repo-checkout 부모(${label}) 안에 manifest로 기록된 자식 — fresh 부모와 무관하게 stale 자식은 독립적으로 회수된다`, async () => {
+    const base = await makeBase();
+    const chatRoot = chatWorkspaceRootFor(base);
+    const parent = await plantWorkspace(chatRoot, 'deploy', { marker: WELL_WITHIN_IDLE });
+    if (gitAsFile) {
+      await fsp.writeFile(join(parent, '.git'), 'gitdir: /elsewhere/.git/worktrees/deploy\n');
+    } else {
+      await fsp.mkdir(join(parent, '.git'), { recursive: true });
+    }
+    const child = await plantWorkspace(chatRoot, 'deploy/scripts', { marker: WELL_PAST_IDLE });
+    await recordRunWorkspaceLeaf(chatRoot, 'deploy/scripts');
+
+    const removed = await manager.sweepRunWorkspaces(base);
+    assert.equal(removed, 1, 'manifest로 발견된 stale 자식은 fresh 조상과 무관하게 독립 회수되어야 한다');
+    await assert.rejects(() => fsp.access(child), 'stale 자손은 제거되어야 한다');
+    await assert.doesNotReject(() => fsp.access(parent), 'fresh 조상(과 그 .git)은 보존되어야 한다');
+  });
+}

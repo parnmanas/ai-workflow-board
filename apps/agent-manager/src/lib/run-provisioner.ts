@@ -26,10 +26,11 @@
 // one fetch+ff-pull per run, which is the whole point.
 
 import { promises as fsp } from 'node:fs';
-import { join, dirname, resolve, sep } from 'node:path';
+import { join, dirname, resolve, relative, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
+import { recordRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   authenticatedCloneUrl,
   installRepoCredential,
@@ -453,6 +454,18 @@ export async function provisionRunWorkspace(
   const dir = join(root, rel);
   const gitDir = join(dir, '.git');
 
+  // Record the exact provisioned boundary for 'action'/'chat' (the two kinds
+  // worktree-manager's idle-sweep/snapshot walk) — see run-workspace-manifest.ts
+  // for why the directory-content heuristic alone cannot see a nested
+  // workspace_folder once an ancestor holds a `.git` (ticket 9fd27487, review
+  // round 3). Called only after a successful provisioning below.
+  const recordManifestLeaf = async (): Promise<void> => {
+    if (p.kind !== 'action' && p.kind !== 'chat') return;
+    const kindRoot = join(root, '.awb', p.kind === 'action' ? 'act' : 'chat');
+    const leaf = relative(kindRoot, resolve(dir)).split(sep).join('/');
+    await recordRunWorkspaceLeaf(kindRoot, leaf).catch(() => {});
+  };
+
   // Defense-in-depth path-traversal guard: this provisioner runs `rm -rf` on
   // `dir` for a fresh checkout (and to clear a non-git reuse folder), and it
   // trusts a wire value the server already normalized. Re-assert here that the
@@ -493,6 +506,7 @@ export async function provisionRunWorkspace(
         // 그 안에서 뭘 해야 하는지는 에이전트에게 여전히 알려준다.
         await fsp.mkdir(dir, { recursive: true });
         await touchLastUsedMarker(dir);
+        await recordManifestLeaf();
         steps.push(`ensure folder ${rel} (no repo to clone) → ok`);
         log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} folder ready (no repo): ${dir}`);
         return { ok: true, dir, steps, notes };
@@ -564,6 +578,7 @@ export async function provisionRunWorkspace(
 
       log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);
       await touchLastUsedMarker(dir);
+      await recordManifestLeaf();
       return { ok: true, dir, steps, notes };
     } catch (err: any) {
       const error = String(err?.message ?? err);

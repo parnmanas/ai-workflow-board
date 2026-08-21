@@ -54,6 +54,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
+import { readRunWorkspaceLeaves, forgetRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
   decidePushReadiness,
   classifyWorktreeCheckout,
@@ -1540,7 +1541,7 @@ export class WorktreeManager {
     const out: RunWorkspaceSnapshotEntry[] = [];
     for (const kind of ['action', 'chat'] as const) {
       const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
-      const leaves = await this.#listRunWorkspaceLeaves(root);
+      const leaves = await this.#listAllRunWorkspaceLeaves(root);
       for (const leaf of leaves) {
         const path = join(root, leaf);
         out.push({
@@ -1592,7 +1593,7 @@ export class WorktreeManager {
     let removed = 0;
     for (const kind of ['action', 'chat'] as const) {
       const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
-      const leaves = await this.#listRunWorkspaceLeaves(root);
+      const leaves = await this.#listAllRunWorkspaceLeaves(root);
       leaves.sort((a, b) => b.split('/').length - a.split('/').length);
       const survived: string[] = [];
       for (const leaf of leaves) {
@@ -1623,6 +1624,7 @@ export class WorktreeManager {
         try {
           await fsp.rm(path, { recursive: true, force: true });
           removed++;
+          await forgetRunWorkspaceLeaf(root, leaf);
           log(`[worktree] swept idle ${kind} workspace ${path} (idle ${Math.round(idleMs / 60000)}min)`);
         } catch (err: any) {
           log(`[worktree] sweep failed for ${kind} workspace ${path}: ${err?.message ?? err}`);
@@ -1631,6 +1633,26 @@ export class WorktreeManager {
       }
     }
     return removed;
+  }
+
+  /**
+   * `#listRunWorkspaceLeaves`의 디렉터리-내용 휴리스틱과, provisionRunWorkspace가
+   * 직접 기록한 manifest(`run-workspace-manifest.ts`)를 합집합(union)한 leaf
+   * 목록(ticket 9fd27487, 리뷰 3라운드). 휴리스틱 단독으로는 조상이 `.git`을
+   * 갖는 순간(체크아웃된 repo) 그 밑으로 절대 내려가지 않으므로, 그 안에
+   * 독립적으로 프로비저닝된 중첩 workspace_folder 경계(예: `deploy`에 자기
+   * repo가 있고 그 밑에 `deploy/scripts`가 별도로 프로비저닝된 경우)를 영원히
+   * 못 찾는다 — manifest가 정확히 그 경계를 알고 있으므로 여기서 보충한다.
+   * manifest가 아직 비어있는(이 기능 이전에 프로비저닝된) 폴더는 휴리스틱이
+   * 그대로 커버하므로 기존 동작과 100% 호환이다. 두 소스 모두 같은 leaf를
+   * 찾아내는 일반적인 경우(매니페스트 도입 이후)는 Set으로 중복 제거된다.
+   */
+  async #listAllRunWorkspaceLeaves(root: string): Promise<string[]> {
+    const [heuristic, manifest] = await Promise.all([
+      this.#listRunWorkspaceLeaves(root),
+      readRunWorkspaceLeaves(root),
+    ]);
+    return Array.from(new Set([...heuristic, ...manifest]));
   }
 
   /**
