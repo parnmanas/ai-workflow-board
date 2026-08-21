@@ -28,7 +28,7 @@ import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
-import { injectWorkFolder, sharedWorktreeInstructions } from './prompts.js';
+import { injectWorkFolder, worktreeInstructionsFor } from './prompts.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
@@ -2638,9 +2638,11 @@ export class EventDispatcher {
       worktreeMode,
       ev.ticket_id,
     );
-    const worktreeInstructions = worktreeMode === 'shared'
-      ? sharedWorktreeInstructions(agentContext?.cwd || '')
-      : '';
+    // ticket 41e69c91: per_ticket (board default) previously got no folder-
+    // boundary policy at all — only 'shared' called into prompts.ts. Route
+    // both through worktreeInstructionsFor so mode selection itself is
+    // exercised by a test, not just the leaf instruction-text functions.
+    const worktreeInstructions = worktreeInstructionsFor(worktreeMode, agentContext?.cwd || '');
 
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.

@@ -11,6 +11,7 @@ import {
   type PreparedAttachment,
   type RawChatAttachment,
 } from './chat-attachment-prep.js';
+import type { WorktreeMode } from './worktree-manager.js';
 
 interface CommentLike {
   author_name?: string;
@@ -132,6 +133,32 @@ export function sharedWorktreeInstructions(workFolder: string): string {
     '- Do not delete or recreate the assigned checkout or its cache directories. A clean/cold import requires explicit user instruction.',
     '- If a repository script attempts to create or select another worktree, stop and report the script as incompatible with AWB shared mode; do not use a fallback directory.',
   ].join('\n');
+}
+
+/** per_ticket 모드(보드 기본값)에서 매 티켓 턴에 주입되는 폴더 경계 정책. shared
+ * 모드와 목적(반스프롤)은 같지만 문구가 다르다 — per_ticket 워크트리는 티켓마다
+ * 새로 배정되는 전용 폴더이므로 "캐시를 데워 유지하라"는 shared 전용 문구는 여기
+ * 해당하지 않는다. 이 문구가 per_ticket에는 한 번도 전달된 적이 없었던 것이 ticket
+ * 41e69c91의 근본 원인(working_dir 상위 에이전트 홈 컨테이너로 새는 clone/worktree
+ * 스프롤)이었다. */
+export function perTicketWorktreeInstructions(workFolder: string): string {
+  if (!workFolder) return '';
+  return [
+    'AWB per-ticket worktree policy (mandatory):',
+    `- Your assigned work folder for this ticket is exactly: ${workFolder}`,
+    '- Work only inside that folder. Do not create another git worktree, clone, checkout directory, `_compilecheck_*`, `_test_*`, or per-ticket build folder.',
+    '- Never create anything above working_dir (the agent-home container) or inside another agent\'s home directory — that is exactly how the shared container gets polluted.',
+    '- If a dependency install is missing (e.g. node_modules), symlink it from the shared `.awb/base/<repo>` checkout instead of running a fresh install or clone.',
+  ].join('\n');
+}
+
+/** 트리거 프롬프트에 주입할 폴더 경계 정책 문구를 보드 worktree_mode에 따라 고른다.
+ * mode가 없는 보드(worktree 규약 이전, worktree_mode 필드 자체가 없음)는 반드시 빈
+ * 문자열을 반환해야 한다 — injectWorkFolder와 동일한 byte-identity 보장(수용 기준 4). */
+export function worktreeInstructionsFor(mode: WorktreeMode | undefined, workFolder: string): string {
+  if (mode === 'shared') return sharedWorktreeInstructions(workFolder);
+  if (mode === 'per_ticket') return perTicketWorktreeInstructions(workFolder);
+  return '';
 }
 
 /**
