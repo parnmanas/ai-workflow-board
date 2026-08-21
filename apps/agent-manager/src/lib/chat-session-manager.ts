@@ -193,6 +193,19 @@ export class ChatSessionManager
     return `${roomId}|${agentId || '_'}`;
   }
 
+  /** ticket 6ff827cb requirement 3 — public entry point for the
+   *  extend_chat_keepalive/release_chat_keepalive agent_manager_command
+   *  handler, which only knows (roomId, agentId) from the MCP tool call — not
+   *  this class's private `#makeKey` composite session-key format. Delegates
+   *  to BaseSessionManager#applyKeepAlive once the real key is built. */
+  applyRoomKeepAlive(
+    roomId: string,
+    agentId: string,
+    opts: { action: 'extend' | 'release'; minutes?: number; reason?: string },
+  ): { ok: boolean; error?: string; until?: number; ceilingMs?: number } {
+    return this.applyKeepAlive(this.#makeKey(roomId, agentId), opts);
+  }
+
   /** Drop oldest (least-recently-touched) room buckets until the map is back
    *  under #ROOMS_MAX. Map iteration order is insertion order, and
    *  recordRoomMessage re-inserts a room on every message, so the first key
@@ -506,6 +519,49 @@ export class ChatSessionManager
 
   protected _onStderrLine(_sess: SessionRecord, _line: string): void {
     // Stderr buffering handled in BaseSessionManager#wireStdio (shared ring).
+  }
+
+  // -- Visibility overrides (ticket 6ff827cb) --------------------------------
+  // Requirement 5: "조용히 죽는 게 이번 사고의 본질" — a manager-initiated
+  // forced termination must never be silent. Both hooks are fire-and-forget,
+  // same posture as the existing fallback-message path above.
+
+  /** A keep-alive-ceiling kill (the one path that terminates despite possible
+   *  live progress evidence) posts a room notice so the user sees WHY the
+   *  session stopped instead of it just going quiet. */
+  protected _onForcedTermination(
+    sess: SessionRecord,
+    reason: string,
+    info: { liveTaskCount: number },
+  ): void {
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+    const reasonLabel = reason === 'keep_alive_ceiling' ? 'keep-alive 상한 도달' : reason;
+    const reasonDetail = sess._keepAliveReason ? ` (사유: ${sess._keepAliveReason})` : '';
+    const taskNote =
+      info.liveTaskCount > 0
+        ? ` 살아있던 백그라운드 작업 ${info.liveTaskCount}개도 함께 종료됐습니다.`
+        : '';
+    const message =
+      `⚠️ [System] ${reasonLabel}으로 세션을 종료했습니다.${reasonDetail}${taskNote} ` +
+      `계속 작업이 필요하면 새 메시지를 보내 세션을 다시 시작하세요.`;
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    void postChatRoomMessage(cfg, roomId, agentId, message);
+  }
+
+  /** gap 4 — a session past progressEscalationHours is NOT killed (it still
+   *  has real progress evidence), but a human should be able to notice it's
+   *  been running unusually long in case it's actually a runaway loop. */
+  protected _onLongRunningEscalation(sess: SessionRecord, ageHours: string): void {
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+    const message =
+      `ℹ️ [System] 이 세션이 ${ageHours}시간째 계속 실행 중입니다(진행 신호는 계속 감지됨). ` +
+      `정상적인 장시간 작업이면 무시해도 되지만, 무한 루프가 의심되면 확인해주세요.`;
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    void postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
   protected async _onChildExit(
