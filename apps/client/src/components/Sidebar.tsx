@@ -7,6 +7,11 @@ import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
 import { NavBadge } from './common/NavBadge';
 import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
+import {
+  SIDEBAR_ROOMS_BASE_COUNT,
+  nextVisibleRoomCount,
+  paginateSidebarRooms,
+} from './sidebarRoomsPaging';
 
 interface SidebarProps {
   overlay: boolean;
@@ -60,9 +65,17 @@ export default function Sidebar({
   const navigate = useNavigate();
   const location = useLocation();
   const [boardsExpanded, setBoardsExpanded] = React.useState(true);
+  const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
 
   const workspaceBase = wsId ? `/ws/${wsId}` : '';
   const canAdmin = hasPermission('admin.access');
+
+  // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
+  // chat-rooms-changed 이벤트로 rooms 배열만 갱신될 때는 wsId 가 그대로이므로
+  // 이 로컬 state 가 리셋되지 않고 유지된다.
+  React.useEffect(() => {
+    setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
+  }, [wsId]);
 
   const isPathActive = (path: string): boolean =>
     location.pathname === path || location.pathname.startsWith(`${path}/`);
@@ -268,6 +281,22 @@ export default function Sidebar({
     );
   };
 
+  const activeRoomId = rooms.find((room) => location.pathname === `${workspaceBase}/chat/${room.id}`)?.id ?? null;
+  const { displayRooms, hiddenRooms } = paginateSidebarRooms(rooms, visibleRoomCount, activeRoomId);
+  // One source of truth once the counts have loaded. Taking the max of the
+  // two sources meant a room read on another tab (which clears perRoom via
+  // the read event) kept showing the stale number from this tab's up-to-30s
+  // -old room snapshot — and a badge you cannot clear by reading is exactly
+  // the "wrong number" complaint. Before the first fetch the room snapshot
+  // is all we have, so use it then.
+  const unreadFor = (room: ChatRoomListItem): number =>
+    countsLoaded ? counts.chat.perRoom[room.id] || 0 : room.unread_count || 0;
+  const hiddenUnreadTotal = hiddenRooms.reduce((sum, room) => sum + unreadFor(room), 0);
+  const showRoomsPager = rooms.length > SIDEBAR_ROOMS_BASE_COUNT;
+  const handleToggleRoomsPager = () => {
+    setVisibleRoomCount((count) => nextVisibleRoomCount(count, rooms.length, hiddenRooms.length > 0));
+  };
+
   const sidebarClassName = [
     'awb-sidebar',
     overlay ? 'awb-sidebar--overlay' : '',
@@ -330,9 +359,9 @@ export default function Sidebar({
 
       <nav
         aria-label="Primary navigation"
-        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
-        <section aria-labelledby="sidebar-chat-heading" style={{ flexShrink: 0 }}>
+        <section aria-labelledby="sidebar-chat-heading">
           <div style={sectionHeaderStyle}>
             <span id="sidebar-chat-heading">Chat</span>
             <button
@@ -369,9 +398,7 @@ export default function Sidebar({
           <div
             aria-label="Chat rooms"
             style={{
-              maxHeight: 220,
               minHeight: roomsLoading ? 40 : undefined,
-              overflowY: 'auto',
               paddingBottom: 4,
             }}
           >
@@ -384,19 +411,10 @@ export default function Sidebar({
                 No chats yet
               </div>
             ) : (
-              rooms.map((room) => {
+              displayRooms.map((room) => {
                 const roomPath = `${workspaceBase}/chat/${room.id}`;
                 const active = location.pathname === roomPath;
-                // One source of truth once the counts have loaded. Taking the
-                // max of the two sources meant a room read on another tab
-                // (which clears perRoom via the read event) kept showing the
-                // stale number from this tab's up-to-30s-old room snapshot —
-                // and a badge you cannot clear by reading is exactly the
-                // "wrong number" complaint. Before the first fetch the room
-                // snapshot is all we have, so use it then.
-                const unread = countsLoaded
-                  ? counts.chat.perRoom[room.id] || 0
-                  : room.unread_count || 0;
+                const unread = unreadFor(room);
                 return (
                   <button
                     key={room.id}
@@ -443,12 +461,41 @@ export default function Sidebar({
                 );
               })
             )}
+            {showRoomsPager && (
+              <button
+                type="button"
+                onClick={handleToggleRoomsPager}
+                aria-expanded={hiddenRooms.length === 0}
+                aria-label={
+                  hiddenRooms.length > 0
+                    ? `더보기, ${hiddenRooms.length}개 더 보기`
+                    : '채팅 목록 접기'
+                }
+                style={navRowStyle(false, true)}
+                onMouseEnter={(event) => {
+                  event.currentTarget.style.background = tokens.colors.surfaceHover;
+                }}
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  {hiddenRooms.length > 0 ? `더보기 (${hiddenRooms.length})` : '접기'}
+                </span>
+                {hiddenRooms.length > 0 && hiddenUnreadTotal > 0 && (
+                  <NavBadge
+                    count={hiddenUnreadTotal}
+                    label={`숨겨진 채팅의 읽지 않은 메시지 ${hiddenUnreadTotal}건`}
+                  />
+                )}
+              </button>
+            )}
           </div>
         </section>
 
-        <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border, flexShrink: 0 }} />
+        <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border }} />
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 8 }}>
+        <div style={{ paddingBottom: 8 }}>
           {workspaceSections.map((section) => (
             <section key={section.title} aria-labelledby={`sidebar-${section.title.toLowerCase()}`}>
               <div style={sectionHeaderStyle}>
