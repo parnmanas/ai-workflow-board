@@ -3,6 +3,7 @@ import { Draggable } from '@hello-pangea/dnd';
 import { BoardCardTicket } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
+import { NavBadge } from './common/NavBadge';
 import { hasStaleOpenQuestion } from './comment-types';
 
 interface TicketCardProps {
@@ -13,6 +14,10 @@ interface TicketCardProps {
   index: number;
   onClick: () => void;
   focusHolders?: Array<{ agent_name: string; role: string }>;
+  /** Unread comment count for this ticket, rolled up over its subtasks too
+   *  (see Column.tsx's sumUnread) — the "which ticket made the board badge
+   *  this number" drill-down (ticket 628f4b39). Undefined/0 renders nothing. */
+  unreadCount?: number;
 }
 
 const priorityVariants: Record<string, 'neutral' | 'info' | 'warning' | 'danger'> = {
@@ -29,7 +34,7 @@ const priorityLabels: Record<string, string> = {
   critical: 'CRIT',
 };
 
-export default function TicketCard({ ticket, index, onClick, focusHolders }: TicketCardProps) {
+export default function TicketCard({ ticket, index, onClick, focusHolders, unreadCount }: TicketCardProps) {
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
@@ -156,7 +161,16 @@ export default function TicketCard({ ticket, index, onClick, focusHolders }: Tic
                 >FOCUS</span>
               )}
             </div>
-            <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {!!unreadCount && unreadCount > 0 && (
+                <NavBadge
+                  count={unreadCount}
+                  size="sm"
+                  label={`읽지 않은 코멘트 ${unreadCount}건`}
+                />
+              )}
+              <span style={{ fontSize: '10px', color: tokens.colors.textMuted }}>#{ticket.id}</span>
+            </div>
           </div>
 
           {/* Title */}
