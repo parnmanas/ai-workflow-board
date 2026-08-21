@@ -199,6 +199,8 @@ export class QaRunService {
       type: 'group',
       name: `QA: ${scenario.name} · ${runId.slice(0, 8)}`,
       last_message_at: null,
+      // 티켓 9fd27487 리뷰 후속 조치 — ChatRoom.run_kind 문서 주석 참고.
+      run_kind: 'qa',
     }));
 
     const now = new Date();

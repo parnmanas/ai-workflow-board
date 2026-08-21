@@ -261,6 +261,7 @@ export class WorkspacesController {
       name, description,
       supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
       claim_verification_enabled, claim_verification_grace_ms,
+      chat_workspace_folder_enabled,
       harness_config, environment_config, assistant_agent_id,
       cli_runtime_profiles, default_cli_runtime_profile,
       hard_budget_config,
@@ -302,6 +303,13 @@ export class WorkspacesController {
       const v = Number(claim_verification_grace_ms);
       if (Number.isFinite(v) && v > 0) ws.claim_verification_grace_ms = Math.floor(v);
       else return res.status(400).json({ error: 'claim_verification_grace_ms must be a positive number' });
+    }
+
+    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487). 위 claim_verification_enabled와
+    // 동일한 int(0/1) truthy 정규화 방식을 사용한다.
+    if (chat_workspace_folder_enabled !== undefined) {
+      const raw = chat_workspace_folder_enabled;
+      ws.chat_workspace_folder_enabled = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
     }
 
     // Workspace-wide default agent harness (ticket 7122600c). Same contract

@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { Workspace } from '../../entities/Workspace';
 import { ChatRoomsController } from './chat-rooms.controller';
 import { RoomCrudService } from './room-crud.service';
 import { RoomMembershipService } from './room-membership.service';
@@ -19,7 +20,7 @@ import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention, TicketAttachment]),
+    TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention, TicketAttachment, Workspace]),
     SharedServicesModule,
     ArtifactRefsModule,
   ],

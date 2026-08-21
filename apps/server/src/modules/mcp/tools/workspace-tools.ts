@@ -149,7 +149,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'update_workspace',
-    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), the default agent harness (harness_config), or the default hard-budget ceiling (hard_budget_config)',
+    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), the chat-workspace-folder opt-in (chat_workspace_folder_enabled), the default agent harness (harness_config), or the default hard-budget ceiling (hard_budget_config)',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().optional().describe('New name'),
@@ -164,6 +164,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
         .describe('Enable the claim-verification sweep (ticket dcb9d661): when an assignee comments in an active column without committing or moving the ticket within the grace window, auto-park it for human review. Default false.'),
       claim_verification_grace_ms: z.number().positive().optional()
         .describe('Grace window in ms before the claim-verification sweep auto-pends an idle assignee claim. Default 600000 (10 min).'),
+      chat_workspace_folder_enabled: z.boolean().optional()
+        .describe('Opt-in (ticket 9fd27487): when true, an ordinary chat room (not an Action Run / Orchestration Mission room) dispatches inside `.awb/chat/<room8>` instead of the agent working_dir root. Default false — off by default because the manager agent\'s own operational chat also rides this path.'),
       harness_config: HarnessConfigSchema.nullable().optional()
         .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
@@ -171,7 +173,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       hard_budget_config: HardBudgetConfigSchema.nullable().optional()
         .describe('Workspace-wide default hard-budget ceiling: { enabled?, max_auto_responses?, window_minutes?, max_dispatches_per_window?, max_tokens_per_window?, max_runs_per_window?, auto_pend?, notify? }. Boards override the ticket-scoped keys per key via their own hard_budget_config; max_runs_per_window has no board layer — it is the sole ceiling on new QA/Action/Orchestration run creations, scoped to this workspace. Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, harness_config, environment_config, hard_budget_config }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, chat_workspace_folder_enabled, harness_config, environment_config, hard_budget_config }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       // getCallerAgent was previously consulted only for the audit rows
       // below, never as a gate — any authenticated key could rewrite any
@@ -205,6 +207,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       if (dispatch_queue_depth !== undefined) ws.dispatch_queue_depth = Math.floor(dispatch_queue_depth);
       if (claim_verification_enabled !== undefined) ws.claim_verification_enabled = claim_verification_enabled ? 1 : 0;
       if (claim_verification_grace_ms !== undefined) ws.claim_verification_grace_ms = Math.floor(claim_verification_grace_ms);
+      if (chat_workspace_folder_enabled !== undefined) ws.chat_workspace_folder_enabled = chat_workspace_folder_enabled ? 1 : 0;
       // Default harness (ticket 7122600c) — strict-validated by the arg
       // schema; empty objects collapse to null via the serializer.
       if (harness_config !== undefined) ws.harness_config = serializeHarnessConfig(harness_config);

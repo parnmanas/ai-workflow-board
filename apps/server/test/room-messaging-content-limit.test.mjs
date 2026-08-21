@@ -36,6 +36,9 @@ function makeSvc() {
     empty,        // ticketRepo
     empty,        // userMentionRepo
     empty,        // attachmentRepo
+    empty,        // workspaceRepo (티켓 9fd27487) — 결코 도달하지 않는다: 여기 모든 경로가
+                  // transaction 스텁에 도달하기 전에, 혹은 그 스텁을 통해 reject되고,
+                  // 둘 다 sendMessage의 chat_workspace_folder_enabled 조회보다 먼저 실행된다.
     noopLog,      // logService
     membership,   // membership
     empty,        // mentionService

@@ -41,12 +41,20 @@ test('ChatRoomMessagePayload type declares run_provision on the wire', () => {
 
 test('RoomMessagingService.sendMessage stamps run_provision onto the emit', () => {
   const code = stripComments(read('modules/chat-rooms/room-messaging.service.ts'));
-  // QA/security dispatch ships the hint via opts.runProvision; the emit must
-  // surface it as the wire field run_provision (conditional spread is fine).
+  // QA/security dispatch는 opts.runProvision을 통해 힌트를 전달한다. 티켓 9fd27487이
+  // 그 사이에 effectiveRunProvision이라는 한 단계를 끼워 넣어서, opt-in하지 않은
+  // 채팅 턴은 opts.runProvision을 무조건 신뢰하는 대신 null로 폴백할 수 있게 했다 —
+  // 이 두 단계가 모두 유지돼야 하며, 그렇지 않으면 이 가드 자신의 헤더가 설명하는
+  // 것과 같은 방식으로 QA/security 힌트가 wire에 조용히 도달하지 못하게 될 수 있다.
   assert.match(
     code,
-    /run_provision:\s*opts\.runProvision/,
-    'sendMessage must emit run_provision from opts.runProvision',
+    /effectiveRunProvision\s*=\s*opts\?\.runProvision\s*\?\?/,
+    'sendMessage must seed effectiveRunProvision from opts.runProvision',
+  );
+  assert.match(
+    code,
+    /run_provision:\s*effectiveRunProvision/,
+    'sendMessage must emit run_provision from effectiveRunProvision',
   );
 });
 

@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
@@ -16,7 +17,7 @@ import { MentionService, ResolvedMention } from '../../services/mention.service'
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
-import { RunProvision } from '../../common/workspace-folder-options';
+import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
@@ -222,6 +223,9 @@ export class RoomMessagingService {
 
     @InjectRepository(TicketAttachment)
     private readonly attachmentRepo: Repository<TicketAttachment>,
+
+    @InjectRepository(Workspace)
+    private readonly workspaceRepo: Repository<Workspace>,
 
     private readonly logService: LogService,
 
@@ -493,11 +497,76 @@ export class RoomMessagingService {
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
 
+    // 방 메타데이터: agent-manager는 이름이 비어 있을 때만 첫 chat-subagent
+    // 턴에 "제목을 생성하라"는 지시를 주입하고(그래서 이름 없는 방은 첫
+    // 대화 내용으로 이름이 붙는다), action_id를 읽어 Action Run을 일반
+    // 채팅과 구분한다(티켓 e6d32e9d).
+    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
+
+    // 티켓 9fd27487 — 일반 채팅방에는 애초에 run_provision이 전혀 없어서,
+    // agent-manager가 이들을 working_dir 루트에서 디스패치했다(티켓
+    // 41e69c91이 티켓에 대해 고쳤던 것과 같은 반스프롤(sprawl) 버그).
+    // Action/QA/security 디스패처는 이미 자체적으로 `opts.runProvision`을
+    // 명시적으로 넘기고 있고, 이 코드는 그 나머지 전부(일반 사용자 채팅 /
+    // DM / @멘션)를 위한 FALLBACK이다 — 모든 전송 경로(REST, MCP,
+    // agent-api)가 이미 통과하는 단일 병목 지점인 여기서 계산해두므로,
+    // 호출자가 각자 사본을 들고 있을 필요가 없다. 티켓의 단계적 롤아웃
+    // 권고에 따라 opt-in Workspace 플래그(기본값 OFF)로 게이팅한다: manager
+    // 에이전트 자신의 운영용 채팅도 이 경로를 함께 타기 때문에, 폴더 고정
+    // (pinning) 동작 변경을 모든 워크스페이스에 조용히 강제해서는 안 된다.
+    // Action Run / Orchestration Mission / QA / security 방은 제외한다 —
+    // 이미 자체 runProvision을 갖고 있거나(Action/QA/security, 방을 여는
+    // 첫 전송에서만) 의도적으로 아예 없다(Mission step은 대신 티켓
+    // 워크트리를 쓴다). QA/security 디스패치가 자신의 전송에서는 항상
+    // opts.runProvision을 넘기더라도 run_kind 체크는 여전히 중요하다: 같은
+    // 방에서 나중에 오는 메시지(예: QA 에이전트가 send_chat_room_message로
+    // 올리는 런 도중 상태 업데이트)는 자체 opts.runProvision이 없고, 이
+    // 제외 처리가 없으면 런의 실제 `.awb/qa/<scenario>` 체크아웃이 아니라
+    // 무관한 `.awb/chat/<room>` 폴더를 가리키는 엉뚱한 kind:'chat'
+    // provision으로 흘러 들어가 버린다(리뷰 후속 조치). progress 하트비트는
+    // 아래 조회 대상에서 제외된다(위 chain-depth 스킵과 같은 이유): 새로운
+    // 디스패치 턴을 여는 일이 절대 없다 — 그 하트비트가 서술하는 런은 이미
+    // 최초 디스패치 시점에 자신의 cwd를 확정했다 — 그래서 모든 tool-call
+    // 하트비트마다 Workspace 조회를 소비하면, 앱에서 가장 트래픽이 많은
+    // 메시지 타입에 아무도 읽지 않는 값을 위한 비용을 물리는 셈이 된다.
+    //
+    // _processMentions/_handleDmAgentRequest보다 먼저 계산한다(원래 아래
+    // emit 바로 앞에 있던 것을 위로 옮김) — DM이나 @멘션은 이 함수 자체의
+    // `chat_room_message` emit이 아니라, 그 두 헬퍼가 발생시키는 별도의
+    // `chat_request` 이벤트를 통해 디스패치되기 때문이다. `chat_room_message`
+    // 쪽은 dispatch_agent_ids가 설정되면 handleChatRoomMessage가 건너뛴다
+    // ("canonical execution path" 코멘트 참고). 두 헬퍼 모두 동일한
+    // provision을 그대로 전달받아야, 워크스페이스 자신의 운영용 에이전트에게
+    // 보낸 DM도 — 티켓 9fd27487의 리스크 섹션이 이름으로 콕 짚은 시나리오다 —
+    // 명시적 대상이 없는 그룹방 턴뿐 아니라 실제로 함께 고정(pin)된다.
+    let effectiveRunProvision = opts?.runProvision ?? null;
+    if (
+      !effectiveRunProvision &&
+      isRealMessage &&
+      !roomForName?.action_id &&
+      !roomForName?.orchestration_mission_id &&
+      !roomForName?.run_kind
+    ) {
+      const ws = await this.workspaceRepo.findOne({ where: { id: workspaceId } });
+      if (ws?.chat_workspace_folder_enabled) {
+        effectiveRunProvision = {
+          kind: 'chat',
+          run_id: roomId,
+          workspace_id: workspaceId,
+          workspace_folder: resolveWorkspaceFolder(null, 'chat', roomId),
+          checkout_mode: 'reuse',
+          // ChatRoom에는 repo_ref 노브가 없다(티켓 9fd27487 인수 기준 3) —
+          // 대화형 세션은 암묵적 clone을 절대 받지 않는다.
+          repo: null,
+        };
+      }
+    }
+
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
     let explicitDispatchAgentIds: string[] = [];
     if (isRealMessage && senderType === 'user') {
-      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg);
-      await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched);
+      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg, effectiveRunProvision);
+      await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision);
       explicitDispatchAgentIds = Array.from(dispatched);
     }
 
@@ -512,12 +581,6 @@ export class RoomMessagingService {
     // Progress rows are excluded from the lookback inside _computeAgentChainDepth
     // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
-
-    // Room metadata: the agent-manager injects a "generate a title" instruction
-    // into the first chat-subagent turn only when the name is empty (so an
-    // untitled room gets named from its opening conversation), and reads
-    // action_id to tell Action Runs from ordinary chats (ticket e6d32e9d).
-    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
 
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
@@ -554,7 +617,7 @@ export class RoomMessagingService {
       // stringified column) so the event-registry map() + client get the shape
       // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
       ...(sanitizedMeta ? { metadata: sanitizedMeta } : {}),
-      ...(opts?.runProvision ? { run_provision: opts.runProvision } : {}),
+      ...(effectiveRunProvision ? { run_provision: effectiveRunProvision } : {}),
     });
 
     // B1 fix: auto-advance the sender's read marker so their own message never
@@ -993,6 +1056,12 @@ export class RoomMessagingService {
     senderName: string,
     content: string,
     savedMessage: ChatRoomMessage,
+    // 티켓 9fd27487 — 호출자가 이미 해석해둔 chat run-workspace 힌트(또는
+    // Action/QA/security가 제공한 값)를, 이 함수가 발생시키는 모든
+    // chat_request에 그대로 전달해서 @멘션 디스패치도 그룹방 턴과 동일한
+    // cwd 고정(pinning)을 받게 한다. opt-in하지 않은 워크스페이스라면(또는
+    // non-real/에이전트가 보낸 메시지에서 파싱된 멘션이라면) null이다.
+    runProvision: RunProvision | null = null,
   ): Promise<Set<string>> {
     const dispatched = new Set<string>();
     const refs = this.mentionService.parseMentions(content);
@@ -1049,6 +1118,7 @@ export class RoomMessagingService {
           // the legacy fallback prompt asks the agent to "use the
           // room_id from the chat request context" with no such field.
           room_id: roomId,
+          ...(runProvision ? { run_provision: runProvision } : {}),
         });
 
         dispatched.add(agent.id);
@@ -1111,6 +1181,10 @@ export class RoomMessagingService {
     content: string,
     savedMessage: ChatRoomMessage,
     alreadyDispatched: Set<string>,
+    // 티켓 9fd27487 — _processMentions의 동일한 파라미터 참고. 이 경로가
+    // 바로 이 값이 정말로 필요했던 주된 경로다: DM은 티켓의 리스크 섹션이
+    // 명시적으로 이름 붙인 "manager 에이전트 자신의 운영용 채팅" 시나리오다.
+    runProvision: RunProvision | null = null,
   ): Promise<void> {
     // Look up the room to confirm it's a DM
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
@@ -1149,6 +1223,7 @@ export class RoomMessagingService {
       mention_depth: 1,
       // See _processMentions — required for room-aware reply routing.
       room_id: roomId,
+      ...(runProvision ? { run_provision: runProvision } : {}),
     });
     alreadyDispatched.add(agent.id);
 
