@@ -421,7 +421,17 @@ export class ChatSessionManager
         sessionKey,
         spec.rolePrompt || '',
         firstTurnText,
-        { onProgress: spec.onProgress, monitorMeta, agentContext: spec.agentContext, firstTurnImages },
+        {
+          onProgress: spec.onProgress,
+          monitorMeta,
+          agentContext: spec.agentContext,
+          firstTurnImages,
+          // ticket 7d8ea7c9: chat dispatch never forwarded runtimeProfile to
+          // the actual spawn — BaseSessionManager already reads this option
+          // (ticket path has passed it correctly all along), the chat path
+          // just never filled it in.
+          runtimeProfile: spec.runtimeProfile ?? null,
+        },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight
       // reservation — `_spawnSession` lands the record in `_sessions`

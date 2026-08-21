@@ -111,10 +111,34 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/** Required fields of RuntimeProfileSpec (cli-adapters/base.ts) — NOT
+ *  `provider`, which was never part of the actual wire/DB schema (ticket
+ *  7d8ea7c9 root cause B). The old `provider` check meant every real profile
+ *  failed validation and silently returned null, so no per-agent Claude
+ *  backend profile could ever apply. */
+function isRuntimeProfileShape(value: any): value is RuntimeProfileSpec {
+  return (
+    typeof value.id === 'string'
+    && (value.protocol === 'anthropic-compatible' || value.protocol === 'openai-compatible')
+    && typeof value.base_url === 'string'
+    && typeof value.model === 'string'
+  );
+}
+
 export function parseRuntimeProfile(raw: unknown): RuntimeProfileSpec | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    log(`parseRuntimeProfile: expected an object, got ${Array.isArray(raw) ? 'array' : typeof raw} — dropping`);
+    return null;
+  }
   const value = raw as any;
-  if (typeof value.id !== 'string' || typeof value.provider !== 'string' || typeof value.model !== 'string') return null;
+  if (!isRuntimeProfileShape(value)) {
+    log(
+      `parseRuntimeProfile: malformed runtime profile (id=${String(value?.id ?? '')}) — ` +
+        `missing/invalid required field(s), dropping and spawning without a runtime profile`,
+    );
+    return null;
+  }
   return value as RuntimeProfileSpec;
 }
 
@@ -543,6 +567,12 @@ export interface ChatDispatchArgs {
    *  reply is attributed to the right agent and lands in the room they're
    *  a member of. Undefined when the manager itself is the participant. */
   agentContext?: AgentExecutionContext;
+  /** ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+   *  this chat turn — the chat-path twin of TicketTriggerArgs.runtimeProfile.
+   *  Undefined/null when the responder isn't a Claude agent or no profile
+   *  resolves; BaseSessionManager then spawns exactly as before (Anthropic
+   *  default endpoint, agentContext.model / harness / CLI default). */
+  runtimeProfile?: RuntimeProfileSpec | null;
   /** Per-message attachments as projected by the server in the SSE / history
    *  payload. ChatSessionManager fetches the bytes it needs (vision content
    *  blocks for Claude, inline text for text-ish mime) before assembling the
@@ -3067,6 +3097,27 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
+    // ticket 7d8ea7c9: RoomMessagingService resolves agent > workspace Claude
+    // backend profile server-side (mirrors trigger-loop.service.ts's ticket
+    // resolution) and stamps it on chat_request. chat_request is
+    // envelope-native (see comment above), so this reads payload.* — NOT the
+    // ev.cli_runtime_profile flattened field, which is agent_trigger-only.
+    //
+    // Deliberately does NOT fall back to `this.#runtimeProfileOverride` the
+    // way the ticket-dispatch path does a few hundred lines up (`const
+    // runtimeProfile = this.#runtimeProfileOverride !== undefined ? ... `).
+    // That instance-wide `--runtime-profile` flag is a blunt override meant
+    // for single-agent hosts; on a host with multiple managed agents (ticket
+    // 7d8ea7c9 root cause C) letting it win here would force every chat
+    // participant onto the same backend regardless of their own
+    // cli_runtime_profile, which is exactly the cross-contamination this
+    // ticket fixes for chat. Per-agent DB profile is the sole source for
+    // chat dispatch; no profile resolves -> no override, no field, CLI
+    // default. The ticket-dispatch path's override-wins precedent is
+    // pre-existing/out of scope here — see ticket 7d8ea7c9 for the open
+    // follow-up on unifying the two.
+    const runtimeProfile = parseRuntimeProfile(payload.cli_runtime_profile);
+
     // ticket 9fd27487: handleChatRoomMessage의 run-workspace 프로비저닝에 대응하는
     // DM / @-멘션 쪽 짝. `chat_request`는 (chat_room_message와 달리) DM이나 명시적
     // @-멘션의 정식(canonical) 디스패치 경로다 — manager 에이전트 자신의 운영 채팅이
@@ -3169,6 +3220,7 @@ export class EventDispatcher {
           rolePrompt: payload.role_prompt || '',
           onProgress,
           agentContext: runContext,
+          runtimeProfile,
           provisionedWorkFolder,
         });
         if (result.dispatched) {
@@ -3230,6 +3282,7 @@ export class EventDispatcher {
           agentId: payload.agent_id || '',
           roomId: payload.room_id || '',
           agentContext: runContext,
+          runtimeProfile,
         });
 
         if (result.spawned) {
@@ -4054,6 +4107,16 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
+    // ticket 7d8ea7c9: group-room broadcasts aren't resolved to a single
+    // profile server-side yet (chat_room_message fans out to every member;
+    // RoomMessagingService only resolves the one target agent of chat_request
+    // today). Parsing here is forward-compatible and a no-op until a server
+    // change stamps p.cli_runtime_profile — same plumbing as chat_request
+    // below, kept symmetric so this path picks up profile support for free.
+    // Also does NOT fall back to `this.#runtimeProfileOverride` — see the
+    // longer note at the chat_request call site below for why.
+    const runtimeProfile = parseRuntimeProfile(p.cli_runtime_profile);
+
     if (runContext?.cli === 'hermes') {
       try {
         const history = await fetchChatRoomHistory(this.#config, p.room_id);
@@ -4140,6 +4203,7 @@ export class EventDispatcher {
           isActionRoom: !!p.is_action_room,
           onProgress,
           agentContext: runContext,
+          runtimeProfile,
           provisionedWorkFolder,
           attachments: Array.isArray(p.attachments) ? p.attachments : [],
           // ticket 89716f04 — thread run identity so the session's turn end is
@@ -4239,6 +4303,7 @@ export class EventDispatcher {
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',
           agentContext: runContext,
+          runtimeProfile,
           // ticket e9d0e8bc: release the run lock when this oneshot exits.
           onExit: runLock ? () => runLock!.release() : undefined,
           // ticket 55d3063f: thread run identity so the oneshot exit handler
