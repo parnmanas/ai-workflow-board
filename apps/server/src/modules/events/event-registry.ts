@@ -34,6 +34,7 @@ import {
   AgentManagerCommandPayload,
   ConsensusUpdatePayload,
   OrchestrationUpdatePayload,
+  TicketReadsClearedPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -692,6 +693,40 @@ export const EVENT_TYPES: EventDefinition[] = [
     // look right — which is exactly why it read as "sometimes wrong".
     flatten: (env) => ({
       event_type: 'user_mention',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
+  },
+
+  // ───────── ticket_reads_cleared ─────────
+  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음"(POST tickets/read-all) 처리 직후
+  // 발행. 처리를 실행한 본인의 세션에만 전달되어(user_mention과 동일한 스코프
+  // 패턴) 다른 브라우저/기기가 폴링 없이 즉시 뱃지를 수렴시키게 한다.
+  {
+    eventType: 'ticket_reads_cleared',
+    emitterEvent: 'ticket_reads_cleared',
+    map(event: any) {
+      const payload: TicketReadsClearedPayload = {
+        user_id: event.user_id,
+        workspace_id: event.workspace_id,
+        board_id: event.board_id ?? null,
+        updated: event.updated,
+        read_at: event.read_at,
+      };
+      return {
+        payload,
+        scope: { user_id: event.user_id, workspace_id: event.workspace_id },
+        timestamp: event.read_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'user') return false;
+      return env.scope.user_id === identity.userId;
+    },
+    // user_mention과 동일하게 flat 유지 — NotificationContext가 payload
+    // 필드(user_id/board_id/…)를 최상위에서 그대로 읽는다.
+    flatten: (env) => ({
+      event_type: 'ticket_reads_cleared',
       ...(env.payload as object),
       timestamp: env.timestamp,
     }),

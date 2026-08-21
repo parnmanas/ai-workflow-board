@@ -487,11 +487,11 @@ export class TicketsController {
     return res.status(201).json({ ...child, labels: JSON.parse(child.labels || '[]'), channel_ids: JSON.parse(child.channel_ids || '[]'), children: [], comments: [] });
   }
 
-  // Involved ticket IDs in one workspace for `userId`: role holder
-  // (assignee_id / reporter_id / reviewer_id) OR has a TicketReadState row
-  // (i.e. already read at least once), excluding archived tickets either
-  // way. Shared by unreadCounts and markAllTicketsRead so both agree on
-  // exactly which tickets count toward "involved".
+  // 한 워크스페이스 내에서 `userId`가 "관여"하는 티켓 ID 집합: role holder
+  // (assignee_id / reporter_id / reviewer_id) 이거나 TicketReadState 행이
+  // 있는(=한 번이라도 읽은 적 있는) 티켓 — 아카이브된 티켓은 어느 쪽이든 제외.
+  // unreadCounts 와 markAllTicketsRead 가 이 메서드를 공유해 "관여" 판정
+  // 기준이 항상 일치하도록 한다.
   private async _getInvolvedTicketIds(
     wsId: string,
     userId: string,
@@ -539,13 +539,12 @@ export class TicketsController {
     return { involvedIds, readBy };
   }
 
-  // Resolves ticket ids (root, child, or grandchild) to the id of the board
-  // that owns them, by walking column_id → BoardColumn.board_id — and, for
-  // tickets with no column_id of their own (subtasks), up the parent_id
-  // chain first. Loads only the given tickets and their ancestor chain, not
-  // every ticket in the workspace. Depth is capped at 2 (root→child→
-  // grandchild) and the bounded loop stops as soon as no new parents appear.
-  // Perf ticket b3812637.
+  // 티켓 id(root/child/grandchild 무관)를 그 티켓을 소유한 보드의 id로
+  // 해석한다 — column_id → BoardColumn.board_id 를 따라가되, 자신의
+  // column_id 가 없는 티켓(서브태스크)은 먼저 parent_id 를 타고 올라간다.
+  // 주어진 티켓과 그 조상 체인만 로드하며 워크스페이스 전체를 훑지 않는다.
+  // 깊이는 2(root→child→grandchild)로 제한하고, 새 부모가 더 없으면 그
+  // bounded 루프가 즉시 멈춘다. Perf 티켓 b3812637.
   private async _resolveTicketsToBoards(ticketIds: string[]): Promise<Map<string, string>> {
     const boardByTicket = new Map<string, string>();
     if (ticketIds.length === 0) return boardByTicket;
@@ -651,14 +650,15 @@ export class TicketsController {
     return res.json({ total, perTicket, perBoard, ticketBoard });
   }
 
-  // Bulk "mark as read" for ticket comments — same upsert-the-read-marker
-  // idea as MentionsService.markAllRead, applied to TicketReadState instead
-  // of UserMention.read_at (which has no per-row equivalent here; a ticket's
-  // "read" marker is one cutoff timestamp, not N rows). Scoped to _involved_
-  // tickets only (see _getInvolvedTicketIds) so this can't create read-state
-  // rows for tickets the caller has no stake in. `board_id` narrows to one
-  // board (the sidebar's per-board "모두 읽음"); omitted, it clears every
-  // involved ticket in the workspace.
+  // 티켓 코멘트 일괄 "읽음 처리" — MentionsService.markAllRead 와 같은
+  // upsert-the-read-marker 아이디어를, UserMention.read_at(행마다 존재) 대신
+  // TicketReadState 에 적용한 것(티켓의 "읽음" 마커는 N개 행이 아니라 커서
+  // 하나뿐이다). _involved_ 티켓(_getInvolvedTicketIds 참고)에만 스코프되어
+  // 호출자가 아무 지분도 없는 티켓엔 read-state 행을 만들 수 없다. `board_id`
+  // 는 한 보드로 좁히고(사이드바의 보드별 "모두 읽음"), 생략하면 워크스페이스
+  // 내 관여 티켓 전체를 지운다. 처리 후 `ticket_reads_cleared` 를 emit 해
+  // 같은 사용자의 다른 탭/기기 세션도 재조회 없이 뱃지를 수렴시킨다
+  // (BroadcastChannel 은 같은 브라우저에서만 닿는다).
   @Post('tickets/read-all')
   async markAllTicketsRead(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
@@ -683,6 +683,13 @@ export class TicketsController {
       last_read_at: now,
     }));
     await this.readStateRepo.upsert(rows, ['user_id', 'ticket_id']);
+    activityEvents.emit('ticket_reads_cleared', {
+      user_id: currentUser.id,
+      workspace_id: wsId,
+      board_id: boardId || null,
+      updated: targetIds.length,
+      read_at: now.toISOString(),
+    });
     return res.json({ updated: targetIds.length });
   }
 

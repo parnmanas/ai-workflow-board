@@ -475,10 +475,10 @@ export default function Board() {
     }
   };
 
-  // Board-scoped "모두 읽음" (ticket 628f4b39) — same optimistic-then-persist
-  // shape as wrapAction's other calls: server upsert first, then the local
-  // badge state so the sidebar/board number and every TicketCard on this
-  // board drop to 0 together instead of waiting for the next 60s poll.
+  // 보드 스코프 "모두 읽음" (티켓 628f4b39) — wrapAction의 다른 호출들과
+  // 같은 optimistic-then-persist 형태: 서버 upsert가 먼저, 그다음 로컬
+  // 뱃지 상태를 지워서 사이드바/보드 숫자와 이 보드의 모든 TicketCard가
+  // 다음 60초 폴링을 기다리지 않고 함께 0으로 떨어지게 한다.
   const handleMarkBoardRead = () => wrapAction(async () => {
     if (!boardId) return;
     await api.markAllTicketsRead(boardId);
@@ -612,11 +612,10 @@ export default function Board() {
       )}
 
       {/*
-        Unread-comment banner (ticket 628f4b39) — spells out what the sidebar
-        badge number means in plain text instead of leaving it to a hover
-        tooltip, and gives a one-click board-level "모두 읽음". The exact
-        count (perBoard is never capped, unlike the "99+" pill) is what makes
-        this trustworthy as the source of truth for "how many, really".
+        미읽음 코멘트 배너 (티켓 628f4b39) — 사이드바 뱃지 숫자가 무엇을
+        뜻하는지 호버 툴팁에 맡기지 않고 평문으로 드러내고, 원클릭 보드
+        단위 "모두 읽음"을 제공한다. 정확한 수치(perBoard는 "99+" 필과
+        달리 절대 캡되지 않음)라서 "실제로 몇 건인지"의 근거로 신뢰할 수 있다.
       */}
       {boardId && (counts.tickets.perBoard[boardId] || 0) > 0 && (
         <div

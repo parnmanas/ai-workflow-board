@@ -71,9 +71,9 @@ export default function Sidebar({
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
-  // Workspace-wide "모두 읽음" (ticket 628f4b39) — the board-scoped version
-  // lives on the Board page itself (Board.tsx), where "board" is unambiguous;
-  // this is the only place a "every board at once" action makes sense.
+  // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — 보드 스코프 버전은
+  // "보드"가 명확한 Board 페이지 자체(Board.tsx)에 있고, 여기는 "모든
+  // 보드를 한 번에"가 의미를 갖는 유일한 곳이다.
   const handleMarkAllTicketsRead = async () => {
     setMarkingAllTicketsRead(true);
     try {
@@ -522,10 +522,9 @@ export default function Sidebar({
                 <span id={`sidebar-${section.title.toLowerCase()}`}>{section.title}</span>
                 {section.title === 'Work' && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {/* Workspace-wide bulk read (\uC694\uAD6C\uC0AC\uD56D 2) \u2014 only worth
-                       showing once there's something to clear. Text stays
-                       lowercase/non-uppercase unlike the section title so it
-                       doesn't visually compete with it despite sharing a row. */}
+                    {/* \uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4 \uC804\uCCB4 \uC77C\uAD04 \uC77D\uC74C(\uC694\uAD6C\uC0AC\uD56D 2) \u2014 \uC9C0\uC6B8 \uAC8C \uC788\uC744
+                       \uB54C\uB9CC \uB178\uCD9C\uD55C\uB2E4. \uC139\uC158 \uC81C\uBAA9\uACFC \uD55C \uD589\uC744 \uACF5\uC720\uD558\uBBC0\uB85C \uB300\uBB38\uC790\uB97C
+                       \uC4F0\uC9C0 \uC54A\uC544 \uC2DC\uAC01\uC801\uC73C\uB85C \uC81C\uBAA9\uACFC \uACBD\uC7C1\uD558\uC9C0 \uC54A\uAC8C \uD55C\uB2E4. */}
                     {counts.tickets.total > 0 && (
                       <button
                         type="button"
@@ -545,9 +544,9 @@ export default function Sidebar({
                           padding: '2px 4px',
                         }}
                       >
-                        {/* Exact, never-capped count as plain text (\uC694\uAD6C\uC0AC\uD56D 3) \u2014
-                           the "99+" pill on the badge below hides the real
-                           number behind a hover tooltip; this button doesn't. */}
+                        {/* \uCEA1\uB418\uC9C0 \uC54A\uC740 \uC815\uD655\uD55C \uC218\uCE58\uB97C \uD3C9\uBB38\uC73C\uB85C(\uC694\uAD6C\uC0AC\uD56D 3) \u2014
+                           \uC544\uB798 \uBC30\uC9C0\uC758 "99+" \uD544\uC740 \uC2E4\uC81C \uC218\uCE58\uB97C \uD638\uBC84 \uD234\uD301 \uB4A4\uC5D0
+                           \uC228\uAE30\uC9C0\uB9CC, \uC774 \uBC84\uD2BC\uC740 \uADF8\uB7EC\uC9C0 \uC54A\uB294\uB2E4. */}
                         {`${counts.tickets.total}\uAC74 \uBAA8\uB450 \uC77D\uC74C`}
                       </button>
                     )}

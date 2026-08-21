@@ -17,6 +17,9 @@
 //      건드린다 — TicketReadState 행이 실제로 그 user_id 로 upsert 된다
 //   6. 마크 후 GET unread-counts 를 다시 부르면 뱃지가 정확히 줄어든다
 //      ("unread-counts 응답 → 뱃지 감소" 경로)
+//   7. read-all 이 실제로 뭔가 지웠으면 SSE `ticket_reads_cleared` 를 정확한
+//      { user_id, workspace_id, board_id, updated } 로 emit 한다(다른 탭/
+//      기기 동기화 계약) — 지운 게 0건이면 emit 하지 않는다
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,11 +51,13 @@ async function loadServerModules() {
     const appModuleUrl = 'file://' + path.join(distRoot, 'app.module.js');
     const authServiceUrl = 'file://' + path.join(distRoot, 'services', 'auth.service.js');
     const rebacServiceUrl = 'file://' + path.join(distRoot, 'services', 'rebac.service.js');
+    const activityServiceUrl = 'file://' + path.join(distRoot, 'services', 'activity.service.js');
     const { AppModule } = await import(appModuleUrl);
     const { AuthService } = await import(authServiceUrl);
     const { ReBACService } = await import(rebacServiceUrl);
+    const { activityEvents } = await import(activityServiceUrl);
     const { getDataSourceToken } = await import('@nestjs/typeorm');
-    return { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken };
+    return { NestFactory, AppModule, AuthService, ReBACService, activityEvents, getDataSourceToken };
   } catch (err) {
     throw new Error(
       'ticket-unread-badge test requires the server to be built first. Run `npm run --workspace=apps/server build`. Original error: ' + err.message
@@ -60,10 +65,20 @@ async function loadServerModules() {
   }
 }
 
+// activityEvents 로부터 다음 'ticket_reads_cleared' emit 하나를 캡처한다
+// (SSE 구독 없이도 emit 계약을 직접 고정 — event-registry.ts가 이 emitterEvent
+// 를 그대로 구독해 웹 UI로 흘려보낸다).
+function captureNextTicketReadsCleared(activityEvents) {
+  return new Promise((resolve) => {
+    activityEvents.once('ticket_reads_cleared', resolve);
+  });
+}
+
 describe('ticket-unread-badge: unread-counts + read-all', async () => {
   let app;
   let boardRepo;
   let readStateRepo;
+  let activityEvents;
   let viewer;
   let viewerToken;
   let ws;
@@ -74,7 +89,9 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
   const OTHER_2 = { author_id: 'other-agent-2', author_type: 'agent', author: 'Other Two' };
 
   before(async () => {
-    const { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken } = await loadServerModules();
+    const modules = await loadServerModules();
+    const { NestFactory, AppModule, AuthService, ReBACService, getDataSourceToken } = modules;
+    activityEvents = modules.activityEvents;
 
     app = await NestFactory.create(AppModule, { logger: false });
     await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');
@@ -157,7 +174,8 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     });
   });
 
-  it('read-all(board_id=A): only tickets resolving to board A are marked read', async () => {
+  it('read-all(board_id=A): only tickets resolving to board A are marked read, and ticket_reads_cleared fires for cross-device sync', async () => {
+    const emitted = captureNextTicketReadsCleared(activityEvents);
     const res = await apiRequest(BASE_URL, '/tickets/read-all', {
       token: viewerToken, workspaceId: ws.id, method: 'POST', body: { board_id: boardA.id },
     });
@@ -177,9 +195,20 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     assert.equal(after.data.total, 4, 'boardB(B1)의 4건만 남아야 한다');
     assert.deepEqual(after.data.perBoard, { [boardB.id]: 4 }, 'boardA 뱃지는 0(키 자체가 사라짐)이어야 한다');
     assert.deepEqual(after.data.perTicket, { [ticketB1.id]: 4 });
+
+    // 다른 탭/기기 동기화 계약: read-all 이 SSE ticket_reads_cleared 를 emit
+    // 해야 NotificationContext 가 재조회 없이 다른 세션의 뱃지를 수렴시킨다
+    // (BroadcastChannel 은 같은 브라우저 프로필의 탭에만 닿는다).
+    const payload = await emitted;
+    assert.equal(payload.user_id, viewer.id);
+    assert.equal(payload.workspace_id, ws.id);
+    assert.equal(payload.board_id, boardA.id, '보드 스코프 read-all 은 board_id 를 실어야 한다');
+    assert.equal(payload.updated, 2);
+    assert.ok(payload.read_at, 'read_at 이 있어야 한다');
   });
 
-  it('read-all(no board_id): clears every involved ticket workspace-wide, including already-read ones', async () => {
+  it('read-all(no board_id): clears every involved ticket workspace-wide, including already-read ones, and emits a workspace-wide ticket_reads_cleared', async () => {
+    const emitted = captureNextTicketReadsCleared(activityEvents);
     const res = await apiRequest(BASE_URL, '/tickets/read-all', {
       token: viewerToken, workspaceId: ws.id, method: 'POST', body: {},
     });
@@ -195,14 +224,30 @@ describe('ticket-unread-badge: unread-counts + read-all', async () => {
     assert.equal(after.data.total, 0);
     assert.deepEqual(after.data.perTicket, {});
     assert.deepEqual(after.data.perBoard, {});
+
+    const payload = await emitted;
+    assert.equal(payload.user_id, viewer.id);
+    assert.equal(payload.workspace_id, ws.id);
+    assert.equal(payload.board_id, null, 'board_id 생략(워크스페이스 전체)이면 null 이어야 한다');
+    assert.equal(payload.updated, 3);
   });
 
-  it('read-all(board_id): 0 involved tickets in that board is a no-op, not an error', async () => {
-    const otherBoard = await boardRepo.save(boardRepo.create({ name: 'Empty Board', workspace_id: ws.id }));
-    const res = await apiRequest(BASE_URL, '/tickets/read-all', {
-      token: viewerToken, workspaceId: ws.id, method: 'POST', body: { board_id: otherBoard.id },
-    });
-    assert.equal(res.status, 201);
-    assert.equal(res.data.updated, 0);
+  it('read-all(board_id): 0 involved tickets in that board is a no-op, not an error, and does not emit ticket_reads_cleared', async () => {
+    let sawEmit = false;
+    const handler = () => { sawEmit = true; };
+    activityEvents.on('ticket_reads_cleared', handler);
+    try {
+      const otherBoard = await boardRepo.save(boardRepo.create({ name: 'Empty Board', workspace_id: ws.id }));
+      const res = await apiRequest(BASE_URL, '/tickets/read-all', {
+        token: viewerToken, workspaceId: ws.id, method: 'POST', body: { board_id: otherBoard.id },
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.data.updated, 0);
+      // 지울 게 없으면 다른 세션에 알릴 것도 없다 — no-op 요청까지 뱃지
+      // 재조회를 유발하면 안 된다.
+      assert.equal(sawEmit, false, '0건 read-all 은 ticket_reads_cleared 를 emit 하면 안 된다');
+    } finally {
+      activityEvents.removeListener('ticket_reads_cleared', handler);
+    }
   });
 });

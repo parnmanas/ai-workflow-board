@@ -2161,10 +2161,10 @@ export const api = {
       perBoard: Record<string, number>;
       ticketBoard: Record<string, string>;
     }>('/tickets/unread-counts'),
-  // Bulk mark-read for ticket comments — same idea as markAllMentionsRead but
-  // upserts TicketReadState instead of touching UserMention rows. `boardId`
-  // narrows to one board's involved tickets; omitted marks every involved
-  // ticket in the current workspace (X-Workspace-Id header) read.
+  // 티켓 코멘트 일괄 읽음 처리 — markAllMentionsRead와 같은 아이디어를,
+  // UserMention 행 대신 TicketReadState에 upsert하는 방식으로 적용한다.
+  // `boardId`는 그 보드의 관여 티켓만 좁히고, 생략하면 현재 워크스페이스
+  // (X-Workspace-Id 헤더)의 관여 티켓 전체를 읽음 처리한다.
   markAllTicketsRead: (boardId?: string): Promise<{ updated: number }> =>
     request<{ updated: number }>('/tickets/read-all', {
       method: 'POST',

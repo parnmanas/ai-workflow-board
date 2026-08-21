@@ -31,7 +31,8 @@ export type StreamEventType =
   | 'agent_instance_update' // Runtime Host instance heartbeat / removal
   | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
   | 'consensus_update'      // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
-  | 'orchestration_update';  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
+  | 'orchestration_update'  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
+  | 'ticket_reads_cleared';  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
 
 export interface StreamEventScope {
   board_id?: string;
@@ -528,6 +529,17 @@ export interface UserMentionPayload {
   actor_name: string;
   preview: string;
   created_at: string; // ISO-8601
+}
+
+// 티켓 628f4b39 — 티켓 코멘트 일괄 읽음("모두 읽음") 처리 결과. 처리한 본인의
+// 다른 탭/기기 세션에만 전달되어, BroadcastChannel(같은 브라우저 탭 전용)이
+// 닿지 않는 다른 기기의 사이드바/보드 뱃지도 재조회 없이 즉시 수렴시킨다.
+export interface TicketReadsClearedPayload {
+  user_id: string;           // 처리를 실행한 사용자
+  workspace_id: string;
+  board_id: string | null;   // 보드 스코프 지정 시 해당 보드, 생략(워크스페이스 전체)이면 null
+  updated: number;           // TicketReadState 로 upsert 된 티켓 수
+  read_at: string;           // ISO-8601
 }
 
 // File browser — server emits this toward a specific agent's SSE stream to ask

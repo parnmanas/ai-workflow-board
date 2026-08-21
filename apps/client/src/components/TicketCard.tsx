@@ -14,9 +14,9 @@ interface TicketCardProps {
   index: number;
   onClick: () => void;
   focusHolders?: Array<{ agent_name: string; role: string }>;
-  /** Unread comment count for this ticket, rolled up over its subtasks too
-   *  (see Column.tsx's sumUnread) — the "which ticket made the board badge
-   *  this number" drill-down (ticket 628f4b39). Undefined/0 renders nothing. */
+  /** 이 티켓의 미읽음 코멘트 수 — 서브태스크까지 롤업된 값(Column.tsx의
+   *  sumUnread 참고). "어느 티켓이 보드 뱃지 숫자를 만들었나" 드릴다운
+   *  (티켓 628f4b39). undefined/0 이면 아무것도 렌더하지 않는다. */
   unreadCount?: number;
 }
 
