@@ -994,3 +994,111 @@ AWB 서버가 SSE `fs_request` 로 구동하는 reverse-RPC, 즉 매니저 호�
 `production.private` `deploy.yml` 서드파티 액션 SHA 고정 — 브랜치 push 가 실배포를
 유발하므로 여전히 승인 대기. 이번 변경은 agent-manager 전용이라 webapp 런타임
 영향이 없어 `production.private` 병합은 하지 않았다.
+
+---
+
+## 재검증 로그 — 2026-08-21 (`main` @ `baa7a156`)
+
+의존성 자체는 깨끗했다. 이번 발견은 **감사의 시간축** 이다 — 지금까지 쌓아온
+게이트가 전부 *이벤트 구동* 이라, 우리가 코드를 건드리지 않는 기간은 아무도
+보지 않는 구간이었다.
+
+### 1. 정기 점검 (모두 통과, 변동 없음)
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (main) | **0 vulnerabilities** (prod 272 / dev 307 / opt 63, total 580) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| 카나리아 (`lodash@4.17.15` + `minimist@1.2.0`) | 1 critical + 1 high 검출 — 어드바이저리 경로 살아있음 확인 |
+| lockfile 위생 | 581 엔트리, 비-registry resolved **0**, 평문 http **0**, integrity 누락 **0** |
+| install script | 3건 (`esbuild`/`fsevents`/`@scarf/scarf`) 전부 allowlist 내 |
+| 액션 SHA 고정 | `uses:` 14건 전부 커밋 SHA |
+| 메이저 뒤처짐 | `npm outdated` 24건 중 **메이저 뒤처짐 0건** (react 18→19, typeorm 0.3→1.1 은 기능 업그레이드로 보안 무관) |
+| `production.private` | `package.json`/`package-lock.json`/`Dockerfile` **바이트 동일** — 런타임 드리프트 없음 |
+| 기존 가드 | supply-chain 16/16, react-router 6/6, ci-branch-coverage 6/6 |
+
+**배포 아티팩트 관점 추가 점검** — 호스트는 `npm i -g awb-agent-manager` 로
+설치하므로, 실제 깔리는 트리는 **우리 lockfile 이 아니라** `^` 범위의 최신 재해결
+결과다. 그 트리를 따로 감사했다: `awb-agent-manager@1.6.127` (97 패키지) **0건**.
+다만 둘은 실제로 갈린다 — `smol-toml` 은 lockfile 1.7.1 / 신규 설치 1.8.0. 오늘은
+양쪽 다 깨끗하지만, 이 차이는 "CI 초록 ≠ 호스트 안전" 이 될 수 있는 지점이므로
+기록해 둔다.
+
+### 2. 이월 항목 해소 확인 — `deploy.yml` 액션 SHA 고정
+
+2026-08-16 이후 "운영자 승인 대기" 로 이월돼 있던 항목이다. `origin/production.private`
+의 `deploy.yml` 을 직접 확인한 결과 서드파티 액션 5건(`actions/checkout`,
+`docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`,
+`appleboy/ssh-action`)이 **전부 커밋 SHA 로 고정돼 있다** — 해소됐다.
+
+회귀 방어도 이미 붙어 있다: `deploy.yml` 은 `production.private` 에만 있는 파일이고,
+2026-08-20 감사가 그 브랜치를 `ci.yml` push 트리거에 넣었으므로, 그 브랜치에서 도는
+`audit-action-pins.mjs` 가 `.github/workflows/` 전체를 훑으며 `deploy.yml` 도 함께
+검사한다.
+
+### 3. 발견 — 의존성 감사에 시간축이 없었다
+
+`ci.yml` 의 트리거는 `pull_request` / `push(main, production.private)` /
+`workflow_dispatch` — **전부 이벤트 구동**이다. 그런데 `npm audit` 이 판정하는 건
+"우리 lockfile 이 바뀌었는가" 가 아니라 **"이 버전에 대해 advisory 가 새로 나왔는가"**
+이고, 그 둘은 완전히 독립적이다. 의존성을 한 줄도 건드리지 않아도 어제까지 깨끗하던
+버전에 오늘 CVE 가 붙는다.
+
+즉 이벤트 구동만으로는 **"누군가 의존성을 건드리는 다음 push"** 까지 새 advisory 를
+아무도 평가하지 않는다. 이 저장소에서 lockfile 이 몇 주씩 그대로인 구간이 실제로
+있었고, 그 사이에도 배포는 계속 나갔다. 지금까지 그 공백을 메운 것은 사람/에이전트가
+생각날 때 돌리는 수동 감사뿐이었다 — 즉 이 문서 자체가 그 우회로였다.
+
+두 번째 층: GitHub 의 `schedule` 트리거는 **기본 브랜치에서만** 돈다. cron 을 그냥
+달면 `main` 의 lockfile 만 매일 보게 되는데, 정작 NAS 에서 돌고 있는 트리는
+`production.private` 이고 그쪽은 여전히 push 때만 감사된다.
+
+### 4. 조치
+
+- **`ci.yml` 에 `schedule: - cron: '17 4 * * *'`**(13:17 KST) 추가 — 매일
+  `dependency-audit` 만 돈다.
+- **무거운 잡 5개**(`chat-join-grep-guard`, `agent-manager-tests`, `client-tests`,
+  `server-tests`, `postgres-dialect-matrix`)에 `github.event_name != 'schedule'`
+  추가 — 같은 커밋이 이미 push 에서 전체 매트릭스를 통과했으므로 매일 다시 태우지
+  않는다. cron 이 태우는 건 `npm ci` 조차 하지 않는 수 초짜리 감사 잡 하나뿐이다.
+- **`scripts/audit-deploy-branch-deps.mjs` 신규** (schedule 전용 스텝) — 배포 브랜치의
+  `package.json`/`package-lock.json` 만 꺼내 격리된 임시 디렉터리에서 `npm audit`.
+  `npm ci` 를 하지 않아 "취약점을 찾는 잡이 그 취약점의 install script 를 먼저
+  실행하는" 순서 문제가 없다. lockfile 이 현재 브랜치와 바이트 동일하면 '동일함을
+  증명하고 스킵'. fetch 실패·lockfile 판독 실패는 **fail-closed** — "확인 못 했다"
+  를 "문제 없다" 로 바꿔 읽는 게 이 계열 가드의 가장 위험한 실패 모드다.
+- `audit-ci-branch-coverage.mjs` 에서 `deployBranches()` / `KNOWN_DEPLOY_BRANCHES`
+  를 export — 두 가드가 **같은 배포 브랜치 목록**을 보게 해 불변식이 갈라지지 않게 했다.
+
+### 5. 가드 (기계 강제)
+
+**`scripts/audit-cron-coverage.mjs` 신규** — `dependency-audit` 스텝으로 편입.
+두 가지를 강제한다: (1) `schedule:` 트리거가 살아 있는가, (2) `dependency-audit`
+을 뺀 모든 잡이 `github.event_name != 'schedule'` 로 스킵되는가.
+
+(2)를 굳이 가드하는 이유: 조건이 잡마다 반복되는 형태라 새 잡을 추가하는 사람이
+빠뜨리기 쉽고, **빠뜨려도 CI 는 초록이라 아무도 모른다** — 비용/노이즈로만 새는
+침묵형 회귀다. 여기서 FAIL 시켜 "이 잡을 cron 에서 돌릴 것인가" 를 명시적 결정으로
+만든다(의도된 경우 `CRON_ONLY_JOBS` 에 추가).
+
+**`apps/server/test/cron-coverage-guard.test.mjs` 신규 6건** — 가드 자신의 파서를
+단언한다. `jobConditions()` 가 잡을 하나도 못 읽으면 검사 대상이 없어 **조용히
+통과**하기 때문이다(그래서 main() 에도 "잡 0개면 FAIL" 을 뒀다).
+
+**가드가 실제로 무는지 확인**:
+- `schedule:` 블록 제거 + 잡 하나의 스킵 조건 제거 → `audit-cron-coverage.mjs`
+  가 정확히 그 2건을 짚고 `exit 1`. 원복 후 통과.
+- `audit-deploy-branch-deps.mjs` 의 **실제 감사 경로 실행 확인**: 로컬 lockfile 을
+  1바이트 바꿔 '동일 스킵' 을 무력화 → `production.private` lockfile 을 꺼내
+  진짜 `npm audit` 실행, 통과 보고. (`npm audit --audit-level=moderate` 는
+  취약 트리에서 exit 1 이며 카나리아로 확인 → `execFileSync` 가 throw 하는 FAIL
+  경로가 실배선돼 있다.)
+- 워크플로 YAML 파싱 검증: `ci.yml` / `publish-agent-manager.yml` 둘 다
+  `js-yaml` 로 로드 성공, 트리거 4종(`pull_request`/`push`/`schedule`/
+  `workflow_dispatch`)·잡 6개·조건 5개 확인.
+- 회귀 없음: supply-chain 16/16, ci-branch-coverage 6/6, cron-coverage 6/6,
+  react-router 6/6, 기존 가드 스크립트 5개 전부 PASS.
+
+### 6. 이월
+
+없음 — 2026-08-16 부터 이월돼 온 `deploy.yml` SHA 고정 건이 위 2절에서 해소됐다.
