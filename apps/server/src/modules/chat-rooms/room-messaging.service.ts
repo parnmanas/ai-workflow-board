@@ -579,6 +579,22 @@ export class RoomMessagingService {
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
 
+    // ticket 7d8ea7c9 (review round 1): per-agent Claude backend profile map
+    // for this broadcast, so a room's Claude-type members can each pick up
+    // their own configured backend — not just DM/@mention targets (see
+    // _resolveChatRuntimeProfilesForMembers doc comment). Progress heartbeats
+    // are excluded (same reasoning as the mention/DM skip above): a
+    // chat_room_message fires on every tool-call narration, and a heartbeat
+    // never opens a new dispatch turn that could use it.
+    let cliRuntimeProfiles: Record<string, CliRuntimeProfile> | undefined;
+    if (isRealMessage && agentMemberIds.size > 0) {
+      const resolved = await this._resolveChatRuntimeProfilesForMembers(
+        Array.from(agentMemberIds),
+        workspaceId,
+      );
+      if (Object.keys(resolved).length > 0) cliRuntimeProfiles = resolved;
+    }
+
     // Trailing consecutive agent-sender count in this room INCLUDING the
     // just-saved message. Plugin uses it to short-circuit dispatch once
     // agents have been talking to each other for too many turns. Always
@@ -623,6 +639,7 @@ export class RoomMessagingService {
       // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
       ...(sanitizedMeta ? { metadata: sanitizedMeta } : {}),
       ...(effectiveRunProvision ? { run_provision: effectiveRunProvision } : {}),
+      ...(cliRuntimeProfiles ? { cli_runtime_profiles: cliRuntimeProfiles } : {}),
     });
 
     // B1 fix: auto-advance the sender's read marker so their own message never
@@ -1063,25 +1080,73 @@ export class RoomMessagingService {
       const workspace = workspaceId
         ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
         : null;
-      const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, workspace, [
-        { source: 'agent', value: agent.cli_runtime_profile },
-      ]);
-      if (!profile) return null;
-      if (profile.credential_required && profile.credential_ref !== agent.credential_id) {
-        this.logService.warn(
-          'ChatRooms',
-          `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
-            `but agent ${agent.id} does not have it selected — dispatching without a runtime profile`,
-        );
-        return null;
-      }
-      return profile;
+      return await this._resolveChatRuntimeProfileCore(agent, workspace);
     } catch (err) {
       this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
         err: String(err), agent_id: agent.id,
       });
       return null;
     }
+  }
+
+  /**
+   * Batch twin of _resolveChatRuntimeProfile for a chat_room_message
+   * broadcast (ticket 7d8ea7c9 review round 1). A group room fans out to
+   * every member, so a single flat profile field can't represent "the right
+   * backend for whichever agent responds" — different Claude-type members
+   * may carry different cli_runtime_profile settings (or none). Resolves one
+   * entry per Claude-type member, keyed by agent_id, so each manager instance
+   * (which may host several of this room's agent identities) can pick its own
+   * responder's entry out of the map at dispatch time. Fetches the workspace
+   * once and reuses it across members instead of repeating
+   * _resolveChatRuntimeProfile's per-call lookup.
+   */
+  private async _resolveChatRuntimeProfilesForMembers(
+    agentIds: string[],
+    workspaceId: string,
+  ): Promise<Record<string, CliRuntimeProfile>> {
+    const out: Record<string, CliRuntimeProfile> = {};
+    if (agentIds.length === 0) return out;
+    const agents = await this.agentRepo.find({ where: { id: In(agentIds), type: 'claude' } });
+    if (agents.length === 0) return out;
+    const workspace = workspaceId
+      ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
+      : null;
+    for (const agent of agents) {
+      try {
+        const profile = await this._resolveChatRuntimeProfileCore(agent, workspace);
+        if (profile) out[agent.id] = profile;
+      } catch (err) {
+        this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+          err: String(err), agent_id: agent.id,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Shared resolve+credential-check core behind both the single-agent
+   *  (_resolveChatRuntimeProfile) and batch (_resolveChatRuntimeProfilesForMembers)
+   *  paths — kept in one place so a credential-mismatch warn / null-return rule
+   *  change never has to be made twice. Caller has already confirmed
+   *  agent.type === 'claude' and fetched `workspace`. */
+  private async _resolveChatRuntimeProfileCore(
+    agent: Agent,
+    workspace: Workspace | null,
+  ): Promise<CliRuntimeProfile | null> {
+    const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, workspace, [
+      { source: 'agent', value: agent.cli_runtime_profile },
+    ]);
+    if (!profile) return null;
+    if (profile.credential_required && profile.credential_ref !== agent.credential_id) {
+      this.logService.warn(
+        'ChatRooms',
+        `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
+          `but agent ${agent.id} does not have it selected — dispatching without a runtime profile`,
+      );
+      return null;
+    }
+    return profile;
   }
 
   /**

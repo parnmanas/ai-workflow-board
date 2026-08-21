@@ -423,10 +423,16 @@ export const EVENT_TYPES: EventDefinition[] = [
         // 생략해서, 아직 opt-in 하지 않은 워크스페이스의 DM wire shape 이
         // byte-for-byte 그대로 유지되게 한다.
         run_provision: event.run_provision ? event.run_provision : undefined,
-        // Same map-through rule as agent_trigger's cli_runtime_profile
-        // (ticket 7d8ea7c9) — RoomMessagingService resolves it server-side;
-        // this field-by-field reconstruction must not drop it on the floor.
-        cli_runtime_profile: event.cli_runtime_profile ?? null,
+        // RoomMessagingService resolves this server-side and OMITS the key
+        // entirely when nothing resolves (see room-messaging.service.ts), so
+        // the DM/@mention wire shape stays byte-for-byte unchanged for a chat
+        // turn with no configured profile. `?? undefined` (NOT `?? null`)
+        // preserves that: JSON.stringify drops an undefined-valued key but
+        // keeps an explicit null — using `?? null` here silently reintroduced
+        // the key with a null value on every unresolved turn (review round 1,
+        // ticket 7d8ea7c9). The key must still appear in this literal for
+        // event-registry-payload-parity-guard's field-by-field check.
+        cli_runtime_profile: event.cli_runtime_profile ?? undefined,
       };
       return {
         payload,
@@ -511,6 +517,15 @@ export const EVENT_TYPES: EventDefinition[] = [
         // mcp__awb__* tool results). Omit when absent so ordinary chat turns keep
         // the wire byte-for-byte unchanged. flatten() spreads it through to clients.
         metadata: event.metadata ? event.metadata : undefined,
+        // ticket 7d8ea7c9 (review round 1): per-agent Claude backend profile
+        // map for this broadcast (see ChatRoomMessagePayload.cli_runtime_profiles).
+        // Omitted when RoomMessagingService resolved no profile for any member,
+        // so ordinary chat turns / non-Claude rooms keep the wire byte-for-byte
+        // unchanged — same conditional-omit convention as run_provision /
+        // is_action_room / metadata above.
+        cli_runtime_profiles: event.cli_runtime_profiles && Object.keys(event.cli_runtime_profiles).length > 0
+          ? event.cli_runtime_profiles
+          : undefined,
       };
       return {
         payload,

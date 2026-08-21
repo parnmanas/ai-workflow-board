@@ -443,6 +443,18 @@ export interface ChatRoomMessagePayload {
   // reliable ticket-action card render on the client. Conditional-omit on the
   // wire (absent for ordinary chat turns) so the legacy shape is unchanged.
   metadata?: ChatRoomMessageMetadata;
+  // ticket 7d8ea7c9 (review round 1): agent_id → resolved Claude backend
+  // profile map for THIS broadcast. Unlike chat_request (single target
+  // agent), chat_room_message fans out to every room member — a flat
+  // single-profile field can't represent "the right backend for whichever
+  // member responds" when different Claude-type members carry different
+  // cli_runtime_profile settings (or none). RoomMessagingService resolves one
+  // entry per Claude-type member (mirrors chat_request's per-agent
+  // resolution); each manager instance picks its own managed responder's
+  // entry out of the map by agent_id. Conditional-omit on the wire (absent
+  // when no member resolves any profile) so ordinary chat turns / non-Claude
+  // rooms keep the legacy shape unchanged.
+  cli_runtime_profiles?: Record<string, CliRuntimeProfile>;
 }
 
 export interface ChatRoomUpdatePayload {

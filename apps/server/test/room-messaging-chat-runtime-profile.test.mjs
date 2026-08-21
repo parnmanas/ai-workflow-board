@@ -186,3 +186,125 @@ test('DM to a Claude agent whose resolved profile requires a credential it does 
     capture.off();
   }
 });
+
+// ── Group-room broadcast (review round 1): chat_room_message's per-agent
+// cli_runtime_profiles map ─────────────────────────────────────────────────
+// Unlike a DM's single chat_request, a group room's chat_room_message fans
+// out to every member — RoomMessagingService must resolve one map entry per
+// Claude-type member (not just an explicit @mention/DM target) so each
+// manager instance can pick its own responder's profile off the broadcast.
+
+function captureRoomMessageEmit() {
+  let captured = null;
+  const handler = (payload) => { captured = payload; };
+  activityEvents.once('chat_room_message', handler);
+  return {
+    off: () => activityEvents.off('chat_room_message', handler),
+    get: () => captured,
+  };
+}
+
+function makeGroupSvc({ agents, workspace, onAgentFind }) {
+  const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
+  const roomRepo = {
+    async findOne() { return groupRoom; },
+    async update() {},
+  };
+  // markRead's own participant/latest-message lookups — a group test doesn't
+  // exercise read-marker behavior, so a working-but-inert stub is enough
+  // (getOne() -> null means markRead returns right after the participant
+  // check, same as the DM tests' tolerated markRead no-op).
+  const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
+  const workspaceRepo = { async findOne() { return workspace; } };
+  const messageRepo = {
+    createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
+    manager: {
+      async transaction(fn) {
+        const em = {
+          getRepository() {
+            return {
+              create: (fields) => ({ ...fields }),
+              async save(row) { return { ...row, id: 'msg-1', created_at: new Date() }; },
+            };
+          },
+        };
+        return fn(em);
+      },
+    },
+  };
+  const agentMemberIds = new Set(agents.map((a) => a.id));
+  const membership = {
+    async requireActiveParticipant() {},
+    async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
+    async getRoomAgentMemberIds() { return agentMemberIds; },
+  };
+  const mentionService = { parseMentions: () => [] }; // plain text, no @[...] tokens
+  const agentRepo = {
+    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
+    // Loose stub: real TypeORM filters `id IN (:...ids) AND type = 'claude'`
+    // server-side; this fixture's `agents` list already only contains the ids
+    // under test, so filtering on `type` alone reproduces the same result.
+    async find({ where }) {
+      onAgentFind?.();
+      return agents.filter((a) => a.type === (where.type ?? a.type));
+    },
+  };
+  const connectivity = { isReachable: () => true };
+  const svc = new RoomMessagingService(
+    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+  );
+  return svc;
+}
+
+test('Group room broadcast: cli_runtime_profiles carries only the Claude-type member with a resolvable profile', async () => {
+  const claudeAgent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
+  const codexAgent = { id: 'agent-2', type: 'codex', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
+  const svc = makeGroupSvc({ agents: [claudeAgent, codexAgent], workspace: optedOutWs });
+  const capture = captureRoomMessageEmit();
+  try {
+    await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello room');
+    const payload = capture.get();
+    assert.ok(payload, 'chat_room_message should have been emitted');
+    assert.ok(payload.cli_runtime_profiles, 'expected a cli_runtime_profiles map');
+    assert.deepEqual(Object.keys(payload.cli_runtime_profiles), ['agent-1'], 'the non-Claude member must not appear in the map');
+    for (const [key, value] of Object.entries(LOCAL_PROFILE)) {
+      assert.equal(payload.cli_runtime_profiles['agent-1'][key], value, `cli_runtime_profiles['agent-1'].${key}`);
+    }
+  } finally {
+    capture.off();
+  }
+});
+
+test('Group room broadcast: cli_runtime_profiles is omitted entirely when no member resolves a profile', async () => {
+  const claudeAgentNoProfile = { id: 'agent-3', type: 'claude', role_prompt: '', cli_runtime_profile: null, credential_id: null };
+  const emptyWs = { id: 'ws-2', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([]) };
+  const svc = makeGroupSvc({ agents: [claudeAgentNoProfile], workspace: emptyWs });
+  const capture = captureRoomMessageEmit();
+  try {
+    await svc.sendMessage('room-1', 'ws-2', 'user', 'user-1', 'Alice', 'hello room');
+    const payload = capture.get();
+    assert.ok(payload);
+    assert.equal('cli_runtime_profiles' in payload, false, 'no resolvable profile must not leave an empty map on the wire');
+  } finally {
+    capture.off();
+  }
+});
+
+test('Group room broadcast: a progress heartbeat never triggers profile resolution (cli_runtime_profiles absent, agentRepo.find not called)', async () => {
+  const claudeAgent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
+  // onAgentFind proves the isRealMessage gate skips resolution ENTIRELY for a
+  // progress row, not just that it happens to resolve to an empty map.
+  let findCalls = 0;
+  const svc = makeGroupSvc({ agents: [claudeAgent], workspace: optedOutWs, onAgentFind: () => { findCalls += 1; } });
+  const capture = captureRoomMessageEmit();
+  try {
+    await svc.sendMessage('room-1', 'ws-1', 'agent', 'manager-1', 'Manager', 'tool call narration', undefined, undefined, 'progress');
+    const payload = capture.get();
+    assert.ok(payload, 'chat_room_message should still be emitted for a progress row');
+    assert.equal('cli_runtime_profiles' in payload, false, 'a progress heartbeat must never carry a profile map');
+    assert.equal(findCalls, 0, 'progress rows must skip profile resolution entirely (isRealMessage gate)');
+  } finally {
+    capture.off();
+  }
+});
