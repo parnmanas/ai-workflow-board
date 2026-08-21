@@ -68,6 +68,12 @@ export const DELEGATION_DEFAULTS = Object.freeze({
   // other's checkout/build artifacts. Same folder serializes; different
   // scenarios stay parallel. Set false to revert to provisioning-only locking.
   runExecutionLock: true,
+  // ticket b972b28c: mirrors BaseSessionManager's progressEscalationHours
+  // (ticket 6ff827cb) for the one-shot #sweep TTL-slide gate — past this
+  // age, a one-shot that's still sliding its TTL on live background-task
+  // evidence gets ONE log-line escalation, never a kill (same governing
+  // principle: real progress evidence is never grounds to reap).
+  subagentProgressEscalationHours: 4,
 });
 
 /** A new shared slot has no warm build cache yet. Unity's initial Asset Import

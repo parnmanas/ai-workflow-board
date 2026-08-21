@@ -48,6 +48,7 @@ import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
+  findLiveBackgroundTasks,
   findLiveGroupBackgroundTasks,
   reapProcessTrees,
   type ProcNode,
@@ -212,6 +213,13 @@ export interface SubagentDelegationConfig {
   ttlMinutes?: number;
   claudeBin?: string;
   codexBin?: string;
+  /** ticket b972b28c: hours a one-shot may keep sliding its TTL on live
+   *  background-task evidence before #sweep logs a ONE-TIME runaway-loop
+   *  escalation. Never kills — mirrors BaseSessionManager's
+   *  progressEscalationHours governing principle (ticket 6ff827cb): real
+   *  progress evidence is never grounds to reap, only to notify. Default 4h
+   *  (see DELEGATION_DEFAULTS in constants.ts). */
+  subagentProgressEscalationHours?: number;
 }
 
 export interface SubagentAwareConfig extends AwbConfig {
@@ -257,6 +265,11 @@ interface SubagentRecord {
   room_id: string | null;
   started_at: number;
   expected_completion_at: number;
+  /** ticket b972b28c: set once #maybeEscalateLongRunning has logged its
+   *  one-time runaway-loop notice for this record, so repeated sweep ticks
+   *  don't spam the log while a genuinely long-running one-shot keeps
+   *  producing live-background-task evidence. */
+  progressEscalatedAt?: number;
   config_path: string | null;
   /** ST-6: false when config_path is a managed-agent's persistent
    *  mcp-config.json file we must NOT unlink on subagent exit / cleanup. */
@@ -340,6 +353,12 @@ export class SubagentManager implements SubagentManagerContract {
    */
   #adapters = new Map<string, CliAdapter>();
   #sweepTimer: NodeJS.Timeout | null = null;
+  /** ticket b972b28c: #sweep's TTL branch now awaits an async live-task probe
+   *  (findLiveBackgroundTasks shells out to `ps`) per TTL-expired candidate.
+   *  Guards against the next setInterval tick re-entering #sweep while a
+   *  prior pass is still mid-probe. A skipped tick is harmless — the next
+   *  one TTL_SWEEP_INTERVAL_MS later just re-evaluates current state. */
+  #sweepInFlight = false;
   #reservationCounter = 0;
   #persistPath: string;
   #pidDir: string;
@@ -401,7 +420,9 @@ export class SubagentManager implements SubagentManagerContract {
     }
     await this.#reconcileOnStart();
     await this.#sweepOrphanCfgs();
-    this.#sweepTimer = setInterval(() => this.#sweep(), TTL_SWEEP_INTERVAL_MS);
+    this.#sweepTimer = setInterval(() => {
+      this.#sweep().catch((err: any) => log(`SubagentManager sweep failed: ${err?.message ?? err}`));
+    }, TTL_SWEEP_INTERVAL_MS);
     this.#sweepTimer.unref?.();
     log(
       `SubagentManager initialized (per-agent cli, pidDir=${this.#pidDir}, cap=${this.#config.delegation.maxConcurrent}, ttl=${this.#config.delegation.ttlMinutes}min)`,
@@ -1738,23 +1759,64 @@ export class SubagentManager implements SubagentManagerContract {
     return out.replace(/[`_*]/g, (c) => `\\${c}`);
   }
 
-  #sweep(): void {
-    const now = Date.now();
-    for (const [pid, record] of this.#map.entries()) {
-      if (record.kind === 'reservation') continue;
-      try {
-        process.kill(pid, 0);
-      } catch (err: any) {
-        if (err?.code === 'ESRCH' || err?.code === 'EPERM') {
-          log(`Sweep: pid=${pid} no longer alive, removing record`);
-          this.#map.delete(pid);
-          if (record.config_path && record.config_path_is_temp) {
-            fsp.rm(dirname(record.config_path), { recursive: true, force: true }).catch(() => {});
+  async #sweep(): Promise<void> {
+    if (this.#sweepInFlight) {
+      log('Sweep: previous pass still in flight (live-task probe pending), skipping this tick');
+      return;
+    }
+    this.#sweepInFlight = true;
+    try {
+      const now = Date.now();
+      const ttlExpired: Array<[number, SubagentRecord]> = [];
+      for (const [pid, record] of this.#map.entries()) {
+        if (record.kind === 'reservation') continue;
+        try {
+          process.kill(pid, 0);
+        } catch (err: any) {
+          if (err?.code === 'ESRCH' || err?.code === 'EPERM') {
+            log(`Sweep: pid=${pid} no longer alive, removing record`);
+            this.#map.delete(pid);
+            if (record.config_path && record.config_path_is_temp) {
+              fsp.rm(dirname(record.config_path), { recursive: true, force: true }).catch(() => {});
+            }
+            continue;
           }
-          continue;
+        }
+        if (now >= record.expected_completion_at) {
+          ttlExpired.push([pid, record]);
         }
       }
-      if (now >= record.expected_completion_at) {
+
+      for (const [pid, record] of ttlExpired) {
+        // A concurrent path (stopForAgent / restart_agent / a genuine exit)
+        // may have already dropped this record while an earlier candidate in
+        // this same pass was awaiting its own live-task probe below.
+        if (this.#map.get(pid) !== record) continue;
+
+        // ticket b972b28c: a wall-clock TTL alone is not evidence of a stuck
+        // subagent — a timer expiring means CHECK, not KILL (same governing
+        // principle as BaseSessionManager's idle reaper, ticket 6ff827cb).
+        // Minimum signal: a live non-benign descendant process (e.g. a
+        // build/test the subagent spawned and is waiting on) means real work
+        // is in flight — slide the deadline instead of reaping it out from
+        // under that work.
+        let liveTasks: ProcNode[] = [];
+        try {
+          liveTasks = await findLiveBackgroundTasks(pid);
+        } catch (err: any) {
+          log(`Sweep: pid=${pid} live-task probe failed, proceeding with TTL reap: ${err?.message ?? err}`);
+        }
+        if (this.#map.get(pid) !== record) continue; // dropped while we awaited
+
+        if (liveTasks.length > 0) {
+          record.expected_completion_at = now + TTL_SWEEP_INTERVAL_MS;
+          log(
+            `Sweep: pid=${pid} exceeded TTL but ${liveTasks.length} live background task(s) found — sliding expected_completion_at`,
+          );
+          this.#maybeEscalateLongRunning(pid, record);
+          continue;
+        }
+
         log(`Sweep: pid=${pid} exceeded TTL, sending SIGTERM`);
         // Drop-first, exactly like stopForAgent / restart_agent (ticket
         // c555fbb6). Remove the record from #map BEFORE signalling so the
@@ -1793,8 +1855,30 @@ export class SubagentManager implements SubagentManagerContract {
           }
         }, SIGTERM_GRACE_MS);
       }
+      this.#persist();
+    } finally {
+      this.#sweepInFlight = false;
     }
-    this.#persist();
+  }
+
+  /** ticket b972b28c — mirrors BaseSessionManager's gap-4 principle (ticket
+   *  6ff827cb): a one-shot that keeps producing live-background-task
+   *  evidence forever is the one real risk the sliding-TTL extension opens
+   *  up (a genuine runaway loop looks identical to real work from the
+   *  outside). Past subagentProgressEscalationHours it is NOT killed — that
+   *  would violate the governing principle for a subagent with real
+   *  evidence — but it gets ONE log line so an operator can look. */
+  #maybeEscalateLongRunning(pid: number, record: SubagentRecord): void {
+    if (record.progressEscalatedAt) return;
+    const hours = this.#config.delegation.subagentProgressEscalationHours ?? 4;
+    const ageMs = Date.now() - record.started_at;
+    if (ageMs < hours * 3_600_000) return;
+    record.progressEscalatedAt = Date.now();
+    const ageHours = (ageMs / 3_600_000).toFixed(1);
+    log(
+      `Sweep: ESCALATION pid=${pid} ticket=${record.ticket_id ?? ''} agent=${record.agent_id ?? ''} — ` +
+        `one-shot running ${ageHours}h with continuous background-task evidence past TTL; verify this isn't a runaway loop`,
+    );
   }
 
   async #reconcileOnStart(): Promise<void> {
@@ -2005,9 +2089,12 @@ export class SubagentManager implements SubagentManagerContract {
     this.#wireExitHandler(record.process_handle as ChildProcess, record.pid);
   }
 
-  /** Test seam (ticket c555fbb6): run one TTL/idle #sweep pass synchronously. */
-  _sweepNow(): void {
-    this.#sweep();
+  /** Test seam (ticket c555fbb6; async-ified for ticket b972b28c): run one
+   *  TTL/progress-gate #sweep pass. Returns the pass's promise so a test can
+   *  await the async live-task probe before asserting drop-first / kill /
+   *  slide outcomes deterministically. */
+  _sweepNow(): Promise<void> {
+    return this.#sweep();
   }
 
   /**
