@@ -485,12 +485,17 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       'It creates a mission for a team you already orchestrate: only the agent named as that team\'s ' +
       'orchestrator may call this for its team_id (use list_orchestration_teams to find it). This is exercising ' +
       'authority a human already granted when they built the team, not a new autonomy surface — team/roster ' +
-      'membership is still entirely human-controlled. Each team allows one open (non-terminal) mission at a ' +
-      'time; a second attempt is rejected with a 409 naming the existing mission_id, its status and how many ' +
-      'of its steps are still in flight — if that count is 0 while status is "running", every step already ' +
-      'finished and you just need to call complete_orchestration_mission on it before retrying; if status is ' +
-      '"draft" (pass start:false, or the initial briefing failed) it was never briefed, so close it with ' +
-      'complete_orchestration_mission(status:"failed") instead — there is no tool to brief an existing draft. ' +
+      'membership is still entirely human-controlled. Your team allows one open (non-terminal) mission per ' +
+      'workspace at a time; a second attempt for the SAME workspace is rejected with a 409 naming the existing ' +
+      'mission_id, its status and how many of its steps are still in flight — if that count is 0 while status ' +
+      'is "running", every step already finished and you just need to call complete_orchestration_mission on ' +
+      'it before retrying; if status is "draft" (pass start:false, or the initial briefing failed) it was ' +
+      'never briefed, so close it with complete_orchestration_mission(status:"failed") instead — there is no ' +
+      'tool to brief an existing draft. If your team is workspace-scoped, workspace_id may be omitted (it ' +
+      'defaults to the team\'s own workspace — this is the common case and behaves exactly as before). If your ' +
+      'team is GLOBAL (no workspace of its own), workspace_id is REQUIRED — it picks which workspace\'s ' +
+      'run-budget and mission room this mission is billed to, out of the workspaces a human has already put on ' +
+      'the team\'s allow-list; call list_workspaces to see what exists, but only a listed one will be accepted. ' +
       'On success the returned mission_id works immediately with submit_orchestration_plan.',
     {
       team_id: z.string().describe('Team id from list_orchestration_teams — you must be its orchestrator'),
@@ -498,6 +503,13 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       objective: z.string().describe('What the team must achieve. Becomes the core of your own brief.'),
       context: z.string().optional().describe('Background / links / prior art'),
       acceptance_criteria: z.string().optional().describe('Definition of done'),
+      workspace_id: z
+        .string()
+        .optional()
+        .describe(
+          'Required for a GLOBAL team (must be on its allowed-workspaces list); omit for a workspace-scoped ' +
+            'team, which always uses its own workspace regardless of this field.',
+        ),
       max_steps: z
         .number()
         .optional()
@@ -536,6 +548,38 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           return err(`team "${team.name}" is disabled`, { status: 409 });
         }
 
+        // 이 미션이 어느 workspace에 과금될지 해석한다(티켓 1b62b437, 설계 결정 —
+        // 티켓의 "설계 결정 필요" #3 참고). workspace 종속 팀은 항상 자기 workspace를
+        // 쓴다: workspace_id는 no-op 확인용으로만 받아들여지고 어긋나면 거절된다 —
+        // 그래야 호출자가 workspace 종속 팀의 미션을 한 번도 허가받은 적 없는 budget으로
+        // 조용히 리디렉션할 수 없다. 글로벌 팀은 자기 workspace가 없으므로, 깔끔한
+        // 에이전트향 메시지를 위해 여기서 workspace_id 필수 여부만 확인한다 — 허용목록
+        // 검사 자체는 여기서 중복하지 않는다; missionSvc.createMission이 유일한 권위
+        // 있는 강제 지점이다(human/REST 생성 경로도 함께 지킨다 — 그쪽엔 사전 검사할
+        // 호출자 identity 개념이 없다), 그래서 비어있거나 허용되지 않은 workspace_id는
+        // 아래 catch를 통해 드러난다.
+        let resolvedWorkspaceId: string;
+        if (team.workspace_id) {
+          if (args.workspace_id && args.workspace_id !== team.workspace_id) {
+            return err(
+              `workspace_id "${args.workspace_id}" does not match this team's own workspace (${team.workspace_id}) ` +
+                `— omit workspace_id to use the team's workspace, or use a global team to target a different one.`,
+              { status: 400 },
+            );
+          }
+          resolvedWorkspaceId = team.workspace_id;
+        } else {
+          const requested = (args.workspace_id || '').trim();
+          if (!requested) {
+            return err(
+              `workspace_id is required to create a mission for global team "${team.name}" — call ` +
+                `list_workspaces to see the workspaces available to you, then pass one explicitly.`,
+              { status: 400 },
+            );
+          }
+          resolvedWorkspaceId = requested;
+        }
+
         // Guard: an agent already mid-step should not also spin up a new
         // mission — that is the actual self-recursion risk (briefing itself is
         // already structurally impossible: startMission posts the brief exactly
@@ -565,8 +609,15 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           );
         }
 
+        // 팀 하나만이 아니라 (팀, workspace) 단위로 스코핑한다(티켓 1b62b437) —
+        // workspace 종속 팀은 모든 미션이 이미 resolvedWorkspaceId를 공유하므로 이
+        // 필터는 거기서 no-op이다(기존 동작 그대로). 글로벌 팀에서는 workspace A의
+        // 열린 미션이 workspace B의 슬롯을 잡아먹는 걸 막아준다 — 팀이 허용된 각
+        // workspace마다 독립된 `cap`을 가진다.
         const openMissions = await missionSvc.listMissionsForAgent(agentId, { status: 'active', limit: 500 });
-        const openForTeam = openMissions.filter((m) => m.team_id === team.id);
+        const openForTeam = openMissions.filter(
+          (m) => m.team_id === team.id && m.workspace_id === resolvedWorkspaceId,
+        );
         if (openForTeam.length >= cap) {
           // Oldest first (listMissionsForAgent orders created_at DESC) — the
           // oldest open mission is the one most likely stuck; at the default
@@ -600,7 +651,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         const maxParallelSteps = clampInt(args.max_parallel_steps, parallelCeiling, 1, parallelCeiling);
 
         const mission = await missionSvc.createMission({
-          workspace_id: team.workspace_id,
+          workspace_id: resolvedWorkspaceId,
           team_id: team.id,
           title: args.title,
           objective: args.objective,

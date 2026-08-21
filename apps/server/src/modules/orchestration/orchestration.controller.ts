@@ -152,9 +152,15 @@ export class OrchestrationController {
 
   /** Agents the UI may offer as orchestrator / member for this workspace. */
   @Get('assignable-agents')
-  async assignableAgents(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async assignableAgents(
+    @Query('workspace_id') workspaceId: string,
+    @Query('global_only') globalOnly: string,
+    @Res() res: Response,
+  ) {
     try {
-      const agents = await this.teams.listAssignableAgents(workspaceId);
+      // global_only(티켓 1b62b437) — 글로벌 팀 picker용: 글로벌(workspace 비종속)
+      // 에이전트만 글로벌 팀의 orchestrator가 되거나 로스터에 들어갈 수 있다.
+      const agents = await this.teams.listAssignableAgents(workspaceId, { globalOnly: globalOnly === 'true' });
       // The service already carries manager_name so the picker can render the
       // canonical `<Manager>/<Agent>` identity — pass the rows through as-is.
       return res.json(agents);

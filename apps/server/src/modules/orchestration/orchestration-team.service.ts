@@ -24,6 +24,7 @@ import { LogService } from '../../services/log.service';
 import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
 import { orchestrationError } from './orchestration-errors';
 import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { visibleScopeWhere } from '../skills/skill-scope';
 
 export interface TeamMemberView {
   id: string;
@@ -49,7 +50,10 @@ export interface AssignableAgentView {
 
 export interface TeamView {
   id: string;
-  workspace_id: string;
+  workspace_id: string | null;
+  is_global: boolean;
+  owner_workspace_id: string | null;
+  allowed_workspace_ids: string[];
   name: string;
   description: string;
   orchestrator_agent_id: string | null;
@@ -78,14 +82,22 @@ export class OrchestrationTeamService {
   // ── Agent resolution ──────────────────────────────────────────────────────
 
   /**
-   * Resolve an agent that is legitimately usable inside `workspaceId`.
+   * `teamWorkspaceId`에 스코프된 팀에서 정당하게 쓸 수 있는 에이전트를 확인한다.
    *
-   * Workspace-less agents (manager identities) are visible everywhere by
-   * design — see the Agent.workspace_id docstring — but a Runtime Host manager
-   * is not an executable worker, so it is rejected as an orchestrator or member
-   * outright. Anything else must belong to this workspace.
+   * workspace 비종속 에이전트(manager identity)는 설계상 어디서나 보인다 —
+   * Agent.workspace_id 문서 참고 — 하지만 Runtime Host manager는 실행 가능한
+   * worker가 아니므로 orchestrator/member로는 무조건 거절된다.
+   *
+   * `teamWorkspaceId === null`은 팀 자체가 글로벌이라는 뜻이다(티켓 1b62b437) —
+   * "글로벌 에이전트는 어디서나 통과"의 자연스러운 확장이 "글로벌 로스터에는 글로벌
+   * 에이전트만 통과"다: workspace 종속 에이전트가 글로벌 팀 로스터에 들어가면
+   * dispatchStep이 그 workspace의 에이전트에게 다른 workspace의 미션으로 지어진
+   * room을 조용히 넘겨주게 된다 — 팀이 workspace 종속이 아니게 된 순간 이를 막을
+   * 다른 장치가 없기 때문이다. 호출자는 반드시 팀 자신의 `workspace_id`를 넘겨야
+   * 한다 — 요청을 보낸 쪽의 workspace_id가 아니다. 이 둘은 workspace 종속 팀에서만
+   * 일치한다.
    */
-  private async requireWorkspaceAgent(agentId: string, workspaceId: string, label: string): Promise<Agent> {
+  private async requireWorkspaceAgent(agentId: string, teamWorkspaceId: string | null, label: string): Promise<Agent> {
     const id = (agentId || '').trim();
     if (!id) throw orchestrationError(400, `${label} is required`);
     const agent = await this.agentRepo.findOne({ where: { id } });
@@ -97,7 +109,15 @@ export class OrchestrationTeamService {
           `Pick one of the agents it manages instead.`,
       );
     }
-    if (agent.workspace_id && agent.workspace_id !== workspaceId) {
+    if (teamWorkspaceId === null) {
+      if (agent.workspace_id) {
+        throw orchestrationError(
+          400,
+          `${label}: ${agent.name} belongs to a workspace, but this is a global team — only global agents ` +
+            `(no workspace) may orchestrate or join a global team's roster.`,
+        );
+      }
+    } else if (agent.workspace_id && agent.workspace_id !== teamWorkspaceId) {
       throw orchestrationError(400, `${label}: agent ${agent.name} belongs to a different workspace`);
     }
     return agent;
@@ -105,10 +125,11 @@ export class OrchestrationTeamService {
 
   // ── Reads ─────────────────────────────────────────────────────────────────
 
+  /** 이 workspace 소유 팀 + 모든 글로벌 팀(티켓 1b62b437). */
   async listTeams(workspaceId: string): Promise<TeamView[]> {
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
     const teams = await this.teamRepo.find({
-      where: { workspace_id: workspaceId },
+      where: visibleScopeWhere<OrchestrationTeam>(workspaceId),
       order: { created_at: 'DESC' },
     });
     if (teams.length === 0) return [];
@@ -141,11 +162,38 @@ export class OrchestrationTeamService {
     return view;
   }
 
+  /**
+   * READ 레벨 조회: 이 workspace 소유 팀 OR 임의의 글로벌 팀(티켓 1b62b437)에
+   * 매칭된다 — 글로벌 팀은 설계상 모든 workspace에서 보여야 한다. 의도적으로 쓰기
+   * 권한 검사는 겸하지 않는다 — update/delete/addMember/updateMember/removeMember는
+   * 이 뒤에 `assertTeamWritable`을 따로 호출하며, "글로벌 팀의 로스터/설정은 소유
+   * workspace만 편집 가능"을 강제하는 건 그쪽이다.
+   */
   async requireTeam(teamId: string, workspaceId: string): Promise<OrchestrationTeam> {
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    const team = await this.teamRepo.findOne({ where: { id: teamId, workspace_id: workspaceId } });
+    const team = await this.teamRepo.findOne({
+      where: visibleScopeWhere<OrchestrationTeam>(workspaceId, { id: teamId }),
+    });
     if (!team) throw orchestrationError(404, 'orchestration team not found in workspace');
     return team;
+  }
+
+  /**
+   * `requireTeam`으로 이미 조회된 팀에 대한 WRITE 레벨 게이트. workspace 종속 팀은
+   * 항상 자기 workspace에서 쓸 수 있다(`requireTeam`의 매칭이 이미 그걸 증명했다).
+   * 글로벌 팀은 `owner_workspace_id` — 만든 workspace — 에서만 쓸 수 있다. 그렇지
+   * 않으면 `requireTeam` 만으로는 MANAGE_ACTIONS을 가진 아무 workspace나 공유
+   * 로스터를 편집할 수 있게 되어버린다 — workspace 종속이 아니게 된 그 순간부터
+   * (OrchestrationTeam 문서 참고).
+   */
+  private assertTeamWritable(team: OrchestrationTeam, workspaceId: string): void {
+    if (team.workspace_id === null && team.owner_workspace_id !== workspaceId) {
+      throw orchestrationError(
+        403,
+        `orchestration team "${team.name}" is a global team owned by a different workspace — only the ` +
+          `workspace that created it may edit its roster or settings.`,
+      );
+    }
   }
 
   /**
@@ -207,6 +255,9 @@ export class OrchestrationTeamService {
       return {
         id: t.id,
         workspace_id: t.workspace_id,
+        is_global: t.workspace_id === null,
+        owner_workspace_id: t.owner_workspace_id,
+        allowed_workspace_ids: Array.isArray(t.allowed_workspace_ids) ? t.allowed_workspace_ids : [],
         name: t.name,
         description: t.description,
         orchestrator_agent_id: t.orchestrator_agent_id,
@@ -250,21 +301,34 @@ export class OrchestrationTeamService {
     max_parallel_steps?: number;
     max_open_missions?: number;
     created_by?: string;
+    /** 글로벌 팀으로 생성(티켓 1b62b437). 기본 false — 기존 호출자는 영향 없음. */
+    is_global?: boolean;
+    /** 글로벌 팀 전용: 이 팀의 orchestrator가 create_orchestration_mission으로 지정 가능한 workspace 목록. */
+    allowed_workspace_ids?: string[];
   }): Promise<TeamView> {
-    const workspaceId = (input.workspace_id || '').trim();
+    // 실행/생성 주체 workspace — 글로벌 팀이어도 항상 필수다: 이후 팀을 편집할 수
+    // 있는 유일한 값인 owner_workspace_id가 된다(assertTeamWritable). "글로벌"은
+    // 로스터가 workspace 비종속이라는 뜻일 뿐, 생성 자체에 workspace 컨텍스트가
+    // 필요 없다는 뜻이 아니다.
+    const callerWorkspaceId = (input.workspace_id || '').trim();
     const name = (input.name || '').trim();
-    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+    if (!callerWorkspaceId) throw orchestrationError(400, 'workspace_id is required');
     if (!name) throw orchestrationError(400, 'name is required');
+
+    const isGlobal = !!input.is_global;
+    const teamWorkspaceId: string | null = isGlobal ? null : callerWorkspaceId;
 
     const orchestrator = await this.requireWorkspaceAgent(
       input.orchestrator_agent_id,
-      workspaceId,
+      teamWorkspaceId,
       'orchestrator_agent_id',
     );
 
     const team = await this.teamRepo.save(
       this.teamRepo.create({
-        workspace_id: workspaceId,
+        workspace_id: teamWorkspaceId,
+        owner_workspace_id: callerWorkspaceId,
+        allowed_workspace_ids: isGlobal ? normalizeWorkspaceIds(input.allowed_workspace_ids) : null,
         name,
         description: (input.description || '').trim(),
         orchestrator_agent_id: orchestrator.id,
@@ -276,10 +340,11 @@ export class OrchestrationTeamService {
       }),
     );
     this.logService.info('Orchestration', `team created ${team.id} (${team.name})`, {
-      workspace_id: workspaceId,
+      workspace_id: teamWorkspaceId,
+      owner_workspace_id: callerWorkspaceId,
       orchestrator_agent_id: orchestrator.id,
     });
-    return this.getTeam(team.id, workspaceId);
+    return this.getTeam(team.id, callerWorkspaceId);
   }
 
   async updateTeam(
@@ -293,9 +358,12 @@ export class OrchestrationTeamService {
       max_parallel_steps?: number;
       max_open_missions?: number;
       enabled?: boolean;
+      /** 글로벌 팀 전용: workspace 허용목록을 통째로 교체한다. */
+      allowed_workspace_ids?: string[];
     },
   ): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
+    this.assertTeamWritable(team, workspaceId);
 
     if (patch.name !== undefined) {
       const name = String(patch.name).trim();
@@ -307,14 +375,25 @@ export class OrchestrationTeamService {
     if (patch.max_parallel_steps !== undefined) team.max_parallel_steps = clampParallel(patch.max_parallel_steps);
     if (patch.max_open_missions !== undefined) team.max_open_missions = clampOpenMissions(patch.max_open_missions);
     if (patch.orchestrator_agent_id !== undefined) {
+      // 호출자가 아니라 팀 자신의 workspace_id를 기준으로 스코핑한다 — 글로벌
+      // 팀은 이 둘이 다르다(team.workspace_id는 null인데 workspaceId는 편집 중인
+      // 소유 workspace다), 그리고 로스터 규칙은 편집자가 아니라 팀의 스코프에
+      // 관한 것이다.
       const agent = await this.requireWorkspaceAgent(
         patch.orchestrator_agent_id,
-        workspaceId,
+        team.workspace_id,
         'orchestrator_agent_id',
       );
       team.orchestrator_agent_id = agent.id;
     }
     if (patch.enabled !== undefined) team.enabled = patch.enabled ? 1 : 0;
+    // 글로벌 팀에만 적용 — 이 파일의 다른 is_global 게이팅 규칙(requireWorkspaceAgent,
+    // assertTeamWritable)과 동일하게. workspace 종속 팀은 허용목록을 쓸 데가
+    // 없으므로(createMission이 그 팀에는 이 값을 참조하지 않는다) 여기서 조용히
+    // 저장해봤자 아무도 손댈 수 없는 죽은 데이터가 된다.
+    if (patch.allowed_workspace_ids !== undefined && team.workspace_id === null) {
+      team.allowed_workspace_ids = normalizeWorkspaceIds(patch.allowed_workspace_ids);
+    }
 
     await this.teamRepo.save(team);
     return this.getTeam(team.id, workspaceId);
@@ -322,6 +401,7 @@ export class OrchestrationTeamService {
 
   async deleteTeam(teamId: string, workspaceId: string): Promise<void> {
     const team = await this.requireTeam(teamId, workspaceId);
+    this.assertTeamWritable(team, workspaceId);
     const live = await this.missionRepo.count({
       where: { team_id: team.id, status: Not(In(TERMINAL_MISSION_STATUSES as unknown as string[])) },
     });
@@ -342,7 +422,10 @@ export class OrchestrationTeamService {
     input: { agent_id: string; role_label?: string; capabilities?: string; max_concurrent?: number },
   ): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
-    const agent = await this.requireWorkspaceAgent(input.agent_id, workspaceId, 'agent_id');
+    this.assertTeamWritable(team, workspaceId);
+    // 편집 호출자가 아니라 팀 자신의 workspace를 기준으로 스코핑한다 — updateTeam의
+    // orchestrator 교체 분기와 같은 이유.
+    const agent = await this.requireWorkspaceAgent(input.agent_id, team.workspace_id, 'agent_id');
 
     const existing = await this.memberRepo.findOne({ where: { team_id: team.id, agent_id: agent.id } });
     if (existing) throw orchestrationError(409, `${agent.name} is already a member of this team`);
@@ -351,7 +434,7 @@ export class OrchestrationTeamService {
     await this.memberRepo.save(
       this.memberRepo.create({
         team_id: team.id,
-        workspace_id: workspaceId,
+        workspace_id: team.workspace_id,
         agent_id: agent.id,
         role_label: (input.role_label || '').trim(),
         capabilities: (input.capabilities || '').trim(),
@@ -369,6 +452,7 @@ export class OrchestrationTeamService {
     patch: { role_label?: string; capabilities?: string; max_concurrent?: number; position?: number },
   ): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
+    this.assertTeamWritable(team, workspaceId);
     const member = await this.memberRepo.findOne({ where: { id: memberId, team_id: team.id } });
     if (!member) throw orchestrationError(404, 'team member not found');
 
@@ -385,21 +469,29 @@ export class OrchestrationTeamService {
 
   async removeMember(teamId: string, workspaceId: string, memberId: string): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
+    this.assertTeamWritable(team, workspaceId);
     const member = await this.memberRepo.findOne({ where: { id: memberId, team_id: team.id } });
     if (!member) throw orchestrationError(404, 'team member not found');
     await this.memberRepo.delete({ id: member.id });
     return this.getTeam(team.id, workspaceId);
   }
 
-  /** Agents already used as orchestrator or member anywhere in the workspace — UI hint only. */
-  async listAssignableAgents(workspaceId: string): Promise<AssignableAgentView[]> {
+  /**
+   * 이 workspace 어딘가에서 이미 orchestrator나 member로 쓰인 에이전트들 — UI 힌트
+   * 용도일 뿐. `globalOnly`(티켓 1b62b437)는 이를 workspace 비종속 에이전트로만
+   * 좁힌다 — 글로벌 팀 picker용: 어차피 requireWorkspaceAgent가 workspace 종속
+   * 에이전트를 글로벌 팀에서 거절하므로, UI가 애초에 그런 선택지를 보여줄 이유가 없다.
+   */
+  async listAssignableAgents(workspaceId: string, opts?: { globalOnly?: boolean }): Promise<AssignableAgentView[]> {
     // Workspace agents plus workspace-less ones (see Agent.workspace_id doc),
     // minus manager identities which are not executable workers.
     const agents = await this.agentRepo.find({
-      where: [
-        { workspace_id: workspaceId, is_active: 1 },
-        { workspace_id: IsNull(), is_active: 1 },
-      ],
+      where: opts?.globalOnly
+        ? { workspace_id: IsNull(), is_active: 1 }
+        : [
+            { workspace_id: workspaceId, is_active: 1 },
+            { workspace_id: IsNull(), is_active: 1 },
+          ],
       order: { name: 'ASC' },
     });
     const assignable = agents.filter((a) => a.type !== 'manager');
@@ -443,4 +535,13 @@ function clampOpenMissions(value: any): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1;
   return Math.min(MAX_OPEN_MISSIONS_CEILING, Math.max(0, Math.floor(n)));
+}
+
+/** 중복 제거 + 빈 값 제거; 결과가 비면 []이 아니라 null — OrchestrationTeam.allowed_workspace_ids가
+ *  다른 곳에서도 동일하게 그렇듯(빈 목록과 "한 번도 설정 안 함"은 둘 다 같은 deny-by-default를
+ *  의미하므로) simple-json으로 그대로 왕복시키기 위함. */
+function normalizeWorkspaceIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = Array.from(new Set(value.map((v) => String(v ?? '').trim()).filter(Boolean)));
+  return ids.length ? ids : null;
 }
