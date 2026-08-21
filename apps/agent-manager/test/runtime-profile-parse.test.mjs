@@ -129,23 +129,22 @@ test('parseRuntimeProfile: non-object input -> null + warn', () => {
   }
 });
 
-// resolveRoomBroadcastRuntimeProfile (ticket 7d8ea7c9 review round 1) — the
-// chat_room_message twin of parseRuntimeProfile. A group-room broadcast fans
-// out to every member, so the server can't stamp a single flat profile field
-// the way chat_request does for its one target agent: it sends an agent_id ->
-// profile map instead, and each manager instance must pick its own
-// responder's entry out of that map (handleChatRoomMessage already computes
-// `roomResponderId` for the typing indicator — this is the same id).
+// resolveRoomBroadcastRuntimeProfile (ticket 7d8ea7c9 review round 1) —
+// parseRuntimeProfile의 chat_room_message 짝. 그룹방 broadcast는 모든
+// 멤버에게 팬아웃되므로, chat_request가 단일 대상 agent에게 하듯 평면
+// profile 필드 하나로 찍을 수 없다: 대신 agent_id -> profile map을
+// 보내고, 각 매니저 인스턴스는 그 맵에서 자기 responder의 항목을 직접
+// 골라야 한다(handleChatRoomMessage가 타이핑 표시용으로 이미 계산해 둔
+// `roomResponderId`가 바로 그 id다).
 //
-// Covers:
-//   - the responder's own entry resolves through the same validation as
-//     parseRuntimeProfile (a malformed entry warns, same as a malformed
-//     singular field would)
-//   - a DIFFERENT member's entry in the map is never picked up
-//   - no map on the payload, or no entry for this responder -> null, no warn
-//     (the common no-profile-configured case must stay quiet)
-//   - an empty responderAgentId (manager's own identity, no managed agent
-//     resolved) -> null without even looking at the map
+// 커버 범위:
+//   - responder 자신의 항목은 parseRuntimeProfile과 동일한 검증을 거쳐
+//     해석된다(malformed 항목은 단일 필드일 때와 마찬가지로 warn)
+//   - 맵에 있는 DIFFERENT 멤버의 항목은 절대 선택되지 않는다
+//   - payload에 맵이 없거나 이 responder 항목이 없으면 -> null, warn 없음
+//     (프로필 미설정이라는 흔한 케이스는 조용해야 한다)
+//   - responderAgentId가 빈 값(매니저 자신의 identity, 해석된 managed
+//     agent 없음)이면 -> 맵을 보지도 않고 null
 
 test('resolveRoomBroadcastRuntimeProfile: picks the responder\'s own entry out of the map', () => {
   const payload = { cli_runtime_profiles: { 'agent-1': REAL_PROFILE, 'agent-2': { ...REAL_PROFILE, id: 'other' } } };

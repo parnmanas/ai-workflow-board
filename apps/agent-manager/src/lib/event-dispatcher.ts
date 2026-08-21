@@ -163,13 +163,13 @@ export function resolveTriggerRuntimeProfile(
   return parseRuntimeProfile(rawCliRuntimeProfile) ?? instanceOverride ?? null;
 }
 
-/** ticket 7d8ea7c9 (review round 1): resolve THIS responder's Claude backend
- *  profile out of a chat_room_message broadcast's per-agent profile map.
- *  Unlike chat_request (single target agent → a flat cli_runtime_profile
- *  field), chat_room_message fans out to every room member, so the server
- *  keys resolved profiles by agent_id (RoomMessagingService resolves one
- *  entry per Claude-type member) — each manager picks its own responder's
- *  entry out of the map instead of relying on a single ambient field. */
+/** ticket 7d8ea7c9 (review round 1): chat_room_message broadcast의 agent별
+ *  profile map에서 바로 이 responder의 Claude backend profile을 골라낸다.
+ *  chat_request(단일 대상 agent → 평면 cli_runtime_profile 필드)와 달리
+ *  chat_room_message는 방의 모든 멤버에게 팬아웃되므로, 서버는 해석된
+ *  profile을 agent_id로 키잉해 보낸다(RoomMessagingService가 Claude-type
+ *  멤버마다 하나씩 항목을 해석) — 각 매니저는 단일 ambient 필드에 의존하는
+ *  대신 맵에서 자기 responder의 항목을 직접 골라 쓴다. */
 export function resolveRoomBroadcastRuntimeProfile(
   payload: any,
   responderAgentId: string,
@@ -4124,13 +4124,13 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    // ticket 7d8ea7c9 (review round 1): RoomMessagingService now resolves a
-    // per-agent profile map for group-room broadcasts (p.cli_runtime_profiles,
-    // keyed by agent_id) — chat_room_message fans out to every member, so a
-    // single flat field can't represent "the right backend for whichever
-    // agent responds" the way chat_request's single-target field can.
-    // roomResponderId (computed above for the typing indicator) is exactly
-    // the agent this dispatch will spawn under, so it doubles as the map key.
+    // ticket 7d8ea7c9 (review round 1): RoomMessagingService가 이제 그룹방
+    // broadcast용 agent별 profile map(p.cli_runtime_profiles, agent_id로
+    // 키잉)을 해석해 보낸다 — chat_room_message는 모든 멤버에게 팬아웃되므로,
+    // chat_request의 단일 대상 필드처럼 평면 필드 하나로는 "지금 응답할 그
+    // agent에게 맞는 backend"를 표현할 수 없다. roomResponderId(타이핑
+    // 표시용으로 위에서 이미 계산됨)가 정확히 이 dispatch가 spawn할 그
+    // agent이므로, 맵 키로 그대로 재사용한다.
     // Also does NOT fall back to `this.#runtimeProfileOverride` — see the
     // longer note at the chat_request call site below for why.
     const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId);
