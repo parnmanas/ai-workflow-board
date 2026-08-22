@@ -386,3 +386,85 @@ test('a dedupe_key note carrying an attachment is never merged — the attachmen
   const reloadedAttachment = rows.find((r) => r.id === withAttachment.id);
   assert.deepEqual(JSON.parse(reloadedAttachment.attachment_resource_ids), [resource.id]);
 });
+
+// 리뷰 라운드3 지적 — write-seq 채번은 프로세스 메모리가 아니라 DB 상태에서
+// 유도되고(재시작 안전), "마지막 코멘트" 조회는 임의 개수 cutoff 없이 같은
+// 초 전체를 본다(burst 크기 무관).
+
+test('write-seq is derived from persisted DB state, not an in-process counter (review round 3 — restart safety)', async () => {
+  const handlers = registerTools();
+  const addComment = handlers.get('add_comment');
+  const t = await makeTicket();
+
+  // 이전 프로세스(또는 이 프로세스의 훨씬 이전 상태)가 남겼을 법한 임의의 큰
+  // seq 값을 직접 시딩한다. 프로세스-로컬 카운터였다면 새로 뜬 프로세스는 이
+  // 값을 전혀 모른 채 1부터 다시 셌을 것이다(재시작 리셋 버그) — DB-유도
+  // 방식은 이 값을 그대로 이어받아야 한다.
+  const seeded = await commentRepo.save(commentRepo.create({
+    ticket_id: t.id, author_type: 'agent', author_id: 'seed-agent', author: 'Seed',
+    content: 'seeded row simulating prior-process state', type: 'note',
+    metadata: JSON.stringify({ _comment_write_seq: 9999 }),
+  }));
+
+  const next = parse(await addComment({
+    ticket_id: t.id, content: 'first real call after the simulated restart',
+    author_type: 'agent', author_id: 'mgr-1', author: 'Manager',
+    metadata: { dedupe_key: 'k1' },
+  }, {}));
+
+  const reloadedNext = await commentRepo.findOne({ where: { id: next.id } });
+  const nextSeq = JSON.parse(reloadedNext.metadata)._comment_write_seq;
+  assert.equal(nextSeq, 10000,
+    'next write-seq must continue from the persisted max (9999+1), never restart from 1 — proves derivation from DB state, not a reset-prone in-process counter');
+  assert.notEqual(next.id, seeded.id, 'different author/type — must not have bumped the seeded row');
+});
+
+test('a same-second burst of MORE than 20 comments still finds the true last row (review round 3 — no arbitrary window cutoff)', async () => {
+  const handlers = registerTools();
+  const addComment = handlers.get('add_comment');
+  const t = await makeTicket();
+
+  const a = parse(await addComment({
+    ticket_id: t.id, content: 'suppressed (a)', author_type: 'agent', author_id: 'mgr-1', author: 'Manager',
+    metadata: { dedupe_key: 'k1' },
+  }, {}));
+  const aReloaded = await commentRepo.findOne({ where: { id: a.id } });
+
+  // `a` 와 정확히 같은 초를 공유하는 무관 filler 21건을 직접 시딩한다(총
+  // 22건 — 이전 버전의 take:20 이 그대로 있었다면 이 시점에 이미 최소 1건은
+  // 창 밖으로 빠진다). 이 row 들은 write-seq 를 안 찍는다 — "이 합치기
+  // 메커니즘 이전에 만들어졌거나 write-seq 를 안 남기는 다른 쓰기 경로"를
+  // 대표한다.
+  for (let i = 0; i < 21; i++) {
+    await commentRepo.save(commentRepo.create({
+      ticket_id: t.id, author_type: 'user', author_id: `filler-${i}`, author: `Filler ${i}`,
+      content: `filler ${i}`, type: 'note', created_at: aReloaded.created_at,
+    }));
+  }
+  const seededCount = await commentRepo.count({ where: { ticket_id: t.id } });
+  assert.equal(seededCount, 22, 'sanity: a + 21 fillers all persisted');
+  const seededTiedCount = (await commentRepo.find({ where: { ticket_id: t.id } }))
+    .filter((r) => r.created_at.getTime() === aReloaded.created_at.getTime()).length;
+  assert.equal(seededTiedCount, 22, 'sanity: all 22 genuinely share the same truncated-to-the-second created_at (explicit created_at persisted as given)');
+
+  // 진짜 마지막 코멘트 — a 와 같은 초에, 실제 add_comment 경로로 자연 발생
+  // 시켜(시간 조작 없음, 같은 초로 착지할 때까지 REAL insert 재시도) 진짜
+  // write-seq 를 받는다. 이게 이 burst 안에서 유일하게 write-seq 를 가진
+  // "무관" row 이므로, 결정론적으로 최댓값을 가져 진짜 마지막으로 뽑혀야 한다.
+  const unrelated = await addCommentAlignedToSecond(addComment, {
+    ticket_id: t.id, content: 'the TRUE last comment, unrelated', author_type: 'user', author_id: 'u1', author: 'User',
+  }, aReloaded.created_at.getTime());
+
+  const c = parse(await addComment({
+    ticket_id: t.id, content: 'suppressed (c)', author_type: 'agent', author_id: 'mgr-1', author: 'Manager',
+    metadata: { dedupe_key: 'k1' },
+  }, {}));
+
+  assert.notEqual(c.id, a.id,
+    'even with 23 comments tied on the same second (well past the old take:20 cutoff), the true last (unrelated) row must still be found and break the dedupe chain');
+  assert.notEqual(c.id, unrelated.id);
+  assert.ok(c.repeat_count === null || c.repeat_count === undefined, 'fresh occurrence row starts at NULL repeat_count');
+
+  const finalRows = await commentRepo.find({ where: { ticket_id: t.id } });
+  assert.equal(finalRows.length, 24, '22 tied seed rows + unrelated + the fresh c row');
+});
