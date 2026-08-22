@@ -89,6 +89,21 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
     try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
     process.env.SQLJS_DB_PATH = isolated;
   }
+  // Same isolation for the Ontology Graph's own sql.js DataSource (ticket
+  // 6ca4894a) — AppOntologyDataSource is constructed at db.ts module-load
+  // time from resolveOntologySqljsLocation(), which defaults to the shared
+  // repo-level database/ontology.db when SQLJS_ONTOLOGY_DB_PATH is unset.
+  // Without this, every qa-flow test process booting the real AppModule
+  // (OntologySqljsFlushService lives in the @Global SharedServicesModule)
+  // would synchronize/flush into that SAME shared file — and collide with
+  // it too if a real `npm run dev` server happens to be running at the same
+  // time — exactly the multi-process clobbering SQLJS_DB_PATH isolation
+  // above already exists to prevent for the primary DB.
+  if (!process.env.SQLJS_ONTOLOGY_DB_PATH) {
+    const isolatedOntology = path.join(os.tmpdir(), `awb-qa-ontology-${process.pid}-${port}.db`);
+    try { fs.rmSync(isolatedOntology, { force: true }); } catch { /* best-effort */ }
+    process.env.SQLJS_ONTOLOGY_DB_PATH = isolatedOntology;
+  }
   // Postgres matrix (ticket 0c175408): the qa-flows suite chains every flow
   // file through its own process but they all connect to the SAME ephemeral CI
   // database — without per-process isolation they cross-contaminate the way the
