@@ -4,14 +4,23 @@
 // the dual-DB migration-free config-column convention). Mirrors
 // hard-budget-guard.test.mjs's bootstrap shape.
 //
-// Central regression this file exists to pin: a wait must resolve EXACTLY
-// ONCE even when the resolution path races itself — two overlapping sweep
-// ticks, or a sweep racing an explicit cancel. That's the literal ask
-// ("잘못된 wakeup 호출·clean exit·supervisor 재디스패치가 중복 실행을 만들지
-// 않는 회귀 테스트") behind this ticket: the previous ad-hoc wait (sleep /
-// ScheduleWakeup misuse) died mid-wait and needed a second session to
-// rediscover state from scratch — a fix that ITSELF double-resolves under a
-// race would just relocate the bug, not close it.
+// Central regressions this file exists to pin (review round 1 findings):
+//
+//   P0 — a wait must resolve EXACTLY ONCE even when the resolution path
+//   races itself (two overlapping sweep ticks, or a sweep racing an
+//   explicit cancel) AND must NEVER be lost when a crash/exception lands
+//   between "the run resolved" and "the comment+dispatch side effects
+//   finished" — the old single-step design cleared `pending_ci_wait` (the
+//   only signal that makes a ticket a sweep candidate) BEFORE the side
+//   effects ran, so a crash there was a silent, permanent loss of the
+//   resume. The two-phase design (tryRecordOutcome, then _deliver, then
+//   markDelivered) is tested here for BOTH directions: no double-delivery
+//   under a race, AND full recovery after a crash/exception anywhere in the
+//   comment-then-dispatch chain.
+//
+//   P1 — run_id/head_sha must be validated against their real external
+//   formats (not just non-empty), both at the service layer and through the
+//   actual registered MCP tool handler (not bypassing it).
 //
 // GitHub reads are stubbed by monkey-patching the `.github` property after
 // construction — CiWaitResumeService compiles `private readonly github` to a
@@ -46,8 +55,10 @@ const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Commen
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
+const { isValidGitHubRunId, isValidGitSha } = await import('file://' + path.join(DIST, 'services', 'github-connector.service.js'));
 const { CiWaitService } = await import('file://' + path.join(DIST, 'modules', 'tickets', 'ci-wait.service.js'));
 const { CiWaitResumeService, __test__ } = await import('file://' + path.join(DIST, 'modules', 'agents', 'ci-wait-resume.service.js'));
+const { registerCiWaitTools } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'tools', 'ci-wait-tools.js'));
 const { DataSource } = await import('typeorm');
 
 const ds = new DataSource(buildDataSourceOptions());
@@ -70,10 +81,11 @@ async function makeTicket(overrides = {}) {
   }));
 }
 
-function makeResumer(githubStub, dispatchCalls) {
+function makeResumer(githubStub, dispatchCalls, dispatchImpl) {
   const fakeTriggerLoop = {
     async dispatchCurrentColumn(ticketId, source, by) {
       dispatchCalls.push({ ticketId, source, by });
+      if (dispatchImpl) return dispatchImpl(ticketId, source, by);
       return { emitted: 1 };
     },
   };
@@ -81,6 +93,8 @@ function makeResumer(githubStub, dispatchCalls) {
   resumer.github = githubStub;
   return resumer;
 }
+
+const SUCCESS_GITHUB_STUB = { async getWorkflowRun() { return { id: '999', status: 'completed', conclusion: 'success', html_url: 'https://x/999', created_at: '', updated_at: '', head_sha: '' }; } };
 
 after(async () => {
   await ds.destroy();
@@ -112,53 +126,165 @@ test('readConfigFromEnv: unset env falls back to DEFAULTS', () => {
   assert.equal(cfg.maxAgeMs, __test__.DEFAULTS.MAX_AGE_MS);
 });
 
-// ── CiWaitService register/cancel ────────────────────────────────────────
+// ── P1: external-identifier format validation (review round 1) ──────────
 
-test('registerWait sets pending_ci_wait + ci_wait_context; rejects a second registration without cancel', async () => {
+test('isValidGitHubRunId: accepts a realistic decimal run id, rejects garbage', () => {
+  assert.equal(isValidGitHubRunId('123456789'), true);
+  assert.equal(isValidGitHubRunId('1'), true);
+  assert.equal(isValidGitHubRunId(''), false);
+  assert.equal(isValidGitHubRunId('0'), false, 'leading/bare zero is never a real run id');
+  assert.equal(isValidGitHubRunId('0123'), false, 'leading zero rejected');
+  assert.equal(isValidGitHubRunId('12a34'), false, 'non-digit characters rejected');
+  assert.equal(isValidGitHubRunId('123456789012345678901'), false, 'over 20 digits rejected');
+  assert.equal(isValidGitHubRunId('-123'), false);
+  assert.equal(isValidGitHubRunId('123; DROP TABLE tickets;'), false, 'injection-shaped input rejected outright, not truncated');
+});
+
+test('isValidGitSha: accepts a full 40-hex SHA-1, rejects anything else', () => {
+  const validSha = 'a'.repeat(40);
+  assert.equal(isValidGitSha(validSha), true);
+  assert.equal(isValidGitSha(validSha.toUpperCase()), true, 'uppercase hex accepted (normalized by the caller)');
+  assert.equal(isValidGitSha('a'.repeat(39)), false, 'too short (e.g. an abbreviated SHA) rejected');
+  assert.equal(isValidGitSha('a'.repeat(41)), false, 'too long rejected');
+  assert.equal(isValidGitSha('g'.repeat(40)), false, 'non-hex character rejected');
+  assert.equal(isValidGitSha(''), false);
+});
+
+test('registerWait rejects a non-numeric / over-length run_id (service layer)', async () => {
   const ticket = await makeTicket();
-  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111', head_sha: 'abc123' }, { actorName: 'A' });
-
-  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
-  assert.equal(fresh.pending_ci_wait, true);
-  const ctx = JSON.parse(fresh.ci_wait_context);
-  assert.equal(ctx.owner, 'o');
-  assert.equal(ctx.run_id, '111');
-
   await assert.rejects(
-    () => ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '222' }),
-    /already has an active CI wait/,
+    () => ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: 'not-a-number' }),
+    /Invalid run_id/,
+  );
+  await assert.rejects(
+    () => ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '1'.repeat(25) }),
+    /Invalid run_id/,
+  );
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh.pending_ci_wait, false, 'a rejected registration must not leave a half-registered wait');
+});
+
+test('registerWait rejects a malformed head_sha but accepts a valid one, normalized to lowercase', async () => {
+  const ticket = await makeTicket();
+  await assert.rejects(
+    () => ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111', head_sha: 'deadbeef' }),
+    /Invalid head_sha/,
+    'a short/abbreviated SHA must be rejected, not silently accepted',
+  );
+  const fresh1 = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh1.pending_ci_wait, false);
+
+  const validSha = 'ABCDEF0123456789ABCDEF0123456789ABCDEF01'; // exactly 40 hex chars
+  assert.equal(validSha.length, 40);
+  await assert.rejects(
+    () => ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111', head_sha: validSha + 'a' }),
+    /Invalid head_sha/,
+    '41 chars is over-length even though the extra char is hex',
   );
 
-  // Every test in this file shares one DataSource (no per-test DB reset) —
-  // clean up so this ticket's still-pending wait cannot leak into a LATER
-  // test's sweep() and pollute its aggregate stats.
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111', head_sha: validSha });
+  const fresh2 = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const ctx = JSON.parse(fresh2.ci_wait_context);
+  assert.equal(ctx.head_sha, validSha.toLowerCase(), 'head_sha must be normalized to lowercase for the later resolved-run comparison');
   await ciWaitService.cancelWait(ticket.id);
 });
 
-test('cancelWait clears the flag and is idempotent', async () => {
+test('registerWait accepts omitted head_sha (still optional)', async () => {
   const ticket = await makeTicket();
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
-
-  const first = await ciWaitService.cancelWait(ticket.id);
-  assert.equal(first.cancelled, true);
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
-  assert.equal(fresh.pending_ci_wait, false);
-  assert.equal(fresh.ci_wait_context, '');
-
-  const second = await ciWaitService.cancelWait(ticket.id);
-  assert.equal(second.cancelled, false, 'cancelling an already-clear wait is a no-op');
+  assert.equal(fresh.pending_ci_wait, true);
+  await ciWaitService.cancelWait(ticket.id);
 });
 
-test('claimResolved: two concurrent claims on the same ticket — exactly one wins', async () => {
+// ── MCP payload boundary — through the ACTUAL registered tool handler ───
+
+function buildFakeMcpServer() {
+  const tools = {};
+  return {
+    tools,
+    tool(name, _description, _schema, handler) {
+      tools[name] = handler;
+    },
+  };
+}
+
+test('await_ci_run MCP tool handler rejects a malformed run_id from a real caller payload', async () => {
+  const ticket = await makeTicket();
+  const fakeServer = buildFakeMcpServer();
+  registerCiWaitTools(fakeServer, { dataSource: ds, activityService, ciWaitService });
+
+  const result = await fakeServer.tools['await_ci_run']({
+    ticket_id: ticket.id, owner: 'o', repo: 'r', run_id: '12a34',
+  }, {});
+  assert.equal(result.isError, true);
+  const body = JSON.parse(result.content[0].text);
+  assert.match(body.error, /Invalid run_id/);
+
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh.pending_ci_wait, false, 'the real tool handler must not leave a half-registered wait on rejected input');
+});
+
+test('await_ci_run MCP tool handler rejects a malformed head_sha from a real caller payload', async () => {
+  const ticket = await makeTicket();
+  const fakeServer = buildFakeMcpServer();
+  registerCiWaitTools(fakeServer, { dataSource: ds, activityService, ciWaitService });
+
+  const result = await fakeServer.tools['await_ci_run']({
+    ticket_id: ticket.id, owner: 'o', repo: 'r', run_id: '123456', head_sha: 'zz-not-hex',
+  }, {});
+  assert.equal(result.isError, true);
+  const body = JSON.parse(result.content[0].text);
+  assert.match(body.error, /Invalid head_sha/);
+});
+
+test('await_ci_run MCP tool handler accepts a valid payload and cancel_ci_wait clears it — full round trip through the real handlers', async () => {
+  const ticket = await makeTicket();
+  const fakeServer = buildFakeMcpServer();
+  registerCiWaitTools(fakeServer, { dataSource: ds, activityService, ciWaitService });
+
+  const registerResult = await fakeServer.tools['await_ci_run']({
+    ticket_id: ticket.id, owner: 'o', repo: 'r', run_id: '123456', head_sha: 'a'.repeat(40),
+  }, {});
+  assert.notEqual(registerResult.isError, true);
+  const registerBody = JSON.parse(registerResult.content[0].text);
+  assert.equal(registerBody.registered, true);
+
+  const cancelResult = await fakeServer.tools['cancel_ci_wait']({ ticket_id: ticket.id }, {});
+  const cancelBody = JSON.parse(cancelResult.content[0].text);
+  assert.equal(cancelBody.cancelled, true);
+});
+
+// ── tryRecordOutcome / markDelivered — the two-phase CAS (review round 1, P0) ─
+
+test('tryRecordOutcome: two concurrent calls with the same expected prior context — exactly one wins, pending_ci_wait untouched', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome: { kind: 'resolved', message: 'x', resolved_at: new Date().toISOString() } });
+
+  const [a, b] = await Promise.all([
+    ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx),
+    ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx),
+  ]);
+  const winners = [a, b].filter(Boolean).length;
+  assert.equal(winners, 1, 'exactly one of the two concurrent CAS calls must win');
+
+  const after1 = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after1.pending_ci_wait, true, 'recording the outcome must NOT clear pending_ci_wait — that is markDelivered\'s job, not this one\'s');
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('markDelivered: two concurrent calls on the same ticket — exactly one wins', async () => {
   const ticket = await makeTicket();
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
 
   const [a, b] = await Promise.all([
-    ciWaitService.claimResolved(ticket.id),
-    ciWaitService.claimResolved(ticket.id),
+    ciWaitService.markDelivered(ticket.id),
+    ciWaitService.markDelivered(ticket.id),
   ]);
   const winners = [a, b].filter(Boolean).length;
-  assert.equal(winners, 1, 'exactly one of the two concurrent claims must win the atomic CAS');
+  assert.equal(winners, 1);
 
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(fresh.pending_ci_wait, false);
@@ -168,18 +294,10 @@ test('claimResolved: two concurrent claims on the same ticket — exactly one wi
 
 test('sweep(): a completed successful run resolves the wait exactly once — comment + dispatch fire once, not twice, under a concurrent double-sweep', async () => {
   const ticket = await makeTicket();
-  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999', head_sha: 'deadbeef' });
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999', head_sha: 'a'.repeat(40) });
 
   const dispatchCalls = [];
-  const githubStub = {
-    // Both racing sweeps may independently read the run before either wins
-    // the claim (a harmless duplicate READ) — only the WRITE-side claim
-    // needs to be exactly-once, which the assertions below verify.
-    async getWorkflowRun() {
-      return { id: '999', status: 'completed', conclusion: 'success', html_url: 'https://x/999', created_at: '', updated_at: '', head_sha: 'deadbeef' };
-    },
-  };
-  const resumer = makeResumer(githubStub, dispatchCalls);
+  const resumer = makeResumer(SUCCESS_GITHUB_STUB, dispatchCalls);
 
   // Simulate two overlapping sweep ticks (e.g. a slow prior tick still
   // running when the interval fires again) racing to resolve the SAME wait.
@@ -215,9 +333,9 @@ test('sweep(): a still-running run is left untouched (no comment, no dispatch, s
 
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(fresh.pending_ci_wait, true, 'still-running run must leave the wait registered for the next sweep');
+  const ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.outcome, undefined, 'no outcome should be recorded while the run is still in flight');
 
-  // Clean up — this ticket is deliberately left pending above; clear it so
-  // it cannot leak into a LATER test's sweep() and pollute its aggregate stats.
   await ciWaitService.cancelWait(ticket.id);
 });
 
@@ -306,4 +424,125 @@ test('sweep(): disabled (CI_WAIT_ENABLED=false) config short-circuits with skipp
   const stats = await resumer.sweep();
   assert.equal(stats.skipped_disabled, true);
   assert.equal(stats.scanned, 0);
+
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+// ── P0 crash/exception recovery (review round 1) ─────────────────────────
+
+test('crash recovery: outcome already recorded (phase 1 done, process died before delivery) — next sweep completes delivery without re-polling GitHub', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  // Simulate "a prior sweep tick called tryRecordOutcome and then the
+  // process died" by calling it directly, bypassing _deliver entirely.
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const outcome = { kind: 'resolved', message: '✅ **CI 대기 완료** — pre-recorded outcome', resolved_at: new Date().toISOString() };
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
+  const won = await ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx);
+  assert.equal(won, true);
+
+  const midCrash = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(midCrash.pending_ci_wait, true, 'still a sweep candidate — this is the whole point of the two-phase design');
+  const noComments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(noComments.length, 0, 'delivery never ran yet');
+
+  // A GitHub stub that throws proves the recovery sweep does NOT re-poll —
+  // it should find ctx.outcome already set and skip straight to delivery.
+  let githubCalled = false;
+  const dispatchCalls = [];
+  const resumer = makeResumer({ async getWorkflowRun() { githubCalled = true; throw new Error('must not be called — outcome already recorded'); } }, dispatchCalls);
+
+  await resumer.sweep();
+
+  assert.equal(githubCalled, false, 'a resolved-but-undelivered ticket must not re-poll GitHub');
+  assert.equal(dispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1);
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].content, /pre-recorded outcome/);
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false, 'recovery sweep must complete delivery and finally clear the wait');
+});
+
+test('crash recovery: comment posted but dispatch threw (partial success) — retried next sweep WITHOUT duplicating the comment, then completes', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  const dispatchCalls = [];
+  const failingResumer = makeResumer(SUCCESS_GITHUB_STUB, dispatchCalls, () => { throw new Error('dispatch transiently failed'); });
+
+  await failingResumer.sweep();
+
+  // Comment landed, dispatch was attempted and failed — must NOT be marked delivered.
+  const comments1 = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments1.length, 1, 'the comment side effect must have landed');
+  assert.equal(dispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1);
+  const midway = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(midway.pending_ci_wait, true, 'a dispatch failure must leave the wait retryable, not lost');
+
+  // Retry with a resumer whose GitHub stub would throw if called (proving
+  // no re-poll — the outcome, including the comment message, is reused) and
+  // whose dispatch now succeeds.
+  const retryDispatchCalls = [];
+  const retryResumer = makeResumer(
+    { async getWorkflowRun() { throw new Error('must not be called — outcome already recorded'); } },
+    retryDispatchCalls,
+  );
+  await retryResumer.sweep();
+
+  const comments2 = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments2.length, 1, 'retry must NOT duplicate the resolution comment');
+  assert.equal(retryDispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1, 'retry must actually re-attempt dispatch');
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false, 'once dispatch succeeds on retry, the wait must finally clear');
+});
+
+test('crash recovery: comment write itself failed — retried next sweep, dispatch never attempted until the comment lands', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  // Force the comment save to fail by temporarily breaking the repository —
+  // simplest reliable way: pass a ticket_id that violates the FK the moment
+  // the comment tries to save is awkward with sql.js's loose typing, so
+  // instead monkey-patch dataSource.getRepository for Comment to return a
+  // repo whose .save() rejects, scoped to this resumer instance only.
+  const dispatchCalls = [];
+  const resumer = makeResumer(SUCCESS_GITHUB_STUB, dispatchCalls);
+  // CiWaitResumeService only ever calls `.getRepository(...)` on
+  // `this.dataSource` (never `.transaction()`/`.query()`/etc.), so a thin
+  // wrapper implementing just that one method is a complete, safe stand-in —
+  // no need to preserve the rest of the real DataSource's surface.
+  const realGetRepository = ds.getRepository.bind(ds);
+  let commentSaveAttempts = 0;
+  resumer.dataSource = {
+    getRepository(entity) {
+      const repo = realGetRepository(entity);
+      if (entity === Comment) {
+        return new Proxy(repo, {
+          get(target, prop, receiver) {
+            if (prop === 'save' && commentSaveAttempts === 0) {
+              return async () => { commentSaveAttempts++; throw new Error('transient comment write failure'); };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        });
+      }
+      return repo;
+    },
+  };
+
+  await resumer.sweep();
+  assert.equal(commentSaveAttempts, 1);
+  assert.equal(dispatchCalls.length, 0, 'dispatch must not be attempted before the comment is durably posted');
+  const midway = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(midway.pending_ci_wait, true);
+
+  // Retry — this time the SAME resumer's proxy no longer intercepts .save()
+  // (commentSaveAttempts is already 1), so the comment goes through for real.
+  await resumer.sweep();
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1);
+  assert.equal(dispatchCalls.length, 1);
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false);
 });
