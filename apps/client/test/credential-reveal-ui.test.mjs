@@ -4,7 +4,37 @@ import fs from 'node:fs';
 import { setupDom, mount, click, run, React, act } from './helpers/jsdom.mjs';
 import { api } from '../src/api.ts';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
+import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
+
+// CredentialManager가 이제 CliAutoLogin(티켓 b2e79108)을 무조건 렌더링하고, 이 컴포넌트는
+// useBoardStreamEvent로 BoardStreamProvider를 요구한다. BoardStreamProvider의 내부 pub/sub
+// 버스는 Node 전역 EventTarget이라 setupDom이 덮어쓰는 jsdom Event/CustomEvent를 거부하므로
+// (smoke-artifact-close-on-navigate.test.mjs와 동일 처리), 마운트 전 pristine Node 생성자를
+// 붙잡아 setupDom 후 복원한다 — 이 파일은 DOM 이벤트를 전부 window.Event로 디스패치해 안전하다.
+const NodeEvent = globalThis.Event;
+const NodeCustomEvent =
+  globalThis.CustomEvent ||
+  class CustomEvent extends NodeEvent {
+    constructor(type, opts = {}) {
+      super(type, opts);
+      this.detail = opts.detail ?? null;
+    }
+  };
+
+class FakeEventSource {
+  static CLOSED = 2;
+  constructor() {
+    this.readyState = 1;
+    this.onopen = null;
+    this.onerror = null;
+  }
+  addEventListener() {}
+  removeEventListener() {}
+  close() {
+    this.readyState = 2;
+  }
+}
 
 const source = fs.readFileSync(
   new URL('../src/components/admin/CredentialManager.tsx', import.meta.url),
@@ -82,6 +112,9 @@ async function mountCredentialManager(t) {
   globalThis.sessionStorage = dom.window.sessionStorage;
   dom.window.HTMLElement.prototype.attachEvent = () => {};
   dom.window.HTMLElement.prototype.detachEvent = () => {};
+  globalThis.Event = NodeEvent;
+  globalThis.CustomEvent = NodeCustomEvent;
+  globalThis.EventSource = FakeEventSource;
   localStorage.setItem('auth_token', 'admin-session');
 
   const originals = {
@@ -106,7 +139,11 @@ async function mountCredentialManager(t) {
     React.createElement(
       AuthProvider,
       null,
-      React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
+      React.createElement(
+        BoardStreamProvider,
+        null,
+        React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
+      ),
     ),
   );
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
