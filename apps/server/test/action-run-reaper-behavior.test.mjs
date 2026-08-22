@@ -17,8 +17,11 @@
 //   - age >= TTL, has source ticket, mid-retry (shouldResume=false)
 //                                                    -> reaped, ticket NOT resumed (retry run owns it)
 //   - no source ticket (cron/manual/on-ticket-done run) -> preserved regardless
-//     of age; those runs never received the completion contract, so 'running'
-//     is a permanent, correct state, not a zombie
+//     of age; the sweep scope still excludes these on purpose (ticket b273d603:
+//     dispatch() now injects a standalone completion contract into these runs
+//     too, but widening the reaper to match would need to tell pre-fix orphaned
+//     runs apart from ones that can actually complete now — deferred as a
+//     follow-up rather than done here)
 //   - age >= TTL, but completeRun reports previouslyCompleted (a real
 //     complete_action_run raced the sweep)           -> NOT counted as reaped, no resume
 //   - a second sweep after a reap is idempotent (row already terminal)
@@ -202,7 +205,7 @@ test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT r
   assert.equal(triggerLoop.calls.length, 0, 'no resume dispatch — completeRun said shouldResume=false');
 });
 
-test('run with no source ticket (cron/manual/on-ticket-done dispatch) is preserved even past the TTL — its target agent never received the completion contract, so running is a permanent, correct state, not a zombie', async () => {
+test('run with no source ticket (cron/manual/on-ticket-done dispatch) is preserved even past the TTL — the sweep scope deliberately excludes these (ticket b273d603 follow-up), not because the run can never complete', async () => {
   const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '' })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);

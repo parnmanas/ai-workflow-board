@@ -44,10 +44,11 @@ test('ActionRunReaperService source defines the sweep loop, TTL gate, and env co
   // Only the non-terminal 'running' status may be reaped (ActionRun has no
   // 'pending' stage, unlike QaRun).
   assert.match(code, /status\s*:\s*['"]running['"]/, 'must scope the sweep to running runs');
-  // Runs without a source_ticket_id never received the complete_action_run
-  // completion contract (actions.service.ts only renders it when a source
-  // ticket is present), so their target agent never learned the run_id and
-  // 'running' is a permanent, correct state for them — not a zombie. This must
+  // Runs without a source_ticket_id are still excluded from the sweep on
+  // purpose (ticket b273d603: actions.service.ts now injects a standalone
+  // completion contract into these runs too, but the reaper's exclusion stays
+  // until a follow-up ticket can tell pre-fix orphaned runs apart from ones
+  // that can actually complete now). This must
   // be excluded at the candidate QUERY (not a JS-loop skip after the fact) —
   // a loop skip still spends the take(ACTION_RUN_REAPER_BATCH) budget on
   // contract-less rows, so once they outnumber the batch size a real, newer

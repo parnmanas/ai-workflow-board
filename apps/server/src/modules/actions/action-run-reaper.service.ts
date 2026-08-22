@@ -40,16 +40,17 @@
  * Env: ACTION_RUN_REAPER_ENABLED(기본 on), ACTION_RUN_REAPER_SWEEP_MS(기본
  * 15분, 1분~1시간 clamp), ACTION_RUN_TTL_MS(기본 2시간, 5분~24시간 clamp).
  *
- * 스윕 후보는 `source_ticket_id`가 있는 run으로 한정한다 —
- * `complete_action_run` 완료 계약은 `sourceTicketId`가 있을 때만 프롬프트에
- * 주입되므로(actions.service.ts renderPrompt), cron(action-scheduler.service.ts)·
- * 수동 UI 실행(actions.controller.ts)·on-ticket-done(on-ticket-done-action.
- * service.ts) 경로로 디스패치된 run은 대상 에이전트가 run_id 자체를 모른다.
- * 이런 run의 `status='running'`은 좀비가 아니라 이 run 타입의 영구적으로
- * 정상인 종착 상태이므로, 이 게이트 없이 스윕하면 정상 이력을 전부 거짓
- * failed로 오염시킨다. 이 게이트를 통과하는 대상은 티켓 구동 run으로
- * 좁혀지므로, 형제 리퍼(QA/Security 6시간)보다 짧은 2시간 기본 TTL도 방어
- * 가능하다고 판단했다 — zero-progress 같은 빠른 퓨즈나 room 최근 메시지
+ * 스윕 후보는 `source_ticket_id`가 있는 run으로 한정한다 (티켓 b273d603 수정
+ * 이후에도 유지되는 제약). `dispatch()`는 이제 `sourceTicketId`가 없는 run(사람
+ * UI 트리거·cron·on-ticket-done)에도 완료 계약을 주입하지만(재개/재시도 언급이
+ * 없는 standalone 버전 — actions.service.ts의 `renderStandaloneCompletionContract`
+ * 참고) 이 게이트는 그대로 좁혀둔다: 이 수정 이전에 디스패치돼 애초에 완료
+ * 계약을 못 받은 채 `running`에 멈춰있는 기존 run들까지 게이트를 넓히는
+ * 순간 거짓 `failed`로 오염되기 때문이다. 신규(완료 가능) run과 구(舊) orphan
+ * run을 구분할 방법이 생기기 전까지는 스윕 대상 확장을 별도 후속 티켓으로
+ * 미룬다. 이 게이트를 통과하는 대상은 티켓 구동 run으로 좁혀지므로, 형제
+ * 리퍼(QA/Security 6시간)보다 짧은 2시간 기본 TTL도 방어 가능하다고
+ * 판단했다 — zero-progress 같은 빠른 퓨즈나 room 최근 메시지
  * (`ChatRoom.last_message_at`) 기반 liveness 신호는 넣지 않았다(over-eng 회피).
  * TTL을 6시간으로 올리고 싶으면 `ACTION_RUN_TTL_MS`로 바로 조정 가능하다.
  */
