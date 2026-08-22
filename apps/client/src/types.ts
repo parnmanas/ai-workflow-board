@@ -957,6 +957,8 @@ export interface CliLoginInstanceOption {
   workspace_id: string | null;
   codex_installed: boolean;
   codex_healthy: boolean;
+  claude_installed: boolean;
+  claude_healthy: boolean;
 }
 
 export type CliLoginSessionStatus =

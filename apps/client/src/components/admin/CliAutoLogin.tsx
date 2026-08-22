@@ -9,22 +9,48 @@ import { Button, Input, Modal, Select } from '../common';
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'timed_out', 'cancelled']);
 const POLL_INTERVAL_MS = 3000;
 
-function instanceLabel(inst: CliLoginInstanceOption): string {
-  if (inst.codex_installed && inst.codex_healthy) return inst.hostname;
-  if (inst.codex_installed) return `${inst.hostname} (codex installed, health unknown)`;
-  return `${inst.hostname} (codex not detected — may still work)`;
+type CliProvider = 'codex' | 'claude';
+
+const CLI_LABELS: Record<CliProvider, string> = {
+  codex: 'Codex',
+  claude: 'Claude',
+};
+
+// 로그인 다이얼로그 설명문에만 쓰는 안내용 커맨드 문자열 — 실제 spawn은
+// agent-manager의 CliLoginManager가 담당(apps/agent-manager/src/lib/cli-login.ts).
+const CLI_LOGIN_COMMAND: Record<CliProvider, string> = {
+  codex: 'codex login --device-auth',
+  claude: 'claude auth login',
+};
+
+function cliLabelOf(cli: string): string {
+  return CLI_LABELS[cli as CliProvider] ?? cli;
+}
+
+function instanceLabel(inst: CliLoginInstanceOption, provider: CliProvider): string {
+  const installed = provider === 'claude' ? inst.claude_installed : inst.codex_installed;
+  const healthy = provider === 'claude' ? inst.claude_healthy : inst.codex_healthy;
+  const label = CLI_LABELS[provider].toLowerCase();
+  if (installed && healthy) return inst.hostname;
+  if (installed) return `${inst.hostname} (${label} installed, health unknown)`;
+  return `${inst.hostname} (${label} not detected — may still work)`;
 }
 
 function statusMessage(session: CliLoginSession): string {
+  const label = cliLabelOf(session.cli);
   switch (session.status) {
     case 'starting':
-      return 'Starting Codex login on the Runtime Host…';
+      return `Starting ${label} login on the Runtime Host…`;
     case 'awaiting_user':
-      return 'Open the link below and enter the code to approve.';
+      // claude의 device-auth 흐름은 codex와 달리 사용자가 입력할 one-time
+      // code가 없다 — 링크를 여는 것 자체가 승인의 전부다.
+      return session.user_code
+        ? 'Open the link below and enter the code to approve.'
+        : 'Open the link below in your browser to approve.';
     case 'completing':
       return 'Approved — finishing up…';
     case 'succeeded':
-      return 'Codex credential created.';
+      return `${label} credential created.`;
     case 'failed':
       return session.error_detail || 'Login failed.';
     case 'timed_out':
@@ -47,10 +73,11 @@ export default function CliAutoLogin({
 }) {
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
+  const [provider, setProvider] = useState<CliProvider>('codex');
   const [instances, setInstances] = useState<CliLoginInstanceOption[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(false);
   const [instanceId, setInstanceId] = useState('');
-  const [credentialName, setCredentialName] = useState('Codex login');
+  const [credentialName, setCredentialName] = useState(`${CLI_LABELS.codex} login`);
   const [starting, setStarting] = useState(false);
   const [session, setSession] = useState<CliLoginSession | null>(null);
   const [error, setError] = useState('');
@@ -75,10 +102,21 @@ export default function CliAutoLogin({
     if (open && !session) void loadInstances();
   }, [open, session, loadInstances]);
 
-  const reset = () => {
+  const reset = (nextProvider: CliProvider = provider) => {
     setSession(null);
     setError('');
-    setCredentialName('Codex login');
+    setProvider(nextProvider);
+    setCredentialName(`${CLI_LABELS[nextProvider]} login`);
+  };
+
+  const changeProvider = (next: CliProvider) => {
+    // Only overwrite the name if it still matches the outgoing provider's
+    // default — an operator-typed custom name must never be clobbered by a
+    // provider switch.
+    if (!credentialName.trim() || credentialName === `${CLI_LABELS[provider]} login`) {
+      setCredentialName(`${CLI_LABELS[next]} login`);
+    }
+    setProvider(next);
   };
 
   const close = () => {
@@ -104,7 +142,7 @@ export default function CliAutoLogin({
       const started = await api.startCliLogin({
         scope: isGlobal ? 'global' : 'workspace',
         workspace_id: isGlobal ? undefined : workspaceId,
-        cli: 'codex',
+        cli: provider,
         credential_name: credentialName.trim(),
         instance_id: instanceId,
       });
@@ -172,12 +210,12 @@ export default function CliAutoLogin({
   return (
     <>
       <Button variant="primary" size="md" onClick={() => setOpen(true)}>
-        Log in with Codex
+        Log in with CLI
       </Button>
       <Modal
         isOpen={open}
         onClose={close}
-        title="Codex Login"
+        title={`${cliLabelOf(session?.cli ?? provider)} Login`}
         maxWidth={520}
         footer={
           !session ? (
@@ -192,7 +230,7 @@ export default function CliAutoLogin({
           ) : TERMINAL_STATUSES.has(session.status) ? (
             <>
               {session.status !== 'succeeded' && (
-                <Button variant="secondary" onClick={reset}>
+                <Button variant="secondary" onClick={() => reset()}>
                   Try Again
                 </Button>
               )}
@@ -210,16 +248,25 @@ export default function CliAutoLogin({
         {!session ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              AWB runs <code>codex login --device-auth</code> on a Runtime Host for you — no terminal or
+              AWB runs <code>{CLI_LOGIN_COMMAND[provider]}</code> on a Runtime Host for you — no terminal or
               file upload needed. You'll just approve the login in your browser.
             </div>
+            <Select
+              label="CLI"
+              value={provider}
+              onChange={(e) => changeProvider(e.target.value as CliProvider)}
+              options={[
+                { value: 'codex', label: CLI_LABELS.codex },
+                { value: 'claude', label: CLI_LABELS.claude },
+              ]}
+            />
             <Select
               label="Runtime Host"
               value={instanceId}
               onChange={(e) => setInstanceId(e.target.value)}
               disabled={instancesLoading || instances.length === 0}
               placeholder={instancesLoading ? 'Loading…' : instances.length === 0 ? 'No Runtime Host online' : undefined}
-              options={instances.map((i) => ({ value: i.instance_id, label: instanceLabel(i) }))}
+              options={instances.map((i) => ({ value: i.instance_id, label: instanceLabel(i, provider) }))}
             />
             {!instancesLoading && instances.length === 0 && (
               <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
@@ -282,8 +329,8 @@ export default function CliAutoLogin({
                 }}
               >
                 <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                  Couldn't recognize the login prompt automatically — here's what Codex printed. Look for a
-                  URL and a one-time code below.
+                  Couldn't recognize the login prompt automatically — here's what {cliLabelOf(session.cli)} printed.
+                  Look for a URL (and a one-time code, if shown) below.
                 </div>
                 <pre
                   style={{
