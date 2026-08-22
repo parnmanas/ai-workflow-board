@@ -4,23 +4,29 @@
 // the dual-DB migration-free config-column convention). Mirrors
 // hard-budget-guard.test.mjs's bootstrap shape.
 //
-// Central regressions this file exists to pin (review round 1 findings):
+// Central regressions this file exists to pin:
 //
-//   P0 — a wait must resolve EXACTLY ONCE even when the resolution path
-//   races itself (two overlapping sweep ticks, or a sweep racing an
-//   explicit cancel) AND must NEVER be lost when a crash/exception lands
-//   between "the run resolved" and "the comment+dispatch side effects
-//   finished" — the old single-step design cleared `pending_ci_wait` (the
-//   only signal that makes a ticket a sweep candidate) BEFORE the side
-//   effects ran, so a crash there was a silent, permanent loss of the
-//   resume. The two-phase design (tryRecordOutcome, then _deliver, then
-//   markDelivered) is tested here for BOTH directions: no double-delivery
-//   under a race, AND full recovery after a crash/exception anywhere in the
-//   comment-then-dispatch chain.
+//   Review round 1 (P0) — a wait must resolve EXACTLY ONCE even when the
+//   resolution path races itself, AND must NEVER be lost when a
+//   crash/exception lands between "the run resolved" and "the
+//   comment+dispatch side effects finished". Fixed by recording the outcome
+//   (phase 1) WITHOUT clearing `pending_ci_wait`.
 //
-//   P1 — run_id/head_sha must be validated against their real external
-//   formats (not just non-empty), both at the service layer and through the
-//   actual registered MCP tool handler (not bypassing it).
+//   Review round 1 (P1) — run_id/head_sha must be validated against their
+//   real external formats, both at the service layer and through the actual
+//   registered MCP tool handler.
+//
+//   Review round 2 (P0 continued) — recording the outcome alone was not
+//   enough: every sweep that saw `ctx.outcome` present went straight into
+//   comment+dispatch with NO coordination between concurrent/retried
+//   attempts, so (a) two sweeps racing AFTER the outcome was already
+//   recorded could both deliver, and (b) `markDelivered`'s CAS on
+//   `pending_ci_wait: true` alone let a stale in-flight delivery clear a
+//   brand-new wait that raced in via cancel+re-register. Fixed by a
+//   lease-based durable outbox (`lease_owner`/`lease_expires_at`/
+//   `delivery_generation`, mirroring `DispatchIntentService.claimForDispatch`)
+//   plus durable per-step flags (`comment_posted`/`dispatch_done`) plus
+//   pinning `markDelivered`'s CAS to the exact finished context.
 //
 // GitHub reads are stubbed by monkey-patching the `.github` property after
 // construction — CiWaitResumeService compiles `private readonly github` to a
@@ -95,6 +101,17 @@ function makeResumer(githubStub, dispatchCalls, dispatchImpl) {
 }
 
 const SUCCESS_GITHUB_STUB = { async getWorkflowRun() { return { id: '999', status: 'completed', conclusion: 'success', html_url: 'https://x/999', created_at: '', updated_at: '', head_sha: '' }; } };
+const THROWING_GITHUB_STUB = { async getWorkflowRun() { throw new Error('must not be called — outcome already recorded'); } };
+
+/** Full outcome shape (post round-2 redesign) — pass overrides for the bits a test cares about. */
+function makeOutcome(overrides = {}) {
+  return {
+    kind: 'resolved', message: 'x', resolved_at: new Date().toISOString(),
+    delivery_generation: 0, lease_owner: '', lease_expires_at: '',
+    comment_posted: false, dispatch_done: false,
+    ...overrides,
+  };
+}
 
 after(async () => {
   await ds.destroy();
@@ -255,17 +272,17 @@ test('await_ci_run MCP tool handler accepts a valid payload and cancel_ci_wait c
   assert.equal(cancelBody.cancelled, true);
 });
 
-// ── tryRecordOutcome / markDelivered — the two-phase CAS (review round 1, P0) ─
+// ── tryUpdateContext / markDelivered — the lease-based CAS primitives ────
 
-test('tryRecordOutcome: two concurrent calls with the same expected prior context — exactly one wins, pending_ci_wait untouched', async () => {
+test('tryUpdateContext: two concurrent calls with the same expected prior context — exactly one wins, pending_ci_wait untouched', async () => {
   const ticket = await makeTicket();
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
-  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome: { kind: 'resolved', message: 'x', resolved_at: new Date().toISOString() } });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome: makeOutcome() });
 
   const [a, b] = await Promise.all([
-    ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx),
-    ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx),
+    ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx),
+    ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx),
   ]);
   const winners = [a, b].filter(Boolean).length;
   assert.equal(winners, 1, 'exactly one of the two concurrent CAS calls must win');
@@ -275,19 +292,52 @@ test('tryRecordOutcome: two concurrent calls with the same expected prior contex
   await ciWaitService.cancelWait(ticket.id);
 });
 
-test('markDelivered: two concurrent calls on the same ticket — exactly one wins', async () => {
+test('markDelivered: two concurrent calls with the same expected context — exactly one wins', async () => {
   const ticket = await makeTicket();
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
 
   const [a, b] = await Promise.all([
-    ciWaitService.markDelivered(ticket.id),
-    ciWaitService.markDelivered(ticket.id),
+    ciWaitService.markDelivered(ticket.id, fresh.ci_wait_context),
+    ciWaitService.markDelivered(ticket.id, fresh.ci_wait_context),
   ]);
   const winners = [a, b].filter(Boolean).length;
   assert.equal(winners, 1);
 
-  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
-  assert.equal(fresh.pending_ci_wait, false);
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false);
+});
+
+test('markDelivered: review round 2 — a stale in-flight delivery for an OLD wait cannot clear a brand-new wait registered via cancel+re-register in between', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '111' });
+  const waitAState = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const staleFinishedContextA = JSON.stringify({
+    ...JSON.parse(waitAState.ci_wait_context),
+    outcome: makeOutcome({ comment_posted: true, dispatch_done: true }),
+  });
+  // waitAState.ci_wait_context (without the outcome) is what a stale
+  // in-flight delivery for wait A would still be holding as its "expected"
+  // parameter if it read the ticket BEFORE this test's simulated race —
+  // but to make the race concrete, simulate the delivery having gotten all
+  // the way to "ready to call markDelivered" for wait A's ORIGINAL context
+  // (post-outcome, pre-clear), then have wait A get cancelled and a fresh
+  // wait B registered before the stale caller's markDelivered finally runs.
+
+  await ciWaitService.cancelWait(ticket.id);
+  await ciWaitService.registerWait(ticket.id, { owner: 'o2', repo: 'r2', run_id: '222' });
+  const waitBState = await ticketRepo.findOne({ where: { id: ticket.id } });
+
+  const staleWon = await ciWaitService.markDelivered(ticket.id, staleFinishedContextA);
+  assert.equal(staleWon, false, 'a stale delivery for wait A must NOT be able to clear wait B');
+
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, true, 'wait B must still be active');
+  assert.equal(after.ci_wait_context, waitBState.ci_wait_context, 'wait B\'s context must be completely untouched by the stale call');
+  const ctxB = JSON.parse(after.ci_wait_context);
+  assert.equal(ctxB.run_id, '222');
+
+  await ciWaitService.cancelWait(ticket.id);
 });
 
 // ── Full sweep, via CiWaitResumeService ──────────────────────────────────
@@ -300,10 +350,8 @@ test('sweep(): a completed successful run resolves the wait exactly once — com
   const resumer = makeResumer(SUCCESS_GITHUB_STUB, dispatchCalls);
 
   // Simulate two overlapping sweep ticks (e.g. a slow prior tick still
-  // running when the interval fires again) racing to resolve the SAME wait.
-  // Assertions are scoped to THIS ticket's id throughout (not raw summed
-  // stats) so the test stays correct regardless of whatever else the shared
-  // DataSource happens to hold.
+  // running when the interval fires again) racing to resolve the SAME wait
+  // starting from "not yet resolved" (races on the phase-1 outcome CAS).
   await Promise.all([resumer.sweep(), resumer.sweep()]);
 
   const dispatchesForTicket = dispatchCalls.filter((c) => c.ticketId === ticket.id);
@@ -318,6 +366,116 @@ test('sweep(): a completed successful run resolves the wait exactly once — com
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(fresh.pending_ci_wait, false);
   assert.equal(fresh.ci_wait_context, '');
+});
+
+test('sweep(): review round 2 — concurrent double-sweep AFTER the outcome is already recorded still delivers exactly once (lease collision)', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+  // Simulate "a prior sweep already recorded the outcome (phase 1 done) and
+  // then crashed before ever entering _deliver" — every sweep from here on
+  // reads ctx.outcome as already present and goes STRAIGHT into _deliver,
+  // which is exactly the round-2 gap: without the lease, both racing sweeps
+  // would see no comment posted yet and both post.
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const outcome = makeOutcome({ message: '✅ pre-recorded, racing delivery' });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
+  const won = await ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx);
+  assert.equal(won, true);
+
+  const dispatchCalls = [];
+  const resumer = makeResumer(THROWING_GITHUB_STUB, dispatchCalls);
+
+  await Promise.all([resumer.sweep(), resumer.sweep()]);
+
+  const dispatchesForTicket = dispatchCalls.filter((c) => c.ticketId === ticket.id);
+  assert.equal(dispatchesForTicket.length, 1, 'the lease must let only ONE of the two racing sweeps actually dispatch');
+
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1, 'the lease must let only ONE of the two racing sweeps actually post the comment');
+  assert.match(comments[0].content, /pre-recorded, racing delivery/);
+
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false);
+});
+
+test('sweep(): a fresh (unexpired) delivery lease held by another attempt is left alone — no duplicate comment/dispatch', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const outcome = makeOutcome({
+    lease_owner: 'some-other-in-flight-attempt',
+    lease_expires_at: new Date(Date.now() + 60_000).toISOString(), // still fresh
+  });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
+  await ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx);
+
+  const dispatchCalls = [];
+  const resumer = makeResumer(THROWING_GITHUB_STUB, dispatchCalls);
+  await resumer.sweep();
+
+  assert.equal(dispatchCalls.length, 0, 'must not dispatch while another attempt\'s lease is still fresh');
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 0, 'must not post while another attempt\'s lease is still fresh');
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, true, 'still pending — the lease-holder (or its expiry) owns resolution');
+
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): an EXPIRED delivery lease (crashed attempt) is reclaimed and delivery completes', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const outcome = makeOutcome({
+    message: '✅ recorded before the crash',
+    lease_owner: 'a-crashed-attempt',
+    lease_expires_at: new Date(Date.now() - 1000).toISOString(), // already expired
+  });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
+  await ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx);
+
+  const dispatchCalls = [];
+  const resumer = makeResumer(THROWING_GITHUB_STUB, dispatchCalls);
+  await resumer.sweep();
+
+  assert.equal(dispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1, 'an expired lease must be reclaimable');
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1);
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false);
+});
+
+test('sweep(): review round 2 — both durable flags already true (crash landed between dispatch success and markDelivered) — next sweep clears WITHOUT re-posting or re-dispatching', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  // Simulate: a prior attempt claimed the lease, posted the comment,
+  // successfully called dispatchCurrentColumn, durably flipped BOTH flags —
+  // then crashed in the sub-window before its own markDelivered call landed.
+  const outcome = makeOutcome({
+    lease_owner: 'crashed-right-before-markDelivered',
+    lease_expires_at: new Date(Date.now() - 1000).toISOString(),
+    comment_posted: true,
+    dispatch_done: true,
+  });
+  const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
+  await ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx);
+
+  const dispatchCalls = [];
+  // Both stubs throw if actually invoked — proves the recovery sweep does
+  // NOT redo either side effect, exactly the scenario review round 2
+  // explicitly asked for ("dispatch intent 기록/소비 뒤 clear 전 크래시 →
+  // 다음 sweep에서도 재개 실행 1회" — here the count across the crash +
+  // retry stays at the ZERO additional dispatches this recovery performs).
+  const resumer = makeResumer(THROWING_GITHUB_STUB, dispatchCalls, () => { throw new Error('must not be called — dispatch_done was already true'); });
+
+  await resumer.sweep();
+
+  assert.equal(dispatchCalls.length, 0, 'dispatch_done=true must prevent any further dispatch attempt');
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 0, 'comment_posted=true must prevent any further comment attempt (none was ever actually saved in this simulation)');
+  const after = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(after.pending_ci_wait, false, 'the defensive backstop must still clear the wait once both flags are true');
 });
 
 test('sweep(): a still-running run is left untouched (no comment, no dispatch, still pending)', async () => {
@@ -428,34 +586,30 @@ test('sweep(): disabled (CI_WAIT_ENABLED=false) config short-circuits with skipp
   await ciWaitService.cancelWait(ticket.id);
 });
 
-// ── P0 crash/exception recovery (review round 1) ─────────────────────────
+// ── P0 crash/exception recovery (review round 1, adapted to the round-2 lease design) ─
 
 test('crash recovery: outcome already recorded (phase 1 done, process died before delivery) — next sweep completes delivery without re-polling GitHub', async () => {
   const ticket = await makeTicket();
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
 
-  // Simulate "a prior sweep tick called tryRecordOutcome and then the
-  // process died" by calling it directly, bypassing _deliver entirely.
+  // Simulate "a prior sweep tick recorded the outcome and then the process
+  // died" by calling tryUpdateContext directly, bypassing _deliver entirely.
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
-  const outcome = { kind: 'resolved', message: '✅ **CI 대기 완료** — pre-recorded outcome', resolved_at: new Date().toISOString() };
+  const outcome = makeOutcome({ message: '✅ **CI 대기 완료** — pre-recorded outcome' });
   const nextCtx = JSON.stringify({ ...JSON.parse(fresh.ci_wait_context), outcome });
-  const won = await ciWaitService.tryRecordOutcome(ticket.id, fresh.ci_wait_context, nextCtx);
+  const won = await ciWaitService.tryUpdateContext(ticket.id, fresh.ci_wait_context, nextCtx);
   assert.equal(won, true);
 
   const midCrash = await ticketRepo.findOne({ where: { id: ticket.id } });
-  assert.equal(midCrash.pending_ci_wait, true, 'still a sweep candidate — this is the whole point of the two-phase design');
+  assert.equal(midCrash.pending_ci_wait, true, 'still a sweep candidate — this is the whole point of the design');
   const noComments = await commentRepo.find({ where: { ticket_id: ticket.id } });
   assert.equal(noComments.length, 0, 'delivery never ran yet');
 
-  // A GitHub stub that throws proves the recovery sweep does NOT re-poll —
-  // it should find ctx.outcome already set and skip straight to delivery.
-  let githubCalled = false;
   const dispatchCalls = [];
-  const resumer = makeResumer({ async getWorkflowRun() { githubCalled = true; throw new Error('must not be called — outcome already recorded'); } }, dispatchCalls);
+  const resumer = makeResumer(THROWING_GITHUB_STUB, dispatchCalls);
 
   await resumer.sweep();
 
-  assert.equal(githubCalled, false, 'a resolved-but-undelivered ticket must not re-poll GitHub');
   assert.equal(dispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1);
   const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
   assert.equal(comments.length, 1);
@@ -479,15 +633,18 @@ test('crash recovery: comment posted but dispatch threw (partial success) — re
   assert.equal(dispatchCalls.filter((c) => c.ticketId === ticket.id).length, 1);
   const midway = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(midway.pending_ci_wait, true, 'a dispatch failure must leave the wait retryable, not lost');
+  const midwayCtx = JSON.parse(midway.ci_wait_context);
+  assert.equal(midwayCtx.outcome.comment_posted, true);
+  assert.equal(midwayCtx.outcome.dispatch_done, false);
 
-  // Retry with a resumer whose GitHub stub would throw if called (proving
-  // no re-poll — the outcome, including the comment message, is reused) and
-  // whose dispatch now succeeds.
+  // Force the lease to look expired so the retry can reclaim it immediately
+  // instead of waiting out the real lease TTL — same technique as the
+  // dedicated lease-expiry test above, applied mid-scenario here.
+  midwayCtx.outcome.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+  await ticketRepo.update(ticket.id, { ci_wait_context: JSON.stringify(midwayCtx) });
+
   const retryDispatchCalls = [];
-  const retryResumer = makeResumer(
-    { async getWorkflowRun() { throw new Error('must not be called — outcome already recorded'); } },
-    retryDispatchCalls,
-  );
+  const retryResumer = makeResumer(THROWING_GITHUB_STUB, retryDispatchCalls);
   await retryResumer.sweep();
 
   const comments2 = await commentRepo.find({ where: { ticket_id: ticket.id } });
@@ -536,6 +693,11 @@ test('crash recovery: comment write itself failed — retried next sweep, dispat
   assert.equal(dispatchCalls.length, 0, 'dispatch must not be attempted before the comment is durably posted');
   const midway = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(midway.pending_ci_wait, true);
+
+  // Force the lease to look expired so the retry can reclaim immediately.
+  const midwayCtx = JSON.parse(midway.ci_wait_context);
+  midwayCtx.outcome.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+  await ticketRepo.update(ticket.id, { ci_wait_context: JSON.stringify(midwayCtx) });
 
   // Retry — this time the SAME resumer's proxy no longer intercepts .save()
   // (commentSaveAttempts is already 1), so the comment goes through for real.
