@@ -129,6 +129,11 @@ export { OntologyReverseEdgeIndex } from './OntologyReverseEdgeIndex';
 // 같은 자세로 db.ts의 ONTOLOGY_ENTITIES를 통해 독립 DataSource(sql.js) /
 // 기존 단일 DataSource(Postgres)에 들어간다.
 export { OntologyEnrichmentQueue } from './OntologyEnrichmentQueue';
+// Graph lifecycle 레지스트리(ticket d35b7b7d, DESIGN.md 축 6) — 위 네
+// 테이블과 같은 자세. graph_status MCP 툴이 이 테이블로 최초 프로비저닝을
+// 원자적으로 선점한다.
+export { OntologyGraph } from './OntologyGraph';
+export type { OntologyGraphStatus } from './OntologyGraph';
 // CLI 자동 로그인(device-auth) 세션 (ticket b2e79108). Auto-DDL'd by TypeORM
 // `synchronize` (D-01) exactly like the sibling tables above; no hand-written
 // migration needed.

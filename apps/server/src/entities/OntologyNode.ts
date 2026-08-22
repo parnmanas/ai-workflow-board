@@ -44,6 +44,8 @@ export type OntologyDurability = 'volatile' | 'stable' | 'frozen';
 @Index(['graph_id', 'symbol_id'], { unique: true })
 @Index(['graph_id', 'path'])
 @Index(['graph_id', 'type', 'layer'])
+// ticket d35b7b7d(Ontology Graph 6/7) — graph_find_symbol의 exact-name 조회용.
+@Index(['graph_id', 'name'])
 @Entity('ontology_nodes')
 export class OntologyNode {
   @PrimaryGeneratedColumn('uuid')
