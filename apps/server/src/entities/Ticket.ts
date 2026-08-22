@@ -244,6 +244,34 @@ export class Ticket {
   @Column({ type: 'boolean', default: false })
   pending_on_tickets: boolean;
 
+  // "Blocked on one external CI run" flag (ticket 778b6dc7). A THIRD pending
+  // flavor alongside `pending_user_action` (human) and `pending_on_tickets`
+  // (another ticket) — registered by the `await_ci_run` MCP tool, typically
+  // from the Merging workflow's pre-landing `workflow_dispatch` check. The
+  // assignee registers the wait and ends the turn; CiWaitResumeService polls
+  // the recorded run server-side and auto-resumes the ticket (re-dispatches
+  // its current-column role holders) the instant the run reaches a terminal
+  // conclusion, or after a bounded timeout if it never resolves — no session
+  // has to stay alive across the run. That "stay alive across a long
+  // external wait" shape is exactly what repeatedly killed sessions mid-wait
+  // (ScheduleWakeup misuse, clean exits) and is what this flag exists to
+  // remove. Checked everywhere `pending_on_tickets` is checked (trigger gate,
+  // focus selector, allocation, backlog promotion, dispatch reconciler,
+  // stuck detector) — see those call sites for the exact parity.
+  @Column({ type: 'boolean', default: false })
+  pending_ci_wait: boolean;
+
+  // JSON context for the active CI wait: {owner, repo, run_id, head_sha,
+  // html_url, registered_by, registered_at}. Empty string when
+  // pending_ci_wait is false. Written by `await_ci_run` (CiWaitService),
+  // read by CiWaitResumeService's sweep to know which run to poll, cleared
+  // by `cancel_ci_wait` or by the sweep's atomic claim once the wait
+  // resolves (success/failure/timeout). Stored as a JSON string like
+  // `handoff_spec` rather than a JSON-array column like `labels` — this is
+  // always at most one object, never a list.
+  @Column({ type: 'text', default: '' })
+  ci_wait_context: string;
+
   // Soft-archive timestamp for the ticket. When non-null the ticket is
   // considered archived: excluded from board GET / SSE payloads / supervisor
   // re-push / backlog promotion / focus selector by default, mutation paths

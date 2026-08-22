@@ -361,7 +361,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       if (scannedIds.has(alert.ticket_id)) continue;
       const liveTicket = await ticketRepo.findOne({ where: { id: alert.ticket_id } });
       if (liveTicket) {
-        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets) {
+        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets || liveTicket.pending_ci_wait) {
           // Manual archive after the alert landed. The archive itself was a
           // deliberate operator action — no need to spam an unstuck chat post
           // to announce that we agree. Drop the row silently so the next
@@ -394,6 +394,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
   private async _intentionalWaitReason(ticket: Ticket): Promise<string | null> {
     if (ticket.archived_at || ticket.pending_user_action) return 'parked';
+
+    // Trusted unconditionally, same posture as pending_user_action above —
+    // unlike pending_on_tickets below, there is no cheap local check to
+    // corroborate "is the wait still genuinely open" (that would mean an
+    // extra GitHub API call from this sweep). CiWaitResumeService owns its
+    // own bounded timeout (CI_WAIT_MAX_AGE_MS), so a wait that never
+    // resolves self-clears there rather than needing this detector to
+    // second-guess it.
+    if (ticket.pending_ci_wait) return 'ci_wait';
 
     if (ticket.pending_on_tickets) {
       const openCount = await this.dataSource.getRepository(TicketPrerequisite)
@@ -444,10 +453,18 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       order: { created_at: 'DESC' },
       select: ['id', 'created_at'],
     });
-    const enteredAt = move?.created_at
-      ? new Date(move.created_at)
-      : new Date(ticket.created_at);
-    const ageMs = now.getTime() - enteredAt.getTime();
+    const columnEnteredAtMs = move?.created_at
+      ? new Date(move.created_at).getTime()
+      : new Date(ticket.created_at).getTime();
+    // 티켓 e1898d71 — `_intentionalWaitReason()`의 억제(선행티켓 대기 /
+    // 사용자 파킹)는 평가만 건너뛸 뿐 이 나이 계산의 시계를 멈추지 않았다.
+    // 그래서 억제가 풀리는 순간 누적된 차단 시간이 그대로 계상돼
+    // promotionDelayMs를 이미 넘긴 상태로 첫 sweep에서 즉시 오탐했다.
+    // 컬럼 진입 시각과 가장 최근 억제 해제 시각 중 더 늦은 쪽을 기준으로
+    // 삼아, 해제 직후엔 promotionDelayMs만큼의 유예를 새로 준다.
+    const unblockedAtMs = await this._latestIntakeUnblockAtMs(ticket.id);
+    const enteredAtMs = Math.max(columnEnteredAtMs, unblockedAtMs);
+    const ageMs = now.getTime() - enteredAtMs;
 
     // A row from a previous active-column stall must not leak into a new intake
     // cycle. Intake comments and ordinary edits never resolve/reset this clock.
@@ -494,6 +511,40 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       await alertRepo.save(existingAlert);
       if (wasDelivered) stats.realerted += 1;
     }
+  }
+
+  /**
+   * 티켓 e1898d71 — intake 승격 억제가 풀린 가장 최근 시각(ms), 없으면 0.
+   * `_intentionalWaitReason()`이 평가 자체를 건너뛰게 만드는 두 억제 경로를
+   * 모두 확인한다:
+   *   - 선행티켓 해제: `field_changed='pending_on_tickets'`, true→false
+   *     (trigger-loop.service.ts의 `_resumePrerequisiteDependents`가 씀,
+   *     actor `Auto-Resume` / trigger_source `prerequisite_reached`).
+   *   - 사용자 파킹 해제(unpend): `field_changed='pending_user_action'`,
+   *     true→false (tickets.controller.ts의 REST PATCH 경로가 씀 — MCP
+   *     `unpend_ticket`은 항상 거부하므로 이 경로만 존재).
+   * 두 억제 모두 같은 방식(평가 스킵, 시계는 미정지)으로 작동하므로 같은
+   * 처리를 적용한다. 둘 중 더 최근 이벤트가 이긴다 — 여러 차례 차단/해제를
+   * 반복했더라도 마지막 해제 시점부터 다시 유예를 준다(누적 차감이 아님).
+   */
+  private async _latestIntakeUnblockAtMs(ticketId: string): Promise<number> {
+    const rows = await this.dataSource.getRepository(ActivityLog).find({
+      where: [
+        {
+          entity_type: 'ticket', entity_id: ticketId, action: 'updated',
+          field_changed: 'pending_on_tickets', old_value: 'true', new_value: 'false',
+        },
+        {
+          entity_type: 'ticket', entity_id: ticketId, action: 'updated',
+          field_changed: 'pending_user_action', old_value: 'true', new_value: 'false',
+        },
+      ],
+      order: { created_at: 'DESC' },
+      take: 1,
+      select: ['id', 'created_at'],
+    });
+    const ts = rows[0]?.created_at ? new Date(rows[0].created_at).getTime() : 0;
+    return Number.isFinite(ts) ? ts : 0;
   }
 
   private async _postPromotionDelayAlert(ticket: Ticket, ageMs: number, column: BoardColumn): Promise<boolean> {

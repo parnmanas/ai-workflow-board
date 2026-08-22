@@ -41,6 +41,12 @@ export interface GitHubWorkflowRun {
   html_url: string;
   created_at: string;
   updated_at: string;
+  // Commit SHA the run was triggered against. Empty string if the caller's
+  // mapped source didn't carry one (defensive default, not expected from a
+  // real GitHub response) — `await_ci_run`/CiWaitResumeService match on this
+  // to catch a run id that no longer corresponds to the SHA it was
+  // registered against.
+  head_sha: string;
 }
 
 // Pure helpers — no DB, no config. Kept as standalone exports.
@@ -89,6 +95,33 @@ export function isValidRepoRef(owner: unknown, repo: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * GitHub Actions run ids are positive decimal integers. Bounded to 20 digits
+ * (the decimal-digit ceiling of a 64-bit unsigned int, `18446744073709551615`)
+ * — enormously more than GitHub will ever issue, but a real technical bound
+ * rather than an arbitrary guess, so a caller-supplied string that is
+ * non-numeric, empty, or absurdly long (injection attempt, copy-paste
+ * mistake, truncation-hiding-a-mismatch) is rejected outright rather than
+ * silently accepted or truncated (ticket 778b6dc7 review — external
+ * identifiers must satisfy the real format in full, never be silently cut
+ * down to fit).
+ */
+const GITHUB_RUN_ID_RE = /^[1-9][0-9]{0,19}$/;
+
+/** Full 40-hex-char SHA-1 commit hash — what `git rev-parse <ref>` (no
+ *  `--short`) and GitHub's REST API both produce. Case-insensitive on input;
+ *  callers should normalize to lowercase before storing/comparing (GitHub's
+ *  own `head_sha` is always lowercase). */
+const GIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+export function isValidGitHubRunId(runId: unknown): boolean {
+  return typeof runId === 'string' && GITHUB_RUN_ID_RE.test(runId);
+}
+
+export function isValidGitSha(sha: unknown): boolean {
+  return typeof sha === 'string' && GIT_SHA_RE.test(sha);
 }
 
 /**
@@ -553,9 +586,45 @@ export class GitHubConnectorService {
         html_url: r.html_url || '',
         created_at: r.created_at || '',
         updated_at: r.updated_at || '',
+        head_sha: r.head_sha || '',
       }));
     } catch (e) {
       if (isGitHubDegradableError(e)) return [];
+      throw e;
+    }
+  }
+
+  /**
+   * One specific run by id (ticket 778b6dc7 — CiWaitResumeService polls a
+   * SINGLE registered run rather than scanning recent runs the way
+   * `listWorkflowRuns`/CiHealthMonitorService do). Same degrade/propagate
+   * contract as `listWorkflowRuns`: null on missing token / 404 (run
+   * deleted, repo gone, bad id), everything else propagates so the poller
+   * observes and logs rather than silently treating a broken credential or
+   * an outage as "not resolved yet".
+   */
+  async getWorkflowRun(
+    owner: string, repo: string, runId: string, credentialId?: string | null, fetchImpl?: typeof fetch,
+  ): Promise<GitHubWorkflowRun | null> {
+    if (!owner || !repo || !runId || !isValidRepoRef(owner, repo)) return null;
+    try {
+      const data = await this.githubFetch(
+        `/repos/${owner}/${repo}/actions/runs/${encodeURIComponent(runId)}`,
+        credentialId,
+        fetchImpl,
+      );
+      return {
+        id: String(data.id),
+        status: data.status || '',
+        conclusion: data.conclusion ?? null,
+        event: data.event || '',
+        html_url: data.html_url || '',
+        created_at: data.created_at || '',
+        updated_at: data.updated_at || '',
+        head_sha: data.head_sha || '',
+      };
+    } catch (e) {
+      if (isGitHubDegradableError(e)) return null;
       throw e;
     }
   }

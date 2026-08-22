@@ -75,6 +75,10 @@ import {
   PRIOR_CI_DISPATCH_GATE_CONTENTS,
   RefreshDefaultPromptTemplatesCiDispatchGate1760000000076,
 } from './migrations/1760000000076-RefreshDefaultPromptTemplatesCiDispatchGate';
+import {
+  PRIOR_CI_WAIT_TOOL_CONTENTS,
+  RefreshDefaultPromptTemplatesCiWaitTool1760000000079,
+} from './migrations/1760000000079-RefreshDefaultPromptTemplatesCiWaitTool';
 
 export interface DriftRegistryEntry {
   /** Matches the `name` column TypeORM writes into the `migrations` history table. */
@@ -96,6 +100,7 @@ export const DRIFT_REGISTRY: DriftRegistryEntry[] = [
   { migrationName: new RefreshDefaultPromptTemplatesPromptAudit1760000000072().name, priorContents: PRIOR_PROMPT_AUDIT_CONTENTS },
   { migrationName: new RefreshDefaultPromptTemplatesReviewDrift1760000000073().name, priorContents: PRIOR_REVIEW_DRIFT_CONTENTS },
   { migrationName: new RefreshDefaultPromptTemplatesCiDispatchGate1760000000076().name, priorContents: PRIOR_CI_DISPATCH_GATE_CONTENTS },
+  { migrationName: new RefreshDefaultPromptTemplatesCiWaitTool1760000000079().name, priorContents: PRIOR_CI_WAIT_TOOL_CONTENTS },
 ];
 
 export interface PromptTemplateDrift {

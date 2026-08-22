@@ -524,6 +524,98 @@ test('StuckTicketDetectorService — acceptance bullets 1..5', async (t) => {
     assert.equal(exceptionAlert?.delivery_attempts, 2);
   });
 
+  // ── (F) 티켓 e1898d71 — 억제(선행티켓 대기 / 파킹)는 평가를 건너뛸 뿐
+  // 나이 계산의 시계를 멈추지 않았다. 억제가 풀리는 순간 누적된 차단
+  // 시간이 그대로 계상돼 promotionDelayMs를 이미 넘긴 상태로 해제 직후
+  // 첫 sweep에서 즉시 오탐했다(실제 인시던트: 티켓 e52e7f64가 해제
+  // 2분 31초 만에 정상 승격됐는데도 "5.7h" 알림이 발송됨). 아래 세 개는
+  // 해제 시점 기준으로 유예가 새로 주어지는지, 억제 해제가 무제한 면제로
+  // 오용되지 않는지(비공허성), 알림 문구의 시간 값도 함께 보정되는지,
+  // 그리고 파킹 해제 경로도 동일하게 처리되는지를 증명한다.
+  await t.test('(F) 선행티켓 차단 해제 직후에는 promotionDelayMs 유예가 새로 주어져 알림이 발송되지 않는다', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: '선행티켓 해제 직후 후보',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+
+    // trigger-loop.service.ts의 `_resumePrerequisiteDependents`가 실제로
+    // 쓰는 것과 동일한 shape — old_value/new_value/actor/trigger_source까지.
+    await ticketRepo.update(ticket.id, { pending_on_tickets: false });
+    const unblockRow = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'updated', field_changed: 'pending_on_tickets',
+      old_value: 'true', new_value: 'false',
+      actor_id: 'system', actor_name: 'Auto-Resume', trigger_source: 'prerequisite_reached',
+    }));
+    await backdate(activityRepo, unblockRow.id, { created_at: new Date(now.getTime() - 60_000) });
+
+    await detector.sweep(now);
+    assert.equal(
+      await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      null,
+      '해제 후 1분밖에 지나지 않았으므로 promotion-delay 알림이 발송되면 안 된다',
+    );
+  });
+
+  await t.test('(F) 해제 후에도 promotionDelayMs를 넘겨 남아 있으면 여전히 알림이 발송된다 — 문구의 시간 값도 해제 시점 기준', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: '해제 후에도 오래 남은 후보',
+    });
+    // created_at을 아주 오래 전으로 잡아, 리베이스 없이 원시 created_at으로
+    // 계산했다면 훨씬 큰 age(20h)가 나오게 만든다 — 문구 검증용.
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 20 * HOUR) });
+
+    // 해제는 3시간 전 — promotionDelayMs(2h)를 이미 넘겼으므로 리베이스
+    // 후에도 여전히 알림이 나가야 한다(억제 해제가 무제한 면제가 아님).
+    await ticketRepo.update(ticket.id, { pending_on_tickets: false });
+    const unblockRow = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'updated', field_changed: 'pending_on_tickets',
+      old_value: 'true', new_value: 'false',
+      actor_id: 'system', actor_name: 'Auto-Resume', trigger_source: 'prerequisite_reached',
+    }));
+    await backdate(activityRepo, unblockRow.id, { created_at: new Date(now.getTime() - 3 * HOUR) });
+
+    await detector.sweep(now);
+    const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.equal(alert?.cause, 'promotion_delay',
+      '해제로부터도 promotionDelayMs를 넘겼으므로 억제 해제 리베이스가 알림을 영구히 삼켜서는 안 된다');
+
+    const msgs = await messageRepo.find({ where: { room_id: room.id } });
+    const alertMsg = msgs.find(m => m.sender_type === 'system'
+      && m.content.includes(ticket.id) && /Promotion-delay detected/.test(m.content));
+    assert.ok(alertMsg, '알림 메시지가 발송되어야 한다');
+    assert.match(alertMsg.content, /waiting in intake for 3\.0h/,
+      `문구의 시간 값은 원시 생성 시각(20h)이 아니라 해제 시점 기준(3h)이어야 한다 (실제: ${alertMsg.content})`);
+    assert.ok(!alertMsg.content.includes('20.0h'),
+      '문구에 원시 created_at 기준 20h가 노출되면 안 된다 — 차단 시간이 빠지지 않았다는 뜻');
+  });
+
+  await t.test('(F) 사용자 파킹 해제(unpend) 경로도 동일하게 처리된다', async () => {
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: intake.id, workspaceId: ws.id, title: '파킹 해제 직후 후보',
+    });
+    await backdate(ticketRepo, ticket.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+
+    // tickets.controller.ts의 REST PATCH 언파크 경로가 쓰는 shape — MCP
+    // `unpend_ticket`은 항상 거부하므로 이 경로만 실제로 존재한다.
+    await ticketRepo.update(ticket.id, { pending_user_action: false });
+    const unpendRow = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      action: 'updated', field_changed: 'pending_user_action',
+      old_value: 'true', new_value: 'false',
+      actor_id: 'qa-human', actor_name: 'qa-human',
+    }));
+    await backdate(activityRepo, unpendRow.id, { created_at: new Date(now.getTime() - 60_000) });
+
+    await detector.sweep(now);
+    assert.equal(
+      await alertRepo.findOne({ where: { ticket_id: ticket.id } }),
+      null,
+      '파킹 해제 후 1분밖에 지나지 않았으므로 promotion-delay 알림이 발송되면 안 된다',
+    );
+  });
+
   await t.test('(B) only comments attributed to the current dispatch epoch are progress', async () => {
     const ticket = await createTicket(app, getDataSourceToken, {
       columnId: todoCol.id, workspaceId: ws.id, title: 'operator comment false progress',

@@ -180,6 +180,33 @@ test('isFallbackEligible: usage_limit + model_unavailable are eligible; auth/cod
   assert.equal(isFallbackEligible(clean), false, 'clean answer NOT eligible');
 });
 
+// ── 컨텍스트 윈도우/출력 토큰 초과 (ticket 7d8ea7c9 후속) ──────────────
+
+test('context-window/출력 토큰 초과 신호 → fatal + 재시도불가, fallback 대상 아님', () => {
+  for (const s of [
+    "Claude's response exceeded the output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+    'The model has reached its context window limit.',
+    'tengu_context_window_exceeded',
+    'tengu_max_tokens_reached',
+    'model_context_window_exceeded: request too large',
+  ]) {
+    const c = classifyCliError(s, { exitCode: 1 });
+    assert.equal(c.isFatal, true, `치명적이어야 함: ${s}`);
+    assert.equal(c.nonRetryable, true, `재시도불가여야 함: ${s}`);
+    assert.equal(c.reason, 'context_window_exceeded', `사유: ${s}`);
+    assert.equal(isFallbackEligible(c), false, `같은 백엔드의 다른 모델로는 해결되지 않음: ${s}`);
+  }
+});
+
+test('정상 exit-0 답변에 context-window 문구가 있어도 → fatal 아님 (오탐 방지 가드)', () => {
+  const c = classifyCliError(
+    'Fixed the bug where we hit the context window limit on the first turn.',
+    { exitCode: 0 },
+  );
+  assert.equal(c.isFatal, false);
+  assert.equal(c.reason, '');
+});
+
 test('buildModelChain: head = primary, fallbacks appended in order, dupes/blanks dropped', () => {
   assert.deepEqual(buildModelChain('opus', ['sonnet', 'haiku']), ['opus', 'sonnet', 'haiku']);
   // null / empty primary → head is null (CLI default), fallbacks still ride.

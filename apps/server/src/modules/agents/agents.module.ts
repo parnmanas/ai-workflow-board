@@ -22,6 +22,7 @@ import { BacklogPromotionService } from './backlog-promotion.service';
 import { ClaimVerificationService } from './claim-verification.service';
 import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { CiHealthMonitorService } from './ci-health-monitor.service';
+import { CiWaitResumeService } from './ci-wait-resume.service';
 import { RespawnStormDetectorService } from './respawn-storm-detector.service';
 import { AgentUsageService } from './agent-usage.service';
 import { DispatchIntentService } from './dispatch-intent.service';
@@ -30,6 +31,7 @@ import { AgentAutostartService } from './agent-autostart.service';
 import { ChildRunService } from './child-run.service';
 import { AgentChildRunsController, ChildRunsController } from './child-runs.controller';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
+import { CiWaitService } from '../tickets/ci-wait.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
 import { WorkspaceMoveService } from '../../services/workspace-move.service';
@@ -80,6 +82,8 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     AgentWorkloadService,
     StuckTicketDetectorService,
     CiHealthMonitorService,
+    CiWaitService,
+    CiWaitResumeService,
     RespawnStormDetectorService,
     AgentUsageService,
     ClaimVerificationService,
@@ -97,6 +101,8 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     AgentWorkloadService,
     StuckTicketDetectorService,
     CiHealthMonitorService,
+    CiWaitService,
+    CiWaitResumeService,
     RespawnStormDetectorService,
     AgentUsageService,
     ClaimVerificationService,

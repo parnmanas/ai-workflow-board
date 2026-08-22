@@ -1,38 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { setupDom, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api } from '../src/api.ts';
-import { AuthProvider } from '../src/contexts/AuthContext.tsx';
-import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
-
-// cli-credential-import.test.mjs / credential-reveal-ui.test.mjs와 동일한 이유로
-// CredentialManager 마운트 전 pristine Node Event/CustomEvent를 붙잡아 setupDom 후
-// 복원한다 — BoardStreamProvider의 pub/sub 버스가 Node 전역 EventTarget이라 jsdom
-// Event를 거부한다.
-const NodeEvent = globalThis.Event;
-const NodeCustomEvent =
-  globalThis.CustomEvent ||
-  class CustomEvent extends NodeEvent {
-    constructor(type, opts = {}) {
-      super(type, opts);
-      this.detail = opts.detail ?? null;
-    }
-  };
-
-class FakeEventSource {
-  static CLOSED = 2;
-  constructor() {
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-  }
-  addEventListener() {}
-  removeEventListener() {}
-  close() {
-    this.readyState = 2;
-  }
-}
 
 function buttonsByText(container, label) {
   return [...container.querySelectorAll('button')].filter((button) => button.textContent?.trim() === label);
@@ -50,9 +21,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
   globalThis.sessionStorage = dom.window.sessionStorage;
   dom.window.HTMLElement.prototype.attachEvent = () => {};
   dom.window.HTMLElement.prototype.detachEvent = () => {};
-  globalThis.Event = NodeEvent;
-  globalThis.CustomEvent = NodeCustomEvent;
-  globalThis.EventSource = FakeEventSource;
+  const { uninstall } = installFakeEventSource();
   localStorage.setItem('auth_token', 'admin-session');
 
   const originals = {
@@ -105,21 +74,14 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     };
   };
 
-  const view = mount(
-    React.createElement(
-      AuthProvider,
-      null,
-      React.createElement(
-        BoardStreamProvider,
-        null,
-        React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
-      ),
-    ),
+  const view = mountWithBoardStream(
+    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
   );
   await flush();
 
   t.after(() => {
     view.unmount();
+    uninstall();
     Object.assign(api, originals);
     dom.cleanup();
   });

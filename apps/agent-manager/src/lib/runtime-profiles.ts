@@ -84,6 +84,10 @@ function buildAdapter(profile: RuntimeProfileSpec, credentialEnv: Record<string,
   };
 }
 
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
 export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   const issues: string[] = [];
   if (profile.kind && profile.kind !== 'claude-backend') issues.push('kind must be "claude-backend"');
@@ -99,6 +103,41 @@ export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
     const count = [profile.adapter.command, profile.adapter.module, profile.adapter.executable].filter(Boolean).length;
     if (count > 1) issues.push('adapter must set only one of command, module, or executable');
     if (profile.adapter.lifecycle !== 'reuse' && count === 0) issues.push('adapter launch command is required unless lifecycle is reuse');
+  }
+  if (profile.context_window !== undefined && !isPositiveInt(profile.context_window)) {
+    issues.push('context_window must be a positive integer');
+  }
+  if (profile.max_output_tokens !== undefined && !isPositiveInt(profile.max_output_tokens)) {
+    issues.push('max_output_tokens must be a positive integer');
+  }
+  if (
+    profile.safety_margin_tokens !== undefined &&
+    !(Number.isInteger(profile.safety_margin_tokens) && profile.safety_margin_tokens >= 0)
+  ) {
+    issues.push('safety_margin_tokens must be a non-negative integer');
+  }
+  if (
+    profile.context_window !== undefined &&
+    profile.max_output_tokens !== undefined &&
+    isPositiveInt(profile.context_window) &&
+    isPositiveInt(profile.max_output_tokens) &&
+    profile.max_output_tokens >= profile.context_window
+  ) {
+    issues.push('max_output_tokens must be less than context_window');
+  }
+  // 리뷰 지적(P1) — safety_margin_tokens(생략 시 기본값)이 context_window 를
+  // known input 0(가장 유리한 경우)에서조차 MIN_OUTPUT_TOKENS 밑으로 깎으면,
+  // 이 profile 은 어떤 prompt 길이에서도 resolveEffectiveMaxOutputTokens() 가
+  // 항상 throw 하는 무의미한 설정이다 — 저장 시점에 명확히 거부한다.
+  if (profile.context_window !== undefined && isPositiveInt(profile.context_window)) {
+    const effectiveMargin = profile.safety_margin_tokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+    if (profile.context_window - effectiveMargin < MIN_OUTPUT_TOKENS) {
+      issues.push(
+        `context_window (${profile.context_window}) minus safety_margin_tokens ` +
+        `(${effectiveMargin}${profile.safety_margin_tokens === undefined ? ', default' : ''}) ` +
+        `leaves less than MIN_OUTPUT_TOKENS (${MIN_OUTPUT_TOKENS}) even for an empty prompt`,
+      );
+    }
   }
   if (issues.length) throw new Error(`Invalid Claude backend profile (${profile.id}): ${issues.join('; ')}`);
 }
@@ -132,6 +171,171 @@ const AUX_MODEL_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
 ] as const;
 
+// ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — Claude Code CLI 바이너리에
+// 실제로 존재함을 문자열 덤프로 확인한 env 변수:
+//   - CLAUDE_CODE_MAX_CONTEXT_TOKENS: 미인식 커스텀 모델에 대해 CLI 가
+//     내부적으로 가정하는 context window 를 실제 값으로 대체한다
+//     ("... is not a model this version of Claude Code recognizes, so
+//     auto-compact will keep this session within N tokens (the context
+//     window it assumes) ... set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its
+//     real window").
+//   - CLAUDE_CODE_MAX_OUTPUT_TOKENS: 요청당 max_tokens 상한
+//     ("Claude's response exceeded the output token maximum. To configure
+//     this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment
+//     variable.").
+// 실제 사고: vLLM 백엔드(context 65,536)에 첫 채팅 메시지가 system
+// prompt+AWB/agent/board/workspace instructions+MCP tool schema+session
+// metadata 만으로 33,537 input tokens 가 됐고, 여기에 CLI 의 고정
+// max_output_tokens(관측값 32,000)를 더하면 65,537 로 정확히 1 token
+// 초과해 vLLM 이 요청을 거부했다(HTTP 500).
+/** 아무것도 override 하지 않을 때 Claude Code CLI 자체가 기본으로 요청하는
+ *  max_tokens(위 사고에서 관측된 값) — profile 이 context_window 만 설정하고
+ *  max_output_tokens 를 명시하지 않았을 때 이 값을 기준으로 clamp 한다. */
+export const DEFAULT_REQUESTED_MAX_OUTPUT_TOKENS = 32_000;
+/** spawn 시점에 이 모듈이 볼 수 없는 모든 것 — Claude Code 자체 기본
+ *  system prompt, CLI가 AWB/host MCP 서버와 실시간으로 협상하는 tool
+ *  schema, 세션 메타데이터 — 을 위해 예약하는 여유분. 관측된 실제 초과분
+ *  (이 보드의 MCP tool 표면 기준, 한 단어짜리 첫 메시지만으로 33,500+
+ *  토큰)보다 넉넉하게 잡았다. */
+export const DEFAULT_SAFETY_MARGIN_TOKENS = 40_000;
+/** 이보다 작은 출력 여유는 "쓸 만한 응답"으로 보지 않는다.
+ *  resolveEffectiveMaxOutputTokens() 가 이 값을 채울 여유가 없으면(즉
+ *  budget 자체가 이 밑이면) 상한을 억지로 끌어올리는 대신 throw 한다 —
+ *  MIN_OUTPUT_TOKENS 로 바닥을 높이면 반환값이 budget 을 넘어 context_window
+ *  상한 불변식이 깨지므로(리뷰 지적, P1) 이 값은 "완화된 하한"이 아니라
+ *  "이 밑이면 실패로 본다"는 임계값이다. */
+export const MIN_OUTPUT_TOKENS = 1_024;
+/** 아래 best-effort 추정에 쓰는 대략적인 char-당-token 비율. 진짜
+ *  tokenizer 가 아니며, 이 비율이 실제 토크나이저 대비 과대/과소 추정
+ *  중 어느 쪽으로 치우치는지(특히 한국어 등 비-ASCII 텍스트에서)는
+ *  검증된 바 없다 — estimatePromptTokens() 는 이 모듈이 볼 수 있는
+ *  부분만 커버하며, 안전성은 이 비율의 정확도가 아니라
+ *  safety_margin_tokens 와 resolveEffectiveMaxOutputTokens() 의 명시적
+ *  실패 처리에 의존한다. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+
+/** 이 모듈이 직접 통제하는 텍스트 조각(role prompt, harness system-prompt
+ *  append, 첫 턴 텍스트) 하나에 대한 best-effort 토큰 추정치. 진짜
+ *  tokenizer 아님 — CHARS_PER_TOKEN_ESTIMATE 참고. */
+export function estimateTokens(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
+}
+
+export interface PromptTokenEstimate {
+  role_prompt: number;
+  harness_append: number;
+  first_turn: number;
+  /** 위 세 구성요소의 합. Claude Code 자체 기본 system prompt, MCP tool
+   *  schema, 세션 메타데이터는 의도적으로 제외됨 — 이 모듈은 spawn
+   *  시점에 그 부분들을 볼 수 없다. safety_margin_tokens 가 그 공백을
+   *  커버한다. */
+  known_total: number;
+}
+
+/** spawn 전에 이 모듈이 실제로 측정할 수 있는 입력의 구성요소별 분해
+ *  (ticket 7d8ea7c9 수용 기준: "첫 턴 컨텍스트 구성요소별 토큰 로깅").
+ *  호출부는 이 값을 최종 effective max output 과 함께 로깅해, 운영자가
+ *  무엇이 known 이고 safety_margin_tokens 가 무엇을 보이지 않게 커버하는지
+ *  볼 수 있게 한다. */
+export function estimatePromptTokens(
+  rolePrompt: string | null | undefined,
+  harnessAppend: string | null | undefined,
+  firstTurnText: string | null | undefined,
+): PromptTokenEstimate {
+  const role_prompt = estimateTokens(rolePrompt);
+  const harness_append = estimateTokens(harnessAppend);
+  const first_turn = estimateTokens(firstTurnText);
+  return { role_prompt, harness_append, first_turn, known_total: role_prompt + harness_append + first_turn };
+}
+
+/** context_window 예산이 최소 출력 여유(MIN_OUTPUT_TOKENS)조차 남기지 못할
+ *  때 resolveEffectiveMaxOutputTokens() 가 던지는 에러 — spawn 사이트가
+ *  이걸 잡아 명확한 로그를 남기고 spawn 을 정상적으로 실패 처리한다(기존
+ *  startRuntimeProfile/validateRuntimeProfile 실패와 동일한 catch 경로).
+ *  `code`는 spawn 사이트가 다른 실패와 구분해 분류하고 싶을 때 쓴다. */
+export class ContextBudgetExhaustedError extends Error {
+  readonly code = 'context_budget_exhausted';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextBudgetExhaustedError';
+  }
+}
+
+/** 순수 clamp 공식: effective_max_output <= context_window -
+ *  known_input_tokens - safety_margin_tokens 를 **항상** 만족해야 한다(리뷰
+ *  지적, P1) — 이전 구현은 이 값을 MIN_OUTPUT_TOKENS 로 하한 처리해서, 남은
+ *  예산(budget)이 MIN_OUTPUT_TOKENS 보다 작을 때 반환값이 budget 을 넘어
+ *  버려 상한 불변식 자체가 깨졌다(예: context_window=65536, known_input=65000
+ *  이면 budget=536 인데 1024 를 반환 — 합계 66024 로 여전히 초과). budget 이
+ *  MIN_OUTPUT_TOKENS 밑이면(known input 만으로 이미 예산을 거의 다 썼거나
+ *  넘겼으면) 값을 억지로 끌어올리는 대신 ContextBudgetExhaustedError 를
+ *  던진다 — 상한을 지키는 유일한 방법은 실패를 명시하는 것이다.
+ *  65,535/65,536/65,537 세 경계값과 예산 고갈 케이스가
+ *  test/runtime-profile-max-output-clamp.test.mjs 에서 검증됨. */
+export function resolveEffectiveMaxOutputTokens(params: {
+  contextWindow: number;
+  knownInputTokens: number;
+  requestedMaxOutputTokens: number;
+  safetyMarginTokens: number;
+}): number {
+  const { contextWindow, knownInputTokens, requestedMaxOutputTokens, safetyMarginTokens } = params;
+  const budget = contextWindow - knownInputTokens - safetyMarginTokens;
+  if (budget < MIN_OUTPUT_TOKENS) {
+    throw new ContextBudgetExhaustedError(
+      `Claude backend context budget exhausted: context_window=${contextWindow} ` +
+      `known_input≈${knownInputTokens} safety_margin=${safetyMarginTokens} leaves only ${budget} ` +
+      `token(s) for output (minimum ${MIN_OUTPUT_TOKENS}). Raise context_window, lower ` +
+      'safety_margin_tokens, or shrink the prompt.',
+    );
+  }
+  return Math.min(requestedMaxOutputTokens, budget);
+}
+
+export interface MaxOutputTokensResolution {
+  /** profile.context_window 가 없으면 {} — 기존 프로필은 CLI 자체 기본
+   *  동작 그대로 유지된다. 있으면
+   *  { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(effectiveMaxOutputTokens) }. */
+  env: Record<string, string>;
+  estimate: PromptTokenEstimate;
+  /** profile.context_window 가 없으면 null(clamp 할 기준이 없음). */
+  effectiveMaxOutputTokens: number | null;
+  safetyMarginTokens: number;
+}
+
+/** spawn 시점 진입점(ticket 7d8ea7c9 후속, 수정범위 2) — 호출부가 이미 갖고
+ *  있는 role prompt / harness system-prompt append / 첫 턴 텍스트로부터
+ *  known input 크기를 추정하고, profile.context_window 에 맞는 동적
+ *  CLAUDE_CODE_MAX_OUTPUT_TOKENS override 를 산출한다. profile 이
+ *  context_window 를 선언하지 않으면 no-op(env: {}) — 호출부는 조건 없이
+ *  항상 호출해도 된다. 예산이 고갈되면 resolveEffectiveMaxOutputTokens() 의
+ *  ContextBudgetExhaustedError 가 그대로 전파된다 — 호출부는 이걸
+ *  startRuntimeProfile() 실패와 동일하게 catch 해서 spawn 을 실패
+ *  처리해야 한다(base-session-manager.ts/subagent-manager.ts 참고). */
+export function resolveMaxOutputTokensEnv(
+  profile: RuntimeProfileSpec | null | undefined,
+  params: { rolePrompt?: string | null; harnessAppend?: string | null; firstTurnText?: string | null },
+): MaxOutputTokensResolution {
+  const estimate = estimatePromptTokens(params.rolePrompt, params.harnessAppend, params.firstTurnText);
+  const safetyMarginTokens = profile?.safety_margin_tokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+  if (!profile?.context_window) {
+    return { env: {}, estimate, effectiveMaxOutputTokens: null, safetyMarginTokens };
+  }
+  const requestedMaxOutputTokens = profile.max_output_tokens ?? DEFAULT_REQUESTED_MAX_OUTPUT_TOKENS;
+  const effectiveMaxOutputTokens = resolveEffectiveMaxOutputTokens({
+    contextWindow: profile.context_window,
+    knownInputTokens: estimate.known_total,
+    requestedMaxOutputTokens,
+    safetyMarginTokens,
+  });
+  return {
+    env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(effectiveMaxOutputTokens) },
+    estimate,
+    effectiveMaxOutputTokens,
+    safetyMarginTokens,
+  };
+}
+
 export class RuntimeLease {
   #release: (() => Promise<void>) | null;
   #closed = false;
@@ -151,6 +355,7 @@ export class RuntimeLease {
       || this.credentialEnv.ANTHROPIC_API_KEY;
     return {
       ...Object.fromEntries(AUX_MODEL_ENV_KEYS.map(key => [key, this.profile.model])),
+      ...(this.profile.context_window ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(this.profile.context_window) } : {}),
       ...(this.profile.env ?? {}),
       ANTHROPIC_BASE_URL: this.launch?.baseUrl ?? this.profile.base_url.replace(/\/$/, ''),
       ...(secret ? { ANTHROPIC_AUTH_TOKEN: secret } : {}),

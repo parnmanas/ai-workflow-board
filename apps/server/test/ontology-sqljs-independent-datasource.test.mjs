@@ -121,7 +121,7 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     assert.notEqual(ontoLoc, primaryLoc, 'ontology DataSource must never point at the primary data.db file');
 
     const entityNames = ontoOpts.entities.map((e) => e.name).sort();
-    assert.deepEqual(entityNames, ['OntologyEdge', 'OntologyNode']);
+    assert.deepEqual(entityNames, ['OntologyEdge', 'OntologyNode', 'OntologyReverseEdgeIndex']);
   });
 
   it('static guard: the PRIMARY sql.js DataSource excludes Ontology* entities (synchronize never DDLs them into data.db)', () => {
@@ -129,6 +129,10 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     const entityNames = primaryOpts.entities.map((e) => e.name);
     assert.ok(!entityNames.includes('OntologyNode'), 'OntologyNode must not synchronize into the primary DataSource');
     assert.ok(!entityNames.includes('OntologyEdge'), 'OntologyEdge must not synchronize into the primary DataSource');
+    assert.ok(
+      !entityNames.includes('OntologyReverseEdgeIndex'),
+      'OntologyReverseEdgeIndex must not synchronize into the primary DataSource',
+    );
   });
 
   it('same-path collision guard: buildOntologyDataSourceOptions() refuses to construct a DataSource pointed at the primary DB file', () => {

@@ -72,6 +72,23 @@ export interface RuntimeProfileSpec {
   credential_required?: boolean;
   credential_ref?: string;
   auth_env?: string;
+  /** 백엔드 모델의 실제 context window(입력+출력 토큰 상한). 설정되면 spawn
+   *  시점에 CLAUDE_CODE_MAX_CONTEXT_TOKENS 를 주입해, 미인식 커스텀 모델 id에
+   *  대한 Claude Code 자체의 내부 추측 대신 실제 값을 쓰게 한다. 아래
+   *  max_output_tokens 동적 clamp 의 기준값이기도 하다(ticket 7d8ea7c9 후속 —
+   *  runtime-profiles.ts 의 resolveMaxOutputTokensEnv 참고). */
+  context_window?: number;
+  /** 이 백엔드에 요청할 출력 토큰 상한. Claude Code 자체 기본값(관측값
+   *  32000)만으로도 큰 첫 턴 prompt 와 합쳐지면 context_window 를 넘길 수
+   *  있다 — spawn 시점에 context_window 에서 known prompt 추정치와
+   *  safety_margin_tokens 를 뺀 값으로 clamp 한 뒤 CLAUDE_CODE_MAX_OUTPUT_TOKENS
+   *  로 주입한다. context_window 가 함께 설정된 경우에만 적용된다. */
+  max_output_tokens?: number;
+  /** spawn 시점에 매니저가 볼 수 없는 모든 것(Claude Code 자체 기본 system
+   *  prompt, CLI가 협상하는 MCP tool schema, 세션 메타데이터)을 위해 예약해
+   *  두는 여유 토큰. 생략 시 DEFAULT_SAFETY_MARGIN_TOKENS(runtime-profiles.ts)
+   *  로 기본값 지정된다. */
+  safety_margin_tokens?: number;
   adapter?: {
     command?: string;
     module?: string;

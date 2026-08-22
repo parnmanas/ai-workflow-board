@@ -61,6 +61,19 @@ const MODEL_UNAVAILABLE_RE =
 // real `agent_message` — i.e. the "answer" is actually an error report.
 const CODEX_ERROR_RE = /\[codex error\]/i;
 
+// 백엔드 context-window/출력 토큰 초과 (ticket 7d8ea7c9 후속). 바이너리 문자열
+// 덤프로 확인한 Claude Code CLI 자체의 실제 출력 문구:
+// "Claude's response exceeded the output token maximum. To configure this
+// behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable." /
+// "The model has reached its context window limit." / 내부 이벤트명
+// `tengu_context_window_exceeded` / `tengu_max_tokens_reached` /
+// `model_context_window_exceeded`. 고정된 prompt+profile 조합에선 결정적이라
+// 단순 재시도로는 그대로 재현된다 — usage/auth 처럼 nonRetryable; 같은
+// 백엔드의 다른 모델도 context window 나 초과를 유발한 prompt 크기를 바꾸지
+// 못하므로 fallback 대상은 아니다.
+const CONTEXT_WINDOW_EXCEEDED_RE =
+  /context window (?:limit|exceeded)|output token maximum|tengu_context_window_exceeded|tengu_max_tokens_reached|model_context_window_exceeded/i;
+
 export interface ClassifyOptions {
   /**
    * Process exit code, when known. A non-zero exit is itself an error context.
@@ -107,6 +120,11 @@ export function classifyCliError(
       return { isFatal: true, nonRetryable: true, reason: 'session_limit' };
     if (USAGE_LIMIT_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'usage_limit' };
     if (AUTH_RE.test(s)) return { isFatal: true, nonRetryable: true, reason: 'auth_failure' };
+    // 이 (prompt, profile) 조합에선 결정적 — profile의
+    // context_window/max_output_tokens/safety_margin_tokens(또는 prompt 자체)가
+    // 바뀌어야만 해소되고, 단순 재시도로는 낫지 않는다.
+    if (CONTEXT_WINDOW_EXCEEDED_RE.test(s))
+      return { isFatal: true, nonRetryable: true, reason: 'context_window_exceeded' };
     // A bad --model id won't self-heal on THIS config (nonRetryable → the
     // breaker force-opens if the fallback chain is exhausted) but IS the prime
     // fallback trigger — isFallbackEligible() routes it to the next model.

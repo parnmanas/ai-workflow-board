@@ -36,6 +36,8 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
   defaultSonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,
   defaultOpus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
+  contextWindowEnv: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
+  maxOutputEnv: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
   awb: process.env.AWB_API_KEY,
   response: process.env.REQUEST_THROUGH_ADAPTER
     ? await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', {
@@ -138,6 +140,45 @@ test('profile.env still overrides the default aux-call model env vars', async ()
   }, join(fixtureRoot, 'aux-model-override.json'));
   assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'unset by profile.env — keeps the default');
   assert.equal(capture.smallFastModel, 'qwen3-coder-next-fast', 'profile.env wins over the default');
+});
+
+// ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — profile.context_window 이
+// 설정되면 실제 spawn 된 자식 프로세스 env 에 CLAUDE_CODE_MAX_CONTEXT_TOKENS
+// 와 동적으로 clamp 된 CLAUDE_CODE_MAX_OUTPUT_TOKENS 가 둘 다 실려야 한다.
+test('profile.context_window 가 CLAUDE_CODE_MAX_CONTEXT_TOKENS 와 clamp 된 CLAUDE_CODE_MAX_OUTPUT_TOKENS 를 둘 다 주입한다', async () => {
+  const executable = await makeClaudeFixture('claude-context-window.mjs');
+  const capture = await spawnFixture({
+    id: 'context-window-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40104',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+    context_window: 10_000,
+    max_output_tokens: 5_000,
+    safety_margin_tokens: 5_000,
+  }, join(fixtureRoot, 'context-window.json'));
+  assert.equal(capture.contextWindowEnv, '10000');
+  // rolePrompt='fixture role' + taskText='fixture task'(각 12자)는 known-input
+  // 추정치가 작게 나온다; 여기서는 context_window - safety_margin_tokens 가
+  // max_output_tokens 와 정확히 같으므로, clamp 는 정확히 그 known-input 만큼만
+  // 깎는다: effective = 5000 - knownInput.
+  const knownInput = Math.ceil('fixture role'.length / 4) + Math.ceil('fixture task'.length / 4);
+  assert.equal(Number(capture.maxOutputEnv), 5_000 - knownInput);
+});
+
+test('profile 에 context_window 없으면 → CLAUDE_CODE_MAX_CONTEXT_TOKENS/MAX_OUTPUT_TOKENS 없음 (회귀 안전)', async () => {
+  const executable = await makeClaudeFixture('claude-no-context-window.mjs');
+  const capture = await spawnFixture({
+    id: 'no-context-window-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40105',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'no-context-window.json'));
+  assert.equal(capture.contextWindowEnv, undefined);
+  assert.equal(capture.maxOutputEnv, undefined);
 });
 
 async function unusedPort() {

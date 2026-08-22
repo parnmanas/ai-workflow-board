@@ -96,8 +96,9 @@ export type IntentReconcileAction = 'resolve' | 'dispatch' | 'defer';
  *   2. archived                 — operator archived it.
  *   3. terminalOrUnrouted       — landed terminal, or its current column no
  *                                 longer routes to this role (responsibility moved).
- *   4. parked                   — pending_user_action / pending_on_tickets (a
- *                                 human/prereq gate; a fresh trigger re-records on resume).
+ *   4. parked                   — pending_user_action / pending_on_tickets /
+ *                                 pending_ci_wait (a human/prereq/CI-run gate;
+ *                                 a fresh trigger re-records on resume).
  *   5. progressed               — forward progress (comment / move / claim /
  *                                 output-liveness) landed AFTER the intent was created.
  *   6. unstaffed                — the routed role has no agent holder to serve it.

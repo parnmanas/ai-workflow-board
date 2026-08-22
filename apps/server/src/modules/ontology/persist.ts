@@ -14,7 +14,7 @@
 // 테스트는 test/ontology-extraction-population-nonblocking.test.mjs).
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import type { DataSource, Repository } from 'typeorm';
+import { In, type DataSource, type Repository } from 'typeorm';
 import { OntologyNode } from '../../entities/OntologyNode';
 import { OntologyEdge } from '../../entities/OntologyEdge';
 import type { DefFact, DefKind, FactBundle } from './extraction/types';
@@ -23,7 +23,9 @@ import type { DecoratorFact } from './extraction/decorator-rules';
 const NODE_CHUNK_SIZE = 500; // 1/7 선례(ontology-sqljs-independent-datasource.test.mjs) — sql.js 표현식-트리 깊이 상한(~1000) 아래로 여유있게.
 const EDGE_CHUNK_SIZE = 500;
 
-function yieldToEventLoop(): Promise<void> {
+// 3/7 리졸버(resolver/resolve.ts)가 같은 청크-삽입+매크로태스크-양보
+// 계약을 재사용한다 — 독립 재구현으로 계약이 갈라지는 걸 막기 위해 export.
+export function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
@@ -90,7 +92,7 @@ interface FileDefIndex {
   nodeIdByQualifiedName: Map<string, string>;
 }
 
-async function insertChunked<T extends object>(
+export async function insertChunked<T extends object>(
   repo: Repository<T>,
   rows: T[],
   chunkSize: number,
@@ -102,6 +104,26 @@ async function insertChunked<T extends object>(
     onChunk?.(Math.min(i + chunkSize, rows.length), rows.length);
     // 명시적 매크로태스크 양보 — 위 파일 헤더 코멘트의 계약. 마지막 청크
     // 뒤에도 무조건 양보한다(특수 케이스 분기 없이 균일하게).
+    await yieldToEventLoop();
+  }
+}
+
+/** insertChunked()의 UPDATE 대응 — id 목록을 chunkSize개씩 잘라
+ *  `UPDATE ... WHERE id IN (...)`로 나눠 실행하고 청크 사이 매크로태스크를
+ *  양보한다. 3/7 리졸버(resolver/resolve.ts)가 대량 polymorphic dispatch
+ *  캡(resolution='dynamic' 갱신)에 재사용한다 — 단일 IN(...) 절 하나로
+ *  전체 id 목록을 보내면 수십만 심볼/다중천 fan-in 규모에서 SQLite/sql.js·
+ *  PostgreSQL의 바인드 변수 한도를 넘어 문장 자체가 실패할 수 있다(리뷰
+ *  지적 라운드 2). insertChunked와 같은 chunkSize를 쓰는 것이 기본 자세. */
+export async function updateChunked<T extends object>(
+  repo: Repository<T>,
+  ids: string[],
+  chunkSize: number,
+  partialEntity: { [P in keyof T]?: T[P] },
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    if (chunk.length > 0) await repo.update({ id: In(chunk) } as any, partialEntity as any);
     await yieldToEventLoop();
   }
 }

@@ -221,6 +221,10 @@ export class AgentWorkloadService {
       // downstream and it auto-resumes when the prereqs land on terminal. Same
       // bound-parameter pattern as the pending_user_action gate above.
       .andWhere('t.pending_on_tickets = :falseVal')
+      // Blocked-on-CI-run exclusion (ticket 778b6dc7): same reasoning again —
+      // a ticket durably awaiting an external CI run must not anchor focus
+      // either, for the same bound-parameter reasons as the two gates above.
+      .andWhere('t.pending_ci_wait = :falseVal')
       // Archived tickets (ticket 9b44526b) are excluded for the same reason:
       // they're no longer actionable workflow items, so they must not anchor
       // focus or block backlog promotion. Trigger emission is also gated
