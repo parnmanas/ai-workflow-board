@@ -6,7 +6,7 @@ import { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { type ToolContext } from './tools';
+import { type ToolContext, type ToolProfile } from './tools';
 import { OrchestrationRunnerService } from '../orchestration/orchestration-runner.service';
 import { OrchestrationMissionService } from '../orchestration/orchestration-mission.service';
 import { OrchestrationTeamService } from '../orchestration/orchestration-team.service';
@@ -71,28 +71,38 @@ function mcpLogError(message: string, meta?: Record<string, any>) {
 const bridgeLogOpts = { log: mcpLog, logError: mcpLogError };
 
 /**
- * tools/list response cache. Tool registration is static (registerAllTools
- * runs once per session via createMcpServerForContext, but every session
- * registers the same set), so the JSON-RPC result body is identical across
- * sessions and across time — only the request `id` varies. We cache the
- * body produced by the first call with a placeholder where the id sits and
- * substitute the real id for every subsequent call. Skips the SDK's tool
- * registry walk + zod-to-JSON-schema serialization on every cached hit;
- * for a 79-tool registry that's a ~59KB body otherwise rebuilt per session.
+ * tools/list response cache. Tool registration is static per profile
+ * (registerAllTools runs once per session via createMcpServerForContext, but
+ * every session of the SAME profile registers the same set), so the
+ * JSON-RPC result body is identical across sessions of that profile and
+ * across time — only the request `id` varies. We cache the body produced by
+ * the first call for each profile with a placeholder where the id sits and
+ * substitute the real id for every subsequent call of that profile. Skips
+ * the SDK's tool registry walk + zod-to-JSON-schema serialization on every
+ * cached hit; for a 205-tool registry that's a ~250KB body otherwise
+ * rebuilt per session.
+ *
+ * Keyed by ToolProfile (ticket ee26302d) — 'full' and 'compact' sessions
+ * register different tool sets, so a single shared body would leak one
+ * profile's response into the other's session (a compact session served
+ * 'full' defeats the reduction; a full session served 'compact' silently
+ * loses tools). Cache fill (captureToolsListBodyIfFirst) and cache read
+ * (buildCachedToolsListResponse) MUST be called with the same profile key.
  */
 const TOOLS_LIST_ID_PLACEHOLDER = '__AWB_TOOLS_LIST_ID__';
-let cachedToolsListBody: string | null = null;
+const cachedToolsListBodies = new Map<ToolProfile, string>();
 
-function buildCachedToolsListResponse(reqId: unknown): string | null {
-  if (!cachedToolsListBody) return null;
-  return cachedToolsListBody.replace(
+function buildCachedToolsListResponse(profile: ToolProfile, reqId: unknown): string | null {
+  const cached = cachedToolsListBodies.get(profile);
+  if (!cached) return null;
+  return cached.replace(
     `"${TOOLS_LIST_ID_PLACEHOLDER}"`,
     JSON.stringify(reqId ?? null),
   );
 }
 
-function captureToolsListBodyIfFirst(bodyStr: string): void {
-  if (cachedToolsListBody) return;
+function captureToolsListBodyIfFirst(profile: ToolProfile, bodyStr: string): void {
+  if (cachedToolsListBodies.has(profile)) return;
   // Body shape: {"jsonrpc":"2.0","id":<X>,"result":{"tools":[...]}}
   // Replace the id field with our placeholder string. Only replace the
   // first id occurrence to avoid clobbering an id nested in a tool's
@@ -107,7 +117,7 @@ function captureToolsListBodyIfFirst(bodyStr: string): void {
   // to re-run SDK than to serve a malformed response forever.
   if (!placeheld.includes(TOOLS_LIST_ID_PLACEHOLDER)) return;
   if (!placeheld.includes('"tools":')) return;
-  cachedToolsListBody = placeheld;
+  cachedToolsListBodies.set(profile, placeheld);
 }
 
 @ApiTags('mcp')
@@ -254,8 +264,8 @@ export class McpController implements OnModuleInit {
     };
   }
 
-  private createMcpServer(): McpServer {
-    return createMcpServerForContext(this.buildToolContext());
+  private createMcpServer(profile: ToolProfile = 'full'): McpServer {
+    return createMcpServerForContext(this.buildToolContext(), profile);
   }
 
   @All('mcp')
@@ -329,13 +339,16 @@ export class McpController implements OnModuleInit {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
+        const sessionToolProfile: ToolProfile = session.auth?.toolProfile === 'compact' ? 'compact' : 'full';
 
         // Cache hit: skip the SDK pipeline entirely for tools/list. The
-        // result body is invariant across sessions, so substituting the
-        // request id into the cached body yields a byte-equivalent
-        // response without serializing 79 tool schemas again.
+        // result body is invariant across sessions OF THE SAME PROFILE, so
+        // substituting the request id into the cached body yields a
+        // byte-equivalent response without serializing 205 tool schemas
+        // again. Keyed by this session's own profile — see
+        // cachedToolsListBodies' doc comment for why that keying matters.
         if (req.method === 'POST' && req.body?.method === 'tools/list') {
-          const cachedBody = buildCachedToolsListResponse(req.body.id);
+          const cachedBody = buildCachedToolsListResponse(sessionToolProfile, req.body.id);
           if (cachedBody) {
             res.setHeader('content-type', 'application/json; charset=utf-8');
             res.setHeader('content-length', Buffer.byteLength(cachedBody));
@@ -345,14 +358,17 @@ export class McpController implements OnModuleInit {
         }
 
         const isFirstToolsList =
-          req.method === 'POST' && req.body?.method === 'tools/list' && !cachedToolsListBody;
+          req.method === 'POST' && req.body?.method === 'tools/list'
+          && !cachedToolsListBodies.has(sessionToolProfile);
         const webRes = await this.activityService.runWithTriggerSource(
           session.auth?.subagentTriggerSource,
           () => session.transport.handleRequest(webReq, { parsedBody: req.body }),
         );
         await sendWebResponse(webRes, res, {
           ...bridgeLogOpts,
-          onJsonBody: isFirstToolsList ? captureToolsListBodyIfFirst : undefined,
+          onJsonBody: isFirstToolsList
+            ? (bodyStr: string) => captureToolsListBodyIfFirst(sessionToolProfile, bodyStr)
+            : undefined,
         });
         return;
       }
@@ -392,6 +408,12 @@ export class McpController implements OnModuleInit {
         strategyRaw === 'single' || strategyRaw === 'delegated' || strategyRaw === 'swarm'
           ? strategyRaw
           : undefined;
+      // Ticket ee26302d: opt-in reduced tool surface. Any value other than
+      // exactly 'compact' (including absent — every pre-existing client)
+      // resolves to 'full', so this can only ever narrow the tool surface,
+      // never widen it — see shared/tool-profiles.ts's security note.
+      const toolProfileRaw = String(req.headers['x-awb-tool-profile'] || '').toLowerCase().trim();
+      const toolProfile: ToolProfile = toolProfileRaw === 'compact' ? 'compact' : 'full';
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -414,11 +436,12 @@ export class McpController implements OnModuleInit {
               clientType: clientTypeHeader,
               runtimeRunId: runtimeRunIdHeader,
               executionStrategy: executionStrategyHeader,
+              toolProfile,
             });
             // No separate agentId → server map or execution-push lookup: the
             // McpServer is referenced only by this tool session's store entry.
             const who = mcpAuthInfo?.agentName || mcpAuthInfo?.keyHint || 'anonymous';
-            mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);
+            mcpLog(`New session: ${id} by [${who}] toolProfile=${toolProfile}  (active: ${sessionStore.size})`);
           },
         });
 
@@ -448,7 +471,7 @@ export class McpController implements OnModuleInit {
           }
         };
 
-        const mcpServer = this.createMcpServer();
+        const mcpServer = this.createMcpServer(toolProfile);
         await mcpServer.connect(transport);
 
         const webRes = await transport.handleRequest(webReq, { parsedBody: req.body });
