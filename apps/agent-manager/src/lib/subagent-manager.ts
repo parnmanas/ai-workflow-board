@@ -46,6 +46,7 @@ import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
   resolveMaxOutputTokensEnv,
+  resolveToolProfileHeader,
   runtimeCredentialEnv,
   startRuntimeProfile,
   type MaxOutputTokensResolution,
@@ -606,6 +607,9 @@ export class SubagentManager implements SubagentManagerContract {
     // compatibility with older servers and hand-built dispatch events.
     const claudeRuntimeProfile =
       adapter.cliType === 'claude' ? spec.runtimeProfile : null;
+    // Ticket ee26302d: see base-session-manager.ts's identical comment —
+    // `{}` (full) unless this profile's context_window is small.
+    const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // Backend profile model is inseparable from its endpoint and therefore
     // wins over Anthropic-oriented per-agent/harness model defaults.
     const effectiveModel =
@@ -707,7 +711,7 @@ export class SubagentManager implements SubagentManagerContract {
         // config to avoid the extra fs write.
         const needsSessionPin = !!(spec.ticketId && spec.role);
 
-        if (ctx?.mcp_config_path && !needsSessionPin) {
+        if (ctx?.mcp_config_path && !needsSessionPin && !toolProfileHeader['X-AWB-Tool-Profile']) {
           // Reuse the static per-agent mcp-config.json for non-role spawns. If
           // it vanished from disk (partial spawn / manual cleanup / pre-file
           // manager upgrade), the CLI would fail with "MCP config file not
@@ -717,6 +721,15 @@ export class SubagentManager implements SubagentManagerContract {
           configPath = existsSync(ctx.mcp_config_path)
             ? ctx.mcp_config_path
             : await writeMcpConfig(ctx.agent_id, this.#config.url, effectiveApiKey);
+          configPathIsTemp = false;
+        } else if (ctx?.mcp_config_path && !needsSessionPin) {
+          // Ticket ee26302d: see base-session-manager.ts's identical branch —
+          // the on-disk static config may predate/mismatch this session's
+          // resolved compact profile, so rewrite it unconditionally rather
+          // than trusting the reuse-if-exists fast path above.
+          configPath = await writeMcpConfig(
+            ctx.agent_id, this.#config.url, effectiveApiKey, undefined, toolProfileHeader,
+          );
           configPathIsTemp = false;
         } else {
           configPath = join(
@@ -729,6 +742,7 @@ export class SubagentManager implements SubagentManagerContract {
           const headers: Record<string, string> = {
             Authorization: `Bearer ${effectiveApiKey}`,
             'X-AWB-Client-Type': ctx ? 'managed-subagent' : 'subagent',
+            ...toolProfileHeader,
           };
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;

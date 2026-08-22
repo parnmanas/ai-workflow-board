@@ -43,6 +43,7 @@ import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
   resolveMaxOutputTokensEnv,
+  resolveToolProfileHeader,
   runtimeCredentialEnv,
   startRuntimeProfile,
   type MaxOutputTokensResolution,
@@ -622,6 +623,11 @@ export class BaseSessionManager {
     // dispatch event. Keep the manager boundary defensive as older/mixed
     // servers may still send one for a non-Claude agent.
     const claudeRuntimeProfile = adapter.cliType === 'claude' ? runtimeProfile : null;
+    // Ticket ee26302d: declares the compact MCP tool profile to the AWB
+    // server when this profile's context_window is small. `{}` (no header,
+    // i.e. full) for every profile without a small context_window,
+    // including no profile at all (non-Claude adapters).
+    const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // A selected Claude backend profile is an endpoint+model pair. Its model
     // must travel with that endpoint rather than being replaced by an
     // Anthropic-oriented Agent/harness default.
@@ -706,7 +712,7 @@ export class BaseSessionManager {
         // (no role pinning needed there).
         const needsSessionPin = !!(monitorMeta?.ticket_id && monitorMeta?.role);
 
-        if (agentContext?.mcp_config_path && !needsSessionPin) {
+        if (agentContext?.mcp_config_path && !needsSessionPin && !toolProfileHeader['X-AWB-Tool-Profile']) {
           // Reuse the static per-agent mcp-config.json for chat / non-pinned
           // sessions. If it vanished from disk (partial spawn, manual cleanup,
           // or a manager upgrade that predates the file), the CLI would fail
@@ -716,6 +722,19 @@ export class BaseSessionManager {
           configPath = existsSync(agentContext.mcp_config_path)
             ? agentContext.mcp_config_path
             : await writeMcpConfig(agentContext.agent_id, this._config.url, effectiveApiKey);
+          configPathIsTemp = false;
+        } else if (agentContext?.mcp_config_path && !needsSessionPin) {
+          // Ticket ee26302d: this session's resolved profile wants the
+          // compact tool profile, but the static config on disk may
+          // predate this feature (or was last written for a 'full'
+          // session) — the reuse-if-exists fast path above can't tell
+          // without parsing the file, so unconditionally rewrite it here.
+          // Non-temp (configPathIsTemp stays false) so the file continues
+          // to serve as this agent's ordinary static config afterward —
+          // only the extra fs write on this spawn is the cost.
+          configPath = await writeMcpConfig(
+            agentContext.agent_id, this._config.url, effectiveApiKey, undefined, toolProfileHeader,
+          );
           configPathIsTemp = false;
         } else {
           configPath = join(
@@ -727,6 +746,7 @@ export class BaseSessionManager {
           const headers: Record<string, string> = {
             Authorization: `Bearer ${effectiveApiKey}`,
             'X-AWB-Client-Type': agentContext ? 'managed-subagent' : 'subagent',
+            ...toolProfileHeader,
           };
           if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
           if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;

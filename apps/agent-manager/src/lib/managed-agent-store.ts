@@ -226,6 +226,12 @@ export async function writeMcpConfig(
   awbUrl: string,
   rawApiKey: string,
   workspaceId?: string,
+  // Ticket ee26302d: extra MCP session headers, e.g.
+  // resolveToolProfileHeader(claudeRuntimeProfile)'s `{'X-AWB-Tool-Profile':
+  // 'compact'}` for a small-context Claude backend. Omitted by every caller
+  // that doesn't have a resolved backend profile in scope — see this
+  // function's callers for which ones do.
+  extraHeaders?: Record<string, string>,
 ): Promise<string> {
   await ensureManagedAgentDir(agentId);
   const path = mcpConfigPathFor(agentId, workspaceId);
@@ -238,6 +244,7 @@ export async function writeMcpConfig(
         headers: {
           Authorization: `Bearer ${rawApiKey}`,
           'X-AWB-Client-Type': 'managed-subagent',
+          ...extraHeaders,
         },
       },
       host: {

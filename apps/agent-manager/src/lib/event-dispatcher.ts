@@ -1473,6 +1473,10 @@ export class EventDispatcher {
       apiKey = issued.raw_key;
       await writeApiKey(context.agent_id, apiKey, scope);
     }
+    // Ticket ee26302d: cross-workspace re-scoping — no resolved profile in
+    // scope here either (same gap as agent-manager-commands.ts's spawn_agent
+    // / #refreshMcpConfig), always writes 'full'. Corrected by the next
+    // actual spawn through base-session-manager.ts / subagent-manager.ts.
     const mcpConfigPath = await writeMcpConfig(context.agent_id, this.#config.url, apiKey, scope);
     return { ...context, workspace_id: scope, api_key: apiKey, mcp_config_path: mcpConfigPath };
   }

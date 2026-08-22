@@ -336,6 +336,41 @@ export function resolveMaxOutputTokensEnv(
   };
 }
 
+/** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진
+ *  Claude backend profile 은 MCP 세션을 'compact' tool profile 로 옵트인해,
+ *  AWB 서버가 ~205개 전체 대신 allowlist ~19개 tool만 등록하게 한다(서버측
+ *  구현은 apps/server/src/modules/mcp/shared/tool-profiles.ts — allowlist
+ *  밖 tool은 이름까지 등록에서 빠진다, stub 아님).
+ *
+ *  값 선택 근거: 실측된 raw tools/list 크기가 이 보드 기준 약
+ *  57,000~67,500 실제 BPE 토큰(apps/server/test/mcp-tool-schema-budget.test.mjs)
+ *  이고, 이 파일의 DEFAULT_SAFETY_MARGIN_TOKENS(40,000)조차 그보다 작다 —
+ *  즉 이 raw 크기를 그대로/거의 그대로 받는 백엔드에서는 65,536 같은 작은
+ *  context_window 는 이미 구조적으로 여유가 없다(ticket 7d8ea7c9 사고의
+ *  context_window 자체가 65,536). 128,000 은 "이 raw 크기 하나만으로도
+ *  빠듯한" 구간을 넉넉히 덮으면서, 200K+ 인 Anthropic 클라우드 tier
+ *  (Haiku 4.5 이상)는 건드리지 않는 보수적인 초기값 — 실측 근거가 아니라
+ *  판단값이므로, allowlist 밖 tool 호출 시도가 mcp.controller.ts의 기존
+ *  요청 로그(bodyPreview)에 그대로 남는 실측이 쌓이면 조정 대상이다. */
+export const TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS = 128_000;
+
+/**
+ * Resolves the `X-AWB-Tool-Profile` header to attach to an MCP session's
+ * request headers for a given (possibly absent) Claude backend profile.
+ * Returns `{}` — never widens the tool surface — whenever `profile` is
+ * absent, `context_window` is unset, or `context_window` is at/above the
+ * threshold; every pre-existing caller (no profile, or a profile without
+ * context_window) is unaffected. Only a genuinely small context_window
+ * opts into 'compact'.
+ */
+export function resolveToolProfileHeader(
+  profile: RuntimeProfileSpec | null | undefined,
+): Record<string, string> {
+  if (!profile?.context_window) return {};
+  if (profile.context_window >= TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS) return {};
+  return { 'X-AWB-Tool-Profile': 'compact' };
+}
+
 export class RuntimeLease {
   #release: (() => Promise<void>) | null;
   #closed = false;

@@ -405,6 +405,9 @@ export class AgentManagerCommandHandler {
       await writeApiKey(agentId, rawApiKey, workspaceId);
       provisioned = true;
     }
+    // Ticket ee26302d: same gap as #refreshMcpConfig below — no resolved
+    // profile at spawn_agent time, so this static file always starts
+    // 'full'; a subsequent ticket/chat spawn corrects it if needed.
     const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId);
 
     // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
@@ -908,6 +911,13 @@ export class AgentManagerCommandHandler {
           `(spawn_agent first to provision)`,
       );
     }
+    // Ticket ee26302d: no resolved Claude backend profile (context_window)
+    // is available at this admin-triggered refresh — always writes 'full'.
+    // The next actual ticket/chat spawn through base-session-manager.ts /
+    // subagent-manager.ts rewrites this same file with the compact header
+    // if that session's resolved profile calls for it (see those files'
+    // "reuse-if-exists fast path" branches), so this is a transient gap,
+    // not a permanent one.
     const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId || undefined);
     const cli = ctx?.cli ?? diskConfig?.cli;
     if (cli) {
