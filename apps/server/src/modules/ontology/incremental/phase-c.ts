@@ -18,6 +18,12 @@ import { In, type DataSource } from 'typeorm';
 import { OntologyEdge } from '../../../entities/OntologyEdge';
 import { OntologyNode } from '../../../entities/OntologyNode';
 import { OntologyEnrichmentQueue } from '../../../entities/OntologyEnrichmentQueue';
+import { yieldToEventLoop } from '../persist';
+
+// persist.ts의 NODE_CHUNK_SIZE/EDGE_CHUNK_SIZE 선례와 동일한 값 — 리뷰
+// 지적: allPaths/srcIds는 그래프의 semantic/derived 엣지 수에 비례해
+// 커질 수 있어, 단일 IN(...)으로 몰면 바인드 변수 한도를 넘을 수 있다.
+const ID_CHUNK_SIZE = 500;
 
 interface EvidenceRefEntry {
   path: string;
@@ -64,12 +70,16 @@ export async function runPhaseC(dataSource: DataSource, graphId: string): Promis
   }
 
   const currentHashByPath = new Map<string, string>();
-  if (allPaths.size > 0) {
+  const allPathsArr = [...allPaths];
+  for (let i = 0; i < allPathsArr.length; i += ID_CHUNK_SIZE) {
+    const chunk = allPathsArr.slice(i, i + ID_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
     const fileNodes = await nodeRepo.find({
-      where: { graph_id: graphId, type: 'File', path: In([...allPaths]), status: 'active' },
+      where: { graph_id: graphId, type: 'File', path: In(chunk), status: 'active' },
       select: ['path', 'content_hash'],
     });
     for (const f of fileNodes) currentHashByPath.set(f.path, f.content_hash);
+    await yieldToEventLoop();
   }
 
   // 캡 대상 src 노드의 pagerank(centrality) — 대기열 우선순위 산정.
@@ -78,9 +88,12 @@ export async function runPhaseC(dataSource: DataSource, graphId: string): Promis
   // 참고) — 여기선 centrality tier만 구현한다.
   const srcIds = [...new Set(candidates.map((e) => e.src_id))];
   const pagerankBySrcId = new Map<string, number>();
-  if (srcIds.length > 0) {
-    const srcNodes = await nodeRepo.find({ where: { graph_id: graphId, id: In(srcIds) }, select: ['id', 'pagerank'] });
+  for (let i = 0; i < srcIds.length; i += ID_CHUNK_SIZE) {
+    const chunk = srcIds.slice(i, i + ID_CHUNK_SIZE);
+    if (chunk.length === 0) continue;
+    const srcNodes = await nodeRepo.find({ where: { graph_id: graphId, id: In(chunk) }, select: ['id', 'pagerank'] });
     for (const n of srcNodes) pagerankBySrcId.set(n.id, n.pagerank);
+    await yieldToEventLoop();
   }
 
   let flipped = 0;

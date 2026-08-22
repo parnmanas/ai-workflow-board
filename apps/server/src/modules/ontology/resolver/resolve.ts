@@ -139,20 +139,33 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
       scopedSrcNodeIds.push(f.id);
       for (const d of index.defsByFilePath.get(p) ?? []) scopedSrcNodeIds.push(d.id);
     }
-    if (scopedSrcNodeIds.length > 0) {
-      const staleOutgoing = await edgeRepo.find({
-        where: { graph_id: input.graphId, src_id: In(scopedSrcNodeIds), type: In(RESOLVER_OWNED_EDGE_TYPES), status: 'active' },
+    // 리뷰 지적(차단) — scopedSrcNodeIds/scopedFileNodeIds는 git-diff 대량
+    // 배치에서 스코프에 든 파일 수만큼 커질 수 있어, 단일 IN(...)으로
+    // 몰면 SQLite/Postgres 바인드 변수 한도를 넘을 수 있다. persist.ts/
+    // resolve.ts 기존 관례(insertChunked/updateChunked)와 동일하게
+    // EDGE_CHUNK_SIZE로 나눠 조회/삭제하고 청크 사이 이벤트 루프를 양보한다.
+    const staleOutgoingIds: string[] = [];
+    for (let i = 0; i < scopedSrcNodeIds.length; i += EDGE_CHUNK_SIZE) {
+      const chunk = scopedSrcNodeIds.slice(i, i + EDGE_CHUNK_SIZE);
+      const rows = await edgeRepo.find({
+        where: { graph_id: input.graphId, src_id: In(chunk), type: In(RESOLVER_OWNED_EDGE_TYPES), status: 'active' },
         select: ['id'],
       });
-      if (staleOutgoing.length > 0) {
-        await updateChunked(edgeRepo, staleOutgoing.map((e) => e.id), EDGE_CHUNK_SIZE, {
-          status: 'removed',
-          valid_to_commit: input.commit,
-        });
-      }
+      staleOutgoingIds.push(...rows.map((e) => e.id));
+      await yieldToEventLoop();
     }
-    if (scopedFileNodeIds.length > 0) {
-      await dataSource.getRepository(OntologyReverseEdgeIndex).delete({ src_file_id: In(scopedFileNodeIds) });
+    if (staleOutgoingIds.length > 0) {
+      await updateChunked(edgeRepo, staleOutgoingIds, EDGE_CHUNK_SIZE, {
+        status: 'removed',
+        valid_to_commit: input.commit,
+      });
+    }
+
+    const reverseRepoForCleanup = dataSource.getRepository(OntologyReverseEdgeIndex);
+    for (let i = 0; i < scopedFileNodeIds.length; i += EDGE_CHUNK_SIZE) {
+      const chunk = scopedFileNodeIds.slice(i, i + EDGE_CHUNK_SIZE);
+      if (chunk.length > 0) await reverseRepoForCleanup.delete({ src_file_id: In(chunk) });
+      await yieldToEventLoop();
     }
   }
 

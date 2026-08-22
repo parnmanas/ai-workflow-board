@@ -31,7 +31,7 @@ process.env.NODE_ENV = 'test';
 
 const { extractFile } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/extract-file.js'));
 const { hashFactBundle } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/hash-bundle.js'));
-const { persistFactBundles } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
+const { persistFactBundles, insertChunked } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
 const { resolveCrossFileEdges } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/resolver/resolve.js'));
 const { runPhaseA, runPhaseADeletion } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/incremental/phase-a.js'));
 const { runPhaseB } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/incremental/phase-b.js'));
@@ -372,6 +372,178 @@ export function run() {
   });
 });
 
+describe('리뷰 지적(차단1) — Phase A가 CONTAINS/DECLARES 구조 엣지를 신규/삭제 def와 동기화한다', () => {
+  const GRAPH_ID = 'phase-a-structural-edges-graph';
+  const FILE_PATH = 'struct.ts';
+  const V1_SRC = `
+export class Widget {
+  render() {
+    return 1;
+  }
+}
+`;
+  const V2_ADD_DEFS_SRC = `
+export class Widget {
+  render() {
+    return 1;
+  }
+  extra() {
+    return 2;
+  }
+}
+
+export function helper() {
+  return 3;
+}
+`;
+  const V3_REMOVE_RENDER_SRC = `
+export class Widget {
+  extra() {
+    return 2;
+  }
+}
+
+export function helper() {
+  return 3;
+}
+`;
+
+  let fileNode, widgetNode, renderNode;
+
+  before(async () => {
+    await seedGraph(GRAPH_ID, [{ path: FILE_PATH, src: V1_SRC }], 'commit-1');
+    fileNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, type: 'File', path: FILE_PATH } });
+    widgetNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'Widget' } });
+    renderNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'Widget.render' } });
+    const containsEdge = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'CONTAINS', src_id: fileNode.id, dst_id: widgetNode.id },
+    });
+    const declaresEdge = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'DECLARES', src_id: widgetNode.id, dst_id: renderNode.id },
+    });
+    assert.ok(containsEdge && declaresEdge, '사전조건 — 초기 추출(persist.ts)이 이미 CONTAINS/DECLARES를 만들어야 한다');
+  });
+
+  it('(a) 기존 파일에 top-level def(helper)와 nested def(Widget.extra) 추가 시 CONTAINS/DECLARES가 active로 새로 생긴다', async () => {
+    const phaseA = await runPhaseA(AppOntologyDataSource, {
+      graphId: GRAPH_ID,
+      workspaceId: WORKSPACE_ID,
+      resourceId: RESOURCE_ID,
+      folderPath: '',
+      commit: 'commit-2',
+      extractionRunId: 'struct-run-1',
+      newPath: FILE_PATH,
+      oldPath: FILE_PATH,
+      lang: 'typescript',
+      content: V2_ADD_DEFS_SRC,
+    });
+    assert.equal(phaseA.shortCircuit, false, '새 def 추가는 changedSymbolIds를 채워 조기 종료하면 안 된다');
+
+    const helperNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'helper' } });
+    const extraNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'Widget.extra' } });
+    assert.ok(helperNode);
+    assert.ok(extraNode);
+
+    const helperContains = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'CONTAINS', src_id: fileNode.id, dst_id: helperNode.id, status: 'active' },
+    });
+    assert.ok(helperContains, 'top-level 신규 def(helper)는 File--CONTAINS-->helper 엣지가 active로 생겨야 한다');
+
+    const extraDeclares = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'DECLARES', src_id: widgetNode.id, dst_id: extraNode.id, status: 'active' },
+    });
+    assert.ok(extraDeclares, '중첩 신규 def(Widget.extra)는 Widget--DECLARES-->extra 엣지가 active로 생겨야 한다');
+  });
+
+  it('(b) def 삭제(Widget.render 제거) 시 그 def를 향하던 DECLARES 엣지가 removed 처리된다', async () => {
+    await runPhaseA(AppOntologyDataSource, {
+      graphId: GRAPH_ID,
+      workspaceId: WORKSPACE_ID,
+      resourceId: RESOURCE_ID,
+      folderPath: '',
+      commit: 'commit-3',
+      extractionRunId: 'struct-run-2',
+      newPath: FILE_PATH,
+      oldPath: FILE_PATH,
+      lang: 'typescript',
+      content: V3_REMOVE_RENDER_SRC,
+    });
+
+    const renderAfter = await nodeRepo.findOne({ where: { id: renderNode.id } });
+    assert.equal(renderAfter.status, 'removed');
+
+    const declaresEdgeAfter = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'DECLARES', src_id: widgetNode.id, dst_id: renderNode.id },
+    });
+    assert.ok(declaresEdgeAfter);
+    assert.equal(
+      declaresEdgeAfter.status,
+      'removed',
+      'Widget--DECLARES-->render 엣지도 render가 삭제되면 removed로 같이 처리돼야 한다(리뷰 지적)',
+    );
+  });
+
+  it('(b) 파일 삭제(runPhaseADeletion) 시 그 파일이 만든 CONTAINS 엣지도 removed 처리된다', async () => {
+    const helperNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'helper' } });
+    const helperContainsBefore = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'CONTAINS', src_id: fileNode.id, dst_id: helperNode.id },
+    });
+    assert.equal(helperContainsBefore.status, 'active');
+
+    await runPhaseADeletion(AppOntologyDataSource, { graphId: GRAPH_ID, commit: 'commit-4', filePath: FILE_PATH });
+
+    const helperContainsAfter = await edgeRepo.findOne({ where: { id: helperContainsBefore.id } });
+    assert.equal(
+      helperContainsAfter.status,
+      'removed',
+      '파일 삭제 시 그 파일이 만든 CONTAINS 엣지도 removed 처리돼야 한다(리뷰 지적)',
+    );
+  });
+});
+
+describe('리뷰 지적(차단1c) — 신규 파일(그래프에 처음 들어오는 경로)에서도 CONTAINS/DECLARES가 생긴다', () => {
+  const GRAPH_ID = 'phase-a-new-file-structural-edges-graph';
+  const NEW_FILE_PATH = 'brand-new.ts';
+  const SRC = `
+export class Foo {
+  bar() {
+    return 1;
+  }
+}
+`;
+
+  it('그래프에 전혀 없던 파일을 Phase A로 처음 넣으면 CONTAINS/DECLARES가 active로 생긴다', async () => {
+    const phaseA = await runPhaseA(AppOntologyDataSource, {
+      graphId: GRAPH_ID,
+      workspaceId: WORKSPACE_ID,
+      resourceId: RESOURCE_ID,
+      folderPath: '',
+      commit: 'commit-1',
+      extractionRunId: 'new-file-run-1',
+      newPath: NEW_FILE_PATH,
+      oldPath: NEW_FILE_PATH,
+      lang: 'typescript',
+      content: SRC,
+    });
+    assert.equal(phaseA.isNewFile, true);
+
+    const fileNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, type: 'File', path: NEW_FILE_PATH } });
+    const fooNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'Foo' } });
+    const barNode = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, qualified_name: 'Foo.bar' } });
+    assert.ok(fileNode && fooNode && barNode);
+
+    const containsEdge = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'CONTAINS', src_id: fileNode.id, dst_id: fooNode.id, status: 'active' },
+    });
+    assert.ok(containsEdge, '신규 파일의 top-level def도 CONTAINS 엣지가 생겨야 한다');
+
+    const declaresEdge = await edgeRepo.findOne({
+      where: { graph_id: GRAPH_ID, type: 'DECLARES', src_id: fooNode.id, dst_id: barNode.id, status: 'active' },
+    });
+    assert.ok(declaresEdge, '신규 파일의 중첩 def도 DECLARES 엣지가 생겨야 한다');
+  });
+});
+
 describe('durability pre-filter — volatile 변경은 stable/frozen 파티션의 reverse-index 워크를 건너뛴다(research-incremental.md §4.3)', () => {
   const GRAPH_ID = 'durability-filter-graph';
   const DST_SYMBOL_ID = 'def:shared.ts#hot';
@@ -462,5 +634,92 @@ describe('파일 삭제 — runPhaseADeletion이 활성 노드를 soft-delete하
     });
     assert.equal(result.shortCircuit, true);
     assert.deepEqual(result.changedSymbolIds, []);
+  });
+});
+
+describe('리뷰 지적(차단2) — resolve.ts의 scopeFilePaths 정리가 청크 경계(500) 너머까지 전부 처리한다', () => {
+  const GRAPH_ID = 'resolve-scope-chunk-graph';
+  const FILE_PATH = 'many-defs.ts';
+  const DEF_COUNT = 620; // EDGE_CHUNK_SIZE(500)보다 크게 — 청크 하나로는 안 끝나야 한다.
+
+  it('620개 넘는 기존 리졸버 소유 CALLS 엣지가 재해소 전에 전부 removed 처리된다', async () => {
+    const fileId = randomUUID();
+    const dstId = randomUUID();
+    const defIds = Array.from({ length: DEF_COUNT }, () => randomUUID());
+
+    const fileRow = {
+      id: fileId,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: `file:${FILE_PATH}`,
+      type: 'File',
+      layer: 'structural',
+      name: FILE_PATH,
+      qualified_name: FILE_PATH,
+      path: FILE_PATH,
+      confidence: 1,
+      status: 'active',
+      props: JSON.stringify({ refs: [], imports: [], exports: [], heritage: [] }),
+    };
+    const dstRow = {
+      id: dstId,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: 'def:target#shared',
+      type: 'Callable',
+      layer: 'structural',
+      name: 'target',
+      qualified_name: 'target',
+      path: FILE_PATH,
+      confidence: 1,
+      status: 'active',
+    };
+    const defRows = defIds.map((id, i) => ({
+      id,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: `def:${FILE_PATH}#fn${i}`,
+      type: 'Callable',
+      layer: 'structural',
+      name: `fn${i}`,
+      qualified_name: `fn${i}`,
+      path: FILE_PATH,
+      confidence: 1,
+      status: 'active',
+      signature_hash: 'sig',
+    }));
+    await insertChunked(nodeRepo, [fileRow, dstRow, ...defRows], 500);
+
+    const edgeRows = defIds.map((srcId) => ({
+      id: randomUUID(),
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      src_id: srcId,
+      dst_id: dstId,
+      type: 'CALLS',
+      layer: 'structural',
+      confidence: 0.75,
+      status: 'active',
+      resolution: 'name_match',
+      props: '{}',
+    }));
+    await insertChunked(edgeRepo, edgeRows, 500);
+
+    await resolveCrossFileEdges(AppOntologyDataSource, {
+      graphId: GRAPH_ID,
+      workspaceId: WORKSPACE_ID,
+      commit: 'c2',
+      extractionRunId: 'chunk-run-1',
+      scopeFilePaths: new Set([FILE_PATH]),
+    });
+
+    const stillActive = await edgeRepo.find({ where: { graph_id: GRAPH_ID, type: 'CALLS', status: 'active' } });
+    assert.equal(
+      stillActive.length,
+      0,
+      `청크 경계(500)를 넘는 ${DEF_COUNT}개 CALLS 엣지가 재해소 전 전부 removed 처리돼야 한다 — 청크 루프가 첫 청크만 처리하면 일부가 active로 남는다`,
+    );
+    const removed = await edgeRepo.find({ where: { graph_id: GRAPH_ID, type: 'CALLS', status: 'removed' } });
+    assert.equal(removed.length, DEF_COUNT);
   });
 });

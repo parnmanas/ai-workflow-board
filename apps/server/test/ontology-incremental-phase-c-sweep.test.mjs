@@ -25,6 +25,7 @@ process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
 const { runPhaseC } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/incremental/phase-c.js'));
+const { insertChunked } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
 const { OntologyStaleSweepService } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/incremental/sweep.service.js'));
 const { AppOntologyDataSource, initOntologyDb, flushOntologySqljs } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
@@ -193,5 +194,85 @@ describe('완료조건 3 — 스윕이 stale-queue 크기/age 퍼센타일을 �
     const secondForGraph = secondSweep.find((r) => r.graphId === GRAPH_ID);
     assert.equal(secondForGraph.drainedThisSweep, 0, 'cooldown 안에 있는 행은 재드레인 대상에서 빠져야 한다');
     assert.equal(secondForGraph.queueSize, 1, 'queueSize 자체는(드레인 여부와 무관하게) 여전히 1이다');
+  });
+});
+
+describe('리뷰 지적(차단2) — Phase C의 allPaths/srcIds 청크 조회가 청크 경계(500) 너머까지 정확히 처리한다', () => {
+  const GRAPH_ID = 'phase-c-chunk-graph';
+  const N = 620; // ID_CHUNK_SIZE(500)보다 크게 — 청크 하나로는 안 끝나야 한다.
+
+  it('620개의 distinct src 노드 + evidence_ref 경로가 청크 경계를 넘어도 각자 자기 pagerank로 정확히 처리된다', async () => {
+    const dstFileId = randomUUID();
+    const dstRow = {
+      id: dstFileId,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: 'file:chunk-shared.ts',
+      type: 'File',
+      layer: 'structural',
+      name: 'chunk-shared.ts',
+      qualified_name: 'chunk-shared.ts',
+      path: 'chunk-shared.ts',
+      confidence: 1,
+      content_hash: 'this-will-never-match-any-evidence_ref',
+      status: 'active',
+    };
+
+    const srcIds = Array.from({ length: N }, () => randomUUID());
+    const srcRows = srcIds.map((id, i) => ({
+      id,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: `concept:${i}`,
+      type: 'Concept',
+      layer: 'semantic',
+      name: `concept${i}`,
+      qualified_name: `concept${i}`,
+      path: '',
+      confidence: 1,
+      status: 'active',
+      pagerank: i / 1000,
+    }));
+    await insertChunked(nodeRepo, [dstRow, ...srcRows], 500);
+
+    // 각 엣지가 서로 다른 가짜 경로를 evidence_ref로 인용한다 — 실제
+    // File 노드가 없는 경로라 currentHashByPath 조회가 항상 미스, 그래서
+    // 전부 stale로 뒤집힌다. 동시에 이 N개의 distinct 가짜 경로가
+    // allPaths 청크 조회를, N개의 distinct src가 srcIds 청크 조회를 각각
+    // 500개 경계 너머까지 실제로 돌게 만든다.
+    const edgeRows = srcIds.map((srcId, i) => ({
+      id: randomUUID(),
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      src_id: srcId,
+      dst_id: dstFileId,
+      type: 'ABOUT',
+      layer: 'semantic',
+      confidence: 0.8,
+      status: 'active',
+      evidence_ref: JSON.stringify([{ path: `nonexistent-${i}.ts`, content_hash: 'whatever' }]),
+      props: '{}',
+    }));
+    await insertChunked(edgeRepo, edgeRows, 500);
+
+    const result = await runPhaseC(AppOntologyDataSource, GRAPH_ID);
+    assert.equal(result.edgesScanned, N);
+    assert.equal(
+      result.edgesFlippedStale,
+      N,
+      '가짜 경로라 전부 불일치해야 한다 — allPaths 청크가 일부만 처리되면 이 수가 500언저리에서 끊긴다',
+    );
+
+    // 청크 경계 양쪽(첫 청크 시작/첫 청크 끝/둘째 청크 시작/둘째 청크 끝)에서
+    // 각자 자기 pagerank로 priority가 정확히 산정됐는지 확인 — srcIds
+    // 청크 조회가 엉뚱한 청크의 값을 섞어 매칭하면 이 값이 틀어진다.
+    for (const i of [0, 499, 500, N - 1]) {
+      const row = await queueRepo.findOne({ where: { graph_id: GRAPH_ID, node_id: srcIds[i] } });
+      assert.ok(row, `index ${i}의 enrichment_queue 행이 있어야 한다`);
+      assert.ok(
+        Math.abs(row.priority - -(i / 1000)) < 1e-9,
+        `index ${i}는 자기 pagerank(${i / 1000})로 priority(-pagerank)가 산정돼야 한다 — 실제는 ${row.priority}`,
+      );
+    }
   });
 });
