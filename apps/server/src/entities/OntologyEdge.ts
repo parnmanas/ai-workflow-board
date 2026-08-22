@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index, Check } from 'typeorm';
 import { OntologyLayer, OntologyStatus, OntologyConfidenceMethod } from './OntologyNode';
 
 export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod };
@@ -10,8 +10,19 @@ export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod };
 //
 // Pinned in DESIGN.md axis 2 (review finding, integrity/major) — name-resolution
 // confidence vs. runtime-dispatch confidence are separate axes. Structural
-// CALLS edges only; null/unused on every other edge type.
-export type OntologyEdgeResolution = 'exact' | 'name_match' | 'dynamic' | 'unresolved';
+// CALLS edges only; null/unused on every other edge type. Unlike type/kind/
+// layer above, this vocabulary is genuinely CLOSED (not workspace-extensible),
+// so — reviewer finding, 6ca4894a Review round 1 — it is enforced with a real
+// DB-level CHECK constraint (below), not just a TypeScript union: TypeORM's
+// `simple-enum` column type was considered and rejected here because on the
+// sqlite/sql.js driver it normalizes to a plain `varchar` with ZERO
+// validation (confirmed against typeorm@0.3.31's DateUtils.simpleEnumToString,
+// which just stringifies) — it would only ever be enforced on Postgres
+// (where simple-enum maps to a native enum type), silently leaving the sql.js
+// backend unprotected. A `@Check()` constraint, by contrast, is a portable
+// SQL feature both SQLite (sql.js) and Postgres synchronize natively.
+export const ONTOLOGY_EDGE_RESOLUTION_VALUES = ['exact', 'name_match', 'dynamic', 'unresolved'] as const;
+export type OntologyEdgeResolution = typeof ONTOLOGY_EDGE_RESOLUTION_VALUES[number];
 export type OntologyEvidenceKind =
   | 'parser' | 'indexer' | 'git' | 'heuristic' | 'cooccurrence' | 'embedding' | 'llm' | 'human';
 export type OntologyEdgeRank = 'preferred' | 'normal' | 'deprecated';
@@ -33,6 +44,7 @@ export type OntologyCompleteness = 'complete' | 'incomplete' | 'no_assertion';
 @Index(['graph_id', 'dst_id', 'type'])
 @Index(['graph_id', 'type', 'layer'])
 @Index(['graph_id', 'status', 'layer'])
+@Check(`"resolution" IN (${ONTOLOGY_EDGE_RESOLUTION_VALUES.map((v) => `'${v}'`).join(', ')}) OR "resolution" IS NULL`)
 @Entity('ontology_edges')
 export class OntologyEdge {
   @PrimaryGeneratedColumn('uuid')
@@ -68,7 +80,10 @@ export class OntologyEdge {
   support: number | null;
 
   // Structural CALLS-only (DESIGN.md axis 2's resolution='dynamic' cap
-  // mechanism). Null/unused on every other edge type.
+  // mechanism). Null/unused on every other edge type. Column stays 'varchar'
+  // (not 'enum'/'simple-enum') — the @Check() constraint above is what
+  // actually enforces membership on both backends; see that decorator's
+  // comment for why simple-enum doesn't.
   @Column({ type: 'varchar', nullable: true, default: null })
   resolution: OntologyEdgeResolution | null;
 
