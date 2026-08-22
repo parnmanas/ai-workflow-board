@@ -25,25 +25,31 @@
  *     malformed identifier (review round 1, P1).
  *   - `cancelWait(ticket, actor)` — clear both fields. Idempotent.
  *   - `tryUpdateContext(ticketId, expectedPriorContext, nextContextJson)` —
- *     the ONE generic atomic CAS primitive every mid-delivery transition
- *     uses: recording an outcome, claiming/renewing the delivery lease,
- *     flipping `comment_posted`/`dispatch_done`. Never touches
- *     `pending_ci_wait` — see CiWaitResumeService's docstring for why that
- *     separation is the crux of the review round 1 P0 fix (a crash between
- *     "resolved" and "delivered" must not lose the ticket's sweep-candidate
- *     status).
- *   - `markDelivered(ticketId, expectedContext)` — the FINAL atomic CAS
- *     (`pending_ci_wait: true -> false`), conditioned on BOTH
- *     `pending_ci_wait: true` AND the EXACT `ci_wait_context` this delivery
- *     attempt just finished with (review round 2 finding: conditioning on
- *     `pending_ci_wait` alone let a stale in-flight delivery for an OLD wait
- *     clear a brand-new wait that raced in via cancel+re-register in
- *     between — pinning the exact context closes that).
+ *     the atomic CAS primitive phase 1 (resolving the wait) uses to record
+ *     an outcome without clearing `pending_ci_wait` — see
+ *     `CiWaitResumeService`'s docstring for why that separation is the crux
+ *     of the review round 1 P0 fix (a crash between "resolved" and
+ *     "delivered" must not lose the ticket's sweep-candidate status).
+ *   - `claimDelivery(ticketId, expectedContext, withinTx)` — phase 2
+ *     (delivery), review round 3's fix. A SINGLE DB transaction that
+ *     atomically (a) CASes `pending_ci_wait: true -> false` conditioned on
+ *     the exact `ci_wait_context` this delivery attempt is resolving, and
+ *     (b) — ONLY if that CAS wins — runs the caller's `withinTx` (the
+ *     resolution comment insert) on the SAME transaction manager. Two
+ *     SEPARATE durable writes (post the comment, THEN CAS a
+ *     `comment_posted` flag) can never fully close the crash-between-them
+ *     window no matter how they are sequenced or leased — only wrapping
+ *     both in one transaction can, since a transaction is the one
+ *     primitive this codebase has that is genuinely all-or-nothing. See
+ *     `CiWaitResumeService._deliver` for how the comment insert itself is
+ *     ALSO independently idempotent (DB unique constraint on
+ *     `Comment.operational_recurrence_key`) — defense in depth, not the
+ *     primary guarantee.
  */
 
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { ActivityService } from '../../services/activity.service';
 import { isValidRepoRef, isValidGitHubRunId, isValidGitSha } from '../../services/github-connector.service';
@@ -51,22 +57,9 @@ import { isValidRepoRef, isValidGitHubRunId, isValidGitSha } from '../../service
 export interface CiWaitOutcome {
   kind: 'resolved' | 'timeout' | 'error';
   message: string;
-  /** Durable per-resolution identity — set once, never changes. Also used as
-   *  the idempotent resolution-comment marker. */
+  /** Durable per-resolution identity — set once, never changes. Also the
+   *  suffix of the resolution comment's dedupe key (see `_deliver`). */
   resolved_at: string; // ISO timestamp
-  /** Bumped every time a delivery attempt (re)claims the lease below. */
-  delivery_generation: number;
-  /** Opaque per-attempt token; '' when no attempt currently holds the lease. */
-  lease_owner: string;
-  /** ISO timestamp; '' when no attempt currently holds the lease. A lease
-   *  past this time is stale and may be reclaimed by a fresh attempt. */
-  lease_expires_at: string;
-  /** Durable — true only once the resolution comment has actually been
-   *  saved. Delivery retries check this before posting again (idempotent). */
-  comment_posted: boolean;
-  /** Durable — true only once `dispatchCurrentColumn` has actually returned
-   *  without throwing. Delivery retries check this before dispatching again. */
-  dispatch_done: boolean;
 }
 
 export interface CiWaitContext {
@@ -110,11 +103,6 @@ export function parseCiWaitContext(raw: string | null | undefined): CiWaitContex
           kind: o.kind as CiWaitOutcome['kind'],
           message: String(o.message || ''),
           resolved_at: String(o.resolved_at || ''),
-          delivery_generation: Number.isFinite(o.delivery_generation) ? o.delivery_generation : 0,
-          lease_owner: String(o.lease_owner || ''),
-          lease_expires_at: String(o.lease_expires_at || ''),
-          comment_posted: !!o.comment_posted,
-          dispatch_done: !!o.dispatch_done,
         }
       : undefined;
     return {
@@ -221,12 +209,12 @@ export class CiWaitService {
   }
 
   /**
-   * The one generic atomic CAS every mid-delivery transition uses. Does NOT
-   * touch `pending_ci_wait` — that is `markDelivered`'s job alone (see class
-   * docstring for why that separation matters). `expectedPriorContext` must
-   * be the exact `ci_wait_context` string the caller most recently read (or
-   * itself just wrote); the CAS only succeeds if nobody else changed it
-   * since. Returns whether THIS call won.
+   * Phase 1 atomic CAS. Does NOT touch `pending_ci_wait` — that is
+   * `claimDelivery`'s job alone (see class docstring for why that
+   * separation matters). `expectedPriorContext` must be the exact
+   * `ci_wait_context` string the caller most recently read (or itself just
+   * wrote); the CAS only succeeds if nobody else changed it since. Returns
+   * whether THIS call won.
    */
   async tryUpdateContext(ticketId: string, expectedPriorContext: string, nextContextJson: string): Promise<boolean> {
     const result = await this.dataSource.getRepository(Ticket).update(
@@ -237,18 +225,38 @@ export class CiWaitService {
   }
 
   /**
-   * Final atomic CAS — ONLY call once delivery (comment + dispatch, both
-   * durably flagged done) has actually completed for the recorded outcome.
-   * Conditioned on BOTH `pending_ci_wait: true` AND the exact
-   * `expectedContext` this delivery attempt finished with, so a stale
-   * in-flight delivery for an OLD wait can never clear a brand-new wait
-   * that raced in via cancel + re-register in the meantime (review round 2).
+   * Phase 2 (delivery) atomic claim — review round 3's fix. Runs inside ONE
+   * DB transaction:
+   *   1. CAS `pending_ci_wait: true -> false`, conditioned on BOTH
+   *      `pending_ci_wait: true` AND the EXACT `expectedContext` this
+   *      delivery attempt is resolving (review round 2 finding: conditioning
+   *      on `pending_ci_wait` alone let a stale in-flight delivery for an
+   *      OLD wait clear a brand-new wait that raced in via cancel +
+   *      re-register in between — pinning the exact context closes that).
+   *   2. ONLY if that CAS affects a row, call `withinTx(manager)` — the
+   *      caller's side effect (the resolution comment insert) — using the
+   *      SAME transaction manager, so it commits or rolls back atomically
+   *      together with step 1. If `withinTx` throws, the WHOLE transaction
+   *      (including the CAS) rolls back — `pending_ci_wait` is left exactly
+   *      as it was, so a later retry safely re-attempts both from scratch.
+   * Returns whether this call actually claimed delivery (and therefore ran
+   * `withinTx`).
    */
-  async markDelivered(ticketId: string, expectedContext: string): Promise<boolean> {
-    const result = await this.dataSource.getRepository(Ticket).update(
-      { id: ticketId, pending_ci_wait: true, ci_wait_context: expectedContext } as any,
-      { pending_ci_wait: false, ci_wait_context: '' },
-    );
-    return (result.affected || 0) > 0;
+  async claimDelivery(
+    ticketId: string,
+    expectedContext: string,
+    withinTx: (manager: EntityManager) => Promise<void>,
+  ): Promise<boolean> {
+    let claimed = false;
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.getRepository(Ticket).update(
+        { id: ticketId, pending_ci_wait: true, ci_wait_context: expectedContext } as any,
+        { pending_ci_wait: false, ci_wait_context: '' },
+      );
+      if ((result.affected || 0) === 0) return; // lost the race / already delivered — commit as a no-op
+      await withinTx(manager);
+      claimed = true;
+    });
+    return claimed;
   }
 }
