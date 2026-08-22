@@ -206,6 +206,8 @@ export class CredentialsController {
         workspace_id: i.workspace_id,
         codex_installed: !!i.runtime_capabilities?.codex?.installed,
         codex_healthy: !!i.runtime_capabilities?.codex?.healthy,
+        claude_installed: !!i.runtime_capabilities?.claude?.installed,
+        claude_healthy: !!i.runtime_capabilities?.claude?.healthy,
       })),
     );
   }

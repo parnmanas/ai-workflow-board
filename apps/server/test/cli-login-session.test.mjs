@@ -118,10 +118,28 @@ function service({ instances = [liveInstance()], issueImpl, sessions, creds } = 
 test('startSession rejects an unsupported cli before touching the registry/command service', async () => {
   const { instance, commandService } = service();
   await assert.rejects(
-    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'claude', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
-    /Unsupported cli "claude"/,
+    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'gemini', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    /Unsupported cli "gemini"/,
   );
   assert.equal(commandService.calls.length, 0);
+});
+
+// ticket 06b2b990 — claude는 이제 codex와 나란히 자동화된다.
+test('startSession happy path for claude: creates a starting session, issues cli_login_start with cli=claude', async () => {
+  const { instance, commandService, sessionRepo } = service();
+  const session = await instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+
+  assert.equal(session.status, 'starting');
+  assert.equal(commandService.calls.length, 1);
+  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'claude' });
+  assert.equal(sessionRepo.rows.get(session.id).command_id, 'cmd-xyz');
 });
 
 test('startSession rejects a missing credential name', async () => {
@@ -369,6 +387,51 @@ test('applyProgress: succeeded encrypts + stores a codex_subscription credential
   assert.doesNotMatch(JSON.stringify(updated), new RegExp(SECRET));
 });
 
+// ticket 06b2b990 — claude_subscription 경로도 codex_subscription과 동일한
+// 계약(필수 필드 검증, 암호화, 원문 미노출)을 따르는지 확인.
+test('applyProgress: succeeded requires credential_fields.credentials_json for a claude session', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+  await assert.rejects(
+    () => s.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: session.command_id, status: 'succeeded', credentialFields: {} }),
+    (err) => err.status === 400 && /credentials_json/.test(err.message),
+  );
+});
+
+test('applyProgress: succeeded encrypts + stores a claude_subscription credential and never echoes the raw secret back', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+  const SECRET = `claude-secret-${randomUUID()}`;
+  const updated = await s.instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'succeeded',
+    credentialFields: { credentials_json: JSON.stringify({ claudeAiOauth: { accessToken: SECRET } }) },
+  });
+
+  assert.equal(updated.status, 'succeeded');
+  assert.ok(updated.created_credential_id);
+  assert.equal(s.credRepo.saved.length, 1);
+  assert.equal(s.credRepo.saved[0].provider, 'claude_subscription');
+  assert.match(s.credRepo.saved[0].encrypted_data, /^enc:/);
+  assert.doesNotMatch(JSON.stringify(updated), new RegExp(SECRET));
+});
+
 test('applyProgress: succeeded on a GLOBAL session creates a workspace_id=null credential', async () => {
   const s = service();
   const session = await s.instance.startSession({
@@ -573,7 +636,10 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
       cli_adapters: ['codex'],
       pid: 12345,
       started_at: new Date().toISOString(),
-      runtime_capabilities: { codex: { installed: true, healthy: true, version: '0.147.0', reason: null, capabilities: {} } },
+      runtime_capabilities: {
+        codex: { installed: true, healthy: true, version: '0.147.0', reason: null, capabilities: {} },
+        claude: { installed: true, healthy: true, version: '2.1.238', reason: null, capabilities: {} },
+      },
     });
 
     const adminToken = auth.createSession(admin.id);
@@ -591,6 +657,9 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     assert.ok(found, 'freshly-upserted manager instance must appear in the picker list');
     assert.equal(found.codex_installed, true);
     assert.equal(found.codex_healthy, true);
+    // ticket 06b2b990 — the picker surfaces claude capability the same way.
+    assert.equal(found.claude_installed, true);
+    assert.equal(found.claude_healthy, true);
 
     // Global scope requires MANAGE_GLOBAL_CREDENTIALS — same gate as
     // POST /api/credentials (완료 기준: "credential 생성 권한과 동일 게이트").

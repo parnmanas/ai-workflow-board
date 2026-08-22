@@ -19,17 +19,19 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
-// cli → 생성할 Credential.provider. codex만 자동화됨 — claude는 완전 비대화형
-// 플래그가 없어 PTY 릴레이가 필요하므로 후속 티켓으로 분리됨(티켓 b2e79108
-// 설명 "리스크/미확정" 절에서 이미 허용된 분할).
+// cli → 생성할 Credential.provider. codex(b2e79108)에 이어 claude(ticket
+// 06b2b990)도 자동화됨 — claude auth login이 TTY 없이도 동작함을 라이브
+// 호스트에서 확인해 codex와 동일한 crossSpawn 경로로 구현했다(PTY 불필요).
 const CLI_PROVIDER: Record<string, string> = {
   codex: 'codex_subscription',
+  claude: 'claude_subscription',
 };
 
 // provider별 필수 필드 — credentials.controller.ts의 PROVIDER_FIELDS 및
 // agent-manager-commands.ts의 REQUIRED_CREDENTIAL_FIELDS와 동일해야 한다.
 const REQUIRED_FIELD: Record<string, string> = {
   codex_subscription: 'auth_json',
+  claude_subscription: 'credentials_json',
 };
 
 export interface StartCliLoginSessionArgs {
@@ -73,7 +75,7 @@ export class CliLoginSessionService {
   async startSession(args: StartCliLoginSessionArgs): Promise<CliLoginSession> {
     const provider = CLI_PROVIDER[args.cli];
     if (!provider) {
-      throw makeError(400, `Unsupported cli "${args.cli}" — only codex is automated so far`);
+      throw makeError(400, `Unsupported cli "${args.cli}" — only codex/claude are automated so far`);
     }
     if (!args.credentialName?.trim()) {
       throw makeError(400, 'credential_name is required');

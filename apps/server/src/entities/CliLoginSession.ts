@@ -35,8 +35,8 @@ export class CliLoginSession {
   @Column({ type: 'boolean', default: false })
   is_global: boolean;
 
-  // 'codex' 만 자동화됨(claude는 후속 티켓 — PTY 릴레이 필요). 문자열 컬럼이라
-  // 스키마 변경 없이 나중에 추가 가능.
+  // 'codex' | 'claude' 자동화됨(ticket b2e79108, 06b2b990). 문자열 컬럼이라
+  // 스키마 변경 없이 다른 CLI도 나중에 추가 가능.
   @Column({ type: 'varchar' })
   cli: string;
 
