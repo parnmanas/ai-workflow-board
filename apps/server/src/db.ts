@@ -20,12 +20,24 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as entitiesBarrel from './entities';
+import { OntologyNode } from './entities/OntologyNode';
+import { OntologyEdge } from './entities/OntologyEdge';
 import {
   DISPATCH_INTENTS_TABLE,
   DEDUP_OPEN_DISPATCH_INTENTS_SQL,
 } from './database/dispatch-intent-dedup';
 
 const entities = Object.values(entitiesBarrel);
+
+// Ontology Graph tables (ticket 6ca4894a, DESIGN.md axis 3) get their own
+// DataSource on sql.js — see buildOntologyDataSourceOptions() below. They
+// must therefore be excluded from the PRIMARY sql.js entities array (below)
+// so `synchronize` never DDLs them into the shared data.db. Postgres/MySQL
+// keep the full barrel unmodified — one DataSource, ontology alongside
+// everything else, exactly as before this ticket.
+const ONTOLOGY_ENTITIES = [OntologyNode, OntologyEdge];
+const ontologyEntitySet = new Set<unknown>(ONTOLOGY_ENTITIES);
+const primarySqljsEntities = entities.filter((e) => !ontologyEntitySet.has(e));
 
 /**
  * True when the active backend is the dev sql.js (in-memory WASM) database.
@@ -392,6 +404,23 @@ export function resolveSqljsLocation(): { dbDir: string; location: string } {
   return { dbDir, location };
 }
 
+/**
+ * Sibling of resolveSqljsLocation() for the Ontology Graph's own sql.js file
+ * (ticket 6ca4894a, DESIGN.md axis 3) — same directory, different filename,
+ * never the same path as the primary. SQLJS_ONTOLOGY_DB_PATH mirrors
+ * SQLJS_DB_PATH's env-override/isolation convention (qa-flow subprocess
+ * isolation, tests).
+ */
+export function resolveOntologySqljsLocation(): { dbDir: string; location: string } {
+  const dbDir = path.join(__dirname, '..', '..', '..', 'database');
+  const location = process.env.SQLJS_ONTOLOGY_DB_PATH
+    ? (path.isAbsolute(process.env.SQLJS_ONTOLOGY_DB_PATH)
+        ? process.env.SQLJS_ONTOLOGY_DB_PATH
+        : path.join(dbDir, process.env.SQLJS_ONTOLOGY_DB_PATH))
+    : path.join(dbDir, 'ontology.db');
+  return { dbDir, location };
+}
+
 export function buildDataSourceOptions(): DataSourceOptions {
   const dbType = (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'mysql' | 'postgres';
   // Migrations glob — matches both src/.ts (tsx dev mode) and dist/.js (compiled)
@@ -465,7 +494,10 @@ export function buildDataSourceOptions(): DataSourceOptions {
     // SqljsWriteSubscriber flips the dirty flag on writes so an idle server
     // flushes nothing. sqljs-only — the prod backends never construct it.
     subscribers: [SqljsWriteSubscriber],
-    entities,
+    // Ontology* entities are excluded here (ticket 6ca4894a, axis 3) — they
+    // live in the second DataSource buildOntologyDataSourceOptions() builds,
+    // never sharing this DataSource's dirty flag/flush timer/data.db file.
+    entities: primarySqljsEntities,
     migrations: migrationsGlob,
     synchronize: true,   // D-01
     migrationsRun: false, // D-02
@@ -600,6 +632,199 @@ export function startSqljsAutoFlush(
       opts.onError?.(e);
     }
   };
+}
+
+// ── dev sql.js Ontology Graph DataSource (ticket 6ca4894a) ──────────────────
+// DESIGN.md axis 3 (S1/S3 in REVIEW-NOTES.md, both critical/major): Ontology
+// tables must NEVER share the primary data.db's dirty flag, flush timer, or
+// serializeSqljsTransactions() queue. If they did, ontology-table growth
+// (this design's own 10 MLOC projection: ~100-150k nodes + ~240-800k edges)
+// would inflate EVERY subsequent flush of the shared file — even one
+// triggered by an unrelated ticket comment — blocking the whole instance's
+// request handling for every user, not just ontology-graph users (S1). This
+// section is therefore a DELIBERATE, near-total duplication of the primary
+// flush machinery above, not a refactor into shared state — sqljsDirty/
+// sqljsFlushInFlight are process-global module variables (see their own
+// comments above); reusing them for a second DataSource would silently
+// reintroduce exactly the cross-contamination this ticket exists to prevent
+// (a write to one DataSource clearing the OTHER's dirty flag, or one
+// DataSource's flush "coalescing" into the other's in-flight export and
+// skipping its own). Postgres/MySQL never construct any of this — ontology
+// tables synchronize into the single existing DataSource unchanged, gated
+// the same way as every other batched-flush mechanism (isSqljsBackend()).
+let ontologySqljsDirty = false;
+let ontologySqljsFlushInFlight: Promise<boolean> | null = null;
+
+export function markOntologySqljsDirty(): void {
+  ontologySqljsDirty = true;
+}
+
+export function isOntologySqljsDirty(): boolean {
+  return ontologySqljsDirty;
+}
+
+/** Ontology-DataSource-scoped sibling of SqljsWriteSubscriber — see its docstring above. */
+@EventSubscriber()
+export class OntologySqljsWriteSubscriber implements EntitySubscriberInterface {
+  afterQuery(event: { query?: string; success?: boolean }): void {
+    if (event.success === false) return;
+    const command = (event.query || '').trimStart().split(/\s/, 1)[0].toUpperCase();
+    if (command && command !== 'SELECT' && command !== 'PRAGMA') {
+      markOntologySqljsDirty();
+    }
+  }
+}
+
+/**
+ * Sibling of buildDataSourceOptions() (DESIGN.md axis 3's explicit
+ * integration point) — always sql.js-shaped, regardless of DB_TYPE. There is
+ * no Postgres/MySQL variant: on those backends Ontology* entities already
+ * synchronize into the single primary DataSource (they're never excluded
+ * from `entities` there), so nothing should ever construct a DataSource from
+ * these options unless isSqljsBackend() is true. Callers gate on that, the
+ * same way every other sqljs-only code path in this file does.
+ */
+export function buildOntologyDataSourceOptions(): DataSourceOptions {
+  const { dbDir, location } = resolveOntologySqljsLocation();
+  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+  return {
+    type: 'sqljs',
+    location,
+    autoSave: false,
+    subscribers: [OntologySqljsWriteSubscriber],
+    entities: ONTOLOGY_ENTITIES,
+    synchronize: true,   // D-01
+    migrationsRun: false, // D-02 — moot here (no ontology migrations exist), kept for parity
+    logging: false,
+  };
+}
+
+// Only constructed when the active backend is sql.js — on Postgres/MySQL
+// this stays null so buildOntologyDataSourceOptions() (and its mkdir side
+// effect) is never even called, matching "Postgres: no changes" exactly.
+export const AppOntologyDataSource: DataSource | null = isSqljsBackend()
+  ? new DataSource(buildOntologyDataSourceOptions())
+  : null;
+if (AppOntologyDataSource) {
+  // Own transaction queue (S3) — serializeSqljsTransactions() is per-instance
+  // (patches this DataSource's own manager, keyed by a closure-local queue +
+  // AsyncLocalStorage), so calling it a second time here is already safe and
+  // requires no changes to the function itself.
+  serializeSqljsTransactions(AppOntologyDataSource);
+}
+
+/** Ontology-DataSource-scoped sibling of doSqljsExport() — see its docstring above. */
+async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
+  ontologySqljsDirty = false;
+  try {
+    await dataSource.sqljsManager.saveDatabase();
+    return true;
+  } catch (e) {
+    ontologySqljsDirty = true;
+    throw e;
+  }
+}
+
+/** Ontology-DataSource-scoped sibling of flushSqljs() — see its docstring above. */
+export async function flushOntologySqljs(dataSource: DataSource, force = false): Promise<boolean> {
+  if (!isSqljsBackend()) return false;
+  if (!dataSource?.isInitialized) return false;
+
+  if (ontologySqljsFlushInFlight) {
+    if (!force) return false;
+    try {
+      await ontologySqljsFlushInFlight;
+    } catch {
+      // Surfaced to that flush's own caller; proceed to a fresh forced export.
+    }
+  }
+
+  if (!force && !ontologySqljsDirty) return false;
+
+  const run = doOntologySqljsExport(dataSource);
+  ontologySqljsFlushInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (ontologySqljsFlushInFlight === run) ontologySqljsFlushInFlight = null;
+  }
+}
+
+/**
+ * Initialize the Ontology DataSource if this backend has one. No-op on
+ * Postgres/MySQL (AppOntologyDataSource is null — ontology tables already
+ * live in the primary DataSource). Idempotent — safe to call from both the
+ * NestJS boot path (DatabaseModule.onModuleInit) and the standalone MCP
+ * entrypoint (mcp-server.ts), same posture as initDb() below.
+ */
+export async function initOntologyDb(): Promise<void> {
+  if (!AppOntologyDataSource) return;
+  if (!AppOntologyDataSource.isInitialized) {
+    await AppOntologyDataSource.initialize();
+  }
+}
+
+/** Ontology-DataSource-scoped sibling of startSqljsAutoFlush() — see its docstring above. */
+export function startOntologySqljsAutoFlush(
+  dataSource: DataSource | null,
+  opts: { onError?: (e: unknown) => void } = {},
+): () => Promise<void> {
+  if (!dataSource || !isSqljsBackend()) {
+    return async () => {};
+  }
+  const intervalMs = resolveSqljsFlushIntervalMs();
+  const handle = setInterval(() => {
+    flushOntologySqljs(dataSource).catch((e) => opts.onError?.(e));
+  }, intervalMs);
+  if (typeof handle.unref === 'function') handle.unref();
+
+  let stopped = false;
+  return async () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(handle);
+    try {
+      await flushOntologySqljs(dataSource, true);
+    } catch (e) {
+      opts.onError?.(e);
+    }
+  };
+}
+
+/**
+ * Row-count ceiling for the ontology sql.js DataSource (ticket 6ca4894a,
+ * REVIEW-NOTES.md S1 defense-in-depth mitigation — the dual-DataSource split
+ * above stops ontology growth from blocking the REST of AWB, but one
+ * workspace's ontology graph can still slow down ontology-graph flushes for
+ * OTHER workspaces sharing the same sql.js file). sql.js/dev only — Postgres
+ * has no per-flush full-file re-export step to bound, so no ceiling applies
+ * there.
+ *
+ * Default derived from a real, pinned-build measurement, not a guess:
+ * `scripts/benchmark-ontology-flush.mjs` populated DESIGN.md's own worst-case
+ * 10 MLOC projection (`research-storage.md` §6.3: 150,000 nodes + 800,000
+ * edges = 950,000 rows) and timed the actual saveDatabase() export —
+ * 676ms wall-clock for a 536.2 MB file (measured 2026-08-22, sql.js@1.12.0,
+ * see that script's header for the reproduction command). 1,000,000 gives
+ * the full designed worst-case room to complete without tripping the
+ * ceiling, while still bounding runaway growth past it (multiple large repos
+ * in one workspace, a re-insertion bug, etc.) to a measured, sub-second-per-
+ * flush regime rather than letting export cost grow unbounded.
+ *
+ * This constant is a NUMBER ONLY — enforcement (DESIGN.md's "degrade to
+ * read-only-against-last-snapshot, or disable the feature for that
+ * workspace") is deliberately NOT implemented here. This ticket's scope is
+ * schema + DataSource separation; the ceiling is meant to be consulted by
+ * whichever ticket performs bulk ontology writes (the extraction worker) or
+ * serves ontology reads, not enforced inside the DataSource/flush layer
+ * itself.
+ */
+export const DEFAULT_ONTOLOGY_SQLJS_ROW_CEILING = 1_000_000;
+
+export function resolveOntologySqljsRowCeiling(): number {
+  const raw = Number.parseInt(process.env.ONTOLOGY_SQLJS_ROW_CEILING || '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_ONTOLOGY_SQLJS_ROW_CEILING;
+  return raw;
 }
 
 // Matches the family of errors sql.js / SQLite raises when the file on disk
@@ -781,6 +1006,8 @@ export async function initDb() {
   // creates the partial unique index (ticket 3c3b17a3).
   await preSyncSqljsOpenIntents();
   await AppDataSource.initialize();
+  // Ticket 6ca4894a — no-op on Postgres/MySQL (AppOntologyDataSource is null there).
+  await initOntologyDb();
   const dbType = process.env.DB_TYPE || 'sqlite';
   console.log(`[DB] Connected using ${dbType}`);
 }
