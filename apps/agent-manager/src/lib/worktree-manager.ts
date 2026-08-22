@@ -202,6 +202,14 @@ export function chatWorkspaceRootFor(baseWorkingDir: string): string {
   return join(baseWorkingDir, '.awb', 'chat');
 }
 
+/** Orchestration Mission-Step 작업폴더의 고정 루트(ticket 2dc3c62f):
+ *  `<working_dir>/.awb/orch` — 서버의 `ORCHESTRATION_WORKSPACE_ROOT`와
+ *  대응된다. mission-keyed 루트 아래 step_key별 leaf로 격리된다
+ *  (orchestration-runner.service.ts의 dispatchStep 참고). */
+export function orchestrationWorkspaceRootFor(baseWorkingDir: string): string {
+  return join(baseWorkingDir, '.awb', 'orch');
+}
+
 interface GitResult {
   ok: boolean;
   stdout: string;
@@ -274,9 +282,9 @@ export interface WorktreeSnapshotEntry {
  *  티켓-워크트리 형태를 억지로 끼워 맞춘 변형이 아니라, 별개의 병렬 projection이다.
  *  인스턴스 heartbeat를 위해 snapshotRunWorkspaces()가 생성한다. */
 export interface RunWorkspaceSnapshotEntry {
-  /** 절대경로(`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
+  /** 절대경로(`<working_dir>/.awb/act/<leaf>`, `.../.awb/chat/<leaf>`, 또는 `.../.awb/orch/<leaf>`). */
   path: string;
-  kind: 'action' | 'chat';
+  kind: 'action' | 'chat' | 'orchestration';
   /** root(`.awb/act` 또는 `.awb/chat`) 기준 상대경로 — action/room id의 앞 8자리
    *  단일 세그먼트가 기본값이지만, 커스텀 `workspace_folder`가 `deploy/scripts`처럼
    *  중첩 경로면(기존 QA/security workspace_folder 옵션이 이미 허용하던 값) 그
@@ -1539,8 +1547,13 @@ export class WorktreeManager {
     if (!baseWorkingDir) return [];
     const liveCwds = await this.#liveProcessCwds();
     const out: RunWorkspaceSnapshotEntry[] = [];
-    for (const kind of ['action', 'chat'] as const) {
-      const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
+    for (const kind of ['action', 'chat', 'orchestration'] as const) {
+      const root =
+        kind === 'action'
+          ? actionWorkspaceRootFor(baseWorkingDir)
+          : kind === 'chat'
+            ? chatWorkspaceRootFor(baseWorkingDir)
+            : orchestrationWorkspaceRootFor(baseWorkingDir);
       const leaves = await this.#listAllRunWorkspaceLeaves(root);
       for (const leaf of leaves) {
         const path = join(root, leaf);
@@ -1591,8 +1604,13 @@ export class WorktreeManager {
     const liveCwds = await this.#liveProcessCwds();
     const now = Date.now();
     let removed = 0;
-    for (const kind of ['action', 'chat'] as const) {
-      const root = kind === 'action' ? actionWorkspaceRootFor(baseWorkingDir) : chatWorkspaceRootFor(baseWorkingDir);
+    for (const kind of ['action', 'chat', 'orchestration'] as const) {
+      const root =
+        kind === 'action'
+          ? actionWorkspaceRootFor(baseWorkingDir)
+          : kind === 'chat'
+            ? chatWorkspaceRootFor(baseWorkingDir)
+            : orchestrationWorkspaceRootFor(baseWorkingDir);
       const leaves = await this.#listAllRunWorkspaceLeaves(root);
       leaves.sort((a, b) => b.split('/').length - a.split('/').length);
       const survived: string[] = [];
