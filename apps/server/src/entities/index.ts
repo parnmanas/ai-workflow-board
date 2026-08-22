@@ -103,3 +103,20 @@ export { OrchestrationTeamMember } from './OrchestrationTeamMember';
 export { OrchestrationMission } from './OrchestrationMission';
 export { OrchestrationStep } from './OrchestrationStep';
 export { OrchestrationEvent } from './OrchestrationEvent';
+// Ontology Graph schema (ticket 6ca4894a, docs/ontology-graph/DESIGN.md axis
+// 2/3) — OntologyNode/OntologyEdge. On the sql.js (dev) backend these are
+// deliberately EXCLUDED from db.ts's primary `entities` array and fed to a
+// second, independently-flushed DataSource instead (see
+// buildOntologyDataSourceOptions() in db.ts) — barrel-exported here only for
+// TypeScript type-sharing, per DESIGN.md axis 3's integration point. On
+// Postgres they synchronize into the single existing DataSource like every
+// other table in this file (D-01, no hand-written migration needed).
+export { OntologyNode } from './OntologyNode';
+export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod } from './OntologyNode';
+export { OntologyEdge } from './OntologyEdge';
+export type {
+  OntologyEdgeResolution,
+  OntologyEvidenceKind,
+  OntologyEdgeRank,
+  OntologyCompleteness,
+} from './OntologyEdge';
