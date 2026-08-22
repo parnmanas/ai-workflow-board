@@ -45,6 +45,20 @@ export class ActionRun {
   @Column({ type: 'varchar', default: '' })
   source_ticket_id: string;
 
+  // Set unconditionally by `dispatch()` at row creation (ticket 2fa5312b,
+  // b273d603 follow-up) — every run's prompt now carries a completion
+  // contract (renderCompletionContract or renderStandaloneCompletionContract)
+  // regardless of source_ticket_id, so this column marks "created by that
+  // code". It lets ActionRunReaperService's sweep tell a source_ticket_id-less
+  // run that CAN call complete_action_run (dispatched after this column
+  // existed) apart from a pre-fix orphan that never received the contract and
+  // so can never complete on its own — reaping the latter on a TTL would
+  // falsely mark a possibly-fine run as 'failed'. Rows that predate this
+  // column default to false (the non-reapable side), which is what keeps
+  // pre-fix orphans excluded.
+  @Column({ type: 'boolean', default: false })
+  completion_contract_injected: boolean;
+
   // Run lifecycle: 'running' (dispatched, agent working) → 'succeeded' |
   // 'failed', set once by `complete_action_run`. The terminal transition is
   // idempotent — a second completion is a no-op so a re-invoked agent can't

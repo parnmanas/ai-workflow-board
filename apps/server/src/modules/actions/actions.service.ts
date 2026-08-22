@@ -1126,6 +1126,11 @@ export class ActionsService {
       prompt_rendered: rendered,
       source_ticket_id: sourceTicketId,
       idempotency_key: idempotencyKey,
+      // `rendered` above always appends a completion contract (ticket
+      // b273d603) — true unconditionally, not just when sourceTicketId is
+      // set. ActionRunReaperService's candidate query (ticket 2fa5312b) reads
+      // this to admit source_ticket_id-less runs into its sweep scope.
+      completion_contract_injected: true,
       // Approval evidence for a high-impact run (scope 5). Empty/null unless the
       // approval gate above authorized it via a real admin approver.
       approved_by: approval?.userId || '',

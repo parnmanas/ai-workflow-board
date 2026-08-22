@@ -40,19 +40,27 @@
  * Env: ACTION_RUN_REAPER_ENABLED(기본 on), ACTION_RUN_REAPER_SWEEP_MS(기본
  * 15분, 1분~1시간 clamp), ACTION_RUN_TTL_MS(기본 2시간, 5분~24시간 clamp).
  *
- * 스윕 후보는 `source_ticket_id`가 있는 run으로 한정한다 (티켓 b273d603 수정
- * 이후에도 유지되는 제약). `dispatch()`는 이제 `sourceTicketId`가 없는 run(사람
- * UI 트리거·cron·on-ticket-done)에도 완료 계약을 주입하지만(재개/재시도 언급이
- * 없는 standalone 버전 — actions.service.ts의 `renderStandaloneCompletionContract`
- * 참고) 이 게이트는 그대로 좁혀둔다: 이 수정 이전에 디스패치돼 애초에 완료
- * 계약을 못 받은 채 `running`에 멈춰있는 기존 run들까지 게이트를 넓히는
- * 순간 거짓 `failed`로 오염되기 때문이다. 신규(완료 가능) run과 구(舊) orphan
- * run을 구분할 방법이 생기기 전까지는 스윕 대상 확장을 별도 후속 티켓으로
- * 미룬다. 이 게이트를 통과하는 대상은 티켓 구동 run으로 좁혀지므로, 형제
- * 리퍼(QA/Security 6시간)보다 짧은 2시간 기본 TTL도 방어 가능하다고
- * 판단했다 — zero-progress 같은 빠른 퓨즈나 room 최근 메시지
- * (`ChatRoom.last_message_at`) 기반 liveness 신호는 넣지 않았다(over-eng 회피).
- * TTL을 6시간으로 올리고 싶으면 `ACTION_RUN_TTL_MS`로 바로 조정 가능하다.
+ * 스윕 후보는 (a) `source_ticket_id`가 있는 run 이거나 (b)
+ * `completion_contract_injected=true`인 run으로 한정한다 (티켓 2fa5312b, b273d603
+ * 후속). `dispatch()`는 이제 `sourceTicketId`가 없는 run(사람 UI 트리거·cron·
+ * on-ticket-done)에도 완료 계약을 주입하고(재개/재시도 언급이 없는 standalone
+ * 버전 — actions.service.ts의 `renderStandaloneCompletionContract` 참고) 그
+ * 순간 `ActionRun.completion_contract_injected`를 무조건 true로 남긴다
+ * (ActionRun.ts 참고). 이 플래그가 바로 (b) 조건이다 — `source_ticket_id`가
+ * 없어도 이 플래그가 true면 대상 에이전트가 `complete_action_run`을 호출할
+ * 방법을 실제로 받았다는 뜻이라 안전하게 스윕 대상에 넣을 수 있다.
+ *
+ * 이 플래그가 생기기 이전(= b273d603 배포 이전)에 디스패치돼 애초에 완료 계약을
+ * 못 받은 채 `running`에 멈춰있는 기존 orphan run들은 컬럼 자체가 없던 시절에
+ * 만들어졌으므로 스키마 기본값 false로 남는다 — 그래서 (b) 조건을 만족하지
+ * 못하고 계속 스윕에서 제외된다(거짓 `failed` 오염 방지). `source_ticket_id`도
+ * 없고 `completion_contract_injected`도 false인 run만 영구 보존 대상이다.
+ *
+ * (a) 조건을 통과하는 대상은 티켓 구동 run으로 좁혀지므로, 형제 리퍼(QA/Security
+ * 6시간)보다 짧은 2시간 기본 TTL도 방어 가능하다고 판단했다 — zero-progress
+ * 같은 빠른 퓨즈나 room 최근 메시지(`ChatRoom.last_message_at`) 기반 liveness
+ * 신호는 넣지 않았다(over-eng 회피). TTL을 6시간으로 올리고 싶으면
+ * `ACTION_RUN_TTL_MS`로 바로 조정 가능하다.
  */
 
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
@@ -135,8 +143,9 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
     try {
       // Only non-terminal ActionRun status: 'running'. 'succeeded'/'failed' are
       // terminal (see ActionRun.status doc comment) and never candidates.
-      // source_ticket_id-less runs (cron/manual/on-ticket-done — see class doc)
-      // are excluded HERE, at the query stage, rather than via a skip inside the
+      // Runs that can never complete on their own — no source_ticket_id AND no
+      // completion_contract_injected (see class doc + ActionRun.ts) — are
+      // excluded HERE, at the query stage, rather than via a skip inside the
       // loop below: a JS-loop skip still spends its take(ACTION_RUN_REAPER_BATCH)
       // budget on them, so once permanently-'running' contract-less rows
       // outnumber the batch size, a created_at-ASC sweep fills entirely with
@@ -147,10 +156,21 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
       // three-valued NULL comparison would otherwise silently drop legacy NULL
       // rows out of the "has a ticket" side too (Not('') was avoided for the
       // same reason when this gate was first added).
+      // Both conditions are combined in ONE where() call with explicit outer
+      // parens around the OR group, rather than where() + andWhere(OR ...):
+      // TypeORM only auto-wraps each where()/andWhere() clause in parens when
+      // the `isolateWhereStatements` DataSource option is on (it isn't, here
+      // — see db.ts), so a plain `.andWhere("A OR B")` after `.where(status)`
+      // would emit `status = ? AND A OR B` — SQL's AND-before-OR precedence
+      // then reads that as `(status = ? AND A) OR B`, silently admitting
+      // terminal (succeeded/failed) rows whenever B holds. Folding everything
+      // into one string with our own parens removes the ambiguity entirely.
       const candidates = await this.runRepo
         .createQueryBuilder('r')
-        .where('r.status = :status', { status: 'running' })
-        .andWhere("r.source_ticket_id IS NOT NULL AND r.source_ticket_id != ''")
+        .where(
+          "r.status = :status AND ((r.source_ticket_id IS NOT NULL AND r.source_ticket_id != '') OR r.completion_contract_injected = :contractInjected)",
+          { status: 'running', contractInjected: true },
+        )
         .orderBy('r.created_at', 'ASC')
         .take(ACTION_RUN_REAPER_BATCH)
         .getMany();
