@@ -50,8 +50,8 @@ export function registerCiWaitTools(server: McpServer, ctx: ToolContext): void {
       ticket_id: z.string().describe('The ticket to park on this CI run'),
       owner: z.string().describe('GitHub repo owner (e.g. parsed from `git remote get-url origin`)'),
       repo: z.string().describe('GitHub repo name'),
-      run_id: z.string().describe('The specific workflow run id to wait on. Resolve this by matching on head_sha first (e.g. `gh run list --json databaseId,headSha` filtered to your SHA) — never by picking the newest run on the branch, which can be a stale prior dispatch.'),
-      head_sha: z.string().optional().describe('Commit SHA the run was dispatched against. Recorded for audit and cross-checked against the resolved run when the sweep completes.'),
+      run_id: z.string().describe('The specific workflow run id to wait on — a decimal GitHub Actions run id (1-20 digits, no leading zero; rejected otherwise). Resolve this by matching on head_sha first (e.g. `gh run list --json databaseId,headSha` filtered to your SHA) — never by picking the newest run on the branch, which can be a stale prior dispatch.'),
+      head_sha: z.string().optional().describe('Commit SHA the run was dispatched against — must be a full 40-character hex SHA-1 (e.g. `git rev-parse <feature-branch>`, no `--short`) if provided; rejected otherwise. Recorded for audit and cross-checked against the resolved run when the sweep completes.'),
       html_url: z.string().optional().describe('Run URL, if already known (saves a lookup when the wait resolves).'),
     },
     async ({ ticket_id, owner, repo, run_id, head_sha, html_url }, extra: { sessionId?: string }) => {
