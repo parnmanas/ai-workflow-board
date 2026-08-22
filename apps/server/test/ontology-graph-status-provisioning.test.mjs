@@ -18,15 +18,23 @@
 // ontology-query-*.test.mjs는 이미 query 함수 자체를 검증했으므로, 여기는
 // "MCP 스키마->핸들러->서비스 배선"이 그 값을 실제로 전달하는지만 본다.
 //
+// 리뷰 지적(critical/high, d35b7b7d 1차 반려) 회귀 — (a) cross-workspace
+// authorization: TOOL_AUTHZ_TABLE의 'caller' tier는 caller 존재만 확인할
+// 뿐 workspace_id 소속은 검증하지 않았다(진짜 세션 caller를 sessionStore에
+// 등록해 다른 workspace의 리소스를 요청했을 때 거부되는지 확인). (b)
+// suggested_next_calls: "unique"만으로 "고신뢰"를 보장하지 못하던 문제
+// (confidence_min을 낮춰도 speculative(<0.6) 매치는 여전히 제외돼야 함).
+//
 // 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요) — ontology 계열
-// 테스트 전체의 관례. 격리된 SQLJS_ONTOLOGY_DB_PATH 임시 파일을 써서
-// 공유 dev database/ontology.db는 절대 건드리지 않는다.
+// 테스트 전체의 관례. 격리된 SQLJS_DB_PATH/SQLJS_ONTOLOGY_DB_PATH 임시
+// 파일을 써서 공유 dev database/*.db는 절대 건드리지 않는다.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -38,7 +46,12 @@ process.env.SQLJS_DB_PATH = path.join(tmpDir, 'primary.db');
 process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
-const { AppOntologyDataSource, initOntologyDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
+// initDb()는 AppDataSource(primary, Agent 포함)와 AppOntologyDataSource
+// 둘 다 초기화한다 — callerCanAccessWorkspace()가 ctx.dataSource(=primary)에서
+// 실제 Agent row를 조회하므로 두 DataSource 모두 필요하다.
+const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
+const { Agent } = await import('file://' + path.join(DIST_ROOT, 'entities/Agent.js'));
+const { sessionStore } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp/internal/session-store.js'));
 const { OntologyGraph } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyGraph.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
 const { OntologyEdge } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyEdge.js'));
@@ -47,8 +60,25 @@ const { OntologyQueryService } = await import('file://' + path.join(DIST_ROOT, '
 const { registerOntologyTools } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp/tools/ontology-tools.js'));
 
 const WORKSPACE_ID = 'gs-ws';
+const OTHER_WORKSPACE_ID = 'gs-ws-other';
 const RESOURCE_ID = 'gs-resource-1';
 const FOLDER_PATH = '';
+const CONF_GRAPH_ID = 'gs-conf-graph'; // 'confidence_min' describe가 만들고, 'cross-workspace' describe가 재사용(정의 순서상 뒤에 실행됨)
+
+// mcp-tool-authz.test.mjs와 같은 패턴 — 실제 Agent row + sessionStore 등록으로
+// 진짜 caller 신원을 만든다(빈 extra={}는 getCallerAgent를 undefined로
+// 만들어 callerCanAccessWorkspace가 항상 deny하므로 더는 쓸 수 없다).
+async function makeAgent(workspaceId) {
+  const repo = AppDataSource.getRepository(Agent);
+  return repo.save(repo.create({ name: `agent-${randomUUID().slice(0, 8)}`, type: 'claude', workspace_id: workspaceId }));
+}
+function registerSession(sessionId, auth) {
+  const transport = { close: async () => {} };
+  sessionStore.register(sessionId, transport, {}, auth);
+  return () => sessionStore.remove(sessionId);
+}
+
+let homeSessionId; // WORKSPACE_ID에 바인딩된 기본 caller — 대부분의 테스트가 이걸 씀
 
 function node(id, graphId, overrides = {}) {
   return {
@@ -71,10 +101,14 @@ let tools;
 let logs;
 
 before(async () => {
-  await initOntologyDb();
+  await initDb();
   graphRepo = AppOntologyDataSource.getRepository(OntologyGraph);
   nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
   edgeRepo = AppOntologyDataSource.getRepository(OntologyEdge);
+
+  const homeAgent = await makeAgent(WORKSPACE_ID);
+  homeSessionId = `session-${randomUUID()}`;
+  registerSession(homeSessionId, { agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'read', source: 'db' });
 
   const fakeExtraction = {
     extractRepo: async () => ({
@@ -106,6 +140,7 @@ before(async () => {
   tools = {};
   const fakeServer = { tool(name, description, schema, handler) { tools[name] = { handler }; } };
   registerOntologyTools(fakeServer, {
+    dataSource: AppDataSource, // callerCanAccessWorkspace()가 여기서 Agent를 조회한다(온톨로지 전용 DataSource가 아님)
     logger: capturingLogger,
     ontologyLifecycleService: lifecycleService,
     ontologyQueryService: queryService,
@@ -114,12 +149,19 @@ before(async () => {
 
 after(async () => {
   if (AppOntologyDataSource.isInitialized) await AppOntologyDataSource.destroy();
+  if (AppDataSource.isInitialized) await AppDataSource.destroy();
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
-async function callTool(name, args) {
-  const res = await tools[name].handler(args, {});
+async function callTool(name, args, sessionId = homeSessionId) {
+  const res = await tools[name].handler(args, { sessionId });
   assert.ok(!res.isError, `${name} returned an error: ${res.isError ? res.content[0].text : ''}`);
+  return JSON.parse(res.content[0].text);
+}
+
+async function callToolExpectError(name, args, sessionId = homeSessionId) {
+  const res = await tools[name].handler(args, { sessionId });
+  assert.ok(res.isError, `${name} was expected to return an error but succeeded`);
   return JSON.parse(res.content[0].text);
 }
 
@@ -180,8 +222,6 @@ describe('graph_status — 완료조건 2: 미인덱싱 repo+folder 최초 참�
 });
 
 describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴에 실제로 적용된다(MCP 핸들러 레이어)', () => {
-  const CONF_GRAPH_ID = 'gs-conf-graph';
-
   before(async () => {
     // resolveGraph()는 graph_id를 캐릭터 그대로 신뢰하지 않고 실제
     // OntologyGraph 행 + workspace_id 일치를 확인한다(다른 workspace 소유
@@ -242,8 +282,27 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
     const lowered = await callTool('graph_find_symbol', { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0.4 });
     assert.equal(lowered.matches.length, 1);
     assert.equal(lowered.unique, true);
-    assert.ok(lowered.detail, 'a unique match must include detail');
-    assert.ok(Array.isArray(lowered.suggested_next_calls) && lowered.suggested_next_calls.length > 0);
+  });
+
+  // 리뷰 지적(high, d35b7b7d 1차 반려) 회귀 — "unique"만으로는 "고신뢰"를
+  // 보장하지 못한다. lowConfSymbol(confidence 0.5)은 confidence_min을 0까지
+  // 낮춰도 여전히 unique=true가 되지만, speculative(<0.6) 매치라
+  // detail/suggested_next_calls는 나오면 안 된다.
+  it('graph_find_symbol: unique여도 speculative(<0.6) 매치는 confidence_min을 낮춰도 detail/suggested_next_calls를 내지 않는다', async () => {
+    const res = await callTool('graph_find_symbol', { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'lowConfSymbol', confidence_min: 0 });
+    assert.equal(res.matches.length, 1);
+    assert.equal(res.unique, true);
+    assert.equal(res.detail, undefined, 'a unique-but-speculative(<0.6) match must NOT get detail');
+    assert.equal(res.suggested_next_calls, undefined, 'a unique-but-speculative(<0.6) match must NOT get suggested_next_calls');
+  });
+
+  it('graph_find_symbol: unique + 고신뢰(>=0.6, 고정 기준) 매치는 detail/suggested_next_calls를 포함한다', async () => {
+    // CA는 confidence=1(node() 헬퍼 기본값) — exact-name 유일 매치.
+    const res = await callTool('graph_find_symbol', { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'CA' });
+    assert.equal(res.matches.length, 1);
+    assert.equal(res.unique, true);
+    assert.ok(res.detail, 'a unique high-confidence match must include detail');
+    assert.ok(Array.isArray(res.suggested_next_calls) && res.suggested_next_calls.length > 0);
   });
 
   it('graph_module_summary: confidence_min이 dependency/dependent 집계에 적용되고 응답에 반영된다', async () => {
@@ -254,5 +313,85 @@ describe('confidence_min — 완료조건 3: wave1 다섯 개 조회/순회 툴�
 
     const lowered = await callTool('graph_module_summary', { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, path: 'mod', confidence_min: 0.4 });
     assert.equal(lowered.dependency_count, 1); // CB가 스코프 밖 의존 대상으로 집계됨
+  });
+});
+
+// 리뷰 지적(critical, d35b7b7d 1차 반려) 회귀 — TOOL_AUTHZ_TABLE의 'caller'
+// tier는 caller 존재만 확인할 뿐 workspace_id 소속은 검증하지 않았다.
+// OTHER_WORKSPACE_ID에 바인딩된, 그 자체로는 정상적인 caller가 WORKSPACE_ID의
+// graph_id/resource_id를 안다고 해서 그 데이터에 접근하거나(조회) 빌드를
+// 기동할(graph_status) 수 있으면 안 된다 — 6개 툴 전부 확인. 이 describe는
+// 정의 순서상 'confidence_min' describe 다음에 실행되므로 CONF_GRAPH_ID와
+// 그 안의 CA/CB 노드가 이미 존재한다(node:test는 같은 레벨 describe를
+// 정의 순서대로 순차 실행 — 파일 전체에 concurrency 옵션이 없음).
+describe('cross-workspace authorization — 리뷰 지적(critical) 회귀: 다른 workspace의 caller는 거부된다', () => {
+  let otherSessionId;
+
+  before(async () => {
+    const otherAgent = await makeAgent(OTHER_WORKSPACE_ID);
+    otherSessionId = `session-${randomUUID()}`;
+    registerSession(otherSessionId, { agentId: otherAgent.id, workspaceId: OTHER_WORKSPACE_ID, scope: 'read', source: 'db' });
+  });
+
+  it('graph_status: 다른 workspace의 caller가 WORKSPACE_ID를 사칭하면 거부되고, 새 그래프도 만들지 않는다', async () => {
+    const beforeCount = (await graphRepo.find({ where: { workspace_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
+    const errBody = await callToolExpectError(
+      'graph_status',
+      { workspace_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+    const afterCount = (await graphRepo.find({ where: { workspace_id: WORKSPACE_ID, resource_id: 'cross-ws-probe', folder_path: '' } })).length;
+    assert.equal(afterCount, beforeCount, 'a denied caller must never trigger provisioning as a side effect');
+  });
+
+  it('graph_find_symbol: 다른 workspace의 caller는 거부된다(데이터가 아니라 에러를 받는다)', async () => {
+    const errBody = await callToolExpectError(
+      'graph_find_symbol',
+      { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, name: 'CA' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+  });
+
+  it('graph_module_summary: 다른 workspace의 caller는 거부된다', async () => {
+    const errBody = await callToolExpectError(
+      'graph_module_summary',
+      { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, path: '' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+  });
+
+  it('graph_neighbors: 다른 workspace의 caller는 거부된다', async () => {
+    const errBody = await callToolExpectError(
+      'graph_neighbors',
+      { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+  });
+
+  it('graph_blast_radius: 다른 workspace의 caller는 거부된다', async () => {
+    const errBody = await callToolExpectError(
+      'graph_blast_radius',
+      { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CB' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+  });
+
+  it('graph_call_path: 다른 workspace의 caller는 거부된다', async () => {
+    const errBody = await callToolExpectError(
+      'graph_call_path',
+      { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, from_id: 'CA', to_id: 'CB' },
+      otherSessionId,
+    );
+    assert.match(errBody.error, /workspace/i);
+  });
+
+  it('대조군 — 같은 workspace의 caller(homeSessionId)는 정상적으로 데이터를 받는다', async () => {
+    const res = await callTool('graph_neighbors', { workspace_id: WORKSPACE_ID, graph_id: CONF_GRAPH_ID, node_id: 'CA', confidence_min: 0.4 });
+    assert.equal(res.matches.length, 1);
   });
 });
