@@ -556,7 +556,13 @@ export class ChatSessionManager
     const message =
       `⚠️ [System] ${reasonLabel}으로 세션을 종료했습니다.${reasonDetail}${taskNote} ` +
       `계속 작업이 필요하면 새 메시지를 보내 세션을 다시 시작하세요.`;
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     void postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
@@ -570,7 +576,13 @@ export class ChatSessionManager
     const message =
       `ℹ️ [System] 이 세션이 ${ageHours}시간째 계속 실행 중입니다(진행 신호는 계속 감지됨). ` +
       `정상적인 장시간 작업이면 무시해도 되지만, 무한 루프가 의심되면 확인해주세요.`;
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     void postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
@@ -583,7 +595,13 @@ export class ChatSessionManager
     const roomId: string | undefined = sess.roomId;
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     void postChatRoomSessionStatus(cfg, roomId, agentId, {
       keep_alive_until_ms: sess._keepAliveUntilMs ?? null,
       background_task_count: sess._lastBackgroundTaskCount ?? 0,
@@ -661,7 +679,13 @@ export class ChatSessionManager
       : '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
 
     log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     await postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
@@ -836,7 +860,13 @@ export class ChatSessionManager
     meta.lastEmitMs = now;
     meta.count += 1;
 
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     // Fire-and-forget — postChatRoomMessage already swallows + logs errors,
     // so a failed progress post never blocks stdout parsing. Tagged
     // type='progress' so the server stamps the discriminator on the row
@@ -1147,7 +1177,13 @@ export class ChatSessionManager
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+    // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     // Split into chunks sized to each channel's server-side per-message bound (so every
     // chunk survives the sanitizer whole), then emit EVERY chunk — no message-count
     // ceiling. A hard cap here (even one that logs) would drop successful refs past it,

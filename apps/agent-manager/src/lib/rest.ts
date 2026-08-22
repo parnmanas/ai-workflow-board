@@ -12,6 +12,17 @@ export interface AwbConfig {
    *  re-verification path they're exercising doesn't add real wall-clock
    *  time to every "no local comment seen" case. */
   silentExitVerifyDelayMs?: number;
+  /** 아래 chat-room 전송 함수들이 주 `apiKey` 가 401/403 을 받았을 때 딱 한 번
+   *  재시도할 fallback `X-Agent-Key` (ticket 7d8ea7c9 후속). chat 세션의
+   *  per-agent 키는 spawn 시점에 한 번만 캡처되어 세션 수명 내내 재사용되는데,
+   *  세션 도중 stale 해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고
+   *  workspace 에 종속되지 않는 키만이 실패 알림을 조용히 유실시키지 않고
+   *  방에 전달할 유일한 수단이다 (401/403 은 classifyHttpSendFailure 가
+   *  'permanent' 로 분류해 이후 버퍼링/재시도되지 않는다). 미설정 시 재시도
+   *  없음 — `apiKey` 를 별도로 override 하지 않는 다른 모든 rest.ts 호출자의
+   *  기존 동작 그대로.
+   */
+  retryApiKey?: string;
   [key: string]: unknown;
 }
 
@@ -650,16 +661,22 @@ export async function postChatRoomMessageRaw(
     const body: Record<string, unknown> = { agent_id: agentId, content };
     if (opts?.type && opts.type !== 'message') body.type = opts.type;
     if (opts?.metadata) body.metadata = opts.metadata;
-    const resp = await fetch(url, {
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      log(`chat fallback POST ${resp.status} with session key — retrying with manager key (room=${roomId})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`chat fallback POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
       return classifyHttpSendFailure(resp.status);
@@ -688,16 +705,22 @@ export async function postChatRoomSessionStatus(
   if (!roomId || !agentId) return;
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/session-status`;
-    const resp = await fetch(url, {
+    const payload = JSON.stringify({ agent_id: agentId, ...body });
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({ agent_id: agentId, ...body }),
+      body: payload,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`session-status POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
     }
