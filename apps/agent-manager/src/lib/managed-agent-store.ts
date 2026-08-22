@@ -56,8 +56,37 @@ export function apiKeyPathFor(agentId: string, workspaceId?: string): string {
   return join(managedAgentDir(agentId), `apikey${workspaceSuffix(workspaceId)}`);
 }
 
-export function mcpConfigPathFor(agentId: string, workspaceId?: string): string {
-  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}.json`);
+// Ticket ee26302d review round 2 (P1): 'compact' gets its own path so two
+// concurrently-spawning sessions of DIFFERENT profiles for the same agent
+// can never share one mutable file to race on — see mcpConfigPathFor's doc
+// comment. 'full' (the default/omitted case) keeps the pre-existing
+// unsuffixed path unchanged for backward compatibility with every caller
+// that doesn't know about tool profiles at all.
+function profileSuffix(profile?: 'full' | 'compact'): string {
+  return profile === 'compact' ? '.compact' : '';
+}
+
+/**
+ * Ticket ee26302d review round 2 (P1): `profile` used to be irrelevant here
+ * — a single shared path served every non-pinned session regardless of its
+ * resolved tool profile, and the caller (base-session-manager.ts /
+ * subagent-manager.ts) rewrote it in place when the wanted profile didn't
+ * match what was last written. That worked for strictly SEQUENTIAL spawns
+ * but not concurrent ones: a full-profile CLI can still be starting up
+ * (reading its `--mcp-config` file is not synchronous with the spawn() call
+ * returning) when a compact-profile spawn for the same agent rewrites the
+ * same path underneath it, or vice versa — there is no handshake confirming
+ * a child already read the file before the next spawn is allowed to write
+ * it again.
+ *
+ * Fixed structurally: each profile gets its own path, so concurrent spawns
+ * of DIFFERENT profiles for the same agent can never collide on one file.
+ * Two concurrent spawns of the SAME profile can still both decide "doesn't
+ * exist yet" and both write — harmless, since both write byte-identical
+ * content for the same (agentId, workspaceId, profile).
+ */
+export function mcpConfigPathFor(agentId: string, workspaceId?: string, profile?: 'full' | 'compact'): string {
+  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}${profileSuffix(profile)}.json`);
 }
 
 export function credentialPathFor(agentId: string): string {
@@ -234,7 +263,11 @@ export async function writeMcpConfig(
   extraHeaders?: Record<string, string>,
 ): Promise<string> {
   await ensureManagedAgentDir(agentId);
-  const path = mcpConfigPathFor(agentId, workspaceId);
+  // Ticket ee26302d review round 2: write target is profile-specific (see
+  // mcpConfigPathFor's doc comment) — derived from extraHeaders so callers
+  // don't have to separately track/pass the profile.
+  const profile = extraHeaders?.['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
+  const path = mcpConfigPathFor(agentId, workspaceId, profile);
   const self = resolveSelfCommand();
   const body = {
     mcpServers: {
