@@ -354,16 +354,58 @@ export interface CliLoginProgressBody {
   status: 'awaiting_user' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
   verification_url?: string;
   user_code?: string;
+  raw_output_fallback?: string;
   error_detail?: string;
   credential_fields?: Record<string, string>;
 }
 
-export async function postCliLoginProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<void> {
-  if (!body.session_id) return;
+/** Test-only override for the in-process retry backoff below — real delays
+ *  would make a test wait ~17s. Reset to null to restore the real schedule. */
+let succeededRetryDelaysMsOverride: number[] | null = null;
+export function _setSucceededRetryDelaysMsForTests(delays: number[] | null): void {
+  succeededRetryDelaysMsOverride = delays;
+}
+const DEFAULT_SUCCEEDED_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+/**
+ * Reviewer finding (ticket b2e79108 review round 1): a 'succeeded' body
+ * carries `credential_fields` — the raw harvested auth.json/config.toml, the
+ * one place that content ever travels over the wire. Buffering it into the
+ * durable send outbox (outbox.json, a plaintext file, up to 20-minute TTL)
+ * on a transient failure would leave the secret sitting in cleartext on disk
+ * far longer / in a less-scoped location than the isolated CODEX_HOME it
+ * came from. So 'succeeded' NEVER reaches the outbox — it gets bounded
+ * in-process retries instead, entirely in memory. If every retry fails, the
+ * caller (CliLoginManager#finish) is told delivery never succeeded (return
+ * false) so it deliberately leaves the isolated home on disk rather than
+ * deleting the only copy of the harvested credential.
+ */
+export async function postCliLoginProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<boolean> {
+  if (!body.session_id) return false;
   const outcome = await postCliLoginProgressRaw(config, body);
-  if (outcome === 'retryable') {
-    outboxSink?.enqueue('cli_login_progress', { body });
+  if (outcome === 'ok') return true;
+  if (outcome === 'permanent') return false;
+  if (body.status === 'succeeded') {
+    return retrySucceededProgress(config, body);
   }
+  outboxSink?.enqueue('cli_login_progress', { body });
+  return false;
+}
+
+async function retrySucceededProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<boolean> {
+  const delays = succeededRetryDelaysMsOverride ?? DEFAULT_SUCCEEDED_RETRY_DELAYS_MS;
+  for (const delayMs of delays) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const outcome = await postCliLoginProgressRaw(config, body);
+    if (outcome === 'ok') return true;
+    if (outcome === 'permanent') break;
+  }
+  log(
+    `cli-login progress: succeeded report for session=${body.session_id} could not be delivered after retries. ` +
+      `The harvested credential is NOT lost — it remains on disk in the isolated CODEX_HOME (deliberately not ` +
+      `deleted) for manual recovery. Investigate connectivity to the AWB server.`,
+  );
+  return false;
 }
 
 /** Transport-only variant of {@link postCliLoginProgress} — the outbox replay

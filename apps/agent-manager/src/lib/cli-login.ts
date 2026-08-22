@@ -5,7 +5,8 @@
 // 스캔해 verification URL + one-time code 를 뽑아 서버로 릴레이한다. 프로세스가
 // exit 0 하면 격리 홈의 auth.json(+config.toml)을 읽어 서버로 넘기고(서버가
 // 암호화해 Credential 로 저장), 성공/실패/타임아웃/취소 모든 경로에서 격리
-// 홈을 삭제한다.
+// 홈을 삭제한다 — 단, 성공 보고 자체가 서버에 끝내 전달되지 못한 경우는 예외
+// (리뷰 반영: 유일한 사본을 지우지 않음, #finish 참고).
 //
 // claude 는 codex `--device-auth` 만큼 깔끔한 비대화형 플래그가 없어(PTY 릴레이
 // 필요) 여기 포함하지 않음 — 후속 티켓으로 분리(티켓 본문에서 이미 허용).
@@ -20,9 +21,10 @@
 //
 // 버전업 시 문구가 바뀔 수 있으므로 파싱은 정확한 코드 포맷이 아니라 주변
 // 영문 안내 문구("Open this link"/"Enter this one-time code")에 기대고,
-// URL/코드를 못 찾아도 프로세스는 계속 진행시킨다(파싱 실패 시 사용자에게
-// raw 출력을 보여주는 폴백은 서버/클라이언트 쪽 책임 — 여기서는 못 찾은 채로
-// succeeded/failed 만 정확히 보고하면 된다).
+// 그 파싱이 일정 시간(PARSE_FALLBACK_QUIET_MS) 안에 URL을 못 찾으면 리뷰
+// 지적대로 raw 출력(redact된)을 awaiting_user 의 raw_output_fallback 으로
+// 그대로 올려 UI가 최소한 "뭔가는 보여줄" 수 있게 한다 — 완전히 파싱이 깨져도
+// 사용자가 starting 상태에 갇혀 아무것도 못 보는 상황을 막는다.
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -37,10 +39,45 @@ import { postCliLoginProgress, type AwbConfig } from './rest.js';
 // 않고 사용자에게 사유가 표시된다").
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const KILL_ESCALATION_MS = 3_000;
+// 구조화 파싱(URL+코드)이 이 시간 동안 조용하면(새 줄이 안 오면) raw fallback
+// 을 1회 전송한다. 실제 캡처에서 배너~안내문 사이에 눈에 띄는 지연이 없었으므로
+// 2초면 정상 케이스에서 오탐 없이 충분하다고 판단.
+const PARSE_FALLBACK_QUIET_MS = 2_000;
+const RAW_FALLBACK_MAX_CHARS = 4_000;
+const RAW_FALLBACK_MAX_LINES = 40;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 function stripAnsi(line: string): string {
   return line.replace(ANSI_RE, '');
+}
+
+// 리뷰 지적: CLI stderr 원문을 무필터로 로그에 남기고 있었다. codex 자신의
+// 정상 출력(우리가 파싱하는 stdout)에는 토큰이 없지만, stderr 는 우리가
+// 형식을 통제할 수 없는 진단 채널이라 방어적으로 토큰/시크릿처럼 보이는
+// 패턴을 전부 지운다 — URL 은 이 함수를 거치지 않는 채널(progress payload)
+// 로만 전달되므로 여기서 과도하게 지워도 실제 흐름에 영향 없다.
+const REDACTION_PATTERNS: RegExp[] = [
+  // JWT (header.payload.signature)
+  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+  // 흔한 prefix 형 API 키 (sk-..., ghp_..., xoxb-... 등)
+  /\b(?:sk|rk|pk|oat|sat|rt|pat|ghp|ghs|xox[a-z])[-_][A-Za-z0-9_-]{8,}\b/gi,
+  // key=value / key: value 형태로 라벨링된 시크릿
+  /\b(access_token|refresh_token|id_token|api_key|client_secret|password)\b(\s*[:=]\s*)["']?[A-Za-z0-9_.\-]{6,}["']?/gi,
+];
+
+function redactSecrets(text: string): string {
+  let out = text;
+  for (const pattern of REDACTION_PATTERNS) {
+    out = out.replace(pattern, (_match, label, sep) =>
+      label ? `${label}${sep}[REDACTED]` : '[REDACTED]',
+    );
+  }
+  // 마지막 방어선: URL이 아니면서 문자+숫자를 모두 포함한 24자 이상의 opaque
+  // 토큰형 문자열은 라벨/포맷을 못 맞춘 미지의 시크릿일 수 있으므로 지운다.
+  out = out.replace(/\b(?!https?:)[A-Za-z0-9_\-.]{24,}\b/g, (m) =>
+    /[0-9]/.test(m) && /[A-Za-z]/.test(m) ? '[REDACTED]' : m,
+  );
+  return out;
 }
 
 export interface CliLoginStartArgs {
@@ -50,7 +87,7 @@ export interface CliLoginStartArgs {
 }
 
 type FinishResult =
-  | { status: 'awaiting_user'; verification_url?: string; user_code?: string }
+  | { status: 'awaiting_user'; verification_url?: string; user_code?: string; raw_output_fallback?: string }
   | { status: 'succeeded'; credential_fields: Record<string, string> }
   | { status: 'failed' | 'timed_out' | 'cancelled'; error_detail: string };
 
@@ -71,11 +108,16 @@ export class CliLoginManager {
   #config: AwbConfig;
   #active: ActiveLogin | null = null;
   #timeoutMs: number;
+  #fallbackQuietMs: number;
   #codexBin: string | null;
 
-  constructor(config: AwbConfig, opts: { timeoutMs?: number; codexBin?: string } = {}) {
+  constructor(
+    config: AwbConfig,
+    opts: { timeoutMs?: number; fallbackQuietMs?: number; codexBin?: string } = {},
+  ) {
     this.#config = config;
     this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#fallbackQuietMs = opts.fallbackQuietMs ?? PARSE_FALLBACK_QUIET_MS;
     // Test-only override — without this, resolveCliBin('codex', null) would
     // find a REAL codex install ahead of any PATH shim a test sets up (it
     // checks well-known install paths — e.g. ~/.npm-global/bin/codex —
@@ -178,14 +220,38 @@ export class CliLoginManager {
 
   #wireOutput(active: ActiveLogin): void {
     let urlCaptured = false;
-    let expectCodeNext = false;
+    let fullyParsed = false;
+    let fallbackSent = false;
     let capturedUrl = '';
+    const rawLines: string[] = [];
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const scanLine = (raw: string) => {
-      const line = stripAnsi(raw).trim();
-      if (!line) return;
+    const scheduleFallback = () => {
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      if (fullyParsed || fallbackSent) return;
+      fallbackTimer = setTimeout(() => {
+        if (fullyParsed || fallbackSent || rawLines.length === 0) return;
+        fallbackSent = true;
+        void postCliLoginProgress(this.#config, {
+          session_id: active.sessionId,
+          command_id: active.commandId,
+          status: 'awaiting_user',
+          raw_output_fallback: rawLines.join('\n').slice(0, RAW_FALLBACK_MAX_CHARS),
+        });
+      }, this.#fallbackQuietMs);
+      fallbackTimer.unref?.();
+    };
+
+    let expectCodeNext = false;
+    // 리뷰 반영: URL/코드 파싱이 안 되는 경우를 대비해, 새 줄이 온 시점마다
+    // "구조화 파싱이 끝났는지" 와 무관하게 raw fallback도 함께 스케줄링한다.
+    // 실제 url+code 를 못 찾은 라인이든 찾은 라인이든 이 함수 하나에서 처리
+    // — scanLine 이 호출 순서상 이 함수보다 먼저 오지 않도록 여기서 함께 정의한다.
+    const handleParsedLine = (line: string) => {
       if (expectCodeNext) {
         expectCodeNext = false;
+        fullyParsed = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
         void postCliLoginProgress(this.#config, {
           session_id: active.sessionId,
           command_id: active.commandId,
@@ -207,12 +273,26 @@ export class CliLoginManager {
       }
     };
 
+    const scanLine = (raw: string) => {
+      const line = redactSecrets(stripAnsi(raw).trim());
+      if (!line) return;
+
+      rawLines.push(line);
+      if (rawLines.length > RAW_FALLBACK_MAX_LINES) rawLines.shift();
+      scheduleFallback();
+
+      // NOTE: expectCodeNext / capturedUrl above use the SAME redacted line
+      // — the URL itself is never a secret and is safe to relay verbatim
+      // (ticket security requirement explicitly allows exposing it).
+      handleParsedLine(line);
+    };
+
     if (active.child.stdout) {
       createInterface({ input: active.child.stdout }).on('line', scanLine);
     }
     if (active.child.stderr) {
       createInterface({ input: active.child.stderr }).on('line', (raw) => {
-        log(`cli-login[${active.sessionId.slice(0, 8)}][err] ${stripAnsi(raw).trim()}`);
+        log(`cli-login[${active.sessionId.slice(0, 8)}][err] ${redactSecrets(stripAnsi(raw).trim())}`);
       });
     }
   }
@@ -260,11 +340,23 @@ export class CliLoginManager {
       /* already gone */
     }
 
-    await postCliLoginProgress(this.#config, {
+    const delivered = await postCliLoginProgress(this.#config, {
       session_id: active.sessionId,
       command_id: active.commandId,
       ...result,
     });
+
+    // 리뷰 반영: 성공했지만 서버에 끝내 보고를 전달하지 못한 경우, 격리 홈을
+    // 지우면 harvested credential의 유일한 사본을 영영 잃는다. 이 경우에만
+    // 삭제를 건너뛴다 — 실패/타임아웃/취소는 애초에 민감 데이터가 없으므로
+    // 항상 삭제한다(티켓 완료 기준 4).
+    if (result.status === 'succeeded' && !delivered) {
+      log(
+        `cli-login: leaving isolated home on disk (session=${active.sessionId.slice(0, 8)}, path=${active.homeDir}) ` +
+          `— succeeded but the server never confirmed receipt; not deleting the only copy of the harvested credential.`,
+      );
+      return;
+    }
 
     // 성공/실패/타임아웃/취소 모든 경로에서 격리 홈을 삭제 — auth.json 등
     // 민감 파일을 디스크에 남기지 않는다(티켓 완료 기준 4).

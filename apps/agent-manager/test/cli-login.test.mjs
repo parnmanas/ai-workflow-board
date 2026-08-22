@@ -19,7 +19,10 @@ process.env.AWB_AGENT_MANAGER_HOME = managerHome;
 
 const { CliLoginManager } = await import('../dist/lib/cli-login.js');
 const { CLI_LOGINS_DIR, LOG_PATH } = await import('../dist/lib/constants.js');
-const { setRestOutbox, postCliLoginProgress } = await import('../dist/lib/rest.js');
+const { setRestOutbox, postCliLoginProgress, _setSucceededRetryDelaysMsForTests } = await import(
+  '../dist/lib/rest.js'
+);
+const { MessageOutbox } = await import('../dist/lib/outbox.js');
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,6 +96,39 @@ function fakeCodexHangs() {
   `);
 }
 
+// 리뷰 지적(round 1) 회귀 — stderr에 토큰 형태 문자열을 그대로 찍는 가짜 CLI.
+function fakeCodexLeakySecretOnStderr(secret) {
+  return makeFakeCodex(`
+    console.error(${JSON.stringify(`access_token: ${secret}`)});
+    setInterval(() => {}, 1000000);
+  `);
+}
+
+// 리뷰 지적(round 1) 회귀 — url/코드 안내 문구가 전혀 매치되지 않는(파싱
+// 실패) 출력만 내고 조용해지는 가짜 CLI. URL을 아예 안 찍으므로
+// urlCaptured는 절대 true가 되지 않는다.
+function fakeCodexUnparseableThenHangs() {
+  return makeFakeCodex(`
+    console.log('Please continue in your browser to finish signing in.');
+    console.log('(this build prints a different prompt than the parser expects)');
+    setInterval(() => {}, 1000000);
+  `);
+}
+
+// 리뷰 지적(round 1) 회귀 — 처음엔 안 맞는 문구만 찍다가(파싱 실패 폴백 유도),
+// 잠시 후 실제 url/코드를 찍는다 — 나중에 진짜 파싱이 성공하면 raw fallback을
+// 대체해야 한다.
+function fakeCodexUnparseableThenRecovers(recoverAfterMs) {
+  const printLines = REAL_PROMPT_LINES.map((l) => `console.log(${JSON.stringify(l)});`).join('\n');
+  return makeFakeCodex(`
+    console.log('Please continue in your browser to finish signing in.');
+    setTimeout(() => {
+      ${printLines}
+    }, ${recoverAfterMs});
+    setInterval(() => {}, 1000000);
+  `);
+}
+
 let originalFetch;
 let requests;
 
@@ -111,6 +147,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   setRestOutbox(null);
+  _setSucceededRetryDelaysMsForTests(null);
 });
 
 function progressBodies(sessionId) {
@@ -289,4 +326,103 @@ test('postCliLoginProgress: a 4xx response is permanent and does not enqueue', a
   );
 
   assert.equal(enqueued.length, 0);
+});
+
+// ── 리뷰 반려(round 1) 회귀 테스트 ───────────────────────────────────────
+
+test('review-fix: a succeeded report that never gets delivered NEVER touches the outbox — the real persisted file never contains the secret, and the isolated home is preserved (not deleted)', async () => {
+  _setSucceededRetryDelaysMsForTests([5, 5, 5]); // 실제 2s/5s/10s 대신 즉시 재시도
+  globalThis.fetch = async () => new Response('server error', { status: 500 }); // 항상 실패
+
+  const outboxPath = join(scratchDir, `outbox-${randomUUID()}.json`);
+  const outbox = new MessageOutbox({ persistPath: outboxPath, log: () => {} });
+  outbox.setSenders({ cli_login_progress: () => Promise.resolve('retryable') });
+  setRestOutbox(outbox);
+
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { codexBin: fakeCodexSuccess() });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-secret-1', cli: 'codex' });
+
+  // 성공 보고가 재시도까지 전부 소진될 시간을 준다(재시도 3회 x 5ms + 여유).
+  await delay(300);
+
+  // awaiting_user 보고(URL/코드 — 시크릿 아님)는 outbox에 들어가는 게 정상
+  // 동작이다. 이 테스트가 잠그는 것은 오직 'succeeded'(시크릿 포함) 상태가
+  // 절대 outbox에 들어가지 않는다는 것.
+  const succeededEntries = outbox.snapshot().filter((e) => e.payload?.body?.status === 'succeeded');
+  assert.equal(succeededEntries.length, 0, 'a succeeded report must never be enqueued into the durable outbox');
+  const fileContent = existsSync(outboxPath) ? readFileSync(outboxPath, 'utf8') : '';
+  assert.doesNotMatch(fileContent, /SECRET-TOKEN-VALUE/, 'the persisted outbox file must never contain the raw credential');
+
+  // 전달 실패 → 유일한 사본을 잃지 않도록 격리 홈을 지우지 않는다.
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  assert.equal(existsSync(join(homeDir, 'auth.json')), true, 'the harvested auth.json must be preserved when delivery never succeeds');
+});
+
+test('review-fix: stderr containing a labeled token is redacted before it ever reaches the log file', async () => {
+  const secret = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6';
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { codexBin: fakeCodexLeakySecretOnStderr(secret), timeoutMs: 150 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-stderr-1', cli: 'codex' });
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
+
+  const logContent = existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
+  assert.doesNotMatch(logContent, new RegExp(secret), 'stderr token leaked into agent-manager.log unredacted');
+  assert.match(logContent, /\[REDACTED\]/, 'expected the redaction marker to appear in place of the token');
+});
+
+test('review-fix: unparseable output (no url ever found) surfaces a raw_output_fallback awaiting_user report instead of leaving the session silently stuck', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { codexBin: fakeCodexUnparseableThenHangs(), fallbackQuietMs: 30, timeoutMs: 5000 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-fallback-1', cli: 'codex' });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.raw_output_fallback), { timeoutMs: 2000 });
+  const fallbackReport = progressBodies(sessionId).find((b) => b.raw_output_fallback);
+  assert.equal(fallbackReport.status, 'awaiting_user');
+  assert.equal(fallbackReport.verification_url, undefined);
+  assert.match(fallbackReport.raw_output_fallback, /continue in your browser/);
+
+  await manager.cancel(sessionId);
+});
+
+test('review-fix: a real url/code parse arriving after a fallback was already sent supersedes it', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { codexBin: fakeCodexUnparseableThenRecovers(200), fallbackQuietMs: 30, timeoutMs: 5000 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-fallback-2', cli: 'codex' });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.raw_output_fallback));
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.verification_url), { timeoutMs: 3000 });
+
+  const bodies = progressBodies(sessionId);
+  const fallbackReport = bodies.find((b) => b.raw_output_fallback);
+  const properReport = bodies.find((b) => b.verification_url);
+  assert.ok(fallbackReport, 'expected an early raw-output fallback report');
+  assert.ok(properReport, 'expected a later proper url/code report to supersede it');
+  assert.equal(properReport.verification_url, 'https://auth.openai.com/codex/device');
+  assert.equal(properReport.user_code, 'TEST-CODE1');
+
+  await manager.cancel(sessionId);
+});
+
+test('review-fix: applyProgress-equivalent — command_id is required on every progress report (rest.ts contract)', async () => {
+  // agent-manager 쪽에서 항상 command_id를 채워 보내는지 확인 — 서버의
+  // applyProgress가 빈 값을 요구-실패로 처리하도록 강화됐으므로, 매니저가
+  // 실제로 매번 채워 보내는지가 이 계약의 절반이다(나머지 절반은 서버
+  // 테스트에서 검증).
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { codexBin: fakeCodexSuccess() });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-nonempty', cli: 'codex' });
+  await waitUntil(() => progressBodies(sessionId).length > 0);
+  for (const body of progressBodies(sessionId)) {
+    assert.ok(body.command_id, 'every progress report must carry a non-empty command_id');
+  }
 });
