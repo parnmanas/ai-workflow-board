@@ -78,6 +78,7 @@ const { Board } = await import('file://' + path.join(DIST, 'entities', 'Board.js
 const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'BoardColumn.js'));
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
+const { Resource } = await import('file://' + path.join(DIST, 'entities', 'Resource.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
@@ -107,6 +108,7 @@ const boardRepo = ds.getRepository(Board);
 const colRepo = ds.getRepository(BoardColumn);
 const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
+const resourceRepo = ds.getRepository(Resource);
 
 async function makeTicket(overrides = {}) {
   const board = await boardRepo.save(boardRepo.create({ name: 'B' }));
@@ -704,4 +706,171 @@ test('crash recovery: outcome already recorded (phase 1 done, process died befor
   assert.match(comments[0].content, /pre-recorded outcome/);
   const after = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(after.pending_ci_wait, false, 'recovery sweep must complete delivery and finally clear the wait');
+});
+
+// ── Credential resolution (ticket 9bbe9146) — the root cause: an unresolved
+// credential made every GitHub read degrade to null and look EXACTLY like
+// "still queued", forever ────────────────────────────────────────────────
+
+test('sweep(): resolves credential_id from the ticket\'s bound Resource (same workspace) and passes it to getWorkflowRun', async () => {
+  const resource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'w1', name: 'repo', type: 'repository', credential_id: 'cred-abc',
+  }));
+  const ticket = await makeTicket({ base_repo_resource_id: resource.id });
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'completed', conclusion: 'success', html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(seenCredentialId, 'cred-abc', 'the Resource\'s credential_id must reach getWorkflowRun\'s 4th argument');
+});
+
+test('sweep(): a bound Resource in a DIFFERENT workspace never leaks its credential_id to this ticket\'s poll', async () => {
+  const resource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'other-workspace', name: 'repo', type: 'repository', credential_id: 'cred-should-not-leak',
+  }));
+  const ticket = await makeTicket({ workspace_id: 'w1', base_repo_resource_id: resource.id });
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(seenCredentialId, null, 'a cross-workspace Resource must never leak its credential_id into this poll');
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): no bound Resource degrades to a null credentialId — same env-token fallback as before this ticket', async () => {
+  const ticket = await makeTicket(); // no base_repo_resource_id
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(seenCredentialId, null);
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+// ── Poll-failure surfacing (ticket 9bbe9146) — the silent-degrade path that
+// let six real Merging tickets sit parked for 1-2h before a human noticed;
+// this is what turns that silence into an observable ticket comment ──────
+
+test('sweep(): a run that degrades to null (no throw) is tracked as a poll failure, not silently ignored', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  const githubStub = { async getWorkflowRun() { return null; } }; // degraded — no throw
+  const resumer = makeResumer(githubStub, []);
+
+  const stats = await resumer.sweep();
+  assert.equal(stats.fetch_failures, 0, 'a null-degrade (not a throw) must not count toward fetch_failures — that stat is throw-only');
+
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh.pending_ci_wait, true, 'a poll failure must not resolve the wait');
+  const ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue.consecutive_failures, 1);
+  assert.ok(ctx.poll_issue.first_failure_at);
+  assert.equal(ctx.poll_issue.alerted, false);
+
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 0, 'must not alert before the configured threshold is reached');
+
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): a thrown GitHub read error is tracked in the SAME poll-failure streak as a null-degrade', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  const githubStub = { async getWorkflowRun() { throw new Error('rate limited'); } };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue.consecutive_failures, 1, 'a thrown read error must feed the same poll-failure counter as a null-degrade');
+
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): N consecutive poll failures post exactly ONE alert comment at the threshold, and later sweeps in the same streak do not re-alert', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  const githubStub = { async getWorkflowRun() { return null; } };
+  const resumer = makeResumer(githubStub, []);
+  const threshold = resumer.getConfig().alertAfterFailures;
+
+  for (let i = 0; i < threshold; i++) await resumer.sweep();
+
+  let comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1, `exactly one alert comment must be posted once the ${threshold}th consecutive failure lands`);
+  assert.match(comments[0].content, /폴링 반복 실패/);
+  assert.match(comments[0].content, new RegExp(`${threshold}회 연속`));
+  assert.match(comments[0].operational_recurrence_key || '', new RegExp(`^ci-wait-poll-alert:${ticket.id}:`));
+
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh.pending_ci_wait, true, 'an alert is a notification, not a resolution — the wait stays registered');
+  const ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue.alerted, true);
+
+  // Two more failing sweeps in the SAME streak must not post a second alert.
+  await resumer.sweep();
+  await resumer.sweep();
+  comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1, 'once alerted, later sweeps in the same streak must not re-post');
+
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): a poll that finally succeeds clears the failure streak entirely, and a LATER unrelated streak can alert again', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let fail = true;
+  const githubStub = {
+    async getWorkflowRun() {
+      if (fail) return null;
+      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  const threshold = resumer.getConfig().alertAfterFailures;
+
+  for (let i = 0; i < threshold; i++) await resumer.sweep();
+  let comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1);
+
+  fail = false;
+  await resumer.sweep(); // now readable (still in_progress, but no longer a poll failure)
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue, undefined, 'a successful poll must clear the failure streak entirely, not just pause it');
+
+  fail = true;
+  for (let i = 0; i < threshold; i++) await resumer.sweep();
+  comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 2, 'a fresh streak after a successful poll must be able to alert again — the OLD streak\'s alerted flag must not suppress it');
+
+  await ciWaitService.cancelWait(ticket.id);
 });
