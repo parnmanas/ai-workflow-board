@@ -513,6 +513,53 @@ export async function postDispatchAckRaw(
 }
 
 /**
+ * ticket d35b7b7d(Ontology Graph 6/7) 완료조건 4 — 같은 (agent_id, ticket_id)
+ * 표본에서 graph_ MCP 툴 대 네이티브 Grep/Read/Bash 호출 비율을 비교하기 위한
+ * 집계 카운트 전송. ticket-session-manager.ts가 턴 하나가 끝날 때마다(턴 경계
+ * 사이에는 누적만 하고 전송하지 않음) 그 턴에서 관측된 카운트를 이걸로
+ * 보고한다 — postOutputLiveness와 같은 REST-only 패턴(fire-and-forget,
+ * retryApiKey 폴백), 새 SSE 이벤트 타입 아님(reporter 결정, d35b7b7d 코멘트).
+ * 서버는 호출당 로그 라인이 아니라 이 집계값 하나만 기록한다(LogService
+ * ring 2000-cap 보호). Claude CLI stream-json 경로에서만 관측 가능 —
+ * ticket-session-manager.ts의 `_onStdoutParsed`가 이 카운트를 쌓는 지점 자체가
+ * `parsed.raw?.type === 'assistant'` 분기 안에 있고, 그 분기는 Codex/
+ * Gemini/커스텀 등 비-JSON 어댑터에는 도달하지 않는다(같은 파일의 "Non-JSON
+ * adapters" 코멘트 참고) — 그 CLI들은 이 표본에서 데이터 없음으로 남는다.
+ */
+export async function postToolCallTelemetry(
+  config: AwbConfig,
+  apiKey: string,
+  body: { agent_id: string; ticket_id: string; role: string; graph_calls: number; native_calls: number },
+): Promise<void> {
+  if (!body.agent_id || !body.ticket_id || (body.graph_calls <= 0 && body.native_calls <= 0)) return;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/tool-call-telemetry`;
+    const effectiveKey = apiKey || config.apiKey;
+    const send = (key: string) => fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': key,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    let resp = await send(effectiveKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== effectiveKey) {
+      log(`tool-call-telemetry POST ${resp.status} with session key — retrying with manager key (ticket=${body.ticket_id})`);
+      resp = await send(config.retryApiKey);
+    }
+    if (!resp.ok) {
+      log(`tool-call-telemetry POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id})`);
+    }
+  } catch (err: any) {
+    log(`tool-call-telemetry POST error: ${err?.message ?? err} (ticket=${body.ticket_id})`);
+  }
+}
+
+/**
  * ticket fdc69c13 — manager → server output-liveness heartbeat. Called
  * (throttled by OUTPUT_LIVENESS_MIN_INTERVAL_MS) whenever a ticket subagent
  * emits model output, so the server's TicketSupervisor knows the

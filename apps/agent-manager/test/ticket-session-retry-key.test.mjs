@@ -22,7 +22,7 @@ process.env.AWB_AGENT_MANAGER_HOME = mkdtempSync(join(tmpdir(), 'awb-ticket-retr
 const { test } = await import('node:test');
 const assert = (await import('node:assert/strict')).default;
 
-const { postOutputLiveness, postSilentExitSystemComment, postSilentExitSystemCommentRaw } =
+const { postOutputLiveness, postSilentExitSystemComment, postSilentExitSystemCommentRaw, postToolCallTelemetry } =
   await import('../dist/lib/rest.js');
 const { callMcpTool, fireAndForgetTool } = await import('../dist/lib/mcp-client.js');
 
@@ -102,6 +102,60 @@ test('postOutputLiveness: 1차 키가 바로 성공하면 단일 호출만 한�
     { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
     'session-key',
     { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee' },
+  ));
+  assert.deepEqual(calls.map((c) => c.apiKey), ['session-key']);
+});
+
+// ── postToolCallTelemetry (ticket d35b7b7d 완료조건 4) ──────────────────────
+// postOutputLiveness와 정확히 같은 재시도 배선(config.retryApiKey 폴백) —
+// ticket-session-manager.ts가 턴 종료마다 graph_/native 표본을 이걸로 flush.
+
+test('postToolCallTelemetry: 세션 키의 403에 retryApiKey로 재시도한다', async () => {
+  const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }, { status: 200 }]);
+  await withFetch(fetch, () => postToolCallTelemetry(
+    { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
+    'session-key',
+    { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 2, native_calls: 5 },
+  ));
+  assert.deepEqual(calls.map((c) => c.apiKey), ['session-key', 'manager-key']);
+});
+
+test('postToolCallTelemetry: retryApiKey 미설정 시 403을 재시도하지 않는다', async () => {
+  const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }]);
+  await withFetch(fetch, () => postToolCallTelemetry(
+    { ...BASE, apiKey: 'only-key' },
+    'only-key',
+    { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 1, native_calls: 0 },
+  ));
+  assert.equal(calls.length, 1, 'retryApiKey 없음 — 단일 시도');
+});
+
+test('postToolCallTelemetry: graph_calls/native_calls 둘 다 0이면 아무 요청도 보내지 않는다', async () => {
+  const { calls, fetch } = fetchSequence([{ status: 200 }]);
+  await withFetch(fetch, () => postToolCallTelemetry(
+    { ...BASE, apiKey: 'k' },
+    'k',
+    { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 0, native_calls: 0 },
+  ));
+  assert.equal(calls.length, 0, '빈 표본은 네트워크 호출 자체를 생략(불필요한 요청 방지)');
+});
+
+test('postToolCallTelemetry: agent_id/ticket_id 누락 시 요청을 보내지 않는다', async () => {
+  const { calls, fetch } = fetchSequence([{ status: 200 }]);
+  await withFetch(fetch, () => postToolCallTelemetry(
+    { ...BASE, apiKey: 'k' },
+    'k',
+    { agent_id: '', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 1, native_calls: 1 },
+  ));
+  assert.equal(calls.length, 0);
+});
+
+test('postToolCallTelemetry: 1차 키가 바로 성공하면 단일 호출만 한다', async () => {
+  const { calls, fetch } = fetchSequence([{ status: 200 }]);
+  await withFetch(fetch, () => postToolCallTelemetry(
+    { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
+    'session-key',
+    { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee', graph_calls: 3, native_calls: 1 },
   ));
   assert.deepEqual(calls.map((c) => c.apiKey), ['session-key']);
 });

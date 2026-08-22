@@ -767,6 +767,44 @@ export class AgentManagerController {
     return res.json({ ok: true, recorded });
   }
 
+  /**
+   * Manager → server per-(agent,ticket) graph_ vs native tool-call sample
+   * (ticket d35b7b7d, Ontology Graph 6/7, 완료조건 4 — reporter 결정).
+   * ticket-session-manager.ts가 Claude CLI stream-json 경로에서 한 턴 동안
+   * 관측한 graph_ MCP 툴 호출 수와 네이티브 Grep/Read/Bash 호출 수를 턴
+   * 종료마다 이걸로 보고한다. 서버는 호출당 로그 라인이 아니라 이 집계값
+   * 하나만 LogService에 기록한다(ring 2000-cap 보호, reporter 결정 범위 3) —
+   * ontology-tools.ts의 graph_ 툴 호출 로깅(개별 호출당 1줄, 저빈도라 무관)과
+   * 는 별개의, 더 낮은 빈도(턴당 1줄)의 집계 신호다. Codex/Gemini 등
+   * 비-JSON 어댑터는 이 표본에 절대 나타나지 않는다 — 데이터 부재이지
+   * 버그가 아니다(postToolCallTelemetry 코멘트 참고).
+   *
+   * Auth: AgentAuthGuard(X-Agent-Key) — output-liveness와 같은 open trust
+   * 모델. 이 값은 어떤 게이트/판단도 구동하지 않는 순수 관측 신호라 남용
+   * 리스크가 없다.
+   */
+  @ApiSecurity('agent-api-key')
+  @Post('api/agent-manager/tool-call-telemetry')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: 'Manager → server: per-(agent,ticket) graph_ vs native tool-call sample' })
+  async reportToolCallTelemetry(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const agentId = String(body?.agent_id || callerAgentId || '').trim();
+    const ticketId = String(body?.ticket_id || '').trim();
+    const role = String(body?.role || '').trim();
+    const graphCalls = Number.isFinite(body?.graph_calls) ? Math.max(0, Math.trunc(body.graph_calls)) : 0;
+    const nativeCalls = Number.isFinite(body?.native_calls) ? Math.max(0, Math.trunc(body.native_calls)) : 0;
+    if (!agentId || !ticketId || (graphCalls === 0 && nativeCalls === 0)) {
+      return res.json({ ok: true, recorded: false });
+    }
+    this.logService.info(
+      'Ontology',
+      `graph vs native tool-call sample agent=${agentId.slice(0, 8)} ticket=${ticketId.slice(0, 8)} graph=${graphCalls} native=${nativeCalls}`,
+      { agent_id: agentId, ticket_id: ticketId, role, graph_calls: graphCalls, native_calls: nativeCalls, source: 'claude_stream_json' },
+    );
+    return res.json({ ok: true, recorded: true });
+  }
+
   // ─── Admin → Server (instances) ──────────────────────────────────────────
 
   @ApiBearerAuth('user-session')
