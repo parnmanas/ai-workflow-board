@@ -36,6 +36,8 @@ export interface GitHubWorkflowRun {
   id: string;
   status: string;
   conclusion: string | null;
+  /** 트리거 이벤트('push'/'schedule'/'workflow_dispatch' 등). */
+  event: string;
   html_url: string;
   created_at: string;
   updated_at: string;
@@ -547,6 +549,7 @@ export class GitHubConnectorService {
         id: String(r.id),
         status: r.status || '',
         conclusion: r.conclusion ?? null,
+        event: r.event || '',
         html_url: r.html_url || '',
         created_at: r.created_at || '',
         updated_at: r.updated_at || '',
