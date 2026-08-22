@@ -276,3 +276,74 @@ describe('리뷰 지적(차단2) — Phase C의 allPaths/srcIds 청크 조회가
     }
   });
 });
+
+describe('리뷰 지적(차단2, 잔존) — Phase C의 candidate 스캔 자체가 keyset pagination으로 순회된다', () => {
+  const GRAPH_ID = 'phase-c-keyset-pagination-graph';
+  const N = 7; // pageSize=2로 나누면 4페이지(2,2,2,1) — 마지막 페이지가 꽉 안 찬 경우까지 포함.
+
+  it('작은 pageSize(2)를 주입해도 7개 candidate가 페이지 경계 누락 없이 전부 처리된다', async () => {
+    const dstFileId = randomUUID();
+    const dstRow = {
+      id: dstFileId,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: 'file:keyset-shared.ts',
+      type: 'File',
+      layer: 'structural',
+      name: 'keyset-shared.ts',
+      qualified_name: 'keyset-shared.ts',
+      path: 'keyset-shared.ts',
+      confidence: 1,
+      content_hash: 'never-matches-any-evidence_ref',
+      status: 'active',
+    };
+    const srcIds = Array.from({ length: N }, () => randomUUID());
+    const srcRows = srcIds.map((id, i) => ({
+      id,
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      symbol_id: `keyset-concept:${i}`,
+      type: 'Concept',
+      layer: 'semantic',
+      name: `k${i}`,
+      qualified_name: `k${i}`,
+      path: '',
+      confidence: 1,
+      status: 'active',
+      pagerank: (i + 1) / 100,
+    }));
+    await insertChunked(nodeRepo, [dstRow, ...srcRows], 500);
+
+    const edgeRows = srcIds.map((srcId, i) => ({
+      id: randomUUID(),
+      workspace_id: WORKSPACE_ID,
+      graph_id: GRAPH_ID,
+      src_id: srcId,
+      dst_id: dstFileId,
+      type: 'ABOUT',
+      layer: 'semantic',
+      confidence: 0.8,
+      status: 'active',
+      evidence_ref: JSON.stringify([{ path: `keyset-nonexistent-${i}.ts`, content_hash: 'whatever' }]),
+      props: '{}',
+    }));
+    await insertChunked(edgeRepo, edgeRows, 500);
+
+    const result = await runPhaseC(AppOntologyDataSource, GRAPH_ID, { pageSize: 2 });
+    assert.equal(result.edgesScanned, N, 'pageSize=2로 4번(2+2+2+1) 나눠 순회해도 스캔 총량은 N이어야 한다');
+    assert.equal(
+      result.edgesFlippedStale,
+      N,
+      '모든 페이지가 처리돼야 한다 — 마지막(꽉 안 찬) 페이지가 누락되면 이 수가 N보다 작아진다',
+    );
+
+    for (let i = 0; i < N; i++) {
+      const row = await queueRepo.findOne({ where: { graph_id: GRAPH_ID, node_id: srcIds[i] } });
+      assert.ok(row, `index ${i}(페이지 ${Math.floor(i / 2) + 1})가 처리돼야 한다`);
+      assert.ok(
+        Math.abs(row.priority - -((i + 1) / 100)) < 1e-9,
+        `index ${i}는 자기 pagerank로 priority가 산정돼야 한다 — 페이지 상태가 섞이면 이 값이 틀어진다`,
+      );
+    }
+  });
+});
