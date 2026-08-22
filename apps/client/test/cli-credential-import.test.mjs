@@ -53,7 +53,7 @@ test('Credentials exposes the Codex and Claude CLI login credential importer, wi
   assert.match(credentialManagerSource, /<CliCredentialImport/);
   assert.match(credentialManagerSource, /onCreated=\{loadCredentials\}/);
   assert.match(source, /codex login/);
-  assert.match(source, /claude login/);
+  assert.match(source, /claude auth login/);
   assert.match(source, /~\/\.codex\/auth\.json/);
   assert.match(source, /~\/\.claude\/\.credentials\.json/);
 });

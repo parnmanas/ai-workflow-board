@@ -23,7 +23,7 @@ const CLI_DETAILS: Record<CliProvider, {
   },
   claude: {
     label: 'Claude CLI',
-    command: 'claude login',
+    command: 'claude auth login',
     file: '~/.claude/.credentials.json',
     provider: 'claude_subscription',
     field: 'credentials_json',
