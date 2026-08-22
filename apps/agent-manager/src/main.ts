@@ -967,13 +967,18 @@ async function runRuntime(
     // discoverRuntimeCapabilities()가 절대 다루지 않는다 — 여기서 따로 확인해
     // 전부 한 줄의 기동 시점 로그로 합쳐, 다음 PATH 사각지대가 세션 안에서만
     // 뒤늦게 드러나지 않고 agent-manager.log에 바로 남게 한다.
-    const auxCliChecks = await Promise.all(
-      ['git', 'gh'].map(async (cli) => [cli, await checkAuxiliaryCli(cli)] as const),
+    // (리뷰 지적 반영) discoverRuntimeCapabilities()의 결과는 설치 여부/버전만
+    // 담고 실제로 어느 실행 파일이 선택됐는지는 버린다 — 이 티켓이 다루는
+    // 회귀(702d0ebe, codex가 snap을 npm-global보다 먼저 잡음)는 "설치돼 있는가"가
+    // 아니라 "어느 경로가 선택됐는가"의 문제였다. claude/codex도 discoverRuntimeCapabilities
+    // 대신 checkAuxiliaryCli로 통일해, 4개 CLI 모두 resolveCliBin이 고른 절대경로로
+    // 직접 probe하고 그 경로를 함께 로그에 남긴다.
+    const cliResolutionChecks = await Promise.all(
+      (['claude', 'codex', 'gh', 'git'] as const).map(
+        async (cli) => [cli, await checkAuxiliaryCli(cli)] as const,
+      ),
     );
-    log(`boot CLI resolution: ${formatCliResolutionSummary([
-      ...(['claude', 'codex'] as const).map((id) => [id, runtimeCapabilities[id]] as const),
-      ...auxCliChecks,
-    ])}`);
+    log(`boot CLI resolution: ${formatCliResolutionSummary(cliResolutionChecks)}`);
     await Promise.all(
       KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
         try {
