@@ -45,7 +45,7 @@ export class OntologyEnrichmentQueue {
   @Column({ type: 'float', default: 0 })
   priority: number;
 
-  @Column({ type: 'datetime' })
+  @Column({ type: Date })
   staled_at: Date;
 
   // 스윕이 이 행을 마지막으로 "드레인"(텔레메트리 집계 + 북키핑, 이
@@ -53,7 +53,7 @@ export class OntologyEnrichmentQueue {
   // 한 번도 드레인 안 됨. Sourcegraph 오토인덱서의 per-repo cooldown과
   // 같은 자세(research-incremental.md §5.2) — 같은 노드가 계속 stale을
   // 반복해도 짧은 시간 안에 두 번 재고려하지 않는다.
-  @Column({ type: 'datetime', nullable: true, default: null })
+  @Column({ type: Date, nullable: true, default: null })
   cooldown_until: Date | null;
 
   @CreateDateColumn()
