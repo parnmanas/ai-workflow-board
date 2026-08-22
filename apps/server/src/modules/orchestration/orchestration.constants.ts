@@ -125,8 +125,22 @@ export type PostActionCondition = (typeof POST_ACTION_CONDITIONS)[number];
  * ActionRun의 최종 완료를 기다리거나 구독하지 않으므로(설계 결정), 그런
  * 이름은 실제로 추적하지 않는 것을 추적하는 것처럼 오인시킨다.
  */
-export const POST_ACTION_STATUSES = ['pending', 'dispatched', 'dispatch_failed', 'skipped'] as const;
+/**
+ * `in_flight`(리뷰 지적 반영, 티켓 2dc3c62f) — dispatch() 호출 "직전"에 저장되는
+ * 중간 상태. completeMission()이 terminal status를 저장한 직후 ~ post_actions
+ * 처리 사이, 또는 dispatch() 호출 자체의 도중에 프로세스가 죽으면(재시작 등)
+ * 이 상태로 영구히 남을 수 있다 — runPostActions()가 재호출될 때(reaper 복구
+ * 스윕) `pending`은 안전하게 재시도하지만 `in_flight`는 절대 재시도하지 않는다
+ * (dispatch()가 실제로 이미 발화했을 수도 있어 재시도하면 중복 디스패치 위험).
+ * 대신 일정 유예시간이 지난 `in_flight`는 `dispatch_failed`(결과 불명으로
+ * 처리)로 전환해 "영구 미실행·무감사" 상태를 벗어나게 한다.
+ */
+export const POST_ACTION_STATUSES = ['pending', 'in_flight', 'dispatched', 'dispatch_failed', 'skipped'] as const;
 export type PostActionStatus = (typeof POST_ACTION_STATUSES)[number];
+
+/** in_flight 상태가 이보다 오래 지속되면 크래시로 중단된 것으로 간주하고
+ *  dispatch_failed로 전환한다(재시도는 절대 하지 않음 — 중복 디스패치 방지). */
+export const POST_ACTION_STALE_IN_FLIGHT_MS = 2 * 60_000;
 
 export interface MissionPostAction {
   /** Action.id — 대상 workspace 소속인지는 디스패치 시점에 재검증한다. */
