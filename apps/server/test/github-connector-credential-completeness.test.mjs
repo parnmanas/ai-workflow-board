@@ -1,12 +1,13 @@
-// Regression guard — 티켓 5ba957b0.
+// 회귀 방지 가드 — 티켓 5ba957b0.
 //
 // "credential 인자를 안 넘기고 GitHubConnectorService 메서드를 호출" 버그가 이미
 // 4번 났다: (1) REST/ls-remote(c90653d9), (2) worktree-manager clone/push
 // (agent-manager), (3) environment-provisioner clone(6c107743), (4)
-// ci-wait-resume.service.ts:287의 getWorkflowRun(9bbe9146). 3번 직후 보드 레슨
-// (a3e5b406)이 "agent-manager git-네트워크 경로"로 좁게 적혀 있던 탓에 4번째가
-// 서버측 REST 경로로 그대로 새어나갔다 — 산문 규약은 스코프가 반 발짝만 어긋나도
-// 못 막는다는 뜻이므로, 이 파일은 기계적으로 거절한다.
+// ci-wait-resume.service.ts:287의 getWorkflowRun(9bbe9146 — 이 가드를 만드는
+// 동안 origin/main에 랜딩되어 4번째 사례는 이미 고쳐진 상태다). 3번 직후 보드
+// 레슨(a3e5b406)이 "agent-manager git-네트워크 경로"로 좁게 적혀 있던 탓에
+// 4번째가 서버측 REST 경로로 그대로 새어나갔다 — 산문 규약은 스코프가 반 발짝만
+// 어긋나도 못 막는다는 뜻이므로, 이 파일은 기계적으로 거절한다.
 //
 // 순수 정적 소스텍스트 스캔이다(test-registration-completeness.test.mjs /
 // drift-registry-completeness.test.mjs와 같은 장르) — app 부팅도, dist 빌드도
@@ -17,13 +18,24 @@
 //      인스턴스를 만들어도 놓치지 않기 위함).
 //   2) 그 receiver들에 대해 credential-스코프 메서드(isEnabled 등 10개) 호출부를
 //      전수 스캔하고, 괄호 중첩을 추적해 호출 인자 텍스트를 그대로 추출한다.
+//      이 10개 목록(CREDENTIAL_SCOPED_METHODS) 자체도 하드코딩 방치가 아니다 —
+//      github-connector.service.ts의 클래스 바디를 파싱해 실제로 githubFetch/
+//      resolveToken을 경유하는 public 메서드 집합을 독립적으로 "발견"하고, 그
+//      집합이 이 상수와 정확히 일치하는지 별도 테스트로 비교한다(리뷰 라운드1
+//      지적 — 새 credential 경유 public 메서드가 추가돼도 상수에 안 넣으면
+//      조용히 통과하던 구멍을 막는다).
 //   3) 인자 텍스트에 "credential"이 없는 호출은 화이트리스트(의도적 예외, 사유
 //      필수)에 없는 한 실패시킨다 — 화이트리스트 방식(새 호출은 기본 거절).
+//      화이트리스트는 오직 "정말로 credential이 필요 없는 의도된 호출"만을
+//      위한 등록소다 — 아직 못 고친 실제 버그를 여기 등록해 가드를 green으로
+//      우회하는 용도가 아니다(리뷰 라운드1 지적 — 9bbe9146이 랜딩되기 전에 그
+//      호출부를 임시 등록했던 것을 반려당했다). 그래서 지금은 비어 있다.
 //
 // 비공허성: 아래 non-vacuous regression 블록은 스캐너가 실제로 쓰는 것과 동일한
-// findCallSites/hasCredentialArg 함수를 리터럴 fixture에 돌려, credential-blind
-// 호출을 놓치지 않는지 직접 증명한다(mcp-tool-authz.test.mjs의 ONE_LINE_FIXTURE /
-// MULTI_LINE_FIXTURE 패턴과 동일).
+// findCallSites/hasCredentialArg/discoverCredentialRoutedPublicMethods 함수를
+// 리터럴 fixture에 돌려, credential-blind 호출과 상수-목록 drift를 놓치지 않는지
+// 직접 증명한다(mcp-tool-authz.test.mjs의 ONE_LINE_FIXTURE/MULTI_LINE_FIXTURE
+// 패턴과 동일).
 
 import { test, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -34,11 +46,17 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const SRC_DIR = path.join(SERVER_ROOT, 'src');
+const GITHUB_CONNECTOR_SERVICE_FILE = path.join(SRC_DIR, 'services', 'github-connector.service.ts');
 
 // GitHubConnectorService의 public 메서드 중 credentialId(또는 opts.credential_id)를
 // 받아 내부적으로 githubFetch/resolveToken을 타는 전체 목록(github-connector.service.ts
 // 기준, private 헬퍼인 githubFetch/resolveToken/getTokenForCredential 자체는 제외 —
-// 외부에서 직접 호출되는 곳이 없음을 grep으로 확인했다).
+// 외부에서 직접 호출되는 곳이 없음을 grep으로 확인했다). 이 목록은 손으로만 유지되는
+// blind spot이 아니다 — 아래 "CREDENTIAL_SCOPED_METHODS 완전성" 테스트가
+// discoverCredentialRoutedPublicMethods()로 github-connector.service.ts에서 실제
+// credential-경유 public 메서드 집합을 독립적으로 재발견해 이 배열과 정확히
+// 일치하는지 매번 비교한다 — 새 메서드가 추가되고 여기 등록을 빠뜨리면 그 비교
+// 테스트가 실패한다.
 const CREDENTIAL_SCOPED_METHODS = [
   'isEnabled',
   'fetchBranchTipSha',
@@ -53,23 +71,18 @@ const CREDENTIAL_SCOPED_METHODS = [
 ];
 
 // 의도적으로 credential 없이 호출해도 되는 것으로 "확인된" 호출만 여기에 등록한다.
-// 이 목록은 새 위반의 우회 통로가 아니라 "아직 못 고친 known bug"를 추적하는
-// 용도다 — 각 항목은 반드시 티켓 참조와 사유를 달고, argsText는 실제 호출부와
-// 정확히 일치해야 한다(그래야 진짜로 고쳐지면 "stale entry" 테스트가 잡아내
-// 청소를 강제한다).
-const WHITELIST = [
-  {
-    file: 'modules/agents/ci-wait-resume.service.ts',
-    method: 'getWorkflowRun',
-    argsText: 'ctx.owner, ctx.repo, ctx.run_id',
-    reason:
-      '티켓 9bbe9146(CiWaitResumeService가 종료된 run을 재개시키지 않는 버그, board 환경 ' +
-      '저장소 폴백 포함)이 이 호출부를 이미 손대는 중이라 이 티켓(5ba957b0)의 스코프 밖으로 ' +
-      '명시적으로 제외했다. 9bbe9146이 origin/main에 랜딩되면 이 호출부에 credential 인자가 ' +
-      '붙어 argsText가 더 이상 매치되지 않을 것이고, 그 순간 아래 "stale entry" 테스트가 ' +
-      '실패하며 이 항목을 지우라고 알려준다 — 랜딩 여부를 사람이 따로 추적할 필요가 없다.',
-  },
-];
+// 각 항목은 반드시 티켓 참조와 사유를 달고, argsText는 실제 호출부와 정확히
+// 일치해야 한다(그래야 진짜로 고쳐지면 "stale entry" 테스트가 잡아내 청소를
+// 강제한다). **이 목록은 "아직 못 고친 known bug"를 임시로 숨기는 용도가
+// 아니다** — 리뷰 라운드1에서 ci-wait-resume.service.ts:287(9bbe9146이 고치기
+// 전의 실제 credential-blind 회귀)를 "진행 중인 다른 티켓 스코프"라는 이유로
+// 여기 등록했다가 반려됐다: 화이트리스트는 오직 credential이 구조적으로 필요
+// 없는 호출(예: 공개 endpoint를 캐시-워밍 목적으로만 두드리는 경우 등)만을
+// 위한 것이고, 실제 회귀는 반드시 코드를 고치거나(가능하면 즉시) 그 수정이
+// 랜딩될 때까지 이 가드 자체를 티켓 prerequisite로 막아야 한다 — 알려진
+// credential 결함을 green 상태로 은폐한 채 이 가드를 병합할 수 없다. 지금은
+// 등록된 예외가 없다(9bbe9146이 랜딩되어 유일한 known gap이 해소됐다).
+const WHITELIST = [];
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -166,6 +179,35 @@ function discoverReceiverNames(srcDir) {
   return names;
 }
 
+// github-connector.service.ts의 클래스 멤버는 이 파일 전체에서 일관되게 2-space
+// 들여쓰기로 선언된다(`  async foo(...)`, `  private bar(...)` 등 — 프로젝트
+// 컨벤션인 2-space indent를 그대로 따름). 그 들여쓰기 위치에서 시작하는 멤버
+// 선언부를 순서대로 찾아, "이 선언부터 다음 멤버 선언 직전까지"를 그 멤버의
+// 소스 슬라이스로 본다 — 메서드 바디의 중괄호를 직접 균형 추적하지 않아도
+// 되므로 opts 객체 타입 인자(searchRepos 등)처럼 중첩된 `{}`가 껴 있어도
+// 흔들리지 않는다. constructor는 credential을 다루지 않으므로 제외한다.
+function discoverCredentialRoutedPublicMethods(fileContent) {
+  const memberPattern = /^ {2}(private\s+)?(async\s+)?(\w+)\s*\(/gm;
+  const members = [];
+  let m;
+  while ((m = memberPattern.exec(fileContent))) {
+    members.push({ name: m[3], isPrivate: !!m[1], start: m.index });
+  }
+  const discovered = new Set();
+  for (let i = 0; i < members.length; i++) {
+    const { name, isPrivate, start } = members[i];
+    // constructor는 경계 마커로는 그대로 참여시키되(그래야 바로 앞/뒤 멤버의
+    // 슬라이스가 constructor 위치와 상관없이 정확하다) discovered 후보에서는
+    // 제외한다 — credential을 다루지 않는다.
+    if (name === 'constructor') continue;
+    const end = i + 1 < members.length ? members[i + 1].start : fileContent.length;
+    const body = fileContent.slice(start, end);
+    const routesCredential = /\bthis\.(githubFetch|resolveToken)\s*\(/.test(body);
+    if (!isPrivate && routesCredential) discovered.add(name);
+  }
+  return discovered;
+}
+
 function scanLiveCallSites() {
   const receiverNames = discoverReceiverNames(SRC_DIR);
   const sites = [];
@@ -198,6 +240,44 @@ test('sanity: 감사 기준선(14곳) 이상의 credential-스코프 호출부�
     sites.length >= 14,
     `credential-스코프 호출부를 ${sites.length}곳만 발견했다(기대: 14곳 이상) — ` +
       '스캔 자체가 깨져 완전성 검사가 공허해졌을 수 있다.',
+  );
+});
+
+test('sanity: github-connector.service.ts에서 credential-경유 public 메서드를 실제로 발견한다', () => {
+  const content = fs.readFileSync(GITHUB_CONNECTOR_SERVICE_FILE, 'utf8');
+  const discovered = discoverCredentialRoutedPublicMethods(content);
+  assert.ok(
+    discovered.size >= 10,
+    `credential-경유 public 메서드를 ${discovered.size}개만 발견했다(기대: 10개 이상) — ` +
+      '발견 로직(2-space 멤버 들여쓰기 파싱)이 깨졌을 수 있다.',
+  );
+});
+
+// ─── CREDENTIAL_SCOPED_METHODS 완전성: 리뷰 라운드1 지적 — 하드코딩된 목록이
+// 실제 서비스 구현과 독립적으로 계속 일치하는지 비교한다. github-connector.
+// service.ts에 credential을 githubFetch/resolveToken으로 경유하는 새 public
+// 메서드가 추가되고 이 상수에 등록을 빠뜨리면(=위 CREDENTIAL_SCOPED_METHODS
+// 기반 스캔에서 조용히 빠짐) 아래 테스트가 그 drift를 잡아낸다. ───
+
+test('CREDENTIAL_SCOPED_METHODS 상수가 github-connector.service.ts의 실제 credential-경유 public 메서드 집합과 정확히 일치한다', () => {
+  const content = fs.readFileSync(GITHUB_CONNECTOR_SERVICE_FILE, 'utf8');
+  const discovered = discoverCredentialRoutedPublicMethods(content);
+  const declared = new Set(CREDENTIAL_SCOPED_METHODS);
+  const missing = [...discovered].filter((n) => !declared.has(n)).sort();
+  const stale = [...declared].filter((n) => !discovered.has(n)).sort();
+  assert.deepEqual(
+    missing,
+    [],
+    'github-connector.service.ts에 credential을 githubFetch/resolveToken으로 경유하는 새 ' +
+      'public 메서드가 추가됐는데 CREDENTIAL_SCOPED_METHODS에는 없다 — 이 파일 상단 상수에 ' +
+      '추가해 스캔 대상에 포함시켜라(빠뜨리면 그 메서드의 credential-blind 호출부가 조용히 ' +
+      '통과한다).',
+  );
+  assert.deepEqual(
+    stale,
+    [],
+    'CREDENTIAL_SCOPED_METHODS에 github-connector.service.ts에서 더 이상 credential을 ' +
+      '경유하지 않거나(리팩터) 삭제된 메서드가 남아있다 — 상수에서 제거하라.',
   );
 });
 
@@ -283,5 +363,61 @@ describe('non-vacuous regression — 스캐너가 credential-blind 호출을 실
     const sites = findCallSites(OBJECT_OPTS_FIXTURE, 'fixture.ts', new Set(['githubService']), CREDENTIAL_SCOPED_METHODS);
     assert.equal(sites.length, 1);
     assert.equal(hasCredentialArg(sites[0].argsText), true);
+  });
+});
+
+describe('non-vacuous regression — CREDENTIAL_SCOPED_METHODS 완전성 비교가 실제로 drift를 잡아내는가', () => {
+  // github-connector.service.ts의 실제 형태를 축약 재현: constructor·private
+  // 헬퍼(githubFetch 포함)·credential을 안 쓰는 public 메서드·resolveToken을
+  // 경유하는 public 메서드·opts 객체 타입(중첩 `{}`)을 받는 public 메서드를
+  // 모두 담아, 발견 로직이 각각을 올바르게 분류하는지 한 번에 검증한다.
+  const SERVICE_CLASS_FIXTURE =
+    'export class FakeGitHubConnectorService {\n' +
+    '  constructor(private readonly dataSource) {}\n' +
+    '\n' +
+    '  private getEnvToken() {\n' +
+    '    return process.env.GITHUB_TOKEN || "";\n' +
+    '  }\n' +
+    '\n' +
+    '  async resolveToken(credentialId) {\n' +
+    '    return credentialId ? "tok" : this.getEnvToken();\n' +
+    '  }\n' +
+    '\n' +
+    '  async isEnabled(credentialId) {\n' +
+    '    return !!(await this.resolveToken(credentialId));\n' +
+    '  }\n' +
+    '\n' +
+    '  private async githubFetch(path, credentialId) {\n' +
+    '    const token = await this.resolveToken(credentialId);\n' +
+    '    return { path, token };\n' +
+    '  }\n' +
+    '\n' +
+    '  async searchRepos(query, opts) {\n' +
+    '    const perPage = opts?.per_page ?? 10;\n' +
+    '    return this.githubFetch(`/search/repositories?q=${query}`, opts?.credential_id);\n' +
+    '  }\n' +
+    '\n' +
+    '  buildSyncContent(info) {\n' +
+    '    return `# ${info.full_name}`;\n' +
+    '  }\n' +
+    '}\n';
+
+  it('credential을 경유하는 public 메서드만 발견하고, constructor·private 헬퍼·credential-미경유 메서드는 제외한다', () => {
+    const discovered = discoverCredentialRoutedPublicMethods(SERVICE_CLASS_FIXTURE);
+    assert.deepEqual([...discovered].sort(), ['isEnabled', 'searchRepos']);
+  });
+
+  it('CREDENTIAL_SCOPED_METHODS에 새 메서드 등록을 빠뜨리면 완전성 비교가 실패로 잡아낸다', () => {
+    const discovered = discoverCredentialRoutedPublicMethods(SERVICE_CLASS_FIXTURE);
+    const declaredWithoutSearchRepos = new Set(['isEnabled']); // searchRepos 등록 누락을 시뮬레이션
+    const missing = [...discovered].filter((n) => !declaredWithoutSearchRepos.has(n));
+    assert.deepEqual(missing, ['searchRepos']);
+  });
+
+  it('CREDENTIAL_SCOPED_METHODS에 실제로 존재하지 않는 낡은 항목이 남으면 완전성 비교가 실패로 잡아낸다', () => {
+    const discovered = discoverCredentialRoutedPublicMethods(SERVICE_CLASS_FIXTURE);
+    const declaredWithStaleEntry = new Set(['isEnabled', 'searchRepos', 'removedMethod']); // 삭제된 메서드가 남아있는 상황을 시뮬레이션
+    const stale = [...declaredWithStaleEntry].filter((n) => !discovered.has(n));
+    assert.deepEqual(stale, ['removedMethod']);
   });
 });
