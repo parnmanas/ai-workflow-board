@@ -12,15 +12,16 @@ export interface AwbConfig {
    *  re-verification path they're exercising doesn't add real wall-clock
    *  time to every "no local comment seen" case. */
   silentExitVerifyDelayMs?: number;
-  /** 아래 chat-room 전송 함수들이 주 `apiKey` 가 401/403 을 받았을 때 딱 한 번
-   *  재시도할 fallback `X-Agent-Key` (ticket 7d8ea7c9 후속). chat 세션의
-   *  per-agent 키는 spawn 시점에 한 번만 캡처되어 세션 수명 내내 재사용되는데,
-   *  세션 도중 stale 해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고
-   *  workspace 에 종속되지 않는 키만이 실패 알림을 조용히 유실시키지 않고
-   *  방에 전달할 유일한 수단이다 (401/403 은 classifyHttpSendFailure 가
-   *  'permanent' 로 분류해 이후 버퍼링/재시도되지 않는다). 미설정 시 재시도
-   *  없음 — `apiKey` 를 별도로 override 하지 않는 다른 모든 rest.ts 호출자의
-   *  기존 동작 그대로.
+  /** 아래 chat-room/output-liveness/silent-exit 전송 함수들과 mcp-client.ts의
+   *  MCP 툴콜이 주 `apiKey` 가 401/403 을 받았을 때 딱 한 번 재시도할 fallback
+   *  `X-Agent-Key`/`Authorization` (ticket 7d8ea7c9 후속, ticket 23253aeb로
+   *  ticket-dispatch 세션까지 확장). chat/ticket 세션의 per-agent 키는 spawn
+   *  시점에 한 번만 캡처되어 세션 수명 내내 재사용되는데, 세션 도중 stale
+   *  해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고 workspace 에
+   *  종속되지 않는 키만이 실패 알림을 조용히 유실시키지 않고 전달할 유일한
+   *  수단이다 (401/403 은 classifyHttpSendFailure 가 'permanent' 로 분류해
+   *  이후 버퍼링/재시도되지 않는다). 미설정 시 재시도 없음 — `apiKey` 를
+   *  별도로 override 하지 않는 다른 모든 rest.ts 호출자의 기존 동작 그대로.
    */
   retryApiKey?: string;
   [key: string]: unknown;
@@ -519,7 +520,9 @@ export async function postDispatchAckRaw(
  * exit-143 deathloop. Fire-and-log: a dropped heartbeat just means the
  * supervisor falls back to ticket-write staleness for that window. `apiKey` is
  * the effective (managed-agent-or-manager) key so the report authenticates even
- * when the child runs as a managed agent.
+ * when the child runs as a managed agent. ticket 23253aeb — if that per-agent
+ * key is stale/out-of-scope (401/403), retry once with `config.retryApiKey`
+ * before giving up, same posture as the chat-room senders in this file.
  */
 export async function postOutputLiveness(
   config: AwbConfig,
@@ -529,16 +532,23 @@ export async function postOutputLiveness(
   if (!body.agent_id || !body.ticket_id) return;
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/output-liveness`;
-    const resp = await fetch(url, {
+    const effectiveKey = apiKey || config.apiKey;
+    const send = (key: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': apiKey || config.apiKey,
+        'X-Agent-Key': key,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(effectiveKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== effectiveKey) {
+      log(`output-liveness POST ${resp.status} with session key — retrying with manager key (ticket=${body.ticket_id})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`output-liveness POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id})`);
     }
@@ -938,7 +948,10 @@ export async function failMentionAuditRetrySpawn(
 
 /** Transport-only variant of {@link postSilentExitSystemComment} — no grace
  *  delay (the exit it narrates is long past by replay time) and classifies the
- *  failure instead of buffering it. The outbox replay path calls this directly. */
+ *  failure instead of buffering it. The outbox replay path calls this directly.
+ *  ticket 23253aeb — retries once with `config.retryApiKey` on a 401/403 from
+ *  the primary key before classifying the failure, so a stale per-agent key
+ *  doesn't silently swallow the one comment that explains a silent exit. */
 export async function postSilentExitSystemCommentRaw(
   config: AwbConfig,
   ticketId: string,
@@ -947,16 +960,22 @@ export async function postSilentExitSystemCommentRaw(
   if (!ticketId || !body?.content) return { outcome: 'permanent', result: 'failed' };
   try {
     const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
-    const resp = await fetch(url, {
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      log(`silent-exit comment POST ${resp.status} with session key — retrying with manager key (ticket=${ticketId})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(
         `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,

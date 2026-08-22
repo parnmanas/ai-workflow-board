@@ -11,6 +11,13 @@ export interface McpCallOptions {
  * Open a short-lived MCP session against the AWB server, call a single tool,
  * and tear the session down. Returns the JSON-RPC response envelope (with
  * `result` field) or throws on transport / protocol failure.
+ *
+ * ticket 23253aeb: if `config.apiKey` is a stale/out-of-scope per-agent key
+ * (spawn-time-captured, reused for the session's whole lifetime — same class
+ * as the rest.ts chat-room senders), `initialize` comes back 401/403 and the
+ * whole handshake never gets a session id. When `config.retryApiKey` is set
+ * and differs from the failed key, retry the entire handshake once with it
+ * before giving up — same one-shot fallback posture as rest.ts.
  */
 export async function callMcpTool(
   config: AwbConfig,
@@ -24,15 +31,14 @@ export async function callMcpTool(
   const url = `${base}/mcp`;
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  const baseHeaders: Record<string, string> = {
-    Authorization: `Bearer ${config.apiKey}`,
+  const makeHeaders = (apiKey: string): Record<string, string> => ({
+    Authorization: `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
-  };
-
-  const initResp = await fetch(url, {
+  });
+  const doInitialize = (apiKey: string) => fetch(url, {
     method: 'POST',
-    headers: baseHeaders,
+    headers: makeHeaders(apiKey),
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
@@ -45,6 +51,15 @@ export async function callMcpTool(
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
+
+  let apiKey = config.apiKey;
+  let initResp = await doInitialize(apiKey);
+  if (!initResp.ok && (initResp.status === 401 || initResp.status === 403)
+    && config.retryApiKey && config.retryApiKey !== apiKey) {
+    log(`MCP tool ${toolName} initialize ${initResp.status} with session key — retrying with manager key`);
+    apiKey = config.retryApiKey;
+    initResp = await doInitialize(apiKey);
+  }
   if (!initResp.ok) {
     throw new Error(`initialize HTTP ${initResp.status}`);
   }
@@ -52,7 +67,7 @@ export async function callMcpTool(
   if (!sid) throw new Error('initialize did not return Mcp-Session-Id');
   await initResp.text().catch(() => null);
 
-  const sessionHeaders: Record<string, string> = { ...baseHeaders, 'Mcp-Session-Id': sid };
+  const sessionHeaders: Record<string, string> = { ...makeHeaders(apiKey), 'Mcp-Session-Id': sid };
 
   await fetch(url, {
     method: 'POST',
