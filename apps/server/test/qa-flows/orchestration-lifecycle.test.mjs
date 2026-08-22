@@ -47,10 +47,14 @@ async function loadOrchestrationServices() {
   const runner = await import(
     pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-runner.service.js')).href
   );
+  const reaper = await import(
+    pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-reaper.service.js')).href
+  );
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
     OrchestrationRunnerService: runner.OrchestrationRunnerService,
+    OrchestrationReaperService: reaper.OrchestrationReaperService,
   };
 }
 
@@ -1139,6 +1143,83 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   assert.ok(eventTypes.includes('criteria_updated'));
   assert.ok(eventTypes.includes('post_action_dispatched'));
   assert.ok(eventTypes.includes('post_action_dispatch_failed'));
+});
+
+// 리뷰 지적 반영(티켓 2dc3c62f, P1) — post-action crash-window 복구.
+test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pending은 이어서 디스패치하고, 멈춰있는 in_flight는 재시도 없이 실패로 확정한다', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationReaperService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const reaper = app.get(OrchestrationReaperService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-crash-recovery');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'crash-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'crash-member' });
+
+  step('실제로 디스패치 가능한 Action을 등록한다');
+  const recoveryAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Crash-recovery notify',
+    prompt: 'Recovered after a simulated crash.',
+    target_agent_id: member.id,
+  });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Crash-recovery squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  step('completeMission()이 terminal status를 저장한 직후 프로세스가 죽은 상황을 직접 시뮬레이션한다 — post_actions는 손대지 않은 채로 둔다');
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Crash-window mission',
+    objective: 'Prove post-actions survive a crash between terminal-status save and runPostActions.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  const staleDispatchedAt = new Date(Date.now() - 10 * 60_000).toISOString(); // 유예시간(2분)을 훌쩍 넘긴 시각
+  const missionRepo = ds.getRepository('OrchestrationMission');
+  await missionRepo.update(
+    { id: mission.id },
+    {
+      status: 'completed',
+      finished_at: new Date(),
+      post_actions: [
+        // 크래시 시나리오 A: completeMission()이 여기까지 오지도 못하고 죽어서 아직 아무 것도 시도되지 않은 항목.
+        { action_id: recoveryAction.id, order: 1, condition: 'always', status: 'pending', run_id: null, room_id: null, error: '', dispatched_at: null },
+        // 크래시 시나리오 B: dispatch() 호출 도중(또는 그 결과를 저장하기 전) 죽어서 in_flight로 멈춘 항목.
+        { action_id: recoveryAction.id, order: 2, condition: 'always', status: 'in_flight', run_id: null, room_id: null, error: '', dispatched_at: staleDispatchedAt },
+      ],
+    },
+  );
+
+  step('reaper 스윕 한 번으로 두 항목 모두 복구된다');
+  const swept = await reaper.runOnce();
+  assert.equal(swept.post_actions_recovered, 1, 'crash 상태의 post_actions를 가진 미션 1건이 복구 대상으로 집계된다');
+
+  const recovered = await missions.getMissionDetail(mission.id, ws.id);
+  assert.equal(recovered.status, 'completed', '복구 스윕은 mission.status를 절대 건드리지 않는다');
+
+  const pendingEntry = recovered.post_actions.find((p) => p.order === 1);
+  assert.equal(pendingEntry.status, 'dispatched', '한 번도 시도되지 않았던 pending 항목은 처음으로 안전하게 디스패치된다');
+  assert.ok(pendingEntry.run_id, '실제로 디스패치되어 run_id가 기록된다');
+
+  const staleInFlightEntry = recovered.post_actions.find((p) => p.order === 2);
+  assert.equal(staleInFlightEntry.status, 'dispatch_failed', '오래된 in_flight 항목은 재시도 없이 실패로 확정된다');
+  assert.equal(staleInFlightEntry.run_id, null, 'run_id가 없다는 것은 dispatch()가 다시 호출되지 않았다는 뜻이다(중복 디스패치 방지 확인)');
+  assert.match(staleInFlightEntry.error, /in_flight/, '에러 메시지가 "not found" 등 새로운 디스패치 시도의 결과가 아니라 in_flight 정체를 명시한다');
+
+  step('같은 미션에 대한 두 번째 스윕은 아무것도 다시 건드리지 않는다(idempotent)');
+  const secondSweep = await reaper.runOnce();
+  assert.equal(secondSweep.post_actions_recovered, 0, '이미 확정된 항목만 남은 미션은 더 이상 복구 대상이 아니다');
 });
 
 exitAfterTests();

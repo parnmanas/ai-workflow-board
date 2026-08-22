@@ -56,6 +56,7 @@ import {
   MAX_ARTIFACTS_PER_STEP,
   MissionCompletionCriterion,
   PlanStepInput,
+  POST_ACTION_STALE_IN_FLIGHT_MS,
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
   allCriteriaMet,
@@ -445,31 +446,74 @@ export class OrchestrationRunnerService {
    * `condition`이 미션의 최종 status와 맞는 post_actions 항목을 `order` 순서로
    * 전부 디스패치한다. Fire-and-forget(MissionPostAction 문서 참고): 디스패치
    * 성공(run_id) 또는 실패를 기록할 뿐 재시도하지 않고 `mission.status`도
-   * 절대 건드리지 않는다. 추가 mission-lock 중첩 없이 실행된다 — 호출자
-   * (completeMission)가 이미 락을 쥐고 있고, 이 메서드는 건네받은 mission
-   * 객체를 읽고 post_actions/events만 쓰므로 다른 step/plan 상태가 레이스에
-   * 노출될 위험이 없다.
+   * 절대 건드리지 않는다.
+   *
+   * **재시작/크래시 안전성(리뷰 지적 반영, 티켓 2dc3c62f)** — 이 메서드는 같은
+   * 미션에 대해 몇 번을 다시 호출해도 안전하다(resumable):
+   *   - `status !== 'pending'`인 항목은 건너뛴다 — 이미 skipped/dispatched/
+   *     dispatch_failed로 확정된 항목은 다시 건드리지 않는다.
+   *   - `status === 'in_flight'`인 항목(직전 호출이 dispatch() 도중 죽어서
+   *     남은 흔적)은 **절대 재시도하지 않는다** — dispatch()가 실제로는 이미
+   *     발화했을 수 있어 재시도하면 ActionRun이 중복 생성될 위험이 있다. 대신
+   *     `POST_ACTION_STALE_IN_FLIGHT_MS`보다 오래 멈춰 있으면 결과 불명으로
+   *     `dispatch_failed` 처리해 감사 기록을 남긴다(reapPendingPostActions가
+   *     주기적으로 재호출).
+   *   - dispatch() 호출 **직전**에 `in_flight` + `dispatched_at`을 먼저
+   *     저장한다 — completeMission()이 terminal status를 저장한 직후 ~ 이
+   *     메서드가 끝나기 전 사이에 프로세스가 죽어도(리뷰 지적의 첫 번째
+   *     crash-window), 남은 `pending`/`in_flight` 항목이 그대로 감사
+   *     이력에 남아 reaper가 이어받을 수 있다.
+   *
+   * 호출자(completeMission 또는 recoverPostActions)가 이미 mission-lock을
+   * 쥐고 있으므로 이 메서드 자신은 추가로 락을 걸지 않는다.
    */
   private async runPostActions(mission: OrchestrationMission): Promise<void> {
     const list = Array.isArray(mission.post_actions) ? mission.post_actions : [];
     if (list.length === 0) return;
 
     const orderedActions = [...list].sort((a, b) => a.order - b.order);
-    let mutated = false;
+    mission.post_actions = orderedActions;
+
     for (const pa of orderedActions) {
-      if (!postActionApplies(pa.condition, mission.status)) {
-        if (pa.status !== 'skipped') {
-          pa.status = 'skipped';
-          mutated = true;
-          await this.missions.recordEvent(mission, {
-            type: 'post_action_skipped',
-            message: `Post-action ${pa.action_id} skipped (condition "${pa.condition}" does not match mission status "${mission.status}")`,
-            actor_type: 'system',
-            data: { action_id: pa.action_id },
-          });
-        }
+      if (pa.status === 'in_flight') {
+        const startedMs = pa.dispatched_at ? Date.parse(pa.dispatched_at) : NaN;
+        const stale = !Number.isFinite(startedMs) || Date.now() - startedMs >= POST_ACTION_STALE_IN_FLIGHT_MS;
+        if (!stale) continue; // 아직 유예시간 이내 — 다음 스윕에서 다시 판단
+        pa.status = 'dispatch_failed';
+        pa.error =
+          'in_flight 상태로 멈춰 있었습니다(프로세스 재시작 등으로 중단된 것으로 추정) — 실제 디스패치 여부를 ' +
+          '알 수 없어 재시도하지 않고 결과 불명으로 기록합니다. run_id가 비어있으면 실제로는 디스패치되지 ' +
+          '않았을 가능성이 높습니다.';
+        await this.missionRepo.save(mission);
+        await this.missions.recordEvent(mission, {
+          type: 'post_action_dispatch_failed',
+          message: `Post-action ${pa.action_id} left stuck in-flight (likely a crash) — treated as failed without retrying`,
+          actor_type: 'system',
+          data: { action_id: pa.action_id, error: pa.error, stale_in_flight: true },
+        });
         continue;
       }
+      if (pa.status !== 'pending') continue; // 이미 확정됨 — 재처리하지 않음(resumable의 핵심)
+
+      if (!postActionApplies(pa.condition, mission.status)) {
+        pa.status = 'skipped';
+        await this.missionRepo.save(mission);
+        await this.missions.recordEvent(mission, {
+          type: 'post_action_skipped',
+          message: `Post-action ${pa.action_id} skipped (condition "${pa.condition}" does not match mission status "${mission.status}")`,
+          actor_type: 'system',
+          data: { action_id: pa.action_id },
+        });
+        continue;
+      }
+
+      // dispatch() 호출 "직전"에 in_flight로 저장한다 — 이 save와 dispatch()
+      // 사이, 또는 dispatch() 도중에 죽어도 다음 재호출이 in_flight 흔적을
+      // 보고 재시도 없이 안전하게 마무리 짓는다.
+      pa.status = 'in_flight';
+      pa.dispatched_at = new Date().toISOString();
+      await this.missionRepo.save(mission);
+
       try {
         const action = await this.actionRepo.findOne({ where: { id: pa.action_id } });
         if (!action) throw new Error(`action ${pa.action_id} not found`);
@@ -485,8 +529,7 @@ export class OrchestrationRunnerService {
         pa.run_id = result.run.id;
         pa.room_id = result.room_id;
         pa.error = '';
-        pa.dispatched_at = new Date().toISOString();
-        mutated = true;
+        await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatched',
           message: `Post-action "${action.name}" dispatched (run ${result.run.id})`,
@@ -496,7 +539,7 @@ export class OrchestrationRunnerService {
       } catch (e: any) {
         pa.status = 'dispatch_failed';
         pa.error = String(e?.message || e).slice(0, 1000);
-        mutated = true;
+        await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatch_failed',
           message: `Post-action ${pa.action_id} failed to dispatch: ${pa.error}`,
@@ -509,10 +552,22 @@ export class OrchestrationRunnerService {
         });
       }
     }
-    if (mutated) {
-      mission.post_actions = orderedActions;
-      await this.missionRepo.save(mission);
-    }
+  }
+
+  /**
+   * `runPostActions`의 공개 진입점(리뷰 지적 반영, 티켓 2dc3c62f) —
+   * `OrchestrationReaperService`가 주기적으로 호출해 크래시로 중단된
+   * post_actions를 이어받는다. terminal 미션에만 의미가 있고(그 외엔 no-op),
+   * mission-lock 안에서 실행되어 진짜 동시 completeMission/다른 복구 스윕과
+   * 안전하게 직렬화된다. `runPostActions` 자체가 resumable하므로 이 메서드는
+   * 몇 번을 호출해도 안전하다.
+   */
+  async recoverPostActions(missionId: string): Promise<void> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = await this.missions.requireMission(missionId);
+      if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) return;
+      await this.runPostActions(mission);
+    });
   }
 
   // ── Plan intake ───────────────────────────────────────────────────────────
