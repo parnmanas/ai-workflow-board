@@ -312,7 +312,12 @@ export function MissionFormModal({
     const cleanCriteria = completionCriteria
       .map((c) => ({ key: c.key.trim(), description: c.description.trim() }))
       .filter((c) => c.key && c.description);
-    const cleanPostActions = postActions.filter((p) => p.action_id);
+    // "+ Add"는 order를 그 시점의 postActions.length로, "Remove"는 재번호 없이
+    // 그 자리만 뺀다 — 추가/삭제를 반복하면 order가 중복되거나 건너뛸 수 있다.
+    // order는 이제 post-action의 상관관계 키(orchestration:<mission>:<order>)
+    // 일부라 유일성이 실제로 중요하므로(리뷰 지적 반영, 티켓 2dc3c62f), 제출
+    // 직전에 최종 배열 순서 그대로 0..N-1로 다시 매긴다.
+    const cleanPostActions = postActions.filter((p) => p.action_id).map((p, idx) => ({ ...p, order: idx }));
     const repoRef =
       repoResourceId.trim() || repoUrl.trim() || repoBranch.trim()
         ? {
