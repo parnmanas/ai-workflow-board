@@ -15,7 +15,11 @@
  *                 between commit and emit, or an SSE gap), create a durable
  *                 intent so the dispatch is recovered. This is the self-healing
  *                 net that makes the guarantee hold even when the same-tx record
- *                 at the trigger source never ran.
+ *                 at the trigger source never ran. Skipped when the holder has
+ *                 already responded (comment / claim) since entering the
+ *                 CURRENT column — that proves the dispatch was NOT lost, so
+ *                 the ticket's silence since then is a chosen pause, not a
+ *                 stall (ticket fec25d90).
  *
  * Because every decision is re-derived from committed DB state, the guarantee
  * survives a process restart (the next sweep re-discovers all open intents) and
@@ -284,6 +288,15 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * the durable outbox self-heal never covered Review / Merging. A ticket that
    * has made forward progress within `seedAfterMs`, is parked, or already has an
    * open intent for the role is skipped.
+   *
+   * 담당자가 이번 컬럼 진입 이후 실제로 응답(코멘트/클레임 등)한 적이 있다면 —
+   * 그 뒤로 아무리 오래 idle이어도 — 재시드하지 않는다(ticket fec25d90). 재시드된
+   * intent의 created_at은 그 응답보다 나중이라 decideIntentReconcile의
+   * `progressed` 규칙이 다시는 성립할 수 없고, 그 결과 "담당자가 의도적으로
+   * 대기 중"인 정상 상황이 영원히 만족되지 않는 재디스패치·에스컬레이션 루프가
+   * 된다. 디스패치가 유실되지 않았다는 증거(응답 자체)가 있으니 이 라우팅
+   * 사이클에 대해 reconciler가 할 일은 없다 — 장기 무진행 여부는
+   * StuckTicketDetector가 훨씬 긴 시간축에서 별도로 감시한다.
    */
   private async _seedMissingIntents(now: Date, stats: ReconcileStats): Promise<void> {
     const colRepo = this.dataSource.getRepository(BoardColumn);
@@ -313,6 +326,11 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
       // served — no seed. Baseline is created_at (immutable), never updated_at.
       const idleMs = now.getTime() - Math.max(lastProgressMs, new Date(ticket.created_at).getTime());
       if (idleMs < this.config.seedAfterMs) continue;
+
+      // 이 컬럼에 들어온 뒤 실제로 응답한 적이 있다면 디스패치는 유실되지 않은
+      // 것이다 — 재시드 대상에서 제외한다(ticket fec25d90, 위 docstring 참고).
+      const enteredAtMs = await this._lastColumnEntryMs(ticket.id, new Date(ticket.created_at).getTime());
+      if (lastProgressMs > enteredAtMs) continue;
 
       for (const role of roles) {
         const existing = await this.intents.findOpenForTicketRole(ticket.id, role);
@@ -401,6 +419,24 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
     const outputMs = this.agentStatus?.getLatestOutputLivenessForTicket?.(ticket.id) ?? 0;
 
     return Math.max(commentMs, lifecycleMs, outputMs);
+  }
+
+  /**
+   * 티켓이 현재 컬럼에 가장 최근에 들어온 시각(epoch ms)을 구한다(ticket
+   * fec25d90). 이 티켓의 최신 `moved`/`column` ActivityLog 행 시각을 쓰고,
+   * 한 번도 이동한 적이 없다면(예: BacklogPromotionService가 직접 이 컬럼에
+   * 만든 경우) `fallbackMs`(호출자가 넘기는 ticket.created_at)로 대체한다.
+   * `_latestForwardProgressMs`의 lifecycle MAX와는 다르다 — 그쪽은 claim/release
+   * 까지 함께 묶어 "가장 최근에 뭔가 있었던 시각"을 구하지만, 재시드 스킵
+   * 판단에는 "이번 dwell이 시작된 시각" 그 자체가 필요하다.
+   */
+  private async _lastColumnEntryMs(ticketId: string, fallbackMs: number): Promise<number> {
+    const latestMove = await this.dataSource.getRepository(ActivityLog).findOne({
+      where: { ticket_id: ticketId, action: 'moved', field_changed: 'column' },
+      order: { created_at: 'DESC' },
+      select: ['id', 'created_at'],
+    });
+    return latestMove?.created_at ? new Date(latestMove.created_at).getTime() : fallbackMs;
   }
 
   private async _writeAudit(ticket: Ticket | null, intent: any, action: string, extra: Record<string, unknown>): Promise<void> {

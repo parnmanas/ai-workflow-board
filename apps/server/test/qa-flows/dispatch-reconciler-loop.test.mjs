@@ -27,6 +27,11 @@
 //  11. seed on a REVIEW-kind column (blocker B1): a lost reviewer emit leaves no
 //      intent; the widened seeder re-derives and dispatches it. Previously the
 //      seeder scanned only active/intake, so review/merging never self-healed.
+//  15. seed is SKIPPED once the holder has already responded (comment) since
+//      entering the CURRENT column — an assignee-chosen wait (e.g. sequencing
+//      around a sibling ticket editing the same file) is not a lost dispatch
+//      (ticket fec25d90). A sibling with NO engagement at all still seeds in
+//      the same sweep — the fix is scoped, not a wholesale seed disable.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -451,6 +456,53 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     await reconciler.reconcile(new Date(next + 10 * 60_000));
     intent = await intentRepo.findOne({ where: { id: intent.id } });
     assert.equal(intent.dispatch_generation, generationBeforePend, 'still frozen on a later sweep — no infinite generation growth');
+  });
+
+  await t.test('15: seed is SKIPPED once the holder already responded after entering this column (ticket fec25d90)', async () => {
+    // Reproduces the production incident this ticket reports: an assignee left
+    // an explicit "sequencing after a sibling ticket editing the same file"
+    // comment shortly after the ticket was routed, then deliberately left the
+    // ticket routed (no move_ticket / pend_ticket — by design, per the board's
+    // single-file-overlap wait guidance) rather than actively working it. The
+    // OLD seeder only measured "idle since the last progress signal" against
+    // seedAfterMs — so once idle time since that comment crossed the threshold,
+    // it seeded a BRAND NEW intent whose created_at postdates the comment. That
+    // reseeded intent can never resolve via decideIntentReconcile's `progressed`
+    // rule (which needs FRESH progress strictly after ITS OWN creation) — an
+    // unbounded re-dispatch/escalation loop misdiagnosed as an agent/infra
+    // failure, for what is actually a correct, deliberate pause.
+    const waited = await mkTicket('assignee left a wait comment, then went quiet');
+    const enteredAt = new Date(Date.now() - 6 * 60_000);      // entered this column 6 min ago
+    const waitCommentAt = new Date(Date.now() - 4 * 60_000);  // responded 2 min later, silent since
+    await ticketRepo.update(waited.id, { created_at: enteredAt });
+    await commentRepo.save(commentRepo.create({
+      ticket_id: waited.id, workspace_id: ws.id, author_type: 'agent', author: 'ralf',
+      content: 'ee26302d touches the same file — sequencing after it lands, not starting yet',
+      type: 'note', created_at: waitCommentAt,
+    }));
+    assert.equal(await intents.findOpenForTicketRole(waited.id, 'assignee'), null, 'no intent exists yet');
+
+    // Control: a genuinely lost-emit sibling with NO engagement at all — the
+    // original self-healing seed guarantee must still fire for it in the SAME
+    // sweep, proving the fix is scoped rather than a wholesale seed disable.
+    const lost = await mkTicket('genuinely lost emit, no engagement at all');
+    await ticketRepo.update(lost.id, { created_at: new Date(Date.now() - 6 * 60_000) });
+
+    // Sweep ~4 min after the wait comment — well past seedAfterMs=1min either way.
+    await reconciler.reconcile(new Date());
+
+    assert.equal(
+      await intents.findOpenForTicketRole(waited.id, 'assignee'), null,
+      'a holder who already responded after entering this column is NOT re-seeded — the dispatch was demonstrably not lost',
+    );
+    const seededAudits = await ds.getRepository('ActivityLog').find({
+      where: { ticket_id: waited.id, action: 'dispatch_intent_seeded' },
+    });
+    assert.equal(seededAudits.length, 0, 'no dispatch_intent_seeded audit row for the ticket the assignee already responded on');
+
+    const lostSeeded = await intents.findOpenForTicketRole(lost.id, 'assignee');
+    assert.ok(lostSeeded, 'the genuinely lost-emit sibling is still seeded in the same sweep — the fix is scoped, not a wholesale seed disable');
+    assert.equal(lostSeeded.trigger_source, 'reconcile_seed');
   });
 });
 
