@@ -846,29 +846,15 @@ export function resolveOntologySqljsRowCeiling(): number {
 const SQLITE_CORRUPT_RE = /malformed|disk image|file is not a database|not a database|encrypted/i;
 
 /**
- * Boot-time integrity guard for the dev sql.js database (ticket e9847153).
- *
- * Why this exists: a corrupt `data.db` ("database disk image is malformed")
- * otherwise makes TypeORM's initialize() hang ~25s as synchronize introspects
- * a broken file before finally erroring — long enough that an agent subagent
- * gets SIGTERM-killed (exit 143) before it can report anything. We open the
- * file with sql.js directly here and run PRAGMA integrity_check, so a bad file
- * is caught in <1s with an actionable message *before* TypeORM touches it.
- *
- * Scope: sql.js (dev SQLite) ONLY. Postgres/MySQL return immediately, so
- * production behavior is unchanged. A fresh/missing/empty file also returns
- * early — sql.js creates it on initialize().
- *
- * Recovery: set AWB_DB_AUTORECOVER=1 (dev convenience) to back the corrupt
- * file up to `<file>.corrupt-<ts>` and let sql.js recreate an empty DB.
- * Otherwise we print how to clear it and process.exit(1). Never auto-deletes
- * for non-sqlite backends.
+ * ensureSqljsDbHealthy() / ensureOntologySqljsDbHealthy() 공용 코어(ticket
+ * b646ed54). PRAGMA integrity_check 선제 검사 + AWB_DB_AUTORECOVER 복구
+ * 로직은 대상 파일 경로만 다를 뿐 두 DataSource(primary data.db / ontology.db)에
+ * 대해 완전히 동일하므로 여기로 추출했다. `pathEnvVarName`은 FATAL 메시지의
+ * "다른 파일을 가리키게 하라" 안내에만 쓰인다 — 그 파일의 위치를 오버라이드하는
+ * 실제 env var 이름(SQLJS_DB_PATH 또는 SQLJS_ONTOLOGY_DB_PATH)이 그대로
+ * 나가야 안내가 정확하다.
  */
-export async function ensureSqljsDbHealthy(): Promise<void> {
-  const dbType = process.env.DB_TYPE || 'sqlite';
-  if (dbType !== 'sqlite') return;
-
-  const { location } = resolveSqljsLocation();
+async function checkAndRecoverSqljsFile(location: string, pathEnvVarName: string): Promise<void> {
   // Nothing to validate — sql.js will create a fresh DB on initialize().
   if (!fs.existsSync(location)) return;
   if (fs.statSync(location).size === 0) return;
@@ -932,10 +918,62 @@ export async function ensureSqljsDbHealthy(): Promise<void> {
     `[DB]     This is local dev data and is disposable. To fix, either:\n` +
     `[DB]       • delete it so sql.js recreates an empty DB:  rm "${location}"\n` +
     `[DB]       • set AWB_DB_AUTORECOVER=1 to auto-backup + recreate on boot\n` +
-    `[DB]       • or point SQLJS_DB_PATH at a different file\n` +
+    `[DB]       • or point ${pathEnvVarName} at a different file\n` +
     `[DB]     (Aborting now instead of hanging ~25s — ticket e9847153.)\n`,
   );
   process.exit(1);
+}
+
+/**
+ * Boot-time integrity guard for the dev sql.js database (ticket e9847153).
+ *
+ * Why this exists: a corrupt `data.db` ("database disk image is malformed")
+ * otherwise makes TypeORM's initialize() hang ~25s as synchronize introspects
+ * a broken file before finally erroring — long enough that an agent subagent
+ * gets SIGTERM-killed (exit 143) before it can report anything. We open the
+ * file with sql.js directly here and run PRAGMA integrity_check, so a bad file
+ * is caught in <1s with an actionable message *before* TypeORM touches it.
+ *
+ * Scope: sql.js (dev SQLite) ONLY. Postgres/MySQL return immediately, so
+ * production behavior is unchanged. A fresh/missing/empty file also returns
+ * early — sql.js creates it on initialize().
+ *
+ * Recovery: set AWB_DB_AUTORECOVER=1 (dev convenience) to back the corrupt
+ * file up to `<file>.corrupt-<ts>` and let sql.js recreate an empty DB.
+ * Otherwise we print how to clear it and process.exit(1). Never auto-deletes
+ * for non-sqlite backends.
+ */
+export async function ensureSqljsDbHealthy(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveSqljsLocation();
+  await checkAndRecoverSqljsFile(location, 'SQLJS_DB_PATH');
+}
+
+/**
+ * ensureSqljsDbHealthy()의 Ontology-DataSource 전용 자매 함수(ticket
+ * b646ed54) — 같은 PRAGMA integrity_check 선제 검사를
+ * resolveOntologySqljsLocation()이 가리키는 파일(기본 database/ontology.db,
+ * ticket 6ca4894a)에 대해 수행한다.
+ *
+ * 이 가드가 빠져 있던 이유가 곧 이 티켓의 존재 이유다: AppOntologyDataSource도
+ * (isSqljsBackend()일 때) 표준 TypeORM sqljs DataSource이므로, 손상된
+ * ontology.db는 위 primary data.db와 정확히 같은 ~25초 synchronize() hang을
+ * 일으킬 수 있다 — 그런데 이 가드는 resolveSqljsLocation()(primary 경로)만
+ * 검사하도록 하드코딩되어 있어 두 번째 DataSource는 무방비 상태였다.
+ *
+ * 로직은 대상 위치만 다를 뿐 ensureSqljsDbHealthy()와 완전히 동일 — 공유
+ * 코어는 checkAndRecoverSqljsFile()로 추출했다(AWB_DB_AUTORECOVER 복구
+ * 규약도 그대로 재사용: `<file>.corrupt-<ts>` 백업 후 sql.js가 빈 DB를
+ * 재생성).
+ */
+export async function ensureOntologySqljsDbHealthy(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveOntologySqljsLocation();
+  await checkAndRecoverSqljsFile(location, 'SQLJS_ONTOLOGY_DB_PATH');
 }
 
 /**
@@ -1014,6 +1052,10 @@ export async function preSyncSqljsOpenIntents(): Promise<void> {
 export async function initDb() {
   // Catch a corrupt dev DB before TypeORM hangs on it (ticket e9847153).
   await ensureSqljsDbHealthy();
+  // 두 번째 sql.js DataSource(ontology.db, ticket 6ca4894a)도 같은 hang을
+  // 일으킬 수 있어 아래 initOntologyDb() → AppOntologyDataSource.initialize()
+  // 이전에 동일 가드를 돌린다(ticket b646ed54).
+  await ensureOntologySqljsDbHealthy();
   // Collapse any pre-existing duplicate open dispatch_intents before synchronize
   // creates the partial unique index (ticket 3c3b17a3).
   await preSyncSqljsOpenIntents();
