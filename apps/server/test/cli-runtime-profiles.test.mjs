@@ -160,6 +160,29 @@ test('max_output_tokens >= context_window 및 양의 정수가 아닌 값을 거
   assert.equal(fractional.ok, false);
 });
 
+// 리뷰 지적(P1) — context_window 가 (생략 시 기본값으로 간주하는)
+// safety_margin_tokens 조차 감당 못 하면, agent-manager 의
+// resolveEffectiveMaxOutputTokens() 는 known input 0(가장 유리한 경우)에서도
+// 항상 throw 하는 무의미한 profile 이다 — 저장 시점에 거부한다.
+test('context_window 가 safety_margin_tokens(기본값 또는 명시값)조차 감당 못 하면 거부한다', () => {
+  // safety_margin_tokens 생략 → 서버측 DEFAULT_SAFETY_MARGIN_TOKENS(40,000) 가정.
+  const defaultMargin = validateCliRuntimeProfiles([{ ...profiles[0], context_window: 8_000 }]);
+  assert.equal(defaultMargin.ok, false);
+  assert.match(defaultMargin.error, /leaves less than.*tokens for output/s);
+
+  const explicitMargin = validateCliRuntimeProfiles([
+    { ...profiles[0], context_window: 2_000, safety_margin_tokens: 1_500 },
+  ]);
+  assert.equal(explicitMargin.ok, false);
+  assert.match(explicitMargin.error, /leaves less than.*tokens for output/s);
+
+  // 경계(정확히 1,024 남음)는 통과해야 한다.
+  const boundary = validateCliRuntimeProfiles([
+    { ...profiles[0], context_window: 2_000, safety_margin_tokens: 976 },
+  ]);
+  assert.equal(boundary.ok, true);
+});
+
 test('missing selected profile fails with its inheritance source', () => {
   assert.throws(
     () => resolveCliRuntimeProfile(profiles, [{ source: 'agent', value: 'deleted' }]),

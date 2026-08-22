@@ -6,6 +6,15 @@ export const RESERVED_RUNTIME_ENV = new Set([
 ]);
 export const SENSITIVE_RUNTIME_ENV = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)/i;
 
+// ticket 7d8ea7c9 후속(리뷰 지적, P1) — apps/agent-manager/src/lib/runtime-profiles.ts
+// 의 DEFAULT_SAFETY_MARGIN_TOKENS/MIN_OUTPUT_TOKENS 와 반드시 같은 값으로
+// 유지할 것. context_window 가 (생략 시 기본값으로 간주하는) safety_margin_tokens
+// 조차 감당 못 하면 agent-manager 의 resolveEffectiveMaxOutputTokens() 는
+// known input 0(가장 유리한 경우)에서조차 항상 실패하므로, 그런 profile은
+// 저장 시점에 명확히 거부한다.
+const DEFAULT_SAFETY_MARGIN_TOKENS = 40_000;
+const MIN_OUTPUT_TOKENS = 1_024;
+
 const PublicEnvSchema = z.record(z.string(), z.string()).optional();
 const LifecycleSchema = z.enum(['on_release', 'manager_exit', 'reuse']).default('on_release');
 
@@ -72,6 +81,19 @@ export const ClaudeBackendProfileSchema = z.object({
       path: ['max_output_tokens'],
       message: 'must be less than context_window',
     });
+  }
+  if (value.context_window !== undefined) {
+    const effectiveMargin = value.safety_margin_tokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+    if (value.context_window - effectiveMargin < MIN_OUTPUT_TOKENS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['context_window'],
+        message:
+          `context_window minus safety_margin_tokens (${effectiveMargin}` +
+          `${value.safety_margin_tokens === undefined ? ', default' : ''}) leaves less than ` +
+          `${MIN_OUTPUT_TOKENS} tokens for output even for an empty prompt`,
+      });
+    }
   }
   for (const [scope, env] of [['env', value.env], ['adapter.env', value.adapter?.env]] as const) {
     for (const key of Object.keys(env ?? {})) {

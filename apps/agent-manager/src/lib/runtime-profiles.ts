@@ -125,6 +125,20 @@ export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   ) {
     issues.push('max_output_tokens must be less than context_window');
   }
+  // 리뷰 지적(P1) — safety_margin_tokens(생략 시 기본값)이 context_window 를
+  // known input 0(가장 유리한 경우)에서조차 MIN_OUTPUT_TOKENS 밑으로 깎으면,
+  // 이 profile 은 어떤 prompt 길이에서도 resolveEffectiveMaxOutputTokens() 가
+  // 항상 throw 하는 무의미한 설정이다 — 저장 시점에 명확히 거부한다.
+  if (profile.context_window !== undefined && isPositiveInt(profile.context_window)) {
+    const effectiveMargin = profile.safety_margin_tokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+    if (profile.context_window - effectiveMargin < MIN_OUTPUT_TOKENS) {
+      issues.push(
+        `context_window (${profile.context_window}) minus safety_margin_tokens ` +
+        `(${effectiveMargin}${profile.safety_margin_tokens === undefined ? ', default' : ''}) ` +
+        `leaves less than MIN_OUTPUT_TOKENS (${MIN_OUTPUT_TOKENS}) even for an empty prompt`,
+      );
+    }
+  }
   if (issues.length) throw new Error(`Invalid Claude backend profile (${profile.id}): ${issues.join('; ')}`);
 }
 
@@ -184,14 +198,20 @@ export const DEFAULT_REQUESTED_MAX_OUTPUT_TOKENS = 32_000;
  *  (이 보드의 MCP tool 표면 기준, 한 단어짜리 첫 메시지만으로 33,500+
  *  토큰)보다 넉넉하게 잡았다. */
 export const DEFAULT_SAFETY_MARGIN_TOKENS = 40_000;
-/** 유효 출력 상한을 이 값 밑으로는 절대 clamp 하지 않는다 — 거대하거나
- *  알 수 없는 prompt 는 출력 여유를 줄일 뿐, 0 이하의 max_tokens 요청을
- *  만들지는 않는다. */
+/** 이보다 작은 출력 여유는 "쓸 만한 응답"으로 보지 않는다.
+ *  resolveEffectiveMaxOutputTokens() 가 이 값을 채울 여유가 없으면(즉
+ *  budget 자체가 이 밑이면) 상한을 억지로 끌어올리는 대신 throw 한다 —
+ *  MIN_OUTPUT_TOKENS 로 바닥을 높이면 반환값이 budget 을 넘어 context_window
+ *  상한 불변식이 깨지므로(리뷰 지적, P1) 이 값은 "완화된 하한"이 아니라
+ *  "이 밑이면 실패로 본다"는 임계값이다. */
 export const MIN_OUTPUT_TOKENS = 1_024;
 /** 아래 best-effort 추정에 쓰는 대략적인 char-당-token 비율. 진짜
- *  tokenizer 가 아니라 의도적으로 보수적으로(영어/한국어 혼합 텍스트
- *  기준 다소 과대 계산) 잡았다 — estimatePromptTokens() 는 이 모듈이 볼
- *  수 있는 부분만 커버하고, 나머지는 safety_margin_tokens 가 흡수한다. */
+ *  tokenizer 가 아니며, 이 비율이 실제 토크나이저 대비 과대/과소 추정
+ *  중 어느 쪽으로 치우치는지(특히 한국어 등 비-ASCII 텍스트에서)는
+ *  검증된 바 없다 — estimatePromptTokens() 는 이 모듈이 볼 수 있는
+ *  부분만 커버하며, 안전성은 이 비율의 정확도가 아니라
+ *  safety_margin_tokens 와 resolveEffectiveMaxOutputTokens() 의 명시적
+ *  실패 처리에 의존한다. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 /** 이 모듈이 직접 통제하는 텍스트 조각(role prompt, harness system-prompt
@@ -229,12 +249,30 @@ export function estimatePromptTokens(
   return { role_prompt, harness_append, first_turn, known_total: role_prompt + harness_append + first_turn };
 }
 
+/** context_window 예산이 최소 출력 여유(MIN_OUTPUT_TOKENS)조차 남기지 못할
+ *  때 resolveEffectiveMaxOutputTokens() 가 던지는 에러 — spawn 사이트가
+ *  이걸 잡아 명확한 로그를 남기고 spawn 을 정상적으로 실패 처리한다(기존
+ *  startRuntimeProfile/validateRuntimeProfile 실패와 동일한 catch 경로).
+ *  `code`는 spawn 사이트가 다른 실패와 구분해 분류하고 싶을 때 쓴다. */
+export class ContextBudgetExhaustedError extends Error {
+  readonly code = 'context_budget_exhausted';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextBudgetExhaustedError';
+  }
+}
+
 /** 순수 clamp 공식: effective_max_output <= context_window -
- *  known_input_tokens - safety_margin_tokens, MIN_OUTPUT_TOKENS 로 하한을
- *  둬서 거대한 prompt 도 0 이하 요청 대신 출력 여유만 줄어들게 한다.
- *  실제 사고 수치(context_window=65536, known_input=33537, requested=32000
- *  → 합계 65537, 1 token 초과)로 test/runtime-profile-max-output-clamp.test.mjs
- *  에서 경계값 검증됨. */
+ *  known_input_tokens - safety_margin_tokens 를 **항상** 만족해야 한다(리뷰
+ *  지적, P1) — 이전 구현은 이 값을 MIN_OUTPUT_TOKENS 로 하한 처리해서, 남은
+ *  예산(budget)이 MIN_OUTPUT_TOKENS 보다 작을 때 반환값이 budget 을 넘어
+ *  버려 상한 불변식 자체가 깨졌다(예: context_window=65536, known_input=65000
+ *  이면 budget=536 인데 1024 를 반환 — 합계 66024 로 여전히 초과). budget 이
+ *  MIN_OUTPUT_TOKENS 밑이면(known input 만으로 이미 예산을 거의 다 썼거나
+ *  넘겼으면) 값을 억지로 끌어올리는 대신 ContextBudgetExhaustedError 를
+ *  던진다 — 상한을 지키는 유일한 방법은 실패를 명시하는 것이다.
+ *  65,535/65,536/65,537 세 경계값과 예산 고갈 케이스가
+ *  test/runtime-profile-max-output-clamp.test.mjs 에서 검증됨. */
 export function resolveEffectiveMaxOutputTokens(params: {
   contextWindow: number;
   knownInputTokens: number;
@@ -243,7 +281,15 @@ export function resolveEffectiveMaxOutputTokens(params: {
 }): number {
   const { contextWindow, knownInputTokens, requestedMaxOutputTokens, safetyMarginTokens } = params;
   const budget = contextWindow - knownInputTokens - safetyMarginTokens;
-  return Math.max(MIN_OUTPUT_TOKENS, Math.min(requestedMaxOutputTokens, budget));
+  if (budget < MIN_OUTPUT_TOKENS) {
+    throw new ContextBudgetExhaustedError(
+      `Claude backend context budget exhausted: context_window=${contextWindow} ` +
+      `known_input≈${knownInputTokens} safety_margin=${safetyMarginTokens} leaves only ${budget} ` +
+      `token(s) for output (minimum ${MIN_OUTPUT_TOKENS}). Raise context_window, lower ` +
+      'safety_margin_tokens, or shrink the prompt.',
+    );
+  }
+  return Math.min(requestedMaxOutputTokens, budget);
 }
 
 export interface MaxOutputTokensResolution {
@@ -262,7 +308,10 @@ export interface MaxOutputTokensResolution {
  *  known input 크기를 추정하고, profile.context_window 에 맞는 동적
  *  CLAUDE_CODE_MAX_OUTPUT_TOKENS override 를 산출한다. profile 이
  *  context_window 를 선언하지 않으면 no-op(env: {}) — 호출부는 조건 없이
- *  항상 호출해도 된다. */
+ *  항상 호출해도 된다. 예산이 고갈되면 resolveEffectiveMaxOutputTokens() 의
+ *  ContextBudgetExhaustedError 가 그대로 전파된다 — 호출부는 이걸
+ *  startRuntimeProfile() 실패와 동일하게 catch 해서 spawn 을 실패
+ *  처리해야 한다(base-session-manager.ts/subagent-manager.ts 참고). */
 export function resolveMaxOutputTokensEnv(
   profile: RuntimeProfileSpec | null | undefined,
   params: { rolePrompt?: string | null; harnessAppend?: string | null; firstTurnText?: string | null },
