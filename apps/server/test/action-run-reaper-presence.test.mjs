@@ -44,22 +44,30 @@ test('ActionRunReaperService source defines the sweep loop, TTL gate, and env co
   // Only the non-terminal 'running' status may be reaped (ActionRun has no
   // 'pending' stage, unlike QaRun).
   assert.match(code, /status\s*:\s*['"]running['"]/, 'must scope the sweep to running runs');
-  // Runs without a source_ticket_id are still excluded from the sweep on
-  // purpose (ticket b273d603: actions.service.ts now injects a standalone
-  // completion contract into these runs too, but the reaper's exclusion stays
-  // until a follow-up ticket can tell pre-fix orphaned runs apart from ones
-  // that can actually complete now). This must
-  // be excluded at the candidate QUERY (not a JS-loop skip after the fact) —
-  // a loop skip still spends the take(ACTION_RUN_REAPER_BATCH) budget on
-  // contract-less rows, so once they outnumber the batch size a real, newer
+  // A run with neither a source_ticket_id NOR completion_contract_injected is
+  // excluded from the sweep on purpose (ticket 2fa5312b, b273d603 follow-up):
+  // such a run predates b273d603 (the column didn't exist yet, so it defaults
+  // to false) and never received a completion contract in its prompt, so it
+  // has no way to ever call complete_action_run — reaping it on a TTL would
+  // falsely mark a possibly-fine run as 'failed'. A source_ticket_id-less run
+  // dispatched AFTER b273d603 gets completion_contract_injected=true at
+  // creation (actions.service.ts dispatch()) and so is now a valid candidate.
+  // This must be excluded at the candidate QUERY (not a JS-loop skip after the
+  // fact) — a loop skip still spends the take(ACTION_RUN_REAPER_BATCH) budget
+  // on contract-less rows, so once they outnumber the batch size a real, newer
   // zombie is silently never reached (ticket 23dfc38a). IS NOT NULL must sit
   // alongside != '' since a bare != '' would silently drop legacy NULL rows
   // under Postgres's three-valued NULL comparison.
-  assert.match(code, /createQueryBuilder\(/, 'candidate selection must use createQueryBuilder, not repo.find(), so the source_ticket_id gate can live in SQL before take()');
+  assert.match(code, /createQueryBuilder\(/, 'candidate selection must use createQueryBuilder, not repo.find(), so the source_ticket_id / completion_contract_injected gate can live in SQL before take()');
   assert.match(
     code,
     /source_ticket_id\s+IS\s+NOT\s+NULL\s+AND\s+r?\.?source_ticket_id\s*!=\s*['"]{2}/,
-    'candidate query must filter out contract-less runs (source_ticket_id IS NOT NULL AND != \'\') before take(), not inside the reap loop',
+    'candidate query must still admit ticket-driven runs (source_ticket_id IS NOT NULL AND != \'\') before take(), not inside the reap loop',
+  );
+  assert.match(
+    code,
+    /completion_contract_injected/,
+    'candidate query must also admit source_ticket_id-less runs that received a completion contract (ticket 2fa5312b)',
   );
   // Age gate: ActionRun has no started_at column, so age is measured from
   // created_at only (not a started_at ?? created_at fallback like QaRun/

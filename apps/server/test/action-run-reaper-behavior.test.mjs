@@ -16,12 +16,16 @@
 //                                                    -> reaped AND source ticket resumed
 //   - age >= TTL, has source ticket, mid-retry (shouldResume=false)
 //                                                    -> reaped, ticket NOT resumed (retry run owns it)
-//   - no source ticket (cron/manual/on-ticket-done run) -> preserved regardless
-//     of age; the sweep scope still excludes these on purpose (ticket b273d603:
-//     dispatch() now injects a standalone completion contract into these runs
-//     too, but widening the reaper to match would need to tell pre-fix orphaned
-//     runs apart from ones that can actually complete now — deferred as a
-//     follow-up rather than done here)
+//   - no source ticket, completion_contract_injected=false (pre-fix orphan —
+//     dispatched before ticket b273d603 added the standalone completion
+//     contract, so the target agent never had a way to call
+//     complete_action_run) -> preserved regardless of age, forever (ticket
+//     2fa5312b: this is the one case the sweep scope still deliberately
+//     excludes, to avoid falsely marking a possibly-fine run as 'failed')
+//   - no source ticket, completion_contract_injected=true (post-fix standalone
+//     dispatch — the target agent DID receive a completion contract) -> reaped
+//     past TTL like any other zombie, but shouldResume stays false (there is
+//     no source ticket to resume) (ticket 2fa5312b)
 //   - age >= TTL, but completeRun reports previouslyCompleted (a real
 //     complete_action_run raced the sweep)           -> NOT counted as reaped, no resume
 //   - a second sweep after a reap is idempotent (row already terminal)
@@ -40,32 +44,44 @@ const HOUR = 60 * 60_000;
 const MIN = 60_000;
 const NOW = new Date('2026-08-18T12:00:00Z');
 
-// Fake TypeORM query builder — covers exactly the where/andWhere/orderBy/take
-// chain runOnce() calls. getMany() applies status + source_ticket_id filtering
-// BEFORE take(), mirroring real SQL (WHERE runs before LIMIT) — this is the
-// property the batch-starvation regression test below depends on.
+// Fake TypeORM query builder — covers exactly the where/orderBy/take chain
+// runOnce() calls. getMany() applies status + the source_ticket_id-OR-
+// completion_contract_injected filtering BEFORE take(), mirroring real SQL
+// (WHERE runs before LIMIT) — this is the property the batch-starvation
+// regression test below depends on.
+//
+// The real query folds status AND the OR-group into a SINGLE where() call
+// (action-run-reaper.service.ts) rather than where(status).andWhere(OR ...) —
+// TypeORM does not parenthesize andWhere() clauses unless
+// `isolateWhereStatements` is on (it isn't here), so a split call would emit
+// `status = ? AND A OR B`, which SQL parses as `(status = ? AND A) OR B` and
+// silently admits terminal rows. This fake's where() mirrors that single-call
+// shape; andWhere() is kept as a passthrough only so an accidental call
+// doesn't hard-crash the test.
 function makeRunRepo(rows) {
   return {
     rows,
     createQueryBuilder() {
       let status = null;
-      let requireSourceTicket = false;
+      let requireCompletableGate = false;
       let takeN = rows.length;
       const qb = {
-        where(_expr, params) {
+        where(expr, params) {
           if (params && 'status' in params) status = params.status;
+          if (typeof expr === 'string' && expr.includes('source_ticket_id') && expr.includes('completion_contract_injected')) {
+            requireCompletableGate = true;
+          }
           return qb;
         },
-        andWhere(expr) {
-          if (typeof expr === 'string' && expr.includes('source_ticket_id')) requireSourceTicket = true;
-          return qb;
-        },
+        andWhere() { return qb; },
         orderBy() { return qb; },
         take(n) { takeN = n; return qb; },
         async getMany() {
           let out = rows.filter((r) => r.status === status);
-          if (requireSourceTicket) {
-            out = out.filter((r) => r.source_ticket_id != null && r.source_ticket_id !== '');
+          if (requireCompletableGate) {
+            out = out.filter((r) =>
+              (r.source_ticket_id != null && r.source_ticket_id !== '') || r.completion_contract_injected === true,
+            );
           }
           out = out.slice().sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
           return out.slice(0, takeN);
@@ -121,13 +137,19 @@ function makeTriggerLoopService() {
 
 const noopLog = { info() {}, warn() {}, error() {} };
 
-// ageMs back from NOW.
-function makeRun(id, { ageMs, status = 'running', sourceTicketId = '', shouldResume = false, workspaceId = 'ws1' } = {}) {
+// ageMs back from NOW. completionContractInjected defaults to false, matching
+// the ActionRun entity's schema default (ActionRun.ts) — a fixture must opt
+// in explicitly to represent a post-b273d603 standalone dispatch.
+function makeRun(id, {
+  ageMs, status = 'running', sourceTicketId = '', shouldResume = false, workspaceId = 'ws1',
+  completionContractInjected = false,
+} = {}) {
   return {
     id,
     status,
     workspace_id: workspaceId,
     source_ticket_id: sourceTicketId,
+    completion_contract_injected: completionContractInjected,
     created_at: new Date(NOW.getTime() - ageMs),
     completed_at: null,
     result_summary: '',
@@ -186,9 +208,33 @@ test('terminal runs are never selected regardless of age', async () => {
   const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
-
   assert.deepEqual(reaped, []);
   assert.equal(actionsService.calls.length, 0, 'find() only ever asks for status=running, so terminal rows are never fetched');
+});
+
+test('precedence regression: a terminal run with completion_contract_injected=true is still never selected (status gate must AND with the OR-group, not be split apart by it)', async () => {
+  // Guards against a real near-miss while building this OR-widening (ticket
+  // 2fa5312b): TypeORM does not parenthesize where()/andWhere() clauses
+  // unless `isolateWhereStatements` is on (it isn't — see db.ts), so
+  // `.where(status).andWhere("A OR B")` emits `status = ? AND A OR B`, which
+  // SQL's AND-before-OR precedence reads as `(status = ? AND A) OR B` —
+  // silently admitting non-'running' rows whenever B (completion_contract_injected)
+  // holds. The real query folds everything into one where() call with
+  // explicit outer parens around the OR-group specifically to avoid this. A
+  // succeeded run with completion_contract_injected=true is the sharpest
+  // fixture to catch a regression back to the split form.
+  const rows = [
+    makeRun('done-but-contracted', { ageMs: 8 * HOUR, status: 'succeeded', sourceTicketId: '', completionContractInjected: true }),
+  ];
+  const runRepo = makeRunRepo(rows);
+  const actionsService = makeActionsService(rows);
+  const triggerLoop = makeTriggerLoopService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+
+  const { reaped } = await svc.runOnce(NOW);
+
+  assert.deepEqual(reaped, [], 'a succeeded run must never be reaped, even with completion_contract_injected=true');
+  assert.equal(actionsService.calls.length, 0, 'the status=running gate must AND with the OR-group, not be split apart by operator precedence');
 });
 
 test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT resumed — the retry run owns it', async () => {
@@ -205,8 +251,12 @@ test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT r
   assert.equal(triggerLoop.calls.length, 0, 'no resume dispatch — completeRun said shouldResume=false');
 });
 
-test('run with no source ticket (cron/manual/on-ticket-done dispatch) is preserved even past the TTL — the sweep scope deliberately excludes these (ticket b273d603 follow-up), not because the run can never complete', async () => {
-  const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '' })];
+test('pre-fix orphan (no source ticket, no completion contract) is preserved forever, even past the TTL', async () => {
+  // Represents a run dispatched BEFORE ticket b273d603: completion_contract_injected
+  // didn't exist yet, so it reads as the schema default false. This run's
+  // target agent was never told a run_id or told to call complete_action_run —
+  // reaping it would falsely mark a possibly-fine run as 'failed'.
+  const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: false })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
   const triggerLoop = makeTriggerLoopService();
@@ -214,9 +264,45 @@ test('run with no source ticket (cron/manual/on-ticket-done dispatch) is preserv
 
   const { reaped } = await svc.runOnce(NOW);
 
-  assert.deepEqual(reaped, [], 'no source ticket -> not a reap candidate, regardless of age');
-  assert.equal(actionsService.calls.length, 0, 'completeRun must never be called for a run without a source ticket');
+  assert.deepEqual(reaped, [], 'no source ticket and no completion contract -> never a reap candidate, regardless of age');
+  assert.equal(actionsService.calls.length, 0, 'completeRun must never be called for a run that can never complete on its own');
   assert.equal(triggerLoop.calls.length, 0, 'no source ticket to resume');
+  assert.equal(rows[0].status, 'running', 'untouched');
+});
+
+test('post-fix standalone run (no source ticket, but completion contract was injected) IS reaped past the TTL — nothing to resume', async () => {
+  // Represents a run dispatched AFTER ticket b273d603: dispatch() set
+  // completion_contract_injected=true because the prompt carried a standalone
+  // completion contract, so the target agent genuinely had a way to call
+  // complete_action_run and just never did (died, or truly still running past
+  // TTL). ticket 2fa5312b widens the sweep to cover exactly this case.
+  const rows = [makeRun('standalone-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: true })];
+  const runRepo = makeRunRepo(rows);
+  const actionsService = makeActionsService(rows);
+  const triggerLoop = makeTriggerLoopService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+
+  const { reaped, details } = await svc.runOnce(NOW);
+
+  assert.deepEqual(reaped, ['standalone-stuck'], 'a source_ticket_id-less run that received a completion contract is now reapable');
+  assert.equal(details[0].id, 'standalone-stuck');
+  assert.equal(rows[0].status, 'failed', 'completeRun closed the run as failed');
+  assert.equal(actionsService.calls.length, 1);
+  assert.equal(actionsService.calls[0].args.status, 'failed');
+  assert.equal(triggerLoop.calls.length, 0, 'no source ticket -> nothing to resume, even though the run was reaped');
+});
+
+test('fresh post-fix standalone run under the TTL is spared', async () => {
+  const rows = [makeRun('standalone-fresh', { ageMs: 10 * MIN, sourceTicketId: '', completionContractInjected: true })];
+  const runRepo = makeRunRepo(rows);
+  const actionsService = makeActionsService(rows);
+  const triggerLoop = makeTriggerLoopService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+
+  const { reaped } = await svc.runOnce(NOW);
+
+  assert.deepEqual(reaped, [], 'under the TTL -> spared regardless of completion_contract_injected');
+  assert.equal(actionsService.calls.length, 0);
   assert.equal(rows[0].status, 'running', 'untouched');
 });
 

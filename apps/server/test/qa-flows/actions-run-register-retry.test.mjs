@@ -35,6 +35,9 @@ const { loadPendActionCandidates } = await import(
 const { evaluatePendActionGate } = await import(
   'file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'shared', 'pend-action-gate.js')
 );
+const { ActionRunReaperService } = await import(
+  'file://' + path.join(DIST_ROOT, 'modules', 'actions', 'action-run-reaper.service.js')
+);
 
 test('Actions: register new, run existing, fail + retry, and pend-gate scope end-to-end', async (t) => {
   step('Boot NestJS app');
@@ -127,6 +130,16 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     /is paused until you report back/,
     'the standalone contract omits the ticket-resume language — there is no ticket',
   );
+  // ActionRunReaperService's sweep scope (ticket 2fa5312b, b273d603 follow-up)
+  // relies on this flag to tell a source_ticket_id-less run that CAN complete
+  // (dispatched after b273d603) apart from a pre-fix orphan that never
+  // received a contract — so it must be persisted true, not just reflected in
+  // the rendered prompt text asserted above.
+  const persistedRun1 = (await actions.listRuns(created.id, ws.id, 20)).find((r) => r.id === res1.run.id);
+  assert.equal(
+    persistedRun1.completion_contract_injected, true,
+    'a source_ticket_id-less run still persists completion_contract_injected=true — the reaper depends on this to admit it into its sweep scope',
+  );
 
   step('Standalone run: completeRun(succeeded) transitions status, nothing to resume');
   const complete1 = await actions.completeRun(res1.run.id, ws.id, {
@@ -215,6 +228,52 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     'needs a human approver — no Action grants prod sign-off',
   );
   assert.equal(allowed.allowed, true, 'pend proceeds once no_action_reason is supplied');
+
+  // ── 리퍼 스윕 범위 확장 (티켓 2fa5312b, b273d603 후속) — 실 DataSource +
+  // 실 TypeORM QueryBuilder end-to-end. 페이크 기반 검증은
+  // action-run-reaper-behavior.test.mjs가 wiring 관점에서 이미 담당하므로,
+  // 여기서는 실제 SQL이 정확히 의도한 행만 고르는지(연산자 우선순위 실수가
+  // 있었다면 여기서 드러난다)를 직접 확인한다 ──────────────────────────
+  step('Reaper scope: a post-fix standalone run past TTL is reaped, a pre-fix orphan is preserved');
+  const runRepo = ds.getRepository('ActionRun');
+  const staleAt = new Date(Date.now() - 3 * 60 * 60_000); // 3h ago > default 2h TTL
+  const postFixStandalone = await runRepo.save(runRepo.create({
+    action_id: created.id,
+    workspace_id: ws.id,
+    room_id: randomUUID(),
+    triggered_by_type: 'user',
+    source_ticket_id: '',
+    completion_contract_injected: true, // dispatched after b273d603 — CAN complete
+    status: 'running',
+    created_at: staleAt,
+  }));
+  const preFixOrphan = await runRepo.save(runRepo.create({
+    action_id: created.id,
+    workspace_id: ws.id,
+    room_id: randomUUID(),
+    triggered_by_type: 'user',
+    source_ticket_id: '',
+    completion_contract_injected: false, // predates b273d603 — never got a contract
+    status: 'running',
+    created_at: staleAt,
+  }));
+
+  const reaper = app.get(ActionRunReaperService);
+  const swept = await reaper.runOnce();
+  const sweptIds = swept.reaped;
+  assert.ok(
+    sweptIds.includes(postFixStandalone.id),
+    'a source_ticket_id-less run that received a completion contract must be reaped once past the TTL',
+  );
+  assert.ok(
+    !sweptIds.includes(preFixOrphan.id),
+    'a source_ticket_id-less run that never received a completion contract must be preserved, not falsely marked failed',
+  );
+
+  const postFixRow = await runRepo.findOne({ where: { id: postFixStandalone.id } });
+  assert.equal(postFixRow.status, 'failed', 'the reaped standalone run settles to failed');
+  const preFixRow = await runRepo.findOne({ where: { id: preFixOrphan.id } });
+  assert.equal(preFixRow.status, 'running', 'the pre-fix orphan is left untouched, not contaminated with a false failed');
 
   exitAfterTests(0);
 });
