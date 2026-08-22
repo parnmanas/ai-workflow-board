@@ -1,15 +1,15 @@
-// Shared NestFactory boot helpers.
+// 공용 NestFactory 부팅 헬퍼.
 //
-// bootApp() — full HTTP boot for QA tests. Every QA test boots its own
-// NestJS app on a unique port so tests can run independently. This module
-// consolidates the repeated boot/module-load code that appeared inline in
-// proxy-passthrough.test.mjs and chat-roundtrip.test.mjs.
+// bootApp() — QA 테스트용 전체 HTTP 부팅. 모든 QA 테스트는 독립적으로 실행될
+// 수 있도록 각자 고유 포트에 자신만의 NestJS 앱을 부팅한다. 이 모듈은
+// proxy-passthrough.test.mjs / chat-roundtrip.test.mjs에 인라인으로 중복돼
+// 있던 부팅/모듈로드 코드를 하나로 모은 것이다.
 //
-// Pattern: `const { app, port, modules } = await bootApp({ port: 7800 });`
-// then `t.after(() => app.close())` + `exitAfterTests()` at file end.
+// 패턴: `const { app, port, modules } = await bootApp({ port: 7800 });`
+// 이후 파일 끝에서 `t.after(() => app.close())` + `exitAfterTests()`.
 //
-// bootAppModuleOnly() — DI-graph-only boot, no listen (see its own doc
-// comment below). Used by nest-app-boot-smoke.test.mjs.
+// bootAppModuleOnly() — HTTP listen 없이 DI 그래프만 인스턴스화하는 부팅
+// (아래 자체 doc comment 참고). nest-app-boot-smoke.test.mjs가 사용한다.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -149,26 +149,25 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   return { app, port, modules };
 }
 
-// Minimal boot — DI graph instantiation only, no HTTP listen. Used by
-// nest-app-boot-smoke.test.mjs to catch guard/provider wiring bugs (e.g. a
-// @UseGuards(PermissionGuard) controller whose module doesn't register
-// PermissionGuard's own dependency AuthGuard) that `tsc` can't see, since
-// NestJS resolves DI at runtime, not at compile time.
+// 최소 부팅 — HTTP listen 없이 DI 그래프만 인스턴스화한다.
+// nest-app-boot-smoke.test.mjs가 이 함수로 guard/provider 배선 버그(예:
+// @UseGuards(PermissionGuard)를 쓰는 컨트롤러의 모듈이 PermissionGuard
+// 자신의 의존성인 AuthGuard를 등록하지 않은 경우)를 잡아낸다 — NestJS DI는
+// 컴파일이 아니라 런타임에 해석되므로 `tsc`는 이 문제를 볼 수 없다.
 //
-// abortOnError: false is required. Without it, NestFactory.create logs the
-// UnknownDependenciesException itself and calls process.exit(1) directly on
-// a wiring failure — bypassing the caller's try/catch and killing the whole
-// node:test worker instead of surfacing an assertable error (verified by
-// deliberately breaking a module's guard providers and observing the
-// process die silently without abortOnError:false, vs. throwing cleanly
-// with it).
+// abortOnError: false가 반드시 필요하다. 이게 없으면 배선 실패 시
+// NestFactory.create가 UnknownDependenciesException을 스스로 로그만 찍고
+// process.exit(1)을 직접 호출해버려 — 호출자의 try/catch를 건너뛰고
+// node:test 워커 전체를 그대로 죽인다(assert 가능한 에러로 드러나지 않는다).
+// 모듈의 guard provider를 일부러 깨뜨려, abortOnError:false 없이는 프로세스가
+// 조용히 죽고 있으면 깔끔하게 예외가 던져지는 것을 직접 확인해 검증했다.
 export async function bootAppModuleOnly({ logger = false } = {}) {
   process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
   process.env.NODE_ENV = 'test';
   process.env.MCP_DEV_MODE = process.env.MCP_DEV_MODE || 'true';
   process.env.AGENT_DEV_MODE = process.env.AGENT_DEV_MODE || 'true';
-  // Hermetic sql.js DBs per process, same rationale as bootApp() above but
-  // keyed on pid only (no port — this boot never listens).
+  // bootApp()과 동일한 이유로 프로세스별 격리 sql.js DB를 만들되, pid로만
+  // 키를 잡는다(이 부팅은 listen을 하지 않으므로 port가 없다).
   if (!process.env.SQLJS_DB_PATH) {
     const isolated = path.join(os.tmpdir(), `awb-boot-smoke-${process.pid}.db`);
     try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
