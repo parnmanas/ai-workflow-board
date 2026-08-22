@@ -41,6 +41,7 @@ import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
 import { OutreachModule } from './modules/outreach/outreach.module';
 import { OrchestrationModule } from './modules/orchestration/orchestration.module';
+import { OntologyModule } from './modules/ontology/ontology.module';
 
 @Module({
   imports: [
@@ -114,6 +115,7 @@ import { OrchestrationModule } from './modules/orchestration/orchestration.modul
     ArtifactRefsModule,
     OutreachModule,
     OrchestrationModule,
+    OntologyModule,
   ],
 })
 export class AppModule {}
