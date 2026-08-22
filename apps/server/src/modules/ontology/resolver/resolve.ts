@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { In, type DataSource } from 'typeorm';
 import { OntologyEdge, type OntologyEdgeResolution } from '../../../entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from '../../../entities/OntologyReverseEdgeIndex';
-import { insertChunked, yieldToEventLoop } from '../persist';
+import { insertChunked, updateChunked, yieldToEventLoop } from '../persist';
 import { buildGraphSymbolIndex, type DefNodeInfo, type GraphSymbolIndex } from './symbol-index';
 import { resolveImportFactExact, resolveImportFactSuffix, resolveName, resolveRef, type CascadeResult } from './cascade';
 import { deriveOverridesAndCapDynamicDispatch, type ExistingEdgeSnapshot, type ExistingEdges } from './polymorphic-cap';
@@ -196,11 +196,18 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   // graph_id에 저장된 EXTENDS/IMPLEMENTS/OVERRIDES/활성 CALLS도 함께
   // 조회해 캡 판단에 합류시킨다(리뷰 지적 — "어느 tier가 매칭했든" 계약은
   // edgeRows만 봐서는 지켜지지 않는다, SCIP는 이 루프를 아예 거치지 않는
-  // 별도 쓰기 경로다). ──
+  // 별도 쓰기 경로다). 세 조회 전부 status='active'로 제한 — removed/
+  // quarantined 엣지(장차 ticket #4의 증분 갱신이 soft-delete할 대상)를
+  // 폴리모픽 타겟 집합에 계속 포함시키면, 이미 지워진 상속/오버라이드가
+  // 활성 CALLS를 계속 dynamic으로 잘못 캡하게 된다(리뷰 지적 라운드 2). ──
   const edgeRepo = dataSource.getRepository(OntologyEdge);
   const existing: ExistingEdges = {
-    heritage: (await edgeRepo.find({ where: { graph_id: input.graphId, type: In(['EXTENDS', 'IMPLEMENTS']) } })).map(toExistingSnapshot),
-    overrides: (await edgeRepo.find({ where: { graph_id: input.graphId, type: 'OVERRIDES' } })).map(toExistingSnapshot),
+    heritage: (
+      await edgeRepo.find({ where: { graph_id: input.graphId, type: In(['EXTENDS', 'IMPLEMENTS']), status: 'active' } })
+    ).map(toExistingSnapshot),
+    overrides: (await edgeRepo.find({ where: { graph_id: input.graphId, type: 'OVERRIDES', status: 'active' } })).map(
+      toExistingSnapshot,
+    ),
     calls: (await edgeRepo.find({ where: { graph_id: input.graphId, type: 'CALLS', status: 'active' } })).map(toExistingSnapshot),
   };
   const { overridesEdges, dynamicCappedEdges, existingCallsIdsToCapDynamic } = deriveOverridesAndCapDynamicDispatch(
@@ -211,9 +218,11 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   );
 
   await insertChunked(edgeRepo, edgeRows, EDGE_CHUNK_SIZE);
-  if (existingCallsIdsToCapDynamic.length > 0) {
-    await edgeRepo.update({ id: In(existingCallsIdsToCapDynamic) }, { resolution: 'dynamic' });
-  }
+  // 단일 IN(...) UPDATE 하나로 전체 목록을 보내면 수십만 심볼/다중천
+  // fan-in 규모에서 SQLite/sql.js·PostgreSQL의 바인드 변수 한도를 넘어
+  // 문장 자체가 실패할 수 있다(리뷰 지적 라운드 2) — insertChunked와 같은
+  // EDGE_CHUNK_SIZE로 나눠 청크 사이 양보한다.
+  await updateChunked(edgeRepo, existingCallsIdsToCapDynamic, EDGE_CHUNK_SIZE, { resolution: 'dynamic' });
   const reverseIndexRows = [...reverseIndexByKey.values()];
   await insertChunked(dataSource.getRepository(OntologyReverseEdgeIndex), reverseIndexRows, REVERSE_INDEX_CHUNK_SIZE);
 

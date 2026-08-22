@@ -79,7 +79,10 @@ const DEF_NODE_TYPES = new Set(['Type', 'Callable', 'Field']);
 export async function buildGraphSymbolIndex(dataSource: DataSource, graphId: string): Promise<GraphSymbolIndex> {
   const nodeRepo = dataSource.getRepository(OntologyNode);
   const edgeRepo = dataSource.getRepository(OntologyEdge);
-  const nodes = await nodeRepo.find({ where: { graph_id: graphId } });
+  // status='active'로 제한 — removed/quarantined 노드를 리졸버 입력에
+  // 포함하면 이미 지워진 심볼이 계속 멤버/해소 대상으로 취급된다(리뷰
+  // 지적 라운드 2).
+  const nodes = await nodeRepo.find({ where: { graph_id: graphId, status: 'active' } });
 
   const index = new GraphSymbolIndex();
   const defNodeById = new Map<string, DefNodeInfo>();
@@ -117,7 +120,7 @@ export async function buildGraphSymbolIndex(dataSource: DataSource, graphId: str
     }
   }
 
-  const declaresEdges = await edgeRepo.find({ where: { graph_id: graphId, type: 'DECLARES' } });
+  const declaresEdges = await edgeRepo.find({ where: { graph_id: graphId, type: 'DECLARES', status: 'active' } });
   for (const e of declaresEdges) {
     const member = defNodeById.get(e.dst_id);
     if (member) index.addDeclaresMember(e.src_id, member);

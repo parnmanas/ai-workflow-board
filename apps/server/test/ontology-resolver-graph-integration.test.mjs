@@ -42,7 +42,7 @@ process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
 const { extractFile } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/extract-file.js'));
-const { persistFactBundles } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
+const { persistFactBundles, updateChunked } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/persist.js'));
 const { resolveCrossFileEdges } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/resolver/resolve.js'));
 const { AppOntologyDataSource, initOntologyDb, flushOntologySqljs } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
@@ -326,5 +326,148 @@ describe('resolveCrossFileEdges — 리뷰 지적(1라운드, 블로커): 이 �
 
   it('summary.dynamicCappedEdges에도 기존 DB CALLS의 캡이 반영된다', () => {
     assert.ok(scipSummary.dynamicCappedEdges >= 1, '기존에 저장돼 있던 CALLS의 캡도 summary 카운트에 반영돼야 한다');
+  });
+});
+
+describe('resolveCrossFileEdges — 리뷰 지적(2라운드, 블로커1): removed 상태의 heritage/OVERRIDES는 폴리모픽 캡 대상에서 제외된다', () => {
+  const STATUS_GRAPH_ID = 'resolver-status-filter-graph';
+  let removedOverridesCallsId;
+  let removedHeritageCallsId;
+  let activeControlCallsId;
+
+  function edgeRow(overrides) {
+    return {
+      id: randomUUID(),
+      workspace_id: 'resolver-status-filter-ws',
+      graph_id: STATUS_GRAPH_ID,
+      layer: 'structural',
+      confidence: 0.95,
+      confidence_method: 'constant',
+      support: null,
+      call_count: null,
+      evidence_kind: 'parser',
+      evidence_ref: '[]',
+      rank: 'normal',
+      completeness: 'no_assertion',
+      extraction_run_id: 'status-filter-run',
+      model_id: null,
+      prompt_version: null,
+      first_seen_commit: 'c1',
+      last_seen_commit: 'c1',
+      valid_from_commit: 'c1',
+      valid_to_commit: null,
+      status: 'active',
+      props: '{}',
+      resolution: null,
+      ...overrides,
+    };
+  }
+
+  before(async () => {
+    // 이 그래프에는 File 노드를 전혀 만들지 않는다(persistFactBundles 미호출)
+    // — resolveCrossFileEdges의 파일 순회는 0회라 edgeRows=[](이번 실행이
+    // 새로 만드는 heritage/CALLS가 전혀 없음). 아래 세 시나리오는 전부
+    // 기존 DB 엣지(existing.*) 조회 경로만으로 구성된다 — status 필터
+    // 자체를 직접 겨냥한다.
+
+    // (1) 이미 removed된 OVERRIDES — 대상을 향한 활성 CALLS는 캡되면 안 된다.
+    const removedOverridesDst = randomUUID(); // "이미 삭제된 override 대상" 역할
+    await edgeRepo.save(edgeRow({ src_id: randomUUID(), dst_id: removedOverridesDst, type: 'OVERRIDES', status: 'removed' }));
+    removedOverridesCallsId = randomUUID();
+    await edgeRepo.save(
+      edgeRow({ id: removedOverridesCallsId, src_id: randomUUID(), dst_id: removedOverridesDst, type: 'CALLS', resolution: 'exact', evidence_kind: 'indexer' }),
+    );
+
+    // (2) 이미 removed된 EXTENDS(heritage) — 새 OVERRIDES 파생에 기여하지
+    // 않아야 하고, 그 대상을 향한 활성 CALLS도 캡되면 안 된다.
+    const removedHeritageSuper = randomUUID(); // "상속 관계가 이미 끊긴" 슈퍼클래스 역할
+    await edgeRepo.save(edgeRow({ src_id: randomUUID(), dst_id: removedHeritageSuper, type: 'EXTENDS', status: 'removed' }));
+    removedHeritageCallsId = randomUUID();
+    await edgeRepo.save(
+      edgeRow({ id: removedHeritageCallsId, src_id: randomUUID(), dst_id: removedHeritageSuper, type: 'CALLS', resolution: 'exact', evidence_kind: 'indexer' }),
+    );
+
+    // (대조군) 같은 그래프 안에서 ACTIVE OVERRIDES는 여전히 캡을 유발해야
+    // 한다 — 양성 대조 없이는 "아무것도 캡되지 않는 버그"와 구분할 수 없다.
+    const activeSuper = randomUUID();
+    await edgeRepo.save(edgeRow({ src_id: randomUUID(), dst_id: activeSuper, type: 'OVERRIDES', status: 'active' }));
+    activeControlCallsId = randomUUID();
+    await edgeRepo.save(
+      edgeRow({ id: activeControlCallsId, src_id: randomUUID(), dst_id: activeSuper, type: 'CALLS', resolution: 'exact', evidence_kind: 'indexer' }),
+    );
+
+    await resolveCrossFileEdges(AppOntologyDataSource, {
+      graphId: STATUS_GRAPH_ID,
+      workspaceId: 'resolver-status-filter-ws',
+      commit: 'c1',
+      extractionRunId: 'status-filter-resolve-run',
+    });
+  });
+
+  it('removed 상태의 OVERRIDES는 폴리모픽 타겟에서 제외돼, 그 대상을 향한 활성 exact CALLS가 dynamic으로 바뀌지 않는다', async () => {
+    const edge = await edgeRepo.findOne({ where: { id: removedOverridesCallsId } });
+    assert.equal(edge.resolution, 'exact', 'removed OVERRIDES는 이제 없는 관계로 취급돼야 한다');
+  });
+
+  it('removed 상태의 EXTENDS(heritage)는 새 OVERRIDES 파생에 기여하지 않아, 그 대상을 향한 활성 exact CALLS가 dynamic으로 바뀌지 않는다', async () => {
+    const edge = await edgeRepo.findOne({ where: { id: removedHeritageCallsId } });
+    assert.equal(edge.resolution, 'exact');
+  });
+
+  it('(대조군) 같은 그래프의 ACTIVE OVERRIDES는 여전히 CALLS를 dynamic으로 캡한다 — 위 두 케이스가 전체 캡 로직 무력화가 아님을 증명', async () => {
+    const edge = await edgeRepo.findOne({ where: { id: activeControlCallsId } });
+    assert.equal(edge.resolution, 'dynamic');
+  });
+});
+
+describe('updateChunked — 리뷰 지적(2라운드, 블로커2): 대량 CALLS 갱신이 단일 IN(...) 문 하나로 몰리지 않는다', () => {
+  const CHUNK_GRAPH_ID = 'resolver-chunked-update-graph';
+  const CALL_COUNT = 7;
+  let callIds = [];
+
+  before(async () => {
+    callIds = [];
+    for (let i = 0; i < CALL_COUNT; i++) {
+      const id = randomUUID();
+      callIds.push(id);
+      await edgeRepo.save({
+        id,
+        workspace_id: 'resolver-chunk-ws',
+        graph_id: CHUNK_GRAPH_ID,
+        src_id: randomUUID(),
+        dst_id: randomUUID(),
+        type: 'CALLS',
+        layer: 'structural',
+        confidence: 1.0,
+        confidence_method: 'constant',
+        support: null,
+        call_count: null,
+        evidence_kind: 'indexer',
+        evidence_ref: '[]',
+        rank: 'normal',
+        completeness: 'no_assertion',
+        extraction_run_id: 'chunk-test-run',
+        model_id: null,
+        prompt_version: null,
+        first_seen_commit: 'c1',
+        last_seen_commit: 'c1',
+        valid_from_commit: 'c1',
+        valid_to_commit: null,
+        status: 'active',
+        props: '{}',
+        resolution: 'exact',
+      });
+    }
+  });
+
+  it('작은 chunkSize(2)를 주입해도 7개 id 전부가(4개의 개별 UPDATE 문에 걸쳐) resolution=dynamic으로 갱신된다', async () => {
+    await updateChunked(edgeRepo, callIds, 2, { resolution: 'dynamic' });
+    const rows = await edgeRepo.find({ where: { graph_id: CHUNK_GRAPH_ID, type: 'CALLS' } });
+    assert.equal(rows.length, CALL_COUNT);
+    for (const row of rows) assert.equal(row.resolution, 'dynamic', `id=${row.id}는 dynamic으로 갱신돼야 한다`);
+  });
+
+  it('빈 id 배열이면 아무 것도 하지 않는다(no-op, 에러 없음)', async () => {
+    await updateChunked(edgeRepo, [], 2, { resolution: 'dynamic' });
   });
 });
