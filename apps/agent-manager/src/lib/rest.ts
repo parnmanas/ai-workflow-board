@@ -92,7 +92,7 @@ export function classifyHttpSendFailure(status: number): SendOutcome {
  *  outbox module (main.ts injects the live instance at boot). */
 interface RestOutboxSink {
   enqueue(
-    kind: 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack',
+    kind: 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack' | 'cli_login_progress',
     payload: unknown,
   ): void;
 }
@@ -328,6 +328,72 @@ export async function postCommandAckRaw(
     return 'ok';
   } catch (err: any) {
     log(`command ack POST error: ${err?.message ?? err} (command=${command_id})`);
+    return 'retryable';
+  }
+}
+
+/**
+ * ticket b2e79108 — manager → server progress/completion report for a
+ * cli_login_start device-auth session. Deliberately a SEPARATE channel from
+ * command/ack: that ack fires once per command_id and the server's
+ * command-ledger 410s anything past its 10-minute TTL (command-ledger.
+ * service.ts), but a human completing a browser OAuth approval can easily
+ * exceed 10 minutes. So the first command/ack just confirms "process
+ * spawned"; every awaiting_user / succeeded / failed / timed_out / cancelled
+ * transition after that goes through this endpoint instead, with no TTL tied
+ * to the original command dispatch.
+ *
+ * On 'succeeded' this carries the credential_fields the manager harvested
+ * from the isolated CODEX_HOME's auth.json (+ config.toml) — the ONLY place
+ * that raw content travels over the wire. The server encrypts + stores it
+ * and never echoes it back.
+ */
+export interface CliLoginProgressBody {
+  session_id: string;
+  command_id: string;
+  status: 'awaiting_user' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+  verification_url?: string;
+  user_code?: string;
+  error_detail?: string;
+  credential_fields?: Record<string, string>;
+}
+
+export async function postCliLoginProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<void> {
+  if (!body.session_id) return;
+  const outcome = await postCliLoginProgressRaw(config, body);
+  if (outcome === 'retryable') {
+    outboxSink?.enqueue('cli_login_progress', { body });
+  }
+}
+
+/** Transport-only variant of {@link postCliLoginProgress} — the outbox replay
+ *  path calls this directly (never re-enqueues its own replay). */
+export async function postCliLoginProgressRaw(
+  config: AwbConfig,
+  body: CliLoginProgressBody,
+): Promise<SendOutcome> {
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/cli-login/${encodeURIComponent(body.session_id)}/progress`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(
+        `cli-login progress POST failed: ${resp.status} ${resp.statusText} ` +
+          `(session=${body.session_id} status=${body.status})`,
+      );
+      return classifyHttpSendFailure(resp.status);
+    }
+    return 'ok';
+  } catch (err: any) {
+    log(`cli-login progress POST error: ${err?.message ?? err} (session=${body.session_id} status=${body.status})`);
     return 'retryable';
   }
 }

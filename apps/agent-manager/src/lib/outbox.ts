@@ -37,7 +37,12 @@ import { randomUUID } from 'node:crypto';
 
 /** Message classes the outbox knows how to replay. Each maps to one rest.ts
  *  raw sender wired in main.ts (setSenders). */
-export type OutboxKind = 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack';
+export type OutboxKind =
+  | 'chat_message'
+  | 'silent_exit_comment'
+  | 'dispatch_ack'
+  | 'command_ack'
+  | 'cli_login_progress';
 
 /** Replay verdict for one entry — same trichotomy rest.ts classifies live
  *  sends into. `retryable` keeps the entry and aborts the flush pass. */
@@ -65,6 +70,10 @@ export const OUTBOX_MAX_AGE_MS: Record<OutboxKind, number> = {
   silent_exit_comment: 24 * 60 * 60_000,
   dispatch_ack: 15 * 60_000,
   command_ack: 60 * 60_000,
+  // A cli-login session (starting/awaiting_user/completing) is reaped
+  // server-side ~12 minutes after its own last progress update — no point
+  // replaying a report past that, the session will already be timed_out.
+  cli_login_progress: 20 * 60_000,
 };
 
 /** Queue depth cap — a multi-hour outage on a busy manager should fit, but a
@@ -84,6 +93,7 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set<OutboxKind>([
   'silent_exit_comment',
   'dispatch_ack',
   'command_ack',
+  'cli_login_progress',
 ]);
 
 export interface MessageOutboxOptions {

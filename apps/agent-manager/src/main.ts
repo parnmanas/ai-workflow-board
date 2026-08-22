@@ -62,10 +62,12 @@ import {
   postSilentExitSystemCommentRaw,
   postDispatchAckRaw,
   postCommandAckRaw,
+  postCliLoginProgressRaw,
 } from './lib/rest.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
 import { postRuntimeChildEvent } from './lib/rest.js';
+import { CliLoginManager } from './lib/cli-login.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -492,6 +494,7 @@ async function runRuntime(
       (await postSilentExitSystemCommentRaw(config, p.ticket_id, p.body)).outcome,
     dispatch_ack: (p) => postDispatchAckRaw(config, p.body),
     command_ack: (p) => postCommandAckRaw(config, p.command_id, p.status, p.detail),
+    cli_login_progress: (p) => postCliLoginProgressRaw(config, p.body),
   });
   messageOutbox.load();
   setRestOutbox(messageOutbox);
@@ -575,6 +578,10 @@ async function runRuntime(
   // at call time. The first spawn always lands after eventStream.start().
   let eventStreamRef: EventStream | null = null;
 
+  // ticket b2e79108 — Codex device-auth login runner. One in-flight session
+  // per manager process (enforced by CliLoginManager.isBusy/#startCliLogin).
+  const cliLoginManager = new CliLoginManager(config);
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -589,6 +596,7 @@ async function runRuntime(
     // Shared instance covers both the persistent and one-shot paths.
     circuitBreaker,
     runtimeSupervisor,
+    cliLoginManager,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
