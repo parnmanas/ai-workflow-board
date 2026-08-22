@@ -164,9 +164,15 @@ function fakeCodexUnparseableThenRecovers(recoverAfterMs) {
 // 주석 참고). URL은 "If the browser didn't open, visit: <url>"처럼 문장
 // 안에 섞여 나온다 — CliLoginManager의 URL 정규식(`https?:\/\/\S+`)이 줄
 // 앞머리 여부와 무관하게 뽑아내는지를 이 포맷 자체가 검증한다.
+// 리뷰 지적(round 1, ticket 06b2b990): client_id/state 둘 다 24자+ 영숫자-
+// 하이픈 문자열이라야 redactSecrets()의 OPAQUE_TOKEN_RE가 실제로 이 값들을
+// [REDACTED]로 지우는 회귀를 재현한다 — 이전 fixture의 state=test-state는
+// 10자라 이 회귀를 놓쳤다.
+const CLAUDE_TEST_URL =
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=AbiMBGlAr1KmUTZvBWNYh1Q16mBxagC2Vkj14gSsstE';
 const REAL_CLAUDE_PROMPT_LINES = [
   'Opening browser to sign in…',
-  'If the browser didn\'t open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=test-state',
+  `If the browser didn't open, visit: ${CLAUDE_TEST_URL}`,
   'Paste code here if prompted > ',
 ];
 
@@ -380,7 +386,11 @@ test('claude success: awaiting_user carries the url only (no user_code — claud
   const bodies = progressBodies(sessionId);
   const awaiting = bodies.find((b) => b.status === 'awaiting_user');
   assert.ok(awaiting, 'expected an awaiting_user progress report');
-  assert.match(awaiting.verification_url, /^https:\/\/claude\.com\/cai\/oauth\/authorize\?/);
+  // 리뷰 지적(round 1, ticket 06b2b990) 회귀: prefix만 확인하면
+  // redactSecrets()가 URL 안의 client_id/state(24자+ 영숫자-하이픈 값)를
+  // [REDACTED]로 지워 승인 불가능한 링크를 만드는 손상을 놓친다 — 반드시
+  // 원본 URL 전체와 정확히 일치해야 한다.
+  assert.equal(awaiting.verification_url, CLAUDE_TEST_URL);
   assert.equal(awaiting.user_code, undefined, 'claude device-auth has no user-entered code, unlike codex');
 
   const succeeded = bodies.find((b) => b.status === 'succeeded');

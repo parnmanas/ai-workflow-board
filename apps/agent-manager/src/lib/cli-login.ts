@@ -278,7 +278,13 @@ export class CliLoginManager {
     // "구조화 파싱이 끝났는지" 와 무관하게 raw fallback도 함께 스케줄링한다.
     // 실제 url+code 를 못 찾은 라인이든 찾은 라인이든 이 함수 하나에서 처리
     // — scanLine 이 호출 순서상 이 함수보다 먼저 오지 않도록 여기서 함께 정의한다.
-    const handleParsedLine = (line: string) => {
+    //
+    // 인자는 redaction을 거치지 않은 원문(rawLine)이다 — URL/코드는 애초에
+    // 비밀이 아니고(티켓 보안 요구사항이 노출을 명시적으로 허용), redaction
+    // 정규식(특히 OPAQUE_TOKEN_RE)이 URL 안의 정상 값(OAuth client_id/state
+    // 등 24자+ 영숫자-하이픈 문자열)을 [REDACTED]로 지워 승인 링크 자체를
+    // 손상시키는 회귀가 실제로 있었다(리뷰 지적, ticket 06b2b990).
+    const handleParsedLine = (rawLine: string) => {
       // claude는 codex와 달리 사용자가 브라우저 밖에서 입력할 one-time code가
       // 없다 — verification_url을 여는 것 자체가 승인 흐름의 전부이고, 이후
       // 완료 여부는 claude CLI 자신이 백그라운드에서 폴링해 감지한다("Paste
@@ -287,7 +293,7 @@ export class CliLoginManager {
       // 찾는 즉시(코드를 기다리지 않고) awaiting_user를 보고한다.
       if (active.cli === 'claude') {
         if (!urlCaptured) {
-          const urlMatch = line.match(/https?:\/\/\S+/);
+          const urlMatch = rawLine.match(/https?:\/\/\S+/);
           if (urlMatch) {
             capturedUrl = urlMatch[0];
             urlCaptured = true;
@@ -313,34 +319,44 @@ export class CliLoginManager {
           command_id: active.commandId,
           status: 'awaiting_user',
           verification_url: capturedUrl,
-          user_code: line,
+          user_code: rawLine,
         });
         return;
       }
       if (!urlCaptured) {
-        const urlMatch = line.match(/https?:\/\/\S+/);
+        const urlMatch = rawLine.match(/https?:\/\/\S+/);
         if (urlMatch) {
           capturedUrl = urlMatch[0];
           urlCaptured = true;
         }
       }
-      if (/enter this one-time code/i.test(line)) {
+      if (/enter this one-time code/i.test(rawLine)) {
         expectCodeNext = true;
       }
     };
 
     const scanLine = (raw: string) => {
-      const line = redactSecrets(stripAnsi(raw).trim());
-      if (!line) return;
+      const rawLine = stripAnsi(raw).trim();
+      if (!rawLine) return;
+      const redactedLine = redactSecrets(rawLine);
 
-      rawLines.push(line);
+      // raw_output_fallback (unrecognized-format safety net, shown verbatim
+      // in the UI) must stay redacted — it's untrusted-format text that may
+      // contain secrets.
+      rawLines.push(redactedLine);
       if (rawLines.length > RAW_FALLBACK_MAX_LINES) rawLines.shift();
       scheduleFallback();
 
-      // NOTE: expectCodeNext / capturedUrl above use the SAME redacted line
-      // — the URL itself is never a secret and is safe to relay verbatim
-      // (ticket security requirement explicitly allows exposing it).
-      handleParsedLine(line);
+      // 리뷰 지적(round 1, ticket 06b2b990) — 확인된 버그: 구조화 추출을
+      // redactedLine에 대해 수행했더니, OPAQUE_TOKEN_RE(하이픈 포함 24자+
+      // 영숫자)가 URL 자체가 아니라 URL "안"의 값(예: claude의 OAuth
+      // client_id/state 쿼리 파라미터, UUID 형태)을 [REDACTED]로 지워버려
+      // 사용자에게 릴레이되는 verification_url이 브라우저에서 승인 불가능한
+      // 손상된 링크가 됐다. URL/코드는 애초에 비밀이 아니므로(티켓 보안
+      // 요구사항이 노출을 명시적으로 허용) 구조화 추출은 원문(rawLine)에서
+      // 수행한다 — redaction은 raw_output_fallback/stderr 로그처럼 "포맷을
+      // 통제할 수 없는" 표면에만 적용한다.
+      handleParsedLine(rawLine);
     };
 
     if (active.child.stdout) {
