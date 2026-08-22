@@ -100,9 +100,46 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
     claude_executable: executable,
   }, join(fixtureRoot, 'direct.json'), { model: 'anthropic-agent-default' });
   assert.equal(capture.baseUrl, 'http://127.0.0.1:40101');
-  assert.equal(capture.model, 'fixture-model-a');
+  // ticket 41dc37cb — raw profile.model 은 --model argv로 나가지 않는다
+  // (CLI가 unrecognized_model 로 거부); CLI가 인식하는 기본 alias만 실린다.
+  assert.equal(capture.model, 'sonnet');
   assert.equal(capture.awb, 'agent-awb-key');
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
+});
+
+// ticket 41dc37cb — Claude Code CLI는 `--model`에 낯선 값이 오면 내부 보조
+// 요청(generate_session_title 등)을 unrecognized_model 로 거부해 첫 턴부터
+// 실패시킨다. profile.model(raw provider id, 예: vLLM served-model-name)이
+// 그대로 argv에 실리면 안 되고, CLI가 스스로 인정하는 alias(기본값
+// 'sonnet')가 실려야 한다 — 실제 백엔드 라우팅은 바로 아래 aux-call env
+// 테스트가 검증하는 ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 담당한다.
+test('Anthropic-compatible profile never leaks the raw provider model id into --model (unrecognized_model regression)', async () => {
+  const executable = await makeClaudeFixture('claude-alias-model.mjs');
+  const capture = await spawnFixture({
+    id: 'alias-model-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40106',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'alias-model.json'));
+  assert.equal(capture.model, 'sonnet', '--model must carry a CLI-recognized alias, never the raw provider id');
+  assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'the sonnet-tier override still routes requests to the real backend model');
+});
+
+test('profile.model_alias overrides the default --model alias', async () => {
+  const executable = await makeClaudeFixture('claude-custom-alias.mjs');
+  const capture = await spawnFixture({
+    id: 'custom-alias-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40107',
+    model: 'qwen3-coder-next',
+    model_alias: 'haiku',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'custom-alias.json'));
+  assert.equal(capture.model, 'haiku');
+  assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
 });
 
 // ticket 7d8ea7c9 후속 — Claude Code 내부 보조 호출(세션 제목 생성 등)은
@@ -266,7 +303,10 @@ createServer(async (request, response) => {
       },
     }, join(fixtureRoot, 'adapter.json'));
     assert.equal(capture.baseUrl, `http://127.0.0.1:${adapterPort}`);
-    assert.equal(capture.model, 'fixture-model-b');
+    // ticket 41dc37cb — argv --model은 alias('sonnet')로 나가지만, adapter가
+    // 실제로 백엔드에 전달하는 model(아래 forwarded)은 여전히 raw
+    // profile.model(AWB_BACKEND_MODEL 경유) — 백엔드 라우팅은 회귀 없음.
+    assert.equal(capture.model, 'sonnet');
     assert.equal(capture.auth, 'awb-local-adapter');
     assert.equal(capture.response.content[0].text, 'translated response');
     assert.deepEqual(forwarded, {
@@ -326,6 +366,32 @@ test('profile validation reports protocol and adapter mistakes', () => {
     }),
     /adapter is required/,
   );
+});
+
+// ticket 41dc37cb
+test('profile validation rejects an unrecognized model_alias', () => {
+  assert.throws(
+    () => validateRuntimeProfile({
+      id: 'bad-alias',
+      protocol: 'anthropic-compatible',
+      base_url: 'http://127.0.0.1:1',
+      model: 'm',
+      model_alias: 'gpt-5',
+    }),
+    /model_alias must be one of/,
+  );
+});
+
+test('profile validation accepts each known model_alias', () => {
+  for (const alias of ['opus', 'sonnet', 'haiku', 'fable']) {
+    assert.doesNotThrow(() => validateRuntimeProfile({
+      id: `alias-${alias}`,
+      protocol: 'anthropic-compatible',
+      base_url: 'http://127.0.0.1:1',
+      model: 'm',
+      model_alias: alias,
+    }));
+  }
 });
 
 test('non-Claude spawn ignores a workspace Claude profile including model, cwd, env, args, and credential contract', async () => {

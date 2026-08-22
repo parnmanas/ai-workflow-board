@@ -42,6 +42,7 @@ import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
+  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -637,9 +638,16 @@ export class BaseSessionManager {
     const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // A selected Claude backend profile is an endpoint+model pair. Its model
     // must travel with that endpoint rather than being replaced by an
-    // Anthropic-oriented Agent/harness default.
-    const effectiveModel =
-      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? agentContext?.model ?? null;
+    // Anthropic-oriented Agent/harness default. The profile's raw provider
+    // model id must NEVER reach `--model` directly — Claude Code CLI rejects
+    // an unrecognized id with unrecognized_model on internal aux calls
+    // (generate_session_title etc.), failing the first chat turn before it
+    // starts (ticket 41dc37cb). Pass a CLI-recognized alias instead; actual
+    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
+    // overrides (runtime-profiles.ts), not by this flag.
+    const effectiveModel = claudeRuntimeProfile
+      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {

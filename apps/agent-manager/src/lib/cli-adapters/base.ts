@@ -65,6 +65,16 @@ export interface RuntimeProfileSpec {
   protocol: 'anthropic-compatible' | 'openai-compatible';
   base_url: string;
   model: string;
+  /** Claude Code CLI가 `--model`/내부 보조 요청(세션 제목 생성 등)에서
+   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 백엔드로 실제
+   *  나가는 모델은 항상 `model`(위) — RuntimeLease.claudeEnv() 가
+   *  ANTHROPIC_DEFAULT_*_MODEL/ANTHROPIC_MODEL 네 tier 전부를 profile.model
+   *  로 덮어쓰므로 alias 선택은 백엔드 라우팅에 영향 없다. 생략 시
+   *  DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts) — ticket
+   *  41dc37cb: raw provider model id를 `--model`에 직접 넘기면 CLI가
+   *  `unrecognized_model`로 거부한다(특히 generate_session_title 등 보조
+   *  요청). */
+  model_alias?: 'opus' | 'sonnet' | 'haiku' | 'fable';
   claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;

@@ -88,6 +88,28 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+/** Claude Code CLI 자체가 `--model`/내부 보조 요청에서 인식하는 alias
+ *  4종(listModels()의 opus/sonnet/haiku/fable — cli-adapters/claude.ts와
+ *  동일 목록을 여기서도 독립 유지: 이 모듈은 claude.ts 를 import하지
+ *  않는다). */
+export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+export type ClaudeModelAlias = (typeof CLAUDE_MODEL_ALIASES)[number];
+/** profile.model_alias 생략 시 `--model`에 실릴 기본 alias. 'sonnet'을
+ *  고른 이유는 순전히 관례(일반 사용자용 기본 tier) — claudeEnv()가
+ *  ANTHROPIC_DEFAULT_*_MODEL 네 tier 전부를 profile.model 로 이미
+ *  덮어쓰므로 어떤 alias를 골라도 백엔드로 나가는 실제 모델은 동일하다. */
+export const DEFAULT_CLAUDE_MODEL_ALIAS: ClaudeModelAlias = 'sonnet';
+
+/** ticket 41dc37cb — spawn 사이트가 `--model`에 실제로 넘길 값. profile.model
+ *  (raw provider id, 예: vLLM `--served-model-name`)을 절대 직접 반환하지
+ *  않는다 — CLI가 그 문자열을 인식 못 하면 generate_session_title 같은 내부
+ *  보조 요청이 unrecognized_model 로 거부되어 첫 턴부터 실패한다. 실제 백엔드
+ *  라우팅은 claudeEnv()의 ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 담당하므로,
+ *  여기서는 CLI 자신이 유효하다고 인정하는 alias만 고르면 된다. */
+export function resolveClaudeModelAlias(profile: RuntimeProfileSpec): ClaudeModelAlias {
+  return profile.model_alias ?? DEFAULT_CLAUDE_MODEL_ALIAS;
+}
+
 export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   const issues: string[] = [];
   if (profile.kind && profile.kind !== 'claude-backend') issues.push('kind must be "claude-backend"');
@@ -96,6 +118,9 @@ export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   }
   if (!profile.base_url) issues.push('base_url is required');
   if (!profile.model) issues.push('model is required');
+  if (profile.model_alias !== undefined && !CLAUDE_MODEL_ALIASES.includes(profile.model_alias)) {
+    issues.push(`model_alias must be one of ${CLAUDE_MODEL_ALIASES.join(', ')}`);
+  }
   if (profile.protocol === 'openai-compatible' && !profile.adapter) issues.push('adapter is required');
   if (profile.protocol === 'anthropic-compatible' && profile.adapter) issues.push('adapter must be omitted');
   if (profile.credential_required && !profile.credential_ref) issues.push('credential_ref is required');

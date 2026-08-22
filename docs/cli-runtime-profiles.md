@@ -12,9 +12,10 @@ the referenced secret is resolved only on the manager host.
 
 ## Anthropic-compatible endpoint
 
-No backend process is started by AWB. Claude receives `ANTHROPIC_BASE_URL`, the
-profile model through its existing `--model` argument, optional public env/args,
-and the referenced credential:
+No backend process is started by AWB. Claude receives `ANTHROPIC_BASE_URL`, a
+CLI-recognized model alias (see [Model alias](#model-alias) below) through its
+existing `--model` argument, optional public env/args, and the referenced
+credential:
 
 ```json
 [
@@ -84,6 +85,38 @@ Adapters also receive non-secret `AWB_BACKEND_BASE_URL` and
 `lifecycle: reuse` connects to an already-running adapter after a health check;
 `on_release` and `manager_exit` reuse the existing shared process supervisor
 and process-tree cleanup.
+
+## Model alias
+
+`model` is the raw provider model id the *backend* serves (a vLLM
+`--served-model-name`, an OpenAI-compatible model string, ...). Claude Code CLI
+itself only recognizes a fixed alias family for `--model`: `opus`, `sonnet`,
+`haiku`, `fable`. Passing `model` straight through to `--model` makes the CLI
+reject its own internal helper calls (session-title generation and similar)
+with `unrecognized_model`, failing the very first turn.
+
+To avoid this, a profile's `--model` argument is always one of the four
+aliases — `model_alias` if set, otherwise `sonnet`:
+
+```json
+{
+  "id": "vllm-qwen3-coder",
+  "kind": "claude-backend",
+  "protocol": "anthropic-compatible",
+  "base_url": "http://gpu-host:8000",
+  "model": "qwen3-coder-next",
+  "model_alias": "sonnet"
+}
+```
+
+The alias only has to be something the CLI accepts — it does not change which
+backend model actually serves the request. Every aux-model environment
+variable Claude Code consults (`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+`ANTHROPIC_DEFAULT_HAIKU_MODEL`) defaults to `model`, so regardless of which
+alias tier `--model` claims to be, every request — main turn or internal aux
+call — still routes to the one configured backend model. Set `env` to override
+any of those variables individually (e.g. a genuinely multi-model backend).
 
 ## Claude wrapper and public configuration
 

@@ -45,6 +45,7 @@ import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-de
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
+  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -611,9 +612,17 @@ export class SubagentManager implements SubagentManagerContract {
     // `{}` (full) unless this profile's context_window is small.
     const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // Backend profile model is inseparable from its endpoint and therefore
-    // wins over Anthropic-oriented per-agent/harness model defaults.
-    const effectiveModel =
-      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? ctx?.model ?? null;
+    // wins over Anthropic-oriented per-agent/harness model defaults. The
+    // profile's raw provider model id (e.g. a vLLM --served-model-name)
+    // must NEVER reach `--model` directly — Claude Code CLI rejects an
+    // unrecognized id with unrecognized_model on internal aux calls
+    // (generate_session_title etc.), failing the turn before it starts
+    // (ticket 41dc37cb). Pass a CLI-recognized alias instead; the actual
+    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
+    // overrides (runtime-profiles.ts), not by this flag.
+    const effectiveModel = claudeRuntimeProfile
+      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      : (slice?.model ?? harness?.model ?? ctx?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
