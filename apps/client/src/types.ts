@@ -2527,6 +2527,34 @@ export interface OrchestrationStepArtifact {
   label: string;
 }
 
+export interface OrchestrationCompletionCriterion {
+  key: string;
+  description: string;
+  met: boolean;
+  met_at: string | null;
+  note?: string;
+}
+
+export type OrchestrationPostActionCondition = 'always' | 'on_success' | 'on_failure';
+export type OrchestrationPostActionStatus = 'pending' | 'dispatched' | 'dispatch_failed' | 'skipped';
+
+export interface OrchestrationPostAction {
+  action_id: string;
+  order: number;
+  condition: OrchestrationPostActionCondition;
+  status: OrchestrationPostActionStatus;
+  run_id?: string | null;
+  room_id?: string | null;
+  error?: string;
+  dispatched_at?: string | null;
+}
+
+export interface OrchestrationRepoRef {
+  resource_id?: string;
+  url?: string;
+  branch?: string;
+}
+
 export interface OrchestrationCounts {
   total: number;
   done: number;
@@ -2573,6 +2601,8 @@ export interface OrchestrationStep {
   dispatched_at: string | null;
   started_at: string | null;
   finished_at: string | null;
+  /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
+  workspace_folder: string;
 }
 
 export interface OrchestrationTimelineEvent {
@@ -2592,6 +2622,13 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   objective: string;
   context: string;
   acceptance_criteria: string;
+  method: string;
+  completion_criteria: OrchestrationCompletionCriterion[];
+  post_actions: OrchestrationPostAction[];
+  resolved_workspace_folder: string;
+  workspace_folder: string;
+  repo_ref: OrchestrationRepoRef | null;
+  checkout_mode: 'reuse' | 'fresh';
   plan_summary: string;
   result_summary: string;
   failure_reason: string;

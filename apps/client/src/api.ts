@@ -92,6 +92,8 @@ import type {
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
+  OrchestrationPostActionCondition,
+  OrchestrationRepoRef,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2306,6 +2308,12 @@ export const api = {
     objective: string;
     context?: string;
     acceptance_criteria?: string;
+    method?: string;
+    completion_criteria?: Array<{ key: string; description: string }>;
+    post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+    workspace_folder?: string;
+    repo_ref?: OrchestrationRepoRef | null;
+    checkout_mode?: 'reuse' | 'fresh';
     max_parallel_steps?: number;
     max_steps?: number;
     step_timeout_minutes?: number;
@@ -2320,6 +2328,12 @@ export const api = {
       objective?: string;
       context?: string;
       acceptance_criteria?: string;
+      method?: string;
+      completion_criteria?: Array<{ key: string; description: string }>;
+      post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+      workspace_folder?: string;
+      repo_ref?: OrchestrationRepoRef | null;
+      checkout_mode?: 'reuse' | 'fresh';
       max_parallel_steps?: number;
       max_steps?: number;
       step_timeout_minutes?: number;
