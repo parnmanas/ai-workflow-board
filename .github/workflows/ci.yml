@@ -134,12 +134,28 @@ jobs:
         run: node scripts/audit-ci-branch-coverage.mjs
       - name: 정기 감사 커버리지 가드
         run: node scripts/audit-cron-coverage.mjs
+      # 발행 범위 상한 가드 (2026-08-22 감사). 오프라인·수 밀리초라 항상 돈다.
+      # 위 모든 검사는 lockfile 축인데, agent-manager 는 호스트에 `npm i -g` 로
+      # 깔리고 그 경로는 lockfile 을 읽지 않는다 — npm 이 `^` 범위를 그 시점
+      # 레지스트리에서 새로 해석한다. 범위를 넓히는 변경(`^1.7.0` → `*`)은 그
+      # 구멍의 폭을 직접 키우므로 cron 을 기다리지 않고 PR 에서 막는다.
+      - name: 발행 패키지 선언 범위 가드
+        run: node scripts/audit-published-deps.mjs --offline
       # schedule 전용 — cron 은 기본 브랜치(main)에서만 돌므로, 이 스텝이 없으면
       # 배포 브랜치는 "다음 push" 까지 새 advisory 를 한 번도 평가받지 못한다.
       # push/PR 에서는 그 브랜치 자신의 dependency-audit 이 이미 돌므로 불필요.
       - name: 배포 브랜치 lockfile 재감사 (schedule 전용)
         if: github.event_name == 'schedule'
         run: node scripts/audit-deploy-branch-deps.mjs
+      # schedule 전용 — 레지스트리를 실제로 때려 "지금 `npm i -g awb-agent-manager`
+      # 가 깔 트리"(live)와 "다음 publish 가 넘길 트리"(next)를 해석해 audit 한다.
+      # 매 PR 마다 외부 레지스트리에 의존하면 CI 가 비-hermetic 해지고 레지스트리
+      # blip 이 곧 red 다. 반면 이 축이 잡는 건 시간축 변화(우리 커밋과 무관하게
+      # 늘어나는 advisory + 우리 커밋과 무관하게 움직이는 `^` 해석 결과)이므로
+      # 하루 한 번이면 충분하다. 값싼 상한 검사는 위에서 항상 돈다.
+      - name: 발행 트리 재감사 (schedule 전용)
+        if: github.event_name == 'schedule'
+        run: node scripts/audit-published-deps.mjs
 
   # Fast static guard — runs everywhere, no DB. Catches the bare-join regression
   # class deterministically in seconds.
