@@ -2176,14 +2176,19 @@ export class EventDispatcher {
           // Plain note (no @mention) → never re-triggers an agent. Throttled by
           // the tracker to one post per storm-burst so a supervisor re-send
           // flood doesn't spam the ticket.
+          // ticket e341bcc2: metadata.dedupe_key 를 실으면, 새 hold-burst 의
+          // post 가 티켓의 마지막 코멘트와 같은 키일 때 서버가 그 자리에서
+          // repeat_count/last_repeated_at 만 bump 한다(새 row 아님). 상세 원인
+          // (ticket id, reason)은 위 매니저 로그 줄에만 남기고 코멘트 본문에는
+          // 넣지 않는다.
           fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
             content:
-              '⚠️ **중복 dispatch 억제 (동일 ticket-role live twin 방지)** — 이미 이 ' +
-              '(ticket, role) 에 대한 dispatch 가 프로비저닝/spawn 진행 중이라, ' +
-              'supervisor 재시도로 도착한 새 트리거를 spawn 전에 억제했습니다. ' +
-              '진행 중인 dispatch 가 세션을 새로 만들거나 재사용하며, 억제된 ' +
-              'force-respawn 요청은 완료 직후 1회 재실행됩니다. (ticket 3d180f85)',
+              '⚠️ 중복 dispatch 억제 — 같은 (ticket, role) dispatch 가 이미 진행 중이라 ' +
+              '새 트리거를 무시했습니다. force-respawn 이었다면 완료 직후 1회 재실행됩니다.',
+            metadata: {
+              dedupe_key: `dispatch_suppress:inflight:${ev.ticket_id.slice(0, 8)}:${ev.action || '_'}:${dispatchAgentId.slice(0, 8) || '_'}`,
+            },
           });
         }
         return;
@@ -2201,13 +2206,15 @@ export class EventDispatcher {
             `agent=${dispatchAgentId.slice(0, 8) || '_'}`,
         );
         if (reservation.evicted === 'safety_valve') {
+          // ticket e341bcc2: 문구만 한 줄로 축약하고 합치기(dedupe_key) 대상에서는
+          // 제외했다 — 드물게 발생하고, 발생할 때마다 운영자가 프로비저닝 hang /
+          // codex exit-1 같은 서로 다른 근본원인을 매번 확인해야 하는 경보라
+          // repeat_count 로 뭉개면 오히려 빈도·타이밍 정보가 죽는다.
           fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
             content:
-              '⚠️ **디스패치 dedupe 강제 해제 (safety valve)** — 이 (ticket, role) 의 ' +
-              'in-flight 예약이 연속 재시도를 억제해, 실제 진행이 없는 좀비 예약으로 ' +
-              '판단하고 강제 해제 후 재-dispatch 했습니다. 반복되면 매니저 로그에서 ' +
-              '프로비저닝 hang / codex exit-1 근본원인을 확인하세요. (ticket 7c3ba9cf)',
+              '⚠️ 디스패치 dedupe 강제 해제 (safety valve) — 좀비 예약을 회수하고 재-dispatch 했습니다. ' +
+              '반복되면 매니저 로그에서 프로비저닝 hang / codex exit-1 원인을 확인하세요.',
           });
         }
       }
@@ -3563,11 +3570,11 @@ export class EventDispatcher {
         fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ticketId,
           content:
-            '⚠️ **중복 dispatch 억제 (role-mention vs 컬럼 트리거)** — 이 코멘트의 ' +
-            `@[role:${mention.role_shortcut}] 멘션과 동시에 발화된 컬럼 이동 트리거가 이미 같은 ` +
-            '(ticket, role) seat 를 프로비저닝/실행 중이라, 중복 세션을 만들지 않고 멘션 dispatch 를 ' +
-            '억제했습니다. 이 코멘트 내용은 진행 중인 세션이 티켓 상태를 다시 조회할 때 함께 반영됩니다. ' +
-            '(ticket e90294e7)',
+            '⚠️ 중복 dispatch 억제 — 컬럼 트리거가 같은 (ticket, role) 를 이미 실행 중이라 ' +
+            '멘션 dispatch 를 무시했습니다. 이 코멘트는 진행 중인 세션이 함께 읽습니다.',
+          metadata: {
+            dedupe_key: `dispatch_suppress:mention_seat:${ticketId.slice(0, 8) || '_'}:${mention.role_shortcut}:${targetAgentId.slice(0, 8) || '_'}`,
+          },
         });
       };
       // ticket 13160d20: handleTrigger 자신의 authoritative-vs-fallback 선택
