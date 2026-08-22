@@ -2,24 +2,48 @@
 //
 // 배경: 7d8ea7c9 사고에서 vLLM 백엔드(context_window 65,536)로 첫 채팅
 // 메시지를 보낼 때 system prompt + AWB/agent/board/workspace instructions +
-// MCP tool schema + session metadata만으로 33,537 input tokens가 됐고,
-// CLI 고정 max_output_tokens(32,000)를 더해 정확히 1 token 초과, HTTP 500이
-// 났다. 이 티켓에서 AWB MCP 서버가 실제로 `tools/list`에 태우는 바이트를
-// 실측한 결과(2026-08-22 기준, 실제 InMemoryTransport 왕복):
-//   - 205개 tool, tools[] 배열 JSON 253,638 bytes
-//   - 실제 BPE 토크나이저(o200k_base) 기준 약 57,000~67,500 tokens
-//     (전체를 한 번에 토크나이즈 vs tool별 합산의 차이) — 65,536 컨텍스트의
-//     로컬 백엔드에서는 이것만으로 예산 전체를 거의 다 태운다.
-//   - 2026-04-28 커밋 bf8de6c2의 캐시 도입 당시 주석은 "79-tool registry ...
-//     ~59KB"라고 기록했다 — 약 4개월 만에 tool 수 2.6배, 바이트 4.3배 증가.
+// MCP tool schema + session metadata를 합쳐 실측 33,537 input tokens가
+// 됐고, CLI 고정 max_output_tokens(32,000)를 더해 정확히 1 token 초과,
+// HTTP 500이 났다(백엔드 tokenizer가 그 요청에 실제로 청구한 값).
 //
-// 이 테스트는 그 실측을 "한 번 보고 끝"이 아니라 CI에서 상시 추적되는
-// 회귀 가드로 만든다. 목적은 성장 자체를 막는 게 아니라(정상적인 기능
-// 추가로 계속 늘어날 것) 조용한 폭주(스캔 로직 깨짐, 실수로 중복 삽입된
-// blob, 통제 안 된 재귀적 스키마 등)를 CI에서 잡는 것 — 문턱을 올려야
-// 한다면 그 자체가 "이 정도 성장은 의식적으로 받아들인다"는 코드 리뷰
-// 대상이 되도록 한다(TOOL_AUTHZ_TABLE/KNOWN_EXISTING_TOOLS 등 이 저장소의
-// 기존 완전성 가드들과 동일한 철학).
+// 이 티켓에서 실측한 건 그 33,537과는 다른 지점의 숫자다 — AWB MCP
+// 서버가 CLI에 내려주는 raw `tools/list` 응답 자체의 크기(2026-08-22,
+// 진짜 McpServer + InMemoryTransport로 실제 JSON-RPC 왕복을 재현):
+//   - 205개 tool, tools[] 배열 JSON 253,638 bytes
+//   - 실제 BPE 토크나이저(tiktoken o200k_base/cl100k_base) 기준 약
+//     57,000~67,500 tokens (전체를 한 번에 토크나이즈 vs tool별 합산의
+//     차이) — codebase 자체의 char/4 휴리스틱은 63,117로 그 사이.
+//   - 2026-04-28 커밋 bf8de6c2의 캐시 도입 당시 주석은 "79-tool registry
+//     ... ~59KB"라고 기록했다 — 약 4개월 만에 tool 수 2.6배, 바이트
+//     4.3배 증가.
+//
+// 이 두 숫자(raw tools/list 57,000~67,500 vs 사고의 총 input 33,537)를
+// 같은 것으로 취급하지 말 것 — raw MCP JSON, CLI가 실제로 모델
+// 백엔드에 보내는 tool payload(변환/압축/지연로딩 여부는 CLI 내부
+// 동작이라 이 저장소 조사만으로는 확정할 수 없음), 백엔드 tokenizer가
+// 청구한 input은 서로 다른 지점의 서로 다른 측정이다. raw 크기가 사고의
+// 총 input보다 큰 것 자체가 흥미로운 미해결 질문이지, "이게 사고 원인의
+// N%를 차지했다"고 결론 내릴 근거는 아니다(과거 버전의 이 주석/관련
+// 티켓 코멘트가 이렇게 과대 서술했었다 — 리뷰 지적으로 수정).
+//
+// 확실한 사실만 남기면: (1) AWB가 내보내는 raw schema 자체가 크고 계속
+// 빠르게 커지고 있고, (2) 65,536처럼 작은 컨텍스트에서는 이 raw 크기
+// 하나만으로도 여유가 거의 없다 — 1M 컨텍스트인 Anthropic 클라우드
+// tier(Opus/Sonnet 5)에서는 5.7~6.75%, 가장 작은 상용 tier인 200K
+// (Haiku 4.5)에서도 28.5~33.75%에 불과하다. CLI가 이 raw schema를
+// 실제로 얼마나 그대로/변형해서 백엔드에 보내는지는 별도 질문이며,
+// 실제 축소/lazy-load 방향 결정은 후속 티켓(ee26302d)에서 다룬다.
+//
+// 이 테스트는 raw schema 크기 실측을 "한 번 보고 끝"이 아니라 CI에서
+// 상시 추적되는 회귀 가드로 만든다. 목적은 성장 자체를 막는 게
+// 아니라(정상적인 기능 추가로 계속 늘어날 것) 조용한 폭주(스캔 로직
+// 깨짐, 실수로 중복 삽입된 blob, 통제 안 된 재귀적 스키마 등)를 CI에서
+// 잡는 것이다 — 이 가드를 통과한다고 "소형 컨텍스트에 안전하다"는
+// 뜻은 전혀 아니다(현재 크기조차 이미 그 예산 대부분을 차지한다).
+// 문턱을 올려야 한다면 그 자체가 "이 정도 성장은 의식적으로
+// 받아들인다"는 코드 리뷰 대상이 되도록 한다(TOOL_AUTHZ_TABLE/
+// KNOWN_EXISTING_TOOLS 등 이 저장소의 기존 완전성 가드들과 동일한
+// 철학).
 //
 // 실측 방법: 진짜 McpServer + registerAllTools(전체 40개 *-tools.ts 도메인,
 // tools/index.ts의 파일명 컨벤션 자동 발견 그대로) + SDK 제공
@@ -93,19 +117,24 @@ describe('MCP tool schema wire-size budget (ticket faa32380)', () => {
     );
 
     const totalBytes = Buffer.byteLength(JSON.stringify(tools), 'utf8');
-    // Ceiling: current measured baseline is 253,638 bytes (205 tools,
-    // 2026-08-22). ~1.6x headroom over that for ordinary feature growth —
-    // if organic tool additions genuinely need more, raise this number in
-    // the SAME PR as the addition (a conscious, reviewed decision), not
-    // silently. This exists to catch runaway/accidental bloat (duplicated
-    // blob, unbounded recursive schema, scan regex drift), not to gate
-    // normal growth.
-    const TOTAL_BYTES_CEILING = 400_000;
+    // Growth-sentinel ceiling, NOT a small-context safety budget — the
+    // baseline itself already consumes most of a 65,536-token local
+    // backend's window (see the file header), so staying under this
+    // ceiling says nothing about small-context safety. It exists only to
+    // separate ordinary feature-driven growth from a runaway (duplicated
+    // blob, unbounded recursive schema, scan regex drift): +25% headroom
+    // over the last-measured baseline, tight enough to actually catch a
+    // careless blow-up. If organic tool additions genuinely need more,
+    // raise CURRENT_BASELINE_BYTES in the SAME PR as the addition (a
+    // conscious, reviewed decision), not silently.
+    const CURRENT_BASELINE_BYTES = 253_638; // 205 tools, 2026-08-22 실측
+    const TOTAL_BYTES_CEILING = Math.ceil(CURRENT_BASELINE_BYTES * 1.25);
     assert.ok(
       totalBytes <= TOTAL_BYTES_CEILING,
-      `tools/list wire size grew to ${totalBytes} bytes (ceiling ${TOTAL_BYTES_CEILING}) across ` +
-      `${tools.length} tools — see ticket faa32380 for why this budget matters on small-context local ` +
-      'backends (e.g. 65,536-token vLLM). If this is deliberate growth, raise TOTAL_BYTES_CEILING here.',
+      `tools/list wire size grew to ${totalBytes} bytes (growth-sentinel ceiling ${TOTAL_BYTES_CEILING}, ` +
+      `+25% over the ${CURRENT_BASELINE_BYTES}-byte baseline) across ${tools.length} tools. This is a ` +
+      'runaway-bloat tripwire, not a small-context safety budget — the actual reduction/lazy-load design ' +
+      'decision is ticket ee26302d. If this growth is deliberate, raise CURRENT_BASELINE_BYTES here.',
     );
 
     // Named per-tool outlier: update_board was ~13.4-14.0KB at audit time
