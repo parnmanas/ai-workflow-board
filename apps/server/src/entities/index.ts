@@ -120,6 +120,11 @@ export type {
   OntologyEdgeRank,
   OntologyCompleteness,
 } from './OntologyEdge';
+// 역방향 참조 색인(ticket e52e7f64, DESIGN.md 축 1/4) — OntologyNode/Edge와
+// 같은 자세: sql.js에서는 db.ts의 ONTOLOGY_ENTITIES를 통해 독립
+// DataSource로, Postgres에서는 이 파일의 다른 테이블과 함께 기존 단일
+// DataSource로.
+export { OntologyReverseEdgeIndex } from './OntologyReverseEdgeIndex';
 // CLI 자동 로그인(device-auth) 세션 (ticket b2e79108). Auto-DDL'd by TypeORM
 // `synchronize` (D-01) exactly like the sibling tables above; no hand-written
 // migration needed.
