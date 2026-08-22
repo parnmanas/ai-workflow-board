@@ -637,7 +637,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
-  // orchestration (12) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
+  // orchestration (13) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
   // 전부 EXCLUDE 인 이유: 이 툴들은 티켓 row 를 하나도 건드리지 않고 Mission/Step
   // 상태만 바꾼다. 그리고 그 상태는 이미 전용 관찰면 — AWB 의 Mission 상세 화면
   // (Plan 그래프 + append-only 타임라인, `orchestration_update` SSE 로 라이브) —
@@ -658,6 +658,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   report_orchestration_progress: 'orchestration',
   report_orchestration_step: 'orchestration',
   submit_orchestration_plan: 'orchestration',
+  update_orchestration_criteria: 'orchestration',
   update_orchestration_step: 'orchestration',
   // non-ticket (82) — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).

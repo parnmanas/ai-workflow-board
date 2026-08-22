@@ -153,9 +153,9 @@ export type WorktreeStatusProvider = () => Promise<WorktreeStatusEntry[]>;
 export interface RunWorkspaceStatusEntry {
   /** 이 작업폴더의 `.awb/act|chat/` 루트가 속한 managed-agent 기준 working_dir. */
   working_dir: string;
-  /** 절대경로 (`<working_dir>/.awb/act/<leaf>` 또는 `.../.awb/chat/<leaf>`). */
+  /** 절대경로 (`<working_dir>/.awb/act/<leaf>`, `.../.awb/chat/<leaf>`, 또는 `.../.awb/orch/<leaf>`). */
   path: string;
-  kind: 'action' | 'chat';
+  kind: 'action' | 'chat' | 'orchestration';
   /** 경로 마지막 세그먼트 — action/room id 의 앞 8자리, 또는 커스텀 `workspace_folder` leaf. */
   leaf: string;
   /** 마지막으로 성공한 provision 의 ISO 타임스탬프. liveness 마커보다 먼저 있던 폴더라면 null. */

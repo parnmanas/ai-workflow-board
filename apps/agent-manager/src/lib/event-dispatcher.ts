@@ -4087,8 +4087,13 @@ export class EventDispatcher {
         // ticket 9fd27487: 'chat'에는 complete_*_run 툴 자체가 없다(일반 채팅방은
         // one-shot run이 아니다 — RunProvisionKind 참고); qa/security/action은
         // 공통 kind→tool 계약을 그대로 타고 간다(chat-session-manager.ts /
-        // subagent-manager.ts의 orphan-sweep에서도 동일하게 사용).
-        if (runProvision.kind !== 'chat') {
+        // subagent-manager.ts의 orphan-sweep에서도 동일하게 사용). ticket
+        // 2dc3c62f: 'orchestration'도 여기서 제외한다 — report_orchestration_step
+        // 은 run_id/workspace_id가 아니라 step_id로 완료 처리하는 다른 모양의
+        // 계약이라 resolveRunCompletionRoute에 억지로 맞추지 않는다; 대신 미션의
+        // 기존 step_timeout_minutes reaper가 응답 없는 step을 회수한다
+        // (run-provisioner.ts의 RunProvisionKind 문서 참고).
+        if (runProvision.kind !== 'chat' && runProvision.kind !== 'orchestration') {
           const route = resolveRunCompletionRoute(runProvision.kind);
           await fireAndForgetTool(this.#config, route.completeTool, {
             run_id: runProvision.run_id,
@@ -4260,7 +4265,12 @@ export class EventDispatcher {
           // complete_*_run 생명주기가 없는 계속 진행 중인 대화이므로(RunSessionBinding
           // 참고), 여기서 바인딩해 버리면 sweep이 에이전트의 정당한 장기 백그라운드
           // 작업까지 걷어가 버린다.
-          run: runProvision && runProvision.kind !== 'chat'
+          // ticket 2dc3c62f: kind:'orchestration' 도 제외 — RunSessionBinding.kind
+          // 타입 자체가 'qa'|'security'|'action'만 받고(base-session-manager.ts),
+          // report_orchestration_step은 step_id 기반이라 이 run_id/workspace_id
+          // 바인딩 계약과 모양이 다르다(run-provisioner.ts의 RunProvisionKind
+          // 문서 참고).
+          run: runProvision && runProvision.kind !== 'chat' && runProvision.kind !== 'orchestration'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
@@ -4359,7 +4369,12 @@ export class EventDispatcher {
           // no re-invocation) — the twin of the persistent path's `run` above.
           // ticket 9fd27487: kind:'chat' 제외 — persistent 경로 위쪽의 동일한
           // 가드 참고(RunSessionBinding에는 'chat' 멤버가 없다).
-          run: runProvision && runProvision.kind !== 'chat'
+          // ticket 2dc3c62f: kind:'orchestration' 도 제외 — RunSessionBinding.kind
+          // 타입 자체가 'qa'|'security'|'action'만 받고(base-session-manager.ts),
+          // report_orchestration_step은 step_id 기반이라 이 run_id/workspace_id
+          // 바인딩 계약과 모양이 다르다(run-provisioner.ts의 RunProvisionKind
+          // 문서 참고).
+          run: runProvision && runProvision.kind !== 'chat' && runProvision.kind !== 'orchestration'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
