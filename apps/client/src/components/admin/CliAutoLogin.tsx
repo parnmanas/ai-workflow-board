@@ -136,6 +136,10 @@ export default function CliAutoLogin({
         status: data.status,
         verification_url: data.verification_url ?? prev.verification_url,
         user_code: data.user_code ?? prev.user_code,
+        // Server sends this verbatim (including explicit null once a real
+        // url/code supersedes it) — no `??` fallback, the server is
+        // authoritative on whether the raw fallback should still show.
+        raw_output_fallback: data.raw_output_fallback,
         error_detail: data.error_detail || prev.error_detail,
         created_credential_id: data.created_credential_id ?? prev.created_credential_id,
       };
@@ -263,6 +267,36 @@ export default function CliAutoLogin({
                     {session.user_code}
                   </div>
                 )}
+              </div>
+            )}
+            {session.status === 'awaiting_user' && !session.verification_url && session.raw_output_fallback && (
+              <div
+                style={{
+                  padding: 14,
+                  borderRadius: tokens.radii.md,
+                  border: `1px solid ${tokens.colors.border}`,
+                  background: tokens.colors.surfaceSubtle,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
+                  Couldn't recognize the login prompt automatically — here's what Codex printed. Look for a
+                  URL and a one-time code below.
+                </div>
+                <pre
+                  style={{
+                    margin: 0,
+                    fontSize: tokens.typography.fontSizeXs,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    maxHeight: 200,
+                    overflowY: 'auto',
+                  }}
+                >
+                  {session.raw_output_fallback}
+                </pre>
               </div>
             )}
             {(session.status === 'starting' || session.status === 'awaiting_user' || session.status === 'completing') && (

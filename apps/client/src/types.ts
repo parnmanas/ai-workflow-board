@@ -977,6 +977,7 @@ export interface CliLoginSession {
   status: CliLoginSessionStatus;
   verification_url: string | null;
   user_code: string | null;
+  raw_output_fallback: string | null;
   error_detail: string;
   created_credential_id: string | null;
   created_at: string;
