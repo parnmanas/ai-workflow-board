@@ -9,8 +9,10 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
+import { Action } from '../../entities/Action';
 import { Workspace } from '../../entities/Workspace';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { ActionsModule } from '../actions/actions.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -40,9 +42,11 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       ChatRoomParticipant,
       ChatRoomMessage,
       Agent,
+      Action,
       Workspace,
     ]),
     ChatRoomsModule,
+    ActionsModule,
     SharedServicesModule,
   ],
   controllers: [OrchestrationController],

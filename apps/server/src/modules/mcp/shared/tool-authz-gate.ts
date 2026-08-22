@@ -139,6 +139,11 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   list_orchestration_teams: 'caller',
   list_orchestration_missions: 'caller',
   create_orchestration_mission: 'caller',
+  // 티켓 2dc3c62f: 신규 도구라 KNOWN_EXISTING_TOOLS에 없다. 'caller'는
+  // update_orchestration_step/complete_orchestration_mission과 같은 태도다 —
+  // 진짜 인가는 게이트가 아니라 runner service 안 updateCriteria()의
+  // requireOrchestrator() 검사다.
+  update_orchestration_criteria: 'caller',
 
   // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
   // what the handler already enforces on its own: it resolves the caller's
