@@ -49,6 +49,29 @@ function isUniqueConstraintError(error: unknown): boolean {
     || /unique constraint/i.test(value?.message || '');
 }
 
+// ticket e341bcc2: silent-exit 엔드포인트의 fingerprint 기반 합치기
+// (agent-api.controller.ts computeSystemFingerprint) 를 `metadata.dedupe_key`
+// 로 옵트인하는 모든 add_comment 호출자에게 일반화한다. 메모리 상의
+// metadata 객체(호출자의 요청)와 Comment row 가 저장하는 raw JSON 문자열
+// 양쪽 모두 같은 헬퍼로 읽을 수 있다.
+function extractDedupeKey(metadata: unknown): string | null {
+  let meta: Record<string, unknown>;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    meta = metadata as Record<string, unknown>;
+  } else if (typeof metadata === 'string') {
+    try {
+      const parsed = JSON.parse(metadata);
+      meta = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      meta = {};
+    }
+  } else {
+    meta = {};
+  }
+  const key = meta.dedupe_key;
+  return typeof key === 'string' && key ? key : null;
+}
+
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
   const {
     dataSource, activityService, mentionService, logger, ticketRoleAssignmentService,
@@ -96,7 +119,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       parent_id: z.string().optional()
         .describe("Parent comment id for threading. Must belong to the same ticket. Required for type='answer'."),
       metadata: z.record(z.string(), z.unknown()).optional()
-        .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row.'),
+        .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row. ' +
+          'Set `dedupe_key` (any stable string you control) to collapse repeats: if the ticket\'s LAST comment already carries ' +
+          'the same dedupe_key, this call bumps its repeat_count/last_repeated_at in place instead of adding a new row — use this ' +
+          'for noisy auto-generated notices that may fire many times in a row (an unrelated reply in between always starts a fresh row).'),
       author_role: z.string().optional()
         .describe("Role the comment is authored as (e.g. 'assignee', 'reviewer'). Auto-filled from the subagent session pin or from TicketRoleAssignment when omitted. Stored on metadata.author_role so the UI can render which role spoke."),
       attachment_resource_ids: z.array(z.string()).optional()
@@ -355,11 +381,36 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         }
       }
 
+      // 합치기(dedupe merge, ticket e341bcc2): `metadata.dedupe_key` 를 찍은
+      // 호출자는 silent-exit 엔드포인트가 (reason, exit_code, author_role)
+      // fingerprint 에 쓰는 것과 같은 in-place bump 에 옵트인한다 — 예를 들어
+      // agent-manager 의 dispatch 억제 코멘트는 이게 없으면 억제될 때마다
+      // 새 row 를 쌓는다. 합치기는 티켓의 마지막 코멘트에만 적용된다
+      // (silent-exit 과 동일한 계약) — 중간에 무관한 답글이 끼면 항상 새
+      // occurrence row 로 시작해 타임라인 가독성을 유지한다.
+      const dedupeKey = extractDedupeKey(finalMetadata);
       let comment: Comment;
+      let deduped = false;
       try {
         comment = await dataSource.transaction(async (manager) => {
           await lockTicketCommentWrites(manager, ticket_id);
           const lockedRepo = manager.getRepository(Comment);
+
+          if (dedupeKey) {
+            const lastComment = await lockedRepo.findOne({ where: { ticket_id }, order: { created_at: 'DESC' } });
+            if (lastComment && extractDedupeKey(lastComment.metadata) === dedupeKey) {
+              const nextCount = (lastComment.repeat_count ?? 1) + 1;
+              await lockedRepo.update(lastComment.id, {
+                content,
+                metadata: JSON.stringify(finalMetadata),
+                repeat_count: nextCount,
+                last_repeated_at: new Date(),
+              });
+              deduped = true;
+              return (await lockedRepo.findOne({ where: { id: lastComment.id } }))!;
+            }
+          }
+
           const saved = await lockedRepo.save(lockedRepo.create({
             ticket_id,
             author_type: resolvedAuthorType,
@@ -387,6 +438,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           return ok({ suppressed: true, reason: 'duplicate_terminal_acknowledgement' });
         }
         throw error;
+      }
+
+      if (deduped) {
+        // action:'updated' + actor_id:'system' — resolvedAuthorId/'created' 가
+        // 아니다. silent-exit 선례의 131,068-사이클 런어웨이 인시던트
+        // (2026-05-28) 가 못박은 바로 그 규칙이다: trigger-loop 의
+        // system-actor 가드는 이 조합에서만 재디스패치를 건너뛰므로, bump 된
+        // 합치기 row 는 원인 agent 를 절대 스스로 재트리거할 수 없다.
+        await activityService.logActivity({
+          entity_type: 'comment', entity_id: comment.id, action: 'updated',
+          ticket_id, actor_id: 'system', actor_name: authorName,
+          new_value: String(comment.repeat_count ?? 1),
+          field_changed: 'repeat_count',
+        });
+        return ok(comment);
       }
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
