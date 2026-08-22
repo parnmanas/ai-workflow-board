@@ -34,6 +34,11 @@ export interface DecoratorFact {
    *  엣지를 만든다. cron/event_pattern은 항상 빈 배열(인자가 문자열
    *  리터럴이라 식별자 타깃이 없음). */
   argIdentifiers: string[];
+  /** 데코레이터의 첫 번째 인자 원문(따옴표 벗김) — cron/event_pattern처럼
+   *  식별자가 아니라 문자열 리터럴(cron 표현식, 이벤트 패턴명)을 쓰는
+   *  family의 Endpoint 노드 이름/symbol_id 구성에 쓴다(persist.ts). 인자가
+   *  없으면 null. */
+  primaryArgText: string | null;
 }
 
 const FAMILY_PATTERNS: Array<{ family: DecoratorFamily; pattern: string }> = [
@@ -52,10 +57,14 @@ const DECL_KIND_MAP: Record<string, DecoratedTargetKind> = {
 };
 const DECL_KINDS = new Set(Object.keys(DECL_KIND_MAP));
 
+// NestJS 데코레이터는 TypeScript 전용 관례 — types.ts가 36개 언어로
+// 넓어진 뒤에도(리뷰 지적 라운드 1) 이 룰셋은 명시적 허용목록만 통과시킨다.
+// 이전엔 `!== 'javascript'`만 걸러 새로 추가된 34개 언어(python/rust/go...)가
+// 전부 astGrepLang의 fallback으로 조용히 TypeScript 취급됐을 것이다.
+const DECORATOR_SUPPORTED_LANGS: ReadonlySet<ExtractionLang> = new Set(['typescript', 'tsx']);
+
 function astGrepLang(lang: ExtractionLang): Lang {
-  if (lang === 'tsx') return Lang.Tsx;
-  if (lang === 'javascript') return Lang.JavaScript;
-  return Lang.TypeScript;
+  return lang === 'tsx' ? Lang.Tsx : Lang.TypeScript;
 }
 
 /** 데코레이터 노드로부터 그것이 실제로 데코레이트하는 선언 노드를 찾는다.
@@ -87,7 +96,7 @@ function findDecoratedTarget(decoratorNode: SgNode): SgNode | null {
  *  문법). 다른 파일 상태를 읽지 않는다 — Tier 1의 단일 파일 불변식은
  *  그대로 유지. */
 export function extractDecoratorFacts(path: string, content: string, lang: ExtractionLang): DecoratorFact[] {
-  if (lang === 'javascript') return []; // NestJS 데코레이터는 TS 전용 관례
+  if (!DECORATOR_SUPPORTED_LANGS.has(lang)) return [];
   let root;
   try {
     root = parse(astGrepLang(lang), content).root();
@@ -111,13 +120,16 @@ export function extractDecoratorFacts(path: string, content: string, lang: Extra
       const targetName = nameField ? nameField.text() : '';
       if (!targetName) continue;
       const range = target.range();
+      const allArgs = m.getMultipleMatches('ARGS');
       const argIdentifiers =
         family === 'cron' || family === 'event_pattern'
           ? []
-          : m.getMultipleMatches('ARGS').filter((a) => a.kind() === 'identifier').map((a) => a.text());
+          : allArgs.filter((a) => a.kind() === 'identifier').map((a) => a.text());
+      const primaryArgText = allArgs.length > 0 ? allArgs[0].text().replace(/^['"`]|['"`]$/g, '') : null;
       facts.push({
         family,
         targetKind,
+        primaryArgText,
         targetName,
         targetStartLine: range.start.line + 1,
         targetEndLine: range.end.line + 1,

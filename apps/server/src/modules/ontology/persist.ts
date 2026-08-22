@@ -1,9 +1,10 @@
 // FactBundle[] + DecoratorFact[] -> OntologyNode/OntologyEdge 행 (ticket
-// e14ef1c9, DESIGN.md 축 1/2). Tier 1 산출물만 영속화한다 — CONTAINS(파일→
+// e14ef1c9, DESIGN.md 축 1/2). 그래프 엣지는 Tier 1 산출물만 — CONTAINS(파일→
 // 최상위 def)/DECLARES(부모 def→자식 def)/DECORATES(ast-grep 룰셋)뿐,
-// refs[]/imports[]/exports[]/heritage[]는 아직 미해소라 엣지가 아니라
-// 원시 사실 그대로 남는다(크로스파일 해소는 3/7 리졸버 몫 — 이 함수는 그
-// 사실들을 그래프에 쓰지 않는다).
+// refs[]/imports[]/exports[]/heritage[]는 아직 미해소라 엣지로 만들지
+// 않는다(크로스파일 해소는 3/7 리졸버 몫). 다만 그 원시 fact 자체는
+// File 노드의 props JSON에 그대로 실어 durable하게 남긴다(리뷰 지적
+// 라운드 1 — 3/7이 재파싱 없이 읽어갈 수 있어야 한다).
 //
 // 1/7 리뷰에서 이관된 완료조건(ontology-sqljs-independent-datasource.test.mjs
 // 코멘트, ticket e14ef1c9 코멘트 스레드): 대량 insert는 청크 사이 명시적
@@ -204,7 +205,19 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
       content_hash: bundle.fileHash,
       lang: bundle.lang,
       profile_version: bundle.extractorVersion,
-      props: JSON.stringify({ has_parse_error: bundle.hasParseError }),
+      // 리뷰 지적(라운드 1) — refs[]/imports[]/exports[]/heritage[]는 아직
+      // 엣지가 아니지만(크로스파일 해소는 3/7 리졸버 몫), 원시 fact 자체는
+      // 3/7이 소비할 수 있게 durable하게 남아야 한다. 새 테이블/컬럼 없이
+      // File 노드 자신의 props(OntologyNode.ts 자신의 문서: "타입별 속성을
+      // 담는 자유형식 JSON 자루")에 실어 보낸다 — graph_id 스코프로 이미
+      // 쿼리 가능하므로 별도 반환 경로가 필요 없다.
+      props: JSON.stringify({
+        has_parse_error: bundle.hasParseError,
+        refs: bundle.refs,
+        imports: bundle.imports,
+        exports: bundle.exports,
+        heritage: bundle.heritage,
+      }),
     } as OntologyNode);
 
     const nodeIdByQualifiedName = new Map<string, string>();
@@ -255,17 +268,62 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
     fileIndexes.push({ bundle, fileNodeId, nodeIdByQualifiedName });
   }
 
-  // ── Phase 2: DECORATES — 대상 def(같은 파일) x 가드/인터셉터/파이프
-  // 클래스(전체 그래프, 이름 기준 유일 매칭)만. @Cron()/@EventPattern()은
-  // 식별자 인자가 없어(문자열 리터럴) 항상 unresolved로 집계된다 — 파일
-  // 헤더 코멘트 참고, 이는 스코프 상 의도된 동작이다.
+  // ── Phase 2: DECORATES ──
+  // guard/interceptor/pipe: 대상 def(같은 파일) x 가드/인터셉터/파이프
+  // 클래스(전체 그래프, 이름 기준 유일 매칭).
+  // cron/event_pattern(리뷰 지적 라운드 1로 추가) — 인자가 식별자가 아니라
+  // 문자열 리터럴(cron 표현식/이벤트 패턴명)이라 기존 "이름으로 클래스
+  // 찾기" 경로가 애초에 적용되지 않는다. 대신 axis 2의 기존 구조적
+  // 어휘(Endpoint — 새 타입을 발명하지 않음)로 이 데코레이터 occurrence
+  // 전용 노드를 만든다: 파일+대상+family+라인으로 스코프되므로 크로스파일
+  // 해석이 필요 없고 Tier 1 자체로 완결된다. 이렇게 해야 "룰셋이 감지는
+  // 하지만 그래프엔 안 남아 쿼리 불가"였던 이전 상태를 벗어난다.
   let decoratesEdges = 0;
   let decoratesUnresolved = 0;
   for (const index of fileIndexes) {
     const facts = input.decoratorFactsByPath.get(index.bundle.path) ?? [];
     for (const fact of facts) {
       const targetNodeId = findDecoratedTargetNodeId(index, fact);
-      if (!targetNodeId || fact.argIdentifiers.length === 0) {
+      if (!targetNodeId) {
+        decoratesUnresolved += 1;
+        continue;
+      }
+
+      if (fact.family === 'cron' || fact.family === 'event_pattern') {
+        const endpointId = randomUUID();
+        const endpointName = fact.primaryArgText ?? `${fact.family}:${fact.targetName}`;
+        nodeRows.push({
+          id: endpointId,
+          ...baseNodeFields(input.commit),
+          symbol_id: `endpoint:${index.bundle.path}#${fact.targetName}#${fact.family}#${fact.targetStartLine}`,
+          type: 'Endpoint',
+          kind: fact.family,
+          layer: 'structural',
+          name: endpointName,
+          qualified_name: endpointName,
+          path: index.bundle.path,
+          start_line: fact.targetStartLine,
+          end_line: fact.targetEndLine,
+          content_hash: '',
+          lang: index.bundle.lang,
+          profile_version: index.bundle.extractorVersion,
+          props: '{}',
+        } as OntologyNode);
+        edgeRows.push({
+          id: randomUUID(),
+          ...baseEdgeFields(input.commit),
+          src_id: targetNodeId,
+          dst_id: endpointId,
+          type: 'DECORATES',
+          confidence: 0.6,
+          resolution: 'dynamic',
+          props: JSON.stringify({ family: fact.family }),
+        } as OntologyEdge);
+        decoratesEdges += 1;
+        continue;
+      }
+
+      if (fact.argIdentifiers.length === 0) {
         decoratesUnresolved += 1;
         continue;
       }
