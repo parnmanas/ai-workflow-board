@@ -721,12 +721,19 @@ export class SubagentManager implements SubagentManagerContract {
           // structurally: each profile gets its own path via
           // mcpConfigPathFor(..., profile), so concurrent spawns of
           // DIFFERENT profiles for the same agent can never race on one file.
+          //
+          // Ticket ee26302d review round 3 (P1): pass ctx.workspace_id through
+          // here too — omitting it (as round 2 did) collapses workspace A and
+          // workspace B onto the SAME unscoped path whenever they share an
+          // agent id, so whichever workspace spawns first "wins" the file and
+          // the other silently reuses it (wrong Authorization, or a stale
+          // auth failure) instead of getting its own workspace-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
-          const profileConfigPath = mcpConfigPathFor(ctx.agent_id, undefined, profile);
+          const profileConfigPath = mcpConfigPathFor(ctx.agent_id, ctx.workspace_id, profile);
           configPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
-                ctx.agent_id, this.#config.url, effectiveApiKey, undefined, toolProfileHeader,
+                ctx.agent_id, this.#config.url, effectiveApiKey, ctx.workspace_id, toolProfileHeader,
               );
           configPathIsTemp = false;
         } else {

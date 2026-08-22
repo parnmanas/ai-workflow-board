@@ -130,6 +130,13 @@ export interface SpawnOpts {
    */
   agentContext?: {
     agent_id: string;
+    /** Ticket ee26302d review round 3 (P1): every real caller (ChatSessionManager
+     *  / TicketSessionManager) passes an AgentExecutionContext here, which has
+     *  this as a required field — declared optional locally only so a caller
+     *  without workspace scoping isn't forced to supply one. Threaded into the
+     *  profile-specific mcp-config path/write below so workspace A and
+     *  workspace B sharing an agent id don't converge on one unscoped file. */
+    workspace_id?: string;
     api_key: string;
     cwd: string;
     mcp_config_path: string;
@@ -725,12 +732,19 @@ export class BaseSessionManager {
           // its own path, so concurrent spawns of DIFFERENT profiles can
           // never share a file to race on (see that function's doc comment
           // for why concurrent spawns of the SAME profile are still safe).
+          //
+          // Ticket ee26302d review round 3 (P1): pass agentContext.workspace_id
+          // through here too — omitting it (as round 2 did) collapses workspace
+          // A and workspace B onto the SAME unscoped path whenever they share
+          // an agent id, so whichever workspace spawns first "wins" the file
+          // and the other silently reuses it (wrong Authorization, or a stale
+          // auth failure) instead of getting its own workspace-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
-          const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, undefined, profile);
+          const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
           configPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
-                agentContext.agent_id, this._config.url, effectiveApiKey, undefined, toolProfileHeader,
+                agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
               );
           configPathIsTemp = false;
         } else {
