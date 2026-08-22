@@ -130,11 +130,11 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     /is paused until you report back/,
     'the standalone contract omits the ticket-resume language — there is no ticket',
   );
-  // ActionRunReaperService's sweep scope (ticket 2fa5312b, b273d603 follow-up)
-  // relies on this flag to tell a source_ticket_id-less run that CAN complete
-  // (dispatched after b273d603) apart from a pre-fix orphan that never
-  // received a contract — so it must be persisted true, not just reflected in
-  // the rendered prompt text asserted above.
+  // ActionRunReaperService의 스윕 범위(티켓 2fa5312b, b273d603 후속)는 이
+  // 플래그로 완료 가능한 source_ticket_id 없는 run(b273d603 이후
+  // 디스패치)과 계약을 못 받은 pre-fix orphan을 구분한다 — 그래서 위에서
+  // 검증한 렌더링된 프롬프트 텍스트뿐 아니라 실제로 true로 영속화돼야
+  // 한다.
   const persistedRun1 = (await actions.listRuns(created.id, ws.id, 20)).find((r) => r.id === res1.run.id);
   assert.equal(
     persistedRun1.completion_contract_injected, true,
@@ -236,14 +236,14 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   // 있었다면 여기서 드러난다)를 직접 확인한다 ──────────────────────────
   step('Reaper scope: a post-fix standalone run past TTL is reaped, a pre-fix orphan is preserved');
   const runRepo = ds.getRepository('ActionRun');
-  const staleAt = new Date(Date.now() - 3 * 60 * 60_000); // 3h ago > default 2h TTL
+  const staleAt = new Date(Date.now() - 3 * 60 * 60_000); // 3시간 전 > 기본 2시간 TTL
   const postFixStandalone = await runRepo.save(runRepo.create({
     action_id: created.id,
     workspace_id: ws.id,
     room_id: randomUUID(),
     triggered_by_type: 'user',
     source_ticket_id: '',
-    completion_contract_injected: true, // dispatched after b273d603 — CAN complete
+    completion_contract_injected: true, // b273d603 이후 디스패치 — 완료 가능
     status: 'running',
     created_at: staleAt,
   }));
@@ -253,7 +253,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     room_id: randomUUID(),
     triggered_by_type: 'user',
     source_ticket_id: '',
-    completion_contract_injected: false, // predates b273d603 — never got a contract
+    completion_contract_injected: false, // b273d603 이전 — 완료 계약을 받은 적 없음
     status: 'running',
     created_at: staleAt,
   }));

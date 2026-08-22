@@ -45,17 +45,17 @@ export class ActionRun {
   @Column({ type: 'varchar', default: '' })
   source_ticket_id: string;
 
-  // Set unconditionally by `dispatch()` at row creation (ticket 2fa5312b,
-  // b273d603 follow-up) — every run's prompt now carries a completion
-  // contract (renderCompletionContract or renderStandaloneCompletionContract)
-  // regardless of source_ticket_id, so this column marks "created by that
-  // code". It lets ActionRunReaperService's sweep tell a source_ticket_id-less
-  // run that CAN call complete_action_run (dispatched after this column
-  // existed) apart from a pre-fix orphan that never received the contract and
-  // so can never complete on its own — reaping the latter on a TTL would
-  // falsely mark a possibly-fine run as 'failed'. Rows that predate this
-  // column default to false (the non-reapable side), which is what keeps
-  // pre-fix orphans excluded.
+  // `dispatch()`가 행을 생성하는 시점에 무조건 true로 세팅한다(티켓 2fa5312b,
+  // b273d603 후속) — 이제 모든 run의 프롬프트는 source_ticket_id 유무와
+  // 무관하게 완료 계약(renderCompletionContract 또는
+  // renderStandaloneCompletionContract)을 싣기 때문에, 이 컬럼은 "그 코드로
+  // 생성됐는지"를 표시한다. 덕분에 ActionRunReaperService의 스윕이
+  // source_ticket_id 없는 run 중에서도 complete_action_run을 호출할 수 있는
+  // run(이 컬럼이 생긴 이후 디스패치됨)과, 완료 계약을 못 받아 스스로 완료할
+  // 방법이 아예 없는 pre-fix orphan을 구분할 수 있다 — 후자를 TTL로 reap하면
+  // 정상일 수도 있는 run을 거짓 'failed'로 만들어버린다. 이 컬럼이 생기기
+  // 전 행은 기본값 false(reap 불가 쪽)로 남으므로 pre-fix orphan이 자연히
+  // 제외된다.
   @Column({ type: 'boolean', default: false })
   completion_contract_injected: boolean;
 

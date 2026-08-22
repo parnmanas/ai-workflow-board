@@ -16,16 +16,16 @@
 //                                                    -> reaped AND source ticket resumed
 //   - age >= TTL, has source ticket, mid-retry (shouldResume=false)
 //                                                    -> reaped, ticket NOT resumed (retry run owns it)
-//   - no source ticket, completion_contract_injected=false (pre-fix orphan —
-//     dispatched before ticket b273d603 added the standalone completion
-//     contract, so the target agent never had a way to call
-//     complete_action_run) -> preserved regardless of age, forever (ticket
-//     2fa5312b: this is the one case the sweep scope still deliberately
-//     excludes, to avoid falsely marking a possibly-fine run as 'failed')
-//   - no source ticket, completion_contract_injected=true (post-fix standalone
-//     dispatch — the target agent DID receive a completion contract) -> reaped
-//     past TTL like any other zombie, but shouldResume stays false (there is
-//     no source ticket to resume) (ticket 2fa5312b)
+//   - source ticket 없음, completion_contract_injected=false (pre-fix
+//     orphan — 티켓 b273d603이 standalone 완료 계약을 추가하기 전에
+//     디스패치돼, 대상 에이전트가 애초에 complete_action_run을 호출할
+//     방법이 없었음) -> 나이와 무관하게 영구 보존(티켓 2fa5312b: 스윕
+//     범위가 의도적으로 계속 제외하는 유일한 케이스 — 정상일 수도 있는
+//     run을 거짓 'failed'로 만들지 않기 위함)
+//   - source ticket 없음, completion_contract_injected=true (post-fix
+//     standalone dispatch — 대상 에이전트가 완료 계약을 실제로 받음) ->
+//     다른 좀비와 동일하게 TTL 초과 시 reap되지만, shouldResume은 계속
+//     false(resume할 source ticket이 없음)(티켓 2fa5312b)
 //   - age >= TTL, but completeRun reports previouslyCompleted (a real
 //     complete_action_run raced the sweep)           -> NOT counted as reaped, no resume
 //   - a second sweep after a reap is idempotent (row already terminal)
@@ -44,20 +44,20 @@ const HOUR = 60 * 60_000;
 const MIN = 60_000;
 const NOW = new Date('2026-08-18T12:00:00Z');
 
-// Fake TypeORM query builder — covers exactly the where/orderBy/take chain
-// runOnce() calls. getMany() applies status + the source_ticket_id-OR-
-// completion_contract_injected filtering BEFORE take(), mirroring real SQL
-// (WHERE runs before LIMIT) — this is the property the batch-starvation
-// regression test below depends on.
+// 페이크 TypeORM 쿼리 빌더 — runOnce()가 호출하는 where/orderBy/take
+// 체인만 정확히 커버한다. getMany()는 status + source_ticket_id-OR-
+// completion_contract_injected 필터링을 take() 이전에 적용해 실제 SQL
+// 동작(WHERE가 LIMIT보다 먼저 실행됨)을 그대로 흉내낸다 — 아래
+// batch-starvation 회귀 테스트가 바로 이 성질에 의존한다.
 //
-// The real query folds status AND the OR-group into a SINGLE where() call
-// (action-run-reaper.service.ts) rather than where(status).andWhere(OR ...) —
-// TypeORM does not parenthesize andWhere() clauses unless
-// `isolateWhereStatements` is on (it isn't here), so a split call would emit
-// `status = ? AND A OR B`, which SQL parses as `(status = ? AND A) OR B` and
-// silently admits terminal rows. This fake's where() mirrors that single-call
-// shape; andWhere() is kept as a passthrough only so an accidental call
-// doesn't hard-crash the test.
+// 실제 쿼리는 where(status).andWhere(OR ...) 대신 status와 OR 그룹을
+// 하나의 where() 호출로 합친다(action-run-reaper.service.ts) — TypeORM은
+// `isolateWhereStatements`가 켜져 있지 않으면 andWhere() 절을 괄호로
+// 감싸주지 않으므로(이 프로젝트는 꺼져 있음), 분리해서 호출하면
+// `status = ? AND A OR B`가 나가고 SQL은 이를 `(status = ? AND A) OR B`로
+// 해석해 terminal row까지 조용히 들여보낸다. 이 페이크의 where()는 그
+// 단일-호출 형태를 그대로 흉내내고, andWhere()는 실수로 호출돼도 테스트가
+// 죽지 않도록 그냥 통과시키는 용도로만 남겨뒀다.
 function makeRunRepo(rows) {
   return {
     rows,
@@ -137,9 +137,10 @@ function makeTriggerLoopService() {
 
 const noopLog = { info() {}, warn() {}, error() {} };
 
-// ageMs back from NOW. completionContractInjected defaults to false, matching
-// the ActionRun entity's schema default (ActionRun.ts) — a fixture must opt
-// in explicitly to represent a post-b273d603 standalone dispatch.
+// NOW로부터 ageMs만큼 과거. completionContractInjected는 ActionRun
+// 엔티티의 스키마 기본값(ActionRun.ts)과 동일하게 false가 기본이다 —
+// post-b273d603 standalone dispatch를 나타내려면 픽스처가 명시적으로
+// opt-in해야 한다.
 function makeRun(id, {
   ageMs, status = 'running', sourceTicketId = '', shouldResume = false, workspaceId = 'ws1',
   completionContractInjected = false,
@@ -213,16 +214,17 @@ test('terminal runs are never selected regardless of age', async () => {
 });
 
 test('precedence regression: a terminal run with completion_contract_injected=true is still never selected (status gate must AND with the OR-group, not be split apart by it)', async () => {
-  // Guards against a real near-miss while building this OR-widening (ticket
-  // 2fa5312b): TypeORM does not parenthesize where()/andWhere() clauses
-  // unless `isolateWhereStatements` is on (it isn't — see db.ts), so
-  // `.where(status).andWhere("A OR B")` emits `status = ? AND A OR B`, which
-  // SQL's AND-before-OR precedence reads as `(status = ? AND A) OR B` —
-  // silently admitting non-'running' rows whenever B (completion_contract_injected)
-  // holds. The real query folds everything into one where() call with
-  // explicit outer parens around the OR-group specifically to avoid this. A
-  // succeeded run with completion_contract_injected=true is the sharpest
-  // fixture to catch a regression back to the split form.
+  // 이 OR-확장을 구현하던 중 실제로 겪은 near-miss를 잠근다(티켓
+  // 2fa5312b): TypeORM은 `isolateWhereStatements`가 켜져 있지 않으면
+  // where()/andWhere() 절을 괄호로 감싸주지 않는다(이 프로젝트는 꺼져
+  // 있음 — db.ts 참고). 그래서 `.where(status).andWhere("A OR B")`는
+  // `status = ? AND A OR B`를 내보내고, SQL의 AND-먼저-OR-나중 우선순위
+  // 규칙상 이는 `(status = ? AND A) OR B`로 해석되어
+  // B(completion_contract_injected)가 참이기만 하면 'running'이 아닌
+  // row까지 조용히 들여보낸다. 실제 쿼리는 이를 피하려고 모든 조건을
+  // 하나의 where() 호출에 OR 그룹 바깥 괄호로 명시해 합친다.
+  // completion_contract_injected=true인 succeeded run이 분리된 형태로의
+  // 회귀를 잡아내는 가장 예리한 픽스처다.
   const rows = [
     makeRun('done-but-contracted', { ageMs: 8 * HOUR, status: 'succeeded', sourceTicketId: '', completionContractInjected: true }),
   ];
@@ -252,10 +254,11 @@ test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT r
 });
 
 test('pre-fix orphan (no source ticket, no completion contract) is preserved forever, even past the TTL', async () => {
-  // Represents a run dispatched BEFORE ticket b273d603: completion_contract_injected
-  // didn't exist yet, so it reads as the schema default false. This run's
-  // target agent was never told a run_id or told to call complete_action_run —
-  // reaping it would falsely mark a possibly-fine run as 'failed'.
+  // 티켓 b273d603 이전에 디스패치된 run을 나타낸다 — 그땐
+  // completion_contract_injected 컬럼 자체가 없었으므로 스키마 기본값인
+  // false로 읽힌다. 이 run의 대상 에이전트는 run_id도, complete_action_run을
+  // 호출하라는 안내도 받은 적이 없다 — reap하면 정상일 수도 있는 run을
+  // 거짓 'failed'로 만들어버린다.
   const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: false })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
@@ -271,11 +274,11 @@ test('pre-fix orphan (no source ticket, no completion contract) is preserved for
 });
 
 test('post-fix standalone run (no source ticket, but completion contract was injected) IS reaped past the TTL — nothing to resume', async () => {
-  // Represents a run dispatched AFTER ticket b273d603: dispatch() set
-  // completion_contract_injected=true because the prompt carried a standalone
-  // completion contract, so the target agent genuinely had a way to call
-  // complete_action_run and just never did (died, or truly still running past
-  // TTL). ticket 2fa5312b widens the sweep to cover exactly this case.
+  // 티켓 b273d603 이후에 디스패치된 run을 나타낸다 — 프롬프트에 standalone
+  // 완료 계약이 실렸으므로 dispatch()가 completion_contract_injected=true를
+  // 세팅했고, 대상 에이전트는 실제로 complete_action_run을 호출할 방법이
+  // 있었는데도 그냥 안 한 것(죽었거나, TTL을 넘겨서도 정말 실행 중이거나).
+  // 티켓 2fa5312b는 정확히 이 케이스를 스윕에 포함하도록 넓힌다.
   const rows = [makeRun('standalone-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: true })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);

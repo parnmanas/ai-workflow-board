@@ -141,30 +141,32 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
     if (this.sweeping) return { reaped: [], details: [] };
     this.sweeping = true;
     try {
-      // Only non-terminal ActionRun status: 'running'. 'succeeded'/'failed' are
-      // terminal (see ActionRun.status doc comment) and never candidates.
-      // Runs that can never complete on their own — no source_ticket_id AND no
-      // completion_contract_injected (see class doc + ActionRun.ts) — are
-      // excluded HERE, at the query stage, rather than via a skip inside the
-      // loop below: a JS-loop skip still spends its take(ACTION_RUN_REAPER_BATCH)
-      // budget on them, so once permanently-'running' contract-less rows
-      // outnumber the batch size, a created_at-ASC sweep fills entirely with
-      // always-skipped rows and a real, newer zombie is never reached — silently,
-      // since the "reaped stale runs" log only fires when something was actually
-      // reaped. Filtering before take() keeps the budget scoped to real
-      // candidates. IS NOT NULL is required alongside != '' because Postgres's
-      // three-valued NULL comparison would otherwise silently drop legacy NULL
-      // rows out of the "has a ticket" side too (Not('') was avoided for the
-      // same reason when this gate was first added).
-      // Both conditions are combined in ONE where() call with explicit outer
-      // parens around the OR group, rather than where() + andWhere(OR ...):
-      // TypeORM only auto-wraps each where()/andWhere() clause in parens when
-      // the `isolateWhereStatements` DataSource option is on (it isn't, here
-      // — see db.ts), so a plain `.andWhere("A OR B")` after `.where(status)`
-      // would emit `status = ? AND A OR B` — SQL's AND-before-OR precedence
-      // then reads that as `(status = ? AND A) OR B`, silently admitting
-      // terminal (succeeded/failed) rows whenever B holds. Folding everything
-      // into one string with our own parens removes the ambiguity entirely.
+      // non-terminal인 ActionRun 상태는 'running' 하나뿐이다. 'succeeded'/
+      // 'failed'는 terminal이라(ActionRun.status doc 코멘트 참고) 절대
+      // 후보가 되지 않는다.
+      // source_ticket_id도 없고 completion_contract_injected도 없는(class
+      // doc + ActionRun.ts 참고), 즉 스스로는 절대 완료할 수 없는 run은 아래
+      // 루프 안에서 skip하는 대신 바로 이 쿼리 단계에서 제외한다 — JS
+      // 루프에서 skip해도 take(ACTION_RUN_REAPER_BATCH) 예산은 그대로
+      // 소모되므로, 영원히 'running'인 계약 없는 row가 batch 크기를 넘어서는
+      // 순간 created_at 오름차순 스윕이 전부 skip 대상으로만 채워져 정작
+      // 진짜로 새로 생긴 좀비는 조용히 도달조차 못 하게 된다 — "reaped
+      // stale runs" 로그는 실제로 뭔가 reap됐을 때만 찍히므로 이 상황은
+      // 티도 안 난다. take() 이전에 필터링해두면 예산이 진짜 후보에만
+      // 쓰인다. IS NOT NULL을 != '' 와 나란히 요구하는 이유는 Postgres의
+      // 3진 NULL 비교 때문이다 — 안 그러면 legacy NULL row가 "티켓이 있음"
+      // 쪽에서도 조용히 빠진다(같은 이유로 이 게이트를 처음 추가할 때
+      // Not('')도 피했다).
+      // 두 조건은 where() + andWhere(OR ...) 대신 하나의 where() 호출에 OR
+      // 그룹 전체를 명시적 바깥 괄호로 묶어 합친다 — TypeORM은
+      // `isolateWhereStatements` DataSource 옵션이 켜져 있을 때만 각
+      // where()/andWhere() 절을 자동으로 괄호로 감싸는데(이 프로젝트는
+      // 꺼져 있음 — db.ts 참고), `.where(status)` 뒤에 그냥
+      // `.andWhere("A OR B")`를 붙이면 `status = ? AND A OR B`가 나가버린다
+      // — SQL의 AND-먼저-OR-나중 우선순위 규칙상 이는
+      // `(status = ? AND A) OR B`로 읽혀 B가 참이기만 하면 terminal
+      // (succeeded/failed) row까지 조용히 들여보낸다. 전부 우리가 직접
+      // 괄호를 넣은 문자열 하나로 합치면 이 모호함이 완전히 사라진다.
       const candidates = await this.runRepo
         .createQueryBuilder('r')
         .where(
