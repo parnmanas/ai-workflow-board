@@ -7,8 +7,11 @@
 //   normalizeCompletionCriteria — key 중복/빈 description을 거부하고, met=true가
 //                                 아닌 항목은 met_at을 절대 채우지 않는다.
 //   normalizePostActions       — 정의 단계에서 항상 status:'pending'으로
-//                                 리셋하고 order로 정렬한다(실행 상태는 오직
-//                                 runPostActions()만 쓴다).
+//                                 리셋하고(실행 상태는 오직 runPostActions()만
+//                                 쓴다), order는 호출자 입력을 무시하고 항상
+//                                 최종 배열 순서 그대로 0..N-1로 재부여한다
+//                                 (order가 dispatch idempotency key의 일부라
+//                                 유일성이 중요함 — 리뷰 2라운드 지적 반영).
 //   postActionApplies          — condition과 최종 mission status의 매핑표.
 
 import test from 'node:test';
@@ -106,20 +109,40 @@ test('normalizePostActions — 항상 status를 pending으로 리셋하고 run �
   assert.equal(pa.error, '');
 });
 
-test('normalizePostActions — condition 기본값은 "always"이고 order로 정렬한다', () => {
+test('normalizePostActions — condition 기본값은 "always"이고 배열 순서 그대로 남는다', () => {
   const result = normalizePostActions([
     { action_id: 'second', order: 2 },
     { action_id: 'first', order: 1, condition: 'on_failure' },
     { action_id: 'third-bad-condition', order: 3, condition: 'not-a-real-condition' },
   ]);
   assert.equal('error' in result, false);
+  // 호출자가 준 order(2/1/3)는 정렬 기준으로 쓰이지 않는다 — 입력 배열의
+  // 순서가 그대로 결과 순서다.
   assert.deepEqual(
     result.postActions.map((p) => p.action_id),
-    ['first', 'second', 'third-bad-condition'],
+    ['second', 'first', 'third-bad-condition'],
   );
-  assert.equal(result.postActions[0].condition, 'on_failure');
-  assert.equal(result.postActions[1].condition, 'always');
+  assert.equal(result.postActions[0].condition, 'always');
+  assert.equal(result.postActions[1].condition, 'on_failure');
   assert.equal(result.postActions[2].condition, 'always'); // 유효하지 않은 condition은 'always'로 폴백
+});
+
+test('normalizePostActions — order는 호출자 입력과 무관하게 항상 최종 배열 위치로 재부여된다(중복/공백 order 방지, 리뷰 2라운드 지적)', () => {
+  const result = normalizePostActions([
+    { action_id: 'a-1', order: 5 },
+    { action_id: 'a-2', order: 5 }, // 클라이언트 add/remove 반복으로 중복될 수 있는 값
+    { action_id: '' }, // 빈 항목은 버려진다 — 뒤따르는 항목의 최종 인덱스에 영향을 주면 안 된다
+    { action_id: 'a-3', order: 0 },
+  ]);
+  assert.equal('error' in result, false);
+  assert.deepEqual(
+    result.postActions.map((p) => p.order),
+    [0, 1, 2],
+  );
+  assert.deepEqual(
+    result.postActions.map((p) => p.action_id),
+    ['a-1', 'a-2', 'a-3'],
+  );
 });
 
 test('postActionApplies — always는 최종 status와 무관하게 항상 실행된다', () => {

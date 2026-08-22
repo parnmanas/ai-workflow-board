@@ -10,6 +10,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Agent } from '../../entities/Agent';
 import { Action } from '../../entities/Action';
+import { ActionRun } from '../../entities/ActionRun';
 import { Workspace } from '../../entities/Workspace';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { ActionsModule } from '../actions/actions.module';
@@ -43,6 +44,7 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       ChatRoomMessage,
       Agent,
       Action,
+      ActionRun,
       Workspace,
     ]),
     ChatRoomsModule,

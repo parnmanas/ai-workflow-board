@@ -299,6 +299,10 @@ export class OrchestrationMissionService {
         method: (input.method || '').trim(),
         completion_criteria: criteriaResult.criteria.length ? criteriaResult.criteria : null,
         post_actions: postActionsResult.postActions.length ? postActionsResult.postActions : null,
+        // 정의 직후엔 전 항목이 normalizePostActions()에 의해 'pending'이므로,
+        // "미확정 항목 있음" == "배열이 비어있지 않음"이다(post_actions_pending
+        // 문서 참고). 이후 runPostActions()가 실제 처리 진행에 맞춰 갱신한다.
+        post_actions_pending: postActionsResult.postActions.length > 0,
         workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
         repo_ref: normalizeRepoRef(input.repo_ref),
         checkout_mode: normalizeCheckoutMode(input.checkout_mode),
@@ -399,6 +403,7 @@ export class OrchestrationMissionService {
       const result = normalizePostActions(patch.post_actions);
       if ('error' in result) throw orchestrationError(400, result.error);
       mission.post_actions = result.postActions.length ? result.postActions : null;
+      mission.post_actions_pending = result.postActions.length > 0;
     }
     if (patch.workspace_folder !== undefined) mission.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
     if (patch.repo_ref !== undefined) mission.repo_ref = normalizeRepoRef(patch.repo_ref);

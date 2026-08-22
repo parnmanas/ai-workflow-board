@@ -33,6 +33,7 @@ import { MissionCompletionCriterion, MissionPostAction } from '../modules/orches
 @Index('idx_orch_missions_workspace', ['workspace_id'])
 @Index('idx_orch_missions_team', ['team_id'])
 @Index('idx_orch_missions_status', ['status'])
+@Index('idx_orch_missions_post_actions_pending', ['post_actions_pending'])
 export class OrchestrationMission {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -91,6 +92,20 @@ export class OrchestrationMission {
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   post_actions: MissionPostAction[] | null;
+
+  /**
+   * `post_actions` 안에 아직 확정되지 않은(`pending`/`in_flight`) 항목이
+   * 있는지를 나타내는 색인 가능한 플래그(리뷰 지적 반영, 티켓 2dc3c62f) —
+   * post_actions 자체는 simple-json이라 SQL WHERE로 내용을 거를 수 없다.
+   * `runPostActions()`가 매 저장마다 이 값을 재계산해 항상 실제 배열
+   * 내용과 일치시키고, `OrchestrationReaperService.reapPendingPostActions`가
+   * `finished_at DESC take:N` 같은 최신순 창 대신 이 컬럼으로 직접 질의해서
+   * — 오래된 terminal Mission이 최근 Mission들에 밀려 영영 복구 대상에서
+   * 빠지는 기아(starvation) 없이 — 미확정 항목이 있는 Mission만 정확히
+   * 찾아낸다.
+   */
+  @Column({ type: 'boolean', default: false })
+  post_actions_pending: boolean;
 
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
