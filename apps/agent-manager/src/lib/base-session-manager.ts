@@ -21,7 +21,7 @@ import { resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
-import { checkSessionProgress } from './session-progress.js';
+import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -324,6 +324,13 @@ export interface SessionRecord {
   /** ticket 6ff827cb gap 4 — epoch-ms the long-running escalation was already
    *  posted, so #maybeEscalateLongRunning fires at most once per session. */
   _progressEscalatedAt?: number | null;
+  /** ticket e18be8ff — background-task count from the MOST RECENT
+   *  checkSessionProgress recheck (idle timer / maxTurns / unhealthy gate),
+   *  cached here so a status-visibility push (see `_onSessionStatusChanged`)
+   *  can report it without triggering its own process-tree scan. Stale
+   *  between rechecks by design — this is a best-effort UI badge, not a
+   *  liveness decision. */
+  _lastBackgroundTaskCount?: number;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
@@ -945,6 +952,7 @@ export class BaseSessionManager {
       sess._lastOutputAtMs,
     );
     if (this._sessions.get(key) !== sess) return;
+    this.#recordProgressVerdict(sess, verdict);
 
     if (verdict.alive) {
       log(
@@ -1274,6 +1282,7 @@ export class BaseSessionManager {
       sess._lastOutputAtMs,
     );
     if (this._sessions.get(key) !== sess) return; // exited during the async check
+    this.#recordProgressVerdict(sess, verdict);
 
     if (verdict.alive) {
       log(
@@ -1329,6 +1338,22 @@ export class BaseSessionManager {
   /** Override in subclasses to surface a long-running-session escalation
    *  somewhere a human will see it (e.g. a chat room notice). No-op in base. */
   protected _onLongRunningEscalation(_sess: SessionRecord, _ageHours: string): void {}
+
+  /** ticket e18be8ff — override in subclasses to push a session's current
+   *  keep-alive / background-task-count snapshot somewhere a human will see
+   *  it (e.g. a chat room status badge). No-op in base. Called after every
+   *  checkSessionProgress recheck and every applyKeepAlive grant/release —
+   *  never triggers its own process-tree scan (see `_lastBackgroundTaskCount`). */
+  protected _onSessionStatusChanged(_sess: SessionRecord): void {}
+
+  /** Cache the latest background-task count from a fresh checkSessionProgress
+   *  verdict and notify subclasses. Shared by all three recheck call sites
+   *  (idle timer, maxTurns, unhealthy-kill gate) so the status badge stays in
+   *  sync with whichever gate last ran the scan, with no extra scan of its own. */
+  #recordProgressVerdict(sess: SessionRecord, verdict: ProgressCheckResult): void {
+    sess._lastBackgroundTaskCount = verdict.backgroundTaskCount;
+    this._onSessionStatusChanged(sess);
+  }
 
   /** ticket 6ff827cb requirement 3 — force-terminate a session whose
    *  explicit keep-alive grant exceeded the hard ceiling. This is the ONE
@@ -1413,6 +1438,7 @@ export class BaseSessionManager {
       log(`${this.#logTag} keep-alive released ${this.#keyField}=${sessionKey} pid=${sess.pid}`);
       sess._keepAliveUntilMs = null;
       sess._keepAliveReason = null;
+      this._onSessionStatusChanged(sess);
       return { ok: true };
     }
 
@@ -1432,6 +1458,7 @@ export class BaseSessionManager {
         `until=${new Date(sess._keepAliveUntilMs).toISOString()} ceiling=${new Date(ceilingMs).toISOString()} ` +
         `reason="${sess._keepAliveReason}"`,
     );
+    this._onSessionStatusChanged(sess);
     return { ok: true, until: sess._keepAliveUntilMs, ceilingMs };
   }
 
@@ -1514,6 +1541,7 @@ export class BaseSessionManager {
     );
     if (this._sessions.get(key) !== sess) return; // exited during the async check
     if (sess.unhealthyKilled) return; // killed by the other trigger while we awaited
+    this.#recordProgressVerdict(sess, verdict);
 
     if (verdict.alive) {
       log(

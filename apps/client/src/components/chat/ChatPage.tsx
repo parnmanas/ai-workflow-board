@@ -25,6 +25,7 @@ import {
 import NewChatModal from './ParticipantPicker';
 import ChatRoomView from './RoomDetailPanel';
 import { getDmAgentPartnerId, normalizeAgentTasks } from './utils/agentTasks';
+import { isSessionStatusLive, pruneExpiredSessionStatus, restoreSessionStatusSnapshot, mergeSessionStatusSnapshot } from './utils/sessionStatusFlow';
 
 /**
  * ChatPage — Phase 7 room-based chat surface.
@@ -114,6 +115,10 @@ export default function ChatPage() {
   const [chatProtocolVersion, setChatProtocolVersion] = useState<number | null>(null);
   const [scrollToMessageId, setScrollToMessageId] = useState<string | null>(null);
   const [typingAgents, setTypingAgents] = useState<Record<string, { name: string; status?: string }>>({}); // agent_id -> { name, status }
+  // ticket e18be8ff — agent_id -> live keep-alive/background-task snapshot for
+  // the active room's session(s). keepAliveUntilMs is an absolute deadline so
+  // the badge can tick a live countdown between SSE pushes.
+  const [sessionStatusByAgent, setSessionStatusByAgent] = useState<Record<string, { name: string; keepAliveUntilMs: number | null; backgroundTaskCount: number }>>({});
   // Observer mode: viewer is *not* a participant of the active room (only
   // possible when showAllRooms is on). Used to skip mark-read calls that
   // would 403 server-side for non-members.
@@ -121,6 +126,21 @@ export default function ChatPage() {
   const [dashboardAgents, setDashboardAgents] = useState<DashboardAgent[]>([]);
   const activeRoomIdRef = useRef<string | null>(null);
   const isObserverRef = useRef<boolean>(false);
+  // Review round 2, P1 #2 — per-agent "sequence number the SSE handler last
+  // set sessionStatusByAgent for this agent". Lets the room-entry GET
+  // snapshot below tell whether a newer SSE push already landed while the GET
+  // was in flight, so it can keep that newer state instead of stomping it
+  // back to the (by then stale) snapshot row. See mergeSessionStatusSnapshot.
+  const sessionStatusUpdatedAtRef = useRef<Record<string, number>>({});
+  // Review round 2 follow-up, P1 #2 — a shared monotonic counter backing the
+  // comparison above. Date.now() was tried first, but a GET-issued and an
+  // SSE-handled event landing in the same millisecond produced equal
+  // timestamps, which the merge treated as "not newer" and let the snapshot
+  // wrongly stomp a same-tick SSE update. Every read of this ref via
+  // `nextSessionStatusSeq()` hands out a distinct, strictly-increasing
+  // integer, so two events can never tie regardless of wall-clock resolution.
+  const sessionStatusSeqRef = useRef<number>(0);
+  const nextSessionStatusSeq = useCallback(() => (sessionStatusSeqRef.current += 1), []);
   // Mirror of `messages` for use inside async callbacks (older-page dedup) that
   // run between renders and can't rely on the closed-over state snapshot.
   const messagesRef = useRef<ChatRoomMessageItem[]>([]);
@@ -229,6 +249,8 @@ export default function ChatPage() {
   // Load messages + mark read on room change
   useEffect(() => {
     setTypingAgents({}); // clear stale typing indicators when switching rooms
+    setSessionStatusByAgent({}); // clear stale keep-alive/background-task badges when switching rooms
+    sessionStatusUpdatedAtRef.current = {};
     // Reset pagination state on every room switch so the new room starts
     // with a clean "no older fetched yet" slate. Without this, switching
     // from a fully-loaded room (hasMoreMessages=false) to a new room
@@ -293,6 +315,33 @@ export default function ChatPage() {
             );
           }
         }
+      })
+      .catch(() => {});
+
+    // Restore currently-active keep-alive/background-task badges on room
+    // entry — the SSE push that would otherwise populate this is
+    // fire-and-forget, so opening/re-entering the room between pushes would
+    // otherwise show nothing until the next progress recheck (ticket
+    // e18be8ff review round 1, P1 #2). requestStartedSeq + the merge below
+    // guard against a newer SSE push landing before this resolves (review
+    // round 2, P1 #2) — a plain replace would stomp it back to this stale
+    // snapshot. observer=true matches the getChatRoom/getChatRoomMessages
+    // calls above so a non-participant workspace-wide viewer isn't 404'd by
+    // the server's new room-access check (review round 2, P1 #1).
+    //
+    // requestStartedSeq captures the shared monotonic counter's CURRENT value
+    // (no increment) as a marker: any SSE handler run afterward calls
+    // nextSessionStatusSeq(), which always produces something strictly
+    // greater than whatever was current at this point — unlike Date.now(),
+    // which can tie with the SSE handler's own Date.now() in the same
+    // millisecond (review round 2 follow-up, P1 #2).
+    const requestStartedSeq = sessionStatusSeqRef.current;
+    api.getChatRoomSessionStatus(activeRoomId, initialObserver)
+      .then((entries) => {
+        if (cancelled) return;
+        setSessionStatusByAgent((prev) =>
+          mergeSessionStatusSnapshot(prev, entries, sessionStatusUpdatedAtRef.current, requestStartedSeq),
+        );
       })
       .catch(() => {});
 
@@ -418,6 +467,52 @@ export default function ChatPage() {
       return next;
     });
   }, []));
+
+  // SSE: chat_room_session_status — keep-alive / live background-task-count
+  // badge. Pushed on keep-alive grant/release and on every progress recheck
+  // (idle timer / maxTurns / unhealthy gate) — NOT on a fixed clock, so an
+  // entry with no live grant and no background tasks means "nothing to show"
+  // and is removed rather than rendered as "0".
+  useBoardStreamEvent('chat_room_session_status', useCallback((data: any) => {
+    if (!data || !data.room_id) return;
+    if (data.room_id !== activeRoomIdRef.current) return;
+    // Recorded before the state update so a room-entry GET snapshot that was
+    // already in flight knows this agent's `prev` is newer than whatever the
+    // snapshot read (review round 2, P1 #2 — see mergeSessionStatusSnapshot).
+    // Uses the shared monotonic counter, not Date.now() — see
+    // requestStartedSeq above for why (review round 2 follow-up, P1 #2).
+    sessionStatusUpdatedAtRef.current[data.agent_id] = nextSessionStatusSeq();
+    setSessionStatusByAgent((prev) => {
+      const keepAliveUntilMs = typeof data.keep_alive_until_ms === 'number' ? data.keep_alive_until_ms : null;
+      const backgroundTaskCount = data.background_task_count || 0;
+      const entry = { name: data.agent_name || 'Agent', keepAliveUntilMs, backgroundTaskCount };
+      if (!isSessionStatusLive(entry, Date.now())) {
+        if (!prev[data.agent_id]) return prev;
+        const next = { ...prev };
+        delete next[data.agent_id];
+        return next;
+      }
+      return { ...prev, [data.agent_id]: entry };
+    });
+  }, []));
+
+  // The keep-alive countdown is computed from an absolute deadline at render
+  // time, so a badge showing "잔여 XX분" needs periodic re-renders between SSE
+  // pushes (pushes only fire when the deadline itself changes) — hence the
+  // tick counter. Each tick also prunes any entry whose deadline has already
+  // passed and that has no live background tasks: a lost/late exit or
+  // follow-up SSE push would otherwise leave a "잔여 0분" badge stuck forever
+  // (ticket e18be8ff review round 1, P1 #1). Only runs while there's
+  // something to show.
+  const [, setStatusTick] = useState(0);
+  useEffect(() => {
+    if (Object.keys(sessionStatusByAgent).length === 0) return;
+    const timer = setInterval(() => {
+      setStatusTick((t) => t + 1);
+      setSessionStatusByAgent((prev) => pruneExpiredSessionStatus(prev, Date.now()));
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [sessionStatusByAgent]);
 
   // Safety timeout: clear all typing indicators after 15s in case is_typing:false is lost
   useEffect(() => {
@@ -646,6 +741,7 @@ export default function ChatPage() {
         participantCount={participantCount}
         participants={roomParticipants}
         typingAgents={typingAgents}
+        sessionStatusByAgent={sessionStatusByAgent}
         currentUserId={user?.id}
         activeTasks={activeAgentTasks}
         onSelectTask={openTicketArtifact}

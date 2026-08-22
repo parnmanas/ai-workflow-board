@@ -227,6 +227,33 @@ export class RoomMembershipService {
   }
 
   /**
+   * Shared helper for read endpoints that are keyed only by roomId (e.g. GET
+   * .../session-status): throw 404 if the room doesn't exist OR belongs to a
+   * different workspace than the caller's current one (same status for both
+   * so a foreign-workspace roomId doesn't confirm existence), and — unless
+   * `observer` (the workspace-wide monitoring view, same bypass `getRoom`
+   * grants via `?observer=true`) — 403 unless userId is an active participant.
+   * `getRoomDetail` intentionally tolerates a non-member viewer for that same
+   * observer flow but never checked workspace_id at all; this helper is the
+   * one used by endpoints that need the workspace boundary actually enforced
+   * (ticket e18be8ff review round 2, P1 #1).
+   */
+  async requireRoomAccess(
+    roomId: string,
+    workspaceId: string,
+    userId: string,
+    opts: { observer?: boolean } = {},
+  ): Promise<void> {
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    if (!room || room.workspace_id !== workspaceId) {
+      throw makeError(404, 'Room not found');
+    }
+    if (!opts.observer) {
+      await this.requireActiveParticipant(roomId, userId, 'user');
+    }
+  }
+
+  /**
    * Shared helper: resolve a (type, id) pair to a human-readable display name.
    * Returns 'Unknown User' / 'Unknown Agent' / 'Unknown' on miss (never throws).
    *

@@ -278,4 +278,64 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
     'the frame must be keyed by the ANSWERING agent — the client clears the indicator by this id');
 });
 
+// ─── 6. Chat session-status badge (chat_room_session_status, ticket e18be8ff) ──
+// Same re-resolution contract as chat_room_typing above, on the new
+// keep-alive/background-task-count endpoint the agent-manager posts from
+// ChatSessionManager#_onSessionStatusChanged.
+test('chat_room_session_status: server re-resolves agent_id and forwards keep-alive/background-task fields', async () => {
+  const room = await ds.getRepository('ChatRoom').save(
+    ds.getRepository('ChatRoom').create({
+      workspace_id: ws.id,
+      name: 'session-status room',
+      type: 'group',
+      created_by_type: 'user',
+      created_by: 'tester',
+    }),
+  );
+
+  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-status-sub' });
+  await ds.getRepository('ChatRoomParticipant').save(
+    ds.getRepository('ChatRoomParticipant').create({
+      room_id: room.id,
+      participant_type: 'agent',
+      participant_id: mgrA.id,
+      joined_at: new Date(),
+    }),
+  );
+  const sse = await openSseStream(BASE_PORT, subKey.raw_key, {});
+  after(() => sse.close());
+
+  const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'chat-status-caller' });
+  const keepAliveUntilMs = Date.now() + 8 * 60_000;
+  const resp = await fetch(
+    `http://127.0.0.1:${BASE_PORT}/api/agent/chat-rooms/${room.id}/session-status`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Agent-Key': callerKey.raw_key },
+      body: JSON.stringify({
+        agent_id: memberA.id,
+        keep_alive_until_ms: keepAliveUntilMs,
+        background_task_count: 2,
+      }),
+    },
+  );
+  assert.ok(resp.ok, `session-status endpoint must accept the post, got ${resp.status}`);
+
+  const frame = await sse.waitFor(
+    'chat_room_session_status',
+    (d) => d.room_id === room.id,
+    8000,
+  );
+  assert.equal(frame.data.agent_name, MEMBER_A_DISPLAY,
+    `chat_room_session_status.agent_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.agent_name}"`);
+  assert.ok(String(frame.data.agent_name).includes('/'),
+    'the session-status label must carry the manager prefix, not a bare name');
+  assert.equal(frame.data.agent_id, memberA.id,
+    'the frame must be keyed by the ANSWERING agent, not the manager');
+  assert.equal(frame.data.keep_alive_until_ms, keepAliveUntilMs,
+    'keep_alive_until_ms must be forwarded verbatim (absolute deadline, not pre-computed remaining minutes)');
+  assert.equal(frame.data.background_task_count, 2,
+    'background_task_count must be forwarded verbatim');
+});
+
 exitAfterTests();

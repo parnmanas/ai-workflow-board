@@ -14,7 +14,7 @@ import {
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { fetchChatRoomHistory, postChatRoomMessage } from './rest.js';
+import { fetchChatRoomHistory, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import { resolveRunCompletionRoute } from './run-provisioner.js';
@@ -574,11 +574,34 @@ export class ChatSessionManager
     void postChatRoomMessage(cfg, roomId, agentId, message);
   }
 
+  /** ticket e18be8ff — push the room's live status badge ("백그라운드 작업
+   *  N개 실행 중 · keep-alive 잔여 XX분"). Fired after every progress recheck
+   *  and every applyKeepAlive grant/release (see BaseSessionManager); never
+   *  triggers a scan of its own. Fire-and-log, like the room typing indicator
+   *  — a dropped push just leaves the badge stale until the next recheck. */
+  protected _onSessionStatusChanged(sess: SessionRecord): void {
+    const roomId: string | undefined = sess.roomId;
+    const agentId: string | undefined = sess.agentId;
+    if (!roomId || !agentId) return;
+    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    void postChatRoomSessionStatus(cfg, roomId, agentId, {
+      keep_alive_until_ms: sess._keepAliveUntilMs ?? null,
+      background_task_count: sess._lastBackgroundTaskCount ?? 0,
+    });
+  }
+
   protected async _onChildExit(
     sess: SessionRecord,
     _code: number | null,
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
+    // ticket e18be8ff — clear the room's status badge on EVERY exit path
+    // (normal reply, idle-reap, unhealthy-kill, keep-alive-ceiling), not just
+    // forced termination. Without this a badge showing "keep-alive 잔여 8분"
+    // would keep counting down client-side for a session that's already gone.
+    sess._keepAliveUntilMs = null;
+    sess._lastBackgroundTaskCount = 0;
+    this._onSessionStatusChanged(sess);
     // ticket 89716f04 — the child is gone; its descendants died or reparented,
     // so a pending turn-end orphan sweep has nothing valid to enumerate.
     this.#cancelOrphanSweep(sess);

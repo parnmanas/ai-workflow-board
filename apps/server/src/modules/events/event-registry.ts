@@ -22,6 +22,7 @@ import {
   ChatRoomMessagePayload,
   ChatRoomUpdatePayload,
   ChatRoomTypingPayload,
+  ChatRoomSessionStatusPayload,
   CommentMentionPayload,
   CommentTypingPayload,
   TicketPresencePayload,
@@ -586,6 +587,37 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_name: event.agent_name || 'Agent',
         is_typing: !!event.is_typing,
         status: event.status ?? null,
+        agent_member_ids: event.agent_member_ids
+          ? Array.from(event.agent_member_ids as Set<string>)
+          : undefined,
+      };
+      return {
+        payload,
+        scope: {
+          room_id: event.room_id,
+          member_ids: event.member_ids,
+          agent_member_ids: event.agent_member_ids,
+        },
+      };
+    },
+    filter: roomMemberFilter,
+    flatten: (env) => env.payload,
+  },
+
+  // ───────── chat_room_session_status ─────────
+  // ticket e18be8ff — keep-alive / live-background-task-count badge for a
+  // chat session. Same room-scoped fan-out as chat_room_typing (agent
+  // members + human members of the room), just a different payload shape.
+  {
+    eventType: 'chat_room_session_status',
+    emitterEvent: 'chat_room_session_status',
+    map(event: any) {
+      const payload: ChatRoomSessionStatusPayload = {
+        room_id: event.room_id,
+        agent_id: event.agent_id,
+        agent_name: event.agent_name || 'Agent',
+        keep_alive_until_ms: event.keep_alive_until_ms ?? null,
+        background_task_count: event.background_task_count ?? 0,
         agent_member_ids: event.agent_member_ids
           ? Array.from(event.agent_member_ids as Set<string>)
           : undefined,

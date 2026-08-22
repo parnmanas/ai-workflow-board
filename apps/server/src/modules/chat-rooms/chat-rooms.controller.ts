@@ -25,6 +25,7 @@ import { RoomMessagingService } from './room-messaging.service';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../mcp/shared/ticket-helpers';
+import { getChatRoomSessionStatus } from '../agent-api/chat-session-status.store';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -134,6 +135,29 @@ export class ChatRoomsController {
       return res.json(detail);
     } catch (err: any) {
       return res.status(err.status || 404).json({ error: err.message });
+    }
+  }
+
+  // Snapshot of the currently-live chat_room_session_status push(es) for this
+  // room (keep-alive deadline / background-task count per agent). The SSE
+  // push is fire-and-forget, so a client opening or re-entering the room
+  // between pushes needs this to show "currently active" state immediately
+  // instead of waiting for the next progress recheck or session exit
+  // (ticket e18be8ff review round 1, P1 #2). requireRoomAccess enforces the
+  // same participant/observer + workspace boundary as getRoom before serving
+  // the in-memory store, which is keyed only by roomId and otherwise has no
+  // notion of who's allowed to read it (review round 2, P1 #1).
+  @Get(':roomId/session-status')
+  @RequirePermission(PERMISSIONS.CHAT_VIEW)
+  async getSessionStatus(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    try {
+      const observe = req.query.observer === 'true';
+      await this.membership.requireRoomAccess(roomId, wsId, user.id, { observer: observe });
+      return res.json(getChatRoomSessionStatus(roomId));
+    } catch (err: any) {
+      return res.status(err.status || 500).json({ error: err.message });
     }
   }
 

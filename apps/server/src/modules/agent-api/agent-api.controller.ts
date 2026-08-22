@@ -45,6 +45,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { enforceAutoResponseBudget } from '../../common/hard-budget-guard';
 import { lockTicketCommentWrites } from '../../common/ticket-comment-write-lock';
+import { setChatRoomSessionStatus } from './chat-session-status.store';
 import { createHash } from 'node:crypto';
 
 @ApiSecurity('agent-api-key')
@@ -1194,6 +1195,40 @@ export class AgentApiController {
       agent_name: resolvedName,
       is_typing: is_typing !== false,
       status: status || null,
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+    return res.json({ ok: true });
+  }
+
+  @Post('chat-rooms/:roomId/session-status')
+  async setChatRoomSessionStatus(@Body() body: any, @Param('roomId') roomId: string, @Req() req: Request, @Res() res: Response) {
+    const { agent_id, keep_alive_until_ms, background_task_count } = body;
+    if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
+    if (this.scopeRejects(req, await this.resolveRoomWorkspaceId(roomId))) return this.denyScope(res);
+    // Same display-name resolution as setChatRoomTyping — the badge must be
+    // attributed to the responding agent's resolved `<Manager>/<Agent>` name.
+    const resolvedName =
+      (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id)) || 'Agent';
+    const memberIds = await this.membership.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+    const resolvedKeepAliveUntilMs = typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null;
+    const resolvedBackgroundTaskCount = Number.isFinite(background_task_count) ? Math.max(0, background_task_count) : 0;
+    // Cache the last-known status so a client that opens/re-enters this room
+    // between SSE pushes can ask for the current snapshot instead of waiting
+    // for the next progress recheck (ticket e18be8ff review round 1, P1 #2).
+    setChatRoomSessionStatus(roomId, {
+      agent_id,
+      agent_name: resolvedName,
+      keep_alive_until_ms: resolvedKeepAliveUntilMs,
+      background_task_count: resolvedBackgroundTaskCount,
+    });
+    activityEvents.emit('chat_room_session_status', {
+      room_id: roomId,
+      agent_id,
+      agent_name: resolvedName,
+      keep_alive_until_ms: resolvedKeepAliveUntilMs,
+      background_task_count: resolvedBackgroundTaskCount,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });

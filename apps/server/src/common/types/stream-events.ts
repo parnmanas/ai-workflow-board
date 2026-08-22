@@ -20,6 +20,7 @@ export type StreamEventType =
   | 'chat_room_message'    // Phase 7: new message in a chat room
   | 'chat_room_update'     // Phase 7: room renamed / participant added / user left
   | 'chat_room_typing'     // Phase 7+: agent typing indicator in a chat room
+  | 'chat_room_session_status' // ticket e18be8ff: keep-alive / live background-task-count badge for a chat session
   | 'comment_mention'      // Mention feature: agent @-mentioned in a ticket comment
   | 'user_mention'         // Mention feature: user @-mentioned (web UI unread badge)
   | 'comment_typing'       // Phase-9 typed comments: someone is composing a comment on a ticket
@@ -480,6 +481,24 @@ export interface ChatRoomTypingPayload {
   agent_name: string;
   is_typing: boolean;
   status?: string | null;
+  // See ChatRoomMessagePayload — same managed-agent fan-out reason.
+  agent_member_ids?: string[];
+}
+
+// ticket e18be8ff — pushed by ChatSessionManager after every keep-alive
+// grant/release and every progress recheck (idle timer / maxTurns /
+// unhealthy gate), so the room UI can render "백그라운드 작업 N개 실행 중 ·
+// keep-alive 잔여 XX분" without polling. `keep_alive_until_ms` is an
+// absolute epoch-ms deadline (not a pre-computed "remaining minutes") so the
+// client can tick a live countdown between pushes instead of showing stale
+// text. null means no active grant. Cleared (both fields reset) on session
+// exit — see ChatSessionManager#_onChildExit.
+export interface ChatRoomSessionStatusPayload {
+  room_id: string;
+  agent_id: string;
+  agent_name: string;
+  keep_alive_until_ms: number | null;
+  background_task_count: number;
   // See ChatRoomMessagePayload — same managed-agent fan-out reason.
   agent_member_ids?: string[];
 }
