@@ -31,9 +31,9 @@ import {
   type CliAdapter,
   type CliProgressEvent,
   type CliUsageSnapshot,
-  buildModelChain,
   describeHarness,
   partitionHarness,
+  resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
@@ -635,8 +635,13 @@ export class SubagentManager implements SubagentManagerContract {
     // harness.fallback_models 로 체인을 만든다. 폴백 respawn 은 exit 핸들러가
     // _modelChain/_chainAttempt 를 넘겨오므로 그대로 이어쓴다. attemptModel 이
     // 이번 시도의 실제 모델(null=CLI 기본)이며 아래 buildOneshotSpawn 에 전달된다.
+    // Claude backend profile이 활성화된 세션은 resolveModelChain()이
+    // harness.fallback_models를 통째로 무시한다(ticket 41dc37cb 리뷰 라운드1) —
+    // 이 profile은 endpoint 하나에 model 하나만 서빙하므로 "다른 모델로
+    // 폴백"이 성립하지 않고, 그 raw 값들은 애초에 CLI-recognized alias로
+    // 검증된 적도 없다.
     const modelChain =
-      spec._modelChain ?? buildModelChain(effectiveModel, spec.harness?.fallback_models);
+      spec._modelChain ?? resolveModelChain(effectiveModel, claudeRuntimeProfile, spec.harness?.fallback_models);
     const chainAttempt = spec._chainAttempt ?? 0;
     const attemptModel = modelChain[chainAttempt] ?? null;
     if (modelChain.length > 1) {

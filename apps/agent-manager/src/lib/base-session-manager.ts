@@ -32,9 +32,9 @@ import {
   type ParseResult,
   type ResolvedEffortPreset,
   type TurnImage,
-  buildModelChain,
   describeHarness,
   partitionHarness,
+  resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
@@ -661,7 +661,12 @@ export class BaseSessionManager {
     // chainAttempt 인덱스만 넘기면 동일 체인의 다음 모델을 고른다. attemptModel
     // 이 이번 세션의 실제 모델(null=CLI 기본). 체인 상태는 아래 SessionRecord 에
     // 저장해 exit 핸들러가 남은 폴백 여부를 판단한다.
-    const modelChain = buildModelChain(effectiveModel, rawHarness?.fallback_models);
+    // Claude backend profile이 활성화된 세션은 resolveModelChain()이
+    // harness.fallback_models를 통째로 무시한다(ticket 41dc37cb 리뷰 라운드1) —
+    // subagent-manager.ts와 동일한 근거: endpoint 하나에 model 하나뿐이라
+    // "다른 모델로 폴백"이 성립하지 않고, 그 raw 값들은 CLI-recognized
+    // alias로 검증된 적이 없다.
+    const modelChain = resolveModelChain(effectiveModel, claudeRuntimeProfile, rawHarness?.fallback_models);
     const chainAttempt = chainAttemptOpt ?? 0;
     const attemptModel = modelChain[chainAttempt] ?? null;
     if (modelChain.length > 1) {

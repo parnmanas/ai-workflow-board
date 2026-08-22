@@ -118,6 +118,14 @@ alias tier `--model` claims to be, every request — main turn or internal aux
 call — still routes to the one configured backend model. Set `env` to override
 any of those variables individually (e.g. a genuinely multi-model backend).
 
+A board's harness `fallback_models` (a model-retry chain for transient
+usage-limit / model-unavailable deaths) is ignored while a profile is bound:
+the profile serves exactly one model behind one endpoint, so there is nothing
+else on that backend to fall back to, and those entries were never validated
+as CLI-recognized aliases. A fallback-eligible death on a profile-bound
+session is treated as an ordinary single failure instead of retrying with a
+different `--model`.
+
 ## Claude wrapper and public configuration
 
 `claude_executable` optionally selects Claude CLI or a Claude-compatible

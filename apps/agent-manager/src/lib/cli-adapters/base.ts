@@ -177,6 +177,31 @@ export function buildModelChain(
 }
 
 /**
+ * Chain-decision entry point shared by both spawn sites (subagent-manager.ts
+ * and base-session-manager.ts) — ticket 41dc37cb review round 1. A bound
+ * Claude backend profile pins the session to one served model behind one
+ * endpoint; there is no other model on that backend to fall back to.
+ * `harness.fallback_models` targets the plain-Anthropic multi-tier case
+ * (try opus, then sonnet, ...) and its entries are never validated as
+ * CLI-recognized aliases. Letting them extend a profile-bound chain would
+ * make a fallback-eligible retry's `--model` an arbitrary board-configured
+ * string again — resurrecting the exact unrecognized_model failure this
+ * ticket fixed, on the very path meant to recover from a failure. So while a
+ * profile is bound, the chain is the resolved alias alone (length 1 — see
+ * buildModelChain's bound check, this makes the fallback respawn a no-op and
+ * the death falls through to the ordinary breaker/silent-exit path, same as
+ * if fallback_models were never configured). The profile-less path is
+ * byte-for-byte `buildModelChain` — unchanged.
+ */
+export function resolveModelChain(
+  effectiveModel: string | null,
+  claudeRuntimeProfile: RuntimeProfileSpec | null | undefined,
+  fallbackModels: string[] | null | undefined,
+): (string | null)[] {
+  return buildModelChain(effectiveModel, claudeRuntimeProfile ? null : fallbackModels);
+}
+
+/**
  * Ticket-level "effort preset" channel — a PARALLEL surface to HarnessSpec,
  * deliberately NOT folded into HARNESS_SPEC_KEYS. A Ticket carries an abstract
  * preset id; Board settings map that id to per-CLI options. The server resolves

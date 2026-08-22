@@ -57,6 +57,20 @@ process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'o
   return path;
 }
 
+// ticket 41dc37cb 리뷰 라운드1 — 매번 동일하게 fallback-eligible 실패로
+// 죽는 CLI. 재-spawn(모델 폴백)이 실제로 트리거되는지/안 되는지를
+// SubagentManager.onExit 카운트로 관찰하는 테스트 전용.
+async function makeAlwaysFailFixture(name) {
+  await mkdir(fixtureRoot, { recursive: true });
+  const path = join(fixtureRoot, name);
+  await writeFile(path, `#!/usr/bin/env node
+process.stderr.write('unrecognized model\\n');
+process.exit(1);
+`);
+  await chmod(path, 0o755);
+  return path;
+}
+
 async function spawnFixture(profile, captureFile, extra = {}) {
   const manager = new SubagentManager(config);
   const exited = new Promise(resolve => { manager.onExit = resolve; });
@@ -140,6 +154,73 @@ test('profile.model_alias overrides the default --model alias', async () => {
   }, join(fixtureRoot, 'custom-alias.json'));
   assert.equal(capture.model, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+});
+
+// ticket 41dc37cb 리뷰 라운드1 — 리뷰 지적: 최초 spawn은 alias를 쓰지만,
+// 폴백-적격 실패(unrecognized_model 등) 후 exit 핸들러의 model-fallback
+// 체인(ticket 61f4dd18)이 harness.fallback_models의 raw 값으로 재-spawn하면
+// 바로 위 두 테스트가 지키는 불변식이 재시도 경로에서 깨진다 — 같은 endpoint에
+// CLI가 검증한 적 없는 임의 문자열이 다시 --model로 실린다. resolveModelChain()
+// (cli-adapters/base.ts, 단위 테스트는 cli-error-signatures.test.mjs)이 profile
+// 활성화 시 harness.fallback_models를 통째로 무시해 체인 길이를 1로 고정하므로,
+// 폴백 respawn 자체가 트리거되지 않는다 — 이 테스트는 실제
+// SubagentManager.spawn()으로 그걸 end-to-end 증명한다: 첫 시도가
+// fallback-eligible 실패로 죽어도 두 번째 프로세스는 절대 뜨지 않는다.
+test('ticket 41dc37cb: a Claude backend profile session never retries with a different --model on a fallback-eligible death', async () => {
+  const executable = await makeAlwaysFailFixture('claude-always-fail-fallback.mjs');
+  const manager = new SubagentManager(config);
+  let exitCount = 0;
+  let resolveFirstExit;
+  const firstExit = new Promise((resolve) => {
+    resolveFirstExit = resolve;
+  });
+  manager.onExit = () => {
+    exitCount += 1;
+    if (exitCount === 1) resolveFirstExit();
+  };
+  const result = await manager.spawn({
+    kind: 'trigger',
+    taskText: 'fixture task',
+    rolePrompt: 'fixture role',
+    triggerId: 'trigger-fallback-suppress-a',
+    ticketId: 'ticket-fallback-suppress-a',
+    agentId: 'agent-fixture',
+    role: 'assignee',
+    runtimeProfile: {
+      id: 'fallback-suppress-a',
+      kind: 'claude-backend',
+      protocol: 'anthropic-compatible',
+      base_url: 'http://127.0.0.1:40109',
+      model: 'qwen3-coder-next',
+      claude_executable: executable,
+    },
+    // Not a CLI-recognized alias on purpose — proves it can never reach
+    // --model, whether on attempt 1 (already covered above) or a fallback
+    // retry (what this test guards).
+    harness: { fallback_models: ['claude-opus-4-1-not-a-cli-alias'] },
+    agentContext: {
+      agent_id: 'agent-fixture',
+      api_key: 'agent-awb-key',
+      cwd: fixtureRoot,
+      mcp_config_path: join(fixtureRoot, 'missing-mcp.json'),
+      cli: 'claude',
+      cli_home_dir: join(fixtureRoot, 'claude-home'),
+    },
+  });
+  assert.equal(result.spawned, true);
+  await Promise.race([
+    firstExit,
+    delay(5_000).then(() => assert.fail('fallback-suppression fixture did not exit')),
+  ]);
+  // A pre-fix build fires the second spawn synchronously inside the same
+  // close-handler tick (attemptModel = the raw fallback string) — give it a
+  // beat to land before asserting it never happened.
+  await delay(500);
+  assert.equal(
+    exitCount,
+    1,
+    'a profile-bound session has exactly one model to retry with — the fallback chain must not extend past it',
+  );
 });
 
 // ticket 7d8ea7c9 후속 — Claude Code 내부 보조 호출(세션 제목 생성 등)은
