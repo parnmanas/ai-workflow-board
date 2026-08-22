@@ -1,11 +1,15 @@
-// Shared NestFactory boot for QA tests.
+// Shared NestFactory boot helpers.
 //
-// Every QA test boots its own NestJS app on a unique port so tests can run
-// independently. This module consolidates the repeated boot/module-load code
-// that appeared inline in proxy-passthrough.test.mjs and chat-roundtrip.test.mjs.
+// bootApp() — full HTTP boot for QA tests. Every QA test boots its own
+// NestJS app on a unique port so tests can run independently. This module
+// consolidates the repeated boot/module-load code that appeared inline in
+// proxy-passthrough.test.mjs and chat-roundtrip.test.mjs.
 //
 // Pattern: `const { app, port, modules } = await bootApp({ port: 7800 });`
 // then `t.after(() => app.close())` + `exitAfterTests()` at file end.
+//
+// bootAppModuleOnly() — DI-graph-only boot, no listen (see its own doc
+// comment below). Used by nest-app-boot-smoke.test.mjs.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -143,6 +147,41 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   await app.listen(port, '0.0.0.0');
   traceEvent('boot-ok', { port, duration_ms: Date.now() - t0 });
   return { app, port, modules };
+}
+
+// Minimal boot — DI graph instantiation only, no HTTP listen. Used by
+// nest-app-boot-smoke.test.mjs to catch guard/provider wiring bugs (e.g. a
+// @UseGuards(PermissionGuard) controller whose module doesn't register
+// PermissionGuard's own dependency AuthGuard) that `tsc` can't see, since
+// NestJS resolves DI at runtime, not at compile time.
+//
+// abortOnError: false is required. Without it, NestFactory.create logs the
+// UnknownDependenciesException itself and calls process.exit(1) directly on
+// a wiring failure — bypassing the caller's try/catch and killing the whole
+// node:test worker instead of surfacing an assertable error (verified by
+// deliberately breaking a module's guard providers and observing the
+// process die silently without abortOnError:false, vs. throwing cleanly
+// with it).
+export async function bootAppModuleOnly({ logger = false } = {}) {
+  process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
+  process.env.NODE_ENV = 'test';
+  process.env.MCP_DEV_MODE = process.env.MCP_DEV_MODE || 'true';
+  process.env.AGENT_DEV_MODE = process.env.AGENT_DEV_MODE || 'true';
+  // Hermetic sql.js DBs per process, same rationale as bootApp() above but
+  // keyed on pid only (no port — this boot never listens).
+  if (!process.env.SQLJS_DB_PATH) {
+    const isolated = path.join(os.tmpdir(), `awb-boot-smoke-${process.pid}.db`);
+    try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
+    process.env.SQLJS_DB_PATH = isolated;
+  }
+  if (!process.env.SQLJS_ONTOLOGY_DB_PATH) {
+    const isolatedOntology = path.join(os.tmpdir(), `awb-boot-smoke-ontology-${process.pid}.db`);
+    try { fs.rmSync(isolatedOntology, { force: true }); } catch { /* best-effort */ }
+    process.env.SQLJS_ONTOLOGY_DB_PATH = isolatedOntology;
+  }
+  const { NestFactory } = await import('@nestjs/core');
+  const { AppModule } = await import('file://' + path.join(DIST_ROOT, 'app.module.js'));
+  return NestFactory.create(AppModule, { logger, abortOnError: false });
 }
 
 export async function closeTestApp(app) {
