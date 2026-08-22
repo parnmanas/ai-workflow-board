@@ -62,6 +62,24 @@ export interface CiWaitOutcome {
   resolved_at: string; // ISO timestamp
 }
 
+/**
+ * Tracks an ONGOING streak of sweeps that learned nothing about the run
+ * (GitHub read threw, or degraded to null — no credential resolvable / 404)
+ * — ticket 9bbe9146. Distinct from `outcome`: the wait is still legitimately
+ * active, this just means recent sweeps could not make progress on it.
+ * Cleared entirely the moment a poll succeeds (even "still queued" counts as
+ * success here — only the INABILITY to read the run is tracked).
+ */
+export interface CiWaitPollIssue {
+  consecutive_failures: number;
+  /** ISO timestamp of the first failure in the CURRENT streak — stable
+   *  across retries, doubles as the alert comment's dedupe key suffix. */
+  first_failure_at: string;
+  /** Set once an alert comment has been posted for this streak, so later
+   *  sweeps don't re-attempt it every 2 minutes. */
+  alerted: boolean;
+}
+
 export interface CiWaitContext {
   owner: string;
   repo: string;
@@ -73,6 +91,8 @@ export interface CiWaitContext {
   /** Present once the wait has resolved (success/failure/timeout/malformed)
    *  but delivery (comment + dispatch) may not have completed yet. */
   outcome?: CiWaitOutcome;
+  /** Present only while there is an ONGOING run of poll failures. */
+  poll_issue?: CiWaitPollIssue;
 }
 
 export interface RegisterWaitInput {
@@ -105,6 +125,14 @@ export function parseCiWaitContext(raw: string | null | undefined): CiWaitContex
           resolved_at: String(o.resolved_at || ''),
         }
       : undefined;
+    const pi = parsed.poll_issue;
+    const poll_issue: CiWaitPollIssue | undefined = (pi && typeof pi === 'object' && pi.consecutive_failures)
+      ? {
+          consecutive_failures: Number(pi.consecutive_failures) || 0,
+          first_failure_at: String(pi.first_failure_at || ''),
+          alerted: !!pi.alerted,
+        }
+      : undefined;
     return {
       owner: String(parsed.owner),
       repo: String(parsed.repo),
@@ -114,6 +142,7 @@ export function parseCiWaitContext(raw: string | null | undefined): CiWaitContex
       registered_by: String(parsed.registered_by || ''),
       registered_at: String(parsed.registered_at || ''),
       outcome,
+      poll_issue,
     };
   } catch {
     return null;

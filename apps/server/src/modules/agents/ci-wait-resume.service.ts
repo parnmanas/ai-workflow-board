@@ -91,27 +91,53 @@
  * outcome, and resumes the ticket with an explanatory comment so a
  * human/agent can re-dispatch or escalate instead of the ticket silently
  * never coming back.
+ *
+ * Credential resolution (ticket 9bbe9146): `getWorkflowRun` needs a
+ * `credential_id` to authenticate past `GitHubConnectorService`'s env-token
+ * fallback (`process.env.GITHUB_TOKEN`, commonly unset — this deployment
+ * authenticates via per-Resource stored credentials instead, see
+ * `github-tools.ts`'s `sync_github_resource` comment). An earlier version of
+ * this service never resolved one at all, so every poll silently degraded
+ * to "no token" (`isGitHubDegradableError` → `getWorkflowRun` returns null)
+ * and looked EXACTLY like "still queued" — six real Merging tickets sat
+ * parked for 1-2h before a human noticed. `_resolveCredentialId` now mirrors
+ * `ClaimVerificationService._lookupRemoteSha`'s existing pattern:
+ * `Ticket.base_repo_resource_id` → `Resource` (workspace-scope checked) →
+ * `Resource.credential_id`. Degrades to null (same as before) when the
+ * ticket has no repo binding — never blocks the sweep.
+ *
+ * Poll-failure surfacing (ticket 9bbe9146): the silent-degrade case above is
+ * exactly why a run that cannot be READ at all (thrown error, or degraded
+ * to null) is now tracked separately from a run that is legitimately still
+ * queued/in_progress (`CiWaitContext.poll_issue`, cleared the instant a poll
+ * succeeds). After `CI_WAIT_ALERT_AFTER_FAILURES` consecutive unreadable
+ * polls (default 5, ~10 min) `_trackPollFailure` posts ONE ticket comment —
+ * the wait stays registered (this is a notification, not a resolution) so
+ * the problem is visible long before the 6h timeout, not just at it.
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
+import { Resource } from '../../entities/Resource';
 import { LogService } from '../../services/log.service';
 import { GitHubConnectorService, GitHubWorkflowRun } from '../../services/github-connector.service';
-import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome } from '../tickets/ci-wait.service';
+import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome, CiWaitPollIssue } from '../tickets/ci-wait.service';
 import { TriggerLoopService } from './trigger-loop.service';
 
 const DEFAULTS = {
   ENABLED: true,
   SWEEP_MS: 2 * 60_000,          // 2 min — short, since a ticket is actively parked on this
   MAX_AGE_MS: 6 * 60 * 60_000,   // 6 h — safety valve for a run that never resolves
+  ALERT_AFTER_FAILURES: 5,       // ~10 min at the default sweep interval
 } as const;
 
 export interface CiWaitResumeConfig {
   enabled: boolean;
   sweepMs: number;
   maxAgeMs: number;
+  alertAfterFailures: number;
 }
 
 function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): CiWaitResumeConfig {
@@ -131,6 +157,7 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): CiWaitResumeCo
     enabled: parseBool(env.CI_WAIT_ENABLED, DEFAULTS.ENABLED),
     sweepMs: parseIntEnv(env.CI_WAIT_SWEEP_MS, DEFAULTS.SWEEP_MS),
     maxAgeMs: parseIntEnv(env.CI_WAIT_MAX_AGE_MS, DEFAULTS.MAX_AGE_MS),
+    alertAfterFailures: parseIntEnv(env.CI_WAIT_ALERT_AFTER_FAILURES, DEFAULTS.ALERT_AFTER_FAILURES),
   };
 }
 
@@ -282,17 +309,27 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const credentialId = await this._resolveCredentialId(ticket);
     let run: GitHubWorkflowRun | null;
     try {
-      run = await this.github.getWorkflowRun(ctx.owner, ctx.repo, ctx.run_id);
+      run = await this.github.getWorkflowRun(ctx.owner, ctx.repo, ctx.run_id, credentialId);
     } catch (e) {
       stats.fetch_failures++;
       this.logService.warn('CI', 'ci-wait GitHub read failed (will retry next sweep)', {
         err: String(e), ticket_id: ticket.id, owner: ctx.owner, repo: ctx.repo, run_id: ctx.run_id,
       });
+      run = null;
+    }
+    if (!run) {
+      // Either the throw above, or GitHubConnectorService's own degrade-to-
+      // null (404 / unresolved credential). Either way this sweep learned
+      // nothing about the run — track it so a persistently broken
+      // credential/run_id surfaces well before CI_WAIT_MAX_AGE_MS instead of
+      // retrying in total silence for up to 6h (see class docstring).
+      await this._trackPollFailure(ticket, rawContext, ctx, nowMs);
       return;
     }
-    if (!run) return; // degradable (404 / no token) — retry next sweep, not yet a timeout
+    if (ctx.poll_issue) await this._clearPollFailure(ticket, rawContext, ctx);
     if (run.status !== 'completed') return; // still running/queued — retry next sweep
 
     const outcome = this._freshOutcome('resolved', this._formatResolvedMessage(ctx, run), nowMs);
@@ -301,6 +338,92 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
     if (!won) return; // lost the race — the winner (or a future sweep) delivers
     await this._deliver(ticket, nextJson, nextCtx, stats);
+  }
+
+  /**
+   * Resolve this ticket's stored GitHub credential — mirrors
+   * `ClaimVerificationService._lookupRemoteSha`'s existing pattern
+   * (claim-verification.service.ts) exactly: `Ticket.base_repo_resource_id`
+   * → `Resource`, workspace-scope checked so a stale id pointing at another
+   * workspace's Resource can never leak that workspace's credential →
+   * `Resource.credential_id`. Degrades to null (→ GitHubConnectorService's
+   * env-token fallback, same as before this ticket) when the ticket has no
+   * repo binding or the Resource is unresolvable — never blocks the sweep.
+   */
+  private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
+    if (!ticket.base_repo_resource_id || !ticket.workspace_id) return null;
+    const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } });
+    if (resource && resource.workspace_id !== null && resource.workspace_id !== ticket.workspace_id) return null;
+    return resource?.credential_id || null;
+  }
+
+  /**
+   * Record one more sweep that could not read the run at all (see class
+   * docstring's "Poll-failure surfacing"). CAS-conditioned on `rawContext`
+   * like every other context mutation in this file — a losing race just
+   * means another sweep already recorded (or is recording) the same streak.
+   * Posts an alert comment the sweep that crosses `alertAfterFailures`
+   * (never resolves/clears the wait — this is a notification, not an
+   * outcome).
+   */
+  private async _trackPollFailure(ticket: Ticket, rawContext: string, ctx: CiWaitContext, nowMs: number): Promise<void> {
+    const prior = ctx.poll_issue;
+    const consecutiveFailures = (prior?.consecutive_failures || 0) + 1;
+    const firstFailureAt = prior?.first_failure_at || new Date(nowMs).toISOString();
+    const alreadyAlerted = !!prior?.alerted;
+    const shouldAlert = !alreadyAlerted && consecutiveFailures >= this.config.alertAfterFailures;
+    const nextIssue: CiWaitPollIssue = {
+      consecutive_failures: consecutiveFailures,
+      first_failure_at: firstFailureAt,
+      alerted: alreadyAlerted || shouldAlert,
+    };
+    const nextCtx: CiWaitContext = { ...ctx, poll_issue: nextIssue };
+    const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, JSON.stringify(nextCtx));
+    if (!won || !shouldAlert) return;
+    await this._postPollFailureAlert(ticket, ctx, consecutiveFailures, firstFailureAt);
+  }
+
+  /** A poll finally succeeded — drop the failure streak entirely so a LATER
+   *  unrelated streak starts counting from zero and can alert again. */
+  private async _clearPollFailure(ticket: Ticket, rawContext: string, ctx: CiWaitContext): Promise<void> {
+    const nextCtx: CiWaitContext = { ...ctx, poll_issue: undefined };
+    await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, JSON.stringify(nextCtx));
+  }
+
+  /**
+   * Best-effort notification comment — deliberately NOT routed through
+   * `CiWaitService.claimDelivery` (that CASes `pending_ci_wait` false, which
+   * would be wrong here: the wait is still legitimately active, only
+   * struggling to read its run). Dedupe key is stable for the whole streak
+   * (`firstFailureAt`, not `nowMs`) so a retry after a mid-write crash can
+   * never double-post — same `.orIgnore()` idempotency column the resolution
+   * comment uses (see `_deliver`).
+   */
+  private async _postPollFailureAlert(ticket: Ticket, ctx: CiWaitContext, consecutiveFailures: number, firstFailureAt: string): Promise<void> {
+    const dedupeKey = `ci-wait-poll-alert:${ticket.id}:${firstFailureAt}`;
+    try {
+      await this.dataSource.getRepository(Comment)
+        .createQueryBuilder()
+        .insert()
+        .into(Comment)
+        .values({
+          ticket_id: ticket.id,
+          workspace_id: ticket.workspace_id || '',
+          author_type: 'system',
+          author_id: '',
+          author: 'CiWaitResumeService',
+          content:
+            `⚠️ **CI 대기 폴링 반복 실패** — ${ctx.owner}/${ctx.repo} run ${ctx.run_id} 상태를 ${consecutiveFailures}회 연속(최초 실패 ${firstFailureAt}) 확인하지 못했습니다. ` +
+            'GitHub 자격증명(credential) 또는 run_id를 확인하세요. 대기 자체는 계속 유지되며, ' +
+            `계속 실패하면 최대 ${Math.round(this.config.maxAgeMs / 3_600_000)}시간 후 타임아웃으로 자동 해제됩니다.`,
+          type: 'note',
+          operational_recurrence_key: dedupeKey,
+        })
+        .orIgnore()
+        .execute();
+    } catch (e) {
+      this.logService.warn('CI', 'ci-wait poll-failure alert comment failed', { err: String(e), ticket_id: ticket.id });
+    }
   }
 
   private _formatResolvedMessage(ctx: CiWaitContext, run: GitHubWorkflowRun): string {
