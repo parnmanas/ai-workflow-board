@@ -289,14 +289,21 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * has made forward progress within `seedAfterMs`, is parked, or already has an
    * open intent for the role is skipped.
    *
-   * 담당자가 이번 컬럼 진입 이후 실제로 응답(코멘트/클레임 등)한 적이 있다면 —
-   * 그 뒤로 아무리 오래 idle이어도 — 재시드하지 않는다(ticket fec25d90). 재시드된
-   * intent의 created_at은 그 응답보다 나중이라 decideIntentReconcile의
-   * `progressed` 규칙이 다시는 성립할 수 없고, 그 결과 "담당자가 의도적으로
-   * 대기 중"인 정상 상황이 영원히 만족되지 않는 재디스패치·에스컬레이션 루프가
-   * 된다. 디스패치가 유실되지 않았다는 증거(응답 자체)가 있으니 이 라우팅
-   * 사이클에 대해 reconciler가 할 일은 없다 — 장기 무진행 여부는
-   * StuckTicketDetector가 훨씬 긴 시간축에서 별도로 감시한다.
+   * 이 role의 CURRENT holder 본인이 이번 컬럼 진입 이후 실제로 응답(코멘트/
+   * 클레임/output-liveness)한 적이 있다면 — 그 뒤로 아무리 오래 idle이어도 —
+   * 이 role만 재시드하지 않는다(ticket fec25d90). 재시드된 intent의 created_at
+   * 은 그 응답보다 나중이라 decideIntentReconcile의 `progressed` 규칙이 다시는
+   * 성립할 수 없고, 그 결과 "담당자가 의도적으로 대기 중"인 정상 상황이 영원히
+   * 만족되지 않는 재디스패치·에스컬레이션 루프가 된다. 디스패치가 유실되지
+   * 않았다는 증거(응답 자체)가 있으니 이 role의 이번 라우팅 사이클에 대해
+   * reconciler가 할 일은 없다 — 장기 무진행 여부는 StuckTicketDetector가 훨씬
+   * 긴 시간축에서 별도로 감시한다.
+   *
+   * 판단은 role별 holder로 한정한다(리뷰 지적) — reporter 등 제3자나 다른
+   * role의 holder가 남긴 신호는 "이 role의 디스패치가 유실되지 않았다"는
+   * 증거가 되지 못한다. 그 신호까지 합친 티켓 전체 `_latestForwardProgressMs`
+   * 를 그대로 쓰면, assignee emit이 실제로 유실됐는데 reporter가 질문 코멘트만
+   * 남긴 경우에도 영구히 재시드가 억제되는 정반대 방향의 회귀가 생긴다.
    */
   private async _seedMissingIntents(now: Date, stats: ReconcileStats): Promise<void> {
     const colRepo = this.dataSource.getRepository(BoardColumn);
@@ -327,16 +334,21 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
       const idleMs = now.getTime() - Math.max(lastProgressMs, new Date(ticket.created_at).getTime());
       if (idleMs < this.config.seedAfterMs) continue;
 
-      // 이 컬럼에 들어온 뒤 실제로 응답한 적이 있다면 디스패치는 유실되지 않은
-      // 것이다 — 재시드 대상에서 제외한다(ticket fec25d90, 위 docstring 참고).
       const enteredAtMs = await this._lastColumnEntryMs(ticket.id, new Date(ticket.created_at).getTime());
-      if (lastProgressMs > enteredAtMs) continue;
 
       for (const role of roles) {
         const existing = await this.intents.findOpenForTicketRole(ticket.id, role);
         if (existing) continue;
         const holders = await this._resolveHolderAgentIds(ticket.workspace_id, ticket.id, role);
         if (holders.length === 0) continue; // unstaffed → no dispatch owed
+
+        // 이 role의 holder 본인이 컬럼 진입 이후 실제로 응답했다면 디스패치는
+        // 유실되지 않은 것이다 — 이 role만 재시드 대상에서 제외한다(ticket
+        // fec25d90, 위 docstring 참고). 다른 role holder/제3자의 신호는 넣지
+        // 않는다 — 있어도 "이 role"의 유실 디스패치는 여전히 seed돼야 한다.
+        const holderProgressMs = await this._holderProgressMs(ticket, role, holders);
+        if (holderProgressMs > enteredAtMs) continue;
+
         await this.intents.createSeed({
           workspaceId: ticket.workspace_id,
           boardId: col.board_id,
@@ -397,11 +409,19 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * shifting a comment's timestamp under a non-UTC dev TZ and silently
    * mis-deciding `progressed`. The `progressed` comparison against the intent's
    * own (entity-hydrated) created_at must use the same clock.
+   *
+   * `id: 'DESC'` rides along as a deterministic tiebreaker (리뷰 지적, ticket
+   * fec25d90) — `created_at` alone has no defined pick among rows sharing the
+   * same stored timestamp (a same-second burst), which is the board runbook's
+   * "created_at 단독 사용 금지" case. `id` is a random UUID, not a write
+   * sequence, so it does not recover true insertion order within a tie — it
+   * only makes the pick reproducible across runs/dialects instead of
+   * implementation-defined, matching `_resolveHolderAgentIds`'s convention.
    */
   private async _latestForwardProgressMs(ticket: Ticket): Promise<number> {
     const latestComment = await this.dataSource.getRepository(Comment).findOne({
       where: { ticket_id: ticket.id, type: Not('system') },
-      order: { created_at: 'DESC' },
+      order: { created_at: 'DESC', id: 'DESC' },
       select: ['id', 'created_at'],
     });
     const commentMs = latestComment?.created_at ? new Date(latestComment.created_at).getTime() : 0;
@@ -411,7 +431,7 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
         { ticket_id: ticket.id, action: 'moved', field_changed: 'column' },
         { ticket_id: ticket.id, action: 'updated', field_changed: 'locked_by_agent_id' },
       ],
-      order: { created_at: 'DESC' },
+      order: { created_at: 'DESC', id: 'DESC' },
       select: ['id', 'created_at'],
     });
     const lifecycleMs = latestLifecycle?.created_at ? new Date(latestLifecycle.created_at).getTime() : 0;
@@ -428,15 +448,50 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * 만든 경우) `fallbackMs`(호출자가 넘기는 ticket.created_at)로 대체한다.
    * `_latestForwardProgressMs`의 lifecycle MAX와는 다르다 — 그쪽은 claim/release
    * 까지 함께 묶어 "가장 최근에 뭔가 있었던 시각"을 구하지만, 재시드 스킵
-   * 판단에는 "이번 dwell이 시작된 시각" 그 자체가 필요하다.
+   * 판단에는 "이번 dwell이 시작된 시각" 그 자체가 필요하다. `id: 'DESC'`를
+   * 결정적 타이브레이커로 함께 쓴다(리뷰 지적) — 동일 타임스탬프 move burst에서
+   * `created_at` 단독 정렬은 어느 행을 고를지 정의돼 있지 않다.
    */
   private async _lastColumnEntryMs(ticketId: string, fallbackMs: number): Promise<number> {
     const latestMove = await this.dataSource.getRepository(ActivityLog).findOne({
       where: { ticket_id: ticketId, action: 'moved', field_changed: 'column' },
-      order: { created_at: 'DESC' },
+      order: { created_at: 'DESC', id: 'DESC' },
       select: ['id', 'created_at'],
     });
     return latestMove?.created_at ? new Date(latestMove.created_at).getTime() : fallbackMs;
+  }
+
+  /**
+   * 이 role의 CURRENT holder(들) 본인이 낸 진행 신호(코멘트/락/output-liveness)
+   * 의 최신 시각(epoch ms), 없으면 0(ticket fec25d90, 리뷰 지적 반영). 다른
+   * role holder나 reporter 등 제3자의 신호는 "이 role에 대한 디스패치가
+   * 유실되지 않았다"는 증거가 되지 못하므로 제외한다 — `_latestForwardProgressMs`
+   * 는 티켓 전체의 신호를 합쳐 반환해 role을 구분하지 않으므로 재시드 스킵
+   * 판단에는 쓸 수 없다.
+   */
+  private async _holderProgressMs(ticket: Ticket, role: string, holderAgentIds: string[]): Promise<number> {
+    if (holderAgentIds.length === 0) return 0;
+
+    const latestComment = await this.dataSource.getRepository(Comment).findOne({
+      where: { ticket_id: ticket.id, type: Not('system'), author_id: In(holderAgentIds) },
+      order: { created_at: 'DESC', id: 'DESC' },
+      select: ['id', 'created_at'],
+    });
+    const commentMs = latestComment?.created_at ? new Date(latestComment.created_at).getTime() : 0;
+
+    // 락은 티켓 단일 필드라 "지금 이 role의 holder가 쥐고 있을 때만" 응답
+    // 신호로 인정한다 — 다른 role holder의 claim은 이 role에 대한 증거가 아니다.
+    const lockMs = (ticket.locked_by_agent_id && ticket.locked_at && holderAgentIds.includes(ticket.locked_by_agent_id))
+      ? new Date(ticket.locked_at).getTime()
+      : 0;
+
+    let outputMs = 0;
+    for (const agentId of holderAgentIds) {
+      const ts = this.agentStatus?.getOutputLivenessAt?.(agentId, ticket.id, role);
+      if (ts !== undefined && ts > outputMs) outputMs = ts;
+    }
+
+    return Math.max(commentMs, lockMs, outputMs);
   }
 
   private async _writeAudit(ticket: Ticket | null, intent: any, action: string, extra: Record<string, unknown>): Promise<void> {
