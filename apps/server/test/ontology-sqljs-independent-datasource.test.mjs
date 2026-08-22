@@ -30,22 +30,21 @@
 //      whose resolved location equals the primary DataSource's, instead of
 //      silently letting two independent sql.js instances export the same
 //      on-disk file.
-//   6. COMPLETION CRITERION 3, split into what the dual-DataSource split
-//      does and does not guarantee (reviewer finding, 6ca4894a Review round
-//      1 — the original single test here mocked the gate BEFORE the real
-//      saveDatabase() call, so the actual synchronous export never ran
-//      concurrently with anything and the test proved nothing):
-//        6a. a REAL, chunked ontology bulk-population transaction (many
-//            awaited insert chunks, S3's own "batch, minimize transaction()
-//            calls" shape) does not block a concurrent primary write —
-//            TRUE, and now tested against a real multi-chunk transaction
-//            instead of a mocked gate.
-//        6b. the flush's own synchronous db.export() call (WASM, verified
-//            against typeorm@0.3.31's own source) DOES monopolize the
-//            event loop for its duration — a real, DESIGN.md-acknowledged
-//            v1 limitation (moving the flush off the main thread is an
-//            explicitly rejected v1 mechanism, a named future follow-up),
-//            demonstrated here rather than glossed over.
+//   6. COMPLETION CRITERION 3, corrected TWICE across reviewer round 1 (see
+//      the long comment directly above the KNOWN V1 LIMITATION test below
+//      for the full history — the first fix mocked the gate before the real
+//      saveDatabase() call and proved nothing; the second fix's own
+//      "chunked bulk-population" test smuggled in a test-only setTimeout
+//      that did real work the actual (nonexistent, out-of-scope) population
+//      path isn't guaranteed to reproduce). What THIS ticket actually
+//      guarantees and tests: queue independence (item 4 above) is the
+//      necessary structural precondition; the flush's own synchronous
+//      db.export() DOES monopolize the event loop for its duration — a
+//      real, DESIGN.md-acknowledged v1 limitation, not a bug, demonstrated
+//      deterministically below. Full non-blocking behavior for a REAL bulk
+//      population workload is explicitly NOT established here and is a
+//      required obligation of whichever ticket implements that workload
+//      (flagged on ticket e14ef1c9 directly, not just documented here).
 //
 // Runs against compiled dist/ (requires `npm run build`, satisfied by the
 // test script). Uses isolated SQLJS_DB_PATH / SQLJS_ONTOLOGY_DB_PATH temp
@@ -258,78 +257,57 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     );
   });
 
-  // COMPLETION CRITERION 3, corrected (reviewer finding, 6ca4894a Review
-  // round 1): the previous version of this test gated the MOCKED
+  // COMPLETION CRITERION 3, corrected TWICE (reviewer findings, 6ca4894a
+  // Review round 1 — the reviewer approved fixes 1+2 above after re-running
+  // this suite locally, but round-1's own first pass at 3a was itself still
+  // wrong and got a second, sharper finding):
+  //
+  // Round-1-a: the FIRST version of this test gated the MOCKED
   // saveDatabase() behind a Promise BEFORE calling the real
   // origOntoSave() — meaning the real, synchronous WASM db.export() call
   // (measured at 676ms for a 950k-row DB, scripts/benchmark-ontology-flush.mjs)
-  // never actually ran while the "concurrent" primary write executed, so the
-  // test proved nothing about the real export window. Verified directly
-  // against typeorm@0.3.31's own source
-  // (node_modules/typeorm/driver/sqljs/SqljsDriver.js `save()`): the
-  // underlying `this.databaseConnection.export()` call is fully synchronous
-  // — no internal await — and calling an async function runs its body
-  // synchronously up to its first REAL await, so that export call (and
-  // every transitive synchronous call above it: SqljsEntityManager.
-  // saveDatabase() → SqljsDriver.save()) executes in the SAME tick as
-  // `flushOntologySqljs(...)`'s call site, before that call even returns a
-  // pending promise. Node.js is single-threaded — nothing else in the
-  // process, on ANY DataSource, can run while that synchronous chain is
-  // executing. The two tests below split completion criterion 3 into
-  // exactly what the dual-DataSource split does and does not guarantee,
-  // instead of one test overclaiming both:
-  it('COMPLETION CRITERION 3a: a real, chunked ontology bulk-population transaction does not block a concurrent primary write (ticket-move/comment stand-in)', async () => {
-    // Real multi-chunk transaction — S3's own "minimize transaction() call
-    // count" guidance means ONE transaction() wrapping many batched inserts,
-    // each `await`ed individually so the event loop gets a genuine yield
-    // point between chunks (unlike the flush's single unyielding export
-    // call). The 5ms pacing between chunks is test-only — it exists solely
-    // to make the interleaving assertions below deterministic across
-    // machines of different speed, not to change the real code path (which
-    // has no such delay, see benchmark-ontology-flush.mjs).
-    const CHUNK_SIZE = 100;
-    const CHUNK_COUNT = 30;
-    let chunksCompleted = 0;
-
-    const population = AppOntologyDataSource.manager.transaction(async (manager) => {
-      const repo = manager.getRepository(OntologyNode);
-      for (let c = 0; c < CHUNK_COUNT; c++) {
-        const rows = Array.from({ length: CHUNK_SIZE }, (_, i) =>
-          repo.create(makeNode(`bulk-pop-${c}-${i}`)));
-        await repo.insert(rows);
-        await new Promise((r) => setTimeout(r, 5)); // test-only pacing, see comment above
-        chunksCompleted++;
-      }
-    });
-
-    // Wait until population has genuinely started (a few chunks landed).
-    while (chunksCompleted < 2) await new Promise((r) => setImmediate(r));
-
-    const wsRepo = AppDataSource.getRepository(Workspace);
-    const start = Date.now();
-    await AppDataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(Workspace);
-      await repo.save(repo.create({ name: 'interleaved-during-bulk-population', description: 'ticket-move/comment stand-in' }));
-    });
-    const elapsedMs = Date.now() - start;
-
-    assert.ok(
-      chunksCompleted < CHUNK_COUNT,
-      `population must still be incomplete (${chunksCompleted}/${CHUNK_COUNT} chunks done) right after the ` +
-        `interleaved primary write finished — otherwise this proves sequential execution, not real overlap`,
-    );
-    assert.ok(
-      elapsedMs < 300,
-      `an interleaved primary write should complete quickly (took ${elapsedMs}ms) while a ${CHUNK_COUNT}-chunk ` +
-        `ontology bulk population transaction is actively running`,
-    );
-
-    await population; // let it finish — don't leave a dangling in-flight transaction
-    assert.equal(chunksCompleted, CHUNK_COUNT);
-
-    const names = (await wsRepo.find()).map((w) => w.name);
-    assert.ok(names.includes('interleaved-during-bulk-population'), 'the primary write must have actually committed, not just resolved fast');
-  });
+  // never actually ran while the "concurrent" primary write executed. Fixed
+  // by replacing the mock with the KNOWN V1 LIMITATION test below (real,
+  // unmocked flush; see its own comment for the fix detail).
+  //
+  // Round-1-b (this fix): the SECOND version — "COMPLETION CRITERION 3a" —
+  // wrapped a real multi-chunk ontology transaction with a test-only
+  // `setTimeout(5)` between chunks to make the interleaving assertion
+  // deterministic, and claimed this proved "a real bulk-population
+  // transaction does not block a concurrent primary write." The reviewer
+  // correctly rejected this: this ticket's scope is schema + DataSource
+  // split ONLY — there is no actual bulk-population/writer service anywhere
+  // in this codebase yet (that is ticket e14ef1c9's job, the extraction
+  // worker), so "the real path" that claim referred to does not exist to be
+  // tested. The setTimeout(5) was doing real work in the test (creating an
+  // event-loop yield point) that a from-scratch population implementation
+  // is not guaranteed to reproduce — `await repo.insert()` alone resolves
+  // via the microtask queue, which does not guarantee a fair yield to the
+  // timer/I/O phase the way an explicit macrotask (setImmediate/setTimeout)
+  // does, so the claim did not transfer to "any real chunked population
+  // loop," only to "a loop that happens to yield via a macrotask between
+  // chunks."
+  //
+  // Correction: completion criterion 3's literal wording ("온톨로지 대량
+  // 쓰기 중 기존 AWB 쓰기가 블로킹되지 않음을 테스트로 검증") requires an
+  // actual population workload to verify in real wall-clock terms — this
+  // ticket cannot honestly claim that without inventing an out-of-scope
+  // population implementation. What THIS ticket verifies and guarantees is
+  // the STRUCTURAL, necessary precondition: the 'queue independence' test
+  // above already proves a transaction() on the ontology DataSource and a
+  // transaction() on the primary DataSource run concurrently (maxActive=2)
+  // — i.e. they do NOT share `serializeSqljsTransactions()`'s FIFO queue,
+  // so nothing in THIS ticket's own code forces population writes to
+  // serialize behind primary writes or vice versa. That is necessary but
+  // NOT sufficient on its own: whichever ticket implements the actual bulk
+  // population loop (e14ef1c9, the extraction worker, or any later
+  // fan-out writer) MUST additionally (a) yield the event loop between
+  // batches via an explicit macrotask (e.g. `setImmediate`), not rely on
+  // microtask-chained `await`s alone, and (b) test ITS OWN real write path
+  // for non-blocking behavior directly — that obligation is NOT satisfied
+  // by anything in this ticket and must not be assumed inherited from it.
+  // (Flagged explicitly as a comment on ticket e14ef1c9 itself, not just
+  // buried here.)
 
   it('KNOWN V1 LIMITATION, documented not claimed fixed: the ontology flush\'s synchronous db.export() call monopolizes the event loop for its duration', async () => {
     // DESIGN.md axis 3 explicitly REJECTS "moving the sql.js flush off the
