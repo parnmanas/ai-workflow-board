@@ -121,7 +121,8 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     assert.notEqual(ontoLoc, primaryLoc, 'ontology DataSource must never point at the primary data.db file');
 
     const entityNames = ontoOpts.entities.map((e) => e.name).sort();
-    assert.deepEqual(entityNames, ['OntologyEdge', 'OntologyNode', 'OntologyReverseEdgeIndex']);
+    // ticket 964014f5 — OntologyEnrichmentQueue(Phase C의 재보강 대기열) 추가.
+    assert.deepEqual(entityNames, ['OntologyEdge', 'OntologyEnrichmentQueue', 'OntologyNode', 'OntologyReverseEdgeIndex']);
   });
 
   it('static guard: the PRIMARY sql.js DataSource excludes Ontology* entities (synchronize never DDLs them into data.db)', () => {
@@ -132,6 +133,10 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     assert.ok(
       !entityNames.includes('OntologyReverseEdgeIndex'),
       'OntologyReverseEdgeIndex must not synchronize into the primary DataSource',
+    );
+    assert.ok(
+      !entityNames.includes('OntologyEnrichmentQueue'),
+      'OntologyEnrichmentQueue must not synchronize into the primary DataSource',
     );
   });
 
