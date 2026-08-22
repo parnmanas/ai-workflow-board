@@ -34,7 +34,8 @@ export type StreamEventType =
   | 'consensus_update'      // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
   | 'orchestration_update'  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
   | 'ticket_reads_cleared'  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
-  | 'cli_login_progress';  // 티켓 b2e79108: CLI 자동 로그인(device-auth) 진행 상태 — UI 전용, agent-manager 비소비
+  | 'cli_login_progress'  // 티켓 b2e79108: CLI 자동 로그인(device-auth) 진행 상태 — UI 전용, agent-manager 비소비
+  | 'ontology_graph_progress'; // 티켓 964014f5: Ontology Graph 증분 갱신 진행 + graph_status 상태 — UI 전용, agent-manager 비소비
 
 export interface StreamEventScope {
   board_id?: string;
@@ -833,4 +834,37 @@ export interface CliLoginProgressPayload {
   raw_output_fallback: string | null;
   error_detail: string;
   created_credential_id: string | null;
+}
+
+/**
+ * 티켓 964014f5(Ontology Graph 4/7) — 증분 갱신(Phase A/B/C) 진행 헤더 +
+ * graph_status(축 6/ticket #6, 아직 미배정) 생명주기 상태를 같은 프레임에
+ * 싣는다(DESIGN.md 축 4 Integration points: "The same progress-frame shape
+ * now also carries graph_status's building/ready/stale/error state").
+ * UI 전용 — consensus_update/orchestration_update와 같은 패턴: agent는
+ * MCP 툴 응답의 {indexed_at, confidence}로 신선도를 알지 이 스트림을
+ * 구독하지 않는다. `scout-client.md` §3.4 Pattern B(직접 증분 payload,
+ * 재조회 없음) — AgentSubagentsPanel.tsx의 subagent_log 카운터 증가
+ * 패턴과 동일하게, 클라이언트가 progress 숫자를 그대로 누적/치환한다.
+ */
+export interface OntologyGraphProgressPayload {
+  workspace_id: string;
+  graph_id: string;
+  resource_id: string;
+  /** 이 진행 프레임을 낸 job(디바운스 단일 파일 갱신, 또는 git-diff 스코프
+   *  배치)의 상관관계 id — 같은 job의 연속 프레임을 클라이언트가 묶어볼 때 씀. */
+  job_id: string;
+  phase: 'phase_a' | 'phase_b' | 'phase_c' | 'sweep';
+  /** graph_status(ticket #6이 실제 소비/생성할 값) — building=Phase A/B
+   *  진행 중, ready=이번 job 완료(에러 없음), stale=완료했지만 알려진
+   *  backlog가 남음(스윕 대상 존재), error=job 자체가 실패. */
+  graph_status: 'building' | 'ready' | 'stale' | 'error';
+  files_processed: number;
+  edges_extracted: number;
+  edges_total: number | null;
+  nodes_extracted: number;
+  /** phase_a에서 조기 종료됐으면 true(완료조건 1) — UI가 "즉시 완료"로
+   *  표시할 수 있게. */
+  short_circuited: boolean;
+  error: string | null;
 }

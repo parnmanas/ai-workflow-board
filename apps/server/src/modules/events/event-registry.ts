@@ -37,6 +37,7 @@ import {
   OrchestrationUpdatePayload,
   TicketReadsClearedPayload,
   CliLoginProgressPayload,
+  OntologyGraphProgressPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -1196,6 +1197,44 @@ export const EVENT_TYPES: EventDefinition[] = [
       identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({
       event_type: 'cli_login_progress',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
+  },
+
+  // ───────── ontology_graph_progress ─────────
+  // 티켓 964014f5: Ontology Graph 증분 갱신(Phase A/B/C) 진행 + graph_status.
+  // consensus_update/orchestration_update와 같은 user-only UI fuel 패턴 —
+  // agent는 MCP 툴 응답의 {indexed_at, confidence}(축 6, 미배정)로 신선도를
+  // 알지 이 스트림을 구독하지 않는다. workspace 스코프(ticket_id 없음 — 이
+  // 이벤트는 티켓이 아니라 그래프에 묶인다).
+  {
+    eventType: 'ontology_graph_progress',
+    emitterEvent: 'ontology_graph_progress',
+    map(event: any) {
+      const payload: OntologyGraphProgressPayload = {
+        workspace_id: event.workspace_id || '',
+        graph_id: event.graph_id || '',
+        resource_id: event.resource_id || '',
+        job_id: event.job_id || '',
+        phase: event.phase,
+        graph_status: event.graph_status,
+        files_processed: Number.isFinite(event.files_processed) ? Number(event.files_processed) : 0,
+        edges_extracted: Number.isFinite(event.edges_extracted) ? Number(event.edges_extracted) : 0,
+        edges_total: Number.isFinite(event.edges_total) ? Number(event.edges_total) : null,
+        nodes_extracted: Number.isFinite(event.nodes_extracted) ? Number(event.nodes_extracted) : 0,
+        short_circuited: !!event.short_circuited,
+        error: event.error ?? null,
+      };
+      return {
+        payload,
+        scope: { workspace_id: event.workspace_id || undefined },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (_env, identity) => identity.type === 'user',
+    flatten: (env) => ({
+      event_type: 'ontology_graph_progress',
       ...(env.payload as object),
       timestamp: env.timestamp,
     }),
