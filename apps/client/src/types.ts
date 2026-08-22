@@ -949,6 +949,40 @@ export interface Credential {
   updated_at: string;
 }
 
+// 티켓 b2e79108 — CLI 자동 로그인(device-auth). 매니저 인스턴스 선택 드롭다운용
+// 최소 shape (GET /credentials/cli-login/instances).
+export interface CliLoginInstanceOption {
+  instance_id: string;
+  hostname: string;
+  workspace_id: string | null;
+  codex_installed: boolean;
+  codex_healthy: boolean;
+}
+
+export type CliLoginSessionStatus =
+  | 'starting'
+  | 'awaiting_user'
+  | 'completing'
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'cancelled';
+
+export interface CliLoginSession {
+  id: string;
+  workspace_id: string;
+  is_global: boolean;
+  cli: string;
+  credential_name: string;
+  status: CliLoginSessionStatus;
+  verification_url: string | null;
+  user_code: string | null;
+  error_detail: string;
+  created_credential_id: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
 export interface Channel {
   id: string; // GUID
   name: string;

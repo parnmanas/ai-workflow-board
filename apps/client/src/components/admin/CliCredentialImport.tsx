@@ -139,7 +139,10 @@ export default function CliCredentialImport({
 
   return (
     <>
-      <Button variant="secondary" size="md" onClick={() => setOpen(true)}>Import CLI Login</Button>
+      {/* 티켓 b2e79108 — 자동 로그인(CliAutoLogin)이 1차 진입점이 된 뒤로, 이
+          버튼은 매니저 오프라인/원격 호스트 로그인 등 자동 경로가 안 될 때의
+          수동 폴백이다. */}
+      <Button variant="ghost" size="md" onClick={() => setOpen(true)}>Import from File</Button>
       <Modal
         isOpen={open}
         onClose={close}

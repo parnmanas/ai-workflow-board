@@ -44,7 +44,8 @@ type StreamNamedEventType =
   | 'agent_instance_update'  // Phase 3 Agent Manager dashboard
   | 'consensus_update'   // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
   | 'orchestration_update'  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
-  | 'ticket_reads_cleared';  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
+  | 'ticket_reads_cleared'  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
+  | 'cli_login_progress';  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -226,6 +227,13 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // 폴링 없이 즉시 수렴하도록.
       eventSource.addEventListener('ticket_reads_cleared', (event: MessageEvent) => {
         dispatch('ticket_reads_cleared', event.data);
+      });
+
+      // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태. 이 로그인을
+      // 시작한 사용자에게만 오므로(서버 event-registry가 user_id로 좁힘)
+      // 컴포넌트가 session_id로 한 번 더 필터링해서 쓴다.
+      eventSource.addEventListener('cli_login_progress', (event: MessageEvent) => {
+        dispatch('cli_login_progress', event.data);
       });
 
       eventSource.onerror = () => {
