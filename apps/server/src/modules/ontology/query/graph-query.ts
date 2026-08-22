@@ -14,16 +14,20 @@
 // bidirectional level-BFS로 방문집합을 애플리케이션 메모리에 둔다
 // (research-storage.md §2.4).
 //
-// 중요: depth cap은 "출력 row 수"가 아니라 "재귀 평가 자체가 절대 무한/
-// 임의로 깊어지지 않는다"는 것만 보장한다 — 조밀한(fan-out이 큰) 그래프에서는
-// 캡 안에서도 중간 평가 비용이 노드 수가 아니라 Σ(fan-in×fan-out)^depth에
-// 가깝다는 것을 research-storage.md §2.4가 스스로 인정한다("re-explores a
-// node once per distinct incoming path within the depth cap... acceptable
-// because depth is capped"). 이 파일의 안전장치는 (1) depth cap을 항상 강제
-// 적용(기본 3-6 hop 대역, null/unbounded 절대 불가), (2) 출력 row cap을
-// LIMIT으로 강제(SQLite 공식 문서가 권고하는 "unconditional LIMIT" 안전판),
-// (3) BFS는 방문 노드 수 자체에도 별도 상한을 둔다 — 세 가지 조합이지,
-// 어느 하나도 "임의로 조밀한 그래프에서 항상 빠르다"는 보장은 아니다.
+// 중요(리뷰 지적으로 수정됨): 최종 출력의 LIMIT만으로는 재귀 평가 자체의
+// 폭발(수렴-후-재확산 그래프에서 서로 다른 경로 수만큼 중간 행이
+// 생기는 것)을 막지 못한다 — depth cap 안에서도 마찬가지다. 그래서 CTE의
+// 재귀 항은 `path` 컬럼과 경로별 cycle guard를 쓰는 대신, `UNION`(ALL이
+// 아님)으로 `(node_id, depth)` 튜플 자체를 재귀 전체에 걸쳐 중복 제거한다
+// — SQLite/Postgres 둘 다 재귀 CTE의 UNION(distinct)이 "이번 스텝에서 나온
+// 후보 행이 지금까지 누적된 결과 전체와 완전히 같으면 버린다"를 표준
+// SQL만으로 보장한다(DuckDB의 `USING KEY`처럼 비표준 확장이 아님). 그
+// 결과 중간 행 수는 경로 수가 아니라 최대 `노드 수 × maxDepth`로
+// 상한된다(조밀한 클리크·다이아몬드형 수렴-재확산 그래프에서도) —
+// ontology-query-bounded-scale.test.mjs의 "합류 후 재확산" fixture가
+// 이를 직접 증명한다. SQLite 문서 자체가 명시하듯 ORDER BY 없는 재귀
+// CTE는 FIFO(너비 우선)로 확장되므로, 어떤 노드가 처음 등장하는 depth가
+// 곧 최소 depth다 — path 없이도 정확성이 깨지지 않는다.
 import type { DataSource } from 'typeorm';
 import { OntologyEdge } from '../../../entities/OntologyEdge';
 import { OntologyNode } from '../../../entities/OntologyNode';
@@ -116,9 +120,12 @@ interface ReachSqlParams {
   rowCap: number;
 }
 
-// SQLite/sql.js variant — research-storage.md §2.4의 illustrative SQL을
-// 그대로 이식(cycle guard: 구분자 문자열 + instr()). id는 uuid라 쉼표를
-// 포함하지 않으므로 ','를 구분자로 써도 충돌하지 않는다(원 SQL의 가정과 동일).
+// SQLite/sql.js variant. research-storage.md §2.4의 illustrative SQL은
+// path 컬럼 + 경로별 cycle guard(instr())를 썼지만, 그건 "같은 경로 안에서
+// 노드를 재방문하지 않는다"만 보장할 뿐 "여러 경로가 같은 노드로 합류하면
+// 그 수만큼 중간 행이 생긴다"는 리뷰 지적을 막지 못한다(파일 헤더 참고).
+// 대신 `UNION`(ALL 아님) + `(node_id, depth)` 튜플만으로 재귀 CTE
+// 전체에 걸친 중복 제거를 표준 SQL로 얻는다 — path 컬럼 자체가 없다.
 //
 // CROSS JOIN(일반 JOIN이 아님)이 반드시 필요하다 — 실측으로 발견한 함정:
 // `FROM ontology_edges e JOIN reach r ON e.src_id = r.node_id`로 쓰면
@@ -140,7 +147,7 @@ interface ReachSqlParams {
 function buildReachSqlSqlite(p: ReachSqlParams): { sql: string; params: unknown[] } {
   const joinCol = p.direction === 'outgoing' ? 'src_id' : 'dst_id';
   const discoverCol = p.direction === 'outgoing' ? 'dst_id' : 'src_id';
-  const params: unknown[] = [p.startId, p.startId, p.maxDepth, p.graphId, p.confidenceMin];
+  const params: unknown[] = [p.startId, p.maxDepth, p.graphId, p.confidenceMin];
   let typeFilter = '';
   if (p.edgeTypes) {
     typeFilter = ` AND e.type IN (${p.edgeTypes.map(() => '?').join(', ')})`;
@@ -148,17 +155,16 @@ function buildReachSqlSqlite(p: ReachSqlParams): { sql: string; params: unknown[
   }
   params.push(p.startId, p.rowCap);
   const sql = `
-    WITH RECURSIVE reach(node_id, depth, path) AS (
-      SELECT ? AS node_id, 0 AS depth, ',' || ? || ',' AS path
-      UNION ALL
-      SELECT e.${discoverCol} AS node_id, r.depth + 1 AS depth, r.path || e.${discoverCol} || ',' AS path
+    WITH RECURSIVE reach(node_id, depth) AS (
+      SELECT ? AS node_id, 0 AS depth
+      UNION
+      SELECT e.${discoverCol} AS node_id, r.depth + 1 AS depth
       FROM reach r
       CROSS JOIN ontology_edges e ON e.${joinCol} = r.node_id
       WHERE r.depth < ?
         AND e.graph_id = ?
         AND e.status = 'active'
         AND e.confidence >= ?${typeFilter}
-        AND instr(r.path, ',' || e.${discoverCol} || ',') = 0
     )
     SELECT node_id, MIN(depth) AS depth
     FROM reach
@@ -170,8 +176,8 @@ function buildReachSqlSqlite(p: ReachSqlParams): { sql: string; params: unknown[
   return { sql, params };
 }
 
-// Postgres variant — 동일 의미론, cycle guard만 text[] + ANY()로 이식
-// (research-storage.md §2.4: "ported to a Postgres text[]/ANY() check").
+// Postgres variant — 동일 의미론(UNION distinct 기반 (node_id,depth) 중복
+// 제거, path 컬럼 없음).
 function buildReachSqlPostgres(p: ReachSqlParams): { sql: string; params: unknown[] } {
   const joinCol = p.direction === 'outgoing' ? 'src_id' : 'dst_id';
   const discoverCol = p.direction === 'outgoing' ? 'dst_id' : 'src_id';
@@ -187,17 +193,16 @@ function buildReachSqlPostgres(p: ReachSqlParams): { sql: string; params: unknow
   const rowCapIdx = nextIdx + 1;
   params.push(p.startId, p.rowCap);
   const sql = `
-    WITH RECURSIVE reach(node_id, depth, path) AS (
-      SELECT $1::text AS node_id, 0 AS depth, ARRAY[$1::text] AS path
-      UNION ALL
-      SELECT e.${discoverCol}, r.depth + 1, r.path || e.${discoverCol}
+    WITH RECURSIVE reach(node_id, depth) AS (
+      SELECT $1::text AS node_id, 0 AS depth
+      UNION
+      SELECT e.${discoverCol}, r.depth + 1
       FROM ontology_edges e
       JOIN reach r ON e.${joinCol} = r.node_id
       WHERE r.depth < $2
         AND e.graph_id = $3
         AND e.status = 'active'
         AND e.confidence >= $4${typeFilter}
-        AND NOT (e.${discoverCol} = ANY(r.path))
     )
     SELECT node_id, MIN(depth) AS depth
     FROM reach
@@ -305,42 +310,97 @@ export interface GraphCallPathResult {
 }
 
 interface VisitRecord {
-  edge: GraphCallPathStep;
-  /** forward 방향: 이 노드의 부모(fromId 쪽으로 한 걸음). backward 방향: 이 노드의 자식(toId 쪽으로 한 걸음). */
-  via: string;
+  /** 루트(fromId/toId) 자신은 null. */
+  edge: GraphCallPathStep | null;
+  /** forward 방향: 이 노드의 부모(fromId 쪽으로 한 걸음). backward 방향: 이 노드의 자식(toId 쪽으로 한 걸음). 루트는 null. */
+  via: string | null;
+  /** 이 노드를 최초 발견한 라운드에서의, 그 방향 자신의 depth(fromId/toId=0). */
+  depth: number;
+}
+
+interface MeetingCandidate {
+  nodeId: string;
+  /** forwardDepth + backwardDepth — 이 교차점을 지나는 경로의 총 hop 수. */
+  combinedDepth: number;
 }
 
 function toStep(e: OntologyEdge): GraphCallPathStep {
   return { edgeId: e.id, srcId: e.src_id, dstId: e.dst_id, type: e.type, confidence: e.confidence };
 }
 
-async function fetchFrontierEdges(
+interface ExpandSideResult {
+  next: string[];
+  candidates: MeetingCandidate[];
+  truncated: boolean;
+}
+
+/** DESIGN.md §11 seed #5 / research-storage.md §2.4 — "Shortest call path — unsafe as one query, safe as an orchestrated loop." 양 끝에서 교대로 레벨 단위로 확장한다.
+ *
+ * 리뷰 지적 2건을 여기서 함께 고친다:
+ * - [안전성] 프론티어를 청크로 나눠 조회하되, 매 청크 조회 전에 남은 방문
+ *   예산(MAX_CALL_PATH_VISITED - 현재 방문 수)을 계산해 SQL `LIMIT`으로
+ *   그대로 강제한다 — 단일 허브 노드가 수백만 개의 active edge를 가져도
+ *   한 청크가 절대 그 예산을 넘는 행을 메모리에 올리지 않는다(이전에는
+ *   `getMany()`로 청크 전체를 무제한 적재한 뒤 라운드가 끝나야 예산을
+ *   확인했다).
+ * - [정확성] 새로 발견한 노드가 반대편 visited에 이미 있으면 그 자리에서
+ *   즉시 `break`하지 않는다 — 이번 라운드에서 발견된 모든 교차 후보를
+ *   전부 모아 반환하고, 호출부가 `combinedDepth`(반대편 depth + 이번
+ *   라운드 depth) 최소값을 고른다. 같은 라운드 안에서도 반대편이 서로
+ *   다른 깊이로 이미 방문한 노드들이 섞여 있을 수 있어("첫 교차점"이
+ *   "가장 가까운 교차점"이라는 보장이 없음), 쿼리 행 순서에 의존하지 않는
+ *   진짜 최단 경로를 얻으려면 후보를 모아 비교해야 한다. */
+async function expandOneSide(
   dataSource: DataSource,
   graphId: string,
   confidenceMin: number,
   edgeTypes: string[] | undefined,
-  column: 'src_id' | 'dst_id',
+  matchColumn: 'src_id' | 'dst_id',
+  discoverIsDst: boolean,
   frontier: string[],
-): Promise<OntologyEdge[]> {
-  if (frontier.length === 0) return [];
+  thisVisited: Map<string, VisitRecord>,
+  otherVisited: Map<string, VisitRecord>,
+  thisDepth: number,
+): Promise<ExpandSideResult> {
+  const next: string[] = [];
+  const candidates: MeetingCandidate[] = [];
   const repo = dataSource.getRepository(OntologyEdge);
-  const out: OntologyEdge[] = [];
+
   for (let i = 0; i < frontier.length; i += FRONTIER_CHUNK_SIZE) {
+    const remaining = MAX_CALL_PATH_VISITED - (thisVisited.size + otherVisited.size);
+    if (remaining <= 0) return { next, candidates, truncated: true };
+
     const chunk = frontier.slice(i, i + FRONTIER_CHUNK_SIZE);
     let qb = repo
       .createQueryBuilder('e')
       .where('e.graph_id = :graphId', { graphId })
       .andWhere('e.status = :status', { status: 'active' })
       .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
-      .andWhere(`e.${column} IN (:...chunk)`, { chunk });
+      .andWhere(`e.${matchColumn} IN (:...chunk)`, { chunk })
+      .orderBy('e.id', 'ASC') // 결정론적 순서 — 정확성이 이제 순서에 의존하진 않지만(위 후보-수집 방식), 재현 가능한 테스트를 위해 유지.
+      .take(remaining + 1); // +1: 이 청크 하나가 예산을 넘는지 잘라내지 않고도 판별하기 위함(정확히 SQL LIMIT으로 상한을 강제).
     if (edgeTypes) qb = qb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
-    out.push(...(await qb.getMany()));
+    const edges = await qb.getMany();
+
+    const chunkExceeded = edges.length > remaining;
+    const usable = chunkExceeded ? edges.slice(0, remaining) : edges;
+
+    for (const e of usable) {
+      const discoveredId = discoverIsDst ? e.dst_id : e.src_id;
+      const viaId = discoverIsDst ? e.src_id : e.dst_id;
+      if (thisVisited.has(discoveredId)) continue;
+      thisVisited.set(discoveredId, { edge: toStep(e), via: viaId, depth: thisDepth });
+      const other = otherVisited.get(discoveredId);
+      if (other) candidates.push({ nodeId: discoveredId, combinedDepth: thisDepth + other.depth });
+      else next.push(discoveredId);
+    }
+
+    if (chunkExceeded) return { next, candidates, truncated: true };
     await yieldToEventLoop();
   }
-  return out;
+  return { next, candidates, truncated: false };
 }
 
-/** DESIGN.md §11 seed #5 / research-storage.md §2.4 — "Shortest call path — unsafe as one query, safe as an orchestrated loop." 양 끝에서 동시에 레벨 단위로 확장하고 프론티어가 만나는 즉시 멈춘다. */
 export async function graphCallPath(dataSource: DataSource, input: GraphCallPathInput): Promise<GraphCallPathResult> {
   const startedAt = Date.now();
   if (!input.graphId) throw new Error('graph-query: graphId is required');
@@ -360,10 +420,12 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
     return { found: true, path: [], pathConfidence: 1, hops: 0, nodesVisited: 1, truncated: false, durationMs: Date.now() - startedAt };
   }
 
-  const forwardVisited = new Map<string, VisitRecord | null>([[input.fromId, null]]);
-  const backwardVisited = new Map<string, VisitRecord | null>([[input.toId, null]]);
+  const forwardVisited = new Map<string, VisitRecord>([[input.fromId, { edge: null, via: null, depth: 0 }]]);
+  const backwardVisited = new Map<string, VisitRecord>([[input.toId, { edge: null, via: null, depth: 0 }]]);
   let forwardFrontier = [input.fromId];
   let backwardFrontier = [input.toId];
+  let forwardDepth = 0;
+  let backwardDepth = 0;
   let meetingId: string | null = null;
   let truncated = false;
 
@@ -379,39 +441,38 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
     const useBackward = !useForward && backwardFrontier.length > 0;
     if (!useForward && !useBackward) break; // 양쪽 다 막다른 길 — 더 확장할 프론티어가 없음
 
+    let candidates: MeetingCandidate[];
     if (useForward) {
-      const edges = await fetchFrontierEdges(dataSource, input.graphId, confidenceMin, edgeTypes, 'src_id', forwardFrontier);
-      const next: string[] = [];
-      for (const e of edges) {
-        if (forwardVisited.has(e.dst_id)) continue;
-        forwardVisited.set(e.dst_id, { edge: toStep(e), via: e.src_id });
-        if (backwardVisited.has(e.dst_id)) {
-          meetingId = e.dst_id;
-          break;
-        }
-        next.push(e.dst_id);
-      }
-      forwardFrontier = next;
+      forwardDepth += 1;
+      const r = await expandOneSide(
+        dataSource, input.graphId, confidenceMin, edgeTypes,
+        'src_id', true, forwardFrontier, forwardVisited, backwardVisited, forwardDepth,
+      );
+      forwardFrontier = r.next;
+      candidates = r.candidates;
+      if (r.truncated) truncated = true;
     } else {
-      const edges = await fetchFrontierEdges(dataSource, input.graphId, confidenceMin, edgeTypes, 'dst_id', backwardFrontier);
-      const next: string[] = [];
-      for (const e of edges) {
-        if (backwardVisited.has(e.src_id)) continue;
-        backwardVisited.set(e.src_id, { edge: toStep(e), via: e.dst_id });
-        if (forwardVisited.has(e.src_id)) {
-          meetingId = e.src_id;
-          break;
-        }
-        next.push(e.src_id);
-      }
-      backwardFrontier = next;
+      backwardDepth += 1;
+      const r = await expandOneSide(
+        dataSource, input.graphId, confidenceMin, edgeTypes,
+        'dst_id', false, backwardFrontier, backwardVisited, forwardVisited, backwardDepth,
+      );
+      backwardFrontier = r.next;
+      candidates = r.candidates;
+      if (r.truncated) truncated = true;
     }
     forwardTurn = !forwardTurn;
 
-    if (!meetingId && forwardVisited.size + backwardVisited.size > MAX_CALL_PATH_VISITED) {
-      truncated = true;
+    if (candidates.length > 0) {
+      // 이번 라운드에서 발견된 교차 후보 중 총 hop 수가 최소인 것을 고른다
+      // — 쿼리 행 순서와 무관하게 진짜 최단 경로가 되도록(리뷰 지적 3).
+      let best = candidates[0];
+      for (const c of candidates) if (c.combinedDepth < best.combinedDepth) best = c;
+      meetingId = best.nodeId;
+      truncated = false; // 답을 확정했으므로 이번 라운드의 부분 truncation은 무관하다.
       break;
     }
+    if (truncated) break; // 후보 없이 예산 초과 — 더 진행해도 안전하지 않다.
     await yieldToEventLoop();
   }
 
@@ -422,15 +483,15 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
 
   const forwardHalf: GraphCallPathStep[] = [];
   for (let cur = meetingId; ; ) {
-    const rec = forwardVisited.get(cur);
-    if (!rec) break; // fromId 자신(루트 마커)에 도달
+    const rec = forwardVisited.get(cur)!;
+    if (!rec.edge || rec.via === null) break; // fromId 자신(루트 마커)에 도달
     forwardHalf.unshift(rec.edge);
     cur = rec.via;
   }
   const backwardHalf: GraphCallPathStep[] = [];
   for (let cur = meetingId; ; ) {
-    const rec = backwardVisited.get(cur);
-    if (!rec) break; // toId 자신(루트 마커)에 도달
+    const rec = backwardVisited.get(cur)!;
+    if (!rec.edge || rec.via === null) break; // toId 자신(루트 마커)에 도달
     backwardHalf.push(rec.edge);
     cur = rec.via;
   }
