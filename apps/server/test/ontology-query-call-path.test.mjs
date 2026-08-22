@@ -201,7 +201,11 @@ describe('graphCallPath — 완료조건 3: path_confidence는 min-along-path, �
 
   it('fromId===toId면 빈 경로에 pathConfidence=1을 반환한다', async () => {
     const result = await graphCallPath(AppOntologyDataSource, { graphId: GRAPH_ID, fromId: 'A', toId: 'A' });
-    assert.deepEqual(result, { found: true, path: [], pathConfidence: 1, hops: 0, nodesVisited: 1, truncated: false, durationMs: result.durationMs });
+    // ticket d35b7b7d — confidenceMin(실제 적용된 값)이 응답 필드로 추가됨.
+    assert.deepEqual(result, {
+      found: true, path: [], pathConfidence: 1, hops: 0, nodesVisited: 1, truncated: false,
+      confidenceMin: 0.75, durationMs: result.durationMs,
+    });
   });
 });
 
