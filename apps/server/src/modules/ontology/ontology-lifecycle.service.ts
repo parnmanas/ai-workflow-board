@@ -8,9 +8,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { AppOntologyDataSource } from '../../db';
 import { OntologyGraph } from '../../entities/OntologyGraph';
+import { OntologyEdge } from '../../entities/OntologyEdge';
 import { LogService } from '../../services/log.service';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
@@ -176,5 +177,24 @@ export class OntologyLifecycleService {
       });
       throw e;
     }
+  }
+
+  /**
+   * research-ontology.md §8.6 point 6의 dirty_ratio — 이 그래프의 활성
+   * (active+stale) 엣지 중 status='stale'(phase-c.ts의 soft-edge
+   * invalidation) 비율. 엣지가 아직 하나도 없으면(building 등) null —
+   * "0% dirty"와 "아직 측정 불가"를 구분한다. 인간 프레시니스 배지
+   * (ticket d22b83b4)가 소비. incremental-scheduler.service.ts가 아직
+   * 어떤 실 트리거(파일 저장 웹훅 등)에도 배선돼 있지 않아(그 파일 헤더
+   * 코멘트 참고) 오늘은 항상 0에 가깝게 나오지만, 이미 스키마에 있는
+   * OntologyEdge.status 값을 그대로 집계할 뿐이라 스케줄러가 배선되는
+   * 순간 자동으로 의미 있어진다.
+   */
+  async computeDirtyRatio(graphId: string): Promise<number | null> {
+    const repo = this.resolveOntologyDataSource().getRepository(OntologyEdge);
+    const total = await repo.count({ where: { graph_id: graphId, status: In(['active', 'stale']) } });
+    if (total === 0) return null;
+    const stale = await repo.count({ where: { graph_id: graphId, status: 'stale' } });
+    return stale / total;
   }
 }
