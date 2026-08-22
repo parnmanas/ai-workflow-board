@@ -29,7 +29,6 @@
 // CTE는 FIFO(너비 우선)로 확장되므로, 어떤 노드가 처음 등장하는 depth가
 // 곧 최소 depth다 — path 없이도 정확성이 깨지지 않는다.
 import type { DataSource } from 'typeorm';
-import { OntologyEdge } from '../../../entities/OntologyEdge';
 import { OntologyNode } from '../../../entities/OntologyNode';
 import { In } from 'typeorm';
 import { yieldToEventLoop } from '../persist';
@@ -327,10 +326,6 @@ interface MeetingCandidate {
   via: string;
 }
 
-function toStep(e: OntologyEdge): GraphCallPathStep {
-  return { edgeId: e.id, srcId: e.src_id, dstId: e.dst_id, type: e.type, confidence: e.confidence };
-}
-
 interface ExpandSideResult {
   next: string[];
   candidates: MeetingCandidate[];
@@ -338,6 +333,181 @@ interface ExpandSideResult {
 }
 
 const CANDIDATE_KEY_CHUNK_SIZE = 200; // otherVisited 키를 IN(...)에 넣을 때의 청크 크기 — FRONTIER_CHUNK_SIZE(500)와 곱해진 상한(아래 후보 탐지 쿼리 코멘트)을 더 좁게 유지하려고 일부러 더 작게 잡는다.
+
+interface CandidateSqlParams {
+  matchColumn: 'src_id' | 'dst_id';
+  discoverColumn: 'src_id' | 'dst_id';
+  chunk: string[];
+  otherChunk: string[];
+  graphId: string;
+  confidenceMin: number;
+  edgeTypes?: string[];
+}
+
+interface CandidateRow {
+  id: string;
+  src_id: string;
+  dst_id: string;
+  type: string;
+  confidence: number | string;
+  discovered_id: string;
+}
+
+// 후보 탐지 SQL(양 방언 공통 설계) — 리뷰 지적(3라운드): OntologyEdge에는
+// (graph_id, src_id, dst_id[, type]) 유일성 제약이 없어, 같은 frontier→
+// discovered 쌍 사이에 서로 다른 type/evidence/run의 active edge가 임의
+// 개수 있을 수 있다. "결과의 서로 다른 discoveredId 수는 otherChunk
+// 크기로 유계"였던 이전 주장은 **행 수**가 아니라 **distinct 값 개수**에만
+// 해당했다 — LIMIT 없는 `getMany()`는 discoveredId당 parallel edge가
+// 전부 몇 개든 다 적재했다. 이제 `ROW_NUMBER() OVER (PARTITION BY
+// discoverColumn ORDER BY confidence DESC, id ASC)`로 discoveredId당
+// 대표 edge를 정확히 1개(가장 신뢰도 높은 것, 동점이면 id로 결정론적
+// tie-break)만 골라 **결과 row 자체를 otherChunk 크기로 상한**한다 —
+// distinct 값 개수가 아니라 실제 반환 row 수가 유계라는 뜻. 어느 한
+// (src,dst) 쌍에 60,000개의 parallel edge가 있어도 SQL 엔진이 내부적으로
+// 정렬하는 동안만 처리하고, Node 쪽으로 넘어오는 entity/row는 여전히
+// discoveredId당 1개뿐이다(TypeORM 엔티티 hydration 비용도 그만큼만).
+function buildCandidateSqlSqlite(p: CandidateSqlParams): { sql: string; params: unknown[] } {
+  const params: unknown[] = [p.graphId, p.confidenceMin];
+  const chunkPh = p.chunk.map(() => '?').join(', ');
+  params.push(...p.chunk);
+  const otherPh = p.otherChunk.map(() => '?').join(', ');
+  params.push(...p.otherChunk);
+  let typeFilter = '';
+  if (p.edgeTypes) {
+    typeFilter = ` AND e.type IN (${p.edgeTypes.map(() => '?').join(', ')})`;
+    params.push(...p.edgeTypes);
+  }
+  const sql = `
+    WITH ranked AS (
+      SELECT e.id AS edge_id, e.src_id, e.dst_id, e.type, e.confidence,
+             e.${p.discoverColumn} AS discovered_id,
+             ROW_NUMBER() OVER (PARTITION BY e.${p.discoverColumn} ORDER BY e.confidence DESC, e.id ASC) AS rn
+      FROM ontology_edges e
+      WHERE e.graph_id = ?
+        AND e.status = 'active'
+        AND e.confidence >= ?
+        AND e.${p.matchColumn} IN (${chunkPh})
+        AND e.${p.discoverColumn} IN (${otherPh})${typeFilter}
+    )
+    SELECT edge_id AS id, src_id, dst_id, type, confidence, discovered_id
+    FROM ranked
+    WHERE rn = 1
+  `;
+  return { sql, params };
+}
+
+function buildCandidateSqlPostgres(p: CandidateSqlParams): { sql: string; params: unknown[] } {
+  const params: unknown[] = [p.graphId, p.confidenceMin];
+  let idx = 3;
+  const chunkPh = p.chunk.map(() => `$${idx++}`).join(', ');
+  params.push(...p.chunk);
+  const otherPh = p.otherChunk.map(() => `$${idx++}`).join(', ');
+  params.push(...p.otherChunk);
+  let typeFilter = '';
+  if (p.edgeTypes) {
+    typeFilter = ` AND e.type = ANY($${idx}::text[])`;
+    params.push(p.edgeTypes);
+    idx += 1;
+  }
+  const sql = `
+    WITH ranked AS (
+      SELECT e.id AS edge_id, e.src_id, e.dst_id, e.type, e.confidence,
+             e.${p.discoverColumn} AS discovered_id,
+             ROW_NUMBER() OVER (PARTITION BY e.${p.discoverColumn} ORDER BY e.confidence DESC, e.id ASC) AS rn
+      FROM ontology_edges e
+      WHERE e.graph_id = $1
+        AND e.status = 'active'
+        AND e.confidence >= $2
+        AND e.${p.matchColumn} IN (${chunkPh})
+        AND e.${p.discoverColumn} IN (${otherPh})${typeFilter}
+    )
+    SELECT edge_id AS id, src_id, dst_id, type, confidence, discovered_id
+    FROM ranked
+    WHERE rn = 1
+  `;
+  return { sql, params };
+}
+
+interface RankedLimitSqlParams {
+  matchColumn: 'src_id' | 'dst_id';
+  discoverColumn: 'src_id' | 'dst_id';
+  chunk: string[];
+  graphId: string;
+  confidenceMin: number;
+  edgeTypes?: string[];
+  limit: number;
+}
+
+// "새 노드 발견"(2단계) 전용 — buildCandidateSql*과 같은 이유(스키마에
+// parallel edge를 막는 유일성 제약이 없음, 리뷰 지적 3라운드)로 여기도
+// discoveredId당 대표 edge 1개만 골라야 한다. 후보 탐지와의 차이는
+// otherChunk 필터가 없다는 것과, "몇 개의 서로 다른 새 노드까지
+// 볼 것인가"를 뜻하는 LIMIT이 ROW_NUMBER로 디듀프된 뒤에 걸린다는 것
+// — 그래야 LIMIT이 진짜 "새 노드 수" 예산이지, "같은 새 노드로 가는
+// parallel edge 행 수"에 좀먹히지 않는다.
+function buildNewNodeSqlSqlite(p: RankedLimitSqlParams): { sql: string; params: unknown[] } {
+  const params: unknown[] = [p.graphId, p.confidenceMin];
+  const chunkPh = p.chunk.map(() => '?').join(', ');
+  params.push(...p.chunk);
+  let typeFilter = '';
+  if (p.edgeTypes) {
+    typeFilter = ` AND e.type IN (${p.edgeTypes.map(() => '?').join(', ')})`;
+    params.push(...p.edgeTypes);
+  }
+  params.push(p.limit);
+  const sql = `
+    WITH ranked AS (
+      SELECT e.id AS edge_id, e.src_id, e.dst_id, e.type, e.confidence,
+             e.${p.discoverColumn} AS discovered_id,
+             ROW_NUMBER() OVER (PARTITION BY e.${p.discoverColumn} ORDER BY e.confidence DESC, e.id ASC) AS rn
+      FROM ontology_edges e
+      WHERE e.graph_id = ?
+        AND e.status = 'active'
+        AND e.confidence >= ?
+        AND e.${p.matchColumn} IN (${chunkPh})${typeFilter}
+    )
+    SELECT edge_id AS id, src_id, dst_id, type, confidence, discovered_id
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY discovered_id ASC
+    LIMIT ?
+  `;
+  return { sql, params };
+}
+
+function buildNewNodeSqlPostgres(p: RankedLimitSqlParams): { sql: string; params: unknown[] } {
+  const params: unknown[] = [p.graphId, p.confidenceMin];
+  let idx = 3;
+  const chunkPh = p.chunk.map(() => `$${idx++}`).join(', ');
+  params.push(...p.chunk);
+  let typeFilter = '';
+  if (p.edgeTypes) {
+    typeFilter = ` AND e.type = ANY($${idx}::text[])`;
+    params.push(p.edgeTypes);
+    idx += 1;
+  }
+  params.push(p.limit);
+  const limitIdx = idx;
+  const sql = `
+    WITH ranked AS (
+      SELECT e.id AS edge_id, e.src_id, e.dst_id, e.type, e.confidence,
+             e.${p.discoverColumn} AS discovered_id,
+             ROW_NUMBER() OVER (PARTITION BY e.${p.discoverColumn} ORDER BY e.confidence DESC, e.id ASC) AS rn
+      FROM ontology_edges e
+      WHERE e.graph_id = $1
+        AND e.status = 'active'
+        AND e.confidence >= $2
+        AND e.${p.matchColumn} IN (${chunkPh})${typeFilter}
+    )
+    SELECT edge_id AS id, src_id, dst_id, type, confidence, discovered_id
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY discovered_id ASC
+    LIMIT $${limitIdx}
+  `;
+  return { sql, params };
+}
 
 /** DESIGN.md §11 seed #5 / research-storage.md §2.4 — "Shortest call path — unsafe as one query, safe as an orchestrated loop." 양 끝에서 교대로 레벨 단위로 확장한다.
  *
@@ -351,12 +521,14 @@ const CANDIDATE_KEY_CHUNK_SIZE = 200; // otherVisited 키를 IN(...)에 넣을 �
  *
  * 고친 구조: 이번 청크에서 할 일을 **두 단계로 분리**한다.
  *   (1) **후보 탐지** — `discoverColumn IN otherVisited의 키`로 딱 집어
- *       조회한다. 이 결과의 서로 다른 discoveredId 수는 otherVisited
- *       청크 크기(<=CANDIDATE_KEY_CHUNK_SIZE)로 자연히 유계다 — 허브의
- *       raw fan-out과는 무관한 바운드라 **SQL LIMIT을 걸지 않는다**(걸면
- *       정확히 이번에 지적된 버그가 재발한다). thisVisited는 건드리지
- *       않는다 — 승자만 나중에 커밋해야, otherVisited가 클수록 후보
- *       수만큼 방문 예산을 소모해 안전 상한을 우회하는 일이 없다.
+ *       조회한다(buildCandidateSql* 참고 — ROW_NUMBER()로 discoveredId당
+ *       대표 edge 1개만 골라 **결과 row 자체**가 otherVisited 청크
+ *       크기(<=CANDIDATE_KEY_CHUNK_SIZE)로 유계다, distinct 값 개수가
+ *       아니라 — 리뷰 지적 3라운드). 이 바운드는 허브의 raw fan-out과
+ *       무관하므로 **LIMIT을 걸지 않는다**(걸면 2라운드에 지적된 버그가
+ *       재발한다). thisVisited는 건드리지 않는다 — 승자만 나중에
+ *       커밋해야, otherVisited가 클수록 후보 수만큼 방문 예산을 소모해
+ *       안전 상한을 우회하는 일이 없다.
  *   (2) **새 노드 발견** — otherVisited에 없는, 진짜 처음 보는 노드만
  *       상대로 한다(이미 (1)에서 다뤘으므로 명시적으로 제외). 허브의
  *       원래 위험(단일 노드가 수백만 active edge)이 실제로 존재하는
@@ -379,59 +551,63 @@ async function expandOneSide(
 ): Promise<ExpandSideResult> {
   const next: string[] = [];
   const candidates: MeetingCandidate[] = [];
-  const repo = dataSource.getRepository(OntologyEdge);
+  const dialect = resolveDialect(dataSource);
   const discoverColumn = discoverIsDst ? 'dst_id' : 'src_id';
   const otherKeys = [...otherVisited.keys()];
 
   for (let i = 0; i < frontier.length; i += FRONTIER_CHUNK_SIZE) {
     const chunk = frontier.slice(i, i + FRONTIER_CHUNK_SIZE);
 
-    // ── (1) 후보 탐지 — LIMIT 없음, otherVisited 청크 크기로 유계 ──
+    // ── (1) 후보 탐지 — LIMIT 없음, discoveredId당 대표 edge 1개만
+    // 반환되므로 결과 row 자체가 otherChunk 크기로 유계 ──
     for (let j = 0; j < otherKeys.length; j += CANDIDATE_KEY_CHUNK_SIZE) {
       const otherChunk = otherKeys.slice(j, j + CANDIDATE_KEY_CHUNK_SIZE);
-      let cqb = repo
-        .createQueryBuilder('e')
-        .where('e.graph_id = :graphId', { graphId })
-        .andWhere('e.status = :status', { status: 'active' })
-        .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
-        .andWhere(`e.${matchColumn} IN (:...chunk)`, { chunk })
-        .andWhere(`e.${discoverColumn} IN (:...otherChunk)`, { otherChunk });
-      if (edgeTypes) cqb = cqb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
-      const rows = await cqb.getMany();
-      for (const e of rows) {
-        const discoveredId = discoverIsDst ? e.dst_id : e.src_id;
-        const viaId = discoverIsDst ? e.src_id : e.dst_id;
+      const buildCandidateSql = dialect === 'postgres' ? buildCandidateSqlPostgres : buildCandidateSqlSqlite;
+      const { sql, params } = buildCandidateSql({ matchColumn, discoverColumn, chunk, otherChunk, graphId, confidenceMin, edgeTypes });
+      const rows: CandidateRow[] = await dataSource.query(sql, params);
+      for (const r of rows) {
+        const discoveredId = r.discovered_id;
+        const viaId = discoverIsDst ? r.src_id : r.dst_id;
         const other = otherVisited.get(discoveredId)!; // otherChunk 자체가 otherVisited.keys()에서 왔으므로 항상 존재
-        candidates.push({ nodeId: discoveredId, combinedDepth: thisDepth + other.depth, edge: toStep(e), via: viaId });
+        const confidence = typeof r.confidence === 'string' ? Number.parseFloat(r.confidence) : r.confidence;
+        candidates.push({
+          nodeId: discoveredId,
+          combinedDepth: thisDepth + other.depth,
+          edge: { edgeId: r.id, srcId: r.src_id, dstId: r.dst_id, type: r.type, confidence },
+          via: viaId,
+        });
       }
       await yieldToEventLoop();
     }
     if (candidates.length > 0) continue; // 이미 답을 확정할 수 있음 — 이 청크의 (2)는 건너뛴다(다음 청크의 (1)은 계속 돈다 — 더 짧은 후보가 있을 수 있으므로).
 
-    // ── (2) 새 노드 발견 — 남은 방문 예산만큼 SQL LIMIT으로 강제 ──
+    // ── (2) 새 노드 발견 — discoveredId당 대표 edge 1개로 디듀프한 뒤
+    // 남은 방문 예산만큼 SQL LIMIT으로 강제(디듀프 후 LIMIT 순서가
+    // 중요 — 그래야 LIMIT이 "새 노드 수" 예산이지 parallel edge 행
+    // 수에 좀먹히지 않는다) ──
     const remaining = MAX_CALL_PATH_VISITED - (thisVisited.size + otherVisited.size);
     if (remaining <= 0) return { next, candidates, truncated: true };
-    let qb = repo
-      .createQueryBuilder('e')
-      .where('e.graph_id = :graphId', { graphId })
-      .andWhere('e.status = :status', { status: 'active' })
-      .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
-      .andWhere(`e.${matchColumn} IN (:...chunk)`, { chunk })
-      .orderBy('e.id', 'ASC') // 결정론적 순서(재현 가능한 테스트용) — "새 노드"만 다루므로 여기서의 순서는 정확성에 영향 없음(그게 이번 수정의 요점).
-      .take(remaining + 1); // +1: 이 청크 하나가 예산을 넘는지 잘라내지 않고도 판별. 즉 이 쿼리는 최대 remaining+1개의 edge entity를 메모리에 올린다(정확히 예산과 같은 수가 아니라 "그보다 하나 더 많을 수 있다" — 판별용으로 의도적).
-    if (edgeTypes) qb = qb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
-    const edges = await qb.getMany();
+    const buildNewNodeSql = dialect === 'postgres' ? buildNewNodeSqlPostgres : buildNewNodeSqlSqlite;
+    // +1: 이 청크 하나가 예산을 넘는지 잘라내지 않고도 판별하기 위함 —
+    // 이 쿼리는 최대 remaining+1개의 "서로 다른 새 노드" row를 반환한다
+    // (정확히 예산과 같은 수가 아니라 "그보다 하나 더 많을 수 있다" —
+    // 판별용으로 의도적).
+    const { sql: newNodeSql, params: newNodeParams } = buildNewNodeSql({
+      matchColumn, discoverColumn, chunk, graphId, confidenceMin, edgeTypes, limit: remaining + 1,
+    });
+    const newNodeRows: CandidateRow[] = await dataSource.query(newNodeSql, newNodeParams);
 
-    const chunkExceeded = edges.length > remaining;
-    const usable = chunkExceeded ? edges.slice(0, remaining) : edges;
+    const chunkExceeded = newNodeRows.length > remaining;
+    const usable = chunkExceeded ? newNodeRows.slice(0, remaining) : newNodeRows;
 
-    for (const e of usable) {
-      const discoveredId = discoverIsDst ? e.dst_id : e.src_id;
-      const viaId = discoverIsDst ? e.src_id : e.dst_id;
+    for (const r of usable) {
+      const discoveredId = r.discovered_id;
+      const viaId = discoverIsDst ? r.src_id : r.dst_id;
       // otherVisited 멤버는 (1)이 이미 후보로 전부 처리했으므로 명시적으로
       // 제외한다 — 여기 도달하는 건 반드시 양쪽 다 몰랐던 진짜 새 노드다.
       if (thisVisited.has(discoveredId) || otherVisited.has(discoveredId)) continue;
-      thisVisited.set(discoveredId, { edge: toStep(e), via: viaId, depth: thisDepth });
+      const confidence = typeof r.confidence === 'string' ? Number.parseFloat(r.confidence) : r.confidence;
+      thisVisited.set(discoveredId, { edge: { edgeId: r.id, srcId: r.src_id, dstId: r.dst_id, type: r.type, confidence }, via: viaId, depth: thisDepth });
       next.push(discoveredId);
     }
 

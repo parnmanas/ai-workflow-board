@@ -7,14 +7,19 @@
 // 아니라 왕복 합쳐 maxHops라는 것 — 구현 중 발견한 함정, graph-query.ts의
 // loop 코멘트 참고), **리뷰 지적(1라운드, 블로커3)** — 같은 라운드에서
 // 여러 교차 후보가 발견될 때 첫 번째가 아니라 combinedDepth가 최소인
-// 후보를 고르는지, 그리고 **리뷰 지적(2라운드)** — 그 1라운드 수정의
-// "청크당 SQL LIMIT"과 결합하면서 생긴 새 결함(예산 캡에 걸려 잘린
-// 청크에서 후보 하나를 찾으면 잘려나간 나머지의 더 짧은 후보를 놓칠 수
-// 있었음)까지 결정론적으로 재현한다 — graph-query.ts는 이제 "후보 탐지"
-// 쿼리 자체를 SQL LIMIT과 완전히 분리해 절대 잘리지 않게 재설계됐다.
-// 방문 상한 자체가 진짜 하드 캡인지(리뷰 지적 1라운드 블로커2, "새 노드
-// 발견" 쪽)는 ontology-query-bounded-scale.test.mjs의 (D) 단일 허브
-// fixture가 별도로 증명한다.
+// 후보를 고르는지, **리뷰 지적(2라운드)** — 그 1라운드 수정의 "청크당
+// SQL LIMIT"과 결합하면서 생긴 새 결함(예산 캡에 걸려 잘린 청크에서
+// 후보 하나를 찾으면 잘려나간 나머지의 더 짧은 후보를 놓칠 수 있었음),
+// 그리고 **리뷰 지적(3라운드)** — OntologyEdge에 (src_id,dst_id[,type])
+// 유일성 제약이 없어 같은 노드 쌍 사이에 parallel active edge가 임의
+// 개수 있을 수 있다는 점(후보 탐지가 "서로 다른 discoveredId 수"로만
+// 유계였지 "반환 row 수"로는 유계가 아니었던 결함)까지 전부 결정론적으로
+// 재현한다 — graph-query.ts는 이제 후보 탐지·새 노드 발견 둘 다
+// discoveredId(또는 대상 노드)당 confidence 최댓값 대표 edge 1개만
+// ROW_NUMBER()로 골라 반환 row 자체를 유계로 만든다. 방문 상한 자체가
+// 진짜 하드 캡인지(리뷰 지적 1라운드 블로커2, "새 노드 발견" 쪽)는
+// ontology-query-bounded-scale.test.mjs의 (D) 단일 허브 fixture가
+// 별도로 증명한다.
 //
 // 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요) — ontology 계열
 // 테스트 전체의 관례.
@@ -52,6 +57,25 @@ function node(id) {
 }
 function edge(id, srcId, dstId, confidence, overrides = {}) {
   return { id, workspace_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: srcId, dst_id: dstId, type: 'CALLS', layer: 'structural', confidence, status: 'active', ...overrides };
+}
+
+// 대량(수만 건) edge를 빠르게 심기 위한 원시 다중-row INSERT — TypeORM의
+// repo.insert(bigArray)는 한 문장에 전부 넣으려다 바인드 변수 한도를
+// 넘길 수 있어(ontology-query-bounded-scale.test.mjs와 같은 이유) 500개씩
+// 청크로 나눈다. 이 fixture 세팅 자체는 persist.ts의 "청크 사이 매크로태스크
+// 양보" 계약과 무관하다(그 계약은 population write 경로 검증용).
+const RAW_INSERT_BATCH = 500;
+async function bulkInsertEdgesRaw(rows) {
+  for (let i = 0; i < rows.length; i += RAW_INSERT_BATCH) {
+    const batch = rows.slice(i, i + RAW_INSERT_BATCH);
+    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const params = [];
+    for (const r of batch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
+    await AppOntologyDataSource.query(
+      `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
+      params,
+    );
+  }
 }
 
 before(async () => {
@@ -127,32 +151,34 @@ before(async () => {
   //    이 더미들이 있어도 여전히 4홉(QY 경유)을 빠르게 반환해야 한다.
   const DUMMY_HUB_OUT_DEGREE = MAX_CALL_PATH_VISITED + 10_000;
   const DUMMY_BATCH = 500;
-  let dummyBatch = [];
+  const dummyEdges = [];
   for (let i = 0; i < DUMMY_HUB_OUT_DEGREE; i++) {
-    dummyBatch.push({
+    dummyEdges.push({
       id: `hc-e${i}`, workspace_id: WORKSPACE_ID, graph_id: GRAPH_ID,
       src_id: 'QP1', dst_id: `hc-leaf${i}`, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
     });
-    if (dummyBatch.length >= DUMMY_BATCH) {
-      const placeholders = dummyBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-      const params = [];
-      for (const r of dummyBatch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
-      await AppOntologyDataSource.query(
-        `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
-        params,
-      );
-      dummyBatch = [];
-    }
   }
-  if (dummyBatch.length > 0) {
-    const placeholders = dummyBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-    const params = [];
-    for (const r of dummyBatch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
-    await AppOntologyDataSource.query(
-      `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
-      params,
-    );
+  await bulkInsertEdgesRaw(dummyEdges);
+
+  // ── 8) 리뷰 지적(3라운드): OntologyEdge에는 (graph_id, src_id, dst_id[,
+  //    type]) 유일성 제약이 없다 — 같은 (src,dst) 쌍 사이에 서로 다른
+  //    type/evidence/run의 active edge가 임의 개수 있을 수 있다. RH->RY
+  //    사이에 60,000개 이상의 **parallel**(같은 src/dst) edge를 심는다 —
+  //    "결과의 서로 다른 discoveredId 수는 otherChunk로 유계"라는 이전
+  //    주장은 distinct 값 개수에만 해당했지 반환 row 수에는 해당하지
+  //    않았다(진짜 버그). 그중 정확히 1개(id 'rh-ry-best')만 confidence
+  //    0.95로 나머지 59,999개(전부 0.76)보다 눈에 띄게 높게 잡아, 후보
+  //    쿼리가 discoveredId(RY)당 대표 edge를 진짜로 "confidence 최댓값"
+  //    하나만 고르는지(단순히 아무 거나 하나 고르는 게 아니라) 직접
+  //    증명한다 — path_confidence로 어느 쪽이 골렸는지 뚜렷이 구분된다.
+  await nodeRepo.insert([node('RS'), node('RH'), node('RY'), node('RT')]);
+  await edgeRepo.insert([edge('e-rs-rh', 'RS', 'RH', 0.99), edge('e-ry-rt', 'RY', 'RT', 0.99)]);
+  const parallelEdges = [{ id: 'rh-ry-best', workspace_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.95, status: 'active' }];
+  const PARALLEL_EDGE_COUNT = MAX_CALL_PATH_VISITED + 10_000;
+  for (let i = 0; i < PARALLEL_EDGE_COUNT; i++) {
+    parallelEdges.push({ id: `rh-ry-dup${i}`, workspace_id: WORKSPACE_ID, graph_id: GRAPH_ID, src_id: 'RH', dst_id: 'RY', type: 'CALLS', layer: 'structural', confidence: 0.76, status: 'active' });
   }
+  await bulkInsertEdgesRaw(parallelEdges);
 });
 
 after(async () => {
@@ -208,6 +234,29 @@ describe('graphCallPath — 리뷰 지적(2라운드): 후보 탐지는 SQL LIMI
     assert.ok(!result.path.some((s) => s.srcId === 'QP1' || s.srcId === 'QX' || s.srcId === 'QZ'), '더 긴 QP1/QX/QZ 경유 경로가 섞이면 안 된다');
     assert.ok(result.nodesVisited < 100, `방문 노드 수가 더미 fan-out(60,000+)에 끌려 커지면 안 된다: ${result.nodesVisited}`);
     assert.ok(wallMs < 10_000, `QP1의 거대한 무관 fan-out이 후보 탐지를 느리게 만들면 안 된다: ${wallMs}ms`);
+  });
+});
+
+describe('graphCallPath — 리뷰 지적(3라운드): parallel edge가 있어도 후보 탐지는 discoveredId당 대표 edge 1개로 유계다', () => {
+  it('RH->RY 사이 60,000개 이상의 parallel edge 중 confidence 최댓값(0.95) 하나만 대표로 골라 RS->RH->RY->RT(3홉)을 반환한다', async () => {
+    // fixture 8) — RH->RY 사이에 60,000개+ parallel edge(전부 같은
+    // src/dst)가 있고, 그중 confidence가 뚜렷이 높은 것(0.95, id
+    // 'rh-ry-best')은 단 하나뿐이며 나머지(59,999개, 0.76)는 명백히
+    // 낮다. path_confidence는 min-along-path이므로:
+    //   대표로 'rh-ry-best'(0.95)가 골렸다면 -> min(0.99, 0.95, 0.99) = 0.95
+    //   아무 duplicate('...-dup*', 0.76)나 골렸다면          -> min(0.99, 0.76, 0.99) = 0.76
+    // 두 값이 뚜렷이 달라, 어떤 대표가 실제로 골렸는지 이 단정 하나로
+    // 정확히 구분된다 — "느리지 않다"만으로는 못 잡는, 결과의 정확성
+    // 자체에 대한 단정이다.
+    const t0 = Date.now();
+    const result = await graphCallPath(AppOntologyDataSource, { graphId: GRAPH_ID, fromId: 'RS', toId: 'RT' });
+    const wallMs = Date.now() - t0;
+    assert.equal(result.found, true);
+    assert.equal(result.hops, 3);
+    assert.equal(result.path.map((s) => s.srcId).join('->'), 'RS->RH->RY');
+    assert.equal(result.pathConfidence, 0.95, 'discoveredId(RY)당 대표 edge로 confidence 최댓값이 골려야 한다 — duplicate 중 아무거나 골리면 0.76이 나온다');
+    assert.ok(result.nodesVisited < 100, `방문 노드 수가 parallel edge 6만 개에 끌려 커지면 안 된다: ${result.nodesVisited}`);
+    assert.ok(wallMs < 10_000, `RH->RY 사이 거대한 parallel edge가 후보 탐지를 느리게 만들면 안 된다: ${wallMs}ms`);
   });
 });
 
