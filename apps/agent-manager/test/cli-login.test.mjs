@@ -104,6 +104,32 @@ function fakeCodexLeakySecretOnStderr(secret) {
   `);
 }
 
+// 리뷰 지적(round 2) 회귀 — JWT/prefix-key/labeled/opaque 네 종류 시크릿을
+// 전부 문자열 "중간"(offset 0이 아님)에 심어서 stderr와 (파싱 실패 유도용)
+// stdout 양쪽에 찍는 가짜 CLI. redactSecrets()가 capture-group이 없는
+// 정규식(JWT/prefix-key)에서 원본 전체를 되삽입하던 버그를 잡기 위한 것.
+const LEAKY_SECRETS = {
+  jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
+  prefixKey: 'sk-abcdefgh12345678ABCDEFGH',
+  labeledValue: 'SUPERSECRETVALUE1234567',
+  opaque: 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6',
+};
+
+function fakeCodexLeakySecretsEverywhere() {
+  const s = LEAKY_SECRETS;
+  return makeFakeCodex(`
+    console.error('warning: saw jwt ' + ${JSON.stringify(s.jwt)} + ' during startup');
+    console.error('key check: ' + ${JSON.stringify(s.prefixKey)} + ' loaded ok');
+    console.error(${JSON.stringify(`access_token: ${s.labeledValue}`)} + ' (cached)');
+    console.error('random blob ' + ${JSON.stringify(s.opaque)} + ' seen in env');
+    console.log('unrelated line embeds jwt ' + ${JSON.stringify(s.jwt)} + ' mid-sentence');
+    console.log('and a prefix key ' + ${JSON.stringify(s.prefixKey)} + ' mid-sentence too');
+    console.log('labeled ' + ${JSON.stringify(`access_token: ${s.labeledValue}`)} + ' mid-sentence');
+    console.log('opaque blob ' + ${JSON.stringify(s.opaque)} + ' mid-sentence');
+    setInterval(() => {}, 1000000);
+  `);
+}
+
 // 리뷰 지적(round 1) 회귀 — url/코드 안내 문구가 전혀 매치되지 않는(파싱
 // 실패) 출력만 내고 조용해지는 가짜 CLI. URL을 아예 안 찍으므로
 // urlCaptured는 절대 true가 되지 않는다.
@@ -372,6 +398,47 @@ test('review-fix: stderr containing a labeled token is redacted before it ever r
   const logContent = existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
   assert.doesNotMatch(logContent, new RegExp(secret), 'stderr token leaked into agent-manager.log unredacted');
   assert.match(logContent, /\[REDACTED\]/, 'expected the redaction marker to appear in place of the token');
+});
+
+// 리뷰 지적(round 2, 확인된 버그): redactSecrets()가 모든 패턴에 같은
+// (label, sep) 2-인자 콜백을 재사용했는데, JWT/prefix-key 정규식엔 capture
+// group이 없어 String.replace가 그 자리에 (offset, fullString)을 넘겼다.
+// offset은 문자열 중간 매치에서 truthy라 `${label}${sep}[REDACTED]` 분기가
+// 그대로 타면서 원본 전체(시크릿 그대로)가 결과에 다시 삽입됐다 — redact는
+// 커녕 원문을 중복 노출. 아래는 4종 시크릿(JWT/prefix-key/labeled/opaque)을
+// 전부 문자열 "중간"에 심어 이 정확한 실패 모드를 재현한다.
+test('review-fix round2: JWT/prefix-key/labeled/opaque secrets embedded MID-STRING in stderr are all redacted in the real log file (not just leaked back in)', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { codexBin: fakeCodexLeakySecretsEverywhere(), timeoutMs: 150 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-stderr-2', cli: 'codex' });
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
+
+  const logContent = existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
+  for (const [kind, secret] of Object.entries(LEAKY_SECRETS)) {
+    assert.doesNotMatch(logContent, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${kind} leaked into agent-manager.log unredacted`);
+  }
+  assert.match(logContent, /\[REDACTED\]/);
+});
+
+test('review-fix round2: JWT/prefix-key/labeled/opaque secrets embedded MID-STRING in unparseable stdout are all redacted in raw_output_fallback', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { codexBin: fakeCodexLeakySecretsEverywhere(), fallbackQuietMs: 30, timeoutMs: 5000 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-fallback-3', cli: 'codex' });
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.raw_output_fallback), { timeoutMs: 2000 });
+
+  const fallback = progressBodies(sessionId).find((b) => b.raw_output_fallback).raw_output_fallback;
+  for (const [kind, secret] of Object.entries(LEAKY_SECRETS)) {
+    assert.doesNotMatch(fallback, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${kind} leaked into raw_output_fallback unredacted`);
+  }
+  assert.match(fallback, /\[REDACTED\]/);
+
+  await manager.cancel(sessionId);
 });
 
 test('review-fix: unparseable output (no url ever found) surfaces a raw_output_fallback awaiting_user report instead of leaving the session silently stuck', async () => {

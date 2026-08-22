@@ -56,27 +56,30 @@ function stripAnsi(line: string): string {
 // 형식을 통제할 수 없는 진단 채널이라 방어적으로 토큰/시크릿처럼 보이는
 // 패턴을 전부 지운다 — URL 은 이 함수를 거치지 않는 채널(progress payload)
 // 로만 전달되므로 여기서 과도하게 지워도 실제 흐름에 영향 없다.
-const REDACTION_PATTERNS: RegExp[] = [
-  // JWT (header.payload.signature)
-  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
-  // 흔한 prefix 형 API 키 (sk-..., ghp_..., xoxb-... 등)
-  /\b(?:sk|rk|pk|oat|sat|rt|pat|ghp|ghs|xox[a-z])[-_][A-Za-z0-9_-]{8,}\b/gi,
-  // key=value / key: value 형태로 라벨링된 시크릿
-  /\b(access_token|refresh_token|id_token|api_key|client_secret|password)\b(\s*[:=]\s*)["']?[A-Za-z0-9_.\-]{6,}["']?/gi,
-];
+//
+// 리뷰 지적(round 2, 확인된 버그): 모든 패턴에 같은 (label, sep) 2-인자
+// replacer를 재사용했으나, JWT/prefix-key 정규식엔 capture group이 없어
+// String.replace가 그 자리에 (offset, fullString)을 넘겼다. offset은 문자열
+// 중간 매치에서 truthy라 `${label}${sep}[REDACTED]` 분기가 그대로 타면서
+// fullString(원본 전체, 즉 시크릿 그대로)이 결과에 통째로 다시 삽입됐다 —
+// redact는커녕 원문을 중복 노출하는 정반대 결과. 패턴마다 자기 capture
+// group 구조에 맞는 전용 replacer를 쓰도록 분리해 이 클래스의 버그를
+// 구조적으로 막는다(공유 콜백이 모든 정규식에 같은 인자 수를 가정하지
+// 않는다).
+const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
+const PREFIXED_KEY_RE = /\b(?:sk|rk|pk|oat|sat|rt|pat|ghp|ghs|xox[a-z])[-_][A-Za-z0-9_-]{8,}\b/gi;
+const LABELED_SECRET_RE =
+  /\b(access_token|refresh_token|id_token|api_key|client_secret|password)\b(\s*[:=]\s*)["']?[A-Za-z0-9_.\-]{6,}["']?/gi;
+// 마지막 방어선: URL이 아니면서 문자+숫자를 모두 포함한 24자 이상의 opaque
+// 토큰형 문자열은 라벨/포맷을 못 맞춘 미지의 시크릿일 수 있으므로 지운다.
+const OPAQUE_TOKEN_RE = /\b(?!https?:)[A-Za-z0-9_\-.]{24,}\b/g;
 
 function redactSecrets(text: string): string {
   let out = text;
-  for (const pattern of REDACTION_PATTERNS) {
-    out = out.replace(pattern, (_match, label, sep) =>
-      label ? `${label}${sep}[REDACTED]` : '[REDACTED]',
-    );
-  }
-  // 마지막 방어선: URL이 아니면서 문자+숫자를 모두 포함한 24자 이상의 opaque
-  // 토큰형 문자열은 라벨/포맷을 못 맞춘 미지의 시크릿일 수 있으므로 지운다.
-  out = out.replace(/\b(?!https?:)[A-Za-z0-9_\-.]{24,}\b/g, (m) =>
-    /[0-9]/.test(m) && /[A-Za-z]/.test(m) ? '[REDACTED]' : m,
-  );
+  out = out.replace(JWT_RE, '[REDACTED]');
+  out = out.replace(PREFIXED_KEY_RE, '[REDACTED]');
+  out = out.replace(LABELED_SECRET_RE, (_match, label, sep) => `${label}${sep}[REDACTED]`);
+  out = out.replace(OPAQUE_TOKEN_RE, (m) => (/[0-9]/.test(m) && /[A-Za-z]/.test(m) ? '[REDACTED]' : m));
   return out;
 }
 
