@@ -107,6 +107,22 @@ test('todo_workflow: the Wait-branch / "don\'t bounce back" self-contradiction i
   );
 });
 
+test('todo_workflow: overlap Wait branch registers add_ticket_prerequisites, not just a comment (ticket eb4f09b6)', () => {
+  const content = templateByName('todo_workflow').content;
+  assert.match(
+    content, /\*\*Wait\*\*.*add_ticket_prerequisites/is,
+    'the concurrent-work Wait branch must call add_ticket_prerequisites to register the block, not just leave a comment',
+  );
+  assert.match(
+    content, /human answer.*pend_ticket.*another ticket finishing.*add_ticket_prerequisites/is,
+    'todo_workflow must state the human-vs-ticket rule of thumb for choosing prerequisite over pend_ticket',
+  );
+  assert.match(
+    content, /auto-resumes.*terminal column.*re-triggered/is,
+    'todo_workflow must explain the prerequisite auto-resume behavior once the blocking ticket lands on a terminal column',
+  );
+});
+
 test('review_workflow: gained a pend_ticket / add_ticket_prerequisites escape hatch (was 0 occurrences)', () => {
   const content = templateByName('review_workflow').content;
   assert.match(content, /pend_ticket/, 'review_workflow must reference pend_ticket at least once');
