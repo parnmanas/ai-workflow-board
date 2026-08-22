@@ -18,22 +18,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, run, React } from './helpers/jsdom.mjs';
+import { setupDom, typeInto, React } from './helpers/jsdom.mjs';
 import { mountWithBoardStream } from './helpers/boardStream.mjs';
 import ChatMessageInput from '../src/components/chat/ChatMessageInput.tsx';
 
 const h = React.createElement;
-
-// React 제어 컴포넌트의 textarea 에 "실제 타이핑"을 흉내낸다(네이티브 value 세터 +
-// input 이벤트 → React onChange 발화).
-function typeInto(textarea, value) {
-  const proto = Object.getPrototypeOf(textarea);
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  run(() => {
-    setter.call(textarea, value);
-    textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
-  });
-}
 
 test('룸 전환 시 컴포저 draft 가 초기화된다(다중 작업 전환 리셋 계약)', () => {
   const dom = setupDom({ width: 1280 });
