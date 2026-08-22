@@ -58,6 +58,11 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   unarchive_ticket: 'unarchive',
   add_ticket_prerequisites: 'prereq',
   remove_ticket_prerequisite: 'prereq',
+  // ticket 778b6dc7: durable CI-run wait, same "blocking flag on the ticket
+  // row" shape as prereq add/remove above — one category covers both
+  // register/cancel directions, same precedent as 'prereq'.
+  await_ci_run: 'ci_wait',
+  cancel_ci_wait: 'ci_wait',
   handoff_to_agent: 'handoff',
   propose_move: 'propose',
   record_agreement: 'consensus',
