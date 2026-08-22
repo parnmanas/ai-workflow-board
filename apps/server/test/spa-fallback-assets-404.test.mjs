@@ -13,17 +13,20 @@
 // + exclude 카탈로그)를 구동한다.
 //
 // 범위에서 뺀 것: "/assets 이외의 알 수 없는 라우트(예 /ws/:id/boards)도 여전히
-// index.html 로 fallback 되는지"는 이 스위트가 검증하지 않는다 — 그 catch-all 은
-// @nestjs/serve-static 이 내부적으로 res.sendFile(indexFilePath, null, cb) 를
-// root 옵션 없이 호출하는데(node_modules/@nestjs/serve-static/dist/loaders/
-// express.loader.js), root 가 없으면 send 모듈이 절대경로 전체 세그먼트를
-// dotfile 검사 대상으로 삼는다. 이 저장소의 AWB worktree 절대경로는
-// `.../.awb/wt/<board>/<ticket>/...` 형태라 `.awb` 세그먼트가 dotfile 로 인식돼
-// 항상 404 로 떨어진다 — /assets 제외 변경과 무관한 기존 버그이며 프로덕션
-// Dockerfile(WORKDIR=/app, dot-segment 없음)에는 영향이 없다. 후속 티켓
-// #[ticket:6000fadf-d4a0-4bae-a285-aae0a20ea2e2|SPA fallback res.sendFile이 root 옵션 없이 호출돼 dot-segment 포함 경로(.awb worktree 등)에서 항상 404]
-// 로 분리 기록. 아래는 그 버그를 우회하는 케이스(루트 `/` — express.static 자체의
-// index-serving 으로 처리되어 이 dotfile 경로를 타지 않는다)만 회귀 가드로 쓴다.
+// index.html 로 fallback 되는지"는 이 스위트가 검증하지 않는다 — 그 경로는
+// applySpaFallback(common/spa-fallback.ts, main.ts에서 ServeStaticModule보다
+// 먼저 마운트, ticket 7ba057fb)이 처리하고, 확장자 없는 요청만 가로채므로
+// 확장자가 있는 /assets/*.js 요청(이 스위트의 대상)은 애초에 그 미들웨어를 타지
+// 않고 그대로 ServeStaticModule의 exclude 카탈로그로 흘러간다 — 이 스위트와는
+// 무관하다. applySpaFallback은 res.sendFile('index.html', { root: clientDistRoot
+// }, cb)처럼 root를 명시해서 호출하므로, 이 저장소의 AWB worktree 절대경로
+// (`.../.awb/wt/<board>/<ticket>/...`) 아래에서도 `.awb` 세그먼트가 dotfile로
+// 오인되지 않는다 — root 없이 절대경로로 sendFile했다면(과거 @nestjs/serve-static
+// 내장 fallback의 방식) 항상 404 났을 것이다. 그 dot-segment 회귀 커버리지는
+// 별도 spa-fallback-dotsegment.test.mjs(ticket
+// #[ticket:6000fadf-d4a0-4bae-a285-aae0a20ea2e2|SPA fallback res.sendFile이 root 옵션 없이 호출돼 dot-segment 포함 경로(.awb worktree 등)에서 항상 404])
+// 에 있다. 아래는 /assets 제외 계약(루트 `/`는 express.static 자체의
+// index-serving 으로 처리되어 이 경로를 타지 않는다)만 회귀 가드로 쓴다.
 
 import fs from 'node:fs';
 import path from 'node:path';
