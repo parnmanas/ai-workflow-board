@@ -138,6 +138,10 @@ export class AllocationService {
       // ticket waiting on prerequisite tickets has its triggers dropped
       // downstream, so it must not appear in the agent's allocated list.
       if ((ticket as any).pending_on_tickets) continue;
+      // Blocked-on-CI-run exclusion (ticket 778b6dc7): same reasoning again —
+      // a ticket durably awaiting an external CI run has its triggers
+      // dropped downstream too.
+      if ((ticket as any).pending_ci_wait) continue;
 
       // v0.41 — read role slugs straight off the column row. Replaces the
       // old `Board.routing_config[col.name.toLowerCase()]` lookup.

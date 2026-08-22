@@ -361,7 +361,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       if (scannedIds.has(alert.ticket_id)) continue;
       const liveTicket = await ticketRepo.findOne({ where: { id: alert.ticket_id } });
       if (liveTicket) {
-        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets) {
+        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets || liveTicket.pending_ci_wait) {
           // Manual archive after the alert landed. The archive itself was a
           // deliberate operator action — no need to spam an unstuck chat post
           // to announce that we agree. Drop the row silently so the next
@@ -394,6 +394,15 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
   private async _intentionalWaitReason(ticket: Ticket): Promise<string | null> {
     if (ticket.archived_at || ticket.pending_user_action) return 'parked';
+
+    // Trusted unconditionally, same posture as pending_user_action above —
+    // unlike pending_on_tickets below, there is no cheap local check to
+    // corroborate "is the wait still genuinely open" (that would mean an
+    // extra GitHub API call from this sweep). CiWaitResumeService owns its
+    // own bounded timeout (CI_WAIT_MAX_AGE_MS), so a wait that never
+    // resolves self-clears there rather than needing this detector to
+    // second-guess it.
+    if (ticket.pending_ci_wait) return 'ci_wait';
 
     if (ticket.pending_on_tickets) {
       const openCount = await this.dataSource.getRepository(TicketPrerequisite)

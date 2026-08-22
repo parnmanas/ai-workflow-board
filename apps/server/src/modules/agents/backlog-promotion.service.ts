@@ -355,6 +355,10 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       // trigger emit gate would drop every wake-up, leaving the active column
       // held by a ghost. Same reasoning as the pending_user_action exclusion.
       .andWhere('t.pending_on_tickets = :falseVal', { falseVal: false })
+      // Blocked-on-CI-run exclusion (ticket 778b6dc7): same reasoning again —
+      // the trigger emit gate drops every wake-up for a ticket durably
+      // awaiting an external CI run.
+      .andWhere('t.pending_ci_wait = :falseVal', { falseVal: false })
       // Archived intake tickets (ticket 9b44526b) must not consume a
       // promotion slot — same reasoning as the pending_user_action
       // exclusion: the trigger emit gate downstream would drop every
