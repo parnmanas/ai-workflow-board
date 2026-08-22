@@ -20,6 +20,7 @@ import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 import { OutreachModule } from '../outreach/outreach.module';
 import { OrchestrationModule } from '../orchestration/orchestration.module';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
+import { OntologyModule } from '../ontology/ontology.module';
 
 @Module({
   imports: [
@@ -58,6 +59,9 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
     // MCP tool (ticket 6ff827cb) — routes an extend/release grant to the
     // calling agent's own live manager instance over agent_manager_command.
     AgentManagerModule,
+    // Provides OntologyLifecycleService + OntologyQueryService for the
+    // ontology-tools MCP tools (ticket d35b7b7d, DESIGN.md 축 6).
+    OntologyModule,
   ],
   controllers: [McpController],
 })

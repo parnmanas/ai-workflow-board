@@ -69,6 +69,8 @@ import type { OrchestrationRunnerService } from '../../orchestration/orchestrati
 import type { OrchestrationMissionService } from '../../orchestration/orchestration-mission.service';
 import type { OrchestrationTeamService } from '../../orchestration/orchestration-team.service';
 import type { AgentManagerCommandService } from '../../agent-manager/agent-manager-command.service';
+import type { OntologyLifecycleService } from '../../ontology/ontology-lifecycle.service';
+import type { OntologyQueryService } from '../../ontology/ontology-query.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -213,6 +215,16 @@ export interface ToolContext {
   // (there is no live manager instance concept without the DI-wired
   // InstanceRegistry this service wraps).
   agentManagerCommandService?: AgentManagerCommandService;
+  // Ontology Graph (ticket d35b7b7d, DESIGN.md 축 6). Required by
+  // ontology-tools.ts's six graph_ tools: `ontologyLifecycleService` resolves
+  // graph_id from (resource_id, folder_path) and auto-provisions +
+  // kicks off the initial Tier 1/1.5 build on first reference (graph_status);
+  // `ontologyQueryService` answers the bounded traversal/lookup queries. Both
+  // depend on a worker-pool/git-repo-cache-backed extraction service, so —
+  // same posture as orchestration*/featuresService above — standalone context
+  // omits them and the tools degrade to an explicit error.
+  ontologyLifecycleService?: OntologyLifecycleService;
+  ontologyQueryService?: OntologyQueryService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

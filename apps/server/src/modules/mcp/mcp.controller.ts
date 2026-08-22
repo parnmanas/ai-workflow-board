@@ -49,6 +49,8 @@ import { GitHubConnectorService } from '../../services/github-connector.service'
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { ClassificationBridgeService } from '../outreach/classifier/classification-bridge.service';
+import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service';
+import { OntologyQueryService } from '../ontology/ontology-query.service';
 
 // Module-level log reference, set from McpController.onModuleInit
 let logService: LogService | null = null;
@@ -162,6 +164,8 @@ export class McpController implements OnModuleInit {
     private readonly orchestrationTeamService: OrchestrationTeamService,
     private readonly metricsRegistry: MemoryMetricsRegistry,
     private readonly agentManagerCommandService: AgentManagerCommandService,
+    private readonly ontologyLifecycleService: OntologyLifecycleService,
+    private readonly ontologyQueryService: OntologyQueryService,
   ) {}
 
   onModuleInit() {
@@ -261,6 +265,8 @@ export class McpController implements OnModuleInit {
       orchestrationMissionService: this.orchestrationMissionService,
       orchestrationTeamService: this.orchestrationTeamService,
       agentManagerCommandService: this.agentManagerCommandService,
+      ontologyLifecycleService: this.ontologyLifecycleService,
+      ontologyQueryService: this.ontologyQueryService,
     };
   }
 
