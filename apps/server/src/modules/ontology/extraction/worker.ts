@@ -7,9 +7,9 @@
 // 경계를 넘지 않는다. extractFile()이 이미 tree.delete()를 보장하므로 이
 // 파일은 그 계약을 신뢰하고 값만 직렬화해 돌려보낸다.
 import { parentPort } from 'node:worker_threads';
-import { xxh3 } from '@node-rs/xxhash';
 import { extractFile } from './extract-file';
 import { extractDecoratorFacts } from './decorator-rules';
+import { hashFactBundle } from './hash-bundle';
 import type { ExtractionTask, ExtractionTaskResult } from './types';
 
 if (!parentPort) {
@@ -22,7 +22,9 @@ async function handleTask(task: ExtractionTask): Promise<ExtractionTaskResult> {
   try {
     const bundle = await extractFile(task.path, task.content, task.lang);
     // XXH3(64비트) → 16진수 문자열, FactBundle.fileHash 계약(types.ts) 그대로.
-    bundle.fileHash = xxh3.xxh64(task.content).toString(16);
+    // ticket 964014f5부터 파일 해시뿐 아니라 각 def의 contentHash/
+    // signatureHash도 여기서 함께 채운다(hash-bundle.ts).
+    hashFactBundle(bundle, task.content);
     // extractDecoratorFacts는 javascript를 자체적으로 걸러낸다(decorator-rules.ts) —
     // 여기서 다시 분기하지 않는다.
     const decoratorFacts = extractDecoratorFacts(task.path, task.content, task.lang);

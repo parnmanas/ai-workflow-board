@@ -112,7 +112,7 @@ export { OrchestrationEvent } from './OrchestrationEvent';
 // Postgres에서는 이 파일의 다른 모든 테이블과 마찬가지로 기존 단일
 // DataSource에 그대로 synchronize된다(D-01, 손으로 쓴 마이그레이션 불요).
 export { OntologyNode } from './OntologyNode';
-export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod } from './OntologyNode';
+export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod, OntologyDurability } from './OntologyNode';
 export { OntologyEdge } from './OntologyEdge';
 export type {
   OntologyEdgeResolution,
@@ -125,6 +125,10 @@ export type {
 // DataSource로, Postgres에서는 이 파일의 다른 테이블과 함께 기존 단일
 // DataSource로.
 export { OntologyReverseEdgeIndex } from './OntologyReverseEdgeIndex';
+// Tier-3 재보강 대기열(ticket 964014f5, DESIGN.md 축 4) — 위 세 테이블과
+// 같은 자세로 db.ts의 ONTOLOGY_ENTITIES를 통해 독립 DataSource(sql.js) /
+// 기존 단일 DataSource(Postgres)에 들어간다.
+export { OntologyEnrichmentQueue } from './OntologyEnrichmentQueue';
 // CLI 자동 로그인(device-auth) 세션 (ticket b2e79108). Auto-DDL'd by TypeORM
 // `synchronize` (D-01) exactly like the sibling tables above; no hand-written
 // migration needed.

@@ -12,6 +12,17 @@ export type OntologyLayer = 'structural' | 'derived' | 'semantic' | 'curated';
 export type OntologyStatus = 'active' | 'stale' | 'removed' | 'quarantined';
 export type OntologyConfidenceMethod = 'constant' | 'agreement' | 'support' | 'calibrated' | 'human';
 
+// ticket 964014f5(Ontology Graph 4/7), DESIGN.md 축 4 — durability tier.
+// `volatile`(워크스페이스 소스) / `stable`(lockfile-pinned deps, 아직 이
+// 코드베이스엔 ExternalPackage 추출기가 없어 실제로는 채워지지 않음 —
+// 미래 티켓을 위해 어휘만 열어둠) / `frozen`(vendored/generated 경로,
+// extraction/durability.ts의 휴리스틱으로 판정). File 노드가 최초로 갖고,
+// 같은 파일의 def 노드들은 그 파일의 값을 그대로 상속한다(persist.ts).
+// Phase B의 reverse-index pre-filter(incremental/reverse-lookup.ts)가 이
+// 컬럼으로 "volatile 파일만 건드린 커밋은 stable/frozen 파티션을 아예
+// 건드리지 않는다"를 구현한다(research-incremental.md §4.3).
+export type OntologyDurability = 'volatile' | 'stable' | 'frozen';
+
 // Ontology Graph 노드 테이블(ticket 6ca4894a, DESIGN.md 축 2/3). 구조적/파생/
 // semantic 그래프 엔티티(파일, callable, community, concept 등) 1개당 1행.
 // 전체 property set + index 형태는 research-ontology.md §8.5를 그대로
@@ -84,6 +95,18 @@ export class OntologyNode {
 
   @Column({ type: 'varchar', default: '' })
   content_hash: string;
+
+  // ticket 964014f5, DESIGN.md 축 4 — content_hash와 분리된 "선언부만"의
+  // 해시(이름/kind/arity/visibility/파라미터·반환타입/heritage, body 제외).
+  // Callable/Type/Field 노드에만 의미가 있다(File은 항상 ''). body-only
+  // 편집은 content_hash만 바뀌고 signature_hash는 그대로라 Phase A가 다른
+  // 파일을 건드리지 않고 조기 종료할 수 있다 — extraction/hash-bundle.ts가
+  // 실제 값을 계산.
+  @Column({ type: 'varchar', default: '' })
+  signature_hash: string;
+
+  @Column({ type: 'varchar', default: 'volatile' })
+  durability: OntologyDurability;
 
   @Column({ type: 'varchar', default: '' })
   lang: string;
