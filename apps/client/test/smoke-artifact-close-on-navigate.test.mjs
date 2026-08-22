@@ -9,10 +9,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
+import { setupDom, click, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ArtifactPanelProvider, useArtifactPanel } from '../src/contexts/ArtifactPanelContext.tsx';
-import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
 import TicketArtifact from '../src/components/TicketArtifact.tsx';
 import BoardArtifact from '../src/components/BoardArtifact.tsx';
@@ -20,32 +20,6 @@ import AgentArtifact from '../src/components/AgentArtifact.tsx';
 import { api } from '../src/api.ts';
 
 const h = React.createElement;
-
-// BoardStreamProvider 의 pub/sub 는 Node 전역 EventTarget 이라 jsdom Event 를 거부한다
-// (smoke-ticket-artifact-realtime 과 동일 처리).
-const NodeEvent = globalThis.Event;
-const NodeCustomEvent =
-  globalThis.CustomEvent ||
-  class CustomEvent extends NodeEvent {
-    constructor(type, opts = {}) {
-      super(type, opts);
-      this.detail = opts.detail ?? null;
-    }
-  };
-
-class FakeEventSource {
-  static CLOSED = 2;
-  constructor() {
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-  }
-  addEventListener() {}
-  removeEventListener() {}
-  close() {
-    this.readyState = 2;
-  }
-}
 
 async function flush() {
   await act(async () => {
@@ -80,23 +54,18 @@ function Harness({ node, title }) {
 }
 
 function renderArtifact(node, title = '아티팩트') {
-  return mount(
-    h(
-      MemoryRouter,
-      { initialEntries: ['/ws/w1/chat'] },
-      h(BoardStreamProvider, null, h(ArtifactPanelProvider, null, h(Harness, { node, title }))),
-    ),
-  );
+  return mountWithBoardStream(h(ArtifactPanelProvider, null, h(Harness, { node, title })), {
+    withAuth: false,
+    wrap: (tree) => h(MemoryRouter, { initialEntries: ['/ws/w1/chat'] }, tree),
+  });
 }
 
 function setupEnv() {
   const dom = setupDom({ width: 1280 });
-  globalThis.Event = NodeEvent;
-  globalThis.CustomEvent = NodeCustomEvent;
-  globalThis.EventSource = FakeEventSource;
+  const { uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  return dom;
+  return { dom, uninstall };
 }
 
 /** 라벨로 버튼을 찾아 클릭. 없으면 무엇이 렌더됐는지 함께 실패시킨다. */
@@ -110,7 +79,7 @@ function clickButton(view, label) {
 }
 
 test('TicketArtifact "보드에서 열기" — 보드로 이동하고 패널이 닫힌다', async () => {
-  const dom = setupEnv();
+  const { dom, uninstall } = setupEnv();
   const orig = api.getTicket;
   api.getTicket = async () => ({
     id: 't1', title: '샘플 티켓', board_id: 'b1', workspace_id: 'w1', comments: [],
@@ -132,12 +101,13 @@ test('TicketArtifact "보드에서 열기" — 보드로 이동하고 패널이 
     view.unmount();
   } finally {
     api.getTicket = orig;
+    uninstall();
     dom.cleanup();
   }
 });
 
 test('BoardArtifact 티켓 링크 — 그 티켓으로 이동하고 패널이 닫힌다', async () => {
-  const dom = setupEnv();
+  const { dom, uninstall } = setupEnv();
   const orig = api.getBoard;
   api.getBoard = async () => ({
     id: 'b1',
@@ -164,12 +134,13 @@ test('BoardArtifact 티켓 링크 — 그 티켓으로 이동하고 패널이 �
     view.unmount();
   } finally {
     api.getBoard = orig;
+    uninstall();
     dom.cleanup();
   }
 });
 
 test('AgentArtifact 상세 보기 — 에이전트 상세로 이동하고 패널이 닫힌다', async () => {
-  const dom = setupEnv();
+  const { dom, uninstall } = setupEnv();
   const orig = api.getAgent;
   api.getAgent = async () => ({ id: 'a1', name: '샘플 에이전트', workspace_id: 'w1' });
   try {
@@ -189,6 +160,7 @@ test('AgentArtifact 상세 보기 — 에이전트 상세로 이동하고 패널
     view.unmount();
   } finally {
     api.getAgent = orig;
+    uninstall();
     dom.cleanup();
   }
 });

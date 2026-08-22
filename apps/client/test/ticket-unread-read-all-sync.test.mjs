@@ -19,58 +19,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
+import { setupDom, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { MemoryRouter } from 'react-router-dom';
-import { AuthProvider } from '../src/contexts/AuthContext.tsx';
-import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider, useNotifications } from '../src/contexts/NotificationContext.tsx';
 import { api } from '../src/api.ts';
 
 const h = React.createElement;
-
-// smoke-ticket-artifact-realtime.test.mjs 와 동일한 이유로 필요: BoardStreamProvider
-// 내부 pub/sub 버스는 Node 전역 EventTarget 이고 CustomEvent 로 디스패치하는데,
-// setupDom 이 전역 Event/CustomEvent 를 jsdom 것으로 덮어쓰면 Node EventTarget
-// 이 이를 거부한다(ERR_INVALID_ARG_TYPE). 마운트 전 pristine Node 생성자를
-// 붙잡아 setupDom 이후 복원한다(이 파일은 DOM 이벤트를 디스패치하지 않아 안전).
-const NodeEvent = globalThis.Event;
-const NodeCustomEvent =
-  globalThis.CustomEvent ||
-  class CustomEvent extends NodeEvent {
-    constructor(type, opts = {}) {
-      super(type, opts);
-      this.detail = opts.detail ?? null;
-    }
-  };
-function useNodeEventGlobals() {
-  globalThis.Event = NodeEvent;
-  globalThis.CustomEvent = NodeCustomEvent;
-}
-
-class FakeEventSource {
-  static instances = [];
-  static CLOSED = 2;
-  constructor(url) {
-    this.url = url;
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-    this._listeners = {};
-    FakeEventSource.instances.push(this);
-  }
-  addEventListener(type, fn) {
-    (this._listeners[type] ||= []).push(fn);
-  }
-  removeEventListener(type, fn) {
-    this._listeners[type] = (this._listeners[type] || []).filter((f) => f !== fn);
-  }
-  close() {
-    this.readyState = 2;
-  }
-  emit(type, dataObj) {
-    for (const fn of this._listeners[type] || []) fn({ data: JSON.stringify(dataObj) });
-  }
-}
 
 function Harness({ capture }) {
   const notifications = useNotifications();
@@ -100,11 +55,9 @@ function makeInitialTicketCounts() {
 
 async function mountHarness(t, { ticketCounts } = {}) {
   const dom = setupDom({ width: 1280 });
-  useNodeEventGlobals();
-  globalThis.EventSource = FakeEventSource;
+  const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  FakeEventSource.instances.length = 0;
 
   const originals = {
     getMe: api.getMe,
@@ -135,17 +88,9 @@ async function mountHarness(t, { ticketCounts } = {}) {
   };
 
   const capture = { current: null };
-  const view = mount(
-    h(
-      MemoryRouter,
-      null,
-      h(
-        AuthProvider,
-        null,
-        h(BoardStreamProvider, null, h(NotificationProvider, null, h(Harness, { capture }))),
-      ),
-    ),
-  );
+  const view = mountWithBoardStream(h(NotificationProvider, null, h(Harness, { capture })), {
+    wrap: (tree) => h(MemoryRouter, null, tree),
+  });
 
   await flush();
   assert.ok(capture.current, 'NotificationProvider 컨텍스트가 마운트돼야 한다');
@@ -153,11 +98,12 @@ async function mountHarness(t, { ticketCounts } = {}) {
 
   t.after(() => {
     view.unmount();
+    uninstall();
     Object.assign(api, originals);
     dom.cleanup();
   });
 
-  return { capture, markAllTicketsReadCalls };
+  return { capture, markAllTicketsReadCalls, FakeEventSource };
 }
 
 test('초기 unread 응답 → 보드/티켓 카운트가 존재한다', async (t) => {
@@ -185,7 +131,7 @@ test('보드 read-all(서버 호출 + markTicketsReadForBoard) 후 로컬 카운
 });
 
 test('다른 세션에서 emit 된 ticket_reads_cleared(보드 스코프) 수신 시 재조회 없이 로컬 카운트가 수렴한다', async (t) => {
-  const { capture } = await mountHarness(t);
+  const { capture, FakeEventSource } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
   const es = FakeEventSource.instances[0];
@@ -207,7 +153,7 @@ test('다른 세션에서 emit 된 ticket_reads_cleared(보드 스코프) 수신
 });
 
 test('ticket_reads_cleared(워크스페이스 전체, board_id=null) 수신 시 모든 보드가 함께 0이 된다', async (t) => {
-  const { capture } = await mountHarness(t, {
+  const { capture, FakeEventSource } = await mountHarness(t, {
     ticketCounts: {
       total: 8,
       perTicket: { t1: 5, t2: 3 },
@@ -235,7 +181,7 @@ test('ticket_reads_cleared(워크스페이스 전체, board_id=null) 수신 시 
 });
 
 test('다른 사용자(user_id 불일치)의 ticket_reads_cleared 는 무시한다', async (t) => {
-  const { capture } = await mountHarness(t);
+  const { capture, FakeEventSource } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
   const es = FakeEventSource.instances[0];
@@ -254,7 +200,7 @@ test('다른 사용자(user_id 불일치)의 ticket_reads_cleared 는 무시한�
 });
 
 test('다른 워크스페이스(workspace_id 불일치)의 ticket_reads_cleared 는 무시한다', async (t) => {
-  const { capture } = await mountHarness(t);
+  const { capture, FakeEventSource } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
   const es = FakeEventSource.instances[0];
