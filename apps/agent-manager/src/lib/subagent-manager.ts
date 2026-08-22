@@ -44,7 +44,7 @@ import { classifySpawnException } from './dispatch-preflight.js';
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
-import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
+import { resolveMaxOutputTokensEnv, runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
@@ -629,14 +629,30 @@ export class SubagentManager implements SubagentManagerContract {
     let configPath: string | null = null;
     let configPathIsTemp = false;
     let runtimeLease: RuntimeLease | null = null;
+    // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — profile.context_window 가
+    // 설정된 경우에만 의미 있는 no-op-safe 계산. runtimeLease 성패와 무관하게
+    // 로그/env 병합에 재사용하므로 try 블록보다 먼저 계산해 둔다.
+    const maxOutputResolution = claudeRuntimeProfile
+      ? resolveMaxOutputTokensEnv(claudeRuntimeProfile, {
+          rolePrompt: spec.rolePrompt,
+          harnessAppend: harness?.system_prompt_append,
+          firstTurnText: spec.taskText,
+        })
+      : null;
     try {
       if (claudeRuntimeProfile) {
         runtimeLease = await startRuntimeProfile(
           claudeRuntimeProfile,
           runtimeCredentialEnv(claudeRuntimeProfile, ctx?.credential_id, ctx?.extra_env),
         );
+        const est = maxOutputResolution!.estimate;
+        const budgetLog = maxOutputResolution!.effectiveMaxOutputTokens !== null
+          ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
+            `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
+            `safety_margin=${maxOutputResolution!.safetyMarginTokens} effective_max_output=${maxOutputResolution!.effectiveMaxOutputTokens}`
+          : '';
         log(
-          `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
+          `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
       // Establish the server-owned baseline before creating MCP attribution.
@@ -818,6 +834,7 @@ export class SubagentManager implements SubagentManagerContract {
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
+          ...(maxOutputResolution?.env ?? {}),
         },
       });
       if (runtimeLease) child.once('close', () => void runtimeLease?.close());

@@ -41,7 +41,7 @@ import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
 import { writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
-import { runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
+import { resolveMaxOutputTokensEnv, runtimeCredentialEnv, startRuntimeProfile, type RuntimeLease } from './runtime-profiles.js';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
@@ -648,6 +648,16 @@ export class BaseSessionManager {
     let configPathIsTemp = false;
     let pidPath: string | null = null;
     let runtimeLease: RuntimeLease | null = null;
+    // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — profile.context_window 가
+    // 설정된 경우에만 의미 있는 no-op-safe 계산. runtimeLease 성패와 무관하게
+    // 로그/env 병합에 재사용하므로 try 블록보다 먼저 계산해 둔다.
+    const maxOutputResolution = claudeRuntimeProfile
+      ? resolveMaxOutputTokensEnv(claudeRuntimeProfile, {
+          rolePrompt,
+          harnessAppend: harness?.system_prompt_append,
+          firstTurnText,
+        })
+      : null;
     try {
       if (claudeRuntimeProfile) {
         runtimeLease = await startRuntimeProfile(
@@ -658,8 +668,14 @@ export class BaseSessionManager {
             agentContext?.extra_env,
           ),
         );
+        const est = maxOutputResolution!.estimate;
+        const budgetLog = maxOutputResolution!.effectiveMaxOutputTokens !== null
+          ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
+            `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
+            `safety_margin=${maxOutputResolution!.safetyMarginTokens} effective_max_output=${maxOutputResolution!.effectiveMaxOutputTokens}`
+          : '';
         log(
-          `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}`,
+          `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
       let descriptor = adapter.buildSessionSpawn({
@@ -802,6 +818,7 @@ export class BaseSessionManager {
           ...credentialEnv,
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
+          ...(maxOutputResolution?.env ?? {}),
         },
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
