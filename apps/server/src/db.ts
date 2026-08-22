@@ -686,6 +686,23 @@ export class OntologySqljsWriteSubscriber implements EntitySubscriberInterface {
  */
 export function buildOntologyDataSourceOptions(): DataSourceOptions {
   const { dbDir, location } = resolveOntologySqljsLocation();
+  // Reviewer finding (6ca4894a Review round 1): a misconfigured
+  // SQLJS_ONTOLOGY_DB_PATH that happens to normalize to the SAME file as the
+  // primary sql.js DB would silently defeat this entire ticket — two
+  // independent sql.js/WASM instances would each hold their own in-memory
+  // copy of that one file and export/overwrite it on their own schedules,
+  // corrupting or dropping whichever side flushed last. Fail boot loudly and
+  // immediately instead of letting that happen quietly.
+  const primaryLocation = path.resolve(resolveSqljsLocation().location);
+  const ontologyLocation = path.resolve(location);
+  if (ontologyLocation === primaryLocation) {
+    throw new Error(
+      `[DB] SQLJS_ONTOLOGY_DB_PATH resolves to the same file as the primary sql.js DB ` +
+      `(${ontologyLocation}). The ontology DataSource must never share a file with the ` +
+      `primary DataSource (ticket 6ca4894a, DESIGN.md axis 3 / REVIEW-NOTES.md S1) — point ` +
+      `SQLJS_ONTOLOGY_DB_PATH at a different file.`,
+    );
+  }
   if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
   return {
     type: 'sqljs',
