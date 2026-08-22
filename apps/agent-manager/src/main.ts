@@ -36,7 +36,11 @@ import {
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
 import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index.js';
-import { discoverRuntimeCapabilities } from './lib/runtime/runtime-health.js';
+import {
+  checkAuxiliaryCli,
+  discoverRuntimeCapabilities,
+  formatCliResolutionSummary,
+} from './lib/runtime/runtime-health.js';
 import { promptComposer } from './lib/prompts.js';
 import { ManagedAgentRegistry } from './lib/managed-agents.js';
 import { ManagedAgentContextRegistry } from './lib/managed-agent-context.js';
@@ -957,6 +961,19 @@ async function runRuntime(
     // reflects the CLIs actually installed on this host.
     const availableModels: Record<string, string[]> = {};
     const runtimeCapabilities = await discoverRuntimeCapabilities();
+    // ticket 49c173c8 — PATH를 명시 고정하는 systemd 드롭인이 두 번째로 어떤
+    // 디렉터리(codex용 ~/.npm-global/bin, gh용 ~/.local/bin)를 조용히 빠뜨렸는데도
+    // 매니저 쪽엔 아무 신호가 없었다. git/gh는 agent runtime이 아니라서 위
+    // discoverRuntimeCapabilities()가 절대 다루지 않는다 — 여기서 따로 확인해
+    // 전부 한 줄의 기동 시점 로그로 합쳐, 다음 PATH 사각지대가 세션 안에서만
+    // 뒤늦게 드러나지 않고 agent-manager.log에 바로 남게 한다.
+    const auxCliChecks = await Promise.all(
+      ['git', 'gh'].map(async (cli) => [cli, await checkAuxiliaryCli(cli)] as const),
+    );
+    log(`boot CLI resolution: ${formatCliResolutionSummary([
+      ...(['claude', 'codex'] as const).map((id) => [id, runtimeCapabilities[id]] as const),
+      ...auxCliChecks,
+    ])}`);
     await Promise.all(
       KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
         try {

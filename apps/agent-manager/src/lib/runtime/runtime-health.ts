@@ -88,3 +88,34 @@ export async function discoverRuntimeCapabilities(
   );
   return Object.fromEntries(rows);
 }
+
+/**
+ * `git`/`gh` 같은 비-runtime CLI 도구를 discoverRuntimeCapabilities와 동일한
+ * 방식으로 probe한다 — 이런 도구는 KNOWN_RUNTIME_IDS에 없어 그 함수가 절대
+ * 다루지 않는다. 절대 throw하지 않는다 — probe 자체가 실패하면
+ * discoverRuntimeCapabilities의 catch 분기와 동일한 `probe_unavailable`
+ * 형태로 degrade한다.
+ */
+export async function checkAuxiliaryCli(
+  command: string,
+  probe: (command: string, args: string[]) => Promise<RuntimeProbeResult> = probeRuntimeCommand,
+): Promise<RuntimeProbeResult> {
+  try {
+    return await probe(command, ['--version']);
+  } catch {
+    return { installed: false, healthy: false, version: null, reason: 'probe_unavailable' };
+  }
+}
+
+/**
+ * (id, probe 결과) 목록을 사람이 grep하기 쉬운 한 줄 로그로 렌더링한다.
+ * 예: `claude=2.1.3 codex=0.146.0 gh=NOT_FOUND(not_found) git=2.43.0` —
+ * ticket 49c173c8의 기동 시점 CLI 해석 신호.
+ */
+export function formatCliResolutionSummary(
+  entries: ReadonlyArray<readonly [string, RuntimeProbeResult]>,
+): string {
+  return entries
+    .map(([id, r]) => `${id}=${r.installed ? (r.version ?? 'installed') : `NOT_FOUND(${r.reason ?? 'unknown'})`}`)
+    .join(' ');
+}
