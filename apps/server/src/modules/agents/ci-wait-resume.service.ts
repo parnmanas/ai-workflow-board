@@ -329,11 +329,24 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
       await this._trackPollFailure(ticket, rawContext, ctx, nowMs);
       return;
     }
-    if (ctx.poll_issue) await this._clearPollFailure(ticket, rawContext, ctx);
-    if (run.status !== 'completed') return; // still running/queued — retry next sweep
+    if (run.status !== 'completed') {
+      // Still running/queued — retry next sweep. This readable poll still
+      // clears a stale failure streak, but that is the ONLY mutation this
+      // sweep performs, so it is safe as its own CAS against `rawContext`.
+      if (ctx.poll_issue) await this._clearPollFailure(ticket, rawContext, ctx);
+      return;
+    }
 
+    // Run completed — record the resolved outcome AND drop any poll-failure
+    // streak in the SAME CAS. Review round 1 (ticket 9bbe9146): these used to
+    // be two separate tryUpdateContext calls against the same `rawContext`
+    // (clear-streak, then record-outcome) — the second one always lost the
+    // CAS because the first had already advanced `ci_wait_context` past
+    // `rawContext`, silently deferring delivery to the NEXT sweep and
+    // breaking the "resumes within one sweep" guarantee on exactly the
+    // recovery-after-failure path this ticket exists to fix.
     const outcome = this._freshOutcome('resolved', this._formatResolvedMessage(ctx, run), nowMs);
-    const nextCtx: CiWaitContext = { ...ctx, outcome };
+    const nextCtx: CiWaitContext = { ...ctx, outcome, poll_issue: undefined };
     const nextJson = JSON.stringify(nextCtx);
     const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
     if (!won) return; // lost the race — the winner (or a future sweep) delivers

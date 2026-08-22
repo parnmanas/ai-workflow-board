@@ -874,3 +874,46 @@ test('sweep(): a poll that finally succeeds clears the failure streak entirely, 
 
   await ciWaitService.cancelWait(ticket.id);
 });
+
+test('sweep(): review round 1 (reviewer) — N poll failures followed by a poll that is IMMEDIATELY completed resolves the wait in that SAME sweep() call, not a later one', async () => {
+  // Regression for a real bug: clearing the poll_issue streak and recording
+  // the resolved outcome were two SEPARATE tryUpdateContext CAS calls both
+  // conditioned on the SAME stale `rawContext`. The first (clear) always won
+  // and advanced ci_wait_context; the second (record outcome) then always
+  // lost that CAS against its own now-stale `rawContext` and silently
+  // deferred delivery to the NEXT sweep — breaking the "resumes within one
+  // sweep" guarantee on exactly the recovery-after-failure path this ticket
+  // exists to fix.
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let attempt = 0;
+  const githubStub = {
+    async getWorkflowRun() {
+      attempt++;
+      if (attempt <= 3) return null; // 3 consecutive poll failures (degraded)
+      return { id: '999', status: 'completed', conclusion: 'success', html_url: 'https://x/999', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const dispatchCalls = [];
+  const resumer = makeResumer(githubStub, dispatchCalls);
+
+  for (let i = 0; i < 3; i++) await resumer.sweep(); // build up a poll_issue streak
+  const midway = await ticketRepo.findOne({ where: { id: ticket.id } });
+  const midwayCtx = JSON.parse(midway.ci_wait_context);
+  assert.equal(midwayCtx.poll_issue.consecutive_failures, 3);
+
+  // The 4th sweep: getWorkflowRun succeeds AND the run is already completed.
+  await resumer.sweep();
+
+  const dispatchesForTicket = dispatchCalls.filter((c) => c.ticketId === ticket.id);
+  assert.equal(dispatchesForTicket.length, 1, 'the completed run must be delivered in the SAME sweep() call that first reads it successfully, not deferred to a later sweep');
+
+  const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].content, /CI 대기 완료/);
+
+  const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(fresh.pending_ci_wait, false, 'the wait must be cleared in this same sweep, not deferred to a follow-up sweep');
+  assert.equal(fresh.ci_wait_context, '', 'a fully delivered wait must not leave any context (stale poll_issue or otherwise) behind');
+});
