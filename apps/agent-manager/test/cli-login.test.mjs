@@ -9,7 +9,7 @@
 // 않음을 이 시점에 보장한다.
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -155,6 +155,60 @@ function fakeCodexUnparseableThenRecovers(recoverAfterMs) {
   `);
 }
 
+// ── ticket 06b2b990 — Claude CLI device-auth 자동 로그인 ────────────────
+//
+// 실제 라이브 호스트(claude-cli 2.1.238, `CLAUDE_CONFIG_DIR` 격리, `claude
+// auth login --claudeai`)에서 캡처한 정확한 줄 포맷. codex와 달리 별도 줄의
+// one-time code가 없다 — "Paste code here if prompted"는 자동 폴링이 실패한
+// 경우에만 쓰이는 조건부 폴백이라 파서가 관여하지 않는다(cli-login.ts 상단
+// 주석 참고). URL은 "If the browser didn't open, visit: <url>"처럼 문장
+// 안에 섞여 나온다 — CliLoginManager의 URL 정규식(`https?:\/\/\S+`)이 줄
+// 앞머리 여부와 무관하게 뽑아내는지를 이 포맷 자체가 검증한다.
+const REAL_CLAUDE_PROMPT_LINES = [
+  'Opening browser to sign in…',
+  'If the browser didn\'t open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=test-state',
+  'Paste code here if prompted > ',
+];
+
+function makeFakeClaude(bodyJs) {
+  const path = join(scratchDir, `fake-claude-${randomUUID()}.js`);
+  writeFileSync(path, `#!/usr/bin/env node\n${bodyJs}\n`, { mode: 0o755 });
+  return path;
+}
+
+function fakeClaudeSuccess() {
+  const printLines = REAL_CLAUDE_PROMPT_LINES.map((l) => `console.log(${JSON.stringify(l)});`).join('\n');
+  return makeFakeClaude(`
+    const fs = require('fs');
+    const path = require('path');
+    ${printLines}
+    setTimeout(() => {
+      fs.writeFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'SECRET-CLAUDE-TOKEN-VALUE' } }));
+      process.exit(0);
+    }, 30);
+  `);
+}
+
+function fakeClaudeFailure() {
+  const printLines = REAL_CLAUDE_PROMPT_LINES.map((l) => `console.log(${JSON.stringify(l)});`).join('\n');
+  return makeFakeClaude(`
+    ${printLines}
+    setTimeout(() => { console.error('login failed: state mismatch'); process.exit(1); }, 30);
+  `);
+}
+
+function fakeClaudeExitZeroNoCredentialsFile() {
+  return makeFakeClaude(`setTimeout(() => process.exit(0), 20);`);
+}
+
+function fakeClaudeHangs() {
+  const printLines = REAL_CLAUDE_PROMPT_LINES.map((l) => `console.log(${JSON.stringify(l)});`).join('\n');
+  return makeFakeClaude(`
+    ${printLines}
+    setInterval(() => {}, 1000000);
+  `);
+}
+
 let originalFetch;
 let requests;
 
@@ -282,11 +336,11 @@ test('busy guard: a second start() while one is in flight throws and never spawn
   await manager.cancel(firstId);
 });
 
-test('only codex is accepted — claude is rejected without spawning anything (follow-up ticket)', async () => {
+test('codex and claude are both accepted (ticket 06b2b990); a third cli is rejected without spawning anything', async () => {
   const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' });
   await assert.rejects(
-    () => manager.start({ sessionId: randomUUID(), commandId: 'cmd-7', cli: 'claude' }),
-    /unsupported cli "claude"/,
+    () => manager.start({ sessionId: randomUUID(), commandId: 'cmd-7', cli: 'gemini' }),
+    /unsupported cli "gemini"/,
   );
   assert.equal(manager.isBusy(), false);
 });
@@ -312,6 +366,142 @@ test('isolation: CODEX_HOME handed to the child is never the real ~/.codex, and 
   assert.equal(capturedHome, join(CLI_LOGINS_DIR, sessionId));
   assert.notEqual(capturedHome, join(homedir(), '.codex'));
   assert.ok(capturedHome.startsWith(managerHome), 'isolated home must live under this manager instance\'s own home, not a shared/global location');
+});
+
+// ── ticket 06b2b990 — Claude device-auth tests ──────────────────────────
+
+test('claude success: awaiting_user carries the url only (no user_code — claude has none), then succeeded with credential_fields.credentials_json', async () => {
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { claudeBin: fakeClaudeSuccess() });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c1', cli: 'claude' });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'succeeded'));
+
+  const bodies = progressBodies(sessionId);
+  const awaiting = bodies.find((b) => b.status === 'awaiting_user');
+  assert.ok(awaiting, 'expected an awaiting_user progress report');
+  assert.match(awaiting.verification_url, /^https:\/\/claude\.com\/cai\/oauth\/authorize\?/);
+  assert.equal(awaiting.user_code, undefined, 'claude device-auth has no user-entered code, unlike codex');
+
+  const succeeded = bodies.find((b) => b.status === 'succeeded');
+  assert.deepEqual(
+    JSON.parse(succeeded.credential_fields.credentials_json),
+    { claudeAiOauth: { accessToken: 'SECRET-CLAUDE-TOKEN-VALUE' } },
+  );
+  assert.equal(succeeded.command_id, 'cmd-c1');
+
+  // 임시 홈은 성공 후에도 삭제되어야 한다(완료 기준 4) — 민감 파일을 디스크에
+  // 남기지 않음.
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  await waitUntil(() => !existsSync(homeDir));
+  assert.equal(manager.isBusy(), false);
+});
+
+test("claude failure: non-zero exit is reported as failed with a claude-specific message (not codex's), and the isolated home is removed", async () => {
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { claudeBin: fakeClaudeFailure() });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c2', cli: 'claude' });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'failed'));
+  const failed = progressBodies(sessionId).find((b) => b.status === 'failed');
+  assert.match(failed.error_detail, /^claude login exited with code 1/);
+
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  await waitUntil(() => !existsSync(homeDir));
+});
+
+test('claude: exit 0 without a .credentials.json is reported as failed, not succeeded', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { claudeBin: fakeClaudeExitZeroNoCredentialsFile() },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c3', cli: 'claude' });
+
+  await waitUntil(() => progressBodies(sessionId).length > 0);
+  const [report] = progressBodies(sessionId);
+  assert.equal(report.status, 'failed');
+  assert.match(report.error_detail, /\.credentials\.json was not found/);
+});
+
+test('claude timeout: a hung login is killed and reported timed_out within the injected timeout', async () => {
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { claudeBin: fakeClaudeHangs(), timeoutMs: 150 },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c4', cli: 'claude' });
+
+  // awaiting_user should still surface before the timeout fires — the fake
+  // script prints the prompt immediately, well under 150ms.
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'awaiting_user'));
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  await waitUntil(() => !existsSync(homeDir), { timeoutMs: 3000 });
+  assert.equal(manager.isBusy(), false);
+});
+
+test('claude cancel: an in-flight session is killed, reported cancelled, and its home is removed', async () => {
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { claudeBin: fakeClaudeHangs() });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c5', cli: 'claude' });
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'awaiting_user'));
+
+  const cancelled = await manager.cancel(sessionId);
+  assert.equal(cancelled, true);
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'cancelled'), { timeoutMs: 3000 });
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  await waitUntil(() => !existsSync(homeDir), { timeoutMs: 3000 });
+});
+
+// 티켓 완료 기준: "호스트의 실제 ~/.claude/.credentials.json이 로그인 도중/후
+// 변경되지 않음을 테스트로 잠글 것". 실제 개발자 홈은 절대 건드리지 않는다
+// (CI마다 다르고 위험할 수 있음) — 대신 이 테스트가 전부 통제하는 가짜 "실제
+// 홈"에 sentinel 파일을 심어두고, 격리된 로그인 플로우가 끝난 뒤에도 그
+// 파일이 바이트 단위로 그대로인지 직접 확인한다.
+test("isolation: CLAUDE_CONFIG_DIR handed to the child is never the real ~/.claude, and the host's real .credentials.json is byte-identical before/after a full login", async () => {
+  const fakeRealHome = mkdtempSync(join(tmpdir(), 'awb-cli-login-realhome-'));
+  const fakeRealClaudeDir = join(fakeRealHome, '.claude');
+  mkdirSync(fakeRealClaudeDir, { recursive: true });
+  const realCredPath = join(fakeRealClaudeDir, '.credentials.json');
+  const sentinelContent = JSON.stringify({ claudeAiOauth: { accessToken: 'REAL-HOST-TOKEN-DO-NOT-TOUCH' } });
+  writeFileSync(realCredPath, sentinelContent);
+
+  const captureFile = join(scratchDir, `captured-claude-home-${randomUUID()}.txt`);
+  const path = makeFakeClaude(`
+    const fs = require('fs');
+    const path = require('path');
+    fs.writeFileSync(${JSON.stringify(captureFile)}, process.env.CLAUDE_CONFIG_DIR || '');
+    fs.writeFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'ISOLATED-TOKEN' } }));
+    process.exit(0);
+  `);
+
+  const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { claudeBin: path });
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-c8', cli: 'claude' });
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'succeeded'));
+
+  const capturedConfigDir = readFileSync(captureFile, 'utf8');
+  assert.equal(capturedConfigDir, join(CLI_LOGINS_DIR, sessionId));
+  assert.notEqual(capturedConfigDir, fakeRealClaudeDir);
+  assert.notEqual(capturedConfigDir, join(homedir(), '.claude'));
+  assert.ok(
+    capturedConfigDir.startsWith(managerHome),
+    "isolated home must live under this manager instance's own home, not a shared/global location",
+  );
+
+  // The ticket's core safety guarantee: the host's real .credentials.json
+  // (represented here by the sentinel file) is untouched, both mid-flight
+  // and after the flow has fully completed.
+  assert.equal(
+    readFileSync(realCredPath, 'utf8'),
+    sentinelContent,
+    "the host's real ~/.claude/.credentials.json must never be read or written by the isolated login flow",
+  );
+
+  rmSync(fakeRealHome, { recursive: true, force: true });
 });
 
 test('redaction: the harvested secret never appears in the durable agent-manager.log file', async () => {

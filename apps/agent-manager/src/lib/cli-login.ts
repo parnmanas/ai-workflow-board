@@ -1,30 +1,47 @@
 // ticket b2e79108 — Codex CLI device-auth 자동 로그인.
+// ticket 06b2b990 — 위 패턴을 Claude CLI로 확장.
 //
-// `codex login --device-auth` 를 격리된 CODEX_HOME(호스트/에이전트가 실제로
-// 쓰는 ~/.codex 와 절대 공유하지 않음)에서 spawn하고, stdout을 줄 단위로
-// 스캔해 verification URL + one-time code 를 뽑아 서버로 릴레이한다. 프로세스가
-// exit 0 하면 격리 홈의 auth.json(+config.toml)을 읽어 서버로 넘기고(서버가
-// 암호화해 Credential 로 저장), 성공/실패/타임아웃/취소 모든 경로에서 격리
-// 홈을 삭제한다 — 단, 성공 보고 자체가 서버에 끝내 전달되지 못한 경우는 예외
-// (리뷰 반영: 유일한 사본을 지우지 않음, #finish 참고).
+// `codex login --device-auth` / `claude auth login --claudeai` 를 격리된
+// CODEX_HOME/CLAUDE_CONFIG_DIR(호스트/에이전트가 실제로 쓰는 ~/.codex,
+// ~/.claude 와 절대 공유하지 않음)에서 spawn하고, stdout을 줄 단위로 스캔해
+// verification URL(+codex만 one-time code)을 뽑아 서버로 릴레이한다. 프로세스가
+// exit 0 하면 격리 홈의 인증 파일(codex: auth.json(+config.toml), claude:
+// .credentials.json)을 읽어 서버로 넘기고(서버가 암호화해 Credential 로
+// 저장), 성공/실패/타임아웃/취소 모든 경로에서 격리 홈을 삭제한다 — 단, 성공
+// 보고 자체가 서버에 끝내 전달되지 못한 경우는 예외(리뷰 반영: 유일한 사본을
+// 지우지 않음, #finish 참고).
 //
-// claude 는 codex `--device-auth` 만큼 깔끔한 비대화형 플래그가 없어(PTY 릴레이
-// 필요) 여기 포함하지 않음 — 후속 티켓으로 분리(티켓 본문에서 이미 허용).
+// ticket b2e79108 작성 시점엔 claude 가 codex `--device-auth` 만큼 깔끔한
+// 비대화형 플래그가 없어(PTY 릴레이 필요할 것으로 추정) 후속 티켓으로
+// 분리했었다. 그러나 라이브 호스트(claude-cli 2.1.238)에서 직접 검증한 결과
+// `claude auth login`은 TTY를 요구하지 않는다 — codex와 동일하게 순수 stdio
+// 파이프(stdout 스캔 + SIGTERM 취소)만으로 동작하고, 승인 후 폴링도 CLI가
+// 알아서 완료한다("Paste code here if prompted"는 자동 폴링이 실패했을 때만
+// 쓰이는 조건부 폴백이라 AWB의 릴레이 대상이 아니다 — 우리가 필요한 건
+// verification_url 뿐이다). 따라서 node-pty 없이 codex와 동일한 crossSpawn
+// 경로로 구현한다.
 //
-// 실제 출력 포맷(라이브 호스트, codex-cli 0.147.0, 격리 CODEX_HOME에서 캡처):
+// 실제 출력 포맷(라이브 호스트에서 캡처):
 //
-//   1. Open this link in your browser and sign in to your account
-//      https://auth.openai.com/codex/device
+//   codex-cli 0.147.0, 격리 CODEX_HOME:
+//     1. Open this link in your browser and sign in to your account
+//        https://auth.openai.com/codex/device
 //
-//   2. Enter this one-time code (expires in 15 minutes)
-//      5EQ1-BCF0O
+//     2. Enter this one-time code (expires in 15 minutes)
+//        5EQ1-BCF0O
+//
+//   claude-cli 2.1.238, 격리 CLAUDE_CONFIG_DIR (`claude auth login --claudeai`):
+//     Opening browser to sign in…
+//     If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?...
+//     Paste code here if prompted >
 //
 // 버전업 시 문구가 바뀔 수 있으므로 파싱은 정확한 코드 포맷이 아니라 주변
-// 영문 안내 문구("Open this link"/"Enter this one-time code")에 기대고,
-// 그 파싱이 일정 시간(PARSE_FALLBACK_QUIET_MS) 안에 URL을 못 찾으면 리뷰
-// 지적대로 raw 출력(redact된)을 awaiting_user 의 raw_output_fallback 으로
-// 그대로 올려 UI가 최소한 "뭔가는 보여줄" 수 있게 한다 — 완전히 파싱이 깨져도
-// 사용자가 starting 상태에 갇혀 아무것도 못 보는 상황을 막는다.
+// 영문 안내 문구("Open this link"/"Enter this one-time code")나 URL 자체의
+// 등장에 기대고, 그 파싱이 일정 시간(PARSE_FALLBACK_QUIET_MS) 안에 URL을 못
+// 찾으면 리뷰 지적대로 raw 출력(redact된)을 awaiting_user 의
+// raw_output_fallback 으로 그대로 올려 UI가 최소한 "뭔가는 보여줄" 수 있게
+// 한다 — 완전히 파싱이 깨져도 사용자가 starting 상태에 갇혀 아무것도 못 보는
+// 상황을 막는다.
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -97,11 +114,14 @@ type FinishResult =
 interface ActiveLogin {
   sessionId: string;
   commandId: string;
+  cli: string;
   child: ChildProcess;
   homeDir: string;
   timer: ReturnType<typeof setTimeout>;
   finished: boolean;
 }
+
+const SUPPORTED_CLIS: ReadonlySet<string> = new Set(['codex', 'claude']);
 
 /**
  * 매니저당 로그인 세션 1개 제한(격리 홈 충돌·자원 낭비 방지 — 티켓 보안
@@ -113,20 +133,22 @@ export class CliLoginManager {
   #timeoutMs: number;
   #fallbackQuietMs: number;
   #codexBin: string | null;
+  #claudeBin: string | null;
 
   constructor(
     config: AwbConfig,
-    opts: { timeoutMs?: number; fallbackQuietMs?: number; codexBin?: string } = {},
+    opts: { timeoutMs?: number; fallbackQuietMs?: number; codexBin?: string; claudeBin?: string } = {},
   ) {
     this.#config = config;
     this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#fallbackQuietMs = opts.fallbackQuietMs ?? PARSE_FALLBACK_QUIET_MS;
-    // Test-only override — without this, resolveCliBin('codex', null) would
-    // find a REAL codex install ahead of any PATH shim a test sets up (it
+    // Test-only override — without this, resolveCliBin(cli, null) would find
+    // a REAL codex/claude install ahead of any PATH shim a test sets up (it
     // checks well-known install paths — e.g. ~/.npm-global/bin/codex —
     // before falling back to `command -v`), making it impossible to point
     // tests at a fake binary via env manipulation alone.
     this.#codexBin = opts.codexBin ?? null;
+    this.#claudeBin = opts.claudeBin ?? null;
   }
 
   isBusy(): boolean {
@@ -145,22 +167,28 @@ export class CliLoginManager {
         `another login session (${this.#active.sessionId.slice(0, 8)}) is already in flight on this manager`,
       );
     }
-    if (args.cli !== 'codex') {
-      throw new Error(`unsupported cli "${args.cli}" — only codex device-auth is automated so far`);
+    if (!SUPPORTED_CLIS.has(args.cli)) {
+      throw new Error(`unsupported cli "${args.cli}" — only codex/claude device-auth login is automated so far`);
     }
 
     const homeDir = join(CLI_LOGINS_DIR, args.sessionId);
     await mkdir(homeDir, { recursive: true, mode: 0o700 });
 
-    const bin = this.#codexBin ?? resolveCliBin('codex', null);
-    const child = crossSpawn(bin, ['login', '--device-auth'], {
+    const isClaude = args.cli === 'claude';
+    const bin = isClaude ? this.#claudeBin ?? resolveCliBin('claude', null) : this.#codexBin ?? resolveCliBin('codex', null);
+    const spawnArgs = isClaude ? ['auth', 'login', '--claudeai'] : ['login', '--device-auth'];
+    const env = isClaude
+      ? { ...process.env, CLAUDE_CONFIG_DIR: homeDir }
+      : { ...process.env, CODEX_HOME: homeDir };
+    const child = crossSpawn(bin, spawnArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, CODEX_HOME: homeDir },
+      env,
     });
 
     const active: ActiveLogin = {
       sessionId: args.sessionId,
       commandId: args.commandId,
+      cli: args.cli,
       child,
       homeDir,
       finished: false,
@@ -187,7 +215,7 @@ export class CliLoginManager {
       } else {
         void this.#finish(active, {
           status: 'failed',
-          error_detail: `codex login exited with code ${code}`,
+          error_detail: `${active.cli} login exited with code ${code}`,
         });
       }
     });
@@ -251,6 +279,31 @@ export class CliLoginManager {
     // 실제 url+code 를 못 찾은 라인이든 찾은 라인이든 이 함수 하나에서 처리
     // — scanLine 이 호출 순서상 이 함수보다 먼저 오지 않도록 여기서 함께 정의한다.
     const handleParsedLine = (line: string) => {
+      // claude는 codex와 달리 사용자가 브라우저 밖에서 입력할 one-time code가
+      // 없다 — verification_url을 여는 것 자체가 승인 흐름의 전부이고, 이후
+      // 완료 여부는 claude CLI 자신이 백그라운드에서 폴링해 감지한다("Paste
+      // code here if prompted"는 자동 폴링이 실패했을 때만 쓰이는 조건부
+      // 폴백이라 릴레이 대상이 아니다 — 파일 상단 주석 참고). 그래서 URL을
+      // 찾는 즉시(코드를 기다리지 않고) awaiting_user를 보고한다.
+      if (active.cli === 'claude') {
+        if (!urlCaptured) {
+          const urlMatch = line.match(/https?:\/\/\S+/);
+          if (urlMatch) {
+            capturedUrl = urlMatch[0];
+            urlCaptured = true;
+            fullyParsed = true;
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            void postCliLoginProgress(this.#config, {
+              session_id: active.sessionId,
+              command_id: active.commandId,
+              status: 'awaiting_user',
+              verification_url: capturedUrl,
+            });
+          }
+        }
+        return;
+      }
+
       if (expectCodeNext) {
         expectCodeNext = false;
         fullyParsed = true;
@@ -301,6 +354,24 @@ export class CliLoginManager {
   }
 
   async #completeSuccess(active: ActiveLogin): Promise<void> {
+    if (active.cli === 'claude') {
+      let credentialsJson = '';
+      try {
+        credentialsJson = await readFile(join(active.homeDir, '.credentials.json'), 'utf8');
+      } catch (err: any) {
+        await this.#finish(active, {
+          status: 'failed',
+          error_detail: `claude auth login exited 0 but .credentials.json was not found in the isolated CLAUDE_CONFIG_DIR: ${err?.message ?? err}`,
+        });
+        return;
+      }
+      await this.#finish(active, {
+        status: 'succeeded',
+        credential_fields: { credentials_json: credentialsJson },
+      });
+      return;
+    }
+
     let authJson = '';
     try {
       authJson = await readFile(join(active.homeDir, 'auth.json'), 'utf8');
