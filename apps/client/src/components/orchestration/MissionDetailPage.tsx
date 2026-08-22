@@ -4,6 +4,7 @@ import { api } from '../../api';
 import type {
   OrchestrationMissionDetail,
   OrchestrationStep,
+  OrchestrationTeam,
   OrchestrationTimelineEvent,
   OrchestrationUpdateEvent,
 } from '../../types';
@@ -14,6 +15,7 @@ import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
 import PlanGraph from './PlanGraph';
+import { MissionFormModal } from './OrchestrationPage';
 import { eventColor, missionStyle, progressPercent, stepStyle } from './status';
 
 /**
@@ -42,6 +44,8 @@ export default function MissionDetailPage() {
   const [busy, setBusy] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
+  const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(
@@ -63,6 +67,13 @@ export default function MissionDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Edit 모달의 (편집 중엔 비활성화된) Team select에 현재 팀 이름을 보여주는
+  // 데만 필요하다 — draft 미션만 편집 가능하므로 자주 열리는 경로는 아니다.
+  useEffect(() => {
+    if (!wsId) return;
+    api.listOrchestrationTeams(wsId).then(setTeams).catch(() => setTeams([]));
+  }, [wsId]);
 
   // Debounced refetch: a wave of parallel steps completing emits one frame per
   // step, and each would otherwise trigger its own full detail request.
@@ -132,14 +143,19 @@ export default function MissionDetailPage() {
               All missions
             </Button>
             {mission.status === 'draft' && (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={busy}
-                onClick={() => act(() => api.startOrchestrationMission(mission.id, wsId), 'Orchestrator briefed')}
-              >
-                Start
-              </Button>
+              <>
+                <Button variant="secondary" size="sm" onClick={() => setShowEdit(true)}>
+                  Edit
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={busy}
+                  onClick={() => act(() => api.startOrchestrationMission(mission.id, wsId), 'Orchestrator briefed')}
+                >
+                  Start
+                </Button>
+              </>
             )}
             {(mission.status === 'planning' || mission.status === 'running') && (
               <>
@@ -306,6 +322,18 @@ export default function MissionDetailPage() {
       </div>
 
       <StepDetailModal step={selectedStep} onClose={() => setSelectedStepId(null)} />
+
+      <MissionFormModal
+        isOpen={showEdit}
+        wsId={wsId}
+        teams={teams}
+        mission={mission}
+        onClose={() => setShowEdit(false)}
+        onSaved={(m) => {
+          setMission(m);
+          setShowEdit(false);
+        }}
+      />
 
       <NudgeModal
         isOpen={showNudge}
