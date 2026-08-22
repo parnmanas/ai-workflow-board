@@ -21,10 +21,23 @@ const DIST_ROOT = path.join(__dirname, '..', 'dist');
 
 const { extractFile } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/extract-file.js'));
 const { extractDecoratorFacts } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/decorator-rules.js'));
-const { langForPath, EXTRACTOR_VERSION } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/types.js'));
+const { langForPath, EXTRACTOR_VERSION, TAG_QUERY_VERIFIED_LANGS } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/types.js'));
+const { smokeTestGrammar } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/extraction/grammars.js'));
 
-describe('langForPath (ticket e14ef1c9)', () => {
-  it('maps extensions to the three supported languages, and rejects unknown extensions', () => {
+// tree-sitter-wasms가 실제로 번들하는 36개 언어 전체(리뷰 지적 라운드 1 —
+// `ls node_modules/tree-sitter-wasms/out`으로 직접 확인한 그대로) — 이
+// 목록이 grammars.ts의 GRAMMAR_FILES/types.ts의 ExtractionLang과 어긋나면
+// 이 테스트가 즉시 깨진다.
+const ALL_36_LANGS = [
+  'typescript', 'tsx', 'javascript', 'bash', 'c', 'cpp', 'c_sharp', 'css', 'dart',
+  'elisp', 'elixir', 'elm', 'embedded_template', 'go', 'html', 'java', 'json',
+  'kotlin', 'lua', 'objc', 'ocaml', 'php', 'python', 'ql', 'rescript', 'ruby',
+  'rust', 'scala', 'solidity', 'swift', 'systemrdl', 'tlaplus', 'toml', 'vue',
+  'yaml', 'zig',
+];
+
+describe('langForPath — 36-language tree-sitter-wasms bundle (ticket e14ef1c9, 리뷰 지적 라운드 1)', () => {
+  it('maps the TS/JS family via its own multi-extension branch', () => {
     assert.equal(langForPath('a/b.ts'), 'typescript');
     assert.equal(langForPath('a/b.mts'), 'typescript');
     assert.equal(langForPath('a/b.cts'), 'typescript');
@@ -33,8 +46,86 @@ describe('langForPath (ticket e14ef1c9)', () => {
     assert.equal(langForPath('a/b.jsx'), 'javascript');
     assert.equal(langForPath('a/b.mjs'), 'javascript');
     assert.equal(langForPath('a/b.cjs'), 'javascript');
-    assert.equal(langForPath('a/b.py'), null);
-    assert.equal(langForPath('a/b.json'), null);
+  });
+
+  it('maps a sample of the other 33 bundled languages by extension', () => {
+    assert.equal(langForPath('a/b.py'), 'python');
+    assert.equal(langForPath('a/b.rs'), 'rust');
+    assert.equal(langForPath('a/b.go'), 'go');
+    assert.equal(langForPath('a/b.rb'), 'ruby');
+    assert.equal(langForPath('a/b.java'), 'java');
+    assert.equal(langForPath('a/b.php'), 'php');
+    assert.equal(langForPath('a/b.swift'), 'swift');
+    assert.equal(langForPath('a/b.kt'), 'kotlin');
+    assert.equal(langForPath('a/b.yaml'), 'yaml');
+    assert.equal(langForPath('a/b.yml'), 'yaml');
+    assert.equal(langForPath('a/b.toml'), 'toml');
+    assert.equal(langForPath('a/b.json'), 'json');
+  });
+
+  it('rejects a genuinely unrecognized extension', () => {
+    assert.equal(langForPath('a/b.xyz-not-a-real-extension'), null);
+    assert.equal(langForPath('a/b'), null);
+  });
+
+  it('TAG_QUERY_VERIFIED_LANGS is exactly the hand-verified TS/TSX/JS set — extraction is honestly scoped narrower than grammar loading', () => {
+    assert.deepEqual([...TAG_QUERY_VERIFIED_LANGS].sort(), ['javascript', 'tsx', 'typescript']);
+  });
+
+  // trap #1(research-extraction.md §6)이 바로 이걸 예견했다 — ABI 불일치는
+  // 로드 시점이 아니라 실제로 한 번 파싱해봐야 드러난다. 이 스위트를 처음
+  // 작성하며 36개 전부를 실제로 돌려본 결과 3개가 진짜로 깨졌다: elm/ql은
+  // "memory access out of bounds"(WASM 힙 경계 침범 — 전형적 ABI
+  // 불일치), yaml은 "resolved is not a function". 세 개 다 재현
+  // 가능하고 안정적이다(반복 실행해도 항상 이 3개만 실패) — 나머지
+  // 33개는 항상 통과한다. quarantine 대상을 하드코딩하는 대신 매번 실제로
+  // 돌려서 확인한다 — 언젠가 tree-sitter-wasms가 이 그래머들을 고치면
+  // 이 테스트가 자동으로 "예상과 다르게 통과함"을 잡아낸다(아래 두 번째
+  // 단언).
+  const KNOWN_GRAMMAR_LOAD_FAILURES = new Set(['elm', 'ql', 'yaml']);
+
+  it('33 of the 36 bundled grammars load and parse cleanly; the 3 known-broken ones are quarantined by name, not silently ignored', async () => {
+    const unexpectedFailures = [];
+    const unexpectedSuccesses = [];
+    for (const lang of ALL_36_LANGS) {
+      const result = await smokeTestGrammar(lang);
+      const expectedToFail = KNOWN_GRAMMAR_LOAD_FAILURES.has(lang);
+      if (!result.ok && !expectedToFail) unexpectedFailures.push(`${lang}: ${result.error}`);
+      if (result.ok && expectedToFail) unexpectedSuccesses.push(lang);
+    }
+    assert.deepEqual(unexpectedFailures, [], `quarantine 목록 밖의 언어가 깨졌다(회귀) — ${JSON.stringify(unexpectedFailures)}`);
+    assert.deepEqual(unexpectedSuccesses, [], `quarantine 목록의 언어가 이제 통과한다 — KNOWN_GRAMMAR_LOAD_FAILURES에서 빼야 한다: ${JSON.stringify(unexpectedSuccesses)}`);
+  });
+
+  it('extractFile honestly skips extraction for a grammar-loadable-but-unverified language, without pretending it parsed', async () => {
+    const bundle = await extractFile('fixture.py', 'def hello():\n    pass\n', 'python');
+    assert.equal(bundle.skippedReason, 'no_tag_query_for_language');
+    assert.deepEqual(bundle.defs, []);
+  });
+
+  // elm/ql/yaml은 오늘 기준 셋 다 태그 쿼리도 없다(!query 분기가 먼저
+  // 스킵한다) — 하지만 실제로 어느 try/catch가 먼저 걸리는지는 이 프로세스
+  // 안에서 이전에 어떤 그래머들이 이미 로드됐는지(WASM 런타임 공유 상태)에
+  // 따라 갈린다는 걸 직접 관찰했다: 이 테스트를 단독 프로세스에서 돌리면
+  // elm/ql은 setLanguage()에서 "Incompatible language version"으로,
+  // yaml은 parse()에서 별개의 내부 에러로 깨지지만(위 스모크 테스트 결과),
+  // 같은 프로세스에서 다른 그래머 수십 개를 먼저 로드한 뒤에는 그중 일부가
+  // getLangHandle() 자체에서 먼저 실패하는 것으로 관측되기도 한다 — 정확히
+  // *어느* try/catch가 잡느냐는 비결정적이지만, *어느 쪽이든 항상 잡아서
+  // 크래시 없이 정직한 스킵으로 떨어진다*는 것이 이 방어 코드가 실제로
+  // 보장해야 하는 불변식이다. 그래서 정확한 skippedReason 값 하나로
+  // 고정하지 않고 "두 스킵 카테고리 중 하나"로 단언한다.
+  const VALID_GRAMMAR_SKIP_REASONS = new Set(['no_tag_query_for_language', 'grammar_load_failed']);
+
+  it('extractFile never throws for any of the 3 grammar-quarantined languages — always resolves to a clean, known skippedReason', async () => {
+    for (const lang of KNOWN_GRAMMAR_LOAD_FAILURES) {
+      const bundle = await extractFile(`fixture.${lang}`, 'placeholder content\n', lang);
+      assert.ok(
+        VALID_GRAMMAR_SKIP_REASONS.has(bundle.skippedReason),
+        `${lang}: skippedReason이 알려진 스킵 카테고리가 아니다 — ${bundle.skippedReason}`,
+      );
+      assert.deepEqual(bundle.defs, []);
+    }
   });
 });
 
