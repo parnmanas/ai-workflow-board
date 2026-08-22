@@ -67,16 +67,16 @@ describe('ensureOntologySqljsDbHealthy() — corruption guard extended to databa
   afterEach(() => {
     delete process.env.AWB_DB_AUTORECOVER;
     for (const p of [primaryPath, ontologyPath]) {
-      try { fs.rmSync(p, { force: true }); } catch { /* best-effort */ }
+      try { fs.rmSync(p, { force: true }); } catch { /* 최선 노력 정리 */ }
       for (const backup of corruptBackupsFor(p)) {
-        try { fs.rmSync(path.join(path.dirname(p), backup), { force: true }); } catch { /* best-effort */ }
+        try { fs.rmSync(path.join(path.dirname(p), backup), { force: true }); } catch { /* 최선 노력 정리 */ }
       }
     }
   });
 
   after(async () => {
     if (AppOntologyDataSource?.isInitialized) await AppOntologyDataSource.destroy();
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 최선 노력 정리 */ }
   });
 
   it('resolveOntologySqljsLocation() (not the primary resolver) is the file this guard checks', () => {
