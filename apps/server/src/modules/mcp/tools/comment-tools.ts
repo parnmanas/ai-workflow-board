@@ -40,6 +40,7 @@ import { computeLoopScore } from '../../../common/loop-score';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
+import { sinceBoundaryParam } from '../../../common/created-at-since-param';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -74,24 +75,34 @@ function extractDedupeKey(metadata: unknown): string | null {
   return typeof key === 'string' && key ? key : null;
 }
 
-// 리뷰 라운드2(ticket e341bcc2): "티켓의 마지막 코멘트"를 created_at 하나로만
+// 리뷰 라운드2/3(ticket e341bcc2): "티켓의 마지막 코멘트"를 created_at 하나로만
 // 정렬하면 sql.js 에서 비결정적이다 — @CreateDateColumn 이 DB 기본값
 // datetime('now') 에 맡겨질 때 초 단위로 truncate 되므로(common/created-at-
 // since-param.ts 의 근본원인 설명 참고), 같은 초에 여러 건이 insert 되면
 // 순서가 정해지지 않는다. TypeORM `@Generated('increment')` 로 진짜
-// auto-increment 컬럼을 추가하는 방안은 이 티켓에서 직접 검증한 결과
-// sqljs 드라이버가 세컨더리(비-PK) 컬럼에도 `AUTOINCREMENT` DDL 을 내려
-// "near AUTOINCREMENT: syntax error" 로 스키마 동기화 자체가 깨져서
-// 폐기했다. 대신 프로세스-내 단조 카운터를 매 add_comment 호출마다
-// metadata 에 찍어 애플리케이션 레벨에서 같은-초 tie 를 깬다 — 새 컬럼도
-// 마이그레이션도 없다. 프로세스 재시작으로 리셋돼도 created_at 이 1차
-// 정렬 키이므로 안전하다(재시작을 사이에 둔 진짜 같은-초 burst 는 현실적으로
-// 없다).
-let commentWriteSeqCounter = 0;
-function nextCommentWriteSeq(): number {
-  commentWriteSeqCounter += 1;
-  return commentWriteSeqCounter;
-}
+// auto-increment 컬럼을 추가하는 방안은 이 티켓에서 직접 검증한 결과 sqljs
+// 드라이버가 세컨더리(비-PK) 컬럼에도 `AUTOINCREMENT` DDL 을 내려 "near
+// AUTOINCREMENT: syntax error" 로 스키마 동기화 자체가 깨져서 폐기했다.
+//
+// 라운드2 에서는 프로세스-내 단조 카운터로 이 tie 를 깼으나, 라운드3 리뷰가
+// 지적한 대로 그 카운터는 (1) 프로세스 재시작에 리셋되어 영속적이지 않고,
+// (2) "마지막 코멘트" 조회를 `take:20` 윈도우로 제한해 같은 초에 21건 이상
+// 몰리면 진짜 마지막 row 가 창 밖으로 빠질 수 있었다. 지금은 DB 상태에서
+// 그때그때 유도하는 값으로 교체한다:
+//   1. `lockTicketCommentWrites` 로 같은 티켓 코멘트 쓰기가 이미 직렬화된
+//      상태에서, 그 시점 이 티켓의 가장 최근 created_at 을 조회한다.
+//   2. 그 created_at 과 정확히 같은(=, LIMIT 없음) row 를 전부 가져온다 —
+//      같은 초에 몇 건이 몰리든 개수와 무관하게 전량 조회된다.
+//   3. 그 tied-group 안에서 `_comment_write_seq` 최댓값 + 1 을 다음 값으로
+//      쓰고, 최댓값을 가진 row 를 "진짜 마지막 코멘트"로 채택한다.
+// 매 insert 가 그 순간의 DB 값으로부터 새로 계산되므로(프로세스 메모리에
+// 의존하지 않음) 재시작과 무관하게 항상 올바르고, tied-group 을 개수 제한
+// 없이 통째로 가져오므로 같은 초 burst 크기와도 무관하다. "seq 가 가장 큰
+// row 는 항상 created_at 도 가장 최신인 tied-group 안에 있다"는 불변식은
+// 매 insert 가 쓰기 직렬화 하에 그 시점 MAX(seq)+1 을 부여하기 때문에
+// 성립한다 — 삽입 순서상 나중 row 는 seq 가 항상 엄격히 더 크고 created_at
+// 은 항상 같거나 더 크므로, 전역 최대 seq 를 가진 row 가 가장 오래된
+// created_at 그룹에 속할 수 없다.
 function extractWriteSeq(metadata: unknown): number {
   const seq = parseCommentMetadata(metadata)._comment_write_seq;
   return typeof seq === 'number' && Number.isFinite(seq) ? seq : -1;
@@ -145,9 +156,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         .describe("Parent comment id for threading. Must belong to the same ticket. Required for type='answer'."),
       metadata: z.record(z.string(), z.unknown()).optional()
         .describe('Type-specific extension bag (e.g. handoff target_agent_id, decision references[]). Stored as JSON on the row. ' +
-          'Set `dedupe_key` (any stable string you control) to collapse repeats: if the ticket\'s LAST comment already carries ' +
-          'the same dedupe_key, this call bumps its repeat_count/last_repeated_at in place instead of adding a new row — use this ' +
-          'for noisy auto-generated notices that may fire many times in a row (an unrelated reply in between always starts a fresh row).'),
+          'Set `dedupe_key` (any stable string you control) to collapse repeats — eligible ONLY for plain type=\'note\' calls ' +
+          'with no attachment_resource_ids and no @-mentions in content (other combinations always insert a fresh row, since ' +
+          'bumping in place would silently skip their side effects): when eligible, if the ticket\'s LAST comment was written ' +
+          'by the same author with the same type and dedupe_key, this call bumps its repeat_count/last_repeated_at in place ' +
+          'instead of adding a new row — use this for noisy auto-generated notices that may fire many times in a row (a ' +
+          'different author/type/dedupe_key, or an unrelated reply, in between always starts a fresh row).'),
       author_role: z.string().optional()
         .describe("Role the comment is authored as (e.g. 'assignee', 'reviewer'). Auto-filled from the subagent session pin or from TicketRoleAssignment when omitted. Stored on metadata.author_role so the UI can render which role spoke."),
       attachment_resource_ids: z.array(z.string()).optional()
@@ -427,11 +441,6 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       const dedupeKey = extractDedupeKey(finalMetadata);
       const dedupeEligible = !!dedupeKey && resolvedType === 'note'
         && resolvedAttachmentIds.length === 0 && mentionRefs.length === 0;
-      // 모든 저장(합치기든 신규 insert 든)에 프로세스-내 단조 write-seq 를
-      // 찍는다 — 이 호출 자체는 dedupe_key 가 없어도, 나중에 같은 티켓에
-      // dedupe_key 를 실은 호출이 와서 "마지막 코멘트"를 찾을 때 이 행을
-      // 후보로 올바르게 비교하려면 필요하다.
-      finalMetadata._comment_write_seq = nextCommentWriteSeq();
       let comment: Comment;
       let deduped = false;
       try {
@@ -439,45 +448,58 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           await lockTicketCommentWrites(manager, ticket_id);
           const lockedRepo = manager.getRepository(Comment);
 
-          if (dedupeEligible) {
-            // created_at 하나만으로 "마지막"을 정렬하면 sql.js 에서 같은 초에
-            // 여러 건이 몰릴 때 비결정적이다(파일 상단 nextCommentWriteSeq
-            // 주석 참고). 최근 구간을 넉넉히 가져와 (created_at, write-seq)
-            // 로 애플리케이션에서 직접 최댓값을 고른다 — 같은 초 burst 가
-            // 20건을 넘는 경우는 현실적으로 없다.
-            const recentComments = await lockedRepo.find({
-              where: { ticket_id },
-              order: { created_at: 'DESC' },
-              take: 20,
-            });
-            const lastComment = recentComments.reduce<Comment | null>((best, cur) => {
-              if (!best) return cur;
-              const bestTime = best.created_at.getTime();
-              const curTime = cur.created_at.getTime();
-              if (curTime !== bestTime) return curTime > bestTime ? cur : best;
-              return extractWriteSeq(cur.metadata) > extractWriteSeq(best.metadata) ? cur : best;
-            }, null);
-            // 최소 요건(리뷰 지적): 후보 row 가 작성자(type+id)와 type 까지
-            // 지금 이 호출과 완전히 같을 때만 합친다 — 다른 agent 가 우연히
-            // 같은 dedupe_key 문자열을 재사용해도 남의 코멘트 작성자 이름
-            // 아래 내용만 바뀌는 일이 없다.
-            if (
-              lastComment
-              && lastComment.author_type === resolvedAuthorType
-              && lastComment.author_id === resolvedAuthorId
-              && lastComment.type === resolvedType
-              && extractDedupeKey(lastComment.metadata) === dedupeKey
-            ) {
-              const nextCount = (lastComment.repeat_count ?? 1) + 1;
-              await lockedRepo.update(lastComment.id, {
-                content,
-                metadata: JSON.stringify(finalMetadata),
-                repeat_count: nextCount,
-                last_repeated_at: new Date(),
-              });
-              deduped = true;
-              return (await lockedRepo.findOne({ where: { id: lastComment.id } }))!;
+          // "마지막 코멘트" 판정 + 다음 write-seq 채번을 모두 이 tied-group
+          // 조회 하나로 처리한다(파일 상단 extractWriteSeq 주석 참고, 리뷰
+          // 라운드3). 프로세스-로컬 카운터도 take:N 윈도우도 없다: 이 티켓의
+          // 현재 최신 created_at 을 먼저 찾고, 그 값과 정확히 같은 row 를
+          // LIMIT 없이 전부 가져와 그 안에서 write-seq 최댓값과 그 보유자를
+          // 고른다. sql.js 는 @CreateDateColumn 기본값이 초 단위라 문자열
+          // 비교가 어긋날 수 있으므로 sinceBoundaryParam 으로 그 드라이버의
+          // 저장 포맷에 맞춰 정확히 일치시킨다(Postgres 는 그대로 통과).
+          const mostRecent = await lockedRepo.findOne({
+            where: { ticket_id },
+            order: { created_at: 'DESC' },
+          });
+          let lastComment: Comment | null = null;
+          let maxWriteSeq = 0;
+          if (mostRecent) {
+            const tiedGroup = await lockedRepo.createQueryBuilder('c')
+              .where('c.ticket_id = :ticket_id', { ticket_id })
+              .andWhere('c.created_at = :tiedCreatedAt', { tiedCreatedAt: sinceBoundaryParam(dataSource, mostRecent.created_at) })
+              .getMany();
+            for (const c of tiedGroup) {
+              const seq = extractWriteSeq(c.metadata);
+              if (seq > maxWriteSeq) maxWriteSeq = seq;
+              if (!lastComment || seq > extractWriteSeq(lastComment.metadata)) lastComment = c;
             }
+          }
+          // 모든 저장(합치기든 신규 insert 든)에 이 값을 찍는다 — 이 호출
+          // 자체는 dedupe_key 가 없어도, 나중에 같은 티켓에 dedupe_key 를
+          // 실은 호출이 와서 "마지막 코멘트"를 찾을 때 이 행을 후보로 올바르게
+          // 비교하려면 필요하다.
+          finalMetadata._comment_write_seq = maxWriteSeq + 1;
+
+          // 최소 요건(리뷰 지적): 후보 row 가 작성자(type+id)와 type 까지
+          // 지금 이 호출과 완전히 같을 때만 합친다 — 다른 agent 가 우연히
+          // 같은 dedupe_key 문자열을 재사용해도 남의 코멘트 작성자 이름
+          // 아래 내용만 바뀌는 일이 없다.
+          if (
+            dedupeEligible
+            && lastComment
+            && lastComment.author_type === resolvedAuthorType
+            && lastComment.author_id === resolvedAuthorId
+            && lastComment.type === resolvedType
+            && extractDedupeKey(lastComment.metadata) === dedupeKey
+          ) {
+            const nextCount = (lastComment.repeat_count ?? 1) + 1;
+            await lockedRepo.update(lastComment.id, {
+              content,
+              metadata: JSON.stringify(finalMetadata),
+              repeat_count: nextCount,
+              last_repeated_at: new Date(),
+            });
+            deduped = true;
+            return (await lockedRepo.findOne({ where: { id: lastComment.id } }))!;
           }
 
           const saved = await lockedRepo.save(lockedRepo.create({
