@@ -20,9 +20,11 @@ import { join } from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolContext } from './context';
 import { installToolAuthzGate } from '../shared/tool-authz-gate';
+import { installToolProfileGate, type ToolProfile } from '../shared/tool-profiles';
 
 export type { ToolContext } from './context';
 export { createStandaloneContext } from './context';
+export type { ToolProfile } from '../shared/tool-profiles';
 
 type RegisterFn = (server: McpServer, ctx: ToolContext) => void;
 
@@ -74,11 +76,19 @@ function findRegisterFn(mod: Record<string, unknown>, base: string): RegisterFn 
   return null;
 }
 
-export function registerAllTools(server: McpServer, ctx: ToolContext): void {
-  // Central authz gate FIRST — every server.tool() call made by every
-  // module registered below (and any future *-tools.ts file discovered by
-  // name alone) is checked against the destructive-tool table before its
-  // own handler runs. See shared/tool-authz-gate.ts for the rationale.
+export function registerAllTools(server: McpServer, ctx: ToolContext, profile: ToolProfile = 'full'): void {
+  // Tool profile gate BEFORE the authz gate — an allowlist-omitted tool
+  // must never reach registration at all (no server.tool() call survives
+  // for it), so the filter has to see each server.tool() call before authz
+  // gets a chance to wrap it in its own gatedHandler. See
+  // shared/tool-profiles.ts for the omit-vs-stub rationale.
+  if (profile === 'compact') {
+    installToolProfileGate(server);
+  }
+  // Central authz gate — every server.tool() call made by every module
+  // registered below (and any future *-tools.ts file discovered by name
+  // alone) is checked against the destructive-tool table before its own
+  // handler runs. See shared/tool-authz-gate.ts for the rationale.
   installToolAuthzGate(server, ctx.dataSource);
   for (const mod of discoverToolModules()) {
     mod.register(server, ctx);
