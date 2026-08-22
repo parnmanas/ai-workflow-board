@@ -103,6 +103,69 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
   const runsAfter2 = await actions.listRuns(created.id, ws.id, 20);
   assert.equal(runsAfter2.length, 2, 'two runs recorded after the retry');
 
+  // ── source_ticket_id 없는 run도 complete_action_run으로 status가 정확히
+  // 전이돼야 한다 (티켓 b273d603 — 이전에는 이런 run의 프롬프트에 완료 계약이
+  // 아예 주입되지 않아 status가 running에 영구 고정됐다) ──────────────────
+  step('Standalone run (no source_ticket_id): prompt still carries a completion contract');
+  assert.match(
+    res1.prompt,
+    /complete_action_run/,
+    'a run with no source ticket still gets a completion contract in its prompt',
+  );
+  assert.match(
+    res1.prompt,
+    new RegExp(`run_id="${res1.run.id}"`),
+    'the standalone completion contract carries the correct run_id',
+  );
+  assert.match(
+    res1.prompt,
+    new RegExp(`workspace_id="${ws.id}"`),
+    'the standalone completion contract carries the correct workspace_id',
+  );
+  assert.doesNotMatch(
+    res1.prompt,
+    /is paused until you report back/,
+    'the standalone contract omits the ticket-resume language — there is no ticket',
+  );
+
+  step('Standalone run: completeRun(succeeded) transitions status, nothing to resume');
+  const complete1 = await actions.completeRun(res1.run.id, ws.id, {
+    status: 'succeeded',
+    summary: 'deployed manually via UI',
+  });
+  assert.equal(complete1.status, 'succeeded', 'status transitions running -> succeeded');
+  assert.equal(complete1.sourceTicketId, '', 'no source ticket to echo back');
+  assert.equal(complete1.previouslyCompleted, false, 'first completion is not a no-op');
+  assert.equal(complete1.shouldResume, false, 'nothing to resume without a source ticket');
+  assert.equal(complete1.retried, false, 'a standalone run never auto-retries');
+  const runsAfterComplete1 = await actions.listRuns(created.id, ws.id, 20);
+  const row1 = runsAfterComplete1.find((r) => r.id === res1.run.id);
+  assert.equal(row1.status, 'succeeded', 'the persisted run row reflects the new status');
+  assert.ok(row1.completed_at, 'completed_at is stamped');
+
+  step('Standalone run: completeRun(failed) also settles — no retry, nothing dispatched it');
+  const complete2 = await actions.completeRun(res2.run.id, ws.id, {
+    status: 'failed',
+    summary: 'deploy target unreachable',
+  });
+  assert.equal(complete2.status, 'failed', 'status transitions running -> failed');
+  assert.equal(complete2.previouslyCompleted, false, 'first completion is not a no-op');
+  assert.equal(complete2.shouldResume, false, 'nothing to resume without a source ticket');
+  assert.equal(complete2.retried, false, 'a standalone run never auto-retries, even on failure');
+  assert.equal(complete2.exhausted, false, '"exhausted" only applies to the ticket-driven retry chain');
+  const runsAfterComplete2 = await actions.listRuns(created.id, ws.id, 20);
+  const row2 = runsAfterComplete2.find((r) => r.id === res2.run.id);
+  assert.equal(row2.status, 'failed', 'the persisted run row reflects the failed status');
+  assert.ok(row2.completed_at, 'completed_at is stamped on failure too');
+
+  step('Standalone run: re-completing an already-terminal run is a no-op (idempotency)');
+  const dupComplete = await actions.completeRun(res1.run.id, ws.id, {
+    status: 'failed',
+    summary: 'duplicate call, should be ignored',
+  });
+  assert.equal(dupComplete.previouslyCompleted, true, 'a second call on a terminal run is recognized as a duplicate');
+  assert.equal(dupComplete.status, 'succeeded', 'the recorded status is unchanged by the ignored duplicate');
+
   // ── pend 게이트 스코프 + 판정 (실 DataSource end-to-end) ───────────
   step('Pend gate: scope query surfaces only enabled, in-scope Actions');
   const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
