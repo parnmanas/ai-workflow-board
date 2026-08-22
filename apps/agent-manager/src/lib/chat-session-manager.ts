@@ -16,6 +16,7 @@ import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-ad
 import { createAdapter } from './cli-adapters/index.js';
 import { fetchChatRoomHistory, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
+import { classifyCliError } from './cli-error-signatures.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
@@ -93,6 +94,19 @@ const HISTORY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
 /** Max characters sent in the fallback chat message body. */
 const FALLBACK_MAX_CHARS = 1500;
+
+/** 순수 함수 — 응답 없이 종료된 세션에 대해 방에 보일 폴백 메시지를 만든다.
+ *  context-window 힌트(ticket 7d8ea7c9 후속)를 실제 자식 프로세스 없이
+ *  단위 테스트할 수 있도록 _onChildExit 에서 분리했다. */
+export function buildChatFallbackMessage(body: string, exitCode: number | null): string {
+  if (!body) return '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
+  const classification = classifyCliError(body, { exitCode });
+  const contextWindowHint = classification.reason === 'context_window_exceeded'
+    ? '\n\n⚠️ 이 실패는 백엔드 모델의 컨텍스트 윈도우(또는 출력 토큰) 초과로 보입니다. ' +
+      'Claude backend profile의 context_window/max_output_tokens/safety_margin_tokens 설정을 확인하세요.'
+    : '';
+  return `⚠️ Agent가 응답하지 못했습니다. CLI 출력:\n\`\`\`\n${body}\n\`\`\`${contextWindowHint}`;
+}
 /** Min ms between progress messages emitted to a chat room — coalesces
  *  rapid tool_use bursts so the room isn't flooded. */
 const PROGRESS_MIN_INTERVAL_MS = 1500;
@@ -610,7 +624,7 @@ export class ChatSessionManager
 
   protected async _onChildExit(
     sess: SessionRecord,
-    _code: number | null,
+    code: number | null,
     _signal: NodeJS.Signals | null,
   ): Promise<void> {
     // ticket e18be8ff — clear the room's status badge on EVERY exit path
@@ -674,9 +688,11 @@ export class ChatSessionManager
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
 
-    const message = body
-      ? `⚠️ Agent가 응답하지 못했습니다. CLI 출력:\n\`\`\`\n${body}\n\`\`\``
-      : '⚠️ Agent가 응답하지 못했습니다 (출력 없음).';
+    // ticket 7d8ea7c9 후속 — context 오류(백엔드 context window/output token
+    // 초과)는 이전엔 다른 실패와 구분 없이 raw CLI 출력만 덤프돼 "왜"가
+    // 드러나지 않았다. buildChatFallbackMessage 가 알려진 신호를 감지해
+    // 원인을 짚어주는 안내를 덧붙인다.
+    const message = buildChatFallbackMessage(body, code);
 
     log(`[chat-session] fallback message for room=${roomId} agent=${agentId} pid=${sess.pid} outputLen=${body.length}`);
     // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
