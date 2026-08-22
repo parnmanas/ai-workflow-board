@@ -617,6 +617,7 @@ export class GitHubConnectorService {
         id: String(data.id),
         status: data.status || '',
         conclusion: data.conclusion ?? null,
+        event: data.event || '',
         html_url: data.html_url || '',
         created_at: data.created_at || '',
         updated_at: data.updated_at || '',
