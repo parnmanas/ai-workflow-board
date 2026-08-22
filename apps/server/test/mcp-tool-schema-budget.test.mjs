@@ -127,7 +127,7 @@ describe('MCP tool schema wire-size budget (ticket faa32380)', () => {
     // careless blow-up. If organic tool additions genuinely need more,
     // raise CURRENT_BASELINE_BYTES in the SAME PR as the addition (a
     // conscious, reviewed decision), not silently.
-    const CURRENT_BASELINE_BYTES = 253_638; // 205 tools, 2026-08-22 실측
+    const CURRENT_BASELINE_BYTES = 252_256; // 205 tools, 2026-08-22 실측 (update_board 압축 후, 티켓 f61d67ba)
     const TOTAL_BYTES_CEILING = Math.ceil(CURRENT_BASELINE_BYTES * 1.25);
     assert.ok(
       totalBytes <= TOTAL_BYTES_CEILING,
@@ -143,10 +143,17 @@ describe('MCP tool schema wire-size budget (ticket faa32380)', () => {
     // many separate tickets: harness_config, effort_presets,
     // environment_config, liveness_policy, qa_phases, merge_gate_config,
     // respawn_storm_config, hard_budget_config, default_role_assignments,
-    // ...). Tracked explicitly (generous headroom) rather than silently
-    // exempted, so continued unchecked growth is visible.
+    // ...).
+    //
+    // 티켓 f61d67ba — 위 필드들의 description prose를 압축(inputSchema.properties에
+    // 이미 노출되는 필드별 JSON-shape echo 제거 + 문장 다듬기)해 실측 12,019
+    // bytes(~11.7KB, 2026-08-22)로 낮췄다. respawn-storm circuit breaker /
+    // hard-budget ceiling 필드는 압축 전후 텍스트를 절 단위로 대조해 동작·안전
+    // 관련 뉘앙스를 하나도 잘라내지 않았음을 확인했다. 상한선도 그에 맞춰
+    // 낮췄지만 조용히 예외 처리하는 대신 여전히 명시적으로(넉넉한 여유분과 함께)
+    // 추적해 향후 통제되지 않은 재증가가 계속 드러나게 한다.
     const PER_TOOL_CEILING = 10_000;
-    const KNOWN_OUTLIERS = { update_board: 25_000 };
+    const KNOWN_OUTLIERS = { update_board: 15_000 };
 
     const oversized = [];
     for (const t of tools) {
