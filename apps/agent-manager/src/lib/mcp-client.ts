@@ -11,6 +11,13 @@ export interface McpCallOptions {
  * Open a short-lived MCP session against the AWB server, call a single tool,
  * and tear the session down. Returns the JSON-RPC response envelope (with
  * `result` field) or throws on transport / protocol failure.
+ *
+ * ticket 23253aeb: `config.apiKey`가 stale/스코프 이탈된 per-agent 키면(spawn
+ * 시점에 캡처되어 세션 수명 내내 재사용 — rest.ts의 chat-room 발신 함수들과
+ * 동일한 실패 클래스) `initialize`가 401/403을 반환해 핸드셰이크가 세션 id를
+ * 아예 얻지 못한다. `config.retryApiKey`가 설정돼 있고 실패한 키와 다르면,
+ * 포기하기 전에 전체 핸드셰이크를 그 키로 한 번 더 재시도한다 — rest.ts와
+ * 동일한 1회 폴백 방식.
  */
 export async function callMcpTool(
   config: AwbConfig,
@@ -24,15 +31,14 @@ export async function callMcpTool(
   const url = `${base}/mcp`;
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  const baseHeaders: Record<string, string> = {
-    Authorization: `Bearer ${config.apiKey}`,
+  const makeHeaders = (apiKey: string): Record<string, string> => ({
+    Authorization: `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
-  };
-
-  const initResp = await fetch(url, {
+  });
+  const doInitialize = (apiKey: string) => fetch(url, {
     method: 'POST',
-    headers: baseHeaders,
+    headers: makeHeaders(apiKey),
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
@@ -45,6 +51,15 @@ export async function callMcpTool(
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
+
+  let apiKey = config.apiKey;
+  let initResp = await doInitialize(apiKey);
+  if (!initResp.ok && (initResp.status === 401 || initResp.status === 403)
+    && config.retryApiKey && config.retryApiKey !== apiKey) {
+    log(`MCP tool ${toolName} initialize ${initResp.status} with session key — retrying with manager key`);
+    apiKey = config.retryApiKey;
+    initResp = await doInitialize(apiKey);
+  }
   if (!initResp.ok) {
     throw new Error(`initialize HTTP ${initResp.status}`);
   }
@@ -52,7 +67,7 @@ export async function callMcpTool(
   if (!sid) throw new Error('initialize did not return Mcp-Session-Id');
   await initResp.text().catch(() => null);
 
-  const sessionHeaders: Record<string, string> = { ...baseHeaders, 'Mcp-Session-Id': sid };
+  const sessionHeaders: Record<string, string> = { ...makeHeaders(apiKey), 'Mcp-Session-Id': sid };
 
   await fetch(url, {
     method: 'POST',

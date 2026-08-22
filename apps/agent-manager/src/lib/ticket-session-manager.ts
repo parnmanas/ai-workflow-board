@@ -992,8 +992,10 @@ export class TicketSessionManager
       const nowMs = Date.now();
       if (nowMs - (sess._lastLivenessPostAtMs ?? 0) >= OUTPUT_LIVENESS_MIN_INTERVAL_MS) {
         sess._lastLivenessPostAtMs = nowMs;
+        // retryApiKey 는 per-agent 키가 401/403 을 받으면 rest.ts 가 매니저 자체
+        // 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고, ticket 23253aeb).
         void postOutputLiveness(
-          this._config,
+          { ...this._config, retryApiKey: this._config.apiKey },
           sess._effectiveApiKey || this._config.apiKey,
           { agent_id: sess.agentId, ticket_id: sess.ticketId, role: sess.role || '' },
         );
@@ -1104,7 +1106,13 @@ export class TicketSessionManager
     // Best-effort audit comment, attributed to the session's effective agent
     // identity so the board shows WHO asked to split and WHY. Fire-and-forget:
     // a failed POST must not affect the running child.
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 per-agent 키가 401/403 을 받으면 mcp-client.ts 가 매니저
+    // 자체 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고, ticket 23253aeb).
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     const body =
       '🔀 Agent requested a **session split** for this (ticket, role). The next ' +
       'trigger will start in a fresh subagent session instead of resuming this one.' +
@@ -1423,7 +1431,14 @@ export class TicketSessionManager
     // Use the managed-agent apiKey when available so the REST endpoint
     // attributes the system comment to the agent that owned this session.
     // Falls back to the manager's own apiKey otherwise.
-    const cfg = { ...this._config, apiKey: sess._effectiveApiKey || this._config.apiKey };
+    // retryApiKey 는 그 managed-agent 키가 401/403 을 받으면 rest.ts 가 매니저
+    // 자체 키로 폴백하게 한다 (AwbConfig.retryApiKey 참고, ticket 23253aeb) —
+    // silent-exit 코멘트가 조용히 유실되는 것을 막는 이 티켓의 핵심 대상.
+    const cfg = {
+      ...this._config,
+      apiKey: sess._effectiveApiKey || this._config.apiKey,
+      retryApiKey: this._config.apiKey,
+    };
     return postSilentExitSystemComment(cfg, ticketId, {
       content: body,
       exit_code: code,

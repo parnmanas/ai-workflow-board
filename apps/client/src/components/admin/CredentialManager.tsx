@@ -7,6 +7,7 @@ import { Button, Input, Modal, Badge, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { useAuth } from '../../contexts/AuthContext';
 import CliCredentialImport from './CliCredentialImport';
+import CliAutoLogin from './CliAutoLogin';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -332,6 +333,11 @@ export default function CredentialManager({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <CliAutoLogin
+            workspaceId={effectiveWsId}
+            createScope={effectiveCreateScope}
+            onCreated={loadCredentials}
+          />
           <CliCredentialImport
             workspaceId={effectiveWsId}
             createScope={effectiveCreateScope}

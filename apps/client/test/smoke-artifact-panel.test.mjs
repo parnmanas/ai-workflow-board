@@ -5,11 +5,19 @@
 // "열리면 닫기버튼으로 포커스가 가고, 닫으면 오프너로 복귀한다", "모바일 모달에서
 // Tab 이 배경으로 새지 않는다" 를 react-dom/client 실마운트로 고정한다.
 //
+// ArtifactPanel/TicketRefCard/ArtifactRefCard 는 현재 useBoardStream 을 쓰지 않지만
+// 컨테이너급 컴포넌트를 그대로 실마운트하므로, CredentialManager 와 같은 경로로 SSE
+// 구독이 추가되는 순간 provider 없이는 깨진다(티켓 474bc091). mountWithBoardStream 으로
+// 미리 감싸 구조적으로 막는다 — auth_token 을 설정하지 않으므로 EventSource 연결
+// effect 는 early-return 하고(installFakeEventSource 불필요), AuthProvider 도 이
+// 컴포넌트들이 요구하지 않아 생략한다(원래도 없었음 — 동작 변경 없음).
+//
 // 실행:  node --import tsx --test apps/client/test/smoke-artifact-panel.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, click, keydown, React } from './helpers/jsdom.mjs';
+import { setupDom, click, keydown, React } from './helpers/jsdom.mjs';
+import { mountWithBoardStream } from './helpers/boardStream.mjs';
 import { ArtifactPanelProvider, useArtifactPanel } from '../src/contexts/ArtifactPanelContext.tsx';
 import { TicketArtifactOpenerProvider } from '../src/contexts/ticketArtifactOpener.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
@@ -54,8 +62,9 @@ const NewCardsApp = () => h(ArtifactPanelProvider, null, h(NewCardsHarness));
 
 test('① 데스크톱: 티켓 카드 클릭 → 패널(role=complementary) 오픈 + 내용 렌더 + 닫기버튼 포커스', () => {
   const dom = setupDom({ width: 1280 });
+  globalThis.localStorage = dom.window.localStorage; // BoardStreamProvider effect 가 읽음(auth_token 미설정 → early-return)
   try {
-    const { container } = mount(h(App, { isMobile: false }));
+    const { container } = mountWithBoardStream(h(App, { isMobile: false }), { withAuth: false });
 
     // 초기: 패널 닫힘
     assert.equal(document.querySelector('[role="complementary"]'), null);
@@ -80,8 +89,9 @@ test('① 데스크톱: 티켓 카드 클릭 → 패널(role=complementary) 오�
 
 test('④ 데스크톱: 닫기 버튼 클릭 → 패널 닫힘 + 오프너(카드)로 포커스 복귀', () => {
   const dom = setupDom({ width: 1280 });
+  globalThis.localStorage = dom.window.localStorage; // BoardStreamProvider effect 가 읽음(auth_token 미설정 → early-return)
   try {
-    const { container } = mount(h(App, { isMobile: false }));
+    const { container } = mountWithBoardStream(h(App, { isMobile: false }), { withAuth: false });
     const card = container.querySelector('[data-ticket-ref="T1"]');
     card.focus();
     click(card);
@@ -98,8 +108,9 @@ test('④ 데스크톱: 닫기 버튼 클릭 → 패널 닫힘 + 오프너(카�
 
 test('① F2-4 신규 카드 타입: 승인 변형 + 결과물 카드가 실제 DOM 에 마운트되고 승인 카드 클릭이 패널을 연다', () => {
   const dom = setupDom({ width: 1280 });
+  globalThis.localStorage = dom.window.localStorage; // BoardStreamProvider effect 가 읽음(auth_token 미설정 → early-return)
   try {
-    const { container } = mount(h(NewCardsApp));
+    const { container } = mountWithBoardStream(h(NewCardsApp), { withAuth: false });
 
     // ⓑ 승인 변형 TicketRefCard: data-ticket-approval + detail "→ Review" 배지
     const approval = container.querySelector('[data-ticket-ref="T-prop"]');
@@ -133,8 +144,9 @@ test('① F2-4 신규 카드 타입: 승인 변형 + 결과물 카드가 실제 
 
 test('③④ 모바일: 패널이 role=dialog+aria-modal 로 열리고 Tab 이 시트 내부에 트랩된다', () => {
   const dom = setupDom({ width: 400 }); // 모바일 브레이크포인트
+  globalThis.localStorage = dom.window.localStorage; // BoardStreamProvider effect 가 읽음(auth_token 미설정 → early-return)
   try {
-    const { container } = mount(h(App, { isMobile: true }));
+    const { container } = mountWithBoardStream(h(App, { isMobile: true }), { withAuth: false });
     const card = container.querySelector('[data-ticket-ref="T1"]');
     card.focus();
     click(card);

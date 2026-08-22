@@ -46,10 +46,20 @@ If you add or change an **SSE event type**, the server side (`apps/server/src/mo
 
 ## Field mapping reference (AWB SSE → handlers)
 
-| SSE field | Handler meaning |
+`agent_manager_command`(admin control-surface — spawn/stop/restart 등) payload는 아래 명시적 필드를 그대로 쓴다. `action`/`field_changed`/`actor_name` 별칭 매핑은 **쓰지 않는다** — 그건 다른 이벤트 계열(바로 아래 참조)이다.
+
+| Payload field | Meaning |
 |---|---|
-| `action` | role |
-| `field_changed` | trigger_id |
-| `actor_name` | agent_id |
+| `command_id` | ack 상관관계 id (`POST /api/agent-manager/command/ack`로 echo) |
+| `instance_id` | 대상 manager 프로세스 (heartbeat의 `instance_id`와 매치) |
+| `agent_id` | manager를 감독하는 Agent row(SSE 필터링용 — 실제 대상 managed agent는 `args.agent_id`) |
+| `command` | verb (`CommandKind`) |
+| `args` | command별 파라미터 |
+| `issued_by` | 발급한 admin의 user_id |
+| `issued_at` | ISO-8601 |
+
+정의: `AgentManagerCommandPayload` — `apps/agent-manager/src/lib/agent-manager-commands.ts` (handler 측), `apps/server/src/common/types/stream-events.ts` (server 측, 동일 이름). verb 목록은 하드코딩 나열 대신 그 파일의 `CommandKind`/`KNOWN_COMMANDS`를 근거로 볼 것 — 개수를 여기 적어뒀다가 stale해진 전례가 있다(구 버전 "5 verbs" 표기).
+
+`action`→role / `field_changed`→trigger_id / `actor_name`→agent_id 매핑은 `agent_manager_command`가 아니라 **`agent_trigger`(티켓 dispatch) SSE 계열** 전용이다 — `apps/agent-manager/src/lib/event-dispatcher.ts`의 트리거 처리부(`dispatchTrigger`/`#ackDispatch`) 참조.
 
 Internals: `docs/agent-manager.md`. Quickstart: `apps/agent-manager/README.md`.

@@ -11,62 +11,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
+import { setupDom, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { MemoryRouter } from 'react-router-dom';
-import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import TicketArtifact from '../src/components/TicketArtifact.tsx';
 import { api } from '../src/api.ts';
 
 const h = React.createElement;
-
-// BoardStreamProvider 의 내부 pub/sub 버스는 Node 전역 EventTarget 이고 CustomEvent 로
-// 디스패치한다. setupDom 이 전역 Event/CustomEvent 를 jsdom 것으로 덮어쓰면 Node
-// EventTarget 이 jsdom Event 를 거부하므로(ERR_INVALID_ARG_TYPE), 마운트 전 pristine Node
-// 생성자를 붙잡아 setupDom 후 복원한다(이 파일은 DOM 이벤트를 디스패치하지 않아 안전).
-const NodeEvent = globalThis.Event;
-const NodeCustomEvent =
-  globalThis.CustomEvent ||
-  class CustomEvent extends NodeEvent {
-    constructor(type, opts = {}) {
-      super(type, opts);
-      this.detail = opts.detail ?? null;
-    }
-  };
-
-function useNodeEventGlobals() {
-  globalThis.Event = NodeEvent;
-  globalThis.CustomEvent = NodeCustomEvent;
-}
-
-// board_update 는 EventSource 로 도착하므로, 실제 브라우저 EventSource 를 대체하되
-// 리스너를 붙잡아 테스트가 임의 이벤트를 흘려보낼 수 있는 최소 스텁을 쓴다.
-class FakeEventSource {
-  static instances = [];
-  static CLOSED = 2;
-  constructor(url) {
-    this.url = url;
-    this.readyState = 1;
-    this.onopen = null;
-    this.onerror = null;
-    this._listeners = {};
-    FakeEventSource.instances.push(this);
-  }
-  addEventListener(type, fn) {
-    (this._listeners[type] ||= []).push(fn);
-  }
-  removeEventListener(type, fn) {
-    this._listeners[type] = (this._listeners[type] || []).filter((f) => f !== fn);
-  }
-  close() {
-    this.readyState = 2;
-  }
-  open() {
-    if (this.onopen) this.onopen();
-  }
-  emit(type, dataObj) {
-    for (const fn of this._listeners[type] || []) fn({ data: JSON.stringify(dataObj) });
-  }
-}
 
 // getTicket 이 마이크로태스크로 resolve 하므로 effect+상태전이를 flush 하는 헬퍼.
 async function flush() {
@@ -78,11 +29,9 @@ async function flush() {
 
 test('board_update(대상 티켓) 도착 시 조용히 재조회하고 새 내용으로 교체', async () => {
   const dom = setupDom({ width: 1280 });
-  useNodeEventGlobals();
-  globalThis.EventSource = FakeEventSource;
+  const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  FakeEventSource.instances.length = 0;
 
   const origGetTicket = api.getTicket;
   let calls = 0;
@@ -94,7 +43,10 @@ test('board_update(대상 티켓) 도착 시 조용히 재조회하고 새 내�
   try {
     // "보드에서 열기" 버튼(티켓 7815a958)이 컨테이너에서 useNavigate 를 쓰므로
     // MemoryRouter 로 감싼다(smoke-deeplink 의 라우팅 스모크와 동일 관례).
-    const view = mount(h(MemoryRouter, null, h(BoardStreamProvider, null, h(TicketArtifact, { ticketId: 't1' }))));
+    const view = mountWithBoardStream(h(TicketArtifact, { ticketId: 't1' }), {
+      withAuth: false,
+      wrap: (tree) => h(MemoryRouter, null, tree),
+    });
     await flush();
 
     assert.equal(calls, 1, '마운트 시 1회 조회');
@@ -122,23 +74,25 @@ test('board_update(대상 티켓) 도착 시 조용히 재조회하고 새 내�
     view.unmount();
   } finally {
     api.getTicket = origGetTicket;
+    uninstall();
     dom.cleanup();
   }
 });
 
 test('SSE 단절 배너: 미연결이면 노출, onopen 후 사라짐', async () => {
   const dom = setupDom({ width: 1280 });
-  useNodeEventGlobals();
-  globalThis.EventSource = FakeEventSource;
+  const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  FakeEventSource.instances.length = 0;
 
   const origGetTicket = api.getTicket;
   api.getTicket = async () => ({ title: '제목' });
 
   try {
-    const view = mount(h(MemoryRouter, null, h(BoardStreamProvider, null, h(TicketArtifact, { ticketId: 't1' }))));
+    const view = mountWithBoardStream(h(TicketArtifact, { ticketId: 't1' }), {
+      withAuth: false,
+      wrap: (tree) => h(MemoryRouter, null, tree),
+    });
     await flush();
 
     // onopen 전 → isConnected=false → 단절 배너 노출.
@@ -155,6 +109,7 @@ test('SSE 단절 배너: 미연결이면 노출, onopen 후 사라짐', async ()
     view.unmount();
   } finally {
     api.getTicket = origGetTicket;
+    uninstall();
     dom.cleanup();
   }
 });

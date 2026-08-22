@@ -33,7 +33,8 @@ export type StreamEventType =
   | 'agent_manager_command' // ST-4: AWB → awb-agent-manager control message (spawn/stop/reload-config)
   | 'consensus_update'      // 다중담당자·합의 T4: 합의 상태 변화 (UI T6 소비, agent 비소비)
   | 'orchestration_update'  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
-  | 'ticket_reads_cleared';  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
+  | 'ticket_reads_cleared'  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
+  | 'cli_login_progress';  // 티켓 b2e79108: CLI 자동 로그인(device-auth) 진행 상태 — UI 전용, agent-manager 비소비
 
 export interface StreamEventScope {
   board_id?: string;
@@ -734,7 +735,14 @@ export type AgentManagerCommand =
   // that room_id on the target manager instance; see ChatSessionManager's
   // applyKeepAlive (inherited from BaseSessionManager).
   | 'extend_chat_keepalive'  // defer idle/maxTurns reap for a live chat session, up to the hard ceiling
-  | 'release_chat_keepalive'; // clear an active grant early
+  | 'release_chat_keepalive' // clear an active grant early
+  // ticket b2e79108 — Codex/Claude CLI device-auth 자동 로그인. args:
+  // { session_id, cli }. 매니저는 프로세스를 spawn한 직후 빠르게 "시작됨"만
+  // ack한다 — 사람의 브라우저 승인을 기다리는 완료까지 기다리면 command-ledger
+  // 의 10분 TTL을 넘길 수 있다. 이후 진행/완료는
+  // POST /api/agent-manager/cli-login/:sessionId/progress 로 별도 보고한다.
+  | 'cli_login_start'
+  | 'cli_login_cancel'; // 세션 취소 — 이미 끝난 세션이면 매니저가 no-op으로 처리
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the
@@ -803,4 +811,26 @@ export interface OrchestrationUpdatePayload {
   plan_version: number;
   counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
   last_event: { type: string; message: string; step_key: string } | null;
+}
+
+/**
+ * ticket b2e79108 — CLI 자동 로그인(device-auth) 진행 상태 push. UI 전용:
+ * agent-manager 는 이 이벤트를 구독하지 않는다(진행 상태를 만드는 쪽이 매니저
+ * 자신이니까). consensus_update/orchestration_update 보다 더 좁게, 이 로그인을
+ * 시작한 사용자 한 명에게만 전달된다(event-registry의 filter가 user_id로 좁힘).
+ *
+ * 토큰 원문은 절대 싣지 않는다 — succeeded 여도 created_credential_id 뿐.
+ */
+export interface CliLoginProgressPayload {
+  session_id: string;
+  workspace_id: string;
+  status: 'starting' | 'awaiting_user' | 'completing' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+  verification_url: string | null;
+  user_code: string | null;
+  // ticket b2e79108 review round 1 — parsing-failure fallback: raw (redacted,
+  // size-capped) CLI stdout when the manager couldn't find a url/code in the
+  // expected wording. Cleared once a real url/code is parsed.
+  raw_output_fallback: string | null;
+  error_detail: string;
+  created_credential_id: string | null;
 }

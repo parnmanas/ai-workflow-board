@@ -6,6 +6,7 @@ import { LoadingProvider } from './contexts/LoadingContext';
 import { ConfirmProvider } from './contexts/ConfirmContext';
 import LoginPage from './components/LoginPage';
 import AppLayout from './components/AppLayout';
+import { ChunkLoadErrorBoundary } from './components/common';
 import { tokens } from './tokens';
 import { ViewModeProvider, useViewMode, defaultSectionForMode } from './contexts/ViewModeContext';
 
@@ -181,62 +182,64 @@ function AppContent() {
   }
 
   return (
-    <Suspense fallback={<RouteFallback />}>
-      <Routes>
-        <Route element={<AppLayout />}>
-          {/* Legacy redirects */}
-          <Route index element={<WorkspaceDefaultRedirect />} />
-          <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
-          <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
-          <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
-          <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
+    <ChunkLoadErrorBoundary>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            {/* Legacy redirects */}
+            <Route index element={<WorkspaceDefaultRedirect />} />
+            <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
+            <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
+            <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
+            <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
 
-          {/* Admin routes — all management pages live here */}
-          <Route path="admin/*" element={<AdminPage />} />
+            {/* Admin routes — all management pages live here */}
+            <Route path="admin/*" element={<AdminPage />} />
 
-          {/* Workspace-scoped routes */}
-          <Route path="ws/:wsId">
-            <Route index element={<WorkspaceSectionRedirect />} />
-            <Route path="assistant" element={<ChatFirstHome />} />
-            <Route path="boards" element={<BoardsIndexPage />} />
-            <Route path="boards/:boardId" element={<Board />} />
-            <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-            <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
-            <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
-            <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
-            <Route path="orchestration" element={<OrchestrationPage />} />
-            <Route path="orchestration/teams" element={<OrchestrationTeamsPage />} />
-            <Route path="orchestration/missions/:missionId" element={<MissionDetailPage />} />
-            <Route path="chat" element={<ChatPage />} />
-            <Route path="chat/:roomId" element={<ChatPage />} />
-            <Route path="users" element={<Navigate to="settings/members" replace />} />
-            <Route path="agents" element={<AgentsPage />} />
-            <Route path="agents/:agentId" element={<AgentDetailPage />} />
-            <Route path="channels" element={<Navigate to="settings/channels" replace />} />
-            <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
-            <Route path="catalog" element={<LegacyCatalogRedirect />} />
-            <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
-            <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
-            <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
-            <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
-            <Route path="credentials" element={<Navigate to="settings/credentials" replace />} />
-            <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
-            <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
-            <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
-            <Route path="roles" element={<Navigate to="settings/roles" replace />} />
-            <Route path="settings" element={<SettingsOverviewPage />} />
-            <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
-            <Route path="settings/members" element={<WorkspaceUsersPage />} />
-            <Route path="settings/roles" element={<WorkspaceRolesPage />} />
-            <Route path="settings/credentials" element={<WorkspaceManagementPage kind="credentials" />} />
-            <Route path="settings/channels" element={<WorkspaceChannelsPage />} />
-            <Route path="settings/api-keys" element={<WorkspaceApiKeysPage />} />
-            <Route path="settings/claude-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
-            <Route path="claude-backend-profiles" element={<Navigate to="settings/claude-profiles" replace />} />
+            {/* Workspace-scoped routes */}
+            <Route path="ws/:wsId">
+              <Route index element={<WorkspaceSectionRedirect />} />
+              <Route path="assistant" element={<ChatFirstHome />} />
+              <Route path="boards" element={<BoardsIndexPage />} />
+              <Route path="boards/:boardId" element={<Board />} />
+              <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
+              <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
+              <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
+              <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
+              <Route path="orchestration" element={<OrchestrationPage />} />
+              <Route path="orchestration/teams" element={<OrchestrationTeamsPage />} />
+              <Route path="orchestration/missions/:missionId" element={<MissionDetailPage />} />
+              <Route path="chat" element={<ChatPage />} />
+              <Route path="chat/:roomId" element={<ChatPage />} />
+              <Route path="users" element={<Navigate to="settings/members" replace />} />
+              <Route path="agents" element={<AgentsPage />} />
+              <Route path="agents/:agentId" element={<AgentDetailPage />} />
+              <Route path="channels" element={<Navigate to="settings/channels" replace />} />
+              <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
+              <Route path="catalog" element={<LegacyCatalogRedirect />} />
+              <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
+              <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
+              <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
+              <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
+              <Route path="credentials" element={<Navigate to="settings/credentials" replace />} />
+              <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
+              <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
+              <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
+              <Route path="roles" element={<Navigate to="settings/roles" replace />} />
+              <Route path="settings" element={<SettingsOverviewPage />} />
+              <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
+              <Route path="settings/members" element={<WorkspaceUsersPage />} />
+              <Route path="settings/roles" element={<WorkspaceRolesPage />} />
+              <Route path="settings/credentials" element={<WorkspaceManagementPage kind="credentials" />} />
+              <Route path="settings/channels" element={<WorkspaceChannelsPage />} />
+              <Route path="settings/api-keys" element={<WorkspaceApiKeysPage />} />
+              <Route path="settings/claude-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
+              <Route path="claude-backend-profiles" element={<Navigate to="settings/claude-profiles" replace />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
-    </Suspense>
+        </Routes>
+      </Suspense>
+    </ChunkLoadErrorBoundary>
   );
 }
 

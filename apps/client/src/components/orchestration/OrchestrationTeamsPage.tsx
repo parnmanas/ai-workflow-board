@@ -354,7 +354,7 @@ function OnlineDot({ online }: { online: boolean }) {
   );
 }
 
-function TeamFormModal({
+export function TeamFormModal({
   isOpen,
   wsId,
   agents,
@@ -389,6 +389,16 @@ function TeamFormModal({
 
   const effectiveGlobal = team ? team.is_global : isGlobal;
   const orchestratorPool = effectiveGlobal ? globalAgents : agents;
+
+  // 편집 모달의 읽기 전용 스코프 표시용 — 생성 Select의 global 옵션 라벨과 문구를 맞춰
+  // 완료 조건("생성/편집 표기 통일")을 만족시킨다. workspace 이름 해석에 실패해도
+  // "(undefined)" 같은 값이 나오지 않도록 이름이 없으면 접미사를 붙이지 않는다.
+  const scopeLabel = (() => {
+    if (!team) return null;
+    if (team.is_global) return 'Global — visible to every workspace, global agents only';
+    const wsName = workspaces.find((w) => w.id === team.workspace_id)?.name;
+    return wsName ? `This workspace (${wsName})` : 'This workspace';
+  })();
 
   useEffect(() => {
     if (!isOpen) return;
@@ -479,11 +489,30 @@ function TeamFormModal({
         <Input label="Team name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Platform squad" />
         <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
         {team ? (
-          team.is_global && (
-            <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-              Global team — its roster scope cannot be changed after creation.
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <label
+              style={{
+                fontSize: tokens.typography.fontSizeXs,
+                fontWeight: tokens.typography.fontWeightSemibold,
+                color: tokens.colors.textMuted,
+                textTransform: 'uppercase',
+                display: 'block',
+                marginBottom: tokens.spacing.xs,
+              }}
+            >
+              Scope
+            </label>
+            <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textStrong }}>{scopeLabel}</div>
+            <div
+              style={{
+                fontSize: tokens.typography.fontSizeXs,
+                color: tokens.colors.textSecondary,
+                marginTop: tokens.spacing.xs,
+              }}
+            >
+              Scope is fixed at creation — create a new team to use a different scope.
             </div>
-          )
+          </div>
         ) : (
           <Select
             label="Scope"

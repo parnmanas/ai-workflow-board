@@ -12,6 +12,18 @@ export interface AwbConfig {
    *  re-verification path they're exercising doesn't add real wall-clock
    *  time to every "no local comment seen" case. */
   silentExitVerifyDelayMs?: number;
+  /** 아래 chat-room/output-liveness/silent-exit 전송 함수들과 mcp-client.ts의
+   *  MCP 툴콜이 주 `apiKey` 가 401/403 을 받았을 때 딱 한 번 재시도할 fallback
+   *  `X-Agent-Key`/`Authorization` (ticket 7d8ea7c9 후속, ticket 23253aeb로
+   *  ticket-dispatch 세션까지 확장). chat/ticket 세션의 per-agent 키는 spawn
+   *  시점에 한 번만 캡처되어 세션 수명 내내 재사용되는데, 세션 도중 stale
+   *  해지거나 스코프를 벗어나면 매니저 자체의 항상 유효하고 workspace 에
+   *  종속되지 않는 키만이 실패 알림을 조용히 유실시키지 않고 전달할 유일한
+   *  수단이다 (401/403 은 classifyHttpSendFailure 가 'permanent' 로 분류해
+   *  이후 버퍼링/재시도되지 않는다). 미설정 시 재시도 없음 — `apiKey` 를
+   *  별도로 override 하지 않는 다른 모든 rest.ts 호출자의 기존 동작 그대로.
+   */
+  retryApiKey?: string;
   [key: string]: unknown;
 }
 
@@ -81,7 +93,7 @@ export function classifyHttpSendFailure(status: number): SendOutcome {
  *  outbox module (main.ts injects the live instance at boot). */
 interface RestOutboxSink {
   enqueue(
-    kind: 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack',
+    kind: 'chat_message' | 'silent_exit_comment' | 'dispatch_ack' | 'command_ack' | 'cli_login_progress',
     payload: unknown,
   ): void;
 }
@@ -322,6 +334,114 @@ export async function postCommandAckRaw(
 }
 
 /**
+ * ticket b2e79108 — manager → server progress/completion report for a
+ * cli_login_start device-auth session. Deliberately a SEPARATE channel from
+ * command/ack: that ack fires once per command_id and the server's
+ * command-ledger 410s anything past its 10-minute TTL (command-ledger.
+ * service.ts), but a human completing a browser OAuth approval can easily
+ * exceed 10 minutes. So the first command/ack just confirms "process
+ * spawned"; every awaiting_user / succeeded / failed / timed_out / cancelled
+ * transition after that goes through this endpoint instead, with no TTL tied
+ * to the original command dispatch.
+ *
+ * On 'succeeded' this carries the credential_fields the manager harvested
+ * from the isolated CODEX_HOME's auth.json (+ config.toml) — the ONLY place
+ * that raw content travels over the wire. The server encrypts + stores it
+ * and never echoes it back.
+ */
+export interface CliLoginProgressBody {
+  session_id: string;
+  command_id: string;
+  status: 'awaiting_user' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+  verification_url?: string;
+  user_code?: string;
+  raw_output_fallback?: string;
+  error_detail?: string;
+  credential_fields?: Record<string, string>;
+}
+
+/** Test-only override for the in-process retry backoff below — real delays
+ *  would make a test wait ~17s. Reset to null to restore the real schedule. */
+let succeededRetryDelaysMsOverride: number[] | null = null;
+export function _setSucceededRetryDelaysMsForTests(delays: number[] | null): void {
+  succeededRetryDelaysMsOverride = delays;
+}
+const DEFAULT_SUCCEEDED_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+/**
+ * Reviewer finding (ticket b2e79108 review round 1): a 'succeeded' body
+ * carries `credential_fields` — the raw harvested auth.json/config.toml, the
+ * one place that content ever travels over the wire. Buffering it into the
+ * durable send outbox (outbox.json, a plaintext file, up to 20-minute TTL)
+ * on a transient failure would leave the secret sitting in cleartext on disk
+ * far longer / in a less-scoped location than the isolated CODEX_HOME it
+ * came from. So 'succeeded' NEVER reaches the outbox — it gets bounded
+ * in-process retries instead, entirely in memory. If every retry fails, the
+ * caller (CliLoginManager#finish) is told delivery never succeeded (return
+ * false) so it deliberately leaves the isolated home on disk rather than
+ * deleting the only copy of the harvested credential.
+ */
+export async function postCliLoginProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<boolean> {
+  if (!body.session_id) return false;
+  const outcome = await postCliLoginProgressRaw(config, body);
+  if (outcome === 'ok') return true;
+  if (outcome === 'permanent') return false;
+  if (body.status === 'succeeded') {
+    return retrySucceededProgress(config, body);
+  }
+  outboxSink?.enqueue('cli_login_progress', { body });
+  return false;
+}
+
+async function retrySucceededProgress(config: AwbConfig, body: CliLoginProgressBody): Promise<boolean> {
+  const delays = succeededRetryDelaysMsOverride ?? DEFAULT_SUCCEEDED_RETRY_DELAYS_MS;
+  for (const delayMs of delays) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const outcome = await postCliLoginProgressRaw(config, body);
+    if (outcome === 'ok') return true;
+    if (outcome === 'permanent') break;
+  }
+  log(
+    `cli-login progress: succeeded report for session=${body.session_id} could not be delivered after retries. ` +
+      `The harvested credential is NOT lost — it remains on disk in the isolated CODEX_HOME (deliberately not ` +
+      `deleted) for manual recovery. Investigate connectivity to the AWB server.`,
+  );
+  return false;
+}
+
+/** Transport-only variant of {@link postCliLoginProgress} — the outbox replay
+ *  path calls this directly (never re-enqueues its own replay). */
+export async function postCliLoginProgressRaw(
+  config: AwbConfig,
+  body: CliLoginProgressBody,
+): Promise<SendOutcome> {
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/cli-login/${encodeURIComponent(body.session_id)}/progress`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(
+        `cli-login progress POST failed: ${resp.status} ${resp.statusText} ` +
+          `(session=${body.session_id} status=${body.status})`,
+      );
+      return classifyHttpSendFailure(resp.status);
+    }
+    return 'ok';
+  } catch (err: any) {
+    log(`cli-login progress POST error: ${err?.message ?? err} (session=${body.session_id} status=${body.status})`);
+    return 'retryable';
+  }
+}
+
+/**
  * ticket e7c87517 — manager → server ack for an `agent_trigger` dispatch,
  * closing the durable dispatch outbox loop. Called right after the manager
  * spawns the subagent (`outcome='processed'`) or aborts the spawn
@@ -400,7 +520,9 @@ export async function postDispatchAckRaw(
  * exit-143 deathloop. Fire-and-log: a dropped heartbeat just means the
  * supervisor falls back to ticket-write staleness for that window. `apiKey` is
  * the effective (managed-agent-or-manager) key so the report authenticates even
- * when the child runs as a managed agent.
+ * when the child runs as a managed agent. (ticket 23253aeb) 이 per-agent 키가
+ * stale/스코프 이탈(401/403)이면, 포기하기 전에 이 파일의 chat-room 발신
+ * 함수들과 동일한 방식으로 `config.retryApiKey`로 한 번 더 재시도한다.
  */
 export async function postOutputLiveness(
   config: AwbConfig,
@@ -410,16 +532,23 @@ export async function postOutputLiveness(
   if (!body.agent_id || !body.ticket_id) return;
   try {
     const url = `${trimSlash(config.url)}/api/agent-manager/output-liveness`;
-    const resp = await fetch(url, {
+    const effectiveKey = apiKey || config.apiKey;
+    const send = (key: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': apiKey || config.apiKey,
+        'X-Agent-Key': key,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(effectiveKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== effectiveKey) {
+      log(`output-liveness POST ${resp.status} with session key — retrying with manager key (ticket=${body.ticket_id})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`output-liveness POST failed: ${resp.status} ${resp.statusText} (ticket=${body.ticket_id})`);
     }
@@ -650,16 +779,22 @@ export async function postChatRoomMessageRaw(
     const body: Record<string, unknown> = { agent_id: agentId, content };
     if (opts?.type && opts.type !== 'message') body.type = opts.type;
     if (opts?.metadata) body.metadata = opts.metadata;
-    const resp = await fetch(url, {
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      log(`chat fallback POST ${resp.status} with session key — retrying with manager key (room=${roomId})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`chat fallback POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
       return classifyHttpSendFailure(resp.status);
@@ -688,16 +823,22 @@ export async function postChatRoomSessionStatus(
   if (!roomId || !agentId) return;
   try {
     const url = `${trimSlash(config.url)}/api/agent/chat-rooms/${encodeURIComponent(roomId)}/session-status`;
-    const resp = await fetch(url, {
+    const payload = JSON.stringify({ agent_id: agentId, ...body });
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({ agent_id: agentId, ...body }),
+      body: payload,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(`session-status POST failed: ${resp.status} ${resp.statusText} (room=${roomId})`);
     }
@@ -807,7 +948,10 @@ export async function failMentionAuditRetrySpawn(
 
 /** Transport-only variant of {@link postSilentExitSystemComment} — no grace
  *  delay (the exit it narrates is long past by replay time) and classifies the
- *  failure instead of buffering it. The outbox replay path calls this directly. */
+ *  failure instead of buffering it. The outbox replay path calls this directly.
+ *  (ticket 23253aeb) 1차 키에서 401/403을 받으면 실패로 분류하기 전에
+ *  `config.retryApiKey`로 한 번 더 재시도한다 — stale per-agent 키 때문에
+ *  silent-exit을 설명하는 유일한 코멘트가 조용히 사라지지 않도록. */
 export async function postSilentExitSystemCommentRaw(
   config: AwbConfig,
   ticketId: string,
@@ -816,16 +960,22 @@ export async function postSilentExitSystemCommentRaw(
   if (!ticketId || !body?.content) return { outcome: 'permanent', result: 'failed' };
   try {
     const url = `${trimSlash(config.url)}/api/agent/tickets/${encodeURIComponent(ticketId)}/silent-exit-comment`;
-    const resp = await fetch(url, {
+    const send = (apiKey: string) => fetch(url, {
       method: 'POST',
       headers: {
-        'X-Agent-Key': config.apiKey,
+        'X-Agent-Key': apiKey,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await send(config.apiKey);
+    if (!resp.ok && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey && config.retryApiKey !== config.apiKey) {
+      log(`silent-exit comment POST ${resp.status} with session key — retrying with manager key (ticket=${ticketId})`);
+      resp = await send(config.retryApiKey);
+    }
     if (!resp.ok) {
       log(
         `silent-exit comment POST failed: ${resp.status} ${resp.statusText} (ticket=${ticketId})`,

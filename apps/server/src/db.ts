@@ -20,12 +20,23 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as entitiesBarrel from './entities';
+import { OntologyNode } from './entities/OntologyNode';
+import { OntologyEdge } from './entities/OntologyEdge';
 import {
   DISPATCH_INTENTS_TABLE,
   DEDUP_OPEN_DISPATCH_INTENTS_SQL,
 } from './database/dispatch-intent-dedup';
 
 const entities = Object.values(entitiesBarrel);
+
+// Ontology Graph 테이블(ticket 6ca4894a, DESIGN.md 축 3)은 sql.js에서 자체
+// DataSource를 갖는다 — 아래 buildOntologyDataSourceOptions() 참고. 그래서
+// PRIMARY sqljs entities 배열(아래)에서는 제외해야 `synchronize`가 공유
+// data.db에 절대 DDL하지 않는다. Postgres/MySQL은 배럴을 그대로 유지 — 이
+// 티켓 이전과 똑같이 단일 DataSource에 온톨로지가 다른 모든 것과 함께 있다.
+const ONTOLOGY_ENTITIES = [OntologyNode, OntologyEdge];
+const ontologyEntitySet = new Set<unknown>(ONTOLOGY_ENTITIES);
+const primarySqljsEntities = entities.filter((e) => !ontologyEntitySet.has(e));
 
 /**
  * True when the active backend is the dev sql.js (in-memory WASM) database.
@@ -392,6 +403,23 @@ export function resolveSqljsLocation(): { dbDir: string; location: string } {
   return { dbDir, location };
 }
 
+/**
+ * Ontology Graph 자체 sql.js 파일을 위한 resolveSqljsLocation()의 자매 함수
+ * (ticket 6ca4894a, DESIGN.md 축 3) — 같은 디렉터리, 다른 파일명, 절대
+ * primary와 같은 경로가 되지 않는다. SQLJS_ONTOLOGY_DB_PATH는
+ * SQLJS_DB_PATH의 env-override/격리 관례(qa-flow 서브프로세스 격리, 테스트)를
+ * 그대로 따른다.
+ */
+export function resolveOntologySqljsLocation(): { dbDir: string; location: string } {
+  const dbDir = path.join(__dirname, '..', '..', '..', 'database');
+  const location = process.env.SQLJS_ONTOLOGY_DB_PATH
+    ? (path.isAbsolute(process.env.SQLJS_ONTOLOGY_DB_PATH)
+        ? process.env.SQLJS_ONTOLOGY_DB_PATH
+        : path.join(dbDir, process.env.SQLJS_ONTOLOGY_DB_PATH))
+    : path.join(dbDir, 'ontology.db');
+  return { dbDir, location };
+}
+
 export function buildDataSourceOptions(): DataSourceOptions {
   const dbType = (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'mysql' | 'postgres';
   // Migrations glob — matches both src/.ts (tsx dev mode) and dist/.js (compiled)
@@ -465,7 +493,10 @@ export function buildDataSourceOptions(): DataSourceOptions {
     // SqljsWriteSubscriber flips the dirty flag on writes so an idle server
     // flushes nothing. sqljs-only — the prod backends never construct it.
     subscribers: [SqljsWriteSubscriber],
-    entities,
+    // Ontology* 엔티티는 여기서 제외한다(ticket 6ca4894a, 축 3) — 이들은
+    // buildOntologyDataSourceOptions()가 만드는 두 번째 DataSource에 들어가고,
+    // 이 DataSource의 dirty flag/flush timer/data.db 파일을 절대 공유하지 않는다.
+    entities: primarySqljsEntities,
     migrations: migrationsGlob,
     synchronize: true,   // D-01
     migrationsRun: false, // D-02
@@ -602,6 +633,212 @@ export function startSqljsAutoFlush(
   };
 }
 
+// ── dev sql.js 온톨로지 그래프 DataSource (ticket 6ca4894a) ──────────────────
+// DESIGN.md 축 3(REVIEW-NOTES.md S1/S3, 둘 다 critical/major): 온톨로지
+// 테이블은 primary data.db의 dirty flag, flush timer, 또는
+// serializeSqljsTransactions() 큐를 절대 공유해서는 안 된다. 공유한다면
+// 온톨로지 테이블 증가(이 설계 자체의 10 MLOC 투영: ~10-15만 노드 +
+// ~24만-80만 엣지)가 공유 파일의 이후 모든 flush를 부풀리게 되고 — 무관한
+// 티켓 코멘트 하나가 트리거한 flush조차 — 온톨로지 사용자뿐 아니라 모든
+// 사용자의 인스턴스 전체 요청 처리를 블로킹하게 된다(S1). 그래서 이 섹션은
+// 공유 상태로 리팩터링한 게 아니라, 위 primary flush 메커니즘을 의도적으로
+// 거의 그대로 복제한 것이다 — sqljsDirty/sqljsFlushInFlight는 프로세스
+// 전역 모듈 변수라(위 자신들의 코멘트 참고) 두 번째 DataSource를 위해
+// 재사용하면 이 티켓이 막으려는 바로 그 교차 오염이 조용히 재발한다(한
+// DataSource로의 쓰기가 다른 쪽의 dirty flag를 지운다거나, 한 DataSource의
+// flush가 다른 쪽의 진행 중인 export에 "합류"해 자기 것을 건너뛴다거나).
+// Postgres/MySQL은 이 중 아무것도 구성하지 않는다 — 온톨로지 테이블은 다른
+// 모든 배치 flush 메커니즘과 같은 방식(isSqljsBackend())으로 게이트되어
+// 기존 단일 DataSource에 변경 없이 synchronize된다.
+let ontologySqljsDirty = false;
+let ontologySqljsFlushInFlight: Promise<boolean> | null = null;
+
+export function markOntologySqljsDirty(): void {
+  ontologySqljsDirty = true;
+}
+
+export function isOntologySqljsDirty(): boolean {
+  return ontologySqljsDirty;
+}
+
+/** SqljsWriteSubscriber의 Ontology-DataSource 전용 자매 클래스 — 위 docstring 참고. */
+@EventSubscriber()
+export class OntologySqljsWriteSubscriber implements EntitySubscriberInterface {
+  afterQuery(event: { query?: string; success?: boolean }): void {
+    if (event.success === false) return;
+    const command = (event.query || '').trimStart().split(/\s/, 1)[0].toUpperCase();
+    if (command && command !== 'SELECT' && command !== 'PRAGMA') {
+      markOntologySqljsDirty();
+    }
+  }
+}
+
+/**
+ * buildDataSourceOptions()의 자매 함수(DESIGN.md 축 3의 명시적 통합
+ * 지점) — DB_TYPE과 무관하게 항상 sql.js 형태다. Postgres/MySQL 변형은
+ * 없다: 그 백엔드에서는 Ontology* 엔티티가 이미 단일 primary DataSource에
+ * synchronize되므로(거기서는 `entities`에서 절대 제외되지 않음),
+ * isSqljsBackend()가 true일 때가 아니면 이 옵션으로 DataSource를 만들 일이
+ * 없어야 한다. 호출부는 이 파일의 다른 모든 sqljs 전용 코드 경로와 같은
+ * 방식으로 게이트한다.
+ */
+export function buildOntologyDataSourceOptions(): DataSourceOptions {
+  const { dbDir, location } = resolveOntologySqljsLocation();
+  // 리뷰 지적(6ca4894a Review round 1): SQLJS_ONTOLOGY_DB_PATH가 잘못
+  // 설정되어 정규화 후 primary sql.js DB와 우연히 같은 파일을 가리키면 이
+  // 티켓 전체가 조용히 무력화된다 — 독립된 두 sql.js/WASM 인스턴스가 각각
+  // 그 파일의 자기 메모리 사본을 들고 서로 다른 스케줄로 export/덮어쓰기를
+  // 하면서, 나중에 flush한 쪽이 먼저 flush한 쪽을 손상시키거나 날려버린다.
+  // 조용히 그렇게 되도록 두는 대신 부팅을 즉시, 크게 실패시킨다.
+  const primaryLocation = path.resolve(resolveSqljsLocation().location);
+  const ontologyLocation = path.resolve(location);
+  if (ontologyLocation === primaryLocation) {
+    throw new Error(
+      `[DB] SQLJS_ONTOLOGY_DB_PATH resolves to the same file as the primary sql.js DB ` +
+      `(${ontologyLocation}). The ontology DataSource must never share a file with the ` +
+      `primary DataSource (ticket 6ca4894a, DESIGN.md axis 3 / REVIEW-NOTES.md S1) — point ` +
+      `SQLJS_ONTOLOGY_DB_PATH at a different file.`,
+    );
+  }
+  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+  return {
+    type: 'sqljs',
+    location,
+    autoSave: false,
+    subscribers: [OntologySqljsWriteSubscriber],
+    entities: ONTOLOGY_ENTITIES,
+    synchronize: true,   // D-01
+    migrationsRun: false, // D-02 — 여기선 무의미(온톨로지 마이그레이션 자체가 없음), 대칭성 위해 유지
+    logging: false,
+  };
+}
+
+// 활성 백엔드가 sql.js일 때만 생성된다 — Postgres/MySQL에서는 null로
+// 남아서 buildOntologyDataSourceOptions()(그리고 그 mkdir 부수효과)가 아예
+// 호출조차 안 되고, "Postgres: 변경 없음"과 정확히 일치한다.
+export const AppOntologyDataSource: DataSource | null = isSqljsBackend()
+  ? new DataSource(buildOntologyDataSourceOptions())
+  : null;
+if (AppOntologyDataSource) {
+  // 자체 트랜잭션 큐(S3) — serializeSqljsTransactions()는 인스턴스별로
+  // 동작한다(이 DataSource 자신의 manager를 패치하고, 클로저 로컬 큐 +
+  // AsyncLocalStorage로 키잉되므로), 여기서 두 번째로 호출해도 이미
+  // 안전하고 함수 자체를 바꿀 필요가 없다.
+  serializeSqljsTransactions(AppOntologyDataSource);
+}
+
+/** doSqljsExport()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
+async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
+  ontologySqljsDirty = false;
+  try {
+    await dataSource.sqljsManager.saveDatabase();
+    return true;
+  } catch (e) {
+    ontologySqljsDirty = true;
+    throw e;
+  }
+}
+
+/** flushSqljs()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
+export async function flushOntologySqljs(dataSource: DataSource, force = false): Promise<boolean> {
+  if (!isSqljsBackend()) return false;
+  if (!dataSource?.isInitialized) return false;
+
+  if (ontologySqljsFlushInFlight) {
+    if (!force) return false;
+    try {
+      await ontologySqljsFlushInFlight;
+    } catch {
+      // 그 flush 자신의 호출자에게 전달됨; 새로운 강제 export를 진행한다.
+    }
+  }
+
+  if (!force && !ontologySqljsDirty) return false;
+
+  const run = doOntologySqljsExport(dataSource);
+  ontologySqljsFlushInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (ontologySqljsFlushInFlight === run) ontologySqljsFlushInFlight = null;
+  }
+}
+
+/**
+ * 이 백엔드에 Ontology DataSource가 있으면 초기화한다. Postgres/MySQL에서는
+ * no-op(AppOntologyDataSource가 null — 온톨로지 테이블이 이미 primary
+ * DataSource에 있음). 멱등적 — NestJS 부트 경로(DatabaseModule.onModuleInit)와
+ * standalone MCP 진입점(mcp-server.ts) 양쪽에서 호출해도 안전, 아래
+ * initDb()와 같은 자세.
+ */
+export async function initOntologyDb(): Promise<void> {
+  if (!AppOntologyDataSource) return;
+  if (!AppOntologyDataSource.isInitialized) {
+    await AppOntologyDataSource.initialize();
+  }
+}
+
+/** startSqljsAutoFlush()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
+export function startOntologySqljsAutoFlush(
+  dataSource: DataSource | null,
+  opts: { onError?: (e: unknown) => void } = {},
+): () => Promise<void> {
+  if (!dataSource || !isSqljsBackend()) {
+    return async () => {};
+  }
+  const intervalMs = resolveSqljsFlushIntervalMs();
+  const handle = setInterval(() => {
+    flushOntologySqljs(dataSource).catch((e) => opts.onError?.(e));
+  }, intervalMs);
+  if (typeof handle.unref === 'function') handle.unref();
+
+  let stopped = false;
+  return async () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(handle);
+    try {
+      await flushOntologySqljs(dataSource, true);
+    } catch (e) {
+      opts.onError?.(e);
+    }
+  };
+}
+
+/**
+ * 온톨로지 sql.js DataSource의 row-count ceiling(ticket 6ca4894a,
+ * REVIEW-NOTES.md S1의 defense-in-depth 완화책 — 위 듀얼 DataSource
+ * 분리는 온톨로지 증가가 AWB 나머지를 블로킹하는 것은 막지만, 한
+ * 워크스페이스의 온톨로지 그래프가 같은 sql.js 파일을 공유하는 다른
+ * 워크스페이스의 온톨로지 그래프 flush를 여전히 느리게 만들 수 있다).
+ * sql.js/dev 전용 — Postgres는 매 flush마다 전체 파일을 재export하는
+ * 단계 자체가 없으므로 이 ceiling이 적용되지 않는다.
+ *
+ * 기본값은 추측이 아니라 실제 고정 빌드 실측에서 도출했다:
+ * `scripts/benchmark-ontology-flush.mjs`가 이 설계 자체의 워스트케이스 10
+ * MLOC 투영(`research-storage.md` §6.3: 150,000 nodes + 800,000 edges =
+ * 950,000 rows)을 채운 뒤 실제 saveDatabase() export 시간을 측정 — 536.2
+ * MB 파일에 676ms wall-clock(2026-08-22 측정, sql.js@1.12.0, 재현 명령은 그
+ * 스크립트 헤더 참고). 1,000,000은 설계된 워스트케이스 전체가 ceiling에
+ * 안 걸리고 여유 있게 끝나도록 하면서, 그 이상의 폭주 증가(한 워크스페이스에
+ * 여러 대형 저장소, 재삽입 버그 등)는 export 비용이 무한정 커지게 두는
+ * 대신 실측된 서브초 단위 flush 비용 안으로 제한한다.
+ *
+ * 이 상수는 숫자만 제공한다 — enforcement(DESIGN.md의 "마지막 스냅샷 기준
+ * 읽기 전용으로 격하, 또는 해당 워크스페이스의 기능 비활성화")는 여기서
+ * 의도적으로 구현하지 않는다. 이 티켓의 범위는 스키마 + DataSource
+ * 분리이고, 이 ceiling은 온톨로지 대량 쓰기를 실제로 수행하는 티켓(추출
+ * 워커)이나 온톨로지 읽기를 제공하는 티켓이 참조해야 할 값이지,
+ * DataSource/flush 레이어 안에서 강제되는 것이 아니다.
+ */
+export const DEFAULT_ONTOLOGY_SQLJS_ROW_CEILING = 1_000_000;
+
+export function resolveOntologySqljsRowCeiling(): number {
+  const raw = Number.parseInt(process.env.ONTOLOGY_SQLJS_ROW_CEILING || '', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_ONTOLOGY_SQLJS_ROW_CEILING;
+  return raw;
+}
+
 // Matches the family of errors sql.js / SQLite raises when the file on disk
 // is not a valid, intact database. Used to distinguish a corrupt-DB failure
 // (recoverable in dev — the data is disposable) from a real bug we must not
@@ -609,29 +846,15 @@ export function startSqljsAutoFlush(
 const SQLITE_CORRUPT_RE = /malformed|disk image|file is not a database|not a database|encrypted/i;
 
 /**
- * Boot-time integrity guard for the dev sql.js database (ticket e9847153).
- *
- * Why this exists: a corrupt `data.db` ("database disk image is malformed")
- * otherwise makes TypeORM's initialize() hang ~25s as synchronize introspects
- * a broken file before finally erroring — long enough that an agent subagent
- * gets SIGTERM-killed (exit 143) before it can report anything. We open the
- * file with sql.js directly here and run PRAGMA integrity_check, so a bad file
- * is caught in <1s with an actionable message *before* TypeORM touches it.
- *
- * Scope: sql.js (dev SQLite) ONLY. Postgres/MySQL return immediately, so
- * production behavior is unchanged. A fresh/missing/empty file also returns
- * early — sql.js creates it on initialize().
- *
- * Recovery: set AWB_DB_AUTORECOVER=1 (dev convenience) to back the corrupt
- * file up to `<file>.corrupt-<ts>` and let sql.js recreate an empty DB.
- * Otherwise we print how to clear it and process.exit(1). Never auto-deletes
- * for non-sqlite backends.
+ * ensureSqljsDbHealthy() / ensureOntologySqljsDbHealthy() 공용 코어(ticket
+ * b646ed54). PRAGMA integrity_check 선제 검사 + AWB_DB_AUTORECOVER 복구
+ * 로직은 대상 파일 경로만 다를 뿐 두 DataSource(primary data.db / ontology.db)에
+ * 대해 완전히 동일하므로 여기로 추출했다. `pathEnvVarName`은 FATAL 메시지의
+ * "다른 파일을 가리키게 하라" 안내에만 쓰인다 — 그 파일의 위치를 오버라이드하는
+ * 실제 env var 이름(SQLJS_DB_PATH 또는 SQLJS_ONTOLOGY_DB_PATH)이 그대로
+ * 나가야 안내가 정확하다.
  */
-export async function ensureSqljsDbHealthy(): Promise<void> {
-  const dbType = process.env.DB_TYPE || 'sqlite';
-  if (dbType !== 'sqlite') return;
-
-  const { location } = resolveSqljsLocation();
+async function checkAndRecoverSqljsFile(location: string, pathEnvVarName: string): Promise<void> {
   // Nothing to validate — sql.js will create a fresh DB on initialize().
   if (!fs.existsSync(location)) return;
   if (fs.statSync(location).size === 0) return;
@@ -695,10 +918,62 @@ export async function ensureSqljsDbHealthy(): Promise<void> {
     `[DB]     This is local dev data and is disposable. To fix, either:\n` +
     `[DB]       • delete it so sql.js recreates an empty DB:  rm "${location}"\n` +
     `[DB]       • set AWB_DB_AUTORECOVER=1 to auto-backup + recreate on boot\n` +
-    `[DB]       • or point SQLJS_DB_PATH at a different file\n` +
+    `[DB]       • or point ${pathEnvVarName} at a different file\n` +
     `[DB]     (Aborting now instead of hanging ~25s — ticket e9847153.)\n`,
   );
   process.exit(1);
+}
+
+/**
+ * Boot-time integrity guard for the dev sql.js database (ticket e9847153).
+ *
+ * Why this exists: a corrupt `data.db` ("database disk image is malformed")
+ * otherwise makes TypeORM's initialize() hang ~25s as synchronize introspects
+ * a broken file before finally erroring — long enough that an agent subagent
+ * gets SIGTERM-killed (exit 143) before it can report anything. We open the
+ * file with sql.js directly here and run PRAGMA integrity_check, so a bad file
+ * is caught in <1s with an actionable message *before* TypeORM touches it.
+ *
+ * Scope: sql.js (dev SQLite) ONLY. Postgres/MySQL return immediately, so
+ * production behavior is unchanged. A fresh/missing/empty file also returns
+ * early — sql.js creates it on initialize().
+ *
+ * Recovery: set AWB_DB_AUTORECOVER=1 (dev convenience) to back the corrupt
+ * file up to `<file>.corrupt-<ts>` and let sql.js recreate an empty DB.
+ * Otherwise we print how to clear it and process.exit(1). Never auto-deletes
+ * for non-sqlite backends.
+ */
+export async function ensureSqljsDbHealthy(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveSqljsLocation();
+  await checkAndRecoverSqljsFile(location, 'SQLJS_DB_PATH');
+}
+
+/**
+ * ensureSqljsDbHealthy()의 Ontology-DataSource 전용 자매 함수(ticket
+ * b646ed54) — 같은 PRAGMA integrity_check 선제 검사를
+ * resolveOntologySqljsLocation()이 가리키는 파일(기본 database/ontology.db,
+ * ticket 6ca4894a)에 대해 수행한다.
+ *
+ * 이 가드가 빠져 있던 이유가 곧 이 티켓의 존재 이유다: AppOntologyDataSource도
+ * (isSqljsBackend()일 때) 표준 TypeORM sqljs DataSource이므로, 손상된
+ * ontology.db는 위 primary data.db와 정확히 같은 ~25초 synchronize() hang을
+ * 일으킬 수 있다 — 그런데 이 가드는 resolveSqljsLocation()(primary 경로)만
+ * 검사하도록 하드코딩되어 있어 두 번째 DataSource는 무방비 상태였다.
+ *
+ * 로직은 대상 위치만 다를 뿐 ensureSqljsDbHealthy()와 완전히 동일 — 공유
+ * 코어는 checkAndRecoverSqljsFile()로 추출했다(AWB_DB_AUTORECOVER 복구
+ * 규약도 그대로 재사용: `<file>.corrupt-<ts>` 백업 후 sql.js가 빈 DB를
+ * 재생성).
+ */
+export async function ensureOntologySqljsDbHealthy(): Promise<void> {
+  const dbType = process.env.DB_TYPE || 'sqlite';
+  if (dbType !== 'sqlite') return;
+
+  const { location } = resolveOntologySqljsLocation();
+  await checkAndRecoverSqljsFile(location, 'SQLJS_ONTOLOGY_DB_PATH');
 }
 
 /**
@@ -777,10 +1052,16 @@ export async function preSyncSqljsOpenIntents(): Promise<void> {
 export async function initDb() {
   // Catch a corrupt dev DB before TypeORM hangs on it (ticket e9847153).
   await ensureSqljsDbHealthy();
+  // 두 번째 sql.js DataSource(ontology.db, ticket 6ca4894a)도 같은 hang을
+  // 일으킬 수 있어 아래 initOntologyDb() → AppOntologyDataSource.initialize()
+  // 이전에 동일 가드를 돌린다(ticket b646ed54).
+  await ensureOntologySqljsDbHealthy();
   // Collapse any pre-existing duplicate open dispatch_intents before synchronize
   // creates the partial unique index (ticket 3c3b17a3).
   await preSyncSqljsOpenIntents();
   await AppDataSource.initialize();
+  // Ticket 6ca4894a — Postgres/MySQL에서는 no-op(그쪽은 AppOntologyDataSource가 null).
+  await initOntologyDb();
   const dbType = process.env.DB_TYPE || 'sqlite';
   console.log(`[DB] Connected using ${dbType}`);
 }

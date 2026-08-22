@@ -111,6 +111,27 @@ async function healthy(url: string): Promise<boolean> {
   }
 }
 
+/**
+ * Claude Code 자체의 내부 보조 요청(세션 제목 생성 등)은 `--model` argv
+ * 플래그를 아예 거치지 않고 이 env 변수들로 모델을 고른다. 모델 하나만
+ * 서빙하는 커스텀 백엔드 프로필(예: 단일 vLLM `--served-model-name`)은
+ * 이 값들을 전부 `profile.model` 로 기본값 지정해야 한다 — 안 그러면 이
+ * 보조 요청들이 CLI 자체 기본 모델명을 백엔드로 보내 `unrecognized_model`
+ * 로 거부당하고, CLI 는 턴 전체를 실패시키기 전까지 몇 분간 재시도하며
+ * 멈춘다 (ticket 7d8ea7c9 후속). ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL
+ * 조합은 cli-adapters/deepseek.ts 에서 이미 검증된 페어링이고,
+ * ANTHROPIC_DEFAULT_* 3종은 tier alias 를 다른 방식으로 해석하는 CLI
+ * 버전에 대비해 방어적으로 포함했다. `profile.env`(claudeEnv() 에서 이
+ * 뒤에 spread) 는 여전히 이 값들을 프로필별로 override 할 수 있다.
+ */
+const AUX_MODEL_ENV_KEYS = [
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+] as const;
+
 export class RuntimeLease {
   #release: (() => Promise<void>) | null;
   #closed = false;
@@ -129,6 +150,7 @@ export class RuntimeLease {
     const secret = this.credentialEnv[this.profile.auth_env || 'ANTHROPIC_AUTH_TOKEN']
       || this.credentialEnv.ANTHROPIC_API_KEY;
     return {
+      ...Object.fromEntries(AUX_MODEL_ENV_KEYS.map(key => [key, this.profile.model])),
       ...(this.profile.env ?? {}),
       ANTHROPIC_BASE_URL: this.launch?.baseUrl ?? this.profile.base_url.replace(/\/$/, ''),
       ...(secret ? { ANTHROPIC_AUTH_TOKEN: secret } : {}),

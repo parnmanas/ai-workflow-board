@@ -33,6 +33,11 @@ export const INSTANCES_DIR = join(AGENT_MANAGER_HOME, 'instances');
 // endpoint), an mcp-config.json that wraps that apiKey for `claude
 // --mcp-config`, a cached settings JSON, and a per-agent subagent log.
 export const MANAGED_AGENTS_DIR = join(AGENT_MANAGER_HOME, 'agents');
+// ticket b2e79108 — isolated CODEX_HOME per in-flight device-auth login
+// session, keyed by session_id (NOT mktemp-random) so a status/cancel command
+// arriving moments later can re-find the same dir. Never the operator's real
+// ~/.codex — see cli-login.ts.
+export const CLI_LOGINS_DIR = join(AGENT_MANAGER_HOME, 'cli-logins');
 export const LOG_DIR = AGENT_MANAGER_HOME;
 export const LOG_PATH = join(LOG_DIR, 'agent-manager.log');
 

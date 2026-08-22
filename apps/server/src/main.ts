@@ -12,7 +12,7 @@ import { ApiKeyService } from './services/api-key.service';
 import { DeploymentService } from './modules/deployments/deployment.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
-import { ensureSqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
+import { ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
 import { applySpaFallback } from './common/spa-fallback';
 
@@ -28,6 +28,13 @@ async function bootstrap() {
   // triggers DatabaseModule's TypeOrmModule.forRoot() — which would otherwise
   // hang ~25s on a malformed file (ticket e9847153). No-op on postgres/mysql.
   await ensureSqljsDbHealthy();
+
+  // 두 번째 sql.js DataSource(database/ontology.db, ticket 6ca4894a)도 같은
+  // 종류의 hang을 일으킬 수 있다 — NestFactory.create() 도중 DI 라이프사이클이
+  // OntologySqljsFlushService.onModuleInit()을 거쳐 AppOntologyDataSource.initialize()를
+  // 호출하기 때문이다. primary와 같은 시점(NestFactory.create() 이전)에 선제
+  // 검사한다(ticket b646ed54).
+  await ensureOntologySqljsDbHealthy();
 
   // Also before NestFactory (→ TypeOrmModule.forRoot → synchronize): collapse any
   // pre-existing duplicate OPEN dispatch_intents so the partial UNIQUE index this

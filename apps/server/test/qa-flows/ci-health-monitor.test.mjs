@@ -139,8 +139,11 @@ function makeFakeGitHubFetchSharedRepoByCredential(state) {
   };
 }
 
-function run(id, conclusion, isoTime) {
-  return { id, status: 'completed', conclusion, html_url: `https://github.com/acme/widgets/actions/runs/${id}`, created_at: isoTime, updated_at: isoTime };
+// event 기본값 'push' — 실제 GitHub API는 모든 workflow run에 event를 채워 보낸다
+// (ticket 654465c8: evaluateRedStreak가 event가 비어있는 run을 fail-closed로 신호에서
+// 제외하므로, 이 기본값이 없으면 아래 모든 sweep 시나리오가 신호를 하나도 못 받는다).
+function run(id, conclusion, isoTime, event = 'push') {
+  return { id, status: 'completed', conclusion, event, html_url: `https://github.com/acme/widgets/actions/runs/${id}`, created_at: isoTime, updated_at: isoTime };
 }
 
 test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery', async (t) => {

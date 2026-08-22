@@ -89,6 +89,21 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
     try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
     process.env.SQLJS_DB_PATH = isolated;
   }
+  // Ontology Graph 자체 sql.js DataSource에도 같은 격리를 적용한다(ticket
+  // 6ca4894a) — AppOntologyDataSource는 db.ts 모듈 로드 시점에
+  // resolveOntologySqljsLocation()으로 생성되는데, SQLJS_ONTOLOGY_DB_PATH가
+  // 없으면 공유 레포 레벨 database/ontology.db가 기본값이 된다. 이 격리가
+  // 없으면 실제 AppModule을 부팅하는 모든 qa-flow 테스트 프로세스가
+  // (OntologySqljsFlushService가 @Global SharedServicesModule에 있으므로)
+  // 그 공유 파일 하나에 synchronize/flush하게 되고 — 같은 시각에 실제
+  // `npm run dev` 서버가 떠 있으면 그것과도 충돌한다 — 바로 위
+  // SQLJS_DB_PATH 격리가 primary DB를 위해 이미 막고 있는 것과 동일한
+  // 다중 프로세스 충돌 클래스다.
+  if (!process.env.SQLJS_ONTOLOGY_DB_PATH) {
+    const isolatedOntology = path.join(os.tmpdir(), `awb-qa-ontology-${process.pid}-${port}.db`);
+    try { fs.rmSync(isolatedOntology, { force: true }); } catch { /* best-effort */ }
+    process.env.SQLJS_ONTOLOGY_DB_PATH = isolatedOntology;
+  }
   // Postgres matrix (ticket 0c175408): the qa-flows suite chains every flow
   // file through its own process but they all connect to the SAME ephemeral CI
   // database — without per-process isolation they cross-contaminate the way the

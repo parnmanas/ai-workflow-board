@@ -41,6 +41,7 @@ import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
 import { OutreachModule } from './modules/outreach/outreach.module';
 import { OrchestrationModule } from './modules/orchestration/orchestration.module';
+import { OntologyModule } from './modules/ontology/ontology.module';
 
 @Module({
   imports: [
@@ -48,7 +49,13 @@ import { OrchestrationModule } from './modules/orchestration/orchestration.modul
     SharedServicesModule,
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', '..', 'client', 'dist'),
-      exclude: ['/api{*path}', '/mcp{*path}'],
+      // /assets 는 SPA fallback(index.html) 대상에서 제외한다. express.static 이 먼저
+      // 실제 파일을 서빙하므로 존재하는 해시 청크는 그대로 나가고, 여기 걸리는 건
+      // "파일이 없는" /assets/*.js 뿐이다 — 재배포로 해시가 바뀐 뒤 stale 탭이 구
+      // 청크를 lazy-import 하면 기존엔 200 text/html(index.html)로 응답해 브라우저의
+      // strict MIME 체크를 위반했다(ticket 2cae7314). 제외하면 매칭되는 라우트가 없어
+      // 정상 404 로 떨어져 dynamic import 가 명확한 실패로 reject 된다.
+      exclude: ['/api{*path}', '/mcp{*path}', '/assets{*path}'],
       serveStaticOptions: {
         // Vite emits hashed filenames inside /assets/ (index-<hash>.js etc.) so
         // those are safe to cache forever. index.html and anything at the root
@@ -108,6 +115,7 @@ import { OrchestrationModule } from './modules/orchestration/orchestration.modul
     ArtifactRefsModule,
     OutreachModule,
     OrchestrationModule,
+    OntologyModule,
   ],
 })
 export class AppModule {}

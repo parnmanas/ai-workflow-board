@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
+import { setupDom, click, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api } from '../src/api.ts';
-import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
 
 const source = fs.readFileSync(
@@ -23,7 +23,7 @@ test('Credentials exposes the Codex and Claude CLI login credential importer, wi
   assert.match(credentialManagerSource, /<CliCredentialImport/);
   assert.match(credentialManagerSource, /onCreated=\{loadCredentials\}/);
   assert.match(source, /codex login/);
-  assert.match(source, /claude login/);
+  assert.match(source, /claude auth login/);
   assert.match(source, /~\/\.codex\/auth\.json/);
   assert.match(source, /~\/\.claude\/\.credentials\.json/);
 });
@@ -64,6 +64,7 @@ async function mountCredentialManagerForImport(t) {
   globalThis.sessionStorage = dom.window.sessionStorage;
   dom.window.HTMLElement.prototype.attachEvent = () => {};
   dom.window.HTMLElement.prototype.detachEvent = () => {};
+  const { uninstall } = installFakeEventSource();
   localStorage.setItem('auth_token', 'admin-session');
 
   const originals = {
@@ -108,17 +109,14 @@ async function mountCredentialManagerForImport(t) {
     return created;
   };
 
-  const view = mount(
-    React.createElement(
-      AuthProvider,
-      null,
-      React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
-    ),
+  const view = mountWithBoardStream(
+    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
   );
   await flush();
 
   t.after(() => {
     view.unmount();
+    uninstall();
     Object.assign(api, originals);
     dom.cleanup();
   });
@@ -128,10 +126,10 @@ async function mountCredentialManagerForImport(t) {
 test('importing a CLI login credential from the Credentials page appears in the same list immediately', async (t) => {
   const { container, createCredentialCalls } = await mountCredentialManagerForImport(t);
 
-  assert.equal(buttonsByText(container, 'Import CLI Login').length, 1);
+  assert.equal(buttonsByText(container, 'Import from File').length, 1);
   assert.doesNotMatch(container.textContent, /Codex CLI login/);
 
-  click(buttonsByText(container, 'Import CLI Login')[0]);
+  click(buttonsByText(container, 'Import from File')[0]);
 
   const fileInput = container.querySelector('input[type="file"][accept*="json"]');
   assert.ok(fileInput, 'credential file input should be present once the importer is open');

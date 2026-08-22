@@ -103,6 +103,34 @@ function renderCompletionContract(
   );
 }
 
+/**
+ * source_ticket_id 없는 run(사람 UI 트리거 / cron / on-ticket-done)에 붙는 완료
+ * 계약 (티켓 b273d603). `dispatch()`가 `sourceTicketId`일 때만 `renderCompletionContract`를
+ * 붙이던 기존 동작 때문에, 대상 에이전트가 `run_id`조차 전달받지 못해
+ * `complete_action_run`을 호출할 방법이 없었다 — 그래서 이런 run의 `status`가
+ * 실제 완료 여부와 무관하게 영구히 `running`으로 남았다. 재개할 티켓도
+ * `completeRun`의 자동 재시도도 없으므로(해당 분기는 `!sourceTicketId`일 때
+ * 조기 반환한다) 재개/재시도 문구는 넣지 않는다.
+ */
+function renderStandaloneCompletionContract(runId: string, workspaceId: string): string {
+  return (
+    `\n\n---\n` +
+    `## Report your result (required — this keeps the run's status accurate)\n\n` +
+    `This run has no ticket to resume, but its status is tracked and shown in the Actions UI. ` +
+    `When you finish, call:\n\n` +
+    '```\n' +
+    `mcp__awb__complete_action_run(\n` +
+    `  run_id="${runId}",\n` +
+    `  workspace_id="${workspaceId}",\n` +
+    `  status="succeeded" | "failed",\n` +
+    `  summary="<what you did and the outcome, or why it failed>"\n` +
+    `)\n` +
+    '```\n\n' +
+    `- Nothing auto-retries and nothing else is waiting on this run — the call only records the outcome so \`status\` stops showing \`running\` once you're done.\n` +
+    `- Do this exactly once. A second call on the same run is ignored (the outcome is already recorded).`
+  );
+}
+
 export interface DispatchActionArgs {
   actionId: string;
   // 'user' = web UI clicked Run; 'system' = scheduler; 'agent' = MCP-authenticated
@@ -119,8 +147,11 @@ export interface DispatchActionArgs {
   // because it hit an Action-resolvable blocker instead of parking. Persisted
   // on the ActionRun so `completeRun` can re-dispatch it once the run finishes.
   // Undefined for cron / manual / on-ticket-done runs that have nothing to
-  // resume. When set, a completion contract is appended to the rendered prompt
-  // so the target agent reports its outcome via `complete_action_run`.
+  // resume. A completion contract is appended to the rendered prompt either
+  // way (ticket b273d603) so `status` can never get stuck at 'running': the
+  // resume/retry variant when set, a standalone variant (no resume/retry
+  // language) when unset — see `renderCompletionContract` /
+  // `renderStandaloneCompletionContract`.
   sourceTicketId?: string;
   // 1-based attempt number. `completeRun`'s retry path re-dispatches with
   // attempt+1; the default 1 covers the first, agent-initiated dispatch.
@@ -1052,19 +1083,23 @@ export class ActionsService {
 
     const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
     const withLanguage = prependBoardLanguageInstruction(renderedPrompt, board?.language);
-    // When a ticket dispatched this run, append the completion contract so the
-    // target agent reports its outcome via `complete_action_run` — that call is
-    // what re-dispatches (resumes) the source ticket. Server-injected (not left
-    // to the Action author) so every ticket-driven run closes the loop reliably.
+    // Every run gets a completion contract appended so the target agent reports
+    // its outcome via `complete_action_run` — without this, `status` never
+    // leaves 'running' no matter how the run actually ended (ticket b273d603).
+    // A ticket-driven run gets the resume/retry variant (that call is what
+    // re-dispatches the source ticket); a run with no source ticket (human UI
+    // trigger / cron / on-ticket-done) gets the standalone variant instead —
+    // it has nothing to resume or retry, but its status still needs to settle.
     // Mint a run-level idempotency key on the first dispatch; retries pass the
     // failed run's key so the whole chain shares one (scope 5). Only ticket-
-    // driven runs get a key — cron/manual runs have nothing to resume or dedupe.
+    // driven runs get a key — cron/manual runs never retry, so there is
+    // nothing to dedupe against.
     const idempotencyKey = sourceTicketId
       ? (args.idempotencyKey || '').trim() || randomUUID()
       : '';
     const rendered = sourceTicketId
       ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, highImpact)}`
-      : withLanguage;
+      : `${withLanguage}${renderStandaloneCompletionContract(runId, action.workspace_id)}`;
 
     // Create the room. We use 'group' as the underlying type so the chat
     // controller's existing rules (rename, multi-participant, etc.) apply.
@@ -1091,6 +1126,11 @@ export class ActionsService {
       prompt_rendered: rendered,
       source_ticket_id: sourceTicketId,
       idempotency_key: idempotencyKey,
+      // 위 `rendered`는 항상 완료 계약을 덧붙이므로(티켓 b273d603)
+      // sourceTicketId가 있을 때만이 아니라 무조건 true로 세팅한다.
+      // ActionRunReaperService의 후보 쿼리(티켓 2fa5312b)가 이 값을 읽어
+      // source_ticket_id 없는 run도 스윕 범위에 들인다.
+      completion_contract_injected: true,
       // Approval evidence for a high-impact run (scope 5). Empty/null unless the
       // approval gate above authorized it via a real admin approver.
       approved_by: approval?.userId || '',

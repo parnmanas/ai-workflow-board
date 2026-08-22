@@ -1,0 +1,762 @@
+// 티켓 b2e79108 — Codex/Claude CLI device-auth 자동 로그인.
+//
+// 이 파일은 세 계층을 검증한다:
+//   1. CliLoginSessionService — 순수 로직(소유권 검증, 상태 전이, credential
+//      암호화 생성, 토큰 원문이 절대 응답/세션 오브젝트에 실리지 않음).
+//   2. CliLoginAgentController — 매니저→서버 progress 엔드포인트의 자체 검증
+//      (currentAgentId 없음/잘못된 status)과 서비스 위임.
+//   3. 실제 AppModule을 부팅한 라우팅 스모크 테스트 — CredentialsModule이
+//      AgentManagerModule을 정말로 import해서 DI가 깨지지 않았는지, 그리고
+//      cli_login_start 가 진짜 agent_manager_command SSE로 나가는지 확인한다.
+import 'reflect-metadata';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+process.env.ENCRYPTION_KEY = `test-encryption-key-${randomUUID()}`;
+
+const { CliLoginSessionService } = await import('../dist/modules/credentials/cli-login-session.service.js');
+const { CliLoginAgentController } = await import('../dist/modules/credentials/cli-login-agent.controller.js');
+const { TERMINAL_CLI_LOGIN_SESSION_STATUSES } = await import('../dist/entities/CliLoginSession.js');
+
+// ─── stubs ──────────────────────────────────────────────────────────────
+
+function sessionRepoStub() {
+  const rows = new Map();
+  let seq = 0;
+  return {
+    create(partial) {
+      return { id: `session-${++seq}`, ...partial };
+    },
+    save: async (row) => {
+      rows.set(row.id, row);
+      return row;
+    },
+    findOne: async ({ where }) => rows.get(where.id) || null,
+    // reapStale()'s createQueryBuilder chain — the test seeds `rows` with
+    // exactly the sessions it wants swept, so the stub just returns
+    // everything currently stored rather than interpreting the SQL predicate.
+    createQueryBuilder() {
+      const qb = {
+        where: () => qb,
+        andWhere: () => qb,
+        getMany: async () => Array.from(rows.values()),
+      };
+      return qb;
+    },
+    rows,
+  };
+}
+
+function credRepoStub() {
+  const saved = [];
+  let seq = 0;
+  return {
+    create(partial) {
+      return { id: `cred-${++seq}`, ...partial };
+    },
+    save: async (row) => {
+      saved.push(row);
+      return row;
+    },
+    saved,
+  };
+}
+
+function commandServiceStub(issueImpl) {
+  const calls = [];
+  return {
+    issue: async (inst, command, args, issuedBy) => {
+      calls.push({ inst, command, args, issuedBy });
+      if (issueImpl) return issueImpl(inst, command, args, issuedBy);
+      return { command_id: 'cmd-xyz', issued_at: new Date().toISOString() };
+    },
+    calls,
+  };
+}
+
+function instanceRegistryStub(instances) {
+  return { list: () => instances };
+}
+
+function logServiceStub() {
+  return { warn() {}, error() {}, info() {}, debug() {} };
+}
+
+function liveInstance(overrides = {}) {
+  return {
+    // 이 워크스페이스는 이 파일의 나머지 테스트가 두루 쓰는 workspaceId:'w1'
+    // 과 일치해야 한다 — startSession의 workspace-visibility 검증(리뷰
+    // 지적 round 1)이 서로 다른 값이면 403으로 막기 때문.
+    instance_id: 'inst-1',
+    agent_id: 'manager-agent-1',
+    workspace_id: 'w1',
+    mode: 'manager',
+    hostname: 'host-1',
+    ...overrides,
+  };
+}
+
+function service({ instances = [liveInstance()], issueImpl, sessions, creds } = {}) {
+  const sessionRepo = sessions || sessionRepoStub();
+  const credRepo = creds || credRepoStub();
+  const commandService = commandServiceStub(issueImpl);
+  const instanceRegistry = instanceRegistryStub(instances);
+  const logService = logServiceStub();
+  return {
+    instance: new CliLoginSessionService(sessionRepo, credRepo, commandService, instanceRegistry, logService),
+    sessionRepo,
+    credRepo,
+    commandService,
+  };
+}
+
+// ─── CliLoginSessionService.startSession ───────────────────────────────
+
+test('startSession rejects an unsupported cli before touching the registry/command service', async () => {
+  const { instance, commandService } = service();
+  await assert.rejects(
+    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'gemini', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    /Unsupported cli "gemini"/,
+  );
+  assert.equal(commandService.calls.length, 0);
+});
+
+// ticket 06b2b990 — claude는 이제 codex와 나란히 자동화된다.
+test('startSession happy path for claude: creates a starting session, issues cli_login_start with cli=claude', async () => {
+  const { instance, commandService, sessionRepo } = service();
+  const session = await instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+
+  assert.equal(session.status, 'starting');
+  assert.equal(commandService.calls.length, 1);
+  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'claude' });
+  assert.equal(sessionRepo.rows.get(session.id).command_id, 'cmd-xyz');
+});
+
+test('startSession rejects a missing credential name', async () => {
+  const { instance } = service();
+  await assert.rejects(
+    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: '  ', instanceId: 'inst-1', triggeredById: 'u1' }),
+    /credential_name is required/,
+  );
+});
+
+test('startSession rejects when no live manager instance matches instanceId', async () => {
+  const { instance } = service({ instances: [] });
+  await assert.rejects(
+    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'Codex', instanceId: 'inst-missing', triggeredById: 'u1' }),
+    /not currently online/,
+  );
+});
+
+test('startSession happy path: creates a starting session, issues cli_login_start, stamps the returned command_id', async () => {
+  const { instance, commandService, sessionRepo } = service();
+  const session = await instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'codex',
+    credentialName: 'My Codex',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+
+  assert.equal(session.status, 'starting');
+  assert.equal(session.instance_id, 'inst-1');
+  assert.equal(session.manager_agent_id, 'manager-agent-1');
+  assert.equal(session.command_id, 'cmd-xyz');
+  assert.ok(session.started_at);
+
+  assert.equal(commandService.calls.length, 1);
+  assert.equal(commandService.calls[0].command, 'cli_login_start');
+  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'codex' });
+  assert.equal(commandService.calls[0].issuedBy, 'user-1');
+
+  // Persisted row must carry the same command_id (not just the return value).
+  assert.equal(sessionRepo.rows.get(session.id).command_id, 'cmd-xyz');
+});
+
+// 리뷰 지적(round 1): instance_id는 클라이언트가 직접 제출하는 값이라,
+// 그 instance가 실제로 요청 workspace에 속하는지 서버가 검증하지 않으면
+// 다른 workspace의 instance_id를 그대로 넣어 명령을 보낼 수 있었다.
+test('review-fix: startSession rejects a workspace-scoped request whose instance belongs to a DIFFERENT workspace', async () => {
+  const { instance, commandService } = service({ instances: [liveInstance({ workspace_id: 'other-workspace' })] });
+  await assert.rejects(
+    () => instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' }),
+    (err) => err.status === 403 && /not available in this workspace/.test(err.message),
+  );
+  assert.equal(commandService.calls.length, 0, 'must reject before ever issuing the command');
+});
+
+test('review-fix: startSession allows a workspace-scoped request against a GLOBAL (workspace_id=null) instance', async () => {
+  const { instance } = service({ instances: [liveInstance({ workspace_id: null })] });
+  const session = await instance.startSession({ workspaceId: 'w1', isGlobal: false, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'u1' });
+  assert.equal(session.status, 'starting');
+});
+
+test('review-fix: startSession for a GLOBAL session may target an instance from ANY workspace (matches listCliLoginInstances\' own no-workspace-filter behavior for global admins)', async () => {
+  const { instance } = service({ instances: [liveInstance({ workspace_id: 'some-other-workspace' })] });
+  const session = await instance.startSession({ workspaceId: '', isGlobal: true, cli: 'codex', credentialName: 'x', instanceId: 'inst-1', triggeredById: 'admin-1' });
+  assert.equal(session.status, 'starting');
+  assert.equal(session.is_global, true);
+});
+
+// ─── CliLoginSessionService.applyProgress ──────────────────────────────
+
+async function seededStarting(overrides = {}) {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'codex',
+    credentialName: 'My Codex',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+  Object.assign(session, overrides);
+  await s.sessionRepo.save(session);
+  return { ...s, session };
+}
+
+test('applyProgress: unknown session id is a 404', async () => {
+  const { instance } = service();
+  await assert.rejects(
+    () => instance.applyProgress({ sessionId: 'nope', callerAgentId: 'manager-agent-1', commandId: 'cmd-xyz', status: 'awaiting_user' }),
+    (err) => err.status === 404,
+  );
+});
+
+test('applyProgress: caller must be the manager that owns the session (ownership check)', async () => {
+  const { instance, session } = await seededStarting();
+  await assert.rejects(
+    () => instance.applyProgress({ sessionId: session.id, callerAgentId: 'some-other-manager', commandId: session.command_id, status: 'awaiting_user' }),
+    (err) => err.status === 403,
+  );
+});
+
+test('applyProgress: a mismatched command_id is rejected as stale/superseded', async () => {
+  const { instance, session } = await seededStarting();
+  await assert.rejects(
+    () => instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: 'some-other-command', status: 'awaiting_user' }),
+    (err) => err.status === 409,
+  );
+});
+
+// 리뷰 지적(round 1): command_id를 아예 안 보내면 이 검증 자체가 건너뛰어져
+// 우회할 수 있었다 — 이제 항상 비어있지 않아야 한다.
+test('review-fix: applyProgress rejects an EMPTY command_id even though ownership is otherwise valid', async () => {
+  const { instance, session } = await seededStarting();
+  await assert.rejects(
+    () => instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: '', status: 'awaiting_user', userCode: 'X' }),
+    (err) => err.status === 409 && /command_id is required/.test(err.message),
+  );
+});
+
+// startSession의 2단계 저장(세션 생성 → command 발행 → command_id 되저장)
+// 사이의 극히 짧은 경합 창을 위한 관용 — session.command_id가 아직 비어
+// 있으면 최초 보고를 신뢰한다(소유권 검증은 별개로 여전히 fail-closed).
+test('review-fix: applyProgress accepts the first non-empty command_id when the session does not have one recorded yet', async () => {
+  const { instance, session } = await seededStarting({ command_id: '' });
+  const result = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: 'first-ever-command',
+    status: 'awaiting_user',
+    userCode: 'X',
+  });
+  assert.equal(result.status, 'awaiting_user');
+});
+
+test('applyProgress: awaiting_user records the verification url + code', async () => {
+  const { instance, session } = await seededStarting();
+  const updated = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    verificationUrl: 'https://auth.openai.com/codex/device',
+    userCode: 'ABCD-1234',
+  });
+  assert.equal(updated.status, 'awaiting_user');
+  assert.equal(updated.verification_url, 'https://auth.openai.com/codex/device');
+  assert.equal(updated.user_code, 'ABCD-1234');
+});
+
+// 리뷰 지적(round 1): 티켓이 명시한 파싱 실패 폴백 — url/code를 못 찾았을
+// 때 raw 출력을 보여줄 수 있어야 한다.
+test('review-fix: applyProgress stores raw_output_fallback when url/code were not found', async () => {
+  const { instance, session } = await seededStarting();
+  const updated = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    rawOutputFallback: 'Please continue in your browser to finish signing in.',
+  });
+  assert.equal(updated.status, 'awaiting_user');
+  assert.ok(!updated.verification_url, 'no url was ever parsed, so it must stay unset');
+  assert.equal(updated.raw_output_fallback, 'Please continue in your browser to finish signing in.');
+});
+
+test('review-fix: a later real url/code report clears any previously-stored raw_output_fallback', async () => {
+  const { instance, session } = await seededStarting();
+  await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    rawOutputFallback: 'unparsed output',
+  });
+  const updated = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    verificationUrl: 'https://auth.openai.com/codex/device',
+    userCode: 'ABCD-1234',
+  });
+  assert.equal(updated.verification_url, 'https://auth.openai.com/codex/device');
+  assert.equal(updated.raw_output_fallback, null, 'the fallback text must be cleared once a real parse supersedes it');
+});
+
+test('review-fix: applyProgress caps an oversized raw_output_fallback server-side (defense in depth against a buggy/malicious manager)', async () => {
+  const { instance, session } = await seededStarting();
+  const huge = 'x'.repeat(10_000);
+  const updated = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    rawOutputFallback: huge,
+  });
+  assert.ok(updated.raw_output_fallback.length <= 4000);
+});
+
+for (const status of TERMINAL_CLI_LOGIN_SESSION_STATUSES) {
+  test(`applyProgress: a report for an already-terminal session (${status}) is an idempotent no-op, not an error`, async () => {
+    const { instance, session } = await seededStarting({ status, finished_at: new Date() });
+    const result = await instance.applyProgress({
+      sessionId: session.id,
+      callerAgentId: 'manager-agent-1',
+      commandId: session.command_id,
+      status: 'awaiting_user',
+      userCode: 'late-duplicate',
+    });
+    assert.equal(result.status, status, 'terminal status must not be overwritten by a late/duplicate report');
+    assert.notEqual(result.user_code, 'late-duplicate');
+  });
+}
+
+test('applyProgress: succeeded requires credential_fields.auth_json', async () => {
+  const { instance, session } = await seededStarting();
+  await assert.rejects(
+    () => instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: session.command_id, status: 'succeeded', credentialFields: {} }),
+    (err) => err.status === 400 && /auth_json/.test(err.message),
+  );
+});
+
+test('applyProgress: succeeded encrypts + stores a codex_subscription credential and never echoes the raw secret back', async () => {
+  const { instance, session, credRepo } = await seededStarting();
+  const SECRET = `sk-test-secret-${randomUUID()}`;
+  const updated = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'succeeded',
+    credentialFields: { auth_json: JSON.stringify({ access_token: SECRET }) },
+  });
+
+  assert.equal(updated.status, 'succeeded');
+  assert.ok(updated.created_credential_id);
+  assert.equal(credRepo.saved.length, 1);
+  assert.equal(credRepo.saved[0].provider, 'codex_subscription');
+  assert.equal(credRepo.saved[0].workspace_id, 'w1');
+  assert.notEqual(credRepo.saved[0].encrypted_data, JSON.stringify({ auth_json: JSON.stringify({ access_token: SECRET }) }));
+  assert.match(credRepo.saved[0].encrypted_data, /^enc:/);
+
+  // The session object returned to the (eventual) HTTP caller must never
+  // carry the raw token — only the created credential's id.
+  assert.doesNotMatch(JSON.stringify(updated), new RegExp(SECRET));
+});
+
+// ticket 06b2b990 — claude_subscription 경로도 codex_subscription과 동일한
+// 계약(필수 필드 검증, 암호화, 원문 미노출)을 따르는지 확인.
+test('applyProgress: succeeded requires credential_fields.credentials_json for a claude session', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+  await assert.rejects(
+    () => s.instance.applyProgress({ sessionId: session.id, callerAgentId: 'manager-agent-1', commandId: session.command_id, status: 'succeeded', credentialFields: {} }),
+    (err) => err.status === 400 && /credentials_json/.test(err.message),
+  );
+});
+
+test('applyProgress: succeeded encrypts + stores a claude_subscription credential and never echoes the raw secret back', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1',
+    isGlobal: false,
+    cli: 'claude',
+    credentialName: 'My Claude',
+    instanceId: 'inst-1',
+    triggeredById: 'user-1',
+  });
+  const SECRET = `claude-secret-${randomUUID()}`;
+  const updated = await s.instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'succeeded',
+    credentialFields: { credentials_json: JSON.stringify({ claudeAiOauth: { accessToken: SECRET } }) },
+  });
+
+  assert.equal(updated.status, 'succeeded');
+  assert.ok(updated.created_credential_id);
+  assert.equal(s.credRepo.saved.length, 1);
+  assert.equal(s.credRepo.saved[0].provider, 'claude_subscription');
+  assert.match(s.credRepo.saved[0].encrypted_data, /^enc:/);
+  assert.doesNotMatch(JSON.stringify(updated), new RegExp(SECRET));
+});
+
+test('applyProgress: succeeded on a GLOBAL session creates a workspace_id=null credential', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: '',
+    isGlobal: true,
+    cli: 'codex',
+    credentialName: 'Global Codex',
+    instanceId: 'inst-1',
+    triggeredById: 'admin-1',
+  });
+  await s.instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'succeeded',
+    credentialFields: { auth_json: '{}' },
+  });
+  assert.equal(s.credRepo.saved[0].workspace_id, null);
+});
+
+for (const status of ['failed', 'timed_out', 'cancelled']) {
+  test(`applyProgress: manager-reported ${status} sets status + error_detail + finished_at`, async () => {
+    const { instance, session } = await seededStarting();
+    const updated = await instance.applyProgress({
+      sessionId: session.id,
+      callerAgentId: 'manager-agent-1',
+      commandId: session.command_id,
+      status,
+      errorDetail: `boom-${status}`,
+    });
+    assert.equal(updated.status, status);
+    assert.equal(updated.error_detail, `boom-${status}`);
+    assert.ok(updated.finished_at);
+  });
+}
+
+// ─── CliLoginSessionService.cancelSession ──────────────────────────────
+
+test('cancelSession is idempotent once a session is already terminal', async () => {
+  const { instance, session } = await seededStarting({ status: 'succeeded', finished_at: new Date() });
+  const result = await instance.cancelSession(session.id, 'w1');
+  assert.equal(result.status, 'succeeded');
+});
+
+test('cancelSession dispatches cli_login_cancel best-effort and marks the session cancelled even if dispatch fails', async () => {
+  const { instance, session, commandService } = await seededStarting();
+  commandService.issue = async () => {
+    throw new Error('manager offline');
+  };
+  const result = await instance.cancelSession(session.id, 'w1');
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.error_detail, 'Cancelled by user');
+});
+
+// ─── CliLoginSessionService.reapStale ──────────────────────────────────
+
+test('reapStale marks every non-terminal session it is handed as timed_out', async () => {
+  const sessionRepo = sessionRepoStub();
+  const old = sessionRepo.create({
+    workspace_id: 'w1',
+    is_global: false,
+    cli: 'codex',
+    credential_name: 'x',
+    status: 'awaiting_user',
+    manager_agent_id: 'manager-agent-1',
+    instance_id: 'inst-1',
+    triggered_by_id: 'u1',
+    command_id: 'c1',
+  });
+  await sessionRepo.save(old);
+  const s = service({ sessions: sessionRepo });
+  const reaped = await s.instance.reapStale(1000);
+  assert.equal(reaped, 1);
+  assert.equal(sessionRepo.rows.get(old.id).status, 'timed_out');
+  assert.match(sessionRepo.rows.get(old.id).error_detail, /auto-reaped/);
+});
+
+// ─── CliLoginAgentController ───────────────────────────────────────────
+
+function response() {
+  return {
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+}
+
+test('CliLoginAgentController.progress: no currentAgentId on the request → 401', async () => {
+  const controller = new CliLoginAgentController({ applyProgress: async () => ({}) });
+  const res = response();
+  await controller.progress('session-1', { status: 'awaiting_user' }, {}, res);
+  assert.equal(res.statusCode, 401);
+});
+
+test('CliLoginAgentController.progress: an invalid status is rejected before calling the service', async () => {
+  let called = false;
+  const controller = new CliLoginAgentController({ applyProgress: async () => { called = true; } });
+  const res = response();
+  await controller.progress('session-1', { status: 'bogus' }, { currentAgentId: 'manager-1' }, res);
+  assert.equal(res.statusCode, 400);
+  assert.equal(called, false);
+});
+
+test('CliLoginAgentController.progress: delegates to the service and returns metadata only (no credential_fields echo)', async () => {
+  const calls = [];
+  const controller = new CliLoginAgentController({
+    applyProgress: async (args) => {
+      calls.push(args);
+      return { id: 'session-1', status: 'succeeded' };
+    },
+  });
+  const res = response();
+  await controller.progress(
+    'session-1',
+    { status: 'succeeded', command_id: 'cmd-1', credential_fields: { auth_json: 'SECRET-XYZ' } },
+    { currentAgentId: 'manager-1' },
+    res,
+  );
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { ok: true, session_id: 'session-1', status: 'succeeded' });
+  assert.doesNotMatch(JSON.stringify(res.body), /SECRET-XYZ/);
+  assert.equal(calls[0].callerAgentId, 'manager-1');
+  assert.equal(calls[0].credentialFields.auth_json, 'SECRET-XYZ');
+});
+
+test('CliLoginAgentController.progress: a service error carrying .status maps to that HTTP status', async () => {
+  const controller = new CliLoginAgentController({
+    applyProgress: async () => {
+      const err = new Error('caller is not the manager that owns this login session');
+      err.status = 403;
+      throw err;
+    },
+  });
+  const res = response();
+  await controller.progress('session-1', { status: 'failed' }, { currentAgentId: 'manager-1' }, res);
+  assert.equal(res.statusCode, 403);
+  assert.match(res.body.error, /not the manager/);
+});
+
+// ─── Routed smoke test — proves the module wiring is real ──────────────
+
+test('routed: POST /api/credentials/cli-login/start dispatches a real agent_manager_command and persists a starting session', async () => {
+  process.env.DB_TYPE = 'sqlite';
+  process.env.NODE_ENV = 'test';
+  process.env.MCP_DEV_MODE = 'true';
+  process.env.AGENT_DEV_MODE = 'true';
+  process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), `awb-cli-login-route-${process.pid}-${randomUUID()}.db`);
+
+  const [
+    { NestFactory },
+    { AppModule },
+    { AuthService },
+    { getDataSourceToken },
+    { InstanceRegistryService },
+    { activityEvents },
+  ] = await Promise.all([
+    import('@nestjs/core'),
+    import('../dist/app.module.js'),
+    import('../dist/services/auth.service.js'),
+    import('@nestjs/typeorm'),
+    import('../dist/modules/agent-manager/instance-registry.service.js'),
+    import('../dist/services/activity.service.js'),
+  ]);
+  const app = await NestFactory.create(AppModule, { logger: false });
+
+  try {
+    await app.listen(0, '127.0.0.1');
+    const port = app.getHttpServer().address().port;
+    const auth = app.get(AuthService);
+    const dataSource = app.get(getDataSourceToken());
+    const userRepo = dataSource.getRepository('User');
+    const workspaceRepo = dataSource.getRepository('Workspace');
+
+    const admin = await userRepo.save(userRepo.create({
+      name: 'Login Admin',
+      email: `login-admin-${randomUUID()}@example.test`,
+      role: 'admin',
+      status: 'active',
+      password_hash: await auth.hashPassword('admin-password'),
+    }));
+    const nonAdmin = await userRepo.save(userRepo.create({
+      name: 'Login User',
+      email: `login-user-${randomUUID()}@example.test`,
+      role: 'user',
+      status: 'active',
+      permissions: JSON.stringify(['admin.credentials']),
+      password_hash: await auth.hashPassword('user-password'),
+    }));
+    const workspace = await workspaceRepo.save(workspaceRepo.create({ name: 'Login Workspace' }));
+
+    const registry = app.get(InstanceRegistryService);
+    const instanceId = `inst-${randomUUID()}`;
+    const managerAgentId = `agent-${randomUUID()}`;
+    registry.upsert({
+      instance_id: instanceId,
+      agent_id: managerAgentId,
+      workspace_id: workspace.id,
+      mode: 'manager',
+      hostname: 'test-host',
+      plugin_version: '1.0.0',
+      cli: 'claude',
+      cli_adapters: ['codex'],
+      pid: 12345,
+      started_at: new Date().toISOString(),
+      runtime_capabilities: {
+        codex: { installed: true, healthy: true, version: '0.147.0', reason: null, capabilities: {} },
+        claude: { installed: true, healthy: true, version: '2.1.238', reason: null, capabilities: {} },
+      },
+    });
+
+    const adminToken = auth.createSession(admin.id);
+    const nonAdminToken = auth.createSession(nonAdmin.id);
+    const baseUrl = `http://127.0.0.1:${port}/api/credentials`;
+
+    // The instance picker route surfaces the fake manager with its
+    // capability report.
+    const instancesRes = await fetch(`${baseUrl}/cli-login/instances?workspace_id=${workspace.id}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const instancesBody = await instancesRes.json();
+    assert.equal(instancesRes.status, 200);
+    const found = instancesBody.find((i) => i.instance_id === instanceId);
+    assert.ok(found, 'freshly-upserted manager instance must appear in the picker list');
+    assert.equal(found.codex_installed, true);
+    assert.equal(found.codex_healthy, true);
+    // ticket 06b2b990 — the picker surfaces claude capability the same way.
+    assert.equal(found.claude_installed, true);
+    assert.equal(found.claude_healthy, true);
+
+    // Global scope requires MANAGE_GLOBAL_CREDENTIALS — same gate as
+    // POST /api/credentials (완료 기준: "credential 생성 권한과 동일 게이트").
+    const deniedGlobal = await fetch(`${baseUrl}/cli-login/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${nonAdminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'global', cli: 'codex', credential_name: 'x', instance_id: instanceId }),
+    });
+    assert.equal(deniedGlobal.status, 403);
+
+    // Unknown instance_id → 404, not a 500/silent success.
+    const missingInstance = await fetch(`${baseUrl}/cli-login/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace_id: workspace.id, cli: 'codex', credential_name: 'x', instance_id: 'does-not-exist' }),
+    });
+    assert.equal(missingInstance.status, 404);
+
+    let capturedCommand = null;
+    activityEvents.once('agent_manager_command', (payload) => {
+      capturedCommand = payload;
+    });
+
+    const started = await fetch(`${baseUrl}/cli-login/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace_id: workspace.id, cli: 'codex', credential_name: 'My Codex', instance_id: instanceId }),
+    });
+    const startedBody = await started.json();
+    assert.equal(started.status, 201);
+    assert.equal(startedBody.status, 'starting');
+    assert.equal(startedBody.cli, 'codex');
+
+    assert.ok(capturedCommand, 'starting a login must emit a real agent_manager_command over the shared activityEvents bus');
+    assert.equal(capturedCommand.command, 'cli_login_start');
+    assert.equal(capturedCommand.agent_id, managerAgentId);
+    assert.equal(capturedCommand.args.session_id, startedBody.id);
+    assert.equal(capturedCommand.args.cli, 'codex');
+
+    // GET reflects the same session back to the same workspace.
+    const fetched = await fetch(`${baseUrl}/cli-login/${startedBody.id}?workspace_id=${workspace.id}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const fetchedBody = await fetched.json();
+    assert.equal(fetched.status, 200);
+    assert.equal(fetchedBody.id, startedBody.id);
+    assert.equal(fetchedBody.status, 'starting');
+
+    // 리뷰 지적(round 1): listCliLoginInstances를 workspace_id 없이 부르면
+    // "전역" 조회이므로 credential 생성과 동일한 게이트가 필요하다.
+    const globalInstancesDenied = await fetch(`${baseUrl}/cli-login/instances`, {
+      headers: { Authorization: `Bearer ${nonAdminToken}` },
+    });
+    assert.equal(globalInstancesDenied.status, 403);
+    const globalInstancesAllowed = await fetch(`${baseUrl}/cli-login/instances`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(globalInstancesAllowed.status, 200);
+    const globalInstancesBody = await globalInstancesAllowed.json();
+    assert.ok(globalInstancesBody.some((i) => i.instance_id === instanceId));
+
+    // 리뷰 지적(round 1): 전역 세션의 조회/취소도 생성과 동일한 게이트가
+    // 필요하다 — workspace 스코프 권한만으로 다른 workspace를 위해 만든
+    // 전역 세션을 열람/취소할 수 있으면 안 된다.
+    const globalStarted = await fetch(`${baseUrl}/cli-login/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: 'global', cli: 'codex', credential_name: 'Global Codex', instance_id: instanceId }),
+    });
+    assert.equal(globalStarted.status, 201);
+    const globalSession = await globalStarted.json();
+    assert.equal(globalSession.is_global, true);
+
+    const globalGetDenied = await fetch(`${baseUrl}/cli-login/${globalSession.id}`, {
+      headers: { Authorization: `Bearer ${nonAdminToken}` },
+    });
+    assert.equal(globalGetDenied.status, 403);
+    const globalGetAllowed = await fetch(`${baseUrl}/cli-login/${globalSession.id}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(globalGetAllowed.status, 200);
+
+    const globalCancelDenied = await fetch(`${baseUrl}/cli-login/${globalSession.id}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${nonAdminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(globalCancelDenied.status, 403);
+    const globalCancelAllowed = await fetch(`${baseUrl}/cli-login/${globalSession.id}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(globalCancelAllowed.status, 200);
+    const globalCancelledBody = await globalCancelAllowed.json();
+    assert.equal(globalCancelledBody.status, 'cancelled');
+  } finally {
+    await app.close();
+  }
+});

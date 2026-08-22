@@ -24,6 +24,8 @@ import type {
   SecurityScheduleScope,
   SecurityScheduleKind,
   Credential,
+  CliLoginInstanceOption,
+  CliLoginSession,
   ChatMessage,
   ChatThread,
   DashboardAgent,
@@ -1557,6 +1559,33 @@ export const api = {
     const qs = params.toString();
     return request<{ success: true; id: string }>(`/credentials/${id}${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
   },
+
+  // 티켓 b2e79108 — CLI 자동 로그인(device-auth). 터미널·파일 업로드 없이
+  // Codex 로그인 세션을 시작하고 진행 상태를 폴링/SSE로 추적한다.
+  listCliLoginInstances: (workspaceId?: string) => {
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    const qs = params.toString();
+    return request<CliLoginInstanceOption[]>(`/credentials/cli-login/instances${qs ? `?${qs}` : ''}`);
+  },
+  startCliLogin: (data: {
+    workspace_id?: string;
+    scope?: 'global' | 'workspace';
+    cli: string;
+    credential_name: string;
+    instance_id: string;
+  }) => request<CliLoginSession>('/credentials/cli-login/start', { method: 'POST', body: JSON.stringify(data) }),
+  getCliLoginSession: (sessionId: string, workspaceId?: string) => {
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    const qs = params.toString();
+    return request<CliLoginSession>(`/credentials/cli-login/${sessionId}${qs ? `?${qs}` : ''}`);
+  },
+  cancelCliLogin: (sessionId: string, workspaceId?: string) =>
+    request<CliLoginSession>(`/credentials/cli-login/${sessionId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
 
   // ─── Chat (Phase 2) ────────────────────────────────────
   // Workspace context is read from the per-tab active workspace (see

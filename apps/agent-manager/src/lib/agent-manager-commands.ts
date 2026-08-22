@@ -68,6 +68,7 @@ import {
 } from './managed-agent-store.js';
 import { createAdapter } from './cli-adapters/index.js';
 import { runSelfUpdate, restartManager } from './self-update.js';
+import type { CliLoginManager } from './cli-login.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -83,7 +84,12 @@ type CommandKind =
   // ticket 6ff827cb — issued by the keep_chat_session_alive MCP tool, not an
   // admin action. args: { agent_id, room_id, minutes?, reason? }.
   | 'extend_chat_keepalive'
-  | 'release_chat_keepalive';
+  | 'release_chat_keepalive'
+  // ticket b2e79108 — Codex CLI device-auth 자동 로그인. args:
+  // { session_id, cli }. #startCliLogin은 프로세스 spawn 확인 즉시 ack하고,
+  // 실제 진행/완료는 CliLoginManager가 postCliLoginProgress로 별도 릴레이한다.
+  | 'cli_login_start'
+  | 'cli_login_cancel';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -116,6 +122,8 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'restart_manager',
   'extend_chat_keepalive',
   'release_chat_keepalive',
+  'cli_login_start',
+  'cli_login_cancel',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -174,6 +182,12 @@ export interface CommandHandlerDeps {
    * Returns a Promise that resolves once the SSE stream is re-established,
    * so spawn_agent can await it before acking. */
   requestStreamReconnect?: () => Promise<void> | void;
+  /** ticket b2e79108 — runs codex login --device-auth in an isolated
+   *  CODEX_HOME and relays progress/completion over its own REST channel
+   *  (see cli-login.ts). Optional so the legacy test harness (deps without
+   *  a login manager) keeps wiring up; #startCliLogin throws a clear error
+   *  if a cli_login_start arrives with none wired. */
+  cliLoginManager?: Pick<CliLoginManager, 'isBusy' | 'start' | 'cancel'> | null;
 }
 
 export class AgentManagerCommandHandler {
@@ -254,6 +268,10 @@ export class AgentManagerCommandHandler {
         return this.#applyChatKeepalive(payload, 'extend');
       case 'release_chat_keepalive':
         return this.#applyChatKeepalive(payload, 'release');
+      case 'cli_login_start':
+        return this.#startCliLogin(payload);
+      case 'cli_login_cancel':
+        return this.#cancelCliLogin(payload);
     }
   }
 
@@ -821,6 +839,45 @@ export class AgentManagerCommandHandler {
       ? `release_chat_keepalive ok: agent=${agentId.slice(0, 8)} room=${roomId.slice(0, 8)}`
       : `extend_chat_keepalive ok: agent=${agentId.slice(0, 8)} room=${roomId.slice(0, 8)} ` +
           `until=${result.until ? new Date(result.until).toISOString() : '-'}`;
+  }
+
+  /**
+   * ticket b2e79108 — kick off `codex login --device-auth` in an isolated
+   * CODEX_HOME. Only confirms the process spawned (CliLoginManager.start
+   * resolves as soon as it sees the child's 'spawn' event, not on
+   * completion) — command/ack's ledger 410s anything past 10 minutes and a
+   * human completing the browser approval can easily take longer than that.
+   * All subsequent state (awaiting_user url/code, succeeded/failed/
+   * timed_out/cancelled) is relayed by CliLoginManager itself via
+   * postCliLoginProgress, a separate REST channel with no ack-TTL tied to
+   * this dispatch.
+   */
+  async #startCliLogin(payload: AgentManagerCommandPayload): Promise<string> {
+    const sessionId = String(payload.args?.session_id || '').trim();
+    if (!sessionId) throw new Error('cli_login_start: args.session_id is required');
+    const cli = String(payload.args?.cli || '').trim().toLowerCase();
+    if (!cli) throw new Error('cli_login_start: args.cli is required');
+    if (!this.#deps.cliLoginManager) {
+      throw new Error('cli_login_start: no cli-login manager wired on this deployment');
+    }
+    await this.#deps.cliLoginManager.start({ sessionId, commandId: payload.command_id, cli });
+    return `cli_login_start ok: session=${sessionId.slice(0, 8)} cli=${cli} process spawned, awaiting user`;
+  }
+
+  /**
+   * Best-effort — server dispatches this when a user cancels from the UI.
+   * If the manager has no memory of the session (already finished, or a
+   * stray dispatch for a session another manager instance owns), this is a
+   * harmless no-op rather than an error: the server already marks the
+   * session cancelled regardless of whether this reaches the right process.
+   */
+  async #cancelCliLogin(payload: AgentManagerCommandPayload): Promise<string> {
+    const sessionId = String(payload.args?.session_id || '').trim();
+    if (!sessionId) throw new Error('cli_login_cancel: args.session_id is required');
+    const cancelled = (await this.#deps.cliLoginManager?.cancel(sessionId)) ?? false;
+    return cancelled
+      ? `cli_login_cancel ok: session=${sessionId.slice(0, 8)} cancelled`
+      : `cli_login_cancel: session=${sessionId.slice(0, 8)} not active on this manager (already finished?)`;
   }
 
   async #reloadConfig(): Promise<string> {

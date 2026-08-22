@@ -27,7 +27,7 @@ import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { initDb, AppDataSource, startSqljsAutoFlush } from './db';
+import { initDb, AppDataSource, startSqljsAutoFlush, AppOntologyDataSource, startOntologySqljsAutoFlush } from './db';
 import { preSyncPostgres } from './database/pre-sync-postgres';
 import { createStandaloneContext, type ToolContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
@@ -232,13 +232,18 @@ async function main() {
   const stopSqljsFlush = startSqljsAutoFlush(AppDataSource, {
     onError: (e) => console.error('[MCP] sql.js flush failed:', e),
   });
+  // Ontology Graph 자체 DataSource/flush timer(ticket 6ca4894a) — Postgres/MySQL에서는
+  // no-op(그쪽은 AppOntologyDataSource가 null).
+  const stopOntologySqljsFlush = startOntologySqljsAutoFlush(AppOntologyDataSource, {
+    onError: (e) => console.error('[MCP] ontology sql.js flush failed:', e),
+  });
   let shuttingDown = false;
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.once(sig, async () => {
       if (shuttingDown) return;
       shuttingDown = true;
       try {
-        await stopSqljsFlush();
+        await Promise.all([stopSqljsFlush(), stopOntologySqljsFlush()]);
       } finally {
         process.exit(0);
       }

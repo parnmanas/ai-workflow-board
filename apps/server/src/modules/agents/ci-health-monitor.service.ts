@@ -34,6 +34,10 @@
  * — the "OR" catches a repo with infrequent pushes where only 1-2 red runs
  * exist but a long time has passed. Recovers the instant the newest completed
  * run is green, regardless of how long the preceding streak was.
+ * `event === 'schedule'`인 run, 그리고 event가 빈 문자열(누락)인 run도 동일하게 신호에서
+ * 제외된다(fail-closed) — cron 트리거 run은 대부분의 잡이 skip돼도 run-level conclusion은
+ * success로 찍히고, wire 경로에서 event 필드가 유실되면 그 판별 자체가 불가능해지기
+ * 때문이다(ticket 654465c8, 리뷰 지적).
  *
  * Ticket idempotency: the auto-created ticket carries
  * `operational_dedupe_key = "ci_red:{board_id}:{repo}:{branch}:{workflow_id}"`
@@ -141,7 +145,13 @@ export function evaluateRedStreak(
   now: Date,
   config: { minConsecutiveRuns: number; minAgeMs: number },
 ): RedStreakResult {
-  const signal = (runs || []).filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || ''));
+  // schedule(cron) 트리거 run은 워크플로 대부분의 잡이 `if: ... != 'schedule'`로 skip되지만
+  // run-level conclusion은 그대로 success로 찍힌다 — signal에서 통째로 제외해 잡 5/6 skip인
+  // run이 진짜 복구로도, 스트릭 브레이커로도 오판되지 않게 한다(ticket 654465c8). event가 빈
+  // 문자열(누락)인 run도 같은 이유로 제외한다(fail-closed) — schedule 여부를 확인할 수 없는
+  // run을 신호로 받아들이면, wire 경로에서 event 필드가 유실되는 순간 이 수정 자체가
+  // 조용히 무력화된다(리뷰 지적).
+  const signal = (runs || []).filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || '') && !!r.event && r.event !== 'schedule');
   if (signal.length === 0) {
     return { isRed: false, isGreen: false, streak: 0, firstFailedRun: null, lastRun: null };
   }

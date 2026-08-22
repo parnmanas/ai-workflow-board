@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { setupDom, mount, click, run, React, act } from './helpers/jsdom.mjs';
+import { setupDom, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api } from '../src/api.ts';
-import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
 
 const source = fs.readFileSync(
@@ -82,6 +82,7 @@ async function mountCredentialManager(t) {
   globalThis.sessionStorage = dom.window.sessionStorage;
   dom.window.HTMLElement.prototype.attachEvent = () => {};
   dom.window.HTMLElement.prototype.detachEvent = () => {};
+  const { uninstall } = installFakeEventSource();
   localStorage.setItem('auth_token', 'admin-session');
 
   const originals = {
@@ -102,17 +103,14 @@ async function mountCredentialManager(t) {
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => credentials;
 
-  const view = mount(
-    React.createElement(
-      AuthProvider,
-      null,
-      React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
-    ),
+  const view = mountWithBoardStream(
+    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
   );
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
   t.after(() => {
     view.unmount();
+    uninstall();
     Object.assign(api, originals);
     dom.cleanup();
   });
@@ -126,15 +124,7 @@ function buttonsByText(container, label) {
 function enterRevealPassword(container, password = 'admin-password') {
   const input = container.querySelector('input[autocomplete="current-password"]');
   assert.ok(input);
-  run(() => {
-    const setter = Object.getOwnPropertyDescriptor(domWindowInputPrototype(input), 'value')?.set;
-    setter?.call(input, password);
-    input.dispatchEvent(new window.Event('input', { bubbles: true }));
-  });
-}
-
-function domWindowInputPrototype(input) {
-  return Object.getPrototypeOf(input);
+  typeInto(input, password);
 }
 
 test('Reveal is not offered for non-OAuth credential providers', async (t) => {
@@ -144,6 +134,30 @@ test('Reveal is not offered for non-OAuth credential providers', async (t) => {
     .find((row) => row.textContent?.includes('Non OAuth API Key'));
   assert.ok(nonOAuthRow);
   assert.equal(buttonsByText(nonOAuthRow, 'Reveal').length, 0);
+});
+
+// 티켓 a9e2b1af: enterRevealPassword() 는 기존에 React onChange 를 태우지 못하는 하네스
+// 결함이 있어, 아래 두 테스트를 포함한 이 파일의 인터랙션 테스트들이 "Confirm and Reveal"
+// 클릭 시 revealPassword state 가 빈 문자열이라 api.revealCredential 자체가 호출되지 않는
+// 채로도(CredentialManager.tsx 의 `if (!revealTarget || !revealPassword) return;` 가드에
+// 막혀) 통과해왔다. 타이핑한 값이 실제로 API 호출 인자까지 도달하는지 여기서 직접 잠근다.
+test('타이핑한 reveal 비밀번호가 그대로 api.revealCredential 에 전달된다(하네스 타이핑 결함 회귀 가드)', async (t) => {
+  const { container } = await mountCredentialManager(t);
+  const revealCalls = [];
+  api.revealCredential = (id, password) => {
+    revealCalls.push({ id, password });
+    return new Promise(() => {}); // 이 테스트는 호출 인자만 검증한다 — resolve 는 불필요.
+  };
+
+  click(buttonsByText(container, 'Reveal')[0]);
+  enterRevealPassword(container, 'typed-secret-password');
+  click(buttonsByText(container, 'Confirm and Reveal')[0]);
+
+  assert.deepEqual(
+    revealCalls,
+    [{ id: 'credential-a', password: 'typed-secret-password' }],
+    'enterRevealPassword 로 타이핑한 값이 실제 React state 를 거쳐 API 호출 인자로 전달되어야 한다',
+  );
 });
 
 test('closing while reveal is pending prevents the stale secret from returning', async (t) => {
