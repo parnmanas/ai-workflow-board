@@ -53,6 +53,13 @@ export class CliLoginSession {
   @Column({ type: 'varchar', nullable: true, default: null })
   user_code: string | null;
 
+  // 리뷰 지적(round 1): URL/코드 안내 문구가 바뀌어 구조화 파싱이 실패하면
+  // 매니저가 raw stdout(redact됨, 크기 제한)을 여기에 채운다 — 사용자가
+  // starting 상태에 갇혀 아무것도 못 보는 상황을 막는 폴백. 진짜 url/code가
+  // 나중에라도 파싱되면 그쪽이 우선이고 이 필드는 비워진다.
+  @Column({ type: 'text', nullable: true, default: null })
+  raw_output_fallback: string | null;
+
   @Column({ type: 'text', default: '' })
   error_detail: string;
 

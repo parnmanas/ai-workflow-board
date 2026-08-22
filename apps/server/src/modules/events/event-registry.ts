@@ -1182,6 +1182,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         status: event.status,
         verification_url: event.verification_url ?? null,
         user_code: event.user_code ?? null,
+        raw_output_fallback: event.raw_output_fallback ?? null,
         error_detail: event.error_detail || '',
         created_credential_id: event.created_credential_id ?? null,
       };

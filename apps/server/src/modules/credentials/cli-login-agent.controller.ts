@@ -45,6 +45,7 @@ export class CliLoginAgentController {
         status: status as any,
         verificationUrl: typeof body?.verification_url === 'string' ? body.verification_url : undefined,
         userCode: typeof body?.user_code === 'string' ? body.user_code : undefined,
+        rawOutputFallback: typeof body?.raw_output_fallback === 'string' ? body.raw_output_fallback : undefined,
         errorDetail: typeof body?.error_detail === 'string' ? body.error_detail : undefined,
         credentialFields:
           body?.credential_fields && typeof body.credential_fields === 'object'

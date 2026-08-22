@@ -11,6 +11,7 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -47,9 +48,12 @@ export interface ApplyCliLoginProgressArgs {
   status: 'awaiting_user' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
   verificationUrl?: string;
   userCode?: string;
+  rawOutputFallback?: string;
   errorDetail?: string;
   credentialFields?: Record<string, string>;
 }
+
+const RAW_OUTPUT_FALLBACK_MAX_CHARS = 4000;
 
 /**
  * CLI device-auth 자동 로그인 세션의 시작/진행/완료/취소를 담당. 실제 로그인
@@ -79,6 +83,16 @@ export class CliLoginSessionService {
       .find((i) => i.instance_id === args.instanceId && i.mode === 'manager');
     if (!inst) {
       throw makeError(404, 'That Runtime Host instance is not currently online');
+    }
+    // 리뷰 지적(round 1): instance_id는 클라이언트가 그대로 제출하는 값이라,
+    // 이 검증이 없으면 다른 workspace의 manager instance_id를 직접 넣어
+    // command를 보낼 수 있었다. 전역(is_global) 세션은 자기 자신의
+    // listCliLoginInstances(workspace_id 없음)가 이미 모든 workspace의
+    // 인스턴스를 보여주는 것과 동일하게 어떤 instance든 허용하고, workspace
+    // 세션은 그 instance가 이 workspace에서 실제로 보이는 경우(전역
+    // instance 포함)에만 허용한다.
+    if (!args.isGlobal && !agentIsVisibleInWorkspace(inst.workspace_id, args.workspaceId)) {
+      throw makeError(403, 'That Runtime Host instance is not available in this workspace');
     }
 
     const session = await this.sessionRepo.save(
@@ -158,7 +172,19 @@ export class CliLoginSessionService {
     if (session.manager_agent_id !== args.callerAgentId) {
       throw makeError(403, 'caller is not the manager that owns this login session');
     }
-    if (session.command_id && args.commandId && session.command_id !== args.commandId) {
+    // 리뷰 지적(round 1): args.commandId가 비어 있으면 검사를 통째로
+    // 건너뛰던 버그 — 호출자가 command_id를 아예 안 보내는 방식으로 이
+    // 검증을 우회할 수 있었다. 이제 항상 비어있지 않아야 한다. session
+    // 쪽 command_id가 아직 비어 있는 경우(startSession의 2단계 저장 — 세션
+    // 생성 → command 발행 → command_id 되저장 — 사이의 극히 짧은 경합
+    // 창)에는 최초 보고를 그대로 신뢰한다: 소유권(manager_agent_id 일치)이
+    // 이미 위에서 fail-closed로 강제되므로 이 관용이 보안 경계를 넓히지
+    // 않는다 — command_id는 같은 manager의 stale/중복 dispatch를 가려내는
+    // 2차 방어선일 뿐이다.
+    if (!args.commandId) {
+      throw makeError(409, 'command_id is required');
+    }
+    if (session.command_id && session.command_id !== args.commandId) {
       throw makeError(409, 'command_id does not match this session — stale/superseded report ignored');
     }
     if (TERMINAL_CLI_LOGIN_SESSION_STATUSES.includes(session.status)) {
@@ -169,8 +195,19 @@ export class CliLoginSessionService {
 
     if (args.status === 'awaiting_user') {
       session.status = 'awaiting_user';
-      session.verification_url = args.verificationUrl?.trim() || session.verification_url;
-      session.user_code = args.userCode?.trim() || session.user_code;
+      const url = args.verificationUrl?.trim();
+      const code = args.userCode?.trim();
+      if (url && code) {
+        // 진짜 파싱 성공 — raw fallback은 더 이상 필요 없으니 비운다.
+        session.verification_url = url;
+        session.user_code = code;
+        session.raw_output_fallback = null;
+      } else if (args.rawOutputFallback?.trim()) {
+        // 리뷰 지적(round 1): 티켓이 명시한 파싱 실패 폴백. url/code를 아직
+        // 못 찾았을 때만 raw 출력을 보여준다 — 이미 진짜 url/code가 있으면
+        // 그걸 덮어쓰지 않는다.
+        session.raw_output_fallback = args.rawOutputFallback.trim().slice(0, RAW_OUTPUT_FALLBACK_MAX_CHARS);
+      }
       await this.sessionRepo.save(session);
       this.emitProgress(session);
       return session;
@@ -243,6 +280,7 @@ export class CliLoginSessionService {
       status: session.status,
       verification_url: session.verification_url,
       user_code: session.user_code,
+      raw_output_fallback: session.raw_output_fallback,
       error_detail: session.error_detail,
       created_credential_id: session.created_credential_id,
       triggered_by_id: session.triggered_by_id,

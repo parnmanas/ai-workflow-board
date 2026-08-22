@@ -827,6 +827,10 @@ export interface CliLoginProgressPayload {
   status: 'starting' | 'awaiting_user' | 'completing' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
   verification_url: string | null;
   user_code: string | null;
+  // ticket b2e79108 review round 1 — parsing-failure fallback: raw (redacted,
+  // size-capped) CLI stdout when the manager couldn't find a url/code in the
+  // expected wording. Cleared once a real url/code is parsed.
+  raw_output_fallback: string | null;
   error_detail: string;
   created_credential_id: string | null;
 }
