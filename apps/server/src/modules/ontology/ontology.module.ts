@@ -4,8 +4,9 @@ import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
+import { OntologyQueryService } from './ontology-query.service';
 
-// ticket e14ef1c9/e52e7f64 (DESIGN.md 축 1/4) — 이 모듈에는 아직
+// ticket e14ef1c9/e52e7f64/20b07fc8 (DESIGN.md 축 1/3/4) — 이 모듈에는 아직
 // 컨트롤러/MCP 툴이 없다. graph_status 같은 lifecycle 배선(ticket #6,
 // 미배정)이 이 서비스들을 실제로 트리거하기 전까지는 DI 대기 상태다 —
 // 그래도 AppModule에 등록해 둬야 그 후속 티켓이 곧바로 주입받아 쓸 수
@@ -15,7 +16,7 @@ import { OntologyResolverService } from './ontology-resolver.service';
 // 인스턴스를 공유해도 문제 없음).
 @Module({
   imports: [TypeOrmModule.forFeature([Resource, Credential])],
-  providers: [OntologyExtractionService, OntologyResolverService],
-  exports: [OntologyExtractionService, OntologyResolverService],
+  providers: [OntologyExtractionService, OntologyResolverService, OntologyQueryService],
+  exports: [OntologyExtractionService, OntologyResolverService, OntologyQueryService],
 })
 export class OntologyModule {}
