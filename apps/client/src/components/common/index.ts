@@ -10,4 +10,5 @@ export type { HeaderActionProps, HeaderActionVariant } from './HeaderAction';
 export { HeaderOverflowMenu } from './HeaderOverflowMenu';
 export { EmptyState } from './EmptyState';
 export { ErrorState } from './ErrorState';
+export { ChunkLoadErrorBoundary } from './ChunkLoadErrorBoundary';
 export { PermissionNotice } from './PermissionNotice';

@@ -3,6 +3,18 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { tokens } from './tokens';
+import { shouldReloadForChunkError } from './utils/chunkReload';
+
+// 배포 후 stale 탭에서 라우트 청크(해시가 바뀌어 사라진 파일)를 lazy-import 하면
+// Vite 런타임이 `vite:preloadError` 를 던진다(ticket 2cae7314). 이번 세션에서
+// 아직 시도하지 않았다면 1회 자동 새로고침으로 조용히 복구하고, 새로고침 후에도
+// 또 실패하면(무한 루프 방지 가드) 그대로 두어 ChunkLoadErrorBoundary 가 안내
+// 배너를 띄우게 한다.
+window.addEventListener('vite:preloadError', () => {
+  if (shouldReloadForChunkError(window.sessionStorage)) {
+    window.location.reload();
+  }
+});
 
 // Inject global keyframes + AppLayout responsive sidebar CSS
 const style = document.createElement('style');
