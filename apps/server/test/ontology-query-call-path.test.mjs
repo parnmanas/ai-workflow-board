@@ -5,12 +5,16 @@
 // 완료조건 2 중 BFS 쪽(confidence_min이 프론티어 쿼리에 실제 적용),
 // hop cap이 "총 경로 길이" 상한으로 정확히 작동함(편도 각각 maxHops가
 // 아니라 왕복 합쳐 maxHops라는 것 — 구현 중 발견한 함정, graph-query.ts의
-// loop 코멘트 참고), 그리고 **리뷰 지적(1차 라운드, 블로커3)** — 같은
-// 라운드에서 여러 교차 후보가 발견될 때 첫 번째가 아니라 combinedDepth가
-// 최소인 후보를 고르는지(쿼리 행 순서와 무관하게 진짜 최단 경로를
-// 반환하는지)를 결정론적으로 재현한다. 방문 상한 자체가 진짜 하드
-// 캡인지(리뷰 지적 블로커2)는 ontology-query-bounded-scale.test.mjs의
-// (D) 단일 허브 fixture가 별도로 증명한다.
+// loop 코멘트 참고), **리뷰 지적(1라운드, 블로커3)** — 같은 라운드에서
+// 여러 교차 후보가 발견될 때 첫 번째가 아니라 combinedDepth가 최소인
+// 후보를 고르는지, 그리고 **리뷰 지적(2라운드)** — 그 1라운드 수정의
+// "청크당 SQL LIMIT"과 결합하면서 생긴 새 결함(예산 캡에 걸려 잘린
+// 청크에서 후보 하나를 찾으면 잘려나간 나머지의 더 짧은 후보를 놓칠 수
+// 있었음)까지 결정론적으로 재현한다 — graph-query.ts는 이제 "후보 탐지"
+// 쿼리 자체를 SQL LIMIT과 완전히 분리해 절대 잘리지 않게 재설계됐다.
+// 방문 상한 자체가 진짜 하드 캡인지(리뷰 지적 1라운드 블로커2, "새 노드
+// 발견" 쪽)는 ontology-query-bounded-scale.test.mjs의 (D) 단일 허브
+// fixture가 별도로 증명한다.
 //
 // 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요) — ontology 계열
 // 테스트 전체의 관례.
@@ -31,7 +35,9 @@ process.env.SQLJS_DB_PATH = path.join(tmpDir, 'primary.db');
 process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
-const { graphCallPath, MAX_CALL_PATH_HOPS } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/query/graph-query.js'));
+const { graphCallPath, MAX_CALL_PATH_HOPS, MAX_CALL_PATH_VISITED } = await import(
+  'file://' + path.join(DIST_ROOT, 'modules/ontology/query/graph-query.js')
+);
 const { AppOntologyDataSource, initOntologyDb, flushOntologySqljs } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
 const { OntologyEdge } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyEdge.js'));
@@ -108,6 +114,45 @@ before(async () => {
 
   await nodeRepo.insert(nodes);
   await edgeRepo.insert(edges);
+
+  // ── 7) 리뷰 지적(2라운드): 후보 탐지가 SQL LIMIT에 걸리지 않는다는
+  //    불변식 직접 증명. QP1에 60,000개(MAX_CALL_PATH_VISITED보다 많음)의
+  //    무관한 더미 outgoing edge를 추가한다 — 전부 backwardVisited에
+  //    없는 목적지(hc-leafN)라 후보가 아니다. 이전(1라운드) 수정처럼
+  //    "새 노드 발견"과 "후보 탐지"가 같은 SQL LIMIT을 공유했다면, 이
+  //    더미 fan-out이 QP1->QX(진짜 후보, 더 긴 경로)조차 밀어낼 수 있었다.
+  //    지금 구현은 후보 탐지 쿼리 자체가 `dst_id IN otherVisited키`로
+  //    걸려 있어 더미 6만 개는 애초에 조회 대상도 아니다(WHERE 절 자체가
+  //    걸러냄, LIMIT으로 잘라내는 게 아님) — 그래서 아래 "리뷰 지적" 테스트가
+  //    이 더미들이 있어도 여전히 4홉(QY 경유)을 빠르게 반환해야 한다.
+  const DUMMY_HUB_OUT_DEGREE = MAX_CALL_PATH_VISITED + 10_000;
+  const DUMMY_BATCH = 500;
+  let dummyBatch = [];
+  for (let i = 0; i < DUMMY_HUB_OUT_DEGREE; i++) {
+    dummyBatch.push({
+      id: `hc-e${i}`, workspace_id: WORKSPACE_ID, graph_id: GRAPH_ID,
+      src_id: 'QP1', dst_id: `hc-leaf${i}`, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
+    });
+    if (dummyBatch.length >= DUMMY_BATCH) {
+      const placeholders = dummyBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const params = [];
+      for (const r of dummyBatch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
+      await AppOntologyDataSource.query(
+        `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
+        params,
+      );
+      dummyBatch = [];
+    }
+  }
+  if (dummyBatch.length > 0) {
+    const placeholders = dummyBatch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const params = [];
+    for (const r of dummyBatch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
+    await AppOntologyDataSource.query(
+      `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
+      params,
+    );
+  }
 });
 
 after(async () => {
@@ -134,7 +179,7 @@ describe('graphCallPath — 완료조건 3: path_confidence는 min-along-path, �
   });
 });
 
-describe('graphCallPath — 리뷰 지적: 같은 라운드에 여러 교차 후보가 있으면 최단(combinedDepth 최소)을 고른다', () => {
+describe('graphCallPath — 리뷰 지적(1라운드): 같은 라운드에 여러 교차 후보가 있으면 최단(combinedDepth 최소)을 고른다', () => {
   it('QS->QT는 더 긴 경로(QP1/QX/QZ, 5홉)가 먼저 발견돼도 진짜 최단(QP2/QY, 4홉)을 반환한다', async () => {
     const result = await graphCallPath(AppOntologyDataSource, { graphId: GRAPH_ID, fromId: 'QS', toId: 'QT' });
     assert.equal(result.found, true);
@@ -142,6 +187,27 @@ describe('graphCallPath — 리뷰 지적: 같은 라운드에 여러 교차 후
     assert.equal(result.path.map((s) => s.srcId).join('->'), 'QS->QM->QP2->QY');
     assert.equal(result.path.map((s) => s.dstId).join('->'), 'QM->QP2->QY->QT');
     assert.ok(!result.path.some((s) => s.srcId === 'QP1' || s.srcId === 'QX' || s.srcId === 'QZ'), '더 긴 QP1/QX/QZ 경유 경로가 섞이면 안 된다');
+  });
+});
+
+describe('graphCallPath — 리뷰 지적(2라운드): 후보 탐지는 SQL LIMIT의 영향을 받지 않는다', () => {
+  it('QP1이 QT를 향하지 않는 60,000개 이상의 무관한 엣지를 가져도 여전히 4홉(QY 경유)을 빠르게 찾는다', async () => {
+    // fixture 7)에서 QP1에 MAX_CALL_PATH_VISITED+10,000개의 더미 엣지를
+    // 심어뒀다 — 1라운드 수정처럼 "새 노드 발견"과 "후보 탐지"가 같은
+    // SQL LIMIT을 공유했다면, 사전식으로 더미들 사이 어딘가에 낄 수 있는
+    // QP1->QX(진짜 후보)가 잘려나가 없어질 수 있었다. 이번 결과는 여전히
+    // 1라운드 수정 때와 정확히 같아야 하고(경로·hops 동일), 무엇보다
+    // nodesVisited가 더미 6만 개에 끌려 커지지 않아야 한다(후보 탐지가
+    // otherVisited 크기로만 유계라는 증거) — 그리고 무엇보다 빨라야 한다.
+    const t0 = Date.now();
+    const result = await graphCallPath(AppOntologyDataSource, { graphId: GRAPH_ID, fromId: 'QS', toId: 'QT' });
+    const wallMs = Date.now() - t0;
+    assert.equal(result.found, true);
+    assert.equal(result.hops, 4);
+    assert.equal(result.path.map((s) => s.srcId).join('->'), 'QS->QM->QP2->QY');
+    assert.ok(!result.path.some((s) => s.srcId === 'QP1' || s.srcId === 'QX' || s.srcId === 'QZ'), '더 긴 QP1/QX/QZ 경유 경로가 섞이면 안 된다');
+    assert.ok(result.nodesVisited < 100, `방문 노드 수가 더미 fan-out(60,000+)에 끌려 커지면 안 된다: ${result.nodesVisited}`);
+    assert.ok(wallMs < 10_000, `QP1의 거대한 무관 fan-out이 후보 탐지를 느리게 만들면 안 된다: ${wallMs}ms`);
   });
 });
 

@@ -322,6 +322,9 @@ interface MeetingCandidate {
   nodeId: string;
   /** forwardDepth + backwardDepth — 이 교차점을 지나는 경로의 총 hop 수. */
   combinedDepth: number;
+  edge: GraphCallPathStep;
+  /** 이 방향(thisVisited) 쪽에서 본 부모/자식 — 후보가 선정되면 이 값으로 VisitRecord를 커밋한다. */
+  via: string;
 }
 
 function toStep(e: OntologyEdge): GraphCallPathStep {
@@ -334,22 +337,34 @@ interface ExpandSideResult {
   truncated: boolean;
 }
 
+const CANDIDATE_KEY_CHUNK_SIZE = 200; // otherVisited 키를 IN(...)에 넣을 때의 청크 크기 — FRONTIER_CHUNK_SIZE(500)와 곱해진 상한(아래 후보 탐지 쿼리 코멘트)을 더 좁게 유지하려고 일부러 더 작게 잡는다.
+
 /** DESIGN.md §11 seed #5 / research-storage.md §2.4 — "Shortest call path — unsafe as one query, safe as an orchestrated loop." 양 끝에서 교대로 레벨 단위로 확장한다.
  *
- * 리뷰 지적 2건을 여기서 함께 고친다:
- * - [안전성] 프론티어를 청크로 나눠 조회하되, 매 청크 조회 전에 남은 방문
- *   예산(MAX_CALL_PATH_VISITED - 현재 방문 수)을 계산해 SQL `LIMIT`으로
- *   그대로 강제한다 — 단일 허브 노드가 수백만 개의 active edge를 가져도
- *   한 청크가 절대 그 예산을 넘는 행을 메모리에 올리지 않는다(이전에는
- *   `getMany()`로 청크 전체를 무제한 적재한 뒤 라운드가 끝나야 예산을
- *   확인했다).
- * - [정확성] 새로 발견한 노드가 반대편 visited에 이미 있으면 그 자리에서
- *   즉시 `break`하지 않는다 — 이번 라운드에서 발견된 모든 교차 후보를
- *   전부 모아 반환하고, 호출부가 `combinedDepth`(반대편 depth + 이번
- *   라운드 depth) 최소값을 고른다. 같은 라운드 안에서도 반대편이 서로
- *   다른 깊이로 이미 방문한 노드들이 섞여 있을 수 있어("첫 교차점"이
- *   "가장 가까운 교차점"이라는 보장이 없음), 쿼리 행 순서에 의존하지 않는
- *   진짜 최단 경로를 얻으려면 후보를 모아 비교해야 한다. */
+ * **리뷰 지적(2라운드)으로 재설계됨** — 1라운드 수정(청크당 SQL LIMIT으로
+ * 방문 예산 강제 + 라운드 전체 후보 중 combinedDepth 최소 선택)은 각각은
+ * 옳았지만 **결합**하면 새 결함이 생겼다: 한 청크가 예산 캡에 걸려 잘리고
+ * 그 잘린 부분집합 안에서 후보가 하나라도 나오면, 잘려나가 아예 조회되지
+ * 않은 나머지 부분에 더 짧은(combinedDepth가 더 작은) 후보가 있어도
+ * 놓친 채 확정해버렸다 — "라운드 전체를 본다"는 전제가 예산 캡 경계에서
+ * 깨진 것.
+ *
+ * 고친 구조: 이번 청크에서 할 일을 **두 단계로 분리**한다.
+ *   (1) **후보 탐지** — `discoverColumn IN otherVisited의 키`로 딱 집어
+ *       조회한다. 이 결과의 서로 다른 discoveredId 수는 otherVisited
+ *       청크 크기(<=CANDIDATE_KEY_CHUNK_SIZE)로 자연히 유계다 — 허브의
+ *       raw fan-out과는 무관한 바운드라 **SQL LIMIT을 걸지 않는다**(걸면
+ *       정확히 이번에 지적된 버그가 재발한다). thisVisited는 건드리지
+ *       않는다 — 승자만 나중에 커밋해야, otherVisited가 클수록 후보
+ *       수만큼 방문 예산을 소모해 안전 상한을 우회하는 일이 없다.
+ *   (2) **새 노드 발견** — otherVisited에 없는, 진짜 처음 보는 노드만
+ *       상대로 한다(이미 (1)에서 다뤘으므로 명시적으로 제외). 허브의
+ *       원래 위험(단일 노드가 수백만 active edge)이 실제로 존재하는
+ *       곳이 여기라, 남은 방문 예산을 SQL `LIMIT`으로 그대로 강제한다.
+ *       (1)에서 이미 후보가 나왔으면 이번 청크의 (2)는 건너뛴다 — 답을
+ *       이미 확정할 수 있으니 새 프론티어를 더 넓힐 필요가 없다.
+ * 이 분리 덕분에 "후보 판정"은 절대 SQL LIMIT에 의해 잘리지 않는다 —
+ * 라운드 안의 모든 후보가 항상 전부 모인 뒤에야 비교된다. */
 async function expandOneSide(
   dataSource: DataSource,
   graphId: string,
@@ -365,20 +380,45 @@ async function expandOneSide(
   const next: string[] = [];
   const candidates: MeetingCandidate[] = [];
   const repo = dataSource.getRepository(OntologyEdge);
+  const discoverColumn = discoverIsDst ? 'dst_id' : 'src_id';
+  const otherKeys = [...otherVisited.keys()];
 
   for (let i = 0; i < frontier.length; i += FRONTIER_CHUNK_SIZE) {
+    const chunk = frontier.slice(i, i + FRONTIER_CHUNK_SIZE);
+
+    // ── (1) 후보 탐지 — LIMIT 없음, otherVisited 청크 크기로 유계 ──
+    for (let j = 0; j < otherKeys.length; j += CANDIDATE_KEY_CHUNK_SIZE) {
+      const otherChunk = otherKeys.slice(j, j + CANDIDATE_KEY_CHUNK_SIZE);
+      let cqb = repo
+        .createQueryBuilder('e')
+        .where('e.graph_id = :graphId', { graphId })
+        .andWhere('e.status = :status', { status: 'active' })
+        .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
+        .andWhere(`e.${matchColumn} IN (:...chunk)`, { chunk })
+        .andWhere(`e.${discoverColumn} IN (:...otherChunk)`, { otherChunk });
+      if (edgeTypes) cqb = cqb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
+      const rows = await cqb.getMany();
+      for (const e of rows) {
+        const discoveredId = discoverIsDst ? e.dst_id : e.src_id;
+        const viaId = discoverIsDst ? e.src_id : e.dst_id;
+        const other = otherVisited.get(discoveredId)!; // otherChunk 자체가 otherVisited.keys()에서 왔으므로 항상 존재
+        candidates.push({ nodeId: discoveredId, combinedDepth: thisDepth + other.depth, edge: toStep(e), via: viaId });
+      }
+      await yieldToEventLoop();
+    }
+    if (candidates.length > 0) continue; // 이미 답을 확정할 수 있음 — 이 청크의 (2)는 건너뛴다(다음 청크의 (1)은 계속 돈다 — 더 짧은 후보가 있을 수 있으므로).
+
+    // ── (2) 새 노드 발견 — 남은 방문 예산만큼 SQL LIMIT으로 강제 ──
     const remaining = MAX_CALL_PATH_VISITED - (thisVisited.size + otherVisited.size);
     if (remaining <= 0) return { next, candidates, truncated: true };
-
-    const chunk = frontier.slice(i, i + FRONTIER_CHUNK_SIZE);
     let qb = repo
       .createQueryBuilder('e')
       .where('e.graph_id = :graphId', { graphId })
       .andWhere('e.status = :status', { status: 'active' })
       .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
       .andWhere(`e.${matchColumn} IN (:...chunk)`, { chunk })
-      .orderBy('e.id', 'ASC') // 결정론적 순서 — 정확성이 이제 순서에 의존하진 않지만(위 후보-수집 방식), 재현 가능한 테스트를 위해 유지.
-      .take(remaining + 1); // +1: 이 청크 하나가 예산을 넘는지 잘라내지 않고도 판별하기 위함(정확히 SQL LIMIT으로 상한을 강제).
+      .orderBy('e.id', 'ASC') // 결정론적 순서(재현 가능한 테스트용) — "새 노드"만 다루므로 여기서의 순서는 정확성에 영향 없음(그게 이번 수정의 요점).
+      .take(remaining + 1); // +1: 이 청크 하나가 예산을 넘는지 잘라내지 않고도 판별. 즉 이 쿼리는 최대 remaining+1개의 edge entity를 메모리에 올린다(정확히 예산과 같은 수가 아니라 "그보다 하나 더 많을 수 있다" — 판별용으로 의도적).
     if (edgeTypes) qb = qb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
     const edges = await qb.getMany();
 
@@ -388,11 +428,11 @@ async function expandOneSide(
     for (const e of usable) {
       const discoveredId = discoverIsDst ? e.dst_id : e.src_id;
       const viaId = discoverIsDst ? e.src_id : e.dst_id;
-      if (thisVisited.has(discoveredId)) continue;
+      // otherVisited 멤버는 (1)이 이미 후보로 전부 처리했으므로 명시적으로
+      // 제외한다 — 여기 도달하는 건 반드시 양쪽 다 몰랐던 진짜 새 노드다.
+      if (thisVisited.has(discoveredId) || otherVisited.has(discoveredId)) continue;
       thisVisited.set(discoveredId, { edge: toStep(e), via: viaId, depth: thisDepth });
-      const other = otherVisited.get(discoveredId);
-      if (other) candidates.push({ nodeId: discoveredId, combinedDepth: thisDepth + other.depth });
-      else next.push(discoveredId);
+      next.push(discoveredId);
     }
 
     if (chunkExceeded) return { next, candidates, truncated: true };
@@ -466,9 +506,19 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
     if (candidates.length > 0) {
       // 이번 라운드에서 발견된 교차 후보 중 총 hop 수가 최소인 것을 고른다
       // — 쿼리 행 순서와 무관하게 진짜 최단 경로가 되도록(리뷰 지적 3).
+      // expandOneSide의 후보 탐지(위 함수 코멘트 (1))는 SQL LIMIT을 전혀
+      // 쓰지 않으므로, 여기 모인 candidates는 이번 라운드의 전체 집합이지
+      // 예산 캡에 잘린 부분집합이 아니다(리뷰 지적 2라운드로 고친 부분).
       let best = candidates[0];
       for (const c of candidates) if (c.combinedDepth < best.combinedDepth) best = c;
       meetingId = best.nodeId;
+      // 승자만 thisVisited(이번 라운드를 확장한 쪽)에 커밋한다 — 다른
+      // 후보들은 방문 예산에 넣지 않는다(otherVisited가 클수록 후보 수만큼
+      // 예산을 소모하면 안전 상한을 우회할 수 있다).
+      const winnerVisited = useForward ? forwardVisited : backwardVisited;
+      if (!winnerVisited.has(meetingId)) {
+        winnerVisited.set(meetingId, { edge: best.edge, via: best.via, depth: useForward ? forwardDepth : backwardDepth });
+      }
       truncated = false; // 답을 확정했으므로 이번 라운드의 부분 truncation은 무관하다.
       break;
     }
