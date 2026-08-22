@@ -59,6 +59,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { registerAllTools } from '../dist/modules/mcp/tools/index.js';
+import { COMPACT_TOOL_ALLOWLIST } from '../dist/modules/mcp/shared/tool-profiles.js';
 
 /** registerAllTools가 등록 시점에 ctx.<service>를 동기 호출하면(핸들러
  *  안에서만 쓰는 이 저장소의 확립된 관례 위반) 조용히 undefined를 넘기는
@@ -167,5 +168,110 @@ describe('MCP tool schema wire-size budget (ticket faa32380)', () => {
       `tool(s) exceeded their per-tool schema-size ceiling — a new "god tool" accreting unbounded ` +
       `config surface? ${oversized.join('; ')}`,
     );
+  });
+});
+
+// 티켓 ee26302d(faa32380 감사 후속) — 'compact' tool profile. 위 describe와
+// 같은 실측 방법(진짜 McpServer + InMemoryTransport)을 그대로 쓰되, 이번엔
+// registerAllTools의 세 번째 인자로 profile을 넘긴다. 두 방향 모두 증명한다
+// (보드 레슨 4): (A) 이 파일에서 — allowlist SET이 정확히 일치하는지 +
+// 바이트가 실측 기준선 근처인지. (B) qa-flows/mcp-tool-profile-cache.test.mjs
+// 에서 — allowlist 밖 tool을 실제 compact 세션에서 호출하면 SDK 레벨
+// "not found"가 나는지(HTTP 계층 + 캐시 키잉까지 포함한 end-to-end).
+describe('MCP tool schema wire-size budget — compact profile (ticket ee26302d)', () => {
+  it('registers exactly COMPACT_TOOL_ALLOWLIST — allowlist 밖 tool은 이름조차 등록되지 않는다', async () => {
+    const server = new McpServer({ name: 'schema-budget-compact-test', version: '0.0.0' }, { capabilities: { tools: {} } });
+    registerAllTools(server, makeStubCtx(), 'compact');
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'schema-budget-compact-test-client', version: '0.0.0' });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    let tools;
+    try {
+      ({ tools } = await client.listTools());
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    const registeredNames = new Set(tools.map((t) => t.name));
+    const allowlistNames = new Set(COMPACT_TOOL_ALLOWLIST);
+    const missing = [...allowlistNames].filter((n) => !registeredNames.has(n));
+    const extra = [...registeredNames].filter((n) => !allowlistNames.has(n));
+    assert.deepEqual(missing, [], `allowlisted tool(s) missing from compact tools/list: ${missing.join(', ')}`);
+    assert.deepEqual(extra, [], `non-allowlisted tool(s) leaked into compact tools/list: ${extra.join(', ')}`);
+
+    // update_board is the single largest full-profile tool (see the sibling
+    // describe above) and is deliberately not on the allowlist — a concrete,
+    // named negative check in addition to the set-difference above.
+    assert.ok(!registeredNames.has('update_board'), 'update_board must not appear in the compact tools/list');
+  });
+
+  it('compact tools/list wire size stays near the measured baseline (growth-sentinel, not safety budget)', async () => {
+    const server = new McpServer({ name: 'schema-budget-compact-test', version: '0.0.0' }, { capabilities: { tools: {} } });
+    registerAllTools(server, makeStubCtx(), 'compact');
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'schema-budget-compact-test-client', version: '0.0.0' });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    let tools;
+    try {
+      ({ tools } = await client.listTools());
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    const totalBytes = Buffer.byteLength(JSON.stringify(tools), 'utf8');
+    // Same growth-sentinel philosophy as CURRENT_BASELINE_BYTES above — this
+    // is NOT the 60,000-byte design target from the ticket's acceptance
+    // criteria (that target already passed at design time: 37,608 bytes,
+    // see shared/tool-profiles.ts's module doc comment). This ceiling exists
+    // only to catch the allowlist quietly growing (e.g. a careless copy-paste
+    // add) without anyone raising it on purpose.
+    const CURRENT_COMPACT_BASELINE_BYTES = 37_608; // 19 tools, 2026-08-22 실측
+    const COMPACT_BYTES_CEILING = Math.ceil(CURRENT_COMPACT_BASELINE_BYTES * 1.25);
+    assert.ok(
+      totalBytes <= COMPACT_BYTES_CEILING,
+      `compact tools/list wire size grew to ${totalBytes} bytes (ceiling ${COMPACT_BYTES_CEILING}, +25% over ` +
+      `the ${CURRENT_COMPACT_BASELINE_BYTES}-byte baseline) across ${tools.length} tools. If the allowlist grew ` +
+      'on purpose, raise CURRENT_COMPACT_BASELINE_BYTES here in the same PR.',
+    );
+  });
+
+  it('calling an allowlist-omitted tool on a compact session gets the SDK-level "not found" error, not a hang or hidden success', async () => {
+    const server = new McpServer({ name: 'schema-budget-compact-test', version: '0.0.0' }, { capabilities: { tools: {} } });
+    registerAllTools(server, makeStubCtx(), 'compact');
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'schema-budget-compact-test-client', version: '0.0.0' });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    let result;
+    try {
+      result = await client.callTool({ name: 'update_board', arguments: { board_id: 'does-not-matter' } });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    // The MCP SDK resolves a tools/call for an unregistered name into a
+    // normal (HTTP 200) CallToolResult with isError:true, rather than
+    // rejecting the promise — asserting on the resolved shape here, not a
+    // thrown exception, is what this test's own harness actually observed.
+    assert.equal(result.isError, true, 'update_board must be reported as an error, not silently succeed');
+    const text = result.content?.[0]?.text || '';
+    assert.match(text, /not found/i, `expected an SDK "not found" error, got: ${text}`);
   });
 });
