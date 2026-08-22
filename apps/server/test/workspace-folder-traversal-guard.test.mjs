@@ -61,11 +61,24 @@ test('resolveWorkspaceFolder: every folder is rooted under .awb/qa/ (worktree �
 
 // ── 티켓 9fd27487: 티켓이 아닌 실행 경로 (Action Run / 채팅방) ──────────────────
 
-test('runWorkspaceRootForKind: qa/security share .awb/qa; action and chat get their own root', () => {
+test('runWorkspaceRootForKind: qa/security는 .awb/qa를 공유하고, action/chat/orchestration은 각자 자기 루트를 갖는다', () => {
   assert.equal(runWorkspaceRootForKind('qa'), '.awb/qa');
   assert.equal(runWorkspaceRootForKind('security'), '.awb/qa');
   assert.equal(runWorkspaceRootForKind('action'), '.awb/act');
   assert.equal(runWorkspaceRootForKind('chat'), '.awb/chat');
+  assert.equal(runWorkspaceRootForKind('orchestration'), '.awb/orch');
+});
+
+// ── 티켓 2dc3c62f: Mission 실행 계약 — orchestration step 작업공간 ──────────────
+
+test('resolveWorkspaceFolder: orchestration step은 .awb/orch/ 아래 mission-keyed이고, traversal로 그 밖을 벗어날 수 없다', () => {
+  assert.equal(resolveWorkspaceFolder('', 'orchestration', 'mission-id-1234'), '.awb/orch/mission-');
+  assert.equal(resolveWorkspaceFolder(null, 'orchestration', 'abcdef1234567890'), '.awb/orch/abcdef12');
+  // runner는 이미 조합된 leaf(mission8/step_key 또는
+  // mission.workspace_folder/step_key)를 explicit folder로 넘겨서 step을
+  // mission leaf 아래 중첩시킨다 — traversal 세그먼트는 동일하게 제거된다.
+  assert.equal(resolveWorkspaceFolder('mission-i/../../etc/step', 'orchestration', 'x'), '.awb/orch/mission-i/etc/step');
+  assert.equal(resolveWorkspaceFolder('../../../etc/passwd', 'orchestration', 'm-1'), '.awb/orch/etc/passwd');
 });
 
 test('resolveWorkspaceFolder: action Runs are action-keyed under .awb/act/ (not run-keyed — every Run of the same Action reuses one folder)', () => {

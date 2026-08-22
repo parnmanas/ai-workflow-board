@@ -47,8 +47,11 @@ export const DEFAULT_BUILD_MODE: BuildMode = 'cold_then_warm';
 
 /** 서버가 프로비저닝하는 모든 run/dispatch 작업공간의 종류(ticket 9fd27487에서
  *  기존 'qa'|'security' 두 개뿐이던 조합을 확장한 것). 각 kind는 각자 고정된
- *  `.awb/<root>` 폴더를 루트로 삼는다 — `runWorkspaceRootForKind` 참고. */
-export type RunWorkspaceKind = 'qa' | 'security' | 'action' | 'chat';
+ *  `.awb/<root>` 폴더를 루트로 삼는다 — `runWorkspaceRootForKind` 참고.
+ *  'orchestration'(티켓 2dc3c62f)은 Mission의 각 Step 디스패치가 쓴다 —
+ *  action처럼 반복 재사용되는 게 아니라 mission-keyed 루트 아래 step별로
+ *  격리된다(orchestration-runner.service.ts의 dispatchStep 참고). */
+export type RunWorkspaceKind = 'qa' | 'security' | 'action' | 'chat' | 'orchestration';
 
 /**
  * Fixed root (relative to the agent's working_dir) for every QA/security run
@@ -73,14 +76,22 @@ export const ACTION_WORKSPACE_ROOT = '.awb/act';
  *  루트는 항상 에이전트가 만든 빈 scratch 폴더만 담는다. */
 export const CHAT_WORKSPACE_ROOT = '.awb/chat';
 
+/** Mission-Step 실행 작업폴더 루트(ticket 2dc3c62f) — `.awb/orch`. mission별로
+ *  루트가 하나 배정되고(`resolveWorkspaceFolder(mission.workspace_folder,
+ *  'orchestration', mission.id)`), 그 아래 각 step은 자기 `step_key` 리프로
+ *  격리된다(orchestration-runner.service.ts의 dispatchStep 참고) — 동시에
+ *  진행되는 두 step이 같은 폴더를 공유해 clobber하는 일이 없다. */
+export const ORCHESTRATION_WORKSPACE_ROOT = '.awb/orch';
+
 /** 주어진 run-workspace kind에 대해 고정된 `.awb/<root>`를 반환한다. QA와
  *  security는 의도적으로 루트 하나를 공유하며(`.awb/qa`, 이 타입이 생기기
  *  전부터 변함없음 — resolveWorkspaceFolder의 doc comment 참고), action과
- *  chat은 각자 별도의 루트를 가져서 이 티켓이 폴더를 추가하는 세 가지
- *  "run 유사" 실행 경로가 디스크상에서 시각적으로 구분되도록 한다. */
+ *  chat, orchestration은 각자 별도의 루트를 가져서 이 티켓이 폴더를 추가하는
+ *  "run 유사" 실행 경로들이 디스크상에서 시각적으로 구분되도록 한다. */
 export function runWorkspaceRootForKind(kind: RunWorkspaceKind): string {
   if (kind === 'action') return ACTION_WORKSPACE_ROOT;
   if (kind === 'chat') return CHAT_WORKSPACE_ROOT;
+  if (kind === 'orchestration') return ORCHESTRATION_WORKSPACE_ROOT;
   return RUN_WORKSPACE_ROOT;
 }
 

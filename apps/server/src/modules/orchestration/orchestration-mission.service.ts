@@ -28,10 +28,22 @@ import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
   TERMINAL_MISSION_STATUSES,
+  MissionCompletionCriterion,
+  MissionPostAction,
   computePlanProgress,
   isInFlight,
   isTerminalStepStatus,
+  normalizeCompletionCriteria,
+  normalizePostActions,
 } from './orchestration.constants';
+import {
+  CheckoutMode,
+  WorkspaceFolderRepoRef,
+  normalizeCheckoutMode,
+  normalizeRepoRef,
+  normalizeWorkspaceFolder,
+  resolveWorkspaceFolder,
+} from '../../common/workspace-folder-options';
 
 export interface MissionCounts {
   total: number;
@@ -79,12 +91,22 @@ export interface MissionStepView {
   dispatched_at: Date | null;
   started_at: Date | null;
   finished_at: Date | null;
+  /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
+  workspace_folder: string;
 }
 
 export interface MissionDetail extends MissionListItem {
   objective: string;
   context: string;
   acceptance_criteria: string;
+  method: string;
+  completion_criteria: MissionCompletionCriterion[];
+  post_actions: MissionPostAction[];
+  /** 해석 완료된 working_dir-relative 루트(절대 ''가 아님) — `.awb/orch/<leaf>`. */
+  resolved_workspace_folder: string;
+  workspace_folder: string;
+  repo_ref: WorkspaceFolderRepoRef | null;
+  checkout_mode: CheckoutMode;
   plan_summary: string;
   result_summary: string;
   failure_reason: string;
@@ -185,6 +207,12 @@ export class OrchestrationMissionService {
     objective?: string;
     context?: string;
     acceptance_criteria?: string;
+    method?: string;
+    completion_criteria?: unknown;
+    post_actions?: unknown;
+    workspace_folder?: string;
+    repo_ref?: unknown;
+    checkout_mode?: string;
     max_parallel_steps?: number;
     max_steps?: number;
     max_plan_versions?: number;
@@ -255,6 +283,11 @@ export class OrchestrationMissionService {
     const objective = (input.objective || '').trim();
     if (!objective) throw orchestrationError(400, 'objective is required — the orchestrator plans from it');
 
+    const criteriaResult = normalizeCompletionCriteria(input.completion_criteria);
+    if ('error' in criteriaResult) throw orchestrationError(400, criteriaResult.error);
+    const postActionsResult = normalizePostActions(input.post_actions);
+    if ('error' in postActionsResult) throw orchestrationError(400, postActionsResult.error);
+
     const mission = await this.missionRepo.save(
       this.missionRepo.create({
         workspace_id: workspaceId,
@@ -263,6 +296,12 @@ export class OrchestrationMissionService {
         objective,
         context: (input.context || '').trim(),
         acceptance_criteria: (input.acceptance_criteria || '').trim(),
+        method: (input.method || '').trim(),
+        completion_criteria: criteriaResult.criteria.length ? criteriaResult.criteria : null,
+        post_actions: postActionsResult.postActions.length ? postActionsResult.postActions : null,
+        workspace_folder: normalizeWorkspaceFolder(input.workspace_folder),
+        repo_ref: normalizeRepoRef(input.repo_ref),
+        checkout_mode: normalizeCheckoutMode(input.checkout_mode),
         status: 'draft',
         orchestrator_agent_id: input.orchestrator_agent_id || null,
         max_parallel_steps: clampInt(input.max_parallel_steps, team.max_parallel_steps, 1, MAX_PARALLEL_CEILING),
@@ -293,6 +332,12 @@ export class OrchestrationMissionService {
       objective?: string;
       context?: string;
       acceptance_criteria?: string;
+      method?: string;
+      completion_criteria?: unknown;
+      post_actions?: unknown;
+      workspace_folder?: string;
+      repo_ref?: unknown;
+      checkout_mode?: string;
       max_parallel_steps?: number;
       max_steps?: number;
       max_plan_versions?: number;
@@ -303,16 +348,27 @@ export class OrchestrationMissionService {
     if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
       throw orchestrationError(409, `mission is ${mission.status} and can no longer be edited`);
     }
-    // The brief (title/objective/context/criteria) is only editable before the
-    // orchestrator has been briefed. Once the mission prompt has been posted,
-    // editing it here would silently desync what the orchestrator was told from
-    // what the UI shows — the orchestrator has no way to learn about the edit.
+    // 브리핑(title/objective/context/criteria/method/workspace/post-actions)은
+    // orchestrator가 브리핑되기 전, draft 상태일 때만 편집 가능하다. 미션
+    // 프롬프트가 이미 전송된 뒤에 여기서 편집하면 orchestrator가 들은 내용과
+    // UI가 보여주는 내용이 조용히 어긋난다 — orchestrator는 그 편집을 알 방법이
+    // 없다. workspace_folder/repo_ref/checkout_mode도 함께 잠근다: 미션 도중
+    // 체크아웃 위치를 바꾸면 이미 디스패치된 step(다른 폴더)과 이후 디스패치될
+    // step이 서로 어긋난다. completion_criteria의 구조(어떤 criteria가 있는지)도
+    // 여기서 잠긴다 — `met`을 런타임에 뒤집는 건 대신
+    // `update_orchestration_criteria`(mission-locked, orchestrator 전용)로 한다.
     const briefLocked = mission.status !== 'draft';
     const touchesBrief =
       patch.title !== undefined ||
       patch.objective !== undefined ||
       patch.context !== undefined ||
-      patch.acceptance_criteria !== undefined;
+      patch.acceptance_criteria !== undefined ||
+      patch.method !== undefined ||
+      patch.completion_criteria !== undefined ||
+      patch.post_actions !== undefined ||
+      patch.workspace_folder !== undefined ||
+      patch.repo_ref !== undefined ||
+      patch.checkout_mode !== undefined;
     if (briefLocked && touchesBrief) {
       throw orchestrationError(
         409,
@@ -333,6 +389,20 @@ export class OrchestrationMissionService {
     }
     if (patch.context !== undefined) mission.context = String(patch.context).trim();
     if (patch.acceptance_criteria !== undefined) mission.acceptance_criteria = String(patch.acceptance_criteria).trim();
+    if (patch.method !== undefined) mission.method = String(patch.method).trim();
+    if (patch.completion_criteria !== undefined) {
+      const result = normalizeCompletionCriteria(patch.completion_criteria);
+      if ('error' in result) throw orchestrationError(400, result.error);
+      mission.completion_criteria = result.criteria.length ? result.criteria : null;
+    }
+    if (patch.post_actions !== undefined) {
+      const result = normalizePostActions(patch.post_actions);
+      if ('error' in result) throw orchestrationError(400, result.error);
+      mission.post_actions = result.postActions.length ? result.postActions : null;
+    }
+    if (patch.workspace_folder !== undefined) mission.workspace_folder = normalizeWorkspaceFolder(patch.workspace_folder);
+    if (patch.repo_ref !== undefined) mission.repo_ref = normalizeRepoRef(patch.repo_ref);
+    if (patch.checkout_mode !== undefined) mission.checkout_mode = normalizeCheckoutMode(patch.checkout_mode);
     if (patch.max_parallel_steps !== undefined) {
       mission.max_parallel_steps = clampInt(patch.max_parallel_steps, mission.max_parallel_steps, 1, MAX_PARALLEL_CEILING);
     }
@@ -500,6 +570,13 @@ export class OrchestrationMissionService {
       objective: mission.objective,
       context: mission.context,
       acceptance_criteria: mission.acceptance_criteria,
+      method: mission.method,
+      completion_criteria: Array.isArray(mission.completion_criteria) ? mission.completion_criteria : [],
+      post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
+      resolved_workspace_folder: resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id),
+      workspace_folder: mission.workspace_folder,
+      repo_ref: mission.repo_ref,
+      checkout_mode: mission.checkout_mode,
       plan_summary: mission.plan_summary,
       result_summary: mission.result_summary,
       failure_reason: mission.failure_reason,
@@ -533,6 +610,7 @@ export class OrchestrationMissionService {
           dispatched_at: s.dispatched_at,
           started_at: s.started_at,
           finished_at: s.finished_at,
+          workspace_folder: `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -583,6 +661,12 @@ export class OrchestrationMissionService {
       objective: mission.objective,
       context: mission.context,
       acceptance_criteria: mission.acceptance_criteria,
+      method: mission.method,
+      completion_criteria: Array.isArray(mission.completion_criteria) ? mission.completion_criteria : [],
+      completion_criteria_note: Array.isArray(mission.completion_criteria) && mission.completion_criteria.length
+        ? 'complete_orchestration_mission(status:"completed") is BLOCKED until every entry here has met:true — use update_orchestration_criteria to flip one.'
+        : 'No structured completion criteria defined — acceptance_criteria (prose) is the only definition of done.',
+      post_actions: Array.isArray(mission.post_actions) ? mission.post_actions : [],
       plan_version: mission.plan_version,
       plan_summary: mission.plan_summary,
       limits: {

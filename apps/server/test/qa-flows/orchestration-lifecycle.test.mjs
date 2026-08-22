@@ -1003,4 +1003,142 @@ test('Orchestration: a draft mission is never an unrecoverable wedge (review rou
   assert.notEqual(retried.mission_id, draftId);
 });
 
+// ticket 2dc3c62f — Mission 실행 계약: 완료 조건 게이트 + agent 작업공간 + post-action.
+test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 격리된 작업공간 폴더로 디스패치되며, 완료 시 post-action이 실행된다', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const runner = app.get(OrchestrationRunnerService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-contract');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'contract-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'contract-member' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'contract-orch');
+  const memberMcp = await mcpFor(member, 'contract-member');
+
+  step('완료 후 실행될 실제 Action을 등록한다("always" 성공 케이스)');
+  const notifyAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Notify on mission end',
+    prompt: 'The mission ended — post a summary.',
+    target_agent_id: member.id,
+  });
+
+  step('구조화된 완료 조건, 커스텀 workspace 루트, post_actions 2개(실재/댕글링)를 갖는 팀 + 미션');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Contract squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Contract-gated mission',
+    objective: 'Ship one thing and prove the execution contract holds.',
+    method: 'Keep it small — one step is enough to prove the contract.',
+    completion_criteria: [{ key: 'verified', description: 'A human/orchestrator actually checked the result' }],
+    post_actions: [
+      { action_id: notifyAction.id, order: 1, condition: 'always' },
+      { action_id: 'does-not-exist', order: 2, condition: 'always' },
+    ],
+    workspace_folder: 'custom-root',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  assert.equal(mission.completion_criteria.length, 1);
+  assert.equal(mission.completion_criteria[0].met, false, '갓 만든 criterion은 unmet 상태로 시작한다');
+
+  await runner.startMission(mission.id, ws.id, HUMAN);
+
+  step('Orchestrator가 단일 step을 제출한다');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [{ step_key: 'only-step', title: 'Only step', instructions: 'Do the one thing.', assignee_agent_id: member.id }],
+  });
+  assert.ok(!plan?.isError, `plan 실패: ${JSON.stringify(plan)}`);
+  assert.deepEqual(plan.dispatched_now, ['only-step']);
+
+  step('디스패치된 step은 미션의 커스텀 workspace 루트 아래 자기만의 격리된 폴더에 고정된다');
+  const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
+  const only = afterPlan.steps.find((s) => s.step_key === 'only-step');
+  assert.equal(
+    only.workspace_folder,
+    '.awb/orch/custom-root/only-step',
+    'getMissionDetail이 dispatchStep이 프로비저닝하는 것과 동일한 격리 leaf를 계산한다',
+  );
+  const stepMessages = await roomMessages(ds, only.room_id);
+  assert.match(
+    stepMessages[0].content,
+    /\.awb\/orch\/custom-root\/only-step/,
+    '렌더링된 작업 지시서가 agent-manager가 스폰 전에 프로비저닝할 정확한 폴더를 명시한다',
+  );
+  assert.match(stepMessages[0].content, /Keep it small/, 'mission.method도 step 프롬프트에 렌더링된다');
+
+  step('step을 done으로 보고하는 것만으로는 완료가 풀리지 않는다 — 구조화된 criterion이 여전히 unmet이다');
+  const reported = await memberMcp.callTool('report_orchestration_step', {
+    step_id: only.id, status: 'done', summary: 'Did the one thing.',
+  });
+  assert.ok(!reported?.isError, `report 실패: ${JSON.stringify(reported)}`);
+
+  const blocked = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: mission.id, status: 'completed', summary: 'Should be blocked.',
+  });
+  assert.equal(blocked.isError, true, '완료 조건이 unmet인 동안은 완료가 거부되어야 한다');
+  assert.match(blocked.error.error, /verified/, '거부 메시지가 unmet인 criterion의 key를 명시한다');
+  assert.match(blocked.error.error, /update_orchestration_criteria/, '거부 메시지가 자신의 해결책을 명시한다');
+
+  step('orchestrator가 아니면 criteria를 뒤집을 수 없다');
+  const deniedCriteria = await memberMcp.callTool('update_orchestration_criteria', {
+    mission_id: mission.id, updates: [{ key: 'verified', met: true }],
+  });
+  assert.equal(deniedCriteria.isError, true, 'completion criteria는 orchestrator만 갱신할 수 있다');
+
+  step('orchestrator가 note와 함께 criterion을 met으로 표시하면 이제 완료가 허용된다');
+  const flipped = await orchMcp.callTool('update_orchestration_criteria', {
+    mission_id: mission.id,
+    updates: [{ key: 'verified', met: true, note: 'Checked the artifact myself.' }],
+  });
+  assert.ok(!flipped?.isError, `update_orchestration_criteria 실패: ${JSON.stringify(flipped)}`);
+  assert.equal(flipped.completion_criteria[0].met, true);
+
+  const completed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: mission.id, status: 'completed', summary: 'Shipped it.',
+  });
+  assert.ok(!completed?.isError, `criteria가 met인데도 complete 실패: ${JSON.stringify(completed)}`);
+  assert.equal(completed.status, 'completed');
+
+  step('완료 시 post-action이 발화한다: 실재 Action은 추적 가능한 run으로 디스패치되고, 댕글링 쪽은 실패가 기록된다 — 어느 쪽도 미션 자체의 상태에는 영향 없음');
+  const final = await missions.getMissionDetail(mission.id, ws.id);
+  assert.equal(final.status, 'completed', 'post-action의 결과는 미션 상태를 절대 되돌리거나 바꾸지 않는다');
+  const byActionId = Object.fromEntries(final.post_actions.map((p) => [p.action_id, p]));
+  assert.equal(byActionId[notifyAction.id].status, 'dispatched');
+  assert.ok(byActionId[notifyAction.id].run_id, '디스패치된 post-action은 감사/추적을 위해 run_id를 기록한다');
+  const postActionRoom = await ds
+    .getRepository('ChatRoom')
+    .findOne({ where: { id: byActionId[notifyAction.id].room_id } });
+  assert.ok(postActionRoom, '디스패치된 post-action Run이 실제로 room을 만들었다 — 상태만 조작된 게 아니다');
+
+  assert.equal(byActionId['does-not-exist'].status, 'dispatch_failed');
+  assert.match(byActionId['does-not-exist'].error, /not found/);
+
+  const eventTypes = final.events.map((e) => e.type);
+  assert.ok(eventTypes.includes('criteria_updated'));
+  assert.ok(eventTypes.includes('post_action_dispatched'));
+  assert.ok(eventTypes.includes('post_action_dispatch_failed'));
+});
+
 exitAfterTests();

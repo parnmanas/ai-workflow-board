@@ -33,8 +33,8 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, In, DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
@@ -43,7 +43,9 @@ import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember'
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
+import { Action } from '../../entities/Action';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
@@ -52,12 +54,16 @@ import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/age
 import {
   DEPENDENCY_SATISFYING_STATUSES,
   MAX_ARTIFACTS_PER_STEP,
+  MissionCompletionCriterion,
   PlanStepInput,
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
+  allCriteriaMet,
   computePlanProgress,
   isInFlight,
   isTerminalStepStatus,
+  normalizeCompletionCriteria,
+  postActionApplies,
   validatePlan,
 } from './orchestration.constants';
 import {
@@ -67,6 +73,8 @@ import {
   renderStepPrompt,
   renderWakePrompt,
 } from './orchestration-prompt';
+import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
+import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 /** Synthetic sender the dispatch messages are attributed to, mirroring QA/Actions. */
 const SYSTEM_SENDER_ID = 'system';
@@ -95,9 +103,12 @@ export class OrchestrationRunnerService {
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly missions: OrchestrationMissionService,
     private readonly teams: OrchestrationTeamService,
+    private readonly actionsService: ActionsService,
     private readonly logService: LogService,
   ) {}
 
@@ -309,6 +320,21 @@ export class OrchestrationRunnerService {
             `Wait for their reports, or skip them with update_orchestration_step first.`,
         );
       }
+      // 구조화된 완료 조건 게이트(티켓 2dc3c62f) — "completed"만 막는다:
+      // 정당한 "failed" 종료는 정의상 충족되지 않은 criteria에 절대 발목
+      // 잡혀선 안 된다. `[]`/null criteria(이 기능 이전에 만들어진 모든 미션,
+      // 그리고 criteria를 정의한 적 없는 미션)는 no-op 게이트다 —
+      // allCriteriaMet가 true를 반환하므로 기존 미션에 회귀가 없다.
+      if (input.status === 'completed' && !allCriteriaMet(mission.completion_criteria)) {
+        const unmet = (mission.completion_criteria ?? []).filter((c) => !c.met);
+        throw orchestrationError(
+          409,
+          `cannot complete: ${unmet.length} completion criterion/criteria not yet met ` +
+            `(${unmet.map((c) => c.key).join(', ')}). Verify them and mark each with ` +
+            `update_orchestration_criteria, or complete with status:"failed" if the objective ` +
+            `truly cannot be delivered.`,
+        );
+      }
       // Failing a mission mid-flight is legitimate (the orchestrator has decided
       // the objective is unreachable), so open steps are closed out rather than
       // blocking the call — otherwise a wedged step would trap the mission.
@@ -341,8 +367,152 @@ export class OrchestrationRunnerService {
       this.logService.info('Orchestration', `mission ${mission.id} ${input.status}`, {
         workspace_id: mission.workspace_id,
       });
+      // 완료 후 Action을 발화한다(티켓 2dc3c62f). 이 기능 전체에서 유일한
+      // 호출 지점이다 — cancelMission(운영자 중단)과 reaper의
+      // failMissionExternally(포기)는 의도적으로 post_actions를 발화하지
+      // 않는다: 둘 다 정상 종료가 아니고, completeMission이 "유일한 정상
+      // 종료"이기 때문이다(이 파일 헤더 문서 참고). 위에서 이미 저장된
+      // `mission.status`에는 절대 영향을 주지 않는다.
+      await this.runPostActions(mission);
       return mission;
     });
+  }
+
+  /**
+   * Orchestrator가 완료 조건 하나 이상을 met/unmet으로 뒤집는다(선택적 note
+   * 포함). updateStep과 동일하게 mission-locked + orchestrator 전용이다.
+   * dispatch/pump는 하지 않는다 — criteria는 완료 게이트를 위한 관찰
+   * 대상이지 step DAG의 일부가 아니다.
+   */
+  async updateCriteria(
+    missionId: string,
+    callerAgentId: string,
+    updates: Array<{ key: string; met: boolean; note?: string }>,
+  ): Promise<OrchestrationMission> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = await this.missions.requireMission(missionId);
+      this.requireOrchestrator(mission, callerAgentId);
+      if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+        throw orchestrationError(409, `mission is ${mission.status}`);
+      }
+      const existing = Array.isArray(mission.completion_criteria) ? mission.completion_criteria : [];
+      if (existing.length === 0) {
+        throw orchestrationError(
+          409,
+          'this mission has no structured completion criteria to update — acceptance_criteria (prose) is its ' +
+            'only definition of done.',
+        );
+      }
+      const byKey = new Map(existing.map((c) => [c.key, { ...c }]));
+      const changed: string[] = [];
+      for (const u of updates) {
+        const key = String(u?.key ?? '').trim();
+        const entry = byKey.get(key);
+        if (!entry) {
+          throw orchestrationError(400, `unknown completion criterion key "${u?.key}"`);
+        }
+        entry.met = u.met === true;
+        entry.met_at = entry.met ? new Date().toISOString() : null;
+        if (u.note !== undefined) entry.note = String(u.note).slice(0, 1000);
+        byKey.set(key, entry);
+        changed.push(key);
+      }
+      const next: MissionCompletionCriterion[] = existing.map((c) => byKey.get(c.key)!);
+      // 쓰기 경로가 쓰는 것과 같은 normalizer로 재검증한다 — 손수 만든
+      // `updates` 배열이 이 런타임 경로를 통해 잘못된 모양을 몰래 통과시키지
+      // 못하게 한다(defense-in-depth — 위의 필드별 검사가 이미 흔한 경우는
+      // 대부분 막는다).
+      const revalidated = normalizeCompletionCriteria(next);
+      if ('error' in revalidated) throw orchestrationError(400, revalidated.error);
+      mission.completion_criteria = revalidated.criteria;
+      await this.missionRepo.save(mission);
+
+      const orchestratorName = await this.agentName(callerAgentId);
+      const met = revalidated.criteria.filter((c) => c.met).length;
+      await this.missions.recordEvent(mission, {
+        type: 'criteria_updated',
+        message: `${orchestratorName} updated completion criteria (${changed.join(', ')}) — ${met}/${revalidated.criteria.length} met`,
+        actor_type: 'agent',
+        actor_id: callerAgentId,
+        actor_name: orchestratorName,
+        data: { changed, criteria: revalidated.criteria },
+      });
+      return mission;
+    });
+  }
+
+  /**
+   * `condition`이 미션의 최종 status와 맞는 post_actions 항목을 `order` 순서로
+   * 전부 디스패치한다. Fire-and-forget(MissionPostAction 문서 참고): 디스패치
+   * 성공(run_id) 또는 실패를 기록할 뿐 재시도하지 않고 `mission.status`도
+   * 절대 건드리지 않는다. 추가 mission-lock 중첩 없이 실행된다 — 호출자
+   * (completeMission)가 이미 락을 쥐고 있고, 이 메서드는 건네받은 mission
+   * 객체를 읽고 post_actions/events만 쓰므로 다른 step/plan 상태가 레이스에
+   * 노출될 위험이 없다.
+   */
+  private async runPostActions(mission: OrchestrationMission): Promise<void> {
+    const list = Array.isArray(mission.post_actions) ? mission.post_actions : [];
+    if (list.length === 0) return;
+
+    const orderedActions = [...list].sort((a, b) => a.order - b.order);
+    let mutated = false;
+    for (const pa of orderedActions) {
+      if (!postActionApplies(pa.condition, mission.status)) {
+        if (pa.status !== 'skipped') {
+          pa.status = 'skipped';
+          mutated = true;
+          await this.missions.recordEvent(mission, {
+            type: 'post_action_skipped',
+            message: `Post-action ${pa.action_id} skipped (condition "${pa.condition}" does not match mission status "${mission.status}")`,
+            actor_type: 'system',
+            data: { action_id: pa.action_id },
+          });
+        }
+        continue;
+      }
+      try {
+        const action = await this.actionRepo.findOne({ where: { id: pa.action_id } });
+        if (!action) throw new Error(`action ${pa.action_id} not found`);
+        if (action.workspace_id !== mission.workspace_id) {
+          throw new Error(`action ${pa.action_id} belongs to a different workspace`);
+        }
+        const result = await this.actionsService.dispatch({
+          actionId: action.id,
+          triggeredByType: 'system',
+          triggeredById: `orchestration:${mission.id}`,
+        });
+        pa.status = 'dispatched';
+        pa.run_id = result.run.id;
+        pa.room_id = result.room_id;
+        pa.error = '';
+        pa.dispatched_at = new Date().toISOString();
+        mutated = true;
+        await this.missions.recordEvent(mission, {
+          type: 'post_action_dispatched',
+          message: `Post-action "${action.name}" dispatched (run ${result.run.id})`,
+          actor_type: 'system',
+          data: { action_id: action.id, run_id: result.run.id, room_id: result.room_id },
+        });
+      } catch (e: any) {
+        pa.status = 'dispatch_failed';
+        pa.error = String(e?.message || e).slice(0, 1000);
+        mutated = true;
+        await this.missions.recordEvent(mission, {
+          type: 'post_action_dispatch_failed',
+          message: `Post-action ${pa.action_id} failed to dispatch: ${pa.error}`,
+          actor_type: 'system',
+          data: { action_id: pa.action_id, error: pa.error },
+        });
+        this.logService.warn('Orchestration', `post-action dispatch failed for mission ${mission.id}`, {
+          action_id: pa.action_id,
+          error: pa.error,
+        });
+      }
+    }
+    if (mutated) {
+      mission.post_actions = orderedActions;
+      await this.missionRepo.save(mission);
+    }
   }
 
   // ── Plan intake ───────────────────────────────────────────────────────────
@@ -945,6 +1115,25 @@ export class OrchestrationRunnerService {
     step.finished_at = null;
     await this.stepRepo.save(step);
 
+    // 이 step의 격리된 작업폴더 + repo를 해석한다(티켓 2dc3c62f):
+    // `.awb/orch/` 아래 `<mission-leaf>/<step_key>` — 같은 미션의 동시 진행
+    // step끼리 폴더를 공유하는 일이 없다. `missionLeaf`는 getMissionDetail의
+    // `resolved_workspace_folder` 계산과 정확히 동일하다 — leaf를
+    // buildRunProvision이 step id로부터 유도하게 두지 않고 미리 계산해두는
+    // 이유는 그 메서드의 문서 참고.
+    const missionLeaf = mission.workspace_folder || mission.id.slice(0, 8);
+    const stepWorkspaceFolder = `${missionLeaf}/${step.step_key}`;
+    const runProvision: RunProvision = await buildRunProvision(this.dataSource, {
+      kind: 'orchestration',
+      id: step.id,
+      runId: step.id,
+      workspaceId: mission.workspace_id,
+      boardId: null,
+      workspaceFolder: stepWorkspaceFolder,
+      repoRef: mission.repo_ref,
+      checkoutMode: mission.checkout_mode,
+    });
+
     const prompt = renderStepPrompt({
       mission,
       step,
@@ -952,9 +1141,10 @@ export class OrchestrationRunnerService {
       orchestratorName,
       dependencies,
       isRetry: step.attempt > 1,
+      workspaceFolder: runProvision.workspace_folder,
     });
 
-    await this.postToRoom(room.id, mission.workspace_id, prompt);
+    await this.postToRoom(room.id, mission.workspace_id, prompt, runProvision);
 
     await this.missions.recordEvent(mission, {
       type: 'step_dispatched',
@@ -1318,14 +1508,18 @@ export class OrchestrationRunnerService {
   }
 
   /**
-   * Post a machine-rendered instruction into a room.
+   * 기계가 렌더링한 지시문을 room에 게시한다.
    *
-   * `sender_type: 'user'` (not 'system') is load-bearing: the agent-manager only
-   * executes work for user-authored room messages, exactly as QA run dispatch
-   * does. `bypassContentLimit` is required because a rendered brief routinely
-   * exceeds the 10k interactive chat cap.
+   * `sender_type: 'user'`('system'이 아님)는 필수다: agent-manager는 QA run
+   * 디스패치와 정확히 동일하게 user가 작성한 room 메시지에 대해서만 작업을
+   * 실행하기 때문이다. `bypassContentLimit`은 렌더링된 브리핑이 10k
+   * interactive chat 한도를 일상적으로 넘기 때문에 필요하다. `runProvision`
+   * (티켓 2dc3c62f, step 디스패치 전용 — mission 브리핑/wake room에는 절대
+   * 붙지 않음)은 assignee의 subagent가 스폰되기 전에 agent-manager가 그
+   * step의 격리된 작업폴더를 프로비저닝하도록 알려준다 — QA/Action run
+   * 디스패치와 정확히 동일하다.
    */
-  private postToRoom(roomId: string, workspaceId: string, content: string): Promise<any> {
+  private postToRoom(roomId: string, workspaceId: string, content: string, runProvision?: RunProvision): Promise<any> {
     return this.messaging.sendMessage(
       roomId,
       workspaceId,
@@ -1336,7 +1530,7 @@ export class OrchestrationRunnerService {
       undefined,
       undefined,
       'message',
-      { bypassContentLimit: true },
+      { bypassContentLimit: true, ...(runProvision ? { runProvision } : {}) },
     );
   }
 }

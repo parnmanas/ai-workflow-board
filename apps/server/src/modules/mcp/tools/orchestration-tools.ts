@@ -112,6 +112,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
             status: mission.status,
             objective: mission.objective,
             context: mission.context,
+            method: mission.method,
             acceptance_criteria: mission.acceptance_criteria,
             note: 'You are a member of this mission, not its orchestrator — the plan is not shown. Use ' +
               'get_orchestration_step for your own assignment.',
@@ -258,11 +259,48 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
   );
 
   server.tool(
+    'update_orchestration_criteria',
+    'Flip one or more structured completion criteria met/unmet for a mission you orchestrate (only present when ' +
+      'the mission defines them — get_orchestration_mission shows the current list). ' +
+      'complete_orchestration_mission(status:"completed") is REJECTED while any criterion is unmet, so mark one ' +
+      'only after you have actually verified it — do not take a member\'s report at face value. Include a note ' +
+      'explaining how you verified it; it is recorded on the mission timeline.',
+    {
+      mission_id: z.string(),
+      updates: z
+        .array(
+          z.object({
+            key: z.string().describe('Criterion key, from get_orchestration_mission'),
+            met: z.boolean(),
+            note: z.string().optional().describe('How you verified it (or why you are reverting it to unmet)'),
+          }),
+        )
+        .min(1),
+    },
+    async ({ mission_id, updates }, extra) => {
+      const svc = runner();
+      if (!svc) return err(NO_RUNTIME);
+      try {
+        const mission = await svc.updateCriteria(mission_id, callerAgentId(extra), updates);
+        return ok({
+          mission_id: mission.id,
+          completion_criteria: mission.completion_criteria ?? [],
+        });
+      } catch (e: any) {
+        return toolError(e, 'failed to update completion criteria');
+      }
+    },
+  );
+
+  server.tool(
     'complete_orchestration_mission',
     'End a mission you orchestrate. Use status "completed" once the acceptance criteria are actually met ' +
       '(verify them — do not take a member\'s word for it), or "failed" when the objective cannot be ' +
       'delivered. THE MISSION NEVER ENDS ON ITS OWN: until you call this, it stays open and the board shows ' +
-      'it as in progress. Completing requires no step to be in flight.',
+      'it as in progress. Completing requires no step to be in flight, and — when the mission defines ' +
+      'structured completion criteria — every one of them marked met via update_orchestration_criteria first; ' +
+      'a rejection names which keys are still unmet. Any post-completion Actions the mission defines are ' +
+      'dispatched right after this call settles, regardless of which status you pass.',
     {
       mission_id: z.string(),
       status: z.enum(['completed', 'failed']),
@@ -502,7 +540,56 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       title: z.string().describe('Short mission title'),
       objective: z.string().describe('What the team must achieve. Becomes the core of your own brief.'),
       context: z.string().optional().describe('Background / links / prior art'),
-      acceptance_criteria: z.string().optional().describe('Definition of done'),
+      acceptance_criteria: z.string().optional().describe('Definition of done (free text)'),
+      method: z
+        .string()
+        .optional()
+        .describe('How the team should approach the objective — constraints, non-negotiables, preferred approach'),
+      completion_criteria: z
+        .array(
+          z.object({
+            key: z.string().describe('Short unique slug, e.g. "tests-pass"'),
+            description: z.string(),
+            met: z.boolean().optional().describe('Default false — flip later with update_orchestration_criteria'),
+          }),
+        )
+        .optional()
+        .describe(
+          'Optional structured checklist ON TOP OF acceptance_criteria prose — when set, ' +
+            'complete_orchestration_mission(status:"completed") is blocked until every entry is met:true.',
+        ),
+      post_actions: z
+        .array(
+          z.object({
+            action_id: z.string().describe('Action id to dispatch once the mission ends'),
+            order: z.number().optional().describe('Ascending dispatch order (default: array order)'),
+            condition: z
+              .enum(['always', 'on_success', 'on_failure'])
+              .optional()
+              .describe('always | on_success (completed only) | on_failure (failed only). Default "always".'),
+          }),
+        )
+        .optional()
+        .describe(
+          'Actions to dispatch after the mission ends (fire-and-forget — failure to dispatch is recorded but ' +
+            'never reopens or changes the mission).',
+        ),
+      workspace_folder: z
+        .string()
+        .optional()
+        .describe('working_dir-relative root for every step\'s isolated working folder (default: `.awb/orch/<mission id8>`)'),
+      repo_ref: z
+        .object({
+          resource_id: z.string().optional(),
+          url: z.string().optional(),
+          branch: z.string().optional(),
+        })
+        .optional()
+        .describe('Repo every step checks out. Omit to reuse the board/workspace environment_config repo.'),
+      checkout_mode: z
+        .enum(['reuse', 'fresh'])
+        .optional()
+        .describe('How each step\'s folder is prepared (default "reuse"; "fresh" wipes + re-checks-out every dispatch)'),
       workspace_id: z
         .string()
         .optional()
@@ -657,6 +744,12 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           objective: args.objective,
           context: args.context,
           acceptance_criteria: args.acceptance_criteria,
+          method: args.method,
+          completion_criteria: args.completion_criteria,
+          post_actions: args.post_actions,
+          workspace_folder: args.workspace_folder,
+          repo_ref: args.repo_ref,
+          checkout_mode: args.checkout_mode,
           max_steps: maxSteps,
           max_parallel_steps: maxParallelSteps,
           step_timeout_minutes: args.step_timeout_minutes,
