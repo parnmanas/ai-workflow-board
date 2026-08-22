@@ -8,13 +8,13 @@
 // 명시적 매크로태스크 양보 계약을 그대로 재사용한다(insertChunked/
 // yieldToEventLoop, persist.ts에서 import).
 import { randomUUID } from 'node:crypto';
-import type { DataSource } from 'typeorm';
+import { In, type DataSource } from 'typeorm';
 import { OntologyEdge, type OntologyEdgeResolution } from '../../../entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from '../../../entities/OntologyReverseEdgeIndex';
 import { insertChunked, yieldToEventLoop } from '../persist';
 import { buildGraphSymbolIndex, type DefNodeInfo, type GraphSymbolIndex } from './symbol-index';
 import { resolveImportFactExact, resolveImportFactSuffix, resolveName, resolveRef, type CascadeResult } from './cascade';
-import { deriveOverridesAndCapDynamicDispatch } from './polymorphic-cap';
+import { deriveOverridesAndCapDynamicDispatch, type ExistingEdgeSnapshot, type ExistingEdges } from './polymorphic-cap';
 import type { RefFact } from '../extraction/types';
 
 const EDGE_CHUNK_SIZE = 500; // persist.ts 선례(NODE_CHUNK_SIZE/EDGE_CHUNK_SIZE)와 같은 값 — sql.js 표현식-트리 깊이 상한 아래로 여유있게.
@@ -73,6 +73,10 @@ function baseEdgeFields(input: ResolveCrossFileEdgesInput) {
     valid_to_commit: null,
     status: 'active' as const,
   };
+}
+
+function toExistingSnapshot(e: OntologyEdge): ExistingEdgeSnapshot {
+  return { id: e.id, src_id: e.src_id, dst_id: e.dst_id, confidence: e.confidence, resolution: e.resolution };
 }
 
 function findContainingDef(fileDefs: DefNodeInfo[], line: number): DefNodeInfo | null {
@@ -187,11 +191,29 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   }
 
   // ── OVERRIDES 파생 + polymorphic dispatch cap(REVIEW-NOTES.md I5) —
-  // 별도 파일(polymorphic-cap.ts)의 순수 함수. 별도로 추출된 fact가 아니라
-  // 이미 계산한 heritage 엣지 + DECLARES 멤버 인덱스로부터 파생한다. ──
-  const { overridesEdges, dynamicCappedEdges } = deriveOverridesAndCapDynamicDispatch(index, edgeRows, base);
+  // 별도 파일(polymorphic-cap.ts)의 순수 함수. 이번 실행에서 새로 만든
+  // heritage/CALLS(edgeRows)뿐 아니라, SCIP 등 이 리졸버 바깥 경로로 이미
+  // graph_id에 저장된 EXTENDS/IMPLEMENTS/OVERRIDES/활성 CALLS도 함께
+  // 조회해 캡 판단에 합류시킨다(리뷰 지적 — "어느 tier가 매칭했든" 계약은
+  // edgeRows만 봐서는 지켜지지 않는다, SCIP는 이 루프를 아예 거치지 않는
+  // 별도 쓰기 경로다). ──
+  const edgeRepo = dataSource.getRepository(OntologyEdge);
+  const existing: ExistingEdges = {
+    heritage: (await edgeRepo.find({ where: { graph_id: input.graphId, type: In(['EXTENDS', 'IMPLEMENTS']) } })).map(toExistingSnapshot),
+    overrides: (await edgeRepo.find({ where: { graph_id: input.graphId, type: 'OVERRIDES' } })).map(toExistingSnapshot),
+    calls: (await edgeRepo.find({ where: { graph_id: input.graphId, type: 'CALLS', status: 'active' } })).map(toExistingSnapshot),
+  };
+  const { overridesEdges, dynamicCappedEdges, existingCallsIdsToCapDynamic } = deriveOverridesAndCapDynamicDispatch(
+    index,
+    edgeRows,
+    base,
+    existing,
+  );
 
-  await insertChunked(dataSource.getRepository(OntologyEdge), edgeRows, EDGE_CHUNK_SIZE);
+  await insertChunked(edgeRepo, edgeRows, EDGE_CHUNK_SIZE);
+  if (existingCallsIdsToCapDynamic.length > 0) {
+    await edgeRepo.update({ id: In(existingCallsIdsToCapDynamic) }, { resolution: 'dynamic' });
+  }
   const reverseIndexRows = [...reverseIndexByKey.values()];
   await insertChunked(dataSource.getRepository(OntologyReverseEdgeIndex), reverseIndexRows, REVERSE_INDEX_CHUNK_SIZE);
 

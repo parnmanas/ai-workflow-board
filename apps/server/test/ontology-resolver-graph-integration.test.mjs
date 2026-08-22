@@ -29,6 +29,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -230,5 +231,100 @@ describe('resolveCrossFileEdges — 그래프 밖 참조는 추측 없이 미해
 
   it('해소 안 되는 qualifier를 통한 참조는 엣지를 만들지 않고 unresolvedRefs에 집계된다', () => {
     assert.ok(summary.unresolvedRefs >= 1);
+  });
+});
+
+describe('resolveCrossFileEdges — 리뷰 지적(1라운드, 블로커): 이 실행 바깥에서 이미 저장된 CALLS(SCIP 등)도 캡 대상이다', () => {
+  const SCIP_GRAPH_ID = 'resolver-existing-scip-calls-graph';
+  let scipCallsEdgeId;
+  let scipSummary;
+
+  before(async () => {
+    const scipFixtures = [
+      { path: 'scip/base.ts', src: `\nexport class Base {\n  render() {}\n}\n` },
+      { path: 'scip/sub.ts', src: `\nimport { Base } from './base';\n\nexport class Sub extends Base {\n  render() {}\n}\n` },
+    ];
+    const bundles = [];
+    for (const fx of scipFixtures) {
+      const bundle = await extractFile(fx.path, fx.src, 'typescript');
+      assert.equal(bundle.hasParseError, false, `${fx.path} 픽스처가 파싱 에러 없이 파싱돼야 한다`);
+      bundle.fileHash = `hash-${fx.path}`;
+      bundles.push(bundle);
+    }
+    await persistFactBundles(AppOntologyDataSource, {
+      graphId: SCIP_GRAPH_ID,
+      workspaceId: 'resolver-scip-ws',
+      resourceId: 'resolver-scip-resource',
+      folderPath: '',
+      commit: 'scip-commit',
+      extractionRunId: 'scip-extraction-run-1',
+      bundles,
+      decoratorFactsByPath: new Map(),
+    });
+
+    const subFile = await nodeRepo.findOne({ where: { graph_id: SCIP_GRAPH_ID, type: 'File', path: 'scip/sub.ts' } });
+    const baseRender = await nodeRepo.findOne({ where: { graph_id: SCIP_GRAPH_ID, qualified_name: 'Base.render' } });
+    assert.ok(subFile);
+    assert.ok(baseRender);
+
+    // SCIP(Tier 2) 스타일로 이미 정밀 해소돼 저장된 CALLS 엣지를 resolve.ts의
+    // imports[]/refs[]/heritage[] 루프를 거치지 않고 직접 삽입한다 — src_id는
+    // 실제 호출부가 아니어도 무방하다(OntologyEdge는 src_id/dst_id에 DB 레벨
+    // FK가 없다, 엔티티 헤더 코멘트 참고). 이 테스트가 검증하려는 것은 오직
+    // "이 리졸버 실행 바깥에서 이미 저장된 CALLS도 캡되는가"이다.
+    scipCallsEdgeId = randomUUID();
+    await edgeRepo.save({
+      id: scipCallsEdgeId,
+      workspace_id: 'resolver-scip-ws',
+      graph_id: SCIP_GRAPH_ID,
+      src_id: subFile.id,
+      dst_id: baseRender.id,
+      type: 'CALLS',
+      layer: 'structural',
+      confidence: 1.0,
+      confidence_method: 'constant',
+      support: null,
+      call_count: null,
+      evidence_kind: 'indexer',
+      evidence_ref: '[]',
+      rank: 'normal',
+      completeness: 'no_assertion',
+      extraction_run_id: 'scip-simulated-run',
+      model_id: null,
+      prompt_version: null,
+      first_seen_commit: 'scip-commit',
+      last_seen_commit: 'scip-commit',
+      valid_from_commit: 'scip-commit',
+      valid_to_commit: null,
+      status: 'active',
+      props: '{}',
+    });
+
+    scipSummary = await resolveCrossFileEdges(AppOntologyDataSource, {
+      graphId: SCIP_GRAPH_ID,
+      workspaceId: 'resolver-scip-ws',
+      commit: 'scip-commit',
+      extractionRunId: 'scip-resolve-run-1',
+    });
+  });
+
+  it('Sub extends Base + render 오버라이드로 OVERRIDES가 이번 실행에서 파생된다(사전조건 확인)', async () => {
+    const subRender = await nodeRepo.findOne({ where: { graph_id: SCIP_GRAPH_ID, qualified_name: 'Sub.render' } });
+    const baseRender = await nodeRepo.findOne({ where: { graph_id: SCIP_GRAPH_ID, qualified_name: 'Base.render' } });
+    const overrides = await edgeRepo.findOne({
+      where: { graph_id: SCIP_GRAPH_ID, type: 'OVERRIDES', src_id: subRender.id, dst_id: baseRender.id },
+    });
+    assert.ok(overrides, 'Sub.render -> Base.render OVERRIDES가 이 실행에서 새로 파생돼야 한다');
+  });
+
+  it('resolve.ts의 refs[] 루프가 아니라 사전에 직접 삽입한 SCIP 스타일 CALLS(resolution=exact)가 dynamic으로 갱신된다', async () => {
+    const updated = await edgeRepo.findOne({ where: { id: scipCallsEdgeId } });
+    assert.ok(updated);
+    assert.equal(updated.resolution, 'dynamic', '이 실행 바깥(SCIP 등)에서 이미 저장된 CALLS도 폴리모픽 타겟이면 dynamic으로 캡돼야 한다');
+    assert.equal(updated.confidence, 1.0, 'confidence(이름 해석 확신도)는 캡과 무관하게 원래 값(SCIP의 1.0)을 유지해야 한다');
+  });
+
+  it('summary.dynamicCappedEdges에도 기존 DB CALLS의 캡이 반영된다', () => {
+    assert.ok(scipSummary.dynamicCappedEdges >= 1, '기존에 저장돼 있던 CALLS의 캡도 summary 카운트에 반영돼야 한다');
   });
 });
