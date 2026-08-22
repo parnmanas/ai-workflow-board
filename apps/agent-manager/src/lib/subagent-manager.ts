@@ -38,7 +38,7 @@ import {
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
-import { writeMcpConfig } from './managed-agent-store.js';
+import { readMcpConfigToolProfile, writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import { classifySpawnException } from './dispatch-preflight.js';
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
@@ -711,25 +711,28 @@ export class SubagentManager implements SubagentManagerContract {
         // config to avoid the extra fs write.
         const needsSessionPin = !!(spec.ticketId && spec.role);
 
-        if (ctx?.mcp_config_path && !needsSessionPin && !toolProfileHeader['X-AWB-Tool-Profile']) {
-          // Reuse the static per-agent mcp-config.json for non-role spawns. If
-          // it vanished from disk (partial spawn / manual cleanup / pre-file
-          // manager upgrade), the CLI would fail with "MCP config file not
-          // found" — regenerate it in place from the in-context apiKey.
-          // Regeneration preserves the host stdio server the temp else-branch
-          // below would drop.
-          configPath = existsSync(ctx.mcp_config_path)
-            ? ctx.mcp_config_path
-            : await writeMcpConfig(ctx.agent_id, this.#config.url, effectiveApiKey);
-          configPathIsTemp = false;
-        } else if (ctx?.mcp_config_path && !needsSessionPin) {
-          // Ticket ee26302d: see base-session-manager.ts's identical branch —
-          // the on-disk static config may predate/mismatch this session's
-          // resolved compact profile, so rewrite it unconditionally rather
-          // than trusting the reuse-if-exists fast path above.
-          configPath = await writeMcpConfig(
-            ctx.agent_id, this.#config.url, effectiveApiKey, undefined, toolProfileHeader,
-          );
+        if (ctx?.mcp_config_path && !needsSessionPin) {
+          // Reuse the static per-agent mcp-config.json for non-role spawns —
+          // but ONLY if its on-disk X-AWB-Tool-Profile header already matches
+          // what THIS session wants. Ticket ee26302d review round 1 (P1): see
+          // base-session-manager.ts's identical branch — the file is shared
+          // across every non-pinned spawn for this agent, so a PRIOR
+          // session's resolved profile can leave a stale header a LATER
+          // session would otherwise silently inherit regardless of its own
+          // desired profile. Comparing content fixes both directions
+          // (compact→full and full→compact), not just one.
+          const wantProfile = toolProfileHeader['X-AWB-Tool-Profile'];
+          const exists = existsSync(ctx.mcp_config_path);
+          const onDiskProfile = exists ? await readMcpConfigToolProfile(ctx.mcp_config_path) : undefined;
+          if (exists && onDiskProfile === wantProfile) {
+            configPath = ctx.mcp_config_path;
+          } else {
+            // Missing (partial spawn / manual cleanup / pre-file manager
+            // upgrade) or profile mismatch — (re)write in place.
+            configPath = await writeMcpConfig(
+              ctx.agent_id, this.#config.url, effectiveApiKey, undefined, toolProfileHeader,
+            );
+          }
           configPathIsTemp = false;
         } else {
           configPath = join(

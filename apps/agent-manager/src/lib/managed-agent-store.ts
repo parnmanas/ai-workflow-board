@@ -258,6 +258,28 @@ export async function writeMcpConfig(
   return path;
 }
 
+/**
+ * Reads an existing mcp-config.json's `awb` server headers and returns its
+ * current `X-AWB-Tool-Profile` value (or `undefined` if absent/unreadable).
+ *
+ * Ticket ee26302d review round 1 (P1): callers that reuse a shared static
+ * config across sessions with different resolved profiles cannot assume the
+ * file's PAST content matches THIS session's desired profile just because
+ * this session doesn't want 'compact' — a prior compact session may have
+ * left that header stamped on the shared file. Compare this against the
+ * caller's own desired header value before deciding to reuse-as-is vs
+ * rewrite.
+ */
+export async function readMcpConfigToolProfile(path: string): Promise<string | undefined> {
+  try {
+    const raw = await fsp.readFile(path, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed?.mcpServers?.awb?.headers?.['X-AWB-Tool-Profile'];
+  } catch {
+    return undefined;
+  }
+}
+
 /** Remove the on-disk apiKey + mcp-config for an agent (e.g., on stop).
  *  Also clears the per-agent CLI credential snapshot — on the next spawn the
  *  manager re-fetches it from AWB so a credential-rotation in the AWB UI

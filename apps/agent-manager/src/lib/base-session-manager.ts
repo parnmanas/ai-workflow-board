@@ -39,7 +39,7 @@ import {
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
-import { writeMcpConfig } from './managed-agent-store.js';
+import { readMcpConfigToolProfile, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
   resolveMaxOutputTokensEnv,
@@ -712,29 +712,32 @@ export class BaseSessionManager {
         // (no role pinning needed there).
         const needsSessionPin = !!(monitorMeta?.ticket_id && monitorMeta?.role);
 
-        if (agentContext?.mcp_config_path && !needsSessionPin && !toolProfileHeader['X-AWB-Tool-Profile']) {
+        if (agentContext?.mcp_config_path && !needsSessionPin) {
           // Reuse the static per-agent mcp-config.json for chat / non-pinned
-          // sessions. If it vanished from disk (partial spawn, manual cleanup,
-          // or a manager upgrade that predates the file), the CLI would fail
-          // with "MCP config file not found" — regenerate it in place from the
-          // in-context apiKey. Regeneration preserves the host stdio server the
-          // temp-config else-branch below would drop.
-          configPath = existsSync(agentContext.mcp_config_path)
-            ? agentContext.mcp_config_path
-            : await writeMcpConfig(agentContext.agent_id, this._config.url, effectiveApiKey);
-          configPathIsTemp = false;
-        } else if (agentContext?.mcp_config_path && !needsSessionPin) {
-          // Ticket ee26302d: this session's resolved profile wants the
-          // compact tool profile, but the static config on disk may
-          // predate this feature (or was last written for a 'full'
-          // session) — the reuse-if-exists fast path above can't tell
-          // without parsing the file, so unconditionally rewrite it here.
-          // Non-temp (configPathIsTemp stays false) so the file continues
-          // to serve as this agent's ordinary static config afterward —
-          // only the extra fs write on this spawn is the cost.
-          configPath = await writeMcpConfig(
-            agentContext.agent_id, this._config.url, effectiveApiKey, undefined, toolProfileHeader,
-          );
+          // sessions — but ONLY if its on-disk X-AWB-Tool-Profile header
+          // already matches what THIS session wants. Ticket ee26302d review
+          // round 1 (P1): the file is shared across every non-pinned spawn
+          // for this agent, so a PRIOR session's resolved profile (e.g. a
+          // compact-context backend) can leave a stale header that a LATER
+          // full-profile session would otherwise silently inherit — the
+          // previous version of this branch only rewrote when the CURRENT
+          // session wanted compact, never when it wanted full but the file
+          // was already stamped compact. Comparing content (not just "did
+          // this session ask for compact") fixes both directions.
+          const wantProfile = toolProfileHeader['X-AWB-Tool-Profile'];
+          const exists = existsSync(agentContext.mcp_config_path);
+          const onDiskProfile = exists ? await readMcpConfigToolProfile(agentContext.mcp_config_path) : undefined;
+          if (exists && onDiskProfile === wantProfile) {
+            configPath = agentContext.mcp_config_path;
+          } else {
+            // Missing (partial spawn / manual cleanup / pre-file manager
+            // upgrade) or profile mismatch — (re)write in place. Non-temp
+            // (configPathIsTemp stays false) so the file continues to serve
+            // as this agent's ordinary static config afterward.
+            configPath = await writeMcpConfig(
+              agentContext.agent_id, this._config.url, effectiveApiKey, undefined, toolProfileHeader,
+            );
+          }
           configPathIsTemp = false;
         } else {
           configPath = join(
