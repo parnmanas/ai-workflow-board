@@ -17,12 +17,22 @@ import { findOrFail } from '../../common/find-or-fail';
 import { ensureRepoCache, listTree, getFileContent, listCommits } from '../mcp/shared/git-repo-cache';
 import { resolveGitCredential } from '../mcp/shared/git-branches';
 import { AppOntologyDataSource } from '../../db';
-import { langForPath, type ExtractionTask } from './extraction/types';
+import { langForPath, type ExtractionTask, type FactBundle } from './extraction/types';
 import { runExtractionPool } from './extraction/pool';
 import { persistFactBundles, type PersistSummary } from './persist';
 import type { DecoratorFact } from './extraction/decorator-rules';
 
 const FETCH_CONCURRENCY = 16;
+const MAX_ERROR_MESSAGE_LENGTH = 300;
+// 워커가 대량 동시 크래시하는 병리적 상황(예: worker.js 자체 결함)에서도
+// 반환 페이로드가 무한정 커지지 않도록 상세 목록만 캡한다 —
+// filesFailedExtraction 카운트 자체는 캡 없이 항상 정확하므로, 목록 길이가
+// 카운트보다 작으면 "더 있음"을 그 자체로 알 수 있다.
+const MAX_REPORTED_EXTRACTION_FAILURES = 100;
+
+function redactWorkerError(raw: string): string {
+  return raw.length > MAX_ERROR_MESSAGE_LENGTH ? `${raw.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : raw;
+}
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -51,11 +61,28 @@ export interface ExtractRepoOptions {
   poolSize?: number;
 }
 
+export interface ExtractionFailure {
+  path: string;
+  /** 워커가 보고한 에러 메시지 — 길이만 절단(redact)한다, 원인 판별에
+   *  필요한 예외 메시지 자체는 지우지 않는다. */
+  error: string;
+}
+
 export interface ExtractRepoResult extends PersistSummary {
   commit: string;
   filesDiscovered: number;
   filesSkippedByExtension: number;
   filesSkippedTooLargeOrBinary: number;
+  /** worker_threads 풀이 에러/비정상 exit로 회수한 파일 수 — bundle=null이라
+   *  persist 입력에서 조용히 빠진 파일들. pool.ts는 이런 실패를 파일별 에러
+   *  값으로 의도적으로 복구해 풀 전체 Promise를 정상 resolve시키므로, 이
+   *  카운트가 없으면 부분 그래프가 완전한 성공처럼 보인다(리뷰 지적 — 이
+   *  필드 없이는 filesDiscovered와의 차분만으로 extension/large/binary/
+   *  quarantine/worker-failure 원인을 구분할 수 없었다). */
+  filesFailedExtraction: number;
+  /** filesFailedExtraction의 상세 — MAX_REPORTED_EXTRACTION_FAILURES개까지만
+   *  담는다(카운트 자체는 캡 없음). */
+  extractionFailures: ExtractionFailure[];
   treeWalkMs: number;
   fetchMs: number;
   extractMs: number;
@@ -65,6 +92,20 @@ export interface ExtractRepoResult extends PersistSummary {
 
 @Injectable()
 export class OntologyExtractionService {
+  // 아래 필드들은 실제 구현이 기본값이다 — 테스트에서만 재할당해 git-repo-cache/
+  // 실제 워커 풀/DB 없이 extractRepo() 자신의 조합 로직(특히 풀 실패 →
+  // ExtractRepoResult 전파)을 검증한다
+  // (test/ontology-extraction-service-failure-propagation.test.mjs). 프로덕션
+  // 코드 경로는 이 필드들을 재할당하지 않는다 — Nest DI가 생성한 인스턴스는
+  // 항상 아래 기본값(실제 구현)을 그대로 쓴다.
+  private ensureRepoCache = ensureRepoCache;
+  private listTree = listTree;
+  private getFileContent = getFileContent;
+  private listCommits = listCommits;
+  private resolveGitCredential = resolveGitCredential;
+  private runExtractionPool = runExtractionPool;
+  private persistFactBundles = persistFactBundles;
+
   constructor(
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
@@ -85,7 +126,7 @@ export class OntologyExtractionService {
     const queue: string[] = [rootPath];
     while (queue.length > 0) {
       const dir = queue.shift()!;
-      const entries = await listTree(repoPath, ref, dir);
+      const entries = await this.listTree(repoPath, ref, dir);
       for (const entry of entries) {
         if (entry.type === 'tree') {
           queue.push(entry.path);
@@ -110,11 +151,11 @@ export class OntologyExtractionService {
       throw new Error("resource has no URL — set the repository's URL before extracting its ontology graph");
     }
 
-    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, opts.workspaceId);
-    const repoPath = await ensureRepoCache({ resourceId: opts.resourceId, url: resource.url, credential });
+    const credential = await this.resolveGitCredential(this.credentialRepo, resource.credential_id, opts.workspaceId);
+    const repoPath = await this.ensureRepoCache({ resourceId: opts.resourceId, url: resource.url, credential });
     const ref = opts.ref || resource.default_branch || 'HEAD';
 
-    const commits = await listCommits({ repoPath, ref, limit: 1 });
+    const commits = await this.listCommits({ repoPath, ref, limit: 1 });
     const commit = commits[0]?.sha ?? ref;
 
     const treeStart = Date.now();
@@ -122,7 +163,7 @@ export class OntologyExtractionService {
     const treeWalkMs = Date.now() - treeStart;
 
     const fetchStart = Date.now();
-    const fetched = await mapWithConcurrency(files, FETCH_CONCURRENCY, (filePath) => getFileContent(repoPath, ref, filePath));
+    const fetched = await mapWithConcurrency(files, FETCH_CONCURRENCY, (filePath) => this.getFileContent(repoPath, ref, filePath));
     const fetchMs = Date.now() - fetchStart;
 
     let skippedTooLargeOrBinary = 0;
@@ -141,17 +182,33 @@ export class OntologyExtractionService {
     }
 
     const extractStart = Date.now();
-    const results = await runExtractionPool(tasks, { poolSize: opts.poolSize });
+    const results = await this.runExtractionPool(tasks, { poolSize: opts.poolSize });
     const extractMs = Date.now() - extractStart;
 
-    const bundles = results.filter((r) => r.bundle).map((r) => r.bundle!);
+    // 리뷰 지적 — pool.ts는 워커 에러/비정상 exit를 파일별 에러 값으로
+    // 의도적으로 복구해 풀 전체 Promise를 정상 resolve시킨다(배치 하나가
+    // 파일 하나의 결함으로 멈추지 않게 하려고). 그래서 bundle===null인
+    // 항목을 그냥 걸러내기만 하면(이전 구현) 그 정보가 이 서비스 경계에서
+    // 완전히 사라져, 워커 OOM/모듈 에러가 나도 호출자는 부분 그래프를 완전한
+    // 성공으로 오인한다 — 아래에서 명시적으로 집계해 반환값에 싣는다.
+    const bundles: FactBundle[] = [];
     const decoratorFactsByPath = new Map<string, DecoratorFact[]>();
+    const extractionFailures: ExtractionFailure[] = [];
+    let filesFailedExtraction = 0;
     for (const r of results) {
-      if (r.bundle) decoratorFactsByPath.set(r.path, r.decoratorFacts);
+      if (r.bundle) {
+        bundles.push(r.bundle);
+        decoratorFactsByPath.set(r.path, r.decoratorFacts);
+        continue;
+      }
+      filesFailedExtraction += 1;
+      if (extractionFailures.length < MAX_REPORTED_EXTRACTION_FAILURES) {
+        extractionFailures.push({ path: r.path, error: redactWorkerError(r.error ?? 'unknown worker failure') });
+      }
     }
 
     const dataSource = this.resolveOntologyDataSource();
-    const summary = await persistFactBundles(dataSource, {
+    const summary = await this.persistFactBundles(dataSource, {
       graphId: opts.graphId,
       workspaceId: opts.workspaceId,
       resourceId: opts.resourceId,
@@ -176,6 +233,8 @@ export class OntologyExtractionService {
       filesDiscovered: files.length,
       filesSkippedByExtension: skippedByExtension,
       filesSkippedTooLargeOrBinary: skippedTooLargeOrBinary,
+      filesFailedExtraction,
+      extractionFailures,
       treeWalkMs,
       fetchMs,
       extractMs,
