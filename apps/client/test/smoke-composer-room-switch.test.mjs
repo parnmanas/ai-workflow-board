@@ -8,11 +8,18 @@
 //
 // 워크스페이스 미설정 시 멘션 후보 fetch 는 early-return 하므로 네트워크 없이 마운트된다.
 //
+// ChatMessageInput 은 현재 useBoardStream 을 쓰지 않지만, CredentialManager 가 그랬듯
+// SSE 구독이 나중에 추가되는 순간 provider 없이는 마운트 자체가 깨진다(티켓 474bc091).
+// mountWithBoardStream 으로 미리 감싸 그 회귀를 구조적으로 막는다 — auth_token 을
+// 설정하지 않으므로 BoardStreamProvider 의 EventSource 연결 effect 는 early-return 하고
+// (installFakeEventSource 불필요), AuthProvider 도 이 컴포넌트가 요구하지 않아 생략한다.
+//
 // 실행:  node --import tsx --test apps/client/test/smoke-composer-room-switch.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, run, React } from './helpers/jsdom.mjs';
+import { setupDom, run, React } from './helpers/jsdom.mjs';
+import { mountWithBoardStream } from './helpers/boardStream.mjs';
 import ChatMessageInput from '../src/components/chat/ChatMessageInput.tsx';
 
 const h = React.createElement;
@@ -39,7 +46,10 @@ test('룸 전환 시 컴포저 draft 가 초기화된다(다중 작업 전환 �
   globalThis.URL.revokeObjectURL = dom.window.URL.revokeObjectURL;
 
   try {
-    const view = mount(h(ChatMessageInput, { roomId: 'room-A', onSent: () => {}, isMobile: true }));
+    const view = mountWithBoardStream(
+      h(ChatMessageInput, { roomId: 'room-A', onSent: () => {}, isMobile: true }),
+      { withAuth: false },
+    );
     const textarea = view.container.querySelector('textarea');
     assert.ok(textarea, '컴포저 textarea 가 렌더돼야 함');
 
