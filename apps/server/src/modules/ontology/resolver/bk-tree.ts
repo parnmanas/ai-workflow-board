@@ -40,6 +40,15 @@ export interface BKMatch {
   distance: number;
 }
 
+export interface BKQueryStats {
+  matches: BKMatch[];
+  /** 이번 query()가 실제로 방문한 노드 수(= levenshtein 호출 횟수). 트리
+   *  전체 크기 이하로 항상 bounded — 삼각부등식 가지치기가 실제로 작동하는지
+   *  wall-clock 없이 결정론적으로 계측하기 위한 용도(scripts/benchmark-bk-tree.mjs,
+   *  리뷰 지적 — 완료조건 2를 wall-clock 노이즈가 아니라 실제 게이트로). */
+  visitedNodes: number;
+}
+
 /** 편집거리 메트릭 위의 BK-tree — insert()는 추출 런당 워크스페이스 심볼명
  *  전체에 대해 한 번씩, query()는 미해소 참조 하나당 한 번 호출된다. 둘 다
  *  평균 O(log n) 노드 방문(가지치기 덕분) — pairwise 비교(O(n))와 달리
@@ -75,11 +84,20 @@ export class BKTree {
   /** word와 편집거리 maxDistance 이하인 모든 단어를 distance 오름차순(동률은
    *  사전순)으로 반환한다. */
   query(word: string, maxDistance: number): BKMatch[] {
-    if (!this.root) return [];
+    return this.queryWithStats(word, maxDistance).matches;
+  }
+
+  /** query()와 완전히 같은 순회 코드 경로를 공유하되(별도로 복제된 로직
+   *  아님), 실제로 방문한 노드 수도 함께 반환한다 — query()의 기존
+   *  시그니처/동작은 그대로 유지된다. */
+  queryWithStats(word: string, maxDistance: number): BKQueryStats {
+    if (!this.root) return { matches: [], visitedNodes: 0 };
     const out: BKMatch[] = [];
+    let visitedNodes = 0;
     const stack: BKNode[] = [this.root];
     while (stack.length > 0) {
       const node = stack.pop()!;
+      visitedNodes += 1;
       const d = levenshtein(word, node.word);
       if (d <= maxDistance) out.push({ word: node.word, distance: d });
       // 삼각부등식 가지치기: edge와 d의 차이가 maxDistance를 넘는 자식
@@ -90,6 +108,6 @@ export class BKTree {
       }
     }
     out.sort((a, b) => a.distance - b.distance || (a.word < b.word ? -1 : a.word > b.word ? 1 : 0));
-    return out;
+    return { matches: out, visitedNodes };
   }
 }

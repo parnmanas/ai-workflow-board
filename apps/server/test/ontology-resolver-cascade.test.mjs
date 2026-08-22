@@ -386,6 +386,33 @@ describe('BKTree — 직접 단위테스트', () => {
     tree.insert('same');
     assert.equal(tree.size, 1);
   });
+
+  it('queryWithStats()는 query()와 완전히 같은 매치를 반환하고, 방문 노드 수는 트리 크기보다 적다(가지치기가 실제로 일어난다)', () => {
+    const words = [
+      'apple', 'banana', 'cherry', 'date', 'eggplant', 'fig', 'grape', 'honeydew',
+      'kiwi', 'lemon', 'mango', 'nectarine', 'orange', 'papaya', 'quince', 'raspberry',
+      'strawberry', 'tangerine', 'ugli', 'vanilla', 'watermelon', 'ximenia', 'yam', 'zucchini',
+    ];
+    const tree = new BKTree();
+    for (const w of words) tree.insert(w);
+    assert.equal(tree.size, words.length);
+
+    const stats = tree.queryWithStats('kiwi', 1);
+    const direct = tree.query('kiwi', 1);
+    assert.deepEqual(stats.matches, direct, 'queryWithStats().matches는 query()와 같은 순회 코드 경로를 공유하므로 결과가 완전히 같아야 한다');
+    assert.ok(stats.visitedNodes > 0);
+    assert.ok(
+      stats.visitedNodes < tree.size,
+      `삼각부등식 가지치기가 실제로 작동해 트리 전체(${tree.size}개)를 방문하지 않아야 한다 — 실제 방문 ${stats.visitedNodes}개`,
+    );
+  });
+
+  it('빈 트리에서 queryWithStats()는 visitedNodes=0을 반환한다', () => {
+    const tree = new BKTree();
+    const stats = tree.queryWithStats('anything', 5);
+    assert.deepEqual(stats.matches, []);
+    assert.equal(stats.visitedNodes, 0);
+  });
 });
 
 describe('path-resolution — 순수 함수 직접 테스트', () => {
