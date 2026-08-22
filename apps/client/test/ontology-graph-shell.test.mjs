@@ -29,11 +29,13 @@ test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라
   assert.doesNotMatch(appSource, /path="ontology-graph" element={<WorkspaceManagementPage/);
 });
 
-test('api.ts가 그래프 상태 조회 + 재방문 로깅 엔드포인트를 노출한다', () => {
+test('api.ts가 그래프 상태 조회 + 재방문 로깅 + refresh 커맨드 엔드포인트를 노출한다', () => {
   assert.match(apiSource, /getOntologyGraphStatus:/);
   assert.match(apiSource, /\/ontology\/status/);
   assert.match(apiSource, /logOntologyGraphViewOpened:/);
   assert.match(apiSource, /\/ontology\/view-opened/);
+  assert.match(apiSource, /refreshOntologyGraph:/);
+  assert.match(apiSource, /\/ontology\/refresh/);
 });
 
 test('types.ts가 상태 응답 + SSE 진행 이벤트 타입을 노출하고 dirty_ratio/behind/ahead 필드를 포함한다', () => {
@@ -65,4 +67,19 @@ test('OntologyGraphPage는 선택 변경 시 재방문을 로깅하되 폴링 ti
 
 test('OntologyGraphPage는 freshnessBadge 순수 함수를 그대로 소비한다(로직 중복 구현 금지)', () => {
   assert.match(pageSource, /import \{ freshnessBadge, type FreshnessTone \} from '\.\/freshness'/);
+});
+
+test('"Refresh Graph"는 GET /status 재호출이 아니라 POST /refresh 커맨드를 부른다(리뷰 지적, 승인 블로커 회귀)', () => {
+  // resolveOrProvision(=load())은 created===true(최초 참조)일 때만 재빌드를
+  // 킥오프한다 — 이미 존재하는 그래프에 대한 "Refresh"가 load()만 다시
+  // 부르면 아무것도 재시작되지 않는다. handleBuildOrRefresh가 statusResp
+  // 존재 여부로 분기해 refreshOntologyGraph를 실제로 호출하는지 확인.
+  assert.match(pageSource, /const handleBuildOrRefresh = useCallback\(async \(\) => \{/);
+  assert.match(pageSource, /if \(!statusResp\) \{\s*void load\(\);\s*return;\s*\}/);
+  assert.match(pageSource, /api\.refreshOntologyGraph\(wsId, statusResp\.graph_id\)/);
+  assert.match(pageSource, /onClick={\(\) => void handleBuildOrRefresh\(\)}/);
+});
+
+test('Refresh/Build 버튼은 building 중에는 비활성화된다(중복 클릭 UX — 서버 CAS와 별개의 방어선)', () => {
+  assert.match(pageSource, /disabled={!resourceId \|\| loading \|\| refreshing \|\| isBuilding}/);
 });

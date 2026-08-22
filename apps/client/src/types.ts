@@ -2659,6 +2659,16 @@ export interface OntologyGraphStatusResponse {
   freshness_error: string | null;
 }
 
+/** POST /api/ontology/refresh 응답 — 기존 그래프를 building으로 되돌리고
+ *  재빌드를 킥오프한다("Refresh Graph" 액션, GET /status와 달리 이미
+ *  존재하는 그래프도 실제로 재시작한다). `started=false`면 이미 building
+ *  중이던 그래프에 대한 중복 호출 — 새 빌드를 또 킥오프하지 않았다는 뜻. */
+export interface OntologyGraphRefreshResponse {
+  graph_id: string;
+  status: OntologyGraphStatusValue;
+  started: boolean;
+}
+
 /** Payload of the `ontology_graph_progress` SSE frame (UI-only event,
  *  ticket 964014f5) — server(event-registry.ts)/client(BoardStreamContext.tsx)
  *  배선은 이미 완료돼 있음, 이 타입만 신규(ticket d22b83b4). */

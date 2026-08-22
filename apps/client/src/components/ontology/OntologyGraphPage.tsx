@@ -36,6 +36,7 @@ export default function OntologyGraphPage() {
   const [folderPath, setFolderPath] = useState('');
   const [statusResp, setStatusResp] = useState<OntologyGraphStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 같은 (resource_id, folder_path) 선택에 대해 재방문 로그를 중복 기록하지
   // 않기 위한 마지막 로깅 키 — 폴링 tick마다가 아니라 "사람이 다른
@@ -82,6 +83,30 @@ export default function OntologyGraphPage() {
     api.logOntologyGraphViewOpened(wsId, { resourceId, folderPath }).catch(() => { /* 텔레메트리 실패는 조용히 무시 */ });
   }, [wsId, resourceId, folderPath]);
 
+  // "Build/Refresh Graph" 액션(리뷰 지적, 승인 블로커) — load()(GET
+  // /status)는 조회+최초 프로비저닝만 할 뿐, 이미 존재하는(ready/stale/
+  // error) 그래프는 재시작하지 않는다(resolveOrProvision은 created===true일
+  // 때만 kickOffInitialBuild를 부른다). 기존 그래프에 대해서는 별도
+  // POST /refresh(forceRebuild, 원자적 단일-승자 UPDATE)로 실제 재빌드를
+  // 킥오프한 뒤, 그 결과(대개 status='building')를 반영하도록 load()를
+  // 다시 불러 폴링을 재개시킨다.
+  const handleBuildOrRefresh = useCallback(async () => {
+    if (!wsId || !resourceId) return;
+    if (!statusResp) {
+      void load();
+      return;
+    }
+    setRefreshing(true);
+    try {
+      await api.refreshOntologyGraph(wsId, statusResp.graph_id);
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to refresh graph', 'error');
+    } finally {
+      setRefreshing(false);
+    }
+    void load({ silent: true });
+  }, [wsId, resourceId, statusResp, load, showToast]);
+
   // building 동안만 폴링 — ready/error/stale 도달 즉시 멈춘다
   // (MissionDetailPage.tsx의 isLive 안전망 폴링과 같은 자세).
   const isBuilding = statusResp?.status === 'building';
@@ -124,7 +149,11 @@ export default function OntologyGraphPage() {
         title="Ontology Graph"
         description="Extracted structural and semantic graph of a repository — symbols, calls, imports, and how they relate."
         actions={
-          <Button variant="primary" onClick={() => void load()} disabled={!resourceId || loading}>
+          <Button
+            variant="primary"
+            onClick={() => void handleBuildOrRefresh()}
+            disabled={!resourceId || loading || refreshing || isBuilding}
+          >
             {statusResp ? 'Refresh Graph' : 'Build Graph'}
           </Button>
         }

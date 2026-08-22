@@ -133,6 +133,28 @@ export class OntologyController {
     });
   }
 
+  // "Refresh Graph" 액션의 실제 재빌드 트리거(리뷰 지적, 승인 블로커) —
+  // GET /status는 조회(+최초 참조 시 프로비저닝)일 뿐 기존 그래프를
+  // 재빌드하지 않는다(OntologyLifecycleService.forceRebuild 코멘트 참고).
+  // 조회(GET)와 명령(POST)을 분리 — actions.service.ts류의 커맨드
+  // 엔드포인트와 같은 자세.
+  @Post('refresh')
+  async refresh(@Body() body: any, @Res() res: Response) {
+    const workspaceId = body?.workspace_id;
+    const graphId = body?.graph_id;
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!graphId) return res.status(400).json({ error: 'graph_id is required' });
+    try {
+      const { graph, started } = await this.lifecycleService.forceRebuild({ graphId, workspaceId });
+      return res.json({ graph_id: graph.id, status: graph.status, started });
+    } catch (e: any) {
+      if (e instanceof GraphRefResolutionError) {
+        return res.status(e.code === 'not_found' ? 404 : 400).json({ error: e.message, code: e.code });
+      }
+      throw e;
+    }
+  }
+
   // 휴먼 그래프뷰 재방문 텔레메트리(Done-when, ticket d22b83b4) —
   // ontology-tools.ts의 logGraphToolCall과 같은 메커니즘(LogService,
   // 'Ontology' 카테고리)을 재사용한다. status 폴링마다가 아니라 페이지가

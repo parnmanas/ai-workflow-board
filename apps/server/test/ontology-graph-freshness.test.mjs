@@ -56,8 +56,10 @@ const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' 
 const { Resource } = await import('file://' + path.join(DIST_ROOT, 'entities/Resource.js'));
 const { Credential } = await import('file://' + path.join(DIST_ROOT, 'entities/Credential.js'));
 const { OntologyGraph } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyGraph.js'));
+const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
 const { OntologyEdge } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyEdge.js'));
-const { OntologyLifecycleService } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/ontology-lifecycle.service.js'));
+const { OntologyReverseEdgeIndex } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyReverseEdgeIndex.js'));
+const { OntologyLifecycleService, GraphRefResolutionError } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/ontology-lifecycle.service.js'));
 const { OntologyController } = await import('file://' + path.join(DIST_ROOT, 'modules/ontology/ontology.controller.js'));
 const { countBehindAhead } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp/shared/git-repo-cache.js'));
 
@@ -69,6 +71,14 @@ function edge(id, graphId, overrides = {}) {
   return {
     id, workspace_id: WORKSPACE_ID, graph_id: graphId, src_id: `${id}-src`, dst_id: `${id}-dst`,
     type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active',
+    ...overrides,
+  };
+}
+
+function node(id, graphId, symbolId, overrides = {}) {
+  return {
+    id, workspace_id: WORKSPACE_ID, graph_id: graphId, symbol_id: symbolId,
+    type: 'Callable', layer: 'structural', name: symbolId, confidence: 1, status: 'active',
     ...overrides,
   };
 }
@@ -270,5 +280,177 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
     assert.equal(entry.meta.resource_id, 'r-view');
     assert.equal(entry.meta.folder_path, 'apps/server');
     assert.equal(entry.meta.user_id, 'u1');
+  });
+});
+
+// ─── 리뷰 지적 회귀(승인 블로커, 라운드1) ────────────────────────────────
+// "Refresh Graph" 버튼이 GET /status(resolveOrProvision)만 다시 부르는데,
+// resolveOrProvision은 created===true(최초 참조)일 때만 kickOffInitialBuild를
+// 부른다 — 기존 ready/stale/error 그래프에 대한 "Refresh"가 실제로는
+// 아무것도 재시작하지 않았고, 특히 실패한 최초 빌드는 UI에서 영구히
+// 재시도 불가능했다. forceRebuild()(원자적 단일-승자 UPDATE)로 해소.
+
+describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
+  it('두 번째 실행이 첫 번째 실행의 노드/엣지/역방향색인을 정확히 교체한다 — 중복 적재도, unique 제약 위반도 없어야 한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-idempotent', folder_path: '', status: 'ready',
+    }));
+    const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
+    const reverseRepo = AppOntologyDataSource.getRepository(OntologyReverseEdgeIndex);
+
+    // 실제 extractRepo/resolveGraph를 흉내내는 fake — 매 호출마다 진짜 repo에
+    // 행을 심는다(요약 숫자만 반환하는 다른 describe 블록의 fake와 달리,
+    // 여기서는 실제 DB 부수효과 자체를 검증해야 하므로).
+    let call = 0;
+    const insertingExtraction = {
+      extractRepo: async () => {
+        call += 1;
+        const rows = call === 1
+          ? [node(randomUUID(), graph.id, 'sym:a')]
+          : [node(randomUUID(), graph.id, 'sym:a', { name: 'a-v2' }), node(randomUUID(), graph.id, 'sym:b')];
+        await nodeRepo.insert(rows);
+        return {
+          commit: `c${call}`, filesDiscovered: rows.length, filesSkippedByExtension: 0, filesSkippedTooLargeOrBinary: 0,
+          filesFailedExtraction: 0, extractionFailures: [], treeWalkMs: 1, fetchMs: 1, extractMs: 1, totalLines: 1,
+          endToEndLinesPerSecond: 1, filesProcessed: rows.length, nodesInserted: rows.length, edgesInserted: 0,
+          containsEdges: 0, declaresEdges: 0, decoratesEdges: 0, decoratesUnresolved: 0, parseErrorFiles: 0,
+          skippedFiles: 0, durationMs: 1,
+        };
+      },
+    };
+    const insertingResolver = {
+      resolveGraph: async () => {
+        const edgeRows = call === 1 ? [edge('e1', graph.id)] : [edge('e2', graph.id), edge('e3', graph.id)];
+        await edgeRepo.save(edgeRows);
+        await reverseRepo.insert([{ graph_id: graph.id, dst_symbol_id: 'sym:a', src_file_id: 'f1' }]);
+        return {
+          filesProcessed: 1, edgesInserted: edgeRows.length, importsEdges: 0, refEdgesByType: {}, heritageEdges: 0,
+          overridesEdges: 0, dynamicCappedEdges: 0, reverseIndexRows: 1, unresolvedImports: 0, unresolvedRefs: 0,
+        };
+      },
+    };
+
+    const svc = new OntologyLifecycleService(AppOntologyDataSource, insertingExtraction, insertingResolver, { info() {}, warn() {}, error() {} });
+
+    await svc.runInitialBuild(graph);
+    assert.equal((await nodeRepo.find({ where: { graph_id: graph.id } })).length, 1, '1회차 후 노드 1개');
+    assert.equal((await edgeRepo.find({ where: { graph_id: graph.id } })).length, 1, '1회차 후 엣지 1개');
+
+    const afterFirst = await graphRepo.findOne({ where: { id: graph.id } });
+    await assert.doesNotReject(
+      svc.runInitialBuild(afterFirst),
+      '재실행이 OntologyNode의 (graph_id, symbol_id) 유니크 인덱스 위반으로 죽으면 안 된다(첫 실행도 sym:a를 심었으므로, 지우지 않고 재실행하면 반드시 충돌한다)',
+    );
+
+    const finalNodes = await nodeRepo.find({ where: { graph_id: graph.id } });
+    const finalEdges = await edgeRepo.find({ where: { graph_id: graph.id } });
+    const finalReverse = await reverseRepo.find({ where: { graph_id: graph.id } });
+    assert.equal(finalNodes.length, 2, '2회차 후 노드는 2회차가 심은 2개뿐이어야 한다(1회차 잔존/중복 없음)');
+    assert.deepEqual(finalNodes.map((n) => n.symbol_id).sort(), ['sym:a', 'sym:b']);
+    assert.equal(finalEdges.length, 2, '2회차 후 엣지는 2개뿐이어야 한다 — OntologyEdge는 유니크 제약이 없어, 지우지 않았다면 1회차 엣지가 살아남아 3개가 됐을 것');
+    assert.equal(finalReverse.length, 1, '역방향색인도 2회차 것만 남아야 한다 — 누적되면 2개');
+
+    const finalGraph = await graphRepo.findOne({ where: { id: graph.id } });
+    assert.equal(finalGraph.status, 'ready');
+    assert.equal(finalGraph.commit, 'c2');
+  });
+});
+
+describe('OntologyLifecycleService.forceRebuild — "Refresh Graph" 액션의 실제 재시작', () => {
+  it('ready 그래프를 refresh하면 building으로 전환되고 started=true', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-ready', folder_path: '', status: 'ready', commit: 'oldsha', indexed_at: new Date(),
+    }));
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    assert.equal(result.started, true);
+    assert.equal(result.graph.status, 'building');
+  });
+
+  it('error 그래프를 refresh하면 error 필드가 비워지고 building으로 전환된다 — "영구 재시도 불가" 버그의 정확한 회귀', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-error', folder_path: '', status: 'error', error: 'boom: previous failure',
+    }));
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    assert.equal(result.started, true);
+    assert.equal(result.graph.status, 'building');
+    assert.equal(result.graph.error, '');
+  });
+
+  it('이미 building 중인 그래프를 refresh하면 새 빌드를 킥오프하지 않는다(started=false)', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-building', folder_path: '', status: 'building',
+    }));
+    const result = await lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID });
+    assert.equal(result.started, false);
+    assert.equal(result.graph.status, 'building');
+  });
+
+  it('동시 두 번의 refresh 요청(중복 클릭) 중 정확히 하나만 승자가 된다 — 원자적 단일-승자 UPDATE(actions.service.ts와 같은 패턴)', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-race', folder_path: '', status: 'ready',
+    }));
+    const [a, b] = await Promise.all([
+      lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID }),
+      lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: WORKSPACE_ID }),
+    ]);
+    const startedCount = [a.started, b.started].filter(Boolean).length;
+    assert.equal(startedCount, 1, '정확히 하나만 started=true여야 한다(둘 다 true면 병렬 빌드, 둘 다 false면 아무도 재시작 안 됨)');
+  });
+
+  it('존재하지 않는 graph_id는 not_found', async () => {
+    await assert.rejects(
+      () => lifecycleService.forceRebuild({ graphId: 'gf-does-not-exist', workspaceId: WORKSPACE_ID }),
+      (e) => e instanceof GraphRefResolutionError && e.code === 'not_found',
+    );
+  });
+
+  it('다른 workspace 소유 그래프는 not_found(존재 유출 없음)', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-refresh-cross-ws', folder_path: '', status: 'ready',
+    }));
+    await assert.rejects(
+      () => lifecycleService.forceRebuild({ graphId: graph.id, workspaceId: OTHER_WORKSPACE_ID }),
+      (e) => e instanceof GraphRefResolutionError && e.code === 'not_found',
+    );
+  });
+});
+
+describe('OntologyController.refresh — "Refresh Graph" 커맨드 엔드포인트(조회 GET과 분리된 POST)', () => {
+  it('workspace_id 누락 시 400', async () => {
+    const res = fakeRes();
+    await controller.refresh({ graph_id: 'x' }, res);
+    assert.equal(res._status, 400);
+  });
+
+  it('graph_id 누락 시 400', async () => {
+    const res = fakeRes();
+    await controller.refresh({ workspace_id: WORKSPACE_ID }, res);
+    assert.equal(res._status, 400);
+  });
+
+  it('존재하지 않는 graph_id는 404', async () => {
+    const res = fakeRes();
+    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: 'gf-ctrl-does-not-exist' }, res);
+    assert.equal(res._status, 404);
+    assert.equal(res._body.code, 'not_found');
+  });
+
+  it('ready 그래프를 refresh하면 200 + started=true + status=building, 곧바로 재호출하면 started=false(중복 킥오프 방지가 컨트롤러 계층까지 이어진다)', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-ctrl-refresh', folder_path: '', status: 'ready',
+    }));
+
+    const res = fakeRes();
+    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: graph.id }, res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.started, true);
+    assert.equal(res._body.status, 'building');
+    assert.equal(res._body.graph_id, graph.id);
+
+    const res2 = fakeRes();
+    await controller.refresh({ workspace_id: WORKSPACE_ID, graph_id: graph.id }, res2);
+    assert.equal(res2._status, 200);
+    assert.equal(res2._body.started, false);
+    assert.equal(res2._body.status, 'building');
   });
 });

@@ -11,7 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, In } from 'typeorm';
 import { AppOntologyDataSource } from '../../db';
 import { OntologyGraph } from '../../entities/OntologyGraph';
+import { OntologyNode } from '../../entities/OntologyNode';
 import { OntologyEdge } from '../../entities/OntologyEdge';
+import { OntologyReverseEdgeIndex } from '../../entities/OntologyReverseEdgeIndex';
+import { deleteChunked, NODE_CHUNK_SIZE, EDGE_CHUNK_SIZE } from './persist';
 import { LogService } from '../../services/log.service';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
@@ -146,6 +149,14 @@ export class OntologyLifecycleService {
   async runInitialBuild(graph: OntologyGraph): Promise<void> {
     const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
     try {
+      // 리뷰 지적(d22b83b4, "Refresh Graph" 승인 블로커) — 이 메서드는
+      // 원래 그래프당 최초 1회만 호출된다는 암묵 전제로 짜여 있었다.
+      // forceRebuild()가 이제 같은 그래프에 대해 재호출하므로, 재추출 전
+      // 기존 행을 먼저 지워 (a) OntologyNode의 (graph_id, symbol_id)
+      // 유니크 인덱스 충돌, (b) 유니크 제약이 없는 OntologyEdge/
+      // OntologyReverseEdgeIndex의 조용한 중복 적재를 둘 다 막는다. 최초
+      // 빌드에서는 지울 행이 없어 사실상 no-op.
+      await this.clearExistingGraphRows(graph.id);
       const extractResult = await this.extractionService.extractRepo({
         workspaceId: graph.workspace_id,
         resourceId: graph.resource_id,
@@ -196,5 +207,70 @@ export class OntologyLifecycleService {
     if (total === 0) return null;
     const stale = await repo.count({ where: { graph_id: graphId, status: 'stale' } });
     return stale / total;
+  }
+
+  /** runInitialBuild()를 재호출해도 안전하도록 이 그래프의 기존
+   *  OntologyNode/Edge/ReverseEdgeIndex 행을 전부 지운다 — status 무관하게
+   *  전부(stale/removed도 (graph_id, symbol_id) 유니크 인덱스와 여전히
+   *  충돌하므로 active만 지우는 걸로는 부족하다). insertChunked와 대칭인
+   *  deleteChunked로 청크 단위 삭제 — 설계상 30만+ 노드 규모 그래프에서
+   *  단일 DELETE 문이 sql.js 이벤트 루프를 오래 막지 않게(같은 우려로
+   *  insertChunked 자체가 청크+양보 계약을 지킨다, persist.ts 파일 헤더
+   *  참고). */
+  private async clearExistingGraphRows(graphId: string): Promise<void> {
+    const ds = this.resolveOntologyDataSource();
+    const nodeRepo = ds.getRepository(OntologyNode);
+    const edgeRepo = ds.getRepository(OntologyEdge);
+    const reverseRepo = ds.getRepository(OntologyReverseEdgeIndex);
+
+    const nodeIds = (await nodeRepo.find({ where: { graph_id: graphId }, select: ['id'] })).map((n) => n.id);
+    const edgeIds = (await edgeRepo.find({ where: { graph_id: graphId }, select: ['id'] })).map((e) => e.id);
+    const reverseIds = (await reverseRepo.find({ where: { graph_id: graphId }, select: ['id'] })).map((r) => r.id);
+
+    await deleteChunked(nodeRepo, nodeIds, NODE_CHUNK_SIZE);
+    await deleteChunked(edgeRepo, edgeIds, EDGE_CHUNK_SIZE);
+    await deleteChunked(reverseRepo, reverseIds, EDGE_CHUNK_SIZE);
+  }
+
+  /**
+   * "Build/Refresh Graph" 액션의 refresh 절반(ticket d22b83b4, 리뷰 지적 —
+   * 승인 블로커). resolveOrProvision()은 그래프가 이미 존재하면(created
+   * ===false) kickOffInitialBuild를 부르지 않으므로, ready/stale/error
+   * 그래프에 대한 "Refresh"가 실제로는 아무것도 재시작하지 않았다 — 특히
+   * 실패한 최초 빌드는 UI에서 영구히 재시도 불가능했다. 이 메서드는 기존
+   * 그래프도 무조건 building으로 되돌리고 재빌드를 킥오프한다.
+   *
+   * actions.service.ts의 원자적 단일-승자 UPDATE 패턴과 같은 자세 —
+   * `status != 'building'` 가드 UPDATE 하나로 동시 두 클릭(또는 이미 진행
+   * 중인 백그라운드 빌드) 중 정확히 하나만 kickOffInitialBuild를 부르게
+   * 한다. `affected`는 Postgres·sql.js 둘 다 채워준다(actions.service.ts
+   * 리뷰 코멘트 참고) — undefined/null이면 승자가 아니라고 fail-closed
+   * 처리(?? 0).
+   */
+  async forceRebuild(input: { graphId: string; workspaceId: string }): Promise<{ graph: OntologyGraph; started: boolean }> {
+    const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
+    const graph = await repo.findOne({ where: { id: input.graphId } });
+    if (!graph || graph.workspace_id !== input.workspaceId) {
+      throw new GraphRefResolutionError('Ontology graph not found in this workspace', 'not_found');
+    }
+
+    const claim = await repo
+      .createQueryBuilder()
+      .update(OntologyGraph)
+      .set({ status: 'building', error: '' })
+      .where('id = :id', { id: graph.id })
+      .andWhere("status != 'building'")
+      .execute();
+    const won = (claim.affected ?? 0) > 0;
+
+    if (!won) {
+      const latest = await repo.findOne({ where: { id: graph.id } });
+      return { graph: latest ?? graph, started: false };
+    }
+
+    const updated = await repo.findOne({ where: { id: graph.id } });
+    const started = updated ?? graph;
+    this.kickOffInitialBuild(started);
+    return { graph: started, started: true };
   }
 }

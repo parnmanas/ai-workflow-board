@@ -91,6 +91,7 @@ import type {
   OrchestrationMissionDetail,
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
+  OntologyGraphRefreshResponse,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2377,6 +2378,11 @@ export const api = {
     request<{ ok: true }>('/ontology/view-opened', {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, resource_id: ref.resourceId, folder_path: ref.folderPath }),
+    }),
+  refreshOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphRefreshResponse> =>
+    request<OntologyGraphRefreshResponse>('/ontology/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, graph_id: graphId }),
     }),
 };
 

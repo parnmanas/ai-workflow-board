@@ -21,8 +21,11 @@ import type { DefFact, DefKind, FactBundle } from './extraction/types';
 import type { DecoratorFact } from './extraction/decorator-rules';
 import { classifyDurability } from './extraction/durability';
 
-const NODE_CHUNK_SIZE = 500; // 1/7 선례(ontology-sqljs-independent-datasource.test.mjs) — sql.js 표현식-트리 깊이 상한(~1000) 아래로 여유있게.
-const EDGE_CHUNK_SIZE = 500;
+// ontology-lifecycle.service.ts의 clearExistingGraphRows()(ticket d22b83b4,
+// "Refresh Graph" 재실행 전 삭제)가 deleteChunked와 같은 크기 상수를
+// 재사용하도록 export.
+export const NODE_CHUNK_SIZE = 500; // 1/7 선례(ontology-sqljs-independent-datasource.test.mjs) — sql.js 표현식-트리 깊이 상한(~1000) 아래로 여유있게.
+export const EDGE_CHUNK_SIZE = 500;
 
 // 3/7 리졸버(resolver/resolve.ts)가 같은 청크-삽입+매크로태스크-양보
 // 계약을 재사용한다 — 독립 재구현으로 계약이 갈라지는 걸 막기 위해 export.
@@ -128,6 +131,27 @@ export async function updateChunked<T extends object>(
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
     if (chunk.length > 0) await repo.update({ id: In(chunk) } as any, partialEntity as any);
+    await yieldToEventLoop();
+  }
+}
+
+/** insertChunked()/updateChunked()의 DELETE 대응 — id 목록을 chunkSize개씩
+ *  잘라 `DELETE ... WHERE id IN (...)`로 나눠 실행하고 청크 사이
+ *  매크로태스크를 양보한다. ontology-lifecycle.service.ts의
+ *  clearExistingGraphRows()(ticket d22b83b4, "Refresh Graph" 재실행 전
+ *  삭제)가 재사용 — 리뷰 지적: runInitialBuild()는 원래 그래프당 최초
+ *  1회만 호출된다는 암묵 전제였다(OntologyNode의 (graph_id, symbol_id)
+ *  유니크 인덱스가 재삽입과 그대로 충돌, OntologyEdge/
+ *  OntologyReverseEdgeIndex는 유니크 제약이 없어 조용히 중복 적재) — 재호출을
+ *  안전하게 만들려면 재실행 전에 기존 행을 반드시 지워야 한다. */
+export async function deleteChunked<T extends object>(
+  repo: Repository<T>,
+  ids: string[],
+  chunkSize: number,
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    if (chunk.length > 0) await repo.delete({ id: In(chunk) } as any);
     await yieldToEventLoop();
   }
 }
