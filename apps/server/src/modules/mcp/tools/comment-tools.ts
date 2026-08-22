@@ -54,22 +54,47 @@ function isUniqueConstraintError(error: unknown): boolean {
 // 로 옵트인하는 모든 add_comment 호출자에게 일반화한다. 메모리 상의
 // metadata 객체(호출자의 요청)와 Comment row 가 저장하는 raw JSON 문자열
 // 양쪽 모두 같은 헬퍼로 읽을 수 있다.
-function extractDedupeKey(metadata: unknown): string | null {
-  let meta: Record<string, unknown>;
+function parseCommentMetadata(metadata: unknown): Record<string, unknown> {
   if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
-    meta = metadata as Record<string, unknown>;
-  } else if (typeof metadata === 'string') {
+    return metadata as Record<string, unknown>;
+  }
+  if (typeof metadata === 'string') {
     try {
       const parsed = JSON.parse(metadata);
-      meta = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     } catch {
-      meta = {};
+      return {};
     }
-  } else {
-    meta = {};
   }
-  const key = meta.dedupe_key;
+  return {};
+}
+
+function extractDedupeKey(metadata: unknown): string | null {
+  const key = parseCommentMetadata(metadata).dedupe_key;
   return typeof key === 'string' && key ? key : null;
+}
+
+// 리뷰 라운드2(ticket e341bcc2): "티켓의 마지막 코멘트"를 created_at 하나로만
+// 정렬하면 sql.js 에서 비결정적이다 — @CreateDateColumn 이 DB 기본값
+// datetime('now') 에 맡겨질 때 초 단위로 truncate 되므로(common/created-at-
+// since-param.ts 의 근본원인 설명 참고), 같은 초에 여러 건이 insert 되면
+// 순서가 정해지지 않는다. TypeORM `@Generated('increment')` 로 진짜
+// auto-increment 컬럼을 추가하는 방안은 이 티켓에서 직접 검증한 결과
+// sqljs 드라이버가 세컨더리(비-PK) 컬럼에도 `AUTOINCREMENT` DDL 을 내려
+// "near AUTOINCREMENT: syntax error" 로 스키마 동기화 자체가 깨져서
+// 폐기했다. 대신 프로세스-내 단조 카운터를 매 add_comment 호출마다
+// metadata 에 찍어 애플리케이션 레벨에서 같은-초 tie 를 깬다 — 새 컬럼도
+// 마이그레이션도 없다. 프로세스 재시작으로 리셋돼도 created_at 이 1차
+// 정렬 키이므로 안전하다(재시작을 사이에 둔 진짜 같은-초 burst 는 현실적으로
+// 없다).
+let commentWriteSeqCounter = 0;
+function nextCommentWriteSeq(): number {
+  commentWriteSeqCounter += 1;
+  return commentWriteSeqCounter;
+}
+function extractWriteSeq(metadata: unknown): number {
+  const seq = parseCommentMetadata(metadata)._comment_write_seq;
+  return typeof seq === 'number' && Number.isFinite(seq) ? seq : -1;
 }
 
 export function registerCommentTools(server: McpServer, ctx: ToolContext): void {
@@ -143,6 +168,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if (artifactRefsService && ticket.workspace_id) {
         content = await artifactRefsService.normalizeStoredOutput(ticket.workspace_id, content);
       }
+
+      // 리뷰 라운드2(ticket e341bcc2): 아래 dedupe 옵트인 판정과 파일 하단의
+      // mention 디스패치 블록이 같은 파싱 결과를 재사용하도록 한 번만 계산한다.
+      const mentionRefs = mentionService.parseMentions(content);
 
       // Validate type — REST endpoint shape parity. Zod already restricts to the
       // allowed enum, but we also reject 'system' explicitly so an agent can't
@@ -388,7 +417,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // 새 row 를 쌓는다. 합치기는 티켓의 마지막 코멘트에만 적용된다
       // (silent-exit 과 동일한 계약) — 중간에 무관한 답글이 끼면 항상 새
       // occurrence row 로 시작해 타임라인 가독성을 유지한다.
+      //
+      // 리뷰 라운드2(ticket e341bcc2) 반영 — 옵트인 범위를 이 티켓이 실제로
+      // 쓰는 자동 억제 note 로 제한한다: type='note' 이고 첨부/멘션이 없는
+      // 호출만 합치기 후보다. answer 의 부모-resolve, mention 디스패치, 첨부
+      // 연결처럼 bump 의 조기 반환(성공 시 그대로 return, 아래 deduped 분기)이
+      // 건너뛰는 부수효과가 있는 호출은 애초에 후보에서 제외해 그 부수효과가
+      // 조용히 유실되지 않게 한다.
       const dedupeKey = extractDedupeKey(finalMetadata);
+      const dedupeEligible = !!dedupeKey && resolvedType === 'note'
+        && resolvedAttachmentIds.length === 0 && mentionRefs.length === 0;
+      // 모든 저장(합치기든 신규 insert 든)에 프로세스-내 단조 write-seq 를
+      // 찍는다 — 이 호출 자체는 dedupe_key 가 없어도, 나중에 같은 티켓에
+      // dedupe_key 를 실은 호출이 와서 "마지막 코멘트"를 찾을 때 이 행을
+      // 후보로 올바르게 비교하려면 필요하다.
+      finalMetadata._comment_write_seq = nextCommentWriteSeq();
       let comment: Comment;
       let deduped = false;
       try {
@@ -396,9 +439,35 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           await lockTicketCommentWrites(manager, ticket_id);
           const lockedRepo = manager.getRepository(Comment);
 
-          if (dedupeKey) {
-            const lastComment = await lockedRepo.findOne({ where: { ticket_id }, order: { created_at: 'DESC' } });
-            if (lastComment && extractDedupeKey(lastComment.metadata) === dedupeKey) {
+          if (dedupeEligible) {
+            // created_at 하나만으로 "마지막"을 정렬하면 sql.js 에서 같은 초에
+            // 여러 건이 몰릴 때 비결정적이다(파일 상단 nextCommentWriteSeq
+            // 주석 참고). 최근 구간을 넉넉히 가져와 (created_at, write-seq)
+            // 로 애플리케이션에서 직접 최댓값을 고른다 — 같은 초 burst 가
+            // 20건을 넘는 경우는 현실적으로 없다.
+            const recentComments = await lockedRepo.find({
+              where: { ticket_id },
+              order: { created_at: 'DESC' },
+              take: 20,
+            });
+            const lastComment = recentComments.reduce<Comment | null>((best, cur) => {
+              if (!best) return cur;
+              const bestTime = best.created_at.getTime();
+              const curTime = cur.created_at.getTime();
+              if (curTime !== bestTime) return curTime > bestTime ? cur : best;
+              return extractWriteSeq(cur.metadata) > extractWriteSeq(best.metadata) ? cur : best;
+            }, null);
+            // 최소 요건(리뷰 지적): 후보 row 가 작성자(type+id)와 type 까지
+            // 지금 이 호출과 완전히 같을 때만 합친다 — 다른 agent 가 우연히
+            // 같은 dedupe_key 문자열을 재사용해도 남의 코멘트 작성자 이름
+            // 아래 내용만 바뀌는 일이 없다.
+            if (
+              lastComment
+              && lastComment.author_type === resolvedAuthorType
+              && lastComment.author_id === resolvedAuthorId
+              && lastComment.type === resolvedType
+              && extractDedupeKey(lastComment.metadata) === dedupeKey
+            ) {
               const nextCount = (lastComment.repeat_count ?? 1) + 1;
               await lockedRepo.update(lastComment.id, {
                 content,
@@ -500,7 +569,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // never receives the targeted `comment_mention` event and so the
       // mention silently degrades to an update.
       try {
-        const refs = mentionService.parseMentions(content);
+        const refs = mentionRefs;
         if (refs.length > 0) {
           // T3 self-exclusion: drop the comment author so `@[role:assignee]`
           // summons only the OTHER co-holders — never a comment_mention back
