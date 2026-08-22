@@ -83,6 +83,13 @@ function stripQuotes(text: string): string {
   return text.replace(/^['"`]|['"`]$/g, '');
 }
 
+/** 그래머 로드/setLanguage/parse 실패를 하나의 안정적인 skippedReason
+ *  카테고리로 접는다 — 호출부(worker.ts, persist.ts, 테스트)가 정확한
+ *  에러 문자열이 아니라 이 상수로 매칭할 수 있게. */
+function grammarFailureReason(_e: unknown): string {
+  return 'grammar_load_failed';
+}
+
 /** 캡처 노드에서 시작해 지정된 kind를 가진 가장 가까운 조상을 찾는다. */
 function findAncestorOfKind(node: TsNode, kinds: Set<string>): TsNode | null {
   let cur: TsNode | null = node.parent;
@@ -116,11 +123,37 @@ export async function extractFile(path: string, content: string, lang: Extractio
     return emptyBundle(path, lang, { skippedReason: 'file_too_large' });
   }
 
-  const { language, query } = await getLangHandle(lang);
-  const parser = getSharedParser();
-  parser.setLanguage(language);
+  let handle: Awaited<ReturnType<typeof getLangHandle>>;
+  try {
+    handle = await getLangHandle(lang);
+  } catch (e) {
+    return emptyBundle(path, lang, { skippedReason: grammarFailureReason(e) });
+  }
+  const { language, query } = handle;
+  if (!query) {
+    // 그래머는 로드 가능하지만(smokeTestGrammar가 별도로 검증) 이 언어의
+    // 태그 쿼리는 아직 없다(types.ts의 TAG_QUERY_VERIFIED_LANGS 밖) — 조용히
+    // 빈 결과를 내는 대신 정직하게 스킵 사유를 남긴다.
+    return emptyBundle(path, lang, { skippedReason: 'no_tag_query_for_language' });
+  }
 
-  const tree = parser.parse(content);
+  // trap #1(research-extraction.md §6) — ABI 불일치는 Language.load() 자체가
+  // 아니라 setLanguage()나 parse() 시점에야 던질 수 있다(36개 중 실제로
+  // 3개에서 직접 확인: elm/ql은 setLanguage()에서 "Incompatible language
+  // version", yaml은 parse()에서 별개의 내부 에러 — grammars.ts의
+  // smokeTestGrammar가 부팅 시점에 예측 가능하게 만드는 바로 그 부류).
+  // 이 셋은 현재 전부 태그 쿼리도 없어 위 !query 분기로 먼저 스킵되지만,
+  // 그건 우연이다 — 태그 쿼리가 검증된 언어의 그래머가 여기서 깨지는
+  // 경우에도(TS/JS 자신은 아니지만 방어적으로) 태스크를 에러로 죽이는 대신
+  // 같은 방식으로 정직하게 스킵한다.
+  const parser = getSharedParser();
+  let tree: ReturnType<typeof parser.parse>;
+  try {
+    parser.setLanguage(language);
+    tree = parser.parse(content);
+  } catch (e) {
+    return emptyBundle(path, lang, { skippedReason: grammarFailureReason(e) });
+  }
   if (!tree) {
     return emptyBundle(path, lang, { skippedReason: 'parse_returned_null' });
   }

@@ -7,9 +7,36 @@
 // 3/7 리졸버(ticket 미배정) 몫 — 이 파일에서 만드는 어떤 타입도 다른 파일의
 // 정보를 참조하지 않는다.
 
-/** 이 배치(추출 실행)가 지원하는 언어. ast-grep의 `Lang`과 이름을 맞춘다
- *  (NestJS 룰셋이 같은 파일에 대해 두 엔진을 모두 돌리므로). */
-export type ExtractionLang = 'typescript' | 'tsx' | 'javascript';
+// 리뷰 지적(라운드 1) — 그래머 소스를 tree-sitter-wasms 36개 문법 전체로
+// 넓혔다. 애초 티켓이 인용한 `kreuzberg-dev/tree-sitter-language-pack`은
+// 그 이름으로는 npm 패키지가 아니었다 — 실제로는 `@xberg-io/` 스코프
+// 아래 있고(`@xberg-io/tree-sitter-language-pack`, 371언어, native N-API;
+// `@xberg-io/tree-sitter-language-pack-wasm`, 같은 371언어, 단일 WASM
+// 블롭) 둘 다 web-tree-sitter의 `Language.load()`가 기대하는 "언어당
+// 로드 가능한 .wasm 파일"이 아니라 자기 완결적인 별도 Parser/Node/Tree
+// API를 노출한다(직접 설치해 확인 — node_modules/@xberg-io/*/index.d.ts,
+// ts_pack_core_wasm.js) — web-tree-sitter와 나란히 쓸 수 없고, 채택하려면
+// web-tree-sitter 자체를 버려야 한다(티켓이 명시한 "web-tree-sitter(WASM)"
+// 기술 선택 자체를 뒤집는 결정이라 이 티켓 범위에서 임의로 하지 않는다).
+// tree-sitter-wasms(이미 package.json 의존성, Unlicense)가 실제로
+// web-tree-sitter와 맞물리는 유일한 다국어 grammar 소스라 그 번들
+// 전체(36언어, `ls node_modules/tree-sitter-wasms/out` 직접 확인)로
+// 그래머 로딩 범위를 넓혔다 — 문법 로딩(smokeTestGrammar)은 36개
+// 전부, 태그 쿼리 기반 fact 추출(defs/refs/imports/exports/heritage)은
+// 이 티켓이 실제로 검증·dogfood한 typescript/tsx/javascript만 보장한다.
+// 나머지는 extract-file.ts가 `skippedReason: 'no_tag_query_for_language'`로
+// 정직하게 스킵한다(조용히 빈 결과를 내지 않음).
+export type ExtractionLang =
+  | 'typescript' | 'tsx' | 'javascript'
+  | 'bash' | 'c' | 'cpp' | 'c_sharp' | 'css' | 'dart' | 'elisp' | 'elixir' | 'elm'
+  | 'embedded_template' | 'go' | 'html' | 'java' | 'json' | 'kotlin' | 'lua' | 'objc'
+  | 'ocaml' | 'php' | 'python' | 'ql' | 'rescript' | 'ruby' | 'rust' | 'scala'
+  | 'solidity' | 'swift' | 'systemrdl' | 'tlaplus' | 'toml' | 'vue' | 'yaml' | 'zig';
+
+/** 태그 쿼리(defs/refs/imports/exports/heritage 추출)가 실제로 검증·구현된
+ *  언어 — 이 집합 밖은 grammars.ts가 그래머는 로드하지만 extract-file.ts는
+ *  파싱 없이 `skippedReason`으로 스킵한다. */
+export const TAG_QUERY_VERIFIED_LANGS: ReadonlySet<ExtractionLang> = new Set(['typescript', 'tsx', 'javascript']);
 
 export type DefKind =
   | 'class' | 'interface' | 'function' | 'method' | 'type' | 'enum' | 'field' | 'variable';
@@ -122,6 +149,44 @@ export interface ExtractionTaskResult {
 
 export const EXTRACTOR_VERSION = '1.0.0';
 
+// 확장자(점 없이) → 언어. tree-sitter-wasms 36개 번들 전체를 커버한다 —
+// 다중 확장자를 갖는 언어만 위 langForPath의 특별 분기로 처리(tsx/ts류/js류).
+const EXTENSION_LANG_MAP: Record<string, ExtractionLang> = {
+  sh: 'bash', bash: 'bash',
+  c: 'c', h: 'c',
+  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp',
+  cs: 'c_sharp',
+  css: 'css',
+  dart: 'dart',
+  el: 'elisp',
+  ex: 'elixir', exs: 'elixir',
+  elm: 'elm',
+  ejs: 'embedded_template', erb: 'embedded_template',
+  go: 'go',
+  html: 'html', htm: 'html',
+  java: 'java',
+  json: 'json',
+  kt: 'kotlin', kts: 'kotlin',
+  lua: 'lua',
+  m: 'objc', mm: 'objc',
+  ml: 'ocaml', mli: 'ocaml',
+  php: 'php',
+  py: 'python', pyi: 'python',
+  ql: 'ql', qll: 'ql',
+  res: 'rescript', resi: 'rescript',
+  rb: 'ruby',
+  rs: 'rust',
+  scala: 'scala',
+  sol: 'solidity',
+  swift: 'swift',
+  rdl: 'systemrdl',
+  tla: 'tlaplus',
+  toml: 'toml',
+  vue: 'vue',
+  yaml: 'yaml', yml: 'yaml',
+  zig: 'zig',
+};
+
 /** 확장자 → 언어. tree-sitter-wasms가 typescript/tsx 문법을 분리해서
  *  번들하므로(문법 자체가 다름) 확장자로 미리 갈라야 한다. */
 export function langForPath(filePath: string): ExtractionLang | null {
@@ -129,5 +194,7 @@ export function langForPath(filePath: string): ExtractionLang | null {
   if (lower.endsWith('.tsx')) return 'tsx';
   if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
   if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
-  return null;
+  const dot = lower.lastIndexOf('.');
+  if (dot < 0) return null;
+  return EXTENSION_LANG_MAP[lower.slice(dot + 1)] ?? null;
 }
