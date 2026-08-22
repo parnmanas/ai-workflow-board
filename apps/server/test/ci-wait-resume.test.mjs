@@ -797,6 +797,109 @@ test('sweep(): no bound Resource degrades to a null credentialId — same env-to
   await ciWaitService.cancelWait(ticket.id);
 });
 
+// ── Board-environment credential fallback (ticket 9bbe9146, review round 4 —
+// live probe) — on this board EVERY ticket's base_repo_resource_id is
+// permanently '': trigger-loop.service.ts's dispatch resolves the board's
+// environment_config repo into the SSE payload but never persists it back
+// onto the ticket row (base-repo-binding.ts's `pickBaseRepoResourceId`
+// backfill only fills the wire payload). A resolver that only reads
+// Ticket.base_repo_resource_id therefore degrades to null for every ticket on
+// such a board — reproducing this ticket's original symptom one layer down.
+// `_resolveCredentialId` must consult the SAME board-env fallback dispatch
+// uses (mergeEnvironmentConfig(workspace, board).repositories[0]) before
+// giving up. ─────────────────────────────────────────────────────────────
+
+test('sweep(): base_repo_resource_id=\'\' falls back to the board environment repo\'s credential_id', async () => {
+  const resource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'w1', name: 'board-env-repo', type: 'repository', credential_id: 'cred-board-env',
+  }));
+  const board = await boardRepo.save(boardRepo.create({
+    name: 'B-env',
+    environment_config: JSON.stringify({ repositories: [{ resource_id: resource.id }] }),
+  }));
+  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
+  const ticket = await ticketRepo.save(ticketRepo.create({
+    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false, base_repo_resource_id: '',
+  }));
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'completed', conclusion: 'success', html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(
+    seenCredentialId,
+    'cred-board-env',
+    'a ticket with no base_repo_resource_id of its own must still resolve the board environment repo\'s credential_id',
+  );
+});
+
+test('sweep(): a board environment repo\'s Resource in a DIFFERENT workspace never leaks its credential_id', async () => {
+  const resource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'other-workspace', name: 'board-env-repo', type: 'repository', credential_id: 'cred-should-not-leak-env',
+  }));
+  const board = await boardRepo.save(boardRepo.create({
+    name: 'B-env-cross-ws',
+    environment_config: JSON.stringify({ repositories: [{ resource_id: resource.id }] }),
+  }));
+  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
+  const ticket = await ticketRepo.save(ticketRepo.create({
+    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false, base_repo_resource_id: '',
+  }));
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(seenCredentialId, null, 'a cross-workspace board-env Resource must never leak its credential_id');
+  await ciWaitService.cancelWait(ticket.id);
+});
+
+test('sweep(): an explicit ticket-level base_repo_resource_id still wins over the board environment repo', async () => {
+  const ticketResource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'w1', name: 'ticket-repo', type: 'repository', credential_id: 'cred-ticket-wins',
+  }));
+  const boardResource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: 'w1', name: 'board-repo', type: 'repository', credential_id: 'cred-should-not-be-used',
+  }));
+  const board = await boardRepo.save(boardRepo.create({
+    name: 'B-precedence',
+    environment_config: JSON.stringify({ repositories: [{ resource_id: boardResource.id }] }),
+  }));
+  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
+  const ticket = await ticketRepo.save(ticketRepo.create({
+    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false,
+    base_repo_resource_id: ticketResource.id,
+  }));
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  let seenCredentialId = 'unset';
+  const githubStub = {
+    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
+      seenCredentialId = credentialId;
+      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
+    },
+  };
+  const resumer = makeResumer(githubStub, []);
+  await resumer.sweep();
+
+  assert.equal(seenCredentialId, 'cred-ticket-wins', 'an explicit ticket-level binding must take precedence over the board environment fallback');
+  await ciWaitService.cancelWait(ticket.id);
+});
+
 // ── Poll-failure surfacing (ticket 9bbe9146) — the silent-degrade path that
 // let six real Merging tickets sit parked for 1-2h before a human noticed;
 // this is what turns that silence into an observable ticket comment ──────

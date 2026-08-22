@@ -100,11 +100,16 @@
  * this service never resolved one at all, so every poll silently degraded
  * to "no token" (`isGitHubDegradableError` → `getWorkflowRun` returns null)
  * and looked EXACTLY like "still queued" — six real Merging tickets sat
- * parked for 1-2h before a human noticed. `_resolveCredentialId` now mirrors
- * `ClaimVerificationService._lookupRemoteSha`'s existing pattern:
- * `Ticket.base_repo_resource_id` → `Resource` (workspace-scope checked) →
- * `Resource.credential_id`. Degrades to null (same as before) when the
- * ticket has no repo binding — never blocks the sweep.
+ * parked for 1-2h before a human noticed. `_resolveCredentialId` resolves
+ * `Ticket.base_repo_resource_id` → `Resource` (workspace-scope checked,
+ * mirrors `ClaimVerificationService._lookupRemoteSha`) → `Resource.
+ * credential_id` — but falls back to the ticket's BOARD environment repo
+ * (`pickBaseRepoResourceId`, same helper `trigger-loop.service.ts` dispatch
+ * uses) when the ticket carries no repo binding of its own, since on some
+ * boards every ticket's `base_repo_resource_id` is permanently empty (round 4
+ * live-probe finding — dispatch resolves the board-env repo into the SSE
+ * payload but never persists it onto the ticket row). Degrades to null when
+ * NEITHER source resolves — never blocks the sweep.
  *
  * Poll-failure surfacing (ticket 9bbe9146): the silent-degrade case above is
  * exactly why a run that cannot be READ at all (thrown error, or degraded
@@ -121,10 +126,15 @@ import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { Resource } from '../../entities/Resource';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { GitHubConnectorService, GitHubWorkflowRun } from '../../services/github-connector.service';
 import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome, CiWaitPollIssue } from '../tickets/ci-wait.service';
 import { TriggerLoopService } from './trigger-loop.service';
+import { mergeEnvironmentConfig } from '../../common/environment-config';
+import { pickBaseRepoResourceId, EnvRepoRef } from '../../common/base-repo-binding';
 
 const DEFAULTS = {
   ENABLED: true,
@@ -354,20 +364,60 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve this ticket's stored GitHub credential — mirrors
-   * `ClaimVerificationService._lookupRemoteSha`'s existing pattern
-   * (claim-verification.service.ts) exactly: `Ticket.base_repo_resource_id`
-   * → `Resource`, workspace-scope checked so a stale id pointing at another
-   * workspace's Resource can never leak that workspace's credential →
-   * `Resource.credential_id`. Degrades to null (→ GitHubConnectorService's
-   * env-token fallback, same as before this ticket) when the ticket has no
-   * repo binding or the Resource is unresolvable — never blocks the sweep.
+   * Resolve this ticket's GitHub credential. `Ticket.base_repo_resource_id`
+   * wins when set, mirroring `ClaimVerificationService._lookupRemoteSha`'s
+   * pattern (claim-verification.service.ts): `Resource`, workspace-scope
+   * checked so a stale id pointing at another workspace's Resource can never
+   * leak that workspace's credential → `Resource.credential_id`.
+   *
+   * Review round 4 (ticket 9bbe9146, live probe): on THIS board every ticket's
+   * `base_repo_resource_id` is permanently `''` — dispatch resolves the repo
+   * via `pickBaseRepoResourceId('', boardEnvRepositories)` inside
+   * `trigger-loop.service.ts` (~line 2727) but only fills the SSE payload,
+   * never writes it back onto the ticket row. A resolver that only reads
+   * `Ticket.base_repo_resource_id` therefore degrades to null for every
+   * ticket on this board — the exact silent failure this ticket exists to
+   * fix, just moved one layer down. Fixed by consulting the SAME
+   * `pickBaseRepoResourceId` fallback dispatch uses, reusing its board-env
+   * merge (`_resolveBoardEnvRepositories` below mirrors trigger-loop.service.
+   * ts:2614-2654's `boardEnvRepositories` construction) so this service and
+   * dispatch always agree on which repo a ticket resolves to.
+   *
+   * Degrades to null (→ GitHubConnectorService's env-token fallback, same as
+   * before this ticket) when nothing resolves — never blocks the sweep.
    */
   private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
-    if (!ticket.base_repo_resource_id || !ticket.workspace_id) return null;
-    const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } });
+    if (!ticket.workspace_id) return null;
+    const boardEnvRepositories = await this._resolveBoardEnvRepositories(ticket);
+    const picked = pickBaseRepoResourceId(ticket.base_repo_resource_id, boardEnvRepositories);
+    if (!picked.resourceId) return null;
+    const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: picked.resourceId } });
     if (resource && resource.workspace_id !== null && resource.workspace_id !== ticket.workspace_id) return null;
     return resource?.credential_id || null;
+  }
+
+  /**
+   * Board-environment repositories for the ticket's board — the fallback
+   * source `pickBaseRepoResourceId` consults when the ticket carries no
+   * `base_repo_resource_id` of its own. Mirrors trigger-loop.service.ts:
+   * 2614-2654's `boardEnvRepositories` construction exactly (workspace default
+   * ⊕ board override, key-level merge) so this service can never disagree
+   * with dispatch about which repo a ticket resolves to. Degrades to `[]` (→
+   * no fallback candidate) on any missing link (no column, no board, no
+   * environment_config on either row) — never throws, never blocks the sweep.
+   */
+  private async _resolveBoardEnvRepositories(ticket: Ticket): Promise<EnvRepoRef[]> {
+    if (!ticket.column_id) return [];
+    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    if (!col?.board_id) return [];
+    const [board, workspace] = await Promise.all([
+      this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } }),
+      ticket.workspace_id
+        ? this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+        : Promise.resolve(null),
+    ]);
+    const mergedEnv = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
+    return mergedEnv?.repositories || [];
   }
 
   /**
