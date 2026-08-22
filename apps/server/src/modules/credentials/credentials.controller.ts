@@ -6,6 +6,7 @@ import { Repository, IsNull } from 'typeorm';
 import { DataSource } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Credential } from '../../entities/Credential';
+import { CliLoginSession } from '../../entities/CliLoginSession';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
@@ -17,6 +18,8 @@ import { Board } from '../../entities/Board';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { AuthService } from '../../services/auth.service';
 import { ActivityService } from '../../services/activity.service';
+import { CliLoginSessionService } from './cli-login-session.service';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
   github: { label: 'GitHub', fields: ['token'] },
@@ -67,6 +70,26 @@ function isMaskedValue(value: string): boolean {
   return value.includes('••••');
 }
 
+// 티켓 b2e79108 — CLI 자동 로그인 세션 응답 shape. 토큰 원문(auth_json 등)은
+// CliLoginSession에 애초에 저장하지 않으므로(Credential.encrypted_data에만
+// 있음) 여기엔 원천적으로 실릴 수 없다 — created_credential_id로만 참조.
+function serializeCliLoginSession(s: CliLoginSession) {
+  return {
+    id: s.id,
+    workspace_id: s.workspace_id,
+    is_global: s.is_global,
+    cli: s.cli,
+    credential_name: s.credential_name,
+    status: s.status,
+    verification_url: s.verification_url,
+    user_code: s.user_code,
+    error_detail: s.error_detail,
+    created_credential_id: s.created_credential_id,
+    created_at: s.created_at,
+    finished_at: s.finished_at,
+  };
+}
+
 // Shared response shape. `scope` lets the client tell workspace credentials
 // apart from inherited global ones. Write permissions are enforced per row in
 // the current Workspace management page.
@@ -104,6 +127,8 @@ export class CredentialsController {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly authService: AuthService,
     private readonly activityService: ActivityService,
+    private readonly cliLoginSessions: CliLoginSessionService,
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {}
 
   /**
@@ -146,6 +171,83 @@ export class CredentialsController {
   @Get('providers')
   async providers(@Res() res: Response) {
     return res.json(PROVIDER_FIELDS);
+  }
+
+  // ── CLI 자동 로그인(device-auth) — 티켓 b2e79108 ────────────────────
+  // "cli-login/instances" 는 반드시 "cli-login/:sessionId" 보다 먼저 선언
+  // 되어야 한다 — 안 그러면 GET /cli-login/instances 가 sessionId="instances"
+  // 로 잘못 매칭된다(Nest는 동일 세그먼트 수 경로를 선언 순서로 매칭).
+
+  @Get('cli-login/instances')
+  async listCliLoginInstances(
+    @Query('workspace_id') workspaceId: string | undefined,
+    @Res() res: Response,
+  ) {
+    const all = this.instanceRegistry.list().filter((i) => i.mode === 'manager');
+    const visible = workspaceId
+      ? all.filter((i) => i.workspace_id === workspaceId || i.workspace_id === null)
+      : all;
+    return res.json(
+      visible.map((i) => ({
+        instance_id: i.instance_id,
+        hostname: i.hostname,
+        workspace_id: i.workspace_id,
+        codex_installed: !!i.runtime_capabilities?.codex?.installed,
+        codex_healthy: !!i.runtime_capabilities?.codex?.healthy,
+      })),
+    );
+  }
+
+  @Post('cli-login/start')
+  async startCliLogin(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const isGlobal = body?.scope === 'global';
+    if (isGlobal && !this.canManageGlobal(req)) {
+      return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
+    }
+    const workspaceId = isGlobal ? '' : String(body?.workspace_id || '').trim();
+    if (!isGlobal && !workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const instanceId = String(body?.instance_id || '').trim();
+    if (!instanceId) return res.status(400).json({ error: 'instance_id is required' });
+    const actor = (req as any).currentUser;
+
+    try {
+      const session = await this.cliLoginSessions.startSession({
+        workspaceId,
+        isGlobal,
+        cli: String(body?.cli || '').trim().toLowerCase(),
+        credentialName: String(body?.credential_name || '').trim(),
+        instanceId,
+        triggeredById: actor?.id || '',
+      });
+      return res.status(201).json(serializeCliLoginSession(session));
+    } catch (err: any) {
+      return res.status(err?.status || 500).json({ error: err?.message || 'failed to start login session' });
+    }
+  }
+
+  @Get('cli-login/:sessionId')
+  async getCliLoginSession(
+    @Param('sessionId') sessionId: string,
+    @Query('workspace_id') workspaceId: string,
+    @Res() res: Response,
+  ) {
+    const session = await this.cliLoginSessions.getSession(sessionId, workspaceId);
+    if (!session) return res.status(404).json({ error: 'Login session not found' });
+    return res.json(serializeCliLoginSession(session));
+  }
+
+  @Post('cli-login/:sessionId/cancel')
+  async cancelCliLogin(
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const session = await this.cliLoginSessions.cancelSession(sessionId, String(body?.workspace_id || ''));
+      return res.json(serializeCliLoginSession(session));
+    } catch (err: any) {
+      return res.status(err?.status || 500).json({ error: err?.message || 'failed to cancel login session' });
+    }
   }
 
   @Post(':id/reveal')

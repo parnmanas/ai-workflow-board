@@ -36,6 +36,7 @@ import {
   ConsensusUpdatePayload,
   OrchestrationUpdatePayload,
   TicketReadsClearedPayload,
+  CliLoginProgressPayload,
 } from '../../common/types/stream-events';
 import { EventDefinition, SubscriberIdentity } from './types';
 
@@ -1160,6 +1161,40 @@ export const EVENT_TYPES: EventDefinition[] = [
     filter: (_env, identity) => identity.type === 'user',
     flatten: (env) => ({
       event_type: 'orchestration_update',
+      ...(env.payload as object),
+      timestamp: env.timestamp,
+    }),
+  },
+
+  // ───────── cli_login_progress ─────────
+  // ticket b2e79108: CLI 자동 로그인(device-auth) 진행 상태. consensus_update /
+  // orchestration_update 와 같은 user-only UI fuel 패턴이지만 더 좁다 — 이
+  // 로그인을 시작한 사용자 본인에게만 간다(다른 admin이 동시에 자기 세션을
+  // 보고 있어도 서로 섞이면 안 된다). agent-manager는 진행 상태를 만드는
+  // 쪽이므로 구독하지 않는다 — SSE contract 상 agent-manager 무관.
+  {
+    eventType: 'cli_login_progress',
+    emitterEvent: 'cli_login_progress',
+    map(event: any) {
+      const payload: CliLoginProgressPayload = {
+        session_id: event.session_id || '',
+        workspace_id: event.workspace_id || '',
+        status: event.status,
+        verification_url: event.verification_url ?? null,
+        user_code: event.user_code ?? null,
+        error_detail: event.error_detail || '',
+        created_credential_id: event.created_credential_id ?? null,
+      };
+      return {
+        payload,
+        scope: { workspace_id: event.workspace_id || undefined, user_id: event.triggered_by_id || undefined },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) =>
+      identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({
+      event_type: 'cli_login_progress',
       ...(env.payload as object),
       timestamp: env.timestamp,
     }),

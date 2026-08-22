@@ -120,3 +120,14 @@ export type {
   OntologyEdgeRank,
   OntologyCompleteness,
 } from './OntologyEdge';
+// CLI 자동 로그인(device-auth) 세션 (ticket b2e79108). Auto-DDL'd by TypeORM
+// `synchronize` (D-01) exactly like the sibling tables above; no hand-written
+// migration needed.
+//
+// NOTE: only the entity CLASS is re-exported here — database.module.ts does
+// `Object.values(entitiesBarrel)` to build the TypeOrmModule.forFeature()
+// list, so a non-class value export (like the TERMINAL_… status array) would
+// get swept into that list and break the entities type. Import
+// TERMINAL_CLI_LOGIN_SESSION_STATUSES / CliLoginSessionStatus directly from
+// './CliLoginSession' instead.
+export { CliLoginSession } from './CliLoginSession';
