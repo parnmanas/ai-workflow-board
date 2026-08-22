@@ -2632,3 +2632,49 @@ export interface OrchestrationUpdateEvent {
   last_event: { type: string; message: string; step_key: string } | null;
   timestamp: string;
 }
+
+// ─── Ontology Graph (ticket d22b83b4, DESIGN.md 축 5) ──────────────────────
+
+export type OntologyGraphStatusValue = 'building' | 'ready' | 'stale' | 'error';
+
+/** GET /api/ontology/status 응답 — MCP `graph_status` 툴(ticket d35b7b7d)과
+ *  같은 provisioning helper를 쓰지만, UI 전용 필드(dirty_ratio/behind/ahead/
+ *  freshness_error)가 추가로 얹힌다. */
+export interface OntologyGraphStatusResponse {
+  graph_id: string;
+  status: OntologyGraphStatusValue;
+  indexed_at: string | null;
+  commit: string;
+  progress: Record<string, unknown>;
+  error?: string;
+  /** research-ontology.md §8.6 point 6 — status='stale' 활성 엣지 비율.
+   *  엣지가 아직 없으면(building 등) null. */
+  dirty_ratio: number | null;
+  /** indexed_at 시점 commit이 현재 HEAD보다 몇 커밋 뒤처졌는지
+   *  (countBehindAhead 기반). git 접근 실패 시 null — freshness_error 참고. */
+  behind: number | null;
+  /** 정상 케이스는 항상 0 — 0이 아니면 인덱싱된 커밋이 더 이상 이
+   *  브랜치의 조상이 아니다(리베이스/force-push로 역사가 바뀜). */
+  ahead: number | null;
+  freshness_error: string | null;
+}
+
+/** Payload of the `ontology_graph_progress` SSE frame (UI-only event,
+ *  ticket 964014f5) — server(event-registry.ts)/client(BoardStreamContext.tsx)
+ *  배선은 이미 완료돼 있음, 이 타입만 신규(ticket d22b83b4). */
+export interface OntologyGraphProgressEvent {
+  event_type: 'ontology_graph_progress';
+  workspace_id: string;
+  graph_id: string;
+  resource_id: string;
+  job_id: string;
+  phase: 'phase_a' | 'phase_b' | 'phase_c' | 'sweep';
+  graph_status: OntologyGraphStatusValue;
+  files_processed: number;
+  edges_extracted: number;
+  edges_total: number | null;
+  nodes_extracted: number;
+  short_circuited: boolean;
+  error: string | null;
+  timestamp: string;
+}
