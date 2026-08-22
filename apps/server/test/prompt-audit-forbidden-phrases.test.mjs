@@ -114,6 +114,10 @@ test('todo_workflow: overlap Wait branch registers add_ticket_prerequisites, not
     'the concurrent-work Wait branch must call add_ticket_prerequisites to register the block, not just leave a comment',
   );
   assert.match(
+    content, /prerequisite_ticket_ids=\["<full prerequisite ticket UUID>"\]/,
+    'the add_ticket_prerequisites example must pass a full-UUID placeholder in prerequisite_ticket_ids, not a shortened ticket id — that field takes the real ticket UUID and a shortened id would fail the call',
+  );
+  assert.match(
     content, /human answer.*pend_ticket.*another ticket finishing.*add_ticket_prerequisites/is,
     'todo_workflow must state the human-vs-ticket rule of thumb for choosing prerequisite over pend_ticket',
   );

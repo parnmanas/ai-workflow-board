@@ -4,46 +4,43 @@ import { PromptTemplate } from '../../entities/PromptTemplate';
 import { DEFAULT_PROMPT_TEMPLATES } from '../default-prompt-templates';
 
 /**
- * ticket eb4f09b6 — refresh the To Do default workflow prompt template on
- * existing workspaces so already-installed boards pick up the prerequisite-
- * registration fix for the concurrent-work "Wait" branch:
- *   - todo_workflow: when the assignee decides to Wait on their own
- *     in-progress ticket (file/module overlap), the guide previously told
- *     them to leave a comment and explicitly do neither `move_ticket` nor
- *     `pend_ticket` — a bare-comment wait with no matching ticket-state
- *     change. That is the root cause ticket fec25d90 traced: DispatchReconciler
- *     / StuckTicketDetector have no way to read "assignee decided to wait" out
- *     of a comment, so the ticket looked idle and re-entered the
- *     redispatch/escalation loop. The Wait branch now also calls
- *     `mcp__awb__add_ticket_prerequisites`, naming the in-progress ticket as
- *     the blocker. That sets `pending_on_tickets=true`, which
- *     StuckTicketDetector's `_intentionalWaitReason` already reads as
- *     `open_prerequisite` (an intentional wait, same posture as
- *     `pend_ticket`'s `pending_user_action`) and agent-workload's focus
- *     selector already excludes from anchoring — both were shipped with the
- *     add_ticket_prerequisites tool itself (ticket 48d14fff), so no runtime
- *     code changes here, only the guide catching up to a tool the assignee
- *     wasn't yet told to use for this specific decision point. The section
- *     also now states the rule of thumb for choosing `add_ticket_prerequisites`
- *     over `pend_ticket` (human decision vs. another ticket finishing) and
- *     explains the auto-resume behavior (the block clears and this ticket's
- *     current-column holders are re-triggered the moment the named ticket
- *     lands on a terminal column — no `unpend_ticket` needed).
+ * 티켓 eb4f09b6 — 기존 워크스페이스에 이미 설치된 To Do 기본 워크플로우 프롬프트
+ * 템플릿을 새로고침해, 동시 작업 "Wait" 분기의 prerequisite 등록 수정 사항을
+ * 이미 설치된 보드도 반영하도록 한다:
+ *   - todo_workflow: 담당자가 자신의 진행 중(in-progress) 티켓과 파일/모듈이
+ *     겹쳐 Wait을 선택할 때, 기존 가이드는 코멘트만 남기고 `move_ticket`도
+ *     `pend_ticket`도 명시적으로 호출하지 말라고 안내했다 — 티켓 상태 변화가
+ *     전혀 없는 순수 코멘트 대기였다. 이것이 바로 티켓 fec25d90이 추적한 근본
+ *     원인이다: DispatchReconciler / StuckTicketDetector는 코멘트에서
+ *     "담당자가 대기를 선택했다"는 사실을 읽어낼 방법이 없어, 해당 티켓이
+ *     idle로 보여 재디스패치/에스컬레이션 루프에 다시 들어갔다. 이제 Wait
+ *     분기는 `mcp__awb__add_ticket_prerequisites`도 호출해 진행 중인 티켓을
+ *     차단 요인으로 등록한다. 이는 `pending_on_tickets=true`를 설정하며,
+ *     StuckTicketDetector의 `_intentionalWaitReason`은 이를 `open_prerequisite`
+ *     (의도된 대기, `pend_ticket`의 `pending_user_action`과 같은 성격)로 이미
+ *     읽고, agent-workload의 focus selector도 이미 앵커링 대상에서 제외한다 —
+ *     둘 다 `add_ticket_prerequisites` 도구 자체와 함께 배포되었으므로(티켓
+ *     48d14fff), 여기서는 런타임 코드 변경이 없고 담당자가 이 결정 지점에서
+ *     아직 안내받지 못했던 도구를 가이드가 뒤늦게 반영할 뿐이다. 이 절은 또한
+ *     `add_ticket_prerequisites`와 `pend_ticket` 중 무엇을 선택할지의 기준
+ *     (사람의 판단 vs. 다른 티켓의 완료)과, 자동 재개 동작(지정한 티켓이
+ *     terminal 컬럼에 도달하는 순간 차단이 해제되고 이 티켓의 현재 컬럼
+ *     담당자가 재트리거된다 — `unpend_ticket` 불필요)을 명시한다.
  *
- * Same operator-safety contract as every prior refresh migration
+ * 이전의 모든 refresh 마이그레이션과 동일한 운영 안전 계약
  * (1760000000022 / 30 / 31 / 36 / 42 / 44 / 46 / 49 / 52 / 72 / 73 / 76 / 79):
- *   - row.content must byte-exact match a PRIOR_PREREQUISITE_WAIT_CONTENTS
- *     literal to be touched at all.
- *   - Operator customizations / drift are left completely alone.
- *   - INSERT is never performed here (seed/backfill paths own that).
- *   - Idempotent: after a first successful run every row already holds
- *     `current` (read live from DEFAULT_PROMPT_TEMPLATES, never a frozen
- *     snapshot), so a re-run's `row.content === target` short-circuit
- *     leaves it untouched.
+ *   - row.content가 PRIOR_PREREQUISITE_WAIT_CONTENTS 리터럴과 byte-exact로
+ *     일치해야만 손댄다.
+ *   - 운영자 커스터마이징/drift는 완전히 그대로 둔다.
+ *   - INSERT는 여기서 절대 수행하지 않는다(seed/backfill 경로가 담당).
+ *   - Idempotent: 최초 실행이 성공한 뒤에는 모든 row가 이미 `current`
+ *     (고정 스냅샷이 아니라 DEFAULT_PROMPT_TEMPLATES에서 실시간으로 읽음)를
+ *     담고 있으므로, 재실행 시 `row.content === target` 단락 조건이 그대로
+ *     건드리지 않는다.
  *
- * PRIOR_PREREQUISITE_WAIT_CONTENTS captured via tsx + JSON.stringify from
- * `apps/server/src/database/default-prompt-templates.ts` at the commit just
- * before this ticket's edit (same extraction method 072/073/076/79 used).
+ * PRIOR_PREREQUISITE_WAIT_CONTENTS는 이 티켓의 수정 직전 커밋에서
+ * `apps/server/src/database/default-prompt-templates.ts`를 tsx +
+ * JSON.stringify로 추출했다(072/073/076/79와 동일한 추출 방식).
  */
 
 export const PRIOR_PREREQUISITE_WAIT_CONTENTS: Record<string, string[]> = {
@@ -83,8 +80,8 @@ export class RefreshDefaultPromptTemplatesPrerequisiteWait1760000000080
           continue;
         }
         const current = currentByName.get(name)!;
-        // up: prior → current. down: current → prior (symmetric swap, same
-        // exact-match discipline both directions — same shape as 072/073/076/79).
+        // up: prior → current. down: current → prior (대칭 교체 — 양방향 모두
+        // 동일한 exact-match 규율, 072/073/076/79와 같은 형태).
         const target = direction === 'up' ? current : PRIOR_PREREQUISITE_WAIT_CONTENTS[name][0];
         const sourceList = direction === 'up' ? PRIOR_PREREQUISITE_WAIT_CONTENTS[name] : [current];
         if (row.content === target) {
@@ -96,7 +93,7 @@ export class RefreshDefaultPromptTemplatesPrerequisiteWait1760000000080
           await tplRepo.save(row);
           updated++;
         } else {
-          // Operator customization / independent drift — leave it alone.
+          // 운영자 커스터마이징 / 독립적인 drift — 그대로 둔다.
           customized++;
         }
       }
