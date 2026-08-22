@@ -103,14 +103,14 @@ export { OrchestrationTeamMember } from './OrchestrationTeamMember';
 export { OrchestrationMission } from './OrchestrationMission';
 export { OrchestrationStep } from './OrchestrationStep';
 export { OrchestrationEvent } from './OrchestrationEvent';
-// Ontology Graph schema (ticket 6ca4894a, docs/ontology-graph/DESIGN.md axis
-// 2/3) — OntologyNode/OntologyEdge. On the sql.js (dev) backend these are
-// deliberately EXCLUDED from db.ts's primary `entities` array and fed to a
-// second, independently-flushed DataSource instead (see
-// buildOntologyDataSourceOptions() in db.ts) — barrel-exported here only for
-// TypeScript type-sharing, per DESIGN.md axis 3's integration point. On
-// Postgres they synchronize into the single existing DataSource like every
-// other table in this file (D-01, no hand-written migration needed).
+// Ontology Graph 스키마(ticket 6ca4894a, docs/ontology-graph/DESIGN.md 축
+// 2/3) — OntologyNode/OntologyEdge. sql.js(dev) 백엔드에서는 이 둘을
+// 의도적으로 db.ts의 primary `entities` 배열에서 제외하고 대신 독립적으로
+// flush되는 두 번째 DataSource로 넣는다(db.ts의
+// buildOntologyDataSourceOptions() 참고) — 여기서 barrel export하는 이유는
+// DESIGN.md 축 3의 통합 지점에 따른 TypeScript 타입 공유 목적뿐이다.
+// Postgres에서는 이 파일의 다른 모든 테이블과 마찬가지로 기존 단일
+// DataSource에 그대로 synchronize된다(D-01, 손으로 쓴 마이그레이션 불요).
 export { OntologyNode } from './OntologyNode';
 export type { OntologyLayer, OntologyStatus, OntologyConfidenceMethod } from './OntologyNode';
 export { OntologyEdge } from './OntologyEdge';

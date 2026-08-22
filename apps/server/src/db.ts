@@ -29,12 +29,11 @@ import {
 
 const entities = Object.values(entitiesBarrel);
 
-// Ontology Graph tables (ticket 6ca4894a, DESIGN.md axis 3) get their own
-// DataSource on sql.js — see buildOntologyDataSourceOptions() below. They
-// must therefore be excluded from the PRIMARY sql.js entities array (below)
-// so `synchronize` never DDLs them into the shared data.db. Postgres/MySQL
-// keep the full barrel unmodified — one DataSource, ontology alongside
-// everything else, exactly as before this ticket.
+// Ontology Graph 테이블(ticket 6ca4894a, DESIGN.md 축 3)은 sql.js에서 자체
+// DataSource를 갖는다 — 아래 buildOntologyDataSourceOptions() 참고. 그래서
+// PRIMARY sqljs entities 배열(아래)에서는 제외해야 `synchronize`가 공유
+// data.db에 절대 DDL하지 않는다. Postgres/MySQL은 배럴을 그대로 유지 — 이
+// 티켓 이전과 똑같이 단일 DataSource에 온톨로지가 다른 모든 것과 함께 있다.
 const ONTOLOGY_ENTITIES = [OntologyNode, OntologyEdge];
 const ontologyEntitySet = new Set<unknown>(ONTOLOGY_ENTITIES);
 const primarySqljsEntities = entities.filter((e) => !ontologyEntitySet.has(e));
@@ -405,11 +404,11 @@ export function resolveSqljsLocation(): { dbDir: string; location: string } {
 }
 
 /**
- * Sibling of resolveSqljsLocation() for the Ontology Graph's own sql.js file
- * (ticket 6ca4894a, DESIGN.md axis 3) — same directory, different filename,
- * never the same path as the primary. SQLJS_ONTOLOGY_DB_PATH mirrors
- * SQLJS_DB_PATH's env-override/isolation convention (qa-flow subprocess
- * isolation, tests).
+ * Ontology Graph 자체 sql.js 파일을 위한 resolveSqljsLocation()의 자매 함수
+ * (ticket 6ca4894a, DESIGN.md 축 3) — 같은 디렉터리, 다른 파일명, 절대
+ * primary와 같은 경로가 되지 않는다. SQLJS_ONTOLOGY_DB_PATH는
+ * SQLJS_DB_PATH의 env-override/격리 관례(qa-flow 서브프로세스 격리, 테스트)를
+ * 그대로 따른다.
  */
 export function resolveOntologySqljsLocation(): { dbDir: string; location: string } {
   const dbDir = path.join(__dirname, '..', '..', '..', 'database');
@@ -494,9 +493,9 @@ export function buildDataSourceOptions(): DataSourceOptions {
     // SqljsWriteSubscriber flips the dirty flag on writes so an idle server
     // flushes nothing. sqljs-only — the prod backends never construct it.
     subscribers: [SqljsWriteSubscriber],
-    // Ontology* entities are excluded here (ticket 6ca4894a, axis 3) — they
-    // live in the second DataSource buildOntologyDataSourceOptions() builds,
-    // never sharing this DataSource's dirty flag/flush timer/data.db file.
+    // Ontology* 엔티티는 여기서 제외한다(ticket 6ca4894a, 축 3) — 이들은
+    // buildOntologyDataSourceOptions()가 만드는 두 번째 DataSource에 들어가고,
+    // 이 DataSource의 dirty flag/flush timer/data.db 파일을 절대 공유하지 않는다.
     entities: primarySqljsEntities,
     migrations: migrationsGlob,
     synchronize: true,   // D-01
@@ -634,24 +633,23 @@ export function startSqljsAutoFlush(
   };
 }
 
-// ── dev sql.js Ontology Graph DataSource (ticket 6ca4894a) ──────────────────
-// DESIGN.md axis 3 (S1/S3 in REVIEW-NOTES.md, both critical/major): Ontology
-// tables must NEVER share the primary data.db's dirty flag, flush timer, or
-// serializeSqljsTransactions() queue. If they did, ontology-table growth
-// (this design's own 10 MLOC projection: ~100-150k nodes + ~240-800k edges)
-// would inflate EVERY subsequent flush of the shared file — even one
-// triggered by an unrelated ticket comment — blocking the whole instance's
-// request handling for every user, not just ontology-graph users (S1). This
-// section is therefore a DELIBERATE, near-total duplication of the primary
-// flush machinery above, not a refactor into shared state — sqljsDirty/
-// sqljsFlushInFlight are process-global module variables (see their own
-// comments above); reusing them for a second DataSource would silently
-// reintroduce exactly the cross-contamination this ticket exists to prevent
-// (a write to one DataSource clearing the OTHER's dirty flag, or one
-// DataSource's flush "coalescing" into the other's in-flight export and
-// skipping its own). Postgres/MySQL never construct any of this — ontology
-// tables synchronize into the single existing DataSource unchanged, gated
-// the same way as every other batched-flush mechanism (isSqljsBackend()).
+// ── dev sql.js 온톨로지 그래프 DataSource (ticket 6ca4894a) ──────────────────
+// DESIGN.md 축 3(REVIEW-NOTES.md S1/S3, 둘 다 critical/major): 온톨로지
+// 테이블은 primary data.db의 dirty flag, flush timer, 또는
+// serializeSqljsTransactions() 큐를 절대 공유해서는 안 된다. 공유한다면
+// 온톨로지 테이블 증가(이 설계 자체의 10 MLOC 투영: ~10-15만 노드 +
+// ~24만-80만 엣지)가 공유 파일의 이후 모든 flush를 부풀리게 되고 — 무관한
+// 티켓 코멘트 하나가 트리거한 flush조차 — 온톨로지 사용자뿐 아니라 모든
+// 사용자의 인스턴스 전체 요청 처리를 블로킹하게 된다(S1). 그래서 이 섹션은
+// 공유 상태로 리팩터링한 게 아니라, 위 primary flush 메커니즘을 의도적으로
+// 거의 그대로 복제한 것이다 — sqljsDirty/sqljsFlushInFlight는 프로세스
+// 전역 모듈 변수라(위 자신들의 코멘트 참고) 두 번째 DataSource를 위해
+// 재사용하면 이 티켓이 막으려는 바로 그 교차 오염이 조용히 재발한다(한
+// DataSource로의 쓰기가 다른 쪽의 dirty flag를 지운다거나, 한 DataSource의
+// flush가 다른 쪽의 진행 중인 export에 "합류"해 자기 것을 건너뛴다거나).
+// Postgres/MySQL은 이 중 아무것도 구성하지 않는다 — 온톨로지 테이블은 다른
+// 모든 배치 flush 메커니즘과 같은 방식(isSqljsBackend())으로 게이트되어
+// 기존 단일 DataSource에 변경 없이 synchronize된다.
 let ontologySqljsDirty = false;
 let ontologySqljsFlushInFlight: Promise<boolean> | null = null;
 
@@ -663,7 +661,7 @@ export function isOntologySqljsDirty(): boolean {
   return ontologySqljsDirty;
 }
 
-/** Ontology-DataSource-scoped sibling of SqljsWriteSubscriber — see its docstring above. */
+/** SqljsWriteSubscriber의 Ontology-DataSource 전용 자매 클래스 — 위 docstring 참고. */
 @EventSubscriber()
 export class OntologySqljsWriteSubscriber implements EntitySubscriberInterface {
   afterQuery(event: { query?: string; success?: boolean }): void {
@@ -676,23 +674,22 @@ export class OntologySqljsWriteSubscriber implements EntitySubscriberInterface {
 }
 
 /**
- * Sibling of buildDataSourceOptions() (DESIGN.md axis 3's explicit
- * integration point) — always sql.js-shaped, regardless of DB_TYPE. There is
- * no Postgres/MySQL variant: on those backends Ontology* entities already
- * synchronize into the single primary DataSource (they're never excluded
- * from `entities` there), so nothing should ever construct a DataSource from
- * these options unless isSqljsBackend() is true. Callers gate on that, the
- * same way every other sqljs-only code path in this file does.
+ * buildDataSourceOptions()의 자매 함수(DESIGN.md 축 3의 명시적 통합
+ * 지점) — DB_TYPE과 무관하게 항상 sql.js 형태다. Postgres/MySQL 변형은
+ * 없다: 그 백엔드에서는 Ontology* 엔티티가 이미 단일 primary DataSource에
+ * synchronize되므로(거기서는 `entities`에서 절대 제외되지 않음),
+ * isSqljsBackend()가 true일 때가 아니면 이 옵션으로 DataSource를 만들 일이
+ * 없어야 한다. 호출부는 이 파일의 다른 모든 sqljs 전용 코드 경로와 같은
+ * 방식으로 게이트한다.
  */
 export function buildOntologyDataSourceOptions(): DataSourceOptions {
   const { dbDir, location } = resolveOntologySqljsLocation();
-  // Reviewer finding (6ca4894a Review round 1): a misconfigured
-  // SQLJS_ONTOLOGY_DB_PATH that happens to normalize to the SAME file as the
-  // primary sql.js DB would silently defeat this entire ticket — two
-  // independent sql.js/WASM instances would each hold their own in-memory
-  // copy of that one file and export/overwrite it on their own schedules,
-  // corrupting or dropping whichever side flushed last. Fail boot loudly and
-  // immediately instead of letting that happen quietly.
+  // 리뷰 지적(6ca4894a Review round 1): SQLJS_ONTOLOGY_DB_PATH가 잘못
+  // 설정되어 정규화 후 primary sql.js DB와 우연히 같은 파일을 가리키면 이
+  // 티켓 전체가 조용히 무력화된다 — 독립된 두 sql.js/WASM 인스턴스가 각각
+  // 그 파일의 자기 메모리 사본을 들고 서로 다른 스케줄로 export/덮어쓰기를
+  // 하면서, 나중에 flush한 쪽이 먼저 flush한 쪽을 손상시키거나 날려버린다.
+  // 조용히 그렇게 되도록 두는 대신 부팅을 즉시, 크게 실패시킨다.
   const primaryLocation = path.resolve(resolveSqljsLocation().location);
   const ontologyLocation = path.resolve(location);
   if (ontologyLocation === primaryLocation) {
@@ -711,26 +708,26 @@ export function buildOntologyDataSourceOptions(): DataSourceOptions {
     subscribers: [OntologySqljsWriteSubscriber],
     entities: ONTOLOGY_ENTITIES,
     synchronize: true,   // D-01
-    migrationsRun: false, // D-02 — moot here (no ontology migrations exist), kept for parity
+    migrationsRun: false, // D-02 — 여기선 무의미(온톨로지 마이그레이션 자체가 없음), 대칭성 위해 유지
     logging: false,
   };
 }
 
-// Only constructed when the active backend is sql.js — on Postgres/MySQL
-// this stays null so buildOntologyDataSourceOptions() (and its mkdir side
-// effect) is never even called, matching "Postgres: no changes" exactly.
+// 활성 백엔드가 sql.js일 때만 생성된다 — Postgres/MySQL에서는 null로
+// 남아서 buildOntologyDataSourceOptions()(그리고 그 mkdir 부수효과)가 아예
+// 호출조차 안 되고, "Postgres: 변경 없음"과 정확히 일치한다.
 export const AppOntologyDataSource: DataSource | null = isSqljsBackend()
   ? new DataSource(buildOntologyDataSourceOptions())
   : null;
 if (AppOntologyDataSource) {
-  // Own transaction queue (S3) — serializeSqljsTransactions() is per-instance
-  // (patches this DataSource's own manager, keyed by a closure-local queue +
-  // AsyncLocalStorage), so calling it a second time here is already safe and
-  // requires no changes to the function itself.
+  // 자체 트랜잭션 큐(S3) — serializeSqljsTransactions()는 인스턴스별로
+  // 동작한다(이 DataSource 자신의 manager를 패치하고, 클로저 로컬 큐 +
+  // AsyncLocalStorage로 키잉되므로), 여기서 두 번째로 호출해도 이미
+  // 안전하고 함수 자체를 바꿀 필요가 없다.
   serializeSqljsTransactions(AppOntologyDataSource);
 }
 
-/** Ontology-DataSource-scoped sibling of doSqljsExport() — see its docstring above. */
+/** doSqljsExport()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
 async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
   ontologySqljsDirty = false;
   try {
@@ -742,7 +739,7 @@ async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
   }
 }
 
-/** Ontology-DataSource-scoped sibling of flushSqljs() — see its docstring above. */
+/** flushSqljs()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
 export async function flushOntologySqljs(dataSource: DataSource, force = false): Promise<boolean> {
   if (!isSqljsBackend()) return false;
   if (!dataSource?.isInitialized) return false;
@@ -752,7 +749,7 @@ export async function flushOntologySqljs(dataSource: DataSource, force = false):
     try {
       await ontologySqljsFlushInFlight;
     } catch {
-      // Surfaced to that flush's own caller; proceed to a fresh forced export.
+      // 그 flush 자신의 호출자에게 전달됨; 새로운 강제 export를 진행한다.
     }
   }
 
@@ -768,11 +765,11 @@ export async function flushOntologySqljs(dataSource: DataSource, force = false):
 }
 
 /**
- * Initialize the Ontology DataSource if this backend has one. No-op on
- * Postgres/MySQL (AppOntologyDataSource is null — ontology tables already
- * live in the primary DataSource). Idempotent — safe to call from both the
- * NestJS boot path (DatabaseModule.onModuleInit) and the standalone MCP
- * entrypoint (mcp-server.ts), same posture as initDb() below.
+ * 이 백엔드에 Ontology DataSource가 있으면 초기화한다. Postgres/MySQL에서는
+ * no-op(AppOntologyDataSource가 null — 온톨로지 테이블이 이미 primary
+ * DataSource에 있음). 멱등적 — NestJS 부트 경로(DatabaseModule.onModuleInit)와
+ * standalone MCP 진입점(mcp-server.ts) 양쪽에서 호출해도 안전, 아래
+ * initDb()와 같은 자세.
  */
 export async function initOntologyDb(): Promise<void> {
   if (!AppOntologyDataSource) return;
@@ -781,7 +778,7 @@ export async function initOntologyDb(): Promise<void> {
   }
 }
 
-/** Ontology-DataSource-scoped sibling of startSqljsAutoFlush() — see its docstring above. */
+/** startSqljsAutoFlush()의 Ontology-DataSource 전용 자매 함수 — 위 docstring 참고. */
 export function startOntologySqljsAutoFlush(
   dataSource: DataSource | null,
   opts: { onError?: (e: unknown) => void } = {},
@@ -809,32 +806,30 @@ export function startOntologySqljsAutoFlush(
 }
 
 /**
- * Row-count ceiling for the ontology sql.js DataSource (ticket 6ca4894a,
- * REVIEW-NOTES.md S1 defense-in-depth mitigation — the dual-DataSource split
- * above stops ontology growth from blocking the REST of AWB, but one
- * workspace's ontology graph can still slow down ontology-graph flushes for
- * OTHER workspaces sharing the same sql.js file). sql.js/dev only — Postgres
- * has no per-flush full-file re-export step to bound, so no ceiling applies
- * there.
+ * 온톨로지 sql.js DataSource의 row-count ceiling(ticket 6ca4894a,
+ * REVIEW-NOTES.md S1의 defense-in-depth 완화책 — 위 듀얼 DataSource
+ * 분리는 온톨로지 증가가 AWB 나머지를 블로킹하는 것은 막지만, 한
+ * 워크스페이스의 온톨로지 그래프가 같은 sql.js 파일을 공유하는 다른
+ * 워크스페이스의 온톨로지 그래프 flush를 여전히 느리게 만들 수 있다).
+ * sql.js/dev 전용 — Postgres는 매 flush마다 전체 파일을 재export하는
+ * 단계 자체가 없으므로 이 ceiling이 적용되지 않는다.
  *
- * Default derived from a real, pinned-build measurement, not a guess:
- * `scripts/benchmark-ontology-flush.mjs` populated DESIGN.md's own worst-case
- * 10 MLOC projection (`research-storage.md` §6.3: 150,000 nodes + 800,000
- * edges = 950,000 rows) and timed the actual saveDatabase() export —
- * 676ms wall-clock for a 536.2 MB file (measured 2026-08-22, sql.js@1.12.0,
- * see that script's header for the reproduction command). 1,000,000 gives
- * the full designed worst-case room to complete without tripping the
- * ceiling, while still bounding runaway growth past it (multiple large repos
- * in one workspace, a re-insertion bug, etc.) to a measured, sub-second-per-
- * flush regime rather than letting export cost grow unbounded.
+ * 기본값은 추측이 아니라 실제 고정 빌드 실측에서 도출했다:
+ * `scripts/benchmark-ontology-flush.mjs`가 이 설계 자체의 워스트케이스 10
+ * MLOC 투영(`research-storage.md` §6.3: 150,000 nodes + 800,000 edges =
+ * 950,000 rows)을 채운 뒤 실제 saveDatabase() export 시간을 측정 — 536.2
+ * MB 파일에 676ms wall-clock(2026-08-22 측정, sql.js@1.12.0, 재현 명령은 그
+ * 스크립트 헤더 참고). 1,000,000은 설계된 워스트케이스 전체가 ceiling에
+ * 안 걸리고 여유 있게 끝나도록 하면서, 그 이상의 폭주 증가(한 워크스페이스에
+ * 여러 대형 저장소, 재삽입 버그 등)는 export 비용이 무한정 커지게 두는
+ * 대신 실측된 서브초 단위 flush 비용 안으로 제한한다.
  *
- * This constant is a NUMBER ONLY — enforcement (DESIGN.md's "degrade to
- * read-only-against-last-snapshot, or disable the feature for that
- * workspace") is deliberately NOT implemented here. This ticket's scope is
- * schema + DataSource separation; the ceiling is meant to be consulted by
- * whichever ticket performs bulk ontology writes (the extraction worker) or
- * serves ontology reads, not enforced inside the DataSource/flush layer
- * itself.
+ * 이 상수는 숫자만 제공한다 — enforcement(DESIGN.md의 "마지막 스냅샷 기준
+ * 읽기 전용으로 격하, 또는 해당 워크스페이스의 기능 비활성화")는 여기서
+ * 의도적으로 구현하지 않는다. 이 티켓의 범위는 스키마 + DataSource
+ * 분리이고, 이 ceiling은 온톨로지 대량 쓰기를 실제로 수행하는 티켓(추출
+ * 워커)이나 온톨로지 읽기를 제공하는 티켓이 참조해야 할 값이지,
+ * DataSource/flush 레이어 안에서 강제되는 것이 아니다.
  */
 export const DEFAULT_ONTOLOGY_SQLJS_ROW_CEILING = 1_000_000;
 
@@ -1023,7 +1018,7 @@ export async function initDb() {
   // creates the partial unique index (ticket 3c3b17a3).
   await preSyncSqljsOpenIntents();
   await AppDataSource.initialize();
-  // Ticket 6ca4894a — no-op on Postgres/MySQL (AppOntologyDataSource is null there).
+  // Ticket 6ca4894a — Postgres/MySQL에서는 no-op(그쪽은 AppOntologyDataSource가 null).
   await initOntologyDb();
   const dbType = process.env.DB_TYPE || 'sqlite';
   console.log(`[DB] Connected using ${dbType}`);

@@ -1,31 +1,31 @@
-// Regression test — ticket 6ca4894a (reviewer finding, Review round 1)
+// 회귀 테스트 — ticket 6ca4894a (리뷰 지적, Review round 1)
 //
-// OntologyEdge.resolution was a TypeScript union (OntologyEdgeResolution)
-// over a plain `varchar` column with no DB-level constraint — Postgres and
-// sql.js could both silently store any string, since TypeScript types are
-// erased at runtime and never checked by either database. DESIGN.md axis 2
-// pins `resolution` as a genuinely CLOSED vocabulary (unlike type/kind/layer,
-// which are deliberately open/workspace-extensible) — the ticket's own text
-// literally writes it as `resolution ENUM('exact','name_match','dynamic',
-// 'unresolved')`.
+// OntologyEdge.resolution은 TypeScript union(OntologyEdgeResolution)만
+// 있고 실제 컬럼은 DB 레벨 제약 없는 순수 `varchar`였다 — TypeScript
+// 타입은 런타임에 지워지고 어느 DB도 검사하지 않으므로 Postgres와 sql.js
+// 둘 다 임의 문자열을 조용히 저장할 수 있었다. DESIGN.md 축 2는
+// `resolution`을 (워크스페이스 확장 가능하도록 의도적으로 열어둔
+// type/kind/layer와 달리) 진짜 CLOSED 어휘로 못박는다 — 티켓 원문도
+// 그대로 `resolution ENUM('exact','name_match','dynamic','unresolved')`로
+// 쓰고 있다.
 //
-// TypeORM's `simple-enum` column type was considered and rejected as the
-// fix: verified directly against typeorm@0.3.31's own source
-// (AbstractSqliteDriver.js normalizeType(): `simple-enum` → plain "varchar"
-// with NO check constraint; DateUtils.simpleEnumToString() is a no-op
-// stringify) — on the sql.js/SQLite backend it provides ZERO enforcement,
-// only Postgres (where simple-enum maps to a real native enum type) would
-// actually be protected. A `@Check()` constraint is portable SQL both
-// dialects support natively and was verified empirically (a throwaway probe
-// against a real sql.js DataSource) to generate a real `CONSTRAINT ... CHECK`
-// clause and reject invalid values with `CHECK constraint failed`.
+// TypeORM의 `simple-enum` 컬럼 타입을 수정안으로 검토했으나 기각했다:
+// typeorm@0.3.31 소스(AbstractSqliteDriver.js의 normalizeType():
+// `simple-enum` → 그냥 "varchar", check 제약 없음; DateUtils.
+// simpleEnumToString()은 단순 문자열화만 하는 no-op)를 직접 확인 — sql.js/
+// SQLite 백엔드에서는 강제력이 전혀 없고, Postgres(simple-enum이 실제
+// 네이티브 enum 타입으로 매핑되는 곳)만 실제로 보호된다. `@Check()` 제약은
+// 두 dialect 모두 네이티브로 지원하는 이식성 있는 SQL이고, 실증적으로도
+// 확인했다(실제 sql.js DataSource에 대한 일회성 프로브로 실제
+// `CONSTRAINT ... CHECK` 절이 생성되고 잘못된 값이 `CHECK constraint
+// failed`로 거부됨을 확인).
 //
-// This suite proves the actual, shipped OntologyEdge entity enforces the
-// closed vocabulary at the storage layer, not just via its TypeScript type.
+// 이 스위트는 실제로 배포되는 OntologyEdge 엔티티가 TypeScript 타입뿐
+// 아니라 저장 계층에서도 닫힌 어휘를 강제함을 증명한다.
 //
-// Runs against compiled dist/ (requires `npm run build`). Uses an isolated
-// SQLJS_ONTOLOGY_DB_PATH temp file so it never touches the shared dev
-// database/ontology.db.
+// 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요). 격리된
+// SQLJS_ONTOLOGY_DB_PATH 임시 파일을 써서 공유 dev database/ontology.db는
+// 절대 건드리지 않는다.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -97,10 +97,10 @@ describe('OntologyEdge.resolution — DB-level closed-vocabulary enforcement (ti
   });
 
   it('rejects an out-of-vocabulary value at the DB layer even via raw SQL (bypassing the TypeScript type entirely)', async () => {
-    // A raw INSERT is exactly what a typo, a bug in a future service, or any
-    // non-TypeScript caller (another process, a manual fixup query) could
-    // produce — precisely what a TypeScript union alone can never catch,
-    // and what the reviewer asked to be enforced at the storage layer.
+    // raw INSERT는 오타, 미래 서비스의 버그, 또는 TypeScript를 거치지 않는
+    // 호출자(다른 프로세스, 수동 fixup 쿼리)가 정확히 만들어낼 수 있는
+    // 형태다 — TypeScript union 혼자서는 절대 못 잡고, 리뷰어가 저장 계층에서
+    // 강제해 달라고 요청한 바로 그 지점이다.
     await assert.rejects(
       () =>
         AppOntologyDataSource.query(

@@ -232,8 +232,8 @@ async function main() {
   const stopSqljsFlush = startSqljsAutoFlush(AppDataSource, {
     onError: (e) => console.error('[MCP] sql.js flush failed:', e),
   });
-  // Ontology Graph's own DataSource/flush timer (ticket 6ca4894a) — no-op on
-  // Postgres/MySQL (AppOntologyDataSource is null there).
+  // Ontology Graph 자체 DataSource/flush timer(ticket 6ca4894a) — Postgres/MySQL에서는
+  // no-op(그쪽은 AppOntologyDataSource가 null).
   const stopOntologySqljsFlush = startOntologySqljsAutoFlush(AppOntologyDataSource, {
     onError: (e) => console.error('[MCP] ontology sql.js flush failed:', e),
   });

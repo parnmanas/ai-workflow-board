@@ -1,54 +1,50 @@
-// Regression test — ticket 6ca4894a
+// 회귀 테스트 — ticket 6ca4894a
 // "Ontology Graph 1/7 스키마 — OntologyNode/OntologyEdge 엔티티 + sql.js 전용
 // DataSource 분리"
 //
-// DESIGN.md axis 3 / REVIEW-NOTES.md S1(critical)+S3(major): if OntologyNode/
-// OntologyEdge shared the PRIMARY sql.js DataSource (dirty flag, flush timer,
-// serializeSqljsTransactions() queue), ontology-table growth would inflate
-// EVERY subsequent flush of the shared file — blocking the whole instance's
-// request handling (ticket moves, comments, dispatch) for every user, not
-// just ontology-graph users. The fix is a second, fully independent sql.js
-// DataSource (AppOntologyDataSource, db.ts) for ontology tables only.
+// DESIGN.md 축 3 / REVIEW-NOTES.md S1(critical)+S3(major): OntologyNode/
+// OntologyEdge가 PRIMARY sql.js DataSource(dirty flag, flush timer,
+// serializeSqljsTransactions() 큐)를 공유한다면, 온톨로지 테이블 증가가
+// 공유 파일의 이후 모든 flush를 부풀려서 — 온톨로지 사용자뿐 아니라 모든
+// 사용자의 인스턴스 전체 요청 처리(티켓 이동, 코멘트, dispatch)를
+// 블로킹하게 된다. 그 픽스는 온톨로지 테이블 전용, 완전히 독립된 두
+// 번째 sql.js DataSource(AppOntologyDataSource, db.ts)다.
 //
-// This suite proves the independence end-to-end, not just that the second
-// DataSource exists:
-//   1. STATIC GUARD — the primary DataSource's sqljs entities array excludes
-//      Ontology*; the ontology DataSource's options point at a different
-//      on-disk file and carry their own subscriber class.
-//   2. DIRTY-FLAG INDEPENDENCE — writing to one DataSource never marks the
-//      other dirty.
-//   3. FLUSH INDEPENDENCE — flushing one DataSource never calls the other's
-//      saveDatabase(), and never clears the other's dirty flag.
-//   4. QUEUE INDEPENDENCE — serializeSqljsTransactions() is applied per-
-//      DataSource (db.ts module load), so concurrent transaction() calls on
-//      the TWO DIFFERENT DataSources run genuinely in parallel — unlike two
-//      overlapping calls on the SAME DataSource, which
-//      sqljs-transaction-serialize-queue.test.mjs already proves stay
-//      serialized to maxActive=1.
-//   5. SAME-PATH COLLISION GUARD (reviewer finding, 6ca4894a Review round 1)
-//      — buildOntologyDataSourceOptions() refuses to construct a DataSource
-//      whose resolved location equals the primary DataSource's, instead of
-//      silently letting two independent sql.js instances export the same
-//      on-disk file.
-//   6. COMPLETION CRITERION 3, corrected TWICE across reviewer round 1 (see
-//      the long comment directly above the KNOWN V1 LIMITATION test below
-//      for the full history — the first fix mocked the gate before the real
-//      saveDatabase() call and proved nothing; the second fix's own
-//      "chunked bulk-population" test smuggled in a test-only setTimeout
-//      that did real work the actual (nonexistent, out-of-scope) population
-//      path isn't guaranteed to reproduce). What THIS ticket actually
-//      guarantees and tests: queue independence (item 4 above) is the
-//      necessary structural precondition; the flush's own synchronous
-//      db.export() DOES monopolize the event loop for its duration — a
-//      real, DESIGN.md-acknowledged v1 limitation, not a bug, demonstrated
-//      deterministically below. Full non-blocking behavior for a REAL bulk
-//      population workload is explicitly NOT established here and is a
-//      required obligation of whichever ticket implements that workload
-//      (flagged on ticket e14ef1c9 directly, not just documented here).
+// 이 스위트는 두 번째 DataSource가 "존재한다"는 것만이 아니라 독립성을
+// 끝까지 증명한다:
+//   1. 정적 가드 — primary DataSource의 sqljs entities 배열은 Ontology*를
+//      제외하고, 온톨로지 DataSource의 옵션은 다른 디스크 파일을 가리키며
+//      자기만의 subscriber 클래스를 갖는다.
+//   2. DIRTY-FLAG 독립성 — 한쪽 DataSource에 쓰는 것이 절대 다른 쪽을
+//      dirty로 표시하지 않는다.
+//   3. FLUSH 독립성 — 한쪽 DataSource를 flush하는 것이 절대 다른 쪽의
+//      saveDatabase()를 호출하지 않고, 다른 쪽의 dirty flag도 지우지 않는다.
+//   4. 큐 독립성 — serializeSqljsTransactions()는 DataSource별로 적용된다
+//      (db.ts 모듈 로드 시점), 그래서 서로 다른 두 DataSource에 대한 동시
+//      transaction() 호출은 진짜로 병렬 실행된다 — 같은 DataSource에 걸린
+//      두 개의 겹치는 호출이 maxActive=1로 직렬화됨을 이미 증명한
+//      sqljs-transaction-serialize-queue.test.mjs와 대조적이다.
+//   5. 동일 경로 충돌 가드(리뷰 지적, 6ca4894a Review round 1) —
+//      buildOntologyDataSourceOptions()는 정규화된 위치가 primary
+//      DataSource와 같은 DataSource를 만드는 것을 거부한다 — 두 독립
+//      sql.js 인스턴스가 조용히 같은 디스크 파일을 export하게 두는 대신.
+//   6. 완료조건 3, 리뷰 round 1에서 두 번 교정됨(전체 경위는 아래 KNOWN V1
+//      LIMITATION 테스트 바로 위의 긴 코멘트 참고 — 첫 번째 픽스는 실제
+//      saveDatabase() 호출 전에 gate를 mock해서 아무것도 증명하지 못했고,
+//      두 번째 픽스의 "청크 단위 대량 population" 테스트는 실제(존재하지
+//      않는, 범위 밖) population 경로가 재현한다는 보장이 없는 실제 동작을
+//      test-only setTimeout으로 몰래 끼워 넣었다). 이 티켓이 실제로 보장하고
+//      테스트하는 것: 큐 독립성(위 4번)이 필요한 구조적 전제조건이고;
+//      flush 자신의 동기식 db.export()는 실제로 그 시간 동안 이벤트 루프를
+//      독점한다 — 버그가 아니라 실재하는, DESIGN.md가 인정한 v1 한계이며,
+//      아래에서 결정론적으로 증명한다. 실제 대량 population 워크로드에
+//      대한 완전한 비블로킹 동작은 여기서 명시적으로 확립하지 않으며,
+//      그 워크로드를 구현하는 티켓의 필수 의무다(여기 문서화만이 아니라
+//      ticket e14ef1c9에 직접 플래그해둠).
 //
-// Runs against compiled dist/ (requires `npm run build`, satisfied by the
-// test script). Uses isolated SQLJS_DB_PATH / SQLJS_ONTOLOGY_DB_PATH temp
-// files so it never touches the shared dev database/*.db.
+// 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요, test 스크립트가
+// 보장). 격리된 SQLJS_DB_PATH / SQLJS_ONTOLOGY_DB_PATH 임시 파일을 써서
+// 공유 dev database/*.db는 절대 건드리지 않는다.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -102,8 +98,9 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
   before(async () => {
     await AppDataSource.initialize();
     await AppOntologyDataSource.initialize();
-    // Persist each backend's own synchronize()-created schema and reset both
-    // dirty flags so every test starts from a known, clean baseline.
+    // 각 백엔드 자신의 synchronize()가 만든 스키마를 영속화하고 두 dirty
+    // flag를 모두 리셋해서, 모든 테스트가 알려진 깨끗한 기준선에서 시작하게
+    // 한다.
     await flushSqljs(AppDataSource, true);
     await flushOntologySqljs(AppOntologyDataSource, true);
   });
@@ -135,11 +132,11 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
   });
 
   it('same-path collision guard: buildOntologyDataSourceOptions() refuses to construct a DataSource pointed at the primary DB file', () => {
-    const primaryLocation = resolveSqljsLocation().location; // absolute tmp path in this test file
+    const primaryLocation = resolveSqljsLocation().location; // 이 테스트 파일에서는 절대경로 tmp 경로
     const prevOntologyPath = process.env.SQLJS_ONTOLOGY_DB_PATH;
 
     try {
-      // Exact same absolute path as the primary.
+      // primary와 정확히 같은 절대경로.
       process.env.SQLJS_ONTOLOGY_DB_PATH = primaryLocation;
       assert.throws(
         () => buildOntologyDataSourceOptions(),
@@ -147,9 +144,9 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
         'an exact-same-path override must throw at construction time, not silently build a colliding DataSource',
       );
 
-      // Differently-SPELLED but same-resolved path (redundant ../ segment) —
-      // proves the guard normalizes via path.resolve(), not bare string
-      // equality, matching the reviewer's explicit ask.
+      // 철자는 다르지만 정규화 결과는 같은 경로(중복된 ../ 세그먼트) —
+      // 가드가 단순 문자열 동등성이 아니라 path.resolve()로 정규화 비교함을
+      // 증명한다, 리뷰어의 명시적 요청과 일치.
       const dir = path.dirname(primaryLocation);
       const base = path.basename(primaryLocation);
       process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(dir, '..', path.basename(dir), base);
@@ -162,13 +159,13 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
       process.env.SQLJS_ONTOLOGY_DB_PATH = prevOntologyPath;
     }
 
-    // The real, isolated test config (this file's own env setup) must never
-    // trip the guard — default/isolated paths always differ by design.
+    // 실제 격리된 테스트 설정(이 파일 자신의 env 설정)은 절대 가드에
+    // 걸리면 안 된다 — 기본값/격리된 경로는 설계상 항상 다르다.
     assert.doesNotThrow(() => buildOntologyDataSourceOptions(), 'the actual isolated test paths must never collide');
   });
 
   it('dirty-flag independence: writing ontology rows never marks the primary DataSource dirty, and vice versa', async () => {
-    // Baseline: both clean.
+    // 기준선: 둘 다 깨끗함.
     await flushSqljs(AppDataSource, true);
     await flushOntologySqljs(AppOntologyDataSource, true);
     assert.equal(isSqljsDirty(), false);
@@ -179,12 +176,12 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     assert.equal(isOntologySqljsDirty(), true, 'an ontology write must mark the ontology dirty flag');
     assert.equal(isSqljsDirty(), false, 'an ontology write must NOT mark the primary dirty flag');
 
-    // Flushing ontology clears only the ontology flag.
+    // 온톨로지를 flush하면 온톨로지 flag만 지워진다.
     await flushOntologySqljs(AppOntologyDataSource);
     assert.equal(isOntologySqljsDirty(), false);
     assert.equal(isSqljsDirty(), false);
 
-    // Now the reverse direction.
+    // 이제 반대 방향.
     const wsRepo = AppDataSource.getRepository(Workspace);
     await wsRepo.save(wsRepo.create({ name: 'dirty-flag-check', description: 'primary write' }));
     assert.equal(isSqljsDirty(), true, 'a primary write must mark the primary dirty flag');
@@ -223,11 +220,11 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
   });
 
   it('queue independence: overlapping transaction() calls on the TWO DIFFERENT DataSources run concurrently, not serialized', async () => {
-    // Contrast with sqljs-transaction-serialize-queue.test.mjs, which proves
-    // maxActive stays at 1 for two overlapping calls on the SAME DataSource.
-    // Here, one call per DataSource, at the same time — if they shared a
-    // queue (the bug this ticket exists to prevent), maxActive would be
-    // capped at 1 exactly like the single-DataSource case.
+    // sqljs-transaction-serialize-queue.test.mjs와 대조된다 — 그 파일은
+    // 같은 DataSource에 걸린 두 개의 겹치는 호출에 대해 maxActive가
+    // 1로 유지됨을 증명한다. 여기서는 DataSource마다 하나씩, 동시에
+    // 호출한다 — 만약 큐를 공유한다면(이 티켓이 막으려는 바로 그 버그)
+    // maxActive는 단일 DataSource 케이스와 똑같이 1로 제한될 것이다.
     let active = 0;
     let maxActive = 0;
     const hold = (manager, name) => async () => {
@@ -257,74 +254,70 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     );
   });
 
-  // COMPLETION CRITERION 3, corrected TWICE (reviewer findings, 6ca4894a
-  // Review round 1 — the reviewer approved fixes 1+2 above after re-running
-  // this suite locally, but round-1's own first pass at 3a was itself still
-  // wrong and got a second, sharper finding):
+  // 완료조건 3, 두 번 교정됨(리뷰 지적, 6ca4894a Review round 1 — 리뷰어는
+  // 이 스위트를 로컬에서 재실행한 뒤 위 1+2번 픽스를 승인했지만, round 1
+  // 자신의 3a 첫 시도 자체가 여전히 틀렸고 더 예리한 두 번째 지적을 받았다):
   //
-  // Round-1-a: the FIRST version of this test gated the MOCKED
-  // saveDatabase() behind a Promise BEFORE calling the real
-  // origOntoSave() — meaning the real, synchronous WASM db.export() call
-  // (measured at 676ms for a 950k-row DB, scripts/benchmark-ontology-flush.mjs)
-  // never actually ran while the "concurrent" primary write executed. Fixed
-  // by replacing the mock with the KNOWN V1 LIMITATION test below (real,
-  // unmocked flush; see its own comment for the fix detail).
+  // Round-1-a: 이 테스트의 첫 번째 버전은 MOCK한 saveDatabase()를 실제
+  // origOntoSave() 호출 앞에서 Promise로 멈춰 세웠다 — 즉 실제 동기식
+  // WASM db.export() 호출(950k행 DB에서 676ms로 측정,
+  // scripts/benchmark-ontology-flush.mjs)이 "동시" primary 쓰기가 실행되는
+  // 동안 실제로는 단 한 번도 실행되지 않았다는 뜻이다. 아래 KNOWN V1
+  // LIMITATION 테스트(실제, mock 없는 flush)로 교체해서 고쳤다 — 픽스
+  // 세부사항은 그 자신의 코멘트 참고.
   //
-  // Round-1-b (this fix): the SECOND version — "COMPLETION CRITERION 3a" —
-  // wrapped a real multi-chunk ontology transaction with a test-only
-  // `setTimeout(5)` between chunks to make the interleaving assertion
-  // deterministic, and claimed this proved "a real bulk-population
-  // transaction does not block a concurrent primary write." The reviewer
-  // correctly rejected this: this ticket's scope is schema + DataSource
-  // split ONLY — there is no actual bulk-population/writer service anywhere
-  // in this codebase yet (that is ticket e14ef1c9's job, the extraction
-  // worker), so "the real path" that claim referred to does not exist to be
-  // tested. The setTimeout(5) was doing real work in the test (creating an
-  // event-loop yield point) that a from-scratch population implementation
-  // is not guaranteed to reproduce — `await repo.insert()` alone resolves
-  // via the microtask queue, which does not guarantee a fair yield to the
-  // timer/I/O phase the way an explicit macrotask (setImmediate/setTimeout)
-  // does, so the claim did not transfer to "any real chunked population
-  // loop," only to "a loop that happens to yield via a macrotask between
-  // chunks."
+  // Round-1-b(이번 픽스): 두 번째 버전 — "COMPLETION CRITERION 3a" —는
+  // 실제 청크 단위 온톨로지 트랜잭션을 청크 사이 test-only `setTimeout(5)`로
+  // 감싸서 interleaving assertion을 결정론적으로 만들었고, 이게 "실제 대량
+  // population 트랜잭션이 동시 primary 쓰기를 블로킹하지 않는다"를
+  // 증명한다고 주장했다. 리뷰어가 이를 정확히 반려했다: 이 티켓의 범위는
+  // 스키마 + DataSource 분리뿐이다 — 이 코드베이스 어디에도 실제 대량
+  // population/writer 서비스가 아직 없으므로(그건 추출 워커인 ticket
+  // e14ef1c9의 몫), 그 주장이 가리키는 "실제 경로"는 테스트할 대상 자체가
+  // 없었다. setTimeout(5)는 테스트 안에서 실제로 뭔가를 하고
+  // 있었다(이벤트 루프 양보 지점을 만듦) — 그런데 처음부터 구현될
+  // population은 이걸 재현한다는 보장이 없다 — `await repo.insert()`
+  // 하나만으로는 microtask 큐를 통해 이어질 뿐, 명시적 매크로태스크
+  // (setImmediate/setTimeout)처럼 timer/I/O phase로의 공정한 양보를
+  // 보장하지 않으므로, 그 주장은 "실제 청크 단위 population 루프 전반"이
+  // 아니라 "우연히 청크 사이에 매크로태스크로 양보하는 루프"에만 적용됐다.
   //
-  // Correction: completion criterion 3's literal wording ("온톨로지 대량
-  // 쓰기 중 기존 AWB 쓰기가 블로킹되지 않음을 테스트로 검증") requires an
-  // actual population workload to verify in real wall-clock terms — this
-  // ticket cannot honestly claim that without inventing an out-of-scope
-  // population implementation. What THIS ticket verifies and guarantees is
-  // the STRUCTURAL, necessary precondition: the 'queue independence' test
-  // above already proves a transaction() on the ontology DataSource and a
-  // transaction() on the primary DataSource run concurrently (maxActive=2)
-  // — i.e. they do NOT share `serializeSqljsTransactions()`'s FIFO queue,
-  // so nothing in THIS ticket's own code forces population writes to
-  // serialize behind primary writes or vice versa. That is necessary but
-  // NOT sufficient on its own: whichever ticket implements the actual bulk
-  // population loop (e14ef1c9, the extraction worker, or any later
-  // fan-out writer) MUST additionally (a) yield the event loop between
-  // batches via an explicit macrotask (e.g. `setImmediate`), not rely on
-  // microtask-chained `await`s alone, and (b) test ITS OWN real write path
-  // for non-blocking behavior directly — that obligation is NOT satisfied
-  // by anything in this ticket and must not be assumed inherited from it.
-  // (Flagged explicitly as a comment on ticket e14ef1c9 itself, not just
-  // buried here.)
+  // 정정: 완료조건 3의 문자 그대로의 표현("온톨로지 대량 쓰기 중 기존
+  // AWB 쓰기가 블로킹되지 않음을 테스트로 검증")은 실제 wall-clock
+  // 관점에서 검증할 실제 population 워크로드를 요구한다 — 이 티켓은
+  // 범위 밖의 population 구현을 새로 만들지 않고서는 그걸 정직하게
+  // 주장할 수 없다. 이 티켓이 실제로 검증하고 보장하는 것은 구조적,
+  // 필요조건이다: 위 'queue independence' 테스트가 이미 온톨로지
+  // DataSource의 transaction()과 primary DataSource의 transaction()이
+  // 동시에 실행됨(maxActive=2)을 증명한다 — 즉 `serializeSqljsTransactions()`의
+  // FIFO 큐를 공유하지 않으므로, 이 티켓 자신의 코드 안에는 population
+  // 쓰기가 primary 쓰기 뒤로 직렬화되도록(혹은 그 반대로) 강제하는 것이
+  // 없다. 이건 필요하지만 그 자체로 충분하지는 않다: 실제 대량 population
+  // 루프를 구현하는 티켓(e14ef1c9, 추출 워커, 또는 이후의 fan-out
+  // writer 어떤 것이든)은 추가로 (a) 명시적 매크로태스크(예:
+  // `setImmediate`)로 배치 사이에 이벤트 루프를 양보해야 하고 —
+  // microtask로 이어지는 `await`만으로는 안 됨 — (b) 자기 자신의 실제
+  // 쓰기 경로에 대해 비블로킹 동작을 직접 테스트해야 한다 — 그 의무는 이
+  // 티켓의 그 무엇으로도 충족되지 않고, 이 티켓으로부터 물려받는다고
+  // 가정해서도 안 된다(여기 문서화만이 아니라 ticket e14ef1c9 자체에도
+  // 코멘트로 명시적으로 플래그해둠).
 
   it('KNOWN V1 LIMITATION, documented not claimed fixed: the ontology flush\'s synchronous db.export() call monopolizes the event loop for its duration', async () => {
-    // DESIGN.md axis 3 explicitly REJECTS "moving the sql.js flush off the
-    // main thread" as a v1 mechanism (sql.js's WASM-resident Database object
-    // cannot safely cross a worker_threads boundary without a flush-
-    // ownership redesign the design document does not size) — this is a
-    // real, named follow-up (§10a), not a v1 commitment. This test proves
-    // the limitation exists structurally (deterministic — ordering, not
-    // wall-clock racing) rather than silently asserting non-blocking where
-    // it isn't true.
-    // Chunked inserts, not one 3000-row .insert() call — TypeORM's bulk
-    // insert builder blows past sql.js/SQLite's expression-tree depth limit
-    // (~1000) well before 3000 rows × this entity's column count. This is
-    // orthogonal to the point being tested here (some real data must exist
-    // so the flush below does a real export, not an early-return); the
-    // chunk-vs-single-call distinction matters for populating quickly
-    // without erroring, not for the blocking behavior under test.
+    // DESIGN.md 축 3은 "sql.js flush를 메인 스레드 밖으로 이동"을 v1
+    // 메커니즘으로 명시적으로 REJECT한다(sql.js의 WASM 상주 Database
+    // 객체는 flush 소유권 재설계 없이는 worker_threads 경계를 안전하게
+    // 넘을 수 없고, 이 설계 문서는 그 재설계 크기를 산정하지 않는다) —
+    // 이건 실재하는, 이름 붙은 후속 과제(§10a)지 v1 커밋이 아니다. 이
+    // 테스트는 이 한계가 구조적으로 존재함을(결정론적으로 — wall-clock
+    // 레이스가 아니라 순서로) 증명한다, 사실이 아닌데 비블로킹이라고
+    // 조용히 주장하는 대신.
+    // 3000행짜리 .insert() 호출 한 번이 아니라 청크 단위 insert — TypeORM의
+    // 대량 insert 빌더는 이 엔티티의 컬럼 수를 감안하면 3000행보다 훨씬
+    // 전에 sql.js/SQLite의 expression-tree 깊이 상한(~1000)을 넘어버린다.
+    // 이건 여기서 테스트하려는 지점(flush가 실제 export를 하도록, 조기
+    // 반환이 아니라, 어느 정도 실제 데이터가 존재해야 함)과는 별개다 —
+    // 청크 대 단일 호출의 구분은 에러 없이 빠르게 채우는 데 중요한 것이지,
+    // 테스트 대상인 블로킹 동작과는 무관하다.
     const repo = AppOntologyDataSource.getRepository(OntologyNode);
     for (let offset = 0; offset < 3000; offset += 500) {
       await repo.insert(Array.from({ length: 500 }, (_, i) => makeNode(`export-block-${offset + i}`)));
@@ -334,9 +327,9 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     let microtaskRan = false;
     Promise.resolve().then(() => { microtaskRan = true; });
 
-    // A plain (non-awaited) call — the async function's body, including the
-    // real synchronous db.export() deep inside it, runs to completion in
-    // THIS line, before control ever returns here.
+    // await 없는 순수 호출 — async 함수의 본문(그 안 깊숙이 있는 실제
+    // 동기식 db.export() 포함)이 이 줄 안에서 완료까지 실행되고, 그 후에야
+    // 제어가 여기로 돌아온다.
     const flushPromise = flushOntologySqljs(AppOntologyDataSource, true);
 
     assert.equal(
@@ -353,7 +346,7 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
   });
 });
 
-// TypeORM/sql.js leave handles that keep the event loop alive. The suite is
-// launched with `--test-force-exit`, which tears those down and exits with the
-// real code node:test computed — no manual process.exit, which would have
-// overridden the exit code and masked a failed assertion.
+// TypeORM/sql.js는 이벤트 루프를 붙잡아두는 핸들을 남긴다. 이 스위트는
+// `--test-force-exit`로 실행돼 그런 핸들을 정리하고 node:test가 계산한
+// 실제 종료 코드로 exit한다 — 수동 process.exit()은 그 코드를 덮어써
+// 실패한 assertion을 가릴 수 있으므로 쓰지 않는다.

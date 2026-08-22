@@ -9,21 +9,21 @@ import {
 } from '../db';
 
 /**
- * NestJS-side lifecycle owner for the Ontology Graph's own sql.js DataSource
- * (ticket 6ca4894a, DESIGN.md axis 3). Sibling of SqljsFlushService — same
- * periodic-tick / dirty-flag-gated / final-flush-on-shutdown shape — but
- * pointed at AppOntologyDataSource instead of the primary DataSource, and
- * NOT `@InjectDataSource()`-driven: AppOntologyDataSource is a plain module-
- * level singleton in db.ts (never registered via TypeOrmModule), the same
- * way the standalone mcp-server.ts entry point consumes it directly.
+ * Ontology Graph 자체 sql.js DataSource의 NestJS 측 라이프사이클 소유자
+ * (ticket 6ca4894a, DESIGN.md 축 3). SqljsFlushService의 자매 클래스 —
+ * 주기적 tick / dirty-flag 게이팅 / 종료 시 최종 flush 형태는 같지만,
+ * primary DataSource 대신 AppOntologyDataSource를 대상으로 하고,
+ * `@InjectDataSource()`로 주입받지 않는다: AppOntologyDataSource는 db.ts의
+ * 평범한 모듈 레벨 싱글턴이라(TypeOrmModule로 등록된 적 없음), standalone
+ * mcp-server.ts 진입점이 직접 소비하는 것과 같은 방식이다.
  *
- * Without this service, TypeOrmModule.forRoot() in DatabaseModule only ever
- * initializes the PRIMARY DataSource — AppOntologyDataSource would stay
- * uninitialized for the entire lifetime of the `nest start`/`node dist/main.js`
- * process (the actual combined server AWB runs in dev/prod), even though the
- * standalone mcp-server.ts binary already wires it up. This service closes
- * that gap so the dual-DataSource split is live wherever AWB's NestJS app
- * runs, not just under the separate stdio/HTTP standalone MCP binary.
+ * 이 서비스가 없으면, DatabaseModule의 TypeOrmModule.forRoot()는 오직
+ * PRIMARY DataSource만 초기화한다 — AppOntologyDataSource는 standalone
+ * mcp-server.ts 바이너리가 이미 배선을 마쳤음에도 불구하고 `nest start`/
+ * `node dist/main.js` 프로세스(AWB가 실제 dev/prod에서 구동하는 combined
+ * 서버) 생애 주기 내내 초기화되지 않은 채로 남는다. 이 서비스가 그 공백을
+ * 메워서, 별도의 stdio/HTTP standalone MCP 바이너리뿐 아니라 AWB의 NestJS
+ * 앱이 도는 어디서든 듀얼 DataSource 분리가 실제로 살아있게 한다.
  */
 @Injectable()
 export class OntologySqljsFlushService implements OnModuleInit, OnModuleDestroy {
@@ -34,8 +34,8 @@ export class OntologySqljsFlushService implements OnModuleInit, OnModuleDestroy 
   constructor(private readonly logService: LogService) {}
 
   async onModuleInit(): Promise<void> {
-    // Narrowed to a local const: TS does not retain the `!== null` narrowing
-    // of a cross-module `const` inside a nested closure (setInterval below).
+    // 로컬 const로 좁혀둔다: TS는 아래 setInterval 클로저 안에서 다른
+    // 모듈의 `const`에 대한 `!== null` 좁히기를 유지해주지 않는다.
     const dataSource = AppOntologyDataSource;
     if (!this.enabled || !dataSource) return;
 
