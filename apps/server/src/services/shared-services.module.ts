@@ -28,6 +28,7 @@ import { ReBACService } from './rebac.service';
 import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
 import { SqljsFlushService } from './sqljs-flush.service';
+import { OntologySqljsFlushService } from './ontology-sqljs-flush.service';
 import {
   DiscordUserProvider,
   SlackUserProvider,
@@ -69,6 +70,7 @@ import {
     MemoryWatchdogService,
     AgentConnectivityRegistry,
     SqljsFlushService,
+    OntologySqljsFlushService,
     NotificationService,
     SystemCommentService,
     ReBACService,
