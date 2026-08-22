@@ -44,6 +44,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
 import { Action } from '../../entities/Action';
+import { ActionRun } from '../../entities/ActionRun';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
@@ -55,6 +56,7 @@ import {
   DEPENDENCY_SATISFYING_STATUSES,
   MAX_ARTIFACTS_PER_STEP,
   MissionCompletionCriterion,
+  MissionPostAction,
   PlanStepInput,
   POST_ACTION_STALE_IN_FLIGHT_MS,
   SUMMARY_MAX,
@@ -105,6 +107,7 @@ export class OrchestrationRunnerService {
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
+    @InjectRepository(ActionRun) private readonly actionRunRepo: Repository<ActionRun>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly missions: OrchestrationMissionService,
@@ -443,6 +446,23 @@ export class OrchestrationRunnerService {
   }
 
   /**
+   * mission id + post_action의 `order`로부터 결정론적인 상관관계 키를
+   * 만든다(리뷰 지적 2라운드 반영, 티켓 2dc3c62f). `dispatch()` 호출 시
+   * `triggeredById`로 넘겨 ActionRun에 그대로 찍히게 하고, 나중에 크래시
+   * 복구 시 이 값으로 ActionRun을 되찾아 실제로 디스패치가 성공했는지
+   * 재확인하는 용도로 쓴다 — `order`는 미션 안에서 유일하다
+   * (normalizePostActions가 배열 인덱스로 정렬하므로).
+   */
+  private postActionTriggerId(missionId: string, order: number): string {
+    return `orchestration:${missionId}:${order}`;
+  }
+
+  /** 현재 배열 상태로부터 `post_actions_pending`을 다시 계산해 반영한다. */
+  private syncPostActionsPendingFlag(mission: OrchestrationMission, list: MissionPostAction[]): void {
+    mission.post_actions_pending = list.some((p) => p.status === 'pending' || p.status === 'in_flight');
+  }
+
+  /**
    * `condition`이 미션의 최종 status와 맞는 post_actions 항목을 `order` 순서로
    * 전부 디스패치한다. Fire-and-forget(MissionPostAction 문서 참고): 디스패치
    * 성공(run_id) 또는 실패를 기록할 뿐 재시도하지 않고 `mission.status`도
@@ -453,16 +473,22 @@ export class OrchestrationRunnerService {
    *   - `status !== 'pending'`인 항목은 건너뛴다 — 이미 skipped/dispatched/
    *     dispatch_failed로 확정된 항목은 다시 건드리지 않는다.
    *   - `status === 'in_flight'`인 항목(직전 호출이 dispatch() 도중 죽어서
-   *     남은 흔적)은 **절대 재시도하지 않는다** — dispatch()가 실제로는 이미
-   *     발화했을 수 있어 재시도하면 ActionRun이 중복 생성될 위험이 있다. 대신
-   *     `POST_ACTION_STALE_IN_FLIGHT_MS`보다 오래 멈춰 있으면 결과 불명으로
-   *     `dispatch_failed` 처리해 감사 기록을 남긴다(reapPendingPostActions가
-   *     주기적으로 재호출).
+   *     남은 흔적)은 **절대 dispatch()를 다시 호출하지 않는다** — 이미
+   *     발화했을 수 있어 재호출하면 ActionRun이 중복 생성될 위험이 있다.
+   *     대신 `POST_ACTION_STALE_IN_FLIGHT_MS`보다 오래 멈춰 있으면, 먼저
+   *     `postActionTriggerId`로 실제 ActionRun이 이미 만들어졌는지
+   *     조회한다(리뷰 2라운드 지적 — "dispatch 성공 후 run_id 저장 전
+   *     크래시"의 감사 연결 유실을 여기서 복구한다): 찾으면 그 run_id/
+   *     room_id로 `dispatched`를 확정하고, 못 찾으면 그제서야 결과 불명으로
+   *     `dispatch_failed` 처리한다.
    *   - dispatch() 호출 **직전**에 `in_flight` + `dispatched_at`을 먼저
    *     저장한다 — completeMission()이 terminal status를 저장한 직후 ~ 이
    *     메서드가 끝나기 전 사이에 프로세스가 죽어도(리뷰 지적의 첫 번째
    *     crash-window), 남은 `pending`/`in_flight` 항목이 그대로 감사
    *     이력에 남아 reaper가 이어받을 수 있다.
+   *   - 매 저장마다 `mission.post_actions_pending`을 재계산한다 —
+   *     `OrchestrationReaperService`가 이 컬럼으로 미확정 미션을 정확히
+   *     찾아내는 근거다(`finished_at DESC` 같은 최신순 창이 아니라).
    *
    * 호출자(completeMission 또는 recoverPostActions)가 이미 mission-lock을
    * 쥐고 있으므로 이 메서드 자신은 추가로 락을 걸지 않는다.
@@ -479,15 +505,40 @@ export class OrchestrationRunnerService {
         const startedMs = pa.dispatched_at ? Date.parse(pa.dispatched_at) : NaN;
         const stale = !Number.isFinite(startedMs) || Date.now() - startedMs >= POST_ACTION_STALE_IN_FLIGHT_MS;
         if (!stale) continue; // 아직 유예시간 이내 — 다음 스윕에서 다시 판단
+
+        // dispatch()가 실제로 ActionRun을 만든 뒤(그래서 재시도는 여전히
+        // 금지) 그 run_id를 여기 저장하기 전에 죽었을 수 있다 — 재시도 대신
+        // 그때 쓴 상관관계 키로 실제 생성 여부를 조회해 감사 연결을 복구한다.
+        const triggerId = this.postActionTriggerId(mission.id, pa.order);
+        const existingRun = await this.actionRunRepo.findOne({
+          where: { action_id: pa.action_id, triggered_by_type: 'system', triggered_by_id: triggerId },
+          order: { created_at: 'DESC' },
+        });
+        if (existingRun) {
+          pa.status = 'dispatched';
+          pa.run_id = existingRun.id;
+          pa.room_id = existingRun.room_id;
+          pa.error = '';
+          this.syncPostActionsPendingFlag(mission, orderedActions);
+          await this.missionRepo.save(mission);
+          await this.missions.recordEvent(mission, {
+            type: 'post_action_dispatched',
+            message: `Post-action ${pa.action_id} was actually dispatched before a crash (run ${existingRun.id}) — recovered via correlation lookup`,
+            actor_type: 'system',
+            data: { action_id: pa.action_id, run_id: existingRun.id, room_id: existingRun.room_id, recovered: true },
+          });
+          continue;
+        }
+
         pa.status = 'dispatch_failed';
         pa.error =
-          'in_flight 상태로 멈춰 있었습니다(프로세스 재시작 등으로 중단된 것으로 추정) — 실제 디스패치 여부를 ' +
-          '알 수 없어 재시도하지 않고 결과 불명으로 기록합니다. run_id가 비어있으면 실제로는 디스패치되지 ' +
-          '않았을 가능성이 높습니다.';
+          'in_flight 상태로 멈춰 있었고, 상관관계 키로 조회해도 실제 생성된 ActionRun을 찾지 못했습니다 — ' +
+          '디스패치 자체가 일어나지 않은 것으로 보고 재시도하지 않은 채 실패로 기록합니다.';
+        this.syncPostActionsPendingFlag(mission, orderedActions);
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatch_failed',
-          message: `Post-action ${pa.action_id} left stuck in-flight (likely a crash) — treated as failed without retrying`,
+          message: `Post-action ${pa.action_id} left stuck in-flight (likely a crash), no matching ActionRun found — treated as failed without retrying`,
           actor_type: 'system',
           data: { action_id: pa.action_id, error: pa.error, stale_in_flight: true },
         });
@@ -497,6 +548,7 @@ export class OrchestrationRunnerService {
 
       if (!postActionApplies(pa.condition, mission.status)) {
         pa.status = 'skipped';
+        this.syncPostActionsPendingFlag(mission, orderedActions);
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_skipped',
@@ -512,6 +564,7 @@ export class OrchestrationRunnerService {
       // 보고 재시도 없이 안전하게 마무리 짓는다.
       pa.status = 'in_flight';
       pa.dispatched_at = new Date().toISOString();
+      this.syncPostActionsPendingFlag(mission, orderedActions);
       await this.missionRepo.save(mission);
 
       try {
@@ -523,12 +576,13 @@ export class OrchestrationRunnerService {
         const result = await this.actionsService.dispatch({
           actionId: action.id,
           triggeredByType: 'system',
-          triggeredById: `orchestration:${mission.id}`,
+          triggeredById: this.postActionTriggerId(mission.id, pa.order),
         });
         pa.status = 'dispatched';
         pa.run_id = result.run.id;
         pa.room_id = result.room_id;
         pa.error = '';
+        this.syncPostActionsPendingFlag(mission, orderedActions);
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatched',
@@ -539,6 +593,7 @@ export class OrchestrationRunnerService {
       } catch (e: any) {
         pa.status = 'dispatch_failed';
         pa.error = String(e?.message || e).slice(0, 1000);
+        this.syncPostActionsPendingFlag(mission, orderedActions);
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatch_failed',

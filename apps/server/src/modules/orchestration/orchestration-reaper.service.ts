@@ -143,27 +143,29 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
    * 크래시로 중단된 post_actions를 이어받는다(리뷰 지적 반영, 티켓 2dc3c62f)
    * — completeMission()이 terminal status를 저장한 직후, 또는 개별
    * post-action dispatch() 도중에 프로세스가 죽으면 `pending`/`in_flight`
-   * 항목이 그대로 남을 수 있다. 최근 종료된 미션 중 그런 항목이 있는 것만
-   * `recoverPostActions`로 재호출한다 — `runPostActions` 자체가 resumable
-   * 이므로(이미 확정된 항목은 건드리지 않고, in_flight는 절대 재시도하지
-   * 않음) 반복 호출은 안전하다. `take: 100`은 다른 리퍼 쿼리와 동일한
-   * 방어적 상한이며, 정상 케이스는 completeMission()이 이미 동기적으로
-   * post_actions를 전부 확정 짓기 때문에 이 스윕이 뭔가를 찾는 경우는
-   * 드물다(크래시 회복 전용 경로).
+   * 항목이 그대로 남을 수 있다. `runPostActions` 자체가 resumable이므로
+   * (이미 확정된 항목은 건드리지 않고, in_flight는 절대 재시도하지 않음)
+   * 반복 호출은 안전하다.
+   *
+   * **리뷰 2라운드 지적 반영** — 예전엔 `finished_at DESC, take:100`으로
+   * "최근 종료된 미션"만 훑었는데, 이러면 terminal 미션이 100개를 넘는
+   * 순간 그보다 오래된 미확정 미션은 최신 미션들에 밀려 이 스윕이 영원히
+   * 찾지 못하는 기아(starvation)가 생긴다. `post_actions_pending`은
+   * post_actions 배열 내용과 항상 동기화되는 색인 가능한 불리언 컬럼이므로
+   * (OrchestrationMission.post_actions_pending 문서 참고), 이제 그 컬럼을
+   * 직접 필터링해 "미확정 항목이 있는 미션"을 recency와 무관하게 전부
+   * 찾아낸다. `take`는 한 스윕이 한 번에 처리하는 상한일 뿐 선택 기준이
+   * 아니다 — 남은 건 다음 스윕(주기적 setInterval)이 이어받는다.
    */
   private async reapPendingPostActions(now: Date): Promise<number> {
     const candidates = await this.missionRepo.find({
-      where: { status: In(['completed', 'failed']) },
-      order: { finished_at: 'DESC' },
-      take: 100,
+      where: { status: In(['completed', 'failed']), post_actions_pending: true },
+      take: 200,
     });
     if (candidates.length === 0) return 0;
 
     let recovered = 0;
     for (const mission of candidates) {
-      const list = Array.isArray(mission.post_actions) ? mission.post_actions : [];
-      const needsRecovery = list.some((pa) => pa.status === 'pending' || pa.status === 'in_flight');
-      if (!needsRecovery) continue;
       try {
         await this.runner.recoverPostActions(mission.id);
         recovered += 1;

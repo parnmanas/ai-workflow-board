@@ -222,21 +222,28 @@ export interface PostActionsValidationError {
  * status='pending'으로 리셋한다 — 실행 상태는 오직 runPostActions()만 쓴다
  * (사람/오케스트레이터가 브리핑을 통해 정의를 바꿀 수 있는 건 draft일 때뿐이라,
  * 이 함수가 호출되는 시점엔 어차피 아직 아무것도 디스패치되지 않았다).
+ *
+ * `order`는 호출자(UI/MCP caller) 입력을 신뢰하지 않고 **항상** 최종 배열
+ * 순서(빈 항목 제거 후) 그대로 0..N-1로 다시 매긴다(리뷰 2라운드 지적 반영,
+ * 티켓 2dc3c62f) — `order`는 이제 `OrchestrationRunnerService`가 dispatch
+ * idempotency key(`orchestration:<mission>:<order>`)의 일부로 쓰기 때문에
+ * 유일성이 프로그램적으로 중요하다. 클라이언트가 입력 순서를 그대로 배열로
+ * 보내는 한(재정렬 UI 없음) 이 재매김은 사용자가 의도한 순서를 그대로
+ * 보존하면서 중복/공백 order를 원천적으로 막는다.
  */
 export function normalizePostActions(input: unknown): { postActions: MissionPostAction[] } | PostActionsValidationError {
   if (input == null) return { postActions: [] };
   if (!Array.isArray(input)) return { error: 'post_actions must be an array' };
   const out: MissionPostAction[] = [];
-  input.forEach((raw, idx) => {
+  input.forEach((raw) => {
     const actionId = String((raw as any)?.action_id ?? '').trim();
     if (!actionId) return; // 빈 항목은 조용히 무시 — UI가 편집 중 빈 행을 보낼 수 있다
     const condition = (POST_ACTION_CONDITIONS as readonly string[]).includes((raw as any)?.condition)
       ? (raw as any).condition
       : 'always';
-    const orderRaw = Number((raw as any)?.order);
     out.push({
       action_id: actionId,
-      order: Number.isFinite(orderRaw) ? orderRaw : idx,
+      order: out.length,
       condition,
       status: 'pending',
       run_id: null,
@@ -245,7 +252,6 @@ export function normalizePostActions(input: unknown): { postActions: MissionPost
       dispatched_at: null,
     });
   });
-  out.sort((a, b) => a.order - b.order);
   return { postActions: out };
 }
 
