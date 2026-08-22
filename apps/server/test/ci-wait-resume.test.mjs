@@ -128,7 +128,7 @@ async function makeTicket(overrides = {}) {
  * means any regression of the ordering fails loudly here instead of
  * silently under-reporting dispatch coverage.
  */
-function makeResumer(githubStub, dispatchCalls, dispatchImpl, ciWaitServiceOverride = ciWaitService) {
+function makeResumer(githubStub, dispatchCalls, dispatchImpl, ciWaitServiceOverride = ciWaitService, dataSourceOverride = ds) {
   const fakeTriggerLoop = {
     async dispatchCurrentColumn(ticketId, source, by) {
       const live = await ticketRepo.findOne({ where: { id: ticketId } });
@@ -144,9 +144,35 @@ function makeResumer(githubStub, dispatchCalls, dispatchImpl, ciWaitServiceOverr
       return { emitted: 1 };
     },
   };
-  const resumer = new CiWaitResumeService(ds, logStub, ciWaitServiceOverride, fakeTriggerLoop);
+  const resumer = new CiWaitResumeService(dataSourceOverride, logStub, ciWaitServiceOverride, fakeTriggerLoop);
   resumer.github = githubStub;
   return resumer;
+}
+
+/**
+ * Wraps the real DataSource so the FIRST `failTimes` calls to
+ * `getRepository(Comment)` return a builder that throws on
+ * `createQueryBuilder()` — simulates a transient DB failure specifically for
+ * `_postPollFailureAlert`'s insert, which reads `this.dataSource` directly
+ * (the resumer's own constructor arg, distinct from `ciWaitService`'s
+ * internal dataSource used for the CAS calls). Every other entity/repo
+ * passes straight through to the real DataSource.
+ */
+function makeThrowOnceOnCommentInsertDataSource(failTimes = 1) {
+  let remaining = failTimes;
+  return {
+    getRepository(entity) {
+      if (entity === Comment && remaining > 0) {
+        remaining--;
+        return {
+          createQueryBuilder() {
+            throw new Error('simulated comment-insert failure — poll-failure alert');
+          },
+        };
+      }
+      return ds.getRepository(entity);
+    },
+  };
 }
 
 function assertNoOrderingViolations(dispatchCalls) {
@@ -916,4 +942,41 @@ test('sweep(): review round 1 (reviewer) — N poll failures followed by a poll 
   const fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
   assert.equal(fresh.pending_ci_wait, false, 'the wait must be cleared in this same sweep, not deferred to a follow-up sweep');
   assert.equal(fresh.ci_wait_context, '', 'a fully delivered wait must not leave any context (stale poll_issue or otherwise) behind');
+});
+
+test('sweep(): review round 2 (reviewer) — a failed alert-comment INSERT at the threshold does not permanently suppress the alert; the next sweep posts exactly one comment and durably records alerted=true', async () => {
+  const ticket = await makeTicket();
+  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
+
+  const githubStub = { async getWorkflowRun() { return null; } };
+  const failingDs = makeThrowOnceOnCommentInsertDataSource(1);
+  const resumer = makeResumer(githubStub, [], undefined, ciWaitService, failingDs);
+  const threshold = resumer.getConfig().alertAfterFailures;
+
+  for (let i = 0; i < threshold - 1; i++) await resumer.sweep();
+  let fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  let ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue.alerted, false, 'not yet at the threshold — no alert attempt expected');
+
+  // The threshold-crossing sweep: the alert-comment INSERT throws.
+  await resumer.sweep();
+  fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  ctx = JSON.parse(fresh.ci_wait_context);
+  assert.ok(ctx.poll_issue.consecutive_failures >= threshold, 'the counter must still advance even though the alert insert failed');
+  assert.equal(ctx.poll_issue.alerted, false, 'a failed INSERT must NOT be recorded as alerted — or the next sweep would never retry it');
+  let comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 0, 'the failed insert must not have left a comment behind');
+
+  // The NEXT sweep — the simulated failure budget is exhausted, so this
+  // insert succeeds. Must post exactly one comment (via the SAME stable
+  // dedupe key as the failed attempt) and durably record alerted=true.
+  await resumer.sweep();
+  fresh = await ticketRepo.findOne({ where: { id: ticket.id } });
+  ctx = JSON.parse(fresh.ci_wait_context);
+  assert.equal(ctx.poll_issue.alerted, true);
+  comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
+  assert.equal(comments.length, 1, 'exactly one alert comment must exist after the retry succeeds — no duplicate, no permanent loss');
+  assert.match(comments[0].operational_recurrence_key || '', new RegExp(`^ci-wait-poll-alert:${ticket.id}:`));
+
+  await ciWaitService.cancelWait(ticket.id);
 });

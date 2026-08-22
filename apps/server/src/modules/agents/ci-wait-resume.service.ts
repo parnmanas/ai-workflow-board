@@ -378,6 +378,20 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
    * Posts an alert comment the sweep that crosses `alertAfterFailures`
    * (never resolves/clears the wait — this is a notification, not an
    * outcome).
+   *
+   * Review round 2 (ticket 9bbe9146): `alerted` must NOT be written true in
+   * this same CAS. It used to be — but the comment INSERT happens AFTER this
+   * CAS commits, so a transient INSERT failure (caught and warn-logged by
+   * `_postPollFailureAlert`) left `alerted:true` durably recorded with no
+   * comment ever posted, and every later sweep saw `alreadyAlerted:true` and
+   * never retried — a single DB hiccup permanently silenced the exact alert
+   * this ticket exists to guarantee. Instead: advance the counter
+   * unconditionally, THEN attempt the INSERT, and only flip `alerted:true` in
+   * a SEPARATE follow-up CAS once the INSERT is confirmed to have succeeded.
+   * If that INSERT (or the follow-up CAS) fails, `alerted` stays false and
+   * the next sweep retries — safe to retry because the comment's dedupe key
+   * is `firstFailureAt`-stable, so a re-attempted INSERT after a already-
+   * successful one just no-ops via `.orIgnore()` instead of double-posting.
    */
   private async _trackPollFailure(ticket: Ticket, rawContext: string, ctx: CiWaitContext, nowMs: number): Promise<void> {
     const prior = ctx.poll_issue;
@@ -388,12 +402,22 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     const nextIssue: CiWaitPollIssue = {
       consecutive_failures: consecutiveFailures,
       first_failure_at: firstFailureAt,
-      alerted: alreadyAlerted || shouldAlert,
+      alerted: alreadyAlerted,
     };
     const nextCtx: CiWaitContext = { ...ctx, poll_issue: nextIssue };
-    const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, JSON.stringify(nextCtx));
+    const nextJson = JSON.stringify(nextCtx);
+    const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
     if (!won || !shouldAlert) return;
-    await this._postPollFailureAlert(ticket, ctx, consecutiveFailures, firstFailureAt);
+
+    const posted = await this._postPollFailureAlert(ticket, ctx, consecutiveFailures, firstFailureAt);
+    if (!posted) return; // INSERT failed — leave alerted=false so the next sweep retries with the same dedupe key
+
+    const alertedCtx: CiWaitContext = { ...nextCtx, poll_issue: { ...nextIssue, alerted: true } };
+    // CAS against `nextJson` (what we just wrote), not the original
+    // `rawContext` — losing this race means another sweep already advanced
+    // `ci_wait_context` past it (e.g. a concurrent success cleared the
+    // streak), so there is nothing left here to mark alerted on.
+    await this.ciWaitService.tryUpdateContext(ticket.id, nextJson, JSON.stringify(alertedCtx));
   }
 
   /** A poll finally succeeded — drop the failure streak entirely so a LATER
@@ -410,9 +434,12 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
    * struggling to read its run). Dedupe key is stable for the whole streak
    * (`firstFailureAt`, not `nowMs`) so a retry after a mid-write crash can
    * never double-post — same `.orIgnore()` idempotency column the resolution
-   * comment uses (see `_deliver`).
+   * comment uses (see `_deliver`). Returns whether the INSERT itself
+   * succeeded (`.orIgnore()` skipping an already-posted duplicate still
+   * counts as success) — the caller only durably records `alerted:true` when
+   * this returns true, see `_trackPollFailure`.
    */
-  private async _postPollFailureAlert(ticket: Ticket, ctx: CiWaitContext, consecutiveFailures: number, firstFailureAt: string): Promise<void> {
+  private async _postPollFailureAlert(ticket: Ticket, ctx: CiWaitContext, consecutiveFailures: number, firstFailureAt: string): Promise<boolean> {
     const dedupeKey = `ci-wait-poll-alert:${ticket.id}:${firstFailureAt}`;
     try {
       await this.dataSource.getRepository(Comment)
@@ -434,8 +461,10 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
         })
         .orIgnore()
         .execute();
+      return true;
     } catch (e) {
       this.logService.warn('CI', 'ci-wait poll-failure alert comment failed', { err: String(e), ticket_id: ticket.id });
+      return false;
     }
   }
 
