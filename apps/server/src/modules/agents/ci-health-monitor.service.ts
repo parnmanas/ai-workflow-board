@@ -34,6 +34,8 @@
  * — the "OR" catches a repo with infrequent pushes where only 1-2 red runs
  * exist but a long time has passed. Recovers the instant the newest completed
  * run is green, regardless of how long the preceding streak was.
+ * `event === 'schedule'`인 run도 동일하게 신호에서 제외된다 — cron 트리거 run은 대부분의
+ * 잡이 skip돼도 run-level conclusion은 success로 찍히기 때문이다(ticket 654465c8).
  *
  * Ticket idempotency: the auto-created ticket carries
  * `operational_dedupe_key = "ci_red:{board_id}:{repo}:{branch}:{workflow_id}"`
@@ -141,7 +143,10 @@ export function evaluateRedStreak(
   now: Date,
   config: { minConsecutiveRuns: number; minAgeMs: number },
 ): RedStreakResult {
-  const signal = (runs || []).filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || ''));
+  // schedule(cron) 트리거 run은 워크플로 대부분의 잡이 `if: ... != 'schedule'`로 skip되지만
+  // run-level conclusion은 그대로 success로 찍힌다 — signal에서 통째로 제외해 잡 5/6 skip인
+  // run이 진짜 복구로도, 스트릭 브레이커로도 오판되지 않게 한다(ticket 654465c8).
+  const signal = (runs || []).filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || '') && r.event !== 'schedule');
   if (signal.length === 0) {
     return { isRed: false, isGreen: false, streak: 0, firstFailedRun: null, lastRun: null };
   }
