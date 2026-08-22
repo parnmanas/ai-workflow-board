@@ -74,13 +74,15 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const idx = process.argv.indexOf('--mcp-config');
 const mcpConfigPath = idx >= 0 ? process.argv[idx + 1] : null;
 let toolProfile = null;
+let authorization = null;
 try {
   const parsed = JSON.parse(readFileSync(mcpConfigPath, 'utf8'));
   toolProfile = parsed?.mcpServers?.awb?.headers?.['X-AWB-Tool-Profile'] ?? null;
+  authorization = parsed?.mcpServers?.awb?.headers?.['Authorization'] ?? null;
 } catch (e) {
   toolProfile = 'ERROR:' + e.message;
 }
-writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({ pid: process.pid, mcpConfigPath, toolProfile }));
+writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({ pid: process.pid, mcpConfigPath, toolProfile, authorization }));
 process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'ok'}) + '\\n');
 `,
   );
@@ -358,4 +360,80 @@ test('BaseSessionManager#_spawnSession: CONCURRENT full + compact spawns for the
   assert.equal(fullCap.toolProfile, null, 'the full-profile child must never observe a compact header');
   assert.equal(compactCap.toolProfile, 'compact', 'the compact-profile child must never observe a missing header');
   assert.notEqual(fullCap.mcpConfigPath, compactCap.mcpConfigPath, 'the two profiles must resolve to DIFFERENT config paths');
+});
+
+// ─── Workspace isolation (review round 3) ───────────────────────────────
+//
+// Round 2's profile-specific path fix (mcpConfigPathFor(..., profile))
+// closed the profile dimension but dropped the workspace dimension —
+// both managers passed `undefined` for workspaceId regardless of what
+// agentContext/ctx actually carried. Two workspaces sharing an agent id
+// would converge on the SAME unscoped path: whichever workspace's session
+// spawned first "wins" the file (via the existsSync reuse fast path), and
+// the other silently reuses it — wrong Authorization for that workspace,
+// or a stale one, instead of getting its own workspace-scoped config.
+//
+// Deliberately sequential, not concurrent: this is a pure path-computation
+// check on (agentId, workspaceId, profile). The concurrency dimension is
+// already covered by the CONCURRENT tests above for the profile axis; nothing
+// here depends on timing, so a race would only add noise.
+
+test('SubagentManager#spawn: same agent id, different workspace ids resolve to different config paths and each observes its own Authorization', async () => {
+  const claudeBin = await makeClaudeFixture('claude-sm-ws-iso.mjs');
+  const agentId = 'agent-sm-ws-iso';
+  const cwd = join(fixtureRoot, 'sm-ws-iso-cwd');
+  await mkdir(cwd, { recursive: true });
+  const manager = new SubagentManager({ ...baseConfig, delegation: { ...baseConfig.delegation, claudeBin } });
+  const waitForPidExit = installExitRouter(manager);
+
+  async function step(workspaceId, apiKey, label) {
+    const captureFile = join(fixtureRoot, `sm-ws-iso-${label}.json`);
+    const agentContext = {
+      agent_id: agentId, workspace_id: workspaceId, api_key: apiKey, cwd,
+      mcp_config_path: mcpConfigPathFor(agentId, workspaceId), cli: 'claude',
+    };
+    await spawnSubagentAndAwaitExit(manager, waitForPidExit, {
+      agentContext, triggerId: `trigger-sm-ws-iso-${label}`,
+      runtimeProfile: { ...fullProfile(), env: { CAPTURE_FILE: captureFile } },
+    });
+    return readCapture(captureFile);
+  }
+
+  const capA = await step('workspace-a', 'agent-awb-key-workspace-a', 'a');
+  const capB = await step('workspace-b', 'agent-awb-key-workspace-b', 'b');
+
+  assert.notEqual(capA.mcpConfigPath, capB.mcpConfigPath, 'workspace A and B must resolve to DIFFERENT config paths');
+  assert.equal(capA.authorization, 'Bearer agent-awb-key-workspace-a', 'workspace A child must observe its own Authorization');
+  assert.equal(capB.authorization, 'Bearer agent-awb-key-workspace-b', "workspace B child must observe its own Authorization — not workspace A's");
+});
+
+test('BaseSessionManager#_spawnSession: same agent id, different workspace ids resolve to different config paths and each observes its own Authorization', async () => {
+  const claudeBin = await makeClaudeFixture('claude-bsm-ws-iso.mjs');
+  const agentId = 'agent-bsm-ws-iso';
+  const cwd = join(fixtureRoot, 'bsm-ws-iso-cwd');
+  await mkdir(cwd, { recursive: true });
+  const manager = new BaseSessionManager(
+    { ...baseConfig, delegation: { ...baseConfig.delegation, claudeBin } },
+    { keyField: 'sessionKey', logTag: '[test-bsm-ws-iso]', cfgPrefix: 'bsm-ws-iso-', kindLabel: 'chat_session' },
+  );
+
+  async function step(workspaceId, apiKey, label) {
+    const captureFile = join(fixtureRoot, `bsm-ws-iso-${label}.json`);
+    const agentContext = {
+      agent_id: agentId, workspace_id: workspaceId, api_key: apiKey, cwd,
+      mcp_config_path: mcpConfigPathFor(agentId, workspaceId), cli: 'claude',
+    };
+    await spawnBaseSessionAndAwaitExit(manager, {
+      agentContext, sessionKey: `sess-bsm-ws-iso-${label}`,
+      runtimeProfile: { ...fullProfile(), env: { CAPTURE_FILE: captureFile } },
+    });
+    return readCapture(captureFile);
+  }
+
+  const capA = await step('workspace-a', 'agent-awb-key-workspace-a', 'a');
+  const capB = await step('workspace-b', 'agent-awb-key-workspace-b', 'b');
+
+  assert.notEqual(capA.mcpConfigPath, capB.mcpConfigPath, 'workspace A and B must resolve to DIFFERENT config paths');
+  assert.equal(capA.authorization, 'Bearer agent-awb-key-workspace-a', 'workspace A child must observe its own Authorization');
+  assert.equal(capB.authorization, 'Bearer agent-awb-key-workspace-b', "workspace B child must observe its own Authorization — not workspace A's");
 });
