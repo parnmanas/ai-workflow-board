@@ -58,24 +58,27 @@ test('CiWaitService.registerWait validates run_id and head_sha against their rea
   assert.match(code, /isValidGitSha\(headShaRaw\)/, 'registerWait must validate head_sha via isValidGitSha when provided');
 });
 
-test('CiWaitService source defines the register/cancel/lease-CAS surface', () => {
+test('CiWaitService source defines the register/cancel/transactional-claim surface', () => {
   assert.ok(fs.existsSync(CI_WAIT_SVC), `expected ${CI_WAIT_SVC} to exist`);
   const code = stripComments(fs.readFileSync(CI_WAIT_SVC, 'utf8'));
   assert.match(code, /class\s+CiWaitService/, 'must export CiWaitService class');
   assert.match(code, /async\s+registerWait\s*\(/, 'must expose registerWait()');
   assert.match(code, /async\s+cancelWait\s*\(/, 'must expose cancelWait()');
-  // Lease-based durable outbox (ticket 778b6dc7 review rounds 1+2): the
-  // generic mid-delivery CAS must NEVER clear pending_ci_wait (that would
-  // repeat the round-1 bug — a crash between claim and side-effect losing
-  // the resume forever); only markDelivered may clear it, and it must be
-  // pinned to the exact finished context (round 2 — conditioning on
-  // pending_ci_wait alone let a stale delivery clear a brand-new wait).
-  assert.match(code, /async\s+tryUpdateContext\s*\(/, 'must expose tryUpdateContext() — the generic mid-delivery CAS that never clears pending_ci_wait');
-  assert.match(code, /async\s+markDelivered\s*\(\s*ticketId:\s*string,\s*expectedContext:\s*string\s*\)/, 'markDelivered must take the expected finished context, not just a ticketId');
-  assert.doesNotMatch(code, /async\s+claimResolved\s*\(/, 'the old single-step claimResolved() must be gone — it is the exact P0 bug the redesign replaces');
+  // Transactional delivery claim (ticket 778b6dc7 review round 3): the
+  // phase-1 CAS must NEVER clear pending_ci_wait (round 1 — a crash between
+  // claim and side-effect must not lose the resume forever); only
+  // claimDelivery may clear it, and it must do so in the SAME DB
+  // transaction as the caller's side effect (round 3 — two separate durable
+  // writes, however leased/sequenced, can never fully close the
+  // crash-between-them window; only a transaction can).
+  assert.match(code, /async\s+tryUpdateContext\s*\(/, 'must expose tryUpdateContext() — the phase-1 CAS that never clears pending_ci_wait');
+  assert.match(code, /async\s+claimDelivery\s*\(\s*ticketId:\s*string,\s*expectedContext:\s*string,\s*withinTx:/, 'claimDelivery must take the expected finished context AND a withinTx callback run on the same transaction manager');
+  assert.doesNotMatch(code, /async\s+claimResolved\s*\(/, 'the round-1 single-step claimResolved() must be gone');
   assert.doesNotMatch(code, /async\s+tryRecordOutcome\s*\(/, 'the round-1-only tryRecordOutcome() must be gone — superseded by the generic tryUpdateContext()');
+  assert.doesNotMatch(code, /async\s+markDelivered\s*\(/, 'the round-2 markDelivered() (a SEPARATE CAS from the side effect) must be gone — superseded by claimDelivery\'s single transaction');
+  assert.doesNotMatch(code, /lease_owner|lease_expires_at|delivery_generation/, 'the round-2 lease fields must be gone — a transaction replaces coordination-by-lease entirely');
 
-  const tryUpdateContextBody = code.slice(code.indexOf('async tryUpdateContext'), code.indexOf('async markDelivered'));
+  const tryUpdateContextBody = code.slice(code.indexOf('async tryUpdateContext'), code.indexOf('async claimDelivery'));
   assert.doesNotMatch(
     tryUpdateContextBody,
     /pending_ci_wait:\s*false/,
@@ -87,15 +90,17 @@ test('CiWaitService source defines the register/cancel/lease-CAS surface', () =>
     'tryUpdateContext must CAS on the exact prior ci_wait_context (not just id) so two racing sweeps cannot both win',
   );
 
-  const markDeliveredBody = code.slice(code.indexOf('async markDelivered'));
+  const claimDeliveryBody = code.slice(code.indexOf('async claimDelivery'));
+  assert.match(claimDeliveryBody, /this\.dataSource\.transaction\(/, 'claimDelivery must run inside a single DB transaction');
   assert.match(
-    markDeliveredBody,
-    /update\(\s*\{\s*id:\s*ticketId,\s*pending_ci_wait:\s*true,\s*ci_wait_context:\s*expectedContext\s*\}[\s\S]*?pending_ci_wait:\s*false/,
-    'markDelivered must CAS on BOTH pending_ci_wait: true AND the exact expectedContext (review round 2) before clearing',
+    claimDeliveryBody,
+    /manager\.getRepository\(Ticket\)\.update\(\s*\{\s*id:\s*ticketId,\s*pending_ci_wait:\s*true,\s*ci_wait_context:\s*expectedContext\s*\}[\s\S]*?pending_ci_wait:\s*false/,
+    'claimDelivery must CAS on BOTH pending_ci_wait: true AND the exact expectedContext (review round 2) using the transaction manager, before clearing',
   );
+  assert.match(claimDeliveryBody, /await\s+withinTx\(manager\)/, 'the caller\'s side effect must run with the SAME transaction manager, not a fresh connection — that is what makes it atomic with the CAS (review round 3)');
 });
 
-test('CiWaitResumeService source defines the sweep loop, env config, bounded timeout, and the lease-based retry-safe delivery', () => {
+test('CiWaitResumeService source defines the sweep loop, env config, bounded timeout, and the transactional-claim delivery', () => {
   assert.ok(fs.existsSync(RESUMER), `expected ${RESUMER} to exist`);
   const code = stripComments(fs.readFileSync(RESUMER, 'utf8'));
   assert.match(code, /class\s+CiWaitResumeService/, 'must export CiWaitResumeService class');
@@ -107,35 +112,31 @@ test('CiWaitResumeService source defines the sweep loop, env config, bounded tim
   assert.match(code, /CI_WAIT_SWEEP_MS/, 'must read CI_WAIT_SWEEP_MS env var');
   assert.match(code, /CI_WAIT_MAX_AGE_MS/, 'must read CI_WAIT_MAX_AGE_MS env var');
   assert.doesNotMatch(code, /claimResolved\(/, 'must not call the removed single-step claimResolved()');
-  assert.match(code, /tryUpdateContext\(/, 'must record the outcome and every delivery-flag flip via the generic CAS');
-  assert.match(code, /markDelivered\(/, 'must clear the wait via the final CAS only after delivery is attempted');
+  assert.doesNotMatch(code, /markDelivered\(/, 'must not call the removed round-2 markDelivered() — claimDelivery replaces it');
+  assert.doesNotMatch(code, /lease_owner|lease_expires_at|delivery_generation/, 'the round-2 lease fields must be gone from the resumer too');
+  assert.match(code, /tryUpdateContext\(/, 'must record the outcome via the phase-1 CAS');
+  assert.match(code, /claimDelivery\(/, 'must claim delivery (CAS + side effect, one transaction) via CiWaitService.claimDelivery');
   assert.match(code, /dispatchCurrentColumn\(/, 'must resume via TriggerLoopService.dispatchCurrentColumn');
-  // Review round 2: outcome-present alone must not be sufficient to deliver —
-  // a lease (owner + expiry) must gate entry, and durable per-step flags
-  // must prevent re-doing a step that already succeeded.
-  assert.match(code, /lease_owner/, 'delivery must be gated by a lease owner field');
-  assert.match(code, /lease_expires_at/, 'the lease must carry an expiry so a crashed attempt is reclaimable');
-  assert.match(code, /delivery_generation/, 'the lease must carry a generation bumped on each (re)claim');
-  assert.match(code, /comment_posted/, 'comment delivery must be tracked by a durable flag, not a non-atomic query-then-act check');
-  assert.match(code, /dispatch_done/, 'dispatch delivery must be tracked by a durable flag');
-  assert.doesNotMatch(code, /_hasResolutionComment/, 'the round-1 query-based idempotency check must be gone — comment_posted is now the sole source of truth (round 2 finding: query-then-act was itself racy)');
+  // Review round 3: the comment insert must carry a globally-unique dedupe
+  // key on the SAME nullable-unique idempotency column the silent-exit
+  // fallback already uses — defense in depth alongside the transaction.
+  assert.match(code, /operational_recurrence_key/, 'the resolution comment must carry a dedupe key for defense-in-depth idempotency');
+  assert.match(code, /\.orIgnore\(\)/, 'the comment insert must use insert-or-ignore so a hypothetical duplicate attempt cannot throw/duplicate');
 
   const deliverBody = code.slice(code.indexOf('private async _deliver'));
-  // Lease pre-check: a fresh (unexpired) lease owned by someone else must
-  // short-circuit BEFORE any CAS attempt.
-  assert.match(deliverBody, /leaseExpiresMs > nowMs/, 'must check the in-memory lease expiry before attempting to claim, so a fresh lease is left alone');
-  // The comment try/catch and the dispatch try/catch must each `return`
-  // WITHOUT calling markDelivered on failure — that's what makes a partial
-  // (comment-succeeded, dispatch-failed) delivery retryable instead of lost.
-  const commentSection = deliverBody.slice(
-    deliverBody.indexOf('if (!workingOutcome.comment_posted)'),
-    deliverBody.indexOf('if (!workingOutcome.dispatch_done)'),
-  );
-  const commentCatch = commentSection.slice(commentSection.indexOf('} catch (e) {'));
-  assert.match(commentCatch, /return;/, 'comment-write failure must return early (not call markDelivered) so the lease expires and the next sweep retries the whole delivery');
-  const dispatchSection = deliverBody.slice(deliverBody.indexOf('if (!workingOutcome.dispatch_done)'));
-  const dispatchCatch = dispatchSection.slice(dispatchSection.indexOf('} catch (e) {'), dispatchSection.indexOf('markDelivered'));
-  assert.match(dispatchCatch, /return;/, 'dispatch failure must return early (not call markDelivered) so the lease expires and the next sweep retries just the dispatch');
+  assert.match(deliverBody, /claimDelivery\(ticket\.id,\s*rawContext,/, '_deliver must claim delivery keyed on the exact rawContext it was given');
+  assert.match(deliverBody, /if\s*\(!claimed\)\s*return;/, '_deliver must stop when the claim is lost (already delivered, or racing attempt won)');
+
+  // Ordering (review round 3 latent bug): dispatchCurrentColumn refuses to
+  // emit while pending_ci_wait is still true (trigger-loop.service.ts's
+  // pending gate), so the dispatch call MUST textually follow the
+  // claimDelivery call (which durably clears the flag first), never precede
+  // it — an earlier draft called dispatch before the claim and was always a
+  // silent no-op against the real gate.
+  const claimIdx = deliverBody.indexOf('claimDelivery(');
+  const dispatchIdx = deliverBody.indexOf('dispatchCurrentColumn(');
+  assert.ok(claimIdx >= 0 && dispatchIdx >= 0, 'both claimDelivery and dispatchCurrentColumn calls must be present in _deliver');
+  assert.ok(dispatchIdx > claimIdx, 'dispatchCurrentColumn must be called AFTER claimDelivery — pending_ci_wait must already be false or the real gate silently drops the dispatch');
 });
 
 test('ci-wait-tools.ts registers await_ci_run and cancel_ci_wait', () => {
