@@ -35,7 +35,7 @@ function fetchSequence(responses) {
     fetch: async (_url, init) => {
       calls.push({ apiKey: init?.headers?.['X-Agent-Key'] });
       const next = responses[calls.length - 1];
-      if (!next) throw new Error(`unexpected extra fetch call (#${calls.length})`);
+      if (!next) throw new Error(`예상 밖의 추가 fetch 호출 (#${calls.length})`);
       return new Response(next.body ?? '{}', { status: next.status, statusText: next.statusText ?? '' });
     },
   };
@@ -52,12 +52,11 @@ async function withFetch(fetchImpl, run) {
 }
 
 // ── postOutputLiveness ──────────────────────────────────────────────────────
-// Signature is (config, apiKey, body) — `apiKey` is the primary key (mirrors
-// `sess._effectiveApiKey || this._config.apiKey` at the call site) and
-// `config.retryApiKey` is the fallback, matching the real ticket-session-manager
-// call site wiring.
+// 시그니처는 (config, apiKey, body) — `apiKey`가 1차 시도 키다(호출부의
+// `sess._effectiveApiKey || this._config.apiKey`를 그대로 미러링). `config.retryApiKey`가
+// 폴백 키로, 실제 ticket-session-manager 호출부 배선과 동일하다.
 
-test('postOutputLiveness retries with retryApiKey on a 403 from the session key', async () => {
+test('postOutputLiveness: 세션 키의 403에 retryApiKey로 재시도한다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }, { status: 200 }]);
   await withFetch(fetch, () => postOutputLiveness(
     { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
@@ -67,7 +66,7 @@ test('postOutputLiveness retries with retryApiKey on a 403 from the session key'
   assert.deepEqual(calls.map((c) => c.apiKey), ['session-key', 'manager-key']);
 });
 
-test('postOutputLiveness retries with retryApiKey on a 401 from the session key', async () => {
+test('postOutputLiveness: 세션 키의 401에 retryApiKey로 재시도한다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 401, statusText: 'Unauthorized' }, { status: 200 }]);
   await withFetch(fetch, () => postOutputLiveness(
     { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
@@ -77,27 +76,27 @@ test('postOutputLiveness retries with retryApiKey on a 401 from the session key'
   assert.deepEqual(calls.map((c) => c.apiKey), ['session-key', 'manager-key']);
 });
 
-test('postOutputLiveness does not retry a 403 when retryApiKey is unset', async () => {
+test('postOutputLiveness: retryApiKey 미설정 시 403을 재시도하지 않는다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }]);
   await withFetch(fetch, () => postOutputLiveness(
     { ...BASE, apiKey: 'only-key' },
     'only-key',
     { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee' },
   ));
-  assert.equal(calls.length, 1, 'no retryApiKey — single attempt, matches pre-fix behavior');
+  assert.equal(calls.length, 1, 'retryApiKey 없음 — 단일 시도, 수정 전 동작과 동일');
 });
 
-test('postOutputLiveness does not retry when retryApiKey equals the key that just failed', async () => {
+test('postOutputLiveness: retryApiKey가 방금 실패한 키와 같으면 재시도하지 않는다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }]);
   await withFetch(fetch, () => postOutputLiveness(
     { ...BASE, apiKey: 'same-key', retryApiKey: 'same-key' },
     'same-key',
     { agent_id: 'agent-1', ticket_id: 'ticket-1', role: 'assignee' },
   ));
-  assert.equal(calls.length, 1, 'retrying with the identical key would fail identically');
+  assert.equal(calls.length, 1, '동일한 키로 재시도해도 똑같이 실패할 것');
 });
 
-test('postOutputLiveness makes a single call when the primary key already succeeds', async () => {
+test('postOutputLiveness: 1차 키가 바로 성공하면 단일 호출만 한다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 200 }]);
   await withFetch(fetch, () => postOutputLiveness(
     { ...BASE, apiKey: 'manager-key', retryApiKey: 'manager-key' },
@@ -109,7 +108,7 @@ test('postOutputLiveness makes a single call when the primary key already succee
 
 // ── postSilentExitSystemComment(Raw) ────────────────────────────────────────
 
-test('postSilentExitSystemCommentRaw retries with retryApiKey on a 401 from the session key', async () => {
+test('postSilentExitSystemCommentRaw: 세션 키의 401에 retryApiKey로 재시도한다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 401, statusText: 'Unauthorized' }, { status: 201 }]);
   const outcome = await withFetch(fetch, () => postSilentExitSystemCommentRaw(
     { ...BASE, apiKey: 'session-key', retryApiKey: 'manager-key' },
@@ -121,7 +120,7 @@ test('postSilentExitSystemCommentRaw retries with retryApiKey on a 401 from the 
   assert.deepEqual(calls.map((c) => c.apiKey), ['session-key', 'manager-key']);
 });
 
-test('postSilentExitSystemCommentRaw does not retry a 403 when retryApiKey is unset', async () => {
+test('postSilentExitSystemCommentRaw: retryApiKey 미설정 시 403을 재시도하지 않는다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 403, statusText: 'Forbidden' }]);
   const outcome = await withFetch(fetch, () => postSilentExitSystemCommentRaw(
     { ...BASE, apiKey: 'only-key' },
@@ -130,10 +129,10 @@ test('postSilentExitSystemCommentRaw does not retry a 403 when retryApiKey is un
   ));
   assert.equal(outcome.outcome, 'permanent');
   assert.equal(outcome.result, 'failed');
-  assert.equal(calls.length, 1, 'no retryApiKey — single attempt, matches pre-fix behavior');
+  assert.equal(calls.length, 1, 'retryApiKey 없음 — 단일 시도, 수정 전 동작과 동일');
 });
 
-test('postSilentExitSystemCommentRaw does not credential-retry a 5xx (stays outbox-retryable)', async () => {
+test('postSilentExitSystemCommentRaw: 5xx는 자격증명 재시도 대상이 아니다(outbox-retryable 유지)', async () => {
   const { calls, fetch } = fetchSequence([{ status: 503, statusText: 'Unavailable' }]);
   const outcome = await withFetch(fetch, () => postSilentExitSystemCommentRaw(
     { ...BASE, apiKey: 'session-key', retryApiKey: 'manager-key' },
@@ -141,10 +140,10 @@ test('postSilentExitSystemCommentRaw does not credential-retry a 5xx (stays outb
     { content: 'server hiccup', exit_code: 1 },
   ));
   assert.equal(outcome.outcome, 'retryable');
-  assert.equal(calls.length, 1, '5xx is not an auth failure — no credential swap, outbox handles the retry later');
+  assert.equal(calls.length, 1, '5xx는 인증 실패가 아님 — 자격증명 교체 없음, 재시도는 outbox가 나중에 처리');
 });
 
-test('postSilentExitSystemCommentRaw gives up after the retryApiKey attempt also fails', async () => {
+test('postSilentExitSystemCommentRaw: retryApiKey 시도도 실패하면 최종 포기한다', async () => {
   const { calls, fetch } = fetchSequence([
     { status: 403, statusText: 'Forbidden' },
     { status: 403, statusText: 'Forbidden' },
@@ -155,10 +154,10 @@ test('postSilentExitSystemCommentRaw gives up after the retryApiKey attempt also
     { content: 'still broken', exit_code: 1 },
   ));
   assert.equal(outcome.outcome, 'permanent');
-  assert.equal(calls.length, 2, 'exactly one retry attempt — no infinite loop');
+  assert.equal(calls.length, 2, '정확히 1회만 재시도 — 무한루프 없음');
 });
 
-test('postSilentExitSystemComment (grace-delay wrapper) surfaces the retried success', async () => {
+test('postSilentExitSystemComment(grace-delay 래퍼): 재시도 성공 결과를 그대로 전달한다', async () => {
   const { calls, fetch } = fetchSequence([{ status: 401, statusText: 'Unauthorized' }, { status: 201 }]);
   const result = await withFetch(fetch, () => postSilentExitSystemComment(
     { ...BASE, apiKey: 'session-key', retryApiKey: 'manager-key', silentExitVerifyDelayMs: 0 },
@@ -170,11 +169,11 @@ test('postSilentExitSystemComment (grace-delay wrapper) surfaces the retried suc
 });
 
 // ── callMcpTool / fireAndForgetTool (session-split add_comment) ─────────────
-// callMcpTool opens a fresh MCP session per call (initialize → notifications/
-// initialized → tools/call → DELETE), all authenticated via a single Bearer
-// token baked in at handshake start. A stale per-agent key surfaces as a
-// 401/403 on `initialize`; on retry the ENTIRE handshake re-runs with
-// `config.retryApiKey` since the session id is tied to the key that opened it.
+// callMcpTool은 호출마다 새 MCP 세션을 연다(initialize → notifications/
+// initialized → tools/call → DELETE) — 전부 핸드셰이크 시작 시 고정된 단일
+// Bearer 토큰으로 인증한다. stale per-agent 키는 `initialize`에서 401/403으로
+// 드러나며, 재시도 시 세션 id가 그 키에 종속되므로 `config.retryApiKey`로
+// 핸드셰이크 전체를 다시 연다.
 
 function makeMcpFetch({ initStatusByKey, toolResultText = '{"ok":true}' }) {
   const calls = [];
@@ -187,7 +186,7 @@ function makeMcpFetch({ initStatusByKey, toolResultText = '{"ok":true}' }) {
       try {
         rpcMethod = JSON.parse(init.body)?.method;
       } catch {
-        /* not JSON-RPC (shouldn't happen here) */
+        /* JSON-RPC 형식이 아님 (여기선 발생하지 않아야 함) */
       }
     }
     calls.push({ method, rpcMethod, apiKey });
@@ -212,12 +211,12 @@ function makeMcpFetch({ initStatusByKey, toolResultText = '{"ok":true}' }) {
       });
       return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    throw new Error(`unexpected fetch: ${method} ${rpcMethod}`);
+    throw new Error(`예상 밖의 fetch: ${method} ${rpcMethod}`);
   };
   return { calls, fetch };
 }
 
-test('callMcpTool retries the whole handshake with retryApiKey when initialize gets 403', async () => {
+test('callMcpTool: initialize가 403을 받으면 retryApiKey로 핸드셰이크 전체를 재시도한다', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'session-key': 403, 'manager-key': 200 } });
   const result = await withFetch(fetch, () => callMcpTool(
     { ...BASE, apiKey: 'session-key', retryApiKey: 'manager-key' },
@@ -229,20 +228,20 @@ test('callMcpTool retries the whole handshake with retryApiKey when initialize g
   assert.deepEqual(initCalls.map((c) => c.apiKey), ['session-key', 'manager-key']);
   assert.ok(
     calls.some((c) => c.rpcMethod === 'tools/call' && c.apiKey === 'manager-key'),
-    'the rest of the handshake (notify/call/delete) uses the successful retry key',
+    '핸드셰이크의 나머지(notify/call/delete)는 재시도로 성공한 키를 사용한다',
   );
 });
 
-test('callMcpTool does not retry when retryApiKey is unset — throws on the 401', async () => {
+test('callMcpTool: retryApiKey 미설정 시 재시도하지 않고 401에서 throw한다', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'only-key': 401 } });
   await assert.rejects(
     () => withFetch(fetch, () => callMcpTool({ ...BASE, apiKey: 'only-key' }, 'add_comment', {})),
     /initialize HTTP 401/,
   );
-  assert.equal(calls.length, 1, 'no retryApiKey — single initialize attempt, matches pre-fix behavior');
+  assert.equal(calls.length, 1, 'retryApiKey 없음 — initialize 단일 시도, 수정 전 동작과 동일');
 });
 
-test('callMcpTool does not retry when retryApiKey equals the key that just failed', async () => {
+test('callMcpTool: retryApiKey가 방금 실패한 키와 같으면 재시도하지 않는다', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'same-key': 403 } });
   await assert.rejects(
     () => withFetch(fetch, () => callMcpTool(
@@ -252,10 +251,10 @@ test('callMcpTool does not retry when retryApiKey equals the key that just faile
     )),
     /initialize HTTP 403/,
   );
-  assert.equal(calls.length, 1, 'retrying with the identical key would fail identically');
+  assert.equal(calls.length, 1, '동일한 키로 재시도해도 똑같이 실패할 것');
 });
 
-test('callMcpTool does not credential-retry a 5xx from initialize (not an auth failure)', async () => {
+test('callMcpTool: initialize의 5xx는 자격증명 재시도 대상이 아니다(인증 실패 아님)', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'session-key': 503 } });
   await assert.rejects(
     () => withFetch(fetch, () => callMcpTool(
@@ -265,10 +264,10 @@ test('callMcpTool does not credential-retry a 5xx from initialize (not an auth f
     )),
     /initialize HTTP 503/,
   );
-  assert.equal(calls.length, 1, '5xx is not an auth failure — no credential swap');
+  assert.equal(calls.length, 1, '5xx는 인증 실패가 아님 — 자격증명 교체 없음');
 });
 
-test('callMcpTool makes a single initialize call when the primary key already succeeds', async () => {
+test('callMcpTool: 1차 키가 바로 성공하면 initialize를 한 번만 호출한다', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'good-key': 200 } });
   await withFetch(fetch, () => callMcpTool(
     { ...BASE, apiKey: 'good-key', retryApiKey: 'manager-key' },
@@ -279,7 +278,7 @@ test('callMcpTool makes a single initialize call when the primary key already su
   assert.deepEqual(initCalls.map((c) => c.apiKey), ['good-key']);
 });
 
-test('fireAndForgetTool swallows the failure instead of throwing when both keys fail', async () => {
+test('fireAndForgetTool: 두 키 모두 실패해도 throw 대신 실패를 삼킨다', async () => {
   const { calls, fetch } = makeMcpFetch({ initStatusByKey: { 'session-key': 403, 'manager-key': 403 } });
   await withFetch(fetch, () => fireAndForgetTool(
     { ...BASE, apiKey: 'session-key', retryApiKey: 'manager-key' },
@@ -290,6 +289,6 @@ test('fireAndForgetTool swallows the failure instead of throwing when both keys 
   assert.deepEqual(
     initCalls.map((c) => c.apiKey),
     ['session-key', 'manager-key'],
-    'exactly one retry attempt — no infinite loop',
+    '정확히 1회만 재시도 — 무한루프 없음',
   );
 });

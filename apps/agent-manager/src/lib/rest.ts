@@ -520,9 +520,9 @@ export async function postDispatchAckRaw(
  * exit-143 deathloop. Fire-and-log: a dropped heartbeat just means the
  * supervisor falls back to ticket-write staleness for that window. `apiKey` is
  * the effective (managed-agent-or-manager) key so the report authenticates even
- * when the child runs as a managed agent. ticket 23253aeb — if that per-agent
- * key is stale/out-of-scope (401/403), retry once with `config.retryApiKey`
- * before giving up, same posture as the chat-room senders in this file.
+ * when the child runs as a managed agent. (ticket 23253aeb) 이 per-agent 키가
+ * stale/스코프 이탈(401/403)이면, 포기하기 전에 이 파일의 chat-room 발신
+ * 함수들과 동일한 방식으로 `config.retryApiKey`로 한 번 더 재시도한다.
  */
 export async function postOutputLiveness(
   config: AwbConfig,
@@ -949,9 +949,9 @@ export async function failMentionAuditRetrySpawn(
 /** Transport-only variant of {@link postSilentExitSystemComment} — no grace
  *  delay (the exit it narrates is long past by replay time) and classifies the
  *  failure instead of buffering it. The outbox replay path calls this directly.
- *  ticket 23253aeb — retries once with `config.retryApiKey` on a 401/403 from
- *  the primary key before classifying the failure, so a stale per-agent key
- *  doesn't silently swallow the one comment that explains a silent exit. */
+ *  (ticket 23253aeb) 1차 키에서 401/403을 받으면 실패로 분류하기 전에
+ *  `config.retryApiKey`로 한 번 더 재시도한다 — stale per-agent 키 때문에
+ *  silent-exit을 설명하는 유일한 코멘트가 조용히 사라지지 않도록. */
 export async function postSilentExitSystemCommentRaw(
   config: AwbConfig,
   ticketId: string,

@@ -12,12 +12,12 @@ export interface McpCallOptions {
  * and tear the session down. Returns the JSON-RPC response envelope (with
  * `result` field) or throws on transport / protocol failure.
  *
- * ticket 23253aeb: if `config.apiKey` is a stale/out-of-scope per-agent key
- * (spawn-time-captured, reused for the session's whole lifetime — same class
- * as the rest.ts chat-room senders), `initialize` comes back 401/403 and the
- * whole handshake never gets a session id. When `config.retryApiKey` is set
- * and differs from the failed key, retry the entire handshake once with it
- * before giving up — same one-shot fallback posture as rest.ts.
+ * ticket 23253aeb: `config.apiKey`가 stale/스코프 이탈된 per-agent 키면(spawn
+ * 시점에 캡처되어 세션 수명 내내 재사용 — rest.ts의 chat-room 발신 함수들과
+ * 동일한 실패 클래스) `initialize`가 401/403을 반환해 핸드셰이크가 세션 id를
+ * 아예 얻지 못한다. `config.retryApiKey`가 설정돼 있고 실패한 키와 다르면,
+ * 포기하기 전에 전체 핸드셰이크를 그 키로 한 번 더 재시도한다 — rest.ts와
+ * 동일한 1회 폴백 방식.
  */
 export async function callMcpTool(
   config: AwbConfig,
