@@ -58,6 +58,7 @@ import type { SecurityScheduleService } from '../../security/security-schedule.s
 import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
 import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
+import { CiWaitService } from '../../tickets/ci-wait.service';
 import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
@@ -170,6 +171,11 @@ export interface ToolContext {
   // on the DataSource since the service is stateless over dataSource +
   // activityService. Used by ticket-prerequisite-tools.
   ticketPrerequisitesService?: TicketPrerequisitesService;
+  // Ticket 778b6dc7: durable "blocked-on-one-external-CI-run" wait. Present
+  // in both modes — stateless over dataSource + activityService, same
+  // standalone-instantiation shape as ticketPrerequisitesService above. Used
+  // by ci-wait-tools (await_ci_run / cancel_ci_wait).
+  ciWaitService?: CiWaitService;
   // Cross-board handoff pipeline (ticket ac21a745). Required by handoff-tools
   // (reject_handoff / get_handoff_pipeline). Present only in NestJS integrated
   // mode — the relay engine subscribes to the live activity bus, which the
@@ -272,6 +278,10 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // direct instantiation matches the DI singleton's behavior in standalone mode.
   const ticketPrerequisitesService = new TicketPrerequisitesService(dataSource as any, activityService);
 
+  // CI-wait service — likewise stateless over dataSource + activityService,
+  // same standalone-instantiation shape as the prereq service above.
+  const ciWaitService = new CiWaitService(dataSource as any, activityService);
+
   // BenchmarkService is stateless over the DataSource (the @InjectDataSource
   // decorator is DI metadata only — calling the constructor directly is the
   // standalone equivalent of the DI singleton, matching the prereq service above).
@@ -296,6 +306,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     roomMembershipService,
     roomMessagingService,
     ticketPrerequisitesService,
+    ciWaitService,
     benchmarkService,
     buildArtifactService,
     deploymentService,
