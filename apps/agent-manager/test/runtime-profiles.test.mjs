@@ -31,6 +31,11 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   baseUrl: process.env.ANTHROPIC_BASE_URL,
   auth: process.env.ANTHROPIC_AUTH_TOKEN,
   model: process.argv.includes('--model') ? process.argv[process.argv.indexOf('--model') + 1] : null,
+  anthropicModel: process.env.ANTHROPIC_MODEL,
+  smallFastModel: process.env.ANTHROPIC_SMALL_FAST_MODEL,
+  defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+  defaultSonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,
+  defaultOpus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
   awb: process.env.AWB_API_KEY,
   response: process.env.REQUEST_THROUGH_ADAPTER
     ? await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', {
@@ -96,6 +101,43 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
   assert.equal(capture.model, 'fixture-model-a');
   assert.equal(capture.awb, 'agent-awb-key');
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
+});
+
+// ticket 7d8ea7c9 후속 — Claude Code 내부 보조 호출(세션 제목 생성 등)은
+// --model 을 거치지 않고 이 env 변수들로 모델을 고른다. 모델 하나만
+// 서빙하는 백엔드(예: vLLM --served-model-name)는 이 값들도 profile.model
+// 로 기본값 지정하지 않으면 CLI 자체 기본값을 "unrecognized_model" 로
+// 거부한다.
+test('Anthropic-compatible profile defaults the aux-call model env vars to profile.model', async () => {
+  const executable = await makeClaudeFixture('claude-aux-model.mjs');
+  const capture = await spawnFixture({
+    id: 'aux-model-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40102',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'aux-model.json'));
+  assert.equal(capture.anthropicModel, 'qwen3-coder-next');
+  assert.equal(capture.smallFastModel, 'qwen3-coder-next');
+  assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+  assert.equal(capture.defaultSonnet, 'qwen3-coder-next');
+  assert.equal(capture.defaultOpus, 'qwen3-coder-next');
+});
+
+test('profile.env still overrides the default aux-call model env vars', async () => {
+  const executable = await makeClaudeFixture('claude-aux-model-override.mjs');
+  const capture = await spawnFixture({
+    id: 'aux-model-override',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40103',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+    env: { ANTHROPIC_SMALL_FAST_MODEL: 'qwen3-coder-next-fast' },
+  }, join(fixtureRoot, 'aux-model-override.json'));
+  assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'unset by profile.env — keeps the default');
+  assert.equal(capture.smallFastModel, 'qwen3-coder-next-fast', 'profile.env wins over the default');
 });
 
 async function unusedPort() {
