@@ -165,6 +165,23 @@ function StepCard({
         {step.assignee_name || 'unassigned'}
       </div>
 
+      {step.workspace_folder && (
+        <div
+          style={{
+            marginTop: 3,
+            fontSize: 9.5,
+            fontFamily: 'monospace',
+            color: tokens.colors.textMuted,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={step.workspace_folder}
+        >
+          {step.workspace_folder}
+        </div>
+      )}
+
       {step.depends_on.length > 0 && (
         <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
           {step.depends_on.map((key) => (

@@ -257,6 +257,11 @@ function CreateMissionModal({
   const [criteria, setCriteria] = useState('');
   const [startNow, setStartNow] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [method, setMethod] = useState('');
+  const [workspaceFolder, setWorkspaceFolder] = useState('');
+  const [checkoutMode, setCheckoutMode] = useState<'reuse' | 'fresh'>('reuse');
+  const [completionCriteria, setCompletionCriteria] = useState<Array<{ key: string; description: string }>>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -265,6 +270,11 @@ function CreateMissionModal({
     setContext('');
     setCriteria('');
     setStartNow(true);
+    setShowAdvanced(false);
+    setMethod('');
+    setWorkspaceFolder('');
+    setCheckoutMode('reuse');
+    setCompletionCriteria([]);
     setTeamId(teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
   }, [isOpen, teams]);
 
@@ -275,6 +285,9 @@ function CreateMissionModal({
       showToast('Title, objective and team are required', 'error');
       return;
     }
+    const cleanCriteria = completionCriteria
+      .map((c) => ({ key: c.key.trim(), description: c.description.trim() }))
+      .filter((c) => c.key && c.description);
     setSaving(true);
     try {
       const mission = await api.createOrchestrationMission({
@@ -284,6 +297,10 @@ function CreateMissionModal({
         objective: objective.trim(),
         context: context.trim(),
         acceptance_criteria: criteria.trim(),
+        method: method.trim(),
+        completion_criteria: cleanCriteria.length ? cleanCriteria : undefined,
+        workspace_folder: workspaceFolder.trim(),
+        checkout_mode: checkoutMode,
         start: startNow,
       });
       if (mission.start_error) {
@@ -358,6 +375,100 @@ function CreateMissionModal({
           onChange={setCriteria}
           rows={3}
         />
+
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          style={{
+            alignSelf: 'flex-start',
+            border: 'none',
+            background: 'transparent',
+            color: tokens.colors.accentSubtle,
+            cursor: 'pointer',
+            fontSize: 12,
+            fontFamily: 'inherit',
+            padding: 0,
+          }}
+        >
+          {showAdvanced ? '▾' : '▸'} Advanced — execution contract & workspace
+        </button>
+
+        {showAdvanced && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingLeft: 4, borderLeft: `2px solid ${tokens.colors.border}` }}>
+            <LabeledTextarea
+              label="Method (optional)"
+              hint="How the team should approach it — constraints, non-negotiables, preferred approach. Separate from the objective (what)."
+              value={method}
+              onChange={setMethod}
+              rows={2}
+            />
+            <div>
+              <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
+                Structured completion criteria (optional)
+              </span>
+              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
+                On top of the acceptance-criteria prose above — when set, the mission cannot be marked "completed"
+                until the orchestrator has flipped every one of these to met.
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {completionCriteria.map((c, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      value={c.key}
+                      placeholder="key, e.g. tests-pass"
+                      onChange={(e) => {
+                        const next = [...completionCriteria];
+                        next[i] = { ...next[i], key: e.target.value };
+                        setCompletionCriteria(next);
+                      }}
+                      style={{ width: 140, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                    />
+                    <input
+                      value={c.description}
+                      placeholder="Description — how it's verified"
+                      onChange={(e) => {
+                        const next = [...completionCriteria];
+                        next[i] = { ...next[i], description: e.target.value };
+                        setCompletionCriteria(next);
+                      }}
+                      style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                    />
+                    <Button variant="ghost" size="sm" onClick={() => setCompletionCriteria(completionCriteria.filter((_, j) => j !== i))}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setCompletionCriteria([...completionCriteria, { key: '', description: '' }])}
+                >
+                  + Add criterion
+                </Button>
+              </div>
+            </div>
+            <div>
+              <Input
+                label="Workspace folder root (optional)"
+                value={workspaceFolder}
+                onChange={(e) => setWorkspaceFolder(e.target.value)}
+                placeholder=".awb/orch/<mission id> (default)"
+              />
+              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
+                working_dir-relative root every step's isolated folder nests under. Default: .awb/orch/&lt;mission id&gt;.
+              </span>
+            </div>
+            <Select
+              label="Checkout mode"
+              options={[
+                { value: 'reuse', label: 'Reuse — fetch + fast-forward before each step' },
+                { value: 'fresh', label: 'Fresh — wipe + re-checkout before each step' },
+              ]}
+              value={checkoutMode}
+              onChange={(e) => setCheckoutMode(e.target.value as 'reuse' | 'fresh')}
+            />
+          </div>
+        )}
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
           <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
