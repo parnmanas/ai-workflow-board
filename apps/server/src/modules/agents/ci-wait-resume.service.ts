@@ -18,31 +18,52 @@
  * recent runs for a red streak. No dedicated alert entity: the wait state
  * already lives directly on the Ticket row, one wait at a time.
  *
- * Two-phase resolve/deliver (ticket 778b6dc7 review round 1, P0 fix):
+ * Delivery design (review rounds 1 and 2 — read this before touching
+ * `_deliver`): a resolved wait must be delivered (comment + dispatch)
+ * EXACTLY ONCE even though delivery isn't one atomic operation, and even
+ * though a crash can land between any two of its steps. The fix is a
+ * lease-based durable outbox living directly in `ci_wait_context.outcome` —
+ * the same `lease_owner`/`lease_expires_at`/CAS-with-generation shape
+ * `DispatchIntentService.claimForDispatch` already uses for the analogous
+ * "durable, crash-recoverable dispatch tracking" problem elsewhere in this
+ * codebase:
  *
- *   Phase 1 — `_recordOutcome`: once a run resolves (success/failure) or the
- *   wait times out or the context is corrupt, atomically CAS-stamp an
- *   `outcome` onto `ci_wait_context` via `CiWaitService.tryRecordOutcome`.
- *   This does NOT touch `pending_ci_wait` — the ticket stays a sweep
- *   candidate. A crash right after this succeeds is free to retry: the next
- *   sweep finds `ctx.outcome` already set and skips straight to phase 2,
- *   no GitHub re-poll needed.
+ *   1. `tryUpdateContext` records the outcome (phase 1) WITHOUT touching
+ *      `pending_ci_wait` — a crash here is free to retry, no GitHub re-poll
+ *      needed (round 1 P0 fix).
+ *   2. `_deliver` first checks the in-memory `lease_expires_at`: if another
+ *      attempt's lease is still fresh, this sweep does nothing (round 2
+ *      finding — outcome-present alone used to send EVERY sweep straight
+ *      into comment+dispatch with no coordination between them). Otherwise
+ *      it CAS-claims (or reclaims an expired) lease, bumping
+ *      `delivery_generation` and stamping a fresh `lease_owner`+expiry.
+ *      Only the CAS winner proceeds.
+ *   3. Comment and dispatch are each guarded by their OWN durable flag
+ *      (`comment_posted` / `dispatch_done`), flipped via `tryUpdateContext`
+ *      immediately after the side effect actually succeeds — never before
+ *      (that would durably claim something that didn't happen), and a
+ *      failure at either step returns without flipping anything, leaving
+ *      the lease to expire so a LATER sweep retries from exactly where this
+ *      one left off (round 2's "comment succeeded, dispatch failed" +
+ *      "crash after claim" scenarios).
+ *   4. `markDelivered` (the ONLY thing that clears `pending_ci_wait`) fires
+ *      once both flags are true, CAS'd on the EXACT context this delivery
+ *      just finished with — not just `pending_ci_wait: true` — so a stale
+ *      in-flight delivery can never clear a brand-new wait that raced in
+ *      via cancel + re-register while it was working (round 2 finding).
  *
- *   Phase 2 — `_deliver`: idempotent comment (checked by a stable
- *   `resolved_at` marker embedded in the comment body — skipped if already
- *   posted) + `dispatchCurrentColumn`. Only once BOTH have been attempted
- *   does `CiWaitService.markDelivered` clear `pending_ci_wait`. If either
- *   step throws, delivery returns early WITHOUT clearing the flag — the
- *   next sweep retries phase 2 alone (comment idempotency prevents a
- *   duplicate post; a redundant `dispatchCurrentColumn` call is itself safe
- *   because the trigger loop's live-twin dispatch-suppression layer absorbs
- *   a repeat wake for a ticket already mid-dispatch — see this ticket's own
- *   audit trail for that mechanism firing in practice).
- *
- * Splitting "resolution is a fact" from "delivery has happened" is what
- * makes a crash/exception ANYWHERE in the chain retryable instead of a
- * silent, permanent loss of the resume — the exact failure mode ticket
- * 778b6dc7 exists to eliminate, this time for its own fix.
+ * Residual risk, stated plainly rather than overclaimed: the window between
+ * "`dispatchCurrentColumn` returns successfully" and "the `dispatch_done`
+ * CAS write lands" is not literally atomic (no side effect that crosses a
+ * process boundary can be). A crash in that specific sub-window causes AT
+ * MOST ONE redundant re-dispatch on the eventual retry — bounded, not
+ * repeating, and itself absorbed by `TriggerLoopService`'s existing
+ * per-(ticket,role) intent upsert + live-twin suppression. This is the same
+ * trade-off `DispatchIntentService` itself makes (an `applyManagerAck`
+ * "processed" outcome is explicitly NOT resolution, only a deadline
+ * extension) — no durable system can make an external side effect and its
+ * own bookkeeping perfectly atomic; the goal here is bounding the gap, not
+ * pretending it doesn't exist.
  *
  * Bounded wait: a run that never reaches a terminal status (deleted
  * workflow, stuck queue, wrong run id) would otherwise hang the ticket
@@ -51,6 +72,7 @@
  * human/agent can re-dispatch or escalate instead of the ticket silently
  * never coming back.
  */
+import { randomUUID } from 'crypto';
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -157,6 +179,14 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     return { ...this.config };
   }
 
+  /** Delivery lease TTL — comfortably shorter than the sweep interval, so a
+   *  genuinely crashed attempt's lease has already expired by the time the
+   *  next scheduled sweep runs, without needing a second independent env
+   *  var to keep in sync. */
+  private get deliveryLeaseMs(): number {
+    return Math.max(30_000, Math.floor(this.config.sweepMs * 0.75));
+  }
+
   /** Public test hook — equivalent to one tick of the internal loop. */
   async sweep(): Promise<CiWaitSweepStats> {
     const stats: CiWaitSweepStats = {
@@ -190,14 +220,22 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     return stats;
   }
 
+  private _freshOutcome(kind: CiWaitOutcome['kind'], message: string, nowMs: number): CiWaitOutcome {
+    return {
+      kind, message, resolved_at: new Date(nowMs).toISOString(),
+      delivery_generation: 0, lease_owner: '', lease_expires_at: '',
+      comment_posted: false, dispatch_done: false,
+    };
+  }
+
   private async _evaluateOne(ticket: Ticket, nowMs: number, stats: CiWaitSweepStats): Promise<void> {
     const rawContext = ticket.ci_wait_context;
     const ctx = parseCiWaitContext(rawContext);
 
     if (ctx?.outcome) {
       // Already resolved by this or an earlier (possibly crashed-before-
-      // delivering) sweep — skip straight to delivery, no GitHub call.
-      await this._deliver(ticket, ctx, stats);
+      // fully-delivering) attempt — skip straight to delivery, no GitHub call.
+      await this._deliver(ticket, rawContext, ctx, nowMs, stats);
       return;
     }
 
@@ -205,33 +243,35 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
       // Flagged but unparseable/incomplete context — nothing to poll.
       // Record an error outcome (phase 1) so delivery is retryable exactly
       // like every other path, rather than resolving it in one step.
-      const outcome: CiWaitOutcome = {
-        kind: 'error',
-        message: 'CI 대기 컨텍스트가 손상되어(파싱 불가) 대기를 해제합니다. 상태를 직접 확인한 뒤 필요하면 `await_ci_run`을 다시 등록하세요.',
-        resolved_at: new Date(nowMs).toISOString(),
-      };
+      const outcome = this._freshOutcome(
+        'error',
+        'CI 대기 컨텍스트가 손상되어(파싱 불가) 대기를 해제합니다. 상태를 직접 확인한 뒤 필요하면 `await_ci_run`을 다시 등록하세요.',
+        nowMs,
+      );
       const fresh: CiWaitContext = { ...EMPTY_CONTEXT_BASE, outcome };
-      const won = await this.ciWaitService.tryRecordOutcome(ticket.id, rawContext, JSON.stringify(fresh));
+      const freshJson = JSON.stringify(fresh);
+      const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, freshJson);
       if (!won) return; // another sweep already recorded it — it handles delivery
-      await this._deliver(ticket, fresh, stats);
+      await this._deliver(ticket, freshJson, fresh, nowMs, stats);
       return;
     }
 
     const registeredAtMs = Date.parse(ctx.registered_at);
     const ageMs = Number.isFinite(registeredAtMs) ? nowMs - registeredAtMs : this.config.maxAgeMs;
     if (ageMs >= this.config.maxAgeMs) {
-      const outcome: CiWaitOutcome = {
-        kind: 'timeout',
-        message: `⏱️ **CI 대기 타임아웃** — ${ctx.owner}/${ctx.repo} run ${ctx.run_id}이(가) ` +
+      const outcome = this._freshOutcome(
+        'timeout',
+        `⏱️ **CI 대기 타임아웃** — ${ctx.owner}/${ctx.repo} run ${ctx.run_id}이(가) ` +
           `${Math.round(this.config.maxAgeMs / 3_600_000)}시간 동안 완료되지 않아 대기를 해제합니다. ` +
           `직접 run 상태를 확인한 뒤 재-dispatch 하거나, 필요하면 \`pend_ticket\`으로 사람에게 넘기세요.`,
-        resolved_at: new Date(nowMs).toISOString(),
-      };
+        nowMs,
+      );
       const nextCtx: CiWaitContext = { ...ctx, outcome };
-      const won = await this.ciWaitService.tryRecordOutcome(ticket.id, rawContext, JSON.stringify(nextCtx));
+      const nextJson = JSON.stringify(nextCtx);
+      const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
       if (!won) return;
       stats.timed_out++;
-      await this._deliver(ticket, nextCtx, stats);
+      await this._deliver(ticket, nextJson, nextCtx, nowMs, stats);
       return;
     }
 
@@ -248,15 +288,12 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     if (!run) return; // degradable (404 / no token) — retry next sweep, not yet a timeout
     if (run.status !== 'completed') return; // still running/queued — retry next sweep
 
-    const outcome: CiWaitOutcome = {
-      kind: 'resolved',
-      message: this._formatResolvedMessage(ctx, run),
-      resolved_at: new Date(nowMs).toISOString(),
-    };
+    const outcome = this._freshOutcome('resolved', this._formatResolvedMessage(ctx, run), nowMs);
     const nextCtx: CiWaitContext = { ...ctx, outcome };
-    const won = await this.ciWaitService.tryRecordOutcome(ticket.id, rawContext, JSON.stringify(nextCtx));
+    const nextJson = JSON.stringify(nextCtx);
+    const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
     if (!won) return; // lost the race — the winner (or a future sweep) delivers
-    await this._deliver(ticket, nextCtx, stats);
+    await this._deliver(ticket, nextJson, nextCtx, nowMs, stats);
   }
 
   private _formatResolvedMessage(ctx: CiWaitContext, run: GitHubWorkflowRun): string {
@@ -271,19 +308,49 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Phase 2 — idempotent delivery. Safe to call more than once for the same
-   * `ctx.outcome` (retried after a crash, or reached redundantly by a sweep
-   * that lost the phase-1 CAS but still holds a stale in-memory ticket —
-   * the ONLY caller that matters is the sweep that just won `tryRecordOutcome`,
-   * but this method's own idempotency makes a redundant call harmless too).
+   * Delivery — see the class docstring for the full lease/CAS design this
+   * implements. `rawContext` MUST be the exact `ci_wait_context` string
+   * matching `ctx` (the caller's most recent read or write); every CAS in
+   * here is conditioned against it.
    */
-  private async _deliver(ticket: Ticket, ctx: CiWaitContext, stats: CiWaitSweepStats): Promise<void> {
+  private async _deliver(ticket: Ticket, rawContext: string, ctx: CiWaitContext, nowMs: number, stats: CiWaitSweepStats): Promise<void> {
     const outcome = ctx.outcome;
     if (!outcome) return; // defensive — callers always pass a context with outcome set
 
-    const marker = `<!-- ci-wait-resolved:${outcome.resolved_at} -->`;
-    const alreadyPosted = await this._hasResolutionComment(ticket.id, marker);
-    if (!alreadyPosted) {
+    if (outcome.comment_posted && outcome.dispatch_done) {
+      // Fully delivered but never cleared (shouldn't normally happen —
+      // defensive backstop so a stuck row can still self-heal).
+      await this.ciWaitService.markDelivered(ticket.id, rawContext);
+      return;
+    }
+
+    // Someone else's lease is still fresh — don't race it, just wait for
+    // either it to finish (clears pending_ci_wait) or expire (next sweep
+    // reclaims). This is the round-2 fix: outcome-present alone used to
+    // send EVERY sweep straight into comment+dispatch with zero
+    // coordination between them.
+    const leaseExpiresMs = outcome.lease_expires_at ? Date.parse(outcome.lease_expires_at) : NaN;
+    if (outcome.lease_owner && Number.isFinite(leaseExpiresMs) && leaseExpiresMs > nowMs) {
+      return;
+    }
+
+    // Claim (or reclaim an expired) lease atomically.
+    const claimedOutcome: CiWaitOutcome = {
+      ...outcome,
+      delivery_generation: outcome.delivery_generation + 1,
+      lease_owner: randomUUID(),
+      lease_expires_at: new Date(nowMs + this.deliveryLeaseMs).toISOString(),
+    };
+    const claimedCtx: CiWaitContext = { ...ctx, outcome: claimedOutcome };
+    const claimedJson = JSON.stringify(claimedCtx);
+    const claimed = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, claimedJson);
+    if (!claimed) return; // lost the race to a concurrent sweep or a fresher lease already landed
+
+    let workingJson = claimedJson;
+    let workingOutcome = claimedOutcome;
+
+    if (!workingOutcome.comment_posted) {
+      const marker = `<!-- ci-wait-resolved:${workingOutcome.resolved_at} -->`;
       try {
         const commentRepo = this.dataSource.getRepository(Comment);
         await commentRepo.save(commentRepo.create({
@@ -292,39 +359,53 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
           author_type: 'system',
           author_id: '',
           author: 'CiWaitResumeService',
-          content: `${outcome.message}\n${marker}`,
+          content: `${workingOutcome.message}\n${marker}`,
           type: 'note',
         }));
       } catch (e) {
-        this.logService.warn('CI', 'ci-wait resolution comment write failed (will retry next sweep — pending_ci_wait stays set)', {
+        this.logService.warn('CI', 'ci-wait resolution comment write failed — leaving the lease to expire, retried next sweep', {
           err: String(e), ticket_id: ticket.id,
         });
-        return; // do NOT mark delivered — retry the whole delivery next sweep
+        return;
       }
+      const nextOutcome: CiWaitOutcome = { ...workingOutcome, comment_posted: true };
+      const nextCtx: CiWaitContext = { ...claimedCtx, outcome: nextOutcome };
+      const nextJson = JSON.stringify(nextCtx);
+      const won = await this.ciWaitService.tryUpdateContext(ticket.id, workingJson, nextJson);
+      if (!won) {
+        // We hold the lease — this should not happen. Extremely defensive:
+        // stop rather than proceed against state we can no longer trust.
+        this.logService.warn('CI', 'ci-wait: unexpected CAS loss right after posting the comment — leaving for next sweep', { ticket_id: ticket.id });
+        return;
+      }
+      workingJson = nextJson;
+      workingOutcome = nextOutcome;
+      if (outcome.kind === 'resolved') stats.resolved++;
     }
 
-    if (outcome.kind === 'resolved') stats.resolved++;
-
-    try {
-      await this.triggerLoopService.dispatchCurrentColumn(ticket.id, 'ci_wait_resolved', 'system');
-    } catch (e) {
-      this.logService.warn('CI', 'ci-wait resume dispatch failed (will retry next sweep — pending_ci_wait stays set; comment already posted so it will not duplicate)', {
-        err: String(e), ticket_id: ticket.id,
-      });
-      return; // do NOT mark delivered — retry just the dispatch next sweep
+    if (!workingOutcome.dispatch_done) {
+      try {
+        await this.triggerLoopService.dispatchCurrentColumn(ticket.id, 'ci_wait_resolved', 'system');
+      } catch (e) {
+        this.logService.warn('CI', 'ci-wait resume dispatch failed — leaving the lease to expire, retried next sweep (comment already posted, will not duplicate)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+        return;
+      }
+      const nextOutcome: CiWaitOutcome = { ...workingOutcome, dispatch_done: true };
+      const nextCtx: CiWaitContext = { ...claimedCtx, outcome: nextOutcome };
+      const nextJson = JSON.stringify(nextCtx);
+      const won = await this.ciWaitService.tryUpdateContext(ticket.id, workingJson, nextJson);
+      if (!won) {
+        this.logService.warn('CI', 'ci-wait: unexpected CAS loss right after dispatch — leaving for next sweep', { ticket_id: ticket.id });
+        return;
+      }
+      workingJson = nextJson;
     }
 
-    // Only now — comment ensured + dispatch attempted — is the wait truly
-    // over. A racing cancel_ci_wait or a second delivery attempt that
-    // already won this CAS both no-op safely against this call.
-    await this.ciWaitService.markDelivered(ticket.id);
-  }
-
-  private async _hasResolutionComment(ticketId: string, marker: string): Promise<boolean> {
-    const commentRepo = this.dataSource.getRepository(Comment);
-    const existing = await commentRepo.find({
-      where: { ticket_id: ticketId, author: 'CiWaitResumeService' },
-    });
-    return existing.some((c) => c.content.includes(marker));
+    // Both durable flags are true — delivery is done. Final CAS pinned to
+    // the exact context (not just pending_ci_wait: true) so a stale
+    // in-flight delivery can never clear a brand-new wait (round 2).
+    await this.ciWaitService.markDelivered(ticket.id, workingJson);
   }
 }
