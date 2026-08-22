@@ -381,6 +381,10 @@ SQLJS_DB_PATH=database/data-fresh.db npm run dev
 This guard is **sql.js (dev) only** — Postgres/MySQL boots are never touched, and AWB never
 auto-deletes a non-sqlite database.
 
+The same check also covers the second sql.js file, `database/ontology.db` (the independent
+Ontology Graph DataSource). It follows the identical Option A/B recovery above — swap
+`database/data.db` for `database/ontology.db` and `SQLJS_DB_PATH` for `SQLJS_ONTOLOGY_DB_PATH`.
+
 ### Tech Stack
 
 | Layer | Technology |
