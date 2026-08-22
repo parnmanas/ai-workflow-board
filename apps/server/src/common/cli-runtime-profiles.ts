@@ -45,6 +45,12 @@ export const ClaudeBackendProfileSchema = z.object({
   credential_required: z.boolean().default(false),
   credential_ref: z.string().uuid().optional(),
   auth_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).default('ANTHROPIC_AUTH_TOKEN'),
+  // ticket 7d8ea7c9 후속 — 백엔드 모델의 실제 context window 를 agent-manager
+  // 에 알려 CLAUDE_CODE_MAX_CONTEXT_TOKENS/CLAUDE_CODE_MAX_OUTPUT_TOKENS 로
+  // 주입하기 위한 필드. 셋 다 생략 가능(기존 프로필은 그대로 동작).
+  context_window: z.number().int().positive().optional(),
+  max_output_tokens: z.number().int().positive().optional(),
+  safety_margin_tokens: z.number().int().nonnegative().optional(),
   adapter: AdapterSchema.optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.protocol === 'openai-compatible' && !value.adapter) {
@@ -55,6 +61,17 @@ export const ClaudeBackendProfileSchema = z.object({
   }
   if (value.credential_required && !value.credential_ref) {
     ctx.addIssue({ code: 'custom', path: ['credential_ref'], message: 'is required when credential_required is true' });
+  }
+  if (
+    value.context_window !== undefined &&
+    value.max_output_tokens !== undefined &&
+    value.max_output_tokens >= value.context_window
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['max_output_tokens'],
+      message: 'must be less than context_window',
+    });
   }
   for (const [scope, env] of [['env', value.env], ['adapter.env', value.adapter?.env]] as const) {
     for (const key of Object.keys(env ?? {})) {
