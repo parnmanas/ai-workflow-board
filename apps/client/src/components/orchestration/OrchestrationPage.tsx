@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api';
 import type {
+  Action,
+  OrchestrationMissionDetail,
   OrchestrationMissionListItem,
+  OrchestrationPostActionCondition,
   OrchestrationTeam,
   OrchestrationUpdateEvent,
 } from '../../types';
@@ -140,14 +143,15 @@ export default function OrchestrationPage() {
         )}
       </div>
 
-      <CreateMissionModal
+      <MissionFormModal
         isOpen={showCreate}
         wsId={wsId}
         teams={teams}
+        mission={null}
         onClose={() => setShowCreate(false)}
-        onCreated={(id) => {
+        onSaved={(mission) => {
           setShowCreate(false);
-          navigate(`/ws/${wsId}/orchestration/missions/${id}`);
+          navigate(`/ws/${wsId}/orchestration/missions/${mission.id}`);
         }}
       />
     </div>
@@ -236,18 +240,26 @@ function MissionRow({
   );
 }
 
-function CreateMissionModal({
+/**
+ * Mission 생성/편집 모달 — `mission`이 null이면 생성, 그렇지 않으면 그 draft
+ * 미션의 편집(TeamFormModal이 팀에 대해 쓰는 것과 동일한 단일-컴포넌트
+ * create/edit 패턴). 편집은 서버 `updateMission`이 draft 상태에서만 브리핑
+ * 필드 편집을 허용하므로 draft 미션에서만 열린다(MissionDetailPage 참고).
+ */
+export function MissionFormModal({
   isOpen,
   wsId,
   teams,
+  mission,
   onClose,
-  onCreated,
+  onSaved,
 }: {
   isOpen: boolean;
   wsId: string;
   teams: OrchestrationTeam[];
+  mission: OrchestrationMissionDetail | null;
   onClose: () => void;
-  onCreated: (missionId: string) => void;
+  onSaved: (mission: OrchestrationMissionDetail) => void;
 }) {
   const { showToast } = useToast();
   const [title, setTitle] = useState('');
@@ -262,21 +274,33 @@ function CreateMissionModal({
   const [workspaceFolder, setWorkspaceFolder] = useState('');
   const [checkoutMode, setCheckoutMode] = useState<'reuse' | 'fresh'>('reuse');
   const [completionCriteria, setCompletionCriteria] = useState<Array<{ key: string; description: string }>>([]);
+  const [postActions, setPostActions] = useState<
+    Array<{ action_id: string; order: number; condition: OrchestrationPostActionCondition }>
+  >([]);
+  const [repoResourceId, setRepoResourceId] = useState('');
+  const [repoUrl, setRepoUrl] = useState('');
+  const [repoBranch, setRepoBranch] = useState('');
+  const [actions, setActions] = useState<Action[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
-    setTitle('');
-    setObjective('');
-    setContext('');
-    setCriteria('');
+    api.listActions(wsId).then(setActions).catch(() => setActions([]));
+    setTitle(mission?.title || '');
+    setObjective(mission?.objective || '');
+    setContext(mission?.context || '');
+    setCriteria(mission?.acceptance_criteria || '');
     setStartNow(true);
-    setShowAdvanced(false);
-    setMethod('');
-    setWorkspaceFolder('');
-    setCheckoutMode('reuse');
-    setCompletionCriteria([]);
-    setTeamId(teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
-  }, [isOpen, teams]);
+    setShowAdvanced(!!mission && (!!mission.method || mission.completion_criteria.length > 0 || mission.post_actions.length > 0 || !!mission.workspace_folder || !!mission.repo_ref));
+    setMethod(mission?.method || '');
+    setWorkspaceFolder(mission?.workspace_folder || '');
+    setCheckoutMode(mission?.checkout_mode || 'reuse');
+    setCompletionCriteria((mission?.completion_criteria || []).map((c) => ({ key: c.key, description: c.description })));
+    setPostActions((mission?.post_actions || []).map((p) => ({ action_id: p.action_id, order: p.order, condition: p.condition })));
+    setRepoResourceId(mission?.repo_ref?.resource_id || '');
+    setRepoUrl(mission?.repo_ref?.url || '');
+    setRepoBranch(mission?.repo_ref?.branch || '');
+    setTeamId(mission?.team_id || teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
+  }, [isOpen, mission, teams, wsId]);
 
   const selectedTeam = teams.find((t) => t.id === teamId) || null;
 
@@ -288,29 +312,54 @@ function CreateMissionModal({
     const cleanCriteria = completionCriteria
       .map((c) => ({ key: c.key.trim(), description: c.description.trim() }))
       .filter((c) => c.key && c.description);
+    const cleanPostActions = postActions.filter((p) => p.action_id);
+    const repoRef =
+      repoResourceId.trim() || repoUrl.trim() || repoBranch.trim()
+        ? {
+            ...(repoResourceId.trim() ? { resource_id: repoResourceId.trim() } : {}),
+            ...(repoUrl.trim() ? { url: repoUrl.trim() } : {}),
+            ...(repoBranch.trim() ? { branch: repoBranch.trim() } : {}),
+          }
+        : null;
     setSaving(true);
     try {
-      const mission = await api.createOrchestrationMission({
-        workspace_id: wsId,
-        team_id: teamId,
-        title: title.trim(),
-        objective: objective.trim(),
-        context: context.trim(),
-        acceptance_criteria: criteria.trim(),
-        method: method.trim(),
-        completion_criteria: cleanCriteria.length ? cleanCriteria : undefined,
-        workspace_folder: workspaceFolder.trim(),
-        checkout_mode: checkoutMode,
-        start: startNow,
-      });
-      if (mission.start_error) {
-        showToast(`Mission created but not started: ${mission.start_error}`, 'error');
+      const saved = mission
+        ? await api.updateOrchestrationMission(mission.id, {
+            workspace_id: wsId,
+            title: title.trim(),
+            objective: objective.trim(),
+            context: context.trim(),
+            acceptance_criteria: criteria.trim(),
+            method: method.trim(),
+            completion_criteria: cleanCriteria,
+            post_actions: cleanPostActions,
+            workspace_folder: workspaceFolder.trim(),
+            repo_ref: repoRef,
+            checkout_mode: checkoutMode,
+          })
+        : await api.createOrchestrationMission({
+            workspace_id: wsId,
+            team_id: teamId,
+            title: title.trim(),
+            objective: objective.trim(),
+            context: context.trim(),
+            acceptance_criteria: criteria.trim(),
+            method: method.trim(),
+            completion_criteria: cleanCriteria.length ? cleanCriteria : undefined,
+            post_actions: cleanPostActions.length ? cleanPostActions : undefined,
+            workspace_folder: workspaceFolder.trim(),
+            repo_ref: repoRef,
+            checkout_mode: checkoutMode,
+            start: startNow,
+          });
+      if (!mission && saved.start_error) {
+        showToast(`Mission created but not started: ${saved.start_error}`, 'error');
       } else {
-        showToast(startNow ? 'Mission briefed to the orchestrator' : 'Mission saved as a draft', 'success');
+        showToast(mission ? 'Mission updated' : startNow ? 'Mission briefed to the orchestrator' : 'Mission saved as a draft', 'success');
       }
-      onCreated(mission.id);
+      onSaved(saved);
     } catch (e: any) {
-      showToast(e?.message || 'Failed to create mission', 'error');
+      showToast(e?.message || 'Failed to save mission', 'error');
     } finally {
       setSaving(false);
     }
@@ -320,7 +369,7 @@ function CreateMissionModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="New mission"
+      title={mission ? 'Edit mission' : 'New mission'}
       maxWidth={640}
       footer={
         <>
@@ -328,7 +377,7 @@ function CreateMissionModal({
             Cancel
           </Button>
           <Button variant="primary" onClick={submit} loading={saving}>
-            {startNow ? 'Create & brief orchestrator' : 'Save draft'}
+            {mission ? 'Save' : startNow ? 'Create & brief orchestrator' : 'Save draft'}
           </Button>
         </>
       }
@@ -338,6 +387,7 @@ function CreateMissionModal({
 
         <Select
           label="Team"
+          disabled={!!mission}
           options={teams.map((t) => ({
             value: t.id,
             label:
@@ -448,6 +498,60 @@ function CreateMissionModal({
               </div>
             </div>
             <div>
+              <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
+                Post-completion actions (optional)
+              </span>
+              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
+                Actions to dispatch once the mission ends. Fire-and-forget — a dispatch failure is recorded but never
+                changes the mission's own outcome.
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {postActions.map((p, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 6 }}>
+                    <select
+                      value={p.action_id}
+                      onChange={(e) => {
+                        const next = [...postActions];
+                        next[i] = { ...next[i], action_id: e.target.value };
+                        setPostActions(next);
+                      }}
+                      style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                    >
+                      <option value="">Select an action…</option>
+                      {actions.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={p.condition}
+                      onChange={(e) => {
+                        const next = [...postActions];
+                        next[i] = { ...next[i], condition: e.target.value as OrchestrationPostActionCondition };
+                        setPostActions(next);
+                      }}
+                      style={{ width: 130, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                    >
+                      <option value="always">always</option>
+                      <option value="on_success">on_success</option>
+                      <option value="on_failure">on_failure</option>
+                    </select>
+                    <Button variant="ghost" size="sm" onClick={() => setPostActions(postActions.filter((_, j) => j !== i))}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPostActions([...postActions, { action_id: '', order: postActions.length, condition: 'always' }])}
+                >
+                  + Add post-action
+                </Button>
+              </div>
+            </div>
+            <div>
               <Input
                 label="Workspace folder root (optional)"
                 value={workspaceFolder}
@@ -467,13 +571,43 @@ function CreateMissionModal({
               value={checkoutMode}
               onChange={(e) => setCheckoutMode(e.target.value as 'reuse' | 'fresh')}
             />
+            <div>
+              <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
+                Repo (optional)
+              </span>
+              <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
+                Checked out for every step. Leave all blank to reuse the board/workspace environment_config repo.
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={repoResourceId}
+                  placeholder="Resource id (preferred)"
+                  onChange={(e) => setRepoResourceId(e.target.value)}
+                  style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                />
+                <input
+                  value={repoUrl}
+                  placeholder="or raw git URL"
+                  onChange={(e) => setRepoUrl(e.target.value)}
+                  style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                />
+                <input
+                  value={repoBranch}
+                  placeholder="branch (optional)"
+                  onChange={(e) => setRepoBranch(e.target.value)}
+                  style={{ width: 130, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
+                />
+              </div>
+            </div>
           </div>
         )}
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
-          <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
-          Brief the orchestrator immediately
-        </label>
+        {!mission && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
+            <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
+            Brief the orchestrator immediately
+          </label>
+        )}
       </div>
     </Modal>
   );
