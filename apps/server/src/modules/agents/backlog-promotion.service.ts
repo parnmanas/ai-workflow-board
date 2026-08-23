@@ -102,7 +102,6 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
@@ -717,14 +716,15 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       const ageMs = Date.now() - new Date(firstSkip.created_at).getTime();
       if (ageMs < readRoleBackfillThresholdMsFromEnv()) return;
 
-      const defaults = parseDefaultRoleAssignments(board.default_role_assignments);
-      const holders = defaults[slug];
-      if (!holders || holders.length === 0) return; // no board default — never backfill, never spam-retry
-
-      const applied = await this.ticketRoleAssignmentService.applyBoardDefaults(
-        ticket.id, ticket.workspace_id, { [slug]: holders },
+      // Shared core with TriggerLoopService's active-column halt backfill
+      // (ticket 1e002acb) — see TicketRoleAssignmentService.backfillVacantRoleFromBoardDefaults
+      // for the never-overwrite / invalid-holder-filtering guarantee. Returns
+      // false with no write when the board has no default for this slug — no
+      // board default — never backfill, never spam-retry.
+      const applied = await this.ticketRoleAssignmentService.backfillVacantRoleFromBoardDefaults(
+        ticket.id, ticket.workspace_id, board.default_role_assignments, slug,
       );
-      if (!applied.some(a => a.slug === slug && a.applied > 0)) return;
+      if (!applied) return;
 
       await activityLogRepo.save(activityLogRepo.create({
         entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
