@@ -64,7 +64,9 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     SkillsModule,
     // WorkspaceRolesModule exports TicketRoleAssignmentService — BacklogPromotionService
     // uses applyBoardDefaults to auto-backfill a vacant role after the ticket bb5b9aed
-    // threshold. No cycle: WorkspaceRolesModule only imports TypeOrmModule.
+    // threshold, and TriggerLoopService reuses the same backfillVacantRoleFromBoardDefaults
+    // core for an immediate halt-policy backfill (ticket 1e002acb). No cycle:
+    // WorkspaceRolesModule only imports TypeOrmModule.
     WorkspaceRolesModule,
   ],
   controllers: [
