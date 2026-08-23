@@ -12,7 +12,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { AgentManagerController } from './agent-manager.controller';
-import { InstanceRegistryService } from './instance-registry.service';
+import { InstanceRegistryModule } from './instance-registry.module';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
@@ -29,30 +29,36 @@ import { SkillsModule } from '../skills/skills.module';
   // bearer for the freshly-paired manager. Agent repo is needed for both
   // pair/redeem (manager identity) and createManagedAgent (CLI-typed agent).
   //
-  // forwardRef around AgentsModule: AgentsModule now also imports this module
-  // (to inject InstanceRegistryService into AgentsController for live-data
-  // enrichment of /api/agents). NestJS resolves the cycle via forwardRef on
-  // both sides.
+  // forwardRef around AgentsModule: AgentsModule also imports this module (for
+  // AgentManagerCommandService/PairingService). NestJS resolves the cycle via
+  // forwardRef on both sides.
+  //
+  // InstanceRegistryModule (ticket c3b767c6): InstanceRegistryService moved
+  // there and is now @Global() — importing it here keeps this module's own
+  // controller/ManagerDriftMonitorService resolving it exactly as before,
+  // while ChatRoomsModule/AgentsModule reach it too without either needing an
+  // import edge onto this module. See that module's doc comment.
   imports: [
     forwardRef(() => AgentsModule),
+    InstanceRegistryModule,
     SkillsModule,
     TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource, Workspace]),
   ],
   controllers: [AgentManagerController],
   providers: [
-    InstanceRegistryService,
     PairingService,
     CommandLedgerService,
     AgentManagerCommandService,
     // version-drift / stale self-update health monitor (ticket 7485df07). Runs
-    // its own sweep timer; consumes InstanceRegistryService — same module, no
-    // extra wiring. No HTTP surface, so it isn't in `controllers`/`exports`.
+    // its own sweep timer; consumes InstanceRegistryService (now global via
+    // InstanceRegistryModule above). No HTTP surface, so it isn't in
+    // `controllers`/`exports`.
     ManagerDriftMonitorService,
     AgentAuthGuard,
     AuthGuard,
     PermissionGuard,
     WorkspaceGuard,
   ],
-  exports: [InstanceRegistryService, PairingService, AgentManagerCommandService],
+  exports: [PairingService, AgentManagerCommandService],
 })
 export class AgentManagerModule {}

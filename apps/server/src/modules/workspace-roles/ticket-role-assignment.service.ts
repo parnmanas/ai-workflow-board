@@ -8,6 +8,7 @@ import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 /**
@@ -689,6 +690,36 @@ export class TicketRoleAssignmentService {
       if (rows.length > 0) summary.push({ slug, applied: rows.length });
     }
     return summary;
+  }
+
+  /**
+   * Backfill ONE vacant role slug from a board's `default_role_assignments`
+   * (ticket 1e002acb). Thin single-slug wrapper around `applyBoardDefaults` —
+   * the shared write path (never overwrite an existing holder, drop
+   * default-holder ids that no longer resolve to a real agent/user) two very
+   * differently-paced callers both need:
+   *   - `BacklogPromotionService._maybeBackfillVacantRole` — intake only,
+   *     gated behind a 30min-since-first-skip-audit-row threshold so normal
+   *     staffing gets a chance first.
+   *   - `TriggerLoopService` halt-policy entry into an active column (Review /
+   *     Merging) — no sweep ever revisits an edge-triggered halt, so the
+   *     attempt is immediate, right before the ticket would otherwise flag
+   *     `_flagPolicyHalt` and go silent.
+   * Returns false with no write when the board has no default for this slug —
+   * callers read that as "cannot auto-recover, leave the real halt/skip in
+   * place."
+   */
+  async backfillVacantRoleFromBoardDefaults(
+    ticketId: string,
+    workspaceId: string,
+    boardDefaultRoleAssignments: string | null | undefined,
+    slug: string,
+  ): Promise<boolean> {
+    const defaults = parseDefaultRoleAssignments(boardDefaultRoleAssignments);
+    const holders = defaults[slug];
+    if (!holders || holders.length === 0) return false;
+    const applied = await this.applyBoardDefaults(ticketId, workspaceId, { [slug]: holders });
+    return applied.some(a => a.slug === slug && a.applied > 0);
   }
 
   /**

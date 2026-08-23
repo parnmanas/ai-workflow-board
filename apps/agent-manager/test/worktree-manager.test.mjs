@@ -26,6 +26,7 @@ import {
   sharedSlotName,
   isSharedSlotSeg,
 } from '../dist/lib/worktree-manager.js';
+import { classifyWorktreeOutcome } from '../dist/lib/dispatch-preflight.js';
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -313,5 +314,153 @@ test('verifyCheckout: an initialized-but-unpopulated checkout → incomplete_che
     assert.match(d.detail, /HEAD does not resolve/);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── ticket 112ea3c5: board repo를 상속하는 티켓이 DIFFERENT resource의
+// 기존 worktree로 절대 빠지면 안 된다 ────────────────────────────────────
+//
+// 보고된 사고를 정확히 재현한다: 이미 무관한 resource의 체크아웃을 갖고
+// 있는 agent working_dir(이전에, 다른 board/티켓에서의 정상적인 작업으로
+// 생긴 것)이, 자신의 base_repo_resource_id는 비어 있고 board environment를
+// 통해 DIFFERENT resource로 resolve되는 NEW 티켓으로 새어들어가면 안 된다.
+// WorktreeManager.resolveCwd는 모든 worktree 루트를 `resourceSlug`
+// (`.awb/wt/<resourceSlug>/…`)로 격리하므로, 이는 동시에
+// classifyWorktreeOutcome의 hard-fail 계약(완료 기준 #4)에 대한
+// integration 레벨 증명이기도 하다: CORRECT resource의 프로비저닝 실패는
+// 이미 존재하는 다른 resource의 체크아웃으로 절대 폴백하면 안 된다.
+
+const TICKET_OTHER_BOARD = 'dddddddd-1111-2222-3333-444444444444';
+const TICKET_D = 'eeeeeeee-1111-2222-3333-444444444444';
+const TICKET_E = 'ffffffff-1111-2222-3333-444444444444';
+
+for (const ticketMode of ['per_ticket', 'shared']) {
+  test(`resolveCwd (${ticketMode}): a pre-existing OTHER resource's shared worktree is never reused for a ticket resolved to a DIFFERENT resource`, async () => {
+    const other = await makeRepoWithRemote(); // 예: "GameClient" — 무관한 resource
+    const correct = await makeRepoWithRemote(); // 예: "Emberdelve" — board-resolved repo
+    const workingDir = join(other.root, 'shared-agent-home');
+    try {
+      await fsp.writeFile(join(other.repo, 'OTHER_MARKER.md'), 'other resource content\n');
+      git(other.repo, ['add', 'OTHER_MARKER.md']);
+      git(other.repo, ['commit', '-q', '-m', 'other resource marker']);
+      git(other.repo, ['push', '-q', 'origin', 'main']);
+      await fsp.writeFile(join(correct.repo, 'CORRECT_MARKER.md'), 'correct resource content\n');
+      git(correct.repo, ['add', 'CORRECT_MARKER.md']);
+      git(correct.repo, ['commit', '-q', '-m', 'correct resource marker']);
+      git(correct.repo, ['push', '-q', 'origin', 'main']);
+      await fsp.mkdir(workingDir, { recursive: true });
+
+      const wm = new WorktreeManager();
+      // 기존 상태: EARLIER의 무관한 티켓이 같은 agent working_dir에서 OTHER
+      // resource의 shared pool slot을 이미 leased한 상태 — 정확히 "agent
+      // home에 이미 다른 repo의 shared-0이 존재" 전제조건이다(완료 기준 #7).
+      const otherResult = await wm.resolveCwd({
+        baseWorkingDir: workingDir,
+        ticketId: TICKET_OTHER_BOARD,
+        role: 'assignee',
+        mode: 'shared',
+        poolSize: 1,
+        bootstrapRepo: { resourceId: 'gameclient-resource', url: other.remote, branch: 'main' },
+      });
+      assert.ok(otherResult.isWorktree, 'the other resource\'s own worktree provisions normally');
+      const otherSlotPath = otherResult.worktreePath;
+      const otherHeadBefore = git(otherSlotPath, ['rev-parse', 'HEAD']);
+
+      // NEW 티켓: 자신의 base_repo_resource_id는 비어 있었고, caller
+      // (resolveBootstrapRepository)가 resolveCwd 호출 전에 board의 repo —
+      // DIFFERENT resource — 로 이미 resolve해둔 상태다.
+      const result = await wm.resolveCwd({
+        baseWorkingDir: workingDir,
+        ticketId: ticketMode === 'shared' ? TICKET_D : TICKET_E,
+        role: 'assignee',
+        mode: ticketMode,
+        poolSize: 1,
+        bootstrapRepo: { resourceId: 'emberdelve-resource', url: correct.remote, branch: 'main' },
+      });
+
+      assert.ok(result.isWorktree, `${ticketMode}: provisioning against the correct, isolated resource succeeds`);
+      assert.ok(
+        result.worktreePath.startsWith(join(workingDir, '.awb', 'wt', 'emberdelve-resource')),
+        `${ticketMode}: worktree lands under the board-resolved resource's own slug dir, got ${result.worktreePath}`,
+      );
+      assert.doesNotMatch(result.worktreePath, /gameclient-resource/, `${ticketMode}: never touches the other resource's tree`);
+      assert.notEqual(result.cwd, otherSlotPath, `${ticketMode}: cwd is not the other resource's shared slot`);
+      assert.equal(
+        (await fsp.readFile(join(result.cwd, 'CORRECT_MARKER.md'), 'utf8')).replace(/\r\n/g, '\n'),
+        'correct resource content\n',
+      );
+      assert.equal(existsSync(join(result.cwd, 'OTHER_MARKER.md')), false, `${ticketMode}: the other resource's file never appears here`);
+
+      // other resource의 기존 slot은 완전히 그대로다 — "warm한 걸 아무거나
+      // 재사용" 폴백이 아님을 증명한다.
+      assert.equal(git(otherSlotPath, ['rev-parse', 'HEAD']), otherHeadBefore);
+      assert.equal(
+        (await fsp.readFile(join(otherSlotPath, 'OTHER_MARKER.md'), 'utf8')).replace(/\r\n/g, '\n'),
+        'other resource content\n',
+      );
+    } finally {
+      await other.cleanup();
+      await correct.cleanup();
+    }
+  });
+}
+
+test('resolveCwd: a provisioning failure for the resolved (correct) resource hard-fails via classifyWorktreeOutcome — never silently falls back to another resource\'s pre-existing worktree', async () => {
+  const other = await makeRepoWithRemote();
+  const correct = await makeRepoWithRemote();
+  const workingDir = join(other.root, 'conflict-agent-home');
+  const ticketId = 'aaaabbbb-1111-2222-3333-444444444444';
+  try {
+    await fsp.mkdir(workingDir, { recursive: true });
+    const wm = new WorktreeManager();
+
+    // 이전의 무관한 작업에서 생긴 기존 OTHER resource shared-0.
+    const otherResult = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_OTHER_BOARD,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'gameclient-resource', url: other.remote, branch: 'main' },
+    });
+    assert.ok(otherResult.isWorktree);
+    const otherSlotPath = otherResult.worktreePath;
+    const otherHeadBefore = git(otherSlotPath, ['rev-parse', 'HEAD']);
+
+    // `git worktree add`가 거부하도록 강제한다: correct resource의
+    // per_ticket 체크아웃이 쓸 EXACT 경로에 worktree가 아닌 디렉터리를
+    // 미리 만들어둔다(#ensureWorktree가 문서화한 "path exists but isn't a
+    // registered worktree — refuse to clobber" 가드를 그대로 재현).
+    const conflictPath = join(workingDir, '.awb', 'wt', 'emberdelve-resource', worktreeSlug(ticketId, 'per_ticket'));
+    await fsp.mkdir(conflictPath, { recursive: true });
+    await fsp.writeFile(join(conflictPath, 'stray.txt'), 'not a git worktree\n');
+
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'emberdelve-resource', url: correct.remote, branch: 'main' },
+    });
+
+    assert.equal(result.isWorktree, false, 'provisioning for the correct resource is refused, not silently swapped');
+    assert.equal(result.reason, 'path_conflict');
+    // classifyWorktreeOutcome(실제 dispatch 게이트)이 이 결과를 반드시
+    // hard-block해야 한다 — #applyWorktreeCwd가 이 result가 담은 어떤
+    // `cwd`로도 spawn하지 않고 dispatch를 중단함을 증명한다.
+    const gate = classifyWorktreeOutcome(result);
+    assert.equal(gate.blocked, true);
+    assert.equal(gate.kind, 'worktree:path_conflict');
+
+    // other resource의 기존 worktree로 절대 폴백하지 않는다.
+    assert.notEqual(result.cwd, otherSlotPath);
+    assert.doesNotMatch(result.worktreePath ?? '', /gameclient-resource/);
+    // 실패한 시도로 other resource의 slot이 건드려지지 않는다.
+    assert.equal(git(otherSlotPath, ['rev-parse', 'HEAD']), otherHeadBefore);
+    // 충돌을 일으킨 디렉터리 자체도 그대로 남아있다(절대 덮어쓰지 않음).
+    assert.equal(await fsp.readFile(join(conflictPath, 'stray.txt'), 'utf8'), 'not a git worktree\n');
+  } finally {
+    await other.cleanup();
+    await correct.cleanup();
   }
 });

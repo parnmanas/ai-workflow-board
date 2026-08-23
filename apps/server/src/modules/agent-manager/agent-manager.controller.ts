@@ -241,6 +241,15 @@ export class AgentManagerController {
       ? body.cli_adapters.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : [];
     const runtime_capabilities = sanitizeRuntimeCapabilities(body?.runtime_capabilities);
+    // ticket c3b767c6 — dispatch-gated feature flags this manager build
+    // declares (e.g. 'context_window_clamp'). `undefined` (not `[]`) when the
+    // field is absent/malformed so the capability gate can tell "manager
+    // never reported" apart from "reported, has none" — both currently
+    // resolve to the same "unsupported" verdict, but the distinction is
+    // preserved on the wire for future diagnostics.
+    const manager_capabilities = Array.isArray(body?.manager_capabilities)
+      ? body.manager_capabilities.filter((s: unknown): s is string => typeof s === 'string' && !!s)
+      : undefined;
 
     // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
@@ -439,6 +448,7 @@ export class AgentManagerController {
       cli: typeof body?.cli === 'string' && body.cli ? body.cli : 'claude',
       cli_adapters,
       runtime_capabilities,
+      manager_capabilities,
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
       agent_ids,

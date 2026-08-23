@@ -12,6 +12,7 @@
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
@@ -19,6 +20,9 @@ import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecision';
+import { Workspace } from '../../../entities/Workspace';
+import { pickBaseRepoResourceId } from '../../../common/base-repo-binding';
+import { mergeEnvironmentConfig } from '../../../common/environment-config';
 import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
@@ -445,7 +449,55 @@ export async function loadTicketFull(
       out.base_repo = null;
     }
   } else {
+    // ticket 112ea3c5: base_repo_resource_id가 비어 있다는 건 "repo 없음"이
+    // 아니라 "board environment repository를 상속한다"는 뜻이다 — dispatch
+    // 경로(trigger-loop.service.ts)가 agent_trigger payload에 이미 적용하는
+    // 것과 동일한 board-env 백필이다(ticket 8c3befa8). 모든 티켓 READER(MCP
+    // get_ticket, REST 상세, agent-api → agent-manager의 fetchTicketContext)가
+    // 동일한 repo로 resolve해야 한다 — 그렇지 않으면 세션 중 티켓을 재조회한
+    // caller가 base_repo:null을 보게 되고, 이것이 assignee가 무관한 resource의
+    // worktree로 빠졌던 사고의 정확한 원인이다.
     out.base_repo = null;
+    try {
+      const col = ticket.column_id
+        ? await scope.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+        : null;
+      const [board, workspace] = await Promise.all([
+        col?.board_id
+          ? scope.getRepository(Board).findOne({ where: { id: col.board_id } })
+          : Promise.resolve(null),
+        ticket.workspace_id
+          ? scope.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+          : Promise.resolve(null),
+      ]);
+      const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
+      const picked = pickBaseRepoResourceId('', merged?.repositories || []);
+      const candidate = picked.resourceId
+        ? await scope.getRepository(Resource).findOne({ where: { id: picked.resourceId } })
+        : null;
+      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === ticket.workspace_id)
+        ? candidate
+        : null;
+      if (repo) {
+        out.base_repo = {
+          id: repo.id,
+          name: repo.name,
+          url: repo.url,
+          // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch
+          // 오버라이드가 resource의 default_branch보다 우선한다. 그렇지 않으면
+          // board가 "release"를 지정해도 read 경로는 resource의 "main"만 보여줘
+          // dispatch 경로(위 backfill과 동일 규칙)와 어긋난다.
+          default_branch: picked.branch || repo.default_branch || '',
+          type: repo.type,
+        };
+        // out.base_branch(원본 컬럼)는 그대로 둔다 — 클라이언트 편집 폼이 이
+        // 필드를 그대로 바인딩하므로, 상속된 값을 여기 써넣으면 "명시적으로
+        // 지정된 branch"처럼 보일 위험이 있다. 유효 branch는 base_repo.default_branch
+        // 하나로 노출한다(위 회귀 테스트가 검증하는 필드).
+      }
+    } catch {
+      out.base_repo = null;
+    }
   }
 
   // Hydrate the linked next-ticket snapshot so the picker UI can render its

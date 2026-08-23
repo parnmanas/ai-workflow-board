@@ -109,6 +109,15 @@ export interface InstanceRecord {
   last_spawn_error?: string | null;
   last_spawn_error_cli?: string | null;
   last_spawn_error_at?: string | null;
+  // ticket c3b767c6 — dispatch-gated feature flags this manager BUILD
+  // supports (e.g. 'context_window_clamp'), distinct from runtime_capabilities
+  // above (which describes per-CLI-runtime health, not manager-wide dispatch
+  // behavior). apps/server/src/common/manager-capability-gate.ts reads this
+  // to refuse a dispatch whose profile needs a flag the manager never
+  // reported, instead of spawning a session an old build would mishandle
+  // silently. Older managers (pre this ticket) leave it undefined — the gate
+  // treats that identically to "reported, but empty".
+  manager_capabilities?: string[];
 }
 
 /**
@@ -258,6 +267,24 @@ export class InstanceRegistryService implements OnModuleDestroy {
 
   listForWorkspace(workspaceId: string): InstanceRecord[] {
     return this.list().filter((i) => i.workspace_id === workspaceId);
+  }
+
+  /** Live instances currently supervising `agentId` (ticket c3b767c6 —
+   *  dispatch-capability gate). Usually one; an agent identity backed by more
+   *  than one physical process (e.g. laptop + VM sharing a pairing code)
+   *  returns each. TTL-swept like every other view onto `instances`.
+   *
+   *  Matches on EITHER field because both wire shapes are live:
+   *  - `agent_id === agentId`: the common single-agent-per-host pairing —
+   *    the manager's own paired identity IS the dispatched-to agent.
+   *  - `agent_ids?.includes(agentId)`: a host supervising OTHER agent
+   *    identities it spawned (ST-5b multi-agent supervision) — those never
+   *    register as `agent_id` themselves, only through this list. Checking
+   *    `agent_id` alone here always returns `[]` for that case, silently
+   *    routing every capability check through the zero-instance fail-open
+   *    branch (ticket c3b767c6 review — the exact defect this fixes). */
+  listForAgent(agentId: string): InstanceRecord[] {
+    return this.list().filter((i) => i.agent_id === agentId || i.agent_ids?.includes(agentId));
   }
 
   get(instanceId: string): InstanceRecord | null {

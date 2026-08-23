@@ -39,7 +39,10 @@ import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
+import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
+import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -201,6 +204,15 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // imported by AgentsModule, no cycle.
     private readonly roomMessaging: RoomMessagingService,
     private readonly runSkillSnapshots: RunSkillSnapshotService,
+    // ticket c3b767c6 — dispatch-capability gate. @Global() (see
+    // instance-registry.module.ts), so this needs no new module import even
+    // though AgentsModule has no direct relationship to that provider's home.
+    private readonly instanceRegistry: InstanceRegistryService,
+    // ticket 1e002acb — immediate board-default backfill for a halt-policy
+    // column entry. Same provider BacklogPromotionService already injects
+    // directly (WorkspaceRolesModule only imports TypeOrmModule, so this is
+    // cycle-free — no forwardRef needed).
+    private readonly ticketRoleAssignmentService: TicketRoleAssignmentService,
   ) {
     this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
   }
@@ -452,10 +464,41 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         || (col.unassigned_policy === 'skip_if_ticket_staffed' && await this._ticketHasAnyHolder(ticket.id));
       if (shouldSkip) {
         await this._autoAdvanceUnassigned(ticket, col);
-      } else {
-        await this._flagPolicyHalt(ticket, col, col);
+        return;
       }
-      return;
+      // ticket 1e002acb: a halt-policy column with every routed slug vacant
+      // used to go straight to `_flagPolicyHalt` and sit silent — the only
+      // vacant-role rescue path (BacklogPromotionService._maybeBackfillVacantRole)
+      // was intake-only. Try the same board-default backfill immediately here
+      // (no sweep will ever revisit an edge-triggered halt, so there is no
+      // "wait and retry" option the way intake's 30min-gated version has).
+      const vacantSlugs = resolved.filter((r) => r.targetAgentIds.length === 0).map((r) => r.slug);
+      await this._backfillHaltedColumnRoles(ticket, col, vacantSlugs);
+      // Re-resolve EVERY originally-vacant slug from fresh DB state rather
+      // than trusting the backfill call's own return value (reviewer round 1,
+      // ticket 1e002acb): `applyBoardDefaults` only writes a slug that is
+      // STILL vacant at the moment IT runs, so a concurrent write — another
+      // in-flight `_handleActivity` for this same ticket, a human assigning
+      // the role by hand — that lands first makes this backfill attempt
+      // report "not applied" for that slug even though the seat is no longer
+      // empty. Re-resolving is the only way to tell "backfill genuinely found
+      // nothing to fill" apart from "something else filled it first" — both
+      // look identical from the backfill's own return value, but only the
+      // first one is a real halt.
+      const stillVacantSlugs: string[] = [];
+      for (const r of resolved) {
+        if (!vacantSlugs.includes(r.slug)) continue;
+        const holders = await this._resolveRoleHolders(ticket, r.slug);
+        r.targetAgentIds = holders ? holders.agentIds : [];
+        if (r.targetAgentIds.length === 0) stillVacantSlugs.push(r.slug);
+      }
+      if (stillVacantSlugs.length > 0) {
+        await this._flagPolicyHalt(ticket, col, col, stillVacantSlugs);
+        return;
+      }
+      // Every originally-vacant routed slug now has a holder (via this
+      // backfill or a concurrent write) — fall through (no return) to the
+      // per-role dispatch loop below instead of halting.
     }
 
     // 다중담당자 T2 fan-out (#1 / #2 / #6). Emit to EVERY holder of each routed
@@ -795,13 +838,84 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Immediate board-default backfill for a halt-policy column entry (ticket
+   * 1e002acb). Unlike `BacklogPromotionService._maybeBackfillVacantRole`
+   * (intake only, gated 30min behind a recurring skip-audit row so normal
+   * staffing gets a chance first), this call site has no sweep to retry
+   * later — `_handleActivity` runs once per activity, so this is the ticket's
+   * only chance to recover before `_flagPolicyHalt` leaves it silent. Reuses
+   * `TicketRoleAssignmentService.backfillVacantRoleFromBoardDefaults` (the
+   * same never-overwrite / invalid-holder-filtering core the intake path
+   * uses) per vacant slug — writes its own `halt_policy_role_backfilled`
+   * audit row for whatever it applied, but is otherwise fire-and-forget: the
+   * caller does NOT use this method's outcome to decide halt vs. dispatch
+   * (reviewer round 1, ticket 1e002acb) — it always re-resolves every
+   * originally-vacant slug from fresh DB state afterward, since a slug this
+   * call reports as "not applied" (no board default, OR a concurrent write
+   * already won the race) can still be non-vacant by the time that happens.
+   */
+  private async _backfillHaltedColumnRoles(
+    ticket: Ticket,
+    col: BoardColumn,
+    vacantSlugs: string[],
+  ): Promise<void> {
+    if (vacantSlugs.length === 0) return;
+    const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
+    if (!board) return;
+    const filled: string[] = [];
+    for (const slug of vacantSlugs) {
+      try {
+        const applied = await this.ticketRoleAssignmentService.backfillVacantRoleFromBoardDefaults(
+          ticket.id, ticket.workspace_id, board.default_role_assignments, slug,
+        );
+        if (applied) filled.push(slug);
+      } catch (e) {
+        this.logService.warn('MCP', 'halt-policy role backfill attempt failed (continuing)', {
+          err: String(e), ticket_id: ticket.id, role: slug,
+        });
+      }
+    }
+    if (filled.length > 0) {
+      try {
+        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+        await activityLogRepo.save(activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'halt_policy_role_backfilled',
+          role: filled.join(','),
+          new_value: `column=${col.id} board=${board.id} slugs=${filled.join(',')}`,
+          trigger_source: 'auto_advance',
+        }));
+      } catch (e) {
+        this.logService.warn('MCP', 'halt-policy backfill audit write failed (backfill still applied)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+      }
+      this.logService.info('MCP', 'halt-policy column entry auto-backfilled from board default', {
+        ticket_id: ticket.id, column_id: col.id, slugs: filled,
+      });
+    }
+  }
+
+  /**
    * Halt and leave an audit flag when the current or next column explicitly
-   * declares `unassigned_policy=halt`.
+   * declares `unassigned_policy=halt`. `vacantSlugs` (ticket 1e002acb) is the
+   * routed role_routing slugs that had zero agent holders AND — per the
+   * caller — no board default to auto-backfill from, i.e. a GENUINE halt: no
+   * further automation can move this ticket, so it needs a human. Previously
+   * this wrote only a `logService.warn` + one ActivityLog row, which put the
+   * whole 3h+ incident (ticket 1e002acb description) behind a line nobody was
+   * watching. Now it also posts a ticket comment naming the empty seat(s), so
+   * silence is no longer the only signal.
    */
   private async _flagPolicyHalt(
     ticket: Ticket,
     col: BoardColumn,
     gateCol: BoardColumn,
+    vacantSlugs: string[] = [],
   ): Promise<void> {
     this.logService.warn(
       'MCP',
@@ -813,6 +927,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         gate_column_id: gateCol.id,
         gate_column_name: gateCol.name,
         unassigned_policy: gateCol.unassigned_policy,
+        vacant_slugs: vacantSlugs,
       },
     );
     try {
@@ -825,13 +940,75 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
           actor_id: 'system',
           actor_name: 'TriggerLoopService',
           action: 'auto_advance_halted_policy',
-          new_value: `column=${col.id} blocked_column=${gateCol.id} reason=column_unassigned_policy_halt`,
-          role: '',
+          new_value: `column=${col.id} blocked_column=${gateCol.id} reason=column_unassigned_policy_halt vacant_slugs=${vacantSlugs.join(',')}`,
+          role: vacantSlugs.join(','),
           trigger_source: 'auto_advance',
         }),
       );
     } catch (e) {
       this.logService.warn('MCP', 'auto_advance gate-halt flag write failed (halt still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+    if (vacantSlugs.length > 0) {
+      await this._postHaltVisibilityComment(ticket, col, vacantSlugs);
+    }
+  }
+
+  /**
+   * Visibility comment for a genuine halt (ticket 1e002acb point 2) — names
+   * the column and the exact routed slug(s) sitting vacant so a human doesn't
+   * have to dig through activity logs to learn what StuckTicketDetector will
+   * only surface hours later (worse, misattributed — see
+   * StuckTicketDetectorService._matchNoProgress). Dedupes via
+   * `metadata.dedupe_key`, the same field `add_comment`'s own dedupe reads.
+   * Deliberately an EXISTENCE check over the last 20 system comments rather
+   * than add_comment's "bump only if it's the exact last row" rule — ordering
+   * comments by `created_at DESC` alone is not a reliable "most recent" signal
+   * on sql.js (second-truncated timestamps + a random UUID PK give no real
+   * tiebreak; ticket e341bcc2 is the documented history of getting this
+   * wrong), and this call site fires rarely enough that "was this halt
+   * already flagged recently" is all the suppression this needs. A write
+   * failure here must never undo the halt itself.
+   */
+  private async _postHaltVisibilityComment(
+    ticket: Ticket,
+    col: BoardColumn,
+    vacantSlugs: string[],
+  ): Promise<void> {
+    const dedupeKey = `halt_policy:${col.id}:${[...vacantSlugs].sort().join(',')}`;
+    const content =
+      `⏸️ **${col.name}** 컬럼 진입 정지 — 라우팅 역할 [${vacantSlugs.join(', ')}] 좌석이 비어 있고 ` +
+      `이 컬럼 정책은 \`unassigned_policy=halt\` 입니다. 보드 기본값(default_role_assignments)에도 ` +
+      `해당 역할이 없어 자동 백필이 불가능합니다 — 담당자를 수동으로 지정해주세요.`;
+    try {
+      const commentRepo = this.dataSource.getRepository(Comment);
+      const recent = await commentRepo.find({
+        where: { ticket_id: ticket.id, author_type: 'system', type: 'system' },
+        order: { created_at: 'DESC' },
+        take: 20,
+      });
+      const match = recent.find(
+        (c) => safeJsonParse<Record<string, unknown>>(c.metadata, {}).dedupe_key === dedupeKey,
+      );
+      if (match) {
+        match.repeat_count = (match.repeat_count || 1) + 1;
+        match.last_repeated_at = new Date();
+        await commentRepo.save(match);
+        return;
+      }
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticket.id,
+        workspace_id: ticket.workspace_id,
+        author_type: 'system',
+        author_id: '',
+        author: 'TriggerLoopService',
+        content,
+        type: 'system',
+        metadata: JSON.stringify({ dedupe_key: dedupeKey }),
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'halt visibility comment write failed (halt still applied)', {
         err: String(e), ticket_id: ticket.id,
       });
     }
@@ -2069,6 +2246,69 @@ candidate's branch or move the ticket.
     return true;
   }
 
+  /**
+   * Manager dispatch-capability gate (ticket c3b767c6). Runs right after
+   * `runtimeProfile` is resolved (the only point this method knows whether
+   * the profile needs anything) and before the `agent_trigger` SSE emit.
+   *
+   * A resolved profile with `context_window` set opts into a per-turn output
+   * clamp that only a manager build reporting MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP
+   * on its heartbeat actually implements (apps/agent-manager/src/lib/
+   * runtime-profiles.ts resolveMaxOutputTokensEnv). An older manager silently
+   * ignores the field and requests the CLI's fixed default output budget —
+   * the exact vLLM context-overflow hang+500 ticket 1af53029 traced to a
+   * stale manager on a separate host, with no server-side signal to catch it
+   * before burning a whole CLI session. This gate drops the trigger BEFORE
+   * it reaches that manager instead of letting the dispatch spawn and hang.
+   *
+   * Silent-drop + audit row mirrors every sibling "hard" gate above (board
+   * pause / archived / pending-user / hard-budget) rather than the
+   * credential-mismatch `throw` a few lines below its call site — this is a
+   * routine, retriable condition (an operator updating the manager clears it
+   * on the very next heartbeat), not a configuration error to surface loudly.
+   */
+  private async _checkManagerCapabilityGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    profile: CliRuntimeProfile | null,
+  ): Promise<boolean> {
+    const capability = requiredManagerCapability(profile);
+    if (!capability) return false;
+    const verdict = evaluateManagerCapability(this.instanceRegistry.listForAgent(agentId), capability);
+    if (verdict.ok) return false;
+
+    this.logService.warn('MCP', 'agent_trigger dropped (manager capability mismatch)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      capability, profile_id: profile?.id, reason: verdict.reason, detail: verdict.detail,
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'agent_trigger_dropped_manager_incapable',
+        new_value: `agent=${agentId} profile=${profile?.id ?? ''} capability=${capability} ${verdict.detail ?? ''}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'manager-capability-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+    if (triggerSource === 'comment_summary') {
+      throw Object.assign(new Error(verdict.detail || 'agent-manager does not support this dispatch profile'), {
+        status: 503, code: 'SUMMARY_DISPATCH_MANAGER_INCOMPATIBLE',
+      });
+    }
+    return true;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -2522,10 +2762,15 @@ candidate's branch or move the ticket.
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
+        // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+        // b5c1c080) — workspace_id를 where절에 넣으면 workspace_id=null인
+        // global Resource가 정확일치 필터에 걸려 조용히 못 찾힌다. 나머지 reader
+        // 전부(loadTicketFull, resources.controller.ts, ci-wait-resume.service.ts)
+        // 이미 이 패턴을 쓴다.
         const r = await this.dataSource.getRepository(Resource).findOne({
-          where: { id: baseRepoId, workspace_id: baseRepoWorkspaceId },
+          where: { id: baseRepoId },
         });
-        if (r) {
+        if (r && (r.workspace_id === null || r.workspace_id === baseRepoWorkspaceId)) {
           baseRepo = {
             id: r.id,
             name: r.name,
@@ -2611,7 +2856,7 @@ candidate's branch or move the ticket.
     // Merged board+workspace environment repositories, captured for the base_repo
     // backfill below (goal 1, ticket 8c3befa8). Populated inside the resolve
     // try so a base-repo-less ticket can inherit the board's default repo.
-    let boardEnvRepositories: { resource_id?: string }[] = [];
+    let boardEnvRepositories: { resource_id?: string; branch?: string }[] = [];
     // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
     // Null-safe read via the shared resolver — a missing/malformed column falls
     // back to DEFAULT_WORKTREE_MODE ('per_ticket'). Shipped on the trigger payload
@@ -2657,10 +2902,14 @@ candidate's branch or move the ticket.
           .filter((id) => id.length > 0);
         const repoMap = new Map<string, { url: string; default_branch: string }>();
         if (resourceIds.length > 0 && ticket.workspace_id) {
+          // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+          // b5c1c080) — workspace_id를 where절에 넣으면 global(workspace_id=null)
+          // Resource가 정확일치 필터에 걸려 조용히 못 찾힌다.
           const rows = await this.dataSource.getRepository(Resource).find({
-            where: resourceIds.map((rid) => ({ id: rid, workspace_id: ticket.workspace_id })),
+            where: { id: In(resourceIds) },
           });
           for (const r of rows) {
+            if (r.workspace_id !== null && r.workspace_id !== ticket.workspace_id) continue;
             repoMap.set(r.id, { url: r.url || '', default_branch: r.default_branch || '' });
           }
         }
@@ -2712,6 +2961,9 @@ candidate's branch or move the ticket.
           `agent ${agent.id} must select that credential before dispatch`,
         );
       }
+      if (await this._checkManagerCapabilityGate(ticket, agentId, role, triggerSource, runtimeProfile)) {
+        return '';
+      }
     }
 
     // ── base repo binding (ticket 8c3befa8) ──────────────────────────────────
@@ -2727,13 +2979,18 @@ candidate's branch or move the ticket.
       const picked = pickBaseRepoResourceId('', boardEnvRepositories);
       if (picked.resourceId) {
         try {
+          // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+          // b5c1c080) — 나머지 지점과 동일 사유.
           const r = await this.dataSource.getRepository(Resource).findOne({
-            where: { id: picked.resourceId, workspace_id: baseRepoWorkspaceId },
+            where: { id: picked.resourceId },
           });
-          if (r) {
+          if (r && (r.workspace_id === null || r.workspace_id === baseRepoWorkspaceId)) {
             baseRepoId = r.id;
             baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
-            if (!baseBranch) baseBranch = baseRepo.default_branch;
+            // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch 오버라이드가
+            // resource의 default_branch보다 우선한다 — 그렇지 않으면 board가 "release"를
+            // 지정해도 resource의 "main"으로 조용히 덮여써진다.
+            if (!baseBranch) baseBranch = picked.branch || baseRepo.default_branch;
             this.logService.info('MCP', 'base_repo backfilled from board environment (ticket 8c3befa8)', {
               ticket_id: ticket.id, base_repo_id: baseRepoId, base_branch: baseBranch, source: picked.source,
             });
@@ -2981,6 +3238,13 @@ candidate's branch or move the ticket.
           priority_index: priorityIndex(ticket.priority),
           ticket_created_at: createdAtIso,
           force_respawn: forceRespawn,
+          // ticket 112ea3c5 (수용 기준 #8): 이 dispatch가 바인딩한 resolved
+          // repo/branch — ticket 고유든 board-env 백필이든 — 를 남겨, "잘못된
+          // repo" 신고를 이 티켓 자체의 audit trail만으로 진단할 수 있게 한다.
+          base_repo_id: baseRepoId || null,
+          base_repo_url: baseRepo?.url || null,
+          base_branch: baseBranch || null,
+          worktree_mode: worktreeMode,
         }),
         role,
         trigger_source: triggerSource,
