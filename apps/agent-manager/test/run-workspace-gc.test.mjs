@@ -24,6 +24,7 @@ import {
   WorktreeManager,
   actionWorkspaceRootFor,
   chatWorkspaceRootFor,
+  orchestrationWorkspaceRootFor,
   runWorkspaceRootFor,
 } from '../dist/lib/worktree-manager.js';
 import { recordRunWorkspaceLeaf } from '../dist/lib/run-workspace-manifest.js';
@@ -49,10 +50,11 @@ async function plantWorkspace(root, leaf, { marker } = {}) {
   return dir;
 }
 
-test('actionWorkspaceRootFor / chatWorkspaceRootFor: fixed roots symmetric with runWorkspaceRootFor', () => {
+test('actionWorkspaceRootFor / chatWorkspaceRootFor / orchestrationWorkspaceRootFor: runWorkspaceRootFor와 대칭인 고정 루트', () => {
   const base = '/home/agent/work';
   assert.equal(actionWorkspaceRootFor(base), join(base, '.awb', 'act'));
   assert.equal(chatWorkspaceRootFor(base), join(base, '.awb', 'chat'));
+  assert.equal(orchestrationWorkspaceRootFor(base), join(base, '.awb', 'orch'));
   // 기존 QA/security 루트와 대칭적인 형태다 — join 패턴은 동일하고
   // leaf 세그먼트만 다르다.
   assert.equal(runWorkspaceRootFor(base), join(base, '.awb', 'qa'));
@@ -111,19 +113,23 @@ test('sweepRunWorkspaces: NEVER reclaims a folder a live process currently sits 
   }
 });
 
-test('sweepRunWorkspaces: sweeps both .awb/act and .awb/chat independently in one call', async () => {
+test('sweepRunWorkspaces: 한 번의 호출에서 .awb/act, .awb/chat, .awb/orch를 독립적으로 sweep한다', async () => {
   const base = await makeBase();
   const staleAction = await plantWorkspace(actionWorkspaceRootFor(base), 'stale-a', { marker: WELL_PAST_IDLE });
   const freshAction = await plantWorkspace(actionWorkspaceRootFor(base), 'fresh-a', { marker: WELL_WITHIN_IDLE });
   const staleChat = await plantWorkspace(chatWorkspaceRootFor(base), 'stale-c', { marker: WELL_PAST_IDLE });
   const freshChat = await plantWorkspace(chatWorkspaceRootFor(base), 'fresh-c', { marker: WELL_WITHIN_IDLE });
+  const staleOrch = await plantWorkspace(orchestrationWorkspaceRootFor(base), 'stale-o', { marker: WELL_PAST_IDLE });
+  const freshOrch = await plantWorkspace(orchestrationWorkspaceRootFor(base), 'fresh-o', { marker: WELL_WITHIN_IDLE });
 
   const removed = await manager.sweepRunWorkspaces(base);
-  assert.equal(removed, 2);
+  assert.equal(removed, 3);
   await assert.rejects(() => fsp.access(staleAction));
   await assert.rejects(() => fsp.access(staleChat));
+  await assert.rejects(() => fsp.access(staleOrch));
   await assert.doesNotReject(() => fsp.access(freshAction));
   await assert.doesNotReject(() => fsp.access(freshChat));
+  await assert.doesNotReject(() => fsp.access(freshOrch));
 });
 
 test('sweepRunWorkspaces: an empty/absent baseWorkingDir, or roots that were never provisioned, are a clean no-op', async () => {

@@ -47,6 +47,15 @@ export const ClaudeBackendProfileSchema = z.object({
   protocol: z.enum(['anthropic-compatible', 'openai-compatible']),
   base_url: z.string().url(),
   model: z.string().min(1),
+  // ticket 41dc37cb — Claude Code CLI 자신이 `--model`/내부 보조 요청
+  // (generate_session_title 등)에서 인식하는 alias. 실제 백엔드로 나가는
+  // 모델은 항상 위 model — agent-manager 의 RuntimeLease.claudeEnv() 가
+  // ANTHROPIC_DEFAULT_*_MODEL/ANTHROPIC_MODEL 네 tier 전부를 model 로
+  // 덮어쓰므로 alias 선택은 백엔드 라우팅에 영향 없다. 생략 시 'sonnet'
+  // (apps/agent-manager/src/lib/runtime-profiles.ts DEFAULT_CLAUDE_MODEL_ALIAS).
+  // raw provider model id(예: vLLM --served-model-name)를 그대로 CLI에
+  // 넘기면 CLI가 unrecognized_model 로 거부해 첫 채팅부터 실패한다.
+  model_alias: z.enum(['opus', 'sonnet', 'haiku', 'fable']).optional(),
   claude_executable: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   env: PublicEnvSchema,

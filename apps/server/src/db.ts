@@ -23,6 +23,8 @@ import * as entitiesBarrel from './entities';
 import { OntologyNode } from './entities/OntologyNode';
 import { OntologyEdge } from './entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from './entities/OntologyReverseEdgeIndex';
+import { OntologyEnrichmentQueue } from './entities/OntologyEnrichmentQueue';
+import { OntologyGraph } from './entities/OntologyGraph';
 import {
   DISPATCH_INTENTS_TABLE,
   DEDUP_OPEN_DISPATCH_INTENTS_SQL,
@@ -35,7 +37,7 @@ const entities = Object.values(entitiesBarrel);
 // PRIMARY sqljs entities 배열(아래)에서는 제외해야 `synchronize`가 공유
 // data.db에 절대 DDL하지 않는다. Postgres/MySQL은 배럴을 그대로 유지 — 이
 // 티켓 이전과 똑같이 단일 DataSource에 온톨로지가 다른 모든 것과 함께 있다.
-const ONTOLOGY_ENTITIES = [OntologyNode, OntologyEdge, OntologyReverseEdgeIndex];
+const ONTOLOGY_ENTITIES = [OntologyNode, OntologyEdge, OntologyReverseEdgeIndex, OntologyEnrichmentQueue, OntologyGraph];
 const ontologyEntitySet = new Set<unknown>(ONTOLOGY_ENTITIES);
 const primarySqljsEntities = entities.filter((e) => !ontologyEntitySet.has(e));
 

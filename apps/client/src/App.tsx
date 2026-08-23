@@ -34,6 +34,8 @@ const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 const OrchestrationPage = lazy(() => import('./components/orchestration/OrchestrationPage'));
 const OrchestrationTeamsPage = lazy(() => import('./components/orchestration/OrchestrationTeamsPage'));
 const MissionDetailPage = lazy(() => import('./components/orchestration/MissionDetailPage'));
+// Ontology Graph UI 셸(ticket d22b83b4) — 캔버스 없는 라우트/사이드바/배지.
+const OntologyGraphPage = lazy(() => import('./components/ontology/OntologyGraphPage'));
 
 // 지연 로드되는 라우트 청크를 가져오는 동안 보여줄 폴백.
 function RouteFallback() {
@@ -219,6 +221,7 @@ function AppContent() {
               <Route path="catalog" element={<LegacyCatalogRedirect />} />
               <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
               <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
+              <Route path="ontology-graph" element={<OntologyGraphPage />} />
               <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
               <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
               <Route path="credentials" element={<Navigate to="settings/credentials" replace />} />

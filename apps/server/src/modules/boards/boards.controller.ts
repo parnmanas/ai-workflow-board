@@ -34,7 +34,7 @@ import { Workspace } from '../../entities/Workspace';
 import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
-import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
+import { validateBoardHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
 import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateWorktreeModeInput, validateUsePrInput } from '../../common/worktree-config';
 import { validateQaPhasesInput, serializeQaPhases } from '../qa/qa-phases';
@@ -636,14 +636,17 @@ export class BoardsController {
       }
     }
 
-    // Per-board hard-budget ceiling (ticket a940d75b). Same shape as
-    // respawn_storm_config: null clears the override back to the env-folded
-    // baseline; an object is zod-validated (strict keys) so a typo'd field 400s.
+    // Per-board hard-budget ceiling (티켓 a940d75b). respawn_storm_config와 같은
+    // 모양이다: null이면 override를 env-folded baseline으로 초기화하고, 객체면
+    // zod로 검증한다(strict 키, board-scope 서브셋) — 그래서 오타 필드뿐 아니라
+    // 워크스페이스 전용인 max_runs_per_window(티켓 73b92d23 — board 레이어가
+    // 없고 resolveHardBudgetForTicket가 전혀 읽지 않는다)도 조용히 validation을
+    // 통과해 no-op으로 저장되는 대신 400으로 거부된다.
     if (hard_budget_config !== undefined) {
       if (hard_budget_config === null) {
         board.hard_budget_config = null;
       } else {
-        const checked = validateHardBudgetConfigInput(hard_budget_config);
+        const checked = validateBoardHardBudgetConfigInput(hard_budget_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.hard_budget_config = serializeHardBudgetConfig(checked.value);
       }

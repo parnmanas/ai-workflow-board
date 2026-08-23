@@ -59,8 +59,15 @@ export interface RunRepoSpec {
  *  원래 'qa'|'security' 두 가지였던 것을 확장했다). 'chat'은 one-shot run이
  *  아니다 — 순수 채팅방에는 complete_*_run 생명주기가 없으므로 — 호출자는
  *  run-completion / orphan-sweep 관련 바인딩을 반드시 `kind !== 'chat'`으로
- *  걸러야 한다(event-dispatcher의 handleChatRoomMessage 참고). */
-export type RunProvisionKind = 'qa' | 'security' | 'action' | 'chat';
+ *  걸러야 한다(event-dispatcher의 handleChatRoomMessage 참고). 'orchestration'
+ *  (ticket 2dc3c62f, Mission step 디스패치)은 'chat'과 같은 이유로 걸러야
+ *  한다 — 하지만 다른 이유에서다: report_orchestration_step 은 run_id/
+ *  workspace_id 가 아니라 step_id 로 완료 처리하는 다른 모양의 계약이라
+ *  qa/security/action 이 공유하는 `resolveRunCompletionRoute` 에 억지로
+ *  맞추지 않는다 — 대신 미션의 기존 `step_timeout_minutes` reaper 가 프로비저닝
+ *  실패/스폰 실패로 응답 없는 step 을 회수한다(event-dispatcher 의
+ *  `kind !== 'chat' && kind !== 'orchestration'` 가드 참고). */
+export type RunProvisionKind = 'qa' | 'security' | 'action' | 'chat' | 'orchestration';
 
 /** kind별 one-shot run의 MCP 완료-도구(completion-tool) 계약(ticket 9fd27487 —
  *  ticket 89716f04의 orphan-sweep 라우팅을 확장한 것으로, 그 전엔 qa|security만
@@ -181,7 +188,7 @@ function parseRepoCredential(raw: unknown): RepoCredential | null {
  * when absent/malformed — an ordinary chat turn carries no such field). Mirrors
  * the env-config parser pattern: never throws, drops anything it can't validate.
  */
-const RUN_PROVISION_KINDS: RunProvisionKind[] = ['qa', 'security', 'action', 'chat'];
+const RUN_PROVISION_KINDS: RunProvisionKind[] = ['qa', 'security', 'action', 'chat', 'orchestration'];
 
 export function parseRunProvision(raw: unknown): RunProvision | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -460,8 +467,9 @@ export async function provisionRunWorkspace(
   // workspace_folder once an ancestor holds a `.git` (ticket 9fd27487, review
   // round 3). Called only after a successful provisioning below.
   const recordManifestLeaf = async (): Promise<void> => {
-    if (p.kind !== 'action' && p.kind !== 'chat') return;
-    const kindRoot = join(root, '.awb', p.kind === 'action' ? 'act' : 'chat');
+    if (p.kind !== 'action' && p.kind !== 'chat' && p.kind !== 'orchestration') return;
+    const kindDir = p.kind === 'action' ? 'act' : p.kind === 'chat' ? 'chat' : 'orch';
+    const kindRoot = join(root, '.awb', kindDir);
     const leaf = relative(kindRoot, resolve(dir)).split(sep).join('/');
     await recordRunWorkspaceLeaf(kindRoot, leaf).catch(() => {});
   };

@@ -20,7 +20,7 @@ import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
-import { postSilentExitSystemComment, postOutputLiveness } from './rest.js';
+import { postSilentExitSystemComment, postOutputLiveness, postToolCallTelemetry } from './rest.js';
 import { OUTPUT_LIVENESS_MIN_INTERVAL_MS } from './constants.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
 import { CircuitBreaker } from './circuit-breaker.js';
@@ -75,6 +75,22 @@ const TICKET_COMMENT_TOOL_SUFFIXES = [
   'handoff_to_agent',
   'move_ticket',
 ];
+
+/** ticket d35b7b7d(Ontology Graph 6/7) 완료조건 4 — graph_ MCP 툴 대 네이티브
+ *  Grep/Read/Bash 호출 비율 비교 표본의 분류 규칙(reporter 결정, "필요한
+ *  정밀도는 딱 하나 — 비율을 비교할 수 있으면 충분"). `mcp__awb__graph_status`
+ *  같은 MCP 이름은 마지막 `__` 뒤 bare 이름만 보고(프리픽스 변경에 안전 —
+ *  #isCommentTool의 endsWith 선례와 같은 이유), 네이티브 툴(Read/Grep/Bash)은
+ *  애초에 `__`가 없어 그대로 통과한다. */
+const TOOL_CALL_SAMPLE_NATIVE_NAMES = new Set(['read', 'grep', 'bash']);
+
+function classifyToolCallForTelemetry(name: string): 'graph' | 'native' | null {
+  const lastSep = name.lastIndexOf('__');
+  const bare = (lastSep === -1 ? name : name.slice(lastSep + 2)).toLowerCase();
+  if (bare.startsWith('graph_')) return 'graph';
+  if (TOOL_CALL_SAMPLE_NATIVE_NAMES.has(bare)) return 'native';
+  return null;
+}
 
 /** Sentinel a running subagent emits in its own output to request that the
  *  NEXT trigger for this (ticket, role) start in a FRESH session instead of
@@ -139,6 +155,11 @@ export class TicketSessionManager
    *  silent-exit fallback. Cleared per-pid in the exit hook so a long-lived
    *  manager doesn't leak entries across many session respawns. */
   #commentSent = new Set<number>();
+  /** ticket d35b7b7d 완료조건 4 — 이번 턴(다음 isResult까지)에서 관측된
+   *  graph_/native 표본 카운트. #progressMeta와 달리 턴 경계에서 delete하지
+   *  않고 누적하다가, 턴이 끝나는 시점(_onStdoutParsed의 isResult 분기)에
+   *  postToolCallTelemetry로 flush한 뒤 리셋한다. */
+  #toolCallSample = new Map<number, { graph: number; native: number }>();
   /** Per-pid record of the latest trigger that drove a new turn into this
    *  session. Threaded into the fallback metadata so an operator looking at
    *  the system comment can correlate it with the AWB trigger that
@@ -1044,6 +1065,14 @@ export class TicketSessionManager
             // The promised follow-up arrived — disarm cleanly.
             this.#disarmMovingCue(sess.pid, 'move_ticket fired');
           }
+          // ticket d35b7b7d 완료조건 4 — graph_/native 표본 누적(턴 종료 시
+          // flush, 아래 isResult 분기).
+          const sampleKind = classifyToolCallForTelemetry(block.name);
+          if (sampleKind) {
+            const sample = this.#toolCallSample.get(sess.pid) ?? { graph: 0, native: 0 };
+            if (sampleKind === 'graph') sample.graph += 1; else sample.native += 1;
+            this.#toolCallSample.set(sess.pid, sample);
+          }
         }
       }
     }
@@ -1064,6 +1093,24 @@ export class TicketSessionManager
       if (state && state.armed && !state.injected) {
         this.#injectMovingResume(sess, 'turn ended without move_ticket');
       }
+      // ticket d35b7b7d 완료조건 4 — 이번 턴의 graph_/native 표본을 flush.
+      // postOutputLiveness와 같은 fire-and-forget REST 자세(새 SSE 이벤트
+      // 아님) — 실패해도 다음 턴이 계속 누적하므로 재시도 로직 불필요.
+      const sample = this.#toolCallSample.get(sess.pid);
+      if (sample && (sample.graph > 0 || sample.native > 0) && sess.agentId && sess.ticketId) {
+        void postToolCallTelemetry(
+          { ...this._config, retryApiKey: this._config.apiKey },
+          sess._effectiveApiKey || this._config.apiKey,
+          {
+            agent_id: sess.agentId,
+            ticket_id: sess.ticketId,
+            role: sess.role || '',
+            graph_calls: sample.graph,
+            native_calls: sample.native,
+          },
+        );
+      }
+      this.#toolCallSample.delete(sess.pid);
     }
   }
 
@@ -1140,6 +1187,7 @@ export class TicketSessionManager
       this.#commentSent.delete(sess.pid);
       this.#lastTriggerId.delete(sess.pid);
       this.#lastTriggerStartedAt.delete(sess.pid);
+      this.#toolCallSample.delete(sess.pid);
       return;
     }
 
@@ -1165,6 +1213,7 @@ export class TicketSessionManager
     this.#commentSent.delete(sess.pid);
     this.#lastTriggerId.delete(sess.pid);
     this.#lastTriggerStartedAt.delete(sess.pid);
+    this.#toolCallSample.delete(sess.pid);
 
     // Watchdog UNHEALTHY respawn (ticket 54a66701). When the health watchdog
     // SIGTERM'd this session for going unresponsive (#killUnhealthy set

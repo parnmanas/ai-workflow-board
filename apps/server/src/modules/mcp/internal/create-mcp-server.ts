@@ -13,7 +13,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { registerAllTools, type ToolContext } from '../tools';
+import { registerAllTools, type ToolContext, type ToolProfile } from '../tools';
 import { PendingTicketRefAccumulator } from '../tools/ticket-ref-session';
 
 // Update the version bump target when breaking the MCP surface. Clients read
@@ -22,12 +22,12 @@ const MCP_SERVER_NAME = 'ai-workflow-board';
 const MCP_SERVER_VERSION = '1.0.0';
 const MCP_SCHEMA_VERSION = 2;
 
-export function createMcpServerForContext(ctx: ToolContext): McpServer {
+export function createMcpServerForContext(ctx: ToolContext, profile: ToolProfile = 'full'): McpServer {
   ctx.pendingTicketRefs = new PendingTicketRefAccumulator();
   const server = new McpServer(
     { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
     { capabilities: { experimental: { 'awb/schemaVersion': { version: MCP_SCHEMA_VERSION } } } },
   );
-  registerAllTools(server, ctx);
+  registerAllTools(server, ctx, profile);
   return server;
 }

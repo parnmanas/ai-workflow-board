@@ -31,21 +31,23 @@ import {
   type CliAdapter,
   type CliProgressEvent,
   type CliUsageSnapshot,
-  buildModelChain,
   describeHarness,
   partitionHarness,
+  resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
-import { writeMcpConfig } from './managed-agent-store.js';
+import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
 import { classifySpawnException } from './dispatch-preflight.js';
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
+  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
+  resolveToolProfileHeader,
   runtimeCredentialEnv,
   startRuntimeProfile,
   type MaxOutputTokensResolution,
@@ -606,10 +608,21 @@ export class SubagentManager implements SubagentManagerContract {
     // compatibility with older servers and hand-built dispatch events.
     const claudeRuntimeProfile =
       adapter.cliType === 'claude' ? spec.runtimeProfile : null;
+    // Ticket ee26302d: see base-session-manager.ts's identical comment —
+    // `{}` (full) unless this profile's context_window is small.
+    const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // Backend profile model is inseparable from its endpoint and therefore
-    // wins over Anthropic-oriented per-agent/harness model defaults.
-    const effectiveModel =
-      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? ctx?.model ?? null;
+    // wins over Anthropic-oriented per-agent/harness model defaults. The
+    // profile's raw provider model id (e.g. a vLLM --served-model-name)
+    // must NEVER reach `--model` directly — Claude Code CLI rejects an
+    // unrecognized id with unrecognized_model on internal aux calls
+    // (generate_session_title etc.), failing the turn before it starts
+    // (ticket 41dc37cb). Pass a CLI-recognized alias instead; the actual
+    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
+    // overrides (runtime-profiles.ts), not by this flag.
+    const effectiveModel = claudeRuntimeProfile
+      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      : (slice?.model ?? harness?.model ?? ctx?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -622,8 +635,13 @@ export class SubagentManager implements SubagentManagerContract {
     // harness.fallback_models 로 체인을 만든다. 폴백 respawn 은 exit 핸들러가
     // _modelChain/_chainAttempt 를 넘겨오므로 그대로 이어쓴다. attemptModel 이
     // 이번 시도의 실제 모델(null=CLI 기본)이며 아래 buildOneshotSpawn 에 전달된다.
+    // Claude backend profile이 활성화된 세션은 resolveModelChain()이
+    // harness.fallback_models를 통째로 무시한다(ticket 41dc37cb 리뷰 라운드1) —
+    // 이 profile은 endpoint 하나에 model 하나만 서빙하므로 "다른 모델로
+    // 폴백"이 성립하지 않고, 그 raw 값들은 애초에 CLI-recognized alias로
+    // 검증된 적도 없다.
     const modelChain =
-      spec._modelChain ?? buildModelChain(effectiveModel, spec.harness?.fallback_models);
+      spec._modelChain ?? resolveModelChain(effectiveModel, claudeRuntimeProfile, spec.harness?.fallback_models);
     const chainAttempt = spec._chainAttempt ?? 0;
     const attemptModel = modelChain[chainAttempt] ?? null;
     if (modelChain.length > 1) {
@@ -708,15 +726,29 @@ export class SubagentManager implements SubagentManagerContract {
         const needsSessionPin = !!(spec.ticketId && spec.role);
 
         if (ctx?.mcp_config_path && !needsSessionPin) {
-          // Reuse the static per-agent mcp-config.json for non-role spawns. If
-          // it vanished from disk (partial spawn / manual cleanup / pre-file
-          // manager upgrade), the CLI would fail with "MCP config file not
-          // found" — regenerate it in place from the in-context apiKey.
-          // Regeneration preserves the host stdio server the temp else-branch
-          // below would drop.
-          configPath = existsSync(ctx.mcp_config_path)
-            ? ctx.mcp_config_path
-            : await writeMcpConfig(ctx.agent_id, this.#config.url, effectiveApiKey);
+          // Reuse the static per-agent mcp-config.json for non-role spawns.
+          // Ticket ee26302d review round 2 (P1): see base-session-manager.ts's
+          // identical branch — a single shared path with a rewrite-if-
+          // mismatched-content check fixed sequential profile transitions
+          // but not concurrent ones (no handshake confirms a CLI already
+          // read the file before the next spawn can overwrite it). Fixed
+          // structurally: each profile gets its own path via
+          // mcpConfigPathFor(..., profile), so concurrent spawns of
+          // DIFFERENT profiles for the same agent can never race on one file.
+          //
+          // Ticket ee26302d review round 3 (P1): pass ctx.workspace_id through
+          // here too — omitting it (as round 2 did) collapses workspace A and
+          // workspace B onto the SAME unscoped path whenever they share an
+          // agent id, so whichever workspace spawns first "wins" the file and
+          // the other silently reuses it (wrong Authorization, or a stale
+          // auth failure) instead of getting its own workspace-scoped config.
+          const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
+          const profileConfigPath = mcpConfigPathFor(ctx.agent_id, ctx.workspace_id, profile);
+          configPath = existsSync(profileConfigPath)
+            ? profileConfigPath
+            : await writeMcpConfig(
+                ctx.agent_id, this.#config.url, effectiveApiKey, ctx.workspace_id, toolProfileHeader,
+              );
           configPathIsTemp = false;
         } else {
           configPath = join(
@@ -729,6 +761,7 @@ export class SubagentManager implements SubagentManagerContract {
           const headers: Record<string, string> = {
             Authorization: `Bearer ${effectiveApiKey}`,
             'X-AWB-Client-Type': ctx ? 'managed-subagent' : 'subagent',
+            ...toolProfileHeader,
           };
           if (spec.ticketId) headers['X-AWB-Subagent-Ticket-Id'] = spec.ticketId;
           if (spec.role) headers['X-AWB-Subagent-Role'] = spec.role;

@@ -65,6 +65,16 @@ export interface RuntimeProfileSpec {
   protocol: 'anthropic-compatible' | 'openai-compatible';
   base_url: string;
   model: string;
+  /** Claude Code CLI가 `--model`/내부 보조 요청(세션 제목 생성 등)에서
+   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 백엔드로 실제
+   *  나가는 모델은 항상 `model`(위) — RuntimeLease.claudeEnv() 가
+   *  ANTHROPIC_DEFAULT_*_MODEL/ANTHROPIC_MODEL 네 tier 전부를 profile.model
+   *  로 덮어쓰므로 alias 선택은 백엔드 라우팅에 영향 없다. 생략 시
+   *  DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts) — ticket
+   *  41dc37cb: raw provider model id를 `--model`에 직접 넘기면 CLI가
+   *  `unrecognized_model`로 거부한다(특히 generate_session_title 등 보조
+   *  요청). */
+  model_alias?: 'opus' | 'sonnet' | 'haiku' | 'fable';
   claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -164,6 +174,31 @@ export function buildModelChain(
     chain.push(m);
   }
   return chain;
+}
+
+/**
+ * Chain-decision entry point shared by both spawn sites (subagent-manager.ts
+ * and base-session-manager.ts) — ticket 41dc37cb review round 1. A bound
+ * Claude backend profile pins the session to one served model behind one
+ * endpoint; there is no other model on that backend to fall back to.
+ * `harness.fallback_models` targets the plain-Anthropic multi-tier case
+ * (try opus, then sonnet, ...) and its entries are never validated as
+ * CLI-recognized aliases. Letting them extend a profile-bound chain would
+ * make a fallback-eligible retry's `--model` an arbitrary board-configured
+ * string again — resurrecting the exact unrecognized_model failure this
+ * ticket fixed, on the very path meant to recover from a failure. So while a
+ * profile is bound, the chain is the resolved alias alone (length 1 — see
+ * buildModelChain's bound check, this makes the fallback respawn a no-op and
+ * the death falls through to the ordinary breaker/silent-exit path, same as
+ * if fallback_models were never configured). The profile-less path is
+ * byte-for-byte `buildModelChain` — unchanged.
+ */
+export function resolveModelChain(
+  effectiveModel: string | null,
+  claudeRuntimeProfile: RuntimeProfileSpec | null | undefined,
+  fallbackModels: string[] | null | undefined,
+): (string | null)[] {
+  return buildModelChain(effectiveModel, claudeRuntimeProfile ? null : fallbackModels);
 }
 
 /**

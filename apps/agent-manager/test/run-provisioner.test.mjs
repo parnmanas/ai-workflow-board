@@ -138,6 +138,50 @@ test('parseRunProvision: accepts the new action/chat kinds', () => {
   assert.equal(chat.repo, null);
 });
 
+test('parseRunProvision: orchestration kind을 수용한다(ticket 2dc3c62f, Mission step 디스패치)', () => {
+  const orch = parseRunProvision({
+    kind: 'orchestration',
+    run_id: 'step-1',
+    workspace_id: 'w1',
+    workspace_folder: '.awb/orch/mission12/only-step',
+    checkout_mode: 'reuse',
+  });
+  assert.equal(orch.kind, 'orchestration');
+  assert.equal(orch.workspace_folder, '.awb/orch/mission12/only-step');
+  assert.equal(orch.repo, null);
+});
+
+test('provisionRunWorkspace: repo 없는 orchestration step은 격리된 폴더 존재만 보장한다', async () => {
+  const r = await provisionRunWorkspace({
+    kind: 'orchestration',
+    run_id: 'step-2',
+    workspace_id: 'w1',
+    workspace_folder: '.awb/orch/mission34/step-two',
+    checkout_mode: 'reuse',
+    repo: null,
+  }, BASE);
+  assert.equal(r.ok, true);
+  assert.ok(existsSync(join(BASE, '.awb', 'orch', 'mission34', 'step-two')));
+});
+
+test('provisionRunWorkspace: orchestration workspace_folder의 path traversal은 거부된다(working_dir 밖은 절대 rm하지 않음)', async () => {
+  const victimRoot = mkdtempSync(join(tmpdir(), 'awb-runprov-orch-victim-'));
+  const victim = join(victimRoot, 'precious');
+  writeFileSync(victim, 'do not delete\n');
+
+  const r = await provisionRunWorkspace({
+    kind: 'orchestration',
+    run_id: 'step-3',
+    workspace_id: 'w1',
+    workspace_folder: `../../../../../../../../../..${victimRoot}`,
+    checkout_mode: 'fresh',
+    repo: null,
+  }, BASE);
+  assert.equal(r.ok, false, 'traversal은 거부되어야 한다');
+  assert.ok(/traversal/i.test(r.error || ''), '에러 메시지가 traversal을 명시한다');
+  assert.ok(existsSync(victim), 'victim 파일은 그대로 남아있다 — working_dir 밖은 rm되지 않는다');
+});
+
 test('resolveRunCompletionRoute: routes qa/security/action to their MCP tool + status contract', () => {
   assert.deepEqual(resolveRunCompletionRoute('qa'), {
     getTool: 'get_qa_run',

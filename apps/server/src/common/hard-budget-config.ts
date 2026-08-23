@@ -77,6 +77,23 @@ export const HardBudgetConfigSchema = z
 
 export type HardBudgetConfig = z.infer<typeof HardBudgetConfigSchema>;
 
+/**
+ * HardBudgetConfigSchema의 board-scope 서브셋 (티켓 73b92d23). max_runs_per_window를
+ * 제외한다 — 이 필드는 워크스페이스 전용(위 (d) 참고)이라 board의
+ * `hard_budget_config`가 실제로 흘러가는 유일한 소비처인
+ * `resolveHardBudgetForTicket`(hard-budget-guard.ts)는 resolved 객체의
+ * `.maxRunsPerWindow`를 전혀 읽지 않는다. 이 필드를 읽는 건
+ * `resolveHardBudgetForWorkspace`(run-budget-guard.ts)뿐이고, 그 경로엔
+ * board 레이어가 없다. 이 스키마가 생기기 전에는 board에 max_runs_per_window를
+ * 설정하면 validation은 통과하고 저장까지 되지만 어떤 가드도 소비하지
+ * 않는 조용한 accepted-but-inert no-op이었다. 부모의 `.strict()` 스키마에
+ * `.omit()`을 적용해도 strict 체크는 유지되므로, 제외된 키는 이제 조용히
+ * 사라지는 대신 400으로 거부된다.
+ */
+export const BoardHardBudgetConfigSchema = HardBudgetConfigSchema.omit({ max_runs_per_window: true });
+
+export type BoardHardBudgetConfig = z.infer<typeof BoardHardBudgetConfigSchema>;
+
 export const HARD_BUDGET_CONFIG_KEYS = [
   'enabled',
   'max_auto_responses',
@@ -239,6 +256,26 @@ export function validateHardBudgetConfigInput(
   input: unknown,
 ): { ok: true; value: HardBudgetConfig } | { ok: false; error: string } {
   const parsed = HardBudgetConfigSchema.safeParse(input);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('; ');
+    return { ok: false, error: `Invalid hard_budget_config: ${issues}` };
+  }
+  return { ok: true, value: parsed.data };
+}
+
+/**
+ * BOARD-scope hard_budget_config(update_board MCP 인자 / boards.controller.ts의
+ * PATCH body)의 write-path 입력을 검증한다 — validateHardBudgetConfigInput과
+ * 계약은 같지만 BoardHardBudgetConfigSchema를 거치므로 max_runs_per_window
+ * (워크스페이스 전용, 티켓 73b92d23)는 조용히 validation을 통과해 no-op으로
+ * 저장되는 대신 400으로 거부된다.
+ */
+export function validateBoardHardBudgetConfigInput(
+  input: unknown,
+): { ok: true; value: BoardHardBudgetConfig } | { ok: false; error: string } {
+  const parsed = BoardHardBudgetConfigSchema.safeParse(input);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)

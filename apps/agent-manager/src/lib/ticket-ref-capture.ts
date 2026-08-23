@@ -586,7 +586,8 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 so a local deep-link would 404.
  *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
  *                 feature / action / function / user / api-key / benchmark / prompt-template /
- *                 chat / lesson / claude-backend-profile / outreach: not a ticket-row mutation.
+ *                 chat / lesson / claude-backend-profile / outreach / ontology: not a ticket-row
+ *                 mutation.
  *                 (build / deploy 결과물성 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로
  *                 이관 — EXCLUDE 아님.)
  */
@@ -615,6 +616,14 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
   list_workspaces: 'read', ping: 'read', search_actions: 'read', search_chat_messages: 'read',
   search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
+  // ticket d35b7b7d (Ontology Graph 6/7) — five pure-query graph_ tools, same
+  // posture as search_resources above: read-only lookups over a domain
+  // corpus (Ontology Graph nodes/edges), no ticket-row mutation.
+  // graph_status is classified separately below ('non-ticket') since it can
+  // auto-provision a new OntologyGraph row (side effect, but not a ticket
+  // row either) — same split as embed_resources vs. the other resource-tools.
+  graph_find_symbol: 'read', graph_module_summary: 'read', graph_neighbors: 'read',
+  graph_blast_radius: 'read', graph_call_path: 'read',
   // review-guard (1) — returns drift classification/recommendation; its internal
   // reverification budget bookkeeping is not a user-facing ticket mutation card.
   check_review_drift: 'review-guard',
@@ -628,7 +637,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // remote (1)
   create_remote_improvement_ticket: 'remote',
-  // orchestration (12) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
+  // orchestration (13) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
   // 전부 EXCLUDE 인 이유: 이 툴들은 티켓 row 를 하나도 건드리지 않고 Mission/Step
   // 상태만 바꾼다. 그리고 그 상태는 이미 전용 관찰면 — AWB 의 Mission 상세 화면
   // (Plan 그래프 + append-only 타임라인, `orchestration_update` SSE 로 라이브) —
@@ -649,6 +658,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   report_orchestration_progress: 'orchestration',
   report_orchestration_step: 'orchestration',
   submit_orchestration_plan: 'orchestration',
+  update_orchestration_criteria: 'orchestration',
   update_orchestration_step: 'orchestration',
   // non-ticket (82) — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
@@ -675,6 +685,10 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   delete_security_schedule: 'non-ticket', delete_user: 'non-ticket',
   delete_workspace: 'non-ticket', delete_workspace_schedule: 'non-ticket',
   embed_resources: 'non-ticket', execute_function: 'non-ticket',
+  // ticket d35b7b7d (Ontology Graph 6/7) — same posture as embed_resources
+  // above: can write (auto-provision an OntologyGraph row + kick off a
+  // background build) but never touches a ticket row.
+  graph_status: 'non-ticket',
   move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   propose_skill_change: 'non-ticket',

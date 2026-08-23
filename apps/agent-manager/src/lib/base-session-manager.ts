@@ -32,17 +32,19 @@ import {
   type ParseResult,
   type ResolvedEffortPreset,
   type TurnImage,
-  buildModelChain,
   describeHarness,
   partitionHarness,
+  resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
-import { writeMcpConfig } from './managed-agent-store.js';
+import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
+  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
+  resolveToolProfileHeader,
   runtimeCredentialEnv,
   startRuntimeProfile,
   type MaxOutputTokensResolution,
@@ -129,6 +131,13 @@ export interface SpawnOpts {
    */
   agentContext?: {
     agent_id: string;
+    /** Ticket ee26302d review round 3 (P1): every real caller (ChatSessionManager
+     *  / TicketSessionManager) passes an AgentExecutionContext here, which has
+     *  this as a required field — declared optional locally only so a caller
+     *  without workspace scoping isn't forced to supply one. Threaded into the
+     *  profile-specific mcp-config path/write below so workspace A and
+     *  workspace B sharing an agent id don't converge on one unscoped file. */
+    workspace_id?: string;
     api_key: string;
     cwd: string;
     mcp_config_path: string;
@@ -622,11 +631,23 @@ export class BaseSessionManager {
     // dispatch event. Keep the manager boundary defensive as older/mixed
     // servers may still send one for a non-Claude agent.
     const claudeRuntimeProfile = adapter.cliType === 'claude' ? runtimeProfile : null;
+    // Ticket ee26302d: declares the compact MCP tool profile to the AWB
+    // server when this profile's context_window is small. `{}` (no header,
+    // i.e. full) for every profile without a small context_window,
+    // including no profile at all (non-Claude adapters).
+    const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
     // A selected Claude backend profile is an endpoint+model pair. Its model
     // must travel with that endpoint rather than being replaced by an
-    // Anthropic-oriented Agent/harness default.
-    const effectiveModel =
-      claudeRuntimeProfile?.model ?? slice?.model ?? harness?.model ?? agentContext?.model ?? null;
+    // Anthropic-oriented Agent/harness default. The profile's raw provider
+    // model id must NEVER reach `--model` directly — Claude Code CLI rejects
+    // an unrecognized id with unrecognized_model on internal aux calls
+    // (generate_session_title etc.), failing the first chat turn before it
+    // starts (ticket 41dc37cb). Pass a CLI-recognized alias instead; actual
+    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
+    // overrides (runtime-profiles.ts), not by this flag.
+    const effectiveModel = claudeRuntimeProfile
+      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
@@ -640,7 +661,12 @@ export class BaseSessionManager {
     // chainAttempt 인덱스만 넘기면 동일 체인의 다음 모델을 고른다. attemptModel
     // 이 이번 세션의 실제 모델(null=CLI 기본). 체인 상태는 아래 SessionRecord 에
     // 저장해 exit 핸들러가 남은 폴백 여부를 판단한다.
-    const modelChain = buildModelChain(effectiveModel, rawHarness?.fallback_models);
+    // Claude backend profile이 활성화된 세션은 resolveModelChain()이
+    // harness.fallback_models를 통째로 무시한다(ticket 41dc37cb 리뷰 라운드1) —
+    // subagent-manager.ts와 동일한 근거: endpoint 하나에 model 하나뿐이라
+    // "다른 모델로 폴백"이 성립하지 않고, 그 raw 값들은 CLI-recognized
+    // alias로 검증된 적이 없다.
+    const modelChain = resolveModelChain(effectiveModel, claudeRuntimeProfile, rawHarness?.fallback_models);
     const chainAttempt = chainAttemptOpt ?? 0;
     const attemptModel = modelChain[chainAttempt] ?? null;
     if (modelChain.length > 1) {
@@ -708,14 +734,31 @@ export class BaseSessionManager {
 
         if (agentContext?.mcp_config_path && !needsSessionPin) {
           // Reuse the static per-agent mcp-config.json for chat / non-pinned
-          // sessions. If it vanished from disk (partial spawn, manual cleanup,
-          // or a manager upgrade that predates the file), the CLI would fail
-          // with "MCP config file not found" — regenerate it in place from the
-          // in-context apiKey. Regeneration preserves the host stdio server the
-          // temp-config else-branch below would drop.
-          configPath = existsSync(agentContext.mcp_config_path)
-            ? agentContext.mcp_config_path
-            : await writeMcpConfig(agentContext.agent_id, this._config.url, effectiveApiKey);
+          // sessions. Ticket ee26302d review round 2 (P1): this used to be a
+          // single shared path with a rewrite-if-mismatched-content check,
+          // which fixed sequential profile transitions but not concurrent
+          // ones — a full-profile CLI still starting up (reading its
+          // `--mcp-config` file is not synchronous with spawn() returning)
+          // could have the same path rewritten to compact underneath it by
+          // a concurrent spawn for the same agent, or vice versa. Fixed
+          // structurally: mcpConfigPathFor(..., profile) gives each profile
+          // its own path, so concurrent spawns of DIFFERENT profiles can
+          // never share a file to race on (see that function's doc comment
+          // for why concurrent spawns of the SAME profile are still safe).
+          //
+          // Ticket ee26302d review round 3 (P1): pass agentContext.workspace_id
+          // through here too — omitting it (as round 2 did) collapses workspace
+          // A and workspace B onto the SAME unscoped path whenever they share
+          // an agent id, so whichever workspace spawns first "wins" the file
+          // and the other silently reuses it (wrong Authorization, or a stale
+          // auth failure) instead of getting its own workspace-scoped config.
+          const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
+          const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
+          configPath = existsSync(profileConfigPath)
+            ? profileConfigPath
+            : await writeMcpConfig(
+                agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
+              );
           configPathIsTemp = false;
         } else {
           configPath = join(
@@ -727,6 +770,7 @@ export class BaseSessionManager {
           const headers: Record<string, string> = {
             Authorization: `Bearer ${effectiveApiKey}`,
             'X-AWB-Client-Type': agentContext ? 'managed-subagent' : 'subagent',
+            ...toolProfileHeader,
           };
           if (monitorMeta?.ticket_id) headers['X-AWB-Subagent-Ticket-Id'] = monitorMeta.ticket_id;
           if (monitorMeta?.role) headers['X-AWB-Subagent-Role'] = monitorMeta.role;

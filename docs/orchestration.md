@@ -68,8 +68,9 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 `RoomMessagingService.sendMessage(..., sender_type:'user', sender_id:'system')` →
 `chat_room_message` SSE → agent-manager 가 subagent 스폰.
 
-결과적으로 **agent-manager 는 이 기능을 위해 한 줄도 바꾸지 않았고, SSE contract
-도 건드리지 않았다.** 구체적으로:
+결과적으로 **오케스트레이션 자체는 agent-manager 에 새 SSE contract 를 만들지
+않았다** — 기존 `chat_room_message` / `run_provision` 필드를 QA/Action 이 이미
+쓰는 그대로 재사용한다. 구체적으로:
 
 - 룸은 `chat_rooms.orchestration_mission_id` / `orchestration_step_id` 로 표시되고,
   일반 채팅 목록(`listRooms` / `listAllWorkspaceRooms`)에서 제외된다 — Action 룸과 같은 처리.
@@ -79,11 +80,20 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 - Retry 는 **매 시도마다 새 룸**을 판다. 실패한 시도의 대화가 히스토리로 재생되면
   subagent 가 자기 막다른 길을 그대로 반복한다.
 
-> **v1 범위 밖:** `run_provision`(레포 클론/체크아웃 힌트)은 붙이지 않았다. step 은
-> Action 런과 똑같이 담당 Agent 의 `working_dir` 에서 실행된다. 붙이려면
-> `RunProvision.kind` 유니온에 `'orchestration'` 을 추가해야 하고, 이는
-> agent-manager 의 `run-provisioner.ts` 파서(`kind` 화이트리스트)와 같은 PR 로
-> 묶어야 하는 SSE contract 변경이다.
+> **Agent 작업공간 (ticket 2dc3c62f):** step 디스패치는 QA/Action 런과 동일한
+> `run_provision` 힌트(`kind:'orchestration'`)를 실어 보낸다 — agent-manager 가
+> subagent 스폰 전에 `<working_dir>/.awb/orch/<mission-leaf>/<step_key>` 를
+> 프로비저닝(clone/fetch+ff-pull 또는 폴더만 생성)하고 그 경로를 cwd 로 고정한다.
+> `OrchestrationMission.workspace_folder`(루트, 기본값 `<mission id 8자>`) /
+> `repo_ref` / `checkout_mode` 로 제어한다. `RunProvisionKind` 화이트리스트와
+> idle-sweep(`.awb/act`/`.awb/chat`와 동일한 정책)에 `'orchestration'` 이
+> 추가됐다. Mission 은 `method`(수행 방식), 구조화된 `completion_criteria`
+> 체크리스트(전원 met 이어야 `complete_orchestration_mission(status:"completed")`
+> 통과 — `acceptance_criteria` prose 는 그대로 유지), `post_actions`(완료 후
+> 조건부 Action 디스패치, on-ticket-done-action 과 동일하게 fire-and-forget)도
+> 함께 갖는다. 진짜 `git worktree`(전용 브랜치)는 이번에도 범위 밖이다 — step
+> 은 QA/Action 과 같은 clone 기반 "run" 이지, 자기 브랜치를 갖는 dev-loop 가
+> 아니다.
 
 ---
 

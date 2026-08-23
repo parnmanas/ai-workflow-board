@@ -30,6 +30,7 @@
 // 곧 최소 depth다 — path 없이도 정확성이 깨지지 않는다.
 import type { DataSource } from 'typeorm';
 import { OntologyNode } from '../../../entities/OntologyNode';
+import { OntologyEdge, type OntologyCompleteness } from '../../../entities/OntologyEdge';
 import { In } from 'typeorm';
 import { yieldToEventLoop } from '../persist';
 
@@ -52,7 +53,7 @@ function resolveDialect(dataSource: DataSource): Dialect {
   throw new Error(`graph-query: unsupported DataSource dialect '${String(type)}' — DESIGN.md 축 3은 SQLite(sql.js)/Postgres만 지원한다.`);
 }
 
-function normalizeConfidenceMin(value: number | undefined): number {
+export function normalizeConfidenceMin(value: number | undefined): number {
   const v = value ?? DEFAULT_CONFIDENCE_MIN;
   if (!Number.isFinite(v) || v < 0 || v > 1) {
     throw new Error(`graph-query: confidenceMin must be within [0, 1], got ${String(value)}`);
@@ -106,6 +107,11 @@ export interface GraphReachResult {
   truncated: boolean;
   maxDepth: number;
   confidenceMin: number;
+  /** DESIGN.md 축 6(I1 해소분) — "결과 0건"과 "결과 0건, 커버리지가 알려진
+   *  불완전 상태"를 구분하는 응답 레벨 rollup(SPDX 어휘 재사용, path_confidence와
+   *  같은 "per-edge 나열이 아니라 라벨링된 단일 파생값" 자세). 아래
+   *  rollupCompleteness() 참고. */
+  completeness: OntologyCompleteness;
   durationMs: number;
 }
 
@@ -213,7 +219,10 @@ function buildReachSqlPostgres(p: ReachSqlParams): { sql: string; params: unknow
   return { sql, params };
 }
 
-async function hydrateNodes(dataSource: DataSource, graphId: string, ids: string[]): Promise<Map<string, OntologyNode>> {
+/** ontology-tools.ts의 graph_call_path 핸들러가 path 스텝의 src/dst를
+ *  path:line 그라운딩용으로 하이드레이트할 때도 재사용한다(DESIGN.md 축 6:
+ *  "every symbol/match carries path/start_line/end_line"). */
+export async function hydrateNodes(dataSource: DataSource, graphId: string, ids: string[]): Promise<Map<string, OntologyNode>> {
   const out = new Map<string, OntologyNode>();
   if (ids.length === 0) return out;
   const repo = dataSource.getRepository(OntologyNode);
@@ -224,6 +233,74 @@ async function hydrateNodes(dataSource: DataSource, graphId: string, ids: string
     await yieldToEventLoop();
   }
   return out;
+}
+
+/**
+ * DESIGN.md 축 6(I1 해소분) — graph_neighbors/graph_blast_radius의 응답
+ * 레벨 completeness rollup. 재귀 CTE 자체(UNION distinct 기반 (node_id,depth)
+ * dedup, 3라운드 리뷰를 거쳐 확정된 형태 — 파일 헤더 참고)는 건드리지
+ * 않는다: completeness를 재귀 튜플에 얹으면 그 dedup 의미론이 깨진다(같은
+ * 노드/depth라도 completeness가 다른 두 경로가 서로 다른 행으로 남아
+ * "노드 수 × maxDepth" 상한이 무너진다). 대신 반환된 노드 집합에 대해서만
+ * 유계(rowCap 크기)인 별도 rollup 질의로 답한다 — truncated와 마찬가지로
+ * "이미 반환한 것"에 대한 정직성 신호이지, 잘려나간 전체 도달집합에 대한
+ * 주장이 아니다.
+ *
+ * 결과 0건일 때는 이 rollup 질의 자체가 공허해지므로(discoveredIds가
+ * 비어 있음) 다른 질문을 던진다: confidence_min 아래로 걸러진 엣지가
+ * startId에서 나가는(방향에 따라 들어오는) 방향으로 하나라도 있는가?
+ * 있다면 "확인된 무(無)"가 아니라 "알려진 커버리지 gap"이다 — 정확히
+ * DESIGN.md가 든 예시(DECORATES 엣지가 기본 0.75 플로어 바로 아래
+ * confidence≈0.6에 있어, 리플렉션/DI로만 도달하는 대상은 기본값으로
+ * 조용히 빈 결과가 됨)를 구분해낸다.
+ */
+async function rollupCompleteness(
+  dataSource: DataSource,
+  direction: ReachDirection,
+  graphId: string,
+  startId: string,
+  confidenceMin: number,
+  edgeTypes: string[] | undefined,
+  discoveredIds: string[],
+): Promise<OntologyCompleteness> {
+  const edgeRepo = dataSource.getRepository(OntologyEdge);
+
+  if (discoveredIds.length > 0) {
+    // 이 노드들을 "발견시킨" 엣지들 — outgoing이면 dst_id가, incoming이면
+    // src_id가 발견된 쪽.
+    const discoverCol = direction === 'outgoing' ? 'dst_id' : 'src_id';
+    let sawComplete = false;
+    for (let i = 0; i < discoveredIds.length; i += FRONTIER_CHUNK_SIZE) {
+      const chunk = discoveredIds.slice(i, i + FRONTIER_CHUNK_SIZE);
+      const qb = edgeRepo.createQueryBuilder('e')
+        .select('DISTINCT e.completeness', 'completeness')
+        .where('e.graph_id = :graphId', { graphId })
+        .andWhere('e.status = :status', { status: 'active' })
+        .andWhere('e.confidence >= :confidenceMin', { confidenceMin })
+        .andWhere(`e.${discoverCol} IN (:...chunk)`, { chunk });
+      if (edgeTypes) qb.andWhere('e.type IN (:...edgeTypes)', { edgeTypes });
+      const rows: Array<{ completeness: OntologyCompleteness }> = await qb.getRawMany();
+      for (const r of rows) {
+        if (r.completeness === 'incomplete') return 'incomplete'; // worst-case 즉시 확정 — path_confidence의 min-along-path와 같은 정직성 원칙
+        if (r.completeness === 'complete') sawComplete = true;
+      }
+      await yieldToEventLoop();
+    }
+    return sawComplete ? 'complete' : 'no_assertion';
+  }
+
+  // 결과 0건 — startId에서 이 방향으로 confidence_min 미만이라 걸러진 엣지가
+  // 있는지 확인한다(있으면 "알려진 gap" = incomplete).
+  const joinCol = direction === 'outgoing' ? 'src_id' : 'dst_id';
+  const belowFloor = await edgeRepo.createQueryBuilder('e')
+    .select('e.id', 'id')
+    .where('e.graph_id = :graphId', { graphId })
+    .andWhere('e.status = :status', { status: 'active' })
+    .andWhere(`e.${joinCol} = :startId`, { startId })
+    .andWhere('e.confidence < :confidenceMin', { confidenceMin })
+    .limit(1)
+    .getRawOne();
+  return belowFloor ? 'incomplete' : 'no_assertion';
 }
 
 async function boundedReach(dataSource: DataSource, direction: ReachDirection, input: GraphReachInput): Promise<GraphReachResult> {
@@ -261,7 +338,11 @@ async function boundedReach(dataSource: DataSource, direction: ReachDirection, i
     rows.push({ node, depth: typeof r.depth === 'string' ? Number.parseInt(r.depth, 10) : r.depth });
   }
 
-  return { rows, truncated, maxDepth, confidenceMin, durationMs: Date.now() - startedAt };
+  const completeness = await rollupCompleteness(
+    dataSource, direction, input.graphId, input.nodeId, confidenceMin, edgeTypes, rows.map((r) => r.node.id),
+  );
+
+  return { rows, truncated, maxDepth, confidenceMin, completeness, durationMs: Date.now() - startedAt };
 }
 
 /** DESIGN.md §11 seed #5 — 정방향(src->dst) 이웃 탐색. edgeTypes로 필터 가능. */
@@ -305,6 +386,11 @@ export interface GraphCallPathResult {
   nodesVisited: number;
   /** true면 MAX_CALL_PATH_VISITED 캡에 걸려 조기 중단됨(found는 false) — 방문집합 자체에 대한 defense-in-depth. */
   truncated: boolean;
+  /** DESIGN.md 축 6 — 실제 적용된 confidence floor(입력 미지정 시
+   *  DEFAULT_CONFIDENCE_MIN=0.75). graph_neighbors/graph_blast_radius의
+   *  GraphReachResult.confidenceMin과 같은 자세 — 호출자가 생략해도 응답이
+   *  실제 적용값을 정직하게 알려준다. */
+  confidenceMin: number;
   durationMs: number;
 }
 
@@ -633,7 +719,7 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
   const edgeTypes = normalizeEdgeTypes(input.edgeTypes);
 
   if (input.fromId === input.toId) {
-    return { found: true, path: [], pathConfidence: 1, hops: 0, nodesVisited: 1, truncated: false, durationMs: Date.now() - startedAt };
+    return { found: true, path: [], pathConfidence: 1, hops: 0, nodesVisited: 1, truncated: false, confidenceMin, durationMs: Date.now() - startedAt };
   }
 
   const forwardVisited = new Map<string, VisitRecord>([[input.fromId, { edge: null, via: null, depth: 0 }]]);
@@ -704,7 +790,7 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
 
   const nodesVisited = forwardVisited.size + backwardVisited.size;
   if (!meetingId) {
-    return { found: false, path: [], pathConfidence: null, hops: 0, nodesVisited, truncated, durationMs: Date.now() - startedAt };
+    return { found: false, path: [], pathConfidence: null, hops: 0, nodesVisited, truncated, confidenceMin, durationMs: Date.now() - startedAt };
   }
 
   const forwardHalf: GraphCallPathStep[] = [];
@@ -724,5 +810,5 @@ export async function graphCallPath(dataSource: DataSource, input: GraphCallPath
   const path = [...forwardHalf, ...backwardHalf];
   const pathConfidence = path.reduce((min, step) => Math.min(min, step.confidence), 1);
 
-  return { found: true, path, pathConfidence, hops: path.length, nodesVisited, truncated: false, durationMs: Date.now() - startedAt };
+  return { found: true, path, pathConfidence, hops: path.length, nodesVisited, truncated: false, confidenceMin, durationMs: Date.now() - startedAt };
 }

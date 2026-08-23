@@ -88,6 +88,28 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+/** Claude Code CLI 자체가 `--model`/내부 보조 요청에서 인식하는 alias
+ *  4종(listModels()의 opus/sonnet/haiku/fable — cli-adapters/claude.ts와
+ *  동일 목록을 여기서도 독립 유지: 이 모듈은 claude.ts 를 import하지
+ *  않는다). */
+export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+export type ClaudeModelAlias = (typeof CLAUDE_MODEL_ALIASES)[number];
+/** profile.model_alias 생략 시 `--model`에 실릴 기본 alias. 'sonnet'을
+ *  고른 이유는 순전히 관례(일반 사용자용 기본 tier) — claudeEnv()가
+ *  ANTHROPIC_DEFAULT_*_MODEL 네 tier 전부를 profile.model 로 이미
+ *  덮어쓰므로 어떤 alias를 골라도 백엔드로 나가는 실제 모델은 동일하다. */
+export const DEFAULT_CLAUDE_MODEL_ALIAS: ClaudeModelAlias = 'sonnet';
+
+/** ticket 41dc37cb — spawn 사이트가 `--model`에 실제로 넘길 값. profile.model
+ *  (raw provider id, 예: vLLM `--served-model-name`)을 절대 직접 반환하지
+ *  않는다 — CLI가 그 문자열을 인식 못 하면 generate_session_title 같은 내부
+ *  보조 요청이 unrecognized_model 로 거부되어 첫 턴부터 실패한다. 실제 백엔드
+ *  라우팅은 claudeEnv()의 ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 담당하므로,
+ *  여기서는 CLI 자신이 유효하다고 인정하는 alias만 고르면 된다. */
+export function resolveClaudeModelAlias(profile: RuntimeProfileSpec): ClaudeModelAlias {
+  return profile.model_alias ?? DEFAULT_CLAUDE_MODEL_ALIAS;
+}
+
 export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   const issues: string[] = [];
   if (profile.kind && profile.kind !== 'claude-backend') issues.push('kind must be "claude-backend"');
@@ -96,6 +118,9 @@ export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   }
   if (!profile.base_url) issues.push('base_url is required');
   if (!profile.model) issues.push('model is required');
+  if (profile.model_alias !== undefined && !CLAUDE_MODEL_ALIASES.includes(profile.model_alias)) {
+    issues.push(`model_alias must be one of ${CLAUDE_MODEL_ALIASES.join(', ')}`);
+  }
   if (profile.protocol === 'openai-compatible' && !profile.adapter) issues.push('adapter is required');
   if (profile.protocol === 'anthropic-compatible' && profile.adapter) issues.push('adapter must be omitted');
   if (profile.credential_required && !profile.credential_ref) issues.push('credential_ref is required');
@@ -334,6 +359,41 @@ export function resolveMaxOutputTokensEnv(
     effectiveMaxOutputTokens,
     safetyMarginTokens,
   };
+}
+
+/** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진
+ *  Claude backend profile 은 MCP 세션을 'compact' tool profile 로 옵트인해,
+ *  AWB 서버가 ~205개 전체 대신 allowlist ~19개 tool만 등록하게 한다(서버측
+ *  구현은 apps/server/src/modules/mcp/shared/tool-profiles.ts — allowlist
+ *  밖 tool은 이름까지 등록에서 빠진다, stub 아님).
+ *
+ *  값 선택 근거: 실측된 raw tools/list 크기가 이 보드 기준 약
+ *  57,000~67,500 실제 BPE 토큰(apps/server/test/mcp-tool-schema-budget.test.mjs)
+ *  이고, 이 파일의 DEFAULT_SAFETY_MARGIN_TOKENS(40,000)조차 그보다 작다 —
+ *  즉 이 raw 크기를 그대로/거의 그대로 받는 백엔드에서는 65,536 같은 작은
+ *  context_window 는 이미 구조적으로 여유가 없다(ticket 7d8ea7c9 사고의
+ *  context_window 자체가 65,536). 128,000 은 "이 raw 크기 하나만으로도
+ *  빠듯한" 구간을 넉넉히 덮으면서, 200K+ 인 Anthropic 클라우드 tier
+ *  (Haiku 4.5 이상)는 건드리지 않는 보수적인 초기값 — 실측 근거가 아니라
+ *  판단값이므로, allowlist 밖 tool 호출 시도가 mcp.controller.ts의 기존
+ *  요청 로그(bodyPreview)에 그대로 남는 실측이 쌓이면 조정 대상이다. */
+export const TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS = 128_000;
+
+/**
+ * Resolves the `X-AWB-Tool-Profile` header to attach to an MCP session's
+ * request headers for a given (possibly absent) Claude backend profile.
+ * Returns `{}` — never widens the tool surface — whenever `profile` is
+ * absent, `context_window` is unset, or `context_window` is at/above the
+ * threshold; every pre-existing caller (no profile, or a profile without
+ * context_window) is unaffected. Only a genuinely small context_window
+ * opts into 'compact'.
+ */
+export function resolveToolProfileHeader(
+  profile: RuntimeProfileSpec | null | undefined,
+): Record<string, string> {
+  if (!profile?.context_window) return {};
+  if (profile.context_window >= TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS) return {};
+  return { 'X-AWB-Tool-Profile': 'compact' };
 }
 
 export class RuntimeLease {

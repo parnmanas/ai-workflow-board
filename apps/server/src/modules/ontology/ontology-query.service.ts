@@ -1,20 +1,29 @@
-// 그래프 질의 API의 NestJS 진입점(ticket 20b07fc8, DESIGN.md 축 3/6). 이
-// 티켓 범위에는 MCP 툴/컨트롤러가 없다 — ontology-resolver.service.ts와
-// 같은 자세. graph_status 같은 lifecycle 배선(ticket #6, 미배정)이 이
-// 서비스를 실제로 호출하기 전까지는 DI 대기 상태다.
+// 그래프 질의 API의 NestJS 진입점(ticket 20b07fc8/d35b7b7d, DESIGN.md 축
+// 3/6). ontology-tools.ts(ticket d35b7b7d)가 이 서비스를 실제로 호출하는
+// MCP 컨트롤러다 — ontology-resolver.service.ts와 같은 DI 등록 자세.
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { AppOntologyDataSource } from '../../db';
+import type { OntologyNode } from '../../entities/OntologyNode';
 import {
   graphNeighbors,
   graphBlastRadius,
   graphCallPath,
+  hydrateNodes,
   type GraphReachInput,
   type GraphReachResult,
   type GraphCallPathInput,
   type GraphCallPathResult,
 } from './query/graph-query';
+import {
+  findSymbol,
+  moduleSummary,
+  type FindSymbolInput,
+  type FindSymbolResult,
+  type ModuleSummaryInput,
+  type ModuleSummaryResult,
+} from './query/symbol-query';
 
 @Injectable()
 export class OntologyQueryService {
@@ -38,5 +47,20 @@ export class OntologyQueryService {
 
   async callPath(input: GraphCallPathInput): Promise<GraphCallPathResult> {
     return graphCallPath(this.resolveOntologyDataSource(), input);
+  }
+
+  async findSymbol(input: FindSymbolInput): Promise<FindSymbolResult> {
+    return findSymbol(this.resolveOntologyDataSource(), input);
+  }
+
+  async moduleSummary(input: ModuleSummaryInput): Promise<ModuleSummaryResult> {
+    return moduleSummary(this.resolveOntologyDataSource(), input);
+  }
+
+  /** graph_call_path의 path steps(edge 양끝 id만 있음)를 path:line
+   *  그라운딩용으로 하이드레이트할 때 ontology-tools.ts가 쓴다 — 온톨로지
+   *  전용 DataSource 해소를 서비스 경계 밖으로 새지 않게 감싼다. */
+  async hydrateNodesById(graphId: string, ids: string[]): Promise<Map<string, OntologyNode>> {
+    return hydrateNodes(this.resolveOntologyDataSource(), graphId, ids);
   }
 }

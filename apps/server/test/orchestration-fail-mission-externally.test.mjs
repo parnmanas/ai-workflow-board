@@ -105,9 +105,11 @@ function makeService({ missions = [], steps = [] } = {}) {
   const inert = {};
   // 생성자 인자 순서는 orchestration-runner.service.ts의 선언과 동일하다:
   // missionRepo, stepRepo, teamRepo, memberRepo, roomRepo, participantRepo,
-  // agentRepo, messaging, missions, teams, logService. 뒤 4개 repo와
-  // messaging/teams는 failMissionExternally가 전혀 건드리지 않으므로 빈 자리
-  // 채움으로 충분하다.
+  // agentRepo, actionRepo, actionRunRepo, dataSource, messaging, missions,
+  // teams, actionsService, logService (티켓 2dc3c62f로 actionRepo/actionRunRepo/
+  // dataSource/actionsService 4개가 추가됨 — actionRunRepo는 2라운드 리뷰의
+  // 크래시-복구 상관관계 조회용). failMissionExternally는 이 중 missionRepo/
+  // stepRepo/missions/logService만 건드리므로 나머지는 빈 자리채움으로 충분하다.
   const runner = new OrchestrationRunnerService(
     missionRepo,
     stepRepo,
@@ -116,8 +118,12 @@ function makeService({ missions = [], steps = [] } = {}) {
     makeRepo([]),
     makeRepo([]),
     makeRepo([]),
+    makeRepo([]),
+    makeRepo([]),
+    inert,
     inert,
     missionsStub,
+    inert,
     inert,
     noopLog,
   );

@@ -308,6 +308,17 @@ export async function extractFile(path: string, content: string, lang: Extractio
         parentQualifiedName: parent ? parent.qualifiedName : null,
         exported: computeExported(raw.node),
         docstring: null,
+        // ticket 964014f5 — tree-sitter의 표준 'body' named field(class/
+        // interface/function/method/enum 선언에 공통) 시작 offset. type
+        // alias/field/variable처럼 'body' 필드가 없는 kind는 null(types.ts
+        // 문서 그대로 — signature_hash가 전체 범위를 커버하게 된다).
+        bodyStartByte: raw.node.childForFieldName('body')?.startIndex ?? null,
+        // 해시 자체는 여기서 계산하지 않는다 — extractFile()은 구조적
+        // 사실(byte 범위)만 만들고, 원본 content를 쥔 별도 단계
+        // (hash-bundle.ts)가 해싱을 맡는다(worker.ts의 기존 fileHash 관례와
+        // 동일한 관심사 분리, persist.ts 헤더 코멘트 참고).
+        contentHash: '',
+        signatureHash: '',
       });
       stack.push({ endByte: raw.endByte, qualifiedName });
     }

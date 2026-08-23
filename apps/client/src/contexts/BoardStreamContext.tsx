@@ -45,7 +45,8 @@ type StreamNamedEventType =
   | 'consensus_update'   // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
   | 'orchestration_update'  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
   | 'ticket_reads_cleared'  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
-  | 'cli_login_progress';  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
+  | 'cli_login_progress'  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
+  | 'ontology_graph_progress';  // 티켓 964014f5 — Ontology Graph 증분 갱신 진행 + graph_status
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -234,6 +235,14 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // 컴포넌트가 session_id로 한 번 더 필터링해서 쓴다.
       eventSource.addEventListener('cli_login_progress', (event: MessageEvent) => {
         dispatch('cli_login_progress', event.data);
+      });
+
+      // 티켓 964014f5 — Ontology Graph 증분 갱신 진행(edges_extracted 카운터
+      // 등) + graph_status(building/ready/stale/error). 서버가 실제 델타를
+      // 프레임에 담아 보내므로(scout-client.md §3.4 Pattern B) 컴포넌트가
+      // 재조회 없이 카운터를 직접 증가/치환한다.
+      eventSource.addEventListener('ontology_graph_progress', (event: MessageEvent) => {
+        dispatch('ontology_graph_progress', event.data);
       });
 
       eventSource.onerror = () => {

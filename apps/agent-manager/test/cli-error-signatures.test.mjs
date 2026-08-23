@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { classifyCliError, isFallbackEligible } from '../dist/lib/cli-error-signatures.js';
-import { buildModelChain } from '../dist/lib/cli-adapters/base.js';
+import { buildModelChain, resolveModelChain } from '../dist/lib/cli-adapters/base.js';
 
 test('clean / empty input is non-fatal', () => {
   for (const v of [null, undefined, '', '   ', '\n\t']) {
@@ -217,4 +217,36 @@ test('buildModelChain: head = primary, fallbacks appended in order, dupes/blanks
   // no fallbacks → single-element chain (no fallback attempts).
   assert.deepEqual(buildModelChain('opus', undefined), ['opus']);
   assert.deepEqual(buildModelChain('opus', []), ['opus']);
+});
+
+// ticket 41dc37cb 리뷰 라운드1 — subagent-manager.ts/base-session-manager.ts가
+// 공유하는 순수 체인-결정 함수. 두 spawn 사이트가 각자 buildModelChain을
+// 직접 호출하던 걸 이 함수 하나로 합쳐, "profile 활성화 시 fallback_models를
+// 무시한다"는 불변식이 한쪽에서만 적용되고 다른 쪽에서 누락되는 것을
+// 구조적으로 막는다.
+const FIXTURE_PROFILE = {
+  id: 'p',
+  protocol: 'anthropic-compatible',
+  base_url: 'http://127.0.0.1:1',
+  model: 'qwen3-coder-next',
+};
+
+test('resolveModelChain: profile 없으면 buildModelChain과 byte-for-byte 동일 (기존 동작 무회귀)', () => {
+  assert.deepEqual(resolveModelChain('opus', null, ['sonnet', 'haiku']), buildModelChain('opus', ['sonnet', 'haiku']));
+  assert.deepEqual(resolveModelChain(null, null, ['sonnet']), buildModelChain(null, ['sonnet']));
+  assert.deepEqual(resolveModelChain('opus', null, undefined), buildModelChain('opus', undefined));
+});
+
+test('resolveModelChain: Claude backend profile이 활성화되면 harness.fallback_models를 통째로 무시한다', () => {
+  // raw 값이 CLI-recognized alias가 아니어도(오히려 그런 경우가 대부분) 체인에
+  // 절대 실리지 않는다 — 단일 alias만 남아 체인 길이 1, 폴백 respawn 자체가
+  // 트리거되지 않는다(subagent-manager.ts/base-session-manager.ts의
+  // `chainAttempt + 1 < modelChain.length` 가드 참고).
+  assert.deepEqual(
+    resolveModelChain('sonnet', FIXTURE_PROFILE, ['opus', 'claude-legacy-raw-id']),
+    ['sonnet'],
+  );
+  // fallback_models가 애초에 없어도 결과는 동일 — 동작 변화 없음.
+  assert.deepEqual(resolveModelChain('sonnet', FIXTURE_PROFILE, undefined), ['sonnet']);
+  assert.deepEqual(resolveModelChain('sonnet', FIXTURE_PROFILE, []), ['sonnet']);
 });

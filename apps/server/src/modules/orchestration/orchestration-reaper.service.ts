@@ -108,28 +108,75 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
   /** One sweep. Safe to call concurrently — overlapping calls are dropped. */
   async runOnce(
     now: Date = new Date(),
-  ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number }> {
-    if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0 };
+  ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number; post_actions_recovered: number }> {
+    if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
     this.sweeping = true;
     try {
       const stepsFailed = await this.reapStuckSteps(now);
       const planning = await this.reapStalledPlanning(now);
       const running = await this.reapStalledRunning(now);
+      const postActionsRecovered = await this.reapPendingPostActions(now);
       const nudged = planning.nudged + running.nudged;
       const failed = planning.failed + running.failed;
-      if (stepsFailed || nudged || failed) {
+      if (stepsFailed || nudged || failed || postActionsRecovered) {
         this.logService.info(
           'Orchestration',
-          `reaper sweep: ${stepsFailed} step(s) timed out, ${nudged} mission(s) re-briefed, ${failed} failed`,
+          `reaper sweep: ${stepsFailed} step(s) timed out, ${nudged} mission(s) re-briefed, ${failed} failed, ` +
+            `${postActionsRecovered} mission(s)' post-actions recovered`,
         );
       }
-      return { steps_failed: stepsFailed, missions_nudged: nudged, missions_failed: failed };
+      return {
+        steps_failed: stepsFailed,
+        missions_nudged: nudged,
+        missions_failed: failed,
+        post_actions_recovered: postActionsRecovered,
+      };
     } catch (e: any) {
       this.logService.error('Orchestration', `reaper sweep failed: ${e?.message || e}`);
-      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0 };
+      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
     } finally {
       this.sweeping = false;
     }
+  }
+
+  /**
+   * 크래시로 중단된 post_actions를 이어받는다(리뷰 지적 반영, 티켓 2dc3c62f)
+   * — completeMission()이 terminal status를 저장한 직후, 또는 개별
+   * post-action dispatch() 도중에 프로세스가 죽으면 `pending`/`in_flight`
+   * 항목이 그대로 남을 수 있다. `runPostActions` 자체가 resumable이므로
+   * (이미 확정된 항목은 건드리지 않고, in_flight는 절대 재시도하지 않음)
+   * 반복 호출은 안전하다.
+   *
+   * **리뷰 2라운드 지적 반영** — 예전엔 `finished_at DESC, take:100`으로
+   * "최근 종료된 미션"만 훑었는데, 이러면 terminal 미션이 100개를 넘는
+   * 순간 그보다 오래된 미확정 미션은 최신 미션들에 밀려 이 스윕이 영원히
+   * 찾지 못하는 기아(starvation)가 생긴다. `post_actions_pending`은
+   * post_actions 배열 내용과 항상 동기화되는 색인 가능한 불리언 컬럼이므로
+   * (OrchestrationMission.post_actions_pending 문서 참고), 이제 그 컬럼을
+   * 직접 필터링해 "미확정 항목이 있는 미션"을 recency와 무관하게 전부
+   * 찾아낸다. `take`는 한 스윕이 한 번에 처리하는 상한일 뿐 선택 기준이
+   * 아니다 — 남은 건 다음 스윕(주기적 setInterval)이 이어받는다.
+   */
+  private async reapPendingPostActions(now: Date): Promise<number> {
+    const candidates = await this.missionRepo.find({
+      where: { status: In(['completed', 'failed']), post_actions_pending: true },
+      take: 200,
+    });
+    if (candidates.length === 0) return 0;
+
+    let recovered = 0;
+    for (const mission of candidates) {
+      try {
+        await this.runner.recoverPostActions(mission.id);
+        recovered += 1;
+      } catch (e: any) {
+        this.logService.warn(
+          'Orchestration',
+          `post-action recovery failed for mission ${mission.id}: ${e?.message || e}`,
+        );
+      }
+    }
+    return recovered;
   }
 
   private async reapStuckSteps(now: Date): Promise<number> {

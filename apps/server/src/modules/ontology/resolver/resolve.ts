@@ -27,12 +27,31 @@ const CALL_SHAPE_TO_EDGE_TYPE: Record<RefFact['callShape'], string> = {
   value: 'REFERENCES',
 };
 
+// 이 리졸버(imports[]/refs[]/heritage[] 루프)가 직접 생성하는 엣지 타입 —
+// CONTAINS/DECLARES/DECORATES(persist.ts)와 OVERRIDES(polymorphic-cap.ts가
+// 자기 own dedup을 이미 갖고 있음, 위 참고)는 여기 없다. ticket 964014f5의
+// scopeFilePaths 재해소가 "이 파일들의 기존 outgoing edge를 지우고 다시
+// 만든다"고 할 때 정확히 이 목록만 지운다 — 다른 타입까지 지우면 이
+// 리졸버가 소유하지 않는 데이터를 건드리게 된다.
+const RESOLVER_OWNED_EDGE_TYPES = ['IMPORTS', 'CALLS', 'INSTANTIATES', 'USES_TYPE', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS'];
+
 export interface ResolveCrossFileEdgesInput {
   graphId: string;
   workspaceId: string;
   /** persist.ts와 동일 — 이 리졸버 실행이 대상으로 삼은 커밋 sha. */
   commit: string;
   extractionRunId: string;
+  /** ticket 964014f5(증분 갱신, DESIGN.md 축 4) — 지정하면 이 경로 집합에
+   *  속한 파일들의 "자신의 outgoing refs"만 재해소한다(imports/refs/
+   *  heritage 순회를 이 파일들로 제한). 심볼 인덱스(`buildGraphSymbolIndex`)
+   *  자체는 여전히 그래프 전체로 구성한다 — 해소 **대상**(다른 파일의
+   *  심볼)은 전체 그래프에서 찾아야 하고, 좁히는 것은 해소를 **시작하는**
+   *  파일 쪽뿐이기 때문. 미지정(undefined) 시 기존과 동일하게 그래프
+   *  전체를 훑는다(3/7의 초기 전체-그래프 해소 경로는 이 필드를 아예
+   *  넘기지 않아 동작이 바이트 단위로 그대로다) — OVERRIDES 파생/폴리모픽
+   *  캡(polymorphic-cap.ts)도 스코프와 무관하게 항상 전체 그래프
+   *  기준이다(이미 그렇게 설계돼 있음, `index`/`existing`을 그대로 씀). */
+  scopeFilePaths?: ReadonlySet<string>;
 }
 
 export interface ResolveSummary {
@@ -97,6 +116,58 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   const startedAt = Date.now();
   const index = await buildGraphSymbolIndex(dataSource, input.graphId);
   const base = baseEdgeFields(input);
+  const edgeRepo = dataSource.getRepository(OntologyEdge);
+
+  // ticket 964014f5 — scopeFilePaths가 있으면(증분 Phase B 재해소) 이
+  // 파일들이 "자신의 outgoing edge"로 이미 갖고 있던 이 리졸버 소유 타입
+  // 엣지를 먼저 soft-delete한다. 안 그러면 아래 루프의 pushEdge()가 기존
+  // DB 상태를 전혀 조회하지 않고 무조건 새 행을 push하므로(원래 "그래프
+  // 전체를 처음부터" 한 번만 도는 전제였다), 여전히 똑같이 해소되는
+  // ref/import/heritage마다 매 재실행마다 중복 엣지가 쌓인다.
+  // reverse_edge_index도 같은 이유로 이 파일들의 src_file_id 행을 지운다
+  // (자신의 doc 코멘트대로 "추출 런마다 재계산"되는 파생 색인 — 재계산
+  // 전에 이전 런의 행을 남겨두면 안 됨). scopeFilePaths가 없으면(기존
+  // whole-graph 호출) 이 블록은 아예 실행되지 않아 동작이 바이트 단위로
+  // 그대로다.
+  if (input.scopeFilePaths && input.scopeFilePaths.size > 0) {
+    const scopedSrcNodeIds: string[] = [];
+    const scopedFileNodeIds: string[] = [];
+    for (const p of input.scopeFilePaths) {
+      const f = index.filesByPath.get(p);
+      if (!f) continue; // 그래프에 없는 경로(예: 스코프에 넘겼지만 아직 미추출) — 조용히 스킵
+      scopedFileNodeIds.push(f.id);
+      scopedSrcNodeIds.push(f.id);
+      for (const d of index.defsByFilePath.get(p) ?? []) scopedSrcNodeIds.push(d.id);
+    }
+    // 리뷰 지적(차단) — scopedSrcNodeIds/scopedFileNodeIds는 git-diff 대량
+    // 배치에서 스코프에 든 파일 수만큼 커질 수 있어, 단일 IN(...)으로
+    // 몰면 SQLite/Postgres 바인드 변수 한도를 넘을 수 있다. persist.ts/
+    // resolve.ts 기존 관례(insertChunked/updateChunked)와 동일하게
+    // EDGE_CHUNK_SIZE로 나눠 조회/삭제하고 청크 사이 이벤트 루프를 양보한다.
+    const staleOutgoingIds: string[] = [];
+    for (let i = 0; i < scopedSrcNodeIds.length; i += EDGE_CHUNK_SIZE) {
+      const chunk = scopedSrcNodeIds.slice(i, i + EDGE_CHUNK_SIZE);
+      const rows = await edgeRepo.find({
+        where: { graph_id: input.graphId, src_id: In(chunk), type: In(RESOLVER_OWNED_EDGE_TYPES), status: 'active' },
+        select: ['id'],
+      });
+      staleOutgoingIds.push(...rows.map((e) => e.id));
+      await yieldToEventLoop();
+    }
+    if (staleOutgoingIds.length > 0) {
+      await updateChunked(edgeRepo, staleOutgoingIds, EDGE_CHUNK_SIZE, {
+        status: 'removed',
+        valid_to_commit: input.commit,
+      });
+    }
+
+    const reverseRepoForCleanup = dataSource.getRepository(OntologyReverseEdgeIndex);
+    for (let i = 0; i < scopedFileNodeIds.length; i += EDGE_CHUNK_SIZE) {
+      const chunk = scopedFileNodeIds.slice(i, i + EDGE_CHUNK_SIZE);
+      if (chunk.length > 0) await reverseRepoForCleanup.delete({ src_file_id: In(chunk) });
+      await yieldToEventLoop();
+    }
+  }
 
   const edgeRows: OntologyEdge[] = [];
   const reverseIndexByKey = new Map<string, OntologyReverseEdgeIndex>();
@@ -134,6 +205,7 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   }
 
   for (const fileInfo of index.filesByPath.values()) {
+    if (input.scopeFilePaths && !input.scopeFilePaths.has(fileInfo.path)) continue;
     // ── imports[] -> IMPORTS ──
     for (const imp of fileInfo.facts.imports) {
       const result = resolveImportFactExact(index, fileInfo, imp) ?? resolveImportFactSuffix(index, fileInfo, imp);
@@ -199,8 +271,9 @@ export async function resolveCrossFileEdges(dataSource: DataSource, input: Resol
   // 별도 쓰기 경로다). 세 조회 전부 status='active'로 제한 — removed/
   // quarantined 엣지(장차 ticket #4의 증분 갱신이 soft-delete할 대상)를
   // 폴리모픽 타겟 집합에 계속 포함시키면, 이미 지워진 상속/오버라이드가
-  // 활성 CALLS를 계속 dynamic으로 잘못 캡하게 된다(리뷰 지적 라운드 2). ──
-  const edgeRepo = dataSource.getRepository(OntologyEdge);
+  // 활성 CALLS를 계속 dynamic으로 잘못 캡하게 된다(리뷰 지적 라운드 2).
+  // edgeRepo는 함수 상단에서 이미 선언(scopeFilePaths 정리용으로 먼저
+  // 필요했다) — 재선언하지 않고 그대로 재사용. ──
   const existing: ExistingEdges = {
     heritage: (
       await edgeRepo.find({ where: { graph_id: input.graphId, type: In(['EXTENDS', 'IMPLEMENTS']), status: 'active' } })

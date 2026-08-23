@@ -56,8 +56,37 @@ export function apiKeyPathFor(agentId: string, workspaceId?: string): string {
   return join(managedAgentDir(agentId), `apikey${workspaceSuffix(workspaceId)}`);
 }
 
-export function mcpConfigPathFor(agentId: string, workspaceId?: string): string {
-  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}.json`);
+// Ticket ee26302d review round 2 (P1): 'compact' gets its own path so two
+// concurrently-spawning sessions of DIFFERENT profiles for the same agent
+// can never share one mutable file to race on — see mcpConfigPathFor's doc
+// comment. 'full' (the default/omitted case) keeps the pre-existing
+// unsuffixed path unchanged for backward compatibility with every caller
+// that doesn't know about tool profiles at all.
+function profileSuffix(profile?: 'full' | 'compact'): string {
+  return profile === 'compact' ? '.compact' : '';
+}
+
+/**
+ * Ticket ee26302d review round 2 (P1): `profile` used to be irrelevant here
+ * — a single shared path served every non-pinned session regardless of its
+ * resolved tool profile, and the caller (base-session-manager.ts /
+ * subagent-manager.ts) rewrote it in place when the wanted profile didn't
+ * match what was last written. That worked for strictly SEQUENTIAL spawns
+ * but not concurrent ones: a full-profile CLI can still be starting up
+ * (reading its `--mcp-config` file is not synchronous with the spawn() call
+ * returning) when a compact-profile spawn for the same agent rewrites the
+ * same path underneath it, or vice versa — there is no handshake confirming
+ * a child already read the file before the next spawn is allowed to write
+ * it again.
+ *
+ * Fixed structurally: each profile gets its own path, so concurrent spawns
+ * of DIFFERENT profiles for the same agent can never collide on one file.
+ * Two concurrent spawns of the SAME profile can still both decide "doesn't
+ * exist yet" and both write — harmless, since both write byte-identical
+ * content for the same (agentId, workspaceId, profile).
+ */
+export function mcpConfigPathFor(agentId: string, workspaceId?: string, profile?: 'full' | 'compact'): string {
+  return join(managedAgentDir(agentId), `mcp-config${workspaceSuffix(workspaceId)}${profileSuffix(profile)}.json`);
 }
 
 export function credentialPathFor(agentId: string): string {
@@ -226,9 +255,19 @@ export async function writeMcpConfig(
   awbUrl: string,
   rawApiKey: string,
   workspaceId?: string,
+  // Ticket ee26302d: extra MCP session headers, e.g.
+  // resolveToolProfileHeader(claudeRuntimeProfile)'s `{'X-AWB-Tool-Profile':
+  // 'compact'}` for a small-context Claude backend. Omitted by every caller
+  // that doesn't have a resolved backend profile in scope — see this
+  // function's callers for which ones do.
+  extraHeaders?: Record<string, string>,
 ): Promise<string> {
   await ensureManagedAgentDir(agentId);
-  const path = mcpConfigPathFor(agentId, workspaceId);
+  // Ticket ee26302d review round 2: write target is profile-specific (see
+  // mcpConfigPathFor's doc comment) — derived from extraHeaders so callers
+  // don't have to separately track/pass the profile.
+  const profile = extraHeaders?.['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
+  const path = mcpConfigPathFor(agentId, workspaceId, profile);
   const self = resolveSelfCommand();
   const body = {
     mcpServers: {
@@ -238,6 +277,7 @@ export async function writeMcpConfig(
         headers: {
           Authorization: `Bearer ${rawApiKey}`,
           'X-AWB-Client-Type': 'managed-subagent',
+          ...extraHeaders,
         },
       },
       host: {
@@ -249,6 +289,28 @@ export async function writeMcpConfig(
   };
   await fsp.writeFile(path, JSON.stringify(body, null, 2), { mode: 0o600 });
   return path;
+}
+
+/**
+ * Reads an existing mcp-config.json's `awb` server headers and returns its
+ * current `X-AWB-Tool-Profile` value (or `undefined` if absent/unreadable).
+ *
+ * Ticket ee26302d review round 1 (P1): callers that reuse a shared static
+ * config across sessions with different resolved profiles cannot assume the
+ * file's PAST content matches THIS session's desired profile just because
+ * this session doesn't want 'compact' — a prior compact session may have
+ * left that header stamped on the shared file. Compare this against the
+ * caller's own desired header value before deciding to reuse-as-is vs
+ * rewrite.
+ */
+export async function readMcpConfigToolProfile(path: string): Promise<string | undefined> {
+  try {
+    const raw = await fsp.readFile(path, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed?.mcpServers?.awb?.headers?.['X-AWB-Tool-Profile'];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Remove the on-disk apiKey + mcp-config for an agent (e.g., on stop).

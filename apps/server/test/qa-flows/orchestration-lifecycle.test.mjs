@@ -27,6 +27,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
@@ -47,10 +48,14 @@ async function loadOrchestrationServices() {
   const runner = await import(
     pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-runner.service.js')).href
   );
+  const reaper = await import(
+    pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-reaper.service.js')).href
+  );
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
     OrchestrationRunnerService: runner.OrchestrationRunnerService,
+    OrchestrationReaperService: reaper.OrchestrationReaperService,
   };
 }
 
@@ -1001,6 +1006,409 @@ test('Orchestration: a draft mission is never an unrecoverable wedge (review rou
   });
   assert.ok(!retried.isError, `retry after closing the draft failed: ${JSON.stringify(retried)}`);
   assert.notEqual(retried.mission_id, draftId);
+});
+
+// ticket 2dc3c62f — Mission 실행 계약: 완료 조건 게이트 + agent 작업공간 + post-action.
+test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 격리된 작업공간 폴더로 디스패치되며, 완료 시 post-action이 실행된다', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const runner = app.get(OrchestrationRunnerService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-contract');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'contract-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'contract-member' });
+
+  const mcpFor = async (agent, label) => {
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label });
+    const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
+    t.after(() => { void client.close().catch(() => {}); });
+    return client;
+  };
+  const orchMcp = await mcpFor(orch, 'contract-orch');
+  const memberMcp = await mcpFor(member, 'contract-member');
+
+  step('완료 후 실행될 실제 Action을 등록한다("always" 성공 케이스)');
+  const notifyAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Notify on mission end',
+    prompt: 'The mission ended — post a summary.',
+    target_agent_id: member.id,
+  });
+
+  step('구조화된 완료 조건, 커스텀 workspace 루트, post_actions 2개(실재/댕글링)를 갖는 팀 + 미션');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Contract squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Contract-gated mission',
+    objective: 'Ship one thing and prove the execution contract holds.',
+    method: 'Keep it small — one step is enough to prove the contract.',
+    completion_criteria: [{ key: 'verified', description: 'A human/orchestrator actually checked the result' }],
+    post_actions: [
+      { action_id: notifyAction.id, order: 1, condition: 'always' },
+      { action_id: 'does-not-exist', order: 2, condition: 'always' },
+    ],
+    workspace_folder: 'custom-root',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  assert.equal(mission.completion_criteria.length, 1);
+  assert.equal(mission.completion_criteria[0].met, false, '갓 만든 criterion은 unmet 상태로 시작한다');
+
+  await runner.startMission(mission.id, ws.id, HUMAN);
+
+  step('Orchestrator가 단일 step을 제출한다');
+  const plan = await orchMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [{ step_key: 'only-step', title: 'Only step', instructions: 'Do the one thing.', assignee_agent_id: member.id }],
+  });
+  assert.ok(!plan?.isError, `plan 실패: ${JSON.stringify(plan)}`);
+  assert.deepEqual(plan.dispatched_now, ['only-step']);
+
+  step('디스패치된 step은 미션의 커스텀 workspace 루트 아래 자기만의 격리된 폴더에 고정된다');
+  const afterPlan = await missions.getMissionDetail(mission.id, ws.id);
+  const only = afterPlan.steps.find((s) => s.step_key === 'only-step');
+  assert.equal(
+    only.workspace_folder,
+    '.awb/orch/custom-root/only-step',
+    'getMissionDetail이 dispatchStep이 프로비저닝하는 것과 동일한 격리 leaf를 계산한다',
+  );
+  const stepMessages = await roomMessages(ds, only.room_id);
+  assert.match(
+    stepMessages[0].content,
+    /\.awb\/orch\/custom-root\/only-step/,
+    '렌더링된 작업 지시서가 agent-manager가 스폰 전에 프로비저닝할 정확한 폴더를 명시한다',
+  );
+  assert.match(stepMessages[0].content, /Keep it small/, 'mission.method도 step 프롬프트에 렌더링된다');
+
+  step('step을 done으로 보고하는 것만으로는 완료가 풀리지 않는다 — 구조화된 criterion이 여전히 unmet이다');
+  const reported = await memberMcp.callTool('report_orchestration_step', {
+    step_id: only.id, status: 'done', summary: 'Did the one thing.',
+  });
+  assert.ok(!reported?.isError, `report 실패: ${JSON.stringify(reported)}`);
+
+  const blocked = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: mission.id, status: 'completed', summary: 'Should be blocked.',
+  });
+  assert.equal(blocked.isError, true, '완료 조건이 unmet인 동안은 완료가 거부되어야 한다');
+  assert.match(blocked.error.error, /verified/, '거부 메시지가 unmet인 criterion의 key를 명시한다');
+  assert.match(blocked.error.error, /update_orchestration_criteria/, '거부 메시지가 자신의 해결책을 명시한다');
+
+  step('orchestrator가 아니면 criteria를 뒤집을 수 없다');
+  const deniedCriteria = await memberMcp.callTool('update_orchestration_criteria', {
+    mission_id: mission.id, updates: [{ key: 'verified', met: true }],
+  });
+  assert.equal(deniedCriteria.isError, true, 'completion criteria는 orchestrator만 갱신할 수 있다');
+
+  step('orchestrator가 note와 함께 criterion을 met으로 표시하면 이제 완료가 허용된다');
+  const flipped = await orchMcp.callTool('update_orchestration_criteria', {
+    mission_id: mission.id,
+    updates: [{ key: 'verified', met: true, note: 'Checked the artifact myself.' }],
+  });
+  assert.ok(!flipped?.isError, `update_orchestration_criteria 실패: ${JSON.stringify(flipped)}`);
+  assert.equal(flipped.completion_criteria[0].met, true);
+
+  const completed = await orchMcp.callTool('complete_orchestration_mission', {
+    mission_id: mission.id, status: 'completed', summary: 'Shipped it.',
+  });
+  assert.ok(!completed?.isError, `criteria가 met인데도 complete 실패: ${JSON.stringify(completed)}`);
+  assert.equal(completed.status, 'completed');
+
+  step('완료 시 post-action이 발화한다: 실재 Action은 추적 가능한 run으로 디스패치되고, 댕글링 쪽은 실패가 기록된다 — 어느 쪽도 미션 자체의 상태에는 영향 없음');
+  const final = await missions.getMissionDetail(mission.id, ws.id);
+  assert.equal(final.status, 'completed', 'post-action의 결과는 미션 상태를 절대 되돌리거나 바꾸지 않는다');
+  const byActionId = Object.fromEntries(final.post_actions.map((p) => [p.action_id, p]));
+  assert.equal(byActionId[notifyAction.id].status, 'dispatched');
+  assert.ok(byActionId[notifyAction.id].run_id, '디스패치된 post-action은 감사/추적을 위해 run_id를 기록한다');
+  const postActionRoom = await ds
+    .getRepository('ChatRoom')
+    .findOne({ where: { id: byActionId[notifyAction.id].room_id } });
+  assert.ok(postActionRoom, '디스패치된 post-action Run이 실제로 room을 만들었다 — 상태만 조작된 게 아니다');
+
+  assert.equal(byActionId['does-not-exist'].status, 'dispatch_failed');
+  assert.match(byActionId['does-not-exist'].error, /not found/);
+
+  const eventTypes = final.events.map((e) => e.type);
+  assert.ok(eventTypes.includes('criteria_updated'));
+  assert.ok(eventTypes.includes('post_action_dispatched'));
+  assert.ok(eventTypes.includes('post_action_dispatch_failed'));
+});
+
+// 리뷰 지적 반영(티켓 2dc3c62f, P1) — post-action crash-window 복구.
+test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pending은 이어서 디스패치하고, 멈춰있는 in_flight는 재시도 없이 실패로 확정한다', async (t) => {
+  const { app, port, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationReaperService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const reaper = app.get(OrchestrationReaperService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-crash-recovery');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'crash-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'crash-member' });
+
+  step('실제로 디스패치 가능한 Action을 등록한다');
+  const recoveryAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Crash-recovery notify',
+    prompt: 'Recovered after a simulated crash.',
+    target_agent_id: member.id,
+  });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Crash-recovery squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  step('completeMission()이 terminal status를 저장한 직후 프로세스가 죽은 상황을 직접 시뮬레이션한다 — post_actions는 손대지 않은 채로 둔다');
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Crash-window mission',
+    objective: 'Prove post-actions survive a crash between terminal-status save and runPostActions.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  const staleDispatchedAt = new Date(Date.now() - 10 * 60_000).toISOString(); // 유예시간(2분)을 훌쩍 넘긴 시각
+  const missionRepo = ds.getRepository('OrchestrationMission');
+  await missionRepo.update(
+    { id: mission.id },
+    {
+      status: 'completed',
+      finished_at: new Date(),
+      post_actions: [
+        // 크래시 시나리오 A: completeMission()이 여기까지 오지도 못하고 죽어서 아직 아무 것도 시도되지 않은 항목.
+        { action_id: recoveryAction.id, order: 1, condition: 'always', status: 'pending', run_id: null, room_id: null, error: '', dispatched_at: null },
+        // 크래시 시나리오 B: dispatch() 호출 도중(또는 그 결과를 저장하기 전) 죽어서 in_flight로 멈춘 항목.
+        { action_id: recoveryAction.id, order: 2, condition: 'always', status: 'in_flight', run_id: null, room_id: null, error: '', dispatched_at: staleDispatchedAt },
+      ],
+      // 실제 크래시라면 createMission()이 이미 true로 세팅해뒀을 값이다 —
+      // 여기서는 크래시 상황을 직접 흉내 내느라 post_actions를 손으로
+      // 덮어쓰므로, 그 값이 실제로 의존하는 post_actions_pending도 같이
+      // 세팅해야 reapPendingPostActions()의 WHERE 절이 이 미션을 찾는다.
+      post_actions_pending: true,
+    },
+  );
+
+  step('reaper 스윕 한 번으로 두 항목 모두 복구된다');
+  const swept = await reaper.runOnce();
+  assert.equal(swept.post_actions_recovered, 1, 'crash 상태의 post_actions를 가진 미션 1건이 복구 대상으로 집계된다');
+
+  const recovered = await missions.getMissionDetail(mission.id, ws.id);
+  assert.equal(recovered.status, 'completed', '복구 스윕은 mission.status를 절대 건드리지 않는다');
+
+  const pendingEntry = recovered.post_actions.find((p) => p.order === 1);
+  assert.equal(pendingEntry.status, 'dispatched', '한 번도 시도되지 않았던 pending 항목은 처음으로 안전하게 디스패치된다');
+  assert.ok(pendingEntry.run_id, '실제로 디스패치되어 run_id가 기록된다');
+
+  const staleInFlightEntry = recovered.post_actions.find((p) => p.order === 2);
+  assert.equal(staleInFlightEntry.status, 'dispatch_failed', '오래된 in_flight 항목은 재시도 없이 실패로 확정된다');
+  assert.equal(staleInFlightEntry.run_id, null, 'run_id가 없다는 것은 dispatch()가 다시 호출되지 않았다는 뜻이다(중복 디스패치 방지 확인)');
+  assert.match(staleInFlightEntry.error, /in_flight/, '에러 메시지가 "not found" 등 새로운 디스패치 시도의 결과가 아니라 in_flight 정체를 명시한다');
+
+  step('같은 미션에 대한 두 번째 스윕은 아무것도 다시 건드리지 않는다(idempotent)');
+  const secondSweep = await reaper.runOnce();
+  assert.equal(secondSweep.post_actions_recovered, 0, '이미 확정된 항목만 남은 미션은 더 이상 복구 대상이 아니다');
+});
+
+// 리뷰 지적 반영(티켓 2dc3c62f, P1, 2라운드) — 위 테스트가 고정한 "재시도 없이
+// 실패로 확정"은 dispatch()가 실제로는 성공했던 경우(ActionRun이 생성된 뒤,
+// 그 run_id를 post_actions에 저장하기 전에 죽음)엔 감사 연결(run_id/room_id)을
+// 영영 잃어버리는 새 문제를 만든다는 게 2라운드 지적이었다. 이 테스트는 그
+// 정확한 crash window를 직접 재현해 재시도(dispatch() 재호출)가 아니라
+// 상관관계 키(orchestration:<mission>:<order>) 조회로 기존 run을 되찾아
+// 연결하는지 검증한다.
+test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·저장 직전에 죽은 경우 재시도 대신 실제 ActionRun을 상관관계 키로 되찾아 연결한다', async (t) => {
+  const { app, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationReaperService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const reaper = app.get(OrchestrationReaperService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-crash-linkage');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'linkage-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'linkage-member' });
+
+  step('실제로 디스패치 가능한 Action을 등록한다');
+  const recoveryAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Crash-linkage notify',
+    prompt: 'Already dispatched before the simulated crash.',
+    target_agent_id: member.id,
+  });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Crash-linkage squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const mission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Crash-linkage mission',
+    objective: 'Prove a successfully-dispatched post-action survives a crash before its run_id is saved.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+
+  step('dispatch()가 실제로 만들어낸 ActionRun을 직접 심어둔다 — order=0 post-action의 결정론적 상관관계 키로');
+  const triggerId = `orchestration:${mission.id}:0`;
+  const runRepo = ds.getRepository('ActionRun');
+  const realRoomId = randomUUID();
+  const realRun = await runRepo.save(runRepo.create({
+    action_id: recoveryAction.id,
+    workspace_id: ws.id,
+    room_id: realRoomId,
+    triggered_by_type: 'system',
+    triggered_by_id: triggerId,
+    completion_contract_injected: true,
+    status: 'running',
+  }));
+
+  step('그런데 mission.post_actions에는 그 run_id가 저장되지 못한 채 in_flight로 멈춰 있다 — dispatch() 성공 직후, save() 직전에 죽은 상황');
+  const staleDispatchedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+  const missionRepo = ds.getRepository('OrchestrationMission');
+  await missionRepo.update(
+    { id: mission.id },
+    {
+      status: 'completed',
+      finished_at: new Date(),
+      post_actions: [
+        { action_id: recoveryAction.id, order: 0, condition: 'always', status: 'in_flight', run_id: null, room_id: null, error: '', dispatched_at: staleDispatchedAt },
+      ],
+      post_actions_pending: true,
+    },
+  );
+
+  step('reaper 스윕은 재시도(dispatch() 재호출)하지 않고, 상관관계 키로 실제 ActionRun을 되찾아 연결한다');
+  const swept = await reaper.runOnce();
+  assert.equal(swept.post_actions_recovered, 1);
+
+  const recovered = await missions.getMissionDetail(mission.id, ws.id);
+  const entry = recovered.post_actions.find((p) => p.order === 0);
+  assert.equal(entry.status, 'dispatched', '실제로 디스패치가 성공했으므로 dispatch_failed가 아니라 dispatched로 확정되어야 한다');
+  assert.equal(entry.run_id, realRun.id, '재시도로 새 run을 만드는 대신 상관관계 키로 찾은 기존 run_id를 그대로 연결한다');
+  assert.equal(entry.room_id, realRoomId, 'room_id도 그 기존 run에서 그대로 가져온다');
+  assert.equal(entry.error, '');
+
+  const runCountAfter = await runRepo.count({ where: { action_id: recoveryAction.id, triggered_by_id: triggerId } });
+  assert.equal(runCountAfter, 1, '중복 디스패치가 없었다 — 같은 상관관계 키의 ActionRun은 여전히 1건뿐이다');
+
+  const eventTypes = recovered.events.map((e) => e.type);
+  assert.ok(eventTypes.includes('post_action_dispatched'));
+  const recoveryEvent = recovered.events.find((e) => e.type === 'post_action_dispatched' && e.data?.recovered === true);
+  assert.ok(recoveryEvent, '크래시 이후 재연결된 케이스는 일반 디스패치와 구분되는 recovered:true 플래그를 이벤트에 남긴다');
+});
+
+// 리뷰 지적 반영(티켓 2dc3c62f, P1, 2라운드) — reapPendingPostActions()가
+// `finished_at DESC` 최신순으로 상한 개수(100)만 훑고 그 안에서만 JS로 걸러내던
+// 예전 방식은, 그 상한보다 최근에 끝난 미션이 100개 넘게 쌓이면 그보다 오래된
+// 미확정 미션을 원천적으로 후보 목록에서조차 빼버리는 기아를 유발했다. 이제는
+// `post_actions_pending` 컬럼 자체를 WHERE로 직접 걸러 recency와 완전히
+// 무관하게 후보를 고른다 — 그걸 직접 재현해서 검증한다.
+test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 미션도 놓치지 않는다(기아 회귀 방지)', async (t) => {
+  const { app, modules, services } = await sharedApp(t);
+  const { getDataSourceToken, ActionsService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const actions = app.get(ActionsService);
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationReaperService } = services;
+  const teams = app.get(OrchestrationTeamService);
+  const missions = app.get(OrchestrationMissionService);
+  const reaper = app.get(OrchestrationReaperService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'orch-starvation');
+  const orch = await createAgent(app, getDataSourceToken, ws.id, { name: 'starvation-orch' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'starvation-member' });
+
+  const recoveryAction = await actions.create({
+    workspace_id: ws.id,
+    name: 'Starvation-regression notify',
+    prompt: 'Old mission, should still be recovered.',
+    target_agent_id: member.id,
+  });
+
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Starvation squad',
+    orchestrator_agent_id: orch.id,
+    created_by: HUMAN.id,
+  });
+  await teams.addMember(team.id, ws.id, { agent_id: member.id });
+
+  const missionRepo = ds.getRepository('OrchestrationMission');
+
+  step('post_actions가 전혀 없는(할 일 없는) terminal 미션 120개를 만든다 — 예전 코드의 take:100 상한을 넘는 개수. finished_at을 전부 "지금"으로 찍어, 최신순 정렬이면 이 노이즈들이 창을 전부 채운다');
+  for (let i = 0; i < 120; i++) {
+    await missionRepo.save(
+      missionRepo.create({
+        workspace_id: ws.id,
+        team_id: team.id,
+        title: `Noise mission ${i}`,
+        status: 'completed',
+        finished_at: new Date(),
+        // run-budget-guard.ts(ticket a51ec6d9, 별개의 완결된 기능)는 workspace당
+        // 최근 60분 이내 생성된 OrchestrationMission 행 수를 세어 창구를
+        // 막는다 — 이 120개를 createMission()이 아니라 리포지토리로 직접
+        // 심더라도 그 카운트에는 똑같이 잡힌다. 이 테스트가 검증하려는 건
+        // "리퍼가 finished_at 최신순에 속지 않는가"이지 저 가드와는 무관하므로,
+        // created_at만 그 60분 창 밖으로 미리 찍어 노이즈가 그 가드에
+        // 걸리지 않게 한다(finished_at은 여전히 "방금"으로 남긴다).
+        created_at: new Date(Date.now() - 2 * 60 * 60_000),
+      }),
+    );
+  }
+
+  step('그보다 훨씬 먼저 끝났고, 아직 미확정 post-action이 남아있는 미션 1개를 만든다');
+  const oldMission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Old unresolved mission',
+    objective: 'Finished long ago but still has an unresolved post-action.',
+    created_by_type: 'user',
+    created_by: HUMAN.id,
+  });
+  await missionRepo.update(
+    { id: oldMission.id },
+    {
+      status: 'completed',
+      finished_at: new Date(Date.now() - 30 * 24 * 60 * 60_000), // 30일 전 — 예전의 "finished_at DESC take:100"이면 노이즈 120개에 밀려 후보에서조차 빠진다
+      post_actions: [
+        { action_id: recoveryAction.id, order: 0, condition: 'always', status: 'pending', run_id: null, room_id: null, error: '', dispatched_at: null },
+      ],
+      post_actions_pending: true,
+    },
+  );
+
+  step('reaper 스윕 한 번으로 100개 제한과 무관하게 오래된 미션의 post-action이 여전히 발견·디스패치된다');
+  const swept = await reaper.runOnce();
+  assert.ok(swept.post_actions_recovered >= 1, `기아 없이 복구되어야 한다 (got ${JSON.stringify(swept)})`);
+
+  const recovered = await missions.getMissionDetail(oldMission.id, ws.id);
+  assert.equal(recovered.post_actions[0].status, 'dispatched', '100개보다 뒤(더 오래됨)에 있어도 놓치지 않고 디스패치된다');
+  assert.ok(recovered.post_actions[0].run_id);
 });
 
 exitAfterTests();

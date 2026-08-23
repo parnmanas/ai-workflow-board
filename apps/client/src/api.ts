@@ -90,6 +90,10 @@ import type {
   OrchestrationMissionListItem,
   OrchestrationMissionDetail,
   OrchestrationAssignableAgent,
+  OntologyGraphStatusResponse,
+  OntologyGraphRefreshResponse,
+  OrchestrationPostActionCondition,
+  OrchestrationRepoRef,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2304,6 +2308,12 @@ export const api = {
     objective: string;
     context?: string;
     acceptance_criteria?: string;
+    method?: string;
+    completion_criteria?: Array<{ key: string; description: string }>;
+    post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+    workspace_folder?: string;
+    repo_ref?: OrchestrationRepoRef | null;
+    checkout_mode?: 'reuse' | 'fresh';
     max_parallel_steps?: number;
     max_steps?: number;
     step_timeout_minutes?: number;
@@ -2318,6 +2328,12 @@ export const api = {
       objective?: string;
       context?: string;
       acceptance_criteria?: string;
+      method?: string;
+      completion_criteria?: Array<{ key: string; description: string }>;
+      post_actions?: Array<{ action_id: string; order?: number; condition?: OrchestrationPostActionCondition }>;
+      workspace_folder?: string;
+      repo_ref?: OrchestrationRepoRef | null;
+      checkout_mode?: 'reuse' | 'fresh';
       max_parallel_steps?: number;
       max_steps?: number;
       step_timeout_minutes?: number;
@@ -2356,6 +2372,31 @@ export const api = {
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, note: note || '' }),
+    }),
+
+  // ─── Ontology Graph (ticket d22b83b4) ─────────────────────
+  getOntologyGraphStatus: (
+    workspaceId: string,
+    ref: { graphId?: string; resourceId?: string; folderPath?: string },
+  ): Promise<OntologyGraphStatusResponse> => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (ref.graphId) params.set('graph_id', ref.graphId);
+    if (ref.resourceId) params.set('resource_id', ref.resourceId);
+    if (ref.folderPath !== undefined) params.set('folder_path', ref.folderPath);
+    return request<OntologyGraphStatusResponse>(`/ontology/status?${params.toString()}`);
+  },
+  logOntologyGraphViewOpened: (
+    workspaceId: string,
+    ref: { resourceId?: string; folderPath?: string },
+  ): Promise<{ ok: true }> =>
+    request<{ ok: true }>('/ontology/view-opened', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, resource_id: ref.resourceId, folder_path: ref.folderPath }),
+    }),
+  refreshOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphRefreshResponse> =>
+    request<OntologyGraphRefreshResponse>('/ontology/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, graph_id: graphId }),
     }),
 };
 

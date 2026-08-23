@@ -151,6 +151,12 @@ export default function Sidebar({
           label: 'Prompt Templates',
           icon: 'P',
         },
+        {
+          key: 'ontology-graph',
+          path: `${workspaceBase}/ontology-graph`,
+          label: 'Ontology Graph',
+          icon: 'G',
+        },
       ],
     },
     {

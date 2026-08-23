@@ -27,6 +27,16 @@
 //  11. seed on a REVIEW-kind column (blocker B1): a lost reviewer emit leaves no
 //      intent; the widened seeder re-derives and dispatches it. Previously the
 //      seeder scanned only active/intake, so review/merging never self-healed.
+//  15. seed is SKIPPED only when the ROLE HOLDER itself has responded since
+//      entering the CURRENT column — an assignee-chosen wait (e.g. sequencing
+//      around a sibling ticket editing the same file) is not a lost dispatch
+//      (ticket fec25d90). Four angles in one scenario: (A) the holder itself
+//      responds → skip; (B) a THIRD PARTY (reporter/other-role holder)
+//      responds instead → the role's genuinely lost dispatch still seeds
+//      (review blocker: role-scoped, not ticket-wide); (C) no engagement at
+//      all → still seeds (self-healing preserved); (D) a same-timestamp
+//      `moved` burst still resolves a deterministic entry time (review
+//      blocker: `id` tiebreaker, not `created_at` alone).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -451,6 +461,110 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     await reconciler.reconcile(new Date(next + 10 * 60_000));
     intent = await intentRepo.findOne({ where: { id: intent.id } });
     assert.equal(intent.dispatch_generation, generationBeforePend, 'still frozen on a later sweep — no infinite generation growth');
+  });
+
+  await t.test('15: seed is SKIPPED only when the ROLE HOLDER itself responded after entering this column (ticket fec25d90)', async () => {
+    // Reproduces the production incident this ticket reports: an assignee left
+    // an explicit "sequencing after a sibling ticket editing the same file"
+    // comment shortly after the ticket was routed, then deliberately left the
+    // ticket routed (no move_ticket / pend_ticket — by design, per the board's
+    // single-file-overlap wait guidance) rather than actively working it. The
+    // OLD seeder only measured "idle since the last progress signal" against
+    // seedAfterMs — so once idle time since that comment crossed the threshold,
+    // it seeded a BRAND NEW intent whose created_at postdates the comment. That
+    // reseeded intent can never resolve via decideIntentReconcile's `progressed`
+    // rule (which needs FRESH progress strictly after ITS OWN creation) — an
+    // unbounded re-dispatch/escalation loop misdiagnosed as an agent/infra
+    // failure, for what is actually a correct, deliberate pause.
+    //
+    // Review round 1 covered here:
+    //   1. the skip must be scoped to the CURRENT ROLE's holder — a comment
+    //      from a reporter / other-role holder must NOT suppress a genuinely
+    //      lost assignee dispatch (scenario B).
+    //   2. `_lastColumnEntryMs` needs a deterministic tiebreaker for a
+    //      same-timestamp `moved` burst, not `created_at` alone (scenario D).
+    //   3. the fixture creates a REAL `moved`/column ActivityLog row so
+    //      `_lastColumnEntryMs`'s primary query is exercised, not just its
+    //      ticket.created_at fallback.
+    const reporter = await createAgent(app, getDataSourceToken, ws.id, { name: 'other-role-holder' });
+    const activityLogRepo = ds.getRepository('ActivityLog');
+    const moveActivity = (ticketId, at) => activityLogRepo.save(activityLogRepo.create({
+      entity_type: 'ticket', entity_id: ticketId, ticket_id: ticketId, workspace_id: ws.id,
+      action: 'moved', field_changed: 'column', old_value: 'To Do', new_value: 'In Progress',
+      actor_id: 'system', actor_name: 'System', trigger_source: 'test', created_at: at,
+    }));
+
+    // --- A: the ASSIGNEE holder itself responds after column entry → skip. ---
+    const waited = await mkTicket('assignee left a wait comment, then went quiet');
+    const enteredAt = new Date(Date.now() - 6 * 60_000);      // entered this column 6 min ago
+    const waitCommentAt = new Date(Date.now() - 4 * 60_000);  // responded 2 min later, silent since
+    await ticketRepo.update(waited.id, { created_at: enteredAt });
+    await moveActivity(waited.id, enteredAt);
+    await commentRepo.save(commentRepo.create({
+      ticket_id: waited.id, workspace_id: ws.id, author_type: 'agent', author: 'ralf', author_id: agent.id,
+      content: 'ee26302d touches the same file — sequencing after it lands, not starting yet',
+      type: 'note', created_at: waitCommentAt,
+    }));
+    assert.equal(await intents.findOpenForTicketRole(waited.id, 'assignee'), null, 'no intent exists yet');
+
+    // --- B (review blocker #1): a THIRD PARTY (not the assignee holder)
+    // comments after column entry, but the assignee's own dispatch is
+    // genuinely lost — must still seed for the assignee role despite the
+    // ticket-wide "someone commented" signal. ---
+    const thirdParty = await mkTicket('reporter commented, but assignee dispatch is genuinely lost');
+    const tpEnteredAt = new Date(Date.now() - 6 * 60_000);
+    const tpCommentAt = new Date(Date.now() - 4 * 60_000);
+    await ticketRepo.update(thirdParty.id, { created_at: tpEnteredAt });
+    await moveActivity(thirdParty.id, tpEnteredAt);
+    await commentRepo.save(commentRepo.create({
+      ticket_id: thirdParty.id, workspace_id: ws.id, author_type: 'agent', author: 'other-role-holder',
+      author_id: reporter.id, content: 'when will this land?', type: 'note', created_at: tpCommentAt,
+    }));
+
+    // --- C (control): a genuinely lost-emit sibling with NO engagement at
+    // all — the original self-healing seed guarantee must still fire. ---
+    const lost = await mkTicket('genuinely lost emit, no engagement at all');
+    const lostEnteredAt = new Date(Date.now() - 6 * 60_000);
+    await ticketRepo.update(lost.id, { created_at: lostEnteredAt });
+    await moveActivity(lost.id, lostEnteredAt);
+
+    // --- D (review blocker #2): a same-timestamp `moved` BURST (e.g. a quick
+    // multi-hop promotion landing within the same wall-clock second) must
+    // still resolve a deterministic entry time, and a holder comment strictly
+    // AFTER that tied timestamp must still count as progress. ---
+    const burst = await mkTicket('same-timestamp moved burst, then assignee responds');
+    const burstAt = new Date(Date.now() - 6 * 60_000);
+    await ticketRepo.update(burst.id, { created_at: burstAt });
+    await Promise.all([moveActivity(burst.id, burstAt), moveActivity(burst.id, burstAt), moveActivity(burst.id, burstAt)]);
+    await commentRepo.save(commentRepo.create({
+      ticket_id: burst.id, workspace_id: ws.id, author_type: 'agent', author: 'ralf', author_id: agent.id,
+      content: 'landed after the burst', type: 'note', created_at: new Date(Date.now() - 4 * 60_000),
+    }));
+
+    // Sweep ~4 min after the responses — well past seedAfterMs=1min either way.
+    await reconciler.reconcile(new Date());
+
+    assert.equal(
+      await intents.findOpenForTicketRole(waited.id, 'assignee'), null,
+      'the assignee holder itself responded after entering this column — NOT re-seeded, the dispatch was demonstrably not lost',
+    );
+    const seededAudits = await activityLogRepo.find({
+      where: { ticket_id: waited.id, action: 'dispatch_intent_seeded' },
+    });
+    assert.equal(seededAudits.length, 0, 'no dispatch_intent_seeded audit row for the ticket the assignee already responded on');
+
+    const thirdPartySeeded = await intents.findOpenForTicketRole(thirdParty.id, 'assignee');
+    assert.ok(thirdPartySeeded, "a third party's comment does not suppress the assignee role's genuinely lost dispatch — still seeded");
+    assert.equal(thirdPartySeeded.trigger_source, 'reconcile_seed');
+
+    const lostSeeded = await intents.findOpenForTicketRole(lost.id, 'assignee');
+    assert.ok(lostSeeded, 'the genuinely lost-emit sibling is still seeded in the same sweep — the fix is scoped, not a wholesale seed disable');
+    assert.equal(lostSeeded.trigger_source, 'reconcile_seed');
+
+    assert.equal(
+      await intents.findOpenForTicketRole(burst.id, 'assignee'), null,
+      'a same-timestamp moved burst still resolves a deterministic entry time — the later holder comment counts as progress, not re-seeded',
+    );
   });
 });
 

@@ -4,6 +4,7 @@ import { api } from '../../api';
 import type {
   OrchestrationMissionDetail,
   OrchestrationStep,
+  OrchestrationTeam,
   OrchestrationTimelineEvent,
   OrchestrationUpdateEvent,
 } from '../../types';
@@ -14,6 +15,7 @@ import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
 import PlanGraph from './PlanGraph';
+import { MissionFormModal } from './OrchestrationPage';
 import { eventColor, missionStyle, progressPercent, stepStyle } from './status';
 
 /**
@@ -42,6 +44,8 @@ export default function MissionDetailPage() {
   const [busy, setBusy] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
+  const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(
@@ -63,6 +67,13 @@ export default function MissionDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Edit 모달의 (편집 중엔 비활성화된) Team select에 현재 팀 이름을 보여주는
+  // 데만 필요하다 — draft 미션만 편집 가능하므로 자주 열리는 경로는 아니다.
+  useEffect(() => {
+    if (!wsId) return;
+    api.listOrchestrationTeams(wsId).then(setTeams).catch(() => setTeams([]));
+  }, [wsId]);
 
   // Debounced refetch: a wave of parallel steps completing emits one frame per
   // step, and each would otherwise trigger its own full detail request.
@@ -132,14 +143,19 @@ export default function MissionDetailPage() {
               All missions
             </Button>
             {mission.status === 'draft' && (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={busy}
-                onClick={() => act(() => api.startOrchestrationMission(mission.id, wsId), 'Orchestrator briefed')}
-              >
-                Start
-              </Button>
+              <>
+                <Button variant="secondary" size="sm" onClick={() => setShowEdit(true)}>
+                  Edit
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={busy}
+                  onClick={() => act(() => api.startOrchestrationMission(mission.id, wsId), 'Orchestrator briefed')}
+                >
+                  Start
+                </Button>
+              </>
             )}
             {(mission.status === 'planning' || mission.status === 'running') && (
               <>
@@ -191,13 +207,47 @@ export default function MissionDetailPage() {
               <Prose text={mission.context} muted />
             </>
           )}
+          {mission.method && (
+            <>
+              <SubHeading>Method</SubHeading>
+              <Prose text={mission.method} muted />
+            </>
+          )}
           {mission.acceptance_criteria && (
             <>
               <SubHeading>Acceptance criteria</SubHeading>
               <Prose text={mission.acceptance_criteria} muted />
             </>
           )}
+          <SubHeading>Workspace</SubHeading>
+          <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
+            {mission.resolved_workspace_folder}
+          </div>
         </Section>
+
+        {mission.completion_criteria.length > 0 && (
+          <Section
+            title="Completion criteria"
+            right={
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+                {mission.completion_criteria.filter((c) => c.met).length}/{mission.completion_criteria.length} met
+              </span>
+            }
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {mission.completion_criteria.map((c) => (
+                <div key={c.key} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}>
+                  <span style={{ color: c.met ? tokens.colors.successLight : tokens.colors.textMuted }}>{c.met ? '☑' : '☐'}</span>
+                  <div>
+                    <span style={{ color: tokens.colors.textPrimary }}>{c.description}</span>{' '}
+                    <span style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}>{c.key}</span>
+                    {c.note && <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{c.note}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
 
         {mission.plan_summary && (
           <Section title={`Orchestrator's plan (v${mission.plan_version})`}>
@@ -234,12 +284,56 @@ export default function MissionDetailPage() {
           </Section>
         )}
 
+        {mission.post_actions.length > 0 && (
+          <Section title="Post-completion actions">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[...mission.post_actions]
+                .sort((a, b) => a.order - b.order)
+                .map((pa, i) => {
+                  const style = postActionStyle(pa.status);
+                  return (
+                    <div key={`${pa.action_id}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                      <span
+                        style={{
+                          padding: '1px 7px',
+                          borderRadius: 999,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          color: style.color,
+                          background: style.background,
+                        }}
+                      >
+                        {pa.status}
+                      </span>
+                      <span style={{ fontFamily: 'monospace', color: tokens.colors.textSecondary }}>{pa.action_id}</span>
+                      <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>({pa.condition})</span>
+                      {pa.error && <span style={{ color: tokens.colors.dangerLight, fontSize: 11 }}>{pa.error}</span>}
+                    </div>
+                  );
+                })}
+            </div>
+          </Section>
+        )}
+
         <Section title="Timeline" right={<span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{mission.events.length} events</span>}>
           <Timeline events={mission.events} onSelectStep={(stepId) => setSelectedStepId(stepId)} />
         </Section>
       </div>
 
       <StepDetailModal step={selectedStep} onClose={() => setSelectedStepId(null)} />
+
+      <MissionFormModal
+        isOpen={showEdit}
+        wsId={wsId}
+        teams={teams}
+        mission={mission}
+        onClose={() => setShowEdit(false)}
+        onSaved={(m) => {
+          setMission(m);
+          setShowEdit(false);
+        }}
+      />
 
       <NudgeModal
         isOpen={showNudge}
@@ -423,6 +517,14 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
   );
 }
 
+/** post_action 한 행의 "디스패치 결과" 색상 — 그 ActionRun의 최종 결과는 아니다(여기선 추적하지 않음, 서버쪽 MissionPostAction 문서 참고). */
+function postActionStyle(status: string): { color: string; background: string } {
+  if (status === 'dispatched') return { color: tokens.colors.successLight, background: `${tokens.colors.success}22` };
+  if (status === 'dispatch_failed') return { color: tokens.colors.dangerLight, background: `${tokens.colors.danger}22` };
+  if (status === 'skipped') return { color: tokens.colors.textMuted, background: `${tokens.colors.border}55` };
+  return { color: tokens.colors.warningLight, background: `${tokens.colors.warning}22` };
+}
+
 function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section>
@@ -553,6 +655,12 @@ function StepDetailModal({ step, onClose }: { step: OrchestrationStep | null; on
             attempt {step.attempt}/{step.max_attempts}
           </span>
         </div>
+
+        {step.workspace_folder && (
+          <div style={{ fontSize: 11, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
+            {step.workspace_folder}
+          </div>
+        )}
 
         {step.depends_on.length > 0 && (
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>

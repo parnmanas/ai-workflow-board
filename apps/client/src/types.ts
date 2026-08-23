@@ -2527,6 +2527,34 @@ export interface OrchestrationStepArtifact {
   label: string;
 }
 
+export interface OrchestrationCompletionCriterion {
+  key: string;
+  description: string;
+  met: boolean;
+  met_at: string | null;
+  note?: string;
+}
+
+export type OrchestrationPostActionCondition = 'always' | 'on_success' | 'on_failure';
+export type OrchestrationPostActionStatus = 'pending' | 'dispatched' | 'dispatch_failed' | 'skipped';
+
+export interface OrchestrationPostAction {
+  action_id: string;
+  order: number;
+  condition: OrchestrationPostActionCondition;
+  status: OrchestrationPostActionStatus;
+  run_id?: string | null;
+  room_id?: string | null;
+  error?: string;
+  dispatched_at?: string | null;
+}
+
+export interface OrchestrationRepoRef {
+  resource_id?: string;
+  url?: string;
+  branch?: string;
+}
+
 export interface OrchestrationCounts {
   total: number;
   done: number;
@@ -2573,6 +2601,8 @@ export interface OrchestrationStep {
   dispatched_at: string | null;
   started_at: string | null;
   finished_at: string | null;
+  /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
+  workspace_folder: string;
 }
 
 export interface OrchestrationTimelineEvent {
@@ -2592,6 +2622,13 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   objective: string;
   context: string;
   acceptance_criteria: string;
+  method: string;
+  completion_criteria: OrchestrationCompletionCriterion[];
+  post_actions: OrchestrationPostAction[];
+  resolved_workspace_folder: string;
+  workspace_folder: string;
+  repo_ref: OrchestrationRepoRef | null;
+  checkout_mode: 'reuse' | 'fresh';
   plan_summary: string;
   result_summary: string;
   failure_reason: string;
@@ -2630,5 +2667,61 @@ export interface OrchestrationUpdateEvent {
   plan_version: number;
   counts: OrchestrationCounts;
   last_event: { type: string; message: string; step_key: string } | null;
+  timestamp: string;
+}
+
+// ─── Ontology Graph (ticket d22b83b4, DESIGN.md 축 5) ──────────────────────
+
+export type OntologyGraphStatusValue = 'building' | 'ready' | 'stale' | 'error';
+
+/** GET /api/ontology/status 응답 — MCP `graph_status` 툴(ticket d35b7b7d)과
+ *  같은 provisioning helper를 쓰지만, UI 전용 필드(dirty_ratio/behind/ahead/
+ *  freshness_error)가 추가로 얹힌다. */
+export interface OntologyGraphStatusResponse {
+  graph_id: string;
+  status: OntologyGraphStatusValue;
+  indexed_at: string | null;
+  commit: string;
+  progress: Record<string, unknown>;
+  error?: string;
+  /** research-ontology.md §8.6 point 6 — status='stale' 활성 엣지 비율.
+   *  엣지가 아직 없으면(building 등) null. */
+  dirty_ratio: number | null;
+  /** indexed_at 시점 commit이 현재 HEAD보다 몇 커밋 뒤처졌는지
+   *  (countBehindAhead 기반). git 접근 실패 시 null — freshness_error 참고. */
+  behind: number | null;
+  /** 정상 케이스는 항상 0 — 0이 아니면 인덱싱된 커밋이 더 이상 이
+   *  브랜치의 조상이 아니다(리베이스/force-push로 역사가 바뀜). */
+  ahead: number | null;
+  freshness_error: string | null;
+}
+
+/** POST /api/ontology/refresh 응답 — 기존 그래프를 building으로 되돌리고
+ *  재빌드를 킥오프한다("Refresh Graph" 액션, GET /status와 달리 이미
+ *  존재하는 그래프도 실제로 재시작한다). `started=false`면 이미 building
+ *  중이던 그래프에 대한 중복 호출 — 새 빌드를 또 킥오프하지 않았다는 뜻. */
+export interface OntologyGraphRefreshResponse {
+  graph_id: string;
+  status: OntologyGraphStatusValue;
+  started: boolean;
+}
+
+/** Payload of the `ontology_graph_progress` SSE frame (UI-only event,
+ *  ticket 964014f5) — server(event-registry.ts)/client(BoardStreamContext.tsx)
+ *  배선은 이미 완료돼 있음, 이 타입만 신규(ticket d22b83b4). */
+export interface OntologyGraphProgressEvent {
+  event_type: 'ontology_graph_progress';
+  workspace_id: string;
+  graph_id: string;
+  resource_id: string;
+  job_id: string;
+  phase: 'phase_a' | 'phase_b' | 'phase_c' | 'sweep';
+  graph_status: OntologyGraphStatusValue;
+  files_processed: number;
+  edges_extracted: number;
+  edges_total: number | null;
+  nodes_extracted: number;
+  short_circuited: boolean;
+  error: string | null;
   timestamp: string;
 }

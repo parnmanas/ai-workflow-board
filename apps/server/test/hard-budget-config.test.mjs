@@ -24,6 +24,7 @@ import {
   resolveHardBudgetConfig,
   resolveHardBudget,
   validateHardBudgetConfigInput,
+  validateBoardHardBudgetConfigInput,
   serializeHardBudgetConfig,
 } from '../dist/common/hard-budget-config.js';
 
@@ -115,6 +116,46 @@ test('validateHardBudgetConfigInput: accepts a well-formed partial config', () =
   const result = validateHardBudgetConfigInput({ max_auto_responses: 50, auto_pend: false });
   assert.equal(result.ok, true);
   assert.deepEqual(result.value, { max_auto_responses: 50, auto_pend: false });
+});
+
+// ── BoardHardBudgetConfigSchema / validateBoardHardBudgetConfigInput (티켓
+//    73b92d23) — update_board(MCP)와 boards.controller.ts의 PATCH가 쓰는
+//    board-scope 서브셋. max_runs_per_window는 워크스페이스 전용
+//    (resolveHardBudgetForWorkspace, run-budget-guard.ts)이고,
+//    resolveHardBudgetForTicket(board의 hard_budget_config가 실제로 흘러가는
+//    곳)은 이 필드를 전혀 읽지 않는다 — 그래서 board scope에서 이 필드를
+//    받아주면 조용히 validation을 통과해 저장되는 no-op이었다. ──────────────
+test('validateBoardHardBudgetConfigInput: max_runs_per_window를 거부한다 (워크스페이스 전용, board 레이어 없음)', () => {
+  const result = validateBoardHardBudgetConfigInput({ max_runs_per_window: 10 });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /max_runs_per_window/);
+});
+
+test('validateBoardHardBudgetConfigInput: 나머지 board-scope 키는 그대로 허용한다', () => {
+  const input = {
+    enabled: true,
+    max_auto_responses: 50,
+    window_minutes: 15,
+    max_dispatches_per_window: 5,
+    max_tokens_per_window: 12345,
+    auto_pend: false,
+    notify: false,
+  };
+  const result = validateBoardHardBudgetConfigInput(input);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, input);
+});
+
+test('validateBoardHardBudgetConfigInput: 알 수 없는 키·범위 초과 값은 ticket-scope validator와 동일하게 거부한다', () => {
+  assert.equal(validateBoardHardBudgetConfigInput({ typo_field: true }).ok, false);
+  assert.equal(validateBoardHardBudgetConfigInput({ max_auto_responses: 0 }).ok, false, '양수여야 함');
+  assert.equal(validateBoardHardBudgetConfigInput({ window_minutes: 2000 }).ok, false, '1440(24시간) 이하여야 함');
+});
+
+test('validateHardBudgetConfigInput(워크스페이스 스코프)은 max_runs_per_window를 계속 허용한다 — 거부는 board 스코프에만 적용', () => {
+  const result = validateHardBudgetConfigInput({ max_runs_per_window: 10 });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, { max_runs_per_window: 10 });
 });
 
 test('serializeHardBudgetConfig: empty/undefined collapses to null; a real value round-trips', () => {

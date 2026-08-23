@@ -56,6 +56,26 @@ export interface DefFact {
   parentQualifiedName: string | null;
   exported: boolean;
   docstring: string | null;
+  /** ticket 964014f5(증분 갱신, DESIGN.md 축 4) — 이 def의 "body" 자식
+   *  노드(tree-sitter `body` named field)가 시작하는 byte offset. 클래스/
+   *  인터페이스/함수/메서드/enum처럼 구분되는 body 블록이 있으면 그
+   *  시작 offset, type alias/field/variable처럼 body 개념이 없으면 null
+   *  (이 경우 signature_hash는 전체 [startByte,endByte)를 커버 — 그런
+   *  def는 "본문만 편집"이 애초에 성립하지 않으므로 모든 편집이 곧
+   *  시그니처 변경이다). extract-file.ts가 채우고, 실제 해시 계산은
+   *  hash-bundle.ts(관심사 분리 — worker.ts의 fileHash 관례와 동일)가
+   *  raw content를 슬라이스해 담당한다. */
+  bodyStartByte: number | null;
+  /** [startByte, endByte) 전체(선언+body)의 해시 — signature_hash와 짝을
+   *  이루는 "content" 절반. extractFile() 시점엔 ''(placeholder), 원본
+   *  content를 쥔 hash-bundle.ts의 hashFactBundle()이 채운다. */
+  contentHash: string;
+  /** [startByte, bodyStartByte ?? endByte) 구간의 해시 — 이름/kind/arity/
+   *  visibility/파라미터·반환타입/heritage를 raw source 텍스트로 뭉뚱그려
+   *  담는다(개별 필드로 구조화하는 대신 — rust-analyzer ItemTree와 같은
+   *  "body와 분리된 선언부 요약" 발상, DESIGN.md 축 4). extractFile()
+   *  시점엔 ''(placeholder), hashFactBundle()이 채운다. */
+  signatureHash: string;
 }
 
 /** 미해소 참조 — 이름 + 한정자 + 호출형태만. 어떤 심볼을 가리키는지는 이

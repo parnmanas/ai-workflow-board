@@ -19,9 +19,13 @@ import { OntologyNode } from '../../entities/OntologyNode';
 import { OntologyEdge } from '../../entities/OntologyEdge';
 import type { DefFact, DefKind, FactBundle } from './extraction/types';
 import type { DecoratorFact } from './extraction/decorator-rules';
+import { classifyDurability } from './extraction/durability';
 
-const NODE_CHUNK_SIZE = 500; // 1/7 선례(ontology-sqljs-independent-datasource.test.mjs) — sql.js 표현식-트리 깊이 상한(~1000) 아래로 여유있게.
-const EDGE_CHUNK_SIZE = 500;
+// ontology-lifecycle.service.ts의 clearExistingGraphRows()(ticket d22b83b4,
+// "Refresh Graph" 재실행 전 삭제)가 deleteChunked와 같은 크기 상수를
+// 재사용하도록 export.
+export const NODE_CHUNK_SIZE = 500; // 1/7 선례(ontology-sqljs-independent-datasource.test.mjs) — sql.js 표현식-트리 깊이 상한(~1000) 아래로 여유있게.
+export const EDGE_CHUNK_SIZE = 500;
 
 // 3/7 리졸버(resolver/resolve.ts)가 같은 청크-삽입+매크로태스크-양보
 // 계약을 재사용한다 — 독립 재구현으로 계약이 갈라지는 걸 막기 위해 export.
@@ -29,7 +33,10 @@ export function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-const DEF_KIND_TO_NODE_TYPE: Record<DefKind, string> = {
+// ticket 964014f5(증분 갱신)의 incremental/phase-a.ts가 재사용한다 — 같은
+// symbol_id 스킴/DefKind 매핑으로 새 def 행을 만들어야 diff·rename remap이
+// 일관되므로 export.
+export const DEF_KIND_TO_NODE_TYPE: Record<DefKind, string> = {
   class: 'Type',
   interface: 'Type',
   type: 'Type',
@@ -40,10 +47,10 @@ const DEF_KIND_TO_NODE_TYPE: Record<DefKind, string> = {
   variable: 'Field',
 };
 
-function fileSymbolId(relPath: string): string {
+export function fileSymbolId(relPath: string): string {
   return `file:${relPath}`;
 }
-function defSymbolId(relPath: string, qualifiedName: string): string {
+export function defSymbolId(relPath: string, qualifiedName: string): string {
   return `def:${relPath}#${qualifiedName}`;
 }
 
@@ -124,6 +131,27 @@ export async function updateChunked<T extends object>(
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
     if (chunk.length > 0) await repo.update({ id: In(chunk) } as any, partialEntity as any);
+    await yieldToEventLoop();
+  }
+}
+
+/** insertChunked()/updateChunked()의 DELETE 대응 — id 목록을 chunkSize개씩
+ *  잘라 `DELETE ... WHERE id IN (...)`로 나눠 실행하고 청크 사이
+ *  매크로태스크를 양보한다. ontology-lifecycle.service.ts의
+ *  clearExistingGraphRows()(ticket d22b83b4, "Refresh Graph" 재실행 전
+ *  삭제)가 재사용 — 리뷰 지적: runInitialBuild()는 원래 그래프당 최초
+ *  1회만 호출된다는 암묵 전제였다(OntologyNode의 (graph_id, symbol_id)
+ *  유니크 인덱스가 재삽입과 그대로 충돌, OntologyEdge/
+ *  OntologyReverseEdgeIndex는 유니크 제약이 없어 조용히 중복 적재) — 재호출을
+ *  안전하게 만들려면 재실행 전에 기존 행을 반드시 지워야 한다. */
+export async function deleteChunked<T extends object>(
+  repo: Repository<T>,
+  ids: string[],
+  chunkSize: number,
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    if (chunk.length > 0) await repo.delete({ id: In(chunk) } as any);
     await yieldToEventLoop();
   }
 }
@@ -211,6 +239,11 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
     }
     if (bundle.hasParseError) parseErrorFiles += 1;
 
+    // ticket 964014f5(증분 갱신, DESIGN.md 축 4) — 파일당 한 번만 판정하고
+    // 이 파일의 File 노드 + 모든 def 노드가 상속한다(durability는 "이
+    // 파일이 어디서 왔는가"의 속성이지 개별 def의 속성이 아니다).
+    const fileDurability = classifyDurability(bundle.path);
+
     const fileNodeId = randomUUID();
     nodeRows.push({
       id: fileNodeId,
@@ -225,6 +258,10 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
       start_line: null,
       end_line: null,
       content_hash: bundle.fileHash,
+      // File 노드엔 signature_hash가 의미 없다(Callable/Type/Field 전용,
+      // OntologyNode.ts 문서 참고) — 컬럼 기본값 ''을 그대로 명시.
+      signature_hash: '',
+      durability: fileDurability,
       lang: bundle.lang,
       profile_version: bundle.extractorVersion,
       // 리뷰 지적(라운드 1) — refs[]/imports[]/exports[]/heritage[]는 아직
@@ -259,7 +296,14 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
         path: bundle.path,
         start_line: def.startLine,
         end_line: def.endLine,
-        content_hash: '',
+        // ticket 964014f5 이전엔 두 값 다 ''로 비어 있었다(리뷰 지적 없이
+        // 지나간 gap — DESIGN.md 축 4의 "computed alongside the existing
+        // content_hash" 전제가 실제로는 여기서 처음 채워진다). extractFile()
+        // + hash-bundle.ts(또는 이 def를 만든 worker.ts/incremental
+        // Phase A)가 이미 계산해 둔 값을 그대로 옮긴다.
+        content_hash: def.contentHash,
+        signature_hash: def.signatureHash,
+        durability: fileDurability,
         lang: bundle.lang,
         profile_version: bundle.extractorVersion,
         props: JSON.stringify({ exported: def.exported, docstring: def.docstring }),
@@ -327,6 +371,10 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
           start_line: fact.targetStartLine,
           end_line: fact.targetEndLine,
           content_hash: '',
+          signature_hash: '',
+          // Endpoint는 File 노드가 아니지만 여전히 이 파일에서 유래한
+          // 합성 노드다 — 자기 파일의 durability를 그대로 상속한다.
+          durability: classifyDurability(index.bundle.path),
           lang: index.bundle.lang,
           profile_version: index.bundle.extractorVersion,
           props: '{}',

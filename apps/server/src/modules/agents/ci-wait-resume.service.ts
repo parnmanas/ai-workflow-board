@@ -91,27 +91,63 @@
  * outcome, and resumes the ticket with an explanatory comment so a
  * human/agent can re-dispatch or escalate instead of the ticket silently
  * never coming back.
+ *
+ * Credential resolution (ticket 9bbe9146): `getWorkflowRun` needs a
+ * `credential_id` to authenticate past `GitHubConnectorService`'s env-token
+ * fallback (`process.env.GITHUB_TOKEN`, commonly unset — this deployment
+ * authenticates via per-Resource stored credentials instead, see
+ * `github-tools.ts`'s `sync_github_resource` comment). An earlier version of
+ * this service never resolved one at all, so every poll silently degraded
+ * to "no token" (`isGitHubDegradableError` → `getWorkflowRun` returns null)
+ * and looked EXACTLY like "still queued" — six real Merging tickets sat
+ * parked for 1-2h before a human noticed. `_resolveCredentialId` resolves
+ * `Ticket.base_repo_resource_id` → `Resource` (workspace-scope checked,
+ * mirrors `ClaimVerificationService._lookupRemoteSha`) → `Resource.
+ * credential_id` — but falls back to the ticket's BOARD environment repo
+ * (`pickBaseRepoResourceId`, same helper `trigger-loop.service.ts` dispatch
+ * uses) when the ticket carries no repo binding of its own, since on some
+ * boards every ticket's `base_repo_resource_id` is permanently empty (round 4
+ * live-probe finding — dispatch resolves the board-env repo into the SSE
+ * payload but never persists it onto the ticket row). Degrades to null when
+ * NEITHER source resolves — never blocks the sweep.
+ *
+ * Poll-failure surfacing (ticket 9bbe9146): the silent-degrade case above is
+ * exactly why a run that cannot be READ at all (thrown error, or degraded
+ * to null) is now tracked separately from a run that is legitimately still
+ * queued/in_progress (`CiWaitContext.poll_issue`, cleared the instant a poll
+ * succeeds). After `CI_WAIT_ALERT_AFTER_FAILURES` consecutive unreadable
+ * polls (default 5, ~10 min) `_trackPollFailure` posts ONE ticket comment —
+ * the wait stays registered (this is a notification, not a resolution) so
+ * the problem is visible long before the 6h timeout, not just at it.
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
+import { Resource } from '../../entities/Resource';
+import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
+import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { GitHubConnectorService, GitHubWorkflowRun } from '../../services/github-connector.service';
-import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome } from '../tickets/ci-wait.service';
+import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome, CiWaitPollIssue } from '../tickets/ci-wait.service';
 import { TriggerLoopService } from './trigger-loop.service';
+import { mergeEnvironmentConfig } from '../../common/environment-config';
+import { pickBaseRepoResourceId, EnvRepoRef } from '../../common/base-repo-binding';
 
 const DEFAULTS = {
   ENABLED: true,
   SWEEP_MS: 2 * 60_000,          // 2 min — short, since a ticket is actively parked on this
   MAX_AGE_MS: 6 * 60 * 60_000,   // 6 h — safety valve for a run that never resolves
+  ALERT_AFTER_FAILURES: 5,       // ~10 min at the default sweep interval
 } as const;
 
 export interface CiWaitResumeConfig {
   enabled: boolean;
   sweepMs: number;
   maxAgeMs: number;
+  alertAfterFailures: number;
 }
 
 function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): CiWaitResumeConfig {
@@ -131,6 +167,7 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): CiWaitResumeCo
     enabled: parseBool(env.CI_WAIT_ENABLED, DEFAULTS.ENABLED),
     sweepMs: parseIntEnv(env.CI_WAIT_SWEEP_MS, DEFAULTS.SWEEP_MS),
     maxAgeMs: parseIntEnv(env.CI_WAIT_MAX_AGE_MS, DEFAULTS.MAX_AGE_MS),
+    alertAfterFailures: parseIntEnv(env.CI_WAIT_ALERT_AFTER_FAILURES, DEFAULTS.ALERT_AFTER_FAILURES),
   };
 }
 
@@ -282,25 +319,203 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const credentialId = await this._resolveCredentialId(ticket);
     let run: GitHubWorkflowRun | null;
     try {
-      run = await this.github.getWorkflowRun(ctx.owner, ctx.repo, ctx.run_id);
+      run = await this.github.getWorkflowRun(ctx.owner, ctx.repo, ctx.run_id, credentialId);
     } catch (e) {
       stats.fetch_failures++;
       this.logService.warn('CI', 'ci-wait GitHub read failed (will retry next sweep)', {
         err: String(e), ticket_id: ticket.id, owner: ctx.owner, repo: ctx.repo, run_id: ctx.run_id,
       });
+      run = null;
+    }
+    if (!run) {
+      // Either the throw above, or GitHubConnectorService's own degrade-to-
+      // null (404 / unresolved credential). Either way this sweep learned
+      // nothing about the run — track it so a persistently broken
+      // credential/run_id surfaces well before CI_WAIT_MAX_AGE_MS instead of
+      // retrying in total silence for up to 6h (see class docstring).
+      await this._trackPollFailure(ticket, rawContext, ctx, nowMs);
       return;
     }
-    if (!run) return; // degradable (404 / no token) — retry next sweep, not yet a timeout
-    if (run.status !== 'completed') return; // still running/queued — retry next sweep
+    if (run.status !== 'completed') {
+      // Still running/queued — retry next sweep. This readable poll still
+      // clears a stale failure streak, but that is the ONLY mutation this
+      // sweep performs, so it is safe as its own CAS against `rawContext`.
+      if (ctx.poll_issue) await this._clearPollFailure(ticket, rawContext, ctx);
+      return;
+    }
 
+    // Run completed — record the resolved outcome AND drop any poll-failure
+    // streak in the SAME CAS. Review round 1 (ticket 9bbe9146): these used to
+    // be two separate tryUpdateContext calls against the same `rawContext`
+    // (clear-streak, then record-outcome) — the second one always lost the
+    // CAS because the first had already advanced `ci_wait_context` past
+    // `rawContext`, silently deferring delivery to the NEXT sweep and
+    // breaking the "resumes within one sweep" guarantee on exactly the
+    // recovery-after-failure path this ticket exists to fix.
     const outcome = this._freshOutcome('resolved', this._formatResolvedMessage(ctx, run), nowMs);
-    const nextCtx: CiWaitContext = { ...ctx, outcome };
+    const nextCtx: CiWaitContext = { ...ctx, outcome, poll_issue: undefined };
     const nextJson = JSON.stringify(nextCtx);
     const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
     if (!won) return; // lost the race — the winner (or a future sweep) delivers
     await this._deliver(ticket, nextJson, nextCtx, stats);
+  }
+
+  /**
+   * Resolve this ticket's GitHub credential. `Ticket.base_repo_resource_id`
+   * wins when set, mirroring `ClaimVerificationService._lookupRemoteSha`'s
+   * pattern (claim-verification.service.ts): `Resource`, workspace-scope
+   * checked so a stale id pointing at another workspace's Resource can never
+   * leak that workspace's credential → `Resource.credential_id`.
+   *
+   * Review round 4 (ticket 9bbe9146, live probe): on THIS board every ticket's
+   * `base_repo_resource_id` is permanently `''` — dispatch resolves the repo
+   * via `pickBaseRepoResourceId('', boardEnvRepositories)` inside
+   * `trigger-loop.service.ts` (~line 2727) but only fills the SSE payload,
+   * never writes it back onto the ticket row. A resolver that only reads
+   * `Ticket.base_repo_resource_id` therefore degrades to null for every
+   * ticket on this board — the exact silent failure this ticket exists to
+   * fix, just moved one layer down. Fixed by consulting the SAME
+   * `pickBaseRepoResourceId` fallback dispatch uses, reusing its board-env
+   * merge (`_resolveBoardEnvRepositories` below mirrors trigger-loop.service.
+   * ts:2614-2654's `boardEnvRepositories` construction) so this service and
+   * dispatch always agree on which repo a ticket resolves to.
+   *
+   * Degrades to null (→ GitHubConnectorService's env-token fallback, same as
+   * before this ticket) when nothing resolves — never blocks the sweep.
+   */
+  private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
+    if (!ticket.workspace_id) return null;
+    const boardEnvRepositories = await this._resolveBoardEnvRepositories(ticket);
+    const picked = pickBaseRepoResourceId(ticket.base_repo_resource_id, boardEnvRepositories);
+    if (!picked.resourceId) return null;
+    const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: picked.resourceId } });
+    if (resource && resource.workspace_id !== null && resource.workspace_id !== ticket.workspace_id) return null;
+    return resource?.credential_id || null;
+  }
+
+  /**
+   * Board-environment repositories for the ticket's board — the fallback
+   * source `pickBaseRepoResourceId` consults when the ticket carries no
+   * `base_repo_resource_id` of its own. Mirrors trigger-loop.service.ts:
+   * 2614-2654's `boardEnvRepositories` construction exactly (workspace default
+   * ⊕ board override, key-level merge) so this service can never disagree
+   * with dispatch about which repo a ticket resolves to. Degrades to `[]` (→
+   * no fallback candidate) on any missing link (no column, no board, no
+   * environment_config on either row) — never throws, never blocks the sweep.
+   */
+  private async _resolveBoardEnvRepositories(ticket: Ticket): Promise<EnvRepoRef[]> {
+    if (!ticket.column_id) return [];
+    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    if (!col?.board_id) return [];
+    const [board, workspace] = await Promise.all([
+      this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } }),
+      ticket.workspace_id
+        ? this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+        : Promise.resolve(null),
+    ]);
+    const mergedEnv = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
+    return mergedEnv?.repositories || [];
+  }
+
+  /**
+   * Record one more sweep that could not read the run at all (see class
+   * docstring's "Poll-failure surfacing"). CAS-conditioned on `rawContext`
+   * like every other context mutation in this file — a losing race just
+   * means another sweep already recorded (or is recording) the same streak.
+   * Posts an alert comment the sweep that crosses `alertAfterFailures`
+   * (never resolves/clears the wait — this is a notification, not an
+   * outcome).
+   *
+   * Review round 2 (ticket 9bbe9146): `alerted` must NOT be written true in
+   * this same CAS. It used to be — but the comment INSERT happens AFTER this
+   * CAS commits, so a transient INSERT failure (caught and warn-logged by
+   * `_postPollFailureAlert`) left `alerted:true` durably recorded with no
+   * comment ever posted, and every later sweep saw `alreadyAlerted:true` and
+   * never retried — a single DB hiccup permanently silenced the exact alert
+   * this ticket exists to guarantee. Instead: advance the counter
+   * unconditionally, THEN attempt the INSERT, and only flip `alerted:true` in
+   * a SEPARATE follow-up CAS once the INSERT is confirmed to have succeeded.
+   * If that INSERT (or the follow-up CAS) fails, `alerted` stays false and
+   * the next sweep retries — safe to retry because the comment's dedupe key
+   * is `firstFailureAt`-stable, so a re-attempted INSERT after a already-
+   * successful one just no-ops via `.orIgnore()` instead of double-posting.
+   */
+  private async _trackPollFailure(ticket: Ticket, rawContext: string, ctx: CiWaitContext, nowMs: number): Promise<void> {
+    const prior = ctx.poll_issue;
+    const consecutiveFailures = (prior?.consecutive_failures || 0) + 1;
+    const firstFailureAt = prior?.first_failure_at || new Date(nowMs).toISOString();
+    const alreadyAlerted = !!prior?.alerted;
+    const shouldAlert = !alreadyAlerted && consecutiveFailures >= this.config.alertAfterFailures;
+    const nextIssue: CiWaitPollIssue = {
+      consecutive_failures: consecutiveFailures,
+      first_failure_at: firstFailureAt,
+      alerted: alreadyAlerted,
+    };
+    const nextCtx: CiWaitContext = { ...ctx, poll_issue: nextIssue };
+    const nextJson = JSON.stringify(nextCtx);
+    const won = await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, nextJson);
+    if (!won || !shouldAlert) return;
+
+    const posted = await this._postPollFailureAlert(ticket, ctx, consecutiveFailures, firstFailureAt);
+    if (!posted) return; // INSERT failed — leave alerted=false so the next sweep retries with the same dedupe key
+
+    const alertedCtx: CiWaitContext = { ...nextCtx, poll_issue: { ...nextIssue, alerted: true } };
+    // CAS against `nextJson` (what we just wrote), not the original
+    // `rawContext` — losing this race means another sweep already advanced
+    // `ci_wait_context` past it (e.g. a concurrent success cleared the
+    // streak), so there is nothing left here to mark alerted on.
+    await this.ciWaitService.tryUpdateContext(ticket.id, nextJson, JSON.stringify(alertedCtx));
+  }
+
+  /** A poll finally succeeded — drop the failure streak entirely so a LATER
+   *  unrelated streak starts counting from zero and can alert again. */
+  private async _clearPollFailure(ticket: Ticket, rawContext: string, ctx: CiWaitContext): Promise<void> {
+    const nextCtx: CiWaitContext = { ...ctx, poll_issue: undefined };
+    await this.ciWaitService.tryUpdateContext(ticket.id, rawContext, JSON.stringify(nextCtx));
+  }
+
+  /**
+   * Best-effort notification comment — deliberately NOT routed through
+   * `CiWaitService.claimDelivery` (that CASes `pending_ci_wait` false, which
+   * would be wrong here: the wait is still legitimately active, only
+   * struggling to read its run). Dedupe key is stable for the whole streak
+   * (`firstFailureAt`, not `nowMs`) so a retry after a mid-write crash can
+   * never double-post — same `.orIgnore()` idempotency column the resolution
+   * comment uses (see `_deliver`). Returns whether the INSERT itself
+   * succeeded (`.orIgnore()` skipping an already-posted duplicate still
+   * counts as success) — the caller only durably records `alerted:true` when
+   * this returns true, see `_trackPollFailure`.
+   */
+  private async _postPollFailureAlert(ticket: Ticket, ctx: CiWaitContext, consecutiveFailures: number, firstFailureAt: string): Promise<boolean> {
+    const dedupeKey = `ci-wait-poll-alert:${ticket.id}:${firstFailureAt}`;
+    try {
+      await this.dataSource.getRepository(Comment)
+        .createQueryBuilder()
+        .insert()
+        .into(Comment)
+        .values({
+          ticket_id: ticket.id,
+          workspace_id: ticket.workspace_id || '',
+          author_type: 'system',
+          author_id: '',
+          author: 'CiWaitResumeService',
+          content:
+            `⚠️ **CI 대기 폴링 반복 실패** — ${ctx.owner}/${ctx.repo} run ${ctx.run_id} 상태를 ${consecutiveFailures}회 연속(최초 실패 ${firstFailureAt}) 확인하지 못했습니다. ` +
+            'GitHub 자격증명(credential) 또는 run_id를 확인하세요. 대기 자체는 계속 유지되며, ' +
+            `계속 실패하면 최대 ${Math.round(this.config.maxAgeMs / 3_600_000)}시간 후 타임아웃으로 자동 해제됩니다.`,
+          type: 'note',
+          operational_recurrence_key: dedupeKey,
+        })
+        .orIgnore()
+        .execute();
+      return true;
+    } catch (e) {
+      this.logService.warn('CI', 'ci-wait poll-failure alert comment failed', { err: String(e), ticket_id: ticket.id });
+      return false;
+    }
   }
 
   private _formatResolvedMessage(ctx: CiWaitContext, run: GitHubWorkflowRun): string {

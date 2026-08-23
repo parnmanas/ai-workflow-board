@@ -49,6 +49,12 @@ export interface McpAgentContext {
   clientType?: 'subagent' | 'managed-subagent' | 'runtime-child';
   runtimeRunId?: string;
   executionStrategy?: 'single' | 'delegated' | 'swarm';
+  // Ticket ee26302d: opt-in reduced MCP tool surface for small-context
+  // backends, declared via X-AWB-Tool-Profile on the initialize request.
+  // Undefined/'full' = unchanged behavior (every pre-existing client).
+  // Stamped once at session init and never changes for the session's
+  // lifetime — see shared/tool-profiles.ts for what 'compact' does.
+  toolProfile?: 'full' | 'compact';
 }
 
 interface SessionEntry {

@@ -85,7 +85,21 @@ export function renderMissionPrompt(args: {
 
   lines.push(section('Objective', mission.objective));
   if (mission.context) lines.push(section('Context', mission.context));
+  if (mission.method) lines.push(section('Method — how to approach this', mission.method));
   if (mission.acceptance_criteria) lines.push(section('Acceptance criteria', mission.acceptance_criteria));
+  if (Array.isArray(mission.completion_criteria) && mission.completion_criteria.length > 0) {
+    const body = mission.completion_criteria
+      .map((c) => `- [${c.met ? 'x' : ' '}] \`${c.key}\` — ${c.description}${c.note ? ` (${c.note})` : ''}`)
+      .join('\n');
+    lines.push(
+      section(
+        'Structured completion criteria (BLOCKING)',
+        `${body}\n\ncomplete_orchestration_mission(status:"completed") is REJECTED until every item above is ` +
+          `checked. Flip one with \`mcp__awb__update_orchestration_criteria\` once you have verified it — do ` +
+          `not check one you have not actually confirmed.`,
+      ),
+    );
+  }
   if (teamPrompt) lines.push(section('Team standing instructions', teamPrompt));
 
   lines.push(section('Your team', renderRoster(roster)));
@@ -163,6 +177,8 @@ export function renderStepPrompt(args: {
   orchestratorName: string;
   dependencies: DependencyContext[];
   isRetry: boolean;
+  /** agent-manager가 스폰 전에 프로비저닝하는 working_dir-relative 폴더(티켓 2dc3c62f). */
+  workspaceFolder?: string;
 }): string {
   const { mission, step, teamName, orchestratorName, dependencies } = args;
   const lines: string[] = [];
@@ -182,6 +198,16 @@ export function renderStepPrompt(args: {
   lines.push('');
 
   lines.push(section('Mission objective (why this step exists)', mission.objective));
+  if (mission.method) lines.push(section('Method — how the orchestrator wants this approached', mission.method));
+  if (args.workspaceFolder) {
+    lines.push(
+      section(
+        'Working folder (server-decided — do NOT improvise)',
+        `\`<working_dir>/${args.workspaceFolder}\` — prepared for you and set as your current directory before ` +
+          `you were spawned. Work only here; do not \`cd\` elsewhere or clone a fresh copy yourself.`,
+      ),
+    );
+  }
   lines.push(section('Your task', step.instructions));
   if (step.acceptance_criteria) lines.push(section('Done when', step.acceptance_criteria));
 

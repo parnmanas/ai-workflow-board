@@ -782,3 +782,60 @@ export async function diffChangedPaths(
   );
   return stdout.split('\n').map((line) => line.trim()).filter(Boolean);
 }
+
+/** 한 줄의 `git diff --name-status -M` 출력 — `status`는 `A`/`M`/`D`/`R`
+ *  (그 외 `T`/`U` 등도 그대로 첫 글자를 담는다, `-M`만 켠 상태라 `C`는
+ *  나오지 않음). `status==='R'`일 때만 `oldPath`/`similarity`(0-100, `R100`
+ *  등 상태 코드 뒤 숫자)가 채워진다. */
+export interface DiffPathChange {
+  status: string;
+  path: string;
+  oldPath: string | null;
+  similarity: number | null;
+}
+
+/**
+ * ticket 964014f5(증분 갱신, DESIGN.md 축 4) — `diffChangedPaths`의 rename-
+ * aware 버전. `--name-only` 대신 `--name-status -M`을 써서 rename/move를
+ * `R<similarity>\t<old>\t<new>` 줄로 명시적으로 받는다. incremental/
+ * git-diff-batch.ts의 `git diff <last_indexed_commit>..HEAD --name-status -M`
+ * 스코프 배치 트리거(브랜치 전환/대량 외부 편집)가 이 함수로 rename을
+ * 감지해 Phase A의 무조건 재해소 분기(REVIEW-NOTES.md I2)를 결정한다.
+ * 검증 규율은 `diffChangedPaths`와 동일 — 두 ref 모두 `isValidRef`를
+ * 통과해야 하고, 경로 목록은 `--`로 ref spec과 분리한다.
+ */
+export async function diffChangedPathsWithStatus(
+  repoPath: string,
+  fromRef: string,
+  toRef: string,
+  opts: DiffChangedPathsOptions = {},
+): Promise<DiffPathChange[]> {
+  if (!isValidRef(fromRef) || !fromRef.trim()) throw new GitReadError('잘못된 시작 ref 입니다.');
+  if (!isValidRef(toRef) || !toRef.trim()) throw new GitReadError('잘못된 끝 ref 입니다.');
+  const sep = opts.threeDot ? '...' : '..';
+  const spec = `${fromRef.trim()}${sep}${toRef.trim()}`;
+  const { stdout } = await runGit(
+    ['diff', '--name-status', '-M', spec, '--'],
+    { cwd: repoPath, maxBytes: opts.maxBytes ?? 4 * 1024 * 1024 },
+  );
+  const out: DiffPathChange[] = [];
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const cols = line.split('\t');
+    const statusToken = cols[0] ?? '';
+    if (statusToken.startsWith('R') && cols.length >= 3) {
+      const similarity = parseInt(statusToken.slice(1), 10);
+      out.push({
+        status: 'R',
+        oldPath: cols[1],
+        path: cols[2],
+        similarity: Number.isFinite(similarity) ? similarity : null,
+      });
+      continue;
+    }
+    if (cols.length < 2) continue;
+    out.push({ status: statusToken.slice(0, 1) || 'M', oldPath: null, path: cols[1], similarity: null });
+  }
+  return out;
+}

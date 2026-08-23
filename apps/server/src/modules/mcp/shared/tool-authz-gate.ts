@@ -139,6 +139,11 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   list_orchestration_teams: 'caller',
   list_orchestration_missions: 'caller',
   create_orchestration_mission: 'caller',
+  // 티켓 2dc3c62f: 신규 도구라 KNOWN_EXISTING_TOOLS에 없다. 'caller'는
+  // update_orchestration_step/complete_orchestration_mission과 같은 태도다 —
+  // 진짜 인가는 게이트가 아니라 runner service 안 updateCriteria()의
+  // requireOrchestrator() 검사다.
+  update_orchestration_criteria: 'caller',
 
   // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
   // what the handler already enforces on its own: it resolves the caller's
@@ -159,6 +164,24 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // stricter tier to protect.
   await_ci_run: 'caller',
   cancel_ci_wait: 'caller',
+
+  // ticket d35b7b7d (Ontology Graph 6/7, DESIGN.md 축 6): new tools, not in
+  // KNOWN_EXISTING_TOOLS. 'caller' mirrors what every handler already
+  // enforces on its own — resolveGraph()/resolveOrProvision() in
+  // ontology-tools.ts / ontology-lifecycle.service.ts scope every graph to
+  // its (workspace_id, resource_id, folder_path) or a graph_id already
+  // bound to that workspace; a graph_id from another workspace resolves to
+  // `not_found` rather than leaking existence. All six are read-only
+  // (graph_status's only mutation is auto-provisioning/kicking off its own
+  // build, never touching another caller's data) — no cross-agent/
+  // cross-resource surface here for a stricter tier to protect, only a
+  // resolvable caller requirement.
+  graph_status: 'caller',
+  graph_find_symbol: 'caller',
+  graph_module_summary: 'caller',
+  graph_neighbors: 'caller',
+  graph_blast_radius: 'caller',
+  graph_call_path: 'caller',
 };
 
 /**

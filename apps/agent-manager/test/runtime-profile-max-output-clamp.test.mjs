@@ -16,10 +16,12 @@ import {
   DEFAULT_SAFETY_MARGIN_TOKENS,
   MIN_OUTPUT_TOKENS,
   RuntimeLease,
+  TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS,
   estimatePromptTokens,
   estimateTokens,
   resolveEffectiveMaxOutputTokens,
   resolveMaxOutputTokensEnv,
+  resolveToolProfileHeader,
   validateRuntimeProfile,
 } from '../dist/lib/runtime-profiles.js';
 
@@ -251,6 +253,56 @@ test('claudeEnv(): profile.env 이 CLAUDE_CODE_MAX_CONTEXT_TOKENS 를 여전히 
     {},
   );
   assert.equal(lease.claudeEnv().CLAUDE_CODE_MAX_CONTEXT_TOKENS, 'operator-override');
+});
+
+// ── resolveToolProfileHeader (ticket ee26302d, faa32380 감사 후속) ────
+
+test('resolveToolProfileHeader: profile 이 null/undefined 면 → {} (기존 프로필 영향 없음)', () => {
+  assert.deepEqual(resolveToolProfileHeader(null), {});
+  assert.deepEqual(resolveToolProfileHeader(undefined), {});
+});
+
+test('resolveToolProfileHeader: profile 에 context_window 없으면 → {}', () => {
+  assert.deepEqual(
+    resolveToolProfileHeader({ id: 'p', protocol: 'anthropic-compatible', base_url: 'http://x', model: 'm' }),
+    {},
+  );
+});
+
+test('resolveToolProfileHeader: context_window 이 threshold 이상이면 → {} (클라우드 tier 는 옵트인되지 않는다)', () => {
+  assert.deepEqual(
+    resolveToolProfileHeader({
+      id: 'p', protocol: 'anthropic-compatible', base_url: 'http://x', model: 'm',
+      context_window: TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS,
+    }),
+    {},
+    '경계값(threshold 정확히 일치)은 >= 비교라 옵트인되지 않는다',
+  );
+  assert.deepEqual(
+    resolveToolProfileHeader({
+      id: 'p', protocol: 'anthropic-compatible', base_url: 'http://x', model: 'm',
+      context_window: 200_000, // Haiku 4.5 급 cloud tier
+    }),
+    {},
+  );
+});
+
+test('resolveToolProfileHeader: context_window 이 threshold 미만이면 compact 로 옵트인한다', () => {
+  assert.deepEqual(
+    resolveToolProfileHeader({
+      id: 'p', protocol: 'anthropic-compatible', base_url: 'http://x', model: 'm',
+      context_window: TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS - 1,
+    }),
+    { 'X-AWB-Tool-Profile': 'compact' },
+    '경계값 바로 아래(threshold - 1)는 옵트인되어야 한다',
+  );
+  assert.deepEqual(
+    resolveToolProfileHeader({
+      id: 'p', protocol: 'anthropic-compatible', base_url: 'http://x', model: 'm',
+      context_window: REAL_CONTEXT_WINDOW, // 65,536 — ticket 7d8ea7c9 사고의 실제 context_window
+    }),
+    { 'X-AWB-Tool-Profile': 'compact' },
+  );
 });
 
 // ── validateRuntimeProfile: 신규 선택적 필드 ──────────────────────────
