@@ -607,6 +607,35 @@ export abstract class CliAdapter {
   }
 
   /**
+   * `cwd`를 이 에이전트의 CLI 설정 홈에서 멱등하게 trust-승인 상태로 표시한다
+   * (ticket 152e3606) — Action/QA/security run 작업폴더(`.awb/act|qa|base`)가
+   * 프로비저닝/확정된 직후, {@link readTrustMeta}를 참조하기 전에 디스패치
+   * 레이어가 호출한다. AWB 스스로 그 폴더를 만들고 `.claude/settings.json`도
+   * 직접 심었으므로 사람이 남길 trust 판단이 없다 — 읽기 전용 preflight
+   * ({@link readTrustMeta} / `decideCliTrustReadiness`, ticket 48aeab6e)가
+   * 지금까지 할 수 있었던 건 "감지 후 차단"뿐이었는데, 비대화형 run
+   * (Action/QA/security)에는 그 대화상자를 수락해줄 사람이 아예 없어서
+   * 차단이 곧 무한 대기로 이어졌다 — 이 함수가 그 간극을 메운다.
+   *
+   * 정신적으로는 반드시 best-effort여야 한다: 여기서 던진 에러는 호출자가
+   * 잡아서 로그만 남기고, 원래대로라면 성공했을 디스패치를 절대 중단시키지
+   * 않는다(예: `bypassPermissions` 아래에서는 trust 자체가 무의미하므로).
+   * 베이스 기본값은 no-op — {@link requiresWorkspaceTrust}를 구현하는
+   * 어댑터에만 의미가 있다.
+   *
+   * 주의: 티켓 디스패치가 쓰는 per-ticket worktree(`.awb/wt/<ticket>`)에는
+   * 이 시딩을 걸지 않는다 — 그 경로는 ticket 48aeab6e가 의도적으로 설계한
+   * 게이트(비-bypass `permission_mode`를 설정한 운영자는 trust 승인을 사람이
+   * 직접 하길 원한다)를 갖고 있고, 실제로 `cli-readiness-block-pend.test.mjs`가
+   * 그 계약을 고정해둔 테스트다. 이번 ticket 152e3606이 고치는 사고는
+   * harness/permission_mode 개념 자체가 없는 Action/QA/security run
+   * 디스패치 경로에 한정된다.
+   */
+  async ensureWorkspaceTrust(_cliHomeDir: string, _cwd: string): Promise<void> {
+    return;
+  }
+
+  /**
    * Optional hook called once per spawn_agent after `ensureCliHomeDir`
    * creates the per-agent dir. Override to copy / symlink any
    * credentials or shared state the CLI needs before it can run — most

@@ -109,6 +109,30 @@ function normalizeEffort(effort?: string | null): string | null {
   return CLAUDE_EFFORT_LEVELS.has(mapped) ? mapped : null;
 }
 
+// cli_home_dir별 `.claude.json` read-modify-write 뮤텍스(아래 ensureWorkspaceTrust
+// 용) — 같은 에이전트 밑에서 서로 다른 cwd로 향하는 두 동시 디스패치가 이 뮤텍스
+// 없이는 공유 파일에 대한 read-modify-write를 레이스해 한쪽이 심은 entry를
+// 잃어버릴 수 있다. run-provisioner.ts의 withFolderLock / WorktreeManager의
+// #withPoolLock과 동일한 chained-promise 뮤텍스 모양을 그대로 따온 것 — 이
+// 파일이 지키는 자원(cli-home당 JSON 파일 하나)이 claude 어댑터 로컬이라 여기에
+// 별도로 둔다.
+const trustSeedLocks = new Map<string, Promise<void>>();
+
+async function withTrustSeedLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = trustSeedLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => (release = r));
+  const composed = prev.then(() => mine);
+  trustSeedLocks.set(key, composed);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (trustSeedLocks.get(key) === composed) trustSeedLocks.delete(key);
+  }
+}
+
 export class ClaudeCliAdapter extends CliAdapter {
   static cliType = 'claude';
 
@@ -424,6 +448,49 @@ export class ClaudeCliAdapter extends CliAdapter {
     }
     const entry = parsed?.projects?.[cwd];
     return { trusted: entry?.hasTrustDialogAccepted === true };
+  }
+
+  /**
+   * `<cliHomeDir>/.claude.json`의 `projects[cwd].hasTrustDialogAccepted`를
+   * 멱등하게 `true`로 설정한다(ticket 152e3606) — 근거는
+   * {@link CliAdapter.ensureWorkspaceTrust} 참고. 파일의 다른 모든 키(onboarding
+   * 상태, 다른 project들, MCP 설정 등)는 그대로 보존하며, 이 boolean 하나만
+   * 추가하거나 뒤집는다.
+   *
+   * 파일이 없으면 새로 만든다(ENOENT는 readTrustMeta와 마찬가지로 "아직 보존할
+   * 게 없다"는 확실한 신호). 파일은 있지만 손상된 경우엔 손대지 않고 시딩 자체를
+   * 조용히 건너뛴다 — 파싱 불가능한 파일이 원래 어떤 모양이어야 했는지 알 수
+   * 없으므로, 덮어쓰면 이 함수가 건드릴 이유가 없는 실제 CLI 상태(onboarding
+   * 플래그, 다른 project들의 trust, MCP 서버 항목)를 파괴할 위험이 있다.
+   * read-modify-write 전체가 cliHomeDir별 락 안에서 돌아가므로, 같은 에이전트의
+   * 다른 cwd를 시딩하는 동시 호출이 이 쓰기를 절대 덮어쓸 수 없다.
+   */
+  async ensureWorkspaceTrust(cliHomeDir: string, cwd: string): Promise<void> {
+    await withTrustSeedLock(cliHomeDir, async () => {
+      const path = join(cliHomeDir, '.claude.json');
+      let parsed: any = {};
+      try {
+        const raw = await fsp.readFile(path, 'utf8');
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return;
+        }
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+        parsed = {};
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+      if (!parsed.projects || typeof parsed.projects !== 'object' || Array.isArray(parsed.projects)) {
+        parsed.projects = {};
+      }
+      const existing = parsed.projects[cwd];
+      const entry = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+      if (entry.hasTrustDialogAccepted === true) return;
+      entry.hasTrustDialogAccepted = true;
+      parsed.projects[cwd] = entry;
+      await fsp.writeFile(path, JSON.stringify(parsed, null, 2), 'utf8');
+    });
   }
 
   async prepareCliHome(

@@ -2558,6 +2558,17 @@ export class EventDispatcher {
     // 분기에서 별도로 처리된다.
     if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
       const adapter = createAdapter(agentContext.cli);
+      // 참고 (ticket 152e3606): 여기서는 의도적으로 workspace trust를 자동
+      // 시딩하지 않는다. chat-room run-dispatch 경로(Action/QA/security)와
+      // 달리, 이 티켓-디스패치 게이트는 ticket 48aeab6e가 의도적으로 설계한
+      // 계약이다 — 비-bypassPermissions harness를 설정한 운영자는 티켓
+      // 체크아웃이 비대화형으로 돌기 전에 사람이 trust를 직접 확인하길
+      // 원한다(cli-readiness-block-pend.test.mjs의 "pends on the first
+      // abort" 케이스 참고). 여기서 자동 시딩하면 그 운영자의 선택을 조용히
+      // 무력화하게 된다. 이 티켓이 고치는 사고는 harness 자체를 전혀 싣지
+      // 않는 Action/QA/security run에 국한된다(event-dispatcher.ts의 "Chat
+      // room run dispatch" 절 참고) — 그쪽엔 bypassPermissions가 암묵적으로
+      // 항상 적용돼 보존해야 할 사람-확인 게이트가 애초에 없다.
       const trustRequired = adapter.requiresWorkspaceTrust(harness);
       const trustMeta = trustRequired
         ? await adapter.readTrustMeta(agentContext.cli_home_dir, agentContext.cwd)
@@ -4128,6 +4139,28 @@ export class EventDispatcher {
       // Pin the prepared folder as the subagent cwd (matches the prompt path).
       if (agentContext) runContext = { ...agentContext, cwd: result.dir };
       log(`Run workspace ready: run=${runProvision.run_id.slice(0, 8)} dir=${result.dir}`);
+      // ticket 152e3606: run 작업폴더의 workspace trust를 시딩한다. run의
+      // CLI 세션은 완전히 비대화형이라 trust 대화상자를 수락해줄 사람이
+      // 없다 — 미신뢰 cwd는 경고만 내는 게 아니라 repo의
+      // `.claude/settings.json` permissions.allow를 조용히 무시해버린다(이
+      // 티켓이 존재하는 이유가 된 사고: allow 항목 22개가 무시되고 run이
+      // 서버에 아무 실패도 안 보이는 채로 멈춤). AWB가 이 폴더를 직접
+      // 만들었으므로 사람이 남길 trust 판단이 없다. 위쪽 티켓-디스패치
+      // 게이트와 달리 이 경로는 spawn에 `harness`를 전혀 싣지 않으므로
+      // (chatSessionManager.dispatch / 아래 subagentManager.spawn 모두
+      // chat-room 턴엔 harness 필드가 없다) 이것과 짝지을 만한 차단-후-중단
+      // 체크 자체가 없다 — 시딩이 이 경로의 수정 전부다. best-effort:
+      // 시딩 실패로 run 자체를 중단시키지 않는다.
+      if (runContext?.cwd && runContext?.cli_home_dir && runContext?.cli !== 'hermes') {
+        await createAdapter(runContext.cli)
+          .ensureWorkspaceTrust(runContext.cli_home_dir, runContext.cwd)
+          .catch((err: any) => {
+            log(
+              `[cli-trust] ensureWorkspaceTrust failed: run=${runProvision.run_id.slice(0, 8)} ` +
+                `cli=${runContext?.cli} cwd=${runContext?.cwd}: ${String(err?.message ?? err)}`,
+            );
+          });
+      }
     }
     // ticket 9fd27487: composeChatRoomPrompt에 폴더 경계 블록 트리거로 전달된다.
     // 프로비저닝 실패(FAILURE)라면 위에서 이미 "런 작업폴더 프로비저닝 실패" abort
