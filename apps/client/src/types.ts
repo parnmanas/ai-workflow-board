@@ -182,10 +182,10 @@ export interface Resource {
   updated_at: string;
 }
 
-// Embedded snapshot of the ticket's base repository — populated by
-// loadTicketFull on the server from ticket.base_repo_resource_id, or (when
-// that's unset) backfilled from the board/workspace environment_config
-// default repo (ticket 112ea3c5) — null only when neither resolves.
+// 티켓 base repository의 임베디드 스냅샷 — 서버 loadTicketFull이
+// ticket.base_repo_resource_id로 채우거나, 그게 비어 있으면 board/workspace
+// environment_config의 default repo로 백필한다(ticket 112ea3c5) — 둘 다
+// resolve 안 될 때만 null.
 export interface TicketBaseRepo {
   id: string;
   name: string;

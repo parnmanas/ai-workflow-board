@@ -29,6 +29,11 @@
 /** Minimal shape of a (merged) environment_config repository entry. */
 export interface EnvRepoRef {
   resource_id?: string;
+  /** 레거시 per-repo branch 오버라이드(write 경로는 이제 resource_id만
+   *  받지만 — ticket 8fbe90e9 — read 경로는 여전히 permissive라 예전에
+   *  저장된 row는 아직 이 값을 가질 수 있다). 존재하면 Resource 자신의
+   *  default_branch보다 우선한다(리뷰 지적, ticket 112ea3c5). */
+  branch?: string;
 }
 
 export type BaseRepoSource = 'ticket' | 'board_env' | 'none';
@@ -38,6 +43,10 @@ export interface PickedBaseRepo {
   resourceId: string;
   /** Where it came from — for logging / audit only. */
   source: BaseRepoSource;
+  /** `source === 'board_env'`이고 그 entry가 branch를 선언했을 때만 채워지는
+   *  board-env entry 자신의 branch 오버라이드. 그 외('ticket'/'none')엔 ''.
+   *  비어 있으면 호출자는 Resource 자신의 default_branch로 폴백한다. */
+  branch: string;
 }
 
 /**
@@ -56,12 +65,12 @@ export function pickBaseRepoResourceId(
   envRepositories: EnvRepoRef[] | null | undefined,
 ): PickedBaseRepo {
   const ticketId = (ticketBaseRepoId || '').trim();
-  if (ticketId) return { resourceId: ticketId, source: 'ticket' };
+  if (ticketId) return { resourceId: ticketId, source: 'ticket', branch: '' };
   for (const repo of envRepositories || []) {
     const rid = (repo?.resource_id || '').trim();
-    if (rid) return { resourceId: rid, source: 'board_env' };
+    if (rid) return { resourceId: rid, source: 'board_env', branch: (repo?.branch || '').trim() };
   }
-  return { resourceId: '', source: 'none' };
+  return { resourceId: '', source: 'none', branch: '' };
 }
 
 /**

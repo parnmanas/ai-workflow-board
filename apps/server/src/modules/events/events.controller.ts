@@ -234,12 +234,12 @@ export class EventsController implements OnModuleDestroy {
   }
 
   /**
-   * ticket 112ea3c5: an unset `base_repo_resource_id` inherits the board
-   * environment repository — same board-env backfill the dispatch path
-   * (trigger-loop.service.ts, ticket 8c3befa8) and `loadTicketFull` apply, so
-   * the archive-time worktree cleanup this feeds (agent-manager's
-   * `#cleanupArchivedTicketWorkspace`) targets the SAME resource the ticket
-   * actually ran in instead of degrading to a scan-every-managed-repo sweep.
+   * ticket 112ea3c5: `base_repo_resource_id`가 비어 있으면 board environment
+   * repository를 상속한다 — dispatch 경로(trigger-loop.service.ts, ticket
+   * 8c3befa8)와 `loadTicketFull`이 이미 적용하는 것과 동일한 board-env 백필이다.
+   * 이 값이 먹이는 archive 시점 worktree 정리(agent-manager의
+   * `#cleanupArchivedTicketWorkspace`)가 티켓이 실제로 작업한 그 resource를
+   * 정확히 타깃하도록 하고, "모든 managed repo 스캔"으로 퇴화하지 않게 한다.
    */
   private async resolveTicketRepositoryResourceId(ticketId: string): Promise<string> {
     if (!ticketId) return '';

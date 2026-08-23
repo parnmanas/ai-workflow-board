@@ -449,15 +449,14 @@ export async function loadTicketFull(
       out.base_repo = null;
     }
   } else {
-    // ticket 112ea3c5: an unset base_repo_resource_id means "inherit the
-    // board environment repository", not "no repository" — the same
-    // board-env backfill trigger-loop.service.ts's dispatch path already
-    // applies to the agent_trigger payload (ticket 8c3befa8). Every ticket
-    // READER (MCP get_ticket, REST detail, agent-api → agent-manager's
-    // fetchTicketContext) must resolve to the SAME repo, or a caller that
-    // reads the ticket mid-session sees base_repo:null while the dispatch
-    // prompt named a concrete repo — the exact disagreement that let an
-    // assignee fall back into an unrelated resource's worktree.
+    // ticket 112ea3c5: base_repo_resource_id가 비어 있다는 건 "repo 없음"이
+    // 아니라 "board environment repository를 상속한다"는 뜻이다 — dispatch
+    // 경로(trigger-loop.service.ts)가 agent_trigger payload에 이미 적용하는
+    // 것과 동일한 board-env 백필이다(ticket 8c3befa8). 모든 티켓 READER(MCP
+    // get_ticket, REST 상세, agent-api → agent-manager의 fetchTicketContext)가
+    // 동일한 repo로 resolve해야 한다 — 그렇지 않으면 세션 중 티켓을 재조회한
+    // caller가 base_repo:null을 보게 되고, 이것이 assignee가 무관한 resource의
+    // worktree로 빠졌던 사고의 정확한 원인이다.
     out.base_repo = null;
     try {
       const col = ticket.column_id
@@ -484,9 +483,17 @@ export async function loadTicketFull(
           id: repo.id,
           name: repo.name,
           url: repo.url,
-          default_branch: repo.default_branch || '',
+          // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch
+          // 오버라이드가 resource의 default_branch보다 우선한다. 그렇지 않으면
+          // board가 "release"를 지정해도 read 경로는 resource의 "main"만 보여줘
+          // dispatch 경로(위 backfill과 동일 규칙)와 어긋난다.
+          default_branch: picked.branch || repo.default_branch || '',
           type: repo.type,
         };
+        // out.base_branch(원본 컬럼)는 그대로 둔다 — 클라이언트 편집 폼이 이
+        // 필드를 그대로 바인딩하므로, 상속된 값을 여기 써넣으면 "명시적으로
+        // 지정된 branch"처럼 보일 위험이 있다. 유효 branch는 base_repo.default_branch
+        // 하나로 노출한다(위 회귀 테스트가 검증하는 필드).
       }
     } catch {
       out.base_repo = null;

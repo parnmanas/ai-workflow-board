@@ -2680,7 +2680,7 @@ candidate's branch or move the ticket.
     // Merged board+workspace environment repositories, captured for the base_repo
     // backfill below (goal 1, ticket 8c3befa8). Populated inside the resolve
     // try so a base-repo-less ticket can inherit the board's default repo.
-    let boardEnvRepositories: { resource_id?: string }[] = [];
+    let boardEnvRepositories: { resource_id?: string; branch?: string }[] = [];
     // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
     // Null-safe read via the shared resolver — a missing/malformed column falls
     // back to DEFAULT_WORKTREE_MODE ('per_ticket'). Shipped on the trigger payload
@@ -2805,7 +2805,10 @@ candidate's branch or move the ticket.
           if (r) {
             baseRepoId = r.id;
             baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
-            if (!baseBranch) baseBranch = baseRepo.default_branch;
+            // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch 오버라이드가
+            // resource의 default_branch보다 우선한다 — 그렇지 않으면 board가 "release"를
+            // 지정해도 resource의 "main"으로 조용히 덮여써진다.
+            if (!baseBranch) baseBranch = picked.branch || baseRepo.default_branch;
             this.logService.info('MCP', 'base_repo backfilled from board environment (ticket 8c3befa8)', {
               ticket_id: ticket.id, base_repo_id: baseRepoId, base_branch: baseBranch, source: picked.source,
             });
@@ -3053,9 +3056,9 @@ candidate's branch or move the ticket.
           priority_index: priorityIndex(ticket.priority),
           ticket_created_at: createdAtIso,
           force_respawn: forceRespawn,
-          // ticket 112ea3c5 (AC #8): resolved repo/branch this dispatch bound
-          // to — ticket-own or board-env-backfilled — so a "wrong repo"
-          // report can be diagnosed from this ticket's own audit trail alone.
+          // ticket 112ea3c5 (수용 기준 #8): 이 dispatch가 바인딩한 resolved
+          // repo/branch — ticket 고유든 board-env 백필이든 — 를 남겨, "잘못된
+          // repo" 신고를 이 티켓 자체의 audit trail만으로 진단할 수 있게 한다.
           base_repo_id: baseRepoId || null,
           base_repo_url: baseRepo?.url || null,
           base_branch: baseBranch || null,

@@ -39,12 +39,12 @@ function code(relPath) {
 
 test('ticket base repo wins over the board environment', () => {
   const r = pickBaseRepoResourceId('ticket-repo', [{ resource_id: 'env-repo' }]);
-  assert.deepEqual(r, { resourceId: 'ticket-repo', source: 'ticket' });
+  assert.deepEqual(r, { resourceId: 'ticket-repo', source: 'ticket', branch: '' });
 });
 
 test('empty ticket repo falls back to the board environment first repository', () => {
   const r = pickBaseRepoResourceId('', [{ resource_id: 'env-repo-0' }, { resource_id: 'env-repo-1' }]);
-  assert.deepEqual(r, { resourceId: 'env-repo-0', source: 'board_env' });
+  assert.deepEqual(r, { resourceId: 'env-repo-0', source: 'board_env', branch: '' });
 });
 
 test('whitespace-only ticket repo is treated as empty and falls back', () => {
@@ -58,14 +58,34 @@ test('url-only environment repos (no resource_id) are NOT a valid fallback', () 
   // recreate the very push failure this ticket prevents. Skip it, pick the
   // first entry that DOES have a resource_id.
   const r = pickBaseRepoResourceId('', [{ url: 'https://x/y.git' }, { resource_id: 'real-repo' }]);
-  assert.deepEqual(r, { resourceId: 'real-repo', source: 'board_env' });
+  assert.deepEqual(r, { resourceId: 'real-repo', source: 'board_env', branch: '' });
 });
 
 test('no ticket repo and no environment repo → none', () => {
-  assert.deepEqual(pickBaseRepoResourceId('', []), { resourceId: '', source: 'none' });
-  assert.deepEqual(pickBaseRepoResourceId('', null), { resourceId: '', source: 'none' });
-  assert.deepEqual(pickBaseRepoResourceId(null, undefined), { resourceId: '', source: 'none' });
-  assert.deepEqual(pickBaseRepoResourceId('', [{ url: 'https://x/y.git' }]), { resourceId: '', source: 'none' });
+  assert.deepEqual(pickBaseRepoResourceId('', []), { resourceId: '', source: 'none', branch: '' });
+  assert.deepEqual(pickBaseRepoResourceId('', null), { resourceId: '', source: 'none', branch: '' });
+  assert.deepEqual(pickBaseRepoResourceId(null, undefined), { resourceId: '', source: 'none', branch: '' });
+  assert.deepEqual(pickBaseRepoResourceId('', [{ url: 'https://x/y.git' }]), { resourceId: '', source: 'none', branch: '' });
+});
+
+test('board env entry\'s own branch override is surfaced (리뷰 지적, ticket 112ea3c5): the picked entry\'s branch wins over the Resource\'s default_branch downstream', () => {
+  const r = pickBaseRepoResourceId('', [{ resource_id: 'env-repo-0', branch: 'release' }]);
+  assert.deepEqual(r, { resourceId: 'env-repo-0', source: 'board_env', branch: 'release' });
+});
+
+test('board env entry with no branch field → branch is empty (caller falls back to Resource default_branch)', () => {
+  const r = pickBaseRepoResourceId('', [{ resource_id: 'env-repo-0' }]);
+  assert.equal(r.branch, '');
+});
+
+test('board env entry with whitespace-only branch is treated as empty', () => {
+  const r = pickBaseRepoResourceId('', [{ resource_id: 'env-repo-0', branch: '   ' }]);
+  assert.equal(r.branch, '');
+});
+
+test('ticket-own repo pick never surfaces a branch (the ticket\'s own base_branch column is handled separately by the caller)', () => {
+  const r = pickBaseRepoResourceId('ticket-repo', [{ resource_id: 'env-repo', branch: 'release' }]);
+  assert.equal(r.branch, '', 'the env entry\'s branch must not leak in when the ticket itself already owns a repo');
 });
 
 // ── 2. requiresBaseRepo — goal 2 guard scope ──────────────────────────────────
@@ -126,8 +146,13 @@ test('_emitTrigger backfills base_repo from the board environment (goal 1)', () 
   assert.match(src, /pickBaseRepoResourceId\(/, 'must call the backfill picker');
   // Only backfills when the ticket has no base repo of its own.
   assert.match(src, /if \(!baseRepoId && baseRepoWorkspaceId\)/, 'backfill must be gated on an empty ticket base repo');
-  // baseBranch inherits the resolved Resource default_branch when empty.
-  assert.match(src, /if \(!baseBranch\) baseBranch = baseRepo\.default_branch/, 'empty base_branch must fall back to default_branch');
+  // baseBranch는 board entry 자신의 branch 오버라이드를 먼저 물려받고
+  // (리뷰 지적, ticket 112ea3c5), 그 다음 resolved Resource의 default_branch로 폴백한다.
+  assert.match(
+    src,
+    /if \(!baseBranch\) baseBranch = picked\.branch \|\| baseRepo\.default_branch/,
+    'empty base_branch must prefer the board entry\'s own branch, falling back to default_branch',
+  );
 });
 
 test('_emitTrigger pends (does not emit) when a branch-work dispatch has no resolved repo (goal 2)', () => {
