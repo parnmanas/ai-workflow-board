@@ -623,13 +623,16 @@ export abstract class CliAdapter {
    * 베이스 기본값은 no-op — {@link requiresWorkspaceTrust}를 구현하는
    * 어댑터에만 의미가 있다.
    *
-   * 주의: 티켓 디스패치가 쓰는 per-ticket worktree(`.awb/wt/<ticket>`)에는
-   * 이 시딩을 걸지 않는다 — 그 경로는 ticket 48aeab6e가 의도적으로 설계한
-   * 게이트(비-bypass `permission_mode`를 설정한 운영자는 trust 승인을 사람이
-   * 직접 하길 원한다)를 갖고 있고, 실제로 `cli-readiness-block-pend.test.mjs`가
-   * 그 계약을 고정해둔 테스트다. 이번 ticket 152e3606이 고치는 사고는
-   * harness/permission_mode 개념 자체가 없는 Action/QA/security run
-   * 디스패치 경로에 한정된다.
+   * 주의: 티켓 디스패치가 쓰는 per-ticket worktree(`.awb/wt/<ticket>`)에서는
+   * `requiresWorkspaceTrust(harness)`가 참일 때(운영자가 명시적으로
+   * 비-bypassPermissions `permission_mode`를 설정한 경우)는 호출자가 이
+   * 함수를 아예 부르지 않는다 — 그 경로는 ticket 48aeab6e가 의도적으로
+   * 설계한 게이트(그런 운영자는 trust 승인을 사람이 직접 하길 원한다)이고,
+   * 실제로 `cli-readiness-block-pend.test.mjs`가 그 계약을 고정해둔
+   * 테스트다. `requiresWorkspaceTrust`가 거짓(기본 bypassPermissions)일
+   * 때는 호출자가 이 함수를 fire-and-forget으로(await하지 않고) 호출해
+   * 미리 시딩해둔다 — 지금 당장은 무관하지만 그 폴더가 나중에
+   * non-bypass harness로 재사용될 때를 대비한다.
    */
   async ensureWorkspaceTrust(_cliHomeDir: string, _cwd: string): Promise<void> {
     return;

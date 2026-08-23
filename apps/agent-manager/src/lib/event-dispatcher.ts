@@ -2558,18 +2558,33 @@ export class EventDispatcher {
     // 분기에서 별도로 처리된다.
     if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
       const adapter = createAdapter(agentContext.cli);
-      // 참고 (ticket 152e3606): 여기서는 의도적으로 workspace trust를 자동
-      // 시딩하지 않는다. chat-room run-dispatch 경로(Action/QA/security)와
-      // 달리, 이 티켓-디스패치 게이트는 ticket 48aeab6e가 의도적으로 설계한
-      // 계약이다 — 비-bypassPermissions harness를 설정한 운영자는 티켓
-      // 체크아웃이 비대화형으로 돌기 전에 사람이 trust를 직접 확인하길
-      // 원한다(cli-readiness-block-pend.test.mjs의 "pends on the first
-      // abort" 케이스 참고). 여기서 자동 시딩하면 그 운영자의 선택을 조용히
-      // 무력화하게 된다. 이 티켓이 고치는 사고는 harness 자체를 전혀 싣지
-      // 않는 Action/QA/security run에 국한된다(event-dispatcher.ts의 "Chat
-      // room run dispatch" 절 참고) — 그쪽엔 bypassPermissions가 암묵적으로
-      // 항상 적용돼 보존해야 할 사람-확인 게이트가 애초에 없다.
       const trustRequired = adapter.requiresWorkspaceTrust(harness);
+      // ticket 152e3606 리뷰 반영: bypassPermissions(harness 미설정 또는
+      // 명시적 bypassPermissions — trustRequired=false)일 때만 워크스페이스
+      // trust를 미리 시딩한다. 이 디스패치 자체엔 trust가 무관하지만(스킵
+      // 플래그가 이미 대화상자를 우회한다), 같은 폴더가 나중에 non-bypass
+      // harness로 재사용되거나 Action/QA run이 같은 cwd를 재사용할 때를
+      // 대비해 미리 해 둔다. 반대로 trustRequired=true(운영자가 명시적으로
+      // bypassPermissions 아닌 permission_mode를 설정한 경우)에는 절대
+      // 시딩하지 않는다 — ticket 48aeab6e가 설계한 "사람이 trust를 직접
+      // 확인해야 한다"는 계약을 그대로 지킨다
+      // (cli-readiness-block-pend.test.mjs의 "pends on the first abort"
+      // 케이스가 이 계약을 고정해둔다).
+      //
+      // await하지 않고 fire-and-forget으로 던진다 — await를 걸면 이 핫
+      // 디스패치 경로에 새 async yield point가 생겨 동시 트리거 처리
+      // 순서를 흔든다(실측: dispatch-inflight-guard.test.mjs의 "두 동시
+      // force-respawn → 정확히 1회만 재실행" 테스트가 await 버전에서
+      // 깨졌다). 이 디스패치의 진행 여부가 시딩 완료를 기다릴 필요가
+      // 없으므로(현재 스폰엔 trust가 무관) 안전하다.
+      if (!trustRequired) {
+        void adapter.ensureWorkspaceTrust(agentContext.cli_home_dir, agentContext.cwd).catch((err: any) => {
+          log(
+            `[cli-trust] background ensureWorkspaceTrust failed: ticket=${ev.ticket_id} cli=${agentContext.cli} ` +
+              `cwd=${agentContext.cwd}: ${String(err?.message ?? err)}`,
+          );
+        });
+      }
       const trustMeta = trustRequired
         ? await adapter.readTrustMeta(agentContext.cli_home_dir, agentContext.cwd)
         : null;

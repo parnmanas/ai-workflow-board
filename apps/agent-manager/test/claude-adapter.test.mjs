@@ -228,3 +228,30 @@ test('ensureWorkspaceTrust: 같은 cli-home 아래 서로 다른 cwd를 동시�
   assert.equal(raw.projects[cwdA]?.hasTrustDialogAccepted, true, 'cwd A는 동시 시딩에서도 살아남아야 한다');
   assert.equal(raw.projects[cwdB]?.hasTrustDialogAccepted, true, 'cwd B는 동시 시딩에서도 살아남아야 한다');
 });
+
+test('ensureWorkspaceTrust: 성공 후 임시(.tmp-*) 파일이 남지 않는다(원자적 rename 교체)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  await adapter.ensureWorkspaceTrust(cliHomeDir, '/some/cwd');
+  const entries = await fsp.readdir(cliHomeDir);
+  assert.deepEqual(entries, ['.claude.json'], '임시 파일 없이 최종 파일만 남아있어야 한다');
+});
+
+test('ensureWorkspaceTrust: 쓰기 실패(디렉터리 read-only) 시 원본 파일 내용이 그대로 보존된다', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const path = join(cliHomeDir, '.claude.json');
+  const original = JSON.stringify({ projects: { '/other/cwd': { hasTrustDialogAccepted: true } } });
+  await fsp.writeFile(path, original);
+  await fsp.chmod(cliHomeDir, 0o500); // 디렉터리 쓰기 금지 → 임시 파일 생성 자체가 실패
+  try {
+    await assert.rejects(
+      () => adapter.ensureWorkspaceTrust(cliHomeDir, '/mnt/data/awb-agents/awb/.awb/wt/repo/write-fail'),
+      '디렉터리 쓰기 실패는 호출자에게 그대로 전파돼야 한다(best-effort 흡수는 event-dispatcher 쪽 책임)',
+    );
+    const after = await fsp.readFile(path, 'utf8');
+    assert.equal(after, original, '임시 파일 쓰기가 실패해도 원본은 truncate조차 되지 않고 그대로 남아야 한다');
+  } finally {
+    await fsp.chmod(cliHomeDir, 0o700); // afterEach의 재귀 삭제가 지울 수 있도록 권한 복구
+  }
+});

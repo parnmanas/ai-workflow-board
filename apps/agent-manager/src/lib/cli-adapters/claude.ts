@@ -133,6 +133,24 @@ async function withTrustSeedLock<T>(key: string, fn: () => Promise<T>): Promise<
   }
 }
 
+/**
+ * 테스트 전용 드레인 훅(ticket 152e3606 리뷰 반영) — 호출 시점 기준으로
+ * 대기 중이거나 진행 중인 `ensureWorkspaceTrust` 호출을 전부 기다린다.
+ * event-dispatcher.ts는 bypassPermissions 티켓 디스패치에서 이 시딩을
+ * 의도적으로 fire-and-forget(await 없이)으로 던진다 — await를 걸면 동시
+ * 디스패치 처리 순서를 흔들기 때문이다(dispatch-inflight-guard.test.mjs
+ * 참고). 그런데 그 결과로 `handleTrigger`가 resolve된 뒤에도 이 백그라운드
+ * 쓰기가 남아있을 수 있어서, `afterEach`가 곧바로 cli-home 임시 디렉터리를
+ * `fs.rm(recursive)`로 지우는 테스트에서는 그 삭제와 이 쓰기가 레이스해
+ * `ENOTEMPTY`가 날 수 있다. 그런 테스트의 `afterEach`는 임시 디렉터리를
+ * 지우기 전에 이 함수를 호출해야 한다. 실제 운영 코드는 호출하지 않는다 —
+ * cli-home은 에이전트 전체 수명 동안 유지되므로 이 레이스가 사실상
+ * 발생하지 않는다.
+ */
+export async function _drainTrustSeedLocksForTests(): Promise<void> {
+  await Promise.allSettled([...trustSeedLocks.values()]);
+}
+
 export class ClaudeCliAdapter extends CliAdapter {
   static cliType = 'claude';
 
@@ -489,7 +507,28 @@ export class ClaudeCliAdapter extends CliAdapter {
       if (entry.hasTrustDialogAccepted === true) return;
       entry.hasTrustDialogAccepted = true;
       parsed.projects[cwd] = entry;
-      await fsp.writeFile(path, JSON.stringify(parsed, null, 2), 'utf8');
+      // 원자적 교체(ticket 152e3606 리뷰 반영): 같은 디렉터리에 임시 파일을
+      // 쓴 뒤 rename한다 — 실제 Claude CLI 프로세스도 이 파일을 자체적으로
+      // 갱신할 수 있는데, in-place truncate 쓰기(`writeFile(path, ...)`)는
+      // CLI의 쓰기와 겹치면 최소한 손상되거나 잘린 JSON을 읽는 리더를 만들
+      // 수 있다. 같은 파일시스템 내 rename은 POSIX/Windows 모두 원자적이라
+      // 어떤 리더도 완전한 이전 내용이나 완전한 새 내용만 보게 된다 — "부분
+      // JSON 노출"은 이걸로 막힌다. 단, 이 in-process 뮤텍스 + rename
+      // 조합으로도 진짜 lost-update까지는 못 막는다: 우리가 파일을 읽은
+      // 시점과 rename하는 시점 사이에 CLI 프로세스가 같은 파일에 자체
+      // 쓰기를 끼워넣으면 그 변경은 이 rename에 덮여 유실될 수 있다(진짜
+      // 방지엔 flock류 OS 레벨 파일 락이 필요한데 이 용도엔 과하고 Node
+      // 표준 fs만으로는 이식성 있게 구현하기도 어렵다). 이 함수는 매
+      // 디스패치마다 멱등하게 재호출되므로, 그런 드문 lost-update는 다음
+      // 호출에서 스스로 복구된다 — 그래서 별도 재시도 로직을 두지 않았다.
+      const tmpPath = join(cliHomeDir, `.claude.json.tmp-${process.pid}`);
+      try {
+        await fsp.writeFile(tmpPath, JSON.stringify(parsed, null, 2), 'utf8');
+        await fsp.rename(tmpPath, path);
+      } catch (err) {
+        await fsp.unlink(tmpPath).catch(() => {});
+        throw err;
+      }
     });
   }
 
