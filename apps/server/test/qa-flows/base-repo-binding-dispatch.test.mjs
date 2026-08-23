@@ -18,6 +18,17 @@
 //   3. A ticket that declares an UNRESOLVABLE base repo (deleted Resource) on an
 //      assignee/active dispatch is likewise pended — no agent_trigger — rather
 //      than dispatched into a worktree it can't push from. Fail closed.
+//   4. (ticket b5c1c080) A GLOBAL (workspace_id=null, admin-shared) Resource
+//      resolves at dispatch time exactly like a workspace-scoped one, whether
+//      it's the ticket's own base_repo_resource_id or reachable only through
+//      the board's environment_config. Before this ticket, trigger-loop's three
+//      Resource lookups filtered by an EXACT-match workspace_id in the DB
+//      where-clause, which can never match a NULL column — a global repo
+//      silently vanished at dispatch time (base_repo AND environment_config
+//      both empty, wrongly pended as "no repo") even though every other reader
+//      (get_ticket/loadTicketFull, the resources REST API, ci-wait-resume)
+//      already used the permissive id-only-fetch + application-code check and
+//      resolved it fine.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -210,6 +221,65 @@ test('base repo binding: env backfill reaches the wire; repo-less + unresolvable
     t4Comments.filter((c) => /base repo 미해결/.test(c.content || '')).length, 0,
     'the explanatory "dispatch blocked, pend for a human" comment is skipped too — there is no park to explain',
   );
+
+  // ── Scenario 5: a GLOBAL Resource as the ticket's OWN base_repo_resource_id
+  // (ticket b5c1c080). Before this ticket, trigger-loop.service.ts resolved a
+  // ticket's own base repo with `where: { id, workspace_id }` — an exact-match
+  // filter that can never match a Resource row whose workspace_id is NULL — so
+  // a global (admin-shared) repo silently failed to resolve at dispatch time
+  // even though loadTicketFull already showed it fine via get_ticket/REST.
+  step('Scenario 5: ticket\'s own base_repo_resource_id points at a GLOBAL Resource — must resolve, not pend');
+  const globalResource = await ds.getRepository('Resource').save(
+    ds.getRepository('Resource').create({
+      workspace_id: null,
+      name: 'global shared repo',
+      type: 'repository',
+      url: 'https://github.com/parnmanas/global-shared.git',
+      default_branch: 'main',
+    }),
+  );
+  const t5 = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id, workspaceId: ws.id,
+    title: 'ticket base repo is a global Resource', assigneeId: assignee.id,
+  });
+  await ds.getRepository('Ticket').update(t5.id, {
+    base_repo_resource_id: globalResource.id,
+    base_branch: '',
+  });
+  await triggerLoop.dispatchCurrentColumn(t5.id, 'qa-base-repo', 'qa-actor');
+  const trig5 = await va.waitForTrigger((tr) => tr.ticket_id === t5.id, 4000);
+  assert.ok(trig5._wire.base_repo, 'a global Resource set as the ticket\'s own base repo must reach the flattened wire');
+  assert.equal(trig5._wire.base_repo.id, globalResource.id, 'base_repo must be the global Resource');
+  assert.equal(trig5._wire.base_repo.url, 'https://github.com/parnmanas/global-shared.git');
+  const t5Fresh = await ds.getRepository('Ticket').findOne({ where: { id: t5.id } });
+  assert.equal(!!t5Fresh.pending_user_action, false, 'a resolvable global base repo must NOT pend the ticket');
+
+  // ── Scenario 6: a GLOBAL Resource reachable ONLY via the board's
+  // environment_config (the ticket carries no base_repo_resource_id of its
+  // own) — ticket b5c1c080's other two originally-cited call sites: the
+  // env-repo list resolve (feeds environment_config.repositories) and the
+  // goal-1 base_repo backfill (feeds base_repo) must BOTH resolve the global
+  // Resource, not just one of them.
+  step('Scenario 6: board environment_config references ONLY a GLOBAL Resource — env repos + base_repo backfill must both resolve');
+  await ds.getRepository('Board').update(board.id, {
+    environment_config: JSON.stringify({ repositories: [{ resource_id: globalResource.id }] }),
+  });
+  const t6 = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id, workspaceId: ws.id,
+    title: 'board env repo is a global Resource, no ticket base repo', assigneeId: assignee.id,
+  });
+  await triggerLoop.dispatchCurrentColumn(t6.id, 'qa-base-repo', 'qa-actor');
+  const trig6 = await va.waitForTrigger((tr) => tr.ticket_id === t6.id, 4000);
+  assert.ok(trig6._wire.base_repo, 'base_repo must be backfilled from the board env\'s global Resource');
+  assert.equal(trig6._wire.base_repo.id, globalResource.id, 'backfilled base_repo must be the global Resource');
+  assert.ok(trig6._wire.environment_config, 'environment_config must reach the wire');
+  assert.equal(
+    trig6._wire.environment_config.repositories?.[0]?.url,
+    'https://github.com/parnmanas/global-shared.git',
+    'the global Resource must NOT be silently dropped from environment_config.repositories',
+  );
+  const t6Fresh = await ds.getRepository('Ticket').findOne({ where: { id: t6.id } });
+  assert.equal(!!t6Fresh.pending_user_action, false, 'a resolvable global env repo must NOT pend the ticket');
 
   exitAfterTests(0);
 });
