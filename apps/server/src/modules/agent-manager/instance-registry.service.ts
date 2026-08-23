@@ -272,9 +272,19 @@ export class InstanceRegistryService implements OnModuleDestroy {
   /** Live instances currently supervising `agentId` (ticket c3b767c6 —
    *  dispatch-capability gate). Usually one; an agent identity backed by more
    *  than one physical process (e.g. laptop + VM sharing a pairing code)
-   *  returns each. TTL-swept like every other view onto `instances`. */
+   *  returns each. TTL-swept like every other view onto `instances`.
+   *
+   *  Matches on EITHER field because both wire shapes are live:
+   *  - `agent_id === agentId`: the common single-agent-per-host pairing —
+   *    the manager's own paired identity IS the dispatched-to agent.
+   *  - `agent_ids?.includes(agentId)`: a host supervising OTHER agent
+   *    identities it spawned (ST-5b multi-agent supervision) — those never
+   *    register as `agent_id` themselves, only through this list. Checking
+   *    `agent_id` alone here always returns `[]` for that case, silently
+   *    routing every capability check through the zero-instance fail-open
+   *    branch (ticket c3b767c6 review — the exact defect this fixes). */
   listForAgent(agentId: string): InstanceRecord[] {
-    return this.list().filter((i) => i.agent_id === agentId);
+    return this.list().filter((i) => i.agent_id === agentId || i.agent_ids?.includes(agentId));
   }
 
   get(instanceId: string): InstanceRecord | null {
