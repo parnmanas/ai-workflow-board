@@ -16,7 +16,7 @@ import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-ad
 import { createAdapter } from './cli-adapters/index.js';
 import { fetchChatRoomHistory, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
-import { classifyCliError } from './cli-error-signatures.js';
+import { classifyCliError, hasUntrustedWorkspaceWarning } from './cli-error-signatures.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
 import { resolveRunCompletionRoute } from './run-provisioner.js';
 import {
@@ -651,6 +651,39 @@ export class ChatSessionManager
       } catch {
         /* ignore — lock release must never break exit cleanup */
       }
+    }
+    // ticket 152e3606: run-completion backstop. `_sweepTurnEndOrphans`는
+    // turn-end RESULT 라인(ticket 89716f04) 이후에만 armed된다 — 턴 도중에
+    // 멈춘 세션(예: 비대화형 run에서 아무도 승인해줄 수 없는 permission
+    // 승인 대기에 영원히 걸린 경우)은 그 라인을 절대 못 내므로 저 sweep이
+    // 아예 돌지 않고, 이 exit이 로컬 프로세스를 죽인 뒤에도(idle-timer,
+    // health-watchdog, 또는 단순 crash — 어떤 경로든 결국 이 훅으로
+    // 모인다) run은 서버에서 영원히 `running`으로 남는다. 무조건 +
+    // fire-and-forget으로 호출한다: `complete_*_run`의 terminal 전이는
+    // 원자적으로 멱등이라(actions.service.ts의 completeRun, `status =
+    // 'running'` 가드) 에이전트가 이미 스스로 종료 처리한 run은 그대로
+    // 유지되고 — 세션이 죽었을 때 진짜로 아직 열려 있던 run에만 실제
+    // 효과가 생긴다.
+    if (sess._run) {
+      const run = sess._run;
+      const route = resolveRunCompletionRoute(run.kind);
+      // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
+      // (그냥 두면 아무도 안 읽는 stdout 속에 묻힌다) 진단 가능한 원인일
+      // 때 run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가
+      // 그냥 "결과 없음" 보다 낫다.
+      const tail = this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
+      const summary = hasUntrustedWorkspaceWarning(tail)
+        ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+          'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
+          'cli-home의 .claude.json trust 시딩을 확인하세요.'
+        : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}) — ` +
+          `승인 대기 등으로 멈춰 idle-timer/health-watchdog에 의해 종료됐을 수 있습니다.`;
+      await fireAndForgetTool(this._config, route.completeTool, {
+        run_id: run.run_id,
+        workspace_id: run.workspace_id,
+        status: route.failureStatus,
+        summary,
+      });
     }
     // F-1 (ticket 24694916): backstop — if the child died mid-turn after doing
     // ticket actions (before the turn-end result line), still emit their card so a
