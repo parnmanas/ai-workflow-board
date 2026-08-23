@@ -21,6 +21,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
@@ -29,6 +31,9 @@ import {
   createAgentTrio,
   createTicket,
 } from '../helpers/fixtures.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 process.env.PORT = process.env.QA_HALT_POLICY_BACKFILL_PORT || '7946';
 
@@ -213,14 +218,36 @@ test('halt-policy column entry backfills from board default, or leaves a visible
   assert.equal(t2HaltCommentsAfter[0].repeat_count, 2, 'repeat_count bumps on a re-entered identical halt');
 
   // ---------------------------------------------------------------------
-  // Case 3 (reviewer round 1, ticket 1e002acb) — a seat filled by a WRITE
-  // THAT RACES this backfill attempt must not halt, even when this
-  // backfill's own `applyBoardDefaults` call reports 0 applied for that slug
-  // (because the concurrent write's `existing.length > 0` check won first).
-  // The fix must re-resolve fresh holder state after the backfill attempt
-  // rather than trusting the attempt's own return value.
+  // Case 3 (reviewer round 2, ticket 1e002acb) — a seat filled by a write
+  // that races the backfill attempt must not halt, even when THIS backfill's
+  // own `applyBoardDefaults` call reports 0 applied for that slug (because
+  // the concurrent write's `existing.length > 0` check won first).
+  //
+  // Round-1 tried to reproduce this with a bare `Promise.all` race, but the
+  // reviewer correctly flagged it as non-deterministic: whether
+  // `backfillVacantRoleFromBoardDefaults` actually returns `false` for
+  // 'reviewer' depends on unobserved timing, so the pre-fix (buggy) code
+  // could pass the same assertions on a lucky interleaving (backfill wins,
+  // dispatches normally; the race write lands as a harmless second holder
+  // afterward) — a regression test must fail on the pre-fix code, not
+  // "usually" fail.
+  //
+  // Fixed here by monkey-patching TicketRoleAssignmentService on the live
+  // app instance: the wrapped `backfillVacantRoleFromBoardDefaults` inserts
+  // the competing holder itself, BEFORE calling straight through to the
+  // real implementation — so the real implementation's own
+  // `existing.length > 0` check deterministically sees the seat already
+  // taken and returns `false`. The wrapper also records that return value so
+  // the test can assert on it directly, closing the gap the reviewer named:
+  // "an assertion that the helper's return value was false."
   // ---------------------------------------------------------------------
   step('Case 3 — a seat filled by a write that races the backfill attempt must not halt');
+  const roleAssignModule = await import(
+    'file://' + path.join(DIST_ROOT, 'modules', 'workspace-roles', 'ticket-role-assignment.service.js')
+  );
+  const roleAssignSvc = app.get(roleAssignModule.TicketRoleAssignmentService);
+  const originalBackfill = roleAssignSvc.backfillVacantRoleFromBoardDefaults.bind(roleAssignSvc);
+
   const c3 = await makeBoard('halt-backfill-concurrent-race');
   await boardRepo.update(c3.board.id, {
     default_role_assignments: JSON.stringify({ reviewer: [{ agent_id: trio.reviewer.agent.id }] }),
@@ -233,34 +260,62 @@ test('halt-policy column entry backfills from board default, or leaves a visible
     reporterId: trio.reporter.agent.id,
   });
 
-  step('  fire the halt-triggering move, racing a direct concurrent write for the same seat');
-  const movedPromise = activity.logActivity({
-    entity_type: 'ticket', entity_id: t3.id, action: 'moved',
-    field_changed: 'column', old_value: 'To Do', new_value: 'Review',
-    ticket_id: t3.id, actor_id: 'test-user', actor_name: 'tester',
-  });
-  // Deliberately fired alongside movedPromise (not awaited first) so it races
-  // TriggerLoopService's own in-flight backfill attempt for the identical
-  // (ticket, reviewer) seat. Uses a DIFFERENT agent than the board default so
-  // either outcome (this write lands first, or the backfill's own write
-  // does) is unambiguous — the invariant under test is "no halt", not "who
-  // wins". Both writes are awaited (via Promise.all) before `settle()`, so by
-  // the time TriggerLoopService's re-resolve step runs (somewhere in the
-  // settle() window), this write is already visible regardless of exactly
-  // how it interleaved with the backfill's own check-then-write.
-  const concurrentAssignPromise = assignRepo.save(assignRepo.create({
-    ticket_id: t3.id, role_id: reviewerRole.id, agent_id: trio.assignee.agent.id, user_id: null,
-  }));
-  await Promise.all([movedPromise, concurrentAssignPromise]);
-  await settle();
+  let observedReturn;
+  let raceInjected = false;
+  roleAssignSvc.backfillVacantRoleFromBoardDefaults = async (ticketId, workspaceId, boardDefaults, slug) => {
+    if (slug === 'reviewer' && ticketId === t3.id && !raceInjected) {
+      raceInjected = true;
+      // The competing write, landing INSIDE the intercepted call — strictly
+      // before the real implementation's own vacancy check — so that check
+      // is guaranteed to see a non-vacant seat. Uses trio.assignee (NOT the
+      // board-default trio.reviewer) so a passing "dispatch continued" check
+      // below can only be explained by this race write, not by the backfill
+      // having quietly won anyway.
+      await assignRepo.save(assignRepo.create({
+        ticket_id: t3.id, role_id: reviewerRole.id, agent_id: trio.assignee.agent.id, user_id: null,
+      }));
+    }
+    const result = await originalBackfill(ticketId, workspaceId, boardDefaults, slug);
+    if (slug === 'reviewer' && ticketId === t3.id) observedReturn = result;
+    return result;
+  };
 
-  step('  the seat is filled (by whichever write landed) and the ticket was never halted');
+  try {
+    step('  emit "moved" onto the halt column — the patched backfill forces its own helper call to lose the race');
+    await activity.logActivity({
+      entity_type: 'ticket', entity_id: t3.id, action: 'moved',
+      field_changed: 'column', old_value: 'To Do', new_value: 'Review',
+      ticket_id: t3.id, actor_id: 'test-user', actor_name: 'tester',
+    });
+    await settle();
+  } finally {
+    roleAssignSvc.backfillVacantRoleFromBoardDefaults = originalBackfill;
+  }
+
+  step('  the helper genuinely returned false, yet the seat is filled and the ticket was never halted');
+  assert.equal(
+    observedReturn, false,
+    'backfillVacantRoleFromBoardDefaults must have been called for reviewer and returned false — the exact branch under test',
+  );
   const t3Holders = await assignRepo.find({ where: { ticket_id: t3.id, role_id: reviewerRole.id } });
-  assert.ok(t3Holders.length >= 1, 'the reviewer seat must be filled by the time the halt decision runs');
+  assert.equal(t3Holders.length, 1, 'exactly the race write holds the seat — this backfill contributed nothing');
+  assert.equal(t3Holders[0].agent_id, trio.assignee.agent.id, 'the seat holder is the race write, not the board default');
   const t3Logs = await activityLogRepo.find({ where: { ticket_id: t3.id } });
   assert.ok(
     !t3Logs.some((l) => l.action === 'auto_advance_halted_policy'),
-    `a seat filled by a concurrent write must not halt even if this backfill's own applied count was 0; got ${JSON.stringify(t3Logs.map((l) => l.action))}`,
+    `a seat filled by a concurrent write must not halt even though this backfill's own applied count was 0; got ${JSON.stringify(t3Logs.map((l) => l.action))}`,
+  );
+  assert.ok(
+    !t3Logs.some((l) => l.action === 'halt_policy_role_backfilled'),
+    'this backfill attempt applied nothing — it must not claim credit for the race winner\'s write',
+  );
+  step('  dispatch continued to the seat the race write filled, not just "no halt"');
+  const t3Emit = t3Logs.find((l) => l.action === 'trigger_emitted' && l.role === 'reviewer');
+  assert.ok(t3Emit, 'the filled reviewer seat must still receive a trigger_emitted dispatch');
+  assert.equal(
+    JSON.parse(t3Emit.new_value || '{}').target_agent_id,
+    trio.assignee.agent.id,
+    'dispatch must target the agent the race write actually assigned, confirming this is live per-role dispatch, not a stale snapshot',
   );
 
   exitAfterTests(0);
