@@ -820,7 +820,10 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     now: Date,
     recentComments: Comment[],
     epoch: { agentId: string; startedAt: Date } | null,
-  ): Promise<{ stalled: boolean; ageMs: number; hasAgentHolder: boolean; everDispatched: boolean }> {
+  ): Promise<{
+    stalled: boolean; ageMs: number; hasAgentHolder: boolean; everDispatched: boolean;
+    haltedPolicyVacantSlugs: string[];
+  }> {
     // Open prerequisite waits are filtered by `_intentionalWaitReason` before
     // evaluation. A stale pending_on_tickets flag intentionally falls through.
     const pending = !!ticket.pending_user_action;
@@ -856,7 +859,41 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
 
     // Holder lookup only matters (and only queried) when we're about to alert.
     const hasAgentHolder = stalled ? await this._ticketHasAgentHolder(ticket.id) : false;
-    return { stalled, ageMs, hasAgentHolder, everDispatched };
+    // ticket 1e002acb: a ticket sitting on a halt-policy column with its
+    // routed role seat vacant IS "hasAgentHolder=true" whenever some OTHER
+    // role (e.g. assignee) is staffed — _ticketHasAgentHolder counts holders
+    // across every role, not just the ones this column actually routes to.
+    // That misattributes the cause as "an agent IS assigned, check the agent"
+    // when the real problem is the CURRENT column's seat, not the agent.
+    const haltedPolicyVacantSlugs = stalled ? await this._haltedPolicyVacantSlugs(ticket.id) : [];
+    return { stalled, ageMs, hasAgentHolder, everDispatched, haltedPolicyVacantSlugs };
+  }
+
+  /**
+   * Read the current stall's halt-policy cause straight off the audit trail
+   * TriggerLoopService._flagPolicyHalt already writes (ticket 1e002acb),
+   * rather than re-deriving role_routing/holder resolution a second time here
+   * and risking the two judgments drifting apart. Only trusts the LATEST
+   * `auto_advance_halted_policy` row when it landed AT OR AFTER this ticket's
+   * most recent column-move — an older row describes a halt on a column the
+   * ticket has since left (and possibly re-entered, resetting the vacancy),
+   * not the current stall. Returns `[]` when there is no such row, or the
+   * ticket has moved on since — the caller reads that as "not a halt-policy
+   * stall."
+   */
+  private async _haltedPolicyVacantSlugs(ticketId: string): Promise<string[]> {
+    const [row, latestMoveMs] = await Promise.all([
+      this.dataSource.getRepository(ActivityLog).findOne({
+        where: { ticket_id: ticketId, action: 'auto_advance_halted_policy' },
+        order: { created_at: 'DESC' },
+        select: ['id', 'created_at', 'role'],
+      }),
+      this._latestColumnMoveAtMs(ticketId),
+    ]);
+    if (!row) return [];
+    const atMs = new Date(row.created_at).getTime();
+    if (!Number.isFinite(atMs) || atMs < latestMoveMs) return [];
+    return (row.role || '').split(',').map(s => s.trim()).filter(Boolean);
   }
 
   private async _dispatchEpoch(
@@ -1050,7 +1087,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     existingAlert: StuckTicketAlert | null,
     now: Date,
     stats: SweepStats,
-    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean; haltedPolicyVacantSlugs: string[] },
   ): Promise<void> {
     const alertRepo = this.dataSource.getRepository(StuckTicketAlert);
 
@@ -1111,11 +1148,12 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    */
   private async _writeNoProgressAudit(
     ticket: Ticket,
-    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean; haltedPolicyVacantSlugs: string[] },
     now: Date,
   ): Promise<void> {
     try {
       const repo = this.dataSource.getRepository(ActivityLog);
+      const haltedPolicy = res.haltedPolicyVacantSlugs.length > 0;
       await repo.save(repo.create({
         workspace_id: ticket.workspace_id ?? '',
         entity_type: 'ticket',
@@ -1129,8 +1167,13 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
           has_agent_holder: res.hasAgentHolder,
           ever_dispatched: res.everDispatched,
           column_id: ticket.column_id ?? '',
-          reason: res.everDispatched ? 'dispatched_then_no_progress' : 'never_dispatched',
-          recovery: 'operator: verify agent online / worktree pool / focus window; re-trigger or re-assign',
+          reason: haltedPolicy
+            ? 'column_role_unstaffed_halt'
+            : (res.everDispatched ? 'dispatched_then_no_progress' : 'never_dispatched'),
+          vacant_slugs: res.haltedPolicyVacantSlugs,
+          recovery: haltedPolicy
+            ? `operator: assign [${res.haltedPolicyVacantSlugs.join(', ')}] on this ticket's current column — the agent is not the problem`
+            : 'operator: verify agent online / worktree pool / focus window; re-trigger or re-assign',
         }),
         actor_id: 'system',
         actor_name: 'StuckTicketDetector',
@@ -1157,7 +1200,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
    */
   private async _postNoProgressAlert(
     ticket: Ticket,
-    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean },
+    res: { ageMs: number; hasAgentHolder: boolean; everDispatched: boolean; haltedPolicyVacantSlugs: string[] },
     now: Date,
   ): Promise<boolean> {
     const targetRoomId = await this._resolveAlertRoomId(ticket.workspace_id);
@@ -1173,16 +1216,22 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     const boardName = column ? await this._resolveBoardNameForColumn(column) : '(no board)';
     const ageH = Math.max(0, res.ageMs / 3_600_000);
     const ticketLink = `/ws/${ticket.workspace_id}/ticket/${ticket.id}`;
-    const cause = res.everDispatched
-      ? 'dispatched then went silent'
-      : 'never dispatched (no agent has run)';
-    const holder = res.hasAgentHolder ? 'an agent IS assigned' : 'NO agent assigned';
     void now;
+    // ticket 1e002acb: a halt-policy column with its routed seat vacant is
+    // NOT an agent-health problem — pointing operators at "check the agent
+    // (online? worktree pool?)" for this shape sent them chasing a healthy
+    // agent for 3+ hours in the incident this ticket describes. Distinct
+    // cause line, matching the existing English-base + Korean-reason-suffix
+    // mix `_postPromotionDelayAlert`/`_resolvePromotionDelayReasonSuffix`
+    // already use in this file.
+    const causeLine = res.haltedPolicyVacantSlugs.length > 0
+      ? `Cause: column_role_unstaffed_halt · **${column?.name ?? '(unknown)'}** 컬럼의 라우팅 역할 [${res.haltedPolicyVacantSlugs.join(', ')}] 좌석이 비어 있고 정책이 halt 입니다 (보드 기본값도 없어 자동 백필 불가). 에이전트 문제가 아닙니다 — 이 티켓에 ${res.haltedPolicyVacantSlugs.join('/')} 를 배정해주세요.`
+      : `Cause: ${res.everDispatched ? 'dispatched then went silent' : 'never dispatched (no agent has run)'} · ${res.hasAgentHolder ? 'an agent IS assigned' : 'NO agent assigned'}. Check the agent (online? worktree pool? focus window?), then re-trigger or re-assign.`;
     const lines = [
       `⛔ **No-progress stall detected** — \`${ticket.id}\``,
       `**${ticket.title}**`,
       `Board: ${boardName} · column: ${column?.name ?? '(unknown)'} · no forward progress for ${ageH.toFixed(1)}h`,
-      `Cause: ${cause} · ${holder}. Check the agent (online? worktree pool? focus window?), then re-trigger or re-assign.`,
+      causeLine,
       `[Open ticket](${ticketLink})`,
     ];
     try {
@@ -1190,6 +1239,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       this.logService.info('StuckDetector', 'no-progress alert posted', {
         ticket_id: ticket.id, room_id: targetRoomId, age_h: Number(ageH.toFixed(2)),
         ever_dispatched: res.everDispatched, has_agent_holder: res.hasAgentHolder,
+        halted_policy_vacant_slugs: res.haltedPolicyVacantSlugs,
       });
       return true;
     } catch (e) {
