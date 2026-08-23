@@ -237,21 +237,28 @@ test('ensureWorkspaceTrust: 성공 후 임시(.tmp-*) 파일이 남지 않는다
   assert.deepEqual(entries, ['.claude.json'], '임시 파일 없이 최종 파일만 남아있어야 한다');
 });
 
-test('ensureWorkspaceTrust: 쓰기 실패(디렉터리 read-only) 시 원본 파일 내용이 그대로 보존된다', async () => {
-  const adapter = new ClaudeCliAdapter();
-  const cliHomeDir = await makeTmpCliHome();
-  const path = join(cliHomeDir, '.claude.json');
-  const original = JSON.stringify({ projects: { '/other/cwd': { hasTrustDialogAccepted: true } } });
-  await fsp.writeFile(path, original);
-  await fsp.chmod(cliHomeDir, 0o500); // 디렉터리 쓰기 금지 → 임시 파일 생성 자체가 실패
-  try {
-    await assert.rejects(
-      () => adapter.ensureWorkspaceTrust(cliHomeDir, '/mnt/data/awb-agents/awb/.awb/wt/repo/write-fail'),
-      '디렉터리 쓰기 실패는 호출자에게 그대로 전파돼야 한다(best-effort 흡수는 event-dispatcher 쪽 책임)',
-    );
-    const after = await fsp.readFile(path, 'utf8');
-    assert.equal(after, original, '임시 파일 쓰기가 실패해도 원본은 truncate조차 되지 않고 그대로 남아야 한다');
-  } finally {
-    await fsp.chmod(cliHomeDir, 0o700); // afterEach의 재귀 삭제가 지울 수 있도록 권한 복구
-  }
-});
+test(
+  'ensureWorkspaceTrust: 쓰기 실패(디렉터리 read-only) 시 원본 파일 내용이 그대로 보존된다',
+  // win32는 디렉터리 chmod가 그 안의 새 파일 생성(임시 파일 쓰기)을 막지
+  // 않는다 — POSIX 권한 모델이 없어 이 실패 주입 자체가 성립하지 않는다
+  // (CI 2026-08-23: windows-latest에서 rejects 기대가 충족되지 않아 적발).
+  { skip: process.platform === 'win32' && 'win32는 디렉터리 chmod로 쓰기를 막지 못해 이 실패 주입이 성립하지 않음' },
+  async () => {
+    const adapter = new ClaudeCliAdapter();
+    const cliHomeDir = await makeTmpCliHome();
+    const path = join(cliHomeDir, '.claude.json');
+    const original = JSON.stringify({ projects: { '/other/cwd': { hasTrustDialogAccepted: true } } });
+    await fsp.writeFile(path, original);
+    await fsp.chmod(cliHomeDir, 0o500); // 디렉터리 쓰기 금지 → 임시 파일 생성 자체가 실패
+    try {
+      await assert.rejects(
+        () => adapter.ensureWorkspaceTrust(cliHomeDir, '/mnt/data/awb-agents/awb/.awb/wt/repo/write-fail'),
+        '디렉터리 쓰기 실패는 호출자에게 그대로 전파돼야 한다(best-effort 흡수는 event-dispatcher 쪽 책임)',
+      );
+      const after = await fsp.readFile(path, 'utf8');
+      assert.equal(after, original, '임시 파일 쓰기가 실패해도 원본은 truncate조차 되지 않고 그대로 남아야 한다');
+    } finally {
+      await fsp.chmod(cliHomeDir, 0o700); // afterEach의 재귀 삭제가 지울 수 있도록 권한 복구
+    }
+  },
+);
