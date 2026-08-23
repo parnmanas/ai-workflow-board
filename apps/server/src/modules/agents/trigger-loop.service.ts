@@ -2762,10 +2762,15 @@ candidate's branch or move the ticket.
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
+        // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+        // b5c1c080) — workspace_id를 where절에 넣으면 workspace_id=null인
+        // global Resource가 정확일치 필터에 걸려 조용히 못 찾힌다. 나머지 reader
+        // 전부(loadTicketFull, resources.controller.ts, ci-wait-resume.service.ts)
+        // 이미 이 패턴을 쓴다.
         const r = await this.dataSource.getRepository(Resource).findOne({
-          where: { id: baseRepoId, workspace_id: baseRepoWorkspaceId },
+          where: { id: baseRepoId },
         });
-        if (r) {
+        if (r && (r.workspace_id === null || r.workspace_id === baseRepoWorkspaceId)) {
           baseRepo = {
             id: r.id,
             name: r.name,
@@ -2897,10 +2902,14 @@ candidate's branch or move the ticket.
           .filter((id) => id.length > 0);
         const repoMap = new Map<string, { url: string; default_branch: string }>();
         if (resourceIds.length > 0 && ticket.workspace_id) {
+          // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+          // b5c1c080) — workspace_id를 where절에 넣으면 global(workspace_id=null)
+          // Resource가 정확일치 필터에 걸려 조용히 못 찾힌다.
           const rows = await this.dataSource.getRepository(Resource).find({
-            where: resourceIds.map((rid) => ({ id: rid, workspace_id: ticket.workspace_id })),
+            where: { id: In(resourceIds) },
           });
           for (const r of rows) {
+            if (r.workspace_id !== null && r.workspace_id !== ticket.workspace_id) continue;
             repoMap.set(r.id, { url: r.url || '', default_branch: r.default_branch || '' });
           }
         }
@@ -2970,10 +2979,12 @@ candidate's branch or move the ticket.
       const picked = pickBaseRepoResourceId('', boardEnvRepositories);
       if (picked.resourceId) {
         try {
+          // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
+          // b5c1c080) — 나머지 지점과 동일 사유.
           const r = await this.dataSource.getRepository(Resource).findOne({
-            where: { id: picked.resourceId, workspace_id: baseRepoWorkspaceId },
+            where: { id: picked.resourceId },
           });
-          if (r) {
+          if (r && (r.workspace_id === null || r.workspace_id === baseRepoWorkspaceId)) {
             baseRepoId = r.id;
             baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
             // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch 오버라이드가
