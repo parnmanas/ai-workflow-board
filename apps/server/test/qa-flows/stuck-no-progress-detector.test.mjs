@@ -23,6 +23,11 @@
 //      reviewer is flagged. Previously the candidate query only scanned
 //      active/intake, so review/merging stalls raised ZERO alerts.
 //   8. MERGING-kind column (blocker B1) — a ticket idle in Merging is flagged.
+//   9. column_role_unstaffed_halt (ticket 1e002acb) — a ticket halted by
+//      TriggerLoopService._flagPolicyHalt (routed slug vacant, no board
+//      default to auto-backfill from) is classified by the EMPTY SEAT, not
+//      misattributed to "check the agent" just because some OTHER role
+//      happens to be staffed.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -242,6 +247,53 @@ test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) 
     await detector.sweep(now);
     const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
     assert.ok(alert, 'a merging-kind ticket idle 5h is flagged — merging is non-terminal & dispatches');
+  });
+
+  await t.test('9: column_role_unstaffed_halt — halt-policy vacant seat is not misattributed to the agent', async () => {
+    // Mirrors the ticket 1e002acb incident: Review routes to 'reviewer', the
+    // ticket has an ASSIGNEE (so has_agent_holder alone would read true) but
+    // its OWN routed reviewer seat was never staffed, and
+    // TriggerLoopService._flagPolicyHalt already wrote the halt audit row
+    // naming it (exercised end-to-end in
+    // test/qa-flows/halt-policy-role-backfill.test.mjs — this subtest is
+    // scoped to StuckTicketDetectorService's consumption of that row). The
+    // stale generic message ("an agent IS assigned, check the agent...") sent
+    // operators chasing a healthy agent for 3h05m in the real incident.
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: reviewCol.id, workspaceId: ws.id, title: 'halted — reviewer seat never staffed',
+      assigneeId: agent.id, // staffed elsewhere, but NOT the routed 'reviewer' slug
+    });
+    await backdate(ticketRepo, ticket.id, {
+      created_at: new Date(now.getTime() - 5 * HOUR),
+      updated_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    const haltRow = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      actor_id: 'system', actor_name: 'TriggerLoopService', action: 'auto_advance_halted_policy',
+      new_value: `column=${reviewCol.id} blocked_column=${reviewCol.id} reason=column_unassigned_policy_halt vacant_slugs=reviewer`,
+      role: 'reviewer', trigger_source: 'auto_advance',
+    }));
+    await backdate(activityRepo, haltRow.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+
+    const beforeSys = systemMsgs(await messageRepo.find({ where: { room_id: room.id } })).length;
+    await detector.sweep(now);
+
+    const alert = await alertRepo.findOne({ where: { ticket_id: ticket.id } });
+    assert.ok(alert, 'a halt-policy stall is still a no-progress stall — it must be flagged');
+
+    const audits = await activityRepo.find({ where: { ticket_id: ticket.id, action: 'stuck_no_progress' } });
+    assert.equal(audits.length, 1, 'one structured stuck_no_progress reason audit written');
+    const payload = JSON.parse(audits[0].new_value);
+    assert.equal(payload.reason, 'column_role_unstaffed_halt', 'cause classified by the empty seat, not the agent');
+    assert.deepEqual(payload.vacant_slugs, ['reviewer'], 'audit names the exact vacant slug');
+    assert.match(payload.recovery, /reviewer/, 'recovery pointer names the slug to staff');
+
+    const msgs = systemMsgs(await messageRepo.find({ where: { room_id: room.id } }));
+    const mine = msgs.find(m => m.content.includes(ticket.id) && /No-progress stall detected/.test(m.content));
+    assert.ok(mine, 'a no-progress chat alert was posted');
+    assert.equal(msgs.length - beforeSys, 1, 'exactly one new alert');
+    assert.match(mine.content, /reviewer/, 'alert names the vacant slug');
+    assert.doesNotMatch(mine.content, /Check the agent/, 'must NOT send operators chasing a healthy agent');
   });
 });
 
