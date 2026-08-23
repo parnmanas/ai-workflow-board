@@ -197,6 +197,23 @@ emitted at session spawn.
 should never be asked for more than a known amount regardless of how much
 budget is left.
 
+### Manager capability gate
+
+Only an agent-manager build new enough to implement the clamp above can
+safely run a `context_window`-bearing profile — an older build silently
+ignores the field and requests the CLI's fixed default output budget
+regardless, reproducing the same context-overflow hang+opaque-5xx this
+section exists to prevent (this was previously invisible: a separate host
+running a stale build looked identical to a healthy one from the central
+server). Every manager reports the dispatch-gated features it implements on
+its heartbeat as `manager_capabilities` (`context_window_clamp` today); the
+server checks this BEFORE emitting a trigger/chat request whenever the
+resolved profile sets `context_window`, and refuses to dispatch — logging a
+clear reason and, for chat, posting a room message naming the incompatible
+manager's version — instead of spawning a session doomed to hang. A manager
+with no live heartbeat data at all is not blocked (there is no telemetry to
+prove an incompatibility); update the manager to clear a genuine mismatch.
+
 ## Claude wrapper and public configuration
 
 `claude_executable` optionally selects Claude CLI or a Claude-compatible
