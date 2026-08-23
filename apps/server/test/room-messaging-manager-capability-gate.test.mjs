@@ -207,3 +207,159 @@ test('DM dispatch for a profile WITHOUT context_window: never gates, even agains
     chatRequest.off();
   }
 });
+
+// ── 그룹방 broadcast (ticket 9e2fc33d) ──────────────────────────────────────
+// DM/@mention은 단일 대상이라 dispatch 자체를 거부하면 끝나지만(위 테스트들),
+// 그룹방의 chat_room_message는 방 전체에 팬아웃된다. cli_runtime_profiles
+// 맵에서만 비호환 멤버의 profile을 빼고 agent_member_ids에는 그대로 두면, 그
+// 매니저는 "이 agent는 원래 profile이 없다"는 정상 케이스와 구분하지 못한 채
+// map-없음 폴백(agent-manager resolveRoomBroadcastRuntimeProfile)을 그대로 타
+// profile 없이(=CLI 고정 기본 output budget으로) dispatch를 강행해버린다 —
+// c3b767c6/1af53029가 막으려던 hang+500을 그대로 재현하는 셈이다. 그래서
+// 비호환 멤버는 map과 agent_member_ids 양쪽에서 함께 빠져야 하고, 다른
+// 멤버(호환 매니저 또는 애초에 profile이 없는 agent)와 사람 참가자는 전혀
+// 영향받지 않아야 한다.
+
+function captureRoomMessageOnce() {
+  let captured = null;
+  const handler = (payload) => { captured = payload; };
+  activityEvents.once('chat_room_message', handler);
+  return {
+    off: () => activityEvents.off('chat_room_message', handler),
+    get: () => captured,
+  };
+}
+
+function makeGroupSvc({ agents, workspace, instanceRegistry }) {
+  const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
+  const roomRepo = {
+    async findOne() { return groupRoom; },
+    async update() {},
+  };
+  // markRead 자체의 participant/latest-message 조회 — 이 그룹 테스트들은
+  // read-marker 동작을 검증하지 않으므로, getOne() -> null로 참가자 체크
+  // 직후 바로 리턴하게만 해두면 충분하다(room-messaging-chat-runtime-profile
+  // 테스트의 동일 stub과 같은 이유).
+  const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
+  const workspaceRepo = { async findOne() { return workspace; } };
+  const messageRepo = {
+    createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
+    manager: {
+      async transaction(fn) {
+        const em = {
+          getRepository() {
+            return {
+              create: (fields) => ({ ...fields }),
+              async save(row) { return { ...row, id: 'msg-1', created_at: new Date() }; },
+            };
+          },
+        };
+        return fn(em);
+      },
+    },
+  };
+  const agentMemberIds = new Set(agents.map((a) => a.id));
+  const membership = {
+    async requireActiveParticipant() {},
+    async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
+    async getRoomAgentMemberIds() { return agentMemberIds; },
+  };
+  const mentionService = { parseMentions: () => [] };
+  const agentRepo = {
+    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
+    // 느슨한 stub(room-messaging-chat-runtime-profile.test.mjs의 makeGroupSvc와
+    // 동일): fixture의 agents가 이미 테스트 대상 id만 담고 있으므로 type만
+    // 필터링해도 실제 TypeORM의 `id IN (:...) AND type = 'claude'`와 같은
+    // 결과가 나온다.
+    async find({ where }) { return agents.filter((a) => a.type === (where.type ?? a.type)); },
+  };
+  const connectivity = { isReachable: () => true };
+  return new RoomMessagingService(
+    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    instanceRegistry,
+  );
+}
+
+test('Group room broadcast with mixed old/new managers: the old-manager member is dropped from BOTH cli_runtime_profiles and agent_member_ids; the new-manager member and a no-profile member are untouched', async () => {
+  const oldManagerAgent = { id: 'agent-old-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
+  const newManagerAgent = { id: 'agent-new-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
+  const plainAgent = { id: 'agent-plain-group', type: 'claude', role_prompt: '', cli_runtime_profile: null, credential_id: null };
+  const instanceRegistry = {
+    listForAgent: (id) => {
+      if (id === oldManagerAgent.id) return [OLD_MANAGER_INSTANCE];
+      if (id === newManagerAgent.id) return [NEW_MANAGER_INSTANCE];
+      return [];
+    },
+  };
+  const svc = makeGroupSvc({
+    agents: [oldManagerAgent, newManagerAgent, plainAgent],
+    workspace: wsWithVllmProfile,
+    instanceRegistry,
+  });
+
+  const roomMessage = captureRoomMessageOnce();
+  warnLogs.length = 0;
+  try {
+    await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello room');
+    const payload = roomMessage.get();
+    assert.ok(payload, 'chat_room_message should have been emitted');
+
+    assert.deepEqual(
+      Object.keys(payload.cli_runtime_profiles).sort(),
+      ['agent-new-group'],
+      'only the compatible, profile-carrying member may appear in the map',
+    );
+
+    assert.deepEqual(
+      Array.from(payload.agent_member_ids).sort(),
+      ['agent-new-group', 'agent-plain-group'],
+      'the incompatible member must be excluded from the broadcast dispatch-candidate set entirely — ' +
+        'leaving it there would let its manager fall back to dispatching it profile-less (CLI default ' +
+        'output budget), reproducing the exact hang+500 this gate exists to prevent',
+    );
+
+    assert.ok(
+      Array.from(payload.member_ids).includes(oldManagerAgent.id),
+      'member_ids (message visibility for the whole room) must NOT be filtered — only dispatch-candidate eligibility is',
+    );
+
+    assert.ok(warnLogs.length > 0, 'the mismatch must be logged, not silent');
+  } finally {
+    roomMessage.off();
+  }
+});
+
+test('Group room broadcast with NO live manager telemetry: fails OPEN — the member stays in both cli_runtime_profiles and agent_member_ids', async () => {
+  const agent = { id: 'agent-unknown-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
+  const instanceRegistry = { listForAgent: () => [] };
+  const svc = makeGroupSvc({ agents: [agent], workspace: wsWithVllmProfile, instanceRegistry });
+
+  const roomMessage = captureRoomMessageOnce();
+  try {
+    await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello room');
+    const payload = roomMessage.get();
+    assert.ok(
+      payload.cli_runtime_profiles?.[agent.id],
+      'no live instance data must not block a broadcast profile — a fresh pairing or a TTL sweep looks identical to "no manager"',
+    );
+    assert.ok(Array.from(payload.agent_member_ids).includes(agent.id));
+  } finally {
+    roomMessage.off();
+  }
+});
+
+test('Group room broadcast when instanceRegistry itself is undefined: fails OPEN, never throws', async () => {
+  const agent = { id: 'agent-no-registry-group', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
+  const svc = makeGroupSvc({ agents: [agent], workspace: wsWithVllmProfile, instanceRegistry: undefined });
+
+  const roomMessage = captureRoomMessageOnce();
+  try {
+    await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello room');
+    const payload = roomMessage.get();
+    assert.ok(payload.cli_runtime_profiles?.[agent.id]);
+    assert.ok(Array.from(payload.agent_member_ids).includes(agent.id));
+  } finally {
+    roomMessage.off();
+  }
+});

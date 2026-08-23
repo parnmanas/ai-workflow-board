@@ -24,7 +24,7 @@ import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
-import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
+import { requiredManagerCapability, evaluateManagerCapability, checkManagerCapabilityForDispatch } from '../../common/manager-capability-gate';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
 const CONTENT_MAX = 10000;
@@ -596,13 +596,26 @@ export class RoomMessagingService {
     // 하트비트는 제외한다(위 mention/DM skip과 같은 이유): chat_room_message는
     // 모든 tool-call narration마다 발생하는데, 하트비트는 그 profile을 쓸 새
     // dispatch 턴을 여는 게 아니기 때문이다.
+    //
+    // ticket 9e2fc33d: manager capability 게이트가 profile을 비호환으로
+    // 판정한 멤버는 profile map뿐 아니라 이번 broadcast의
+    // agent_member_ids에서도 뺀다(_resolveChatRuntimeProfilesForMembers doc
+    // 코멘트 참고) — 그래야 그 매니저가 map-없음 폴백으로 profile 없이
+    // dispatch를 강행하지 못한다. member_ids(사람/다른 agent 포함 전체
+    // 참가자)는 그대로 둔다 — 메시지 자체는 방의 모든 참가자에게 정상
+    // 노출되어야 하고, 배제되는 건 "이 턴에 dispatch 후보가 될 자격"뿐이다.
     let cliRuntimeProfiles: Record<string, CliRuntimeProfile> | undefined;
+    let broadcastAgentMemberIds = agentMemberIds;
     if (isRealMessage && agentMemberIds.size > 0) {
-      const resolved = await this._resolveChatRuntimeProfilesForMembers(
+      const { profiles, incompatibleAgentIds } = await this._resolveChatRuntimeProfilesForMembers(
         Array.from(agentMemberIds),
         workspaceId,
       );
-      if (Object.keys(resolved).length > 0) cliRuntimeProfiles = resolved;
+      if (Object.keys(profiles).length > 0) cliRuntimeProfiles = profiles;
+      if (incompatibleAgentIds.length > 0) {
+        broadcastAgentMemberIds = new Set(agentMemberIds);
+        for (const id of incompatibleAgentIds) broadcastAgentMemberIds.delete(id);
+      }
     }
 
     // Trailing consecutive agent-sender count in this room INCLUDING the
@@ -628,7 +641,7 @@ export class RoomMessagingService {
       created_at: savedMsg.created_at.toISOString(),
       agent_chain_depth: agentChainDepth,
       member_ids: memberIds,
-      agent_member_ids: agentMemberIds,
+      agent_member_ids: broadcastAgentMemberIds,
       // DM/@mention execution is owned by the targeted chat_request event.
       // The room event still broadcasts the persisted message to participants,
       // but Runtime Hosts use this marker to avoid a second execution path.
@@ -1110,29 +1123,56 @@ export class RoomMessagingService {
    * 항목을 맵에서 직접 고를 수 있게 한다. workspace는 한 번만 가져와
    * 멤버 전체에 재사용한다 — _resolveChatRuntimeProfile처럼 호출마다
    * 반복 조회하지 않는다.
+   *
+   * ticket 9e2fc33d: profile을 resolve한 뒤에는 그 agent_id의 LIVE manager
+   * instance(들)가 profile이 요구하는 capability(예: context_window 클램프)를
+   * 실제로 지원하는지 checkManagerCapabilityForDispatch로 확인한다. 비호환이면
+   * map에 아예 넣지 않는다 — profile만 빼고 agent_id는 그대로 두면, 그
+   * 매니저는 "이 agent는 원래 profile이 없다"는 정상 케이스와 구분하지 못한 채
+   * map에 항목이 없을 때의 폴백(agent-manager
+   * resolveRoomBroadcastRuntimeProfile)을 그대로 타 profile 없이(=CLI 고정
+   * 기본 output budget으로) dispatch를 진행해버린다 — c3b767c6/1af53029가
+   * 막으려던 hang+500을 그대로 재현하는 것과 같다. 그래서 비호환 agent_id는
+   * incompatibleAgentIds로 함께 반환해, 호출자가 그 agent를 이번 broadcast의
+   * emit 대상(agent_member_ids) 자체에서도 제외하게 한다 — DM/@멘션 경로
+   * (_checkManagerCapability)가 dispatch 자체를 거부하는 것과 동일한 효과를
+   * 팬아웃 구조에 맞게 낸다. 다른 멤버는 영향받지 않고 정상 응답한다.
    */
   private async _resolveChatRuntimeProfilesForMembers(
     agentIds: string[],
     workspaceId: string,
-  ): Promise<Record<string, CliRuntimeProfile>> {
-    const out: Record<string, CliRuntimeProfile> = {};
-    if (agentIds.length === 0) return out;
+  ): Promise<{ profiles: Record<string, CliRuntimeProfile>; incompatibleAgentIds: string[] }> {
+    const profiles: Record<string, CliRuntimeProfile> = {};
+    const incompatibleAgentIds: string[] = [];
+    if (agentIds.length === 0) return { profiles, incompatibleAgentIds };
     const agents = await this.agentRepo.find({ where: { id: In(agentIds), type: 'claude' } });
-    if (agents.length === 0) return out;
+    if (agents.length === 0) return { profiles, incompatibleAgentIds };
     const workspace = workspaceId
       ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
       : null;
     for (const agent of agents) {
       try {
         const profile = await this._resolveChatRuntimeProfileCore(agent, workspace);
-        if (profile) out[agent.id] = profile;
+        if (!profile) continue;
+        const instances = this.instanceRegistry?.listForAgent(agent.id) ?? [];
+        const verdict = checkManagerCapabilityForDispatch(profile, instances);
+        if (!verdict.ok) {
+          incompatibleAgentIds.push(agent.id);
+          this.logService.warn(
+            'ChatRooms',
+            'chat_room_message broadcast profile dropped (manager capability mismatch)',
+            { agent_id: agent.id, profile_id: profile.id, reason: verdict.reason, detail: verdict.detail },
+          );
+          continue;
+        }
+        profiles[agent.id] = profile;
       } catch (err) {
         this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
           err: String(err), agent_id: agent.id,
         });
       }
     }
-    return out;
+    return { profiles, incompatibleAgentIds };
   }
 
   /** 단일 agent 경로(_resolveChatRuntimeProfile)와 배치 경로
