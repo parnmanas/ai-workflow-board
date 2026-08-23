@@ -1271,3 +1271,175 @@ lockfile 이 아니라 **해석 결과**를 감사한다. 두 질문을 분리�
 
 - `react` 18→19, `typeorm` 0.3→1.1, `@hello-pangea/dnd` 17→18, `undici` 7→8 —
   전부 기능 메이저이고 보안 사유 없음. 현 버전은 각 계열의 최신이며 advisory 0건.
+
+## 재검증 로그 — 2026-08-23 (`main` @ `857d10f4`)
+
+### 결론
+
+의존성 자체는 또 깨끗했다 — `main`, 배포 브랜치, 발행 트리(live/next) 전부 0건.
+
+이번 발견은 **어제 넓힌 감사 대상에서 한 축이 빠져 있었다**는 것이다. 2026-08-22
+감사가 "lockfile 이 아니라 호스트가 받는 트리를 봐야 한다" 를 세우고 그 트리에
+`npm audit` 을 붙였는데, 그 트리에 대해 물어야 할 질문은 두 개였다. advisory 는
+붙였고 **install script 는 빠뜨렸다** — 그런데 둘 중 더 빠르고 더 직접적인 쪽은
+후자다. CVE 가 하나도 없어도 서드파티 `postinstall` 하나면 모든 라이브 호스트에서
+매니저 권한으로 임의 코드가 돈다.
+
+### 1. 정기 점검 (모두 통과, 변동 없음)
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (main) | **0 vulnerabilities** (prod 276 / dev 307 / opt 85, total 606) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| 카나리아 (`lodash@4.17.15` + `minimist@1.2.0`) | 1 critical + 1 high 검출 — 어드바이저리 경로 살아있음 확인 |
+| lockfile 위생 | 606 엔트리, 비-registry resolved **0**, 평문 http **0**, integrity 누락 **0** |
+| install script (lockfile 축) | 3건 (`esbuild`/`fsevents`/`@scarf/scarf`) 전부 allowlist 내 |
+| 액션 SHA 고정 | `uses:` 14건 전부 커밋 SHA |
+| 발행 트리 감사 (live/next) | 96 / 92 패키지, moderate 이상 **0건** |
+| `production.private` | `package.json`/`package-lock.json`/`Dockerfile`/`turbo.json`/워크스페이스 매니페스트 3종 **전부 바이트 동일** — 의존성 드리프트 없음 |
+| 기존 가드 | supply-chain 16/16, ci-branch-coverage 6/6, cron-coverage 6/6, published-deps 10/10 |
+
+**배포 브랜치 드리프트 실측** — `origin/main` ↔ `origin/production.private` 는 6개
+파일만 갈려 있고(`deploy.yml` + CLI 런타임 프로파일 관련 5개) **의존성 축은 전혀
+갈리지 않는다**. 어제 갈려 있던 `apps/server/package.json` / `apps/client/package.json`
+(테스트 목록 차이)도 그 사이 동기화돼 지금은 바이트 동일이다.
+
+**발행 트리 드리프트** — 어제 10건이었고 오늘 **11건**이다(`fast-uri` 3.1.5 → 3.1.6
+추가). 여전히 lockfile 이 가리키지 않는 버전들이고, 여전히 전부 깨끗하다. 이 표를
+매 실행 로그에 남기는 이유는 2026-08-22 절에 적은 그대로다.
+
+**메이저 뒤처짐** — 변동 없음. `undici` 7.29.0 은 7.x 최신이고 7 계열이 유지보수
+중이므로 보안 사유의 강제 업그레이드 대상이 아니다(2026-08-22 판단 유지).
+
+### 2. 발견 — 해석된 트리를 advisory 로만 봤고, install script 로는 보지 않았다
+
+어제 세운 사실: **`npm i -g awb-agent-manager` 는 우리 lockfile 을 읽지 않는다.**
+호스트가 받는 트리는 그 시점 레지스트리에서 `^` 범위를 새로 해석한 별개의 객체다.
+
+그 트리에 대해 물어야 할 질문은 두 개인데 하나만 물었다:
+
+| 축 | 무엇을 묻는가 | lockfile 트리 | **해석된(호스트) 트리** |
+| --- | --- | --- | --- |
+| advisory | 알려진 취약점이 있는가 | `npm audit` (오래전부터) | `audit-published-deps.mjs` (2026-08-22) |
+| **install script** | **설치할 때 무엇이 실행되는가** | `audit-install-scripts.mjs` | **아무것도 없었다** |
+
+`scripts/audit-install-scripts.mjs` 는 정확히 이 축을 허용목록으로 강제한다 —
+그런데 첫 줄이 `readFileSync(resolve(root, 'package-lock.json'))` 이다. 즉
+**어제 "다른 객체" 라고 확인한 바로 그 파일**을 읽는다. 그래서 CI 러너의 트리는
+지켜지고 라이브 호스트의 트리는 지켜지지 않았다.
+
+이 축의 실패 모드가 advisory 보다 나쁜 이유:
+
+> advisory 는 취약점이 **발견되고 공시된 뒤에야** 붙는다. install script 는 그런
+> 지연이 없다 — 탈취된 패키지가 퍼지는 데 필요한 건 publish 한 번이고, 그 순간부터
+> `npm i -g` 하는 모든 호스트에서 코드가 돈다. CVE 번호는 한참 뒤에 붙거나 안 붙는다.
+
+그리고 실행 경로가 실제로 열려 있었다. `self-update.ts` 의 전역 설치 두 곳
+(POSIX 경로 / Windows detached 헬퍼) 모두 `npm install -g <spec>` 을 플래그 없이
+실행한다 — npm 기본값은 **lifecycle script 실행**이다. 2026-08-15 에 붙인 SLSA
+provenance 게이트는 **우리 tarball 의 출처**를 보증할 뿐, 그 아래 95개 전이
+의존성이 설치 시 무엇을 실행하는지에 대해서는 아무 말도 하지 않는다.
+
+**실측** — 오늘 기준 발행 트리(96 패키지)의 install-script 패키지는 **0개**다.
+즉 지금 뚫려 있는 건 아니다. 뚫려 있는 것은 **그 0 을 아무도 확인하지 않는다**는
+사실이고, 0 이 1 이 되는 데 우리 커밋은 한 줄도 필요 없다.
+
+### 3. 조치 — 탐지(cron)와 차단(실행 시점) 2겹
+
+**(a) 탐지 — `scripts/audit-published-deps.mjs` 에 install-script 축 추가**
+
+이미 해석된 lockfile 을 들고 있으므로 추가 네트워크 비용이 0이다. `npm install
+--package-lock-only` 는 설치하지 않지만 packument 에서 `hasInstallScript` 를
+lockfile 에 채워 넣는다 — 스크립트를 **실행하지 않고** "진짜로 깔면 무엇이
+실행되는가" 를 읽어낼 수 있다(실측 확인: `esbuild@0.25.0` 을 그 모드로 해석하면
+`hasInstallScript: true` 가 그대로 들어온다). live/next 양쪽에 대해 판정하고,
+통과하더라도 `install script 0개` 를 로그에 남긴다.
+
+허용목록(`PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED`)은 **의도적으로 비어 있고,
+lockfile 축의 ALLOWED 와 별개 집합이다.** 빌드 체인이 `esbuild` 의 postinstall 을
+정당하게 필요로 한다는 사실은 라이브 호스트에서 임의 코드가 도는 것을 정당화하지
+않는다. 실측 0개이므로 빈 집합이 희망이 아니라 현재 상태다.
+
+**(b) 차단 — self-update 전역 설치에 `--ignore-scripts`**
+
+탐지만 두면 cron 층이라 최대 24시간 방치된다. 실행 시점에서 막는 층이 따로 필요하다.
+`self-update.ts` 의 두 호출부(POSIX / Windows 헬퍼) 모두에 `--ignore-scripts` 를 붙였다.
+
+깨지는 것이 없음을 실측으로 확인했다:
+
+- 격리된 prefix 에 `npm install -g --prefix /tmp/... --ignore-scripts awb-agent-manager@latest`
+  → 96 패키지 설치, `bin/awb-agent-manager` 심링크 정상 생성, `--version` 이
+  `1.6.148` 출력. **bin 링크는 lifecycle script 가 아니라 npm 코어 동작**이라
+  이 플래그의 영향을 받지 않는다.
+- 발행 tarball 의 `package.json` 확인 — `preinstall`/`install`/`postinstall` 없음.
+  `prepublishOnly` 는 publish 시점에 소스 트리에서만 돌고 소비자 설치와 무관하다.
+
+**(c) 운영자가 손으로 치는 경로도 같이 맞췄다**
+
+부트스트랩(`npm i -g awb-agent-manager`)은 우리가 플래그를 넣을 수 없는 경로다 —
+문서에 있는 명령이 곧 그 경로다. `apps/agent-manager/README.md`, `docs/agent-manager.md`,
+그리고 Admin UI 가 "수동 업그레이드" 안내로 띄우는 문자열
+(`AgentManagerPage.tsx` 3곳)을 `npm i -g --ignore-scripts …` 로 통일했다.
+UI 문자열 2개는 자동 업데이트가 **실제로 실행하는 명령**을 설명하는 자리라,
+그대로 뒀으면 오늘부로 사실과 다른 안내가 된다.
+
+### 4. 가드 (기계 강제)
+
+`apps/server/test/published-deps-audit-guard.test.mjs` 에 **6건 추가** (10 → 16).
+새 파일을 만들지 않았으므로 `package.json` `test` 등록은 이미 돼 있다(2026-08-21
+고아 테스트 계열 회귀 없음 — `test-registration-completeness` 4/4 확인).
+
+- `installScriptPackages()` 파싱 — 중첩 경로/스코프 이름 추출, `link` 엔트리 제외.
+- `hasInstallScript` 없는 트리를 **0개로 읽는가** (거짓 양성 없음).
+- `disallowedInstallScripts()` 가 허용목록을 **이름 정확 매칭**으로만 빼는가.
+- 허용목록이 **지금 비어 있는가** — 항목이 생기면 여기서 멈춰 세운다.
+- **self-update 의 전역 설치 호출부가 전부 `--ignore-scripts` 를 쓰는가.**
+  호출부를 하나도 못 찾으면 "검사 대상 0개" 로 조용히 통과하므로 `>= 2` 를 함께 단언한다.
+- **결합 강제** — 허용목록이 비어 있지 않은데 `--ignore-scripts` 가 남아 있으면 FAIL.
+  두 결정은 반대 방향으로 묶여 있다: 허용목록에 이름을 넣는다는 건 "이 패키지는
+  install script 가 필요하다" 는 뜻인데 `--ignore-scripts` 는 그걸 건너뛴다.
+  그대로 두면 호스트에 **조용히 깨진 트리**가 깔린다. 사람 기억 대신 여기서 막는다.
+
+**기존 가드 1건 수정** — `supply-chain-integrity-guard.test.mjs` 의 liveness 단언이
+전역 설치 argv 를 `['install', '-g', installSpec]` 로 **정확히** 고정하고 있어
+`--ignore-scripts` 삽입에 깨졌다. 플래그는 사이에 낄 수 있게 풀되 **검증된
+`installSpec` 으로 고정된다**는 원래 성질(2026-08-15 TOCTOU 방어)은 그대로 유지하도록
+정규식을 좁혔다. 이건 가드 완화가 아니다 — 플래그 존재 자체는 위 신규 가드가 별도로
+강제하므로 두 성질이 각각 자기 자리에서 지켜진다.
+
+**가드가 실제로 무는지 확인** (전부 실측):
+
+- **FAIL 경로 실배선 확인** — `apps/agent-manager/package.json` 에 `esbuild@^0.25.0`
+  을 임시로 넣고 전체 감사 실행 → `next` 트리에서 정확히 그 1건을 짚고 `exit 1`,
+  `live` 는 0개로 통과(발행된 latest 에는 없으므로 정확한 동작). 원복 후 통과.
+- **해석 층 실측** — `resolveAndAudit()` 에 `esbuild@0.25.0` 을 물려 실제 레지스트리
+  해석 → 26 패키지 중 `hasInstallScript` 1건을 검출. 탐지가 mock 이 아니라 실제
+  packument 경로로 동작함을 확인.
+- `--ignore-scripts` 제거 → 신규 가드가 정확히 그 1건으로 red(`전역 설치가 서드파티
+  install script 를 실행한다: ['install', '-g', installSpec],`). 원복 후 16/16.
+- 허용목록에 `esbuild` 추가 → **2건** red(빈 집합 단언 + 결합 강제). 원복 후 16/16.
+- 수정한 liveness 단언이 여전히 무는지 확인 — `installSpec` 을 `channelSpec` 으로
+  바꾸니 정확히 그 테스트가 red. 즉 TOCTOU 고정 성질은 살아 있다.
+- 전체 감사 스크립트 5개 + `audit-deploy-branch-deps.mjs` 전부 PASS.
+- 가드 4파일 합산 **48/48 pass** (supply-chain 16 / ci-branch-coverage 6 /
+  cron-coverage 6 / published-deps 16 + test-registration 4).
+- `apps/agent-manager` — `npm run build` 통과, 전체 테스트 **1190 pass / 0 fail**.
+- `apps/client` — build 통과, 전체 테스트 **328 pass / 0 fail**.
+
+**로컬 한계 (CI 에서 확인 필요)** — 이 워크트리의 `node_modules` 는 공유 base
+체크아웃 심링크인데 그 설치본이 `main` 보다 오래돼 `web-tree-sitter` /
+`@node-rs/xxhash` 가 없다. 그래서 `apps/server` 의 `npm test` 는 앞단 `nest build`
+에서 TS2307 로 죽는다 — **이번 변경과 무관한 환경 문제**다(두 패키지는
+`apps/server/package.json` 과 lockfile 에 정상 선언돼 있어 `npm ci` 하는 CI 에는
+존재하고, 이번 diff 는 `ontology` 쪽 파일을 하나도 건드리지 않는다). 서버 테스트는
+빌드를 우회해 관련 가드 파일을 직접 실행하는 방식으로 검증했다.
+
+### 5. 이월 (변동 없음, 운영자 판단 필요)
+
+- `react` 18→19, `typeorm` 0.3→1.1, `@hello-pangea/dnd` 17→18, `undici` 7→8 —
+  전부 기능 메이저이고 보안 사유 없음. 현 버전은 각 계열의 최신이며 advisory 0건.
+- **`node:22-slim` 태그 고정 (신규 이월, 미조치)** — `Dockerfile` 세 스테이지가
+  전부 부동(floating) 태그를 쓴다. 액션은 SHA 로 고정돼 있는데 베이스 이미지는
+  아니라 일관성이 없다. 다만 다이제스트로 고정하면 **OS 패키지 보안 패치가 멈추는**
+  반대 방향 위험이 생기므로, 자동 범프 수단(Dependabot 등) 없이 단독으로 고정하는
+  건 순 손해다. 둘을 같이 도입할지는 운영자 판단 사항이라 조치하지 않고 기록만 한다.

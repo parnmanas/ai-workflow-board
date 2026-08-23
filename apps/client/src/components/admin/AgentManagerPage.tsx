@@ -626,7 +626,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
       title: 'Update manager',
       message:
         inst.install_mode === 'npm-global'
-          ? 'Update this manager? It will reinstall from npm (npm i -g awb-agent-manager@latest) and restart.'
+          ? 'Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart.'
           : 'Update this manager? It will pull the latest source, rebuild, and restart.',
       confirmLabel: 'Update',
       danger: false,
@@ -905,7 +905,7 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
               }}
               title={
                 inst.install_mode === 'npm-global'
-                  ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g awb-agent-manager@latest, then restart).`
+                  ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).`
                   : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm ci + build, then re-exec).`
               }
             >
@@ -2388,7 +2388,7 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
     return (
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
-        title="This manager can't auto-update — upgrade it manually with npm i -g awb-agent-manager@latest."
+        title="This manager can't auto-update — upgrade it manually with npm i -g --ignore-scripts awb-agent-manager@latest."
       >
         (manual updates only)
       </span>

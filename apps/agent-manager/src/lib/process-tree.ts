@@ -43,7 +43,14 @@ export interface ProcNode {
  *  (collectNonBenignDescendants), so the host server's own transient
  *  shell-outs (screenshots, log scans) are excluded with it. Exported +
  *  overridable so a follow-up can extend the denylist without touching logic. */
-export const BENIGN_CMD_PATTERNS: readonly RegExp[] = Object.freeze([/\bmcp-host\b/]);
+export const BENIGN_CMD_PATTERNS: readonly RegExp[] = Object.freeze([
+  /\bmcp-host\b/,
+  // Windows attaches a console host to CLI processes. It is infrastructure,
+  // not work left running by the agent; counting it as a background task
+  // makes an idle session look alive forever and triggers a process scan every
+  // idleRecheckSeconds (60s by default).
+  /(?:^|[\\/])conhost\.exe(?:\s|$)/i,
+]);
 
 export function isBenignCmd(cmd: string, patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS): boolean {
   return patterns.some((re) => re.test(cmd));
@@ -122,7 +129,8 @@ export async function listAllProcesses(): Promise<ProcNode[]> {
   if (hostPlatform() === 'win32') {
     const script =
       'Get-CimInstance Win32_Process | ' +
-      'Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress';
+      "Select-Object ProcessId,ParentProcessId,@{Name='CommandLine';Expression={if ($_.CommandLine) {$_.CommandLine} else {$_.Name}}} | " +
+      'ConvertTo-Json -Compress';
     const res = await runPowerShell(script, { timeoutMs: 15_000 });
     if (res.spawnFailed || res.code !== 0) return [];
     return parseProcListWin(res.stdout);

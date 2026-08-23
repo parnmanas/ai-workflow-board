@@ -110,13 +110,29 @@ aliases — `model_alias` if set, otherwise `sonnet`:
 ```
 
 The alias only has to be something the CLI accepts — it does not change which
-backend model actually serves the request. Every aux-model environment
-variable Claude Code consults (`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
-`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
-`ANTHROPIC_DEFAULT_HAIKU_MODEL`) defaults to `model`, so regardless of which
-alias tier `--model` claims to be, every request — main turn or internal aux
-call — still routes to the one configured backend model. Set `env` to override
-any of those variables individually (e.g. a genuinely multi-model backend).
+backend model actually serves the request, but the environment variables that
+carry it split into two roles:
+
+- **Selection** (`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`) — Claude
+  Code's internal helper calls (session-title generation and similar) read
+  these directly, bypassing `--model` argv entirely. They default to the same
+  alias as `--model`, never to `model`. A raw provider id here reproduces the
+  exact `unrecognized_model` failure this section exists to prevent, even
+  when `--model` itself is already alias-safe — only fixing `--model` and
+  leaving these two on the raw id is the round-1 regression that reopened
+  this ticket.
+- **Override** (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`) — the
+  CLI's official mechanism (see [Claude Code docs, Model configuration →
+  Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection))
+  for mapping a resolved tier alias to the model actually requested. These
+  default to `model`, so regardless of which alias tier gets selected (via
+  `--model`, `ANTHROPIC_MODEL`, or `ANTHROPIC_SMALL_FAST_MODEL`), every
+  request — main turn or internal aux call — still routes to the one
+  configured backend model, `fable` included.
+
+Set `env` to override any of those variables individually (e.g. a genuinely
+multi-model backend).
 
 A board's harness `fallback_models` (a model-retry chain for transient
 usage-limit / model-unavailable deaths) is ignored while a profile is bound:
@@ -125,6 +141,61 @@ else on that backend to fall back to, and those entries were never validated
 as CLI-recognized aliases. A fallback-eligible death on a profile-bound
 session is treated as an ordinary single failure instead of retrying with a
 different `--model`.
+
+## Context window and output budget
+
+Custom backends (a self-hosted vLLM server, for example) usually have a much
+smaller context window than Anthropic's cloud tiers. Claude Code CLI does not
+know this on its own — without help it requests its own fixed default output
+budget regardless of the backend's real limit, so a large first turn can push
+`input + max_tokens` past the backend's context window. The backend then
+rejects the request only after Claude Code has waited out its own retry
+budget, so the failure surfaces as a multi-minute hang followed by an opaque
+5xx instead of a fast, clear error.
+
+Set `context_window` to the backend's real limit (a vLLM server reports this
+as `max_model_len`) to opt in to a per-turn clamp:
+
+```json
+{
+  "id": "vllm-qwen3-coder",
+  "kind": "claude-backend",
+  "protocol": "anthropic-compatible",
+  "base_url": "http://gpu-host:8000",
+  "model": "qwen3-coder-next",
+  "context_window": 65536,
+  "safety_margin_tokens": 20000
+}
+```
+
+With `context_window` set, every session spawn estimates the known input
+(role prompt + harness system-prompt append + first turn text) and injects
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS` so `known_input + safety_margin_tokens +
+output` stays within `context_window`. If the resulting budget would leave
+less than a minimal, useful output allowance, the spawn fails immediately
+with a clear error instead of reaching the backend at all.
+
+`safety_margin_tokens` reserves room for everything the clamp cannot see at
+spawn time — Claude Code's own base system prompt, session metadata, and the
+AWB MCP tool schema. **The default (40,000) is sized for large cloud context
+windows and is usually wrong for a small self-hosted backend** — combined
+with a realistic first-message input it can already exceed what's left of a
+~65K window, turning a working chat into an immediate budget error. Set
+`safety_margin_tokens` explicitly for any backend with a `context_window`
+below a few hundred thousand tokens. A `context_window` under
+`TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS` (`apps/agent-manager/src/lib/runtime-profiles.ts`)
+also auto-selects AWB's compact MCP tool profile — a fixed allowlist (see
+`COMPACT_TOOL_ALLOWLIST` in `apps/server/src/modules/mcp/shared/tool-profiles.ts`)
+instead of the full tool set — which is most of what the margin needs to
+cover; 15,000–20,000 tokens is a reasonable starting point for a ~64K-token
+window like the example above — adjust from there based on observed
+`known_input≈`/`effective_max_output=` values in the agent-manager log line
+emitted at session spawn.
+
+`max_output_tokens` caps the *requested* output before the clamp runs
+(default 32,000, Claude Code's own fixed ask) — set it lower if the backend
+should never be asked for more than a known amount regardless of how much
+budget is left.
 
 ## Claude wrapper and public configuration
 

@@ -399,3 +399,72 @@ test('validateRuntimeProfile: context_window - safety_margin_tokens == MIN_OUTPU
     safety_margin_tokens: 2_000 - MIN_OUTPUT_TOKENS, // budget(known input 0 기준) = 정확히 MIN_OUTPUT_TOKENS
   }));
 });
+
+// ── 티켓 1af53029: profile 4901018c(Local vLLM - qwen3-coder-next)에 실제로
+// 적용하는 값 ──────────────────────────────────────────────────────
+//
+// context_window=65,536(vLLM max_model_len)은 정했지만, 기본
+// safety_margin_tokens(40,000)를 그대로 두면 실측 known input(33,537, 위
+// REAL_KNOWN_INPUT — 실제 AWB 첫 채팅 규모 근사)만으로 이미 예산이 고갈된다:
+// 65,536 - 33,537 - 40,000 = -8,001 < MIN_OUTPUT_TOKENS. context_window 를
+// 몰라서 174초 뒤 vLLM 500으로 실패하던 원래 사고를, 즉시 명확한
+// ContextBudgetExhaustedError 로 바꿀 뿐 첫 채팅이 여전히 실패하는 건
+// 마찬가지라 해결이 아니다.
+//
+// 대신 이 profile 에는 safety_margin_tokens=20,000 을 명시적으로 설정한다.
+// 이 값이 남겨야 하는 "known_total 이 못 보는" 몫: context_window<
+// TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS(128,000) 라 resolveToolProfileHeader()
+// 가 자동으로 'compact' MCP tool profile 을 요청하므로(ticket ee26302d),
+// AWB MCP tool schema 는 37,608 bytes(≈8,500~10,000 실측 BPE 토큰 범위,
+// apps/server/test/mcp-tool-schema-budget.test.mjs 참고) 로 이미 줄어든 채
+// 더해진다 — 여기에 CLI 자체 기본 system prompt 와 char/4 추정 오차 여유를
+// 더해도 20,000 이면 충분하다고 판단했다. known_input=REAL_KNOWN_INPUT 기준
+// budget=31,999-20,000=11,999 로, 실사용 가능한 출력 여유를 남기면서도
+// throw 임계(30,975)에는 한참 못 미친다.
+const VLLM_PROFILE_SAFETY_MARGIN = 20_000;
+
+test('티켓 1af53029: 기본 safety_margin_tokens(40,000)를 그대로 두면 실측 known input 에서 ContextBudgetExhaustedError — override 가 필요한 이유', () => {
+  assert.throws(
+    () => resolveEffectiveMaxOutputTokens({
+      contextWindow: REAL_CONTEXT_WINDOW,
+      knownInputTokens: REAL_KNOWN_INPUT,
+      requestedMaxOutputTokens: DEFAULT_REQUESTED_MAX_OUTPUT_TOKENS,
+      safetyMarginTokens: DEFAULT_SAFETY_MARGIN_TOKENS,
+    }),
+    ContextBudgetExhaustedError,
+  );
+});
+
+test('티켓 1af53029: safety_margin_tokens=20,000 override는 실측 known input(33,537)에서 양수의 유효 output budget을 계산한다', () => {
+  const effective = resolveEffectiveMaxOutputTokens({
+    contextWindow: REAL_CONTEXT_WINDOW,
+    knownInputTokens: REAL_KNOWN_INPUT,
+    requestedMaxOutputTokens: DEFAULT_REQUESTED_MAX_OUTPUT_TOKENS,
+    safetyMarginTokens: VLLM_PROFILE_SAFETY_MARGIN,
+  });
+  assert.equal(effective, REAL_CONTEXT_WINDOW - REAL_KNOWN_INPUT - VLLM_PROFILE_SAFETY_MARGIN);
+  assert.ok(effective >= MIN_OUTPUT_TOKENS, '유의미한 출력 여유(MIN_OUTPUT_TOKENS 이상)가 남아야 한다');
+  assert.ok(
+    REAL_KNOWN_INPUT + effective <= REAL_CONTEXT_WINDOW,
+    'vLLM 요청의 input+max_tokens 합은 context_window(65,536)를 넘지 않아야 한다',
+  );
+});
+
+test('티켓 1af53029: resolveMaxOutputTokensEnv 로도 동일 profile 설정이 CLAUDE_CODE_MAX_OUTPUT_TOKENS 를 양수로 산출한다', () => {
+  const resolution = resolveMaxOutputTokensEnv(
+    {
+      id: '4901018c-2639-48eb-b016-c3ec8a39e5cb',
+      protocol: 'anthropic-compatible',
+      base_url: 'http://192.168.0.6:8000',
+      model: 'qwen3-coder-next',
+      context_window: REAL_CONTEXT_WINDOW,
+      safety_margin_tokens: VLLM_PROFILE_SAFETY_MARGIN,
+    },
+    // role_prompt/harness_append/first_turn 합이 REAL_KNOWN_INPUT 을 근사하도록
+    // 구성 — 실제 AWB 첫 채팅 규모 재현(사고 재현과 동일한 근사 방식).
+    { rolePrompt: 'x'.repeat(REAL_KNOWN_INPUT * 4), harnessAppend: '', firstTurnText: '' },
+  );
+  assert.equal(resolution.effectiveMaxOutputTokens, REAL_CONTEXT_WINDOW - REAL_KNOWN_INPUT - VLLM_PROFILE_SAFETY_MARGIN);
+  assert.ok(resolution.effectiveMaxOutputTokens > 0);
+  assert.deepEqual(resolution.env, { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(resolution.effectiveMaxOutputTokens) });
+});

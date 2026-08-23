@@ -446,6 +446,11 @@ export class BaseSessionManager {
    *  cap-accounting they do across spawned + reserved sessions stays
    *  consistent. */
   protected readonly _inflight = new Map<string, InflightReservation>();
+  /** Final spawn-side guard. Dispatch reservations normally prevent twins,
+   *  but they live above provisioning and can be reclaimed/released by
+   *  independent event paths. Keep the irreversible CLI spawn itself atomic
+   *  per session key so even a reservation bug cannot create two children. */
+  #spawningSessionKeys = new Set<string>();
   /** Per-pid plain-text stdout/stderr tail. Wired in `#wireStdio` for every
    *  session the base class spawns; subclasses read it in their
    *  `_onChildExit` hook to build silent-exit fallback messages without
@@ -583,6 +588,24 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
+    opts: SpawnOpts = {},
+  ): Promise<SessionRecord | null> {
+    if (this.#spawningSessionKeys.has(sessionKey)) {
+      log(`${this.#logTag} spawn blocked by final session-key guard ${this.#keyField}=${sessionKey}`);
+      return null;
+    }
+    this.#spawningSessionKeys.add(sessionKey);
+    try {
+      return await this.#spawnSessionUnlocked(sessionKey, rolePrompt, firstTurnText, opts);
+    } finally {
+      this.#spawningSessionKeys.delete(sessionKey);
+    }
+  }
+
+  async #spawnSessionUnlocked(
+    sessionKey: string,
+    rolePrompt: string,
+    firstTurnText: string,
     { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
@@ -702,11 +725,16 @@ export class BaseSessionManager {
           ),
         );
         const est = maxOutputResolution.estimate;
+        // 티켓 1af53029 — context_window 미설정은 이전까지 이 로그 라인에서
+        // 완전히 무음이었다(budgetLog가 빈 문자열). 원래 사고(7d8ea7c9)가 바로
+        // 이 상태에서 174초 뒤 vLLM 500으로 터졌으므로, clamp 가 꺼져 있다는
+        // 사실 자체를 운영자가 로그에서 바로 볼 수 있어야 한다.
         const budgetLog = maxOutputResolution.effectiveMaxOutputTokens !== null
           ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
             `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
             `safety_margin=${maxOutputResolution.safetyMarginTokens} effective_max_output=${maxOutputResolution.effectiveMaxOutputTokens}`
-          : '';
+          : ' context_window not set — no CLAUDE_CODE_MAX_OUTPUT_TOKENS clamp applied; ' +
+            'a large first turn can silently exceed the backend context window and fail after a long timeout';
         log(
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );

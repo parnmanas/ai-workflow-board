@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
+import { _drainTrustSeedLocksForTests } from '../dist/lib/cli-adapters/claude.js';
 
 const AGENT = 'agent-rolf';
 const TICKET = 'ticket-cli-readiness';
@@ -106,6 +107,11 @@ beforeEach(() => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  // ticket 152e3606: bypassPermissions 티켓 디스패치는 워크스페이스 trust를
+  // fire-and-forget으로 시딩한다 — 임시 cli-home 디렉터리를 지우기 전에
+  // 그 백그라운드 쓰기를 먼저 드레인해야, 삭제 도중 새 파일이 생겨
+  // ENOTEMPTY가 나는 레이스를 피할 수 있다.
+  await _drainTrustSeedLocksForTests();
   await Promise.all(tempDirs.splice(0).map((dir) => fsp.rm(dir, { recursive: true, force: true })));
 });
 
@@ -282,4 +288,46 @@ test('control: an untrusted, credential-less cli-home under the DEFAULT harness 
   assert.equal(state.spawns.length, 1, 'the common case (no board harness override) is unaffected by this gate');
   assert.equal(countTool('pend_ticket'), 0);
   assert.equal(countTool('add_comment'), 0);
+});
+
+// ── (4) ticket 152e3606: 티켓 워크스페이스 trust 시딩 — bypass에서만, fire-and-forget ──
+
+test('ticket 152e3606: bypassPermissions 티켓 디스패치는 워크스페이스 trust를 백그라운드로 시딩한다', async () => {
+  const cliHomeDir = await makeCliHomeDir(); // untrusted, harness_config 없음 → bypassPermissions
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir);
+
+  await d.handleTrigger(makeEvent({ field_changed: 'seed-a1' }));
+  assert.equal(state.spawns.length, 1, 'bypass 모드는 trust 상태와 무관하게 즉시 스폰된다');
+
+  // fire-and-forget이라 handleTrigger가 resolve된 시점엔 시딩이 아직 진행
+  // 중일 수 있다 — 드레인해서 배경 쓰기가 끝난 뒤 파일 상태를 확인한다.
+  await _drainTrustSeedLocksForTests();
+  const raw = JSON.parse(await fsp.readFile(join(cliHomeDir, '.claude.json'), 'utf8'));
+  assert.equal(
+    raw.projects[CWD]?.hasTrustDialogAccepted,
+    true,
+    '지금은 bypass라 trust가 무관해도, 이 워크스페이스가 나중에 non-bypass harness로 재사용될 때를 위해 미리 trusted로 남겨둬야 한다',
+  );
+});
+
+test('ticket 152e3606: non-bypass permission_mode에서는 워크스페이스 trust 시딩을 아예 시도하지 않는다', async () => {
+  const cliHomeDir = await makeCliHomeDir(); // untrusted — .claude.json 자체가 아직 없음
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir);
+  const harness_config = { permission_mode: 'default' };
+
+  await d.handleTrigger(makeEvent({ harness_config, field_changed: 'seed-b1' }));
+  assert.equal(state.spawns.length, 0, '기존 계약대로 pend되어 스폰되지 않아야 한다');
+
+  await _drainTrustSeedLocksForTests();
+  const exists = await fsp
+    .access(join(cliHomeDir, '.claude.json'))
+    .then(() => true)
+    .catch(() => false);
+  assert.equal(
+    exists,
+    false,
+    'non-bypass 게이트가 활성인 동안은 .claude.json 자체가 새로 생기면 안 된다 — 이 분기에서는 시딩을 호출 자체를 하지 않아야 한다(ticket 48aeab6e 계약 보존)',
+  );
 });

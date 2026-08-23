@@ -29,9 +29,12 @@ import { fileURLToPath } from 'node:url';
 
 import {
   PUBLISHED_MANIFEST,
+  PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED,
   clauseHasUpperBound,
   declaredRanges,
+  disallowedInstallScripts,
   driftRows,
+  installScriptPackages,
   lockfileVersions,
   publishedManifest,
   rangeProblem,
@@ -170,5 +173,119 @@ test('가드 스크립트가 ci.yml dependency-audit 잡에 실제로 배선돼 
     ci,
     /node scripts\/audit-published-deps\.mjs\s*$/m,
     'ci.yml 에 전체(레지스트리 해석) 발행 트리 감사 스텝이 없다',
+  );
+});
+
+// ─── install-script 축 (2026-08-23 감사) ────────────────────────────────────
+//
+// 2026-08-22 는 해석된 트리에 `npm audit` 만 돌렸다 — advisory 축. 그런데 `npm i -g`
+// 는 기본적으로 의존성의 preinstall/install/postinstall 을 실행하므로, CVE 가 하나도
+// 없어도 서드파티 postinstall 하나면 모든 라이브 호스트에서 매니저 권한으로 임의
+// 코드가 돈다. 그 축을 강제하던 audit-install-scripts.mjs 는 package-lock.json 을
+// 읽는다 — 이 스크립트가 존재하는 이유가 된 바로 그 "다른 객체" 다.
+
+test('installScriptPackages 는 해석된 lockfile 에서 install-script 패키지만 뽑는다', () => {
+  const found = installScriptPackages({
+    packages: {
+      '': { name: 'probe' },
+      'node_modules/esbuild': { version: '0.25.0', hasInstallScript: true },
+      'node_modules/zod': { version: '4.3.6' },
+      'node_modules/a/node_modules/@scope/nested': { version: '2.0.0', hasInstallScript: true },
+      // link 엔트리는 워크스페이스 심링크라 설치 시 스크립트가 도는 대상이 아니다.
+      'node_modules/local': { version: '0.0.0', hasInstallScript: true, link: true },
+    },
+  });
+  assert.deepEqual(
+    [...found].sort(),
+    [
+      ['@scope/nested', '2.0.0'],
+      ['esbuild', '0.25.0'],
+    ],
+    'hasInstallScript 엔트리만, 중첩 경로에서도 이름을 정확히 뽑아야 한다',
+  );
+});
+
+test('hasInstallScript 가 없는 트리는 0개로 읽는다 (거짓 양성 없음)', () => {
+  const found = installScriptPackages({
+    packages: {
+      '': { name: 'probe' },
+      'node_modules/zod': { version: '4.3.6' },
+      'node_modules/cross-spawn': { version: '7.0.6' },
+    },
+  });
+  assert.equal(found.size, 0);
+  assert.deepEqual(disallowedInstallScripts(found), []);
+});
+
+test('disallowedInstallScripts 는 허용목록만 빼고 전부 보고한다', () => {
+  const found = new Map([
+    ['evil', '9.9.9'],
+    ['esbuild', '0.25.0'],
+  ]);
+  // 빈 허용목록(=현재 상태)에서는 둘 다 잡혀야 한다. 이게 느슨해지면 조용히 통과한다.
+  assert.deepEqual(disallowedInstallScripts(found, new Set()), [
+    { name: 'esbuild', version: '0.25.0' },
+    { name: 'evil', version: '9.9.9' },
+  ]);
+  // 허용된 이름은 빠지되, 허용목록은 **이름을 정확히** 매칭해야 한다.
+  assert.deepEqual(disallowedInstallScripts(found, new Set(['esbuild'])), [
+    { name: 'evil', version: '9.9.9' },
+  ]);
+});
+
+test('발행 트리 허용목록은 lockfile 축의 허용목록과 별개이며 지금은 비어 있다', () => {
+  // audit-install-scripts.mjs 의 ALLOWED(esbuild/fsevents/@scarf/scarf)를 여기로
+  // 끌어다 쓰면 안 된다 — 빌드 체인이 esbuild 의 postinstall 을 필요로 한다는 사실은
+  // 라이브 호스트에서 임의 코드가 도는 것을 정당화하지 않는다. 실측상 발행 트리의
+  // install-script 패키지는 0개이므로 빈 집합이 현실과 일치한다.
+  assert.ok(
+    PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED instanceof Set,
+    '허용목록은 Set 이어야 한다',
+  );
+  assert.equal(
+    PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED.size,
+    0,
+    '발행 트리 install-script 허용목록에 항목이 생겼다 —' +
+      ' self-update 의 --ignore-scripts 와 함께 재검토할 것 (아래 결합 테스트 참조)',
+  );
+});
+
+test('self-update 의 전역 설치는 전부 --ignore-scripts 를 쓴다', () => {
+  // 탐지(cron)만으로는 최대 24시간 방치된다. 실제 실행 시점의 차단은 여기다.
+  const src = fs.readFileSync(
+    path.join(REPO_ROOT, 'apps/agent-manager/src/lib/self-update.ts'),
+    'utf8',
+  );
+  // POSIX 경로와 Windows 헬퍼(템플릿 리터럴에 임베드된 소스) 양쪽.
+  const installSites = src
+    .split('\n')
+    .filter((l) => /['"]install['"],\s*['"]-g['"]/.test(l));
+  assert.ok(
+    installSites.length >= 2,
+    `전역 설치 호출부를 찾지 못했다 (${installSites.length}개) — 파서가 깨졌거나 호출부가 사라졌다`,
+  );
+  for (const line of installSites) {
+    assert.match(
+      line,
+      /--ignore-scripts/,
+      `전역 설치가 서드파티 install script 를 실행한다: ${line.trim()}`,
+    );
+  }
+});
+
+test('허용목록이 비어 있지 않다면 --ignore-scripts 는 재검토돼야 한다 (결합 강제)', () => {
+  // 두 결정은 반대 방향으로 묶여 있다. 허용목록에 이름을 넣는다는 건 "이 패키지는
+  // install script 가 필요하다" 는 뜻인데, --ignore-scripts 는 그걸 건너뛴다 —
+  // 그대로 두면 호스트에 조용히 깨진 트리가 깔린다. 사람 기억 대신 여기서 막는다.
+  if (PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED.size === 0) return;
+  const src = fs.readFileSync(
+    path.join(REPO_ROOT, 'apps/agent-manager/src/lib/self-update.ts'),
+    'utf8',
+  );
+  assert.doesNotMatch(
+    src,
+    /--ignore-scripts/,
+    'install-script 허용목록에 항목이 있는데 self-update 가 여전히 스크립트를 건너뛴다 —' +
+      ' 그 패키지가 필요로 하는 스크립트가 호스트에서 실행되지 않는다',
   );
 });

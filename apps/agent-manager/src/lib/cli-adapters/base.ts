@@ -66,14 +66,17 @@ export interface RuntimeProfileSpec {
   base_url: string;
   model: string;
   /** Claude Code CLI가 `--model`/내부 보조 요청(세션 제목 생성 등)에서
-   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 백엔드로 실제
-   *  나가는 모델은 항상 `model`(위) — RuntimeLease.claudeEnv() 가
-   *  ANTHROPIC_DEFAULT_*_MODEL/ANTHROPIC_MODEL 네 tier 전부를 profile.model
-   *  로 덮어쓰므로 alias 선택은 백엔드 라우팅에 영향 없다. 생략 시
-   *  DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts) — ticket
-   *  41dc37cb: raw provider model id를 `--model`에 직접 넘기면 CLI가
-   *  `unrecognized_model`로 거부한다(특히 generate_session_title 등 보조
-   *  요청). */
+   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 이 alias는
+   *  `--model`뿐 아니라 RuntimeLease.claudeEnv()의 ANTHROPIC_MODEL/
+   *  ANTHROPIC_SMALL_FAST_MODEL(내부 보조 요청이 직접 읽는 모델 선택
+   *  변수)에도 그대로 실린다 — raw provider model id를 이 두 변수에
+   *  넣으면 CLI가 `unrecognized_model`로 거부한다(특히
+   *  generate_session_title 등 보조 요청; round 1이 `--model`만 고치고
+   *  이 두 env는 그대로 둬서 운영에서 재발, ticket 41dc37cb). 백엔드로
+   *  실제 나가는 모델은 항상 `model`(위) — claudeEnv()의
+   *  ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 어떤 alias가 선택되든 그
+   *  값으로 매핑하므로, alias 자체의 선택은 백엔드 라우팅에 영향 없다.
+   *  생략 시 DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts). */
   model_alias?: 'opus' | 'sonnet' | 'haiku' | 'fable';
   claude_executable?: string;
   cwd?: string;
@@ -601,6 +604,38 @@ export abstract class CliAdapter {
    */
   async readTrustMeta(_cliHomeDir: string, _cwd: string): Promise<CliTrustMeta | null> {
     return null;
+  }
+
+  /**
+   * `cwd`를 이 에이전트의 CLI 설정 홈에서 멱등하게 trust-승인 상태로 표시한다
+   * (ticket 152e3606) — Action/QA/security run 작업폴더(`.awb/act|qa|base`)가
+   * 프로비저닝/확정된 직후, {@link readTrustMeta}를 참조하기 전에 디스패치
+   * 레이어가 호출한다. AWB 스스로 그 폴더를 만들고 `.claude/settings.json`도
+   * 직접 심었으므로 사람이 남길 trust 판단이 없다 — 읽기 전용 preflight
+   * ({@link readTrustMeta} / `decideCliTrustReadiness`, ticket 48aeab6e)가
+   * 지금까지 할 수 있었던 건 "감지 후 차단"뿐이었는데, 비대화형 run
+   * (Action/QA/security)에는 그 대화상자를 수락해줄 사람이 아예 없어서
+   * 차단이 곧 무한 대기로 이어졌다 — 이 함수가 그 간극을 메운다.
+   *
+   * 정신적으로는 반드시 best-effort여야 한다: 여기서 던진 에러는 호출자가
+   * 잡아서 로그만 남기고, 원래대로라면 성공했을 디스패치를 절대 중단시키지
+   * 않는다(예: `bypassPermissions` 아래에서는 trust 자체가 무의미하므로).
+   * 베이스 기본값은 no-op — {@link requiresWorkspaceTrust}를 구현하는
+   * 어댑터에만 의미가 있다.
+   *
+   * 주의: 티켓 디스패치가 쓰는 per-ticket worktree(`.awb/wt/<ticket>`)에서는
+   * `requiresWorkspaceTrust(harness)`가 참일 때(운영자가 명시적으로
+   * 비-bypassPermissions `permission_mode`를 설정한 경우)는 호출자가 이
+   * 함수를 아예 부르지 않는다 — 그 경로는 ticket 48aeab6e가 의도적으로
+   * 설계한 게이트(그런 운영자는 trust 승인을 사람이 직접 하길 원한다)이고,
+   * 실제로 `cli-readiness-block-pend.test.mjs`가 그 계약을 고정해둔
+   * 테스트다. `requiresWorkspaceTrust`가 거짓(기본 bypassPermissions)일
+   * 때는 호출자가 이 함수를 fire-and-forget으로(await하지 않고) 호출해
+   * 미리 시딩해둔다 — 지금 당장은 무관하지만 그 폴더가 나중에
+   * non-bypass harness로 재사용될 때를 대비한다.
+   */
+  async ensureWorkspaceTrust(_cliHomeDir: string, _cwd: string): Promise<void> {
+    return;
   }
 
   /**

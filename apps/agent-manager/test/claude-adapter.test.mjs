@@ -152,3 +152,113 @@ test('readTrustMeta: corrupt .claude.json → null (ambiguous, fail open — nev
   const meta = await adapter.readTrustMeta(cliHomeDir, '/some/cwd');
   assert.equal(meta, null);
 });
+
+// ── ensureWorkspaceTrust (ticket 152e3606 — 프로비저닝 시점 trust 시딩) ──
+
+test('ensureWorkspaceTrust: .claude.json이 아예 없음 → 새로 만들고, 이후 cwd가 trusted로 읽힘', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const cwd = '/mnt/data/awb-agents/awb/.awb/act/6158a5ff';
+  await adapter.ensureWorkspaceTrust(cliHomeDir, cwd);
+  const meta = await adapter.readTrustMeta(cliHomeDir, cwd);
+  assert.deepEqual(meta, { trusted: true }, '방금 프로비저닝된 워크스페이스 폴더는 trusted로 읽혀야 한다');
+});
+
+test('ensureWorkspaceTrust: 무관한 project/key가 있는 기존 .claude.json → 이 cwd만 추가하고 나머지는 보존', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const path = join(cliHomeDir, '.claude.json');
+  const otherCwd = '/mnt/data/awb-agents/awb/.awb/wt/repo/other-ticket';
+  await fsp.writeFile(
+    path,
+    JSON.stringify({
+      numStartups: 12,
+      oauthAccount: { emailAddress: 'ops@example.com' },
+      projects: { [otherCwd]: { hasTrustDialogAccepted: true, allowedTools: ['Bash'] } },
+    }),
+  );
+  const cwd = '/mnt/data/awb-agents/awb/.awb/act/new-run';
+  await adapter.ensureWorkspaceTrust(cliHomeDir, cwd);
+
+  const raw = JSON.parse(await fsp.readFile(path, 'utf8'));
+  assert.equal(raw.numStartups, 12, '무관한 최상위 key는 시딩 후에도 살아남아야 한다');
+  assert.equal(raw.oauthAccount.emailAddress, 'ops@example.com');
+  assert.equal(raw.projects[otherCwd].hasTrustDialogAccepted, true, '다른 project는 건드리지 않아야 한다');
+  assert.deepEqual(raw.projects[otherCwd].allowedTools, ['Bash'], '다른 project의 필드도 건드리지 않아야 한다');
+  assert.equal(raw.projects[cwd].hasTrustDialogAccepted, true, '새로 프로비저닝된 cwd는 이제 trusted여야 한다');
+});
+
+test('ensureWorkspaceTrust: 이미 trusted인 cwd → 멱등 no-op(내용 불변)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const cwd = '/mnt/data/awb-agents/awb/.awb/act/already-trusted';
+  await fsp.writeFile(
+    join(cliHomeDir, '.claude.json'),
+    JSON.stringify({ projects: { [cwd]: { hasTrustDialogAccepted: true, customField: 'keep-me' } } }),
+  );
+  await adapter.ensureWorkspaceTrust(cliHomeDir, cwd);
+  const raw = JSON.parse(await fsp.readFile(join(cliHomeDir, '.claude.json'), 'utf8'));
+  assert.equal(raw.projects[cwd].hasTrustDialogAccepted, true);
+  assert.equal(raw.projects[cwd].customField, 'keep-me', '이미 trusted인 cwd를 다시 시딩해도 다른 필드를 잃으면 안 된다');
+});
+
+test('ensureWorkspaceTrust: .claude.json이 손상됨 → 손대지 않고 그대로 둠(실제 CLI 상태 파괴 위험 차단)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const path = join(cliHomeDir, '.claude.json');
+  const corrupt = '{ not valid json';
+  await fsp.writeFile(path, corrupt);
+  await adapter.ensureWorkspaceTrust(cliHomeDir, '/some/cwd');
+  const after = await fsp.readFile(path, 'utf8');
+  assert.equal(after, corrupt, '있지만 손상된 파일은 덮어쓰지 않고 정확히 그대로 남아있어야 한다');
+});
+
+test('ensureWorkspaceTrust: 같은 cli-home 아래 서로 다른 cwd를 동시에 시딩해도 어느 쪽도 유실되지 않음', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  const cwdA = '/mnt/data/awb-agents/awb/.awb/act/run-a';
+  const cwdB = '/mnt/data/awb-agents/awb/.awb/qa/run-b';
+  // 두 호출을 동시에 발사 — cliHomeDir별 뮤텍스가 없으면 한쪽의
+  // read-modify-write가 다른 쪽과 겹쳐 쓰기 경쟁에서 진 entry를 잃을 수 있다.
+  await Promise.all([
+    adapter.ensureWorkspaceTrust(cliHomeDir, cwdA),
+    adapter.ensureWorkspaceTrust(cliHomeDir, cwdB),
+  ]);
+  const raw = JSON.parse(await fsp.readFile(join(cliHomeDir, '.claude.json'), 'utf8'));
+  assert.equal(raw.projects[cwdA]?.hasTrustDialogAccepted, true, 'cwd A는 동시 시딩에서도 살아남아야 한다');
+  assert.equal(raw.projects[cwdB]?.hasTrustDialogAccepted, true, 'cwd B는 동시 시딩에서도 살아남아야 한다');
+});
+
+test('ensureWorkspaceTrust: 성공 후 임시(.tmp-*) 파일이 남지 않는다(원자적 rename 교체)', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const cliHomeDir = await makeTmpCliHome();
+  await adapter.ensureWorkspaceTrust(cliHomeDir, '/some/cwd');
+  const entries = await fsp.readdir(cliHomeDir);
+  assert.deepEqual(entries, ['.claude.json'], '임시 파일 없이 최종 파일만 남아있어야 한다');
+});
+
+test(
+  'ensureWorkspaceTrust: 쓰기 실패(디렉터리 read-only) 시 원본 파일 내용이 그대로 보존된다',
+  // win32는 디렉터리 chmod가 그 안의 새 파일 생성(임시 파일 쓰기)을 막지
+  // 않는다 — POSIX 권한 모델이 없어 이 실패 주입 자체가 성립하지 않는다
+  // (CI 2026-08-23: windows-latest에서 rejects 기대가 충족되지 않아 적발).
+  { skip: process.platform === 'win32' && 'win32는 디렉터리 chmod로 쓰기를 막지 못해 이 실패 주입이 성립하지 않음' },
+  async () => {
+    const adapter = new ClaudeCliAdapter();
+    const cliHomeDir = await makeTmpCliHome();
+    const path = join(cliHomeDir, '.claude.json');
+    const original = JSON.stringify({ projects: { '/other/cwd': { hasTrustDialogAccepted: true } } });
+    await fsp.writeFile(path, original);
+    await fsp.chmod(cliHomeDir, 0o500); // 디렉터리 쓰기 금지 → 임시 파일 생성 자체가 실패
+    try {
+      await assert.rejects(
+        () => adapter.ensureWorkspaceTrust(cliHomeDir, '/mnt/data/awb-agents/awb/.awb/wt/repo/write-fail'),
+        '디렉터리 쓰기 실패는 호출자에게 그대로 전파돼야 한다(best-effort 흡수는 event-dispatcher 쪽 책임)',
+      );
+      const after = await fsp.readFile(path, 'utf8');
+      assert.equal(after, original, '임시 파일 쓰기가 실패해도 원본은 truncate조차 되지 않고 그대로 남아야 한다');
+    } finally {
+      await fsp.chmod(cliHomeDir, 0o700); // afterEach의 재귀 삭제가 지울 수 있도록 권한 복구
+    }
+  },
+);

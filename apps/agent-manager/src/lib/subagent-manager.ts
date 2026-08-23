@@ -39,7 +39,7 @@ import {
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
-import { classifyCliError, isFallbackEligible } from './cli-error-signatures.js';
+import { classifyCliError, isFallbackEligible, hasUntrustedWorkspaceWarning } from './cli-error-signatures.js';
 import { classifySpawnException } from './dispatch-preflight.js';
 import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-defer.js';
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
@@ -671,11 +671,14 @@ export class SubagentManager implements SubagentManagerContract {
           runtimeCredentialEnv(claudeRuntimeProfile, ctx?.credential_id, ctx?.extra_env),
         );
         const est = maxOutputResolution.estimate;
+        // 티켓 1af53029 — context_window 미설정 상태의 무음 로그를
+        // base-session-manager.ts 와 동일하게 명시적 경고로 바꾼다.
         const budgetLog = maxOutputResolution.effectiveMaxOutputTokens !== null
           ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
             `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
             `safety_margin=${maxOutputResolution.safetyMarginTokens} effective_max_output=${maxOutputResolution.effectiveMaxOutputTokens}`
-          : '';
+          : ' context_window not set — no CLAUDE_CODE_MAX_OUTPUT_TOKENS clamp applied; ' +
+            'a large first turn can silently exceed the backend context window and fail after a long timeout';
         log(
           `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
@@ -1058,6 +1061,12 @@ export class SubagentManager implements SubagentManagerContract {
       // stranded run as `error`. Gated on record.run so ordinary spawns skip the
       // process enumeration entirely. Guarded internally — never throws.
       if (record.run) await this._sweepOneshotRunOrphans(record);
+
+      // ticket 152e3606: run-completion backstop — 같은 티켓으로 고친
+      // ChatSessionManager#_onChildExit의 oneshot 짝. 위 _sweepOneshotRunOrphans
+      // 이후에도 왜 이게 여전히 필요한지는 _runExitCompletionBackstop 자체
+      // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
+      if (record.run) await this._runExitCompletionBackstop(record, code);
 
       // Drop the tail ring now that all post-exit hooks have read it.
       record.tailLines = [];
@@ -1471,6 +1480,45 @@ export class SubagentManager implements SubagentManagerContract {
       `[subagent] run ${run8} oneshot cleanup: reaped ${reaped.length}/${orphans.length} ` +
         `live background task(s) [pids=${pidList}] — finalized run as error`,
     );
+  }
+
+  /**
+   * Run-completion backstop(ticket 152e3606) — 같은 티켓으로 고친
+   * ChatSessionManager#_onChildExit의 oneshot 짝. 위 `_sweepOneshotRunOrphans`는 LIVE
+   * ORPHAN 프로세스를 찾았을 때만 run을 종료 처리한다 — orphan이 하나도 없이
+   * 멈춘 run(예: 아무도 승인해줄 수 없는 permission 승인 대기에 걸려서 승인
+   * 대상 도구조차 시작 못 한 경우)은 거기서 일찍 return돼 `record.run`이
+   * 그대로 남는다. 이게 없으면 로컬 프로세스가 이미 죽었는데도(TTL sweep /
+   * kill / crash — 어떤 exit이든 결국 호출자인 `#wireExitHandler`의 `close`
+   * 콜백으로 모인다) run은 서버에서 영원히 `running`으로 남는다. 무조건 +
+   * fire-and-forget: complete_*_run의 terminal 전이는 원자적으로
+   * 멱등이라(actions.service.ts의 completeRun, `status = 'running'` 가드)
+   * 에이전트 자신이 이미 종료 처리했거나 호출자에서 방금 전 orphan sweep이
+   * 처리한 run은 그대로 유지된다. 절대 throw하지 않는다 — 모든 실패는
+   * fireAndForgetTool 자체의 내부 catch로 흡수된다. 테스트 러너를 위해
+   * `#private`가 아니라 `_` 접두사로 뒀다.
+   */
+  async _runExitCompletionBackstop(record: SubagentRecord, code: number | null): Promise<void> {
+    const run = record.run;
+    if (!run) return;
+    const route = resolveRunCompletionRoute(run.kind);
+    // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
+    // (그냥 두면 아무도 안 읽는 stdout 속에 묻힌다) 진단 가능한 원인일 때
+    // run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가 그냥
+    // "결과 없음" 보다 낫다.
+    const tail = this.#collectTail(record);
+    const summary = hasUntrustedWorkspaceWarning(tail)
+      ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+        'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
+        'cli-home의 .claude.json trust 시딩을 확인하세요.'
+      : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}) — ` +
+        `승인 대기 등으로 멈춰 TTL sweep/kill에 의해 종료됐을 수 있습니다.`;
+    await fireAndForgetTool(this.#config, route.completeTool, {
+      run_id: run.run_id,
+      workspace_id: run.workspace_id,
+      status: route.failureStatus,
+      summary,
+    });
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {

@@ -74,6 +74,27 @@ const CODEX_ERROR_RE = /\[codex error\]/i;
 const CONTEXT_WINDOW_EXCEEDED_RE =
   /context window (?:limit|exceeded)|output token maximum|tengu_context_window_exceeded|tengu_max_tokens_reached|model_context_window_exceeded/i;
 
+// Workspace-trust 대화상자 미해결(ticket 152e3606) — 이 cwd에
+// `hasTrustDialogAccepted`가 설정 안 됐을 때 CLI 자신이 내는 stderr:
+// "Ignoring N permissions.allow entries from .claude/settings.json: this
+// workspace has not been trusted." 아래 classifyCliError의 fatal/nonRetryable
+// 출력에는 의도적으로 엮지 않는다 — `--dangerously-skip-permissions`(harness가
+// 없을 때의 기본값) 아래에서는 CLI가 이걸 찍고도 보통 그대로 진행하므로(ticket
+// b2e88390 — 이 경고가 뜨고도 44턴을 완주한 run이 있었다), usage/auth
+// 시그니처처럼 실제 답변을 억누르거나 circuit-breaker를 트립시켜서는 절대 안
+// 된다. 실제 수정은 Action/QA/security run 디스패치 직전에 호출하는
+// `ensureWorkspaceTrust`(cli-adapters/claude.ts)이고, 이 export는 순전히
+// exit-time backstop이 "결과가 없던 게 바로 이것 때문"이라는 걸 (시딩 실패나
+// AWB가 프로비저닝하지 않은 cwd 등으로) 경고가 그래도 나타났을 때 일반적인
+// "결과 없음" summary와 구분해서 알 수 있게 하기 위한 용도다.
+const UNTRUSTED_WORKSPACE_RE = /ignoring \d+ permissions\.allow entr(?:y|ies).{0,80}?not been trusted/is;
+
+/** `text`에 CLI 자체의 "workspace not trusted, ignoring permissions.allow"
+ *  경고가 들어있으면 true(참고: {@link UNTRUSTED_WORKSPACE_RE}). */
+export function hasUntrustedWorkspaceWarning(text: string | null | undefined): boolean {
+  return !!text && UNTRUSTED_WORKSPACE_RE.test(text);
+}
+
 export interface ClassifyOptions {
   /**
    * Process exit code, when known. A non-zero exit is itself an error context.

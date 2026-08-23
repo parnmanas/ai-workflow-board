@@ -414,9 +414,12 @@ test('the manager self-update has exactly one distribution channel (npm, no git 
   );
 
   // 가드가 죽은 채 초록불만 내는 것 방지 — 전역 설치 자체는 여전히 있어야 한다.
+  // 플래그는 사이에 낄 수 있게 두되(2026-08-23 에 `--ignore-scripts` 가 들어왔다)
+  // **검증된 installSpec 으로 고정된다**는 성질은 그대로 못박는다. 그 플래그 자체의
+  // 존재는 published-deps-audit-guard.test.mjs 가 별도로 강제한다.
   assert.match(
     src,
-    /\[\s*'install',\s*'-g',\s*installSpec\s*\]/,
+    /\[\s*'install',\s*'-g',(?:\s*'--[a-z-]+',)*\s*installSpec\s*\]/,
     'the npm-global install must still be wired, pinned to the verified installSpec',
   );
 });
