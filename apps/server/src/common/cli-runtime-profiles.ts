@@ -47,20 +47,6 @@ export const ClaudeBackendProfileSchema = z.object({
   protocol: z.enum(['anthropic-compatible', 'openai-compatible']),
   base_url: z.string().url(),
   model: z.string().min(1),
-  // ticket 41dc37cb — Claude Code CLI 자신이 `--model`/내부 보조 요청
-  // (generate_session_title 등)에서 인식하는 alias. agent-manager 의
-  // RuntimeLease.claudeEnv() 가 이 alias 를 --model 뿐 아니라
-  // ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL(내부 보조 요청이 --model
-  // argv 를 거치지 않고 직접 읽는 모델 선택 변수)에도 그대로 싣는다 —
-  // round 1이 --model 만 고치고 이 두 env 는 raw model 그대로 둬서
-  // 운영에서 재발했다. 실제 백엔드로 나가는 모델은 항상 위 model —
-  // ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 어떤 alias 가 선택되든 그
-  // 값으로 매핑하므로, alias 자체의 선택은 백엔드 라우팅에 영향 없다.
-  // 생략 시 'sonnet'(apps/agent-manager/src/lib/runtime-profiles.ts
-  // DEFAULT_CLAUDE_MODEL_ALIAS). raw provider model id(예: vLLM
-  // --served-model-name)를 그대로 CLI에 넘기면 CLI가 unrecognized_model
-  // 로 거부해 첫 채팅부터 실패한다.
-  model_alias: z.enum(['opus', 'sonnet', 'haiku', 'fable']).optional(),
   claude_executable: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   env: PublicEnvSchema,
@@ -74,6 +60,10 @@ export const ClaudeBackendProfileSchema = z.object({
   context_window: z.number().int().positive().optional(),
   max_output_tokens: z.number().int().positive().optional(),
   safety_margin_tokens: z.number().int().nonnegative().optional(),
+  // ticket 41dc37cb round 3 — claude-with-vllm.sh(운영 검증됨)가 설정하는
+  // CLAUDE_CODE_AUTO_COMPACT_WINDOW를 그대로 profile에서 주입하기 위한 필드.
+  // 생략 가능(기존 프로필은 그대로 동작).
+  auto_compact_window: z.number().int().positive().optional(),
   adapter: AdapterSchema.optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.protocol === 'openai-compatible' && !value.adapter) {

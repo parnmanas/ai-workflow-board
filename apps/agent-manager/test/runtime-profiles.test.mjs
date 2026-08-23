@@ -39,6 +39,7 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   defaultFable: process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,
   contextWindowEnv: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
   maxOutputEnv: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+  autoCompactWindowEnv: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,
   awb: process.env.AWB_API_KEY,
   response: process.env.REQUEST_THROUGH_ADAPTER
     ? await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', {
@@ -115,90 +116,44 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
     claude_executable: executable,
   }, join(fixtureRoot, 'direct.json'), { model: 'anthropic-agent-default' });
   assert.equal(capture.baseUrl, 'http://127.0.0.1:40101');
-  // ticket 41dc37cb — raw profile.model 은 --model argv로 나가지 않는다
-  // (CLI가 unrecognized_model 로 거부); CLI가 인식하는 기본 alias만 실린다.
-  assert.equal(capture.model, 'sonnet');
+  // ticket 41dc37cb round 3 — claude-with-vllm.sh(운영 검증됨)는 --model을
+  // 아예 넘기지 않는다; AWB도 Claude backend profile 세션에서 이 플래그를
+  // 전혀 주입하지 않는다(alias든 raw id든).
+  assert.equal(capture.model, null);
   assert.equal(capture.awb, 'agent-awb-key');
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
 });
 
-// ticket 41dc37cb — Claude Code CLI는 `--model`에 낯선 값이 오면 내부 보조
-// 요청(generate_session_title 등)을 unrecognized_model 로 거부해 첫 턴부터
-// 실패시킨다. profile.model(raw provider id, 예: vLLM served-model-name)이
-// 그대로 argv에 실리면 안 되고, CLI가 스스로 인정하는 alias(기본값
-// 'sonnet')가 실려야 한다 — 실제 백엔드 라우팅은 바로 아래 aux-call env
-// 테스트가 검증하는 ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 담당한다.
-//
-// round 2(운영 실측 재발) — round 1은 이 argv 불변식만 고치고 ANTHROPIC_MODEL/
-// ANTHROPIC_SMALL_FAST_MODEL env는 그대로 raw profile.model로 남겨뒀다. 이
-// 두 변수는 Claude Code 내부 보조 요청이 --model argv를 거치지 않고 직접
-// 읽는 "모델 선택" 값이라, argv만 고쳐도 generate_session_title은 여전히
-// unrecognized_model로 거부됐다(실제 vLLM 프로덕션에서 재현). 아래
-// anthropicModel/smallFastModel 단언이 바로 그 재발을 잡는다.
-test('Anthropic-compatible profile는 --model / ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL 그 어디에도 raw provider model id를 흘리지 않는다 (unrecognized_model 회귀)', async () => {
-  const executable = await makeClaudeFixture('claude-alias-model.mjs');
+// ticket 41dc37cb round 3 — round 1/2는 --model/ANTHROPIC_MODEL/
+// ANTHROPIC_SMALL_FAST_MODEL에 CLI가 인식하는 alias를 실어 unrecognized_model
+// 회귀를 막으려 했으나, 그 alias 간접화 자체가 운영에서 실제 채팅 성공을
+// 막았다 — 재오픈 사유. 운영에서 정상 동작이 검증된
+// /home/parn/.local/bin/claude-with-vllm.sh 기준으로 재작성: alias를 전혀
+// 쓰지 않고 ANTHROPIC_MODEL에 raw served model을 그대로 노출한다.
+// ANTHROPIC_SMALL_FAST_MODEL은 기준 스크립트가 설정하지 않으므로 undefined로
+// 남아야 한다(CLI 자체 기본 동작).
+test('Anthropic-compatible profile: ANTHROPIC_MODEL에 raw served model을 그대로 노출하고 --model/ANTHROPIC_SMALL_FAST_MODEL은 건드리지 않는다 (claude-with-vllm.sh parity)', async () => {
+  const executable = await makeClaudeFixture('claude-raw-model.mjs');
   const capture = await spawnFixture({
-    id: 'alias-model-a',
+    id: 'raw-model-a',
     kind: 'claude-backend',
     protocol: 'anthropic-compatible',
     base_url: 'http://127.0.0.1:40106',
     model: 'qwen3-coder-next',
     claude_executable: executable,
-  }, join(fixtureRoot, 'alias-model.json'));
-  assert.equal(capture.model, 'sonnet', '--model must carry a CLI-recognized alias, never the raw provider id');
-  assert.equal(capture.anthropicModel, 'sonnet', 'ANTHROPIC_MODEL은 내부 보조 호출(예: generate_session_title)이 직접 읽는 값이라 이것도 alias여야 한다 — raw id면 안 된다');
-  assert.equal(capture.smallFastModel, 'sonnet', 'ANTHROPIC_SMALL_FAST_MODEL도 ANTHROPIC_MODEL과 동일한 종류의 보조-호출 선택 변수다');
-  assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'the sonnet-tier override still routes requests to the real backend model');
+  }, join(fixtureRoot, 'raw-model.json'));
+  assert.equal(capture.model, null, '--model은 alias든 raw id든 전혀 실리지 않는다');
+  assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'ANTHROPIC_MODEL은 claude-with-vllm.sh와 동일하게 raw served model이어야 한다');
+  assert.equal(capture.smallFastModel, undefined, 'ANTHROPIC_SMALL_FAST_MODEL은 기준 스크립트가 설정하지 않으므로 주입하지 않는다');
+  assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'ANTHROPIC_DEFAULT_SONNET_MODEL도 동일한 raw served model로 매핑된다');
 });
 
-test('profile.model_alias overrides the default --model alias', async () => {
-  const executable = await makeClaudeFixture('claude-custom-alias.mjs');
-  const capture = await spawnFixture({
-    id: 'custom-alias-a',
-    kind: 'claude-backend',
-    protocol: 'anthropic-compatible',
-    base_url: 'http://127.0.0.1:40107',
-    model: 'qwen3-coder-next',
-    model_alias: 'haiku',
-    claude_executable: executable,
-  }, join(fixtureRoot, 'custom-alias.json'));
-  assert.equal(capture.model, 'haiku');
-  // ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL도 'sonnet' 기본값이 아니라
-  // --model과 동일하게 선택된 alias를 따라가야 한다 (ticket 41dc37cb round 2).
-  assert.equal(capture.anthropicModel, 'haiku');
-  assert.equal(capture.smallFastModel, 'haiku');
-  assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
-});
-
-// ticket 41dc37cb round 2 리뷰 지적 — CLAUDE_MODEL_ALIASES/model_alias 스키마는
-// 'fable'을 정상 alias로 허용하지만, MODEL_OVERRIDE_ENV_KEYS에는 처음에
-// opus/sonnet/haiku 3종만 있고 ANTHROPIC_DEFAULT_FABLE_MODEL이 빠져 있었다 —
-// model_alias:'fable' profile은 selection env(ANTHROPIC_MODEL 등)에 'fable'이
-// 실려도 실제 백엔드 모델로의 매핑이 보장되지 않는 상태였다. Claude Code 공식
-// 문서(code.claude.com/docs/en/model-config, "Restrict model selection" 섹션)로
-// ANTHROPIC_DEFAULT_FABLE_MODEL이 실재하는 공식 env var임을 확인하고
-// MODEL_OVERRIDE_ENV_KEYS에 추가했다 — 이 테스트가 그 매핑을 직접 증명한다.
-test('profile.model_alias: "fable"도 ANTHROPIC_DEFAULT_FABLE_MODEL로 실제 백엔드 모델에 매핑된다', async () => {
-  const executable = await makeClaudeFixture('claude-fable-alias.mjs');
-  const capture = await spawnFixture({
-    id: 'fable-alias-a',
-    kind: 'claude-backend',
-    protocol: 'anthropic-compatible',
-    base_url: 'http://127.0.0.1:40108',
-    model: 'qwen3-coder-next',
-    model_alias: 'fable',
-    claude_executable: executable,
-  }, join(fixtureRoot, 'fable-alias.json'));
-  assert.equal(capture.model, 'fable', '--model에는 raw id가 아니라 fable alias가 실려야 한다');
-  assert.equal(capture.anthropicModel, 'fable', 'ANTHROPIC_MODEL도 동일하게 fable alias를 따라가야 한다');
-  assert.equal(capture.defaultFable, 'qwen3-coder-next', 'ANTHROPIC_DEFAULT_FABLE_MODEL이 fable alias를 실제 백엔드 모델로 매핑해야 한다');
-});
-
-// ticket 41dc37cb 리뷰 라운드1 — 리뷰 지적: 최초 spawn은 alias를 쓰지만,
-// 폴백-적격 실패(unrecognized_model 등) 후 exit 핸들러의 model-fallback
-// 체인(ticket 61f4dd18)이 harness.fallback_models의 raw 값으로 재-spawn하면
-// 바로 위 두 테스트가 지키는 불변식이 재시도 경로에서 깨진다 — 같은 endpoint에
-// CLI가 검증한 적 없는 임의 문자열이 다시 --model로 실린다. resolveModelChain()
+// ticket 41dc37cb 리뷰 라운드1 — 리뷰 지적: 최초 spawn은 --model을 전혀 싣지
+// 않지만, 폴백-적격 실패(unrecognized_model 등) 후 exit 핸들러의
+// model-fallback 체인(ticket 61f4dd18)이 harness.fallback_models의 raw
+// 값으로 재-spawn하면 바로 위 테스트가 지키는 불변식이 재시도 경로에서
+// 깨진다 — 같은 endpoint에 CLI가 검증한 적 없는 임의 문자열이 --model로
+// 실린다. resolveModelChain()
 // (cli-adapters/base.ts, 단위 테스트는 cli-error-signatures.test.mjs)이 profile
 // 활성화 시 harness.fallback_models를 통째로 무시해 체인 길이를 1로 고정하므로,
 // 폴백 respawn 자체가 트리거되지 않는다 — 이 테스트는 실제
@@ -232,9 +187,9 @@ test('ticket 41dc37cb: a Claude backend profile session never retries with a dif
       model: 'qwen3-coder-next',
       claude_executable: executable,
     },
-    // Not a CLI-recognized alias on purpose — proves it can never reach
-    // --model, whether on attempt 1 (already covered above) or a fallback
-    // retry (what this test guards).
+    // 일부러 board-설정 임의 문자열을 사용 — 첫 시도(위에서 이미 확인,
+    // --model 자체가 완전히 생략됨)든 폴백 재시도(이 테스트가 지키는
+    // 대상)든 --model에 절대 도달하지 않음을 증명한다.
     harness: { fallback_models: ['claude-opus-4-1-not-a-cli-alias'] },
     agentContext: {
       agent_id: 'agent-fixture',
@@ -261,15 +216,12 @@ test('ticket 41dc37cb: a Claude backend profile session never retries with a dif
   );
 });
 
-// ticket 7d8ea7c9 후속, ticket 41dc37cb round 2 로 세분화 — Claude Code 내부
+// ticket 7d8ea7c9 후속, ticket 41dc37cb round 3 로 세분화 — Claude Code 내부
 // 보조 호출(세션 제목 생성 등)은 --model argv 를 거치지 않고 env 로 모델을
-// 고른다. 하지만 그 env 는 두 종류로 나뉜다: ANTHROPIC_MODEL/
-// ANTHROPIC_SMALL_FAST_MODEL 은 "지금 어떤 모델을 쓰는지" 자체를 CLI가
-// 검증하는 선택 값이라 --model 과 동일한 alias 여야 하고(raw id를 넣으면
-// round 1 수정 후에도 실측에서 unrecognized_model 이 재발했다),
-// ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL 은 그 alias 를 실제 어떤
-// 모델로 요청할지 매핑하는 공식 override 라 raw provider id 가 정답이다.
-test('Anthropic-compatible profile: ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL은 alias를 기본값으로, ANTHROPIC_DEFAULT_*_MODEL은 profile.model을 기본값으로 삼는다', async () => {
+// 고른다. claude-with-vllm.sh 기준으로는 ANTHROPIC_MODEL 과
+// ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL 넷 다 raw provider model id가
+// 정답이다 — alias 간접화는 더 이상 없다.
+test('Anthropic-compatible profile: ANTHROPIC_MODEL과 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL 모두 profile.model(raw)을 기본값으로 삼는다', async () => {
   const executable = await makeClaudeFixture('claude-aux-model.mjs');
   const capture = await spawnFixture({
     id: 'aux-model-a',
@@ -279,12 +231,12 @@ test('Anthropic-compatible profile: ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL�
     model: 'qwen3-coder-next',
     claude_executable: executable,
   }, join(fixtureRoot, 'aux-model.json'));
-  assert.equal(capture.anthropicModel, 'sonnet', '모델 선택 변수는 CLI가 인식하는 alias여야 한다 — raw id이면 안 된다');
-  assert.equal(capture.smallFastModel, 'sonnet', '모델 선택 변수는 CLI가 인식하는 alias여야 한다 — raw id이면 안 된다');
+  assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'ANTHROPIC_MODEL은 raw served model이어야 한다 — alias가 아니다');
+  assert.equal(capture.smallFastModel, undefined, 'ANTHROPIC_SMALL_FAST_MODEL은 claude-with-vllm.sh가 설정하지 않으므로 주입하지 않는다');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultOpus, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
-  assert.equal(capture.defaultFable, 'qwen3-coder-next', 'fable도 나머지 3종과 동일하게 방어적으로 override된다(선택된 alias가 아니어도)');
+  assert.equal(capture.defaultFable, undefined, 'ANTHROPIC_DEFAULT_FABLE_MODEL은 claude-with-vllm.sh가 설정하지 않으므로 round 3에서 제거됐다');
 });
 
 test('profile.env still overrides the default aux-call model env vars', async () => {
@@ -298,8 +250,8 @@ test('profile.env still overrides the default aux-call model env vars', async ()
     claude_executable: executable,
     env: { ANTHROPIC_SMALL_FAST_MODEL: 'qwen3-coder-next-fast' },
   }, join(fixtureRoot, 'aux-model-override.json'));
-  assert.equal(capture.anthropicModel, 'sonnet', 'profile.env로 unset — alias 기본값을 유지한다');
-  assert.equal(capture.smallFastModel, 'qwen3-coder-next-fast', 'profile.env가 raw id라도 기본값을 이긴다');
+  assert.equal(capture.anthropicModel, 'qwen3-coder-next', '이 테스트는 ANTHROPIC_MODEL을 건드리지 않으므로 raw 기본값을 유지한다');
+  assert.equal(capture.smallFastModel, 'qwen3-coder-next-fast', 'profile.env는 기본 주입 대상이 아닌 키도 추가할 수 있다');
 });
 
 // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — profile.context_window 이
@@ -339,6 +291,38 @@ test('profile 에 context_window 없으면 → CLAUDE_CODE_MAX_CONTEXT_TOKENS/MA
   }, join(fixtureRoot, 'no-context-window.json'));
   assert.equal(capture.contextWindowEnv, undefined);
   assert.equal(capture.maxOutputEnv, undefined);
+});
+
+// ticket 41dc37cb round 3 — claude-with-vllm.sh(운영 검증됨)가 설정하는
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW를 profile.auto_compact_window로부터
+// 그대로 주입한다.
+test('profile.auto_compact_window 가 CLAUDE_CODE_AUTO_COMPACT_WINDOW 를 주입한다', async () => {
+  const executable = await makeClaudeFixture('claude-auto-compact-window.mjs');
+  const capture = await spawnFixture({
+    id: 'auto-compact-window-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40110',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+    context_window: 262_144,
+    auto_compact_window: 235_000,
+  }, join(fixtureRoot, 'auto-compact-window.json'));
+  assert.equal(capture.contextWindowEnv, '262144');
+  assert.equal(capture.autoCompactWindowEnv, '235000');
+});
+
+test('profile 에 auto_compact_window 없으면 → CLAUDE_CODE_AUTO_COMPACT_WINDOW 없음 (회귀 안전)', async () => {
+  const executable = await makeClaudeFixture('claude-no-auto-compact-window.mjs');
+  const capture = await spawnFixture({
+    id: 'no-auto-compact-window-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40111',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'no-auto-compact-window.json'));
+  assert.equal(capture.autoCompactWindowEnv, undefined);
 });
 
 async function unusedPort() {
@@ -426,10 +410,10 @@ createServer(async (request, response) => {
       },
     }, join(fixtureRoot, 'adapter.json'));
     assert.equal(capture.baseUrl, `http://127.0.0.1:${adapterPort}`);
-    // ticket 41dc37cb — argv --model은 alias('sonnet')로 나가지만, adapter가
+    // ticket 41dc37cb round 3 — argv --model은 전혀 나가지 않지만, adapter가
     // 실제로 백엔드에 전달하는 model(아래 forwarded)은 여전히 raw
     // profile.model(AWB_BACKEND_MODEL 경유) — 백엔드 라우팅은 회귀 없음.
-    assert.equal(capture.model, 'sonnet');
+    assert.equal(capture.model, null);
     assert.equal(capture.auth, 'awb-local-adapter');
     assert.equal(capture.response.content[0].text, 'translated response');
     assert.deepEqual(forwarded, {
@@ -491,30 +475,28 @@ test('profile validation reports protocol and adapter mistakes', () => {
   );
 });
 
-// ticket 41dc37cb
-test('profile validation rejects an unrecognized model_alias', () => {
+// ticket 41dc37cb round 3
+test('profile validation rejects a non-positive-integer auto_compact_window', () => {
   assert.throws(
     () => validateRuntimeProfile({
-      id: 'bad-alias',
+      id: 'bad-auto-compact',
       protocol: 'anthropic-compatible',
       base_url: 'http://127.0.0.1:1',
       model: 'm',
-      model_alias: 'gpt-5',
+      auto_compact_window: -1,
     }),
-    /model_alias must be one of/,
+    /auto_compact_window must be a positive integer/,
   );
 });
 
-test('profile validation accepts each known model_alias', () => {
-  for (const alias of ['opus', 'sonnet', 'haiku', 'fable']) {
-    assert.doesNotThrow(() => validateRuntimeProfile({
-      id: `alias-${alias}`,
-      protocol: 'anthropic-compatible',
-      base_url: 'http://127.0.0.1:1',
-      model: 'm',
-      model_alias: alias,
-    }));
-  }
+test('profile validation accepts a positive-integer auto_compact_window', () => {
+  assert.doesNotThrow(() => validateRuntimeProfile({
+    id: 'good-auto-compact',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:1',
+    model: 'm',
+    auto_compact_window: 235_000,
+  }));
 });
 
 test('non-Claude spawn ignores a workspace Claude profile including model, cwd, env, args, and credential contract', async () => {
