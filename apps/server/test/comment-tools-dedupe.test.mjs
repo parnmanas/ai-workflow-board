@@ -24,7 +24,7 @@
 // 컴파일된 dist/ 를 real sql.js DataSource 로 실행한다 — 레시피는
 // test/comment-tools-pending-gate.test.mjs 와 동일.
 
-import test, { after } from 'node:test';
+import test, { after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -82,18 +82,35 @@ function parse(res) {
   return JSON.parse(res.content[0].text);
 }
 
-// claim-verification-same-second-move.test.mjs 와 동일한 결정성 기법: 실제
-// insert 를 반복해 그 행의 REAL(조작하지 않은) created_at 이 우연히 목표
-// 초와 같아질 때까지 재시도한다. sql.js 의 datetime('now') 기본값은 초
-// 단위라 직전 호출과 같은 초 안에서라면 대개 1~수회 안에 성공한다.
-async function addCommentAlignedToSecond(addComment, args, targetMs, maxAttempts = 200) {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const res = parse(await addComment(args, {}));
-    const reloaded = await commentRepo.findOne({ where: { id: res.id } });
-    if (reloaded.created_at.getTime() === targetMs) return res;
-    await commentRepo.delete({ id: res.id });
+// ticket 95f914b7: 이전 버전은 실제 insert 를 반복해 그 행의 REAL(조작하지
+// 않은) created_at 이 우연히 목표 초와 같아질 때까지 최대 200회 재시도했다
+// (claim-verification-same-second-move.test.mjs 와 동일 기법) — CI 부하가
+// 높아 재시도 예산을 넘기면 무관한 변경의 병합까지 지연시키는 flake 였다
+// (CI run 32615567877).
+//
+// "같은 초에 결정적으로 착지"를 검증하려면 created_at 자체를 조작해선 안
+// 된다는 제약은 그대로 유지한다 — @CreateDateColumn 이 비워진 채로 insert
+// 되면 그 값은 오직 sql.js 의 DB-레벨 DEFAULT (datetime('now')) 에서만
+// 나와야, sqljs 가 실제로 초 단위로 truncate 하는 코드 경로를 그대로
+// exercise 한다(값을 하드코딩하면 그 경로를 우회해버려 아래 두 테스트 이름에
+// 붙은 "리뷰 라운드2 지적"이 막으려던 실패 모드를 다시 놓친다).
+//
+// 대신 이 truncate 가 읽는 "지금" 자체를 결정적으로 만든다: sql.js 의
+// datetime('now') 는 SQLite WASM 이 WASI CLOCK_REALTIME 조회에
+// emscripten_date_now() = Date.now() 를 그대로 쓴다(node_modules/sql.js/
+// dist/sql-asm-debug.js 의 _clock_time_get 에서 확인). node:test 내장
+// mock.timers 로 전역 Date 만 얼리면(apps/server/src/modules/mcp/tools/
+// comment-tools.ts 의 write-seq 로직은 손대지 않는다) 그 구간의 REAL insert
+// 는 매번 같은 초에 결정적으로 착지한다 — 재시도/삭제 루프도, 벽시계 대기도
+// 필요 없다. apis 를 ['Date'] 로 한정해 setTimeout/setInterval 류는 실시간
+// 그대로 둔다(sql.js/TypeORM 내부가 그런 타이머에 의존해도 영향 없도록).
+async function addCommentAtFixedTime(addComment, args, targetMs) {
+  mock.timers.enable({ apis: ['Date'], now: targetMs });
+  try {
+    return parse(await addComment(args, {}));
+  } finally {
+    mock.timers.reset();
   }
-  throw new Error(`failed to align add_comment insert to target second within ${maxAttempts} attempts`);
 }
 
 after(async () => {
@@ -173,10 +190,12 @@ test('an unrelated comment landing in the SAME wall-clock second still breaks th
 
   // 리뷰 라운드2 지적: created_at 을 미래로 강제하는 이전 버전은 sql.js 가
   // 초 단위로 truncate 하는 실제 실패 모드를 우회했다. 대신 REAL insert 를
-  // `a` 와 정확히 같은 초에 자연스럽게 착지시킨다(값을 조작하지 않는다) —
-  // 그 상태에서도 write-seq 타이브레이크 덕분에 "마지막 코멘트" 판정이
-  // 여전히 결정적으로 `unrelated` 를 가리켜야 한다.
-  const unrelated = await addCommentAlignedToSecond(addComment, {
+  // `a` 와 정확히 같은 초에 착지시킨다(값을 조작하지 않는다 — clock seam은
+  // sql.js 가 datetime('now') 에 읽는 Date 자체를 얼릴 뿐, created_at 은
+  // 여전히 그 DB-레벨 DEFAULT 에서 나온다. 파일 상단 addCommentAtFixedTime
+  // 주석 참고) — 그 상태에서도 write-seq 타이브레이크 덕분에 "마지막 코멘트"
+  // 판정이 여전히 결정적으로 `unrelated` 를 가리켜야 한다.
+  const unrelated = await addCommentAtFixedTime(addComment, {
     ticket_id: t.id, content: 'unrelated human-visible reply', author_type: 'user', author_id: 'u1', author: 'User',
   }, aReloaded.created_at.getTime());
   assert.notEqual(unrelated.id, a.id);
@@ -447,11 +466,13 @@ test('a same-second burst of MORE than 20 comments still finds the true last row
     .filter((r) => r.created_at.getTime() === aReloaded.created_at.getTime()).length;
   assert.equal(seededTiedCount, 22, 'sanity: all 22 genuinely share the same truncated-to-the-second created_at (explicit created_at persisted as given)');
 
-  // 진짜 마지막 코멘트 — a 와 같은 초에, 실제 add_comment 경로로 자연 발생
-  // 시켜(시간 조작 없음, 같은 초로 착지할 때까지 REAL insert 재시도) 진짜
-  // write-seq 를 받는다. 이게 이 burst 안에서 유일하게 write-seq 를 가진
-  // "무관" row 이므로, 결정론적으로 최댓값을 가져 진짜 마지막으로 뽑혀야 한다.
-  const unrelated = await addCommentAlignedToSecond(addComment, {
+  // 진짜 마지막 코멘트 — a 와 같은 초에, 실제 add_comment 경로로 발생시켜
+  // (created_at 조작 없음, clock seam 으로 그 순간의 Date 만 얼려 REAL insert
+  // 를 같은 초에 결정적으로 착지시킨다 — 파일 상단 addCommentAtFixedTime
+  // 주석 참고) 진짜 write-seq 를 받는다. 이게 이 burst 안에서 유일하게
+  // write-seq 를 가진 "무관" row 이므로, 결정론적으로 최댓값을 가져 진짜
+  // 마지막으로 뽑혀야 한다.
+  const unrelated = await addCommentAtFixedTime(addComment, {
     ticket_id: t.id, content: 'the TRUE last comment, unrelated', author_type: 'user', author_id: 'u1', author: 'User',
   }, aReloaded.created_at.getTime());
 
