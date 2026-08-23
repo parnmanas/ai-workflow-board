@@ -121,59 +121,49 @@ test('returns actionable validation errors without accepting plaintext secrets',
   assert.match(checked.error, /credential_ref/);
 });
 
-// ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — context_window/max_output_tokens/
-// safety_margin_tokens 는 ClaudeBackendProfile.config JSON blob 에 실려
-// agent-manager 로 그대로 전달된다(entity 컬럼 추가 불요). 셋 다 선택적이라
-// 기존 프로필(필드 생략)은 그대로 통과해야 한다.
-test('context_window/max_output_tokens/safety_margin_tokens 는 선택적이며 저장소를 왕복해도 유지된다', () => {
-  const runtime = { ...profiles[0], context_window: 65_536, max_output_tokens: 32_000, safety_margin_tokens: 1_000 };
+// ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과), ticket 41dc37cb round 3 —
+// context_window/max_output_tokens/safety_margin_tokens/auto_compact_window
+// 는 ClaudeBackendProfile.config JSON blob 에 실려 agent-manager 로 그대로
+// 전달된다(entity 컬럼 추가 불요). 넷 다 선택적이라 기존 프로필(필드 생략)은
+// 그대로 통과해야 한다.
+test('context_window/max_output_tokens/safety_margin_tokens/auto_compact_window 는 선택적이며 저장소를 왕복해도 유지된다', () => {
+  const runtime = {
+    ...profiles[0],
+    context_window: 65_536,
+    max_output_tokens: 32_000,
+    safety_margin_tokens: 1_000,
+    auto_compact_window: 58_000,
+  };
   const checked = validateCliRuntimeProfiles([runtime]);
   assert.equal(checked.ok, true);
   assert.equal(checked.value[0].context_window, 65_536);
   assert.equal(checked.value[0].max_output_tokens, 32_000);
   assert.equal(checked.value[0].safety_margin_tokens, 1_000);
+  assert.equal(checked.value[0].auto_compact_window, 58_000);
 
   const entity = runtimeToProfileEntity(checked.value[0], 'With context window');
   const restored = profileEntityToRuntime({ ...entity, created_at: new Date(), updated_at: new Date() });
   assert.equal(restored.context_window, 65_536);
   assert.equal(restored.max_output_tokens, 32_000);
   assert.equal(restored.safety_margin_tokens, 1_000);
+  assert.equal(restored.auto_compact_window, 58_000);
 });
 
-test('context_window/max_output_tokens/safety_margin_tokens 를 생략한 profile 도 여전히 통과한다 (기존 프로필 영향 없음)', () => {
+test('context_window/max_output_tokens/safety_margin_tokens/auto_compact_window 를 생략한 profile 도 여전히 통과한다 (기존 프로필 영향 없음)', () => {
   const checked = validateCliRuntimeProfiles([profiles[0]]);
   assert.equal(checked.ok, true);
   assert.equal(checked.value[0].context_window, undefined);
   assert.equal(checked.value[0].max_output_tokens, undefined);
   assert.equal(checked.value[0].safety_margin_tokens, undefined);
+  assert.equal(checked.value[0].auto_compact_window, undefined);
 });
 
-// ticket 41dc37cb — model_alias 도 context_window 3형제와 동일하게
-// ClaudeBackendProfile.config JSON blob 에 실려 왕복하는 선택적 필드다.
-// agent-manager 의 resolveClaudeModelAlias() 가 이 값(생략 시 'sonnet')을
-// 그대로 Claude CLI `--model` 에 실어, raw profile.model 이 unrecognized_model
-// 로 거부되는 것을 막는다.
-test('model_alias 는 선택적이며 저장소를 왕복해도 유지된다', () => {
-  const runtime = { ...profiles[0], model_alias: 'haiku' };
-  const checked = validateCliRuntimeProfiles([runtime]);
-  assert.equal(checked.ok, true);
-  assert.equal(checked.value[0].model_alias, 'haiku');
+test('auto_compact_window 는 양의 정수가 아니면 거부한다', () => {
+  const negative = validateCliRuntimeProfiles([{ ...profiles[0], auto_compact_window: -1 }]);
+  assert.equal(negative.ok, false);
 
-  const entity = runtimeToProfileEntity(checked.value[0], 'With model alias');
-  const restored = profileEntityToRuntime({ ...entity, created_at: new Date(), updated_at: new Date() });
-  assert.equal(restored.model_alias, 'haiku');
-});
-
-test('model_alias 를 생략한 profile 도 여전히 통과한다 (기존 프로필 영향 없음)', () => {
-  const checked = validateCliRuntimeProfiles([profiles[0]]);
-  assert.equal(checked.ok, true);
-  assert.equal(checked.value[0].model_alias, undefined);
-});
-
-test('model_alias 는 opus/sonnet/haiku/fable 중 하나만 허용한다', () => {
-  const checked = validateCliRuntimeProfiles([{ ...profiles[0], model_alias: 'gpt-5' }]);
-  assert.equal(checked.ok, false);
-  assert.match(checked.error, /model_alias/);
+  const fractional = validateCliRuntimeProfiles([{ ...profiles[0], auto_compact_window: 1.5 }]);
+  assert.equal(fractional.ok, false);
 });
 
 test('max_output_tokens >= context_window 및 양의 정수가 아닌 값을 거부한다', () => {

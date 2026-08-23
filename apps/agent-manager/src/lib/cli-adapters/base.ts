@@ -65,19 +65,6 @@ export interface RuntimeProfileSpec {
   protocol: 'anthropic-compatible' | 'openai-compatible';
   base_url: string;
   model: string;
-  /** Claude Code CLI가 `--model`/내부 보조 요청(세션 제목 생성 등)에서
-   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 이 alias는
-   *  `--model`뿐 아니라 RuntimeLease.claudeEnv()의 ANTHROPIC_MODEL/
-   *  ANTHROPIC_SMALL_FAST_MODEL(내부 보조 요청이 직접 읽는 모델 선택
-   *  변수)에도 그대로 실린다 — raw provider model id를 이 두 변수에
-   *  넣으면 CLI가 `unrecognized_model`로 거부한다(특히
-   *  generate_session_title 등 보조 요청; round 1이 `--model`만 고치고
-   *  이 두 env는 그대로 둬서 운영에서 재발, ticket 41dc37cb). 백엔드로
-   *  실제 나가는 모델은 항상 `model`(위) — claudeEnv()의
-   *  ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 어떤 alias가 선택되든 그
-   *  값으로 매핑하므로, alias 자체의 선택은 백엔드 라우팅에 영향 없다.
-   *  생략 시 DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts). */
-  model_alias?: 'opus' | 'sonnet' | 'haiku' | 'fable';
   claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -97,6 +84,12 @@ export interface RuntimeProfileSpec {
    *  safety_margin_tokens 를 뺀 값으로 clamp 한 뒤 CLAUDE_CODE_MAX_OUTPUT_TOKENS
    *  로 주입한다. context_window 가 함께 설정된 경우에만 적용된다. */
   max_output_tokens?: number;
+  /** ticket 41dc37cb round 3 — claude-with-vllm.sh 기준(운영 검증됨)의
+   *  CLAUDE_CODE_AUTO_COMPACT_WINDOW 를 그대로 주입하기 위한 필드. 설정되면
+   *  spawn 시점에 이 값을 CLAUDE_CODE_AUTO_COMPACT_WINDOW 로 주입해, CLI가
+   *  context_window 상한에 닿기 전에 스스로 auto-compact 하도록 유도한다.
+   *  생략 시 CLI 자체 기본 동작(기존 프로필 영향 없음). */
+  auto_compact_window?: number;
   /** spawn 시점에 매니저가 볼 수 없는 모든 것(Claude Code 자체 기본 system
    *  prompt, CLI가 협상하는 MCP tool schema, 세션 메타데이터)을 위해 예약해
    *  두는 여유 토큰. 생략 시 DEFAULT_SAFETY_MARGIN_TOKENS(runtime-profiles.ts)
@@ -180,21 +173,20 @@ export function buildModelChain(
 }
 
 /**
- * Chain-decision entry point shared by both spawn sites (subagent-manager.ts
- * and base-session-manager.ts) — ticket 41dc37cb review round 1. A bound
- * Claude backend profile pins the session to one served model behind one
- * endpoint; there is no other model on that backend to fall back to.
- * `harness.fallback_models` targets the plain-Anthropic multi-tier case
- * (try opus, then sonnet, ...) and its entries are never validated as
- * CLI-recognized aliases. Letting them extend a profile-bound chain would
- * make a fallback-eligible retry's `--model` an arbitrary board-configured
- * string again — resurrecting the exact unrecognized_model failure this
- * ticket fixed, on the very path meant to recover from a failure. So while a
- * profile is bound, the chain is the resolved alias alone (length 1 — see
- * buildModelChain's bound check, this makes the fallback respawn a no-op and
- * the death falls through to the ordinary breaker/silent-exit path, same as
- * if fallback_models were never configured). The profile-less path is
- * byte-for-byte `buildModelChain` — unchanged.
+ * subagent-manager.ts와 base-session-manager.ts 양쪽 spawn 지점이 공유하는
+ * 체인 결정 진입점 — ticket 41dc37cb 리뷰 라운드1. 바인딩된 Claude backend
+ * profile은 세션을 하나의 endpoint 뒤 하나의 served model에 고정한다 —
+ * 그 백엔드에는 폴백할 다른 model이 없다. `harness.fallback_models`는
+ * plain-Anthropic 멀티티어 케이스(opus 시도 후 sonnet 시도 등)를 겨냥한
+ * 것이라 단일-model 백엔드에는 아무 의미가 없다. 이를 profile-bound 체인
+ * 까지 확장하면 폴백-적격 재시도의 `--model`이 다시 임의의 board-설정
+ * 문자열이 될 것이다 — 실패를 복구하려는 바로 그 경로에서. 그래서
+ * profile이 바인딩된 동안 체인은 `[null]`이다(길이 1 — buildModelChain의
+ * bound 체크 참고; round 3가 profile 세션에서 `--model` 자체를 완전히
+ * 없앴으므로 재시도할 alias조차 없다). 이로써 폴백 respawn은 no-op이
+ * 되고 죽음은 fallback_models가 전혀 설정되지 않았을 때와 동일하게 일반
+ * breaker/silent-exit 경로로 떨어진다. profile 없는 경로는
+ * `buildModelChain`과 byte-for-byte 동일 — 무변경.
  */
 export function resolveModelChain(
   effectiveModel: string | null,

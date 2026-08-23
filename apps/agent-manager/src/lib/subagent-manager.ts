@@ -45,7 +45,6 @@ import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-de
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
-  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -611,17 +610,16 @@ export class SubagentManager implements SubagentManagerContract {
     // Ticket ee26302d: see base-session-manager.ts's identical comment —
     // `{}` (full) unless this profile's context_window is small.
     const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
-    // Backend profile model is inseparable from its endpoint and therefore
-    // wins over Anthropic-oriented per-agent/harness model defaults. The
-    // profile's raw provider model id (e.g. a vLLM --served-model-name)
-    // must NEVER reach `--model` directly — Claude Code CLI rejects an
-    // unrecognized id with unrecognized_model on internal aux calls
-    // (generate_session_title etc.), failing the turn before it starts
-    // (ticket 41dc37cb). Pass a CLI-recognized alias instead; the actual
-    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
-    // overrides (runtime-profiles.ts), not by this flag.
+    // Backend profile의 model은 그 endpoint와 분리될 수 없으므로 Anthropic
+    // 지향 per-agent/harness model 기본값보다 우선한다. ticket 41dc37cb
+    // round 3 — 운영에서 정상 동작이 검증된 claude-with-vllm.sh는
+    // `--model`을 아예 넘기지 않는다; served model은 claudeEnv()의
+    // ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_MODEL 라우팅(runtime-profiles.ts)
+    // 만으로 CLI에 전달된다. round 1/2의 CLI-recognized-alias 간접화는
+    // 실제 운영 검증을 통과하지 못했으므로, profile이 활성화된 세션은
+    // 이제 이 플래그를 항상 생략한다.
     const effectiveModel = claudeRuntimeProfile
-      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      ? null
       : (slice?.model ?? harness?.model ?? ctx?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;

@@ -42,7 +42,6 @@ import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
-  resolveClaudeModelAlias,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -659,17 +658,17 @@ export class BaseSessionManager {
     // i.e. full) for every profile without a small context_window,
     // including no profile at all (non-Claude adapters).
     const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
-    // A selected Claude backend profile is an endpoint+model pair. Its model
-    // must travel with that endpoint rather than being replaced by an
-    // Anthropic-oriented Agent/harness default. The profile's raw provider
-    // model id must NEVER reach `--model` directly — Claude Code CLI rejects
-    // an unrecognized id with unrecognized_model on internal aux calls
-    // (generate_session_title etc.), failing the first chat turn before it
-    // starts (ticket 41dc37cb). Pass a CLI-recognized alias instead; actual
-    // backend routing is carried by claudeEnv()'s ANTHROPIC_DEFAULT_*_MODEL
-    // overrides (runtime-profiles.ts), not by this flag.
+    // 선택된 Claude backend profile은 endpoint+model이 하나로 묶인 쌍이다.
+    // 이 model은 Anthropic 지향 Agent/harness 기본값으로 대체되지 않고 그
+    // endpoint와 함께 이동해야 한다. ticket 41dc37cb round 3 — 운영에서
+    // 정상 동작이 검증된 claude-with-vllm.sh는 `--model`을 아예 넘기지
+    // 않는다; served model은 claudeEnv()의
+    // ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_*_MODEL 라우팅(runtime-profiles.ts)
+    // 만으로 CLI에 전달된다. round 1/2의 CLI-recognized-alias 간접화는
+    // 실제 운영 검증을 통과하지 못했으므로, profile이 활성화된 세션은
+    // 이제 이 플래그를 항상 생략한다.
     const effectiveModel = claudeRuntimeProfile
-      ? resolveClaudeModelAlias(claudeRuntimeProfile)
+      ? null
       : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
     const effortFlag = slice?.effort ?? null;
     const ultracode = !!slice?.ultracode;

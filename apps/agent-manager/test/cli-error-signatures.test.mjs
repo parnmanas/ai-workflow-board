@@ -238,10 +238,13 @@ test('resolveModelChain: profile 없으면 buildModelChain과 byte-for-byte 동�
 });
 
 test('resolveModelChain: Claude backend profile이 활성화되면 harness.fallback_models를 통째로 무시한다', () => {
-  // raw 값이 CLI-recognized alias가 아니어도(오히려 그런 경우가 대부분) 체인에
-  // 절대 실리지 않는다 — 단일 alias만 남아 체인 길이 1, 폴백 respawn 자체가
-  // 트리거되지 않는다(subagent-manager.ts/base-session-manager.ts의
-  // `chainAttempt + 1 < modelChain.length` 가드 참고).
+  // fallback_models의 어떤 값도 체인에 절대 실리지 않는다 — primary 하나만
+  // 남아 체인 길이 1, 폴백 respawn 자체가 트리거되지 않는다
+  // (subagent-manager.ts/base-session-manager.ts의
+  // `chainAttempt + 1 < modelChain.length` 가드 참고). 실제 호출부는 profile
+  // 활성화 시 primary로 항상 null을 넘기지만(round 3 — --model 자체를
+  // 생략), 이 단위 테스트는 임의의 primary 값에도 무시 동작이 성립함을
+  // 더 일반적으로 증명한다.
   assert.deepEqual(
     resolveModelChain('sonnet', FIXTURE_PROFILE, ['opus', 'claude-legacy-raw-id']),
     ['sonnet'],

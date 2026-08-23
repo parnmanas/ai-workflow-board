@@ -88,28 +88,6 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
-/** Claude Code CLI 자체가 `--model`/내부 보조 요청에서 인식하는 alias
- *  4종(listModels()의 opus/sonnet/haiku/fable — cli-adapters/claude.ts와
- *  동일 목록을 여기서도 독립 유지: 이 모듈은 claude.ts 를 import하지
- *  않는다). */
-export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
-export type ClaudeModelAlias = (typeof CLAUDE_MODEL_ALIASES)[number];
-/** profile.model_alias 생략 시 `--model`에 실릴 기본 alias. 'sonnet'을
- *  고른 이유는 순전히 관례(일반 사용자용 기본 tier) — claudeEnv()가
- *  ANTHROPIC_DEFAULT_*_MODEL 네 tier 전부를 profile.model 로 이미
- *  덮어쓰므로 어떤 alias를 골라도 백엔드로 나가는 실제 모델은 동일하다. */
-export const DEFAULT_CLAUDE_MODEL_ALIAS: ClaudeModelAlias = 'sonnet';
-
-/** ticket 41dc37cb — spawn 사이트가 `--model`에 실제로 넘길 값. profile.model
- *  (raw provider id, 예: vLLM `--served-model-name`)을 절대 직접 반환하지
- *  않는다 — CLI가 그 문자열을 인식 못 하면 generate_session_title 같은 내부
- *  보조 요청이 unrecognized_model 로 거부되어 첫 턴부터 실패한다. 실제 백엔드
- *  라우팅은 claudeEnv()의 ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 담당하므로,
- *  여기서는 CLI 자신이 유효하다고 인정하는 alias만 고르면 된다. */
-export function resolveClaudeModelAlias(profile: RuntimeProfileSpec): ClaudeModelAlias {
-  return profile.model_alias ?? DEFAULT_CLAUDE_MODEL_ALIAS;
-}
-
 export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   const issues: string[] = [];
   if (profile.kind && profile.kind !== 'claude-backend') issues.push('kind must be "claude-backend"');
@@ -118,8 +96,8 @@ export function validateRuntimeProfile(profile: RuntimeProfileSpec): void {
   }
   if (!profile.base_url) issues.push('base_url is required');
   if (!profile.model) issues.push('model is required');
-  if (profile.model_alias !== undefined && !CLAUDE_MODEL_ALIASES.includes(profile.model_alias)) {
-    issues.push(`model_alias must be one of ${CLAUDE_MODEL_ALIASES.join(', ')}`);
+  if (profile.auto_compact_window !== undefined && !isPositiveInt(profile.auto_compact_window)) {
+    issues.push('auto_compact_window must be a positive integer');
   }
   if (profile.protocol === 'openai-compatible' && !profile.adapter) issues.push('adapter is required');
   if (profile.protocol === 'anthropic-compatible' && profile.adapter) issues.push('adapter must be omitted');
@@ -176,42 +154,21 @@ async function healthy(url: string): Promise<boolean> {
 }
 
 /**
- * Claude Code 자체의 내부 보조 요청(세션 제목 생성 등)은 `--model` argv
- * 플래그를 아예 거치지 않고 이 두 변수로 "지금 어떤 모델을 쓰는지"를
- * 직접 읽는다 — 즉 이 값 자체가 CLI 검증 대상이다. raw provider id(예:
- * vLLM `--served-model-name`)를 여기 넣으면 그 보조 요청이
- * `unrecognized_model` 로 거부되어 첫 턴부터 실패한다 — round 1(ticket
- * 41dc37cb)이 `--model` argv만 alias 로 고치고 이 두 변수는 그대로
- * `profile.model` 로 남겨둬서, 운영 vLLM 실측에서 그대로 재발했다. 반드시
- * `--model` 과 동일한, CLI 가 인식하는 alias(resolveClaudeModelAlias)를
- * 넣는다. ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL 조합은
- * cli-adapters/deepseek.ts 에서 이미 검증된 페어링이다.
+ * ticket 41dc37cb round 3 — 운영에서 정상 동작이 검증된
+ * `/home/parn/.local/bin/claude-with-vllm.sh` 기준으로 재작성. round 1/2는
+ * `--model`/ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL에 CLI가 인식하는
+ * alias(opus/sonnet/haiku/fable)를 싣고 실제 백엔드 라우팅은
+ * ANTHROPIC_DEFAULT_*_MODEL 오버라이드에만 맡겼으나, 그 alias 간접화 자체가
+ * 실제 채팅 성공을 막았다(운영 재현) — 기준 스크립트는 alias를 전혀 쓰지
+ * 않고 이 네 변수 전부에 raw served model(profile.model)을 그대로 싣는다.
+ * ANTHROPIC_SMALL_FAST_MODEL/ANTHROPIC_DEFAULT_FABLE_MODEL은 기준 스크립트가
+ * 설정하지 않으므로 여기서도 주입하지 않는다(CLI 자체 기본 동작에 맡김).
  */
-const MODEL_SELECTION_ENV_KEYS = [
+const MODEL_ROUTING_ENV_KEYS = [
   'ANTHROPIC_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL',
-] as const;
-
-/**
- * CLI 가 (argv `--model` 이든 위 MODEL_SELECTION_ENV_KEYS 든) 일단 tier
- * alias 를 고른 "다음" 그 alias 를 실제 어떤 모델로 요청할지 찾아보는
- * 공식 override 변수 — 여기가 raw provider id 의 정당한 자리다. 모델
- * 하나만 서빙하는 커스텀 백엔드 프로필은 이 값들을 전부 `profile.model`
- * 로 지정해, 어떤 tier alias 가 선택되든 항상 같은 백엔드 모델로
- * 귀결되게 한다. CLAUDE_MODEL_ALIASES(opus/sonnet/haiku/fable) 4종
- * 전부에 대응하는 override 가 공식 문서(Claude Code docs, Model
- * configuration → Restrict model selection)에 있어 4종 모두 포함한다 —
- * round 2 리뷰 지적으로 fable 용 override 누락(round 1이 3종만 넣어
- * model_alias:'fable' 프로필의 매핑 계약이 깨져 있었음)을 확인 후 추가.
- * tier alias 를 다른 방식으로 해석하는 CLI 버전에 대비해 4종 모두
- * 방어적으로 포함했다. `profile.env`(claudeEnv() 에서 이 뒤에 spread)
- * 는 여전히 이 값들을 프로필별로 override 할 수 있다.
- */
-const MODEL_OVERRIDE_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'ANTHROPIC_DEFAULT_FABLE_MODEL',
 ] as const;
 
 // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — Claude Code CLI 바이너리에
@@ -452,11 +409,10 @@ export class RuntimeLease {
   claudeEnv(): Record<string, string> {
     const secret = this.credentialEnv[this.profile.auth_env || 'ANTHROPIC_AUTH_TOKEN']
       || this.credentialEnv.ANTHROPIC_API_KEY;
-    const alias = resolveClaudeModelAlias(this.profile);
     return {
-      ...Object.fromEntries(MODEL_SELECTION_ENV_KEYS.map(key => [key, alias])),
-      ...Object.fromEntries(MODEL_OVERRIDE_ENV_KEYS.map(key => [key, this.profile.model])),
+      ...Object.fromEntries(MODEL_ROUTING_ENV_KEYS.map(key => [key, this.profile.model])),
       ...(this.profile.context_window ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(this.profile.context_window) } : {}),
+      ...(this.profile.auto_compact_window ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(this.profile.auto_compact_window) } : {}),
       ...(this.profile.env ?? {}),
       ANTHROPIC_BASE_URL: this.launch?.baseUrl ?? this.profile.base_url.replace(/\/$/, ''),
       ...(secret ? { ANTHROPIC_AUTH_TOKEN: secret } : {}),
