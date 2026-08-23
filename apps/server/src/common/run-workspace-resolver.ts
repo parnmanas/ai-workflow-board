@@ -9,8 +9,11 @@
 // Resolution order for the repo (first match wins):
 //   1. repo_ref.url            — direct git url (escape hatch).
 //   2. repo_ref.resource_id    — a checked-in repo Resource (workspace-scoped).
-//   3. inherit                 — the first repository of the merged
-//                                board ⊕ workspace `environment_config`.
+//   3. inherit                 — the merged board ⊕ workspace `environment_config`:
+//                                the first entry that carries a resource_id, or
+//                                (only if none do) the first url-only entry —
+//                                mirrors pickBaseRepoResourceId's array scan on
+//                                the dispatch path (ticket fff842c6).
 // When none resolves the run still gets a `RunProvision` with `repo: null` —
 // the manager just ensures the folder exists and the rendered prompt (ticket 3)
 // still tells the agent what to do.
@@ -108,23 +111,36 @@ async function resolveRunRepo(
     return null; // unresolvable resource → no repo
   }
 
-  // 3. Inherit the first repository of the merged board ⊕ workspace env config.
+  // 3. Inherit a repository of the merged board ⊕ workspace env config — prefer
+  //    the FIRST entry that carries a resource_id (mirrors pickBaseRepoResourceId's
+  //    array scan on the dispatch path, ticket 8c3befa8/fff842c6) so a QA/Security
+  //    run and a ticket dispatch inheriting the SAME environment_config land on
+  //    the SAME repo whenever a credentialed entry exists anywhere in the array.
+  //    Only when NO entry has a resource_id do we fall back to the first url-only
+  //    entry (anonymous clone) — a tier dispatch has no equivalent for (it would
+  //    leave base_repo unbound instead), so this fallback never disagrees with
+  //    dispatch, it only covers a case dispatch can't resolve at all.
+  //    (이전엔 repositories[0]만 봐서, 레거시 multi-entry 설정에서 url-only
+  //    entry가 0번을 차지하면 뒤쪽 resource_id entry를 영영 못 봤다 — ticket
+  //    fff842c6에서 발견한 dispatch 경로와의 실제 정책 차이.)
   const board = input.boardId
     ? await ds.getRepository(Board).findOne({ where: { id: input.boardId } })
     : null;
   const ws = await ds.getRepository(Workspace).findOne({ where: { id: input.workspaceId } });
   const merged = mergeEnvironmentConfig(ws?.environment_config, board?.environment_config);
-  const first = merged?.repositories?.[0];
-  if (!first) return null;
+  const repos = merged?.repositories || [];
+  const chosen = repos.find((r) => (r?.resource_id || '').trim())
+    || repos.find((r) => (r?.url || '').trim());
+  if (!chosen) return null;
 
-  let url = (first.url || '').trim();
-  let branch = (first.branch || '').trim();
+  let url = (chosen.url || '').trim();
+  let branch = (chosen.branch || '').trim();
   // Only a Resource-sourced repo carries auth: a direct env-config `url` (like
   // the direct-url escape hatch above) stays anonymous — its credential, if any,
   // is expected to be embedded in the url by whoever configured it.
   let credentialId: string | null = null;
-  if (!url && first.resource_id) {
-    const r = await ds.getRepository(Resource).findOne({ where: { id: first.resource_id.trim() } });
+  if (!url && chosen.resource_id) {
+    const r = await ds.getRepository(Resource).findOne({ where: { id: chosen.resource_id.trim() } });
     if (r && r.workspace_id !== null && r.workspace_id !== input.workspaceId) return null;
     url = (r?.url || '').trim();
     if (!branch) branch = (r?.default_branch || '').trim();

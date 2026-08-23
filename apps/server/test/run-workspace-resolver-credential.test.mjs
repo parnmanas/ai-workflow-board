@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 
 import { buildRunProvision } from '../dist/common/run-workspace-resolver.js';
 import { encrypt } from '../dist/services/encryption.service.js';
+import { pickBaseRepoResourceId } from '../dist/common/base-repo-binding.js';
 
 // --- fake DataSource --------------------------------------------------------
 // getRepository(Entity) dispatches by the compiled class name; findOne matches
@@ -245,5 +246,45 @@ test('inherited env-config DIRECT url stays anonymous', async () => {
 
   assert.ok(rp.repo);
   assert.equal(rp.repo.url, 'https://github.com/x/y.git');
+  assert.equal(rp.repo.credential, undefined);
+});
+
+// ── 티켓 fff842c6: 통합 감사 — dispatch 경로(pickBaseRepoResourceId)와의 정책 일치 ──
+// 이전엔 inherit 단계가 `repositories[0]`만 봐서, 레거시 multi-entry 환경설정에서
+// url-only entry가 0번을 차지하면 뒤쪽 resource_id entry(credential 보유)를 영영
+// 고르지 못했다 — dispatch 경로(pickBaseRepoResourceId, resource_id 없는 entry는
+// 건너뛰고 스캔)와 서로 다른 repo를 선택할 수 있는 실제 gap이었다. 같은 배열을 두
+// 함수에 동시에 먹여 반드시 같은 resource_id로 수렴함을 고정한다.
+test('multi-entry env-config: run-resolver picks the SAME resource_id entry as the dispatch path, not an earlier url-only entry', async () => {
+  const repositories = [{ url: 'https://github.com/legacy/anon.git' }, { resource_id: 'res-1' }];
+
+  const dispatchPick = pickBaseRepoResourceId('', repositories);
+  assert.equal(dispatchPick.resourceId, 'res-1', 'sanity: dispatch path skips the url-only entry and picks the resource_id entry');
+
+  const ds = makeDataSource({
+    resources: [resourceRow()],
+    credentials: [credRow()],
+    boards: [{ id: 'board-1', environment_config: JSON.stringify({ repositories }) }],
+    workspaces: [{ id: 'ws-1', environment_config: null }],
+  });
+  const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
+
+  assert.equal(rp.repo.url, 'https://github.com/parnmanas/private.git', 'run-resolver must land on the resource_id entry (res-1), matching the dispatch path — not the earlier url-only entry');
+  assert.deepEqual(rp.repo.credential, { username: 'x-access-token', token: 'ghp_SECRET_TOKEN' }, 'the resource_id entry carries a credential the url-only entry never would have');
+});
+
+test('multi-entry env-config with NO resource_id anywhere: run-resolver still falls back to the first url-only entry (a tier dispatch has no equivalent for)', async () => {
+  const repositories = [{ url: 'https://github.com/legacy/anon-1.git' }, { url: 'https://github.com/legacy/anon-2.git' }];
+
+  const dispatchPick = pickBaseRepoResourceId('', repositories);
+  assert.equal(dispatchPick.resourceId, '', 'sanity: dispatch path has nothing to bind here (would leave base_repo unbound)');
+
+  const ds = makeDataSource({
+    boards: [{ id: 'board-1', environment_config: JSON.stringify({ repositories }) }],
+    workspaces: [{ id: 'ws-1', environment_config: null }],
+  });
+  const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
+
+  assert.equal(rp.repo.url, 'https://github.com/legacy/anon-1.git', 'still picks the first entry in array order when no entry has a resource_id');
   assert.equal(rp.repo.credential, undefined);
 });
