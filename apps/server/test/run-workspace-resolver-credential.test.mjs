@@ -288,3 +288,52 @@ test('multi-entry env-config with NO resource_id anywhere: run-resolver still fa
   assert.equal(rp.repo.url, 'https://github.com/legacy/anon-1.git', 'still picks the first entry in array order when no entry has a resource_id');
   assert.equal(rp.repo.credential, undefined);
 });
+
+// ── 리뷰 라운드1 지적(ticket fff842c6): resource_id + 인라인 url이 함께 있는
+// 레거시 entry에서도 dispatch 경로와 수렴해야 한다. 고친 chosen 선택 로직이
+// resource_id 있는 entry를 우선 고르더라도, 정작 그 entry에 인라인 url이 같이
+// 있으면 예전 코드는 Resource 조회를 건너뛰고 인라인 url을 그대로 썼다 —
+// dispatch는 resource_id를 고른 뒤 항상 Resource row(canonical url/branch/
+// credential)를 읽으므로 이 지점에서 여전히 어긋났다. resource_id가 있으면
+// 인라인 url 유무와 무관하게 무조건 Resource가 canonical source여야 한다.
+test('resource_id + 인라인 url이 함께 있는 entry: Resource가 canonical source — 인라인 url/기본 branch가 아니라 Resource의 url·default_branch·credential을 쓴다', async () => {
+  const repositories = [{ resource_id: 'res-1', url: 'https://github.com/legacy/stale-inline.git' }];
+
+  const ds = makeDataSource({
+    resources: [resourceRow({ default_branch: 'develop' })],
+    credentials: [credRow()],
+    boards: [{ id: 'board-1', environment_config: JSON.stringify({ repositories }) }],
+    workspaces: [{ id: 'ws-1', environment_config: null }],
+  });
+  const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
+
+  assert.equal(rp.repo.url, 'https://github.com/parnmanas/private.git', 'entry의 stale한 인라인 url이 아니라 Resource의 canonical url을 써야 한다');
+  assert.equal(rp.repo.branch, 'develop', 'Resource의 default_branch를 써야 한다(dispatch 경로의 Resource 조회 결과와 동일)');
+  assert.deepEqual(rp.repo.credential, { username: 'x-access-token', token: 'ghp_SECRET_TOKEN' }, '인라인 url만으로는 절대 나올 수 없는 credential이 Resource 경유로 실려야 한다');
+});
+
+test('resource_id + 인라인 url이 함께 있는 entry: Resource를 찾을 수 없으면 인라인 url로 조용히 폴백하지 않고 repo:null로 hard-fail한다', async () => {
+  const repositories = [{ resource_id: 'missing-res', url: 'https://github.com/legacy/stale-inline.git' }];
+
+  const ds = makeDataSource({
+    resources: [],
+    boards: [{ id: 'board-1', environment_config: JSON.stringify({ repositories }) }],
+    workspaces: [{ id: 'ws-1', environment_config: null }],
+  });
+  const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
+
+  assert.equal(rp.repo, null, 'resource_id가 존재하지 않으면 인라인 url이 있어도 폴백하지 않는다 — dispatch가 이 경우 바인딩을 포기하는 것과 동일한 계약');
+});
+
+test('resource_id + 인라인 url이 함께 있는 entry: Resource가 타 workspace 소유면 마찬가지로 인라인 url 폴백 없이 repo:null로 hard-fail한다', async () => {
+  const repositories = [{ resource_id: 'res-1', url: 'https://github.com/legacy/stale-inline.git' }];
+
+  const ds = makeDataSource({
+    resources: [resourceRow({ workspace_id: 'ws-OTHER' })],
+    boards: [{ id: 'board-1', environment_config: JSON.stringify({ repositories }) }],
+    workspaces: [{ id: 'ws-1', environment_config: null }],
+  });
+  const rp = await buildRunProvision(ds, { ...baseInput, repoRef: null });
+
+  assert.equal(rp.repo, null, 'Resource가 다른 workspace 소유면(스코프 위반) 인라인 url로도 폴백하지 않는다');
+});
