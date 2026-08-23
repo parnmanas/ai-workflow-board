@@ -12,6 +12,7 @@
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
+import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
@@ -19,6 +20,9 @@ import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecision';
+import { Workspace } from '../../../entities/Workspace';
+import { pickBaseRepoResourceId } from '../../../common/base-repo-binding';
+import { mergeEnvironmentConfig } from '../../../common/environment-config';
 import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
@@ -445,7 +449,48 @@ export async function loadTicketFull(
       out.base_repo = null;
     }
   } else {
+    // ticket 112ea3c5: an unset base_repo_resource_id means "inherit the
+    // board environment repository", not "no repository" — the same
+    // board-env backfill trigger-loop.service.ts's dispatch path already
+    // applies to the agent_trigger payload (ticket 8c3befa8). Every ticket
+    // READER (MCP get_ticket, REST detail, agent-api → agent-manager's
+    // fetchTicketContext) must resolve to the SAME repo, or a caller that
+    // reads the ticket mid-session sees base_repo:null while the dispatch
+    // prompt named a concrete repo — the exact disagreement that let an
+    // assignee fall back into an unrelated resource's worktree.
     out.base_repo = null;
+    try {
+      const col = ticket.column_id
+        ? await scope.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+        : null;
+      const [board, workspace] = await Promise.all([
+        col?.board_id
+          ? scope.getRepository(Board).findOne({ where: { id: col.board_id } })
+          : Promise.resolve(null),
+        ticket.workspace_id
+          ? scope.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+          : Promise.resolve(null),
+      ]);
+      const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
+      const picked = pickBaseRepoResourceId('', merged?.repositories || []);
+      const candidate = picked.resourceId
+        ? await scope.getRepository(Resource).findOne({ where: { id: picked.resourceId } })
+        : null;
+      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === ticket.workspace_id)
+        ? candidate
+        : null;
+      if (repo) {
+        out.base_repo = {
+          id: repo.id,
+          name: repo.name,
+          url: repo.url,
+          default_branch: repo.default_branch || '',
+          type: repo.type,
+        };
+      }
+    } catch {
+      out.base_repo = null;
+    }
   }
 
   // Hydrate the linked next-ticket snapshot so the picker UI can render its

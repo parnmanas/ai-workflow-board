@@ -183,7 +183,9 @@ export interface Resource {
 }
 
 // Embedded snapshot of the ticket's base repository — populated by
-// loadTicketFull on the server when ticket.base_repo_resource_id is set.
+// loadTicketFull on the server from ticket.base_repo_resource_id, or (when
+// that's unset) backfilled from the board/workspace environment_config
+// default repo (ticket 112ea3c5) — null only when neither resolves.
 export interface TicketBaseRepo {
   id: string;
   name: string;

@@ -3053,6 +3053,13 @@ candidate's branch or move the ticket.
           priority_index: priorityIndex(ticket.priority),
           ticket_created_at: createdAtIso,
           force_respawn: forceRespawn,
+          // ticket 112ea3c5 (AC #8): resolved repo/branch this dispatch bound
+          // to — ticket-own or board-env-backfilled — so a "wrong repo"
+          // report can be diagnosed from this ticket's own audit trail alone.
+          base_repo_id: baseRepoId || null,
+          base_repo_url: baseRepo?.url || null,
+          base_branch: baseBranch || null,
+          worktree_mode: worktreeMode,
         }),
         role,
         trigger_source: triggerSource,

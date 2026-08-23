@@ -8,9 +8,13 @@ import { Repository, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
+import { Board } from '../../entities/Board';
+import { Workspace } from '../../entities/Workspace';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { pickBaseRepoResourceId } from '../../common/base-repo-binding';
+import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -100,6 +104,8 @@ export class EventsController implements OnModuleDestroy {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
+    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
@@ -227,10 +233,32 @@ export class EventsController implements OnModuleDestroy {
     return null;
   }
 
+  /**
+   * ticket 112ea3c5: an unset `base_repo_resource_id` inherits the board
+   * environment repository — same board-env backfill the dispatch path
+   * (trigger-loop.service.ts, ticket 8c3befa8) and `loadTicketFull` apply, so
+   * the archive-time worktree cleanup this feeds (agent-manager's
+   * `#cleanupArchivedTicketWorkspace`) targets the SAME resource the ticket
+   * actually ran in instead of degrading to a scan-every-managed-repo sweep.
+   */
   private async resolveTicketRepositoryResourceId(ticketId: string): Promise<string> {
     if (!ticketId) return '';
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
-    return ticket?.base_repo_resource_id || '';
+    if (!ticket) return '';
+    if (ticket.base_repo_resource_id) return ticket.base_repo_resource_id;
+    try {
+      const col = ticket.column_id
+        ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
+        : null;
+      const [board, workspace] = await Promise.all([
+        col?.board_id ? this.boardRepo.findOne({ where: { id: col.board_id } }) : Promise.resolve(null),
+        ticket.workspace_id ? this.workspaceRepo.findOne({ where: { id: ticket.workspace_id } }) : Promise.resolve(null),
+      ]);
+      const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
+      return pickBaseRepoResourceId('', merged?.repositories || []).resourceId;
+    } catch {
+      return '';
+    }
   }
 
   private async resolveTicketColumnSnapshot(ticketId: string, entityId: string): Promise<{
