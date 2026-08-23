@@ -212,5 +212,56 @@ test('halt-policy column entry backfills from board default, or leaves a visible
   assert.equal(t2HaltCommentsAfter[0].id, t2HaltComments[0].id, 'the existing comment row is reused, not replaced');
   assert.equal(t2HaltCommentsAfter[0].repeat_count, 2, 'repeat_count bumps on a re-entered identical halt');
 
+  // ---------------------------------------------------------------------
+  // Case 3 (reviewer round 1, ticket 1e002acb) — a seat filled by a WRITE
+  // THAT RACES this backfill attempt must not halt, even when this
+  // backfill's own `applyBoardDefaults` call reports 0 applied for that slug
+  // (because the concurrent write's `existing.length > 0` check won first).
+  // The fix must re-resolve fresh holder state after the backfill attempt
+  // rather than trusting the attempt's own return value.
+  // ---------------------------------------------------------------------
+  step('Case 3 — a seat filled by a write that races the backfill attempt must not halt');
+  const c3 = await makeBoard('halt-backfill-concurrent-race');
+  await boardRepo.update(c3.board.id, {
+    default_role_assignments: JSON.stringify({ reviewer: [{ agent_id: trio.reviewer.agent.id }] }),
+  });
+  const t3 = await createTicket(app, getDataSourceToken, {
+    columnId: c3.review.id,
+    workspaceId: ws.id,
+    title: 'concurrent assignment races the halt backfill',
+    assigneeId: trio.assignee.agent.id,
+    reporterId: trio.reporter.agent.id,
+  });
+
+  step('  fire the halt-triggering move, racing a direct concurrent write for the same seat');
+  const movedPromise = activity.logActivity({
+    entity_type: 'ticket', entity_id: t3.id, action: 'moved',
+    field_changed: 'column', old_value: 'To Do', new_value: 'Review',
+    ticket_id: t3.id, actor_id: 'test-user', actor_name: 'tester',
+  });
+  // Deliberately fired alongside movedPromise (not awaited first) so it races
+  // TriggerLoopService's own in-flight backfill attempt for the identical
+  // (ticket, reviewer) seat. Uses a DIFFERENT agent than the board default so
+  // either outcome (this write lands first, or the backfill's own write
+  // does) is unambiguous — the invariant under test is "no halt", not "who
+  // wins". Both writes are awaited (via Promise.all) before `settle()`, so by
+  // the time TriggerLoopService's re-resolve step runs (somewhere in the
+  // settle() window), this write is already visible regardless of exactly
+  // how it interleaved with the backfill's own check-then-write.
+  const concurrentAssignPromise = assignRepo.save(assignRepo.create({
+    ticket_id: t3.id, role_id: reviewerRole.id, agent_id: trio.assignee.agent.id, user_id: null,
+  }));
+  await Promise.all([movedPromise, concurrentAssignPromise]);
+  await settle();
+
+  step('  the seat is filled (by whichever write landed) and the ticket was never halted');
+  const t3Holders = await assignRepo.find({ where: { ticket_id: t3.id, role_id: reviewerRole.id } });
+  assert.ok(t3Holders.length >= 1, 'the reviewer seat must be filled by the time the halt decision runs');
+  const t3Logs = await activityLogRepo.find({ where: { ticket_id: t3.id } });
+  assert.ok(
+    !t3Logs.some((l) => l.action === 'auto_advance_halted_policy'),
+    `a seat filled by a concurrent write must not halt even if this backfill's own applied count was 0; got ${JSON.stringify(t3Logs.map((l) => l.action))}`,
+  );
+
   exitAfterTests(0);
 });

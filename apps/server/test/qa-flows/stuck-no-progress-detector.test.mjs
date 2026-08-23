@@ -28,6 +28,10 @@
 //      default to auto-backfill from) is classified by the EMPTY SEAT, not
 //      misattributed to "check the agent" just because some OTHER role
 //      happens to be staffed.
+//   10. Stale halt row (ticket 1e002acb reviewer round 1) — the halt audit
+//      row is a POINT-IN-TIME record; once an operator staffs the routed
+//      slug by hand (no fresh column-move to invalidate the row itself),
+//      the cause must NOT still read column_role_unstaffed_halt.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -294,6 +298,49 @@ test('StuckTicketDetector — cause-agnostic no-progress hard stall', async (t) 
     assert.equal(msgs.length - beforeSys, 1, 'exactly one new alert');
     assert.match(mine.content, /reviewer/, 'alert names the vacant slug');
     assert.doesNotMatch(mine.content, /Check the agent/, 'must NOT send operators chasing a healthy agent');
+  });
+
+  await t.test('10: a halt row goes stale once the routed slug is staffed by hand — no misattribution', async () => {
+    // Reviewer round 1 (ticket 1e002acb): the halt audit row is a
+    // POINT-IN-TIME record. An operator can staff the routed role after the
+    // halt WITHOUT the ticket making a fresh column-move — the only thing
+    // that invalidates the row via its timestamp — so the row alone is not
+    // proof the seat is STILL vacant. Same setup as subtest 9, except the
+    // reviewer seat gets staffed by hand before the sweep runs.
+    const ticket = await createTicket(app, getDataSourceToken, {
+      columnId: reviewCol.id, workspaceId: ws.id, title: 'halted then staffed by hand — must not misattribute',
+      assigneeId: agent.id,
+    });
+    await backdate(ticketRepo, ticket.id, {
+      created_at: new Date(now.getTime() - 5 * HOUR),
+      updated_at: new Date(now.getTime() - 5 * HOUR),
+    });
+    const haltRow = await activityRepo.save(activityRepo.create({
+      workspace_id: ws.id, entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+      actor_id: 'system', actor_name: 'TriggerLoopService', action: 'auto_advance_halted_policy',
+      new_value: `column=${reviewCol.id} blocked_column=${reviewCol.id} reason=column_unassigned_policy_halt vacant_slugs=reviewer`,
+      role: 'reviewer', trigger_source: 'auto_advance',
+    }));
+    await backdate(activityRepo, haltRow.id, { created_at: new Date(now.getTime() - 5 * HOUR) });
+
+    // Operator staffs the routed 'reviewer' role directly — no column-move,
+    // so the halt row's own recency check alone would still pass.
+    const reviewerRole = await ds.getRepository('WorkspaceRole')
+      .findOne({ where: { workspace_id: ws.id, slug: 'reviewer' } });
+    await ds.getRepository('TicketRoleAssignment').save(ds.getRepository('TicketRoleAssignment').create({
+      ticket_id: ticket.id, role_id: reviewerRole.id, agent_id: agent.id, user_id: null,
+    }));
+
+    await detector.sweep(now);
+
+    const audits = await activityRepo.find({ where: { ticket_id: ticket.id, action: 'stuck_no_progress' } });
+    assert.equal(audits.length, 1, 'one structured stuck_no_progress reason audit written');
+    const payload = JSON.parse(audits[0].new_value);
+    assert.notEqual(
+      payload.reason, 'column_role_unstaffed_halt',
+      'the routed slug is staffed now — must not misattribute to a stale halt row',
+    );
+    assert.deepEqual(payload.vacant_slugs, [], 'no vacant slug remains once the routed role is staffed');
   });
 });
 
