@@ -61,14 +61,24 @@ test('parseProcListWin handles array, single-object, null CommandLine, and junk'
   assert.deepEqual(parseProcListWin(''), []);
 });
 
-test('isBenignCmd matches the mcp-host stdio child only', () => {
+test('isBenignCmd matches managed CLI infrastructure', () => {
   assert.equal(isBenignCmd('node /home/x/self.js mcp-host'), true);
   assert.equal(isBenignCmd('awb-agent-manager mcp-host'), true);
+  assert.equal(isBenignCmd('\\??\\C:\\Windows\\System32\\conhost.exe 0x4'), true);
+  assert.equal(isBenignCmd('C:\\WINDOWS\\system32\\conhost.exe'), true);
+  assert.equal(isBenignCmd('conhost.exe'), true);
   assert.equal(isBenignCmd('bash -c "sleep 999"'), false);
   assert.equal(isBenignCmd('powershell -Command build.ps1'), false);
   assert.equal(isBenignCmd('/opt/unity/Editor/Unity -batchmode'), false);
-  // Default denylist is exactly the mcp-host marker.
-  assert.equal(BENIGN_CMD_PATTERNS.length, 1);
+  assert.equal(BENIGN_CMD_PATTERNS.length, 2);
+});
+
+test('collectNonBenignDescendants ignores a Windows console host', () => {
+  const table = [
+    { pid: 100, ppid: 1, cmd: 'claude.exe --model x' },
+    { pid: 200, ppid: 100, cmd: '\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4' },
+  ];
+  assert.deepEqual(collectNonBenignDescendants(table, 100), []);
 });
 
 test('collectNonBenignDescendants returns live orphans and prunes the benign subtree', () => {
