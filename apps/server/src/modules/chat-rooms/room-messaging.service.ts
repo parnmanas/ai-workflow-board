@@ -15,7 +15,7 @@ import { AgentConnectivityRegistry } from '../../services/agent-connectivity.reg
 import { AGENT_AUTOSTART_REQUESTED, AutostartRequestEvent } from '../../common/agent-autostart-events';
 import { MentionService, ResolvedMention } from '../../services/mention.service';
 import { RoomMembershipService } from './room-membership.service';
-import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { resolveAgentDisplayName, resolveAgentDisplayMap } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
@@ -24,6 +24,8 @@ import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
+import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
 const CONTENT_MAX = 10000;
 
@@ -242,6 +244,14 @@ export class RoomMessagingService {
     // "is this chat target actually reachable?" (global service).
     private readonly connectivity: AgentConnectivityRegistry,
     private readonly artifactRefs?: ArtifactRefsService,
+    // ticket c3b767c6 — dispatch-capability gate. @Global() (see
+    // instance-registry.module.ts) so ChatRoomsModule needs no new import
+    // edge onto AgentManagerModule to reach it. Optional + defensively
+    // guarded in _checkManagerCapability() below so hand-constructed test
+    // doubles that omit it (bypassing Nest's container entirely) keep working
+    // unchanged — a missing registry degrades to "no live telemetry", which
+    // evaluateManagerCapability() already treats as fail-open.
+    private readonly instanceRegistry?: InstanceRegistryService,
   ) {}
 
   /**
@@ -1213,6 +1223,11 @@ export class RoomMessagingService {
         if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) continue;
 
         const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
+        const capabilityError = await this._checkManagerCapability(agent, cliRuntimeProfile);
+        if (capabilityError) {
+          await this.sendSystemMessage(roomId, workspaceId, capabilityError);
+          continue;
+        }
         activityEvents.emit('chat_request', {
           agent_id: agent.id,
           user_id: senderId,
@@ -1324,6 +1339,11 @@ export class RoomMessagingService {
     if (alreadyDispatched.has(agent.id)) return;
 
     const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
+    const capabilityError = await this._checkManagerCapability(agent, cliRuntimeProfile);
+    if (capabilityError) {
+      await this.sendSystemMessage(roomId, workspaceId, capabilityError);
+      return;
+    }
     activityEvents.emit('chat_request', {
       agent_id: agent.id,
       user_id: senderId,
@@ -1368,6 +1388,44 @@ export class RoomMessagingService {
       source: 'chat',
     };
     activityEvents.emit(AGENT_AUTOSTART_REQUESTED, evt);
+  }
+
+  /**
+   * Manager dispatch-capability gate (ticket c3b767c6) — the chat-side twin of
+   * TriggerLoopService._checkManagerCapabilityGate. This is the path the
+   * source incident actually hit: a resolved profile with `context_window`
+   * set silently got no clamp from a stale manager on a separate host, which
+   * requested the CLI's fixed default output budget and reproduced the same
+   * vLLM context-overflow hang+500 the profile fix was meant to prevent —
+   * with no signal in the room beyond a chat message that never got a reply.
+   *
+   * Unlike the credential mismatch a few lines above this method's call
+   * sites (which safely drops the profile and dispatches WITHOUT it — falling
+   * back to the default Anthropic endpoint is a fine substitute when a
+   * credential is missing), a capability mismatch must NOT fall back to
+   * dropping the profile: the configured backend is the only one this agent
+   * can reach, so silently switching away from it is worse than failing
+   * clearly. Returns a Korean, room-postable explanation when incompatible;
+   * null when the dispatch may proceed (including whenever `profile` needs
+   * nothing an old manager could get wrong, or the registry has no live
+   * telemetry to prove an incompatibility — see evaluateManagerCapability).
+   */
+  private async _checkManagerCapability(agent: Agent, profile: CliRuntimeProfile | null): Promise<string | null> {
+    const capability = requiredManagerCapability(profile);
+    if (!capability) return null;
+    const instances = this.instanceRegistry?.listForAgent(agent.id) ?? [];
+    const verdict = evaluateManagerCapability(instances, capability);
+    if (verdict.ok) return null;
+
+    const displayMap = await resolveAgentDisplayMap(this.agentRepo, [agent]);
+    const displayName = displayMap.get(agent.id) ?? agent.name;
+    this.logService.warn('ChatRooms', 'chat_request dropped (manager capability mismatch)', {
+      agent_id: agent.id, capability, profile_id: profile?.id, reason: verdict.reason, detail: verdict.detail,
+    });
+    return (
+      `⚠️ **${displayName}**에게 dispatch할 수 없습니다 — ${verdict.detail} ` +
+      '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.'
+    );
   }
 
 }

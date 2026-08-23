@@ -39,6 +39,8 @@ import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from
 import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
+import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
@@ -201,6 +203,10 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // imported by AgentsModule, no cycle.
     private readonly roomMessaging: RoomMessagingService,
     private readonly runSkillSnapshots: RunSkillSnapshotService,
+    // ticket c3b767c6 — dispatch-capability gate. @Global() (see
+    // instance-registry.module.ts), so this needs no new module import even
+    // though AgentsModule has no direct relationship to that provider's home.
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {
     this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
   }
@@ -2069,6 +2075,69 @@ candidate's branch or move the ticket.
     return true;
   }
 
+  /**
+   * Manager dispatch-capability gate (ticket c3b767c6). Runs right after
+   * `runtimeProfile` is resolved (the only point this method knows whether
+   * the profile needs anything) and before the `agent_trigger` SSE emit.
+   *
+   * A resolved profile with `context_window` set opts into a per-turn output
+   * clamp that only a manager build reporting MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP
+   * on its heartbeat actually implements (apps/agent-manager/src/lib/
+   * runtime-profiles.ts resolveMaxOutputTokensEnv). An older manager silently
+   * ignores the field and requests the CLI's fixed default output budget —
+   * the exact vLLM context-overflow hang+500 ticket 1af53029 traced to a
+   * stale manager on a separate host, with no server-side signal to catch it
+   * before burning a whole CLI session. This gate drops the trigger BEFORE
+   * it reaches that manager instead of letting the dispatch spawn and hang.
+   *
+   * Silent-drop + audit row mirrors every sibling "hard" gate above (board
+   * pause / archived / pending-user / hard-budget) rather than the
+   * credential-mismatch `throw` a few lines below its call site — this is a
+   * routine, retriable condition (an operator updating the manager clears it
+   * on the very next heartbeat), not a configuration error to surface loudly.
+   */
+  private async _checkManagerCapabilityGate(
+    ticket: Ticket,
+    agentId: string,
+    role: string,
+    triggerSource: string,
+    profile: CliRuntimeProfile | null,
+  ): Promise<boolean> {
+    const capability = requiredManagerCapability(profile);
+    if (!capability) return false;
+    const verdict = evaluateManagerCapability(this.instanceRegistry.listForAgent(agentId), capability);
+    if (verdict.ok) return false;
+
+    this.logService.warn('MCP', 'agent_trigger dropped (manager capability mismatch)', {
+      ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      capability, profile_id: profile?.id, reason: verdict.reason, detail: verdict.detail,
+    });
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'agent_trigger_dropped_manager_incapable',
+        new_value: `agent=${agentId} profile=${profile?.id ?? ''} capability=${capability} ${verdict.detail ?? ''}`,
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.warn('MCP', 'manager-capability-drop audit write failed (drop still applied)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+    if (triggerSource === 'comment_summary') {
+      throw Object.assign(new Error(verdict.detail || 'agent-manager does not support this dispatch profile'), {
+        status: 503, code: 'SUMMARY_DISPATCH_MANAGER_INCOMPATIBLE',
+      });
+    }
+    return true;
+  }
+
   private async _emitTrigger(
     ticket: Ticket,
     agentId: string,
@@ -2711,6 +2780,9 @@ candidate's branch or move the ticket.
           `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
           `agent ${agent.id} must select that credential before dispatch`,
         );
+      }
+      if (await this._checkManagerCapabilityGate(ticket, agentId, role, triggerSource, runtimeProfile)) {
+        return '';
       }
     }
 
