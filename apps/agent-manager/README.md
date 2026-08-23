@@ -44,9 +44,17 @@ See [the Runtime Host reference](../../docs/agent-manager.md) and
 ### npm (recommended)
 
 ```bash
-npm i -g awb-agent-manager
+npm i -g --ignore-scripts awb-agent-manager
 awb-agent-manager --version
 ```
+
+`--ignore-scripts` matches what self-update does. The SLSA provenance gate
+covers **our** tarball, but the ~95 transitive dependencies below it are
+re-resolved from the registry at install time, and `npm i -g` would otherwise
+run any `preinstall`/`postinstall` they carry as your user — no CVE required.
+This package's published tree has **zero** install-script packages
+(`scripts/audit-published-deps.mjs` re-checks that every night), and bin
+linking is npm core rather than a lifecycle script, so the flag costs nothing.
 
 Published to the public npm registry as
 [`awb-agent-manager`](https://www.npmjs.com/package/awb-agent-manager) (unscoped);

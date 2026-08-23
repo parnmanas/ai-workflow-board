@@ -76,10 +76,17 @@ alias. New UI and documentation should say **Runtime Host**.
 ## Installation and pairing
 
 ```bash
-npm i -g awb-agent-manager
+npm i -g --ignore-scripts awb-agent-manager
 awb-agent-manager setup
 awb-agent-manager service install
 ```
+
+`--ignore-scripts` 는 self-update 가 쓰는 것과 같은 플래그다. provenance 게이트는
+**우리 tarball** 의 출처만 보증하고, 그 아래 전이 의존성은 설치 시점 레지스트리에서
+새로 해석되므로 그중 하나가 postinstall 을 달고 있으면 CVE 없이도 이 호스트에서
+임의 코드가 돈다. 발행 트리의 install-script 패키지는 0개이고
+(`scripts/audit-published-deps.mjs` 가 매일 재확인), bin 링크는 lifecycle script 가
+아니라 npm 코어 동작이라 이 플래그로 잃는 것이 없다.
 
 The setup flow redeems a one-time pairing token created in **Admin → Runtime
 Hosts** and writes host configuration under `$AWB_AGENT_MANAGER_HOME` (or the

@@ -608,7 +608,10 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
   await sleep(750);
 
   // 2. Reinstall globally. shell:true on Windows resolves the npm.cmd shim.
-  const install = spawnSync('npm', ['install', '-g', npmSpec], {
+  // --ignore-scripts: same reason as the POSIX path — provenance covers our own
+  // tarball, not the transitive tree's install scripts. Bin linking is npm core,
+  // not a lifecycle script, so the shim below is still created.
+  const install = spawnSync('npm', ['install', '-g', '--ignore-scripts', npmSpec], {
     stdio: 'ignore',
     shell: isWin,
     windowsHide: true,
@@ -817,7 +820,7 @@ async function runNpmGlobalSelfUpdate(
 
   // Dry-run / test hook: report intent without spawning the helper or exiting.
   if (opts.noReExec) {
-    const summary = `npm-global update: would run \`npm install -g ${installSpec}\` + restart (re-exec skipped)`;
+    const summary = `npm-global update: would run \`npm install -g --ignore-scripts ${installSpec}\` + restart (re-exec skipped)`;
     out(`Self-update: ${summary}`);
     return { changed: true, summary, willReExec: false };
   }
@@ -828,10 +831,17 @@ async function runNpmGlobalSelfUpdate(
   // package after five seconds while the detached helper was still waiting or
   // installing, yet the command had already reported success.
   if (process.platform !== 'win32') {
-    out(`Self-update: npm install -g ${installSpec}`);
+    out(`Self-update: npm install -g --ignore-scripts ${installSpec}`);
+    // `--ignore-scripts` — provenance 게이트는 **우리 tarball 의 출처**만 보증한다.
+    // 그 아래 95개 전이 의존성은 `^` 범위로 그 시점 레지스트리에서 해석되므로,
+    // 그중 하나가 postinstall 을 달고 들어오면 CVE 없이도 이 호스트에서 매니저
+    // 권한으로 임의 코드가 돈다. 발행 트리의 install-script 패키지는 실측 0개이고
+    // (scripts/audit-published-deps.mjs 가 매 cron 마다 그 0 을 재확인한다), 위
+    // bin 링크는 lifecycle script 가 아니라 npm 코어 동작이라 이 플래그에 영향받지
+    // 않는다 — 실측: `--ignore-scripts` 로 설치해도 bin 심링크·실행 모두 정상.
     const installed = await runAsync(
       'npm',
-      ['install', '-g', installSpec],
+      ['install', '-g', '--ignore-scripts', installSpec],
       tmpdir(),
       BUILD_TIMEOUT_MS,
       (line) => out(`  [npm-global] ${line}`),
@@ -894,7 +904,7 @@ async function runNpmGlobalSelfUpdate(
     return { changed: false, summary };
   }
 
-  const summary = `npm-global update scheduled: detached helper runs \`npm install -g ${installSpec}\` after exit, then restarts`;
+  const summary = `npm-global update scheduled: detached helper runs \`npm install -g --ignore-scripts ${installSpec}\` after exit, then restarts`;
   out(`Self-update: ${summary}`);
 
   // Same 1.5s tail as the git path: let the caller finish its ack POST + log

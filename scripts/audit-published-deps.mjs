@@ -33,6 +33,20 @@
  * 워크스페이스는 지금의 범위를 들고 있다. "오늘 호스트가 안전한가" 와 "다음 배포가
  * 안전한가" 는 다른 질문이라 둘 다 답해야 한다.
  *
+ * ── 두 축을 본다: advisory 와 install script (2026-08-23 추가) ──
+ *
+ * 위 구멍을 처음 막을 때(2026-08-22)는 해석된 트리에 `npm audit` 만 돌렸다. 그런데
+ * **advisory 는 이 트리의 유일한 실패 모드가 아니다.** `npm i -g` 는 기본적으로
+ * 의존성의 preinstall/install/postinstall 을 실행한다 — 즉 CVE 가 하나도 없어도
+ * 서드파티 postinstall 하나면 모든 라이브 호스트에서 매니저 권한으로 임의 코드가 돈다.
+ * 게다가 이쪽은 advisory 보다 빠르다: 탈취된 패키지가 퍼지는 데 필요한 건 publish
+ * 한 번이고, advisory 가 붙는 건 그보다 한참 뒤다.
+ *
+ * `scripts/audit-install-scripts.mjs` 가 바로 이 축을 허용목록으로 강제하지만
+ * **읽는 파일이 `package-lock.json` 이다** — 이 스크립트가 존재하는 이유가 된 바로
+ * 그 "다른 객체". 그래서 lockfile 축의 허용목록은 통과하는데 호스트가 받는 트리는
+ * 아무도 안 보는 상태였다. 여기서 같은 판정을 **해석된 트리**에 대해 다시 한다.
+ *
  * 설계 선택:
  *   - **설치하지 않는다.** `npm install --package-lock-only --ignore-scripts` 로 해석만
  *     하고 그 lockfile 에 `npm audit` 을 돌린다. 취약점을 찾는 잡이 그 취약점의
@@ -63,6 +77,27 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_LEVEL = 'moderate';
+
+/**
+ * 발행 트리에서 install script 를 도는 것이 허용된 패키지. **의도적으로 비어 있다.**
+ *
+ * `scripts/audit-install-scripts.mjs` 의 ALLOWED(esbuild/fsevents/@scarf/scarf)와
+ * 다른 집합인 이유: 그쪽은 **CI 러너의 lockfile 트리**를 판정하고, 이쪽은
+ * **라이브 호스트가 `npm i -g` 로 받는 트리**를 판정한다. 2026-08-22 감사가 두
+ * 트리가 서로 다른 객체임을 확인했으므로 허용목록도 따라 갈라져야 한다 — 빌드
+ * 체인이 esbuild 의 postinstall 을 정당하게 필요로 한다는 사실은 호스트에서
+ * 임의 코드가 도는 것을 정당화하지 않는다.
+ *
+ * 오늘 기준 발행 트리(96 패키지)의 install-script 패키지는 실측 0개다. 즉 0 은
+ * 희망사항이 아니라 현재 상태이고, 그래서 self-update 의 `--ignore-scripts`
+ * (apps/agent-manager/src/lib/self-update.ts)가 아무것도 깨지 않는다.
+ *
+ * 여기에 이름을 추가한다면 self-update 의 `--ignore-scripts` 도 함께 재검토해야
+ * 한다 — 그러지 않으면 그 패키지가 필요로 하는 스크립트가 호스트에서 조용히
+ * 건너뛰어져 깨진 트리가 깔린다. 그 결합은 사람 기억이 아니라
+ * apps/server/test/published-deps-audit-guard.test.mjs 가 강제한다.
+ */
+export const PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED = new Set([]);
 
 /** 발행되는 패키지의 매니페스트 경로. 이게 소비자가 해석하게 될 범위의 출처다. */
 export const PUBLISHED_MANIFEST = 'apps/agent-manager/package.json';
@@ -170,6 +205,37 @@ export function lockfileVersions(lock) {
 }
 
 /**
+ * 해석된 lockfile 에서 **install script 를 도는 패키지**를 뽑는다.
+ *
+ * `npm install --package-lock-only` 는 설치를 하지 않지만 packument 로부터
+ * `hasInstallScript` 를 lockfile 에 채워 넣는다 — 즉 스크립트를 실행하지 않고도
+ * "이 트리를 진짜로 깔면 무엇이 실행되는가" 를 알 수 있다. (실측 확인:
+ * `esbuild@0.25.0` 을 `--package-lock-only --ignore-scripts` 로 해석하면
+ * `hasInstallScript: true` 가 그대로 들어온다.)
+ *
+ * 반환: Map<name, version>. `lockfileVersions()` 와 같은 경로 규칙을 쓴다.
+ */
+export function installScriptPackages(lock) {
+  const out = new Map();
+  for (const [path, entry] of Object.entries(lock?.packages ?? {})) {
+    if (!path || entry?.link || !entry?.hasInstallScript) continue;
+    const idx = path.lastIndexOf('node_modules/');
+    if (idx === -1) continue;
+    const name = path.slice(idx + 'node_modules/'.length);
+    if (!out.has(name)) out.set(name, entry.version ?? '(unknown)');
+  }
+  return out;
+}
+
+/** 허용목록을 벗어난 install-script 패키지만 남긴다. */
+export function disallowedInstallScripts(found, allowed = PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED) {
+  return [...found]
+    .filter(([name]) => !allowed.has(name))
+    .map(([name, version]) => ({ name, version }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
  * lockfile 해석 결과와 레지스트리 재해석 결과의 차이.
  * 양쪽에 다 있는 이름만 비교한다 — 한쪽에만 있는 건 트리 모양 차이라 별개 축이다.
  */
@@ -208,6 +274,7 @@ export function resolveAndAudit(label, manifest) {
     }
     const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
     const versions = lockfileVersions(lock);
+    const installScripts = installScriptPackages(lock);
 
     try {
       execFileSync('npm', ['audit', `--audit-level=${AUDIT_LEVEL}`], {
@@ -222,7 +289,7 @@ export function resolveAndAudit(label, manifest) {
       throw err;
     }
 
-    return { versions, packageCount: versions.size };
+    return { versions, installScripts, packageCount: versions.size };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -323,6 +390,22 @@ function main() {
     console.log(`ok   ${t.label} — ${res.packageCount} 패키지, ${AUDIT_LEVEL} 이상 0건`);
     console.log(`     대상: ${t.what}`);
 
+    // install-script 축. advisory 와 독립적인 실패 모드다 — CVE 가 하나도 없어도
+    // postinstall 하나면 호스트에서 임의 코드가 돈다. `npm i -g` 는 기본적으로
+    // 그 스크립트를 실행하고, 우리 lockfile 게이트는 이 트리를 보지 않는다.
+    const rogue = disallowedInstallScripts(res.installScripts);
+    if (rogue.length > 0) {
+      console.log(`FAIL ${t.label} — 허용목록에 없는 install-script 패키지 ${rogue.length}개:`);
+      for (const r of rogue) console.log(`       ${r.name}@${r.version}`);
+      failures.push(
+        `${t.label}: install-script 패키지 ${rogue.length}개 (${rogue.map((r) => r.name).join(', ')})`,
+      );
+    } else {
+      console.log(
+        `     install script 0개 — \`npm i -g\` 가 호스트에서 실행할 서드파티 스크립트 없음.`,
+      );
+    }
+
     const drift = driftRows(lockVersions, res.versions);
     if (drift.length > 0) {
       // 통과시키되 반드시 보이게 남긴다. 이 목록이 곧 "CI 가 판정한 적 없는 버전" 이다.
@@ -338,7 +421,8 @@ function main() {
 
   finish(
     failures,
-    `발행 트리 감사 완료 — live/next 양쪽 모두 ${AUDIT_LEVEL} 이상 0건, 선언 범위 ${names.length}개 전부 상한 있음.`,
+    `발행 트리 감사 완료 — live/next 양쪽 모두 ${AUDIT_LEVEL} 이상 0건 + install script 0개,` +
+      ` 선언 범위 ${names.length}개 전부 상한 있음.`,
   );
 }
 
@@ -351,7 +435,10 @@ function finish(failures, okMessage) {
         ` \`npm i -g awb-agent-manager\` 는 우리 lockfile 을 읽지 않는다.` +
         `\n\`npm audit fix\` 는 금지(루트 overrides 를 날린다).` +
         ` ${PUBLISHED_MANIFEST} 의 선언 범위를 좁히거나, 안전한 버전이 나올 때까지` +
-        ` 루트 \`overrides\` 로 고정할 것.`,
+        ` 루트 \`overrides\` 로 고정할 것.` +
+        `\n\ninstall-script 건이라면: 그 스크립트는 라이브 호스트에서 매니저 권한으로` +
+        ` 실행된다. 정말 필요하면 PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED 에 추가하되,` +
+        ` self-update 의 \`--ignore-scripts\` 를 함께 재검토할 것(가드가 그 결합을 강제한다).`,
     );
     process.exit(1);
   }
