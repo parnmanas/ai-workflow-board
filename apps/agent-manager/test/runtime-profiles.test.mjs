@@ -36,6 +36,7 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
   defaultSonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,
   defaultOpus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
+  defaultFable: process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,
   contextWindowEnv: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
   maxOutputEnv: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
   awb: process.env.AWB_API_KEY,
@@ -169,6 +170,30 @@ test('profile.model_alias overrides the default --model alias', async () => {
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
 });
 
+// ticket 41dc37cb round 2 리뷰 지적 — CLAUDE_MODEL_ALIASES/model_alias 스키마는
+// 'fable'을 정상 alias로 허용하지만, MODEL_OVERRIDE_ENV_KEYS에는 처음에
+// opus/sonnet/haiku 3종만 있고 ANTHROPIC_DEFAULT_FABLE_MODEL이 빠져 있었다 —
+// model_alias:'fable' profile은 selection env(ANTHROPIC_MODEL 등)에 'fable'이
+// 실려도 실제 백엔드 모델로의 매핑이 보장되지 않는 상태였다. Claude Code 공식
+// 문서(code.claude.com/docs/en/model-config, "Restrict model selection" 섹션)로
+// ANTHROPIC_DEFAULT_FABLE_MODEL이 실재하는 공식 env var임을 확인하고
+// MODEL_OVERRIDE_ENV_KEYS에 추가했다 — 이 테스트가 그 매핑을 직접 증명한다.
+test('profile.model_alias: "fable"도 ANTHROPIC_DEFAULT_FABLE_MODEL로 실제 백엔드 모델에 매핑된다', async () => {
+  const executable = await makeClaudeFixture('claude-fable-alias.mjs');
+  const capture = await spawnFixture({
+    id: 'fable-alias-a',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40108',
+    model: 'qwen3-coder-next',
+    model_alias: 'fable',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'fable-alias.json'));
+  assert.equal(capture.model, 'fable', '--model에는 raw id가 아니라 fable alias가 실려야 한다');
+  assert.equal(capture.anthropicModel, 'fable', 'ANTHROPIC_MODEL도 동일하게 fable alias를 따라가야 한다');
+  assert.equal(capture.defaultFable, 'qwen3-coder-next', 'ANTHROPIC_DEFAULT_FABLE_MODEL이 fable alias를 실제 백엔드 모델로 매핑해야 한다');
+});
+
 // ticket 41dc37cb 리뷰 라운드1 — 리뷰 지적: 최초 spawn은 alias를 쓰지만,
 // 폴백-적격 실패(unrecognized_model 등) 후 exit 핸들러의 model-fallback
 // 체인(ticket 61f4dd18)이 harness.fallback_models의 raw 값으로 재-spawn하면
@@ -259,6 +284,7 @@ test('Anthropic-compatible profile: ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL�
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultOpus, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
+  assert.equal(capture.defaultFable, 'qwen3-coder-next', 'fable도 나머지 3종과 동일하게 방어적으로 override된다(선택된 alias가 아니어도)');
 });
 
 test('profile.env still overrides the default aux-call model env vars', async () => {

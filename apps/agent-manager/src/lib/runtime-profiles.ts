@@ -198,17 +198,20 @@ const MODEL_SELECTION_ENV_KEYS = [
  * 공식 override 변수 — 여기가 raw provider id 의 정당한 자리다. 모델
  * 하나만 서빙하는 커스텀 백엔드 프로필은 이 값들을 전부 `profile.model`
  * 로 지정해, 어떤 tier alias 가 선택되든 항상 같은 백엔드 모델로
- * 귀결되게 한다. 3종만 있고 fable 용 override 가 없는 것은 CLI 에 그런
- * 변수가 존재하지 않기 때문 — model_alias:'fable' 프로필은 이 경로로
- * 커버되지 않는다(기존 한계, 이번 티켓 범위 밖). tier alias 를 다른
- * 방식으로 해석하는 CLI 버전에 대비해 3종 모두 방어적으로 포함했다.
- * `profile.env`(claudeEnv() 에서 이 뒤에 spread) 는 여전히 이 값들을
- * 프로필별로 override 할 수 있다.
+ * 귀결되게 한다. CLAUDE_MODEL_ALIASES(opus/sonnet/haiku/fable) 4종
+ * 전부에 대응하는 override 가 공식 문서(Claude Code docs, Model
+ * configuration → Restrict model selection)에 있어 4종 모두 포함한다 —
+ * round 2 리뷰 지적으로 fable 용 override 누락(round 1이 3종만 넣어
+ * model_alias:'fable' 프로필의 매핑 계약이 깨져 있었음)을 확인 후 추가.
+ * tier alias 를 다른 방식으로 해석하는 CLI 버전에 대비해 4종 모두
+ * 방어적으로 포함했다. `profile.env`(claudeEnv() 에서 이 뒤에 spread)
+ * 는 여전히 이 값들을 프로필별로 override 할 수 있다.
  */
 const MODEL_OVERRIDE_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
 ] as const;
 
 // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — Claude Code CLI 바이너리에

@@ -122,14 +122,14 @@ carry it split into two roles:
   leaving these two on the raw id is the round-1 regression that reopened
   this ticket.
 - **Override** (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
-  `ANTHROPIC_DEFAULT_HAIKU_MODEL`) — the CLI's official mechanism for mapping
-  a resolved tier alias to the model actually requested. These default to
-  `model`, so regardless of which alias tier gets selected (via `--model`,
-  `ANTHROPIC_MODEL`, or `ANTHROPIC_SMALL_FAST_MODEL`), every request — main
-  turn or internal aux call — still routes to the one configured backend
-  model. There is no `ANTHROPIC_DEFAULT_FABLE_MODEL` (the CLI has no such
-  variable), so a `model_alias: "fable"` profile is not covered by this
-  override.
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`) — the
+  CLI's official mechanism (see [Claude Code docs, Model configuration →
+  Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection))
+  for mapping a resolved tier alias to the model actually requested. These
+  default to `model`, so regardless of which alias tier gets selected (via
+  `--model`, `ANTHROPIC_MODEL`, or `ANTHROPIC_SMALL_FAST_MODEL`), every
+  request — main turn or internal aux call — still routes to the one
+  configured backend model, `fable` included.
 
 Set `env` to override any of those variables individually (e.g. a genuinely
 multi-model backend).
