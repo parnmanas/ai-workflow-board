@@ -26,6 +26,7 @@ import {
   sharedSlotName,
   isSharedSlotSeg,
 } from '../dist/lib/worktree-manager.js';
+import { classifyWorktreeOutcome } from '../dist/lib/dispatch-preflight.js';
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -313,5 +314,155 @@ test('verifyCheckout: an initialized-but-unpopulated checkout → incomplete_che
     assert.match(d.detail, /HEAD does not resolve/);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── ticket 112ea3c5: a ticket that inherits the board's repo must never land
+// in a DIFFERENT resource's pre-existing worktree ──────────────────────────
+//
+// Reproduces the reported incident precisely: an agent working_dir that
+// already carries an unrelated resource's checkout (from earlier, correctly-
+// scoped work on a different board/ticket) must not leak into a NEW ticket
+// whose own base_repo_resource_id is empty and resolves to a DIFFERENT
+// resource via the board environment. WorktreeManager.resolveCwd scopes every
+// worktree root by `resourceSlug` (`.awb/wt/<resourceSlug>/…`), so this also
+// serves as the integration-level proof for classifyWorktreeOutcome's
+// hard-fail contract (completion criterion #4): a provisioning failure for
+// the CORRECT resource must never fall back to the other, already-present
+// resource's checkout.
+
+const TICKET_OTHER_BOARD = 'dddddddd-1111-2222-3333-444444444444';
+const TICKET_D = 'eeeeeeee-1111-2222-3333-444444444444';
+const TICKET_E = 'ffffffff-1111-2222-3333-444444444444';
+
+for (const ticketMode of ['per_ticket', 'shared']) {
+  test(`resolveCwd (${ticketMode}): a pre-existing OTHER resource's shared worktree is never reused for a ticket resolved to a DIFFERENT resource`, async () => {
+    const other = await makeRepoWithRemote(); // e.g. "GameClient" — unrelated resource
+    const correct = await makeRepoWithRemote(); // e.g. "Emberdelve" — the board-resolved repo
+    const workingDir = join(other.root, 'shared-agent-home');
+    try {
+      await fsp.writeFile(join(other.repo, 'OTHER_MARKER.md'), 'other resource content\n');
+      git(other.repo, ['add', 'OTHER_MARKER.md']);
+      git(other.repo, ['commit', '-q', '-m', 'other resource marker']);
+      git(other.repo, ['push', '-q', 'origin', 'main']);
+      await fsp.writeFile(join(correct.repo, 'CORRECT_MARKER.md'), 'correct resource content\n');
+      git(correct.repo, ['add', 'CORRECT_MARKER.md']);
+      git(correct.repo, ['commit', '-q', '-m', 'correct resource marker']);
+      git(correct.repo, ['push', '-q', 'origin', 'main']);
+      await fsp.mkdir(workingDir, { recursive: true });
+
+      const wm = new WorktreeManager();
+      // Pre-existing: an EARLIER, unrelated ticket already leased a shared
+      // pool slot for the OTHER resource on this same agent working_dir —
+      // exactly the "agent home already carries a different repo's shared-0"
+      // precondition (completion criterion #7).
+      const otherResult = await wm.resolveCwd({
+        baseWorkingDir: workingDir,
+        ticketId: TICKET_OTHER_BOARD,
+        role: 'assignee',
+        mode: 'shared',
+        poolSize: 1,
+        bootstrapRepo: { resourceId: 'gameclient-resource', url: other.remote, branch: 'main' },
+      });
+      assert.ok(otherResult.isWorktree, 'the other resource\'s own worktree provisions normally');
+      const otherSlotPath = otherResult.worktreePath;
+      const otherHeadBefore = git(otherSlotPath, ['rev-parse', 'HEAD']);
+
+      // The NEW ticket: its own base_repo_resource_id was empty; the caller
+      // (resolveBootstrapRepository) resolved it to the board's repo — a
+      // DIFFERENT resource — before calling resolveCwd.
+      const result = await wm.resolveCwd({
+        baseWorkingDir: workingDir,
+        ticketId: ticketMode === 'shared' ? TICKET_D : TICKET_E,
+        role: 'assignee',
+        mode: ticketMode,
+        poolSize: 1,
+        bootstrapRepo: { resourceId: 'emberdelve-resource', url: correct.remote, branch: 'main' },
+      });
+
+      assert.ok(result.isWorktree, `${ticketMode}: provisioning against the correct, isolated resource succeeds`);
+      assert.ok(
+        result.worktreePath.startsWith(join(workingDir, '.awb', 'wt', 'emberdelve-resource')),
+        `${ticketMode}: worktree lands under the board-resolved resource's own slug dir, got ${result.worktreePath}`,
+      );
+      assert.doesNotMatch(result.worktreePath, /gameclient-resource/, `${ticketMode}: never touches the other resource's tree`);
+      assert.notEqual(result.cwd, otherSlotPath, `${ticketMode}: cwd is not the other resource's shared slot`);
+      assert.equal(
+        (await fsp.readFile(join(result.cwd, 'CORRECT_MARKER.md'), 'utf8')).replace(/\r\n/g, '\n'),
+        'correct resource content\n',
+      );
+      assert.equal(existsSync(join(result.cwd, 'OTHER_MARKER.md')), false, `${ticketMode}: the other resource's file never appears here`);
+
+      // The other resource's pre-existing slot is completely undisturbed —
+      // proves this isn't a "reuse whatever's warm" fallback.
+      assert.equal(git(otherSlotPath, ['rev-parse', 'HEAD']), otherHeadBefore);
+      assert.equal(
+        (await fsp.readFile(join(otherSlotPath, 'OTHER_MARKER.md'), 'utf8')).replace(/\r\n/g, '\n'),
+        'other resource content\n',
+      );
+    } finally {
+      await other.cleanup();
+      await correct.cleanup();
+    }
+  });
+}
+
+test('resolveCwd: a provisioning failure for the resolved (correct) resource hard-fails via classifyWorktreeOutcome — never silently falls back to another resource\'s pre-existing worktree', async () => {
+  const other = await makeRepoWithRemote();
+  const correct = await makeRepoWithRemote();
+  const workingDir = join(other.root, 'conflict-agent-home');
+  const ticketId = 'aaaabbbb-1111-2222-3333-444444444444';
+  try {
+    await fsp.mkdir(workingDir, { recursive: true });
+    const wm = new WorktreeManager();
+
+    // Pre-existing OTHER resource shared-0, from earlier unrelated work.
+    const otherResult = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_OTHER_BOARD,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'gameclient-resource', url: other.remote, branch: 'main' },
+    });
+    assert.ok(otherResult.isWorktree);
+    const otherSlotPath = otherResult.worktreePath;
+    const otherHeadBefore = git(otherSlotPath, ['rev-parse', 'HEAD']);
+
+    // Force `git worktree add` to refuse: pre-create a non-worktree directory
+    // at the EXACT path the correct resource's per_ticket checkout would use
+    // (mirrors #ensureWorktree's documented "path exists but isn't a
+    // registered worktree — refuse to clobber" guard).
+    const conflictPath = join(workingDir, '.awb', 'wt', 'emberdelve-resource', worktreeSlug(ticketId, 'per_ticket'));
+    await fsp.mkdir(conflictPath, { recursive: true });
+    await fsp.writeFile(join(conflictPath, 'stray.txt'), 'not a git worktree\n');
+
+    const result = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId,
+      role: 'assignee',
+      mode: 'per_ticket',
+      bootstrapRepo: { resourceId: 'emberdelve-resource', url: correct.remote, branch: 'main' },
+    });
+
+    assert.equal(result.isWorktree, false, 'provisioning for the correct resource is refused, not silently swapped');
+    assert.equal(result.reason, 'path_conflict');
+    // classifyWorktreeOutcome (the actual dispatch gate) must hard-block this
+    // outcome — proving #applyWorktreeCwd aborts the dispatch instead of
+    // spawning into whatever `cwd` this result carries.
+    const gate = classifyWorktreeOutcome(result);
+    assert.equal(gate.blocked, true);
+    assert.equal(gate.kind, 'worktree:path_conflict');
+
+    // Never falls back to the other resource's pre-existing worktree.
+    assert.notEqual(result.cwd, otherSlotPath);
+    assert.doesNotMatch(result.worktreePath ?? '', /gameclient-resource/);
+    // The other resource's slot is untouched by the failed attempt.
+    assert.equal(git(otherSlotPath, ['rev-parse', 'HEAD']), otherHeadBefore);
+    // The conflicting directory itself is left alone too (never clobbered).
+    assert.equal(await fsp.readFile(join(conflictPath, 'stray.txt'), 'utf8'), 'not a git worktree\n');
+  } finally {
+    await other.cleanup();
+    await correct.cleanup();
   }
 });
