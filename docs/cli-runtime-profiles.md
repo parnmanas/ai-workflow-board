@@ -182,12 +182,15 @@ windows and is usually wrong for a small self-hosted backend** — combined
 with a realistic first-message input it can already exceed what's left of a
 ~65K window, turning a working chat into an immediate budget error. Set
 `safety_margin_tokens` explicitly for any backend with a `context_window`
-below a few hundred thousand tokens. A `context_window` under 128,000 also
-auto-selects AWB's compact MCP tool profile (~19 tools instead of the full
-set), which is most of what the margin needs to cover; 15,000–20,000 tokens
-is a reasonable starting point for a ~64K-token window like the example
-above — adjust from there based on observed `known_input≈`/`effective_max_output=`
-values in the agent-manager log line emitted at session spawn.
+below a few hundred thousand tokens. A `context_window` under
+`TOOL_PROFILE_COMPACT_THRESHOLD_TOKENS` (`apps/agent-manager/src/lib/runtime-profiles.ts`)
+also auto-selects AWB's compact MCP tool profile — a fixed allowlist (see
+`COMPACT_TOOL_ALLOWLIST` in `apps/server/src/modules/mcp/shared/tool-profiles.ts`)
+instead of the full tool set — which is most of what the margin needs to
+cover; 15,000–20,000 tokens is a reasonable starting point for a ~64K-token
+window like the example above — adjust from there based on observed
+`known_input≈`/`effective_max_output=` values in the agent-manager log line
+emitted at session spawn.
 
 `max_output_tokens` caps the *requested* output before the clamp runs
 (default 32,000, Claude Code's own fixed ask) — set it lower if the backend
