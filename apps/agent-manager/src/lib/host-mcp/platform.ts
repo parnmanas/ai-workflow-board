@@ -97,6 +97,10 @@ export function runCommand(cmd: string, args: string[], opts: RunOptions = {}): 
         cwd: opts.cwd,
         env: opts.inheritEnv === false ? opts.env : { ...process.env, ...(opts.env || {}) },
         stdio: ['pipe', 'pipe', 'pipe'],
+        // Agent Manager is a background service. On Windows, spawning a
+        // console executable (PowerShell, taskkill, where, ...) without this
+        // flag briefly creates a visible conhost window on the user's desktop.
+        windowsHide: hostPlatform() === 'win32',
       });
     } catch (err: any) {
       resolve({

@@ -446,6 +446,11 @@ export class BaseSessionManager {
    *  cap-accounting they do across spawned + reserved sessions stays
    *  consistent. */
   protected readonly _inflight = new Map<string, InflightReservation>();
+  /** Final spawn-side guard. Dispatch reservations normally prevent twins,
+   *  but they live above provisioning and can be reclaimed/released by
+   *  independent event paths. Keep the irreversible CLI spawn itself atomic
+   *  per session key so even a reservation bug cannot create two children. */
+  #spawningSessionKeys = new Set<string>();
   /** Per-pid plain-text stdout/stderr tail. Wired in `#wireStdio` for every
    *  session the base class spawns; subclasses read it in their
    *  `_onChildExit` hook to build silent-exit fallback messages without
@@ -580,6 +585,24 @@ export class BaseSessionManager {
   }
 
   protected async _spawnSession(
+    sessionKey: string,
+    rolePrompt: string,
+    firstTurnText: string,
+    opts: SpawnOpts = {},
+  ): Promise<SessionRecord | null> {
+    if (this.#spawningSessionKeys.has(sessionKey)) {
+      log(`${this.#logTag} spawn blocked by final session-key guard ${this.#keyField}=${sessionKey}`);
+      return null;
+    }
+    this.#spawningSessionKeys.add(sessionKey);
+    try {
+      return await this.#spawnSessionUnlocked(sessionKey, rolePrompt, firstTurnText, opts);
+    } finally {
+      this.#spawningSessionKeys.delete(sessionKey);
+    }
+  }
+
+  async #spawnSessionUnlocked(
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
