@@ -379,6 +379,27 @@ export function resolveMaxOutputTokensEnv(
   };
 }
 
+/** ticket c3b767c6 — dispatch-time capability flag this build declares on the
+ *  instance heartbeat (apps/agent-manager/src/main.ts → InstanceHeartbeat).
+ *  Mirrors apps/server/src/common/manager-capability-gate.ts's copy of the
+ *  same string literal; keep both in sync if this is ever renamed.
+ *
+ *  Why this exists: a separate host's stale agent-manager build (one that
+ *  predates resolveMaxOutputTokensEnv() above) silently ignores
+ *  context_window/safety_margin_tokens and requests the CLI's fixed default
+ *  output budget regardless of what the profile says — reproducing ticket
+ *  1af53029's incident (multi-minute hang, then an opaque backend 5xx) with
+ *  no signal the central server could see to tell an old manager apart from
+ *  a healthy one. Declaring this flag lets the server refuse to dispatch a
+ *  context_window-bearing profile to a manager that never reports it,
+ *  instead of spawning a session doomed to hang. */
+export const MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP = 'context_window_clamp';
+/** Every dispatch-capability flag this build supports — shipped verbatim as
+ *  `manager_capabilities` on every heartbeat (instance-heartbeat.ts). Add new
+ *  flags here as future dispatch-gated features land; never remove one this
+ *  build still honors, since the server treats absence as "unsupported". */
+export const MANAGER_CAPABILITIES: readonly string[] = [MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP];
+
 /** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진
  *  Claude backend profile 은 MCP 세션을 'compact' tool profile 로 옵트인해,
  *  AWB 서버가 ~205개 전체 대신 allowlist ~19개 tool만 등록하게 한다(서버측

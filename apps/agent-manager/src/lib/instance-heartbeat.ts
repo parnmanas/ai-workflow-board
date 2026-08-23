@@ -35,6 +35,15 @@ export interface InstanceMeta {
   // deprecated cli_adapters projection, this distinguishes missing, unhealthy,
   // and healthy runtimes and includes the harness capability contract.
   runtimeCapabilities?: RuntimeCapabilityReport | null;
+  // ticket c3b767c6 — flat list of dispatch-gated feature flags this BUILD
+  // supports (e.g. runtime-profiles.ts MANAGER_CAPABILITIES), unrelated to
+  // per-CLI-runtime health above: this describes what the manager binary
+  // itself implements regardless of which CLI a given session uses. The
+  // server refuses to dispatch a profile that needs a flag this manager
+  // never reports, instead of spawning a session an old build would
+  // mishandle silently. Optional so callers that don't pass one still
+  // construct a valid heartbeat (an empty list, same as omitting it).
+  managerCapabilities?: string[] | null;
   // Per-CLI model enumeration captured once at boot (cliType → model ids),
   // via each adapter's listModels(). Shipped verbatim on every heartbeat as
   // `available_models` so AWB can populate a per-agent model selector from the
@@ -179,6 +188,13 @@ export interface InstanceHeartbeatPayload {
   cli: string;
   cli_adapters: string[];
   runtime_capabilities?: RuntimeCapabilityReport;
+  // ticket c3b767c6 — dispatch-gated feature flags this build supports (see
+  // InstanceMeta.managerCapabilities doc comment above). Omitted (rather than
+  // sent as []) when empty so an old AWB server's whole-record replace on
+  // upsert doesn't matter either way, and so the field's mere presence never
+  // implies "this build knows about capability reporting" when it actually
+  // has nothing to declare.
+  manager_capabilities?: string[];
   pid: number;
   started_at: string;
   // cliType → model ids each installed CLI accepts. Gathered once at boot.
@@ -259,6 +275,9 @@ export class InstanceHeartbeat {
       meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
         ? meta.runtimeCapabilities
         : null;
+    const managerCapabilities = Array.isArray(meta?.managerCapabilities)
+      ? meta.managerCapabilities.map((s) => String(s)).filter(Boolean)
+      : [];
     const updateChecker = meta?.updateChecker ?? null;
     const credentialMetaProvider = meta?.agentCredentialMetaProvider ?? null;
     const worktreeStatusProvider = meta?.worktreeStatusProvider ?? null;
@@ -358,6 +377,7 @@ export class InstanceHeartbeat {
         cli: String(meta?.cli || 'claude'),
         cli_adapters: cliAdapters,
         ...(runtimeCapabilities ? { runtime_capabilities: runtimeCapabilities } : {}),
+        ...(managerCapabilities.length ? { manager_capabilities: managerCapabilities } : {}),
         pid: process.pid,
         started_at: this.#startedAt,
         // Only include the managed-agent fields when the snapshot is wired

@@ -58,7 +58,7 @@ import {
 } from './lib/managed-agent-store.js';
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
-import { shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
+import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
   setRestOutbox,
@@ -1000,6 +1000,10 @@ async function runRuntime(
         .filter(([, status]) => status.installed && status.healthy)
         .map(([runtimeId]) => runtimeId),
       runtimeCapabilities,
+      // ticket c3b767c6 — declares this build's dispatch-gated feature set
+      // (currently just context_window_clamp) so the server can refuse to
+      // dispatch a profile whose clamp an old manager would silently ignore.
+      managerCapabilities: MANAGER_CAPABILITIES as string[],
       // Per-CLI model lists gathered just above (cliType → model ids).
       availableModels,
       // ST-5b — pass the registry as a snapshot source so each heartbeat
