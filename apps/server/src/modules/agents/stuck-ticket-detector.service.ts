@@ -49,6 +49,7 @@ import { Ticket } from '../../entities/Ticket';
 import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Workspace } from '../../entities/Workspace';
+import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { LogService } from '../../services/log.service';
@@ -865,35 +866,70 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // across every role, not just the ones this column actually routes to.
     // That misattributes the cause as "an agent IS assigned, check the agent"
     // when the real problem is the CURRENT column's seat, not the agent.
-    const haltedPolicyVacantSlugs = stalled ? await this._haltedPolicyVacantSlugs(ticket.id) : [];
+    const haltedPolicyVacantSlugs = stalled ? await this._haltedPolicyVacantSlugs(ticket) : [];
     return { stalled, ageMs, hasAgentHolder, everDispatched, haltedPolicyVacantSlugs };
   }
 
   /**
-   * Read the current stall's halt-policy cause straight off the audit trail
+   * Read the current stall's halt-policy cause off the audit trail
    * TriggerLoopService._flagPolicyHalt already writes (ticket 1e002acb),
-   * rather than re-deriving role_routing/holder resolution a second time here
-   * and risking the two judgments drifting apart. Only trusts the LATEST
+   * rather than re-deriving role_routing/holder resolution from scratch and
+   * risking the two judgments drifting apart. Only trusts the LATEST
    * `auto_advance_halted_policy` row when it landed AT OR AFTER this ticket's
    * most recent column-move — an older row describes a halt on a column the
-   * ticket has since left (and possibly re-entered, resetting the vacancy),
-   * not the current stall. Returns `[]` when there is no such row, or the
-   * ticket has moved on since — the caller reads that as "not a halt-policy
-   * stall."
+   * ticket has since left (and possibly re-entered, resetting the vacancy).
+   *
+   * The audit row is still just a POINT-IN-TIME record (reviewer round 1,
+   * ticket 1e002acb): an operator can staff the routed role after the halt
+   * without the ticket making a fresh column-move, which is the only thing
+   * that invalidates the row above. So the row's `role` column is a
+   * CANDIDATE, not the verdict — this cross-checks it against the column's
+   * CURRENT `role_routing` and the ticket's CURRENT `TicketRoleAssignment`
+   * state, and returns only the intersection: slugs the row named AND that
+   * are still actually vacant right now. Returns `[]` when there is no
+   * (still-relevant) row, or every slug it named has since been staffed —
+   * the caller reads either as "not a halt-policy stall."
    */
-  private async _haltedPolicyVacantSlugs(ticketId: string): Promise<string[]> {
+  private async _haltedPolicyVacantSlugs(ticket: Ticket): Promise<string[]> {
     const [row, latestMoveMs] = await Promise.all([
       this.dataSource.getRepository(ActivityLog).findOne({
-        where: { ticket_id: ticketId, action: 'auto_advance_halted_policy' },
+        where: { ticket_id: ticket.id, action: 'auto_advance_halted_policy' },
         order: { created_at: 'DESC' },
         select: ['id', 'created_at', 'role'],
       }),
-      this._latestColumnMoveAtMs(ticketId),
+      this._latestColumnMoveAtMs(ticket.id),
     ]);
     if (!row) return [];
     const atMs = new Date(row.created_at).getTime();
     if (!Number.isFinite(atMs) || atMs < latestMoveMs) return [];
-    return (row.role || '').split(',').map(s => s.trim()).filter(Boolean);
+    const auditedSlugs = (row.role || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (auditedSlugs.length === 0 || !ticket.column_id) return [];
+
+    const column = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    if (!column) return [];
+    let routedSlugs: string[] = [];
+    try {
+      const parsed = JSON.parse((column as any).role_routing || '[]');
+      if (Array.isArray(parsed)) routedSlugs = parsed.filter((s): s is string => typeof s === 'string');
+    } catch {
+      // malformed role_routing reads as no routed slugs — nothing to report.
+    }
+
+    const stillVacant: string[] = [];
+    for (const slug of auditedSlugs) {
+      if (!routedSlugs.includes(slug)) continue; // config drift since the halt — no longer even routed here
+      const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
+        where: { workspace_id: ticket.workspace_id, slug },
+      });
+      if (!role) continue;
+      const count = await this.dataSource.getRepository(TicketRoleAssignment)
+        .createQueryBuilder('a')
+        .where('a.ticket_id = :tid AND a.role_id = :rid', { tid: ticket.id, rid: role.id })
+        .andWhere("a.agent_id IS NOT NULL AND a.agent_id != ''")
+        .getCount();
+      if (count === 0) stillVacant.push(slug);
+    }
+    return stillVacant;
   }
 
   private async _dispatchEpoch(

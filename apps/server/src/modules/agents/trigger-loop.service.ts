@@ -473,20 +473,32 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       // (no sweep will ever revisit an edge-triggered halt, so there is no
       // "wait and retry" option the way intake's 30min-gated version has).
       const vacantSlugs = resolved.filter((r) => r.targetAgentIds.length === 0).map((r) => r.slug);
-      const backfilledSlugs = await this._backfillHaltedColumnRoles(ticket, col, vacantSlugs);
-      if (backfilledSlugs.length === 0) {
-        await this._flagPolicyHalt(ticket, col, col, vacantSlugs);
+      await this._backfillHaltedColumnRoles(ticket, col, vacantSlugs);
+      // Re-resolve EVERY originally-vacant slug from fresh DB state rather
+      // than trusting the backfill call's own return value (reviewer round 1,
+      // ticket 1e002acb): `applyBoardDefaults` only writes a slug that is
+      // STILL vacant at the moment IT runs, so a concurrent write — another
+      // in-flight `_handleActivity` for this same ticket, a human assigning
+      // the role by hand — that lands first makes this backfill attempt
+      // report "not applied" for that slug even though the seat is no longer
+      // empty. Re-resolving is the only way to tell "backfill genuinely found
+      // nothing to fill" apart from "something else filled it first" — both
+      // look identical from the backfill's own return value, but only the
+      // first one is a real halt.
+      const stillVacantSlugs: string[] = [];
+      for (const r of resolved) {
+        if (!vacantSlugs.includes(r.slug)) continue;
+        const holders = await this._resolveRoleHolders(ticket, r.slug);
+        r.targetAgentIds = holders ? holders.agentIds : [];
+        if (r.targetAgentIds.length === 0) stillVacantSlugs.push(r.slug);
+      }
+      if (stillVacantSlugs.length > 0) {
+        await this._flagPolicyHalt(ticket, col, col, stillVacantSlugs);
         return;
       }
-      // At least one routed slug just got a board-default holder — re-resolve
-      // it and fall through (no return) to the per-role dispatch loop below
-      // instead of halting.
-      for (const r of resolved) {
-        if (backfilledSlugs.includes(r.slug)) {
-          const holders = await this._resolveRoleHolders(ticket, r.slug);
-          if (holders) r.targetAgentIds = holders.agentIds;
-        }
-      }
+      // Every originally-vacant routed slug now has a holder (via this
+      // backfill or a concurrent write) — fall through (no return) to the
+      // per-role dispatch loop below instead of halting.
     }
 
     // 다중담당자 T2 fan-out (#1 / #2 / #6). Emit to EVERY holder of each routed
@@ -834,18 +846,22 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * only chance to recover before `_flagPolicyHalt` leaves it silent. Reuses
    * `TicketRoleAssignmentService.backfillVacantRoleFromBoardDefaults` (the
    * same never-overwrite / invalid-holder-filtering core the intake path
-   * uses) per vacant slug. Returns the slugs that actually got filled — a
-   * slug with no board default, or one a concurrent write already filled, is
-   * silently absent from the result (never retried, never spammed).
+   * uses) per vacant slug — writes its own `halt_policy_role_backfilled`
+   * audit row for whatever it applied, but is otherwise fire-and-forget: the
+   * caller does NOT use this method's outcome to decide halt vs. dispatch
+   * (reviewer round 1, ticket 1e002acb) — it always re-resolves every
+   * originally-vacant slug from fresh DB state afterward, since a slug this
+   * call reports as "not applied" (no board default, OR a concurrent write
+   * already won the race) can still be non-vacant by the time that happens.
    */
   private async _backfillHaltedColumnRoles(
     ticket: Ticket,
     col: BoardColumn,
     vacantSlugs: string[],
-  ): Promise<string[]> {
-    if (vacantSlugs.length === 0) return [];
+  ): Promise<void> {
+    if (vacantSlugs.length === 0) return;
     const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-    if (!board) return [];
+    if (!board) return;
     const filled: string[] = [];
     for (const slug of vacantSlugs) {
       try {
@@ -882,7 +898,6 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
         ticket_id: ticket.id, column_id: col.id, slugs: filled,
       });
     }
-    return filled;
   }
 
   /**
