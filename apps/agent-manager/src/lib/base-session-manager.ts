@@ -702,11 +702,16 @@ export class BaseSessionManager {
           ),
         );
         const est = maxOutputResolution.estimate;
+        // 티켓 1af53029 — context_window 미설정은 이전까지 이 로그 라인에서
+        // 완전히 무음이었다(budgetLog가 빈 문자열). 원래 사고(7d8ea7c9)가 바로
+        // 이 상태에서 174초 뒤 vLLM 500으로 터졌으므로, clamp 가 꺼져 있다는
+        // 사실 자체를 운영자가 로그에서 바로 볼 수 있어야 한다.
         const budgetLog = maxOutputResolution.effectiveMaxOutputTokens !== null
           ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
             `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
             `safety_margin=${maxOutputResolution.safetyMarginTokens} effective_max_output=${maxOutputResolution.effectiveMaxOutputTokens}`
-          : '';
+          : ' context_window not set — no CLAUDE_CODE_MAX_OUTPUT_TOKENS clamp applied; ' +
+            'a large first turn can silently exceed the backend context window and fail after a long timeout';
         log(
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );

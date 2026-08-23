@@ -142,6 +142,58 @@ as CLI-recognized aliases. A fallback-eligible death on a profile-bound
 session is treated as an ordinary single failure instead of retrying with a
 different `--model`.
 
+## Context window and output budget
+
+Custom backends (a self-hosted vLLM server, for example) usually have a much
+smaller context window than Anthropic's cloud tiers. Claude Code CLI does not
+know this on its own — without help it requests its own fixed default output
+budget regardless of the backend's real limit, so a large first turn can push
+`input + max_tokens` past the backend's context window. The backend then
+rejects the request only after Claude Code has waited out its own retry
+budget, so the failure surfaces as a multi-minute hang followed by an opaque
+5xx instead of a fast, clear error.
+
+Set `context_window` to the backend's real limit (a vLLM server reports this
+as `max_model_len`) to opt in to a per-turn clamp:
+
+```json
+{
+  "id": "vllm-qwen3-coder",
+  "kind": "claude-backend",
+  "protocol": "anthropic-compatible",
+  "base_url": "http://gpu-host:8000",
+  "model": "qwen3-coder-next",
+  "context_window": 65536,
+  "safety_margin_tokens": 20000
+}
+```
+
+With `context_window` set, every session spawn estimates the known input
+(role prompt + harness system-prompt append + first turn text) and injects
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS` so `known_input + safety_margin_tokens +
+output` stays within `context_window`. If the resulting budget would leave
+less than a minimal, useful output allowance, the spawn fails immediately
+with a clear error instead of reaching the backend at all.
+
+`safety_margin_tokens` reserves room for everything the clamp cannot see at
+spawn time — Claude Code's own base system prompt, session metadata, and the
+AWB MCP tool schema. **The default (40,000) is sized for large cloud context
+windows and is usually wrong for a small self-hosted backend** — combined
+with a realistic first-message input it can already exceed what's left of a
+~65K window, turning a working chat into an immediate budget error. Set
+`safety_margin_tokens` explicitly for any backend with a `context_window`
+below a few hundred thousand tokens. A `context_window` under 128,000 also
+auto-selects AWB's compact MCP tool profile (~19 tools instead of the full
+set), which is most of what the margin needs to cover; 15,000–20,000 tokens
+is a reasonable starting point for a ~64K-token window like the example
+above — adjust from there based on observed `known_input≈`/`effective_max_output=`
+values in the agent-manager log line emitted at session spawn.
+
+`max_output_tokens` caps the *requested* output before the clamp runs
+(default 32,000, Claude Code's own fixed ask) — set it lower if the backend
+should never be asked for more than a known amount regardless of how much
+budget is left.
+
 ## Claude wrapper and public configuration
 
 `claude_executable` optionally selects Claude CLI or a Claude-compatible

@@ -671,11 +671,14 @@ export class SubagentManager implements SubagentManagerContract {
           runtimeCredentialEnv(claudeRuntimeProfile, ctx?.credential_id, ctx?.extra_env),
         );
         const est = maxOutputResolution.estimate;
+        // 티켓 1af53029 — context_window 미설정 상태의 무음 로그를
+        // base-session-manager.ts 와 동일하게 명시적 경고로 바꾼다.
         const budgetLog = maxOutputResolution.effectiveMaxOutputTokens !== null
           ? ` context_window=${claudeRuntimeProfile.context_window} known_input≈${est.known_total}` +
             `(role=${est.role_prompt} append=${est.harness_append} first_turn=${est.first_turn}) ` +
             `safety_margin=${maxOutputResolution.safetyMarginTokens} effective_max_output=${maxOutputResolution.effectiveMaxOutputTokens}`
-          : '';
+          : ' context_window not set — no CLAUDE_CODE_MAX_OUTPUT_TOKENS clamp applied; ' +
+            'a large first turn can silently exceed the backend context window and fail after a long timeout';
         log(
           `[subagent] Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
