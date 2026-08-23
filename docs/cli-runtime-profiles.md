@@ -110,13 +110,29 @@ aliases — `model_alias` if set, otherwise `sonnet`:
 ```
 
 The alias only has to be something the CLI accepts — it does not change which
-backend model actually serves the request. Every aux-model environment
-variable Claude Code consults (`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`,
-`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
-`ANTHROPIC_DEFAULT_HAIKU_MODEL`) defaults to `model`, so regardless of which
-alias tier `--model` claims to be, every request — main turn or internal aux
-call — still routes to the one configured backend model. Set `env` to override
-any of those variables individually (e.g. a genuinely multi-model backend).
+backend model actually serves the request, but the environment variables that
+carry it split into two roles:
+
+- **Selection** (`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`) — Claude
+  Code's internal helper calls (session-title generation and similar) read
+  these directly, bypassing `--model` argv entirely. They default to the same
+  alias as `--model`, never to `model`. A raw provider id here reproduces the
+  exact `unrecognized_model` failure this section exists to prevent, even
+  when `--model` itself is already alias-safe — only fixing `--model` and
+  leaving these two on the raw id is the round-1 regression that reopened
+  this ticket.
+- **Override** (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`) — the CLI's official mechanism for mapping
+  a resolved tier alias to the model actually requested. These default to
+  `model`, so regardless of which alias tier gets selected (via `--model`,
+  `ANTHROPIC_MODEL`, or `ANTHROPIC_SMALL_FAST_MODEL`), every request — main
+  turn or internal aux call — still routes to the one configured backend
+  model. There is no `ANTHROPIC_DEFAULT_FABLE_MODEL` (the CLI has no such
+  variable), so a `model_alias: "fable"` profile is not covered by this
+  override.
+
+Set `env` to override any of those variables individually (e.g. a genuinely
+multi-model backend).
 
 A board's harness `fallback_models` (a model-retry chain for transient
 usage-limit / model-unavailable deaths) is ignored while a profile is bound:

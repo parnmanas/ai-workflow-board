@@ -66,14 +66,17 @@ export interface RuntimeProfileSpec {
   base_url: string;
   model: string;
   /** Claude Code CLI가 `--model`/내부 보조 요청(세션 제목 생성 등)에서
-   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 백엔드로 실제
-   *  나가는 모델은 항상 `model`(위) — RuntimeLease.claudeEnv() 가
-   *  ANTHROPIC_DEFAULT_*_MODEL/ANTHROPIC_MODEL 네 tier 전부를 profile.model
-   *  로 덮어쓰므로 alias 선택은 백엔드 라우팅에 영향 없다. 생략 시
-   *  DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts) — ticket
-   *  41dc37cb: raw provider model id를 `--model`에 직접 넘기면 CLI가
-   *  `unrecognized_model`로 거부한다(특히 generate_session_title 등 보조
-   *  요청). */
+   *  스스로 인식하는 alias 중 이 profile 이 사칭할 tier. 이 alias는
+   *  `--model`뿐 아니라 RuntimeLease.claudeEnv()의 ANTHROPIC_MODEL/
+   *  ANTHROPIC_SMALL_FAST_MODEL(내부 보조 요청이 직접 읽는 모델 선택
+   *  변수)에도 그대로 실린다 — raw provider model id를 이 두 변수에
+   *  넣으면 CLI가 `unrecognized_model`로 거부한다(특히
+   *  generate_session_title 등 보조 요청; round 1이 `--model`만 고치고
+   *  이 두 env는 그대로 둬서 운영에서 재발, ticket 41dc37cb). 백엔드로
+   *  실제 나가는 모델은 항상 `model`(위) — claudeEnv()의
+   *  ANTHROPIC_DEFAULT_*_MODEL 오버라이드가 어떤 alias가 선택되든 그
+   *  값으로 매핑하므로, alias 자체의 선택은 백엔드 라우팅에 영향 없다.
+   *  생략 시 DEFAULT_CLAUDE_MODEL_ALIAS('sonnet', runtime-profiles.ts). */
   model_alias?: 'opus' | 'sonnet' | 'haiku' | 'fable';
   claude_executable?: string;
   cwd?: string;
