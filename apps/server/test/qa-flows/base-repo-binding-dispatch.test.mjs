@@ -18,17 +18,17 @@
 //   3. A ticket that declares an UNRESOLVABLE base repo (deleted Resource) on an
 //      assignee/active dispatch is likewise pended — no agent_trigger — rather
 //      than dispatched into a worktree it can't push from. Fail closed.
-//   4. (ticket b5c1c080) A GLOBAL (workspace_id=null, admin-shared) Resource
-//      resolves at dispatch time exactly like a workspace-scoped one, whether
-//      it's the ticket's own base_repo_resource_id or reachable only through
-//      the board's environment_config. Before this ticket, trigger-loop's three
-//      Resource lookups filtered by an EXACT-match workspace_id in the DB
-//      where-clause, which can never match a NULL column — a global repo
-//      silently vanished at dispatch time (base_repo AND environment_config
-//      both empty, wrongly pended as "no repo") even though every other reader
-//      (get_ticket/loadTicketFull, the resources REST API, ci-wait-resume)
-//      already used the permissive id-only-fetch + application-code check and
-//      resolved it fine.
+//   4. (ticket b5c1c080) GLOBAL(workspace_id=null, admin 공유) Resource도
+//      workspace-scoped Resource와 동일하게 dispatch 시점에 resolve되어야
+//      한다 — 티켓 자신의 base_repo_resource_id로 설정된 경우든, board의
+//      environment_config를 통해서만 참조되는 경우든 마찬가지다. 이 티켓
+//      이전에는 trigger-loop의 세 Resource 조회가 DB where절에 EXACT-match
+//      workspace_id 필터를 걸어서, NULL 컬럼과는 절대 매치되지 않아 global
+//      repo가 dispatch 시점에 조용히 사라졌다(base_repo와 environment_config
+//      둘 다 비어 "repo 없음"으로 오탐 pend) — get_ticket/loadTicketFull,
+//      resources REST API, ci-wait-resume 등 나머지 모든 reader는 이미
+//      permissive한 id-only-fetch + 애플리케이션 코드 체크 패턴을 써서 정상
+//      resolve하고 있었는데도 그랬다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -222,12 +222,12 @@ test('base repo binding: env backfill reaches the wire; repo-less + unresolvable
     'the explanatory "dispatch blocked, pend for a human" comment is skipped too — there is no park to explain',
   );
 
-  // ── Scenario 5: a GLOBAL Resource as the ticket's OWN base_repo_resource_id
-  // (ticket b5c1c080). Before this ticket, trigger-loop.service.ts resolved a
-  // ticket's own base repo with `where: { id, workspace_id }` — an exact-match
-  // filter that can never match a Resource row whose workspace_id is NULL — so
-  // a global (admin-shared) repo silently failed to resolve at dispatch time
-  // even though loadTicketFull already showed it fine via get_ticket/REST.
+  // ── Scenario 5: 티켓 자신의 base_repo_resource_id가 GLOBAL Resource인 경우
+  // (ticket b5c1c080). 이 티켓 이전에는 trigger-loop.service.ts가 티켓 자신의
+  // base repo를 `where: { id, workspace_id }`로 resolve했다 — workspace_id가
+  // NULL인 Resource row와는 절대 매치되지 않는 정확일치 필터라, loadTicketFull은
+  // get_ticket/REST로 정상 표시하는데도 실제 dispatch 시점엔 global(admin 공유)
+  // repo가 조용히 resolve 실패했다.
   step('Scenario 5: ticket\'s own base_repo_resource_id points at a GLOBAL Resource — must resolve, not pend');
   const globalResource = await ds.getRepository('Resource').save(
     ds.getRepository('Resource').create({
@@ -254,12 +254,12 @@ test('base repo binding: env backfill reaches the wire; repo-less + unresolvable
   const t5Fresh = await ds.getRepository('Ticket').findOne({ where: { id: t5.id } });
   assert.equal(!!t5Fresh.pending_user_action, false, 'a resolvable global base repo must NOT pend the ticket');
 
-  // ── Scenario 6: a GLOBAL Resource reachable ONLY via the board's
-  // environment_config (the ticket carries no base_repo_resource_id of its
-  // own) — ticket b5c1c080's other two originally-cited call sites: the
-  // env-repo list resolve (feeds environment_config.repositories) and the
-  // goal-1 base_repo backfill (feeds base_repo) must BOTH resolve the global
-  // Resource, not just one of them.
+  // ── Scenario 6: board의 environment_config를 통해서만 참조되는 GLOBAL
+  // Resource인 경우(티켓 자신은 base_repo_resource_id가 없음) — ticket
+  // b5c1c080이 원래 지목한 나머지 두 지점, 즉 env-repo 목록 resolve
+  // (environment_config.repositories로 이어짐)와 goal-1 base_repo 백필
+  // (base_repo로 이어짐) 둘 다 이 global Resource를 resolve해야 하며,
+  // 한쪽만 되어서는 안 된다.
   step('Scenario 6: board environment_config references ONLY a GLOBAL Resource — env repos + base_repo backfill must both resolve');
   await ds.getRepository('Board').update(board.id, {
     environment_config: JSON.stringify({ repositories: [{ resource_id: globalResource.id }] }),
