@@ -1443,3 +1443,199 @@ UI 문자열 2개는 자동 업데이트가 **실제로 실행하는 명령**을
   아니라 일관성이 없다. 다만 다이제스트로 고정하면 **OS 패키지 보안 패치가 멈추는**
   반대 방향 위험이 생기므로, 자동 범프 수단(Dependabot 등) 없이 단독으로 고정하는
   건 순 손해다. 둘을 같이 도입할지는 운영자 판단 사항이라 조치하지 않고 기록만 한다.
+
+---
+
+## 재검증 로그 — 2026-08-24 (`main` @ `0b675988`)
+
+### 결론
+
+의존성 자체는 또 깨끗했다 — `main`, 배포 브랜치, 발행 트리(live/next) 전부 0건.
+
+이번 발견은 **어제의 판단을 다른 라이브 호스트에 적용하지 않았다**는 것이다.
+2026-08-23 감사는 "`npm i -g` 는 서드파티 install script 를 실행한다 → 매니저
+호스트에서 임의 코드가 돈다" 를 세우고 self-update 경로에 `--ignore-scripts` 를
+붙였다. 그런데 이 시스템에는 라이브 호스트가 **둘**이다:
+
+| 라이브 호스트 | 설치 경로 | install script 실행 | 2026-08-23 이전 | 2026-08-24 이전 |
+| --- | --- | --- | --- | --- |
+| agent-manager 호스트 | `npm i -g awb-agent-manager` | 매니저 권한 | 열려 있었음 | **닫힘** |
+| **NAS 서버 이미지** | `Dockerfile` 의 `npm ci` | **root, 배포 레이어 안** | 열려 있었음 | **열려 있었음** |
+
+즉 어제 닫은 것은 두 구멍 중 하나였고, 남은 쪽이 권한 면에서는 더 나빴다.
+
+### 1. 정기 점검 (모두 통과, 변동 없음)
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (main) | **0 vulnerabilities** (prod 276 / dev 307 / opt 85, total 606) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| 카나리아 (`lodash@4.17.15` + `minimist@1.2.0`) | 1 critical + 1 high 검출 — 어드바이저리 경로 살아있음 확인 |
+| lockfile 위생 | 606 엔트리(root 제외), 비-registry resolved **0**, 평문 http **0**, integrity 누락 **0** (누락으로 잡힌 3건은 `apps/*` 워크스페이스 자신) |
+| root `overrides` 실효성 | 4건 전부 실제로 적용됨 — `multer@2.2.0`, `@hono/node-server@2.1.0`, `js-yaml@5.2.3`, `picomatch@4.0.5` |
+| install script (lockfile 축) | 3건 (`esbuild`/`fsevents`/`@scarf/scarf`) 전부 allowlist 내 |
+| 액션 SHA 고정 | `uses:` 14건 전부 커밋 SHA |
+| 발행 트리 감사 (live/next) | 93 / 92 패키지, moderate 이상 **0건**, install script **0개** |
+| `production.private` | `package.json`/`package-lock.json`/`Dockerfile`/`turbo.json`/워크스페이스 매니페스트 3종 **전부 바이트 동일** — 의존성 드리프트 없음 |
+| 기존 가드 | supply-chain 16/16(조치 후 19/19), ci-branch-coverage 6/6, cron-coverage 6/6, published-deps 16/16 |
+
+**배포 브랜치 드리프트 실측** — `origin/main` ↔ `origin/production.private` 는 13개
+파일이 갈려 있는데(`deploy.yml` + 아직 머지되지 않은 agent-manager 소스 12개)
+**의존성 축은 전혀 갈리지 않는다**. 위 7개 파일 전부 `git diff --quiet` 통과.
+
+**발행 트리 드리프트** — 어제 11건, 오늘도 **11건**으로 같다(`@hono/node-server`
+2.1.0→2.1.1, `ajv` 8.18.0→8.20.0, `content-type` 2.0.0→2.1.0, `eventsource-parser`
+3.1.0→3.1.1, `fast-uri` 3.1.5→3.1.6, `hono` 4.13.0→4.13.3, `ip-address`
+10.4.0→10.5.0, `jose` 6.2.8→6.2.10, `negotiator` 1.0.0→1.1.0, `smol-toml`
+1.7.1→1.8.0, `type-is` 1.6.18→2.1.0). 여전히 lockfile 이 가리키지 않는 버전들이고,
+여전히 전부 깨끗하다.
+
+**메이저 뒤처짐** — 변동 없음(아래 이월 참조). 직접 의존성 46개 중 19개가 registry
+최신과 정확히 일치하고, 나머지는 전부 semver 범위 안의 마이너/패치 뒤처짐이거나
+이월된 기능 메이저다. advisory 가 붙은 것은 없다.
+
+### 2. 발견 — 배포 이미지가 서드파티 install script 를 root 로 실행하고 있었다
+
+`Dockerfile` 의 설치 두 곳 모두 플래그 없이 `npm ci` 를 돌린다 — npm 기본값은
+**lifecycle script 실행**이다.
+
+```
+Stage 1 (deps)   : RUN npm ci                                  ← builder 로 복사돼 산출물을 만든다
+Stage 3 (runner) : RUN npm ci --omit=dev --workspace=server    ← 실제로 배포되는 레이어
+```
+
+두 스테이지 모두 `USER node` 이전이라 **root** 로 돈다. 특히 stage 3 은 NAS 에
+pull 돼 계속 떠 있는 바로 그 레이어이므로, 여기서 도는 postinstall 은 최종
+이미지에 무엇이든 영구히 남길 수 있다.
+
+**실측 — 이건 이론이 아니라 지금 실제로 돌고 있었다.** stage 3 의 트리(247 패키지)를
+로컬에서 그대로 재현해 lockfile 의 `hasInstallScript` 집합과 교차시키면:
+
+| 스테이지 | 패키지 수 | install script 를 도는 패키지 |
+| --- | --- | --- |
+| stage 1 (전체 dev 포함) | 527 | `esbuild`, `@scarf/scarf` (`fsevents` 는 macOS 전용이라 리눅스 미설치) |
+| **stage 3 (배포 레이어)** | 247 | **`@scarf/scarf`** |
+
+`@scarf/scarf@1.4.0` 은 `swagger-ui-dist` 의 **비-optional** 의존성이라
+(`@nestjs/swagger` 경유) `--omit=dev` 로도 빠지지 않고 prod 트리에 남는다. 그
+`postinstall` 은 `node ./report.js` 이고, 내용은 `child_process.exec` + `scarf.sh`
+로의 HTTPS 전송이다.
+
+루트 `package.json` 의 `scarfSettings: { enabled: false }` 가 이미 있지만 이것은
+**그 스크립트 자신이 읽는 옵트아웃**이다 — 실행을 넘겨준 뒤에 상대의 선의에 기대는
+방어이고, 패키지가 탈취되면 제일 먼저 무시될 값이다.
+
+**기존 가드가 왜 이걸 못 봤는가.** `scripts/audit-install-scripts.mjs` 의 허용목록은
+"어떤 패키지가 install script 를 갖는가" 만 판정한다. 그런데 같은 스크립트라도 도는
+자리에 따라 결과가 다르다:
+
+| 도는 자리 | 권한 | 지속성 | 시크릿 |
+| --- | --- | --- | --- |
+| CI 러너 | 러너 사용자 | 잡 끝나면 소멸 | 없음 (`contents: read`) |
+| **배포 이미지 빌드** | **root** | **최종 레이어에 영구** | 이미지가 곧 배포물 |
+
+허용목록은 전자를 위한 승인이다. `esbuild` 의 postinstall 이 빌드 체인에 필요하다는
+사실은 배포 이미지 안에서 서드파티 코드가 root 로 도는 것을 승인한 적이 없다.
+그래서 허용목록은 초록인데 배포 레이어는 열려 있었다.
+
+### 3. 조치 — `Dockerfile` 두 설치에 `--ignore-scripts`
+
+```
+RUN npm ci --ignore-scripts
+RUN npm ci --omit=dev --workspace=server --ignore-scripts
+```
+
+**잃는 것이 없음을 전수로 확인했다.** lockfile 축 가드가 install-script 집합이 정확히
+3개(`esbuild`/`fsevents`/`@scarf/scarf`)임을 이미 강제하고 있으므로 열거가 완전하다:
+
+- **`esbuild`** — 바이너리는 postinstall 다운로드가 아니라 플랫폼
+  optionalDependency(`@esbuild/linux-x64`, lockfile 에 26개 플랫폼 전부 존재)로 온다.
+  격리 디렉터리에 `--ignore-scripts` 로 설치해 `esbuild.transform()` / CLI `--bundle`
+  양쪽 정상 동작 확인.
+- **`fsevents`** — macOS 전용 optional. 리눅스 이미지엔 애초에 설치되지 않는다.
+- **`@scarf/scarf`** — 순수 텔레메트리. 실행할 이유가 없다(이번 조치의 대상 그 자체).
+
+**엔드투엔드 실측** (Docker 데몬을 쓸 수 없는 환경이라 동일 명령을 로컬에서 그대로 재현):
+
+- `git archive HEAD` 로 뽑은 깨끗한 트리에 `npm ci --ignore-scripts` → 527 패키지 설치,
+  `npx turbo run build` **3/3 스테이지 성공** (server `nest build` / client `vite build` /
+  agent-manager `tsc`). 즉 stage 1+2 경로가 그대로 동작한다.
+- stage 3 레이아웃(루트 `package.json` + lockfile + `apps/server/package.json` 만 존재)을
+  재현해 `npm ci --omit=dev --workspace=server --ignore-scripts` → 247 패키지 설치,
+  네이티브 모듈 `@ast-grep/napi` · `@node-rs/xxhash` · `sql.js` 전부 정상 로드.
+- 그 트리에 위에서 빌드한 `apps/server/dist` 를 얹어 **실제로 서버를 부팅** →
+  전 마이그레이션 통과 후 `Nest application successfully started`, HTTP 리스닝 확인.
+
+**CI 의 `npm ci` 는 의도적으로 건드리지 않았다.** ci.yml 의 `npm ci` 8곳은
+2026-08-12 감사가 "신뢰할 수 없는 코드가 러너에서 돈다" 를 인지한 상태에서
+`contents: read` + 시크릿 미참조 + 허용목록이라는 보상 통제를 붙여 **명시적으로
+받아들인** 결정이다. 이번 발견은 그 결정이 배포 레이어까지 자동으로 확장된 적이
+없다는 것이고, 조치 범위도 거기까지다. (CI 도 같은 열거로 안전하다는 것은 위 실측이
+보여주지만, 허용목록이 실제로 행사되는 자리를 한 곳은 남겨 두는 편이 그 허용목록을
+죽은 설정으로 만들지 않는다.)
+
+### 4. 가드 (기계 강제)
+
+**(a) `scripts/audit-install-scripts.mjs` 에 두 번째 축 추가** — 기존 lockfile 축은
+그대로 두고, `Dockerfile` 의 모든 **로컬** npm 설치가 `--ignore-scripts` 를 쓰는지
+판정한다(`npm install -g <tool>` 같은 전역 설치는 lockfile 트리와 무관하므로 제외 —
+그쪽 방어는 self-update + supply-chain 가드 담당). 이 스크립트는 ci.yml 의
+`dependency-audit` 잡에서 push/PR/cron 전부에 대해 이미 돌고 있고,
+`production.private` push 에서도 그 브랜치 체크아웃 기준으로 돈다.
+
+**fail-closed** — 설치 줄을 한 줄도 못 찾으면 "검사 대상 0개" 로 조용히 통과하는 대신
+실패시킨다. 파서가 깨졌든 설치 방식이 바뀌었든, 어느 쪽도 침묵할 이유가 없다.
+
+리팩터 하나를 같이 했다: lockfile 축 검사가 모듈 최상위에서 돌고 있어 테스트가 파서를
+`import` 하기만 해도 검사가 돌고 실패 시 `process.exit(1)` 이 러너 전체를 죽인다.
+`auditLockfile()` 로 감싸고 `audit-ci-branch-coverage.mjs` 와 같은 `isMain` 규약을 적용했다.
+
+**(b) `apps/server/test/supply-chain-integrity-guard.test.mjs` 에 3건 추가 (16 → 19).**
+새 파일을 만들지 않았으므로 `package.json` `test` 등록은 이미 돼 있다
+(`test-registration-completeness` 4/4 확인).
+
+- `Dockerfile` 의 로컬 설치가 전부 `--ignore-scripts` 를 쓰는가.
+- **검사 대상이 실제로 존재하는가** (`>= 2`) — 파서가 조용히 0건을 반환하면 위
+  단언은 "빈 배열 == 빈 배열" 로 영원히 초록이 된다.
+- 파서 자체의 성질 — 주석 줄을 세지 않고, `npm install -g` / `npm i -g` 를 제외하고,
+  `--ignore-scripts` 없는 줄만 위반으로 잡는가.
+
+**가드가 실제로 무는지 확인** (전부 실측):
+
+- runner 스테이지에서 `--ignore-scripts` 제거 → 스크립트가 정확히 그 1건을 짚고 `exit 1`.
+  원복 후 통과.
+- 두 `npm ci` 를 전부 다른 명령으로 치환(설치 줄 0개) → fail-closed 경로가 `exit 1`.
+- deps 스테이지에서 `--ignore-scripts` 제거 → 가드 테스트가 **정확히 1건만** red
+  (`Dockerfile 의 로컬 npm 설치는 전부 --ignore-scripts 를 쓴다`). 원복 후 19/19.
+- 가드 5파일 합산 **51/51 pass** (supply-chain 19 / ci-branch-coverage 6 /
+  cron-coverage 6 / published-deps 16 + test-registration 4).
+- 감사 스크립트 6개(`audit-action-pins` / `audit-ci-branch-coverage` /
+  `audit-cron-coverage` / `audit-install-scripts` / `audit-published-deps` /
+  `audit-deploy-branch-deps`) 전부 PASS.
+
+**로컬 한계** — 이 호스트에는 Docker 데몬이 없어 `docker build` 자체는 돌리지 못했다.
+대신 세 스테이지의 npm 명령과 파일 레이아웃을 그대로 재현해 위 3번의 엔드투엔드
+실측을 수행했다. 변경된 것은 `RUN` 줄의 플래그 하나뿐이고 COPY/베이스 이미지 구조는
+건드리지 않았으므로 이 재현이 커버하지 못하는 축은 없다.
+
+### 5. 배포 반영 — 운영자 조치 필요
+
+지금까지의 감사 조치는 대부분 CI/가드 전용이라 배포 브랜치에 머지하지 않았다.
+**이번은 다르다** — `Dockerfile` 은 배포 산출물을 만드는 파일이므로, 이 수정이 실제
+NAS 이미지에 반영되려면 `main` → `production.private` 머지가 필요하다. 그리고 그
+브랜치 push 자체가 곧 실배포(`deploy.yml`)를 트리거하므로 **운영자 판단으로 남긴다.**
+머지 전까지 배포된 이미지는 계속 `@scarf/scarf` 의 postinstall 을 실행한 트리다.
+
+### 6. 이월 (변동 없음, 운영자 판단 필요)
+
+- `react` 18→19, `typeorm` 0.3→1.1, `@hello-pangea/dnd` 17→18, `undici` 7→8 —
+  전부 기능 메이저이고 보안 사유 없음. 현 버전은 각 계열의 최신이며 advisory 0건.
+- **`node:22-slim` 태그 고정** — `Dockerfile` 세 스테이지가 전부 부동 태그를 쓴다.
+  다이제스트 고정은 OS 보안 패치를 멈추는 반대 방향 위험이 있어 자동 범프 수단
+  없이 단독 도입하면 순 손해. `deploy.yml` 이 NAS 에서 직접 띄우는
+  `postgres:16-alpine` 도 같은 성질이다. 판단 보류, 기록만 유지.
+- **베이스 이미지의 OS 패키지 축은 여전히 감사되지 않는다** (신규 이월). `npm audit`
+  계열은 npm 트리만 본다 — `node:22-slim` 이 들고 오는 glibc/openssl/zlib 등과
+  `apt-get install` 하는 `git`/`wget`/`ca-certificates` 는 어느 가드도 보지 않는다.
+  닫으려면 이미지 스캐너(Trivy/Grype)를 배포 워크플로에 새로 들여야 하므로 도구
+  도입 판단이 선행 사항이다.

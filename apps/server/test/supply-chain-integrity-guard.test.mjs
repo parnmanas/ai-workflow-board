@@ -17,6 +17,12 @@
 //      (2026-08-15 추가).
 //   6. 그 provenance 를 매니저 self-update 가 실제로 **검증**한다 — 증명을 만들어만
 //      놓고 아무도 읽지 않으면 방어가 아니다 (2026-08-15 추가).
+//   7. Dockerfile 의 설치가 **서드파티 install script 를 실행하지 않는다**
+//      (2026-08-24 추가). 3 번은 "어떤 패키지가 스크립트를 갖는가" 만 보고 그
+//      스크립트가 **어디서** 도는지는 묻지 않았다 — 그래서 배포 이미지 빌드가
+//      root 권한으로 `@scarf/scarf` 의 postinstall 을 최종 레이어 안에서 돌리고
+//      있었다. 2026-08-23 이 `npm i -g`(agent-manager 호스트)에 대해 세운 판단을
+//      다른 라이브 호스트(NAS 서버 이미지)에 같은 모양으로 적용한 것.
 //
 // 깨졌을 때 테스트를 완화하지 말고, 위 감사 문서의 판단 근거부터 다시 볼 것.
 
@@ -25,6 +31,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  dockerfileInstallLines,
+  missingIgnoreScripts,
+} from '../../../scripts/audit-install-scripts.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -72,6 +83,64 @@ test('Dockerfile installs dependencies only through `npm ci`', () => {
   assert.ok(
     ciLines.length >= 2,
     `expected at least 2 \`npm ci\` invocations (deps + runner stage), found ${ciLines.length}`,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1-b. Dockerfile — 배포 이미지 빌드는 서드파티 install script 를 실행하지 않는다
+//      (2026-08-24 의존성 보안 감사)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `npm ci` 는 기본적으로 의존성의 preinstall/install/postinstall 을 실행한다.
+// 여기서 그 스크립트는 **root 권한으로, 배포될 레이어 안에서** 돈다 — 최종
+// 이미지에 무엇이든 남길 수 있고, 그 이미지는 NAS 에 pull 돼 계속 떠 있다.
+// lockfile 축 허용목록(위 3번, esbuild/fsevents/@scarf/scarf)은 CI 러너를 위한
+// 승인이지 배포 레이어를 위한 승인이 아니다.
+
+const DOCKERFILE_SRC = fs.readFileSync(DOCKERFILE, 'utf8');
+
+test('Dockerfile 의 로컬 npm 설치는 전부 --ignore-scripts 를 쓴다', () => {
+  const installs = dockerfileInstallLines(DOCKERFILE_SRC);
+  const missing = missingIgnoreScripts(installs);
+
+  assert.deepEqual(
+    missing.map((m) => `Dockerfile:${m.line} ${m.text}`),
+    [],
+    '배포 이미지 빌드가 서드파티 install script 를 root 로 실행한다. ' +
+      'docs/audit/2026-08-dependency-security-audit.md 의 2026-08-24 절 참고.',
+  );
+});
+
+test('install-script 가드가 검사할 Dockerfile 설치 줄을 실제로 찾는다', () => {
+  // 파서가 조용히 0건을 반환하면 위 테스트는 "빈 배열 == 빈 배열" 로 영원히
+  // 초록이 된다. 검사 대상이 존재한다는 사실 자체를 여기서 고정한다.
+  const installs = dockerfileInstallLines(DOCKERFILE_SRC);
+  assert.ok(
+    installs.length >= 2,
+    `deps + runner 두 스테이지의 설치 줄을 기대했는데 ${installs.length}건만 찾았다`,
+  );
+});
+
+test('dockerfileInstallLines 는 전역 설치를 제외하고 주석 줄을 세지 않는다', () => {
+  const sample = [
+    '# RUN npm ci            <- 주석이므로 무시',
+    'RUN npm ci --ignore-scripts',
+    'RUN npm install -g some-cli',
+    'RUN npm i -g other-cli',
+    'RUN npm install --global yet-another-cli',
+    'RUN npm install --omit=dev',
+  ].join('\n');
+
+  const lines = dockerfileInstallLines(sample);
+  assert.deepEqual(
+    lines.map((l) => l.line),
+    [2, 6],
+    '주석/전역 설치를 제외한 로컬 설치 줄만 잡아야 한다',
+  );
+  assert.deepEqual(
+    missingIgnoreScripts(lines).map((l) => l.line),
+    [6],
+    '--ignore-scripts 가 없는 줄만 위반으로 잡아야 한다',
   );
 });
 
