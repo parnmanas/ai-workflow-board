@@ -22,11 +22,19 @@
 // `size != null` 가드로 이를 자연스럽게 처리한다.
 //
 // 왜 "그냥 batch-check 에 이 디렉터리 blob SHA 목록을 다 먹여서 noLazyFetch
-// 로 감싸면 안 되는가"(직접 실측으로 확인한 이유, 아래 네거티브 컨트롤
-// B 가 증명한다): promisor 클론에서 batch-check 입력 중 단 하나라도
-// 로컬에 없으면, 그 한 줄만 "missing" 으로 보고하고 계속하는 게 아니라
-// 전체 프로세스가 `fatal: could not fetch <oid> from promisor remote`
-// 로 즉시 죽는다(exit 128) — 부분 성공이 불가능하다.
+// 로 감싸면 안 되는가": 로컬 실측(git 2.43.0)에서는 promisor 클론에서
+// batch-check 입력 중 단 하나라도 로컬에 없으면, 그 한 줄만 "missing" 으로
+// 보고하고 계속하는 게 아니라 전체 프로세스가 `fatal: could not fetch
+// <oid> from promisor remote` 로 즉시 죽었다(exit 128) — 부분 성공이
+// 불가능했다. 이 동작은 git 버전에 따라 다르다는 것이 실제 CI 러너(git
+// 2.55.0)에서 드러났다 — 같은 입력이 fatal 없이 missing 엔트리만 보고하고
+// 넘어간다(exit 0). 그래서 아래 네거티브 컨트롤 B 는 "반드시 죽는다"를
+// 더 이상 단언하지 않고, 두 git 버전 모두에서 성립해야 하는 불변식(아직
+// 로컬에 없는 blob 에 유효한 size 를 보고할 수 없다)만 확인한다 — 어느
+// 쪽이든 fillBlobSizesLocalOnly() 가 blob 하나당 독립 호출로 나뉜 이유
+// (한쪽이 죽거나 missing 처리돼도 다른 blob 조회에 전혀 영향이 없게)는
+// 유효하고, 실제 프로덕션 코드도 이미 두 경우를 동일하게 size:null 로
+// 처리한다(parts.length < 3 분기와 catch 분기).
 //
 // 리뷰 라운드 1 지적 및 재수정: 최초 구현은 "요청한 특정 SHA 목록" 대신
 // `--batch-all-objects`(캐시 클론이 가진 전체 로컬 객체 열거)로 교집합을
@@ -144,15 +152,30 @@ describe('UI 파일 브라우저 listTree() 의 blobless 클론 lazy-fetch 회�
     );
   });
 
-  it('네거티브 컨트롤 B — cat-file --batch-check에 missing OID를 하나라도 섞으면 노이즈 없이 전체가 fatal(exit≠0)한다 (부분 성공 불가 — blob마다 독립 호출로 나누는 이유)', () => {
-    assert.throws(() => {
-      execFileSync('git', ['cat-file', '--batch-check'], {
+  it('네거티브 컨트롤 B — GIT_NO_LAZY_FETCH=1 아래서는 아직 로컬에 없는 blob 에 유효한 size 를 보고할 수 없다 (missing OID가 섞인 batch-check 결과를 그대로 신뢰해 파싱하면 안 되는 이유 — blob마다 독립 호출로 나누는 이유)', () => {
+    let stdout = '';
+    try {
+      stdout = execFileSync('git', ['cat-file', '--batch-check'], {
         cwd: cachePath,
         input: `${manySha}\nffffffffffffffffffffffffffffffffffffffff\n`,
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
-        stdio: ['pipe', 'ignore', 'ignore'],
-      });
-    }, /Command failed/, 'missing OID가 섞인 batch-check는 GIT_NO_LAZY_FETCH=1 아래서 전체가 실패해야 한다');
+      }).toString();
+    } catch (err) {
+      // 로컬 실측(git 2.43.0) 동작 — missing OID가 섞이면 배치 전체가
+      // fatal(exit≠0)한다. "부분 성공 불가"를 그대로 증명한다.
+      assert.match(String(err.message || ''), /Command failed/);
+      return;
+    }
+    // CI 러너(git 2.55.0) 동작 — fatal 대신 missing 엔트리를 이 줄에서
+    // 보고하고 나머지를 계속 처리한다(exit 0). 어느 쪽이 나오는지는 git
+    // 버전마다 다르지만, GIT_NO_LAZY_FETCH=1 는 두 경우 모두 네트워크
+    // fetch 자체를 막으므로 — 아직 로컬에 없는 manySha 에 유효한 size 를
+    // 보고할 수는 없다는 불변식은 항상 성립해야 한다.
+    assert.doesNotMatch(
+      stdout,
+      new RegExp(`^${manySha} blob \\d`, 'm'),
+      'GIT_NO_LAZY_FETCH=1 아래서는 아직 로컬에 없는 blob 에 유효한 size 를 보고하면 안 된다',
+    );
   });
 
   it('listTree는 완전히 새 클론(아무 blob도 로컬에 없음)에서 promisor fetch 0회로 응답하고, 모든 파일 크기는 null로 degrade한다', async () => {
