@@ -163,6 +163,33 @@ export async function countWindowDispatches(dataSource: DataSource, ticketId: st
 }
 
 /**
+ * Same rows as `countWindowDispatches`, grouped by `trigger_source` (ticket
+ * 3c8b8026 acceptance #5). Read-only breakdown for the hard-budget breach
+ * notice — lets a human tell "one source stormed" (e.g. a comment-triggered
+ * self-echo loop) from "many roles were legitimately busy" at a glance,
+ * without changing what counts toward the ceiling itself (see this file's
+ * header: emit-based counting stays the enforcement source; this is
+ * observability layered on the same query, not a new one).
+ */
+export async function countWindowDispatchesBySource(
+  dataSource: DataSource,
+  ticketId: string,
+  since: Date,
+): Promise<Array<{ trigger_source: string; count: number }>> {
+  const rows = await dataSource.getRepository(ActivityLog).createQueryBuilder('a')
+    .select('a.trigger_source', 'trigger_source')
+    .addSelect('COUNT(*)', 'count')
+    .where('a.ticket_id = :tid', { tid: ticketId })
+    .andWhere("a.action = 'trigger_emitted'")
+    .andWhere('a.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
+    .andWhere('a.created_at >= :since', { since })
+    .groupBy('a.trigger_source')
+    .orderBy('COUNT(*)', 'DESC')
+    .getRawMany<{ trigger_source: string; count: string | number }>();
+  return rows.map((r) => ({ trigger_source: r.trigger_source || '_', count: Number(r.count) }));
+}
+
+/**
  * (b) Summed input+output tokens inside the window, sourced from the
  * `subagents` table's usage columns (ticket 6dd3f968 — populated on the
  * agent-manager's `end` POST). Deliberately sums only `input_tokens` +

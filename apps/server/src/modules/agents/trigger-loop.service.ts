@@ -37,7 +37,7 @@ import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from '../../common/hard-budget-config';
-import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
+import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
@@ -2152,8 +2152,13 @@ candidate's branch or move the ticket.
 
       const dispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
       if (dispatchCount >= cfg.maxDispatchesPerWindow) {
+        // ticket 3c8b8026 acceptance #5: breach 확정 후에만(핫패스 아님) 같은
+        // 윈도우를 trigger_source 별로 다시 묶어, 사람이 자동 pend 사유에서
+        // 폭주 근원(예: comment 자기증폭)과 정상적으로 바쁜 티켓을 구분할 수
+        // 있게 한다. 상한 판정 자체(위 dispatchCount)는 그대로 emit 기준.
+        const bySource = await countWindowDispatchesBySource(this.dataSource, ticket.id, since);
         return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
-          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow,
+          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow, bySource,
         });
       }
 
@@ -2191,9 +2196,14 @@ candidate's branch or move the ticket.
     triggerSource: string,
     cfg: ResolvedHardBudget,
     windowMin: number,
-    breach: { kind: 'dispatch' | 'tokens'; count: number; limit: number },
+    breach: {
+      kind: 'dispatch' | 'tokens';
+      count: number;
+      limit: number;
+      bySource?: Array<{ trigger_source: string; count: number }>;
+    },
   ): Promise<boolean> {
-    const { kind, count, limit } = breach;
+    const { kind, count, limit, bySource } = breach;
     const isTokens = kind === 'tokens';
     const auditAction = isTokens ? 'agent_trigger_dropped_hard_budget_tokens' : 'agent_trigger_dropped_hard_budget';
     const pendGuardActor = isTokens ? 'hard_budget_token_guard' : 'hard_budget_dispatch_guard';
@@ -2202,11 +2212,17 @@ candidate's branch or move the ticket.
     const countLabel = isTokens
       ? `토큰 사용량: ${count.toLocaleString('ko-KR')} / ${windowMin}분 (상한 ${limit.toLocaleString('ko-KR')})`
       : `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${limit})`;
+    // ticket 3c8b8026 acceptance #5: trigger_source 분포 한 줄 — 사람이 pend
+    // 사유만 보고도 "어느 출처가 상한을 태웠는지" 바로 판단하도록 한다.
+    const sourceBreakdown = bySource && bySource.length > 0
+      ? bySource.map((s) => `${s.trigger_source}${s.count}건`).join(', ')
+      : '';
+    const sourceLine = sourceBreakdown ? `\n출처 분포: ${sourceBreakdown}` : '';
     const reason = isTokens
       ? `이 티켓의 ${windowMin}분 내 토큰 사용량이 하드 상한(${limit.toLocaleString('ko-KR')} 토큰)을 초과해 자동 중지되었습니다. ` +
         `토큰 소모 원인을 확인한 뒤 pending을 해제하세요.`
       : `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${limit}회)을 초과해 자동 중지되었습니다. ` +
-        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
+        `폭주 여부를 확인한 뒤 pending을 해제하세요.${sourceLine}`;
 
     this.logService.info('MCP', `agent_trigger dropped (${logLabel})`, {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
@@ -2242,6 +2258,7 @@ candidate's branch or move the ticket.
           `🚦 **${alertTitle}** — \`${ticket.id}\``,
           `**${ticket.title}**`,
           countLabel,
+          ...(sourceBreakdown ? [`출처 분포: ${sourceBreakdown}`] : []),
           cfg.autoPend
             ? '티켓 자동 pend됨 — 사람이 해제하기 전까지 추가 트리거가 차단됩니다.'
             : 'notify-only (auto-pend off for this board).',

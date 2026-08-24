@@ -45,6 +45,7 @@ const {
   lastHumanUnpendAt,
   countAutoResponses,
   countWindowDispatches,
+  countWindowDispatchesBySource,
   countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
@@ -155,6 +156,36 @@ test('countWindowDispatches excludes manual/comment_summary trigger sources', as
   await recordTriggerEmitted(t.id, 'comment_summary');
   await recordTriggerEmitted(t.id, 'column_move');
   assert.equal(await countWindowDispatches(ds, t.id, since), 2);
+});
+
+// ticket 3c8b8026 acceptance #5: the auto-pend notice's trigger_source
+// breakdown, sourced from this grouped query. Same underlying rows/exclusions
+// as countWindowDispatches — this only adds a GROUP BY on top, so the two
+// must always agree on the total.
+test('countWindowDispatchesBySource groups by trigger_source with the same exclusions as countWindowDispatches', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  await recordTriggerEmitted(t.id, 'comment');
+  await recordTriggerEmitted(t.id, 'comment');
+  await recordTriggerEmitted(t.id, 'column_move');
+  await recordTriggerEmitted(t.id, 'manual');
+  await recordTriggerEmitted(t.id, 'comment_summary');
+
+  const bySource = await countWindowDispatchesBySource(ds, t.id, since);
+  const asMap = Object.fromEntries(bySource.map((r) => [r.trigger_source, r.count]));
+  assert.deepEqual(asMap, { comment: 2, column_move: 1 },
+    'manual/comment_summary excluded exactly like countWindowDispatches; grouped by trigger_source');
+
+  const total = bySource.reduce((sum, r) => sum + r.count, 0);
+  assert.equal(total, await countWindowDispatches(ds, t.id, since),
+    'the grouped total must equal the scalar count — both read the same underlying rows');
+});
+
+test('countWindowDispatchesBySource returns an empty array when nothing is in the window', async () => {
+  const t = await makeTicket(null);
+  const future = new Date(Date.now() + 60_000);
+  await recordTriggerEmitted(t.id, 'comment');
+  assert.deepEqual(await countWindowDispatchesBySource(ds, t.id, future), []);
 });
 
 // ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────

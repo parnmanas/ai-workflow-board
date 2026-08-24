@@ -99,3 +99,48 @@ test('the token hard-budget drop action string appears exactly once and is disti
   const dispatchDropMentions = (src.match(/'agent_trigger_dropped_hard_budget'/g) || []).length;
   assert.equal(dispatchDropMentions, 1, 'adding the token ceiling must not duplicate the dispatch drop action string');
 });
+
+// ── trigger_source breakdown (ticket 3c8b8026 acceptance #5) ───────────────
+// A human clearing a hard-budget auto-pend needs to tell "one source stormed"
+// (e.g. a comment self-echo loop) from "many roles were legitimately busy" at
+// a glance. `_checkHardBudgetGate` only has the breach confirmed AFTER the
+// scalar `countWindowDispatches` call trips — the breakdown query must run in
+// that same (rare, already-breaching) branch, never on every dispatch's
+// happy path, and its result must actually reach both the pend reason and the
+// chat alert `_tripHardBudgetGate` composes.
+
+test('the dispatch-breach branch fetches the trigger_source breakdown via countWindowDispatchesBySource', () => {
+  const src = code(SRC_PATH);
+  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
+  assert.ok(match, 'could not isolate the _checkHardBudgetGate method body');
+  const body = match[0];
+  assert.match(body, /countWindowDispatchesBySource\(/, '_checkHardBudgetGate must call countWindowDispatchesBySource');
+
+  // Must be called strictly AFTER the scalar dispatchCount breach check —
+  // never unconditionally on every dispatch (that would run an extra grouped
+  // query on the hot path for every single trigger, breach or not).
+  const scalarIdx = body.indexOf('dispatchCount >= cfg.maxDispatchesPerWindow');
+  const bySourceIdx = body.indexOf('countWindowDispatchesBySource(');
+  assert.ok(scalarIdx > -1 && bySourceIdx > -1 && scalarIdx < bySourceIdx,
+    'the breakdown query must run inside the already-breached branch, not unconditionally');
+});
+
+test('_tripHardBudgetGate wires bySource into both the pend reason and the chat alert for a dispatch breach', () => {
+  const src = code(SRC_PATH);
+  const match = src.match(/private async _tripHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
+  assert.ok(match, 'could not isolate the _tripHardBudgetGate method body');
+  const body = match[0];
+  assert.match(body, /bySource/, '_tripHardBudgetGate must accept/use the bySource breakdown');
+  assert.match(body, /sourceBreakdown/, 'must format the breakdown into a display string');
+
+  // The formatted breakdown must actually be spliced into BOTH surfaces a
+  // human reads after an auto-pend — the ticket's pending_reason (User tab)
+  // and the chat alert — not computed and then dropped on the floor.
+  const reasonIdx = body.indexOf('const reason =');
+  const sourceLineDeclIdx = body.indexOf('const sourceLine =');
+  assert.ok(sourceLineDeclIdx > -1 && reasonIdx > -1 && sourceLineDeclIdx < reasonIdx,
+    'sourceLine must be computed before it is spliced into `reason`');
+  assert.match(body.slice(reasonIdx), /\$\{sourceLine\}/, 'the pend reason string must interpolate sourceLine');
+  assert.match(body, /sourceBreakdown \? \[`출처 분포: \$\{sourceBreakdown\}`\] : \[\]/,
+    'the chat alert body array must conditionally include the same breakdown');
+});
