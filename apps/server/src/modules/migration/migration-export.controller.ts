@@ -51,7 +51,13 @@ export class MigrationExportController {
 
     const selfDeploy = await this.deployments.getLatest(null, SELF_DEPLOY_ENV_DEFAULT).catch(() => null);
 
-    await this._auditAccess(req, 'migration_export_meta', 'meta', `${tables.length} tables reported`);
+    // Fail CLOSED (review round 2) — the audit trail is a mandatory control
+    // for this surface (전 워크스페이스 크리덴셜을 반환할 수 있는 표면), not
+    // best-effort. If the write itself fails, refuse to hand back data rather
+    // than silently exporting unaudited.
+    if (!(await this._auditAccess(req, 'migration_export_meta', 'meta', `${tables.length} tables reported`))) {
+      return res.status(503).json({ error: 'Export audit logging failed — refusing to return data without an audit trail' });
+    }
 
     return res.json({
       app_version: getAppVersion(),
@@ -82,14 +88,6 @@ export class MigrationExportController {
       return res.status(404).json({ error: `Unknown or unsupported entity: ${entityName}` });
     }
 
-    // 페이지 하나하나가 아니라 이 엔티티의 "처음부터 다시 pull 시작"에서만
-    // 감사 이벤트 1건 — 큰 테이블은 페이지가 수천 개일 수 있어(리뷰 라운드1
-    // P3), 페이지마다 남기면 activity_logs 자체가 노이즈로 뒤덮인다. 재개
-    // (after != null)는 이미 시작된 같은 pull의 연속이라 새 이벤트가 아니다.
-    if (!after) {
-      await this._auditAccess(req, 'migration_export_table', entityName, 'first page requested');
-    }
-
     const repo = this.dataSource.getRepository(EntityClass as any);
     const pkNames = repo.metadata.primaryColumns.map((c) => c.propertyName);
     if (pkNames.length < 1 || pkNames.length > 2) {
@@ -115,16 +113,40 @@ export class MigrationExportController {
     const lastRow = rows[rows.length - 1] as any;
     const nextCursor = hasMore ? encodeCursor(pkNames.map((name) => lastRow[name])) : null;
 
+    // Audit EVERY call, not just "first page" (review round 2, blocking) —
+    // `after` is an entirely client-supplied query parameter with no
+    // server-side binding to any real pagination state. A caller could skip
+    // the old "only audit when after is empty" heuristic on its very first
+    // request by supplying any non-empty `after`: for a single-column PK a
+    // synthetic low value (e.g. `!`) still returns virtually the whole first
+    // page, and for the composite-PK entity a malformed cursor makes
+    // applyKeysetCursor() apply no filter at all (decodeCursor returns `[]`,
+    // length check fails, filter is skipped) — a full unfiltered first page,
+    // unaudited. Auditing unconditionally closes both bypasses. Volume is
+    // bounded by (total rows / page size), not "one row per page ever
+    // fetched across a whole migration" — a full-instance migration audits at
+    // most a few thousand rows total, not a per-page flood.
+    //
+    // Fail CLOSED — if the audit write itself fails, refuse to return data.
+    const auditSummary = `${plainRows.length} row(s) returned, has_more=${hasMore}, after=${after ? 'resumed' : 'initial'}`;
+    if (!(await this._auditAccess(req, 'migration_export_table', entityName, auditSummary))) {
+      return res.status(503).json({ error: 'Export audit logging failed — refusing to return data without an audit trail' });
+    }
+
     return res.json({ rows: plainRows, has_more: hasMore, next_cursor: nextCursor });
   }
 
   /**
-   * 성공 접근 감사(리뷰 라운드1 P3) — MigrationExportGuard가 이미 검증해
-   * `req.apiKey`에 심어둔 caller 신원만 기록한다. `new_value`는 사람이
-   * 읽을 요약(행수/페이지 상태)일 뿐 실제 row 데이터·크리덴셜 평문·토큰은
-   * 절대 담지 않는다.
+   * 성공 접근 감사 — MigrationExportGuard가 이미 검증해 `req.apiKey`에 심어둔
+   * caller 신원만 기록한다. `new_value`는 사람이 읽을 요약(행수/페이지 상태)일
+   * 뿐 실제 row 데이터·크리덴셜 평문·토큰은 절대 담지 않는다.
+   *
+   * fail-closed 계약(리뷰 라운드2, 차단): 이 표면은 전 워크스페이스 크리덴셜을
+   * 반환할 수 있어 감사 로그가 best-effort가 아니라 필수 제어다. 쓰기 실패를
+   * 삼키지 않고 `false`로 알려 호출자(meta/table)가 데이터 응답 대신 503을
+   * 내도록 한다 — "감사에 실패했지만 평문은 나갔다"를 구조적으로 막는다.
    */
-  private async _auditAccess(req: Request, action: 'migration_export_meta' | 'migration_export_table', entityId: string, summary: string): Promise<void> {
+  private async _auditAccess(req: Request, action: 'migration_export_meta' | 'migration_export_table', entityId: string, summary: string): Promise<boolean> {
     const apiKey = (req as any).apiKey;
     try {
       await this.activityService.logActivity({
@@ -137,8 +159,9 @@ export class MigrationExportController {
         ticket_id: '',
         trigger_source: 'migration_export',
       });
+      return true;
     } catch {
-      // 감사 기록 실패로 실제 export 응답을 막지 않는다 — best-effort.
+      return false;
     }
   }
 }
