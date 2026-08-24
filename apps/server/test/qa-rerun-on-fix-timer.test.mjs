@@ -31,6 +31,7 @@ import { QaScenario } from '../dist/entities/QaScenario.js';
 import { Deployment } from '../dist/entities/Deployment.js';
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 function deferred() {
   let resolve;
@@ -120,7 +121,7 @@ test('legacy delayed rerun timer (rerun_delay_seconds > 0) fires the rerun', asy
 
   const started = deferred();
   const qaRunService = makeQaRunService(started.resolve);
-  const service = new QaRerunOnFixService(ds, qaRunService, noopLog);
+  const service = new QaRerunOnFixService(ds, qaRunService, noopLog, noQuiesce);
 
   await service._handleActivity({ action: 'moved', ticket_id: ticket.id });
   assert.equal(qaRunService.calls.length, 0, 'the rerun is deferred behind the timer, not fired synchronously');
@@ -156,7 +157,7 @@ test('deployment-gate fallback-cap timer (rerun_delay_seconds > 0) fires without
 
   const started = deferred();
   const qaRunService = makeQaRunService(started.resolve);
-  const service = new QaRerunOnFixService(ds, qaRunService, noopLog);
+  const service = new QaRerunOnFixService(ds, qaRunService, noopLog, noQuiesce);
 
   await service._handleActivity({ action: 'moved', ticket_id: ticket.id });
   assert.equal(qaRunService.calls.length, 0, 'no deploy yet — the rerun is gated, not fired synchronously');

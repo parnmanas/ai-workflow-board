@@ -67,6 +67,7 @@ function registerTools(ctxOverrides = {}) {
   const ctx = {
     dataSource: ds, activityService, mentionService: mentionServiceStub,
     logger: logStub, ticketRoleAssignmentService: null, roomMessagingService: null,
+    instanceQuiesceService: { isQuiesced: async () => false },
     ...ctxOverrides,
   };
   registerCommentTools(server, ctx);

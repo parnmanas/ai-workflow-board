@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository, In } from 'typeorm';
 import { Feature, FeatureChainProposal, FeatureProposedTicket } from '../../entities/Feature';
@@ -12,6 +12,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ActivityService } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
@@ -78,6 +79,9 @@ export class FeaturesService {
     private readonly roleAssignmentService: TicketRoleAssignmentService,
     private readonly prereqService: TicketPrerequisitesService,
     private readonly triggerLoop: TriggerLoopService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   // ── Reads ────────────────────────────────────────────────────────────────
@@ -171,6 +175,16 @@ export class FeaturesService {
    * to research, then call `propose_feature_chain` with a structured chain.
    */
   async dispatchPlanning(featureId: string): Promise<{ room_id: string; agent_id: string }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). Shared
+    // by create()'s auto_plan, reject()'s replan, AND the manual "replan"
+    // controller endpoint (features.controller.ts) — all three already
+    // tolerate dispatchPlanning throwing (auto_plan/replan swallow it and
+    // leave the feature retriable; the manual endpoint surfaces it to the
+    // caller as an explicit error), so gating here covers every path in one
+    // place without a silent-forever-lost trap.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      throw new ServiceUnavailableException('Instance is quiesced — fleet dispatch is paused until an operator resumes it');
+    }
     const feature = await this.get(featureId);
     const plannerId = feature.planner_agent_id.trim();
     if (!plannerId) {

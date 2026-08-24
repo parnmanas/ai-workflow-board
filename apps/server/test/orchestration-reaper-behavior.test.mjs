@@ -76,6 +76,7 @@ function makeRepo(rows) {
 }
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 function makeMission(id, overrides = {}) {
   return {
@@ -172,7 +173,7 @@ function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator
         return true;
       }),
   };
-  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog);
+  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog, noQuiesce);
   return { svc, missionRepo, stepRepo, eventRepo, nudges, recordedEvents, clock };
 }
 

@@ -124,6 +124,7 @@ function harness({ ticket, comments = [], agents = [], findOneImpl = null, liveT
     mentionService: { parseMentions: () => [], async resolveMentions() { return []; } },
     logger: { info() {}, warn() {}, error() {} },
     ticketRoleAssignmentService: null,
+    instanceQuiesceService: { isQuiesced: async () => false },
   };
   registerCommentTools(server, ctx);
   return { handlers, counters, ticket, commentsById, agentsById, live, getTicketFindOneCalls: () => ticketFindOneCalls };

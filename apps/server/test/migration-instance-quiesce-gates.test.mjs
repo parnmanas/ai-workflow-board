@@ -38,6 +38,16 @@ const { QaScheduleService } = await import(modPath('modules', 'qa', 'qa-schedule
 const { SecurityScheduleService } = await import(modPath('modules', 'security', 'security-schedule.service.js'));
 const { WorkspaceScheduleService } = await import(modPath('modules', 'workspace-schedule', 'workspace-schedule.service.js'));
 const { AgentAutostartService } = await import(modPath('modules', 'agents', 'agent-autostart.service.js'));
+// Review round 1 P2 (blocking) — the paths the reviewer named as bypassing
+// quiesce entirely: ActionScheduler, OutreachPolling, OrchestrationReaper,
+// QaRerunOnFix — plus OnTicketDoneActionService and FeaturesService, found
+// during the same audit to share the same class of gap.
+const { ActionSchedulerService } = await import(modPath('modules', 'actions', 'action-scheduler.service.js'));
+const { OnTicketDoneActionService } = await import(modPath('modules', 'actions', 'on-ticket-done-action.service.js'));
+const { OrchestrationReaperService } = await import(modPath('modules', 'orchestration', 'orchestration-reaper.service.js'));
+const { OutreachPollingService } = await import(modPath('modules', 'outreach', 'outreach-polling.service.js'));
+const { QaRerunOnFixService } = await import(modPath('modules', 'qa', 'qa-rerun-on-fix.service.js'));
+const { FeaturesService } = await import(modPath('modules', 'features', 'features.service.js'));
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const quiescedTrue = { isQuiesced: async () => true };
@@ -93,6 +103,53 @@ test('AgentAutostartService chat-path autostart (_handleChatRequest) short-circu
   // is passed and the quiesce check is what actually gates this call — a
   // malformed event returning early would be a false positive for this test.
   await assert.doesNotReject(() => svc._handleChatRequest({ agent_id: 'a1', room_id: 'r1', workspace_id: 'w1' }));
+});
+
+test('[review round 1 P2] ActionSchedulerService tick short-circuits while quiesced, before querying any Action row', async () => {
+  const svc = new ActionSchedulerService(/* actionRepo */ {}, /* actionsService */ {}, logStub, quiescedTrue);
+  await assert.doesNotReject(() => svc._tick());
+});
+
+test('[review round 1 P2] OnTicketDoneActionService activity handler short-circuits while quiesced, before even reading the ticket', async () => {
+  const svc = new OnTicketDoneActionService(/* dataSource */ {}, /* actionsService */ {}, logStub, quiescedTrue);
+  // A log payload with no ticket_id/action would normally be a no-op anyway —
+  // proving the gate fires FIRST means passing one that WOULD otherwise be
+  // eligible (action='moved', a ticket_id) and confirming dataSource.getRepository
+  // (needed to look the ticket up) is never called.
+  await assert.doesNotReject(() => svc._handleActivity({ action: 'moved', ticket_id: 'tk-1' }));
+});
+
+test('[review round 1 P2] OrchestrationReaperService.runOnce short-circuits while quiesced, before the sweeping-flag dance or any repo access', async () => {
+  const svc = new OrchestrationReaperService(
+    /* missionRepo */ {}, /* stepRepo */ {}, /* eventRepo */ {}, /* teamRepo */ {},
+    /* missions */ {}, /* runner */ {}, logStub, quiescedTrue,
+  );
+  const result = await svc.runOnce();
+  assert.deepEqual(result, { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 });
+});
+
+test('[review round 1 P2] OutreachPollingService.runOnce short-circuits while quiesced, before touching any channel row', async () => {
+  const svc = new OutreachPollingService(/* channelRepo */ {}, /* credentialRepo */ {}, /* ingestService */ {}, logStub, quiescedTrue);
+  const result = await svc.runOnce();
+  assert.deepEqual(result, { polled: [], failed: [] });
+});
+
+test('[review round 1 P2] QaRerunOnFixService bypasses QaScheduleService.runOnce entirely (calls QaRunService.startQaRun directly) — its OWN gate on _startRerun must fire too', async () => {
+  const svc = new QaRerunOnFixService(/* dataSource */ {}, /* qaRunService */ {}, logStub, quiescedTrue);
+  // _startRerun is private but this is exactly the shared call-through both
+  // _firePending (fallback-cap timer) and the deployment-event path funnel
+  // through — gating it once here covers both without duplicating the check.
+  await assert.doesNotReject(() => svc._startRerun('scenario-1', 1, 'fix-ticket-1'));
+});
+
+test('[review round 1 P2] FeaturesService.dispatchPlanning refuses while quiesced (shared by create()auto_plan, reject()replan, AND the manual replan controller endpoint)', async () => {
+  const svc = new FeaturesService(
+    /* featureRepo */ {}, /* roomRepo */ {}, /* participantRepo */ {}, /* agentRepo */ {},
+    /* colRepo */ {}, /* boardRepo */ {}, /* dataSource */ {}, /* activityService */ {},
+    logStub, /* messaging */ {}, /* roleAssignmentService */ {}, /* prereqService */ {},
+    /* triggerLoop */ {}, quiescedTrue,
+  );
+  await assert.rejects(() => svc.dispatchPlanning('feature-1'), /quiesced/i);
 });
 
 test('every scheduler + backlog-promotion runs its normal path when NOT quiesced (sanity check the stubs above prove the right thing)', async () => {

@@ -46,6 +46,7 @@ import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { IN_FLIGHT_STEP_STATUSES, isInFlight } from './orchestration.constants';
@@ -86,6 +87,9 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     private readonly missions: OrchestrationMissionService,
     private readonly runner: OrchestrationRunnerService,
     private readonly logService: LogService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -109,6 +113,14 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
   async runOnce(
     now: Date = new Date(),
   ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number; post_actions_recovered: number }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
+    // QaScheduleService.runOnce's identical gate for the full rationale — the
+    // 3 reap* methods below all end up dispatching via
+    // OrchestrationRunnerService (failStepExternally/nudgeOrchestrator/
+    // recoverPostActions → sendMessage), independent of _emitTrigger.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
+    }
     if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
     this.sweeping = true;
     try {

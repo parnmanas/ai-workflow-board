@@ -29,6 +29,7 @@ import { OutreachPollingService } from '../dist/modules/outreach/outreach-pollin
 import { OutreachController } from '../dist/modules/outreach/outreach.controller.js';
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 function response() {
   return {
@@ -58,7 +59,7 @@ describe('Outreach channels — workspace scope contract', () => {
     const agentRepo = dataSource.getRepository(Agent);
     // pollingService is only used for computeNextPoll() here (a pure
     // date computation) — its own repo/ingest deps are never exercised.
-    const pollingService = new OutreachPollingService(channelRepo, credentialRepo, {}, noopLog);
+    const pollingService = new OutreachPollingService(channelRepo, credentialRepo, {}, noopLog, noQuiesce);
     const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, agentRepo, pollingService);
     controller = new OutreachController(channelService);
   });

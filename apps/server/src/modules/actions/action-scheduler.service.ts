@@ -4,6 +4,7 @@ import { Repository, Not } from 'typeorm';
 import { Action } from '../../entities/Action';
 import { ActionsService } from './actions.service';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { parseCron, cronMatches } from './cron';
 
 // Tick-cadence for the scheduler. We dispatch per-minute granularity; finer
@@ -26,6 +27,9 @@ export class ActionSchedulerService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
     private readonly actionsService: ActionsService,
     private readonly logService: LogService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -52,6 +56,13 @@ export class ActionSchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async _tick(): Promise<void> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
+    // QaScheduleService.runOnce's identical gate for the full rationale.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('Actions', 'scheduler tick skipped (instance quiesced)');
+      return;
+    }
+
     const now = new Date();
     // Pull only enabled actions with a non-empty cron. Across all workspaces —
     // server is single-tenant in practice and the row count stays small.

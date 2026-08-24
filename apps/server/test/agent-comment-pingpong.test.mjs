@@ -127,6 +127,7 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
     },
     logger: { info() {}, warn() {}, error() {} },
     ticketRoleAssignmentService: null,
+    instanceQuiesceService: { isQuiesced: async () => false },
   };
   registerCommentTools(server, ctx);
   return { addComment: handlers.get('add_comment'), counters, stored };
