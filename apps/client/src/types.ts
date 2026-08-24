@@ -30,6 +30,26 @@ export interface ApiKey {
   _notice?: string;
 }
 
+export interface MigrationRun {
+  id: string; // GUID
+  source_url: string;
+  status: 'pending' | 'preflight' | 'running' | 'paused' | 'completed' | 'failed';
+  phase: 'core' | 'attachments' | 'done';
+  skip_attachments: number;
+  allow_merge: number;
+  current_entity: string | null;
+  cursor: string | null;
+  entity_order: string[] | null;
+  progress: Record<string, { pulled: number; done: boolean }>;
+  preflight_report: Record<string, unknown> | null;
+  error_message: string;
+  created_by: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PermissionMeta {
   label: string;
   description: string;

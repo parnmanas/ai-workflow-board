@@ -5,6 +5,7 @@ import UserManager from './UserManager';
 import LogViewer from './LogViewer';
 import AgentLogViewer from './AgentLogViewer';
 import SettingsManager from './SettingsManager';
+import MigrationManager from './MigrationManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
 import SkillsPage from './SkillsPage';
 import SkillRegistryPage from './SkillRegistryPage';
@@ -22,6 +23,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   },
   'workflow-health': { title: 'Workflow Health', description: 'Automation suppression, respawn storms, QA trends, and token usage' },
   settings: { title: 'Settings', description: 'System configuration' },
+  migration: { title: 'Live Import', description: 'Pull this instance\'s data from a live source AWB server' },
 };
 
 function AdminRoute({ page, children }: { page: string; children: React.ReactNode }) {
@@ -56,6 +58,7 @@ export default function AdminPage() {
       <Route path="global-credentials" element={<WorkspaceRouteRedirect path="settings/credentials" />} />
       <Route path="claude-backend-profiles" element={<WorkspaceRouteRedirect path="settings/claude-profiles" />} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
+      <Route path="migration" element={<AdminRoute page="migration"><MigrationManager /></AdminRoute>} />
       <Route path="functions" element={<WorkspaceRouteRedirect path="functions" />} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>

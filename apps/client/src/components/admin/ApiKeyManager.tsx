@@ -172,6 +172,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
                   { value: 'full', label: 'Full (Read + Write)' },
                   { value: 'read', label: 'Read Only' },
                   { value: 'write', label: 'Write Only' },
+                  { value: 'migration_export', label: 'Migration Export (server-to-server pull)' },
                 ]}
               />
               <Select
