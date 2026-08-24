@@ -107,6 +107,13 @@ export const SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES = 10 * 60;
 export const TTL_SWEEP_INTERVAL_MS = 60_000;
 export const SIGTERM_GRACE_MS = 5_000;
 export const STOP_GRACE_MS = 2_000;
+/** ticket 6abe2b79: SubagentManager#stop() 이 SIGKILL 전송 후 각 victim 의 실제
+ *  exit 핸들러(정리 + run-completion backstop)가 끝나길 기다리는 상한. ps 기반
+ *  orphan sweep(findLiveGroupBackgroundTasks, 자체 상한 15초) + 1회 MCP fetch 가
+ *  이 창 안에서 끝나는 게 통상 케이스 — 상한을 넘겨도 stop() 은 그 victim 에
+ *  대해 직접 한 번 더 completion backstop 을 호출해 무음 유실을 막는다(#stop
+ *  참고), 그래서 이 값을 과하게 늘려 shutdown 을 느리게 만들 필요는 없다. */
+export const STOP_FORCE_KILL_SETTLE_MS = 5_000;
 
 export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity', 'pi'] as const;
 export type CliType = (typeof KNOWN_CLI_TYPES)[number];

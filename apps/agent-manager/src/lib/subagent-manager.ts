@@ -21,6 +21,7 @@ import {
   TTL_SWEEP_INTERVAL_MS,
   SIGTERM_GRACE_MS,
   STOP_GRACE_MS,
+  STOP_FORCE_KILL_SETTLE_MS,
 } from './constants.js';
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
@@ -374,6 +375,13 @@ export class SubagentManager implements SubagentManagerContract {
    *  prior pass is still mid-probe. A skipped tick is harmless — the next
    *  one TTL_SWEEP_INTERVAL_MS later just re-evaluates current state. */
   #sweepInFlight = false;
+  /** ticket 6abe2b79: pid → resolver, stop() 호출 도중에만 살아있다. 실제 exit
+   *  핸들러(#wireExitHandler)가 victim 의 post-exit 체인(정리 + run-completion
+   *  backstop)이 실제로 끝나면 이 항목을 resolve + 삭제한다 — 그래서 stop() 이
+   *  SIGKILL 보내자마자 반환하는 대신 실제 완료를 기다릴 수 있다(그 race 가 왜
+   *  문제인지는 stop() 자체 docstring 참고 — SIGKILL 대상의 backstop 이 호출자의
+   *  process.exit() 전에 못 끝날 수 있었다). */
+  #stopWaiters = new Map<number, () => void>();
   #reservationCounter = 0;
   #persistPath: string;
   #pidDir: string;
@@ -1073,6 +1081,16 @@ export class SubagentManager implements SubagentManagerContract {
       // 이후에도 왜 이게 여전히 필요한지는 _runExitCompletionBackstop 자체
       // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
       if (record.run) await this._runExitCompletionBackstop(record, code);
+
+      // ticket 6abe2b79: 이 victim 의 post-exit 체인(위 run-completion backstop
+      // 포함)이 실제로 끝났음을 대기 중인 stop() 에 알린다 — stop() 이 SIGKILL
+      // 직후 바로 반환하지 않고 실제 완료를 기다릴 수 있게 한다. stop() 밖에서는
+      // #stopWaiters 가 비어 있으므로 no-op.
+      const stopWaiter = this.#stopWaiters.get(pid);
+      if (stopWaiter) {
+        this.#stopWaiters.delete(pid);
+        stopWaiter();
+      }
 
       // Drop the tail ring now that all post-exit hooks have read it.
       record.tailLines = [];
@@ -2170,6 +2188,20 @@ export class SubagentManager implements SubagentManagerContract {
    * 그대로 유지), run-completion backstop 은 이제 침묵 대신 실제 사유를 담아
    * 정상 발화한다. reservation 은 자식 프로세스도 exit 핸들러도 없으므로
    * 기존과 동일하게 즉시 지운다.
+   *
+   * 리뷰 지적 반영(라운드2): SIGKILL 을 보낸 직후 곧바로 반환하면, 호출자
+   * (main.ts shutdown())가 뒤이어 다른 정리 단계를 거쳐 곧 process.exit() 하는
+   * 사이에 SIGKILL 대상의 'close' 이벤트와 그 안의 run-completion backstop 이
+   * 미처 못 끝나고 프로세스와 함께 잘려나갈 수 있다 — drop-first 버그와 증상만
+   * 다를 뿐 같은 무음 유실 클래스다. 그래서 SIGKILL 이후 각 victim 의 실제 exit
+   * 핸들러(정리+backstop)가 끝나길 STOP_FORCE_KILL_SETTLE_MS 상한을 두고
+   * 기다린다(#stopWaiters, #wireExitHandler 가 완료 시 resolve). 상한을 넘겨도
+   * (예: SIGKILL 에도 안 죽는 병적인 케이스) 조용히 포기하지 않고, 그 victim 에
+   * 한해 이 메서드가 직접 한 번 더 completion backstop 을 호출해 "close 가
+   * 끝내 안 와도 정확히 1회는 보고된다"는 계약을 지킨다 — 실제 exit 핸들러가
+   * 나중에라도 뒤따라오면 #stopWaiters 에 항목이 이미 없어 중복 호출을
+   * 걸러내고, 설령 겹치더라도 complete_*_run 의 서버측 terminal 전이가
+   * 멱등이라 안전하다(_runExitCompletionBackstop 자체 docstring 참고).
    */
   async stop(reason?: string): Promise<void> {
     if (this.#sweepTimer) {
@@ -2178,6 +2210,7 @@ export class SubagentManager implements SubagentManagerContract {
     }
     const stopReason = reason || 'manager_shutdown';
     const victims: SubagentRecord[] = [];
+    const settled: Promise<void>[] = [];
     for (const [pid, rec] of this.#map.entries()) {
       if (rec.kind === 'reservation') {
         this.#map.delete(pid);
@@ -2185,6 +2218,11 @@ export class SubagentManager implements SubagentManagerContract {
       }
       rec.stopReason = stopReason;
       victims.push(rec);
+      settled.push(
+        new Promise<void>((resolve) => {
+          this.#stopWaiters.set(rec.pid, resolve);
+        }),
+      );
     }
     for (const rec of victims) {
       try {
@@ -2204,9 +2242,31 @@ export class SubagentManager implements SubagentManagerContract {
     }
     // 이제 각 victim 의 'close' 이벤트가 도착하면 실제 exit 핸들러가 #map
     // 정리 + temp-config unlink 를 그대로 담당한다(stop() 이 수동으로
-    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수). SIGKILL 에도
-    // 살아남는 스트래글러가 있으면 temp cfg 가 새지만, 이 호출 직후 매니저
-    // 프로세스 자체가 종료되므로 무관하다.
+    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수).
+    let timedOut = false;
+    await Promise.race([
+      Promise.all(settled),
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, STOP_FORCE_KILL_SETTLE_MS).unref?.();
+      }),
+    ]);
+    if (timedOut) {
+      for (const rec of victims) {
+        // #stopWaiters 에 아직 항목이 있다 = 실제 exit 핸들러가 아직 못 끝냄.
+        if (!this.#stopWaiters.delete(rec.pid)) continue;
+        if (rec.run) {
+          try {
+            await this._runExitCompletionBackstop(rec, null);
+          } catch (err: any) {
+            log(`[subagent] stop() force-kill fallback backstop failed pid=${rec.pid}: ${err?.message ?? err}`);
+          }
+          rec.run = null;
+        }
+      }
+    }
     this.#persist();
     log(`SubagentManager stopped (terminated ${victims.length} children, reason=${stopReason})`);
   }

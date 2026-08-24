@@ -649,6 +649,15 @@ export function pendingRestartReason(): 'self_update_restart' | null {
   return _pendingRestartReason;
 }
 
+/** 테스트 전용 탈출구: runNpmGlobalSelfUpdate() 를 통해 실제 npm-global 설치 +
+ *  자가 SIGTERM 을 구동하지 않고도 pendingRestartReason() 을 검증할 수 있게
+ *  한다(ticket 6abe2b79 — pendingRestartReason 자체는 b831b896 이 도입했지만
+ *  이 getter 를 직접 검증하는 테스트는 없었다; main.ts 의 SubagentManager.stop()
+ *  배선이 이 값에 의존하므로 여기서 커버한다). */
+export function _setPendingRestartReasonForTests(reason: 'self_update_restart' | null): void {
+  _pendingRestartReason = reason;
+}
+
 /**
  * Wall-clock timestamp (Date.now()) of the first deferred-due-to-sessions
  * self-update attempt in the current streak, or null when nothing is

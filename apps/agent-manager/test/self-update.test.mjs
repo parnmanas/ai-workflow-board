@@ -32,6 +32,8 @@ import {
   evaluateNpmUpdateGate,
   hasPendingSelfUpdate,
   _npmGlobalUpdaterSourceForTests,
+  pendingRestartReason,
+  _setPendingRestartReasonForTests,
 } from '../dist/lib/self-update.js';
 
 // ─── install mode ───────────────────────────────────────────────────────────
@@ -360,5 +362,31 @@ test('retired git-mode exports are gone', async () => {
   const mod = await import('../dist/lib/self-update.js');
   for (const name of ['adoptRemoteBranch', 'detectRepoRoot', 'computeGitUpdateState']) {
     assert.equal(mod[name], undefined, `${name} must not be exported anymore`);
+  }
+});
+
+// ─── pendingRestartReason (ticket b831b896 / 6abe2b79 rebase 통합) ──────────
+// runNpmGlobalSelfUpdate()의 실제 성공 경로(npm install -g 성공 → 자가 SIGTERM
+// 예약)는 이 스위트 어디에서도 실제로 구동하지 않는다(진짜 npm install + 자가
+// 종료를 유닛 테스트에서 트리거하는 건 너무 위험하다 — 같은 이유로 이미
+// `isSystemdReExecPending`/`_systemdReExecPending`의 세팅 지점도 이 파일에서
+// 테스트되지 않는다). 그 두 self-update 재시작 호출부(POSIX reExecManager,
+// Windows shutdownForNpmGlobalUpdate)에 `_pendingRestartReason = 'self_update_restart'`
+// 한 줄을 심은 배치 자체는 코드 리뷰로 검증한다 — 여기서는 그 값을 읽는
+// getter(pendingRestartReason)의 계약만 테스트 전용 setter로 증명한다(ticket
+// b831b896 이 이 getter 를 도입했지만 직접 검증하는 테스트는 없었다 — ticket
+// 6abe2b79 의 main.ts 통합에서 SubagentManager.stop() 이 이 값에 의존하므로
+// 여기서 커버한다).
+test('pendingRestartReason: 기본값은 null (self-update 재시작 예약 없음)', () => {
+  _setPendingRestartReasonForTests(null);
+  assert.equal(pendingRestartReason(), null);
+});
+
+test('pendingRestartReason: self-update 재시작이 예약되면 self_update_restart 를 반환한다', () => {
+  _setPendingRestartReasonForTests('self_update_restart');
+  try {
+    assert.equal(pendingRestartReason(), 'self_update_restart');
+  } finally {
+    _setPendingRestartReasonForTests(null); // 다른 테스트로 새지 않도록 원복
   }
 });

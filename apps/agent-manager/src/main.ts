@@ -1197,11 +1197,12 @@ async function runRuntime(
   });
 
   const shutdown = async (signal: string): Promise<void> => {
-    // ticket b831b896: self-update's re-exec path SIGTERMs this same process
-    // (see self-update.ts's reExecManager / shutdownForNpmGlobalUpdate), so a
-    // bare signal name can't tell a version-update restart apart from an
-    // operator's SIGTERM/SIGINT or a manual restart_manager command.
-    // pendingRestartReason() is the one place that distinction is recorded.
+    // ticket 6abe2b79 / b831b896: self-update 의 재-exec 경로도 이 함수를
+    // SIGTERM 으로 태운다(self-update.ts 의 reExecManager/shutdownForNpmGlobalUpdate
+    // 참고) — 그래서 signal 인자만으로는 self-update 재시작과 operator
+    // SIGTERM/SIGINT 를 구분할 수 없다. pendingRestartReason() 이 그 구분을
+    // 담당한다(오직 self-update 전용 재시작 경로에서만 세팅되고, restart_manager
+    // 는 세팅하지 않는다 — 그쪽은 'manager_shutdown' 으로 남는다).
     const stopReason = pendingRestartReason() ?? 'manager_shutdown';
     log(`agent-manager received ${signal} — terminating subagents (reason=${stopReason})`);
     presenceHeartbeat._real?.stop();
@@ -1230,7 +1231,7 @@ async function runRuntime(
     }
     eventStream.stop();
     try {
-      await subagentManager.stop();
+      await subagentManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown: ${err?.message ?? err}`);
     }
