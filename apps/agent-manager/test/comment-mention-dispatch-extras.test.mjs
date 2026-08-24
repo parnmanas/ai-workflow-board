@@ -143,3 +143,82 @@ test('handleCommentMention: a per-agent profile on the event wins over a DIFFERE
   const spec = getSpawnedSpec();
   assert.deepEqual(spec.runtimeProfile, RUNTIME_PROFILE);
 });
+
+// ── Hermes ACP 분기 harness 합성 (리뷰 지적, 71532b4f) ──────────────────────
+//
+// handleCommentMention의 Hermes 분기는 컬럼 트리거(#dispatchTriggerBody)의
+// Hermes 분기와 달리 harness.system_prompt_append를 systemContext에 전혀
+// 접지 않았다 — one-shot Claude spawn() 경로만 고치고 넘어갔던 최초 구현의
+// 리뷰 지적 사항. #dispatchHermes()가 결국 runtimeSupervisor.dispatch()에
+// 넘기는 systemContext(skillSnapshot 없을 때는 args.systemContext와 동일)를
+// 캡처해 rolePrompt와 harness append가 합성되는지 직접 검증한다.
+
+const HERMES_AGENT_ID = 'H1';
+const HERMES_WORKING_DIR = '/tmp/awb-test-comment-mention-agent-h1';
+const HERMES_MANAGED_AGENT_CONTEXTS = new Map([
+  [HERMES_AGENT_ID, {
+    agent_id: HERMES_AGENT_ID,
+    workspace_id: 'W1',
+    api_key: 'test-key',
+    working_dir: HERMES_WORKING_DIR,
+    mcp_config_path: '/tmp/awb-test-comment-mention-hermes-mcp.json',
+    cli: 'hermes',
+  }],
+]);
+
+function makeHermesDispatcher(extraDeps = {}) {
+  let dispatchedSpec = null;
+  const runtimeSupervisor = {
+    async dispatch(spec) {
+      dispatchedSpec = spec;
+      return { sessionId: 'sess-1', stopReason: 'end_turn' };
+    },
+  };
+  const dispatcher = new EventDispatcher(
+    {
+      url: 'http://127.0.0.1:0',
+      apiKey: 'test',
+      delegation: { enabled: true, persistentTicketSessions: false },
+    },
+    {
+      managedAgentContexts: HERMES_MANAGED_AGENT_CONTEXTS,
+      runtimeSupervisor,
+      ...extraDeps,
+    },
+  );
+  return { dispatcher, getDispatchedSpec: () => dispatchedSpec };
+}
+
+function hermesBaseEvent(overrides) {
+  return {
+    ticket_id: 'T5',
+    comment_id: 'C5',
+    agent_id: HERMES_AGENT_ID,
+    actor_id: 'U1',
+    actor_type: 'user',
+    content: '@[agent:H1|Hermes Bot] 확인해주세요',
+    mention_source: 'direct',
+    role_prompt: 'You are the assignee.',
+    ...overrides,
+  };
+}
+
+test('handleCommentMention (Hermes branch): harness.system_prompt_append is composed into systemContext alongside rolePrompt', async () => {
+  const { dispatcher, getDispatchedSpec } = makeHermesDispatcher();
+  await dispatcher.handleCommentMention(JSON.stringify(hermesBaseEvent({
+    harness_config: HARNESS_CONFIG,
+  })));
+
+  const spec = getDispatchedSpec();
+  assert.ok(spec, 'runtimeSupervisor.dispatch() must have been called');
+  assert.equal(spec.systemContext, 'You are the assignee.\n\nRespond in Korean.');
+});
+
+test('handleCommentMention (Hermes branch): no harness_config on the event falls back to rolePrompt alone (no stray separator)', async () => {
+  const { dispatcher, getDispatchedSpec } = makeHermesDispatcher();
+  await dispatcher.handleCommentMention(JSON.stringify(hermesBaseEvent()));
+
+  const spec = getDispatchedSpec();
+  assert.ok(spec, 'runtimeSupervisor.dispatch() must have been called');
+  assert.equal(spec.systemContext, 'You are the assignee.');
+});
