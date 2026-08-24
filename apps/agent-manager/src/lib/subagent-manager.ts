@@ -1505,12 +1505,19 @@ export class SubagentManager implements SubagentManagerContract {
     // run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가 그냥
     // "결과 없음" 보다 낫다.
     const tail = this.#collectTail(record);
+    // ticket b831b896 round 3: no speculative "TTL sweep/kill일 수 있음"
+    // guess anymore — and there is nothing to classify it AS here, either.
+    // stop() / #sweep() / stopForAgent all drop the record from #map BEFORE
+    // signalling (ticket 6abe2b79), so a manager-initiated kill never
+    // reaches this backstop at all — this only ever fires for an exit NONE
+    // of those caused (crash, stuck permission prompt, …), which really is
+    // unknown.
     const summary = hasUntrustedWorkspaceWarning(tail)
       ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
         'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
         'cli-home의 .claude.json trust 시딩을 확인하세요.'
-      : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}) — ` +
-        `승인 대기 등으로 멈춰 TTL sweep/kill에 의해 종료됐을 수 있습니다.`;
+      : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}, reason=unknown) — ` +
+        `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
     await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,

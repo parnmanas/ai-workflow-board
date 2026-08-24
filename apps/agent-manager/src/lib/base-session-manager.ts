@@ -255,13 +255,28 @@ export interface SessionRecord {
    *  Read by `_onChildExit` so the exit hook skips the silent-exit fallback and
    *  circuit-breaker accounting — we killed it on purpose, it is not a crash. */
   _twinTerminated?: boolean;
-  /** Set by `stop()` right before it SIGTERMs this session as part of a
-   *  manager-wide shutdown/restart — e.g. `'self_update_restart'` when the
-   *  manager is tearing down to re-exec into a just-installed version
-   *  (ticket b831b896). Read by `_onChildExit` so a run-completion backstop
-   *  fired for this exit can report the real cause instead of guessing
-   *  idle-timer/health-watchdog. Undefined for any exit `stop()` didn't
-   *  cause (idle reap, TTL sweep, crash, normal reply). */
+  /**
+   * Set right before the manager deliberately terminates/closes this
+   * session, by whichever kill path caused it (ticket b831b896 review round
+   * 3 — "각 kill 지점에서 reason을 태그"). Read by `_onChildExit` so a
+   * run-completion backstop fired for this exit can report the real cause
+   * instead of guessing idle-timer/health-watchdog. Canonical values, one
+   * per manager-initiated kill site:
+   *   - `'self_update_restart'` — stop(), self-update's own SIGTERM
+   *   - `'manager_shutdown'`    — stop(), any other reason (operator
+   *                               SIGTERM/SIGINT, restart_manager)
+   *   - `'health_watchdog'`     — #killUnhealthy (no LLM response threshold)
+   *   - `'keep_alive_ceiling'`  — #forceTerminate (explicit keep-alive grant
+   *                               exceeded its hard ceiling)
+   *   - `'idle'`                — _onIdleTimerFired (idle window elapsed,
+   *                               no progress evidence)
+   *   - `'max_turns'`           — _maybeCloseForMaxTurns (turn cap hit, no
+   *                               progress evidence)
+   *   - `'credential_rotation'` — stopForAgent
+   * Undefined for any exit none of the above caused (crash, normal reply,
+   * an exit the manager didn't initiate) — `_onChildExit` reports those as
+   * `'unknown'` rather than guessing a specific mechanism it can't observe.
+   */
   stopReason?: string;
   /** Effective MCP api key the child authenticates with — the managed
    *  agent's key when running for one, else the manager's. Used to attribute
@@ -1068,6 +1083,9 @@ export class BaseSessionManager {
     log(
       `${this.#logTag} ${this.#keyField}=${key} hit maxTurns=${maxTurns}, closing stdin for respawn (no progress evidence)`,
     );
+    // ticket b831b896 round 3: canonical bucket, distinct from 'idle' — this
+    // is a turn-count cap, not an activity timeout.
+    sess.stopReason = 'max_turns';
     try {
       sess.child.stdin.end();
     } catch {
@@ -1400,6 +1418,9 @@ export class BaseSessionManager {
     log(
       `${this.#logTag} idle, closing stdin ${this.#keyField}=${key} pid=${sess.pid} (no progress evidence)`,
     );
+    // ticket b831b896 round 3: canonical bucket for a run-completion
+    // backstop — set before closing stdin, same as every other kill site.
+    sess.stopReason = 'idle';
     try {
       sess.child.stdin.end();
     } catch {
@@ -1484,6 +1505,10 @@ export class BaseSessionManager {
     // fresh-spawns instead of reusing a dying stdin, and `_getLiveSession`'s
     // existing `unhealthyKilled` purge covers any lookup that races this.
     sess.unhealthyKilled = true;
+    // ticket b831b896 round 3: this method's only caller passes
+    // 'keep_alive_ceiling' — tag it so a run-completion backstop reports the
+    // real cause instead of guessing.
+    sess.stopReason = reason;
     if (this._sessions.get(key) === sess) this._sessions.delete(key);
     if (sess.idleTimer) {
       clearTimeout(sess.idleTimer);
@@ -1660,6 +1685,10 @@ export class BaseSessionManager {
   #killUnhealthy(sess: SessionRecord, reason: string): void {
     if (sess.unhealthyKilled) return;
     sess.unhealthyKilled = true;
+    // ticket b831b896 round 3: canonical bucket for a run-completion
+    // backstop; `reason` stays free-text (elapsed time / turn count) for
+    // the log line below.
+    sess.stopReason = 'health_watchdog';
     const key = sess[this.#keyField];
     log(
       `${this.#logTag} UNHEALTHY ${this.#keyField}=${key} pid=${sess.pid} — ${reason}; killing for respawn`,
@@ -1758,6 +1787,9 @@ export class BaseSessionManager {
     const victims = Array.from(this._sessions.values()).filter((s) => s.agentId === agentId);
     if (victims.length === 0) return { count: 0, inflight: [] };
     for (const sess of victims) {
+      // ticket b831b896 round 3: canonical bucket for a run-completion
+      // backstop, set before signalling like every other kill site.
+      sess.stopReason = 'credential_rotation';
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);
         sess.idleTimer = null;

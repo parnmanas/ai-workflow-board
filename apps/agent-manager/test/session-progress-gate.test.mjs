@@ -192,6 +192,9 @@ test('idle expired + zero progress evidence → closes stdin exactly like before
   mgr._sessions.set(sess.sessionKey, sess);
   await mgr.checkIdle(sess, 10 * 60_000);
   assert.equal(ended, true, 'a genuinely idle session (no output/tasks/cli-home activity) still reaps');
+  // ticket b831b896 round 3: tagged before stdin.end() so a run-completion
+  // backstop can report the real cause instead of guessing.
+  assert.equal(sess.stopReason, 'idle');
 });
 
 // ── 3. stdout activity resets the idle gate (signal 1) ──
@@ -391,6 +394,9 @@ test('maxTurns reached + zero progress evidence → closes stdin for respawn (re
   mgr._sessions.set(sess.sessionKey, sess);
   await mgr.checkMaxTurns(sess, 30);
   assert.equal(ended, true, 'a genuinely idle session at maxTurns still respawns as before');
+  // ticket b831b896 round 3: distinct from 'idle' — this is a turn-count
+  // cap, not an activity timeout, and a run-completion backstop should say so.
+  assert.equal(sess.stopReason, 'max_turns');
 });
 
 // ── 4b. unhealthy watchdog hits the same progress gate (P0, round-1 review) ──
@@ -472,6 +478,9 @@ test('P0 control: unhealthy hit + zero progress evidence + no keep-alive → sti
     assert.ok(killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM', 'a genuinely silent session is still SIGTERM-ed');
     assert.equal(sess.unhealthyKilled, true);
     assert.equal(mgr._sessions.has(sess.sessionKey), false, 'session record dropped');
+    // ticket b831b896 round 3: tagged before SIGTERM so a run-completion
+    // backstop can report the real cause instead of guessing.
+    assert.equal(sess.stopReason, 'health_watchdog');
   } finally {
     process.kill = origKill;
   }
@@ -632,6 +641,9 @@ test('keep-alive ceiling reached → force-terminates the session and posts a ro
 
     assert.ok(killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM', 'ceiling breach signals the CLI child');
     assert.equal(mgr._sessions.has(key), false, 'session record dropped immediately (drop-first, like #killUnhealthy)');
+    // ticket b831b896 round 3: tagged before SIGTERM (on the retained local
+    // `sess` reference — the map entry is already gone by this point).
+    assert.equal(sess.stopReason, 'keep_alive_ceiling');
 
     const notices = posts.filter((p) => p.roomId === roomId);
     assert.equal(notices.length, 1, 'exactly one room notice posted — never a silent kill');

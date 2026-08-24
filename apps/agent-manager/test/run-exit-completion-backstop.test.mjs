@@ -168,6 +168,15 @@ test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)�
   const call = mcpToolCalls.find((c) => c.name === 'complete_action_run' && c.args.run_id === 'run-generic-hang');
   assert.ok(call);
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  // ticket b831b896 round 3: stopReason이 전혀 없는 경우(매니저가 죽인 게
+  // 아닌 진짜 원인불명 종료) — 추측 문구 대신 정직하게 unknown이라고만
+  // 기록해야 한다.
+  assert.match(call.args.summary, /reason=unknown/, '원인을 모르면 모른다고 정확히 기록해야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 모르는데 특정 메커니즘(idle-timer/health-watchdog)을 추측하면 안 된다',
+  );
 });
 
 // ticket b831b896: 매니저 self-update 재시작이 in-flight 세션을 SIGTERM하면
@@ -198,6 +207,16 @@ test('ChatSessionManager.stop: 살아있는 run-bound 세션에 reason을 태그
   mgr._sessions.set(sess.sessionKey, sess);
   await mgr.stop('self_update_restart');
   assert.equal(sess.stopReason, 'self_update_restart', 'stop()이 SIGTERM 전에 sess.stopReason을 설정해야 한다');
+});
+
+// ticket b831b896 round 3: "각 kill 지점에서 reason을 태그" — stopForAgent
+// (credential rotation)도 manager-initiated kill 지점 중 하나다.
+test('ChatSessionManager.stopForAgent: 살아있는 세션에 credential_rotation을 태그해 SIGTERM 이전에 남긴다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(50002, { agentId: 'agent-rotated' });
+  mgr._sessions.set(sess.sessionKey, sess);
+  await mgr.stopForAgent('agent-rotated');
+  assert.equal(sess.stopReason, 'credential_rotation');
 });
 
 // ── SubagentManager._runExitCompletionBackstop (oneshot run 경로) ────────────
@@ -283,4 +302,14 @@ test('SubagentManager._runExitCompletionBackstop: 흔한 hang(tail에 trust 경�
   assert.ok(call);
   assert.equal(call.args.status, 'error');
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  // ticket b831b896 round 3: stop()/#sweep()/stopForAgent가 전부 SIGTERM
+  // 전에 #map에서 record를 지우는 기존 설계(ticket 6abe2b79)라 매니저發
+  // kill은 애초에 이 backstop에 도달 못 한다 — 도달했다면 그 자체로
+  // 원인불명이므로 추측 대신 정직하게 unknown이라고 기록해야 한다.
+  assert.match(call.args.summary, /reason=unknown/, '원인을 모르면 모른다고 정확히 기록해야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /TTL sweep|idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 모르는데 TTL sweep/kill 같은 특정 메커니즘을 추측하면 안 된다',
+  );
 });
