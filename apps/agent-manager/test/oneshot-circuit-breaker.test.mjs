@@ -1219,3 +1219,125 @@ test('SIGKILL 이후 close 가 끝내 오지 않는 극단 케이스 (ticket 6ab
     t.mock.timers.reset();
   }
 });
+
+test('settle timeout fallback 과 뒤늦은 close 의 interleaving (ticket 6abe2b79 리뷰 라운드3): completion fetch 가 아직 pending 인 동안 close 가 와도 complete_*_run 은 정확히 1회만 호출된다', async (t) => {
+  // 리뷰 지적: fallback 이 #stopWaiters.delete() 후 record.run 을 await 끝나고
+  // 나서야 null 처리하면, 그 await 도중 실제 close 가 와서 exit 핸들러가 같은
+  // non-null record.run 을 보고 completion 을 또 부를 수 있다. 이 테스트는 그
+  // 정확한 타이밍(1차 completion fetch 가 아직 안 끝난 시점에 close 도착)을
+  // 재현해, #claimRun 의 원자적 claim(읽기+null 대입이 await 없는 한 동기
+  // 구간)이 실제로 두 번째 호출을 막는지 증명한다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => (pid === child.pid ? true : realKill(pid, sig));
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // complete_action_run 호출만 게이트로 막아 "fetch 가 아직 resolve 되지 않은
+  // 상태"를 정확히 만든다 — 호출 자체는 gate 이전에 기록해, 이중 호출이 실제로
+  // 일어난다면 두 번 다 잡힌다.
+  const toolCalls = [];
+  let releaseGate;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        const name = body.params?.name;
+        mcpToolCalls.push(name);
+        toolCalls.push({ name, args: body.params?.arguments });
+        if (name === 'complete_action_run') await gate; // 1차 호출을 여기서 붙잡아 둔다
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-race',
+        ticket_id: 'ticket-race',
+        process_handle: child,
+        commentSent: false,
+      }),
+      run: { run_id: 'oneshot-race-run', workspace_id: 'ws-1', kind: 'action' },
+    });
+
+    const stopping = mgr.stop('manager_shutdown');
+    t.mock.timers.tick(STOP_GRACE_MS);
+    await new Promise((r) => realSetTimeout(r, 0)); // SIGKILL 루프 + settle 타이머 등록
+    t.mock.timers.tick(STOP_FORCE_KILL_SETTLE_MS + 100); // settle 상한 만료 → fallback 시작
+
+    // fallback 의 complete_action_run 호출이 게이트에 막혀 "아직 pending" 인
+    // 상태에 도달할 때까지 기다린다 — 바로 이 시점이 리뷰가 지적한 취약한
+    // 창(window)이다.
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      '전제조건: fallback 의 1차 호출이 딱 하나 걸려 있다(아직 미완료)',
+    );
+
+    // 바로 이 순간 실제 close 가 뒤늦게 온다 — #claimRun 을 안 썼다면 exit
+    // 핸들러가 여전히 non-null 인 record.run 을 보고 completion 을 또 부를
+    // 것이다. exit 핸들러는 이 앞에서 _sweepOneshotRunOrphans 의 실 `ps`
+    // 서브프로세스 호출도 거치므로(claim 이 없다면 그 경로까지 다 타야 두 번째
+    // 호출이 실제로 fetch 에 도달한다), 고정된 짧은 지연이 아니라 넉넉한 실시간
+    // 창을 두고 그 사이 언제든 두 번째 호출이 나타나면 즉시 실패시킨다 — 그래야
+    // "그냥 아직 안 왔을 뿐"이라 우연히 통과하는 공허한 통과를 피한다.
+    child.emit('close', null, 'SIGKILL');
+    const raceWindowStart = Date.now();
+    while (Date.now() - raceWindowStart < 500) {
+      if (toolCalls.filter((c) => c.name === 'complete_action_run').length > 1) break;
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      'close 가 pending 인 fallback 호출과 겹쳐도 두 번째 complete_action_run 호출은 발생하면 안 된다',
+    );
+
+    releaseGate(); // 이제 1차 호출을 마저 완료시킨다
+    await stopping;
+
+    const calls = toolCalls.filter((c) => c.name === 'complete_action_run');
+    assert.equal(calls.length, 1, '최종적으로도 complete_action_run 은 정확히 1회만 호출됐다');
+    assert.equal(calls[0].args.run_id, 'oneshot-race-run');
+    assert.match(calls[0].args.summary, /reason=manager_shutdown/);
+    assert.equal(cb.size, 0, '이 경합 시나리오도 breaker 에는 계상되지 않는다');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});

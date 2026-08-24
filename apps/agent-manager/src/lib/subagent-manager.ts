@@ -383,6 +383,22 @@ export class SubagentManager implements SubagentManagerContract {
    *  process.exit() 전에 못 끝날 수 있었다). */
   #stopWaiters = new Map<number, () => void>();
   #reservationCounter = 0;
+  /**
+   * ticket 6abe2b79 리뷰 라운드3: record.run 을 "완료 처리할 권리"로 원자적으로
+   * 떼어낸다 — 읽기와 null 대입이 같은 동기 구간 안이라 그 사이에 다른 경로가
+   * 끼어들 수 없다(JS 단일 스레드 특성상 await 없는 연속 statement 는 절대
+   * 쪼개지지 않는다). 이 값을 쓰는 모든 completion 경로(#wireExitHandler 의
+   * close 콜백, stop() 의 force-kill fallback)가 반드시 이 메서드로만
+   * record.run 을 읽어야 한다 — 직접 `record.run` 을 읽고 그 값을 들고 await
+   * 하면, await 도중 다른 경로가 같은 값을 또 읽어 complete_*_run 이 두 번
+   * 호출되는 TOCTOU 경합이 생긴다(리뷰에서 실측 지적됨). null 을 반환하면 이미
+   * 다른 경로가 가져갔다는 뜻 — 호출자는 즉시 스킵한다.
+   */
+  #claimRun(record: SubagentRecord): RunSessionBinding | null {
+    const run = record.run ?? null;
+    record.run = null;
+    return run;
+  }
   #persistPath: string;
   #pidDir: string;
   #initialized = false;
@@ -1074,13 +1090,23 @@ export class SubagentManager implements SubagentManagerContract {
       // end for orphaned background tasks the CLI left running and finalize a
       // stranded run as `error`. Gated on record.run so ordinary spawns skip the
       // process enumeration entirely. Guarded internally — never throws.
-      if (record.run) await this._sweepOneshotRunOrphans(record);
-
-      // ticket 152e3606: run-completion backstop — 같은 티켓으로 고친
-      // ChatSessionManager#_onChildExit의 oneshot 짝. 위 _sweepOneshotRunOrphans
-      // 이후에도 왜 이게 여전히 필요한지는 _runExitCompletionBackstop 자체
-      // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
-      if (record.run) await this._runExitCompletionBackstop(record, code);
+      //
+      // ticket 6abe2b79 리뷰 라운드3: 아래 두 단계가 쓰던 `record.run` 을 여기서
+      // #claimRun 으로 딱 한 번, 동기적으로 떼어낸다 — stop() 의 force-kill
+      // fallback 도 동일한 메서드로 claim 하므로, 둘 중 먼저 이 동기 구간을
+      // 통과하는 쪽만 이 run 을 완료 처리한다. 이후 두 단계는 이 로컬 스냅샷만
+      // 쓰고 record.run 을 다시 읽지 않는다.
+      const claimedRun = this.#claimRun(record);
+      if (claimedRun) {
+        const finalizedByOrphanSweep = await this._sweepOneshotRunOrphans(record, claimedRun);
+        // ticket 152e3606: run-completion backstop — 같은 티켓으로 고친
+        // ChatSessionManager#_onChildExit의 oneshot 짝. orphan sweep 이 이미
+        // 끝내지 않았을 때만 필요한 이유는 _runExitCompletionBackstop 자체
+        // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
+        if (!finalizedByOrphanSweep) {
+          await this._runExitCompletionBackstop(record, code, claimedRun);
+        }
+      }
 
       // ticket 6abe2b79: 이 victim 의 post-exit 체인(위 run-completion backstop
       // 포함)이 실제로 끝났음을 대기 중인 stop() 에 알린다 — stop() 이 SIGKILL
@@ -1445,19 +1471,28 @@ export class SubagentManager implements SubagentManagerContract {
    * zombie. Re-reads run status first so a run the agent already finalized is
    * never clobbered. Every await is guarded — this runs inside the exit closure
    * and must never reject. Public (`_`-prefixed) for the test runner.
+   *
+   * ticket 6abe2b79 리뷰 라운드3: `runOverride` 가 주어지면(closure 가 #claimRun
+   * 으로 이미 떼어낸 스냅샷) 그걸 쓰고, 없으면(기존 직접-호출 유닛 테스트 호환)
+   * `record.run` 을 그대로 읽는다. 반환값 `true` 는 "이 run 은 여기서 완료
+   * 처리됐거나 이미 terminal 이라 더 손댈 게 없다" — 호출자(closure)는 이 경우
+   * `_runExitCompletionBackstop` 을 또 부르면 안 된다.
    */
-  async _sweepOneshotRunOrphans(record: SubagentRecord): Promise<void> {
-    const run = record.run;
-    if (!run) return;
+  async _sweepOneshotRunOrphans(
+    record: SubagentRecord,
+    runOverride?: RunSessionBinding | null,
+  ): Promise<boolean> {
+    const run = runOverride !== undefined ? runOverride : record.run;
+    if (!run) return false;
 
     let orphans: ProcNode[];
     try {
       orphans = await findLiveGroupBackgroundTasks(record.pid);
     } catch (err: any) {
       log(`[subagent] run orphan sweep enumeration failed pid=${record.pid}: ${err?.message ?? err}`);
-      return;
+      return false;
     }
-    if (orphans.length === 0) return; // clean one-shot turn — nothing stranded
+    if (orphans.length === 0) return false; // clean one-shot turn — nothing stranded
 
     const run8 = run.run_id.slice(0, 8);
     const pidList = orphans.map((o) => o.pid).join(',');
@@ -1490,7 +1525,7 @@ export class SubagentManager implements SubagentManagerContract {
         `[subagent] run ${run8} already ${status}; ${orphans.length} live background task(s) present ` +
           `at oneshot cleanup [pids=${pidList}] — leaving to normal teardown`,
       );
-      return;
+      return true; // 이미 terminal — backstop 이 또 부를 필요 없음
     }
 
     // THE TRAP: one-shot run exited its turn with live non-benign descendants and
@@ -1520,6 +1555,7 @@ export class SubagentManager implements SubagentManagerContract {
       `[subagent] run ${run8} oneshot cleanup: reaped ${reaped.length}/${orphans.length} ` +
         `live background task(s) [pids=${pidList}] — finalized run as error`,
     );
+    return true;
   }
 
   /**
@@ -1537,9 +1573,17 @@ export class SubagentManager implements SubagentManagerContract {
    * 처리한 run은 그대로 유지된다. 절대 throw하지 않는다 — 모든 실패는
    * fireAndForgetTool 자체의 내부 catch로 흡수된다. 테스트 러너를 위해
    * `#private`가 아니라 `_` 접두사로 뒀다.
+   *
+   * ticket 6abe2b79 리뷰 라운드3: `runOverride` 가 주어지면(closure/stop() 이
+   * #claimRun 으로 이미 떼어낸 스냅샷) 그걸 쓰고, 없으면(기존 직접-호출 유닛
+   * 테스트 호환) `record.run` 을 읽는다.
    */
-  async _runExitCompletionBackstop(record: SubagentRecord, code: number | null): Promise<void> {
-    const run = record.run;
+  async _runExitCompletionBackstop(
+    record: SubagentRecord,
+    code: number | null,
+    runOverride?: RunSessionBinding | null,
+  ): Promise<void> {
+    const run = runOverride !== undefined ? runOverride : record.run;
     if (!run) return;
     const route = resolveRunCompletionRoute(run.kind);
     // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
@@ -1571,6 +1615,10 @@ export class SubagentManager implements SubagentManagerContract {
       status: route.failureStatus,
       summary,
     });
+    // ticket 6abe2b79 리뷰 라운드3: 호출자가 대부분 #claimRun 으로 이미 null
+    // 처리해 둔 상태라 대개 no-op 이지만, override 없이 직접 불린 경우(기존
+    // 유닛 테스트)에도 이중 호출을 막는 belt-and-suspenders.
+    record.run = null;
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {
@@ -2198,10 +2246,17 @@ export class SubagentManager implements SubagentManagerContract {
    * 기다린다(#stopWaiters, #wireExitHandler 가 완료 시 resolve). 상한을 넘겨도
    * (예: SIGKILL 에도 안 죽는 병적인 케이스) 조용히 포기하지 않고, 그 victim 에
    * 한해 이 메서드가 직접 한 번 더 completion backstop 을 호출해 "close 가
-   * 끝내 안 와도 정확히 1회는 보고된다"는 계약을 지킨다 — 실제 exit 핸들러가
-   * 나중에라도 뒤따라오면 #stopWaiters 에 항목이 이미 없어 중복 호출을
-   * 걸러내고, 설령 겹치더라도 complete_*_run 의 서버측 terminal 전이가
-   * 멱등이라 안전하다(_runExitCompletionBackstop 자체 docstring 참고).
+   * 끝내 안 와도 정확히 1회는 보고된다"는 계약을 지킨다.
+   *
+   * 리뷰 지적 반영(라운드3): #stopWaiters 삭제만으로는 중복 호출을 막지
+   * 못한다 — 그건 "누가 대기 중인지"만 추적할 뿐, "누가 completion 을 부를
+   * 권리를 가졌는지"는 별개다. 실제 close 가 이 fallback 의 await 도중 뒤늦게
+   * 와도 양쪽이 같은 record.run 을 보고 둘 다 completion 을 부를 수 있었다.
+   * 지금은 #claimRun 으로 record.run 을 await 하기 *전에* 동기적으로 떼어내
+   * (읽기+null 대입이 한 동기 구간), 실제 exit 핸들러도 동일한 메서드로만
+   * record.run 을 읽으므로 둘 중 먼저 그 동기 구간을 통과하는 쪽만 완료
+   * 처리한다 — 서버측 멱등성은 상태 손상을 막는 안전판일 뿐, 이게 "정확히
+   * 1회 호출"을 보장하는 진짜 메커니즘이다.
    */
   async stop(reason?: string): Promise<void> {
     if (this.#sweepTimer) {
@@ -2257,13 +2312,16 @@ export class SubagentManager implements SubagentManagerContract {
       for (const rec of victims) {
         // #stopWaiters 에 아직 항목이 있다 = 실제 exit 핸들러가 아직 못 끝냄.
         if (!this.#stopWaiters.delete(rec.pid)) continue;
-        if (rec.run) {
+        // #claimRun: record.run 읽기 + null 대입이 여기서 동기적으로 끝난다 —
+        // 뒤이은 await 도중 실제 close 가 와도, 그쪽의 #claimRun 호출은 이미
+        // null 을 보고 스킵한다(또는 이쪽이 늦게 도착해 이미 null 을 받는다).
+        const claimedRun = this.#claimRun(rec);
+        if (claimedRun) {
           try {
-            await this._runExitCompletionBackstop(rec, null);
+            await this._runExitCompletionBackstop(rec, null, claimedRun);
           } catch (err: any) {
             log(`[subagent] stop() force-kill fallback backstop failed pid=${rec.pid}: ${err?.message ?? err}`);
           }
-          rec.run = null;
         }
       }
     }
