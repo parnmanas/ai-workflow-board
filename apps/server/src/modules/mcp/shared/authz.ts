@@ -79,6 +79,13 @@ export async function resolveCallerWorkspaceId(
  * still reach every workspace, but only after a DB lookup proves the agent
  * really is global — never merely because the caller omitted workspaceId.
  * Every other unresolved case (no caller, no agentId, unknown agent) denies.
+ *
+ * A null `targetWorkspaceId` (a genuinely global resource) is checked via
+ * that same DB lookup FIRST, before ever consulting `caller.workspaceId` —
+ * a workspace-bound ApiKey can never legitimately equal a null target by
+ * definition, so short-circuiting on it there would reject every caller,
+ * including a genuinely global Agent whose ApiKey row still carries a
+ * non-null workspace_id from issuance context (ticket 9b7a5bb7).
  */
 export async function callerCanAccessWorkspace(
   dataSource: DataSource,
@@ -86,6 +93,12 @@ export async function callerCanAccessWorkspace(
   targetWorkspaceId: string | null,
 ): Promise<boolean> {
   if (!caller) return false;
+  if (targetWorkspaceId === null) {
+    if (!caller.agentId) return false;
+    const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+    if (!agent) return false;
+    return normalizeAgentWorkspaceId(agent.workspace_id) === null && caller.scope === 'full';
+  }
   if (caller.workspaceId) {
     return normalizeAgentWorkspaceId(caller.workspaceId) === targetWorkspaceId;
   }
