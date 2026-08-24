@@ -570,11 +570,19 @@ export async function listTree(repoPath: string, ref: string, treePath: string):
   // `<ref>:<path>` resolves to the tree object at that path; ls-tree then lists
   // its immediate children with names relative to it.
   const treeish = norm ? `${r}:${norm}` : r;
+  // `--long` 없는 plain `ls-tree` 는 tree 객체만 읽는다 — blobless
+  // (`--filter=blob:none`) 캐시 클론도 tree 는 항상 로컬에 전부 갖고
+  // 있으므로 이 spawn 은 절대 lazy-fetch 하지 않는다. `--long` 은 추가로
+  // blob 마다 object size 를 요구하는데, 이게 바로 이 티켓이 고치는
+  // blob당 promisor fetch 폭주의 원인이었다(ticket 719ef137/4796899d).
+  // 크기는 별도로, 로컬에 있는 것만 best-effort 로 채운다 —
+  // fillBlobSizesLocalOnly 참고.
   const { stdout } = await runGit(
-    ['ls-tree', '--long', '--', treeish],
+    ['ls-tree', '--', treeish],
     { cwd: repoPath, maxBytes: 4 * 1024 * 1024 },
   );
   const entries = parseLsTree(stdout, norm);
+  await fillBlobSizesLocalOnly(repoPath, entries);
   entries.sort((a, b) => {
     const ad = a.type === 'tree' ? 0 : 1;
     const bd = b.type === 'tree' ? 0 : 1;
@@ -588,21 +596,16 @@ function parseLsTree(stdout: string, basePath: string): TreeEntry[] {
   const out: TreeEntry[] = [];
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    // Format (--long): "<mode> <type> <sha> <size>\t<name>"
+    // 포맷(`--long` 없음): "<mode> <type> <sha>\t<name>" — size 컬럼 없음;
+    // blob 크기는 fillBlobSizesLocalOnly 가 별도로 채운다.
     const tabIdx = line.indexOf('\t');
     if (tabIdx < 0) continue;
     const meta = line.slice(0, tabIdx).trim().split(/\s+/);
     const name = line.slice(tabIdx + 1);
     if (meta.length < 3) continue;
-    const [, type, sha, sizeRaw] = meta;
+    const [, type, sha] = meta;
     const t: TreeEntry['type'] = type === 'tree' ? 'tree' : type === 'commit' ? 'commit' : 'blob';
-    out.push({
-      name,
-      path: basePath ? `${basePath}/${name}` : name,
-      type: t,
-      sha,
-      size: t === 'blob' && sizeRaw && sizeRaw !== '-' ? parseInt(sizeRaw, 10) : null,
-    });
+    out.push({ name, path: basePath ? `${basePath}/${name}` : name, type: t, sha, size: null });
   }
   return out;
 }
@@ -648,6 +651,56 @@ export async function listTreeRecursive(repoPath: string, ref: string, treePath:
     out.push({ path: norm ? `${norm}/${name}` : name, sha });
   }
   return out;
+}
+
+/**
+ * `listTree` 의 blob entry 에 대한 best-effort 크기 백필 — 캐시 클론에
+ * 이미 로컬로 있는 객체에 대해서만 `size` 를 채우고, 절대 promisor fetch
+ * 를 유발하지 않는다. 아직 로컬에 없는 blob 은 `size: null` 로 남기고,
+ * 호출부는 디렉터리 목록 하나 보여주자고 네트워크 왕복을 태우는 대신
+ * "크기 미상"으로 degrade 한다(ticket 4796899d — 719ef137 의
+ * `git ls-tree --long` 버그와 근본 원인은 같지만 호출부가 다르다).
+ *
+ * 이 디렉터리의 blob SHA 목록을 그냥 `git cat-file --batch-check` 에
+ * `noLazyFetch` 로 감싸 먹이는 방식은 안 통한다: 실측으로 확인한 바,
+ * promisor 클론에서 입력 중 단 하나라도 로컬에 없으면 그 한 줄만
+ * "missing" 으로 보고하고 계속하는 게 아니라 batch-check 프로세스
+ * 전체가 `fatal: could not fetch <oid> from promisor remote` 로 즉시
+ * 죽는다(exit 128) — 이미 캐시된 blob 과 아직 안 가져온 blob 이 섞인
+ * 디렉터리에는 쓸 수 없다. 또한 `noLazyFetch` 없이 여러 개를 한 번에
+ * 먹여도 git 이 missing 객체 하나당 별도의 promisor 왕복을 여는 것도
+ * 확인했다(`ls-tree --long` 과 동일한 O(blob) 병리) — 이 방법도 제외.
+ *
+ * 대신 클론이 이미 갖고 있는 전체 객체를 열거해서(`--batch-all-objects`,
+ * promisor 원격과 무관하게 네트워크를 절대 건드리지 않는 로컬
+ * pack/loose 객체 DB 스캔) 그 맵에서 크기를 조회한다 — 디스크에 이미
+ * 있는 것만 답할 수 있는 호출이라 애초에 missing-object 실패 모드
+ * 자체가 없다.
+ */
+async function fillBlobSizesLocalOnly(repoPath: string, entries: TreeEntry[]): Promise<void> {
+  const blobs = entries.filter((e) => e.type === 'blob');
+  if (blobs.length === 0) return;
+  let stdout: string;
+  try {
+    ({ stdout } = await runGit(['cat-file', '--batch-check', '--batch-all-objects'], {
+      cwd: repoPath,
+      maxBytes: 32 * 1024 * 1024,
+      noLazyFetch: true,
+    }));
+  } catch {
+    return; // best-effort — size는 null로 남고 목록 자체는 그대로 성공한다
+  }
+  const sizeBySha = new Map<string, number>();
+  for (const line of stdout.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 3) continue; // 손상/절단된 줄 — 건너뜀
+    const size = parseInt(parts[2], 10);
+    if (Number.isFinite(size)) sizeBySha.set(parts[0], size);
+  }
+  for (const e of blobs) {
+    const size = sizeBySha.get(e.sha);
+    if (size !== undefined) e.size = size;
+  }
 }
 
 export interface FileContent {
