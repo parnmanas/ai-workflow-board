@@ -13,7 +13,12 @@ import {
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
 import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
-import { isSystemdReExecPending, runSelfUpdate, UpdateChecker } from './lib/self-update.js';
+import {
+  isSystemdReExecPending,
+  pendingRestartReason,
+  runSelfUpdate,
+  UpdateChecker,
+} from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -576,6 +581,14 @@ async function runRuntime(
   // OAuth until idle/maxTurns retired it (10+ minutes).
   const chatSessionManager = new ChatSessionManager(config);
   const ticketSessionManager = new TicketSessionManager(config, circuitBreaker);
+  // ticket b831b896: total chat / action / QA / ticket-dispatch sessions
+  // currently live, across all three managers. Fed to runSelfUpdate so it can
+  // defer a restart while real work is in flight instead of SIGTERMing it
+  // moments after it starts.
+  const countInFlightSessions = (): number =>
+    subagentManager._snapshot().length +
+    chatSessionManager._snapshot().length +
+    ticketSessionManager._snapshot().length;
   // Late-bound reference to the SSE stream — the EventStream is constructed
   // after this command handler (it depends on commandHandler for dispatch),
   // so the spawn_agent → reconnect hook captures this slot and resolves it
@@ -601,6 +614,9 @@ async function runRuntime(
     circuitBreaker,
     runtimeSupervisor,
     cliLoginManager,
+    // ticket b831b896: lets #updateManager() pass the live session count into
+    // runSelfUpdate's drain-wait gate.
+    countInFlightSessions,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
@@ -1176,7 +1192,13 @@ async function runRuntime(
   });
 
   const shutdown = async (signal: string): Promise<void> => {
-    log(`agent-manager received ${signal} — terminating subagents`);
+    // ticket b831b896: self-update's re-exec path SIGTERMs this same process
+    // (see self-update.ts's reExecManager / shutdownForNpmGlobalUpdate), so a
+    // bare signal name can't tell a version-update restart apart from an
+    // operator's SIGTERM/SIGINT or a manual restart_manager command.
+    // pendingRestartReason() is the one place that distinction is recorded.
+    const stopReason = pendingRestartReason() ?? 'manager_shutdown';
+    log(`agent-manager received ${signal} — terminating subagents (reason=${stopReason})`);
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
     updateChecker.stop();
@@ -1208,12 +1230,12 @@ async function runRuntime(
       log(`shutdown: ${err?.message ?? err}`);
     }
     try {
-      await chatSessionManager.stop();
+      await chatSessionManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown (chat): ${err?.message ?? err}`);
     }
     try {
-      await ticketSessionManager.stop();
+      await ticketSessionManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown (ticket): ${err?.message ?? err}`);
     }
@@ -1252,7 +1274,7 @@ async function runRuntime(
   // its own. A contended SIGUSR1 just gets a no-op summary back.
   process.on('SIGUSR1', async () => {
     try {
-      const result = await runSelfUpdate({ log });
+      const result = await runSelfUpdate({ log, countInFlightSessions });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);

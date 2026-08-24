@@ -51,6 +51,15 @@ const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
+/** How often to re-check in-flight session count while deferring a
+ *  self-update restart. See waitForSessionsToDrain (ticket b831b896). */
+export const SELF_UPDATE_DRAIN_POLL_MS = 15_000;
+/** Upper bound on how long a self-update waits for in-flight chat / action /
+ *  QA / ticket-dispatch sessions to drain before forcing the restart anyway.
+ *  Sessions still running past this cap get SIGTERM'd same as before — the
+ *  difference is the kill is now tagged `reason=self_update_restart`
+ *  accurately instead of guessed (ticket b831b896). */
+export const SELF_UPDATE_DRAIN_MAX_WAIT_MS = 10 * 60_000;
 
 /** Env var selecting the update channel. See the file header for the values. */
 export const UPDATE_CHANNEL_ENV = 'AWB_AGENT_MANAGER_UPDATE_CHANNEL';
@@ -131,6 +140,17 @@ export interface SelfUpdateOpts {
   log?: (msg: string) => void;
   /** Skip the actual re-exec — useful for tests / dry runs. */
   noReExec?: boolean;
+  /** Returns the number of chat/action/QA/ticket-dispatch sessions currently
+   *  in flight. When provided, runSelfUpdate waits for this to reach 0 (or
+   *  drainMaxWaitMs to elapse) before installing + restarting, so a restart
+   *  never SIGTERMs a session that just started (ticket b831b896). Omitted
+   *  by callers that can't tell us what's running (legacy tests, dry-run
+   *  probes) — the wait is skipped entirely rather than guessing. */
+  countInFlightSessions?: () => number;
+  /** Test-only override for the drain poll interval (default SELF_UPDATE_DRAIN_POLL_MS). */
+  drainPollMs?: number;
+  /** Test-only override for the drain wait cap (default SELF_UPDATE_DRAIN_MAX_WAIT_MS). */
+  drainMaxWaitMs?: number;
 }
 
 interface RunResult {
@@ -479,6 +499,7 @@ let selfUpdateInFlight = false;
 /** Test-only escape hatch: clear the in-flight flag between unit tests. */
 export function _resetSelfUpdateInFlightForTests(): void {
   selfUpdateInFlight = false;
+  _pendingRestartReason = null;
 }
 
 /**
@@ -547,10 +568,73 @@ export function isSystemdReExecPending(): boolean {
   return _systemdReExecPending;
 }
 
+/**
+ * Set by runNpmGlobalSelfUpdate right before it schedules the self-SIGTERM
+ * that drives reExecManager / shutdownForNpmGlobalUpdate. Read by main.ts's
+ * shutdown handler so a session killed by THAT SIGTERM is reported with an
+ * accurate `reason=self_update_restart` instead of a guessed idle/watchdog
+ * cause (ticket b831b896) — main.ts has no other way to distinguish "I'm
+ * restarting myself for a version update" from a plain operator SIGTERM /
+ * SIGINT or a manual `restart_manager` command, both of which route through
+ * the exact same shutdown() → stop() call chain.
+ */
+let _pendingRestartReason: 'self_update_restart' | null = null;
+
+/** Read by main.ts's shutdown handler — see _pendingRestartReason. */
+export function pendingRestartReason(): 'self_update_restart' | null {
+  return _pendingRestartReason;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Block until `countInFlightSessions()` reports zero, or `maxWaitMs` elapses
+ * — whichever comes first. main.ts's shutdown handler SIGTERMs every live
+ * chat / action / QA / ticket-dispatch session with no age/activity filter,
+ * so a restart that fires moments after a session starts kills it outright.
+ * Pausing here — before we even touch npm — keeps that from happening in the
+ * common case (ticket b831b896); the `out` log line makes the deferral
+ * visible instead of silent.
+ *
+ * No-op when `countInFlightSessions` isn't wired (legacy test harness /
+ * callers that can't tell us what's running) — never blocks a caller that
+ * has no way to answer the question.
+ */
+async function waitForSessionsToDrain(
+  out: (msg: string) => void,
+  countInFlightSessions?: () => number,
+  pollMs: number = SELF_UPDATE_DRAIN_POLL_MS,
+  maxWaitMs: number = SELF_UPDATE_DRAIN_MAX_WAIT_MS,
+): Promise<void> {
+  if (!countInFlightSessions) return;
+  let count = countInFlightSessions();
+  if (count <= 0) return;
+  const deadline = Date.now() + maxWaitMs;
+  out(
+    `Self-update: deferring restart — ${count} in-flight session(s); ` +
+      `waiting up to ${Math.round(maxWaitMs / 60_000)}min for drain`,
+  );
+  while (count > 0 && Date.now() < deadline) {
+    await sleep(pollMs);
+    count = countInFlightSessions();
+  }
+  if (count > 0) {
+    out(
+      `Self-update: drain wait exceeded ${Math.round(maxWaitMs / 60_000)}min cap — ` +
+        `proceeding with ${count} session(s) still in flight`,
+    );
+  } else {
+    out('Self-update: in-flight sessions drained — proceeding with restart');
+  }
+}
+
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
 ): Promise<SelfUpdateResult> {
+  await waitForSessionsToDrain(out, opts.countInFlightSessions, opts.drainPollMs, opts.drainMaxWaitMs);
   const channel = resolveUpdateChannel();
   if (isAutoUpdateDisabled(channel)) {
     const summary =
@@ -856,6 +940,7 @@ async function runNpmGlobalSelfUpdate(
     const summary = `npm-global update installed ${installSpec}; restarting manager`;
     out(`Self-update: ${summary}`);
     _lastReExecScheduled = true;
+    _pendingRestartReason = 'self_update_restart';
     setTimeout(() => reExecManager(out), 1500).unref?.();
     return { changed: true, summary, willReExec: true };
   }
@@ -911,6 +996,7 @@ async function runNpmGlobalSelfUpdate(
   // line, then shut down. The helper is already polling our pid. Keep the
   // in-flight flag set across the grace window (see runSelfUpdate's finally).
   _lastReExecScheduled = true;
+  _pendingRestartReason = 'self_update_restart';
   setTimeout(() => {
     try {
       shutdownForNpmGlobalUpdate(out);

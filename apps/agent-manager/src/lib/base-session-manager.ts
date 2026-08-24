@@ -255,6 +255,14 @@ export interface SessionRecord {
    *  Read by `_onChildExit` so the exit hook skips the silent-exit fallback and
    *  circuit-breaker accounting — we killed it on purpose, it is not a crash. */
   _twinTerminated?: boolean;
+  /** Set by `stop()` right before it SIGTERMs this session as part of a
+   *  manager-wide shutdown/restart — e.g. `'self_update_restart'` when the
+   *  manager is tearing down to re-exec into a just-installed version
+   *  (ticket b831b896). Read by `_onChildExit` so a run-completion backstop
+   *  fired for this exit can report the real cause instead of guessing
+   *  idle-timer/health-watchdog. Undefined for any exit `stop()` didn't
+   *  cause (idle reap, TTL sweep, crash, normal reply). */
+  stopReason?: string;
   /** Effective MCP api key the child authenticates with — the managed
    *  agent's key when running for one, else the manager's. Used to attribute
    *  manager-posted audit comments (silent-exit, session-split) to the right
@@ -1789,13 +1797,22 @@ export class BaseSessionManager {
     return { count: victims.length, inflight };
   }
 
-  async stop(): Promise<void> {
+  /**
+   * @param reason Why this manager-wide stop is happening — e.g.
+   *   `'self_update_restart'` (main.ts's shutdown handler passes through
+   *   `pendingRestartReason()`). Tagged onto every live session BEFORE the
+   *   SIGTERM so `_onChildExit` can report the real cause instead of
+   *   guessing (ticket b831b896). Left undefined for callers that don't
+   *   know/care (defaults main.ts's shutdown to a generic 'manager_shutdown').
+   */
+  async stop(reason?: string): Promise<void> {
     if (this.#healthTimer) {
       clearInterval(this.#healthTimer);
       this.#healthTimer = null;
     }
     const sessions = Array.from(this._sessions.values());
     for (const sess of sessions) {
+      sess.stopReason = reason;
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);
         sess.idleTimer = null;

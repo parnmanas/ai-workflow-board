@@ -159,6 +159,113 @@ test('runSelfUpdate: channel=off refuses to touch the install', async () => {
   }
 });
 
+// ticket b831b896: a self-update restart used to SIGTERM every in-flight
+// chat/action/QA/ticket-dispatch session unconditionally — a session that
+// had started 13 seconds earlier died mid-run and its failure got recorded
+// with a guessed cause. runSelfUpdate now waits for countInFlightSessions()
+// to drain (bounded by drainMaxWaitMs) before it goes anywhere near npm.
+// channel=off short-circuits AFTER the drain wait, so these assert the
+// deferral itself without ever touching the real registry/install.
+
+test('runSelfUpdate: defers while sessions are in flight, proceeds once drained', async () => {
+  const prev = process.env[UPDATE_CHANNEL_ENV];
+  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
+  _resetSelfUpdateInFlightForTests();
+  try {
+    const logs = [];
+    let calls = 0;
+    // Reports 1 in-flight session for the first two polls, then drains.
+    const countInFlightSessions = () => {
+      calls += 1;
+      return calls <= 2 ? 1 : 0;
+    };
+    const r = await runSelfUpdate({
+      log: (m) => logs.push(m),
+      noReExec: true,
+      countInFlightSessions,
+      drainPollMs: 5,
+      drainMaxWaitMs: 5_000,
+    });
+    const joined = logs.join('\n');
+    assert.match(joined, /deferring restart — 1 in-flight session/);
+    assert.match(joined, /in-flight sessions drained — proceeding/);
+    assert.ok(calls >= 3, 'must re-check after draining, not just once');
+    // channel=off still short-circuits the actual install — proves the wait
+    // ran to completion and returned control to the normal pipeline.
+    assert.equal(r.changed, false);
+    assert.match(r.summary, /pins this build/);
+  } finally {
+    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
+    else process.env[UPDATE_CHANNEL_ENV] = prev;
+    _resetSelfUpdateInFlightForTests();
+  }
+});
+
+test('runSelfUpdate: forces through once the drain wait cap elapses', async () => {
+  const prev = process.env[UPDATE_CHANNEL_ENV];
+  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
+  _resetSelfUpdateInFlightForTests();
+  try {
+    const logs = [];
+    const countInFlightSessions = () => 2; // never drains
+    const r = await runSelfUpdate({
+      log: (m) => logs.push(m),
+      noReExec: true,
+      countInFlightSessions,
+      drainPollMs: 5,
+      drainMaxWaitMs: 25,
+    });
+    const joined = logs.join('\n');
+    assert.match(joined, /deferring restart — 2 in-flight session/);
+    assert.match(joined, /drain wait exceeded .*min cap — proceeding with 2 session/);
+    // Forcing through means we still reach the normal pipeline afterward.
+    assert.equal(r.changed, false);
+    assert.match(r.summary, /pins this build/);
+  } finally {
+    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
+    else process.env[UPDATE_CHANNEL_ENV] = prev;
+    _resetSelfUpdateInFlightForTests();
+  }
+});
+
+test('runSelfUpdate: zero in-flight sessions never logs a deferral', async () => {
+  const prev = process.env[UPDATE_CHANNEL_ENV];
+  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
+  _resetSelfUpdateInFlightForTests();
+  try {
+    const logs = [];
+    const r = await runSelfUpdate({
+      log: (m) => logs.push(m),
+      noReExec: true,
+      countInFlightSessions: () => 0,
+      drainPollMs: 5,
+      drainMaxWaitMs: 5_000,
+    });
+    assert.doesNotMatch(logs.join('\n'), /deferring restart/);
+    assert.equal(r.changed, false);
+  } finally {
+    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
+    else process.env[UPDATE_CHANNEL_ENV] = prev;
+    _resetSelfUpdateInFlightForTests();
+  }
+});
+
+test('runSelfUpdate: no countInFlightSessions callback → wait is skipped entirely (legacy callers)', async () => {
+  const prev = process.env[UPDATE_CHANNEL_ENV];
+  process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
+  _resetSelfUpdateInFlightForTests();
+  try {
+    const logs = [];
+    const r = await runSelfUpdate({ log: (m) => logs.push(m), noReExec: true });
+    assert.doesNotMatch(logs.join('\n'), /deferring restart/);
+    assert.equal(r.changed, false);
+  } finally {
+    if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
+    else process.env[UPDATE_CHANNEL_ENV] = prev;
+    _resetSelfUpdateInFlightForTests();
+  }
+});
+
 test('embedded npm-global updater helper source is valid ESM (node --check)', async () => {
   const src = _npmGlobalUpdaterSourceForTests();
   assert.match(src, /npm.*install.*-g/s, 'helper must run `npm install -g`');

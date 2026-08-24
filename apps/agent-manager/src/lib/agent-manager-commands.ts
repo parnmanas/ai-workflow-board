@@ -173,6 +173,14 @@ export interface CommandHandlerDeps {
   runtimeSupervisor?: Pick<RuntimeSupervisor, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
+  /** ticket b831b896: total chat / action / QA / ticket-dispatch sessions
+   *  currently live, across every session manager main.ts owns. Passed
+   *  through to runSelfUpdate so `update_manager` defers the restart while
+   *  real work is in flight instead of SIGTERMing it moments after it
+   *  starts. Optional so the legacy test harness (deps without this) keeps
+   *  wiring up — runSelfUpdate treats a missing callback as "unknown,
+   *  don't block". */
+  countInFlightSessions?: () => number;
   /** Force-drop and re-establish the SSE connection. Called after a successful
    * `spawn_agent` so the server's cached `managedAgentIds` set (which is
    * snapshotted once per SSE connect — see events.controller.ts:236-244)
@@ -286,6 +294,13 @@ export class AgentManagerCommandHandler {
    * re-exec is scheduled on a ~1.5s timer inside runSelfUpdate so the
    * ack POST can complete before the parent process exits.
    *
+   * Drain wait (ticket b831b896): before touching npm at all, runSelfUpdate
+   * waits for `countInFlightSessions` to reach 0 (capped at
+   * SELF_UPDATE_DRAIN_MAX_WAIT_MS, then forces through regardless) — so this
+   * method, and therefore the ack, can take up to that long to return while
+   * real chat/action/QA/ticket-dispatch work finishes instead of getting
+   * SIGTERM'd moments after it started.
+   *
    * Concurrency: runSelfUpdate enforces a module-level in-flight mutex
    * shared with the SIGUSR1 handler. A second update_manager dispatched
    * while one is still running short-circuits to {changed:false,
@@ -294,7 +309,7 @@ export class AgentManagerCommandHandler {
    * see the contention on the admin UI.
    */
   async #updateManager(): Promise<string> {
-    const result = await runSelfUpdate({ log });
+    const result = await runSelfUpdate({ log, countInFlightSessions: this.#deps.countInFlightSessions });
     if (!result.changed) {
       throw new Error(`update_manager: ${result.summary}`);
     }

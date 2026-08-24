@@ -672,10 +672,16 @@ export class ChatSessionManager
       // 때 run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가
       // 그냥 "결과 없음" 보다 낫다.
       const tail = this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);
+      // ticket b831b896: 매니저가 stop()에서 이 세션을 직접 SIGTERM한 경우
+      // sess.stopReason이 그 사유를 정확히 담고 있다 — 승인 대기/idle-timer
+      // 추측이 아니라 매니저 자신이 방금 한 일이므로 추측할 이유가 없다.
       const summary = hasUntrustedWorkspaceWarning(tail)
         ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
           'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
           'cli-home의 .claude.json trust 시딩을 확인하세요.'
+        : sess.stopReason
+        ? `run 세션 프로세스가 매니저의 의도적 종료로 중단됐습니다(exit code=${code ?? 'null'}, ` +
+          `reason=${sess.stopReason}) — 매니저가 직접 SIGTERM을 보낸 것으로 확인된 종료입니다.`
         : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}) — ` +
           `승인 대기 등으로 멈춰 idle-timer/health-watchdog에 의해 종료됐을 수 있습니다.`;
       await fireAndForgetTool(this._config, route.completeTool, {

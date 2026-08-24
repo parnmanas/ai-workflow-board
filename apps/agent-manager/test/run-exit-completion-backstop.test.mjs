@@ -170,6 +170,36 @@ test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)�
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
 });
 
+// ticket b831b896: 매니저 self-update 재시작이 in-flight 세션을 SIGTERM하면
+// stop()이 sess.stopReason을 태그해 두고, 이 backstop이 idle-timer/
+// health-watchdog 추측 대신 그 정확한 사유를 report한다.
+test('ChatSessionManager._onChildExit: stopReason이 있으면 추측 문구 대신 정확한 사유를 기록한다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(40006, {
+    _run: { run_id: 'run-self-update', workspace_id: 'ws-1', kind: 'action' },
+    stopReason: 'self_update_restart',
+  });
+  await mgr._onChildExit(sess, null, 'SIGTERM');
+  const call = mcpToolCalls.find((c) => c.name === 'complete_action_run' && c.args.run_id === 'run-self-update');
+  assert.ok(call, 'run은 여전히 종료 처리돼야 한다');
+  assert.match(call.args.summary, /self_update_restart/, 'stopReason이 summary에 그대로 드러나야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 아는데도 추측 문구를 쓰면 안 된다',
+  );
+});
+
+test('ChatSessionManager.stop: 살아있는 run-bound 세션에 reason을 태그해 SIGTERM 이전에 남긴다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(50001, {
+    _run: { run_id: 'run-shutdown-tag', workspace_id: 'ws-1', kind: 'action' },
+  });
+  mgr._sessions.set(sess.sessionKey, sess);
+  await mgr.stop('self_update_restart');
+  assert.equal(sess.stopReason, 'self_update_restart', 'stop()이 SIGTERM 전에 sess.stopReason을 설정해야 한다');
+});
+
 // ── SubagentManager._runExitCompletionBackstop (oneshot run 경로) ────────────
 
 let pidSeq = 90000;
