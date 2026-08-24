@@ -125,16 +125,29 @@ describe('blobless 캐시 클론에서 lazy-fetch 회귀 가드 (ticket 719ef137
       `ls-tree --long이 blob을 promisor fetch해야 픽스처가 유효하다 (before.in-pack=${before['in-pack']}, after.in-pack=${after['in-pack']})`,
     );
 
-    // 같은 옛 패턴을 GIT_NO_LAZY_FETCH=1 아래서 돌리면 조용히 느려지는 대신
-    // 즉시 실패해야 한다 — listTreeRecursive/getFileContentsBatch가 내부에서
-    // 기대는 것과 동일한 안전장치가 실제로 이 git 버전에서 동작함을 증명.
-    assert.throws(() => {
+    // 같은 옛 패턴을 GIT_NO_LAZY_FETCH=1 아래서 돌리면 promisor fetch를 시도하지
+    // 않아야 한다 — listTreeRecursive/getFileContentsBatch가 내부에서 기대하는
+    // 것과 동일한 안전장치가 이 git 버전에서도 fetch 자체를 막는지 증명한다.
+    // git 버전에 따라 이 상황을 "즉시 에러(non-zero exit)"로 처리할 수도,
+    // "size: -"로 조용히 degrade할 수도 있어(둘 다 관찰됨) 프로세스 종료
+    // 코드에 의존하지 않고, 나머지 서브테스트와 동일하게 in-pack 불변으로
+    // "fetch가 실제로 일어나지 않았는가"만 직접 확인한다.
+    const beforeGuarded = countObjects();
+    try {
       execFileSync('git', ['ls-tree', '--long', '--', 'HEAD:src/nested'], {
         cwd: cachePath,
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
         stdio: ['ignore', 'ignore', 'ignore'],
       });
-    }, /Command failed/, 'GIT_NO_LAZY_FETCH=1은 옛 패턴을 즉시 실패시켜야 한다');
+    } catch {
+      // 이 git 버전이 하드 실패를 택했다면 그것도 유효한 차단 — 아래
+      // in-pack 불변 검사가 버전 무관하게 최종 판단한다.
+    }
+    const afterGuarded = countObjects();
+    assert.equal(
+      afterGuarded['in-pack'], beforeGuarded['in-pack'],
+      `GIT_NO_LAZY_FETCH=1은 옛 패턴이 blob을 promisor fetch하지 못하게 막아야 한다 (before.in-pack=${beforeGuarded['in-pack']}, after.in-pack=${afterGuarded['in-pack']})`,
+    );
   });
 
   it('listTreeRecursive는 promisor fetch 0회로 서브트리 전체를 한 번에 나열한다', async () => {
