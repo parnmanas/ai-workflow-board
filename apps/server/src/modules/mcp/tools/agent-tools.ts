@@ -169,8 +169,9 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       workspace_id: z.string().nullable().optional().describe('Owning workspace, or null/blank for all workspaces'),
       cli_runtime_profile: z.string().nullable().optional().describe(
         "Claude backend profile id this agent's dispatch pins to. 'none' = explicit opt-out (stop inheriting the " +
-        'board/workspace/global default); null/empty = clear the pin and inherit again. Claude-type agents only. ' +
-        'Takes effect on the next dispatch.'
+        'board/workspace/global default); null = clear the pin and inherit again. Empty string is preserved for ' +
+        "REST compatibility and also stops inheritance (behaves like 'none') — pass null if you actually want to " +
+        'resume inheriting. Claude-type agents only. Takes effect on the next dispatch.'
       ),
     },
     async ({

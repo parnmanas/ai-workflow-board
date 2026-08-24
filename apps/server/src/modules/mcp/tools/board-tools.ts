@@ -277,7 +277,9 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board PR usage (worktree 규약 chain, ticket 4ba844ea): false (default) does a direct fast-forward merge on the Merging boundary; true opts into the PR create/merge path. Omit to leave unchanged.'),
       cli_runtime_profile: z.string().nullable().optional().describe(
         "Claude backend profile id this board's dispatch pins to. 'none' = explicit opt-out (stop inheriting the " +
-        'workspace/global default); null/empty = clear the pin and inherit again. Takes effect on the next dispatch.'
+        'workspace/global default); null = clear the pin and inherit again. Empty string is preserved for REST ' +
+        "compatibility and also stops inheritance (behaves like 'none') — pass null if you actually want to " +
+        'resume inheriting. Takes effect on the next dispatch.'
       ),
     },
     async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile }) => {

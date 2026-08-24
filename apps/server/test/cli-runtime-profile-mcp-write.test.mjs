@@ -220,7 +220,7 @@ describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
     );
   });
 
-  it('null clears the pin back to inherit; empty string is accepted the same way REST accepts it', async () => {
+  it('null clears the pin back to inherit; empty string is preserved for REST compatibility and also stops inheritance', async () => {
     const agent = await makeAgent({ cli_runtime_profile: profile.id });
     const nulled = await tools.update_agent.handler(
       { agent_id: agent.id, cli_runtime_profile: null },
