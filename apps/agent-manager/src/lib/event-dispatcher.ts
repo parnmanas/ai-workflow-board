@@ -3703,6 +3703,31 @@ export class EventDispatcher {
       }
     }
 
+    // 티켓 71532b4f: #dispatchTriggerBody(handleTrigger)와 동일한 harness /
+    // runtime profile / effort preset / env vars 계산 — 같은 in-file 함수
+    // (parseHarnessConfig/resolveTriggerRuntimeProfile/parseEffortPreset/
+    // parseEnvironmentConfig/parseWorktreeMode/buildDispatchEnvVars) 재사용.
+    // 이전에는 이 넷을 전혀 계산하지 않아, agent에 명시 핀된 cli_runtime_profile이
+    // 조용히 무시되고 순정 Claude로 돌았다 — 아래 one-shot spawn()에 그대로 실어
+    // 보낸다(서버가 comment_mention 페이로드에 agent_trigger와 같은 이름의
+    // 필드를 싣도록 확장됨: event-registry.ts/mention-dispatch-profile.ts).
+    const harness = parseHarnessConfig(ev.harness_config);
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
+    const effortPreset = parseEffortPreset(ev.effort_preset);
+    const envConfig = parseEnvironmentConfig(ev.environment_config);
+    const worktreeMode = parseWorktreeMode(ev.worktree_mode);
+    const envVars = buildDispatchEnvVars(envConfig?.env_vars, agentContext?.cwd, worktreeMode, ticketId);
+    if (harness) {
+      log(
+        `Comment mention carries harness_config: ticket=${ticketId.slice(0, 8) || '_'} keys=${Object.keys(harness).join(',')}`,
+      );
+    }
+    if (effortPreset) {
+      log(
+        `Comment mention carries effort_preset: id=${effortPreset.id}${effortPreset.label ? ` (${effortPreset.label})` : ''} ticket=${ticketId.slice(0, 8) || '_'}`,
+      );
+    }
+
     try {
       const canDelegate =
         delegationEnabled && this.#subagentManager && this.#subagentManager.canSpawn();
@@ -3734,6 +3759,10 @@ export class EventDispatcher {
             // (or stay null when ambiguous) instead of pinning a guess.
             role: mention.mention_source === 'role' ? mention.role_shortcut || '' : '',
             agentContext,
+            harness,
+            runtimeProfile,
+            effortPreset,
+            envVars,
             // ticket e90294e7 round 2: release the claimed seat when this
             // one-shot's process exits, not when spawn() merely returns a pid
             // — the column trigger must stay locked out for the seat's whole
