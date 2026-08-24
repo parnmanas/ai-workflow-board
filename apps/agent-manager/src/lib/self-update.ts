@@ -51,14 +51,23 @@ const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
 const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const NPM_VIEW_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 10 * 60_000;
-/** How often to re-check in-flight session count while deferring a
- *  self-update restart. See waitForSessionsToDrain (ticket b831b896). */
-export const SELF_UPDATE_DRAIN_POLL_MS = 15_000;
-/** Upper bound on how long a self-update waits for in-flight chat / action /
- *  QA / ticket-dispatch sessions to drain before forcing the restart anyway.
- *  Sessions still running past this cap get SIGTERM'd same as before — the
- *  difference is the kill is now tagged `reason=self_update_restart`
- *  accurately instead of guessed (ticket b831b896). */
+/**
+ * Upper bound on how long a self-update stays deferred (across separate
+ * runSelfUpdate() calls — see _deferredSince) waiting for in-flight chat /
+ * action / QA / ticket-dispatch sessions to drain before forcing the
+ * restart anyway. Sessions still running past this cap get SIGTERM'd same
+ * as before — the difference is the kill is now tagged
+ * `reason=self_update_restart` accurately instead of guessed.
+ *
+ * Round 2 (ticket b831b896 review): this is now a WALL-CLOCK cap checked on
+ * each retry, not a single in-call blocking sleep. Round 1 blocked inside
+ * one runSelfUpdate() call for up to this long, which held the
+ * selfUpdateInFlight mutex the whole time (silently no-op'ing a concurrent
+ * operator restart_manager) and made the SSE update_manager ack arrive
+ * after the server's command-ledger RECORD_TTL_MS (also 10 minutes —
+ * apps/server/src/modules/agent-manager/command-ledger.service.ts),
+ * getting rejected 410 even though the update itself succeeded.
+ */
 export const SELF_UPDATE_DRAIN_MAX_WAIT_MS = 10 * 60_000;
 
 /** Env var selecting the update channel. See the file header for the values. */
@@ -134,21 +143,33 @@ export interface SelfUpdateResult {
    *  command handler / SIGUSR1 path) inspects this so it can hand the ack
    *  POST + log line a head start before the parent exits. */
   willReExec?: boolean;
+  /** ticket b831b896 round 2: true when `changed:false` means "an update IS
+   *  needed but is waiting for in-flight sessions to drain — UpdateChecker
+   *  will retry automatically", as opposed to a genuine skip/refuse
+   *  (channel off, npm unreachable, provenance refused, already up to
+   *  date) or a real failure (install failed). Callers that otherwise treat
+   *  `changed:false` as an error (e.g. the SSE update_manager ack) should
+   *  NOT do so when this is true — nothing is wrong, the update is simply
+   *  pending. */
+  deferred?: boolean;
 }
 
 export interface SelfUpdateOpts {
   log?: (msg: string) => void;
   /** Skip the actual re-exec — useful for tests / dry runs. */
   noReExec?: boolean;
-  /** Returns the number of chat/action/QA/ticket-dispatch sessions currently
-   *  in flight. When provided, runSelfUpdate waits for this to reach 0 (or
-   *  drainMaxWaitMs to elapse) before installing + restarting, so a restart
-   *  never SIGTERMs a session that just started (ticket b831b896). Omitted
-   *  by callers that can't tell us what's running (legacy tests, dry-run
-   *  probes) — the wait is skipped entirely rather than guessing. */
+  /**
+   * Returns the number of chat/action/QA/ticket-dispatch sessions currently
+   * in flight. Checked ONCE an actual install has been confirmed (channel
+   * on, npm reachable, provenance verified, not already up to date) — a
+   * non-zero count returns a `changed:false` "deferred" result immediately
+   * (no blocking sleep); UpdateChecker's periodic tick retries automatically
+   * until drainMaxWaitMs elapses (ticket b831b896 round 2 — round 1 blocked
+   * in-call, which held the selfUpdateInFlight mutex and delayed the SSE
+   * ack past the server's command-ledger TTL). Omitted by callers that
+   * can't tell us what's running (legacy tests, dry-run probes) — the check
+   * is skipped entirely rather than guessing. */
   countInFlightSessions?: () => number;
-  /** Test-only override for the drain poll interval (default SELF_UPDATE_DRAIN_POLL_MS). */
-  drainPollMs?: number;
   /** Test-only override for the drain wait cap (default SELF_UPDATE_DRAIN_MAX_WAIT_MS). */
   drainMaxWaitMs?: number;
 }
@@ -343,6 +364,12 @@ export class UpdateChecker {
   #stopped = false;
   #intervalMs: number;
   #log: (msg: string) => void;
+  /** ticket b831b896 round 2: lets #tick retry a self-update that an
+   *  earlier runSelfUpdate() call deferred because sessions were in flight.
+   *  Nullable — main.ts wires this in via setCountInFlightSessions() AFTER
+   *  construction, since the session managers it reads don't exist yet at
+   *  the point UpdateChecker itself is constructed. */
+  #countInFlightSessions: (() => number) | null = null;
 
   constructor(
     opts: {
@@ -354,10 +381,14 @@ export class UpdateChecker {
       installMode?: InstallMode;
       updateChannel?: string;
       currentVersion?: string;
+      /** See setCountInFlightSessions — accepted here too so a test can
+       *  construct a fully-wired checker in one call. */
+      countInFlightSessions?: () => number;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
+    this.#countInFlightSessions = opts.countInFlightSessions ?? null;
     const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
     const update_channel = resolveUpdateChannel(opts.updateChannel);
     // The build-time snapshot (dist/package.json) is the running code's own
@@ -383,6 +414,15 @@ export class UpdateChecker {
   status(): UpdateStatus {
     // Defensive copy so the caller can't accidentally mutate the cache.
     return { ...this.#status };
+  }
+
+  /** ticket b831b896 round 2: wire the live in-flight session counter in
+   *  after construction (main.ts builds this checker before the chat /
+   *  ticket / subagent managers it reads from exist). Once set, #tick
+   *  retries any self-update that's currently deferred waiting for
+   *  sessions to drain — see hasPendingSelfUpdate(). */
+  setCountInFlightSessions(fn: () => number): void {
+    this.#countInFlightSessions = fn;
   }
 
   start(): void {
@@ -431,6 +471,20 @@ export class UpdateChecker {
     if (this.#status.install_mode !== 'npm-global') return;
     if (isAutoUpdateDisabled(this.#status.update_channel)) return;
     await this.#tickNpmGlobal();
+    // ticket b831b896 round 2: retry a self-update that an earlier
+    // runSelfUpdate() call (SIGUSR1 / SSE update_manager) deferred because
+    // sessions were in flight — that call already returned immediately
+    // rather than blocking, so this periodic tick is the only thing that
+    // ever revisits it. runSelfUpdate owns the selfUpdateInFlight mutex and
+    // the SELF_UPDATE_DRAIN_MAX_WAIT_MS wall-clock cap itself, so this is a
+    // plain retry, not a special case.
+    if (this.#countInFlightSessions && hasPendingSelfUpdate()) {
+      try {
+        await runSelfUpdate({ log: this.#log, countInFlightSessions: this.#countInFlightSessions });
+      } catch (err: any) {
+        this.#log(`Self-update retry failed: ${err?.stack || err?.message || err}`);
+      }
+    }
   }
 
   /**
@@ -500,6 +554,8 @@ let selfUpdateInFlight = false;
 export function _resetSelfUpdateInFlightForTests(): void {
   selfUpdateInFlight = false;
   _pendingRestartReason = null;
+  _deferredSince = null;
+  _lastDeferredDueToSessions = false;
 }
 
 /**
@@ -539,6 +595,14 @@ export async function runSelfUpdate(opts: SelfUpdateOpts = {}): Promise<SelfUpda
       selfUpdateInFlight = false;
     }
     _lastReExecScheduled = false;
+    // _deferredSince tracks a "waiting for sessions to drain" streak ACROSS
+    // separate runSelfUpdate() calls (this call may be a UpdateChecker retry
+    // of an earlier deferral) — clear it on any outcome except "still
+    // deferred", same one-shot-flag idiom as _lastReExecScheduled above.
+    if (!_lastDeferredDueToSessions) {
+      _deferredSince = null;
+    }
+    _lastDeferredDueToSessions = false;
   }
 }
 
@@ -585,56 +649,88 @@ export function pendingRestartReason(): 'self_update_restart' | null {
   return _pendingRestartReason;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Wall-clock timestamp (Date.now()) of the first deferred-due-to-sessions
+ * self-update attempt in the current streak, or null when nothing is
+ * currently deferred. Tracked ACROSS separate runSelfUpdate() calls (a
+ * retry from UpdateChecker's tick is a fresh call) rather than held across
+ * one blocking sleep — see SELF_UPDATE_DRAIN_MAX_WAIT_MS for why round 1's
+ * in-call blocking wait was wrong.
+ */
+let _deferredSince: number | null = null;
+
+/** Set (once) right before a "still deferred, within cap" return so
+ *  runSelfUpdate's finally{} knows NOT to clear _deferredSince — same
+ *  one-shot-flag idiom as _lastReExecScheduled. */
+let _lastDeferredDueToSessions = false;
+
+/** True while a self-update is deferred waiting for in-flight sessions to
+ *  drain. UpdateChecker's periodic tick reads this to decide whether to
+ *  retry runSelfUpdate on its own (see UpdateChecker#tick). */
+export function hasPendingSelfUpdate(): boolean {
+  return _deferredSince !== null;
+}
+
+export interface NpmUpdateGateResult {
+  /** True = go ahead and install (sessions are clear, or the cap forced it). */
+  proceed: boolean;
+  /** True = `proceed:false` because the count was zero anyway (nothing to
+   *  install to begin with) — never true when proceed is true. */
+  deferred: boolean;
+  /** _deferredSince value the caller should hold going forward — null clears
+   *  it (nothing pending anymore), a timestamp starts/continues a streak. */
+  nextDeferredSinceMs: number | null;
+  /** Human-readable outcome, or null when there's nothing worth logging
+   *  (count was 0 and no prior deferral was in progress). */
+  summary: string | null;
 }
 
 /**
- * Block until `countInFlightSessions()` reports zero, or `maxWaitMs` elapses
- * — whichever comes first. main.ts's shutdown handler SIGTERMs every live
- * chat / action / QA / ticket-dispatch session with no age/activity filter,
- * so a restart that fires moments after a session starts kills it outright.
- * Pausing here — before we even touch npm — keeps that from happening in the
- * common case (ticket b831b896); the `out` log line makes the deferral
- * visible instead of silent.
- *
- * No-op when `countInFlightSessions` isn't wired (legacy test harness /
- * callers that can't tell us what's running) — never blocks a caller that
- * has no way to answer the question.
+ * Pure decision point for whether an install-confirmed self-update should
+ * proceed now, defer, or force through past the drain cap. Synchronous and
+ * side-effect-free by construction — cannot block — so it's the thing to
+ * unit test directly rather than the full runNpmGlobalSelfUpdate pipeline,
+ * which needs a real npm registry round-trip to even reach this point
+ * (ticket b831b896 round 2 review — round 1's blocking in-call sleep here
+ * was the actual defect: it held the caller for up to `capMs`, which held
+ * the module-level self-update mutex that whole time and made the SSE
+ * update_manager ack arrive after the server's command-ledger TTL).
  */
-async function waitForSessionsToDrain(
-  out: (msg: string) => void,
-  countInFlightSessions?: () => number,
-  pollMs: number = SELF_UPDATE_DRAIN_POLL_MS,
-  maxWaitMs: number = SELF_UPDATE_DRAIN_MAX_WAIT_MS,
-): Promise<void> {
-  if (!countInFlightSessions) return;
-  let count = countInFlightSessions();
-  if (count <= 0) return;
-  const deadline = Date.now() + maxWaitMs;
-  out(
-    `Self-update: deferring restart — ${count} in-flight session(s); ` +
-      `waiting up to ${Math.round(maxWaitMs / 60_000)}min for drain`,
-  );
-  while (count > 0 && Date.now() < deadline) {
-    await sleep(pollMs);
-    count = countInFlightSessions();
+export function evaluateNpmUpdateGate(input: {
+  countInFlightSessions: number | null;
+  deferredSinceMs: number | null;
+  nowMs: number;
+  capMs: number;
+}): NpmUpdateGateResult {
+  const { countInFlightSessions, deferredSinceMs, nowMs, capMs } = input;
+  if (countInFlightSessions === null) {
+    // Not wired (legacy caller, dry-run probe) — never block on a question
+    // we have no way to answer.
+    return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary: null };
   }
-  if (count > 0) {
-    out(
-      `Self-update: drain wait exceeded ${Math.round(maxWaitMs / 60_000)}min cap — ` +
-        `proceeding with ${count} session(s) still in flight`,
-    );
-  } else {
-    out('Self-update: in-flight sessions drained — proceeding with restart');
+  if (countInFlightSessions <= 0) {
+    const summary = deferredSinceMs !== null ? 'in-flight sessions drained — proceeding with restart' : null;
+    return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary };
   }
+  const since = deferredSinceMs ?? nowMs;
+  const deferredForMs = nowMs - since;
+  if (deferredForMs < capMs) {
+    const summary =
+      `npm-global update deferred: ${countInFlightSessions} in-flight session(s) — will retry ` +
+      `automatically (deferred ${Math.round(deferredForMs / 1000)}s so far, ` +
+      `cap ${Math.round(capMs / 60_000)}min)`;
+    return { proceed: false, deferred: true, nextDeferredSinceMs: since, summary };
+  }
+  const summary =
+    `drain wait cap (${Math.round(capMs / 60_000)}min) exceeded — ` +
+    `proceeding with ${countInFlightSessions} session(s) still in flight`;
+  return { proceed: true, deferred: false, nextDeferredSinceMs: null, summary };
 }
 
 async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
 ): Promise<SelfUpdateResult> {
-  await waitForSessionsToDrain(out, opts.countInFlightSessions, opts.drainPollMs, opts.drainMaxWaitMs);
   const channel = resolveUpdateChannel();
   if (isAutoUpdateDisabled(channel)) {
     const summary =
@@ -895,6 +991,20 @@ async function runNpmGlobalSelfUpdate(
     out(`Self-update: ${PROVENANCE_BYPASS_ENV} set — proceeding despite unverified provenance`);
   }
 
+  // ticket b831b896 review round 2: nothing upstream of this ever compared
+  // current-vs-latest — every call unconditionally reinstalled, even a
+  // no-op reinstall of the version already running. That made an
+  // already-latest / auto-update-off manager pay the full drain-wait below
+  // for a restart that was never going to happen. verdict.version is the
+  // exact version we'd install (resolved + provenance-verified above), so
+  // this is the earliest point we can know "is there actually anything to
+  // do" — skip before it costs a session-drain check or an npm install.
+  if (verdict.version && compareSemver(verdict.version, current) <= 0) {
+    const summary = `npm-global update skipped: already on v${current} (registry has v${verdict.version})`;
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
+  }
+
   // 검증된 정확한 버전으로 설치 spec 을 고정한다. dist-tag(`@latest`/`@next`) 를
   // 검증한 뒤 다시 같은 태그로 설치하면 그 사이 태그가 옮겨간 tarball 이 들어오는
   // TOCTOU 구멍이 남는다 — 검증한 바이트와 설치하는 바이트가 같아야 게이트가
@@ -907,6 +1017,24 @@ async function runNpmGlobalSelfUpdate(
     const summary = `npm-global update: would run \`npm install -g --ignore-scripts ${installSpec}\` + restart (re-exec skipped)`;
     out(`Self-update: ${summary}`);
     return { changed: true, summary, willReExec: false };
+  }
+
+  // ticket b831b896 review round 2: an install + restart is now DEFINITELY
+  // about to happen (every earlier gate passed) — this is the one place a
+  // session-drain check belongs. evaluateNpmUpdateGate is synchronous and
+  // side-effect-free (cannot block); UpdateChecker's periodic tick retries
+  // this whole call automatically until the gate reports proceed:true.
+  const gate = evaluateNpmUpdateGate({
+    countInFlightSessions: opts.countInFlightSessions ? opts.countInFlightSessions() : null,
+    deferredSinceMs: _deferredSince,
+    nowMs: Date.now(),
+    capMs: opts.drainMaxWaitMs ?? SELF_UPDATE_DRAIN_MAX_WAIT_MS,
+  });
+  _deferredSince = gate.nextDeferredSinceMs;
+  if (gate.summary) out(`Self-update: ${gate.summary}`);
+  if (!gate.proceed) {
+    _lastDeferredDueToSessions = gate.deferred;
+    return { changed: false, summary: gate.summary!, deferred: gate.deferred || undefined };
   }
 
   // POSIX can replace the package files while Node has the old modules mapped.

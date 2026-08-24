@@ -589,6 +589,11 @@ async function runRuntime(
     subagentManager._snapshot().length +
     chatSessionManager._snapshot().length +
     ticketSessionManager._snapshot().length;
+  // ticket b831b896 round 2: updateChecker was constructed earlier (before
+  // these session managers existed), so it's wired late via the setter
+  // instead of a constructor opt — lets its periodic tick retry a
+  // self-update that got deferred waiting for sessions to drain.
+  updateChecker.setCountInFlightSessions(countInFlightSessions);
   // Late-bound reference to the SSE stream — the EventStream is constructed
   // after this command handler (it depends on commandHandler for dispatch),
   // so the spawn_agent → reconnect hook captures this slot and resolves it
