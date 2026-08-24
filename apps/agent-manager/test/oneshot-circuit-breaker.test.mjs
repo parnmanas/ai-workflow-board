@@ -939,7 +939,17 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
   }
 });
 
-test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTERM → NOT counted', async (t) => {
+test('shutdown 회귀 (ticket 8436f96f, 6abe2b79): stop() 이 SIGTERM 전에 지우는 대신 stopReason 을 태그 — breaker 는 여전히 미계상, run-completion backstop 은 사유를 보고한다', async (t) => {
+  // 8436f96f 가 세운, 이 테스트가 지키는 보장: 매니저 shutdown 킬은 절대
+  // circuit-breaker 배달 실패로 오계상되면 안 된다. 원래는 SIGTERM *전에*
+  // #map 에서 레코드를 지우는 방식(#sweep/stopForAgent 와 같은 drop-first
+  // 관용구)으로 이를 달성했는데, 그 부작용으로 #wireExitHandler 의 #map 조회가
+  // 모든 shutdown 킬에서 실패해, 그 시점에 실행 중이던 oneshot Action/QA run 이
+  // _runExitCompletionBackstop 에 절대 닿지 못하고 서버에서 2시간 TTL reaper
+  // 까지 `running` 으로 방치됐다(ticket 6abe2b79). 이제 stop() 은 레코드를
+  // 지우는 대신 stopReason 을 태그해 #map 에 남겨 둔다 — 아래 breaker 보장은
+  // "레코드가 없어서"가 아니라 _handleOneshotExit 의 stopReason early-return
+  // 으로 유지되고, run-completion backstop 은 실제로 발화한다.
   const cb = new CircuitBreaker();
   const mgr = new SubagentManager(makeConfig(), cb);
   const key = CircuitBreaker.key('agent-shutdown', 'ticket-shutdown', 'assignee');
@@ -955,7 +965,51 @@ test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTER
     }
     return realKill(pid, sig);
   };
+  // _sweepOneshotRunOrphans 가 실제 `ps` 서브프로세스를 spawn 해 group 을
+  // 조회한다(process-tree.ts 의 findLiveGroupBackgroundTasks) — setImmediate
+  // 한 틱보다 오래 걸리므로, 아래 t.mock.timers.enable 이 전역 setTimeout 을
+  // 바꾸기 전에 진짜 setTimeout 을 먼저 붙잡아 둔다.
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
   t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // run-completion 호출의 args 까지 검사하기 위한 로컬 fetch override
+  // (공용 beforeEach 목은 도구 이름만 기록한다) — 이 파일의 mockTicketFetch 와
+  // 동일한 로컬 override 패턴을 따른다.
+  const toolCalls = [];
+  const localFetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        mcpToolCalls.push(body.params?.name);
+        toolCalls.push({ name: body.params?.name, args: body.params?.arguments });
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+  globalThis.fetch = localFetch;
 
   try {
     mgr._trackForTest({
@@ -966,22 +1020,46 @@ test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTER
         process_handle: child,
         commentSent: false,
       }),
+      // ticket 6abe2b79: 죽은 oneshot Action run 의 모습 — exit 시점 backstop
+      // 이 종료 처리해야 하는 서버 쪽 run 에 바인딩돼 있다.
+      run: { run_id: 'oneshot-shutdown-run', workspace_id: 'ws-1', kind: 'action' },
     });
 
-    const stopping = mgr.stop();
-    assert.equal(mgr._snapshot().length, 0, 'stop dropped the record before waiting for SIGTERM exit');
-    assert.deepEqual(killed, ['SIGTERM'], 'stop sent SIGTERM after dropping the record');
+    const stopping = mgr.stop('manager_shutdown');
+    const tracked = mgr._snapshot().find((r) => r.pid === child.pid);
+    assert.ok(tracked, 'stop() 은 자식이 실제로 종료할 때까지 레코드를 계속 추적한다(더 이상 drop-first 아님)');
+    assert.equal(tracked.stopReason, 'manager_shutdown', 'stop() 이 시그널 전에 사유를 태그한다');
+    assert.deepEqual(killed, ['SIGTERM'], 'stop 은 여전히 즉시 SIGTERM 을 보낸다');
 
-    child.emit('exit', null, 'SIGTERM');
-    await new Promise((r) => setImmediate(r));
-    assert.equal(cb.size, 0, 'shutdown SIGTERM was not counted toward the breaker');
-    assert.equal(cb.shouldBlock(key), null, 'breaker stayed closed during manager shutdown');
-    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'shutdown did not falsely pend the ticket');
-    assert.equal(silentExit(), undefined, 'shutdown emitted no silent-exit fallback');
+    // 실제 exit 핸들러는 'exit' 이 아니라 'close' 를 구독한다(#wireExitHandler
+    // 참고) — 'close' 를 emit 해야 실제로 그 경로를 구동한다.
+    child.emit('close', null, 'SIGTERM');
+    // _sweepOneshotRunOrphans 의 실제 `ps` 서브프로세스 조회가 끝나고
+    // _runExitCompletionBackstop 이 complete_action_run 을 호출할 때까지
+    // 폴링한다 — 한 번의 setImmediate/microtask 로는 subprocess I/O 를
+    // 따라잡지 못한다.
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+
+    assert.equal(cb.size, 0, 'shutdown SIGTERM 은 breaker 에 계상되지 않았다');
+    assert.equal(cb.shouldBlock(key), null, '매니저 shutdown 중에도 breaker 는 닫힌 채 유지된다');
+    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'shutdown 이 티켓을 잘못 pend 하지 않았다');
+    assert.equal(silentExit(), undefined, 'shutdown 이 silent-exit fallback 을 내보내지 않았다');
+
+    const completion = toolCalls.find((c) => c.name === 'complete_action_run');
+    assert.ok(completion, 'run-completion backstop 이 죽은 run 에 대해 complete_action_run 을 호출했다');
+    assert.equal(completion.args.run_id, 'oneshot-shutdown-run');
+    assert.equal(completion.args.status, 'failed');
+    assert.match(
+      completion.args.summary,
+      /reason=manager_shutdown/,
+      'summary 가 idle-timer/TTL sweep 추측 대신 실제 사유를 보고한다',
+    );
+
+    assert.equal(mgr._snapshot().length, 0, 'exit 핸들러가 실제로 돈 뒤에야 레코드가 정리된다');
 
     t.mock.timers.tick(60_000);
     await stopping;
-    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'stop retained its grace-period escalation');
+    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'stop 은 grace-period 에스컬레이션을 그대로 유지한다');
   } finally {
     process.kill = originalKill;
     t.mock.timers.reset();

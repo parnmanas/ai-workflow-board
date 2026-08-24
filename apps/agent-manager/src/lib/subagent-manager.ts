@@ -320,6 +320,14 @@ interface SubagentRecord {
    *  background tasks and finalizes a stranded run as `error`. Plain data, so
    *  it survives #persist (unlike onSpawnExit, a function). */
   run?: RunSessionBinding | null;
+  /** ticket 6abe2b79: stop() 가 SIGTERM 을 보내기 *전에* 살아있는 모든 victim
+   *  레코드에 세팅한다 — BaseSessionManager 의 sess.stopReason(ticket b831b896)
+   *  과 동일한 규약. _handleOneshotExit 이 이 값을 보고 circuit-breaker/
+   *  silent-exit 오탐 로직을 건너뛰고(배달 실패가 아니므로), _runExitCompletionBackstop
+   *  이 추측 대신 실제 사유를 보고한다 — 매니저 shutdown 으로 죽은 oneshot
+   *  Action/QA run 이 서버의 TTL reaper 까지 `running` 으로 방치되지 않고
+   *  정확히 보고되게 한다. */
+  stopReason?: string | null;
 }
 
 type AnyRecord = SubagentRecord | ReservationRecord;
@@ -1095,6 +1103,22 @@ export class SubagentManager implements SubagentManagerContract {
   async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
     const pid = record.pid;
 
+    // ticket 6abe2b79: stop() 가 이제 시그널 전에 #map 에서 지우는 대신 모든
+    // victim 에 stopReason 을 태그하므로, 매니저 shutdown 킬도 #wireExitHandler
+    // 의 #map 조회에서 early-return 되지 않고 여기까지 들어온다. 아래 로직은
+    // 우리가 방금 직접 죽인 프로세스에는 전혀 맞지 않는다 — 집계할 실제 답변도
+    // 없고, model-fallback 재-spawn 도 의미 없으며(매니저가 종료 중이므로),
+    // mention-audit 재시도도 안 되고, 무엇보다 circuit-breaker 페널티는 절대
+    // 안 된다. #sweep/stopForAgent 가 drop-first 로 지켜온 "reap 은 배달
+    // 실패가 아니다" 보장을 stop() 에도 그대로 확장하되, drop-first 의 부작용
+    // (run-completion backstop 이 아예 안 도는 것)은 재도입하지 않는다. 그
+    // backstop 은 여전히 실행된다 — #wireExitHandler 에서 record.run 이 있으면
+    // 무조건 — summary 에 추측 대신 stopReason 이 반영된 채로.
+    if (record.stopReason) {
+      log(`Subagent exit pid=${pid} skip: manager-initiated stop (reason=${record.stopReason})`);
+      return;
+    }
+
     // Classification of the aggregated one-shot result. Defaults to non-fatal;
     // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout
     // we collect. Read below by both the answer-posting guard and the
@@ -1505,19 +1529,24 @@ export class SubagentManager implements SubagentManagerContract {
     // run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가 그냥
     // "결과 없음" 보다 낫다.
     const tail = this.#collectTail(record);
-    // ticket b831b896 round 3: no speculative "TTL sweep/kill일 수 있음"
-    // guess anymore — and there is nothing to classify it AS here, either.
-    // stop() / #sweep() / stopForAgent all drop the record from #map BEFORE
-    // signalling (ticket 6abe2b79), so a manager-initiated kill never
-    // reaches this backstop at all — this only ever fires for an exit NONE
-    // of those caused (crash, stuck permission prompt, …), which really is
-    // unknown.
-    const summary = hasUntrustedWorkspaceWarning(tail)
-      ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
-        'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
-        'cli-home의 .claude.json trust 시딩을 확인하세요.'
-      : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}, reason=unknown) — ` +
-        `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
+    // ticket 6abe2b79: stop() 이 이제 SIGTERM 전에 #map 을 비우는 대신 모든
+    // victim 에 stopReason 을 태그해 두므로(레코드는 exit 핸들러가 정리),
+    // 매니저 shutdown 킬도 여기까지 정상적으로 들어온다 — ticket b831b896
+    // round 3 의 "manager-initiated kill 은 절대 이 backstop 에 못 닿는다"는
+    // 전제는 더 이상 사실이 아니다. stopReason 이 있으면 그 정확한 사유를
+    // 그대로 보고하고(untrusted-workspace 탐지나 "TTL sweep/kill 때문일 수
+    // 있다"는 추측은 둘 다 이 케이스엔 안 맞고, 후자는 이 티켓이 없애려는 바로
+    // 그 추측성 문구다), stopReason 이 없을 때만(=진짜 원인불명 — crash, 승인
+    // 대기 등) b831b896 round 3 이 정리한 정직한 "reason=unknown" 문구로
+    // 폴백한다.
+    const summary = record.stopReason
+      ? `agent-manager가 프로세스를 종료해 이 run이 결과 없이 중단됐습니다 (reason=${record.stopReason}).`
+      : hasUntrustedWorkspaceWarning(tail)
+        ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+          'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
+          'cli-home의 .claude.json trust 시딩을 확인하세요.'
+        : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}, reason=unknown) — ` +
+          `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
     await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,
@@ -2129,20 +2158,34 @@ export class SubagentManager implements SubagentManagerContract {
     };
   }
 
-  async stop(): Promise<void> {
+  /**
+   * ticket 6abe2b79: stopForAgent / #sweep 와 달리, 시그널을 보내기 전에 각
+   * victim 을 #map 에서 미리 지우지 않는다. drop-first 방식이면 매니저
+   * shutdown 킬마다 #wireExitHandler 의 #map 조회가 무조건 실패해, 이 프로세스가
+   * 돌리던 oneshot Action/QA run 이 _runExitCompletionBackstop 에 절대 닿지
+   * 못하고 서버에서 2시간 TTL reaper 까지 `running` 으로 방치됐다. 대신 사유를
+   * 태그하고 레코드를 그대로 남겨 둔다 — 실제 exit 핸들러가 이를 찾아내고,
+   * _handleOneshotExit 의 stopReason 체크가 크래시 오계상 로직을 건너뛰며
+   * (#sweep/stopForAgent 가 drop-first 로 지켜온 "reap ≠ 배달 실패" 보장을
+   * 그대로 유지), run-completion backstop 은 이제 침묵 대신 실제 사유를 담아
+   * 정상 발화한다. reservation 은 자식 프로세스도 exit 핸들러도 없으므로
+   * 기존과 동일하게 즉시 지운다.
+   */
+  async stop(reason?: string): Promise<void> {
     if (this.#sweepTimer) {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
+    const stopReason = reason || 'manager_shutdown';
     const victims: SubagentRecord[] = [];
     for (const [pid, rec] of this.#map.entries()) {
-      if (rec.kind === 'reservation') continue;
+      if (rec.kind === 'reservation') {
+        this.#map.delete(pid);
+        continue;
+      }
+      rec.stopReason = stopReason;
       victims.push(rec);
-      this.#map.delete(pid);
     }
-    // Reservations have no child process or exit handler. Drop them before any
-    // child is signalled too, so shutdown exposes an empty manager immediately.
-    this.#map.clear();
     for (const rec of victims) {
       try {
         process.kill(rec.pid, 'SIGTERM');
@@ -2158,18 +2201,14 @@ export class SubagentManager implements SubagentManagerContract {
       } catch {
         /* gone */
       }
-      // Drop-first makes the per-child exit handler return before its normal
-      // cleanup. Preserve temp-config hygiene explicitly, as stopForAgent does.
-      if (rec.config_path && rec.config_path_is_temp) {
-        await fsp.unlink(rec.config_path).catch(() => {});
-      }
     }
-    try {
-      await fsp.writeFile(this.#persistPath, JSON.stringify({ pids: [] }, null, 2));
-    } catch {
-      /* best-effort */
-    }
-    log(`SubagentManager stopped (terminated ${victims.length} children)`);
+    // 이제 각 victim 의 'close' 이벤트가 도착하면 실제 exit 핸들러가 #map
+    // 정리 + temp-config unlink 를 그대로 담당한다(stop() 이 수동으로
+    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수). SIGKILL 에도
+    // 살아남는 스트래글러가 있으면 temp cfg 가 새지만, 이 호출 직후 매니저
+    // 프로세스 자체가 종료되므로 무관하다.
+    this.#persist();
+    log(`SubagentManager stopped (terminated ${victims.length} children, reason=${stopReason})`);
   }
 
   _snapshot(): any[] {
