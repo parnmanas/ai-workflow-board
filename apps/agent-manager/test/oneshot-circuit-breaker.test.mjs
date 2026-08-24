@@ -958,8 +958,11 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
       'the TTL branch SIGTERM-reaped the pid (proves the TTL branch ran, not ESRCH-cleanup)',
     );
 
-    // Now the SIGTERM lands: a signal death reports code=null.
-    child.emit('exit', null, 'SIGTERM');
+    // Now the SIGTERM lands: a signal death reports code=null. 실제 exit
+    // 핸들러는 'exit' 이 아니라 'close' 를 구독한다(#wireExitHandler 참고) —
+    // 'close' 를 emit 해야 이 경로가 실제로 구동된다(emit('exit', ...) 는
+    // 아무 리스너도 없어 조용히 no-op 이 되어 아래 단언들을 공허하게 통과시킨다).
+    child.emit('close', null, 'SIGTERM');
     await new Promise((r) => setImmediate(r)); // flush the async exit handler
 
     // Gating proven: the exit handler found no record (dropped) and
