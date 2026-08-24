@@ -619,12 +619,12 @@ let _lastReExecScheduled = false;
  * the right code: 1 when we're tearing down to re-exec into the just-built
  * dist, 0 for a normal operator-driven stop.
  *
- * The unit runs `Restart=on-failure`, so restart hinges on the exit code:
- * only a non-zero exit makes systemd respawn the unit, while a clean exit(0)
- * (e.g. a deliberate `systemctl stop`) leaves it stopped. The exit-1 signal
- * here is what makes the re-exec actually restart — it also keeps the exit
- * code semantically honest (1 = abnormal/re-exec, 0 = clean stop) for logs
- * and journald.
+ * 이 유닛은 `Restart=on-failure`로 동작하므로 재시작 여부는 exit 코드에 달려
+ * 있다: 0이 아닌 exit여야 systemd가 재기동시키고, 정상 exit(0)(예: 의도적인
+ * `systemctl stop`)이면 멈춘 채로 남는다. 여기서 exit 1을 쓰는 것 자체가
+ * re-exec이 실제로 재시작되게 만드는 조건이며, 동시에 exit 코드의 의미도
+ * 정직하게 유지한다(1 = 비정상/재기동, 0 = 정상 정지) — 로그와 journald
+ * 기록을 위해서도 그렇다.
  */
 let _systemdReExecPending = false;
 
@@ -1048,10 +1048,10 @@ async function runNpmGlobalSelfUpdate(
   }
 
   // POSIX can replace the package files while Node has the old modules mapped.
-  // Install FIRST and restart only after npm succeeds. The previous universal
-  // exit-first helper raced systemd's Restart=on-failure: systemd relaunched
-  // the old package after five seconds while the detached helper was still
-  // waiting or installing, yet the command had already reported success.
+  // Install FIRST and restart only after npm succeeds. 이전의 범용 exit-first
+  // 방식은 systemd의 Restart=on-failure와 경합했다: 분리된(detached) 헬퍼가
+  // 아직 대기 중이거나 설치 중인데도 systemd가 5초 뒤 예전 패키지를 다시
+  // 띄웠고, 그 시점엔 이미 명령이 성공을 보고한 뒤였다.
   if (process.platform !== 'win32') {
     out(`Self-update: npm install -g --ignore-scripts ${installSpec}`);
     // `--ignore-scripts` — provenance 게이트는 **우리 tarball 의 출처**만 보증한다.
@@ -1233,15 +1233,16 @@ function isManagedBySystemd(): boolean {
  *
  * Two strategies depending on the supervisor:
  *
- * 1. **systemd** (Linux + a `.service` unit): the parent exits 1 and lets the
- *    unit's `Restart=on-failure` bring up a fresh process (a non-zero exit is
- *    what triggers it). We MUST NOT spawn a detached child here — systemd's
- *    default `KillMode=control-group` would sweep the new child into the same
- *    cgroup teardown when the parent dies,
- *    killing the very process we just launched. Symptom: `update_manager` SSE
- *    command lands, build succeeds, parent exits, child appears for a moment
- *    in `ps`, then the entire unit goes inactive(dead) and the operator's
- *    Update button vanishes with no replacement process.
+ * 1. **systemd**(Linux + `.service` 유닛): 부모 프로세스가 exit 1로 종료되면
+ *    유닛의 `Restart=on-failure`가 새 프로세스를 띄운다(0이 아닌 exit가 바로
+ *    그 트리거 조건이다). 여기서 분리된(detached) 자식 프로세스를 직접
+ *    spawn하면 안 된다 — systemd의 기본 `KillMode=control-group`이 부모가
+ *    죽을 때 새로 띄운 자식까지 같은 cgroup teardown에 휩쓸어 가버려,
+ *    방금 띄운 그 프로세스를 그대로 죽여버리기 때문이다.
+ *    Symptom: `update_manager` SSE command lands, build succeeds, parent
+ *    exits, child appears for a moment in `ps`, then the entire unit goes
+ *    inactive(dead) and the operator's Update button vanishes with no
+ *    replacement process.
  *
  * 2. **everything else** (Windows, raw bash, macOS launchd, npm-global
  *    install): spawn a detached child with --force and SIGTERM-self. No
@@ -1253,10 +1254,11 @@ function reExecManager(out: (msg: string) => void): void {
     out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
     // We trigger the SIGTERM shutdown handler so chat / ticket sessions get
     // cleaned up, but we MUST set _systemdReExecPending first so the handler's
-    // final `process.exit(...)` picks exit code 1 instead of 0. Under
-    // Restart=on-failure a clean exit(0) would NOT respawn — exit 1 is what
-    // makes systemd relaunch us, and it also keeps the journald record honest
-    // about why the unit restarted (re-exec, not a crash or operator stop).
+    // final `process.exit(...)` picks exit code 1 instead of 0.
+    // Restart=on-failure에서는 정상 exit(0)이면 재기동되지 않는다 — 실제로
+    // systemd가 재시작하게 만드는 것은 exit 1이며, 이는 동시에 유닛이 왜
+    // 재시작됐는지(크래시나 운영자의 정지가 아니라 재기동을 위한 것이라는
+    // 점)를 journald 기록에도 정직하게 남긴다.
     _systemdReExecPending = true;
     setTimeout(() => {
       try {
