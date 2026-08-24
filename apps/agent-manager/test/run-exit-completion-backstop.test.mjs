@@ -329,10 +329,12 @@ test('SubagentManager._runExitCompletionBackstop: 흔한 hang(tail에 trust 경�
   assert.ok(call);
   assert.equal(call.args.status, 'error');
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
-  // ticket b831b896 round 3: stop()/#sweep()/stopForAgent가 전부 SIGTERM
-  // 전에 #map에서 record를 지우는 기존 설계(ticket 6abe2b79)라 매니저發
-  // kill은 애초에 이 backstop에 도달 못 한다 — 도달했다면 그 자체로
-  // 원인불명이므로 추측 대신 정직하게 unknown이라고 기록해야 한다.
+  // ticket 6abe2b79 rebase 통합: stop()이 SIGTERM 전에 매니저發 kill마다
+  // record.stopReason을 태그하므로(레코드 자체는 exit 핸들러가 정리),
+  // 매니저發 kill은 이제 이 backstop에 정상 도달해 위 stopReason 분기로
+  // 정확한 사유를 보고한다. 이 테스트의 record는 stopReason 없이 만들어져
+  // 있으므로(진짜 원인불명 — crash, 승인 대기 등) 그 경우에만 추측 대신
+  // 정직하게 unknown이라고 기록해야 한다는 것을 검증한다.
   assert.match(call.args.summary, /reason=unknown/, '원인을 모르면 모른다고 정확히 기록해야 한다');
   assert.doesNotMatch(
     call.args.summary,
