@@ -162,7 +162,14 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           'bumping in place would silently skip their side effects): when eligible, if the ticket\'s LAST comment was written ' +
           'by the same author with the same type and dedupe_key, this call bumps its repeat_count/last_repeated_at in place ' +
           'instead of adding a new row — use this for noisy auto-generated notices that may fire many times in a row (a ' +
-          'different author/type/dedupe_key, or an unrelated reply, in between always starts a fresh row).'),
+          'different author/type/dedupe_key, or an unrelated reply, in between always starts a fresh row). ' +
+          'Set `auto_notice: true` when this comment is itself a system/manager-generated automatic notice (e.g. a ' +
+          'dispatch-suppression or provisioning-blocker notification) that carries no new actionable content — the ' +
+          'comment is still saved and attributed to the real caller, but its activity-log row is stamped actor_id=\'system\' ' +
+          'so it never re-triggers the ticket\'s routed roles the way an ordinary comment would (ticket 3c8b8026: without ' +
+          'this, a suppression notice posted in response to a suppressed trigger re-triggers, gets suppressed again, and ' +
+          'posts another notice — a self-amplifying loop that burns the hard-budget ceiling on pure echo). @-mentions ' +
+          'inside the content still dispatch normally either way — only the generic "new comment" wake is skipped.'),
       author_role: z.string().optional()
         .describe("Role the comment is authored as (e.g. 'assignee', 'reviewer'). Auto-filled from the subagent session pin or from TicketRoleAssignment when omitted. Stored on metadata.author_role so the UI can render which role spoke."),
       attachment_resource_ids: z.array(z.string()).optional()
@@ -549,9 +556,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
       // endpoint and answer_question tool perform, so all three surfaces agree.
+      //
+      // ticket 3c8b8026: metadata.auto_notice===true(system/manager 자동 알림,
+      // 예: dispatch 억제 공지)은 이 첫 insert 에서도 위 deduped 분기와 동일하게
+      // actor_id='system' 으로 남긴다 — trigger-loop.service.ts의 system-actor
+      // 가드가 이 값 하나만으로 재트리거를 건너뛰므로, 접히지 않은(=새 row 로
+      // 들어가는) 알림도 스스로를 재트리거할 수 없다. 코멘트 자체의
+      // author/author_id는 실제 호출자(예: Manager 에이전트) 그대로 저장되어
+      // 화면 귀속은 바뀌지 않는다 — 이 스탬프는 activity-log 의 트리거 판단에만
+      // 영향을 준다.
+      const isAutoNotice = finalMetadata.auto_notice === true;
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
-        ticket_id, actor_id: resolvedAuthorId, actor_name: authorName,
+        ticket_id, actor_id: isAutoNotice ? 'system' : resolvedAuthorId, actor_name: authorName,
         new_value: content,
         field_changed: resolvedType,
       });
