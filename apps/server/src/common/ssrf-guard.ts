@@ -36,8 +36,12 @@ const ALLOWED_HEADER_NAMES = new Set([
 
 // 제3자 웹훅 인증에 필요해 allowlist에는 있지만 credential을 담는 헤더.
 // guardedFetch가 리다이렉트 홉의 origin이 바뀌면 이 헤더들을 제거한다.
+// x-agent-key는 이 코드베이스의 표준 에이전트 인증 헤더(AgentAuthGuard가
+// 읽는 바로 그 헤더) — migration export 클라이언트(ticket 0f638509)가
+// guardedFetch로 단기 TTL 토큰을 실어 보내므로, 소스가(또는 소스가 침해되어)
+// 다른 origin으로 리다이렉트해도 토큰이 그 origin으로 새지 않도록 한다.
 const SENSITIVE_HEADER_NAMES = new Set([
-  'authorization', 'x-api-key', 'x-webhook-secret', 'x-hub-signature', 'x-hub-signature-256', 'x-signature',
+  'authorization', 'x-api-key', 'x-agent-key', 'x-webhook-secret', 'x-hub-signature', 'x-hub-signature-256', 'x-signature',
 ]);
 
 function httpError(status: number, message: string): Error & { status: number } {

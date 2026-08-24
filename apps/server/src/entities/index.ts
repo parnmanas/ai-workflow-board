@@ -145,3 +145,7 @@ export type { OntologyGraphStatus } from './OntologyGraph';
 // TERMINAL_CLI_LOGIN_SESSION_STATUSES / CliLoginSessionStatus directly from
 // './CliLoginSession' instead.
 export { CliLoginSession } from './CliLoginSession';
+// 도착지 주도 live pull import 실행 상태 (ticket 0f638509). Auto-DDL'd by
+// TypeORM `synchronize` (D-01) exactly like the sibling tables above; no
+// hand-written migration needed.
+export { MigrationRun } from './MigrationRun';
