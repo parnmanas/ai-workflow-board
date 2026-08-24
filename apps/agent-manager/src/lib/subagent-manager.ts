@@ -2257,6 +2257,18 @@ export class SubagentManager implements SubagentManagerContract {
    * record.run 을 읽으므로 둘 중 먼저 그 동기 구간을 통과하는 쪽만 완료
    * 처리한다 — 서버측 멱등성은 상태 손상을 막는 안전판일 뿐, 이게 "정확히
    * 1회 호출"을 보장하는 진짜 메커니즘이다.
+   *
+   * 리뷰 지적 반영(라운드4): 라운드3 은 "정확히 한 경로만 부른다"는 지켰지만
+   * "그 경로가 실제로 끝나길 기다린다"는 안 지켰다 — 실제 exit 핸들러가 먼저
+   * #claimRun 에 성공한 뒤 _sweepOneshotRunOrphans/_runExitCompletionBackstop
+   * 의 await 도중 STOP_FORCE_KILL_SETTLE_MS 가 만료되면, fallback 의
+   * #claimRun 은 null 을 받아 스킵하고 stop() 은 그대로 반환해 버렸다 — exit
+   * 핸들러가 들고 있는 completion 요청이 호출자의 뒤이은 process.exit() 에
+   * 잘려나갈 수 있는, 증상만 다른 같은 무음 유실이다. 그래서 victim 각각을
+   * 독립적으로 처리한다: 1차 상한 안에 자연 정착(#stopWaiters 의 resolve)되면
+   * 끝, 상한을 넘겼는데 #claimRun 이 값을 얻으면(=아무도 안 가져감) fallback
+   * 이 직접 완료 처리, #claimRun 이 null 이면(=exit 핸들러가 이미 작업 중)
+   * 포기하지 않고 그 기존 완료 promise 를 2차 상한만큼 한 번 더 기다린다.
    */
   async stop(reason?: string): Promise<void> {
     if (this.#sweepTimer) {
@@ -2265,7 +2277,7 @@ export class SubagentManager implements SubagentManagerContract {
     }
     const stopReason = reason || 'manager_shutdown';
     const victims: SubagentRecord[] = [];
-    const settled: Promise<void>[] = [];
+    const settledByPid = new Map<number, Promise<void>>();
     for (const [pid, rec] of this.#map.entries()) {
       if (rec.kind === 'reservation') {
         this.#map.delete(pid);
@@ -2273,7 +2285,8 @@ export class SubagentManager implements SubagentManagerContract {
       }
       rec.stopReason = stopReason;
       victims.push(rec);
-      settled.push(
+      settledByPid.set(
+        rec.pid,
         new Promise<void>((resolve) => {
           this.#stopWaiters.set(rec.pid, resolve);
         }),
@@ -2297,34 +2310,41 @@ export class SubagentManager implements SubagentManagerContract {
     }
     // 이제 각 victim 의 'close' 이벤트가 도착하면 실제 exit 핸들러가 #map
     // 정리 + temp-config unlink 를 그대로 담당한다(stop() 이 수동으로
-    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수).
-    let timedOut = false;
-    await Promise.race([
-      Promise.all(settled),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          timedOut = true;
-          resolve();
-        }, STOP_FORCE_KILL_SETTLE_MS).unref?.();
-      }),
-    ]);
-    if (timedOut) {
-      for (const rec of victims) {
-        // #stopWaiters 에 아직 항목이 있다 = 실제 exit 핸들러가 아직 못 끝냄.
-        if (!this.#stopWaiters.delete(rec.pid)) continue;
-        // #claimRun: record.run 읽기 + null 대입이 여기서 동기적으로 끝난다 —
-        // 뒤이은 await 도중 실제 close 가 와도, 그쪽의 #claimRun 호출은 이미
-        // null 을 보고 스킵한다(또는 이쪽이 늦게 도착해 이미 null 을 받는다).
+    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수). 아래는 victim 마다
+    // 독립적으로 "자연 정착 대기 → 못 끝났으면 누가 completion 을 들고
+    // 있는지 확인 → 아무도 없으면 fallback 이 직접, 이미 누가 있으면 그
+    // 완료를 한 번 더 대기"를 수행한다.
+    await Promise.all(
+      victims.map(async (rec) => {
+        const settled = settledByPid.get(rec.pid)!;
+        const firstRoundTimedOut = await Promise.race([
+          settled.then(() => false as const),
+          new Promise<true>((resolve) => {
+            setTimeout(() => resolve(true), STOP_FORCE_KILL_SETTLE_MS).unref?.();
+          }),
+        ]);
+        if (!firstRoundTimedOut) return; // 실제 exit 핸들러가 정상적으로 끝냄
+
         const claimedRun = this.#claimRun(rec);
         if (claimedRun) {
+          // 아무도 안 가져갔다 — exit 핸들러가 아예 시작도 못 한 경우(예:
+          // SIGKILL 에도 안 죽는 병적인 케이스). fallback 이 직접 완료 처리.
+          this.#stopWaiters.delete(rec.pid);
           try {
             await this._runExitCompletionBackstop(rec, null, claimedRun);
           } catch (err: any) {
             log(`[subagent] stop() force-kill fallback backstop failed pid=${rec.pid}: ${err?.message ?? err}`);
           }
+          return;
         }
-      }
-    }
+        // 이미 실제 exit 핸들러가 #claimRun 으로 가져가 작업 중이다 — 포기하지
+        // 않고 그 기존 완료 promise 를 한 번 더(상한 두 배까지) 기다린다.
+        await Promise.race([
+          settled,
+          new Promise<void>((resolve) => setTimeout(resolve, STOP_FORCE_KILL_SETTLE_MS).unref?.()),
+        ]);
+      }),
+    );
     this.#persist();
     log(`SubagentManager stopped (terminated ${victims.length} children, reason=${stopReason})`);
   }
