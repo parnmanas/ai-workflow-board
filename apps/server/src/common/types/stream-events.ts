@@ -527,6 +527,22 @@ export interface CommentMentionPayload {
   // depth reaches its cap so an agent-mention ping-pong auto-terminates —
   // the chain resets once a human comments.
   agent_chain_depth?: number;
+  // 티켓 71532b4f: agent_trigger와 동일한 ticket > agent > board 우선순위로
+  // 해석된 dispatch 부가값. 이전에는 comment_mention이 이 셋을 전혀 나르지
+  // 않아, 코멘트 멘션으로 깨운 세션이 agent에 명시 핀된 cli_runtime_profile을
+  // 무시하고 순정 Claude로 조용히 돌았다 — agent-manager의 handleCommentMention이
+  // resolveTriggerRuntimeProfile / parseHarnessConfig / parseEffortPreset로
+  // 읽어 subagentManager.spawn()에 그대로 실어 보낸다(handleTrigger와 동일).
+  // null = 적용할 override 없음(매니저는 기존처럼 CLI 기본값으로 spawn).
+  harness_config: HarnessConfig | null;
+  cli_runtime_profile: CliRuntimeProfile | null;
+  effort_preset: ResolvedEffortPreset | null;
+  // Same ticket 71532b4f expansion as the three fields above — env_vars-only
+  // (repositories always empty; see mention-dispatch-profile.ts's resolveMentionDispatchExtras
+  // doc comment for why) and the board worktree mode, so agent-manager's
+  // buildDispatchEnvVars() produces the same envVars a column trigger would.
+  environment_config: ResolvedEnvironmentConfig | null;
+  worktree_mode: WorktreeMode;
 }
 
 // Phase-9 typed comments — fires when a user/agent starts composing a comment
