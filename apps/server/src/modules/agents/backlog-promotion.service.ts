@@ -102,6 +102,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
@@ -179,6 +180,10 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     // surgery again.
     @Inject(forwardRef(() => TriggerLoopService))
     private readonly triggerLoop: TriggerLoopService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free the same way the constructor
+    // params above are.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -295,6 +300,19 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
 
     const board = await boardRepo.findOne({ where: { id: boardId } });
     if (!board) return null;
+
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). Same
+    // rationale as the board-pause gate directly below — a quiesced
+    // destination must not shuffle tickets out of intake either, not just
+    // skip downstream agent triggers (_emitTrigger already gates the
+    // trigger itself, but that still leaves observable queue churn if this
+    // level ran unchecked).
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('BacklogPromotion', 'tryPromote skipped (instance quiesced)', {
+        board_id: boardId, triggered_by: opts?.triggerAgentId || null,
+      });
+      return null;
+    }
 
     // Board pause gate. Pausing must also block the silent backlog→active
     // move, not just downstream agent triggers — otherwise the moment a

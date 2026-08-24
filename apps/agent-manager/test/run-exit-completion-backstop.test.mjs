@@ -168,6 +168,82 @@ test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)�
   const call = mcpToolCalls.find((c) => c.name === 'complete_action_run' && c.args.run_id === 'run-generic-hang');
   assert.ok(call);
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  // ticket b831b896 round 3: stopReason이 전혀 없는 경우(매니저가 죽인 게
+  // 아닌 진짜 원인불명 종료) — 추측 문구 대신 정직하게 unknown이라고만
+  // 기록해야 한다.
+  assert.match(call.args.summary, /reason=unknown/, '원인을 모르면 모른다고 정확히 기록해야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 모르는데 특정 메커니즘(idle-timer/health-watchdog)을 추측하면 안 된다',
+  );
+});
+
+// ticket b831b896: 매니저 self-update 재시작이 in-flight 세션을 SIGTERM하면
+// stop()이 sess.stopReason을 태그해 두고, 이 backstop이 idle-timer/
+// health-watchdog 추측 대신 그 정확한 사유를 report한다.
+test('ChatSessionManager._onChildExit: stopReason이 있으면 추측 문구 대신 정확한 사유를 기록한다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(40006, {
+    _run: { run_id: 'run-self-update', workspace_id: 'ws-1', kind: 'action' },
+    stopReason: 'self_update_restart',
+  });
+  await mgr._onChildExit(sess, null, 'SIGTERM');
+  const call = mcpToolCalls.find((c) => c.name === 'complete_action_run' && c.args.run_id === 'run-self-update');
+  assert.ok(call, 'run은 여전히 종료 처리돼야 한다');
+  assert.match(call.args.summary, /self_update_restart/, 'stopReason이 summary에 그대로 드러나야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 아는데도 추측 문구를 쓰면 안 된다',
+  );
+});
+
+test('ChatSessionManager.stop: 살아있는 run-bound 세션에 reason을 태그해 SIGTERM 이전에 남긴다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(50001, {
+    _run: { run_id: 'run-shutdown-tag', workspace_id: 'ws-1', kind: 'action' },
+  });
+  mgr._sessions.set(sess.sessionKey, sess);
+  await mgr.stop('self_update_restart');
+  assert.equal(sess.stopReason, 'self_update_restart', 'stop()이 SIGTERM 전에 sess.stopReason을 설정해야 한다');
+});
+
+// ticket b831b896 round 3: "각 kill 지점에서 reason을 태그" — stopForAgent
+// (credential rotation)도 manager-initiated kill 지점 중 하나다.
+test('ChatSessionManager.stopForAgent: 살아있는 세션에 credential_rotation을 태그해 SIGTERM 이전에 남긴다', async () => {
+  const mgr = new ChatSessionManager(makeConfig());
+  const sess = makeChatSession(50002, { agentId: 'agent-rotated' });
+  mgr._sessions.set(sess.sessionKey, sess);
+  await mgr.stopForAgent('agent-rotated');
+  assert.equal(sess.stopReason, 'credential_rotation');
+});
+
+// ticket b831b896 round 4: reviewer가 지적한 마지막 미분류 kill 지점 —
+// #evictLru(_ensureCapacity가 maxConcurrent에서 새 세션을 위해 가장 오래
+// 안 건드린 세션을 reap)도 idle/max_turns와 같은 stdin.end() manager-
+// initiated close이므로 동일하게 분류돼야 한다.
+test('ChatSessionManager._ensureCapacity: maxConcurrent 도달 시 LRU 세션에 lru_eviction을 태그해 stdin.end() 이전에 남긴다', () => {
+  const mgr = new ChatSessionManager({
+    url: 'http://127.0.0.1:0',
+    apiKey: 'test-key',
+    delegation: { enabled: true, maxConcurrent: 1, ttlMinutes: 15, idleMinutes: 999, maxTurnsPerSession: 999 },
+  });
+  const older = makeChatSession(50003, {
+    _run: { run_id: 'run-evicted', workspace_id: 'ws-1', kind: 'action' },
+    lastTouchedAt: Date.now() - 100_000,
+  });
+  const newer = makeChatSession(50004, { lastTouchedAt: Date.now() });
+  mgr._sessions.set(older.sessionKey, older);
+  mgr._sessions.set(newer.sessionKey, newer);
+
+  const ok = mgr._ensureCapacity();
+
+  assert.equal(ok, true, 'eviction succeeded, room was made for a new spawn');
+  assert.equal(older.stopReason, 'lru_eviction', 'evicted (older) 세션에 태그돼야 한다');
+  assert.equal(mgr._sessions.has(older.sessionKey), false, '더 오래된 세션이 reap됐다');
+  assert.equal(mgr._sessions.has(newer.sessionKey), true, '더 최근 세션은 살아남는다');
+  assert.equal(newer.stopReason, undefined, '살아남은 세션은 태그되면 안 된다');
 });
 
 // ── SubagentManager._runExitCompletionBackstop (oneshot run 경로) ────────────
@@ -253,4 +329,16 @@ test('SubagentManager._runExitCompletionBackstop: 흔한 hang(tail에 trust 경�
   assert.ok(call);
   assert.equal(call.args.status, 'error');
   assert.doesNotMatch(call.args.summary, /workspace trust/, '관측한 적 없는 trust 원인을 주장하면 안 된다');
+  // ticket 6abe2b79 rebase 통합: stop()이 SIGTERM 전에 매니저發 kill마다
+  // record.stopReason을 태그하므로(레코드 자체는 exit 핸들러가 정리),
+  // 매니저發 kill은 이제 이 backstop에 정상 도달해 위 stopReason 분기로
+  // 정확한 사유를 보고한다. 이 테스트의 record는 stopReason 없이 만들어져
+  // 있으므로(진짜 원인불명 — crash, 승인 대기 등) 그 경우에만 추측 대신
+  // 정직하게 unknown이라고 기록해야 한다는 것을 검증한다.
+  assert.match(call.args.summary, /reason=unknown/, '원인을 모르면 모른다고 정확히 기록해야 한다');
+  assert.doesNotMatch(
+    call.args.summary,
+    /TTL sweep|idle-timer|health-watchdog|승인 대기 등으로 멈춰/,
+    '원인을 모르는데 TTL sweep/kill 같은 특정 메커니즘을 추측하면 안 된다',
+  );
 });

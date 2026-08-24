@@ -42,6 +42,7 @@ import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module
 import { OutreachModule } from './modules/outreach/outreach.module';
 import { OrchestrationModule } from './modules/orchestration/orchestration.module';
 import { OntologyModule } from './modules/ontology/ontology.module';
+import { MigrationModule } from './modules/migration/migration.module';
 
 @Module({
   imports: [
@@ -116,6 +117,7 @@ import { OntologyModule } from './modules/ontology/ontology.module';
     OutreachModule,
     OrchestrationModule,
     OntologyModule,
+    MigrationModule,
   ],
 })
 export class AppModule {}

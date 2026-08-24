@@ -33,6 +33,7 @@ const MIN = 60_000;
 const NOW = new Date('2026-06-25T12:00:00Z');
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 // Stub channel repo over a plain-object row array. Handles the two find
 // shapes runOnce uses: { enabled, next_poll_at: IsNull() } and
@@ -118,7 +119,7 @@ function svcWith(rows, failMap = {}, credentialRows = []) {
   const channelRepo = makeChannelRepo(rows);
   const credentialRepo = makeCredentialRepo(credentialRows);
   const ingestService = makeIngestService(failMap);
-  const svc = new OutreachPollingService(channelRepo, credentialRepo, ingestService, noopLog);
+  const svc = new OutreachPollingService(channelRepo, credentialRepo, ingestService, noopLog, noQuiesce);
   return { svc, channelRepo, credentialRepo, ingestService };
 }
 
@@ -308,7 +309,7 @@ test('a RedditForbiddenError (403) from pollChannel marks the channel blocked_at
       throw new RedditForbiddenError('banned from subreddit', 403);
     },
   };
-  const svc = new OutreachPollingService(channelRepo, credentialRepo, ingestService, noopLog);
+  const svc = new OutreachPollingService(channelRepo, credentialRepo, ingestService, noopLog, noQuiesce);
 
   const { polled, failed } = await svc.runOnce(NOW);
 

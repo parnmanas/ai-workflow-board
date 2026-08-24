@@ -98,6 +98,13 @@ export default function SettingsOverviewPage() {
           icon: 'S',
           adminOnly: true,
         },
+        {
+          title: 'Live Import',
+          description: 'Pull this instance\'s data from a live source AWB server.',
+          path: '/admin/migration',
+          icon: 'M',
+          adminOnly: true,
+        },
       ],
     },
   ];

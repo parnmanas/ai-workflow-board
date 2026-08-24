@@ -6,6 +6,7 @@ import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import {
   AgentManagerCommandService,
@@ -98,6 +99,9 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     private readonly roomMessaging: RoomMessagingService,
     private readonly logService: LogService,
     metrics: MemoryMetricsRegistry,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {
     // Debounce-map size gauges (ticket 1f750878) for /api/diagnostics/memory —
     // a persistent climb means the TTL sweep regressed. Mirrors the
@@ -328,6 +332,12 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
 
   private async _handleChatRequest(evt: AutostartRequestEvent): Promise<void> {
     if (!evt?.agent_id || !evt.room_id) return;
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). This
+    // chat-triggered autostart path is fully independent of
+    // TriggerLoopService._emitTrigger's own quiesce check (the ticket-triggered
+    // autostart path funnels through _emitTrigger and is covered there) — a
+    // quiesced destination must not spawn agents via chat mentions either.
+    if (await this.instanceQuiesce.isQuiesced()) return;
     const cls = await this.classify(evt.agent_id);
     if (cls.reachable) return; // came online between send and here — nothing to do
     if (!cls.agent) return;    // agent deleted between send and here

@@ -9,6 +9,7 @@ import { QaScenario, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { Deployment } from '../../entities/Deployment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { QaRunService } from './qa-run.service';
 import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
@@ -123,6 +124,9 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly qaRunService: QaRunService,
     private readonly logService: LogService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit() {
@@ -365,6 +369,14 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
   // ── Internals ──────────────────────────────────────────────────────────────
 
   private async _startRerun(scenarioId: string, generation: number, fixTicketId: string): Promise<void> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). This
+    // path calls QaRunService.startQaRun DIRECTLY — it bypasses
+    // QaScheduleService.runOnce's own gate entirely, so gating the scheduler
+    // alone is not sufficient for the QA subsystem (review round 1 P2).
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('QA', 'rerun-on-fix skipped (instance quiesced)', { scenario_id: scenarioId, fix_ticket_id: fixTicketId });
+      return;
+    }
     try {
       const result = await this.qaRunService.startQaRun({
         scenarioId,

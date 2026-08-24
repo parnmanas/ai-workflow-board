@@ -21,6 +21,7 @@ import {
   TTL_SWEEP_INTERVAL_MS,
   SIGTERM_GRACE_MS,
   STOP_GRACE_MS,
+  STOP_FORCE_KILL_SETTLE_MS,
 } from './constants.js';
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
@@ -320,6 +321,14 @@ interface SubagentRecord {
    *  background tasks and finalizes a stranded run as `error`. Plain data, so
    *  it survives #persist (unlike onSpawnExit, a function). */
   run?: RunSessionBinding | null;
+  /** ticket 6abe2b79: stop() 가 SIGTERM 을 보내기 *전에* 살아있는 모든 victim
+   *  레코드에 세팅한다 — BaseSessionManager 의 sess.stopReason(ticket b831b896)
+   *  과 동일한 규약. _handleOneshotExit 이 이 값을 보고 circuit-breaker/
+   *  silent-exit 오탐 로직을 건너뛰고(배달 실패가 아니므로), _runExitCompletionBackstop
+   *  이 추측 대신 실제 사유를 보고한다 — 매니저 shutdown 으로 죽은 oneshot
+   *  Action/QA run 이 서버의 TTL reaper 까지 `running` 으로 방치되지 않고
+   *  정확히 보고되게 한다. */
+  stopReason?: string | null;
 }
 
 type AnyRecord = SubagentRecord | ReservationRecord;
@@ -366,7 +375,30 @@ export class SubagentManager implements SubagentManagerContract {
    *  prior pass is still mid-probe. A skipped tick is harmless — the next
    *  one TTL_SWEEP_INTERVAL_MS later just re-evaluates current state. */
   #sweepInFlight = false;
+  /** ticket 6abe2b79: pid → resolver, stop() 호출 도중에만 살아있다. 실제 exit
+   *  핸들러(#wireExitHandler)가 victim 의 post-exit 체인(정리 + run-completion
+   *  backstop)이 실제로 끝나면 이 항목을 resolve + 삭제한다 — 그래서 stop() 이
+   *  SIGKILL 보내자마자 반환하는 대신 실제 완료를 기다릴 수 있다(그 race 가 왜
+   *  문제인지는 stop() 자체 docstring 참고 — SIGKILL 대상의 backstop 이 호출자의
+   *  process.exit() 전에 못 끝날 수 있었다). */
+  #stopWaiters = new Map<number, () => void>();
   #reservationCounter = 0;
+  /**
+   * ticket 6abe2b79 리뷰 라운드3: record.run 을 "완료 처리할 권리"로 원자적으로
+   * 떼어낸다 — 읽기와 null 대입이 같은 동기 구간 안이라 그 사이에 다른 경로가
+   * 끼어들 수 없다(JS 단일 스레드 특성상 await 없는 연속 statement 는 절대
+   * 쪼개지지 않는다). 이 값을 쓰는 모든 completion 경로(#wireExitHandler 의
+   * close 콜백, stop() 의 force-kill fallback)가 반드시 이 메서드로만
+   * record.run 을 읽어야 한다 — 직접 `record.run` 을 읽고 그 값을 들고 await
+   * 하면, await 도중 다른 경로가 같은 값을 또 읽어 complete_*_run 이 두 번
+   * 호출되는 TOCTOU 경합이 생긴다(리뷰에서 실측 지적됨). null 을 반환하면 이미
+   * 다른 경로가 가져갔다는 뜻 — 호출자는 즉시 스킵한다.
+   */
+  #claimRun(record: SubagentRecord): RunSessionBinding | null {
+    const run = record.run ?? null;
+    record.run = null;
+    return run;
+  }
   #persistPath: string;
   #pidDir: string;
   #initialized = false;
@@ -1058,13 +1090,33 @@ export class SubagentManager implements SubagentManagerContract {
       // end for orphaned background tasks the CLI left running and finalize a
       // stranded run as `error`. Gated on record.run so ordinary spawns skip the
       // process enumeration entirely. Guarded internally — never throws.
-      if (record.run) await this._sweepOneshotRunOrphans(record);
+      //
+      // ticket 6abe2b79 리뷰 라운드3: 아래 두 단계가 쓰던 `record.run` 을 여기서
+      // #claimRun 으로 딱 한 번, 동기적으로 떼어낸다 — stop() 의 force-kill
+      // fallback 도 동일한 메서드로 claim 하므로, 둘 중 먼저 이 동기 구간을
+      // 통과하는 쪽만 이 run 을 완료 처리한다. 이후 두 단계는 이 로컬 스냅샷만
+      // 쓰고 record.run 을 다시 읽지 않는다.
+      const claimedRun = this.#claimRun(record);
+      if (claimedRun) {
+        const finalizedByOrphanSweep = await this._sweepOneshotRunOrphans(record, claimedRun);
+        // ticket 152e3606: run-completion backstop — 같은 티켓으로 고친
+        // ChatSessionManager#_onChildExit의 oneshot 짝. orphan sweep 이 이미
+        // 끝내지 않았을 때만 필요한 이유는 _runExitCompletionBackstop 자체
+        // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
+        if (!finalizedByOrphanSweep) {
+          await this._runExitCompletionBackstop(record, code, claimedRun);
+        }
+      }
 
-      // ticket 152e3606: run-completion backstop — 같은 티켓으로 고친
-      // ChatSessionManager#_onChildExit의 oneshot 짝. 위 _sweepOneshotRunOrphans
-      // 이후에도 왜 이게 여전히 필요한지는 _runExitCompletionBackstop 자체
-      // docstring 참고. 내부에서 가드하므로 절대 throw하지 않는다.
-      if (record.run) await this._runExitCompletionBackstop(record, code);
+      // ticket 6abe2b79: 이 victim 의 post-exit 체인(위 run-completion backstop
+      // 포함)이 실제로 끝났음을 대기 중인 stop() 에 알린다 — stop() 이 SIGKILL
+      // 직후 바로 반환하지 않고 실제 완료를 기다릴 수 있게 한다. stop() 밖에서는
+      // #stopWaiters 가 비어 있으므로 no-op.
+      const stopWaiter = this.#stopWaiters.get(pid);
+      if (stopWaiter) {
+        this.#stopWaiters.delete(pid);
+        stopWaiter();
+      }
 
       // Drop the tail ring now that all post-exit hooks have read it.
       record.tailLines = [];
@@ -1094,6 +1146,22 @@ export class SubagentManager implements SubagentManagerContract {
    */
   async _handleOneshotExit(record: SubagentRecord, code: number | null): Promise<void> {
     const pid = record.pid;
+
+    // ticket 6abe2b79: stop() 가 이제 시그널 전에 #map 에서 지우는 대신 모든
+    // victim 에 stopReason 을 태그하므로, 매니저 shutdown 킬도 #wireExitHandler
+    // 의 #map 조회에서 early-return 되지 않고 여기까지 들어온다. 아래 로직은
+    // 우리가 방금 직접 죽인 프로세스에는 전혀 맞지 않는다 — 집계할 실제 답변도
+    // 없고, model-fallback 재-spawn 도 의미 없으며(매니저가 종료 중이므로),
+    // mention-audit 재시도도 안 되고, 무엇보다 circuit-breaker 페널티는 절대
+    // 안 된다. #sweep/stopForAgent 가 drop-first 로 지켜온 "reap 은 배달
+    // 실패가 아니다" 보장을 stop() 에도 그대로 확장하되, drop-first 의 부작용
+    // (run-completion backstop 이 아예 안 도는 것)은 재도입하지 않는다. 그
+    // backstop 은 여전히 실행된다 — #wireExitHandler 에서 record.run 이 있으면
+    // 무조건 — summary 에 추측 대신 stopReason 이 반영된 채로.
+    if (record.stopReason) {
+      log(`Subagent exit pid=${pid} skip: manager-initiated stop (reason=${record.stopReason})`);
+      return;
+    }
 
     // Classification of the aggregated one-shot result. Defaults to non-fatal;
     // only set for non-NATIVE_MCP adapters (codex / antigravity) whose stdout
@@ -1403,19 +1471,28 @@ export class SubagentManager implements SubagentManagerContract {
    * zombie. Re-reads run status first so a run the agent already finalized is
    * never clobbered. Every await is guarded — this runs inside the exit closure
    * and must never reject. Public (`_`-prefixed) for the test runner.
+   *
+   * ticket 6abe2b79 리뷰 라운드3: `runOverride` 가 주어지면(closure 가 #claimRun
+   * 으로 이미 떼어낸 스냅샷) 그걸 쓰고, 없으면(기존 직접-호출 유닛 테스트 호환)
+   * `record.run` 을 그대로 읽는다. 반환값 `true` 는 "이 run 은 여기서 완료
+   * 처리됐거나 이미 terminal 이라 더 손댈 게 없다" — 호출자(closure)는 이 경우
+   * `_runExitCompletionBackstop` 을 또 부르면 안 된다.
    */
-  async _sweepOneshotRunOrphans(record: SubagentRecord): Promise<void> {
-    const run = record.run;
-    if (!run) return;
+  async _sweepOneshotRunOrphans(
+    record: SubagentRecord,
+    runOverride?: RunSessionBinding | null,
+  ): Promise<boolean> {
+    const run = runOverride !== undefined ? runOverride : record.run;
+    if (!run) return false;
 
     let orphans: ProcNode[];
     try {
       orphans = await findLiveGroupBackgroundTasks(record.pid);
     } catch (err: any) {
       log(`[subagent] run orphan sweep enumeration failed pid=${record.pid}: ${err?.message ?? err}`);
-      return;
+      return false;
     }
-    if (orphans.length === 0) return; // clean one-shot turn — nothing stranded
+    if (orphans.length === 0) return false; // clean one-shot turn — nothing stranded
 
     const run8 = run.run_id.slice(0, 8);
     const pidList = orphans.map((o) => o.pid).join(',');
@@ -1448,7 +1525,7 @@ export class SubagentManager implements SubagentManagerContract {
         `[subagent] run ${run8} already ${status}; ${orphans.length} live background task(s) present ` +
           `at oneshot cleanup [pids=${pidList}] — leaving to normal teardown`,
       );
-      return;
+      return true; // 이미 terminal — backstop 이 또 부를 필요 없음
     }
 
     // THE TRAP: one-shot run exited its turn with live non-benign descendants and
@@ -1478,6 +1555,7 @@ export class SubagentManager implements SubagentManagerContract {
       `[subagent] run ${run8} oneshot cleanup: reaped ${reaped.length}/${orphans.length} ` +
         `live background task(s) [pids=${pidList}] — finalized run as error`,
     );
+    return true;
   }
 
   /**
@@ -1495,9 +1573,17 @@ export class SubagentManager implements SubagentManagerContract {
    * 처리한 run은 그대로 유지된다. 절대 throw하지 않는다 — 모든 실패는
    * fireAndForgetTool 자체의 내부 catch로 흡수된다. 테스트 러너를 위해
    * `#private`가 아니라 `_` 접두사로 뒀다.
+   *
+   * ticket 6abe2b79 리뷰 라운드3: `runOverride` 가 주어지면(closure/stop() 이
+   * #claimRun 으로 이미 떼어낸 스냅샷) 그걸 쓰고, 없으면(기존 직접-호출 유닛
+   * 테스트 호환) `record.run` 을 읽는다.
    */
-  async _runExitCompletionBackstop(record: SubagentRecord, code: number | null): Promise<void> {
-    const run = record.run;
+  async _runExitCompletionBackstop(
+    record: SubagentRecord,
+    code: number | null,
+    runOverride?: RunSessionBinding | null,
+  ): Promise<void> {
+    const run = runOverride !== undefined ? runOverride : record.run;
     if (!run) return;
     const route = resolveRunCompletionRoute(run.kind);
     // ticket 152e3606 요구사항 2: CLI 자체의 untrusted-workspace 경고를
@@ -1505,18 +1591,34 @@ export class SubagentManager implements SubagentManagerContract {
     // run의 실패 summary로 승격한다 — 구체적이고 실행 가능한 메시지가 그냥
     // "결과 없음" 보다 낫다.
     const tail = this.#collectTail(record);
-    const summary = hasUntrustedWorkspaceWarning(tail)
-      ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
-        'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
-        'cli-home의 .claude.json trust 시딩을 확인하세요.'
-      : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}) — ` +
-        `승인 대기 등으로 멈춰 TTL sweep/kill에 의해 종료됐을 수 있습니다.`;
+    // ticket 6abe2b79: stop() 이 이제 SIGTERM 전에 #map 을 비우는 대신 모든
+    // victim 에 stopReason 을 태그해 두므로(레코드는 exit 핸들러가 정리),
+    // 매니저 shutdown 킬도 여기까지 정상적으로 들어온다 — ticket b831b896
+    // round 3 의 "manager-initiated kill 은 절대 이 backstop 에 못 닿는다"는
+    // 전제는 더 이상 사실이 아니다. stopReason 이 있으면 그 정확한 사유를
+    // 그대로 보고하고(untrusted-workspace 탐지나 "TTL sweep/kill 때문일 수
+    // 있다"는 추측은 둘 다 이 케이스엔 안 맞고, 후자는 이 티켓이 없애려는 바로
+    // 그 추측성 문구다), stopReason 이 없을 때만(=진짜 원인불명 — crash, 승인
+    // 대기 등) b831b896 round 3 이 정리한 정직한 "reason=unknown" 문구로
+    // 폴백한다.
+    const summary = record.stopReason
+      ? `agent-manager가 프로세스를 종료해 이 run이 결과 없이 중단됐습니다 (reason=${record.stopReason}).`
+      : hasUntrustedWorkspaceWarning(tail)
+        ? 'run 세션이 CLI workspace trust 미승인으로 종료됐습니다 — .claude/settings.json의 ' +
+          'permissions.allow가 무시되어 비대화형 세션이 진행하지 못했습니다. 해당 agent ' +
+          'cli-home의 .claude.json trust 시딩을 확인하세요.'
+        : `run 세션 프로세스가 결과 없이 종료됐습니다(exit code=${code ?? 'null'}, reason=unknown) — ` +
+          `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
     await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
       workspace_id: run.workspace_id,
       status: route.failureStatus,
       summary,
     });
+    // ticket 6abe2b79 리뷰 라운드3: 호출자가 대부분 #claimRun 으로 이미 null
+    // 처리해 둔 상태라 대개 no-op 이지만, override 없이 직접 불린 경우(기존
+    // 유닛 테스트)에도 이중 호출을 막는 belt-and-suspenders.
+    record.run = null;
   }
 
   #wireStdioCapture(child: ChildProcess, pid: number): void {
@@ -2122,20 +2224,74 @@ export class SubagentManager implements SubagentManagerContract {
     };
   }
 
-  async stop(): Promise<void> {
+  /**
+   * ticket 6abe2b79: stopForAgent / #sweep 와 달리, 시그널을 보내기 전에 각
+   * victim 을 #map 에서 미리 지우지 않는다. drop-first 방식이면 매니저
+   * shutdown 킬마다 #wireExitHandler 의 #map 조회가 무조건 실패해, 이 프로세스가
+   * 돌리던 oneshot Action/QA run 이 _runExitCompletionBackstop 에 절대 닿지
+   * 못하고 서버에서 2시간 TTL reaper 까지 `running` 으로 방치됐다. 대신 사유를
+   * 태그하고 레코드를 그대로 남겨 둔다 — 실제 exit 핸들러가 이를 찾아내고,
+   * _handleOneshotExit 의 stopReason 체크가 크래시 오계상 로직을 건너뛰며
+   * (#sweep/stopForAgent 가 drop-first 로 지켜온 "reap ≠ 배달 실패" 보장을
+   * 그대로 유지), run-completion backstop 은 이제 침묵 대신 실제 사유를 담아
+   * 정상 발화한다. reservation 은 자식 프로세스도 exit 핸들러도 없으므로
+   * 기존과 동일하게 즉시 지운다.
+   *
+   * 리뷰 지적 반영(라운드2): SIGKILL 을 보낸 직후 곧바로 반환하면, 호출자
+   * (main.ts shutdown())가 뒤이어 다른 정리 단계를 거쳐 곧 process.exit() 하는
+   * 사이에 SIGKILL 대상의 'close' 이벤트와 그 안의 run-completion backstop 이
+   * 미처 못 끝나고 프로세스와 함께 잘려나갈 수 있다 — drop-first 버그와 증상만
+   * 다를 뿐 같은 무음 유실 클래스다. 그래서 SIGKILL 이후 각 victim 의 실제 exit
+   * 핸들러(정리+backstop)가 끝나길 STOP_FORCE_KILL_SETTLE_MS 상한을 두고
+   * 기다린다(#stopWaiters, #wireExitHandler 가 완료 시 resolve). 상한을 넘겨도
+   * (예: SIGKILL 에도 안 죽는 병적인 케이스) 조용히 포기하지 않고, 그 victim 에
+   * 한해 이 메서드가 직접 한 번 더 completion backstop 을 호출해 "close 가
+   * 끝내 안 와도 정확히 1회는 보고된다"는 계약을 지킨다.
+   *
+   * 리뷰 지적 반영(라운드3): #stopWaiters 삭제만으로는 중복 호출을 막지
+   * 못한다 — 그건 "누가 대기 중인지"만 추적할 뿐, "누가 completion 을 부를
+   * 권리를 가졌는지"는 별개다. 실제 close 가 이 fallback 의 await 도중 뒤늦게
+   * 와도 양쪽이 같은 record.run 을 보고 둘 다 completion 을 부를 수 있었다.
+   * 지금은 #claimRun 으로 record.run 을 await 하기 *전에* 동기적으로 떼어내
+   * (읽기+null 대입이 한 동기 구간), 실제 exit 핸들러도 동일한 메서드로만
+   * record.run 을 읽으므로 둘 중 먼저 그 동기 구간을 통과하는 쪽만 완료
+   * 처리한다 — 서버측 멱등성은 상태 손상을 막는 안전판일 뿐, 이게 "정확히
+   * 1회 호출"을 보장하는 진짜 메커니즘이다.
+   *
+   * 리뷰 지적 반영(라운드4): 라운드3 은 "정확히 한 경로만 부른다"는 지켰지만
+   * "그 경로가 실제로 끝나길 기다린다"는 안 지켰다 — 실제 exit 핸들러가 먼저
+   * #claimRun 에 성공한 뒤 _sweepOneshotRunOrphans/_runExitCompletionBackstop
+   * 의 await 도중 STOP_FORCE_KILL_SETTLE_MS 가 만료되면, fallback 의
+   * #claimRun 은 null 을 받아 스킵하고 stop() 은 그대로 반환해 버렸다 — exit
+   * 핸들러가 들고 있는 completion 요청이 호출자의 뒤이은 process.exit() 에
+   * 잘려나갈 수 있는, 증상만 다른 같은 무음 유실이다. 그래서 victim 각각을
+   * 독립적으로 처리한다: 1차 상한 안에 자연 정착(#stopWaiters 의 resolve)되면
+   * 끝, 상한을 넘겼는데 #claimRun 이 값을 얻으면(=아무도 안 가져감) fallback
+   * 이 직접 완료 처리, #claimRun 이 null 이면(=exit 핸들러가 이미 작업 중)
+   * 포기하지 않고 그 기존 완료 promise 를 2차 상한만큼 한 번 더 기다린다.
+   */
+  async stop(reason?: string): Promise<void> {
     if (this.#sweepTimer) {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
+    const stopReason = reason || 'manager_shutdown';
     const victims: SubagentRecord[] = [];
+    const settledByPid = new Map<number, Promise<void>>();
     for (const [pid, rec] of this.#map.entries()) {
-      if (rec.kind === 'reservation') continue;
+      if (rec.kind === 'reservation') {
+        this.#map.delete(pid);
+        continue;
+      }
+      rec.stopReason = stopReason;
       victims.push(rec);
-      this.#map.delete(pid);
+      settledByPid.set(
+        rec.pid,
+        new Promise<void>((resolve) => {
+          this.#stopWaiters.set(rec.pid, resolve);
+        }),
+      );
     }
-    // Reservations have no child process or exit handler. Drop them before any
-    // child is signalled too, so shutdown exposes an empty manager immediately.
-    this.#map.clear();
     for (const rec of victims) {
       try {
         process.kill(rec.pid, 'SIGTERM');
@@ -2151,18 +2307,46 @@ export class SubagentManager implements SubagentManagerContract {
       } catch {
         /* gone */
       }
-      // Drop-first makes the per-child exit handler return before its normal
-      // cleanup. Preserve temp-config hygiene explicitly, as stopForAgent does.
-      if (rec.config_path && rec.config_path_is_temp) {
-        await fsp.unlink(rec.config_path).catch(() => {});
-      }
     }
-    try {
-      await fsp.writeFile(this.#persistPath, JSON.stringify({ pids: [] }, null, 2));
-    } catch {
-      /* best-effort */
-    }
-    log(`SubagentManager stopped (terminated ${victims.length} children)`);
+    // 이제 각 victim 의 'close' 이벤트가 도착하면 실제 exit 핸들러가 #map
+    // 정리 + temp-config unlink 를 그대로 담당한다(stop() 이 수동으로
+    // 중복하던 것을 보통의 oneshot exit 과 동일하게 흡수). 아래는 victim 마다
+    // 독립적으로 "자연 정착 대기 → 못 끝났으면 누가 completion 을 들고
+    // 있는지 확인 → 아무도 없으면 fallback 이 직접, 이미 누가 있으면 그
+    // 완료를 한 번 더 대기"를 수행한다.
+    await Promise.all(
+      victims.map(async (rec) => {
+        const settled = settledByPid.get(rec.pid)!;
+        const firstRoundTimedOut = await Promise.race([
+          settled.then(() => false as const),
+          new Promise<true>((resolve) => {
+            setTimeout(() => resolve(true), STOP_FORCE_KILL_SETTLE_MS).unref?.();
+          }),
+        ]);
+        if (!firstRoundTimedOut) return; // 실제 exit 핸들러가 정상적으로 끝냄
+
+        const claimedRun = this.#claimRun(rec);
+        if (claimedRun) {
+          // 아무도 안 가져갔다 — exit 핸들러가 아예 시작도 못 한 경우(예:
+          // SIGKILL 에도 안 죽는 병적인 케이스). fallback 이 직접 완료 처리.
+          this.#stopWaiters.delete(rec.pid);
+          try {
+            await this._runExitCompletionBackstop(rec, null, claimedRun);
+          } catch (err: any) {
+            log(`[subagent] stop() force-kill fallback backstop failed pid=${rec.pid}: ${err?.message ?? err}`);
+          }
+          return;
+        }
+        // 이미 실제 exit 핸들러가 #claimRun 으로 가져가 작업 중이다 — 포기하지
+        // 않고 그 기존 완료 promise 를 한 번 더(상한 두 배까지) 기다린다.
+        await Promise.race([
+          settled,
+          new Promise<void>((resolve) => setTimeout(resolve, STOP_FORCE_KILL_SETTLE_MS).unref?.()),
+        ]);
+      }),
+    );
+    this.#persist();
+    log(`SubagentManager stopped (terminated ${victims.length} children, reason=${stopReason})`);
   }
 
   _snapshot(): any[] {

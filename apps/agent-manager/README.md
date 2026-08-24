@@ -296,7 +296,7 @@ Signals:
 |--------------|-----------------------------------------------------------|
 | `SIGTERM`/`SIGINT` | Graceful drain (stop subagents, release lock)       |
 | `SIGHUP`     | Re-read `config.json` (delegation tunables hot-reload)    |
-| `SIGUSR1`    | Self-update hook (currently a stub — upgrade via npm)     |
+| `SIGUSR1`    | Self-update: verify provenance, drain sessions, `npm install -g` latest, re-exec (git checkout is fallback-only when npm is unavailable) |
 
 ## Development
 

@@ -26,6 +26,7 @@ import { PassThrough } from 'node:stream';
 
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import { CircuitBreaker } from '../dist/lib/circuit-breaker.js';
+import { STOP_GRACE_MS, STOP_FORCE_KILL_SETTLE_MS } from '../dist/lib/constants.js';
 
 function makeConfig() {
   return {
@@ -209,6 +210,41 @@ function mockTicketFetch(ticketPayload) {
     }
     return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
   };
+}
+
+/** ticket 6abe2b79: 공용 beforeEach 목은 tools/call 이름만 기록한다(mcpToolCalls).
+ *  run-completion 호출의 args(run_id/status/summary) 까지 검사해야 하는 stop()
+ *  회귀 테스트를 위해, 이름+args 를 모두 담는 로컬 fetch override 를 하나로
+ *  묶어 둔다 — mockTicketFetch 와 동일한 로컬 override 패턴. */
+function makeArgsCapturingFetch() {
+  const toolCalls = [];
+  const fetchImpl = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        mcpToolCalls.push(body.params?.name);
+        toolCalls.push({ name: body.params?.name, args: body.params?.arguments });
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+  return { fetchImpl, toolCalls };
 }
 
 test('① codex usage-limit exit 1: NO agent add_comment, only system silent-exit', async () => {
@@ -922,8 +958,11 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
       'the TTL branch SIGTERM-reaped the pid (proves the TTL branch ran, not ESRCH-cleanup)',
     );
 
-    // Now the SIGTERM lands: a signal death reports code=null.
-    child.emit('exit', null, 'SIGTERM');
+    // Now the SIGTERM lands: a signal death reports code=null. 실제 exit
+    // 핸들러는 'exit' 이 아니라 'close' 를 구독한다(#wireExitHandler 참고) —
+    // 'close' 를 emit 해야 이 경로가 실제로 구동된다(emit('exit', ...) 는
+    // 아무 리스너도 없어 조용히 no-op 이 되어 아래 단언들을 공허하게 통과시킨다).
+    child.emit('close', null, 'SIGTERM');
     await new Promise((r) => setImmediate(r)); // flush the async exit handler
 
     // Gating proven: the exit handler found no record (dropped) and
@@ -939,7 +978,17 @@ test('gating regression (ticket c555fbb6): a #sweep TTL idle-timeout is dropped 
   }
 });
 
-test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTERM → NOT counted', async (t) => {
+test('shutdown 회귀 (ticket 8436f96f, 6abe2b79): stop() 이 SIGTERM 전에 지우는 대신 stopReason 을 태그 — breaker 는 여전히 미계상, run-completion backstop 은 사유를 보고한다', async (t) => {
+  // 8436f96f 가 세운, 이 테스트가 지키는 보장: 매니저 shutdown 킬은 절대
+  // circuit-breaker 배달 실패로 오계상되면 안 된다. 원래는 SIGTERM *전에*
+  // #map 에서 레코드를 지우는 방식(#sweep/stopForAgent 와 같은 drop-first
+  // 관용구)으로 이를 달성했는데, 그 부작용으로 #wireExitHandler 의 #map 조회가
+  // 모든 shutdown 킬에서 실패해, 그 시점에 실행 중이던 oneshot Action/QA run 이
+  // _runExitCompletionBackstop 에 절대 닿지 못하고 서버에서 2시간 TTL reaper
+  // 까지 `running` 으로 방치됐다(ticket 6abe2b79). 이제 stop() 은 레코드를
+  // 지우는 대신 stopReason 을 태그해 #map 에 남겨 둔다 — 아래 breaker 보장은
+  // "레코드가 없어서"가 아니라 _handleOneshotExit 의 stopReason early-return
+  // 으로 유지되고, run-completion backstop 은 실제로 발화한다.
   const cb = new CircuitBreaker();
   const mgr = new SubagentManager(makeConfig(), cb);
   const key = CircuitBreaker.key('agent-shutdown', 'ticket-shutdown', 'assignee');
@@ -955,7 +1004,22 @@ test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTER
     }
     return realKill(pid, sig);
   };
+  // _sweepOneshotRunOrphans 가 실제 `ps` 서브프로세스를 spawn 해 group 을
+  // 조회한다(process-tree.ts 의 findLiveGroupBackgroundTasks) — setImmediate
+  // 한 틱보다 오래 걸리므로, 아래 t.mock.timers.enable 이 전역 setTimeout 을
+  // 바꾸기 전에 진짜 setTimeout 을 먼저 붙잡아 둔다.
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
   t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const { fetchImpl, toolCalls } = makeArgsCapturingFetch();
+  globalThis.fetch = fetchImpl;
 
   try {
     mgr._trackForTest({
@@ -966,22 +1030,445 @@ test('shutdown regression (ticket 8436f96f): stop() drops children BEFORE SIGTER
         process_handle: child,
         commentSent: false,
       }),
+      // ticket 6abe2b79: 죽은 oneshot Action run 의 모습 — exit 시점 backstop
+      // 이 종료 처리해야 하는 서버 쪽 run 에 바인딩돼 있다.
+      run: { run_id: 'oneshot-shutdown-run', workspace_id: 'ws-1', kind: 'action' },
     });
 
-    const stopping = mgr.stop();
-    assert.equal(mgr._snapshot().length, 0, 'stop dropped the record before waiting for SIGTERM exit');
-    assert.deepEqual(killed, ['SIGTERM'], 'stop sent SIGTERM after dropping the record');
+    const stopping = mgr.stop('manager_shutdown');
+    const tracked = mgr._snapshot().find((r) => r.pid === child.pid);
+    assert.ok(tracked, 'stop() 은 자식이 실제로 종료할 때까지 레코드를 계속 추적한다(더 이상 drop-first 아님)');
+    assert.equal(tracked.stopReason, 'manager_shutdown', 'stop() 이 시그널 전에 사유를 태그한다');
+    assert.deepEqual(killed, ['SIGTERM'], 'stop 은 여전히 즉시 SIGTERM 을 보낸다');
 
-    child.emit('exit', null, 'SIGTERM');
-    await new Promise((r) => setImmediate(r));
-    assert.equal(cb.size, 0, 'shutdown SIGTERM was not counted toward the breaker');
-    assert.equal(cb.shouldBlock(key), null, 'breaker stayed closed during manager shutdown');
-    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'shutdown did not falsely pend the ticket');
-    assert.equal(silentExit(), undefined, 'shutdown emitted no silent-exit fallback');
+    // 실제 exit 핸들러는 'exit' 이 아니라 'close' 를 구독한다(#wireExitHandler
+    // 참고) — 'close' 를 emit 해야 실제로 그 경로를 구동한다.
+    child.emit('close', null, 'SIGTERM');
+    // _sweepOneshotRunOrphans 의 실제 `ps` 서브프로세스 조회가 끝나고
+    // _runExitCompletionBackstop 이 complete_action_run 을 호출할 때까지
+    // 폴링한다 — 한 번의 setImmediate/microtask 로는 subprocess I/O 를
+    // 따라잡지 못한다.
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+
+    assert.equal(cb.size, 0, 'shutdown SIGTERM 은 breaker 에 계상되지 않았다');
+    assert.equal(cb.shouldBlock(key), null, '매니저 shutdown 중에도 breaker 는 닫힌 채 유지된다');
+    assert.equal(mcpToolCalls.includes('pend_ticket'), false, 'shutdown 이 티켓을 잘못 pend 하지 않았다');
+    assert.equal(silentExit(), undefined, 'shutdown 이 silent-exit fallback 을 내보내지 않았다');
+
+    const completion = toolCalls.find((c) => c.name === 'complete_action_run');
+    assert.ok(completion, 'run-completion backstop 이 죽은 run 에 대해 complete_action_run 을 호출했다');
+    assert.equal(completion.args.run_id, 'oneshot-shutdown-run');
+    assert.equal(completion.args.status, 'failed');
+    assert.match(
+      completion.args.summary,
+      /reason=manager_shutdown/,
+      'summary 가 idle-timer/TTL sweep 추측 대신 실제 사유를 보고한다',
+    );
+
+    assert.equal(mgr._snapshot().length, 0, 'exit 핸들러가 실제로 돈 뒤에야 레코드가 정리된다');
 
     t.mock.timers.tick(60_000);
     await stopping;
-    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'stop retained its grace-period escalation');
+    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'stop 은 grace-period 에스컬레이션을 그대로 유지한다');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});
+
+test('SIGKILL 강제 경로 회귀 (ticket 6abe2b79 리뷰 반영): grace 만료로 SIGKILL 뒤 close 가 뒤늦게 와도 stop() 은 completion backstop 완료를 기다린 뒤에만 반환한다', async (t) => {
+  // 리뷰 지적: SIGKILL 전송 직후 stop() 이 곧바로 반환하면, 호출자(main.ts
+  // shutdown())가 곧 process.exit() 하는 사이에 SIGKILL 대상의 'close' 콜백과
+  // 그 안의 run-completion backstop 이 미처 못 끝날 수 있다. 이 테스트는 SIGTERM
+  // 만으로는 안 죽어(즉 grace 동안 close 를 emit 하지 않아) SIGKILL 로
+  // 에스컬레이션되는 케이스를 재현하고, close 가 SIGKILL 이후에야 도착해도
+  // stop() 의 반환 자체가 그 완료를 실제로 기다리는지 단언한다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const killed = [];
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => {
+    if (pid === child.pid) {
+      killed.push(sig);
+      return true;
+    }
+    return realKill(pid, sig);
+  };
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const { fetchImpl, toolCalls } = makeArgsCapturingFetch();
+  globalThis.fetch = fetchImpl;
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-sigkill',
+        ticket_id: 'ticket-sigkill',
+        process_handle: child,
+        commentSent: false,
+      }),
+      run: { run_id: 'oneshot-sigkill-run', workspace_id: 'ws-1', kind: 'action' },
+    });
+
+    const stopping = mgr.stop('manager_shutdown');
+
+    // SIGTERM grace 만 흘려보내고 close 는 아직 emit 하지 않는다 — SIGTERM 을
+    // 무시하는 프로세스를 흉내낸다. STOP_FORCE_KILL_SETTLE_MS 타이머는 SIGKILL
+    // 루프 *이후*에야 등록되므로, 여기서는 정확히 grace 분량만 흘려보낸다.
+    t.mock.timers.tick(STOP_GRACE_MS);
+    await new Promise((r) => realSetTimeout(r, 0)); // SIGKILL 루프의 동기 이어달리기를 흘려보냄
+    assert.deepEqual(killed, ['SIGTERM', 'SIGKILL'], 'SIGTERM 만으로 안 죽어 SIGKILL 로 에스컬레이션됐다');
+
+    let resolved = false;
+    stopping.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => realSetTimeout(r, 20));
+    assert.equal(resolved, false, 'close 가 아직 안 왔으므로 stop() 은 아직 반환하면 안 된다 — 이게 바로 리뷰가 지적한 race');
+
+    // 이제 SIGKILL 이 실제로 죽인 것처럼 close 를 뒤늦게 emit.
+    child.emit('close', null, 'SIGKILL');
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+    await stopping;
+
+    assert.equal(resolved, true, 'stop() 은 실제 exit 핸들러(backstop 포함)가 끝난 뒤에야 반환했다');
+    const completion = toolCalls.find((c) => c.name === 'complete_action_run');
+    assert.ok(completion, 'SIGKILL 로 죽은 victim 의 run 도 completion backstop 이 호출됐다');
+    assert.equal(completion.args.run_id, 'oneshot-sigkill-run');
+    assert.match(completion.args.summary, /reason=manager_shutdown/);
+    assert.equal(mgr._snapshot().length, 0, '실제 close 이벤트가 왔으므로 레코드가 정리됐다');
+    assert.equal(cb.size, 0, 'SIGKILL 강제 경로도 breaker 에는 계상되지 않는다');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});
+
+test('SIGKILL 이후 close 가 끝내 오지 않는 극단 케이스 (ticket 6abe2b79 리뷰 반영): 상한 만료 시 stop() 이 직접 completion backstop 을 호출해 무음 유실을 막는다', async (t) => {
+  // 리뷰 지적 ④: close 콜백이 (예: SIGKILL 에도 안 죽는 병적인 프로세스처럼)
+  // 끝내 오지 않으면, bounded wait 만으로는 상한에서 조용히 포기해 버려 이
+  // 티켓이 고치려던 무음 유실이 다른 모습으로 재발한다. stop() 은 상한 만료 시
+  // 그 victim 에 한해 직접 completion backstop 을 호출해야 한다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => (pid === child.pid ? true : realKill(pid, sig));
+  // 위 SIGKILL 회귀 테스트와 동일한 이유로 진짜 setTimeout 을 먼저 붙잡아 둔다:
+  // t.mock.timers.tick() 은 tick 호출 "시점에 이미 등록된" 타이머만 동기적으로
+  // 흘려보낸다 — grace 타이머의 콜백(그 안에서 SIGKILL 루프를 돌고 settle
+  // 타이머를 새로 등록하는 코드)은 await 의 연속이라 마이크로태스크로 밀리므로,
+  // 한 번의 tick() 호출 안에서는 settle 타이머가 아직 존재하지 않아 캐스케이드
+  // 되지 않는다(먼저 이 파일의 첫 SIGKILL 테스트에서 실측 확인 — 한 번에 몰아
+  // tick 했더니 settle 타이머가 등록되기도 전에 tick() 이 끝나 stop() 이 영원히
+  // 안 풀렸다). 그래서 grace 만큼 tick → 진짜 시간으로 한 틱 흘려보내 SIGKILL
+  // 루프가 실제로 돌고 settle 타이머가 등록되게 함 → settle 만큼 tick, 두 단계로
+  // 나눈다.
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const { fetchImpl, toolCalls } = makeArgsCapturingFetch();
+  globalThis.fetch = fetchImpl;
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-wedged',
+        ticket_id: 'ticket-wedged',
+        process_handle: child,
+        commentSent: false,
+      }),
+      run: { run_id: 'oneshot-wedged-run', workspace_id: 'ws-1', kind: 'security' },
+    });
+
+    const stopping = mgr.stop('manager_shutdown');
+    // grace + settle 상한을 모두 흘려보내되, close 는 한 번도 emit 하지 않는다
+    // — SIGKILL 조차 안 통하는 병적인 케이스를 흉내낸다. #stop() 의 fallback 은
+    // 실 서브프로세스(ps)를 부르지 않고 fireAndForgetTool 만 부르므로, 목 fetch
+    // 만으로 결정적으로 끝난다.
+    t.mock.timers.tick(STOP_GRACE_MS);
+    await new Promise((r) => realSetTimeout(r, 0)); // SIGKILL 루프 + settle 타이머 등록을 흘려보냄
+    t.mock.timers.tick(STOP_FORCE_KILL_SETTLE_MS + 100);
+    await stopping;
+
+    const completion = toolCalls.find((c) => c.name === 'complete_security_run');
+    assert.ok(completion, 'close 가 끝내 안 와도 stop() 이 직접 completion backstop 을 호출해야 한다');
+    assert.equal(completion.args.run_id, 'oneshot-wedged-run');
+    assert.equal(completion.args.status, 'error');
+    assert.match(completion.args.summary, /reason=manager_shutdown/);
+    assert.equal(
+      mgr._snapshot().some((r) => r.pid === child.pid),
+      true,
+      '실제 close 이벤트는 안 왔으므로 레코드 자체는 #map 에 남아있다 — 진짜 정리는 close 가 오면 그때 일어난다',
+    );
+    assert.equal(cb.size, 0, '병적인 SIGKILL-면역 케이스도 breaker 에는 계상되지 않는다');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});
+
+test('settle timeout fallback 과 뒤늦은 close 의 interleaving (ticket 6abe2b79 리뷰 라운드3): completion fetch 가 아직 pending 인 동안 close 가 와도 complete_*_run 은 정확히 1회만 호출된다', async (t) => {
+  // 리뷰 지적: fallback 이 #stopWaiters.delete() 후 record.run 을 await 끝나고
+  // 나서야 null 처리하면, 그 await 도중 실제 close 가 와서 exit 핸들러가 같은
+  // non-null record.run 을 보고 completion 을 또 부를 수 있다. 이 테스트는 그
+  // 정확한 타이밍(1차 completion fetch 가 아직 안 끝난 시점에 close 도착)을
+  // 재현해, #claimRun 의 원자적 claim(읽기+null 대입이 await 없는 한 동기
+  // 구간)이 실제로 두 번째 호출을 막는지 증명한다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => (pid === child.pid ? true : realKill(pid, sig));
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // complete_action_run 호출만 게이트로 막아 "fetch 가 아직 resolve 되지 않은
+  // 상태"를 정확히 만든다 — 호출 자체는 gate 이전에 기록해, 이중 호출이 실제로
+  // 일어난다면 두 번 다 잡힌다.
+  const toolCalls = [];
+  let releaseGate;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        const name = body.params?.name;
+        mcpToolCalls.push(name);
+        toolCalls.push({ name, args: body.params?.arguments });
+        if (name === 'complete_action_run') await gate; // 1차 호출을 여기서 붙잡아 둔다
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-race',
+        ticket_id: 'ticket-race',
+        process_handle: child,
+        commentSent: false,
+      }),
+      run: { run_id: 'oneshot-race-run', workspace_id: 'ws-1', kind: 'action' },
+    });
+
+    const stopping = mgr.stop('manager_shutdown');
+    t.mock.timers.tick(STOP_GRACE_MS);
+    await new Promise((r) => realSetTimeout(r, 0)); // SIGKILL 루프 + settle 타이머 등록
+    t.mock.timers.tick(STOP_FORCE_KILL_SETTLE_MS + 100); // settle 상한 만료 → fallback 시작
+
+    // fallback 의 complete_action_run 호출이 게이트에 막혀 "아직 pending" 인
+    // 상태에 도달할 때까지 기다린다 — 바로 이 시점이 리뷰가 지적한 취약한
+    // 창(window)이다.
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      '전제조건: fallback 의 1차 호출이 딱 하나 걸려 있다(아직 미완료)',
+    );
+
+    // 바로 이 순간 실제 close 가 뒤늦게 온다 — #claimRun 을 안 썼다면 exit
+    // 핸들러가 여전히 non-null 인 record.run 을 보고 completion 을 또 부를
+    // 것이다. exit 핸들러는 이 앞에서 _sweepOneshotRunOrphans 의 실 `ps`
+    // 서브프로세스 호출도 거치므로(claim 이 없다면 그 경로까지 다 타야 두 번째
+    // 호출이 실제로 fetch 에 도달한다), 고정된 짧은 지연이 아니라 넉넉한 실시간
+    // 창을 두고 그 사이 언제든 두 번째 호출이 나타나면 즉시 실패시킨다 — 그래야
+    // "그냥 아직 안 왔을 뿐"이라 우연히 통과하는 공허한 통과를 피한다.
+    child.emit('close', null, 'SIGKILL');
+    const raceWindowStart = Date.now();
+    while (Date.now() - raceWindowStart < 500) {
+      if (toolCalls.filter((c) => c.name === 'complete_action_run').length > 1) break;
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      'close 가 pending 인 fallback 호출과 겹쳐도 두 번째 complete_action_run 호출은 발생하면 안 된다',
+    );
+
+    releaseGate(); // 이제 1차 호출을 마저 완료시킨다
+    await stopping;
+
+    const calls = toolCalls.filter((c) => c.name === 'complete_action_run');
+    assert.equal(calls.length, 1, '최종적으로도 complete_action_run 은 정확히 1회만 호출됐다');
+    assert.equal(calls[0].args.run_id, 'oneshot-race-run');
+    assert.match(calls[0].args.summary, /reason=manager_shutdown/);
+    assert.equal(cb.size, 0, '이 경합 시나리오도 breaker 에는 계상되지 않는다');
+  } finally {
+    process.kill = originalKill;
+    t.mock.timers.reset();
+  }
+});
+
+test('역방향 interleaving (ticket 6abe2b79 리뷰 라운드4): exit 핸들러가 먼저 claim 한 뒤 completion 이 pending 인 상태로 settle timeout 이 만료돼도 stop() 은 그 완료를 기다린 뒤에만 resolve 된다', async (t) => {
+  // 리뷰 지적: 라운드3 의 #claimRun 은 "정확히 한 경로만 completion 을 부른다"는
+  // 지켰지만, "그 경로가 실제로 끝날 때까지 stop() 이 기다린다"는 지키지 못했다.
+  // 실제 close 가 먼저 와서 exit 핸들러가 #claimRun 에 성공한 뒤 그 completion
+  // fetch 가 아직 pending 인 상태로 STOP_FORCE_KILL_SETTLE_MS 가 만료되면,
+  // fallback 의 #claimRun 은 null 을 받아 아무 것도 안 하고, 그 시점에 stop() 이
+  // 그냥 반환해 버리면 exit 핸들러가 들고 있는 완료 요청이 호출자의 뒤이은
+  // process.exit() 에 잘려나갈 수 있었다. 이 테스트는 정확히 그 순서(close 가
+  // 먼저 claim, 그 다음 settle timeout 만료)를 재현해 stop() 이 여전히
+  // resolve 되지 않고 있는지, gate 해제 후에야 정확히 1회 호출과 함께
+  // resolve 되는지 단언한다.
+  const cb = new CircuitBreaker();
+  const mgr = new SubagentManager(makeConfig(), cb);
+  const child = new EventEmitter();
+  child.pid = ++pidSeq;
+  const originalKill = process.kill;
+  const realKill = originalKill.bind(process);
+  process.kill = (pid, sig) => (pid === child.pid ? true : realKill(pid, sig));
+  const realSetTimeout = globalThis.setTimeout;
+  const waitUntil = async (predicate, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitUntil: 조건이 시간 내에 충족되지 않음');
+      await new Promise((r) => realSetTimeout(r, 10));
+    }
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const toolCalls = [];
+  let releaseGate;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const method = init?.method || 'GET';
+    if (u.endsWith('/mcp')) {
+      if (method === 'DELETE') return new Response('{}', { status: 200 });
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (body.method === 'initialize') {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'mcp-session-id': 'sid-test', 'content-type': 'application/json' },
+        });
+      }
+      if (body.method === 'tools/call') {
+        const name = body.params?.name;
+        mcpToolCalls.push(name);
+        toolCalls.push({ name, args: body.params?.arguments });
+        if (name === 'complete_action_run') await gate;
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: '{}' }] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 202 });
+    }
+    const body = init?.body ? JSON.parse(init.body) : null;
+    restPosts.push({ url: u, method, body });
+    return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    mgr._trackForTest({
+      ...makeCodexRecord({
+        pid: child.pid,
+        agent_id: 'agent-reverse-race',
+        ticket_id: 'ticket-reverse-race',
+        process_handle: child,
+        commentSent: false,
+      }),
+      run: { run_id: 'oneshot-reverse-race-run', workspace_id: 'ws-1', kind: 'action' },
+    });
+
+    const stopping = mgr.stop('manager_shutdown');
+
+    // close 를 먼저 emit 해 exit 핸들러가 #claimRun 에 성공하게 만든다 — SIGTERM
+    // 만으로 죽어버린 케이스를 흉내낸다. 이 시점에 stop() 은 아직 grace 대기
+    // 중이라, exit 핸들러의 claim + _sweepOneshotRunOrphans(실 ps 호출) +
+    // _runExitCompletionBackstop(게이트에 막힘) 이 stop() 과 완전히 동시에
+    // 진행된다.
+    child.emit('close', null, 'SIGTERM');
+
+    // exit 핸들러의 completion 호출이 게이트에 도달할 때까지 기다린다 —
+    // _sweepOneshotRunOrphans 의 실 ps 호출을 거쳐야 하므로 waitUntil 사용.
+    await waitUntil(() => toolCalls.some((c) => c.name === 'complete_action_run'));
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      '전제조건: exit 핸들러의 completion 호출이 걸려 있다(아직 미완료)',
+    );
+
+    // 이제 stop() 의 grace + settle 상한을 모두 흘려보낸다 — exit 핸들러가
+    // completion 을 들고 있는 채로 settle timeout 이 만료되는 정확한 상황이다.
+    t.mock.timers.tick(STOP_GRACE_MS);
+    await new Promise((r) => realSetTimeout(r, 0)); // SIGKILL 루프 + per-victim Promise.all 진입(1차 settle 타이머 등록)을 흘려보냄
+    t.mock.timers.tick(STOP_FORCE_KILL_SETTLE_MS + 100); // 1차 상한 만료 → #claimRun 은 null(이미 exit 핸들러가 소유) → 기존 완료를 한 번 더 기다리는 분기로 진입, 2차 타이머 등록
+    await new Promise((r) => realSetTimeout(r, 0)); // 2차 타이머 등록 자체를 흘려보냄(2차 상한까지 tick 하지는 않는다 — gate 해제로 풀려야 함을 증명하는 것이 이 테스트의 핵심)
+
+    let resolved = false;
+    stopping.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => realSetTimeout(r, 30));
+    assert.equal(
+      resolved,
+      false,
+      'exit 핸들러가 completion 을 아직 못 끝냈으므로(게이트 pending), settle timeout 이 만료돼도 stop() 은 반환하면 안 된다',
+    );
+    assert.equal(
+      toolCalls.filter((c) => c.name === 'complete_action_run').length,
+      1,
+      'settle timeout 만료가 fallback 의 중복 호출을 유발하면 안 된다(#claimRun 이 null 을 받아야 함)',
+    );
+
+    releaseGate(); // exit 핸들러가 들고 있던 completion 을 이제 풀어준다
+    await stopping;
+
+    assert.equal(resolved, true, 'gate 해제 후에는 stop() 이 실제로 resolve 됐다');
+    const calls = toolCalls.filter((c) => c.name === 'complete_action_run');
+    assert.equal(calls.length, 1, 'exit 핸들러가 소유한 completion 만 정확히 1회 호출됐다 — fallback 의 중복 호출 없음');
+    assert.equal(calls[0].args.run_id, 'oneshot-reverse-race-run');
+    assert.match(calls[0].args.summary, /reason=manager_shutdown/);
+    assert.equal(cb.size, 0, '이 역방향 경합 시나리오도 breaker 에는 계상되지 않는다');
   } finally {
     process.kill = originalKill;
     t.mock.timers.reset();

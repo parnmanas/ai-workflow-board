@@ -13,7 +13,12 @@ import {
 import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
 import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
-import { isSystemdReExecPending, runSelfUpdate, UpdateChecker } from './lib/self-update.js';
+import {
+  isSystemdReExecPending,
+  pendingRestartReason,
+  runSelfUpdate,
+  UpdateChecker,
+} from './lib/self-update.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -576,6 +581,19 @@ async function runRuntime(
   // OAuth until idle/maxTurns retired it (10+ minutes).
   const chatSessionManager = new ChatSessionManager(config);
   const ticketSessionManager = new TicketSessionManager(config, circuitBreaker);
+  // ticket b831b896: total chat / action / QA / ticket-dispatch sessions
+  // currently live, across all three managers. Fed to runSelfUpdate so it can
+  // defer a restart while real work is in flight instead of SIGTERMing it
+  // moments after it starts.
+  const countInFlightSessions = (): number =>
+    subagentManager._snapshot().length +
+    chatSessionManager._snapshot().length +
+    ticketSessionManager._snapshot().length;
+  // ticket b831b896 round 2: updateChecker was constructed earlier (before
+  // these session managers existed), so it's wired late via the setter
+  // instead of a constructor opt — lets its periodic tick retry a
+  // self-update that got deferred waiting for sessions to drain.
+  updateChecker.setCountInFlightSessions(countInFlightSessions);
   // Late-bound reference to the SSE stream — the EventStream is constructed
   // after this command handler (it depends on commandHandler for dispatch),
   // so the spawn_agent → reconnect hook captures this slot and resolves it
@@ -601,6 +619,9 @@ async function runRuntime(
     circuitBreaker,
     runtimeSupervisor,
     cliLoginManager,
+    // ticket b831b896: lets #updateManager() pass the live session count into
+    // runSelfUpdate's drain-wait gate.
+    countInFlightSessions,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
@@ -1176,7 +1197,14 @@ async function runRuntime(
   });
 
   const shutdown = async (signal: string): Promise<void> => {
-    log(`agent-manager received ${signal} — terminating subagents`);
+    // ticket 6abe2b79 / b831b896: self-update 의 재-exec 경로도 이 함수를
+    // SIGTERM 으로 태운다(self-update.ts 의 reExecManager/shutdownForNpmGlobalUpdate
+    // 참고) — 그래서 signal 인자만으로는 self-update 재시작과 operator
+    // SIGTERM/SIGINT 를 구분할 수 없다. pendingRestartReason() 이 그 구분을
+    // 담당한다(오직 self-update 전용 재시작 경로에서만 세팅되고, restart_manager
+    // 는 세팅하지 않는다 — 그쪽은 'manager_shutdown' 으로 남는다).
+    const stopReason = pendingRestartReason() ?? 'manager_shutdown';
+    log(`agent-manager received ${signal} — terminating subagents (reason=${stopReason})`);
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
     updateChecker.stop();
@@ -1203,17 +1231,17 @@ async function runRuntime(
     }
     eventStream.stop();
     try {
-      await subagentManager.stop();
+      await subagentManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown: ${err?.message ?? err}`);
     }
     try {
-      await chatSessionManager.stop();
+      await chatSessionManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown (chat): ${err?.message ?? err}`);
     }
     try {
-      await ticketSessionManager.stop();
+      await ticketSessionManager.stop(stopReason);
     } catch (err: any) {
       log(`shutdown (ticket): ${err?.message ?? err}`);
     }
@@ -1252,7 +1280,7 @@ async function runRuntime(
   // its own. A contended SIGUSR1 just gets a no-op summary back.
   process.on('SIGUSR1', async () => {
     try {
-      const result = await runSelfUpdate({ log });
+      const result = await runSelfUpdate({ log, countInFlightSessions });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);

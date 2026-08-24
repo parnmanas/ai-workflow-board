@@ -17,7 +17,12 @@ export interface LogActivityParams {
   // 'workspace' added (ticket 1fcba693) for the workspace config-change audit —
   // a settings PATCH (e.g. supervisor_stale_ms) is workspace-scoped, not tied to
   // a ticket, so `ticket_id` is '' and `workspace_id` carries the scope.
-  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace' | 'credential';
+  // 'migration' (ticket 0f638509, 리뷰 라운드1 P3) — 소스 서버의 live pull
+  // import export 표면(GET /api/migration/export/*) 접근 감사. 이 표면은
+  // 전 워크스페이스의 크리덴셜을 평문으로 반환할 수 있는 표면이라 workspace_id
+  // 하나로 스코프되지 않는다 — entity_id가 대신 "무엇을"(엔티티명 또는
+  // 'meta') 나타낸다.
+  entity_type: 'ticket' | 'comment' | 'board' | 'agent' | 'workspace' | 'credential' | 'migration';
   entity_id: string | number;
   // The three `respawn_*` actions are first-class events written by
   // RespawnStormDetectorService (ticket ab06eac2). ActivityLog.action is a bare
@@ -45,7 +50,13 @@ export interface LogActivityParams {
     // `actor_id`/`actor_name` the REAL agent whose comment was blocked (prior to
     // this, only the internal auto-pend's field-change row existed, and it
     // always attributed to the guard itself, never the suppressed agent).
-    | 'comment_pingpong_suppressed';
+    | 'comment_pingpong_suppressed'
+    // 'migration_export_*' (ticket 0f638509, 리뷰 라운드1 P3) — 소스 서버
+    // export 표면 접근 감사. meta/table은 성공 접근, denied는
+    // MigrationExportGuard의 거부(누락/무효 키, 잘못된 scope) — 절대 원문
+    // 키·평문 크리덴셜 값을 필드에 담지 않는다(field_changed/new_value는
+    // 엔티티명·행수·거부 사유 같은 메타데이터만).
+    | 'migration_export_meta' | 'migration_export_table' | 'migration_export_denied';
   field_changed?: string;
   old_value?: string;
   new_value?: string;

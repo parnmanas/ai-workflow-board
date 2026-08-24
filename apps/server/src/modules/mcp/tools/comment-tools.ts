@@ -608,8 +608,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           // fan-out target — it reflects this ticket's comment history, not
           // the recipient.
           const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
+          // Instance-wide quiesce gate (ticket 0f638509 — live pull import),
+          // checked once outside the loop — a quiesced destination must not
+          // spawn/wake an agent via an @-mention either.
+          const quiescedForMentions = await ctx.instanceQuiesceService.isQuiesced();
           for (const m of resolved) {
             if (m.type === 'agent') {
+              if (quiescedForMentions) continue;
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
               if (!agent) continue;
               // Same workspace-scope safety as the REST path.
@@ -816,8 +821,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const userMentionRepo = dataSource.getRepository(UserMention);
           // ticket 07402c57: same chain-depth stamp as add_comment above.
           const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
+          // Instance-wide quiesce gate (ticket 0f638509) — see add_comment above.
+          const quiescedForMentions = await ctx.instanceQuiesceService.isQuiesced();
           for (const m of resolvedRefs) {
             if (m.type === 'agent') {
+              if (quiescedForMentions) continue;
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
               if (!agent) continue;
               if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
@@ -1490,24 +1498,29 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       // 4. comment_mention to the target agent so the proxy spawns a
       //    subagent NOW with the handoff content rather than waiting for
-      //    the next assignee-trigger cycle.
+      //    the next assignee-trigger cycle. Instance-wide quiesce gate
+      //    (ticket 0f638509) — a quiesced destination must not spawn a
+      //    subagent via a handoff mention; the reassignment + activity log
+      //    above still land either way, only this immediate wake-up skips.
       const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
       // ticket 07402c57: same chain-depth stamp as add_comment/ask_question.
       const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
-      activityEvents.emit('comment_mention', {
-        ticket_id: ticket.id,
-        comment_id: comment.id,
-        workspace_id: ticket.workspace_id,
-        agent_id: targetAgent.id,
-        actor_id: resolved.authorId,
-        actor_type: resolved.authorType,
-        actor_name: resolved.authorName,
-        content,
-        role_prompt: targetAgent.role_prompt || '',
-        mention_source: 'direct',
-        timestamp: ts,
-        agent_chain_depth: agentChainDepth,
-      });
+      if (!(await ctx.instanceQuiesceService.isQuiesced())) {
+        activityEvents.emit('comment_mention', {
+          ticket_id: ticket.id,
+          comment_id: comment.id,
+          workspace_id: ticket.workspace_id,
+          agent_id: targetAgent.id,
+          actor_id: resolved.authorId,
+          actor_type: resolved.authorType,
+          actor_name: resolved.authorName,
+          content,
+          role_prompt: targetAgent.role_prompt || '',
+          mention_source: 'direct',
+          timestamp: ts,
+          agent_chain_depth: agentChainDepth,
+        });
+      }
       logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);
 
       return ok({ comment, ticket: { id: ticket.id, assignee_id: ticket.assignee_id, assignee: ticket.assignee } });

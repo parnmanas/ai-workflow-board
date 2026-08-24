@@ -173,6 +173,14 @@ export interface CommandHandlerDeps {
   runtimeSupervisor?: Pick<RuntimeSupervisor, 'stopForAgent'> | null;
   /** Optional config-reload hook; resolves with a short summary string. */
   reloadConfig?: () => Promise<string> | string;
+  /** ticket b831b896: total chat / action / QA / ticket-dispatch sessions
+   *  currently live, across every session manager main.ts owns. Passed
+   *  through to runSelfUpdate so `update_manager` defers the restart while
+   *  real work is in flight instead of SIGTERMing it moments after it
+   *  starts. Optional so the legacy test harness (deps without this) keeps
+   *  wiring up — runSelfUpdate treats a missing callback as "unknown,
+   *  don't block". */
+  countInFlightSessions?: () => number;
   /** Force-drop and re-establish the SSE connection. Called after a successful
    * `spawn_agent` so the server's cached `managedAgentIds` set (which is
    * snapshotted once per SSE connect — see events.controller.ts:236-244)
@@ -286,16 +294,32 @@ export class AgentManagerCommandHandler {
    * re-exec is scheduled on a ~1.5s timer inside runSelfUpdate so the
    * ack POST can complete before the parent process exits.
    *
+   * Drain check (ticket b831b896, round 2): once channel/npm-reachability/
+   * provenance/already-latest are all resolved and an install is
+   * DEFINITELY about to happen, runSelfUpdate checks `countInFlightSessions`
+   * ONCE. A non-zero count returns immediately with `deferred:true` instead
+   * of blocking — UpdateChecker's periodic tick retries automatically until
+   * SELF_UPDATE_DRAIN_MAX_WAIT_MS elapses. This method (and therefore the
+   * SSE ack) always returns quickly, regardless of drain outcome — round 1
+   * blocked in-call for up to the drain cap, which held the module-level
+   * in-flight mutex that long (silently no-op'ing a concurrent operator
+   * `restart_manager`) and routinely made the ack arrive after the server's
+   * command-ledger TTL (`RECORD_TTL_MS`, also 10 minutes), getting rejected
+   * even though the update itself went on to succeed.
+   *
    * Concurrency: runSelfUpdate enforces a module-level in-flight mutex
-   * shared with the SIGUSR1 handler. A second update_manager dispatched
-   * while one is still running short-circuits to {changed:false,
-   * summary:'self-update already in flight'}; we throw on that so the
-   * REST ack carries 'error' rather than silently no-op'ing — operators
-   * see the contention on the admin UI.
+   * shared with the SIGUSR1 handler, held only for the duration of one
+   * quick check (never across the drain wait — see above). A second
+   * update_manager dispatched while one is still running short-circuits to
+   * {changed:false, summary:'self-update already in flight'}; we throw on
+   * that so the REST ack carries 'error' rather than silently no-op'ing —
+   * operators see the contention on the admin UI. `deferred:true` is
+   * deliberately NOT thrown as an error — the update is pending, not
+   * refused or failed.
    */
   async #updateManager(): Promise<string> {
-    const result = await runSelfUpdate({ log });
-    if (!result.changed) {
+    const result = await runSelfUpdate({ log, countInFlightSessions: this.#deps.countInFlightSessions });
+    if (!result.changed && !result.deferred) {
       throw new Error(`update_manager: ${result.summary}`);
     }
     return `update_manager ok: ${result.summary}`;

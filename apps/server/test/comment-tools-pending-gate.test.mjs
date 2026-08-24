@@ -56,6 +56,7 @@ function registerTools() {
   const ctx = {
     dataSource: ds, activityService, mentionService: mentionServiceStub,
     logger: logStub, ticketRoleAssignmentService: null, roomMessagingService: null,
+    instanceQuiesceService: { isQuiesced: async () => false },
   };
   registerCommentTools(server, ctx);
   return handlers;

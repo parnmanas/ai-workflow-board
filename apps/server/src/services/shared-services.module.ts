@@ -13,6 +13,7 @@ import { RelationTuple } from '../entities/RelationTuple';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
 import { UserChannel } from '../entities/UserChannel';
+import { SystemSetting } from '../entities/SystemSetting';
 import { ActivityService } from './activity.service';
 import { AuthService } from './auth.service';
 import { ApiKeyService } from './api-key.service';
@@ -29,6 +30,7 @@ import { MentionService } from './mention.service';
 import { PresenceService } from './presence.service';
 import { SqljsFlushService } from './sqljs-flush.service';
 import { OntologySqljsFlushService } from './ontology-sqljs-flush.service';
+import { InstanceQuiesceService } from './instance-quiesce.service';
 import {
   DiscordUserProvider,
   SlackUserProvider,
@@ -56,7 +58,7 @@ import {
   imports: [
     TypeOrmModule.forFeature([
       ActivityLog, AgentErrorLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn,
-      RelationTuple, WorkspaceRole, TicketRoleAssignment, UserChannel,
+      RelationTuple, WorkspaceRole, TicketRoleAssignment, UserChannel, SystemSetting,
     ]),
   ],
   providers: [
@@ -81,6 +83,7 @@ import {
     TelegramUserProvider,
     NotificationProviderRegistry,
     UserChannelDispatcherService,
+    InstanceQuiesceService,
   ],
   exports: [
     ActivityService,
@@ -95,6 +98,7 @@ import {
     PresenceService,
     NotificationProviderRegistry,
     UserChannelDispatcherService,
+    InstanceQuiesceService,
   ],
 })
 export class SharedServicesModule {}

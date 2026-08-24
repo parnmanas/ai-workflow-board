@@ -7,6 +7,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Action } from '../../entities/Action';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
 import { ActionsService } from './actions.service';
 import { ActionTicketContext } from './action-prompt';
@@ -65,6 +66,9 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly actionsService: ActionsService,
     private readonly logService: LogService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit() {
@@ -86,6 +90,16 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
   }
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import), checked
+    // FIRST — before the on_done_dispatched_at claim below. This hook is a
+    // one-shot event listener with no periodic sweep/backstop, and the claim
+    // is a permanent CAS (Ticket.on_done_dispatched_at vs terminal_entered_at):
+    // gating AFTER the claim would silently and PERMANENTLY drop the hook for
+    // any ticket that completes during the quiesce window (no automatic
+    // retry once the operator resumes). Gating here at least avoids consuming
+    // the claim, so the door is left open if some future path re-evaluates it.
+    if (await this.instanceQuiesce.isQuiesced()) return;
+
     // Only column moves can land a ticket on a terminal column. Everything else
     // (comments, field updates, archives) is irrelevant to this hook.
     if (log.action !== 'moved' || !log.ticket_id) return;

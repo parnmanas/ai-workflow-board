@@ -12,6 +12,7 @@ import type {
   QaRun,
   QaRunBatch,
   Deployment,
+  MigrationRun,
   QaSchedule,
   QaScheduleScope,
   WorkspaceSchedule,
@@ -1923,6 +1924,17 @@ export const api = {
       '/admin/settings/self-improvement/discover/columns',
       { method: 'POST', body: JSON.stringify(body) },
     ),
+
+  // ─── Migration / Live Import (ticket 0f638509) ─────────
+  listMigrationRuns: () => request<MigrationRun[]>('/admin/migration/runs'),
+  getMigrationRun: (id: string) => request<MigrationRun>(`/admin/migration/runs/${id}`),
+  startMigrationRun: (body: { source_url: string; source_token: string; skip_attachments?: boolean; allow_merge?: boolean }) =>
+    request<MigrationRun>('/admin/migration/runs', { method: 'POST', body: JSON.stringify(body) }),
+  pullMigrationAttachments: (id: string) =>
+    request<MigrationRun>(`/admin/migration/runs/${id}/pull-attachments`, { method: 'POST' }),
+  getInstanceQuiesce: () => request<{ quiesced: boolean; reason: string }>('/admin/migration/quiesce'),
+  resumeFleetDispatch: () =>
+    request<{ quiesced: boolean }>('/admin/migration/quiesce/resume', { method: 'POST' }),
 
   // ─── Admin Column Policies (ticket f886ada7) ───────────
   listColumnPolicies: () =>

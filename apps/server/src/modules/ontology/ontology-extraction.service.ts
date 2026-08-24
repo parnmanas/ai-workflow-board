@@ -14,7 +14,7 @@ import { DataSource, Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { findOrFail } from '../../common/find-or-fail';
-import { ensureRepoCache, listTree, getFileContent, listCommits } from '../mcp/shared/git-repo-cache';
+import { ensureRepoCache, listTreeRecursive, getFileContentsBatch, listCommits, type TreeFileEntry } from '../mcp/shared/git-repo-cache';
 import { resolveGitCredential } from '../mcp/shared/git-branches';
 import { AppOntologyDataSource } from '../../db';
 import { langForPath, type ExtractionTask, type FactBundle } from './extraction/types';
@@ -22,7 +22,6 @@ import { runExtractionPool } from './extraction/pool';
 import { persistFactBundles, type PersistSummary } from './persist';
 import type { DecoratorFact } from './extraction/decorator-rules';
 
-const FETCH_CONCURRENCY = 16;
 const MAX_ERROR_MESSAGE_LENGTH = 300;
 // 워커가 대량 동시 크래시하는 병리적 상황(예: worker.js 자체 결함)에서도
 // 반환 페이로드가 무한정 커지지 않도록 상세 목록만 캡한다 —
@@ -32,19 +31,6 @@ const MAX_REPORTED_EXTRACTION_FAILURES = 100;
 
 function redactWorkerError(raw: string): string {
   return raw.length > MAX_ERROR_MESSAGE_LENGTH ? `${raw.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…` : raw;
-}
-
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const idx = next++;
-      out[idx] = await fn(items[idx]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
 }
 
 export interface ExtractRepoOptions {
@@ -99,8 +85,8 @@ export class OntologyExtractionService {
   // 코드 경로는 이 필드들을 재할당하지 않는다 — Nest DI가 생성한 인스턴스는
   // 항상 아래 기본값(실제 구현)을 그대로 쓴다.
   private ensureRepoCache = ensureRepoCache;
-  private listTree = listTree;
-  private getFileContent = getFileContent;
+  private listTreeRecursive = listTreeRecursive;
+  private getFileContentsBatch = getFileContentsBatch;
   private listCommits = listCommits;
   private resolveGitCredential = resolveGitCredential;
   private runExtractionPool = runExtractionPool;
@@ -120,21 +106,13 @@ export class OntologyExtractionService {
     return AppOntologyDataSource ?? this.nestDataSource;
   }
 
-  private async walkTree(repoPath: string, ref: string, rootPath: string): Promise<{ files: string[]; skippedByExtension: number }> {
-    const files: string[] = [];
+  private async walkTree(repoPath: string, ref: string, rootPath: string): Promise<{ files: TreeFileEntry[]; skippedByExtension: number }> {
+    const entries = await this.listTreeRecursive(repoPath, ref, rootPath);
+    const files: TreeFileEntry[] = [];
     let skippedByExtension = 0;
-    const queue: string[] = [rootPath];
-    while (queue.length > 0) {
-      const dir = queue.shift()!;
-      const entries = await this.listTree(repoPath, ref, dir);
-      for (const entry of entries) {
-        if (entry.type === 'tree') {
-          queue.push(entry.path);
-        } else if (entry.type === 'blob') {
-          if (langForPath(entry.path)) files.push(entry.path);
-          else skippedByExtension += 1;
-        }
-      }
+    for (const entry of entries) {
+      if (langForPath(entry.path)) files.push(entry);
+      else skippedByExtension += 1;
     }
     return { files, skippedByExtension };
   }
@@ -163,21 +141,21 @@ export class OntologyExtractionService {
     const treeWalkMs = Date.now() - treeStart;
 
     const fetchStart = Date.now();
-    const fetched = await mapWithConcurrency(files, FETCH_CONCURRENCY, (filePath) => this.getFileContent(repoPath, ref, filePath));
+    const fetched = await this.getFileContentsBatch(repoPath, files);
     const fetchMs = Date.now() - fetchStart;
 
     let skippedTooLargeOrBinary = 0;
     let totalLines = 0;
     const tasks: ExtractionTask[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const content = fetched[i];
+    for (const entry of files) {
+      const content = fetched.get(entry.path)!;
       if (content.binary || content.too_large) {
         skippedTooLargeOrBinary += 1;
         continue;
       }
-      const lang = langForPath(files[i]);
+      const lang = langForPath(entry.path);
       if (!lang) continue; // walkTree가 이미 걸렀지만 타입 좁히기를 위해 방어적으로 재확인
-      tasks.push({ path: files[i], content: content.content, lang });
+      tasks.push({ path: entry.path, content: content.content, lang });
       totalLines += content.content.length === 0 ? 0 : content.content.split('\n').length;
     }
 

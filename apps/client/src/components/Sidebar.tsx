@@ -201,6 +201,7 @@ export default function Sidebar({
                 badgeLabel: `승인 대기 중인 가입 요청 ${counts.pendingUsers}건`,
               },
               { key: 'system-settings', path: '/admin/settings', label: 'System Settings', icon: 'S' },
+              { key: 'migration', path: '/admin/migration', label: 'Live Import', icon: 'M' },
             ]
           : []),
       ],

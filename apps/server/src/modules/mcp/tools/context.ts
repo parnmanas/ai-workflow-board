@@ -31,8 +31,10 @@ import { Ticket } from '../../../entities/Ticket';
 import { UserMention } from '../../../entities/UserMention';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { Workspace } from '../../../entities/Workspace';
+import { SystemSetting } from '../../../entities/SystemSetting';
 import { ActivityService } from '../../../services/activity.service';
 import { ApiKeyService } from '../../../services/api-key.service';
+import { InstanceQuiesceService } from '../../../services/instance-quiesce.service';
 import { LogService } from '../../../services/log.service';
 import { EmbeddingService } from '../../../services/embedding.service';
 import { GitHubConnectorService } from '../../../services/github-connector.service';
@@ -97,6 +99,11 @@ export interface ToolContext {
   embeddingService: EmbeddingService;
   githubService: GitHubConnectorService;
   mentionService: MentionService;
+  // 인스턴스 전역 fleet quiesce 조회(ticket 0f638509) — comment_mention
+  // 디스패치 지점(add_comment/ask_question/handoff_to_agent)이 quiesce 상태를
+  // 확인하는 데 필요하다. activityService처럼 stateless-over-DataSource라
+  // 두 생성 경로 모두 항상 채운다(standalone도 optional이 아님).
+  instanceQuiesceService: InstanceQuiesceService;
   logger: McpLogger;
   // Optional — present in NestJS integrated mode; undefined when invoked from
   // the standalone mcp-server entry point (no DI). Tools that depend on it
@@ -255,6 +262,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     logService,
   );
   const apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));
+  const instanceQuiesceService = new InstanceQuiesceService(dataSource.getRepository(SystemSetting));
   const embeddingService = new EmbeddingService(dataSource);
   const githubService = new GitHubConnectorService(dataSource);
   const mentionService = new MentionService();
@@ -314,6 +322,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     embeddingService,
     githubService,
     mentionService,
+    instanceQuiesceService,
     logger,
     roomMembershipService,
     roomMessagingService,

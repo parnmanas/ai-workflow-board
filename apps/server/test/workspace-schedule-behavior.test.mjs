@@ -29,6 +29,7 @@ const MIN = 60_000;
 const NOW = new Date('2026-06-29T12:00:00Z');
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 // Stub schedule repo over a plain-object row array. Handles the two find shapes
 // runOnce uses: { enabled, next_run_at: IsNull() } and
@@ -162,7 +163,7 @@ function svcWith(rows, agents = [{ id: 'agent-1', workspace_id: 'ws-1', name: 'B
   const participantRepo = makeParticipantRepo();
   const agentRepo = makeAgentRepo(agents);
   const messaging = makeMessaging();
-  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, agentRepo, messaging, noopLog);
+  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, agentRepo, messaging, noopLog, {}, noQuiesce);
   return { svc, scheduleRepo, roomRepo, participantRepo, agentRepo, messaging };
 }
 

@@ -44,6 +44,7 @@ import { HandoffService } from '../handoff/handoff.service';
 import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { EmbeddingService } from '../../services/embedding.service';
 import { GitHubConnectorService } from '../../services/github-connector.service';
 import { WorkflowFunctionsService } from '../workflow-functions/workflow-functions.service';
@@ -166,6 +167,9 @@ export class McpController implements OnModuleInit {
     private readonly agentManagerCommandService: AgentManagerCommandService,
     private readonly ontologyLifecycleService: OntologyLifecycleService,
     private readonly ontologyQueryService: OntologyQueryService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesceService: InstanceQuiesceService,
   ) {}
 
   onModuleInit() {
@@ -232,6 +236,7 @@ export class McpController implements OnModuleInit {
       dataSource: this.dataSource,
       activityService: this.activityService,
       apiKeyService: this.apiKeyService,
+      instanceQuiesceService: this.instanceQuiesceService,
       embeddingService: this.embeddingService,
       githubService: this.githubService,
       logger: this._logService,

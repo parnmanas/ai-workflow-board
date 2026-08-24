@@ -18,6 +18,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
@@ -83,6 +84,9 @@ export class TicketsController {
     private readonly ticketPrerequisites: TicketPrerequisitesService,
     private readonly ticketDuplicates: TicketDuplicateService,
     private readonly artifactRefs: ArtifactRefsService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   @Get('tickets/:id/comment-summary')
@@ -2472,9 +2476,14 @@ export class TicketsController {
     // every fan-out target below, since it reflects this ticket's comment
     // history, not the recipient.
     const agentChainDepth = await computeTicketCommentChainDepth(this.commentRepo, ticket.id);
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import),
+    // checked once outside the loop — a quiesced destination must not
+    // spawn/wake an agent via an @-mention either.
+    const quiescedForMentions = await this.instanceQuiesce.isQuiesced();
 
     for (const m of resolved) {
       if (m.type === 'agent') {
+        if (quiescedForMentions) continue;
         const agent = await this.agentRepo.findOne({ where: { id: m.id } });
         if (!agent) continue;
         // Scope safety: an agent in a different workspace should never receive this mention.

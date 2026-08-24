@@ -12,6 +12,7 @@ import { WorkspaceSchedule } from '../dist/entities/WorkspaceSchedule.js';
 import { WorkspaceScheduleService } from '../dist/modules/workspace-schedule/workspace-schedule.service.js';
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 describe('Workspace Schedule board-scope cleanup', () => {
   let dataSource;
@@ -26,7 +27,7 @@ describe('Workspace Schedule board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(WorkspaceSchedule);
-    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, {}, {}, noopLog, {});
+    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, {}, {}, noopLog, {}, noQuiesce);
   });
 
   after(async () => {

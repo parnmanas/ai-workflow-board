@@ -21,6 +21,7 @@ import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { Credential } from '../../entities/Credential';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { OutreachIngestService } from './outreach-ingest.service';
 import { resolveChannelConnector } from './connector-resolver';
 import { OutreachConnector } from './connectors/types';
@@ -53,6 +54,9 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     private readonly ingestService: OutreachIngestService,
     private readonly logService: LogService,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -83,6 +87,13 @@ export class OutreachPollingService implements OnModuleInit, OnModuleDestroy {
    * channel ids polled vs. the ones whose poll failed this tick.
    */
   async runOnce(now: Date = new Date()): Promise<{ polled: string[]; failed: string[] }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
+    // QaScheduleService.runOnce's identical gate for the full rationale.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('OutreachScheduler', 'runOnce skipped (instance quiesced)');
+      return { polled: [], failed: [] };
+    }
+
     const polled: string[] = [];
     const failed: string[] = [];
 
