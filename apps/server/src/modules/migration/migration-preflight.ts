@@ -3,7 +3,7 @@ import * as path from 'path';
 import { DataSource } from 'typeorm';
 import { computeSchemaFingerprint } from './migration-crypto';
 import { MigrationSourceMeta } from './migration-client';
-import { MIGRATION_ENTITY_ORDER, MIGRATION_EXCLUDED_TABLE_PREFIX } from './migration-entity-registry';
+import { MIGRATION_ENTITY_ORDER, MIGRATION_EXCLUDED_TABLE_PREFIX, MIGRATION_CONTROL_ENTITY_NAMES } from './migration-entity-registry';
 
 let _cachedVersion: string | null = null;
 
@@ -73,8 +73,15 @@ export function comparePreflight(source: MigrationSourceMeta, local: LocalPrefli
     reasons.push(`app_version mismatch (source=${source.app_version} dest=${local.app_version})`);
   }
 
+  // 온톨로지 테이블 접두사 + MigrationRun(이관 대상이 아니라 이 기능 자신의
+  // 제어 테이블) 제외 — export controller의 listMigratableEntityMetadata와
+  // 같은 필터를 방어적으로 한 번 더 적용한다(구버전 소스가 아직 그 필터를
+  // 안 가진 경우 대비, 리뷰 라운드1 P1).
   const sourceEntitySet = new Set(
-    source.tables.filter((t) => !t.table.startsWith(MIGRATION_EXCLUDED_TABLE_PREFIX)).map((t) => t.entity),
+    source.tables
+      .filter((t) => !t.table.startsWith(MIGRATION_EXCLUDED_TABLE_PREFIX))
+      .filter((t) => !MIGRATION_CONTROL_ENTITY_NAMES.has(t.entity))
+      .map((t) => t.entity),
   );
   const destEntitySet = new Set(local.entities);
   const entitiesMissingOnSource = local.entities.filter((e) => !sourceEntitySet.has(e));

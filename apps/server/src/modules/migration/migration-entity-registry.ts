@@ -41,6 +41,14 @@
  */
 export const MIGRATION_EXCLUDED_TABLE_PREFIX = 'ontology_';
 
+// migration_runs(MigrationRun)는 이관 대상 데이터가 아니라 이 기능 자신의
+// 제어 테이블이다 — 소스가 자기 DataSource의 entityMetadatas를 그대로
+// 보고하면 MigrationRun도 함께 잡히는데, MIGRATION_ENTITY_ORDER에는
+// 의도적으로 없으므로 필터링하지 않으면 "entities_unknown_to_dest"에
+// 걸려 동일 빌드끼리도 프리플라이트가 항상 실패한다(리뷰 라운드1 P1 —
+// 소스/도착지 어느 쪽이든 이 이름으로 걸러야 한다).
+export const MIGRATION_CONTROL_ENTITY_NAMES = new Set(['MigrationRun']);
+
 // 완료 기준 7(스킵 플래그) 대상 — MigrationRun.phase='core' 패스에서
 // skip_attachments=1이면 이 목록만 건너뛰고, 이후 pull-attachments
 // 엔드포인트가 이 목록만 별도로 채운다. base64 TEXT/임베딩 벡터라 용량을
@@ -117,4 +125,24 @@ export function resolveMigrationEntity(entitiesBarrel: Record<string, unknown>, 
   if (!ALLOWED_ENTITY_NAMES.has(entityName)) return null;
   const ctor = entitiesBarrel[entityName];
   return typeof ctor === 'function' ? ctor : null;
+}
+
+/**
+ * export controller의 `GET meta`가 보고할 테이블 후보 목록 — 단일 정의를
+ * 컨트롤러와 테스트가 함께 쓴다(리뷰 라운드1 P1). 온톨로지 테이블과
+ * MigrationRun 자신을 제외하는 필터가 export 쪽과 preflight 비교 쪽
+ * 두 군데서 따로 구현되어 있으면 한쪽만 고치고 잊어버리기 쉽다 — 실제로
+ * 이 필터 자체가 여기 하나로 모이기 전엔 export 쪽에 MigrationRun 제외가
+ * 아예 빠져 있어서 동일 빌드 소스/도착지끼리도 프리플라이트가 항상
+ * 실패했다. row_count는 DB 접근이 필요해 여기 포함하지 않는다 — 호출자가
+ * 필요하면 반환된 (entity, table) 목록으로 직접 채운다.
+ */
+export function listMigratableEntityMetadata(dataSource: { entityMetadatas: Array<{ name: string; tableName: string }> }): { entity: string; table: string }[] {
+  const out: { entity: string; table: string }[] = [];
+  for (const meta of dataSource.entityMetadatas) {
+    if (meta.tableName.startsWith(MIGRATION_EXCLUDED_TABLE_PREFIX)) continue;
+    if (MIGRATION_CONTROL_ENTITY_NAMES.has(meta.name)) continue;
+    out.push({ entity: meta.name, table: meta.tableName });
+  }
+  return out;
 }
