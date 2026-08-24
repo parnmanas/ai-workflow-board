@@ -19,7 +19,25 @@ COPY apps/client/package.json apps/client/
 COPY apps/agent-manager/package.json apps/agent-manager/
 
 # Install all dependencies (hoisted to root node_modules)
-RUN npm ci
+#
+# `--ignore-scripts` — 이 스테이지의 node_modules 는 builder 로 그대로 복사돼
+# 배포 산출물(client/server dist)을 만든다. 즉 여기서 도는 서드파티
+# preinstall/install/postinstall 은 **root 권한으로, 배포될 아티팩트를 만드는
+# 트리 안에서** 임의 코드로 돈다. lockfile 축 허용목록
+# (scripts/audit-install-scripts.mjs — esbuild/fsevents/@scarf/scarf)은 "어떤
+# 패키지가 스크립트를 갖는가" 를 감시할 뿐 "그게 배포 이미지 빌드에서 돌아도
+# 되는가" 는 묻지 않는다.
+#
+# 셋 다 이 플래그로 잃는 것이 없음을 실측 확인했다(2026-08-24 감사):
+#   - esbuild — 바이너리는 postinstall 다운로드가 아니라 플랫폼 optionalDependency
+#     (`@esbuild/linux-x64`)로 온다. `--ignore-scripts` 설치 후 transform/bundle
+#     정상 동작 확인.
+#   - fsevents — macOS 전용 optional. 리눅스 이미지엔 애초에 설치되지 않는다.
+#   - @scarf/scarf — 텔레메트리. postinstall 이 child_process.exec + scarf.sh
+#     HTTPS 전송을 한다. 루트 package.json 의 `scarfSettings.enabled:false` 는
+#     **그 스크립트가 스스로 읽는 옵트아웃**이라 실행을 넘겨준 뒤의 선의에 기댄다.
+# 실측: 이 플래그로 `npm ci` + `turbo run build` 3/3 스테이지 정상 빌드.
+RUN npm ci --ignore-scripts
 
 # ============================================
 # Stage 2: Build with Turborepo
@@ -91,7 +109,14 @@ COPY skills ./skills
 # 이 레이아웃(루트 package.json + lockfile + apps/server/package.json 만
 # 존재)에서도 `npm ci --workspace=server` 는 정상 동작하며, 설치 결과 트리는
 # 기존 `npm install` 과 패키지 200개 전부 동일하다 — 동작 변화 없음.
-RUN npm ci --omit=dev --workspace=server
+#
+# `--ignore-scripts` (2026-08-24 감사) — 이 스테이지는 **실제로 배포되는 레이어**다.
+# 여기서 도는 install script 는 root 권한으로 최종 이미지에 무엇이든 남길 수 있다.
+# 실측한 이 트리(247 패키지)의 install-script 패키지는 `@scarf/scarf` 하나뿐이고
+# (swagger-ui-dist 의 비-optional 의존성 → @nestjs/swagger 경유로 prod 트리에 있다)
+# 순수 텔레메트리라 실행할 이유가 전혀 없다. 플래그 적용 후 247 패키지 설치 →
+# @ast-grep/napi · @node-rs/xxhash · sql.js 네이티브 로드 정상, 서버 부팅 정상 확인.
+RUN npm ci --omit=dev --workspace=server --ignore-scripts
 
 # Writable data dir for the server. Currently used by the Credentials
 # encryption service to persist its auto-generated AES key when
