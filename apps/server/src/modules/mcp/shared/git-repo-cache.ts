@@ -113,6 +113,16 @@ interface RunGitOpts {
   /** Hard cap on captured stdout bytes; output beyond this is dropped and
    *  `truncated` is set. Default unlimited (well, Node string growth). */
   maxBytes?: number;
+  /** Text to write to the child's stdin before closing it (e.g. an OID list
+   *  for `fetch --stdin` / `cat-file --batch`). Omit for commands that don't
+   *  read stdin. */
+  stdin?: string;
+  /** Set GIT_NO_LAZY_FETCH=1 so a missing object in a blobless clone is a
+   *  hard failure instead of a silent per-object promisor round trip (ticket
+   *  719ef137). Only safe for call sites that never legitimately need a
+   *  blob's content/size — set it and a real lazy fetch becomes a loud
+   *  regression instead of a silent slowdown. */
+  noLazyFetch?: boolean;
 }
 
 interface RunGitResult {
@@ -129,7 +139,11 @@ function runGit(args: string[], opts: RunGitOpts = {}): Promise<RunGitResult> {
     // so a hostile Resource URL/ref can't smuggle a `--upload-pack`-style flag.
     const child = spawn('git', args, {
       cwd: opts.cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        ...(opts.noLazyFetch ? { GIT_NO_LAZY_FETCH: '1' } : {}),
+      },
     });
     let out = '';
     let outBytes = 0;
@@ -166,6 +180,7 @@ function runGit(args: string[], opts: RunGitOpts = {}): Promise<RunGitResult> {
       if (code === 0) resolve({ stdout: out, truncated });
       else reject(new GitReadError(maskGitUrl(err.trim() || `git ${args[0]} exited with code ${code}`)));
     });
+    if (opts.stdin !== undefined) child.stdin.end(opts.stdin, 'utf8');
   });
 }
 
@@ -592,6 +607,49 @@ function parseLsTree(stdout: string, basePath: string): TreeEntry[] {
   return out;
 }
 
+export interface TreeFileEntry {
+  path: string;
+  sha: string;
+}
+
+/**
+ * Recursively list every blob under `treePath` at `ref` in **one** git
+ * process (ticket 719ef137 fix A). Unlike `listTree`, this never asks for
+ * blob sizes (no `--long`), so a blobless cache clone never needs to touch a
+ * blob's content — `ls-tree -r` only reads tree objects, which a
+ * `--filter=blob:none` clone always has in full. `noLazyFetch` turns any
+ * future regression back toward requiring blob data into a hard, immediate
+ * failure instead of a silent per-blob promisor round trip.
+ *
+ * Contrast with the previous per-directory BFS (`walkTree` in
+ * ontology-extraction.service.ts calling `listTree` once per directory): that
+ * was O(directories) git spawns *and*, via `--long`, O(blobs) lazy fetches.
+ * This is exactly one spawn and zero blob fetches, regardless of tree shape.
+ */
+export async function listTreeRecursive(repoPath: string, ref: string, treePath: string): Promise<TreeFileEntry[]> {
+  const r = refOrHead(ref);
+  if (!isValidRef(r)) throw new GitReadError('잘못된 ref 입니다.');
+  const norm = normalizeRepoPath(treePath);
+  const treeish = norm ? `${r}:${norm}` : r;
+  const { stdout } = await runGit(
+    ['ls-tree', '-r', '-z', '--', treeish],
+    { cwd: repoPath, maxBytes: 32 * 1024 * 1024, noLazyFetch: true },
+  );
+  const out: TreeFileEntry[] = [];
+  for (const rec of stdout.split('\0')) {
+    if (!rec) continue;
+    const tabIdx = rec.indexOf('\t');
+    if (tabIdx < 0) continue;
+    const meta = rec.slice(0, tabIdx).trim().split(/\s+/);
+    const name = rec.slice(tabIdx + 1);
+    if (meta.length < 3) continue;
+    const [, type, sha] = meta;
+    if (type !== 'blob') continue; // `-r` already recurses trees; submodules(commit) skipped, same as listTree/walkTree today
+    out.push({ path: norm ? `${norm}/${name}` : name, sha });
+  }
+  return out;
+}
+
 export interface FileContent {
   path: string;
   size: number;
@@ -602,6 +660,7 @@ export interface FileContent {
 }
 
 const MAX_FILE_BYTES = numEnv('AWB_GIT_MAX_FILE_BYTES', 512 * 1024); // 512KB preview cap
+const BULK_FETCH_TIMEOUT_MS = numEnv('AWB_GIT_BULK_FETCH_TIMEOUT_MS', 60_000); // whole-batch backfill/read, scales with file count
 
 export async function getFileContent(repoPath: string, ref: string, filePath: string): Promise<FileContent> {
   const r = refOrHead(ref);
@@ -642,6 +701,154 @@ export async function getFileContent(repoPath: string, ref: string, filePath: st
     truncated: blob.truncated,
     content: binary ? '' : blob.stdout,
   };
+}
+
+interface BatchBlobResult {
+  type: string; // 'blob' | 'missing' (trees/commits are never requested here)
+  size: number;
+  content: Buffer;
+}
+
+/**
+ * Run `git cat-file --batch`, feeding `oids` (one per line) on stdin and
+ * parsing the binary-safe `<oid> <type> <size>\n<content>\n` framing (or
+ * `<oid> missing\n`) from stdout. Kept separate from `runGit()` because
+ * blob content can be arbitrary bytes — decoding each stdout chunk to utf8
+ * as it arrives (like `runGit` does) can split a multi-byte character across
+ * a chunk boundary and corrupt it, so this accumulates raw `Buffer`s and only
+ * decodes the exact byte range of each blob once its length is known from
+ * the header.
+ */
+function runGitCatFileBatch(oids: string[], opts: { cwd: string; timeoutMs?: number; maxBytes?: number }): Promise<Map<string, BatchBlobResult>> {
+  const timeoutMs = opts.timeoutMs ?? BULK_FETCH_TIMEOUT_MS;
+  const maxBytes = opts.maxBytes ?? 128 * 1024 * 1024;
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['cat-file', '--batch'], {
+      cwd: opts.cwd,
+      // GIT_NO_LAZY_FETCH=1 — every oid here was just bulk-backfilled by the
+      // caller; if one is still missing, fail loudly instead of falling back
+      // to the serial per-object promisor fetch this whole batch exists to
+      // avoid (ticket 719ef137 fix B).
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
+    });
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let overflow = false;
+    let err = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new GitReadError(`git cat-file --batch timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const fail = (e: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      reject(e);
+    };
+    child.stdout.on('data', (d: Buffer) => {
+      if (overflow) return;
+      totalBytes += d.length;
+      if (totalBytes > maxBytes) {
+        overflow = true;
+        fail(new GitReadError(`git cat-file --batch output exceeded ${maxBytes} bytes`));
+        return;
+      }
+      chunks.push(d);
+    });
+    child.stderr.on('data', (d: Buffer) => { if (err.length < 8192) err += d.toString('utf8'); });
+    child.on('error', (e) => fail(new GitReadError(maskGitUrl(String((e as Error)?.message || e)))));
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new GitReadError(maskGitUrl(err.trim() || `git cat-file --batch exited with code ${code}`)));
+        return;
+      }
+      try {
+        resolve(parseCatFileBatch(Buffer.concat(chunks, totalBytes)));
+      } catch (e) {
+        reject(e instanceof Error ? e : new GitReadError(String(e)));
+      }
+    });
+    child.stdin.end(oids.map((o) => `${o}\n`).join(''), 'utf8');
+  });
+}
+
+function parseCatFileBatch(buf: Buffer): Map<string, BatchBlobResult> {
+  const out = new Map<string, BatchBlobResult>();
+  let offset = 0;
+  while (offset < buf.length) {
+    const nl = buf.indexOf(0x0a, offset);
+    if (nl < 0) break;
+    const header = buf.toString('utf8', offset, nl).split(' ');
+    offset = nl + 1;
+    if (header.length >= 3) {
+      const [oid, type, sizeRaw] = header;
+      const size = parseInt(sizeRaw, 10) || 0;
+      const content = Buffer.from(buf.subarray(offset, offset + size));
+      offset += size;
+      if (buf[offset] === 0x0a) offset += 1; // trailing separator after content
+      out.set(oid, { type, size, content });
+    } else {
+      out.set(header[0], { type: 'missing', size: 0, content: Buffer.alloc(0) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch the content of many blobs in **two** git processes total, regardless
+ * of file count (ticket 719ef137 fix B — the bottleneck that follows fix A
+ * once the tree walk itself stops lazy-fetching: one `cat-file -s` +
+ * `cat-file blob` round trip per file, done by `getFileContent`, still means
+ * 2×N promisor round trips for N files).
+ *
+ *  1. One `git fetch --filter=blob:none --stdin` backfills every blob this
+ *     batch needs, deduped by OID, in a single promisor negotiation.
+ *  2. One `git cat-file --batch` reads them all back locally.
+ *
+ * Every full file's bytes are transferred (there's no per-file `--long`-style
+ * short-circuit before the content round trip like `getFileContent` has for
+ * `too_large`) — an acceptable trade-off for source-tree extraction, where
+ * `langForPath` has already excluded non-source files before this is called.
+ */
+export async function getFileContentsBatch(repoPath: string, entries: TreeFileEntry[]): Promise<Map<string, FileContent>> {
+  const out = new Map<string, FileContent>();
+  if (entries.length === 0) return out;
+
+  const uniqueShas = [...new Set(entries.map((e) => e.sha))];
+  await runGit(
+    ['-c', 'fetch.negotiationAlgorithm=noop', 'fetch', 'origin', '--no-tags', '--no-write-fetch-head', '--filter=blob:none', '--stdin'],
+    { cwd: repoPath, timeoutMs: BULK_FETCH_TIMEOUT_MS, stdin: uniqueShas.map((s) => `${s}\n`).join('') },
+  );
+
+  const bySha = await runGitCatFileBatch(uniqueShas, { cwd: repoPath, timeoutMs: BULK_FETCH_TIMEOUT_MS });
+
+  for (const entry of entries) {
+    const blob = bySha.get(entry.sha);
+    if (!blob || blob.type === 'missing') {
+      out.set(entry.path, { path: entry.path, size: 0, binary: false, too_large: false, truncated: false, content: '' });
+      continue;
+    }
+    if (blob.size > MAX_FILE_BYTES) {
+      out.set(entry.path, { path: entry.path, size: blob.size, binary: false, too_large: true, truncated: false, content: '' });
+      continue;
+    }
+    const binary = blob.content.includes(0);
+    out.set(entry.path, {
+      path: entry.path,
+      size: blob.size,
+      binary,
+      too_large: false,
+      truncated: false,
+      content: binary ? '' : blob.content.toString('utf8'),
+    });
+  }
+  return out;
 }
 
 /** Branches + tags for the ref picker, resolved from the cache clone (no extra

@@ -12,10 +12,15 @@
 //
 // git-repo-cache/실제 워커 풀/DB 없이 검증하기 위해
 // OntologyExtractionService의 (테스트 전용) 재할당 가능 필드들
-// (ensureRepoCache/listTree/getFileContent/listCommits/resolveGitCredential/
-// runExtractionPool/persistFactBundles)을 전부 페이크로 교체한다 —
-// 프로덕션 경로는 이 필드들을 절대 재할당하지 않는다
+// (ensureRepoCache/listTreeRecursive/getFileContentsBatch/listCommits/
+// resolveGitCredential/runExtractionPool/persistFactBundles)을 전부
+// 페이크로 교체한다 — 프로덕션 경로는 이 필드들을 절대 재할당하지 않는다
 // (ontology-extraction.service.ts 클래스 헤더 코멘트).
+//
+// listTreeRecursive/getFileContentsBatch는 ticket 719ef137(blobless 캐시
+// 클론에서 `git ls-tree --long`이 blob당 promisor fetch를 유발해 타임아웃
+// 나던 버그)의 수정으로 옛 listTree(디렉터리별 BFS)/getFileContent(파일별
+// 순차 fetch)를 대체한 것 — 이 fake들의 시그니처도 같이 바뀌었다.
 //
 // 컴파일된 dist/ 대상으로 실행한다(`npm run build` 필요) — 1/7과 같은 관례.
 
@@ -97,21 +102,27 @@ function buildService({ poolResults, persistImpl }) {
   svc.resolveGitCredential = async () => null;
   svc.ensureRepoCache = async () => '/fake/repo/path';
   svc.listCommits = async () => [{ sha: 'c0ffee' }];
-  svc.listTree = async (_repoPath, _ref, dir) => {
-    if (dir !== '') return [];
+  svc.listTreeRecursive = async (_repoPath, _ref, rootPath) => {
+    if (rootPath !== '') return [];
     return [
-      { name: 'a.ts', path: 'a.ts', type: 'blob', sha: 'x', size: 20 },
-      { name: 'b.ts', path: 'b.ts', type: 'blob', sha: 'y', size: 20 },
+      { path: 'a.ts', sha: 'x' },
+      { path: 'b.ts', sha: 'y' },
     ];
   };
-  svc.getFileContent = async (_repoPath, _ref, filePath) => ({
-    path: filePath,
-    size: 20,
-    binary: false,
-    too_large: false,
-    truncated: false,
-    content: 'export const x = 1;\n',
-  });
+  svc.getFileContentsBatch = async (_repoPath, entries) => {
+    const out = new Map();
+    for (const entry of entries) {
+      out.set(entry.path, {
+        path: entry.path,
+        size: 20,
+        binary: false,
+        too_large: false,
+        truncated: false,
+        content: 'export const x = 1;\n',
+      });
+    }
+    return out;
+  };
   svc.runExtractionPool = async (tasks) => poolResults(tasks);
   svc.persistFactBundles = persistImpl ?? defaultPersistImpl();
   return svc;
