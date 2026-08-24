@@ -619,11 +619,12 @@ let _lastReExecScheduled = false;
  * the right code: 1 when we're tearing down to re-exec into the just-built
  * dist, 0 for a normal operator-driven stop.
  *
- * The unit now runs `Restart=always`, so restart no longer hinges on the exit
- * code — systemd respawns on any exit (a deliberate `systemctl stop` is the
- * one case it leaves down). We keep the exit-1 signal anyway: it's correct
- * under any restart policy and keeps the exit code semantically honest
- * (1 = abnormal/re-exec, 0 = clean stop) for logs and journald.
+ * The unit runs `Restart=on-failure`, so restart hinges on the exit code:
+ * only a non-zero exit makes systemd respawn the unit, while a clean exit(0)
+ * (e.g. a deliberate `systemctl stop`) leaves it stopped. The exit-1 signal
+ * here is what makes the re-exec actually restart — it also keeps the exit
+ * code semantically honest (1 = abnormal/re-exec, 0 = clean stop) for logs
+ * and journald.
  */
 let _systemdReExecPending = false;
 
@@ -1048,9 +1049,9 @@ async function runNpmGlobalSelfUpdate(
 
   // POSIX can replace the package files while Node has the old modules mapped.
   // Install FIRST and restart only after npm succeeds. The previous universal
-  // exit-first helper raced systemd's Restart=always: systemd relaunched the old
-  // package after five seconds while the detached helper was still waiting or
-  // installing, yet the command had already reported success.
+  // exit-first helper raced systemd's Restart=on-failure: systemd relaunched
+  // the old package after five seconds while the detached helper was still
+  // waiting or installing, yet the command had already reported success.
   if (process.platform !== 'win32') {
     out(`Self-update: npm install -g --ignore-scripts ${installSpec}`);
     // `--ignore-scripts` — provenance 게이트는 **우리 tarball 의 출처**만 보증한다.
@@ -1233,9 +1234,10 @@ function isManagedBySystemd(): boolean {
  * Two strategies depending on the supervisor:
  *
  * 1. **systemd** (Linux + a `.service` unit): the parent exits 1 and lets the
- *    unit's `Restart=always` bring up a fresh process. We MUST NOT spawn
- *    a detached child here — systemd's default `KillMode=control-group` would
- *    sweep the new child into the same cgroup teardown when the parent dies,
+ *    unit's `Restart=on-failure` bring up a fresh process (a non-zero exit is
+ *    what triggers it). We MUST NOT spawn a detached child here — systemd's
+ *    default `KillMode=control-group` would sweep the new child into the same
+ *    cgroup teardown when the parent dies,
  *    killing the very process we just launched. Symptom: `update_manager` SSE
  *    command lands, build succeeds, parent exits, child appears for a moment
  *    in `ps`, then the entire unit goes inactive(dead) and the operator's
@@ -1248,13 +1250,13 @@ function isManagedBySystemd(): boolean {
  */
 function reExecManager(out: (msg: string) => void): void {
   if (isManagedBySystemd()) {
-    out('Self-update: re-exec via systemd (Restart=always → exit 1)');
+    out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
     // We trigger the SIGTERM shutdown handler so chat / ticket sessions get
     // cleaned up, but we MUST set _systemdReExecPending first so the handler's
     // final `process.exit(...)` picks exit code 1 instead of 0. Under
-    // Restart=always a clean exit(0) would respawn too, but exit 1 keeps the
-    // journald record honest about why the unit restarted (re-exec, not a
-    // crash or operator stop).
+    // Restart=on-failure a clean exit(0) would NOT respawn — exit 1 is what
+    // makes systemd relaunch us, and it also keeps the journald record honest
+    // about why the unit restarted (re-exec, not a crash or operator stop).
     _systemdReExecPending = true;
     setTimeout(() => {
       try {
