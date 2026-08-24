@@ -273,6 +273,9 @@ export interface SessionRecord {
    *   - `'max_turns'`           — _maybeCloseForMaxTurns (turn cap hit, no
    *                               progress evidence)
    *   - `'credential_rotation'` — stopForAgent
+   *   - `'lru_eviction'`        — #evictLru (_ensureCapacity reaping the
+   *                               least-recently-touched session to make
+   *                               room for a new spawn at maxConcurrent)
    * Undefined for any exit none of the above caused (crash, normal reply,
    * an exit the manager didn't initiate) — `_onChildExit` reports those as
    * `'unknown'` rather than guessing a specific mechanism it can't observe.
@@ -1729,6 +1732,11 @@ export class BaseSessionManager {
     if (!oldestKey) return false;
     const s = this._sessions.get(oldestKey)!;
     log(`${this.#logTag} evicting lru ${this.#keyField}=${oldestKey} pid=${s.pid}`);
+    // ticket b831b896 round 4: canonical bucket for a run-completion
+    // backstop, set before closing stdin like every other kill site —
+    // capacity eviction is manager-initiated too (_ensureCapacity, called
+    // right before spawning a new session at maxConcurrent).
+    s.stopReason = 'lru_eviction';
     if (s.idleTimer) {
       clearTimeout(s.idleTimer);
       s.idleTimer = null;

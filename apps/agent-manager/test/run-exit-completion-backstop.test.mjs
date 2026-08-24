@@ -219,6 +219,33 @@ test('ChatSessionManager.stopForAgent: 살아있는 세션에 credential_rotatio
   assert.equal(sess.stopReason, 'credential_rotation');
 });
 
+// ticket b831b896 round 4: reviewer가 지적한 마지막 미분류 kill 지점 —
+// #evictLru(_ensureCapacity가 maxConcurrent에서 새 세션을 위해 가장 오래
+// 안 건드린 세션을 reap)도 idle/max_turns와 같은 stdin.end() manager-
+// initiated close이므로 동일하게 분류돼야 한다.
+test('ChatSessionManager._ensureCapacity: maxConcurrent 도달 시 LRU 세션에 lru_eviction을 태그해 stdin.end() 이전에 남긴다', () => {
+  const mgr = new ChatSessionManager({
+    url: 'http://127.0.0.1:0',
+    apiKey: 'test-key',
+    delegation: { enabled: true, maxConcurrent: 1, ttlMinutes: 15, idleMinutes: 999, maxTurnsPerSession: 999 },
+  });
+  const older = makeChatSession(50003, {
+    _run: { run_id: 'run-evicted', workspace_id: 'ws-1', kind: 'action' },
+    lastTouchedAt: Date.now() - 100_000,
+  });
+  const newer = makeChatSession(50004, { lastTouchedAt: Date.now() });
+  mgr._sessions.set(older.sessionKey, older);
+  mgr._sessions.set(newer.sessionKey, newer);
+
+  const ok = mgr._ensureCapacity();
+
+  assert.equal(ok, true, 'eviction succeeded, room was made for a new spawn');
+  assert.equal(older.stopReason, 'lru_eviction', 'evicted (older) 세션에 태그돼야 한다');
+  assert.equal(mgr._sessions.has(older.sessionKey), false, '더 오래된 세션이 reap됐다');
+  assert.equal(mgr._sessions.has(newer.sessionKey), true, '더 최근 세션은 살아남는다');
+  assert.equal(newer.stopReason, undefined, '살아남은 세션은 태그되면 안 된다');
+});
+
 // ── SubagentManager._runExitCompletionBackstop (oneshot run 경로) ────────────
 
 let pidSeq = 90000;
