@@ -16,6 +16,7 @@ import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
 import {
   isSystemdReExecPending,
   pendingRestartReason,
+  restartManager,
   runSelfUpdate,
   UpdateChecker,
 } from './lib/self-update.js';
@@ -191,6 +192,11 @@ Signals:
   SIGUSR1         self-update: install the latest npm package and re-exec its
                   global binary. Git checkout update is fallback-only when npm
                   is unavailable.
+  SIGUSR2         unconditional restart: re-exec the running binary in place
+                  (no version check, no npm install/build). Use this to pick
+                  up on-disk config changes that are only read at startup
+                  (e.g. --runtime-profile), where self-update would no-op
+                  because the package version hasn't changed.
 `);
 }
 
@@ -1284,6 +1290,21 @@ async function runRuntime(
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);
+    }
+  });
+
+  // SIGUSR2 → unconditional restart (ticket ad5a81da). runSelfUpdate/SIGUSR1
+  // only re-execs when the npm registry has a newer version, so it silently
+  // no-ops for config-only changes (e.g. editing the on-disk --runtime-profile
+  // JSON, which main.ts only reads once at startup — see flags.runtimeProfile
+  // above). restartManager() shares self-update's in-flight mutex but skips
+  // the version/provenance check entirely, so it always re-execs in place.
+  process.on('SIGUSR2', async () => {
+    try {
+      const result = await restartManager({ log });
+      log(`Restart: ${result.summary}`);
+    } catch (err: any) {
+      log(`Restart failed: ${err?.stack || err?.message || err}`);
     }
   });
 
