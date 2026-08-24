@@ -12,6 +12,7 @@ import { SecuritySchedule } from '../dist/entities/SecuritySchedule.js';
 import { SecurityScheduleService } from '../dist/modules/security/security-schedule.service.js';
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 describe('Security Schedule board-scope cleanup', () => {
   let dataSource;
@@ -26,7 +27,7 @@ describe('Security Schedule board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(SecuritySchedule);
-    service = new SecurityScheduleService(scheduleRepo, {}, {}, noopLog, {});
+    service = new SecurityScheduleService(scheduleRepo, {}, {}, noopLog, {}, noQuiesce);
   });
 
   after(async () => {

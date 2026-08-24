@@ -11,6 +11,7 @@ import { QaSchedule } from '../dist/entities/QaSchedule.js';
 import { QaScheduleService } from '../dist/modules/qa/qa-schedule.service.js';
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 describe('QA Schedule board-scope cleanup', () => {
   let dataSource;
@@ -25,7 +26,7 @@ describe('QA Schedule board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(QaSchedule);
-    service = new QaScheduleService(scheduleRepo, {}, {}, noopLog, {});
+    service = new QaScheduleService(scheduleRepo, {}, {}, noopLog, {}, noQuiesce);
   });
 
   after(async () => {

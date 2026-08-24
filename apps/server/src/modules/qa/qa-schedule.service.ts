@@ -5,6 +5,7 @@ import { QaSchedule, QaScheduleScope } from '../../entities/QaSchedule';
 import { QaRunBatch } from '../../entities/QaRunBatch';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { QaRunService } from './qa-run.service';
 import { isValidCron, nextCronAfter } from './qa-cron';
@@ -90,6 +91,9 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     private readonly qaRunService: QaRunService,
     private readonly logService: LogService,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -228,6 +232,19 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
    * ids it dispatched a batch for this tick.
    */
   async runOnce(now: Date = new Date()): Promise<{ dispatched: string[]; skipped: string[] }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). Checked
+    // before touching ANY schedule row — including the tick/manual-run_now
+    // distinction the report on this gate flagged: `runOnce` is shared by both,
+    // and a quiesced destination must refuse both equally (the risk is
+    // "this destination dispatches to the shared fleet at all", not just the
+    // automatic path). `next_run_at` cursors are left untouched, so schedules
+    // that were due during the quiesce window fire on the next tick once an
+    // operator resumes the fleet — nothing is silently lost.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('QaScheduler', 'runOnce skipped (instance quiesced)');
+      return { dispatched: [], skipped: [] };
+    }
+
     const dispatched: string[] = [];
     const skipped: string[] = [];
 

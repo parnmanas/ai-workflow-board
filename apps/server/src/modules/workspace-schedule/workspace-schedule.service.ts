@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { isValidCron, nextCronAfter } from '../qa/qa-cron';
@@ -97,6 +98,9 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -235,6 +239,15 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
    * ids it dispatched a task for this tick.
    */
   async runOnce(now: Date = new Date()): Promise<{ dispatched: string[] }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
+    // QaScheduleService.runOnce's identical gate for the full rationale —
+    // shared by the setInterval tick AND the manual run_workspace_schedule_now
+    // tool, both refused equally while quiesced.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('WorkspaceScheduler', 'runOnce skipped (instance quiesced)');
+      return { dispatched: [] };
+    }
+
     const dispatched: string[] = [];
 
     // Self-heal: an enabled schedule with a null next_run_at (legacy row / cadence

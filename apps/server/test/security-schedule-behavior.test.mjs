@@ -28,6 +28,7 @@ const MIN = 60_000;
 const NOW = new Date('2026-06-25T12:00:00Z');
 
 const noopLog = { info() {}, warn() {}, error() {} };
+const noQuiesce = { isQuiesced: async () => false };
 
 // Stub schedule repo over a plain-object row array. Handles the two find shapes
 // runOnce uses: { enabled, next_run_at: IsNull() } and
@@ -128,7 +129,7 @@ function svcWith(rows, batches = []) {
   const scheduleRepo = makeScheduleRepo(rows);
   const batchRepo = makeBatchRepo(batches);
   const runService = makeRunService();
-  const svc = new SecurityScheduleService(scheduleRepo, batchRepo, runService, noopLog);
+  const svc = new SecurityScheduleService(scheduleRepo, batchRepo, runService, noopLog, {}, noQuiesce);
   return { svc, scheduleRepo, batchRepo, runService };
 }
 

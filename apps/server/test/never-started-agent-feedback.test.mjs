@@ -121,6 +121,7 @@ async function buildAutostart({ agentRows, instances, agentStatus, activity, roo
     roomMessaging,
     noopLog,
     metricsFake(),
+    { isQuiesced: async () => false },
   );
 }
 

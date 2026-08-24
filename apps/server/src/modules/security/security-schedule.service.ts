@@ -5,6 +5,7 @@ import { SecuritySchedule, SecurityScheduleScope, SecurityScheduleKind, normaliz
 import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { SecurityRunService, RefreshChecklistResult } from './security-run.service';
 // qa-cron is a generic, feature-agnostic 5-field cron evaluator (UTC). Reused
@@ -108,6 +109,9 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     private readonly runService: SecurityRunService,
     private readonly logService: LogService,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
+    // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
+    // shared-services.module.ts), cycle-free.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
   onModuleInit(): void {
@@ -260,6 +264,15 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
    * schedule ids it dispatched a batch for this tick.
    */
   async runOnce(now: Date = new Date()): Promise<{ dispatched: string[]; skipped: string[] }> {
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
+    // QaScheduleService.runOnce's identical gate for the full rationale —
+    // this is shared by the setInterval tick AND the manual run_security_
+    // schedule_now tool, and both must be refused equally while quiesced.
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('SecurityScheduler', 'runOnce skipped (instance quiesced)');
+      return { dispatched: [], skipped: [] };
+    }
+
     const dispatched: string[] = [];
     const skipped: string[] = [];
 

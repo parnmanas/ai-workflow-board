@@ -18,6 +18,7 @@ import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { Comment } from '../../entities/Comment';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
+import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { GitHubConnectorService, parseGitHubUrl } from '../../services/github-connector.service';
 import { AgentWorkloadService } from './agent-workload.service';
 import { AgentStatusService } from './agent-status.service';
@@ -213,6 +214,11 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // directly (WorkspaceRolesModule only imports TypeOrmModule, so this is
     // cycle-free — no forwardRef needed).
     private readonly ticketRoleAssignmentService: TicketRoleAssignmentService,
+    // ticket 0f638509 — instance-wide fleet quiesce (live pull import).
+    // @Global() (see shared-services.module.ts), so this needs no new module
+    // import even though AgentsModule has no direct relationship to that
+    // provider's home — same shape as InstanceRegistryService above.
+    private readonly instanceQuiesce: InstanceQuiesceService,
   ) {
     this._hardBudgetBaseline = hardBudgetDefaultsFromEnv();
   }
@@ -2397,6 +2403,43 @@ candidate's branch or move the ticket.
         }
         return '';
       }
+    }
+
+    // Instance-wide quiesce gate (ticket 0f638509 — live pull import). Set
+    // while/after a migration import so this destination never dispatches
+    // to the fleet until an operator explicitly resumes it — otherwise a
+    // freshly-imported server and its still-live source could both dispatch
+    // the same ticket to the same downstream agent fleet. Same chokepoint,
+    // same drop semantics as the board-pause gate directly below; checked
+    // first because it is instance-wide (no boardId needed to evaluate it).
+    if (await this.instanceQuiesce.isQuiesced()) {
+      this.logService.info('MCP', 'agent_trigger dropped (instance quiesced)', {
+        ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
+      });
+      try {
+        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+        await activityLogRepo.save(activityLogRepo.create({
+          entity_type: 'ticket',
+          entity_id: ticket.id,
+          ticket_id: ticket.id,
+          actor_id: 'system',
+          actor_name: 'TriggerLoopService',
+          action: 'agent_trigger_dropped_instance_quiesced',
+          new_value: `agent=${agentId}`,
+          role,
+          trigger_source: triggerSource,
+        }));
+      } catch (e) {
+        this.logService.warn('MCP', 'quiesced-drop audit write failed (drop still applied)', {
+          err: String(e), ticket_id: ticket.id,
+        });
+      }
+      if (triggerSource === 'comment_summary') {
+        throw Object.assign(new Error('The instance is quiesced'), {
+          status: 503, code: 'SUMMARY_DISPATCH_INSTANCE_QUIESCED',
+        });
+      }
+      return '';
     }
 
     // Board pause gate. _emitTrigger is the SINGLE chokepoint every dispatch
