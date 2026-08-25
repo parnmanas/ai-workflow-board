@@ -1510,6 +1510,7 @@ export class WorktreeManager {
       // 이름 스캔 결과가 아니라, 이번 실행에서 ticket 경로와 full UUID ref가 함께
       // 검증된 worktree의 브랜치만 삭제 경계 안에 둔다.
       const ownedBranches = new Set<string>();
+      const ownedTicketWorktrees = new Map<string, string>();
       await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
       const baseRef = `refs/remotes/origin/${baseBranch}`;
       const baseExists = await git(entry.repo, ['show-ref', '--verify', '--quiet', baseRef]);
@@ -1562,19 +1563,10 @@ export class WorktreeManager {
           ownedSharedSlots.set(w.branch, w.path);
           continue;
         }
-        const injectedRemoval = this.#terminalCleanupHooks.removeWorktree;
-        const allowRemoval = injectedRemoval
-          ? await Promise.resolve(injectedRemoval(entry.repo, w.path))
-          : true;
-        const removed = allowRemoval
-          ? await git(entry.repo, ['worktree', 'remove', w.path])
-          : { ok: false, stdout: '', stderr: '주입된 worktree 삭제 실패' };
-        if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
-          report.heldReasons.push(`worktree 삭제 실패: ${w.path}`);
-          blockedBranches.add(w.branch);
-          continue;
-        }
-        report.removedWorktrees++;
+        // 일반 티켓 worktree도 원격 ref가 로컬보다 전진했을 수 있다.
+        // 로컬·원격 ref의 병합 가능성을 모두 확정하기 전에는 경로를 제거하지
+        // 않아, 어느 한쪽이라도 보존 대상일 때 checkout과 ref를 함께 보존한다.
+        ownedTicketWorktrees.set(w.branch, w.path);
       }
 
       await this.prune(entry.repo);
@@ -1612,30 +1604,26 @@ export class WorktreeManager {
         }
       }
 
-      for (const [branch, worktreePath] of ownedSharedSlots) {
+      // 테스트 seam을 포함한 알려진 worktree 제거 불가 상태도 원격 ref를
+      // 건드리기 전에 확정한다. 실제 제거는 원격 lease 삭제 성공 뒤 수행한다.
+      const worktreeRemovalAllowed = new Map<string, boolean>();
+      for (const [branch, worktreePath] of ownedTicketWorktrees) {
         if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
-        // warm build 산출물과 slot 자체는 보존하되, 삭제 가능한 티켓
-        // 브랜치 ref를 checkout에서 놓기 위해 검증된 base tip에서 detach한다.
-        const detached = await git(worktreePath, ['switch', '--detach', baseRef]);
-        if (!detached.ok) {
-          report.heldReasons.push(`shared slot detach 실패: ${worktreePath} (${branch})`);
-          blockedBranches.add(branch);
-          continue;
-        }
-        sharedSlotReady = true;
-      }
-
-      for (const branch of localBranches) {
-        if (protectedBranches.has(branch)) continue;
-        if (blockedBranches.has(branch)) continue;
-        const deleted = await git(entry.repo, ['branch', '-d', branch]);
-        if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
-        else {
-          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+        const injectedRemoval = this.#terminalCleanupHooks.removeWorktree;
+        const allowed = injectedRemoval
+          ? await Promise.resolve(injectedRemoval(entry.repo, worktreePath))
+          : true;
+        worktreeRemovalAllowed.set(branch, allowed);
+        if (!allowed) {
+          report.heldReasons.push(`worktree 삭제 실패: ${worktreePath}`);
           blockedBranches.add(branch);
         }
       }
 
+      // 원격 ref는 checkout·로컬 ref보다 먼저 lease 조건부로 삭제한다.
+      // 검증 직후 원격이 전진하면 이 단계에서 중단되므로 shared slot의
+      // checkout과 active lease, 일반 티켓 worktree와 로컬 ref가 모두 유지된다.
+      const remotelyDeleted = new Set<string>();
       for (const branch of remoteBranches) {
         if (protectedBranches.has(branch)) continue;
         if (blockedBranches.has(branch)) continue;
@@ -1649,11 +1637,51 @@ export class WorktreeManager {
           `:refs/heads/${branch}`,
         ]);
         if (deleted.ok || /remote ref does not exist|unable to delete/i.test(deleted.stderr)) {
-          report.removedRemoteBranches.push(branch);
+          remotelyDeleted.add(branch);
         } else {
           report.heldReasons.push(`원격 브랜치 삭제 실패: origin/${branch}`);
           blockedBranches.add(branch);
         }
+      }
+
+      for (const [branch, worktreePath] of ownedSharedSlots) {
+        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+        // warm build 산출물과 slot 자체는 보존하되, 원격 삭제까지 성공한 뒤
+        // 검증된 base tip에서 detach해 원격 경쟁 실패 시 checkout을 보존한다.
+        const detached = await git(worktreePath, ['switch', '--detach', baseRef]);
+        if (!detached.ok) {
+          report.heldReasons.push(`shared slot detach 실패: ${worktreePath} (${branch})`);
+          blockedBranches.add(branch);
+          continue;
+        }
+        sharedSlotReady = true;
+      }
+
+      for (const [branch, worktreePath] of ownedTicketWorktrees) {
+        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+        const removed = worktreeRemovalAllowed.get(branch) !== false
+          ? await git(entry.repo, ['worktree', 'remove', worktreePath])
+          : { ok: false, stdout: '', stderr: '주입된 worktree 삭제 실패' };
+        if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
+          report.heldReasons.push(`worktree 삭제 실패: ${worktreePath}`);
+          blockedBranches.add(branch);
+          continue;
+        }
+        report.removedWorktrees++;
+      }
+
+      for (const branch of localBranches) {
+        if (protectedBranches.has(branch)) continue;
+        if (blockedBranches.has(branch)) continue;
+        const deleted = await git(entry.repo, ['branch', '-d', branch]);
+        if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
+        else {
+          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+          blockedBranches.add(branch);
+        }
+      }
+      for (const branch of remotelyDeleted) {
+        if (!blockedBranches.has(branch)) report.removedRemoteBranches.push(branch);
       }
 
       // 이름은 삭제 권한으로 사용하지 않는다. 다만 full UUID 고아 ref와
