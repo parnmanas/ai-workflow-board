@@ -1510,8 +1510,15 @@ export class WorktreeManager {
       await this.prune(entry.repo);
       const worktrees = await this.listWorktrees(entry.repo);
       const registry = await this.#readRegistry(entry.worktreesRoot);
+      // Windows의 `git worktree list`는 8.3 단축 경로(RUNNER~1)를 긴 경로로
+      // 되돌려 출력할 수 있다. Node가 만든 관리 루트와 문자열만 비교하면 같은
+      // 디렉터리도 소유권 밖으로 오판하므로, 존재하는 양쪽 경로를 native
+      // realpath로 맞춘 뒤 경계를 검사한다. 해석 실패 시에는 원문 비교로
+      // fail-closed 동작을 유지한다.
+      const comparableWorktreesRoot = await fsp.realpath(entry.worktreesRoot).catch(() => entry.worktreesRoot);
       for (const w of worktrees) {
-        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        const comparableWorktreePath = await fsp.realpath(w.path).catch(() => w.path);
+        if (!isUnder(comparableWorktreePath, comparableWorktreesRoot)) continue;
         const seg = lastSegment(w.path);
         const sharedLease = isSharedSlotSeg(seg) ? registry.slots[seg] : undefined;
         const isOwnedSharedSlot = sharedLease?.active === true && sharedLease.ticketId === opts.ticketId;
