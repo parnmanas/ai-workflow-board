@@ -44,7 +44,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene, createAgent, createTicket, createApiKey,
+  setupKanbanScene, createAgent, createTicket, createApiKey, runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -291,11 +291,11 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     for (let i = 0; i < 3; i += 1) {
       tids.push(await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system'));
     }
-    const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'suppression-manager', type: 'manager' });
-    const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'mgr-suppression' });
+    const managerKey = runtimeHostKeyForAgent(agent.id);
+    assert.ok(managerKey, 'fixture agent의 실제 런타임 호스트 키가 있어야 한다');
     const post = (bodyObj) => fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',
-      headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+      headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
       body: JSON.stringify(bodyObj),
     });
     const before = await intents.findOpenForTicketRole(ticket.id, 'assignee');
@@ -303,7 +303,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     for (let i = 0; i < 3; i += 1) {
       const resp = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
         method: 'POST',
-        headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+        headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ticket_id: ticket.id, role: 'assignee', trigger_id: tids[i],
           outcome: 'suppressed', reason: 'inflight_dispatch',
@@ -361,8 +361,8 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
   await t.test('10c: SSE 수신 즉시 도착한 suppressed ACK도 상관 행을 찾는다', async () => {
     const ticket = await mkTicket('immediate suppression correlation');
-    const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'immediate-suppression-manager', type: 'manager' });
-    const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'mgr-immediate-suppression' });
+    const managerKey = runtimeHostKeyForAgent(agent.id);
+    assert.ok(managerKey, 'fixture agent의 실제 런타임 호스트 키가 있어야 한다');
 
     let resolveAck;
     let rejectAck;
@@ -374,7 +374,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       if (event.ticket_id !== ticket.id) return;
       void fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
         method: 'POST',
-        headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+        headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ticket_id: ticket.id,
           role: 'assignee',

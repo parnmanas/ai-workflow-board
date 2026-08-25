@@ -3212,18 +3212,6 @@ candidate's branch or move the ticket.
 
     const forceRespawn = opts?.forceRespawn === true;
 
-    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 위쪽 얼리 드롭
-    // (_checkPendingUserGate 최초 호출) 이후 여기까지 오는 동안 agent/role
-    // 조회, base-repo/column-prompt/harness/effort/environment 해석,
-    // board-lessons 주입, chain-target 조회 등 십여 개의 await가 더 지나갔다
-    // — 그 창 안에서 걸린 pend_ticket은 얼리 드롭에는 보이지 않는다. 동일
-    // 헬퍼로(판정 로직 중복 없이) 실제 emit 바로 앞에서 한 번 더 신선 조회한다.
-    // 이 호출과 아래 emit 사이에는 다른 await가 없다 — 그것이 이 재확인의
-    // 존재 이유다.
-    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
-      return '';
-    }
-
     // hard-budget의 원시 집합이자 매니저 억제 ACK의 상관 근거를 SSE보다
     // 먼저 커밋한다. EventEmitter 리스너는 동기적으로 실행을 시작하므로
     // emit 뒤에 저장하면 즉시 도착한 ACK가 행을 못 찾아 영구 유실될 수 있다.
@@ -3267,6 +3255,13 @@ candidate's branch or move the ticket.
         status: 503,
         code: 'TRIGGER_CORRELATION_PERSIST_FAILED',
       });
+    }
+
+    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 상관 행 저장까지
+    // 마친 뒤 실제 emit 바로 앞에서 신선한 티켓 상태를 다시 읽는다. 이 호출과
+    // 아래 emit 사이에는 다른 await가 없어 pending 전환을 지나쳐 발행하지 않는다.
+    if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      return '';
     }
 
     activityEvents.emit('agent_trigger', {
