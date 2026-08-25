@@ -476,7 +476,7 @@ async function makeManagedTerminalRepo(ticketId) {
   git(base, ['config', 'user.email', 'test@awb.local']);
   git(base, ['config', 'user.name', 'AWB Test']);
   await fsp.mkdir(wtRoot, { recursive: true });
-  const branch = `ticket/${ticketId.slice(0, 8)}-cleanup-test`;
+  const branch = `ticket/${ticketId}-cleanup-test`;
   git(base, ['worktree', 'add', '-q', '-b', branch, wt, 'origin/main']);
   git(wt, ['push', '-q', '-u', 'origin', branch]);
   return { ...fixture, workingDir, base, wt, branch };
@@ -547,6 +547,66 @@ test('cleanupTerminalTicketGit: dirty·미병합·다른 티켓 브랜치를 보
     assert.ok(unmerged.heldReasons.some((reason) => reason.includes('미병합/고유 커밋')));
     assert.ok(existsSync(fixture.wt));
     assert.equal(git(fixture.base, ['branch', '--list', otherBranch]), otherBranch);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: worktree 제거 실패 시 로컬과 origin 브랜치를 모두 보존한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const originalPath = process.env.PATH;
+  try {
+    const guardDir = await fsp.mkdtemp(join(tmpdir(), 'awb-git-remove-guard-'));
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const guardGit = join(guardDir, 'git');
+    await fsp.writeFile(
+      guardGit,
+      `#!/bin/sh\nif [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then echo "의도한 제거 실패" >&2; exit 1; fi\nexec "${realGit}" "$@"\n`,
+    );
+    await fsp.chmod(guardGit, 0o755);
+    process.env.PATH = `${guardDir}:${originalPath}`;
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('worktree 삭제 실패:')));
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+  } finally {
+    process.env.PATH = originalPath;
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 검증된 worktree 소유권 밖의 고아·동일 8자 prefix·불일치 ref를 보존한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const collisionTicket = 'aaaaaaaa-9999-8888-7777-666666666666';
+  const collisionBranch = `ticket/${collisionTicket}-collision`;
+  const orphanBranch = `ticket/${TICKET_A}-orphan`;
+  const legacyShortBranch = `ticket/${TICKET_A.slice(0, 8)}-legacy`;
+  try {
+    for (const branch of [collisionBranch, orphanBranch, legacyShortBranch]) {
+      git(fixture.base, ['branch', branch, 'origin/main']);
+      git(fixture.base, ['push', '-q', 'origin', branch]);
+    }
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch]);
+    assert.deepEqual(result.removedRemoteBranches, [fixture.branch]);
+    for (const branch of [collisionBranch, orphanBranch, legacyShortBranch]) {
+      assert.equal(git(fixture.base, ['branch', '--list', branch]), branch);
+      assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', branch]).length > 0, true);
+    }
   } finally {
     await fixture.cleanup();
   }

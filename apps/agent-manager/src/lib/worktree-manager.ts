@@ -1482,15 +1482,20 @@ export class WorktreeManager {
     };
     if (!opts.baseWorkingDir || !opts.ticketId) return report;
     const ticket8 = String(opts.ticketId).slice(0, 8);
-    const prefixes = [`ticket/${ticket8}-`, `ticket/${opts.ticketId}-`];
+    // 8자 slug는 worktree 위치를 찾는 힌트일 뿐 브랜치 소유권 증명이 아니다.
+    // UUID 전체가 들어간 ref만 현재 티켓의 브랜치로 인정해 prefix 충돌을 막는다.
+    const branchPrefix = `ticket/${opts.ticketId}-`;
     const ownsBranch = (branch: string | null): branch is string =>
-      !!branch && prefixes.some((prefix) => branch.startsWith(prefix));
+      !!branch && branch.startsWith(branchPrefix);
     const baseBranch = (opts.baseBranch || 'main').trim();
     const protectedBranches = new Set(['main', 'production.private', 'codex', baseBranch]);
     const managed = await this.#managedRepos(opts.baseWorkingDir, opts.repositoryResourceId);
 
     for (const entry of managed) {
       const blockedBranches = new Set<string>();
+      // 이름 스캔 결과가 아니라, 이번 실행에서 ticket 경로와 full UUID ref가 함께
+      // 검증된 worktree의 브랜치만 삭제 경계 안에 둔다.
+      const ownedBranches = new Set<string>();
       await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
       const baseRef = `refs/remotes/origin/${baseBranch}`;
       const baseExists = await git(entry.repo, ['show-ref', '--verify', '--quiet', baseRef]);
@@ -1509,6 +1514,7 @@ export class WorktreeManager {
           report.heldReasons.push(`worktree 소유권 불일치: ${w.path} (${w.branch ?? 'detached'})`);
           continue;
         }
+        ownedBranches.add(w.branch);
         const dirty = await git(w.path, ['status', '--porcelain', '--untracked-files=normal']);
         if (!dirty.ok || dirty.stdout.trim()) {
           report.heldReasons.push(`dirty worktree: ${w.path} (${w.branch})`);
@@ -1524,6 +1530,7 @@ export class WorktreeManager {
         const removed = await git(entry.repo, ['worktree', 'remove', w.path]);
         if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
           report.heldReasons.push(`worktree 삭제 실패: ${w.path}`);
+          blockedBranches.add(w.branch);
           continue;
         }
         report.removedWorktrees++;
@@ -1532,9 +1539,9 @@ export class WorktreeManager {
       await this.prune(entry.repo);
       const localRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/ticket/']);
       const remoteRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/ticket/']);
-      const localBranches = localRefs.stdout.split(/\r?\n/).filter(ownsBranch);
+      const localBranches = localRefs.stdout.split(/\r?\n/).filter((branch) => ownedBranches.has(branch));
       const remoteBranches = remoteRefs.stdout.split(/\r?\n/)
-        .map((ref) => ref.replace(/^origin\//, '')).filter(ownsBranch);
+        .map((ref) => ref.replace(/^origin\//, '')).filter((branch) => ownedBranches.has(branch));
 
       for (const branch of localBranches) {
         if (protectedBranches.has(branch)) continue;
@@ -1546,7 +1553,10 @@ export class WorktreeManager {
         }
         const deleted = await git(entry.repo, ['branch', '-d', branch]);
         if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
-        else report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+        else {
+          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+          blockedBranches.add(branch);
+        }
       }
 
       for (const branch of remoteBranches) {
@@ -1570,8 +1580,9 @@ export class WorktreeManager {
       const remainingLocal = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/ticket/']);
       const remainingRemote = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/ticket/']);
       report.remainingBranches.push(
-        ...remainingLocal.stdout.split(/\r?\n/).filter(ownsBranch),
-        ...remainingRemote.stdout.split(/\r?\n/).filter(ownsBranch),
+        ...remainingLocal.stdout.split(/\r?\n/).filter((branch) => ownedBranches.has(branch)),
+        ...remainingRemote.stdout.split(/\r?\n/)
+          .filter((ref) => ownedBranches.has(ref.replace(/^origin\//, ''))),
       );
       await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, opts.ticketId).catch(() => {});
     }
