@@ -150,6 +150,22 @@ test('composeChatRoomPrompt ordinary chat uses capability-first operational poli
   assert.ok(!p.includes('This is an ACTION run'), 'Action framing never leaks into ordinary chat');
 });
 
+test('ordinary chat uses tickets selectively and handles simple or boardless work directly', () => {
+  for (const usesNativeMcp of [true, false]) {
+    const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
+    assert.ok(p.includes('an AWB ticket is optional, not the default for every request'));
+    assert.ok(p.includes('suitable existing board'));
+    assert.ok(p.includes('If no suitable board exists'));
+    assert.ok(p.includes('do NOT create a board or ticket merely to process the request'));
+    assert.ok(p.includes('environment setup, configuration, quick fixes'));
+    assert.ok(p.includes('perform the requested work now'));
+    assert.ok(
+      !p.includes('For non-operational development work, create an AWB ticket'),
+      'the old unconditional ticket rule must not return',
+    );
+  }
+});
+
 test('non-native chat routes missing capability to manager fallback, never the user', () => {
   const p = composeChatRoomPrompt(ROOM, [], { ...MSG, content: 'Deploy AWB' }, undefined, false);
   assert.ok(p.includes('agent-manager fallback can create/reuse the capability ticket'));
