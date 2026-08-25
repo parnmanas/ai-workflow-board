@@ -11,8 +11,9 @@
 // 저장되어 화면 귀속은 바뀌지 않는다.
 //
 // 리뷰 라운드1 지적1: 값 자체가 아니라 발신자를 검증한다 — auto_notice 는
-// 발신 Agent 가 Agent.type==='manager' (agent-manager 가 이 알림들을 남길 때
-// 항상 인증하는 페어링 전용 신원)일 때만 존중되고, 그 외 caller 의
+// 인증 세션의 Agent 가 Agent.type==='manager'이고 저장 author와 일치할 때만
+// 존중된다(agent-manager 가 이 알림들을 남길 때 항상 인증하는 페어링 전용
+// 신원). 그 외 caller 의
 // auto_notice 는 조용히 무시되어(에러 아님) 평범한 코멘트로 저장된다 —
 // 임의의 agent 가 자기선언만으로 자신의 코멘트를 트리거 경로에서 숨길 수
 // 없다는 것을 아래 거부/대조 테스트들로 증명한다.
@@ -43,6 +44,7 @@ const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { registerCommentTools } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'tools', 'comment-tools.js'));
+const { sessionStore } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'internal', 'session-store.js'));
 
 const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
@@ -85,6 +87,13 @@ async function makeRegularAgent(name = 'Assignee', type = 'claude') {
 function parse(res) {
   return JSON.parse(res.content[0].text);
 }
+function authenticatedExtra(agent) {
+  const sessionId = `auto-notice-${agent.id}-${Math.random()}`;
+  sessionStore.register(sessionId, { close: async () => {} }, {}, {
+    agentId: agent.id, agentName: agent.name, workspaceId: 'w1', source: 'db',
+  });
+  return { sessionId };
+}
 async function lastActivityFor(commentId) {
   const rows = await activityRepo.find({
     where: { entity_type: 'comment', entity_id: commentId },
@@ -108,7 +117,7 @@ test('auto_notice:true from a manager-tier agent (Agent.type=manager) stamps act
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 — 새 트리거를 무시했습니다.',
     author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true },
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   const log = await lastActivityFor(comment.id);
   assert.equal(log.action, 'created');
@@ -126,7 +135,7 @@ test('auto_notice:true does not change the saved comment\'s own author attributi
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 — 새 트리거를 무시했습니다.',
     author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true },
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   assert.equal(comment.author_id, manager.id, 'the comment row itself still attributes to the real caller');
   assert.equal(comment.author, 'Manager');
@@ -142,7 +151,7 @@ test('without auto_notice, the activity-log actor_id stays the real caller (base
 
   const comment = parse(await addComment({
     ticket_id: t.id, content: 'ordinary note', author_type: 'agent', author_id: manager.id, author: 'Manager',
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   const log = await lastActivityFor(comment.id);
   assert.equal(log.actor_id, manager.id, 'omitting auto_notice must not change pre-existing attribution behavior');
@@ -157,7 +166,7 @@ test('auto_notice:false (explicit) behaves identically to omitting it', async ()
   const comment = parse(await addComment({
     ticket_id: t.id, content: 'ordinary note', author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: false },
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   const log = await lastActivityFor(comment.id);
   assert.equal(log.actor_id, manager.id);
@@ -173,12 +182,12 @@ test('auto_notice combined with dedupe_key: both the first insert and the folded
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 (attempt 1)',
     author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true, dedupe_key: 'dispatch_suppress:inflight:t1:assignee:a1' },
-  }, {}));
+  }, authenticatedExtra(manager)));
   const second = parse(await addComment({
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 (attempt 2)',
     author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true, dedupe_key: 'dispatch_suppress:inflight:t1:assignee:a1' },
-  }, {}));
+  }, authenticatedExtra(manager)));
   assert.equal(second.id, first.id, 'still folds into one row — auto_notice does not disturb the dedupe path');
   assert.equal(second.repeat_count, 2);
 
@@ -202,14 +211,14 @@ test('an unrelated comment interleaved between two auto_notice occurrences: the 
   const a = parse(await addComment({
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 (a)', author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true, dedupe_key: 'k1' },
-  }, {}));
+  }, authenticatedExtra(manager)));
   await addComment({
     ticket_id: t.id, content: 'human reply in between', author_type: 'user', author_id: 'u1', author: 'User',
   }, {});
   const c = parse(await addComment({
     ticket_id: t.id, content: '⚠️ 중복 dispatch 억제 (c)', author_type: 'agent', author_id: manager.id, author: 'Manager',
     metadata: { auto_notice: true, dedupe_key: 'k1' },
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   assert.notEqual(c.id, a.id, 'the intervening reply breaks the dedupe chain — this is the exact busy-ticket scenario the ticket reproduces');
   const log = await lastActivityFor(c.id);
@@ -293,9 +302,27 @@ test('a manager-tier agent posting WITHOUT auto_notice still logs its real actor
   const comment = parse(await addComment({
     ticket_id: t.id, content: 'a substantive manager-authored comment, not a notice',
     author_type: 'agent', author_id: manager.id, author: 'Manager',
-  }, {}));
+  }, authenticatedExtra(manager)));
 
   const log = await lastActivityFor(comment.id);
   assert.equal(log.actor_id, manager.id,
     'being manager-tier is necessary but not sufficient — the caller must ALSO opt in via auto_notice:true');
+});
+
+test('일반 에이전트 인증 세션이 Manager author_id를 주입해도 auto_notice 권한을 얻지 못한다', async () => {
+  const handlers = registerTools();
+  const addComment = handlers.get('add_comment');
+  const t = await makeTicket();
+  const manager = await makeManagerAgent('Forged Manager');
+  const regular = await makeRegularAgent('Authenticated Assignee');
+
+  const comment = parse(await addComment({
+    ticket_id: t.id, content: '위조한 자동 알림',
+    author_type: 'agent', author_id: manager.id, author: 'Forged Manager',
+    metadata: { auto_notice: true },
+  }, authenticatedExtra(regular)));
+
+  const log = await lastActivityFor(comment.id);
+  assert.equal(log.actor_id, manager.id,
+    '요청 author가 manager여도 인증 호출자가 다르면 system actor로 바뀌지 않아야 한다');
 });
