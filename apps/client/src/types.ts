@@ -1446,6 +1446,7 @@ export interface RuntimeProfileConfig {
   protocol: 'anthropic-compatible' | 'openai-compatible';
   base_url: string;
   model: string;
+  omit_effort?: boolean;
   claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;

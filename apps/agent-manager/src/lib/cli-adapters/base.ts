@@ -65,6 +65,8 @@ export interface RuntimeProfileSpec {
   protocol: 'anthropic-compatible' | 'openai-compatible';
   base_url: string;
   model: string;
+  /** Keep the Claude CLI/backend default by omitting `--effort`, even when the ticket preset has one. */
+  omit_effort?: boolean;
   claude_executable?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -274,15 +276,14 @@ export function selectEffortSlice(
 /**
  * 운영 검증된 claude-with-vllm.sh는 `--effort`를 주입하지 않는다. Claude
  * backend profile은 Claude CLI의 추론 단계 이름과 일치하지 않을 수 있는
- * OpenAI-compatible 백엔드를 가리키므로, profile 세션에서는 보드 preset의
- * Claude 전용 `--effort`를 전달하지 않는다. profile 없는 일반 Claude 경로는
- * 기존 preset 값을 그대로 유지한다.
+ * OpenAI-compatible 백엔드를 가리킬 수 있다. 프로필에서 `omit_effort`를
+ * 켠 경우에만 보드 preset의 Claude 전용 `--effort`를 전달하지 않는다.
  */
 export function resolveClaudeEffortFlag(
   slice: { effort?: string } | null | undefined,
   claudeRuntimeProfile: RuntimeProfileSpec | null | undefined,
 ): string | null {
-  return claudeRuntimeProfile ? null : (slice?.effort ?? null);
+  return claudeRuntimeProfile?.omit_effort ? null : (slice?.effort ?? null);
 }
 
 /** One-line summary of an applied harness for spawn-site logs — the

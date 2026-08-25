@@ -7,7 +7,7 @@ import { tokens } from '../../tokens';
 
 const empty = (): ClaudeBackendProfile => ({
   id: '', name: '', kind: 'claude-backend', protocol: 'anthropic-compatible',
-  base_url: '', model: '', credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN',
+  base_url: '', model: '', omit_effort: false, credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN',
 });
 
 export default function ClaudeBackendProfilesManager() {
@@ -101,6 +101,11 @@ export default function ClaudeBackendProfilesManager() {
             <input type="checkbox" checked={Boolean(editing.credential_required)}
               onChange={e => setEditing({ ...editing, credential_required: e.target.checked })} />
             Credential required
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={Boolean(editing.omit_effort)}
+              onChange={e => setEditing({ ...editing, omit_effort: e.target.checked })} />
+            Do not set effort
           </label>
         </div>
         <label style={{ display: 'block', marginTop: 12, fontSize: 13 }}>Adapter config (JSON)

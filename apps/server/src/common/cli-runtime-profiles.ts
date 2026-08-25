@@ -47,6 +47,7 @@ export const ClaudeBackendProfileSchema = z.object({
   protocol: z.enum(['anthropic-compatible', 'openai-compatible']),
   base_url: z.string().url(),
   model: z.string().min(1),
+  omit_effort: z.boolean().default(false),
   claude_executable: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   env: PublicEnvSchema,
