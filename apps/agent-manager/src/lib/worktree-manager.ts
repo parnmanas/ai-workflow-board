@@ -1493,6 +1493,9 @@ export class WorktreeManager {
 
     for (const entry of managed) {
       const blockedBranches = new Set<string>();
+      const reportOnlyBranches = new Set<string>();
+      let sharedSlotOwned = false;
+      let sharedSlotReady = false;
       // 이름 스캔 결과가 아니라, 이번 실행에서 ticket 경로와 full UUID ref가 함께
       // 검증된 worktree의 브랜치만 삭제 경계 안에 둔다.
       const ownedBranches = new Set<string>();
@@ -1506,12 +1509,18 @@ export class WorktreeManager {
 
       await this.prune(entry.repo);
       const worktrees = await this.listWorktrees(entry.repo);
+      const registry = await this.#readRegistry(entry.worktreesRoot);
       for (const w of worktrees) {
         if (!isUnder(w.path, entry.worktreesRoot)) continue;
         const seg = lastSegment(w.path);
-        if (isSharedSlotSeg(seg) || (seg !== ticket8 && !seg.startsWith(`${ticket8}-`))) continue;
+        const sharedLease = isSharedSlotSeg(seg) ? registry.slots[seg] : undefined;
+        const isOwnedSharedSlot = sharedLease?.active === true && sharedLease.ticketId === opts.ticketId;
+        if (isSharedSlotSeg(seg) && !isOwnedSharedSlot) continue;
+        if (!isSharedSlotSeg(seg) && seg !== ticket8 && !seg.startsWith(`${ticket8}-`)) continue;
+        if (isOwnedSharedSlot) sharedSlotOwned = true;
         if (!ownsBranch(w.branch) || protectedBranches.has(w.branch)) {
           report.heldReasons.push(`worktree 소유권 불일치: ${w.path} (${w.branch ?? 'detached'})`);
+          if (w.branch) reportOnlyBranches.add(w.branch);
           continue;
         }
         ownedBranches.add(w.branch);
@@ -1527,6 +1536,18 @@ export class WorktreeManager {
           blockedBranches.add(w.branch);
           continue;
         }
+        if (isOwnedSharedSlot) {
+          // warm build 산출물과 slot 자체는 보존하되, checkout 중인 티켓
+          // 브랜치 ref를 지울 수 있도록 검증된 base tip에서 detach한다.
+          const detached = await git(w.path, ['switch', '--detach', baseRef]);
+          if (!detached.ok) {
+            report.heldReasons.push(`shared slot detach 실패: ${w.path} (${w.branch})`);
+            blockedBranches.add(w.branch);
+            continue;
+          }
+          sharedSlotReady = true;
+          continue;
+        }
         const removed = await git(entry.repo, ['worktree', 'remove', w.path]);
         if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
           report.heldReasons.push(`worktree 삭제 실패: ${w.path}`);
@@ -1539,6 +1560,8 @@ export class WorktreeManager {
       await this.prune(entry.repo);
       const localRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/ticket/']);
       const remoteRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/ticket/']);
+      const localRefNames = localRefs.stdout.split(/\r?\n/).filter(Boolean);
+      const remoteRefNames = remoteRefs.stdout.split(/\r?\n/).filter(Boolean);
       const localBranches = localRefs.stdout.split(/\r?\n/).filter((branch) => ownedBranches.has(branch));
       const remoteBranches = remoteRefs.stdout.split(/\r?\n/)
         .map((ref) => ref.replace(/^origin\//, '')).filter((branch) => ownedBranches.has(branch));
@@ -1573,7 +1596,23 @@ export class WorktreeManager {
           report.removedRemoteBranches.push(branch);
         } else {
           report.heldReasons.push(`원격 브랜치 삭제 실패: origin/${branch}`);
+          blockedBranches.add(branch);
         }
+      }
+
+      // 이름은 삭제 권한으로 사용하지 않는다. 다만 full UUID 고아 ref와
+      // legacy 8자 ref는 티켓과 연관 가능하므로 보존 사실을 보고한다.
+      const isReportCandidate = (branch: string) =>
+        branch.startsWith(branchPrefix) || branch.startsWith(`ticket/${ticket8}-`);
+      for (const branch of localRefNames) {
+        if (!ownedBranches.has(branch) && isReportCandidate(branch)) reportOnlyBranches.add(branch);
+      }
+      for (const ref of remoteRefNames) {
+        const branch = ref.replace(/^origin\//, '');
+        if (!ownedBranches.has(branch) && isReportCandidate(branch)) reportOnlyBranches.add(ref);
+      }
+      for (const branch of reportOnlyBranches) {
+        report.heldReasons.push(`소유권 미확인 브랜치 보존: ${branch}`);
       }
 
       await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
@@ -1583,8 +1622,11 @@ export class WorktreeManager {
         ...remainingLocal.stdout.split(/\r?\n/).filter((branch) => ownedBranches.has(branch)),
         ...remainingRemote.stdout.split(/\r?\n/)
           .filter((ref) => ownedBranches.has(ref.replace(/^origin\//, ''))),
+        ...reportOnlyBranches,
       );
-      await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, opts.ticketId).catch(() => {});
+      if (sharedSlotOwned && sharedSlotReady && blockedBranches.size === 0) {
+        await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, opts.ticketId).catch(() => {});
+      }
     }
     report.heldReasons = [...new Set(report.heldReasons)];
     report.remainingBranches = [...new Set(report.remainingBranches)];

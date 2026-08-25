@@ -1347,7 +1347,7 @@ export class EventDispatcher {
         const cleanup = await this.#worktreeManager.cleanupTerminalTicketGit({
           baseWorkingDir: ctx.working_dir,
           ticketId,
-          baseBranch: ticket.base_repo?.default_branch || ticket.base_branch || 'main',
+          baseBranch: ticket.base_branch || ticket.base_repo?.default_branch || 'main',
           repositoryResourceId: ticket.base_repo?.id,
         });
         total += cleanup.removedWorktrees;

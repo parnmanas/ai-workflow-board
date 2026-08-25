@@ -607,6 +607,93 @@ test('cleanupTerminalTicketGit: 검증된 worktree 소유권 밖의 고아·동�
       assert.equal(git(fixture.base, ['branch', '--list', branch]), branch);
       assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', branch]).length > 0, true);
     }
+    for (const branch of [orphanBranch, legacyShortBranch]) {
+      assert.ok(result.remainingBranches.includes(branch));
+      assert.ok(result.remainingBranches.includes(`origin/${branch}`));
+      assert.ok(result.heldReasons.includes(`소유권 미확인 브랜치 보존: ${branch}`));
+    }
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('worktree 소유권 불일치:')) === false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 티켓 경로의 소유권 불일치 branch를 잔여 목록과 보류 사유로 보고한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const otherBranch = `ticket/${TICKET_B}-wrong-owner`;
+  try {
+    git(fixture.wt, ['switch', '-q', '-c', otherBranch, 'origin/main']);
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(result.heldReasons.some((reason) => reason.includes(`worktree 소유권 불일치:`)));
+    assert.ok(result.heldReasons.includes(`소유권 미확인 브랜치 보존: ${otherBranch}`));
+    assert.ok(result.remainingBranches.includes(otherBranch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), otherBranch);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+async function makeSharedTerminalRepo(ticketId) {
+  const fixture = await makeRepoWithRemote();
+  const workingDir = join(fixture.root, 'agent-home');
+  const wm = new WorktreeManager();
+  const resolved = await wm.resolveCwd({
+    baseWorkingDir: workingDir,
+    ticketId,
+    role: 'assignee',
+    mode: 'shared',
+    poolSize: 1,
+    bootstrapRepo: { resourceId: 'repo-resource', url: fixture.remote, branch: 'main' },
+  });
+  assert.equal(resolved.isWorktree, true);
+  const base = join(workingDir, '.awb', 'base', 'repo-resource');
+  const branch = `ticket/${ticketId}-shared-cleanup`;
+  git(resolved.cwd, ['switch', '-q', '-c', branch]);
+  git(resolved.cwd, ['push', '-q', '-u', 'origin', branch]);
+  return { ...fixture, workingDir, base, wt: resolved.cwd, branch };
+}
+
+test('cleanupTerminalTicketGit: shared slot은 보존하고 clean·merged 티켓 ref만 삭제한 뒤 lease를 해제한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.equal(result.removedWorktrees, 0);
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch]);
+    assert.deepEqual(result.removedRemoteBranches, [fixture.branch]);
+    assert.equal(existsSync(fixture.wt), true, 'shared slot 자체는 warm pool로 보존한다');
+    assert.equal(git(fixture.wt, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD');
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: dirty shared slot은 ref와 active lease를 함께 보존하고 사유를 보고한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    await fsp.writeFile(join(fixture.wt, 'dirty.txt'), '보존\n');
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('dirty worktree:')));
+    assert.ok(result.remainingBranches.includes(fixture.branch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, true);
   } finally {
     await fixture.cleanup();
   }
