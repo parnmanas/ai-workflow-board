@@ -147,7 +147,8 @@ export class OntologyLifecycleService {
    * 있다.
    */
   async runInitialBuild(graph: OntologyGraph): Promise<void> {
-    const repo = this.resolveOntologyDataSource().getRepository(OntologyGraph);
+    const dataSource = this.resolveOntologyDataSource();
+    const repo = dataSource.getRepository(OntologyGraph);
     try {
       // 리뷰 지적(d22b83b4, "Refresh Graph" 승인 블로커) — 이 메서드는
       // 원래 그래프당 최초 1회만 호출된다는 암묵 전제로 짜여 있었다.
@@ -156,30 +157,33 @@ export class OntologyLifecycleService {
       // 유니크 인덱스 충돌, (b) 유니크 제약이 없는 OntologyEdge/
       // OntologyReverseEdgeIndex의 조용한 중복 적재를 둘 다 막는다. 최초
       // 빌드에서는 지울 행이 없어 사실상 no-op.
-      await this.clearExistingGraphRows(graph.id);
-      const extractResult = await this.extractionService.extractRepo({
-        workspaceId: graph.workspace_id,
-        resourceId: graph.resource_id,
-        folderPath: graph.folder_path,
-        graphId: graph.id,
-      });
-      const resolveResult = await this.resolverService.resolveGraph({
-        graphId: graph.id,
-        workspaceId: graph.workspace_id,
-        commit: extractResult.commit,
-        extractionRunId: randomUUID(),
-      });
-      await repo.update({ id: graph.id }, {
-        status: 'ready',
-        indexed_at: new Date(),
-        commit: extractResult.commit,
-        progress: JSON.stringify({
-          files_discovered: extractResult.filesDiscovered,
-          files_failed_extraction: extractResult.filesFailedExtraction,
-          nodes_inserted: extractResult.nodesInserted,
-          edges_inserted: extractResult.edgesInserted + resolveResult.edgesInserted,
-        }),
-        error: '',
+      await dataSource.transaction(async (manager) => {
+        await this.clearExistingGraphRows(graph.id, manager);
+        const extractResult = await this.extractionService.extractRepo({
+          workspaceId: graph.workspace_id,
+          resourceId: graph.resource_id,
+          folderPath: graph.folder_path,
+          graphId: graph.id,
+          dataSource: manager,
+        });
+        const resolveResult = await this.resolverService.resolveGraph({
+          graphId: graph.id,
+          workspaceId: graph.workspace_id,
+          commit: extractResult.commit,
+          extractionRunId: randomUUID(),
+        }, manager);
+        await manager.getRepository(OntologyGraph).update({ id: graph.id }, {
+          status: 'ready',
+          indexed_at: new Date(),
+          commit: extractResult.commit,
+          progress: JSON.stringify({
+            files_discovered: extractResult.filesDiscovered,
+            files_failed_extraction: extractResult.filesFailedExtraction,
+            nodes_inserted: extractResult.nodesInserted,
+            edges_inserted: extractResult.edgesInserted + resolveResult.edgesInserted,
+          }),
+          error: '',
+        });
       });
     } catch (e) {
       await repo.update({ id: graph.id }, {
@@ -217,8 +221,7 @@ export class OntologyLifecycleService {
    *  단일 DELETE 문이 sql.js 이벤트 루프를 오래 막지 않게(같은 우려로
    *  insertChunked 자체가 청크+양보 계약을 지킨다, persist.ts 파일 헤더
    *  참고). */
-  private async clearExistingGraphRows(graphId: string): Promise<void> {
-    const ds = this.resolveOntologyDataSource();
+  private async clearExistingGraphRows(graphId: string, ds: Pick<DataSource, 'getRepository'> = this.resolveOntologyDataSource()): Promise<void> {
     const nodeRepo = ds.getRepository(OntologyNode);
     const edgeRepo = ds.getRepository(OntologyEdge);
     const reverseRepo = ds.getRepository(OntologyReverseEdgeIndex);

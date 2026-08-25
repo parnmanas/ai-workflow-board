@@ -6,7 +6,7 @@
 // 주입받아 쓸 수 있다.
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { AppOntologyDataSource } from '../../db';
 import { resolveCrossFileEdges, type ResolveCrossFileEdgesInput, type ResolveSummary } from './resolver/resolve';
 
@@ -26,7 +26,7 @@ export class OntologyResolverService {
     return AppOntologyDataSource ?? this.nestDataSource;
   }
 
-  async resolveGraph(input: ResolveCrossFileEdgesInput): Promise<ResolveSummary> {
-    return this.resolveCrossFileEdges(this.resolveOntologyDataSource(), input);
+  async resolveGraph(input: ResolveCrossFileEdgesInput, dataSource?: DataSource | EntityManager): Promise<ResolveSummary> {
+    return this.resolveCrossFileEdges(dataSource ?? this.resolveOntologyDataSource(), input);
   }
 }

@@ -8,7 +8,7 @@
 // 명시적 매크로태스크 양보 계약을 그대로 재사용한다(insertChunked/
 // yieldToEventLoop, persist.ts에서 import).
 import { randomUUID } from 'node:crypto';
-import { In, type DataSource } from 'typeorm';
+import { In, type DataSource, type EntityManager } from 'typeorm';
 import { OntologyEdge, type OntologyEdgeResolution } from '../../../entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from '../../../entities/OntologyReverseEdgeIndex';
 import { insertChunked, updateChunked, yieldToEventLoop } from '../persist';
@@ -112,7 +112,7 @@ function findContainingDef(fileDefs: DefNodeInfo[], line: number): DefNodeInfo |
  *  경로. graph_id 하나의 File/Def 노드 전체를 메모리 인덱스로 올린 뒤
  *  imports[]/refs[]/heritage[]를 캐스케이드로 해소하고, 클래스 계층에서
  *  OVERRIDES를 파생시켜 polymorphic CALLS 타겟을 dynamic으로 캡한다. */
-export async function resolveCrossFileEdges(dataSource: DataSource, input: ResolveCrossFileEdgesInput): Promise<ResolveSummary> {
+export async function resolveCrossFileEdges(dataSource: DataSource | EntityManager, input: ResolveCrossFileEdgesInput): Promise<ResolveSummary> {
   const startedAt = Date.now();
   const index = await buildGraphSymbolIndex(dataSource, input.graphId);
   const base = baseEdgeFields(input);

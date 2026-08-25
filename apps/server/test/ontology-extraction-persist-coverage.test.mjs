@@ -180,6 +180,43 @@ describe('DECORATES persist coverage — interceptor/pipe/cron/event_pattern (ti
   });
 });
 
+describe('canonical natural key 중복 제거', () => {
+  it('같은 파일 bundle과 decorator fact가 중복돼도 노드·엣지를 한 번만 만들고 재실행 ID가 안정적이다', async () => {
+    const graphId = 'persist-dedupe-graph';
+    const bundle = await extractFile(DECORATOR_COVERAGE_PATH, DECORATOR_COVERAGE_SRC, 'typescript');
+    bundle.fileHash = 'dedupe-hash';
+    const facts = extractDecoratorFacts(DECORATOR_COVERAGE_PATH, DECORATOR_COVERAGE_SRC, 'typescript');
+    const input = {
+      graphId,
+      workspaceId: 'persist-coverage-ws',
+      resourceId: 'persist-coverage-resource',
+      folderPath: '',
+      commit: 'persist-coverage-commit',
+      extractionRunId: 'persist-dedupe-run',
+      bundles: [bundle, bundle],
+      decoratorFactsByPath: new Map([[DECORATOR_COVERAGE_PATH, [...facts, ...facts]]]),
+    };
+
+    const summary = await persistFactBundles(AppOntologyDataSource, input);
+    const firstNodes = await nodeRepo.find({ where: { graph_id: graphId }, order: { symbol_id: 'ASC' } });
+    const firstEdges = await edgeRepo.find({ where: { graph_id: graphId }, order: { id: 'ASC' } });
+    assert.equal(summary.nodesInserted, firstNodes.length);
+    assert.equal(summary.edgesInserted, firstEdges.length);
+    assert.equal(new Set(firstNodes.map((row) => row.symbol_id)).size, firstNodes.length, '노드 natural key가 유일해야 한다');
+
+    const nodeIds = firstNodes.map((row) => row.id);
+    const edgeIds = firstEdges.map((row) => row.id);
+    await persistFactBundles(AppOntologyDataSource, { ...input, extractionRunId: 'persist-dedupe-run-2' });
+
+    const secondNodes = await nodeRepo.find({ where: { graph_id: graphId }, order: { symbol_id: 'ASC' } });
+    const secondEdges = await edgeRepo.find({ where: { graph_id: graphId }, order: { id: 'ASC' } });
+    assert.equal(secondNodes.length, firstNodes.length, '재시도는 노드 수를 늘리지 않아야 한다');
+    assert.equal(secondEdges.length, firstEdges.length, '재시도는 엣지 수를 늘리지 않아야 한다');
+    assert.deepEqual(secondNodes.map((row) => row.id), nodeIds, '같은 노드 natural key는 재실행에서도 같은 ID여야 한다');
+    assert.deepEqual(secondEdges.map((row) => row.id), edgeIds, '같은 엣지 natural key는 재실행에서도 같은 ID여야 한다');
+  });
+});
+
 describe('raw unresolved facts survive extraction -> persist (ticket e14ef1c9, 리뷰 지적 #3)', () => {
   it('the File node props carries the exact refs/imports/exports/heritage the extractor produced — a 3/7 resolver can read them back without re-parsing', async () => {
     const fileNode = await nodeRepo.findOne({ where: { type: 'File', path: RAW_FACTS_PATH, graph_id: 'persist-coverage-graph' } });

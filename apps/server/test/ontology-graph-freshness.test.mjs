@@ -106,6 +106,9 @@ before(async () => {
   const fakeResolver = { resolveGraph: async () => { throw new Error('not used in this suite'); } };
   const noopLogger = { info() {}, warn() {}, error() {} };
   lifecycleService = new OntologyLifecycleService(AppOntologyDataSource, fakeExtraction, fakeResolver, noopLogger);
+  // 이 스위트의 프로비저닝 검증은 백그라운드 빌드 자체가 대상이 아니다.
+  // sql.js 단일 연결에서 fire-and-forget 트랜잭션이 다음 테스트와 겹치지 않게 한다.
+  lifecycleService.kickOffInitialBuild = () => {};
 
   logs = [];
   const capturingLogger = {
@@ -353,6 +356,35 @@ describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리
     const finalGraph = await graphRepo.findOne({ where: { id: graph.id } });
     assert.equal(finalGraph.status, 'ready');
     assert.equal(finalGraph.commit, 'c2');
+  });
+
+  it('교체 도중 추출이 실패하면 트랜잭션이 기존 ready 스냅샷을 보존한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({
+      workspace_id: WORKSPACE_ID, resource_id: 'r-rollback', folder_path: '', status: 'ready', commit: 'stable-commit',
+    }));
+    const nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
+    const original = node('rollback-old', graph.id, 'sym:stable');
+    await nodeRepo.insert(original);
+
+    const failingExtraction = {
+      extractRepo: async ({ dataSource }) => {
+        await dataSource.getRepository(OntologyNode).insert(node('rollback-new', graph.id, 'sym:partial'));
+        throw new Error('의도한 추출 실패');
+      },
+    };
+    const svc = new OntologyLifecycleService(
+      AppOntologyDataSource,
+      failingExtraction,
+      { resolveGraph: async () => { throw new Error('호출되면 안 됨'); } },
+      { info() {}, warn() {}, error() {} },
+    );
+
+    await assert.rejects(() => svc.runInitialBuild(graph), /의도한 추출 실패/);
+    const rows = await nodeRepo.find({ where: { graph_id: graph.id } });
+    assert.deepEqual(rows.map((row) => row.symbol_id), ['sym:stable']);
+    const failedGraph = await graphRepo.findOne({ where: { id: graph.id } });
+    assert.equal(failedGraph.status, 'error');
+    assert.equal(failedGraph.commit, 'stable-commit', '마지막 ready 커밋 메타데이터도 보존해야 한다');
   });
 });
 
