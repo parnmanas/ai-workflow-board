@@ -191,14 +191,24 @@ export async function countWindowDispatchesBySource(
  * 표시용 코멘트는 한 hold-burst에 한 번만 발행되므로 카운팅 근거로 쓰지
  * 않는다. 매 억제 분기가 남기는 전용 activity의 고유 trigger id를 세어
  * 알림 throttle 및 outbox 재전송과 무관하게 원시 emit에서 정확히 차감한다.
+ * suppression 자체의 created_at으로 창을 자르면 늦게 도착한 ACK가 이전
+ * epoch의 emit 대신 새 epoch의 정상 dispatch를 차감할 수 있다. 따라서
+ * entity_id(억제된 trigger id)를 현재 창 안의 trigger_emitted.field_changed와
+ * 상관시킨 행만 센다.
  */
 export async function countTwinSuppressions(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
   const row = await dataSource.getRepository(ActivityLog).createQueryBuilder('a')
     .select('COUNT(DISTINCT a.entity_id)', 'count')
+    .innerJoin(ActivityLog, 'e', [
+      'e.ticket_id = a.ticket_id',
+      "e.action = 'trigger_emitted'",
+      'e.field_changed = a.entity_id',
+      'e.created_at >= :since',
+    ].join(' AND '))
     .where('a.ticket_id = :tid', { tid: ticketId })
     .andWhere("a.action = 'dispatch_twin_suppressed'")
-    .andWhere('a.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
-    .andWhere('a.created_at >= :since', { since })
+    .andWhere('e.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
+    .setParameters({ since, excluded: ['manual', 'comment_summary'] })
     .getRawOne<{ count: string | number }>();
   return Number(row?.count ?? 0);
 }

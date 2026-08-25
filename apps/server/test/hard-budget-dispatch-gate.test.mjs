@@ -98,6 +98,18 @@ test('trigger 상관 activity는 SSE보다 먼저 저장되고 저장 실패는 
     '상관 activity 저장 실패 시 SSE를 보내지 않는 fail-closed 오류 계약이 있어야 한다');
 });
 
+test('late pending 드롭은 선저장 trigger_emitted 상관 행을 제거한다', () => {
+  const src = code(SRC_PATH);
+  const lateGateIdx = src.lastIndexOf('await this._checkPendingUserGate(');
+  const emitIdx = src.indexOf(EMIT_MARKER);
+  assert.ok(lateGateIdx > -1 && lateGateIdx < emitIdx, 'late pending 재확인은 SSE 직전에 있어야 한다');
+  const lateGateBody = src.slice(lateGateIdx, emitIdx);
+  assert.match(lateGateBody, /await activityLogRepo\.delete\(triggerCorrelation\.id\)/,
+    '실제 SSE emit 없이 드롭할 때 선저장 trigger_emitted 행을 정확한 PK로 제거해야 한다');
+  assert.ok(lateGateBody.indexOf('activityLogRepo.delete') < lateGateBody.indexOf("return ''"),
+    '상관 행 제거를 마친 뒤에만 late-pending 드롭을 반환해야 한다');
+});
+
 // ── Token ceiling (ticket ef53fdf4) — shares _checkHardBudgetGate/its call
 // site with the dispatch ceiling above, so it inherits every ordering
 // guarantee already asserted (single call site, after pending gate, before

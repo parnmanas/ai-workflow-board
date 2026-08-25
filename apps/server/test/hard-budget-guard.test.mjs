@@ -193,6 +193,7 @@ test('countTwinSuppressions는 한 hold의 표시 알림 수와 무관하게 억
   const t = await makeTicket(null);
   const since = new Date(Date.now() - 1000);
   for (let i = 0; i < 4; i += 1) {
+    await recordTriggerEmitted(t.id, 'comment', `trigger-${i}`);
     await activityRepo.save(activityRepo.create({
       entity_type: 'ticket', entity_id: `trigger-${i}`, ticket_id: t.id,
       action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
@@ -215,6 +216,7 @@ test('countTwinSuppressions는 원시 dispatch 집합에서 제외한 source를 
   const t = await makeTicket(null);
   const since = new Date(Date.now() - 1000);
   for (const triggerSource of ['comment', 'manual', 'comment_summary']) {
+    await recordTriggerEmitted(t.id, triggerSource, `suppressed-${triggerSource}`);
     await activityRepo.save(activityRepo.create({
       entity_type: 'ticket', entity_id: `suppressed-${triggerSource}`, ticket_id: t.id,
       action: 'dispatch_twin_suppressed', trigger_source: triggerSource,
@@ -224,10 +226,11 @@ test('countTwinSuppressions는 원시 dispatch 집합에서 제외한 source를 
     'manual/comment_summary 억제는 정상 dispatch 차감에 포함하면 안 된다');
 });
 
-test('countTwinSuppressions는 윈도우 이전 activity와 다른 action을 제외한다', async () => {
+test('countTwinSuppressions는 윈도우 이전 emit과 다른 action을 제외한다', async () => {
   const t = await makeTicket(null);
+  await recordTriggerEmitted(t.id, 'comment', 'old-trigger');
   await activityRepo.save(activityRepo.create({
-    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    entity_type: 'ticket', entity_id: 'old-trigger', ticket_id: t.id,
     action: 'dispatch_twin_suppressed', field_changed: 'mention_seat',
   }));
   const since = new Date();
@@ -239,6 +242,25 @@ test('countTwinSuppressions는 윈도우 이전 activity와 다른 action을 제
 
   assert.equal(await countTwinSuppressions(ds, t.id, since), 0,
     '윈도우 이전 억제와 전용 action이 아닌 activity는 차감하면 안 된다');
+});
+
+test('countTwinSuppressions는 늦게 도착한 이전 epoch ACK를 새 창에서 차감하지 않는다', async () => {
+  const t = await makeTicket(null);
+  const emitted = await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    action: 'trigger_emitted', field_changed: 'previous-epoch-trigger',
+    trigger_source: 'comment', created_at: new Date('2026-08-24T09:59:59.000Z'),
+  }));
+  const since = new Date('2026-08-24T10:00:00.000Z');
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: 'previous-epoch-trigger', ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', trigger_source: 'comment',
+    created_at: new Date('2026-08-24T10:00:01.000Z'),
+  }));
+
+  assert.ok(emitted.created_at < since, '테스트 전제: 원본 emit은 현재 창 이전이어야 한다');
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 0,
+    '현재 창 밖 emit의 늦은 suppression ACK는 새 epoch dispatch를 차감하면 안 된다');
 });
 
 // ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────

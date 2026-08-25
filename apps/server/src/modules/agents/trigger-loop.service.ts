@@ -3222,8 +3222,9 @@ candidate's branch or move the ticket.
     const createdAtIso = ticket.created_at
       ? new Date(ticket.created_at).toISOString()
       : '';
+    let triggerCorrelation: ActivityLog;
     try {
-      await activityLogRepo.save(activityLogRepo.create({
+      triggerCorrelation = await activityLogRepo.save(activityLogRepo.create({
         entity_type: 'ticket',
         entity_id: ticket.id,
         ticket_id: ticket.id,
@@ -3261,6 +3262,9 @@ candidate's branch or move the ticket.
     // 마친 뒤 실제 emit 바로 앞에서 신선한 티켓 상태를 다시 읽는다. 이 호출과
     // 아래 emit 사이에는 다른 await가 없어 pending 전환을 지나쳐 발행하지 않는다.
     if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      // 실제 SSE emit이 없었으므로 hard-budget의 원시 emit 집합에서도 뺀다.
+      // 저장 결과의 PK로 정확히 이 시도의 상관 행 하나만 원자 삭제한다.
+      await activityLogRepo.delete(triggerCorrelation.id);
       return '';
     }
 

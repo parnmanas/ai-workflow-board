@@ -69,19 +69,21 @@ test('_checkPendingUserGate is called exactly twice in _emitTrigger: once early,
   assert.ok(secondCallIdx < emitIdx, 'the last-moment recheck must precede the SSE emit');
 });
 
-test('nothing is awaited between the last-moment recheck and the SSE emit — the whole point of the fix', () => {
+test('last-moment 재확인 성공 경로에는 SSE emit 전 추가 await가 없다', () => {
   const src = code(SRC_PATH);
   const callSites = [...src.matchAll(CALL_RE)];
   const emitIdx = src.indexOf(EMIT_MARKER);
   const lastGateIdx = callSites[callSites.length - 1].index;
 
   const between = src.slice(lastGateIdx, emitIdx);
-  // Exactly one `await` — the recheck call itself
-  // (`await this._checkPendingUserGate(...)`). Any MORE awaits between here
-  // and the emit reopens the TOCTOU window this ticket closed; any FEWER
-  // means the recheck call itself was removed or moved elsewhere.
-  const awaitsBetween = (between.match(/\bawait\b/g) || []).length;
-  assert.equal(awaitsBetween, 1, `expected exactly 1 await between the last-moment gate and the emit, found ${awaitsBetween}`);
+  // late-pending 드롭 분기는 선저장 trigger_emitted를 지우기 위해 await할 수
+  // 있다. 다만 조건문을 통과한 성공 경로에는 emit 전 추가 await가 없어야
+  // 하므로, cleanup 분기 뒤의 꼬리만 검사한다.
+  const dropReturnIdx = between.indexOf("return '';");
+  assert.ok(dropReturnIdx > -1, 'late-pending 드롭 분기가 있어야 한다');
+  const successfulTail = between.slice(dropReturnIdx + "return '';".length);
+  assert.doesNotMatch(successfulTail, /\bawait\b/,
+    'late-pending 검사를 통과한 성공 경로는 추가 비동기 창 없이 바로 emit해야 한다');
 });
 
 test('_checkPendingUserGate short-circuits on an explicit bypass before touching the DB', () => {
