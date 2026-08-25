@@ -46,6 +46,7 @@ const {
   countAutoResponses,
   countWindowDispatches,
   countWindowDispatchesBySource,
+  countTwinSuppressionNotices,
   countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
@@ -65,6 +66,7 @@ const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
 const subagentRepo = ds.getRepository(Subagent);
+const agentRepo = ds.getRepository(Agent);
 const wsRepo = ds.getRepository(Workspace);
 
 async function makeBoard(hardBudgetConfig) {
@@ -158,10 +160,9 @@ test('countWindowDispatches excludes manual/comment_summary trigger sources', as
   assert.equal(await countWindowDispatches(ds, t.id, since), 2);
 });
 
-// ticket 3c8b8026 acceptance #5: the auto-pend notice's trigger_source
-// breakdown, sourced from this grouped query. Same underlying rows/exclusions
-// as countWindowDispatches — this only adds a GROUP BY on top, so the two
-// must always agree on the total.
+// ticket 3c8b8026 성공 기준 5: 자동 pend 알림의 trigger_source 분포다.
+// countWindowDispatches와 같은 행/제외 조건에 GROUP BY만 더하므로 두 집계의
+// 합계는 항상 같아야 한다.
 test('countWindowDispatchesBySource groups by trigger_source with the same exclusions as countWindowDispatches', async () => {
   const t = await makeTicket(null);
   const since = new Date(Date.now() - 1000);
@@ -186,6 +187,57 @@ test('countWindowDispatchesBySource returns an empty array when nothing is in th
   const future = new Date(Date.now() + 60_000);
   await recordTriggerEmitted(t.id, 'comment');
   assert.deepEqual(await countWindowDispatchesBySource(ds, t.id, future), []);
+});
+
+test('countTwinSuppressionNotices는 접힌 억제 알림의 실제 발생 횟수를 세고 위조 알림은 제외한다', async () => {
+  const t = await makeTicket(null);
+  const manager = await agentRepo.save(agentRepo.create({ name: 'Manager', type: 'manager' }));
+  const regular = await agentRepo.save(agentRepo.create({ name: 'Assignee', type: 'claude' }));
+  const metadata = JSON.stringify({ auto_notice: true, dedupe_key: `dispatch_suppress:inflight:${t.id}:assignee` });
+  const suppression = await addAgentComment(t.id, {
+    author_id: manager.id, author: manager.name, metadata, repeat_count: 2,
+  });
+  const forged = await addAgentComment(t.id, {
+    author_id: regular.id, author: regular.name, metadata,
+  });
+  const since = new Date(Date.now() - 1000);
+
+  for (const action of ['created', 'updated']) {
+    await activityRepo.save(activityRepo.create({
+      entity_type: 'comment', entity_id: suppression.id, ticket_id: t.id,
+      action, actor_id: 'system', actor_name: manager.name,
+    }));
+  }
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'comment', entity_id: forged.id, ticket_id: t.id,
+    action: 'created', actor_id: regular.id, actor_name: regular.name,
+  }));
+
+  assert.equal(await countTwinSuppressionNotices(ds, t.id, since), 2,
+    '최초 저장과 repeat_count 접기를 각각 한 번의 억제로 세고 일반 agent 위조는 제외해야 한다');
+});
+
+test('countTwinSuppressionNotices는 윈도우 이전 activity와 다른 자동 알림 키를 제외한다', async () => {
+  const t = await makeTicket(null);
+  const manager = await agentRepo.save(agentRepo.create({ name: 'Manager2', type: 'manager' }));
+  const suppression = await addAgentComment(t.id, {
+    author_id: manager.id, author: manager.name,
+    metadata: JSON.stringify({ auto_notice: true, dedupe_key: `dispatch_suppress:mention_seat:${t.id}` }),
+  });
+  const otherNotice = await addAgentComment(t.id, {
+    author_id: manager.id, author: manager.name,
+    metadata: JSON.stringify({ auto_notice: true, dedupe_key: `worktree_pool:${t.id}` }),
+  });
+  const since = new Date();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'comment', entity_id: otherNotice.id, ticket_id: t.id,
+    action: 'created', actor_id: 'system', actor_name: manager.name,
+  }));
+
+  assert.equal(await countTwinSuppressionNotices(ds, t.id, since), 0,
+    '윈도우 이전 억제와 dispatch_suppress 이름공간 밖 알림은 차감하면 안 된다');
+  assert.ok(suppression.id);
 });
 
 // ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────

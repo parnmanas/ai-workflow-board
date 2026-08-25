@@ -76,6 +76,18 @@ test('_checkHardBudgetGate exempts manual and comment_summary trigger sources (m
   assert.match(body, /triggerSource === 'comment_summary'/, 'must exempt comment_summary triggers');
 });
 
+test('_checkHardBudgetGate는 쌍둥이 억제된 emit을 실제 dispatch 수에서 제외한다', () => {
+  const src = code(SRC_PATH);
+  const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
+  assert.ok(match, '_checkHardBudgetGate 메서드 본문을 찾을 수 있어야 한다');
+  const body = match[0];
+  assert.match(body, /countTwinSuppressionNotices\(/, '쌍둥이 억제 발생 수를 조회해야 한다');
+  assert.match(body, /Math\.max\(0, emittedDispatchCount - suppressedDispatchCount\)/,
+    '상한 판정 수는 원시 emit에서 억제 수를 빼고 음수를 막아야 한다');
+  assert.match(body, /dispatchCount >= cfg\.maxDispatchesPerWindow/,
+    '차감된 수를 상한과 비교해야 한다');
+});
+
 // ── Token ceiling (ticket ef53fdf4) — shares _checkHardBudgetGate/its call
 // site with the dispatch ceiling above, so it inherits every ordering
 // guarantee already asserted (single call site, after pending gate, before
@@ -100,14 +112,10 @@ test('the token hard-budget drop action string appears exactly once and is disti
   assert.equal(dispatchDropMentions, 1, 'adding the token ceiling must not duplicate the dispatch drop action string');
 });
 
-// ── trigger_source breakdown (ticket 3c8b8026 acceptance #5) ───────────────
-// A human clearing a hard-budget auto-pend needs to tell "one source stormed"
-// (e.g. a comment self-echo loop) from "many roles were legitimately busy" at
-// a glance. `_checkHardBudgetGate` only has the breach confirmed AFTER the
-// scalar `countWindowDispatches` call trips — the breakdown query must run in
-// that same (rare, already-breaching) branch, never on every dispatch's
-// happy path, and its result must actually reach both the pend reason and the
-// chat alert `_tripHardBudgetGate` composes.
+// ── trigger_source 분포 (ticket 3c8b8026 성공 기준 5) ─────────────────────
+// hard-budget 자동 pend를 해제할 사람은 한 출처의 폭주와 여러 역할의 정상
+// 활동을 구분할 수 있어야 한다. 분포 조회는 상한 초과가 확정된 드문 분기에서만
+// 실행하며, 결과는 pending 사유와 채팅 알림 양쪽에 전달해야 한다.
 
 test('the dispatch-breach branch fetches the trigger_source breakdown via countWindowDispatchesBySource', () => {
   const src = code(SRC_PATH);
@@ -116,9 +124,8 @@ test('the dispatch-breach branch fetches the trigger_source breakdown via countW
   const body = match[0];
   assert.match(body, /countWindowDispatchesBySource\(/, '_checkHardBudgetGate must call countWindowDispatchesBySource');
 
-  // Must be called strictly AFTER the scalar dispatchCount breach check —
-  // never unconditionally on every dispatch (that would run an extra grouped
-  // query on the hot path for every single trigger, breach or not).
+  // 분포 조회는 dispatchCount 상한 검사 뒤에만 실행해야 한다. 모든 트리거의
+  // 핫패스에서 무조건 그룹 쿼리를 실행하면 안 된다.
   const scalarIdx = body.indexOf('dispatchCount >= cfg.maxDispatchesPerWindow');
   const bySourceIdx = body.indexOf('countWindowDispatchesBySource(');
   assert.ok(scalarIdx > -1 && bySourceIdx > -1 && scalarIdx < bySourceIdx,
@@ -133,9 +140,8 @@ test('_tripHardBudgetGate wires bySource into both the pend reason and the chat 
   assert.match(body, /bySource/, '_tripHardBudgetGate must accept/use the bySource breakdown');
   assert.match(body, /sourceBreakdown/, 'must format the breakdown into a display string');
 
-  // The formatted breakdown must actually be spliced into BOTH surfaces a
-  // human reads after an auto-pend — the ticket's pending_reason (User tab)
-  // and the chat alert — not computed and then dropped on the floor.
+  // 포맷한 분포는 자동 pend 뒤 사람이 보는 pending_reason과 채팅 알림 양쪽에
+  // 실제로 포함되어야 한다.
   const reasonIdx = body.indexOf('const reason =');
   const sourceLineDeclIdx = body.indexOf('const sourceLine =');
   assert.ok(sourceLineDeclIdx > -1 && reasonIdx > -1 && sourceLineDeclIdx < reasonIdx,

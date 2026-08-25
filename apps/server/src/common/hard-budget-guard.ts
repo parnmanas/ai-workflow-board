@@ -28,6 +28,7 @@ import type { DataSource } from 'typeorm';
 import type { ActivityService } from '../services/activity.service';
 import type { RoomMessagingService } from '../modules/chat-rooms/room-messaging.service';
 import { ActivityLog } from '../entities/ActivityLog';
+import { Agent } from '../entities/Agent';
 import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ChatRoom } from '../entities/ChatRoom';
@@ -163,13 +164,10 @@ export async function countWindowDispatches(dataSource: DataSource, ticketId: st
 }
 
 /**
- * Same rows as `countWindowDispatches`, grouped by `trigger_source` (ticket
- * 3c8b8026 acceptance #5). Read-only breakdown for the hard-budget breach
- * notice — lets a human tell "one source stormed" (e.g. a comment-triggered
- * self-echo loop) from "many roles were legitimately busy" at a glance,
- * without changing what counts toward the ceiling itself (see this file's
- * header: emit-based counting stays the enforcement source; this is
- * observability layered on the same query, not a new one).
+ * `countWindowDispatches`와 같은 행을 `trigger_source`별로 묶는다(티켓
+ * 3c8b8026 성공 기준 5). hard-budget 초과 알림에 쓰는 읽기 전용 분포이며,
+ * 한 출처의 폭주와 여러 역할의 정상 활동을 사람이 구분하게 한다. 원시 emit
+ * 관측값을 보존하고, 실제 상한 판정에서는 쌍둥이 억제 수를 별도로 차감한다.
  */
 export async function countWindowDispatchesBySource(
   dataSource: DataSource,
@@ -187,6 +185,40 @@ export async function countWindowDispatchesBySource(
     .orderBy('COUNT(*)', 'DESC')
     .getRawMany<{ trigger_source: string; count: string | number }>();
   return rows.map((r) => ({ trigger_source: r.trigger_source || '_', count: Number(r.count) }));
+}
+
+/**
+ * 윈도우 안의 쌍둥이 억제 횟수다(티켓 3c8b8026 성공 기준 3).
+ * `dispatch_suppress:*` 키를 쓰는 매니저 자동 알림만 대상으로 삼고, 각 최초
+ * 저장/반복 접기에 남는 activity 행을 세므로 `repeat_count`로 접힌 발생도
+ * 빠뜨리지 않는다. 일반 agent가 같은 metadata를 위조해도 Agent.type 검증과
+ * activity의 system actor 검증을 함께 통과할 수 없다.
+ */
+export async function countTwinSuppressionNotices(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
+  const rows = await dataSource.getRepository(Comment).createQueryBuilder('c')
+    .innerJoin(Agent, 'a', 'a.id = c.author_id')
+    .where('c.ticket_id = :tid', { tid: ticketId })
+    .andWhere("c.author_type = 'agent'")
+    .andWhere("a.type = 'manager'")
+    .andWhere("c.type = 'note'")
+    .select(['c.id', 'c.metadata'])
+    .getMany();
+  const ids = rows.filter((c) => {
+    let meta: any;
+    try { meta = JSON.parse(c.metadata || '{}'); } catch { meta = {}; }
+    return meta?.auto_notice === true
+      && typeof meta?.dedupe_key === 'string'
+      && meta.dedupe_key.startsWith('dispatch_suppress:');
+  }).map((c) => c.id);
+  if (ids.length === 0) return 0;
+
+  return dataSource.getRepository(ActivityLog).createQueryBuilder('a')
+    .where("a.entity_type = 'comment'")
+    .andWhere('a.entity_id IN (:...ids)', { ids })
+    .andWhere("a.action IN ('created', 'updated')")
+    .andWhere("a.actor_id = 'system'")
+    .andWhere('a.created_at >= :since', { since })
+    .getCount();
 }
 
 /**
