@@ -85,20 +85,15 @@ test('Comment on In Progress ticket triggers assignee (trigger_source=comment)',
   exitAfterTests(0);
 });
 
-// ticket 3c8b8026: a system/manager auto-notice comment (e.g. "⚠️ 중복
-// dispatch 억제") is itself posted via add_comment, authenticated as the real
-// Manager agent — without this guard its `actor_id` is a real UUID, passes
-// the comment-trigger path above unchanged, and wakes the assignee again.
-// That re-trigger gets suppressed too, posts another notice, and so on — a
-// self-amplifying loop that burned a 30-dispatch hard-budget ceiling in 16
-// minutes on pure echo (27% of the emitted triggers were this notice alone).
-// comment-tools.ts now stamps `actor_id='system'` on the activity-log row for
-// any add_comment carrying `metadata.auto_notice===true`, which routes
-// straight into the SAME pre-existing system-actor skip this file's first
-// test does NOT exercise (it uses a real user actor_id). This asserts the
-// negative side of that same comment-entity/created path end-to-end through
-// TriggerLoopService, then proves the harness isn't vacuously silent by
-// checking an ordinary comment right after it DOES still trigger.
+// ticket 3c8b8026: 시스템/매니저 자동 알림(예: "⚠️ 중복 dispatch 억제")도
+// add_comment로 저장되며 실제 Manager UUID로 인증된다. 별도 표시가 없으면
+// 일반 코멘트 트리거 경로를 통과해 담당자를 다시 깨우고, 그 재트리거도 다시
+// 억제되어 알림을 남기는 자기증폭 루프가 된다. 실제로 16분 동안 hard-budget
+// 30회를 소진했고 그중 27%가 이 알림의 자기메아리였다.
+// comment-tools.ts는 `metadata.auto_notice===true`인 적법한 매니저 알림의
+// activity actor_id를 system으로 기록해 기존 system-actor 제외 경로를 탄다.
+// 아래 테스트는 이 부정 경로를 TriggerLoopService까지 종단간 확인한 다음,
+// 일반 코멘트는 여전히 트리거된다는 양성 대조로 테스트의 비공허성을 증명한다.
 test('a system-actor comment (auto-notice shape) does not trigger the routed role; an ordinary comment right after still does', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.QA_COMMENT_SYSTEM_PORT || '7815', 10) });
   t.after(() => { void app.close().catch(() => {}); });
