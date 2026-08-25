@@ -28,6 +28,7 @@ import { detectDeferralToTerminal, formatDeferralTerminalWarning } from '../shar
 import { findColumnByName } from '../shared/ticket-helpers';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
+import { recordCommentMentionDispatch } from '../../../common/mention-dispatch-correlation';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { buildConsensusMetadata, buildProposalMetadata } from '../../../common/consensus-state';
@@ -648,6 +649,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               // 이 mention으로 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히
               // 무시하고 CLI 기본값으로 돈다.
               const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
+              const dispatchTriggerId = m.roleShortcut
+                ? await recordCommentMentionDispatch(dataSource, {
+                    ticketId: ticket.id, workspaceId: ticket.workspace_id,
+                    agentId: agent.id, role: m.roleShortcut,
+                  })
+                : '';
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id,
                 comment_id: comment.id,
@@ -658,6 +665,8 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 actor_name: authorName,
                 content,
                 role_prompt: agent.role_prompt || '',
+                dispatch_trigger_id: dispatchTriggerId,
+                dispatch_role: m.roleShortcut || '',
                 mention_source: m.roleShortcut ? 'role' : 'direct',
                 role_shortcut: m.roleShortcut,
                 timestamp: ts,
@@ -893,12 +902,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               // 티켓 71532b4f: add_comment와 동일한 dispatch 부가값 — 누락 시 이 mention으로
               // 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히 무시한다.
               const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
+              const dispatchTriggerId = m.roleShortcut
+                ? await recordCommentMentionDispatch(dataSource, {
+                    ticketId: ticket.id, workspaceId: ticket.workspace_id,
+                    agentId: agent.id, role: m.roleShortcut,
+                  })
+                : '';
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
                 agent_id: agent.id,
                 actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
                 content, role_prompt: agent.role_prompt || '',
                 mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
+                dispatch_trigger_id: dispatchTriggerId, dispatch_role: m.roleShortcut || '',
                 timestamp: ts,
                 agent_chain_depth: agentChainDepth,
                 harness_config: extras.harness_config,

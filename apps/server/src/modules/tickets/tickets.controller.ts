@@ -10,6 +10,7 @@ import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { Agent } from '../../entities/Agent';
 import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
+import { recordCommentMentionDispatch } from '../../common/mention-dispatch-correlation';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
@@ -2494,6 +2495,12 @@ export class TicketsController {
         // 부가값 — 누락 시 이 mention으로 깨운 세션이 agent에 핀된
         // backend/harness/effort를 조용히 무시한다.
         const extras = await resolveMentionDispatchExtras(this.dataSource, ticket, agent);
+        const dispatchTriggerId = m.roleShortcut
+          ? await recordCommentMentionDispatch(this.dataSource, {
+              ticketId: ticket.id, workspaceId: ticket.workspace_id,
+              agentId: agent.id, role: m.roleShortcut,
+            })
+          : '';
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
@@ -2503,6 +2510,8 @@ export class TicketsController {
           actor_type: 'user',
           actor_name: actor.name,
           content: comment.content,
+          dispatch_trigger_id: dispatchTriggerId,
+          dispatch_role: m.roleShortcut || '',
           role_prompt: agent.role_prompt || '',
           mention_source: m.roleShortcut ? 'role' : 'direct',
           role_shortcut: m.roleShortcut,

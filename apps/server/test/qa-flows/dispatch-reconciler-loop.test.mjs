@@ -405,6 +405,42 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     }), 1, '즉시 억제도 정확히 한 번 차감 activity로 남아야 한다');
   });
 
+  await t.test('10d: mention_seat ACK는 comment_mention 전용 trigger_emitted와 건별 상관된다', async () => {
+    const ticket = await mkTicket('mention seat suppression correlation');
+    const { recordCommentMentionDispatch } = await import(
+      path.join(DIST_ROOT, 'common', 'mention-dispatch-correlation.js')
+    );
+    const triggerId = await recordCommentMentionDispatch(ds, {
+      ticketId: ticket.id,
+      workspaceId: ws.id,
+      agentId: agent.id,
+      role: 'assignee',
+    });
+    const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
+      workspaceId: ws.id, label: 'mgr-mention-suppression',
+    })).raw_key;
+    const response = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticket_id: ticket.id,
+        role: 'assignee',
+        trigger_id: triggerId,
+        outcome: 'suppressed',
+        reason: 'mention_seat',
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).applied, true);
+    const audit = await ds.getRepository('ActivityLog').findOne({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed', entity_id: triggerId },
+    });
+    assert.ok(audit, 'mention 억제 ACK가 원본 trigger_emitted ID로 감사 행을 남겨야 한다');
+    assert.equal(audit.field_changed, 'mention_seat');
+    assert.equal(audit.role, 'assignee');
+    assert.equal(audit.trigger_source, 'comment_mention');
+  });
+
   await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {
     // Reviewer blocker B1: the seeder previously scanned only active/intake, so a
     // reviewer trigger lost to a commit↔emit crash left the ticket in Review with
