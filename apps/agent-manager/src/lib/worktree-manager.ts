@@ -373,15 +373,25 @@ export class WorktreeManager {
   #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
   #bootstrapLocks = new Map<string, Promise<string | null>>();
+  /** OS 셸 래퍼 없이 오류·경쟁 조건을 재현하기 위한 플랫폼 중립 테스트 seam. */
+  #terminalCleanupHooks: {
+    removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
+    beforeRemoteDelete?: (branch: string) => Promise<void> | void;
+  };
 
   constructor(opts: {
     provisionLockTimeoutMs?: number;
     provisionLockStaleMs?: number;
     provisionLockHeartbeatMs?: number;
+    terminalCleanupHooks?: {
+      removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
+      beforeRemoteDelete?: (branch: string) => Promise<void> | void;
+    };
   } = {}) {
     this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
     this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
     this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
+    this.#terminalCleanupHooks = opts.terminalCleanupHooks ?? {};
   }
 
   /**
@@ -1555,7 +1565,13 @@ export class WorktreeManager {
           sharedSlotReady = true;
           continue;
         }
-        const removed = await git(entry.repo, ['worktree', 'remove', w.path]);
+        const injectedRemoval = this.#terminalCleanupHooks.removeWorktree;
+        const allowRemoval = injectedRemoval
+          ? await Promise.resolve(injectedRemoval(entry.repo, w.path))
+          : true;
+        const removed = allowRemoval
+          ? await git(entry.repo, ['worktree', 'remove', w.path])
+          : { ok: false, stdout: '', stderr: '주입된 worktree 삭제 실패' };
         if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
           report.heldReasons.push(`worktree 삭제 실패: ${w.path}`);
           blockedBranches.add(w.branch);
@@ -1615,6 +1631,7 @@ export class WorktreeManager {
         if (blockedBranches.has(branch)) continue;
         const verifiedTip = remoteTips.get(branch);
         if (!verifiedTip) continue;
+        await this.#terminalCleanupHooks.beforeRemoteDelete?.(branch);
         const deleted = await git(entry.repo, [
           'push',
           `--force-with-lease=refs/heads/${branch}:${verifiedTip}`,

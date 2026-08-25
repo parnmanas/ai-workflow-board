@@ -554,19 +554,10 @@ test('cleanupTerminalTicketGit: dirty·미병합·다른 티켓 브랜치를 보
 
 test('cleanupTerminalTicketGit: worktree 제거 실패 시 로컬과 origin 브랜치를 모두 보존한다', async () => {
   const fixture = await makeManagedTerminalRepo(TICKET_A);
-  const originalPath = process.env.PATH;
   try {
-    const guardDir = await fsp.mkdtemp(join(tmpdir(), 'awb-git-remove-guard-'));
-    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
-    const guardGit = join(guardDir, 'git');
-    await fsp.writeFile(
-      guardGit,
-      `#!/bin/sh\nif [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then echo "의도한 제거 실패" >&2; exit 1; fi\nexec "${realGit}" "$@"\n`,
-    );
-    await fsp.chmod(guardGit, 0o755);
-    process.env.PATH = `${guardDir}:${originalPath}`;
-
-    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: { removeWorktree: () => false },
+    }).cleanupTerminalTicketGit({
       baseWorkingDir: fixture.workingDir,
       ticketId: TICKET_A,
       baseBranch: 'main',
@@ -577,14 +568,12 @@ test('cleanupTerminalTicketGit: worktree 제거 실패 시 로컬과 origin 브�
     assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
     assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
   } finally {
-    process.env.PATH = originalPath;
     await fixture.cleanup();
   }
 });
 
 test('cleanupTerminalTicketGit: 검증 뒤 원격 tip이 전진하면 lease 불일치로 삭제를 보류한다', async () => {
   const fixture = await makeManagedTerminalRepo(TICKET_A);
-  const originalPath = process.env.PATH;
   try {
     const racer = join(fixture.root, 'racer');
     execFileSync('git', ['clone', '-q', fixture.remote, racer]);
@@ -595,18 +584,16 @@ test('cleanupTerminalTicketGit: 검증 뒤 원격 tip이 전진하면 lease 불�
     git(racer, ['add', '.']);
     git(racer, ['commit', '-q', '-m', '원격 전진']);
 
-    const guardDir = await fsp.mkdtemp(join(tmpdir(), 'awb-git-lease-guard-'));
-    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
-    const guardGit = join(guardDir, 'git');
-    const marker = join(guardDir, 'advanced');
-    await fsp.writeFile(
-      guardGit,
-      `#!/bin/sh\nif [ "$3" = "push" ] && [ ! -e "${marker}" ]; then touch "${marker}"; "${realGit}" -C "${racer}" push -q origin "${fixture.branch}"; fi\nexec "${realGit}" "$@"\n`,
-    );
-    await fsp.chmod(guardGit, 0o755);
-    process.env.PATH = `${guardDir}:${originalPath}`;
-
-    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+    let advanced = false;
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        beforeRemoteDelete: (branch) => {
+          if (advanced || branch !== fixture.branch) return;
+          advanced = true;
+          git(racer, ['push', '-q', 'origin', fixture.branch]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
       baseWorkingDir: fixture.workingDir,
       ticketId: TICKET_A,
       baseBranch: 'main',
@@ -617,7 +604,6 @@ test('cleanupTerminalTicketGit: 검증 뒤 원격 tip이 전진하면 lease 불�
     assert.ok(result.heldReasons.includes(`원격 브랜치 삭제 실패: origin/${fixture.branch}`));
     assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
   } finally {
-    process.env.PATH = originalPath;
     await fixture.cleanup();
   }
 });
