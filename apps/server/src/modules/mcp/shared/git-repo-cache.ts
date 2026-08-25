@@ -570,11 +570,19 @@ export async function listTree(repoPath: string, ref: string, treePath: string):
   // `<ref>:<path>` resolves to the tree object at that path; ls-tree then lists
   // its immediate children with names relative to it.
   const treeish = norm ? `${r}:${norm}` : r;
+  // `--long` 없는 plain `ls-tree` 는 tree 객체만 읽는다 — blobless
+  // (`--filter=blob:none`) 캐시 클론도 tree 는 항상 로컬에 전부 갖고
+  // 있으므로 이 spawn 은 절대 lazy-fetch 하지 않는다. `--long` 은 추가로
+  // blob 마다 object size 를 요구하는데, 이게 바로 이 티켓이 고치는
+  // blob당 promisor fetch 폭주의 원인이었다(ticket 719ef137/4796899d).
+  // 크기는 별도로, 로컬에 있는 것만 best-effort 로 채운다 —
+  // fillBlobSizesLocalOnly 참고.
   const { stdout } = await runGit(
-    ['ls-tree', '--long', '--', treeish],
+    ['ls-tree', '--', treeish],
     { cwd: repoPath, maxBytes: 4 * 1024 * 1024 },
   );
   const entries = parseLsTree(stdout, norm);
+  await fillBlobSizesLocalOnly(repoPath, entries);
   entries.sort((a, b) => {
     const ad = a.type === 'tree' ? 0 : 1;
     const bd = b.type === 'tree' ? 0 : 1;
@@ -588,21 +596,16 @@ function parseLsTree(stdout: string, basePath: string): TreeEntry[] {
   const out: TreeEntry[] = [];
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    // Format (--long): "<mode> <type> <sha> <size>\t<name>"
+    // 포맷(`--long` 없음): "<mode> <type> <sha>\t<name>" — size 컬럼 없음;
+    // blob 크기는 fillBlobSizesLocalOnly 가 별도로 채운다.
     const tabIdx = line.indexOf('\t');
     if (tabIdx < 0) continue;
     const meta = line.slice(0, tabIdx).trim().split(/\s+/);
     const name = line.slice(tabIdx + 1);
     if (meta.length < 3) continue;
-    const [, type, sha, sizeRaw] = meta;
+    const [, type, sha] = meta;
     const t: TreeEntry['type'] = type === 'tree' ? 'tree' : type === 'commit' ? 'commit' : 'blob';
-    out.push({
-      name,
-      path: basePath ? `${basePath}/${name}` : name,
-      type: t,
-      sha,
-      size: t === 'blob' && sizeRaw && sizeRaw !== '-' ? parseInt(sizeRaw, 10) : null,
-    });
+    out.push({ name, path: basePath ? `${basePath}/${name}` : name, type: t, sha, size: null });
   }
   return out;
 }
@@ -648,6 +651,76 @@ export async function listTreeRecursive(repoPath: string, ref: string, treePath:
     out.push({ path: norm ? `${norm}/${name}` : name, sha });
   }
   return out;
+}
+
+// listTree() 한 번당 로컬 크기 조회를 위해 동시에 띄우는 `cat-file
+// --batch-check` 프로세스 상한 — ontology-extraction.service.ts 의
+// FETCH_CONCURRENCY 와 동일한 값(리뷰 지적 대응: 디렉터리가 매우 크더라도
+// 동시 spawn 수 자체는 여전히 bound 되게 한다).
+const LOCAL_SIZE_LOOKUP_CONCURRENCY = 16;
+
+/** `items` 를 최대 `limit` 개까지 동시에 `fn` 으로 처리하는 단순 워커풀 —
+ *  ontology-extraction.service.ts 의 동명 헬퍼와 같은 패턴이지만 모듈이
+ *  달라 독립적으로 둔다(결과 배열이 필요 없어 반환 없이 부수효과만). */
+async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      await fn(items[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/**
+ * `listTree` 의 blob entry 에 대한 best-effort 크기 백필 — 캐시 클론에
+ * 이미 로컬로 있는 객체에 대해서만 `size` 를 채우고, 절대 promisor fetch
+ * 를 유발하지 않는다. 아직 로컬에 없는 blob 은 `size: null` 로 남기고,
+ * 호출부는 디렉터리 목록 하나 보여주자고 네트워크 왕복을 태우는 대신
+ * "크기 미상"으로 degrade 한다(ticket 4796899d — 719ef137 의
+ * `git ls-tree --long` 버그와 근본 원인은 같지만 호출부가 다르다).
+ *
+ * 이 디렉터리의 blob SHA 를 전부 한 `cat-file --batch-check` 호출에 몰아서
+ * `noLazyFetch` 로 감싸는 방식은 안 통한다: 실측으로 확인한 바, promisor
+ * 클론에서 입력 중 단 하나라도 로컬에 없으면 그 한 줄만 "missing" 으로
+ * 보고하고 계속하는 게 아니라 batch-check 프로세스 전체가 `fatal: could
+ * not fetch <oid> from promisor remote` 로 즉시 죽는다(exit 128) — 이미
+ * 캐시된 blob 과 아직 안 가져온 blob 이 섞인 디렉터리(실사용 시 거의
+ * 항상 이런 상태)에는 쓸 수 없다.
+ *
+ * `--batch-all-objects` 로 클론이 가진 전체 로컬 객체를 한 번에 열거해
+ * 교집합을 취하는 방식(리뷰 라운드 1 지적으로 폐기)도 안 된다 — 그
+ * 비용이 이 디렉터리의 blob 수가 아니라 **캐시 클론 전체의 로컬 객체
+ * 수**(오래되고 큰 저장소일수록 계속 커짐)에 비례해서, 디렉터리를 열
+ * 때마다 저장소 전체를 훑는 꼴이 되어 이 티켓이 고치려던 "느린 응답"을
+ * 다른 축에서 재현할 수 있다.
+ *
+ * 그래서 blob 하나당 `cat-file --batch-check` 를 독립 호출로 띄운다 —
+ * `noLazyFetch` 아래서 그 blob 이 로컬에 있으면 즉시 size 를 반환하고
+ * (exit 0), 없으면 그 호출 하나만 fatal 로 실패한다(catch 해서 그
+ * entry 만 null 로 남긴다 — 다른 blob 조회에는 영향 없음). 비용이 정확히
+ * 이 디렉터리의 blob 개수에만 비례하고, 동시 spawn 수는
+ * LOCAL_SIZE_LOOKUP_CONCURRENCY 로 bound 한다.
+ */
+async function fillBlobSizesLocalOnly(repoPath: string, entries: TreeEntry[]): Promise<void> {
+  const blobs = entries.filter((e) => e.type === 'blob');
+  await mapWithConcurrency(blobs, LOCAL_SIZE_LOOKUP_CONCURRENCY, async (entry) => {
+    try {
+      const { stdout } = await runGit(['cat-file', '--batch-check'], {
+        cwd: repoPath,
+        maxBytes: 256,
+        stdin: `${entry.sha}\n`,
+        noLazyFetch: true,
+      });
+      const parts = stdout.trim().split(/\s+/);
+      if (parts.length < 3) return; // "missing" — size는 null로 남는다
+      const size = parseInt(parts[2], 10);
+      if (Number.isFinite(size)) entry.size = size;
+    } catch {
+      // 로컬에 없는 blob(promisor 미보유) — fetch 하지 않고 size는 null로 남긴다
+    }
+  });
 }
 
 export interface FileContent {
