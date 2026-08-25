@@ -46,10 +46,10 @@ const EMPTY_EXTRAS: MentionDispatchExtras = {
  * 항상 null로 두면 resource_id 전용 repo 항목만 조용히 drop되고(부작용 없음),
  * workspace-scoped Resource 조회를 한 번 아낀다.
  *
- * 다른 common/ resolver(resolveHarnessConfig 등)와 같은 fail-closed 원칙 — 자원 조회
- * 하나가 실패해도 dispatch 자체를 막지 않도록 전부 EMPTY_EXTRAS(모두 null/기본값)로
- * degrade한다. 멘션 하나 못 읽은 프로필 때문에 멘션 전달 자체가 무너지면 이 티켓이
- * 고치려는 침묵 버그보다 나쁘다.
+ * harness/effort/environment 해석 실패는 기존 멘션 전달을 유지하도록 기본값으로
+ * degrade한다. 반면 Claude runtime profile 해석과 credential 검증은 컬럼 트리거처럼
+ * fail-closed다. 명시 프로파일 오류를 null로 바꾸면 기본 유료 backend로 조용히
+ * 폴백하므로, 이 오류는 호출부까지 전파해 dispatch 자체를 중단해야 한다.
  *
  * 루트 티켓 컬럼 트리거만 다룬다(trigger-loop.service.ts와 동일 범위) — column_id가
  * 없는 서브태스크 코멘트 멘션은 board 카탈로그 없이 workspace 레벨로만 degrade한다.
@@ -59,6 +59,7 @@ export async function resolveMentionDispatchExtras(
   ticket: Pick<Ticket, 'column_id' | 'workspace_id' | 'effort_preset' | 'cli_runtime_profile'>,
   agent: Pick<Agent, 'type' | 'cli_runtime_profile' | 'credential_id'>,
 ): Promise<MentionDispatchExtras> {
+  let extras = EMPTY_EXTRAS;
   try {
     const board = await resolveBoardForColumn(dataSource, ticket.column_id);
     const workspace = ticket.workspace_id
@@ -72,32 +73,50 @@ export async function resolveMentionDispatchExtras(
     const mergedEnv = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
     const environmentConfig = resolveEnvironmentConfig(mergedEnv, () => null);
 
-    let runtimeProfile: CliRuntimeProfile | null = null;
-    if (agent.type === 'claude') {
-      const profile = await resolveClaudeBackendProfileForDispatch(dataSource, workspace, [
-        { source: 'run', value: ticket.cli_runtime_profile },
-        { source: 'agent', value: agent.cli_runtime_profile },
-        { source: 'board', value: board?.cli_runtime_profile },
-      ]);
-      // Credential mismatch: soft-fail to null (mirrors room-messaging.service.ts's
-      // _resolveChatRuntimeProfileCore) rather than throwing (trigger-loop.service.ts's
-      // hard-fail) — a mention reply is best-effort delivery, not a full ticket
-      // dispatch, so degrade to the default backend instead of dropping the mention.
-      if (profile && (!profile.credential_required || profile.credential_ref === agent.credential_id)) {
-        runtimeProfile = profile;
-      }
-    }
-
-    return {
+    extras = {
       harness_config: harnessConfig,
       effort_preset: effortPreset,
-      cli_runtime_profile: runtimeProfile,
+      cli_runtime_profile: null,
       environment_config: environmentConfig,
       worktree_mode: worktreeMode,
     };
   } catch {
-    return EMPTY_EXTRAS;
+    // 비-runtime 부가 설정은 best-effort다. runtime profile은 아래에서 별도로
+    // 다시 조회하므로 이 catch가 명시 프로파일 오류를 삼키지 않는다.
   }
+
+  if (agent.type !== 'claude') return extras;
+
+  let runtimeProfile: CliRuntimeProfile | null;
+  try {
+    const runtimeBoard = await resolveBoardForColumn(dataSource, ticket.column_id);
+    const runtimeWorkspace = ticket.workspace_id
+      ? await dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+      : null;
+    runtimeProfile = await resolveClaudeBackendProfileForDispatch(dataSource, runtimeWorkspace, [
+      { source: 'run', value: ticket.cli_runtime_profile },
+      { source: 'agent', value: agent.cli_runtime_profile },
+      { source: 'board', value: runtimeBoard?.cli_runtime_profile },
+    ]);
+  } catch (error) {
+    console.warn('[MentionDispatch] Claude runtime profile 해석 실패 — comment_mention dispatch를 중단합니다.', {
+      workspace_id: ticket.workspace_id,
+      error: String(error),
+    });
+    throw error;
+  }
+  if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent.credential_id) {
+    const error = new Error(
+      `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
+      'agent must select that credential before comment mention dispatch',
+    );
+    console.warn('[MentionDispatch] Claude runtime profile credential 불일치 — comment_mention dispatch를 중단합니다.', {
+      workspace_id: ticket.workspace_id,
+      profile_id: runtimeProfile.id,
+    });
+    throw error;
+  }
+  return { ...extras, cli_runtime_profile: runtimeProfile };
 }
 
 async function resolveBoardForColumn(
