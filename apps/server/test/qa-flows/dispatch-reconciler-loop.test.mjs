@@ -405,12 +405,19 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     }), 1, '즉시 억제도 정확히 한 번 차감 activity로 남아야 한다');
   });
 
-  await t.test('10d: mention_seat ACK는 comment_mention 전용 trigger_emitted와 건별 상관된다', async () => {
+  await t.test('10d: mention_seat 억제 뒤에도 기존 승자의 processed ACK가 유지된다', async () => {
     const ticket = await mkTicket('mention seat suppression correlation');
+    const winnerTriggerId = await triggerLoop.emitAgentTrigger(
+      ticket, agent.id, 'assignee', 'column_move', 'system',
+    );
+    const winnerBeforeSuppression = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    assert.ok(winnerBeforeSuppression, '승자 dispatch가 실제 open intent를 만들어야 한다');
+    assert.equal(winnerBeforeSuppression.last_trigger_id, winnerTriggerId);
+
     const { recordCommentMentionDispatch } = await import(
       path.join(DIST_ROOT, 'common', 'mention-dispatch-correlation.js')
     );
-    const triggerId = await recordCommentMentionDispatch(ds, {
+    const suppressedTriggerId = await recordCommentMentionDispatch(ds, {
       ticketId: ticket.id,
       workspaceId: ws.id,
       agentId: agent.id,
@@ -425,7 +432,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       body: JSON.stringify({
         ticket_id: ticket.id,
         role: 'assignee',
-        trigger_id: triggerId,
+        trigger_id: suppressedTriggerId,
         outcome: 'suppressed',
         reason: 'mention_seat',
       }),
@@ -433,12 +440,42 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     assert.equal(response.status, 200);
     assert.equal((await response.json()).applied, true);
     const audit = await ds.getRepository('ActivityLog').findOne({
-      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed', entity_id: triggerId },
+      where: {
+        ticket_id: ticket.id,
+        action: 'dispatch_twin_suppressed',
+        entity_id: suppressedTriggerId,
+      },
     });
     assert.ok(audit, 'mention 억제 ACK가 원본 trigger_emitted ID로 감사 행을 남겨야 한다');
     assert.equal(audit.field_changed, 'mention_seat');
     assert.equal(audit.role, 'assignee');
     assert.equal(audit.trigger_source, 'comment_mention');
+
+    const winnerAfterSuppression = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    assert.equal(winnerAfterSuppression.last_trigger_id, winnerTriggerId,
+      'mention emit과 suppressed ACK가 기존 승자의 상관 키를 덮으면 안 된다');
+    assert.equal(winnerAfterSuppression.last_ack_kind, winnerBeforeSuppression.last_ack_kind,
+      '패자 억제는 승자의 ACK 상태를 바꾸면 안 된다');
+
+    const processed = await intents.applyManagerAck({
+      ticketId: ticket.id,
+      role: 'assignee',
+      triggerId: winnerTriggerId,
+      outcome: 'processed',
+    });
+    assert.equal(processed.applied, true, '승자의 processed ACK가 적용되어야 한다');
+    assert.equal(processed.matched, true, '승자의 trigger ID가 stale 처리되면 안 된다');
+    const processedIntent = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    assert.equal(processedIntent.last_trigger_id, winnerTriggerId);
+    assert.equal(processedIntent.last_ack_kind, 'processed');
+    const processedAudit = await ds.getRepository('ActivityLog').findOne({
+      where: { ticket_id: ticket.id, action: 'dispatch_ack_processed' },
+      order: { created_at: 'DESC', id: 'DESC' },
+    });
+    assert.ok(processedAudit, '승자의 processed 감사 행이 남아야 한다');
+    const processedDetail = JSON.parse(processedAudit.new_value);
+    assert.equal(processedDetail.trigger_id, winnerTriggerId);
+    assert.equal(processedDetail.role, 'assignee');
   });
 
   await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {
