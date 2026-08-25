@@ -128,6 +128,14 @@ export interface PoolRegistry {
   slots: Record<string, PoolSlotLease>;
 }
 
+export interface TerminalTicketCleanupReport {
+  removedWorktrees: number;
+  removedLocalBranches: string[];
+  removedRemoteBranches: string[];
+  remainingBranches: string[];
+  heldReasons: string[];
+}
+
 /**
  * Freshness grace for crash-reclaim: a lease whose `leasedAt` is within this
  * window is NEVER reclaimed, even if no live session/`/proc` owner is visible
@@ -1452,6 +1460,124 @@ export class WorktreeManager {
       await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, ticketId).catch(() => {});
     }
     return removed;
+  }
+
+  /**
+   * terminal 진입 시 티켓 전용 Git 흔적을 보수적으로 정리한다.
+   * 티켓 prefix와 worktree 경로가 함께 일치하고, checkout이 clean이며,
+   * 브랜치 tip이 base에 포함된 경우에만 worktree와 로컬/origin ref를 삭제한다.
+   */
+  async cleanupTerminalTicketGit(opts: {
+    baseWorkingDir: string;
+    ticketId: string;
+    baseBranch?: string;
+    repositoryResourceId?: string;
+  }): Promise<TerminalTicketCleanupReport> {
+    const report: TerminalTicketCleanupReport = {
+      removedWorktrees: 0,
+      removedLocalBranches: [],
+      removedRemoteBranches: [],
+      remainingBranches: [],
+      heldReasons: [],
+    };
+    if (!opts.baseWorkingDir || !opts.ticketId) return report;
+    const ticket8 = String(opts.ticketId).slice(0, 8);
+    const prefixes = [`ticket/${ticket8}-`, `ticket/${opts.ticketId}-`];
+    const ownsBranch = (branch: string | null): branch is string =>
+      !!branch && prefixes.some((prefix) => branch.startsWith(prefix));
+    const baseBranch = (opts.baseBranch || 'main').trim();
+    const protectedBranches = new Set(['main', 'production.private', 'codex', baseBranch]);
+    const managed = await this.#managedRepos(opts.baseWorkingDir, opts.repositoryResourceId);
+
+    for (const entry of managed) {
+      const blockedBranches = new Set<string>();
+      await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
+      const baseRef = `refs/remotes/origin/${baseBranch}`;
+      const baseExists = await git(entry.repo, ['show-ref', '--verify', '--quiet', baseRef]);
+      if (!baseExists.ok) {
+        report.heldReasons.push(`base 브랜치 origin/${baseBranch}를 확인할 수 없음`);
+        continue;
+      }
+
+      await this.prune(entry.repo);
+      const worktrees = await this.listWorktrees(entry.repo);
+      for (const w of worktrees) {
+        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        const seg = lastSegment(w.path);
+        if (isSharedSlotSeg(seg) || (seg !== ticket8 && !seg.startsWith(`${ticket8}-`))) continue;
+        if (!ownsBranch(w.branch) || protectedBranches.has(w.branch)) {
+          report.heldReasons.push(`worktree 소유권 불일치: ${w.path} (${w.branch ?? 'detached'})`);
+          continue;
+        }
+        const dirty = await git(w.path, ['status', '--porcelain', '--untracked-files=normal']);
+        if (!dirty.ok || dirty.stdout.trim()) {
+          report.heldReasons.push(`dirty worktree: ${w.path} (${w.branch})`);
+          blockedBranches.add(w.branch);
+          continue;
+        }
+        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', w.branch, baseRef]);
+        if (!merged.ok) {
+          report.heldReasons.push(`미병합/고유 커밋: ${w.branch}`);
+          blockedBranches.add(w.branch);
+          continue;
+        }
+        const removed = await git(entry.repo, ['worktree', 'remove', w.path]);
+        if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
+          report.heldReasons.push(`worktree 삭제 실패: ${w.path}`);
+          continue;
+        }
+        report.removedWorktrees++;
+      }
+
+      await this.prune(entry.repo);
+      const localRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/ticket/']);
+      const remoteRefs = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/ticket/']);
+      const localBranches = localRefs.stdout.split(/\r?\n/).filter(ownsBranch);
+      const remoteBranches = remoteRefs.stdout.split(/\r?\n/)
+        .map((ref) => ref.replace(/^origin\//, '')).filter(ownsBranch);
+
+      for (const branch of localBranches) {
+        if (protectedBranches.has(branch)) continue;
+        if (blockedBranches.has(branch)) continue;
+        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
+        if (!merged.ok) {
+          report.heldReasons.push(`미병합/고유 커밋: ${branch}`);
+          continue;
+        }
+        const deleted = await git(entry.repo, ['branch', '-d', branch]);
+        if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
+        else report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+      }
+
+      for (const branch of remoteBranches) {
+        if (protectedBranches.has(branch)) continue;
+        if (blockedBranches.has(branch)) continue;
+        const remoteRef = `refs/remotes/origin/${branch}`;
+        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', remoteRef, baseRef]);
+        if (!merged.ok) {
+          report.heldReasons.push(`미병합/고유 커밋: origin/${branch}`);
+          continue;
+        }
+        const deleted = await git(entry.repo, ['push', 'origin', '--delete', branch]);
+        if (deleted.ok || /remote ref does not exist|unable to delete/i.test(deleted.stderr)) {
+          report.removedRemoteBranches.push(branch);
+        } else {
+          report.heldReasons.push(`원격 브랜치 삭제 실패: origin/${branch}`);
+        }
+      }
+
+      await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
+      const remainingLocal = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/ticket/']);
+      const remainingRemote = await git(entry.repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/ticket/']);
+      report.remainingBranches.push(
+        ...remainingLocal.stdout.split(/\r?\n/).filter(ownsBranch),
+        ...remainingRemote.stdout.split(/\r?\n/).filter(ownsBranch),
+      );
+      await this.#releaseSharedSlot(entry.repo, entry.worktreesRoot, opts.ticketId).catch(() => {});
+    }
+    report.heldReasons = [...new Set(report.heldReasons)];
+    report.remainingBranches = [...new Set(report.remainingBranches)];
+    return report;
   }
 
   /**

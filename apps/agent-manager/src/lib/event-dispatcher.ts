@@ -1320,16 +1320,10 @@ export class EventDispatcher {
   }
 
   /**
-   * ticket 9f26f091: when a ticket lands in a terminal column (done/merged),
-   * force-remove its per-(ticket,role) worktrees across every managed agent
-   * this manager owns — regardless of dirty state. Terminal-ness is read from
-   * the server-maintained `Ticket.terminal_entered_at` (stamped on entering a
-   * terminal column, cleared on leaving), so a position reorder inside a
-   * non-terminal column or a bounce back out to In Progress never triggers
-   * cleanup. The work is committed to the ticket's branch (or already merged)
-   * by the time it's terminal, so the checkout is disposable: the branch ref
-   * survives in the base repo even after its worktree is gone. Best-effort and
-   * fire-and-forget; never throws.
+   * 티켓이 terminal 컬럼에 진입하면 매니저가 소유한 checkout에서 해당 티켓의
+   * Git 흔적을 정리한다. 서버의 terminal_entered_at을 재확인하고, worktree가
+   * clean하며 티켓 branch가 base에 포함된 경우에만 worktree와 로컬/origin ref를
+   * 삭제한다. 보류 결과는 티켓 코멘트에 남기며 전체 처리는 best-effort다.
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
     if (!this.#worktreeManager) return;
@@ -1350,11 +1344,22 @@ export class EventDispatcher {
         // working_dir dedupe on that alone.
         if (seenDirs.has(ctx.working_dir)) continue;
         seenDirs.add(ctx.working_dir);
-        total += await this.#worktreeManager.removeTicketWorktrees({
+        const cleanup = await this.#worktreeManager.cleanupTerminalTicketGit({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          baseBranch: ticket.base_repo?.default_branch || ticket.base_branch || 'main',
           repositoryResourceId: ticket.base_repo?.id,
         });
+        total += cleanup.removedWorktrees;
+        if (cleanup.heldReasons.length > 0 || cleanup.remainingBranches.length > 0) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ticketId,
+            content:
+              `⚠️ Git 자동 정리를 보류했습니다.\n\n사유:\n- ${cleanup.heldReasons.join('\n- ') || '잔여 브랜치 확인 필요'}\n\n` +
+              `잔여 브랜치: ${cleanup.remainingBranches.join(', ') || '없음'}`,
+            metadata: { dedupe_key: `terminal-git-cleanup-held:${ticket.terminal_entered_at}` },
+          });
+        }
       }
       if (total > 0) {
         log(
