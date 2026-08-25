@@ -694,6 +694,8 @@ export class AgentManagerController {
    * credential, …). The `trigger_id` echoes the value the manager received on
    * the trigger payload (SSE `field_changed`), so DispatchIntentService matches
    * the ack to THAT exact dispatch and ignores a stale ack for a superseded one.
+   * 쌍둥이 억제는 `suppressed`로 별도 보고하며, intent를 재개하지 않고
+   * trigger_id별 전용 activity만 남겨 hard-budget에서 정확히 차감한다.
    *
    * CRITICAL (reviewer): `processed` is NOT resolution — it only extends the
    * retry deadline (spawn started, give the strand time to show real progress).
@@ -711,20 +713,38 @@ export class AgentManagerController {
   @ApiSecurity('agent-api-key')
   @Post('api/agent-manager/dispatch/ack')
   @UseGuards(AgentAuthGuard)
-  @ApiOperation({ summary: 'Manager → server: ack an agent_trigger dispatch (processed|nack)' })
+  @ApiOperation({ summary: 'Manager → server: agent_trigger 결과 보고 (processed|nack|suppressed)' })
   async dispatchAck(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
     const ticket_id = String(body?.ticket_id || '').trim();
     const role = String(body?.role || '').trim();
     const trigger_id = String(body?.trigger_id || '').trim();
-    const outcome = body?.outcome === 'processed' ? 'processed' : body?.outcome === 'nack' ? 'nack' : null;
+    const outcome = body?.outcome === 'processed'
+      ? 'processed'
+      : body?.outcome === 'nack'
+        ? 'nack'
+        : body?.outcome === 'suppressed'
+          ? 'suppressed'
+          : null;
     const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 500) : '';
     const skillSnapshotRunId = String(body?.skill_snapshot_run_id || '').trim();
     if (!ticket_id || !role || !outcome) {
-      return res.status(400).json({ error: 'ticket_id, role and outcome (processed|nack) are required' });
+      return res.status(400).json({ error: 'ticket_id, role and outcome (processed|nack|suppressed) are required' });
+    }
+    if (outcome === 'suppressed' && !trigger_id) {
+      return res.status(400).json({ error: 'suppressed outcome requires trigger_id' });
+    }
+    if (outcome === 'suppressed') {
+      const caller = callerAgentId ? await this.agentRepo.findOne({ where: { id: callerAgentId } }) : null;
+      if (caller?.type !== 'manager') {
+        return res.status(403).json({ error: 'suppressed outcome requires a manager agent' });
+      }
     }
 
-    const result = await this.dispatchIntents.applyManagerAck({ ticketId: ticket_id, role, triggerId: trigger_id, outcome, reason });
+    const result = await this.dispatchIntents.applyManagerAck({
+      ticketId: ticket_id, role, triggerId: trigger_id, outcome, reason,
+      managerAgentId: String(callerAgentId || ''),
+    });
     if (outcome === 'processed' && skillSnapshotRunId) {
       const ticket = await this.ticketRepo.findOne({ where: { id: ticket_id } });
       if (ticket?.workspace_id) {

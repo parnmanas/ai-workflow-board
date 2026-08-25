@@ -464,3 +464,371 @@ test('resolveCwd: a provisioning failure for the resolved (correct) resource har
     await correct.cleanup();
   }
 });
+
+async function makeManagedTerminalRepo(ticketId) {
+  const fixture = await makeRepoWithRemote();
+  const workingDir = join(fixture.root, 'agent-home');
+  const base = join(workingDir, '.awb', 'base', 'repo-resource');
+  const wtRoot = join(workingDir, '.awb', 'wt', 'repo-resource');
+  const wt = join(wtRoot, ticketId.slice(0, 8));
+  await fsp.mkdir(join(workingDir, '.awb', 'base'), { recursive: true });
+  execFileSync('git', ['clone', '-q', fixture.remote, base]);
+  git(base, ['config', 'user.email', 'test@awb.local']);
+  git(base, ['config', 'user.name', 'AWB Test']);
+  await fsp.mkdir(wtRoot, { recursive: true });
+  const branch = `ticket/${ticketId}-cleanup-test`;
+  git(base, ['worktree', 'add', '-q', '-b', branch, wt, 'origin/main']);
+  git(wt, ['push', '-q', '-u', 'origin', branch]);
+  return { ...fixture, workingDir, base, wt, branch };
+}
+
+test('cleanupTerminalTicketGit: clean이고 base에 반영된 티켓 worktree와 로컬/origin 브랜치만 멱등 삭제한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    git(fixture.base, ['checkout', '-q', 'main']);
+    const first = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.equal(first.removedWorktrees, 1);
+    assert.deepEqual(first.removedLocalBranches, [fixture.branch]);
+    assert.deepEqual(first.removedRemoteBranches, [fixture.branch]);
+    assert.deepEqual(first.remainingBranches, []);
+    assert.deepEqual(first.heldReasons, []);
+    assert.equal(existsSync(fixture.wt), false);
+
+    const repeated = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.deepEqual(repeated, {
+      removedWorktrees: 0,
+      removedLocalBranches: [],
+      removedRemoteBranches: [],
+      remainingBranches: [],
+      heldReasons: [],
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: dirty·미병합·다른 티켓 브랜치를 보존하고 사유를 반환한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const other = 'bbbbbbbb-1111-2222-3333-444444444444';
+  const otherBranch = `ticket/${other.slice(0, 8)}-keep`;
+  try {
+    await fsp.writeFile(join(fixture.wt, 'dirty.txt'), '보존');
+    git(fixture.base, ['branch', otherBranch, 'origin/main']);
+    const dirty = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(dirty.heldReasons.some((reason) => reason.startsWith('dirty worktree:')));
+    assert.ok(dirty.remainingBranches.includes(fixture.branch));
+    assert.equal(git(fixture.base, ['branch', '--list', otherBranch]), otherBranch);
+
+    await fsp.rm(join(fixture.wt, 'dirty.txt'));
+    await fsp.writeFile(join(fixture.wt, 'unique.txt'), '고유 커밋');
+    git(fixture.wt, ['add', '.']);
+    git(fixture.wt, ['commit', '-q', '-m', 'unique']);
+    const unmerged = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(unmerged.heldReasons.some((reason) => reason.includes('미병합/고유 커밋')));
+    assert.ok(existsSync(fixture.wt));
+    assert.equal(git(fixture.base, ['branch', '--list', otherBranch]), otherBranch);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: worktree 제거 실패 시 로컬과 origin 브랜치를 모두 보존한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: { removeWorktree: () => false },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('worktree 삭제 실패:')));
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 검증 뒤 원격 tip이 전진하면 lease 불일치로 삭제를 보류한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    const racer = join(fixture.root, 'racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'race.txt'), '원격 전진\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 전진']);
+
+    let advanced = false;
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        beforeRemoteDelete: (branch) => {
+          if (advanced || branch !== fixture.branch) return;
+          advanced = true;
+          git(racer, ['push', '-q', 'origin', fixture.branch]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.removedRemoteBranches, []);
+    assert.ok(result.heldReasons.includes(`원격 브랜치 삭제 실패: origin/${fixture.branch}`));
+    assert.equal(existsSync(fixture.wt), true);
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: origin만 미병합인 일반 티켓 branch는 worktree와 ref를 모두 보존한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    const racer = join(fixture.root, 'ticket-racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'unique.txt'), '원격 고유 커밋\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 고유 커밋']);
+    git(racer, ['push', '-q', 'origin', fixture.branch]);
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.equal(result.removedWorktrees, 0, JSON.stringify(result));
+    assert.ok(result.heldReasons.includes(`미병합/고유 커밋: origin/${fixture.branch}`));
+    assert.ok(result.remainingBranches.includes(fixture.branch));
+    assert.ok(result.remainingBranches.includes(`origin/${fixture.branch}`));
+    assert.equal(existsSync(fixture.wt), true);
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 검증된 worktree 소유권 밖의 고아·동일 8자 prefix·불일치 ref를 보존한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const collisionTicket = 'aaaaaaaa-9999-8888-7777-666666666666';
+  const collisionBranch = `ticket/${collisionTicket}-collision`;
+  const orphanBranch = `ticket/${TICKET_A}-orphan`;
+  const legacyShortBranch = `ticket/${TICKET_A.slice(0, 8)}-legacy`;
+  try {
+    for (const branch of [collisionBranch, orphanBranch, legacyShortBranch]) {
+      git(fixture.base, ['branch', branch, 'origin/main']);
+      git(fixture.base, ['push', '-q', 'origin', branch]);
+    }
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch]);
+    assert.deepEqual(result.removedRemoteBranches, [fixture.branch]);
+    for (const branch of [collisionBranch, orphanBranch, legacyShortBranch]) {
+      assert.equal(git(fixture.base, ['branch', '--list', branch]), branch);
+      assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', branch]).length > 0, true);
+    }
+    for (const branch of [orphanBranch, legacyShortBranch]) {
+      assert.ok(result.remainingBranches.includes(branch));
+      assert.ok(result.remainingBranches.includes(`origin/${branch}`));
+      assert.ok(result.heldReasons.includes(`소유권 미확인 브랜치 보존: ${branch}`));
+    }
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('worktree 소유권 불일치:')) === false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 티켓 경로의 소유권 불일치 branch를 잔여 목록과 보류 사유로 보고한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const otherBranch = `ticket/${TICKET_B}-wrong-owner`;
+  try {
+    git(fixture.wt, ['switch', '-q', '-c', otherBranch, 'origin/main']);
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(result.heldReasons.some((reason) => reason.includes(`worktree 소유권 불일치:`)));
+    assert.ok(result.heldReasons.includes(`소유권 미확인 브랜치 보존: ${otherBranch}`));
+    assert.ok(result.remainingBranches.includes(otherBranch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), otherBranch);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+async function makeSharedTerminalRepo(ticketId) {
+  const fixture = await makeRepoWithRemote();
+  const workingDir = join(fixture.root, 'agent-home');
+  const wm = new WorktreeManager();
+  const resolved = await wm.resolveCwd({
+    baseWorkingDir: workingDir,
+    ticketId,
+    role: 'assignee',
+    mode: 'shared',
+    poolSize: 1,
+    bootstrapRepo: { resourceId: 'repo-resource', url: fixture.remote, branch: 'main' },
+  });
+  assert.equal(resolved.isWorktree, true);
+  const base = join(workingDir, '.awb', 'base', 'repo-resource');
+  const branch = `ticket/${ticketId}-shared-cleanup`;
+  git(resolved.cwd, ['switch', '-q', '-c', branch]);
+  git(resolved.cwd, ['push', '-q', '-u', 'origin', branch]);
+  return { ...fixture, workingDir, base, wt: resolved.cwd, branch };
+}
+
+test('cleanupTerminalTicketGit: shared slot은 보존하고 clean·merged 티켓 ref만 삭제한 뒤 lease를 해제한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.equal(result.removedWorktrees, 0);
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch]);
+    assert.deepEqual(result.removedRemoteBranches, [fixture.branch]);
+    assert.equal(existsSync(fixture.wt), true, 'shared slot 자체는 warm pool로 보존한다');
+    assert.equal(git(fixture.wt, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD');
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: dirty shared slot은 ref와 active lease를 함께 보존하고 사유를 보고한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    await fsp.writeFile(join(fixture.wt, 'dirty.txt'), '보존\n');
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('dirty worktree:')));
+    assert.ok(result.remainingBranches.includes(fixture.branch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: origin만 미병합인 shared branch는 ref와 active lease를 함께 보존한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    const racer = join(fixture.root, 'shared-racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'unique.txt'), '원격 고유 커밋\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 고유 커밋']);
+    git(racer, ['push', '-q', 'origin', fixture.branch]);
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.ok(result.heldReasons.includes(`미병합/고유 커밋: origin/${fixture.branch}`));
+    assert.ok(result.remainingBranches.includes(fixture.branch));
+    assert.ok(result.remainingBranches.includes(`origin/${fixture.branch}`));
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: shared 원격 삭제 경쟁 시 checkout·로컬 ref·active lease를 함께 보존한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    const racer = join(fixture.root, 'shared-delete-racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'race.txt'), '원격 전진\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 전진']);
+
+    let advanced = false;
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        beforeRemoteDelete: (branch) => {
+          if (advanced || branch !== fixture.branch) return;
+          advanced = true;
+          git(racer, ['push', '-q', 'origin', fixture.branch]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.removedRemoteBranches, []);
+    assert.ok(result.heldReasons.includes(`원격 브랜치 삭제 실패: origin/${fixture.branch}`));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});

@@ -37,7 +37,7 @@ import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from '../../common/hard-budget-config';
-import { lastHumanUnpendAt, countWindowDispatches, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
+import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource, countTwinSuppressions, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
@@ -2150,10 +2150,19 @@ candidate's branch or move the ticket.
       const since = epoch && epoch.getTime() > windowStart.getTime() ? epoch : windowStart;
       const windowMin = Math.round(cfg.windowMs / 60_000);
 
-      const dispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
+      const emittedDispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
+      const suppressedDispatchCount = await countTwinSuppressions(this.dataSource, ticket.id, since);
+      const dispatchCount = Math.max(0, emittedDispatchCount - suppressedDispatchCount);
       if (dispatchCount >= cfg.maxDispatchesPerWindow) {
+        // ticket 3c8b8026 성공 기준 5: 초과 확정 후에만(핫패스 아님) 같은
+        // 윈도우를 trigger_source 별로 다시 묶어, 사람이 자동 pend 사유에서
+        // 폭주 근원(예: comment 자기증폭)과 정상적으로 바쁜 티켓을 구분할 수
+        // 있게 한다. 원시 emit 분포는 유지하고 상한 판정 수에서는 쌍둥이
+        // 억제 발생만 별도로 차감한다.
+        const bySource = await countWindowDispatchesBySource(this.dataSource, ticket.id, since);
         return await this._tripHardBudgetGate(ticket, agentId, role, triggerSource, cfg, windowMin, {
-          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow,
+          kind: 'dispatch', count: dispatchCount, limit: cfg.maxDispatchesPerWindow, bySource,
+          emittedCount: emittedDispatchCount, suppressedCount: suppressedDispatchCount,
         });
       }
 
@@ -2191,9 +2200,16 @@ candidate's branch or move the ticket.
     triggerSource: string,
     cfg: ResolvedHardBudget,
     windowMin: number,
-    breach: { kind: 'dispatch' | 'tokens'; count: number; limit: number },
+    breach: {
+      kind: 'dispatch' | 'tokens';
+      count: number;
+      limit: number;
+      bySource?: Array<{ trigger_source: string; count: number }>;
+      emittedCount?: number;
+      suppressedCount?: number;
+    },
   ): Promise<boolean> {
-    const { kind, count, limit } = breach;
+    const { kind, count, limit, bySource, emittedCount, suppressedCount } = breach;
     const isTokens = kind === 'tokens';
     const auditAction = isTokens ? 'agent_trigger_dropped_hard_budget_tokens' : 'agent_trigger_dropped_hard_budget';
     const pendGuardActor = isTokens ? 'hard_budget_token_guard' : 'hard_budget_dispatch_guard';
@@ -2202,11 +2218,20 @@ candidate's branch or move the ticket.
     const countLabel = isTokens
       ? `토큰 사용량: ${count.toLocaleString('ko-KR')} / ${windowMin}분 (상한 ${limit.toLocaleString('ko-KR')})`
       : `dispatch 수: ${count}회 / ${windowMin}분 (상한 ${limit})`;
+    // ticket 3c8b8026 성공 기준 5: trigger_source 분포 한 줄 — 사람이 pend
+    // 사유만 보고도 "어느 출처가 상한을 태웠는지" 바로 판단하도록 한다.
+    const sourceBreakdown = bySource && bySource.length > 0
+      ? bySource.map((s) => `${s.trigger_source}${s.count}건`).join(', ')
+      : '';
+    const sourceLine = sourceBreakdown ? `\n출처 분포: ${sourceBreakdown}` : '';
+    const suppressedLine = !isTokens && suppressedCount
+      ? `\n원시 emit: ${emittedCount}건 · 쌍둥이 억제 제외: ${suppressedCount}건`
+      : '';
     const reason = isTokens
       ? `이 티켓의 ${windowMin}분 내 토큰 사용량이 하드 상한(${limit.toLocaleString('ko-KR')} 토큰)을 초과해 자동 중지되었습니다. ` +
         `토큰 소모 원인을 확인한 뒤 pending을 해제하세요.`
       : `이 티켓의 dispatch 빈도가 ${windowMin}분 내 하드 상한(${limit}회)을 초과해 자동 중지되었습니다. ` +
-        `폭주 여부를 확인한 뒤 pending을 해제하세요.`;
+        `폭주 여부를 확인한 뒤 pending을 해제하세요.${sourceLine}${suppressedLine}`;
 
     this.logService.info('MCP', `agent_trigger dropped (${logLabel})`, {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
@@ -2242,6 +2267,8 @@ candidate's branch or move the ticket.
           `🚦 **${alertTitle}** — \`${ticket.id}\``,
           `**${ticket.title}**`,
           countLabel,
+          ...(sourceBreakdown ? [`출처 분포: ${sourceBreakdown}`] : []),
+          ...(suppressedCount ? [`원시 emit: ${emittedCount}건 · 쌍둥이 억제 제외: ${suppressedCount}건`] : []),
           cfg.autoPend
             ? '티켓 자동 pend됨 — 사람이 해제하기 전까지 추가 트리거가 차단됩니다.'
             : 'notify-only (auto-pend off for this board).',
@@ -2552,8 +2579,9 @@ candidate's branch or move the ticket.
     // focus-window gate below — an over-budget ticket must not dispatch even
     // when it's the agent's top-ranked focus ticket. A single early check is
     // enough (no late re-check like the pending gate): the count source
-    // (`trigger_emitted`) is a fail-open observability write, so this is
-    // already a best-effort safety-net ceiling, not a hard real-time cap.
+    // (`trigger_emitted`)은 SSE보다 먼저 저장되는 dispatch 상관 원장이지만,
+    // 이 조회와 이후 저장 사이에 동시 emit이 들어올 수 있으므로 실시간
+    // 원자 상한이 아니라 보수적 safety-net ceiling으로 취급한다.
     if (await this._checkHardBudgetGate(ticket, agentId, role, triggerSource, boardId)) {
       return '';
     }
@@ -3184,15 +3212,59 @@ candidate's branch or move the ticket.
 
     const forceRespawn = opts?.forceRespawn === true;
 
-    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 위쪽 얼리 드롭
-    // (_checkPendingUserGate 최초 호출) 이후 여기까지 오는 동안 agent/role
-    // 조회, base-repo/column-prompt/harness/effort/environment 해석,
-    // board-lessons 주입, chain-target 조회 등 십여 개의 await가 더 지나갔다
-    // — 그 창 안에서 걸린 pend_ticket은 얼리 드롭에는 보이지 않는다. 동일
-    // 헬퍼로(판정 로직 중복 없이) 실제 emit 바로 앞에서 한 번 더 신선 조회한다.
-    // 이 호출과 아래 emit 사이에는 다른 await가 없다 — 그것이 이 재확인의
-    // 존재 이유다.
+    // hard-budget의 원시 집합이자 매니저 억제 ACK의 상관 근거를 SSE보다
+    // 먼저 커밋한다. EventEmitter 리스너는 동기적으로 실행을 시작하므로
+    // emit 뒤에 저장하면 즉시 도착한 ACK가 행을 못 찾아 영구 유실될 수 있다.
+    // 이 저장이 실패하면 상관 불가능한 trigger를 내보내지 않는 fail-closed
+    // 정책을 적용한다. 보수적으로 dispatch가 누락될 수는 있어도, 억제된
+    // dispatch를 상한에서 비결정적으로 차감하거나 과소계상하지는 않는다.
+    const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+    const createdAtIso = ticket.created_at
+      ? new Date(ticket.created_at).toISOString()
+      : '';
+    let triggerCorrelation: ActivityLog;
+    try {
+      triggerCorrelation = await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'trigger_emitted',
+        // 매니저의 억제 보고를 실제 emit과 1:1로 상관시키는 안정 키다.
+        field_changed: triggerId,
+        new_value: JSON.stringify({
+          target_agent_id: agentId,
+          column_position: col?.position ?? -1,
+          chain_target: chainTarget,
+          priority_index: priorityIndex(ticket.priority),
+          ticket_created_at: createdAtIso,
+          force_respawn: forceRespawn,
+          base_repo_id: baseRepoId || null,
+          base_repo_url: baseRepo?.url || null,
+          base_branch: baseBranch || null,
+          worktree_mode: worktreeMode,
+        }),
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.error('MCP', 'trigger_emitted activity log write failed; trigger not emitted', {
+        err: String(e), ticket_id: ticket.id, agent_id: agentId, role,
+      });
+      throw Object.assign(new Error('Unable to persist trigger correlation'), {
+        status: 503,
+        code: 'TRIGGER_CORRELATION_PERSIST_FAILED',
+      });
+    }
+
+    // 마지막 순간 재확인 (ticket be934f61 — TOCTOU race). 상관 행 저장까지
+    // 마친 뒤 실제 emit 바로 앞에서 신선한 티켓 상태를 다시 읽는다. 이 호출과
+    // 아래 emit 사이에는 다른 await가 없어 pending 전환을 지나쳐 발행하지 않는다.
     if (await this._checkPendingUserGate(ticket, agentId, role, triggerSource, opts?.bypassTicketPending)) {
+      // 실제 SSE emit이 없었으므로 hard-budget의 원시 emit 집합에서도 뺀다.
+      // 저장 결과의 PK로 정확히 이 시도의 상관 행 하나만 원자 삭제한다.
+      await activityLogRepo.delete(triggerCorrelation.id);
       return '';
     }
 
@@ -3257,48 +3329,6 @@ candidate's branch or move the ticket.
     this.logService.info('MCP', 'agent_trigger emitted (fire-and-forget)', {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource, force_respawn: forceRespawn,
     });
-
-    // Observability hook required by ticket 4a6cdfd7 acceptance #8.
-    // Every successful dispatch leaves a `trigger_emitted` ActivityLog
-    // row with the selector ranking inputs in `new_value` so admins
-    // can correlate the chosen-focus decision against the parked tickets.
-    try {
-      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-      const createdAtIso = ticket.created_at
-        ? new Date(ticket.created_at).toISOString()
-        : '';
-      await activityLogRepo.save(activityLogRepo.create({
-        entity_type: 'ticket',
-        entity_id: ticket.id,
-        ticket_id: ticket.id,
-        actor_id: 'system',
-        actor_name: 'TriggerLoopService',
-        action: 'trigger_emitted',
-        new_value: JSON.stringify({
-          target_agent_id: agentId,
-          column_position: col?.position ?? -1,
-          chain_target: chainTarget,
-          priority_index: priorityIndex(ticket.priority),
-          ticket_created_at: createdAtIso,
-          force_respawn: forceRespawn,
-          // ticket 112ea3c5 (수용 기준 #8): 이 dispatch가 바인딩한 resolved
-          // repo/branch — ticket 고유든 board-env 백필이든 — 를 남겨, "잘못된
-          // repo" 신고를 이 티켓 자체의 audit trail만으로 진단할 수 있게 한다.
-          base_repo_id: baseRepoId || null,
-          base_repo_url: baseRepo?.url || null,
-          base_branch: baseBranch || null,
-          worktree_mode: worktreeMode,
-        }),
-        role,
-        trigger_source: triggerSource,
-      }));
-    } catch (e) {
-      // Never block the emit on observability writes. A missed log row
-      // is preferable to a missed trigger.
-      this.logService.warn('MCP', 'trigger_emitted activity log write failed (non-fatal)', {
-        err: String(e), ticket_id: ticket.id, agent_id: agentId,
-      });
-    }
 
     // Claim-verification snapshot (ticket dcb9d661). When an assignee
     // is being woken on an active column AND the workspace has

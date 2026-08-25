@@ -124,7 +124,7 @@ export function resolveHarnessConfig(
 export function buildBoardLanguageInstruction(language: string | null | undefined): string | null {
   const trimmed = language?.trim();
   if (!trimmed) return null;
-  return `Respond in ${trimmed}. Write all ticket comments, chat messages, commit messages, PR descriptions, and code comments in ${trimmed}.`;
+  return `Respond in ${trimmed}. Write every user-visible message in ${trimmed}, including ticket comments, chat messages, questions, status/progress updates, blocker and Pending reasons, tool arguments that will be displayed to users, commit messages, PR descriptions, and code comments. Do not fall back to English for workflow or error messages.`;
 }
 
 export function appendBoardLanguageInstruction(

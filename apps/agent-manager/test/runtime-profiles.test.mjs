@@ -12,6 +12,7 @@ import {
   startRuntimeProfile,
   validateRuntimeProfile,
 } from '../dist/lib/runtime-profiles.js';
+import { resolveClaudeEffortFlag } from '../dist/lib/cli-adapters/base.js';
 
 const fixtureRoot = join(process.cwd(), '.test-claude-backend');
 const config = {
@@ -31,6 +32,7 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   baseUrl: process.env.ANTHROPIC_BASE_URL,
   auth: process.env.ANTHROPIC_AUTH_TOKEN,
   model: process.argv.includes('--model') ? process.argv[process.argv.indexOf('--model') + 1] : null,
+  effort: process.argv.includes('--effort') ? process.argv[process.argv.indexOf('--effort') + 1] : null,
   anthropicModel: process.env.ANTHROPIC_MODEL,
   smallFastModel: process.env.ANTHROPIC_SMALL_FAST_MODEL,
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
@@ -84,6 +86,7 @@ async function spawnFixture(profile, captureFile, extra = {}) {
     ticketId: `ticket-${profile.id}`,
     agentId: 'agent-fixture',
     role: 'assignee',
+    effortPreset: extra.effortPreset,
     runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile } },
     agentContext: {
       agent_id: 'agent-fixture',
@@ -122,6 +125,28 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
   assert.equal(capture.model, null);
   assert.equal(capture.awb, 'agent-awb-key');
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
+});
+
+test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 생략한다', async () => {
+  const executable = await makeClaudeFixture('claude-effort-parity.mjs');
+  const profile = {
+    id: 'effort-parity',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40110',
+    model: 'qwen3-coder-next',
+    omit_effort: true,
+    claude_executable: executable,
+  };
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, profile), null);
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...profile, omit_effort: false }), 'high');
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, null), 'high');
+
+  const capture = await spawnFixture(profile, join(fixtureRoot, 'effort-parity.json'), {
+    model: 'anthropic-agent-default',
+    effortPreset: { id: 'deep', claude: { effort: 'high' } },
+  });
+  assert.equal(capture.effort, null);
 });
 
 // ticket 41dc37cb round 3 — round 1/2는 --model/ANTHROPIC_MODEL/

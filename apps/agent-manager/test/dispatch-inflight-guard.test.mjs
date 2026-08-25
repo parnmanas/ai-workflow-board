@@ -385,6 +385,53 @@ test('concurrent supervisor tick: two same-key triggers → exactly ONE spawn, o
   assert.equal(mgr.tryReserveDispatch('t1', 'assignee', 'a1').live, true, 'released to a live-reuse state');
 });
 
+test('한 hold의 억제 N건은 알림 1건과 별개로 suppressed ack N건을 보고한다', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, tracker } = makeDispatcher({ ticketMgr: mgr });
+  const ackBodies = [];
+  const commentCalls = [];
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (target.endsWith('/api/agent-manager/dispatch/ack')) {
+      ackBodies.push(JSON.parse(body));
+      return { ok: true, status: 200, async json() { return {}; }, async text() { return ''; }, headers: { get: () => null } };
+    }
+    if (body.includes('"tools/call"')) commentCalls.push(JSON.parse(body));
+    return {
+      ok: true, status: 200,
+      headers: { get: (name) => name.toLowerCase() === 'mcp-session-id' ? 'suppression-session' : null },
+      async json() { return {}; }, async text() { return ''; },
+    };
+  };
+
+  const holder = dispatcher.handleTrigger(evJson({ field_changed: 'holder' }));
+  await waitFor(() => mgr.spawnCount === 1);
+  await Promise.all([
+    dispatcher.handleTrigger(evJson({ field_changed: 'twin-1' })),
+    dispatcher.handleTrigger(evJson({ field_changed: 'twin-2' })),
+    dispatcher.handleTrigger(evJson({ field_changed: 'twin-3' })),
+  ]);
+  await waitFor(() => ackBodies.filter((b) => b.outcome === 'suppressed').length === 3);
+  await waitFor(() => commentCalls.some((c) => c?.params?.name === 'add_comment'));
+
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 3, '실제 억제는 세 건이다');
+  assert.deepEqual(
+    ackBodies.filter((b) => b.outcome === 'suppressed').map((b) => b.trigger_id).sort(),
+    ['twin-1', 'twin-2', 'twin-3'],
+    '표시 throttle과 무관하게 억제된 각 trigger id를 서버에 보고해야 한다',
+  );
+  assert.equal(
+    commentCalls.filter((c) => c?.params?.name === 'add_comment').length,
+    1,
+    '같은 hold-burst의 사용자 가시 알림은 한 번만 발행해야 한다',
+  );
+
+  gate.resolve();
+  await holder;
+});
+
 test('gate releases after a successful dispatch so a later same-key trigger re-enters', async () => {
   const { dispatcher, mgr, tracker } = makeDispatcher();
   await dispatcher.handleTrigger(evJson());

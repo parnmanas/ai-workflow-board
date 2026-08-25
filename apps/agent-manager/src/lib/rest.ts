@@ -444,8 +444,9 @@ export async function postCliLoginProgressRaw(
 /**
  * ticket e7c87517 — manager → server ack for an `agent_trigger` dispatch,
  * closing the durable dispatch outbox loop. Called right after the manager
- * spawns the subagent (`outcome='processed'`) or aborts the spawn
- * (`outcome='nack'` — worktree pool_exhausted / missing repo / push credential).
+ * 하위 에이전트 spawn 성공은 `outcome='processed'`, spawn 중단은
+ * `outcome='nack'`, 이미 진행 중인 쌍둥이 억제는 `outcome='suppressed'`로
+ * 서버에 보고한다.
  * `triggerId` echoes the value received on the trigger payload (SSE
  * `field_changed`) so the server matches the ack to THAT dispatch and drops a
  * stale one. Fire-and-log: a dropped ack just means the server's reconciler
@@ -456,7 +457,7 @@ export interface DispatchAckBody {
   ticket_id: string;
   role: string;
   trigger_id: string;
-  outcome: 'processed' | 'nack';
+  outcome: 'processed' | 'nack' | 'suppressed';
   reason?: string;
   skill_snapshot_run_id?: string;
 }

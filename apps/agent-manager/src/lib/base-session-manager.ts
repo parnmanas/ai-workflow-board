@@ -34,6 +34,7 @@ import {
   type TurnImage,
   describeHarness,
   partitionHarness,
+  resolveClaudeEffortFlag,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
@@ -696,7 +697,7 @@ export class BaseSessionManager {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
-    const effortFlag = slice?.effort ?? null;
+    const effortFlag = resolveClaudeEffortFlag(slice, claudeRuntimeProfile);
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(

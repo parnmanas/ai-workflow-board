@@ -224,6 +224,7 @@ test('migrates safely reusable legacy Anthropic rows instead of silently droppin
     protocol: 'anthropic-compatible',
     base_url: 'http://127.0.0.1:9010',
     model: 'legacy-model',
+    omit_effort: false,
     env: { LEGACY_PUBLIC: 'preserved' },
     args: ['--legacy-flag'],
     credential_required: false,

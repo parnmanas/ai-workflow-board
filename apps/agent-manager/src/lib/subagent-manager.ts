@@ -34,6 +34,7 @@ import {
   type CliUsageSnapshot,
   describeHarness,
   partitionHarness,
+  resolveClaudeEffortFlag,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
@@ -653,7 +654,7 @@ export class SubagentManager implements SubagentManagerContract {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? ctx?.model ?? null);
-    const effortFlag = slice?.effort ?? null;
+    const effortFlag = resolveClaudeEffortFlag(slice, claudeRuntimeProfile);
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(

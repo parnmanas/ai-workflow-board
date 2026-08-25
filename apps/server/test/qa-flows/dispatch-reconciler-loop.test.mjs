@@ -52,6 +52,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 process.env.PORT = process.env.QA_DISPATCH_PORT || '7835';
+// suppressed ACK의 manager provenance를 검증하므로 dev-mode 인증 우회를 끈다.
+process.env.AGENT_API_KEY = 'qa-dispatch-reconciler-static-fallback';
 process.env.STUCK_DETECTOR_ENABLED = 'false';       // isolate the dispatch loop
 process.env.DISPATCH_RECONCILER_ENABLED = 'true';
 process.env.DISPATCH_RECONCILER_SWEEP_MS = '300000'; // 5min — the auto-timer never fires in-test
@@ -76,6 +78,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
   const intents = await load('dispatch-intent.service.js', 'DispatchIntentService');
   const reconciler = await load('dispatch-reconciler.service.js', 'DispatchReconcilerService');
   const triggerLoop = await load('trigger-loop.service.js', 'TriggerLoopService');
+  const { activityEvents } = await import('file://' + path.join(DIST_ROOT, 'services', 'activity.service.js'));
 
   step('Seed a CODE board (env repo so assignee+active dispatches land) + agent');
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
@@ -282,6 +285,124 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
     const bad = await post({ ticket_id: ticket.id });
     assert.equal(bad.status, 400, 'missing role/outcome → 400 (contract validation)');
+  });
+
+  await t.test('10b: HTTP suppressed outcome은 매 억제를 기록하되 intent를 변경하지 않는다', async () => {
+    const ticket = await mkTicket('http suppression audit');
+    const tids = [];
+    for (let i = 0; i < 3; i += 1) {
+      tids.push(await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system'));
+    }
+    assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
+    const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
+      workspaceId: ws.id, label: 'mgr-suppression',
+    })).raw_key;
+    const post = (bodyObj) => fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
+    const before = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+
+    for (let i = 0; i < 3; i += 1) {
+      const resp = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticket.id, role: 'assignee', trigger_id: tids[i],
+          outcome: 'suppressed', reason: 'inflight_dispatch',
+        }),
+      });
+      assert.equal(resp.status, 200, 'suppressed 보고를 wire endpoint가 받아야 한다');
+    }
+
+    const rows = await ds.getRepository('ActivityLog').find({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed' },
+    });
+    assert.equal(rows.length, 3, '표시 알림 throttle과 무관하게 억제 N건이 각각 기록되어야 한다');
+    const after = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    assert.equal(after.status, before.status, 'suppressed 관측은 intent 상태를 바꾸면 안 된다');
+    assert.equal(after.last_ack_kind, before.last_ack_kind, '진행 중 holder의 ack 상태를 덮으면 안 된다');
+
+    const otherTicket = await mkTicket('other suppression audit');
+    const otherTid = await triggerLoop.emitAgentTrigger(otherTicket, agent.id, 'assignee', 'column_move', 'system');
+    const invalidCases = [
+      { ticket_id: ticket.id, role: 'assignee', trigger_id: '존재하지-않는-trigger' },
+      { ticket_id: ticket.id, role: 'reviewer', trigger_id: tids[0] },
+      { ticket_id: ticket.id, role: 'assignee', trigger_id: otherTid },
+    ];
+    for (const invalid of invalidCases) {
+      const resp = await post({ ...invalid, outcome: 'suppressed', reason: 'inflight_dispatch' });
+      assert.equal(resp.status, 200);
+      assert.equal((await resp.json()).applied, false, 'emit과 상관되지 않은 억제 보고는 적용하면 안 된다');
+    }
+    assert.equal(await ds.getRepository('ActivityLog').count({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed' },
+    }), 3, '미상관 trigger/role은 차감 activity를 만들면 안 된다');
+
+    for (const source of ['manual', 'comment_summary']) {
+      const excludedTriggerId = `${source}-suppression`;
+      await ds.getRepository('ActivityLog').save({
+        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+        action: 'trigger_emitted', field_changed: excludedTriggerId,
+        role: 'assignee', trigger_source: source,
+      });
+      const excluded = await post({
+        ticket_id: ticket.id, role: 'assignee', trigger_id: excludedTriggerId,
+        outcome: 'suppressed', reason: 'inflight_dispatch',
+      });
+      assert.equal((await excluded.json()).applied, false,
+        `hard-budget 원시 집합에서 제외한 ${source} emit은 차감하면 안 된다`);
+    }
+
+    const forged = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': (await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'non-manager' })).raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket_id: ticket.id, role: 'assignee', trigger_id: 'forged', outcome: 'suppressed' }),
+    });
+    assert.equal(forged.status, 403, '일반 agent는 hard-budget 차감 신호를 위조할 수 없어야 한다');
+  });
+
+  await t.test('10c: SSE 수신 즉시 도착한 suppressed ACK도 상관 행을 찾는다', async () => {
+    const ticket = await mkTicket('immediate suppression correlation');
+    assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
+    const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
+      workspaceId: ws.id, label: 'mgr-immediate-suppression',
+    })).raw_key;
+
+    let resolveAck;
+    let rejectAck;
+    const ackResult = new Promise((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+    const onTrigger = (event) => {
+      if (event.ticket_id !== ticket.id) return;
+      void fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticket.id,
+          role: 'assignee',
+          trigger_id: event.trigger_id,
+          outcome: 'suppressed',
+          reason: 'inflight_dispatch',
+        }),
+      }).then(async (response) => ({ status: response.status, body: await response.json() }))
+        .then(resolveAck, rejectAck);
+    };
+    activityEvents.on('agent_trigger', onTrigger);
+    t.after(() => activityEvents.removeListener('agent_trigger', onTrigger));
+
+    const triggerId = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
+    const ack = await ackResult;
+    activityEvents.removeListener('agent_trigger', onTrigger);
+
+    assert.equal(ack.status, 200);
+    assert.equal(ack.body.applied, true, 'SSE 리스너가 즉시 보낸 ACK도 이미 커밋된 emit과 상관되어야 한다');
+    assert.equal(await ds.getRepository('ActivityLog').count({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed', entity_id: triggerId },
+    }), 1, '즉시 억제도 정확히 한 번 차감 activity로 남아야 한다');
   });
 
   await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {

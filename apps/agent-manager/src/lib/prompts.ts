@@ -350,6 +350,10 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     '- ORDINARY WORK ROUTING: an AWB ticket is optional, not the default for every request. Use a ticket when a suitable existing board clearly matches the work and the task benefits from board tracking, handoff, review, or a multi-step lifecycle.',
     '- If no suitable board exists, do NOT create a board or ticket merely to process the request. Handle the work directly in this chat. Also handle small, one-off work directly, including environment setup, configuration, quick fixes, and simple file or command changes, unless the user explicitly asks for ticket tracking.',
     '- When ticketing is warranted, reuse the suitable existing board and create one focused AWB ticket. Otherwise perform the requested work now and report the result inline; do not only describe a proposed ticket.',
+    '- DIRECT-CHAT GIT POLICY: before changing tracked repository files, inspect the current branch, working tree, remote default branch, and repository instructions. Pure inspection and environment-only work that does not change tracked files needs no branch.',
+    '- For direct-chat file changes, use the branch explicitly requested by the user when safe. Otherwise create or reuse one dedicated branch for this chat task, named `chat/<room-id-short>-<slug>`, from the latest remote default branch. Never make direct-chat edits on shared/protected branches such as `main`, `master`, `production`, `production.private`, or release branches.',
+    '- If the working tree already has changes, continue on the current branch only when those changes clearly belong to this same chat task. If they are unrelated or ownership is uncertain, preserve them and stop before switching branches, stashing, overwriting, or mixing work; report the conflict and ask for direction.',
+    '- Keep all edits for one chat task on that dedicated branch. Do not commit, push, merge, or delete branches unless the user requested it or the surrounding workflow explicitly requires it.',
   ];
   if (mode) {
     const managerDelivers = mode === 'agent_manager_delivers';

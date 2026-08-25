@@ -1136,6 +1136,11 @@ export class EventDispatcher {
         '않으며, 재설정 후 **정확히 1회** 재개됩니다' +
         (resetLabel ? ` (reset: ${resetLabel})` : '') +
         '. (ticket 467f714a)',
+      // ticket 3c8b8026: 이 파일의 모든 순수 자동 알림 add_comment 호출은
+      // auto_notice:true 를 실어 서버가 activity-log actor_id 를 'system' 으로
+      // 남기게 한다 — 그래야 이 알림이 스스로를 재트리거해 억제→알림→재트리거의
+      // 자기증폭 루프를 만들지 않는다(코멘트 본문의 author 표시는 그대로 유지).
+      metadata: { auto_notice: true },
     });
   }
   // ticket e9d0e8bc: folder-keyed run-lifetime lock. One per manager process
@@ -1309,21 +1314,16 @@ export class EventDispatcher {
         `⛔ **shared worktree 풀 고갈 지속 — 자동 재시도 한도 초과, pend** — 매니저가 ${entry.attempts}회 자동 재시도했지만 슬롯이 반납/회수되지 않아 디스패치를 pend 했습니다.\n\n` +
         `leaked lease 는 이미 회수 grace(20분) 를 넘겨 재조정 대상이었으므로, 남은 원인은 이 working_dir 를 공유하는 보드들의 실제 동시 실행 수가 풀 크기 N 을 초과하는 과다구독입니다.\n\n` +
         `**조치:** max_concurrent_tickets_per_agent 를 늘리거나, 이 working_dir 를 공유하는 보드/에이전트 구성을 분리한 뒤 unpend 하세요. (원인-불문 no-progress 백스톱: e7c87517)`,
+      metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
     });
     log(`[pool-retry] pended ticket=${entry.ticketId.slice(0, 8)} role=${entry.role} after ${entry.attempts} exhausted retries`);
   }
 
   /**
-   * ticket 9f26f091: when a ticket lands in a terminal column (done/merged),
-   * force-remove its per-(ticket,role) worktrees across every managed agent
-   * this manager owns — regardless of dirty state. Terminal-ness is read from
-   * the server-maintained `Ticket.terminal_entered_at` (stamped on entering a
-   * terminal column, cleared on leaving), so a position reorder inside a
-   * non-terminal column or a bounce back out to In Progress never triggers
-   * cleanup. The work is committed to the ticket's branch (or already merged)
-   * by the time it's terminal, so the checkout is disposable: the branch ref
-   * survives in the base repo even after its worktree is gone. Best-effort and
-   * fire-and-forget; never throws.
+   * 티켓이 terminal 컬럼에 진입하면 매니저가 소유한 checkout에서 해당 티켓의
+   * Git 흔적을 정리한다. 서버의 terminal_entered_at을 재확인하고, worktree가
+   * clean하며 티켓 branch가 base에 포함된 경우에만 worktree와 로컬/origin ref를
+   * 삭제한다. 보류 결과는 티켓 코멘트에 남기며 전체 처리는 best-effort다.
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
     if (!this.#worktreeManager) return;
@@ -1344,11 +1344,22 @@ export class EventDispatcher {
         // working_dir dedupe on that alone.
         if (seenDirs.has(ctx.working_dir)) continue;
         seenDirs.add(ctx.working_dir);
-        total += await this.#worktreeManager.removeTicketWorktrees({
+        const cleanup = await this.#worktreeManager.cleanupTerminalTicketGit({
           baseWorkingDir: ctx.working_dir,
           ticketId,
+          baseBranch: ticket.base_branch || ticket.base_repo?.default_branch || 'main',
           repositoryResourceId: ticket.base_repo?.id,
         });
+        total += cleanup.removedWorktrees;
+        if (cleanup.heldReasons.length > 0 || cleanup.remainingBranches.length > 0) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ticketId,
+            content:
+              `⚠️ Git 자동 정리를 보류했습니다.\n\n사유:\n- ${cleanup.heldReasons.join('\n- ') || '잔여 브랜치 확인 필요'}\n\n` +
+              `잔여 브랜치: ${cleanup.remainingBranches.join(', ') || '없음'}`,
+            metadata: { dedupe_key: `terminal-git-cleanup-held:${ticket.terminal_entered_at}` },
+          });
+        }
       }
       if (total > 0) {
         log(
@@ -1694,6 +1705,7 @@ export class EventDispatcher {
       content:
         `⚠️ **Hermes 런타임 실행 실패** (\`${chatCode}\`)\n\n` +
         '이 멘션에 응답하지 못했습니다. Agent Manager 로그를 확인한 뒤 다시 멘션해 주세요.',
+      metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
     });
   }
 
@@ -2170,6 +2182,7 @@ export class EventDispatcher {
           inflightKey,
           { force: isForce, raw },
         );
+        this.#ackDispatch(ev, 'suppressed', 'inflight_dispatch');
         log(
           `[dispatch] twin suppressed (inflight_dispatch): another dispatch is already ` +
             `provisioning/spawning ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'} ` +
@@ -2196,6 +2209,15 @@ export class EventDispatcher {
               '새 트리거를 무시했습니다. force-respawn 이었다면 완료 직후 1회 재실행됩니다.',
             metadata: {
               dedupe_key: `dispatch_suppress:inflight:${ev.ticket_id}:${ev.action || '_'}:${dispatchAgentId || '_'}`,
+              // ticket 3c8b8026: 이 알림 자체가 코멘트→트리거 경로를 다시 타
+              // 새 trigger_emitted 를 낳고, 그 트리거가 또 억제되며 알림을 한
+              // 번 더 남기는 자기증폭 루프였다(재현: hard-budget 30회를
+              // 16분만에 소진, 그중 27%가 순수 이 알림의 자기메아리). 서버는
+              // auto_notice:true 인 코멘트의 activity-log actor_id 를
+              // 'system' 으로 남겨 trigger-loop 의 기존 system-actor 가드가
+              // 그대로 걸러내게 한다 — dedupe_key 로 합쳐지지 않는(=티켓의
+              // 마지막 코멘트가 아닌) 최초 알림 발생 건에도 적용된다.
+              auto_notice: true,
             },
           });
         }
@@ -2223,6 +2245,7 @@ export class EventDispatcher {
             content:
               '⚠️ 디스패치 dedupe 강제 해제 (safety valve) — 좀비 예약을 회수하고 재-dispatch 했습니다. ' +
               '반복되면 매니저 로그에서 프로비저닝 hang / codex exit-1 원인을 확인하세요.',
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
           });
         }
       }
@@ -2348,6 +2371,7 @@ export class EventDispatcher {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content: PI_TICKET_DISPATCH_BLOCK_COMMENT,
+          metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
         });
       }
       await fireAndForgetTool(this.#config, 'pend_ticket', {
@@ -2442,6 +2466,7 @@ export class EventDispatcher {
           await fireAndForgetTool(this.#config, 'add_comment', {
             ticket_id: ev.ticket_id,
             content: POOL_EXHAUSTED_RETRY_COMMENT,
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
           });
         }
         log(
@@ -2482,6 +2507,7 @@ export class EventDispatcher {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
           content,
+          metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
         });
       }
       // ticket 52eedadf: the cooldown backoff above thins the supervisor storm
@@ -2613,7 +2639,11 @@ export class EventDispatcher {
               `세부: \`${readiness.detail || ''}\`\n\n` +
               `해당 agent의 CLI 자격 증명을 재발급/재로그인한 뒤 다시 트리거하세요.\n\n` +
               `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 자격 증명을 고친 뒤 unpend 하세요._`;
-          await fireAndForgetTool(this.#config, 'add_comment', { ticket_id: ev.ticket_id, content });
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content,
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
+          });
         }
         if (provisionBlock.shouldPend) {
           await fireAndForgetTool(this.#config, 'pend_ticket', {
@@ -2668,6 +2698,7 @@ export class EventDispatcher {
               `원인: \`${readiness.detail || 'push credential unavailable'}\`\n\n` +
               `이 repository resource 에 GitHub 자격 증명(토큰)을 설정하거나 push 가능한 환경으로 전환한 뒤 다시 트리거하세요. ` +
               `(Merging 단계의 push 실패로 CLI 세션을 낭비하지 않도록 dispatch 전에 검증합니다.)`,
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
           });
         }
         // ticket 52eedadf: a missing push credential is likewise durable (an
@@ -3080,6 +3111,7 @@ export class EventDispatcher {
                 `마지막 오류: \`${result.detail || `invalid transport in ${mcpServerPath}`}\`\n\n` +
                 `이 agent의 CLI 홈(config.toml)의 \`${mcpServerPath}\` 테이블(또는 harness/자격 증명 설정)을 점검해 고친 뒤 이 티켓을 unpend 하세요.\n\n` +
                 `_동일 오류로 인한 supervisor 자동 재트리거는 억제됩니다 — 설정을 고친 뒤 unpend 하세요._`,
+              metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지, #postDeferAuditComment 주석 참고
             });
           }
           if (provisionBlock.shouldPend) {
@@ -3123,7 +3155,7 @@ export class EventDispatcher {
    * server's reconciler falls back to its processing-grace timeout if the ack
    * never lands, so this can never block or fail a spawn.
    */
-  #ackDispatch(ev: any, outcome: 'processed' | 'nack', reason?: string): void {
+  #ackDispatch(ev: any, outcome: 'processed' | 'nack' | 'suppressed', reason?: string): void {
     void postDispatchAck(this.#config, {
       ticket_id: String(ev?.ticket_id || ''),
       role: String(ev?.action || ''),
@@ -3642,6 +3674,10 @@ export class EventDispatcher {
             '멘션 dispatch 를 무시했습니다. 이 코멘트는 진행 중인 세션이 함께 읽습니다.',
           metadata: {
             dedupe_key: `dispatch_suppress:mention_seat:${ticketId || '_'}:${mention.role_shortcut}:${targetAgentId || '_'}`,
+            // ticket 3c8b8026 — 자기 재트리거 방지. 위 inflight_dispatch
+            // 사이트의 주석 참고(동일 근거: 이 알림이 코멘트→트리거 경로를
+            // 다시 타 자기증폭 루프를 만들던 문제).
+            auto_notice: true,
           },
         });
       };

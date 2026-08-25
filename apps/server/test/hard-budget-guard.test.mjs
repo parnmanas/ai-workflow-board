@@ -45,6 +45,8 @@ const {
   lastHumanUnpendAt,
   countAutoResponses,
   countWindowDispatches,
+  countWindowDispatchesBySource,
+  countTwinSuppressions,
   countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
@@ -64,6 +66,7 @@ const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
 const subagentRepo = ds.getRepository(Subagent);
+const agentRepo = ds.getRepository(Agent);
 const wsRepo = ds.getRepository(Workspace);
 
 async function makeBoard(hardBudgetConfig) {
@@ -98,10 +101,10 @@ async function recordHumanUnpend(ticketId) {
     actor_id: 'human1', actor_name: 'Human',
   }));
 }
-async function recordTriggerEmitted(ticketId, triggerSource = 'comment') {
+async function recordTriggerEmitted(ticketId, triggerSource = 'comment', triggerId = '') {
   await activityRepo.save(activityRepo.create({
     entity_type: 'ticket', entity_id: ticketId, ticket_id: ticketId, action: 'trigger_emitted',
-    trigger_source: triggerSource, actor_id: 'system', actor_name: 'TriggerLoopService',
+    field_changed: triggerId, trigger_source: triggerSource, actor_id: 'system', actor_name: 'TriggerLoopService',
   }));
 }
 /** Write a `subagents` row shaped like the `end` POST leaves it (ticket 6dd3f968). */
@@ -155,6 +158,109 @@ test('countWindowDispatches excludes manual/comment_summary trigger sources', as
   await recordTriggerEmitted(t.id, 'comment_summary');
   await recordTriggerEmitted(t.id, 'column_move');
   assert.equal(await countWindowDispatches(ds, t.id, since), 2);
+});
+
+// ticket 3c8b8026 성공 기준 5: 자동 pend 알림의 trigger_source 분포다.
+// countWindowDispatches와 같은 행/제외 조건에 GROUP BY만 더하므로 두 집계의
+// 합계는 항상 같아야 한다.
+test('countWindowDispatchesBySource groups by trigger_source with the same exclusions as countWindowDispatches', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  await recordTriggerEmitted(t.id, 'comment');
+  await recordTriggerEmitted(t.id, 'comment');
+  await recordTriggerEmitted(t.id, 'column_move');
+  await recordTriggerEmitted(t.id, 'manual');
+  await recordTriggerEmitted(t.id, 'comment_summary');
+
+  const bySource = await countWindowDispatchesBySource(ds, t.id, since);
+  const asMap = Object.fromEntries(bySource.map((r) => [r.trigger_source, r.count]));
+  assert.deepEqual(asMap, { comment: 2, column_move: 1 },
+    'manual/comment_summary excluded exactly like countWindowDispatches; grouped by trigger_source');
+
+  const total = bySource.reduce((sum, r) => sum + r.count, 0);
+  assert.equal(total, await countWindowDispatches(ds, t.id, since),
+    'the grouped total must equal the scalar count — both read the same underlying rows');
+});
+
+test('countWindowDispatchesBySource returns an empty array when nothing is in the window', async () => {
+  const t = await makeTicket(null);
+  const future = new Date(Date.now() + 60_000);
+  await recordTriggerEmitted(t.id, 'comment');
+  assert.deepEqual(await countWindowDispatchesBySource(ds, t.id, future), []);
+});
+
+test('countTwinSuppressions는 한 hold의 표시 알림 수와 무관하게 억제 N건을 정확히 센다', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  for (let i = 0; i < 4; i += 1) {
+    await recordTriggerEmitted(t.id, 'comment', `trigger-${i}`);
+    await activityRepo.save(activityRepo.create({
+      entity_type: 'ticket', entity_id: `trigger-${i}`, ticket_id: t.id,
+      action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
+      new_value: JSON.stringify({ trigger_id: `trigger-${i}`, role: 'assignee' }),
+      trigger_source: 'comment',
+    }));
+  }
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
+    '표시 알림이 한 번뿐인 hold에서도 실제 억제 N건을 모두 세어야 한다');
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: 'trigger-0', ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
+    trigger_source: 'comment',
+  }));
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
+    'outbox 재전송으로 같은 trigger id가 중복 저장되어도 한 번만 차감해야 한다');
+});
+
+test('countTwinSuppressions는 원시 dispatch 집합에서 제외한 source를 차감하지 않는다', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  for (const triggerSource of ['comment', 'manual', 'comment_summary']) {
+    await recordTriggerEmitted(t.id, triggerSource, `suppressed-${triggerSource}`);
+    await activityRepo.save(activityRepo.create({
+      entity_type: 'ticket', entity_id: `suppressed-${triggerSource}`, ticket_id: t.id,
+      action: 'dispatch_twin_suppressed', trigger_source: triggerSource,
+    }));
+  }
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 1,
+    'manual/comment_summary 억제는 정상 dispatch 차감에 포함하면 안 된다');
+});
+
+test('countTwinSuppressions는 윈도우 이전 emit과 다른 action을 제외한다', async () => {
+  const t = await makeTicket(null);
+  await recordTriggerEmitted(t.id, 'comment', 'old-trigger');
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: 'old-trigger', ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', field_changed: 'mention_seat',
+  }));
+  const since = new Date();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    action: 'created', actor_id: 'system', actor_name: 'Manager',
+  }));
+
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 0,
+    '윈도우 이전 억제와 전용 action이 아닌 activity는 차감하면 안 된다');
+});
+
+test('countTwinSuppressions는 늦게 도착한 이전 epoch ACK를 새 창에서 차감하지 않는다', async () => {
+  const t = await makeTicket(null);
+  const emitted = await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    action: 'trigger_emitted', field_changed: 'previous-epoch-trigger',
+    trigger_source: 'comment', created_at: new Date('2026-08-24T09:59:59.000Z'),
+  }));
+  const since = new Date('2026-08-24T10:00:00.000Z');
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: 'previous-epoch-trigger', ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', trigger_source: 'comment',
+    created_at: new Date('2026-08-24T10:00:01.000Z'),
+  }));
+
+  assert.ok(emitted.created_at < since, '테스트 전제: 원본 emit은 현재 창 이전이어야 한다');
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 0,
+    '현재 창 밖 emit의 늦은 suppression ACK는 새 epoch dispatch를 차감하면 안 된다');
 });
 
 // ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────

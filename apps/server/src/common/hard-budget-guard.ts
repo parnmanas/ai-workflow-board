@@ -163,6 +163,57 @@ export async function countWindowDispatches(dataSource: DataSource, ticketId: st
 }
 
 /**
+ * `countWindowDispatches`와 같은 행을 `trigger_source`별로 묶는다(티켓
+ * 3c8b8026 성공 기준 5). hard-budget 초과 알림에 쓰는 읽기 전용 분포이며,
+ * 한 출처의 폭주와 여러 역할의 정상 활동을 사람이 구분하게 한다. 원시 emit
+ * 관측값을 보존하고, 실제 상한 판정에서는 쌍둥이 억제 수를 별도로 차감한다.
+ */
+export async function countWindowDispatchesBySource(
+  dataSource: DataSource,
+  ticketId: string,
+  since: Date,
+): Promise<Array<{ trigger_source: string; count: number }>> {
+  const rows = await dataSource.getRepository(ActivityLog).createQueryBuilder('a')
+    .select('a.trigger_source', 'trigger_source')
+    .addSelect('COUNT(*)', 'count')
+    .where('a.ticket_id = :tid', { tid: ticketId })
+    .andWhere("a.action = 'trigger_emitted'")
+    .andWhere('a.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
+    .andWhere('a.created_at >= :since', { since })
+    .groupBy('a.trigger_source')
+    .orderBy('COUNT(*)', 'DESC')
+    .getRawMany<{ trigger_source: string; count: string | number }>();
+  return rows.map((r) => ({ trigger_source: r.trigger_source || '_', count: Number(r.count) }));
+}
+
+/**
+ * 윈도우 안에서 매니저가 실제로 억제한 쌍둥이 트리거 수다.
+ * 표시용 코멘트는 한 hold-burst에 한 번만 발행되므로 카운팅 근거로 쓰지
+ * 않는다. 매 억제 분기가 남기는 전용 activity의 고유 trigger id를 세어
+ * 알림 throttle 및 outbox 재전송과 무관하게 원시 emit에서 정확히 차감한다.
+ * suppression 자체의 created_at으로 창을 자르면 늦게 도착한 ACK가 이전
+ * epoch의 emit 대신 새 epoch의 정상 dispatch를 차감할 수 있다. 따라서
+ * entity_id(억제된 trigger id)를 현재 창 안의 trigger_emitted.field_changed와
+ * 상관시킨 행만 센다.
+ */
+export async function countTwinSuppressions(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
+  const row = await dataSource.getRepository(ActivityLog).createQueryBuilder('a')
+    .select('COUNT(DISTINCT a.entity_id)', 'count')
+    .innerJoin(ActivityLog, 'e', [
+      'e.ticket_id = a.ticket_id',
+      "e.action = 'trigger_emitted'",
+      'e.field_changed = a.entity_id',
+      'e.created_at >= :since',
+    ].join(' AND '))
+    .where('a.ticket_id = :tid', { tid: ticketId })
+    .andWhere("a.action = 'dispatch_twin_suppressed'")
+    .andWhere('e.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
+    .setParameters({ since, excluded: ['manual', 'comment_summary'] })
+    .getRawOne<{ count: string | number }>();
+  return Number(row?.count ?? 0);
+}
+
+/**
  * (b) Summed input+output tokens inside the window, sourced from the
  * `subagents` table's usage columns (ticket 6dd3f968 — populated on the
  * agent-manager's `end` POST). Deliberately sums only `input_tokens` +

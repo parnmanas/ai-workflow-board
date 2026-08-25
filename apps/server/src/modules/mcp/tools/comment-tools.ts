@@ -162,7 +162,18 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           'bumping in place would silently skip their side effects): when eligible, if the ticket\'s LAST comment was written ' +
           'by the same author with the same type and dedupe_key, this call bumps its repeat_count/last_repeated_at in place ' +
           'instead of adding a new row — use this for noisy auto-generated notices that may fire many times in a row (a ' +
-          'different author/type/dedupe_key, or an unrelated reply, in between always starts a fresh row).'),
+          'different author/type/dedupe_key, or an unrelated reply, in between always starts a fresh row). ' +
+          'Set `auto_notice: true` when this comment is itself a system/manager-generated automatic notice (e.g. a ' +
+          'dispatch-suppression or provisioning-blocker notification) that carries no new actionable content — the ' +
+          'comment is still saved and attributed to the real caller, but its activity-log row is stamped actor_id=\'system\' ' +
+          'so it never re-triggers the ticket\'s routed roles the way an ordinary comment would (ticket 3c8b8026: without ' +
+          'this, a suppression notice posted in response to a suppressed trigger re-triggers, gets suppressed again, and ' +
+          'posts another notice — a self-amplifying loop that burns the hard-budget ceiling on pure echo). @-mentions ' +
+          'inside the content still dispatch normally either way — only the generic "new comment" wake is skipped. ' +
+          'Honored ONLY when the resolved author is a manager-tier Agent (Agent.type=\'manager\', the pairing-minted ' +
+          'identity agent-manager itself authenticates as for these notices) — any other caller\'s auto_notice is ' +
+          'silently ignored (comment saved normally, no error) so an ordinary agent cannot self-declare its own ' +
+          'substantive comment exempt from triggering.'),
       author_role: z.string().optional()
         .describe("Role the comment is authored as (e.g. 'assignee', 'reviewer'). Auto-filled from the subagent session pin or from TicketRoleAssignment when omitted. Stored on metadata.author_role so the UI can render which role spoke."),
       attachment_resource_ids: z.array(z.string()).optional()
@@ -549,9 +560,22 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
 
       // Auto-resolve parent question on answer — same idempotent flip the REST
       // endpoint and answer_question tool perform, so all three surfaces agree.
+      //
+      // ticket 3c8b8026: metadata.auto_notice===true(system/manager 자동 알림,
+      // 예: dispatch 억제 공지)은 이 첫 insert 에서도 위 deduped 분기와 동일하게
+      // actor_id='system' 으로 남긴다 — trigger-loop.service.ts의 system-actor
+      // 가드가 이 값 하나만으로 재트리거를 건너뛰므로, 접히지 않은(=새 row 로
+      // 들어가는) 알림도 스스로를 재트리거할 수 없다. 코멘트 자체의
+      // author/author_id는 실제 호출자(예: Manager 에이전트) 그대로 저장되어
+      // 화면 귀속은 바뀌지 않는다 — 이 스탬프는 activity-log 의 트리거 판단에만
+      // 영향을 준다. 리뷰 라운드1 지적1: 값 자체가 아니라 발신자를 검증한다
+      // (인증 세션의 manager 신원과 저장 author 일치) — 임의 agent 의 요청값
+      // 위조로는 이 경로를 탈 수 없다.
+      const isAutoNotice = finalMetadata.auto_notice === true
+        && await isAuthenticatedManagerAutoNotice(caller, resolvedAuthorType, resolvedAuthorId);
       await activityService.logActivity({
         entity_type: 'comment', entity_id: comment.id, action: 'created',
-        ticket_id, actor_id: resolvedAuthorId, actor_name: authorName,
+        ticket_id, actor_id: isAutoNotice ? 'system' : resolvedAuthorId, actor_name: authorName,
         new_value: content,
         field_changed: resolvedType,
       });
@@ -716,6 +740,33 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       }
     }
     return { authorType, authorId, authorName };
+  }
+
+  // ─── Helper: auto_notice 발신자 검증 (ticket 3c8b8026 리뷰 라운드1 지적1) ──
+  // metadata.auto_notice 는 값 자체만으로 activity-log actor_id 를 'system'
+  // 으로 바꿔 코멘트→트리거 경로를 끊는, 행동에 실질적 영향을 주는 신호다.
+  // 값을 자기선언만으로 신뢰하면 아무 agent 나 평범한 코멘트에 이 값을 실어
+  // routed-role 의 정상 comment wake 를 조용히 숨길 수 있어, 티켓의 위험
+  // 조건("판정은 작성자 종류(system/manager 자동 알림) 기준으로 좁게")을
+  // 어긴다. 그래서 값이 아니라 "이 값을 존중해도 되는 발신자인가"를 검증한다
+  // — 요청 author가 아니라 인증 세션을 기준으로 하며, agent-manager 가 이
+  // 알림들을 남길 때 인증하는 신원은 항상 페어링으로
+  // 발급된 매니저 전용 Agent(type='manager') 다(개별 티켓 역할 agent 의
+  // per-agent 키가 아니라 EventDispatcher 자신의 공유 config.apiKey, 참고
+  // apps/agent-manager/src/lib/mcp-client.ts 의 fireAndForgetTool). 그 외
+  // caller 가 auto_notice 를 실어 보내면 에러 없이 조용히 무시하고(다른
+  // 옵트인 메타데이터 필드들과 같은 관용 방식) 평범한 코멘트로 저장한다 —
+  // 즉 activity-log 는 여전히 실제 caller 를 actor_id 로 남겨 정상 트리거된다.
+  async function isAuthenticatedManagerAutoNotice(
+    caller: ReturnType<typeof getCallerAgent>,
+    authorType: 'user' | 'agent',
+    authorId: string,
+  ): Promise<boolean> {
+    // 요청의 author_id는 호환성을 위해 호출자가 지정할 수 있으므로 권한 근거로
+    // 삼지 않는다. 인증 세션의 agentId가 저장 author와 일치하는 경우에만 조회한다.
+    if (authorType !== 'agent' || !caller?.agentId || caller.agentId !== authorId) return false;
+    const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+    return agent?.type === 'manager';
   }
 
   // ─── Helper: 저장 직전 pending_user_action 재확인 (ticket be934f61 패턴,
