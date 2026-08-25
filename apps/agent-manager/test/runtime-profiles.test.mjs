@@ -127,7 +127,7 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
 });
 
-test('Claude backend profile은 보드 effort를 argv에 주입하지 않고 일반 Claude는 기존 값을 유지한다', async () => {
+test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 생략한다', async () => {
   const executable = await makeClaudeFixture('claude-effort-parity.mjs');
   const profile = {
     id: 'effort-parity',
@@ -135,9 +135,11 @@ test('Claude backend profile은 보드 effort를 argv에 주입하지 않고 일
     protocol: 'anthropic-compatible',
     base_url: 'http://127.0.0.1:40110',
     model: 'qwen3-coder-next',
+    omit_effort: true,
     claude_executable: executable,
   };
   assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, profile), null);
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...profile, omit_effort: false }), 'high');
   assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, null), 'high');
 
   const capture = await spawnFixture(profile, join(fixtureRoot, 'effort-parity.json'), {
