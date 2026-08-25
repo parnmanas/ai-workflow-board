@@ -28,7 +28,6 @@ import type { DataSource } from 'typeorm';
 import type { ActivityService } from '../services/activity.service';
 import type { RoomMessagingService } from '../modules/chat-rooms/room-messaging.service';
 import { ActivityLog } from '../entities/ActivityLog';
-import { Agent } from '../entities/Agent';
 import { Board } from '../entities/Board';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ChatRoom } from '../entities/ChatRoom';
@@ -188,37 +187,19 @@ export async function countWindowDispatchesBySource(
 }
 
 /**
- * 윈도우 안의 쌍둥이 억제 횟수다(티켓 3c8b8026 성공 기준 3).
- * `dispatch_suppress:*` 키를 쓰는 매니저 자동 알림만 대상으로 삼고, 각 최초
- * 저장/반복 접기에 남는 activity 행을 세므로 `repeat_count`로 접힌 발생도
- * 빠뜨리지 않는다. 일반 agent가 같은 metadata를 위조해도 Agent.type 검증과
- * activity의 system actor 검증을 함께 통과할 수 없다.
+ * 윈도우 안에서 매니저가 실제로 억제한 쌍둥이 트리거 수다.
+ * 표시용 코멘트는 한 hold-burst에 한 번만 발행되므로 카운팅 근거로 쓰지
+ * 않는다. 매 억제 분기가 남기는 전용 activity의 고유 trigger id를 세어
+ * 알림 throttle 및 outbox 재전송과 무관하게 원시 emit에서 정확히 차감한다.
  */
-export async function countTwinSuppressionNotices(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
-  const rows = await dataSource.getRepository(Comment).createQueryBuilder('c')
-    .innerJoin(Agent, 'a', 'a.id = c.author_id')
-    .where('c.ticket_id = :tid', { tid: ticketId })
-    .andWhere("c.author_type = 'agent'")
-    .andWhere("a.type = 'manager'")
-    .andWhere("c.type = 'note'")
-    .select(['c.id', 'c.metadata'])
-    .getMany();
-  const ids = rows.filter((c) => {
-    let meta: any;
-    try { meta = JSON.parse(c.metadata || '{}'); } catch { meta = {}; }
-    return meta?.auto_notice === true
-      && typeof meta?.dedupe_key === 'string'
-      && meta.dedupe_key.startsWith('dispatch_suppress:');
-  }).map((c) => c.id);
-  if (ids.length === 0) return 0;
-
-  return dataSource.getRepository(ActivityLog).createQueryBuilder('a')
-    .where("a.entity_type = 'comment'")
-    .andWhere('a.entity_id IN (:...ids)', { ids })
-    .andWhere("a.action IN ('created', 'updated')")
-    .andWhere("a.actor_id = 'system'")
+export async function countTwinSuppressions(dataSource: DataSource, ticketId: string, since: Date): Promise<number> {
+  const row = await dataSource.getRepository(ActivityLog).createQueryBuilder('a')
+    .select('COUNT(DISTINCT a.entity_id)', 'count')
+    .where('a.ticket_id = :tid', { tid: ticketId })
+    .andWhere("a.action = 'dispatch_twin_suppressed'")
     .andWhere('a.created_at >= :since', { since })
-    .getCount();
+    .getRawOne<{ count: string | number }>();
+  return Number(row?.count ?? 0);
 }
 
 /**

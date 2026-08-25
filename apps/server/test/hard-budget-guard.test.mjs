@@ -46,7 +46,7 @@ const {
   countAutoResponses,
   countWindowDispatches,
   countWindowDispatchesBySource,
-  countTwinSuppressionNotices,
+  countTwinSuppressions,
   countWindowTokens,
   pendTicketForHardBudget,
   enforceAutoResponseBudget,
@@ -189,55 +189,41 @@ test('countWindowDispatchesBySource returns an empty array when nothing is in th
   assert.deepEqual(await countWindowDispatchesBySource(ds, t.id, future), []);
 });
 
-test('countTwinSuppressionNotices는 접힌 억제 알림의 실제 발생 횟수를 세고 위조 알림은 제외한다', async () => {
+test('countTwinSuppressions는 한 hold의 표시 알림 수와 무관하게 억제 N건을 정확히 센다', async () => {
   const t = await makeTicket(null);
-  const manager = await agentRepo.save(agentRepo.create({ name: 'Manager', type: 'manager' }));
-  const regular = await agentRepo.save(agentRepo.create({ name: 'Assignee', type: 'claude' }));
-  const metadata = JSON.stringify({ auto_notice: true, dedupe_key: `dispatch_suppress:inflight:${t.id}:assignee` });
-  const suppression = await addAgentComment(t.id, {
-    author_id: manager.id, author: manager.name, metadata, repeat_count: 2,
-  });
-  const forged = await addAgentComment(t.id, {
-    author_id: regular.id, author: regular.name, metadata,
-  });
   const since = new Date(Date.now() - 1000);
-
-  for (const action of ['created', 'updated']) {
+  for (let i = 0; i < 4; i += 1) {
     await activityRepo.save(activityRepo.create({
-      entity_type: 'comment', entity_id: suppression.id, ticket_id: t.id,
-      action, actor_id: 'system', actor_name: manager.name,
+      entity_type: 'ticket', entity_id: `trigger-${i}`, ticket_id: t.id,
+      action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
+      new_value: JSON.stringify({ trigger_id: `trigger-${i}`, role: 'assignee' }),
     }));
   }
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
+    '표시 알림이 한 번뿐인 hold에서도 실제 억제 N건을 모두 세어야 한다');
   await activityRepo.save(activityRepo.create({
-    entity_type: 'comment', entity_id: forged.id, ticket_id: t.id,
-    action: 'created', actor_id: regular.id, actor_name: regular.name,
+    entity_type: 'ticket', entity_id: 'trigger-0', ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
   }));
-
-  assert.equal(await countTwinSuppressionNotices(ds, t.id, since), 2,
-    '최초 저장과 repeat_count 접기를 각각 한 번의 억제로 세고 일반 agent 위조는 제외해야 한다');
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
+    'outbox 재전송으로 같은 trigger id가 중복 저장되어도 한 번만 차감해야 한다');
 });
 
-test('countTwinSuppressionNotices는 윈도우 이전 activity와 다른 자동 알림 키를 제외한다', async () => {
+test('countTwinSuppressions는 윈도우 이전 activity와 다른 action을 제외한다', async () => {
   const t = await makeTicket(null);
-  const manager = await agentRepo.save(agentRepo.create({ name: 'Manager2', type: 'manager' }));
-  const suppression = await addAgentComment(t.id, {
-    author_id: manager.id, author: manager.name,
-    metadata: JSON.stringify({ auto_notice: true, dedupe_key: `dispatch_suppress:mention_seat:${t.id}` }),
-  });
-  const otherNotice = await addAgentComment(t.id, {
-    author_id: manager.id, author: manager.name,
-    metadata: JSON.stringify({ auto_notice: true, dedupe_key: `worktree_pool:${t.id}` }),
-  });
+  await activityRepo.save(activityRepo.create({
+    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    action: 'dispatch_twin_suppressed', field_changed: 'mention_seat',
+  }));
   const since = new Date();
   await new Promise((resolve) => setTimeout(resolve, 5));
   await activityRepo.save(activityRepo.create({
-    entity_type: 'comment', entity_id: otherNotice.id, ticket_id: t.id,
-    action: 'created', actor_id: 'system', actor_name: manager.name,
+    entity_type: 'ticket', entity_id: t.id, ticket_id: t.id,
+    action: 'created', actor_id: 'system', actor_name: 'Manager',
   }));
 
-  assert.equal(await countTwinSuppressionNotices(ds, t.id, since), 0,
-    '윈도우 이전 억제와 dispatch_suppress 이름공간 밖 알림은 차감하면 안 된다');
-  assert.ok(suppression.id);
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 0,
+    '윈도우 이전 억제와 전용 action이 아닌 activity는 차감하면 안 된다');
 });
 
 // ── countWindowTokens (ticket ef53fdf4) ─────────────────────────────────────

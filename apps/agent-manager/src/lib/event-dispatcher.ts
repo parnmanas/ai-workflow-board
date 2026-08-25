@@ -2177,6 +2177,7 @@ export class EventDispatcher {
           inflightKey,
           { force: isForce, raw },
         );
+        this.#ackDispatch(ev, 'suppressed', 'inflight_dispatch');
         log(
           `[dispatch] twin suppressed (inflight_dispatch): another dispatch is already ` +
             `provisioning/spawning ticket=${ev.ticket_id.slice(0, 8)} role=${ev.action || '_'} ` +
@@ -3149,7 +3150,7 @@ export class EventDispatcher {
    * server's reconciler falls back to its processing-grace timeout if the ack
    * never lands, so this can never block or fail a spawn.
    */
-  #ackDispatch(ev: any, outcome: 'processed' | 'nack', reason?: string): void {
+  #ackDispatch(ev: any, outcome: 'processed' | 'nack' | 'suppressed', reason?: string): void {
     void postDispatchAck(this.#config, {
       ticket_id: String(ev?.ticket_id || ''),
       role: String(ev?.action || ''),

@@ -81,7 +81,7 @@ test('_checkHardBudgetGate는 쌍둥이 억제된 emit을 실제 dispatch 수에
   const match = src.match(/private async _checkHardBudgetGate\([\s\S]*?\r?\n  \}\r?\n/);
   assert.ok(match, '_checkHardBudgetGate 메서드 본문을 찾을 수 있어야 한다');
   const body = match[0];
-  assert.match(body, /countTwinSuppressionNotices\(/, '쌍둥이 억제 발생 수를 조회해야 한다');
+  assert.match(body, /countTwinSuppressions\(/, '쌍둥이 억제 발생 수를 조회해야 한다');
   assert.match(body, /Math\.max\(0, emittedDispatchCount - suppressedDispatchCount\)/,
     '상한 판정 수는 원시 emit에서 억제 수를 빼고 음수를 막아야 한다');
   assert.match(body, /dispatchCount >= cfg\.maxDispatchesPerWindow/,

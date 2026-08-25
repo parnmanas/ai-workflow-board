@@ -284,6 +284,41 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     assert.equal(bad.status, 400, 'missing role/outcome → 400 (contract validation)');
   });
 
+  await t.test('10b: HTTP suppressed outcome은 매 억제를 기록하되 intent를 변경하지 않는다', async () => {
+    const ticket = await mkTicket('http suppression audit');
+    const tid = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
+    const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'suppression-manager', type: 'manager' });
+    const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'mgr-suppression' });
+    const before = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+
+    for (let i = 0; i < 3; i += 1) {
+      const resp = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticket.id, role: 'assignee', trigger_id: `${tid}-twin-${i}`,
+          outcome: 'suppressed', reason: 'inflight_dispatch',
+        }),
+      });
+      assert.equal(resp.status, 200, 'suppressed 보고를 wire endpoint가 받아야 한다');
+    }
+
+    const rows = await ds.getRepository('ActivityLog').find({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed' },
+    });
+    assert.equal(rows.length, 3, '표시 알림 throttle과 무관하게 억제 N건이 각각 기록되어야 한다');
+    const after = await intents.findOpenForTicketRole(ticket.id, 'assignee');
+    assert.equal(after.status, before.status, 'suppressed 관측은 intent 상태를 바꾸면 안 된다');
+    assert.equal(after.last_ack_kind, before.last_ack_kind, '진행 중 holder의 ack 상태를 덮으면 안 된다');
+
+    const forged = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': (await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'non-manager' })).raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket_id: ticket.id, role: 'assignee', trigger_id: 'forged', outcome: 'suppressed' }),
+    });
+    assert.equal(forged.status, 403, '일반 agent는 hard-budget 차감 신호를 위조할 수 없어야 한다');
+  });
+
   await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {
     // Reviewer blocker B1: the seeder previously scanned only active/intake, so a
     // reviewer trigger lost to a commit↔emit crash left the ticket in Review with

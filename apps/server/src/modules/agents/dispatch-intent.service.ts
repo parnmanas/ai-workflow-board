@@ -339,21 +339,36 @@ export class DispatchIntentService {
    * trigger_id ≠ the intent's current one is ignored (superseded by a newer
    * dispatch). Returns the applied outcome for the controller's response.
    *
-   *   outcome='processed' — spawn started. NOT resolution; extends the retry
-   *                         deadline by the processing grace so a healthy strand
-   *                         gets time to show forward progress.
-   *   outcome='nack'      — the manager aborted the spawn (worktree pool /
-   *                         missing repo / twin suppressed). Back to `pending`
-   *                         with backoff + a structured reason audit so the
-   *                         reconciler re-dispatches once the blocker clears.
+   *   outcome='processed' — spawn 시작. 해결 완료가 아니며, 정상 strand가
+   *                         진행을 남길 시간을 주도록 재시도 시각만 연장한다.
+   *   outcome='nack'      — worktree 풀·저장소 누락 등으로 spawn을 중단했다.
+   *                         intent를 pending으로 되돌려 blocker 해소 뒤
+   *                         reconciler가 backoff 재디스패치하게 한다.
+   *   outcome='suppressed' — 진행 중 holder와 겹친 쌍둥이를 전용 activity로
+   *                          기록하되 intent 상태는 변경하지 않는다.
    */
   async applyManagerAck(args: {
     ticketId: string; role: string; triggerId: string;
-    outcome: 'processed' | 'nack'; reason?: string;
+    outcome: 'processed' | 'nack' | 'suppressed'; reason?: string; managerAgentId?: string;
   }): Promise<{ applied: boolean; matched: boolean; status?: string }> {
     const now = new Date();
     const repo = this.repo();
     const open = await this._findOpen(args.ticketId, args.role, repo);
+    if (args.outcome === 'suppressed') {
+      await this.dataSource.getRepository(ActivityLog).save({
+        entity_type: 'ticket',
+        entity_id: args.triggerId,
+        ticket_id: args.ticketId,
+        workspace_id: open?.workspace_id || '',
+        action: 'dispatch_twin_suppressed',
+        field_changed: (args.reason || 'twin').slice(0, 200),
+        new_value: JSON.stringify({ trigger_id: args.triggerId, role: args.role }),
+        actor_id: args.managerAgentId || '',
+        actor_name: 'AgentManager',
+      });
+      const matched = Boolean(open && (!args.triggerId || !open.last_trigger_id || args.triggerId === open.last_trigger_id));
+      return { applied: true, matched, status: open?.status };
+    }
     if (!open) return { applied: false, matched: false };
     // Stale-ack guard: only the most recent dispatch's trigger_id may mutate.
     if (args.triggerId && open.last_trigger_id && args.triggerId !== open.last_trigger_id) {

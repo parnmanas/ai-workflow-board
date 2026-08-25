@@ -37,7 +37,7 @@ import { BoardLesson } from '../../entities/BoardLesson';
 import { isConsensusVoteComment } from '../../common/consensus-meta';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { ResolvedHardBudget, hardBudgetDefaultsFromEnv, resolveHardBudget } from '../../common/hard-budget-config';
-import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource, countTwinSuppressionNotices, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
+import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource, countTwinSuppressions, countWindowTokens, pendTicketForHardBudget, postHardBudgetAlert } from '../../common/hard-budget-guard';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
@@ -2151,7 +2151,7 @@ candidate's branch or move the ticket.
       const windowMin = Math.round(cfg.windowMs / 60_000);
 
       const emittedDispatchCount = await countWindowDispatches(this.dataSource, ticket.id, since);
-      const suppressedDispatchCount = await countTwinSuppressionNotices(this.dataSource, ticket.id, since);
+      const suppressedDispatchCount = await countTwinSuppressions(this.dataSource, ticket.id, since);
       const dispatchCount = Math.max(0, emittedDispatchCount - suppressedDispatchCount);
       if (dispatchCount >= cfg.maxDispatchesPerWindow) {
         // ticket 3c8b8026 성공 기준 5: 초과 확정 후에만(핫패스 아님) 같은
