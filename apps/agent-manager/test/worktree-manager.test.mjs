@@ -582,6 +582,46 @@ test('cleanupTerminalTicketGit: worktree 제거 실패 시 로컬과 origin 브�
   }
 });
 
+test('cleanupTerminalTicketGit: 검증 뒤 원격 tip이 전진하면 lease 불일치로 삭제를 보류한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const originalPath = process.env.PATH;
+  try {
+    const racer = join(fixture.root, 'racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'race.txt'), '원격 전진\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 전진']);
+
+    const guardDir = await fsp.mkdtemp(join(tmpdir(), 'awb-git-lease-guard-'));
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const guardGit = join(guardDir, 'git');
+    const marker = join(guardDir, 'advanced');
+    await fsp.writeFile(
+      guardGit,
+      `#!/bin/sh\nif [ "$3" = "push" ] && [ ! -e "${marker}" ]; then touch "${marker}"; "${realGit}" -C "${racer}" push -q origin "${fixture.branch}"; fi\nexec "${realGit}" "$@"\n`,
+    );
+    await fsp.chmod(guardGit, 0o755);
+    process.env.PATH = `${guardDir}:${originalPath}`;
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.removedRemoteBranches, []);
+    assert.ok(result.heldReasons.includes(`원격 브랜치 삭제 실패: origin/${fixture.branch}`));
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]).length > 0, true);
+  } finally {
+    process.env.PATH = originalPath;
+    await fixture.cleanup();
+  }
+});
+
 test('cleanupTerminalTicketGit: 검증된 worktree 소유권 밖의 고아·동일 8자 prefix·불일치 ref를 보존한다', async () => {
   const fixture = await makeManagedTerminalRepo(TICKET_A);
   const collisionTicket = 'aaaaaaaa-9999-8888-7777-666666666666';
@@ -692,6 +732,37 @@ test('cleanupTerminalTicketGit: dirty shared slot은 ref와 active lease를 함�
     assert.ok(result.heldReasons.some((reason) => reason.startsWith('dirty worktree:')));
     assert.ok(result.remainingBranches.includes(fixture.branch));
     assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: origin만 미병합인 shared branch는 ref와 active lease를 함께 보존한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    const racer = join(fixture.root, 'shared-racer');
+    execFileSync('git', ['clone', '-q', fixture.remote, racer]);
+    git(racer, ['config', 'user.email', 'test@awb.local']);
+    git(racer, ['config', 'user.name', 'AWB Test']);
+    git(racer, ['switch', '-q', fixture.branch]);
+    await fsp.writeFile(join(racer, 'unique.txt'), '원격 고유 커밋\n');
+    git(racer, ['add', '.']);
+    git(racer, ['commit', '-q', '-m', '원격 고유 커밋']);
+    git(racer, ['push', '-q', 'origin', fixture.branch]);
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.ok(result.heldReasons.includes(`미병합/고유 커밋: origin/${fixture.branch}`));
+    assert.ok(result.remainingBranches.includes(fixture.branch));
+    assert.ok(result.remainingBranches.includes(`origin/${fixture.branch}`));
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
     const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
     assert.equal(registry.slots['shared-0'].active, true);
   } finally {

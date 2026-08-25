@@ -1566,14 +1566,35 @@ export class WorktreeManager {
       const remoteBranches = remoteRefs.stdout.split(/\r?\n/)
         .map((ref) => ref.replace(/^origin\//, '')).filter((branch) => ownedBranches.has(branch));
 
+      // 로컬 삭제 전에 양쪽 ref의 병합 상태와 원격 tip을 함께 고정한다.
+      // 어느 한쪽이라도 보존 대상이면 부분 삭제하지 않으며, 원격 삭제 시에는
+      // 이 SHA를 lease로 사용해 검증 이후 전진한 ref를 지우지 않는다.
+      const remoteTips = new Map<string, string>();
+      for (const branch of ownedBranches) {
+        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+        if (localBranches.includes(branch)) {
+          const merged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
+          if (!merged.ok) {
+            report.heldReasons.push(`미병합/고유 커밋: ${branch}`);
+            blockedBranches.add(branch);
+          }
+        }
+        if (remoteBranches.includes(branch)) {
+          const remoteRef = `refs/remotes/origin/${branch}`;
+          const tip = await git(entry.repo, ['rev-parse', '--verify', remoteRef]);
+          const merged = await git(entry.repo, ['merge-base', '--is-ancestor', remoteRef, baseRef]);
+          if (!tip.ok || !merged.ok) {
+            report.heldReasons.push(`미병합/고유 커밋: origin/${branch}`);
+            blockedBranches.add(branch);
+          } else {
+            remoteTips.set(branch, tip.stdout.trim());
+          }
+        }
+      }
+
       for (const branch of localBranches) {
         if (protectedBranches.has(branch)) continue;
         if (blockedBranches.has(branch)) continue;
-        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
-        if (!merged.ok) {
-          report.heldReasons.push(`미병합/고유 커밋: ${branch}`);
-          continue;
-        }
         const deleted = await git(entry.repo, ['branch', '-d', branch]);
         if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
         else {
@@ -1585,13 +1606,14 @@ export class WorktreeManager {
       for (const branch of remoteBranches) {
         if (protectedBranches.has(branch)) continue;
         if (blockedBranches.has(branch)) continue;
-        const remoteRef = `refs/remotes/origin/${branch}`;
-        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', remoteRef, baseRef]);
-        if (!merged.ok) {
-          report.heldReasons.push(`미병합/고유 커밋: origin/${branch}`);
-          continue;
-        }
-        const deleted = await git(entry.repo, ['push', 'origin', '--delete', branch]);
+        const verifiedTip = remoteTips.get(branch);
+        if (!verifiedTip) continue;
+        const deleted = await git(entry.repo, [
+          'push',
+          `--force-with-lease=refs/heads/${branch}:${verifiedTip}`,
+          'origin',
+          `:refs/heads/${branch}`,
+        ]);
         if (deleted.ok || /remote ref does not exist|unable to delete/i.test(deleted.stderr)) {
           report.removedRemoteBranches.push(branch);
         } else {
