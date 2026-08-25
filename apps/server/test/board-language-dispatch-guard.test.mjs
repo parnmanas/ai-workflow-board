@@ -22,12 +22,16 @@ test('board language instruction is centralized in harness-config', () => {
   assert.match(src, /export function buildBoardLanguageInstruction/);
   assert.match(src, /export function appendBoardLanguageInstruction/);
   assert.match(src, /export function prependBoardLanguageInstruction/);
+  assert.match(src, /every user-visible message/);
+  assert.match(src, /blocker and Pending reasons/);
+  assert.match(src, /tool arguments that will be displayed to users/);
+  assert.match(src, /Do not fall back to English/);
 });
 
 test('ticket trigger dispatch appends board language via shared helper', () => {
   const src = fs.readFileSync(TRIGGER_PATH, 'utf8');
   assert.match(src, /appendBoardLanguageInstruction\(harnessConfig,\s*boardForHarness\?\.language\)/);
-  assert.doesNotMatch(src, /Write all ticket comments, chat messages, commit messages/);
+  assert.doesNotMatch(src, /every user-visible message/);
 });
 
 test('Action dispatch prepends board language to rendered prompt', () => {

@@ -166,6 +166,20 @@ test('ordinary chat uses tickets selectively and handles simple or boardless wor
   }
 });
 
+test('direct chat file changes use a dedicated safe branch without touching unrelated work', () => {
+  for (const usesNativeMcp of [true, false]) {
+    const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
+    assert.ok(p.includes('DIRECT-CHAT GIT POLICY'));
+    assert.ok(p.includes('Pure inspection and environment-only work'));
+    assert.ok(p.includes('chat/<room-id-short>-<slug>'));
+    assert.ok(p.includes('latest remote default branch'));
+    assert.ok(p.includes('Never make direct-chat edits on shared/protected branches'));
+    assert.ok(p.includes('production.private'));
+    assert.ok(p.includes('preserve them and stop before switching branches'));
+    assert.ok(p.includes('Do not commit, push, merge, or delete branches unless the user requested it'));
+  }
+});
+
 test('non-native chat routes missing capability to manager fallback, never the user', () => {
   const p = composeChatRoomPrompt(ROOM, [], { ...MSG, content: 'Deploy AWB' }, undefined, false);
   assert.ok(p.includes('agent-manager fallback can create/reuse the capability ticket'));

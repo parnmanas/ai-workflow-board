@@ -1140,10 +1140,11 @@ function LanguageSetting({ board, onSave }: LanguageSettingProps) {
         Output language
       </h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        Agents dispatched on this board write their ticket comments, chat messages, commit messages,
-        and code comments in this language. Leave unset to keep the agent default (English). Applies
-        to every role on the board. Claude receives it through its system prompt and Codex receives
-        the same instruction through the managed policy block.
+        Agents dispatched on this board write every user-visible message in this language, including
+        ticket comments, chat messages, progress updates, blocker and Pending reasons, commit messages,
+        and code comments. Leave unset to keep the agent default (English). Applies to every role on
+        the board. Claude receives it through its system prompt and Codex receives the same instruction
+        through the managed policy block.
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 220 }}>
