@@ -297,6 +297,7 @@ Signals:
 | `SIGTERM`/`SIGINT` | Graceful drain (stop subagents, release lock)       |
 | `SIGHUP`     | Re-read `config.json` (delegation tunables hot-reload)    |
 | `SIGUSR1`    | Self-update: verify provenance, drain sessions, `npm install -g` latest, re-exec (git checkout is fallback-only when npm is unavailable) |
+| `SIGUSR2`    | Unconditional restart: re-exec in place, no version check / install / build. Use for on-disk config that's only read at startup (e.g. `--runtime-profile`), where SIGUSR1 would no-op because the package version didn't change |
 
 ## Development
 

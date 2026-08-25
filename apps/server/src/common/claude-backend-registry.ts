@@ -4,7 +4,7 @@ import { WorkspaceClaudeBackendProfile } from '../entities/WorkspaceClaudeBacken
 import { Workspace } from '../entities/Workspace';
 import { SystemSetting } from '../entities/SystemSetting';
 import {
-  CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles, resolveCliRuntimeProfile,
+  CLI_RUNTIME_NONE, CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles, resolveCliRuntimeProfile,
 } from './cli-runtime-profiles';
 
 const CORE_KEYS = new Set(['id', 'name', 'protocol', 'base_url', 'model', 'credential_ref']);
@@ -70,6 +70,30 @@ export async function authoritativeWorkspaceRuntimeProfiles(
   return workspace.claude_backend_profiles_migrated
     ? registryProfiles
     : parseCliRuntimeProfiles(workspace.cli_runtime_profiles);
+}
+
+/**
+ * Validates a `cli_runtime_profile` write against the workspace's
+ * authoritative profile list — the same fail-closed check the REST
+ * PATCH handlers (agents.controller.ts / boards.controller.ts) run inline.
+ * `null`/undefined clears the pin (inherit again); CLI_RUNTIME_NONE is the
+ * explicit opt-out sentinel and is accepted without a list lookup; anything
+ * else must match an authoritative profile id or the write is rejected.
+ */
+export async function validateCliRuntimeProfileSelection(
+  dataSource: DataSource,
+  workspace: Workspace | null | undefined,
+  raw: unknown,
+  scopeLabel: string,
+): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
+  const selected = raw == null ? null : String(raw);
+  if (selected && selected !== CLI_RUNTIME_NONE) {
+    const profiles = await authoritativeWorkspaceRuntimeProfiles(dataSource, workspace);
+    if (!profiles.some(profile => profile.id === selected)) {
+      return { ok: false, error: `cli_runtime_profile "${selected}" does not exist in ${scopeLabel}` };
+    }
+  }
+  return { ok: true, value: selected };
 }
 
 export async function resolveClaudeBackendProfileForDispatch(

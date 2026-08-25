@@ -30,6 +30,7 @@ import { QaPhasesSchema, serializeQaPhases } from '../../qa/qa-phases';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
+import { validateCliRuntimeProfileSelection } from '../../../common/claude-backend-registry';
 import type { ToolContext } from './context';
 
 export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
@@ -237,7 +238,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_board',
-    'Update a board name, description, routing_config, column→prompt-template mapping, auto-archive policy, agent harness override, or output language',
+    'Update a board name, description, routing_config, column→prompt-template mapping, auto-archive policy, agent harness override, output language, or cli_runtime_profile pin',
     {
       board_id: z.string().describe('Board ID'),
       name: z.string().optional().describe('New name'),
@@ -274,8 +275,14 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board worktree layout (worktree 규약 chain, ticket 4ba844ea): "per_ticket" (default) gives each ticket its own worktree under `<working_dir>/.awb/wt/<ticket8>/`; "shared" reuses one worktree at `<working_dir>/.awb/wt/shared/`. Both are always rooted inside the working_dir\'s `.awb/`. Omit to leave unchanged.'),
       use_pr: z.boolean().optional()
         .describe('Per-board PR usage (worktree 규약 chain, ticket 4ba844ea): false (default) does a direct fast-forward merge on the Merging boundary; true opts into the PR create/merge path. Omit to leave unchanged.'),
+      cli_runtime_profile: z.string().nullable().optional().describe(
+        "Claude backend profile id this board's dispatch pins to. 'none' = explicit opt-out (stop inheriting the " +
+        'workspace/global default); null = clear the pin and inherit again. Empty string is preserved for REST ' +
+        "compatibility and also stops inheritance (behaves like 'none') — pass null if you actually want to " +
+        'resume inheriting. Takes effect on the next dispatch.'
+      ),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -418,6 +425,14 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       }
       if (use_pr !== undefined) {
         board.use_pr = use_pr;
+      }
+      if (cli_runtime_profile !== undefined) {
+        const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
+        const checked = await validateCliRuntimeProfileSelection(
+          dataSource, workspace, cli_runtime_profile, `workspace ${board.workspace_id}`,
+        );
+        if (!checked.ok) return err(checked.error);
+        board.cli_runtime_profile = checked.value;
       }
 
       await boardRepo.save(board);

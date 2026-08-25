@@ -39,6 +39,7 @@ import {
   CliLoginProgressPayload,
   OntologyGraphProgressPayload,
 } from '../../common/types/stream-events';
+import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { EventDefinition, SubscriberIdentity } from './types';
 
 // ── Helpers used by multiple filter functions ─────────────────────────────
@@ -665,6 +666,16 @@ export const EVENT_TYPES: EventDefinition[] = [
         agent_chain_depth: typeof event.agent_chain_depth === 'number'
           ? event.agent_chain_depth
           : undefined,
+        // 티켓 71532b4f: agent_trigger와 동일한 ticket > agent > board 우선순위로
+        // 호출부(comment-tools.ts/tickets.controller.ts)가 resolveMentionDispatchExtras로
+        // 미리 계산해 넘긴 값. 같은 필드·같은 flatten 규칙을 agent_trigger와
+        // 공유한다 — 하나만 빠뜨리면 이 필드가 wire에서 조용히 사라진다(이 티켓이
+        // 고치는 정확히 그 결함 클래스).
+        harness_config: event.harness_config ?? null,
+        cli_runtime_profile: event.cli_runtime_profile ?? null,
+        effort_preset: event.effort_preset ?? null,
+        environment_config: event.environment_config ?? null,
+        worktree_mode: event.worktree_mode ?? DEFAULT_WORKTREE_MODE,
       };
       return {
         payload,
@@ -699,6 +710,22 @@ export const EVENT_TYPES: EventDefinition[] = [
         // mention-chain ping-pong, mirroring handleChatRoomMessage's
         // agent_chain_depth check.
         agent_chain_depth: p.agent_chain_depth,
+        // 티켓 71532b4f: agent-manager's handleCommentMention reads these off the
+        // FLATTENED event (parseHarnessConfig(ev.harness_config),
+        // resolveTriggerRuntimeProfile(ev.cli_runtime_profile, ...),
+        // parseEffortPreset(ev.effort_preset)) — same flatten rule as
+        // agent_trigger's harness_config/cli_runtime_profile/effort_preset. Without
+        // these three lines the fields never leave the envelope and a comment
+        // mention silently spawns without the agent's pinned backend/harness/effort.
+        harness_config: p.harness_config ?? null,
+        cli_runtime_profile: p.cli_runtime_profile ?? null,
+        effort_preset: p.effort_preset ?? null,
+        // 티켓 71532b4f: agent-manager's handleCommentMention reads these off the
+        // FLATTENED event too (parseEnvironmentConfig(ev.environment_config),
+        // parseWorktreeMode(ev.worktree_mode)) to build the same envVars
+        // buildDispatchEnvVars() would produce for a column trigger.
+        environment_config: p.environment_config ?? null,
+        worktree_mode: p.worktree_mode,
         timestamp: env.timestamp,
       };
     },

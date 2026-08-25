@@ -41,6 +41,7 @@ import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
 import { sinceBoundaryParam } from '../../../common/created-at-since-param';
+import { resolveMentionDispatchExtras } from '../../../common/mention-dispatch-profile';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -619,6 +620,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               if (!agent) continue;
               // Same workspace-scope safety as the REST path.
               if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
+              // 티켓 71532b4f: agent_trigger와 동일한 dispatch 부가값 — 이걸 안 실으면
+              // 이 mention으로 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히
+              // 무시하고 CLI 기본값으로 돈다.
+              const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id,
                 comment_id: comment.id,
@@ -633,6 +638,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 role_shortcut: m.roleShortcut,
                 timestamp: ts,
                 agent_chain_depth: agentChainDepth,
+                harness_config: extras.harness_config,
+                cli_runtime_profile: extras.cli_runtime_profile,
+                effort_preset: extras.effort_preset,
+                environment_config: extras.environment_config,
+                worktree_mode: extras.worktree_mode,
               });
               logger.info('Mentions', `Agent @-mention routed via MCP add_comment: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
             } else {
@@ -829,6 +839,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
               const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
               if (!agent) continue;
               if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
+              // 티켓 71532b4f: add_comment와 동일한 dispatch 부가값 — 누락 시 이 mention으로
+              // 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히 무시한다.
+              const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
                 agent_id: agent.id,
@@ -837,6 +850,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
                 timestamp: ts,
                 agent_chain_depth: agentChainDepth,
+                harness_config: extras.harness_config,
+                cli_runtime_profile: extras.cli_runtime_profile,
+                effort_preset: extras.effort_preset,
+                environment_config: extras.environment_config,
+                worktree_mode: extras.worktree_mode,
               });
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
@@ -1506,6 +1524,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // ticket 07402c57: same chain-depth stamp as add_comment/ask_question.
       const agentChainDepth = await computeTicketCommentChainDepth(commentRepo, ticket.id);
       if (!(await ctx.instanceQuiesceService.isQuiesced())) {
+        // 티켓 71532b4f: add_comment/ask_question과 동일한 dispatch 부가값 — 누락 시
+        // 이 handoff mention으로 깨운 세션이 targetAgent에 핀된 backend/harness/effort를
+        // 조용히 무시한다.
+        const extras = await resolveMentionDispatchExtras(dataSource, ticket, targetAgent);
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
@@ -1519,6 +1541,11 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           mention_source: 'direct',
           timestamp: ts,
           agent_chain_depth: agentChainDepth,
+          harness_config: extras.harness_config,
+          cli_runtime_profile: extras.cli_runtime_profile,
+          effort_preset: extras.effort_preset,
+          environment_config: extras.environment_config,
+          worktree_mode: extras.worktree_mode,
         });
       }
       logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);

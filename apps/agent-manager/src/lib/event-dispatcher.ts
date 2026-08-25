@@ -3447,6 +3447,34 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentTicket = delegation.persistentTicketSessions !== false;
 
+    // 티켓 71532b4f: #dispatchTriggerBody(handleTrigger)와 동일한 harness /
+    // runtime profile / effort preset / env vars 계산 — 같은 in-file 함수
+    // (parseHarnessConfig/resolveTriggerRuntimeProfile/parseEffortPreset/
+    // parseEnvironmentConfig/parseWorktreeMode/buildDispatchEnvVars) 재사용.
+    // 이전에는 이 값들을 전혀 계산하지 않아, agent에 명시 핀된 cli_runtime_profile이
+    // 조용히 무시되고 순정 Claude로 돌았다(서버가 comment_mention 페이로드에
+    // agent_trigger와 같은 이름의 필드를 싣도록 확장됨: event-registry.ts/
+    // mention-dispatch-profile.ts). 트리거 경로와 동일하게 Hermes 분기 직전에
+    // 계산해, 아래 Hermes 분기(harness.system_prompt_append)와 그 다음의 Claude
+    // one-shot spawn() 양쪽에서 재사용한다 — 리뷰 지적(71532b4f): Hermes 분기가
+    // harness를 계산 시점보다 먼저 실행·반환해 harness가 계속 무시되던 버그.
+    const harness = parseHarnessConfig(ev.harness_config);
+    const runtimeProfile = resolveTriggerRuntimeProfile(ev.cli_runtime_profile, this.#runtimeProfileOverride);
+    const effortPreset = parseEffortPreset(ev.effort_preset);
+    const envConfig = parseEnvironmentConfig(ev.environment_config);
+    const worktreeMode = parseWorktreeMode(ev.worktree_mode);
+    const envVars = buildDispatchEnvVars(envConfig?.env_vars, agentContext?.cwd, worktreeMode, ticketId);
+    if (harness) {
+      log(
+        `Comment mention carries harness_config: ticket=${ticketId.slice(0, 8) || '_'} keys=${Object.keys(harness).join(',')}`,
+      );
+    }
+    if (effortPreset) {
+      log(
+        `Comment mention carries effort_preset: id=${effortPreset.id}${effortPreset.label ? ` (${effortPreset.label})` : ''} ticket=${ticketId.slice(0, 8) || '_'}`,
+      );
+    }
+
     if (agentContext?.cli === 'hermes') {
       try {
         const ticket = ticketId ? await fetchTicketContext(this.#config, ticketId) : null;
@@ -3477,7 +3505,10 @@ export class EventDispatcher {
           agentContext,
           runId: `ticket:${ticketId}:${mention.role_shortcut || '_'}`,
           leaseId: String(ev.worktree_lease_id || `cwd:${agentContext.cwd}`),
-          systemContext: rolePrompt,
+          // 리뷰 지적(71532b4f): 컬럼 트리거 Hermes 분기와 동일하게 harness의
+          // system_prompt_append를 합성 — 이전에는 rolePrompt만 실려 board/
+          // workspace harness_config가 Hermes comment_mention에서만 무시됐다.
+          systemContext: [rolePrompt, harness?.system_prompt_append || ''].filter(Boolean).join('\n\n'),
           task: taskText,
         });
         log(
@@ -3734,6 +3765,10 @@ export class EventDispatcher {
             // (or stay null when ambiguous) instead of pinning a guess.
             role: mention.mention_source === 'role' ? mention.role_shortcut || '' : '',
             agentContext,
+            harness,
+            runtimeProfile,
+            effortPreset,
+            envVars,
             // ticket e90294e7 round 2: release the claimed seat when this
             // one-shot's process exits, not when spawn() merely returns a pid
             // — the column trigger must stay locked out for the seat's whole

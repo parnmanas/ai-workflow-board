@@ -23,6 +23,7 @@ import {
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
+import { validateCliRuntimeProfileSelection } from '../../../common/claude-backend-registry';
 import { WorkspaceMoveService, WorkspaceMoveBlockedError } from '../../../services/workspace-move.service';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
@@ -145,7 +146,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_agent',
-    'Update an AI agent (name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta)',
+    'Update an AI agent (name, description, type, avatar_url, is_active, role_prompt, role_prompt_meta, cli_runtime_profile)',
     {
       agent_id: z.string().describe('Agent ID'),
       name: z.string().optional().describe('New name'),
@@ -166,6 +167,12 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         "Per-agent default model the spawned CLI runs under (e.g. 'opus', 'claude-opus-4-8'). Empty string clears it (CLI default). Takes effect on the next spawn — restart a running agent to apply."
       ),
       workspace_id: z.string().nullable().optional().describe('Owning workspace, or null/blank for all workspaces'),
+      cli_runtime_profile: z.string().nullable().optional().describe(
+        "Claude backend profile id this agent's dispatch pins to. 'none' = explicit opt-out (stop inheriting the " +
+        'board/workspace/global default); null = clear the pin and inherit again. Empty string is preserved for ' +
+        "REST compatibility and also stops inheritance (behaves like 'none') — pass null if you actually want to " +
+        'resume inheriting. Claude-type agents only. Takes effect on the next dispatch.'
+      ),
     },
     async ({
       agent_id,
@@ -181,6 +188,7 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
       working_dir,
       model,
       workspace_id,
+      cli_runtime_profile,
     }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const agentRepo = dataSource.getRepository(Agent);
@@ -231,6 +239,22 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         agent.workspace_id = normalizedWorkspaceId;
       }
 
+      // Must run AFTER the workspace_id block above so a profile is checked
+      // against the agent's FINAL (possibly just-reassigned) workspace, not
+      // its pre-update one — otherwise a profile valid only in the old
+      // workspace would slip through on a combined reassign+pin call.
+      const prevProfile = agent.cli_runtime_profile;
+      if (cli_runtime_profile !== undefined) {
+        const workspace = agent.workspace_id
+          ? await dataSource.getRepository(Workspace).findOne({ where: { id: agent.workspace_id } })
+          : null;
+        const checked = await validateCliRuntimeProfileSelection(
+          dataSource, workspace, cli_runtime_profile, 'agent workspace',
+        );
+        if (!checked.ok) return err(checked.error);
+        agent.cli_runtime_profile = checked.value;
+      }
+
       const runtimeId = typeof agent.type === 'string' ? agent.type.trim().toLowerCase() : '';
       if (!runtimeId) return err('runtime_not_configured');
       if (!isExecutableRuntime(runtimeId)) return err('runtime_unknown');
@@ -265,6 +289,20 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
             field: 'name',
             before: prevName,
             after: updated.name,
+            via: 'MCP update_agent',
+          },
+        );
+      }
+      if (prevProfile !== updated.cli_runtime_profile) {
+        logger.info(
+          'AgentIdentity',
+          `Agent cli_runtime_profile changed via MCP update_agent: "${prevProfile}" → "${updated.cli_runtime_profile}" (id=${updated.id.slice(0, 8)})`,
+          {
+            agent_id: updated.id,
+            agent_type: updated.type,
+            field: 'cli_runtime_profile',
+            before: prevProfile,
+            after: updated.cli_runtime_profile,
             via: 'MCP update_agent',
           },
         );

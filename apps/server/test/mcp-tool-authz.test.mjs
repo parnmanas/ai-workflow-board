@@ -56,6 +56,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   let dataSource;
   let apiKeyService;
   let tools; // name -> { handler }
+  let managerAgent; // update_agent's runtime_host_required gate needs a real manager-type Agent
 
   before(async () => {
     dataSource = new DataSource({
@@ -66,6 +67,11 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     });
     await dataSource.initialize();
     apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));
+    managerAgent = await dataSource.getRepository(Agent).save(dataSource.getRepository(Agent).create({
+      name: 'authz-test-manager',
+      type: 'manager',
+      workspace_id: '',
+    }));
 
     tools = {};
     const fakeServer = {
@@ -114,6 +120,16 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
       name: `agent-${randomUUID().slice(0, 8)}`,
       type: 'claude',
       workspace_id: workspaceId ?? '',
+      // update_agent re-validates runtime_config against the agent's type on
+      // EVERY call (agent-tools.ts, after the cli_runtime_profile block),
+      // even one that never touches these fields — a fixture missing
+      // manager_agent_id fails closed with runtime_host_required before a
+      // successful call ever reaches agentRepo.save(). Every test in this
+      // file so far only asserted update_agent REJECTIONS, which return at
+      // the earlier authz gate and never reach that validation — harmless to
+      // set unconditionally here.
+      manager_agent_id: managerAgent.id,
+      runtime_config: { strategy: 'single', permission_mode: 'strict' },
     }));
     return agent;
   }
@@ -608,6 +624,62 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, undefined);
     const gone = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
     assert.equal(gone, null);
+  });
+
+  // ─── Ticket 9b7a5bb7: the two tests above only ever registered a session
+  // WITHOUT caller.workspaceId, so callerCanAccessWorkspace's null-target
+  // branch was reached via its `!caller.workspaceId` fallback — never via a
+  // caller whose ApiKey/session carries a non-null workspaceId even though
+  // the underlying Agent is genuinely global. That second shape is exactly
+  // what the ticket reported (a global agent's own key still had a
+  // workspace_id stamped on it from issuance context) and used to be
+  // rejected unconditionally, because `caller.workspaceId && caller.workspaceId
+  // === targetWorkspaceId` short-circuited to false before the Agent-row
+  // lookup ever ran. These pin down both the fix (accept) and that it does
+  // not overshoot into a privilege escalation (still reject a merely
+  // workspace-bound full-scope caller from touching a global target). ───
+
+  it('allows a genuinely global full-scope Agent to update_agent on itself even when its own session carries a stale non-null workspaceId', async () => {
+    const globalAgent = await makeAgent(''); // '' normalizes to null (global)
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: globalAgent.id,
+      workspaceId: 'workspace-a', // stale/contextual — must not short-circuit the null-target check
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.update_agent.handler(
+      { agent_id: globalAgent.id, name: 'renamed-global-self' },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, undefined);
+    const updated = await dataSource.getRepository(Agent).findOne({ where: { id: globalAgent.id } });
+    assert.equal(updated.name, 'renamed-global-self');
+  });
+
+  it('still rejects update_agent on a global target from a workspace-bound full-scope caller whose own Agent is not actually global', async () => {
+    const caller = await makeAgent('workspace-a');
+    const globalVictim = await makeAgent('');
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: caller.id,
+      workspaceId: 'workspace-a',
+      scope: 'full',
+      source: 'db',
+    });
+
+    const result = await tools.update_agent.handler(
+      { agent_id: globalVictim.id, name: 'renamed-by-workspace-bound-caller' },
+      { sessionId },
+    );
+    cleanup();
+
+    assert.equal(result.isError, true);
+    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: globalVictim.id } });
+    assert.notEqual(stillThere.name, 'renamed-by-workspace-bound-caller');
   });
 
   // ─── DoD (b): sessionless / unresolvable-session create_user / update_user ───

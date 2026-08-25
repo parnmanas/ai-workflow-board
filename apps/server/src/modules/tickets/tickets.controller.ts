@@ -56,6 +56,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
+import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-profile';
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
@@ -2489,6 +2490,10 @@ export class TicketsController {
         // Scope safety: an agent in a different workspace should never receive this mention.
         if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
 
+        // 티켓 71532b4f: comment-tools.ts(MCP add_comment 등)와 동일한 dispatch
+        // 부가값 — 누락 시 이 mention으로 깨운 세션이 agent에 핀된
+        // backend/harness/effort를 조용히 무시한다.
+        const extras = await resolveMentionDispatchExtras(this.dataSource, ticket, agent);
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
@@ -2503,6 +2508,11 @@ export class TicketsController {
           role_shortcut: m.roleShortcut,
           timestamp: ts,
           agent_chain_depth: agentChainDepth,
+          harness_config: extras.harness_config,
+          cli_runtime_profile: extras.cli_runtime_profile,
+          effort_preset: extras.effort_preset,
+          environment_config: extras.environment_config,
+          worktree_mode: extras.worktree_mode,
         });
         this.logService.info('Mentions', `Agent @-mention routed: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
       } else {

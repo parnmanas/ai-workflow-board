@@ -334,9 +334,10 @@ export type ChatReplyMode = boolean | 'agent_manager_delivers';
  *  CHANNEL lines are identical. An Action Run reuses the chat-room pipeline but
  *  its intent is the opposite of a chat: the message is a task the subagent must
  *  perform DIRECTLY, not defer into an AWB ticket. So for Action rooms we drop
- *  the "this is a CHAT channel, create a ticket" rule and substitute a
+ *  the ordinary-chat work-routing rule and substitute a
  *  "do the work directly, do NOT create a ticket" rule. Ordinary chat rooms
- *  (isActionRoom = false, the default) keep the prior behavior verbatim. */
+ *  (isActionRoom = false, the default) choose between a suitable existing
+ *  board and direct inline execution based on the work itself. */
 function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false): string[] {
   const operationalPolicy = [
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
@@ -344,6 +345,11 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     '- If no Action matches but a relevant MCP/tool exists, perform the operation with that tool. For safe repeatable work, register a narrow idempotent Action with `save_action` and run it. Ask for user input only when a concrete permission, approval, secret, or irreversible-risk gate requires it, and request only that minimum input.',
     '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
     '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
+  ];
+  const ordinaryWorkPolicy = [
+    '- ORDINARY WORK ROUTING: an AWB ticket is optional, not the default for every request. Use a ticket when a suitable existing board clearly matches the work and the task benefits from board tracking, handoff, review, or a multi-step lifecycle.',
+    '- If no suitable board exists, do NOT create a board or ticket merely to process the request. Handle the work directly in this chat. Also handle small, one-off work directly, including environment setup, configuration, quick fixes, and simple file or command changes, unless the user explicitly asks for ticket tracking.',
+    '- When ticketing is warranted, reuse the suitable existing board and create one focused AWB ticket. Otherwise perform the requested work now and report the result inline; do not only describe a proposed ticket.',
   ];
   if (mode) {
     const managerDelivers = mode === 'agent_manager_delivers';
@@ -364,7 +370,8 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
       );
     } else {
       lines.push(...operationalPolicy);
-      lines.push('- For non-operational development work, create an AWB ticket with `mcp__awb__create_ticket` (leave roles unset for board defaults). Questions, status/triage, and read-only investigation stay inline.');
+      lines.push(...ordinaryWorkPolicy);
+      lines.push('- For a warranted ticket, use `mcp__awb__create_ticket` and leave roles unset for board defaults. Questions, status/triage, and read-only investigation stay inline.');
     }
     lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
     return lines;
@@ -379,7 +386,8 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     );
   } else {
     lines.push(...operationalPolicy);
-    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For non-operational development work, describe the ticket needed for the existing manager-side reply flow.');
+    lines.push(...ordinaryWorkPolicy);
+    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. If ordinary work genuinely warrants a ticket, describe the suitable existing board and focused ticket needed for the manager-side reply flow; otherwise do the work directly.');
   }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
