@@ -56,7 +56,7 @@ export function defSymbolId(relPath: string, qualifiedName: string): string {
 
 /** natural key를 UUID 컬럼에 저장 가능한 결정론적 ID로 바꾼다. 같은 입력을
  * 여러 청크·재시도에서 보더라도 동일한 행을 가리키게 하는 용도다. */
-function stableUuid(namespace: string, naturalKey: string): string {
+export function stableUuid(namespace: string, naturalKey: string): string {
   const hex = createHash('sha256').update(namespace).update('\0').update(naturalKey).digest('hex').slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
@@ -65,11 +65,11 @@ function nodeNaturalKey(row: OntologyNode): string {
   return `${row.graph_id}\0${row.symbol_id}`;
 }
 
-function edgeNaturalKey(row: OntologyEdge): string {
+export function edgeNaturalKey(row: OntologyEdge): string {
   return [row.graph_id, row.src_id, row.dst_id, row.type, row.layer, row.resolution ?? '', row.evidence_kind, row.props].join('\0');
 }
 
-function canonicalizeRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
+export function canonicalizeRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
   const canonical = new Map<string, { row: T; fingerprint: string }>();
   for (const row of rows) {
     const { id: _generatedId, created_at: _createdAt, updated_at: _updatedAt, ...stableFields } = row as T & {
@@ -146,7 +146,7 @@ export async function insertChunked<T extends object>(
   }
 }
 
-async function upsertChunked<T extends object>(
+export async function upsertChunked<T extends object>(
   repo: Repository<T>,
   rows: T[],
   chunkSize: number,

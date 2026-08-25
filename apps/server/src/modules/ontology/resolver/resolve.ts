@@ -4,14 +4,13 @@
 // IMPORTS/CALLS/INSTANTIATES/USES_TYPE/REFERENCES/EXTENDS/IMPLEMENTS
 // 엣지를 만들고, reverse_edge_index를 채운다. Tier 1.5 자체가 "a separate,
 // whole-workspace pass"로 설계돼 있어(DESIGN.md 축 1) 이 그래프의 노드
-// 전체를 메모리에 올린다 — persist.ts와 마찬가지로 청크 insert +
-// 명시적 매크로태스크 양보 계약을 그대로 재사용한다(insertChunked/
+// 전체를 메모리에 올린다 — persist.ts와 마찬가지로 청크 upsert +
+// 명시적 매크로태스크 양보 계약을 그대로 재사용한다(upsertChunked/
 // yieldToEventLoop, persist.ts에서 import).
-import { randomUUID } from 'node:crypto';
 import { In, type DataSource, type EntityManager } from 'typeorm';
 import { OntologyEdge, type OntologyEdgeResolution } from '../../../entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from '../../../entities/OntologyReverseEdgeIndex';
-import { insertChunked, updateChunked, yieldToEventLoop } from '../persist';
+import { canonicalizeRows, edgeNaturalKey, stableUuid, updateChunked, upsertChunked, yieldToEventLoop } from '../persist';
 import { buildGraphSymbolIndex, type DefNodeInfo, type GraphSymbolIndex } from './symbol-index';
 import { resolveImportFactExact, resolveImportFactSuffix, resolveName, resolveRef, type CascadeResult } from './cascade';
 import { deriveOverridesAndCapDynamicDispatch, type ExistingEdgeSnapshot, type ExistingEdges } from './polymorphic-cap';
@@ -179,10 +178,10 @@ export async function resolveCrossFileEdges(dataSource: DataSource | EntityManag
   let unresolvedHeritage = 0;
 
   function recordReverseIndex(srcFileId: string, dstSymbolId: string): void {
-    const key = JSON.stringify([dstSymbolId, srcFileId]); // symbol_id/file id 문자열이 임의 구두점을 포함할 수 있어 델리미터 충돌 없는 튜플 인코딩 사용
+    const key = JSON.stringify([input.graphId, dstSymbolId, srcFileId]); // symbol_id/file id 문자열이 임의 구두점을 포함할 수 있어 델리미터 충돌 없는 튜플 인코딩 사용
     if (!reverseIndexByKey.has(key)) {
       reverseIndexByKey.set(key, {
-        id: randomUUID(),
+        id: stableUuid('ontology-reverse-edge-index', key),
         graph_id: input.graphId,
         dst_symbol_id: dstSymbolId,
         src_file_id: srcFileId,
@@ -192,7 +191,8 @@ export async function resolveCrossFileEdges(dataSource: DataSource | EntityManag
 
   function pushEdge(type: string, srcId: string, result: CascadeResult, srcFileId: string): void {
     edgeRows.push({
-      id: randomUUID(),
+      // 아래 전역 canonical 단계에서 natural key 기반 결정론적 ID로 교체한다.
+      id: '',
       ...base,
       src_id: srcId,
       dst_id: result.nodeId,
@@ -290,18 +290,25 @@ export async function resolveCrossFileEdges(dataSource: DataSource | EntityManag
     existing,
   );
 
-  await insertChunked(edgeRepo, edgeRows, EDGE_CHUNK_SIZE);
+  // 파일/규칙/청크 경계를 넘어 같은 논리 엣지가 여러 번 생겨도 하나로
+  // 수렴시킨다. OVERRIDES까지 파생되고 CALLS dynamic cap까지 확정된 뒤의
+  // 최종 필드를 natural key로 삼아 resolver 전체 출력에 동일 계약을 적용한다.
+  const canonicalEdges = canonicalizeRows(edgeRows, edgeNaturalKey).map((row) => ({
+    ...row,
+    id: stableUuid('ontology-edge', edgeNaturalKey(row)),
+  }));
+  await upsertChunked(edgeRepo, canonicalEdges, EDGE_CHUNK_SIZE, ['id']);
   // 단일 IN(...) UPDATE 하나로 전체 목록을 보내면 수십만 심볼/다중천
   // fan-in 규모에서 SQLite/sql.js·PostgreSQL의 바인드 변수 한도를 넘어
   // 문장 자체가 실패할 수 있다(리뷰 지적 라운드 2) — insertChunked와 같은
   // EDGE_CHUNK_SIZE로 나눠 청크 사이 양보한다.
   await updateChunked(edgeRepo, existingCallsIdsToCapDynamic, EDGE_CHUNK_SIZE, { resolution: 'dynamic' });
   const reverseIndexRows = [...reverseIndexByKey.values()];
-  await insertChunked(dataSource.getRepository(OntologyReverseEdgeIndex), reverseIndexRows, REVERSE_INDEX_CHUNK_SIZE);
+  await upsertChunked(dataSource.getRepository(OntologyReverseEdgeIndex), reverseIndexRows, REVERSE_INDEX_CHUNK_SIZE, ['id']);
 
   return {
     filesProcessed: index.filesByPath.size,
-    edgesInserted: edgeRows.length,
+    edgesInserted: canonicalEdges.length,
     importsEdges,
     refEdgesByType,
     heritageEdges,

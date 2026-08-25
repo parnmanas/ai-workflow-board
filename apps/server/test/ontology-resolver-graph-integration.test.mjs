@@ -221,6 +221,37 @@ describe('resolveCrossFileEdges — reverse_edge_index 영속화 + 중복제거'
   });
 });
 
+describe('resolveCrossFileEdges — 재시도·중복 입력 멱등성', () => {
+  it('동일 입력 연속 실행과 중복 fact가 edge/reverse-index 수 및 ID를 바꾸지 않는다', async () => {
+    const consumerFile = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, type: 'File', path: 'consumer.ts' } });
+    assert.ok(consumerFile);
+    const props = JSON.parse(consumerFile.props);
+    props.imports = [...props.imports, ...props.imports];
+    props.refs = [...props.refs, ...props.refs];
+    consumerFile.props = JSON.stringify(props);
+    await nodeRepo.save(consumerFile);
+
+    const firstEdges = await edgeRepo.find({ where: { graph_id: GRAPH_ID }, order: { id: 'ASC' } });
+    const firstReverse = await reverseIndexRepo.find({ where: { graph_id: GRAPH_ID }, order: { id: 'ASC' } });
+    const input = {
+      graphId: GRAPH_ID,
+      workspaceId: 'resolver-integration-ws',
+      commit: 'resolver-integration-commit',
+      extractionRunId: 'resolver-integration-retry',
+    };
+
+    await resolveCrossFileEdges(AppOntologyDataSource, input);
+    await resolveCrossFileEdges(AppOntologyDataSource, { ...input, extractionRunId: 'resolver-integration-retry-2' });
+
+    const finalEdges = await edgeRepo.find({ where: { graph_id: GRAPH_ID }, order: { id: 'ASC' } });
+    const finalReverse = await reverseIndexRepo.find({ where: { graph_id: GRAPH_ID }, order: { id: 'ASC' } });
+    assert.equal(finalEdges.length, firstEdges.length, 'resolver 재시도는 엣지 수를 늘리지 않아야 한다');
+    assert.equal(finalReverse.length, firstReverse.length, 'resolver 재시도는 reverse index 수를 늘리지 않아야 한다');
+    assert.deepEqual(finalEdges.map((row) => row.id), firstEdges.map((row) => row.id), '엣지 ID가 안정적이어야 한다');
+    assert.deepEqual(finalReverse.map((row) => row.id), firstReverse.map((row) => row.id), 'reverse index ID가 안정적이어야 한다');
+  });
+});
+
 describe('resolveCrossFileEdges — 그래프 밖 참조는 추측 없이 미해소로 남는다', () => {
   it('그래프에 없는 파일을 향한 import는 엣지를 만들지 않고 unresolvedImports에 집계된다', async () => {
     const orphanFile = await nodeRepo.findOne({ where: { graph_id: GRAPH_ID, type: 'File', path: 'orphan.ts' } });
