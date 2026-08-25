@@ -44,7 +44,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene, createAgent, createTicket, createApiKey, runtimeHostKeyForAgent,
+  setupKanbanScene, createAgent, createTicket, createApiKey,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -52,6 +52,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 process.env.PORT = process.env.QA_DISPATCH_PORT || '7835';
+// suppressed ACK의 manager provenance를 검증하므로 dev-mode 인증 우회를 끈다.
+process.env.AGENT_API_KEY = 'qa-dispatch-reconciler-static-fallback';
 process.env.STUCK_DETECTOR_ENABLED = 'false';       // isolate the dispatch loop
 process.env.DISPATCH_RECONCILER_ENABLED = 'true';
 process.env.DISPATCH_RECONCILER_SWEEP_MS = '300000'; // 5min — the auto-timer never fires in-test
@@ -291,8 +293,10 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     for (let i = 0; i < 3; i += 1) {
       tids.push(await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system'));
     }
-    const managerKey = runtimeHostKeyForAgent(agent.id);
-    assert.ok(managerKey, 'fixture agent의 실제 런타임 호스트 키가 있어야 한다');
+    assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
+    const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
+      workspaceId: ws.id, label: 'mgr-suppression',
+    })).raw_key;
     const post = (bodyObj) => fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',
       headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
@@ -361,8 +365,10 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
   await t.test('10c: SSE 수신 즉시 도착한 suppressed ACK도 상관 행을 찾는다', async () => {
     const ticket = await mkTicket('immediate suppression correlation');
-    const managerKey = runtimeHostKeyForAgent(agent.id);
-    assert.ok(managerKey, 'fixture agent의 실제 런타임 호스트 키가 있어야 한다');
+    assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
+    const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
+      workspaceId: ws.id, label: 'mgr-immediate-suppression',
+    })).raw_key;
 
     let resolveAck;
     let rejectAck;
