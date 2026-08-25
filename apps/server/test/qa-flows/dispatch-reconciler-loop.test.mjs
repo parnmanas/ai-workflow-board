@@ -76,6 +76,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
   const intents = await load('dispatch-intent.service.js', 'DispatchIntentService');
   const reconciler = await load('dispatch-reconciler.service.js', 'DispatchReconcilerService');
   const triggerLoop = await load('trigger-loop.service.js', 'TriggerLoopService');
+  const { activityEvents } = await import('file://' + path.join(DIST_ROOT, 'services', 'activity.service.js'));
 
   step('Seed a CODE board (env repo so assignee+active dispatches land) + agent');
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
@@ -356,6 +357,46 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       body: JSON.stringify({ ticket_id: ticket.id, role: 'assignee', trigger_id: 'forged', outcome: 'suppressed' }),
     });
     assert.equal(forged.status, 403, '일반 agent는 hard-budget 차감 신호를 위조할 수 없어야 한다');
+  });
+
+  await t.test('10c: SSE 수신 즉시 도착한 suppressed ACK도 상관 행을 찾는다', async () => {
+    const ticket = await mkTicket('immediate suppression correlation');
+    const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'immediate-suppression-manager', type: 'manager' });
+    const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'mgr-immediate-suppression' });
+
+    let resolveAck;
+    let rejectAck;
+    const ackResult = new Promise((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+    const onTrigger = (event) => {
+      if (event.ticket_id !== ticket.id) return;
+      void fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticket.id,
+          role: 'assignee',
+          trigger_id: event.trigger_id,
+          outcome: 'suppressed',
+          reason: 'inflight_dispatch',
+        }),
+      }).then(async (response) => ({ status: response.status, body: await response.json() }))
+        .then(resolveAck, rejectAck);
+    };
+    activityEvents.on('agent_trigger', onTrigger);
+    t.after(() => activityEvents.removeListener('agent_trigger', onTrigger));
+
+    const triggerId = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
+    const ack = await ackResult;
+    activityEvents.removeListener('agent_trigger', onTrigger);
+
+    assert.equal(ack.status, 200);
+    assert.equal(ack.body.applied, true, 'SSE 리스너가 즉시 보낸 ACK도 이미 커밋된 emit과 상관되어야 한다');
+    assert.equal(await ds.getRepository('ActivityLog').count({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed', entity_id: triggerId },
+    }), 1, '즉시 억제도 정확히 한 번 차감 activity로 남아야 한다');
   });
 
   await t.test('11: seed — a REVIEW-kind ticket with a lost reviewer emit is seeded then dispatched (blocker B1)', async () => {

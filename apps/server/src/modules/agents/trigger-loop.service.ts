@@ -2579,8 +2579,9 @@ candidate's branch or move the ticket.
     // focus-window gate below — an over-budget ticket must not dispatch even
     // when it's the agent's top-ranked focus ticket. A single early check is
     // enough (no late re-check like the pending gate): the count source
-    // (`trigger_emitted`) is a fail-open observability write, so this is
-    // already a best-effort safety-net ceiling, not a hard real-time cap.
+    // (`trigger_emitted`)은 SSE보다 먼저 저장되는 dispatch 상관 원장이지만,
+    // 이 조회와 이후 저장 사이에 동시 emit이 들어올 수 있으므로 실시간
+    // 원자 상한이 아니라 보수적 safety-net ceiling으로 취급한다.
     if (await this._checkHardBudgetGate(ticket, agentId, role, triggerSource, boardId)) {
       return '';
     }
@@ -3223,6 +3224,51 @@ candidate's branch or move the ticket.
       return '';
     }
 
+    // hard-budget의 원시 집합이자 매니저 억제 ACK의 상관 근거를 SSE보다
+    // 먼저 커밋한다. EventEmitter 리스너는 동기적으로 실행을 시작하므로
+    // emit 뒤에 저장하면 즉시 도착한 ACK가 행을 못 찾아 영구 유실될 수 있다.
+    // 이 저장이 실패하면 상관 불가능한 trigger를 내보내지 않는 fail-closed
+    // 정책을 적용한다. 보수적으로 dispatch가 누락될 수는 있어도, 억제된
+    // dispatch를 상한에서 비결정적으로 차감하거나 과소계상하지는 않는다.
+    const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+    const createdAtIso = ticket.created_at
+      ? new Date(ticket.created_at).toISOString()
+      : '';
+    try {
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'TriggerLoopService',
+        action: 'trigger_emitted',
+        // 매니저의 억제 보고를 실제 emit과 1:1로 상관시키는 안정 키다.
+        field_changed: triggerId,
+        new_value: JSON.stringify({
+          target_agent_id: agentId,
+          column_position: col?.position ?? -1,
+          chain_target: chainTarget,
+          priority_index: priorityIndex(ticket.priority),
+          ticket_created_at: createdAtIso,
+          force_respawn: forceRespawn,
+          base_repo_id: baseRepoId || null,
+          base_repo_url: baseRepo?.url || null,
+          base_branch: baseBranch || null,
+          worktree_mode: worktreeMode,
+        }),
+        role,
+        trigger_source: triggerSource,
+      }));
+    } catch (e) {
+      this.logService.error('MCP', 'trigger_emitted activity log write failed; trigger not emitted', {
+        err: String(e), ticket_id: ticket.id, agent_id: agentId, role,
+      });
+      throw Object.assign(new Error('Unable to persist trigger correlation'), {
+        status: 503,
+        code: 'TRIGGER_CORRELATION_PERSIST_FAILED',
+      });
+    }
+
     activityEvents.emit('agent_trigger', {
       trigger_id: triggerId,
       ticket_id: ticket.id,
@@ -3284,50 +3330,6 @@ candidate's branch or move the ticket.
     this.logService.info('MCP', 'agent_trigger emitted (fire-and-forget)', {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource, force_respawn: forceRespawn,
     });
-
-    // Observability hook required by ticket 4a6cdfd7 acceptance #8.
-    // Every successful dispatch leaves a `trigger_emitted` ActivityLog
-    // row with the selector ranking inputs in `new_value` so admins
-    // can correlate the chosen-focus decision against the parked tickets.
-    try {
-      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-      const createdAtIso = ticket.created_at
-        ? new Date(ticket.created_at).toISOString()
-        : '';
-      await activityLogRepo.save(activityLogRepo.create({
-        entity_type: 'ticket',
-        entity_id: ticket.id,
-        ticket_id: ticket.id,
-        actor_id: 'system',
-        actor_name: 'TriggerLoopService',
-        action: 'trigger_emitted',
-        // 매니저의 억제 보고를 실제 emit과 1:1로 상관시키는 안정 키다.
-        field_changed: triggerId,
-        new_value: JSON.stringify({
-          target_agent_id: agentId,
-          column_position: col?.position ?? -1,
-          chain_target: chainTarget,
-          priority_index: priorityIndex(ticket.priority),
-          ticket_created_at: createdAtIso,
-          force_respawn: forceRespawn,
-          // ticket 112ea3c5 (수용 기준 #8): 이 dispatch가 바인딩한 resolved
-          // repo/branch — ticket 고유든 board-env 백필이든 — 를 남겨, "잘못된
-          // repo" 신고를 이 티켓 자체의 audit trail만으로 진단할 수 있게 한다.
-          base_repo_id: baseRepoId || null,
-          base_repo_url: baseRepo?.url || null,
-          base_branch: baseBranch || null,
-          worktree_mode: worktreeMode,
-        }),
-        role,
-        trigger_source: triggerSource,
-      }));
-    } catch (e) {
-      // Never block the emit on observability writes. A missed log row
-      // is preferable to a missed trigger.
-      this.logService.warn('MCP', 'trigger_emitted activity log write failed (non-fatal)', {
-        err: String(e), ticket_id: ticket.id, agent_id: agentId,
-      });
-    }
 
     // Claim-verification snapshot (ticket dcb9d661). When an assignee
     // is being woken on an active column AND the workspace has

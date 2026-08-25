@@ -88,6 +88,16 @@ test('_checkHardBudgetGate는 쌍둥이 억제된 emit을 실제 dispatch 수에
     '차감된 수를 상한과 비교해야 한다');
 });
 
+test('trigger 상관 activity는 SSE보다 먼저 저장되고 저장 실패는 fail-closed다', () => {
+  const src = code(SRC_PATH);
+  const saveIdx = src.indexOf('await activityLogRepo.save(activityLogRepo.create({');
+  const emitIdx = src.indexOf(EMIT_MARKER);
+  assert.ok(saveIdx > -1, 'trigger_emitted 상관 activity 저장이 있어야 한다');
+  assert.ok(saveIdx < emitIdx, '즉시 억제 ACK도 상관되도록 activity 저장이 SSE보다 먼저여야 한다');
+  assert.match(src, /TRIGGER_CORRELATION_PERSIST_FAILED/,
+    '상관 activity 저장 실패 시 SSE를 보내지 않는 fail-closed 오류 계약이 있어야 한다');
+});
+
 // ── Token ceiling (ticket ef53fdf4) — shares _checkHardBudgetGate/its call
 // site with the dispatch ceiling above, so it inherits every ordering
 // guarantee already asserted (single call site, after pending gate, before
