@@ -2,11 +2,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { Comment } from '../../../entities/Comment';
-import { Ticket } from '../../../entities/Ticket';
 import { TicketCompletionVerification } from '../../../entities/TicketCompletionVerification';
 import { TicketCompletionVerificationAttempt } from '../../../entities/TicketCompletionVerificationAttempt';
 import { ok, err } from '../shared/helpers';
 import type { ToolContext } from './context';
+import { lockTicketForCompletionVerification } from '../shared/completion-verification-gate';
+import { BoardColumn } from '../../../entities/BoardColumn';
 
 const EvidenceSchema = z.object({
   summary: z.string().min(1),
@@ -26,20 +27,32 @@ export function registerCompletionVerificationTools(server: McpServer, ctx: Tool
       not_before: z.string().datetime().optional(),
     },
     async ({ ticket_id, dedupe_key, description, not_before }) => {
-      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
-      if (!ticket) return err('Ticket not found');
-
-      const row = await dataSource.transaction(async manager => {
-        const repo = manager.getRepository(TicketCompletionVerification);
-        await repo.createQueryBuilder().insert().values({
-          ticket_id,
-          dedupe_key,
-          description,
-          not_before: not_before ? new Date(not_before) : null,
-        }).orIgnore().execute();
-        return repo.findOneOrFail({ where: { ticket_id, dedupe_key } });
-      });
-      return ok(row);
+      try {
+        const row = await dataSource.transaction(async manager => {
+          const ticket = await lockTicketForCompletionVerification(manager, ticket_id);
+          const column = ticket.column_id
+            ? await manager.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+            : null;
+          // 늦은 등록 정책: 이미 terminal인 티켓에는 조건을 붙이지 않는다. 재개될
+          // 수 없는 pending 행을 만드는 대신 먼저 명시적으로 티켓을 reopen해야 한다.
+          if (column?.kind === 'terminal' || column?.is_terminal === true) {
+            throw new Error('terminal 티켓에는 완료 검증을 늦게 등록할 수 없습니다. 먼저 티켓을 명시적으로 다시 여세요');
+          }
+          const repo = manager.getRepository(TicketCompletionVerification);
+          const due = not_before ? new Date(not_before) : new Date();
+          await repo.createQueryBuilder().insert().values({
+            ticket_id,
+            dedupe_key,
+            description,
+            not_before: not_before ? due : null,
+            next_dispatch_at: due,
+          }).orIgnore().execute();
+          return repo.findOneOrFail({ where: { ticket_id, dedupe_key } });
+        });
+        return ok(row);
+      } catch (error) {
+        return err(error instanceof Error ? error.message : String(error));
+      }
     },
   );
 
@@ -56,6 +69,7 @@ export function registerCompletionVerificationTools(server: McpServer, ctx: Tool
     async ({ ticket_id, dedupe_key, attempt_key, status, evidence }) => {
       try {
         const result = await dataSource.transaction(async manager => {
+          await lockTicketForCompletionVerification(manager, ticket_id);
           const verificationRepo = manager.getRepository(TicketCompletionVerification);
           const attemptRepo = manager.getRepository(TicketCompletionVerificationAttempt);
           const commentRepo = manager.getRepository(Comment);
@@ -81,6 +95,9 @@ export function registerCompletionVerificationTools(server: McpServer, ctx: Tool
           verification.attempt_count += 1;
           verification.evidence = JSON.stringify(evidence);
           verification.completed_at = status === 'passed' ? new Date() : null;
+          verification.next_dispatch_at = status === 'passed'
+            ? null
+            : new Date(Date.now() + Math.min(60 * 60_000, 60_000 * 2 ** Math.min(verification.attempt_count, 6)));
           await verificationRepo.save(verification);
 
           // 판정과 사람이 읽을 수 있는 증거를 한 트랜잭션에 묶어 상태만 완료되고

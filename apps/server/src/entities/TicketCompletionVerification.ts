@@ -33,6 +33,16 @@ export class TicketCompletionVerification {
   @Column({ type: Date, nullable: true, default: null })
   completed_at: Date | null;
 
+  // 재개 워커가 원자적으로 임대하는 다음 실행 시각. null이면 passed라 종료됨.
+  @Column({ type: Date, nullable: true, default: null })
+  next_dispatch_at: Date | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  last_dispatched_at: Date | null;
+
+  @Column({ type: 'int', default: 0 })
+  dispatch_count: number;
+
   @CreateDateColumn()
   created_at: Date;
 
