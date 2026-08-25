@@ -72,6 +72,8 @@ export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'release_ticket',
   'add_comment',
   'move_ticket',
+  'register_completion_verification',
+  'record_completion_verification',
   'propose_move',
   'record_agreement',
   'update_ticket',

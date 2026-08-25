@@ -30,6 +30,7 @@
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
+import { assertCompletionVerificationsPassed } from './completion-verification-gate';
 
 type RepoScope = DataSource | EntityManager;
 
@@ -74,6 +75,9 @@ export async function applyTerminalEnteredAtForMove(
   sourceColumn: BoardColumn | null | undefined,
   destColumn: BoardColumn | null | undefined,
 ): Promise<void> {
+  // 모든 이동 표면이 공유하는 트랜잭션 경계에서 검증해 등록/판정과 Done
+  // 이동 사이의 TOCTOU 및 크래시 창을 닫는다.
+  await assertCompletionVerificationsPassed(ticketRepo.manager, ticketId, destColumn);
   const wasTerminal = isTerminalColumn(sourceColumn);
   const isTerminal = isTerminalColumn(destColumn);
   const status = deriveRootTicketStatus(destColumn);
