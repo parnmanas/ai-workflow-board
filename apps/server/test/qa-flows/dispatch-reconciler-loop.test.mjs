@@ -286,9 +286,17 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
   await t.test('10b: HTTP suppressed outcome은 매 억제를 기록하되 intent를 변경하지 않는다', async () => {
     const ticket = await mkTicket('http suppression audit');
-    const tid = await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system');
+    const tids = [];
+    for (let i = 0; i < 3; i += 1) {
+      tids.push(await triggerLoop.emitAgentTrigger(ticket, agent.id, 'assignee', 'column_move', 'system'));
+    }
     const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'suppression-manager', type: 'manager' });
     const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'mgr-suppression' });
+    const post = (bodyObj) => fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
     const before = await intents.findOpenForTicketRole(ticket.id, 'assignee');
 
     for (let i = 0; i < 3; i += 1) {
@@ -296,7 +304,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
         method: 'POST',
         headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ticket_id: ticket.id, role: 'assignee', trigger_id: `${tid}-twin-${i}`,
+          ticket_id: ticket.id, role: 'assignee', trigger_id: tids[i],
           outcome: 'suppressed', reason: 'inflight_dispatch',
         }),
       });
@@ -310,6 +318,37 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     const after = await intents.findOpenForTicketRole(ticket.id, 'assignee');
     assert.equal(after.status, before.status, 'suppressed 관측은 intent 상태를 바꾸면 안 된다');
     assert.equal(after.last_ack_kind, before.last_ack_kind, '진행 중 holder의 ack 상태를 덮으면 안 된다');
+
+    const otherTicket = await mkTicket('other suppression audit');
+    const otherTid = await triggerLoop.emitAgentTrigger(otherTicket, agent.id, 'assignee', 'column_move', 'system');
+    const invalidCases = [
+      { ticket_id: ticket.id, role: 'assignee', trigger_id: '존재하지-않는-trigger' },
+      { ticket_id: ticket.id, role: 'reviewer', trigger_id: tids[0] },
+      { ticket_id: ticket.id, role: 'assignee', trigger_id: otherTid },
+    ];
+    for (const invalid of invalidCases) {
+      const resp = await post({ ...invalid, outcome: 'suppressed', reason: 'inflight_dispatch' });
+      assert.equal(resp.status, 200);
+      assert.equal((await resp.json()).applied, false, 'emit과 상관되지 않은 억제 보고는 적용하면 안 된다');
+    }
+    assert.equal(await ds.getRepository('ActivityLog').count({
+      where: { ticket_id: ticket.id, action: 'dispatch_twin_suppressed' },
+    }), 3, '미상관 trigger/role은 차감 activity를 만들면 안 된다');
+
+    for (const source of ['manual', 'comment_summary']) {
+      const excludedTriggerId = `${source}-suppression`;
+      await ds.getRepository('ActivityLog').save({
+        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id,
+        action: 'trigger_emitted', field_changed: excludedTriggerId,
+        role: 'assignee', trigger_source: source,
+      });
+      const excluded = await post({
+        ticket_id: ticket.id, role: 'assignee', trigger_id: excludedTriggerId,
+        outcome: 'suppressed', reason: 'inflight_dispatch',
+      });
+      assert.equal((await excluded.json()).applied, false,
+        `hard-budget 원시 집합에서 제외한 ${source} emit은 차감하면 안 된다`);
+    }
 
     const forged = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',

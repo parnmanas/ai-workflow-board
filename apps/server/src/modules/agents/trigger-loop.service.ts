@@ -3301,6 +3301,8 @@ candidate's branch or move the ticket.
         actor_id: 'system',
         actor_name: 'TriggerLoopService',
         action: 'trigger_emitted',
+        // 매니저의 억제 보고를 실제 emit과 1:1로 상관시키는 안정 키다.
+        field_changed: triggerId,
         new_value: JSON.stringify({
           target_agent_id: agentId,
           column_position: col?.position ?? -1,

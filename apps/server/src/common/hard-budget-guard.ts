@@ -197,6 +197,7 @@ export async function countTwinSuppressions(dataSource: DataSource, ticketId: st
     .select('COUNT(DISTINCT a.entity_id)', 'count')
     .where('a.ticket_id = :tid', { tid: ticketId })
     .andWhere("a.action = 'dispatch_twin_suppressed'")
+    .andWhere('a.trigger_source NOT IN (:...excluded)', { excluded: ['manual', 'comment_summary'] })
     .andWhere('a.created_at >= :since', { since })
     .getRawOne<{ count: string | number }>();
   return Number(row?.count ?? 0);

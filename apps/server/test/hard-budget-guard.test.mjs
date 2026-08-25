@@ -101,10 +101,10 @@ async function recordHumanUnpend(ticketId) {
     actor_id: 'human1', actor_name: 'Human',
   }));
 }
-async function recordTriggerEmitted(ticketId, triggerSource = 'comment') {
+async function recordTriggerEmitted(ticketId, triggerSource = 'comment', triggerId = '') {
   await activityRepo.save(activityRepo.create({
     entity_type: 'ticket', entity_id: ticketId, ticket_id: ticketId, action: 'trigger_emitted',
-    trigger_source: triggerSource, actor_id: 'system', actor_name: 'TriggerLoopService',
+    field_changed: triggerId, trigger_source: triggerSource, actor_id: 'system', actor_name: 'TriggerLoopService',
   }));
 }
 /** Write a `subagents` row shaped like the `end` POST leaves it (ticket 6dd3f968). */
@@ -197,6 +197,7 @@ test('countTwinSuppressions는 한 hold의 표시 알림 수와 무관하게 억
       entity_type: 'ticket', entity_id: `trigger-${i}`, ticket_id: t.id,
       action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
       new_value: JSON.stringify({ trigger_id: `trigger-${i}`, role: 'assignee' }),
+      trigger_source: 'comment',
     }));
   }
   assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
@@ -204,9 +205,23 @@ test('countTwinSuppressions는 한 hold의 표시 알림 수와 무관하게 억
   await activityRepo.save(activityRepo.create({
     entity_type: 'ticket', entity_id: 'trigger-0', ticket_id: t.id,
     action: 'dispatch_twin_suppressed', field_changed: 'inflight_dispatch',
+    trigger_source: 'comment',
   }));
   assert.equal(await countTwinSuppressions(ds, t.id, since), 4,
     'outbox 재전송으로 같은 trigger id가 중복 저장되어도 한 번만 차감해야 한다');
+});
+
+test('countTwinSuppressions는 원시 dispatch 집합에서 제외한 source를 차감하지 않는다', async () => {
+  const t = await makeTicket(null);
+  const since = new Date(Date.now() - 1000);
+  for (const triggerSource of ['comment', 'manual', 'comment_summary']) {
+    await activityRepo.save(activityRepo.create({
+      entity_type: 'ticket', entity_id: `suppressed-${triggerSource}`, ticket_id: t.id,
+      action: 'dispatch_twin_suppressed', trigger_source: triggerSource,
+    }));
+  }
+  assert.equal(await countTwinSuppressions(ds, t.id, since), 1,
+    'manual/comment_summary 억제는 정상 dispatch 차감에 포함하면 안 된다');
 });
 
 test('countTwinSuppressions는 윈도우 이전 activity와 다른 action을 제외한다', async () => {

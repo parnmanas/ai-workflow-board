@@ -355,6 +355,18 @@ export class DispatchIntentService {
     const repo = this.repo();
     const open = await this._findOpen(args.ticketId, args.role, repo);
     if (args.outcome === 'suppressed') {
+      const emitted = await this.dataSource.getRepository(ActivityLog).findOne({
+        where: {
+          ticket_id: args.ticketId,
+          action: 'trigger_emitted',
+          field_changed: args.triggerId,
+          role: args.role,
+        },
+      });
+      // hard-budget 원시 집합에 없는 emit은 차감 근거로 받아들이지 않는다.
+      if (!emitted || ['manual', 'comment_summary'].includes(emitted.trigger_source)) {
+        return { applied: false, matched: false, status: open?.status };
+      }
       await this.dataSource.getRepository(ActivityLog).save({
         entity_type: 'ticket',
         entity_id: args.triggerId,
@@ -363,6 +375,7 @@ export class DispatchIntentService {
         action: 'dispatch_twin_suppressed',
         field_changed: (args.reason || 'twin').slice(0, 200),
         new_value: JSON.stringify({ trigger_id: args.triggerId, role: args.role }),
+        trigger_source: emitted.trigger_source,
         actor_id: args.managerAgentId || '',
         actor_name: 'AgentManager',
       });
