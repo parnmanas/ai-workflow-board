@@ -1506,6 +1506,7 @@ export class WorktreeManager {
       const reportOnlyBranches = new Set<string>();
       let sharedSlotOwned = false;
       let sharedSlotReady = false;
+      const ownedSharedSlots = new Map<string, string>();
       // 이름 스캔 결과가 아니라, 이번 실행에서 ticket 경로와 full UUID ref가 함께
       // 검증된 worktree의 브랜치만 삭제 경계 안에 둔다.
       const ownedBranches = new Set<string>();
@@ -1554,15 +1555,11 @@ export class WorktreeManager {
           continue;
         }
         if (isOwnedSharedSlot) {
-          // warm build 산출물과 slot 자체는 보존하되, checkout 중인 티켓
-          // 브랜치 ref를 지울 수 있도록 검증된 base tip에서 detach한다.
-          const detached = await git(w.path, ['switch', '--detach', baseRef]);
-          if (!detached.ok) {
-            report.heldReasons.push(`shared slot detach 실패: ${w.path} (${w.branch})`);
-            blockedBranches.add(w.branch);
-            continue;
-          }
-          sharedSlotReady = true;
+          // 원격 ref가 로컬보다 전진했을 수 있으므로 여기서는 checkout을
+          // 변경하지 않는다. 양쪽 ref의 병합 가능성을 모두 확정한 뒤에만
+          // 아래에서 detach하여, 보류된 active lease와 실제 checkout이
+          // 계속 같은 티켓 브랜치를 가리키게 한다.
+          ownedSharedSlots.set(w.branch, w.path);
           continue;
         }
         const injectedRemoval = this.#terminalCleanupHooks.removeWorktree;
@@ -1613,6 +1610,19 @@ export class WorktreeManager {
             remoteTips.set(branch, tip.stdout.trim());
           }
         }
+      }
+
+      for (const [branch, worktreePath] of ownedSharedSlots) {
+        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+        // warm build 산출물과 slot 자체는 보존하되, 삭제 가능한 티켓
+        // 브랜치 ref를 checkout에서 놓기 위해 검증된 base tip에서 detach한다.
+        const detached = await git(worktreePath, ['switch', '--detach', baseRef]);
+        if (!detached.ok) {
+          report.heldReasons.push(`shared slot detach 실패: ${worktreePath} (${branch})`);
+          blockedBranches.add(branch);
+          continue;
+        }
+        sharedSlotReady = true;
       }
 
       for (const branch of localBranches) {

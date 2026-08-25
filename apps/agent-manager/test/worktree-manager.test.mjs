@@ -749,6 +749,7 @@ test('cleanupTerminalTicketGit: origin만 미병합인 shared branch는 ref와 a
     assert.ok(result.remainingBranches.includes(fixture.branch));
     assert.ok(result.remainingBranches.includes(`origin/${fixture.branch}`));
     assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.equal(git(fixture.wt, ['branch', '--show-current']), fixture.branch);
     const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
     assert.equal(registry.slots['shared-0'].active, true);
   } finally {
