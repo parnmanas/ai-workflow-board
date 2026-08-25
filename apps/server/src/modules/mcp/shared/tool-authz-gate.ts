@@ -165,6 +165,11 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   await_ci_run: 'caller',
   cancel_ci_wait: 'caller',
 
+  // durable 완료조건은 인증된 티켓 작업자만 등록·판정할 수 있다. 세부 범위는
+  // 각 도구가 ticket_id로 제한하고 중앙 게이트는 익명 호출을 차단한다.
+  register_completion_verification: 'caller',
+  record_completion_verification: 'caller',
+
   // ticket d35b7b7d (Ontology Graph 6/7, DESIGN.md 축 6): new tools, not in
   // KNOWN_EXISTING_TOOLS. 'caller' mirrors what every handler already
   // enforces on its own — resolveGraph()/resolveOrProvision() in

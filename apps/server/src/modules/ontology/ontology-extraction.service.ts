@@ -10,7 +10,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { findOrFail } from '../../common/find-or-fail';
@@ -45,6 +45,8 @@ export interface ExtractRepoOptions {
   /** 생략하면 Resource.default_branch, 그것도 비어 있으면 저장소 HEAD. */
   ref?: string;
   poolSize?: number;
+  /** lifecycle 전체 교체 트랜잭션에서 사용할 transaction manager. */
+  dataSource?: DataSource | EntityManager;
 }
 
 export interface ExtractionFailure {
@@ -185,7 +187,7 @@ export class OntologyExtractionService {
       }
     }
 
-    const dataSource = this.resolveOntologyDataSource();
+    const dataSource = opts.dataSource ?? this.resolveOntologyDataSource();
     const summary = await this.persistFactBundles(dataSource, {
       graphId: opts.graphId,
       workspaceId: opts.workspaceId,

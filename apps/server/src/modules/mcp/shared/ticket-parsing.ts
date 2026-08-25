@@ -20,6 +20,7 @@ import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
 import { Resource } from '../../../entities/Resource';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecision';
+import { TicketCompletionVerification } from '../../../entities/TicketCompletionVerification';
 import { Workspace } from '../../../entities/Workspace';
 import { pickBaseRepoResourceId } from '../../../common/base-repo-binding';
 import { mergeEnvironmentConfig } from '../../../common/environment-config';
@@ -299,6 +300,15 @@ export async function loadTicketFull(
     comments: parseComments(ticket.comments),
     attachments: [] as any[],
   };
+
+  const completionVerifications = await scope.getRepository(TicketCompletionVerification).find({
+    where: { ticket_id: ticket.id },
+    order: { created_at: 'ASC' },
+  });
+  out.completion_verifications = completionVerifications.map(row => ({
+    ...row,
+    evidence: safeJsonParse(row.evidence),
+  }));
 
   // Ambiguous chat-duplicate choices are durable decision rows, not merely a
   // create-response hint. Project the still-pending candidates on every full

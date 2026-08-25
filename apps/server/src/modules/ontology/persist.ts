@@ -12,9 +12,9 @@
 // microtask 체인은 timer/I/O phase로의 공정한 양보를 보장하지 않는다. 이
 // 계약을 어기지 않는 것이 이 파일 전체의 존재 이유다(non-blocking 회귀
 // 테스트는 test/ontology-extraction-population-nonblocking.test.mjs).
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { In, type DataSource, type Repository } from 'typeorm';
+import { In, type DataSource, type EntityManager, type Repository } from 'typeorm';
 import { OntologyNode } from '../../entities/OntologyNode';
 import { OntologyEdge } from '../../entities/OntologyEdge';
 import type { DefFact, DefKind, FactBundle } from './extraction/types';
@@ -52,6 +52,37 @@ export function fileSymbolId(relPath: string): string {
 }
 export function defSymbolId(relPath: string, qualifiedName: string): string {
   return `def:${relPath}#${qualifiedName}`;
+}
+
+/** natural key를 UUID 컬럼에 저장 가능한 결정론적 ID로 바꾼다. 같은 입력을
+ * 여러 청크·재시도에서 보더라도 동일한 행을 가리키게 하는 용도다. */
+export function stableUuid(namespace: string, naturalKey: string): string {
+  const hex = createHash('sha256').update(namespace).update('\0').update(naturalKey).digest('hex').slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+function nodeNaturalKey(row: OntologyNode): string {
+  return `${row.graph_id}\0${row.symbol_id}`;
+}
+
+export function edgeNaturalKey(row: OntologyEdge): string {
+  return [row.graph_id, row.src_id, row.dst_id, row.type, row.layer, row.resolution ?? '', row.evidence_kind, row.props].join('\0');
+}
+
+export function canonicalizeRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
+  const canonical = new Map<string, { row: T; fingerprint: string }>();
+  for (const row of rows) {
+    const { id: _generatedId, created_at: _createdAt, updated_at: _updatedAt, ...stableFields } = row as T & {
+      id?: string;
+      created_at?: Date;
+      updated_at?: Date;
+    };
+    const fingerprint = JSON.stringify(stableFields, Object.keys(stableFields).sort());
+    const key = keyOf(row);
+    const previous = canonical.get(key);
+    if (!previous || fingerprint < previous.fingerprint) canonical.set(key, { row, fingerprint });
+  }
+  return [...canonical.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value.row);
 }
 
 export interface PersistInput {
@@ -111,6 +142,21 @@ export async function insertChunked<T extends object>(
     onChunk?.(Math.min(i + chunkSize, rows.length), rows.length);
     // 명시적 매크로태스크 양보 — 위 파일 헤더 코멘트의 계약. 마지막 청크
     // 뒤에도 무조건 양보한다(특수 케이스 분기 없이 균일하게).
+    await yieldToEventLoop();
+  }
+}
+
+export async function upsertChunked<T extends object>(
+  repo: Repository<T>,
+  rows: T[],
+  chunkSize: number,
+  conflictPaths: string[],
+  onChunk?: (completedRows: number, totalRows: number) => void,
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    if (chunk.length > 0) await repo.upsert(chunk, { conflictPaths });
+    onChunk?.(Math.min(i + chunkSize, rows.length), rows.length);
     await yieldToEventLoop();
   }
 }
@@ -176,7 +222,7 @@ function findDecoratedTargetNodeId(index: FileDefIndex, fact: DecoratorFact): st
  *  sql.js에서는 AppOntologyDataSource, Postgres에서는 (AppOntologyDataSource가
  *  null이므로) NestJS가 관리하는 단일 primary DataSource, db.ts의 듀얼
  *  DataSource 계약 그대로(축 3). */
-export async function persistFactBundles(dataSource: DataSource, input: PersistInput): Promise<PersistSummary> {
+export async function persistFactBundles(dataSource: DataSource | EntityManager, input: PersistInput): Promise<PersistSummary> {
   const startedAt = Date.now();
   const nodeRepo = dataSource.getRepository(OntologyNode);
   const edgeRepo = dataSource.getRepository(OntologyEdge);
@@ -244,7 +290,7 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
     // 파일이 어디서 왔는가"의 속성이지 개별 def의 속성이 아니다).
     const fileDurability = classifyDurability(bundle.path);
 
-    const fileNodeId = randomUUID();
+    const fileNodeId = stableUuid('ontology-node', `${input.graphId}\0${fileSymbolId(bundle.path)}`);
     nodeRows.push({
       id: fileNodeId,
       ...baseNodeFields(input.commit),
@@ -281,7 +327,7 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
 
     const nodeIdByQualifiedName = new Map<string, string>();
     for (const def of bundle.defs) {
-      const id = randomUUID();
+      const id = stableUuid('ontology-node', `${input.graphId}\0${defSymbolId(bundle.path, def.qualifiedName)}`);
       nodeIdByQualifiedName.set(def.qualifiedName, id);
       const nodeType = DEF_KIND_TO_NODE_TYPE[def.kind];
       nodeRows.push({
@@ -356,12 +402,13 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
       }
 
       if (fact.family === 'cron' || fact.family === 'event_pattern') {
-        const endpointId = randomUUID();
+        const endpointSymbolId = `endpoint:${index.bundle.path}#${fact.targetName}#${fact.family}#${fact.targetStartLine}`;
+        const endpointId = stableUuid('ontology-node', `${input.graphId}\0${endpointSymbolId}`);
         const endpointName = fact.primaryArgText ?? `${fact.family}:${fact.targetName}`;
         nodeRows.push({
           id: endpointId,
           ...baseNodeFields(input.commit),
-          symbol_id: `endpoint:${index.bundle.path}#${fact.targetName}#${fact.family}#${fact.targetStartLine}`,
+          symbol_id: endpointSymbolId,
           type: 'Endpoint',
           kind: fact.family,
           layer: 'structural',
@@ -418,15 +465,21 @@ export async function persistFactBundles(dataSource: DataSource, input: PersistI
     }
   }
 
-  await insertChunked(nodeRepo, nodeRows, NODE_CHUNK_SIZE, (completedRows, totalRows) =>
+  const canonicalNodes = canonicalizeRows(nodeRows, nodeNaturalKey);
+  const canonicalEdges = canonicalizeRows(edgeRows, edgeNaturalKey).map((row) => ({
+    ...row,
+    id: stableUuid('ontology-edge', edgeNaturalKey(row)),
+  }));
+
+  await upsertChunked(nodeRepo, canonicalNodes, NODE_CHUNK_SIZE, ['graph_id', 'symbol_id'], (completedRows, totalRows) =>
     input.onChunkInserted?.({ kind: 'node', completedRows, totalRows }));
-  await insertChunked(edgeRepo, edgeRows, EDGE_CHUNK_SIZE, (completedRows, totalRows) =>
+  await upsertChunked(edgeRepo, canonicalEdges, EDGE_CHUNK_SIZE, ['id'], (completedRows, totalRows) =>
     input.onChunkInserted?.({ kind: 'edge', completedRows, totalRows }));
 
   return {
     filesProcessed: input.bundles.length,
-    nodesInserted: nodeRows.length,
-    edgesInserted: edgeRows.length,
+    nodesInserted: canonicalNodes.length,
+    edgesInserted: canonicalEdges.length,
     containsEdges,
     declaresEdges,
     decoratesEdges,

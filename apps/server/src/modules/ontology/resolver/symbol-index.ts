@@ -3,7 +3,7 @@
 // separate, whole-workspace pass"). persist.ts(ticket e14ef1c9)가 File
 // 노드 props에 남겨둔 refs[]/imports[]/exports[]/heritage[]를 재파싱 없이
 // 그대로 읽어들인다 — persist.ts 자신의 헤더 코멘트가 명시한 계약.
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { OntologyNode } from '../../../entities/OntologyNode';
 import { OntologyEdge } from '../../../entities/OntologyEdge';
 import type { ExportFact, HeritageFact, ImportFact, RefFact } from '../extraction/types';
@@ -76,7 +76,7 @@ export class GraphSymbolIndex {
 
 const DEF_NODE_TYPES = new Set(['Type', 'Callable', 'Field']);
 
-export async function buildGraphSymbolIndex(dataSource: DataSource, graphId: string): Promise<GraphSymbolIndex> {
+export async function buildGraphSymbolIndex(dataSource: DataSource | EntityManager, graphId: string): Promise<GraphSymbolIndex> {
   const nodeRepo = dataSource.getRepository(OntologyNode);
   const edgeRepo = dataSource.getRepository(OntologyEdge);
   // status='active'로 제한 — removed/quarantined 노드를 리졸버 입력에

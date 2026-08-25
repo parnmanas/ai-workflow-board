@@ -100,6 +100,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'Comment', // FK: Ticket
   'TicketAttachment', // FK: Ticket (skippable)
   'TicketPrerequisite', // FK: Ticket ×2, 복합 PK
+  'TicketCompletionVerification', 'TicketCompletionVerificationAttempt',
   'TicketReadState', 'TicketRoleAssignment', 'StuckTicketAlert', 'ReviewDriftState',
   'UserMention', 'BenchmarkScore', 'CiRedAlert', 'DispatchIntent', 'ActionRun',
   'ActionApproval', 'Feature', 'WorkflowFunctionRun', 'CommentSummaryRun',

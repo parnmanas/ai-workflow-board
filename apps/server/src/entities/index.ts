@@ -2,6 +2,8 @@ export { Workspace } from './Workspace';
 export { Board } from './Board';
 export { BoardColumn } from './BoardColumn';
 export { Ticket } from './Ticket';
+export { TicketCompletionVerification } from './TicketCompletionVerification';
+export { TicketCompletionVerificationAttempt } from './TicketCompletionVerificationAttempt';
 export { Comment } from './Comment';
 export { CommentSummaryRun } from './CommentSummaryRun';
 export { User } from './User';

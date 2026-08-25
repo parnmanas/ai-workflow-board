@@ -29,6 +29,8 @@ import { DispatchIntentService } from './dispatch-intent.service';
 import { DispatchReconcilerService } from './dispatch-reconciler.service';
 import { AgentAutostartService } from './agent-autostart.service';
 import { ChildRunService } from './child-run.service';
+import { CompletionVerificationResumeService } from './completion-verification-resume.service';
+import { TicketCompletionVerification } from '../../entities/TicketCompletionVerification';
 import { AgentChildRunsController, ChildRunsController } from './child-runs.controller';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
@@ -51,7 +53,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun]),
+    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun, TicketCompletionVerification]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
@@ -96,6 +98,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     DispatchReconcilerService,
     AgentAutostartService,
     ChildRunService,
+    CompletionVerificationResumeService,
   ],
   exports: [
     AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
