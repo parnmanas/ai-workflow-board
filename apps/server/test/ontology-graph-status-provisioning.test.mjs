@@ -185,7 +185,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   it('full-scope 에이전트 API key 세션은 자신이 맡은 티켓의 error 그래프를 1회 재시작하고 감사 로그를 남긴다', async () => {
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     logs.length = 0;
     const body = await callTool('graph_refresh', {
@@ -204,7 +204,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   it('이미 building이면 즉시 started=false를 반환하고 두 번째 빌드를 시작하지 않는다', async () => {
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     const body = await callTool('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
@@ -223,7 +223,7 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     const unassignedAgent = await makeAgent(WORKSPACE_ID);
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
-      agentId: unassignedAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+      agentId: unassignedAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     const assignmentDenied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
@@ -241,12 +241,81 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     });
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     const denied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: otherGraph.id,
     }, fullSessionId);
     cleanup();
+    assert.match(denied.error, /그래프 리소스/);
+  });
+
+  it('세션의 현재 작업 티켓이 없거나 요청 ticket_id와 다르면 거부된다', async () => {
+    const otherTicket = await AppDataSource.getRepository(Ticket).save({
+      id: randomUUID(), workspace_id: WORKSPACE_ID, column_id: null, title: '과거 작업 티켓',
+      base_repo_resource_id: (await graphRepo.findOneByOrFail({ id: graphId })).resource_id,
+    });
+    const role = await AppDataSource.getRepository(WorkspaceRole).findOneByOrFail({ workspace_id: WORKSPACE_ID });
+    await AppDataSource.getRepository(TicketRoleAssignment).save({
+      ticket_id: otherTicket.id, role_id: role.id, agent_id: homeAgent.id, user_id: null,
+      holder_key: `agent:${homeAgent.id}`,
+    });
+    const unpinnedSessionId = `session-${randomUUID()}`;
+    const cleanupUnpinned = registerSession(unpinnedSessionId, {
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+    });
+    const unpinnedDenied = await callToolExpectError('graph_refresh', {
+      workspace_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
+    }, unpinnedSessionId);
+    cleanupUnpinned();
+    assert.match(unpinnedDenied.error, /티켓에 배정된 에이전트/);
+
+    const fullSessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(fullSessionId, {
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
+    });
+    const denied = await callToolExpectError('graph_refresh', {
+      workspace_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
+    }, fullSessionId);
+    cleanup();
+    assert.match(denied.error, /티켓에 배정된 에이전트/);
+  });
+
+  it('기준 저장소가 없는 티켓은 거부된다', async () => {
+    const ticket = await AppDataSource.getRepository(Ticket).findOneByOrFail({ id: ticketId });
+    const originalResourceId = ticket.base_repo_resource_id;
+    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: '' });
+    const fullSessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(fullSessionId, {
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
+    });
+    const denied = await callToolExpectError('graph_refresh', {
+      workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
+    }, fullSessionId);
+    cleanup();
+    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: originalResourceId });
+    assert.match(denied.error, /그래프 리소스/);
+  });
+
+  it('workspace_id가 null인 전역 리소스는 거부된다', async () => {
+    const globalResource = await AppDataSource.getRepository(Resource).save({
+      id: randomUUID(), workspace_id: null, name: '전역 저장소', type: 'repository', url: 'https://example.invalid/global.git',
+    });
+    const globalGraph = await graphRepo.save({
+      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: globalResource.id, folder_path: '', status: 'error',
+    });
+    const ticket = await AppDataSource.getRepository(Ticket).findOneByOrFail({ id: ticketId });
+    const originalResourceId = ticket.base_repo_resource_id;
+    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: globalResource.id });
+    const fullSessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(fullSessionId, {
+      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
+    });
+    const denied = await callToolExpectError('graph_refresh', {
+      workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: globalGraph.id,
+    }, fullSessionId);
+    cleanup();
+    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: originalResourceId });
     assert.match(denied.error, /그래프 리소스/);
   });
 });

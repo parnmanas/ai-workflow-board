@@ -58,6 +58,7 @@ async function checkGraphRefreshScope(
 ): Promise<ReturnType<typeof err> | null> {
   const caller = getCallerAgent(extra);
   if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
+  if (!caller?.subagentTicketId || caller.subagentTicketId !== input.ticketId) return err(GRAPH_REFRESH_SCOPE_ERROR);
   if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, input.workspaceId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
 
   const [ticket, assignment, resource] = await Promise.all([
@@ -69,11 +70,12 @@ async function checkGraphRefreshScope(
   ]);
   const resourceInWorkspace = resource
     && resource.type === 'repository'
-    && (resource.workspace_id === null || resource.workspace_id === input.workspaceId);
+    && resource.workspace_id === input.workspaceId;
   const ticketMatches = ticket
     && ticket.workspace_id === input.workspaceId
     && !ticket.archived_at
-    && (!ticket.base_repo_resource_id || ticket.base_repo_resource_id === input.graph.resource_id);
+    && !!ticket.base_repo_resource_id
+    && ticket.base_repo_resource_id === input.graph.resource_id;
   return assignment && ticketMatches && resourceInWorkspace ? null : err(GRAPH_REFRESH_SCOPE_ERROR);
 }
 
