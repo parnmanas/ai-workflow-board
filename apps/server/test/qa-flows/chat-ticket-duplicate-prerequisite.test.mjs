@@ -281,10 +281,21 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.equal(stillHardBudgetPending.pending_user_action, true);
   assert.equal(stillHardBudgetPending.pending_set_by, 'hard_budget_dispatch_guard');
 
+  step('레거시 생성자명이 저장된 duplicate pending도 조회하고 결정할 수 있다');
   await ticketRepo.update(independent.id, {
     pending_reason: 'Confirm whether this chat report duplicates one of the suggested tickets.',
-    pending_set_by: 'duplicate_decision_guard',
+    pending_set_by: 'Outreach',
   });
+  const legacyResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+  });
+  assert.equal(legacyResponse.status, 200);
+  const legacyReport = await legacyResponse.json();
+  assert.equal(legacyReport.duplicate_decision_pending, true,
+    'ambiguous 후보가 남은 레거시 생성자명 pending은 duplicate 결정 상태다');
+  assert.ok(legacyReport.duplicate_candidates.length > 0,
+    '레거시 duplicate pending도 후보를 다시 노출해야 한다');
+
   const kept = await duplicateService.confirm(independent.id, null, 'qa', 'qa');
   assert.equal(kept.canonical_ticket_id, null);
   await ticketRepo.update(independent.id, {

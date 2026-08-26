@@ -317,11 +317,13 @@ export async function loadTicketFull(
   // human decision surface.
   out.duplicate_decision_pending = false;
   out.duplicate_candidates = [];
-  if (isDuplicateDecisionPending(ticket)) {
-    const decisions = await scope.getRepository(TicketDuplicateDecision).find({
-      where: { report_ticket_id: ticket.id, outcome: 'ambiguous_pending' },
-      order: { confidence: 'DESC', created_at: 'ASC' },
-    });
+  const decisions = ticket.pending_user_action
+    ? await scope.getRepository(TicketDuplicateDecision).find({
+        where: { report_ticket_id: ticket.id, outcome: 'ambiguous_pending' },
+        order: { confidence: 'DESC', created_at: 'ASC' },
+      })
+    : [];
+  if (isDuplicateDecisionPending(ticket, decisions.length > 0)) {
     if (decisions.length > 0) {
       out.duplicate_decision_pending = true;
       const candidateIds = Array.from(new Set(decisions.map(row => row.candidate_ticket_id)));
