@@ -296,6 +296,33 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.ok(legacyReport.duplicate_candidates.length > 0,
     '레거시 duplicate pending도 후보를 다시 노출해야 한다');
 
+  step('stale 후보와 생성자명이 있어도 일반 사용자 Pending은 duplicate가 아니다');
+  await ticketRepo.update(independent.id, {
+    pending_reason: '벤치마크 실행 결과를 확인해 주세요.',
+    pending_set_by: 'Benchmark Operator',
+  });
+  const userPendingResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+  });
+  assert.equal(userPendingResponse.status, 200);
+  const userPendingReport = await userPendingResponse.json();
+  assert.equal(userPendingReport.duplicate_decision_pending, false,
+    '레거시 안내가 아닌 임의 Pending은 stale 후보만으로 duplicate가 되면 안 된다');
+  assert.deepEqual(userPendingReport.duplicate_candidates, []);
+  await assert.rejects(
+    duplicateService.confirm(independent.id, null, 'qa', 'qa'),
+    /no duplicate decision pending/,
+    'duplicate confirm이 일반 사용자 Pending을 해제하면 안 된다',
+  );
+  const stillUserPending = await ticketRepo.findOne({ where: { id: independent.id } });
+  assert.equal(stillUserPending.pending_user_action, true);
+  assert.equal(stillUserPending.pending_set_by, 'Benchmark Operator');
+
+  await ticketRepo.update(independent.id, {
+    pending_reason: 'Confirm whether this chat report duplicates one of the suggested tickets.',
+    pending_set_by: 'Outreach',
+  });
+
   const kept = await duplicateService.confirm(independent.id, null, 'qa', 'qa');
   assert.equal(kept.canonical_ticket_id, null);
   await ticketRepo.update(independent.id, {
