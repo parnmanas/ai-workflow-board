@@ -253,6 +253,35 @@ export async function fetchChatRoomHistory(
   }
 }
 
+export interface OrdinaryWorkBoardCandidate {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** non-native 채팅 런타임이 임의 UUID 대신 실제 기존 보드만 고르도록 후보를 조회한다. */
+export async function fetchOrdinaryWorkBoardCandidates(
+  config: AwbConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OrdinaryWorkBoardCandidate[]> {
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates`;
+    const resp = await fetchImpl(url, {
+      headers: { 'X-Agent-Key': config.apiKey },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`일반 작업 보드 후보 조회 실패: ${resp.status}`);
+      return [];
+    }
+    const data = await resp.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err: any) {
+    log(`일반 작업 보드 후보 조회 오류: ${err?.message ?? err}`);
+    return [];
+  }
+}
+
 /**
  * POST a response payload back to AWB for a pending fs_request.
  * Fire-and-log on failure — server-side timeout will surface a 504 to the UI.

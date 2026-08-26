@@ -13,6 +13,7 @@ import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   fetchTicketContext,
   fetchChatRoomHistory,
+  fetchOrdinaryWorkBoardCandidates,
   fetchAgentRecord,
   fetchRepositoryCredential,
   hasNewAgentComment,
@@ -871,6 +872,7 @@ export interface PromptComposer {
     roomName?: string,
     isActionRoom?: boolean,
     workFolder?: string,
+    ordinaryWorkBoards?: Array<{ id: string; name: string; description?: string }>,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -4338,6 +4340,7 @@ export class EventDispatcher {
           { fetchImages: false },
         );
         const rolePrompt = p.role_prompt || '';
+        const ordinaryWorkBoards = await fetchOrdinaryWorkBoardCandidates(this.#config);
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -4353,6 +4356,7 @@ export class EventDispatcher {
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
             provisionedWorkFolder,
+            ordinaryWorkBoards,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
@@ -4490,6 +4494,9 @@ export class EventDispatcher {
         // the persistent path above). Match the reply-channel instruction to
         // whether this CLI can call the AWB MCP tool itself.
         const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+        const ordinaryWorkBoards = usesNativeMcp
+          ? []
+          : await fetchOrdinaryWorkBoardCandidates(this.#config);
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -4508,6 +4515,7 @@ export class EventDispatcher {
             '',
             !!p.is_action_room,
             provisionedWorkFolder,
+            ordinaryWorkBoards,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({

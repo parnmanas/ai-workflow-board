@@ -544,6 +544,7 @@ export function composeChatRoomPrompt(
   // byte-identity no-op이 되므로 opt-in하지 않은 workspace/QA-security 디스패치
   // (별도로 자기만의 프롬프트를 조립하는 경로)는 영향받지 않는다.
   workFolder = '',
+  ordinaryWorkBoards: Array<{ id: string; name: string; description?: string }> = [],
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -553,6 +554,17 @@ export function composeChatRoomPrompt(
   );
   lines.push('');
   lines.push(`Room ID: ${roomId}`);
+  if (!usesNativeMcp && !isActionRoom) {
+    lines.push('');
+    lines.push('Existing board candidates for ordinary work (use only these UUIDs):');
+    if (ordinaryWorkBoards.length === 0) {
+      lines.push('- (none; treat this as the no-suitable-existing-board direct-chat exception)');
+    } else {
+      for (const board of ordinaryWorkBoards) {
+        lines.push(`- ${board.name} | ${board.id}${board.description ? ` | ${board.description.slice(0, 500)}` : ''}`);
+      }
+    }
+  }
   lines.push('');
   const realHistory = Array.isArray(history)
     ? history.filter((h) => !h.type || h.type === 'message')

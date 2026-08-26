@@ -786,11 +786,18 @@ export class AgentApiController {
     });
     if (!column) return res.status(409).json({ error: 'board has no active workflow column' });
 
+    let committed = false;
     try {
       const result = await this.dataSource.transaction(async manager => {
         const tickets = manager.getRepository(Ticket);
         let ticket = await tickets.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
-        if (ticket) return { ticket, reused: true };
+        if (ticket) {
+          const activity = await manager.getRepository(ActivityLog).findOne({
+            where: { ticket_id: ticket.id, entity_type: 'ticket', entity_id: ticket.id, action: 'created' },
+          });
+          if (!activity) throw new Error('ordinary work ticket is missing its durable creation activity');
+          return { ticket, activity, reused: true };
+        }
         ticket = tickets.create({
           workspace_id: workspaceId,
           column_id: column.id,
@@ -805,13 +812,19 @@ export class AgentApiController {
           operational_dedupe_key: dedupeKey,
         });
         ticket = await tickets.save(ticket);
-        return { ticket, reused: false };
-      });
-      if (!result.reused) {
-        await this.activityService.logActivity({
-          entity_type: 'ticket', entity_id: result.ticket.id, action: 'created',
-          ticket_id: result.ticket.id, actor_name: 'Agent Manager',
+        const activity = await this.activityService.logActivityTx(manager, {
+          entity_type: 'ticket', entity_id: ticket.id, action: 'created',
+          ticket_id: ticket.id, workspace_id: workspaceId, actor_name: 'Agent Manager',
+          field_changed: 'workflow_dispatch', new_value: 'pending',
         });
+        return { ticket, activity, reused: false };
+      });
+      committed = true;
+      // 생성과 함께 저장된 pending intent만 방출한다. 정상 재시도는 dispatched를
+      // 보고 건너뛰며, 저장 직후 중단/리스너 실패 때만 같은 activity를 복구 방출한다.
+      if (result.activity.new_value !== 'dispatched') {
+        this.activityService.emitLogged([result.activity]);
+        await this.dataSource.getRepository(ActivityLog).update(result.activity.id, { new_value: 'dispatched' });
       }
       return res.status(result.reused ? 200 : 201).json({
         id: result.ticket.id,
@@ -820,6 +833,11 @@ export class AgentApiController {
         reused: result.reused,
       });
     } catch (error: any) {
+      // 이미 커밋된 뒤의 방출 실패를 생성 경쟁으로 오인해 성공 처리하지 않는다.
+      // 호출자가 같은 dedupe key로 재시도하면 durable activity를 다시 방출한다.
+      if (committed) {
+        return res.status(503).json({ error: 'ordinary_work_dispatch_failed', message: error?.message || String(error) });
+      }
       const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
       if (existing) return res.status(200).json({
         id: existing.id, title: existing.title,
@@ -827,6 +845,22 @@ export class AgentApiController {
       });
       return res.status(503).json({ error: 'ordinary_work_fallback_failed', message: error?.message || String(error) });
     }
+  }
+
+  /** agent-manager가 non-native 프롬프트에 주입할 현재 workspace의 실제 보드 후보. */
+  @Get('ordinary-work-board-candidates')
+  async ordinaryWorkBoardCandidates(@Req() req: Request, @Res() res: Response) {
+    const workspaceId = this.requestScope(req);
+    if (!workspaceId) return res.status(400).json({ error: 'workspace scope is required' });
+    const boards = await this.boardRepo.find({
+      where: { workspace_id: workspaceId, archived_at: IsNull(), paused_at: IsNull() },
+      order: { created_at: 'ASC' },
+    });
+    return res.json(boards.map(board => ({
+      id: board.id,
+      name: board.name,
+      description: board.description || '',
+    })));
   }
 
   @Post('move-ticket')

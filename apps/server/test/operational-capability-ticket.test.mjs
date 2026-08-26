@@ -81,4 +81,37 @@ test('ordinary work fallback creates one focused ticket on the selected board wi
   assert.equal(column.board_id, board.id, '선택한 기존 보드의 워크플로에 생성한다');
 });
 
+test('ordinary work fallback retry recovers dispatch after post-commit emission failure', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-recovery' });
+  const activityService = app.get(modules.ActivityService);
+  const originalEmitLogged = activityService.emitLogged.bind(activityService);
+  let attempts = 0;
+  activityService.emitLogged = (rows) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('의도한 방출 실패');
+    return originalEmitLogged(rows);
+  };
+  t.after(() => { activityService.emitLogged = originalEmitLogged; });
+  const payload = {
+    workspace_id: ws.id, board_id: board.id, dedupe_key: 'recover-dispatch-key',
+    title: '방출 복구', room_id: 'room-recovery', message_id: 'message-recovery',
+  };
+  const post = () => fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-ticket`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  assert.equal((await post()).status, 503, '커밋 뒤 방출 실패를 성공으로 숨기지 않는다');
+  assert.equal((await post()).status, 200, '같은 요청 재시도가 durable activity를 다시 방출한다');
+  const tickets = await ds.getRepository('Ticket').find({ where: { operational_dedupe_key: 'ordinary:recover-dispatch-key' } });
+  assert.equal(tickets.length, 1);
+  assert.equal(await ds.getRepository('ActivityLog').count({
+    where: { ticket_id: tickets[0].id, action: 'created' },
+  }), 1, '생성 activity는 티켓과 같은 트랜잭션에서 정확히 한 건 저장된다');
+  assert.equal(attempts, 2, '재시도가 누락된 워크플로 방출을 정확히 복구한다');
+  const activity = await ds.getRepository('ActivityLog').findOneByOrFail({ ticket_id: tickets[0].id, action: 'created' });
+  assert.equal(activity.new_value, 'dispatched', '복구 성공 뒤 durable dispatch intent를 완료 처리한다');
+});
+
 test.after(() => exitAfterTests());

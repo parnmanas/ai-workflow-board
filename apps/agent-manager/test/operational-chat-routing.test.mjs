@@ -6,10 +6,13 @@ import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
   ensureOperationalFallbackTicket,
+  ensureOrdinaryWorkFallbackTicket,
   parseOrdinaryWorkFallback,
   operationalDedupeKey,
   parseOperationalFallback,
 } from '../dist/lib/operational-chat-fallback.js';
+import { fetchOrdinaryWorkBoardCandidates } from '../dist/lib/rest.js';
+import { composeChatRoomPrompt } from '../dist/lib/prompts.js';
 
 const config = { url: 'https://awb.invalid', apiKey: 'key', workspace_id: 'workspace-1' };
 const marker = (operation = 'deploy awb') =>
@@ -160,4 +163,26 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('non-native prompt receives real existing board candidates before selecting a ticket destination', async () => {
+  const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
+    new Response(JSON.stringify([{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]), { status: 200 }));
+  const prompt = composeChatRoomPrompt(
+    'room-1', [], { content: '로그인 오류를 고쳐줘', sender_name: '사용자', sender_id: 'user-1' },
+    undefined, false, undefined, '', false, '', boards,
+  );
+  assert.match(prompt, /제품 개발 \| board-real \| 제품 코드 변경/);
+  assert.match(prompt, /use only these UUIDs/);
+});
+
+test('ordinary fallback sends the selected pre-injected board exactly once', async () => {
+  const calls = [];
+  const request = { board_id: 'board-real', title: '로그인 오류 수정', description: '회귀 테스트 포함' };
+  await ensureOrdinaryWorkFallbackTicket(config, request, { room_id: 'room-1', message_id: 'msg-1' }, async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(init.body) });
+    return new Response(JSON.stringify({ id: 'ticket-1', title: request.title, reused: false }), { status: 201 });
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.board_id, 'board-real');
 });
