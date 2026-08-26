@@ -25,6 +25,7 @@ import {
   createTicket,
   createBoard,
   createColumn,
+  createUser,
   addRoleHolder,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
@@ -120,6 +121,33 @@ test('T5 핵심: 2홀더 직접이동 차단 → propose_move → 전원 승인 
   assert.equal(rAgain.moved, null, '이미 실행된 제안 → 재이동 없음');
 });
 
+test('subtask 게이트: 합의가 성립해도 열린 재귀 child가 있으면 자동 이동하지 않는다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: BASE_PORT + 6 });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken } = modules;
+  const { ws, columns, trio, holderB, ticket } = await twoHolderScene(app, getDataSourceToken, 'consensus-subtask-gate');
+  const ds = app.get(getDataSourceToken());
+  await ds.getRepository('BoardColumn').update(columns.inProgress.id, { process_subtasks: true });
+  const child = await createTicket(app, getDataSourceToken, {
+    columnId: null, workspaceId: ws.id, title: '열린 child', parentId: ticket.id, depth: 1,
+    assigneeId: trio.assignee.agent.id,
+  });
+  await createTicket(app, getDataSourceToken, {
+    columnId: null, workspaceId: ws.id, title: '열린 grandchild', parentId: child.id, depth: 2,
+    assigneeId: trio.assignee.agent.id,
+  });
+  const a = await mcpFor(port, trio.assignee.key.raw_key);
+  const b = await mcpFor(port, holderB.key.raw_key);
+  t.after(() => { void a.close(); void b.close(); });
+
+  await a.callTool('propose_move', { ticket_id: ticket.id, target_column_id: columns.review.id });
+  await a.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  const finalVote = await b.callTool('record_agreement', { ticket_id: ticket.id, status: 'agree' });
+  assert.equal(finalVote.consensus.satisfied, true, '합의 자체는 성립해야 함');
+  assert.equal(finalVote.moved, null, 'subtask 게이트가 합의 자동 이동을 차단해야 함');
+  assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.inProgress.id);
+});
+
 test('회귀(T7 리뷰): 소진된 제안의 표는 다음 멀티홀더 컬럼 게이트를 만족시키지 못한다', async (t) => {
   // 시나리오: In Progress(assignee A+B) 합의 성립 → auto-move → Review 도 같은
   // 역할(assignee) 라우팅(2연속 멀티홀더 phase). 게이트 앵커를 "최신 vote 가 참조한
@@ -174,7 +202,7 @@ test('이슈#1: 보드 간 이동(move_ticket_to_board)도 컬럼 이탈이라 �
   // 라우팅으로 판정하므로 목적지 보드/컬럼 라우팅과 무관하게 차단되어야 한다.
   const { app, port, modules } = await bootApp({ port: BASE_PORT + 4 });
   t.after(() => { void app.close().catch(() => {}); });
-  const { getDataSourceToken } = modules;
+  const { getDataSourceToken, AuthService } = modules;
 
   const { ws, columns, trio, ticket } = await twoHolderScene(app, getDataSourceToken, 'consensus-gate-e');
   // 같은 워크스페이스의 두 번째 보드 + 목적지 컬럼.
@@ -185,20 +213,38 @@ test('이슈#1: 보드 간 이동(move_ticket_to_board)도 컬럼 이탈이라 �
   const a = await mcpFor(port, trio.assignee.key.raw_key);
   t.after(() => { void a.close(); });
 
-  step('2홀더 티켓을 다른 보드로 이동 시도 → 소스 컬럼 게이트로 차단(우회 봉쇄)');
+  const ds = app.get(getDataSourceToken());
+  await ds.getRepository('BoardColumn').update(columns.inProgress.id, { process_subtasks: true });
+  await createTicket(app, getDataSourceToken, {
+    columnId: null, workspaceId: ws.id, title: '보드 이탈 차단 child', parentId: ticket.id, depth: 1,
+    assigneeId: trio.assignee.agent.id,
+  });
+  const user = await createUser(app, getDataSourceToken, { name: '보드 이동 REST 사용자' });
+  const userToken = app.get(AuthService).createSession(user.id);
+
+  step('열린 child가 있는 티켓을 MCP로 다른 보드 이동 → subtask 게이트 차단');
   const blocked = await a.callTool('move_ticket_to_board', {
     ticket_id: ticket.id, target_board_id: board2.id, target_column_id: destCol.id,
   });
-  assert.equal(blocked.isError, true, '보드 간 이동도 합의 미성립 시 차단되어야 함');
-  assert.match(blocked.error?.error || '', /consensus_required/, '차단 메시지는 consensus_required 를 포함');
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.error?.error || '', /subtask_gate_blocked/);
   assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), columns.inProgress.id, '차단 → 티켓은 원 보드/컬럼 그대로');
 
-  step('force=true → 게이트 우회하여 보드 간 이동');
+  step('force=true도 subtask 게이트를 우회하지 못함');
   const forced = await a.callTool('move_ticket_to_board', {
     ticket_id: ticket.id, target_board_id: board2.id, target_column_id: destCol.id, force: true,
   });
-  assert.ok(!forced.isError, `force 보드이동 실패: ${JSON.stringify(forced)}`);
-  assert.equal(await columnIdOf(app, getDataSourceToken, ticket.id), destCol.id, 'force → 다른 보드 컬럼으로 이동됨');
+  assert.equal(forced.isError, true);
+  assert.match(forced.error?.error || '', /subtask_gate_blocked/);
+
+  step('REST 보드 간 이동도 같은 subtask 게이트로 차단');
+  const rest = await fetch(`http://localhost:${port}/api/tickets/${ticket.id}/move-to-board`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_board_id: board2.id, target_column_id: destCol.id, force: true }),
+  });
+  assert.equal(rest.status, 409);
+  assert.equal((await rest.json()).error, 'subtask_gate_blocked');
 });
 
 test('이슈#2: 제안 없이 던진 null-agree 표는 ≥2홀더 게이트를 열지 못한다 (ticket bd6d58db)', async (t) => {

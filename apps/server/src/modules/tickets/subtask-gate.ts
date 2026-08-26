@@ -24,3 +24,11 @@ export async function subtaskGateBlocksMove(dataSource: DataSource, ticket: Tick
   if (!source?.process_subtasks || !destination || destination.position <= source.position) return false;
   return (await openDescendants(dataSource, ticket.id)).length > 0;
 }
+
+/** 다른 보드로의 이동처럼 목적지 position을 현재 보드와 비교할 수 없는 컬럼 이탈 게이트. */
+export async function subtaskGateBlocksExit(dataSource: DataSource, ticket: Ticket): Promise<boolean> {
+  if (!ticket.column_id) return false;
+  const source = await dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+  if (!source?.process_subtasks) return false;
+  return (await openDescendants(dataSource, ticket.id)).length > 0;
+}

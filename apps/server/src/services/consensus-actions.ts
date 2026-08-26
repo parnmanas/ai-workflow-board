@@ -37,6 +37,7 @@ import {
   type ResolvedConsensusState,
 } from './consensus.service';
 import { performColumnMove } from '../modules/mcp/shared/ticket-move';
+import { subtaskGateBlocksMove } from '../modules/tickets/subtask-gate';
 import { activityEvents, type ActivityService } from './activity.service';
 
 /** 판정(consensus.service) + 부작용(활동 로그/이동)을 함께 쓰는 의존성 번들. */
@@ -145,6 +146,10 @@ export async function autoExecuteConsensusMove(
 
   const destCol = await deps.dataSource.getRepository(BoardColumn).findOne({ where: { id: open.targetColumnId } });
   if (!destCol) return null;
+
+  // 합의는 subtask 처리 게이트의 우회 권한이 아니다. 제안을 소진하기 전에 검사해
+  // child 완료 후 같은 열린 제안을 다시 승인/실행할 수 있게 둔다.
+  if (await subtaskGateBlocksMove(deps.dataSource, ticket, open.targetColumnId)) return null;
 
   const claimed = await markProposalExecuted(deps.dataSource, open.proposalId, nowIso);
   if (!claimed) return null; // 경쟁 승인 경로가 이미 클레임 — 이중 이동 방지

@@ -25,7 +25,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
-import { subtaskGateBlocksMove } from '../../tickets/subtask-gate';
+import { subtaskGateBlocksExit, subtaskGateBlocksMove } from '../../tickets/subtask-gate';
 
 export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, ticketRoleAssignmentService, logger } = ctx;
@@ -205,6 +205,10 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
       if (sourceBoardId === target_board_id && targetCol.id === ticket.column_id && target_position === undefined) {
         const unchanged = await loadTicketFull(dataSource, ticket.id);
         return ok(unchanged);
+      }
+
+      if (sourceBoardId !== target_board_id && await subtaskGateBlocksExit(dataSource, ticket)) {
+        return err('subtask_gate_blocked — 모든 재귀 subtask를 완료한 뒤 현재 게이트 컬럼을 이탈할 수 있습니다.');
       }
 
       // Consensus gate (다중담당자·합의, ticket bd6d58db). A cross-board move is a

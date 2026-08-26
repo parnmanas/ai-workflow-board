@@ -35,6 +35,35 @@ const priorityLabels: Record<string, string> = {
   critical: 'CRIT',
 };
 
+export function SubtaskBoardRows({ children, onChildClick }: {
+  children: BoardCardTicket[];
+  onChildClick?: (ticket: BoardCardTicket) => void;
+}) {
+  return (
+    <div data-testid="subtask-board-rows" style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
+      {children.map(child => {
+        const childDone = (child.children || []).filter(item => item.status === 'done').length;
+        const childTotal = (child.children || []).length;
+        return (
+          <button
+            key={child.id}
+            data-subtask-id={child.id}
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onChildClick?.(child); }}
+            style={{ textAlign: 'left', padding: '7px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.accent}55`, background: `${tokens.colors.accent}12`, color: tokens.colors.textStrong, cursor: 'pointer' }}
+          >
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 10, color: tokens.colors.textMuted }}>
+              <span>{child.status}</span><span>•</span><span>{child.assignee || '미할당'}</span>
+              {childTotal > 0 && <span style={{ marginLeft: 'auto' }}>{childDone}/{childTotal}</span>}
+            </div>
+            <div style={{ marginTop: 3, fontSize: 12, fontWeight: 600 }}>{child.title}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function TicketCard({ ticket, index, onClick, onChildClick, focusHolders, unreadCount }: TicketCardProps) {
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
@@ -283,26 +312,7 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, focus
             </div>
           )}
           {totalChildren > 0 && (
-            <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
-              {(ticket.children || []).map(child => {
-                const childDone = (child.children || []).filter(item => item.status === 'done').length;
-                const childTotal = (child.children || []).length;
-                return (
-                  <button
-                    key={child.id}
-                    type="button"
-                    onClick={(event) => { event.stopPropagation(); onChildClick?.(child); }}
-                    style={{ textAlign: 'left', padding: '7px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.accent}55`, background: `${tokens.colors.accent}12`, color: tokens.colors.textStrong, cursor: 'pointer' }}
-                  >
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 10, color: tokens.colors.textMuted }}>
-                      <span>{child.status}</span><span>•</span><span>{child.assignee || '미할당'}</span>
-                      {childTotal > 0 && <span style={{ marginLeft: 'auto' }}>{childDone}/{childTotal}</span>}
-                    </div>
-                    <div style={{ marginTop: 3, fontSize: 12, fontWeight: 600 }}>{child.title}</div>
-                  </button>
-                );
-              })}
-            </div>
+            <SubtaskBoardRows children={ticket.children || []} onChildClick={onChildClick} />
           )}
         </div>
       )}

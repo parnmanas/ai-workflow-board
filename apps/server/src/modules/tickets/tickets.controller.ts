@@ -61,7 +61,7 @@ import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-prof
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
-import { subtaskGateBlocksMove } from './subtask-gate';
+import { subtaskGateBlocksExit, subtaskGateBlocksMove } from './subtask-gate';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -1387,6 +1387,10 @@ export class TicketsController {
     if (sourceBoardId === targetBoardId && targetCol.id === ticket.column_id && targetPosition === undefined) {
       const unchanged = await loadTicketFull(this.dataSource, ticket.id);
       return res.json(unchanged);
+    }
+
+    if (sourceBoardId !== targetBoardId && await subtaskGateBlocksExit(this.dataSource, ticket)) {
+      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 현재 게이트 컬럼을 이탈할 수 있습니다.' });
     }
 
     // 다중담당자·합의 게이트(ticket bd6d58db). 보드 간 이동도 현재 컬럼 이탈이므로
