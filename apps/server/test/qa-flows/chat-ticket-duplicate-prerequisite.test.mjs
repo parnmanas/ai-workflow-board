@@ -228,6 +228,8 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   });
   assert.equal(reopenedResponse.status, 200);
   const reopenedReport = await reopenedResponse.json();
+  assert.equal(reopenedReport.duplicate_decision_pending, true,
+    '실제 duplicate pending은 원인 플래그를 명시해야 한다');
   assert.ok(reopenedReport.duplicate_candidates.length >= 2,
     'reopened ticket reads must project every persisted ambiguous candidate');
   await assert.rejects(
@@ -254,6 +256,23 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   await duplicateService.record(keepReport, keepAssessment, 'qa', 'qa');
   const kept = await duplicateService.confirm(independent.id, null, 'qa', 'qa');
   assert.equal(kept.canonical_ticket_id, null);
+  await ticketRepo.update(independent.id, {
+    pending_user_action: true,
+    pending_reason: '실제 dispatch 실행 횟수가 hard budget을 초과했습니다.',
+    pending_set_by: 'hard_budget_dispatch_guard',
+  });
+  const hardBudgetResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+  });
+  assert.equal(hardBudgetResponse.status, 200);
+  const hardBudgetReport = await hardBudgetResponse.json();
+  assert.equal(hardBudgetReport.duplicate_decision_pending, false,
+    '결정 뒤 다른 pending 원인이 생겨도 duplicate 원인으로 분류하면 안 된다');
+  assert.deepEqual(hardBudgetReport.duplicate_candidates, [],
+    'Keep independent는 과거 ambiguous 후보를 종료해야 한다');
+  await ticketRepo.update(independent.id, {
+    pending_user_action: false, pending_reason: '', pending_set_by: '', pending_set_at: null,
+  });
   assert.deepEqual(await triggerLoop.dispatchCurrentColumn(kept.id, 'duplicate_rejected', 'qa'), { emitted: 1 });
 
   exitAfterTests(0);

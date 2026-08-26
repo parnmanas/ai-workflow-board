@@ -314,12 +314,14 @@ export async function loadTicketFull(
   // create-response hint. Project the still-pending candidates on every full
   // ticket read so REST, MCP, and a reopened detail panel expose the same
   // human decision surface.
+  out.duplicate_decision_pending = false;
   if (ticket.pending_user_action) {
     const decisions = await scope.getRepository(TicketDuplicateDecision).find({
       where: { report_ticket_id: ticket.id, outcome: 'ambiguous_pending' },
       order: { confidence: 'DESC', created_at: 'ASC' },
     });
     if (decisions.length > 0) {
+      out.duplicate_decision_pending = true;
       const candidateIds = Array.from(new Set(decisions.map(row => row.candidate_ticket_id)));
       const candidates = await ticketRepo.find({ where: { id: In(candidateIds) } });
       const candidateById = new Map(candidates.map(candidate => [candidate.id, candidate]));

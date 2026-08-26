@@ -208,6 +208,13 @@ export class TicketDuplicateService {
       report.pending_set_by = '';
       const saved = await tickets.save(report);
       const decisions = manager.getRepository(TicketDuplicateDecision);
+      // 후보 행은 감사 기록이면서 동시에 "아직 결정 필요" 상태를 나타낸다.
+      // 결정을 별도 행으로 추가하기 전에 모두 종료해, 이후 hard-budget 등
+      // 다른 원인으로 pending 되어도 과거 후보가 다시 UI에 노출되지 않게 한다.
+      await decisions.update(
+        { report_ticket_id: report.id, outcome: 'ambiguous_pending' },
+        { outcome: 'rejected', actor_name: actorName, actor_id: actorId },
+      );
       await decisions.save(decisions.create({
         workspace_id: report.workspace_id,
         report_ticket_id: report.id,
