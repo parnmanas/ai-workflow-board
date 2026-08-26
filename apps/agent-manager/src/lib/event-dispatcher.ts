@@ -30,6 +30,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
+import { AGENT_CONTEXT_VERSION } from './agent-context-contract.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
@@ -2846,11 +2847,33 @@ export class EventDispatcher {
       worktreeProvision.recoveryInstructions || '',
     ].filter(Boolean).join('\n\n');
 
+    const attachContextContract = (ticket: any, sessionMode: 'persistent' | 'stateless' | 'hermes') => {
+      if (!ticket) return ticket;
+      ticket.__awb_role = ev.action || '';
+      ticket.__awb_repository_context = worktreeProvision.repositoryContext;
+      ticket.__awb_require_repository_context = Boolean(selectedRepo);
+      ticket.__awb_harness = harness;
+      ticket.__awb_runtime_profile = runtimeProfile;
+      ticket.__awb_session_mode = sessionMode;
+      log(
+        `Agent context v${AGENT_CONTEXT_VERSION}: ticket=${ev.ticket_id} role=${ev.action || ''} ` +
+        `cwd=${worktreeProvision.repositoryContext?.cwd || agentContext?.cwd || ''} ` +
+        `resource=${worktreeProvision.repositoryContext?.resourceId || ''} ` +
+        `branch=${worktreeProvision.repositoryContext?.workingBranch || ''} ` +
+        `base=${worktreeProvision.repositoryContext?.baseSha || ''} ` +
+        `head=${worktreeProvision.repositoryContext?.currentSha || ''} ` +
+        `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
+        `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
+        `permission=${harness?.permission_mode || 'managed-default'} mcp=true session=${sessionMode}`,
+      );
+      return ticket;
+    };
+
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.
     if (agentContext?.cli === 'hermes') {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'hermes');
         if (ticket) {
           ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
           ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
@@ -2942,7 +2965,7 @@ export class EventDispatcher {
 
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'persistent');
         if (ticket) {
           ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
           ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
@@ -3034,7 +3057,7 @@ export class EventDispatcher {
 
     if (canDelegate && this.#subagentManager) {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'stateless');
         if (ticket && selectedRepo) {
           ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
           ticket.base_branch = selectedRepo.branch;

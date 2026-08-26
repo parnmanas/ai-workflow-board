@@ -13,6 +13,7 @@ import {
 } from './chat-attachment-prep.js';
 import type { WorktreeMode } from './worktree-manager.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
+import { buildAgentContextContract, renderAgentContextContract } from './agent-context-contract.js';
 
 interface CommentLike {
   author_name?: string;
@@ -182,6 +183,7 @@ export function repositoryContextInstructions(context?: TicketRepositoryContext)
     `- Repository Resource ID: ${context.resourceId || '(URL 기반 레거시 저장소)'}`,
     `- cwd: ${context.cwd}`,
     `- base branch / SHA: ${context.baseBranch} / ${context.baseSha}`,
+    `- current SHA: ${context.currentSha || context.baseSha}`,
     `- working branch: ${context.workingBranch || '(detached)'}`,
     `- dirty: ${context.dirty}`,
     `- base 대비 ahead / behind: ${context.ahead} / ${context.behind}`,
@@ -251,6 +253,19 @@ export function composeTriggerPrompt(
   lines.push(CURRENT_COLUMN_EXECUTION_CONTRACT);
   lines.push('');
   if (ticket) {
+    if (ticket.current_column_id && ticket.current_column_name) {
+      const repositoryContext = (ticket as any).__awb_repository_context as TicketRepositoryContext | undefined;
+      const contextContract = buildAgentContextContract({
+        ticket,
+        role: (ticket as any).__awb_role || '',
+        repository: repositoryContext,
+        harness: (ticket as any).__awb_harness || null,
+        runtimeProfile: (ticket as any).__awb_runtime_profile || null,
+        sessionMode: (ticket as any).__awb_session_mode || 'stateless',
+      });
+      lines.push(renderAgentContextContract(contextContract));
+      lines.push('');
+    }
     lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.current_column_name || ticket.current_column_id) {
