@@ -1289,6 +1289,7 @@ export interface Column {
   kind?: '' | 'intake' | 'active' | 'review' | 'merging' | 'terminal';
   role_routing?: string;
   unassigned_policy: 'halt' | 'skip' | 'skip_if_ticket_staffed';
+  process_subtasks: boolean;
   tickets: Ticket[];
   created_at: string;
 }

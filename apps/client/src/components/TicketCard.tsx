@@ -13,6 +13,7 @@ interface TicketCardProps {
   ticket: BoardCardTicket;
   index: number;
   onClick: () => void;
+  onChildClick?: (ticket: BoardCardTicket) => void;
   focusHolders?: Array<{ agent_name: string; role: string }>;
   /** 이 티켓의 미읽음 코멘트 수 — 서브태스크까지 롤업된 값(Column.tsx의
    *  sumUnread 참고). "어느 티켓이 보드 뱃지 숫자를 만들었나" 드릴다운
@@ -34,7 +35,7 @@ const priorityLabels: Record<string, string> = {
   critical: 'CRIT',
 };
 
-export default function TicketCard({ ticket, index, onClick, focusHolders, unreadCount }: TicketCardProps) {
+export default function TicketCard({ ticket, index, onClick, onChildClick, focusHolders, unreadCount }: TicketCardProps) {
   const doneChildren = (ticket.children || []).filter(c => c.status === 'done').length;
   const totalChildren = (ticket.children || []).length;
   const progress = totalChildren > 0 ? (doneChildren / totalChildren) * 100 : 0;
@@ -279,6 +280,28 @@ export default function TicketCard({ ticket, index, onClick, focusHolders, unrea
           {ticket.comments && ticket.comments.length > 0 && (
             <div style={{ marginTop: 6, fontSize: '10px', color: tokens.colors.textMuted }}>
               {ticket.comments.length} comment{ticket.comments.length > 1 ? 's' : ''}
+            </div>
+          )}
+          {totalChildren > 0 && (
+            <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {(ticket.children || []).map(child => {
+                const childDone = (child.children || []).filter(item => item.status === 'done').length;
+                const childTotal = (child.children || []).length;
+                return (
+                  <button
+                    key={child.id}
+                    type="button"
+                    onClick={(event) => { event.stopPropagation(); onChildClick?.(child); }}
+                    style={{ textAlign: 'left', padding: '7px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.accent}55`, background: `${tokens.colors.accent}12`, color: tokens.colors.textStrong, cursor: 'pointer' }}
+                  >
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 10, color: tokens.colors.textMuted }}>
+                      <span>{child.status}</span><span>•</span><span>{child.assignee || '미할당'}</span>
+                      {childTotal > 0 && <span style={{ marginLeft: 'auto' }}>{childDone}/{childTotal}</span>}
+                    </div>
+                    <div style={{ marginTop: 3, fontSize: 12, fontWeight: 600 }}>{child.title}</div>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
