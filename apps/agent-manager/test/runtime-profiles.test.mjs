@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
   applyClaudeRuntimeProfileEnvPolicy,
@@ -59,6 +60,11 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
       }).then(r => r.json())
     : null
 }));
+if (process.env.SIMULATE_AUX_FAILURE) {
+  process.stderr.write('[claude-code:title_generation_failed] simulated auxiliary failure\\n');
+}
+// 부모가 spawn 반환값에 결과 관찰자를 연결할 시간을 보장한다.
+await new Promise(resolve => setTimeout(resolve, 100));
 process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'ok'}) + '\\n');
 `);
   await chmod(path, 0o755);
@@ -105,6 +111,48 @@ async function spawnFixture(profile, captureFile, extra = {}) {
   assert.equal(result.spawned, true);
   await Promise.race([exited, delay(5_000).then(() => assert.fail('Claude fixture did not exit'))]);
   return JSON.parse(await readFile(captureFile, 'utf8'));
+}
+
+async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
+  const manager = new BaseSessionManager(config, {
+    keyField: 'roomId',
+    logTag: '[runtime-profile-base-fixture]',
+    cfgPrefix: 'runtime-profile-base-fixture',
+    kindLabel: 'chat_session',
+  });
+  const sess = await manager._spawnSession(
+    `room-${profile.id}`,
+    'fixture role',
+    'fixture first turn',
+    {
+      onProgress: () => {},
+      effortPreset: extra.effortPreset,
+      runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile } },
+      agentContext: {
+        agent_id: 'agent-base-fixture',
+        api_key: 'agent-awb-key',
+        cwd: fixtureRoot,
+        mcp_config_path: join(fixtureRoot, 'missing-base-mcp.json'),
+        cli: 'claude',
+        cli_home_dir: join(fixtureRoot, 'claude-base-home'),
+        model: 'anthropic-agent-default',
+      },
+    },
+  );
+  assert.ok(sess, 'BaseSessionManager fixture 세션이 생성되어야 한다');
+  const result = new Promise(resolve => { sess.onResult = resolve; });
+  const exited = once(sess.child, 'exit');
+  const [captured, mainResult] = await Promise.all([
+    Promise.race([
+      exited.then(async () => JSON.parse(await readFile(captureFile, 'utf8'))),
+      delay(5_000).then(() => assert.fail('BaseSessionManager Claude fixture가 종료되지 않았다')),
+    ]),
+    Promise.race([
+      result,
+      delay(5_000).then(() => assert.fail('BaseSessionManager가 주 응답을 전달하지 않았다')),
+    ]),
+  ]);
+  return { capture: captured, mainResult };
 }
 
 test.after(async () => {
@@ -175,6 +223,51 @@ test('omit_effort 환경 정책은 활성 프로필에서만 effort 입력을 �
   assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, 'high', '호출자가 소유한 원본 환경은 변경하지 않는다');
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), env);
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, null), env);
+});
+
+test('BaseSessionManager 채팅 spawn은 omit_effort 환경 제거와 haiku 보조 모델 매핑을 최종 자식에 적용한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-policy.mjs');
+  const { capture } = await spawnBaseSessionFixture({
+    id: 'base-session-policy',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40111',
+    model: 'qwen3-coder-next',
+    omit_effort: true,
+    claude_executable: executable,
+    env: {
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      CLAUDE_EFFORT: 'high',
+    },
+  }, join(fixtureRoot, 'base-session-policy.json'), {
+    effortPreset: { id: 'deep', claude: { effort: 'high' } },
+  });
+
+  assert.equal(capture.effort, null);
+  assert.equal(capture.effortLevelEnv, undefined);
+  assert.equal(capture.alwaysEnableEffortEnv, undefined);
+  assert.equal(capture.legacyEffortEnv, undefined);
+  assert.equal(capture.smallFastModel, 'haiku');
+  assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+});
+
+test('BaseSessionManager는 보조 요청 실패 stderr 뒤의 주 응답 result를 계속 전달한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-aux-failure.mjs');
+  const { mainResult } = await spawnBaseSessionFixture({
+    id: 'base-session-aux-failure',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40112',
+    model: 'qwen3-coder-next',
+    omit_effort: true,
+    claude_executable: executable,
+    env: { SIMULATE_AUX_FAILURE: '1' },
+  }, join(fixtureRoot, 'base-session-aux-failure.json'));
+
+  assert.equal(mainResult.type, 'result');
+  assert.equal(mainResult.subtype, 'success');
+  assert.equal(mainResult.result, 'ok');
 });
 
 // ticket 41dc37cb round 3 — round 1/2는 --model/ANTHROPIC_MODEL/

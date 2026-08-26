@@ -159,10 +159,11 @@ async function healthy(url: string): Promise<boolean> {
  * `--model`/ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL에 CLI가 인식하는
  * alias(opus/sonnet/haiku/fable)를 싣고 실제 백엔드 라우팅은
  * ANTHROPIC_DEFAULT_*_MODEL 오버라이드에만 맡겼으나, 그 alias 간접화 자체가
- * 실제 채팅 성공을 막았다(운영 재현) — 기준 스크립트는 alias를 전혀 쓰지
- * 않고 이 네 변수 전부에 raw served model(profile.model)을 그대로 싣는다.
- * ANTHROPIC_SMALL_FAST_MODEL/ANTHROPIC_DEFAULT_FABLE_MODEL은 기준 스크립트가
- * 설정하지 않으므로 여기서도 주입하지 않는다(CLI 자체 기본 동작에 맡김).
+ * 실제 채팅 성공을 막았다(운영 재현) — 주 요청 경로는 alias를 쓰지 않고
+ * 아래 네 변수에 raw served model(profile.model)을 그대로 싣는다. 다만
+ * generate_session_title 같은 보조 요청의 모델 선택 키는 별도 정책으로
+ * ANTHROPIC_SMALL_FAST_MODEL=haiku를 주입하고, DEFAULT_HAIKU override가 같은
+ * raw served model로 라우팅한다. ANTHROPIC_DEFAULT_FABLE_MODEL은 주입하지 않는다.
  */
 const MODEL_ROUTING_ENV_KEYS = [
   'ANTHROPIC_MODEL',
