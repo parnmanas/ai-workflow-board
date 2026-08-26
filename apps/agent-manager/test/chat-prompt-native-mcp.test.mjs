@@ -150,19 +150,30 @@ test('composeChatRoomPrompt ordinary chat uses capability-first operational poli
   assert.ok(!p.includes('This is an ACTION run'), 'Action framing never leaks into ordinary chat');
 });
 
-test('ordinary chat uses tickets selectively and handles simple or boardless work directly', () => {
+test('ordinary chat routes change requests ticket-first with narrow direct-chat exceptions', () => {
   for (const usesNativeMcp of [true, false]) {
     const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
-    assert.ok(p.includes('an AWB ticket is optional, not the default for every request'));
-    assert.ok(p.includes('suitable existing board'));
-    assert.ok(p.includes('If no suitable board exists'));
-    assert.ok(p.includes('do NOT create a board or ticket merely to process the request'));
-    assert.ok(p.includes('environment setup, configuration, quick fixes'));
-    assert.ok(p.includes('perform the requested work now'));
+    assert.ok(p.includes('ticket-first is the default for ordinary implementation'));
+    assert.ok(p.includes('First search for a suitable existing board'));
+    assert.ok(p.includes('create exactly one focused AWB ticket on that board'));
+    assert.ok(p.includes('genuinely small one-off work'));
+    assert.ok(p.includes('no suitable existing board exists'));
+    assert.ok(p.includes('explicitly asks you to perform directly in chat'));
+    assert.ok(p.includes('For a direct-chat exception, perform the requested work now'));
     assert.ok(
-      !p.includes('For non-operational development work, create an AWB ticket'),
-      'the old unconditional ticket rule must not return',
+      !p.includes('an AWB ticket is optional, not the default for every request'),
+      '기존 direct-chat 기본 문구가 다시 나타나면 안 된다',
     );
+  }
+});
+
+test('ticket-first routing treats future intent as actionable and preserves one room-linked ticket', () => {
+  for (const usesNativeMcp of [true, false]) {
+    const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
+    assert.ok(p.includes('expressing future intent'));
+    assert.ok(p.includes('create and execute the ticket now'));
+    assert.ok(p.includes('source_chat_room_id'));
+    assert.ok(p.includes('create only one focused ticket'));
   }
 });
 
@@ -192,6 +203,10 @@ test('persistent follow-up policy preserves run/ticket dedupe and rechecks Actio
   assert.ok(p.includes('Action search/run first'));
   assert.ok(p.includes('Reuse any run id or open capability ticket'));
   assert.ok(p.includes('re-checking whether a matching Action has since appeared'));
+  assert.ok(p.includes('apply ticket-first routing again'));
+  assert.ok(p.includes('small one-off'));
+  assert.ok(p.includes('Future-intent wording is still actionable'));
+  assert.ok(p.includes('source_chat_room_id'));
   assert.ok(!p.includes('ask the user'));
 });
 
