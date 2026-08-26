@@ -764,6 +764,71 @@ export class AgentApiController {
     }
   }
 
+  /** non-native 채팅 런타임이 선택한 기존 보드에 일반 작업을 한 번만 승격한다. */
+  @Post('ordinary-work-ticket')
+  async ordinaryWorkTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const scope = this.requestScope(req);
+    const workspaceId = String(body.workspace_id || scope || '');
+    const boardId = String(body.board_id || '');
+    const roomId = String(body.room_id || '');
+    const messageId = String(body.message_id || '');
+    const dedupeKey = `ordinary:${String(body.dedupe_key || '')}`;
+    if (!workspaceId || !boardId || !roomId || !messageId || !body.title || dedupeKey === 'ordinary:') {
+      return res.status(400).json({ error: 'workspace_id, board_id, room_id, message_id, dedupe_key and title are required' });
+    }
+    if (scope && scope !== workspaceId) return this.denyScope(res);
+
+    const board = await this.boardRepo.findOne({ where: { id: boardId, workspace_id: workspaceId } });
+    if (!board) return res.status(404).json({ error: 'suitable existing board not found' });
+    const column = await this.colRepo.findOne({
+      where: { board_id: board.id, is_terminal: false },
+      order: { position: 'ASC' },
+    });
+    if (!column) return res.status(409).json({ error: 'board has no active workflow column' });
+
+    try {
+      const result = await this.dataSource.transaction(async manager => {
+        const tickets = manager.getRepository(Ticket);
+        let ticket = await tickets.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
+        if (ticket) return { ticket, reused: true };
+        ticket = tickets.create({
+          workspace_id: workspaceId,
+          column_id: column.id,
+          title: String(body.title).trim().slice(0, 200),
+          description: String(body.description || body.original_request || '').trim(),
+          labels: JSON.stringify(['source:chat']),
+          priority: 'medium',
+          position: await maxTicketPosition(manager, column.id),
+          status: deriveRootTicketStatus(column),
+          source_kind: 'chat',
+          source_chat_room_id: roomId,
+          operational_dedupe_key: dedupeKey,
+        });
+        ticket = await tickets.save(ticket);
+        return { ticket, reused: false };
+      });
+      if (!result.reused) {
+        await this.activityService.logActivity({
+          entity_type: 'ticket', entity_id: result.ticket.id, action: 'created',
+          ticket_id: result.ticket.id, actor_name: 'Agent Manager',
+        });
+      }
+      return res.status(result.reused ? 200 : 201).json({
+        id: result.ticket.id,
+        title: result.ticket.title,
+        source_chat_room_id: result.ticket.source_chat_room_id,
+        reused: result.reused,
+      });
+    } catch (error: any) {
+      const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
+      if (existing) return res.status(200).json({
+        id: existing.id, title: existing.title,
+        source_chat_room_id: existing.source_chat_room_id, reused: true,
+      });
+      return res.status(503).json({ error: 'ordinary_work_fallback_failed', message: error?.message || String(error) });
+    }
+  }
+
   @Post('move-ticket')
   async moveTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const { boardId, ticketId, toColumn, position, force } = body;

@@ -6,6 +6,7 @@ import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
   ensureOperationalFallbackTicket,
+  parseOrdinaryWorkFallback,
   operationalDedupeKey,
   parseOperationalFallback,
 } from '../dist/lib/operational-chat-fallback.js';
@@ -113,6 +114,49 @@ test('manager oneshot exit replaces the marker with the server ticket result at 
     assert.ok(chatCall, 'manager posted the replaced chat answer');
     assert.match(chatCall.body.content, /새 capability 티켓을 자동 생성.*ticket-actual/);
     assert.doesNotMatch(chatCall.body.content, /AWB_OPERATIONAL_FALLBACK/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('non-native one-shot ordinary code change creates one focused ticket linked to the source room', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    calls.push({ url: String(url), body });
+    if (String(url).endsWith('/api/agent/ordinary-work-ticket')) {
+      return new Response(JSON.stringify({ id: 'ticket-focused', title: '로그인 오류 수정', reused: false }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ id: 'chat-answer' }), { status: 201 });
+  };
+  try {
+    const output = `처리하겠습니다.\nAWB_ORDINARY_WORK_FALLBACK: ${JSON.stringify({
+      board_id: 'board-suitable', title: '로그인 오류 수정',
+      description: '재현 테스트를 추가하고 오류를 수정한다.', original_request: '로그인 오류를 고쳐줘',
+    })}`;
+    assert.ok(parseOrdinaryWorkFallback(output));
+    const manager = new SubagentManager({ ...config, delegation: { enabled: true, maxConcurrent: 2, ttlMinutes: 15 } });
+    await manager._handleOneshotExit({
+      pid: 99103, kind: 'chat', cli_type: 'codex', trigger_id: null,
+      chat_request_id: 'msg-code-change', ticket_id: null, agent_id: 'agent-1', role: null,
+      room_id: 'room-source', started_at: Date.now(), config_path: null,
+      config_path_is_temp: false, captureOutput: true,
+      outLines: [
+        JSON.stringify({ type: 'thread.started' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: output } }),
+        JSON.stringify({ type: 'turn.completed' }),
+      ],
+      tailLines: [], commentSent: false, tap: null,
+    }, 0);
+    const ticketCalls = calls.filter(c => c.url.endsWith('/api/agent/ordinary-work-ticket'));
+    assert.equal(ticketCalls.length, 1, 'focused ticket creation is requested exactly once');
+    assert.equal(ticketCalls[0].body.board_id, 'board-suitable');
+    assert.equal(ticketCalls[0].body.room_id, 'room-source');
+    assert.equal(ticketCalls[0].body.message_id, 'msg-code-change');
+    const chatCall = calls.find(c => c.url.includes('/chat-rooms/'));
+    assert.match(chatCall.body.content, /작업 티켓을 자동 생성하고 워크플로에 연결.*ticket-focused/);
+    assert.doesNotMatch(chatCall.body.content, /AWB_ORDINARY_WORK_FALLBACK/);
   } finally {
     globalThis.fetch = originalFetch;
   }

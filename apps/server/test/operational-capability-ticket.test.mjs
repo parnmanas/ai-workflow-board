@@ -54,4 +54,31 @@ test('operational fallback is exactly-once, traces concurrent recurrence, clears
   assert.notEqual((await next.json()).id, ticketId);
 });
 
+test('ordinary work fallback creates one focused ticket on the selected board with chat provenance', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-fallback' });
+  const payload = {
+    workspace_id: ws.id, board_id: board.id, dedupe_key: 'room-message-key',
+    title: '일반 코드 수정', description: '회귀 테스트와 함께 수정한다.',
+    original_request: '코드를 수정해줘', room_id: 'room-source', message_id: 'message-source',
+  };
+  const post = () => fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-ticket`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  const first = await post();
+  const second = await post();
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 200);
+  const [firstBody, secondBody] = await Promise.all([first.json(), second.json()]);
+  assert.equal(firstBody.id, secondBody.id);
+  const tickets = await ds.getRepository('Ticket').find({ where: { operational_dedupe_key: 'ordinary:room-message-key' } });
+  assert.equal(tickets.length, 1, '동일 채팅 요청은 focused ticket 한 건만 만든다');
+  assert.equal(tickets[0].source_kind, 'chat');
+  assert.equal(tickets[0].source_chat_room_id, 'room-source');
+  const column = await ds.getRepository('BoardColumn').findOneByOrFail({ id: tickets[0].column_id });
+  assert.equal(column.board_id, board.id, '선택한 기존 보드의 워크플로에 생성한다');
+});
+
 test.after(() => exitAfterTests());

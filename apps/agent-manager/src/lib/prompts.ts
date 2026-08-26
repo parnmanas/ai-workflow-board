@@ -410,7 +410,8 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
   } else {
     lines.push(...operationalPolicy);
     lines.push(...ordinaryWorkPolicy);
-    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it. For ticket-first ordinary work, identify the suitable existing board and exactly one focused ticket, including this room as `source_chat_room_id`, for the manager-side reply flow; use direct chat only for the listed exceptions.');
+    lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it.');
+    lines.push('- For ticket-first ordinary work, select the suitable existing board from the available workspace context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.');
   }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
