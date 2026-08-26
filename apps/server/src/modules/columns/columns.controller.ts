@@ -27,7 +27,7 @@ export class ColumnsController {
 
   @Post('boards/:boardId/columns')
   async create(@Param('boardId') boardId: string, @Body() body: any, @Res() res: Response) {
-    const { name, color = '#e2e8f0', description = '', kind, role_routing, is_terminal, unassigned_policy = 'halt' } = body;
+    const { name, color = '#e2e8f0', description = '', kind, role_routing, is_terminal, unassigned_policy = 'halt', process_subtasks = false } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     if (kind !== undefined && !COLUMN_KINDS.has(kind)) {
       return res.status(400).json({ error: `kind must be one of ${[...COLUMN_KINDS].filter(k => k).join('|')} (or omit)` });
@@ -81,13 +81,14 @@ export class ColumnsController {
       role_routing: roleRoutingJson,
       is_terminal: resolvedTerminal,
       unassigned_policy,
+      process_subtasks: !!process_subtasks,
     }));
     return res.status(201).json(column);
   }
 
   @Patch('columns/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { name, color, position, description, is_terminal, kind, role_routing, unassigned_policy } = body;
+    const { name, color, position, description, is_terminal, kind, role_routing, unassigned_policy, process_subtasks } = body;
     const col = await findOrFail(this.repo, { where: { id } }, 'Column not found');
 
     if (kind !== undefined && !COLUMN_KINDS.has(kind)) {
@@ -99,6 +100,7 @@ export class ColumnsController {
     if (color !== undefined) col.color = color;
     if (description !== undefined) col.description = description;
     if (unassigned_policy !== undefined) col.unassigned_policy = unassigned_policy;
+    if (process_subtasks !== undefined) col.process_subtasks = !!process_subtasks;
     if (role_routing !== undefined) {
       const slugs = Array.isArray(role_routing)
         ? role_routing.filter((s: unknown): s is string => typeof s === 'string')

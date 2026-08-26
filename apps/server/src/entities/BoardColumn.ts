@@ -102,6 +102,10 @@ export class BoardColumn {
   @Column({ type: 'varchar', default: 'halt' })
   unassigned_policy: UnassignedColumnPolicy;
 
+  /** Hold a root in this column while its recursive subtask tree is worked. */
+  @Column({ type: 'boolean', default: false })
+  process_subtasks: boolean;
+
   @CreateDateColumn()
   created_at: Date;
 

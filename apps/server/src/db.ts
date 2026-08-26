@@ -225,6 +225,7 @@ export const DEFAULT_COLUMNS: Array<{
    */
   kind: 'intake' | 'active' | 'review' | 'merging' | 'terminal';
   unassigned_policy: 'halt' | 'skip' | 'skip_if_ticket_staffed';
+  process_subtasks?: boolean;
 }> = [
   { name: 'Backlog',     position: 0, color: '#94a3b8',                       kind: 'intake',   unassigned_policy: 'halt' },
   { name: 'To Do',       position: 1, color: '#60a5fa',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed' },
@@ -233,7 +234,7 @@ export const DEFAULT_COLUMNS: Array<{
   // each planning column with the planner role; teams that prefer the v1
   // To Do → In Progress flow can rename or delete it.
   { name: 'Plan',        position: 2, color: '#22d3ee',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed' },
-  { name: 'In Progress', position: 3, color: '#fbbf24',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed' },
+  { name: 'In Progress', position: 3, color: '#fbbf24',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed', process_subtasks: true },
   { name: 'Review',      position: 4, color: '#a78bfa',                       kind: 'review',   unassigned_policy: 'halt' },
   { name: 'Merging',     position: 5, color: '#f472b6',                       kind: 'merging',  unassigned_policy: 'halt' },
   { name: 'Done',        position: 6, color: '#34d399', is_terminal: true,    kind: 'terminal', unassigned_policy: 'halt' },
