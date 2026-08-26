@@ -19,8 +19,9 @@
 // best-effort(never-throw) — credential 설치 실패가 dispatch 를 막지 않는다.
 
 import { promises as fsp } from 'node:fs';
-import { isAbsolute, join, resolve as pathResolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 const GIT_TIMEOUT_MS = 20_000;
 
@@ -36,6 +37,48 @@ interface GitRun {
   ok: boolean;
   stdout: string;
   stderr: string;
+}
+
+/** 토큰을 argv나 origin URL에 넣지 않고 clone하고, 성공한 repo에 영구 helper를 설치한다. */
+export async function cloneWithRepoCredential(args: {
+  url: string;
+  dir: string;
+  branch?: string;
+  credential?: RepoCredential | null;
+  timeoutMs?: number;
+}): Promise<GitRun> {
+  const cleanUrl = args.url.trim();
+  const credential = args.credential;
+  await fsp.mkdir(dirname(args.dir), { recursive: true });
+  let temporaryCredentialFile: string | null = null;
+  const configArgs: string[] = [];
+  if (credential?.token && /^https?:\/\//i.test(cleanUrl)) {
+    temporaryCredentialFile = join(dirname(args.dir), `.awb-clone-credential-${randomUUID()}`);
+    const u = new URL(cleanUrl);
+    u.username = credential.username || 'x-access-token';
+    u.password = credential.token;
+    await fsp.writeFile(temporaryCredentialFile, `${u.toString()}\n`, { mode: 0o600 });
+    configArgs.push('-c', `credential.helper=store --file=${JSON.stringify(temporaryCredentialFile)}`);
+  }
+  try {
+    const branchArgs = args.branch?.trim() ? ['--branch', args.branch.trim()] : [];
+    const result = await new Promise<GitRun>((resolve) => {
+      execFile(
+        'git',
+        [...configArgs, 'clone', ...branchArgs, '--', cleanUrl, args.dir],
+        { timeout: args.timeoutMs ?? 20 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+        (err, stdout, stderr) => resolve({
+          ok: !err,
+          stdout: (stdout ?? '').toString(),
+          stderr: (stderr ?? (err as any)?.message ?? '').toString(),
+        }),
+      );
+    });
+    if (result.ok) await installRepoCredential(args.dir, cleanUrl, credential);
+    return result;
+  } finally {
+    if (temporaryCredentialFile) await fsp.unlink(temporaryCredentialFile).catch(() => {});
+  }
 }
 
 /** 모듈 내부 전용 `git -C <cwd> <args...>` 러너. never-throw — 실패는 { ok:false }.
