@@ -7,12 +7,22 @@
 // 실행:  node --import tsx --test apps/client/test/ticket-artifact-view.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { TicketArtifactView } from '../src/components/TicketArtifact.tsx';
 
 const render = (state) => renderToStaticMarkup(React.createElement(TicketArtifactView, { state }));
+
+test('TicketPanel의 duplicate 선택 UI는 확인된 duplicate pending 원인에서만 노출한다', () => {
+  const source = fs.readFileSync(new URL('../src/components/TicketPanel.tsx', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /activeTicket\.duplicate_decision_pending === true\s*&&\s*!!activeTicket\.duplicate_candidates\?\.length/,
+  );
+  assert.doesNotMatch(source, /\{!!activeTicket\.duplicate_candidates\?\.length && !duplicateDecisionDone/);
+});
 
 test('로딩 상태: 로딩 문구', () => {
   const html = render({ status: 'loading' });
