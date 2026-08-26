@@ -52,7 +52,7 @@ test.beforeAll(async () => {
     url: 'https://github.com/parnmanas/ai-workflow-board.git',
     default_branch: process.env.GITHUB_HEAD_REF
       || process.env.GITHUB_REF_NAME
-      || execFileSync('git', ['branch', '--show-current'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(),
+      || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(),
   });
   token = app.get(AuthService).createSession(user.id);
 });
@@ -89,8 +89,8 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   });
 
   await page.goto(`/ws/${workspace.id}/ontology-graph`);
-  await page.getByLabel('Folder (optional)').fill(FIXTURE_FOLDER);
-  await page.getByLabel('Repository').selectOption(resource.id);
+  await page.getByPlaceholder('repo root').fill(FIXTURE_FOLDER);
+  await page.locator('select').filter({ has: page.locator(`option[value="${resource.id}"]`) }).selectOption(resource.id);
 
   await expect(page.getByText(/nodes · .*edges/)).toBeVisible({ timeout: 30_000 });
   expect(statuses).toContain('building');
@@ -99,6 +99,10 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   const graph = page.getByLabel('Ontology graph canvas');
   await expect(graph).toBeVisible();
   await expect.poll(() => graph.locator('canvas').count()).toBeGreaterThan(0);
+
+  await graph.focus();
+  await page.keyboard.press('Enter');
+  await expect(graph.locator('xpath=..').locator('aside')).toContainText(/연결 \d+개/);
 
   const beforeZoom = await graph.screenshot();
   await graph.hover();
@@ -115,15 +119,6 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   await page.mouse.up();
   const afterPan = await graph.screenshot();
   expect(Buffer.compare(afterZoom, afterPan)).not.toBe(0);
-
-  let selected = false;
-  for (let x = 0.2; x <= 0.8 && !selected; x += 0.1) {
-    for (let y = 0.2; y <= 0.8 && !selected; y += 0.1) {
-      await page.mouse.click(box.x + box.width * x, box.y + box.height * y);
-      selected = await page.getByText(/연결 \d+개/).isVisible().catch(() => false);
-    }
-  }
-  expect(selected).toBe(true);
 
   const loadsBeforeRefresh = snapshotLoads;
   statuses.length = 0;

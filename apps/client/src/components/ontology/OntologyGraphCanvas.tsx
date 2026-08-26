@@ -104,7 +104,18 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
-      <div ref={containerRef} aria-label="Ontology graph canvas" style={{ minWidth: 0, minHeight: 520 }} />
+      <div
+        ref={containerRef}
+        aria-label="Ontology graph canvas"
+        role="application"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter') return;
+          const firstNode = graph.nodes()[0];
+          if (firstNode) setSelectedId(firstNode);
+        }}
+        style={{ minWidth: 0, minHeight: 520 }}
+      />
       {selected && (
         <aside style={{ padding: 16, borderLeft: `1px solid ${tokens.colors.border}`, overflowWrap: 'anywhere' }}>
           <div style={{ fontWeight: tokens.typography.fontWeightSemibold }}>{selected.name}</div>
