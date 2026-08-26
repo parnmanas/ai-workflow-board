@@ -70,33 +70,48 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const renderer = new Sigma(graph, containerRef.current, {
-      renderEdgeLabels: false,
-      labelDensity: 0.08,
-      labelGridCellSize: 120,
-      hideEdgesOnMove: snapshot.edges.length > 2_000,
-      zIndex: true,
-    });
-    rendererRef.current = renderer;
-    const reduceNodes = (node: string, data: Record<string, any>) => {
-      const isSelected = node === selectedRef.current;
-      return {
-        ...data,
-        label: 1 / renderer.getCamera().getState().ratio > 1.7 || isSelected ? data.label : '',
-        highlighted: isSelected,
-        zIndex: isSelected ? 1 : 0,
+    const container = containerRef.current;
+    let renderer: Sigma | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const mountRenderer = () => {
+      if (renderer || container.clientWidth === 0 || container.clientHeight === 0) return;
+      const sigma = new Sigma(graph, container, {
+        renderEdgeLabels: false,
+        labelDensity: 0.08,
+        labelGridCellSize: 120,
+        hideEdgesOnMove: snapshot.edges.length > 2_000,
+        zIndex: true,
+      });
+      renderer = sigma;
+      rendererRef.current = sigma;
+      const reduceNodes = (node: string, data: Record<string, any>) => {
+        const isSelected = node === selectedRef.current;
+        return {
+          ...data,
+          label: 1 / sigma.getCamera().getState().ratio > 1.7 || isSelected ? data.label : '',
+          highlighted: isSelected,
+          zIndex: isSelected ? 1 : 0,
+        };
       };
+      sigma.setSetting('nodeReducer', reduceNodes);
+      sigma.refresh();
+      sigma.on('clickNode', ({ node }) => setSelectedId(node));
+      sigma.on('clickStage', () => setSelectedId(null));
+      const camera = sigma.getCamera();
+      const updateZoom = () => sigma.refresh();
+      camera.on('updated', updateZoom);
     };
-    renderer.setSetting('nodeReducer', reduceNodes);
-    renderer.refresh();
-    renderer.on('clickNode', ({ node }) => setSelectedId(node));
-    renderer.on('clickStage', () => setSelectedId(null));
-    const camera = renderer.getCamera();
-    const updateZoom = () => renderer.refresh();
-    camera.on('updated', updateZoom);
+
+    mountRenderer();
+    if (!renderer) {
+      resizeObserver = new ResizeObserver(mountRenderer);
+      resizeObserver.observe(container);
+    }
     return () => {
+      resizeObserver?.disconnect();
       rendererRef.current = null;
-      renderer.kill();
+      renderer?.kill();
     };
   }, [graph, snapshot.edges.length]);
 
