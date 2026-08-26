@@ -921,7 +921,7 @@ test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후
     assert.equal(secondTicket.canonical_ticket_id, null, '애매한 경우 자동링크되지 않는다');
     assert.equal(secondTicket.pending_user_action, true, '애매한 후보는 사람 확인 큐(pending_user_action)로 표면화된다');
     assert.match(secondTicket.pending_reason, /github/);
-    assert.equal(secondTicket.pending_set_by, 'Outreach');
+    assert.equal(secondTicket.pending_set_by, 'duplicate_decision_guard');
     assert.ok(secondTicket.pending_set_at);
 
     const decisions = await dataSource.getRepository(TicketDuplicateDecision).find();

@@ -1228,6 +1228,9 @@ export interface Ticket {
   pending_reason?: string;
   pending_set_at?: string | null;
   pending_set_by?: string;
+  // 서버가 미결 duplicate decision 행을 확인해 계산한 원인 플래그다.
+  // 후보 배열만으로 판정하면 과거 후보가 다른 pending UI에 재노출될 수 있다.
+  duplicate_decision_pending?: boolean;
   // Persisted ambiguous chat-duplicate choices. Hydrated by full ticket reads
   // so a report reopened after intake can still be explicitly linked or kept
   // independent.

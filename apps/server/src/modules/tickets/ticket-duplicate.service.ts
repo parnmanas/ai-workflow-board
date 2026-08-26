@@ -8,6 +8,7 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { randomUUID } from 'crypto';
 import { dispatchBackoffMs, readReconcilerConfig } from '../agents/dispatch-intent.service';
+import { isDuplicateDecisionPending } from './ticket-duplicate-pending';
 
 export interface DuplicateIntake {
   title: string;
@@ -187,7 +188,11 @@ export class TicketDuplicateService {
       const tickets = manager.getRepository(Ticket);
       const report = await tickets.findOne({ where: { id: reportId } });
       if (!report) throw new Error('Ticket not found');
-      if (!report.pending_user_action) throw new Error('Ticket has no duplicate decision pending');
+      const decisions = manager.getRepository(TicketDuplicateDecision);
+      const hasAmbiguousCandidate = await decisions.exists({
+        where: { report_ticket_id: report.id, outcome: 'ambiguous_pending' },
+      });
+      if (!isDuplicateDecisionPending(report, hasAmbiguousCandidate)) throw new Error('Ticket has no duplicate decision pending');
       let canonical: Ticket | null = null;
       if (candidateId) {
         const pendingCandidate = await manager.getRepository(TicketDuplicateDecision).findOne({
@@ -207,7 +212,13 @@ export class TicketDuplicateService {
       report.pending_set_at = null;
       report.pending_set_by = '';
       const saved = await tickets.save(report);
-      const decisions = manager.getRepository(TicketDuplicateDecision);
+      // 후보 행은 감사 기록이면서 동시에 "아직 결정 필요" 상태를 나타낸다.
+      // 결정을 별도 행으로 추가하기 전에 모두 종료해, 이후 hard-budget 등
+      // 다른 원인으로 pending 되어도 과거 후보가 다시 UI에 노출되지 않게 한다.
+      await decisions.update(
+        { report_ticket_id: report.id, outcome: 'ambiguous_pending' },
+        { outcome: 'rejected', actor_name: actorName, actor_id: actorId },
+      );
       await decisions.save(decisions.create({
         workspace_id: report.workspace_id,
         report_ticket_id: report.id,
