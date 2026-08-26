@@ -793,9 +793,19 @@ export class WorktreeManager {
     wtPath: string,
     startRef?: string,
   ): Promise<{ ok: boolean; created: boolean; reason?: string; detail?: string }> {
-    const existing = (await this.listWorktrees(baseWorkingDir)).find((w) =>
-      samePath(w.path, wtPath),
-    );
+    const worktrees = await this.listWorktrees(baseWorkingDir);
+    // Git for Windows는 porcelain 경로의 8.3 단축명을 긴 경로로 확장할 수
+    // 있다. 존재하는 경로는 native realpath로 맞춰 재개 worktree를 새 경로
+    // 충돌로 오인하지 않게 하고, 해석 실패 시 기존 문자열 비교를 유지한다.
+    const comparableWtPath = await fsp.realpath(wtPath).catch(() => wtPath);
+    let existing: WorktreeInfo | undefined;
+    for (const worktree of worktrees) {
+      const comparableWorktreePath = await fsp.realpath(worktree.path).catch(() => worktree.path);
+      if (samePath(comparableWorktreePath, comparableWtPath)) {
+        existing = worktree;
+        break;
+      }
+    }
     if (existing) {
       try {
         const st = await fsp.stat(wtPath);
