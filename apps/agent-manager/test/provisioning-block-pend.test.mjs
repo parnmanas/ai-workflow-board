@@ -33,6 +33,7 @@ import assert from 'node:assert/strict';
 
 import { EventDispatcher } from '../dist/lib/event-dispatcher.js';
 import { findDuplicateSpawn } from '../dist/lib/subagent-manager.js';
+import { composeTriggerPrompt } from '../dist/lib/prompts.js';
 
 const AGENT = 'agent-rolf';
 const TICKET = 'ticket-prov';
@@ -136,8 +137,14 @@ function makeDispatcher(state) {
     enabled: true,
     async resolveCwd() {
       state.resolveCalls += 1;
-      if (state.broken) return { isWorktree: false, reason: state.reason };
-      return { isWorktree: true, cwd: '/ws/.awb/wt/ok', mode: 'per_ticket', reused: false };
+      if (state.broken) return { isWorktree: false, reason: state.reason, detail: state.detail };
+      return {
+        isWorktree: true,
+        cwd: '/ws/.awb/wt/ok',
+        mode: 'per_ticket',
+        reused: false,
+        repositoryContext: state.repositoryContext,
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -153,7 +160,12 @@ function makeDispatcher(state) {
   // whose spawn() (our faithful single-flight fake) we count.
   return new EventDispatcher(
     { url: 'http://127.0.0.1:0', apiKey: 'test-key', delegation: { enabled: true } },
-    { worktreeManager, subagentManager: makeSubagentManager(state), managedAgentContexts },
+    {
+      worktreeManager,
+      subagentManager: makeSubagentManager(state),
+      managedAgentContexts,
+      prompts: { composeTriggerPrompt },
+    },
   );
 }
 
@@ -176,6 +188,69 @@ function makeEvent(overrides = {}) {
 }
 
 const countTool = (name) => mcpToolCalls.filter((n) => n === name).length;
+
+test('실제 dispatch는 auth failure를 fallback하지 않고 즉시 중단한다', async () => {
+  const state = newState({ reason: 'repository_auth_failed', detail: 'fatal: 인증 실패' });
+  const d = makeDispatcher(state);
+
+  await d.handleTrigger(makeEvent({ field_changed: 'auth-failure' }));
+
+  assert.equal(state.spawns.length, 0, '인증 실패에서는 담당 에이전트를 시작하지 않는다');
+  assert.equal(countTool('pend_ticket'), 0, '인증 실패 진단 자체는 credential 원문 요청이나 자동 변경을 유발하지 않는다');
+  assert.equal(countTool('add_comment'), 1, '원인별 진단을 티켓에 기록한다');
+});
+
+test('안전한 fallback 성공은 실제 dispatch를 계속하고 복구·중복 방지 prompt를 전달한다', async () => {
+  const state = newState({ reason: 'repository_fetch_failed', detail: 'exit 128: 원격 일시 오류' });
+  const d = makeDispatcher(state);
+
+  await d.handleTrigger(makeEvent({ field_changed: 'safe-fallback' }));
+
+  assert.equal(state.spawns.length, 1, '안전한 로컬 복구 가능 실패는 담당 에이전트에게 이어진다');
+  const prompt = state.spawns[0].taskText;
+  assert.match(prompt, /AWB 저장소 준비 fallback/);
+  assert.match(prompt, /repository_fetch_failed/);
+  assert.match(prompt, /원래 의도/);
+  assert.match(prompt, /기대 결과/);
+  assert.match(prompt, /재현 정보: exit 128: 원격 일시 오류/);
+  assert.match(prompt, /허용 범위/);
+  assert.match(prompt, /기존 개선 티켓을 먼저 검색/);
+  assert.match(prompt, /동일 항목이 없을 때 최대 1건만 등록/);
+  assert.match(prompt, /일회성 오류나 중복 항목은 등록하지/);
+  assert.doesNotMatch(prompt, /토큰 원문을 (?:입력|요청)/);
+});
+
+test('fallback 비허용 실패는 prompt 없이 dispatch를 중단한다', async () => {
+  const state = newState({ reason: 'base_branch_unavailable', detail: 'origin/release 없음' });
+  const d = makeDispatcher(state);
+
+  await d.handleTrigger(makeEvent({ field_changed: 'unsafe-fallback' }));
+
+  assert.equal(state.spawns.length, 0, '안전하지 않은 복구 실패에는 strand가 생성되지 않는다');
+  assert.equal(countTool('pend_ticket'), 0);
+  assert.equal(countTool('add_comment'), 1);
+});
+
+test('정상 provisioning dispatch는 확정 repository context를 실제 prompt로 전달한다', async () => {
+  const state = newState({
+    broken: false,
+    repositoryContext: {
+      resourceId: 'repo-1', cwd: '/ws/.awb/wt/ok', baseBranch: 'release',
+      baseSha: 'abc123', workingBranch: 'ticket/ticket-prov-work', dirty: true,
+      ahead: 3, behind: 2, resumed: true,
+    },
+  });
+  const d = makeDispatcher(state);
+
+  await d.handleTrigger(makeEvent({ base_branch: 'release', field_changed: 'context' }));
+
+  assert.equal(state.spawns.length, 1);
+  assert.match(state.spawns[0].taskText, /Repository Resource ID: repo-1/);
+  assert.match(state.spawns[0].taskText, /base branch \/ SHA: release \/ abc123/);
+  assert.match(state.spawns[0].taskText, /working branch: ticket\/ticket-prov-work/);
+  assert.match(state.spawns[0].taskText, /dirty: true/);
+  assert.match(state.spawns[0].taskText, /ahead \/ behind: 3 \/ 2/);
+});
 
 // ── (1) durable → first-abort pend, no repeated spawn, recovery → one strand ──
 
@@ -271,16 +346,16 @@ test('concurrent recovery triggers spawn EXACTLY ONE strand via the real (ticket
 
 // ── (4) transient blocker keeps the cooldown self-heal (contrast to durable) ───
 
-test('a TRANSIENT blocker does NOT pend on the first abort — it pends only after the threshold', async () => {
-  const state = newState({ reason: 'path_conflict' }); // transient (a sibling ticket may free the path)
+test('repository unavailable은 안전 fallback과 분리되어 반복 실패 후에만 보류된다', async () => {
+  const state = newState({ reason: 'repository_unavailable' });
   const d = makeDispatcher(state);
 
   // First abort: no pend (unlike a durable blocker) — a sibling ticket might free
   // the path, so the cooldown gets a self-heal window first.
   await d.handleTrigger(makeEvent({ field_changed: 't1' }));
-  assert.equal(state.spawns.length, 0, 'transient block: no spawn');
-  assert.equal(countTool('pend_ticket'), 0, 'transient block: NOT pended on the first abort');
-  assert.equal(ticketState.pending_user_action, false, 'transient block: ticket not pended yet');
+  assert.equal(state.spawns.length, 0, 'repository unavailable: no spawn');
+  assert.equal(countTool('pend_ticket'), 0, 'repository unavailable: 첫 실패에는 보류하지 않는다');
+  assert.equal(ticketState.pending_user_action, false, 'repository unavailable: ticket not pended yet');
 
   // Two more state-changed (non-supervisor, so never cooldown-suppressed) aborts
   // reach DEFAULT_PEND_AFTER_ABORTS (3). Only then does even a transient block
@@ -288,10 +363,10 @@ test('a TRANSIENT blocker does NOT pend on the first abort — it pends only aft
   // supervisor triggers; driving state-changed ones here reaches the threshold
   // deterministically without a fake clock — the pend mechanism is identical.)
   await d.handleTrigger(makeEvent({ field_changed: 't2' }));
-  assert.equal(countTool('pend_ticket'), 0, 'still no pend at abort 2');
+  assert.equal(countTool('pend_ticket'), 0, '두 번째 실패까지 보류하지 않는다');
   await d.handleTrigger(makeEvent({ field_changed: 't3' }));
-  assert.equal(countTool('pend_ticket'), 1, 'a persistent transient finally pends after the threshold');
-  assert.equal(state.spawns.length, 0, 'still no strand across the whole transient episode');
+  assert.equal(countTool('pend_ticket'), 1, '지속되는 repository unavailable은 임계값에서 보류한다');
+  assert.equal(state.spawns.length, 0, '전체 retry 구간에 strand가 생성되지 않는다');
 });
 
 // ── re-arm: a recovered ticket-role backs off afresh on a later break ──────────

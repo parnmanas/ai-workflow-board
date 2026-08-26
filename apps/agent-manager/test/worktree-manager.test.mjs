@@ -837,6 +837,58 @@ test('cleanupTerminalTicketGit: shared slot은 보존하고 clean·merged 티켓
   }
 });
 
+test('shared warm slot 재할당은 remote default가 아닌 티켓 지정 baseRef에서 시작한다', async () => {
+  const fixture = await makeRepoWithRemote();
+  const workingDir = join(fixture.root, 'agent-home-release-base');
+  const wm = new WorktreeManager();
+  try {
+    const seed = join(fixture.root, 'release-seed');
+    execFileSync('git', ['clone', '-q', fixture.remote, seed]);
+    git(seed, ['config', 'user.email', 'test@awb.local']);
+    git(seed, ['config', 'user.name', 'AWB Test']);
+    git(seed, ['switch', '-q', '-c', 'release']);
+    await fsp.writeFile(join(seed, 'RELEASE.md'), 'release base\n');
+    git(seed, ['add', '.']);
+    git(seed, ['commit', '-q', '-m', 'release base']);
+    git(seed, ['push', '-q', '-u', 'origin', 'release']);
+
+    const first = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'repo-release-base', url: fixture.remote, branch: 'main' },
+    });
+    assert.equal(first.isWorktree, true);
+    const firstBranch = git(first.cwd, ['branch', '--show-current']);
+    git(first.cwd, ['push', '-q', '-u', 'origin', firstBranch]);
+    await wm.cleanupTerminalTicketGit({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-release-base',
+    });
+
+    const second = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_B,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'repo-release-base', url: fixture.remote, branch: 'release' },
+    });
+    assert.equal(second.isWorktree, true);
+    assert.equal(git(second.cwd, ['rev-parse', 'HEAD']), git(second.cwd, ['rev-parse', 'origin/release']));
+    assert.notEqual(git(second.cwd, ['rev-parse', 'HEAD']), git(second.cwd, ['rev-parse', 'origin/main']));
+    assert.equal(existsSync(join(second.cwd, 'RELEASE.md')), true);
+    assert.equal(second.repositoryContext.baseBranch, 'release');
+    assert.equal(second.repositoryContext.baseSha, git(second.cwd, ['rev-parse', 'origin/release']));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('cleanupTerminalTicketGit: dirty shared slot은 ref와 active lease를 함께 보존하고 사유를 보고한다', async () => {
   const fixture = await makeSharedTerminalRepo(TICKET_A);
   try {

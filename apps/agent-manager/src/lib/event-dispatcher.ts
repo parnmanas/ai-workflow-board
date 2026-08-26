@@ -1288,7 +1288,7 @@ export class EventDispatcher {
               `- 허용 범위: 현재 working_dir 아래 기존 .awb/base 및 .awb/wt만 진단하고, 비파괴 fetch/worktree/branch 준비만 재시도\n` +
               `- 금지: credential 원문 요청·출력, 기존 dirty 변경 초기화, 강제 삭제, 다른 작업 폴더 생성\n` +
               `- 권한/비밀/파괴 조치가 필요하면 즉시 중단하고 최소 승인만 요청\n` +
-              `- 복구 뒤 재발 방지 가치가 있는 구조적 결함을 발견한 경우에만 기존 티켓을 검색해 중복 없이 AWB 개선 티켓 1건을 등록하고, 일회성 오류는 등록하지 마세요.`,
+              `- 복구 뒤 재발 방지 가치가 있는 구조적 결함을 발견한 경우에만 기존 개선 티켓을 먼저 검색하고, 동일 항목이 없을 때 최대 1건만 등록하세요. 일회성 오류나 중복 항목은 등록하지 마세요.`,
           };
         }
         return { ok: false, reason: gate.reason, blockerKind: gate.kind, detail: res.detail };

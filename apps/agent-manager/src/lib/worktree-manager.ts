@@ -962,6 +962,8 @@ export class WorktreeManager {
       await this.#resetSlotOnAcquire(a.baseWorkingDir, wtPath, {
         fullReset: !ens.created,
         recordedBranch: prevLease?.branch ?? null,
+        baseRef: a.baseRef,
+        baseBranch: a.baseBranch,
       });
       const featureBranch = `ticket/${a.ticketId}-work`;
       const currentBranch = await git(wtPath, ['branch', '--show-current']);
@@ -998,9 +1000,8 @@ export class WorktreeManager {
   async #resetSlotOnAcquire(
     baseWorkingDir: string,
     slotPath: string,
-    opts: { fullReset: boolean; recordedBranch: string | null },
+    opts: { fullReset: boolean; recordedBranch: string | null; baseRef: string; baseBranch: string },
   ): Promise<void> {
-    const base = await this.#detectBaseBranch(baseWorkingDir);
     // The branch the dead/prior occupant left checked out — delete it too.
     const liveHead = await git(slotPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const liveBranch = liveHead.ok ? liveHead.stdout.trim() : '';
@@ -1009,11 +1010,8 @@ export class WorktreeManager {
       // Detach at the current commit (no file changes → safe on a dirty tree),
       // freeing the branch so `reset --hard` and `branch -D` below can proceed.
       await git(slotPath, ['checkout', '--detach']);
-      let resetOk = false;
-      if (base) {
-        const r = await git(slotPath, ['reset', '--hard', `origin/${base}`]);
-        resetOk = r.ok;
-      }
+      const reset = await git(slotPath, ['reset', '--hard', opts.baseRef]);
+      const resetOk = reset.ok;
       if (!resetOk) {
         // origin/<base> unresolvable (no remote / stale) → fall back to the base
         // repo's current HEAD commit, which is where fresh slots start anyway.
@@ -1033,7 +1031,7 @@ export class WorktreeManager {
     // sat on `main` could get `branch -D main`. Protecting the literals closes
     // that (crash-reclaim hardening requested in the ticket 83b2d43b review).
     const protectedBranches = new Set(
-      ['HEAD', base, 'main', 'master'].filter((x): x is string => !!x),
+      ['HEAD', opts.baseBranch, 'main', 'master'].filter((x): x is string => !!x),
     );
     for (const b of new Set([liveBranch, opts.recordedBranch ?? ''])) {
       if (b && !protectedBranches.has(b)) {
