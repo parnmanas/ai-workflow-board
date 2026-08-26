@@ -25,6 +25,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
+import { subtaskGateBlocksMove } from '../../tickets/subtask-gate';
 
 export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, activityService, ticketRoleAssignmentService, logger } = ctx;
@@ -70,6 +71,10 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         destColumnId = col.id;
       }
       if (!destColumnId) return err('Either target_column_id or target_column_name is required');
+
+      if (await subtaskGateBlocksMove(dataSource, ticket, destColumnId)) {
+        return err('subtask_gate_blocked — 이 컬럼의 모든 재귀 subtask가 완료되기 전에는 부모를 앞으로 이동할 수 없습니다.');
+      }
 
       const oldColumnId = ticket.column_id;
 

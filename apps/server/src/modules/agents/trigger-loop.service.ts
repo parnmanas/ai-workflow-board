@@ -44,6 +44,7 @@ import { requiredManagerCapability, evaluateManagerCapability } from '../../comm
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { openDescendants } from '../tickets/subtask-gate';
 
 // Sentinel actor written onto auto-advance `moved` activities. Deliberately
 // non-'system' so the trigger loop re-enters and processes the destination
@@ -284,6 +285,8 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       triggerSource = 'column_move';
     } else if (log.entity_type === COMMENT_ENTITY && log.action === COMMENT_ACTION) {
       triggerSource = 'comment';
+    } else if (log.action === 'status_changed') {
+      triggerSource = 'subtask_update';
     } else if (log.action === 'updated') {
       // Comment edits never re-trigger. The runaway loop on 2026-05-28 fired
       // here: silent_exit dedupe writes a comment.updated activity (field_changed
@@ -306,8 +309,16 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     if (log.actor_id === 'system' || log.actor_id === '') return;
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
-    const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
+    let ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
     if (!ticket) return;
+
+    // Nested child status activities point at their immediate parent. Resolve
+    // the column-owning root before applying the gate.
+    for (let depth = 0; !ticket.column_id && ticket.parent_id && depth < 8; depth++) {
+      const parent = await ticketRepo.findOne({ where: { id: ticket.parent_id } });
+      if (!parent) return;
+      ticket = parent;
+    }
 
     // v0.41 — column resolution is column-id driven, not name-driven.
     // The ticket's current column_id is the ground truth (the previous
@@ -321,6 +332,29 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       .getRepository(BoardColumn)
       .findOne({ where: { id: ticket.column_id } });
     if (!col) return;
+
+    // A subtask-processing column owns the recursive child tree. Dispatch
+    // each open child using that child's own role assignments and never let
+    // the root's unassigned-policy path skip around this gate.
+    if (col.process_subtasks) {
+      const open = await openDescendants(this.dataSource, ticket.id);
+      if (open.length > 0) {
+        const slugs = safeJsonParse<string[]>(col.role_routing, []);
+        for (const child of open) {
+          for (const slug of slugs) {
+            const holders = await this._resolveRoleHolders(child, slug);
+            for (const agentId of holders?.agentIds || []) {
+              await this._emitTrigger(child, agentId, slug, 'subtask_gate', log.actor_id || '');
+            }
+          }
+        }
+        return;
+      }
+      if (triggerSource === 'subtask_update') {
+        await this._autoAdvanceUnassigned(ticket, col, true);
+        return;
+      }
+    }
 
     // Terminal columns never trigger themselves. Completion is the
     // terminal column's job. But a terminal landing can hand off to the
@@ -742,6 +776,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
   private async _autoAdvanceUnassigned(
     ticket: Ticket,
     currentCol: BoardColumn,
+    includeTerminal = false,
   ): Promise<void> {
     const colRepo = this.dataSource.getRepository(BoardColumn);
     const cols = await colRepo.find({
@@ -751,7 +786,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const nextCol = cols.find(
       (c) =>
         c.position > currentCol.position &&
-        !((c as any).is_terminal === true || (c as any).kind === 'terminal'),
+        (includeTerminal || !((c as any).is_terminal === true || (c as any).kind === 'terminal')),
     );
     if (!nextCol) {
       this.logService.info('MCP', 'auto_advance skipped (no next non-terminal column)', {
@@ -765,8 +800,22 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const fromPosition = ticket.position;
     const fromColumnId = currentCol.id;
 
-    await this.dataSource.transaction(async (manager) => {
+    const moved = await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
+      const nextIsTerminal = nextCol.is_terminal === true || nextCol.kind === 'terminal';
+
+      // Last-subtask completions may race. Claim this transition with a
+      // compare-and-set so only one event performs position shifts/logging.
+      const claimed = await tRepo.createQueryBuilder()
+        .update()
+        .set({
+          column_id: nextCol.id,
+          terminal_entered_at: nextIsTerminal ? new Date() : null,
+          ...(nextIsTerminal ? { status: 'done' as const } : {}),
+        })
+        .where('id = :id AND column_id = :fromColumnId', { id: ticket.id, fromColumnId })
+        .execute();
+      if (!claimed.affected) return false;
 
       // Close the gap left by the ticket in its current column (root tickets only).
       await tRepo
@@ -793,11 +842,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       // stamped here — but defensively clear it in case a legacy row had
       // a stale stamp from a previous run.
       await tRepo.update(ticket.id, {
-        column_id: nextCol.id,
         position: destCount,
-        terminal_entered_at: null,
+        terminal_entered_at: nextIsTerminal ? new Date() : null,
       });
+      return true;
     });
+
+    if (!moved) return;
 
     // Emit the `moved` activity via ActivityService so SSE listeners (UI,
     // agent-manager) get the update AND the trigger loop re-enters with the
@@ -2384,7 +2435,14 @@ candidate's branch or move the ticket.
     // (focus selector), the audit-row ranking summary, and any
     // downstream lookup. Cheap, single repo hit, avoids the three
     // separate findOne calls the pre-fix code did.
-    const currentColumnId = duplicateGateTicket?.column_id || ticket.column_id;
+    let currentColumnId: string | null = duplicateGateTicket?.column_id || ticket.column_id || null;
+    if (!currentColumnId && ticket.parent_id) {
+      let parent = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.parent_id } });
+      for (let depth = 0; parent && !parent.column_id && parent.parent_id && depth < 8; depth++) {
+        parent = await this.dataSource.getRepository(Ticket).findOne({ where: { id: parent.parent_id } });
+      }
+      currentColumnId = parent?.column_id || null;
+    }
     const col = currentColumnId
       ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: currentColumnId } })
       : null;

@@ -61,6 +61,7 @@ import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-prof
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
+import { subtaskGateBlocksMove } from './subtask-gate';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -1041,6 +1042,9 @@ export class TicketsController {
 
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
+    if (targetColumnId && await subtaskGateBlocksMove(this.dataSource, ticket, targetColumnId)) {
+      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 부모를 이동할 수 있습니다.' });
+    }
 
     // Review→Merging approval gate (ticket a3d25202 — proposal 2 of 86bfb8af).
     // Unlike the terminal-reopen guard (which deliberately exempts this human
