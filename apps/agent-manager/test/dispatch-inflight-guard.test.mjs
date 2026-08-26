@@ -1109,6 +1109,8 @@ function mentionEvJson(fields = {}) {
     role_prompt: '',
     mention_source: 'role',
     role_shortcut: 'assignee',
+    dispatch_trigger_id: 'mention-trigger-1',
+    dispatch_role: 'assignee',
     ...fields,
   });
 }
@@ -1133,6 +1135,60 @@ test('role-mention is suppressed while a column-move trigger for the SAME (ticke
   await pTrigger;
   assert.equal(mgr.spawnCount, 1, 'only the column-triggered session ever spawned');
   assert.ok(mgr._getLiveSession(KEY('t1', 'assignee', 'a1')), 'the column-triggered session completed normally');
+});
+
+test('column trigger에 진 role-mention은 상관 ID·역할·사유를 suppressed ACK wire payload로 보낸다', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+  const ackBodies = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/api/agent-manager/dispatch/ack')) {
+      ackBodies.push(JSON.parse(String(init?.body || '{}')));
+    }
+    return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return {}; } };
+  };
+
+  const pTrigger = dispatcher.handleTrigger(evJson());
+  await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+  await dispatcher.handleCommentMention(mentionEvJson({
+    dispatch_trigger_id: 'mention-trigger-wire',
+    dispatch_role: 'assignee',
+  }));
+  assert.equal(await waitFor(() => ackBodies.length === 1), true);
+  assert.deepEqual(ackBodies[0], {
+    ticket_id: 't1',
+    role: 'assignee',
+    trigger_id: 'mention-trigger-wire',
+    outcome: 'suppressed',
+    reason: 'mention_seat',
+    skill_snapshot_run_id: '',
+  });
+
+  gate.resolve();
+  await pTrigger;
+});
+
+test('role-mention 상관 계약이 없거나 역할이 다르면 차감 ACK를 위조하지 않는다', async () => {
+  for (const fields of [
+    { dispatch_trigger_id: '', dispatch_role: '' },
+    { dispatch_trigger_id: 'mention-trigger-wrong-role', dispatch_role: 'reviewer' },
+  ]) {
+    const gate = deferred();
+    const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+    const { dispatcher } = makeDispatcher({ ticketMgr: mgr });
+    const ackBodies = [];
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith('/api/agent-manager/dispatch/ack')) ackBodies.push(init?.body);
+      return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return {}; } };
+    };
+    const pTrigger = dispatcher.handleTrigger(evJson());
+    await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+    await dispatcher.handleCommentMention(mentionEvJson(fields));
+    assert.equal(ackBodies.length, 0);
+    gate.resolve();
+    await pTrigger;
+  }
 });
 
 test('the suppression posts a ticket comment so the mention is not silently lost', async () => {

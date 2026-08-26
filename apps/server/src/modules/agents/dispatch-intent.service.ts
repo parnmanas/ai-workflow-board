@@ -375,6 +375,7 @@ export class DispatchIntentService {
         action: 'dispatch_twin_suppressed',
         field_changed: (args.reason || 'twin').slice(0, 200),
         new_value: JSON.stringify({ trigger_id: args.triggerId, role: args.role }),
+        role: args.role,
         trigger_source: emitted.trigger_source,
         actor_id: args.managerAgentId || '',
         actor_name: 'AgentManager',

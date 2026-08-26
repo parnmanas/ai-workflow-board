@@ -3660,6 +3660,22 @@ export class EventDispatcher {
       const replayPendingForceForMention = (): void =>
         this.#replayPendingForce(mentionInflightKey, ticketId, mention.role_shortcut);
       const suppressForSeat = (): void => {
+        const mentionTrigger = String(ev.dispatch_trigger_id || '');
+        const mentionRole = String(ev.dispatch_role || '');
+        if (mentionTrigger && mentionRole === mention.role_shortcut) {
+          void postDispatchAck(this.#config, {
+            ticket_id: ticketId,
+            role: mentionRole,
+            trigger_id: mentionTrigger,
+            outcome: 'suppressed',
+            reason: 'mention_seat',
+          });
+        } else {
+          log(
+            `Comment mention suppression ACK skipped — correlation contract missing or role mismatch: ` +
+              `ticket=${ticketId.slice(0, 8) || '_'} role=${mention.role_shortcut}`,
+          );
+        }
         log(
           `Comment mention suppressed — column-move trigger already owns this (ticket, role, agent) seat: ` +
             `ticket=${ticketId.slice(0, 8) || '_'} role=${mention.role_shortcut} agent=${targetAgentId.slice(0, 8) || '_'}`,

@@ -36,8 +36,9 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         .describe('Whether tickets in this column are workflow end-state. Auto-syncs with `kind` (kind="terminal" implies is_terminal=true).'),
       unassigned_policy: z.enum(UNASSIGNED_POLICY_VALUES).optional().default('halt')
         .describe('When no routed role has a holder: halt, always skip, or skip only when the ticket has another holder'),
+      process_subtasks: z.boolean().optional().default(false).describe('Dispatch subtasks and hold their root in this column until the recursive tree is done'),
     },
-    async ({ board_id, name, color, kind, role_routing, is_terminal, unassigned_policy }) => {
+    async ({ board_id, name, color, kind, role_routing, is_terminal, unassigned_policy, process_subtasks }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const maxResult = await repo
         .createQueryBuilder('col')
@@ -83,6 +84,7 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         role_routing: roleRoutingJson,
         is_terminal: resolvedTerminal,
         unassigned_policy,
+        process_subtasks,
       }));
       return ok(column);
     }
@@ -105,8 +107,9 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
         .describe('Role slugs to wake when a ticket lands on this column. Replaces the legacy lowercased-name lookup against Board.routing_config.'),
       unassigned_policy: z.enum(UNASSIGNED_POLICY_VALUES).optional()
         .describe('When no routed role has a holder: halt, always skip, or skip only when the ticket has another holder'),
+      process_subtasks: z.boolean().optional().describe('Dispatch subtasks and hold their root here until every descendant is done'),
     },
-    async ({ column_id, name, color, description, position, is_terminal, kind, role_routing, unassigned_policy }) => {
+    async ({ column_id, name, color, description, position, is_terminal, kind, role_routing, unassigned_policy, process_subtasks }) => {
       const repo = dataSource.getRepository(BoardColumn);
       const col = await repo.findOne({ where: { id: column_id } });
       if (!col) return err('Column not found');
@@ -115,6 +118,7 @@ export function registerColumnTools(server: McpServer, ctx: ToolContext): void {
       if (color !== undefined) col.color = color;
       if (description !== undefined) col.description = description;
       if (unassigned_policy !== undefined) col.unassigned_policy = unassigned_policy;
+      if (process_subtasks !== undefined) col.process_subtasks = process_subtasks;
       if (role_routing !== undefined) {
         // Storage shape is JSON-stringified array; mirrors the migration
         // backfill format and the writeRoutingConfigThrough helper.

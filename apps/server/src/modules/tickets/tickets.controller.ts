@@ -10,6 +10,7 @@ import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
 import { Agent } from '../../entities/Agent';
 import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
+import { recordCommentMentionDispatch } from '../../common/mention-dispatch-correlation';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
@@ -60,6 +61,7 @@ import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-prof
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
+import { subtaskGateBlocksExit, subtaskGateBlocksMove } from './subtask-gate';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -320,7 +322,7 @@ export class TicketsController {
       pending_user_action: duplicateAssessment.ambiguous,
       pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
       pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-      pending_set_by: duplicateAssessment.ambiguous ? (creator.created_by || 'Ticket intake') : '',
+      pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 
@@ -1040,6 +1042,9 @@ export class TicketsController {
 
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
+    if (targetColumnId && await subtaskGateBlocksMove(this.dataSource, ticket, targetColumnId)) {
+      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 부모를 이동할 수 있습니다.' });
+    }
 
     // Review→Merging approval gate (ticket a3d25202 — proposal 2 of 86bfb8af).
     // Unlike the terminal-reopen guard (which deliberately exempts this human
@@ -1382,6 +1387,10 @@ export class TicketsController {
     if (sourceBoardId === targetBoardId && targetCol.id === ticket.column_id && targetPosition === undefined) {
       const unchanged = await loadTicketFull(this.dataSource, ticket.id);
       return res.json(unchanged);
+    }
+
+    if (sourceBoardId !== targetBoardId && await subtaskGateBlocksExit(this.dataSource, ticket)) {
+      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 현재 게이트 컬럼을 이탈할 수 있습니다.' });
     }
 
     // 다중담당자·합의 게이트(ticket bd6d58db). 보드 간 이동도 현재 컬럼 이탈이므로
@@ -2494,6 +2503,12 @@ export class TicketsController {
         // 부가값 — 누락 시 이 mention으로 깨운 세션이 agent에 핀된
         // backend/harness/effort를 조용히 무시한다.
         const extras = await resolveMentionDispatchExtras(this.dataSource, ticket, agent);
+        const dispatchTriggerId = m.roleShortcut
+          ? await recordCommentMentionDispatch(this.dataSource, {
+              ticketId: ticket.id, workspaceId: ticket.workspace_id,
+              agentId: agent.id, role: m.roleShortcut,
+            })
+          : '';
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
@@ -2503,6 +2518,8 @@ export class TicketsController {
           actor_type: 'user',
           actor_name: actor.name,
           content: comment.content,
+          dispatch_trigger_id: dispatchTriggerId,
+          dispatch_role: m.roleShortcut || '',
           role_prompt: agent.role_prompt || '',
           mention_source: m.roleShortcut ? 'role' : 'direct',
           role_shortcut: m.roleShortcut,

@@ -106,6 +106,7 @@ export default function Column({ column, onTicketClick, onCreateTicket, focusTic
                 ticket={ticket}
                 index={index}
                 onClick={() => onTicketClick(ticket)}
+                onChildClick={onTicketClick}
                 focusHolders={focusTicketMap?.[ticket.id]}
                 unreadCount={sumUnread(ticket, counts.tickets.perTicket)}
               />

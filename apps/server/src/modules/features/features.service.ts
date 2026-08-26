@@ -490,7 +490,7 @@ export class FeaturesService {
         pending_user_action: duplicateAssessment?.ambiguous || false,
         pending_reason: duplicateAssessment?.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
         pending_set_at: duplicateAssessment?.ambiguous ? new Date() : null,
-        pending_set_by: duplicateAssessment?.ambiguous ? 'Feature Intake' : '',
+        pending_set_by: duplicateAssessment?.ambiguous ? 'duplicate_decision_guard' : '',
         // Cross-board handoff relay (ticket ac21a745) — validated at propose time;
         // re-run defensively ('' on the rare re-validation miss so one bad spec
         // never aborts the whole chain build).

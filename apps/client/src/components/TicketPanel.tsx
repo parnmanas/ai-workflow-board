@@ -3899,7 +3899,9 @@ export default function TicketPanel({
                   )}
                 </div>
 
-                {!!activeTicket.duplicate_candidates?.length && !duplicateDecisionDone ? (
+                {activeTicket.duplicate_decision_pending === true
+                  && !!activeTicket.duplicate_candidates?.length
+                  && !duplicateDecisionDone ? (
                   <div style={{
                     background: tokens.colors.surfaceCard,
                     border: `1px solid ${tokens.colors.border}`,

@@ -521,6 +521,9 @@ export interface CommentMentionPayload {
   role_prompt: string;
   mention_source: 'direct' | 'role'; // direct @-mention vs. @assignee-style role shortcut
   role_shortcut?: string; // 'assignee' | 'reporter' | 'reviewer' when mention_source === 'role'
+  // comment_id와 구별되는 hard-budget/ACK 상관 ID. 역할 멘션에만 존재한다.
+  dispatch_trigger_id?: string;
+  dispatch_role?: string;
   // Ticket-comment analog of ChatRoomMessagePayload.agent_chain_depth: trailing
   // strictly-alternating agent-authorship chain length on this ticket's
   // comments, including this one. agent-manager skips delegation once the

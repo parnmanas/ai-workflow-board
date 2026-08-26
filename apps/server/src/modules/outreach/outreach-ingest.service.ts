@@ -638,7 +638,7 @@ export class OutreachIngestService {
           ? `Confirm whether this ${channel.kind} report duplicates one of the suggested tickets.`
           : '',
         pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-        pending_set_by: duplicateAssessment.ambiguous ? 'Outreach' : '',
+        pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
         created_by: 'Outreach',
         created_by_type: 'system',
         created_by_id: '',

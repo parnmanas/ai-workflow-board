@@ -23,7 +23,7 @@ interface ColumnManagerProps {
   defaultPromptTemplates: BuiltinPromptDefault[];
   workspaceRoles?: RoleOption[];
   onCreateColumn: (boardId: string, name: string, color?: string) => Promise<void>;
-  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed' }) => Promise<void>;
+  onUpdateColumn: (columnId: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed'; process_subtasks?: boolean }) => Promise<void>;
   onDeleteColumn: (columnId: string) => Promise<void>;
   onUpdateRoutingConfig: (config: Record<string, string[]>) => Promise<void>;
   onSaveColumnPrompts: (config: Record<string, string>) => Promise<void>;
@@ -294,6 +294,11 @@ export default function ColumnManager({
                                   Terminal (Done)
                                 </label>
                               </div>
+
+                              <label style={{ paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 8, fontSize: '12px', color: tokens.colors.textSecondary }}>
+                                <input type="checkbox" checked={!!col.process_subtasks} onChange={(e) => onUpdateColumn(col.id, { process_subtasks: e.target.checked })} />
+                                Subtask 처리 (완료 전 부모 이동 차단)
+                              </label>
 
                               {/* Prompt template selector — attached to agent_trigger when a ticket enters this column */}
                               <div style={{ paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 8 }}>

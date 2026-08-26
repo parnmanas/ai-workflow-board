@@ -182,6 +182,9 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // cross-resource surface here for a stricter tier to protect, only a
   // resolvable caller requirement.
   graph_status: 'caller',
+  // graph_refresh는 기존 그래프 데이터를 교체하는 명령이다. 핸들러도
+  // full-scope API key + 티켓 역할 + 리소스 경계를 다시 검증한다.
+  graph_refresh: 'full',
   graph_find_symbol: 'caller',
   graph_module_summary: 'caller',
   graph_neighbors: 'caller',

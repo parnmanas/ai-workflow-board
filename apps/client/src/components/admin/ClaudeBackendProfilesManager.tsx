@@ -35,13 +35,15 @@ export default function ClaudeBackendProfilesManager() {
     let adapter;
     try { adapter = adapterText.trim() ? JSON.parse(adapterText) : undefined; }
     catch { showToast('Adapter config must be valid JSON', 'error'); return; }
-    const payload = { ...editing, ...(adapter ? { adapter } : {}) };
+    // 조회 응답 전용 필드는 strict 서버 스키마로 다시 보내지 않는다.
+    const { credential_status: _credentialStatus, ...editable } = editing;
+    const payload = { ...editable, ...(adapter ? { adapter } : {}) };
     if (!adapter) delete payload.adapter;
     try {
       if (isNew) await api.createClaudeBackendProfile(payload);
       else await api.updateClaudeBackendProfile(editing.id, payload);
       await load(); edit(); showToast('Claude backend profile saved', 'success');
-    } catch (e: any) { showToast(e.message || 'Save failed', 'error'); }
+    } catch (e: any) { showToast(`프로필 저장 실패: ${e.message || '요청을 처리하지 못했습니다'}`, 'error'); }
   };
   const remove = async (profile: ClaudeBackendProfile) => {
     try {
