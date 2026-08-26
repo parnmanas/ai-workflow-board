@@ -77,6 +77,10 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
     const mountRenderer = () => {
       if (renderer || container.clientWidth === 0 || container.clientHeight === 0) return;
       const sigma = new Sigma(graph, container, {
+        // 상세 패널이 열리며 grid 열이 재배치될 때 ResizeObserver가 일시적인
+        // 0 너비를 볼 수 있다. 최초 마운트는 위에서 실제 크기를 검증하므로,
+        // 이후 레이아웃 전환 중의 순간값만 Sigma 예외로 승격하지 않는다.
+        allowInvalidContainer: true,
         renderEdgeLabels: false,
         labelDensity: 0.08,
         labelGridCellSize: 120,
@@ -118,7 +122,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
   useEffect(() => { rendererRef.current?.refresh(); }, [selectedId]);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
+    <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', width: '100%', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
       <div
         ref={containerRef}
         aria-label="Ontology graph canvas"

@@ -29,12 +29,13 @@ test('ready/stale 그래프는 전용 snapshot API로 조회해 Sigma/Graphology
   assert.match(pageSource, /<OntologyGraphCanvas snapshot={snapshot} \/>/);
   assert.match(canvasSource, /import Graph from 'graphology'/);
   assert.match(canvasSource, /import Sigma from 'sigma'/);
-  assert.match(canvasSource, /new Sigma\(graph, containerRef\.current/);
+  assert.match(canvasSource, /new Sigma\(graph, container/);
 });
 
 test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨김 보호 장치를 제공한다', () => {
-  assert.match(canvasSource, /renderer\.on\('clickNode'/);
+  assert.match(canvasSource, /sigma\.on\('clickNode'/);
   assert.match(canvasSource, /camera\.on\('updated'/);
+  assert.match(canvasSource, /allowInvalidContainer: true/);
   assert.match(canvasSource, /hideEdgesOnMove: snapshot\.edges\.length > 2_000/);
   assert.match(canvasSource, /getState\(\)\.ratio > 1\.7/);
   assert.match(canvasSource, /연결 \{selected\.degree\}개/);
