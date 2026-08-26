@@ -691,6 +691,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // above: can write (auto-provision an OntologyGraph row + kick off a
   // background build) but never touches a ticket row.
   graph_status: 'non-ticket',
+  graph_refresh: 'non-ticket',
   move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   propose_skill_change: 'non-ticket',
