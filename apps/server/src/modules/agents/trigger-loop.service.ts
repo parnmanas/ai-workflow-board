@@ -678,8 +678,15 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     ticket: Ticket,
     slug: string,
   ): Promise<{ role: WorkspaceRole; agentIds: string[] } | null> {
+    const column = ticket.column_id
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+      : null;
+    const board = column?.board_id
+      ? await this.dataSource.getRepository(Board).findOne({ where: { id: column.board_id } })
+      : null;
+    const effectiveWorkspaceId = board?.workspace_id || ticket.workspace_id;
     const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
-      where: { workspace_id: ticket.workspace_id, slug },
+      where: { workspace_id: effectiveWorkspaceId, slug },
     });
     if (!role) return null;
     const rows = await this.dataSource.getRepository(TicketRoleAssignment).find({
