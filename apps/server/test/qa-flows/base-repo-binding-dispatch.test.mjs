@@ -115,6 +115,32 @@ test('base repo binding: env backfill reaches the wire; repo-less + unresolvable
 
   const t1Fresh = await ds.getRepository('Ticket').findOne({ where: { id: t1.id } });
   assert.equal(!!t1Fresh.pending_user_action, false, 'a resolvable env repo must NOT pend the ticket');
+  assert.equal(t1Fresh.base_repo_resource_id, resource.id, 'dispatch가 후속 CI/merge/QA용 유효 repo를 티켓에 백필해야 한다');
+  assert.equal(t1Fresh.base_branch, 'main', 'Resource.default_branch도 티켓의 빈 branch에 백필해야 한다');
+
+  // TXIV 회귀: board.workspace_id만 현재 소속이고 ticket/column workspace_id는
+  // 과거 workspace를 가리킨다. 보드 repo/default_branch가 wire까지 유지돼야 한다.
+  step('Scenario 1b: stale ticket/column workspace에서도 board repo/main으로 dispatch');
+  const legacyWs = await ds.getRepository('Workspace').save(ds.getRepository('Workspace').create({
+    name: 'legacy-txiv-workspace',
+  }));
+  const t1b = await createTicket(app, getDataSourceToken, {
+    columnId: columns.inProgress.id, workspaceId: ws.id,
+    title: 'TXIV legacy workspace mismatch', assigneeId: assignee.id,
+  });
+  await ds.getRepository('Ticket').update(t1b.id, { workspace_id: legacyWs.id });
+  await ds.getRepository('BoardColumn').update(columns.inProgress.id, { workspace_id: legacyWs.id });
+  await triggerLoop.dispatchCurrentColumn(t1b.id, 'qa-base-repo-legacy-workspace', 'qa-actor');
+  const trig1b = await va.waitForTrigger((tr) => tr.ticket_id === t1b.id, 4000);
+  assert.equal(trig1b._wire.base_repo?.id, resource.id, 'board repo가 stale ticket workspace 때문에 제거되면 안 된다');
+  assert.equal(trig1b._wire.base_repo?.url, 'https://github.com/parnmanas/ai-workflow-board.git');
+  assert.equal(trig1b._wire.base_branch, 'main');
+  assert.equal(trig1b._wire.environment_config?.repositories?.[0]?.resource_id, resource.id);
+  assert.equal(trig1b._wire.environment_config?.repositories?.[0]?.branch, 'main');
+  const t1bFresh = await ds.getRepository('Ticket').findOne({ where: { id: t1b.id } });
+  assert.equal(t1bFresh.base_repo_resource_id, resource.id);
+  assert.equal(t1bFresh.base_branch, 'main');
+  await ds.getRepository('BoardColumn').update(columns.inProgress.id, { workspace_id: ws.id });
 
   // ── Scenario 2: THE ACCEPTANCE — board AND ticket both declare NO repo ───────
   // ticket 8c3befa8 verification: "보드에 environment repo 가 없는 상태로 base_repo
