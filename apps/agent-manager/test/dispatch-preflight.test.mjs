@@ -18,6 +18,7 @@ import {
   decideCliTrustReadiness,
   decideCliAuthReadiness,
   classifyWorktreeOutcome,
+  isSafeTicketProvisioningFallback,
   classifyWorktreeCheckout,
   normalizeRemoteUrl,
   redactRemoteUrl,
@@ -33,6 +34,27 @@ import {
   classifySpawnException,
   firstLine,
 } from '../dist/lib/dispatch-preflight.js';
+
+test('ticket provisioning fallback은 안전한 로컬 복구만 허용한다', () => {
+  for (const reason of [
+    'repository_fetch_failed',
+    'repository_clone_failed',
+    'path_conflict',
+    'add_failed',
+    'worktree_unavailable',
+    'branch_prepare_failed',
+  ]) {
+    assert.equal(isSafeTicketProvisioningFallback(reason), true, reason);
+  }
+  for (const reason of [
+    'repository_unlinked',
+    'repository_auth_failed',
+    'base_branch_unavailable',
+    'not_a_git_repo',
+  ]) {
+    assert.equal(isSafeTicketProvisioningFallback(reason), false, reason);
+  }
+});
 
 // ── isGitAuthFailure ────────────────────────────────────────────────────────
 

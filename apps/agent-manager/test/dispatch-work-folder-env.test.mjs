@@ -5,8 +5,30 @@ import {
   composeTriggerPrompt,
   sharedWorktreeInstructions,
   perTicketWorktreeInstructions,
+  repositoryContextInstructions,
   worktreeInstructionsFor,
 } from '../dist/lib/prompts.js';
+
+test('확정된 repository context는 비밀 없이 prompt에 직렬화된다', () => {
+  const text = repositoryContextInstructions({
+    resourceId: 'repo-resource-id',
+    cwd: '/agent/.awb/wt/repo/ticket',
+    baseBranch: 'main',
+    baseSha: '0123456789abcdef',
+    workingBranch: 'ticket/full-id-work',
+    dirty: true,
+    ahead: 2,
+    behind: 1,
+    resumed: true,
+  });
+  assert.match(text, /Repository Resource ID: repo-resource-id/);
+  assert.match(text, /base branch \/ SHA: main \/ 0123456789abcdef/);
+  assert.match(text, /working branch: ticket\/full-id-work/);
+  assert.match(text, /dirty: true/);
+  assert.match(text, /ahead \/ behind: 2 \/ 1/);
+  assert.match(text, /기존 worktree 재개/);
+  assert.doesNotMatch(text, /token|password|credential/i);
+});
 
 test('dispatch exports the manager-resolved shared worktree contract', () => {
   assert.deepEqual(

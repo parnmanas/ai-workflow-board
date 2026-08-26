@@ -170,6 +170,101 @@ test('non-empty non-git working_dir provisions below .awb without touching conta
   }
 });
 
+test('신규 티켓은 stale base clone을 fetch한 최신 origin/base에서 시작한다', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'freshness-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const first = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-freshness', url: source.remote, branch: 'main' },
+    });
+    assert.equal(first.repositoryContext.baseSha, git(source.remote, ['rev-parse', 'refs/heads/main']));
+
+    git(source.repo, ['push', '-q', 'origin', 'main']);
+    const remoteTip = git(source.remote, ['rev-parse', 'refs/heads/main']);
+    const second = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_B,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-freshness', url: source.remote, branch: 'main' },
+    });
+    assert.equal(git(second.cwd, ['rev-parse', 'HEAD']), remoteTip);
+    assert.equal(second.repositoryContext.baseSha, remoteTip);
+    assert.equal(second.repositoryContext.workingBranch, `ticket/${TICKET_B}-work`);
+    assert.equal(second.repositoryContext.resumed, false);
+  } finally {
+    await source.cleanup();
+  }
+});
+
+test('재개 티켓은 dirty 변경과 기존 브랜치를 보존하고 ahead/behind를 보고한다', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'resume-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const first = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-resume', url: source.remote, branch: 'main' },
+    });
+    await fsp.writeFile(join(first.cwd, 'dirty.txt'), '보존할 변경\n');
+    git(source.repo, ['push', '-q', 'origin', 'main']);
+
+    const resumed = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-resume', url: source.remote, branch: 'main' },
+    });
+    assert.equal(resumed.cwd, first.cwd);
+    assert.equal(resumed.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+    assert.equal(resumed.repositoryContext.dirty, true);
+    assert.equal(resumed.repositoryContext.behind, 1);
+    assert.equal(resumed.repositoryContext.ahead, 0);
+    assert.equal(resumed.repositoryContext.resumed, true);
+    assert.equal(await fsp.readFile(join(first.cwd, 'dirty.txt'), 'utf8'), '보존할 변경\n');
+  } finally {
+    await source.cleanup();
+  }
+});
+
+test('repo 미연결과 fetch 실패는 서로 다른 provisioning 진단을 반환한다', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'failure-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const unlinked = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: null,
+    });
+    assert.equal(unlinked.reason, 'repository_unlinked');
+
+    await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-failure', url: source.remote, branch: 'main' },
+    });
+    await fsp.rename(source.remote, `${source.remote}.offline`);
+    const failed = await wm.resolveCwd({
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_B,
+      role: 'assignee',
+      bootstrapRepo: { resourceId: 'repo-failure', url: source.remote, branch: 'main' },
+    });
+    assert.equal(failed.reason, 'repository_fetch_failed');
+    assert.match(failed.detail, /does not appear to be a git repository|Could not read from remote repository/);
+  } finally {
+    await source.cleanup();
+  }
+});
+
 test('one non-git container isolates base clones for different repository resources', async () => {
   const first = await makeRepoWithRemote();
   const second = await makeRepoWithRemote();
@@ -217,7 +312,8 @@ test('container base clone credential store is inherited by its ticket worktree'
   try {
     process.env.GIT_CONFIG_COUNT = '1';
     process.env.GIT_CONFIG_KEY_0 = `url.${source.remote}.insteadOf`;
-    process.env.GIT_CONFIG_VALUE_0 = 'https://token-user:container-secret@git.example.test/acme/private.git';
+    // clone argv에는 credential이 없는 clean URL만 들어가므로 clean URL을 치환한다.
+    process.env.GIT_CONFIG_VALUE_0 = remoteUrl;
     const wm = new WorktreeManager();
     const result = await wm.resolveCwd({
       baseWorkingDir: workingDir,
@@ -232,7 +328,7 @@ test('container base clone credential store is inherited by its ticket worktree'
     });
     assert.ok(result.isWorktree);
     const baseClone = join(workingDir, '.awb', 'base', 'private-resource');
-    assert.equal(git(baseClone, ['remote', 'get-url', 'origin']), remoteUrl);
+    assert.equal(git(baseClone, ['config', '--get', 'remote.origin.url']), remoteUrl);
     const baseHelper = git(baseClone, ['config', '--get', 'credential.helper']);
     assert.equal(git(result.cwd, ['config', '--get', 'credential.helper']), baseHelper);
     const credentialFile = credentialFileFromHelper(baseHelper);

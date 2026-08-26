@@ -58,11 +58,12 @@ import { readRunWorkspaceLeaves, forgetRunWorkspaceLeaf } from './run-workspace-
 import {
   decidePushReadiness,
   classifyWorktreeCheckout,
+  isGitAuthFailure,
   type PushReadinessDecision,
   type WorktreeCheckoutDecision,
 } from './dispatch-preflight.js';
 import {
-  authenticatedCloneUrl,
+  cloneWithRepoCredential,
   installRepoCredential,
   scrubOriginUrl,
   maskCredential,
@@ -342,12 +343,27 @@ export interface ResolveCwdResult {
   reused?: boolean;
   /** populated on fallback so callers can log why isolation was skipped. */
   reason?: string;
+  detail?: string;
   /** the worktree checkout root; undefined on fallback. */
   worktreePath?: string;
   /** Reserved relative work subpath; currently always empty. */
   workSubpath?: string;
   /** the effective mode used to pick the slug. */
   mode?: WorktreeMode;
+  /** 에이전트 프롬프트에 그대로 전달할 확정된 Git 상태. 비밀은 포함하지 않는다. */
+  repositoryContext?: TicketRepositoryContext;
+}
+
+export interface TicketRepositoryContext {
+  resourceId: string;
+  cwd: string;
+  baseBranch: string;
+  baseSha: string;
+  workingBranch: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  resumed: boolean;
 }
 
 /** Map a ticket + mode to the worktree dir's last path segment.
@@ -372,7 +388,7 @@ export class WorktreeManager {
    *  it, so different tickets remain fully concurrent after their cwd exists. */
   #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
-  #bootstrapLocks = new Map<string, Promise<string | null>>();
+  #bootstrapLocks = new Map<string, Promise<{ repo: string | null; reason?: string; detail?: string }>>();
   /** OS 셸 래퍼 없이 오류·경쟁 조건을 재현하기 위한 플랫폼 중립 테스트 seam. */
   #terminalCleanupHooks: {
     removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
@@ -428,8 +444,8 @@ export class WorktreeManager {
   async #bootstrapContainerRepo(
     baseWorkingDir: string,
     repo: ResolveCwdArgs['bootstrapRepo'],
-  ): Promise<string | null> {
-    if (!repo?.url?.trim()) return null;
+  ): Promise<{ repo: string | null; reason?: string; detail?: string }> {
+    if (!repo?.url?.trim()) return { repo: null, reason: 'repository_unlinked' };
     const cleanUrl = repo.url.trim();
     const resourceSlug = repo.resourceId?.trim().replace(/[^A-Za-z0-9._-]/g, '_');
     // Legacy URL-only bootstraps still need stable isolation without leaking
@@ -443,27 +459,24 @@ export class WorktreeManager {
       const cloneDir = join(baseWorkingDir, '.awb', 'base', repoSlug);
       if (await this.#isGitWorkTree(cloneDir)) {
         await installRepoCredential(cloneDir, cleanUrl, repo.credential);
-        return cloneDir;
+        return { repo: cloneDir };
       }
       await fsp.mkdir(join(baseWorkingDir, '.awb', 'base'), { recursive: true });
       const branch = (repo.branch || '').trim();
-      const cloneUrl = authenticatedCloneUrl(cleanUrl, repo.credential);
-      const cloneArgs = ['clone', ...(branch ? ['--branch', branch] : []), '--', cloneUrl, cloneDir];
-      const cloned = await new Promise<GitResult>((resolve) => {
-        execFile(
-          'git',
-          cloneArgs,
-          { timeout: 20 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
-          (err, stdout, stderr) => resolve({
-            ok: !err,
-            stdout: (stdout ?? '').toString(),
-            stderr: (stderr ?? (err as any)?.message ?? '').toString(),
-          }),
-        );
+      const cloned = await cloneWithRepoCredential({
+        url: cleanUrl,
+        dir: cloneDir,
+        branch,
+        credential: repo.credential,
       });
       if (!cloned.ok) {
         log(`[worktree] container base clone failed: ${maskCredential(cloned.stderr, repo.credential).trim()}`);
-        return null;
+        const detail = maskCredential(cloned.stderr, repo.credential).trim();
+        return {
+          repo: null,
+          reason: isGitAuthFailure(detail) ? 'repository_auth_failed' : 'repository_clone_failed',
+          detail,
+        };
       }
       // Never leave the token embedded in origin. Persist it in the checkout's
       // private credential-store file so later fetch/push from ticket worktrees
@@ -471,7 +484,7 @@ export class WorktreeManager {
       await scrubOriginUrl(cloneDir, cleanUrl);
       await installRepoCredential(cloneDir, cleanUrl, repo.credential);
       log(`[worktree] cloned container base from ${repo.url}${branch ? ` branch=${branch}` : ''}: ${cloneDir}`);
-      return cloneDir;
+      return { repo: cloneDir };
     })().finally(() => this.#bootstrapLocks.delete(key));
     this.#bootstrapLocks.set(key, run);
     return run;
@@ -558,11 +571,37 @@ export class WorktreeManager {
     // `.git`, leave that checkout untouched and create AWB's managed base below
     // `.awb/base/<resource>`. This removes all behavior differences based on
     // whether working_dir itself is a repo.
-    const localBaseRepo = await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
-    if (!localBaseRepo) return fallback('repository_unavailable');
+    const bootstrapped = await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
+    const localBaseRepo = bootstrapped.repo;
+    if (!localBaseRepo) {
+      const result = fallback(bootstrapped.reason ?? 'repository_unavailable');
+      result.detail = bootstrapped.detail;
+      return result;
+    }
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
     await installRepoCredential(localBaseRepo, args.bootstrapRepo?.url ?? '', args.bootstrapRepo?.credential);
+
+    // 모든 신규/재개 dispatch는 먼저 원격을 갱신한다. 재개 worktree 자체에는
+    // checkout/reset을 하지 않으므로 dirty 파일과 기존 브랜치는 그대로 보존된다.
+    const fetched = await git(localBaseRepo, ['fetch', '--prune', 'origin']);
+    if (!fetched.ok) {
+      const detail = maskCredential(fetched.stderr, args.bootstrapRepo?.credential).trim();
+      const reason = isGitAuthFailure(detail) ? 'repository_auth_failed' : 'repository_fetch_failed';
+      const result = fallback(reason);
+      result.detail = detail || undefined;
+      return result;
+    }
+    let baseBranch = (args.bootstrapRepo?.branch || '').trim();
+    if (!baseBranch) {
+      const remoteHead = await git(localBaseRepo, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      baseBranch = remoteHead.ok ? remoteHead.stdout.trim().replace(/^origin\//, '') : '';
+    }
+    if (!baseBranch) return fallback('base_branch_unavailable');
+    const baseRef = `refs/remotes/origin/${baseBranch}`;
+    const baseTip = await git(localBaseRepo, ['rev-parse', '--verify', baseRef]);
+    if (!baseTip.ok) return fallback('base_branch_unavailable');
+    const baseSha = baseTip.stdout.trim();
 
     const resourceId = args.bootstrapRepo?.resourceId?.trim();
     const cleanUrl = args.bootstrapRepo?.url?.trim() || '';
@@ -586,6 +625,10 @@ export class WorktreeManager {
         workSubpath,
         withSub,
         fallback,
+        resourceId: resourceId || '',
+        baseBranch,
+        baseSha,
+        baseRef,
       });
     }
 
@@ -596,7 +639,7 @@ export class WorktreeManager {
       // this, simultaneous triggers can both observe a missing registration;
       // the loser then falls back to the shared base cwd and defeats isolation.
       await this.prune(provisioningBase);
-      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath);
+      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath, baseRef);
       if (!ens.ok) {
         if (ens.reason === 'add_failed') {
           log(
@@ -610,6 +653,14 @@ export class WorktreeManager {
           `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
         );
       }
+      if (ens.created) {
+        const featureBranch = `ticket/${ticketId}-work`;
+        const switched = await git(wtPath, ['switch', '-c', featureBranch]);
+        if (!switched.ok) return fallback('branch_prepare_failed');
+      }
+      const repositoryContext = await this.#describeRepositoryContext(
+        wtPath, resourceId || '', baseBranch, baseSha, !ens.created,
+      );
       return {
         cwd: withSub(wtPath),
         isWorktree: true,
@@ -617,6 +668,7 @@ export class WorktreeManager {
         worktreePath: wtPath,
         workSubpath,
         mode,
+        repositoryContext,
       };
     });
   }
@@ -739,6 +791,7 @@ export class WorktreeManager {
     baseWorkingDir: string,
     worktreesRoot: string,
     wtPath: string,
+    startRef?: string,
   ): Promise<{ ok: boolean; created: boolean; reason?: string; detail?: string }> {
     const existing = (await this.listWorktrees(baseWorkingDir)).find((w) =>
       samePath(w.path, wtPath),
@@ -773,11 +826,37 @@ export class WorktreeManager {
     // changes — same commit) frees the branch. Best-effort.
     await this.#freeBaseBranch(baseWorkingDir);
 
-    const add = await git(baseWorkingDir, ['worktree', 'add', '--detach', wtPath]);
+    const add = await git(baseWorkingDir, ['worktree', 'add', '--detach', wtPath, ...(startRef ? [startRef] : [])]);
     if (!add.ok) {
       return { ok: false, created: false, reason: 'add_failed', detail: add.stderr.trim() };
     }
     return { ok: true, created: true };
+  }
+
+  async #describeRepositoryContext(
+    cwd: string,
+    resourceId: string,
+    baseBranch: string,
+    baseSha: string,
+    resumed: boolean,
+  ): Promise<TicketRepositoryContext> {
+    const branch = await git(cwd, ['branch', '--show-current']);
+    const status = await git(cwd, ['status', '--porcelain']);
+    const counts = await git(cwd, ['rev-list', '--left-right', '--count', `origin/${baseBranch}...HEAD`]);
+    const [behind = 0, ahead = 0] = counts.ok
+      ? counts.stdout.trim().split(/\s+/).map((value) => Number(value) || 0)
+      : [0, 0];
+    return {
+      resourceId,
+      cwd,
+      baseBranch,
+      baseSha,
+      workingBranch: branch.ok && branch.stdout.trim() ? branch.stdout.trim() : null,
+      dirty: status.ok && status.stdout.length > 0,
+      ahead,
+      behind,
+      resumed,
+    };
   }
 
   // ── warm-pool (shared mode, 규약 ⑥) ──────────────────────────────────────
@@ -804,16 +883,23 @@ export class WorktreeManager {
     workSubpath: string;
     withSub: (p: string) => string;
     fallback: (reason: string) => ResolveCwdResult;
+    resourceId: string;
+    baseBranch: string;
+    baseSha: string;
+    baseRef: string;
   }): Promise<ResolveCwdResult> {
     const N = Math.max(1, Math.floor(a.poolSize && a.poolSize > 0 ? a.poolSize : 1));
     const t8 = String(a.ticketId).slice(0, 8);
-    const result = (wtPath: string, reused: boolean): ResolveCwdResult => ({
+    const result = async (wtPath: string, reused: boolean): Promise<ResolveCwdResult> => ({
       cwd: a.withSub(wtPath),
       isWorktree: true,
       reused,
       worktreePath: wtPath,
       workSubpath: a.workSubpath,
       mode: 'shared',
+      repositoryContext: await this.#describeRepositoryContext(
+        wtPath, a.resourceId, a.baseBranch, a.baseSha, reused,
+      ),
     });
 
     return this.#withPoolLock(a.worktreesRoot, async () => {
@@ -836,7 +922,7 @@ export class WorktreeManager {
           reg.slots[mine].leasedAt = nowIso();
           delete reg.slots[mine].releasedAt;
           await this.#writeRegistry(a.worktreesRoot, reg);
-          return result(wtPath, !ens.created);
+          return await result(wtPath, !ens.created);
         }
         // Owned slot can't be materialized (dir clobbered by a non-worktree,
         // add failed) — drop the stale lease and fall through to a fresh pick.
@@ -867,7 +953,7 @@ export class WorktreeManager {
       const slotName = sharedSlotName(pick);
       const wtPath = join(a.worktreesRoot, slotName);
       const prevLease = reg.slots[slotName];
-      const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
+      const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath, a.baseRef);
       if (!ens.ok) return a.fallback(ens.reason ?? 'worktree_unavailable');
 
       // Reset-on-acquire: hand a clean TRACKED tree at the base tip while keeping
@@ -877,6 +963,12 @@ export class WorktreeManager {
         fullReset: !ens.created,
         recordedBranch: prevLease?.branch ?? null,
       });
+      const featureBranch = `ticket/${a.ticketId}-work`;
+      const currentBranch = await git(wtPath, ['branch', '--show-current']);
+      if (!currentBranch.ok || !currentBranch.stdout.trim()) {
+        const switched = await git(wtPath, ['switch', '-c', featureBranch]);
+        if (!switched.ok) return a.fallback('branch_prepare_failed');
+      }
 
       reg.slots[slotName] = {
         slot: slotName,
@@ -889,7 +981,7 @@ export class WorktreeManager {
       log(
         `[worktree] leased shared pool slot ${slotName} (${resetIdx >= 0 ? 'reset warm' : 'fresh'}) to ticket=${t8} role=${a.role} of N=${N}`,
       );
-      return result(wtPath, !ens.created);
+      return await result(wtPath, !ens.created);
     });
   }
 
