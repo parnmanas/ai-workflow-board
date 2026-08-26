@@ -102,7 +102,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
         <aside style={{ padding: 16, borderLeft: `1px solid ${tokens.colors.border}`, overflowWrap: 'anywhere' }}>
           <div style={{ fontWeight: tokens.typography.fontWeightSemibold }}>{selected.name}</div>
           <div style={{ color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs, marginTop: 8 }}>{selected.type} · {selected.kind || selected.layer}</div>
-          <div style={{ marginTop: 12, fontSize: tokens.typography.fontSizeSm }}>{selected.path}{selected.start_line ? `:${selected.start_line}` : ''}</div>
+          <div style={{ marginTop: 12, fontSize: tokens.typography.fontSizeMd }}>{selected.path}{selected.start_line ? `:${selected.start_line}` : ''}</div>
           <div style={{ marginTop: 12, color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>연결 {selected.degree}개 · {clusterOf(selected)} 클러스터</div>
         </aside>
       )}
