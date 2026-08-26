@@ -205,15 +205,31 @@ export class OntologyController {
         select: ['id', 'type', 'kind', 'name', 'qualified_name', 'path', 'start_line', 'end_line', 'layer', 'degree', 'pagerank'],
       }),
     ]);
-    const selected = new Set(nodes.map((node) => node.id));
-    const edges = selected.size === 0
+    // 엣지를 먼저 자른 뒤 메모리에서 노드를 거르면, 선택 밖 노드의 고신뢰
+    // 엣지가 많은 그래프에서 실제 선택 노드 간 관계가 전부 사라질 수 있다.
+    // 노드 선택과 동일한 결정적 서브쿼리를 양 끝에 적용한 뒤 상한을 건다.
+    // ID 5,000개를 IN 파라미터로 전달하지 않아 SQLite 파라미터 한계도 피한다.
+    const selectedNodeIds = nodeRepo.createQueryBuilder('selected_node')
+      .select('selected_node.id')
+      .where('selected_node.graph_id = :graphId')
+      .andWhere('selected_node.status = :nodeStatus')
+      .orderBy('selected_node.pagerank', 'DESC')
+      .addOrderBy('selected_node.degree', 'DESC')
+      .addOrderBy('selected_node.id', 'ASC')
+      .limit(GRAPH_NODE_LIMIT);
+    const edges = nodes.length === 0
       ? []
-      : (await edgeRepo.find({
-          where: { graph_id: graph.id, status: 'active' },
-          order: { confidence: 'DESC', id: 'ASC' },
-          take: GRAPH_EDGE_LIMIT * 3,
-          select: ['id', 'src_id', 'dst_id', 'type', 'layer', 'confidence'],
-        })).filter((edge) => selected.has(edge.src_id) && selected.has(edge.dst_id)).slice(0, GRAPH_EDGE_LIMIT);
+      : await edgeRepo.createQueryBuilder('edge')
+          .select(['edge.id', 'edge.src_id', 'edge.dst_id', 'edge.type', 'edge.layer', 'edge.confidence'])
+          .where('edge.graph_id = :graphId')
+          .andWhere('edge.status = :edgeStatus')
+          .andWhere(`edge.src_id IN (${selectedNodeIds.getQuery()})`)
+          .andWhere(`edge.dst_id IN (${selectedNodeIds.getQuery()})`)
+          .setParameters({ graphId: graph.id, nodeStatus: 'active', edgeStatus: 'active' })
+          .orderBy('edge.confidence', 'DESC')
+          .addOrderBy('edge.id', 'ASC')
+          .limit(GRAPH_EDGE_LIMIT)
+          .getMany();
 
     return res.json({
       graph_id: graph.id,

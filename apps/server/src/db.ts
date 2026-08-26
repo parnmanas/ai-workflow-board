@@ -170,6 +170,14 @@ export class SqljsWriteSubscriber implements EntitySubscriberInterface {
 // transaction() 프라미스가 settle되는 순간 token.active를 false로 닫으면,
 // store 참조 자체는 늦게 실행되는 자손에도 계속 전파되더라도 `getStore()?.active`는
 // 그 시점엔 이미 false이므로 재진입으로 오인되지 않고 정상적으로 큐를 다시 탄다.
+const sqljsWorkQueues = new WeakMap<DataSource, <T>(work: () => Promise<T>) => Promise<T>>();
+
+/** 같은 sql.js 연결의 트랜잭션이 끝난 뒤 연결을 직접 만지는 작업을 실행한다. */
+export function afterSqljsTransactions<T>(dataSource: DataSource, work: () => Promise<T>): Promise<T> {
+  const enqueue = sqljsWorkQueues.get(dataSource);
+  return enqueue ? enqueue(work) : work();
+}
+
 export function serializeSqljsTransactions(dataSource: DataSource): void {
   if (dataSource.options.type !== 'sqljs') return;
 
@@ -179,11 +187,17 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   const original = manager.transaction.bind(manager);
   const reentry = new AsyncLocalStorage<{ active: boolean }>();
   let queue: Promise<void> = Promise.resolve();
+  const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = queue.then(work);
+    queue = run.then(() => undefined, () => undefined);
+    return run;
+  };
+  sqljsWorkQueues.set(dataSource, enqueue);
 
   manager.transaction = (...args: unknown[]) => {
     if (reentry.getStore()?.active) return original(...args);
     const token = { active: true };
-    const run: Promise<unknown> = queue.then(() => reentry.run(token, () => original(...args)));
+    const run: Promise<unknown> = enqueue(() => reentry.run(token, () => original(...args)));
     // Keep the chain alive regardless of outcome — a failed transaction must
     // not wedge every transaction queued behind it. The rejection itself is
     // still delivered to this call's own caller via `run`. Closing the token
@@ -191,7 +205,7 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
     // relying on run()'s callback scope — is what keeps a stale fire-and-
     // forget descendant from reading a reentry flag that has outlived the
     // transaction it was spawned from.
-    queue = run.then(
+    run.then(
       () => { token.active = false; },
       () => { token.active = false; },
     );
@@ -735,7 +749,10 @@ if (AppOntologyDataSource) {
 async function doOntologySqljsExport(dataSource: DataSource): Promise<boolean> {
   ontologySqljsDirty = false;
   try {
-    await dataSource.sqljsManager.saveDatabase();
+    // sql.js export는 활성 트랜잭션을 암묵적으로 끝낼 수 있다. 전체 그래프
+    // 빌드가 양보한 사이 주기 flush가 끼어들어 COMMIT을 무효화하지 않도록
+    // 이 DataSource의 트랜잭션 직렬화 큐 뒤에서만 내보낸다.
+    await afterSqljsTransactions(dataSource, () => dataSource.sqljsManager.saveDatabase());
     return true;
   } catch (e) {
     ontologySqljsDirty = true;
