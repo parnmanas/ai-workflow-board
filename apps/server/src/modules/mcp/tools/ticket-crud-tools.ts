@@ -421,7 +421,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           pending_user_action: duplicateAssessment.ambiguous,
           pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
           pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-          pending_set_by: duplicateAssessment.ambiguous ? (creatorName || 'Ticket intake') : '',
+          pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
           created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
         }));
 

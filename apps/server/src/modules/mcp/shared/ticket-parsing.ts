@@ -30,6 +30,7 @@ import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse, withArtifactRef } from './helpers';
 import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
 import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
+import { isDuplicateDecisionPending } from '../../tickets/ticket-duplicate-pending';
 
 type RepoScope = DataSource | EntityManager;
 
@@ -315,7 +316,8 @@ export async function loadTicketFull(
   // ticket read so REST, MCP, and a reopened detail panel expose the same
   // human decision surface.
   out.duplicate_decision_pending = false;
-  if (ticket.pending_user_action) {
+  out.duplicate_candidates = [];
+  if (isDuplicateDecisionPending(ticket)) {
     const decisions = await scope.getRepository(TicketDuplicateDecision).find({
       where: { report_ticket_id: ticket.id, outcome: 'ambiguous_pending' },
       order: { confidence: 'DESC', created_at: 'ASC' },
@@ -335,8 +337,6 @@ export async function loadTicketFull(
           matched_signals: safeJsonParse(row.matched_signals),
         }];
       });
-    } else {
-      out.duplicate_candidates = [];
     }
   }
 

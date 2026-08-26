@@ -220,6 +220,7 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   });
   await ticketRepo.update(ambiguousLink.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,
+    pending_set_by: 'duplicate_decision_guard',
   });
   const linkReport = await ticketRepo.findOne({ where: { id: ambiguousLink.id } });
   await duplicateService.record(linkReport, linkAssessment, 'qa', 'qa');
@@ -251,9 +252,39 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   });
   await ticketRepo.update(independent.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,
+    pending_set_by: 'duplicate_decision_guard',
   });
   const keepReport = await ticketRepo.findOne({ where: { id: independent.id } });
   await duplicateService.record(keepReport, keepAssessment, 'qa', 'qa');
+
+  step('stale ambiguous 행은 hard-budget pending 원인을 덮어쓸 수 없다');
+  await ticketRepo.update(independent.id, {
+    pending_user_action: true,
+    pending_reason: '실제 dispatch 실행 횟수가 hard budget을 초과했습니다.',
+    pending_set_by: 'hard_budget_dispatch_guard',
+  });
+  const staleHardBudgetResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
+    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
+  });
+  assert.equal(staleHardBudgetResponse.status, 200);
+  const staleHardBudgetReport = await staleHardBudgetResponse.json();
+  assert.equal(staleHardBudgetReport.duplicate_decision_pending, false,
+    'stale ambiguous 행이 있어도 hard-budget pending은 duplicate 결정 상태가 아니다');
+  assert.deepEqual(staleHardBudgetReport.duplicate_candidates, [],
+    'stale ambiguous 후보를 hard-budget pending UI에 투영하면 안 된다');
+  await assert.rejects(
+    duplicateService.confirm(independent.id, null, 'qa', 'qa'),
+    /no duplicate decision pending/,
+    'duplicate confirm이 hard-budget pending을 해제하면 안 된다',
+  );
+  const stillHardBudgetPending = await ticketRepo.findOne({ where: { id: independent.id } });
+  assert.equal(stillHardBudgetPending.pending_user_action, true);
+  assert.equal(stillHardBudgetPending.pending_set_by, 'hard_budget_dispatch_guard');
+
+  await ticketRepo.update(independent.id, {
+    pending_reason: 'Confirm whether this chat report duplicates one of the suggested tickets.',
+    pending_set_by: 'duplicate_decision_guard',
+  });
   const kept = await duplicateService.confirm(independent.id, null, 'qa', 'qa');
   assert.equal(kept.canonical_ticket_id, null);
   await ticketRepo.update(independent.id, {

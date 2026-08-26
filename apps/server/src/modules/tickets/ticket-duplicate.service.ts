@@ -8,6 +8,7 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { randomUUID } from 'crypto';
 import { dispatchBackoffMs, readReconcilerConfig } from '../agents/dispatch-intent.service';
+import { isDuplicateDecisionPending } from './ticket-duplicate-pending';
 
 export interface DuplicateIntake {
   title: string;
@@ -187,7 +188,7 @@ export class TicketDuplicateService {
       const tickets = manager.getRepository(Ticket);
       const report = await tickets.findOne({ where: { id: reportId } });
       if (!report) throw new Error('Ticket not found');
-      if (!report.pending_user_action) throw new Error('Ticket has no duplicate decision pending');
+      if (!isDuplicateDecisionPending(report)) throw new Error('Ticket has no duplicate decision pending');
       let canonical: Ticket | null = null;
       if (candidateId) {
         const pendingCandidate = await manager.getRepository(TicketDuplicateDecision).findOne({

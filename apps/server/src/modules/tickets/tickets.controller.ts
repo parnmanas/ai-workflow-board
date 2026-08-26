@@ -321,7 +321,7 @@ export class TicketsController {
       pending_user_action: duplicateAssessment.ambiguous,
       pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
       pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-      pending_set_by: duplicateAssessment.ambiguous ? (creator.created_by || 'Ticket intake') : '',
+      pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
 
