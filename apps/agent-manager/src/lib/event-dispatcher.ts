@@ -69,6 +69,21 @@ import {
 } from './skills/skill-materializer.js';
 
 /**
+ * 일반 작업 보드 후보는 non-native 일반 채팅의 ticket-first 라우팅에만 필요하다.
+ * Action room은 capability-first 실행 경로이므로 후보 API의 장애가 실행을 막지 않게
+ * 조회 자체를 생략한다.
+ */
+export async function ordinaryWorkBoardsForChat(
+  config: AwbConfig,
+  usesNativeMcp: boolean,
+  isActionRoom: boolean,
+) {
+  return usesNativeMcp || isActionRoom
+    ? []
+    : fetchOrdinaryWorkBoardCandidates(config);
+}
+
+/**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
  * event (ticket e9c7a896). The server ships the resolved board/workspace
  * harness as a JSON object (or omits it — older servers / unconfigured
@@ -4340,7 +4355,11 @@ export class EventDispatcher {
           { fetchImages: false },
         );
         const rolePrompt = p.role_prompt || '';
-        const ordinaryWorkBoards = await fetchOrdinaryWorkBoardCandidates(this.#config);
+        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+          this.#config,
+          false,
+          !!p.is_action_room,
+        );
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -4494,9 +4513,11 @@ export class EventDispatcher {
         // the persistent path above). Match the reply-channel instruction to
         // whether this CLI can call the AWB MCP tool itself.
         const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
-        const ordinaryWorkBoards = usesNativeMcp
-          ? []
-          : await fetchOrdinaryWorkBoardCandidates(this.#config);
+        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+          this.#config,
+          usesNativeMcp,
+          !!p.is_action_room,
+        );
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,

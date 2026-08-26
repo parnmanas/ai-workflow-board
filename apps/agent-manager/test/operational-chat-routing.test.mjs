@@ -13,6 +13,7 @@ import {
 } from '../dist/lib/operational-chat-fallback.js';
 import { fetchOrdinaryWorkBoardCandidates } from '../dist/lib/rest.js';
 import { composeChatRoomPrompt } from '../dist/lib/prompts.js';
+import { ordinaryWorkBoardsForChat } from '../dist/lib/event-dispatcher.js';
 
 const config = { url: 'https://awb.invalid', apiKey: 'key', workspace_id: 'workspace-1' };
 const marker = (operation = 'deploy awb') =>
@@ -192,6 +193,37 @@ test('ordinary-work board timeout stops routing instead of producing a marker or
     error => error === timeout,
   );
 });
+
+for (const dispatchPath of ['Hermes', 'non-native one-shot']) {
+  test(`${dispatchPath} Action room skips the failing ordinary-work board API and keeps direct execution`, async () => {
+    const originalFetch = globalThis.fetch;
+    let candidateFetches = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/ordinary-work-board-candidates')) {
+        candidateFetches += 1;
+        throw new Error('후보 API 장애');
+      }
+      return new Response('{}', { status: 200 });
+    };
+    try {
+      // Hermes와 non-native one-shot은 모두 native MCP가 아니지만, Action room이면
+      // capability-first 실행이므로 후보 조회 실패에 노출되지 않아야 한다.
+      const boards = await ordinaryWorkBoardsForChat(config, false, true);
+      assert.deepEqual(boards, []);
+      assert.equal(candidateFetches, 0, 'Action room에서는 후보 API를 호출하지 않는다');
+
+      const prompt = composeChatRoomPrompt(
+        'action-room', [], { content: '배포를 실행해줘', sender_name: '사용자', sender_id: 'user-1' },
+        undefined, false, undefined, '', true, '', boards,
+      );
+      assert.match(prompt, /executing an Action Run/);
+      assert.match(prompt, /carry it out DIRECTLY/);
+      assert.doesNotMatch(prompt, /AWB_ORDINARY_WORK_FALLBACK/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
 
 test('only a successful empty board response enables the no-board direct-chat exception', async () => {
   const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
