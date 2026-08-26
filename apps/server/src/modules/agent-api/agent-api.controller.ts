@@ -850,12 +850,20 @@ export class AgentApiController {
   /** agent-manager가 non-native 프롬프트에 주입할 현재 workspace의 실제 보드 후보. */
   @Get('ordinary-work-board-candidates')
   async ordinaryWorkBoardCandidates(@Req() req: Request, @Res() res: Response) {
-    const workspaceId = this.requestScope(req);
+    const scope = this.requestScope(req);
+    const workspaceId = String(req.query.workspace_id || scope || '');
     if (!workspaceId) return res.status(400).json({ error: 'workspace scope is required' });
-    const boards = await this.boardRepo.find({
-      where: { workspace_id: workspaceId, archived_at: IsNull(), paused_at: IsNull() },
-      order: { created_at: 'ASC' },
-    });
+    if (scope && scope !== workspaceId) return this.denyScope(res);
+    const boards = await this.boardRepo.createQueryBuilder('board')
+      .innerJoin(BoardColumn, 'column',
+        'column.board_id = board.id AND column.is_terminal = :isTerminal',
+        { isTerminal: false })
+      .where('board.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('board.archived_at IS NULL')
+      .andWhere('board.paused_at IS NULL')
+      .distinct(true)
+      .orderBy('board.created_at', 'ASC')
+      .getMany();
     return res.json(boards.map(board => ({
       id: board.id,
       name: board.name,

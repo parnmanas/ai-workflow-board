@@ -259,27 +259,31 @@ export interface OrdinaryWorkBoardCandidate {
   description: string;
 }
 
-/** non-native 채팅 런타임이 임의 UUID 대신 실제 기존 보드만 고르도록 후보를 조회한다. */
+/**
+ * non-native 채팅 런타임이 임의 UUID 대신 실제 기존 보드만 고르도록 후보를 조회한다.
+ * 빈 배열은 서버가 정상 응답한 실제 빈 목록만 뜻한다. 조회 실패를 빈 목록으로
+ * 축약하면 ticket-first 작업이 direct-chat 예외로 잘못 강등되므로 반드시 전파한다.
+ */
 export async function fetchOrdinaryWorkBoardCandidates(
   config: AwbConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<OrdinaryWorkBoardCandidate[]> {
-  try {
-    const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates`;
-    const resp = await fetchImpl(url, {
-      headers: { 'X-Agent-Key': config.apiKey },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!resp.ok) {
-      log(`일반 작업 보드 후보 조회 실패: ${resp.status}`);
-      return [];
-    }
-    const data = await resp.json();
-    return Array.isArray(data) ? data : [];
-  } catch (err: any) {
-    log(`일반 작업 보드 후보 조회 오류: ${err?.message ?? err}`);
-    return [];
+  const workspaceQuery = config.workspace_id
+    ? `?workspace_id=${encodeURIComponent(config.workspace_id)}`
+    : '';
+  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates${workspaceQuery}`;
+  const resp = await fetchImpl(url, {
+    headers: { 'X-Agent-Key': config.apiKey },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`일반 작업 보드 후보 조회 실패: HTTP ${resp.status}`);
   }
+  const data = await resp.json();
+  if (!Array.isArray(data)) {
+    throw new Error('일반 작업 보드 후보 조회 실패: 응답이 배열이 아닙니다');
+  }
+  return data;
 }
 
 /**

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { setupKanbanScene } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, setupKanbanScene } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '7827';
 
@@ -79,6 +79,32 @@ test('ordinary work fallback creates one focused ticket on the selected board wi
   assert.equal(tickets[0].source_chat_room_id, 'room-source');
   const column = await ds.getRepository('BoardColumn').findOneByOrFail({ id: tickets[0].column_id });
   assert.equal(column.board_id, board.id, '선택한 기존 보드의 워크플로에 생성한다');
+});
+
+test('ordinary work board candidates include only boards with an active workflow column', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-candidates' });
+  const manager = await createAgent(app, modules.getDataSourceToken, ws.id, {
+    name: 'ordinary-work-candidate-agent', hosted: false,
+  });
+  const key = await createApiKey(app, modules.getDataSourceToken, manager.id, {
+    workspaceId: ws.id, label: 'ordinary-work-candidates',
+  });
+  const columns = await ds.getRepository('BoardColumn').find({ where: { board_id: board.id } });
+  await ds.getRepository('BoardColumn').update(
+    columns.filter(column => !column.is_terminal).map(column => column.id),
+    { is_terminal: true },
+  );
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-board-candidates?workspace_id=${ws.id}`, {
+    headers: { 'X-Agent-Key': key.raw_key },
+  });
+  assert.equal(response.status, 200);
+  const candidates = await response.json();
+  assert.equal(candidates.some(candidate => candidate.id === board.id), false,
+    '활성 비종료 컬럼이 없는 보드는 생성 후보로 노출하지 않는다');
 });
 
 test('ordinary work fallback retry recovers dispatch after post-commit emission failure', async (t) => {

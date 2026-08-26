@@ -176,6 +176,33 @@ test('non-native prompt receives real existing board candidates before selecting
   assert.match(prompt, /use only these UUIDs/);
 });
 
+test('ordinary-work board HTTP failure stops routing instead of becoming a direct-chat exception', async () => {
+  await assert.rejects(
+    fetchOrdinaryWorkBoardCandidates(config, async () =>
+      new Response('일시적 서버 오류', { status: 500 })),
+    /HTTP 500/,
+  );
+});
+
+test('ordinary-work board timeout stops routing instead of producing a marker or direct execution', async () => {
+  const timeout = new Error('요청 시간 초과');
+  timeout.name = 'TimeoutError';
+  await assert.rejects(
+    fetchOrdinaryWorkBoardCandidates(config, async () => { throw timeout; }),
+    error => error === timeout,
+  );
+});
+
+test('only a successful empty board response enables the no-board direct-chat exception', async () => {
+  const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
+    new Response(JSON.stringify([]), { status: 200 }));
+  const prompt = composeChatRoomPrompt(
+    'room-1', [], { content: '작업해줘', sender_name: '사용자', sender_id: 'user-1' },
+    undefined, false, undefined, '', false, '', boards,
+  );
+  assert.match(prompt, /none; treat this as the no-suitable-existing-board direct-chat exception/);
+});
+
 test('ordinary fallback sends the selected pre-injected board exactly once', async () => {
   const calls = [];
   const request = { board_id: 'board-real', title: '로그인 오류 수정', description: '회귀 테스트 포함' };
