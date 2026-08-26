@@ -26,11 +26,11 @@ import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
-import type { WorktreeManager, WorktreeMode } from './worktree-manager.js';
+import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
-import { injectWorkFolder, worktreeInstructionsFor } from './prompts.js';
+import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
 import type { ChatReplyMode } from './prompts.js';
-import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
 import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
@@ -1214,7 +1214,7 @@ export class EventDispatcher {
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
     bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
-  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string; coldSharedWorktree?: boolean }> {
+  ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string; coldSharedWorktree?: boolean; repositoryContext?: TicketRepositoryContext; recoveryInstructions?: string }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
       hasAgentContext: Boolean(agentContext),
@@ -1265,6 +1265,7 @@ export class EventDispatcher {
         return {
           ok: true,
           coldSharedWorktree: res.mode === 'shared' && res.reused === false,
+          repositoryContext: res.repositoryContext,
         };
       }
       const gate = classifyWorktreeOutcome(res);
@@ -1272,7 +1273,25 @@ export class EventDispatcher {
         log(
           `[worktree] isolation provisioning failed for ticket=${ticketId.slice(0, 8)} role=${role}: ${gate.reason}`,
         );
-        return { ok: false, reason: gate.reason, blockerKind: gate.kind };
+        if (isSafeTicketProvisioningFallback(gate.reason)) {
+          const detail = res.detail ? `\n- 재현 정보: ${res.detail}` : '';
+          return {
+            ok: true,
+            reason: gate.reason,
+            blockerKind: gate.kind,
+            detail: res.detail,
+            recoveryInstructions:
+              `AWB 저장소 준비 fallback(본 작업 전에 해결):\n` +
+              `- 실패 단계/원인: ${gate.reason}${detail}\n` +
+              `- 원래 의도: 연결된 Repository Resource를 최신 원격 base에서 티켓 전용 worktree/feature branch로 준비\n` +
+              `- 기대 결과: 준비를 복구한 뒤 같은 티켓 본 작업을 계속 수행\n` +
+              `- 허용 범위: 현재 working_dir 아래 기존 .awb/base 및 .awb/wt만 진단하고, 비파괴 fetch/worktree/branch 준비만 재시도\n` +
+              `- 금지: credential 원문 요청·출력, 기존 dirty 변경 초기화, 강제 삭제, 다른 작업 폴더 생성\n` +
+              `- 권한/비밀/파괴 조치가 필요하면 즉시 중단하고 최소 승인만 요청\n` +
+              `- 복구 뒤 재발 방지 가치가 있는 구조적 결함을 발견한 경우에만 기존 개선 티켓을 먼저 검색하고, 동일 항목이 없을 때 최대 1건만 등록하세요. 일회성 오류나 중복 항목은 등록하지 마세요.`,
+          };
+        }
+        return { ok: false, reason: gate.reason, blockerKind: gate.kind, detail: res.detail };
       }
       return { ok: true };
     } catch (err: any) {
@@ -2804,7 +2823,11 @@ export class EventDispatcher {
     // 전혀 전달되지 않았다 — prompts.ts 호출은 'shared'에만 있었다. 두 모드
     // 모두 worktreeInstructionsFor를 거치게 해서, leaf 문구 함수뿐 아니라
     // 모드 선택 로직 자체도 테스트로 검증되게 한다.
-    const worktreeInstructions = worktreeInstructionsFor(worktreeMode, agentContext?.cwd || '');
+    const worktreeInstructions = [
+      worktreeInstructionsFor(worktreeMode, agentContext?.cwd || ''),
+      repositoryContextInstructions(worktreeProvision.repositoryContext),
+      worktreeProvision.recoveryInstructions || '',
+    ].filter(Boolean).join('\n\n');
 
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.

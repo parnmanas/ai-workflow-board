@@ -111,6 +111,8 @@ export class ClaudeBackendProfilesController {
     // 영속화 가능한 런타임 필드만 strict 스키마에 전달한다.
     const { name: _name, credential_status: _credentialStatus, impact: _impact, ...profilePatch } = body || {};
     const merged = { ...profileEntityToRuntime(current), ...profilePatch, id };
+    // null은 PATCH에서 선택 해제를 뜻하며 런타임 계약에는 값 자체를 생략한다.
+    if (profilePatch.credential_ref === null) delete merged.credential_ref;
     const checked = validateCliRuntimeProfiles([merged]);
     const name = String(body?.name ?? current.name).trim();
     if (!name) return res.status(400).json({ error: 'name is required' });

@@ -38,12 +38,14 @@ let originalFetch;
 let mcpToolCalls;
 let dispatchAcks;
 let ticketGetCount;
+let repositoryCredentialRequests;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
   dispatchAcks = [];
   ticketGetCount = 0;
+  repositoryCredentialRequests = [];
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
@@ -69,6 +71,12 @@ beforeEach(() => {
       dispatchAcks.push(JSON.parse(init?.body || '{}'));
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (target.includes('/git-credential?')) {
+      repositoryCredentialRequests.push(target);
+      return new Response(JSON.stringify({ username: 'game-token', token: 'secret' }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
     if (target.includes('/api/agent/tickets/')) {
       ticketGetCount += 1;
       return new Response(
@@ -92,6 +100,7 @@ function context(permissionMode, cliHomeDir) {
     working_dir: '/workspace',
     mcp_config_path: '/config/mcp.json',
     api_key: 'agent-api-key',
+    workspace_id: 'txiv-board-workspace',
     cli_home_dir: cliHomeDir,
     extra_env: {},
     credential_provider: null,
@@ -100,7 +109,7 @@ function context(permissionMode, cliHomeDir) {
   };
 }
 
-async function harness(t, permissionMode, cliHomeDir) {
+async function harness(t, permissionMode, cliHomeDir, worktreeOverride) {
   const rootDir = await mkdtemp(join(tmpdir(), 'awb-hermes-trigger-outcome-'));
   const runtimeSupervisor = new RuntimeSupervisor({
     rootDir,
@@ -117,7 +126,7 @@ async function harness(t, permissionMode, cliHomeDir) {
     has: (id) => id === AGENT,
     list: () => [context(permissionMode, cliHomeDir)],
   };
-  const worktreeManager = {
+  const worktreeManager = worktreeOverride || {
     enabled: true,
     async resolveCwd() {
       return { isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false };
@@ -217,4 +226,61 @@ test('case 3 (ticket 73772059): cli_home_dir populated (real production shape) �
     [{ outcome: 'processed', reason: '' }],
   );
   assert.ok(ticketGetCount >= 1, 'expected the prompt-composition ticket fetch (proves the Hermes branch ran)');
+});
+
+test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push 경계를 고정한다', async (t) => {
+  const calls = { resolve: [], checkout: [], push: [] };
+  const gameCwd = '/workspace/.awb/wt/gameclient/txiv-ticket';
+  const worktreeManager = {
+    enabled: true,
+    async resolveCwd(args) {
+      calls.resolve.push(structuredClone(args));
+      return { isWorktree: true, cwd: gameCwd, mode: 'per_ticket', reused: false };
+    },
+    async verifyCheckout(cwd, url) {
+      calls.checkout.push({ cwd, url });
+      return { ok: true };
+    },
+    async verifyPushReadiness(cwd, url) {
+      calls.push.push({ cwd, url });
+      return { ok: true };
+    },
+    async removeTicketWorktrees() { return 0; },
+    async removeTicketRunWorkspace() { return false; },
+  };
+  const { dispatcher } = await harness(t, 'trusted', undefined, worktreeManager);
+  const wire = JSON.stringify({
+    event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
+    actor_name: AGENT, field_changed: 'txiv-trigger', trigger_source: 'column_move',
+    workspace_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    base_repo: {
+      id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
+      default_branch: 'master',
+    },
+    base_branch: 'master',
+    environment_config: {
+      repositories: [{
+        resource_id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
+        target_dir: '.', branch: 'master', post_clone_commands: [],
+      }],
+      env_vars: {}, setup_commands: [], setup_timeout_seconds: 600, version: 1,
+    },
+  });
+
+  await dispatcher.handleTrigger(wire);
+  await waitForAck();
+
+  assert.equal(calls.resolve.length, 1);
+  assert.deepEqual(calls.resolve[0].bootstrapRepo, {
+    resourceId: 'gameclient-resource',
+    url: 'https://github.com/acme/GameClient.git',
+    branch: 'master',
+    credential: { username: 'game-token', token: 'secret' },
+  });
+  assert.deepEqual(calls.checkout, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
+  assert.deepEqual(calls.push, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
+  assert.equal(repositoryCredentialRequests.length, 1);
+  assert.match(repositoryCredentialRequests[0], /resources\/gameclient-resource\/git-credential/);
+  assert.match(repositoryCredentialRequests[0], /workspace_id=txiv-board-workspace/);
+  assert.deepEqual(dispatchAcks.map((ack) => ack.outcome), ['processed']);
 });

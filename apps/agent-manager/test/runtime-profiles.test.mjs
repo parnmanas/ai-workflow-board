@@ -5,8 +5,10 @@ import { once } from 'node:events';
 import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
+  applyClaudeRuntimeProfileEnvPolicy,
   runtimeCredentialEnv,
   shutdownRuntimeProfiles,
   startRuntimeProfile,
@@ -33,6 +35,9 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   auth: process.env.ANTHROPIC_AUTH_TOKEN,
   model: process.argv.includes('--model') ? process.argv[process.argv.indexOf('--model') + 1] : null,
   effort: process.argv.includes('--effort') ? process.argv[process.argv.indexOf('--effort') + 1] : null,
+  effortLevelEnv: process.env.CLAUDE_CODE_EFFORT_LEVEL,
+  alwaysEnableEffortEnv: process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT,
+  legacyEffortEnv: process.env.CLAUDE_EFFORT,
   anthropicModel: process.env.ANTHROPIC_MODEL,
   smallFastModel: process.env.ANTHROPIC_SMALL_FAST_MODEL,
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
@@ -55,6 +60,11 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
       }).then(r => r.json())
     : null
 }));
+if (process.env.SIMULATE_AUX_FAILURE) {
+  process.stderr.write('[claude-code:title_generation_failed] simulated auxiliary failure\\n');
+}
+// 부모가 spawn 반환값에 결과 관찰자를 연결할 시간을 보장한다.
+await new Promise(resolve => setTimeout(resolve, 100));
 process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'ok'}) + '\\n');
 `);
   await chmod(path, 0o755);
@@ -103,6 +113,48 @@ async function spawnFixture(profile, captureFile, extra = {}) {
   return JSON.parse(await readFile(captureFile, 'utf8'));
 }
 
+async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
+  const manager = new BaseSessionManager(config, {
+    keyField: 'roomId',
+    logTag: '[runtime-profile-base-fixture]',
+    cfgPrefix: 'runtime-profile-base-fixture',
+    kindLabel: 'chat_session',
+  });
+  const sess = await manager._spawnSession(
+    `room-${profile.id}`,
+    'fixture role',
+    'fixture first turn',
+    {
+      onProgress: () => {},
+      effortPreset: extra.effortPreset,
+      runtimeProfile: { ...profile, env: { ...(profile.env ?? {}), CAPTURE_FILE: captureFile } },
+      agentContext: {
+        agent_id: 'agent-base-fixture',
+        api_key: 'agent-awb-key',
+        cwd: fixtureRoot,
+        mcp_config_path: join(fixtureRoot, 'missing-base-mcp.json'),
+        cli: 'claude',
+        cli_home_dir: join(fixtureRoot, 'claude-base-home'),
+        model: 'anthropic-agent-default',
+      },
+    },
+  );
+  assert.ok(sess, 'BaseSessionManager fixture 세션이 생성되어야 한다');
+  const result = new Promise(resolve => { sess.onResult = resolve; });
+  const exited = once(sess.child, 'exit');
+  const [captured, mainResult] = await Promise.all([
+    Promise.race([
+      exited.then(async () => JSON.parse(await readFile(captureFile, 'utf8'))),
+      delay(5_000).then(() => assert.fail('BaseSessionManager Claude fixture가 종료되지 않았다')),
+    ]),
+    Promise.race([
+      result,
+      delay(5_000).then(() => assert.fail('BaseSessionManager가 주 응답을 전달하지 않았다')),
+    ]),
+  ]);
+  return { capture: captured, mainResult };
+}
+
 test.after(async () => {
   await shutdownRuntimeProfiles();
   await rm(fixtureRoot, { recursive: true, force: true });
@@ -137,6 +189,11 @@ test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 �
     model: 'qwen3-coder-next',
     omit_effort: true,
     claude_executable: executable,
+    env: {
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      CLAUDE_EFFORT: 'high',
+    },
   };
   assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, profile), null);
   assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...profile, omit_effort: false }), 'high');
@@ -147,6 +204,70 @@ test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 �
     effortPreset: { id: 'deep', claude: { effort: 'high' } },
   });
   assert.equal(capture.effort, null);
+  assert.equal(capture.effortLevelEnv, undefined);
+  assert.equal(capture.alwaysEnableEffortEnv, undefined);
+  assert.equal(capture.legacyEffortEnv, undefined);
+});
+
+test('omit_effort 환경 정책은 활성 프로필에서만 effort 입력을 제거하고 원본 환경을 변경하지 않는다', () => {
+  const env = {
+    CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+    CLAUDE_EFFORT: 'high',
+    KEEP_ME: 'yes',
+  };
+  const profile = { id: 'env-policy', omit_effort: true };
+  const sanitized = applyClaudeRuntimeProfileEnvPolicy(env, profile);
+
+  assert.deepEqual(sanitized, { KEEP_ME: 'yes' });
+  assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, 'high', '호출자가 소유한 원본 환경은 변경하지 않는다');
+  assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), env);
+  assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, null), env);
+});
+
+test('BaseSessionManager 채팅 spawn은 omit_effort 환경 제거와 haiku 보조 모델 매핑을 최종 자식에 적용한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-policy.mjs');
+  const { capture } = await spawnBaseSessionFixture({
+    id: 'base-session-policy',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40111',
+    model: 'qwen3-coder-next',
+    omit_effort: true,
+    claude_executable: executable,
+    env: {
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      CLAUDE_EFFORT: 'high',
+    },
+  }, join(fixtureRoot, 'base-session-policy.json'), {
+    effortPreset: { id: 'deep', claude: { effort: 'high' } },
+  });
+
+  assert.equal(capture.effort, null);
+  assert.equal(capture.effortLevelEnv, undefined);
+  assert.equal(capture.alwaysEnableEffortEnv, undefined);
+  assert.equal(capture.legacyEffortEnv, undefined);
+  assert.equal(capture.smallFastModel, 'haiku');
+  assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+});
+
+test('BaseSessionManager는 보조 요청 실패 stderr 뒤의 주 응답 result를 계속 전달한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-aux-failure.mjs');
+  const { mainResult } = await spawnBaseSessionFixture({
+    id: 'base-session-aux-failure',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40112',
+    model: 'qwen3-coder-next',
+    omit_effort: true,
+    claude_executable: executable,
+    env: { SIMULATE_AUX_FAILURE: '1' },
+  }, join(fixtureRoot, 'base-session-aux-failure.json'));
+
+  assert.equal(mainResult.type, 'result');
+  assert.equal(mainResult.subtype, 'success');
+  assert.equal(mainResult.result, 'ok');
 });
 
 // ticket 41dc37cb round 3 — round 1/2는 --model/ANTHROPIC_MODEL/
@@ -155,9 +276,9 @@ test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 �
 // 막았다 — 재오픈 사유. 운영에서 정상 동작이 검증된
 // /home/parn/.local/bin/claude-with-vllm.sh 기준으로 재작성: alias를 전혀
 // 쓰지 않고 ANTHROPIC_MODEL에 raw served model을 그대로 노출한다.
-// ANTHROPIC_SMALL_FAST_MODEL은 기준 스크립트가 설정하지 않으므로 undefined로
-// 남아야 한다(CLI 자체 기본 동작).
-test('Anthropic-compatible profile: ANTHROPIC_MODEL에 raw served model을 그대로 노출하고 --model/ANTHROPIC_SMALL_FAST_MODEL은 건드리지 않는다 (claude-with-vllm.sh parity)', async () => {
+// 주 요청의 raw 라우팅은 유지하되, 제목 생성 같은 보조 요청이 raw 모델을
+// 직접 검증하지 않도록 ANTHROPIC_SMALL_FAST_MODEL에는 tier alias를 싣는다.
+test('Anthropic-compatible profile: 주 요청은 raw served model, 보조 요청은 haiku alias로 선택한다', async () => {
   const executable = await makeClaudeFixture('claude-raw-model.mjs');
   const capture = await spawnFixture({
     id: 'raw-model-a',
@@ -169,7 +290,7 @@ test('Anthropic-compatible profile: ANTHROPIC_MODEL에 raw served model을 그�
   }, join(fixtureRoot, 'raw-model.json'));
   assert.equal(capture.model, null, '--model은 alias든 raw id든 전혀 실리지 않는다');
   assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'ANTHROPIC_MODEL은 claude-with-vllm.sh와 동일하게 raw served model이어야 한다');
-  assert.equal(capture.smallFastModel, undefined, 'ANTHROPIC_SMALL_FAST_MODEL은 기준 스크립트가 설정하지 않으므로 주입하지 않는다');
+  assert.equal(capture.smallFastModel, 'haiku', '보조 요청은 Claude CLI가 인식하는 tier alias를 선택해야 한다');
   assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'ANTHROPIC_DEFAULT_SONNET_MODEL도 동일한 raw served model로 매핑된다');
 });
 
@@ -244,8 +365,8 @@ test('ticket 41dc37cb: a Claude backend profile session never retries with a dif
 // ticket 7d8ea7c9 후속, ticket 41dc37cb round 3 로 세분화 — Claude Code 내부
 // 보조 호출(세션 제목 생성 등)은 --model argv 를 거치지 않고 env 로 모델을
 // 고른다. claude-with-vllm.sh 기준으로는 ANTHROPIC_MODEL 과
-// ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL 넷 다 raw provider model id가
-// 정답이다 — alias 간접화는 더 이상 없다.
+// ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL은 raw provider model id로
+// 라우팅하되, 보조 요청 선택 키만 CLI가 인식하는 haiku alias를 사용한다.
 test('Anthropic-compatible profile: ANTHROPIC_MODEL과 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL 모두 profile.model(raw)을 기본값으로 삼는다', async () => {
   const executable = await makeClaudeFixture('claude-aux-model.mjs');
   const capture = await spawnFixture({
@@ -257,7 +378,7 @@ test('Anthropic-compatible profile: ANTHROPIC_MODEL과 ANTHROPIC_DEFAULT_{OPUS,S
     claude_executable: executable,
   }, join(fixtureRoot, 'aux-model.json'));
   assert.equal(capture.anthropicModel, 'qwen3-coder-next', 'ANTHROPIC_MODEL은 raw served model이어야 한다 — alias가 아니다');
-  assert.equal(capture.smallFastModel, undefined, 'ANTHROPIC_SMALL_FAST_MODEL은 claude-with-vllm.sh가 설정하지 않으므로 주입하지 않는다');
+  assert.equal(capture.smallFastModel, 'haiku', '보조 요청 선택 키는 CLI가 인식하는 alias여야 한다');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultSonnet, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');
   assert.equal(capture.defaultOpus, 'qwen3-coder-next', 'override 변수는 어떤 tier가 선택되든 동일한 백엔드 모델로 라우팅한다');

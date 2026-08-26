@@ -678,8 +678,15 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     ticket: Ticket,
     slug: string,
   ): Promise<{ role: WorkspaceRole; agentIds: string[] } | null> {
+    const column = ticket.column_id
+      ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
+      : null;
+    const board = column?.board_id
+      ? await this.dataSource.getRepository(Board).findOne({ where: { id: column.board_id } })
+      : null;
+    const effectiveWorkspaceId = board?.workspace_id || ticket.workspace_id;
     const role = await this.dataSource.getRepository(WorkspaceRole).findOne({
-      where: { workspace_id: ticket.workspace_id, slug },
+      where: { workspace_id: effectiveWorkspaceId, slug },
     });
     if (!role) return null;
     const rows = await this.dataSource.getRepository(TicketRoleAssignment).find({
@@ -2447,6 +2454,13 @@ candidate's branch or move the ticket.
       ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: currentColumnId } })
       : null;
     const boardId = col?.board_id ?? '';
+    // 보드가 티켓의 실제 소속 경계다. TXIV에는 보드 이동 뒤에도 Ticket과
+    // BoardColumn의 workspace_id가 예전 값을 유지한 행이 있으므로, dispatch의
+    // repo·credential·역할 조회는 보드 workspace를 일관되게 사용한다.
+    const dispatchBoard = boardId
+      ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
+      : null;
+    const effectiveWorkspaceId = dispatchBoard?.workspace_id || ticket.workspace_id || '';
 
     // Agent Manager(type='manager') 드롭 게이트 (ticket 941c72d3). Manager 는 절대
     // 작업하지 않는다 — holder-resolution(_resolveRoleHolders) 에서 대부분 걸러
@@ -2694,7 +2708,7 @@ candidate's branch or move the ticket.
         // claimForDispatch) so we don't double-touch the row it just claimed.
         if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
           await this.dispatchIntents.recordOwed({
-            workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
+            workspaceId: effectiveWorkspaceId, boardId, ticketId: ticket.id,
             role, agentId, triggerSource, reason: `focus_window_capacity cap=${cap}`,
           });
         }
@@ -2819,7 +2833,7 @@ candidate's branch or move the ticket.
       // the reconciler's own re-dispatch (it owns the intent lifecycle).
       if (triggerSource !== DISPATCH_RECONCILE_SOURCE) {
         await this.dispatchIntents.recordOwed({
-          workspaceId: ticket.workspace_id || '', boardId, ticketId: ticket.id,
+          workspaceId: effectiveWorkspaceId, boardId, ticketId: ticket.id,
           role, agentId, triggerSource,
           reason: `inflight_strand_serialization queued_for_replay=${queuedForReplay}${liveStrandIdSuffix}${liveSinceSuffix}`,
         });
@@ -2865,7 +2879,7 @@ candidate's branch or move the ticket.
     // is needed for v0.34's prepend semantics.
     const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
     const workspaceRole = await this.dataSource.getRepository(WorkspaceRole).findOne({
-      where: { workspace_id: ticket.workspace_id, slug: role },
+      where: { workspace_id: effectiveWorkspaceId, slug: role },
     });
     const rolePrompt = [workspaceRole?.role_prompt, agent?.role_prompt]
       .filter((s): s is string => !!s && s.trim().length > 0)
@@ -2887,7 +2901,7 @@ candidate's branch or move the ticket.
     // the merged environment_config is resolved.
     let baseRepoId = freshTicket?.base_repo_resource_id || ticket.base_repo_resource_id || '';
     let baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
-    const baseRepoWorkspaceId = freshTicket?.workspace_id || ticket.workspace_id || '';
+    const baseRepoWorkspaceId = effectiveWorkspaceId;
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
@@ -3000,13 +3014,11 @@ candidate's branch or move the ticket.
     // applied to `columnPrompt.content` below before the trigger emits.
     let usePr = resolveBoardUsePr(undefined);
     try {
-      const boardForHarness = boardId
-        ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
-        : null;
+      const boardForHarness = dispatchBoard;
       worktreeMode = resolveBoardWorktreeMode(boardForHarness?.worktree_mode);
       usePr = resolveBoardUsePr(boardForHarness?.use_pr);
-      const workspaceForHarness = ticket.workspace_id
-        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+      const workspaceForHarness = effectiveWorkspaceId
+        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: effectiveWorkspaceId } })
         : null;
       harnessConfig = resolveHarnessConfig(
         workspaceForHarness?.harness_config,
@@ -3030,7 +3042,7 @@ candidate's branch or move the ticket.
           .map((r) => (r.resource_id || '').trim())
           .filter((id) => id.length > 0);
         const repoMap = new Map<string, { url: string; default_branch: string }>();
-        if (resourceIds.length > 0 && ticket.workspace_id) {
+        if (resourceIds.length > 0 && effectiveWorkspaceId) {
           // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
           // b5c1c080) — workspace_id를 where절에 넣으면 global(workspace_id=null)
           // Resource가 정확일치 필터에 걸려 조용히 못 찾힌다.
@@ -3038,7 +3050,7 @@ candidate's branch or move the ticket.
             where: { id: In(resourceIds) },
           });
           for (const r of rows) {
-            if (r.workspace_id !== null && r.workspace_id !== ticket.workspace_id) continue;
+            if (r.workspace_id !== null && r.workspace_id !== effectiveWorkspaceId) continue;
             repoMap.set(r.id, { url: r.url || '', default_branch: r.default_branch || '' });
           }
         }
@@ -3065,11 +3077,9 @@ candidate's branch or move the ticket.
     // Runtime selection is fail-closed and intentionally outside the legacy
     // harness/environment availability catch: a stale id must never silently
     // fall back to the default Claude endpoint.
-    const runtimeBoard = boardId
-      ? await this.dataSource.getRepository(Board).findOne({ where: { id: boardId } })
-      : null;
-    const runtimeWorkspace = ticket.workspace_id
-      ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+    const runtimeBoard = dispatchBoard;
+    const runtimeWorkspace = effectiveWorkspaceId
+      ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: effectiveWorkspaceId } })
       : null;
     // Claude backend profiles must be invisible to every other CLI. In
     // particular, a workspace/board default must not alter Codex/Antigravity
@@ -3129,6 +3139,28 @@ candidate's branch or move the ticket.
             err: String(e), ticket_id: ticket.id, base_repo_id: picked.resourceId,
           });
         }
+      }
+    }
+
+    // 유효 repo를 찾은 순간 티켓 행에도 멱등 백필한다. 기존 구현은 SSE에만
+    // 값을 실어 CI/merge/QA 후속 서비스가 빈 원본 필드를 다시 읽으면 서로 다른
+    // repo 정책을 적용했다. 명시값은 절대 덮지 않고 빈 필드만 채우므로 재시도와
+    // 동시 dispatch에도 같은 결과이며, UI와 감사 경로에서도 실제 대상이 보인다.
+    if (baseRepo) {
+      if (!baseBranch) baseBranch = baseRepo.default_branch || '';
+      await this.dataSource.getRepository(Ticket).createQueryBuilder()
+        .update()
+        .set({ base_repo_resource_id: baseRepo.id })
+        .where('id = :ticketId', { ticketId: ticket.id })
+        .andWhere("(base_repo_resource_id IS NULL OR base_repo_resource_id = '')")
+        .execute();
+      if (baseBranch) {
+        await this.dataSource.getRepository(Ticket).createQueryBuilder()
+          .update()
+          .set({ base_branch: baseBranch })
+          .where('id = :ticketId', { ticketId: ticket.id })
+          .andWhere("(base_branch IS NULL OR base_branch = '')")
+          .execute();
       }
     }
 
@@ -3245,7 +3277,7 @@ candidate's branch or move the ticket.
     } | null = null;
     try {
       const snapshot = await this.runSkillSnapshots.resolve({
-        workspaceId: ticket.workspace_id || '',
+        workspaceId: effectiveWorkspaceId,
         runId: skillRunId,
         agentId,
         boardId,

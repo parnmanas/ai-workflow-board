@@ -12,6 +12,7 @@ import {
   type RawChatAttachment,
 } from './chat-attachment-prep.js';
 import type { WorktreeMode } from './worktree-manager.js';
+import type { TicketRepositoryContext } from './worktree-manager.js';
 
 interface CommentLike {
   author_name?: string;
@@ -171,6 +172,22 @@ export function worktreeInstructionsFor(mode: WorktreeMode | undefined, workFold
   if (mode === 'shared') return sharedWorktreeInstructions(workFolder);
   if (mode === 'per_ticket') return perTicketWorktreeInstructions(workFolder);
   return '';
+}
+
+/** provisioning 직후 확정한 Git 상태를 에이전트가 다시 추측하지 않도록 전달한다. */
+export function repositoryContextInstructions(context?: TicketRepositoryContext): string {
+  if (!context) return '';
+  return [
+    'AWB 저장소 준비 결과(확정값):',
+    `- Repository Resource ID: ${context.resourceId || '(URL 기반 레거시 저장소)'}`,
+    `- cwd: ${context.cwd}`,
+    `- base branch / SHA: ${context.baseBranch} / ${context.baseSha}`,
+    `- working branch: ${context.workingBranch || '(detached)'}`,
+    `- dirty: ${context.dirty}`,
+    `- base 대비 ahead / behind: ${context.ahead} / ${context.behind}`,
+    `- provisioning mode: ${context.resumed ? '기존 worktree 재개(브랜치·변경 보존)' : '최신 원격 base에서 신규 feature branch 준비'}`,
+    '- 위 브랜치와 작업 폴더는 이미 준비되었습니다. 신규 브랜치를 다시 만들거나 base branch를 checkout하지 마세요.',
+  ].join('\n');
 }
 
 /** Action Run / 채팅방 프롬프트에 주입되는 폴더 경계 정책

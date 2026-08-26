@@ -32,9 +32,8 @@ import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
 import { recordRunWorkspaceLeaf } from './run-workspace-manifest.js';
 import {
-  authenticatedCloneUrl,
+  cloneWithRepoCredential,
   installRepoCredential,
-  scrubOriginUrl,
   maskCredential,
   type RepoCredential,
 } from './repo-credential.js';
@@ -569,19 +568,18 @@ export async function provisionRunWorkspace(
           steps.push(`clear non-git ${rel} before clone → ok`);
         }
         await fsp.mkdir(dirname(dir), { recursive: true });
-        // 토큰을 URL 에 주입해 clone 하되(로그/steps 에는 항상 clean url 만 노출),
-        // clone 직후 origin 을 clean url 로 scrub + credential.helper 설치 → 토큰이
-        // `git remote -v`/on-disk 에 남지 않고 이후 fetch/pull 이 인증된다.
-        const cloneUrl = authenticatedCloneUrl(p.repo.url, cred);
-        const args = ['clone'];
-        if (p.repo.branch) args.push('--branch', p.repo.branch);
-        args.push(cloneUrl, dir);
+        // 공통 helper가 임시 0600 credential store를 사용하므로 토큰은 argv와
+        // origin URL에 한 번도 들어가지 않는다. 성공 후 repo 전용 helper로 승격한다.
         log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} clone ${p.repo.url} → ${dir}`);
-        const cloned = await git(args, RUN_GIT_TIMEOUT_MS);
+        const cloned = await cloneWithRepoCredential({
+          url: p.repo.url,
+          dir,
+          branch: p.repo.branch,
+          credential: cred,
+          timeoutMs: RUN_GIT_TIMEOUT_MS,
+        });
         steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${mask(cloned.stderr)}`}`);
         if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${mask(cloned.stderr)}`);
-        await scrubOriginUrl(dir, p.repo.url);
-        await installRepoCredential(dir, p.repo.url, cred);
       }
 
       log(`[run-provision] ${p.kind} run=${p.run_id.slice(0, 8)} ready: ${dir}`);

@@ -47,6 +47,7 @@ import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-de
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
+  applyClaudeRuntimeProfileEnvPolicy,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -897,7 +898,7 @@ export class SubagentManager implements SubagentManagerContract {
         // harnessEnv merges LAST: a per-dispatch harness model must beat the
         // per-agent extra_env baked at spawn_agent time (deepseek's
         // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).
-        env: {
+        env: applyClaudeRuntimeProfileEnvPolicy({
           ...baseEnv,
           // Board env_vars (ticket 354d336b) merge right after baseEnv so they
           // set non-secret config but never shadow AWB_API_KEY / cli-home /
@@ -909,7 +910,7 @@ export class SubagentManager implements SubagentManagerContract {
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
           ...(maxOutputResolution?.env ?? {}),
-        },
+        }, claudeRuntimeProfile),
       });
       if (runtimeLease) child.once('close', () => void runtimeLease?.close());
       child.once('error', (err: any) => {

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
-import { ClaudeBackendProfile } from '../../types';
+import { ClaudeBackendProfile, Credential } from '../../types';
 import { Button } from '../common';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -10,13 +10,17 @@ const empty = (): ClaudeBackendProfile => ({
   base_url: '', model: '', omit_effort: false, credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN',
 });
 
-export default function ClaudeBackendProfilesManager() {
+export default function ClaudeBackendProfilesManager({ workspaceId }: { workspaceId: string }) {
   const { showToast } = useToast();
   const [profiles, setProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [defaultId, setDefaultId] = useState('');
   const [editing, setEditing] = useState<ClaudeBackendProfile>(empty());
   const [isNew, setIsNew] = useState(true);
   const [adapterText, setAdapterText] = useState('');
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [credentialSearch, setCredentialSearch] = useState('');
+  const [credentialsLoading, setCredentialsLoading] = useState(true);
+  const [credentialsError, setCredentialsError] = useState('');
 
   const load = useCallback(async () => {
     const data = await api.getClaudeBackendProfiles();
@@ -24,11 +28,25 @@ export default function ClaudeBackendProfilesManager() {
     setDefaultId(data.default_profile_id || '');
   }, []);
   useEffect(() => { load().catch(e => showToast(e.message, 'error')); }, [load, showToast]);
+  const loadCredentials = useCallback(async () => {
+    setCredentialsLoading(true);
+    setCredentialsError('');
+    try {
+      setCredentials(await api.listCredentials(workspaceId));
+    } catch (error: any) {
+      setCredentials([]);
+      setCredentialsError(error.message || 'Credential 목록을 불러오지 못했습니다.');
+    } finally {
+      setCredentialsLoading(false);
+    }
+  }, [workspaceId]);
+  useEffect(() => { loadCredentials(); }, [loadCredentials]);
 
   const edit = (profile?: ClaudeBackendProfile) => {
     const next = profile ? { ...profile } : empty();
     setEditing(next);
     setAdapterText(next.adapter ? JSON.stringify(next.adapter, null, 2) : '');
+    setCredentialSearch('');
     setIsNew(!profile);
   };
   const save = async () => {
@@ -41,7 +59,10 @@ export default function ClaudeBackendProfilesManager() {
     if (!adapter) delete payload.adapter;
     try {
       if (isNew) await api.createClaudeBackendProfile(payload);
-      else await api.updateClaudeBackendProfile(editing.id, payload);
+      else await api.updateClaudeBackendProfile(editing.id, {
+        ...payload,
+        credential_ref: editing.credential_ref || null,
+      });
       await load(); edit(); showToast('Claude backend profile saved', 'success');
     } catch (e: any) { showToast(`프로필 저장 실패: ${e.message || '요청을 처리하지 못했습니다'}`, 'error'); }
   };
@@ -61,6 +82,21 @@ export default function ClaudeBackendProfilesManager() {
         disabled={!isNew && key === 'id'}
         onChange={e => setEditing({ ...editing, [key]: e.target.value })} />
     </label>
+  );
+  const selectedCredential = credentials.find(credential => credential.id === editing.credential_ref);
+  const invalidCredentialRef = Boolean(editing.credential_ref && !credentialsLoading && !credentialsError && !selectedCredential);
+  const preservedCredentialRef = Boolean(editing.credential_ref && !selectedCredential);
+  const preservedCredentialLabel = credentialsLoading
+    ? '기존 선택 유지 (Credential 목록 확인 중)'
+    : credentialsError
+      ? '기존 선택 유지 (Credential 목록 로드 실패)'
+      : '삭제되었거나 접근할 수 없는 Credential';
+  const normalizedCredentialSearch = credentialSearch.trim().toLocaleLowerCase();
+  const filteredCredentials = credentials.filter(credential =>
+    credential.id === editing.credential_ref
+    || !normalizedCredentialSearch
+    || credential.name.toLocaleLowerCase().includes(normalizedCredentialSearch)
+    || credential.provider.toLocaleLowerCase().includes(normalizedCredentialSearch)
   );
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(380px, 2fr)', gap: 20 }}>
@@ -98,7 +134,39 @@ export default function ClaudeBackendProfilesManager() {
               <option value="openai-compatible">OpenAI-compatible</option>
             </select>
           </label>
-          {field('Model', 'model')}{field('Base URL', 'base_url')}{field('Credential ref (UUID)', 'credential_ref')}
+          {field('Model', 'model')}{field('Base URL', 'base_url')}
+          <label style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+            Credential
+            <input type="search" value={credentialSearch}
+              onChange={e => setCredentialSearch(e.target.value)}
+              placeholder="이름 또는 provider로 검색" disabled={credentialsLoading || Boolean(credentialsError)} />
+            <select aria-label="Credential 선택" value={editing.credential_ref || ''}
+              disabled={credentialsLoading || Boolean(credentialsError)}
+              onChange={e => setEditing({ ...editing, credential_ref: e.target.value || undefined })}>
+              <option value="">선택하지 않음</option>
+              {preservedCredentialRef && <option value={editing.credential_ref}>{preservedCredentialLabel}</option>}
+              {filteredCredentials.map(credential => (
+                <option value={credential.id} key={credential.id}>
+                  {credential.name} · {credential.provider}{credential.scope === 'global' ? ' · Global' : ''}
+                </option>
+              ))}
+            </select>
+            {credentialsLoading && <small style={{ color: tokens.colors.textMuted }}>Credential 목록을 불러오는 중…</small>}
+            {credentialsError && (
+              <small style={{ color: tokens.colors.danger }}>
+                Credential 목록을 불러오지 못했습니다. 기존 선택값은 변경되지 않습니다.{' '}
+                <button type="button" onClick={loadCredentials}>다시 시도</button>
+              </small>
+            )}
+            {invalidCredentialRef && (
+              <small style={{ color: tokens.colors.danger }}>
+                저장된 Credential을 현재 workspace에서 찾을 수 없습니다. 다른 Credential을 선택하거나 해제하세요.
+              </small>
+            )}
+            {!credentialsLoading && !credentialsError && credentials.length === 0 && (
+              <small style={{ color: tokens.colors.textMuted }}>현재 workspace에서 선택 가능한 Credential이 없습니다.</small>
+            )}
+          </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
             <input type="checkbox" checked={Boolean(editing.credential_required)}
               onChange={e => setEditing({ ...editing, credential_required: e.target.checked })} />

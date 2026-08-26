@@ -43,6 +43,7 @@ import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
+  applyClaudeRuntimeProfileEnvPolicy,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -915,7 +916,7 @@ export class BaseSessionManager {
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they
         // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
         // / cli-home / per-agent credential / harness env layered on top.
-        env: {
+        env: applyClaudeRuntimeProfileEnvPolicy({
           ...baseEnv,
           ...(envVars ?? {}),
           AWB_API_KEY: effectiveApiKey,
@@ -924,7 +925,7 @@ export class BaseSessionManager {
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
           ...(maxOutputResolution?.env ?? {}),
-        },
+        }, claudeRuntimeProfile),
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(

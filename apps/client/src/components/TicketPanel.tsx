@@ -2991,10 +2991,8 @@ export default function TicketPanel({
               );
             })()}
 
-            {/* Base repository / branch — pinned per-ticket so the assignee
-                agent's `in_progress_workflow` cuts its feature branch from
-                the right base instead of whatever the working_dir happens
-                to be on. */}
+            {/* Base repository / branch — 티켓 명시값이 비어 있으면 서버가
+                board/workspace 기본값을 base_repo 스냅샷으로 내려준다. */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
               <div>
                 <label style={labelStyle}>Base Repository</label>
@@ -3049,6 +3047,16 @@ export default function TicketPanel({
                 )}
               </div>
             </div>
+            {!activeTicket.base_repo_resource_id && activeTicket.base_repo && (
+              <div style={{
+                marginTop: -10, marginBottom: 14, padding: '6px 8px',
+                borderRadius: tokens.radii.sm, background: `${tokens.colors.info}14`,
+                color: tokens.colors.textMuted, fontSize: '11px',
+              }}>
+                보드/워크스페이스에서 상속됨: {activeTicket.base_repo.name || activeTicket.base_repo.url}
+                {' · '}{activeTicket.base_branch || activeTicket.base_repo.default_branch || 'origin/HEAD'}
+              </div>
+            )}
 
             {/* Next Ticket — when this ticket lands on a terminal column,
                 TriggerLoopService dispatches a `next_ticket` round for the
