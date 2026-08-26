@@ -261,6 +261,24 @@ jobs:
       - name: Run client tests
         run: npm test -w client
 
+  ontology-graph-browser-smoke:
+    name: Ontology Graph browser smoke (SQL.js + Chromium)
+    if: github.ref != 'refs/heads/production.private' && github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Build server and run bounded browser smoke
+        run: npm run build -w server && npm run test:e2e:ontology -w client
+
   # apps/server 전체 `npm test` 체이닝 CI 게이트 (ticket 003fcc99).
   #
   # 배경: apps/server/package.json 의 `test` 스크립트(build 선행 + top-level ~92개
