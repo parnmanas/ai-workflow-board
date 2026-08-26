@@ -164,7 +164,14 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
       ? worktreeManager
       : {
           async resolveCwd() {
-            return { isWorktree: true, cwd: '/tmp/wt', reused: false, mode: 'per_ticket' };
+            return {
+              isWorktree: true, cwd: '/tmp/wt', reused: false, mode: 'per_ticket',
+              repositoryContext: {
+                resourceId: 'r1', cwd: '/tmp/wt', baseBranch: 'main', baseSha: 'base-sha',
+                currentSha: 'head-sha', workingBranch: 'ticket/t1', dirty: false,
+                ahead: 0, behind: 0, resumed: false,
+              },
+            };
           },
           async verifyCheckout() {
             return { ok: true };
@@ -254,7 +261,12 @@ function assertNonce(reservation, msg = 'a placed reservation carries a generati
 let savedFetch;
 beforeEach(() => {
   savedFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({
+  globalThis.fetch = async (url) => String(url).includes('/api/agent/tickets/') ? ({
+    ok: true,
+    status: 200,
+    async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; },
+    async text() { return ''; },
+  }) : ({
     ok: false,
     status: 503,
     async json() {

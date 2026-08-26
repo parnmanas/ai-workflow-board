@@ -302,4 +302,3 @@ Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness wo
 - **awb-agent-display-name** — the `<Manager>/<Agent>` display contract: 6 touch points for ANY surface that shows an agent (picker, roster, typing/status indicator, timeline, SSE frame, agent-facing prompt). Rendering a bare `agent.name` — or a raw agent id — is a bug: the same leaf name legitimately exists under multiple managers. **Read this before adding any agent picker or agent-name label.**
 
 `.claude/settings.json` carries the read-only permission allowlist generated via `/fewer-permission-prompts` — extend it there rather than ad-hoc allowing in session.
-

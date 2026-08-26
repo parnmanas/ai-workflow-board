@@ -15,7 +15,7 @@ import {
   fetchChatRoomHistory,
   fetchOrdinaryWorkBoardCandidates,
   fetchAgentRecord,
-  fetchRepositoryCredential,
+  fetchRepositoryCredentialStatus,
   hasNewAgentComment,
   postFsResponse,
   postChatRoomMessage,
@@ -350,16 +350,19 @@ export function resolveBootstrapRepository(
   baseRepo: unknown,
   baseBranch: unknown,
   environment: ResolvedEnvironmentConfig | null,
-): { resourceId: string; url: string; branch: string } | null {
+): { resourceId: string; url: string; branch: string; defaultBranch: string | null } | null {
   const repo = baseRepo && typeof baseRepo === 'object' ? baseRepo as any : null;
   const ticketUrl = typeof repo?.url === 'string' ? repo.url.trim() : '';
   if (ticketUrl) {
     const branch = (typeof baseBranch === 'string' ? baseBranch.trim() : '')
       || (typeof repo?.default_branch === 'string' ? repo.default_branch.trim() : '');
-    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch };
+    const defaultBranch = typeof repo?.default_branch === 'string' && repo.default_branch.trim()
+      ? repo.default_branch.trim()
+      : null;
+    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch, defaultBranch };
   }
   const boardRepo = environment?.repositories[0];
-  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch } : null;
+  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch, defaultBranch: null } : null;
 }
 
 /**
@@ -2432,9 +2435,16 @@ export class EventDispatcher {
     // one-shot subagent fallback below read agentContext.cwd, so one rewrite
     // covers both paths.
     const selectedRepo = resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig);
-    const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
-      ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
-      : null;
+    // 선택 결과뿐 아니라 trigger 자체의 저장소 계약도 요구 근거로 보존한다.
+    // malformed/부분 payload가 resolve 단계에서 null이 되더라도 "저장소 없음"
+    // 모드로 조용히 강등하지 않고 repository preflight에서 원인을 드러낸다.
+    const repositoryContextRequired = Boolean(
+      selectedRepo || ev.base_repo || ev.repository_context_required === true || envConfig?.repositories.length,
+    );
+    const repoCredentialStatus = selectedRepo?.resourceId && agentContext?.agent_id
+      ? await fetchRepositoryCredentialStatus(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
+      : { credential: null, failure: selectedRepo ? 'credential_lookup_not_applicable' : null };
+    const repoCredential = repoCredentialStatus.credential;
     const worktreeMode = parseWorktreeMode(ev.worktree_mode);
     const applyWorktree = () => this.#applyWorktreeCwd(
       agentContext,
@@ -2444,7 +2454,12 @@ export class EventDispatcher {
       typeof ev.max_concurrent_tickets_per_agent === 'number'
         ? ev.max_concurrent_tickets_per_agent
         : undefined,
-      selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
+      selectedRepo ? {
+        resourceId: selectedRepo.resourceId,
+        url: selectedRepo.url,
+        branch: selectedRepo.branch,
+        credential: repoCredential,
+      } : null,
     );
     let worktreeProvision = await applyWorktree();
 
@@ -2848,7 +2863,9 @@ export class EventDispatcher {
     ].filter(Boolean).join('\n\n');
 
     const attachContextContract = (ticket: any, sessionMode: 'persistent' | 'stateless' | 'hermes') => {
-      if (!ticket) return ticket;
+      if (!ticket) {
+        throw new AgentContextPreflightError('ticket', 'ticket context 조회 결과가 없습니다');
+      }
       // REST ticket payload보다 trigger envelope가 dispatch 시점의 최신 확정값이다.
       // 계약 preflight 전에 병합해야 누락을 숨기지 않으면서 정상 dispatch도 통과한다.
       ticket.id = ticket.id || ev.ticket_id || '';
@@ -2861,16 +2878,19 @@ export class EventDispatcher {
       // 안전한 no-worktree fallback은 의도된 실행 모드라 repository=null을
       // 허용한다. provisioning이 repository contract를 확정했다고 표시한 경우만
       // 이후 누락을 preflight 오류로 취급한다.
-      ticket.__awb_require_repository_context = Boolean(worktreeProvision.repositoryContext);
+      ticket.__awb_require_repository_context = repositoryContextRequired;
+      if (repositoryContextRequired && !worktreeProvision.repositoryContext) {
+        throw new AgentContextPreflightError('repository', '연결된 저장소의 준비 결과가 없습니다');
+      }
       ticket.__awb_harness = harness;
       ticket.__awb_runtime_profile = runtimeProfile;
       ticket.__awb_session_mode = sessionMode;
       ticket.__awb_effort = effortPreset?.id ?? null;
       ticket.__awb_context_metadata = {
         remoteUrl: selectedRepo?.url ?? null,
-        defaultBranch: selectedRepo?.branch ?? null,
+        defaultBranch: selectedRepo?.defaultBranch ?? worktreeProvision.repositoryContext?.defaultBranch ?? null,
         credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
-        credentialFailure: null,
+        credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
         sandbox: harness?.permission_mode ?? 'managed-default',
         requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
         mcpServers: ['awb'],
@@ -2882,10 +2902,10 @@ export class EventDispatcher {
       if (ticket.__awb_repository_context) {
         Object.assign(ticket.__awb_repository_context, {
           remoteUrl: selectedRepo?.url,
-          defaultBranch: selectedRepo?.branch,
+          defaultBranch: selectedRepo?.defaultBranch ?? ticket.__awb_repository_context.defaultBranch,
           fetchedSha: ticket.__awb_repository_context.baseSha,
           credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
-          credentialFailure: null,
+          credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
         });
       }
       log(
@@ -2896,6 +2916,7 @@ export class EventDispatcher {
         `base=${worktreeProvision.repositoryContext?.baseSha || ''} ` +
         `head=${worktreeProvision.repositoryContext?.currentSha || ''} ` +
         `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
+        `repositoryRequired=${repositoryContextRequired} ` +
         `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
         `permission=${harness?.permission_mode || 'managed-default'} mcp=true session=${sessionMode}`,
       );

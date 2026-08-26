@@ -47,7 +47,13 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
   if (!ticket.current_column_id || !ticket.current_column_name) {
     throw new AgentContextPreflightError('column', '현재 column 확정값이 없습니다');
   }
-  if (ticket.__awb_require_repository_context && !input.repository) {
+  const repositoryComplete = Boolean(
+    input.repository?.resourceId
+    && input.repository.cwd
+    && input.repository.baseBranch
+    && input.repository.baseSha,
+  );
+  if (ticket.__awb_require_repository_context && !repositoryComplete) {
     throw new AgentContextPreflightError('repository', '연결된 저장소의 준비 결과가 없습니다');
   }
 

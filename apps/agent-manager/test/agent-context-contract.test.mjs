@@ -8,6 +8,8 @@ import {
 } from '../dist/lib/agent-context-contract.js';
 import { composeTriggerPrompt } from '../dist/lib/prompts.js';
 import { composePersistentTriggerTurn } from '../dist/lib/ticket-session-manager.js';
+import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
+import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 
 const ticket = {
   id: 'ticket-1', workspace_id: 'workspace-1', board_id: 'board-1',
@@ -77,12 +79,22 @@ test('persistent 두 번째 dispatch는 최신 SHA, dirty, prior progress를 재
   assert.doesNotMatch(second, /"currentSha": "head-sha"/);
 });
 
-test('Claude, Codex, Hermes 실제 prompt 조립 결과의 필수 의미가 동등하다', () => {
-  const prompts = [
-    composeTriggerPrompt(decoratedTicket('persistent'), '', '', ticket.id, null),
-    composeTriggerPrompt(decoratedTicket('stateless'), '', '', ticket.id, null),
-    composeTriggerPrompt(decoratedTicket('hermes'), '', '', ticket.id, null),
-  ];
+test('Claude/Codex adapter와 Hermes task 경계의 최종 입력 의미가 동등하다', () => {
+  const contractPrompt = composeTriggerPrompt(decoratedTicket('stateless'), '', '', ticket.id, null);
+  const claudeDescriptor = new ClaudeCliAdapter().buildOneshotSpawn({
+    rolePrompt: '역할 지침', taskText: contractPrompt, mcpConfigPath: '/tmp/mcp.json',
+    model: null, harness: null, effort: null, ultracode: false,
+  });
+  const claude = claudeDescriptor.args.at(-1);
+  let codex = '';
+  const codexDescriptor = new CodexCliAdapter().buildOneshotSpawn({
+    rolePrompt: '역할 지침', taskText: contractPrompt, mcpConfigPath: null,
+    model: null, harness: null, effort: null, ultracode: false, cwd: '/work/ticket-1',
+  });
+  codexDescriptor.writePrompt({ stdin: { write(value) { codex += value; }, end() {} } });
+  // Hermes dispatcher가 RuntimeSupervisor.task로 넘기는 최종 task 경계와 동일하다.
+  const hermes = composeTriggerPrompt(decoratedTicket('hermes'), '', '', ticket.id, null);
+  const prompts = [claude, codex, hermes];
   for (const prompt of prompts) {
     assert.match(prompt, /"authority": \[/);
     assert.match(prompt, /"remoteUrl": "https:\/\/example.invalid\/repo.git"/);
