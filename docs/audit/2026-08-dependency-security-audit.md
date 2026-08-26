@@ -1443,3 +1443,24 @@ UI 문자열 2개는 자동 업데이트가 **실제로 실행하는 명령**을
   아니라 일관성이 없다. 다만 다이제스트로 고정하면 **OS 패키지 보안 패치가 멈추는**
   반대 방향 위험이 생기므로, 자동 범프 수단(Dependabot 등) 없이 단독으로 고정하는
   건 순 손해다. 둘을 같이 도입할지는 운영자 판단 사항이라 조치하지 않고 기록만 한다.
+
+## 재검증 로그 — 2026-08-26 (`main` @ `5c6b95e2`)
+
+의존성 변경 없이 새 advisory 와 배포 브랜치 lockfile 드리프트를 다시 점검했다.
+`npm audit fix` 는 사용하지 않았으며 루트 `overrides` 도 그대로 유지했다.
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (`main`) | **0 vulnerabilities** (prod 276 / dev 307 / optional 85, total 606) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| `production.private` (`df1cfe47`) | **0 vulnerabilities**, root/workspace manifest와 lockfile이 `main`과 동일 |
+| 레지스트리 서명 | 105개 서명 및 13개 attestation 검증, 실패 0건 |
+| lockfile install script | 3개 (`@scarf/scarf`/`esbuild`/`fsevents`), 전부 허용목록 내 |
+| 발행 트리 (live/next) | 93 / 92 패키지, moderate 이상 0건, install script 0개 |
+| 공급망·감사·테스트 등록 가드 | **48/48 pass** |
+
+발행 트리에는 lockfile 대비 11개 버전 드리프트가 있었지만 live/next 양쪽 모두
+advisory 0건이고 install script도 없었다. `production.private`의 의존성 파일은
+`main`과 바이트 동일하므로 별도 수정이나 lockfile 재생성은 필요하지 않았다.
+새 `apps/server` 테스트 파일을 추가하지 않았고, 등록 완전성 가드로 기존 테스트가
+모두 `package.json`의 `test` 스크립트에 포함된 것도 확인했다.
