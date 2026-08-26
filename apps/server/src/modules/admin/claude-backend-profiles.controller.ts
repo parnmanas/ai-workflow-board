@@ -107,8 +107,10 @@ export class ClaudeBackendProfilesController {
     const repo = this.dataSource.getRepository(ClaudeBackendProfile);
     const current = await repo.findOne({ where: { id } });
     if (!current) return res.status(404).json({ error: 'Profile not found' });
-    const merged = { ...profileEntityToRuntime(current), ...body, id };
-    delete merged.name;
+    // 목록 응답을 그대로 수정 요청에 사용하는 클라이언트도 안전하게 허용하되,
+    // 영속화 가능한 런타임 필드만 strict 스키마에 전달한다.
+    const { name: _name, credential_status: _credentialStatus, impact: _impact, ...profilePatch } = body || {};
+    const merged = { ...profileEntityToRuntime(current), ...profilePatch, id };
     const checked = validateCliRuntimeProfiles([merged]);
     const name = String(body?.name ?? current.name).trim();
     if (!name) return res.status(400).json({ error: 'name is required' });

@@ -217,6 +217,58 @@ describe('Claude backend profile integration', () => {
     );
   });
 
+  it('목록 응답을 편집 payload로 사용해도 omit_effort와 기존 필드가 재조회 후 유지된다', async () => {
+    let listed = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token: adminToken });
+    assert.equal(listed.status, 200, JSON.stringify(listed.data));
+    const editPayload = listed.data.profiles.find(profile => profile.id === profileB.id);
+    assert.ok(editPayload);
+    assert.equal(editPayload.credential_status, 'missing');
+
+    let saved = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileB.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: {
+        ...editPayload,
+        name: 'Profile B edited',
+        base_url: 'http://127.0.0.1/profile-b-edited',
+        model: 'model-profile-b-edited',
+        omit_effort: true,
+        credential_required: false,
+      },
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.data));
+    assert.equal(saved.data.omit_effort, true);
+
+    listed = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token: adminToken });
+    let reloaded = listed.data.profiles.find(profile => profile.id === profileB.id);
+    assert.deepEqual(
+      {
+        name: reloaded.name,
+        base_url: reloaded.base_url,
+        model: reloaded.model,
+        omit_effort: reloaded.omit_effort,
+        credential_required: reloaded.credential_required,
+      },
+      {
+        name: 'Profile B edited',
+        base_url: 'http://127.0.0.1/profile-b-edited',
+        model: 'model-profile-b-edited',
+        omit_effort: true,
+        credential_required: false,
+      },
+    );
+
+    saved = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileB.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: { ...reloaded, omit_effort: false },
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.data));
+    listed = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token: adminToken });
+    reloaded = listed.data.profiles.find(profile => profile.id === profileB.id);
+    assert.equal(reloaded.omit_effort, false);
+  });
+
   it('converges legacy-only and mismatched workspace defaults when replacing a profile', async () => {
     let response = await createProfile(adminToken, 'profile-legacy-b', 'Profile Legacy B');
     assert.equal(response.status, 201, JSON.stringify(response.data));
