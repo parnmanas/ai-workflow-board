@@ -171,6 +171,31 @@ const MODEL_ROUTING_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
 ] as const;
 
+/** Claude Code는 세션 제목 같은 보조 요청에 작은 모델 선택 변수를 우선
+ * 사용한다. 주 요청은 운영 검증된 raw ANTHROPIC_MODEL 라우팅을 유지하되,
+ * 보조 요청만 CLI가 인식하는 tier alias로 선택하고 공식 override를 통해
+ * 같은 served model로 되돌린다. */
+const AUXILIARY_MODEL_ALIAS = 'haiku';
+
+/** `omit_effort`가 제거해야 하는 Claude CLI 환경 입력. argv의 `--effort`
+ * 생략만으로는 매니저/보드/에이전트 환경에서 상속된 값이 내부 보조 요청에
+ * 계속 적용될 수 있으므로 최종 spawn 환경을 조립한 뒤 모두 제거한다. */
+const CLAUDE_EFFORT_ENV_KEYS = [
+  'CLAUDE_CODE_EFFORT_LEVEL',
+  'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
+  'CLAUDE_EFFORT',
+] as const;
+
+export function applyClaudeRuntimeProfileEnvPolicy(
+  env: NodeJS.ProcessEnv,
+  profile: RuntimeProfileSpec | null | undefined,
+): NodeJS.ProcessEnv {
+  if (!profile?.omit_effort) return env;
+  const sanitized = { ...env };
+  for (const key of CLAUDE_EFFORT_ENV_KEYS) delete sanitized[key];
+  return sanitized;
+}
+
 // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — Claude Code CLI 바이너리에
 // 실제로 존재함을 문자열 덤프로 확인한 env 변수:
 //   - CLAUDE_CODE_MAX_CONTEXT_TOKENS: 미인식 커스텀 모델에 대해 CLI 가
@@ -411,6 +436,7 @@ export class RuntimeLease {
       || this.credentialEnv.ANTHROPIC_API_KEY;
     return {
       ...Object.fromEntries(MODEL_ROUTING_ENV_KEYS.map(key => [key, this.profile.model])),
+      ANTHROPIC_SMALL_FAST_MODEL: AUXILIARY_MODEL_ALIAS,
       ...(this.profile.context_window ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(this.profile.context_window) } : {}),
       ...(this.profile.auto_compact_window ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(this.profile.auto_compact_window) } : {}),
       ...(this.profile.env ?? {}),
