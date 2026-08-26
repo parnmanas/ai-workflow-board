@@ -1,47 +1,157 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { api } from '../src/api.ts';
+import ClaudeBackendProfilesManager from '../src/components/admin/ClaudeBackendProfilesManager.tsx';
 
-const source = await readFile(
-  new URL('../src/components/admin/ClaudeBackendProfilesManager.tsx', import.meta.url),
-  'utf8',
-);
-const workspaceSource = await readFile(
-  new URL('../src/components/WorkspaceManagementPage.tsx', import.meta.url),
-  'utf8',
-);
+const credentials = [
+  { id: 'credential-a', workspace_id: 'workspace-1', scope: 'workspace', name: '운영 Claude', provider: 'claude_oauth_token' },
+  { id: 'credential-b', workspace_id: 'workspace-1', scope: 'workspace', name: '개발 API', provider: 'anthropic' },
+];
+const existingProfile = {
+  id: 'profile-1', name: '기존 프로필', kind: 'claude-backend', protocol: 'anthropic-compatible',
+  base_url: 'https://example.test', model: 'claude-test', omit_effort: false,
+  credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN', credential_ref: 'credential-a',
+  credential_status: 'ok',
+};
 
-test('Claude backend profile 저장 payload에서 조회 전용 필드를 제외한다', () => {
-  assert.match(source, /const \{ credential_status: _credentialStatus, \.\.\.editable \} = editing/);
-  assert.match(source, /const payload = \{ \.\.\.editable,/);
-  assert.match(source, /updateClaudeBackendProfile\(editing\.id, \{/);
+const flush = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
+function change(element, value) {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
+    assert.ok(setter);
+    setter.call(element, value);
+    element.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+}
+
+async function renderManager(t, { profiles = [], listCredentials = async () => credentials } = {}) {
+  const dom = setupDom();
+  const originals = {
+    getClaudeBackendProfiles: api.getClaudeBackendProfiles,
+    listCredentials: api.listCredentials,
+    createClaudeBackendProfile: api.createClaudeBackendProfile,
+    updateClaudeBackendProfile: api.updateClaudeBackendProfile,
+  };
+  api.getClaudeBackendProfiles = async () => ({ profiles, default_profile_id: null });
+  api.listCredentials = listCredentials;
+  api.createClaudeBackendProfile = async () => {};
+  api.updateClaudeBackendProfile = async () => {};
+  const view = mount(React.createElement(ClaudeBackendProfilesManager, { workspaceId: 'workspace-1' }));
+  await flush();
+  t.after(() => {
+    view.unmount();
+    Object.assign(api, originals);
+    dom.cleanup();
+  });
+  return view;
+}
+
+function credentialSelect(container) {
+  const select = container.querySelector('select[aria-label="Credential 선택"]');
+  assert.ok(select);
+  return select;
+}
+
+function button(container, label) {
+  const found = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(label));
+  assert.ok(found, `${label} 버튼을 찾을 수 없습니다.`);
+  return found;
+}
+
+test('신규 Credential을 이름으로 검색·선택하고 create payload에는 UUID만 저장한다', async (t) => {
+  const { container } = await renderManager(t);
+  const calls = [];
+  api.createClaudeBackendProfile = async payload => { calls.push(payload); };
+
+  const search = container.querySelector('input[type="search"]');
+  assert.ok(search);
+  typeInto(search, '개발');
+  assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), ['선택하지 않음', '개발 API · anthropic']);
+  change(credentialSelect(container), 'credential-b');
+  click(button(container, 'Save profile'));
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].credential_ref, 'credential-b');
+  assert.equal(JSON.stringify(calls[0]).includes('개발 API'), false);
 });
 
-test('저장 실패는 성공 처리 없이 오류 토스트로 표시한다', () => {
-  assert.match(source, /catch \(e: any\) \{ showToast\(`프로필 저장 실패:/);
-  assert.match(source, /await load\(\); edit\(\); showToast\('Claude backend profile saved', 'success'\)/);
+test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 계약으로 저장한다', async (t) => {
+  const { container } = await renderManager(t, { profiles: [existingProfile] });
+  const calls = [];
+  api.updateClaudeBackendProfile = async (id, payload) => { calls.push({ id, payload }); };
+
+  click(button(container, '기존 프로필'));
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
+  change(credentialSelect(container), 'credential-b');
+  click(button(container, 'Save profile'));
+  await flush();
+  assert.equal(calls[0].id, 'profile-1');
+  assert.equal(calls[0].payload.credential_ref, 'credential-b');
+  assert.equal('credential_status' in calls[0].payload, false);
+
+  click(button(container, '기존 프로필'));
+  change(credentialSelect(container), '');
+  click(button(container, 'Save profile'));
+  await flush();
+  assert.equal(calls[1].payload.credential_ref, null);
 });
 
-test('현재 workspace Credential을 이름으로 검색하고 UUID는 선택 option value로만 사용한다', () => {
-  assert.match(workspaceSource, /ClaudeBackendProfilesManager workspaceId=\{wsId\}/);
-  assert.match(source, /api\.listCredentials\(workspaceId\)/);
-  assert.match(source, /type="search"/);
-  assert.match(source, /credential\.name\.toLocaleLowerCase\(\)\.includes/);
-  assert.match(source, /<option value=\{credential\.id\}/);
-  assert.doesNotMatch(source, /Credential ref \(UUID\)/);
+test('유효하지 않은 기존 참조를 명시하고 다른 Credential 선택 또는 해제를 허용한다', async (t) => {
+  const profile = { ...existingProfile, credential_ref: 'deleted-credential' };
+  const { container } = await renderManager(t, { profiles: [profile] });
+  click(button(container, '기존 프로필'));
+
+  assert.equal(credentialSelect(container).value, 'deleted-credential');
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '삭제되었거나 접근할 수 없는 Credential');
+  assert.match(container.textContent, /다른 Credential을 선택하거나 해제하세요/);
 });
 
-test('Credential 신규 선택, 기존 값 표시, 변경과 해제를 UUID 계약으로 처리한다', () => {
-  assert.match(source, /credentials\.find\(credential => credential\.id === editing\.credential_ref\)/);
-  assert.match(source, /value=\{editing\.credential_ref \|\| ''\}/);
-  assert.match(source, /credential_ref: e\.target\.value \|\| undefined/);
-  assert.match(source, /credential_ref: editing\.credential_ref \|\| null/);
-  assert.match(source, /<option value="">선택하지 않음<\/option>/);
+test('목록 로딩 실패 중 기존 참조를 보존 표시하고 재시도 후 이름을 복구한다', async (t) => {
+  let attempts = 0;
+  const listCredentials = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('목록 오류');
+    return credentials;
+  };
+  const { container } = await renderManager(t, { profiles: [existingProfile], listCredentials });
+  click(button(container, '기존 프로필'));
+
+  assert.equal(credentialSelect(container).disabled, true);
+  assert.equal(credentialSelect(container).value, 'credential-a');
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 로드 실패)');
+  assert.match(container.textContent, /기존 선택값은 변경되지 않습니다/);
+
+  click(button(container, '다시 시도'));
+  await flush();
+  assert.equal(attempts, 2);
+  assert.equal(credentialSelect(container).disabled, false);
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
 });
 
-test('삭제된 참조와 목록 로딩 실패를 구분하고 재시도를 제공한다', () => {
-  assert.match(source, /invalidCredentialRef/);
-  assert.match(source, /삭제되었거나 접근할 수 없는 Credential/);
-  assert.match(source, /기존 선택값은 변경되지 않습니다/);
-  assert.match(source, /onClick=\{loadCredentials\}>다시 시도/);
+test('목록 로딩 중에도 기존 참조가 빈 선택으로 보이지 않는다', async (t) => {
+  const pending = deferred();
+  const { container } = await renderManager(t, {
+    profiles: [existingProfile],
+    listCredentials: () => pending.promise,
+  });
+  click(button(container, '기존 프로필'));
+
+  assert.equal(credentialSelect(container).disabled, true);
+  assert.equal(credentialSelect(container).value, 'credential-a');
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 확인 중)');
+
+  await act(async () => {
+    pending.resolve(credentials);
+    await pending.promise;
+  });
+  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
 });

@@ -85,6 +85,12 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
   );
   const selectedCredential = credentials.find(credential => credential.id === editing.credential_ref);
   const invalidCredentialRef = Boolean(editing.credential_ref && !credentialsLoading && !credentialsError && !selectedCredential);
+  const preservedCredentialRef = Boolean(editing.credential_ref && !selectedCredential);
+  const preservedCredentialLabel = credentialsLoading
+    ? '기존 선택 유지 (Credential 목록 확인 중)'
+    : credentialsError
+      ? '기존 선택 유지 (Credential 목록 로드 실패)'
+      : '삭제되었거나 접근할 수 없는 Credential';
   const normalizedCredentialSearch = credentialSearch.trim().toLocaleLowerCase();
   const filteredCredentials = credentials.filter(credential =>
     credential.id === editing.credential_ref
@@ -138,7 +144,7 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
               disabled={credentialsLoading || Boolean(credentialsError)}
               onChange={e => setEditing({ ...editing, credential_ref: e.target.value || undefined })}>
               <option value="">선택하지 않음</option>
-              {invalidCredentialRef && <option value={editing.credential_ref}>삭제되었거나 접근할 수 없는 Credential</option>}
+              {preservedCredentialRef && <option value={editing.credential_ref}>{preservedCredentialLabel}</option>}
               {filteredCredentials.map(credential => (
                 <option value={credential.id} key={credential.id}>
                   {credential.name} · {credential.provider}{credential.scope === 'global' ? ' · Global' : ''}
