@@ -43,4 +43,4 @@ Thumbs.db
 graphify-out/
 
 # Other AI CLI session artifacts (untracked by design — separate from CLAUDE.md)
-AGENTS.md
+# AGENTS.md is generated from CLAUDE.md and intentionally versioned.
