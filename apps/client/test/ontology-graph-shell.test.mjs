@@ -38,6 +38,10 @@ test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨
   assert.match(canvasSource, /hideEdgesOnMove: snapshot\.edges\.length > 2_000/);
   assert.match(canvasSource, /getState\(\)\.ratio > 1\.7/);
   assert.match(canvasSource, /연결 \{selected\.degree\}개/);
+  assert.match(canvasSource, /type: ontologyType, \.\.\.nodeData/);
+  assert.match(canvasSource, /type: ontologyType, \.\.\.edgeData/);
+  assert.doesNotMatch(canvasSource, /\.\.\.node,\s*\n\s*cluster/);
+  assert.doesNotMatch(canvasSource, /\.\.\.edge,\s*\n\s*size/);
 });
 
 test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {

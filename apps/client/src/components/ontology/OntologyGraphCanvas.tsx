@@ -23,6 +23,9 @@ function buildGraph(snapshot: OntologyGraphSnapshotResponse): Graph {
   const members = new Map<string, number>();
 
   for (const node of snapshot.nodes) {
+    // Sigma의 `type`은 WebGL 렌더 프로그램 이름이다. 온톨로지 도메인의
+    // Type/Callable 값을 그대로 넘기면 등록되지 않은 프로그램으로 해석된다.
+    const { type: ontologyType, ...nodeData } = node;
     const cluster = clusterOf(node);
     const member = members.get(cluster) || 0;
     members.set(cluster, member + 1);
@@ -31,19 +34,23 @@ function buildGraph(snapshot: OntologyGraphSnapshotResponse): Graph {
     const angle = clusterAngle + member * 2.399963;
     const centerRadius = Math.max(2, clusters.length * 0.7);
     graph.addNode(node.id, {
-      ...node,
+      ...nodeData,
+      ontologyType,
       cluster,
       label: node.name || node.qualified_name || node.id,
       x: Math.cos(clusterAngle) * centerRadius + Math.cos(angle) * ring,
       y: Math.sin(clusterAngle) * centerRadius + Math.sin(angle) * ring,
       size: Math.max(2, Math.min(12, 2 + Math.log2((node.degree || 0) + 1))),
-      color: NODE_COLORS[node.type] || tokens.colors.textSecondary,
+      color: NODE_COLORS[ontologyType] || tokens.colors.textSecondary,
     });
   }
   for (const edge of snapshot.edges) {
     if (!graph.hasNode(edge.src_id) || !graph.hasNode(edge.dst_id)) continue;
+    // 엣지의 CALLS/IMPORTS 등도 Sigma의 렌더 프로그램 `type`과 분리한다.
+    const { type: ontologyType, ...edgeData } = edge;
     graph.addDirectedEdgeWithKey(edge.id, edge.src_id, edge.dst_id, {
-      ...edge,
+      ...edgeData,
+      ontologyType,
       size: Math.max(0.3, Math.min(2, edge.confidence * 1.5)),
       color: `${tokens.colors.textSecondary}55`,
     });
