@@ -6,6 +6,8 @@ import {
   buildAgentContextContract,
   renderAgentContextContract,
 } from '../dist/lib/agent-context-contract.js';
+import { composeTriggerPrompt } from '../dist/lib/prompts.js';
+import { composePersistentTriggerTurn } from '../dist/lib/ticket-session-manager.js';
 
 const ticket = {
   id: 'ticket-1', workspace_id: 'workspace-1', board_id: 'board-1',
@@ -17,6 +19,21 @@ const repository = {
   currentSha: 'head-sha', workingBranch: 'ticket/ticket-1-work', dirty: true,
   ahead: 2, behind: 0, resumed: true,
 };
+
+function decoratedTicket(sessionMode, overrides = {}) {
+  return {
+    ...ticket,
+    ...overrides,
+    __awb_role: 'assignee',
+    __awb_repository_context: { ...repository, ...(overrides.__awb_repository_context || {}) },
+    __awb_session_mode: sessionMode,
+    __awb_context_metadata: {
+      remoteUrl: 'https://example.invalid/repo.git', defaultBranch: 'main',
+      credentialAvailable: true, sandbox: 'strict', requestedGitOperation: 'commit_and_push',
+      mcpServers: ['awb'], verificationCommands: ['npm test'],
+    },
+  };
+}
 
 test('provider와 무관하게 동일한 의미 계약을 직렬화한다', () => {
   const common = { ticket, role: 'assignee', repository, harness: { model: 'model-a', permission_mode: 'strict' } };
@@ -34,6 +51,56 @@ test('필수 column 누락은 실행 전 분류된 오류가 된다', () => {
   );
 });
 
+test('실제 trigger prompt 경계도 column 누락 시 spawn 전에 중단한다', () => {
+  assert.throws(
+    () => composeTriggerPrompt({ id: 'ticket-1', __awb_enforce_context_contract: true }, '', '', 'ticket-1', null),
+    (error) => error instanceof AgentContextPreflightError && error.category === 'column',
+  );
+});
+
+test('persistent 두 번째 dispatch는 최신 SHA, dirty, prior progress를 재주입한다', () => {
+  const firstTicket = decoratedTicket('persistent');
+  const secondTicket = decoratedTicket('persistent', {
+    comments: [...ticket.comments, { created_at: '2026-08-28', author: 'Agent', content: '재검증 완료' }],
+    __awb_repository_context: { currentSha: 'new-head-sha', dirty: false, ahead: 3 },
+  });
+  const base = {
+    ticketId: ticket.id, role: 'assignee', triggerId: 'trigger-2', agentId: 'agent-1',
+    rolePrompt: '', ticketPrompt: '', columnPrompt: null, forceRespawn: false,
+  };
+  const first = composePersistentTriggerTurn({ ...base, ticket: firstTicket });
+  const second = composePersistentTriggerTurn({ ...base, ticket: secondTicket });
+  assert.match(first, /"currentSha": "head-sha"/);
+  assert.match(second, /"currentSha": "new-head-sha"/);
+  assert.match(second, /"dirty": false/);
+  assert.match(second, /재검증 완료/);
+  assert.doesNotMatch(second, /"currentSha": "head-sha"/);
+});
+
+test('Claude, Codex, Hermes 실제 prompt 조립 결과의 필수 의미가 동등하다', () => {
+  const prompts = [
+    composeTriggerPrompt(decoratedTicket('persistent'), '', '', ticket.id, null),
+    composeTriggerPrompt(decoratedTicket('stateless'), '', '', ticket.id, null),
+    composeTriggerPrompt(decoratedTicket('hermes'), '', '', ticket.id, null),
+  ];
+  for (const prompt of prompts) {
+    assert.match(prompt, /"authority": \[/);
+    assert.match(prompt, /"remoteUrl": "https:\/\/example.invalid\/repo.git"/);
+    assert.match(prompt, /"credentialAvailable": true/);
+    assert.match(prompt, /"requestedGitOperation": "commit_and_push"/);
+    assert.match(prompt, /"verificationCommands": \[/);
+    assert.match(prompt, /"currentSha": "head-sha"/);
+  }
+});
+
+test('HEAD 조회 실패를 base SHA로 위장하지 않는다', () => {
+  const contract = buildAgentContextContract({
+    ticket, role: 'assignee', repository: { ...repository, currentSha: undefined, currentShaFailure: 'head_lookup_failed' },
+  });
+  assert.equal(contract.repository.currentSha, null);
+  assert.equal(contract.repository.currentShaFailure, 'head_lookup_failed');
+});
+
 test('credential 원문과 과거 코멘트 크기를 계약에서 제한한다', () => {
   const contract = buildAgentContextContract({
     ticket: { ...ticket, comments: [{ content: 'x'.repeat(4000) }] }, role: 'assignee', repository,
@@ -41,6 +108,16 @@ test('credential 원문과 과거 코멘트 크기를 계약에서 제한한다'
   const rendered = renderAgentContextContract(contract);
   assert.equal(contract.priorProgress[0].content.length, 1200);
   assert.doesNotMatch(rendered, /token|password|credential_ref/i);
+});
+
+test('remote URL의 credential과 query를 redaction한다', () => {
+  const contract = buildAgentContextContract({
+    ticket, role: 'assignee',
+    repository: { ...repository, remoteUrl: 'https://user:secret@example.invalid/repo.git?token=secret' },
+  });
+  const rendered = renderAgentContextContract(contract);
+  assert.match(rendered, /https:\/\/example.invalid\/repo.git/);
+  assert.doesNotMatch(rendered, /user|secret|token=/);
 });
 
 test('AGENTS.md는 CLAUDE.md 공통 원본에서 생성된 상태다', async () => {

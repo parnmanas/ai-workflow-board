@@ -365,6 +365,12 @@ export interface TicketRepositoryContext {
   ahead: number;
   behind: number;
   resumed: boolean;
+  remoteUrl?: string;
+  defaultBranch?: string;
+  fetchedSha?: string;
+  currentShaFailure?: string;
+  credentialAvailable?: boolean | null;
+  credentialFailure?: string | null;
 }
 
 /** Map a ticket + mode to the worktree dir's last path segment.
@@ -863,7 +869,8 @@ export class WorktreeManager {
       cwd,
       baseBranch,
       baseSha,
-      currentSha: head.ok ? head.stdout.trim() : '',
+      currentSha: head.ok ? head.stdout.trim() : undefined,
+      currentShaFailure: head.ok ? undefined : 'head_lookup_failed',
       workingBranch: branch.ok && branch.stdout.trim() ? branch.stdout.trim() : null,
       dirty: status.ok && status.stdout.length > 0,
       ahead,

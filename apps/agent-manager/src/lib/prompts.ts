@@ -253,7 +253,9 @@ export function composeTriggerPrompt(
   lines.push(CURRENT_COLUMN_EXECUTION_CONTRACT);
   lines.push('');
   if (ticket) {
-    if (ticket.current_column_id && ticket.current_column_name) {
+    // Dispatcher가 붙인 marker는 실제 실행 경계에서 계약/preflight가 필수임을
+    // 뜻한다. marker 없는 직접 호출은 오래된 라이브러리 소비자 호환 경로다.
+    if ((ticket as any).__awb_enforce_context_contract || (ticket.id && ticket.current_column_id && ticket.current_column_name)) {
       const repositoryContext = (ticket as any).__awb_repository_context as TicketRepositoryContext | undefined;
       const contextContract = buildAgentContextContract({
         ticket,
@@ -262,6 +264,7 @@ export function composeTriggerPrompt(
         harness: (ticket as any).__awb_harness || null,
         runtimeProfile: (ticket as any).__awb_runtime_profile || null,
         sessionMode: (ticket as any).__awb_session_mode || 'stateless',
+        effort: (ticket as any).__awb_effort || null,
       });
       lines.push(renderAgentContextContract(contextContract));
       lines.push('');

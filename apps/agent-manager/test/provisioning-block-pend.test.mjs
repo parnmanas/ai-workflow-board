@@ -181,6 +181,9 @@ function makeEvent(overrides = {}) {
     actor_name: AGENT,
     field_changed: 'trig',
     trigger_source: 'column_move', // non-supervisor by default (always runs preflight)
+    current_column_id: 'column-active',
+    current_column_name: 'In Progress',
+    current_column_kind: 'active',
     base_repo: { id: 'repo-1', url: 'https://github.com/acme/app.git', default_branch: 'main' },
     base_branch: 'main',
     ...overrides,

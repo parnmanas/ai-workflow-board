@@ -30,7 +30,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
-import { AGENT_CONTEXT_VERSION } from './agent-context-contract.js';
+import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-context-contract.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
@@ -2849,12 +2849,45 @@ export class EventDispatcher {
 
     const attachContextContract = (ticket: any, sessionMode: 'persistent' | 'stateless' | 'hermes') => {
       if (!ticket) return ticket;
+      // REST ticket payload보다 trigger envelope가 dispatch 시점의 최신 확정값이다.
+      // 계약 preflight 전에 병합해야 누락을 숨기지 않으면서 정상 dispatch도 통과한다.
+      ticket.id = ticket.id || ev.ticket_id || '';
+      ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
+      ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
+      ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
       ticket.__awb_role = ev.action || '';
+      ticket.__awb_enforce_context_contract = true;
       ticket.__awb_repository_context = worktreeProvision.repositoryContext;
-      ticket.__awb_require_repository_context = Boolean(selectedRepo);
+      // 안전한 no-worktree fallback은 의도된 실행 모드라 repository=null을
+      // 허용한다. provisioning이 repository contract를 확정했다고 표시한 경우만
+      // 이후 누락을 preflight 오류로 취급한다.
+      ticket.__awb_require_repository_context = Boolean(worktreeProvision.repositoryContext);
       ticket.__awb_harness = harness;
       ticket.__awb_runtime_profile = runtimeProfile;
       ticket.__awb_session_mode = sessionMode;
+      ticket.__awb_effort = effortPreset?.id ?? null;
+      ticket.__awb_context_metadata = {
+        remoteUrl: selectedRepo?.url ?? null,
+        defaultBranch: selectedRepo?.branch ?? null,
+        credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
+        credentialFailure: null,
+        sandbox: harness?.permission_mode ?? 'managed-default',
+        requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
+        mcpServers: ['awb'],
+        relatedTickets: ticket.related_tickets ?? [],
+        recentDecisions: ticket.recent_decisions ?? [],
+        unresolvedQuestions: ticket.unresolved_questions ?? [],
+        verificationCommands: ticket.verification_commands ?? [],
+      };
+      if (ticket.__awb_repository_context) {
+        Object.assign(ticket.__awb_repository_context, {
+          remoteUrl: selectedRepo?.url,
+          defaultBranch: selectedRepo?.branch,
+          fetchedSha: ticket.__awb_repository_context.baseSha,
+          credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
+          credentialFailure: null,
+        });
+      }
       log(
         `Agent context v${AGENT_CONTEXT_VERSION}: ticket=${ev.ticket_id} role=${ev.action || ''} ` +
         `cwd=${worktreeProvision.repositoryContext?.cwd || agentContext?.cwd || ''} ` +
@@ -2935,6 +2968,11 @@ export class EventDispatcher {
           this.#ackDispatch(ev, 'processed');
         }
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         log(`Hermes trigger dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
         this.#ackDispatch(ev, 'nack', err?.code || 'runtime_protocol_error');
       }
@@ -3038,6 +3076,11 @@ export class EventDispatcher {
           `Ticket session dispatch declined (${result.reason}), falling back to one-shot subagent`,
         );
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         // Only trust the gate if dispatchTrigger() was actually called: its
         // circuit-breaker check runs first and synchronously (no await)
         // before anything fallible inside dispatchTrigger, so once the call
@@ -3199,6 +3242,11 @@ export class EventDispatcher {
         }
         log(`Subagent spawn declined (${result.reason}); no further fallback in standalone mode`);
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         log(`Delegation path failed: ${err?.message ?? err}; dropping`);
       }
     }
