@@ -2733,6 +2733,39 @@ export interface OntologyGraphRefreshResponse {
   started: boolean;
 }
 
+export interface OntologyGraphSnapshotNode {
+  id: string;
+  type: string;
+  kind: string;
+  name: string;
+  qualified_name: string;
+  path: string;
+  start_line: number | null;
+  end_line: number | null;
+  layer: string;
+  degree: number;
+  pagerank: number;
+}
+
+export interface OntologyGraphSnapshotEdge {
+  id: string;
+  src_id: string;
+  dst_id: string;
+  type: string;
+  layer: string;
+  confidence: number;
+}
+
+export interface OntologyGraphSnapshotResponse {
+  graph_id: string;
+  nodes: OntologyGraphSnapshotNode[];
+  edges: OntologyGraphSnapshotEdge[];
+  total_nodes: number;
+  total_edges: number;
+  truncated: boolean;
+  limits: { nodes: number; edges: number };
+}
+
 /** Payload of the `ontology_graph_progress` SSE frame (UI-only event,
  *  ticket 964014f5) — server(event-registry.ts)/client(BoardStreamContext.tsx)
  *  배선은 이미 완료돼 있음, 이 타입만 신규(ticket d22b83b4). */

@@ -93,6 +93,7 @@ import type {
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
+  OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
   OrchestrationRepoRef,
 } from './types';
@@ -2410,6 +2411,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, graph_id: graphId }),
     }),
+  getOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphSnapshotResponse> =>
+    request<OntologyGraphSnapshotResponse>(
+      `/ontology/graph?workspace_id=${encodeURIComponent(workspaceId)}&graph_id=${encodeURIComponent(graphId)}`,
+    ),
 };
 
 // ─── Ticket role assignment types ─────────────────────────

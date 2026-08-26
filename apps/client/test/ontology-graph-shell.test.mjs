@@ -8,17 +8,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [sidebarSource, appSource, apiSource, typesSource, pageSource] = await Promise.all([
+const [sidebarSource, appSource, apiSource, typesSource, pageSource, canvasSource] = await Promise.all([
   readFile(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/types.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/ontology/OntologyGraphPage.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/ontology/OntologyGraphCanvas.tsx', import.meta.url), 'utf8'),
 ]);
 
 test('사이드바 Knowledge 섹션에 Ontology Graph 항목이 Resources/Prompt Templates와 같은 그룹으로 있다', () => {
   assert.match(sidebarSource, /title: 'Knowledge'[\s\S]*?key: 'ontology-graph'[\s\S]*?\],\s*\},/);
   assert.match(sidebarSource, /path: `\$\{workspaceBase\}\/ontology-graph`/);
+});
+
+test('ready/stale 그래프는 전용 snapshot API로 조회해 Sigma/Graphology 캔버스에 마운트한다', () => {
+  assert.match(apiSource, /getOntologyGraph:/);
+  assert.match(apiSource, /\/ontology\/graph/);
+  assert.match(pageSource, /api\.getOntologyGraph\(wsId, graphId\)/);
+  assert.match(pageSource, /<OntologyGraphCanvas snapshot={snapshot} \/>/);
+  assert.match(canvasSource, /import Graph from 'graphology'/);
+  assert.match(canvasSource, /import Sigma from 'sigma'/);
+  assert.match(canvasSource, /new Sigma\(graph, containerRef\.current/);
+});
+
+test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨김 보호 장치를 제공한다', () => {
+  assert.match(canvasSource, /renderer\.on\('clickNode'/);
+  assert.match(canvasSource, /camera\.on\('updated'/);
+  assert.match(canvasSource, /hideEdgesOnMove: snapshot\.edges\.length > 2_000/);
+  assert.match(canvasSource, /getState\(\)\.ratio > 1\.7/);
+  assert.match(canvasSource, /연결 \{selected\.degree\}개/);
 });
 
 test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {
