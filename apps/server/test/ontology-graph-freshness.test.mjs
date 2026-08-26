@@ -92,12 +92,13 @@ function fakeRes() {
   };
 }
 
-let graphRepo, edgeRepo, resourceRepo, credentialRepo;
+let graphRepo, nodeRepo, edgeRepo, resourceRepo, credentialRepo;
 let lifecycleService, controller, logs;
 
 before(async () => {
   await initDb();
   graphRepo = AppOntologyDataSource.getRepository(OntologyGraph);
+  nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
   edgeRepo = AppOntologyDataSource.getRepository(OntologyEdge);
   resourceRepo = AppDataSource.getRepository(Resource);
   credentialRepo = AppDataSource.getRepository(Credential);
@@ -115,7 +116,7 @@ before(async () => {
     info: (cat, msg, meta) => { logs.push({ cat, msg, meta }); },
     warn() {}, error() {},
   };
-  controller = new OntologyController(resourceRepo, credentialRepo, lifecycleService, capturingLogger);
+  controller = new OntologyController(resourceRepo, credentialRepo, lifecycleService, capturingLogger, AppDataSource);
 });
 
 after(async () => {
@@ -157,6 +158,34 @@ describe('OntologyLifecycleService.computeDirtyRatio', () => {
     ]);
     // active=1, stale=1 → 분모 2, removed/quarantined 2개는 무시돼야 0.5
     assert.equal(await lifecycleService.computeDirtyRatio(graph.id), 0.5);
+  });
+});
+
+describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => {
+  it('ready 그래프의 활성 노드와 양 끝이 선택된 활성 엣지를 반환한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-ready', folder_path: '', status: 'ready' }));
+    const [a, b] = await nodeRepo.save([
+      node('render-node-a', graph.id, 'render/a', { name: 'a', degree: 2, pagerank: 0.8 }),
+      node('render-node-b', graph.id, 'render/b', { name: 'b', degree: 1, pagerank: 0.4 }),
+    ]);
+    await edgeRepo.save(edge('render-edge', graph.id, { src_id: a.id, dst_id: b.id }));
+
+    const res = fakeRes();
+    await controller.graph(WORKSPACE_ID, graph.id, res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.nodes.map((item) => item.id), [a.id, b.id]);
+    assert.equal(res._body.edges.length, 1);
+    assert.equal(res._body.total_nodes, 2);
+    assert.equal(res._body.total_edges, 1);
+    assert.equal(res._body.truncated, false);
+  });
+
+  it('building 그래프는 불완전 스냅샷 대신 409를 반환한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-building', folder_path: '', status: 'building' }));
+    const res = fakeRes();
+    await controller.graph(WORKSPACE_ID, graph.id, res);
+    assert.equal(res._status, 409);
+    assert.equal(res._body.status, 'building');
   });
 });
 

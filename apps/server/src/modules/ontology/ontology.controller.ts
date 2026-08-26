@@ -18,6 +18,7 @@ import { Body, Controller, Get, Post, Query, Req, Res, UseGuards } from '@nestjs
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -28,6 +29,12 @@ import { resolveGitCredential } from '../mcp/shared/git-branches';
 import { ensureRepoCache, countBehindAhead } from '../mcp/shared/git-repo-cache';
 import { OntologyLifecycleService, GraphRefResolutionError } from './ontology-lifecycle.service';
 import { LogService } from '../../services/log.service';
+import { AppOntologyDataSource } from '../../db';
+import { OntologyNode } from '../../entities/OntologyNode';
+import { OntologyEdge } from '../../entities/OntologyEdge';
+
+const GRAPH_NODE_LIMIT = 5_000;
+const GRAPH_EDGE_LIMIT = 10_000;
 
 @ApiBearerAuth('user-session')
 @ApiTags('ontology')
@@ -40,7 +47,12 @@ export class OntologyController {
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     private readonly lifecycleService: OntologyLifecycleService,
     private readonly logService: LogService,
+    private readonly dataSource: DataSource,
   ) {}
+
+  private get ontologyDataSource(): DataSource {
+    return AppOntologyDataSource ?? this.dataSource;
+  }
 
   /** 그래프가 참조하는 Resource의 캐시 클론 경로 — 프레시니스(behind/ahead)
    *  계산 전용, resources.controller.ts._prepRepo와 같은 검증. 이 호출의
@@ -153,6 +165,65 @@ export class OntologyController {
       }
       throw e;
     }
+  }
+
+  /** 브라우저 렌더링 전용 유계 스냅샷. 중심성이 높은 노드를 먼저 고르고,
+   * 선택된 노드 사이의 활성 엣지만 반환해 대형 저장소에서도 응답 크기와
+   * Graphology 메모리 사용량이 예측 가능하게 유지된다. */
+  @Get('graph')
+  async graph(
+    @Query('workspace_id') workspaceId: string,
+    @Query('graph_id') graphId: string,
+    @Res() res: Response,
+  ) {
+    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!graphId) return res.status(400).json({ error: 'graph_id query parameter is required' });
+
+    let graph;
+    try {
+      graph = await this.lifecycleService.resolveOrProvision({ workspaceId, graphId });
+    } catch (e: any) {
+      if (e instanceof GraphRefResolutionError) {
+        return res.status(e.code === 'not_found' ? 404 : 400).json({ error: e.message, code: e.code });
+      }
+      throw e;
+    }
+    if (graph.status !== 'ready' && graph.status !== 'stale') {
+      return res.status(409).json({ error: 'graph is not ready', status: graph.status });
+    }
+
+    const ds = this.ontologyDataSource;
+    const nodeRepo = ds.getRepository(OntologyNode);
+    const edgeRepo = ds.getRepository(OntologyEdge);
+    const [totalNodes, totalEdges, nodes] = await Promise.all([
+      nodeRepo.count({ where: { graph_id: graph.id, status: 'active' } }),
+      edgeRepo.count({ where: { graph_id: graph.id, status: 'active' } }),
+      nodeRepo.find({
+        where: { graph_id: graph.id, status: 'active' },
+        order: { pagerank: 'DESC', degree: 'DESC', id: 'ASC' },
+        take: GRAPH_NODE_LIMIT,
+        select: ['id', 'type', 'kind', 'name', 'qualified_name', 'path', 'start_line', 'end_line', 'layer', 'degree', 'pagerank'],
+      }),
+    ]);
+    const selected = new Set(nodes.map((node) => node.id));
+    const edges = selected.size === 0
+      ? []
+      : (await edgeRepo.find({
+          where: { graph_id: graph.id, status: 'active' },
+          order: { confidence: 'DESC', id: 'ASC' },
+          take: GRAPH_EDGE_LIMIT * 3,
+          select: ['id', 'src_id', 'dst_id', 'type', 'layer', 'confidence'],
+        })).filter((edge) => selected.has(edge.src_id) && selected.has(edge.dst_id)).slice(0, GRAPH_EDGE_LIMIT);
+
+    return res.json({
+      graph_id: graph.id,
+      nodes,
+      edges,
+      total_nodes: totalNodes,
+      total_edges: totalEdges,
+      truncated: totalNodes > nodes.length || totalEdges > edges.length,
+      limits: { nodes: GRAPH_NODE_LIMIT, edges: GRAPH_EDGE_LIMIT },
+    });
   }
 
   // 휴먼 그래프뷰 재방문 텔레메트리(Done-when, ticket d22b83b4) —
