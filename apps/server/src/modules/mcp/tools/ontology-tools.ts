@@ -1,26 +1,26 @@
 /**
  * Ontology Graph MCP tools — wave 1 (ticket d35b7b7d, DESIGN.md 축 6).
  *
- * Tools: graph_status, graph_find_symbol, graph_module_summary,
+ * Tools: graph_status, graph_refresh, graph_find_symbol, graph_module_summary,
  *        graph_neighbors, graph_blast_radius, graph_call_path
  *
- * All six are read-only, 'caller' authz tier (see tool-authz-gate.ts) —
- * any resolvable MCP identity may call them; the real scoping is the
- * explicit workspace_id/graph_id boundary check inside resolveGraph()
- * below, not the gate. Every tool accepts EITHER a previously-obtained
- * `graph_id` OR `(resource_id, folder_path)` — the latter resolves through
- * the SAME provisioning helper `graph_status` exposes explicitly, so no
- * tool ever presupposes a graph that doesn't exist yet (DESIGN.md 축 6,
- * REVIEW-NOTES.md A1).
+ * 조회 도구 6개는 caller 권한으로 호출하되 resolveGraph()에서
+ * workspace_id/graph_id 경계를 검증한다. graph_refresh는 기존 데이터를
+ * 교체하므로 full-scope API 키와 티켓 역할·리소스 범위를 추가 검증한다.
+ * 조회 도구는 이전 graph_status 호출에서 받은 graph_id 또는
+ * (resource_id, folder_path)를 받아 동일한 프로비저닝 경로를 사용한다.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { callerCanAccessWorkspace } from '../shared/authz';
+import { callerCanAccessWorkspace, requireFullScopeCaller } from '../shared/authz';
 import { GraphRefResolutionError } from '../../ontology/ontology-lifecycle.service';
 import type { OntologyGraph } from '../../../entities/OntologyGraph';
 import type { OntologyNode } from '../../../entities/OntologyNode';
+import { Ticket } from '../../../entities/Ticket';
+import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
+import { Resource } from '../../../entities/Resource';
 import { confidenceBucket } from '../../ontology/query/symbol-query';
 import type { GraphCallPathStep } from '../../ontology/query/graph-query';
 import type { ToolContext } from './context';
@@ -30,6 +30,9 @@ const UNAVAILABLE_MESSAGE =
 
 const WORKSPACE_SCOPE_ERROR =
   'Unauthorized: the caller is not a member of this workspace_id — cross-workspace graph access is denied.';
+
+const GRAPH_REFRESH_SCOPE_ERROR =
+  '권한 거부: graph_refresh는 이 티켓에 배정된 에이전트의 full-scope API 키가 필요하며, 그래프 리소스는 티켓 워크스페이스와 범위가 일치해야 합니다.';
 
 // 리뷰 지적(critical, d35b7b7d 1차 반려) — TOOL_AUTHZ_TABLE의 'caller' tier는
 // "세션리스가 아닌 어떤 caller든" 통과시킬 뿐, 그 caller가 요청한
@@ -46,6 +49,32 @@ async function checkWorkspaceScope(ctx: ToolContext, extra: { sessionId?: string
   const caller = getCallerAgent(extra);
   const allowed = await callerCanAccessWorkspace(ctx.dataSource, caller, workspaceId);
   return allowed ? null : err(WORKSPACE_SCOPE_ERROR);
+}
+
+async function checkGraphRefreshScope(
+  ctx: ToolContext,
+  extra: { sessionId?: string },
+  input: { workspaceId: string; ticketId: string; graph: OntologyGraph },
+): Promise<ReturnType<typeof err> | null> {
+  const caller = getCallerAgent(extra);
+  if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
+  if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, input.workspaceId))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+
+  const [ticket, assignment, resource] = await Promise.all([
+    ctx.dataSource.getRepository(Ticket).findOne({ where: { id: input.ticketId } }),
+    ctx.dataSource.getRepository(TicketRoleAssignment).findOne({
+      where: { ticket_id: input.ticketId, agent_id: caller!.agentId! },
+    }),
+    ctx.dataSource.getRepository(Resource).findOne({ where: { id: input.graph.resource_id } }),
+  ]);
+  const resourceInWorkspace = resource
+    && resource.type === 'repository'
+    && (resource.workspace_id === null || resource.workspace_id === input.workspaceId);
+  const ticketMatches = ticket
+    && ticket.workspace_id === input.workspaceId
+    && !ticket.archived_at
+    && (!ticket.base_repo_resource_id || ticket.base_repo_resource_id === input.graph.resource_id);
+  return assignment && ticketMatches && resourceInWorkspace ? null : err(GRAPH_REFRESH_SCOPE_ERROR);
 }
 
 const GRAPH_REF_PARAMS = {
@@ -157,6 +186,41 @@ export function registerOntologyTools(server: McpServer, ctx: ToolContext): void
         progress: JSON.parse(graph.progress || '{}'),
         error: graph.error || undefined,
       });
+    },
+  );
+
+  server.tool(
+    'graph_refresh',
+    '현재 작업 중인 티켓의 기존 온톨로지 그래프를 비동기로 1회 재빌드합니다. ' +
+    'DB 기반 full-scope 에이전트 API 키, ticket_id 역할 배정, 같은 워크스페이스의 저장소 리소스가 필요합니다. ' +
+    '그래프가 이미 building이면 bounded no-op으로 즉시 started=false를 반환합니다. ' +
+    '후속 읽기 전용 graph_status 호출로 확인할 수 있도록 graph_id/status를 반환합니다.',
+    {
+      workspace_id: z.string().describe('워크스페이스 ID'),
+      ticket_id: z.string().describe('배정된 에이전트가 재빌드를 요청하는 티켓 ID'),
+      graph_id: z.string().describe('graph_status에서 얻은 기존 그래프 ID'),
+    },
+    async ({ workspace_id, ticket_id, graph_id }, extra) => {
+      if (!ctx.ontologyLifecycleService) return err(UNAVAILABLE_MESSAGE);
+      const caller = getCallerAgent(extra);
+      if (await requireFullScopeCaller(ctx.dataSource, caller)) return err(GRAPH_REFRESH_SCOPE_ERROR);
+      if (!(await callerCanAccessWorkspace(ctx.dataSource, caller, workspace_id))) return err(GRAPH_REFRESH_SCOPE_ERROR);
+      let graph: OntologyGraph;
+      try {
+        graph = await ctx.ontologyLifecycleService.resolveOrProvision({ workspaceId: workspace_id, graphId: graph_id });
+      } catch (e) {
+        if (e instanceof GraphRefResolutionError) return err(e.message, { code: e.code });
+        throw e;
+      }
+      const scopeError = await checkGraphRefreshScope(ctx, extra, { workspaceId: workspace_id, ticketId: ticket_id, graph });
+      if (scopeError) return scopeError;
+
+      const result = await ctx.ontologyLifecycleService.forceRebuild({ graphId: graph.id, workspaceId: workspace_id });
+      logGraphToolCall(ctx, extra, 'graph_refresh', {
+        workspace_id, ticket_id, resource_id: graph.resource_id,
+        graph_id: result.graph.id, status: result.graph.status, started: result.started,
+      });
+      return ok({ graph_id: result.graph.id, status: result.graph.status, started: result.started });
     },
   );
 
