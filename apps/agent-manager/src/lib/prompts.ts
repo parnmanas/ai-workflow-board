@@ -13,6 +13,11 @@ import {
 } from './chat-attachment-prep.js';
 import type { WorktreeMode } from './worktree-manager.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
+import {
+  buildAgentContextContract,
+  redactAgentContextText,
+  renderAgentContextContract,
+} from './agent-context-contract.js';
 
 interface CommentLike {
   author_name?: string;
@@ -182,6 +187,7 @@ export function repositoryContextInstructions(context?: TicketRepositoryContext)
     `- Repository Resource ID: ${context.resourceId || '(URL 기반 레거시 저장소)'}`,
     `- cwd: ${context.cwd}`,
     `- base branch / SHA: ${context.baseBranch} / ${context.baseSha}`,
+    `- current SHA: ${context.currentSha || `(unknown; ${context.currentShaFailure || '조회 실패 원인 미제공'})`}`,
     `- working branch: ${context.workingBranch || '(detached)'}`,
     `- dirty: ${context.dirty}`,
     `- base 대비 ahead / behind: ${context.ahead} / ${context.behind}`,
@@ -251,6 +257,22 @@ export function composeTriggerPrompt(
   lines.push(CURRENT_COLUMN_EXECUTION_CONTRACT);
   lines.push('');
   if (ticket) {
+    // Dispatcher가 붙인 marker는 실제 실행 경계에서 계약/preflight가 필수임을
+    // 뜻한다. marker 없는 직접 호출은 오래된 라이브러리 소비자 호환 경로다.
+    if ((ticket as any).__awb_enforce_context_contract || (ticket.id && ticket.current_column_id && ticket.current_column_name)) {
+      const repositoryContext = (ticket as any).__awb_repository_context as TicketRepositoryContext | undefined;
+      const contextContract = buildAgentContextContract({
+        ticket,
+        role: (ticket as any).__awb_role || '',
+        repository: repositoryContext,
+        harness: (ticket as any).__awb_harness || null,
+        runtimeProfile: (ticket as any).__awb_runtime_profile || null,
+        sessionMode: (ticket as any).__awb_session_mode || 'stateless',
+        effort: (ticket as any).__awb_effort || null,
+      });
+      lines.push(renderAgentContextContract(contextContract));
+      lines.push('');
+    }
     lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
     if (ticket.current_column_name || ticket.current_column_id) {
@@ -288,7 +310,7 @@ export function composeTriggerPrompt(
       for (const c of comments) {
         const who = c.author_name || c.agent_name || 'unknown';
         const when = c.created_at || '';
-        const body = (c.body || c.content || '').slice(0, 2000);
+        const body = redactAgentContextText(c.body || c.content || '').slice(0, 2000);
         lines.push(`- [${when}] ${who}: ${body}`);
       }
     }

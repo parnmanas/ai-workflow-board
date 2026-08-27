@@ -742,7 +742,22 @@ export async function fetchRepositoryCredential(
   agentId: string,
   workspaceId?: string,
 ): Promise<{ username?: string; token: string } | null> {
-  if (!resourceId || !agentId) return null;
+  return (await fetchRepositoryCredentialStatus(config, resourceId, agentId, workspaceId)).credential;
+}
+
+export interface RepositoryCredentialStatus {
+  credential: { username?: string; token: string } | null;
+  failure: string | null;
+}
+
+/** 자격 증명 부재(204)와 조회 실패를 구분하되 비밀 원문은 호출자에게만 반환한다. */
+export async function fetchRepositoryCredentialStatus(
+  config: AwbConfig,
+  resourceId: string,
+  agentId: string,
+  workspaceId?: string,
+): Promise<RepositoryCredentialStatus> {
+  if (!resourceId || !agentId) return { credential: null, failure: 'credential_lookup_not_applicable' };
   try {
     const workspaceQuery = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : '';
     const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
@@ -750,18 +765,18 @@ export async function fetchRepositoryCredential(
       headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    if (resp.status === 204) return null;
+    if (resp.status === 204) return { credential: null, failure: null };
     if (!resp.ok) {
       log(`repository credential fetch failed: ${resp.status} (resource=${resourceId.slice(0, 8)})`);
-      return null;
+      return { credential: null, failure: `http_${resp.status}` };
     }
     const body = await resp.json() as any;
     return typeof body?.token === 'string' && body.token
-      ? { username: typeof body.username === 'string' ? body.username : undefined, token: body.token }
-      : null;
+      ? { credential: { username: typeof body.username === 'string' ? body.username : undefined, token: body.token }, failure: null }
+      : { credential: null, failure: 'invalid_response' };
   } catch (err: any) {
     log(`repository credential fetch error: ${err?.message ?? err} (resource=${resourceId.slice(0, 8)})`);
-    return null;
+    return { credential: null, failure: 'request_failed' };
   }
 }
 

@@ -55,7 +55,15 @@ let ticketState;  // served for GET /api/agent/tickets/:id — drives the retry 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
-  ticketState = { pending_user_action: false, terminal_entered_at: null };
+  ticketState = {
+    id: TICKET,
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
+    comments: [],
+    pending_user_action: false,
+    terminal_entered_at: null,
+  };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     const method = init?.method || 'GET';
@@ -183,6 +191,18 @@ function makeDispatcher(state) {
         cwd: '/ws/.awb/wt/shared-0',
         mode: 'shared',
         reused: state.slotReused ?? false,
+        repositoryContext: {
+          resourceId: 'repo-1',
+          cwd: '/ws/.awb/wt/shared-0',
+          baseBranch: 'main',
+          baseSha: 'base-sha',
+          currentSha: 'head-sha',
+          workingBranch: 'ticket/ticket-pool-work',
+          dirty: false,
+          ahead: 0,
+          behind: 0,
+          resumed: state.slotReused ?? false,
+        },
       };
     },
     async verifyCheckout() { return { ok: true }; },

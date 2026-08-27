@@ -359,11 +359,18 @@ export interface TicketRepositoryContext {
   cwd: string;
   baseBranch: string;
   baseSha: string;
+  currentSha?: string;
   workingBranch: string | null;
   dirty: boolean;
   ahead: number;
   behind: number;
   resumed: boolean;
+  remoteUrl?: string;
+  defaultBranch?: string;
+  fetchedSha?: string;
+  currentShaFailure?: string;
+  credentialAvailable?: boolean | null;
+  credentialFailure?: string | null;
 }
 
 /** Map a ticket + mode to the worktree dir's last path segment.
@@ -851,6 +858,7 @@ export class WorktreeManager {
     resumed: boolean,
   ): Promise<TicketRepositoryContext> {
     const branch = await git(cwd, ['branch', '--show-current']);
+    const head = await git(cwd, ['rev-parse', 'HEAD']);
     const status = await git(cwd, ['status', '--porcelain']);
     const counts = await git(cwd, ['rev-list', '--left-right', '--count', `origin/${baseBranch}...HEAD`]);
     const [behind = 0, ahead = 0] = counts.ok
@@ -861,6 +869,8 @@ export class WorktreeManager {
       cwd,
       baseBranch,
       baseSha,
+      currentSha: head.ok ? head.stdout.trim() : undefined,
+      currentShaFailure: head.ok ? undefined : 'head_lookup_failed',
       workingBranch: branch.ok && branch.stdout.trim() ? branch.stdout.trim() : null,
       dirty: status.ok && status.stdout.length > 0,
       ahead,

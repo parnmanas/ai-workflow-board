@@ -40,6 +40,12 @@ beforeEach(() => {
       dispatchAcks.push(JSON.parse(init?.body || '{}'));
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (target.includes('/api/agent/tickets/')) {
+      return new Response(JSON.stringify({
+        id: 'ticket-pi-guard', current_column_id: 'column-active', current_column_name: '진행 중',
+        current_column_kind: 'active', comments: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 });
@@ -74,7 +80,14 @@ function harness(cli) {
     enabled: true,
     async resolveCwd() {
       state.worktrees += 1;
-      return { isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false };
+      return {
+        isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'repo-1', cwd: '/workspace/.awb/wt/ticket', baseBranch: 'main', baseSha: 'base-sha',
+          currentSha: 'head-sha', workingBranch: 'ticket/pi-guard-work', dirty: false,
+          ahead: 0, behind: 0, resumed: false,
+        },
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -107,6 +120,9 @@ function ticketTrigger() {
     actor_name: AGENT,
     field_changed: 'trigger-1',
     trigger_source: 'column_move',
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
     base_repo: { id: 'repo-1', url: 'https://github.com/acme/app.git', default_branch: 'main' },
     base_branch: 'main',
   });

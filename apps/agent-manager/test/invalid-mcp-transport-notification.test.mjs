@@ -92,6 +92,12 @@ beforeEach(() => {
       dispatchAcks.push(JSON.parse(init?.body || '{}'));
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (u.includes('/api/agent/tickets/')) {
+      return new Response(JSON.stringify({
+        id: TICKET, current_column_id: 'column-active', current_column_name: '진행 중',
+        current_column_kind: 'active', comments: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 });
@@ -130,7 +136,16 @@ function makeSubagentManager(state, serverName) {
 function makeDispatcher(state, serverName) {
   const worktreeManager = {
     enabled: true,
-    async resolveCwd() { return { isWorktree: true, cwd: '/ws/.awb/wt/ok', mode: 'per_ticket', reused: false }; },
+    async resolveCwd() {
+      return {
+        isWorktree: true, cwd: '/ws/.awb/wt/ok', mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'repo-1', cwd: '/ws/.awb/wt/ok', baseBranch: 'main', baseSha: 'base-sha',
+          currentSha: 'head-sha', workingBranch: 'ticket/mcp-work', dirty: false,
+          ahead: 0, behind: 0, resumed: false,
+        },
+      };
+    },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
     async removeTicketWorktrees() { return 0; },
@@ -157,6 +172,9 @@ function makeEvent(overrides = {}) {
     actor_name: AGENT,
     field_changed: 'trig',
     trigger_source: 'column_move',
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
     base_repo: { id: 'repo-1', url: 'https://github.com/acme/app.git', default_branch: 'main' },
     base_branch: 'main',
     ...overrides,
