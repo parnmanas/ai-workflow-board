@@ -103,6 +103,9 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   await graph.focus();
   await page.keyboard.press('Enter');
   await expect(graph.locator('xpath=..').locator('aside')).toContainText(/연결 \d+개/);
+  await expect.poll(() => graph.locator('canvas').count()).toBeGreaterThan(0);
+  expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 
   const beforeZoom = await graph.screenshot();
   await graph.hover();
@@ -127,6 +130,8 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   await expect.poll(() => statuses.at(-1), { timeout: 30_000 }).toBe('ready');
   await expect.poll(() => snapshotLoads, { timeout: 10_000 }).toBeGreaterThan(loadsBeforeRefresh);
   await expect.poll(() => graph.locator('canvas').count()).toBeGreaterThan(0);
+  expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 
   expect(statuses).not.toContain('error');
   expect(consoleErrors).toEqual([]);

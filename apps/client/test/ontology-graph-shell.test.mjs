@@ -45,6 +45,14 @@ test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨
   assert.doesNotMatch(canvasSource, /\.\.\.edge,\s*\n\s*size/);
 });
 
+test('그래프 캔버스는 도메인 타입과 Sigma 렌더 타입을 분리하고 circle 프로그램을 명시적으로 등록한다', () => {
+  assert.match(canvasSource, /import \{ NodeCircleProgram \} from 'sigma\/rendering'/);
+  assert.match(canvasSource, /ontologyType,\s*\n\s*type: 'circle'/);
+  assert.match(canvasSource, /defaultNodeType: 'circle'/);
+  assert.match(canvasSource, /nodeProgramClasses: \{ circle: NodeCircleProgram \}/);
+  assert.match(canvasSource, /camera\.off\('updated', updateZoom\)/);
+});
+
 test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {
   assert.match(appSource, /const OntologyGraphPage = lazy\(\(\) => import\('\.\/components\/ontology\/OntologyGraphPage'\)\)/);
   assert.match(appSource, /<Route path="ontology-graph" element={<OntologyGraphPage \/>} \/>/);

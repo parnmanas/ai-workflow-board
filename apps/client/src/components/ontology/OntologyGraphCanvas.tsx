@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
+import { NodeCircleProgram } from 'sigma/rendering';
 import type { OntologyGraphSnapshotNode, OntologyGraphSnapshotResponse } from '../../types';
 import { tokens } from '../../tokens';
 
@@ -36,6 +37,7 @@ function buildGraph(snapshot: OntologyGraphSnapshotResponse): Graph {
     graph.addNode(node.id, {
       ...nodeData,
       ontologyType,
+      type: 'circle',
       cluster,
       label: node.name || node.qualified_name || node.id,
       x: Math.cos(clusterAngle) * centerRadius + Math.cos(angle) * ring,
@@ -73,6 +75,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
     const container = containerRef.current;
     let renderer: Sigma | null = null;
     let resizeObserver: ResizeObserver | null = null;
+    let detachCameraListener: (() => void) | null = null;
 
     const mountRenderer = () => {
       if (renderer || container.clientWidth === 0 || container.clientHeight === 0) return;
@@ -81,6 +84,8 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
         // 0 너비를 볼 수 있다. 최초 마운트는 위에서 실제 크기를 검증하므로,
         // 이후 레이아웃 전환 중의 순간값만 Sigma 예외로 승격하지 않는다.
         allowInvalidContainer: true,
+        defaultNodeType: 'circle',
+        nodeProgramClasses: { circle: NodeCircleProgram },
         renderEdgeLabels: false,
         labelDensity: 0.08,
         labelGridCellSize: 120,
@@ -105,6 +110,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
       const camera = sigma.getCamera();
       const updateZoom = () => sigma.refresh();
       camera.on('updated', updateZoom);
+      detachCameraListener = () => camera.off('updated', updateZoom);
     };
 
     mountRenderer();
@@ -114,6 +120,7 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
     }
     return () => {
       resizeObserver?.disconnect();
+      detachCameraListener?.();
       rendererRef.current = null;
       renderer?.kill();
     };
