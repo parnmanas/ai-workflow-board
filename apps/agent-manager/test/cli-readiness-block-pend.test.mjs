@@ -71,7 +71,10 @@ beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
   addCommentContents = [];
-  ticketState = { pending_user_action: false };
+  ticketState = {
+    id: TICKET, current_column_id: 'column-active', current_column_name: '진행 중',
+    current_column_kind: 'active', comments: [], pending_user_action: false,
+  };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     const method = init?.method || 'GET';
@@ -100,7 +103,9 @@ beforeEach(() => {
       }
       return new Response('', { status: 202 }); // notifications/initialized, etc.
     }
-    // REST GETs: repository git-credential (→ no token) and ticket context (→ {}).
+    if (u.includes('/api/agent/tickets/')) {
+      return new Response(JSON.stringify(ticketState), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 });
@@ -129,7 +134,14 @@ function makeDispatcher(state, cliHomeDir) {
   const worktreeManager = {
     enabled: true,
     async resolveCwd() {
-      return { isWorktree: true, cwd: CWD, mode: 'per_ticket', reused: false };
+      return {
+        isWorktree: true, cwd: CWD, mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'repo-1', cwd: CWD, baseBranch: 'main', baseSha: 'base-sha',
+          currentSha: 'head-sha', workingBranch: 'ticket/readiness-work', dirty: false,
+          ahead: 0, behind: 0, resumed: false,
+        },
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -161,6 +173,9 @@ function makeEvent(overrides = {}) {
     actor_name: AGENT,
     field_changed: 'trig',
     trigger_source: 'column_move', // non-supervisor by default (always runs preflight)
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
     base_repo: { id: 'repo-1', url: 'https://github.com/acme/app.git', default_branch: 'main' },
     base_branch: 'main',
     ...overrides,

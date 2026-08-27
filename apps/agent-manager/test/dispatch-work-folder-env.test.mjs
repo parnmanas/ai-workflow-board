@@ -67,7 +67,7 @@ test('shared policy is AWB-owned and names the assigned checkout', () => {
   const assigned = 'D:\\AWBAgents\\GameClient\\.awb\\wt\\resource\\shared-0';
   const policy = sharedWorktreeInstructions(assigned);
   const prompt = composeTriggerPrompt(
-    { id: 'ticket-123', title: 'Warm build' },
+    { id: 'ticket-123', title: 'Warm build', current_column_id: 'active', current_column_name: 'In Progress' },
     '',
     '',
     'ticket-123',
@@ -85,7 +85,7 @@ test('per-ticket policy is AWB-owned, names the assigned folder, and forbids esc
   const assigned = 'D:\\AWBAgents\\GameClient\\.awb\\wt\\resource\\a1b2c3d4';
   const policy = perTicketWorktreeInstructions(assigned);
   const prompt = composeTriggerPrompt(
-    { id: 'ticket-456', title: 'Per-ticket build' },
+    { id: 'ticket-456', title: 'Per-ticket build', current_column_id: 'active', current_column_name: 'In Progress' },
     '',
     '',
     'ticket-456',

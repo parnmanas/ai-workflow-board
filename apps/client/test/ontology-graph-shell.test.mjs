@@ -29,12 +29,13 @@ test('ready/stale 그래프는 전용 snapshot API로 조회해 Sigma/Graphology
   assert.match(pageSource, /<OntologyGraphCanvas snapshot={snapshot} \/>/);
   assert.match(canvasSource, /import Graph from 'graphology'/);
   assert.match(canvasSource, /import Sigma from 'sigma'/);
-  assert.match(canvasSource, /new Sigma\(graph, containerRef\.current/);
+  assert.match(canvasSource, /new Sigma\(graph, container/);
 });
 
 test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨김 보호 장치를 제공한다', () => {
-  assert.match(canvasSource, /renderer\.on\('clickNode'/);
+  assert.match(canvasSource, /sigma\.on\('clickNode'/);
   assert.match(canvasSource, /camera\.on\('updated'/);
+  assert.match(canvasSource, /allowInvalidContainer: true/);
   assert.match(canvasSource, /hideEdgesOnMove: snapshot\.edges\.length > 2_000/);
   assert.match(canvasSource, /getState\(\)\.ratio > 1\.7/);
   assert.match(canvasSource, /연결 \{selected\.degree\}개/);
@@ -42,6 +43,14 @@ test('그래프 캔버스는 선택 상세, semantic zoom, 이동 중 엣지 숨
   assert.match(canvasSource, /type: ontologyType, \.\.\.edgeData/);
   assert.doesNotMatch(canvasSource, /\.\.\.node,\s*\n\s*cluster/);
   assert.doesNotMatch(canvasSource, /\.\.\.edge,\s*\n\s*size/);
+});
+
+test('그래프 캔버스는 도메인 타입과 Sigma 렌더 타입을 분리하고 circle 프로그램을 명시적으로 등록한다', () => {
+  assert.match(canvasSource, /import \{ NodeCircleProgram \} from 'sigma\/rendering'/);
+  assert.match(canvasSource, /ontologyType,\s*\n\s*type: 'circle'/);
+  assert.match(canvasSource, /defaultNodeType: 'circle'/);
+  assert.match(canvasSource, /nodeProgramClasses: \{ circle: NodeCircleProgram \}/);
+  assert.match(canvasSource, /camera\.off\('updated', updateZoom\)/);
 });
 
 test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라우트를 건다(Orchestration과 같은 패턴)', () => {

@@ -73,7 +73,15 @@ let ticketState;
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
-  ticketState = { pending_user_action: false, terminal_entered_at: null };
+  ticketState = {
+    id: 'T-1',
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
+    comments: [],
+    pending_user_action: false,
+    terminal_entered_at: null,
+  };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     const method = init?.method || 'GET';
@@ -208,7 +216,17 @@ function makeHarness(opts = {}) {
   const worktreeManager = {
     enabled: true,
     async resolveCwd() {
-      return { isWorktree: true, cwd: '/ws/.awb/wt/t', mode: 'per_ticket', reused: false };
+      return {
+        isWorktree: true,
+        cwd: '/ws/.awb/wt/t',
+        mode: 'per_ticket',
+        reused: false,
+        repositoryContext: {
+          resourceId: 'repo-1', cwd: '/ws/.awb/wt/t', baseBranch: 'main',
+          baseSha: 'base-sha', currentSha: 'head-sha', workingBranch: 'ticket/session-limit-work',
+          dirty: false, ahead: 0, behind: 0, resumed: false,
+        },
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -235,6 +253,9 @@ function trigger(overrides = {}) {
     actor_name: AGENT,
     field_changed: 'trig',
     trigger_source: 'supervisor',
+    current_column_id: 'column-active',
+    current_column_name: '진행 중',
+    current_column_kind: 'active',
     base_repo: { id: 'repo-1', url: 'https://github.com/acme/app.git', default_branch: 'main' },
     base_branch: 'main',
     ...overrides,

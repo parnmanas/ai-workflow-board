@@ -4,6 +4,8 @@
   "packageManager": "npm@11.6.1",
   "workspaces": ["apps/*"],
   "scripts": {
+    "sync:agent-instructions": "node scripts/sync-agent-instructions.mjs",
+    "check:agent-instructions": "node scripts/sync-agent-instructions.mjs --check",
     "predev": "node scripts/clear-ports.mjs",
     "dev": "turbo run dev",
     "dev:server": "turbo run dev --filter=server",

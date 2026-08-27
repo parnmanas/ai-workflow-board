@@ -253,6 +253,39 @@ export async function fetchChatRoomHistory(
   }
 }
 
+export interface OrdinaryWorkBoardCandidate {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/**
+ * non-native 채팅 런타임이 임의 UUID 대신 실제 기존 보드만 고르도록 후보를 조회한다.
+ * 빈 배열은 서버가 정상 응답한 실제 빈 목록만 뜻한다. 조회 실패를 빈 목록으로
+ * 축약하면 ticket-first 작업이 direct-chat 예외로 잘못 강등되므로 반드시 전파한다.
+ */
+export async function fetchOrdinaryWorkBoardCandidates(
+  config: AwbConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OrdinaryWorkBoardCandidate[]> {
+  const workspaceQuery = config.workspace_id
+    ? `?workspace_id=${encodeURIComponent(config.workspace_id)}`
+    : '';
+  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-board-candidates${workspaceQuery}`;
+  const resp = await fetchImpl(url, {
+    headers: { 'X-Agent-Key': config.apiKey },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`일반 작업 보드 후보 조회 실패: HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (!Array.isArray(data)) {
+    throw new Error('일반 작업 보드 후보 조회 실패: 응답이 배열이 아닙니다');
+  }
+  return data;
+}
+
 /**
  * POST a response payload back to AWB for a pending fs_request.
  * Fire-and-log on failure — server-side timeout will surface a 504 to the UI.
@@ -709,7 +742,22 @@ export async function fetchRepositoryCredential(
   agentId: string,
   workspaceId?: string,
 ): Promise<{ username?: string; token: string } | null> {
-  if (!resourceId || !agentId) return null;
+  return (await fetchRepositoryCredentialStatus(config, resourceId, agentId, workspaceId)).credential;
+}
+
+export interface RepositoryCredentialStatus {
+  credential: { username?: string; token: string } | null;
+  failure: string | null;
+}
+
+/** 자격 증명 부재(204)와 조회 실패를 구분하되 비밀 원문은 호출자에게만 반환한다. */
+export async function fetchRepositoryCredentialStatus(
+  config: AwbConfig,
+  resourceId: string,
+  agentId: string,
+  workspaceId?: string,
+): Promise<RepositoryCredentialStatus> {
+  if (!resourceId || !agentId) return { credential: null, failure: 'credential_lookup_not_applicable' };
   try {
     const workspaceQuery = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : '';
     const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
@@ -717,18 +765,18 @@ export async function fetchRepositoryCredential(
       headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    if (resp.status === 204) return null;
+    if (resp.status === 204) return { credential: null, failure: null };
     if (!resp.ok) {
       log(`repository credential fetch failed: ${resp.status} (resource=${resourceId.slice(0, 8)})`);
-      return null;
+      return { credential: null, failure: `http_${resp.status}` };
     }
     const body = await resp.json() as any;
     return typeof body?.token === 'string' && body.token
-      ? { username: typeof body.username === 'string' ? body.username : undefined, token: body.token }
-      : null;
+      ? { credential: { username: typeof body.username === 'string' ? body.username : undefined, token: body.token }, failure: null }
+      : { credential: null, failure: 'invalid_response' };
   } catch (err: any) {
     log(`repository credential fetch error: ${err?.message ?? err} (resource=${resourceId.slice(0, 8)})`);
-    return null;
+    return { credential: null, failure: 'request_failed' };
   }
 }
 

@@ -164,7 +164,14 @@ function makeDispatcher({ persistent = true, ticketMgr, worktreeManager, subagen
       ? worktreeManager
       : {
           async resolveCwd() {
-            return { isWorktree: true, cwd: '/tmp/wt', reused: false, mode: 'per_ticket' };
+            return {
+              isWorktree: true, cwd: '/tmp/wt', reused: false, mode: 'per_ticket',
+              repositoryContext: {
+                resourceId: 'r1', cwd: '/tmp/wt', baseBranch: 'main', baseSha: 'base-sha',
+                currentSha: 'head-sha', workingBranch: 'ticket/t1', dirty: false,
+                ahead: 0, behind: 0, resumed: false,
+              },
+            };
           },
           async verifyCheckout() {
             return { ok: true };
@@ -254,7 +261,12 @@ function assertNonce(reservation, msg = 'a placed reservation carries a generati
 let savedFetch;
 beforeEach(() => {
   savedFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({
+  globalThis.fetch = async (url) => String(url).includes('/api/agent/tickets/') ? ({
+    ok: true,
+    status: 200,
+    async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; },
+    async text() { return ''; },
+  }) : ({
     ok: false,
     status: 503,
     async json() {
@@ -397,6 +409,9 @@ test('한 hold의 억제 N건은 알림 1건과 별개로 suppressed ack N건을
     if (target.endsWith('/api/agent-manager/dispatch/ack')) {
       ackBodies.push(JSON.parse(body));
       return { ok: true, status: 200, async json() { return {}; }, async text() { return ''; }, headers: { get: () => null } };
+    }
+    if (target.includes('/api/agent/tickets/')) {
+      return { ok: true, status: 200, headers: { get: () => null }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; }, async text() { return ''; } };
     }
     if (body.includes('"tools/call"')) commentCalls.push(JSON.parse(body));
     return {
@@ -1146,6 +1161,9 @@ test('column trigger에 진 role-mention은 상관 ID·역할·사유를 suppres
     if (String(url).endsWith('/api/agent-manager/dispatch/ack')) {
       ackBodies.push(JSON.parse(String(init?.body || '{}')));
     }
+    if (String(url).includes('/api/agent/tickets/')) {
+      return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; } };
+    }
     return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return {}; } };
   };
 
@@ -1180,6 +1198,9 @@ test('role-mention 상관 계약이 없거나 역할이 다르면 차감 ACK를 
     const ackBodies = [];
     globalThis.fetch = async (url, init) => {
       if (String(url).endsWith('/api/agent-manager/dispatch/ack')) ackBodies.push(init?.body);
+      if (String(url).includes('/api/agent/tickets/')) {
+        return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; } };
+      }
       return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return {}; } };
     };
     const pTrigger = dispatcher.handleTrigger(evJson());
@@ -1200,6 +1221,9 @@ test('the suppression posts a ticket comment so the mention is not silently lost
   const savedFetchLocal = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const body = typeof init?.body === 'string' ? init.body : '';
+    if (String(url).includes('/api/agent/tickets/')) {
+      return { ok: true, status: 200, headers: { get: () => null }, async text() { return ''; }, async json() { return { id: 't1', current_column_id: 'c1', current_column_name: '진행 중', comments: [] }; } };
+    }
     if (body.includes('"initialize"')) {
       return {
         ok: true,

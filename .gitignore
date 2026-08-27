@@ -42,5 +42,5 @@ Thumbs.db
 # graphify output (run from repo root, sometimes spills here)
 graphify-out/
 
-# Other AI CLI session artifacts (untracked by design — separate from CLAUDE.md)
-AGENTS.md
+# 기타 AI CLI 세션 산출물(의도적으로 추적하지 않으며 CLAUDE.md와 별도 관리)
+# AGENTS.md는 CLAUDE.md에서 생성하며 의도적으로 버전 관리합니다.

@@ -18,6 +18,7 @@ import {
 } from './base-session-manager.js';
 import type { ParseResult } from './cli-adapters/base.js';
 import { composeTriggerPrompt } from './prompts.js';
+import { buildAgentContextContract, renderAgentContextContract } from './agent-context-contract.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
 import { postSilentExitSystemComment, postOutputLiveness, postToolCallTelemetry } from './rest.js';
@@ -56,6 +57,39 @@ const MOVING_RESUME_GRACE_MS = 30_000;
  *  comment readable in the board UI and avoids landing a multi-page CLI
  *  log in ticket activity. */
 const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
+
+/** 살아 있는 persistent 세션에 보내는 매 turn 최신 컨텍스트. 별도 export는
+ * resume 계약을 실제 조립 결과로 회귀 검증하기 위한 것이다. */
+export function composePersistentTriggerTurn(spec: TicketTriggerArgs): string {
+  const lines: string[] = [];
+  lines.push('[New Trigger] A new trigger arrived for the ticket you are already working on.');
+  if (spec.ticket?.__awb_enforce_context_contract || (spec.ticket?.id && spec.ticket?.current_column_id && spec.ticket?.current_column_name)) {
+    const contextContract = buildAgentContextContract({
+      ticket: spec.ticket,
+      role: spec.role,
+      repository: spec.ticket?.__awb_repository_context,
+      harness: spec.harness ?? spec.ticket?.__awb_harness ?? null,
+      runtimeProfile: spec.runtimeProfile ?? spec.ticket?.__awb_runtime_profile ?? null,
+      sessionMode: 'persistent',
+      effort: spec.effortPreset?.id ?? spec.ticket?.__awb_effort ?? null,
+    });
+    lines.push('');
+    lines.push(renderAgentContextContract(contextContract));
+  }
+  if (spec.ticket?.current_column_name || spec.ticket?.current_column_id) {
+    lines.push(
+      `Current column: ${spec.ticket.current_column_name || 'unknown'} ` +
+        `(kind: ${spec.ticket.current_column_kind || 'unknown'}, id: ${spec.ticket.current_column_id || 'unknown'})`,
+    );
+  }
+  if (spec.columnPrompt?.content) {
+    lines.push('', `Column workflow guide (${spec.columnPrompt.name || 'column_prompt'}):`, spec.columnPrompt.content);
+  }
+  if (spec.ticketPrompt) lines.push('', 'Updated instructions:', spec.ticketPrompt);
+  if (spec.worktreeInstructions) lines.push('', spec.worktreeInstructions);
+  lines.push('', 'Use mcp__awb__get_ticket to fetch the latest ticket state and continue your work.');
+  return lines.join('\n');
+}
 
 /** MCP tool name suffixes that count as the subagent leaving a real
  *  audit-trail entry. If at least one of these tools fires during the
@@ -963,33 +997,7 @@ export class TicketSessionManager
   }
 
   #composeTriggerTurn(spec: TicketTriggerArgs): string {
-    const lines: string[] = [];
-    lines.push('[New Trigger] A new trigger arrived for the ticket you are already working on.');
-    if (spec.ticket?.current_column_name || spec.ticket?.current_column_id) {
-      lines.push(
-        `Current column: ${spec.ticket.current_column_name || 'unknown'} ` +
-          `(kind: ${spec.ticket.current_column_kind || 'unknown'}, id: ${spec.ticket.current_column_id || 'unknown'})`,
-      );
-    }
-    if (spec.columnPrompt && (spec.columnPrompt as any).content) {
-      lines.push('');
-      lines.push(`Column workflow guide (${(spec.columnPrompt as any).name || 'column_prompt'}):`);
-      lines.push((spec.columnPrompt as any).content);
-    }
-    if (spec.ticketPrompt) {
-      lines.push('');
-      lines.push('Updated instructions:');
-      lines.push(spec.ticketPrompt);
-    }
-    if (spec.worktreeInstructions) {
-      lines.push('');
-      lines.push(spec.worktreeInstructions);
-    }
-    lines.push('');
-    lines.push(
-      'Use mcp__awb__get_ticket to fetch the latest ticket state and continue your work.',
-    );
-    return lines.join('\n');
+    return composePersistentTriggerTurn(spec);
   }
 
   // -- Post-comment "moving cue" → resume guard ----------------------------

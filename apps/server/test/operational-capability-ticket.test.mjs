@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { setupKanbanScene } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, setupKanbanScene } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '7827';
 
@@ -52,6 +52,92 @@ test('operational fallback is exactly-once, traces concurrent recurrence, clears
   const next = await post('message-d');
   assert.equal(next.status, 201, 'terminal completion permits a fresh capability ticket');
   assert.notEqual((await next.json()).id, ticketId);
+});
+
+test('ordinary work fallback creates one focused ticket on the selected board with chat provenance', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-fallback' });
+  const payload = {
+    workspace_id: ws.id, board_id: board.id, dedupe_key: 'room-message-key',
+    title: '일반 코드 수정', description: '회귀 테스트와 함께 수정한다.',
+    original_request: '코드를 수정해줘', room_id: 'room-source', message_id: 'message-source',
+  };
+  const post = () => fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-ticket`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  const first = await post();
+  const second = await post();
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 200);
+  const [firstBody, secondBody] = await Promise.all([first.json(), second.json()]);
+  assert.equal(firstBody.id, secondBody.id);
+  const tickets = await ds.getRepository('Ticket').find({ where: { operational_dedupe_key: 'ordinary:room-message-key' } });
+  assert.equal(tickets.length, 1, '동일 채팅 요청은 focused ticket 한 건만 만든다');
+  assert.equal(tickets[0].source_kind, 'chat');
+  assert.equal(tickets[0].source_chat_room_id, 'room-source');
+  const column = await ds.getRepository('BoardColumn').findOneByOrFail({ id: tickets[0].column_id });
+  assert.equal(column.board_id, board.id, '선택한 기존 보드의 워크플로에 생성한다');
+});
+
+test('ordinary work board candidates include only boards with an active workflow column', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-candidates' });
+  const manager = await createAgent(app, modules.getDataSourceToken, ws.id, {
+    name: 'ordinary-work-candidate-agent', hosted: false,
+  });
+  const key = await createApiKey(app, modules.getDataSourceToken, manager.id, {
+    workspaceId: ws.id, label: 'ordinary-work-candidates',
+  });
+  const columns = await ds.getRepository('BoardColumn').find({ where: { board_id: board.id } });
+  await ds.getRepository('BoardColumn').update(
+    columns.filter(column => !column.is_terminal).map(column => column.id),
+    { is_terminal: true },
+  );
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-board-candidates?workspace_id=${ws.id}`, {
+    headers: { 'X-Agent-Key': key.raw_key },
+  });
+  assert.equal(response.status, 200);
+  const candidates = await response.json();
+  assert.equal(candidates.some(candidate => candidate.id === board.id), false,
+    '활성 비종료 컬럼이 없는 보드는 생성 후보로 노출하지 않는다');
+});
+
+test('ordinary work fallback retry recovers dispatch after post-commit emission failure', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const ds = app.get(modules.getDataSourceToken());
+  const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-recovery' });
+  const activityService = app.get(modules.ActivityService);
+  const originalEmitLogged = activityService.emitLogged.bind(activityService);
+  let attempts = 0;
+  activityService.emitLogged = (rows) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('의도한 방출 실패');
+    return originalEmitLogged(rows);
+  };
+  t.after(() => { activityService.emitLogged = originalEmitLogged; });
+  const payload = {
+    workspace_id: ws.id, board_id: board.id, dedupe_key: 'recover-dispatch-key',
+    title: '방출 복구', room_id: 'room-recovery', message_id: 'message-recovery',
+  };
+  const post = () => fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-ticket`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  assert.equal((await post()).status, 503, '커밋 뒤 방출 실패를 성공으로 숨기지 않는다');
+  assert.equal((await post()).status, 200, '같은 요청 재시도가 durable activity를 다시 방출한다');
+  const tickets = await ds.getRepository('Ticket').find({ where: { operational_dedupe_key: 'ordinary:recover-dispatch-key' } });
+  assert.equal(tickets.length, 1);
+  assert.equal(await ds.getRepository('ActivityLog').count({
+    where: { ticket_id: tickets[0].id, action: 'created' },
+  }), 1, '생성 activity는 티켓과 같은 트랜잭션에서 정확히 한 건 저장된다');
+  assert.equal(attempts, 2, '재시도가 누락된 워크플로 방출을 정확히 복구한다');
+  const activity = await ds.getRepository('ActivityLog').findOneByOrFail({ ticket_id: tickets[0].id, action: 'created' });
+  assert.equal(activity.new_value, 'dispatched', '복구 성공 뒤 durable dispatch intent를 완료 처리한다');
 });
 
 test.after(() => exitAfterTests());

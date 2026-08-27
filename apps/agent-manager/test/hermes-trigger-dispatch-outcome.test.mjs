@@ -39,6 +39,7 @@ let mcpToolCalls;
 let dispatchAcks;
 let ticketGetCount;
 let repositoryCredentialRequests;
+let ticketPayload;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
@@ -46,6 +47,7 @@ beforeEach(() => {
   dispatchAcks = [];
   ticketGetCount = 0;
   repositoryCredentialRequests = [];
+  ticketPayload = { id: TICKET, comments: [] };
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
@@ -80,12 +82,55 @@ beforeEach(() => {
     if (target.includes('/api/agent/tickets/')) {
       ticketGetCount += 1;
       return new Response(
-        JSON.stringify({ id: TICKET, comments: [] }),
+        JSON.stringify(ticketPayload),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
+});
+
+test('ticket 조회 null이면 Hermes spawn 전에 ticket preflight nack한다', async (t) => {
+  ticketPayload = null;
+  const { dispatcher } = await harness(t, 'trusted');
+
+  const trigger = JSON.parse(ticketTrigger());
+  trigger.environment_config = {
+    repositories: [{ resource_id: 'repo-1', url: 'https://github.com/acme/app.git', target_dir: '.', branch: 'main', post_clone_commands: [] }],
+    env_vars: {}, setup_commands: [], setup_timeout_seconds: 600, version: 1,
+  };
+  await dispatcher.handleTrigger(JSON.stringify(trigger));
+  await waitForAck();
+
+  assert.deepEqual(dispatchAcks.map(({ outcome, reason }) => ({ outcome, reason })), [
+    { outcome: 'nack', reason: 'agent_context_ticket_missing' },
+  ]);
+});
+
+test('연결 저장소의 provisioning context 누락은 Hermes spawn 전에 repository preflight nack한다', async (t) => {
+  ticketPayload = {
+    id: TICKET,
+    current_column_id: 'column-1',
+    current_column_name: '진행 중',
+    comments: [],
+  };
+  const { dispatcher } = await harness(t, 'trusted', undefined, {
+    enabled: true,
+    async resolveCwd() { return { isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false }; },
+    async verifyCheckout() { return { ok: true }; },
+    async verifyPushReadiness() { return { ok: true }; },
+    async removeTicketWorktrees() { return 0; },
+    async removeTicketRunWorkspace() { return false; },
+  });
+
+  const trigger = JSON.parse(ticketTrigger());
+  trigger.repository_context_required = true;
+  await dispatcher.handleTrigger(JSON.stringify(trigger));
+  await waitForAck();
+
+  assert.deepEqual(dispatchAcks.map(({ outcome, reason }) => ({ outcome, reason })), [
+    { outcome: 'nack', reason: 'agent_context_repository_missing' },
+  ]);
 });
 
 afterEach(() => {
@@ -129,7 +174,14 @@ async function harness(t, permissionMode, cliHomeDir, worktreeOverride) {
   const worktreeManager = worktreeOverride || {
     enabled: true,
     async resolveCwd() {
-      return { isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false };
+      return {
+        isWorktree: true, cwd: '/workspace/.awb/wt/ticket', mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'repo-1', cwd: '/workspace/.awb/wt/ticket', baseBranch: 'main',
+          baseSha: 'base-sha', currentSha: 'head-sha', workingBranch: 'ticket/test',
+          dirty: false, ahead: 0, behind: 0, resumed: false,
+        },
+      };
     },
     async verifyCheckout() { return { ok: true }; },
     async verifyPushReadiness() { return { ok: true }; },
@@ -235,7 +287,14 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
     enabled: true,
     async resolveCwd(args) {
       calls.resolve.push(structuredClone(args));
-      return { isWorktree: true, cwd: gameCwd, mode: 'per_ticket', reused: false };
+      return {
+        isWorktree: true, cwd: gameCwd, mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'gameclient-resource', cwd: gameCwd, baseBranch: 'master',
+          baseSha: 'base-sha', currentSha: 'head-sha', workingBranch: 'ticket/txiv',
+          dirty: false, ahead: 0, behind: 0, resumed: false,
+        },
+      };
     },
     async verifyCheckout(cwd, url) {
       calls.checkout.push({ cwd, url });

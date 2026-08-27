@@ -13,15 +13,16 @@ import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   fetchTicketContext,
   fetchChatRoomHistory,
+  fetchOrdinaryWorkBoardCandidates,
   fetchAgentRecord,
-  fetchRepositoryCredential,
+  fetchRepositoryCredentialStatus,
   hasNewAgentComment,
   postFsResponse,
   postChatRoomMessage,
   postDispatchAck,
   provisionManagedAgentApiKey,
 } from './rest.js';
-import { readApiKey, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
+import { readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
@@ -29,6 +30,7 @@ import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
+import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-context-contract.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
@@ -66,6 +68,21 @@ import {
   SkillMaterializer,
   type RuntimeSkillSnapshot,
 } from './skills/skill-materializer.js';
+
+/**
+ * 일반 작업 보드 후보는 non-native 일반 채팅의 ticket-first 라우팅에만 필요하다.
+ * Action room은 capability-first 실행 경로이므로 후보 API의 장애가 실행을 막지 않게
+ * 조회 자체를 생략한다.
+ */
+export async function ordinaryWorkBoardsForChat(
+  config: AwbConfig,
+  usesNativeMcp: boolean,
+  isActionRoom: boolean,
+) {
+  return usesNativeMcp || isActionRoom
+    ? []
+    : fetchOrdinaryWorkBoardCandidates(config);
+}
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
@@ -333,16 +350,19 @@ export function resolveBootstrapRepository(
   baseRepo: unknown,
   baseBranch: unknown,
   environment: ResolvedEnvironmentConfig | null,
-): { resourceId: string; url: string; branch: string } | null {
+): { resourceId: string; url: string; branch: string; defaultBranch: string | null } | null {
   const repo = baseRepo && typeof baseRepo === 'object' ? baseRepo as any : null;
   const ticketUrl = typeof repo?.url === 'string' ? repo.url.trim() : '';
   if (ticketUrl) {
     const branch = (typeof baseBranch === 'string' ? baseBranch.trim() : '')
       || (typeof repo?.default_branch === 'string' ? repo.default_branch.trim() : '');
-    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch };
+    const defaultBranch = typeof repo?.default_branch === 'string' && repo.default_branch.trim()
+      ? repo.default_branch.trim()
+      : null;
+    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch, defaultBranch };
   }
   const boardRepo = environment?.repositories[0];
-  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch } : null;
+  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch, defaultBranch: null } : null;
 }
 
 /**
@@ -871,6 +891,7 @@ export interface PromptComposer {
     roomName?: string,
     isActionRoom?: boolean,
     workFolder?: string,
+    ordinaryWorkBoards?: Array<{ id: string; name: string; description?: string }>,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -2414,9 +2435,16 @@ export class EventDispatcher {
     // one-shot subagent fallback below read agentContext.cwd, so one rewrite
     // covers both paths.
     const selectedRepo = resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig);
-    const repoCredential = selectedRepo?.resourceId && agentContext?.agent_id
-      ? await fetchRepositoryCredential(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
-      : null;
+    // 선택 결과뿐 아니라 trigger 자체의 저장소 계약도 요구 근거로 보존한다.
+    // malformed/부분 payload가 resolve 단계에서 null이 되더라도 "저장소 없음"
+    // 모드로 조용히 강등하지 않고 repository preflight에서 원인을 드러낸다.
+    const repositoryContextRequired = Boolean(
+      selectedRepo || ev.base_repo || ev.repository_context_required === true || envConfig?.repositories.length,
+    );
+    const repoCredentialStatus = selectedRepo?.resourceId && agentContext?.agent_id
+      ? await fetchRepositoryCredentialStatus(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
+      : { credential: null, failure: selectedRepo ? 'credential_lookup_not_applicable' : null };
+    const repoCredential = repoCredentialStatus.credential;
     const worktreeMode = parseWorktreeMode(ev.worktree_mode);
     const applyWorktree = () => this.#applyWorktreeCwd(
       agentContext,
@@ -2426,7 +2454,12 @@ export class EventDispatcher {
       typeof ev.max_concurrent_tickets_per_agent === 'number'
         ? ev.max_concurrent_tickets_per_agent
         : undefined,
-      selectedRepo ? { ...selectedRepo, credential: repoCredential } : null,
+      selectedRepo ? {
+        resourceId: selectedRepo.resourceId,
+        url: selectedRepo.url,
+        branch: selectedRepo.branch,
+        credential: repoCredential,
+      } : null,
     );
     let worktreeProvision = await applyWorktree();
 
@@ -2829,11 +2862,84 @@ export class EventDispatcher {
       worktreeProvision.recoveryInstructions || '',
     ].filter(Boolean).join('\n\n');
 
+    // Hermes는 RuntimeSupervisor가 이 dispatch에 AWB 하나를 직접 주입한다.
+    // CLI 경로는 실제 spawn에 넘길 관리형 mcp-config를 읽어 진단 계약이
+    // 설정 파일과 어긋나지 않게 한다. 읽을 수 없으면 추정하지 않고 빈 목록이다.
+    const activeMcpServers = agentContext?.cli === 'hermes'
+      ? ['awb']
+      : await readMcpConfigServerNames(agentContext?.mcp_config_path || '');
+
+    const attachContextContract = (ticket: any, sessionMode: 'persistent' | 'stateless' | 'hermes') => {
+      if (!ticket) {
+        throw new AgentContextPreflightError('ticket', 'ticket context 조회 결과가 없습니다');
+      }
+      // REST ticket payload보다 trigger envelope가 dispatch 시점의 최신 확정값이다.
+      // 계약 preflight 전에 병합해야 누락을 숨기지 않으면서 정상 dispatch도 통과한다.
+      ticket.id = ticket.id || ev.ticket_id || '';
+      ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
+      ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
+      ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
+      ticket.__awb_role = ev.action || '';
+      ticket.__awb_enforce_context_contract = true;
+      ticket.__awb_repository_context = worktreeProvision.repositoryContext;
+      // 안전한 no-worktree fallback은 의도된 실행 모드라 repository=null을
+      // 허용한다. provisioning이 repository contract를 확정했다고 표시한 경우만
+      // 이후 누락을 preflight 오류로 취급한다.
+      // 안전한 provisioning fallback은 실패 원인과 복구 범위를 전달해 Agent가
+      // 저장소 준비 자체를 복구하는 명시적 예외다. 이 경로에서는 아직 완성된
+      // repository context가 없다는 사실이 정상이며, 그 외 누락만 fail-closed한다.
+      const requirePreparedRepository = repositoryContextRequired && !worktreeProvision.recoveryInstructions;
+      ticket.__awb_require_repository_context = requirePreparedRepository;
+      if (requirePreparedRepository && !worktreeProvision.repositoryContext) {
+        throw new AgentContextPreflightError('repository', '연결된 저장소의 준비 결과가 없습니다');
+      }
+      ticket.__awb_harness = harness;
+      ticket.__awb_runtime_profile = runtimeProfile;
+      ticket.__awb_session_mode = sessionMode;
+      ticket.__awb_effort = effortPreset?.id ?? null;
+      ticket.__awb_context_metadata = {
+        remoteUrl: selectedRepo?.url ?? null,
+        defaultBranch: selectedRepo?.defaultBranch ?? worktreeProvision.repositoryContext?.defaultBranch ?? null,
+        credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
+        credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
+        sandbox: harness?.permission_mode ?? 'managed-default',
+        requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
+        mcpServers: activeMcpServers,
+        relatedTickets: ticket.related_tickets ?? [],
+        recentDecisions: ticket.recent_decisions ?? [],
+        unresolvedQuestions: ticket.unresolved_questions ?? [],
+        verificationCommands: ticket.verification_commands ?? [],
+      };
+      if (ticket.__awb_repository_context) {
+        Object.assign(ticket.__awb_repository_context, {
+          remoteUrl: selectedRepo?.url,
+          defaultBranch: selectedRepo?.defaultBranch ?? ticket.__awb_repository_context.defaultBranch,
+          fetchedSha: ticket.__awb_repository_context.baseSha,
+          credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
+          credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
+        });
+      }
+      log(
+        `Agent context v${AGENT_CONTEXT_VERSION}: ticket=${ev.ticket_id} role=${ev.action || ''} ` +
+        `cwd=${worktreeProvision.repositoryContext?.cwd || agentContext?.cwd || ''} ` +
+        `resource=${worktreeProvision.repositoryContext?.resourceId || ''} ` +
+        `branch=${worktreeProvision.repositoryContext?.workingBranch || ''} ` +
+        `base=${worktreeProvision.repositoryContext?.baseSha || ''} ` +
+        `head=${worktreeProvision.repositoryContext?.currentSha || ''} ` +
+        `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
+        `repositoryRequired=${repositoryContextRequired} ` +
+        `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
+        `permission=${harness?.permission_mode || 'managed-default'} ` +
+        `mcp=${activeMcpServers.join(',') || 'none'} session=${sessionMode}`,
+      );
+      return ticket;
+    };
+
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.
     if (agentContext?.cli === 'hermes') {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'hermes');
         if (ticket) {
           ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
           ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
@@ -2895,6 +3001,11 @@ export class EventDispatcher {
           this.#ackDispatch(ev, 'processed');
         }
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         log(`Hermes trigger dispatch failed closed: ${err?.code || ''} ${err?.message ?? err}`);
         this.#ackDispatch(ev, 'nack', err?.code || 'runtime_protocol_error');
       }
@@ -2925,7 +3036,7 @@ export class EventDispatcher {
 
     if (delegationEnabled && persistentTicket && this.#ticketSessionManager) {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'persistent');
         if (ticket) {
           ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
           ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
@@ -2998,6 +3109,11 @@ export class EventDispatcher {
           `Ticket session dispatch declined (${result.reason}), falling back to one-shot subagent`,
         );
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         // Only trust the gate if dispatchTrigger() was actually called: its
         // circuit-breaker check runs first and synchronously (no await)
         // before anything fallible inside dispatchTrigger, so once the call
@@ -3017,7 +3133,7 @@ export class EventDispatcher {
 
     if (canDelegate && this.#subagentManager) {
       try {
-        const ticket = await fetchTicketContext(this.#config, ev.ticket_id);
+        const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'stateless');
         if (ticket && selectedRepo) {
           ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
           ticket.base_branch = selectedRepo.branch;
@@ -3159,6 +3275,11 @@ export class EventDispatcher {
         }
         log(`Subagent spawn declined (${result.reason}); no further fallback in standalone mode`);
       } catch (err: any) {
+        if (err instanceof AgentContextPreflightError) {
+          log(`Agent context preflight failed: category=${err.category} ticket=${ev.ticket_id} ${err.message}`);
+          this.#ackDispatch(ev, 'nack', `agent_context_${err.category}_missing`);
+          return;
+        }
         log(`Delegation path failed: ${err?.message ?? err}; dropping`);
       }
     }
@@ -4338,6 +4459,11 @@ export class EventDispatcher {
           { fetchImages: false },
         );
         const rolePrompt = p.role_prompt || '';
+        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+          this.#config,
+          false,
+          !!p.is_action_room,
+        );
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -4353,6 +4479,7 @@ export class EventDispatcher {
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
             provisionedWorkFolder,
+            ordinaryWorkBoards,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
@@ -4490,6 +4617,11 @@ export class EventDispatcher {
         // the persistent path above). Match the reply-channel instruction to
         // whether this CLI can call the AWB MCP tool itself.
         const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+          this.#config,
+          usesNativeMcp,
+          !!p.is_action_room,
+        );
         const taskText =
           this.#prompts?.composeChatRoomPrompt(
             p.room_id,
@@ -4508,6 +4640,7 @@ export class EventDispatcher {
             '',
             !!p.is_action_room,
             provisionedWorkFolder,
+            ordinaryWorkBoards,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({

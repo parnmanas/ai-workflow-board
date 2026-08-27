@@ -14,7 +14,7 @@ import {
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
 import { createAdapter } from './cli-adapters/index.js';
-import { fetchChatRoomHistory, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
+import { fetchChatRoomHistory, fetchOrdinaryWorkBoardCandidates, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
 import { classifyCliError, hasUntrustedWorkspaceWarning } from './cli-error-signatures.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
@@ -404,6 +404,10 @@ export class ChatSessionManager
       history,
       canEmitImages,
     );
+    const usesNativeMcp = createAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+    const ordinaryWorkBoards = usesNativeMcp || spec.isActionRoom
+      ? []
+      : await fetchOrdinaryWorkBoardCandidates(this._config);
     const firstTurnText = composeChatRoomPrompt(
       spec.roomId,
       history,
@@ -413,11 +417,12 @@ export class ChatSessionManager
         sender_id: spec.senderId || '',
       },
       preparedFirstTurn,
-      createAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP),
+      usesNativeMcp,
       historyAttachments,
       spec.roomName || '',
       spec.isActionRoom || false,
       spec.provisionedWorkFolder || '',
+      ordinaryWorkBoards,
     );
     // Vision blocks: history images first (chronological), current turn last
     // so the freshest image is the most salient.
