@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../../api';
-import type { OntologyGraphProgressEvent, OntologyGraphStatusResponse, Resource } from '../../types';
+import type { OntologyGraphProgressEvent, OntologyGraphSnapshotResponse, OntologyGraphStatusResponse, Resource } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Select } from '../common';
 import { freshnessBadge, type FreshnessTone } from './freshness';
+import OntologyGraphCanvas from './OntologyGraphCanvas';
 
 // tokens.colors 조합만 사용(hex 리터럴 금지) — 아래 4개 쌍(success/danger/
 // warning/info Light 변형 on surface)은 contrast.test.mjs가 이미
@@ -37,6 +38,9 @@ export default function OntologyGraphPage() {
   const [statusResp, setStatusResp] = useState<OntologyGraphStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [snapshot, setSnapshot] = useState<OntologyGraphSnapshotResponse | null>(null);
+  const [graphError, setGraphError] = useState('');
+  const [graphLoading, setGraphLoading] = useState(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 같은 (resource_id, folder_path) 선택에 대해 재방문 로그를 중복 기록하지
   // 않기 위한 마지막 로깅 키 — 폴링 tick마다가 아니라 "사람이 다른
@@ -69,6 +73,8 @@ export default function OntologyGraphPage() {
   // graph_status MCP 툴과 동일 계약).
   useEffect(() => {
     if (!resourceId) { setStatusResp(null); return; }
+    setStatusResp(null);
+    setSnapshot(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, resourceId, folderPath]);
@@ -115,6 +121,25 @@ export default function OntologyGraphPage() {
     const handle = setInterval(() => void load({ silent: true }), POLL_MS);
     return () => clearInterval(handle);
   }, [isBuilding, load]);
+
+  useEffect(() => {
+    const graphId = statusResp?.graph_id;
+    const canRender = statusResp?.status === 'ready' || statusResp?.status === 'stale';
+    if (!graphId || !canRender) {
+      setSnapshot(null);
+      setGraphError('');
+      setGraphLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setGraphError('');
+    setGraphLoading(true);
+    api.getOntologyGraph(wsId, graphId)
+      .then((next) => { if (!cancelled) setSnapshot(next); })
+      .catch((error: any) => { if (!cancelled) { setSnapshot(null); setGraphError(error?.message || 'Failed to load graph'); } })
+      .finally(() => { if (!cancelled) setGraphLoading(false); });
+    return () => { cancelled = true; };
+  }, [wsId, statusResp?.graph_id, statusResp?.status, statusResp?.indexed_at]);
 
   // 배경 스윕/증분 갱신(오늘은 대개 무음 — incremental scheduler가 아직
   // 어떤 실 트리거에도 배선돼 있지 않음, ontology-graph-freshness.test.mjs
@@ -213,11 +238,28 @@ export default function OntologyGraphPage() {
           />
         )}
 
-        {resourceId && (statusResp?.status === 'ready' || statusResp?.status === 'stale') && (
+        {resourceId && loading && <EmptyState title="Loading graph" description="Checking the graph build and loading its latest snapshot…" />}
+        {resourceId && !loading && graphLoading && <EmptyState title="Loading graph" description="Preparing the latest bounded graph snapshot…" />}
+
+        {resourceId && graphError && (
+          <EmptyState title="Graph could not be loaded" description={graphError} />
+        )}
+
+        {resourceId && snapshot && snapshot.nodes.length === 0 && (
           <EmptyState
-            title="Graph canvas coming soon"
-            description="The interactive graph renderer ships in a separate follow-up ticket. The graph itself is already built and queryable via the graph_ MCP tools."
+            title="Graph is empty"
+            description="The build completed but produced no active nodes. Refresh the graph after checking the selected repository and folder."
           />
+        )}
+
+        {resourceId && snapshot && snapshot.nodes.length > 0 && (
+          <>
+            <div style={{ color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>
+              {snapshot.nodes.length.toLocaleString()} nodes · {snapshot.edges.length.toLocaleString()} edges
+              {snapshot.truncated ? ` · showing a centrality-ranked sample of ${snapshot.total_nodes.toLocaleString()} nodes and ${snapshot.total_edges.toLocaleString()} edges` : ''}
+            </div>
+            <OntologyGraphCanvas snapshot={snapshot} />
+          </>
         )}
       </div>
     </div>

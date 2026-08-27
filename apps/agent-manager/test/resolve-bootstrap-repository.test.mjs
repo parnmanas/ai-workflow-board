@@ -37,12 +37,12 @@ const BOARD_ENV = env([
 
 test('ticket repo wins over the board environment (ticket > board priority)', () => {
   const picked = resolveBootstrapRepository(TICKET_REPO, 'feature/x', BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'feature/x' });
+  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'feature/x', defaultBranch: 'develop' });
 });
 
 test('ticket repo with no explicit branch falls back to the ticket repo\'s OWN default_branch (not the board env repo\'s)', () => {
   const picked = resolveBootstrapRepository(TICKET_REPO, '', BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'develop' });
+  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'develop', defaultBranch: 'develop' });
 });
 
 test('ticket repo with whitespace-only branch is treated as empty and falls back to the repo default_branch', () => {
@@ -52,7 +52,7 @@ test('ticket repo with whitespace-only branch is treated as empty and falls back
 
 test('empty ticket repo (base_repo: null) falls back to the board environment\'s first repository', () => {
   const picked = resolveBootstrapRepository(null, null, BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'main' });
+  assert.deepEqual(picked, { resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'main', defaultBranch: null });
 });
 
 test('inherited repo snapshot + empty ticket base_branch + board branch != resource default_branch → the resolved (board) branch wins', () => {
@@ -70,7 +70,7 @@ test('inherited repo snapshot + empty ticket base_branch + board branch != resou
     default_branch: 'main', // resource 고유 default — board가 지정한 "release"가 아님
   };
   const picked = resolveBootstrapRepository(inheritedRepo, 'release', BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'release' });
+  assert.deepEqual(picked, { resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'release', defaultBranch: 'main' });
   assert.notEqual(picked.branch, inheritedRepo.default_branch, 'board가 지정한 branch가 resource default로 조용히 덮여쓰이면 안 된다');
 });
 
@@ -93,7 +93,7 @@ test('baseRepo of the wrong shape (string / number / array) is treated as absent
   for (const bad of ['not-an-object', 42, ['a', 'b']]) {
     assert.equal(resolveBootstrapRepository(bad, null, null), null);
     assert.deepEqual(resolveBootstrapRepository(bad, null, BOARD_ENV), {
-      resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'main',
+      resourceId: 'board-resource', url: 'https://github.com/acme/board-repo.git', branch: 'main', defaultBranch: null,
     });
   }
 });
@@ -123,5 +123,5 @@ test('board env repository with no resource_id still resolves (agent-manager is 
   // 하나뿐이고 더 넓게 번지지 않았음을 고정한다.
   const urlOnly = env([{ resource_id: '', url: 'https://github.com/acme/url-only.git', target_dir: 'repos/url-only', branch: '', post_clone_commands: [] }]);
   const picked = resolveBootstrapRepository(null, null, urlOnly);
-  assert.deepEqual(picked, { resourceId: '', url: 'https://github.com/acme/url-only.git', branch: '' });
+  assert.deepEqual(picked, { resourceId: '', url: 'https://github.com/acme/url-only.git', branch: '', defaultBranch: null });
 });

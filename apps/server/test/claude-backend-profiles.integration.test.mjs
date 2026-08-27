@@ -182,7 +182,7 @@ describe('Claude backend profile integration', () => {
     assert.deepEqual(await authoritativeWorkspaceRuntimeProfiles(ds, refreshed), []);
   });
 
-  it('rejects a missing credential_ref on update without changing the profile and accepts an existing credential', async () => {
+  it('rejects a missing credential_ref, accepts an existing credential, and clears an optional selection', async () => {
     const missingCredentialId = randomUUID();
     const rejected = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileA.id}`, {
       token: adminToken,
@@ -214,6 +214,17 @@ describe('Claude backend profile integration', () => {
     assert.equal(
       (await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: profileA.id })).credential_ref,
       replacementCredentialId,
+    );
+
+    const cleared = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${profileA.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: { credential_ref: null, credential_required: false },
+    });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+    assert.equal(
+      (await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: profileA.id })).credential_ref,
+      null,
     );
   });
 

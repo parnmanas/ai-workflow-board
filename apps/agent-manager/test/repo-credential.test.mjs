@@ -19,6 +19,7 @@ import { execFileSync } from 'node:child_process';
 
 import {
   authenticatedCloneUrl,
+  cloneWithRepoCredential,
   installRepoCredential,
   scrubOriginUrl,
   maskCredential,
@@ -178,34 +179,41 @@ test('scrubOriginUrl: origin 을 토큰 없는 clean URL 로 되돌린다', asyn
   }
 });
 
+test('cloneWithRepoCredential: clean origin과 repo 전용 helper를 만들고 임시 credential 파일을 제거한다', async () => {
+  const root = await fsp.mkdtemp(join(tmpdir(), 'awb-clone-cred-'));
+  const source = join(root, 'source');
+  const target = join(root, 'target');
+  try {
+    await fsp.mkdir(source);
+    git(source, ['init', '-q', '-b', 'main']);
+    git(source, ['config', 'user.email', 'test@awb.local']);
+    git(source, ['config', 'user.name', 'AWB Test']);
+    await fsp.writeFile(join(source, 'README.md'), 'clone test\n');
+    git(source, ['add', '.']);
+    git(source, ['commit', '-q', '-m', 'base']);
+    const result = await cloneWithRepoCredential({ url: source, dir: target, branch: 'main' });
+    assert.equal(result.ok, true, result.stderr);
+    assert.equal(git(target, ['remote', 'get-url', 'origin']), source);
+    assert.deepEqual(
+      (await fsp.readdir(root)).filter((name) => name.startsWith('.awb-clone-credential-')),
+      [],
+    );
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
 // ── 구조 가드: git clone spawn 경로는 반드시 헬퍼를 경유 ────────────────────────
 
-test('구조 가드: `git clone` 을 spawn 하는 src/lib 파일은 repo-credential 을 import 한다', () => {
+test('구조 가드: ticket/run clone은 토큰을 argv에 넣지 않는 공통 helper를 사용한다', () => {
   const libDir = fileURLToPath(new URL('../src/lib', import.meta.url));
   const files = readdirSync(libDir).filter((f) => f.endsWith('.ts'));
-  // git 인자 배열 리터럴 `['clone'` / `[ "clone"` 를 clone 프로비저닝의 판별자로 사용
-  // (fetch/pull 전용 self-update·plugin 경로는 target repo 를 clone 하지 않으므로 제외).
-  const clonesRepo = /\[\s*['"]clone['"]/;
-  const offenders = [];
-  for (const f of files) {
-    if (f === 'repo-credential.ts') continue;
-    const src = readFileSync(join(libDir, f), 'utf8');
-    if (!clonesRepo.test(src)) continue;
-    const routed =
-      src.includes("from './repo-credential.js'") && src.includes('installRepoCredential');
-    if (!routed) offenders.push(f);
+  for (const file of ['worktree-manager.ts', 'run-provisioner.ts']) {
+    const src = readFileSync(join(libDir, file), 'utf8');
+    assert.match(src, /cloneWithRepoCredential/);
+    assert.doesNotMatch(src, /authenticatedCloneUrl\(/);
   }
-  assert.deepEqual(
-    offenders,
-    [],
-    `git clone 을 하면서 repo-credential 헬퍼를 경유하지 않는 파일: ${offenders.join(', ')}`,
-  );
-  // 가드 자체가 의미 없어지지 않도록: 최소한 두 프로비저너는 잡혀야 한다.
-  const cloneFiles = files.filter(
-    (f) => f !== 'repo-credential.ts' && clonesRepo.test(readFileSync(join(libDir, f), 'utf8')),
-  );
-  assert.ok(
-    cloneFiles.includes('worktree-manager.ts') && cloneFiles.includes('run-provisioner.ts'),
-    `clone 프로비저너 감지 실패: ${cloneFiles.join(', ')}`,
-  );
+  const helper = readFileSync(join(libDir, 'repo-credential.ts'), 'utf8');
+  assert.match(helper, /credential\.helper=store --file=/);
+  assert.match(helper, /\.awb-clone-credential-/);
 });

@@ -47,6 +47,7 @@ import { detectHarnessSessionLimit, resolveDeferUntil } from './session-limit-de
 import type { HarnessSessionLimitDetection } from './session-limit-defer.js';
 import { summarizeCliJsonLine } from './cli-output-summary.js';
 import {
+  applyClaudeRuntimeProfileEnvPolicy,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -70,7 +71,12 @@ import {
   startMentionAuditRun,
   type AwbConfig,
 } from './rest.js';
-import { ensureOperationalFallbackTicket, parseOperationalFallback } from './operational-chat-fallback.js';
+import {
+  ensureOperationalFallbackTicket,
+  ensureOrdinaryWorkFallbackTicket,
+  parseOperationalFallback,
+  parseOrdinaryWorkFallback,
+} from './operational-chat-fallback.js';
 import type {
   SubagentManager as SubagentManagerContract,
   SubagentSpawnArgs,
@@ -897,7 +903,7 @@ export class SubagentManager implements SubagentManagerContract {
         // harnessEnv merges LAST: a per-dispatch harness model must beat the
         // per-agent extra_env baked at spawn_agent time (deepseek's
         // ANTHROPIC_MODEL — flag/env agreement, see DeepSeekCliAdapter).
-        env: {
+        env: applyClaudeRuntimeProfileEnvPolicy({
           ...baseEnv,
           // Board env_vars (ticket 354d336b) merge right after baseEnv so they
           // set non-secret config but never shadow AWB_API_KEY / cli-home /
@@ -909,7 +915,7 @@ export class SubagentManager implements SubagentManagerContract {
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
           ...(maxOutputResolution?.env ?? {}),
-        },
+        }, claudeRuntimeProfile),
       });
       if (runtimeLease) child.once('close', () => void runtimeLease?.close());
       child.once('error', (err: any) => {
@@ -1185,8 +1191,20 @@ export class SubagentManager implements SubagentManagerContract {
           // Chat one-shot: post the result (or a generic failure) to the room.
           // Chat replies don't feed the ticket trigger loop, so the re-trigger
           // guard below is irrelevant here — keep prior behavior.
+          const ordinaryFallback = answer ? parseOrdinaryWorkFallback(answer) : null;
           const fallback = answer ? parseOperationalFallback(answer) : null;
-          if (fallback) {
+          if (ordinaryFallback) {
+            try {
+              const ticket = await ensureOrdinaryWorkFallbackTicket(this.#config, ordinaryFallback, {
+                room_id: record.room_id,
+                message_id: record.chat_request_id || '',
+              });
+              answer = `${ticket.reused ? '기존' : '새'} 작업 티켓을 ${ticket.reused ? '재사용' : '자동 생성'}하고 워크플로에 연결했습니다: ${ticket.id} ${ticket.title}`;
+            } catch (error: any) {
+              log(`[ordinary-work-fallback] observable failure room=${record.room_id}: ${error?.message || error}`);
+              answer = `⚠️ 작업 티켓 자동 생성에 실패했습니다. 채팅 답변만으로 완료 처리하지 않고 매니저 오류로 기록했습니다: ${error?.message || error}`;
+            }
+          } else if (fallback) {
             try {
               const ticket = await ensureOperationalFallbackTicket(this.#config, fallback, {
                 room_id: record.room_id,

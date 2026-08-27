@@ -274,6 +274,8 @@ test('global CRUD is AdminGuard-protected and referenced deletion is transaction
   assert.match(adminControllerSource, /this\.dataSource\.transaction/);
   assert.match(adminControllerSource, /replacement_profile_id/);
   assert.match(adminControllerSource, /detach === true/);
+  assert.match(adminControllerSource, /profilePatch\.credential_ref === null/);
+  assert.match(adminControllerSource, /delete merged\.credential_ref/);
 });
 
 test('workspace assignment requires owner for writes and masks credential refs for reads', () => {

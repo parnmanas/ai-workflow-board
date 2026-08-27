@@ -82,7 +82,7 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
           <>
             {hasPermission('admin.access') && (
               <div style={{ marginBottom: 20 }}>
-                <ClaudeBackendProfilesManager />
+                <ClaudeBackendProfilesManager workspaceId={wsId} />
               </div>
             )}
             <WorkspaceClaudeBackendProfilesEditor workspaceId={wsId} />

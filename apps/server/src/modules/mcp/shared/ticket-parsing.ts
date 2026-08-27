@@ -247,23 +247,21 @@ export async function loadTicketFull(
         relations: ['board'],
       })
     : null;
-  // 컬럼의 실효 workspace: 자기 scoping 이 있으면 그것, 없으면 board 의 것.
-  // column → board → workspace 가 권위 있는 연결이고, 두 컬럼 모두 nullable 이라
-  // workspace scoping 도입 이전 행은 빈 값을 들고 board 에서 상속받는다.
-  const columnWorkspaceId = currentColumn
-    ? (currentColumn.workspace_id || currentColumn.board?.workspace_id || '')
-    : '';
+  // 티켓의 실효 workspace는 현재 컬럼이 속한 보드가 권위 기준이다. TXIV처럼
+  // 보드는 현재 workspace로 옮겨졌지만 Ticket/BoardColumn의 비정규화 workspace_id가
+  // 예전 값을 유지하는 행이 존재한다. 컬럼 자신의 stale 값을 우선하면 정상 보드
+  // 소속 티켓을 cross-workspace로 오판하고, 보드 environment repo 상속도 막힌다.
+  const effectiveWorkspaceId = currentColumn?.board?.workspace_id || ticket.workspace_id || '';
   // 루트 티켓의 워크플로 상태는 컬럼이 결정한다. 기준 컬럼을 fail-closed 로
   // 해석한다 — 빈 값이나 추측한 이름을 반환하면 다른 workspace 의 컬럼을
   // 노출하거나 호출자가 레거시 저장 값인 Ticket.status 로 폴백하도록 유도할 수 있다.
-  // 다만 "레거시라 scoping 이 아예 없음"(빈 값)과 "다른 workspace 소속"(실제 불일치)은
-  // 다르다. 전자는 해석하고, 후자만 막는다.
+  // Ticket/BoardColumn의 workspace_id는 레거시 비정규화 값일 수 있으므로 소속
+  // 판정에 쓰지 않는다. 컬럼 또는 그 부모 보드 자체가 없을 때만 막는다.
   if (!ticket.parent_id && (
-    !currentColumn ||
-    (columnWorkspaceId !== '' && columnWorkspaceId !== ticket.workspace_id)
+    !currentColumn || !currentColumn.board
   )) {
     throw new Error(
-      `Ticket ${ticket.id} has no current column in workspace ${ticket.workspace_id}`,
+      `Ticket ${ticket.id} has no current column in workspace ${effectiveWorkspaceId}`,
     );
   }
   const out: any = {
@@ -444,10 +442,10 @@ export async function loadTicketFull(
   // a ticket cloned across workspaces) never leaks the foreign url here.
   if (ticket.base_repo_resource_id) {
     try {
-      const candidate = ticket.workspace_id
+      const candidate = effectiveWorkspaceId
         ? await scope.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } })
         : null;
-      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === ticket.workspace_id)
+      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === effectiveWorkspaceId)
         ? candidate
         : null;
       out.base_repo = repo
@@ -480,8 +478,8 @@ export async function loadTicketFull(
         col?.board_id
           ? scope.getRepository(Board).findOne({ where: { id: col.board_id } })
           : Promise.resolve(null),
-        ticket.workspace_id
-          ? scope.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
+        effectiveWorkspaceId
+          ? scope.getRepository(Workspace).findOne({ where: { id: effectiveWorkspaceId } })
           : Promise.resolve(null),
       ]);
       const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
@@ -489,7 +487,7 @@ export async function loadTicketFull(
       const candidate = picked.resourceId
         ? await scope.getRepository(Resource).findOne({ where: { id: picked.resourceId } })
         : null;
-      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === ticket.workspace_id)
+      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === effectiveWorkspaceId)
         ? candidate
         : null;
       if (repo) {

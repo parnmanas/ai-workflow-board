@@ -11,9 +11,8 @@
 // `comments` is `[]` by construction (perf ticket b3812637) — so the tab showed
 // nothing while the card still displayed a comment count.
 //
-// The fail-closed intent (never expose another workspace's column, never let a
-// caller fall back to the legacy Ticket.status) is preserved: a GENUINE
-// cross-workspace mismatch still throws — asserted at the bottom.
+// 소속의 권위 기준은 column → board 연결이다. Ticket/BoardColumn workspace_id는
+// 보드 이동 뒤 stale할 수 있으므로 서로 달라도 상세 조회를 막지 않는다.
 
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -86,7 +85,7 @@ test('NULL-workspace column (pre-migration rows) resolves the same way', async (
   assert.equal(detail.current_column_id, columns.todo.id);
 });
 
-test('a column scoped to a DIFFERENT workspace still fails closed', async () => {
+test('보드 소속이 정상이면 stale ticket/column workspace 불일치도 보드 기준으로 해석한다', async () => {
   const { ws, board, columns } = await setupKanbanScene(app, modules.getDataSourceToken, {
     workspaceName: 'cross-ws-guard',
   });
@@ -95,15 +94,15 @@ test('a column scoped to a DIFFERENT workspace still fails closed', async () => 
     columnId: columns.todo.id, workspaceId: ws.id, title: 'cross-workspace ticket',
   });
 
-  // Column + board genuinely belong to another workspace — the exact leak the
-  // fail-closed guard exists to prevent. This must still throw.
-  await makeLegacyScoping(columns.todo.id, board.id, other.id, other.id);
+  // TXIV 재현: 보드는 현재 workspace에 있지만 column/ticket의 비정규화 값만
+  // 과거 workspace를 가리킨다. column → board 소속이 권위 기준이어야 한다.
+  await ds.getRepository('BoardColumn').update(columns.todo.id, { workspace_id: other.id });
+  await ds.getRepository('Ticket').update(ticket.id, { workspace_id: other.id });
 
-  await assert.rejects(
-    () => loadTicketFull(ds, ticket.id, { commentLimit: 50 }),
-    /no current column in workspace/,
-    'cross-workspace column must still fail closed',
-  );
+  const detail = await loadTicketFull(ds, ticket.id, { commentLimit: 50 });
+  assert.equal(detail.current_column_id, columns.todo.id);
+  assert.equal(detail.current_column_name, columns.todo.name);
+  assert.equal(board.workspace_id, ws.id);
 });
 
 test('a root ticket with no column at all still fails closed', async () => {

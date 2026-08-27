@@ -52,7 +52,7 @@ process.env.SQLJS_DB_PATH = path.join(tmpDir, 'primary.db');
 process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
-const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
+const { AppDataSource, AppOntologyDataSource, initDb, flushOntologySqljs } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 const { Resource } = await import('file://' + path.join(DIST_ROOT, 'entities/Resource.js'));
 const { Credential } = await import('file://' + path.join(DIST_ROOT, 'entities/Credential.js'));
 const { OntologyGraph } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyGraph.js'));
@@ -92,12 +92,13 @@ function fakeRes() {
   };
 }
 
-let graphRepo, edgeRepo, resourceRepo, credentialRepo;
+let graphRepo, nodeRepo, edgeRepo, resourceRepo, credentialRepo;
 let lifecycleService, controller, logs;
 
 before(async () => {
   await initDb();
   graphRepo = AppOntologyDataSource.getRepository(OntologyGraph);
+  nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
   edgeRepo = AppOntologyDataSource.getRepository(OntologyEdge);
   resourceRepo = AppDataSource.getRepository(Resource);
   credentialRepo = AppDataSource.getRepository(Credential);
@@ -115,7 +116,7 @@ before(async () => {
     info: (cat, msg, meta) => { logs.push({ cat, msg, meta }); },
     warn() {}, error() {},
   };
-  controller = new OntologyController(resourceRepo, credentialRepo, lifecycleService, capturingLogger);
+  controller = new OntologyController(resourceRepo, credentialRepo, lifecycleService, capturingLogger, AppDataSource);
 });
 
 after(async () => {
@@ -157,6 +158,61 @@ describe('OntologyLifecycleService.computeDirtyRatio', () => {
     ]);
     // active=1, stale=1 → 분모 2, removed/quarantined 2개는 무시돼야 0.5
     assert.equal(await lifecycleService.computeDirtyRatio(graph.id), 0.5);
+  });
+});
+
+describe('OntologyController.graph — 브라우저 렌더링 스냅샷', () => {
+  it('ready 그래프의 활성 노드와 양 끝이 선택된 활성 엣지를 반환한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-ready', folder_path: '', status: 'ready' }));
+    const [a, b] = await nodeRepo.save([
+      node('render-node-a', graph.id, 'render/a', { name: 'a', degree: 2, pagerank: 0.8 }),
+      node('render-node-b', graph.id, 'render/b', { name: 'b', degree: 1, pagerank: 0.4 }),
+    ]);
+    await edgeRepo.save(edge('render-edge', graph.id, { src_id: a.id, dst_id: b.id }));
+
+    const res = fakeRes();
+    await controller.graph(WORKSPACE_ID, graph.id, res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.nodes.map((item) => item.id), [a.id, b.id]);
+    assert.equal(res._body.edges.length, 1);
+    assert.equal(res._body.total_nodes, 2);
+    assert.equal(res._body.total_edges, 1);
+    assert.equal(res._body.truncated, false);
+  });
+
+  it('선택 밖 고신뢰 엣지가 30,000개를 넘어도 선택 노드 사이 엣지를 반환한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-large-edge-distribution', folder_path: '', status: 'ready' }));
+    const [a, b] = await nodeRepo.save([
+      node('render-large-a', graph.id, 'render/large-a', { degree: 2, pagerank: 0.8 }),
+      node('render-large-b', graph.id, 'render/large-b', { degree: 1, pagerank: 0.4 }),
+    ]);
+    const distractors = Array.from({ length: 30_001 }, (_, index) => edge(
+      `render-distractor-${String(index).padStart(5, '0')}`,
+      graph.id,
+      { src_id: `outside-src-${index}`, dst_id: `outside-dst-${index}`, confidence: 1 },
+    ));
+    for (let index = 0; index < distractors.length; index += 500) {
+      await edgeRepo.insert(distractors.slice(index, index + 500));
+    }
+    await edgeRepo.save(edge('render-selected-edge', graph.id, {
+      src_id: a.id,
+      dst_id: b.id,
+      confidence: 0.1,
+    }));
+
+    const res = fakeRes();
+    await controller.graph(WORKSPACE_ID, graph.id, res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body.edges.map((item) => item.id), ['render-selected-edge']);
+    assert.equal(res._body.total_edges, 30_002);
+  });
+
+  it('building 그래프는 불완전 스냅샷 대신 409를 반환한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'render-building', folder_path: '', status: 'building' }));
+    const res = fakeRes();
+    await controller.graph(WORKSPACE_ID, graph.id, res);
+    assert.equal(res._status, 409);
+    assert.equal(res._body.status, 'building');
   });
 });
 
@@ -294,6 +350,36 @@ describe('OntologyController.viewOpened — 휴먼 그래프뷰 재방문 텔레
 // 재시도 불가능했다. forceRebuild()(원자적 단일-승자 UPDATE)로 해소.
 
 describe('OntologyLifecycleService.runInitialBuild — 재실행 idempotency(리뷰 지적의 근본 원인)', () => {
+  it('전체 빌드 트랜잭션 중 주기 flush가 겹쳐도 flush가 COMMIT 뒤까지 대기한다', async () => {
+    const graph = await graphRepo.save(graphRepo.create({ workspace_id: WORKSPACE_ID, resource_id: 'r-flush-overlap', folder_path: '', status: 'building' }));
+    let releaseBuild;
+    const buildGate = new Promise((resolve) => { releaseBuild = resolve; });
+    let inserted;
+    const insertedSignal = new Promise((resolve) => { inserted = resolve; });
+    const extraction = {
+      extractRepo: async ({ dataSource }) => {
+        await dataSource.getRepository(OntologyNode).insert(node('flush-overlap-node', graph.id, 'sym:flush-overlap'));
+        inserted();
+        await buildGate;
+        return { commit: 'flush-safe', filesDiscovered: 1, filesFailedExtraction: 0, nodesInserted: 1, edgesInserted: 0 };
+      },
+    };
+    const svc = new OntologyLifecycleService(AppOntologyDataSource, extraction, {
+      resolveGraph: async () => ({ edgesInserted: 0 }),
+    }, { info() {}, warn() {}, error() {} });
+
+    const build = svc.runInitialBuild(graph);
+    await insertedSignal;
+    let flushFinished = false;
+    const flush = flushOntologySqljs(AppOntologyDataSource, true).then(() => { flushFinished = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(flushFinished, false, '활성 빌드 트랜잭션 중에는 export하면 안 된다');
+    releaseBuild();
+    await assert.doesNotReject(build);
+    await assert.doesNotReject(flush);
+    assert.equal((await graphRepo.findOne({ where: { id: graph.id } })).status, 'ready');
+  });
+
   it('두 번째 실행이 첫 번째 실행의 노드/엣지/역방향색인을 정확히 교체한다 — 중복 적재도, unique 제약 위반도 없어야 한다', async () => {
     const graph = await graphRepo.save(graphRepo.create({
       workspace_id: WORKSPACE_ID, resource_id: 'r-idempotent', folder_path: '', status: 'ready',

@@ -238,6 +238,18 @@ export function classifyWorktreeOutcome(res: WorktreeOutcome | null | undefined)
   return { blocked: true, kind: `worktree:${reason}`, reason };
 }
 
+/** 비밀·권한·파괴 조치 없이 담당 에이전트가 진단/재시도할 수 있는 실패만 fallback한다. */
+export function isSafeTicketProvisioningFallback(reason?: string): boolean {
+  return new Set([
+    'repository_fetch_failed',
+    'repository_clone_failed',
+    'path_conflict',
+    'add_failed',
+    'worktree_unavailable',
+    'branch_prepare_failed',
+  ]).has(reason || '');
+}
+
 // ── worktree checkout verification (ticket feaa7ab0) ─────────────────────────
 //
 // classifyWorktreeOutcome above trusts the provisioning RESULT (`isWorktree`).

@@ -93,6 +93,7 @@ import type {
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
+  OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
   OrchestrationRepoRef,
 } from './types';
@@ -294,7 +295,7 @@ export const api = {
     request<{ profiles: ClaudeBackendProfile[]; default_profile_id: string | null }>('/admin/claude-backend-profiles'),
   createClaudeBackendProfile: (data: ClaudeBackendProfile) =>
     request<ClaudeBackendProfile>('/admin/claude-backend-profiles', { method: 'POST', body: JSON.stringify(data) }),
-  updateClaudeBackendProfile: (id: string, data: Partial<ClaudeBackendProfile>) =>
+  updateClaudeBackendProfile: (id: string, data: Omit<Partial<ClaudeBackendProfile>, 'credential_ref'> & { credential_ref?: string | null }) =>
     request<ClaudeBackendProfile>(`/admin/claude-backend-profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getClaudeBackendProfileImpact: (id: string) =>
     request<any>(`/admin/claude-backend-profiles/${id}/impact`),
@@ -2410,6 +2411,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, graph_id: graphId }),
     }),
+  getOntologyGraph: (workspaceId: string, graphId: string): Promise<OntologyGraphSnapshotResponse> =>
+    request<OntologyGraphSnapshotResponse>(
+      `/ontology/graph?workspace_id=${encodeURIComponent(workspaceId)}&graph_id=${encodeURIComponent(graphId)}`,
+    ),
 };
 
 // ─── Ticket role assignment types ─────────────────────────
