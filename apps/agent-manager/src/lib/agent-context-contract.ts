@@ -7,6 +7,21 @@ const CONTRACT_JSON_MAX_CHARS = 15_900;
 const COLLECTION_MAX_ITEMS = 20;
 const COLLECTION_ITEM_MAX_CHARS = 800;
 const REDACTED = '[REDACTED]';
+const SENSITIVE_KEY_NAMES = new Set([
+  'authorization',
+  'password',
+  'passwd',
+  'pwd',
+  'token',
+  'accesstoken',
+  'refreshtoken',
+  'apikey',
+  'secret',
+  'clientsecret',
+  'credential',
+  'credentialref',
+  'privatekey',
+]);
 
 export interface AgentContextContractInput {
   ticket: any;
@@ -33,21 +48,32 @@ function compact(value: unknown, limit: number): string {
 export function redactAgentContextText(value: string): string {
   return value
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, `$1${REDACTED}`)
-    .replace(/\b((?:password|passwd|pwd|token|api[_-]?key|secret|credential(?:_ref)?)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`)
+    .replace(/(["']?(?:authorization|password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|client[_-]?secret|credential(?:_ref)?|private[_-]?key)["']?\s*[:=]\s*)(["'])(.*?)(\2)/gi, `$1$2${REDACTED}$4`)
+    .replace(/\b((?:authorization|password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|client[_-]?secret|credential(?:_ref)?|private[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,})\b/g, REDACTED);
+}
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_NAMES.has(key.replace(/[^a-z0-9]/gi, '').toLowerCase());
 }
 
 function boundedCollection(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.slice(-COLLECTION_MAX_ITEMS).map((item) =>
-    compact(typeof item === 'string' ? item : JSON.stringify(item), COLLECTION_ITEM_MAX_CHARS));
+    compact(
+      typeof item === 'string' ? item : JSON.stringify(redactContractValue(item)),
+      COLLECTION_ITEM_MAX_CHARS,
+    ));
 }
 
 function redactContractValue(value: any): any {
   if (typeof value === 'string') return redactAgentContextText(value).slice(0, 2048);
   if (Array.isArray(value)) return value.map(redactContractValue);
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactContractValue(item)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      isSensitiveKey(key) ? REDACTED : redactContractValue(item),
+    ]));
   }
   return value;
 }

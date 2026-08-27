@@ -142,6 +142,54 @@ test('전체 예산 안에서 비밀을 제거하고 높은 우선순위 항목�
   assert.doesNotMatch(prompt, /hunter2|abcdefghijklmnop/);
 });
 
+test('민감 키와 JSON 문자열의 일반 비밀값을 최종 trigger prompt에서 제거한다', () => {
+  const metadataFields = {
+    relatedTickets: [{ token: 'hunter2-related' }],
+    recentDecisions: [{ apiKey: 'hunter2-decision' }],
+    unresolvedQuestions: [{ password: 'hunter2-question' }],
+    verificationCommands: [{ credential_ref: 'hunter2-verification' }],
+  };
+  const prompt = composeTriggerPrompt({
+    ...decoratedTicket('stateless'),
+    comments: [{
+      created_at: '2026-08-27',
+      author: 'Agent',
+      content: '설정 JSON: {"token":"hunter2-comment","safe":"visible"}',
+    }],
+    __awb_context_metadata: {
+      ...decoratedTicket('stateless').__awb_context_metadata,
+      mcpServers: [{
+        name: 'awb',
+        transport: { headers: { token: 'hunter2-mcp', nested: { secret: 'hunter2-nested' } } },
+      }],
+      ...metadataFields,
+    },
+  }, '', '', ticket.id, null);
+
+  assert.doesNotMatch(prompt, /hunter2/);
+  assert.match(prompt, /\[REDACTED\]/);
+  assert.match(prompt, /"safe":"visible"/);
+});
+
+test('메타데이터 컬렉션의 객체형 비밀값을 직렬화 전에 재귀 제거한다', () => {
+  const contract = buildAgentContextContract({
+    ticket: {
+      ...ticket,
+      __awb_context_metadata: {
+        relatedTickets: [{ password: 'related-object-secret' }],
+        recentDecisions: [{ nested: { token: 'decision-object-secret' } }],
+        unresolvedQuestions: [{ values: [{ api_key: 'question-object-secret' }] }],
+        verificationCommands: [{ credential_ref: 'vault://verification-object-secret' }],
+      },
+    },
+    role: 'assignee',
+    repository,
+  });
+  const rendered = renderAgentContextContract(contract);
+  assert.doesNotMatch(rendered, /related-object-secret|decision-object-secret|question-object-secret|verification-object-secret/);
+  assert.equal((rendered.match(/\[REDACTED\]/g) || []).length, 4);
+});
+
 test('최종 trigger prompt는 current SHA 실패를 base SHA로 오인시키지 않는다', () => {
   const decorated = decoratedTicket('stateless', {
     __awb_repository_context: { currentSha: undefined, currentShaFailure: 'head_lookup_failed' },
