@@ -1464,3 +1464,26 @@ advisory 0건이고 install script도 없었다. `production.private`의 의존�
 `main`과 바이트 동일하므로 별도 수정이나 lockfile 재생성은 필요하지 않았다.
 새 `apps/server` 테스트 파일을 추가하지 않았고, 등록 완전성 가드로 기존 테스트가
 모두 `package.json`의 `test` 스크립트에 포함된 것도 확인했다.
+
+## 재검증 로그 — 2026-08-27 (`main` @ `0815a7a5`)
+
+최신 원격 refs를 다시 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`70ff4066`)를 함께 감사했다. `npm audit fix`는 사용하지
+않았으며 루트 `overrides`도 그대로 유지했다.
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (`main`) | **0 vulnerabilities** (prod 280 / dev 306 / optional 85 / peer 1, total 610) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| `production.private` | **0 vulnerabilities**, lockfile과 세 workspace manifest가 `main`과 바이트 동일 |
+| 레지스트리 서명 | 105개 서명 및 13개 attestation 검증, 실패 0건 |
+| lockfile install script | 3개 (`@scarf/scarf`/`esbuild`/`fsevents`), 전부 허용목록 내 |
+| 발행 트리 (live/next) | 93 / 92 패키지, moderate 이상 0건, install script 0개 |
+| 공급망·감사·테스트 등록 가드 | **48/48 pass** |
+
+발행 트리의 lockfile 대비 11개 버전 드리프트도 live/next 양쪽 모두 advisory
+0건이었다. 배포 브랜치의 루트 `package.json`은 배포와 무관한 agent instruction
+동기화 스크립트 두 개만 없고 의존성 선언과 lockfile은 동일하다. 따라서 패키지
+업데이트나 lockfile 재생성은 필요하지 않았다. 새 `apps/server` 테스트 파일을
+추가하지 않았으며, 등록 완전성 가드로 기존 테스트 전부가 각 `package.json`의
+`test` 스크립트에 포함된 것도 재확인했다.
