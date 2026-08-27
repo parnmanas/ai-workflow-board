@@ -1,7 +1,12 @@
 import type { HarnessSpec, RuntimeProfileSpec } from './cli-adapters/base.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
 
-export const AGENT_CONTEXT_VERSION = '1.1';
+export const AGENT_CONTEXT_VERSION = '1.2';
+export const AGENT_CONTEXT_MAX_CHARS = 16_000;
+const CONTRACT_JSON_MAX_CHARS = 15_900;
+const COLLECTION_MAX_ITEMS = 20;
+const COLLECTION_ITEM_MAX_CHARS = 800;
+const REDACTED = '[REDACTED]';
 
 export interface AgentContextContractInput {
   ticket: any;
@@ -22,7 +27,44 @@ export class AgentContextPreflightError extends Error {
 }
 
 function compact(value: unknown, limit: number): string {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  return redactAgentContextText(String(value ?? '').replace(/\s+/g, ' ').trim()).slice(0, limit);
+}
+
+export function redactAgentContextText(value: string): string {
+  return value
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, `$1${REDACTED}`)
+    .replace(/\b((?:password|passwd|pwd|token|api[_-]?key|secret|credential(?:_ref)?)\s*[:=]\s*)[^\s,;]+/gi, `$1${REDACTED}`)
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,})\b/g, REDACTED);
+}
+
+function boundedCollection(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-COLLECTION_MAX_ITEMS).map((item) =>
+    compact(typeof item === 'string' ? item : JSON.stringify(item), COLLECTION_ITEM_MAX_CHARS));
+}
+
+function redactContractValue(value: any): any {
+  if (typeof value === 'string') return redactAgentContextText(value).slice(0, 2048);
+  if (Array.isArray(value)) return value.map(redactContractValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactContractValue(item)]));
+  }
+  return value;
+}
+
+/** 낮은 우선순위부터 제거해 JSON 본문을 고정 예산 안에 맞춘다. */
+function enforceContextBudget(contract: any): any {
+  contract = redactContractValue(contract);
+  const order = ['priorProgress', 'relatedTickets', 'recentDecisions', 'unresolvedQuestions', 'verificationCommands'];
+  for (const field of order) {
+    while (JSON.stringify(contract, null, 2).length > CONTRACT_JSON_MAX_CHARS && contract[field].length > 0) {
+      contract[field].shift();
+    }
+  }
+  if (JSON.stringify(contract, null, 2).length > CONTRACT_JSON_MAX_CHARS) {
+    throw new AgentContextPreflightError('ticket', '필수 Agent Context가 전체 크기 제한을 초과했습니다');
+  }
+  return contract;
 }
 
 function redactRemoteUrl(value: unknown): string | null {
@@ -59,14 +101,14 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
 
   const comments = Array.isArray(ticket.comments) ? ticket.comments.slice(-5) : [];
   const metadata = ticket.__awb_context_metadata || {};
-  return {
+  return enforceContextBudget({
     version: AGENT_CONTEXT_VERSION,
     authority: ['system_policy', 'role_instructions', 'project_instructions', 'task', 'prior_progress'],
     assignment: {
-      workspaceId: ticket.workspace_id || '',
-      boardId: ticket.board_id || ticket.board?.id || '',
-      ticketId: ticket.id,
-      role: input.role,
+      workspaceId: compact(ticket.workspace_id, 256),
+      boardId: compact(ticket.board_id || ticket.board?.id, 256),
+      ticketId: compact(ticket.id, 256),
+      role: compact(input.role, 120),
       column: {
         id: ticket.current_column_id,
         name: ticket.current_column_name,
@@ -101,21 +143,25 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
       credentialFailure: metadata.credentialFailure ?? input.repository?.credentialFailure ?? null,
       requestedGitOperation: metadata.requestedGitOperation ?? null,
     },
-    relatedTickets: Array.isArray(metadata.relatedTickets) ? metadata.relatedTickets : [],
-    recentDecisions: Array.isArray(metadata.recentDecisions) ? metadata.recentDecisions : [],
-    unresolvedQuestions: Array.isArray(metadata.unresolvedQuestions) ? metadata.unresolvedQuestions : [],
-    verificationCommands: Array.isArray(metadata.verificationCommands) ? metadata.verificationCommands : [],
+    relatedTickets: boundedCollection(metadata.relatedTickets),
+    recentDecisions: boundedCollection(metadata.recentDecisions),
+    unresolvedQuestions: boundedCollection(metadata.unresolvedQuestions),
+    verificationCommands: boundedCollection(metadata.verificationCommands),
     priorProgress: comments.map((comment: any) => ({
       at: comment.created_at || '',
       author: compact(comment.author_name || comment.agent_name || comment.author || 'unknown', 120),
       content: compact(comment.body || comment.content, 1200),
     })),
-  };
+  });
 }
 
 export function renderAgentContextContract(contract: ReturnType<typeof buildAgentContextContract>): string {
-  return [
+  const rendered = [
     `AWB Agent Context Contract v${contract.version} (provider-neutral, redacted):`,
     JSON.stringify(contract, null, 2),
   ].join('\n');
+  if (rendered.length > AGENT_CONTEXT_MAX_CHARS) {
+    throw new AgentContextPreflightError('ticket', '직렬화된 Agent Context가 전체 크기 제한을 초과했습니다');
+  }
+  return rendered;
 }

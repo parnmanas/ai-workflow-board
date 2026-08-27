@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import {
+  AGENT_CONTEXT_MAX_CHARS,
   AgentContextPreflightError,
   buildAgentContextContract,
   renderAgentContextContract,
 } from '../dist/lib/agent-context-contract.js';
-import { composeTriggerPrompt } from '../dist/lib/prompts.js';
+import { composeTriggerPrompt, repositoryContextInstructions } from '../dist/lib/prompts.js';
 import { composePersistentTriggerTurn } from '../dist/lib/ticket-session-manager.js';
 import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
@@ -113,13 +114,45 @@ test('HEAD 조회 실패를 base SHA로 위장하지 않는다', () => {
   assert.equal(contract.repository.currentShaFailure, 'head_lookup_failed');
 });
 
-test('credential 원문과 과거 코멘트 크기를 계약에서 제한한다', () => {
+test('전체 예산 안에서 비밀을 제거하고 높은 우선순위 항목을 보존한다', () => {
+  const huge = (prefix) => Array.from({ length: 40 }, (_, index) =>
+    `${prefix}-${index} password=hunter2 token=tok_${'x'.repeat(40)} ${'z'.repeat(1200)}`);
   const contract = buildAgentContextContract({
-    ticket: { ...ticket, comments: [{ content: 'x'.repeat(4000) }] }, role: 'assignee', repository,
+    ticket: {
+      ...ticket,
+      comments: huge('comment').map((content) => ({ content, author: 'Bearer abcdefghijklmnop' })),
+      __awb_context_metadata: {
+        relatedTickets: huge('related'), recentDecisions: huge('decision'),
+        unresolvedQuestions: huge('question'),
+        verificationCommands: [...huge('verify'), 'npm test --workspace=apps/agent-manager'],
+      },
+    }, role: 'assignee', repository,
   });
   const rendered = renderAgentContextContract(contract);
-  assert.equal(contract.priorProgress[0].content.length, 1200);
-  assert.doesNotMatch(rendered, /token|password|credential_ref/i);
+  assert.ok(rendered.length <= AGENT_CONTEXT_MAX_CHARS);
+  assert.doesNotMatch(rendered, /hunter2|tok_x|abcdefghijklmnop/);
+  assert.match(rendered, /\[REDACTED\]/);
+  assert.equal(contract.priorProgress.length, 0);
+  assert.equal(contract.relatedTickets.length, 0);
+  assert.match(rendered, /npm test --workspace=apps\/agent-manager/);
+  const prompt = composeTriggerPrompt({
+    ...decoratedTicket('stateless'),
+    comments: [{ created_at: '2026-08-27', author: 'Agent', content: 'password=hunter2 Bearer abcdefghijklmnop' }],
+  }, '', '', ticket.id, null);
+  assert.doesNotMatch(prompt, /hunter2|abcdefghijklmnop/);
+});
+
+test('최종 trigger prompt는 current SHA 실패를 base SHA로 오인시키지 않는다', () => {
+  const decorated = decoratedTicket('stateless', {
+    __awb_repository_context: { currentSha: undefined, currentShaFailure: 'head_lookup_failed' },
+  });
+  const prompt = composeTriggerPrompt(
+    decorated, '', '', ticket.id, null,
+    repositoryContextInstructions(decorated.__awb_repository_context),
+  );
+  assert.match(prompt, /current SHA: \(unknown; head_lookup_failed\)/);
+  assert.doesNotMatch(prompt, /current SHA: base-sha/);
+  assert.match(prompt, /"currentSha": null/);
 });
 
 test('remote URL의 credential과 query를 redaction한다', () => {

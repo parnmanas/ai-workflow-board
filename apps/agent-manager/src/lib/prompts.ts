@@ -13,7 +13,11 @@ import {
 } from './chat-attachment-prep.js';
 import type { WorktreeMode } from './worktree-manager.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
-import { buildAgentContextContract, renderAgentContextContract } from './agent-context-contract.js';
+import {
+  buildAgentContextContract,
+  redactAgentContextText,
+  renderAgentContextContract,
+} from './agent-context-contract.js';
 
 interface CommentLike {
   author_name?: string;
@@ -183,7 +187,7 @@ export function repositoryContextInstructions(context?: TicketRepositoryContext)
     `- Repository Resource ID: ${context.resourceId || '(URL 기반 레거시 저장소)'}`,
     `- cwd: ${context.cwd}`,
     `- base branch / SHA: ${context.baseBranch} / ${context.baseSha}`,
-    `- current SHA: ${context.currentSha || context.baseSha}`,
+    `- current SHA: ${context.currentSha || `(unknown; ${context.currentShaFailure || '조회 실패 원인 미제공'})`}`,
     `- working branch: ${context.workingBranch || '(detached)'}`,
     `- dirty: ${context.dirty}`,
     `- base 대비 ahead / behind: ${context.ahead} / ${context.behind}`,
@@ -306,7 +310,7 @@ export function composeTriggerPrompt(
       for (const c of comments) {
         const who = c.author_name || c.agent_name || 'unknown';
         const when = c.created_at || '';
-        const body = (c.body || c.content || '').slice(0, 2000);
+        const body = redactAgentContextText(c.body || c.content || '').slice(0, 2000);
         lines.push(`- [${when}] ${who}: ${body}`);
       }
     }
