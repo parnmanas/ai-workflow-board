@@ -18,6 +18,7 @@ const {
   apiKeyPathFor,
   mcpConfigPathFor,
   writeMcpConfig,
+  readMcpConfigServerNames,
   eraseSecrets,
   writeManagedAgentConfig,
 } = await import('../dist/lib/managed-agent-store.js');
@@ -45,6 +46,11 @@ test('global agent secrets are isolated by workspace and erased together', async
   assert.notEqual(mcpConfigPathFor(agentId, 'workspace-a'), mcpConfigPathFor(agentId, 'workspace-b'));
   await writeMcpConfig(agentId, 'https://awb.example', 'key-a', 'workspace-a');
   await writeMcpConfig(agentId, 'https://awb.example', 'key-b', 'workspace-b');
+  assert.deepEqual(
+    await readMcpConfigServerNames(mcpConfigPathFor(agentId, 'workspace-a')),
+    ['awb', 'host'],
+    '진단 계약은 실제 관리형 MCP 설정의 서버 이름을 사용한다',
+  );
   await eraseSecrets(agentId);
   assert.equal(await readApiKey(agentId, 'workspace-a'), null);
   assert.equal(await readApiKey(agentId, 'workspace-b'), null);

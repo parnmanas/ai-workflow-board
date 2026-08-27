@@ -63,7 +63,10 @@ let ticketState;  // the (mocked) server-side ticket row the pend/unpend transit
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   mcpToolCalls = [];
-  ticketState = { pending_user_action: false };
+  ticketState = {
+    id: TICKET, current_column_id: 'column-active', current_column_name: '진행 중',
+    current_column_kind: 'active', comments: [], pending_user_action: false,
+  };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     const method = init?.method || 'GET';
@@ -91,7 +94,9 @@ beforeEach(() => {
       }
       return new Response('', { status: 202 }); // notifications/initialized, etc.
     }
-    // REST GETs: repository git-credential (→ no token) and ticket context (→ {}).
+    if (u.includes('/api/agent/tickets/')) {
+      return new Response(JSON.stringify(ticketState), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 });
@@ -170,7 +175,15 @@ function makeDispatcher(state) {
 }
 
 function newState(overrides = {}) {
-  return { resolveCalls: 0, spawns: [], dedups: [], broken: true, reason: 'not_a_git_repo', ...overrides };
+  return {
+    resolveCalls: 0, spawns: [], dedups: [], broken: true, reason: 'not_a_git_repo',
+    repositoryContext: {
+      resourceId: 'repo-1', cwd: '/ws/.awb/wt/ok', baseBranch: 'main', baseSha: 'base-sha',
+      currentSha: 'head-sha', workingBranch: 'ticket/ticket-prov-work', dirty: false,
+      ahead: 0, behind: 0, resumed: false,
+    },
+    ...overrides,
+  };
 }
 
 function makeEvent(overrides = {}) {

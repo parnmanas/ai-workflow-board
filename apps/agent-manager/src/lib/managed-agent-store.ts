@@ -313,6 +313,19 @@ export async function readMcpConfigToolProfile(path: string): Promise<string | u
   }
 }
 
+/** 관리형 Agent가 실제로 전달받는 MCP 설정의 서버 이름만 읽는다. */
+export async function readMcpConfigServerNames(path: string): Promise<string[]> {
+  try {
+    const raw = await fsp.readFile(path, 'utf8');
+    const parsed = JSON.parse(raw);
+    const servers = parsed?.mcpServers;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return [];
+    return Object.keys(servers).sort();
+  } catch {
+    return [];
+  }
+}
+
 /** Remove the on-disk apiKey + mcp-config for an agent (e.g., on stop).
  *  Also clears the per-agent CLI credential snapshot — on the next spawn the
  *  manager re-fetches it from AWB so a credential-rotation in the AWB UI

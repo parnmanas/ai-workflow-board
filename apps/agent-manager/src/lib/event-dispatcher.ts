@@ -22,7 +22,7 @@ import {
   postDispatchAck,
   provisionManagedAgentApiKey,
 } from './rest.js';
-import { readApiKey, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
+import { readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
@@ -2862,6 +2862,13 @@ export class EventDispatcher {
       worktreeProvision.recoveryInstructions || '',
     ].filter(Boolean).join('\n\n');
 
+    // Hermes는 RuntimeSupervisor가 이 dispatch에 AWB 하나를 직접 주입한다.
+    // CLI 경로는 실제 spawn에 넘길 관리형 mcp-config를 읽어 진단 계약이
+    // 설정 파일과 어긋나지 않게 한다. 읽을 수 없으면 추정하지 않고 빈 목록이다.
+    const activeMcpServers = agentContext?.cli === 'hermes'
+      ? ['awb']
+      : await readMcpConfigServerNames(agentContext?.mcp_config_path || '');
+
     const attachContextContract = (ticket: any, sessionMode: 'persistent' | 'stateless' | 'hermes') => {
       if (!ticket) {
         throw new AgentContextPreflightError('ticket', 'ticket context 조회 결과가 없습니다');
@@ -2878,8 +2885,12 @@ export class EventDispatcher {
       // 안전한 no-worktree fallback은 의도된 실행 모드라 repository=null을
       // 허용한다. provisioning이 repository contract를 확정했다고 표시한 경우만
       // 이후 누락을 preflight 오류로 취급한다.
-      ticket.__awb_require_repository_context = repositoryContextRequired;
-      if (repositoryContextRequired && !worktreeProvision.repositoryContext) {
+      // 안전한 provisioning fallback은 실패 원인과 복구 범위를 전달해 Agent가
+      // 저장소 준비 자체를 복구하는 명시적 예외다. 이 경로에서는 아직 완성된
+      // repository context가 없다는 사실이 정상이며, 그 외 누락만 fail-closed한다.
+      const requirePreparedRepository = repositoryContextRequired && !worktreeProvision.recoveryInstructions;
+      ticket.__awb_require_repository_context = requirePreparedRepository;
+      if (requirePreparedRepository && !worktreeProvision.repositoryContext) {
         throw new AgentContextPreflightError('repository', '연결된 저장소의 준비 결과가 없습니다');
       }
       ticket.__awb_harness = harness;
@@ -2893,7 +2904,7 @@ export class EventDispatcher {
         credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
         sandbox: harness?.permission_mode ?? 'managed-default',
         requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
-        mcpServers: ['awb'],
+        mcpServers: activeMcpServers,
         relatedTickets: ticket.related_tickets ?? [],
         recentDecisions: ticket.recent_decisions ?? [],
         unresolvedQuestions: ticket.unresolved_questions ?? [],
@@ -2918,7 +2929,8 @@ export class EventDispatcher {
         `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
         `repositoryRequired=${repositoryContextRequired} ` +
         `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
-        `permission=${harness?.permission_mode || 'managed-default'} mcp=true session=${sessionMode}`,
+        `permission=${harness?.permission_mode || 'managed-default'} ` +
+        `mcp=${activeMcpServers.join(',') || 'none'} session=${sessionMode}`,
       );
       return ticket;
     };
