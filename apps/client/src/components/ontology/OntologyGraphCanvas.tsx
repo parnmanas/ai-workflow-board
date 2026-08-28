@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
+import { NodeCircleProgram } from 'sigma/rendering';
 import type { OntologyGraphSnapshotNode, OntologyGraphSnapshotResponse } from '../../types';
 import { tokens } from '../../tokens';
 
@@ -36,6 +37,7 @@ function buildGraph(snapshot: OntologyGraphSnapshotResponse): Graph {
     graph.addNode(node.id, {
       ...nodeData,
       ontologyType,
+      type: 'circle',
       cluster,
       label: node.name || node.qualified_name || node.id,
       x: Math.cos(clusterAngle) * centerRadius + Math.cos(angle) * ring,
@@ -70,41 +72,76 @@ export default function OntologyGraphCanvas({ snapshot }: { snapshot: OntologyGr
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const renderer = new Sigma(graph, containerRef.current, {
-      renderEdgeLabels: false,
-      labelDensity: 0.08,
-      labelGridCellSize: 120,
-      hideEdgesOnMove: snapshot.edges.length > 2_000,
-      zIndex: true,
-    });
-    rendererRef.current = renderer;
-    const reduceNodes = (node: string, data: Record<string, any>) => {
-      const isSelected = node === selectedRef.current;
-      return {
-        ...data,
-        label: 1 / renderer.getCamera().getState().ratio > 1.7 || isSelected ? data.label : '',
-        highlighted: isSelected,
-        zIndex: isSelected ? 1 : 0,
+    const container = containerRef.current;
+    let renderer: Sigma | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let detachCameraListener: (() => void) | null = null;
+
+    const mountRenderer = () => {
+      if (renderer || container.clientWidth === 0 || container.clientHeight === 0) return;
+      const sigma = new Sigma(graph, container, {
+        // 상세 패널이 열리며 grid 열이 재배치될 때 ResizeObserver가 일시적인
+        // 0 너비를 볼 수 있다. 최초 마운트는 위에서 실제 크기를 검증하므로,
+        // 이후 레이아웃 전환 중의 순간값만 Sigma 예외로 승격하지 않는다.
+        allowInvalidContainer: true,
+        defaultNodeType: 'circle',
+        nodeProgramClasses: { circle: NodeCircleProgram },
+        renderEdgeLabels: false,
+        labelDensity: 0.08,
+        labelGridCellSize: 120,
+        hideEdgesOnMove: snapshot.edges.length > 2_000,
+        zIndex: true,
+      });
+      renderer = sigma;
+      rendererRef.current = sigma;
+      const reduceNodes = (node: string, data: Record<string, any>) => {
+        const isSelected = node === selectedRef.current;
+        return {
+          ...data,
+          label: 1 / sigma.getCamera().getState().ratio > 1.7 || isSelected ? data.label : '',
+          highlighted: isSelected,
+          zIndex: isSelected ? 1 : 0,
+        };
       };
+      sigma.setSetting('nodeReducer', reduceNodes);
+      sigma.refresh();
+      sigma.on('clickNode', ({ node }) => setSelectedId(node));
+      sigma.on('clickStage', () => setSelectedId(null));
+      const camera = sigma.getCamera();
+      const updateZoom = () => sigma.refresh();
+      camera.on('updated', updateZoom);
+      detachCameraListener = () => camera.off('updated', updateZoom);
     };
-    renderer.setSetting('nodeReducer', reduceNodes);
-    renderer.refresh();
-    renderer.on('clickNode', ({ node }) => setSelectedId(node));
-    renderer.on('clickStage', () => setSelectedId(null));
-    const camera = renderer.getCamera();
-    const updateZoom = () => renderer.refresh();
-    camera.on('updated', updateZoom);
+
+    mountRenderer();
+    if (!renderer) {
+      resizeObserver = new ResizeObserver(mountRenderer);
+      resizeObserver.observe(container);
+    }
     return () => {
+      resizeObserver?.disconnect();
+      detachCameraListener?.();
       rendererRef.current = null;
-      renderer.kill();
+      renderer?.kill();
     };
   }, [graph, snapshot.edges.length]);
 
   useEffect(() => { rendererRef.current?.refresh(); }, [selectedId]);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
-      <div ref={containerRef} aria-label="Ontology graph canvas" style={{ minWidth: 0, minHeight: 520 }} />
+    <div style={{ display: 'grid', gridTemplateColumns: selected ? 'minmax(0, 1fr) 280px' : '1fr', width: '100%', minHeight: 520, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, overflow: 'hidden', background: tokens.colors.surface }}>
+      <div
+        ref={containerRef}
+        aria-label="Ontology graph canvas"
+        role="application"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter') return;
+          const firstNode = graph.nodes()[0];
+          if (firstNode) setSelectedId(firstNode);
+        }}
+        style={{ minWidth: 0, minHeight: 520 }}
+      />
       {selected && (
         <aside style={{ padding: 16, borderLeft: `1px solid ${tokens.colors.border}`, overflowWrap: 'anywhere' }}>
           <div style={{ fontWeight: tokens.typography.fontWeightSemibold }}>{selected.name}</div>
