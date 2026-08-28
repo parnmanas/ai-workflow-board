@@ -1487,3 +1487,16 @@ advisory 0건이고 install script도 없었다. `production.private`의 의존�
 업데이트나 lockfile 재생성은 필요하지 않았다. 새 `apps/server` 테스트 파일을
 추가하지 않았으며, 등록 완전성 가드로 기존 테스트 전부가 각 `package.json`의
 `test` 스크립트에 포함된 것도 재확인했다.
+
+## 재검증 로그 — 2026-08-28 (`main` @ `d45c701a`)
+
+최신 `main`과 배포 브랜치 `production.private`(`344d415a`)를 fetch해 함께 감사했다.
+두 브랜치의 root/workspace manifest, lockfile, Dockerfile, `turbo.json`은 모두 동일했다.
+`npm audit`과 `npm audit --omit=dev`는 각각 0건이었고, 발행 패키지 live/next 트리도
+moderate 이상 0건 및 install script 0개였다. 발행 트리의 lockfile 대비 11개 버전
+드리프트는 모두 advisory 0건이었다.
+
+액션 SHA 고정, install-script 허용목록, CI 배포 브랜치·cron 커버리지, 발행 의존성
+범위 가드와 테스트 등록 완전성을 포함한 보안 가드 48건도 모두 통과했다. 취약점이나
+의존성 드리프트가 없어 패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는
+사용하지 않았고 root `overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았다.
