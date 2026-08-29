@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { delimiter, join } from 'node:path';
@@ -38,12 +39,6 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   effortLevelEnv: process.env.CLAUDE_CODE_EFFORT_LEVEL,
   alwaysEnableEffortEnv: process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT,
   legacyEffortEnv: process.env.CLAUDE_EFFORT,
-  sdkRequestOutputConfig: process.env.CLAUDE_CODE_EFFORT_LEVEL === 'auto'
-    ? undefined
-    : {effort: process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high'},
-  titleRequestOutputConfig: process.env.CLAUDE_CODE_EFFORT_LEVEL === 'auto'
-    ? {format: {type: 'json_schema'}}
-    : {effort: process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high', format: {type: 'json_schema'}},
   anthropicModel: process.env.ANTHROPIC_MODEL,
   smallFastModel: process.env.ANTHROPIC_SMALL_FAST_MODEL,
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
@@ -161,6 +156,104 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
   return { capture: captured, mainResult };
 }
 
+async function waitFor(check, timeoutMs, failureMessage) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = check();
+    if (value) return value;
+    await delay(50);
+  }
+  assert.fail(failureMessage);
+}
+
+/**
+ * 설치된 Claude Code 자체가 만드는 요청을 관찰하는 선택적 통합 검증이다.
+ * fixture가 payload를 합성하면 원래 회귀를 숨길 수 있으므로, 이 경로에서는
+ * 로컬 Anthropic endpoint가 실제 HTTP body를 수신한다.
+ */
+test('실제 Claude CLI의 일반 SDK 요청 payload에서 effort를 생략한다', {
+  skip: !process.env.AWB_REAL_CLAUDE_EXECUTABLE
+    && 'AWB_REAL_CLAUDE_EXECUTABLE을 지정하면 실제 Claude CLI 요청 경계를 검증합니다',
+  timeout: 30_000,
+}, async () => {
+  const executable = process.env.AWB_REAL_CLAUDE_EXECUTABLE;
+  assert.ok(executable);
+  await mkdir(fixtureRoot, { recursive: true });
+  const requests = [];
+  const observedUrls = [];
+  const backend = createServer(async (request, response) => {
+    observedUrls.push(`${request.method} ${request.url}`);
+    if (request.method === 'POST' && request.url?.startsWith('/v1/messages/count_tokens')) {
+      for await (const _chunk of request) { /* 요청 body를 소진한다. */ }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 10 }));
+      return;
+    }
+    if (request.method !== 'POST' || !request.url?.startsWith('/v1/messages')) {
+      response.writeHead(404).end();
+      return;
+    }
+    let text = '';
+    for await (const chunk of request) text += chunk;
+    requests.push({ url: request.url, body: JSON.parse(text) });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      id: `msg_${requests.length}`,
+      type: 'message',
+      role: 'assistant',
+      model: 'qwen3-coder-next',
+      content: [{ type: 'text', text: requests.length === 1 ? '통합 응답' : '{"title":"통합 제목"}' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }));
+  });
+  backend.listen(0, '127.0.0.1');
+  await once(backend, 'listening');
+  const address = backend.address();
+  assert.ok(address && typeof address === 'object');
+
+  const childEnv = applyClaudeRuntimeProfileEnvPolicy({
+    ...process.env,
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
+    ANTHROPIC_AUTH_TOKEN: 'integration-test-token',
+    ANTHROPIC_API_KEY: 'integration-test-token',
+    ANTHROPIC_MODEL: 'qwen3-coder-next',
+    ANTHROPIC_SMALL_FAST_MODEL: 'haiku',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3-coder-next',
+    CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+    CLAUDE_EFFORT: 'high',
+  }, { id: '실제-cli-effort-생략', omit_effort: true });
+  const child = spawn(executable, [
+    '--verbose',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+  ], { cwd: fixtureRoot, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = '';
+  let stdout = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stdin.write(`${JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: '짧게 답해 주세요' }] },
+  })}\n`);
+
+  try {
+    const sdkRequest = await waitFor(
+      () => requests.find(item => item.body?.output_config?.format === undefined),
+      10_000,
+      `일반 SDK 요청을 받지 못했습니다: urls=${observedUrls.join(',')} stdout=${stdout} stderr=${stderr}`,
+    );
+    assert.equal(sdkRequest.body.output_config?.effort, undefined);
+  } finally {
+    child.kill('SIGTERM');
+    await Promise.race([once(child, 'exit'), delay(2_000)]);
+    await new Promise(resolve => backend.close(resolve));
+  }
+});
+
 test.after(async () => {
   await shutdownRuntimeProfiles();
   await rm(fixtureRoot, { recursive: true, force: true });
@@ -235,8 +328,6 @@ test('Claude backend profile의 omit_effort 설정에 따라 실제 argv의 effo
   assert.equal(disabledWithPreset.effortLevelEnv, 'auto');
   assert.equal(disabledWithPreset.alwaysEnableEffortEnv, undefined);
   assert.equal(disabledWithPreset.legacyEffortEnv, undefined);
-  assert.equal(disabledWithPreset.sdkRequestOutputConfig, undefined);
-  assert.equal(disabledWithPreset.titleRequestOutputConfig.effort, undefined);
 });
 
 test('omit_effort 환경 정책은 활성 프로필에서만 backend effort 생략 제어를 고정하고 원본 환경을 변경하지 않는다', () => {
@@ -278,8 +369,6 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보�
   assert.equal(capture.effortLevelEnv, 'auto');
   assert.equal(capture.alwaysEnableEffortEnv, undefined);
   assert.equal(capture.legacyEffortEnv, undefined);
-  assert.equal(capture.sdkRequestOutputConfig, undefined);
-  assert.equal(capture.titleRequestOutputConfig.effort, undefined);
   assert.equal(capture.smallFastModel, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
 });
