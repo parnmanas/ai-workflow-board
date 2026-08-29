@@ -38,6 +38,12 @@ writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({
   effortLevelEnv: process.env.CLAUDE_CODE_EFFORT_LEVEL,
   alwaysEnableEffortEnv: process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT,
   legacyEffortEnv: process.env.CLAUDE_EFFORT,
+  sdkRequestOutputConfig: process.env.CLAUDE_CODE_EFFORT_LEVEL === 'auto'
+    ? undefined
+    : {effort: process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high'},
+  titleRequestOutputConfig: process.env.CLAUDE_CODE_EFFORT_LEVEL === 'auto'
+    ? {format: {type: 'json_schema'}}
+    : {effort: process.env.CLAUDE_CODE_EFFORT_LEVEL || 'high', format: {type: 'json_schema'}},
   anthropicModel: process.env.ANTHROPIC_MODEL,
   smallFastModel: process.env.ANTHROPIC_SMALL_FAST_MODEL,
   defaultHaiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
@@ -226,12 +232,14 @@ test('Claude backend profile의 omit_effort 설정에 따라 실제 argv의 effo
     effortPreset: { id: 'deep', claude: { effort: 'high' } },
   });
   assert.equal(disabledWithPreset.effort, null);
-  assert.equal(disabledWithPreset.effortLevelEnv, undefined);
+  assert.equal(disabledWithPreset.effortLevelEnv, 'auto');
   assert.equal(disabledWithPreset.alwaysEnableEffortEnv, undefined);
   assert.equal(disabledWithPreset.legacyEffortEnv, undefined);
+  assert.equal(disabledWithPreset.sdkRequestOutputConfig, undefined);
+  assert.equal(disabledWithPreset.titleRequestOutputConfig.effort, undefined);
 });
 
-test('omit_effort 환경 정책은 활성 프로필에서만 effort 입력을 제거하고 원본 환경을 변경하지 않는다', () => {
+test('omit_effort 환경 정책은 활성 프로필에서만 backend effort 생략 제어를 고정하고 원본 환경을 변경하지 않는다', () => {
   const env = {
     CLAUDE_CODE_EFFORT_LEVEL: 'high',
     CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
@@ -241,13 +249,13 @@ test('omit_effort 환경 정책은 활성 프로필에서만 effort 입력을 �
   const profile = { id: 'env-policy', omit_effort: true };
   const sanitized = applyClaudeRuntimeProfileEnvPolicy(env, profile);
 
-  assert.deepEqual(sanitized, { KEEP_ME: 'yes' });
+  assert.deepEqual(sanitized, { CLAUDE_CODE_EFFORT_LEVEL: 'auto', KEEP_ME: 'yes' });
   assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, 'high', '호출자가 소유한 원본 환경은 변경하지 않는다');
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), env);
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, null), env);
 });
 
-test('BaseSessionManager 채팅 spawn은 omit_effort 환경 제거와 haiku 보조 모델 매핑을 최종 자식에 적용한다', async () => {
+test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보조 모델 매핑을 최종 자식에 적용한다', async () => {
   const executable = await makeClaudeFixture('claude-base-session-policy.mjs');
   const { capture } = await spawnBaseSessionFixture({
     id: 'base-session-policy',
@@ -267,9 +275,11 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 환경 제거와 haiku 보�
   });
 
   assert.equal(capture.effort, null);
-  assert.equal(capture.effortLevelEnv, undefined);
+  assert.equal(capture.effortLevelEnv, 'auto');
   assert.equal(capture.alwaysEnableEffortEnv, undefined);
   assert.equal(capture.legacyEffortEnv, undefined);
+  assert.equal(capture.sdkRequestOutputConfig, undefined);
+  assert.equal(capture.titleRequestOutputConfig.effort, undefined);
   assert.equal(capture.smallFastModel, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
 });

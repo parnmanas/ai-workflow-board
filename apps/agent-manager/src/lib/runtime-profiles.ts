@@ -178,14 +178,18 @@ const MODEL_ROUTING_ENV_KEYS = [
  * 같은 served model로 되돌린다. */
 const AUXILIARY_MODEL_ALIAS = 'haiku';
 
-/** `omit_effort`가 제거해야 하는 Claude CLI 환경 입력. argv의 `--effort`
- * 생략만으로는 매니저/보드/에이전트 환경에서 상속된 값이 내부 보조 요청에
- * 계속 적용될 수 있으므로 최종 spawn 환경을 조립한 뒤 모두 제거한다. */
-const CLAUDE_EFFORT_ENV_KEYS = [
-  'CLAUDE_CODE_EFFORT_LEVEL',
+/** `omit_effort`가 제거해야 하는 Claude CLI 환경 입력. */
+const CLAUDE_EFFORT_ENABLE_ENV_KEYS = [
   'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
   'CLAUDE_EFFORT',
 ] as const;
+
+/** Claude CLI는 effort 입력이 전혀 없으면 모델 기본값인 `high`를 SDK의
+ * `output_config.effort`로 다시 만든다. CLI가 지원하는 `auto` 제어값은
+ * 제목 생성과 주 SDK 요청 모두에서 그 필드 자체를 생략한다. 따라서
+ * profile 비활성화는 단순 환경 삭제가 아니라 최종 spawn 경계에서 `auto`를
+ * 고정해야 하며, 이는 backend로 전달되는 reasoning effort 값이 아니다. */
+const CLAUDE_OMIT_EFFORT_LEVEL = 'auto';
 
 export function applyClaudeRuntimeProfileEnvPolicy(
   env: NodeJS.ProcessEnv,
@@ -193,7 +197,8 @@ export function applyClaudeRuntimeProfileEnvPolicy(
 ): NodeJS.ProcessEnv {
   if (!profile?.omit_effort) return env;
   const sanitized = { ...env };
-  for (const key of CLAUDE_EFFORT_ENV_KEYS) delete sanitized[key];
+  for (const key of CLAUDE_EFFORT_ENABLE_ENV_KEYS) delete sanitized[key];
+  sanitized.CLAUDE_CODE_EFFORT_LEVEL = CLAUDE_OMIT_EFFORT_LEVEL;
   return sanitized;
 }
 
