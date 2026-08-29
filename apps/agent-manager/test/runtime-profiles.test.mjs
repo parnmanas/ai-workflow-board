@@ -171,7 +171,7 @@ async function waitFor(check, timeoutMs, failureMessage) {
  * fixture가 payload를 합성하면 원래 회귀를 숨길 수 있으므로, 이 경로에서는
  * 로컬 Anthropic endpoint가 실제 HTTP body를 수신한다.
  */
-test('실제 Claude CLI의 일반 SDK 요청 payload에서 effort를 생략한다', {
+test('실제 Claude CLI의 일반 SDK 및 제목 생성 요청 payload에서 effort를 생략한다', {
   skip: !process.env.AWB_REAL_CLAUDE_EXECUTABLE
     && 'AWB_REAL_CLAUDE_EXECUTABLE을 지정하면 실제 Claude CLI 요청 경계를 검증합니다',
   timeout: 30_000,
@@ -247,6 +247,22 @@ test('실제 Claude CLI의 일반 SDK 요청 payload에서 effort를 생략한�
       `일반 SDK 요청을 받지 못했습니다: urls=${observedUrls.join(',')} stdout=${stdout} stderr=${stderr}`,
     );
     assert.equal(sdkRequest.body.output_config?.effort, undefined);
+
+    child.stdin.write(`${JSON.stringify({
+      type: 'control_request',
+      request_id: '통합-제목-요청',
+      request: {
+        subtype: 'generate_session_title',
+        description: 'backend profile effort 비활성화 회귀를 수정한다',
+        persist: false,
+      },
+    })}\n`);
+    const titleRequest = await waitFor(
+      () => requests.find(item => item.body?.output_config?.format !== undefined),
+      10_000,
+      `제목 생성 요청을 받지 못했습니다: urls=${observedUrls.join(',')} stdout=${stdout} stderr=${stderr}`,
+    );
+    assert.equal(titleRequest.body.output_config?.effort, undefined);
   } finally {
     child.kill('SIGTERM');
     await Promise.race([once(child, 'exit'), delay(2_000)]);
