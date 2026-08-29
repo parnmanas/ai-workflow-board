@@ -179,34 +179,56 @@ test('Anthropic-compatible profile launches the real Claude CLI path with endpoi
   assert.ok(capture.argv.includes('--mcp-config'), 'AWB MCP config remains attached');
 });
 
-test('omit_effort를 켠 Claude backend profile만 보드 effort를 argv에서 생략한다', async () => {
+test('Claude backend profile의 omit_effort 설정에 따라 실제 argv의 effort를 결정한다', async () => {
   const executable = await makeClaudeFixture('claude-effort-parity.mjs');
-  const profile = {
+  const baseProfile = {
     id: 'effort-parity',
     kind: 'claude-backend',
     protocol: 'anthropic-compatible',
     base_url: 'http://127.0.0.1:40110',
     model: 'qwen3-coder-next',
-    omit_effort: true,
     claude_executable: executable,
+  };
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...baseProfile, omit_effort: true }), null);
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...baseProfile, omit_effort: false }), 'high');
+  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, null), 'high');
+
+  const enabled = await spawnFixture(
+    { ...baseProfile, omit_effort: false },
+    join(fixtureRoot, 'effort-enabled.json'),
+    { effortPreset: { id: 'deep', claude: { effort: 'high' } } },
+  );
+  assert.equal(enabled.effort, 'high');
+
+  const unspecified = await spawnFixture(
+    baseProfile,
+    join(fixtureRoot, 'effort-unspecified.json'),
+    { effortPreset: { id: 'deep', claude: { effort: 'medium' } } },
+  );
+  assert.equal(unspecified.effort, 'medium');
+
+  const disabledWithoutPreset = await spawnFixture(
+    { ...baseProfile, omit_effort: true },
+    join(fixtureRoot, 'effort-disabled-without-preset.json'),
+  );
+  assert.equal(disabledWithoutPreset.effort, null);
+
+  const disabledWithPreset = await spawnFixture({
+    ...baseProfile,
+    omit_effort: true,
     env: {
       CLAUDE_CODE_EFFORT_LEVEL: 'high',
       CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
       CLAUDE_EFFORT: 'high',
     },
-  };
-  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, profile), null);
-  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, { ...profile, omit_effort: false }), 'high');
-  assert.equal(resolveClaudeEffortFlag({ effort: 'high' }, null), 'high');
-
-  const capture = await spawnFixture(profile, join(fixtureRoot, 'effort-parity.json'), {
+  }, join(fixtureRoot, 'effort-disabled-with-preset.json'), {
     model: 'anthropic-agent-default',
     effortPreset: { id: 'deep', claude: { effort: 'high' } },
   });
-  assert.equal(capture.effort, null);
-  assert.equal(capture.effortLevelEnv, undefined);
-  assert.equal(capture.alwaysEnableEffortEnv, undefined);
-  assert.equal(capture.legacyEffortEnv, undefined);
+  assert.equal(disabledWithPreset.effort, null);
+  assert.equal(disabledWithPreset.effortLevelEnv, undefined);
+  assert.equal(disabledWithPreset.alwaysEnableEffortEnv, undefined);
+  assert.equal(disabledWithPreset.legacyEffortEnv, undefined);
 });
 
 test('omit_effort 환경 정책은 활성 프로필에서만 effort 입력을 제거하고 원본 환경을 변경하지 않는다', () => {
