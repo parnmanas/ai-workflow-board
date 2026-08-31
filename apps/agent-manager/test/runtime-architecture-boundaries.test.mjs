@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, normalize, relative, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-const libRoot = new URL('../src/lib/', import.meta.url).pathname;
+const libRoot = fileURLToPath(new URL('../src/lib/', import.meta.url));
 const runtimeRoot = join(libRoot, 'runtime');
 const layers = ['domain', 'ports', 'application', 'adapters', 'composition'];
 const rank = new Map([['domain', 0], ['ports', 1], ['application', 2], ['adapters', 3], ['composition', 4]]);
