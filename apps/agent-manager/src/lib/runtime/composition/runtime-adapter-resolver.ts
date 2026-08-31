@@ -1,5 +1,7 @@
 import type { CliAdapter } from '../../cli-adapters/base.js';
 import type { RuntimePluginRegistry } from './plugin-registry.js';
+import { RuntimeExecutionFacade } from '../application/runtime-execution-facade.js';
+import type { OneshotSpec, SessionSpec } from '../../cli-adapters/base.js';
 
 /**
  * 실행 소유자별 CLI adapter 수명과 조회를 composition 계층에서 관리한다.
@@ -7,8 +9,11 @@ import type { RuntimePluginRegistry } from './plugin-registry.js';
  */
 export class RuntimeAdapterResolver {
   readonly #adapters = new Map<string, CliAdapter>();
+  readonly #facade: RuntimeExecutionFacade;
 
-  constructor(private readonly registry: RuntimePluginRegistry) {}
+  constructor(private readonly registry: RuntimePluginRegistry) {
+    this.#facade = new RuntimeExecutionFacade(registry);
+  }
 
   resolve(runtimeId: string | null | undefined): CliAdapter {
     const id = String(runtimeId || 'claude').trim().toLowerCase();
@@ -18,5 +23,19 @@ export class RuntimeAdapterResolver {
       this.#adapters.set(id, adapter);
     }
     return adapter;
+  }
+
+  buildOneshot(runtimeId: string | null | undefined, spec: OneshotSpec) {
+    const id = String(runtimeId || 'claude').trim().toLowerCase();
+    const adapter = this.resolve(id);
+    const prepared = this.#facade.prepareOneshot(id, spec, adapter);
+    return { ...prepared, adapter };
+  }
+
+  buildSession(runtimeId: string | null | undefined, mode: 'persistent' | 'resume' | 'control', spec: SessionSpec, sessionId?: string) {
+    const id = String(runtimeId || 'claude').trim().toLowerCase();
+    const adapter = this.resolve(id);
+    const prepared = this.#facade.prepareSession(id, mode, spec, sessionId, adapter);
+    return { ...prepared, adapter };
   }
 }

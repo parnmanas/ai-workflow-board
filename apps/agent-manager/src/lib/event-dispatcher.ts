@@ -62,7 +62,7 @@ interface ResolvedEnvironmentConfig {
 import { FolderMutex } from './run-execution-lock.js';
 import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
-import { mentionTriggerId } from './subagent-manager.js';
+import { mentionTriggerId } from './trigger-id.js';
 import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES } from './constants.js';
 import { createHash } from 'node:crypto';
 import {

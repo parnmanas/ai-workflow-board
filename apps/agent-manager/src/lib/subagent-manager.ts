@@ -217,9 +217,7 @@ export function findDuplicateSpawn(
  * collapse 형태(`mention:<commentId>:`)로 접혀 레거시 무회귀. rule 3 의 mention
  * 예외(`startsWith('mention:')`)는 접두 형태가 같아 그대로 작동한다.
  */
-export function mentionTriggerId(commentId: string, agentId?: string): string {
-  return `mention:${commentId}:${agentId || ''}`;
-}
+export { mentionTriggerId } from './trigger-id.js';
 
 export interface SubagentDelegationConfig {
   enabled?: boolean;
@@ -733,7 +731,7 @@ export class SubagentManager implements SubagentManagerContract {
       const attributedSpec = mentionAudit
         ? { ...spec, triggerSource: mentionAudit.run_token }
         : spec;
-      const descriptor = adapter.buildOneshotSpawn({
+      const descriptor = this.#adapterResolver.buildOneshot(adapter.cliType, {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
@@ -744,7 +742,7 @@ export class SubagentManager implements SubagentManagerContract {
         harness,
         effort: effortFlag,
         ultracode,
-      });
+      }).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-spawn role pin — same contract BaseSessionManager._spawnSession
@@ -817,7 +815,7 @@ export class SubagentManager implements SubagentManagerContract {
 
         Object.assign(
           descriptor,
-          adapter.buildOneshotSpawn({
+          this.#adapterResolver.buildOneshot(adapter.cliType, {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
@@ -828,7 +826,7 @@ export class SubagentManager implements SubagentManagerContract {
             harness,
             effort: effortFlag,
             ultracode,
-          }),
+          }).descriptor,
         );
       }
       if (claudeRuntimeProfile?.args?.length) {

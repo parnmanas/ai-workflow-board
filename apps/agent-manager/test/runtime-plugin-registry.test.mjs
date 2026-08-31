@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { composeRuntime } from '../dist/lib/runtime/composition/compose-runtime.js';
+import fixturePlugin from './fixtures/runtime-plugins/fixture-cli.mjs';
 import { RuntimePluginRegistry } from '../dist/lib/runtime/composition/plugin-registry.js';
 import { RuntimeAdapterResolver } from '../dist/lib/runtime/composition/runtime-adapter-resolver.js';
 import { defineRuntimePlugin } from '../dist/lib/runtime/composition/plugin-manifest.js';
@@ -16,6 +20,55 @@ test('fixture 플러그인은 코어 수정 없이 등록·탐색·생성된다'
   assert.deepEqual(registry.ids(), ['fixture']);
   assert.equal(registry.createCliAdapter('FIXTURE'), adapter);
   assert.equal(registry.descriptor('fixture').capabilities.session, 'oneshot');
+});
+
+test('별도 fixture manifest 등록만으로 실제 facade 실행이 되며 코어와 기존 adapter는 불변이다', () => {
+  const protectedFiles = [
+    '../src/lib/runtime/application/runtime-execution-facade.ts',
+    '../src/lib/cli-adapters/claude.ts',
+    '../src/lib/cli-adapters/codex.ts',
+  ].map(path => new URL(path, import.meta.url));
+  const digest = () => createHash('sha256').update(protectedFiles.map(file => readFileSync(file)).join('\0')).digest('hex');
+  const before = digest();
+  const runtime = composeRuntime([fixturePlugin]);
+  const execution = runtime.facade.prepareOneshot('fixture', {
+    rolePrompt: '제거될 system prompt', taskText: '실제 요청', mcpConfigPath: null, model: '제거될 모델', effort: 'high',
+  });
+  assert.deepEqual(execution.descriptor.args, ['run', '실제 요청']);
+  assert.deepEqual(execution.request.omitted, ['model', 'effort', 'systemPrompt', 'streaming']);
+  assert.equal(digest(), before);
+});
+
+test('Claude와 Codex normalized request는 capability 협상 뒤 최종 argv가 된다', () => {
+  const { facade } = composeRuntime();
+  const input = { rolePrompt: '시스템', taskText: '본문', mcpConfigPath: '/tmp/mcp.json', model: '모델', effort: 'high' };
+  const claude = facade.prepareOneshot('claude', input);
+  assert.ok(claude.descriptor.args.includes('--effort'));
+  assert.ok(claude.descriptor.args.includes('high'));
+  assert.ok(claude.descriptor.args.includes('--mcp-config'));
+  const codex = facade.prepareOneshot('codex', input);
+  assert.equal(codex.request.effort, undefined);
+  assert.ok(codex.request.omitted.includes('effort'));
+  assert.ok(!codex.descriptor.args.includes('--effort'));
+  assert.deepEqual(codex.descriptor.args.slice(0, 3), ['exec', '--model', '모델']);
+});
+
+test('persistent·resume·title 요청도 동일 facade contract를 사용한다', () => {
+  const { facade } = composeRuntime();
+  for (const mode of ['persistent', 'resume']) {
+    const execution = facade.prepareSession('claude', mode, {
+      rolePrompt: '세션 시스템', mcpConfigPath: '/tmp/session-mcp.json', model: '모델', effort: 'high',
+    }, 'thread-1');
+    assert.equal(execution.request.mode, mode);
+    assert.equal(execution.request.sessionId, 'thread-1');
+    assert.ok(execution.descriptor.args.includes('--input-format'));
+    assert.ok(execution.descriptor.args.includes('stream-json'));
+  }
+  const title = facade.prepareOneshot('claude', {
+    rolePrompt: '제목 생성', taskText: 'generate_session_title', mcpConfigPath: null, effort: 'high',
+  });
+  assert.equal(title.request.mode, 'oneshot');
+  assert.ok(title.descriptor.args.includes('generate_session_title'));
 });
 
 test('adapter resolver는 실행 소유자 안에서 plugin factory 결과를 재사용한다', () => {

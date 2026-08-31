@@ -12,6 +12,8 @@
 
 Capability 협상은 모든 정규화 요청의 adapter 진입 전에 수행한다. 미지원 option은 경고용 `omitted` 목록에 기록하고 요청에서 제거한다. Credential은 domain 필드가 아니며 composition에서 adapter에 opaque하게 주입해야 한다.
 
+Production의 `SubagentManager`와 `BaseSessionManager`는 adapter의 argv builder를 직접 호출하지 않는다. 두 경로 모두 `RuntimeAdapterResolver.buildOneshot/buildSession`을 거쳐 `RuntimeExecutionFacade`에서 협상된 요청만 최종 adapter 경계로 전달한다. 제목 생성은 one-shot 경로를, 새 persistent session과 resume는 session 경로를 공유한다.
+
 ## 결과
 
 새 구현은 새 모듈에서 manifest를 정의하고 composition에 등록한다. 코어 use case, 기존 adapter, provider union, factory switch를 수정하지 않는다. 계층 위반은 `runtime-architecture-boundaries.test.mjs`, open-closed와 capability 필터링은 `runtime-plugin-registry.test.mjs`가 막는다.

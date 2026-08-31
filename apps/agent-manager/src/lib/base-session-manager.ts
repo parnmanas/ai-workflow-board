@@ -759,14 +759,14 @@ export class BaseSessionManager {
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
-      let descriptor = adapter.buildSessionSpawn({
+      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
         model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
-      });
+      }, sessionKey).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-session config is required whenever the server needs to attribute
@@ -836,14 +836,14 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = adapter.buildSessionSpawn({
+        descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
           model: attemptModel,
           harness,
           effort: effortFlag,
           ultracode,
-        });
+        }, sessionKey).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
         descriptor.args.push(...claudeRuntimeProfile.args);
