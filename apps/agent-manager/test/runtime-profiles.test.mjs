@@ -303,7 +303,12 @@ test('실제 Claude CLI 요청에서 disabled는 effort 0회, enabled는 정확�
       '--effort', 'low',
     ], {
       cwd: fixtureRoot,
-      env: { ...childEnv, CLAUDE_CODE_EFFORT_LEVEL: 'low' },
+      env: applyClaudeRuntimeProfileEnvPolicy({
+        ...childEnv,
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+        CLAUDE_EFFORT: 'high',
+      }, { id: '실제-cli-effort-활성', omit_effort: false }),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     enabledChild.stdin.write(`${JSON.stringify({
@@ -382,11 +387,23 @@ test('Claude backend profile의 omit_effort 설정에 따라 실제 argv의 effo
   assert.equal(resolveClaudeExecutionEffort({ effort: 'high' }, null).effort, 'high');
 
   const enabled = await spawnFixture(
-    { ...baseProfile, omit_effort: false },
+    {
+      ...baseProfile,
+      omit_effort: false,
+      env: {
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+        CLAUDE_EFFORT: 'high',
+      },
+    },
     join(fixtureRoot, 'effort-enabled.json'),
     { effortPreset: { id: 'deep', claude: { effort: 'high' } } },
   );
   assert.equal(enabled.effort, 'high');
+  assert.equal(enabled.effortLevelEnv, undefined);
+  assert.equal(enabled.alwaysEnableEffortEnv, undefined);
+  assert.equal(enabled.legacyEffortEnv, undefined);
+  assert.equal(enabled.argv.filter(value => value === '--effort').length, 1);
 
   const unspecified = await spawnFixture(
     baseProfile,
@@ -419,7 +436,7 @@ test('Claude backend profile의 omit_effort 설정에 따라 실제 argv의 effo
   assert.equal(disabledWithPreset.legacyEffortEnv, undefined);
 });
 
-test('omit_effort 환경 정책은 활성 프로필에서만 backend effort 생략 제어를 고정하고 원본 환경을 변경하지 않는다', () => {
+test('backend profile 환경 정책은 enabled 충돌 키를 제거하고 disabled 생략 제어를 고정하며 원본 환경을 변경하지 않는다', () => {
   const env = {
     CLAUDE_CODE_EFFORT_LEVEL: 'high',
     CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
@@ -431,7 +448,7 @@ test('omit_effort 환경 정책은 활성 프로필에서만 backend effort 생�
 
   assert.deepEqual(sanitized, { CLAUDE_CODE_EFFORT_LEVEL: 'auto', KEEP_ME: 'yes' });
   assert.equal(env.CLAUDE_CODE_EFFORT_LEVEL, 'high', '호출자가 소유한 원본 환경은 변경하지 않는다');
-  assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), env);
+  assert.deepEqual(applyClaudeRuntimeProfileEnvPolicy(env, { ...profile, omit_effort: false }), { KEEP_ME: 'yes' });
   assert.equal(applyClaudeRuntimeProfileEnvPolicy(env, null), env);
 });
 
@@ -460,6 +477,32 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보�
   assert.equal(capture.legacyEffortEnv, undefined);
   assert.equal(capture.smallFastModel, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+});
+
+test('BaseSessionManager enabled profile은 충돌 env를 제거하고 preset effort를 argv에 한 번만 적용한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-enabled-effort.mjs');
+  const { capture } = await spawnBaseSessionFixture({
+    id: 'base-session-enabled-effort',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40114',
+    model: 'qwen3-coder-next',
+    omit_effort: false,
+    claude_executable: executable,
+    env: {
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
+      CLAUDE_EFFORT: 'high',
+    },
+  }, join(fixtureRoot, 'base-session-enabled-effort.json'), {
+    effortPreset: { id: 'quick', claude: { effort: 'low' } },
+  });
+
+  assert.equal(capture.effort, 'low');
+  assert.equal(capture.effortLevelEnv, undefined);
+  assert.equal(capture.alwaysEnableEffortEnv, undefined);
+  assert.equal(capture.legacyEffortEnv, undefined);
+  assert.equal(capture.argv.filter(value => value === '--effort').length, 1);
 });
 
 test('BaseSessionManager는 보조 요청 실패 stderr 뒤의 주 응답 result를 계속 전달한다', async () => {

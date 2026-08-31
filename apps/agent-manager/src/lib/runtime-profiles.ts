@@ -178,8 +178,9 @@ const MODEL_ROUTING_ENV_KEYS = [
  * 같은 served model로 되돌린다. */
 const AUXILIARY_MODEL_ALIAS = 'haiku';
 
-/** `omit_effort`가 제거해야 하는 Claude CLI 환경 입력. */
+/** backend profile이 argv effort와 충돌하지 않도록 제거할 Claude CLI 환경 입력. */
 const CLAUDE_EFFORT_ENABLE_ENV_KEYS = [
+  'CLAUDE_CODE_EFFORT_LEVEL',
   'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
   'CLAUDE_EFFORT',
 ] as const;
@@ -195,10 +196,10 @@ export function applyClaudeRuntimeProfileEnvPolicy(
   env: NodeJS.ProcessEnv,
   profile: RuntimeProfileSpec | null | undefined,
 ): NodeJS.ProcessEnv {
-  if (!profile?.omit_effort) return env;
+  if (!profile) return env;
   const sanitized = { ...env };
   for (const key of CLAUDE_EFFORT_ENABLE_ENV_KEYS) delete sanitized[key];
-  sanitized.CLAUDE_CODE_EFFORT_LEVEL = CLAUDE_OMIT_EFFORT_LEVEL;
+  if (profile.omit_effort) sanitized.CLAUDE_CODE_EFFORT_LEVEL = CLAUDE_OMIT_EFFORT_LEVEL;
   return sanitized;
 }
 
