@@ -178,8 +178,9 @@ const MODEL_ROUTING_ENV_KEYS = [
  * 같은 served model로 되돌린다. */
 const AUXILIARY_MODEL_ALIAS = 'haiku';
 
-/** `omit_effort`가 제거해야 하는 Claude CLI 환경 입력. */
+/** backend profile이 argv effort와 충돌하지 않도록 제거할 Claude CLI 환경 입력. */
 const CLAUDE_EFFORT_ENABLE_ENV_KEYS = [
+  'CLAUDE_CODE_EFFORT_LEVEL',
   'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
   'CLAUDE_EFFORT',
 ] as const;
@@ -195,11 +196,25 @@ export function applyClaudeRuntimeProfileEnvPolicy(
   env: NodeJS.ProcessEnv,
   profile: RuntimeProfileSpec | null | undefined,
 ): NodeJS.ProcessEnv {
-  if (!profile?.omit_effort) return env;
+  if (!profile) return env;
   const sanitized = { ...env };
   for (const key of CLAUDE_EFFORT_ENABLE_ENV_KEYS) delete sanitized[key];
-  sanitized.CLAUDE_CODE_EFFORT_LEVEL = CLAUDE_OMIT_EFFORT_LEVEL;
+  if (profile.omit_effort) sanitized.CLAUDE_CODE_EFFORT_LEVEL = CLAUDE_OMIT_EFFORT_LEVEL;
   return sanitized;
+}
+
+/** Claude 실행의 최종 effort 금지 계약이다. argv 결정과 자식 환경 정리를
+ * 같은 함수에서 계산해 one-shot/persistent 경로가 서로 다른 정책을 만들지
+ * 못하게 한다. env를 생략하면 argv 결정만 필요한 이른 spawn 단계에 쓴다. */
+export function resolveClaudeExecutionEffort(
+  slice: { effort?: string } | null | undefined,
+  profile: RuntimeProfileSpec | null | undefined,
+  env?: NodeJS.ProcessEnv,
+): { effort: string | null; env?: NodeJS.ProcessEnv } {
+  return {
+    effort: profile?.omit_effort ? null : (slice?.effort ?? null),
+    ...(env ? { env: applyClaudeRuntimeProfileEnvPolicy(env, profile) } : {}),
+  };
 }
 
 // ticket 7d8ea7c9 후속(컨텍스트 윈도우 초과) — Claude Code CLI 바이너리에
