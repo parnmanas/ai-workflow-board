@@ -34,7 +34,6 @@ import {
   type TurnImage,
   describeHarness,
   partitionHarness,
-  resolveClaudeEffortFlag,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
@@ -43,7 +42,7 @@ import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
-  applyClaudeRuntimeProfileEnvPolicy,
+  resolveClaudeExecutionEffort,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -698,7 +697,7 @@ export class BaseSessionManager {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
-    const effortFlag = resolveClaudeEffortFlag(slice, claudeRuntimeProfile);
+    const effortFlag = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(
@@ -916,7 +915,7 @@ export class BaseSessionManager {
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they
         // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
         // / cli-home / per-agent credential / harness env layered on top.
-        env: applyClaudeRuntimeProfileEnvPolicy({
+        env: resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
           ...baseEnv,
           ...(envVars ?? {}),
           AWB_API_KEY: effectiveApiKey,
@@ -925,7 +924,7 @@ export class BaseSessionManager {
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
           ...(maxOutputResolution?.env ?? {}),
-        }, claudeRuntimeProfile),
+        }).env,
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(
