@@ -10,6 +10,7 @@ export interface CliOneshotRequestPort {
 export interface CliSessionRequestPort {
   rolePrompt: string; mcpConfigPath: string | null; model?: string | null; harness?: any;
   effort?: string | null; ultracode?: boolean;
+  sessionMode?: 'persistent' | 'resume' | 'control'; sessionId?: string;
 }
 export interface CliExecutionAdapterPort {
   buildOneshotSpawn(spec: CliOneshotRequestPort): CliSpawnDescriptorPort;

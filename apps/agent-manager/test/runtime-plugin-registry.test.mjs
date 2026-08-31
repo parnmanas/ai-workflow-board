@@ -94,6 +94,11 @@ test('주입한 prompt·session·tool port 산출물이 모든 CLI 최종 argv�
       rolePrompt: '역할', mcpConfigPath: '/tmp/session.json', effort: 'high',
     }, 'thread');
     assert.equal(session.request.sessionId, '세션:thread');
+    assert.equal(session.spec.sessionId, '세션:thread');
+    const lifecycleFlag = mode === 'resume' ? '--resume' : '--session-id';
+    const lifecycleFlagIndex = session.descriptor.args.indexOf(lifecycleFlag);
+    assert.notEqual(lifecycleFlagIndex, -1);
+    assert.equal(session.descriptor.args[lifecycleFlagIndex + 1], '세션:thread');
     assert.ok(session.descriptor.args.includes('/tmp/session.json.주입'));
   }
   const title = facade.prepareOneshot('claude', {

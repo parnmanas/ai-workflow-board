@@ -51,6 +51,8 @@ export class RuntimeExecutionFacade {
     });
     const negotiatedSpec: CliSessionRequestPort = {
       ...spec,
+      sessionMode: mode,
+      sessionId: request.sessionId,
       rolePrompt: request.systemPrompt ?? '',
       model: request.model ?? null,
       effort: request.effort ?? null,

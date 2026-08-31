@@ -209,7 +209,7 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode, sessionMode, sessionId }: SessionSpec): SpawnDescriptor {
     // Session ultracode is best-effort and applied at SESSION CREATION only:
     // a persistent session has no single "task text" arg, so we fold the
     // `ultracode` keyword into the composed system prompt here. Follow-up
@@ -222,6 +222,8 @@ export class ClaudeCliAdapter extends CliAdapter {
     const effortArg = normalizeEffort(effort);
     return {
       args: [
+        ...(sessionId && sessionMode === 'resume' ? ['--resume', sessionId] : []),
+        ...(sessionId && sessionMode === 'persistent' ? ['--session-id', sessionId] : []),
         ...(model ? ['--model', model] : []),
         ...(effortArg ? ['--effort', effortArg] : []),
         '--verbose',

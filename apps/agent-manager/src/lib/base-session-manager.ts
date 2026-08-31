@@ -50,6 +50,7 @@ import {
   type RuntimeLease,
 } from './runtime-profiles.js';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 
@@ -76,6 +77,7 @@ export interface BaseSessionOptions {
   logTag: string;
   cfgPrefix: string;
   kindLabel: 'chat_session' | 'ticket_session';
+  adapterResolver?: RuntimeAdapterResolver;
 }
 
 export interface SessionDelegationConfig {
@@ -458,7 +460,7 @@ export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
-  #adapterResolver = createRuntimeAdapterResolver();
+  #adapterResolver: RuntimeAdapterResolver;
 
   protected _shouldRetryRuntime(runtimeId: string, cause: unknown, attempt: number): boolean {
     return this.#adapterResolver.shouldRetry(runtimeId, cause, attempt);
@@ -505,6 +507,7 @@ export class BaseSessionManager {
     this.#logTag = options.logTag;
     this.#cfgPrefix = options.cfgPrefix;
     this.#kindLabel = options.kindLabel;
+    this.#adapterResolver = options.adapterResolver ?? createRuntimeAdapterResolver();
   }
 
   /** Default-claude getter for legacy callers that introspect the manager. */

@@ -333,6 +333,9 @@ export interface McpAttribution {
 export interface SessionSpec {
   rolePrompt: string;
   mcpConfigPath: string | null;
+  /** 세션 전략이 선택한 실제 CLI lifecycle 동작과 식별자. */
+  sessionMode?: 'persistent' | 'resume' | 'control';
+  sessionId?: string;
   /** Per-agent default model — see OneshotSpec.model. */
   model?: string | null;
   /** Board/workspace harness — see OneshotSpec.harness. */

@@ -25,6 +25,7 @@ import {
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -370,7 +371,7 @@ export class SubagentManager implements SubagentManagerContract {
    * claude / codex / antigravity agents. createAdapter() runs at most once per
    * cli over the manager's lifetime.
    */
-  #adapterResolver = createRuntimeAdapterResolver();
+  #adapterResolver: RuntimeAdapterResolver;
   #sweepTimer: NodeJS.Timeout | null = null;
   /** ticket b972b28c: #sweep's TTL branch now awaits an async live-task probe
    *  (findLiveBackgroundTasks shells out to `ps`) per TTL-expired candidate.
@@ -441,11 +442,16 @@ export class SubagentManager implements SubagentManagerContract {
       }) => void)
     | null = null;
 
-  constructor(config: SubagentAwareConfig, circuitBreaker?: CircuitBreaker) {
+  constructor(
+    config: SubagentAwareConfig,
+    circuitBreaker?: CircuitBreaker,
+    adapterResolver: RuntimeAdapterResolver = createRuntimeAdapterResolver(),
+  ) {
     this.#config = config;
     this.#persistPath = SUBAGENTS_PERSIST_PATH;
     this.#pidDir = SUBAGENTS_BASE_DIR;
     this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
+    this.#adapterResolver = adapterResolver;
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -1252,7 +1258,7 @@ export class SubagentManager implements SubagentManagerContract {
         code: errClass.reason || 'cli_error',
         message: errClass.reason || 'CLI 실행 실패',
         retryable: isFallbackEligible(errClass),
-      }, 0) &&
+      }, record.chainAttempt ?? 0) &&
       record.respawnSpec &&
       Array.isArray(record.modelChain) &&
       (record.chainAttempt ?? 0) + 1 < record.modelChain.length
