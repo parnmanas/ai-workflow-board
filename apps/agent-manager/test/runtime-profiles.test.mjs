@@ -189,6 +189,8 @@ test('실제 Claude CLI 요청에서 disabled는 effort 0회, enabled는 정확�
 }, async () => {
   const executable = process.env.AWB_REAL_CLAUDE_EXECUTABLE;
   assert.ok(executable);
+  const upstreamBaseUrl = process.env.AWB_REAL_CLAUDE_UPSTREAM?.replace(/\/$/, '');
+  const servedModel = process.env.AWB_REAL_CLAUDE_MODEL || 'qwen3-coder-next';
   await mkdir(fixtureRoot, { recursive: true });
   const requests = [];
   const observedUrls = [];
@@ -207,12 +209,26 @@ test('실제 Claude CLI 요청에서 disabled는 effort 0회, enabled는 정확�
     let text = '';
     for await (const chunk of request) text += chunk;
     requests.push({ url: request.url, body: JSON.parse(text) });
+    if (upstreamBaseUrl) {
+      const upstream = await fetch(`${upstreamBaseUrl}${request.url}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'integration-test-token',
+          authorization: 'Bearer integration-test-token',
+        },
+        body: text,
+      });
+      response.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') || 'application/json' });
+      response.end(await upstream.text());
+      return;
+    }
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({
       id: `msg_${requests.length}`,
       type: 'message',
       role: 'assistant',
-      model: 'qwen3-coder-next',
+      model: servedModel,
       content: [{ type: 'text', text: requests.length === 1 ? '통합 응답' : '{"title":"통합 제목"}' }],
       stop_reason: 'end_turn',
       stop_sequence: null,
@@ -229,9 +245,9 @@ test('실제 Claude CLI 요청에서 disabled는 effort 0회, enabled는 정확�
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
     ANTHROPIC_AUTH_TOKEN: 'integration-test-token',
     ANTHROPIC_API_KEY: 'integration-test-token',
-    ANTHROPIC_MODEL: 'qwen3-coder-next',
+    ANTHROPIC_MODEL: servedModel,
     ANTHROPIC_SMALL_FAST_MODEL: 'haiku',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3-coder-next',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: servedModel,
     CLAUDE_CODE_EFFORT_LEVEL: 'high',
     CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: '1',
     CLAUDE_EFFORT: 'high',
