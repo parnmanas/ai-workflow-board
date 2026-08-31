@@ -68,7 +68,7 @@ export class RuntimeExecutionFacade {
         this.ports.telemetry.record('request.completed', { runtimeId, mode: negotiated.mode, attempt });
         return result;
       } catch (cause) {
-        const error = this.#normalizeError(runtimeId, cause);
+        const error = this.ports.errors.normalize(runtimeId, cause);
         this.ports.telemetry.record('request.failed', { runtimeId, code: error.code, attempt });
         if (!this.ports.retry.shouldRetry(error, attempt)) throw error;
       }
@@ -76,21 +76,28 @@ export class RuntimeExecutionFacade {
   }
 
   #negotiate(runtimeId: string, request: NormalizedRuntimeRequest) {
-    const negotiated = negotiateCapabilities(request, this.registry.manifest(runtimeId).capabilities);
-    this.ports.prompt.encode(negotiated);
-    this.ports.session.sessionId(negotiated);
-    this.ports.tools.configure(negotiated);
+    const capabilitySafe = negotiateCapabilities(request, this.registry.manifest(runtimeId).capabilities);
+    const transported = {
+      ...capabilitySafe,
+      prompt: this.ports.prompt.encode(capabilitySafe),
+      sessionId: this.ports.session.sessionId(capabilitySafe),
+      mcpServers: this.ports.tools.configure(capabilitySafe).mcpServers,
+    };
+    // infrastructure 변환 뒤 한 번 더 협상해 포트가 미지원 옵션을 되살리지 못하게 한다.
+    const finalNegotiated = negotiateCapabilities(transported, this.registry.manifest(runtimeId).capabilities);
+    const negotiated = Object.freeze({
+      ...finalNegotiated,
+      omitted: Object.freeze([...new Set([...capabilitySafe.omitted, ...finalNegotiated.omitted])]),
+    });
     this.ports.telemetry.record('request.negotiated', { runtimeId, mode: negotiated.mode, omitted: negotiated.omitted });
     return negotiated;
   }
 
-  #normalizeError(pluginId: string, cause: unknown): RuntimeError {
-    const candidate = cause as Partial<RuntimeError> | null;
-    return Object.freeze({
-      code: typeof candidate?.code === 'string' ? candidate.code : 'provider_error',
-      message: cause instanceof Error ? cause.message : String(cause),
-      retryable: candidate?.retryable === true,
-      pluginId,
-    });
+  normalizeError(pluginId: string, cause: unknown): RuntimeError {
+    return this.ports.errors.normalize(pluginId, cause);
+  }
+
+  shouldRetry(error: RuntimeError, attempt: number): boolean {
+    return this.ports.retry.shouldRetry(error, attempt);
   }
 }

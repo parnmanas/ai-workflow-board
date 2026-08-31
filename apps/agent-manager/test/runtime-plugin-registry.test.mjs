@@ -73,6 +73,51 @@ test('persistent·resume·title 요청도 동일 facade contract를 사용한다
   assert.ok(title.descriptor.args.includes('generate_session_title'));
 });
 
+test('주입한 prompt·session·tool port 산출물이 모든 CLI 최종 argv를 바꾼다', () => {
+  const basePorts = createDefaultRuntimePorts();
+  const calls = [];
+  const ports = {
+    ...basePorts,
+    prompt: { encode(request) { calls.push(`prompt:${request.mode}`); return request.prompt ? `전송:${request.prompt}` : ''; } },
+    session: { sessionId(request) { calls.push(`session:${request.mode}`); return request.sessionId ? `세션:${request.sessionId}` : undefined; } },
+    tools: { configure(request) { calls.push(`tools:${request.mode}`); return { mcpServers: request.mcpServers?.map(path => `${path}.주입`) }; } },
+  };
+  const { facade } = composeRuntime([], ports);
+  const one = facade.prepareOneshot('claude', {
+    rolePrompt: '역할', taskText: '본문', mcpConfigPath: '/tmp/one.json', effort: 'high',
+  });
+  assert.ok(one.descriptor.args.includes('전송:본문'));
+  assert.ok(one.descriptor.args.includes('/tmp/one.json.주입'));
+
+  for (const mode of ['persistent', 'resume']) {
+    const session = facade.prepareSession('claude', mode, {
+      rolePrompt: '역할', mcpConfigPath: '/tmp/session.json', effort: 'high',
+    }, 'thread');
+    assert.equal(session.request.sessionId, '세션:thread');
+    assert.ok(session.descriptor.args.includes('/tmp/session.json.주입'));
+  }
+  const title = facade.prepareOneshot('claude', {
+    rolePrompt: '제목', taskText: 'generate_session_title', mcpConfigPath: null,
+  });
+  assert.ok(title.descriptor.args.includes('전송:generate_session_title'));
+  assert.equal(calls.length, 12);
+});
+
+test('production facade의 공통 error/retry policy가 실패 뒤 두 번째 provider 실행을 구동한다', async () => {
+  let attempts = 0;
+  const retrying = defineRuntimePlugin({
+    id: 'retrying-llm', transport: 'llm', capabilities: requestCapabilities(base),
+    createLlmProvider: () => ({ async complete() {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error('일시 오류'), { code: 'temporary', retryable: true });
+      return { text: '성공' };
+    } }),
+  });
+  const result = await composeRuntime([retrying]).facade.complete('retrying-llm', { prompt: '본문', mode: 'oneshot' });
+  assert.equal(result.text, '성공');
+  assert.equal(attempts, 2);
+});
+
 test('LLM fixture도 manifest 등록만으로 capability 제거 후 최종 body를 받는다', async () => {
   const runtime = composeRuntime([fixtureLlmPlugin]);
   const result = await runtime.facade.complete('fixture-llm', {

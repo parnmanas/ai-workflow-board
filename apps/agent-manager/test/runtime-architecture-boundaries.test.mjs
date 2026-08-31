@@ -79,9 +79,6 @@ test('전체 agent 런타임 그래프는 역방향·순환·코어의 infrastru
   assert.ok([...graph.keys()].some(file => file === 'base-session-manager.ts'));
   assert.ok([...graph.keys()].some(file => file.startsWith('cli-adapters/')));
   const facade = readFileSync(join(runtimeRoot, 'application/runtime-execution-facade.ts'), 'utf8');
-  for (const port of ['prompt', 'session', 'tools', 'retry', 'telemetry']) {
-    assert.match(facade, new RegExp(`this\\.ports\\.${port}\\.`), `production facade가 ${port} port를 사용해야 한다`);
-  }
   for (const manager of ['base-session-manager.ts', 'subagent-manager.ts']) {
     assert.match(readFileSync(join(libRoot, manager), 'utf8'), /\.spawnProcess\(/, `${manager}가 process port를 사용해야 한다`);
   }

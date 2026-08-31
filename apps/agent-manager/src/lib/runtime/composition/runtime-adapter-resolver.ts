@@ -43,4 +43,8 @@ export class RuntimeAdapterResolver {
   spawnProcess(command: string, args: readonly string[], options: Readonly<Record<string, unknown>>) {
     return this.ports.process.spawn(command, args, options);
   }
+
+  shouldRetry(runtimeId: string, cause: unknown, attempt: number) {
+    return this.#facade.shouldRetry(this.#facade.normalizeError(runtimeId, cause), attempt);
+  }
 }

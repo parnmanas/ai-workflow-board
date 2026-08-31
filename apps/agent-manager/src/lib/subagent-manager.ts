@@ -1248,7 +1248,11 @@ export class SubagentManager implements SubagentManagerContract {
       record.kind === 'trigger' &&
       record.ticket_id &&
       !record.commentSent &&
-      isFallbackEligible(errClass) &&
+      this.#adapterResolver.shouldRetry(record.cli_type, {
+        code: errClass.reason || 'cli_error',
+        message: errClass.reason || 'CLI 실행 실패',
+        retryable: isFallbackEligible(errClass),
+      }, 0) &&
       record.respawnSpec &&
       Array.isArray(record.modelChain) &&
       (record.chainAttempt ?? 0) + 1 < record.modelChain.length

@@ -1355,7 +1355,11 @@ export class TicketSessionManager
       !CircuitBreaker.isTransientExit(code)
     ) {
       const errClass = classifyCliError(tail, { exitCode: code });
-      if (isFallbackEligible(errClass)) {
+      if (this._shouldRetryRuntime(sess.cli_type, {
+        code: errClass.reason || 'cli_error',
+        message: errClass.reason || 'CLI 실행 실패',
+        retryable: isFallbackEligible(errClass),
+      }, 0)) {
         const nextAttempt = (sess.chainAttempt ?? 0) + 1;
         const prevModel = sess.modelChain[sess.chainAttempt ?? 0];
         const nextModel = sess.modelChain[nextAttempt];

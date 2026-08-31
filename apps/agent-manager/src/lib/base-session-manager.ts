@@ -459,6 +459,10 @@ export class BaseSessionManager {
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
   #adapterResolver = createRuntimeAdapterResolver();
+
+  protected _shouldRetryRuntime(runtimeId: string, cause: unknown, attempt: number): boolean {
+    return this.#adapterResolver.shouldRetry(runtimeId, cause, attempt);
+  }
   protected readonly _sessions = new Map<string, SessionRecord>();
   /** Synchronous reservation table for in-flight spawns. `_sessions` only
    *  gets the new record at the END of `_spawnSession`, so without this map

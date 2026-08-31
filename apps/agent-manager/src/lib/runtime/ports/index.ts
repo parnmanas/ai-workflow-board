@@ -24,14 +24,15 @@ export interface RuntimePluginLookupPort {
 export interface CliTransportPort { execute(request: NormalizedRuntimeRequest): Promise<RuntimeResult>; }
 export interface LlmProviderPort { complete(request: NormalizedRuntimeRequest): Promise<RuntimeResult>; }
 export interface SessionStrategyPort { sessionId(request: NormalizedRuntimeRequest): string | undefined; }
-export interface PromptTransportPort { encode(request: NormalizedRuntimeRequest): string | Uint8Array; }
+export interface PromptTransportPort { encode(request: NormalizedRuntimeRequest): string; }
 export interface ToolBridgePort {
-  configure(request: NormalizedRuntimeRequest): Readonly<Record<string, unknown>>;
+  configure(request: NormalizedRuntimeRequest): { readonly mcpServers?: readonly string[] };
 }
 export interface ProcessRunnerPort {
   spawn(command: string, args: readonly string[], options: Readonly<Record<string, unknown>>): any;
 }
 export interface RetryPolicyPort { shouldRetry(error: RuntimeError, attempt: number): boolean; }
+export interface ErrorNormalizationPort { normalize(pluginId: string, cause: unknown): RuntimeError; }
 export interface TelemetryPort { record(event: string, fields: Readonly<Record<string, unknown>>): void; }
 
 export interface RuntimeInfrastructurePorts {
@@ -40,5 +41,6 @@ export interface RuntimeInfrastructurePorts {
   readonly tools: ToolBridgePort;
   readonly process: ProcessRunnerPort;
   readonly retry: RetryPolicyPort;
+  readonly errors: ErrorNormalizationPort;
   readonly telemetry: TelemetryPort;
 }
