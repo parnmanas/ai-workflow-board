@@ -27,10 +27,10 @@ const config = {
 
 test('Claude one-shot과 persistent spawn은 모두 공통 최종 effort 계약만 사용한다', async () => {
   for (const relativePath of [
-    'apps/agent-manager/src/lib/subagent-manager.ts',
-    'apps/agent-manager/src/lib/base-session-manager.ts',
+    '../src/lib/subagent-manager.ts',
+    '../src/lib/base-session-manager.ts',
   ]) {
-    const source = await readFile(join(process.cwd(), relativePath), 'utf8');
+    const source = await readFile(new URL(relativePath, import.meta.url), 'utf8');
     assert.equal((source.match(/resolveClaudeExecutionEffort\(/g) ?? []).length, 2, relativePath);
     assert.equal(source.includes('.omit_effort'), false, relativePath);
   }
