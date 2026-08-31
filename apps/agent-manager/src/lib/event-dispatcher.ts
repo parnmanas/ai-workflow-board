@@ -42,7 +42,8 @@ import type {
   RuntimeSupervisor,
 } from './runtime/runtime-supervisor.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
-import { createAdapter, ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
+import { ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
+import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import {
   parseRunProvision,
   provisionRunWorkspace,
@@ -2635,7 +2636,7 @@ export class EventDispatcher {
     // 세션의 runtime_config.permission_mode)을 따로 갖고 있으며, 아래 Hermes
     // 분기에서 별도로 처리된다.
     if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
-      const adapter = createAdapter(agentContext.cli);
+      const adapter = createRuntimeCliAdapter(agentContext.cli);
       const trustRequired = adapter.requiresWorkspaceTrust(harness);
       // ticket 152e3606 리뷰 반영: bypassPermissions(harness 미설정 또는
       // 명시적 bypassPermissions — trustRequired=false)일 때만 워크스페이스
@@ -3500,7 +3501,7 @@ export class EventDispatcher {
       // and posts the reply. Compose the channel instruction to match so the
       // subagent isn't told to use a tool it lacks (or to suppress the stdout
       // the manager reads).
-      const usesNativeMcp = createAdapter(runContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+      const usesNativeMcp = createRuntimeCliAdapter(runContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
       const taskText =
         this.#prompts?.composeChatPrompt(
           rolePrompt,
@@ -4398,7 +4399,7 @@ export class EventDispatcher {
       // 체크 자체가 없다 — 시딩이 이 경로의 수정 전부다. best-effort:
       // 시딩 실패로 run 자체를 중단시키지 않는다.
       if (runContext?.cwd && runContext?.cli_home_dir && runContext?.cli !== 'hermes') {
-        await createAdapter(runContext.cli)
+        await createRuntimeCliAdapter(runContext.cli)
           .ensureWorkspaceTrust(runContext.cli_home_dir, runContext.cwd)
           .catch((err: any) => {
             log(
@@ -4616,7 +4617,7 @@ export class EventDispatcher {
         // Oneshot fallback CLIs are typically codex / antigravity (claude takes
         // the persistent path above). Match the reply-channel instruction to
         // whether this CLI can call the AWB MCP tool itself.
-        const usesNativeMcp = createAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+        const usesNativeMcp = createRuntimeCliAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
         const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
           this.#config,
           usesNativeMcp,

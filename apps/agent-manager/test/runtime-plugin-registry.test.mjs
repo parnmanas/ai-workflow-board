@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RuntimePluginRegistry } from '../dist/lib/runtime/composition/plugin-registry.js';
+import { RuntimeAdapterResolver } from '../dist/lib/runtime/composition/runtime-adapter-resolver.js';
 import { defineRuntimePlugin } from '../dist/lib/runtime/composition/plugin-manifest.js';
 import { negotiateCapabilities } from '../dist/lib/runtime/application/negotiate-capabilities.js';
 import { requestCapabilities } from '../dist/lib/runtime/domain/capabilities.js';
@@ -15,6 +16,25 @@ test('fixture 플러그인은 코어 수정 없이 등록·탐색·생성된다'
   assert.deepEqual(registry.ids(), ['fixture']);
   assert.equal(registry.createCliAdapter('FIXTURE'), adapter);
   assert.equal(registry.descriptor('fixture').capabilities.session, 'oneshot');
+});
+
+test('adapter resolver는 실행 소유자 안에서 plugin factory 결과를 재사용한다', () => {
+  let creations = 0;
+  const registry = new RuntimePluginRegistry().register(defineRuntimePlugin({
+    id: 'fixture-cache',
+    transport: 'cli',
+    capabilities: requestCapabilities(base),
+    createCliAdapter: () => {
+      creations += 1;
+      return {};
+    },
+  })).seal();
+  const firstOwner = new RuntimeAdapterResolver(registry);
+  const secondOwner = new RuntimeAdapterResolver(registry);
+
+  assert.equal(firstOwner.resolve('FIXTURE-CACHE'), firstOwner.resolve('fixture-cache'));
+  assert.notEqual(firstOwner.resolve('fixture-cache'), secondOwner.resolve('fixture-cache'));
+  assert.equal(creations, 2);
 });
 
 test('중복 id와 transport factory 누락은 composition 시점에 거부된다', () => {

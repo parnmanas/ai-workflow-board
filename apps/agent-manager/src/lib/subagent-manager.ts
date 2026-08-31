@@ -25,7 +25,7 @@ import {
 } from './constants.js';
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -373,7 +373,7 @@ export class SubagentManager implements SubagentManagerContract {
    * claude / codex / antigravity agents. createAdapter() runs at most once per
    * cli over the manager's lifetime.
    */
-  #adapters = new Map<string, CliAdapter>();
+  #adapterResolver = createRuntimeAdapterResolver();
   #sweepTimer: NodeJS.Timeout | null = null;
   /** ticket b972b28c: #sweep's TTL branch now awaits an async live-task probe
    *  (findLiveBackgroundTasks shells out to `ps`) per TTL-expired candidate.
@@ -480,13 +480,7 @@ export class SubagentManager implements SubagentManagerContract {
    * unknown values (createAdapter handles that itself).
    */
   #adapterFor(cli: string | null | undefined): CliAdapter {
-    const t = String(cli || 'claude').toLowerCase();
-    let a = this.#adapters.get(t);
-    if (!a) {
-      a = createAdapter(t);
-      this.#adapters.set(t, a);
-    }
-    return a;
+    return this.#adapterResolver.resolve(cli);
   }
 
   /** Default-claude adapter for the legacy single-agent code paths. */

@@ -19,7 +19,7 @@ import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
@@ -459,7 +459,7 @@ export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
-  #adapters = new Map<string, CliAdapter>();
+  #adapterResolver = createRuntimeAdapterResolver();
   protected readonly _sessions = new Map<string, SessionRecord>();
   /** Synchronous reservation table for in-flight spawns. `_sessions` only
    *  gets the new record at the END of `_spawnSession`, so without this map
@@ -510,13 +510,7 @@ export class BaseSessionManager {
   }
 
   protected _adapterFor(cli: string | null | undefined): CliAdapter {
-    const t = String(cli || 'claude').toLowerCase();
-    let a = this.#adapters.get(t);
-    if (!a) {
-      a = createAdapter(t);
-      this.#adapters.set(t, a);
-    }
-    return a;
+    return this.#adapterResolver.resolve(cli);
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
