@@ -1,9 +1,10 @@
 import { type AgentRuntimeConfig, type RuntimeDescriptor, RuntimeSelectionError } from './runtime-types.js';
 import { type HermesRuntime, type HermesRuntimeOptions } from './hermes/hermes-runtime.js';
-import { createBuiltinRuntimeRegistry } from './composition/builtin-plugins.js';
 import { RuntimeAdapterResolver } from './composition/runtime-adapter-resolver.js';
+import { composeRuntime } from './composition/compose-runtime.js';
 
-export const runtimePluginRegistry = createBuiltinRuntimeRegistry();
+const runtimeComposition = composeRuntime();
+export const runtimePluginRegistry = runtimeComposition.registry;
 export const KNOWN_RUNTIME_IDS = runtimePluginRegistry.ids();
 
 export type RuntimeOwner = HermesRuntime;
@@ -26,7 +27,7 @@ export const createRuntimeCliAdapter = (runtimeId: string | null | undefined) =>
 
 /** 실행 소유자별 adapter 캐시. application 호출자는 registry 구현을 보지 않는다. */
 export const createRuntimeAdapterResolver = () =>
-  new RuntimeAdapterResolver(runtimePluginRegistry);
+  new RuntimeAdapterResolver(runtimePluginRegistry, runtimeComposition.ports);
 
 function invalid(runtimeId: string, message: string): never {
   throw new RuntimeSelectionError('runtime_config_invalid', runtimeId, message);

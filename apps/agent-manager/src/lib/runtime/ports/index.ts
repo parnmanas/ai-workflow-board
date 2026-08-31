@@ -18,13 +18,27 @@ export interface CliExecutionAdapterPort {
 export interface RuntimePluginLookupPort {
   manifest(runtimeId: string): { readonly capabilities: RuntimePluginCapabilities };
   createCliAdapter(runtimeId: string): CliExecutionAdapterPort;
+  createLlmProvider(runtimeId: string): LlmProviderPort;
 }
 
 export interface CliTransportPort { execute(request: NormalizedRuntimeRequest): Promise<RuntimeResult>; }
 export interface LlmProviderPort { complete(request: NormalizedRuntimeRequest): Promise<RuntimeResult>; }
 export interface SessionStrategyPort { sessionId(request: NormalizedRuntimeRequest): string | undefined; }
 export interface PromptTransportPort { encode(request: NormalizedRuntimeRequest): string | Uint8Array; }
-export interface ToolBridgePort { configure(request: NormalizedRuntimeRequest): Promise<Readonly<Record<string, unknown>>>; }
-export interface ProcessRunnerPort { run(command: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RuntimeResult>; }
+export interface ToolBridgePort {
+  configure(request: NormalizedRuntimeRequest): Readonly<Record<string, unknown>>;
+}
+export interface ProcessRunnerPort {
+  spawn(command: string, args: readonly string[], options: Readonly<Record<string, unknown>>): any;
+}
 export interface RetryPolicyPort { shouldRetry(error: RuntimeError, attempt: number): boolean; }
 export interface TelemetryPort { record(event: string, fields: Readonly<Record<string, unknown>>): void; }
+
+export interface RuntimeInfrastructurePorts {
+  readonly session: SessionStrategyPort;
+  readonly prompt: PromptTransportPort;
+  readonly tools: ToolBridgePort;
+  readonly process: ProcessRunnerPort;
+  readonly retry: RetryPolicyPort;
+  readonly telemetry: TelemetryPort;
+}

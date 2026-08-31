@@ -13,7 +13,6 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcessByStdio } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
@@ -899,7 +898,7 @@ export class BaseSessionManager {
       // detached 가 POSIX 전용인 이유는 subagent-manager spawn 사이트 참고:
       // win32 의 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 충돌하며, resolved
       // 바이너리가 .cmd/.bat shim 일 때 cmd 콘솔이 번쩍인다.
-      const child = crossSpawn(resolvedBin, descriptor.args, {
+      const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,

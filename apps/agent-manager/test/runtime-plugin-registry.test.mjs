@@ -4,11 +4,13 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { composeRuntime } from '../dist/lib/runtime/composition/compose-runtime.js';
 import fixturePlugin from './fixtures/runtime-plugins/fixture-cli.mjs';
+import fixtureLlmPlugin from './fixtures/runtime-plugins/fixture-llm.mjs';
 import { RuntimePluginRegistry } from '../dist/lib/runtime/composition/plugin-registry.js';
 import { RuntimeAdapterResolver } from '../dist/lib/runtime/composition/runtime-adapter-resolver.js';
 import { defineRuntimePlugin } from '../dist/lib/runtime/composition/plugin-manifest.js';
 import { negotiateCapabilities } from '../dist/lib/runtime/application/negotiate-capabilities.js';
 import { requestCapabilities } from '../dist/lib/runtime/domain/capabilities.js';
+import { createDefaultRuntimePorts } from '../dist/lib/runtime/adapters/infrastructure/default-runtime-ports.js';
 
 const base = { protocol: 'jsonl', session: 'oneshot', native_mcp: false, native_approvals: false, steering: false, cancellation: true, usage: 'none', collaboration: [], skill_delivery: ['prompt'] };
 
@@ -71,6 +73,20 @@ test('persistent·resume·title 요청도 동일 facade contract를 사용한다
   assert.ok(title.descriptor.args.includes('generate_session_title'));
 });
 
+test('LLM fixture도 manifest 등록만으로 capability 제거 후 최종 body를 받는다', async () => {
+  const runtime = composeRuntime([fixtureLlmPlugin]);
+  const result = await runtime.facade.complete('fixture-llm', {
+    prompt: '본문', mode: 'oneshot', effort: 'high', systemPrompt: '제거', mcpServers: ['awb'], streaming: true,
+  });
+  const body = JSON.parse(result.text);
+  assert.equal(body.prompt, '본문');
+  assert.equal(body.effort, undefined);
+  assert.equal(body.systemPrompt, undefined);
+  assert.equal(body.mcpServers, undefined);
+  assert.equal(body.streaming, undefined);
+  assert.deepEqual(body.omitted, ['effort', 'systemPrompt', 'mcpServers', 'streaming']);
+});
+
 test('adapter resolver는 실행 소유자 안에서 plugin factory 결과를 재사용한다', () => {
   let creations = 0;
   const registry = new RuntimePluginRegistry().register(defineRuntimePlugin({
@@ -82,8 +98,8 @@ test('adapter resolver는 실행 소유자 안에서 plugin factory 결과를 �
       return {};
     },
   })).seal();
-  const firstOwner = new RuntimeAdapterResolver(registry);
-  const secondOwner = new RuntimeAdapterResolver(registry);
+  const firstOwner = new RuntimeAdapterResolver(registry, createDefaultRuntimePorts());
+  const secondOwner = new RuntimeAdapterResolver(registry, createDefaultRuntimePorts());
 
   assert.equal(firstOwner.resolve('FIXTURE-CACHE'), firstOwner.resolve('fixture-cache'));
   assert.notEqual(firstOwner.resolve('fixture-cache'), secondOwner.resolve('fixture-cache'));
@@ -95,6 +111,7 @@ test('중복 id와 transport factory 누락은 composition 시점에 거부된�
   const registry = new RuntimePluginRegistry().register(plugin);
   assert.throws(() => registry.register(plugin), /Duplicate runtime plugin id/);
   assert.throws(() => new RuntimePluginRegistry().register(defineRuntimePlugin({ id: 'broken', transport: 'cli', capabilities: requestCapabilities(base) })), /requires createCliAdapter/);
+  assert.throws(() => new RuntimePluginRegistry().register(defineRuntimePlugin({ id: 'broken-llm', transport: 'llm', capabilities: requestCapabilities(base) })), /createLlmProvider가 필요/);
 });
 
 test('미지원 option은 최종 adapter 경계 전에 제거된다', () => {

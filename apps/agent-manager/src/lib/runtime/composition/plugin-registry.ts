@@ -17,6 +17,9 @@ export class RuntimePluginRegistry {
     if (manifest.transport === 'acp' && !manifest.createOwner) {
       throw new Error(`ACP runtime plugin ${id} requires createOwner`);
     }
+    if (manifest.transport === 'llm' && !manifest.createLlmProvider) {
+      throw new Error(`LLM 런타임 플러그인 ${id}에는 createLlmProvider가 필요합니다`);
+    }
     this.#plugins.set(id, Object.freeze({ ...manifest, id }));
     return this;
   }
@@ -48,5 +51,11 @@ export class RuntimePluginRegistry {
     const plugin = this.manifest(runtimeId);
     if (!plugin.createOwner) throw new RuntimeSelectionError('runtime_unavailable', plugin.id, `Runtime ${plugin.id} does not use a protocol process owner`);
     return plugin.createOwner(options);
+  }
+
+  createLlmProvider(runtimeId: string) {
+    const plugin = this.manifest(runtimeId);
+    if (!plugin.createLlmProvider) throw new RuntimeSelectionError('runtime_unavailable', plugin.id, `런타임 ${plugin.id}은 LLM provider를 사용하지 않습니다`);
+    return plugin.createLlmProvider();
   }
 }

@@ -14,7 +14,6 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcess } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import {
   SUBAGENTS_BASE_DIR,
   SUBAGENTS_PERSIST_PATH,
@@ -886,7 +885,7 @@ export class SubagentManager implements SubagentManagerContract {
       // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
       // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
       // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
-      const child = crossSpawn(resolvedBin, descriptor.args, {
+      const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,

@@ -1,6 +1,6 @@
 import { negotiateCapabilities } from './negotiate-capabilities.js';
-import type { NormalizedRuntimeRequest } from '../domain/execution.js';
-import type { CliExecutionAdapterPort, CliOneshotRequestPort, CliSessionRequestPort, CliSpawnDescriptorPort, RuntimePluginLookupPort } from '../ports/index.js';
+import type { NormalizedRuntimeRequest, RuntimeError } from '../domain/execution.js';
+import type { CliExecutionAdapterPort, CliOneshotRequestPort, CliSessionRequestPort, CliSpawnDescriptorPort, RuntimeInfrastructurePorts, RuntimePluginLookupPort } from '../ports/index.js';
 
 export interface PreparedCliExecution<TSpec extends CliOneshotRequestPort | CliSessionRequestPort> {
   readonly adapter: CliExecutionAdapterPort;
@@ -15,7 +15,7 @@ export interface PreparedCliExecution<TSpec extends CliOneshotRequestPort | CliS
  * 다시 섞일 수 없다.
  */
 export class RuntimeExecutionFacade {
-  constructor(private readonly registry: RuntimePluginLookupPort) {}
+  constructor(private readonly registry: RuntimePluginLookupPort, readonly ports: RuntimeInfrastructurePorts) {}
 
   prepareOneshot(runtimeId: string, spec: CliOneshotRequestPort, adapter: CliExecutionAdapterPort = this.registry.createCliAdapter(runtimeId)): PreparedCliExecution<CliOneshotRequestPort> {
     const request = this.#negotiate(runtimeId, {
@@ -59,7 +59,38 @@ export class RuntimeExecutionFacade {
     return Object.freeze({ adapter, request, spec: negotiatedSpec, descriptor: adapter.buildSessionSpawn(negotiatedSpec) });
   }
 
+  async complete(runtimeId: string, request: NormalizedRuntimeRequest) {
+    const negotiated = this.#negotiate(runtimeId, request);
+    const provider = this.registry.createLlmProvider(runtimeId);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const result = await provider.complete(negotiated);
+        this.ports.telemetry.record('request.completed', { runtimeId, mode: negotiated.mode, attempt });
+        return result;
+      } catch (cause) {
+        const error = this.#normalizeError(runtimeId, cause);
+        this.ports.telemetry.record('request.failed', { runtimeId, code: error.code, attempt });
+        if (!this.ports.retry.shouldRetry(error, attempt)) throw error;
+      }
+    }
+  }
+
   #negotiate(runtimeId: string, request: NormalizedRuntimeRequest) {
-    return negotiateCapabilities(request, this.registry.manifest(runtimeId).capabilities);
+    const negotiated = negotiateCapabilities(request, this.registry.manifest(runtimeId).capabilities);
+    this.ports.prompt.encode(negotiated);
+    this.ports.session.sessionId(negotiated);
+    this.ports.tools.configure(negotiated);
+    this.ports.telemetry.record('request.negotiated', { runtimeId, mode: negotiated.mode, omitted: negotiated.omitted });
+    return negotiated;
+  }
+
+  #normalizeError(pluginId: string, cause: unknown): RuntimeError {
+    const candidate = cause as Partial<RuntimeError> | null;
+    return Object.freeze({
+      code: typeof candidate?.code === 'string' ? candidate.code : 'provider_error',
+      message: cause instanceof Error ? cause.message : String(cause),
+      retryable: candidate?.retryable === true,
+      pluginId,
+    });
   }
 }
