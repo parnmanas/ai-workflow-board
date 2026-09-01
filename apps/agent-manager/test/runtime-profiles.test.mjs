@@ -965,7 +965,10 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
     // what's actually installed on the runner.
     const manager = new SubagentManager({
       ...config,
-      delegation: { ...config.delegation, codexBin: executable },
+      delegation: {
+        ...config.delegation,
+        codexBin: process.platform === 'win32' ? `${executable}.cmd` : executable,
+      },
     });
     const exited = new Promise(resolve => { manager.onExit = resolve; });
     const result = await manager.spawn({
