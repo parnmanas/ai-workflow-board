@@ -23,6 +23,7 @@ import { MANAGED_AGENTS_DIR, SUBAGENTS_BASE_DIR } from './constants.js';
 import { log } from './logging.js';
 
 const KILL_BACKUP_DELAY_MS = 2000;
+const KILL_CONFIRM_DELAY_MS = 100;
 
 async function readPid(pidPath: string): Promise<number | null> {
   try {
@@ -96,14 +97,24 @@ async function reapOne(
     } catch {
       /* already gone */
     }
-    const t = setTimeout(() => {
+    const deadline = Date.now() + KILL_BACKUP_DELAY_MS;
+    while (isPidAlive(pid) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, KILL_CONFIRM_DELAY_MS));
+    }
+    if (isPidAlive(pid)) {
       try {
         process.kill(pid, 'SIGKILL');
       } catch {
         /* gone */
       }
-    }, KILL_BACKUP_DELAY_MS);
-    if (typeof t.unref === 'function') t.unref();
+      const killDeadline = Date.now() + KILL_BACKUP_DELAY_MS;
+      while (isPidAlive(pid) && Date.now() < killDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, KILL_CONFIRM_DELAY_MS));
+      }
+    }
+    if (isPidAlive(pid)) {
+      throw new Error(`stale subagent pid=${pid} did not exit; sidecar retained`);
+    }
   }
   await fsp.unlink(pidPath).catch(() => {});
   await fsp.unlink(cfgPath).catch(() => {});
@@ -114,6 +125,7 @@ export interface CleanupResult {
   scanned: number;
   reaped: number;
   skipped?: number;
+  failed?: number;
 }
 
 /**
@@ -121,10 +133,13 @@ export interface CleanupResult {
  * Idempotent and safe to call on every manager startup. Never throws —
  * failures are logged and swallowed.
  */
-export async function cleanupOrphanSubagents(): Promise<CleanupResult> {
+export async function cleanupOrphanSubagents(
+  dir: string = SUBAGENTS_BASE_DIR,
+  protectLiveSiblings = true,
+): Promise<CleanupResult> {
   let entries: string[];
   try {
-    entries = await fsp.readdir(SUBAGENTS_BASE_DIR);
+    entries = await fsp.readdir(dir);
   } catch {
     return { scanned: 0, reaped: 0 };
   }
@@ -132,25 +147,29 @@ export async function cleanupOrphanSubagents(): Promise<CleanupResult> {
   if (pidFiles.length === 0) {
     return { scanned: 0, reaped: 0 };
   }
-  const liveCfgPaths = await readLiveCfgPathsFromProc();
+  // manager lock을 이미 독점한 시작 경로는 같은 home의 live child를 모두
+  // orphan으로 봐야 한다. 다른 독립 호출자는 기존 sibling 보호를 유지한다.
+  const liveCfgPaths = protectLiveSiblings ? await readLiveCfgPathsFromProc() : null;
   log(
-    `[orphan-cleanup] scanning ${pidFiles.length} pid sidecar(s) in ${SUBAGENTS_BASE_DIR} (live cfg paths in /proc: ${liveCfgPaths ? liveCfgPaths.size : 'unavailable'})`,
+    `[orphan-cleanup] scanning ${pidFiles.length} pid sidecar(s) in ${dir} (live cfg paths in /proc: ${liveCfgPaths ? liveCfgPaths.size : 'unavailable'})`,
   );
   let reaped = 0;
   let skipped = 0;
+  let failed = 0;
   for (const entry of pidFiles) {
     try {
-      const r = await reapOne(SUBAGENTS_BASE_DIR, entry, liveCfgPaths);
+      const r = await reapOne(dir, entry, liveCfgPaths);
       if (r.skipped) skipped++;
       else reaped++;
     } catch (err: any) {
+      failed++;
       log(`[orphan-cleanup] skipping ${entry}: ${err?.message ?? err}`);
     }
   }
   log(
     `[orphan-cleanup] reaped ${reaped}/${pidFiles.length} orphan subagents (${skipped} protected as live-sibling)`,
   );
-  return { scanned: pidFiles.length, reaped, skipped };
+  return { scanned: pidFiles.length, reaped, skipped, failed };
 }
 
 interface HermesOwnerSidecar {

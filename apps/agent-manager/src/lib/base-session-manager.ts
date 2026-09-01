@@ -808,12 +808,22 @@ export class BaseSessionManager {
           // auth failure) instead of getting its own workspace-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
           const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
-          configPath = existsSync(profileConfigPath)
+          const sharedConfigPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
                 agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
               );
-          configPathIsTemp = false;
+          // 각 persistent 프로세스에 추적 가능한 config/pid sidecar 쌍을
+          // 부여한다. 내용은 profile별 불변 config의 복사본이라 TOCTOU 격리는
+          // 유지되며, manager가 SIGKILL/crash로 사라져도 시작 시 orphan 정리가
+          // 정확한 Claude 프로세스를 회수한 뒤 같은 session UUID를 재사용한다.
+          configPath = join(
+            SUBAGENTS_BASE_DIR,
+            `${this.#cfgPrefix}${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+          );
+          await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+          await fsp.copyFile(sharedConfigPath, configPath);
+          configPathIsTemp = true;
         } else {
           configPath = join(
             SUBAGENTS_BASE_DIR,

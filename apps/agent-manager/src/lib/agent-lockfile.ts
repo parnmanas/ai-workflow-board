@@ -29,7 +29,8 @@ import { log } from './logging.js';
 
 export const LOCK_PATH = join(AGENT_MANAGER_HOME, 'agent.lock');
 
-const FORCE_KILL_GRACE_MS = 1500;
+const FORCE_KILL_GRACE_MS = 30_000;
+const FORCE_KILL_CONFIRM_MS = 5_000;
 
 export type LockRole = 'manager';
 
@@ -97,20 +98,11 @@ function writeLockAtomic(payload: LockPayload): void {
   writeFileSync(LOCK_PATH, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
 }
 
-function writeLockOverwrite(payload: LockPayload): void {
-  try {
-    mkdirSync(dirname(LOCK_PATH), { recursive: true });
-  } catch {
-    /* ignore */
-  }
-  writeFileSync(LOCK_PATH, JSON.stringify(payload, null, 2) + '\n');
-}
-
 /**
  * Acquire the agent-manager lockfile. Returns a release-handle on success,
  * throws on conflict.
  */
-export function acquireAgentLock(opts: AcquireOptions): LockHandle {
+export async function acquireAgentLock(opts: AcquireOptions): Promise<LockHandle> {
   const role = opts?.role;
   const version = opts?.version || 'unknown';
   const force = opts?.force === true;
@@ -176,35 +168,55 @@ export function acquireAgentLock(opts: AcquireOptions): LockHandle {
   } catch {
     /* already gone */
   }
-  return forceTakeover(payload, existing.pid);
-}
-
-async function forceTakeoverAsync(payload: LockPayload, prevPid: number): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < FORCE_KILL_GRACE_MS) {
-    if (!isPidAlive(prevPid)) break;
-    await delay(100);
+  await waitForExit(existing.pid, FORCE_KILL_GRACE_MS);
+  if (isPidAlive(existing.pid)) {
+    log(`[lockfile] --force: graceful shutdown timed out; SIGKILL previous owner pid=${existing.pid}`);
+    try {
+      process.kill(existing.pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    await waitForExit(existing.pid, FORCE_KILL_CONFIRM_MS);
   }
+  if (isPidAlive(existing.pid)) {
+    const e: any = new Error(
+      `AWB agent-manager previous owner pid=${existing.pid} did not exit; refusing overlapping takeover`,
+    );
+    e.code = 'EAGENTTAKEOVER';
+    throw e;
+  }
+
+  // 정상 종료 핸들러가 자기 lock을 지운 뒤에만 새 소유권을 취한다. 이전
+  // 구현은 SIGTERM 직후 lock을 덮어써 새 manager가 즉시 dispatch를 시작하게
+  // 했고, 이전 manager의 Claude 자식이 아직 살아 있으면 같은 session UUID를
+  // 두 프로세스가 동시에 점유했다.
   try {
     writeLockAtomic(payload);
   } catch (err: any) {
     if (err?.code !== 'EEXIST') throw err;
-    writeLockOverwrite(payload);
+    const current = readLock();
+    if (current && current.pid !== existing.pid && isPidAlive(current.pid)) {
+      const e: any = new Error(`AWB agent-manager takeover lost to pid=${current.pid}`);
+      e.code = 'EAGENTLOCKED';
+      throw e;
+    }
+    try {
+      unlinkSync(LOCK_PATH);
+    } catch {
+      /* 다음 atomic create가 실제 경쟁 결과를 결정한다 */
+    }
+    writeLockAtomic(payload);
   }
-  log(`[lockfile] --force: acquired by overwrite (role=${payload.role} pid=${process.pid})`);
+  log(`[lockfile] --force: acquired after previous owner exit (role=${payload.role} pid=${process.pid})`);
+  return makeReleaseHandle(payload);
 }
 
-function forceTakeover(payload: LockPayload, prevPid: number): LockHandle {
-  try {
-    writeLockOverwrite(payload);
-  } catch (err: any) {
-    log(`[lockfile] --force overwrite failed: ${err?.message ?? err}`);
-    throw err;
+async function waitForExit(prevPid: number, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isPidAlive(prevPid)) return;
+    await delay(100);
   }
-  forceTakeoverAsync(payload, prevPid).catch((err) =>
-    log(`[lockfile] takeover poll: ${err?.message ?? err}`),
-  );
-  return makeReleaseHandle(payload);
 }
 
 function makeReleaseHandle(payload: LockPayload): LockHandle {
