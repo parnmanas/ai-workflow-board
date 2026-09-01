@@ -38,7 +38,7 @@
 import { execSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, win32 } from 'node:path';
 import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
@@ -48,6 +48,30 @@ const WIN_EXE_EXT = /\.exe$/i;
 // 제외한다 — powershell 스크립트는 cross-spawn 의 cmd.exe 래퍼로 실행되지 않고, npm
 // 은 항상 `.ps1` 옆에 `.cmd` 를 함께 떨어뜨린다.
 const WIN_SHIM_EXT = /\.(cmd|bat)$/i;
+
+/** Windows 설정값에 붙은 외부 인용부호와 중복 구분자를 제거한다. spawn 계열 API는
+ * 실행 파일과 인자를 별도로 받으므로 인용부호가 경로 문자열에 남아 있으면 안 된다. */
+export function normalizeWindowsExecutablePath(value: string): string {
+  let normalized = value.trim();
+  if (
+    normalized.length >= 2 &&
+    ((normalized.startsWith('"') && normalized.endsWith('"')) ||
+      (normalized.startsWith("'") && normalized.endsWith("'")))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return win32.normalize(normalized);
+}
+
+/** resolve 결과를 실제 프로세스 생성 직전에 다시 검증한다. 설정 hot-reload와
+ * resolve 이후 파일 삭제까지 진단 가능한 동기 오류로 바꾸기 위해 spawn 호출부에서 쓴다. */
+export function assertCliExecutable(bin: string, cliType: string): void {
+  if (!fileExecutable(bin)) {
+    throw new Error(
+      `[cli-resolver:${cliType}] resolved executable is missing or not executable before spawn: ${bin}`,
+    );
+  }
+}
 
 /** fs 존재 + 실행 가능 여부 probe. Windows 에는 실행 비트 개념이 없어
  *  accessSync(X_OK) 는 존재 확인으로 degrade 된다. 확장자 게이팅(`.exe` vs `.cmd`)
@@ -182,9 +206,12 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
   if (cached) return cached;
 
   if (effectiveOverride) {
-    cache.set(key, effectiveOverride);
-    log(`[cli-resolver:${ct}] using configured path: ${effectiveOverride}`);
-    return effectiveOverride;
+    const configuredPath = isWindows
+      ? normalizeWindowsExecutablePath(effectiveOverride)
+      : effectiveOverride.trim();
+    cache.set(key, configuredPath);
+    log(`[cli-resolver:${ct}] using configured path: ${configuredPath}`);
+    return configuredPath;
   }
 
   if (ct === 'claude') {
@@ -230,8 +257,8 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
   const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable });
   cache.set(key, picked.bin);
   if (picked.kind === 'literal') {
-    log(
-      `[cli-resolver:${ct}] resolution failed; falling back to literal "${ct}" (expect ENOENT unless PATH is set)`,
+    throw new Error(
+      `[cli-resolver:${ct}] executable not found or not executable; checked PATH and known install locations`,
     );
   } else {
     log(`[cli-resolver:${ct}] resolved via ${picked.kind}: ${picked.bin}`);
@@ -260,9 +287,9 @@ function claudeUnixCandidates(home: string): string[] {
 function claudeWindowsCandidates(home: string): string[] {
   const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
   const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-  const pkgBin = join(appdata, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin');
   return [
-    join(pkgBin, 'claude.exe'),
+    // npm 패키지 내부의 bin 경로는 설치 레이아웃이 아니며 claude.exe가 존재하지
+    // 않을 수 있다. npm이 보장하는 전역 shim을 직접 resolve한다.
     join(appdata, 'npm', 'claude.exe'),
     join(localAppData, 'Programs', 'anthropic', 'claude-code', 'claude.exe'),
     // Last-resort npm 배치 shim — 위 .exe 경로가 하나도 없을 때만 도달한다

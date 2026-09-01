@@ -16,7 +16,7 @@ import { type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
-import { resolveBinOverride } from './cli-resolver.js';
+import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -867,6 +867,7 @@ export class BaseSessionManager {
         runtimeLease?.claudeExecutable(),
       );
       const resolvedBin = adapter.resolveBin(binOverride);
+      assertCliExecutable(resolvedBin, adapter.cliType);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
       const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir

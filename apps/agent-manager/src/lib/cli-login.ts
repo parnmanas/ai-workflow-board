@@ -48,7 +48,7 @@ import { createInterface } from 'node:readline';
 import crossSpawn from 'cross-spawn';
 import type { ChildProcess } from 'node:child_process';
 import { CLI_LOGINS_DIR } from './constants.js';
-import { resolveCliBin } from './cli-resolver.js';
+import { assertCliExecutable, resolveCliBin } from './cli-resolver.js';
 import { log } from './logging.js';
 import { postCliLoginProgress, type AwbConfig } from './rest.js';
 
@@ -176,6 +176,7 @@ export class CliLoginManager {
 
     const isClaude = args.cli === 'claude';
     const bin = isClaude ? this.#claudeBin ?? resolveCliBin('claude', null) : this.#codexBin ?? resolveCliBin('codex', null);
+    assertCliExecutable(bin, args.cli);
     const spawnArgs = isClaude ? ['auth', 'login', '--claudeai'] : ['login', '--device-auth'];
     const env = isClaude
       ? { ...process.env, CLAUDE_CONFIG_DIR: homeDir }
