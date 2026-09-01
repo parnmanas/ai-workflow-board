@@ -13,13 +13,12 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcessByStdio } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
 import { resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
@@ -34,7 +33,6 @@ import {
   type TurnImage,
   describeHarness,
   partitionHarness,
-  resolveClaudeEffortFlag,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
@@ -43,7 +41,7 @@ import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
 import type { SubagentMonitor, SubagentTapHandle } from './subagent-monitor.js';
 import {
-  applyClaudeRuntimeProfileEnvPolicy,
+  resolveClaudeExecutionEffort,
   resolveMaxOutputTokensEnv,
   resolveToolProfileHeader,
   runtimeCredentialEnv,
@@ -52,6 +50,7 @@ import {
   type RuntimeLease,
 } from './runtime-profiles.js';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 
@@ -78,6 +77,7 @@ export interface BaseSessionOptions {
   logTag: string;
   cfgPrefix: string;
   kindLabel: 'chat_session' | 'ticket_session';
+  adapterResolver?: RuntimeAdapterResolver;
 }
 
 export interface SessionDelegationConfig {
@@ -460,7 +460,11 @@ export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
-  #adapters = new Map<string, CliAdapter>();
+  #adapterResolver: RuntimeAdapterResolver;
+
+  protected _shouldRetryRuntime(runtimeId: string, cause: unknown, attempt: number): boolean {
+    return this.#adapterResolver.shouldRetry(runtimeId, cause, attempt);
+  }
   protected readonly _sessions = new Map<string, SessionRecord>();
   /** Synchronous reservation table for in-flight spawns. `_sessions` only
    *  gets the new record at the END of `_spawnSession`, so without this map
@@ -503,6 +507,7 @@ export class BaseSessionManager {
     this.#logTag = options.logTag;
     this.#cfgPrefix = options.cfgPrefix;
     this.#kindLabel = options.kindLabel;
+    this.#adapterResolver = options.adapterResolver ?? createRuntimeAdapterResolver();
   }
 
   /** Default-claude getter for legacy callers that introspect the manager. */
@@ -511,13 +516,7 @@ export class BaseSessionManager {
   }
 
   protected _adapterFor(cli: string | null | undefined): CliAdapter {
-    const t = String(cli || 'claude').toLowerCase();
-    let a = this.#adapters.get(t);
-    if (!a) {
-      a = createAdapter(t);
-      this.#adapters.set(t, a);
-    }
-    return a;
+    return this.#adapterResolver.resolve(cli);
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -698,7 +697,7 @@ export class BaseSessionManager {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
-    const effortFlag = resolveClaudeEffortFlag(slice, claudeRuntimeProfile);
+    const effortFlag = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(
@@ -766,14 +765,14 @@ export class BaseSessionManager {
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
-      let descriptor = adapter.buildSessionSpawn({
+      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
         model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
-      });
+      }, sessionKey).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-session config is required whenever the server needs to attribute
@@ -843,14 +842,14 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = adapter.buildSessionSpawn({
+        descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
           model: attemptModel,
           harness,
           effort: effortFlag,
           ultracode,
-        });
+        }, sessionKey).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
         descriptor.args.push(...claudeRuntimeProfile.args);
@@ -906,7 +905,7 @@ export class BaseSessionManager {
       // detached 가 POSIX 전용인 이유는 subagent-manager spawn 사이트 참고:
       // win32 의 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 충돌하며, resolved
       // 바이너리가 .cmd/.bat shim 일 때 cmd 콘솔이 번쩍인다.
-      const child = crossSpawn(resolvedBin, descriptor.args, {
+      const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -916,7 +915,7 @@ export class BaseSessionManager {
         // Board env_vars (ticket 354d336b) merge right after baseEnv so they
         // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
         // / cli-home / per-agent credential / harness env layered on top.
-        env: applyClaudeRuntimeProfileEnvPolicy({
+        env: resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
           ...baseEnv,
           ...(envVars ?? {}),
           AWB_API_KEY: effectiveApiKey,
@@ -925,7 +924,7 @@ export class BaseSessionManager {
           ...adapter.harnessEnv(harness),
           ...(runtimeLease?.claudeEnv() ?? {}),
           ...(maxOutputResolution?.env ?? {}),
-        }, claudeRuntimeProfile),
+        }).env,
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(

@@ -88,8 +88,26 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   // filter) + the agent's MCP client (the reply transport).
   const userStream = await openSseStream(port, userToken);
   const agentMcp = new McpClient({ baseUrl: base, apiKey: responderKey.raw_key });
+  // 소형 컨텍스트 Claude backend profile이 실제로 여는 MCP 세션과 같은
+  // compact 헤더를 쓰는 클라이언트는 최종 채팅 응답에만 사용한다. 복합
+  // 시나리오의 allowlist 밖 도구들은 기존 full 클라이언트로 계속 검증한다.
+  const compactChatMcp = new McpClient({
+    baseUrl: base,
+    apiKey: responderKey.raw_key,
+    extraHeaders: { 'X-AWB-Tool-Profile': 'compact' },
+  });
   await agentMcp.initialize();
-  t.after(async () => { userStream.close(); await agentMcp.close(); });
+  await compactChatMcp.initialize();
+  const compactTools = await compactChatMcp.listTools();
+  assert.ok(
+    compactTools.some((tool) => tool.name === 'send_chat_room_message'),
+    'compact MCP session exposes send_chat_room_message',
+  );
+  t.after(async () => {
+    userStream.close();
+    await compactChatMcp.close();
+    await agentMcp.close();
+  });
   await new Promise((r) => setTimeout(r, 250));
 
   const rawChatRequests = [];
@@ -272,6 +290,19 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     [{ action: 'create', ticket_id: createdTicket.id, title: 'chat artifact round-trip' }],
     'the final reply SSE carries the server-bound create artifact exactly once',
   );
+
+  const compactText = 'compact Claude session reply';
+  const compactToolRes = await compactChatMcp.callTool('send_chat_room_message', {
+    room_id: room.id,
+    content: compactText,
+  });
+  assert.ok(!compactToolRes.isError, `compact MCP send must succeed: ${JSON.stringify(compactToolRes)}`);
+  const compactReplyFrame = await userStream.waitFor(
+    'chat_room_message',
+    (d) => (d?.content ?? d?.payload?.content) === compactText,
+    4000,
+  );
+  assert.ok(compactReplyFrame, 'user must receive the compact-session reply over SSE');
 
   // A real update in the next turn binds an update artifact; an idempotent
   // no-op update does not manufacture another ref.

@@ -13,7 +13,7 @@ import {
   type SessionRecord,
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { fetchChatRoomHistory, fetchOrdinaryWorkBoardCandidates, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
 import { classifyCliError, hasUntrustedWorkspaceWarning } from './cli-error-signatures.js';
@@ -404,7 +404,7 @@ export class ChatSessionManager
       history,
       canEmitImages,
     );
-    const usesNativeMcp = createAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
+    const usesNativeMcp = createRuntimeCliAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
     const ordinaryWorkBoards = usesNativeMcp || spec.isActionRoom
       ? []
       : await fetchOrdinaryWorkBoardCandidates(this._config);

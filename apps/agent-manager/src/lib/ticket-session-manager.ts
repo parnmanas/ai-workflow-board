@@ -33,6 +33,7 @@ import type {
   TicketSessionManager as TicketSessionManagerContract,
   TicketTriggerArgs,
 } from './event-dispatcher.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 
 /** Natural-language cue an assignee/reviewer writes in their comment when
  *  they are about to call `move_ticket` next. Conservative — only matches
@@ -226,12 +227,17 @@ export class TicketSessionManager
       }) => void)
     | null = null;
 
-  constructor(config: SessionAwareConfig, circuitBreaker?: CircuitBreaker) {
+  constructor(
+    config: SessionAwareConfig,
+    circuitBreaker?: CircuitBreaker,
+    adapterResolver?: RuntimeAdapterResolver,
+  ) {
     super(config, {
       keyField: 'sessionKey',
       logTag: '[ticket-session]',
       cfgPrefix: 'cfg-ticket-',
       kindLabel: 'ticket_session',
+      adapterResolver,
     });
     this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
   }
@@ -1355,7 +1361,11 @@ export class TicketSessionManager
       !CircuitBreaker.isTransientExit(code)
     ) {
       const errClass = classifyCliError(tail, { exitCode: code });
-      if (isFallbackEligible(errClass)) {
+      if (this._shouldRetryRuntime(sess.cli_type, {
+        code: errClass.reason || 'cli_error',
+        message: errClass.reason || 'CLI 실행 실패',
+        retryable: isFallbackEligible(errClass),
+      }, sess.chainAttempt ?? 0)) {
         const nextAttempt = (sess.chainAttempt ?? 0) + 1;
         const prevModel = sess.modelChain[sess.chainAttempt ?? 0];
         const nextModel = sess.modelChain[nextAttempt];

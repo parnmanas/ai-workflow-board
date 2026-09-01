@@ -273,19 +273,6 @@ export function selectEffortSlice(
   return null;
 }
 
-/**
- * 운영 검증된 claude-with-vllm.sh는 `--effort`를 주입하지 않는다. Claude
- * backend profile은 Claude CLI의 추론 단계 이름과 일치하지 않을 수 있는
- * OpenAI-compatible 백엔드를 가리킬 수 있다. 프로필에서 `omit_effort`를
- * 켠 경우에만 보드 preset의 Claude 전용 `--effort`를 전달하지 않는다.
- */
-export function resolveClaudeEffortFlag(
-  slice: { effort?: string } | null | undefined,
-  claudeRuntimeProfile: RuntimeProfileSpec | null | undefined,
-): string | null {
-  return claudeRuntimeProfile?.omit_effort ? null : (slice?.effort ?? null);
-}
-
 /** One-line summary of an applied harness for spawn-site logs — the
  *  operator-visible proof (acceptance criterion of e9c7a896) that a board's
  *  harness actually reached the CLI flags. */
@@ -346,6 +333,9 @@ export interface McpAttribution {
 export interface SessionSpec {
   rolePrompt: string;
   mcpConfigPath: string | null;
+  /** 세션 전략이 선택한 실제 CLI lifecycle 동작과 식별자. */
+  sessionMode?: 'persistent' | 'resume' | 'control';
+  sessionId?: string;
   /** Per-agent default model — see OneshotSpec.model. */
   model?: string | null;
   /** Board/workspace harness — see OneshotSpec.harness. */

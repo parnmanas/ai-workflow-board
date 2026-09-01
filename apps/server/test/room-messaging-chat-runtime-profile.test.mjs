@@ -29,7 +29,8 @@ const { activityEvents } = await import(
 );
 
 const warnLogs = [];
-const noopLog = { info() {}, warn: (...args) => warnLogs.push(args), error() {}, debug() {} };
+const errorLogs = [];
+const noopLog = { info() {}, warn: (...args) => warnLogs.push(args), error: (...args) => errorLogs.push(args), debug() {} };
 
 function makeQueryBuilder() {
   const qb = {
@@ -170,7 +171,7 @@ test('DM to a Claude agent with no cli_runtime_profile configured: chat_request 
 });
 
 test('DM to a Claude agent whose resolved profile requires a credential it does not have: omitted + warns instead of dispatching a broken profile', async () => {
-  const guardedProfile = { ...LOCAL_PROFILE, id: 'needs-cred', credential_required: true, credential_ref: '11111111-1111-1111-1111-111111111111' };
+  const guardedProfile = { ...LOCAL_PROFILE, id: 'needs-cred', credential_required: true, credential_ref: '11111111-1111-4111-8111-111111111111' };
   const ws = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([guardedProfile]) };
   const agent = { id: 'agent-4', type: 'claude', role_prompt: '', cli_runtime_profile: 'needs-cred', credential_id: null };
   const svc = makeSvc({ agent, workspace: ws });
@@ -182,6 +183,25 @@ test('DM to a Claude agent whose resolved profile requires a credential it does 
     assert.ok(payload);
     assert.equal('cli_runtime_profile' in payload, false, 'a profile the agent cannot authenticate to must not reach the wire');
     assert.ok(warnLogs.length > 0, 'the credential mismatch must be logged, not silent');
+  } finally {
+    capture.off();
+  }
+});
+
+test('DM profile 조회 실패는 profile 미지정으로 축약하지 않고 디스패치를 중단한다', async () => {
+  const malformedProfile = { ...LOCAL_PROFILE, id: 'malformed', credential_required: true, credential_ref: '잘못된-id' };
+  const workspace = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([malformedProfile]) };
+  const agent = { id: 'agent-5', type: 'claude', role_prompt: '', cli_runtime_profile: 'malformed', credential_id: null };
+  const svc = makeSvc({ agent, workspace });
+  const capture = captureEmit();
+  errorLogs.length = 0;
+  try {
+    await assert.rejects(
+      svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent'),
+      /Invalid Claude backend profiles/,
+    );
+    assert.equal(capture.get(), null);
+    assert.ok(errorLogs.length > 0);
   } finally {
     capture.off();
   }

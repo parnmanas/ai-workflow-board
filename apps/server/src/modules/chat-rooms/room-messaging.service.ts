@@ -1105,10 +1105,10 @@ export class RoomMessagingService {
         : null;
       return await this._resolveChatRuntimeProfileCore(agent, workspace);
     } catch (err) {
-      this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+      this.logService.error('ChatRooms', 'Claude backend profile 해석 실패로 채팅 디스패치를 중단합니다', {
         err: String(err), agent_id: agent.id,
       });
-      return null;
+      throw err;
     }
   }
 
@@ -1167,7 +1167,8 @@ export class RoomMessagingService {
         }
         profiles[agent.id] = profile;
       } catch (err) {
-        this.logService.warn('ChatRooms', 'Claude backend profile resolution failed for chat dispatch (continuing without)', {
+        incompatibleAgentIds.push(agent.id);
+        this.logService.error('ChatRooms', 'Claude backend profile 해석 실패로 그룹 채팅 대상에서 제외합니다', {
           err: String(err), agent_id: agent.id,
         });
       }
