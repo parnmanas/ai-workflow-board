@@ -765,7 +765,18 @@ export class BaseSessionManager {
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
-      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
+      // Claude의 동일 논리 대화는 최초 1회만 --session-id로 생성하고, CLI
+      // home에 provider transcript가 남은 이후의 정상 종료/idle/maxTurns/
+      // manager 재시작/model fallback은 --resume으로 이어간다. 활성 프로세스는
+      // dispatch가 위의 _getLiveSession 경로에서 stdin을 재사용하므로 여기까지
+      // 오지 않으며, orphan 정리는 종료 확인 뒤에만 이 분기를 허용한다.
+      const sessionMode = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
+        ? 'resume'
+        : 'persistent';
+      if (adapter.cliType === 'claude') {
+        log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
+      }
+      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
         model: attemptModel,
@@ -852,7 +863,7 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
+        descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
           model: attemptModel,

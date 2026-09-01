@@ -136,6 +136,21 @@ test('최초 persistent와 reconnect resume 모두 UUID만 Claude CLI 인자로 
   assert.deepEqual(resume.slice(0, 2), ['--resume', expected]);
 });
 
+test('Claude provider transcript 존재 여부로 최초 생성과 resume를 구분한다', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const home = await makeTmpCliHome();
+  const legacy = 'room-a|agent-a';
+  const id = resolveClaudeSessionId(legacy);
+  assert.equal(await adapter.hasPersistedSession(home, legacy), false);
+
+  const projectDir = join(home, 'projects', '-workspace-a');
+  await fsp.mkdir(projectDir, { recursive: true });
+  await fsp.writeFile(join(projectDir, `${id}.jsonl`), '{"type":"user"}\n');
+
+  assert.equal(await adapter.hasPersistedSession(home, legacy), true);
+  assert.equal(await adapter.hasPersistedSession(home, 'room-b|agent-a'), false, '다른 room UUID는 격리된다');
+});
+
 // ── requiresWorkspaceTrust / readTrustMeta (ticket 48aeab6e dispatch preflight) ─
 
 test('requiresWorkspaceTrust: no harness permission_mode → false (the default --dangerously-skip-permissions bypasses the dialog)', () => {

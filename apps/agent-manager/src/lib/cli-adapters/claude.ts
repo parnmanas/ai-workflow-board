@@ -274,6 +274,28 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
+  async hasPersistedSession(cliHomeDir: string | null | undefined, sessionId: string): Promise<boolean> {
+    if (!cliHomeDir || !sessionId) return false;
+    const filename = `${resolveClaudeSessionId(sessionId)}.jsonl`;
+    const projectsDir = join(cliHomeDir, 'projects');
+    let projects;
+    try {
+      projects = await fsp.readdir(projectsDir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const project of projects) {
+      if (!project.isDirectory()) continue;
+      try {
+        await fsp.access(join(projectsDir, project.name, filename));
+        return true;
+      } catch {
+        /* 다른 project에서 같은 session UUID를 계속 찾는다 */
+      }
+    }
+    return false;
+  }
+
   formatTurn(text: string, images?: TurnImage[]): string {
     const content: Array<Record<string, unknown>> = [{ type: 'text', text: String(text) }];
     if (Array.isArray(images)) {

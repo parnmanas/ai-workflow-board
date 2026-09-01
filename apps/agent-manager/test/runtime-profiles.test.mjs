@@ -7,6 +7,7 @@ import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
+import { resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
   applyClaudeRuntimeProfileEnvPolicy,
@@ -477,6 +478,32 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보�
   assert.equal(capture.legacyEffortEnv, undefined);
   assert.equal(capture.smallFastModel, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+  assert.deepEqual(capture.argv.slice(0, 2), [
+    '--session-id',
+    resolveClaudeSessionId('room-base-session-policy'),
+  ]);
+});
+
+test('BaseSessionManager는 종료된 기존 Claude 대화를 동일 UUID의 --resume으로 재개한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-resume.mjs');
+  const sessionKey = 'room-base-session-resume';
+  const projectDir = join(fixtureRoot, 'claude-base-home', 'projects', '-fixture-workspace');
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(join(projectDir, `${resolveClaudeSessionId(sessionKey)}.jsonl`), '{"type":"user"}\n');
+
+  const { capture } = await spawnBaseSessionFixture({
+    id: 'base-session-resume',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40119',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'base-session-resume.json'));
+
+  assert.deepEqual(capture.argv.slice(0, 2), [
+    '--resume',
+    resolveClaudeSessionId(sessionKey),
+  ]);
 });
 
 test('BaseSessionManager enabled profile은 충돌 env를 제거하고 preset effort를 argv에 한 번만 적용한다', async () => {
