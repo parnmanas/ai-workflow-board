@@ -1547,3 +1547,19 @@ install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 a
 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지 않았다.
 `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
 `apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-09-01 (`main` @ `875cf3e7`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`2f332c93`)를 함께 감사했다. root 및 세 workspace의
+manifest와 lockfile blob은 두 브랜치에서 모두 동일해 lockfile drift가 없었다.
+`npm audit`과 `npm audit --omit=dev`는 각각 **0 vulnerabilities**였으며,
+레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 공급망 무결성, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도
+통과했다. 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지
+않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
