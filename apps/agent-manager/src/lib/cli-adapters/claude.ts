@@ -38,7 +38,7 @@ export type ClaudeSessionId = string & { readonly [CLAUDE_SESSION_ID]: true };
  * 같은 대화는 같은 provider session을, 다른 대화는 다른 session을 사용한다.
  */
 export function resolveClaudeSessionId(value: string): ClaudeSessionId {
-  if (UUID_PATTERN.test(value)) return value.toLowerCase() as ClaudeSessionId;
+  if (UUID_PATTERN.test(value)) return value as ClaudeSessionId;
 
   const bytes = createHash('sha1')
     .update(Buffer.from('6ba7b8109dad11d180b400c04fd430c8', 'hex'))

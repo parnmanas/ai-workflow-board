@@ -95,15 +95,23 @@ test('buildSessionSpawn is unaffected — persistent sessions already used strea
 });
 
 test('Claude session id 경계는 유효한 UUID를 그대로 보존한다', () => {
-  const id = '6ba7b810-9dad-41d1-80b4-00c04fd430c8';
+  const id = '6BA7B810-9DAD-41D1-80B4-00C04FD430C8';
   assert.equal(resolveClaudeSessionId(id), id);
-  const args = new ClaudeCliAdapter().buildSessionSpawn({
+  const adapter = new ClaudeCliAdapter();
+  const persistentArgs = adapter.buildSessionSpawn({
     rolePrompt: 'role',
     mcpConfigPath: '/tmp/mcp.json',
     sessionMode: 'persistent',
     sessionId: id,
   }).args;
-  assert.deepEqual(args.slice(0, 2), ['--session-id', id]);
+  const resumeArgs = adapter.buildSessionSpawn({
+    rolePrompt: 'role',
+    mcpConfigPath: '/tmp/mcp.json',
+    sessionMode: 'resume',
+    sessionId: id,
+  }).args;
+  assert.deepEqual(persistentArgs.slice(0, 2), ['--session-id', id]);
+  assert.deepEqual(resumeArgs.slice(0, 2), ['--resume', id]);
 });
 
 test('legacy room/agent 복합 key는 재시작에도 안정적인 유효 UUID로 마이그레이션된다', () => {
