@@ -128,13 +128,13 @@ test('resolveCliBin hot-reload: override set/change/remove takes effect on the v
   // 2) delegation.codexBin을 새 절대경로로 설정(reload_config 시뮬레이션) →
   //    리셋 없이 재호출해도 stale 캐시가 아니라 새 override 값을 즉시 반영.
   const overrideA = resolveCliBin('codex', '/custom/reload-a/codex');
-  assert.equal(overrideA, '/custom/reload-a/codex');
+  assert.equal(overrideA, normalize('/custom/reload-a/codex'));
   assert.notEqual(overrideA, noOverride);
 
   // 3) override 값을 다시 변경해도(리셋 없이) 최신 값을 반영해야 한다 — 첫
   //    override에 고착되면 안 된다.
   const overrideB = resolveCliBin('codex', '/custom/reload-b/codex');
-  assert.equal(overrideB, '/custom/reload-b/codex');
+  assert.equal(overrideB, normalize('/custom/reload-b/codex'));
 
   // 4) override 제거(override 없이 재호출) → 원래의 no-override 결과로
   //    정확히 복귀해야 한다 — 제거 후에도 override 캐시가 새면 안 된다.
