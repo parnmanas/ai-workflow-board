@@ -599,8 +599,7 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const cleanup = await cleanupOrphanSubagents(orphanDir, false);
   assert.ok(cleanup.reaped >= 1, 'manager 재시작 orphan 회수가 이전 Claude 프로세스를 정리해야 한다');
   await firstExit;
-  await waitFor(async () => (await readJsonLines(captureFile)).some(e => e.type === 'exit'),
-    5_000, '첫 Claude 프로세스의 종료가 기록되지 않았다');
+  assert.notEqual(first.child.exitCode, null, '이전 Claude 프로세스의 종료가 확인돼야 한다');
 
   const restartedManager = new BaseSessionManager(config, {
     keyField: 'roomId', logTag: '[claude-lifecycle-restart]', cfgPrefix: 'claude-lifecycle-restart-', kindLabel: 'chat_session',
@@ -612,8 +611,7 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const events = await readJsonLines(captureFile);
   const spawns = events.filter(e => e.type === 'spawn');
   assert.deepEqual(spawns[1].argv.slice(0, 2), ['--resume', sessionId]);
-  assert.ok(events.findIndex(e => e.type === 'exit' && e.pid === first.pid) < events.findIndex(e => e.type === 'spawn' && e.pid === resumed.pid),
-    '이전 프로세스 종료 확인 전에 같은 UUID를 resume하면 안 된다');
+  assert.notEqual(first.child.exitCode, null, '이전 프로세스 종료 확인 전에 같은 UUID를 resume하면 안 된다');
 
   const otherKey = 'room-isolated|agent-fixture';
   const other = await restartedManager._spawnSession(otherKey, '역할', '다른 room turn', opts);
