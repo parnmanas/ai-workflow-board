@@ -205,6 +205,14 @@ describe('MCP tool schema wire-size budget — compact profile (ticket ee26302d)
     assert.deepEqual(missing, [], `allowlisted tool(s) missing from compact tools/list: ${missing.join(', ')}`);
     assert.deepEqual(extra, [], `non-allowlisted tool(s) leaked into compact tools/list: ${extra.join(', ')}`);
 
+    // 티켓 e14499eb: 소형 컨텍스트 Claude backend profile은 compact MCP를
+    // 사용한다. 채팅 최종 응답 도구가 여기서 빠지면 CLI는 성공 종료해도
+    // 웹 채팅에 답을 전달할 방법이 없으므로 이름을 명시적으로 고정한다.
+    assert.ok(
+      registeredNames.has('send_chat_room_message'),
+      'compact chat sessions must expose send_chat_room_message',
+    );
+
     // update_board is the single largest full-profile tool (see the sibling
     // describe above) and is deliberately not on the allowlist — a concrete,
     // named negative check in addition to the set-difference above.

@@ -87,7 +87,14 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   // User SSE stream (recipient under the participant-scoped chat_room_message
   // filter) + the agent's MCP client (the reply transport).
   const userStream = await openSseStream(port, userToken);
-  const agentMcp = new McpClient({ baseUrl: base, apiKey: responderKey.raw_key });
+  // 소형 컨텍스트 Claude backend profile이 실제로 여는 MCP 세션과 같은
+  // compact 헤더를 사용한다. 이 프로필에서도 최종 채팅 도구 등록부터
+  // 웹 SSE 수신까지 종단 왕복이 유지되어야 한다.
+  const agentMcp = new McpClient({
+    baseUrl: base,
+    apiKey: responderKey.raw_key,
+    extraHeaders: { 'X-AWB-Tool-Profile': 'compact' },
+  });
   await agentMcp.initialize();
   t.after(async () => { userStream.close(); await agentMcp.close(); });
   await new Promise((r) => setTimeout(r, 250));
