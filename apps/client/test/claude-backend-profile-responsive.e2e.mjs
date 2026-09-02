@@ -35,6 +35,8 @@ async function stubApi(page) {
       body = workspace;
     } else if (path === '/admin/claude-backend-profiles') {
       body = { profiles: [profile], default_profile_id: profile.id };
+    } else if (path === '/credentials') {
+      body = [];
     } else if (path === `/workspaces/${workspace.id}/claude-backend-profiles/catalog`) {
       body = { profiles: [profile] };
     } else if (path === `/workspaces/${workspace.id}/claude-backend-profiles`) {
@@ -51,15 +53,15 @@ async function stubApi(page) {
 async function openProfiles(page) {
   await stubApi(page);
   await page.goto(`/ws/${workspace.id}/settings/claude-profiles`);
-  await expect(page.getByTestId('claude-profile-shell')).toBeVisible();
+  await expect(page.getByTestId('claude-profile-manager')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Claude Backend Profiles', exact: true })).toBeVisible();
 }
 
 async function layout(page) {
   return page.evaluate(() => {
-    const shell = document.querySelector('[data-testid="claude-profile-shell"]');
-    const list = document.querySelector('[data-testid="claude-profile-list"]');
-    const editor = document.querySelector('[data-testid="claude-profile-editor"]')?.parentElement;
+    const shell = document.querySelector('[data-layout="responsive-profile-columns"]');
+    const list = shell?.firstElementChild;
+    const editor = shell?.lastElementChild;
     if (!shell || !list || !editor) throw new Error('Claude 프로필 레이아웃 표식이 없습니다.');
     const rect = element => {
       const value = element.getBoundingClientRect();
