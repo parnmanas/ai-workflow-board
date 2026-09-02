@@ -50,7 +50,7 @@
 import { execSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, readFileSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename, win32 } from 'node:path';
+import { join, basename, posix, win32 } from 'node:path';
 import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
@@ -255,7 +255,10 @@ export function scanPathForBinary(
 ): string[] {
   if (!pathValue) return [];
   const sep = opts.isWindows ? ';' : ':';
-  const pathJoin = opts.isWindows ? win32.join : join;
+  // 플랫폼 기본 `join` 이 아니라 **명시적으로** 분기한다 — win32 호스트에서
+  // 기본 join 은 POSIX 입력도 `\\` 로 붙여 버려, isWindows=false 계약이 호스트에
+  // 따라 달라진다(Windows CI 에서 실측한 실패).
+  const pathJoin = opts.isWindows ? win32.join : posix.join;
   const suffixes = opts.isWindows
     ? (opts.pathExt || '.COM;.EXE;.BAT;.CMD')
         .split(';')

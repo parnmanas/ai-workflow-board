@@ -85,6 +85,13 @@ test('resolveCliBin: an explicit codexBin override short-circuits PATH/well-know
   _resetResolverCache();
 });
 
+/** 경로 동일성 비교. 기대값은 `node:path.normalize()` 로 맞추고, Windows 에서는
+ *  대소문자를 무시한다 — 두 규칙 모두 board lesson(d5f925ca)에서 왔다. */
+function samePath(a, b) {
+  const [x, y] = [normalize(a), normalize(b)];
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+
 /** resolveCliBin 내부의 fileExecutable 과 같은 판정(X_OK). Windows 에는 실행
  *  비트가 없어 존재 확인으로 degrade 된다. */
 function accessible(p) {
@@ -230,10 +237,12 @@ test('scanPathForBinary: 실제 PATH 상의 설치본을 서브프로세스 없�
       pathExt: process.env.PATHEXT,
       exists: (p) => accessible(p),
     });
-    const expected = normalize(executable);
+    // Windows 파일시스템은 대소문자를 구분하지 않고, 스캔은 확장자를 PATHEXT
+    // 표기 그대로(`.EXE`) 붙인다 — fixture 는 `codex.exe` 다. 경로 비교를
+    // 대소문자 구분으로 하면 제품이 멀쩡한데 테스트만 깨진다(Windows CI 실측).
     assert.ok(
-      hits.some((hit) => normalize(hit) === expected),
-      `PATH 스캔이 fixture 설치본을 찾아야 한다: ${JSON.stringify(hits)} 안에 ${expected}`,
+      hits.some((hit) => samePath(hit, executable)),
+      `PATH 스캔이 fixture 설치본을 찾아야 한다: ${JSON.stringify(hits)} 안에 ${executable}`,
     );
   });
 });
