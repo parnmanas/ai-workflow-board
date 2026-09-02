@@ -232,6 +232,17 @@ export class AgentWorkloadService {
       // selector output consistent with what the supervisor / allocation
       // paths already filter out.
       .andWhere('t.archived_at IS NULL')
+      // 중복/alias 티켓 제외 (ticket 2cc54fde). `canonical_ticket_id` 가 붙은
+      // 티켓은 dispatch 경로 세 곳(`_emitTrigger` 의 race-safe duplicate gate,
+      // `dispatchCurrentColumn`, `dispatchCurrentColumnRole`)이 전부 트리거를
+      // 버리므로 절대 진행되지 않는다. 그런데도 이 후보 집합에는 남아 있어
+      // focus 슬롯을 영구 점유했고, canonical 티켓 승격이
+      // `backlog_promotion_skipped_focus_held` 로 무한 차단되는 교착을 만들었다
+      // — 수동 archive 전까지 풀리지 않던 바로 그 증상. 위 네 개 제외와 정확히
+      // 같은 논리(dispatch 가 버리는 티켓은 슬롯을 잡아서도 안 된다)이며,
+      // 사유 판정은 `focus-eligibility.ts` 의 `focusIneligibilityReason` 와
+      // 짝을 이룬다.
+      .andWhere('t.canonical_ticket_id IS NULL')
       .setParameter('agent_id', agent_id)
       .setParameter('board_id', board_id)
       // Use a bound parameter for boolean instead of the literal `false`

@@ -92,7 +92,7 @@
  */
 import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { Brackets, DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
@@ -107,6 +107,12 @@ import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { priorityIndex } from './priority';
+import {
+  FOCUS_RELEASED_EVENT,
+  FocusIneligibilityReason,
+  FocusReleasedPayload,
+  focusIneligibilityReason,
+} from './focus-eligibility';
 
 function safeJsonParse<T>(s: string | null | undefined, fallback: T): T {
   if (!s) return fallback;
@@ -156,6 +162,21 @@ export const __test__ = {
 // string literal.
 export const LEVEL_TICK_TRIGGERED_BY = 'system:level_tick';
 
+// `triggered_by` marker for promotions kicked by a focus-lease release
+// broadcast (ticket 2cc54fde) — distinguishes "슬롯이 방금 풀려서 즉시
+// 재시도했다" from the periodic level tick in the audit trail.
+export const FOCUS_RELEASE_TRIGGERED_BY = 'system:focus_released';
+
+/**
+ * 반복 기록을 억제하는 감사 action 목록 (`_writeSkipAuditIfChanged`). 승격
+ * 성공을 뜻하는 `backlog_promoted` 는 절대 여기 들어오지 않는다 — 그 행은
+ * 언제나 그대로 기록된다.
+ */
+type SuppressedAuditAction =
+  | 'backlog_promotion_skipped_role_unfilled'
+  | 'backlog_promotion_skipped_focus_held'
+  | 'focus_lease_released';
+
 @Injectable()
 export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
   // Stored listener ref so OnModuleDestroy can detach. Same rationale as
@@ -164,6 +185,9 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
   // explicit removal. Finding-005 in
   // docs/audit/2026-05-system-cascade-audit.md.
   private _agentIdleListener?: (payload: { agent_id: string }) => void;
+  // lease 해제 브로드캐스트 리스너 (ticket 2cc54fde) — 같은 detach 사유로
+  // ref 를 들고 있는다.
+  private _focusReleasedListener?: (payload: FocusReleasedPayload) => void;
   // Level-sweep tick handle (ticket 9df6c348) — see class docstring.
   private tickHandle: NodeJS.Timeout | null = null;
 
@@ -201,6 +225,27 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     };
     activityEvents.on('agent_idle', this._agentIdleListener);
 
+    // Focus-lease 해제 신호 (ticket 2cc54fde). 선행 티켓 등록이나 중복 확정으로
+    // 슬롯이 풀린 직후 즉시 승격을 재시도한다 — 이게 없으면 교착이 풀린 뒤에도
+    // 다음 `agent_idle` 이나 5분 level tick 까지 보드가 그대로 멈춰 있다.
+    this._focusReleasedListener = (payload: FocusReleasedPayload) => {
+      const boardId = payload?.board_id || '';
+      if (!boardId) return;
+      this.tryPromote(boardId, { triggerAgentId: FOCUS_RELEASE_TRIGGERED_BY })
+        .then((promotedId) => {
+          this.logService.info('BacklogPromotion', 'focus release promotion attempt finished', {
+            board_id: boardId, released_ticket_id: payload?.ticket_id || null,
+            reason: payload?.reason || null, promoted_ticket_id: promotedId,
+          });
+        })
+        .catch((e: unknown) => {
+          this.logService.error('BacklogPromotion', 'focus_released handler failed', {
+            err: String(e), board_id: boardId, released_ticket_id: payload?.ticket_id || null,
+          });
+        });
+    };
+    activityEvents.on(FOCUS_RELEASED_EVENT, this._focusReleasedListener);
+
     // Level-triggered backstop (ticket 9df6c348) — see class docstring.
     // unref() so the interval doesn't keep the process alive on its own,
     // same as every other tick-based service in this module.
@@ -217,6 +262,10 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     if (this._agentIdleListener) {
       activityEvents.removeListener('agent_idle', this._agentIdleListener);
       this._agentIdleListener = undefined;
+    }
+    if (this._focusReleasedListener) {
+      activityEvents.removeListener(FOCUS_RELEASED_EVENT, this._focusReleasedListener);
+      this._focusReleasedListener = undefined;
     }
     if (this.tickHandle) {
       clearInterval(this.tickHandle);
@@ -355,6 +404,16 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     const destSlugs = safeJsonParse<string[]>((destination as any).role_routing, []);
     if (!Array.isArray(destSlugs) || destSlugs.length === 0) return null;
 
+    // Stale focus holder 정리 + 감사 (ticket 2cc54fde, 요구사항 3·6).
+    //
+    // 이 시점의 focus 후보 쿼리는 이미 부적격 티켓을 빼고 있으므로 lease 는
+    // 사실상 해제된 상태다. 하지만 "왜 이 티켓이 더 이상 슬롯을 안 잡는가" 를
+    // 사후에 확인할 방법이 없으면 같은 교착이 재발했을 때 또 처음부터
+    // 조사해야 한다. active 컬럼에 앉아 있으면서 점유 자격을 잃은 티켓을
+    // 훑어 해제 사유를 감사 행으로 남긴다. 그 다음 아래 후보 루프가 canonical/
+    // 선행 티켓을 정상적으로 재평가한다.
+    const releasedLeases = await this._auditReleasedFocusLeases(boardId, columns);
+
     const intakeColIds = intakeCols.map(c => c.id);
     // Pending-user-action exclusion (ticket a57517be). A parked intake ticket
     // must not consume the promotion attempt: TriggerLoopService would drop
@@ -381,6 +440,12 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       // exclusion: the trigger emit gate downstream would drop every
       // wake-up anyway, leaving the active column held by a ghost.
       .andWhere('t.archived_at IS NULL')
+      // 중복/alias 티켓 제외 (ticket 2cc54fde). canonical 연결이 확정된 티켓은
+      // dispatch 경로가 전부 트리거를 버리므로, 승격시켜 봐야 active 컬럼에서
+      // 슬롯만 붙든 채 영원히 움직이지 않는 유령이 된다. 요구사항의 "이후
+      // 재획득 금지" 가 여기다 — 한 번 해제된 lease 를 승격 경로가 다시
+      // 쥐여주지 않는다.
+      .andWhere('t.canonical_ticket_id IS NULL')
       .getMany();
     if (candidates.length === 0) return null;
 
@@ -564,13 +629,44 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       // `'active' → todo`, etc.).
       const fromColumnId = ticket.column_id;
       const fromCol = columns.find(c => c.id === fromColumnId) || null;
+
+      // 승격 이동은 compare-and-swap 으로 소유권을 잡는다 (ticket 2cc54fde).
+      //
+      // `tryPromote` 는 이제 세 갈래로 들어온다 — `agent_idle` edge, 5분 level
+      // sweep, 그리고 lease 해제 브로드캐스트(`FOCUS_RELEASED_EVENT`). 슬롯이
+      // 하나 열리면 이 셋이 거의 동시에 같은 보드로 진입할 수 있고, 예전의
+      // 무조건 `save(ticket)` 는 두 패스가 같은 후보를 골라 각자 "승격했다" 고
+      // 보고하게 두었다 — 이동 자체는 멱등이지만 트리거 emit 과 감사 행이
+      // 중복되고, 보드는 한 번에 티켓 하나만 승격한다는 계약이 깨진다.
+      //
+      // `column_id = fromColumnId` 를 WHERE 에 건 UPDATE 는 진 쪽에서
+      // affected=0 을 돌려주므로, 진 패스는 감사 행도 트리거도 쓰지 않고 다음
+      // 후보로 넘어간다. equality WHERE 라 sqlite/postgres 양쪽에서 동일하게
+      // 동작하고(sql.js 는 `getRowsModified()` 로 affected 를 채운다),
+      // `dataSource.transaction()` 을 새로 열지 않으므로 sql.js 단일 커넥션의
+      // 겹침 문제도 만들지 않는다. `correctConfirmedLink` 가 canonical 전이를
+      // 잡을 때 쓰는 것과 같은 패턴이다.
+      const claimed = await ticketRepo.update(
+        { id: ticket.id, column_id: fromColumnId },
+        {
+          column_id: destination.id,
+          position: 0,
+          // Promotion always moves between non-terminal columns (intake →
+          // active), but defensively clear terminal_entered_at to keep the
+          // invariant "non-null only when sitting on a terminal column".
+          terminal_entered_at: null,
+        },
+      );
+      if (claimed.affected !== 1) {
+        this.logService.info('BacklogPromotion', 'promotion lost the move race (continuing)', {
+          board_id: boardId, ticket_id: ticket.id, from_column_id: fromColumnId,
+          triggered_by: opts?.triggerAgentId || null,
+        });
+        continue;
+      }
       ticket.column_id = destination.id;
       ticket.position = 0;
-      // Promotion always moves between non-terminal columns (intake →
-      // active), but defensively clear terminal_entered_at to keep the
-      // invariant "non-null only when sitting on a terminal column".
       ticket.terminal_entered_at = null;
-      await ticketRepo.save(ticket);
 
       try {
         await this.activityService.logActivity({
@@ -633,7 +729,8 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           action: 'backlog_promoted',
           new_value: `from=${fromColumnId} to=${destination.id} priority_index=${priorityIndex(ticket.priority)} ` +
                      `chain_target=${isChainTarget.has(ticket.id)} ` +
-                     `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')}`,
+                     `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')} ` +
+                     `released_leases=${releasedLeases}`,
           trigger_source: 'backlog_promotion',
         }));
       } catch (e) {
@@ -648,6 +745,9 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
         priority_index: priorityIndex(ticket.priority),
         chain_target: isChainTarget.has(ticket.id),
         triggered_by: opts?.triggerAgentId || null,
+        // 요구사항 6 — 이번 패스에서 몇 개의 lease 해제를 감지하고 그 결과
+        // 무엇이 승격됐는지 한 줄로 붙여 둔다.
+        released_leases: releasedLeases,
       });
       return ticket.id;
     }
@@ -668,10 +768,10 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
    */
   private async _writeSkipAuditIfChanged(
     ticketId: string,
-    action: 'backlog_promotion_skipped_role_unfilled' | 'backlog_promotion_skipped_focus_held',
+    action: SuppressedAuditAction,
     role: string,
     newValue: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const activityLogRepo = this.dataSource.getRepository(ActivityLog);
       const last = await activityLogRepo.findOne({
@@ -679,7 +779,7 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
         order: { created_at: 'DESC' },
         select: ['id', 'new_value'],
       });
-      if (last && last.new_value === newValue) return;
+      if (last && last.new_value === newValue) return false;
       await activityLogRepo.save(activityLogRepo.create({
         entity_type: 'ticket',
         entity_id: ticketId,
@@ -691,10 +791,90 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
         role,
         trigger_source: 'backlog_promotion',
       }));
+      return true;
     } catch (e) {
       this.logService.warn('BacklogPromotion', 'skip audit write failed (continuing)', {
         err: String(e), ticket_id: ticketId, action,
       });
+      return false;
+    }
+  }
+
+  /**
+   * active 컬럼에 앉아 있지만 focus 점유 자격을 잃은 티켓을 훑어 해제 사유를
+   * 감사 행으로 남긴다 (ticket 2cc54fde, 요구사항 3·6). 실제로 새 행을 쓴
+   * 티켓 수를 돌려준다.
+   *
+   * 여기서 티켓을 "정리" 하려고 컬럼을 되돌리거나 상태를 고치지는 않는다 —
+   * focus lease 는 저장된 락이 아니라 후보 쿼리의 결과라서, 부적격 플래그가
+   * 켜진 순간 이미 해제돼 있다(`focus-eligibility.ts` 헤더 참조). 승격 경로가
+   * 할 일은 그 사실을 관측 가능하게 남기고 다음 후보를 재평가하는 것뿐이다.
+   *
+   * 쓰기는 `_writeSkipAuditIfChanged` 의 억제 규칙을 그대로 탄다 — 같은
+   * (티켓, 사유) 조합은 상태가 바뀌기 전까지 한 번만 기록되므로, 5분마다 도는
+   * level sweep 이 감사 피드를 도배하지 않는다.
+   */
+  private async _auditReleasedFocusLeases(
+    boardId: string,
+    columns: BoardColumn[],
+  ): Promise<number> {
+    // lease 를 잡을 수 있는 컬럼 = focus 후보 쿼리가 세는 컬럼과 같은 정의
+    // (`AgentWorkloadService.getWorkflowLoadTicketIds`): 종료도 intake 도 아닌
+    // 컬럼. 두 정의가 어긋나면 없는 유령을 보고하게 되므로 같이 유지할 것.
+    const leaseColumnIds = columns
+      .filter(c => {
+        if ((c as any).is_terminal === true) return false;
+        const k = String((c as any).kind || '');
+        return k !== 'intake' && k !== 'terminal';
+      })
+      .map(c => c.id);
+    if (leaseColumnIds.length === 0) return 0;
+
+    try {
+      const ticketRepo = this.dataSource.getRepository(Ticket);
+      const stale = await ticketRepo.createQueryBuilder('t')
+        .where('t.column_id IN (:...ids)', { ids: leaseColumnIds })
+        .andWhere(new Brackets(qb => qb
+          .where('t.archived_at IS NOT NULL')
+          .orWhere('t.canonical_ticket_id IS NOT NULL')
+          .orWhere('t.pending_user_action = :trueVal')
+          .orWhere('t.pending_on_tickets = :trueVal')
+          .orWhere('t.pending_ci_wait = :trueVal')))
+        // sqlite 는 boolean 을 0/1 로 저장하므로 리터럴 대신 바인드 파라미터를
+        // 쓴다 — 후보 쿼리의 `:falseVal` 과 같은 이유.
+        .setParameter('trueVal', true)
+        .getMany();
+      if (stale.length === 0) return 0;
+
+      let written = 0;
+      for (const t of stale) {
+        const reason: FocusIneligibilityReason | null = focusIneligibilityReason(t);
+        // SQL 쪽 OR 조건과 헬퍼의 사유 목록이 어긋나면 여기서 null 이 나온다.
+        // 조용히 세지 말고 경고로 남겨 둘이 갈라진 사실 자체를 드러낸다.
+        if (!reason) {
+          this.logService.warn('BacklogPromotion', 'stale focus lease row matched SQL but no reason resolved', {
+            board_id: boardId, ticket_id: t.id,
+          });
+          continue;
+        }
+        const wrote = await this._writeSkipAuditIfChanged(
+          t.id,
+          'focus_lease_released',
+          '',
+          `board=${boardId} column_id=${t.column_id || ''} reason=${reason}`,
+        );
+        if (!wrote) continue;
+        written += 1;
+        this.logService.info('BacklogPromotion', 'focus lease released for ineligible ticket', {
+          board_id: boardId, ticket_id: t.id, column_id: t.column_id, reason,
+        });
+      }
+      return written;
+    } catch (e) {
+      this.logService.warn('BacklogPromotion', 'stale focus lease sweep failed (continuing)', {
+        err: String(e), board_id: boardId,
+      });
+      return 0;
     }
   }
 
