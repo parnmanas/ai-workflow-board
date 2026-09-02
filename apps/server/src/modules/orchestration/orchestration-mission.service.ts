@@ -125,6 +125,8 @@ export interface MissionDetail extends MissionListItem {
   graph_enabled: boolean;
   /** 확정된 실행 그래프. null = wave/DAG 모드. */
   graph_spec: GraphSpec | null;
+  /** 그래프가 부분 수정된 횟수(티켓 2fc8f99a). 0 = 확정 이후 patch 없음. */
+  graph_revision: number;
   /** 지금까지 소진된 node 실행 횟수(global budget). */
   total_visits: number;
   steps: MissionStepView[];
@@ -614,6 +616,7 @@ export class OrchestrationMissionService {
       created_by: mission.created_by,
       graph_enabled: !!mission.graph_enabled,
       graph_spec: mission.graph_spec ?? null,
+      graph_revision: mission.graph_revision ?? 0,
       total_visits: mission.total_visits ?? 0,
       steps: steps.map((s) => {
         const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
@@ -711,6 +714,7 @@ export class OrchestrationMissionService {
         ? {
             enabled: true,
             spec: mission.graph_spec ?? null,
+            revision: mission.graph_revision ?? 0,
             budget: {
               total_visits: mission.total_visits ?? 0,
               max_total_visits: mission.graph_spec?.max_total_visits ?? null,
@@ -718,7 +722,10 @@ export class OrchestrationMissionService {
             note:
               'This mission executes a graph, not a flat dependency list. Edges can be conditional, and a ' +
               'loop_back edge sends work back for another pass when its condition matches. Steps whose node ' +
-              'is an evaluator/router MUST report a verdict — that verdict is what selects the branch.',
+              'is an evaluator/router MUST report a verdict — that verdict is what selects the branch. ' +
+              'To change part of this graph while it runs — open a branch, retarget a dependency, raise a ' +
+              'loop cap, or stop a runaway loop — use patch_orchestration_graph rather than resubmitting the ' +
+              'whole plan; a patch preserves execution history and does not spend a plan version.',
           }
         : { enabled: false },
       steps: steps.map((s) => ({

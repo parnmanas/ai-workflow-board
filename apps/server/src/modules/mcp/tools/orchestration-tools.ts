@@ -5,7 +5,8 @@
  *
  *   ORCHESTRATOR (the agent named on the team)
  *     get_orchestration_mission      — read the live plan, results and timeline
- *     submit_orchestration_plan      — author / revise the step DAG
+ *     submit_orchestration_plan      — author / revise the step DAG (템플릿으로도 만들 수 있다)
+ *     patch_orchestration_graph      — 실행 중인 미션의 그래프를 부분 수정 (ticket 2fc8f99a)
  *     update_orchestration_step      — retry / reassign / amend / skip a step
  *     add_orchestration_note         — leave a reasoning note on the timeline
  *     complete_orchestration_mission — the ONLY clean way a mission ends
@@ -19,6 +20,7 @@
  *   DISCOVERY (orchestrator or member — read-only)
  *     list_orchestration_teams        — teams you belong to (rosters stay human-authored in the AWB UI)
  *     list_orchestration_missions     — missions you're on; recovers a mission_id a lost session forgot
+ *     list_orchestration_graph_templates — 내장 실행 그래프 템플릿 카탈로그 (읽기 전용)
  *
  *   SELF-SERVICE CREATION (ticket b7127aae)
  *     create_orchestration_mission    — start a mission for a team you already orchestrate
@@ -48,6 +50,10 @@ import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { isInFlight } from '../../orchestration/orchestration.constants';
+import {
+  GRAPH_TEMPLATE_NAMES,
+  listGraphTemplates,
+} from '../../orchestration/orchestration-graph-templates';
 import type { ToolContext } from './context';
 
 const NO_RUNTIME =
@@ -229,12 +235,33 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           'Optional execution graph: conditional branches, join policies and bounded loops. Only accepted on a ' +
             'mission with graph mode enabled. Omit it and the plan runs as a plain dependency DAG exactly as before.',
         ),
+      graph_template: z
+        .object({
+          name: z
+            .enum(GRAPH_TEMPLATE_NAMES as [string, ...string[]])
+            .describe('Template name from list_orchestration_graph_templates'),
+          params: z
+            .record(z.string(), z.any())
+            .optional()
+            .describe('Template parameters — call list_orchestration_graph_templates for each template\'s shape'),
+        })
+        .optional()
+        .describe(
+          'Build the execution graph from a named shape (linear chain, bounded review loop, fan-out with an ' +
+            'aggregator) instead of writing nodes and edges by hand. Expands into an ordinary graph validated ' +
+            'by the same rules. Mutually exclusive with "graph".',
+        ),
     },
-    async ({ mission_id, summary, steps, graph }, extra) => {
+    async ({ mission_id, summary, steps, graph, graph_template }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const result = await svc.submitPlan(mission_id, callerAgentId(extra), { summary, steps, graph });
+        const result = await svc.submitPlan(mission_id, callerAgentId(extra), {
+          summary,
+          steps,
+          graph,
+          graph_template,
+        });
         return ok({
           mission_id,
           plan_version: result.mission.plan_version,
@@ -261,6 +288,125 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         });
       } catch (e: any) {
         return toolError(e, 'failed to submit plan');
+      }
+    },
+  );
+
+  server.tool(
+    'patch_orchestration_graph',
+    'Change part of the execution graph of a running mission you orchestrate, without resubmitting the whole ' +
+      'plan. Use this to open or close a branch, retarget a dependency, raise a loop\'s iteration cap, or stop ' +
+      'a runaway loop by removing its loop_back edge. Only the agent named as that mission\'s orchestrator may ' +
+      'call it, and only on a mission with graph mode enabled. A patch changes the GRAPH ONLY — it never adds, ' +
+      'removes or rewrites steps (use submit_orchestration_plan for that), so it does not consume a plan ' +
+      'version. The patched graph is re-validated in full, so every rule still applies (no accidental cycles, ' +
+      'loops still need a termination condition and a finite cap). Two changes are refused because they would ' +
+      'rewrite history: lowering a node\'s max_visits below the number of times it has ALREADY run, and ' +
+      'lowering max_total_visits below the budget already spent — lower either to exactly the amount already ' +
+      'used to stop further runs instead. Note that a step already marked blocked stays blocked: fixing the ' +
+      'edge does not revive it, call update_orchestration_step action:"retry" for that.',
+    {
+      mission_id: z.string().describe('Mission id from get_orchestration_mission'),
+      set_nodes: z
+        .array(
+          z.object({
+            key: z.string().describe('step_key of an EXISTING graph node'),
+            kind: z.enum(['task', 'evaluator', 'router']).optional(),
+            join: z.enum(['all', 'any']).optional(),
+            max_visits: z.number().optional().describe('New iteration cap. Cannot go below what the node already used.'),
+          }),
+        )
+        .optional()
+        .describe('Change attributes of nodes that already exist. Cannot create or delete nodes.'),
+      add_edges: z
+        .array(
+          z.object({
+            from: z.string(),
+            to: z.string(),
+            kind: z.enum(['sequence', 'conditional', 'loop_back']).optional(),
+            when: z
+              .object({
+                status: z.array(z.string()).optional(),
+                verdict: z.array(z.string()).optional(),
+              })
+              .optional()
+              .describe('Required for conditional and loop_back edges'),
+            label: z.string().optional(),
+          }),
+        )
+        .optional()
+        .describe('Edges to add. Same rules as in submit_orchestration_plan.'),
+      remove_edges: z
+        .array(
+          z.object({
+            from: z.string(),
+            to: z.string(),
+            kind: z
+              .enum(['sequence', 'conditional', 'loop_back'])
+              .optional()
+              .describe('Omit to remove every edge between those two nodes'),
+          }),
+        )
+        .optional()
+        .describe('Edges to remove. Removing an edge that does not exist is an error, not a no-op.'),
+      max_total_visits: z
+        .number()
+        .optional()
+        .describe('New mission-wide execution budget. Cannot go below what has already been spent.'),
+    },
+    async ({ mission_id, ...patch }, extra) => {
+      const svc = runner();
+      if (!svc) return err(NO_RUNTIME);
+      try {
+        const result = await svc.patchGraph(mission_id, callerAgentId(extra), patch);
+        const inert = result.changes.filter((c) => c.inert_reason);
+        return ok({
+          mission_id,
+          graph_revision: result.mission.graph_revision,
+          changes: result.changes,
+          graph: {
+            nodes: result.graph.nodes.length,
+            edges: result.graph.edges.length,
+            entry: result.graph.entry,
+            terminal: result.graph.terminal,
+            loops: result.graph.edges.filter((e) => e.kind === 'loop_back').length,
+            max_total_visits: result.graph.max_total_visits,
+          },
+          dispatched_now: result.dispatched,
+          note:
+            inert.length > 0
+              ? `Applied, but ${inert.length} change(s) do not affect the current pass — see inert_reason on ` +
+                'each. They take effect only if those nodes are re-entered by a loop.'
+              : 'Applied. Steps that were already blocked stay blocked — retry them explicitly if the patch ' +
+                'was meant to revive them.',
+        });
+      } catch (e: any) {
+        return toolError(e, 'failed to patch graph');
+      }
+    },
+  );
+
+  server.tool(
+    'list_orchestration_graph_templates',
+    'List the built-in execution-graph templates you can pass to submit_orchestration_plan as ' +
+      '"graph_template", instead of hand-writing nodes and edges. Read-only and takes no arguments — it ' +
+      'describes shapes, it does not touch any mission. Each entry gives the template name, when to reach for ' +
+      'it, its parameters and a worked example. A template expands into an ordinary graph and is validated by ' +
+      'exactly the same rules, so it is a shortcut for getting a correct shape (especially a review loop, ' +
+      'where the loop_back edge, its termination verdict, the node iteration cap and the mission budget all ' +
+      'have to line up), never an exemption from them.',
+    {},
+    async () => {
+      try {
+        return ok({
+          templates: listGraphTemplates(),
+          usage:
+            'submit_orchestration_plan(mission_id, steps, graph_template: { name, params }). The template ' +
+            'only wires up step_keys that already exist in your plan — submit the steps first. Give either ' +
+            '"graph" or "graph_template", never both.',
+        });
+      } catch (e: any) {
+        return toolError(e, 'failed to list graph templates');
       }
     },
   );

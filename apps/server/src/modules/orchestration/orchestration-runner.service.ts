@@ -76,9 +76,13 @@ import {
   renderWakePrompt,
 } from './orchestration-prompt';
 import {
+  GraphPatchChange,
+  GraphPatchInput,
   GraphSpec,
   GraphSpecInput,
+  MAX_GRAPH_PATCHES,
   MissionProgress,
+  applyGraphPatch,
   computeMissionProgress,
   firedLoopBacks,
   graphFromWavePlan,
@@ -86,6 +90,7 @@ import {
   selectOutgoingEdges,
   validateGraphSpec,
 } from './orchestration-graph';
+import { expandGraphTemplate } from './orchestration-graph-templates';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 
@@ -650,7 +655,12 @@ export class OrchestrationRunnerService {
   async submitPlan(
     missionId: string,
     callerAgentId: string,
-    input: { summary?: string; steps: PlanStepInput[]; graph?: GraphSpecInput | null },
+    input: {
+      summary?: string;
+      steps: PlanStepInput[];
+      graph?: GraphSpecInput | null;
+      graph_template?: { name: string; params?: Record<string, unknown> } | null;
+    },
   ): Promise<{
     mission: OrchestrationMission;
     created: string[];
@@ -697,17 +707,31 @@ export class OrchestrationRunnerService {
       // graph_enabled=false면 이 미션은 기존 wave/DAG 계약 그대로다 — graph를
       // 보내오면 조용히 무시하지 않고 거부한다(조용한 무시는 오케스트레이터가
       // 분기/loop가 실제로 걸린 줄 알고 계획을 세우게 만든다).
-      if (input.graph && !mission.graph_enabled) {
+      if ((input.graph || input.graph_template) && !mission.graph_enabled) {
         throw orchestrationError(
           400,
           'this mission does not have graph mode enabled — it executes the plain dependency plan. ' +
-            'Ask an operator to enable graph mode on the mission, or submit the plan without a "graph".',
+            'Ask an operator to enable graph mode on the mission, or submit the plan without a "graph" ' +
+            'or "graph_template".',
+        );
+      }
+      // 손으로 쓴 그래프와 템플릿은 둘 다 "그래프 전체"를 확정하므로 동시에 받으면
+      // 어느 쪽이 이기는지가 임의 규칙이 된다 — 조용히 하나를 고르지 않고 거부한다.
+      if (input.graph && input.graph_template) {
+        throw orchestrationError(
+          400,
+          'give either "graph" or "graph_template", not both — a template expands into a complete graph, ' +
+            'so combining the two leaves it ambiguous which one defines the execution rules.',
         );
       }
       let graphSpec: GraphSpec | null = mission.graph_spec ?? null;
       if (mission.graph_enabled) {
         const nodeKeys = validated.steps.map((st) => String(st.step_key).trim());
-        if (input.graph) {
+        if (input.graph_template) {
+          const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, { nodeKeys });
+          if ('error' in expanded) throw orchestrationError(400, expanded.error);
+          graphSpec = expanded.spec;
+        } else if (input.graph) {
           const checked = validateGraphSpec(input.graph, { nodeKeys });
           if ('error' in checked) throw orchestrationError(400, checked.error);
           graphSpec = checked.spec;
@@ -801,6 +825,9 @@ export class OrchestrationRunnerService {
 
       mission.plan_version = nextVersion;
       mission.plan_summary = (input.summary || '').slice(0, SUMMARY_MAX);
+      // 그래프 전체가 새로 확정되면 patch 카운터도 새 기준선에서 다시 센다 — 이전
+      // 그래프에 걸었던 patch 횟수를 새 그래프가 물려받을 이유가 없다.
+      if (graphSpec !== mission.graph_spec) mission.graph_revision = 0;
       mission.graph_spec = graphSpec;
       if (mission.status === 'planning') mission.status = 'running';
       await this.missionRepo.save(mission);
@@ -834,6 +861,103 @@ export class OrchestrationRunnerService {
       const pumped = await this.pump(mission);
       await this.wakeAfterPump(mission, pumped);
       return { mission, created, updated, dispatched: pumped.dispatched, graph: graphSpec };
+    });
+  }
+
+  /**
+   * 실행 중인 미션의 그래프를 **부분** 수정한다(티켓 2fc8f99a).
+   *
+   * `submitPlan`과의 경계: 이 메서드는 그래프만 바꾼다 — step 을 만들지도, 지우지도,
+   * 내용을 고치지도 않으므로 `plan_version`(replan 예산)을 소모하지 않는다. 반대로
+   * node 를 늘리려면 step 이 먼저 있어야 하므로 그건 `submitPlan`의 일이다.
+   *
+   * 안전 규칙(이미 일어난 실행을 소급 무효화하지 않는다)과 구조 재검증은 전부 순수
+   * 함수 `applyGraphPatch`에 있다 — 여기서는 락·영속화·이벤트·재펌프만 담당한다.
+   *
+   * 주의: patch 는 step 의 **상태**를 바꾸지 않는다. 죽은 분기 때문에 이미 `blocked`
+   * 로 확정된 step 은 edge 를 고쳐도 스스로 되살아나지 않는다 — 오케스트레이터가
+   * `update_orchestration_step action:"retry"` 로 명시적으로 되살려야 한다. 상태
+   * 되돌리기를 여기 섞으면 "그래프를 고쳤더니 이미 실패 처리된 작업이 조용히 다시
+   * 뛰더라"가 된다.
+   */
+  async patchGraph(
+    missionId: string,
+    callerAgentId: string,
+    patch: GraphPatchInput,
+  ): Promise<{
+    mission: OrchestrationMission;
+    graph: GraphSpec;
+    changes: GraphPatchChange[];
+    dispatched: string[];
+  }> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = await this.missions.requireMission(missionId);
+      this.requireOrchestrator(mission, callerAgentId);
+      if (mission.status !== 'planning' && mission.status !== 'running') {
+        throw orchestrationError(
+          409,
+          `mission is ${mission.status} — the graph can only be patched while planning or running`,
+        );
+      }
+      if (!mission.graph_enabled || !mission.graph_spec) {
+        throw orchestrationError(
+          400,
+          'this mission has no execution graph to patch — it runs the plain dependency plan. Submit a plan ' +
+            'with a "graph" (or "graph_template") on a graph-mode mission first.',
+        );
+      }
+      if ((mission.graph_revision ?? 0) >= MAX_GRAPH_PATCHES) {
+        throw orchestrationError(
+          409,
+          `graph patch limit reached (${MAX_GRAPH_PATCHES}). Resubmit the whole graph with ` +
+            `submit_orchestration_plan, or finish the mission with complete_orchestration_mission.`,
+        );
+      }
+
+      const steps = await this.missions.listSteps(mission.id);
+      const applied = applyGraphPatch(mission.graph_spec, patch, {
+        nodeKeys: steps.map((s) => s.step_key),
+        runtime: {
+          nodes: steps.map((s) => ({
+            key: s.step_key,
+            status: s.status,
+            visit: s.visit ?? 0,
+            verdict: s.verdict ?? '',
+          })),
+          total_visits: mission.total_visits ?? 0,
+        },
+      });
+      if ('error' in applied) throw orchestrationError(400, applied.error);
+
+      mission.graph_spec = applied.spec;
+      mission.graph_revision = (mission.graph_revision ?? 0) + 1;
+      await this.missionRepo.save(mission);
+
+      const orchestratorName = await this.agentName(mission.orchestrator_agent_id);
+      const summary = applied.changes.map((c) => c.detail).join('; ');
+      await this.missions.recordEvent(mission, {
+        type: 'graph_patched',
+        message:
+          `Graph r${mission.graph_revision} patched by ${orchestratorName}: ` +
+          `${summary.slice(0, 400)}${summary.length > 400 ? '…' : ''}`,
+        actor_type: 'agent',
+        actor_id: callerAgentId,
+        actor_name: orchestratorName,
+        data: {
+          graph_revision: mission.graph_revision,
+          changes: applied.changes,
+          nodes: applied.spec.nodes.length,
+          edges: applied.spec.edges.length,
+          conditional: applied.spec.edges.filter((e) => e.kind === 'conditional').length,
+          loops: applied.spec.edges.filter((e) => e.kind === 'loop_back').length,
+          max_total_visits: applied.spec.max_total_visits,
+        },
+      });
+
+      // patch 가 대기 중이던 node 의 join 조건을 열어줄 수 있으므로 즉시 재펌프한다.
+      const pumped = await this.pump(mission);
+      await this.wakeAfterPump(mission, pumped);
+      return { mission, graph: applied.spec, changes: applied.changes, dispatched: pumped.dispatched };
     });
   }
 
