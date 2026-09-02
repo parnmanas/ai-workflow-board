@@ -205,7 +205,7 @@ function appendBounded(buffer: string, chunk: string): string {
  * 종료 시퀀스는 SIGTERM(그룹) → grace → SIGKILL(그룹) 이다. 첫 신호를 SIGTERM 으로
  * 두는 것은 의도적이다 — `git clone` 은 SIGTERM 핸들러에서 반쯤 만들어진 대상
  * 디렉터리를 스스로 지우므로, 다음 시도가 "destination path already exists" 로
- * 깨지지 않는다.
+ * 깨지지 않는다. abort 결과는 그 정리가 끝난 뒤에 확정된다(abort 의 (4) 참고).
  */
 function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: number): Promise<GitRun> {
   return new Promise((resolve) => {
@@ -256,7 +256,7 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
       const pid = child.pid;
       if (typeof pid === 'number' && pid > 0) {
         // 2) 그룹 전체 정리(SIGTERM → grace → SIGKILL + 생존자 스윕). 시그널은 즉시
-        //    발사되고, 완료 대기는 아래 'close' 핸들러가 맡는다.
+        //    발사되고, 완료 대기는 아래 (4) 가 맡는다.
         killPromise = terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS).catch(() => {});
       }
       // 3) backstop — SIGTERM 을 무시하는 리더가 있어도 반드시 종료시킨다.
