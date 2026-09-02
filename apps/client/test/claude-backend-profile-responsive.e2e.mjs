@@ -13,6 +13,25 @@ const profile = {
   auth_env: 'ANTHROPIC_AUTH_TOKEN',
   adapter: { request: { model_field: 'model' } },
 };
+const runtimeHost = {
+  instance_id: 'runtime-instance-codex',
+  agent_id: 'runtime-host-codex',
+  agent_name: 'Codex Runtime Host',
+  workspace_id: workspace.id,
+  mode: 'manager',
+  hostname: 'codex-host.test',
+  plugin_version: '1.0.0',
+  cli: 'codex',
+  cli_adapters: ['codex'],
+  pid: 1234,
+  started_at: '2026-09-02T00:00:00.000Z',
+  last_seen_at: '2026-09-02T00:00:00.000Z',
+  agent_ids: [],
+  working_dirs: [],
+  runtime_capabilities: {
+    codex: { installed: true, healthy: true },
+  },
+};
 
 async function stubApi(page) {
   await page.addInitScript(({ workspaceId }) => {
@@ -41,6 +60,14 @@ async function stubApi(page) {
       body = { profiles: [profile] };
     } else if (path === `/workspaces/${workspace.id}/claude-backend-profiles`) {
       body = { profiles: [profile], allowed_profile_ids: [profile.id], default_profile_id: profile.id };
+    } else if (path === '/agents/dashboard') {
+      body = [];
+    } else if (path === '/admin/agent-manager/managers') {
+      body = [{ id: runtimeHost.agent_id, name: runtimeHost.agent_name, workspace_id: workspace.id, is_active: 1 }];
+    } else if (path === '/admin/agent-manager/instances') {
+      body = [runtimeHost];
+    } else if (path === `/workspaces/${workspace.id}/credentials`) {
+      body = [];
     } else if (path === `/workspaces/${workspace.id}/mentions/unread`) {
       body = { items: [], total: 0 };
     } else if (path.includes('unread') || path.includes('counts')) {
@@ -48,6 +75,65 @@ async function stubApi(page) {
     }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
+}
+
+async function openCliReference(page) {
+  await page.goto(`/ws/${workspace.id}/agents`);
+  await page.getByRole('button', { name: '+ New Agent', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New Managed Agent' });
+  await expect(dialog).toBeVisible();
+  const selects = dialog.locator('select');
+  await expect(selects.nth(0).locator(`option[value="${runtimeHost.agent_id}"]`)).toHaveCount(1);
+  await selects.nth(0).selectOption(runtimeHost.agent_id);
+  await selects.nth(1).selectOption('codex');
+  await expect(selects.nth(2)).toBeEnabled();
+  return dialog;
+}
+
+async function commonPattern(surfaceLocator) {
+  return surfaceLocator.evaluate(surface => {
+    const input = surface?.querySelector('input');
+    const select = surface?.querySelector('select');
+    const buttons = surface?.querySelectorAll('button');
+    const button = buttons?.item(buttons.length - 1);
+    if (!surface || !input || !select || !button) throw new Error('비교할 공통 UI 표식이 없습니다.');
+    const style = element => {
+      const computed = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        borderRadius: computed.borderRadius,
+        fontFamily: computed.fontFamily,
+        fontSize: computed.fontSize,
+        backgroundColor: computed.backgroundColor,
+        borderStyle: computed.borderStyle,
+      };
+    };
+    return {
+      surface: style(surface),
+      input: style(input),
+      select: style(select),
+      button: style(button),
+      documentScrollWidth: document.documentElement.scrollWidth,
+      documentClientWidth: document.documentElement.clientWidth,
+    };
+  });
+}
+
+function expectSharedControls(claude, cli) {
+  expect(claude.input.height).toBe(cli.input.height);
+  expect(claude.input.borderRadius).toBe(cli.input.borderRadius);
+  expect(claude.input.fontFamily).toBe(cli.input.fontFamily);
+  expect(claude.input.fontSize).toBe(cli.input.fontSize);
+  expect(claude.select.height).toBe(cli.select.height);
+  expect(claude.select.borderRadius).toBe(cli.select.borderRadius);
+  expect(claude.button.borderRadius).toBe(cli.button.borderRadius);
+  expect(claude.button.fontFamily).toBe(cli.button.fontFamily);
+  expect(claude.button.fontSize).toBe(cli.button.fontSize);
+  expect(claude.surface.backgroundColor).toBe(cli.surface.backgroundColor);
+  expect(claude.surface.borderStyle).toBe('solid');
+  expect(cli.surface.borderStyle).toBe('solid');
 }
 
 async function openProfiles(page) {
@@ -77,7 +163,7 @@ async function layout(page) {
   });
 }
 
-test('데스크톱에서 기존 프로필 화면과 같은 카드형 2열 정보 구조를 유지한다', async ({ page }, testInfo) => {
+test('데스크톱에서 Claude와 Codex CLI 기준 화면을 같은 viewport로 비교한다', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await openProfiles(page);
   const measured = await layout(page);
@@ -87,9 +173,17 @@ test('데스크톱에서 기존 프로필 화면과 같은 카드형 2열 정보
   expect(measured.shellScrollWidth).toBe(measured.shellClientWidth);
   expect(measured.documentScrollWidth).toBe(measured.documentClientWidth);
   await page.screenshot({ path: testInfo.outputPath('claude-profile-desktop.png'), fullPage: true });
+
+  const claudePattern = await commonPattern(page.locator('[data-layout="responsive-profile-columns"] > :last-child'));
+  const cliDialog = await openCliReference(page);
+  const cliPattern = await commonPattern(cliDialog);
+  expectSharedControls(claudePattern, cliPattern);
+  expect(cliPattern.surface.width).toBeLessThanOrEqual(600);
+  expect(cliPattern.documentScrollWidth).toBe(cliPattern.documentClientWidth);
+  await cliDialog.screenshot({ path: testInfo.outputPath('codex-cli-profile-desktop.png') });
 });
 
-test('좁은 화면에서 단일 열로 전환하고 가로 overflow를 만들지 않는다', async ({ page }, testInfo) => {
+test('좁은 화면에서 Claude와 Codex CLI 기준 화면 모두 overflow 없이 공통 컨트롤을 유지한다', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openProfiles(page);
   const measured = await layout(page);
@@ -100,4 +194,12 @@ test('좁은 화면에서 단일 열로 전환하고 가로 overflow를 만들�
   expect(measured.documentScrollWidth).toBe(measured.documentClientWidth);
   expect(measured.shell.width).toBeLessThanOrEqual(390);
   await page.screenshot({ path: testInfo.outputPath('claude-profile-narrow.png'), fullPage: true });
+
+  const claudePattern = await commonPattern(page.locator('[data-layout="responsive-profile-columns"] > :last-child'));
+  const cliDialog = await openCliReference(page);
+  const cliPattern = await commonPattern(cliDialog);
+  expectSharedControls(claudePattern, cliPattern);
+  expect(cliPattern.surface.width).toBeLessThanOrEqual(390 - 32);
+  expect(cliPattern.documentScrollWidth).toBe(cliPattern.documentClientWidth);
+  await cliDialog.screenshot({ path: testInfo.outputPath('codex-cli-profile-narrow.png') });
 });
