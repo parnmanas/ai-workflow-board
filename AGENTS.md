@@ -281,6 +281,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **디스패치는 QA/Action 런과 같은 ChatRoom 파이프라인을 재사용한다** — `chat_rooms.orchestration_mission_id/_step_id` 로 표시하고 기존 `is_action_room` SSE 마커를 켠다. 따라서 **agent-manager 변경 없음, SSE contract 변경 없음**. `run_provision` 은 v1 범위 밖 (붙이려면 `RunProvision.kind` 에 `'orchestration'` 추가 → agent-manager `run-provisioner.ts` 파서와 같은 PR).
 - `orchestration_update` SSE 는 `consensus_update` 와 같은 **UI 전용** 이벤트 (user-only filter) — agent 비소비이므로 agent-manager contract 무관.
 - 미션은 **암묵적으로 끝나지 않는다**: `complete_orchestration_mission` (또는 운영자 cancel) 만이 종료 경로. 엔진은 스스로 진행 못 할 때만 오케스트레이터를 깨운다(실패/차단, 디스패치 불가, 전 step 종료).
+- **실행 그래프(Graph mode, ticket 1ca9e49b)**: 미션 단위 feature flag `graph_enabled`(기본 off)로 켜면 `depends_on` DAG 위에 버전된 `GraphSpec`(typed edge, 조건 분기, join policy, bounded loop)이 얹힌다. 순수 로직은 `orchestration-graph.ts`, graph/wave 판정 분기는 `computeMissionProgress()` **한 곳에만** 둔다. 순환은 `loop_back` edge로만 만들 수 있고, 종료 조건·node별 `max_visits`·미션 `max_total_visits`가 없으면 `validateGraphSpec()`이 실행 전에 거부한다. 꺼진 미션의 동작은 이 기능 도입 전과 동일하며, wave adapter(`graphFromWavePlan`)의 무손실성은 회귀 테스트가 상태 조합 전수로 단언한다.
 - Reference: `docs/orchestration.md`
 
 ## Skills (AWB 기능)
