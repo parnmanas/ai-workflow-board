@@ -26,9 +26,14 @@
 //
 // SKIP 규약: `DB_TYPE=postgres` 일 때만 실행된다(CI `test:qa:pg` 매트릭스).
 // 기본 sql.js 실행에서는 사유를 남기고 자체 스킵하므로 어디서든 green 이다.
-// 작성 환경(담당자 샌드박스)에는 Postgres 가 없어 로컬에서는 로드 + 자체 스킵만
-// 확인했고, 실제 green 은 pg 매트릭스에서 나와야 한다 —
-// `dispatch-intent-pg-race.test.mjs` 가 세운 것과 같은 규약이다.
+// 작성 환경(담당자 샌드박스)에는 Postgres 가 없으므로 실제 green 은 pg 매트릭스에서
+// 나와야 한다 — `dispatch-intent-pg-race.test.mjs` 가 세운 것과 같은 규약이다.
+//
+// 첫 CI 실행(run 33624327816)이 이 규약의 값어치를 바로 증명했다: 보드에 base repo 를
+// 선언하지 않아 승격된 티켓이 `8c3befa8` 가드로 pend 됐고, 그래서 focus 집계가 비어
+// "담당자가 1건을 들고 있다" 단언이 0 으로 깨졌다. 승격 자체는 정확히 1건으로
+// 성공했으므로 경합 수정과는 무관한 픽스처 결함이었지만, 로컬 스킵만 믿고 넘어갔다면
+// 이 파일은 CI 에서 계속 red 였을 것이다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -79,11 +84,23 @@ test('Postgres: 같은 담당자의 두 후보를 동시에 승격해도 cap=1 �
   const colRepo = ds.getRepository('BoardColumn');
   const ticketRepo = ds.getRepository('Ticket');
   const activityLogRepo = ds.getRepository('ActivityLog');
+  const resourceRepo = ds.getRepository('Resource');
+
+  // ticket 8c3befa8 — base repo 를 선언하지 않은 보드로 assignee 를 dispatch 하면
+  // base_repo 가드가 티켓을 **pend** 시킨다. 그러면 승격은 성공했는데도 그 티켓이
+  // `pending_user_action=true` 라서 focus 집계에서 빠지고, 아래 "담당자가 1건을
+  // 들고 있다" 단언이 0 으로 실패한다(첫 CI 실행에서 실제로 이렇게 깨졌다).
+  // sqljs 쪽 `focus-lease-deadlock.test.mjs` 와 같은 이유로 저장소를 선언한다.
+  const repoResource = await resourceRepo.save(resourceRepo.create({
+    workspace_id: ws.id, name: 'pg slot race repo', type: 'repository',
+    url: 'https://github.com/parnmanas/ai-workflow-board.git', default_branch: 'main',
+  }));
 
   step('Backlog(intake) → To Do(active, assignee) 보드, max_concurrent=1');
   const board = await boardRepo.save(boardRepo.create({
     name: 'pg-slot-race', description: '', workspace_id: ws.id,
     routing_config: JSON.stringify({}),
+    environment_config: JSON.stringify({ repositories: [{ resource_id: repoResource.id }] }),
     max_concurrent_tickets_per_agent: 1,
   }));
   const backlog = await createColumn(app, getDataSourceToken, board.id, {
@@ -139,6 +156,20 @@ test('Postgres: 같은 담당자의 두 후보를 동시에 승격해도 cap=1 �
     moved, reported,
     `active 컬럼으로 이동한 티켓은 승격을 보고한 티켓과 일치해야 한다 ` +
     `(moved=${JSON.stringify(moved)} reported=${JSON.stringify(reported)})`,
+  );
+
+  const promotedRow = await ticketRepo.findOne({ where: { id: reported[0] } });
+  assert.equal(
+    !!promotedRow.pending_user_action, false,
+    '승격된 티켓이 pend 되면 안 된다 — pend 되면 focus 집계에서 빠져 아래 단언이 ' +
+    '0 으로 깨지고, 원인이 경합 문제처럼 잘못 보인다 (ticket 8c3befa8 base_repo 가드)',
+  );
+  const emitted = await activityLogRepo.find({
+    where: { action: 'trigger_emitted', ticket_id: reported[0] },
+  });
+  assert.equal(
+    emitted.length, 1,
+    `승격된 티켓은 담당자에게 트리거를 한 번 emit 해야 한다 (got ${emitted.length})`,
   );
 
   const load = await agentWorkload.getWorkflowLoadTicketIds(alice.id, board.id);
