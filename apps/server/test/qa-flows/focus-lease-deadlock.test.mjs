@@ -299,6 +299,11 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
       '자동 재개는 정확히 하나의 backlog_promoted 행을 남겨야 한다',
     );
 
+    step('  선행 티켓 A 가 실제로 dispatch 됐다 (완료 기준: 수동 개입 없는 dispatch)');
+    await waitFor('A 의 trigger_emitted 행', async () => (
+      await countAction('trigger_emitted', tA.id) === 1 ? true : null
+    ));
+
     step('  요구사항 6 — 해제 사유가 pending_on_tickets 로 기록된다');
     await waitFor('B 의 focus_lease_released 감사 행', async () => {
       const reasons = await releaseReasons(tB.id);
@@ -347,7 +352,7 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     const bob = await createAgent(app, getDataSourceToken, ws.id, { name: 'bob' });
     await createApiKey(app, getDataSourceToken, bob.id, { workspaceId: ws.id, label: 'bob' });
     // 담당자를 나눠 둔다 — 한쪽이 슬롯을 채워도 다른 후보가 여전히 적격이라
-        // 두 패스가 실제로 같은 후보를 놓고 겹칠 여지가 남는다.
+    // 두 패스가 실제로 같은 후보를 놓고 겹칠 여지가 남는다.
     const tRace1 = await createTicket(app, getDataSourceToken, {
       columnId: c5.backlog.id, workspaceId: ws.id, title: 'R1', priority: 'critical',
       assigneeId: alice.id,
