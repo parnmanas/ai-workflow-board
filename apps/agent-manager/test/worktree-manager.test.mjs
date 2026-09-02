@@ -460,20 +460,44 @@ test('다른 branch 에 커밋되지 않은 변경이 있으면 옮기지 않고
   }
 });
 
-test('Merging 종료 상태(base branch 위 + feature branch 삭제됨)는 브랜치를 되살리지 않고 통과한다', async () => {
+test('feature ref 가 없으면 base branch 위여도 승인하지 않고, ref 를 되살리지도 않는다', async () => {
   const fx = await detachedFixture('post-merge-base');
   try {
-    // Merging 가이드 step 3·5 를 그대로 재현: default 체크아웃 후 feature branch 삭제.
+    // Merging 가이드 step 3·5 와 같은 모양(default 체크아웃 + feature branch 삭제).
+    // 이 계층에는 단계 신호가 없어 "Merging 이 끝난 것"과 "In Progress 인데 ref 가
+    // 실수로 사라진 것"을 구분할 수 없으므로 안전하게 실패해야 한다.
     git(fx.first.cwd, ['switch', '-q', 'main']);
     git(fx.first.cwd, ['branch', '-D', fx.branch]);
 
     const resumed = await fx.resolve();
-    assert.equal(resumed.isWorktree, true, 'Merging 종료 상태는 정상으로 인정해야 한다');
-    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
+    assert.equal(resumed.isWorktree, false, '단계 구분이 불가하므로 승인하면 안 된다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
     assert.equal(
-      git(resumed.cwd, ['branch', '--list', fx.branch]), '',
-      'terminal-cleanup 이 지운 ref 를 되살리면 안 된다',
+      git(fx.first.cwd, ['branch', '--list', fx.branch]), '',
+      'Merging step 5 가 지운 ref 를 되살리면 안 된다',
     );
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', '체크아웃도 그대로 둔다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('ff merge 가 거부되면 stale 한 채로 성공 보고하지 않고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('ff-merge-blocked');
+  try {
+    // upstream 이 바꾼 tracked 파일에 미커밋 변경을 남긴다 — ff merge 가 거부되는 조건.
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+    await fsp.writeFile(join(fx.first.cwd, 'README.md'), '# ff 를 막는 미커밋 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false, 'branch 가 stale 로 남았으므로 준비 성공이 아니다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // attach 는 되어 고아 커밋 위험은 없고, 미커밋 변경도 보존된다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(await fsp.readFile(join(fx.first.cwd, 'README.md'), 'utf8'), '# ff 를 막는 미커밋 변경\n');
+    assert.notEqual(git(fx.first.cwd, ['rev-parse', 'HEAD']), remoteTip, 'stale 상태 그대로임을 확인');
   } finally {
     await fx.source.cleanup();
   }
