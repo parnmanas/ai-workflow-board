@@ -35,7 +35,6 @@ import {
   cloneWithRepoCredential,
   installRepoCredential,
   maskCredential,
-  resolveCloneOptions,
   type CloneWirePolicy,
   type RepoCredential,
 } from './repo-credential.js';
@@ -57,7 +56,7 @@ export interface RunRepoSpec {
   /**
    * Repo Resource ⊕ Workspace 로 해석된 clone 정책(ticket bddb63ee) — 서버의
    * `RunRepoSpec.clone_policy` 와 같은 wire 형태. 없으면 repo-credential 의 시스템
-   * 기본값(60분 wall-clock / 10분 idle / 전체 clone)이 적용된다.
+   * 기본값(60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다.
    */
   clone_policy?: CloneWirePolicy | null;
 }
@@ -361,14 +360,13 @@ async function gitWithLockRecovery(
   gitDir: string,
   steps: string[],
   notes: string[],
-  timeoutMs: number = RUN_GIT_TIMEOUT_MS,
 ): Promise<ExecResult> {
-  let res = await git(args, timeoutMs);
+  let res = await git(args, RUN_GIT_TIMEOUT_MS);
   if (!res.ok && /index\.lock/i.test(res.stderr)) {
     const recovered = await recoverStaleIndexLock(gitDir, steps, notes, { blocking: true });
     if (recovered) {
       steps.push('retry git op after stale index.lock recovery');
-      res = await git(args, timeoutMs);
+      res = await git(args, RUN_GIT_TIMEOUT_MS);
     }
   }
   return res;
@@ -557,10 +555,7 @@ export async function provisionRunWorkspace(
         await installRepoCredential(dir, p.repo.url, cred);
         // Existing clone — update non-destructively: fetch, then ff-only pull.
         // Each index-writing op self-recovers a stale index.lock and retries once.
-        // 기존 clone 재사용 경로의 네트워크 git op 도 clone 과 같은 예산을 쓴다
-        // (ticket bddb63ee) — 대형 저장소에서 고정 20분에 걸리는 실패 모드가 동일하다.
-        const netTimeoutMs = resolveCloneOptions(p.repo.clone_policy).timeoutMs;
-        const fetched = await gitWithLockRecovery(['-C', dir, 'fetch', '--all', '--prune'], gitDir, steps, notes, netTimeoutMs);
+        const fetched = await gitWithLockRecovery(['-C', dir, 'fetch', '--all', '--prune'], gitDir, steps, notes);
         steps.push(`fetch ${rel} → ${fetched.ok ? 'ok' : `FAIL: ${mask(fetched.stderr)}`}`);
         if (!fetched.ok) throw new Error(`git fetch failed for ${rel}: ${mask(fetched.stderr)}`);
         if (p.repo.branch) {
@@ -569,7 +564,7 @@ export async function provisionRunWorkspace(
           if (!co.ok) throw new Error(`git checkout ${p.repo.branch} failed in ${rel}: ${mask(co.stderr)}`);
         }
         // ff-only so a diverged local tree stays usable rather than getting clobbered.
-        const pulled = await gitWithLockRecovery(['-C', dir, 'pull', '--ff-only'], gitDir, steps, notes, netTimeoutMs);
+        const pulled = await gitWithLockRecovery(['-C', dir, 'pull', '--ff-only'], gitDir, steps, notes);
         steps.push(`pull --ff-only ${rel} → ${pulled.ok ? 'ok' : `non-ff (left as-is): ${mask(pulled.stderr)}`}`);
       } else {
         // Clone — folder is absent (reuse first run), was just wiped (fresh), or

@@ -3,7 +3,7 @@
 // 대형 저장소가 고정 wall-clock timeout 때문에 clone 실패하지 않도록, clone 예산과
 // 전략을 Repo Resource 에 저장하고 dispatch 에서 해석해 agent-manager 로 보낸다.
 // 여기서 검증하는 것:
-//   (a) 시스템 기본 clone timeout 이 60분(3600초)이다
+//   (a) 시스템 기본값은 clone timeout 60분(3600초)뿐이고 idle 은 비활성이다
 //   (b) 우선순위가 Repo Resource → Workspace → 시스템 기본값이며 **키 단위**다
 //   (c) 두 레이어 모두 비면 null — "override 없음"(구버전 매니저와 동일 동작)
 //   (d) parse 는 읽기 경로라 깨진 행에서도 throw 하지 않고 null 로 degrade 한다
@@ -36,18 +36,41 @@ const SRC = path.resolve(__dirname, '..', 'src');
 
 // ── (a) 시스템 기본값 ────────────────────────────────────────────────────────
 
-test('시스템 기본 clone timeout 은 60분(3600초)이다', () => {
+test('시스템 기본값은 clone timeout 60분(3600초) 하나뿐이고 idle 은 비활성이다', () => {
+  // 리뷰 지적 2 — 티켓이 시스템 기본값으로 명시한 것은 wall timeout 3600초뿐이다.
+  // idle 을 기본으로 켜면 "설정이 없는 기존 저장소는 60분 기본값으로 clone" 이라는
+  // 완료 조건을 깬다(진행률이 정상적으로 오래 멈추는 구간에서 끊길 수 있음).
   assert.equal(DEFAULT_CLONE_TIMEOUT_SECONDS, 3600);
-  assert.equal(DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS, 600);
+  assert.equal(DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS, 0);
 });
 
 test('설정이 없는 저장소: 한쪽만 지정해도 나머지 키는 시스템 기본값으로 채워진다', () => {
   const resolved = resolveClonePolicy(JSON.stringify({ clone_depth: 1 }), null);
   assert.equal(resolved.clone_timeout_seconds, 3600, '지정하지 않은 timeout 은 60분');
-  assert.equal(resolved.clone_idle_timeout_seconds, 600);
+  assert.equal(resolved.clone_idle_timeout_seconds, 0, '지정하지 않은 idle 은 비활성');
   assert.equal(resolved.clone_depth, 1);
   assert.equal(resolved.clone_filter, null);
   assert.equal(resolved.single_branch, false);
+});
+
+test('idle 은 명시 지정했을 때만 켜진다 (opt-in)', () => {
+  // Workspace 만 지정 / Resource 만 지정 / 둘 다 미지정 세 경우를 모두 고정한다.
+  assert.equal(
+    resolveClonePolicy(null, JSON.stringify({ clone_idle_timeout_seconds: 900 })).clone_idle_timeout_seconds,
+    900, 'Workspace 가 켜면 켜진다',
+  );
+  assert.equal(
+    resolveClonePolicy(JSON.stringify({ clone_idle_timeout_seconds: 300 }), JSON.stringify({ clone_idle_timeout_seconds: 900 })).clone_idle_timeout_seconds,
+    300, 'Resource 값이 Workspace 를 덮는다',
+  );
+  assert.equal(
+    resolveClonePolicy(JSON.stringify({ clone_idle_timeout_seconds: 0 }), JSON.stringify({ clone_idle_timeout_seconds: 900 })).clone_idle_timeout_seconds,
+    0, 'Resource 가 명시적으로 0 을 주면 Workspace 의 idle 을 끈다',
+  );
+  assert.equal(
+    resolveClonePolicy(JSON.stringify({ clone_timeout_seconds: 7200 }), null).clone_idle_timeout_seconds,
+    0, '아무도 지정하지 않으면 비활성',
+  );
 });
 
 // ── (b)(c) 우선순위 ──────────────────────────────────────────────────────────
@@ -59,7 +82,7 @@ test('우선순위: Repo Resource 가 Workspace 기본값을 키 단위로 덮�
   assert.equal(resolved.clone_timeout_seconds, 7200, 'Resource 값이 이긴다');
   assert.equal(resolved.clone_depth, 50, 'Resource 가 지정하지 않은 키는 Workspace 값을 상속한다');
   assert.equal(resolved.single_branch, true);
-  assert.equal(resolved.clone_idle_timeout_seconds, 600, '양쪽 다 없으면 시스템 기본값');
+  assert.equal(resolved.clone_idle_timeout_seconds, 0, '양쪽 다 없으면 시스템 기본값(비활성)');
 });
 
 test('우선순위: Repo Resource 만 있어도, Workspace 만 있어도 동작한다', () => {
@@ -125,7 +148,7 @@ test('validate: 유효한 정책은 통과하고, 0(idle 비활성)은 유효값
   });
   assert.equal(r.ok, true);
   assert.equal(r.value.clone_idle_timeout_seconds, 0);
-  // idle 0 은 "미지정" 과 달라야 한다 — resolve 가 기본값 600 으로 되돌리면 안 된다.
+  // idle 0 은 유효값이며, 시스템 기본값도 0(비활성)이라 두 경로가 같은 결과를 낸다.
   assert.equal(resolveClonePolicy(serializeClonePolicy(r.value), null).clone_idle_timeout_seconds, 0);
 });
 

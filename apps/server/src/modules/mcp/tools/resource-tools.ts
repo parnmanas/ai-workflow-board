@@ -81,7 +81,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       clone_policy: ClonePolicySchema.nullable().optional().describe(
         'For type=repository: per-repo clone policy applied by agent-manager when it clones this repo. '
         + 'Keys: clone_timeout_seconds (60..86400, wall-clock budget — system default 3600 = 60min), '
-        + 'clone_idle_timeout_seconds (0..86400, kill only after this long with NO clone progress output; 0 disables — system default 600), '
+        + 'clone_idle_timeout_seconds (0..86400, kill only after this long with NO clone progress output; 0 disables, and 0 is the system default — idle watching is opt-in because git progress output is not a reliable liveness signal on a slow large repo), '
         + 'clone_depth (shallow clone), clone_filter (partial clone, e.g. "blob:none"), single_branch. '
         + 'Every key is optional and falls through to the workspace default (update_workspace.clone_policy) and then the system default. '
         + 'Pass null to clear the per-repo override.'),

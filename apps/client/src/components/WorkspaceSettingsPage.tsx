@@ -101,7 +101,7 @@ export default function WorkspaceSettingsPage() {
                   in this workspace: wall-clock timeout, idle-stall timeout, and the
                   shallow / partial / single-branch flags. A repository Resource overrides
                   individual keys from its own Clone Policy. Leave everything empty for the system
-                  defaults (clone timeout 3600s, idle timeout 600s, full clone).
+                  defaults (clone timeout 3600s, idle timeout off, full clone).
                 </>
               }
               onSave={async (policy) => {

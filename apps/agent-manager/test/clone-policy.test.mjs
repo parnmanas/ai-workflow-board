@@ -132,13 +132,16 @@ async function waitForDeath(pid, deadlineMs = 8000) {
 
 // ── 1. 시스템 기본값: 정책이 없으면 60분 ─────────────────────────────────────
 
-test('기본값: 정책이 없으면 clone 예산은 60분(3600초), idle 은 10분이다', () => {
+test('기본값: 정책이 없으면 clone 예산은 60분(3600초) 하나뿐이고 idle 감시는 꺼져 있다', () => {
+  // 리뷰 지적 2 — 티켓이 시스템 기본값으로 명시한 것은 wall timeout 3600초뿐이다.
+  // idle 을 기본으로 켜면 원격이 pack 을 준비하는 동안처럼 "정상인데 진행률이 오래
+  // 멈추는" 구간에서 멀쩡한 대형 clone 이 끊긴다 — 이 티켓이 살리려는 시나리오다.
   assert.equal(DEFAULT_CLONE_TIMEOUT_MS, 3600_000, '시스템 기본 clone timeout 은 60분이어야 한다');
-  assert.equal(DEFAULT_CLONE_IDLE_TIMEOUT_MS, 600_000);
+  assert.equal(DEFAULT_CLONE_IDLE_TIMEOUT_MS, 0, '시스템 기본 idle 은 비활성이어야 한다');
   for (const noPolicy of [undefined, null, {}, parseClonePolicy(undefined)]) {
     const opts = resolveCloneOptions(noPolicy);
     assert.equal(opts.timeoutMs, 3600_000, `정책 ${JSON.stringify(noPolicy)} → 60분이어야 한다`);
-    assert.equal(opts.idleTimeoutMs, 600_000);
+    assert.equal(opts.idleTimeoutMs, 0, `정책 ${JSON.stringify(noPolicy)} → idle 비활성이어야 한다`);
     assert.deepEqual(opts.strategyArgs, [], '정책이 없으면 clone 전략 플래그는 붙지 않는다');
   }
 });
@@ -161,8 +164,16 @@ test('repo override: wall-clock / idle 예산이 정책 값으로 바뀐다', ()
   assert.equal(opts.idleTimeoutMs, 1800_000);
 });
 
-test('repo override: idle 0 은 비활성이고, 범위를 벗어난 값은 clamp 된다', () => {
-  assert.equal(resolveCloneOptions({ clone_idle_timeout_seconds: 0 }).idleTimeoutMs, 0);
+test('repo override: idle 은 명시 지정했을 때만 켜지고, 범위를 벗어난 값은 clamp 된다', () => {
+  assert.equal(resolveCloneOptions({ clone_idle_timeout_seconds: 0 }).idleTimeoutMs, 0, '0 = 명시적 비활성');
+  assert.equal(resolveCloneOptions({ clone_idle_timeout_seconds: 900 }).idleTimeoutMs, 900_000);
+  // 미지정/무효값은 기본값(비활성)으로 떨어진다 — "미지정 → 600초" 같은 폴백이 있으면 안 된다.
+  for (const bogus of [undefined, null, 'x', NaN, -5]) {
+    assert.equal(
+      resolveCloneOptions({ clone_idle_timeout_seconds: bogus }).idleTimeoutMs, 0,
+      `idle=${String(bogus)} → 비활성`,
+    );
+  }
   // 하한(60초) 미만 / 상한(24시간) 초과.
   assert.equal(resolveCloneOptions({ clone_timeout_seconds: 5 }).timeoutMs, 60_000);
   assert.equal(resolveCloneOptions({ clone_timeout_seconds: 999_999 }).timeoutMs, 86_400_000);
@@ -216,7 +227,9 @@ test('clone 전략: depth 정책이 실제 clone 결과(히스토리 깊이)에 
 
 // ── 4·5. idle timeout + timeout cleanup (가짜 git) ───────────────────────────
 
-test('argv: idle 이 켜져 있으면 --progress 가 붙고, 꺼져 있으면 붙지 않는다', { skip: !POSIX }, async () => {
+test('argv: 정책이 없으면 clone argv 가 이 티켓 이전과 동일하다 (--progress 미부착)', { skip: !POSIX }, async () => {
+  // 리뷰 지적 2 — idle 이 기본 비활성이므로 `--progress` 도 붙지 않는다. 정책을
+  // 설정하지 않은 저장소의 clone 명령줄은 wall-clock 예산만 달라질 뿐 그대로다.
   const fake = await installFakeGit();
   try {
     process.env.AWB_FAKE_GIT_MODE = 'ok';
@@ -224,17 +237,29 @@ test('argv: idle 이 켜져 있으면 --progress 가 붙고, 꺼져 있으면 �
 
     await cloneWithRepoCredential({ url: 'https://example.invalid/r.git', dir: join(root, 'a') });
     let argv = await fake.readArgv();
-    assert.ok(argv.includes('--progress'), `idle 기본값이면 --progress 필요: ${argv.join(' ')}`);
+    assert.ok(!argv.includes('--progress'), `정책이 없으면 --progress 를 붙이지 않는다: ${argv.join(' ')}`);
     assert.ok(!argv.some((a) => a.startsWith('--depth')), '정책이 없으면 --depth 없음');
+    assert.ok(!argv.some((a) => a.startsWith('--filter')), '정책이 없으면 --filter 없음');
     assert.ok(!argv.includes('--single-branch'), '정책이 없으면 --single-branch 없음');
 
+    // idle 을 명시적으로 켜야 --progress 가 붙는다 — git 은 stderr 가 TTY 가 아니면
+    // 진행 출력을 아예 내지 않으므로, 이게 없으면 모든 clone 이 즉시 정지로 오판된다.
     await cloneWithRepoCredential({
       url: 'https://example.invalid/r.git',
       dir: join(root, 'b'),
-      policy: { clone_idle_timeout_seconds: 0, clone_depth: 5, clone_filter: 'tree:0', single_branch: true },
+      policy: { clone_idle_timeout_seconds: 900 },
     });
     argv = await fake.readArgv();
-    assert.ok(!argv.includes('--progress'), 'idle 이 꺼져 있으면 --progress 를 붙이지 않는다');
+    assert.ok(argv.includes('--progress'), `idle 을 켜면 --progress 필요: ${argv.join(' ')}`);
+
+    // 전략 플래그는 idle 과 독립적으로 실린다.
+    await cloneWithRepoCredential({
+      url: 'https://example.invalid/r.git',
+      dir: join(root, 'c'),
+      policy: { clone_depth: 5, clone_filter: 'tree:0', single_branch: true },
+    });
+    argv = await fake.readArgv();
+    assert.ok(!argv.includes('--progress'), 'idle 미지정이면 여전히 --progress 없음');
     assert.ok(argv.includes('--depth=5'), argv.join(' '));
     assert.ok(argv.includes('--filter=tree:0'), argv.join(' '));
     assert.ok(argv.includes('--single-branch'), argv.join(' '));

@@ -13,7 +13,8 @@ import type { ClonePolicy } from '../types';
 //
 // 서버 zod 가 최종 검증 권한이며, 여기서는 사용자가 **어느 칸이 잘못됐는지** 알 수
 // 있도록 같은 범위를 미리 확인할 뿐이다. 빈 칸은 "미지정"이라 저장 payload 에서 키
-// 자체가 빠지고, 그러면 Repo Resource → Workspace → 시스템 기본값 순으로 흘러내린다
+// 자체가 빠지고, 그러면 Repo Resource → Workspace → 시스템 기본값(clone timeout 3600초,
+// idle 비활성, 전체 clone) 순으로 흘러내린다
 // (그래서 0 과 미지정을 구분해야 하고, 폼 상태를 문자열로 들고 있다).
 
 export interface ClonePolicyFormState {

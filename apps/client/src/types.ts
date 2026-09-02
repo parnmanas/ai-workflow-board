@@ -187,7 +187,7 @@ export interface BuiltinPromptDefault {
 export interface ClonePolicy {
   /** clone 전체 wall-clock 예산(초). 60~86400. 시스템 기본값 3600(60분). */
   clone_timeout_seconds?: number;
-  /** 진행 출력이 완전히 끊긴 채 허용할 시간(초). 0 = 비활성. 시스템 기본값 600. */
+  /** 진행 출력이 완전히 끊긴 채 허용할 시간(초). 0 = 비활성(시스템 기본값 — opt-in). */
   clone_idle_timeout_seconds?: number;
   /** `--depth` — shallow clone 커밋 수. 미지정 = 전체 히스토리. */
   clone_depth?: number;
@@ -218,7 +218,7 @@ export interface Resource {
   // For type='repository': per-repo clone policy (ticket bddb63ee). The server
   // returns it PARSED (an object, not the stored JSON text) and merges it over
   // the workspace default at dispatch. null / absent = no override → the system
-  // defaults apply (clone timeout 3600s = 60min, idle timeout 600s, full clone).
+  // defaults apply (clone timeout 3600s = 60min, idle timeout disabled, full clone).
   clone_policy?: ClonePolicy | null;
   created_at: string;
   updated_at: string;

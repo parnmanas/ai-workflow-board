@@ -19,21 +19,28 @@ import { z } from 'zod';
  * 하위 호환: 두 컬럼 모두 nullable 이고 기본 null 이다. 둘 다 비어 있으면
  * `resolveClonePolicy` 가 null 을 돌려주고, 그 경우 SSE payload 에서도 필드가
  * null 로 나간다 — agent-manager 는 null 을 "정책 없음 = 매니저 기본값"으로
- * 취급하며, 그 매니저 기본값이 곧 시스템 기본값(clone timeout 60분)이다. 즉
- * 설정이 전혀 없는 기존 저장소도, 이 필드를 모르는 구버전 매니저도 동일하게
- * 60분 예산으로 clone 된다.
+ * 취급하며, 그 매니저 기본값이 곧 시스템 기본값(clone timeout 60분, idle 비활성,
+ * 전체 clone)이다. 즉 설정이 전혀 없는 기존 저장소도, 이 필드를 모르는 구버전
+ * 매니저도 동일하게 **60분 wall-clock 하나만** 걸린 채 clone 된다.
  */
 
 /** 시스템 기본 clone wall-clock 예산 — 60분. 이 티켓 이전의 고정값은 20분이었다. */
 export const DEFAULT_CLONE_TIMEOUT_SECONDS = 3600;
 
 /**
- * 시스템 기본 idle timeout — 10분. clone 이 **아무 진행 출력도 내지 않은 채**
- * 이만큼 지나면 정지(stall)로 판단한다. wall-clock 예산과 달리 진행 중인 clone 은
- * 절대 끊지 않는 것이 목적이라, 실제로 바이트가 흐르는 동안은 60분 한도까지
- * 살아 있고 완전히 멈춘 연결만 조기에 회수된다. 0 은 idle 판정 비활성.
+ * 시스템 기본 idle timeout — **0 = 비활성**(리뷰 지적 2).
+ *
+ * idle 판정은 opt-in 이다. 티켓이 시스템 기본값으로 명시한 것은 wall timeout 3600초
+ * 뿐이고, 기본으로 idle 감시를 켜면 "설정이 없는 기존 저장소는 60분 기본값으로
+ * clone" 이라는 완료 조건을 깬다 — `--progress` 출력은 활성 전송의 확실한 liveness
+ * 신호가 아니라서, 원격이 pack 을 준비하는 동안이나 거대한 객체 하나를 처리하는
+ * 동안처럼 **정상인데 진행률이 오래 멈추는** 구간에서 멀쩡한 clone 이 끊길 수 있다.
+ * 그 구간이 바로 이 티켓이 살리려는 대형 저장소 시나리오다.
+ *
+ * 따라서 idle 은 Workspace/Repo 가 **명시적으로 지정했을 때만** 켜진다. 켜면 clone 이
+ * 아무 진행 출력도 내지 않은 채 그 시간을 넘길 때 정지(stall)로 보고 회수한다.
  */
-export const DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS = 600;
+export const DEFAULT_CLONE_IDLE_TIMEOUT_SECONDS = 0;
 
 /**
  * `--filter` 값 화이트리스트 정규식. git 이 받는 형태(`blob:none`,
@@ -47,7 +54,7 @@ export const ClonePolicySchema = z
   .object({
     /** clone 전체 wall-clock 예산(초). 60초~24시간. */
     clone_timeout_seconds: z.number().int().min(60).max(86400).optional(),
-    /** 무출력 상태가 이 시간을 넘으면 정지로 판단(초). 0 = 비활성. */
+    /** 무출력 상태가 이 시간을 넘으면 정지로 판단(초). 0 = 비활성(시스템 기본값). */
     clone_idle_timeout_seconds: z.number().int().min(0).max(86400).optional(),
     /** `--depth` — shallow clone 커밋 수. 미지정 = 전체 히스토리. */
     clone_depth: z.number().int().min(1).max(1000000).optional(),

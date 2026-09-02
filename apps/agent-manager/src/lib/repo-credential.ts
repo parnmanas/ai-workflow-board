@@ -32,12 +32,21 @@ const GIT_TIMEOUT_MS = 20_000;
 // 실패하던 문제를 없앤다. 예산과 clone 전략은 서버가 Repo Resource ⊕ Workspace
 // 기본값으로 해석해 `clone_policy` 로 실어 보내고, 여기서 clone argv + 타이머로
 // 번역된다. 정책이 없으면(구버전 서버, 미설정 저장소) 아래 시스템 기본값이
-// 그대로 적용되므로 **설정이 전혀 없는 기존 저장소도 60분 예산**을 받는다.
+// 그대로 적용되므로 **설정이 전혀 없는 기존 저장소는 60분 wall-clock 하나만** 받는다
+// — idle 감시와 clone 전략 플래그는 명시 설정이 있을 때만 켜진다.
 
 /** 시스템 기본 clone wall-clock 예산 — 60분(서버 DEFAULT_CLONE_TIMEOUT_SECONDS 와 동일). */
 export const DEFAULT_CLONE_TIMEOUT_MS = 3600_000;
-/** 시스템 기본 idle 예산 — 10분. clone 진행 출력이 이만큼 완전히 끊겨야 정지로 본다. */
-export const DEFAULT_CLONE_IDLE_TIMEOUT_MS = 600_000;
+/**
+ * 시스템 기본 idle 예산 — **0 = 비활성**(리뷰 지적 2).
+ *
+ * idle 감시는 opt-in 이다. `--progress` 출력은 활성 전송의 확실한 liveness 신호가
+ * 아니라서(원격이 pack 을 준비하는 동안이나 거대한 객체 하나를 처리하는 동안은
+ * 정상인데도 진행률이 오래 멈춘다), 기본으로 켜면 이 티켓이 살리려는 바로 그
+ * 대형 저장소 clone 을 끊을 수 있다. 정책이 없는 저장소에는 wall-clock 60분
+ * 하나만 걸린다.
+ */
+export const DEFAULT_CLONE_IDLE_TIMEOUT_MS = 0;
 /** 정책 값의 상한 — 악의적/오타 payload 가 사실상 무한 대기를 만들지 못하게 한다. */
 const MAX_CLONE_TIMEOUT_MS = 86_400_000;
 const MIN_CLONE_TIMEOUT_MS = 60_000;
@@ -77,11 +86,12 @@ function clampMs(seconds: unknown, fallbackMs: number, minMs: number): number {
  */
 export function resolveCloneOptions(policy?: CloneWirePolicy | null): ResolvedCloneOptions {
   const timeoutMs = clampMs(policy?.clone_timeout_seconds, DEFAULT_CLONE_TIMEOUT_MS, MIN_CLONE_TIMEOUT_MS);
-  // idle 은 0(비활성)이 유효값이므로 min 을 0 으로 둔다.
+  // idle 은 **명시적으로 지정했을 때만** 켜진다. 미지정(undefined/null)이든 0 이든
+  // 결과는 비활성 — 0 이 유효값이라 "미지정 → 기본값" 폴백을 태우면 안 된다.
   const rawIdle = policy?.clone_idle_timeout_seconds;
-  const idleTimeoutMs = rawIdle === 0
-    ? 0
-    : clampMs(rawIdle, DEFAULT_CLONE_IDLE_TIMEOUT_MS, 1_000);
+  const idleTimeoutMs = typeof rawIdle === 'number' && Number.isFinite(rawIdle) && rawIdle > 0
+    ? Math.min(Math.max(Math.round(rawIdle * 1000), 1_000), MAX_CLONE_TIMEOUT_MS)
+    : DEFAULT_CLONE_IDLE_TIMEOUT_MS;
   const strategyArgs: string[] = [];
   const depth = policy?.clone_depth;
   if (typeof depth === 'number' && Number.isInteger(depth) && depth > 0) {
@@ -132,7 +142,7 @@ interface GitRun {
  * 토큰을 argv나 origin URL에 넣지 않고 clone하고, 성공한 repo에 영구 helper를 설치한다.
  *
  * clone 예산/전략은 `policy`(서버가 Repo Resource ⊕ Workspace 로 해석해 실어보낸
- * 값)에서 나오며, 없으면 시스템 기본값(60분 wall-clock / 10분 idle / 전체 clone)이
+ * 값)에서 나오며, 없으면 시스템 기본값(60분 wall-clock / idle 비활성 / 전체 clone)이
  * 적용된다. `timeoutMs` 를 명시하면 정책의 wall-clock 예산을 덮어쓴다(호출자 전용
  * escape hatch).
  */
@@ -164,9 +174,9 @@ export async function cloneWithRepoCredential(args: {
       : opts.timeoutMs;
     const branchArgs = args.branch?.trim() ? ['--branch', args.branch.trim()] : [];
     // `--progress` 는 idle 판정이 켜져 있을 때만 붙인다. git 은 stderr 가 TTY 가
-    // 아니면 진행 출력을 아예 내지 않으므로, 이 플래그가 없으면 "정상적으로 오래
-    // 걸리는 clone" 과 "완전히 멈춘 clone" 이 구분되지 않아 모든 대형 clone 이
-    // idle 로 오판된다. idle 이 꺼져 있으면 stderr 를 깨끗하게 유지한다.
+    // 아니면 진행 출력을 아예 내지 않으므로, idle 을 켜고도 이 플래그가 없으면
+    // 모든 clone 이 즉시 무출력=정지로 오판된다. idle 이 꺼진 기본 경로에서는
+    // 붙이지 않아 stderr 와 wire 동작을 이 티켓 이전과 동일하게 유지한다.
     const progressArgs = opts.idleTimeoutMs > 0 ? ['--progress'] : [];
     const result = await runCloneProcess(
       [...configArgs, 'clone', ...progressArgs, ...opts.strategyArgs, ...branchArgs, '--', cleanUrl, args.dir],
