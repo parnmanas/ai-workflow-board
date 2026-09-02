@@ -86,6 +86,7 @@ import {
   computeMissionProgress,
   firedLoopBacks,
   graphFromWavePlan,
+  carryGraphThroughReplan,
   loopBodyNodes,
   selectOutgoingEdges,
   validateGraphSpec,
@@ -660,6 +661,7 @@ export class OrchestrationRunnerService {
       steps: PlanStepInput[];
       graph?: GraphSpecInput | null;
       graph_template?: { name: string; params?: Record<string, unknown> } | null;
+      reset_graph?: boolean;
     },
   ): Promise<{
     mission: OrchestrationMission;
@@ -707,12 +709,12 @@ export class OrchestrationRunnerService {
       // graph_enabled=false면 이 미션은 기존 wave/DAG 계약 그대로다 — graph를
       // 보내오면 조용히 무시하지 않고 거부한다(조용한 무시는 오케스트레이터가
       // 분기/loop가 실제로 걸린 줄 알고 계획을 세우게 만든다).
-      if ((input.graph || input.graph_template) && !mission.graph_enabled) {
+      if ((input.graph || input.graph_template || input.reset_graph) && !mission.graph_enabled) {
         throw orchestrationError(
           400,
           'this mission does not have graph mode enabled — it executes the plain dependency plan. ' +
-            'Ask an operator to enable graph mode on the mission, or submit the plan without a "graph" ' +
-            'or "graph_template".',
+            'Ask an operator to enable graph mode on the mission, or submit the plan without a "graph", ' +
+            '"graph_template" or "reset_graph".',
         );
       }
       // 손으로 쓴 그래프와 템플릿은 둘 다 "그래프 전체"를 확정하므로 동시에 받으면
@@ -724,24 +726,55 @@ export class OrchestrationRunnerService {
             'so combining the two leaves it ambiguous which one defines the execution rules.',
         );
       }
+      // reset_graph는 "그래프를 버리고 depends_on에서 다시 유도하라"는 뜻이므로, 어떤
+      // 그래프를 쓸지 함께 지정하는 것과 모순된다 — 조용히 한쪽을 이기게 하지 않는다.
+      if (input.reset_graph && (input.graph || input.graph_template)) {
+        throw orchestrationError(
+          400,
+          'reset_graph discards the current graph and re-derives it from depends_on, so it cannot be ' +
+            'combined with "graph" or "graph_template" — send the graph you want, or reset, not both.',
+        );
+      }
       let graphSpec: GraphSpec | null = mission.graph_spec ?? null;
+      // 그래프가 통째로 새 기준선으로 갈렸는지. patch 카운터 리셋 판정에 쓴다 —
+      // 참조 비교로는 "보존했지만 재검증이 새 객체를 돌려준" 경우를 교체로 오인한다.
+      let graphReplaced = false;
+      let graphCarriedNodes: string[] = [];
       if (mission.graph_enabled) {
         const nodeKeys = validated.steps.map((st) => String(st.step_key).trim());
         if (input.graph_template) {
           const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, { nodeKeys });
           if ('error' in expanded) throw orchestrationError(400, expanded.error);
           graphSpec = expanded.spec;
+          graphReplaced = true;
         } else if (input.graph) {
           const checked = validateGraphSpec(input.graph, { nodeKeys });
           if ('error' in checked) throw orchestrationError(400, checked.error);
           graphSpec = checked.spec;
+          graphReplaced = true;
+        } else if (graphSpec && !input.reset_graph) {
+          // 이미 확정된 그래프가 있으면 **보존**하고 이번 replan이 새로 만든 step만
+          // 고립 node로 편입한다(티켓 301018c5). 재생성하면 조건 분기·bounded loop·
+          // 그동안 적용한 patch가 오류도 경고도 없이 사라진다 — step 병합이 additive인
+          // 것과 같은 원칙을 그래프에도 적용한다. 버리고 싶으면 reset_graph로 명시한다.
+          const carried = carryGraphThroughReplan(graphSpec, { nodeKeys });
+          if ('error' in carried) {
+            throw orchestrationError(
+              409,
+              `the current execution graph cannot absorb this plan: ${carried.error} ` +
+                `Send an explicit "graph"/"graph_template", or "reset_graph": true to re-derive it from depends_on.`,
+            );
+          }
+          graphSpec = carried.spec;
+          graphCarriedNodes = carried.added;
         } else {
-          // graph를 안 보냈으면 depends_on을 무손실 승격한다(wave adapter). 그래서
-          // graph 모드 미션은 항상 그래프로 구동되고, 그래프를 쓰지 않는 계획도
-          // 기존과 완전히 동일하게 동작한다.
+          // 최초 계획이거나 reset_graph가 명시됐다 — depends_on을 무손실 승격한다
+          // (wave adapter). 그래서 graph 모드 미션은 항상 그래프로 구동되고, 그래프를
+          // 쓰지 않는 계획도 기존과 완전히 동일하게 동작한다.
           graphSpec = graphFromWavePlan(
             validated.steps.map((st) => ({ step_key: String(st.step_key).trim(), depends_on: st.depends_on ?? [] })),
           );
+          graphReplaced = true;
         }
       }
 
@@ -826,8 +859,9 @@ export class OrchestrationRunnerService {
       mission.plan_version = nextVersion;
       mission.plan_summary = (input.summary || '').slice(0, SUMMARY_MAX);
       // 그래프 전체가 새로 확정되면 patch 카운터도 새 기준선에서 다시 센다 — 이전
-      // 그래프에 걸었던 patch 횟수를 새 그래프가 물려받을 이유가 없다.
-      if (graphSpec !== mission.graph_spec) mission.graph_revision = 0;
+      // 그래프에 걸었던 patch 횟수를 새 그래프가 물려받을 이유가 없다. 반대로 그래프를
+      // 보존한 replan은 그 patch들이 그대로 살아 있으므로 카운터도 이어간다.
+      if (graphReplaced) mission.graph_revision = 0;
       mission.graph_spec = graphSpec;
       if (mission.status === 'planning') mission.status = 'running';
       await this.missionRepo.save(mission);
@@ -853,6 +887,11 @@ export class OrchestrationRunnerService {
                 conditional: graphSpec.edges.filter((e) => e.kind === 'conditional').length,
                 loops: graphSpec.edges.filter((e) => e.kind === 'loop_back').length,
                 max_total_visits: graphSpec.max_total_visits,
+                // 그래프를 새로 깐 replan인지, 기존 그래프를 이어받은 replan인지를
+                // trace에 남긴다 — 조건/loop가 어느 제출에서 사라졌는지 추적 가능해야 한다.
+                carried: !graphReplaced,
+                carried_nodes: graphCarriedNodes,
+                graph_revision: mission.graph_revision ?? 0,
               }
             : null,
         },

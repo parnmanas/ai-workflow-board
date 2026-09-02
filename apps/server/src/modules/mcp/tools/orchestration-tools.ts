@@ -137,7 +137,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       'and lists the step_keys it depends on; steps with no shared dependency run in PARALLEL. The server ' +
       'immediately dispatches every step whose dependencies are already satisfied — you do not dispatch them ' +
       'yourself. Revising is additive: a step_key that already exists is updated only if it has not started, ' +
-      'and steps you omit are kept (use update_orchestration_step to drop one).',
+      'and steps you omit are kept (use update_orchestration_step to drop one). On a graph-mode mission the ' +
+      'execution graph is additive the same way — omitting "graph" KEEPS the graph already in force (branches, ' +
+      'loops and applied graph patches included) and folds new steps in as isolated nodes; pass ' +
+      '"reset_graph": true to deliberately go back to a plain depends_on graph.',
     {
       mission_id: z.string().describe('Mission id from your brief'),
       summary: z
@@ -233,7 +236,8 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         .optional()
         .describe(
           'Optional execution graph: conditional branches, join policies and bounded loops. Only accepted on a ' +
-            'mission with graph mode enabled. Omit it and the plan runs as a plain dependency DAG exactly as before.',
+            'mission with graph mode enabled. Omitting it on the FIRST plan runs a plain dependency DAG exactly ' +
+            'as before; omitting it on a REPLAN keeps the graph already in force rather than flattening it.',
         ),
       graph_template: z
         .object({
@@ -251,8 +255,17 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
             'aggregator) instead of writing nodes and edges by hand. Expands into an ordinary graph validated ' +
             'by the same rules. Mutually exclusive with "graph".',
         ),
+      reset_graph: z
+        .boolean()
+        .optional()
+        .describe(
+          'Throw away the current execution graph and re-derive a plain one from depends_on. Only needed to ' +
+            'ABANDON branches/loops: by default a replan that omits "graph" KEEPS the graph already in force ' +
+            'and folds any new steps in as isolated nodes, so your conditional edges, loops and applied graph ' +
+            'patches survive. Mutually exclusive with "graph" and "graph_template".',
+        ),
     },
-    async ({ mission_id, summary, steps, graph, graph_template }, extra) => {
+    async ({ mission_id, summary, steps, graph, graph_template, reset_graph }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
@@ -261,6 +274,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           steps,
           graph,
           graph_template,
+          reset_graph,
         });
         return ok({
           mission_id,

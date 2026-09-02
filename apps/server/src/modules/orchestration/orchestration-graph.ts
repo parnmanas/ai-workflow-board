@@ -690,6 +690,65 @@ export function graphFromWavePlan(steps: WaveStepInput[]): GraphSpec {
   return validated.spec;
 }
 
+// ── replan 너머로 그래프 잇기 (티켓 301018c5) ────────────────────────────────
+
+/**
+ * 확정된 그래프를 replan 너머로 이어붙이고, 이번 replan이 새로 만든 step만 고립
+ * node로 편입한다.
+ *
+ * `submit_orchestration_plan`이 `graph`/`graph_template` 없이 다시 들어왔을 때 쓴다.
+ * 그전에는 이 경우 `graphFromWavePlan`으로 그래프를 통째로 재생성했는데, 그러면
+ * `sequence` edge만 남아 조건 분기·bounded loop·그동안 적용한 patch가 오류도 경고도
+ * 없이 전부 사라졌다. step 병합이 additive인 것과 같은 원칙을 그래프에도 적용한다.
+ *
+ * 안전한 이유는 **plan에서 step이 사라지지 않기** 때문이다 — replan은 누락 키를
+ * 보존하고(`submitPlan`의 병합), `update_orchestration_step`의 `cancel`은 행을 지우지
+ * 않고 status만 바꾼다. 따라서 기존 그래프의 node 집합은 언제나 `nodeKeys`의 부분집합
+ * 이고, 고아 node가 생기지 않는다. (step을 실제로 삭제하는 경로가 생긴다면 여기서
+ * 사라진 key를 참조하는 node/edge를 걷어내는 처리가 함께 필요하다.)
+ *
+ * `max_total_visits`는 **필요할 때만** 새 node 수까지 올린다. 그러지 않으면 loop가
+ * 없어 예산이 node 수로 자동 유도됐던 그래프가, step 하나 추가되는 순간 "예산이 node
+ * 수보다 작다"며 replan 자체를 거부한다. 선언된 상한을 편의로 넘겨 올리지는 않는다 —
+ * 예산은 안전 장치이므로 구조상 불가피할 때만 최소로 들어올린다.
+ */
+export function carryGraphThroughReplan(
+  spec: GraphSpec,
+  opts: { nodeKeys: string[] },
+): { spec: GraphSpec; added: string[] } | GraphValidationError {
+  const planKeys = Array.from(new Set(opts.nodeKeys.map((k) => String(k ?? '').trim()).filter(Boolean)));
+  const known = new Set(spec.nodes.map((n) => n.key));
+  const added = planKeys.filter((k) => !known.has(k));
+
+  // 현재 spec을 입력 형태로 되돌린다. patch 경로와 같은 이유로 명시값을 그대로
+  // 실어야 재검증에서 기본값(task/all/1)으로 되돌아가지 않는다.
+  const nodes: GraphNodeInput[] = spec.nodes.map((n) => ({
+    key: n.key,
+    kind: n.kind,
+    join: n.join,
+    max_visits: n.max_visits,
+  }));
+  const edges: GraphEdgeInput[] = spec.edges.map((e) => ({
+    from: e.from,
+    to: e.to,
+    kind: e.kind,
+    ...(e.when ? { when: e.when } : {}),
+    ...(e.label ? { label: e.label } : {}),
+  }));
+
+  const revalidated = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes,
+      edges,
+      max_total_visits: Math.max(spec.max_total_visits, planKeys.length),
+    },
+    { nodeKeys: planKeys },
+  );
+  if ('error' in revalidated) return { error: revalidated.error };
+  return { spec: revalidated.spec, added };
+}
+
 // ── Runtime graph patching (티켓 2fc8f99a) ───────────────────────────────────
 //
 // 그래프 전체 재제출(`submit_orchestration_plan`의 `graph`)은 실행 중인 미션을
