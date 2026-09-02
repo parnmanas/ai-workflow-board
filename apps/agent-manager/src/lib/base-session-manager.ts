@@ -1214,6 +1214,20 @@ export class BaseSessionManager {
   }
 
   #wireStdio(sess: SessionRecord): void {
+    // child stdin 은 EPIPE 를 동기 throw 가 아니라 스트림 'error' 이벤트로
+    // 보고한다 — `_writeTurn` 의 try/catch 는 그걸 잡지 못한다. 리스너가 하나도
+    // 없으면 Node 가 uncaughtException 으로 승격시켜 **매니저 프로세스 전체**를
+    // 죽인다. CLI 자식이 첫 턴 write 와 겹쳐 죽기만 해도 그렇다(Windows CI 에서
+    // `write EPIPE` uncaughtException 으로 실측). 세션 정리는 exit/close
+    // 핸들러가 이미 책임지므로 여기서는 로깅 후 흡수해 정상 종료 경로로 넘긴다.
+    if (sess.child.stdin) {
+      sess.child.stdin.on('error', (err: any) => {
+        log(
+          `${this.#logTag} stdin error ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid}: ` +
+            `${err?.code ?? err?.message ?? err}`,
+        );
+      });
+    }
     if (sess.child.stdout) {
       const rlOut = createInterface({ input: sess.child.stdout });
       const tag = this.#logTag.replace(/^\[|\]$/g, '');
