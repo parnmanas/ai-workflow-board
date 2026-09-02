@@ -236,6 +236,47 @@ export function selectBinary(
   return { bin: cliType, kind: 'literal' };
 }
 
+/** `where` / `command -v` 를 쓰지 않는 순수 PATH 스캔. shell lookup 이 timeout
+ *  이나 spawn 실패로 빈손일 때만 쓰이는 fallback 이며, 같은 후보 목록을
+ *  서브프로세스 없이 만들어낸다.
+ *
+ *  Windows 에서는 PATHEXT 의 각 확장자를 순서대로 붙여 본다 — cmd.exe 가 bare
+ *  `codex` 를 찾을 때 쓰는 규칙과 같다. POSIX 에서는 확장자 없이 실행 비트만
+ *  본다. 순수 함수 + `exists` 주입이라 실제 호스트 설치 없이 unit test 할 수
+ *  있다(board lesson: CLI resolver 테스트는 호스트 설치에 의존하지 말 것). */
+export function scanPathForBinary(
+  cliType: string,
+  pathValue: string | null | undefined,
+  opts: {
+    isWindows: boolean;
+    pathExt?: string | null;
+    exists: (p: string) => boolean;
+  },
+): string[] {
+  if (!pathValue) return [];
+  const sep = opts.isWindows ? ';' : ':';
+  const pathJoin = opts.isWindows ? win32.join : join;
+  const suffixes = opts.isWindows
+    ? (opts.pathExt || '.COM;.EXE;.BAT;.CMD')
+        .split(';')
+        .map((ext) => ext.trim())
+        .filter(Boolean)
+    : [''];
+
+  const hits: string[] = [];
+  for (const rawDir of pathValue.split(sep)) {
+    // Windows PATH 항목은 인용부호가 붙어 있을 수 있고, 빈 항목(중복 구분자)은
+    // "현재 디렉터리" 로 해석되면 안 되므로 건너뛴다.
+    const dir = rawDir.trim().replace(/^"(.*)"$/, '$1');
+    if (!dir) continue;
+    for (const suffix of suffixes) {
+      const candidate = pathJoin(dir, `${cliType}${suffix}`);
+      if (opts.exists(candidate) && !hits.includes(candidate)) hits.push(candidate);
+    }
+  }
+  return hits;
+}
+
 /** well-known 설치 후보를 shell PATH lookup 결과보다 앞에 둔다(ticket ce65cf25).
  *  순수 함수라 실제 shell/fs 없이 순서 계약 자체를 unit test 할 수 있다 — PATH
  *  가 무엇을 먼저 노출하든, well-known 후보가 디스크에 존재하면 그것이 이긴다.
@@ -368,7 +409,24 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
       if (t) pathHits.push(t);
     }
   } catch {
-    /* shell 또는 spawn 실패 — well-known candidate 로 계속 시도한다 */
+    /* shell 또는 spawn 실패 — 아래 순수 PATH 스캔으로 계속 시도한다 */
+  }
+
+  // 위 shell lookup 은 서브프로세스라 호스트 부하에 좌우된다. 부하가 높으면
+  // 2000ms timeout 에 걸려 빈손으로 돌아오고, well-known 위치에도 없는 CLI 는
+  // PATH 에 멀쩡히 설치돼 있는데도 "executable not found" 로 죽었다
+  // (Windows CI 실측: `where codex` 가 timeout → resolveCliBin throw). PATH 를
+  // 직접 훑는 fallback 은 서브프로세스 없이 같은 후보를 결정적으로 만들어낸다.
+  // 성공 경로의 순서·의미론은 그대로다 — shell lookup 이 결과를 낸 경우 이
+  // 스캔은 아예 돌지 않는다.
+  if (pathHits.length === 0) {
+    pathHits.push(
+      ...scanPathForBinary(ct, process.env.PATH, {
+        isWindows,
+        pathExt: process.env.PATHEXT,
+        exists: fileExecutable,
+      }),
+    );
   }
 
   const sources = orderResolutionSources(wellKnown, pathHits);
