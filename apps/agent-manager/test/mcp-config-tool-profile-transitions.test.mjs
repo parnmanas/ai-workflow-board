@@ -137,6 +137,9 @@ async function readCapture(path) {
 // events by pid — and record an exit that arrives before its waiter is
 // registered (spawn() resolving races the child's own near-instant exit
 // for these fixtures) rather than assuming registration always wins.
+
+// ── 자식 종료 대기 상한 (티켓 6fd625bb) ─────────────────────────────────────
+//
 // 이 파일의 대기 상한은 **성능 단언이 아니라 hang 진단용**이다 — 검증 대상은
 // 자식이 관측한 헤더(capture)이지 "N ms 안에 끝나는가" 가 아니다. 5000ms 는 실제
 // node 자식을 여러 개 동시에 띄우는 부하 높은 러너에서 그대로 벽시계 추측이 됐다

@@ -720,8 +720,10 @@ test('LIVE session + two concurrent force-respawns → exactly ONE respawn, the 
   // 어느 쪽이 홀더가 될지는 정해져 있지 않으므로 settle 여부로 식별한다: 진 쪽은
   // spawn seam 에서 즉시 드롭돼 게이트와 무관하게 먼저 settle 하고, 이긴 쪽은
   // 게이트에 걸려 settle 하지 못한다.
+  // 거절도 settle 로 센다 — 양쪽 핸들러를 다 붙여야 곁가지 체인이 unhandled
+  // rejection 으로 남지 않는다(실패는 아래 Promise.all 이 그대로 드러낸다).
   let settled = 0;
-  const track = (p) => { p.then(() => { settled++; }); return p; };
+  const track = (p) => { void p.then(() => { settled++; }, () => { settled++; }); return p; };
   const pF1 = track(dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f1' })));
   const pF2 = track(dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f2' })));
 
