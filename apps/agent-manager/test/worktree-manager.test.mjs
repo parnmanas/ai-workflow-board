@@ -269,11 +269,18 @@ async function detachedFixture(label) {
   const first = await resolve();
   assert.equal(first.isWorktree, true);
   assert.equal(first.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+  // 매니저의 base clone 은 커미터 신원을 심지 않고, CI 러너에는 global 신원이
+  // 없다. 복구 경로의 `git rebase` 는 커밋을 만들어야 하므로 신원이 없으면
+  // "Committer identity unknown" 으로 실패한다 — 실제 호스트에는 신원이 있으니
+  // 여기서 심어 그 환경을 맞춘다. worktree 는 base clone 의 config 를 공유한다.
+  const base = join(workingDir, '.awb', 'base', 'repo-detached');
+  git(base, ['config', 'user.email', 'test@awb.local']);
+  git(base, ['config', 'user.name', 'AWB Test']);
   return {
     source,
     resolve,
     first,
-    base: join(workingDir, '.awb', 'base', 'repo-detached'),
+    base,
     branch: `ticket/${TICKET_A}-work`,
     /** origin/main 을 전진시키고 새 tip 을 돌려준다 — stale branch 재현용. */
     advanceBase: () => {
@@ -362,7 +369,10 @@ test('자기 커밋이 있는 feature branch 는 detached 재개 시 base 위로
     const resumed = await fx.resolve();
     assert.equal(resumed.isWorktree, true);
     assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
-    assert.equal(git(resumed.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', 'base tip 위로 rebase 된다');
+    // `remoteTip..HEAD` 만 세면 rebase 여부와 무관하게 1 이라 통과해버린다 —
+    // 새 base tip 이 HEAD 에 실제로 포함됐는지(반대 방향)를 함께 봐야 rebase 가 증명된다.
+    assert.equal(git(resumed.cwd, ['rev-list', '--count', `HEAD..${remoteTip}`]), '0', 'base tip 위로 rebase 된다');
+    assert.equal(git(resumed.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', '자기 커밋 1개만 남는다');
     assert.equal(await readNormalized(resumed.cwd, 'work.txt'), '티켓 작업\n');
     assert.equal(resumed.repositoryContext.ahead, 1);
     assert.equal(resumed.repositoryContext.behind, 0);
