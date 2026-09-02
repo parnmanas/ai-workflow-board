@@ -20,10 +20,99 @@
 
 import { promises as fsp } from 'node:fs';
 import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { terminateDetachedProcessTree } from './process-tree.js';
 
 const GIT_TIMEOUT_MS = 20_000;
+
+// ── clone 정책 (ticket bddb63ee) ─────────────────────────────────────────────
+//
+// 대형 저장소의 첫 clone 이 고정 20분 wall-clock 에 걸려 프로비저닝이 통째로
+// 실패하던 문제를 없앤다. 예산과 clone 전략은 서버가 Repo Resource ⊕ Workspace
+// 기본값으로 해석해 `clone_policy` 로 실어 보내고, 여기서 clone argv + 타이머로
+// 번역된다. 정책이 없으면(구버전 서버, 미설정 저장소) 아래 시스템 기본값이
+// 그대로 적용되므로 **설정이 전혀 없는 기존 저장소도 60분 예산**을 받는다.
+
+/** 시스템 기본 clone wall-clock 예산 — 60분(서버 DEFAULT_CLONE_TIMEOUT_SECONDS 와 동일). */
+export const DEFAULT_CLONE_TIMEOUT_MS = 3600_000;
+/** 시스템 기본 idle 예산 — 10분. clone 진행 출력이 이만큼 완전히 끊겨야 정지로 본다. */
+export const DEFAULT_CLONE_IDLE_TIMEOUT_MS = 600_000;
+/** 정책 값의 상한 — 악의적/오타 payload 가 사실상 무한 대기를 만들지 못하게 한다. */
+const MAX_CLONE_TIMEOUT_MS = 86_400_000;
+const MIN_CLONE_TIMEOUT_MS = 60_000;
+/** `--filter` 화이트리스트. `-` 로 시작하는 값이 git 플래그로 해석되는 것을 막는다. */
+const CLONE_FILTER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:=+._-]*$/;
+
+/** 서버 ResolvedClonePolicy 의 wire 미러. agent-manager 는 별도 패키지라
+ *  ResolvedEnvironmentConfig / HarnessSpec 과 동일하게 형태만 복제한다. */
+export interface CloneWirePolicy {
+  clone_timeout_seconds?: number | null;
+  clone_idle_timeout_seconds?: number | null;
+  clone_depth?: number | null;
+  clone_filter?: string | null;
+  single_branch?: boolean | null;
+}
+
+export interface ResolvedCloneOptions {
+  /** clone 전체 wall-clock 예산(ms). */
+  timeoutMs: number;
+  /** 무출력 허용 시간(ms). 0 = idle 판정 비활성. */
+  idleTimeoutMs: number;
+  /** `git clone` 에 덧붙일 전략 플래그 (`--depth` / `--filter` / `--single-branch`). */
+  strategyArgs: string[];
+}
+
+function clampMs(seconds: unknown, fallbackMs: number, minMs: number): number {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return fallbackMs;
+  const ms = Math.round(seconds * 1000);
+  if (ms <= 0) return minMs === 0 ? 0 : fallbackMs;
+  return Math.min(Math.max(ms, minMs), MAX_CLONE_TIMEOUT_MS);
+}
+
+/**
+ * wire 정책 → 구체적인 타이머/argv. wire 값은 절대 신뢰하지 않는다: 범위를 벗어난
+ * 숫자는 clamp 하고, 화이트리스트를 벗어난 filter 나 비정수 depth 는 조용히 버린다
+ * (정책 하나가 잘못됐다고 clone 전체를 실패시키지 않는다 — availability-first).
+ */
+export function resolveCloneOptions(policy?: CloneWirePolicy | null): ResolvedCloneOptions {
+  const timeoutMs = clampMs(policy?.clone_timeout_seconds, DEFAULT_CLONE_TIMEOUT_MS, MIN_CLONE_TIMEOUT_MS);
+  // idle 은 0(비활성)이 유효값이므로 min 을 0 으로 둔다.
+  const rawIdle = policy?.clone_idle_timeout_seconds;
+  const idleTimeoutMs = rawIdle === 0
+    ? 0
+    : clampMs(rawIdle, DEFAULT_CLONE_IDLE_TIMEOUT_MS, 1_000);
+  const strategyArgs: string[] = [];
+  const depth = policy?.clone_depth;
+  if (typeof depth === 'number' && Number.isInteger(depth) && depth > 0) {
+    strategyArgs.push(`--depth=${depth}`);
+  }
+  const filter = typeof policy?.clone_filter === 'string' ? policy.clone_filter.trim() : '';
+  if (filter && filter.length <= 64 && CLONE_FILTER_PATTERN.test(filter)) {
+    strategyArgs.push(`--filter=${filter}`);
+  }
+  if (policy?.single_branch === true) strategyArgs.push('--single-branch');
+  return { timeoutMs, idleTimeoutMs, strategyArgs };
+}
+
+/**
+ * flattened SSE event 의 `clone_policy` 필드를 wire 형태로 좁힌다. 객체가 아니면
+ * (필드 없음 / null / 구버전 서버 / 손상된 payload) null — 호출자는 그대로
+ * `resolveCloneOptions` 에 넘기고 시스템 기본값을 받는다. 개별 키의 값 검증은
+ * `resolveCloneOptions` 가 담당하므로 여기서는 형태만 본다. 절대 throw 하지 않는다.
+ */
+export function parseClonePolicy(raw: unknown): CloneWirePolicy | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const policy: CloneWirePolicy = {
+    clone_timeout_seconds: typeof r.clone_timeout_seconds === 'number' ? r.clone_timeout_seconds : undefined,
+    clone_idle_timeout_seconds: typeof r.clone_idle_timeout_seconds === 'number' ? r.clone_idle_timeout_seconds : undefined,
+    clone_depth: typeof r.clone_depth === 'number' ? r.clone_depth : undefined,
+    clone_filter: typeof r.clone_filter === 'string' ? r.clone_filter : undefined,
+    single_branch: typeof r.single_branch === 'boolean' ? r.single_branch : undefined,
+  };
+  return Object.values(policy).some((v) => v !== undefined) ? policy : null;
+}
 
 /** repository Resource 의 https 인증 자격. worktree 의 `bootstrapRepo.credential`
  *  과 run-provisioner 의 `RunRepoSpec.credential` 이 공유하는 wire 형태 — 서버가
@@ -39,13 +128,21 @@ interface GitRun {
   stderr: string;
 }
 
-/** 토큰을 argv나 origin URL에 넣지 않고 clone하고, 성공한 repo에 영구 helper를 설치한다. */
+/**
+ * 토큰을 argv나 origin URL에 넣지 않고 clone하고, 성공한 repo에 영구 helper를 설치한다.
+ *
+ * clone 예산/전략은 `policy`(서버가 Repo Resource ⊕ Workspace 로 해석해 실어보낸
+ * 값)에서 나오며, 없으면 시스템 기본값(60분 wall-clock / 10분 idle / 전체 clone)이
+ * 적용된다. `timeoutMs` 를 명시하면 정책의 wall-clock 예산을 덮어쓴다(호출자 전용
+ * escape hatch).
+ */
 export async function cloneWithRepoCredential(args: {
   url: string;
   dir: string;
   branch?: string;
   credential?: RepoCredential | null;
   timeoutMs?: number;
+  policy?: CloneWirePolicy | null;
 }): Promise<GitRun> {
   const cleanUrl = args.url.trim();
   const credential = args.credential;
@@ -61,25 +158,138 @@ export async function cloneWithRepoCredential(args: {
     configArgs.push('-c', `credential.helper=store --file=${JSON.stringify(temporaryCredentialFile)}`);
   }
   try {
+    const opts = resolveCloneOptions(args.policy);
+    const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0
+      ? args.timeoutMs
+      : opts.timeoutMs;
     const branchArgs = args.branch?.trim() ? ['--branch', args.branch.trim()] : [];
-    const result = await new Promise<GitRun>((resolve) => {
-      execFile(
-        'git',
-        [...configArgs, 'clone', ...branchArgs, '--', cleanUrl, args.dir],
-        { timeout: args.timeoutMs ?? 20 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
-        (err, stdout, stderr) => resolve({
-          ok: !err,
-          stdout: (stdout ?? '').toString(),
-          stderr: (stderr ?? (err as any)?.message ?? '').toString(),
-        }),
-      );
-    });
+    // `--progress` 는 idle 판정이 켜져 있을 때만 붙인다. git 은 stderr 가 TTY 가
+    // 아니면 진행 출력을 아예 내지 않으므로, 이 플래그가 없으면 "정상적으로 오래
+    // 걸리는 clone" 과 "완전히 멈춘 clone" 이 구분되지 않아 모든 대형 clone 이
+    // idle 로 오판된다. idle 이 꺼져 있으면 stderr 를 깨끗하게 유지한다.
+    const progressArgs = opts.idleTimeoutMs > 0 ? ['--progress'] : [];
+    const result = await runCloneProcess(
+      [...configArgs, 'clone', ...progressArgs, ...opts.strategyArgs, ...branchArgs, '--', cleanUrl, args.dir],
+      timeoutMs,
+      opts.idleTimeoutMs,
+    );
     if (result.ok) await installRepoCredential(args.dir, cleanUrl, credential);
     return result;
   } finally {
     if (temporaryCredentialFile) await fsp.unlink(temporaryCredentialFile).catch(() => {});
   }
 }
+
+/** stderr/stdout 누적 상한. 진행 출력이 길어질 수 있으므로 tail 만 남긴다 —
+ *  git 의 치명적 오류 메시지는 언제나 마지막에 쓰이므로 진단은 보존된다. */
+const CLONE_OUTPUT_TAIL_LIMIT = 64 * 1024;
+
+function appendBounded(buffer: string, chunk: string): string {
+  const next = buffer + chunk;
+  return next.length > CLONE_OUTPUT_TAIL_LIMIT ? next.slice(next.length - CLONE_OUTPUT_TAIL_LIMIT) : next;
+}
+
+/**
+ * `git clone` 을 **자체 프로세스 그룹**으로 띄우고 wall-clock + idle 두 예산으로
+ * 감시한다. execFile 의 `timeout` 옵션을 쓰지 않는 이유는 두 가지다:
+ *
+ *   1. execFile 은 **직계 자식에게만** 시그널을 보낸다. `git clone` 은
+ *      `git-remote-https` / `index-pack` 같은 하위 프로세스를 띄우므로, 상위만
+ *      죽이면 실제로 네트워크/CPU 를 쓰는 자식들이 그대로 살아남아 다음 dispatch
+ *      의 clone 대상 디렉터리를 계속 건드린다. `detached: true` 로 그룹 리더를
+ *      만들고 그룹 전체에 시그널을 보내야 잔존 프로세스가 남지 않는다.
+ *   2. execFile 에는 idle(무출력) 판정이 없다. 진행 중인 clone 은 아무리 오래
+ *      걸려도 끊지 않고, 완전히 멈춘 연결만 조기 회수하려면 데이터 수신 시각을
+ *      직접 추적해야 한다.
+ *
+ * 종료 시퀀스는 SIGTERM(그룹) → grace → SIGKILL(그룹) 이다. 첫 신호를 SIGTERM 으로
+ * 두는 것은 의도적이다 — `git clone` 은 SIGTERM 핸들러에서 반쯤 만들어진 대상
+ * 디렉터리를 스스로 지우므로, 다음 시도가 "destination path already exists" 로
+ * 깨지지 않는다.
+ */
+function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: number): Promise<GitRun> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let abortReason: string | null = null;
+    let wallTimer: NodeJS.Timeout | null = null;
+    let idleTimer: NodeJS.Timeout | null = null;
+
+    const child = spawn('git', gitArgs, {
+      // POSIX: 자체 프로세스 그룹 리더로 만들어 `kill(-pid)` 로 하위까지 한 번에
+      // 정리한다. win32 는 그룹 개념이 없어 taskkill /T 로 트리를 정리한다
+      // (terminateDetachedProcessTree 가 플랫폼 분기를 담당).
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const clearTimers = () => {
+      if (wallTimer) clearTimeout(wallTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      wallTimer = null;
+      idleTimer = null;
+    };
+
+    const abort = (reason: string) => {
+      if (abortReason || settled) return;
+      abortReason = reason;
+      clearTimers();
+      const pid = child.pid;
+      if (typeof pid === 'number' && pid > 0) {
+        // fire-and-forget: 'close' 이벤트가 최종 resolve 를 담당하고, 이 함수는
+        // 그룹 전체(SIGTERM → grace → SIGKILL)를 정리한다.
+        void terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS).catch(() => {});
+      }
+    };
+
+    const bumpIdle = () => {
+      if (idleTimeoutMs <= 0) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => abort(`no clone progress output for ${Math.round(idleTimeoutMs / 1000)}s (clone_idle_timeout_seconds)`),
+        idleTimeoutMs,
+      );
+    };
+
+    wallTimer = setTimeout(
+      () => abort(`clone exceeded ${Math.round(timeoutMs / 1000)}s (clone_timeout_seconds)`),
+      timeoutMs,
+    );
+    bumpIdle();
+
+    child.stdout?.on('data', (d) => { stdout = appendBounded(stdout, d.toString()); bumpIdle(); });
+    child.stderr?.on('data', (d) => { stderr = appendBounded(stderr, d.toString()); bumpIdle(); });
+
+    const finish = (ok: boolean, extraStderr?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolve({
+        ok,
+        stdout,
+        stderr: extraStderr ? `${stderr}${stderr && !stderr.endsWith('\n') ? '\n' : ''}${extraStderr}` : stderr,
+      });
+    };
+
+    child.on('error', (err: any) => {
+      clearTimers();
+      finish(false, String(err?.message ?? err));
+    });
+    child.on('close', (code) => {
+      if (abortReason) {
+        finish(false, `git clone aborted: ${abortReason} — clone process group terminated`);
+        return;
+      }
+      finish(code === 0);
+    });
+  });
+}
+
+/** abort 시 SIGTERM 후 SIGKILL 까지 주는 유예. git clone 이 junk 디렉터리를
+ *  스스로 지울 시간을 확보하되, 실패 경로가 지나치게 늘어지지 않는 값. */
+const CLONE_KILL_GRACE_MS = 2_000;
 
 /** 모듈 내부 전용 `git -C <cwd> <args...>` 러너. never-throw — 실패는 { ok:false }.
  *  두 소비자(worktree-manager / run-provisioner)의 git 래퍼에 의존하지 않도록 자체

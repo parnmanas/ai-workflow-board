@@ -64,6 +64,8 @@ import {
 } from './dispatch-preflight.js';
 import {
   cloneWithRepoCredential,
+  resolveCloneOptions,
+  type CloneWirePolicy,
   installRepoCredential,
   scrubOriginUrl,
   maskCredential,
@@ -331,6 +333,10 @@ export interface ResolveCwdArgs {
     url: string;
     branch?: string;
     credential?: { username?: string; token: string } | null;
+    /** 서버가 Repo Resource ⊕ Workspace 기본값으로 해석해 agent_trigger 에 실어보낸
+     *  clone 정책(ticket bddb63ee). 없으면 repo-credential 의 시스템 기본값
+     *  (60분 wall-clock / 10분 idle / 전체 clone)이 적용된다. */
+    clonePolicy?: CloneWirePolicy | null;
   } | null;
 }
 
@@ -475,6 +481,7 @@ export class WorktreeManager {
         dir: cloneDir,
         branch,
         credential: repo.credential,
+        policy: repo.clonePolicy,
       });
       if (!cloned.ok) {
         log(`[worktree] container base clone failed: ${maskCredential(cloned.stderr, repo.credential).trim()}`);
@@ -591,7 +598,11 @@ export class WorktreeManager {
 
     // 모든 신규/재개 dispatch는 먼저 원격을 갱신한다. 재개 worktree 자체에는
     // checkout/reset을 하지 않으므로 dirty 파일과 기존 브랜치는 그대로 보존된다.
-    const fetched = await git(localBaseRepo, ['fetch', '--prune', 'origin']);
+    // 대형 저장소에서는 이 fetch 도 기본 20초 안에 못 끝난다 — clone 과 동일한
+    // "고정 wall-clock 이 대형 repo 를 죽인다" 실패 모드라서 같은 예산을 적용한다
+    // (ticket bddb63ee). 정책이 없으면 시스템 기본값 60분.
+    const fetchTimeoutMs = resolveCloneOptions(args.bootstrapRepo?.clonePolicy).timeoutMs;
+    const fetched = await git(localBaseRepo, ['fetch', '--prune', 'origin'], fetchTimeoutMs);
     if (!fetched.ok) {
       const detail = maskCredential(fetched.stderr, args.bootstrapRepo?.credential).trim();
       const reason = isGitAuthFailure(detail) ? 'repository_auth_failed' : 'repository_fetch_failed';
