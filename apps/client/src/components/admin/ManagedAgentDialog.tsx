@@ -6,6 +6,12 @@ import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
+import {
+  reconcileRuntimeProfileSelection,
+  runtimeProfileForAgentUpdate,
+  runtimeProfileForManagedAgentCreate,
+  type RuntimeProfileLoadState,
+} from '../../utils/claudeRuntimeProfile';
 import RuntimeConfigFields, {
   buildRuntimeConfig,
   EMPTY_RUNTIME_SELECTION,
@@ -86,6 +92,7 @@ export default function ManagedAgentDialog({
   const [model, setModel] = useState<string>('');
   const [runtimeProfile, setRuntimeProfile] = useState<string>('');
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
+  const [runtimeProfilesState, setRuntimeProfilesState] = useState<RuntimeProfileLoadState>('idle');
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
   // 이 manager의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
@@ -129,24 +136,30 @@ export default function ManagedAgentDialog({
     const wsId = (mode === 'edit' && agent?.workspace_id)
       ? agent.workspace_id
       : (getActiveWorkspaceId() || '');
-    if (!wsId) { setCredentials([]); return; }
+    setRuntimeProfilesState('loading');
+    if (!wsId) {
+      setCredentials([]);
+      setRuntimeProfiles([]);
+      setRuntimeProfile('');
+      setRuntimeProfilesState('error');
+      return;
+    }
     let alive = true;
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
     api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
       if (!alive) return;
-      const availableProfiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
-      setRuntimeProfiles(availableProfiles);
-      // 에이전트 스냅샷/열려 있던 다이얼로그에 삭제되었거나 이전 workspace의
-      // 프로필 ID가 남아 있으면 서버의 workspace 검증에서 저장 전체가 실패한다.
-      // 현재 workspace가 반환한 권위 목록과 즉시 재동기화해 상속 상태로 되돌린다.
-      setRuntimeProfile(current => (
-        !current || current === 'none' || availableProfiles.some(profile => profile.id === current)
-          ? current
-          : ''
-      ));
-    }).catch(() => { if (alive) setRuntimeProfiles([]); });
+      const profiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
+      setRuntimeProfiles(profiles);
+      setRuntimeProfile((selected) => reconcileRuntimeProfileSelection(selected, profiles));
+      setRuntimeProfilesState('ready');
+    }).catch(() => {
+      if (!alive) return;
+      setRuntimeProfiles([]);
+      setRuntimeProfile('');
+      setRuntimeProfilesState('error');
+    });
     return () => { alive = false; };
   }, [isOpen, mode, agent?.workspace_id]);
 
@@ -241,7 +254,9 @@ export default function ManagedAgentDialog({
           credential_id: supportsCredential && credentialId ? credentialId : null,
           // null clears (CLI default); custom CLIs have no model concept.
           model: cli !== 'hermes' && model.trim() ? model.trim() : null,
-          cli_runtime_profile: cli === 'claude' ? (runtimeProfile || null) : 'none',
+          cli_runtime_profile: runtimeProfileForAgentUpdate(
+            cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
+          ),
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -299,7 +314,9 @@ export default function ManagedAgentDialog({
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
           model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
-          cli_runtime_profile: cli === 'claude' && runtimeProfile ? runtimeProfile : undefined,
+          cli_runtime_profile: runtimeProfileForManagedAgentCreate(
+            cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
+          ),
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -344,7 +361,7 @@ export default function ManagedAgentDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={submit} disabled={busy}>
+          <Button variant="primary" onClick={submit} disabled={busy || runtimeProfilesState === 'loading'}>
             {isEdit ? 'Save' : 'Create'}
           </Button>
         </>

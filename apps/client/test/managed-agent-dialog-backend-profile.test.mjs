@@ -1,29 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import {
+  reconcileRuntimeProfileSelection,
+  runtimeProfileForAgentUpdate,
+} from '../src/utils/claudeRuntimeProfile.ts';
 
-const source = await readFile(
-  new URL('../src/components/admin/ManagedAgentDialog.tsx', import.meta.url),
-  'utf8',
-);
+const profiles = [{ id: 'profile-valid', name: '유효 프로필' }];
 
-test('Agent 설정은 현재 Agent workspace의 허용 프로필만 노출한다', () => {
-  assert.match(source, /const wsId = \(mode === 'edit' && agent\?\.workspace_id\)/);
-  assert.match(source, /api\.getWorkspaceClaudeBackendProfiles\(wsId\)/);
-  assert.match(source, /data\.allowed_profile_ids\.includes\(profile\.id\)/);
-  assert.match(source, /\.\.\.runtimeProfiles\.map\(profile => \(\{ value: profile\.id, label: profile\.name \}\)\)/);
+test('프로필 조회 중에는 stale 선택값 대신 null을 수정 payload에 넣는다', () => {
+  const payload = { cli_runtime_profile: runtimeProfileForAgentUpdate('claude', 'profile-stale', profiles, 'loading') };
+  assert.equal(payload.cli_runtime_profile, null);
 });
 
-test('삭제·재생성·workspace 변경으로 stale이 된 선택값은 상속 상태로 해제한다', () => {
-  assert.match(
-    source,
-    /setRuntimeProfile\(current => \([\s\S]*?!current \|\| current === 'none' \|\| availableProfiles\.some\(profile => profile\.id === current\)[\s\S]*?: ''[\s\S]*?\)\);/,
-  );
+test('프로필 조회 성공 시 stale 선택을 해제하고 수정 payload로 전송하지 않는다', () => {
+  const selection = reconcileRuntimeProfileSelection('profile-stale', profiles);
+  const payload = { cli_runtime_profile: runtimeProfileForAgentUpdate('claude', selection, profiles, 'ready') };
+  assert.equal(selection, '');
+  assert.equal(payload.cli_runtime_profile, null);
 });
 
-test('현재 workspace의 유효한 Claude 프로필은 저장 payload에 유지한다', () => {
-  assert.match(
-    source,
-    /cli_runtime_profile: cli === 'claude' \? \(runtimeProfile \|\| null\) : 'none'/,
-  );
+test('권위 목록의 유효한 선택값은 수정 payload에 유지한다', () => {
+  const selection = reconcileRuntimeProfileSelection('profile-valid', profiles);
+  const payload = { cli_runtime_profile: runtimeProfileForAgentUpdate('claude', selection, profiles, 'ready') };
+  assert.equal(payload.cli_runtime_profile, 'profile-valid');
 });

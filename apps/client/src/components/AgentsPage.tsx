@@ -9,6 +9,11 @@ import DirectoryPicker from './admin/DirectoryPicker';
 import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
+import {
+  reconcileRuntimeProfileSelection,
+  runtimeProfileForManagedAgentCreate,
+  type RuntimeProfileLoadState,
+} from '../utils/claudeRuntimeProfile';
 import { Button, Input, Select, Modal } from './common';
 import RuntimeConfigFields, {
   buildRuntimeConfig,
@@ -148,6 +153,7 @@ export default function AgentsPage() {
   const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
+  const [runtimeProfilesState, setRuntimeProfilesState] = useState<RuntimeProfileLoadState>('idle');
   const [creatingManaged, setCreatingManaged] = useState(false);
   // ST-7 directory picker — opens a modal that browses the picked manager's
   // host filesystem via the existing /api/agents/:id/fs/* reverse-RPC, so
@@ -226,6 +232,7 @@ export default function AgentsPage() {
   useEffect(() => {
     if (!showManagedModal) return;
     let alive = true;
+    setRuntimeProfilesState('loading');
     api.listAgentManagers()
       .then((rows) => { if (alive) setManagers(rows); })
       .catch(() => { if (alive) setManagers([]); });
@@ -239,22 +246,25 @@ export default function AgentsPage() {
       api.getWorkspaceClaudeBackendProfiles(wsId)
         .then((data) => {
           if (!alive) return;
-          const availableProfiles = data.profiles.filter(p => data.allowed_profile_ids.includes(p.id));
-          setRuntimeProfiles(availableProfiles);
-          // workspace 전환 뒤 생성 폼 상태가 유지돼도 이전 workspace의 profile
-          // ID를 전송하지 않도록 현재 workspace의 권위 목록과 선택값을 맞춘다.
-          setManagedForm(form => (
-            !form.runtime_profile
-              || form.runtime_profile === 'none'
-              || availableProfiles.some(profile => profile.id === form.runtime_profile)
-              ? form
-              : { ...form, runtime_profile: '' }
-          ));
+          const profiles = data.profiles.filter(p => data.allowed_profile_ids.includes(p.id));
+          setRuntimeProfiles(profiles);
+          setManagedForm(form => ({
+            ...form,
+            runtime_profile: reconcileRuntimeProfileSelection(form.runtime_profile, profiles),
+          }));
+          setRuntimeProfilesState('ready');
         })
-        .catch(() => { if (alive) setRuntimeProfiles([]); });
+        .catch(() => {
+          if (!alive) return;
+          setRuntimeProfiles([]);
+          setManagedForm(form => ({ ...form, runtime_profile: '' }));
+          setRuntimeProfilesState('error');
+        });
     } else {
       setCredentials([]);
       setRuntimeProfiles([]);
+      setManagedForm(form => ({ ...form, runtime_profile: '' }));
+      setRuntimeProfilesState('error');
     }
     return () => { alive = false; };
   }, [showManagedModal, wsId]);
@@ -343,9 +353,12 @@ export default function AgentsPage() {
       // ManagedAgentDialog's create-mode resolution (sentinel 'none' opts
       // out of board/workspace inheritance; '' / other CLIs omit the field
       // so the server falls back to inherit).
-      const cli_runtime_profile = managedForm.runtime.runtime === 'claude' && managedForm.runtime_profile
-        ? managedForm.runtime_profile
-        : undefined;
+      const cli_runtime_profile = runtimeProfileForManagedAgentCreate(
+        managedForm.runtime.runtime,
+        managedForm.runtime_profile,
+        runtimeProfiles,
+        runtimeProfilesState,
+      );
       const body: ManagedAgentCreateBody = {
         name: managedForm.name.trim(),
         cli: managedForm.runtime.runtime,
@@ -388,6 +401,8 @@ export default function AgentsPage() {
     loadSnapshot,
     showToast,
     resetManagedForm,
+    runtimeProfiles,
+    runtimeProfilesState,
   ]);
 
   // ─── Render ───────────────────────────────────────────────────
@@ -441,6 +456,7 @@ export default function AgentsPage() {
                 !managedForm.manager_agent_id ||
                 !buildRuntimeConfig(managedForm.runtime) ||
                 (managedWorkingDirRequired && !managedForm.working_dir.trim()) ||
+                runtimeProfilesState === 'loading' ||
                 creatingManaged
               }
             >
