@@ -25,6 +25,10 @@
 //      디스패치하지 않는다(crash/restart 복구).
 //   4. 실행 trace에 각 edge의 선택/기각 이유와 반복 이력이 남는다.
 //   5. graph 모드가 꺼진 미션은 graph 입력을 조용히 무시하지 않고 거부한다.
+//   6. (리뷰 반영) fan-out 경계에서 global budget이 초과되지 않는다 — 남은 예산보다
+//      ready node가 많아도 예산만큼만 나간다.
+//   7. (리뷰 반영) graph 미션에서 `visit`을 뺀 지각 보고도 409로 거부되고, 현재
+//      iteration 상태가 그대로 보존된다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -150,6 +154,9 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
   await runner.startMission(mission.id, ws.id, HUMAN);
 
   return {
+    app,
+    // createWorkspace/createAgent 등 fixture 헬퍼가 요구하는 DataSource 토큰 게터.
+    getDataSourceToken,
     ds,
     ws,
     lead,
@@ -233,19 +240,19 @@ test('그래프 실행: 선형 → 병렬 → fan-in → 조건 분기 → bound
 
   // ── 3. 병렬: fan-out ────────────────────────────────────────────────────
   step('spec이 끝나면 api와 ui가 동시에 나간다');
-  const afterSpec = await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec written' });
+  const afterSpec = await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec written', visit: 1 });
   assert.deepEqual(afterSpec.next_steps_dispatched.sort(), ['api', 'ui'], 'fan-out이 병렬로 나간다');
 
   // ── 4. fan-in: join=all ─────────────────────────────────────────────────
   step('integrate는 api와 ui가 둘 다 끝나야 시작한다');
   ({ byKey } = await readSteps(missions, mission.id, ws.id));
-  const afterApi = await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api done' });
+  const afterApi = await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api done', visit: 1 });
   assert.deepEqual(afterApi.next_steps_dispatched, [], 'join=all — 한쪽만 끝나면 아직 대기');
-  const afterUi = await report(workerMcp, byKey.ui.id, { status: 'done', summary: 'ui done' });
+  const afterUi = await report(workerMcp, byKey.ui.id, { status: 'done', summary: 'ui done', visit: 1 });
   assert.deepEqual(afterUi.next_steps_dispatched, ['integrate'], '둘 다 끝나자 fan-in이 시작된다');
 
   ({ byKey } = await readSteps(missions, mission.id, ws.id));
-  const afterIntegrate = await report(workerMcp, byKey.integrate.id, { status: 'done', summary: 'wired' });
+  const afterIntegrate = await report(workerMcp, byKey.integrate.id, { status: 'done', summary: 'wired', visit: 1 });
   assert.deepEqual(afterIntegrate.next_steps_dispatched, ['review'], 'evaluator로 넘어간다');
 
   // ── 5. bounded loop 재진입 ──────────────────────────────────────────────
@@ -374,7 +381,7 @@ test('crash/restart: 저장된 상태에서 엔진을 다시 진입시켜도 in-
 
   await leadMcp.callTool('submit_orchestration_plan', { mission_id: mission.id, ...planFor(worker, critic) });
   let { byKey } = await readSteps(missions, mission.id, ws.id);
-  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec written' });
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec written', visit: 1 });
 
   ({ byKey } = await readSteps(missions, mission.id, ws.id));
   assert.equal(byKey.api.status, 'dispatched', 'api가 in-flight');
@@ -492,6 +499,226 @@ test('graph 모드가 꺼진 미션은 graph 입력을 조용히 무시하지 �
   const reported = await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api done' });
   assert.equal(reported.status, 'done');
   assert.deepEqual(reported.loop_reentered, [], 'loop 개념 자체가 없다');
+});
+
+/**
+ * 예산 경계 전용 그래프 — loop가 **fan-out 지점으로** 되돌아간다.
+ *
+ *     spec → gate ─┬→ a ─┐
+ *                  ├→ b ─┼→ review ─┬─(approve)→ ship
+ *                  └→ c ─┘          └─(revise, loop)→ gate
+ *
+ * 이 모양이어야 "남은 예산 1 + ready node 3개"를 실제로 만들 수 있다. loop 없이는
+ * 불가능하다 — `validateGraphSpec`이 `max_total_visits >= node 수`를 강제하므로,
+ * 재진입으로 예산을 더 태우지 않는 한 모든 node는 항상 한 번씩 돌 여유가 있다.
+ */
+const fanoutLoopPlan = (worker, critic) => ({
+  summary: 'fan-out inside a bounded loop, to exercise the global budget boundary.',
+  steps: [
+    { step_key: 'spec', title: 'Spec', instructions: 'x', assignee_agent_id: worker.id },
+    { step_key: 'gate', title: 'Gate', instructions: 'x', assignee_agent_id: worker.id },
+    { step_key: 'a', title: 'A', instructions: 'x', assignee_agent_id: worker.id },
+    { step_key: 'b', title: 'B', instructions: 'x', assignee_agent_id: worker.id },
+    { step_key: 'c', title: 'C', instructions: 'x', assignee_agent_id: worker.id },
+    { step_key: 'review', title: 'Review', instructions: 'x', assignee_agent_id: critic.id },
+    { step_key: 'ship', title: 'Ship', instructions: 'x', assignee_agent_id: worker.id },
+  ],
+  graph: {
+    nodes: [
+      { key: 'gate', max_visits: 3 },
+      { key: 'review', kind: 'evaluator', max_visits: 3 },
+    ],
+    edges: [
+      { from: 'spec', to: 'gate' },
+      { from: 'gate', to: 'a' },
+      { from: 'gate', to: 'b' },
+      { from: 'gate', to: 'c' },
+      { from: 'a', to: 'review' },
+      { from: 'b', to: 'review' },
+      { from: 'c', to: 'review' },
+      { from: 'review', to: 'ship', kind: 'conditional', when: { verdict: ['approve'] } },
+      { from: 'review', to: 'gate', kind: 'loop_back', when: { verdict: ['revise'] } },
+    ],
+    // node 7개 + 재진입 1회분(gate 1) = 8. 재진입 뒤 a/b/c 3개가 ready가 될 때
+    // 남는 예산이 정확히 1이 되도록 맞춘 값이다.
+    max_total_visits: 8,
+  },
+});
+
+test('fan-out 경계: 남은 예산보다 ready node가 많아도 global budget을 넘겨 디스패치하지 않는다', async (t) => {
+  const s = await stage(t, { label: 'budget' });
+  const { ds, ws, missions, mission, worker, critic, leadMcp, workerMcp, criticMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...fanoutLoopPlan(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+  assert.equal(submitted.graph.max_total_visits, 8);
+
+  const budgetNow = async () => (await missions.getMissionDetail(mission.id, ws.id)).total_visits;
+
+  step('첫 pass를 끝까지 돌려 예산을 6까지 태운다');
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.gate.id, { status: 'done', summary: 'gate', visit: 1 });
+
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.deepEqual(
+    ['a', 'b', 'c'].map((k) => byKey[k].status),
+    ['dispatched', 'dispatched', 'dispatched'],
+    '예산이 넉넉한 첫 pass에서는 fan-out 3개가 모두 나간다',
+  );
+  assert.equal(await budgetNow(), 5, 'spec + gate + a,b,c = 5');
+
+  for (const key of ['a', 'b', 'c']) {
+    ({ byKey } = await readSteps(missions, mission.id, ws.id));
+    await report(workerMcp, byKey[key].id, { status: 'done', summary: key, visit: 1 });
+  }
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.equal(byKey.review.status, 'dispatched');
+  assert.equal(await budgetNow(), 6);
+
+  step('revise로 재진입시켜 남은 예산을 정확히 1로 만든다');
+  const revised = await report(criticMcp, byKey.review.id, {
+    status: 'done',
+    summary: 'redo the fan-out',
+    verdict: 'revise',
+    visit: 1,
+  });
+  assert.deepEqual(revised.next_steps_dispatched, ['gate'], '재진입 시작점만 나간다');
+  assert.equal(await budgetNow(), 7, '남은 예산 = 8 - 7 = 1');
+
+  step('ready node 3개 중 예산이 허용하는 1개만 디스패치된다');
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const afterGate = await report(workerMcp, byKey.gate.id, { status: 'done', summary: 'gate again', visit: 2 });
+  assert.equal(
+    afterGate.next_steps_dispatched.length,
+    1,
+    `남은 예산 1인데 ${afterGate.next_steps_dispatched.length}개가 나갔다 — ` +
+      'pump가 slots만 보고 예산을 무시하면 3개가 전부 나간다(회귀 지점)',
+  );
+
+  const detail = await missions.getMissionDetail(mission.id, ws.id);
+  assert.equal(detail.total_visits, 8, '예산을 정확히 소진했다');
+  assert.ok(
+    detail.total_visits <= detail.graph_spec.max_total_visits,
+    `hard budget 초과: ${detail.total_visits} > ${detail.graph_spec.max_total_visits}`,
+  );
+
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const fanoutStatuses = ['a', 'b', 'c'].map((k) => byKey[k].status).sort();
+  assert.deepEqual(
+    fanoutStatuses,
+    ['dispatched', 'pending', 'pending'],
+    '보류된 2개는 failed가 아니라 pending으로 남는다 — 상한을 올리면 그대로 재개돼야 한다',
+  );
+
+  step('예산 소진이 trace에 남고 보류 목록이 정확하다');
+  const events = await eventsOf(missions, mission.id, ws.id);
+  const exhausted = events.filter((e) => e.type === 'graph_budget_exhausted');
+  assert.equal(exhausted.length, 1, '예산 소진이 정확히 한 번 기록됐다');
+  assert.equal(exhausted[0].data.total_visits, 8);
+  assert.equal(exhausted[0].data.max_total_visits, 8);
+  assert.equal(exhausted[0].data.withheld.length, 2, '보류된 node 2개가 기록된다');
+  assert.equal(exhausted[0].data.dispatched_before_exhaustion.length, 1, '같은 pump에서 나간 1개도 기록된다');
+
+  step('실제로 띄운 subagent 수(room)와 예산 소진량이 일치한다');
+  const rooms = await ds.getRepository('ChatRoom').count({ where: { orchestration_mission_id: mission.id } });
+  assert.equal(detail.total_visits, rooms - 1, '미션 브리핑 room 1개를 뺀 나머지가 디스패치 수');
+});
+
+test('디스패치 실패 시 예산: work order 전송 전에 실패하면 예산을 쓰지 않는다', async (t) => {
+  const s = await stage(t, { label: 'dispatchfail' });
+  const { app, getDataSourceToken, ds, ws, missions, mission, worker, critic, leadMcp } = s;
+
+  // critic을 다른 workspace로 옮겨 dispatchStep의 workspace 재검증에서 던지게 만든다.
+  // 이 검사는 room 생성과 예산 커밋보다 **앞**이므로, 이 실패는 subagent를 띄운 적이
+  // 없고 따라서 예산도 쓰지 않아야 한다(정책: 예산은 "떴을 수 있는가" 기준).
+  const other = await createWorkspace(app, getDataSourceToken, 'orch-elsewhere');
+  await ds.getRepository('Agent').update({ id: critic.id }, { workspace_id: other.id });
+
+  step('entry 2개 중 하나는 정상 디스패치, 하나는 전송 전 실패');
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    summary: 'two independent entry nodes',
+    steps: [
+      { step_key: 'alpha', title: 'Alpha', instructions: 'x', assignee_agent_id: worker.id },
+      { step_key: 'beta', title: 'Beta', instructions: 'x', assignee_agent_id: critic.id },
+    ],
+    // graph를 안 보내면 wave adapter가 승격한다 — 예산 회계는 그대로 활성화된다.
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+  assert.deepEqual(submitted.dispatched_now, ['alpha'], '정상 assignee만 나간다');
+  assert.equal(submitted.graph.max_total_visits, 2, 'adapter 기본 예산 = node 수');
+
+  const { detail, byKey } = await readSteps(missions, mission.id, ws.id);
+  assert.equal(byKey.beta.status, 'failed', '전송 불가는 step 실패로 기록된다');
+  assert.match(byKey.beta.result_summary, /dispatch failed/);
+  assert.equal(
+    detail.total_visits,
+    1,
+    '전송 직전 커밋 지점 **앞에서** 던진 실패는 예산을 소진하지 않는다 — ' +
+      '성공한 alpha 1건만 계상된다',
+  );
+  assert.equal(
+    await ds.getRepository('ChatRoom').count({ where: { orchestration_step_id: byKey.beta.id } }),
+    0,
+    '실패한 step에는 room 자체가 만들어지지 않았다 — 예산을 쓰지 않은 근거',
+  );
+});
+
+test('graph 미션에서 visit을 뺀 지각 보고도 409로 거부되고 현재 iteration이 보존된다', async (t) => {
+  const s = await stage(t, { label: 'novisit' });
+  const { ws, missions, mission, worker, critic, leadMcp, workerMcp, criticMcp } = s;
+
+  await leadMcp.callTool('submit_orchestration_plan', { mission_id: mission.id, ...planFor(worker, critic) });
+
+  step('첫 pass를 evaluator까지 진행한다');
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.ui.id, { status: 'done', summary: 'ui', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.integrate.id, { status: 'done', summary: 'wired', visit: 1 });
+
+  step('revise로 재진입시켜 integrate를 pass 2로 만든다');
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(criticMcp, byKey.review.id, { status: 'done', summary: 'redo', verdict: 'revise', visit: 1 });
+
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const integrateId = byKey.integrate.id;
+  assert.equal(byKey.integrate.visit, 2, 'integrate는 pass 2로 재디스패치됐다');
+  assert.equal(byKey.integrate.status, 'dispatched');
+
+  step('pass 1 작업자가 visit을 빼고 늦게 보고하면 거부된다');
+  const stale = await report(
+    workerMcp,
+    integrateId,
+    { status: 'done', summary: 'late result from the superseded pass 1' },
+    { expectError: true },
+  );
+  assert.equal(stale.error?.status, 409, 'visit 누락은 409로 거부된다');
+  assert.match(
+    String(stale.error?.error ?? ''),
+    /must carry the "visit" number/,
+    'visit을 생략하는 것만으로 가드를 우회할 수 없어야 한다',
+  );
+
+  step('거부된 보고가 pass 2의 상태를 전혀 건드리지 않았다');
+  const after = await readSteps(missions, mission.id, ws.id);
+  assert.equal(after.byKey.integrate.status, 'dispatched', '여전히 pass 2 진행 중');
+  assert.equal(after.byKey.integrate.visit, 2);
+  assert.equal(after.byKey.integrate.result_summary, '', 'stale 요약이 들어오지 않았다');
+  assert.equal(after.byKey.integrate.finished_at, null, '완료 처리되지 않았다');
+
+  step('올바른 visit을 실으면 정상 처리된다 — 가드가 정상 경로를 막지는 않는다');
+  const ok = await report(workerMcp, integrateId, { status: 'done', summary: 'pass 2 result', visit: 2 });
+  assert.equal(ok.status, 'done');
+  assert.deepEqual(ok.next_steps_dispatched, ['review'], 'pass 2의 evaluator로 정상 진행');
 });
 
 exitAfterTests();

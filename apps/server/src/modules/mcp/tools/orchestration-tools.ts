@@ -528,8 +528,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         .number()
         .optional()
         .describe(
-          'Copy the number from your work order verbatim when it gave you one. It identifies which pass of this ' +
-            'step you are reporting; a stale number is rejected instead of overwriting a newer pass.',
+          'REQUIRED whenever your work order stated one (every step of a graph mission does). Copy that number ' +
+            'verbatim. It identifies which pass of this step you are reporting — omitting it, or sending a stale ' +
+            'number, is refused rather than allowed to overwrite a newer pass. Only plain dependency missions, ' +
+            'whose work orders carry no visit number, may leave it out.',
         ),
     },
     async ({ step_id, status, summary, artifacts, verdict, visit }, extra) => {

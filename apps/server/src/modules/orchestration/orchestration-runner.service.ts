@@ -1061,9 +1061,26 @@ export class OrchestrationRunnerService {
       // 중복 실행 통제(티켓 1ca9e49b) — loop 재진입이 만드는 유일한 새 위험:
       // 같은 step_id가 iteration 2로 다시 디스패치된 뒤, iteration 1의 subagent가
       // 뒤늦게 보고하면 status가 terminal이 아니라 위 가드를 그대로 통과해
-      // 새 iteration의 결과를 덮어쓴다. graph 모드의 step prompt는 항상 자기
-      // visit 번호를 싣고 나가므로, 어긋나면 stale로 거부한다. visit을 안 보내는
-      // 기존(비 graph) 호출자는 영향이 없다.
+      // 새 iteration의 결과를 덮어쓴다.
+      //
+      // 그래서 graph 모드 미션에서는 `visit`이 **필수**다(리뷰 지적). optional로
+      // 두면 stale한 iteration 1 작업자가 visit을 그냥 빼고 보고하는 것만으로
+      // 가드를 우회해 iteration 2의 결과를 덮어쓸 수 있다 — 있으나 마나인 방어가
+      // 된다. `dispatchStep`은 graph 모드에서 어떤 node든 항상 자기 visit 번호를
+      // work order에 싣고 나가도록 보장하므로(그쪽 graphNode fallback 참고), 이
+      // 요구가 정상 경로를 막는 일은 없다.
+      //
+      // graph_spec이 없는 기존 wave 미션은 그대로 optional이다 — 재진입 자체가
+      // 없어 구분할 iteration이 없고, 기존 호출자를 깨뜨리지 않는다.
+      if (mission.graph_spec && (input.visit === undefined || input.visit === null)) {
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" belongs to a graph mission, so the report must carry the "visit" number ` +
+            `from your work order (this step is on iteration ${step.visit ?? 0}). Without it the server cannot ` +
+            `tell a current report apart from a superseded one, so the report is refused rather than risk ` +
+            `overwriting a newer pass.`,
+        );
+      }
       if (input.visit !== undefined && input.visit !== null) {
         const claimed = Number(input.visit);
         const current = step.visit ?? 0;
@@ -1276,22 +1293,6 @@ export class OrchestrationRunnerService {
     const progress = this.progressOf(mission, steps);
     if (progress.dispatchable.length === 0) return { dispatched: [], failed: [] };
 
-    // graph 모드의 global budget: 남은 예산이 없으면 아무것도 새로 띄우지 않는다.
-    // 스텝을 failed로 바꾸지는 않는다 — 예산은 "지금 더 못 띄운다"이지 "이 작업이
-    // 실패했다"가 아니고, 운영자가 max_total_visits를 올리면 그대로 재개돼야 한다.
-    // 대신 이벤트를 남겨 decideWake가 정지 상태를 오케스트레이터에게 알리게 한다.
-    if (this.remainingVisitBudget(mission) <= 0) {
-      await this.missions.recordEvent(mission, {
-        type: 'graph_budget_exhausted',
-        message:
-          `Global execution budget exhausted (${mission.total_visits}/${mission.graph_spec?.max_total_visits} ` +
-          `node runs). ${progress.dispatchable.length} node(s) are ready but will not be dispatched.`,
-        actor_type: 'system',
-        data: { total_visits: mission.total_visits, max_total_visits: mission.graph_spec?.max_total_visits ?? null, withheld: progress.dispatchable },
-      });
-      return { dispatched: [], failed: [] };
-    }
-
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
     const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
     const capByAgent = new Map(members.map((m) => [m.agent_id, m.max_concurrent]));
@@ -1316,8 +1317,27 @@ export class OrchestrationRunnerService {
       .filter(Boolean)
       .sort((a, b) => a.position - b.position);
 
-    for (const step of candidates) {
+    // graph 모드의 global budget은 **매 반복마다** 다시 본다.
+    //
+    // 진입 시 한 번만 "남은 예산 >= 1"을 확인하면 fan-out에서 상한을 넘긴다
+    // (리뷰 지적): 남은 예산 1 + ready node 4개 + 슬롯 4개면 네 개를 전부 띄워
+    // total_visits가 상한을 3 초과한다. `slots`는 병렬 상한이지 예산이 아니다.
+    //
+    // 미리 `slots = min(slots, budget)`으로 깎지 않고 루프 안에서 실측을 다시
+    // 읽는 이유: `dispatchStep`이 `mission.total_visits`를 그 자리에서 올리므로
+    // 이 표현식은 항상 실제 소진량을 반영한다 — 특히 **디스패치가 실패한 경우에도
+    // 예산이 이미 소진됐는지 여부가 그대로 반영된다**(work order를 보내기 직전에
+    // 커밋하므로, 커밋 전에 던진 실패는 예산을 쓰지 않고 커밋 후 실패는 쓴다).
+    // 미리 깎아두면 그 두 경우를 구분하지 못한다.
+    let budgetExhausted = false;
+    let index = 0;
+    for (; index < candidates.length; index += 1) {
+      const step = candidates[index];
       if (slots <= 0) break;
+      if (this.remainingVisitBudget(mission) <= 0) {
+        budgetExhausted = true;
+        break;
+      }
       const agentId = step.assignee_agent_id;
       if (!agentId) {
         // An unassigned step cannot be dispatched. Mark it ready so the UI shows
@@ -1367,6 +1387,26 @@ export class OrchestrationRunnerService {
         );
         failed.push(step);
       }
+    }
+
+    if (budgetExhausted) {
+      // 스텝을 failed로 바꾸지는 않는다 — 예산은 "지금 더 못 띄운다"이지 "이 작업이
+      // 실패했다"가 아니고, 운영자가 max_total_visits를 올리면 그대로 재개돼야 한다.
+      // 대신 이벤트를 남겨 decideWake가 정지 상태를 오케스트레이터에게 알리게 한다.
+      const withheld = candidates.slice(index).map((s) => s.step_key);
+      await this.missions.recordEvent(mission, {
+        type: 'graph_budget_exhausted',
+        message:
+          `Global execution budget exhausted (${mission.total_visits}/${mission.graph_spec?.max_total_visits} ` +
+          `node runs). ${withheld.length} node(s) are ready but will not be dispatched.`,
+        actor_type: 'system',
+        data: {
+          total_visits: mission.total_visits,
+          max_total_visits: mission.graph_spec?.max_total_visits ?? null,
+          withheld,
+          dispatched_before_exhaustion: dispatched,
+        },
+      });
     }
 
     return { dispatched, failed };
@@ -1498,7 +1538,15 @@ export class OrchestrationRunnerService {
       checkoutMode: mission.checkout_mode,
     });
 
-    const graphNode = mission.graph_spec?.nodes.find((n) => n.key === step.step_key) ?? null;
+    // graph 모드에서는 **반드시** graphNode를 넘긴다. null이면 프롬프트에서 visit
+    // 안내가 빠지는데, reportStep은 graph 미션의 모든 보고에 visit을 요구하므로
+    // 그 조합은 보고 자체가 불가능한 wedge가 된다. validateGraphSpec이 plan의 모든
+    // step에 node를 채우므로 조회 실패는 이론상 없지만, 두 조건을 같은 술어
+    // (`mission.graph_spec != null`)에 묶어 두는 편이 안전하다.
+    const specNode = mission.graph_spec?.nodes.find((n) => n.key === step.step_key) ?? null;
+    const graphNode = mission.graph_spec
+      ? { kind: specNode?.kind ?? 'task', max_visits: specNode?.max_visits ?? 1 }
+      : null;
     const prompt = renderStepPrompt({
       mission,
       step,

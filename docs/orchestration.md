@@ -143,6 +143,16 @@ node/edge 는 거부된다.
 소진되면 새 디스패치를 멈추고 `graph_budget_exhausted` 를 남긴다(step 을
 `failed` 로 바꾸지는 않는다 — 운영자가 상한을 올리면 그대로 재개돼야 한다).
 
+예산은 `pump()` 의 후보 루프 **안에서 매 반복마다** 다시 확인한다. 진입 시 한 번만
+보면 fan-out 에서 상한을 넘긴다(남은 예산 1 + ready node 4개 + 병렬 슬롯 4개 →
+네 개를 전부 띄움). `slots` 는 병렬 상한이지 예산이 아니다.
+
+**디스패치 실패와 예산**: 예산은 work order 를 room 에 올리기 **직전**에 커밋된다.
+따라서 그 지점 전에 던진 실패(assignee 가 사라졌거나 다른 workspace 로 옮겨진
+경우)는 예산을 쓰지 않고, 그 뒤의 실패는 이미 쓴 것으로 남는다 — "subagent 가
+떴을 수 있는가"를 기준으로 보수적으로 센다. 루프가 예산을 미리 깎지 않고 매
+반복 실측을 다시 읽는 이유가 이 구분을 보존하기 위해서다.
+
 ### verdict 와 중복 실행 통제
 
 evaluator/router node 의 step prompt 에는 그 node 에서 나가는 분기가 기대하는
@@ -151,9 +161,16 @@ verdict 목록이 실린다. 멤버는 `report_orchestration_step(verdict: "..."
 
 loop 는 하나의 새로운 위험을 만든다: 같은 `step_id` 가 pass 2 로 다시 디스패치된
 뒤, pass 1 의 subagent 가 뒤늦게 보고하면 status 가 terminal 이 아니라 기존
-가드를 그냥 통과해 새 pass 의 결과를 덮어쓴다. 그래서 graph 모드의 step prompt 는
-자기 `visit` 번호를 싣고 나가고, 보고에 실린 번호가 현재와 다르면 **stale 로
-거부한다**. `visit` 을 보내지 않는 기존(비 graph) 호출자는 영향이 없다.
+가드를 그냥 통과해 새 pass 의 결과를 덮어쓴다.
+
+그래서 graph 모드 미션에서는 `report_orchestration_step` 의 **`visit` 이 필수**다.
+graph 미션의 step prompt 는 어떤 node 든 항상 자기 `visit` 번호를 싣고 나가고,
+보고에 실린 번호가 현재와 다르면 stale 로, **아예 빠져 있어도** 거부한다(409).
+optional 로 두면 stale 한 pass 1 작업자가 `visit` 을 빼고 보내는 것만으로 가드를
+우회할 수 있어 방어가 성립하지 않는다.
+
+`graph_spec` 이 없는 기존 wave 미션은 그대로 optional 이다 — 재진입 자체가 없어
+구분할 pass 가 없고, 기존 호출자를 깨뜨리지 않는다.
 
 ### wave adapter 와 하위 호환
 
@@ -233,7 +250,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 | 그래프 검증 | `validateGraphSpec()` | 종료 조건·반복 상한·global budget 없는 loop, loop_back 아닌 순환, 도달 불가 node, 분기 없는 router |
 | 반복 상한 | node 별 `max_visits` | evaluator→revision loop 가 영영 도는 것 (상한 도달 시 하류 blocked + 오케스트레이터 깨움) |
 | 실행 예산 | `max_total_visits` vs `total_visits` | 재시도·재진입을 합친 총 subagent 스폰 횟수 폭주 |
-| stale pass 거부 | `report_orchestration_step(visit:)` | 재진입으로 무효가 된 이전 pass 의 지각 보고가 새 pass 결과를 덮어쓰는 것 |
+| stale pass 거부 | `report_orchestration_step(visit:)` — graph 미션에서는 **필수** | 재진입으로 무효가 된 이전 pass 의 지각 보고가 새 pass 결과를 덮어쓰는 것 (누락도 409로 거부 — optional 이면 빼는 것만으로 우회된다) |
 
 ### 권한
 
@@ -303,7 +320,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `get_orchestration_step` | 작업지시 + 의존 step 들의 결과 재조회 |
 | `list_my_orchestration_steps` | 세션 유실 후 미보고 배정 복구 |
 | `report_orchestration_progress` | 하트비트 (타임아웃 시계 리셋, step 을 끝내지 않음) |
-| `report_orchestration_step` | **최종 보고** — 하위 step 을 여는 유일한 신호 · graph 모드에서는 `verdict`(분기 선택)와 `visit`(stale 거부용 pass 번호)를 함께 보낸다 |
+| `report_orchestration_step` | **최종 보고** — 하위 step 을 여는 유일한 신호 · graph 모드에서는 `verdict`(분기 선택)와 `visit`(pass 번호, **필수**)를 함께 보낸다 |
 
 **조회 / 자기-생성** (오케스트레이터 또는 멤버, ticket b7127aae)
 
