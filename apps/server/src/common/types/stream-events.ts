@@ -6,6 +6,7 @@
 import type { HarnessConfig } from '../harness-config';
 import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
+import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
@@ -104,6 +105,14 @@ export interface AgentTriggerPayload {
   // ticket leaves them unset (pure-discussion / non-code work).
   base_repo: { id: string; name: string; url: string; default_branch: string } | null;
   base_branch: string;
+  // Resolved clone policy for `base_repo` (ticket bddb63ee): the Repo Resource's
+  // own `clone_policy` merged key-by-key over the workspace default
+  // (resolveClonePolicy). agent-manager applies it to the container base clone —
+  // wall-clock budget, idle-stall budget, and the shallow/partial/single-branch
+  // flags. Null when neither layer configures anything; the manager then uses its
+  // OWN defaults, which are the same system defaults (clone timeout 60분), so an
+  // unconfigured repo and a pre-bddb63ee manager behave identically.
+  clone_policy?: ResolvedClonePolicy | null;
   // TicketSupervisor signal: agent-manager should kill any live subagent for this
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.

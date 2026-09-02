@@ -45,6 +45,7 @@ import {
   normalizeRepoRef,
   resolveWorkspaceFolder,
 } from './workspace-folder-options';
+import { resolveClonePolicy } from './clone-policy';
 
 export interface BuildRunProvisionInput {
   kind: RunWorkspaceKind;
@@ -104,10 +105,12 @@ async function resolveRunRepo(
     const url = (r?.url || '').trim();
     if (url) {
       const credential = await resolveRepoCredential(ds, r?.credential_id, input.workspaceId);
+      const clone_policy = await resolveRunClonePolicy(ds, r?.clone_policy, input.workspaceId);
       return {
         url,
         branch: ref.branch || (r?.default_branch || '').trim() || undefined,
         ...(credential ? { credential } : {}),
+        ...(clone_policy ? { clone_policy } : {}),
       };
     }
     return null; // unresolvable resource → no repo
@@ -136,6 +139,7 @@ async function resolveRunRepo(
   let url = '';
   let branch = (chosen.branch || '').trim();
   let credentialId: string | null = null;
+  let resourceClonePolicy: string | null = null;
   const chosenResourceId = (chosen.resource_id || '').trim();
   if (chosenResourceId) {
     // resource_id가 있으면 그 entry에 인라인 url이 같이 있어도 무시하고
@@ -150,6 +154,7 @@ async function resolveRunRepo(
     url = (r?.url || '').trim();
     if (!branch) branch = (r?.default_branch || '').trim();
     credentialId = r?.credential_id || null;
+    resourceClonePolicy = r?.clone_policy ?? null;
   } else {
     // resource_id가 전혀 없는 순수 url-only entry — 위 chosen 선택 로직상 이
     // 분기에 도달했다는 건 배열 전체에 resource_id가 없었다는 뜻이다. 직접
@@ -158,7 +163,33 @@ async function resolveRunRepo(
   }
   if (!url) return null;
   const credential = await resolveRepoCredential(ds, credentialId, input.workspaceId);
-  return { url, branch: branch || undefined, ...(credential ? { credential } : {}) };
+  // `ws` 는 위 env-config 병합에서 이미 로드돼 있으므로 재조회 없이 재사용한다.
+  const clone_policy = resolveClonePolicy(resourceClonePolicy, ws?.clone_policy);
+  return {
+    url,
+    branch: branch || undefined,
+    ...(credential ? { credential } : {}),
+    ...(clone_policy ? { clone_policy } : {}),
+  };
+}
+
+/**
+ * Repo Resource → Workspace 순으로 clone 정책을 합친다(ticket bddb63ee). repo_ref
+ * 가 Resource 를 직접 가리키는 경로(branch 2)에는 workspace row 가 아직 로드돼
+ * 있지 않으므로 여기서 한 번 조회한다. 조회 실패는 정책 없음(null)으로 degrade —
+ * 이 resolver 의 다른 lookup 과 동일하게 availability-first 다.
+ */
+async function resolveRunClonePolicy(
+  ds: DataSource,
+  resourceRaw: string | null | undefined,
+  workspaceId: string,
+) {
+  try {
+    const ws = await ds.getRepository(Workspace).findOne({ where: { id: workspaceId } });
+    return resolveClonePolicy(resourceRaw, ws?.clone_policy);
+  } catch {
+    return resolveClonePolicy(resourceRaw, null);
+  }
 }
 
 /**

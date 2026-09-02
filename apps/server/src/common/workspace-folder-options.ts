@@ -1,3 +1,4 @@
+import type { ResolvedClonePolicy } from './clone-policy';
 import { z } from 'zod';
 
 /**
@@ -221,6 +222,14 @@ export interface RunRepoSpec {
   url: string;
   branch?: string;
   credential?: { username?: string; token: string } | null;
+  /**
+   * Resolved clone policy for this repo (ticket bddb63ee) — the Repo Resource's
+   * `clone_policy` merged over the workspace default. Only a Resource-sourced
+   * repo can carry one (a direct url has no Resource row to read it from), and
+   * it is absent/null when neither layer configures anything, in which case
+   * agent-manager falls back to its own system defaults (clone timeout 60분).
+   */
+  clone_policy?: ResolvedClonePolicy | null;
 }
 
 /**

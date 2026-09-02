@@ -131,6 +131,14 @@ export class Workspace {
   @Column({ type: 'text', nullable: true, default: null })
   hard_budget_config: string | null;
 
+  // Workspace-wide default repository clone policy (ticket bddb63ee). Same JSON
+  // shape as Resource.clone_policy; a repository Resource overrides it per key
+  // via resolveClonePolicy (common/clone-policy.ts). null = no default — repos
+  // without their own policy fall through to the system defaults (clone
+  // timeout 60분).
+  @Column({ type: 'text', nullable: true, default: null })
+  clone_policy: string | null;
+
   // ─────────────────────────────────────────────────────────────────────
   // Claim-verification (ticket dcb9d661): detect assignees who post an
   // "I'm done" comment in an active column without actually pushing a

@@ -196,6 +196,10 @@ export const EVENT_TYPES: EventDefinition[] = [
         column_prompt: event.column_prompt ?? null,
         base_repo: event.base_repo ?? null,
         base_branch: event.base_branch || '',
+        // ticket bddb63ee: resolved repo clone policy (Repo Resource ⊕ workspace
+        // default). Null = no override → agent-manager uses its own system
+        // defaults (clone timeout 60분).
+        clone_policy: event.clone_policy ?? null,
         harness_config: event.harness_config ?? null,
         cli_runtime_profile: event.cli_runtime_profile ?? null,
         // Resolved abstract effort preset (board catalog × ticket effort_preset);
@@ -275,6 +279,12 @@ export const EVENT_TYPES: EventDefinition[] = [
         // ticket's own base repo is ignored on the wire.
         base_repo: p.base_repo ?? null,
         base_branch: p.base_branch || '',
+        // ticket bddb63ee: same flatten rule as base_repo — agent-manager's
+        // event-dispatcher reads ev.clone_policy off the FLATTENED event and
+        // passes it into the worktree bootstrap clone. Omit this line and the
+        // per-repo timeout/strategy never leaves the envelope, so a large repo
+        // silently falls back to the manager defaults.
+        clone_policy: p.clone_policy ?? null,
         // e9c7a896: resolved workspace+board harness — agent-manager's
         // handleTrigger reads ev.harness_config off the flattened event and
         // maps the keys onto subagent CLI flags at spawn. Same flatten rule

@@ -26,6 +26,7 @@ import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-pa
 import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
+import { validateClonePolicyInput, serializeClonePolicy } from '../../common/clone-policy';
 import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
 import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import { hasPermission } from '../../common/types/permissions';
@@ -264,7 +265,7 @@ export class WorkspacesController {
       chat_workspace_folder_enabled,
       harness_config, environment_config, assistant_agent_id,
       cli_runtime_profiles, default_cli_runtime_profile,
-      hard_budget_config,
+      hard_budget_config, clone_policy,
     } = body;
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
@@ -372,6 +373,19 @@ export class WorkspacesController {
         const checked = validateEnvironmentConfigInput(environment_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.environment_config = serializeEnvironmentConfig(checked.value);
+      }
+    }
+
+    // Workspace-wide default repository clone policy (ticket bddb63ee). Repo
+    // Resources override it per key; null clears. 두 레이어 모두 비면 시스템
+    // 기본값(clone timeout 60분)이 그대로 적용된다.
+    if (clone_policy !== undefined) {
+      if (clone_policy === null) {
+        ws.clone_policy = null;
+      } else {
+        const checked = validateClonePolicyInput(clone_policy);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        ws.clone_policy = serializeClonePolicy(checked.value);
       }
     }
 

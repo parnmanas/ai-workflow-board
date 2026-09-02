@@ -16,6 +16,7 @@ import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype
 import { listRepoBranches, resolveGitCredential } from '../shared/git-branches';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
+import { ClonePolicySchema, serializeClonePolicy } from '../../../common/clone-policy';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, embeddingService } = ctx;
@@ -77,8 +78,15 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       file_mimetype: z.string().optional().describe('File MIME type'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
       default_branch: z.string().optional().describe('For type=repository: branch tickets default to when none is set on them. Empty string clears.'),
+      clone_policy: ClonePolicySchema.nullable().optional().describe(
+        'For type=repository: per-repo clone policy applied by agent-manager when it clones this repo. '
+        + 'Keys: clone_timeout_seconds (60..86400, wall-clock budget — system default 3600 = 60min), '
+        + 'clone_idle_timeout_seconds (0..86400, kill only after this long with NO clone progress output; 0 disables — system default 600), '
+        + 'clone_depth (shallow clone), clone_filter (partial clone, e.g. "blob:none"), single_branch. '
+        + 'Every key is optional and falls through to the workspace default (update_workspace.clone_policy) and then the system default. '
+        + 'Pass null to clear the per-repo override.'),
     },
-    async ({ workspace_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags, default_branch }) => {
+    async ({ workspace_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags, default_branch, clone_policy }) => {
       const repo = dataSource.getRepository(Resource);
       if (!name || !name.trim()) return err('Resource name is required');
       if (id) {
@@ -103,6 +111,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         }
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
         if (default_branch !== undefined) existing.default_branch = default_branch || '';
+        if (clone_policy !== undefined) existing.clone_policy = serializeClonePolicy(clone_policy);
         const saved = await repo.save(existing);
         embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
         return ok(resourceToJson(saved));
@@ -126,6 +135,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         file_mimetype: effectiveMimetype,
         tags: JSON.stringify(tags ?? []),
         default_branch: default_branch ?? '',
+        clone_policy: serializeClonePolicy(clone_policy),
       });
       const saved = await repo.save(created);
       embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
