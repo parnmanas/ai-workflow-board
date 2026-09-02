@@ -434,6 +434,7 @@ export class OrchestrationMissionService {
     await this.stepRepo.delete({ mission_id: mission.id });
     await this.eventRepo.delete({ mission_id: mission.id });
     await this.missionRepo.delete({ id: mission.id });
+    this.emitDeleted(mission);
     this.logService.info('Orchestration', `mission deleted ${mission.id}`, { workspace_id: workspaceId });
   }
 
@@ -786,6 +787,34 @@ export class OrchestrationMissionService {
       .catch(() => {
         /* live nudge is best-effort; the client polls the detail view anyway */
       });
+  }
+
+  /**
+   * Push the `deleted` variant of the same frame (티켓 03ca8b5b).
+   *
+   * 미션 목록을 그리는 화면(사이드바 WORK > Orchestrations, 미션 목록 페이지)은
+   * 삭제를 알 방법이 이 프레임밖에 없다 — 삭제는 REST
+   * `DELETE /api/orchestration/missions/:id` 로만 일어나므로 페이지가 쏘는
+   * 브라우저 내 커스텀 이벤트로는 다른 탭·다른 클라이언트의 삭제를 절대 못 본다.
+   * 신호가 없으면 사라진 미션이 목록에 남고 클릭 시 없는 상세로 이동한다.
+   *
+   * emitUpdate 와 달리 step 재조회 없이 동기적으로 쏜다: 스텝은 방금 다 지워져
+   * 세어봐야 0 이고, 삭제 통지가 best-effort 비동기 조회 실패에 묻히면 목록이
+   * 영구히 stale 해지기 때문이다.
+   */
+  private emitDeleted(mission: OrchestrationMission): void {
+    activityEvents.emit('orchestration_update', {
+      mission_id: mission.id,
+      workspace_id: mission.workspace_id,
+      team_id: mission.team_id,
+      title: mission.title,
+      status: mission.status,
+      plan_version: mission.plan_version,
+      counts: { total: 0, done: 0, failed: 0, inFlight: 0, pending: 0 },
+      last_event: null,
+      deleted: true,
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 

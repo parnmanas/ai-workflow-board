@@ -2719,6 +2719,12 @@ export interface OrchestrationUpdateEvent {
   plan_version: number;
   counts: OrchestrationCounts;
   last_event: { type: string; message: string; step_key: string } | null;
+  /**
+   * 이 미션이 방금 삭제됐다(티켓 03ca8b5b). 삭제는 REST 로만 일어나므로 목록을
+   * 그리는 화면은 이 프레임 없이는 사라진 미션을 계속 보여준다. 서버는 항상 이
+   * 키를 실어 보낸다(상태 변화 프레임은 false).
+   */
+  deleted: boolean;
   timestamp: string;
 }
 

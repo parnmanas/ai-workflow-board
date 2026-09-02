@@ -1193,6 +1193,7 @@ export const EVENT_TYPES: EventDefinition[] = [
               step_key: String(event.last_event.step_key ?? ''),
             }
           : null,
+        deleted: !!event.deleted,
       };
       return {
         payload,

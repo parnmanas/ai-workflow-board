@@ -108,6 +108,12 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
   // 프레임을 쏘는데 그때마다 목록을 다시 받으면 낭비), 모르는 미션일 때만 재조회한다.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
     if (!wsId || !data || data.workspace_id !== wsId) return;
+    // 삭제된 미션은 즉시 빼야 한다 — 남겨두면 없는 상세 화면으로 보내는 유령
+    // 항목이 된다. 삭제는 REST 로만 일어나므로 이 프레임이 유일한 신호다.
+    if (data.deleted) {
+      setMissions((prev) => prev.filter((mission) => mission.id !== data.mission_id));
+      return;
+    }
     if (!missionsRef.current.some((mission) => mission.id === data.mission_id)) {
       void fetchMissions(wsId, generationRef.current);
       return;

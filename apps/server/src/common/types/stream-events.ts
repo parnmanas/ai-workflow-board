@@ -840,6 +840,14 @@ export interface OrchestrationUpdatePayload {
   plan_version: number;
   counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
   last_event: { type: string; message: string; step_key: string } | null;
+  /**
+   * 이 미션이 방금 삭제됐다는 표시(티켓 03ca8b5b). 삭제는 REST
+   * `DELETE /api/orchestration/missions/:id` 로만 일어나므로, 미션 목록을 그리는
+   * 화면(사이드바 WORK > Orchestrations, 미션 목록 페이지)은 이 신호가 없으면
+   * 사라진 미션을 계속 보여주고 클릭 시 없는 상세로 보낸다. 상태 변화 프레임과
+   * 구분해야 하므로 별도 불리언으로 싣는다(status 는 삭제 직전 값 그대로).
+   */
+  deleted: boolean;
 }
 
 /**

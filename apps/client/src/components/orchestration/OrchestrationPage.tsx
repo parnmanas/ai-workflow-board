@@ -63,6 +63,12 @@ export default function OrchestrationPage() {
   // frame would thrash the list while the user is reading it.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
     if (!data || data.workspace_id !== wsId) return;
+    // 삭제된 미션은 제자리 패치가 아니라 목록에서 빼야 한다 — 아래 분기는
+    // "아는 미션이면 패치"라서, 그대로 두면 사라진 미션이 행으로 남는다.
+    if (data.deleted) {
+      setMissions((prev) => prev.filter((m) => m.id !== data.mission_id));
+      return;
+    }
     setMissions((prev) => {
       const idx = prev.findIndex((m) => m.id === data.mission_id);
       if (idx === -1) {

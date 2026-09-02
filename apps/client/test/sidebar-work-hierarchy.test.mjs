@@ -15,7 +15,8 @@
 //   7. 축소(드로어/overlay) 사이드바에서도 같은 탐색이 가능하고 이동 후 드로어가 닫힌다
 //   8. 페이지가 쏘는 목록 변경 이벤트로 서브메뉴가 갱신된다
 //   9. 접어둔 그룹이라도 그 영역으로 이동해 오면 다시 펴진다
-//  10. 예전 /orchestration/teams 딥링크가 새 /teams 로 리다이렉트된다(딥링크 보존)
+//  10. 서버가 보낸 미션 삭제 SSE 프레임으로 서브메뉴에서 그 항목이 사라진다
+//  11. 예전 /orchestration/teams 딥링크가 새 /teams 로 리다이렉트된다(딥링크 보존)
 //
 // 실행: node --import tsx --test --test-force-exit test/sidebar-work-hierarchy.test.mjs
 import test from 'node:test';
@@ -161,7 +162,7 @@ async function mountSidebar(t, options = {}) {
     }
     pause() {}
   };
-  const { uninstall } = installFakeEventSource();
+  const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
   const state = { teams, missions };
@@ -215,7 +216,32 @@ async function mountSidebar(t, options = {}) {
     dom.cleanup();
   });
 
-  return { view, state, closed };
+  return { view, state, closed, FakeEventSource };
+}
+
+/**
+ * 서버가 실제로 보내는 `orchestration_update` wire payload.
+ *
+ * 필드 구성은 producer 쪽 테스트
+ * (apps/server/test/orchestration-mission-delete-sse.test.mjs)가 실제
+ * event-registry map()+flatten()+JSON.stringify 를 통과시켜 고정한 것과 같다 —
+ * 여기서 임의로 shape 를 지어내면 소비자만 통과하고 실제 배선은 깨진 채로 남는다.
+ */
+function orchestrationUpdateWire(overrides = {}) {
+  return {
+    event_type: 'orchestration_update',
+    mission_id: 'm1',
+    workspace_id: WS_ID,
+    team_id: 't1',
+    title: 'Ship the nav',
+    status: 'completed',
+    plan_version: 1,
+    counts: { total: 0, done: 0, failed: 0, inFlight: 0, pending: 0 },
+    last_event: null,
+    deleted: false,
+    timestamp: new Date(0).toISOString(),
+    ...overrides,
+  };
 }
 
 /** WORK 섹션(<section aria-labelledby="sidebar-work">) 안의 요소만 본다. */
@@ -453,7 +479,63 @@ test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 
   assert.equal(subList(view, 'Teams'), null, 'Teams 접힘이 임의로 풀렸다');
 });
 
-test('⑭ 예전 /orchestration/teams 딥링크는 새 /teams 로 리다이렉트된다', () => {
+test('⑭ 미션이 외부에서 삭제되면 실제 SSE 경로를 타고 서브메뉴에서 사라진다', async (t) => {
+  // 리뷰 라운드 1 차단 사항: 삭제는 REST 로만 일어나 페이지 커스텀 이벤트로는
+  // 알 수 없었고, 사이드바에 유령 항목이 남아 클릭 시 사라진 상세로 갔다.
+  // 여기서는 FakeEventSource → BoardStreamProvider → useWorkNavLists → Sidebar
+  // 라는 프로덕션 SSE 경로를 그대로 태운다(훅을 직접 호출하지 않는다).
+  const { view, state, FakeEventSource } = await mountSidebar(t);
+  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+
+  // 서버는 삭제된 행을 더 이상 돌려주지 않는다 — 재조회가 일어나도 결과가 같도록.
+  state.missions = state.missions.filter((m) => m.id !== 'm1');
+
+  const es = FakeEventSource.instances[0];
+  assert.ok(es, 'BoardStreamProvider 가 EventSource 를 열지 않았다');
+  await act(async () => {
+    es.emit('orchestration_update', orchestrationUpdateWire({ mission_id: 'm1', deleted: true }));
+  });
+  await flush();
+
+  assert.deepEqual(
+    subItemLabels(view, 'Orchestrations'),
+    ['Backfill telemetry'],
+    '삭제된 미션이 서브메뉴에 유령으로 남았다',
+  );
+});
+
+test('⑮ 삭제가 아닌 상태 변화 프레임은 미션을 목록에서 지우지 않는다', async (t) => {
+  // deleted 를 잘못 읽어 살아있는 미션까지 지우는 반대 방향 회귀를 막는다.
+  const { view, FakeEventSource } = await mountSidebar(t);
+
+  const es = FakeEventSource.instances[0];
+  await act(async () => {
+    es.emit(
+      'orchestration_update',
+      orchestrationUpdateWire({ mission_id: 'm1', status: 'running', deleted: false }),
+    );
+  });
+  await flush();
+
+  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+
+  // 다른 워크스페이스의 삭제 프레임도 이 워크스페이스 목록을 건드리면 안 된다.
+  await act(async () => {
+    es.emit(
+      'orchestration_update',
+      orchestrationUpdateWire({ mission_id: 'm1', workspace_id: 'other-ws', deleted: true }),
+    );
+  });
+  await flush();
+
+  assert.deepEqual(
+    subItemLabels(view, 'Orchestrations'),
+    ['Ship the nav', 'Backfill telemetry'],
+    '다른 워크스페이스의 삭제 프레임이 이 목록을 건드렸다',
+  );
+});
+
+test('⑯ 예전 /orchestration/teams 딥링크는 새 /teams 로 리다이렉트된다', () => {
   // Teams 를 WORK 최상위로 승격하면서 정식 경로가 바뀌었다 — 북마크나 기존
   // 코멘트에 남은 예전 링크가 죽지 않아야 한다(App.tsx 에 등록된 실제 컴포넌트).
   const dom = setupDom({ width: 1280 });
