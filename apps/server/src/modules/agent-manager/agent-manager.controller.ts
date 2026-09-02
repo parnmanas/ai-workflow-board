@@ -6,6 +6,7 @@ import { DataSource, In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
+import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
@@ -1484,7 +1485,22 @@ export class AgentManagerController {
       try {
         const decoded = JSON.parse(plaintext);
         if (decoded && typeof decoded === 'object') {
-          fields = decoded as Record<string, string>;
+          // Heal paste damage on the way out too, not only on write: a row
+          // stored by an older build can carry a hard line break inside the
+          // secret (a wrapped terminal copy of `claude setup-token`), which
+          // the manager would export verbatim as CLAUDE_CODE_OAUTH_TOKEN and
+          // every spawn of every agent on that credential would fail auth.
+          const raw = decoded as Record<string, string>;
+          fields = normalizeCredentialFields(raw);
+          const repaired = Object.keys(fields).filter((k) => fields[k] !== raw[k]);
+          if (repaired.length > 0) {
+            this.logService.warn(
+              'AgentManager',
+              `Credential cred=${cred.id.slice(0, 8)} (provider=${cred.provider}) had whitespace inside ` +
+                `field(s) ${repaired.join(',')} — served normalized. Re-save it in Settings → Credentials ` +
+                `to fix it at rest.`,
+            );
+          }
         }
       } catch {
         // Plaintext didn't parse as JSON — treat as empty fields and warn.
