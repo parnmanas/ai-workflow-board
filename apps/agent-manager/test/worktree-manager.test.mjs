@@ -232,6 +232,189 @@ test('재개 티켓은 dirty 변경과 기존 브랜치를 보존하고 ahead/be
   }
 });
 
+// ── detached HEAD 복구 (ticket 15db8628) ────────────────────────────────────
+//
+// `git worktree add --detach` 로 시작한 체크아웃을 feature branch 에 붙이는
+// 마지막 한 걸음이 빠지면 디스패치가 detached HEAD 로 도착한다. 실제로 관측된
+// 형태는 두 가지이고 (worktree 재생성 / 기존 worktree 재개) 둘 다 살아남은
+// stale branch 때문에 `switch -c` 가 "already exists" 로 실패하던 경우다.
+// detached 에서 만든 커밋은 어떤 branch 에도 안 붙어 조용히 유실되므로,
+// 복구 순서는 항상 "커밋을 버리지 않는 쪽"이 우선이다.
+
+const COMMIT_ID = ['-c', 'user.email=test@awb.local', '-c', 'user.name=AWB Test'];
+
+function commit(cwd, message) {
+  git(cwd, ['add', '.']);
+  git(cwd, [...COMMIT_ID, 'commit', '-q', '-m', message]);
+  return git(cwd, ['rev-parse', 'HEAD']);
+}
+
+async function detachedFixture(label) {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, `${label}-agent-dir`);
+  const bootstrapRepo = { resourceId: 'repo-detached', url: source.remote, branch: 'main' };
+  const wm = new WorktreeManager();
+  const resolve = (ticketId = TICKET_A, extra = {}) => wm.resolveCwd({
+    baseWorkingDir: workingDir,
+    ticketId,
+    role: 'assignee',
+    bootstrapRepo,
+    ...extra,
+  });
+  const first = await resolve();
+  assert.equal(first.isWorktree, true);
+  assert.equal(first.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+  return {
+    source,
+    workingDir,
+    resolve,
+    first,
+    base: join(workingDir, '.awb', 'base', 'repo-detached'),
+    branch: `ticket/${TICKET_A}-work`,
+    /** origin/main 을 전진시키고 새 tip 을 돌려준다 — stale branch 재현용. */
+    advanceBase: () => {
+      git(source.repo, ['push', '-q', 'origin', 'main']);
+      return git(source.remote, ['rev-parse', 'refs/heads/main']);
+    },
+  };
+}
+
+test('worktree 만 사라지고 살아남은 stale branch 는 재생성 시 detached 로 남지 않는다', async () => {
+  const fx = await detachedFixture('recreate');
+  try {
+    // 관측된 원인: worktree 디렉터리는 정리됐지만 branch ref 는 공유 .git 에
+    // 남아 다음 `worktree add --detach` + `switch -c` 를 "already exists" 로 깬다.
+    await fsp.rm(fx.first.cwd, { recursive: true, force: true });
+    git(fx.base, ['worktree', 'prune']);
+    assert.equal(git(fx.base, ['rev-parse', '--verify', `refs/heads/${fx.branch}`]).length, 40);
+    const remoteTip = fx.advanceBase();
+
+    const second = await fx.resolve();
+    assert.equal(second.isWorktree, true, 'branch_prepare_failed 로 떨어지지 않아야 한다');
+    assert.equal(second.reason, undefined);
+    assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(second.cwd, ['rev-parse', 'HEAD']), remoteTip, 'stale branch 가 base tip 으로 ff 된다');
+    assert.equal(second.repositoryContext.workingBranch, fx.branch);
+    assert.equal(second.repositoryContext.behind, 0);
+    assert.equal(second.repositoryContext.ahead, 0);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('재개 시 detached HEAD + stale branch 조합은 ff attach 로 복구된다', async () => {
+  const fx = await detachedFixture('resume-detached');
+  try {
+    const remoteTip = fx.advanceBase();
+    // 디스패치가 실제로 마주친 상태: worktree 는 살아 있는데 HEAD 만 detached
+    // 이고 feature branch 는 뒤처진 채 체크아웃되어 있지 않다.
+    git(fx.first.cwd, ['checkout', '--detach']);
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD');
+    // 복구가 재개 worktree 의 작업 파일을 건드리지 않는지도 함께 고정한다.
+    await fsp.writeFile(join(fx.first.cwd, 'dirty.txt'), '보존할 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(resumed.cwd, fx.first.cwd);
+    assert.equal(resumed.repositoryContext.resumed, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), remoteTip);
+    assert.equal(resumed.repositoryContext.workingBranch, fx.branch);
+    assert.equal(resumed.repositoryContext.behind, 0);
+    assert.equal(await fsp.readFile(join(resumed.cwd, 'dirty.txt'), 'utf8'), '보존할 변경\n');
+    assert.equal(resumed.repositoryContext.dirty, true);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('detached HEAD 에서 만든 커밋은 버려지지 않고 feature branch 가 그 위로 전진한다', async () => {
+  const fx = await detachedFixture('orphan-rescue');
+  try {
+    git(fx.first.cwd, ['checkout', '--detach']);
+    await fsp.writeFile(join(fx.first.cwd, 'orphan.txt'), '유실되면 안 되는 작업\n');
+    const orphanSha = commit(fx.first.cwd, 'detached 상태에서 만든 커밋');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), orphanSha, 'branch 가 고아 커밋을 흡수한다');
+    assert.ok(git(resumed.cwd, ['branch', '--contains', orphanSha]).includes(fx.branch));
+    assert.equal(await fsp.readFile(join(resumed.cwd, 'orphan.txt'), 'utf8'), '유실되면 안 되는 작업\n');
+    assert.equal(resumed.repositoryContext.ahead, 1);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('자기 커밋이 있는 feature branch 는 detached 재개 시 base 위로 rebase 되어 attach 된다', async () => {
+  const fx = await detachedFixture('rebase-branch');
+  try {
+    await fsp.writeFile(join(fx.first.cwd, 'work.txt'), '티켓 작업\n');
+    commit(fx.first.cwd, '티켓 작업 커밋');
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', 'base tip 위로 rebase 된다');
+    assert.equal(await fsp.readFile(join(resumed.cwd, 'work.txt'), 'utf8'), '티켓 작업\n');
+    assert.equal(resumed.repositoryContext.ahead, 1);
+    assert.equal(resumed.repositoryContext.behind, 0);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('detached HEAD 와 feature branch 가 각자 고유 커밋을 가지면 어느 쪽도 버리지 않고 실패로 올린다', async () => {
+  const fx = await detachedFixture('diverged');
+  try {
+    await fsp.writeFile(join(fx.first.cwd, 'branch-work.txt'), 'branch 쪽 작업\n');
+    const branchTip = commit(fx.first.cwd, 'branch 커밋');
+    git(fx.first.cwd, ['checkout', '--detach', 'HEAD~1']);
+    await fsp.writeFile(join(fx.first.cwd, 'detached-work.txt'), 'detached 쪽 작업\n');
+    const headTip = commit(fx.first.cwd, 'detached 커밋');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // 자동 복구를 포기했을 뿐, 양쪽 커밋은 그대로 남아 수동 복구가 가능해야 한다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', 'HEAD']), headTip);
+    assert.equal(git(fx.base, ['rev-parse', fx.branch]), branchTip);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('shared slot 재부착도 detached HEAD 를 남기지 않는다', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'shared-detached-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const args = {
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'repo-detached', url: source.remote, branch: 'main' },
+    };
+    const first = await wm.resolveCwd(args);
+    assert.equal(first.isWorktree, true);
+    git(first.cwd, ['checkout', '--detach']);
+
+    const resumed = await wm.resolveCwd(args);
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(resumed.cwd, first.cwd);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), `ticket/${TICKET_A}-work`);
+    assert.equal(resumed.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+  } finally {
+    await source.cleanup();
+  }
+});
+
 test('repo 미연결과 fetch 실패는 서로 다른 provisioning 진단을 반환한다', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'failure-agent-dir');
