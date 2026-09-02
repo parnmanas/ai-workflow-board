@@ -1,64 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
 import { api } from '../src/api.ts';
 import ClaudeBackendProfilesManager from '../src/components/admin/ClaudeBackendProfilesManager.tsx';
 
-const credentials = [
-  { id: 'credential-a', workspace_id: 'workspace-1', scope: 'workspace', name: '운영 Claude', provider: 'claude_oauth_token' },
-  { id: 'credential-b', workspace_id: 'workspace-1', scope: 'workspace', name: '개발 API', provider: 'anthropic' },
-];
 const existingProfile = {
-  id: 'profile-1', name: '기존 프로필', kind: 'claude-backend', protocol: 'anthropic-compatible',
-  base_url: 'https://example.test', model: 'claude-test', omit_effort: false,
-  credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN', credential_ref: 'credential-a',
-  credential_status: 'ok',
+  id: 'profile-1', name: '기존 프로필', kind: 'claude-backend', protocol: 'openai-compatible',
+  base_url: 'https://example.test', model: 'claude-test', omit_effort: true,
+  credential_required: true, credential_ref: 'credential-1', auth_env: 'ANTHROPIC_AUTH_TOKEN',
+  adapter: { request: { model_field: 'model' } },
 };
 
 const flush = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
-
-function deferred() {
-  let resolve;
-  const promise = new Promise(resolvePromise => { resolve = resolvePromise; });
-  return { promise, resolve };
-}
-
-function change(element, value) {
-  act(() => {
-    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
-    assert.ok(setter);
-    setter.call(element, value);
-    element.dispatchEvent(new window.Event('change', { bubbles: true }));
-  });
-}
-
-async function renderManager(t, { profiles = [], listCredentials = async () => credentials } = {}) {
-  const dom = setupDom();
-  const originals = {
-    getClaudeBackendProfiles: api.getClaudeBackendProfiles,
-    listCredentials: api.listCredentials,
-    createClaudeBackendProfile: api.createClaudeBackendProfile,
-    updateClaudeBackendProfile: api.updateClaudeBackendProfile,
-  };
-  api.getClaudeBackendProfiles = async () => ({ profiles, default_profile_id: null });
-  api.listCredentials = listCredentials;
-  api.createClaudeBackendProfile = async () => {};
-  api.updateClaudeBackendProfile = async () => {};
-  const view = mount(React.createElement(ClaudeBackendProfilesManager, { workspaceId: 'workspace-1' }));
-  await flush();
-  t.after(() => {
-    view.unmount();
-    Object.assign(api, originals);
-    dom.cleanup();
-  });
-  return view;
-}
-
-function credentialSelect(container) {
-  const select = container.querySelector('select[aria-label="Credential 선택"]');
-  assert.ok(select);
-  return select;
-}
 
 function button(container, label) {
   const found = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(label));
@@ -66,111 +20,151 @@ function button(container, label) {
   return found;
 }
 
-test('신규 Credential을 이름으로 검색·선택하고 create payload에는 UUID만 저장한다', async (t) => {
-  const { container } = await renderManager(t);
-  const calls = [];
-  api.createClaudeBackendProfile = async payload => { calls.push(payload); };
+function inputByLabel(container, label) {
+  const labels = [...container.querySelectorAll('label')];
+  const owner = labels.find(item => item.textContent?.includes(label));
+  const input = (owner?.htmlFor ? container.querySelector(`#${owner.htmlFor}`) : null)
+    || owner?.querySelector('input, textarea, select')
+    || owner?.parentElement?.querySelector('input, textarea, select');
+  assert.ok(input, `${label} 입력을 찾을 수 없습니다.`);
+  return input;
+}
 
-  const search = container.querySelector('input[type="search"]');
-  assert.ok(search);
-  typeInto(search, '개발');
-  assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), ['선택하지 않음', '개발 API · anthropic']);
-  change(credentialSelect(container), 'credential-b');
-  click(button(container, '프로필 저장'));
+test('기존 Claude 고유 필드를 손실 없이 수정 payload로 전달한다', async (t) => {
+  const dom = setupDom();
+  const originals = {
+    getClaudeBackendProfiles: api.getClaudeBackendProfiles,
+    updateClaudeBackendProfile: api.updateClaudeBackendProfile,
+  };
+  const calls = [];
+  api.getClaudeBackendProfiles = async () => ({ profiles: [existingProfile], default_profile_id: null });
+  api.updateClaudeBackendProfile = async (id, payload) => { calls.push({ id, payload }); };
+  const view = mount(React.createElement(ClaudeBackendProfilesManager));
+  await flush();
+  t.after(() => {
+    view.unmount();
+    Object.assign(api, originals);
+    dom.cleanup();
+  });
+
+  click(button(view.container, '기존 프로필'));
+  const nameInput = [...view.container.querySelectorAll('input')].find(input => input.value === '기존 프로필');
+  assert.ok(nameInput);
+  typeInto(nameInput, '수정된 프로필');
+  click(button(view.container, 'Save profile'));
   await flush();
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].credential_ref, 'credential-b');
-  assert.equal(JSON.stringify(calls[0]).includes('개발 API'), false);
-});
-
-test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 계약으로 저장한다', async (t) => {
-  const { container } = await renderManager(t, { profiles: [existingProfile] });
-  const calls = [];
-  api.updateClaudeBackendProfile = async (id, payload) => { calls.push({ id, payload }); };
-
-  click(button(container, '기존 프로필'));
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
-  change(credentialSelect(container), 'credential-b');
-  click(button(container, '프로필 저장'));
-  await flush();
   assert.equal(calls[0].id, 'profile-1');
-  assert.equal(calls[0].payload.credential_ref, 'credential-b');
-  assert.equal('credential_status' in calls[0].payload, false);
-
-  click(button(container, '기존 프로필'));
-  change(credentialSelect(container), '');
-  click(button(container, '프로필 저장'));
-  await flush();
-  assert.equal(calls[1].payload.credential_ref, null);
+  assert.deepEqual(calls[0].payload, { ...existingProfile, name: '수정된 프로필' });
 });
 
-test('유효하지 않은 기존 참조를 명시하고 다른 Credential 선택 또는 해제를 허용한다', async (t) => {
-  const profile = { ...existingProfile, credential_ref: 'deleted-credential' };
-  const { container } = await renderManager(t, { profiles: [profile] });
-  click(button(container, '기존 프로필'));
-
-  assert.equal(credentialSelect(container).value, 'deleted-credential');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '삭제되었거나 접근할 수 없는 Credential');
-  assert.match(container.textContent, /다른 Credential을 선택하거나 해제하세요/);
-});
-
-test('목록 로딩 실패 중 기존 참조를 보존 표시하고 재시도 후 이름을 복구한다', async (t) => {
-  let attempts = 0;
-  const listCredentials = async () => {
-    attempts += 1;
-    if (attempts === 1) throw new Error('목록 오류');
-    return credentials;
+test('새 프로필 생성 payload에 auth_env, 플래그, adapter JSON을 그대로 전달한다', async (t) => {
+  const dom = setupDom();
+  const originals = {
+    getClaudeBackendProfiles: api.getClaudeBackendProfiles,
+    createClaudeBackendProfile: api.createClaudeBackendProfile,
   };
-  const { container } = await renderManager(t, { profiles: [existingProfile], listCredentials });
-  click(button(container, '기존 프로필'));
-
-  assert.equal(credentialSelect(container).disabled, true);
-  assert.equal(credentialSelect(container).value, 'credential-a');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 로드 실패)');
-  assert.match(container.textContent, /기존 선택값은 변경되지 않습니다/);
-
-  click(button(container, '다시 시도'));
+  const calls = [];
+  api.getClaudeBackendProfiles = async () => ({ profiles: [], default_profile_id: null });
+  api.createClaudeBackendProfile = async payload => { calls.push(payload); };
+  const view = mount(React.createElement(ClaudeBackendProfilesManager));
   await flush();
-  assert.equal(attempts, 2);
-  assert.equal(credentialSelect(container).disabled, false);
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
+  t.after(() => {
+    view.unmount();
+    Object.assign(api, originals);
+    dom.cleanup();
+  });
+
+  typeInto(inputByLabel(view.container, 'Stable ID'), 'new-profile');
+  typeInto(inputByLabel(view.container, 'Name'), '신규 프로필');
+  typeInto(inputByLabel(view.container, 'Model'), 'claude-new');
+  typeInto(inputByLabel(view.container, 'Base URL'), 'https://new.example.test');
+  typeInto(inputByLabel(view.container, 'Authentication environment variable'), 'CUSTOM_CLAUDE_TOKEN');
+  click(inputByLabel(view.container, 'Credential required'));
+  click(inputByLabel(view.container, 'Do not set effort'));
+  typeInto(inputByLabel(view.container, 'Adapter config'), '{"request":{"model_field":"deployment"}}');
+  click(button(view.container, 'Save profile'));
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    id: 'new-profile',
+    name: '신규 프로필',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'https://new.example.test',
+    model: 'claude-new',
+    omit_effort: true,
+    credential_required: true,
+    auth_env: 'CUSTOM_CLAUDE_TOKEN',
+    adapter: { request: { model_field: 'deployment' } },
+  });
 });
 
-test('목록 로딩 중에도 기존 참조가 빈 선택으로 보이지 않는다', async (t) => {
-  const pending = deferred();
-  const { container } = await renderManager(t, {
-    profiles: [existingProfile],
-    listCredentials: () => pending.promise,
+test('저장 중 버튼을 비활성화하고 실패 후 다시 저장할 수 있게 복구한다', async (t) => {
+  const dom = setupDom();
+  const originals = {
+    getClaudeBackendProfiles: api.getClaudeBackendProfiles,
+    createClaudeBackendProfile: api.createClaudeBackendProfile,
+  };
+  let rejectSave;
+  let calls = 0;
+  api.getClaudeBackendProfiles = async () => ({ profiles: [], default_profile_id: null });
+  api.createClaudeBackendProfile = () => {
+    calls += 1;
+    return new Promise((_, reject) => { rejectSave = reject; });
+  };
+  const view = mount(React.createElement(ClaudeBackendProfilesManager));
+  await flush();
+  t.after(() => {
+    view.unmount();
+    Object.assign(api, originals);
+    dom.cleanup();
   });
-  click(button(container, '기존 프로필'));
 
-  assert.equal(credentialSelect(container).disabled, true);
-  assert.equal(credentialSelect(container).value, 'credential-a');
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '기존 선택 유지 (Credential 목록 확인 중)');
+  const save = button(view.container, 'Save profile');
+  click(save);
+  assert.equal(calls, 1);
+  assert.equal(save.disabled, true);
+  assert.ok(save.querySelector('[aria-hidden="true"]'), '저장 중 스피너가 표시되어야 합니다.');
+  click(save);
+  assert.equal(calls, 1, '저장 중 중복 요청을 보내면 안 됩니다.');
 
-  await act(async () => {
-    pending.resolve(credentials);
-    await pending.promise;
-  });
-  assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
+  await act(async () => { rejectSave(new Error('의도한 저장 실패')); });
+  assert.equal(save.disabled, false);
+  assert.equal(save.querySelector('[aria-hidden="true"]'), null);
 });
 
-test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 편집 취소 시 신규 상태로 돌아간다', async (t) => {
-  const { container } = await renderManager(t, { profiles: [existingProfile] });
+test('편집 취소는 빈 생성 폼으로 돌아간다', async (t) => {
+  const dom = setupDom();
+  const originalGet = api.getClaudeBackendProfiles;
+  api.getClaudeBackendProfiles = async () => ({ profiles: [existingProfile], default_profile_id: null });
+  const view = mount(React.createElement(ClaudeBackendProfilesManager));
+  await flush();
+  t.after(() => {
+    view.unmount();
+    api.getClaudeBackendProfiles = originalGet;
+    dom.cleanup();
+  });
 
-  const manager = container.querySelector('[data-testid="claude-profile-manager"]');
-  const columns = container.querySelector('[data-layout="responsive-profile-columns"]');
-  assert.ok(manager);
-  assert.ok(columns);
-  assert.equal(columns.style.display, 'flex');
-  assert.equal(columns.style.flexWrap, 'wrap');
-  assert.ok(container.querySelector('input[aria-label="Stable ID"]'));
-  assert.ok(container.querySelector('select[aria-label="Protocol"]'));
+  click(button(view.container, '기존 프로필'));
+  assert.match(view.container.textContent, /Edit 기존 프로필/);
+  click(button(view.container, 'Cancel'));
+  assert.match(view.container.textContent, /Create profile/);
+  assert.equal(view.container.querySelector('input')?.value, '');
+});
 
-  click(button(container, '기존 프로필'));
-  assert.match(container.textContent, /기존 프로필 편집/);
-  click(button(container, '취소'));
-  assert.match(container.textContent, /프로필 만들기/);
-  assert.equal(container.querySelector('input[aria-label="Stable ID"]').value, '');
+test('프로필 셸과 폼은 공통 컨트롤 및 축소 가능한 반응형 계약을 사용한다', async () => {
+  const source = await readFile(new URL('../src/components/admin/ClaudeBackendProfilesManager.tsx', import.meta.url), 'utf8');
+  assert.match(source, /data-testid="claude-profile-shell"/);
+  assert.match(source, /flexWrap: 'wrap'/);
+  assert.match(source, /repeat\(auto-fit/);
+  assert.match(source, /data-testid="claude-profile-list"/);
+  assert.match(source, /data-testid="claude-profile-editor"/);
+  assert.match(source, /minWidth: 0/);
+  assert.match(source, /<Input/);
+  assert.match(source, /<Select/);
+  assert.doesNotMatch(source, /gridTemplateColumns: 'minmax\(260px, 1fr\) minmax\(380px, 2fr\)'/);
+  assert.doesNotMatch(source, /float: 'right'/);
 });
