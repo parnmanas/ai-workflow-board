@@ -62,7 +62,6 @@ import {
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
   allCriteriaMet,
-  computePlanProgress,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
@@ -76,6 +75,17 @@ import {
   renderStepPrompt,
   renderWakePrompt,
 } from './orchestration-prompt';
+import {
+  GraphSpec,
+  GraphSpecInput,
+  MissionProgress,
+  computeMissionProgress,
+  firedLoopBacks,
+  graphFromWavePlan,
+  loopBodyNodes,
+  selectOutgoingEdges,
+  validateGraphSpec,
+} from './orchestration-graph';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 
@@ -640,8 +650,14 @@ export class OrchestrationRunnerService {
   async submitPlan(
     missionId: string,
     callerAgentId: string,
-    input: { summary?: string; steps: PlanStepInput[] },
-  ): Promise<{ mission: OrchestrationMission; created: string[]; updated: string[]; dispatched: string[] }> {
+    input: { summary?: string; steps: PlanStepInput[]; graph?: GraphSpecInput | null },
+  ): Promise<{
+    mission: OrchestrationMission;
+    created: string[];
+    updated: string[];
+    dispatched: string[];
+    graph: GraphSpec | null;
+  }> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId);
       this.requireOrchestrator(mission, callerAgentId);
@@ -676,6 +692,34 @@ export class OrchestrationRunnerService {
       ];
       const validated = validatePlan(merged, { maxSteps: mission.max_steps });
       if ('error' in validated) throw orchestrationError(400, validated.error);
+
+      // ── 실행 그래프 확정(티켓 1ca9e49b) ────────────────────────────────────
+      // graph_enabled=false면 이 미션은 기존 wave/DAG 계약 그대로다 — graph를
+      // 보내오면 조용히 무시하지 않고 거부한다(조용한 무시는 오케스트레이터가
+      // 분기/loop가 실제로 걸린 줄 알고 계획을 세우게 만든다).
+      if (input.graph && !mission.graph_enabled) {
+        throw orchestrationError(
+          400,
+          'this mission does not have graph mode enabled — it executes the plain dependency plan. ' +
+            'Ask an operator to enable graph mode on the mission, or submit the plan without a "graph".',
+        );
+      }
+      let graphSpec: GraphSpec | null = mission.graph_spec ?? null;
+      if (mission.graph_enabled) {
+        const nodeKeys = validated.steps.map((st) => String(st.step_key).trim());
+        if (input.graph) {
+          const checked = validateGraphSpec(input.graph, { nodeKeys });
+          if ('error' in checked) throw orchestrationError(400, checked.error);
+          graphSpec = checked.spec;
+        } else {
+          // graph를 안 보냈으면 depends_on을 무손실 승격한다(wave adapter). 그래서
+          // graph 모드 미션은 항상 그래프로 구동되고, 그래프를 쓰지 않는 계획도
+          // 기존과 완전히 동일하게 동작한다.
+          graphSpec = graphFromWavePlan(
+            validated.steps.map((st) => ({ step_key: String(st.step_key).trim(), depends_on: st.depends_on ?? [] })),
+          );
+        }
+      }
 
       const roster = await this.buildRoster(mission.team_id);
       const rosterIds = new Set(roster.map((r) => r.agent_id));
@@ -757,6 +801,7 @@ export class OrchestrationRunnerService {
 
       mission.plan_version = nextVersion;
       mission.plan_summary = (input.summary || '').slice(0, SUMMARY_MAX);
+      mission.graph_spec = graphSpec;
       if (mission.status === 'planning') mission.status = 'running';
       await this.missionRepo.save(mission);
 
@@ -770,12 +815,25 @@ export class OrchestrationRunnerService {
         actor_type: 'agent',
         actor_id: callerAgentId,
         actor_name: orchestratorName,
-        data: { plan_version: nextVersion, created, updated },
+        data: {
+          plan_version: nextVersion,
+          created,
+          updated,
+          graph: graphSpec
+            ? {
+                nodes: graphSpec.nodes.length,
+                edges: graphSpec.edges.length,
+                conditional: graphSpec.edges.filter((e) => e.kind === 'conditional').length,
+                loops: graphSpec.edges.filter((e) => e.kind === 'loop_back').length,
+                max_total_visits: graphSpec.max_total_visits,
+              }
+            : null,
+        },
       });
 
       const pumped = await this.pump(mission);
       await this.wakeAfterPump(mission, pumped);
-      return { mission, created, updated, dispatched: pumped.dispatched };
+      return { mission, created, updated, dispatched: pumped.dispatched, graph: graphSpec };
     });
   }
 
@@ -972,8 +1030,16 @@ export class OrchestrationRunnerService {
       status: 'done' | 'failed' | 'blocked';
       summary: string;
       artifacts?: Array<{ kind?: string; ref?: string; label?: string }>;
+      verdict?: string;
+      visit?: number;
     },
-  ): Promise<{ step: OrchestrationStep; dispatched: string[]; orchestrator_woken: boolean }> {
+  ): Promise<{
+    step: OrchestrationStep;
+    reported_status: string;
+    dispatched: string[];
+    orchestrator_woken: boolean;
+    loop_reentered: string[];
+  }> {
     const found = await this.missions.requireStep(stepId);
     return this.withMissionLock(found.mission_id, async () => {
       const step = await this.missions.requireStep(stepId);
@@ -992,11 +1058,31 @@ export class OrchestrationRunnerService {
           `step "${step.step_key}" is already ${step.status}; a result was recorded for it already`,
         );
       }
+      // 중복 실행 통제(티켓 1ca9e49b) — loop 재진입이 만드는 유일한 새 위험:
+      // 같은 step_id가 iteration 2로 다시 디스패치된 뒤, iteration 1의 subagent가
+      // 뒤늦게 보고하면 status가 terminal이 아니라 위 가드를 그대로 통과해
+      // 새 iteration의 결과를 덮어쓴다. graph 모드의 step prompt는 항상 자기
+      // visit 번호를 싣고 나가므로, 어긋나면 stale로 거부한다. visit을 안 보내는
+      // 기존(비 graph) 호출자는 영향이 없다.
+      if (input.visit !== undefined && input.visit !== null) {
+        const claimed = Number(input.visit);
+        const current = step.visit ?? 0;
+        if (!Number.isFinite(claimed) || claimed !== current) {
+          throw orchestrationError(
+            409,
+            `stale report for step "${step.step_key}": you are reporting iteration ${input.visit} but the ` +
+              `step is now on iteration ${current}. The loop re-entered and your work order was superseded — ` +
+              `read the newest work order in your current room instead of re-reporting this one.`,
+          );
+        }
+      }
 
       const actorName = await this.agentName(callerAgentId);
+      const reportedStatus = input.status;
       step.status = input.status;
       step.result_summary = (input.summary || '').slice(0, SUMMARY_MAX);
       step.artifacts = normalizeArtifacts(input.artifacts);
+      step.verdict = String(input.verdict ?? '').trim().toLowerCase().slice(0, 48);
       step.finished_at = new Date();
       step.started_at = step.started_at ?? new Date();
       await this.stepRepo.save(step);
@@ -1011,15 +1097,137 @@ export class OrchestrationRunnerService {
         actor_type: 'agent',
         actor_id: callerAgentId,
         actor_name: actorName,
-        data: { artifacts: step.artifacts ?? [] },
+        data: { artifacts: step.artifacts ?? [], verdict: step.verdict || null, visit: step.visit ?? 0 },
       });
+
+      // 그래프 모드에서만: 어느 outgoing edge가 왜 선택/기각됐는지 trace에 남기고,
+      // 조건이 맞은 loop_back이 있으면 본문 node를 리셋해 재진입시킨다. 반드시
+      // propagateBlocking 앞에서 해야 한다 — 리셋 전에 판정하면 아직 done 상태인
+      // evaluator의 "선택되지 않은" 분기가 하류를 blocked로 확정해버린다.
+      const reentered = mission.graph_spec ? await this.applyGraphTransitions(mission, step) : [];
 
       const blocked = await this.propagateBlocking(mission);
       const pumped = await this.pump(mission);
       const woken = await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
 
-      return { step, dispatched: pumped.dispatched, orchestrator_woken: woken };
+      return {
+        step,
+        reported_status: reportedStatus,
+        dispatched: pumped.dispatched,
+        orchestrator_woken: woken,
+        loop_reentered: reentered,
+      };
     });
+  }
+
+  /**
+   * 방금 종료한 node의 그래프 후처리 — 실행 trace 기록 + bounded loop 재진입.
+   * 재진입된 node key들을 돌려준다. 호출자는 mission lock을 쥐고 있어야 한다.
+   */
+  private async applyGraphTransitions(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+  ): Promise<string[]> {
+    const spec = mission.graph_spec!;
+    const state = {
+      key: step.step_key,
+      status: step.status,
+      visit: step.visit ?? 0,
+      verdict: step.verdict ?? '',
+    };
+
+    // ── 1. edge 선택 이유를 trace에 남긴다 ──────────────────────────────────
+    const { taken, notTaken } = selectOutgoingEdges(spec, step.step_key, state);
+    if (taken.length > 0 || notTaken.length > 0) {
+      await this.missions.recordEvent(mission, {
+        type: 'edge_selected',
+        step_id: step.id,
+        step_key: step.step_key,
+        message:
+          `"${step.step_key}" (iteration ${state.visit}) → ` +
+          (taken.length > 0
+            ? `took ${taken.map((t) => `${t.edge.to}${t.edge.label ? ` [${t.edge.label}]` : ''}`).join(', ')}`
+            : 'took no outgoing edge') +
+          (notTaken.length > 0 ? `; skipped ${notTaken.map((t) => t.edge.to).join(', ')}` : ''),
+        actor_type: 'system',
+        data: {
+          visit: state.visit,
+          verdict: state.verdict || null,
+          taken: taken.map((t) => ({ to: t.edge.to, kind: t.edge.kind, label: t.edge.label ?? null, reason: t.reason })),
+          not_taken: notTaken.map((t) => ({ to: t.edge.to, kind: t.edge.kind, label: t.edge.label ?? null, reason: t.reason })),
+        },
+      });
+    }
+
+    // ── 2. 조건이 맞은 loop_back을 발화시킨다 ───────────────────────────────
+    const fired = firedLoopBacks(spec, step.step_key, state);
+    if (fired.length === 0) return [];
+
+    const steps = await this.missions.listSteps(mission.id);
+    const byKey = new Map(steps.map((st) => [st.step_key, st]));
+    const nodeByKey = new Map(spec.nodes.map((n) => [n.key, n]));
+    const reentered = new Set<string>();
+    const changed: OrchestrationStep[] = [];
+
+    for (const loop of fired) {
+      const target = byKey.get(loop.to);
+      const node = nodeByKey.get(loop.to);
+      if (!target || !node) continue;
+
+      // iteration hard cap: 다음 visit이 상한을 넘으면 재진입하지 않는다. 스텝을
+      // 실패시키지도 않는다 — evaluator가 남긴 verdict 때문에 하류로 가는 분기가
+      // 이미 dead라서, propagateBlocking이 하류를 blocked로 확정하고 decideWake가
+      // 오케스트레이터를 깨운다. 즉 "조용히 도는 무한 loop" 대신 "명시적으로 멈춘
+      // loop + 오케스트레이터 호출"로 끝난다.
+      const nextVisit = (target.visit ?? 0) + 1;
+      if (nextVisit > node.max_visits) {
+        await this.missions.recordEvent(mission, {
+          type: 'loop_exhausted',
+          step_id: step.id,
+          step_key: step.step_key,
+          message:
+            `Loop "${loop.from}" → "${loop.to}" hit its iteration cap (${node.max_visits}) and did not ` +
+            `re-enter. The orchestrator has to decide what happens next.`,
+          actor_type: 'system',
+          data: { from: loop.from, to: loop.to, max_visits: node.max_visits, visit: target.visit ?? 0 },
+        });
+        continue;
+      }
+
+      const body = loopBodyNodes(spec.edges, loop);
+      for (const key of body) {
+        const bodyStep = byKey.get(key);
+        if (!bodyStep) continue;
+        // 이미 이번 발화로 리셋된 node는 건너뛴다(두 loop의 본문이 겹칠 수 있다).
+        if (reentered.has(key)) continue;
+        bodyStep.status = 'pending';
+        bodyStep.visit = (bodyStep.visit ?? 0) + 1;
+        bodyStep.attempt = 0;
+        bodyStep.verdict = '';
+        bodyStep.result_summary = '';
+        bodyStep.artifacts = null;
+        bodyStep.room_id = null;
+        bodyStep.dispatched_at = null;
+        bodyStep.started_at = null;
+        bodyStep.finished_at = null;
+        reentered.add(key);
+        changed.push(bodyStep);
+      }
+
+      await this.missions.recordEvent(mission, {
+        type: 'node_revisited',
+        step_id: step.id,
+        step_key: step.step_key,
+        message:
+          `Loop "${loop.from}" → "${loop.to}"${loop.label ? ` [${loop.label}]` : ''} re-entered ` +
+          `(iteration ${nextVisit}/${node.max_visits}): ${body.join(', ')} reset for another pass.`,
+        actor_type: 'system',
+        data: { from: loop.from, to: loop.to, label: loop.label ?? null, iteration: nextVisit, max_visits: node.max_visits, body },
+      });
+    }
+
+    if (changed.length > 0) await this.stepRepo.save(changed);
+    return Array.from(reentered);
   }
 
   // ── Engine internals ──────────────────────────────────────────────────────
@@ -1040,14 +1248,49 @@ export class OrchestrationRunnerService {
    * 보고하면 자기 자신의 `justFinished`보다 그 최신 실패를 우선한다) 참고.
    * 호출자는 mission lock을 쥐고 있어야 한다.
    */
+  /**
+   * 미션의 현재 실행 판정.
+   *
+   * `graph_spec`이 있으면 그래프 규칙(typed edge / 조건 / join policy)으로, 없으면
+   * 기존 `depends_on` 규칙으로 계산한다. 분기를 **여기 한 곳**에만 두는 이유:
+   * pump / propagateBlocking / decideWake 세 호출자가 서로 다른 판정을 보면
+   * "디스패치는 되는데 곧바로 blocked 처리되는" 식의 모순 상태가 생긴다.
+   *
+   * 두 경로의 반환 필드는 동일하다 — graph adapter(`graphFromWavePlan`)가 무손실
+   * 이므로 legacy 미션을 그래프로 승격해도 같은 값이 나온다(회귀 테스트가 단언).
+   */
+  private progressOf(mission: OrchestrationMission, steps: OrchestrationStep[]): MissionProgress {
+    return computeMissionProgress(mission.graph_spec, steps);
+  }
+
+  /** graph 모드에서 남은 global budget. graph가 없으면 무한(Infinity)으로 본다. */
+  private remainingVisitBudget(mission: OrchestrationMission): number {
+    if (!mission.graph_spec) return Number.POSITIVE_INFINITY;
+    return mission.graph_spec.max_total_visits - (mission.total_visits ?? 0);
+  }
+
   private async pump(mission: OrchestrationMission): Promise<{ dispatched: string[]; failed: OrchestrationStep[] }> {
     if (mission.status !== 'running') return { dispatched: [], failed: [] };
 
     const steps = await this.missions.listSteps(mission.id);
-    const progress = computePlanProgress(
-      steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
-    );
+    const progress = this.progressOf(mission, steps);
     if (progress.dispatchable.length === 0) return { dispatched: [], failed: [] };
+
+    // graph 모드의 global budget: 남은 예산이 없으면 아무것도 새로 띄우지 않는다.
+    // 스텝을 failed로 바꾸지는 않는다 — 예산은 "지금 더 못 띄운다"이지 "이 작업이
+    // 실패했다"가 아니고, 운영자가 max_total_visits를 올리면 그대로 재개돼야 한다.
+    // 대신 이벤트를 남겨 decideWake가 정지 상태를 오케스트레이터에게 알리게 한다.
+    if (this.remainingVisitBudget(mission) <= 0) {
+      await this.missions.recordEvent(mission, {
+        type: 'graph_budget_exhausted',
+        message:
+          `Global execution budget exhausted (${mission.total_visits}/${mission.graph_spec?.max_total_visits} ` +
+          `node runs). ${progress.dispatchable.length} node(s) are ready but will not be dispatched.`,
+        actor_type: 'system',
+        data: { total_visits: mission.total_visits, max_total_visits: mission.graph_spec?.max_total_visits ?? null, withheld: progress.dispatchable },
+      });
+      return { dispatched: [], failed: [] };
+    }
 
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
     const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
@@ -1218,12 +1461,23 @@ export class OrchestrationRunnerService {
     // Stamp the attempt BEFORE sending so a send that half-succeeds cannot be
     // replayed as attempt N again.
     step.attempt += 1;
+    // visit은 loop 재진입 축이라 재시도로는 늘지 않는다(재진입 시
+    // applyGraphTransitions가 올린다). 최초 디스패치만 0 → 1로 올린다.
+    if ((step.visit ?? 0) < 1) step.visit = 1;
     step.status = 'dispatched';
     step.room_id = room.id;
     step.dispatched_at = new Date();
     step.started_at = null;
     step.finished_at = null;
     await this.stepRepo.save(step);
+
+    // global budget은 재시도까지 포함해 "subagent를 몇 번 더 띄울 수 있는가"를
+    // 센다. room 포스트 **전에** 커밋해 두는 이유: 포스트 도중 크래시가 나도 예산이
+    // 소진된 채로 남아야 재시작이 같은 예산을 다시 쓰는 일이 없다(보수적 방향).
+    if (mission.graph_spec) {
+      mission.total_visits = (mission.total_visits ?? 0) + 1;
+      await this.missionRepo.save(mission);
+    }
 
     // 이 step의 격리된 작업폴더 + repo를 해석한다(티켓 2dc3c62f):
     // `.awb/orch/` 아래 `<mission-leaf>/<step_key>` — 같은 미션의 동시 진행
@@ -1244,6 +1498,7 @@ export class OrchestrationRunnerService {
       checkoutMode: mission.checkout_mode,
     });
 
+    const graphNode = mission.graph_spec?.nodes.find((n) => n.key === step.step_key) ?? null;
     const prompt = renderStepPrompt({
       mission,
       step,
@@ -1252,6 +1507,22 @@ export class OrchestrationRunnerService {
       dependencies,
       isRetry: step.attempt > 1,
       workspaceFolder: runProvision.workspace_folder,
+      graphNode: graphNode
+        ? {
+            kind: graphNode.kind,
+            visit: step.visit ?? 1,
+            max_visits: graphNode.max_visits,
+            // 이 node에서 나가는 분기 조건 — evaluator/router가 어떤 verdict를
+            // 돌려줘야 하는지 알아야 분기가 실제로 작동한다.
+            verdicts: Array.from(
+              new Set(
+                mission.graph_spec!.edges
+                  .filter((e) => e.from === step.step_key)
+                  .flatMap((e) => e.when?.verdict ?? []),
+              ),
+            ),
+          }
+        : null,
     });
 
     await this.postToRoom(room.id, mission.workspace_id, prompt, runProvision);
@@ -1260,9 +1531,13 @@ export class OrchestrationRunnerService {
       type: 'step_dispatched',
       step_id: step.id,
       step_key: step.step_key,
-      message: `Step "${step.title}" dispatched to ${await this.agentName(agent.id)} (attempt ${step.attempt}/${step.max_attempts})`,
+      message:
+        `Step "${step.title}" dispatched to ${await this.agentName(agent.id)} ` +
+        `(attempt ${step.attempt}/${step.max_attempts}` +
+        (graphNode && graphNode.max_visits > 1 ? `, iteration ${step.visit}/${graphNode.max_visits}` : '') +
+        `)`,
       actor_type: 'system',
-      data: { room_id: room.id, assignee_agent_id: agentId, attempt: step.attempt },
+      data: { room_id: room.id, assignee_agent_id: agentId, attempt: step.attempt, visit: step.visit ?? 1 },
     });
     this.logService.info(
       'Orchestration',
@@ -1277,9 +1552,7 @@ export class OrchestrationRunnerService {
    */
   private async propagateBlocking(mission: OrchestrationMission): Promise<string[]> {
     const steps = await this.missions.listSteps(mission.id);
-    const progress = computePlanProgress(
-      steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
-    );
+    const progress = this.progressOf(mission, steps);
     if (progress.newlyBlocked.length === 0) return [];
 
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
@@ -1323,9 +1596,7 @@ export class OrchestrationRunnerService {
     if (mission.status !== 'running') return false;
 
     const steps = await this.missions.listSteps(mission.id);
-    const progress = computePlanProgress(
-      steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
-    );
+    const progress = this.progressOf(mission, steps);
     const counts = countSteps(steps);
     const quiet = progress.inFlight.length === 0;
     const failure = ctx.justFinished.status === 'failed' || ctx.justFinished.status === 'blocked';

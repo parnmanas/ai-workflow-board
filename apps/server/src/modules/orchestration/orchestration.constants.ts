@@ -87,6 +87,12 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'mission_failed',
   'mission_cancelled',
   'criteria_updated',
+  // 그래프 실행 trace(티켓 1ca9e49b) — "어느 edge를 왜 골랐는가"와 "몇 번째 반복인가"를
+  // 사후에 재구성할 수 있게 하는 이벤트들. UI 타임라인이 그대로 렌더링한다.
+  'edge_selected',
+  'node_revisited',
+  'loop_exhausted',
+  'graph_budget_exhausted',
   'post_action_dispatched',
   'post_action_dispatch_failed',
   'post_action_skipped',

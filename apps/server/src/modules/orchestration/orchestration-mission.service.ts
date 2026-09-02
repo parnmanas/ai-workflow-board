@@ -22,6 +22,7 @@ import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/age
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
+import { GraphSpec, computeMissionProgress } from './orchestration-graph';
 import { enforceRunBudget } from '../../common/run-budget-guard';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
@@ -30,7 +31,6 @@ import {
   TERMINAL_MISSION_STATUSES,
   MissionCompletionCriterion,
   MissionPostAction,
-  computePlanProgress,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
@@ -93,6 +93,10 @@ export interface MissionStepView {
   finished_at: Date | null;
   /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
   workspace_folder: string;
+  /** loop 재진입 횟수(1-based, 미실행 0). attempt(같은 iteration의 재시도)와 다른 축. */
+  visit: number;
+  /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
+  verdict: string;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -117,6 +121,12 @@ export interface MissionDetail extends MissionListItem {
   step_timeout_minutes: number;
   created_by_type: string;
   created_by: string;
+  /** 그래프 모드 여부(티켓 1ca9e49b) — false면 기존 depends_on 실행 계약. */
+  graph_enabled: boolean;
+  /** 확정된 실행 그래프. null = wave/DAG 모드. */
+  graph_spec: GraphSpec | null;
+  /** 지금까지 소진된 node 실행 횟수(global budget). */
+  total_visits: number;
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -217,6 +227,8 @@ export class OrchestrationMissionService {
     max_steps?: number;
     max_plan_versions?: number;
     step_timeout_minutes?: number;
+    /** 실행 그래프(조건 분기/join/bounded loop) 사용 여부 — 티켓 1ca9e49b. */
+    graph_enabled?: boolean;
     created_by_type?: string;
     created_by?: string;
     /**
@@ -312,6 +324,7 @@ export class OrchestrationMissionService {
         max_steps: clampInt(input.max_steps, 60, 1, MAX_STEPS_CEILING),
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
         step_timeout_minutes: clampInt(input.step_timeout_minutes, 90, 0, 60 * 24 * 7),
+        graph_enabled: input.graph_enabled === true,
         created_by_type: input.created_by_type || 'user',
         created_by: input.created_by || '',
       }),
@@ -346,6 +359,7 @@ export class OrchestrationMissionService {
       max_steps?: number;
       max_plan_versions?: number;
       step_timeout_minutes?: number;
+      graph_enabled?: boolean;
     },
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, workspaceId);
@@ -372,7 +386,11 @@ export class OrchestrationMissionService {
       patch.post_actions !== undefined ||
       patch.workspace_folder !== undefined ||
       patch.repo_ref !== undefined ||
-      patch.checkout_mode !== undefined;
+      patch.checkout_mode !== undefined ||
+      // graph_enabled도 브리핑 계약의 일부다: 미션이 이미 시작된 뒤 켜면
+      // orchestrator는 자기가 분기/loop를 쓸 수 있다는 사실을 들은 적이 없고,
+      // 끄면 이미 확정된 graph_spec이 실행 규칙과 어긋난다.
+      patch.graph_enabled !== undefined;
     if (briefLocked && touchesBrief) {
       throw orchestrationError(
         409,
@@ -417,6 +435,7 @@ export class OrchestrationMissionService {
     if (patch.max_plan_versions !== undefined) {
       mission.max_plan_versions = clampInt(patch.max_plan_versions, mission.max_plan_versions, 1, 50);
     }
+    if (patch.graph_enabled !== undefined) mission.graph_enabled = patch.graph_enabled === true;
     if (patch.step_timeout_minutes !== undefined) {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
@@ -593,6 +612,9 @@ export class OrchestrationMissionService {
       step_timeout_minutes: mission.step_timeout_minutes,
       created_by_type: mission.created_by_type,
       created_by: mission.created_by,
+      graph_enabled: !!mission.graph_enabled,
+      graph_spec: mission.graph_spec ?? null,
+      total_visits: mission.total_visits ?? 0,
       steps: steps.map((s) => {
         const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
         return {
@@ -617,6 +639,8 @@ export class OrchestrationMissionService {
           started_at: s.started_at,
           finished_at: s.finished_at,
           workspace_folder: `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
+          visit: s.visit ?? 0,
+          verdict: s.verdict ?? '',
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -646,9 +670,7 @@ export class OrchestrationMissionService {
   async getMissionForOrchestrator(missionId: string): Promise<Record<string, any>> {
     const mission = await this.requireMission(missionId);
     const steps = await this.listSteps(mission.id);
-    const progress = computePlanProgress(
-      steps.map((s) => ({ step_key: s.step_key, status: s.status, depends_on: s.depends_on })),
-    );
+    const progress = computeMissionProgress(mission.graph_spec, steps);
     const agentIds = Array.from(new Set(steps.map((s) => s.assignee_agent_id).filter((v): v is string => !!v)));
     const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
     const agentById = new Map(agents.map((a) => [a.id, a]));
@@ -685,6 +707,20 @@ export class OrchestrationMissionService {
       counts: countSteps(steps),
       dispatchable_now: progress.dispatchable,
       waiting_on_dependencies: progress.waiting,
+      graph: mission.graph_enabled
+        ? {
+            enabled: true,
+            spec: mission.graph_spec ?? null,
+            budget: {
+              total_visits: mission.total_visits ?? 0,
+              max_total_visits: mission.graph_spec?.max_total_visits ?? null,
+            },
+            note:
+              'This mission executes a graph, not a flat dependency list. Edges can be conditional, and a ' +
+              'loop_back edge sends work back for another pass when its condition matches. Steps whose node ' +
+              'is an evaluator/router MUST report a verdict — that verdict is what selects the branch.',
+          }
+        : { enabled: false },
       steps: steps.map((s) => ({
         step_id: s.id,
         step_key: s.step_key,
@@ -695,6 +731,8 @@ export class OrchestrationMissionService {
         assignee_name: s.assignee_agent_id ? displayById.get(s.assignee_agent_id) ?? '' : '',
         attempt: s.attempt,
         max_attempts: s.max_attempts,
+        visit: s.visit ?? 0,
+        verdict: s.verdict ?? '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
       })),

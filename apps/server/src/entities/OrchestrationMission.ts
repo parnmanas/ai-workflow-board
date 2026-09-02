@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { CheckoutMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 import { MissionCompletionCriterion, MissionPostAction } from '../modules/orchestration/orchestration.constants';
+import { GraphSpec } from '../modules/orchestration/orchestration-graph';
 
 /**
  * A unit of work handed to an OrchestrationTeam.
@@ -106,6 +107,37 @@ export class OrchestrationMission {
    */
   @Column({ type: 'boolean', default: false })
   post_actions_pending: boolean;
+
+  // ── 실행 그래프(티켓 1ca9e49b) ─────────────────────────────────────────────
+
+  /**
+   * Graph 모드 feature flag. false(기본)면 `submit_orchestration_plan`은 `graph`
+   * 입력을 거부하고 미션은 기존 wave/DAG 경로 그대로 동작한다 — 즉 기존 미션의
+   * 동작은 이 티켓 이후에도 한 글자도 바뀌지 않는다. 미션 단위 플래그로 둔 이유:
+   * 전역 env 스위치는 이미 진행 중인 미션까지 한꺼번에 의미를 바꿔버리는데,
+   * 그래프 기능은 미션이 **시작될 때** 어떤 계약으로 계획됐는지에 종속적이다.
+   */
+  @Column({ type: 'boolean', default: false })
+  graph_enabled: boolean;
+
+  /**
+   * 확정된 실행 그래프. null = 아직 그래프가 제출되지 않음(legacy wave 경로).
+   * `orchestration-graph.ts`의 `validateGraphSpec`을 통과한 정규화된 값만 저장된다.
+   * plan과 같은 이유로 simple-json이다 — 스케줄러는 어차피 미션 전체를 한 번에
+   * 읽으므로 edge를 따로 질의할 필요가 없고, `completion_criteria`/`post_actions`가
+   * 이미 확립한 패턴을 따른다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  graph_spec: GraphSpec | null;
+
+  /**
+   * 이 미션에서 지금까지 디스패치된 node 실행 횟수의 총합(global budget 소진량).
+   * `graph_spec.max_total_visits`와 대조되며, 초과하면 loop 재진입이 거부되고
+   * orchestrator가 깨어난다. 재시도(attempt)도 실행이므로 함께 센다 — 예산의
+   * 목적은 "이 미션이 subagent를 몇 번이나 더 띄울 수 있는가"이기 때문이다.
+   */
+  @Column({ type: 'int', default: 0 })
+  total_visits: number;
 
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
