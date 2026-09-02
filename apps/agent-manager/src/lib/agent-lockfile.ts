@@ -36,6 +36,9 @@ const RECOVERY_OWNER_PATH = join(RECOVERY_LOCK_PATH, 'owner.json');
 const FORCE_KILL_GRACE_MS = 30_000;
 const FORCE_KILL_CONFIRM_MS = 5_000;
 const RECOVERY_LOCK_STALE_MS = 60_000;
+// 회수 경로가 create 레이스에서 졌는데 승자마저 이미 죽어 있을 때만 재시도한다.
+// 살아 있는 승자에게 진 경우는 재시도 없이 곧바로 EAGENTLOCKED 다.
+const MAX_ACQUIRE_ATTEMPTS = 5;
 
 export type LockRole = 'manager';
 
@@ -121,6 +124,20 @@ export async function acquireAgentLock(opts: AcquireOptions): Promise<LockHandle
     started_at: new Date().toISOString(),
   };
 
+  // 회수 경로가 create 레이스에서 이미 죽은 승자에게 졌을 때만 다시 돈다
+  // (ELOCKRACE). 그 외 결과는 첫 시도에서 그대로 확정된다.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await attemptAcquire(payload, force);
+    } catch (err: any) {
+      if (err?.code !== 'ELOCKRACE' || attempt >= MAX_ACQUIRE_ATTEMPTS) throw err;
+    }
+  }
+}
+
+async function attemptAcquire(payload: LockPayload, force: boolean): Promise<LockHandle> {
+  const role = payload.role;
+
   // First attempt — pure happy path.
   try {
     writeLockAtomic(payload);
@@ -188,7 +205,7 @@ export async function acquireAgentLock(opts: AcquireOptions): Promise<LockHandle
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
     }
-    writeLockAtomic(payload);
+    createAfterCleanup(payload);
   } finally {
     releaseRecovery();
   }
@@ -206,12 +223,50 @@ async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandl
     } catch (err: any) {
       if (err?.code !== 'ENOENT') throw err;
     }
-    writeLockAtomic(payload);
+    createAfterCleanup(payload);
   } finally {
     releaseRecovery();
   }
   log(`[lockfile] acquired after stale-cleanup (role=${payload.role} pid=${process.pid})`);
   return makeReleaseHandle(payload);
+}
+
+/** 회수 가드(acquireRecoveryLock) 안에서 unlink 직후 새 lock 을 만든다.
+ *
+ *  가드는 **회수 경로에 들어온 contender 만** 직렬화한다. 첫 시도의 O_EXCL
+ *  create(위 attemptAcquire happy path)는 가드를 거치지 않으므로, 회수 경로가
+ *  unlink 한 뒤 create 하기 전 사이에 갓 시작한 contender 의 첫 시도가 파일을
+ *  선점할 수 있다. 그 창은 Windows CI 에서 실제로 관측됐다(파일 연산이 느려
+ *  창이 넓다): 회수 경로가 raw `EEXIST` 를 그대로 올려, `EAGENTLOCKED` 를
+ *  기대하는 호출자에게 fs 오류 코드가 새어 나갔다.
+ *
+ *  창 자체는 O_EXCL 의미상 없앨 수 없으므로 결과를 다시 판정한다 —
+ *  살아 있는 승자에게 졌으면 EAGENTLOCKED, 승자마저 죽었으면 재시도. */
+function createAfterCleanup(payload: LockPayload): void {
+  try {
+    writeLockAtomic(payload);
+  } catch (err: any) {
+    if (err?.code !== 'EEXIST') throw err;
+    const verdict = resolveLostCreateRace(readLock, isPidAlive);
+    if (verdict.outcome === 'locked') throw lockedBy(verdict.owner);
+    const retry: any = new Error(
+      'AWB agent-manager lock create lost a race to an owner that is already gone; retrying',
+    );
+    retry.code = 'ELOCKRACE';
+    throw retry;
+  }
+}
+
+/** createAfterCleanup 의 판정 규칙. 순수 로직 + 의존성 주입이라 실제 프로세스
+ *  레이스를 재현하지 않고도 두 분기를 결정적으로 unit test 할 수 있다
+ *  (cli-resolver 의 `selectBinary` 와 같은 주입 스타일). */
+export function resolveLostCreateRace(
+  read: () => ParsedLock | null,
+  alive: (pid: number) => boolean,
+): { outcome: 'locked'; owner: ParsedLock } | { outcome: 'retry' } {
+  const winner = read();
+  if (winner && alive(winner.pid)) return { outcome: 'locked', owner: winner };
+  return { outcome: 'retry' };
 }
 
 async function acquireRecoveryLock(): Promise<() => void> {
