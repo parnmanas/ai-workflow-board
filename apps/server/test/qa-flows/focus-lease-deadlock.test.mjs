@@ -431,7 +431,14 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     //     티켓 행을 CAS 하므로 티켓 단위 CAS 만으로는 둘 다 통과한다.
     // 5b: 같은 티켓을 두 패스가 노리는 경우 — 이중 승격/이중 감사 행 금지.
     // ──────────────────────────────────────────────────────────────────
-    step('Case 5a — 같은 담당자의 두 후보 동시 승격 시 cap=1 이 지켜진다');
+    // 범위 명시: 5a 는 **불변식 테스트**이지 이 경합의 회귀 테스트가 아니다.
+    // sql.js 는 단일 커넥션 + 트랜잭션 FIFO 직렬화라 한쪽의 이동이 다른 쪽에
+    // 즉시 보이므로, 보드 잠금이 없어도 두 번째 패스가 알아서 cap 포화를 보고
+    // 물러난다 — 즉 픽스 이전 코드로도 통과한다. 진짜 write skew(READ
+    // COMMITTED 에서 서로 다른 행을 CAS 해 둘 다 성공)는 진짜 병렬 트랜잭션이
+    // 있어야 재현되므로 `backlog-promotion-pg-slot-race.test.mjs` (Postgres
+    // 전용)가 담당한다. 여기서 sql.js 통과를 Postgres 보장으로 읽지 말 것.
+    step('Case 5a — 같은 담당자의 두 후보 동시 승격 시 cap=1 이 지켜진다 (불변식)');
     const c5 = await makeBoard('lease-case5');
     // 둘 다 alice 담당. cap=1 이므로 동시에 두 건이 승격되면 max_concurrent
     // 위반이다.
