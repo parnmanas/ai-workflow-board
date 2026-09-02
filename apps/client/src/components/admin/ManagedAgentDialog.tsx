@@ -135,7 +135,17 @@ export default function ManagedAgentDialog({
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
     api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
-      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
+      if (!alive) return;
+      const availableProfiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
+      setRuntimeProfiles(availableProfiles);
+      // 에이전트 스냅샷/열려 있던 다이얼로그에 삭제되었거나 이전 workspace의
+      // 프로필 ID가 남아 있으면 서버의 workspace 검증에서 저장 전체가 실패한다.
+      // 현재 workspace가 반환한 권위 목록과 즉시 재동기화해 상속 상태로 되돌린다.
+      setRuntimeProfile(current => (
+        !current || current === 'none' || availableProfiles.some(profile => profile.id === current)
+          ? current
+          : ''
+      ));
     }).catch(() => { if (alive) setRuntimeProfiles([]); });
     return () => { alive = false; };
   }, [isOpen, mode, agent?.workspace_id]);

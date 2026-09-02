@@ -25,6 +25,11 @@ test('AgentsPage loads workspace-scoped Claude backend profiles for the create f
   // ManagedAgentDialog so a profile disabled for this workspace can't be
   // picked from AgentsPage even though the registry still returns it.
   assert.match(source, /data\.allowed_profile_ids\.includes\(p\.id\)/);
+  assert.match(
+    source,
+    /availableProfiles\.some\(profile => profile\.id === form\.runtime_profile\)[\s\S]*?runtime_profile: ''/,
+    'workspace 변경 뒤 남은 stale profile 선택은 상속 상태로 해제해야 한다',
+  );
 });
 
 test('create form renders a Claude backend profile selector for claude agents', () => {

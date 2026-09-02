@@ -238,7 +238,18 @@ export default function AgentsPage() {
         .catch(() => { if (alive) setCredentials([]); });
       api.getWorkspaceClaudeBackendProfiles(wsId)
         .then((data) => {
-          if (alive) setRuntimeProfiles(data.profiles.filter(p => data.allowed_profile_ids.includes(p.id)));
+          if (!alive) return;
+          const availableProfiles = data.profiles.filter(p => data.allowed_profile_ids.includes(p.id));
+          setRuntimeProfiles(availableProfiles);
+          // workspace 전환 뒤 생성 폼 상태가 유지돼도 이전 workspace의 profile
+          // ID를 전송하지 않도록 현재 workspace의 권위 목록과 선택값을 맞춘다.
+          setManagedForm(form => (
+            !form.runtime_profile
+              || form.runtime_profile === 'none'
+              || availableProfiles.some(profile => profile.id === form.runtime_profile)
+              ? form
+              : { ...form, runtime_profile: '' }
+          ));
         })
         .catch(() => { if (alive) setRuntimeProfiles([]); });
     } else {
