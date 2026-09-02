@@ -690,6 +690,241 @@ export function graphFromWavePlan(steps: WaveStepInput[]): GraphSpec {
   return validated.spec;
 }
 
+// ── Runtime graph patching (티켓 2fc8f99a) ───────────────────────────────────
+//
+// 그래프 전체 재제출(`submit_orchestration_plan`의 `graph`)은 실행 중인 미션을
+// 고치기에는 너무 무딘 도구다: edge 하나를 바꾸려고 그래프 전체를 다시 써야 하고,
+// 빠뜨린 node/edge는 조용히 사라지며, `max_plan_versions` 예산까지 함께 태운다.
+//
+// patch는 **그래프만** 부분 수정한다 — plan(step 집합)은 건드리지 않는다. node
+// 추가/삭제가 patch 연산에 없는 이유가 이것이다: node는 step과 1:1이므로 node를
+// 늘리려면 step을 늘려야 하고, 그건 `submit_orchestration_plan`의 일이다.
+//
+// ── 실행 중 수정의 안전 규칙 ────────────────────────────────────────────────
+// 원칙: **이미 일어난 실행 이력을 patch가 소급해서 무효화할 수 없다.**
+//
+// 1. node의 `max_visits`를 이미 소진한 `visit` 아래로 낮출 수 없다. 낮추면 "상한을
+//    넘긴 채 이미 실행된 node"라는, 엔진이 표현할 수 없는 상태가 된다. 정확히 현재
+//    visit으로 낮추는 것은 허용한다 — "이번 pass가 마지막"이라는 뜻이고, 폭주하는
+//    loop를 세우는 정상적인 수단이다.
+// 2. `max_total_visits`를 이미 소진한 `total_visits` 아래로 낮출 수 없다(같은 이유).
+// 3. `loop_back` edge 제거는 **항상 허용**된다. loop_back은 의존성으로 세지 않으므로
+//    (`computeGraphProgress`가 건너뛴다) 제거해도 어떤 node도 막지 않는다. 이미 끝난
+//    재진입은 그대로 남고 앞으로의 재진입만 사라진다 — 폭주 loop의 탈출구다.
+// 4. 이미 종료했거나 실행 중인 node로 들어가는 edge 추가는 허용하되, 그 edge가 이번
+//    pass에는 영향을 주지 못한다는 사실을 `changes`에 명시해 돌려준다(loop로 재진입
+//    하면 그때부터 적용된다). 조용히 받아들이면 오케스트레이터가 걸지도 않은 게이트를
+//    걸었다고 착각한다.
+//
+// 구조적 불변식(순환·loop 규칙·고아 node·router/evaluator 규칙·예산 하한)은 patch를
+// 적용한 결과 **전체**를 `validateGraphSpec`에 다시 통과시켜 재검증한다 — patch 전용
+// 검증 경로를 따로 만들지 않는다. 두 경로가 갈라지는 순간 "제출로는 거부되는데 patch로는
+// 통과하는 그래프"가 생긴다.
+
+/** 한 미션이 받을 수 있는 graph patch 총 횟수 — patch 폭주/이벤트 로그 범람 가드. */
+export const MAX_GRAPH_PATCHES = 50;
+
+export interface GraphNodePatch {
+  key: string;
+  kind?: string;
+  join?: string;
+  max_visits?: number;
+}
+
+export interface GraphEdgeRemoval {
+  from: string;
+  to: string;
+  /** 생략하면 from→to 의 모든 edge를 제거한다. */
+  kind?: string;
+}
+
+export interface GraphPatchInput {
+  set_nodes?: GraphNodePatch[];
+  add_edges?: GraphEdgeInput[];
+  remove_edges?: GraphEdgeRemoval[];
+  max_total_visits?: number;
+}
+
+/** patch 안전성 판정에 필요한 현재 실행 상태. */
+export interface GraphRuntimeState {
+  nodes: GraphNodeState[];
+  /** mission.total_visits — 지금까지 소진한 global budget. */
+  total_visits: number;
+}
+
+export interface GraphPatchChange {
+  kind: 'node_updated' | 'edge_added' | 'edge_removed' | 'budget_updated';
+  /** 사람이 읽을 변경 요약 — 이벤트 메시지에 그대로 들어간다. */
+  detail: string;
+  /**
+   * 이 변경이 **이번 pass에는** 효력이 없을 때 그 이유. 거부 사유가 아니라 경고다
+   * (규칙 4). 재진입이 일어나면 그때부터 적용된다.
+   */
+  inert_reason?: string;
+}
+
+const edgeSignature = (e: { from: string; to: string; kind?: string }): string =>
+  `${e.from} → ${e.to}${e.kind ? ` (${e.kind})` : ''}`;
+
+/**
+ * 확정된 GraphSpec에 제한된 patch를 적용하고 전체를 재검증한다.
+ *
+ * 성공하면 새 spec과 사람이 읽을 변경 목록을, 실패하면 거부 사유를 돌려준다.
+ * 순수 함수다 — 저장도 이벤트 기록도 호출자(runner service)의 몫이다.
+ */
+export function applyGraphPatch(
+  spec: GraphSpec,
+  patch: GraphPatchInput | null | undefined,
+  opts: { nodeKeys: string[]; runtime: GraphRuntimeState },
+): { spec: GraphSpec; changes: GraphPatchChange[] } | GraphValidationError {
+  if (!patch || typeof patch !== 'object') return { error: 'graph patch must be an object' };
+
+  const setNodes = Array.isArray(patch.set_nodes) ? patch.set_nodes : [];
+  const addEdges = Array.isArray(patch.add_edges) ? patch.add_edges : [];
+  const removeEdges = Array.isArray(patch.remove_edges) ? patch.remove_edges : [];
+  const budgetGiven = patch.max_total_visits !== undefined && patch.max_total_visits !== null;
+  if (setNodes.length === 0 && addEdges.length === 0 && removeEdges.length === 0 && !budgetGiven) {
+    return {
+      error:
+        'graph patch is empty — give at least one of set_nodes, add_edges, remove_edges or max_total_visits',
+    };
+  }
+
+  const changes: GraphPatchChange[] = [];
+  const stateByKey = new Map(opts.runtime.nodes.map((n) => [n.key, n]));
+
+  // 현재 spec을 입력 형태로 되돌린다. 명시값을 그대로 실어야 patch가 건드리지 않은
+  // 속성이 재검증 과정에서 기본값으로 되돌아가지 않는다.
+  const nodeInputs = new Map<string, GraphNodeInput>(
+    spec.nodes.map((n) => [n.key, { key: n.key, kind: n.kind, join: n.join, max_visits: n.max_visits }]),
+  );
+  let edgeInputs: GraphEdgeInput[] = spec.edges.map((e) => ({
+    from: e.from,
+    to: e.to,
+    kind: e.kind,
+    ...(e.when ? { when: e.when } : {}),
+    ...(e.label ? { label: e.label } : {}),
+  }));
+
+  // ── remove_edges ─────────────────────────────────────────────────────────
+  for (const removal of removeEdges) {
+    const from = String(removal?.from ?? '').trim();
+    const to = String(removal?.to ?? '').trim();
+    const kind = removal?.kind ? String(removal.kind).trim() : undefined;
+    const matches = edgeInputs.filter((e) => e.from === from && e.to === to && (!kind || e.kind === kind));
+    if (matches.length === 0) {
+      // 조용한 no-op은 오타를 성공으로 보고하게 만든다.
+      return {
+        error:
+          `graph patch cannot remove edge ${edgeSignature({ from, to, kind })} — no such edge in the ` +
+          `current graph`,
+      };
+    }
+    edgeInputs = edgeInputs.filter((e) => !matches.includes(e));
+    for (const m of matches) {
+      changes.push({ kind: 'edge_removed', detail: `removed ${edgeSignature(m)}` });
+    }
+  }
+
+  // ── add_edges ────────────────────────────────────────────────────────────
+  for (const raw of addEdges) {
+    const from = String(raw?.from ?? '').trim();
+    const to = String(raw?.to ?? '').trim();
+    const kind = raw?.kind ? String(raw.kind).trim() : 'sequence';
+    edgeInputs.push({
+      from,
+      to,
+      kind,
+      ...(raw?.when ? { when: raw.when } : {}),
+      ...(raw?.label ? { label: raw.label } : {}),
+    });
+    const change: GraphPatchChange = { kind: 'edge_added', detail: `added ${edgeSignature({ from, to, kind })}` };
+    // 규칙 4 — 이미 확정/실행 중인 node로 들어가는 edge는 이번 pass에 효력이 없다.
+    const target = stateByKey.get(to);
+    if (target && kind !== 'loop_back') {
+      if (isTerminal(target.status)) {
+        change.inert_reason =
+          `"${to}" already finished (${target.status}) — this edge does not gate the run that already ` +
+          `happened; it applies only if the node is re-entered by a loop`;
+      } else if (['dispatched', 'running'].includes(target.status)) {
+        change.inert_reason =
+          `"${to}" is already ${target.status} — this edge does not gate the pass that is already in ` +
+          `flight; it applies only if the node is re-entered by a loop`;
+      }
+    }
+    changes.push(change);
+  }
+
+  // ── set_nodes ────────────────────────────────────────────────────────────
+  for (const raw of setNodes) {
+    const key = String(raw?.key ?? '').trim();
+    const current = nodeInputs.get(key);
+    if (!current) {
+      return {
+        error:
+          `graph patch cannot update node "${raw?.key}" — it is not in the current graph. A patch may only ` +
+          `change existing nodes; add or remove work with submit_orchestration_plan.`,
+      };
+    }
+    const before = `kind=${current.kind}, join=${current.join}, max_visits=${current.max_visits}`;
+    if (raw?.kind !== undefined) current.kind = String(raw.kind).trim();
+    if (raw?.join !== undefined) current.join = String(raw.join).trim();
+    if (raw?.max_visits !== undefined) current.max_visits = raw.max_visits;
+    const after = `kind=${current.kind}, join=${current.join}, max_visits=${current.max_visits}`;
+    if (before !== after) changes.push({ kind: 'node_updated', detail: `node "${key}": ${before} → ${after}` });
+  }
+
+  // ── budget ───────────────────────────────────────────────────────────────
+  const nextBudget = budgetGiven ? patch.max_total_visits! : spec.max_total_visits;
+  if (budgetGiven && nextBudget !== spec.max_total_visits) {
+    changes.push({
+      kind: 'budget_updated',
+      detail: `max_total_visits: ${spec.max_total_visits} → ${nextBudget}`,
+    });
+  }
+
+  if (changes.length === 0) {
+    return { error: 'graph patch would not change anything — the graph already matches what you asked for' };
+  }
+
+  // ── 구조 재검증 ──────────────────────────────────────────────────────────
+  const revalidated = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: Array.from(nodeInputs.values()),
+      edges: edgeInputs,
+      max_total_visits: nextBudget,
+    },
+    { nodeKeys: opts.nodeKeys },
+  );
+  if ('error' in revalidated) return { error: `graph patch rejected: ${revalidated.error}` };
+
+  // ── 실행 이력과의 정합성(규칙 1·2) ──────────────────────────────────────
+  // 재검증 뒤의 값으로 본다 — loop 본문 전파가 max_visits를 올릴 수 있으므로
+  // 요청값이 아니라 엔진이 실제로 강제할 값이 기준이어야 한다.
+  for (const node of revalidated.spec.nodes) {
+    const used = stateByKey.get(node.key)?.visit ?? 0;
+    if (node.max_visits < used) {
+      return {
+        error:
+          `graph patch rejected: node "${node.key}" has already run ${used} time(s), so its max_visits ` +
+          `cannot be lowered to ${node.max_visits}. Lower it to ${used} to stop it from running again, ` +
+          `or leave it alone.`,
+      };
+    }
+  }
+  if (revalidated.spec.max_total_visits < opts.runtime.total_visits) {
+    return {
+      error:
+        `graph patch rejected: the mission has already used ${opts.runtime.total_visits} of its execution ` +
+        `budget, so max_total_visits cannot be lowered to ${revalidated.spec.max_total_visits}. Lower it to ` +
+        `${opts.runtime.total_visits} to stop further dispatches.`,
+    };
+  }
+
+  return { spec: revalidated.spec, changes };
+}
+
 // ── 미션 단위 판정 진입점 ────────────────────────────────────────────────────
 
 export interface MissionStepStateView {

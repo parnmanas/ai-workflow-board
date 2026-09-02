@@ -93,6 +93,9 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'node_revisited',
   'loop_exhausted',
   'graph_budget_exhausted',
+  // 실행 중 그래프 부분 수정(티켓 2fc8f99a) — 어떤 edge/node/예산이 언제 왜 바뀌었는지
+  // 사후에 재구성할 수 있어야 "왜 이 분기가 갑자기 열렸나"를 설명할 수 있다.
+  'graph_patched',
   'post_action_dispatched',
   'post_action_dispatch_failed',
   'post_action_skipped',

@@ -139,6 +139,17 @@ export class OrchestrationMission {
   @Column({ type: 'int', default: 0 })
   total_visits: number;
 
+  /**
+   * 그래프가 부분 수정(patch)된 횟수 — 0 = 확정 이후 한 번도 patch 되지 않음(티켓 2fc8f99a).
+   *
+   * `GraphSpec.version`(스키마 버전)과 **다른 축**이다: 그쪽은 "이 서버가 해석할 수 있는
+   * 스키마인가"를 판정하는 값이라 `validateGraphSpec`이 상수와 엄격히 비교한다. 그래서
+   * 수정 횟수를 거기에 실을 수 없고, 별도 카운터를 둔다. `plan_version`과도 다르다 —
+   * patch는 plan(step 집합)을 바꾸지 않으므로 replan 예산을 소모하지 않는다.
+   */
+  @Column({ type: 'int', default: 0 })
+  graph_revision: number;
+
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
 
