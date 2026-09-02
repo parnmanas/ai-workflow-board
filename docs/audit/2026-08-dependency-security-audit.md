@@ -1563,3 +1563,25 @@ install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 a
 통과했다. 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지
 않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
 `apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-09-02 (`main` @ `26541422`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`cdb6d75f`)를 함께 감사했다. `production.private`가 해당
+`main` 커밋을 포함하고 있으며 root 및 세 workspace의 manifest와 lockfile은
+바이트 단위로 동일해 lockfile drift가 없었다. `npm audit`과
+`npm audit --omit=dev`는 각각 **0 vulnerabilities**(총 610 packages)였고,
+레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 공급망 무결성, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도
+통과했다. 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지
+않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+로컬 공유 `node_modules`가 최신 `main`보다 오래돼 `@ast-grep/napi`,
+`web-tree-sitter`, `@node-rs/xxhash`가 없어 전체 server test의 선행 build는
+실행할 수 없었다. 세 패키지는 manifest와 lockfile에 정상 등록돼 있으며, 이번
+감사의 독립 보안 가드 48건은 build 없이 직접 실행해 모두 통과했다.
