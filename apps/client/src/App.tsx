@@ -90,7 +90,7 @@ function LegacyCatalogRedirect() {
 // Teams 가 WORK 의 독립 최상위 메뉴로 승격되면서 정식 경로가 /ws/:wsId/teams 로
 // 옮겨졌다(티켓 03ca8b5b). 예전 /ws/:wsId/orchestration/teams 딥링크(북마크,
 // 기존 코멘트 링크)가 깨지지 않도록 절대 경로로 리다이렉트한다.
-function LegacyOrchestrationTeamsRedirect() {
+export function LegacyOrchestrationTeamsRedirect() {
   const { wsId } = useParams<{ wsId: string }>();
   return <Navigate to={`/ws/${wsId}/teams`} replace />;
 }
