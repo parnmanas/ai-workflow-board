@@ -9,6 +9,11 @@
 //                  SIGTERM the owner, wait briefly, overwrite the lock.
 //      - dead    → stale (last owner crashed). Remove and retry create.
 //   3. Garbage on disk (unparseable JSON / pid=0): treat as stale, remove.
+//   4. 2·3 의 회수(remove→create)는 회수 가드로 직렬화되지만, 그 가드는 회수
+//      경로에 들어온 contender 만 붙잡는다 — 1번 happy path 의 create 는 가드를
+//      거치지 않으므로 remove 와 create 사이를 파고들 수 있다. 그렇게 create 가
+//      EEXIST 로 지면 raw fs 오류를 올리지 않고 승자를 다시 읽어 판정한다:
+//      살아 있으면 EAGENTLOCKED, 그마저 죽었으면 처음부터 재시도(createAfterCleanup).
 //
 // Release rules:
 //   - On clean shutdown call release(); only unlinks if pid still matches ours.
