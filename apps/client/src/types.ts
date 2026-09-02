@@ -1579,6 +1579,9 @@ export interface Workspace {
   // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
   // boards override it per key via Board.harness_config.
   harness_config?: string | null;
+  // Workspace 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
+  // JSON 문자열로 내려오며, Repo Resource 가 키 단위로 덮는다.
+  clone_policy?: string | null;
   cli_runtime_profiles?: string | null;
   default_cli_runtime_profile?: string | null;
   default_claude_backend_profile_id?: string | null;
