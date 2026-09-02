@@ -163,6 +163,19 @@ export default function ResourceDetailPanel({
   };
 
   const defaultBranch = (resource.default_branch || '').trim();
+  // clone 정책이 설정된 키만 배지로 보여준다(ticket bddb63ee) — 미설정 키는
+  // 워크스페이스 기본값 → 시스템 기본값으로 흘러내리므로 여기 표시하지 않는다.
+  const clonePolicyBadges = useMemo(() => {
+    const p = resource.clone_policy;
+    if (!p) return [];
+    const out: string[] = [];
+    if (p.clone_timeout_seconds != null) out.push(`clone timeout: ${p.clone_timeout_seconds}s`);
+    if (p.clone_idle_timeout_seconds != null) out.push(`idle timeout: ${p.clone_idle_timeout_seconds}s`);
+    if (p.clone_depth != null) out.push(`depth: ${p.clone_depth}`);
+    if (p.clone_filter) out.push(`filter: ${p.clone_filter}`);
+    if (p.single_branch) out.push('single-branch');
+    return out;
+  }, [resource.clone_policy]);
   const filteredBranches = useMemo(() => {
     if (!branches) return [];
     const q = branchQuery.trim().toLowerCase();
@@ -198,6 +211,9 @@ export default function ResourceDetailPanel({
             {isRepo && defaultBranch && (
               <Badge variant="info">default: {defaultBranch}</Badge>
             )}
+            {isRepo && clonePolicyBadges.map((label) => (
+              <Badge key={label} variant="neutral">{label}</Badge>
+            ))}
           </div>
           {resource.description && (
             <div style={{ fontSize: 13, color: tokens.colors.textSecondary, marginTop: 4, lineHeight: 1.4 }}>

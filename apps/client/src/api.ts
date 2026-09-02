@@ -1,6 +1,7 @@
 import type {
   PromptTemplate,
   Resource,
+  ClonePolicy,
   Action,
   ActionRun,
   WorkflowFunction,
@@ -1034,6 +1035,7 @@ export const api = {
     file_mimetype?: string;
     tags?: string[];
     default_branch?: string;
+    clone_policy?: ClonePolicy | null;
   }) =>
     request<Resource>('/resources', { method: 'POST', body: JSON.stringify(data) }),
   updateResource: (
@@ -1052,6 +1054,7 @@ export const api = {
       tags?: string[];
       credential_id?: string | null;
       default_branch?: string;
+      clone_policy?: ClonePolicy | null;
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

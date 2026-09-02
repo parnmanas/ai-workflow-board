@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { CatalogScope, Resource, Credential, RepoBranch } from '../../types';
+import type { CatalogScope, ClonePolicy, Resource, Credential, RepoBranch } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
@@ -72,7 +72,15 @@ export default function ResourceManager({
   const [formFileMimetype, setFormFileMimetype] = useState('');
   const [formCredentialId, setFormCredentialId] = useState<string>('');
   const [formDefaultBranch, setFormDefaultBranch] = useState('');
-  const [formErrors, setFormErrors] = useState<{ name?: string }>({});
+  // clone 정책(ticket bddb63ee). 문자열 상태로 들고 있다가 저장 직전에 숫자/불리언으로
+  // 정규화한다 — 빈 문자열 = "이 키는 지정하지 않음"(Workspace 기본값 → 시스템 기본값
+  // 으로 흘러내림)이라, 0 과 "미지정" 을 구분해야 하기 때문이다.
+  const [formCloneTimeout, setFormCloneTimeout] = useState('');
+  const [formCloneIdleTimeout, setFormCloneIdleTimeout] = useState('');
+  const [formCloneDepth, setFormCloneDepth] = useState('');
+  const [formCloneFilter, setFormCloneFilter] = useState('');
+  const [formSingleBranch, setFormSingleBranch] = useState(false);
+  const [formErrors, setFormErrors] = useState<{ name?: string; clonePolicy?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string; kind: 'image' | 'video' } | null>(null);
 
@@ -201,6 +209,51 @@ export default function ResourceManager({
     }
   };
 
+  // ── clone 정책 폼 헬퍼 (ticket bddb63ee) ──────────────────────────────────
+  // 저장된 정책 ⇄ 폼 문자열 사이의 단일 변환 지점. 빈 문자열은 "미지정"이며
+  // 저장 시 키 자체를 생략해 Workspace 기본값이 그대로 상속되게 한다.
+  const resetClonePolicyForm = (policy: ClonePolicy | null) => {
+    setFormCloneTimeout(policy?.clone_timeout_seconds != null ? String(policy.clone_timeout_seconds) : '');
+    setFormCloneIdleTimeout(policy?.clone_idle_timeout_seconds != null ? String(policy.clone_idle_timeout_seconds) : '');
+    setFormCloneDepth(policy?.clone_depth != null ? String(policy.clone_depth) : '');
+    setFormCloneFilter(policy?.clone_filter || '');
+    setFormSingleBranch(policy?.single_branch === true);
+  };
+
+  /**
+   * 폼 → 저장 payload. 모든 필드가 비어 있으면 null(정책 제거)을 돌려준다.
+   * 숫자 필드가 정수로 해석되지 않으면 검증 오류를 돌려 저장을 막는다 — 서버도
+   * 같은 범위를 강제하지만, 여기서 잡아야 사용자가 어느 칸이 문제인지 알 수 있다.
+   */
+  const buildClonePolicy = (): { ok: true; value: ClonePolicy | null } | { ok: false; error: string } => {
+    const num = (raw: string, label: string, min: number, max: number) => {
+      const t = raw.trim();
+      if (!t) return { present: false as const };
+      if (!/^\d+$/.test(t)) return { present: true as const, error: `${label}: 정수만 입력하세요` };
+      const n = Number(t);
+      if (n < min || n > max) return { present: true as const, error: `${label}: ${min}~${max} 범위여야 합니다` };
+      return { present: true as const, value: n };
+    };
+    const timeout = num(formCloneTimeout, 'Clone timeout (s)', 60, 86400);
+    const idle = num(formCloneIdleTimeout, 'Idle timeout (s)', 0, 86400);
+    const depth = num(formCloneDepth, 'Clone depth', 1, 1000000);
+    for (const f of [timeout, idle, depth]) {
+      if (f.present && 'error' in f && f.error) return { ok: false, error: f.error };
+    }
+    const filter = formCloneFilter.trim();
+    if (filter && !/^[A-Za-z0-9][A-Za-z0-9:=+._-]*$/.test(filter)) {
+      return { ok: false, error: 'Clone filter: blob:none / tree:0 같은 형태만 허용됩니다' };
+    }
+    if (filter.length > 64) return { ok: false, error: 'Clone filter: 64자 이하여야 합니다' };
+    const value: ClonePolicy = {};
+    if (timeout.present && 'value' in timeout) value.clone_timeout_seconds = timeout.value;
+    if (idle.present && 'value' in idle) value.clone_idle_timeout_seconds = idle.value;
+    if (depth.present && 'value' in depth) value.clone_depth = depth.value;
+    if (filter) value.clone_filter = filter;
+    if (formSingleBranch) value.single_branch = true;
+    return { ok: true, value: Object.keys(value).length > 0 ? value : null };
+  };
+
   const startCreate = () => {
     setFormName('');
     setFormDescription('');
@@ -213,6 +266,7 @@ export default function ResourceManager({
     setFormFileMimetype('');
     setFormCredentialId('');
     setFormDefaultBranch('');
+    resetClonePolicyForm(null);
     setFormErrors({});
     resetBranchTest();
     setEditResource(null);
@@ -231,6 +285,7 @@ export default function ResourceManager({
     setFormFileMimetype(resource.file_mimetype || '');
     setFormCredentialId(resource.credential_id || '');
     setFormDefaultBranch(resource.default_branch || '');
+    resetClonePolicyForm(resource.clone_policy ?? null);
     setFormErrors({});
     resetBranchTest();
     setEditResource(resource);
@@ -300,8 +355,16 @@ export default function ResourceManager({
   };
 
   const handleSave = async () => {
-    const errors: { name?: string } = {};
+    const errors: { name?: string; clonePolicy?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
+    // clone 정책은 repository 타입에서만 의미가 있다 — 다른 타입에서는 폼에
+    // 노출되지 않으므로 검증도 건너뛰고 저장 시 null 로 지운다.
+    let clonePolicy: ClonePolicy | null = null;
+    if (formType === 'repository') {
+      const built = buildClonePolicy();
+      if (!built.ok) errors.clonePolicy = built.error;
+      else clonePolicy = built.value;
+    }
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
       return;
@@ -333,6 +396,7 @@ export default function ResourceManager({
           tags: parsedTags,
           credential_id: formCredentialId || null,
           default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
+          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource updated.', 'success');
       } else {
@@ -350,6 +414,7 @@ export default function ResourceManager({
           file_mimetype: formFileMimetype,
           tags: parsedTags,
           default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
+          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource created.', 'success');
       }
@@ -926,6 +991,71 @@ export default function ResourceManager({
               {branchTestResult && branchTestResult.length > 0 && (
                 <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
                   Click a branch above to pin as default, or type a custom name.
+                </div>
+              )}
+            </div>
+          )}
+
+          {formType === 'repository' && (
+            <div>
+              <label style={{
+                fontSize: tokens.typography.fontSizeXs,
+                fontWeight: tokens.typography.fontWeightSemibold,
+                color: tokens.colors.textMuted,
+                textTransform: 'uppercase',
+                display: 'block',
+                marginBottom: tokens.spacing.xs,
+              }}>Clone Policy</label>
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: tokens.spacing.sm }}>
+                {`비워두면 워크스페이스 기본값 → 시스템 기본값(clone timeout 3600초, idle timeout 600초, 전체 clone)이 적용됩니다. 대형 저장소는 timeout을 늘리거나 depth/filter/single-branch로 clone 자체를 줄이세요.`}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: tokens.spacing.sm }}>
+                {([
+                  { label: 'Clone timeout (s)', value: formCloneTimeout, set: setFormCloneTimeout, placeholder: '3600' },
+                  { label: 'Idle timeout (s)', value: formCloneIdleTimeout, set: setFormCloneIdleTimeout, placeholder: '600 (0 = off)' },
+                  { label: 'Depth', value: formCloneDepth, set: setFormCloneDepth, placeholder: 'full history' },
+                  { label: 'Filter', value: formCloneFilter, set: setFormCloneFilter, placeholder: 'e.g. blob:none' },
+                ] as const).map((field) => (
+                  <div key={field.label}>
+                    <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginBottom: 2 }}>{field.label}</div>
+                    <input
+                      value={field.value}
+                      onChange={(e) => field.set(e.target.value)}
+                      placeholder={field.placeholder}
+                      style={{
+                        background: tokens.colors.surface,
+                        border: `1px solid ${tokens.colors.border}`,
+                        borderRadius: tokens.radii.md,
+                        padding: '8px 10px',
+                        color: tokens.colors.textStrong,
+                        fontSize: tokens.typography.fontSizeMd,
+                        outline: 'none',
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        fontFamily: 'inherit',
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: tokens.spacing.xs,
+                marginTop: tokens.spacing.sm,
+                fontSize: tokens.typography.fontSizeMd,
+                color: tokens.colors.textStrong,
+              }}>
+                <input
+                  type="checkbox"
+                  checked={formSingleBranch}
+                  onChange={(e) => setFormSingleBranch(e.target.checked)}
+                />
+                {`single-branch clone (대상 브랜치만 가져옴 — 다른 브랜치를 base로 쓰는 티켓은 이 저장소에서 체크아웃할 수 없게 됩니다)`}
+              </label>
+              {formErrors.clonePolicy && (
+                <div style={{ fontSize: '11px', color: tokens.colors.danger, marginTop: 4 }}>
+                  {formErrors.clonePolicy}
                 </div>
               )}
             </div>
