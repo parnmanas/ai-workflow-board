@@ -57,7 +57,7 @@ export type ToolProfile = 'full' | 'compact';
 
 /**
  * 출발점 allowlist(19개) — 칸반 컬럼 workflow 가이드가 실제로 호출하는
- * 도구들. 실측(2026-08-22): 이 19개만으로 compact tools/list가 37,608
+ * 도구들. 실측(2026-08-22): 최초 19개 기준 compact tools/list가 37,608
  * bytes(전체 205개 253,638 bytes 대비 ≈85% 감소). 목표 재상향/재조정이
  * 필요해지면 이 목록을 조정할 것 — allowlist 밖 호출 시도의 요청 로그
  * (mcp.controller.ts의 기존 bodyPreview 로그)가 튜닝 근거를 제공한다.
@@ -84,6 +84,9 @@ export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'list_board_lessons',
   'set_current_task',
   'clear_current_task',
+  // 일반 채팅 세션의 최종 응답 경로다. 이 도구가 없으면 Claude CLI가
+  // 정상 종료해도 웹 채팅에는 답변이 전달되지 않고 무응답으로 판정된다.
+  'send_chat_room_message',
 ]);
 
 type ToolMethod = McpServer['tool'];

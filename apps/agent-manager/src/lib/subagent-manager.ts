@@ -14,7 +14,6 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcess } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import {
   SUBAGENTS_BASE_DIR,
   SUBAGENTS_PERSIST_PATH,
@@ -24,8 +23,9 @@ import {
   STOP_FORCE_KILL_SETTLE_MS,
 } from './constants.js';
 import { log } from './logging.js';
-import { resolveBinOverride } from './cli-resolver.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
+import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -217,9 +217,7 @@ export function findDuplicateSpawn(
  * collapse 형태(`mention:<commentId>:`)로 접혀 레거시 무회귀. rule 3 의 mention
  * 예외(`startsWith('mention:')`)는 접두 형태가 같아 그대로 작동한다.
  */
-export function mentionTriggerId(commentId: string, agentId?: string): string {
-  return `mention:${commentId}:${agentId || ''}`;
-}
+export { mentionTriggerId } from './trigger-id.js';
 
 export interface SubagentDelegationConfig {
   enabled?: boolean;
@@ -373,7 +371,7 @@ export class SubagentManager implements SubagentManagerContract {
    * claude / codex / antigravity agents. createAdapter() runs at most once per
    * cli over the manager's lifetime.
    */
-  #adapters = new Map<string, CliAdapter>();
+  #adapterResolver: RuntimeAdapterResolver;
   #sweepTimer: NodeJS.Timeout | null = null;
   /** ticket b972b28c: #sweep's TTL branch now awaits an async live-task probe
    *  (findLiveBackgroundTasks shells out to `ps`) per TTL-expired candidate.
@@ -444,11 +442,16 @@ export class SubagentManager implements SubagentManagerContract {
       }) => void)
     | null = null;
 
-  constructor(config: SubagentAwareConfig, circuitBreaker?: CircuitBreaker) {
+  constructor(
+    config: SubagentAwareConfig,
+    circuitBreaker?: CircuitBreaker,
+    adapterResolver: RuntimeAdapterResolver = createRuntimeAdapterResolver(),
+  ) {
     this.#config = config;
     this.#persistPath = SUBAGENTS_PERSIST_PATH;
     this.#pidDir = SUBAGENTS_BASE_DIR;
     this.circuitBreaker = circuitBreaker ?? new CircuitBreaker();
+    this.#adapterResolver = adapterResolver;
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -480,13 +483,7 @@ export class SubagentManager implements SubagentManagerContract {
    * unknown values (createAdapter handles that itself).
    */
   #adapterFor(cli: string | null | undefined): CliAdapter {
-    const t = String(cli || 'claude').toLowerCase();
-    let a = this.#adapters.get(t);
-    if (!a) {
-      a = createAdapter(t);
-      this.#adapters.set(t, a);
-    }
-    return a;
+    return this.#adapterResolver.resolve(cli);
   }
 
   /** Default-claude adapter for the legacy single-agent code paths. */
@@ -739,7 +736,7 @@ export class SubagentManager implements SubagentManagerContract {
       const attributedSpec = mentionAudit
         ? { ...spec, triggerSource: mentionAudit.run_token }
         : spec;
-      const descriptor = adapter.buildOneshotSpawn({
+      const descriptor = this.#adapterResolver.buildOneshot(adapter.cliType, {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
         mcpConfigPath: null,
@@ -750,7 +747,7 @@ export class SubagentManager implements SubagentManagerContract {
         harness,
         effort: effortFlag,
         ultracode,
-      });
+      }).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-spawn role pin — same contract BaseSessionManager._spawnSession
@@ -823,7 +820,7 @@ export class SubagentManager implements SubagentManagerContract {
 
         Object.assign(
           descriptor,
-          adapter.buildOneshotSpawn({
+          this.#adapterResolver.buildOneshot(adapter.cliType, {
             rolePrompt: spec.rolePrompt || '',
             taskText: spec.taskText,
             mcpConfigPath: configPath,
@@ -834,7 +831,7 @@ export class SubagentManager implements SubagentManagerContract {
             harness,
             effort: effortFlag,
             ultracode,
-          }),
+          }).descriptor,
         );
       }
       if (claudeRuntimeProfile?.args?.length) {
@@ -849,6 +846,7 @@ export class SubagentManager implements SubagentManagerContract {
         runtimeLease?.claudeExecutable(),
       );
       const resolvedBin = adapter.resolveBin(binOverride);
+      assertCliExecutable(resolvedBin, adapter.cliType);
       // ST-7 follow-up: inject the per-agent CLI home dir via the
       // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
       // CODEX_HOME). When the adapter doesn't have one (custom CLI),
@@ -894,7 +892,7 @@ export class SubagentManager implements SubagentManagerContract {
       // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
       // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
       // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
-      const child = crossSpawn(resolvedBin, descriptor.args, {
+      const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -1257,7 +1255,11 @@ export class SubagentManager implements SubagentManagerContract {
       record.kind === 'trigger' &&
       record.ticket_id &&
       !record.commentSent &&
-      isFallbackEligible(errClass) &&
+      this.#adapterResolver.shouldRetry(record.cli_type, {
+        code: errClass.reason || 'cli_error',
+        message: errClass.reason || 'CLI 실행 실패',
+        retryable: isFallbackEligible(errClass),
+      }, record.chainAttempt ?? 0) &&
       record.respawnSpec &&
       Array.isArray(record.modelChain) &&
       (record.chainAttempt ?? 0) + 1 < record.modelChain.length

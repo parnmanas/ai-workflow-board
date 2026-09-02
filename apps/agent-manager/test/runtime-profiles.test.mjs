@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -7,6 +7,8 @@ import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
+import { resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
+import { cleanupOrphanSubagents } from '../dist/lib/orphan-cleanup.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
 import {
   applyClaudeRuntimeProfileEnvPolicy,
@@ -81,6 +83,52 @@ process.stdout.write(JSON.stringify({type:'result', subtype:'success', result:'o
 `);
   await chmod(path, 0o755);
   return path;
+}
+
+async function makePersistentClaudeFixture(name) {
+  await mkdir(fixtureRoot, { recursive: true });
+  const path = join(fixtureRoot, name);
+  await writeFile(path, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const argv = process.argv.slice(2);
+const sessionFlag = argv.includes('--resume') ? '--resume' : '--session-id';
+const sessionId = argv[argv.indexOf(sessionFlag) + 1];
+appendFileSync(process.env.CAPTURE_FILE, JSON.stringify({
+  type: 'spawn', pid: process.pid, argv, sessionId, at: Date.now()
+}) + '\\n');
+if (sessionFlag === '--session-id') {
+  const projectDir = join(process.env.CLAUDE_CONFIG_DIR, 'projects', '-fixture-workspace');
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, sessionId + '.jsonl'), JSON.stringify({ type: 'user' }) + '\\n');
+}
+process.stdin.setEncoding('utf8');
+let input = '';
+process.stdin.on('data', chunk => {
+  input += chunk;
+  let newline;
+  while ((newline = input.indexOf('\\n')) >= 0) {
+    const line = input.slice(0, newline); input = input.slice(newline + 1);
+    if (!line) continue;
+    appendFileSync(process.env.CAPTURE_FILE, JSON.stringify({
+      type: 'turn', pid: process.pid, body: JSON.parse(line), at: Date.now()
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
+  }
+});
+process.on('SIGTERM', () => setTimeout(() => process.exit(0), 150));
+process.on('exit', () => appendFileSync(process.env.CAPTURE_FILE, JSON.stringify({
+  type: 'exit', pid: process.pid, at: Date.now()
+}) + '\\n'));
+`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+function readJsonLines(path) {
+  return readFile(path, 'utf8')
+    .then(text => text.trim().split('\n').filter(Boolean).map(JSON.parse))
+    .catch(error => error?.code === 'ENOENT' ? [] : Promise.reject(error));
 }
 
 // ticket 41dc37cb 리뷰 라운드1 — 매번 동일하게 fallback-eligible 실패로
@@ -170,7 +218,7 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
 async function waitFor(check, timeoutMs, failureMessage) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const value = check();
+    const value = await check();
     if (value) return value;
     await delay(50);
   }
@@ -477,6 +525,107 @@ test('BaseSessionManager 채팅 spawn은 omit_effort 요청 정책과 haiku 보�
   assert.equal(capture.legacyEffortEnv, undefined);
   assert.equal(capture.smallFastModel, 'haiku');
   assert.equal(capture.defaultHaiku, 'qwen3-coder-next');
+  assert.deepEqual(capture.argv.slice(0, 2), [
+    '--session-id',
+    resolveClaudeSessionId('room-base-session-policy'),
+  ]);
+});
+
+test('BaseSessionManager는 종료된 기존 Claude 대화를 동일 UUID의 --resume으로 재개한다', async () => {
+  const executable = await makeClaudeFixture('claude-base-session-resume.mjs');
+  const sessionKey = 'room-base-session-resume';
+  const projectDir = join(fixtureRoot, 'claude-base-home', 'projects', '-fixture-workspace');
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(join(projectDir, `${resolveClaudeSessionId(sessionKey)}.jsonl`), '{"type":"user"}\n');
+
+  const { capture } = await spawnBaseSessionFixture({
+    id: 'base-session-resume',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40119',
+    model: 'qwen3-coder-next',
+    claude_executable: executable,
+  }, join(fixtureRoot, 'base-session-resume.json'));
+
+  assert.deepEqual(capture.argv.slice(0, 2), [
+    '--resume',
+    resolveClaudeSessionId(sessionKey),
+  ]);
+});
+
+test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종료 후 동일 UUID resume 수명주기를 지킨다', async () => {
+  const executable = await makePersistentClaudeFixture('claude-session-lifecycle.mjs');
+  const captureFile = join(fixtureRoot, 'claude-session-lifecycle.jsonl');
+  const cliHome = join(fixtureRoot, 'claude-lifecycle-home');
+  const sessionKey = 'room-lifecycle|agent-fixture';
+  const profile = {
+    id: 'session-lifecycle', kind: 'claude-backend', protocol: 'anthropic-compatible',
+    base_url: 'http://127.0.0.1:40121', model: 'qwen3-coder-next', claude_executable: executable,
+    env: { CAPTURE_FILE: captureFile },
+  };
+  const opts = {
+    onProgress: () => {}, runtimeProfile: profile,
+    agentContext: {
+      agent_id: 'agent-fixture', api_key: 'agent-awb-key', cwd: fixtureRoot,
+      mcp_config_path: join(fixtureRoot, 'missing-lifecycle-mcp.json'),
+      cli: 'claude', cli_home_dir: cliHome, model: 'anthropic-agent-default',
+    },
+  };
+  const firstManager = new BaseSessionManager(config, {
+    keyField: 'roomId', logTag: '[claude-lifecycle]', cfgPrefix: 'claude-lifecycle-', kindLabel: 'chat_session',
+  });
+  const first = await firstManager._spawnSession(sessionKey, '역할', '첫 turn', opts);
+  assert.ok(first);
+  await waitFor(async () => (await readJsonLines(captureFile)).filter(e => e.type === 'turn').length === 1,
+    5_000, '최초 turn이 fixture stdin에 도착하지 않았다');
+  firstManager._sendFollowUp(first, '동시 후속 turn A', { onProgress: () => {} });
+  firstManager._sendFollowUp(first, '동시 후속 turn B', { onProgress: () => {} });
+  await waitFor(async () => (await readJsonLines(captureFile)).filter(e => e.type === 'turn').length === 3,
+    5_000, '활성 프로세스가 후속 turn을 직렬로 받지 못했다');
+  const activeEvents = await readJsonLines(captureFile);
+  assert.equal(activeEvents.filter(e => e.type === 'spawn').length, 1, '같은 room의 활성 turn은 새 프로세스를 만들면 안 된다');
+  assert.equal(new Set(activeEvents.filter(e => e.type === 'turn').map(e => e.pid)).size, 1);
+  const sessionId = resolveClaudeSessionId(sessionKey);
+  assert.deepEqual(activeEvents[0].argv.slice(0, 2), ['--session-id', sessionId]);
+
+  assert.ok(first.pidPath, '실제 session manager spawn이 PID sidecar를 만들어야 한다');
+  assert.ok(first.configPath, '실제 session manager spawn이 MCP config sidecar를 만들어야 한다');
+  const orphanDir = join(fixtureRoot, 'orphan-restart-scan');
+  await mkdir(orphanDir, { recursive: true });
+  const orphanPidPath = join(orphanDir, 'claude-session.pid');
+  await copyFile(first.pidPath, orphanPidPath);
+  await copyFile(first.configPath, join(orphanDir, 'claude-session.json'));
+  const firstExit = once(first.child, 'exit');
+  const cleanup = await cleanupOrphanSubagents(orphanDir, false);
+  assert.ok(cleanup.reaped >= 1, 'manager 재시작 orphan 회수가 이전 Claude 프로세스를 정리해야 한다');
+  await firstExit;
+  assert.notEqual(first.child.exitCode, null, '이전 Claude 프로세스의 종료가 확인돼야 한다');
+
+  const restartedManager = new BaseSessionManager(config, {
+    keyField: 'roomId', logTag: '[claude-lifecycle-restart]', cfgPrefix: 'claude-lifecycle-restart-', kindLabel: 'chat_session',
+  });
+  const resumed = await restartedManager._spawnSession(sessionKey, '역할', '재시작 후 turn', opts);
+  assert.ok(resumed);
+  await waitFor(async () => (await readJsonLines(captureFile)).filter(e => e.type === 'spawn').length === 2,
+    5_000, 'manager 재시작 뒤 resume 프로세스가 생성되지 않았다');
+  const events = await readJsonLines(captureFile);
+  const spawns = events.filter(e => e.type === 'spawn');
+  assert.deepEqual(spawns[1].argv.slice(0, 2), ['--resume', sessionId]);
+  assert.notEqual(first.child.exitCode, null, '이전 프로세스 종료 확인 전에 같은 UUID를 resume하면 안 된다');
+
+  const otherKey = 'room-isolated|agent-fixture';
+  const other = await restartedManager._spawnSession(otherKey, '역할', '다른 room turn', opts);
+  assert.ok(other);
+  await waitFor(async () => (await readJsonLines(captureFile)).filter(e => e.type === 'spawn').length === 3,
+    5_000, '다른 room 프로세스가 생성되지 않았다');
+  const isolatedSpawn = (await readJsonLines(captureFile)).filter(e => e.type === 'spawn')[2];
+  assert.deepEqual(isolatedSpawn.argv.slice(0, 2), ['--session-id', resolveClaudeSessionId(otherKey)]);
+  assert.notEqual(isolatedSpawn.sessionId, sessionId);
+  const resumedExit = once(resumed.child, 'exit');
+  const otherExit = once(other.child, 'exit');
+  resumed.child.stdin.end();
+  other.child.stdin.end();
+  await Promise.all([resumedExit, otherExit]);
 });
 
 test('BaseSessionManager enabled profile은 충돌 env를 제거하고 preset effort를 argv에 한 번만 적용한다', async () => {
@@ -965,7 +1114,10 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
     // what's actually installed on the runner.
     const manager = new SubagentManager({
       ...config,
-      delegation: { ...config.delegation, codexBin: executable },
+      delegation: {
+        ...config.delegation,
+        codexBin: process.platform === 'win32' ? `${executable}.cmd` : executable,
+      },
     });
     const exited = new Promise(resolve => { manager.onExit = resolve; });
     const result = await manager.spawn({

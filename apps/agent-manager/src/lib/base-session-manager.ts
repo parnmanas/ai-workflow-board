@@ -13,13 +13,12 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcessByStdio } from 'node:child_process';
-import crossSpawn from 'cross-spawn';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
-import { resolveBinOverride } from './cli-resolver.js';
+import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
@@ -51,6 +50,7 @@ import {
   type RuntimeLease,
 } from './runtime-profiles.js';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
+import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
 
@@ -77,6 +77,7 @@ export interface BaseSessionOptions {
   logTag: string;
   cfgPrefix: string;
   kindLabel: 'chat_session' | 'ticket_session';
+  adapterResolver?: RuntimeAdapterResolver;
 }
 
 export interface SessionDelegationConfig {
@@ -459,7 +460,11 @@ export class BaseSessionManager {
   protected readonly _config: SessionAwareConfig;
   /** ST-7: per-cliType adapter cache. Same scheme as SubagentManager —
    *  one createAdapter() per cli over the manager's lifetime. */
-  #adapters = new Map<string, CliAdapter>();
+  #adapterResolver: RuntimeAdapterResolver;
+
+  protected _shouldRetryRuntime(runtimeId: string, cause: unknown, attempt: number): boolean {
+    return this.#adapterResolver.shouldRetry(runtimeId, cause, attempt);
+  }
   protected readonly _sessions = new Map<string, SessionRecord>();
   /** Synchronous reservation table for in-flight spawns. `_sessions` only
    *  gets the new record at the END of `_spawnSession`, so without this map
@@ -502,6 +507,7 @@ export class BaseSessionManager {
     this.#logTag = options.logTag;
     this.#cfgPrefix = options.cfgPrefix;
     this.#kindLabel = options.kindLabel;
+    this.#adapterResolver = options.adapterResolver ?? createRuntimeAdapterResolver();
   }
 
   /** Default-claude getter for legacy callers that introspect the manager. */
@@ -510,13 +516,7 @@ export class BaseSessionManager {
   }
 
   protected _adapterFor(cli: string | null | undefined): CliAdapter {
-    const t = String(cli || 'claude').toLowerCase();
-    let a = this.#adapters.get(t);
-    if (!a) {
-      a = createAdapter(t);
-      this.#adapters.set(t, a);
-    }
-    return a;
+    return this.#adapterResolver.resolve(cli);
   }
 
   setMonitor(monitor: SubagentMonitor | null): void {
@@ -765,14 +765,25 @@ export class BaseSessionManager {
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
-      let descriptor = adapter.buildSessionSpawn({
+      // Claude의 동일 논리 대화는 최초 1회만 --session-id로 생성하고, CLI
+      // home에 provider transcript가 남은 이후의 정상 종료/idle/maxTurns/
+      // manager 재시작/model fallback은 --resume으로 이어간다. 활성 프로세스는
+      // dispatch가 위의 _getLiveSession 경로에서 stdin을 재사용하므로 여기까지
+      // 오지 않으며, orphan 정리는 종료 확인 뒤에만 이 분기를 허용한다.
+      const sessionMode = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
+        ? 'resume'
+        : 'persistent';
+      if (adapter.cliType === 'claude') {
+        log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
+      }
+      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
         model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
-      });
+      }, sessionKey).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-session config is required whenever the server needs to attribute
@@ -808,12 +819,22 @@ export class BaseSessionManager {
           // auth failure) instead of getting its own workspace-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
           const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
-          configPath = existsSync(profileConfigPath)
+          const sharedConfigPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
                 agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
               );
-          configPathIsTemp = false;
+          // 각 persistent 프로세스에 추적 가능한 config/pid sidecar 쌍을
+          // 부여한다. 내용은 profile별 불변 config의 복사본이라 TOCTOU 격리는
+          // 유지되며, manager가 SIGKILL/crash로 사라져도 시작 시 orphan 정리가
+          // 정확한 Claude 프로세스를 회수한 뒤 같은 session UUID를 재사용한다.
+          configPath = join(
+            SUBAGENTS_BASE_DIR,
+            `${this.#cfgPrefix}${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+          );
+          await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+          await fsp.copyFile(sharedConfigPath, configPath);
+          configPathIsTemp = true;
         } else {
           configPath = join(
             SUBAGENTS_BASE_DIR,
@@ -842,14 +863,14 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = adapter.buildSessionSpawn({
+        descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
           model: attemptModel,
           harness,
           effort: effortFlag,
           ultracode,
-        });
+        }, sessionKey).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
         descriptor.args.push(...claudeRuntimeProfile.args);
@@ -867,6 +888,7 @@ export class BaseSessionManager {
         runtimeLease?.claudeExecutable(),
       );
       const resolvedBin = adapter.resolveBin(binOverride);
+      assertCliExecutable(resolvedBin, adapter.cliType);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
       const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir
@@ -905,7 +927,7 @@ export class BaseSessionManager {
       // detached 가 POSIX 전용인 이유는 subagent-manager spawn 사이트 참고:
       // win32 의 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 충돌하며, resolved
       // 바이너리가 .cmd/.bat shim 일 때 cmd 콘솔이 번쩍인다.
-      const child = crossSpawn(resolvedBin, descriptor.args, {
+      const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,

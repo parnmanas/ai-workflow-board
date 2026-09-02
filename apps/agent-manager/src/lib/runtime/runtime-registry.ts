@@ -1,88 +1,11 @@
-import {
-  type AgentRuntimeConfig,
-  type RuntimeCapabilities,
-  type RuntimeDescriptor,
-  RuntimeSelectionError,
-} from './runtime-types.js';
-import {
-  HermesRuntime,
-  type HermesRuntimeOptions,
-} from './hermes/hermes-runtime.js';
+import { type AgentRuntimeConfig, type RuntimeDescriptor, RuntimeSelectionError } from './runtime-types.js';
+import { type HermesRuntime, type HermesRuntimeOptions } from './hermes/hermes-runtime.js';
+import { RuntimeAdapterResolver } from './composition/runtime-adapter-resolver.js';
+import { composeRuntime } from './composition/compose-runtime.js';
 
-const CLI_NATIVE_MCP: RuntimeCapabilities = {
-  protocol: 'stream-json',
-  session: 'persistent',
-  native_mcp: true,
-  native_approvals: false,
-  steering: true,
-  cancellation: true,
-  usage: 'tokens-and-cost',
-  collaboration: [],
-  skill_delivery: ['prompt', 'filesystem'],
-};
-
-const DESCRIPTORS = new Map<string, RuntimeDescriptor>([
-  ['claude', { id: 'claude', capabilities: CLI_NATIVE_MCP }],
-  ['deepseek', { id: 'deepseek', capabilities: { ...CLI_NATIVE_MCP } }],
-  ['codex', {
-    id: 'codex',
-    capabilities: {
-      protocol: 'jsonl',
-      session: 'oneshot',
-      native_mcp: true,
-      native_approvals: false,
-      steering: false,
-      cancellation: true,
-      usage: 'tokens',
-      collaboration: [],
-      skill_delivery: ['prompt', 'filesystem'],
-    },
-  }],
-  ['antigravity', {
-    id: 'antigravity',
-    capabilities: {
-      protocol: 'jsonl',
-      session: 'oneshot',
-      native_mcp: false,
-      native_approvals: false,
-      steering: false,
-      cancellation: true,
-      usage: 'none',
-      collaboration: [],
-      skill_delivery: ['prompt'],
-    },
-  }],
-  ['pi', {
-    id: 'pi',
-    capabilities: {
-      protocol: 'jsonl',
-      session: 'oneshot',
-      native_mcp: true,
-      native_approvals: false,
-      steering: false,
-      cancellation: true,
-      usage: 'tokens',
-      collaboration: [],
-      skill_delivery: ['prompt', 'filesystem'],
-    },
-  }],
-  ['hermes', {
-    id: 'hermes',
-    capabilities: {
-      protocol: 'acp',
-      session: 'resumable',
-      native_mcp: true,
-      native_approvals: true,
-      steering: true,
-      cancellation: true,
-      usage: 'tokens',
-      collaboration: ['delegated', 'swarm'],
-      skill_delivery: ['filesystem', 'native'],
-    },
-  }],
-]);
-
-export const KNOWN_RUNTIME_IDS = Object.freeze(Array.from(DESCRIPTORS.keys()));
+const runtimeComposition = composeRuntime();
+export const runtimePluginRegistry = runtimeComposition.registry;
+export const KNOWN_RUNTIME_IDS = runtimePluginRegistry.ids();
 
 export type RuntimeOwner = HermesRuntime;
 
@@ -92,34 +15,19 @@ export function createRuntimeOwner(
   runtimeId: string,
   options: HermesRuntimeOptions,
 ): RuntimeOwner {
-  const descriptor = getRuntimeDescriptor(runtimeId);
-  if (descriptor.id === 'hermes') return new HermesRuntime(options);
-  throw new RuntimeSelectionError(
-    'runtime_unavailable',
-    descriptor.id,
-    `Runtime ${descriptor.id} does not use a protocol process owner`,
-  );
+  return runtimePluginRegistry.createOwner(runtimeId, options) as RuntimeOwner;
 }
 
 export function getRuntimeDescriptor(runtimeId: string | null | undefined): RuntimeDescriptor {
-  const normalized = String(runtimeId ?? '').trim().toLowerCase();
-  if (!normalized) {
-    throw new RuntimeSelectionError(
-      'runtime_not_configured',
-      null,
-      'Agent runtime is not configured',
-    );
-  }
-  const descriptor = DESCRIPTORS.get(normalized);
-  if (!descriptor) {
-    throw new RuntimeSelectionError(
-      'runtime_unknown',
-      normalized,
-      `Unknown agent runtime: ${normalized}`,
-    );
-  }
-  return descriptor;
+  return runtimePluginRegistry.descriptor(runtimeId);
 }
+
+export const createRuntimeCliAdapter = (runtimeId: string | null | undefined) =>
+  runtimePluginRegistry.createCliAdapter(runtimeId);
+
+/** 실행 소유자별 adapter 캐시. application 호출자는 registry 구현을 보지 않는다. */
+export const createRuntimeAdapterResolver = () =>
+  new RuntimeAdapterResolver(runtimePluginRegistry, runtimeComposition.ports);
 
 function invalid(runtimeId: string, message: string): never {
   throw new RuntimeSelectionError('runtime_config_invalid', runtimeId, message);

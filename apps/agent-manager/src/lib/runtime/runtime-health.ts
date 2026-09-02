@@ -1,9 +1,9 @@
 import { isAbsolute } from 'node:path';
-import { createAdapter } from '../cli-adapters/index.js';
 import { resolveCliBin } from '../cli-resolver.js';
 import {
   getRuntimeDescriptor,
   KNOWN_RUNTIME_IDS,
+  createRuntimeCliAdapter,
 } from './runtime-registry.js';
 import type { RuntimeCapabilities } from './runtime-types.js';
 import { probeRuntimeCommand, type RuntimeProbeResult } from './probe-command.js';
@@ -42,7 +42,7 @@ export async function resolveRuntimeProbeCommand(runtimeId: string): Promise<Run
     return { command, args: [...argsPrefix, '--help'] };
   }
   return {
-    command: createAdapter(runtimeId).resolveBin(),
+    command: createRuntimeCliAdapter(runtimeId).resolveBin(),
     args: ['--version'],
   };
 }

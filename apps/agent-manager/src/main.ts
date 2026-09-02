@@ -417,7 +417,7 @@ async function runRuntime(
 
   let lock: LockHandle;
   try {
-    lock = acquireAgentLock({ role: 'manager', version, force: flags.force });
+    lock = await acquireAgentLock({ role: 'manager', version, force: flags.force });
   } catch (err: any) {
     if (err?.code === 'EAGENTLOCKED') {
       log(`agent-manager: ${err.message}`);
@@ -456,12 +456,22 @@ async function runRuntime(
   const updateChecker = new UpdateChecker({ log });
   updateChecker.start();
 
-  cleanupOrphanSubagents()
-    .then((r) => {
-      if (r.scanned > 0)
-        log(`Orphan subagent cleanup: scanned=${r.scanned} reaped=${r.reaped} skipped=${r.skipped ?? 0}`);
-    })
-    .catch((err: any) => log(`Orphan subagent cleanup failed: ${err?.message ?? err}`));
+  // SSE를 열기 전에 이전 manager가 남긴 persistent CLI의 종료를 확인한다.
+  // 백그라운드 정리와 첫 chat dispatch가 경합하면 동일 Claude session UUID가
+  // 잠시 겹쳐 `already in use`가 다시 발생할 수 있다.
+  try {
+    const r = await cleanupOrphanSubagents(undefined, false);
+    if (r.failed) {
+      throw new Error(`${r.failed} orphan CLI process(es) could not be terminated`);
+    }
+    if (r.scanned > 0) {
+      log(`Orphan subagent cleanup: scanned=${r.scanned} reaped=${r.reaped} skipped=${r.skipped ?? 0}`);
+    }
+  } catch (err: any) {
+    log(`Orphan subagent cleanup failed: ${err?.message ?? err}`);
+    lock.release();
+    throw err;
+  }
   cleanupOrphanHermesProcesses()
     .then((r) => {
       if (r.scanned > 0) {

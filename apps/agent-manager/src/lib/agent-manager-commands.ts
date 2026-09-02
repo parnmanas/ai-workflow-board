@@ -66,7 +66,7 @@ import {
   eraseSecrets,
   maskKey,
 } from './managed-agent-store.js';
-import { createAdapter } from './cli-adapters/index.js';
+import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { runSelfUpdate, restartManager } from './self-update.js';
 import type { CliLoginManager } from './cli-login.js';
 
@@ -476,7 +476,7 @@ export class AgentManagerCommandHandler {
       // persist the `awb` server into cli-home at spawn_agent time.
       // Codex treats the generated native config as required; the catch
       // branch below aborts registration if materialization fails.
-      const prep = await createAdapter(cli).prepareCliHome(
+      const prep = await createRuntimeCliAdapter(cli).prepareCliHome(
         cliHomeDir,
         credential,
         { url: this.#config.url, apiKey: rawApiKey },
@@ -946,7 +946,7 @@ export class AgentManagerCommandHandler {
     const cli = ctx?.cli ?? diskConfig?.cli;
     if (cli) {
       await ensureCliHomeDir(agentId);
-      await createAdapter(cli).prepareCliHome(
+      await createRuntimeCliAdapter(cli).prepareCliHome(
         ctx?.cli_home_dir ?? cliHomeDirFor(agentId),
         await readAgentCredential(agentId),
         { url: this.#config.url, apiKey: rawApiKey },

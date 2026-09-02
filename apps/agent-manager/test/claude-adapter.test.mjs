@@ -17,7 +17,7 @@ import { promises as fsp } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
+import { ClaudeCliAdapter, resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
 import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 
 const tempDirs = [];
@@ -92,6 +92,63 @@ test('buildSessionSpawn is unaffected — persistent sessions already used strea
     [descriptor.args[descriptor.args.indexOf('--input-format') + 1], descriptor.args[descriptor.args.indexOf('--output-format') + 1]],
     ['stream-json', 'stream-json'],
   );
+});
+
+test('Claude session id 경계는 유효한 UUID를 그대로 보존한다', () => {
+  const id = '6BA7B810-9DAD-41D1-80B4-00C04FD430C8';
+  assert.equal(resolveClaudeSessionId(id), id);
+  const adapter = new ClaudeCliAdapter();
+  const persistentArgs = adapter.buildSessionSpawn({
+    rolePrompt: 'role',
+    mcpConfigPath: '/tmp/mcp.json',
+    sessionMode: 'persistent',
+    sessionId: id,
+  }).args;
+  const resumeArgs = adapter.buildSessionSpawn({
+    rolePrompt: 'role',
+    mcpConfigPath: '/tmp/mcp.json',
+    sessionMode: 'resume',
+    sessionId: id,
+  }).args;
+  assert.deepEqual(persistentArgs.slice(0, 2), ['--session-id', id]);
+  assert.deepEqual(resumeArgs.slice(0, 2), ['--resume', id]);
+});
+
+test('legacy room/agent 복합 key는 재시작에도 안정적인 유효 UUID로 마이그레이션된다', () => {
+  const legacy = '65d5775c-dd72-4ac8-8a11-9ceefce026cf:d84c48da-dd80-4062-b546-336357e2d28e';
+  const migrated = resolveClaudeSessionId(legacy);
+  assert.match(migrated, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(resolveClaudeSessionId(legacy), migrated, '동일 대화 매핑은 프로세스 재생성 뒤에도 유지되어야 한다');
+  assert.notEqual(resolveClaudeSessionId(`${legacy}:other-room`), migrated, '동시 대화는 provider session을 공유하면 안 된다');
+});
+
+test('최초 persistent와 reconnect resume 모두 UUID만 Claude CLI 인자로 전달한다', () => {
+  const adapter = new ClaudeCliAdapter();
+  const legacy = 'ticket-id:assignee:agent-id';
+  const expected = resolveClaudeSessionId(legacy);
+  const persistent = adapter.buildSessionSpawn({
+    rolePrompt: 'role', mcpConfigPath: '/tmp/mcp.json', sessionMode: 'persistent', sessionId: legacy,
+  }).args;
+  const resume = adapter.buildSessionSpawn({
+    rolePrompt: 'role', mcpConfigPath: '/tmp/mcp.json', sessionMode: 'resume', sessionId: legacy,
+  }).args;
+  assert.deepEqual(persistent.slice(0, 2), ['--session-id', expected]);
+  assert.deepEqual(resume.slice(0, 2), ['--resume', expected]);
+});
+
+test('Claude provider transcript 존재 여부로 최초 생성과 resume를 구분한다', async () => {
+  const adapter = new ClaudeCliAdapter();
+  const home = await makeTmpCliHome();
+  const legacy = 'room-a|agent-a';
+  const id = resolveClaudeSessionId(legacy);
+  assert.equal(await adapter.hasPersistedSession(home, legacy), false);
+
+  const projectDir = join(home, 'projects', '-workspace-a');
+  await fsp.mkdir(projectDir, { recursive: true });
+  await fsp.writeFile(join(projectDir, `${id}.jsonl`), '{"type":"user"}\n');
+
+  assert.equal(await adapter.hasPersistedSession(home, legacy), true);
+  assert.equal(await adapter.hasPersistedSession(home, 'room-b|agent-a'), false, '다른 room UUID는 격리된다');
 });
 
 // ── requiresWorkspaceTrust / readTrustMeta (ticket 48aeab6e dispatch preflight) ─

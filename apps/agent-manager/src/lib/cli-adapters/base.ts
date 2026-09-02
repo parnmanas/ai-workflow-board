@@ -333,6 +333,9 @@ export interface McpAttribution {
 export interface SessionSpec {
   rolePrompt: string;
   mcpConfigPath: string | null;
+  /** 세션 전략이 선택한 실제 CLI lifecycle 동작과 식별자. */
+  sessionMode?: 'persistent' | 'resume' | 'control';
+  sessionId?: string;
   /** Per-agent default model — see OneshotSpec.model. */
   model?: string | null;
   /** Board/workspace harness — see OneshotSpec.harness. */
@@ -422,6 +425,12 @@ export abstract class CliAdapter {
 
   buildSessionSpawn(_spec: SessionSpec): SpawnDescriptor {
     throw new Error(`${this.cliType}: buildSessionSpawn not implemented`);
+  }
+
+  /** 기존 provider 세션이 로컬 CLI 상태에 존재하면 true. 기본 adapter는
+   *  재개 가능한 provider 세션을 사용하지 않으므로 항상 false다. */
+  async hasPersistedSession(_cliHomeDir: string | null | undefined, _sessionId: string): Promise<boolean> {
+    return false;
   }
 
   /**

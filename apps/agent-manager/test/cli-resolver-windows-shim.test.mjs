@@ -13,7 +13,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectBinary, resolveCliBin, _resetResolverCache } from '../dist/lib/cli-resolver.js';
+import {
+  selectBinary,
+  resolveCliBin,
+  normalizeWindowsExecutablePath,
+  assertCliExecutable,
+  _resetResolverCache,
+} from '../dist/lib/cli-resolver.js';
 
 const NPM = 'C:\\Users\\user\\AppData\\Roaming\\npm';
 
@@ -40,20 +46,31 @@ test('codex: npm .cmd-only shim resolves to the .cmd (no ENOENT literal fallback
   assert.equal(picked.bin, `${NPM}\\codex.cmd`);
 });
 
-test('claude: a real .exe always beats a sibling .cmd shim (feedback_windows_claude_exe_only)', () => {
-  const PKG = `${NPM}\\node_modules\\@anthropic-ai\\claude-code\\bin`;
+test('claude: Windows npm global install resolves the supported .cmd shim', () => {
   const sources = [
     `${NPM}\\claude`, // bash 래퍼 (존재)
     `${NPM}\\claude.cmd`, // shim (존재)
-    `${PKG}\\claude.exe`, // 진짜 exe (존재) — 이겨야 함
-    `${NPM}\\claude.cmd`, // last-resort candidate
   ];
   const picked = selectBinary('claude', sources, {
     isWindows: true,
-    exists: winExists([`${NPM}\\claude`, `${NPM}\\claude.cmd`, `${PKG}\\claude.exe`]),
+    exists: winExists([`${NPM}\\claude`, `${NPM}\\claude.cmd`]),
   });
-  assert.equal(picked.kind, 'exe');
-  assert.equal(picked.bin, `${PKG}\\claude.exe`);
+  assert.equal(picked.kind, 'shim');
+  assert.equal(picked.bin, `${NPM}\\claude.cmd`);
+});
+
+test('windows: quoted executable path and duplicate separators are normalized before spawn', () => {
+  assert.equal(
+    normalizeWindowsExecutablePath(` "${NPM}\\\\claude.cmd" `),
+    `${NPM}\\claude.cmd`,
+  );
+});
+
+test('spawn 전 검증은 사라진 실행 파일 경로를 진단 오류로 거부한다', () => {
+  assert.throws(
+    () => assertCliExecutable('/definitely/missing/claude', 'claude'),
+    /resolved executable is missing or not executable before spawn/,
+  );
 });
 
 test('windows: extensionless bash wrapper is never selected even as the only present file', () => {
@@ -106,10 +123,14 @@ test('posix: nothing executable → literal fallback', () => {
   assert.equal(picked.bin, 'codex');
 });
 
-test('resolveCliBin smoke: returns a non-empty string on the current host', () => {
+test('resolveCliBin smoke: either resolves an executable or gives a diagnostic pre-spawn error', () => {
   _resetResolverCache();
-  const bin = resolveCliBin('codex');
-  assert.equal(typeof bin, 'string');
-  assert.ok(bin.length > 0);
+  try {
+    const bin = resolveCliBin('codex');
+    assert.equal(typeof bin, 'string');
+    assert.ok(bin.length > 0);
+  } catch (error) {
+    assert.match(String(error), /executable not found or not executable/);
+  }
   _resetResolverCache();
 });
