@@ -50,7 +50,7 @@
 import { execSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, readFileSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename, dirname, win32 } from 'node:path';
+import { join, basename, win32 } from 'node:path';
 import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
@@ -77,7 +77,10 @@ const WIN_SHIM_OPTIONAL_TARGET = /^node(\.exe)?$/i;
  *  실행 대상은 마지막 호출 줄의 `%dp0%\node_modules\…\cli.js` 다. 확장자 없는
  *  토큰과 node 인터프리터도 제외한다 — 남는 것은 "없으면 반드시 깨지는" 경로뿐. */
 export function parseWindowsShimTargets(contents: string, shimPath: string): string[] {
-  const shimDir = dirname(shimPath);
+  // 경로 조작은 반드시 win32.* 로 한다. 이 함수는 Windows 배치 shim 만 파싱하는데,
+  // 플랫폼 기본 path.* 를 쓰면 Linux(CI, POSIX 개발기)에서 백슬래시가 구분자로
+  // 취급되지 않아 dirname 이 "." 을 돌려주고 결과가 통째로 어긋난다.
+  const shimDir = win32.dirname(shimPath);
   const targets: string[] = [];
   for (const rawLine of contents.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -86,9 +89,9 @@ export function parseWindowsShimTargets(contents: string, shimPath: string): str
       const token = match[1];
       const rest = token.replace(/^%~?dp0%?/i, '');
       if (!rest) continue;
-      const resolved = win32.normalize(join(shimDir, rest));
+      const resolved = win32.normalize(win32.join(shimDir, rest));
       if (!/\.[a-z0-9]+$/i.test(resolved)) continue;
-      if (WIN_SHIM_OPTIONAL_TARGET.test(basename(resolved))) continue;
+      if (WIN_SHIM_OPTIONAL_TARGET.test(win32.basename(resolved))) continue;
       if (!targets.includes(resolved)) targets.push(resolved);
     }
   }
