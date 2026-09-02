@@ -2,6 +2,13 @@ import type { ClaudeBackendProfile } from '../types';
 
 export type RuntimeProfileLoadState = 'idle' | 'loading' | 'ready' | 'error';
 
+export function runtimeProfileSelectionReady(
+  cli: string,
+  loadState: RuntimeProfileLoadState,
+): boolean {
+  return cli !== 'claude' || loadState === 'ready';
+}
+
 function validSelection(
   selection: string,
   profiles: ClaudeBackendProfile[],
