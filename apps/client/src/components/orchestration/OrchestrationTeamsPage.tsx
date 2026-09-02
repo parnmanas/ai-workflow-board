@@ -8,6 +8,7 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Input, Modal, Select } from '../common';
 import { LabeledTextarea } from './OrchestrationPage';
+import { TEAMS_CHANGED_EVENT } from '../workNavigation';
 
 /**
  * Team roster management.
@@ -26,8 +27,6 @@ import { LabeledTextarea } from './OrchestrationPage';
  * `boards-changed` 로 하는 것과 같은 방식으로 팀 목록 변경을 방송해, 이 페이지에서
  * 만들고 지운 팀이 사이드바에 즉시 반영되게 한다.
  */
-export const TEAMS_CHANGED_EVENT = 'orchestration-teams-changed';
-
 function broadcastTeamsChanged() {
   window.dispatchEvent(new CustomEvent(TEAMS_CHANGED_EVENT));
 }

@@ -16,6 +16,7 @@ import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
+import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
 
 /**
  * Mission list — the landing surface of Orchestration mode.
@@ -360,6 +361,9 @@ export function MissionFormModal({
       } else {
         showToast(mission ? 'Mission updated' : startNow ? 'Mission briefed to the orchestrator' : 'Mission saved as a draft', 'success');
       }
+      // 사이드바 WORK > Orchestrations 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b).
+      // 생성/이름변경 모두 이 한 곳을 지나므로 여기서 방송한다.
+      window.dispatchEvent(new CustomEvent(MISSIONS_CHANGED_EVENT));
       onSaved(saved);
     } catch (e: any) {
       showToast(e?.message || 'Failed to save mission', 'error');

@@ -9,30 +9,54 @@ export interface SidebarRoomsPage {
   hiddenRooms: ChatRoomListItem[];
 }
 
+export interface SidebarPage<T> {
+  visibleItems: T[];
+  hiddenItems: T[];
+}
+
 /**
- * rooms 자체의 정렬 순서는 건드리지 않는다 — 노출 개수만큼 앞에서 잘라내고,
- * 현재 열려 있는 방(activeRoomId)이 그 구간 밖에 있을 때만 맨 앞에 얹어 항상
- * 보이게 한다. (RoomListPanel 과 순서가 어긋나지 않도록 재정렬은 하지 않는다.)
+ * 목록 자체의 정렬 순서는 건드리지 않는다 — 노출 개수만큼 앞에서 잘라내고,
+ * 현재 열려 있는 항목(activeId)이 그 구간 밖에 있을 때만 맨 앞에 얹어 항상
+ * 보이게 한다. (본문 목록과 순서가 어긋나지 않도록 재정렬은 하지 않는다.)
+ *
+ * Chat 방뿐 아니라 WORK 의 Teams/Orchestrations/Boards 서브메뉴도 같은 규칙을
+ * 쓴다(티켓 03ca8b5b) — 목록마다 다른 접기 규칙을 두지 않기 위해 제네릭으로 뺐다.
  */
+export function paginateSidebarItems<T extends { id: string }>(
+  items: T[],
+  visibleCount: number,
+  activeId: string | null,
+): SidebarPage<T> {
+  const baseVisible = items.slice(0, visibleCount);
+  const activeItem = activeId ? items.find((item) => item.id === activeId) || null : null;
+  const visibleItems =
+    activeItem && !baseVisible.some((item) => item.id === activeItem.id)
+      ? [activeItem, ...baseVisible]
+      : baseVisible;
+  const visibleIds = new Set(visibleItems.map((item) => item.id));
+  const hiddenItems = items.filter((item) => !visibleIds.has(item.id));
+  return { visibleItems, hiddenItems };
+}
+
+/** "더보기"/"접기" 토글의 다음 visibleCount. 더 감출 항목이 없으면 기본 개수로 접는다. */
+export function nextVisibleCount(
+  currentCount: number,
+  totalItems: number,
+  hasHidden: boolean,
+  baseCount: number = SIDEBAR_ROOMS_BASE_COUNT,
+): number {
+  return hasHidden ? Math.min(currentCount + SIDEBAR_ROOMS_PAGE_SIZE, totalItems) : baseCount;
+}
+
 export function paginateSidebarRooms(
   rooms: ChatRoomListItem[],
   visibleCount: number,
   activeRoomId: string | null,
 ): SidebarRoomsPage {
-  const baseVisibleRooms = rooms.slice(0, visibleCount);
-  const activeRoom = activeRoomId ? rooms.find((room) => room.id === activeRoomId) || null : null;
-  const displayRooms =
-    activeRoom && !baseVisibleRooms.some((room) => room.id === activeRoom.id)
-      ? [activeRoom, ...baseVisibleRooms]
-      : baseVisibleRooms;
-  const displayedIds = new Set(displayRooms.map((room) => room.id));
-  const hiddenRooms = rooms.filter((room) => !displayedIds.has(room.id));
-  return { displayRooms, hiddenRooms };
+  const { visibleItems, hiddenItems } = paginateSidebarItems(rooms, visibleCount, activeRoomId);
+  return { displayRooms: visibleItems, hiddenRooms: hiddenItems };
 }
 
-/** "더보기"/"접기" 토글의 다음 visibleCount. 더 감출 방이 없으면 기본 5개로 접는다. */
 export function nextVisibleRoomCount(currentCount: number, totalRooms: number, hasHidden: boolean): number {
-  return hasHidden
-    ? Math.min(currentCount + SIDEBAR_ROOMS_PAGE_SIZE, totalRooms)
-    : SIDEBAR_ROOMS_BASE_COUNT;
+  return nextVisibleCount(currentCount, totalRooms, hasHidden);
 }
