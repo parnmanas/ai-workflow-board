@@ -44,7 +44,7 @@ function focusCandidateQuery() {
   const src = readSource('modules', 'agents', 'agent-workload.service.ts');
   return sliceBetween(
     src,
-    "const qb = this.dataSource",
+    ".select('DISTINCT t.id', 'id')",
     'const rows: Array<{ id: string }>',
     'agent-workload.service.ts',
   );
