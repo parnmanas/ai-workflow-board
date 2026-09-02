@@ -23,7 +23,7 @@ import {
   STOP_FORCE_KILL_SETTLE_MS,
 } from './constants.js';
 import { log } from './logging.js';
-import { resolveBinOverride } from './cli-resolver.js';
+import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -846,6 +846,7 @@ export class SubagentManager implements SubagentManagerContract {
         runtimeLease?.claudeExecutable(),
       );
       const resolvedBin = adapter.resolveBin(binOverride);
+      assertCliExecutable(resolvedBin, adapter.cliType);
       // ST-7 follow-up: inject the per-agent CLI home dir via the
       // adapter-specific env var (CLAUDE_CONFIG_DIR / GEMINI_HOME /
       // CODEX_HOME). When the adapter doesn't have one (custom CLI),

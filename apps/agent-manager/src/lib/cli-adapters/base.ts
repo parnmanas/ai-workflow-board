@@ -427,6 +427,12 @@ export abstract class CliAdapter {
     throw new Error(`${this.cliType}: buildSessionSpawn not implemented`);
   }
 
+  /** 기존 provider 세션이 로컬 CLI 상태에 존재하면 true. 기본 adapter는
+   *  재개 가능한 provider 세션을 사용하지 않으므로 항상 false다. */
+  async hasPersistedSession(_cliHomeDir: string | null | undefined, _sessionId: string): Promise<boolean> {
+    return false;
+  }
+
   /**
    * Encode a persistent-session turn. Persistent adapters (Claude) build
    * stream-json user messages here; one-shot adapters never call this path.

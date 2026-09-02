@@ -16,7 +16,7 @@ import { type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
 import { log } from './logging.js';
-import { resolveBinOverride } from './cli-resolver.js';
+import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -765,7 +765,18 @@ export class BaseSessionManager {
           `${this.#logTag} Claude backend ready: profile=${claudeRuntimeProfile.id} protocol=${claudeRuntimeProfile.protocol}${budgetLog}`,
         );
       }
-      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
+      // Claude의 동일 논리 대화는 최초 1회만 --session-id로 생성하고, CLI
+      // home에 provider transcript가 남은 이후의 정상 종료/idle/maxTurns/
+      // manager 재시작/model fallback은 --resume으로 이어간다. 활성 프로세스는
+      // dispatch가 위의 _getLiveSession 경로에서 stdin을 재사용하므로 여기까지
+      // 오지 않으며, orphan 정리는 종료 확인 뒤에만 이 분기를 허용한다.
+      const sessionMode = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
+        ? 'resume'
+        : 'persistent';
+      if (adapter.cliType === 'claude') {
+        log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
+      }
+      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
         rolePrompt: rolePrompt || '',
         mcpConfigPath: null,
         model: attemptModel,
@@ -808,12 +819,22 @@ export class BaseSessionManager {
           // auth failure) instead of getting its own workspace-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
           const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
-          configPath = existsSync(profileConfigPath)
+          const sharedConfigPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
                 agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
               );
-          configPathIsTemp = false;
+          // 각 persistent 프로세스에 추적 가능한 config/pid sidecar 쌍을
+          // 부여한다. 내용은 profile별 불변 config의 복사본이라 TOCTOU 격리는
+          // 유지되며, manager가 SIGKILL/crash로 사라져도 시작 시 orphan 정리가
+          // 정확한 Claude 프로세스를 회수한 뒤 같은 session UUID를 재사용한다.
+          configPath = join(
+            SUBAGENTS_BASE_DIR,
+            `${this.#cfgPrefix}${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+          );
+          await fsp.mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+          await fsp.copyFile(sharedConfigPath, configPath);
+          configPathIsTemp = true;
         } else {
           configPath = join(
             SUBAGENTS_BASE_DIR,
@@ -842,7 +863,7 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = this.#adapterResolver.buildSession(adapter.cliType, 'persistent', {
+        descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
           rolePrompt: rolePrompt || '',
           mcpConfigPath: configPath,
           model: attemptModel,
@@ -867,6 +888,7 @@ export class BaseSessionManager {
         runtimeLease?.claudeExecutable(),
       );
       const resolvedBin = adapter.resolveBin(binOverride);
+      assertCliExecutable(resolvedBin, adapter.cliType);
       // ST-7 follow-up: per-agent CLI home isolation (see SubagentManager).
       const cliHomeEnvKey = adapter.configDirEnv();
       const cliHomeEnv = cliHomeEnvKey && agentContext?.cli_home_dir

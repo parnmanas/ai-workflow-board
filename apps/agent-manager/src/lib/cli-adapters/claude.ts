@@ -2,6 +2,7 @@
 // `claude --input-format stream-json --output-format stream-json`.
 
 import { promises as fsp } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
@@ -24,6 +25,32 @@ import {
 } from './base.js';
 
 const { PERSISTENT_SESSION, NATIVE_MCP } = ADAPTER_CAPABILITIES;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+declare const CLAUDE_SESSION_ID: unique symbol;
+export type ClaudeSessionId = string & { readonly [CLAUDE_SESSION_ID]: true };
+
+/**
+ * Claude CLI의 `--session-id`/`--resume` 경계는 UUID만 허용한다. AWB의 room
+ * key나 ticket/role 복합 key는 대화 식별자로는 유효하지만 provider session
+ * id가 아니다. 기존 key는 안정적인 UUID로 변환해 재시작·동시 dispatch에서도
+ * 같은 대화는 같은 provider session을, 다른 대화는 다른 session을 사용한다.
+ */
+export function resolveClaudeSessionId(value: string): ClaudeSessionId {
+  if (UUID_PATTERN.test(value)) return value as ClaudeSessionId;
+
+  const bytes = createHash('sha1')
+    .update(Buffer.from('6ba7b8109dad11d180b400c04fd430c8', 'hex'))
+    .update('awb:claude-session:v1\0', 'utf8')
+    .update(value, 'utf8')
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}` as ClaudeSessionId;
+}
 
 /** Baseline --allowedTools every AWB subagent needs to talk to the board.
  *  Harness allowed_tools entries are APPENDED — replacing the baseline would
@@ -220,10 +247,11 @@ export class ClaudeCliAdapter extends CliAdapter {
       ? `${systemPrompt}${systemPrompt ? '\n\n' : ''}ultracode`
       : systemPrompt;
     const effortArg = normalizeEffort(effort);
+    const claudeSessionId = sessionId ? resolveClaudeSessionId(sessionId) : null;
     return {
       args: [
-        ...(sessionId && sessionMode === 'resume' ? ['--resume', sessionId] : []),
-        ...(sessionId && sessionMode === 'persistent' ? ['--session-id', sessionId] : []),
+        ...(claudeSessionId && sessionMode === 'resume' ? ['--resume', claudeSessionId] : []),
+        ...(claudeSessionId && sessionMode === 'persistent' ? ['--session-id', claudeSessionId] : []),
         ...(model ? ['--model', model] : []),
         ...(effortArg ? ['--effort', effortArg] : []),
         '--verbose',
@@ -244,6 +272,28 @@ export class ClaudeCliAdapter extends CliAdapter {
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: true,
     };
+  }
+
+  async hasPersistedSession(cliHomeDir: string | null | undefined, sessionId: string): Promise<boolean> {
+    if (!cliHomeDir || !sessionId) return false;
+    const filename = `${resolveClaudeSessionId(sessionId)}.jsonl`;
+    const projectsDir = join(cliHomeDir, 'projects');
+    let projects;
+    try {
+      projects = await fsp.readdir(projectsDir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const project of projects) {
+      if (!project.isDirectory()) continue;
+      try {
+        await fsp.access(join(projectsDir, project.name, filename));
+        return true;
+      } catch {
+        /* 다른 project에서 같은 session UUID를 계속 찾는다 */
+      }
+    }
+    return false;
   }
 
   formatTurn(text: string, images?: TurnImage[]): string {

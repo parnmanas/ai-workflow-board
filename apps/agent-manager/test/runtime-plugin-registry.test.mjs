@@ -11,6 +11,7 @@ import { defineRuntimePlugin } from '../dist/lib/runtime/composition/plugin-mani
 import { negotiateCapabilities } from '../dist/lib/runtime/application/negotiate-capabilities.js';
 import { requestCapabilities } from '../dist/lib/runtime/domain/capabilities.js';
 import { createDefaultRuntimePorts } from '../dist/lib/runtime/adapters/infrastructure/default-runtime-ports.js';
+import { resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
 
 const base = { protocol: 'jsonl', session: 'oneshot', native_mcp: false, native_approvals: false, steering: false, cancellation: true, usage: 'none', collaboration: [], skill_delivery: ['prompt'] };
 
@@ -94,11 +95,12 @@ test('주입한 prompt·session·tool port 산출물이 모든 CLI 최종 argv�
       rolePrompt: '역할', mcpConfigPath: '/tmp/session.json', effort: 'high',
     }, 'thread');
     assert.equal(session.request.sessionId, '세션:thread');
+    const claudeSessionId = resolveClaudeSessionId('세션:thread');
     assert.equal(session.spec.sessionId, '세션:thread');
     const lifecycleFlag = mode === 'resume' ? '--resume' : '--session-id';
     const lifecycleFlagIndex = session.descriptor.args.indexOf(lifecycleFlag);
     assert.notEqual(lifecycleFlagIndex, -1);
-    assert.equal(session.descriptor.args[lifecycleFlagIndex + 1], '세션:thread');
+    assert.equal(session.descriptor.args[lifecycleFlagIndex + 1], claudeSessionId);
     assert.ok(session.descriptor.args.includes('/tmp/session.json.주입'));
   }
   const title = facade.prepareOneshot('claude', {
