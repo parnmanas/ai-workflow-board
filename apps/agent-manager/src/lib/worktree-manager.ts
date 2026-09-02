@@ -668,7 +668,7 @@ export class WorktreeManager {
       }
       // 신규·재개 양쪽 모두 attach 를 보장한다. 재개 경로를 건너뛰면 detached
       // HEAD 로 시작한 worktree 가 계속 detached 로 남아 커밋이 고아가 된다.
-      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${ticketId}-work`, baseRef);
+      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${ticketId}-work`, baseRef, baseBranch);
       if (!attached.ok) {
         log(
           `[worktree] branch attach failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,
@@ -871,9 +871,9 @@ export class WorktreeManager {
    * branch 를 둔 상태로 도착했다. 그 상태에서 만든 커밋은 어느 branch 에도 안 붙는
    * 고아 커밋이 되어 `git push` 에 보이지 않고 조용히 유실된다.
    *
-   * 이미 branch 위에 있으면 → 건드리지 않는다. `featureBranch` 가 아닌 다른 branch
-   * 여도 마찬가지다: 재개 경로는 이전 세션이 체크아웃해둔 것을 의도적으로 보존하며,
-   * 여기서 고치려는 결함은 오직 detached HEAD 뿐이다.
+   * 이미 `featureBranch` 위면 → 건드리지 않는다. 다른 branch 위면 티켓 전용
+   * worktree 의 보장이 깨진 상태이므로 `#attachFromOtherBranch` 가 되돌리거나
+   * 거부한다(Merging 이 지시하는 base branch 체크아웃은 예외로 인정).
    *
    * detached 면 → 에이전트 커밋을 절대 버리지 않는 순서로 복구한다:
    *   - branch 없음                → HEAD 에서 `switch -c` (고아 커밋까지 흡수)
@@ -886,19 +886,20 @@ export class WorktreeManager {
    *   - 양쪽 모두 고유 커밋 보유   → 거부한다. 어느 쪽을 골라도 실제 작업이 사라지므로
    *                                 `branch_prepare_failed` 로 올려 담당자가 직접
    *                                 정리하게 둔다.
-   * attach 이후의 전진은 best-effort 다: 충돌하는 rebase 는 abort 하고 branch 는
-   * 붙은 채로 둔다 — 정합성 목표는 attach 이고, base 보다 뒤처진 것은
-   * `repositoryContext.behind` 로 보고되는 정보일 뿐이다. 예외를 던지지 않는다.
+   * attach 이후의 base 전진은 `#advanceOntoBase` 가 맡는다 — rebase 가 실패하면
+   * 복구 미완이므로 성공으로 보고하지 않는다. 예외를 던지지 않는다.
    */
   async #attachFeatureBranch(
     wtPath: string,
     featureBranch: string,
     baseRef: string,
+    baseBranch: string,
   ): Promise<{ ok: boolean; action: string; detail?: string }> {
     const current = await git(wtPath, ['branch', '--show-current']);
     if (current.ok && current.stdout.trim()) {
       const branch = current.stdout.trim();
-      return { ok: true, action: branch === featureBranch ? 'already_attached' : 'other_branch' };
+      if (branch === featureBranch) return { ok: true, action: 'already_attached' };
+      return this.#attachFromOtherBranch(wtPath, featureBranch, baseRef, baseBranch, branch);
     }
 
     const head = await git(wtPath, ['rev-parse', 'HEAD']);
@@ -936,21 +937,95 @@ export class WorktreeManager {
     if (!switched.ok) {
       return { ok: false, action: 'attach_failed', detail: switched.stderr.trim() };
     }
+    return this.#advanceOntoBase(wtPath, featureBranch, baseRef, 'attached');
+  }
 
+  /**
+   * 이미 `featureBranch` 에 붙은 worktree 를 base tip 위로 전진시킨다 —
+   * 자기 커밋이 없으면 `merge --ff-only`, 있으면 `rebase`(완료 기준의
+   * "커밋 0개 → ff attach / 커밋 있음 → rebase" 분기).
+   *
+   * rebase 실패는 **성공으로 보고하지 않는다.** 충돌이나 커미터 신원 부재로
+   * 실패한 상태는 attach 만 된 것이지 복구가 끝난 게 아니므로, 기준대로
+   * `branch_prepare_failed` 를 올려 담당 에이전트가 진단하게 한다. 다만 abort 로
+   * rebase 중간 상태만 걷어내고 **branch 는 붙은 채로** 남겨, 진단하러 온
+   * 에이전트가 최소한 고아 커밋 위험은 없는 worktree 를 만나게 한다.
+   */
+  async #advanceOntoBase(
+    wtPath: string,
+    featureBranch: string,
+    baseRef: string,
+    okAction: string,
+  ): Promise<{ ok: boolean; action: string; detail?: string }> {
     const own = await this.#countCommits(wtPath, [featureBranch, '--not', baseRef]);
     if (own === 0) {
       await git(wtPath, ['merge', '--ff-only', baseRef]);
-      return { ok: true, action: 'attached_ff' };
+      return { ok: true, action: `${okAction}_ff` };
     }
     const rebased = await git(wtPath, ['rebase', baseRef]);
     if (!rebased.ok) {
       await git(wtPath, ['rebase', '--abort']);
-      log(
-        `[worktree] ${featureBranch} attach succeeded but rebase onto ${baseRef} was aborted (${rebased.stderr.trim()}); branch left at its own tip`,
-      );
-      return { ok: true, action: 'attached_rebase_skipped' };
+      return {
+        ok: false,
+        action: 'rebase_failed',
+        detail: `${featureBranch} attached but rebase onto ${baseRef} failed: ${rebased.stderr.trim()}`,
+      };
     }
-    return { ok: true, action: 'attached_rebased' };
+    return { ok: true, action: `${okAction}_rebased` };
+  }
+
+  /**
+   * feature branch 가 아닌 **다른 branch** 에 붙어 있는 티켓 worktree 를 처리한다.
+   * 티켓 전용 worktree 이므로 그대로 승인하면 이후 커밋이 엉뚱한 branch 에 쌓인다.
+   * 그렇다고 무조건 되돌릴 수도 없다 — Merging 가이드가 **base branch 체크아웃을
+   * 명시적으로 지시**하기 때문이다(step 3 `git checkout <default-branch>` → ff
+   * merge, step 5 `git branch -d <feature-branch>` 는 default 가 체크아웃돼 있어야
+   * 한다). 즉 "base branch 위 + feature branch 없음" 은 Merging 이 끝난 **정상
+   * 종료 상태**이고, 거기서 feature branch 를 다시 만들면 step 5 가 방금 지운
+   * ref 를 되살려 terminal-cleanup 이 기대하는 상태를 깨뜨린다.
+   *
+   * 그래서:
+   *   - feature branch 가 살아 있고 tree 가 clean → 되돌려 붙인다(보장 복구).
+   *   - feature branch 가 살아 있는데 tree 가 dirty → 브랜치를 옮기면 작업물이
+   *     따라가거나 덮일 수 있어 자동 판단 불가 → `branch_prepare_failed`.
+   *   - feature branch 가 이미 없고 base branch 위 → Merging 종료 상태로 인정.
+   *   - feature branch 가 이미 없고 그 외 branch → 알 수 없는 상태 → 거부.
+   */
+  async #attachFromOtherBranch(
+    wtPath: string,
+    featureBranch: string,
+    baseRef: string,
+    baseBranch: string,
+    currentBranch: string,
+  ): Promise<{ ok: boolean; action: string; detail?: string }> {
+    const exists = await git(wtPath, ['show-ref', '--verify', '--quiet', `refs/heads/${featureBranch}`]);
+    if (!exists.ok) {
+      if (currentBranch === baseBranch) return { ok: true, action: 'base_branch_post_merge' };
+      return {
+        ok: false,
+        action: 'unknown_branch',
+        detail: `worktree sits on '${currentBranch}' and ${featureBranch} no longer exists — refusing to guess`,
+      };
+    }
+
+    const status = await git(wtPath, ['status', '--porcelain']);
+    if (!status.ok || status.stdout.trim()) {
+      return {
+        ok: false,
+        action: 'other_branch_dirty',
+        detail: `worktree sits on '${currentBranch}' with uncommitted changes — cannot switch to ${featureBranch} safely`,
+      };
+    }
+
+    const switched = await git(wtPath, ['switch', featureBranch]);
+    if (!switched.ok) {
+      return {
+        ok: false,
+        action: 'other_branch_attach_failed',
+        detail: `could not switch from '${currentBranch}' to ${featureBranch}: ${switched.stderr.trim()}`,
+      };
+    }
+    return this.#advanceOntoBase(wtPath, featureBranch, baseRef, 'restored_from_other_branch');
   }
 
   /** `git rev-list --count <args>`. 카운트를 못 구하면 -1 을 돌려준다 — 호출부가
@@ -1045,7 +1120,7 @@ export class WorktreeManager {
         const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
         if (ens.ok) {
           // per_ticket 재개와 같은 이유로 slot 재부착에서도 attach 를 보장한다.
-          const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef);
+          const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef, a.baseBranch);
           if (!attached.ok) {
             log(
               `[worktree] branch attach failed for shared slot ${mine} ticket=${t8}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,
@@ -1110,7 +1185,7 @@ export class WorktreeManager {
       // reset-on-acquire 가 HEAD 를 detach 해두므로 여기서 반드시 다시 붙인다.
       // `switch -c` 단독으로는 이 티켓의 branch 가 다른 slot 에서 살아남은 경우
       // "already exists" 로 실패해 slot 이 detached 로 남았다.
-      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef);
+      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef, a.baseBranch);
       if (!attached.ok) {
         log(
           `[worktree] branch attach failed for shared slot ${slotName} ticket=${t8}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,

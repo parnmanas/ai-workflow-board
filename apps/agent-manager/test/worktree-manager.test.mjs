@@ -402,6 +402,98 @@ test('detached HEAD 와 feature branch 가 각자 고유 커밋을 가지면 어
   }
 });
 
+test('rebase 가 충돌로 실패하면 attach 만 하고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('rebase-conflict');
+  try {
+    // feature branch 와 base 가 같은 파일을 서로 다르게 고쳐 rebase 를 반드시 충돌시킨다.
+    await fsp.writeFile(join(fx.first.cwd, 'README.md'), '# 브랜치 쪽 편집\n');
+    commit(fx.first.cwd, '충돌을 만들 브랜치 커밋');
+    await fsp.writeFile(join(fx.source.repo, 'README.md'), '# base 쪽 편집\n');
+    git(fx.source.repo, ['add', '.']);
+    git(fx.source.repo, [...COMMIT_ID, 'commit', '-q', '-m', 'base 쪽 충돌 커밋']);
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false, '복구 미완이므로 fallback 이어야 한다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // abort 로 rebase 중간 상태는 걷혔고, branch 에는 붙어 있어 고아 커밋 위험은 없다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(existsSync(join(fx.first.cwd, '.git', 'rebase-merge')), false);
+    assert.equal(git(fx.first.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', '브랜치 커밋이 보존된다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('feature branch 가 살아 있는데 다른 branch 에 있으면 feature branch 로 되돌린다', async () => {
+  const fx = await detachedFixture('other-branch-restore');
+  try {
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), remoteTip);
+    assert.equal(resumed.repositoryContext.workingBranch, fx.branch);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('다른 branch 에 커밋되지 않은 변경이 있으면 옮기지 않고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('other-branch-dirty');
+  try {
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+    await fsp.writeFile(join(fx.first.cwd, 'dirty.txt'), '옮기면 안 되는 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    // 작업물도 branch 위치도 그대로 보존된다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'scratch/딴-브랜치');
+    assert.equal(await fsp.readFile(join(fx.first.cwd, 'dirty.txt'), 'utf8'), '옮기면 안 되는 변경\n');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('Merging 종료 상태(base branch 위 + feature branch 삭제됨)는 브랜치를 되살리지 않고 통과한다', async () => {
+  const fx = await detachedFixture('post-merge-base');
+  try {
+    // Merging 가이드 step 3·5 를 그대로 재현: default 체크아웃 후 feature branch 삭제.
+    git(fx.first.cwd, ['switch', '-q', 'main']);
+    git(fx.first.cwd, ['branch', '-D', fx.branch]);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true, 'Merging 종료 상태는 정상으로 인정해야 한다');
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
+    assert.equal(
+      git(resumed.cwd, ['branch', '--list', fx.branch]), '',
+      'terminal-cleanup 이 지운 ref 를 되살리면 안 된다',
+    );
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('feature branch 가 없는 채 base 도 아닌 branch 에 있으면 추측하지 않고 거부한다', async () => {
+  const fx = await detachedFixture('unknown-branch');
+  try {
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+    git(fx.first.cwd, ['branch', '-D', fx.branch]);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(git(fx.first.cwd, ['branch', '--list', fx.branch]), '', '브랜치를 새로 만들지 않는다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
 test('shared slot 재부착도 detached HEAD 를 남기지 않는다', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'shared-detached-agent-dir');
