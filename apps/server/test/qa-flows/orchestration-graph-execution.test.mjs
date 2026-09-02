@@ -947,4 +947,144 @@ test('graph patch 인가: 오케스트레이터만, 그리고 graph 모드 미�
   assert.match(String(noGraph.error?.error ?? ''), /no execution graph to patch/);
 });
 
+// ── replan 너머로 그래프 잇기 (티켓 301018c5) ───────────────────────────────
+//
+// 결함: graph/graph_template 없이 계획을 재제출하면 확정된 그래프가 depends_on
+// 기반 평면 DAG 로 조용히 교체돼 conditional/loop_back 과 그동안 적용한 patch 가
+// 전부 사라졌다(graph_revision 도 0 으로 리셋). 오류도 경고도 없었다.
+
+test('replan: graph 를 생략한 재제출이 확정 그래프와 적용된 patch 를 보존한다', async (t) => {
+  const s = await stage(t, { label: 'replancarry' });
+  const { ws, missions, mission, worker, critic, leadMcp, workerMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...planFor(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+
+  const before = (await missions.getMissionDetail(mission.id, ws.id)).graph_spec;
+  assert.equal(before.edges.filter((e) => e.kind === 'loop_back').length, 1, '픽스처 전제: loop_back 1');
+  assert.equal(before.edges.filter((e) => e.kind === 'conditional').length, 2, '픽스처 전제: conditional 2');
+
+  step('실행 이력을 만든다 — spec 을 끝내 api·ui 를 띄운다');
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec', visit: 1 });
+
+  step('진행 중에 loop 상한을 올리는 patch 를 적용한다');
+  const patched = await patchGraph(leadMcp, mission.id, {
+    set_nodes: [
+      { key: 'integrate', max_visits: 5 },
+      { key: 'review', max_visits: 5 },
+    ],
+  });
+  assert.equal(patched.graph_revision, 1, '첫 patch 는 revision 1');
+
+  step('전형적인 replan: step 하나를 추가하고 graph 는 보내지 않는다');
+  const replanned = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    summary: 'add a docs step',
+    steps: [
+      { step_key: 'docs', title: 'Write the docs', instructions: 'Document it.', assignee_agent_id: worker.id },
+    ],
+  });
+  assert.ok(!replanned?.isError, `replan failed: ${JSON.stringify(replanned)}`);
+  assert.deepEqual(replanned.created_steps, ['docs']);
+
+  step('조건 분기와 bounded loop 가 그대로 남아 있다 — 이게 결함의 본체다');
+  const detail = await missions.getMissionDetail(mission.id, ws.id);
+  const after = detail.graph_spec;
+  assert.equal(after.edges.filter((e) => e.kind === 'loop_back').length, 1, 'loop_back 이 유실됐다');
+  assert.equal(after.edges.filter((e) => e.kind === 'conditional').length, 2, 'conditional 이 유실됐다');
+  assert.equal(
+    after.nodes.find((n) => n.key === 'review').kind,
+    'evaluator',
+    'evaluator node 가 task 로 되돌아갔다',
+  );
+
+  step('patch 로 올린 loop 상한과 patch 카운터도 replan 을 넘어간다');
+  assert.equal(after.nodes.find((n) => n.key === 'integrate').max_visits, 5, 'patch 가 되돌려졌다');
+  assert.equal(detail.graph_revision, 1, '그래프를 보존했으면 patch 카운터도 이어져야 한다');
+
+  step('새 step 은 고립 node 로 편입된다 — entry 이자 terminal');
+  assert.ok(after.nodes.some((n) => n.key === 'docs'), 'docs node 가 편입되지 않았다');
+  assert.ok(after.entry.includes('docs'));
+  assert.ok(after.terminal.includes('docs'));
+  assert.equal(after.edges.filter((e) => e.from === 'docs' || e.to === 'docs').length, 0);
+
+  step('plan_version 은 올랐고, 무엇이 이어졌는지 trace 에 남는다');
+  assert.equal(detail.plan_version, 2);
+  // 이벤트 배열은 created_at DESC 라 위치로 고르면 최초 제출을 집는다. 같은 초에
+  // 여러 건이 쌓일 수도 있으므로 순서가 아니라 plan_version 으로 특정한다.
+  const events = await eventsOf(missions, mission.id, ws.id);
+  const planEvent = events.find((e) => e.type === 'plan_submitted' && e.data?.plan_version === 2);
+  assert.ok(planEvent, 'v2 제출 이벤트가 기록돼야 한다');
+  assert.equal(planEvent.data.graph.carried, true, '보존한 replan 임이 trace 에 남아야 한다');
+  assert.deepEqual(planEvent.data.graph.carried_nodes, ['docs']);
+  assert.equal(planEvent.data.graph.graph_revision, 1);
+
+  const firstEvent = events.find((e) => e.type === 'plan_submitted' && e.data?.plan_version === 1);
+  assert.equal(firstEvent.data.graph.carried, false, '최초 제출은 보존이 아니라 확정이다');
+});
+
+test('replan: reset_graph 로 명시하면 평면 DAG 로 돌아가고 patch 카운터도 리셋된다', async (t) => {
+  const s = await stage(t, { label: 'replanreset' });
+  const { ws, missions, mission, worker, critic, leadMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...planFor(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+  const patched = await patchGraph(leadMcp, mission.id, { set_nodes: [{ key: 'integrate', max_visits: 5 }] });
+  assert.equal(patched.graph_revision, 1);
+
+  step('graph 와 reset_graph 를 함께 보내면 어느 쪽이 이길지 모호하므로 거부한다');
+  const both = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [{ step_key: 'spec', title: 'Write the spec', instructions: 'Draft it.', assignee_agent_id: worker.id }],
+    reset_graph: true,
+    graph: { edges: [{ from: 'spec', to: 'api' }] },
+  });
+  assert.ok(both?.isError, '상호배타 위반이 조용히 통과했다');
+  assert.match(String(both.error?.error ?? ''), /cannot be combined with/);
+
+  step('reset_graph 만 보내면 depends_on 에서 다시 유도한다');
+  const reset = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    summary: 'abandon the branches',
+    steps: [
+      { step_key: 'docs', title: 'Write the docs', instructions: 'Document it.', assignee_agent_id: worker.id },
+    ],
+    reset_graph: true,
+  });
+  assert.ok(!reset?.isError, `reset failed: ${JSON.stringify(reset)}`);
+
+  const detail = await missions.getMissionDetail(mission.id, ws.id);
+  const after = detail.graph_spec;
+  assert.equal(after.edges.filter((e) => e.kind === 'loop_back').length, 0, '폐기했는데 loop 가 남았다');
+  assert.equal(after.edges.filter((e) => e.kind === 'conditional').length, 0);
+  assert.equal(after.nodes.find((n) => n.key === 'integrate').max_visits, 1, 'patch 가 남아 있으면 안 된다');
+  assert.equal(detail.graph_revision, 0, '새 기준선이므로 patch 카운터도 0 으로 돌아가야 한다');
+
+  const events = await eventsOf(missions, mission.id, ws.id);
+  const planEvent = events.find((e) => e.type === 'plan_submitted' && e.data?.plan_version === 2);
+  assert.ok(planEvent, 'v2 제출 이벤트가 기록돼야 한다');
+  assert.equal(planEvent.data.graph.carried, false, '교체한 replan 임이 trace 에 남아야 한다');
+  assert.deepEqual(planEvent.data.graph.carried_nodes, []);
+});
+
+test('replan: graph 모드가 꺼진 미션은 reset_graph 도 조용히 무시하지 않고 거부한다', async (t) => {
+  const s = await stage(t, { graphEnabled: false, label: 'replanplain' });
+  const { mission, worker, leadMcp } = s;
+
+  const refused = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [{ step_key: 'one', title: 'One', instructions: 'Do it.', assignee_agent_id: worker.id }],
+    reset_graph: true,
+  });
+  assert.ok(refused?.isError, 'graph 모드가 꺼졌는데 reset_graph 가 통과했다');
+  assert.match(String(refused.error?.error ?? ''), /does not have graph mode enabled/);
+});
+
 exitAfterTests();
