@@ -261,6 +261,13 @@ export default function MissionDetailPage() {
             mission.steps.length > 0 ? (
               <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                 {mission.counts.done}/{mission.counts.total} done · up to {mission.max_parallel_steps} in parallel
+                {mission.graph_spec
+                  ? ` · graph: ${mission.graph_spec.nodes.length} nodes, ${mission.graph_spec.edges.length} edges` +
+                    (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
+                      ? `, ${mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length} loop`
+                      : '') +
+                    ` · budget ${mission.total_visits}/${mission.graph_spec.max_total_visits} runs`
+                  : ''}
               </span>
             ) : undefined
           }
@@ -274,7 +281,12 @@ export default function MissionDetailPage() {
                   : 'No steps in this mission.'}
             </div>
           ) : (
-            <PlanGraph steps={mission.steps} selectedId={selectedStepId} onSelect={(s) => setSelectedStepId(s.id)} />
+            <PlanGraph
+              steps={mission.steps}
+              graph={mission.graph_spec}
+              selectedId={selectedStepId}
+              onSelect={(s) => setSelectedStepId(s.id)}
+            />
           )}
         </Section>
 

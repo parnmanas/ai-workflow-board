@@ -2655,6 +2655,45 @@ export interface OrchestrationStep {
   finished_at: string | null;
   /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
   workspace_folder: string;
+  /** loop 재진입 횟수(1-based, 미실행 0). attempt(같은 iteration의 재시도)와 다른 축. */
+  visit: number;
+  /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
+  verdict: string;
+}
+
+// ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────
+
+export type OrchestrationGraphNodeKind = 'task' | 'evaluator' | 'router';
+export type OrchestrationGraphEdgeKind = 'sequence' | 'conditional' | 'loop_back';
+export type OrchestrationGraphJoinPolicy = 'all' | 'any';
+
+export interface OrchestrationGraphCondition {
+  status?: string[];
+  verdict?: string[];
+}
+
+export interface OrchestrationGraphNode {
+  key: string;
+  kind: OrchestrationGraphNodeKind;
+  join: OrchestrationGraphJoinPolicy;
+  max_visits: number;
+}
+
+export interface OrchestrationGraphEdge {
+  from: string;
+  to: string;
+  kind: OrchestrationGraphEdgeKind;
+  when?: OrchestrationGraphCondition;
+  label?: string;
+}
+
+export interface OrchestrationGraphSpec {
+  version: number;
+  nodes: OrchestrationGraphNode[];
+  edges: OrchestrationGraphEdge[];
+  entry: string[];
+  terminal: string[];
+  max_total_visits: number;
 }
 
 export interface OrchestrationTimelineEvent {
@@ -2691,6 +2730,12 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   step_timeout_minutes: number;
   created_by_type: string;
   created_by: string;
+  /** 그래프 모드 여부 — false면 기존 depends_on 실행 계약 그대로다. */
+  graph_enabled: boolean;
+  /** 확정된 실행 그래프. null = wave/DAG 모드. */
+  graph_spec: OrchestrationGraphSpec | null;
+  /** 지금까지 소진된 node 실행 횟수(global budget). */
+  total_visits: number;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

@@ -163,12 +163,78 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           }),
         )
         .describe('The plan. Order does not matter — dependencies determine execution order.'),
+      graph: z
+        .object({
+          nodes: z
+            .array(
+              z.object({
+                key: z.string().describe('step_key this node controls'),
+                kind: z
+                  .enum(['task', 'evaluator', 'router'])
+                  .optional()
+                  .describe(
+                    'task (default) = ordinary work. evaluator = judges upstream work and reports a verdict. ' +
+                      'router = only picks a branch; every edge out of it must be conditional.',
+                  ),
+                join: z
+                  .enum(['all', 'any'])
+                  .optional()
+                  .describe(
+                    'How incoming edges combine. all (default) = every one must be satisfied (fan-in). ' +
+                      'any = one is enough — use this where conditional branches merge, or the node waits forever.',
+                  ),
+                max_visits: z
+                  .number()
+                  .optional()
+                  .describe('How many times this node may run (default 1). A loop_back target needs >= 2.'),
+              }),
+            )
+            .optional()
+            .describe('Per-node execution contract. Steps you omit default to task/all/1.'),
+          edges: z
+            .array(
+              z.object({
+                from: z.string(),
+                to: z.string(),
+                kind: z
+                  .enum(['sequence', 'conditional', 'loop_back'])
+                  .optional()
+                  .describe(
+                    'sequence (default) = plain dependency, same as depends_on. conditional = taken only when ' +
+                      '"when" matches. loop_back = send work back upstream for another pass; the ONLY edge kind ' +
+                      'allowed to close a cycle.',
+                  ),
+                when: z
+                  .object({
+                    status: z.array(z.string()).optional().describe('Take this edge when "from" ends in one of these statuses'),
+                    verdict: z.array(z.string()).optional().describe('Take this edge when "from" reports one of these verdicts'),
+                  })
+                  .optional()
+                  .describe('Required for conditional and loop_back edges. Both lists given = both must match.'),
+                label: z.string().optional().describe('Human label shown on the edge, e.g. "needs revision"'),
+              }),
+            )
+            .optional()
+            .describe('Forward edges (from → to means "to" runs after "from"). Omit to derive them from depends_on.'),
+          max_total_visits: z
+            .number()
+            .optional()
+            .describe(
+              'Hard cap on total node runs for the whole mission. REQUIRED when the graph has any loop_back edge — ' +
+                'it is the budget that guarantees the mission terminates.',
+            ),
+        })
+        .optional()
+        .describe(
+          'Optional execution graph: conditional branches, join policies and bounded loops. Only accepted on a ' +
+            'mission with graph mode enabled. Omit it and the plan runs as a plain dependency DAG exactly as before.',
+        ),
     },
-    async ({ mission_id, summary, steps }, extra) => {
+    async ({ mission_id, summary, steps, graph }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const result = await svc.submitPlan(mission_id, callerAgentId(extra), { summary, steps });
+        const result = await svc.submitPlan(mission_id, callerAgentId(extra), { summary, steps, graph });
         return ok({
           mission_id,
           plan_version: result.mission.plan_version,
@@ -176,6 +242,16 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           created_steps: result.created,
           updated_steps: result.updated,
           dispatched_now: result.dispatched,
+          graph: result.graph
+            ? {
+                nodes: result.graph.nodes.length,
+                edges: result.graph.edges.length,
+                entry: result.graph.entry,
+                terminal: result.graph.terminal,
+                loops: result.graph.edges.filter((e) => e.kind === 'loop_back').length,
+                max_total_visits: result.graph.max_total_visits,
+              }
+            : null,
           note:
             result.dispatched.length > 0
               ? 'Those steps are now in flight. You will be woken in this room when one fails or when the ' +
@@ -440,8 +516,23 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         )
         .optional()
         .describe('Concrete outputs of this step, surfaced in the mission view and to dependent steps'),
+      verdict: z
+        .string()
+        .optional()
+        .describe(
+          'Required only when your work order asked for one (evaluator / router steps). The mission branches on ' +
+            'this value — it selects which downstream step runs, or sends the work back for another pass. Use ' +
+            'exactly one of the values your work order listed.',
+        ),
+      visit: z
+        .number()
+        .optional()
+        .describe(
+          'Copy the number from your work order verbatim when it gave you one. It identifies which pass of this ' +
+            'step you are reporting; a stale number is rejected instead of overwriting a newer pass.',
+        ),
     },
-    async ({ step_id, status, summary, artifacts }, extra) => {
+    async ({ step_id, status, summary, artifacts, verdict, visit }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
@@ -449,14 +540,22 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           status,
           summary,
           artifacts: artifacts as any,
+          verdict,
+          visit,
         });
         return ok({
           step_id: result.step.id,
           step_key: result.step.step_key,
-          status: result.step.status,
+          status: result.reported_status,
+          verdict: result.step.verdict || null,
           next_steps_dispatched: result.dispatched,
           orchestrator_notified: result.orchestrator_woken,
-          note: 'Your part is done. Do not keep working on this step — the orchestrator owns what happens next.',
+          loop_reentered: result.loop_reentered,
+          note:
+            result.loop_reentered.length > 0
+              ? 'Recorded. Your verdict sent this branch back for another pass — the affected steps were reset ' +
+                'and will be re-dispatched with fresh work orders. Do not act on that yourself.'
+              : 'Your part is done. Do not keep working on this step — the orchestrator owns what happens next.',
         });
       } catch (e: any) {
         return toolError(e, 'failed to report step');
