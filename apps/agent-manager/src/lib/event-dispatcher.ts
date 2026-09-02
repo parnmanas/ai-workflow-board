@@ -64,6 +64,7 @@ import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './trigger-id.js';
 import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES } from './constants.js';
+import { parseClonePolicy, type CloneWirePolicy } from './repo-credential.js';
 import { createHash } from 'node:crypto';
 import {
   SkillMaterializer,
@@ -1235,7 +1236,7 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
-    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null } | null,
+    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null; clonePolicy?: CloneWirePolicy | null } | null,
   ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string; coldSharedWorktree?: boolean; repositoryContext?: TicketRepositoryContext; recoveryInstructions?: string }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
@@ -2460,6 +2461,9 @@ export class EventDispatcher {
         url: selectedRepo.url,
         branch: selectedRepo.branch,
         credential: repoCredential,
+        // ticket bddb63ee — 서버가 해석한 clone 정책을 flattened event 에서 그대로
+        // 넘긴다. 필드가 없는(구버전) 서버면 undefined → 매니저 시스템 기본값.
+        clonePolicy: parseClonePolicy(ev.clone_policy),
       } : null,
     );
     let worktreeProvision = await applyWorktree();

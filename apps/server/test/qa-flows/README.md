@@ -58,7 +58,9 @@ meta-test guards against that regression returning.
 ## Helpers (`../helpers/`)
 
 - **`boot.mjs`** — `bootApp({ port })` returns `{ app, port, modules }`
-  where `modules` already exposes `activityEvents`, `ActivityService`,
+  where the returned `port` is the port the server **actually** bound —
+  pass `port: 0` to let the OS pick a free one (ticket 6a9a3fe4) — and
+  `modules` already exposes `activityEvents`, `ActivityService`,
   `AuthService`, `getDataSourceToken`, `mcpTools`. Also exports
   `exitAfterTests()` — flushes the trace buffer after the last test. It does
   **not** call `process.exit`; handle teardown + the real exit code come from
@@ -176,6 +178,14 @@ test('my scenario', async (t) => {
   `PORT` env fallback at the top of your file. The `test:qa` npm script
   runs files sequentially, but other locally-running dev servers can steal
   a port.
+  **한 파일에서 앱을 두 번 이상 부팅한다면 고정 포트를 재사용하지 말 것**
+  (ticket 6a9a3fe4). 바로 위 항목대로 teardown 은 `void app.close()` 라
+  앞 서버가 실제로 소켓을 놓을 때까지 기다리지 않으므로, 다음 부팅이 같은
+  포트를 bind 하면 EADDRINUSE 가 난다 — 한가한 머신에서는 통과하고 부하가
+  걸린 전체 스위트에서만 터지는 flake 가 된다. 부팅마다 포트를 달리 하거나
+  (`BASE_PORT + n`), 아예 `bootApp({ port: 0 })` 으로 OS 에 빈 포트를 받아라.
+  `bootApp()` 은 **실제로 바인딩된** 포트를 돌려주므로 반환값을 그대로 URL 에
+  쓰면 된다. 고정 지연(sleep)으로 덮지 말 것.
 - **SSE subscriptions are async.** After starting a `VirtualAgent`, give
   it ~200ms before emitting the event under test — the subscription
   attaches asynchronously and events fired before attach are lost.

@@ -180,6 +180,23 @@ export interface BuiltinPromptDefault {
   column_match: string;
 }
 
+/**
+ * Repo Resource / Workspace 의 clone 정책(ticket bddb63ee). 모든 키가 optional 이며
+ * 지정하지 않은 키는 Repo Resource → Workspace → 시스템 기본값 순으로 흘러내린다.
+ */
+export interface ClonePolicy {
+  /** clone 전체 wall-clock 예산(초). 60~86400. 시스템 기본값 3600(60분). */
+  clone_timeout_seconds?: number;
+  /** 진행 출력이 완전히 끊긴 채 허용할 시간(초). 0 = 비활성(시스템 기본값 — opt-in). */
+  clone_idle_timeout_seconds?: number;
+  /** `--depth` — shallow clone 커밋 수. 미지정 = 전체 히스토리. */
+  clone_depth?: number;
+  /** `--filter` — partial clone 필터(예: `blob:none`). */
+  clone_filter?: string;
+  /** `--single-branch` — 대상 브랜치 하나만 가져온다. */
+  single_branch?: boolean;
+}
+
 export interface Resource {
   id: string;
   workspace_id: string | null;
@@ -198,6 +215,11 @@ export interface Resource {
   // For type='repository': the branch tickets default to when no per-ticket
   // base_branch is set. Empty leaves the choice to git's `origin/HEAD`.
   default_branch?: string;
+  // For type='repository': per-repo clone policy (ticket bddb63ee). The server
+  // returns it PARSED (an object, not the stored JSON text) and merges it over
+  // the workspace default at dispatch. null / absent = no override → the system
+  // defaults apply (clone timeout 3600s = 60min, idle timeout disabled, full clone).
+  clone_policy?: ClonePolicy | null;
   created_at: string;
   updated_at: string;
 }
@@ -1557,6 +1579,9 @@ export interface Workspace {
   // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
   // boards override it per key via Board.harness_config.
   harness_config?: string | null;
+  // Workspace 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
+  // JSON 문자열로 내려오며, Repo Resource 가 키 단위로 덮는다.
+  clone_policy?: string | null;
   cli_runtime_profiles?: string | null;
   default_cli_runtime_profile?: string | null;
   default_claude_backend_profile_id?: string | null;
@@ -2630,6 +2655,45 @@ export interface OrchestrationStep {
   finished_at: string | null;
   /** 이 step의 assignee가 (이미 또는 앞으로) 고정될 working_dir-relative 폴더. */
   workspace_folder: string;
+  /** loop 재진입 횟수(1-based, 미실행 0). attempt(같은 iteration의 재시도)와 다른 축. */
+  visit: number;
+  /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
+  verdict: string;
+}
+
+// ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────
+
+export type OrchestrationGraphNodeKind = 'task' | 'evaluator' | 'router';
+export type OrchestrationGraphEdgeKind = 'sequence' | 'conditional' | 'loop_back';
+export type OrchestrationGraphJoinPolicy = 'all' | 'any';
+
+export interface OrchestrationGraphCondition {
+  status?: string[];
+  verdict?: string[];
+}
+
+export interface OrchestrationGraphNode {
+  key: string;
+  kind: OrchestrationGraphNodeKind;
+  join: OrchestrationGraphJoinPolicy;
+  max_visits: number;
+}
+
+export interface OrchestrationGraphEdge {
+  from: string;
+  to: string;
+  kind: OrchestrationGraphEdgeKind;
+  when?: OrchestrationGraphCondition;
+  label?: string;
+}
+
+export interface OrchestrationGraphSpec {
+  version: number;
+  nodes: OrchestrationGraphNode[];
+  edges: OrchestrationGraphEdge[];
+  entry: string[];
+  terminal: string[];
+  max_total_visits: number;
 }
 
 export interface OrchestrationTimelineEvent {
@@ -2666,6 +2730,12 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   step_timeout_minutes: number;
   created_by_type: string;
   created_by: string;
+  /** 그래프 모드 여부 — false면 기존 depends_on 실행 계약 그대로다. */
+  graph_enabled: boolean;
+  /** 확정된 실행 그래프. null = wave/DAG 모드. */
+  graph_spec: OrchestrationGraphSpec | null;
+  /** 지금까지 소진된 node 실행 횟수(global budget). */
+  total_visits: number;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */
@@ -2694,6 +2764,12 @@ export interface OrchestrationUpdateEvent {
   plan_version: number;
   counts: OrchestrationCounts;
   last_event: { type: string; message: string; step_key: string } | null;
+  /**
+   * 이 미션이 방금 삭제됐다(티켓 03ca8b5b). 삭제는 REST 로만 일어나므로 목록을
+   * 그리는 화면은 이 프레임 없이는 사라진 미션을 계속 보여준다. 서버는 항상 이
+   * 키를 실어 보낸다(상태 변화 프레임은 false).
+   */
+  deleted: boolean;
   timestamp: string;
 }
 

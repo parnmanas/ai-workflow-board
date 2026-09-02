@@ -35,6 +35,7 @@ import {
   cloneWithRepoCredential,
   installRepoCredential,
   maskCredential,
+  type CloneWirePolicy,
   type RepoCredential,
 } from './repo-credential.js';
 
@@ -52,6 +53,12 @@ export interface RunRepoSpec {
    * 커버는 서버측 wiring(후속 티켓)이 이 필드를 채우는 순간 구조적으로 활성화된다.
    */
   credential?: RepoCredential | null;
+  /**
+   * Repo Resource ⊕ Workspace 로 해석된 clone 정책(ticket bddb63ee) — 서버의
+   * `RunRepoSpec.clone_policy` 와 같은 wire 형태. 없으면 repo-credential 의 시스템
+   * 기본값(60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다.
+   */
+  clone_policy?: CloneWirePolicy | null;
 }
 
 /** 서버가 프로비저닝하는 모든 종류의 run/dispatch 작업폴더(ticket 9fd27487가
@@ -576,7 +583,7 @@ export async function provisionRunWorkspace(
           dir,
           branch: p.repo.branch,
           credential: cred,
-          timeoutMs: RUN_GIT_TIMEOUT_MS,
+          policy: p.repo.clone_policy,
         });
         steps.push(`clone ${p.repo.url} → ${rel} ${cloned.ok ? 'ok' : `FAIL: ${mask(cloned.stderr)}`}`);
         if (!cloned.ok) throw new Error(`git clone failed for ${p.repo.url}: ${mask(cloned.stderr)}`);

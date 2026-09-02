@@ -10,6 +10,7 @@ import { Resource } from '../../../entities/Resource';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
 import { EmbeddingService, buildResourceText, textHash } from '../../../services/embedding.service';
 import type { McpLogger } from '../tools/context';
+import { parseClonePolicy } from '../../../common/clone-policy';
 
 export function parseResourceTags(r: Resource): string[] {
   try { return JSON.parse(r.tags || '[]'); } catch { return []; }
@@ -83,6 +84,9 @@ export function resourceToJson(r: Resource) {
     file_mimetype: r.file_mimetype,
     has_file: !!r.file_data,
     default_branch: r.default_branch || '',
+    // ticket bddb63ee — 저장 형태는 JSON text 지만 agent 에게는 파싱된 객체로
+    // 노출한다(깨진 행은 null 로 흡수). null = 정책 없음 → 시스템 기본값.
+    clone_policy: parseClonePolicy(r.clone_policy),
     tags: parseResourceTags(r),
     created_at: r.created_at,
     updated_at: r.updated_at,

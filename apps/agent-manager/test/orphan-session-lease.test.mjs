@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { cleanupOrphanSubagents } from '../dist/lib/orphan-cleanup.js';
+import { resolveLostCreateRace } from '../dist/lib/agent-lockfile.js';
 
 const tempDirs = [];
 const children = [];
@@ -21,6 +22,71 @@ function alive(pid) {
   } catch {
     return false;
   }
+}
+
+// ── 동시 contender 시작 배리어 ────────────────────────────────────────────
+//
+// 아래 두 레이스 테스트의 전제는 "두 contender 가 **같은 시점에** 같은 lock 상태를
+// 보고 경쟁한다" 이다. 두 프로세스를 연달아 spawn 하는 것만으로는 그 전제가
+// 보장되지 않는다 — 부하가 높은 러너(Windows CI 실측)에서는 두 번째 프로세스의
+// 기동·ESM 로드가 수백 ms 늦어, 첫 번째가 이미 owner 가 된 뒤에 도착한다. 그러면
+// 두 번째는 "동시 경쟁자" 가 아니라 **순차적인 두 번째 takeover** 가 되고, 이는
+// --force 의 정상 동작이라 제품이 아니라 테스트만 red 가 된다.
+//
+// 그래서 contender 는 모듈 로드를 마친 뒤 READY 를 찍고 stdin 의 go 신호를
+// 기다린다. 테스트가 둘 다 READY 인 것을 확인한 뒤에야 신호를 보내므로, 경쟁
+// 시작 시점이 wall-clock 추측이 아니라 happens-before 로 고정된다.
+// `destroy()` 는 필수다 — 신호를 읽고 나서 stdin 파이프를 열어두면 그 핸들이
+// 이벤트 루프를 붙잡아 contender 가 영원히 종료하지 않는다(`pause()` 만으로는
+// unref 되지 않는다).
+const BARRIER_PROLOGUE = `
+  process.stdout.write('READY\\n');
+  await new Promise((resolve) => process.stdin.once('data', () => {
+    process.stdin.destroy();
+    resolve();
+  }));
+`;
+
+/** 배리어를 지키는 contender 를 띄운다. `ready` 는 READY 수신, `done` 은 종료. */
+function spawnBarrieredContender(source, env) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+    env,
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  children.push(child);
+  // contender 가 신호를 읽자마자 stdin 을 destroy 하므로, 부모의 write 가
+  // EPIPE 로 끝날 수 있다 — 리스너가 없으면 테스트 프로세스가 죽는다.
+  child.stdin.on('error', () => {});
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  let signalReady;
+  const ready = new Promise((resolve) => { signalReady = resolve; });
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+    if (output.includes('READY')) signalReady();
+  });
+  const done = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, output }));
+  });
+  return { child, ready, done };
+}
+
+/** 둘 다 READY 가 될 때까지 기다린 뒤 동시에 출발시키고 결과를 모은다. */
+async function raceContenders(source, env) {
+  const contenders = [spawnBarrieredContender(source, env), spawnBarrieredContender(source, env)];
+  await Promise.all(
+    contenders.map((c) => {
+      // 배리어 도달 전에 죽으면 무한 대기 대신 그 사실을 즉시 드러낸다.
+      const earlyExit = c.done.then(({ code, output }) => {
+        throw new Error(`contender가 배리어 도달 전에 종료됨: code=${code} output=${JSON.stringify(output)}`);
+      });
+      earlyExit.catch(() => {}); // race 가 끝난 뒤 남는 rejection 흡수
+      return Promise.race([c.ready, earlyExit]);
+    }),
+  );
+  for (const c of contenders) c.child.stdin.write('go\n');
+  return Promise.all(contenders.map((c) => c.done));
 }
 
 afterEach(async () => {
@@ -128,6 +194,7 @@ test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock
 
   const contenderSource = `
     const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
+    ${BARRIER_PROLOGUE}
     try {
       const lock = await acquireAgentLock({ role: 'manager', version: 'new', force: true });
       console.log('ACQUIRED');
@@ -137,22 +204,11 @@ test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock
       console.log('REJECTED:' + error.code);
     }
   `;
-  const runContender = () => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', contenderSource], {
-      env,
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-    children.push(child);
-    let output = '';
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { output += chunk; });
-    return new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('exit', (code) => resolve({ code, output }));
-    });
-  };
 
-  const results = await Promise.all([runContender(), runContender()]);
+  const results = await raceContenders(contenderSource, env);
+  // 진 contender 는 정상적으로 거절되고 스스로 빠져나가야 한다. 여기서 0 이 아닌
+  // 코드가 나오면 진 쪽이 이긴 쪽에게 force-kill 당했다는 뜻이다(Windows 는
+  // 원격 SIGTERM 을 TerminateProcess 로 흉내내 exit code 1 을 남긴다).
   assert.deepEqual(results.map(({ code }) => code), [0, 0]);
   assert.equal(results.filter(({ output }) => output.includes('ACQUIRED')).length, 1);
   assert.equal(results.filter(({ output }) => output.includes('REJECTED:EAGENTLOCKED')).length, 1);
@@ -169,6 +225,7 @@ for (const fixture of [
     const env = { ...process.env, AWB_AGENT_MANAGER_HOME: home };
     const contenderSource = `
       const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
+      ${BARRIER_PROLOGUE}
       try {
         const lock = await acquireAgentLock({ role: 'manager', version: 'new' });
         console.log('ACQUIRED');
@@ -178,20 +235,44 @@ for (const fixture of [
         console.log('REJECTED:' + error.code);
       }
     `;
-    const run = () => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['--input-type=module', '-e', contenderSource], {
-        env,
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
-      children.push(child);
-      let output = '';
-      child.stdout.setEncoding('utf8');
-      child.stdout.on('data', (chunk) => { output += chunk; });
-      child.once('error', reject);
-      child.once('exit', () => resolve(output));
-    });
-    const outputs = await Promise.all([run(), run()]);
+    const outputs = (await raceContenders(contenderSource, env)).map(({ output }) => output);
     assert.equal(outputs.filter((output) => output.includes('ACQUIRED')).length, 1);
-    assert.equal(outputs.filter((output) => output.includes('REJECTED:EAGENTLOCKED')).length, 1);
+    // 진 쪽은 반드시 소유권 오류(EAGENTLOCKED)여야 한다. 회수 경로가 create
+    // 레이스에서 지면 예전에는 raw `EEXIST` 가 그대로 새어 나왔다 — 그 누수를
+    // 다시 들이면 이 단언이 정확히 그 지점에서 깨진다.
+    assert.equal(
+      outputs.filter((output) => output.includes('REJECTED:EAGENTLOCKED')).length,
+      1,
+      `진 contender는 EAGENTLOCKED로 거절돼야 한다: ${JSON.stringify(outputs)}`,
+    );
   });
 }
+
+// ── 회수 경로가 create 레이스에서 졌을 때의 판정 (티켓 6fd625bb) ────────────
+//
+// 회수 가드(acquireRecoveryLock)는 stale-cleanup 경로에 들어온 contender 만
+// 직렬화한다. 갓 시작한 contender 의 **첫 시도** O_EXCL create 는 가드를 거치지
+// 않으므로, 회수 경로가 unlink 한 직후 create 하기 전 사이에 파일을 선점할 수
+// 있다. Windows CI 에서 실제로 그 창이 열렸고(파일 연산이 느려 창이 넓다),
+// 회수 경로가 raw `EEXIST` 를 그대로 올려 `EAGENTLOCKED` 를 기대하는 호출자에게
+// fs 오류 코드가 새어 나갔다 — 위 "unparseable lock 동시 회수" 가 그때 red 였다.
+//
+// 창 자체는 O_EXCL 의미상 없앨 수 없으므로 결과를 다시 판정한다. 그 판정 규칙은
+// 순수 함수 + 의존성 주입이라, 재현 불가능한 실제 프로세스 레이스를 흉내내지
+// 않고도 두 분기를 결정적으로 검증할 수 있다.
+test('create 레이스에서 살아있는 승자에게 지면 EAGENTLOCKED로 판정한다', () => {
+  const winner = { pid: 4242, role: 'manager', version: 'new', started_at: 'now' };
+  const verdict = resolveLostCreateRace(() => winner, (pid) => pid === 4242);
+  assert.equal(verdict.outcome, 'locked');
+  assert.deepEqual(verdict.owner, winner, '거절 메시지에 실제 승자 정보가 실려야 한다');
+});
+
+test('create 레이스 승자가 이미 죽었으면 재시도로 판정한다 — 죽은 lock에 갇히지 않는다', () => {
+  const dead = { pid: 999_999_999, role: 'manager' };
+  assert.deepEqual(resolveLostCreateRace(() => dead, () => false), { outcome: 'retry' });
+});
+
+test('create 레이스 직후 lock이 사라졌거나 읽을 수 없으면 재시도로 판정한다', () => {
+  // readLock 은 unparseable/pid<=0/파일없음 을 모두 null 로 degrade 한다.
+  assert.deepEqual(resolveLostCreateRace(() => null, () => true), { outcome: 'retry' });
+});

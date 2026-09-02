@@ -102,6 +102,26 @@ export class OrchestrationStep {
   @Column({ type: 'int', default: 2 })
   max_attempts: number;
 
+  // ── 그래프 실행 상태(티켓 1ca9e49b) ────────────────────────────────────────
+
+  /**
+   * 이 node가 지금까지 실행에 들어간 횟수(1-based, 미실행이면 0). `attempt`와는
+   * 다른 축이다: `attempt`는 **같은 iteration 안에서의 재시도**이고, `visit`은
+   * loop_back edge를 통한 **재진입 횟수**다. 하나의 evaluator→revision loop에서
+   * draft가 두 번째로 실행되면 visit=2, attempt는 다시 1부터 센다.
+   * `GraphSpec` node의 `max_visits`와 대조돼 무한 반복을 막는다.
+   */
+  @Column({ type: 'int', default: 0 })
+  visit: number;
+
+  /**
+   * 이 step이 마지막으로 보고한 verdict(소문자 정규화). evaluator/router node가
+   * 조건 분기를 고르는 근거이며, `EdgeCondition.verdict`와 대조된다.
+   * '' = verdict 없음(일반 task node의 정상 상태).
+   */
+  @Column({ type: 'varchar', default: '' })
+  verdict: string;
+
   @Column({ type: Date, nullable: true, default: null })
   dispatched_at: Date | null;
 

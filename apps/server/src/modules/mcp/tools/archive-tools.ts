@@ -18,6 +18,7 @@ import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { getCallerAgent } from '../shared/session-auth';
 import { isTerminalColumn, buildArchiveCursor, parseArchiveCursor } from '../shared/archive-helpers';
+import { emitFocusReleased } from '../../agents/focus-eligibility';
 import type { ToolContext } from './context';
 
 export function registerArchiveTools(server: McpServer, ctx: ToolContext): void {
@@ -145,6 +146,13 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
         field_changed: 'archived_at',
         new_value: new Date(ticket.archived_at).toISOString(),
       });
+
+      // active 컬럼 티켓을 아카이브하면 그 자리에서 focus 슬롯이 풀린다
+      // (ticket 2cc54fde). 저장이 끝난 뒤 알려 backlog 승격이 즉시 다음
+      // 티켓을 올리게 한다 — 없으면 다음 `agent_idle` 이나 기본 5분 level
+      // sweep 까지 보드가 멈춰 있다. terminal/intake 컬럼에서의 아카이브는
+      // 잡고 있던 슬롯이 없으므로 헬퍼 안에서 no-op 이 된다.
+      await emitFocusReleased(dataSource, ticket, 'archived');
 
       const full = await loadTicketFull(dataSource, ticket.id);
       return ok({ ...full, manual: true, on_terminal: isTerminal });

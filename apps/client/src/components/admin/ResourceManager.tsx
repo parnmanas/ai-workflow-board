@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { CatalogScope, Resource, Credential, RepoBranch } from '../../types';
+import type { CatalogScope, ClonePolicy, Resource, Credential, RepoBranch } from '../../types';
+import {
+  ClonePolicyFields,
+  EMPTY_CLONE_POLICY_FORM,
+  clonePolicyToForm,
+  formToClonePolicy,
+  type ClonePolicyFormState,
+} from '../ClonePolicyEditor';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
@@ -72,7 +79,11 @@ export default function ResourceManager({
   const [formFileMimetype, setFormFileMimetype] = useState('');
   const [formCredentialId, setFormCredentialId] = useState<string>('');
   const [formDefaultBranch, setFormDefaultBranch] = useState('');
-  const [formErrors, setFormErrors] = useState<{ name?: string }>({});
+  // clone 정책(ticket bddb63ee). 필드 구성·검증은 Workspace Settings 와 공유하는
+  // ClonePolicyEditor 모듈이 소유한다 — 두 표면이 같은 형태를 편집하므로 검증이
+  // 갈라지지 않게 한 곳에 뒀다.
+  const [formClonePolicy, setFormClonePolicy] = useState<ClonePolicyFormState>(EMPTY_CLONE_POLICY_FORM);
+  const [formErrors, setFormErrors] = useState<{ name?: string; clonePolicy?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string; kind: 'image' | 'video' } | null>(null);
 
@@ -213,6 +224,7 @@ export default function ResourceManager({
     setFormFileMimetype('');
     setFormCredentialId('');
     setFormDefaultBranch('');
+    setFormClonePolicy(EMPTY_CLONE_POLICY_FORM);
     setFormErrors({});
     resetBranchTest();
     setEditResource(null);
@@ -231,6 +243,7 @@ export default function ResourceManager({
     setFormFileMimetype(resource.file_mimetype || '');
     setFormCredentialId(resource.credential_id || '');
     setFormDefaultBranch(resource.default_branch || '');
+    setFormClonePolicy(clonePolicyToForm(resource.clone_policy));
     setFormErrors({});
     resetBranchTest();
     setEditResource(resource);
@@ -300,8 +313,16 @@ export default function ResourceManager({
   };
 
   const handleSave = async () => {
-    const errors: { name?: string } = {};
+    const errors: { name?: string; clonePolicy?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
+    // clone 정책은 repository 타입에서만 의미가 있다 — 다른 타입에서는 폼에
+    // 노출되지 않으므로 검증도 건너뛰고 저장 시 null 로 지운다.
+    let clonePolicy: ClonePolicy | null = null;
+    if (formType === 'repository') {
+      const built = formToClonePolicy(formClonePolicy);
+      if (!built.ok) errors.clonePolicy = built.error;
+      else clonePolicy = built.value;
+    }
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
       return;
@@ -333,6 +354,7 @@ export default function ResourceManager({
           tags: parsedTags,
           credential_id: formCredentialId || null,
           default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
+          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource updated.', 'success');
       } else {
@@ -350,6 +372,7 @@ export default function ResourceManager({
           file_mimetype: formFileMimetype,
           tags: parsedTags,
           default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
+          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource created.', 'success');
       }
@@ -928,6 +951,24 @@ export default function ResourceManager({
                   Click a branch above to pin as default, or type a custom name.
                 </div>
               )}
+            </div>
+          )}
+
+          {formType === 'repository' && (
+            <div>
+              <label style={{
+                fontSize: tokens.typography.fontSizeXs,
+                fontWeight: tokens.typography.fontWeightSemibold,
+                color: tokens.colors.textMuted,
+                textTransform: 'uppercase',
+                display: 'block',
+                marginBottom: tokens.spacing.xs,
+              }}>Clone Policy</label>
+              <ClonePolicyFields
+                value={formClonePolicy}
+                onChange={setFormClonePolicy}
+                error={formErrors.clonePolicy}
+              />
             </div>
           )}
 

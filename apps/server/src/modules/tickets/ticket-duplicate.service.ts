@@ -9,6 +9,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { randomUUID } from 'crypto';
 import { dispatchBackoffMs, readReconcilerConfig } from '../agents/dispatch-intent.service';
 import { isDuplicateDecisionPending } from './ticket-duplicate-pending';
+import { emitFocusReleased } from '../agents/focus-eligibility';
 
 export interface DuplicateIntake {
   title: string;
@@ -184,7 +185,7 @@ export class TicketDuplicateService {
   }
 
   async confirm(reportId: string, candidateId: string | null, actorName: string, actorId: string): Promise<Ticket> {
-    return this.dataSource.transaction(async manager => {
+    const confirmed = await this.dataSource.transaction(async manager => {
       const tickets = manager.getRepository(Ticket);
       const report = await tickets.findOne({ where: { id: reportId } });
       if (!report) throw new Error('Ticket not found');
@@ -249,6 +250,16 @@ export class TicketDuplicateService {
       }
       return saved;
     });
+
+    // canonical 연결이 확정된 티켓은 dispatch 경로가 트리거를 전부 버리므로,
+    // 이 순간 focus 후보 집합에서도 빠진다 — lease 해제다 (ticket 2cc54fde,
+    // 요구사항 2). 위 트랜잭션이 커밋된 뒤에 브로드캐스트해서 canonical
+    // 티켓이 방금 열린 슬롯을 즉시 가져가게 한다. 중복이 active 컬럼에 앉은
+    // 채 canonical 승격을 무한 차단하던 교착이 여기서 자동으로 풀린다.
+    if (confirmed.canonical_ticket_id) {
+      await emitFocusReleased(this.dataSource, confirmed, 'duplicate_link');
+    }
+    return confirmed;
   }
 
   /**

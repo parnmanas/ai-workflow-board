@@ -6,6 +6,7 @@
 import type { HarnessConfig } from '../harness-config';
 import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
+import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
@@ -104,6 +105,14 @@ export interface AgentTriggerPayload {
   // ticket leaves them unset (pure-discussion / non-code work).
   base_repo: { id: string; name: string; url: string; default_branch: string } | null;
   base_branch: string;
+  // Resolved clone policy for `base_repo` (ticket bddb63ee): the Repo Resource's
+  // own `clone_policy` merged key-by-key over the workspace default
+  // (resolveClonePolicy). agent-manager applies it to the container base clone —
+  // wall-clock budget, idle-stall budget, and the shallow/partial/single-branch
+  // flags. Null when neither layer configures anything; the manager then uses its
+  // OWN defaults, which are the same system defaults (clone timeout 60분), so an
+  // unconfigured repo and a pre-bddb63ee manager behave identically.
+  clone_policy?: ResolvedClonePolicy | null;
   // TicketSupervisor signal: agent-manager should kill any live subagent for this
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
@@ -831,6 +840,14 @@ export interface OrchestrationUpdatePayload {
   plan_version: number;
   counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
   last_event: { type: string; message: string; step_key: string } | null;
+  /**
+   * 이 미션이 방금 삭제됐다는 표시(티켓 03ca8b5b). 삭제는 REST
+   * `DELETE /api/orchestration/missions/:id` 로만 일어나므로, 미션 목록을 그리는
+   * 화면(사이드바 WORK > Orchestrations, 미션 목록 페이지)은 이 신호가 없으면
+   * 사라진 미션을 계속 보여주고 클릭 시 없는 상세로 보낸다. 상태 변화 프레임과
+   * 구분해야 하므로 별도 불리언으로 싣는다(status 는 삭제 직전 값 그대로).
+   */
+  deleted: boolean;
 }
 
 /**

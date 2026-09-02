@@ -27,6 +27,7 @@ import { AgentAutostartService } from './agent-autostart.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
+import { resolveClonePolicy, ResolvedClonePolicy } from '../../common/clone-policy';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
 import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
@@ -2903,6 +2904,10 @@ candidate's branch or move the ticket.
     let baseBranch = freshTicket?.base_branch || ticket.base_branch || '';
     const baseRepoWorkspaceId = effectiveWorkspaceId;
     let baseRepo: { id: string; name: string; url: string; default_branch: string } | null = null;
+    // base_repo Resource 행의 clone_policy 원문(ticket bddb63ee). 아래 두 해석
+    // 지점(티켓 지정 repo / board environment 백필) 어느 쪽으로 정해지든 같은
+    // 변수에 담아, emit 직전에 workspace 기본값과 키 단위로 합친다.
+    let baseRepoClonePolicyRaw: string | null = null;
     if (baseRepoId && baseRepoWorkspaceId) {
       try {
         // id만으로 fetch 후 workspace를 코드에서 체크(permissive 패턴, ticket
@@ -2920,6 +2925,7 @@ candidate's branch or move the ticket.
             url: r.url || '',
             default_branch: r.default_branch || '',
           };
+          baseRepoClonePolicyRaw = r.clone_policy ?? null;
         }
       } catch (e) {
         this.logService.warn('MCP', 'base_repo lookup failed (continuing without)', {
@@ -3126,6 +3132,7 @@ candidate's branch or move the ticket.
           if (r && (r.workspace_id === null || r.workspace_id === baseRepoWorkspaceId)) {
             baseRepoId = r.id;
             baseRepo = { id: r.id, name: r.name, url: r.url || '', default_branch: r.default_branch || '' };
+            baseRepoClonePolicyRaw = r.clone_policy ?? null;
             // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch 오버라이드가
             // resource의 default_branch보다 우선한다 — 그렇지 않으면 board가 "release"를
             // 지정해도 resource의 "main"으로 조용히 덮여써진다.
@@ -3163,6 +3170,15 @@ candidate's branch or move the ticket.
           .execute();
       }
     }
+
+    // ── clone 정책 해석 (ticket bddb63ee) ────────────────────────────────────
+    // base_repo Resource 의 clone_policy 를 workspace 기본값 위에 키 단위로 얹어
+    // 확정 형태로 만든다. 두 레이어 모두 비어 있으면 null 이고, agent-manager 가
+    // 자신의 시스템 기본값(clone timeout 60분)을 그대로 쓴다 — 즉 설정이 전혀
+    // 없는 기존 저장소의 동작이 wire 상 명시적으로 "override 없음" 으로 남는다.
+    const clonePolicy: ResolvedClonePolicy | null = baseRepo
+      ? resolveClonePolicy(baseRepoClonePolicyRaw, runtimeWorkspace?.clone_policy)
+      : null;
 
     // Goal 2 — force a base repo (guard). An assignee dispatched onto an active
     // (branch-work) column with NO resolvable repo (neither the ticket's own id
@@ -3376,6 +3392,11 @@ candidate's branch or move the ticket.
       column_prompt: columnPrompt,
       base_repo: baseRepo,
       base_branch: baseBranch,
+      // Resolved repo clone policy (ticket bddb63ee) — Repo Resource ⊕ workspace
+      // default. agent-manager applies it to the container base clone (wall-clock
+      // + idle budget, shallow/partial/single-branch). Null = no override; the
+      // manager's own defaults are the same system defaults.
+      clone_policy: clonePolicy,
       // Resolved workspace+board harness — agent-manager applies it as CLI
       // flags at subagent spawn (ticket e9c7a896). Null = no harness.
       harness_config: harnessConfig,

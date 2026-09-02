@@ -11,6 +11,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, canUseCatalogItem, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
+import { parseClonePolicy, serializeClonePolicy, validateClonePolicyInput } from '../../common/clone-policy';
 import { Board } from '../../entities/Board';
 import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
@@ -107,6 +108,9 @@ export class ResourcesController {
       ...r,
       scope: catalogScopeOf(r),
       tags: (() => { try { return JSON.parse(r.tags || '[]'); } catch { return []; } })(),
+      // 저장은 JSON text 지만 클라이언트에는 tags 와 동일하게 파싱된 객체로 준다
+      // (ticket bddb63ee). 깨진 행은 parseClonePolicy 가 null 로 흡수한다.
+      clone_policy: parseClonePolicy(r.clone_policy),
     }));
     return res.json(parsed);
   }
@@ -126,6 +130,7 @@ export class ResourcesController {
       ...resource,
       scope: catalogScopeOf(resource),
       tags: (() => { try { return JSON.parse(resource.tags || '[]'); } catch { return []; } })(),
+      clone_policy: parseClonePolicy(resource.clone_policy),
     };
     return res.json(parsed);
   }
@@ -135,7 +140,7 @@ export class ResourcesController {
     const {
       workspace_id, board_id = null, credential_id = null, name, description = '', type = 'link',
       url = '', content = '', file_data = '', file_name = '', file_mimetype = '',
-      tags = [], default_branch = '',
+      tags = [], default_branch = '', clone_policy = undefined,
     } = body;
     let catalogScope;
     try {
@@ -175,11 +180,23 @@ export class ResourcesController {
       tags: JSON.stringify(Array.isArray(tags) ? tags : []),
       default_branch: typeof default_branch === 'string' ? default_branch : '',
     });
+    // clone_policy (ticket bddb63ee) — 미지정이면 null 그대로 두어 "정책 없음"
+    // 을 유지한다. 값이 오면 스키마 위반은 400 으로 되돌린다.
+    if (clone_policy !== undefined) {
+      if (clone_policy === null) {
+        entity.clone_policy = null;
+      } else {
+        const checked = validateClonePolicyInput(clone_policy);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        entity.clone_policy = serializeClonePolicy(checked.value);
+      }
+    }
     const resource = await this.resourceRepo.save(entity);
     return res.status(201).json({
       ...resource,
       scope: catalogScopeOf(resource),
       tags: (() => { try { return JSON.parse(resource.tags || '[]'); } catch { return []; } })(),
+      clone_policy: parseClonePolicy(resource.clone_policy),
     });
   }
 
@@ -222,12 +239,22 @@ export class ResourcesController {
     }
     if (body.tags !== undefined) resource.tags = JSON.stringify(Array.isArray(body.tags) ? body.tags : []);
     if (body.default_branch !== undefined) resource.default_branch = typeof body.default_branch === 'string' ? body.default_branch : '';
+    if (body.clone_policy !== undefined) {
+      if (body.clone_policy === null) {
+        resource.clone_policy = null;
+      } else {
+        const checked = validateClonePolicyInput(body.clone_policy);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        resource.clone_policy = serializeClonePolicy(checked.value);
+      }
+    }
 
     const saved = await this.resourceRepo.save(resource);
     return res.json({
       ...saved,
       scope: catalogScopeOf(saved),
       tags: (() => { try { return JSON.parse(saved.tags || '[]'); } catch { return []; } })(),
+      clone_policy: parseClonePolicy(saved.clone_policy),
     });
   }
 

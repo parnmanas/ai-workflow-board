@@ -13,12 +13,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { accessSync, constants as fsConstants } from 'node:fs';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, normalize } from 'node:path';
 import {
   orderResolutionSources,
   resolveBinOverride,
+  scanPathForBinary,
   selectBinary,
   resolveCliBin,
   _resetResolverCache,
@@ -83,6 +85,24 @@ test('resolveCliBin: an explicit codexBin override short-circuits PATH/well-know
   _resetResolverCache();
 });
 
+/** 경로 동일성 비교. 기대값은 `node:path.normalize()` 로 맞추고, Windows 에서는
+ *  대소문자를 무시한다 — 두 규칙 모두 board lesson(d5f925ca)에서 왔다. */
+function samePath(a, b) {
+  const [x, y] = [normalize(a), normalize(b)];
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+
+/** resolveCliBin 내부의 fileExecutable 과 같은 판정(X_OK). Windows 에는 실행
+ *  비트가 없어 존재 확인으로 degrade 된다. */
+function accessible(p) {
+  try {
+    accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function withCodexOnPath(run) {
   const dir = await mkdtemp(join(tmpdir(), 'awb-codex-resolver-'));
   const executable = join(dir, process.platform === 'win32' ? 'codex.exe' : 'codex');
@@ -90,7 +110,7 @@ async function withCodexOnPath(run) {
   const previousPath = process.env.PATH;
   process.env.PATH = `${dir}${delimiter}${previousPath ?? ''}`;
   try {
-    return await run();
+    return await run({ dir, executable });
   } finally {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
@@ -157,5 +177,72 @@ test('resolveCliBin hot-reload: removing an override via the sentinel default re
     const afterSentinelReset = resolveCliBin('codex', 'codex');
     assert.equal(afterSentinelReset, noOverride);
     _resetResolverCache();
+  });
+});
+
+// ── shell lookup 이 빈손일 때의 PATH 스캔 fallback (티켓 6fd625bb) ──────────
+//
+// resolveCliBin 의 PATH lookup 은 서브프로세스(`where` / `command -v`)라 호스트
+// 부하에 좌우된다. 2000ms timeout 에 걸리면 빈손으로 돌아오고, well-known 위치에
+// 없는 CLI 는 PATH 에 멀쩡히 설치돼 있는데도 "executable not found" 로 죽는다
+// (Windows CI 실측: `resolveCliBin: … executable not found`, duration≈2.2s =
+// 정확히 그 timeout). scanPathForBinary 는 같은 후보를 서브프로세스 없이
+// 결정적으로 만들어내는 fallback 이다.
+//
+// 아래 테스트는 board lesson(d5f925ca)대로 **호스트 설치나 POSIX 경로 표현에
+// 의존하지 않는다** — exists 를 주입하고, 기대 경로는 플랫폼별 join 으로 만든다.
+
+test('scanPathForBinary(POSIX): PATH 순서대로 실행 가능한 후보만 모은다', () => {
+  const hits = scanPathForBinary('codex', ['/a/bin', '/b/bin', '/c/bin'].join(':'), {
+    isWindows: false,
+    exists: (p) => p === '/b/bin/codex' || p === '/c/bin/codex',
+  });
+  assert.deepEqual(hits, ['/b/bin/codex', '/c/bin/codex']);
+});
+
+test('scanPathForBinary(Windows): PATHEXT 를 순서대로 붙여 본다', () => {
+  const dir = 'C:\\tools';
+  const hits = scanPathForBinary('codex', dir, {
+    isWindows: true,
+    pathExt: '.COM;.EXE;.CMD',
+    exists: (p) => p === `${dir}\\codex.EXE` || p === `${dir}\\codex.CMD`,
+  });
+  // `.exe` 와 `.cmd` 둘 다 후보로 올라오고, 실제 우선순위(진짜 exe 우선)는
+  // selectBinary 가 정한다 — 스캔은 후보 수집만 책임진다.
+  assert.deepEqual(hits, [`${dir}\\codex.EXE`, `${dir}\\codex.CMD`]);
+});
+
+test('scanPathForBinary(Windows): 인용부호와 빈 항목(중복 구분자)을 안전하게 다룬다', () => {
+  const hits = scanPathForBinary('codex', '"C:\\q tools";;C:\\plain;', {
+    isWindows: true,
+    pathExt: '.EXE',
+    exists: () => true,
+  });
+  // 빈 항목은 "현재 디렉터리"로 새면 안 되고, 인용부호는 벗겨져야 한다.
+  assert.deepEqual(hits, ['C:\\q tools\\codex.EXE', 'C:\\plain\\codex.EXE']);
+});
+
+test('scanPathForBinary: PATH 가 비어 있으면 빈 목록 — 절대 literal 로 추측하지 않는다', () => {
+  assert.deepEqual(scanPathForBinary('codex', undefined, { isWindows: false, exists: () => true }), []);
+  assert.deepEqual(scanPathForBinary('codex', '', { isWindows: true, exists: () => true }), []);
+});
+
+test('scanPathForBinary: 실제 PATH 상의 설치본을 서브프로세스 없이 찾아낸다', async () => {
+  // shell lookup 이 timeout 으로 빈손이어도 이 스캔만으로 후보가 나온다는 것을
+  // 실제 파일시스템으로 확인한다 — 호스트에 codex 가 깔려 있을 필요는 없다
+  // (withCodexOnPath 가 임시 실행 가능 fixture 를 만들어 PATH 앞에 붙인다).
+  await withCodexOnPath(({ executable }) => {
+    const hits = scanPathForBinary('codex', process.env.PATH, {
+      isWindows: process.platform === 'win32',
+      pathExt: process.env.PATHEXT,
+      exists: (p) => accessible(p),
+    });
+    // Windows 파일시스템은 대소문자를 구분하지 않고, 스캔은 확장자를 PATHEXT
+    // 표기 그대로(`.EXE`) 붙인다 — fixture 는 `codex.exe` 다. 경로 비교를
+    // 대소문자 구분으로 하면 제품이 멀쩡한데 테스트만 깨진다(Windows CI 실측).
+    assert.ok(
+      hits.some((hit) => samePath(hit, executable)),
+      `PATH 스캔이 fixture 설치본을 찾아야 한다: ${JSON.stringify(hits)} 안에 ${executable}`,
+    );
   });
 });

@@ -103,6 +103,12 @@ export function eventColor(type: string): string {
   if (type === 'mission_completed' || type === 'step_completed') return tokens.colors.successLight;
   if (type === 'plan_submitted' || type === 'orchestrator_woken') return tokens.colors.accentLight;
   if (type === 'step_dispatched' || type === 'step_assigned') return tokens.colors.infoLight;
+  // 그래프 실행 trace(티켓 1ca9e49b) — loop 재진입/예산 소진은 운영자가 놓치면
+  // 안 되는 신호라 경고색, 단순 edge 선택은 정보색.
+  if (type === 'node_revisited' || type === 'loop_exhausted' || type === 'graph_budget_exhausted') {
+    return tokens.colors.warningLight;
+  }
+  if (type === 'edge_selected') return tokens.colors.infoLight;
   return tokens.colors.textMuted;
 }
 
