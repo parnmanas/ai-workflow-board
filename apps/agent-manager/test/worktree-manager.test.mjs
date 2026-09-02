@@ -260,19 +260,17 @@ async function detachedFixture(label) {
   const workingDir = join(source.root, `${label}-agent-dir`);
   const bootstrapRepo = { resourceId: 'repo-detached', url: source.remote, branch: 'main' };
   const wm = new WorktreeManager();
-  const resolve = (ticketId = TICKET_A, extra = {}) => wm.resolveCwd({
+  const resolve = () => wm.resolveCwd({
     baseWorkingDir: workingDir,
-    ticketId,
+    ticketId: TICKET_A,
     role: 'assignee',
     bootstrapRepo,
-    ...extra,
   });
   const first = await resolve();
   assert.equal(first.isWorktree, true);
   assert.equal(first.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
   return {
     source,
-    workingDir,
     resolve,
     first,
     base: join(workingDir, '.awb', 'base', 'repo-detached'),
