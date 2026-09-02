@@ -184,8 +184,8 @@ depends_on: { c: ['a','b'] }  ≡  edges: [a→c, b→c] (sequence) + node c 의
 `computePlanProgress` 와 정확히 일치한다 — `orchestration-graph-spec.test.mjs`
 가 324개 상태 조합으로 이 동치성을 직접 단언한다. 그래서 `graph_enabled` 를 켠
 미션이 **최초** 계획을 `graph` 없이 제출하면 서버가 자동으로 승격하고, 실행 순서는
-그대로다. 이미 그래프가 확정된 뒤의 재제출은 승격이 아니라 보존이다 — 아래
-[replan 과 그래프](#replan-과-그래프-ticket-301018c5) 참조.
+그대로다. 이미 그래프가 확정된 뒤의 재제출은 승격이 아니라 보존이다 —
+"replan 과 그래프" 절 참고.
 
 graph 모드가 **꺼진** 미션에 `graph` 를 보내면 조용히 무시하지 않고 **거부한다**
 — 조용한 무시는 오케스트레이터가 분기/loop 가 실제로 걸린 줄 알고 계획을 세우게 만든다.
