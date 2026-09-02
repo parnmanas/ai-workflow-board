@@ -183,7 +183,9 @@ depends_on: { c: ['a','b'] }  ≡  edges: [a→c, b→c] (sequence) + node c 의
 조건도 loop 도 만들지 않으므로 `computeGraphProgress` 의 판정은
 `computePlanProgress` 와 정확히 일치한다 — `orchestration-graph-spec.test.mjs`
 가 324개 상태 조합으로 이 동치성을 직접 단언한다. 그래서 `graph_enabled` 를 켠
-미션이 `graph` 없이 계획을 제출하면 서버가 자동으로 승격하고, 실행 순서는 그대로다.
+미션이 **최초** 계획을 `graph` 없이 제출하면 서버가 자동으로 승격하고, 실행 순서는
+그대로다. 이미 그래프가 확정된 뒤의 재제출은 승격이 아니라 보존이다 — 아래
+[replan 과 그래프](#replan-과-그래프-ticket-301018c5) 참조.
 
 graph 모드가 **꺼진** 미션에 `graph` 를 보내면 조용히 무시하지 않고 **거부한다**
 — 조용한 무시는 오케스트레이터가 분기/loop 가 실제로 걸린 줄 알고 계획을 세우게 만든다.
@@ -241,12 +243,62 @@ action:"retry"` 로 명시적으로 되살려야 한다. 상태 되돌리기를 
 고쳤더니 이미 실패 처리된 작업이 조용히 다시 뛰더라" 가 된다.
 
 한 미션이 받을 수 있는 patch 총 횟수는 `MAX_GRAPH_PATCHES`(50)로 제한된다. 그래프가
-`submit_orchestration_plan` 으로 새로 확정되면 `graph_revision` 은 0 으로 되돌아간다 —
-새 기준선이 이전 그래프의 patch 횟수를 물려받을 이유가 없다.
+`submit_orchestration_plan` 으로 **새로 확정되면**(`graph`/`graph_template`/`reset_graph`)
+`graph_revision` 은 0 으로 되돌아간다 — 새 기준선이 이전 그래프의 patch 횟수를 물려받을
+이유가 없다. 반대로 그래프를 **보존한** 재제출은 그 patch 들이 그대로 살아 있으므로
+카운터도 이어간다.
 
 > `GraphSpec.version` 은 **스키마** 버전이라 `validateGraphSpec` 이 상수와 엄격히
 > 비교한다(`unsupported graph version N`). 그래서 수정 횟수를 거기에 실을 수 없고,
 > `graph_revision` 을 별도 컬럼으로 둔다.
+
+### replan 과 그래프 (ticket 301018c5)
+
+`submit_orchestration_plan` 의 **step 병합은 additive** 다: 이번 입력에서 빠진
+step_key 는 지워지지 않고 그대로 남는다. 그래프도 **같은 원칙을 따른다.**
+
+| 재제출에 담긴 것 | 그래프 | `graph_revision` |
+|---|---|---|
+| `graph` | 보낸 그래프로 **교체** | 0 으로 리셋 |
+| `graph_template` | 펼친 그래프로 **교체** | 0 으로 리셋 |
+| `reset_graph: true` | `depends_on` 에서 **재유도**(평면 DAG) | 0 으로 리셋 |
+| 셋 다 없음 (그래프 미확정) | `depends_on` 에서 유도 (wave adapter) | 0 |
+| 셋 다 없음 (그래프 확정됨) | **보존** + 새 step 만 고립 node 로 편입 | 이어감 |
+
+마지막 줄이 이 티켓이 고친 지점이다. 그전에는 `graph` 없는 재제출이 확정된 그래프를
+`graphFromWavePlan` 으로 통째 재생성했다. `graphFromWavePlan` 은 `sequence` edge 만
+만들므로 `conditional` 분기와 `loop_back` 이 **오류도 경고도 없이** 전부 사라졌고,
+`patch_orchestration_graph` 로 그동안 쌓은 수정까지 함께 되돌아갔다. step 하나 추가하는
+평범한 replan 이 실행 규칙을 조용히 날리는 셈이었다.
+
+보존은 `carryGraphThroughReplan()` 이 한다. 별도 검증 경로를 만들지 않고 **기존 spec 을
+입력 형태로 되돌려 `validateGraphSpec` 에 다시 통과시킨다** — patch 가 쓰는 것과 같은
+방식이다. 새 step 을 고립 node 로 채우는 것은 검증기가 원래 하던 일이라(그래프에서 빠진
+step 은 `entry` 이자 `terminal` 인 node 로 채워진다) 편입에 별도 코드가 필요 없다.
+
+안전한 근거는 **plan 에서 step 이 사라지지 않는다**는 것이다. 재제출은 누락 키를
+보존하고, `update_orchestration_step` 의 `cancel` 은 행을 지우지 않고 status 만 바꾸며,
+`listSteps` 는 상태로 거르지 않는다. 그래서 확정된 그래프의 node 집합은 언제나 현재
+step 집합의 부분집합이고, 보존이 고아 node 를 만들 수 없다. (step 을 실제로 **삭제**하는
+경로가 생긴다면 사라진 key 를 참조하는 node/edge 를 걷어내는 처리가 함께 필요하다 —
+지금은 `carryGraphThroughReplan` 이 그 경우를 조용히 넘기지 않고 거부한다.)
+
+`max_total_visits` 는 **구조상 불가피할 때만** 새 node 수까지 최소로 올린다. loop 가
+없는 그래프는 예산이 node 수로 자동 유도되는데(`maxTotalVisits = byKey.size`), 그
+상태에서 step 이 하나만 늘어도 "예산이 node 수보다 작다" 로 재제출 자체가 거부되기
+때문이다. 여유가 있으면 손대지 않는다 — 예산은 loop 폭주를 막는 안전 상한이므로 편의로
+들어올리지 않는다.
+
+**그래프를 정말 버리고 싶을 때**는 `reset_graph: true` 로 명시한다. `graph` ·
+`graph_template` 과는 상호배타이고(어느 쪽이 이길지가 임의 규칙이 되므로 거부),
+graph 모드가 꺼진 미션에서는 다른 그래프 입력과 마찬가지로 거부된다.
+
+어느 재제출이 그래프를 갈았는지는 `plan_submitted` 이벤트의 `data.graph.carried` ·
+`carried_nodes` · `graph_revision` 으로 추적한다.
+
+> 분기 하나를 열거나 loop 상한만 고치려는 것이라면 재제출이 아니라
+> `patch_orchestration_graph` 를 써라 — plan 버전을 태우지 않고, 실행 이력과의 정합성을
+> 함께 검사한다.
 
 ### 그래프 템플릿 (ticket 2fc8f99a)
 
@@ -384,7 +436,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | 툴 | 용도 |
 | --- | --- |
 | `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 |
-| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다 |
+| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다. 셋 다 없으면 **확정된 그래프를 보존**하고 새 step 만 고립 node 로 편입한다 — 버리려면 `reset_graph: true` |
 | `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
 | `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
