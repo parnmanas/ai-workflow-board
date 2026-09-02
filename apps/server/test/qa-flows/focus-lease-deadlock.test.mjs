@@ -17,23 +17,32 @@
 //
 // 커버리지 (티켓 요구사항 5의 다섯 항목):
 //
-//   1. duplicate→canonical — 중복 확정 시 lease 가 풀리고 canonical 이 수동
-//      개입 없이 승격 + dispatch 된다. 픽스 이전이라면 tryPromote 가 계속
-//      null 을 돌려주는, 바로 그 재현 케이스.
+//   1. duplicate→canonical — 실제 `TicketDuplicateService.confirm()` 을 태운다.
+//      confirm 은 `pending_user_action` 을 끄면서 `canonical_ticket_id` 를
+//      붙이므로, 픽스 이전에는 중복 티켓이 그 순간 focus 자격을 **되찾아**
+//      슬롯을 영구 점유했다(요구사항 2의 "이후 재획득 금지"가 가리키는 지점).
 //   2. 재획득 금지 — 중복 티켓은 intake 에서도 다시 승격되지 않는다.
 //   3. A→B prerequisite — 선행 등록으로 슬롯이 회수되고, 브로드캐스트를 타고
 //      선행 티켓이 자동 재개(승격)된다. max_concurrent=1.
-//   4. archive/supersede — archive 시 슬롯 회수 + 해제 사유 감사 기록.
+//   4. archive/supersede — 실제 archive 전이 경로 두 개(MCP `archive_ticket`,
+//      REST `POST /api/tickets/:id/archive`)를 각각 태워 슬롯 회수 + 자동 재개
+//      + 해제 사유 감사 기록을 확인한다.
 //   5. 동시 승격 경합 — 두 패스가 같은 티켓을 이중 승격하지 않는다.
 //
 // 요구사항 6(운영 로그)은 각 케이스에서 `focus_lease_released` 감사 행의
 // `reason=` 토큰을 직접 단언해 함께 검증한다.
+//
+// 검증 원칙: 자동 복구를 주장하는 단언은 `tryPromote()` 를 직접 부르지 않는다.
+// 상태 전이는 실제 운영 경로(confirm / archive 도구 / add_ticket_prerequisites)
+// 로 일으키고, 그 뒤 승격과 `trigger_emitted` 가 저절로 일어나기를 기다린다 —
+// 직접 호출로 승격시키면 브로드캐스트 누락을 영영 잡지 못한다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
+import { McpClient } from '../helpers/mcp-client.mjs';
 import {
   createWorkspace,
   createAgent,
@@ -64,16 +73,34 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     const prerequisitesModule = await import(
       'file://' + path.join(DIST_ROOT, 'modules', 'tickets', 'ticket-prerequisites.service.js')
     );
+    const duplicateModule = await import(
+      'file://' + path.join(DIST_ROOT, 'modules', 'tickets', 'ticket-duplicate.service.js')
+    );
+    const duplicatePendingModule = await import(
+      'file://' + path.join(DIST_ROOT, 'modules', 'tickets', 'ticket-duplicate-pending.js')
+    );
+    const authModule = await import(
+      'file://' + path.join(DIST_ROOT, 'services', 'auth.service.js')
+    );
     const backlogPromotion = app.get(backlogPromotionModule.BacklogPromotionService);
     const agentWorkload = app.get(agentWorkloadModule.AgentWorkloadService);
     const prerequisites = app.get(prerequisitesModule.TicketPrerequisitesService);
+    const duplicates = app.get(duplicateModule.TicketDuplicateService);
     const ds = app.get(getDataSourceToken());
 
     step('Seed workspace + driver user + assignee agent');
     const ws = await createWorkspace(app, getDataSourceToken, 'focuslease');
     await createUser(app, getDataSourceToken, { name: 'driver' });
     const alice = await createAgent(app, getDataSourceToken, ws.id, { name: 'alice' });
-    await createApiKey(app, getDataSourceToken, alice.id, { workspaceId: ws.id, label: 'alice' });
+    const aliceKey = await createApiKey(app, getDataSourceToken, alice.id, { workspaceId: ws.id, label: 'alice' });
+
+    // Case 4 는 실제 archive 전이 경로 두 개를 그대로 태운다: MCP `archive_ticket`
+    // 은 HTTP JSON-RPC 로, REST 아카이브는 로그인 세션 토큰으로 호출한다.
+    const port = parseInt(process.env.PORT, 10);
+    const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: aliceKey.raw_key });
+    await mcp.initialize();
+    const restUser = await createUser(app, getDataSourceToken, { name: 'archiver' });
+    const restToken = app.get(authModule.AuthService).createSession(restUser.id);
 
     const boardRepo = ds.getRepository('Board');
     const colRepo = ds.getRepository('BoardColumn');
@@ -137,73 +164,85 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Case 1 — duplicate→canonical. 교착 재현 후 자동 복구.
+    // Case 1 — duplicate→canonical. 실제 `TicketDuplicateService.confirm()`.
+    //
+    // confirm 은 한 트랜잭션에서 `pending_user_action` 을 끄고
+    // `canonical_ticket_id` 를 붙인다. 픽스 이전에는 그 순간 중복 티켓이
+    // focus 자격을 **되찾아** 슬롯을 영구 점유했다 — dispatch 는 절대 되지
+    // 않으므로 canonical 은 영원히 승격되지 못한다.
     // ──────────────────────────────────────────────────────────────────
-    step('Case 1 — 중복 티켓이 잡고 있던 슬롯이 풀리고 canonical 이 자동 승격된다');
+    step('Case 1 — confirm() 이후 중복이 슬롯을 되찾지 않고 canonical 이 자동 복구된다');
     const c1 = await makeBoard('lease-case1');
 
-    // D — active 컬럼에 앉아 alice 의 focus 를 점유한 중복 리포트.
+    // D — active 컬럼에서 중복 판정을 기다리는 리포트. 실제 인테이크가 만드는
+    // 상태 그대로다(`duplicate_decision_guard` 가 세운 pending).
     const tDup = await createTicket(app, getDataSourceToken, {
-      columnId: c1.todo.id, workspaceId: ws.id, title: 'D-duplicate-report', priority: 'high',
+      columnId: c1.todo.id, workspaceId: ws.id, title: 'D-duplicate-report', priority: 'critical',
       assigneeId: alice.id,
     });
-    // C — backlog 에서 승격을 기다리는 canonical 티켓.
+    // C — backlog 에서 승격을 기다리는 canonical 후보.
     const tCanonical = await createTicket(app, getDataSourceToken, {
-      columnId: c1.backlog.id, workspaceId: ws.id, title: 'C-canonical', priority: 'critical',
+      columnId: c1.backlog.id, workspaceId: ws.id, title: 'C-canonical', priority: 'medium',
       assigneeId: alice.id,
     });
-
-    step('  기준선: D 가 focus 를 점유 → canonical 승격이 focus_held 로 차단된다');
-    assert.equal(
-      await agentWorkload.getFocusTicket(alice.id, c1.board.id, 'assignee'), tDup.id,
-      'D 는 아직 평범한 active 티켓이므로 focus 를 점유해야 한다',
-    );
-    const blocked = await backlogPromotion.tryPromote(c1.board.id);
-    assert.equal(blocked, null, 'focus 가 점유된 동안에는 canonical 이 승격되면 안 된다 (교착 재현)');
-    const skipRows = await activityLogRepo.find({
-      where: { action: 'backlog_promotion_skipped_focus_held', ticket_id: tCanonical.id },
+    await ticketRepo.update(tDup.id, {
+      pending_user_action: true,
+      pending_reason: 'Confirm whether this report duplicates one of the suggested tickets.',
+      pending_set_at: new Date(),
+      pending_set_by: duplicatePendingModule.DUPLICATE_PENDING_SET_BY,
     });
-    assert.ok(skipRows.length > 0, '차단은 backlog_promotion_skipped_focus_held 감사 행을 남겨야 한다');
-    assert.match(
-      skipRows[0].new_value || '', new RegExp(`focus_ticket_id=${tDup.id}`),
-      `차단 사유가 점유자로 D 를 지목해야 한다 (got ${skipRows[0].new_value})`,
-    );
+    const decisionRepo = ds.getRepository('TicketDuplicateDecision');
+    await decisionRepo.save(decisionRepo.create({
+      workspace_id: ws.id,
+      report_ticket_id: tDup.id,
+      candidate_ticket_id: tCanonical.id,
+      outcome: 'ambiguous_pending',
+      confidence: 80,
+      matched_signals: JSON.stringify(['title']),
+      actor_name: 'qa-fixture',
+    }));
 
-    step('  canonical 연결 확정 — 여기서부터 D 는 dispatch 불가 상태다');
-    await ticketRepo.update(tDup.id, { canonical_ticket_id: tCanonical.id });
-
-    step('  D 는 focus 후보에서 즉시 빠진다 (lease 해제)');
+    step('  기준선: 판정 대기 중인 D 는 아직 슬롯을 잡고 있지 않다');
     assert.equal(
       await agentWorkload.getFocusTicket(alice.id, c1.board.id, 'assignee'), null,
-      '중복 확정된 티켓은 더 이상 focus 를 점유하면 안 된다',
+      'pending_user_action 인 동안에는 focus 를 점유하지 않아야 한다 (기존 a57517be 동작)',
+    );
+
+    step('  실제 confirm() 호출 — pending 이 풀리고 canonical 이 붙는다');
+    const confirmed = await duplicates.confirm(tDup.id, tCanonical.id, 'qa-operator', restUser.id);
+    assert.equal(confirmed.canonical_ticket_id, tCanonical.id, 'confirm 은 canonical 연결을 저장해야 한다');
+    assert.equal(!!confirmed.pending_user_action, false, 'confirm 은 duplicate pending 을 해제해야 한다');
+
+    step('  재획득 금지 — pending 이 풀렸어도 D 는 focus 를 되찾지 못한다');
+    assert.equal(
+      await agentWorkload.getFocusTicket(alice.id, c1.board.id, 'assignee'), null,
+      'confirm 직후 중복 티켓이 focus 를 재획득하면 안 된다 (교착의 실제 진입점)',
     );
     assert.deepEqual(
       await agentWorkload.getAgentFocusTicketIds(alice.id, c1.board.id, 1), [],
       '중복 티켓은 max_concurrent focus 카운트에도 포함되면 안 된다',
     );
 
-    step('  수동 archive / 직접 승격 없이 canonical 이 승격된다');
-    const promoted1 = await backlogPromotion.tryPromote(c1.board.id);
-    assert.equal(
-      promoted1, tCanonical.id,
-      `중복이 슬롯을 놓았으므로 canonical 이 승격돼야 한다 (got ${promoted1?.slice(0, 8) || 'null'})`,
-    );
-    const canonicalAfter = await ticketRepo.findOne({ where: { id: tCanonical.id } });
+    step('  자동 복구 — tryPromote 직접 호출 없이 canonical 이 승격 + dispatch 된다');
+    const canonicalAfter = await waitFor('canonical 이 first-active 컬럼으로 승격', async () => {
+      const row = await ticketRepo.findOne({ where: { id: tCanonical.id } });
+      return row?.column_id === c1.todo.id ? row : null;
+    });
     assert.equal(canonicalAfter.column_id, c1.todo.id, 'canonical 은 first-active 컬럼으로 이동해야 한다');
+    await waitFor('canonical 의 trigger_emitted 행', async () => (
+      await countAction('trigger_emitted', tCanonical.id) === 1 ? true : null
+    ));
     const dupAfter = await ticketRepo.findOne({ where: { id: tDup.id } });
-    assert.equal(dupAfter.column_id, c1.todo.id, '중복 티켓 자체는 움직이지 않는다 (자동 archive 는 이 픽스의 범위가 아니다)');
-
-    step('  canonical 이 실제로 dispatch 됐다 (trigger_emitted 행)');
     assert.equal(
-      await countAction('trigger_emitted', tCanonical.id), 1,
-      'canonical 승격은 담당자에게 트리거를 한 번 emit 해야 한다',
+      dupAfter.column_id, c1.todo.id,
+      '중복 티켓 자체는 움직이지 않는다 (자동 archive 는 이 픽스의 범위가 아니다)',
     );
 
     step('  요구사항 6 — 해제 사유가 운영 감사에 남는다');
-    assert.deepEqual(
-      await releaseReasons(tDup.id), ['duplicate_link'],
-      'D 에 대해 reason=duplicate_link 인 focus_lease_released 행이 정확히 하나 있어야 한다',
-    );
+    await waitFor('D 의 focus_lease_released 감사 행', async () => {
+      const reasons = await releaseReasons(tDup.id);
+      return reasons.includes('duplicate_link') ? reasons : null;
+    });
     const promotedRow = await activityLogRepo.findOne({
       where: { action: 'backlog_promoted', ticket_id: tCanonical.id },
     });
@@ -311,38 +350,75 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     });
 
     // ──────────────────────────────────────────────────────────────────
-    // Case 4 — archive/supersede 로 슬롯 회수.
+    // Case 4 — archive/supersede 로 슬롯 회수. 실제 전이 경로 두 개를 각각
+    // 태운다. DB 를 직접 갱신하고 `tryPromote()` 를 손으로 부르면 아카이브
+    // 경로에 브로드캐스트가 없어도 테스트가 통과해 버린다 — 그래서 여기서는
+    // 도구/엔드포인트를 그대로 호출하고 승격이 저절로 일어나기를 기다린다.
     // ──────────────────────────────────────────────────────────────────
-    step('Case 4 — archive(supersede) 된 티켓이 슬롯을 놓고 사유가 기록된다');
-    const c4 = await makeBoard('lease-case4');
-    const tSuperseded = await createTicket(app, getDataSourceToken, {
-      columnId: c4.todo.id, workspaceId: ws.id, title: 'S-superseded', priority: 'high',
-      assigneeId: alice.id,
-    });
-    const tNext = await createTicket(app, getDataSourceToken, {
-      columnId: c4.backlog.id, workspaceId: ws.id, title: 'N-next-in-line', priority: 'medium',
-      assigneeId: alice.id,
-    });
+    for (const variant of [
+      {
+        label: 'MCP archive_ticket',
+        board: 'lease-case4-mcp',
+        archive: async (ticketId) => {
+          const res = await mcp.callTool('archive_ticket', { ticket_id: ticketId });
+          assert.ok(!res?.isError, `archive_ticket 호출이 실패했다: ${JSON.stringify(res)}`);
+        },
+      },
+      {
+        label: 'REST POST /api/tickets/:id/archive',
+        board: 'lease-case4-rest',
+        archive: async (ticketId) => {
+          const res = await fetch(`http://localhost:${port}/api/tickets/${ticketId}/archive`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${restToken}`, 'Content-Type': 'application/json' },
+          });
+          assert.ok(res.ok, `REST archive 가 2xx 여야 한다 (got ${res.status})`);
+        },
+      },
+    ]) {
+      step(`Case 4 — ${variant.label} 로 슬롯이 회수되고 다음 티켓이 자동 재개된다`);
+      const c4 = await makeBoard(variant.board);
+      const tSuperseded = await createTicket(app, getDataSourceToken, {
+        columnId: c4.todo.id, workspaceId: ws.id, title: 'S-superseded', priority: 'high',
+        assigneeId: alice.id,
+      });
+      const tNext = await createTicket(app, getDataSourceToken, {
+        columnId: c4.backlog.id, workspaceId: ws.id, title: 'N-next-in-line', priority: 'medium',
+        assigneeId: alice.id,
+      });
 
-    assert.equal(
-      await backlogPromotion.tryPromote(c4.board.id), null,
-      'archive 전에는 N 이 승격되지 않아야 한다 (기준선)',
-    );
-    await ticketRepo.update(tSuperseded.id, { archived_at: new Date() });
+      step('  기준선: S 가 슬롯을 점유 중이라 N 은 승격 대상이 아니다');
+      assert.equal(
+        await agentWorkload.getFocusTicket(alice.id, c4.board.id, 'assignee'), tSuperseded.id,
+        'S 는 평범한 active 티켓이므로 focus 를 점유해야 한다',
+      );
+      assert.equal(
+        (await ticketRepo.findOne({ where: { id: tNext.id } })).column_id, c4.backlog.id,
+        'N 은 아직 intake 에 있어야 한다',
+      );
 
-    assert.equal(
-      await agentWorkload.getFocusTicket(alice.id, c4.board.id, 'assignee'), null,
-      'archive 된 티켓은 focus 를 점유하면 안 된다',
-    );
-    const promoted4 = await backlogPromotion.tryPromote(c4.board.id);
-    assert.equal(
-      promoted4, tNext.id,
-      `archive 로 슬롯이 회수되면 다음 티켓이 승격돼야 한다 (got ${promoted4?.slice(0, 8) || 'null'})`,
-    );
-    assert.deepEqual(
-      await releaseReasons(tSuperseded.id), ['archived'],
-      'archive 로 인한 해제는 reason=archived 로 남아야 한다',
-    );
+      step(`  ${variant.label} 실행`);
+      await variant.archive(tSuperseded.id);
+      assert.ok(
+        (await ticketRepo.findOne({ where: { id: tSuperseded.id } })).archived_at,
+        'archive 경로가 실제로 archived_at 을 기록해야 한다',
+      );
+
+      step('  자동 재개 — tryPromote 직접 호출 없이 N 이 승격 + dispatch 된다');
+      await waitFor(`${variant.label}: N 이 first-active 컬럼으로 승격`, async () => {
+        const row = await ticketRepo.findOne({ where: { id: tNext.id } });
+        return row?.column_id === c4.todo.id ? row : null;
+      });
+      await waitFor(`${variant.label}: N 의 trigger_emitted 행`, async () => (
+        await countAction('trigger_emitted', tNext.id) === 1 ? true : null
+      ));
+
+      step('  요구사항 6 — 해제 사유가 archived 로 기록된다');
+      await waitFor(`${variant.label}: S 의 focus_lease_released 감사 행`, async () => {
+        const reasons = await releaseReasons(tSuperseded.id);
+        return reasons.includes('archived') ? reasons : null;
+      });
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // Case 5 — 동시 승격 경합. 같은 티켓이 두 번 승격되면 안 된다.

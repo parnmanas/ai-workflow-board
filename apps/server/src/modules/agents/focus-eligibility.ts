@@ -137,8 +137,13 @@ export interface FocusReleasedPayload {
  *   - 실패는 삼킨다. 이 신호는 지연 단축용 최적화일 뿐이고, 5분 level sweep
  *     이 여전히 최종 백스톱이다 — 여기서 던져 호출자의 정상 경로를 깨뜨리는
  *     쪽이 훨씬 나쁘다.
- *   - 컬럼이 없는 티켓(child/subtask)은 board 를 특정할 수 없으므로 조용히
- *     넘어간다. 그런 티켓은 애초에 focus 슬롯을 잡지 않는다.
+ *   - **lease 를 잡을 수 있는 컬럼에 있을 때만 발행한다.** focus 후보 쿼리가
+ *     세는 컬럼(종료도 intake 도 아닌 컬럼)이 아니면 애초에 점유한 슬롯이
+ *     없으므로 해제할 것도 없다. 이 게이트를 헬퍼 안에 두어 호출부가 매번
+ *     같은 판단을 재구현하지 않게 한다 — 예를 들어 Done 컬럼 티켓을 자동
+ *     아카이브하는 `TicketArchiverService` 는 이 헬퍼를 불러도 조용히 no-op
+ *     이고, 리텐션 스윕이 보드마다 무의미한 승격 시도를 뿌리지 않는다.
+ *   - 컬럼이 없는 티켓(child/subtask)도 board 를 특정할 수 없으므로 넘어간다.
  */
 export async function emitFocusReleased(
   dataSource: DataSource,
@@ -149,12 +154,29 @@ export async function emitFocusReleased(
     if (!ticket?.id || !ticket.column_id) return;
     const column = await dataSource
       .getRepository(BoardColumn)
-      .findOne({ where: { id: ticket.column_id }, select: ['id', 'board_id'] });
+      .findOne({ where: { id: ticket.column_id }, select: ['id', 'board_id', 'kind', 'is_terminal'] });
     const boardId = column?.board_id || '';
     if (!boardId) return;
+    if (!isLeaseCapableColumn(column)) return;
     const payload: FocusReleasedPayload = { ticket_id: ticket.id, board_id: boardId, reason };
     activityEvents.emit(FOCUS_RELEASED_EVENT, payload);
   } catch {
     // 위 규약대로 의도적으로 무시한다.
   }
+}
+
+/**
+ * 티켓이 focus 슬롯을 점유할 수 있는 컬럼인가 — `getWorkflowLoadTicketIds` 의
+ * 컬럼 조건(`c.is_terminal = false AND c.kind != 'intake'`)과 같은 정의다.
+ * 둘이 어긋나면 없는 lease 의 해제를 알리거나 진짜 해제를 놓치므로 함께
+ * 유지할 것. `kind = 'terminal'` 도 방어적으로 함께 본다 — 일부 레거시
+ * 마이그레이션이 `is_terminal` 없이 `kind` 만 세팅했다.
+ */
+export function isLeaseCapableColumn(
+  column: { kind?: string | null; is_terminal?: boolean | number | null } | null | undefined,
+): boolean {
+  if (!column) return false;
+  if (isTrue(column.is_terminal)) return false;
+  const kind = String(column.kind || '');
+  return kind !== 'intake' && kind !== 'terminal';
 }
