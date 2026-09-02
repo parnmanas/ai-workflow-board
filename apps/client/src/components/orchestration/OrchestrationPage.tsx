@@ -15,7 +15,6 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime } from '../../utils/time';
-import OrchestrationTabs from './OrchestrationTabs';
 import { missionStyle, progressPercent } from './status';
 
 /**
@@ -94,7 +93,7 @@ export default function OrchestrationPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Orchestration"
+        title="Orchestrations"
         description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
         actions={
           <>
@@ -113,7 +112,6 @@ export default function OrchestrationPage() {
           </>
         }
       />
-      <OrchestrationTabs wsId={wsId} active="missions" />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {loading ? (
@@ -122,7 +120,7 @@ export default function OrchestrationPage() {
           <EmptyState
             title="No teams yet"
             description="A mission runs on a team: one orchestrator agent that plans, plus the members it delegates to. Create a team first."
-            action={<Button variant="primary" onClick={() => navigate(`/ws/${wsId}/orchestration/teams`)}>Create a team</Button>}
+            action={<Button variant="primary" onClick={() => navigate(`/ws/${wsId}/teams`)}>Create a team</Button>}
           />
         ) : visible.length === 0 ? (
           <EmptyState

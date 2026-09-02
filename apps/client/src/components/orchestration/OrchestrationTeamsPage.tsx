@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
 import type { OrchestrationAssignableAgent, OrchestrationTeam } from '../../types';
 import { formatAgentDisplayName } from '../../utils/agentName';
@@ -7,7 +7,6 @@ import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Input, Modal, Select } from '../common';
-import OrchestrationTabs from './OrchestrationTabs';
 import { LabeledTextarea } from './OrchestrationPage';
 
 /**
@@ -22,6 +21,17 @@ import { LabeledTextarea } from './OrchestrationPage';
  * the text the orchestrator actually reasons over when assigning work — a team
  * whose members have empty capability blurbs produces noticeably worse plans.
  */
+/**
+ * 사이드바 WORK > Teams 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b). 보드가
+ * `boards-changed` 로 하는 것과 같은 방식으로 팀 목록 변경을 방송해, 이 페이지에서
+ * 만들고 지운 팀이 사이드바에 즉시 반영되게 한다.
+ */
+export const TEAMS_CHANGED_EVENT = 'orchestration-teams-changed';
+
+function broadcastTeamsChanged() {
+  window.dispatchEvent(new CustomEvent(TEAMS_CHANGED_EVENT));
+}
+
 export default function OrchestrationTeamsPage() {
   const { wsId = '' } = useParams<{ wsId: string }>();
   const { showToast } = useToast();
@@ -38,6 +48,11 @@ export default function OrchestrationTeamsPage() {
   const [showForm, setShowForm] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrchestrationTeam | null>(null);
   const [memberTarget, setMemberTarget] = useState<OrchestrationTeam | null>(null);
+  // 사이드바 서브메뉴에서 팀을 고르면 `?team=<id>` 로 들어온다 — 해당 카드를
+  // 강조하고 화면 안으로 스크롤해 "선택 → 상세" 흐름을 잇는다.
+  const [searchParams] = useSearchParams();
+  const selectedTeamId = searchParams.get('team');
+  const selectedCardRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     if (!wsId) return;
@@ -67,8 +82,22 @@ export default function OrchestrationTeamsPage() {
     load();
   }, [load]);
 
-  const replaceTeam = (team: OrchestrationTeam) =>
-    setTeams((prev) => prev.map((t) => (t.id === team.id ? team : t)));
+  useEffect(() => {
+    if (!selectedTeamId || loading) return;
+    selectedCardRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [selectedTeamId, loading, teams.length]);
+
+  // 목록을 바꾸는 경로는 전부 이 헬퍼를 거친다 — 사이드바가 변경을 놓치지 않도록
+  // 상태 갱신과 방송을 한곳에서 처리한다(단순 조회인 load()는 제외).
+  const commitTeams = useCallback((updater: (prev: OrchestrationTeam[]) => OrchestrationTeam[]) => {
+    setTeams(updater);
+    broadcastTeamsChanged();
+  }, []);
+
+  const replaceTeam = useCallback(
+    (team: OrchestrationTeam) => commitTeams((prev) => prev.map((t) => (t.id === team.id ? team : t))),
+    [commitTeams],
+  );
 
   const removeMember = async (team: OrchestrationTeam, memberId: string) => {
     try {
@@ -82,7 +111,7 @@ export default function OrchestrationTeamsPage() {
     if (!deleteTarget) return;
     try {
       await api.deleteOrchestrationTeam(deleteTarget.id, wsId);
-      setTeams((prev) => prev.filter((t) => t.id !== deleteTarget.id));
+      commitTeams((prev) => prev.filter((t) => t.id !== deleteTarget.id));
       showToast('Team deleted', 'success');
     } catch (e: any) {
       showToast(e?.message || 'Failed to delete team', 'error');
@@ -94,8 +123,8 @@ export default function OrchestrationTeamsPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Orchestration"
-        description="Teams: one orchestrator agent that plans and delegates, plus the members that execute."
+        title="Teams"
+        description="One orchestrator agent that plans and delegates, plus the members that execute. Missions run on teams."
         actions={
           <Button
             variant="primary"
@@ -108,7 +137,6 @@ export default function OrchestrationTeamsPage() {
           </Button>
         }
       />
-      <OrchestrationTabs wsId={wsId} active="teams" />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {loading ? (
@@ -125,11 +153,16 @@ export default function OrchestrationTeamsPage() {
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {teams.map((team) => (
+            {teams.map((team) => {
+              const selected = team.id === selectedTeamId;
+              return (
               <div
                 key={team.id}
+                ref={selected ? selectedCardRef : undefined}
+                data-team-id={team.id}
+                aria-current={selected ? 'true' : undefined}
                 style={{
-                  border: `1px solid ${tokens.colors.border}`,
+                  border: `1px solid ${selected ? tokens.colors.accent : tokens.colors.border}`,
                   borderRadius: 10,
                   background: tokens.colors.surfaceCard,
                   padding: 16,
@@ -297,7 +330,8 @@ export default function OrchestrationTeamsPage() {
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -312,7 +346,7 @@ export default function OrchestrationTeamsPage() {
         onClose={() => setShowForm(false)}
         onSaved={(team) => {
           setShowForm(false);
-          setTeams((prev) => (prev.some((t) => t.id === team.id) ? prev.map((t) => (t.id === team.id ? team : t)) : [team, ...prev]));
+          commitTeams((prev) => (prev.some((t) => t.id === team.id) ? prev.map((t) => (t.id === team.id ? team : t)) : [team, ...prev]));
         }}
       />
 

@@ -87,6 +87,14 @@ function LegacyCatalogRedirect() {
   return <Navigate to={`/ws/${wsId}/functions`} replace />;
 }
 
+// Teams 가 WORK 의 독립 최상위 메뉴로 승격되면서 정식 경로가 /ws/:wsId/teams 로
+// 옮겨졌다(티켓 03ca8b5b). 예전 /ws/:wsId/orchestration/teams 딥링크(북마크,
+// 기존 코멘트 링크)가 깨지지 않도록 절대 경로로 리다이렉트한다.
+function LegacyOrchestrationTeamsRedirect() {
+  const { wsId } = useParams<{ wsId: string }>();
+  return <Navigate to={`/ws/${wsId}/teams`} replace />;
+}
+
 function AppContent() {
   const { isAuthenticated, isLoading, serverUnavailable } = useAuth();
   const { showToast } = useToast();
@@ -208,8 +216,9 @@ function AppContent() {
               <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
               <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
               <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
+              <Route path="teams" element={<OrchestrationTeamsPage />} />
               <Route path="orchestration" element={<OrchestrationPage />} />
-              <Route path="orchestration/teams" element={<OrchestrationTeamsPage />} />
+              <Route path="orchestration/teams" element={<LegacyOrchestrationTeamsRedirect />} />
               <Route path="orchestration/missions/:missionId" element={<MissionDetailPage />} />
               <Route path="chat" element={<ChatPage />} />
               <Route path="chat/:roomId" element={<ChatPage />} />
