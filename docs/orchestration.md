@@ -195,6 +195,82 @@ graph 모드가 **꺼진** 미션에 `graph` 를 보내면 조용히 무시하�
 서로 다른 판정을 보면 "디스패치는 됐는데 곧바로 blocked 로 뒤집히는" 모순이나
 "오케스트레이터에게는 대기 중으로 보이는데 엔진은 죽은 것으로 아는" 상태가 생긴다.
 
+### 실행 중 그래프 수정 (patch, ticket 2fc8f99a)
+
+`submit_orchestration_plan` 의 `graph` 는 그래프를 **통째로** 교체한다. 실행 중인
+미션에서 edge 하나를 고치려고 전체를 다시 쓰는 것은 위험하다 — 빠뜨린 node/edge 가
+조용히 사라지고, `max_plan_versions` 예산까지 함께 탄다.
+
+`patch_orchestration_graph` 는 **그래프만** 부분 수정한다. plan(step 집합)은 건드리지
+않으므로 `plan_version` 을 소모하지 않고, 대신 `graph_revision` 이 1씩 오른다.
+
+| 연산 | 의미 |
+| --- | --- |
+| `set_nodes` | **이미 존재하는** node 의 `kind` / `join` / `max_visits` 변경 |
+| `add_edges` | edge 추가 (`submit` 과 동일한 규칙) |
+| `remove_edges` | edge 제거. `kind` 를 생략하면 두 node 사이의 **모든** edge |
+| `max_total_visits` | 미션 단위 실행 예산 변경 |
+
+node 추가/삭제는 patch 에 **없다**. node 는 step 과 1:1 이므로 node 를 늘리려면 step 이
+먼저 있어야 하고, 그건 `submit_orchestration_plan` 의 일이다.
+
+**안전 규칙 — 이미 일어난 실행 이력을 소급해서 무효화할 수 없다**
+
+1. node 의 `max_visits` 를 **이미 소진한 `visit` 아래로** 낮출 수 없다. 낮추면 "상한을
+   넘긴 채 이미 실행된 node" 라는, 엔진이 표현할 수 없는 상태가 된다. 정확히 현재
+   `visit` 으로 낮추는 것은 허용 — "이번 pass 가 마지막" 이라는 뜻이고, 폭주하는 loop 를
+   세우는 정상적인 수단이다.
+2. `max_total_visits` 를 **이미 소진한 `total_visits` 아래로** 낮출 수 없다(같은 이유).
+   정확히 소진량으로 낮추면 추가 디스패치만 멈춘다.
+3. **`loop_back` 제거는 진행 중이어도 항상 허용된다.** `loop_back` 은 의존성으로 세지
+   않으므로(`computeGraphProgress` 가 건너뛴다) 제거해도 어떤 node 도 막지 않는다. 이미
+   끝난 재진입은 그대로 남고 앞으로의 재진입만 사라진다 — 폭주 loop 의 탈출구다.
+4. 이미 종료했거나 실행 중인 node 로 **들어가는** edge 추가는 허용하되, 그 edge 가 이번
+   pass 에 효력이 없다는 사실을 응답의 `changes[].inert_reason` 으로 돌려준다(loop 로
+   재진입하면 그때부터 적용된다). 조용히 받아들이면 걸지도 않은 게이트를 걸었다고
+   착각하게 된다.
+
+구조 불변식(순환·loop 규칙·고아 node·router/evaluator 규칙·예산 하한)은 patch 를 적용한
+결과 **전체**를 `validateGraphSpec` 에 다시 통과시켜 재검증한다 — patch 전용 검증 경로를
+따로 두지 않는다. 두 경로가 갈라지는 순간 "제출로는 거부되는데 patch 로는 통과하는"
+그래프가 생긴다.
+
+**patch 는 step 의 상태를 바꾸지 않는다.** 죽은 분기 때문에 이미 `blocked` 로 확정된
+step 은 edge 를 고쳐도 스스로 되살아나지 않는다 — `update_orchestration_step
+action:"retry"` 로 명시적으로 되살려야 한다. 상태 되돌리기를 patch 에 섞으면 "그래프를
+고쳤더니 이미 실패 처리된 작업이 조용히 다시 뛰더라" 가 된다.
+
+한 미션이 받을 수 있는 patch 총 횟수는 `MAX_GRAPH_PATCHES`(50)로 제한된다. 그래프가
+`submit_orchestration_plan` 으로 새로 확정되면 `graph_revision` 은 0 으로 되돌아간다 —
+새 기준선이 이전 그래프의 patch 횟수를 물려받을 이유가 없다.
+
+> `GraphSpec.version` 은 **스키마** 버전이라 `validateGraphSpec` 이 상수와 엄격히
+> 비교한다(`unsupported graph version N`). 그래서 수정 횟수를 거기에 실을 수 없고,
+> `graph_revision` 을 별도 컬럼으로 둔다.
+
+### 그래프 템플릿 (ticket 2fc8f99a)
+
+검토 루프 하나를 손으로 쓰려면 `loop_back` edge + 종료 조건 `when` + 대상 node 의
+`max_visits >= 2` + 미션 단위 `max_total_visits` 를 **전부** 맞춰야 validation 을
+통과한다. 그 조합이 곧 "검토 루프" 라는 하나의 형태다. 템플릿은 그 형태를 한 번만
+정확히 적어두고 재사용한다.
+
+`submit_orchestration_plan` 에 `graph` 대신 `graph_template: { name, params }` 를 준다
+(둘을 함께 주면 거부된다 — 어느 쪽이 이기는지가 임의 규칙이 되기 때문).
+
+| 템플릿 | 형태 | 주요 파라미터 |
+| --- | --- | --- |
+| `linear` | 순서대로 이어지는 사슬 | `steps[]` (2개 이상, 순서가 곧 실행 순서) |
+| `review_loop` | 작업 → 검토 → (수정 필요 시) 작업 으로 되돌아가는 상한 있는 루프 | `work`, `review`, `max_passes`, `on_pass?`, `pass_verdict?`, `revise_verdict?` |
+| `fan_out_aggregate` | 여러 갈래 병렬 실행 후 하나로 합류 | `branches[]` (2개 이상), `aggregate`, `source?` |
+
+카탈로그는 `list_orchestration_graph_templates` 로 읽는다(용도·파라미터·예시 포함).
+
+템플릿은 **저작 편의일 뿐 새로운 실행 개념이 아니다**: 펼친 결과도 손으로 쓴 그래프와
+똑같이 `validateGraphSpec` 을 통과해야 하고, 실행 규칙도 완전히 동일하다. 템플릿은
+이미 존재하는 `step_key` 만 엮으며 step 을 만들어내지 않는다 — 템플릿이 언급하지 않은
+step 은 기존대로 고립 node 로 채워진다.
+
 ---
 
 ## 디스패치가 채팅룸을 재사용하는 이유
@@ -308,7 +384,8 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | 툴 | 용도 |
 | --- | --- |
 | `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 |
-| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산)를 함께 받는다 |
+| `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다 |
+| `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
 | `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
 | `complete_orchestration_mission` | `completed` / `failed` — **미션을 끝내는 유일한 경로** |
@@ -329,6 +406,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로) |
 | `list_orchestration_missions` | 내가 속한 Mission 목록·상태 (기본 non-terminal 만, `include_finished` 로 확장) |
 | `create_orchestration_mission` | 내가 오케스트레이터인 Team 에 한해 Mission 생성(+즉시 브리핑) — "미션 생성 주체" 절 참고 |
+| `list_orchestration_graph_templates` | 내장 실행 그래프 템플릿 카탈로그(용도·파라미터·예시). 읽기 전용이며 미션을 건드리지 않는다 |
 
 `submit_orchestration_plan` 이 병합(추가적)인 이유: 누락 키를 삭제하면 이미 끝난
 작업과 그 결과 컨텍스트가 조용히 사라진다. 제거는 `skip` 으로 명시해야 한다.
