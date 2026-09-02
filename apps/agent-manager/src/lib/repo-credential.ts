@@ -215,6 +215,7 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
     let abortReason: string | null = null;
     let wallTimer: NodeJS.Timeout | null = null;
     let idleTimer: NodeJS.Timeout | null = null;
+    let killBackstop: NodeJS.Timeout | null = null;
 
     const child = spawn('git', gitArgs, {
       // POSIX: 자체 프로세스 그룹 리더로 만들어 `kill(-pid)` 로 하위까지 한 번에
@@ -232,16 +233,54 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
       idleTimer = null;
     };
 
+    const clearBackstop = () => {
+      if (killBackstop) clearTimeout(killBackstop);
+      killBackstop = null;
+    };
+
+    // 정리 완료를 기다릴 수 있게 kill promise 를 보관한다. 호출자가 실패를
+    // 돌려받은 시점에는 clone 프로세스 그룹이 이미 정리돼 있어야 한다 — 그러지
+    // 않으면 호출자가 대상 디렉터리를 지우거나 재시도하는 동안 git 하위
+    // 프로세스가 같은 경로를 계속 건드린다.
+    let killPromise: Promise<void> | null = null;
+
     const abort = (reason: string) => {
       if (abortReason || settled) return;
       abortReason = reason;
       clearTimers();
+      // 1) 직계 자식에게 먼저 SIGTERM. 그룹 시그널(`kill(-pgid)`)은 detached 가
+      //    실제로 적용됐을 때만 유효한데, 그게 실패하면 아래 그룹 정리는 ESRCH 로
+      //    아무것도 죽이지 못하고 'close' 도 영영 오지 않아 clone 이 무한 대기에
+      //    빠진다. 리더만이라도 확실히 끝내 두면 어떤 경우에도 결과가 확정된다.
+      try { child.kill('SIGTERM'); } catch { /* 이미 종료됨 */ }
       const pid = child.pid;
       if (typeof pid === 'number' && pid > 0) {
-        // fire-and-forget: 'close' 이벤트가 최종 resolve 를 담당하고, 이 함수는
-        // 그룹 전체(SIGTERM → grace → SIGKILL)를 정리한다.
-        void terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS).catch(() => {});
+        // 2) 그룹 전체 정리(SIGTERM → grace → SIGKILL + 생존자 스윕). 시그널은 즉시
+        //    발사되고, 완료 대기는 아래 'close' 핸들러가 맡는다.
+        killPromise = terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS).catch(() => {});
       }
+      // 3) backstop — SIGTERM 을 무시하는 리더가 있어도 반드시 종료시킨다.
+      killBackstop = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* 이미 종료됨 */ }
+      }, CLONE_KILL_GRACE_MS + 500);
+      killBackstop.unref?.();
+      // 4) 정리가 끝나면 'close' 를 기다리지 않고 결과를 확정한다. 'close' 는
+      //    자식이 죽어도 **stdio 파이프가 모두 닫혀야** 발사되는데, 살아남은
+      //    손자 프로세스가 상속받은 stderr 를 붙들고 있으면 영영 오지 않는다.
+      //    그 경우까지 timeout 이 결과를 돌려주지 못하면 clone 전체가 무한
+      //    대기에 빠지므로, abort 경로의 확정 조건은 '그룹 정리 완료' 로 둔다.
+      void Promise.resolve(killPromise).then(() => finishAbort());
+    };
+
+    /** abort 확정 — 그룹 정리 후 결과를 돌려주고, 남은 파이프는 놓아준다. */
+    const finishAbort = () => {
+      if (settled) return;
+      // 파이프를 붙들고 있는 손자 때문에 이벤트 루프가 잡히지 않도록 명시적으로
+      // 끊는다. 이 시점의 출력은 이미 버퍼에 모여 있다.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref?.();
+      finish(false, `git clone aborted: ${abortReason} — clone process group terminated`);
     };
 
     const bumpIdle = () => {
@@ -266,6 +305,7 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
       if (settled) return;
       settled = true;
       clearTimers();
+      clearBackstop();
       resolve({
         ok,
         stdout,
@@ -275,13 +315,14 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
 
     child.on('error', (err: any) => {
       clearTimers();
+      clearBackstop();
       finish(false, String(err?.message ?? err));
     });
     child.on('close', (code) => {
-      if (abortReason) {
-        finish(false, `git clone aborted: ${abortReason} — clone process group terminated`);
-        return;
-      }
+      // abort 중이면 확정은 finishAbort 가 맡는다 — 리더가 SIGTERM 에 먼저
+      // 응답해 'close' 가 빨리 와도 하위 프로세스는 아직 살아 있을 수 있으므로,
+      // 그룹 정리가 끝나기 전에 성공/실패를 돌려주지 않는다.
+      if (abortReason) return;
       finish(code === 0);
     });
   });

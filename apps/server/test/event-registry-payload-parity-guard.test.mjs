@@ -359,6 +359,11 @@ test('agent_trigger flatten() forwards every manager-consumed field', () => {
     'column_prompt',
     'base_repo',
     'base_branch',
+    // clone_policy (ticket bddb63ee): base_repo 와 같은 이유로 flatten 이 필요하다 —
+    // 매니저는 flattened event 의 clone_policy 를 읽어 base clone 의 timeout/idle
+    // 예산과 shallow/partial/single-branch 전략을 정한다. 빠뜨리면 repo별 override
+    // 가 조용히 사라지고 모든 저장소가 매니저 기본값으로만 clone 된다.
+    'clone_policy',
     'max_concurrent_tickets_per_agent',
     'worktree_mode',
     'worktree_rel_path',
