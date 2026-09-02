@@ -243,6 +243,12 @@ test('재개 티켓은 dirty 변경과 기존 브랜치를 보존하고 ahead/be
 
 const COMMIT_ID = ['-c', 'user.email=test@awb.local', '-c', 'user.name=AWB Test'];
 
+// 커밋된 파일은 checkout/rebase 로 다시 펼쳐질 때 Windows 러너의
+// core.autocrlf 를 타므로, 내용 단언은 줄바꿈을 정규화해서 비교한다.
+async function readNormalized(...segments) {
+  return (await fsp.readFile(join(...segments), 'utf8')).replace(/\r\n/g, '\n');
+}
+
 function commit(cwd, message) {
   git(cwd, ['add', '.']);
   git(cwd, [...COMMIT_ID, 'commit', '-q', '-m', message]);
@@ -340,7 +346,7 @@ test('detached HEAD 에서 만든 커밋은 버려지지 않고 feature branch �
     assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
     assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), orphanSha, 'branch 가 고아 커밋을 흡수한다');
     assert.ok(git(resumed.cwd, ['branch', '--contains', orphanSha]).includes(fx.branch));
-    assert.equal(await fsp.readFile(join(resumed.cwd, 'orphan.txt'), 'utf8'), '유실되면 안 되는 작업\n');
+    assert.equal(await readNormalized(resumed.cwd, 'orphan.txt'), '유실되면 안 되는 작업\n');
     assert.equal(resumed.repositoryContext.ahead, 1);
   } finally {
     await fx.source.cleanup();
@@ -359,7 +365,7 @@ test('자기 커밋이 있는 feature branch 는 detached 재개 시 base 위로
     assert.equal(resumed.isWorktree, true);
     assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
     assert.equal(git(resumed.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', 'base tip 위로 rebase 된다');
-    assert.equal(await fsp.readFile(join(resumed.cwd, 'work.txt'), 'utf8'), '티켓 작업\n');
+    assert.equal(await readNormalized(resumed.cwd, 'work.txt'), '티켓 작업\n');
     assert.equal(resumed.repositoryContext.ahead, 1);
     assert.equal(resumed.repositoryContext.behind, 0);
   } finally {
