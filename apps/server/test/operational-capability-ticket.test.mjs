@@ -3,10 +3,15 @@ import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from './helpers/fixtures.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7827';
+// 이 파일의 테스트 4개는 각자 자기 NestJS 앱을 부팅한다. 예전에는 전부
+// 고정 포트 하나(7827)를 다시 바인딩했는데, close() 한 앞 서버가 아직
+// 소켓을 놓지 못한 상태에서 다음 테스트가 bind 하면 EADDRINUSE 로 깨졌다
+// (부하 걸린 전체 스위트에서만 재현되는 flake, ticket 6a9a3fe4). 고정 지연
+// 으로 덮는 대신 `port: 0` 으로 OS 에 빈 포트를 받아 쓴다 — bootApp() 이
+// 실제 바인딩된 포트를 돌려주므로 아래 URL 들은 그 값을 쓴다.
 
 test('operational fallback is exactly-once, traces concurrent recurrence, clears on terminal', async (t) => {
-  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'operational-fallback' });
@@ -55,7 +60,7 @@ test('operational fallback is exactly-once, traces concurrent recurrence, clears
 });
 
 test('ordinary work fallback creates one focused ticket on the selected board with chat provenance', async (t) => {
-  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-fallback' });
@@ -82,7 +87,7 @@ test('ordinary work fallback creates one focused ticket on the selected board wi
 });
 
 test('ordinary work board candidates include only boards with an active workflow column', async (t) => {
-  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-candidates' });
@@ -108,7 +113,7 @@ test('ordinary work board candidates include only boards with an active workflow
 });
 
 test('ordinary work fallback retry recovers dispatch after post-commit emission failure', async (t) => {
-  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const { ws, board } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'ordinary-work-recovery' });
