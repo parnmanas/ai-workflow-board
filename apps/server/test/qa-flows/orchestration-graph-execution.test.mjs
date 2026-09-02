@@ -721,4 +721,230 @@ test('graph 미션에서 visit을 뺀 지각 보고도 409로 거부되고 현�
   assert.deepEqual(ok.next_steps_dispatched, ['review'], 'pass 2의 evaluator로 정상 진행');
 });
 
+// ── Runtime graph patching + graph template (티켓 2fc8f99a) ──────────────────
+//
+// 위 테스트들이 "확정된 그래프가 어떻게 실행되는가"를 본다면, 아래는 "실행 중인
+// 그래프를 어떻게 안전하게 바꾸는가"를 본다. 순수 로직 단언은
+// `orchestration-graph-patch.test.mjs`에 있고, 여기서는 실제 엔진 + MCP HTTP 경로만
+// 검증한다 — 인가(오케스트레이터만), 재펌프(patch가 연 길로 실제 디스패치가 나가는가),
+// revision/trace 기록, 그리고 이미 일어난 실행 이력의 보존.
+
+/** MCP로 그래프를 patch 한다. */
+async function patchGraph(mcp, missionId, body, { expectError = false } = {}) {
+  const result = await mcp.callTool('patch_orchestration_graph', { mission_id: missionId, ...body });
+  if (expectError) {
+    assert.ok(result?.isError, `expected the patch to be rejected, got ${JSON.stringify(result)}`);
+    return result;
+  }
+  assert.ok(!result?.isError, `patch failed: ${JSON.stringify(result)}`);
+  return result;
+}
+
+test('그래프 템플릿: 카탈로그를 읽고 review_loop 템플릿으로 계획을 제출한다', async (t) => {
+  const s = await stage(t, { label: 'template' });
+  const { ws, missions, mission, worker, critic, leadMcp } = s;
+
+  step('오케스트레이터가 사용 가능한 템플릿 목록을 읽는다');
+  const catalog = await leadMcp.callTool('list_orchestration_graph_templates', {});
+  assert.ok(!catalog?.isError, `catalog failed: ${JSON.stringify(catalog)}`);
+  const names = catalog.templates.map((tpl) => tpl.name).sort();
+  assert.deepEqual(names, ['fan_out_aggregate', 'linear', 'review_loop']);
+  for (const tpl of catalog.templates) {
+    assert.ok(tpl.when_to_use, `${tpl.name}: 언제 쓰는지가 있어야 오케스트레이터가 고를 수 있다`);
+    assert.ok(tpl.params.length > 0 && tpl.example, `${tpl.name}: 파라미터와 예시가 있어야 한다`);
+  }
+
+  step('nodes/edges 를 한 줄도 쓰지 않고 검토 루프를 제출한다');
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    summary: 'templated review loop',
+    steps: [
+      { step_key: 'draft', title: 'Draft', instructions: 'Write it.', assignee_agent_id: worker.id },
+      { step_key: 'critique', title: 'Critique', instructions: 'Judge it.', assignee_agent_id: critic.id },
+      { step_key: 'publish', title: 'Publish', instructions: 'Ship it.', assignee_agent_id: worker.id },
+    ],
+    graph_template: {
+      name: 'review_loop',
+      params: { work: 'draft', review: 'critique', max_passes: 3, on_pass: 'publish' },
+    },
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+  assert.equal(submitted.graph.loops, 1, '템플릿이 loop_back edge 를 만들어야 한다');
+  assert.deepEqual(submitted.graph.entry, ['draft']);
+  assert.deepEqual(submitted.dispatched_now, ['draft'], 'entry 만 디스패치된다');
+
+  step('펼쳐진 그래프가 손으로 쓴 것과 동일한 계약을 갖는다');
+  const { detail } = await readSteps(missions, mission.id, ws.id);
+  const spec = detail.graph_spec;
+  assert.equal(spec.nodes.find((n) => n.key === 'critique').kind, 'evaluator');
+  assert.equal(spec.nodes.find((n) => n.key === 'draft').max_visits, 3);
+  const loop = spec.edges.find((e) => e.kind === 'loop_back');
+  assert.deepEqual(loop.when, { verdict: ['revise'] }, '종료 조건 없는 loop 는 애초에 저장될 수 없다');
+
+  step('graph 와 graph_template 을 함께 보내면 조용히 하나를 고르지 않고 거부한다');
+  const both = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    steps: [{ step_key: 'draft', title: 'Draft', instructions: 'Write it.', assignee_agent_id: worker.id }],
+    graph: { edges: [] },
+    graph_template: { name: 'linear', params: { steps: ['draft', 'critique'] } },
+  });
+  assert.ok(both?.isError, '둘 다 주면 거부돼야 한다');
+  assert.match(String(both.error?.error ?? ''), /not both/);
+});
+
+test('graph patch: 대기 중이던 node 의 길을 열면 그 자리에서 디스패치된다', async (t) => {
+  const s = await stage(t, { label: 'patchopen' });
+  const { ws, missions, mission, worker, critic, leadMcp, workerMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...planFor(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+
+  step('spec → api·ui 까지 진행시키고 api 만 끝낸다 — integrate 는 ui 를 기다린다');
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const afterApi = await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api', visit: 1 });
+  assert.deepEqual(afterApi.next_steps_dispatched, [], 'join=all 이라 아직 대기');
+
+  step('ui → integrate 의존을 제거하면 integrate 가 즉시 디스패치된다');
+  const patched = await patchGraph(leadMcp, mission.id, {
+    remove_edges: [{ from: 'ui', to: 'integrate' }],
+  });
+  assert.equal(patched.graph_revision, 1, '첫 patch 는 revision 1');
+  assert.deepEqual(patched.dispatched_now, ['integrate'], 'patch 가 연 길로 실제 디스패치가 나가야 한다');
+  assert.ok(
+    patched.changes.some((c) => c.kind === 'edge_removed' && /ui → integrate/.test(c.detail)),
+    '무엇이 바뀌었는지 changes 에 남아야 한다',
+  );
+
+  step('patch 는 plan 을 건드리지 않는다 — plan_version 을 태우지 않는다');
+  const { detail } = await readSteps(missions, mission.id, ws.id);
+  assert.equal(detail.plan_version, 1, 'patch 후에도 plan_version 은 그대로');
+  assert.equal(detail.graph_revision, 1);
+  assert.equal(detail.steps.length, 7, 'step 은 하나도 늘거나 줄지 않았다');
+
+  step('무엇이 왜 바뀌었는지 실행 trace 에 남는다');
+  const events = await eventsOf(missions, mission.id, ws.id);
+  const patchEvent = events.find((e) => e.type === 'graph_patched');
+  assert.ok(patchEvent, 'graph_patched 이벤트가 기록돼야 한다');
+  assert.match(patchEvent.message, /ui → integrate/);
+  assert.equal(patchEvent.data.graph_revision, 1);
+
+  step('patch 결과도 전체 재검증을 거친다 — patch 전용 우회 경로가 없다');
+  const refused = await patchGraph(leadMcp, mission.id, { max_total_visits: 1 }, { expectError: true });
+  assert.match(
+    String(refused.error?.error ?? ''),
+    /is below the 7 node\(s\)/,
+    'submit 경로에서 거부되는 그래프는 patch 경로에서도 거부돼야 한다',
+  );
+});
+
+test('graph patch: loop_back 제거가 폭주 루프를 멈추고 이미 끝난 반복은 남긴다', async (t) => {
+  const s = await stage(t, { label: 'patchloop' });
+  const { ws, missions, mission, worker, critic, leadMcp, workerMcp, criticMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...planFor(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+
+  step('한 바퀴 돌려 loop 를 pass 2 로 재진입시킨다');
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(workerMcp, byKey.spec.id, { status: 'done', summary: 'spec', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.api.id, { status: 'done', summary: 'api', visit: 1 });
+  await report(workerMcp, byKey.ui.id, { status: 'done', summary: 'ui', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  await report(workerMcp, byKey.integrate.id, { status: 'done', summary: 'wired', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const revised = await report(criticMcp, byKey.review.id, {
+    status: 'done', summary: 'needs work', verdict: 'revise', visit: 1,
+  });
+  assert.deepEqual(revised.loop_reentered.sort(), ['integrate', 'review'], '전제: loop 가 실제로 재진입했다');
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.equal(byKey.integrate.visit, 2);
+
+  step('운영 판단으로 loop_back 을 제거한다 — 진행 중이어도 허용된다');
+  const patched = await patchGraph(leadMcp, mission.id, {
+    remove_edges: [{ from: 'review', to: 'integrate', kind: 'loop_back' }],
+  });
+  assert.equal(patched.graph.loops, 0, 'loop 가 사라져야 한다');
+
+  step('이미 끝난 pass 1 의 이력은 그대로 남는다');
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.equal(byKey.integrate.visit, 2, 'patch 가 visit 을 되돌리면 안 된다');
+
+  step('이미 2번 돈 node 의 상한을 1로 낮추는 것은 거부된다 — 실행 이력 소급 무효화 금지');
+  const tooLow = await patchGraph(
+    leadMcp,
+    mission.id,
+    { set_nodes: [{ key: 'integrate', max_visits: 1 }] },
+    { expectError: true },
+  );
+  assert.match(String(tooLow.error?.error ?? ''), /already run 2 time\(s\)/);
+  assert.match(String(tooLow.error?.error ?? ''), /Lower it to 2/, '허용 가능한 최소값을 알려줘야 한다');
+
+  step('정확히 2 로 낮추는 것은 허용된다 — "이번이 마지막" 을 표현하는 정상 수단');
+  const locked = await patchGraph(leadMcp, mission.id, { set_nodes: [{ key: 'integrate', max_visits: 2 }] });
+  assert.equal(locked.graph_revision, 2, '두 번째 patch 는 revision 2');
+
+  step('pass 2 에서 다시 revise 를 내도 이제는 재진입하지 않는다');
+  await report(workerMcp, byKey.integrate.id, { status: 'done', summary: 'pass 2', visit: 2 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const again = await report(criticMcp, byKey.review.id, {
+    status: 'done', summary: 'still not great', verdict: 'revise', visit: 2,
+  });
+  assert.deepEqual(again.loop_reentered, [], 'loop_back 이 없으므로 재진입은 일어나지 않는다');
+  assert.deepEqual(again.next_steps_dispatched, [], '되돌아갈 곳이 없다');
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.equal(byKey.integrate.visit, 2, '재진입이 없으므로 visit 도 그대로');
+});
+
+test('graph patch 인가: 오케스트레이터만, 그리고 graph 모드 미션에서만', async (t) => {
+  const s = await stage(t, { label: 'patchauthz' });
+  const { mission, worker, critic, leadMcp, workerMcp } = s;
+
+  const submitted = await leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: mission.id,
+    ...planFor(worker, critic),
+  });
+  assert.ok(!submitted?.isError, `submit failed: ${JSON.stringify(submitted)}`);
+
+  step('팀 멤버는 자기 미션이어도 그래프를 바꿀 수 없다');
+  const byMember = await patchGraph(
+    workerMcp,
+    mission.id,
+    { remove_edges: [{ from: 'ui', to: 'integrate' }] },
+    { expectError: true },
+  );
+  assert.match(
+    String(byMember.error?.error ?? ''),
+    /orchestrat/i,
+    '오케스트레이터가 아닌 caller 는 거부돼야 한다',
+  );
+
+  step('graph 모드가 꺼진 미션에는 patch 할 그래프 자체가 없다');
+  const plain = await stage(t, { graphEnabled: false, label: 'patchplain' });
+  const plainSubmit = await plain.leadMcp.callTool('submit_orchestration_plan', {
+    mission_id: plain.mission.id,
+    summary: 'plain dependency plan',
+    steps: [
+      { step_key: 'one', title: 'One', instructions: 'Do it.', assignee_agent_id: plain.worker.id },
+      { step_key: 'two', title: 'Two', instructions: 'Then this.', depends_on: ['one'], assignee_agent_id: plain.worker.id },
+    ],
+  });
+  assert.ok(!plainSubmit?.isError, `submit failed: ${JSON.stringify(plainSubmit)}`);
+  const noGraph = await patchGraph(
+    plain.leadMcp,
+    plain.mission.id,
+    { remove_edges: [{ from: 'one', to: 'two' }] },
+    { expectError: true },
+  );
+  assert.match(String(noGraph.error?.error ?? ''), /no execution graph to patch/);
+});
+
 exitAfterTests();
