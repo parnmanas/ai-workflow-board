@@ -76,7 +76,7 @@ test('신규 Credential을 이름으로 검색·선택하고 create payload에�
   typeInto(search, '개발');
   assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), ['선택하지 않음', '개발 API · anthropic']);
   change(credentialSelect(container), 'credential-b');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
 
   assert.equal(calls.length, 1);
@@ -92,7 +92,7 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
   click(button(container, '기존 프로필'));
   assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
   change(credentialSelect(container), 'credential-b');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
   assert.equal(calls[0].id, 'profile-1');
   assert.equal(calls[0].payload.credential_ref, 'credential-b');
@@ -100,7 +100,7 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
 
   click(button(container, '기존 프로필'));
   change(credentialSelect(container), '');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
   assert.equal(calls[1].payload.credential_ref, null);
 });
@@ -154,4 +154,23 @@ test('목록 로딩 중에도 기존 참조가 빈 선택으로 보이지 않는
     await pending.promise;
   });
   assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
+});
+
+test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 편집 취소 시 신규 상태로 돌아간다', async (t) => {
+  const { container } = await renderManager(t, { profiles: [existingProfile] });
+
+  const manager = container.querySelector('[data-testid="claude-profile-manager"]');
+  const columns = container.querySelector('[data-layout="responsive-profile-columns"]');
+  assert.ok(manager);
+  assert.ok(columns);
+  assert.equal(columns.style.display, 'flex');
+  assert.equal(columns.style.flexWrap, 'wrap');
+  assert.ok(container.querySelector('input[aria-label="Stable ID"]'));
+  assert.ok(container.querySelector('select[aria-label="Protocol"]'));
+
+  click(button(container, '기존 프로필'));
+  assert.match(container.textContent, /기존 프로필 편집/);
+  click(button(container, '취소'));
+  assert.match(container.textContent, /프로필 만들기/);
+  assert.equal(container.querySelector('input[aria-label="Stable ID"]').value, '');
 });
