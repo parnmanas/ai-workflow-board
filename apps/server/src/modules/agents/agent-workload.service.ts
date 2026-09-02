@@ -73,12 +73,21 @@
  */
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { priorityIndex } from './priority';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
+
+/**
+ * 조회를 태울 대상 — 기본은 서비스가 들고 있는 DataSource 이고, 승격 경로처럼
+ * 트랜잭션 안에서 cap 을 확인해야 하는 호출자는 그 트랜잭션의 EntityManager 를
+ * 넘긴다 (ticket 2cc54fde). EntityManager 를 넘기면 조회가 그 트랜잭션의
+ * 커넥션에서 실행되므로, Postgres 에서 커넥션을 하나 더 꺼내지 않고 자기
+ * 트랜잭션이 방금 쓴 값까지 함께 본다.
+ */
+export type FocusQueryScope = DataSource | EntityManager;
 
 /**
  * Parse the `Ticket.labels` JSON string defensively. Returns `[]` on any
@@ -175,8 +184,10 @@ export class AgentWorkloadService {
     agent_id: string,
     board_id: string,
     role_slug?: string,
+    scope?: FocusQueryScope,
   ): Promise<string[]> {
     if (!agent_id || !board_id) return [];
+    const runner = scope || this.dataSource;
 
     // QueryBuilder over the explicit joins avoids the entity-relation
     // metadata path (TicketRoleAssignment has no @ManyToOne onto Ticket
@@ -193,9 +204,11 @@ export class AgentWorkloadService {
     // — pg won't pick a cast direction). Cast the uuid PK to text on the
     // join condition so the comparison runs against a uniform type.
     // SQLite is loose-typed and needs no cast — txt is empty there.
+    // 드라이버는 스코프와 무관하게 같은 커넥션 풀의 것이므로 서비스가 들고 있는
+    // DataSource 에서 읽는다 — EntityManager 에는 `.driver` 가 없다.
     const isPostgres = this.dataSource.driver.options.type === 'postgres';
     const txt = isPostgres ? '::text' : '';
-    const qb = this.dataSource
+    const qb = runner
       .createQueryBuilder()
       .select('DISTINCT t.id', 'id')
       .from('tickets', 't')
@@ -284,11 +297,12 @@ export class AgentWorkloadService {
     agent_id: string,
     board_id: string,
     role_slug?: string,
+    scope?: FocusQueryScope,
   ): Promise<string | null> {
-    const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id, role_slug);
+    const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id, role_slug, scope);
     if (candidateIds.length === 0) return null;
     if (candidateIds.length === 1) return candidateIds[0];
-    const ranked = await this.rankFocusCandidates(candidateIds);
+    const ranked = await this.rankFocusCandidates(candidateIds, scope);
     return ranked[0]?.id ?? null;
   }
 
@@ -323,14 +337,15 @@ export class AgentWorkloadService {
     agent_id: string,
     board_id: string,
     limit: number,
+    scope?: FocusQueryScope,
   ): Promise<string[]> {
     if (!Number.isFinite(limit) || limit <= 0) return [];
-    const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id);
+    const candidateIds = await this.getWorkflowLoadTicketIds(agent_id, board_id, undefined, scope);
     if (candidateIds.length === 0) return [];
     // Single candidate: mirror getFocusTicket's fast path (no BLOCKED
     // filter / sort for a lone ticket) so the two entry points agree.
     if (candidateIds.length === 1) return candidateIds.slice(0, limit);
-    const ranked = await this.rankFocusCandidates(candidateIds);
+    const ranked = await this.rankFocusCandidates(candidateIds, scope);
     return ranked.slice(0, limit).map((t) => t.id);
   }
 
@@ -345,11 +360,15 @@ export class AgentWorkloadService {
    * assumes a multi-candidate set but is still correct (returns [] / the
    * lone survivor) for smaller inputs.
    */
-  private async rankFocusCandidates(candidateIds: string[]): Promise<Ticket[]> {
+  private async rankFocusCandidates(
+    candidateIds: string[],
+    scope?: FocusQueryScope,
+  ): Promise<Ticket[]> {
     if (candidateIds.length === 0) return [];
 
-    const ticketRepo = this.dataSource.getRepository(Ticket);
-    const colRepo = this.dataSource.getRepository(BoardColumn);
+    const runner = scope || this.dataSource;
+    const ticketRepo = runner.getRepository(Ticket);
+    const colRepo = runner.getRepository(BoardColumn);
 
     const tickets = await ticketRepo
       .createQueryBuilder('t')
@@ -417,7 +436,7 @@ export class AgentWorkloadService {
     //   supervisor backstop — it just stops blocking the queue.
     // TODO: batch the activity lookups for all BLOCKED tickets in one query
     // to avoid N+1 sequential queries per candidate (lastRelease, lastClaim, moveCount).
-    const activityRepo = this.dataSource.getRepository(ActivityLog);
+    const activityRepo = runner.getRepository(ActivityLog);
     const nonBlockedTickets: Ticket[] = [];
     for (const t of tickets) {
       const labels = parseLabels(t.labels);

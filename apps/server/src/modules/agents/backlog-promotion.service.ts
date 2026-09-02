@@ -92,7 +92,7 @@
  */
 import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { Brackets, DataSource } from 'typeorm';
+import { Brackets, DataSource, EntityManager } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
@@ -514,8 +514,6 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       requiredRoleIds.push(role.id);
     }
 
-    const assignRepo = this.dataSource.getRepository(TicketRoleAssignment);
-
     // Agent-concurrency cap (ticket 701e5e36). A destination-role holder is
     // eligible for a NEW promotion only while it has a free slot inside its
     // top-N focus window (N = this board's `max_concurrent_tickets_per_agent`,
@@ -524,235 +522,292 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
     // so the board actually runs N concurrent instead of stalling at 1.
     const cap = Math.max(1, Math.floor(board.max_concurrent_tickets_per_agent ?? 1));
 
-    for (const ticket of candidates) {
-      const assignments = await assignRepo.find({ where: { ticket_id: ticket.id } });
-      const assignByRoleId = new Map(assignments.map(a => [a.role_id, a]));
+    // ── 슬롯 획득 (ticket 2cc54fde, 요구사항 4) ──────────────────────────
+    //
+    // cap 확인과 이동을 한 트랜잭션 + 보드 행 잠금 안에서 처리한다.
+    //
+    // 티켓 행 하나만 CAS 하는 것으로는 부족하다: 두 `tryPromote` 가 **같은
+    // 담당자의 서로 다른 후보**를 고르면 둘 다 빈 focus window 를 읽고, 서로
+    // 다른 행을 CAS 하므로 둘 다 성공한다 — 담당자가 cap 을 넘겨 두 티켓을
+    // 쥐게 되는 write skew 다. Postgres READ COMMITTED 는 서로 다른 행을
+    // 건드리는 두 트랜잭션을 막아주지 않으므로, 두 패스가 반드시 같은 객체를
+    // 놓고 겨루게 만들어야 한다 → 보드 행 잠금.
+    //
+    // 잠금 안에서 focus window 를 읽을 때는 트랜잭션의 EntityManager 를
+    // 넘긴다. 그래야 Postgres 에서 커넥션을 하나 더 꺼내지 않고, 앞선 패스가
+    // 커밋한 이동까지 반영된 값을 본다.
+    const skipRecords: Array<{ ticketId: string; action: SuppressedAuditAction; slug: string; newValue: string }> = [];
+    let claim: { ticket: Ticket; fromColumnId: string; dispatchTargets: Array<{ slug: string; holderId: string }> } | null = null;
 
-      let eligible = true;
-      // (role_slug, holder_agent_id) pairs we will emit triggers to once
-      // the move commits. Built up alongside the eligibility check so we
-      // don't re-walk the role list in the post-save loop.
-      const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
-      // Audit-trail material for an ineligibility skip — captured up here
-      // so the post-loop write knows which action/new_value to use. Both
-      // the role-unfilled and focus-held branches route through the same
-      // suppressed writer (`_writeSkipAuditIfChanged`) so a persistently
-      // unpromotable candidate can't spam the activity feed once
-      // `levelSweep` starts calling `tryPromote` on a timer instead of
-      // only on `agent_idle` (ticket 9df6c348).
-      let skipReason: {
-        action: 'backlog_promotion_skipped_role_unfilled' | 'backlog_promotion_skipped_focus_held';
-        slug: string;
-        newValue: string;
-      } | null = null;
-      for (let i = 0; i < requiredRoleIds.length; i++) {
-        const roleId = requiredRoleIds[i];
-        const slug = destSlugs[i];
-        const a = assignByRoleId.get(roleId);
-        if (!a || !a.agent_id) {
-          // Role unfilled on the candidate — can't promote, the trigger
-          // would land on no-one.
-          eligible = false;
-          skipReason = {
-            action: 'backlog_promotion_skipped_role_unfilled',
-            slug,
-            newValue: `board=${boardId} role=${slug} dest_column_id=${destination.id}`,
-          };
-          break;
-        }
-        // Focus-window gate (ticket 4a6cdfd7 → top-N in 701e5e36) —
-        // replaces the previous per-candidate workflow-load cap loop. The
-        // holder's top-N focus window is its top-N ranked tickets on this
-        // board (agent-unit, collapsed across roles). It is eligible for a
-        // new promotion iff that window still has a free slot
-        // (`length < cap`). A full window (`length >= cap`) names the
-        // tickets already occupying every slot; the candidate itself sits
-        // in an intake column so it can never appear there (the selector
-        // excludes intake by construction). At cap=1 `length >= 1` is the
-        // old "any focus held ⇒ skip" behaviour verbatim.
-        const focusWindow = await this.agentWorkload.getAgentFocusTicketIds(
-          a.agent_id, boardId, cap,
-        );
-        if (focusWindow.length >= cap) {
-          eligible = false;
-          // Report the head of the full window (the highest-ranked ticket
-          // holding a slot) so the audit trail names a concrete occupant.
-          const holderId = a.agent_id;
-          const focusTicketId = focusWindow[0] || '';
-          skipReason = {
-            action: 'backlog_promotion_skipped_focus_held',
-            slug,
-            newValue:
-              `board=${boardId} role=${slug} ` +
-              `holder=${holderId} ` +
-              `focus_ticket_id=${focusTicketId}`,
-          };
-          break;
-        }
-        dispatchTargets.push({ slug, holderId: a.agent_id });
-      }
-      if (!eligible) {
-        // Observability: an audit row for every promotion blocked by a
-        // vacant role or a focus-held holder. Lets ops correlate "this
-        // backlog isn't draining" to the specific (role, cause) pair
-        // instead of it looking identical to "hasn't been its turn yet".
-        if (skipReason) {
-          await this._writeSkipAuditIfChanged(
-            ticket.id, skipReason.action, skipReason.slug, skipReason.newValue,
-          );
-          // Vacant-role auto-backfill (ticket bb5b9aed) — see class docstring.
-          // Only role-unfilled is a candidate; focus-held is a normal,
-          // self-resolving wait and must never trigger a role reassignment.
-          if (skipReason.action === 'backlog_promotion_skipped_role_unfilled') {
-            await this._maybeBackfillVacantRole(ticket, board, skipReason.slug);
+    await this.dataSource.transaction(async (manager) => {
+      // Postgres/MySQL: 보드 행을 배타 잠금해 이 보드의 승격을 직렬화한다.
+      // sqlite/sql.js 는 pessimistic lock 을 지원하지 않지만, `db.ts` 의
+      // `serializeSqljsTransactions()` 가 트랜잭션 자체를 FIFO 로 직렬화하므로
+      // 같은 상호배제를 얻는다 (단일 커넥션이라 애초에 겹치지 않는다).
+      await this._lockBoardForPromotion(manager, boardId);
+
+      const assignRepo = manager.getRepository(TicketRoleAssignment);
+      const txTicketRepo = manager.getRepository(Ticket);
+
+      for (const ticket of candidates) {
+        const assignments = await assignRepo.find({ where: { ticket_id: ticket.id } });
+        const assignByRoleId = new Map(assignments.map(a => [a.role_id, a]));
+
+        let eligible = true;
+        // (role_slug, holder_agent_id) pairs we will emit triggers to once
+        // the move commits. Built up alongside the eligibility check so we
+        // don't re-walk the role list in the post-save loop.
+        const dispatchTargets: Array<{ slug: string; holderId: string }> = [];
+        // Audit-trail material for an ineligibility skip — captured up here
+        // so the post-loop write knows which action/new_value to use. Both
+        // the role-unfilled and focus-held branches route through the same
+        // suppressed writer (`_writeSkipAuditIfChanged`) so a persistently
+        // unpromotable candidate can't spam the activity feed once
+        // `levelSweep` starts calling `tryPromote` on a timer instead of
+        // only on `agent_idle` (ticket 9df6c348). 실제 쓰기는 잠금을 놓은 뒤
+        // 트랜잭션 밖에서 한다 — 감사 기록이 보드 잠금 보유 시간을 늘릴 이유가
+        // 없다.
+        let skipReason: {
+          action: 'backlog_promotion_skipped_role_unfilled' | 'backlog_promotion_skipped_focus_held';
+          slug: string;
+          newValue: string;
+        } | null = null;
+        for (let i = 0; i < requiredRoleIds.length; i++) {
+          const roleId = requiredRoleIds[i];
+          const slug = destSlugs[i];
+          const a = assignByRoleId.get(roleId);
+          if (!a || !a.agent_id) {
+            // Role unfilled on the candidate — can't promote, the trigger
+            // would land on no-one.
+            eligible = false;
+            skipReason = {
+              action: 'backlog_promotion_skipped_role_unfilled',
+              slug,
+              newValue: `board=${boardId} role=${slug} dest_column_id=${destination.id}`,
+            };
+            break;
           }
-        }
-        continue;
-      }
-
-      // Move: ticket.column_id update + audit `moved` activity row.
-      //
-      // We deliberately do NOT rely on the `moved` activity to wake the
-      // destination role holders. The activity is written with
-      // `actor_id: 'system'`, which `TriggerLoopService._handleActivity`
-      // skips by design (the system-actor filter exists to prevent
-      // listener-loops on system-comment-style writes). Instead this
-      // service explicitly calls `triggerLoop.emitAgentTrigger()` per
-      // (role, holder) below, so promotion has a deterministic dispatch
-      // path independent of listener semantics.
-      //
-      // Status bump is omitted by design — `move_ticket` MCP / REST do
-      // not auto-mutate ticket.status either, so promotion mirrors the
-      // canonical move semantics rather than re-introducing a hardcoded
-      // status string. Workspaces that key on the legacy enum can derive
-      // it from `BoardColumn.kind` instead (`'intake' → backlog`,
-      // `'active' → todo`, etc.).
-      const fromColumnId = ticket.column_id;
-      const fromCol = columns.find(c => c.id === fromColumnId) || null;
-
-      // 승격 이동은 compare-and-swap 으로 소유권을 잡는다 (ticket 2cc54fde).
-      //
-      // `tryPromote` 는 이제 세 갈래로 들어온다 — `agent_idle` edge, 5분 level
-      // sweep, 그리고 lease 해제 브로드캐스트(`FOCUS_RELEASED_EVENT`). 슬롯이
-      // 하나 열리면 이 셋이 거의 동시에 같은 보드로 진입할 수 있고, 예전의
-      // 무조건 `save(ticket)` 는 두 패스가 같은 후보를 골라 각자 "승격했다" 고
-      // 보고하게 두었다 — 이동 자체는 멱등이지만 트리거 emit 과 감사 행이
-      // 중복되고, 보드는 한 번에 티켓 하나만 승격한다는 계약이 깨진다.
-      //
-      // `column_id = fromColumnId` 를 WHERE 에 건 UPDATE 는 진 쪽에서
-      // affected=0 을 돌려주므로, 진 패스는 감사 행도 트리거도 쓰지 않고 다음
-      // 후보로 넘어간다. equality WHERE 라 sqlite/postgres 양쪽에서 동일하게
-      // 동작하고(sql.js 는 `getRowsModified()` 로 affected 를 채운다),
-      // `dataSource.transaction()` 을 새로 열지 않으므로 sql.js 단일 커넥션의
-      // 겹침 문제도 만들지 않는다. `correctConfirmedLink` 가 canonical 전이를
-      // 잡을 때 쓰는 것과 같은 패턴이다.
-      const claimed = await ticketRepo.update(
-        { id: ticket.id, column_id: fromColumnId },
-        {
-          column_id: destination.id,
-          position: 0,
-          // Promotion always moves between non-terminal columns (intake →
-          // active), but defensively clear terminal_entered_at to keep the
-          // invariant "non-null only when sitting on a terminal column".
-          terminal_entered_at: null,
-        },
-      );
-      if (claimed.affected !== 1) {
-        this.logService.info('BacklogPromotion', 'promotion lost the move race (continuing)', {
-          board_id: boardId, ticket_id: ticket.id, from_column_id: fromColumnId,
-          triggered_by: opts?.triggerAgentId || null,
-        });
-        continue;
-      }
-      ticket.column_id = destination.id;
-      ticket.position = 0;
-      ticket.terminal_entered_at = null;
-
-      try {
-        await this.activityService.logActivity({
-          entity_type: 'ticket',
-          entity_id: ticket.id,
-          action: 'moved',
-          field_changed: 'column',
-          old_value: fromCol ? fromCol.name : '',
-          new_value: destination.name,
-          actor_id: 'system',
-          actor_name: 'BacklogPromotionService',
-          ticket_id: ticket.id,
-          trigger_source: 'backlog_promotion',
-        });
-      } catch (e) {
-        this.logService.warn('BacklogPromotion', 'activity log write failed (move still committed)', {
-          err: String(e), ticket_id: ticket.id,
-        });
-      }
-
-      // Explicit per-holder dispatch. Going through `emitAgentTrigger`
-      // re-applies the focus-selector gate inside `_emitTrigger` for
-      // free — so an emit that loses the focus race (e.g. another role
-      // already landed a higher-column ticket on the same agent
-      // between our eligibility check and this emit) drops silently.
-      // The `triggered_by` field is the *causing* idle-event agent (or
-      // 'backlog_promotion' for direct calls) so post-mortems can
-      // correlate the wake-up to the slot that opened.
-      const triggeredBy = opts?.triggerAgentId || 'backlog_promotion';
-      for (const target of dispatchTargets) {
-        try {
-          await this.triggerLoop.emitAgentTrigger(
-            ticket,
-            target.holderId,
-            target.slug,
-            'backlog_promotion',
-            triggeredBy,
+          // Focus-window gate (ticket 4a6cdfd7 → top-N in 701e5e36) —
+          // replaces the previous per-candidate workflow-load cap loop. The
+          // holder's top-N focus window is its top-N ranked tickets on this
+          // board (agent-unit, collapsed across roles). It is eligible for a
+          // new promotion iff that window still has a free slot
+          // (`length < cap`). A full window (`length >= cap`) names the
+          // tickets already occupying every slot; the candidate itself sits
+          // in an intake column so it can never appear there (the selector
+          // excludes intake by construction). At cap=1 `length >= 1` is the
+          // old "any focus held ⇒ skip" behaviour verbatim.
+          //
+          // 같은 트랜잭션 스코프로 읽는다는 점이 핵심이다 — 이 루프가 앞선
+          // 후보를 이미 이 담당자에게 배정했다면 그 이동이 여기에 즉시
+          // 반영되므로, 한 번의 호출 안에서도 cap 을 넘기지 못한다.
+          const focusWindow = await this.agentWorkload.getAgentFocusTicketIds(
+            a.agent_id, boardId, cap, manager,
           );
-        } catch (e) {
-          // A failed emit on one role mustn't block the others or roll
-          // back the move; the supervisor stale-allocation re-push is
-          // the eventual-consistency backstop for any holder we missed.
-          this.logService.warn('BacklogPromotion', 'destination role emit failed (continuing)', {
-            err: String(e), ticket_id: ticket.id, role: target.slug, agent_id: target.holderId,
-          });
+          if (focusWindow.length >= cap) {
+            eligible = false;
+            // Report the head of the full window (the highest-ranked ticket
+            // holding a slot) so the audit trail names a concrete occupant.
+            const holderId = a.agent_id;
+            const focusTicketId = focusWindow[0] || '';
+            skipReason = {
+              action: 'backlog_promotion_skipped_focus_held',
+              slug,
+              newValue:
+                `board=${boardId} role=${slug} ` +
+                `holder=${holderId} ` +
+                `focus_ticket_id=${focusTicketId}`,
+            };
+            break;
+          }
+          dispatchTargets.push({ slug, holderId: a.agent_id });
         }
-      }
-      const checkedHolders = dispatchTargets.map(t => t.holderId);
+        if (!eligible) {
+          if (skipReason) {
+            skipRecords.push({
+              ticketId: ticket.id, action: skipReason.action,
+              slug: skipReason.slug, newValue: skipReason.newValue,
+            });
+          }
+          continue;
+        }
 
-      // Audit row — separate from the 'moved' activity so dashboards can
-      // distinguish a server-owned promotion from a manual / agent move.
-      try {
-        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-        await activityLogRepo.save(activityLogRepo.create({
-          entity_type: 'ticket',
-          entity_id: ticket.id,
-          ticket_id: ticket.id,
-          actor_id: 'system',
-          actor_name: 'BacklogPromotionService',
-          action: 'backlog_promoted',
-          new_value: `from=${fromColumnId} to=${destination.id} priority_index=${priorityIndex(ticket.priority)} ` +
-                     `chain_target=${isChainTarget.has(ticket.id)} ` +
-                     `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')} ` +
-                     `released_leases=${releasedLeases}`,
-          trigger_source: 'backlog_promotion',
-        }));
-      } catch (e) {
-        this.logService.warn('BacklogPromotion', 'audit log write failed (move still committed)', {
-          err: String(e), ticket_id: ticket.id,
-        });
+        // Move: ticket.column_id update + audit `moved` activity row.
+        //
+        // We deliberately do NOT rely on the `moved` activity to wake the
+        // destination role holders. The activity is written with
+        // `actor_id: 'system'`, which `TriggerLoopService._handleActivity`
+        // skips by design (the system-actor filter exists to prevent
+        // listener-loops on system-comment-style writes). Instead this
+        // service explicitly calls `triggerLoop.emitAgentTrigger()` per
+        // (role, holder) below, so promotion has a deterministic dispatch
+        // path independent of listener semantics.
+        //
+        // Status bump is omitted by design — `move_ticket` MCP / REST do
+        // not auto-mutate ticket.status either, so promotion mirrors the
+        // canonical move semantics rather than re-introducing a hardcoded
+        // status string.
+        //
+        // 보드 잠금이 (board, agent) 슬롯 경합을 이미 막지만, `column_id =
+        // fromColumnId` equality WHERE 는 그대로 둔다: 잠금을 잡지 않는 다른
+        // 경로(사람의 `move_ticket` 등)가 그 사이 티켓을 옮겼다면 여기서
+        // affected=0 으로 걸러진다.
+        const fromColumnId = ticket.column_id as string;
+        const claimed = await txTicketRepo.update(
+          { id: ticket.id, column_id: fromColumnId },
+          {
+            column_id: destination.id,
+            position: 0,
+            // Promotion always moves between non-terminal columns (intake →
+            // active), but defensively clear terminal_entered_at to keep the
+            // invariant "non-null only when sitting on a terminal column".
+            terminal_entered_at: null,
+          },
+        );
+        if (claimed.affected !== 1) {
+          this.logService.info('BacklogPromotion', 'promotion lost the move race (continuing)', {
+            board_id: boardId, ticket_id: ticket.id, from_column_id: fromColumnId,
+            triggered_by: opts?.triggerAgentId || null,
+          });
+          continue;
+        }
+        claim = { ticket, fromColumnId, dispatchTargets };
+        break;
       }
+    });
 
-      this.logService.info('BacklogPromotion', 'promoted ticket from intake to first-active', {
-        board_id: boardId, ticket_id: ticket.id,
-        from_column_id: fromColumnId, to_column_id: destination.id,
-        priority_index: priorityIndex(ticket.priority),
-        chain_target: isChainTarget.has(ticket.id),
-        triggered_by: opts?.triggerAgentId || null,
-        // 요구사항 6 — 이번 패스에서 몇 개의 lease 해제를 감지하고 그 결과
-        // 무엇이 승격됐는지 한 줄로 붙여 둔다.
-        released_leases: releasedLeases,
-      });
-      return ticket.id;
+    // 잠금을 놓은 뒤 감사/백필을 처리한다 — 승격 성공 여부와 무관하게, 이번
+    // 패스에서 걸러진 후보의 사유는 남긴다.
+    for (const rec of skipRecords) {
+      await this._writeSkipAuditIfChanged(rec.ticketId, rec.action, rec.slug, rec.newValue);
+      // Vacant-role auto-backfill (ticket bb5b9aed) — see class docstring.
+      // Only role-unfilled is a candidate; focus-held is a normal,
+      // self-resolving wait and must never trigger a role reassignment.
+      if (rec.action === 'backlog_promotion_skipped_role_unfilled') {
+        const t = candidates.find(c => c.id === rec.ticketId);
+        if (t) await this._maybeBackfillVacantRole(t, board, rec.slug);
+      }
     }
 
-    return null;
+    if (!claim) return null;
+    const { ticket, fromColumnId, dispatchTargets } = claim as {
+      ticket: Ticket;
+      fromColumnId: string;
+      dispatchTargets: Array<{ slug: string; holderId: string }>;
+    };
+    const fromCol = columns.find(c => c.id === fromColumnId) || null;
+    ticket.column_id = destination.id;
+    ticket.position = 0;
+    ticket.terminal_entered_at = null;
+
+    try {
+      await this.activityService.logActivity({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'moved',
+        field_changed: 'column',
+        old_value: fromCol ? fromCol.name : '',
+        new_value: destination.name,
+        actor_id: 'system',
+        actor_name: 'BacklogPromotionService',
+        ticket_id: ticket.id,
+        trigger_source: 'backlog_promotion',
+      });
+    } catch (e) {
+      this.logService.warn('BacklogPromotion', 'activity log write failed (move still committed)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    // Explicit per-holder dispatch. Going through `emitAgentTrigger`
+    // re-applies the focus-selector gate inside `_emitTrigger` for
+    // free — so an emit that loses the focus race (e.g. another role
+    // already landed a higher-column ticket on the same agent
+    // between our eligibility check and this emit) drops silently.
+    // The `triggered_by` field is the *causing* idle-event agent (or
+    // 'backlog_promotion' for direct calls) so post-mortems can
+    // correlate the wake-up to the slot that opened.
+    const triggeredBy = opts?.triggerAgentId || 'backlog_promotion';
+    for (const target of dispatchTargets) {
+      try {
+        await this.triggerLoop.emitAgentTrigger(
+          ticket,
+          target.holderId,
+          target.slug,
+          'backlog_promotion',
+          triggeredBy,
+        );
+      } catch (e) {
+        // A failed emit on one role mustn't block the others or roll
+        // back the move; the supervisor stale-allocation re-push is
+        // the eventual-consistency backstop for any holder we missed.
+        this.logService.warn('BacklogPromotion', 'destination role emit failed (continuing)', {
+          err: String(e), ticket_id: ticket.id, role: target.slug, agent_id: target.holderId,
+        });
+      }
+    }
+    const checkedHolders = dispatchTargets.map(t => t.holderId);
+
+    // Audit row — separate from the 'moved' activity so dashboards can
+    // distinguish a server-owned promotion from a manual / agent move.
+    try {
+      const activityLogRepo = this.dataSource.getRepository(ActivityLog);
+      await activityLogRepo.save(activityLogRepo.create({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        ticket_id: ticket.id,
+        actor_id: 'system',
+        actor_name: 'BacklogPromotionService',
+        action: 'backlog_promoted',
+        new_value: `from=${fromColumnId} to=${destination.id} priority_index=${priorityIndex(ticket.priority)} ` +
+                   `chain_target=${isChainTarget.has(ticket.id)} ` +
+                   `triggered_by=${opts?.triggerAgentId || 'manual'} holders=${checkedHolders.join(',')} ` +
+                   `released_leases=${releasedLeases}`,
+        trigger_source: 'backlog_promotion',
+      }));
+    } catch (e) {
+      this.logService.warn('BacklogPromotion', 'audit log write failed (move still committed)', {
+        err: String(e), ticket_id: ticket.id,
+      });
+    }
+
+    this.logService.info('BacklogPromotion', 'promoted ticket from intake to first-active', {
+      board_id: boardId, ticket_id: ticket.id,
+      from_column_id: fromColumnId, to_column_id: destination.id,
+      priority_index: priorityIndex(ticket.priority),
+      chain_target: isChainTarget.has(ticket.id),
+      triggered_by: opts?.triggerAgentId || null,
+      // 요구사항 6 — 이번 패스에서 몇 개의 lease 해제를 감지하고 그 결과
+      // 무엇이 승격됐는지 한 줄로 붙여 둔다.
+      released_leases: releasedLeases,
+    });
+    return ticket.id;
+  }
+
+  /**
+   * 이 보드의 승격을 직렬화하기 위해 보드 행에 배타 잠금을 건다
+   * (ticket 2cc54fde, 요구사항 4).
+   *
+   * 왜 보드 행인가: 막아야 하는 것은 "같은 담당자의 서로 다른 후보 두 건이
+   * 동시에 승격되는" write skew 다. 두 패스가 서로 다른 티켓 행을 건드리므로
+   * 티켓 CAS 로는 절대 만나지 않는다 — Postgres READ COMMITTED 에서도
+   * 마찬가지다. 승격 후보를 고르는 단위인 보드 행을 공통 경합 지점으로 삼아야
+   * 둘이 실제로 줄을 선다.
+   *
+   * sqlite/sql.js 는 pessimistic lock 을 지원하지 않아 여기서 no-op 이지만,
+   * `db.ts` 의 `serializeSqljsTransactions()` 가 트랜잭션 자체를 FIFO 로
+   * 직렬화하므로(단일 WASM 커넥션) 같은 상호배제가 이미 성립한다. 따라서 이
+   * 잠금은 진짜 커넥션 풀을 쓰는 백엔드에서만 필요하다.
+   */
+  private async _lockBoardForPromotion(manager: EntityManager, boardId: string): Promise<void> {
+    const driverType = String(this.dataSource.driver.options.type || '');
+    if (driverType !== 'postgres' && driverType !== 'mysql' && driverType !== 'mariadb') return;
+    await manager
+      .getRepository(Board)
+      .createQueryBuilder('b')
+      .setLock('pessimistic_write')
+      .where('b.id = :id', { id: boardId })
+      .getOne();
   }
 
   /**

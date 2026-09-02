@@ -27,7 +27,10 @@
 //   4. archive/supersede — 실제 archive 전이 경로 두 개(MCP `archive_ticket`,
 //      REST `POST /api/tickets/:id/archive`)를 각각 태워 슬롯 회수 + 자동 재개
 //      + 해제 사유 감사 기록을 확인한다.
-//   5. 동시 승격 경합 — 두 패스가 같은 티켓을 이중 승격하지 않는다.
+//   5. 동시 승격 경합 — (a) **같은 담당자**의 서로 다른 두 후보를 두 패스가
+//      동시에 고를 때 cap=1 이 지켜지는가(티켓 단위 CAS 만으로는 못 막는
+//      write skew), (b) 같은 티켓을 두 패스가 노릴 때 이중 승격/이중 감사
+//      행이 없는가.
 //
 // 요구사항 6(운영 로그)은 각 케이스에서 `focus_lease_released` 감사 행의
 // `reason=` 토큰을 직접 단언해 함께 검증한다.
@@ -421,41 +424,91 @@ test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonica
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Case 5 — 동시 승격 경합. 같은 티켓이 두 번 승격되면 안 된다.
+    // Case 5 — 동시 승격 경합.
+    //
+    // 5a: **같은 담당자**의 서로 다른 두 후보. cap=1 이므로 정확히 한 건만
+    //     승격돼야 한다. 이게 진짜 write skew 케이스다 — 두 패스가 서로 다른
+    //     티켓 행을 CAS 하므로 티켓 단위 CAS 만으로는 둘 다 통과한다.
+    // 5b: 같은 티켓을 두 패스가 노리는 경우 — 이중 승격/이중 감사 행 금지.
     // ──────────────────────────────────────────────────────────────────
-    step('Case 5 — 동시 tryPromote 두 개가 같은 티켓을 이중 승격하지 않는다');
+    step('Case 5a — 같은 담당자의 두 후보 동시 승격 시 cap=1 이 지켜진다');
     const c5 = await makeBoard('lease-case5');
-    const bob = await createAgent(app, getDataSourceToken, ws.id, { name: 'bob' });
-    await createApiKey(app, getDataSourceToken, bob.id, { workspaceId: ws.id, label: 'bob' });
-    // 담당자를 나눠 둔다 — 한쪽이 슬롯을 채워도 다른 후보가 여전히 적격이라
-    // 두 패스가 실제로 같은 후보를 놓고 겹칠 여지가 남는다.
+    // 둘 다 alice 담당. cap=1 이므로 동시에 두 건이 승격되면 max_concurrent
+    // 위반이다.
     const tRace1 = await createTicket(app, getDataSourceToken, {
-      columnId: c5.backlog.id, workspaceId: ws.id, title: 'R1', priority: 'critical',
+      columnId: c5.backlog.id, workspaceId: ws.id, title: 'R1-same-assignee', priority: 'critical',
       assigneeId: alice.id,
     });
     const tRace2 = await createTicket(app, getDataSourceToken, {
-      columnId: c5.backlog.id, workspaceId: ws.id, title: 'R2', priority: 'high',
-      assigneeId: bob.id,
+      columnId: c5.backlog.id, workspaceId: ws.id, title: 'R2-same-assignee', priority: 'high',
+      assigneeId: alice.id,
     });
 
     const [r1, r2] = await Promise.all([
       backlogPromotion.tryPromote(c5.board.id, { triggerAgentId: 'race-a' }),
       backlogPromotion.tryPromote(c5.board.id, { triggerAgentId: 'race-b' }),
     ]);
-    const returned = [r1, r2].filter(Boolean);
+
+    const promotedIds = [r1, r2].filter(Boolean);
     assert.equal(
-      new Set(returned).size, returned.length,
-      `동시 승격 두 패스가 같은 티켓 id 를 돌려주면 안 된다 (got ${JSON.stringify([r1, r2])})`,
+      promotedIds.length, 1,
+      `cap=1 인 같은 담당자에게 동시 승격은 정확히 한 건만 성공해야 한다 (got ${JSON.stringify([r1, r2])})`,
     );
+
+    const movedRace = [];
     for (const tid of [tRace1.id, tRace2.id]) {
+      const row = await ticketRepo.findOne({ where: { id: tid } });
+      if (row.column_id === c5.todo.id) movedRace.push(tid);
       const n = await countAction('backlog_promoted', tid);
       assert.ok(n <= 1, `티켓 ${tid.slice(0, 8)} 은 backlog_promoted 행이 최대 1개여야 한다 (got ${n})`);
-      const moved = await ticketRepo.findOne({ where: { id: tid } });
-      if (n === 1) {
-        assert.equal(moved.column_id, c5.todo.id, '승격 행이 있으면 실제로 이동해 있어야 한다');
-      }
     }
-    assert.ok(returned.length >= 1, '동시 경합이라도 최소 한 건은 승격돼야 한다 (양쪽 다 no-op 이면 회귀)');
+    assert.deepEqual(
+      movedRace, promotedIds,
+      `active 컬럼으로 실제 이동한 티켓은 승격을 보고한 티켓과 정확히 일치해야 한다 ` +
+      `(moved=${JSON.stringify(movedRace)} reported=${JSON.stringify(promotedIds)})`,
+    );
+    assert.equal(
+      (await activityLogRepo.find({ where: { action: 'backlog_promoted', ticket_id: promotedIds[0] } })).length, 1,
+      '승격된 티켓의 backlog_promoted 감사 행은 정확히 1건이어야 한다',
+    );
+
+    step('  담당자의 focus 도 한 건으로 유지된다 (max_concurrent=1)');
+    const raceFocus = await agentWorkload.getAgentFocusTicketIds(alice.id, c5.board.id, 1);
+    assert.deepEqual(
+      raceFocus, promotedIds,
+      `동시 승격 후에도 담당자 focus window 는 승격된 한 건이어야 한다 (got ${JSON.stringify(raceFocus)})`,
+    );
+    const raceLoad = await agentWorkload.getWorkflowLoadTicketIds(alice.id, c5.board.id);
+    assert.equal(
+      raceLoad.length, 1,
+      `cap=1 보드에서 담당자가 active 로 들고 있는 티켓은 1건이어야 한다 (got ${raceLoad.length}: ${JSON.stringify(raceLoad)})`,
+    );
+
+    step('Case 5b — 같은 티켓을 두 패스가 노려도 이중 승격되지 않는다');
+    const c5b = await makeBoard('lease-case5b');
+    const bob = await createAgent(app, getDataSourceToken, ws.id, { name: 'bob' });
+    await createApiKey(app, getDataSourceToken, bob.id, { workspaceId: ws.id, label: 'bob' });
+    const tSolo = await createTicket(app, getDataSourceToken, {
+      columnId: c5b.backlog.id, workspaceId: ws.id, title: 'R-solo', priority: 'critical',
+      assigneeId: bob.id,
+    });
+
+    const [s1, s2] = await Promise.all([
+      backlogPromotion.tryPromote(c5b.board.id, { triggerAgentId: 'race-c' }),
+      backlogPromotion.tryPromote(c5b.board.id, { triggerAgentId: 'race-d' }),
+    ]);
+    assert.deepEqual(
+      [s1, s2].filter(Boolean), [tSolo.id],
+      `유일 후보를 두 패스가 노리면 정확히 한 쪽만 승격을 보고해야 한다 (got ${JSON.stringify([s1, s2])})`,
+    );
+    assert.equal(
+      await countAction('backlog_promoted', tSolo.id), 1,
+      '같은 티켓에 backlog_promoted 감사 행이 두 번 쓰이면 안 된다',
+    );
+    assert.equal(
+      await countAction('trigger_emitted', tSolo.id), 1,
+      '이중 승격이 없으면 트리거도 한 번만 emit 돼야 한다',
+    );
 
     step('감사 근거 — 이번 실행에서 관측된 focus_lease_released 행');
     for (const r of await activityLogRepo.find({ where: { action: 'focus_lease_released' } })) {
