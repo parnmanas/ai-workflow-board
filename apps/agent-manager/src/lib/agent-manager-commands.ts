@@ -33,6 +33,7 @@
 // so the server log surfaces the outcome to the operator.
 
 import { log } from './logging.js';
+import { normalizeCredentialFields } from './credential-fields.js';
 import {
   postCommandAck,
   fetchAgentRecord,
@@ -598,10 +599,23 @@ export class AgentManagerCommandHandler {
     // Either way: writing an empty credential file silently breaks auth in a
     // way that's hard to diagnose from the CLI's own error. Log loud + return
     // null so caller falls back to operator HOME (legacy).
+    // Strip whitespace the operator's paste smuggled into the secret before
+    // anything consumes it. An interior newline in an OAuth token is not a
+    // soft problem: the CLI puts it in an Authorization header and every
+    // request fails, for every agent sharing the credential.
+    const { fields, repaired } = normalizeCredentialFields(fetched.fields);
+    if (repaired.length > 0) {
+      log(
+        `spawn_agent: agent=${agentId.slice(0, 8)} credential=${fetched.provider} ` +
+          `(id=${fetched.credential_id.slice(0, 8)}) carried whitespace inside field(s) ` +
+          `${repaired.join(',')} — stripped. Re-save the credential in AWB Settings → Credentials.`,
+      );
+    }
+
     const required = REQUIRED_CREDENTIAL_FIELDS[fetched.provider];
     if (required) {
       const present = required.filter((k) => {
-        const v = fetched.fields?.[k];
+        const v = fields[k];
         return typeof v === 'string' && v.length > 0;
       });
       if (present.length === 0) {
@@ -616,7 +630,7 @@ export class AgentManagerCommandHandler {
     return {
       credential_id: fetched.credential_id,
       provider: fetched.provider,
-      fields: fetched.fields,
+      fields,
     };
   }
 

@@ -7,6 +7,7 @@ import {
 } from '../../entities/CliLoginSession';
 import { Credential } from '../../entities/Credential';
 import { encrypt, decryptStrict } from '../../services/encryption.service';
+import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
@@ -218,7 +219,9 @@ export class CliLoginSessionService {
     if (args.status === 'succeeded') {
       const provider = CLI_PROVIDER[session.cli];
       const requiredField = REQUIRED_FIELD[provider];
-      const fields = args.credentialFields || {};
+      // Normalize before the required-field check so a CLI whose captured
+      // output wrapped the token can't store an unusable secret.
+      const fields = normalizeCredentialFields(args.credentialFields || {});
       if (!requiredField || !fields[requiredField]?.trim()) {
         throw makeError(400, `credential_fields.${requiredField || '?'} is required on success`);
       }
