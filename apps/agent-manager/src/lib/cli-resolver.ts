@@ -48,7 +48,13 @@
 // 있는 CLI 만 배치 래퍼로 fall through 한다.
 
 import { execSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, readFileSync, readlinkSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename, posix, win32 } from 'node:path';
 import { KNOWN_CLI_TYPES } from './constants.js';
@@ -131,6 +137,35 @@ export function normalizeWindowsExecutablePath(value: string): string {
     normalized = normalized.slice(1, -1).trim();
   }
   return win32.normalize(normalized);
+}
+
+/** resolve 결과를 한 정규형으로 접는다.
+ *
+ *  Windows 에서는 같은 CLI 를 연달아 두 번 resolve 해도 서로 다른 문자열이 나올
+ *  수 있었다. 결과를 만드는 분기가 둘이고 표기가 다르기 때문이다 —
+ *  shell lookup(`where`)은 디스크의 실제 경로(긴 이름 + 디스크상 대소문자)를
+ *  주고, 그것이 2000ms timeout 으로 빈손일 때 도는 PATH 스캔은
+ *  `process.env.PATH` 의 8.3 단축명에 PATHEXT 항목을 그대로 이어붙인다:
+ *
+ *    where     → C:\Users\runneradmin\...\codex.exe
+ *    PATH 스캔 → C:\Users\RUNNER~1\...\codex.EXE
+ *
+ *  둘 다 spawn 은 되지만, 이 값은 캐시에 들어가고 로그에 찍히고 호출부가 비교
+ *  한다. 어느 분기를 탔는지(= 그때 러너가 얼마나 바빴는지)가 반환값에 새면 안
+ *  된다. `realpathSync.native` 가 8.3 단축명을 펴고 디스크상 대소문자로 맞춘다.
+ *
+ *  POSIX 는 두 분기가 똑같이 `join(PATH 항목, 이름)` 을 만들어 애초에 갈리지
+ *  않으므로 건드리지 않는다 — realpath 는 symlink 까지 풀어 버려서, npm bin
+ *  래퍼처럼 symlink 로 설치된 CLI 의 spawn 대상 자체를 바꿔 놓는다. */
+export function canonicalizeResolvedBin(bin: string, windows: boolean = isWindows): string {
+  if (!windows) return bin;
+  try {
+    return realpathSync.native(bin);
+  } catch {
+    // 경로가 사라졌거나 조회 권한이 없으면 원래 값을 그대로 쓴다. 정규화는
+    // 표기 통일일 뿐이므로 여기서 resolve 를 실패시키면 안 된다.
+    return win32.normalize(bin);
+  }
 }
 
 /** resolve 결과를 실제 프로세스 생성 직전에 다시 검증한다. 설정 hot-reload와
@@ -434,15 +469,19 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
 
   const sources = orderResolutionSources(wellKnown, pathHits);
   const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable, shimUsable });
-  cache.set(key, picked.bin);
   if (picked.kind === 'literal') {
+    // 못 찾은 경우의 캐시 의미론은 그대로 둔다(정규화 대상도 아니다).
+    cache.set(key, picked.bin);
     throw new Error(
       `[cli-resolver:${ct}] executable not found or not executable; checked PATH and known install locations`,
     );
-  } else {
-    log(`[cli-resolver:${ct}] resolved via ${picked.kind}: ${picked.bin}`);
   }
-  return picked.bin;
+  // 캐시·로그·반환값을 전부 같은 정규형으로 맞춘다 — 어느 lookup 분기를 탔는지가
+  // 밖으로 새면 안 된다(canonicalizeResolvedBin 주석 참조).
+  const bin = canonicalizeResolvedBin(picked.bin);
+  cache.set(key, bin);
+  log(`[cli-resolver:${ct}] resolved via ${picked.kind}: ${bin}`);
+  return bin;
 }
 
 export function _resetResolverCache(): void {
