@@ -658,10 +658,23 @@ export class MergeLeaseService {
         // 여기서 안 지워도 고아 플래그는 다른 경로가 치운다: 전달 경로
         // (`claimWaiterDelivery`)와 Merging 이탈 훅(`releaseOpenLeaseRows`)이
         // 둘 다 무조건 정리하므로, 보수적으로 두는 쪽의 비용이 없다.
-        const ctx = parseMergeLeaseContext(ticket.merge_lease_context);
+        const observedContext = ticket.merge_lease_context;
+        const ctx = parseMergeLeaseContext(observedContext);
         if (ctx?.lease_id !== lease.id) return;
+        // ★ 읽은 원문 컨텍스트까지 WHERE 에 넣은 **조건부 쓰기**(리뷰 5R).
+        //   위 검사만으로는 부족하다: 트랜잭션 안이어도 앞선 일반 SELECT 는
+        //   Postgres 기본 격리 수준에서 행 잠금을 잡지 않으므로, 검사와 쓰기
+        //   사이에 다른 경로가 같은 티켓을 **새 lease 로 다시 파킹**하면
+        //   `pending_merge_lease` 는 여전히 true 라서 UPDATE 가 성공하고 그
+        //   새 파킹을 지워버린다. 읽은 값을 조건에 걸면 그 창에서 0행이 되어
+        //   새 파킹이 보존된다 — 주석의 계약을 읽기 시점이 아니라 **쓰기
+        //   시점까지** 원자적으로 지키는 부분이다.
         await tRepo.update(
-          { id: lease.ticket_id, pending_merge_lease: true } as any,
+          {
+            id: lease.ticket_id,
+            pending_merge_lease: true,
+            merge_lease_context: observedContext,
+          } as any,
           { pending_merge_lease: false, merge_lease_context: '' },
         );
       });

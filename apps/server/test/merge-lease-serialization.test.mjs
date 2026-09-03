@@ -872,6 +872,72 @@ test('★ 컨텍스트가 비었거나 손상됐으면 옛 리퍼가 파킹을 �
   }
 });
 
+test('★ 컨텍스트 검사 **직후·UPDATE 직전** 에 재파킹돼도 옛 리퍼가 새 파킹을 지우지 않는다', async () => {
+  // 리뷰 5R. 앞의 두 인터리빙 테스트는 `judgeHolder` 뒤 — 즉 트랜잭션과 티켓
+  // 읽기 **전** 에 상태를 바꾸므로 이 창은 재현하지 못한다. 여기서 닫는 것은
+  // 트랜잭션 안의 "읽고 → 검사하고 → 쓴다" 사이 창이다: Postgres 기본 격리
+  // 수준에서 앞선 일반 SELECT 는 행 잠금을 잡지 않으므로, 검사 통과 후 다른
+  // 경로가 새 lease 로 재파킹하면 `pending_merge_lease` 는 여전히 true 라
+  // UPDATE 가 성공해 **새 파킹을 지운다**. 읽은 원문 컨텍스트를 WHERE 에 넣은
+  // 조건부 쓰기만이 이 창을 닫는다.
+  await clearLeases();
+  const holder = await makeMergingTicket('cas-window');
+  const res = await svc.acquire(holder.id);
+  await backdate(res.lease_id, {
+    last_progress_at: new Date(Date.now() - 60 * MIN),
+    acquired_at: new Date(Date.now() - 60 * MIN),
+  });
+  // 검사를 통과시키려면 컨텍스트가 **이 lease** 를 가리켜야 한다.
+  await ticketRepo.update({ id: holder.id }, {
+    pending_merge_lease: true,
+    merge_lease_context: JSON.stringify({ lease_id: res.lease_id, repo_resource_id: RESOURCE_ID }),
+  });
+
+  // 트랜잭션 매니저의 Ticket 저장소를 감싸, 리퍼의 티켓 UPDATE **직전**에
+  // (검사는 이미 통과한 시점) 다른 lease 로 재파킹한다. 같은 매니저로 쓰므로
+  // UPDATE 입장에서 "읽은 뒤 행이 바뀐" 상태가 정확히 재현된다.
+  const NEW_LEASE_ID = '11111111-0000-4000-8000-0000000000aa';
+  const NEW_CTX = JSON.stringify({ lease_id: NEW_LEASE_ID, repo_resource_id: RESOURCE_ID });
+  const realTx = ds.transaction.bind(ds);
+  let injected = 0;
+  ds.transaction = async (cb) => realTx(async (m) => {
+    const realGetRepo = m.getRepository.bind(m);
+    m.getRepository = (entity) => {
+      const repo = realGetRepo(entity);
+      if (entity !== Ticket) return repo;
+      return new Proxy(repo, {
+        get(target, prop, recv) {
+          if (prop !== 'update') return Reflect.get(target, prop, recv);
+          return async (...args) => {
+            if (injected === 0) {
+              injected++;
+              await realGetRepo(Ticket).update({ id: holder.id }, { merge_lease_context: NEW_CTX });
+            }
+            return target.update(...args);
+          };
+        },
+      });
+    };
+    return cb(m);
+  });
+
+  try {
+    await sweep.sweep();
+    assert.equal(injected, 1, '인터리빙이 재현되지 않았다 — 테스트가 공허하다');
+  } finally {
+    ds.transaction = realTx;
+  }
+
+  const t = await ticketRepo.findOne({ where: { id: holder.id } });
+  assert.equal(t.merge_lease_context, NEW_CTX,
+    '검사 직후 재파킹된 새 컨텍스트를 옛 리퍼가 지웠다 — 조건부 쓰기가 없다');
+  assert.equal(t.pending_merge_lease, true, '새 파킹 플래그가 지워졌다');
+
+  // lease 회수 자체는 정상적으로 커밋된다(조건부 쓰기가 회수까지 막지 않는다).
+  assert.ok((await leaseRepo.findOne({ where: { id: res.lease_id } })).released_at,
+    '티켓 정리를 건너뛰느라 lease 회수까지 롤백됐다');
+});
+
 // ── 6b. 스윕 단독 FIFO (리뷰 3R 지적 2) ────────────────────────────────────
 
 test('★ queued_at 이 같고 id 역순으로 들어와도 스윕 단독으로 진짜 선두가 승격된다', async () => {
