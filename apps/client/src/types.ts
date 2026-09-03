@@ -2718,6 +2718,8 @@ export interface OrchestrationTimelineEvent {
   message: string;
   data: Record<string, any> | null;
   created_at: string;
+  /** 같은 created_at 안의 삽입 순서 — 커서 페이지네이션의 타이브레이커. */
+  write_seq?: number;
 }
 
 export interface OrchestrationMissionDetail extends OrchestrationMissionListItem {

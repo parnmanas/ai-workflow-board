@@ -12,7 +12,7 @@
 //   • 참여자가 아니면 observer 로 강등되고 입력창 대신 사유가 표시된다
 //   • 종료된 미션은 입력창이 없고 기록 보존 안내가 나온다
 //   • 미션이 시작 전(room 없음)이면 안내만 나오고 조회를 시도하지 않는다
-//   • 긴 로그는 잘라 렌더링해 패널이 멈추지 않는다(pagination 상한)
+//   • 긴 로그는 창 크기로 bounded 되고, 위로 스크롤하면 커서로 과거를 이어 붙인다
 //   • bare 멘션이 참여자 로스터로 해석돼 pill 로 렌더링된다
 //   • 참여자는 읽음 처리되고 관전자는 남의 방 읽음을 건드리지 않는다
 //   • needs_recovery step 이 "Waiting" 으로 조용히 오표시되지 않는다
@@ -65,7 +65,7 @@ function evt(id, type, message, createdAt) {
  * `getChatRoomMessages` 만 스텁하면 되므로 별도 DI 를 만들지 않고 api 모듈에 직접
  * 대입한다(이 저장소의 smoke-ticket-artifact-realtime.test.mjs 와 같은 관례).
  */
-async function withPanel({ props, getChatRoomMessages, getChatRoom }, body) {
+async function withPanel({ props, getChatRoomMessages, getChatRoom, listOrchestrationMissionEvents }, body) {
   const dom = setupDom({ width: 1280 });
   const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
@@ -75,20 +75,28 @@ async function withPanel({ props, getChatRoomMessages, getChatRoom }, body) {
     getChatRoomMessages: api.getChatRoomMessages,
     getChatRoom: api.getChatRoom,
     markChatRoomRead: api.markChatRoomRead,
+    listOrchestrationMissionEvents: api.listOrchestrationMissionEvents,
   };
   const readCalls = [];
+  const eventPageCalls = [];
   if (getChatRoomMessages) api.getChatRoomMessages = getChatRoomMessages;
   api.getChatRoom = getChatRoom ?? (async () => ({ participants: [] }));
   api.markChatRoomRead = async (roomId) => {
     readCalls.push(roomId);
   };
+  api.listOrchestrationMissionEvents =
+    listOrchestrationMissionEvents ??
+    (async (_id, _ws, opts) => {
+      eventPageCalls.push(opts);
+      return { events: [], has_more: false, next_cursor: null };
+    });
 
   try {
     // 실제 App 트리와 같은 순서(AuthProvider 바깥 > BoardStreamProvider 안쪽)로 띄운다 —
     // 패널이 로그인 사용자 id 로 "내 메시지"를 가르므로 AuthProvider 가 필요하다.
     const view = mountWithBoardStream(h(Panel, props), { withAuth: true });
     await settle();
-    await body({ view, es: () => FakeEventSource.instances[0], readCalls });
+    await body({ view, es: () => FakeEventSource.instances[0], readCalls, eventPageCalls });
     view.unmount();
   } finally {
     Object.assign(api, originals);
@@ -115,6 +123,7 @@ test('대화 메시지와 실행 이벤트가 서로 다른 렌더러로 시간�
     {
       props: {
         missionId: 'mission-1',
+        workspaceId: 'ws-1',
         roomId: ROOM,
         live: true,
         events: [
@@ -154,7 +163,7 @@ test('대화 메시지와 실행 이벤트가 서로 다른 렌더러로 시간�
 test('POST 응답과 SSE 브로드캐스트로 같은 메시지가 두 번 와도 한 번만 그려진다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es }) => {
@@ -181,7 +190,7 @@ test('POST 응답과 SSE 브로드캐스트로 같은 메시지가 두 번 와�
 test('다른 방의 SSE 메시지는 이 패널에 새지 않는다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es }) => {
@@ -203,7 +212,7 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
   const observerFlags = [];
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
         observerFlags.push(!!observer);
         if (!observer) throw new Error('not a participant of this room');
@@ -233,7 +242,7 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
 test('종료된 미션은 입력창 없이 기록 보존 안내를 보여준다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: false, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: false, events: [] },
       getChatRoomMessages: async () => [msg('m1', '완료 전 마지막 지시')],
     },
     async ({ view }) => {
@@ -258,7 +267,7 @@ test('아직 시작되지 않은 미션은 조회를 시도하지 않고 안내�
   let called = 0;
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: null, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: null, live: true, events: [] },
       getChatRoomMessages: async () => {
         called += 1;
         return [];
@@ -271,14 +280,14 @@ test('아직 시작되지 않은 미션은 조회를 시도하지 않고 안내�
   );
 });
 
-test('긴 실행 로그는 상한까지만 렌더링해 패널이 멈추지 않는다', async () => {
+test('긴 실행 로그는 창 크기까지만 DOM 에 유지한다', async () => {
   const many = Array.from({ length: 500 }, (_, i) =>
     evt(`e${i}`, 'step_progress', `progress ${i}`, new Date(Date.UTC(2026, 5, 1, 0, 0, i)).toISOString()),
   );
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: many },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: many },
       getChatRoomMessages: async () => [],
     },
     async ({ view }) => {
@@ -297,6 +306,78 @@ test('긴 실행 로그는 상한까지만 렌더링해 패널이 멈추지 않�
   );
 });
 
+test('위로 스크롤하면 커서로 과거 실행 이벤트를 이어 붙인다', async () => {
+  // 잘라내기만 하고 이전 이력을 가져올 방법이 없으면 그건 pagination 이 아니라 그냥 손실이다.
+  // detail 응답 자체가 bounded window 이므로 이 경로가 유일한 과거 접근 수단이다.
+  const firstPage = Array.from({ length: 100 }, (_, i) =>
+    evt(`recent-${i}`, 'step_progress', `recent ${i}`, new Date(Date.UTC(2026, 5, 1, 1, 0, i)).toISOString()),
+  );
+  const older = Array.from({ length: 3 }, (_, i) =>
+    evt(`older-${i}`, 'note', `older ${i}`, new Date(Date.UTC(2026, 5, 1, 0, 0, i)).toISOString()),
+  );
+
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
+      getChatRoomMessages: async () => [],
+      // 서버는 최신 → 과거 순으로 돌려준다.
+      listOrchestrationMissionEvents: async (id, ws, opts) => {
+        assert.equal(id, 'mission-1');
+        assert.equal(ws, 'ws-1');
+        assert.ok(opts.before_at, '커서 없이 부르면 같은 페이지를 무한히 다시 가져온다');
+        assert.equal(
+          typeof opts.before_seq,
+          'number',
+          'created_at 만으로 커서를 만들면 같은 초에 몰린 이벤트가 페이지 경계에서 통째로 누락된다',
+        );
+        return { events: [...older].reverse(), has_more: false, next_cursor: null };
+      },
+    },
+    async ({ view }) => {
+      const scroller = view.container.querySelector('[data-testid="mission-conversation-scroll"]');
+      assert.ok(scroller, '스크롤 컨테이너가 있어야 위로 올려 과거를 부를 수 있다');
+
+      await act(async () => {
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+        await Promise.resolve();
+      });
+      await settle();
+
+      const text = textOf(view.container);
+      assert.ok(text.includes('older 0'), '커서로 가져온 과거 이벤트가 화면에 붙어야 한다');
+      assert.ok(text.includes('older 2'));
+    },
+  );
+});
+
+test('첫 페이지가 창보다 작으면 과거를 더 부르지 않는다', async () => {
+  // has_more 판정을 안 하면 스크롤할 때마다 서버를 두드린다.
+  await withPanel(
+    {
+      props: {
+        missionId: 'mission-1',
+        workspaceId: 'ws-1',
+        roomId: ROOM,
+        live: true,
+        events: [evt('only-1', 'note', '유일한 이벤트', '2026-06-01T00:00:00.000Z')],
+      },
+      getChatRoomMessages: async () => [],
+    },
+    async ({ view, eventPageCalls }) => {
+      const scroller = view.container.querySelector('[data-testid="mission-conversation-scroll"]');
+      await act(async () => {
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+        await Promise.resolve();
+      });
+      await settle();
+
+      assert.equal(eventPageCalls.length, 0, '가져올 과거가 없는데 요청하면 스크롤마다 서버를 두드린다');
+    },
+  );
+});
+
 test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', async () => {
   // 구조화 토큰 `@[user:id|이름]` 은 표시명을 자기가 들고 있어 로스터 없이도 pill 이 된다.
   // 로스터가 실제로 갈리는 지점은 **bare `@name`** 이다 — 참여자와 이름이 맞아야 pill 이
@@ -305,7 +386,7 @@ test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', as
   // 아무것도 지키지 못한다(실제로 그렇게 썼다가 변이 검증에서 걸렀다).
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [msg('m1', '@jeongmin 이 부분 확인 부탁해요')],
       getChatRoom: async () => ({
         participants: [
@@ -328,7 +409,7 @@ test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', as
 test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을 건드리지 않는다', async () => {
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async () => [],
     },
     async ({ view, es, readCalls }) => {
@@ -345,7 +426,7 @@ test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을
 
   await withPanel(
     {
-      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
       getChatRoomMessages: async (_r, _l, _b, observer) => {
         if (!observer) throw new Error('not a participant');
         return [];

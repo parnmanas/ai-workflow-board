@@ -42,11 +42,20 @@ const LOAD_OLDER_THRESHOLD = 120;
 const NEAR_BOTTOM_THRESHOLD = 80;
 
 /**
- * 실행 이벤트는 한 화면에 수천 건이 쌓일 수 있어 전부 그리면 긴 미션에서 패널이
- * 멈춘다. 최신 것부터 이 개수까지만 렌더링하고 나머지는 접는다 — Timeline 섹션이
- * 전체 이력을 따로 갖고 있으므로 여기서 잘라도 정보가 사라지지 않는다.
+ * 한 번에 DOM 에 유지하는 실행 이벤트 수의 상한(bounded window).
+ *
+ * 긴 미션의 타임라인은 수천 건이라 전부 그리면 패널이 멈춘다. 그렇다고 잘라 버리면
+ * 이전 이력을 볼 방법이 사라지므로, **창을 뒤로 밀 수 있게** 함께 만들었다:
+ * 위로 스크롤하면 `listOrchestrationMissionEvents` 커서로 과거 이벤트를 이어 붙이고,
+ * 창 크기를 넘으면 화면 밖 반대쪽 끝을 잘라 DOM 노드 수를 일정하게 유지한다.
+ *
+ * (이전 주석은 "Timeline 섹션이 전체 이력을 갖고 있으니 잘라도 된다"고 적었는데
+ *  사실이 아니었다 — mission detail 응답 자체가 최신 N건만 싣는 bounded window 다.)
  */
-const MAX_RENDERED_EVENTS = 200;
+const EVENT_WINDOW = 200;
+
+/** 과거 이벤트를 한 번에 가져오는 크기. */
+const EVENT_PAGE_SIZE = 100;
 
 type Track =
   | { kind: 'messages'; at: string; messages: ChatRoomMessageItem[] }
@@ -63,7 +72,7 @@ export function buildConversationTracks(
 ): Track[] {
   const items: Array<{ at: number; message?: ChatRoomMessageItem; event?: OrchestrationTimelineEvent }> = [];
   for (const m of messages) items.push({ at: new Date(m.created_at).getTime(), message: m });
-  for (const e of events.slice(-MAX_RENDERED_EVENTS)) items.push({ at: new Date(e.created_at).getTime(), event: e });
+  for (const e of events) items.push({ at: new Date(e.created_at).getTime(), event: e });
   // 같은 밀리초에 대화와 실행이 겹치면 실행 이벤트를 뒤에 둔다 — 사용자의 지시가
   // 먼저 보이고 그로 인해 벌어진 일이 뒤따르는 순서가 읽기 자연스럽다.
   items.sort((a, b) => a.at - b.at || (a.message ? -1 : 1) - (b.message ? -1 : 1));
@@ -84,6 +93,8 @@ export function buildConversationTracks(
 
 interface MissionConversationPanelProps {
   missionId: string;
+  /** 이벤트 커서 조회에 필요한 workspace 스코프. */
+  workspaceId: string;
   /** orchestrator 대화가 오가는 ChatRoom. null 이면 미션이 아직 시작되지 않은 것이다. */
   roomId: string | null;
   /** 실행 trace — 대화와 시간순으로 엮어 보여준다. */
@@ -95,6 +106,7 @@ interface MissionConversationPanelProps {
 
 export default function MissionConversationPanel({
   missionId,
+  workspaceId,
   roomId,
   events,
   live,
@@ -122,6 +134,11 @@ export default function MissionConversationPanel({
    */
   const [participants, setParticipants] = useState<MentionParticipant[]>([]);
   const [participantCount, setParticipantCount] = useState(0);
+  /** 커서로 추가로 가져온 과거 실행 이벤트(오래된 것부터). */
+  const [olderEvents, setOlderEvents] = useState<OrchestrationTimelineEvent[]>([]);
+  const [eventCursor, setEventCursor] = useState<{ at: string; seq: number } | null>(null);
+  const [hasMoreEvents, setHasMoreEvents] = useState(false);
+  const loadingEventsRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingOlderRef = useRef(false);
@@ -207,11 +224,53 @@ export default function MissionConversationPanel({
     el.scrollTop += el.scrollHeight - anchor;
   }, [messages]);
 
+  // detail 이 실어준 첫 페이지의 가장 오래된 이벤트가 커서의 출발점이다.
+  useEffect(() => {
+    if (events.length === 0) {
+      setEventCursor(null);
+      setHasMoreEvents(false);
+      return;
+    }
+    const oldest = events[0];
+    setEventCursor({ at: oldest.created_at, seq: oldest.write_seq ?? 0 });
+    // detail 의 창이 가득 찼다면 그 뒤로 더 있을 수 있다고 본다.
+    setHasMoreEvents(events.length >= EVENT_PAGE_SIZE);
+  }, [events]);
+
+  const loadOlderEvents = useCallback(async () => {
+    if (!workspaceId || loadingEventsRef.current || !hasMoreEvents || !eventCursor) return;
+    loadingEventsRef.current = true;
+    try {
+      const page = await api.listOrchestrationMissionEvents(missionId, workspaceId, {
+        limit: EVENT_PAGE_SIZE,
+        before_at: eventCursor.at,
+        before_seq: eventCursor.seq,
+      });
+      // 서버는 최신 → 과거 순으로 준다. 화면은 과거 → 최신이므로 뒤집어 앞에 붙인다.
+      const older = [...page.events].reverse();
+      if (older.length > 0) {
+        setOlderEvents((prev) => {
+          const known = new Set(prev.map((e) => e.id));
+          return [...older.filter((e) => !known.has(e.id)), ...prev];
+        });
+      }
+      setHasMoreEvents(page.has_more);
+      if (page.next_cursor) setEventCursor(page.next_cursor);
+    } catch {
+      // 조용히 실패한다 — 다시 위로 올리면 재시도된다.
+    } finally {
+      loadingEventsRef.current = false;
+    }
+  }, [missionId, workspaceId, hasMoreEvents, eventCursor]);
+
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (el.scrollTop < LOAD_OLDER_THRESHOLD) void loadOlder();
-  }, [loadOlder]);
+    if (el.scrollTop < LOAD_OLDER_THRESHOLD) {
+      void loadOlder();
+      void loadOlderEvents();
+    }
+  }, [loadOlder, loadOlderEvents]);
 
   // 새 메시지 자동 추종 — 사용자가 위쪽 이력을 읽는 중이면 끌어내리지 않는다.
   useEffect(() => {
@@ -258,7 +317,13 @@ export default function MissionConversationPanel({
     );
   }
 
-  const tracks = buildConversationTracks(messages, events);
+  // 과거 페이지 + detail 첫 페이지를 합치고, DOM 노드 수를 일정하게 유지하도록
+  // 창 크기로 자른다. 최신 쪽을 남기는 이유는 운영자가 보는 것이 "지금"이기 때문이고,
+  // 잘려나간 과거는 위로 스크롤하면 커서로 다시 들어온다.
+  const knownIds = new Set(events.map((e) => e.id));
+  const allEvents = [...olderEvents.filter((e) => !knownIds.has(e.id)), ...events];
+  const windowedEvents = allEvents.length > EVENT_WINDOW ? allEvents.slice(-EVENT_WINDOW) : allEvents;
+  const tracks = buildConversationTracks(messages, windowedEvents);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>

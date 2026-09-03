@@ -64,6 +64,11 @@ function makeRepo(rows) {
     async save(rowOrRows) {
       return rowOrRows;
     },
+    // dispatchStep 은 participant/room 을 create() 로 만든다. 이게 없으면 자동
+    // 재디스패치 경로가 "dispatch 실패"로 빠져 검증하려던 분기를 지나가지 못한다.
+    create(row) {
+      return { ...row };
+    },
   };
 }
 
@@ -82,6 +87,9 @@ function makeMission(overrides = {}) {
     step_timeout_minutes: 90,
     graph_spec: null,
     max_parallel_steps: 4,
+    workspace_folder: '',
+    repo_ref: null,
+    checkout_mode: 'reuse',
     result_summary: '',
     failure_reason: '',
     started_at: null,
@@ -150,24 +158,52 @@ function makeRunner({ mission, steps }) {
     { id: 'agent-member', name: 'Member', workspace_id: 'ws-1', is_online: true },
     { id: 'agent-orch', name: 'Orchestrator', workspace_id: 'ws-1', is_online: true },
   ]);
+  // dispatchStep 이 실제로 완주하려면 room 생성과 메시지 전송이 동작해야 한다.
+  // 자동 재디스패치 경로를 검증하려면 이 둘이 inert 여서는 안 된다(그러면 dispatch
+  // 실패로 빠져 'terminal' 이 나오고, 검증하려던 분기를 못 지나간다).
+  let roomSeq = 0;
+  const roomRepo = {
+    rows: [],
+    create(row) {
+      return { ...row, id: `room-${++roomSeq}` };
+    },
+    async save(row) {
+      roomRepo.rows.push(row);
+      return row;
+    },
+    async find() {
+      return roomRepo.rows;
+    },
+    async findOne() {
+      return null;
+    },
+  };
+  const posted = [];
+  const messaging = {
+    async sendMessage(roomId, _ws, _type, _id, _name, content) {
+      posted.push({ roomId, content });
+      return {};
+    },
+  };
+
   const runner = new OrchestrationRunnerService(
     missionRepo,
     stepRepo,
     makeRepo([]),
     makeRepo([]),
-    makeRepo([]),
+    roomRepo,
     makeRepo([]),
     agentRepo,
     makeRepo([]),
     makeRepo([]),
     inert,
-    inert,
+    messaging,
     missionsStub,
     inert,
     inert,
     noopLog,
   );
-  return { runner, recorded, stepRepo, missionRepo };
+  return { runner, recorded, stepRepo, missionRepo, posted };
 }
 
 // ── 1. 재시도 fencing ────────────────────────────────────────────────────────
@@ -298,6 +334,12 @@ test('progress 보고는 매 호출마다 last_heartbeat_at 을 갱신한다', a
 
 // ── 3. 리퍼: heartbeat 기준선 + needs_recovery ───────────────────────────────
 
+/**
+ * 리퍼는 이제 만료를 보자마자 죽이지 않고 `reconcileStaleLease` 한 곳으로 넘긴다
+ * (리뷰 라운드1 P0-1). 그 안에서 관측 → 재연결 요청 → 유예 → 자동 재디스패치가
+ * 일어나므로, 리퍼 단위 테스트는 "언제 reconcile 을 부르는가"만 검증하고 그 안의
+ * 판정은 아래 실제 runner 를 태우는 테스트가 검증한다.
+ */
 function makeReaper({ missions, steps, runner }) {
   const missionRepo = makeRepo(missions);
   const stepRepo = makeRepo(steps);
@@ -333,13 +375,14 @@ test('최근 heartbeat 가 있는 step 은 started_at 이 아무리 오래돼도
     started_at: new Date(now.getTime() - 230 * MIN),
     last_heartbeat_at: new Date(now.getTime() - 1 * MIN),
   });
-  const failed = [];
+  const reconciled = [];
   const { reaper } = makeReaper({
     missions: [mission],
     steps: [step],
     runner: {
-      async failStepExternally(id, reason) {
-        failed.push({ id, reason });
+      async reconcileStaleLease(id) {
+        reconciled.push(id);
+        return 'skipped';
       },
       async nudgeOrchestrator() {},
       async failMissionExternally() {
@@ -350,11 +393,11 @@ test('최근 heartbeat 가 있는 step 은 started_at 이 아무리 오래돼도
 
   await reaper.runOnce(now);
 
-  assert.deepEqual(failed, [], '1분 전에 heartbeat 를 보낸 step 은 절대 리핑되면 안 된다');
+  assert.deepEqual(reconciled, [], '1분 전에 heartbeat 를 보낸 step 은 reconcile 대상조차 되면 안 된다');
   assert.equal(step.status, 'running');
 });
 
-test('heartbeat 가 끊긴 step 은 마지막 heartbeat 기준으로 리핑된다', async () => {
+test('heartbeat 가 끊긴 step 은 reconcile 대상으로 넘어간다', async () => {
   const now = new Date('2026-06-01T05:00:00Z');
   const mission = makeMission({ step_timeout_minutes: 90 });
   const step = makeStep({
@@ -363,13 +406,14 @@ test('heartbeat 가 끊긴 step 은 마지막 heartbeat 기준으로 리핑된�
     started_at: new Date(now.getTime() - 390 * MIN),
     last_heartbeat_at: new Date(now.getTime() - 91 * MIN),
   });
-  const failed = [];
+  const reconciled = [];
   const { reaper } = makeReaper({
     missions: [mission],
     steps: [step],
     runner: {
-      async failStepExternally(id, reason) {
-        failed.push({ id, reason });
+      async reconcileStaleLease(id, _now, graceMs, timeoutMinutes) {
+        reconciled.push({ id, graceMs, timeoutMinutes });
+        return 'noticed';
       },
       async nudgeOrchestrator() {},
       async failMissionExternally() {
@@ -379,11 +423,13 @@ test('heartbeat 가 끊긴 step 은 마지막 heartbeat 기준으로 리핑된�
   });
 
   await reaper.runOnce(now);
-  assert.equal(failed.length, 1, 'heartbeat 가 타임아웃보다 오래 끊기면 리핑돼야 한다');
-  assert.equal(failed[0].id, step.id);
+  assert.equal(reconciled.length, 1, 'heartbeat 가 타임아웃보다 오래 끊기면 reconcile 로 넘어가야 한다');
+  assert.equal(reconciled[0].id, step.id);
+  assert.equal(reconciled[0].timeoutMinutes, 90, '미션의 타임아웃 설정이 그대로 전달돼야 한다');
+  assert.ok(reconciled[0].graceMs > 0, '유예 창이 전달돼야 재연결 기회가 생긴다');
 });
 
-test('heartbeat 를 한 번도 안 보낸 step 은 예전과 똑같이 dispatched_at 으로 잡힌다', async () => {
+test('heartbeat 를 한 번도 안 보낸 step 도 dispatched_at 기준으로 reconcile 된다', async () => {
   const now = new Date('2026-06-01T05:00:00Z');
   const mission = makeMission({ step_timeout_minutes: 90 });
   const step = makeStep({
@@ -392,13 +438,14 @@ test('heartbeat 를 한 번도 안 보낸 step 은 예전과 똑같이 dispatche
     started_at: null,
     last_heartbeat_at: null,
   });
-  const failed = [];
+  const reconciled = [];
   const { reaper } = makeReaper({
     missions: [mission],
     steps: [step],
     runner: {
-      async failStepExternally(id) {
-        failed.push(id);
+      async reconcileStaleLease(id) {
+        reconciled.push(id);
+        return 'noticed';
       },
       async nudgeOrchestrator() {},
       async failMissionExternally() {
@@ -408,7 +455,39 @@ test('heartbeat 를 한 번도 안 보낸 step 은 예전과 똑같이 dispatche
   });
 
   await reaper.runOnce(now);
-  assert.deepEqual(failed, [step.id], '디스패치 직후 죽은 step 을 놓치면 기존 안전망이 후퇴한다');
+  assert.deepEqual(reconciled, [step.id], '디스패치 직후 죽은 step 을 놓치면 기존 안전망이 후퇴한다');
+});
+
+test('유예 중인 step 은 타임아웃 창 안이어도 재평가된다', async () => {
+  // 유예 만료 판정은 runner 안에 있으므로, 리퍼가 "아직 타임아웃 창 안"이라며
+  // 건너뛰어 버리면 유예가 영영 만료되지 않아 복구가 멈춘다.
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 90 });
+  const step = makeStep({
+    status: 'running',
+    dispatched_at: new Date(now.getTime() - 10 * MIN),
+    started_at: new Date(now.getTime() - 10 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 1 * MIN),
+    lease_stale_since: new Date(now.getTime() - 9 * MIN),
+  });
+  const reconciled = [];
+  const { reaper } = makeReaper({
+    missions: [mission],
+    steps: [step],
+    runner: {
+      async reconcileStaleLease(id) {
+        reconciled.push(id);
+        return 'skipped';
+      },
+      async nudgeOrchestrator() {},
+      async failMissionExternally() {
+        return false;
+      },
+    },
+  });
+
+  await reaper.runOnce(now);
+  assert.deepEqual(reconciled, [step.id], '유예 중 step 을 건너뛰면 유예가 만료되지 않아 복구가 멈춘다');
 });
 
 test("retry_policy='manual' step 은 lease 만료 시 needs_recovery 로 간다", async () => {
@@ -487,4 +566,281 @@ test('needs_recovery step 은 dispatchable 도 waiting 도 아니고 terminal �
     'needs_recovery 는 하류를 오염시켜야 한다 — 아니면 하류가 영원히 pending 으로 남는다',
   );
   assert.ok(!progress.dispatchable.includes('verify'), '오염된 하류도 디스패치되면 안 된다');
+});
+
+// ── 5. lease 유예 · 재연결 · 자동 재디스패치 (리뷰 라운드1 P0-1) ─────────────
+//
+// 이전 라운드는 만료를 보자마자 step 을 죽였다 — 요구된 "재연결 · 상태조회 · 유예 후
+// 새 attempt 재디스패치"가 통째로 없었고, 복구는 orchestrator 가 손으로 retry 를
+// 부를 때까지 일어나지 않았다. 아래는 실제 `reconcileStaleLease` 를 그대로 구동한다.
+
+const GRACE = 5 * MIN;
+
+test('lease 만료를 처음 보면 죽이지 않고 유예에 넣은 뒤 재연결을 요청한다', async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    dispatched_at: new Date(now.getTime() - 60 * MIN),
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+  });
+  const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  const outcome = await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+
+  assert.equal(outcome, 'noticed');
+  assert.equal(stepRepo.rows[0].status, 'running', '최초 관측에서 step 을 죽이면 재연결 기회가 사라진다');
+  assert.ok(stepRepo.rows[0].lease_stale_since, '유예 창의 시작점이 기록돼야 한다');
+  const stale = recorded.filter((e) => e.type === 'step_lease_stale');
+  assert.equal(stale.length, 1, '관측이 trace 에 남아야 사후에 복구 과정을 재구성할 수 있다');
+  assert.equal(typeof stale[0].data.assignee_online, 'boolean', '작업자 상태조회 결과가 함께 남아야 한다');
+});
+
+test('유예 안에 heartbeat 가 돌아오면 lease 가 되살아난다', async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+    lease_stale_since: new Date(now.getTime() - 1 * MIN),
+  });
+  const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  // 작업자가 재연결 요청을 읽고 응답했다.
+  await runner.reportProgress(step.id, 'agent-member', '아직 살아있음', 'lease-attempt-1');
+
+  assert.equal(stepRepo.rows[0].lease_stale_since, null, 'heartbeat 는 유예를 해제해야 한다');
+  assert.ok(
+    recorded.some((e) => e.type === 'step_lease_recovered'),
+    '재연결 성공이 trace 에 남아야 "왜 안 죽었는지"를 설명할 수 있다',
+  );
+
+  // 되살아났으므로 이어지는 스윕은 아무것도 하지 않는다.
+  const outcome = await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+  assert.equal(outcome, 'skipped');
+  assert.equal(stepRepo.rows[0].status, 'running');
+});
+
+test('유예가 지나면 새 attempt 로 자동 재디스패치된다', async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    attempt: 1,
+    max_attempts: 3,
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+    lease_stale_since: new Date(now.getTime() - 10 * MIN),
+    lease_token: 'lease-attempt-1',
+  });
+  const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  const outcome = await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+
+  assert.equal(
+    outcome,
+    'redispatched',
+    // 실패 시 원인을 바로 읽을 수 있게 사유를 함께 싣는다 — dispatch 실패는 조용히
+    // 'terminal' 로만 나타나서 그냥 보면 판정 로직 문제와 구분되지 않는다.
+    `유예까지 지났으면 orchestrator 를 기다리지 말고 스스로 다시 띄워야 한다 (사유: ${stepRepo.rows[0].result_summary})`,
+  );
+  const after = stepRepo.rows[0];
+  assert.equal(after.attempt, 2, '새 attempt 로 올라가야 한다');
+  assert.notEqual(after.lease_token, 'lease-attempt-1', '새 lease 를 발급해 이전 attempt 의 지각 결과를 차단해야 한다');
+  assert.equal(after.lease_stale_since, null, '재디스패치 후 유예 상태는 초기화돼야 한다');
+  assert.equal(after.last_heartbeat_at, null, '죽은 attempt 의 heartbeat 를 물려받으면 새 attempt 의 시계가 어긋난다');
+  assert.ok(recorded.some((e) => e.type === 'step_auto_redispatched'));
+});
+
+test("유예가 지나도 retry_policy='manual' 이면 자동 재실행 대신 needs_recovery 로 간다", async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    retry_policy: 'manual',
+    attempt: 1,
+    max_attempts: 3,
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+    lease_stale_since: new Date(now.getTime() - 10 * MIN),
+  });
+  const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  const outcome = await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+
+  assert.equal(outcome, 'terminal');
+  assert.equal(stepRepo.rows[0].status, 'needs_recovery', '비멱등 작업을 자동 재실행하면 이 기능의 목적이 무너진다');
+  assert.equal(stepRepo.rows[0].attempt, 1, '재디스패치가 없었으므로 attempt 도 오르면 안 된다');
+  assert.match(stepRepo.rows[0].recovery_reason, /manual/i);
+});
+
+test('재시도 예산을 다 쓴 step 은 자동 재디스패치 대신 failed 로 확정된다', async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    attempt: 3,
+    max_attempts: 3,
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+    lease_stale_since: new Date(now.getTime() - 10 * MIN),
+  });
+  const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  const outcome = await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+
+  assert.equal(outcome, 'terminal');
+  assert.equal(stepRepo.rows[0].status, 'failed');
+  assert.equal(stepRepo.rows[0].attempt, 3, '예산을 넘겨 다시 띄우면 안 된다');
+  assert.match(stepRepo.rows[0].result_summary, /3/, '예산 소진 사실이 사유에 드러나야 한다');
+});
+
+// ── 6. checkpoint (리뷰 라운드1 P0-2) ────────────────────────────────────────
+
+test('progress 의 checkpoint 는 영속화되고 이후 호출이 없다고 지워지지 않는다', async () => {
+  const mission = makeMission();
+  const step = makeStep();
+  const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  await runner.reportProgress(step.id, 'agent-member', '1단계 끝', 'lease-attempt-1', {
+    stage: 'migrated',
+    processed: 120,
+  });
+  assert.deepEqual(stepRepo.rows[0].checkpoint, { stage: 'migrated', processed: 120 });
+  assert.ok(stepRepo.rows[0].checkpoint_at, '저장 시각이 있어야 오래된 체크포인트를 판별할 수 있다');
+  assert.ok(recorded.some((e) => e.type === 'step_checkpoint'), '각 저장 시점이 append-only 로 남아야 한다');
+
+  // checkpoint 없는 heartbeat 가 기존 값을 날리면 재개 근거가 사라진다.
+  await runner.reportProgress(step.id, 'agent-member', '계속 진행 중', 'lease-attempt-1');
+  assert.deepEqual(
+    stepRepo.rows[0].checkpoint,
+    { stage: 'migrated', processed: 120 },
+    'checkpoint 를 안 보낸 heartbeat 는 "변경 없음"이어야 한다',
+  );
+
+  // 새 값은 덮어쓴다(last-writer-wins).
+  await runner.reportProgress(step.id, 'agent-member', '2단계 끝', 'lease-attempt-1', { stage: 'verified' });
+  assert.deepEqual(stepRepo.rows[0].checkpoint, { stage: 'verified' });
+});
+
+test('자동 재디스패치는 checkpoint 를 보존해 새 attempt 가 이어서 하게 한다', async () => {
+  const now = new Date('2026-06-01T05:00:00Z');
+  const mission = makeMission({ step_timeout_minutes: 30 });
+  const step = makeStep({
+    status: 'running',
+    attempt: 1,
+    max_attempts: 3,
+    checkpoint: { stage: 'half-done', next: 'write the report' },
+    checkpoint_at: new Date(now.getTime() - 35 * MIN),
+    started_at: new Date(now.getTime() - 60 * MIN),
+    last_heartbeat_at: new Date(now.getTime() - 40 * MIN),
+    lease_stale_since: new Date(now.getTime() - 10 * MIN),
+  });
+  const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
+
+  await runner.reconcileStaleLease(step.id, now, GRACE, 30);
+
+  assert.deepEqual(
+    stepRepo.rows[0].checkpoint,
+    { stage: 'half-done', next: 'write the report' },
+    'checkpoint 를 지우면 자동 재디스패치가 "처음부터 다시"와 같아져 재개가 성립하지 않는다',
+  );
+});
+
+// ── 7. 상류 복구 시 하류 자동차단 해제 (리뷰 라운드1 P1-4) ───────────────────
+
+test('상류를 retry 하면 자동 차단됐던 하류가 다시 실행 가능해진다', async () => {
+  const mission = makeMission();
+  const upstream = makeStep({
+    id: 's-up',
+    step_key: 'deploy',
+    status: 'needs_recovery',
+    retry_policy: 'manual',
+    recovery_reason: '비멱등이라 자동 재실행 안 함',
+    attempt: 1,
+    max_attempts: 3,
+  });
+  const downstream = makeStep({
+    id: 's-down',
+    step_key: 'verify',
+    status: 'blocked',
+    auto_blocked: true,
+    depends_on: ['deploy'],
+    result_summary: '[auto-blocked] an upstream step this work depends on did not succeed',
+  });
+  const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [upstream, downstream] });
+
+  await runner.updateStep(upstream.id, 'agent-orch', { action: 'retry' });
+
+  const after = stepRepo.rows.find((s) => s.id === 's-down');
+  assert.notEqual(
+    after.status,
+    'blocked',
+    '상류를 되살려도 하류가 blocked 로 남으면 미션이 영영 완료되지 않는다 — MCP 안내문이 약속한 복구가 거짓이 된다',
+  );
+  assert.equal(after.auto_blocked, false, '자동 차단 표시도 함께 풀려야 다음 실패에서 올바르게 다시 걸린다');
+  assert.equal(after.result_summary, '', '자동 차단이 남긴 안내문은 지워져야 한다');
+  assert.ok(recorded.some((e) => e.type === 'step_unblocked'));
+});
+
+test('작업자가 스스로 보고한 blocked 는 상류가 복구돼도 건드리지 않는다', async () => {
+  // 자동 차단과 사람/에이전트의 "나는 할 수 없다" 판정은 다른 것이다. 후자를 엔진이
+  // 임의로 되살리면 막힌 이유가 사라지지 않은 채 다시 디스패치된다.
+  const mission = makeMission();
+  const upstream = makeStep({ id: 's-up', step_key: 'deploy', status: 'failed', attempt: 1, max_attempts: 3 });
+  const selfBlocked = makeStep({
+    id: 's-down',
+    step_key: 'verify',
+    status: 'blocked',
+    auto_blocked: false,
+    depends_on: ['deploy'],
+    result_summary: '접근 권한이 없어 진행할 수 없습니다',
+  });
+  const { runner, stepRepo } = makeRunner({ mission, steps: [upstream, selfBlocked] });
+
+  await runner.updateStep(upstream.id, 'agent-orch', { action: 'retry' });
+
+  const after = stepRepo.rows.find((s) => s.id === 's-down');
+  assert.equal(after.status, 'blocked', '작업자가 선언한 차단을 엔진이 임의로 풀면 안 된다');
+  assert.equal(after.result_summary, '접근 권한이 없어 진행할 수 없습니다', '작업자가 쓴 사유는 보존돼야 한다');
+});
+
+// ── 8. graph 쌍둥이 판정기도 같은 계약을 지켜야 한다 ────────────────────────
+//
+// 라운드1 에서 `computePlanProgress`(wave) 를 고쳤는데, 그래프 모드에는 **별도 판정기**
+// (`computeGraphProgress`)가 있고 거기에도 상태 목록이 리터럴로 복제돼 있었다. 그래서
+// 그래프 미션에서는 needs_recovery 가 여전히 dispatchable 로 흘러 복구 대기 step 이
+// 즉시 재디스패치됐다 — 리뷰의 P1-4 요청(wave/graph 양쪽 production 경로 테스트)이
+// 그 두 번째 사본을 드러냈다. 두 판정기를 나란히 고정한다.
+
+test('graph 판정기도 needs_recovery 를 terminal 로 보고 dispatchable 로 흘리지 않는다', async () => {
+  const { computeGraphProgress } = await import('../dist/modules/orchestration/orchestration-graph.js');
+
+  const spec = {
+    version: 1,
+    nodes: [
+      { key: 'deploy', kind: 'task', join: 'all', max_visits: 1 },
+      { key: 'verify', kind: 'task', join: 'all', max_visits: 1 },
+    ],
+    edges: [{ from: 'deploy', to: 'verify', kind: 'sequence' }],
+    max_total_visits: 10,
+  };
+  const progress = computeGraphProgress(spec, [
+    { key: 'deploy', status: 'needs_recovery', visit: 1, verdict: '' },
+    { key: 'verify', status: 'pending', visit: 0, verdict: '' },
+  ]);
+
+  assert.ok(
+    !progress.dispatchable.includes('deploy'),
+    'graph 판정기가 needs_recovery 를 dispatchable 로 보면 그래프 미션에서 비멱등 작업이 자동 재실행된다',
+  );
+  assert.ok(progress.failed.includes('deploy'), 'terminal 로 집계돼야 미션이 완료로 오인되지 않는다');
+  assert.ok(
+    progress.newlyBlocked.includes('verify'),
+    '복구 대기 상류의 하류는 blocked 여야 한다 — waiting 으로 남으면 미션이 멈춘 것이 드러나지 않는다',
+  );
+  assert.ok(!progress.dispatchable.includes('verify'));
+  assert.equal(progress.allTerminal, false, '하류가 남아 있으므로 미션은 아직 끝나지 않았다');
 });

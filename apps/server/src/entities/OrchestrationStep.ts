@@ -149,6 +149,45 @@ export class OrchestrationStep {
   @Column({ type: 'text', default: '' })
   recovery_reason: string;
 
+  /**
+   * 작업자가 남긴 **재개 가능한** 진행 상태(티켓 4d065f82, 리뷰 라운드1 P0-2).
+   *
+   * timeline 의 progress 메시지와는 다른 축이다: 그쪽은 사람이 읽는 500자 서술이라
+   * 재시작한 작업자가 "어디서부터 이어서 하면 되는지"를 프로그램적으로 복원할 수 없다.
+   * 이 컬럼은 작업자가 스스로 정의한 구조화 상태를 그대로 담고, lease 가 만료돼 새
+   * attempt 로 재디스패치될 때 **work order 에 실려 나간다** — 그래야 재개가 처음부터
+   * 다시 하는 것과 달라진다.
+   *
+   * 마지막 값만 보관한다(last-writer-wins). 이력이 필요하면 timeline 의
+   * `step_checkpoint` 이벤트가 각 저장 시점을 append-only 로 남긴다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  checkpoint: Record<string, any> | null;
+
+  @Column({ type: Date, nullable: true, default: null })
+  checkpoint_at: Date | null;
+
+  /**
+   * lease 가 만료된 것으로 처음 관측된 시각 — 유예(grace) 창의 시작점이다.
+   * null = 정상(생존 신호가 시간 안에 들어오고 있음).
+   *
+   * 리퍼는 만료를 보자마자 step 을 죽이지 않는다. 먼저 이 값을 찍고 작업자에게
+   * 재연결/상태보고를 요청한 뒤, 유예 안에 heartbeat 가 들어오면 lease 를 그대로
+   * 되살린다. 유예까지 지나야 새 attempt 로 재디스패치한다.
+   */
+  @Column({ type: Date, nullable: true, default: null })
+  lease_stale_since: Date | null;
+
+  /**
+   * 이 step 이 **상류 실패 때문에 엔진이 자동으로** blocked 로 만든 것인지.
+   *
+   * 작업자가 스스로 "막혔다"고 보고한 blocked 와 반드시 구분해야 한다: 상류가 복구되면
+   * 전자는 다시 실행 가능해져야 하고, 후자는 사람이 판단하기 전까지 그대로 둬야 한다.
+   * 이 플래그가 없으면 둘을 가를 방법이 `result_summary` 문자열 검사뿐이다.
+   */
+  @Column({ type: 'boolean', default: false })
+  auto_blocked: boolean;
+
   // ── 그래프 실행 상태(티켓 1ca9e49b) ────────────────────────────────────────
 
   /**

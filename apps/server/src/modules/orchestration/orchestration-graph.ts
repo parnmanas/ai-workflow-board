@@ -29,7 +29,12 @@
  *    거부된다"가 이 규칙이다.
  */
 
-import { DEPENDENCY_SATISFYING_STATUSES, STEP_KEY_PATTERN, computePlanProgress } from './orchestration.constants';
+import {
+  DEPENDENCY_SATISFYING_STATUSES,
+  STEP_KEY_PATTERN,
+  TERMINAL_STEP_STATUSES,
+  computePlanProgress,
+} from './orchestration.constants';
 
 // ── 버전 ─────────────────────────────────────────────────────────────────────
 
@@ -468,8 +473,12 @@ export interface EdgeEvaluation {
   reason: string;
 }
 
+// 상태 목록을 여기서 다시 나열하지 않고 단일 출처를 참조한다(티켓 4d065f82, 리뷰 라운드1 P1-4).
+// 리터럴로 복제해 두었더니 `needs_recovery` 를 추가했을 때 이 사본만 갱신되지 않아,
+// 그래프 모드에서 복구 대기 상류가 "아직 안 끝난 것"으로 읽혀 하류가 영원히 waiting 에
+// 머물렀다 — wave 쪽에서 이미 한 번 겪은 것과 똑같은 실패를 그래프 쌍둥이가 반복했다.
 const isTerminal = (status: string): boolean =>
-  ['done', 'failed', 'blocked', 'skipped', 'cancelled'].includes(status);
+  (TERMINAL_STEP_STATUSES as readonly string[]).includes(status);
 
 const satisfies = (status: string): boolean =>
   (DEPENDENCY_SATISFYING_STATUSES as readonly string[]).includes(status);
@@ -592,7 +601,10 @@ export function computeGraphProgress(spec: GraphSpec, states: GraphNodeState[]):
       out.done.push(node.key);
       continue;
     }
-    if (status === 'failed' || status === 'blocked' || status === 'cancelled') {
+    // 여기도 같은 이유로 단일 출처를 쓴다 — 목록에 빠진 상태는 아래 "pending / ready"
+    // 분기로 흘러 **dispatchable 로 집계**되므로, 자동 재실행을 금지하려고 만든
+    // `needs_recovery` 가 오히려 즉시 재디스패치를 부른다(실제로 그래프 모드에서 재현됨).
+    if ((TERMINAL_STEP_STATUSES as readonly string[]).includes(status) && status !== 'done' && status !== 'skipped') {
       out.failed.push(node.key);
       continue;
     }

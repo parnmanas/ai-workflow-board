@@ -346,6 +346,7 @@ export default function MissionDetailPage() {
           <div style={{ height: 420, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
             <MissionConversationPanel
               missionId={mission.id}
+              workspaceId={wsId}
               roomId={mission.room_id}
               events={mission.events}
               live={isLive}

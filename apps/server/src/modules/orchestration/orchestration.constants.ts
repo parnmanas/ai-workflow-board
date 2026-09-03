@@ -108,6 +108,16 @@ export const ORCHESTRATION_EVENT_TYPES = [
   // fencing 으로 거부된 순간. 후자는 "왜 내 결과가 반영 안 됐나"를 설명하는 유일한 근거다.
   'step_needs_recovery',
   'step_lease_rejected',
+  // 복구 reconciliation(리뷰 라운드1 P0-1) — lease 만료 관측 → 유예 → 재연결 성공
+  // 또는 새 attempt 자동 재디스패치. 각 단계가 왜 그렇게 됐는지 사후 재구성 가능해야 한다.
+  'step_lease_stale',
+  'step_lease_recovered',
+  'step_auto_redispatched',
+  // 재개 가능한 체크포인트 저장(리뷰 라운드1 P0-2) — 마지막 값은 step 에 있고,
+  // 각 저장 시점은 여기 append-only 로 남는다.
+  'step_checkpoint',
+  // 상류 복구로 자동 차단이 풀린 하류(리뷰 라운드1 P1-4).
+  'step_unblocked',
   'orchestrator_woken',
   'mission_paused',
   'mission_resumed',

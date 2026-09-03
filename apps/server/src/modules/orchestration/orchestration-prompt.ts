@@ -242,6 +242,22 @@ export function renderStepPrompt(args: {
     );
   }
 
+  // 복구 재개(티켓 4d065f82, 리뷰 라운드1 P0-2) — 이전 attempt 가 남긴 체크포인트를
+  // 그대로 실어 보낸다. 이게 없으면 자동 재디스패치는 "처음부터 다시"와 같아져서
+  // "재시작 후 이어서 재개"라는 요구가 성립하지 않는다.
+  if (step.checkpoint) {
+    lines.push(
+      section(
+        'Resume from this checkpoint',
+        `A previous attempt of this step saved the state below before it went silent. Continue from it ` +
+          `instead of starting over, and verify anything you did not do yourself:\n\n` +
+          '```json\n' +
+          JSON.stringify(step.checkpoint, null, 2).slice(0, 4000) +
+          '\n```',
+      ),
+    );
+  }
+
   if (args.isRetry && step.result_summary) {
     lines.push(
       section(
@@ -309,6 +325,39 @@ export function renderStepPrompt(args: {
   );
 
   return lines.filter((l) => l !== '').join('\n');
+}
+
+/**
+ * lease 가 만료된 것으로 관측됐을 때 그 attempt 의 방에 포스트하는 재연결 요청
+ * (티켓 4d065f82, 리뷰 라운드1 P0-1).
+ *
+ * 아직 살아 있는 작업자라면 이걸 읽고 heartbeat 하나만 보내도 lease 가 되살아난다 —
+ * 그래서 "죽었다고 판정하기 전에 물어본다"는 유예 단계가 실제 동작을 갖는다.
+ */
+export function renderLeaseRecoveryNudge(args: {
+  step: OrchestrationStep;
+  silentMs: number;
+  graceMs: number;
+}): string {
+  const { step, silentMs, graceMs } = args;
+  const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
+  return [
+    `## Are you still working on "${step.title}"?`,
+    ``,
+    `We have not heard from you for ${minutes(silentMs)} minutes, so this step's lease is treated as stale.`,
+    ``,
+    `**If you are still working**, call \`mcp__awb__report_orchestration_progress\` right now with:`,
+    `- \`step_id\`: \`${step.id}\``,
+    ...(step.lease_token ? [`- \`lease_token\`: \`${step.lease_token}\``] : []),
+    `- \`message\`: what you are doing`,
+    `- \`checkpoint\` (recommended): the state a fresh attempt would need to resume from where you are`,
+    ``,
+    `That single call renews the lease and nothing else happens.`,
+    ``,
+    `**If you do not answer within ${minutes(graceMs)} minutes**, the step is re-dispatched as a new attempt`,
+    `and anything you report afterwards is refused — your lease token stops being valid the moment the new`,
+    `attempt goes out. So do not keep working silently: either check in, or stop.`,
+  ].join('\n');
 }
 
 /**
