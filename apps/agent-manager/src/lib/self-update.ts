@@ -446,6 +446,18 @@ export interface SelfUpdateOpts {
    */
   approvalSource?: string;
   /**
+   * 이 설치를 **이 정확한 버전**으로 고정한다 (ticket 9408b308 — 승인 단위가
+   * (호스트 × 대상 버전)이라는 계약을 구조로 지키기 위한 것).
+   *
+   * 정책 경로가 "승인된 버전이라서" 개시할 때 넘긴다. 이걸 넘기지 않으면 설치는
+   * 채널(`latest` 등)을 **다시** 해석하는데, 승인 판정과 설치 사이에 dist-tag 가
+   * 움직이면 승인한 적 없는 버전이 설치된다 — 승인을 버전에 묶은 의미가 사라진다.
+   *
+   * 복귀 핀(rollback pin)은 이보다 우선한다: 자동 복구가 건 안전 핀이 운영자의
+   * 승인보다 세다(같은 이유로 `off` 는 이 둘 모두보다 앞에서 끊는다).
+   */
+  pinnedTargetVersion?: string;
+  /**
    * 설치 / provenance / 재기동 / 진입점 프로브를 주입 가능한 포트로 뺀 것
    * (리뷰 지적 3). 복귀 경로는 실제 npm 레지스트리와 프로세스 종료를 요구해
    * 통합 테스트로 분기를 태울 수 없다. 프로덕션 호출부는 아무것도 넘기지
@@ -930,6 +942,11 @@ export class UpdateChecker {
       await this.#runUpdate({
         log: this.#log,
         stateDir: this.#stateDir,
+        // 승인으로 개시하는 경우에만 설치를 그 버전으로 고정한다. `auto` 는
+        // 애초에 승인을 보지 않으므로 채널 의미(항상 최신)를 그대로 둔다.
+        ...(decision.reason === 'approved' && decision.approvalVersion
+          ? { pinnedTargetVersion: decision.approvalVersion }
+          : {}),
         ...(this.#countInFlightSessions ? { countInFlightSessions: this.#countInFlightSessions } : {}),
       });
     } catch (err: any) {
@@ -1272,12 +1289,18 @@ async function runSelfUpdateLocked(
   // 아래 provenance 조회와 already-latest 스킵이 이 채널을 그대로 쓰므로,
   // 되돌린 뒤에는 같은 불량 버전이 다시 해석될 수 없다(루프 부재).
   const pin = readUpdatePin(opts.stateDir);
-  const channel = resolveEffectiveUpdateChannel(rawChannel, pin);
+  let channel = resolveEffectiveUpdateChannel(rawChannel, pin);
   if (pin) {
     out(
       `Self-update: channel pinned to v${pin.version} by rollback (${pin.reason || 'no reason recorded'}) — ` +
         `delete ${updatePinPath(opts.stateDir)} to release`,
     );
+  } else if (opts.pinnedTargetVersion) {
+    // ticket 9408b308: 승인된 개시는 승인된 그 버전만 설치한다. 채널을 다시
+    // 해석하면 승인 판정과 설치 사이에 움직인 dist-tag 가 승인 없는 버전을
+    // 밀어 넣을 수 있다. 복귀 핀이 있으면 그쪽이 이기므로 else 다.
+    channel = opts.pinnedTargetVersion;
+    out(`Self-update: install pinned to the approved version v${opts.pinnedTargetVersion}`);
   }
   if (classifyInstallMode(detectNpmGlobalRoot()) !== 'npm-global') {
     const summary = 'self-update skipped: npm is not reachable (upgrade this build manually)';

@@ -26,6 +26,8 @@ import {
   UpdateChecker,
   evaluateUpdatePolicyGate,
   resolveUpdatePolicy,
+  runSelfUpdate,
+  _resetSelfUpdateInFlightForTests,
   UPDATE_POLICY_ENV,
   UPDATE_CHANNEL_OFF,
 } from '../dist/lib/self-update.js';
@@ -33,6 +35,7 @@ import {
   readUpdateApproval,
   writeUpdateApproval,
   updateApprovalPath,
+  writeUpdatePin,
 } from '../dist/lib/self-update-rollback.js';
 
 /** 창이 확실히 열려 있는/닫혀 있는 시각. 창 판정은 호스트 로컬 시각을 쓴다. */
@@ -597,4 +600,112 @@ test('off 는 주기 tick 이 아예 돌지 않으므로 start() 가 판정 줄�
     `start() 도 Self-update 판정 줄을 남겨야 한다 (실제: ${JSON.stringify(logs)})`,
   );
   assert.equal(starts.length, 0);
+});
+
+// ─── 승인한 버전 ≡ 설치되는 버전 ────────────────────────────────────────────
+//
+// 리뷰 P1(검증≡요청)을 고치면서 같은 결함 계열의 잔여 구멍이 드러났다: 승인으로
+// 개시할 때 설치 경로가 채널(`latest`)을 **다시** 해석하므로, 승인 판정과 설치
+// 사이에 dist-tag 가 움직이면 승인한 적 없는 버전이 설치된다. 그러면 "승인은
+// (호스트 × 버전) 1회성"(완료 기준 6)이 실질적으로 무너진다.
+//
+// 아래 테스트는 `noReExec: true` 로 **설치 직전**에서 멈춘다 — 실제 설치나 분리
+// 헬퍼를 띄우지 않으므로 POSIX/Windows 양축에서 그대로 돈다(그래서 skip 이 없다).
+
+/** 설치/증명/재기동/프로브를 전부 가짜로 물린 포트. 증명 버전 = 요청한 채널. */
+function pinPorts() {
+  const calls = { provenance: [], install: [] };
+  const ports = {
+    install: async (spec) => { calls.install.push(spec); return { ok: true, detail: '' }; },
+    verifyProvenance: async (channel) => {
+      calls.provenance.push(channel);
+      return {
+        ok: true,
+        version: channel === 'latest' ? '99.0.0' : channel,
+        reason: `fake ok for ${channel}`,
+      };
+    },
+    restart: () => {},
+    probe: async () => ({ ok: true, reportedVersion: '99.0.0', detail: 'fake' }),
+  };
+  return { ports, calls };
+}
+
+test('pinnedTargetVersion 없이는 채널을 다시 해석한다 (기존 동작 — 대조군)', async (t) => {
+  const home = tempHome(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = pinPorts();
+  const r = await runSelfUpdate({ stateDir: home, ports, noReExec: true, log: () => {} });
+
+  assert.deepEqual(calls.provenance, ['latest'], '핀이 없으면 채널 그대로 조회한다');
+  assert.match(r.summary, /awb-agent-manager@99\.0\.0/);
+  assert.equal(calls.install.length, 0, 'noReExec 은 설치 직전에서 멈춘다');
+});
+
+test('승인된 개시는 그 버전으로 설치를 고정한다 — 채널이 다시 해석되지 않는다', async (t) => {
+  const home = tempHome(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = pinPorts();
+  const r = await runSelfUpdate({
+    stateDir: home, ports, noReExec: true, log: () => {},
+    pinnedTargetVersion: '98.0.0',
+  });
+
+  assert.deepEqual(
+    calls.provenance,
+    ['98.0.0'],
+    '승인한 버전으로 조회해야 한다 — latest 로 조회하면 그 사이 움직인 태그가 들어온다',
+  );
+  assert.match(r.summary, /awb-agent-manager@98\.0\.0/);
+  assert.doesNotMatch(r.summary, /99\.0\.0/, '승인하지 않은 버전이 설치 spec 에 들어가면 안 된다');
+});
+
+test('복귀 핀은 승인 고정보다 우선한다 — 안전 핀이 승인보다 세다', async (t) => {
+  const home = tempHome(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  writeUpdatePin({ version: '97.0.0', reason: 'boot verification failed', pinnedAtMs: 1 }, home);
+  const { ports, calls } = pinPorts();
+  await runSelfUpdate({
+    stateDir: home, ports, noReExec: true, log: () => {},
+    pinnedTargetVersion: '98.0.0',
+  });
+
+  assert.deepEqual(
+    calls.provenance,
+    ['97.0.0'],
+    '복귀 핀이 걸려 있으면 승인 고정이 그것을 덮어써서는 안 된다',
+  );
+});
+
+test('정책 경로: 승인 개시만 pinnedTargetVersion 을 넘기고, auto 는 넘기지 않는다', async (t) => {
+  const approvedHome = tempHome(t);
+  writeUpdateApproval({ version: '1.7.0', source: 'update_manager', approvedAtMs: 1 }, approvedHome);
+  const approved = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home: approvedHome,
+  });
+  await approved.checker.checkNow();
+  assert.equal(approved.starts.length, 1);
+  assert.equal(
+    approved.starts[0].pinnedTargetVersion,
+    '1.7.0',
+    '승인으로 개시하면 그 버전으로 설치를 고정해야 한다',
+  );
+
+  const autoHome = tempHome(t);
+  const auto = makeChecker(t, {
+    policy: 'auto', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home: autoHome,
+  });
+  await auto.checker.checkNow();
+  assert.equal(auto.starts.length, 1);
+  assert.equal(
+    auto.starts[0].pinnedTargetVersion,
+    undefined,
+    'auto 는 승인을 보지 않으므로 채널 의미(항상 최신)를 그대로 둔다',
+  );
 });
