@@ -1320,7 +1320,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
         </label>
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
-        <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} />
+        <WorkspaceFolderOptions kind="security" state={wf} onChange={patchWf} workspaceId={workspaceId} />
 
         {/* 실패 시 → 티켓 생성 (severity-gated on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
