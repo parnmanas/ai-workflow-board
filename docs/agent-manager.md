@@ -130,6 +130,53 @@ The server validates the same contract as the host. This prevents invalid
 configurations from being stored and protects execution if old or manually
 edited data reaches the host.
 
+### Permission tier → CLI flags (ticket 5851e435)
+
+`runtime_config.permission_mode` (Agent trust) is the **source of truth** for
+execution privilege on every runtime, not just Hermes. The board/workspace
+harness `permission_mode` is a second, older layer; the two are folded into one
+effective policy by `resolveEffectivePermissionPolicy()`
+(`apps/agent-manager/src/lib/permission-policy.ts`), which every dispatch entry
+point shares — ticket, chat, mention, Action/QA run and orchestration all reach
+the CLI through `SubagentManager.spawn` or `BaseSessionManager`, and both
+resolve the policy the same way.
+
+**Precedence**: Agent trust > harness > manager default (`trusted`).
+
+- Agent trust set → it decides the tier. The harness can no longer lower it, so
+  a `trusted` agent never loses its max-privilege flag (and therefore never
+  falls back onto Claude's interactive workspace-trust dialog). Within the same
+  tier the harness still picks the exact CLI mode string.
+- Agent trust unset (legacy agent) → the harness string decides, exactly as
+  before this ticket: unset/unrecognised/`bypassPermissions` → `trusted`,
+  `plan` → `strict`, `acceptEdits`/`auto`/`default`/`dontAsk`/`manual` →
+  `approve`.
+
+| runtime | `trusted` | `approve` | `strict` |
+| --- | --- | --- | --- |
+| `claude`, `deepseek` | `--dangerously-skip-permissions` | `--permission-mode acceptEdits` | `--permission-mode plan` |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write -c approval_policy="never"` | `--sandbox read-only -c approval_policy="never"` |
+| `antigravity` | `--dangerously-skip-permissions` | flag omitted (approximated) | flag omitted (approximated) |
+| `pi` | `--approve` | flag omitted (approximated) | flag omitted (approximated) |
+| `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path | ACP request cancelled |
+
+Each CLI adapter declares how faithfully it can express a tier via
+`permissionCapabilities()`. Anything other than `native` is logged at the spawn
+site rather than silently applied — `antigravity`/`pi` have no per-tier option,
+so `approve`/`strict` are approximated by dropping their auto-approve flag
+(both run non-interactively, so this restricts rather than hangs). Only Hermes
+declares `native_approvals`, so an `approve` tier on a CLI runtime is recorded
+as "no AWB approval bridge, runs in a constrained non-interactive mode".
+
+Pending is never created for a CLI-internal permission/trust dialog. Claude's
+workspace-trust preflight (ticket 48aeab6e) now blocks only when the board
+harness explicitly asked for a non-bypass mode **and** Agent trust did not
+override it to `trusted` — an agent whose trust alone is `approve`/`strict` on
+a board that never configured a harness is not gated.
+
+The effective policy and the spawned argv (prompt bodies folded to a length,
+secret-shaped tokens redacted) are written to the manager log on every spawn.
+
 ## Capability and health reporting
 
 The Runtime Host heartbeat advertises each runtime's protocol, session mode,
