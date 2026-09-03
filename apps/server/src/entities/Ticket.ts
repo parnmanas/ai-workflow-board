@@ -296,6 +296,41 @@ export class Ticket {
   @Column({ type: 'text', default: '' })
   merge_lease_context: string;
 
+  // 이 티켓의 **랜딩 에피소드** 단위 재검증 시도 횟수 (ticket e630b530, 리뷰 2R).
+  //
+  // 원래는 이 카운터가 MergeLease 행 위에 있었는데, 그러면 대기 상한 초과로
+  // fail-open 하며 행이 released 되는 순간 예산이 함께 사라졌다 — 이후
+  // `await_merge_lease` 를 다시 부르면 새 행 + 새 예산이 생겨 "유한하게
+  // 랜딩하거나 명시적으로 실패한다" 는 보장이 무너졌다. lease 행은 경합에 따라
+  // 몇 번이든 생겼다 사라지지만 **랜딩 에피소드는 티켓 하나**이므로, 카운터의
+  // 올바른 수명은 lease 가 아니라 티켓이다.
+  //
+  // 증가 시점: 에이전트가 실제로 진행 허가를 받은 순간(`granted` 또는 lease
+  // 없이 진행하는 `degraded`). `queued` 는 CI 를 돌리지 않고 턴을 끝내므로
+  // 세지 않는다. 보드가 기능을 끈 경우(`board_disabled`)도 세지 않는다 —
+  // 킬 스위치는 기능 도입 이전 동작으로 완전히 되돌린다는 뜻이다.
+  //
+  // 리셋 시점: Merging 을 떠날 때(Done 랜딩 / 바운스 / 다른 컬럼)뿐이다.
+  // 리퍼의 lease 회수나 pend 차단은 같은 에피소드가 계속되는 것이므로 리셋하지
+  // 않는다.
+  @Column({ type: 'int', default: 0 })
+  merge_landing_attempts: number;
+
+  // 이 랜딩 에피소드가 이미 **lease 없이 진행**하기로 확정됐는가 (ticket
+  // e630b530, 리뷰 2R). 대기 상한을 넘겨 fail-open 된 순간 켜진다.
+  //
+  // 왜 sticky 여야 하는가: 이 플래그가 없으면 fail-open 직후 에이전트가
+  // `await_merge_lease` 를 다시 부를 때 스코프가 여전히 붐비므로 **다시
+  // 큐에 들어가** 파킹된다 — 방금 내린 fail-open 결정이 즉시 무효화되고,
+  // "대기 → 상한 → fail-open → 재대기" 가 무한히 돌면서 예산은 한 칸도
+  // 쓰이지 않는다(진행 허가를 받은 적이 없으므로). 에피소드 단위로 붙여야
+  // 매 사이클이 degraded 로 통과하며 예산을 쓰고, 결국 명시적 실패로 닫힌다.
+  //
+  // `merge_landing_attempts` 와 정확히 같은 수명 — Merging 을 떠날 때만
+  // 리셋된다.
+  @Column({ type: 'boolean', default: false })
+  merge_lease_degraded: boolean;
+
   // Soft-archive timestamp for the ticket. When non-null the ticket is
   // considered archived: excluded from board GET / SSE payloads / supervisor
   // re-push / backlog promotion / focus selector by default, mutation paths

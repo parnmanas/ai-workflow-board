@@ -48,7 +48,7 @@ process.env.DB_TYPE = 'sqlite';
 process.env.SQLJS_DB_PATH = path.join(tmpDir, 'merge-lease-test.db');
 process.env.NODE_ENV = 'test';
 
-const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.js'));
+const { buildDataSourceOptions, serializeSqljsTransactions } = await import('file://' + path.join(DIST, 'db.js'));
 const { MergeLease } = await import('file://' + path.join(DIST, 'entities', 'MergeLease.js'));
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Board } = await import('file://' + path.join(DIST, 'entities', 'Board.js'));
@@ -69,6 +69,11 @@ const { DataSource, IsNull } = await import('typeorm');
 const MIN = 60_000;
 
 const ds = new DataSource(buildDataSourceOptions());
+// 프로덕션(AppDataSource / DatabaseModule)과 **동일하게** sql.js 트랜잭션
+// 직렬화 큐를 건다. 이걸 빼면 겹친 `dataSource.transaction()` 이 단일 WASM
+// 커넥션에서 충돌해 프로덕션엔 없는 실패가 테스트에만 나타난다 — 반대로
+// 프로덕션에만 있는 직렬화를 테스트가 못 보게 되는 것도 똑같이 나쁘다.
+serializeSqljsTransactions(ds);
 await ds.initialize(); // synchronize → merge_leases + 부분 UNIQUE 인덱스 생성
 
 const activityStub = { async logActivity() {} };
@@ -163,6 +168,8 @@ async function heldCount() {
 async function clearLeases() {
   await leaseRepo.clear();
   await ticketRepo.update({ pending_merge_lease: true }, { pending_merge_lease: false, merge_lease_context: '' });
+  // 에피소드 예산은 티켓 위에 영속하므로 테스트 간 격리가 필요하다.
+  await ds.query('UPDATE tickets SET merge_landing_attempts = 0, merge_lease_degraded = 0');
   dispatched.length = 0;
 }
 
@@ -382,6 +389,183 @@ test('lease 로 막을 수 없는 외부 push 가 계속 base 를 밀면, 무한
   await setBoardLeaseConfig(null);
 });
 
+// ── 5b. FIFO 공정성 (리뷰 2R 지적 1) ────────────────────────────────────────
+//
+// 안전(스코프당 홀더 1명)은 부분 UNIQUE 인덱스가 담보하지만, **공정성**은
+// 인덱스가 표현할 수 없다. 아래 셋은 인덱스를 통과하면서도 큐를 추월하는
+// 경로들 — 예전 구현은 셋 다 통과했다.
+
+test('★ 뒤쪽 대기자가 스스로 재획득해도 선두를 추월하지 못한다', async () => {
+  await clearLeases();
+  const holder = await makeMergingTicket('fifo-holder');
+  const first = await makeMergingTicket('fifo-1st');
+  const second = await makeMergingTicket('fifo-2nd');
+
+  await svc.acquire(holder.id);
+  const q1 = await svc.acquire(first.id);
+  const q2 = await svc.acquire(second.id);
+  assert.equal(q1.outcome, 'queued');
+  assert.equal(q2.outcome, 'queued');
+
+  // 홀더가 랜딩해 스코프가 비었다. 스윕보다 **뒤쪽 대기자**가 먼저 깨어나
+  // 재획득을 시도하는 상황(리컨사일러 재디스패치 등으로 실제로 일어난다).
+  await svc.release(holder.id, 'landed');
+  const jumped = await svc.acquire(second.id);
+
+  assert.equal(jumped.outcome, 'queued', '2번 대기자가 선두를 추월해 lease 를 가져갔다');
+  assert.equal(await heldCount(), 0, '선두가 아닌 대기자가 홀더가 됐다');
+
+  // 선두는 정상적으로 받는다.
+  const head = await svc.acquire(first.id);
+  assert.equal(head.outcome, 'granted');
+  assert.equal(head.lease_id, q1.lease_id);
+});
+
+test('★ 스코프가 비어 있어도 신규 도착이 기존 큐를 추월하지 못한다', async () => {
+  await clearLeases();
+  const holder = await makeMergingTicket('newcomer-holder');
+  const waiting = await makeMergingTicket('newcomer-existing-waiter');
+
+  await svc.acquire(holder.id);
+  const q = await svc.acquire(waiting.id);
+  assert.equal(q.outcome, 'queued');
+
+  // 홀더 해제 → 스코프가 비었지만 대기자가 남아 있다. 이 순간 **처음 도착한**
+  // 티켓은 예전 구현에서 "홀더 없음 → 곧장 held INSERT" 빠른 경로를 타
+  // 대기열 전체를 뛰어넘었다.
+  await svc.release(holder.id, 'landed');
+  const newcomer = await makeMergingTicket('newcomer-arrives-now');
+  const res = await svc.acquire(newcomer.id);
+
+  assert.equal(res.outcome, 'queued', '신규 도착이 기존 대기열을 추월했다');
+  assert.equal(await heldCount(), 0);
+
+  // 순서대로 기존 대기자가 먼저 받는다.
+  assert.equal((await svc.acquire(waiting.id)).outcome, 'granted');
+  assert.equal((await svc.acquire(newcomer.id)).outcome, 'queued');
+});
+
+test('★ 다중 manager 동시 승격 시도 — 오직 선두 하나만 홀더가 된다', async () => {
+  await clearLeases();
+  const holder = await makeMergingTicket('mm-holder');
+  const waiters = [];
+  for (let i = 0; i < 4; i++) waiters.push(await makeMergingTicket(`mm-w${i}`));
+
+  await svc.acquire(holder.id);
+  const queued = [];
+  for (const w of waiters) queued.push(await svc.acquire(w.id));
+  assert.ok(queued.every((r) => r.outcome === 'queued'));
+
+  // 큐 선두를 queued_at 으로 직접 확인해 기대값을 고정한다.
+  const openRows = await leaseRepo.find({
+    where: { repo_resource_id: RESOURCE_ID, base_branch: 'main', state: 'waiting', released_at: IsNull() },
+    order: { queued_at: 'ASC', id: 'ASC' },
+  });
+  const expectedHead = openRows[0];
+
+  // 스코프를 비운 직후 4개 manager 가 **동시에** 승격을 시도한다.
+  await svc.release(holder.id, 'landed');
+  const results = await Promise.all(waiters.map((w) => svc.acquire(w.id)));
+
+  const granted = results.filter((r) => r.outcome === 'granted');
+  assert.equal(granted.length, 1, `동시 승격에서 granted 가 ${granted.length} 개 — 정확히 1이어야 한다`);
+  assert.equal(await heldCount(), 1);
+  assert.equal(
+    granted[0].lease_id, expectedHead.id,
+    'FIFO 선두가 아닌 대기자가 승격됐다 — 안전(홀더 1명)은 지켜졌지만 공정성이 깨졌다',
+  );
+});
+
+// ── 5c. fail-open 이후에도 유한 종료 (리뷰 2R 지적 2) ───────────────────────
+
+test('★ 붐비는 큐 → 대기 상한 fail-open → main 지속 전진 시에도 명시적 실패로 닫힌다', async () => {
+  // 이 티켓의 완료 기준 중 lease 를 **못 받는** 쪽 경로. 예산이 lease 행 위에
+  // 있으면 fail-open 으로 행이 released 될 때 예산이 사라져 다음 호출이 새
+  // 예산을 받아 무한히 돈다.
+  await clearLeases();
+  await setBoardLeaseConfig('{"max_wait_minutes":10,"max_reverify_attempts":3}');
+
+  const hog = await makeMergingTicket('perma-holder');
+  const victim = await makeMergingTicket('starved-but-bounded');
+
+  // 홀더는 계속 살아 있다(CI 진행 중) — 스코프가 절대 비지 않는 상황.
+  assert.equal((await svc.acquire(hog.id)).outcome, 'granted');
+  await ticketRepo.update({ id: hog.id }, {
+    pending_ci_wait: true,
+    ci_wait_context: JSON.stringify({ owner: 'o', repo: 'r', run_id: '99' }),
+  });
+
+  let baseSha = 'm-0';
+  let externalAdvances = 0;
+  let outcome = null;
+  let proceedCount = 0;
+
+  for (let cycle = 0; cycle < 40; cycle++) {
+    const res = await svc.acquire(victim.id);
+
+    if (res.outcome === 'queued') {
+      // 대기 상한이 지나도록 두면 스윕이 fail-open 으로 풀어준다.
+      await backdate(res.lease_id, { queued_at: new Date(Date.now() - 11 * MIN) });
+      await sweep.sweep();
+      continue;
+    }
+
+    // granted 는 나올 수 없다(홀더가 계속 살아 있음) — degraded 로 진행한다.
+    assert.equal(res.outcome, 'degraded', `예상 밖 결과: ${JSON.stringify(res.outcome)}`);
+    proceedCount++;
+
+    if (res.budget === 'exhausted') { outcome = 'explicit_failure'; break; }
+
+    // lease 없이 CI 를 돌리는 동안 main 이 또 전진해 ff 가 실패한다.
+    baseSha = `m-${++externalAdvances}`;
+  }
+
+  assert.equal(outcome, 'explicit_failure', 'fail-open 이후 무한 루프에 빠졌다 — 유한 종료 보장 상실');
+  assert.equal(proceedCount, 4, `상한 3 + 소진 보고 1 = 4회여야 한다 (실제 ${proceedCount})`);
+
+  // 예산이 lease 행이 아니라 티켓에 살아 있었다는 직접 증거.
+  const t = await ticketRepo.findOne({ where: { id: victim.id } });
+  assert.equal(t.merge_landing_attempts, 4);
+  assert.equal(t.merge_lease_degraded, true, 'fail-open 이 에피소드에 sticky 하지 않았다');
+
+  // 홀더는 끝까지 살아 있어야 한다 — 피해자의 탈출이 홀더를 뺏어선 안 된다.
+  assert.equal(await heldCount(), 1);
+  await setBoardLeaseConfig(null);
+});
+
+test('★ 에피소드가 끝나면(Merging 이탈) 예산과 fail-open 플래그가 리셋된다', async () => {
+  await clearLeases();
+  await setBoardLeaseConfig('{"max_reverify_attempts":2}');
+  const t = await makeMergingTicket('episode-reset');
+
+  assert.equal((await svc.acquire(t.id)).attempt, 1);
+  assert.equal((await svc.acquire(t.id)).attempt, 2);
+  assert.equal((await svc.acquire(t.id)).budget, 'exhausted');
+  await ticketRepo.update({ id: t.id }, { merge_lease_degraded: true });
+
+  // In Progress 로 바운스 = 에피소드 종료.
+  await ds.transaction(async (m) => {
+    const tRepo = m.getRepository(Ticket);
+    await tRepo.update({ id: t.id }, { column_id: PROGRESS_COL_ID });
+    await releaseMergeLeaseForMove(
+      tRepo, t.id, { id: MERGING_COL_ID, kind: 'merging' }, { id: PROGRESS_COL_ID, kind: 'active' },
+    );
+  });
+  const after = await ticketRepo.findOne({ where: { id: t.id } });
+  assert.equal(after.merge_landing_attempts, 0);
+  assert.equal(after.merge_lease_degraded, false);
+
+  // 리퍼의 회수는 에피소드 종료가 아니므로 예산을 되돌리지 않는다.
+  await ticketRepo.update({ id: t.id }, { column_id: MERGING_COL_ID });
+  assert.equal((await svc.acquire(t.id)).attempt, 1);
+  const held = await leaseRepo.findOne({ where: { ticket_id: t.id, state: 'held', released_at: IsNull() } });
+  await backdate(held.id, { last_progress_at: new Date(Date.now() - 60 * MIN), acquired_at: new Date(Date.now() - 60 * MIN) });
+  await sweep.sweep();
+  assert.equal((await ticketRepo.findOne({ where: { id: t.id } })).merge_landing_attempts, 1,
+    '리퍼 회수가 에피소드 예산을 되돌렸다 — 상한이 무한 재시도로 퇴화한다');
+  await setBoardLeaseConfig(null);
+});
+
 // ── 6. liveness / 리퍼 (설계 보정 A) ───────────────────────────────────────
 
 test('무진행 홀더는 회수되고, 그 자리를 대기자가 이어받는다', async () => {
@@ -519,6 +703,50 @@ test('절대 상한(백스톱)은 CI 대기 중이어도 회수한다', async ()
   const row = await leaseRepo.findOne({ where: { id: res.lease_id } });
   assert.equal(row.release_reason, 'reap_max_hold');
   await setBoardLeaseConfig(null);
+});
+
+test('★ 판정과 해제 사이에 진행이 기록되면 리퍼가 회수를 취소한다 (TOCTOU)', async () => {
+  // 리뷰 2R 부가 지적. 판정은 무진행이었는데 그 직후 홀더가 진행을 기록하면
+  // (재획득 · CI 대기 등록) 회수는 취소돼야 한다. 무조건 해제하면 방금 살아난
+  // 홀더의 lease 를 뺏고, 홀더는 그 사실을 모른 채 push 로 진입한다.
+  await clearLeases();
+  const holder = await makeMergingTicket('toctou-holder');
+  const res = await svc.acquire(holder.id);
+  await backdate(res.lease_id, {
+    last_progress_at: new Date(Date.now() - 60 * MIN),
+    acquired_at: new Date(Date.now() - 60 * MIN),
+  });
+
+  // 판정 **직후** 진행이 기록되는 인터리빙을 결정론적으로 만든다 — sleep 이
+  // 아니라 판정 함수 자체에 happens-before 를 심는다.
+  const realJudge = svc.judgeHolder.bind(svc);
+  let interposed = 0;
+  svc.judgeHolder = async (lease, config, now) => {
+    const verdict = await realJudge(lease, config, now);
+    if (verdict !== 'alive' && interposed === 0) {
+      interposed++;
+      // 홀더가 살아나 진행을 기록했다.
+      await leaseRepo.update({ id: lease.id }, { last_progress_at: new Date(), progress_note: 'revived' });
+    }
+    return verdict;
+  };
+  try {
+    const stats = await sweep.sweep();
+    assert.equal(interposed, 1, '인터리빙이 재현되지 않았다 — 테스트가 공허하다');
+    assert.equal(stats.reaped, 0, '진행이 기록됐는데도 리퍼가 lease 를 뺏었다');
+  } finally {
+    svc.judgeHolder = realJudge;
+  }
+
+  const still = await leaseRepo.findOne({ where: { id: res.lease_id } });
+  assert.equal(still.released_at, null);
+  assert.equal(still.state, 'held');
+
+  // 그리고 진행이 없으면 다음 스윕에서 정상적으로 회수된다(가드가 회수 자체를
+  // 막아버리지는 않는다는 비공허성 확인).
+  await backdate(res.lease_id, { last_progress_at: new Date(Date.now() - 60 * MIN) });
+  const stats2 = await sweep.sweep();
+  assert.equal(stats2.reaped, 1);
 });
 
 // ── 7. 이동 ↔ 해제 원자성 (설계 보정 D) ────────────────────────────────────
@@ -718,7 +946,7 @@ test('승격은 됐는데 전달 전에 죽은 경우, 다음 스윕이 전달�
   // 홀더를 해제하고, 대기자를 수동으로 승격만 시켜 "홀더인데 아직 파킹" 상태를
   // 만든다 — 승격과 전달 사이 크래시의 재현.
   await svc.release(holder.id, 'landed');
-  assert.ok(await svc.promoteWaiter(w.lease_id, new Date()));
+  assert.ok(await svc.promoteWaiter({ repoResourceId: RESOURCE_ID, baseBranch: 'main' }, await leaseRepo.findOne({ where: { id: w.lease_id } }), new Date()));
   const mid = await ticketRepo.findOne({ where: { id: waiter.id } });
   assert.equal(mid.pending_merge_lease, true, '재현 전제가 성립하지 않았다');
 

@@ -45,6 +45,12 @@ export async function releaseMergeLeaseForMove(
 
     const reason = (destColumn as any)?.kind === 'terminal' ? 'landed' : 'left_merging';
     await releaseOpenLeaseRows(ticketRepo.manager, ticketId, reason);
+
+    // 랜딩 **에피소드**가 여기서 끝난다 — 재검증 예산도 같은 트랜잭션에서
+    // 리셋한다. 리셋을 `releaseOpenLeaseRows` 안에 넣지 않는 이유: 그 함수는
+    // 리퍼의 회수와 명시적 해제도 쓰는데, 그것들은 에피소드가 **계속되는**
+    // 상황이라 예산을 되돌리면 상한이 무한 재시도로 퇴화한다.
+    await ticketRepo.update({ id: ticketId }, { merge_landing_attempts: 0, merge_lease_degraded: false });
   } catch {
     // 해제 실패로 이동을 롤백하지 않는다. 스윕 리퍼가 백스톱.
   }

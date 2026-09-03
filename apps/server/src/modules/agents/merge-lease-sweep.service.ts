@@ -202,7 +202,7 @@ export class MergeLeaseSweepService implements OnModuleInit, OnModuleDestroy {
       if (!ticket) continue;
 
       if (verdict === 'grant') {
-        if (!(await this.mergeLeaseService.promoteWaiter(waiter.id, now))) {
+        if (!(await this.mergeLeaseService.promoteWaiter(scope, waiter, now))) {
           // 승격 경쟁에서 짐 — 다음 tick 에 다시 본다.
           stats.still_waiting++;
           continue;
@@ -266,7 +266,9 @@ export class MergeLeaseSweepService implements OnModuleInit, OnModuleDestroy {
           '',
           '대기를 무한정 늘리는 대신 **lease 없이** 그대로 진행시킵니다 — 기아를 만들지 않기 위한 의도된 동작입니다.',
           '이 상태의 Merging 은 이 기능 도입 이전과 동일합니다: base 가 전진하면 rebase → CI 재검증 루프를 겪을 수 있습니다.',
-          '`merging_workflow` 의 CI dispatch 절차를 그대로 따르되, 반복이 길어지면 코멘트로 상황을 남기세요.',
+          '`merging_workflow` 의 CI dispatch 절차를 그대로 따르세요. 다만 **재검증 예산은 그대로 적용됩니다** —',
+          'lease 를 못 받았다고 무제한 재시도가 열리지는 않습니다. `await_merge_lease` 가 `budget: "exhausted"` 를 돌려주면',
+          '더 rebase 하지 말고 시도 횟수와 base 를 계속 민 원인을 코멘트로 남긴 뒤 In Progress 로 바운스하거나 pend 하세요.',
         ].join('\n');
 
     const dedupeKey = `merge-lease-${kind}:${ticket.id}:${ctx?.lease_id || 'none'}`;
@@ -276,6 +278,13 @@ export class MergeLeaseSweepService implements OnModuleInit, OnModuleDestroy {
       claimed = await this.mergeLeaseService.claimWaiterDelivery(ticket.id, rawContext, async (manager) => {
         if (failOpenLeaseId) {
           await this.mergeLeaseService.failOpenWithinTx(manager, failOpenLeaseId, 'max_wait_exceeded');
+          // 이 에피소드는 이제 lease 없이 진행한다 — 플래그가 없으면 다음
+          // `await_merge_lease` 가 티켓을 다시 큐에 넣어 방금의 fail-open 을
+          // 무효화하고, 예산을 쓰지 않는 무한 대기 루프가 된다.
+          await manager.getRepository(Ticket).update(
+            { id: ticket.id },
+            { merge_lease_degraded: true },
+          );
         }
         await manager.getRepository(Comment)
           .createQueryBuilder()
