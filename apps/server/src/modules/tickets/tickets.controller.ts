@@ -38,6 +38,7 @@ import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
 import { applyTerminalEnteredAtForMove, deriveRootTicketStatus, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
+import { releaseMergeLeaseForMove } from '../mcp/shared/merge-lease-move';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import {
@@ -1130,6 +1131,7 @@ export class TicketsController {
         colRepoTx.findOne({ where: { id: destColumnId } }),
       ]);
       await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
     });
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);
@@ -1284,6 +1286,7 @@ export class TicketsController {
           colRepoTx.findOne({ where: { id: targetColumnId! } }),
         ]);
         await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+        await releaseMergeLeaseForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
       } else {
         // Demoted to subtask — clear the stamp (subtasks have no column).
         await tRepo.update(ticket.id, { terminal_entered_at: null });
@@ -1437,6 +1440,7 @@ export class TicketsController {
       // Cross-board move can change terminal status — stamp / clear
       // terminal_entered_at the same way same-board moves do.
       await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, targetCol!);
+      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceCol, targetCol!);
     });
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);

@@ -1288,7 +1288,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
         </label>
 
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
-        <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} />
+        <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} workspaceId={workspaceId} />
 
         {/* QA phases override (ticket 90cc22f7) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>

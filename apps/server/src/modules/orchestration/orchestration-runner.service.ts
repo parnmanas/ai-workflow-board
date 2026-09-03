@@ -46,13 +46,19 @@ import { Agent } from '../../entities/Agent';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
+import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import {
+  CONFIRM_FEEDBACK_MAX,
+  CONFIRM_VERDICTS,
+  ConfirmDecision,
+  ConfirmVerdict,
   DEPENDENCY_SATISFYING_STATUSES,
   MAX_ARTIFACTS_PER_STEP,
   MissionCompletionCriterion,
@@ -62,13 +68,16 @@ import {
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
   allCriteriaMet,
+  isAwaitingUser,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
+  normalizeConfirmPolicy,
   postActionApplies,
   validatePlan,
 } from './orchestration.constants';
 import {
+  ConfirmFeedbackContext,
   DependencyContext,
   RosterEntry,
   renderMissionPrompt,
@@ -77,6 +86,7 @@ import {
   renderWakePrompt,
 } from './orchestration-prompt';
 import {
+  GraphNode,
   GraphPatchChange,
   GraphPatchInput,
   GraphSpec,
@@ -86,9 +96,11 @@ import {
   applyGraphPatch,
   carryGraphThroughReplan,
   computeMissionProgress,
+  evaluateEdge,
   firedLoopBacks,
   graphFromWavePlan,
   loopBodyNodes,
+  reachableVia,
   selectOutgoingEdges,
   validateGraphSpec,
 } from './orchestration-graph';
@@ -131,6 +143,16 @@ export class OrchestrationRunnerService {
     private readonly teams: OrchestrationTeamService,
     private readonly actionsService: ActionsService,
     private readonly logService: LogService,
+    // 게이트 대기 사실을 AWB 화면 밖으로 내보낸다(티켓 a78cb566). 발송은 미션 락
+    // 밖에서 배경으로 돈다 — 아래 openConfirmGate 주석 참고.
+    //
+    // **맨 뒤에 둔다.** 이 서비스는 여러 유닛 테스트가 스텁으로 직접 생성하므로,
+    // 중간에 끼우면 그 호출부의 뒤쪽 인자가 통째로 한 칸씩 밀려 `logService` 가
+    // undefined 가 된다(실제로 그렇게 깨졌다). 추가는 항상 뒤로.
+    private readonly confirmNotify: OrchestrationConfirmNotifyService,
+    // 같은 규칙에 따라 그 뒤에 붙인다(티켓 f6a0de0e) — mission 방 self-join 과 발화
+    // 시점 권한 재검사가 이 협력자를 쓴다.
+    private readonly membership: RoomMembershipService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */
@@ -191,7 +213,7 @@ export class OrchestrationRunnerService {
           orchestration_step_id: null,
         }),
       );
-      await this.addRoomParticipants(room.id, orchestrator.id);
+      await this.addRoomParticipants(room.id, orchestrator.id, missionHumanOwner(mission));
 
       mission.room_id = room.id;
       mission.orchestrator_agent_id = orchestrator.id;
@@ -743,13 +765,19 @@ export class OrchestrationRunnerService {
       let graphCarriedNodes: string[] = [];
       if (mission.graph_enabled) {
         const nodeKeys = validated.steps.map((st) => String(st.step_key).trim());
+        // confirm 정책은 **모든** 그래프 경로(신규/템플릿/보존)에 똑같이 적용된다 —
+        // 한 경로만 빠져도 `none` 미션이 그 경로로 confirm 게이트를 얻는다(티켓 5dbe4aa2).
+        const confirmPolicy = normalizeConfirmPolicy(mission.confirm_policy);
         if (input.graph_template) {
-          const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, { nodeKeys });
+          const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, {
+            nodeKeys,
+            confirmPolicy,
+          });
           if ('error' in expanded) throw orchestrationError(400, expanded.error);
           graphSpec = expanded.spec;
           graphReplaced = true;
         } else if (input.graph) {
-          const checked = validateGraphSpec(input.graph, { nodeKeys });
+          const checked = validateGraphSpec(input.graph, { nodeKeys, confirmPolicy });
           if ('error' in checked) throw orchestrationError(400, checked.error);
           graphSpec = checked.spec;
           graphReplaced = true;
@@ -758,7 +786,7 @@ export class OrchestrationRunnerService {
           // 고립 node로 편입한다(티켓 301018c5). 재생성하면 조건 분기·bounded loop·
           // 그동안 적용한 patch가 오류도 경고도 없이 사라진다 — step 병합이 additive인
           // 것과 같은 원칙을 그래프에도 적용한다. 버리고 싶으면 reset_graph로 명시한다.
-          const carried = carryGraphThroughReplan(graphSpec, { nodeKeys });
+          const carried = carryGraphThroughReplan(graphSpec, { nodeKeys, confirmPolicy });
           if ('error' in carried) {
             throw orchestrationError(
               409,
@@ -894,10 +922,31 @@ export class OrchestrationRunnerService {
                 carried: !graphReplaced,
                 carried_nodes: graphCarriedNodes,
                 graph_revision: mission.graph_revision ?? 0,
+                confirm_nodes: graphSpec.nodes.filter((n) => n.kind === 'confirm').length,
               }
             : null,
         },
       });
+
+      // 정책이 확인을 요구하는데 확정된 그래프에 confirm 노드가 하나도 없다(티켓 5dbe4aa2).
+      // **거부하지 않는다** — "몇 개면 key_steps 를 만족하는가" 를 서버가 셀 방법이 없어
+      // 정량 강제는 정상 계획까지 막는 브리틀한 게이트가 되기 때문이다. 대신 운영자가
+      // 타임라인에서 "요청한 확인이 계획에 반영되지 않았다" 를 바로 볼 수 있게 남긴다.
+      const confirmPolicyNow = normalizeConfirmPolicy(mission.confirm_policy);
+      if (
+        graphSpec &&
+        (confirmPolicyNow === 'key_steps' || confirmPolicyNow === 'every_step') &&
+        graphSpec.nodes.every((n) => n.kind !== 'confirm')
+      ) {
+        await this.missions.recordEvent(mission, {
+          type: 'note',
+          message:
+            `This mission's confirm_policy is "${confirmPolicyNow}", but the submitted plan contains no user ` +
+            `confirmation gate. The mission will run to completion without asking anyone.`,
+          actor_type: 'system',
+          data: { confirm_policy: confirmPolicyNow, confirm_nodes: 0, plan_version: nextVersion },
+        });
+      }
 
       const pumped = await this.pump(mission);
       await this.wakeAfterPump(mission, pumped);
@@ -958,6 +1007,7 @@ export class OrchestrationRunnerService {
       const steps = await this.missions.listSteps(mission.id);
       const applied = applyGraphPatch(mission.graph_spec, patch, {
         nodeKeys: steps.map((s) => s.step_key),
+        confirmPolicy: normalizeConfirmPolicy(mission.confirm_policy),
         runtime: {
           nodes: steps.map((s) => ({
             key: s.step_key,
@@ -1503,6 +1553,17 @@ export class OrchestrationRunnerService {
         bodyStep.verdict = '';
         bodyStep.result_summary = '';
         bodyStep.artifacts = null;
+        // `confirm_decision` 은 **일부러 지우지 않는다**(티켓 5dbe4aa2). verdict 와
+        // 정반대 이유다:
+        //   - `verdict` 는 라우팅을 여는 값이라 반드시 지워야 한다. 남으면 사람이 답하기
+        //     전에 하류 edge 가 이미 만족된 것으로 판정된다.
+        //   - `confirm_decision` 은 **왜 되돌아왔는지에 대한 기록**이고, 바로 다음 줄의
+        //     pump 가 재작업 step 을 디스패치할 때 work order 에 실려 나가야 하는 값이다.
+        //     여기서 지우면 사용자의 fail 피드백이 전달되기 **직전에** 사라져 요구사항 5가
+        //     조용히 깨진다(회귀 테스트가 이 순서를 직접 잡는다).
+        // 다음 pass 의 답을 막지 않는 것은 `submitConfirmDecision` 의 멱등 검사가
+        // `prior.visit === step.visit` 일 때만 발동하기 때문이고, 게이트가 실제로 다시
+        // 열릴 때 `openConfirmGate` 가 그 자리에서 null 로 되돌린다.
         bodyStep.room_id = null;
         bodyStep.dispatched_at = null;
         bodyStep.started_at = null;
@@ -1525,6 +1586,363 @@ export class OrchestrationRunnerService {
 
     if (changed.length > 0) await this.stepRepo.save(changed);
     return Array.from(reentered);
+  }
+
+  // ── 사용자 확인 게이트(티켓 5dbe4aa2) ──────────────────────────────────────
+
+  /** 이 step 이 graph 모드의 `confirm` node 라면 그 node 를, 아니면 null. */
+  private confirmNodeOf(mission: OrchestrationMission, stepKey: string): GraphNode | null {
+    if (!mission.graph_spec) return null;
+    const node = mission.graph_spec.nodes.find((n) => n.key === stepKey);
+    return node && node.kind === 'confirm' ? node : null;
+  }
+
+  /**
+   * 이 step 으로 이어지는 confirm node 들의 사용자 판정을 모은다(요구사항 5).
+   *
+   * `depends_on` 을 쓰지 않는 이유가 이 기능의 핵심 결함점이다. 표준 형태
+   * `build → confirm ─(fail, loop_back)→ build` 에서 build 의 `depends_on` 에는 confirm 이
+   * 없다 — 있으면 순환이라 계획 검증에서 거부된다. 그래서 dependency context 만 쓰면
+   * 사용자의 피드백은 재실행되는 build 에 **절대 도달하지 못한다**.
+   *
+   * 대신 그래프에서 "이 step 에 도달할 수 있는 confirm node" 를 loop_back 을 포함해 따라간다:
+   * confirm 이 이 step 으로 (재)진입시킬 수 있다면, 그 판정은 이 step 이 지금 무엇을 해야
+   * 하는지에 대한 근거다. 판정이 없는(아직 안 열렸거나 리셋된) 노드는 자연히 빠진다.
+   */
+  private confirmFeedbackFor(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    allSteps: OrchestrationStep[],
+  ): ConfirmFeedbackContext[] {
+    const spec = mission.graph_spec;
+    if (!spec) return [];
+    const confirmKeys = spec.nodes.filter((n) => n.kind === 'confirm').map((n) => n.key);
+    if (confirmKeys.length === 0) return [];
+
+    const byKey = new Map(allSteps.map((s) => [s.step_key, s]));
+    const out: ConfirmFeedbackContext[] = [];
+    for (const key of confirmKeys) {
+      if (key === step.step_key) continue;
+      const source = byKey.get(key);
+      const decision = source?.confirm_decision;
+      if (!source || !decision) continue;
+      // loop_back 을 포함해 도달 가능성을 본다 — fail 경로는 정의상 loop_back 이다.
+      if (!reachableVia(spec.edges, key, true).has(step.step_key)) continue;
+      out.push({
+        step_key: source.step_key,
+        title: source.title,
+        verdict: decision.verdict,
+        feedback: decision.feedback || '',
+        decided_by_name: decision.decided_by_name || '',
+        decided_at: decision.decided_at || '',
+        visit: decision.visit ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * confirm node 를 열어 사람의 판정을 기다리는 durable pause 로 보낸다.
+   *
+   * 요구사항 2의 "결과물을 사용자에게 제공" 은 여기서 성립한다: 만족된 incoming edge 의
+   * 상류 step 들이 보고한 `artifacts`(스크린샷/영상/URL/파일 경로)를 이 step 으로 **복사**
+   * 해 둔다. 참조로 남겨 화면에서 그때그때 상류를 따라가지 않는 이유는 loop 때문이다 —
+   * 재진입하면 상류의 artifacts 가 리셋되므로, 스냅샷하지 않으면 "무엇을 보고 판정했는가"
+   * 가 사후에 사라진다.
+   *
+   * 호출자는 mission lock 을 쥐고 있어야 한다.
+   */
+  private async openConfirmGate(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    allSteps: OrchestrationStep[],
+  ): Promise<void> {
+    const spec = mission.graph_spec!;
+    const byKey = new Map(allSteps.map((s) => [s.step_key, s]));
+
+    const evidence: Array<{ kind: string; ref: string; label: string }> = [];
+    const sources: string[] = [];
+    const seen = new Set<string>();
+    for (const edge of spec.edges) {
+      if (edge.to !== step.step_key || edge.kind === 'loop_back') continue;
+      const source = byKey.get(edge.from);
+      if (!source) continue;
+      const evaluation = evaluateEdge(edge, {
+        key: source.step_key,
+        status: source.status,
+        visit: source.visit ?? 0,
+        verdict: source.verdict ?? '',
+      });
+      if (evaluation.state !== 'satisfied') continue;
+      sources.push(source.step_key);
+      for (const a of Array.isArray(source.artifacts) ? source.artifacts : []) {
+        const dedupe = `${a.kind}\u0000${a.ref}`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        if (evidence.length >= MAX_ARTIFACTS_PER_STEP) break;
+        evidence.push({ kind: a.kind, ref: a.ref, label: a.label });
+      }
+    }
+
+    step.status = 'awaiting_user';
+    // dispatchStep 과 같은 규칙: 최초 오픈만 0 → 1 로 올린다. 재진입은
+    // applyGraphTransitions 가 이미 올려두었다.
+    if ((step.visit ?? 0) < 1) step.visit = 1;
+    step.dispatched_at = new Date();
+    step.started_at = null;
+    step.finished_at = null;
+    step.confirm_decision = null;
+    // 이전 pass 의 verdict 가 남아 있으면 하류 edge 가 사람이 답하기도 전에 판정된다.
+    step.verdict = '';
+    step.result_summary = '';
+    step.artifacts = evidence.length > 0 ? evidence : null;
+
+    // **full entity save 를 쓰지 않는다**(리뷰 라운드2). 손에 든 엔티티는 게이트를 열기
+    // 직전에 읽은 스냅샷이라 `confirm_notified_visit` 이 `null` 인데, 그 사이 다른 서버가
+    // 이 pass 를 선점했을 수 있다. TypeORM 의 `save()` 는 엔티티 전체를 대상으로 쓰기 때문에
+    // **그 마커까지 null 로 되돌린다** — 그러면 뒤따르는 내 조건부 UPDATE 도 성공해 두 서버가
+    // 모두 발송한다. 선점 UPDATE 자체는 원자적인데, 그 앞의 낡은 full save 가 선점을
+    // 무효화해 버리는 것이다.
+    //
+    // 그래서 게이트 상태 전이만 **컬럼을 명시해** 쓴다. 여기 없는 컬럼(특히 선점 마커)은
+    // 이 쓰기가 절대 건드리지 않으므로, 다른 서버의 선점이 살아남는다.
+    await this.stepRepo.update(
+      { id: step.id },
+      {
+        status: step.status,
+        visit: step.visit,
+        dispatched_at: step.dispatched_at,
+        started_at: step.started_at,
+        finished_at: step.finished_at,
+        confirm_decision: step.confirm_decision,
+        verdict: step.verdict,
+        result_summary: step.result_summary,
+        artifacts: step.artifacts,
+      },
+    );
+
+    // global budget 은 **node 실행 횟수**이지 subagent 스폰 횟수가 아니다. 게이트가
+    // subagent 를 띄우지 않더라도 함께 세는 근거는 폭주 방지가 아니라 **예산 정의의
+    // 일관성**이다 — loop 자체는 `node.max_visits` 로 이미 개별 상한이 걸려 있어서
+    // 게이트가 예산을 안 써도 종료한다. 예산에 node kind 모양의 구멍을 내면 "왜 이
+    // 미션은 예산이 안 깎이지"를 나중에 아무도 재구성하지 못한다(리뷰 라운드1).
+    mission.total_visits = (mission.total_visits ?? 0) + 1;
+    await this.missionRepo.save(mission);
+
+    await this.missions.recordEvent(mission, {
+      type: 'confirm_requested',
+      step_id: step.id,
+      step_key: step.step_key,
+      message:
+        `Waiting for a user decision on "${step.title}" (pass ${step.visit ?? 1})` +
+        (evidence.length > 0 ? ` — ${evidence.length} artifact(s) attached for review` : ''),
+      actor_type: 'system',
+      data: {
+        visit: step.visit ?? 1,
+        artifacts: evidence,
+        evidence_from: sources,
+      },
+    });
+    this.logService.info(
+      'Orchestration',
+      `confirm gate opened for step ${step.step_key} (visit ${step.visit ?? 1})`,
+      { mission_id: mission.id, workspace_id: mission.workspace_id },
+    );
+
+    // 화면을 연 사람에게만 보이는 배지로는 부족하다 — 게이트 대기 사실을 기존 사용자
+    // 알림 채널로 내보낸다(티켓 a78cb566).
+    //
+    // **이 pass 를 DB 에서 선점한 호출만 보낸다.** 예전엔 손에 든 엔티티에서
+    // `confirm_notice` 를 읽어 판단했는데, 그 판단은 이 프로세스 안에서만 옳다 —
+    // `missionLocks` 는 프로세스 메모리라 운영(PostgreSQL)에서 서버가 둘이면 두 pump 가
+    // 같은 pass 를 동시에 열고, 둘 다 "아직 안 보냈다"를 읽어 둘 다 보낸다. 승패를 단일
+    // UPDATE 의 WHERE 절이 정하게 바꿔 한 호출만 이기게 한다.
+    //
+    // 선점 자체는 **await 한다** — 색인된 단일 UPDATE 라 매달릴 일이 없고, 여기서 승패가
+    // 갈려야 두 번째 발송이 애초에 시작되지 않는다. 반대로 **발송은 await 하지 않는다**:
+    // 이 메서드는 미션 락 안에서 돌고, provider 의 요청 단위 상한(티켓 672ffcb5)이 있어도
+    // `dispatchForUser` 한 번은 바인딩 수만큼 팬아웃하며 재시도까지 겹쳐 총 소요가 그 몇
+    // 배가 된다. 그걸 여기서 기다리면 그 미션의 락 체인이 통째로 멈춰
+    // **사용자가 판정을 제출하는 것조차 막힌다** — 알림을 못 보내는 것보다 훨씬 나쁜
+    // 결과이고, 요구사항 6("알림 실패가 게이트 오픈을 죽이지 않는다")이 막으려는 실패의
+    // 최악 형태다. `claimGateNotice` 는 던지지 않고, 실패하면 졌다고 본다(fail-closed).
+    if (await this.confirmNotify.claimGateNotice(step, step.visit ?? 1)) {
+      this.confirmNotify.scheduleGateNotice(mission, step);
+    }
+  }
+
+  /**
+   * 사람이 confirm node 에 Pass/Fail 을 제출한다 — 이 기능의 유일한 판정 입구다.
+   *
+   * MCP 툴은 일부러 만들지 않았다: 에이전트가 사람 대신 confirm 에 답할 수 있으면
+   * 게이트 자체가 무의미해진다. 그래서 REST(사용자 세션) 전용이다.
+   *
+   * ── 정확히 한 번 재개(요구사항 6) ─────────────────────────────────────────
+   * 중복 제출·새로고침·재접속 전부 같은 경로로 들어온다. 판정이 이미 있고 `(visit,
+   * verdict)` 가 같으면 **재개하지 않고** 기존 판정을 그대로 돌려준다(`already_decided`).
+   * 그 외의 불일치는 전부 409 다 — 조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로 진행되는,
+   * 사후에 재구성조차 안 되는 상태가 만들어진다.
+   */
+  async submitConfirmDecision(
+    stepId: string,
+    workspaceId: string,
+    actor: ActorRef,
+    input: { verdict: string; feedback?: string; visit: number },
+  ): Promise<{
+    step: OrchestrationStep;
+    already_decided: boolean;
+    dispatched: string[];
+    loop_reentered: string[];
+    orchestrator_woken: boolean;
+  }> {
+    const verdict = String(input?.verdict ?? '').trim().toLowerCase();
+    if (!(CONFIRM_VERDICTS as readonly string[]).includes(verdict)) {
+      throw orchestrationError(400, `verdict must be one of ${CONFIRM_VERDICTS.join(', ')}`);
+    }
+    // `visit` 은 **필수**다(리뷰 라운드1). optional 로 두면 loop 재진입으로 화면이 낡은
+    // 클라이언트가 값을 그냥 빼는 것만으로 아래 stale 대조를 통째로 건너뛰고 새 pass 를
+    // 잘못 판정한다 — 있으나 마나인 방어가 된다. `reportStep` 이 graph 미션의 모든 보고에
+    // visit 을 요구하는 것과 정확히 같은 이유이고, 같은 이유로 여기서도 서버가 강제한다
+    // (클라이언트 타입이 required 인 것은 서버 계약이 아니다).
+    const claimedVisit = Number(input?.visit);
+    if (!Number.isInteger(claimedVisit) || claimedVisit < 1) {
+      throw orchestrationError(
+        400,
+        `"visit" is required and must be a whole number >= 1 — send the pass number shown on the confirmation ` +
+          `you are answering. Without it the server cannot tell a current decision apart from one made against ` +
+          `a screen that has since been superseded by a loop re-entry.`,
+      );
+    }
+    const feedback = String(input?.feedback ?? '').trim().slice(0, CONFIRM_FEEDBACK_MAX);
+
+    const found = await this.missions.requireStep(stepId);
+    return this.withMissionLock(found.mission_id, async () => {
+      // lock 안에서 다시 읽는다 — 동시 제출의 두 번째는 첫 번째가 커밋한 상태를 봐야
+      // idempotent 분기로 떨어진다.
+      const step = await this.missions.requireStep(stepId);
+      const mission = await this.missions.requireMission(step.mission_id, workspaceId);
+
+      if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+        throw orchestrationError(409, `mission is ${mission.status} — this decision is no longer being collected`);
+      }
+      if (!this.confirmNodeOf(mission, step.step_key)) {
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" is not a user confirmation node, so it does not take a Pass/Fail decision`,
+        );
+      }
+
+      // ── 이미 판정됨: 재제출/새로고침 ──────────────────────────────────────
+      // status 검사보다 **먼저** 본다 — 성공한 판정은 step 을 `done` 으로 만들므로,
+      // 순서를 뒤집으면 정상적인 중복 제출이 전부 "awaiting_user 가 아니다" 로 떨어진다.
+      //
+      // 멱등 키는 "step 이 지금 몇 번째 pass 인가"가 아니라 **"이 제출이 몇 번째 pass 에
+      // 답하는가"**(`claimedVisit`)다. 전자로 두면 `fail` 쪽만 비대칭으로 깨진다(리뷰
+      // 라운드1, 플래너 반례): `fail` 은 같은 lock 안에서 loop 를 발화시키고
+      // `loopBodyNodes` 가 **게이트 자신을 본문에 포함**하므로(loop.to 에서 forward 로
+      // 닿고 loop.from 에도 닿는다), 반환 시점의 게이트는 이미 `pending` + `visit=2` 다.
+      // 그 창에서 같은 `fail` 이 다시 들어오면 `prior.visit(1) !== step.visit(2)` 로 멱등
+      // 분기를 건너뛰고 `is pending` 409 가 나간다 — 재개가 두 번 되지는 않으니 안전하지만,
+      // 요구사항 6의 "중복·새로고침·재접속" 이 `pass` 에서만 성립하게 된다.
+      //
+      // 넓어지지 않는 근거: 이 분기는 `prior` 가 살아 있는 동안에만 발화하고, 게이트가
+      // 실제로 다시 열리는 순간 `openConfirmGate` 가 `confirm_decision = null` 로 만든다.
+      // 따라서 새 pass 의 제출은 `prior === null` 이라 정상 경로로 내려가고, stale 화면
+      // (visit 1 vs 현재 2)도 아래 stale 대조에 그대로 걸린다.
+      const prior = step.confirm_decision;
+      if (prior && claimedVisit === prior.visit) {
+        // 같은 답을 다시 보낸 것 = 중복 클릭 / 새로고침 / 네트워크 재시도. 재개하지 않고
+        // 기존 판정을 그대로 돌려준다.
+        if (prior.verdict === verdict) {
+          return {
+            step,
+            already_decided: true,
+            dispatched: [],
+            loop_reentered: [],
+            orchestrator_woken: false,
+          };
+        }
+        // 같은 pass 에 다른 답을 보낸 것 — 조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로
+        // 진행되고 사후 재구성조차 안 된다.
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" was already decided "${prior.verdict}" on pass ${prior.visit} by ` +
+            `${prior.decided_by_name || 'a user'}. A decision cannot be changed — if the work needs another ` +
+            `look, the mission has to route back through the graph.`,
+        );
+      }
+
+      if (!isAwaitingUser(step.status)) {
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" is ${step.status}, not waiting for a user decision`,
+        );
+      }
+      const current = step.visit ?? 0;
+      if (claimedVisit !== current) {
+        throw orchestrationError(
+          409,
+          `stale confirmation for step "${step.step_key}": you are answering pass ${claimedVisit} but the step ` +
+            `is now on pass ${current}. The work was sent back for another round after your screen loaded — ` +
+            `reload the mission and review the current result before deciding.`,
+        );
+      }
+
+      const decision: ConfirmDecision = {
+        verdict: verdict as ConfirmVerdict,
+        feedback,
+        decided_by_user_id: actor.id || '',
+        decided_by_name: actor.name || '',
+        decided_at: new Date().toISOString(),
+        visit: current,
+      };
+      step.confirm_decision = decision;
+      // `verdict` 컬럼에도 실어야 `evaluateEdge` 의 분기 기계가 그대로 작동한다 —
+      // confirm 전용 분기 로직을 새로 만들지 않는 이유가 이것이다.
+      step.verdict = decision.verdict;
+      step.result_summary = (
+        `User confirmation: ${decision.verdict.toUpperCase()}` +
+        (feedback ? `\n\n${feedback}` : '\n\n(no feedback given)')
+      ).slice(0, SUMMARY_MAX);
+      step.status = 'done';
+      step.started_at = step.started_at ?? new Date();
+      step.finished_at = new Date();
+      await this.stepRepo.save(step);
+
+      await this.missions.recordEvent(mission, {
+        type: 'confirm_decided',
+        step_id: step.id,
+        step_key: step.step_key,
+        message:
+          `${actor.name || 'A user'} answered ${decision.verdict.toUpperCase()} on "${step.title}" ` +
+          `(pass ${decision.visit})` + (feedback ? `: ${feedback.slice(0, 300)}` : ''),
+        actor_type: 'user',
+        actor_id: actor.id || '',
+        actor_name: actor.name || '',
+        data: {
+          verdict: decision.verdict,
+          visit: decision.visit,
+          has_feedback: feedback.length > 0,
+          feedback_length: feedback.length,
+        },
+      });
+
+      // 여기서부터는 `reportStep` 의 종료 처리와 **완전히 같은 경로**다. 별도 재개 경로를
+      // 만들지 않는 것이 "정확히 한 번 올바른 edge 로 재개된다" 의 근거다 — 이미 검증된
+      // 전이/차단/디스패치/wake 순서를 그대로 물려받는다.
+      const reentered = await this.applyGraphTransitions(mission, step);
+      const blocked = await this.propagateBlocking(mission);
+      const pumped = await this.pump(mission);
+      const woken = await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
+
+      return {
+        step,
+        already_decided: false,
+        dispatched: pumped.dispatched,
+        loop_reentered: reentered,
+        orchestrator_woken: woken,
+      };
+    });
   }
 
   // ── Engine internals ──────────────────────────────────────────────────────
@@ -1588,7 +2006,6 @@ export class OrchestrationRunnerService {
       }
     }
     let slots = mission.max_parallel_steps - progress.inFlight.length;
-    if (slots <= 0) return { dispatched: [], failed: [] };
 
     const dispatched: string[] = [];
     const failed: OrchestrationStep[] = [];
@@ -1596,6 +2013,13 @@ export class OrchestrationRunnerService {
       .map((k) => byKey.get(k)!)
       .filter(Boolean)
       .sort((a, b) => a.position - b.position);
+    // 슬롯이 없어도 **여기서 조기 반환하지 않는다**(티켓 5dbe4aa2): 아래 confirm 게이트
+    // 패스는 슬롯을 쓰지 않으므로, 병렬 상한에 걸린 미션에서 사람에게 묻는 일까지
+    // 미뤄질 이유가 없다. 슬롯이 없고 게이트도 없으면 아래 두 루프가 모두 no-op 이라
+    // 결과는 예전과 같다.
+    if (slots <= 0 && !candidates.some((step) => this.confirmNodeOf(mission, step.step_key))) {
+      return { dispatched: [], failed: [] };
+    }
 
     // graph 모드의 global budget은 **매 반복마다** 다시 본다.
     //
@@ -1610,9 +2034,37 @@ export class OrchestrationRunnerService {
     // 커밋하므로, 커밋 전에 던진 실패는 예산을 쓰지 않고 커밋 후 실패는 쓴다).
     // 미리 깎아두면 그 두 경우를 구분하지 못한다.
     let budgetExhausted = false;
+
+    // ── confirm 게이트를 먼저, 그리고 병렬 상한과 **무관하게** 연다(티켓 5dbe4aa2).
+    //
+    // 아래 디스패치 루프 안에 두면 안 된다. 그 루프는 `slots <= 0`에서 break 하는데,
+    // 게이트는 subagent 를 띄우지 않아 슬롯을 쓰지 않으므로 다른 step 이 슬롯을 다
+    // 쥐고 있다는 이유로 사람에게 묻는 것을 미룰 근거가 없다. 게다가 break 는 뒤에
+    // 남은 후보를 아예 보지 않으므로, 상한에 걸린 미션에서는 게이트가 열리지 않은 채
+    // "in-flight 는 있는데 아무도 답을 요구받지 않는" 상태로 늘어진다.
+    //
+    // 정상적인 assignee 검사보다 먼저 처리되는 것도 의도다 — 사람이 답하는 node 라
+    // 담당자가 없는 게 정상인데, `!agentId` 분기에 먼저 걸리면 영원히 `ready` 로
+    // 눌러앉아 "배정이 없어 아무것도 못 한다"는 stall wake 만 반복된다.
+    //
+    // 반면 global budget 은 그대로 적용받는다: 게이트도 node 실행이고 loop 를 한 바퀴
+    // 더 돌리므로, 예산에서 빼면 confirm→fail→loop 가 예산 없이 무한히 돌 수 있다.
+    const gates = candidates.filter((step) => this.confirmNodeOf(mission, step.step_key));
+    const regular = candidates.filter((step) => !this.confirmNodeOf(mission, step.step_key));
+    const withheldGates: string[] = [];
+    for (const step of gates) {
+      if (this.remainingVisitBudget(mission) <= 0) {
+        budgetExhausted = true;
+        withheldGates.push(step.step_key);
+        continue;
+      }
+      await this.openConfirmGate(mission, step, steps);
+      dispatched.push(step.step_key);
+    }
+
     let index = 0;
-    for (; index < candidates.length; index += 1) {
-      const step = candidates[index];
+    for (; index < regular.length; index += 1) {
+      const step = regular[index];
       if (slots <= 0) break;
       if (this.remainingVisitBudget(mission) <= 0) {
         budgetExhausted = true;
@@ -1673,7 +2125,7 @@ export class OrchestrationRunnerService {
       // 스텝을 failed로 바꾸지는 않는다 — 예산은 "지금 더 못 띄운다"이지 "이 작업이
       // 실패했다"가 아니고, 운영자가 max_total_visits를 올리면 그대로 재개돼야 한다.
       // 대신 이벤트를 남겨 decideWake가 정지 상태를 오케스트레이터에게 알리게 한다.
-      const withheld = candidates.slice(index).map((s) => s.step_key);
+      const withheld = [...withheldGates, ...regular.slice(index).map((s) => s.step_key)];
       await this.missions.recordEvent(mission, {
         type: 'graph_budget_exhausted',
         message:
@@ -1846,6 +2298,7 @@ export class OrchestrationRunnerService {
       teamName: team?.name ?? '',
       orchestratorName,
       dependencies,
+      confirmFeedback: this.confirmFeedbackFor(mission, step, allSteps),
       isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision.workspace_folder,
       graphNode: graphNode
@@ -1995,7 +2448,11 @@ export class OrchestrationRunnerService {
     const steps = await this.missions.listSteps(mission.id);
     const progress = this.progressOf(mission, steps);
     const counts = countSteps(steps);
-    const quiet = progress.inFlight.length === 0;
+    // 사람의 판정을 기다리는 것은 **정지가 아니다**(티켓 5dbe4aa2). 여기서 awaitingUser 를
+    // 세지 않으면 confirm 게이트가 열릴 때마다 "stalled" 로 판정돼 오케스트레이터가
+    // 깨어나고, 매번 subagent spawn 을 태우면서 "아무것도 디스패치할 수 없다" 는 잘못된
+    // 진단을 반복한다 — 실제로는 사용자의 답만 있으면 그대로 진행되는 상태다.
+    const quiet = progress.inFlight.length === 0 && progress.awaitingUser.length === 0;
     const failure = ctx.justFinished.status === 'failed' || ctx.justFinished.status === 'blocked';
 
     let reason: Parameters<typeof renderWakePrompt>[0]['reason'] | null = null;
@@ -2020,7 +2477,14 @@ export class OrchestrationRunnerService {
       // reaching here means nothing CAN be dispatched: either steps are
       // unassigned, or every remaining one waits on something that will never
       // resolve. Either way only the orchestrator can break the tie.
-      const unassigned = steps.filter((s) => !isTerminalStepStatus(s.status) && !s.assignee_agent_id);
+      // confirm node 는 사람이 답하는 게이트라 assignee 가 없는 게 정상이다 — 여기 섞이면
+      // 오케스트레이터에게 "이 step 에 담당자를 배정하라" 는 실행 불가능한 지시가 나간다.
+      const unassigned = steps.filter(
+        (s) =>
+          !isTerminalStepStatus(s.status) &&
+          !s.assignee_agent_id &&
+          !this.confirmNodeOf(mission, s.step_key),
+      );
       reason = 'stalled';
       detail = unassigned.length
         ? `These steps have no assignee, so nothing can be dispatched: ` +
@@ -2101,6 +2565,66 @@ export class OrchestrationRunnerService {
         data: { reason: reasonTag },
       });
     });
+  }
+
+  /**
+   * 사람을 mission 대화방의 active participant 로 넣는다 — 신규·과거 미션 공통 경로
+   * (티켓 f6a0de0e).
+   *
+   * 이 하나가 티켓의 두 요구사항을 동시에 만족한다. 시작 시 자동 등록되는 것은 미션
+   * **생성자**뿐이라, (a) 자동 등록이 없던 시절의 과거 미션과 (b) 생성자가 아닌 다른
+   * 운영자는 여기로 들어온다. 참여 사실이 `chat_room_participants` 행으로 남으므로
+   * 서버 재시작·복구 뒤에도 그대로 유지된다 — 메모리 캐시가 아니다.
+   *
+   * 권한: 이 메서드에 도달했다는 것 자체가 컨트롤러의 `MANAGE_ACTIONS` 게이트를 이미
+   * 통과했다는 뜻이고(팀·미션을 만들고 nudge/cancel 하는 것과 같은 관객), 여기서
+   * `requireMission(missionId, workspaceId)` 이 workspace 경계를 한 번 더 강제한다.
+   * `RoomMembershipService.ensureActiveParticipant` 는 호출자 자격을 검사하지 않으므로
+   * 그 앞의 이 두 겹이 유일한 방어선이다 — 이 메서드를 다른 곳에서 재사용할 때는 그
+   * 사실을 먼저 확인할 것.
+   *
+   * 미션 락을 잡지 않는다: 미션 상태 기계를 전혀 건드리지 않으며, 락을 잡으면
+   * orchestrator 가 긴 pump 를 도는 동안 사람이 대화에 들어오는 것 자체가 막힌다 —
+   * 정확히 이 기능이 필요한 순간에 못 쓰게 된다.
+   */
+  async joinMissionConversation(
+    missionId: string,
+    workspaceId: string,
+    actor: ActorRef,
+  ): Promise<{ room_id: string; joined: boolean }> {
+    if (actor.type !== 'user' || !actor.id) {
+      throw orchestrationError(400, 'only a signed-in user can join the mission conversation');
+    }
+    const mission = await this.missions.requireMission(missionId, workspaceId);
+    if (!mission.room_id) {
+      throw orchestrationError(409, 'mission has not been started yet — there is no conversation room');
+    }
+    // 종료된 미션에는 새로 참여시키지 않는다(리뷰 라운드1 지적 3). 참여에 성공해도 말을
+    // 걸 orchestrator 세션이 없어 아무 일도 일어나지 않으므로, 화면이 버튼을 숨기는 것과
+    // 서버가 거부하는 것이 같은 규칙이어야 한다 — 한쪽만 막으면 REST 를 직접 부르는
+    // 경로로 규칙이 새고, "과거 미션도 대화 가능"의 범위가 화면과 서버에서 갈린다.
+    // 기록 열람은 그대로 열려 있다: observer 경로는 참여자가 아니어도 읽을 수 있다.
+    if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+      throw orchestrationError(
+        409,
+        `mission is ${mission.status} — its conversation is closed, but the transcript is still readable`,
+      );
+    }
+
+    const joined = await this.membership.ensureActiveParticipant(mission.room_id, 'user', actor.id);
+    if (joined) {
+      // 이미 참여 중이면 이벤트를 남기지 않는다 — 화면을 열 때마다 타임라인이 같은
+      // 줄로 채워지면 실행 trace 로서의 가치가 사라진다.
+      await this.missions.recordEvent(mission, {
+        type: 'note',
+        message: `${actor.name || 'A user'} joined the mission conversation`,
+        actor_type: actor.type,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        data: { reason: 'conversation_join' },
+      });
+    }
+    return { room_id: mission.room_id, joined };
   }
 
   /**
@@ -2476,10 +3000,32 @@ export class OrchestrationRunnerService {
       }));
   }
 
-  /** Agent participant + the synthetic `system` user that carries dispatch messages. */
-  private async addRoomParticipants(roomId: string, agentId: string): Promise<void> {
+  /**
+   * Agent participant + the synthetic `system` user that carries dispatch messages,
+   * plus — mission room 에 한해 — 미션을 만든 사람.
+   *
+   * `humanParticipantId` 는 **mission room 에만** 넘긴다(티켓 f6a0de0e). step room 에
+   * 넘기지 않는 것은 누락이 아니라 결정이다:
+   *
+   *   - step room 은 attempt 마다 새로 열린다("One room per ATTEMPT"). 미션 하나가
+   *     수십 개를 만들고, 사람을 전부 넣으면 참여자 행과 SSE 팬아웃이 그 수만큼 불어난다.
+   *   - 그 방의 대화는 assignee subagent 의 작업 로그이고, 보고는 lease token 을 쥔
+   *     assignee 만 할 수 있다. 사람이 끼어들어도 step 상태를 바꿀 수 없으므로 개입
+   *     지점으로서 의미가 없다.
+   *   - 사람의 지시는 mission room 에서 orchestrator 에게 가고, step 을 통제하는 것은
+   *     orchestrator 다. 창구를 하나로 모으는 편이 "누가 이 step 에 지시했나"를
+   *     추적 가능하게 만든다.
+   *
+   * step room 을 읽어야 할 때는 기존 observer 경로(`?observer=true`)가 그대로 열려 있다 —
+   * 막힌 것은 발화이지 열람이 아니다.
+   */
+  private async addRoomParticipants(
+    roomId: string,
+    agentId: string,
+    humanParticipantId?: string | null,
+  ): Promise<void> {
     const joinedAt = new Date();
-    await this.participantRepo.save([
+    const rows = [
       this.participantRepo.create({
         room_id: roomId,
         participant_type: 'agent',
@@ -2494,7 +3040,21 @@ export class OrchestrationRunnerService {
         last_read_at: joinedAt,
         left_at: null,
       }),
-    ]);
+    ];
+    // 의사 user 'system' 과 겹치지 않게 방어한다 — 겹치면 같은 방에 같은 participant_id
+    // 행이 둘 생겨 중복 팬아웃이 된다.
+    if (humanParticipantId && humanParticipantId !== SYSTEM_SENDER_ID) {
+      rows.push(
+        this.participantRepo.create({
+          room_id: roomId,
+          participant_type: 'user',
+          participant_id: humanParticipantId,
+          last_read_at: joinedAt,
+          left_at: null,
+        }),
+      );
+    }
+    await this.participantRepo.save(rows);
   }
 
   /**
@@ -2523,6 +3083,28 @@ export class OrchestrationRunnerService {
       { bypassContentLimit: true, ...(runProvision ? { runProvision } : {}) },
     );
   }
+}
+
+/**
+ * 미션의 "사람 소유자" — mission room 참여자로 자동 등록할 대상(티켓 f6a0de0e).
+ *
+ * MCP 로 만든 미션은 `created_by_type='agent'` 라 사람 소유자가 없다. 그 경우 자동
+ * 등록은 일어나지 않고, 사람은 join 경로(`joinMissionConversation`)로 명시적으로
+ * 들어온다 — 에이전트가 만든 미션의 방에 임의의 사람을 자동으로 밀어 넣는 것보다,
+ * 권한 게이트를 한 번 통과시키는 편이 감사 가능하기 때문이다.
+ *
+ * UUID 여부는 검사하지 않는다: `participant_id` 는 varchar 이고 이 방에는 이미
+ * 비-UUID 인 의사 user `system` 이 참여자로 들어 있으며, 이름 해석
+ * (`resolveParticipantName`)과 관전 뷰의 bulk 조회가 둘 다 비-UUID 를 이미 안전하게
+ * 다룬다. 여기서만 UUID 를 강제하면 그 기존 관용과 어긋난다.
+ */
+export function missionHumanOwner(mission: {
+  created_by_type?: string | null;
+  created_by?: string | null;
+}): string | null {
+  if (mission.created_by_type !== 'user') return null;
+  const id = (mission.created_by || '').trim();
+  return id ? id : null;
 }
 
 function normalizeArtifacts(

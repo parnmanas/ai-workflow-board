@@ -17,7 +17,11 @@ async function createClient(options = {}) {
   const client = await AcpClient.spawn({
     command: process.execPath,
     args: [fixture],
-    requestTimeoutMs: 500,
+    // 타임아웃 자체를 검증하는 케이스만 아래에서 짧은 값을 명시로 넘긴다. 나머지
+    // 케이스는 fixture 서브프로세스와 실제 round-trip 을 도는데, 여기에 임의로
+    // 짧은 상한(예전 500ms)을 걸면 부하가 높은 러너에서 콜드 스타트만으로
+    // initialize 가 넘어가 red 가 됐다(main CI windows, run 33743009098). 상한은
+    // 성능 단언이 아니라 hang 진단용이므로 제품 기본값(30s)을 그대로 쓴다.
     onEvent: (event) => events.push(event),
     onStderr: (line) => stderr.push(line),
     onPermissionRequest: async (request) => {

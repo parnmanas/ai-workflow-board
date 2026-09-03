@@ -27,6 +27,7 @@ const DIST = path.join(__dirname, '..', 'dist');
 
 const {
   GRAPH_SPEC_VERSION,
+  applyGraphPatch,
   MAX_NODE_VISITS_CEILING,
   MAX_TOTAL_VISITS_CEILING,
   computeGraphProgress,
@@ -543,4 +544,319 @@ test('computeMissionProgress — graph_spec이 없으면 기존 depends_on 경�
   ];
   assert.deepEqual(computeMissionProgress(null, steps), computePlanProgress(steps));
   assert.deepEqual(computeMissionProgress(undefined, steps).dispatchable, ['b']);
+});
+
+// ── 사용자 확인(confirm) 노드 — 티켓 5dbe4aa2 ────────────────────────────────
+//
+// confirm 노드는 사람이 답할 때까지 미션을 멈춘다. 그래서 잘못 만들어진 게이트의
+// 실패 형태는 "에러"가 아니라 **영구 정지**다:
+//   - 한쪽 판정만 라우팅된 게이트 → 사용자가 다른 답을 고르면 나가는 edge 가 전부
+//     dead 라 미션이 조용히 선다. 사람에게 물어놓고 그 답을 버리는 셈이다.
+//   - `none` 정책 미션의 게이트 → 운영자가 "확인 없이 끝까지 돌려라"라고 지시한
+//     미션이 사람을 기다리며 멈춘다.
+// 둘 다 실행 **전에** 거부해야 한다.
+
+/** confirm 게이트가 붙은 최소 그래프. `overrides` 로 edge/정책을 바꿔 끼운다. */
+const confirmGraph = (edges) => ({
+  version: GRAPH_SPEC_VERSION,
+  nodes: [
+    { key: 'build', kind: 'task', max_visits: 3 },
+    { key: 'gate', kind: 'confirm', max_visits: 3 },
+    { key: 'ship', kind: 'task' },
+  ],
+  edges,
+  max_total_visits: 20,
+});
+
+const PASS_FAIL_EDGES = [
+  { from: 'build', to: 'gate' },
+  { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] }, label: 'approved' },
+  { from: 'gate', to: 'build', kind: 'loop_back', when: { verdict: ['fail'] }, label: 'needs rework' },
+];
+const CONFIRM_KEYS = ['build', 'gate', 'ship'];
+
+test('validateGraphSpec — pass/fail 양쪽이 라우팅된 confirm 게이트는 수용된다', () => {
+  const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in r), `수용돼야 한다: ${r.error}`);
+  assert.equal(r.spec.nodes.find((n) => n.key === 'gate').kind, 'confirm');
+  // fail 경로가 loop_back 이어도 라우팅으로 인정된다 — 재작업 loop 가 표준 형태다.
+  assert.ok(r.spec.edges.some((e) => e.kind === 'loop_back' && e.when.verdict.includes('fail')));
+});
+
+test('validateGraphSpec — confirm 게이트에 fail 경로가 없으면 거부된다', () => {
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r, '한쪽만 라우팅된 게이트는 사용자의 다른 답을 버린다');
+  assert.match(r.error, /"fail"/);
+  assert.match(r.error, /gate/);
+});
+
+test('validateGraphSpec — confirm 게이트에 pass 경로가 없으면 거부된다', () => {
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'build', kind: 'loop_back', when: { verdict: ['fail'] } },
+      // ship 이 고아가 되지 않도록 붙여 둔다 — 거부 사유가 고아 검사로 바뀌면
+      // 이 테스트가 검증하려던 규칙을 지나쳐 통과한다.
+      { from: 'build', to: 'ship' },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r);
+  assert.match(r.error, /"pass"/);
+});
+
+test('validateGraphSpec — confirm_policy "none" 은 confirm 노드의 존재 자체를 거부한다', () => {
+  const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'none',
+  });
+  assert.ok('error' in r);
+  assert.match(r.error, /confirm_policy is "none"/);
+});
+
+test('validateGraphSpec — key_steps/every_step/auto 는 모두 confirm 노드를 허용한다', () => {
+  for (const policy of ['auto', 'key_steps', 'every_step']) {
+    const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+      nodeKeys: CONFIRM_KEYS,
+      confirmPolicy: policy,
+    });
+    assert.ok(!('error' in r), `${policy} 에서 수용돼야 한다: ${r.error}`);
+  }
+});
+
+test('validateGraphSpec — 미지/빈 confirm_policy 는 기본값(auto)으로 접혀 confirm 을 허용한다', () => {
+  // DDL 마이그레이션 없이 추가된 컬럼이라 기존 행이 ''/NULL 로 남을 수 있다.
+  // 그 값이 `none` 처럼 취급되면 기존 미션에서 기능이 조용히 죽는다.
+  for (const policy of ['', null, undefined, 'nonsense']) {
+    const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+      nodeKeys: CONFIRM_KEYS,
+      confirmPolicy: policy,
+    });
+    assert.ok(!('error' in r), `${JSON.stringify(policy)} 는 기본값으로 접혀야 한다: ${r.error}`);
+  }
+});
+
+test('validateGraphSpec — confirm 노드는 assignee 를 요구하지 않는다(그래프 검증 대상이 아니다)', () => {
+  // 그래프 검증은 assignee 를 아예 보지 않는다. 이 단언은 "봐서는 안 된다"를 고정한다 —
+  // 만약 여기에 assignee 검사가 생기면 confirm 노드가 실행 전에 거부되고, 사람이
+  // 답하는 게이트에 담당 에이전트를 배정하라는 모순된 요구가 된다.
+  const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in r));
+});
+
+test('applyGraphPatch — set_nodes 로 task 를 confirm 으로 바꿔도 정책과 라우팅 규칙을 그대로 받는다', () => {
+  // patch 는 결과 전체를 validateGraphSpec 에 다시 태운다. 정책을 전달하지 않으면
+  // `none` 미션이 patch 한 번으로 게이트를 얻는다 — 제출로는 거부되는 그래프가
+  // patch 로는 통과하는, 두 경로가 갈라지는 정확한 구멍이다.
+  const base = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: [{ key: 'build' }, { key: 'gate' }, { key: 'ship' }],
+      edges: [
+        { from: 'build', to: 'gate' },
+        { from: 'gate', to: 'ship' },
+      ],
+      max_total_visits: 10,
+    },
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'none' },
+  );
+  assert.ok(!('error' in base));
+  const runtime = {
+    nodes: CONFIRM_KEYS.map((key) => ({ key, status: 'pending', visit: 0, verdict: '' })),
+    total_visits: 0,
+  };
+
+  const denied = applyGraphPatch(base.spec, { set_nodes: [{ key: 'gate', kind: 'confirm' }] }, {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'none',
+    runtime,
+  });
+  assert.ok('error' in denied, 'none 정책은 patch 경로로도 게이트를 얻을 수 없어야 한다');
+  assert.match(denied.error, /confirm_policy is "none"/);
+
+  // 정책이 허용해도 라우팅 규칙은 그대로다 — 지금 gate → ship 은 무조건 edge 라
+  // pass/fail 어느 쪽도 라우팅되지 않았다.
+  const unrouted = applyGraphPatch(base.spec, { set_nodes: [{ key: 'gate', kind: 'confirm' }] }, {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+    runtime,
+  });
+  assert.ok('error' in unrouted);
+  assert.match(unrouted.error, /"pass"/);
+});
+
+test('computeGraphProgress — awaiting_user 게이트는 하류를 열지 않고, 자신도 다시 열리지 않는다', () => {
+  const spec = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  }).spec;
+  const p = computeGraphProgress(spec, [
+    { key: 'build', status: 'done', visit: 1, verdict: '' },
+    { key: 'gate', status: 'awaiting_user', visit: 1, verdict: '' },
+    { key: 'ship', status: 'pending', visit: 0, verdict: '' },
+  ]);
+  assert.deepEqual(p.awaitingUser, ['gate']);
+  assert.ok(!p.dispatchable.includes('gate'));
+  assert.ok(!p.inFlight.includes('gate'));
+  // 하류는 대기 — 사용자의 답이 아직 없으므로 pass edge 는 pending 이다.
+  assert.deepEqual(p.waiting, ['ship']);
+  assert.deepEqual(p.newlyBlocked, []);
+  assert.equal(p.allTerminal, false);
+});
+
+test('computeGraphProgress — pass 판정 뒤에는 pass edge 만 열린다', () => {
+  const spec = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+      { from: 'gate', to: 'build', kind: 'loop_back', when: { verdict: ['fail'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  ).spec;
+  const p = computeGraphProgress(spec, [
+    { key: 'build', status: 'done', visit: 1, verdict: '' },
+    // 판정이 끝난 게이트는 done + verdict 를 갖는다 — evaluator 와 정확히 같은 모양이라
+    // 분기 기계를 새로 만들 필요가 없다는 것이 이 설계의 근거다.
+    { key: 'gate', status: 'done', visit: 1, verdict: 'pass' },
+    { key: 'ship', status: 'pending', visit: 0, verdict: '' },
+  ]);
+  assert.deepEqual(p.dispatchable, ['ship']);
+  assert.deepEqual(p.awaitingUser, []);
+});
+
+// ── confirm 분기가 **실제로** 갈라지는지 (리뷰 라운드1) ──────────────────────
+//
+// "pass 용 edge 와 fail 용 edge 가 각각 하나 이상 있다"만 재면 구멍이 둘 남는다.
+// 둘 다 검증은 통과하는데 사용자의 두 답이 실행상 구분되지 않아, 게이트가 분기가 아니라
+// 단순 "확인 버튼"이 된다 — 요구사항 5가 조용히 깨지는 형태다.
+
+test('validateGraphSpec — 한 edge 가 pass 와 fail 을 동시에 실으면 거부된다', () => {
+  // `{ verdict: ['pass','fail'] }` 하나뿐이면 어느 답을 골라도 같은 edge 를 탄다.
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass', 'fail'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r, '결합 verdict edge 는 분기를 만들지 못한다');
+  assert.match(r.error, /matches BOTH "pass" and "fail"/);
+  assert.match(r.error, /gate/);
+});
+
+test('validateGraphSpec — pass 와 fail 이 같은 node 로 가면 거부된다', () => {
+  // edge 는 둘로 갈라져 있지만 도착지가 같으면 그 node 는 사람이 무엇을 답하든 실행된다.
+  // 두 edge 모두 conditional 로 둔다 — loop_back 을 쓰면 "loop 를 닫지 않는다" 규칙에
+  // 먼저 걸려서 정작 재려던 규칙을 지나쳐버린다.
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+      { from: 'gate', to: 'ship', kind: 'sequence', when: { verdict: ['fail'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r);
+  assert.match(r.error, /routes both "pass" and "fail" to "ship"/);
+});
+
+test('validateGraphSpec — 별도 edge + 별도 target 이면 수용된다(정상 형태)', () => {
+  // 이 파일 위쪽의 PASS_FAIL_EDGES 가 바로 그 형태다. 위 두 규칙이 정상 그래프를
+  // 잡아먹지 않는다는 것을 같은 자리에서 다시 고정한다.
+  const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in r), `정상 형태가 거부되면 안 된다: ${r.error}`);
+  const outgoing = r.spec.edges.filter((e) => e.from === 'gate');
+  const pass = outgoing.filter((e) => (e.when?.verdict ?? []).includes('pass'));
+  const fail = outgoing.filter((e) => (e.when?.verdict ?? []).includes('fail'));
+  assert.equal(pass.length, 1);
+  assert.equal(fail.length, 1);
+  assert.notEqual(pass[0].to, fail[0].to, '두 답이 서로 다른 node 를 연다');
+});
+
+test('validateGraphSpec — 두 답의 경로가 겹치지만 않으면 여러 갈래여도 수용된다', () => {
+  // 규칙은 "겹치지 마라"이지 "각각 하나여야 한다"가 아니다. fan-out 자체는 막지 않는다.
+  const r = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: [
+        { key: 'build', kind: 'task', max_visits: 3 },
+        { key: 'gate', kind: 'confirm', max_visits: 3 },
+        { key: 'ship', kind: 'task' },
+        { key: 'announce', kind: 'task' },
+      ],
+      edges: [
+        { from: 'build', to: 'gate' },
+        { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+        { from: 'gate', to: 'announce', kind: 'conditional', when: { verdict: ['pass'] } },
+        { from: 'gate', to: 'build', kind: 'loop_back', when: { verdict: ['fail'] } },
+      ],
+      max_total_visits: 20,
+    },
+    { nodeKeys: ['build', 'gate', 'ship', 'announce'], confirmPolicy: 'auto' },
+  );
+  assert.ok(!('error' in r), `pass 쪽 fan-out 은 정상이다: ${r.error}`);
+});
+
+test('validateGraphSpec — evaluator 의 동의어 verdict 묶음은 여전히 허용된다', () => {
+  // 위 규칙은 confirm 전용이다. evaluator 에서 `['approve','ship-it']` 같은 동의어
+  // 묶음까지 막으면 기존 그래프가 깨진다.
+  const r = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: [
+        { key: 'build', kind: 'task' },
+        { key: 'review', kind: 'evaluator' },
+        { key: 'ship', kind: 'task' },
+      ],
+      edges: [
+        { from: 'build', to: 'review' },
+        { from: 'review', to: 'ship', kind: 'conditional', when: { verdict: ['approve', 'ship-it'] } },
+      ],
+      max_total_visits: 10,
+    },
+    { nodeKeys: ['build', 'review', 'ship'], confirmPolicy: 'auto' },
+  );
+  assert.ok(!('error' in r), `evaluator 규칙은 바뀌지 않았다: ${r.error}`);
+});
+
+test('applyGraphPatch — patch 로도 결합 verdict edge 를 만들 수 없다', () => {
+  // 제출로 거부되는 그래프가 patch 로는 통과하면 두 경로가 갈라진다.
+  const base = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in base));
+  const runtime = {
+    nodes: CONFIRM_KEYS.map((key) => ({ key, status: 'pending', visit: 0, verdict: '' })),
+    total_visits: 0,
+  };
+
+  const merged = applyGraphPatch(
+    base.spec,
+    {
+      remove_edges: [
+        { from: 'gate', to: 'ship' },
+        { from: 'gate', to: 'build' },
+      ],
+      add_edges: [{ from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass', 'fail'] } }],
+    },
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto', runtime },
+  );
+  assert.ok('error' in merged);
+  assert.match(merged.error, /matches BOTH "pass" and "fail"/);
 });

@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { ConfirmDecision } from '../modules/orchestration/orchestration.constants';
 
 /**
  * One delegated unit of a Mission's plan — a node in the plan DAG.
@@ -27,6 +28,11 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *   needs_recovery — lease 가 만료됐지만 `retry_policy='manual'`(비멱등·위험 작업)이라
  *               자동 재실행이 금지된 상태. `recovery_reason` 에 사유가 담기고,
  *               사람 또는 orchestrator 의 명시적 `retry` 만이 이 상태를 벗어난다.
+ *   awaiting_user — graph 모드의 `confirm` node 가 **사람의 Pass/Fail 판정**을 기다리며
+ *               durable pause 중(티켓 5dbe4aa2). subagent 가 뜨지 않으므로 in-flight 가
+ *               아니고, 스스로 `done` 으로 전이하므로 terminal 도 아니다. 상태가 DB 에
+ *               있으므로 서버가 재시작해도 그대로 남고, 판정이 들어오면 그 자리에서
+ *               이어진다.
  *
  * `dispatched` and `running` are BOTH "in flight" for parallelism accounting —
  * the split exists only so the UI can distinguish "prompt sent, subagent may
@@ -36,6 +42,9 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 @Index('idx_orch_steps_mission', ['mission_id'])
 @Index('idx_orch_steps_assignee', ['assignee_agent_id'])
 @Index('idx_orch_steps_status', ['status'])
+// 리퍼의 confirm 리마인더 후보 스캔용(티켓 a78cb566). 후보는 `status='awaiting_user'` 로
+// 좁힌 뒤 선점 시각 순으로 오래 기다린 것부터 가져간다 — 그 두 컬럼이 그대로 이 색인이다.
+@Index('idx_orch_steps_confirm_gate', ['status', 'confirm_notified_at'])
 export class OrchestrationStep {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -207,6 +216,70 @@ export class OrchestrationStep {
    */
   @Column({ type: 'varchar', default: '' })
   verdict: string;
+
+  // ── 사용자 확인 게이트(티켓 5dbe4aa2) ──────────────────────────────────────
+
+  /**
+   * 이 confirm node 에 사람이 내린 판정. null = 아직 판정 전, 또는 loop 재진입으로
+   * 리셋됨. confirm 이 아닌 node 에서는 항상 null 이다.
+   *
+   * `verdict` 컬럼에도 같은 값이 복사되는데(그래야 `evaluateEdge` 의 분기 기계를
+   * 그대로 재사용한다), 이 컬럼은 그 위에 **누가·언제·왜·몇 번째 pass 에서** 를 얹는다.
+   * 특히 `visit` 이 중요하다: loop 가 재진입하면 같은 step 이 다음 iteration 으로 다시
+   * 열리는데, 브라우저에 떠 있던 이전 pass 의 화면이 그대로 제출되면 남의 pass 판정이
+   * 현재 pass 에 기록된다. 제출 시 이 값을 대조해 stale 화면을 거부한다.
+   *
+   * `orchestration.constants.ts` 의 `ConfirmDecision` 참고.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  confirm_decision: ConfirmDecision | null;
+
+  // ── 게이트 대기 알림 선점(claim) 마커 (티켓 a78cb566) ─────────────────────
+  //
+  // 세 컬럼 모두 **스칼라**다. 예전엔 `confirm_notice` 라는 simple-json 한 덩어리였는데
+  // 두 가지를 못 했다:
+  //
+  //   1. **원자적 선점** — JSON blob 은 `WHERE` 절에서 이식성 있게 비교할 수 없어서
+  //      "읽고 → 판단하고 → 쓴다" 밖에 못 했다. 서버가 둘이면 둘 다 "아직 안 보냈다"를
+  //      읽고 둘 다 보낸다. 스칼라 컬럼이면 단일 UPDATE 의 `WHERE` 에 조건을 실어
+  //      **DB 가 승자를 하나만 고르게** 할 수 있다(SQLite·Postgres 공통).
+  //   2. **색인 가능한 후보 스캔** — 리퍼가 "리마인더 보낼 만료 게이트"를 SQL 로 직접
+  //      고를 수 있어야 한다. JSON 안에 든 값으로는 `WHERE`/`ORDER BY` 를 걸 수 없어,
+  //      예전엔 미션을 무순서로 잘라 온 뒤 애플리케이션에서 걸렀고 그게 기아를 만들었다.
+  //
+  // 관측용 수치(수신자 수·실제 전달 채널 수)는 여기 두지 않는다. 타임라인의
+  // `confirm_notified` 이벤트 `data` 에 이미 들어 있고, 두 곳에 두면 어긋난다.
+  //
+  // loop 재진입에서 **일부러 리셋하지 않는다**. 키가 pass 번호(`visit`)라서 새 pass 는
+  // 값이 저절로 달라져 다시 자격이 생긴다. 미리 null 로 밀면 "그 사이에 이미 나갔는지"
+  // 를 판별할 근거만 잃는다.
+
+  /**
+   * 최초 게이트 알림을 선점한 pass 번호. `visit` 과 같으면 이 pass 는 이미 누군가
+   * 선점했다(= 보내는 중이거나 보냈다). null = 아직 아무도 선점하지 않았다.
+   *
+   * "보냈다"가 아니라 "선점했다"인 것이 중요하다 — 발송은 배경에서 돌기 때문에 성공을
+   * 기다렸다가 쓰면 그 사이 두 번째 발송이 끼어든다. 발송 **전에** 쓴다.
+   */
+  @Column({ type: 'int', nullable: true, default: null })
+  confirm_notified_visit: number | null;
+
+  /**
+   * 위 선점 시각. 리퍼의 리마인더 대기 시간을 재는 **기준점(anchor)** 이다.
+   *
+   * 선점에 실패했거나(발송 직전 프로세스가 죽는 등) 이 기능 이전에 열린 게이트는 null 인데,
+   * 그때 리퍼는 `dispatched_at` 으로 떨어진다 — 최초 알림이 유실된 게이트야말로 리마인더가
+   * 가장 필요한 경우라 여기서 끊으면 안 된다.
+   */
+  @Column({ type: Date, nullable: true, default: null })
+  confirm_notified_at: Date | null;
+
+  /**
+   * 장기 미응답 리마인더를 선점한 pass 번호. `visit` 과 같으면 이 pass 의 리마인더는
+   * 이미 나갔다. pass 당 1회이고, loop 로 다음 pass 가 열리면 값이 달라져 다시 자격이 생긴다.
+   */
+  @Column({ type: 'int', nullable: true, default: null })
+  confirm_reminded_visit: number | null;
 
   @Column({ type: Date, nullable: true, default: null })
   dispatched_at: Date | null;

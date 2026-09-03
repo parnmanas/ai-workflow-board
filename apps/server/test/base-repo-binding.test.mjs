@@ -190,7 +190,7 @@ test('_pendForMissingBaseRepo sets pending_user_action + is idempotent', () => {
   assert.match(src, /pending_user_action = true/, 'must set the pending flag');
   assert.match(src, /pending_set_by = 'TriggerLoopService'/, 'must stamp the pend actor');
   // Idempotent re-read: an already-pending/archived ticket is left untouched.
-  assert.match(src, /if \(!fresh \|\| fresh\.pending_user_action \|\| fresh\.pending_on_tickets \|\| fresh\.pending_ci_wait \|\| fresh\.archived_at\)/, 'must not double-pend');
+  assert.match(src, /if \(!fresh \|\| fresh\.pending_user_action \|\| fresh\.pending_on_tickets \|\| fresh\.pending_ci_wait \|\| fresh\.pending_merge_lease \|\| fresh\.archived_at\)/, 'must not double-pend');
 });
 
 // ── 4. SSE wire delivery guard (flatten) ──────────────────────────────────────

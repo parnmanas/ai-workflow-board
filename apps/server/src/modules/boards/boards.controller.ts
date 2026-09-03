@@ -33,6 +33,7 @@ import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../.
 import { Workspace } from '../../entities/Workspace';
 import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
+import { validateMergeLeaseConfigInput, serializeMergeLeaseConfig } from '../../common/merge-lease-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
 import { validateBoardHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
 import { validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../common/default-role-assignments-config';
@@ -472,7 +473,7 @@ export class BoardsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
 
-    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile } = body;
+    const { name, description, routing_config, column_prompts, max_concurrent_tickets_per_agent, self_improvement_mode, benchmark_mode, auto_archive_days, harness_config, effort_presets, language, environment_config, qa_phases, merge_gate_config, merge_lease_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile } = body;
     if (name !== undefined) board.name = name;
     if (description !== undefined) board.description = description;
     // Board output language (i18n, ticket ae28dcaf). Human-readable name that
@@ -620,6 +621,19 @@ export class BoardsController {
         const checked = validateMergeGateConfigInput(merge_gate_config);
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         board.merge_gate_config = serializeMergeGateConfig(checked.value);
+      }
+    }
+
+    // 보드별 랜딩 lease (ticket e630b530). merge_gate_config 와 같은 모양이지만
+    // **기본값이 반대**다: null 은 "끔" 이 아니라 "기본값(활성)" 이다. 끄려면
+    // 명시적으로 {"enabled": false} 를 써야 한다(킬 스위치).
+    if (merge_lease_config !== undefined) {
+      if (merge_lease_config === null) {
+        board.merge_lease_config = null;
+      } else {
+        const checked = validateMergeLeaseConfigInput(merge_lease_config);
+        if (!checked.ok) return res.status(400).json({ error: checked.error });
+        board.merge_lease_config = serializeMergeLeaseConfig(checked.value);
       }
     }
 

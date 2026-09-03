@@ -23,6 +23,7 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
 import { GraphSpec, computeMissionProgress } from './orchestration-graph';
+import { renderConfirmPolicyGuidance } from './orchestration-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { visibleScopeWhere } from '../skills/skill-scope';
@@ -30,11 +31,15 @@ import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
   TERMINAL_MISSION_STATUSES,
+  ConfirmDecision,
+  ConfirmPolicy,
   MissionCompletionCriterion,
   MissionPostAction,
+  isAwaitingUser,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
+  normalizeConfirmPolicy,
   normalizePostActions,
 } from './orchestration.constants';
 import {
@@ -52,6 +57,11 @@ export interface MissionCounts {
   failed: number;
   inFlight: number;
   pending: number;
+  /**
+   * 사람의 confirm 판정을 기다리는 step 수(티켓 5dbe4aa2). `pending`에서 분리했다 —
+   * "아직 시작 안 함"과 "당신의 답을 기다리는 중"은 운영자가 해야 할 행동이 정반대다.
+   */
+  awaitingUser: number;
 }
 
 export interface MissionListItem {
@@ -104,6 +114,8 @@ export interface MissionStepView {
   recovery_reason: string;
   /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
   last_heartbeat_at: Date | null;
+  /** confirm node 에 사람이 내린 판정(티켓 5dbe4aa2). null = 아직 판정 전/해당 없음. */
+  confirm_decision: ConfirmDecision | null;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -136,6 +148,8 @@ export interface MissionDetail extends MissionListItem {
   graph_revision: number;
   /** 지금까지 소진된 node 실행 횟수(global budget). */
   total_visits: number;
+  /** 사용자 확인 강도 — 항상 정규화된 값이다(티켓 5dbe4aa2). */
+  confirm_policy: ConfirmPolicy;
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -246,6 +260,8 @@ export class OrchestrationMissionService {
     step_timeout_minutes?: number;
     /** 실행 그래프(조건 분기/join/bounded loop) 사용 여부 — 티켓 1ca9e49b. */
     graph_enabled?: boolean;
+    /** 사용자 확인 강도 — 'none' | 'auto'(기본) | 'key_steps' | 'every_step'. 티켓 5dbe4aa2. */
+    confirm_policy?: string;
     created_by_type?: string;
     created_by?: string;
     /**
@@ -342,6 +358,7 @@ export class OrchestrationMissionService {
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
         step_timeout_minutes: clampInt(input.step_timeout_minutes, 90, 0, 60 * 24 * 7),
         graph_enabled: input.graph_enabled === true,
+        confirm_policy: normalizeConfirmPolicy(input.confirm_policy),
         created_by_type: input.created_by_type || 'user',
         created_by: input.created_by || '',
       }),
@@ -377,6 +394,7 @@ export class OrchestrationMissionService {
       max_plan_versions?: number;
       step_timeout_minutes?: number;
       graph_enabled?: boolean;
+      confirm_policy?: string;
     },
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, workspaceId);
@@ -407,7 +425,12 @@ export class OrchestrationMissionService {
       // graph_enabled도 브리핑 계약의 일부다: 미션이 이미 시작된 뒤 켜면
       // orchestrator는 자기가 분기/loop를 쓸 수 있다는 사실을 들은 적이 없고,
       // 끄면 이미 확정된 graph_spec이 실행 규칙과 어긋난다.
-      patch.graph_enabled !== undefined;
+      patch.graph_enabled !== undefined ||
+      // confirm_policy 도 브리핑 계약이다(티켓 5dbe4aa2): orchestrator 는 브리핑에서 들은
+      // 정책대로 그래프를 짜므로, 미션이 시작된 뒤 조이면 이미 확정된 confirm 노드가
+      // 실행 규칙과 어긋나고, 풀면 orchestrator 는 게이트를 쓸 수 있다는 사실을 들은 적이
+      // 없어 정책이 아무 효과도 내지 못한다.
+      patch.confirm_policy !== undefined;
     if (briefLocked && touchesBrief) {
       throw orchestrationError(
         409,
@@ -453,6 +476,7 @@ export class OrchestrationMissionService {
       mission.max_plan_versions = clampInt(patch.max_plan_versions, mission.max_plan_versions, 1, 50);
     }
     if (patch.graph_enabled !== undefined) mission.graph_enabled = patch.graph_enabled === true;
+    if (patch.confirm_policy !== undefined) mission.confirm_policy = normalizeConfirmPolicy(patch.confirm_policy);
     if (patch.step_timeout_minutes !== undefined) {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
@@ -633,6 +657,10 @@ export class OrchestrationMissionService {
       graph_spec: mission.graph_spec ?? null,
       graph_revision: mission.graph_revision ?? 0,
       total_visits: mission.total_visits ?? 0,
+      // 읽기는 항상 정규화를 거친다 — DDL 마이그레이션 없이 추가된 컬럼이라 기존 행이
+      // 빈 문자열/NULL 로 남아 있을 수 있고, 그 값이 그대로 UI 셀렉트에 들어가면 어느
+      // 옵션에도 걸리지 않는 "선택 없음" 상태가 된다.
+      confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
       steps: steps.map((s) => {
         const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
         return {
@@ -662,6 +690,7 @@ export class OrchestrationMissionService {
           retry_policy: s.retry_policy || 'auto',
           recovery_reason: s.recovery_reason || '',
           last_heartbeat_at: s.last_heartbeat_at ?? null,
+          confirm_decision: s.confirm_decision ?? null,
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -731,11 +760,14 @@ export class OrchestrationMissionService {
       counts: countSteps(steps),
       dispatchable_now: progress.dispatchable,
       waiting_on_dependencies: progress.waiting,
+      confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
       graph: mission.graph_enabled
         ? {
             enabled: true,
             spec: mission.graph_spec ?? null,
             revision: mission.graph_revision ?? 0,
+            confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
+            confirm_note: renderConfirmPolicyGuidance(mission.confirm_policy),
             budget: {
               total_visits: mission.total_visits ?? 0,
               max_total_visits: mission.graph_spec?.max_total_visits ?? null,
@@ -765,6 +797,7 @@ export class OrchestrationMissionService {
         recovery_reason: s.recovery_reason || '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
+        confirm_decision: s.confirm_decision ?? null,
       })),
       recent_timeline: events
         .reverse()
@@ -978,11 +1011,15 @@ export class OrchestrationMissionService {
 }
 
 export function countSteps(steps: Array<{ status: string }>): MissionCounts {
-  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0 };
+  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0 };
   for (const s of steps) {
     if (s.status === 'done' || s.status === 'skipped') counts.done += 1;
     else if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') counts.failed += 1;
     else if (isInFlight(s.status)) counts.inFlight += 1;
+    // `pending` 앞에 둔다 — awaiting_user 는 terminal 이 아니라서 그냥 두면 아래
+    // pending 으로 흡수되고, 운영자 화면에서 "당신의 답 대기 중"이 "아직 시작 안 함"과
+    // 구분되지 않는다(티켓 5dbe4aa2).
+    else if (isAwaitingUser(s.status)) counts.awaitingUser += 1;
     else if (!isTerminalStepStatus(s.status)) counts.pending += 1;
   }
   return counts;

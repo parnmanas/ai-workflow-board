@@ -150,6 +150,26 @@ export class OrchestrationMission {
   @Column({ type: 'int', default: 0 })
   graph_revision: number;
 
+  // ── 사용자 확인 강도(티켓 5dbe4aa2) ────────────────────────────────────────
+
+  /**
+   * 이 미션에서 사람의 confirm 게이트를 얼마나 세울 것인가 —
+   * `none` | `auto`(기본) | `key_steps` | `every_step`.
+   * `orchestration.constants.ts` 의 `CONFIRM_POLICIES` 참고.
+   *
+   * 기본값을 `auto` 로 둬도 **기존 미션의 동작은 한 글자도 바뀌지 않는다**: confirm
+   * 노드는 graph 모드에서만 만들 수 있고 `graph_enabled` 기본값이 false 이므로, 기존
+   * 미션은 정책값과 무관하게 confirm 노드를 가질 수 없다. `none` 을 기본으로 두면
+   * 하위호환에 아무 이득 없이 새 기능만 기본 off 가 된다.
+   *
+   * DDL 마이그레이션은 쓰지 않는다 — 이 저장소의 `db.ts` 는 전 백엔드에서
+   * `synchronize` 를 켜고 migration 은 DATA 전용이다. 대신 읽는 쪽이 항상
+   * `normalizeConfirmPolicy()` 를 거쳐 빈 문자열/NULL 로 남은 기존 행도 기본값으로
+   * 접힌다.
+   */
+  @Column({ type: 'varchar', default: 'auto' })
+  confirm_policy: string;
+
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
 

@@ -209,8 +209,11 @@ export class OntologyController {
     // 엣지가 많은 그래프에서 실제 선택 노드 간 관계가 전부 사라질 수 있다.
     // 노드 선택과 동일한 결정적 서브쿼리를 양 끝에 적용한 뒤 상한을 건다.
     // ID 5,000개를 IN 파라미터로 전달하지 않아 SQLite 파라미터 한계도 피한다.
+    // OntologyNode.id는 PostgreSQL에서 uuid지만 edge.src_id/dst_id는 두
+    // 백엔드 공통 varchar다. 서브쿼리 결과를 문자열로 맞추지 않으면
+    // PostgreSQL이 `character varying = uuid` 비교를 거부한다.
     const selectedNodeIds = nodeRepo.createQueryBuilder('selected_node')
-      .select('selected_node.id')
+      .select('CAST(selected_node.id AS varchar)')
       .where('selected_node.graph_id = :graphId')
       .andWhere('selected_node.status = :nodeStatus')
       .orderBy('selected_node.pagerank', 'DESC')

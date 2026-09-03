@@ -742,6 +742,10 @@ export interface AgentInstanceUpdatePayload {
     update_channel?: string | null;
     update_last_checked_at?: string | null;
     update_last_error?: string | null;
+    // ticket 9408b308 — target version the manager's `scheduled` policy is
+    // waiting for an operator to approve. null = reported but nothing
+    // pending; undefined = manager predates the field.
+    update_approval_pending_version?: string | null;
   };
 }
 

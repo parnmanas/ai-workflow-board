@@ -12,6 +12,14 @@
  * with no channel to reconcile them. Operators intervene through `nudge`
  * (talk to the orchestrator) or `cancel` (end it).
  *
+ * 그 규칙의 **유일한 예외**가 `steps/:stepId/confirm`(티켓 5dbe4aa2)이다. 모순이 아닌
+ * 이유: confirm node 는 정의상 사람의 판정을 받으려고 orchestrator 가 계획에 넣은
+ * node 이고, 사람이 바꾸는 것은 plan 이 아니라 **자기 자신에게 요청된 판정값**이다.
+ * 게이트를 세울지 말지는 여전히 orchestrator 의 결정이고(정책은 그 결정의 상한일 뿐),
+ * 판정 결과는 그래프가 미리 선언한 pass/fail edge 로만 흐른다 — 즉 사람이 실행 경로를
+ * 즉흥적으로 만들어내지 못한다. 반대로 이 판정을 MCP 로도 열면 에이전트가 사람 대신
+ * 답할 수 있게 되어 기능 자체가 무의미해지므로, 판정 입구는 여기 하나뿐이다.
+ *
  * Permission: reuses MANAGE_ACTIONS, the same automation-authoring audience as
  * Actions / QA scenarios / Security profiles — orchestration is the same class
  * of capability (defining machine work that runs against the workspace), so it
@@ -323,6 +331,77 @@ export class OrchestrationController {
       return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to nudge orchestrator');
+    }
+  }
+
+  /**
+   * 호출한 사람을 mission 대화방 참여자로 넣는다(티켓 f6a0de0e).
+   *
+   * 미션 생성자는 시작 시 자동 등록되므로 이 경로가 필요 없다. 여기로 오는 것은
+   * (a) 자동 등록이 없던 시절의 과거 미션과 (b) 생성자가 아닌 다른 운영자다 —
+   * 즉 이 라우트 하나가 백필과 초대 두 가지를 겸한다.
+   *
+   * 멱등하다: 이미 참여 중이면 `joined:false` 로 조용히 성공한다. 그래야 화면이
+   * 상태를 몰라도 부담 없이 부를 수 있다.
+   *
+   * 권한이 nudge/cancel 과 같은 `MANAGE_ACTIONS`(클래스 레벨)인 것은 의도된 선택이다.
+   * 미션 상세를 읽을 수 있는 관객과 orchestrator 에게 말을 걸 수 있는 관객을 다르게
+   * 두면, 지금 UI 에서 이미 가능한 nudge 보다 좁거나 넓은 두 번째 기준이 생긴다.
+   */
+  @Post('missions/:id/join-conversation')
+  async joinMissionConversation(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      return res.json(await this.runner.joinMissionConversation(id, body?.workspace_id, actorOf(req)));
+    } catch (e: any) {
+      return fail(res, e, 'Failed to join the mission conversation');
+    }
+  }
+
+  // ── Steps — 사람의 확인 게이트(티켓 5dbe4aa2) ─────────────────────────────
+
+  /**
+   * confirm node 에 Pass/Fail 판정을 제출한다.
+   *
+   * `visit` 은 **필수**다 — 서비스가 400 으로 강제한다. 생략을 허용하면 loop 재진입으로
+   * 화면이 낡은 클라이언트가 값을 빼는 것만으로 stale 대조를 건너뛰고 새 pass 를 잘못
+   * 판정한다(리뷰 라운드1). 여기서 별도로 검사하지 않는 이유는 검증을 두 곳에 두면
+   * 서로 어긋나기 때문이다 — 계약은 서비스 한 곳에만 둔다.
+   *
+   * 멱등성은 서비스가 보장한다(같은 `visit`+`verdict` 재제출은 재개 없이 기존 판정을
+   * 그대로 돌려준다) — 새로고침·중복 클릭·재접속이 전부 이 한 경로로 들어오므로 여기서
+   * 따로 방어하지 않는다. `visit` 은 화면이 본 pass 번호이며, loop 가 재진입해 화면이
+   * stale 해진 경우를 409 로 걸러낸다.
+   */
+  @Post('steps/:stepId/confirm')
+  async confirmStep(
+    @Param('stepId') stepId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.runner.submitConfirmDecision(stepId, body?.workspace_id, actorOf(req), {
+        verdict: body?.verdict,
+        feedback: body?.feedback,
+        visit: body?.visit,
+      });
+      return res.json({
+        already_decided: result.already_decided,
+        step_id: result.step.id,
+        step_key: result.step.step_key,
+        status: result.step.status,
+        confirm_decision: result.step.confirm_decision,
+        dispatched: result.dispatched,
+        loop_reentered: result.loop_reentered,
+        orchestrator_woken: result.orchestrator_woken,
+      });
+    } catch (e: any) {
+      return fail(res, e, 'Failed to submit the confirmation');
     }
   }
 

@@ -99,6 +99,12 @@ export interface InstanceRecord {
   update_channel?: string | null;       // npm channel: 'latest' | dist-tag | version | 'off'
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  // ticket 9408b308 — the manager's `scheduled` update policy is asking an
+  // operator to approve this exact version before it installs anything.
+  // `null` = the manager reports the field but nothing is pending;
+  // `undefined` = the manager predates the field entirely. Keep the two
+  // apart: only a reporting manager's `null` means "the request cleared".
+  update_approval_pending_version?: string | null;
   // Live count reported by the manager's in-memory circuit breaker.
   open_breaker_count?: number;
   // ticket 3d180f85 — per-reason count of dispatches suppressed by the manager's

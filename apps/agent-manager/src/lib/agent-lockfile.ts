@@ -14,6 +14,9 @@
 //      거치지 않으므로 remove 와 create 사이를 파고들 수 있다. 그렇게 create 가
 //      EEXIST 로 지면 raw fs 오류를 올리지 않고 승자를 다시 읽어 판정한다:
 //      살아 있으면 EAGENTLOCKED, 그마저 죽었으면 처음부터 재시도(createAfterCleanup).
+//   5. force 인수는 kill 까지 통째로 회수 가드 안에서 한다. 가드를 잡은 뒤 owner
+//      를 다시 읽어, 대기 중 동료 force contender 가 먼저 인수를 끝냈으면(관측한
+//      pid 와 다르면) 그 새 owner 를 죽이지 않고 EAGENTLOCKED 로 거절한다.
 //
 // Release rules:
 //   - On clean shutdown call release(); only unlinks if pid still matches ours.
@@ -174,37 +177,53 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
     throw e;
   }
 
-  log(`[lockfile] --force: SIGTERM previous owner pid=${existing.pid} role=${existing.role || '?'}`);
-  try {
-    process.kill(existing.pid, 'SIGTERM');
-  } catch {
-    /* already gone */
-  }
-  await waitForExit(existing.pid, FORCE_KILL_GRACE_MS);
-  if (isPidAlive(existing.pid)) {
-    log(`[lockfile] --force: graceful shutdown timed out; SIGKILL previous owner pid=${existing.pid}`);
-    try {
-      process.kill(existing.pid, 'SIGKILL');
-    } catch {
-      /* already gone */
-    }
-    await waitForExit(existing.pid, FORCE_KILL_CONFIRM_MS);
-  }
-  if (isPidAlive(existing.pid)) {
-    const e: any = new Error(
-      `AWB agent-manager previous owner pid=${existing.pid} did not exit; refusing overlapping takeover`,
-    );
-    e.code = 'EAGENTTAKEOVER';
-    throw e;
-  }
-
-  // 종료 대기 중이던 force contender들을 회수 가드로 직렬화한다. 가드 안에서
-  // owner를 다시 읽으므로 먼저 이긴 contender의 lock을 뒤늦게 삭제할 수 없다.
+  // 인수 **전체**(kill 포함)를 회수 가드 안에서 수행한다. 예전에는 kill 이 가드
+  // 밖에 있어서, 위에서 `existing` 을 읽은 뒤 SIGTERM 을 보내기까지의 창에 동료
+  // force contender 가 먼저 인수를 끝내고 자기 lock 을 설치하면 진 쪽이 그 **갓
+  // 태어난 owner** 를 죽였다 — 가드가 lockfile 쓰기만 직렬화하고 kill 은 보호하지
+  // 않았던 것이다(Windows CI 실측: 이긴 쪽이 TerminateProcess 로 exit 1). 가드
+  // 안에서 owner 를 다시 읽어, 관측했던 그 owner 가 아니면 죽이지 않고
+  // EAGENTLOCKED 로 거절한다 — 인수 후 재확인이 이미 쓰던 규칙과 같다.
+  log(
+    `[lockfile] --force: waiting for takeover guard (owner pid=${existing.pid} role=${existing.role || '?'})`,
+  );
   const releaseRecovery = await acquireRecoveryLock();
   try {
-    const current = readLock();
-    if (current && current.pid !== existing.pid) throw lockedBy(current);
-    if (current && isPidAlive(current.pid)) throw lockedBy(current);
+    const owner = readLock();
+    if (owner && isPidAlive(owner.pid)) {
+      if (owner.pid !== existing.pid) throw lockedBy(owner);
+
+      log(`[lockfile] --force: SIGTERM previous owner pid=${owner.pid} role=${owner.role || '?'}`);
+      try {
+        process.kill(owner.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      await waitForExit(owner.pid, FORCE_KILL_GRACE_MS);
+      if (isPidAlive(owner.pid)) {
+        log(`[lockfile] --force: graceful shutdown timed out; SIGKILL previous owner pid=${owner.pid}`);
+        try {
+          process.kill(owner.pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        await waitForExit(owner.pid, FORCE_KILL_CONFIRM_MS);
+      }
+      if (isPidAlive(owner.pid)) {
+        const e: any = new Error(
+          `AWB agent-manager previous owner pid=${owner.pid} did not exit; refusing overlapping takeover`,
+        );
+        e.code = 'EAGENTTAKEOVER';
+        throw e;
+      }
+
+      // 죽인 owner 는 종료 훅으로 자기 lock 을 지운다. 그 사이 가드를 거치지 않는
+      // happy path 로 새 프로세스가 lock 을 만들었을 수 있으니, 우리가 죽인 그
+      // owner 의 lock 이 아니면 지우지 않는다.
+      const current = readLock();
+      if (current && current.pid !== owner.pid) throw lockedBy(current);
+      if (current && isPidAlive(current.pid)) throw lockedBy(current);
+    }
     try {
       unlinkSync(LOCK_PATH);
     } catch (err: any) {

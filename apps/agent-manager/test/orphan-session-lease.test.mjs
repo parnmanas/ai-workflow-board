@@ -47,11 +47,14 @@ const BARRIER_PROLOGUE = `
   }));
 `;
 
-/** 배리어를 지키는 contender 를 띄운다. `ready` 는 READY 수신, `done` 은 종료. */
+/** 배리어를 지키는 contender 를 띄운다. `ready` 는 READY 수신, `done` 은 종료.
+ *  `awaitStderr(needle)` 는 contender 의 진행 상황을 제품 로그로 관찰하는 용도다
+ *  — 제품 로그는 stderr 로 나가므로 stdout 마커(ACQUIRED/REJECTED)와 섞이지
+ *  않는다. 관찰한 내용은 CI 진단이 사라지지 않도록 부모 stderr 로도 흘린다. */
 function spawnBarrieredContender(source, env) {
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
     env,
-    stdio: ['pipe', 'pipe', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.push(child);
   // contender 가 신호를 읽자마자 stdin 을 destroy 하므로, 부모의 write 가
@@ -65,27 +68,49 @@ function spawnBarrieredContender(source, env) {
     output += chunk;
     if (output.includes('READY')) signalReady();
   });
+
+  let stderrText = '';
+  const stderrWaiters = new Set();
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderrText += chunk;
+    process.stderr.write(chunk);
+    for (const waiter of [...stderrWaiters]) {
+      if (stderrText.includes(waiter.needle)) {
+        stderrWaiters.delete(waiter);
+        waiter.resolve();
+      }
+    }
+  });
+  const awaitStderr = (needle) => new Promise((resolve) => {
+    if (stderrText.includes(needle)) resolve();
+    else stderrWaiters.add({ needle, resolve });
+  });
+
   const done = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code) => resolve({ code, output }));
   });
-  return { child, ready, done };
+  return { child, ready, done, awaitStderr };
 }
 
-/** 둘 다 READY 가 될 때까지 기다린 뒤 동시에 출발시키고 결과를 모은다. */
-async function raceContenders(source, env) {
+/** 둘 다 READY 가 될 때까지 기다린 뒤 동시에 출발시키고 결과를 모은다.
+ *  `afterGo` 는 출발 직후 한 번 실행되는 훅으로, 출발만으로는 고정되지 않는
+ *  전제를 마저 고정할 때 쓴다(아래 force 레이스의 인수 가드 배리어). 훅 안에서
+ *  contender 가 죽어도 무한 대기하지 않도록 조기 종료와 race 시킨다. */
+async function raceContenders(source, env, afterGo) {
   const contenders = [spawnBarrieredContender(source, env), spawnBarrieredContender(source, env)];
-  await Promise.all(
-    contenders.map((c) => {
-      // 배리어 도달 전에 죽으면 무한 대기 대신 그 사실을 즉시 드러낸다.
-      const earlyExit = c.done.then(({ code, output }) => {
-        throw new Error(`contender가 배리어 도달 전에 종료됨: code=${code} output=${JSON.stringify(output)}`);
-      });
-      earlyExit.catch(() => {}); // race 가 끝난 뒤 남는 rejection 흡수
-      return Promise.race([c.ready, earlyExit]);
-    }),
-  );
+  const earlyExits = contenders.map((c) => {
+    // 배리어 도달 전에 죽으면 무한 대기 대신 그 사실을 즉시 드러낸다.
+    const earlyExit = c.done.then(({ code, output }) => {
+      throw new Error(`contender가 배리어 도달 전에 종료됨: code=${code} output=${JSON.stringify(output)}`);
+    });
+    earlyExit.catch(() => {}); // race 가 끝난 뒤 남는 rejection 흡수
+    return earlyExit;
+  });
+  await Promise.all(contenders.map((c, i) => Promise.race([c.ready, earlyExits[i]])));
   for (const c of contenders) c.child.stdin.write('go\n');
+  if (afterGo) await Promise.race([afterGo(contenders), ...earlyExits]);
   return Promise.all(contenders.map((c) => c.done));
 }
 
@@ -205,7 +230,27 @@ test('동시 force contender 둘 중 정확히 하나만 종료된 owner의 lock
     }
   `;
 
-  const results = await raceContenders(contenderSource, env);
+  // ── 인수 가드 배리어 ──────────────────────────────────────────────────
+  //
+  // READY/go 배리어는 두 contender 의 **출발**만 맞춘다. 출발한 뒤 lock 을 읽기
+  // 까지 수백 ms 밀리면(4-vCPU Windows 러너 실측) 늦은 쪽은 원래 owner 가 아니라
+  // **먼저 이긴 동료의 lock** 을 읽는다 — 그건 동시 경쟁이 아니라 순차 takeover
+  // 이고 --force 의 정상 동작이라, 제품이 아니라 이 테스트의 전제만 깨진다.
+  //
+  // 그래서 회수 가드(agent.lock.recovery)를 테스트가 먼저 잡아 둔다. 가드를 잡고
+  // 있는 동안에는 아무도 새 lock 을 설치할 수 없으므로, 두 contender 가 읽는
+  // owner 는 반드시 원래 owner 다. 둘 다 "가드 대기" 를 찍은 것을 확인한 뒤에야
+  // 놓아 주므로, 경쟁 전제가 벽시계 추측이 아니라 happens-before 로 고정된다.
+  // 가드 소유자 pid 를 이 테스트 프로세스로 적어 두면 stale 회수 대상이 아니다.
+  const recoveryLock = join(home, 'agent.lock.recovery');
+  await fsp.mkdir(recoveryLock);
+  await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+  const awaitingGuard = `--force: waiting for takeover guard (owner pid=${owner.pid}`;
+
+  const results = await raceContenders(contenderSource, env, async (contenders) => {
+    await Promise.all(contenders.map((c) => c.awaitStderr(awaitingGuard)));
+    await fsp.rm(recoveryLock, { recursive: true, force: true });
+  });
   // 진 contender 는 정상적으로 거절되고 스스로 빠져나가야 한다. 여기서 0 이 아닌
   // 코드가 나오면 진 쪽이 이긴 쪽에게 force-kill 당했다는 뜻이다(Windows 는
   // 원격 SIGTERM 을 TerminateProcess 로 흉내내 exit code 1 을 남긴다).

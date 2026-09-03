@@ -362,7 +362,7 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       if (scannedIds.has(alert.ticket_id)) continue;
       const liveTicket = await ticketRepo.findOne({ where: { id: alert.ticket_id } });
       if (liveTicket) {
-        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets || liveTicket.pending_ci_wait) {
+        if (liveTicket.archived_at || liveTicket.pending_user_action || liveTicket.pending_on_tickets || liveTicket.pending_ci_wait || liveTicket.pending_merge_lease) {
           // Manual archive after the alert landed. The archive itself was a
           // deliberate operator action — no need to spam an unstuck chat post
           // to announce that we agree. Drop the row silently so the next
@@ -404,6 +404,12 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
     // resolves self-clears there rather than needing this detector to
     // second-guess it.
     if (ticket.pending_ci_wait) return 'ci_wait';
+
+    // 랜딩 lease 대기 (ticket e630b530) — 위 CI 대기와 같은 자세로 무조건
+    // 신뢰한다. MergeLeaseService 가 자체 대기 상한(max_wait_minutes)을 갖고
+    // 있어 부여되지 않는 대기는 거기서 fail-open 으로 자체 해소되므로, 이
+    // 감지기가 되짚어 볼 필요가 없다.
+    if (ticket.pending_merge_lease) return 'merge_lease_wait';
 
     if (ticket.pending_on_tickets) {
       const openCount = await this.dataSource.getRepository(TicketPrerequisite)

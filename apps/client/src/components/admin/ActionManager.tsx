@@ -434,6 +434,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             state={formFolder}
             onChange={(patch) => setFormFolder((s) => ({ ...s, ...patch }))}
             showBuildMode={false}
+            workspaceId={effectiveWorkspaceId}
           />
           <div style={{ display: 'flex', gap: 12 }}>
             {formTrigger !== 'on_ticket_done' && (

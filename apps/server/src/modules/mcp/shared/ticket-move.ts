@@ -20,6 +20,7 @@ import type { ActivityService } from '../../../services/activity.service';
 import { loadTicketFull } from './ticket-parsing';
 import { shiftTicketPositions } from './ticket-helpers';
 import { applyTerminalEnteredAtForMove } from './archive-helpers';
+import { releaseMergeLeaseForMove } from './merge-lease-move';
 
 export interface PerformColumnMoveArgs {
   /** 이동할 티켓(현재 column_id/position 기준으로 시프트 계산). */
@@ -80,6 +81,7 @@ export async function performColumnMove(
       colRepoTx.findOne({ where: { id: destColumnId } }),
     ]);
     await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
+    await releaseMergeLeaseForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
 
     // Review-drift episode end (ticket 59efbde9) — delete the
     // ReviewDriftState row only when this move actually ENDS a review

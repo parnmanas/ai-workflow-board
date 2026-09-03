@@ -10,6 +10,7 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
@@ -29,6 +30,7 @@ import { SubagentMonitorService } from '../../services/subagent-monitor.service'
 import { activityEvents } from '../../services/activity.service';
 import {
   InstanceRegistryService,
+  type InstanceRecord,
   type RuntimeCapabilityDescriptor,
   type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
@@ -191,6 +193,90 @@ export class AgentManagerController {
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
+
+  /**
+   * ticket 9408b308 — 직전 하트비트가 광고하던 승인 대기 버전.
+   *
+   * 같은 instance_id 를 먼저 보고, 없으면 같은 (agent_id, hostname) 의 살아있는
+   * manager 인스턴스를 본다. 매니저가 재기동하면 instance_id 가 새로 발급되는데
+   * (upsert 가 그 전임자를 supersede 한다), 그때마다 "새 요청"으로 읽으면 재기동
+   * 한 번에 감사행이 하나씩 늘어난다 — 승인이 안 된 채 매니저가 몇 번 돌면
+   * 같은 버전에 대한 요청이 로그를 뒤덮는다.
+   */
+  private _previousApprovalPendingVersion(
+    instanceId: string,
+    agentId: string,
+    hostname: string,
+  ): string | null {
+    const direct = this.registry.get(instanceId);
+    if (direct) return direct.update_approval_pending_version ?? null;
+    for (const prev of this.registry.list()) {
+      if (prev.mode === 'manager' && prev.agent_id === agentId && prev.hostname === hostname) {
+        return prev.update_approval_pending_version ?? null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * ticket 9408b308 — 승인 요청을 운영자에게 표면화한다.
+   *
+   * WARN 로그(고신호) + `activity_logs` 감사행. ManagerDriftMonitorService 와
+   * 같은 계약을 의도적으로 따른다: ActivityService 가 아니라 repository 로 직접
+   * 저장해 Discord/SSE 팬아웃을 일으키지 않는다. 이 요청은 "지금 사람을 깨우는
+   * 알림"이 아니라 "관리자 페이지를 열지 않아도 남아 있는 기록"이 목적이다.
+   *
+   * best-effort — DB 가 흔들려도 하트비트 처리를 실패시키지 않는다.
+   */
+  private _surfaceUpdateApprovalRequest(rec: InstanceRecord, targetVersion: string): void {
+    const who = `${rec.hostname} (agent ${rec.agent_id.slice(0, 8)})`;
+    const message =
+      `agent-manager update approval requested: ${who} running v${rec.plugin_version} is asking an ` +
+      `operator to approve v${targetVersion} before installing it ` +
+      `(AWB_AGENT_MANAGER_UPDATE_POLICY=scheduled). Nothing installs until an update_manager ` +
+      `command is issued for this host — the request re-surfaces every maintenance window.`;
+    this.logService.warn('AgentManager', message, {
+      kind: 'update_approval_requested',
+      agent_id: rec.agent_id,
+      instance_id: rec.instance_id,
+      hostname: rec.hostname,
+      current_version: rec.plugin_version,
+      target_version: targetVersion,
+      update_channel: rec.update_channel ?? null,
+    });
+    try {
+      const repo = this.dataSource.getRepository(ActivityLog);
+      void repo
+        .save(
+          repo.create({
+            entity_type: 'agent_manager',
+            entity_id: rec.agent_id,
+            action: 'agent_manager_update_approval_requested',
+            field_changed: 'update_approval_pending_version',
+            old_value: String(rec.plugin_version || ''),
+            new_value: JSON.stringify({
+              instance_id: rec.instance_id,
+              hostname: rec.hostname,
+              current_version: rec.plugin_version,
+              target_version: targetVersion,
+              update_channel: rec.update_channel ?? null,
+            }),
+            actor_id: 'system',
+            actor_name: 'AgentManagerHeartbeat',
+            trigger_source: 'system',
+          }),
+        )
+        .catch?.((e: unknown) => {
+          this.logService.warn('AgentManager', 'update-approval audit-row write failed (continuing)', {
+            err: String(e), agent_id: rec.agent_id, target_version: targetVersion,
+          });
+        });
+    } catch (e) {
+      this.logService.warn('AgentManager', 'update-approval audit-row write threw (continuing)', {
+        err: String(e), agent_id: rec.agent_id, target_version: targetVersion,
+      });
+    }
+  }
 
   // ─── Agent Manager → Server ──────────────────────────────────────────────
 
@@ -399,6 +485,15 @@ export class AgentManagerController {
     const update_last_error = hasField('update_last_error')
       ? (typeof body.update_last_error === 'string' ? body.update_last_error : null)
       : undefined;
+    // ticket 9408b308 — `scheduled` 정책의 승인 대기 대상 버전. 위 update_* 와
+    // 같은 absent-vs-null 규율: `null` 은 "이 매니저는 이 필드를 알고 있고 지금은
+    // 대기 없음"이고, undefined 는 "필드를 모르는 구버전 매니저"다. 둘을 섞으면
+    // 구버전 매니저의 침묵이 "요청이 해소됐다"로 읽힌다.
+    const update_approval_pending_version = hasField('update_approval_pending_version')
+      ? (typeof body.update_approval_pending_version === 'string'
+          ? body.update_approval_pending_version.slice(0, 64)
+          : null)
+      : undefined;
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
@@ -460,12 +555,19 @@ export class AgentManagerController {
       dispatch_block_counts = out;
     }
 
+    // ticket 9408b308 — 승인 요청이 "운영자에게 도달"하려면 관리자가 대시보드를
+    // 열지 않아도 남는 신호가 필요하다. upsert 전에 직전 값을 집어 두고, 대상
+    // 버전이 새로 대기 상태로 바뀌는 **전이에서만** 경보 + 감사행을 남긴다
+    // (하트비트는 30초마다 오므로 값이 같은 동안 다시 쓰면 안 된다).
+    const hostname = typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
+    const previousApprovalPending = this._previousApprovalPendingVersion(instance_id, agent_id, hostname);
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
       workspace_id: null,
       mode,
-      hostname: typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown',
+      hostname,
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
       cli: typeof body?.cli === 'string' && body.cli ? body.cli : 'claude',
       cli_adapters,
@@ -486,6 +588,7 @@ export class AgentManagerController {
       update_channel,
       update_last_checked_at,
       update_last_error,
+      update_approval_pending_version,
       open_breaker_count,
       dispatch_suppression_counts,
       dispatch_block_counts,
@@ -494,6 +597,14 @@ export class AgentManagerController {
       last_spawn_error_cli,
       last_spawn_error_at,
     });
+
+    if (
+      typeof update_approval_pending_version === 'string' &&
+      update_approval_pending_version &&
+      update_approval_pending_version !== previousApprovalPending
+    ) {
+      this._surfaceUpdateApprovalRequest(rec, update_approval_pending_version);
+    }
 
     // Mark every managed agent the manager is supervising as alive. Managed
     // agents have no long-running process of their own — they only spawn

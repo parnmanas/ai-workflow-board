@@ -153,6 +153,9 @@ function makeSvc({ agent, workspace, instanceRegistry }) {
   };
   const membership = {
     async requireActiveParticipant() {},
+    // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
+    // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
+    async requireMissionRoomSpeaker() {},
     async getRoomMemberIds() { return ['user-1', agent.id]; },
     async getRoomAgentMemberIds() { return [agent.id]; },
   };
@@ -323,6 +326,9 @@ function makeGroupSvc({ agents, workspace, instanceRegistry }) {
   const agentMemberIds = new Set(agents.map((a) => a.id));
   const membership = {
     async requireActiveParticipant() {},
+    // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
+    // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
+    async requireMissionRoomSpeaker() {},
     async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
     async getRoomAgentMemberIds() { return agentMemberIds; },
   };

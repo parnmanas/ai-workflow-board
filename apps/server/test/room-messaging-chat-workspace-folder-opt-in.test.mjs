@@ -80,6 +80,9 @@ function makeSvc({ room, workspace }) {
   };
   const membership = {
     async requireActiveParticipant() {},
+    // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
+    // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
+    async requireMissionRoomSpeaker() {},
     async getRoomMemberIds() { return ['user-1']; },
     async getRoomAgentMemberIds() { return ['agent-1']; },
   };

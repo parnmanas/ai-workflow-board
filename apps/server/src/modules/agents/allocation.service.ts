@@ -142,6 +142,9 @@ export class AllocationService {
       // a ticket durably awaiting an external CI run has its triggers
       // dropped downstream too.
       if ((ticket as any).pending_ci_wait) continue;
+      // 랜딩 lease 대기 제외 (ticket e630b530): 같은 논리 — 저장소 랜딩 구간을
+      // 다른 티켓이 점유해 대기 중인 티켓도 트리거가 하류에서 드롭된다.
+      if ((ticket as any).pending_merge_lease) continue;
 
       // v0.41 — read role slugs straight off the column row. Replaces the
       // old `Board.routing_config[col.name.toLowerCase()]` lookup.

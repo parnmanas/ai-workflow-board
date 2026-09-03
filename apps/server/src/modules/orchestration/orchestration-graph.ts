@@ -30,10 +30,13 @@
  */
 
 import {
+  ConfirmPolicy,
   DEPENDENCY_SATISFYING_STATUSES,
   STEP_KEY_PATTERN,
   TERMINAL_STEP_STATUSES,
   computePlanProgress,
+  isAwaitingUser,
+  normalizeConfirmPolicy,
 } from './orchestration.constants';
 
 // ── 버전 ─────────────────────────────────────────────────────────────────────
@@ -43,8 +46,21 @@ export const GRAPH_SPEC_VERSION = 1;
 
 // ── 어휘 ─────────────────────────────────────────────────────────────────────
 
-export const GRAPH_NODE_KINDS = ['task', 'evaluator', 'router'] as const;
+/**
+ * - `task`      — 평범한 작업 node. 배정된 에이전트가 실행한다.
+ * - `evaluator` — 작업을 판정하고 `verdict`로 분기시키는 node(에이전트가 실행).
+ * - `router`    — 실행 없이 조건만으로 분기를 고르는 node.
+ * - `confirm`   — **사람**의 Pass/Fail 판정을 기다리는 게이트(티켓 5dbe4aa2).
+ *                 에이전트에게 디스패치되지 않으므로 assignee가 필요 없고, 대신
+ *                 `awaiting_user` 상태로 durable pause 한다. 분기는 evaluator와
+ *                 완전히 같은 기계를 쓴다 — `when.verdict: ['pass'|'fail']`.
+ */
+export const GRAPH_NODE_KINDS = ['task', 'evaluator', 'router', 'confirm'] as const;
 export type GraphNodeKind = (typeof GRAPH_NODE_KINDS)[number];
+
+/** confirm node 가 사람에게서 받을 수 있는 판정값 — `CONFIRM_VERDICTS`와 같은 어휘. */
+const CONFIRM_PASS = 'pass';
+const CONFIRM_FAIL = 'fail';
 
 /**
  * - `sequence`   — 무조건 의존성. depends_on과 정확히 같은 의미(기본값).
@@ -159,8 +175,12 @@ function normalizeCondition(raw: unknown): EdgeCondition | undefined {
   return out;
 }
 
-/** non-loop_back edge만 따라가며 `from`에서 도달 가능한 node 집합. */
-function reachableVia(edges: GraphEdge[], from: string, includeLoopBack = false): Set<string> {
+/**
+ * non-loop_back edge만 따라가며 `from`에서 도달 가능한 node 집합.
+ * `includeLoopBack`이면 재진입 edge까지 따라간다 — "이 node가 저 node를 (다시) 실행시킬
+ * 수 있는가"를 묻는 쪽(runner 의 confirm 피드백 전달)이 쓴다.
+ */
+export function reachableVia(edges: GraphEdge[], from: string, includeLoopBack = false): Set<string> {
   const adjacency = new Map<string, string[]>();
   for (const e of edges) {
     if (!includeLoopBack && e.kind === 'loop_back') continue;
@@ -188,12 +208,18 @@ function reachableVia(edges: GraphEdge[], from: string, includeLoopBack = false)
  * 그래프의 node는 **step과 1:1**이다 — 별도의 실행 단위를 만들지 않는다. 그래서
  * 그래프에서 빠진 step은 자동으로 고립 node(entry이자 terminal)로 채워지고,
  * 존재하지 않는 step을 가리키는 node/edge는 거부된다.
+ *
+ * `confirmPolicy`(티켓 5dbe4aa2)는 미션의 사용자 확인 강도다. 생략하면 기본값으로
+ * 정규화된다. **모든 호출부가 이 값을 넘겨야 한다** — `applyGraphPatch`와
+ * `carryGraphThroughReplan`이 이 함수를 재호출하므로, 한 곳이라도 빠뜨리면 patch나
+ * replan 한 번으로 `none` 정책이 조용히 우회된다.
  */
 export function validateGraphSpec(
   input: GraphSpecInput | null | undefined,
-  opts: { nodeKeys: string[] },
+  opts: { nodeKeys: string[]; confirmPolicy?: ConfirmPolicy | string | null },
 ): { spec: GraphSpec } | GraphValidationError {
   if (!input || typeof input !== 'object') return { error: 'graph must be an object' };
+  const confirmPolicy = normalizeConfirmPolicy(opts.confirmPolicy);
 
   const version = input.version ?? GRAPH_SPEC_VERSION;
   if (version !== GRAPH_SPEC_VERSION) {
@@ -428,6 +454,78 @@ export function validateGraphSpec(
         };
       }
     }
+    if (node.kind === 'confirm') {
+      // 정책 게이트(요구사항 8) — `none`이면 confirm 노드의 존재 자체를 거부한다.
+      // 이것이 정책 중 유일하게 프로그램적으로 강제되는 항목이다.
+      if (confirmPolicy === 'none') {
+        return {
+          error:
+            `graph node "${node.key}" is a confirm node, but this mission's confirm_policy is "none" — ` +
+            `user confirmation gates are not allowed here. Make it a task/evaluator node, or change the ` +
+            `mission's confirm_policy before planning.`,
+        };
+      }
+      // 양쪽 판정 모두 갈 곳이 있어야 한다. 한쪽이 없으면 사용자가 그 답을 골랐을 때
+      // 나가는 edge가 전부 dead 라서 미션이 조용히 멈춘다 — 사람에게 물어놓고 그 답을
+      // 버리는 셈이라, "게이트가 걸린 것처럼 보이는데 실제로는 막다른 길"이 된다.
+      //
+      // patch 규칙 3("loop_back 제거는 항상 허용")과의 관계: confirm 의 `fail` 경로가
+      // loop_back 하나뿐이면 그 제거는 이 규칙에 막힌다. 폭주 loop 의 탈출구가 사라지는
+      // 것은 아니다 — 규칙 1의 "max_visits 를 현재 visit 으로 낮추기"가 그대로 남아 있고,
+      // 그쪽이 오히려 사용자의 `fail` 답을 버리지 않으면서 재진입만 끊는 정확한 수단이다.
+      const edgesFor = (verdict: string) => outgoing.filter((e) => (e.when?.verdict ?? []).includes(verdict));
+      const passEdges = edgesFor(CONFIRM_PASS);
+      const failEdges = edgesFor(CONFIRM_FAIL);
+      const missing = [
+        ...(passEdges.length === 0 ? [CONFIRM_PASS] : []),
+        ...(failEdges.length === 0 ? [CONFIRM_FAIL] : []),
+      ];
+      if (missing.length > 0) {
+        return {
+          error:
+            `confirm node "${node.key}" has no outgoing edge for verdict ${missing.map((v) => `"${v}"`).join(' or ')} — ` +
+            `a user confirmation must route BOTH answers. Add an edge with ` +
+            `{ when: { verdict: ["${missing[0]}"] } } (a loop_back counts, and is the usual way to route "fail").`,
+        };
+      }
+
+      // "양쪽에 edge 가 있다"만으로는 부족하다(리뷰 라운드1). 아래 두 규칙이 더 필요하다 —
+      // 없으면 검증은 통과하는데 **사용자의 두 답이 실행상 구분되지 않는** 그래프가 만들어지고,
+      // 게이트는 분기가 아니라 단순 "확인 버튼"으로 전락한다. 요구사항 5("Pass 와 Failure 를
+      // 각각 다른 후속 edge 로 라우팅")가 정확히 여기서 깨진다.
+      //
+      // 1. 한 edge 가 pass 와 fail 을 **동시에** 실어서는 안 된다. `{ verdict: ["pass","fail"] }`
+      //    하나만 있으면 어느 답을 골라도 같은 edge 를 타므로 분기가 존재하지 않는다.
+      //    evaluator 는 다르다 — 거기서 `["approve","ship-it"]` 은 동의어 묶음이라 정상이다.
+      //    confirm 은 답이 정확히 둘뿐이고 그 둘이 사람의 선택 그 자체라서 규칙이 다르다.
+      const bothOnOneEdge = outgoing.find(
+        (e) => (e.when?.verdict ?? []).includes(CONFIRM_PASS) && (e.when?.verdict ?? []).includes(CONFIRM_FAIL),
+      );
+      if (bothOnOneEdge) {
+        return {
+          error:
+            `confirm node "${node.key}" has an edge to "${bothOnOneEdge.to}" whose condition matches BOTH "pass" ` +
+            `and "fail" — the two answers would take the same edge, so asking the person changes nothing. Split ` +
+            `it into one edge with { when: { verdict: ["pass"] } } and another with { when: { verdict: ["fail"] } }.`,
+        };
+      }
+
+      // 2. pass 가 여는 node 집합과 fail 이 여는 node 집합이 겹쳐서는 안 된다. 겹치는 node 는
+      //    사람이 무엇을 답하든 실행되므로 그 하류에 한해 확인이 아무 효과도 내지 않고,
+      //    사용자는 그 사실을 화면에서 알 방법이 없다. "어느 쪽이든 하는 일"은 분기 지점이
+      //    아니라 하류 join 으로 표현해야 한다.
+      const passTargets = new Set(passEdges.map((e) => e.to));
+      const sharedTarget = failEdges.map((e) => e.to).find((to) => passTargets.has(to));
+      if (sharedTarget) {
+        return {
+          error:
+            `confirm node "${node.key}" routes both "pass" and "fail" to "${sharedTarget}" — that node runs ` +
+            `whatever the person decides, so the confirmation has no effect on it. Send the two answers to ` +
+            `different nodes (the usual shape is pass → the next step, fail → a loop_back to the work that must ` +
+            `be redone); if something must happen either way, put it downstream of both with join="any".`,
+        };
+      }
+    }
   }
 
   // node 순서는 위상 정렬 순서로 고정 — UI lane 렌더링과 dispatch tie-break이 결정론적이도록.
@@ -552,6 +650,8 @@ export interface GraphProgress {
   /** 비종료지만 join 조건이 영영 충족될 수 없음 → blocked 처리 대상. */
   newlyBlocked: string[];
   inFlight: string[];
+  /** confirm node 가 사람의 판정을 기다리며 durable pause 중(티켓 5dbe4aa2). */
+  awaitingUser: string[];
   done: string[];
   failed: string[];
   allTerminal: boolean;
@@ -573,6 +673,7 @@ export function computeGraphProgress(spec: GraphSpec, states: GraphNodeState[]):
     waiting: [],
     newlyBlocked: [],
     inFlight: [],
+    awaitingUser: [],
     done: [],
     failed: [],
     allTerminal: true,
@@ -594,6 +695,14 @@ export function computeGraphProgress(spec: GraphSpec, states: GraphNodeState[]):
 
     if (['dispatched', 'running'].includes(status)) {
       out.inFlight.push(node.key);
+      out.allTerminal = false;
+      continue;
+    }
+    // confirm node 의 durable pause(티켓 5dbe4aa2). 여기서 명시적으로 걸러내지 않으면
+    // 아래 "pending / ready" 분기로 흘러 **매 pump 마다 다시 dispatchable 로 집계**되고,
+    // 그러면 사람이 답하기도 전에 같은 confirm 이 몇 번이고 재오픈된다.
+    if (isAwaitingUser(status)) {
+      out.awaitingUser.push(node.key);
       out.allTerminal = false;
       continue;
     }
@@ -691,6 +800,9 @@ export function graphFromWavePlan(steps: WaveStepInput[]): GraphSpec {
       edges.push({ from, to, kind: 'sequence' });
     }
   }
+  // confirmPolicy 를 넘기지 않는다: 이 adapter 는 `{ key }` 만으로 node 를 만들어 전부
+  // 기본 kind(`task`)가 되므로 confirm node 가 생길 수 있는 경로가 없다. 정책 검사는
+  // confirm node 가 하나도 없으면 어떤 정책값에서도 발화하지 않는다.
   const validated = validateGraphSpec(
     { version: GRAPH_SPEC_VERSION, nodes: keys.map((key) => ({ key })), edges, max_total_visits: keys.length },
     { nodeKeys: keys },
@@ -726,7 +838,7 @@ export function graphFromWavePlan(steps: WaveStepInput[]): GraphSpec {
  */
 export function carryGraphThroughReplan(
   spec: GraphSpec,
-  opts: { nodeKeys: string[] },
+  opts: { nodeKeys: string[]; confirmPolicy?: ConfirmPolicy | string | null },
 ): { spec: GraphSpec; added: string[] } | GraphValidationError {
   const planKeys = Array.from(new Set(opts.nodeKeys.map((k) => String(k ?? '').trim()).filter(Boolean)));
   const known = new Set(spec.nodes.map((n) => n.key));
@@ -755,7 +867,7 @@ export function carryGraphThroughReplan(
       edges,
       max_total_visits: Math.max(spec.max_total_visits, planKeys.length),
     },
-    { nodeKeys: planKeys },
+    { nodeKeys: planKeys, confirmPolicy: opts.confirmPolicy },
   );
   if ('error' in revalidated) return { error: revalidated.error };
   return { spec: revalidated.spec, added };
@@ -846,7 +958,7 @@ const edgeSignature = (e: { from: string; to: string; kind?: string }): string =
 export function applyGraphPatch(
   spec: GraphSpec,
   patch: GraphPatchInput | null | undefined,
-  opts: { nodeKeys: string[]; runtime: GraphRuntimeState },
+  opts: { nodeKeys: string[]; runtime: GraphRuntimeState; confirmPolicy?: ConfirmPolicy | string | null },
 ): { spec: GraphSpec; changes: GraphPatchChange[] } | GraphValidationError {
   if (!patch || typeof patch !== 'object') return { error: 'graph patch must be an object' };
 
@@ -966,7 +1078,10 @@ export function applyGraphPatch(
       edges: edgeInputs,
       max_total_visits: nextBudget,
     },
-    { nodeKeys: opts.nodeKeys },
+    // 정책을 반드시 함께 넘긴다(티켓 5dbe4aa2): `set_nodes`로 task node 의 kind 를
+    // `confirm`으로 바꿀 수 있으므로, 여기서 빠뜨리면 `none` 정책 미션이 patch 한 번으로
+    // confirm 게이트를 얻는다.
+    { nodeKeys: opts.nodeKeys, confirmPolicy: opts.confirmPolicy },
   );
   if ('error' in revalidated) return { error: `graph patch rejected: ${revalidated.error}` };
 
@@ -1012,6 +1127,8 @@ export interface MissionProgress {
   waiting: string[];
   newlyBlocked: string[];
   inFlight: string[];
+  /** 사람의 confirm 판정을 기다리는 node 들(티켓 5dbe4aa2). `inFlight`와 별개 축이다. */
+  awaitingUser: string[];
   done: string[];
   failed: string[];
   allTerminal: boolean;
@@ -1039,6 +1156,7 @@ export function computeMissionProgress(
       waiting: g.waiting,
       newlyBlocked: g.newlyBlocked,
       inFlight: g.inFlight,
+      awaitingUser: g.awaitingUser,
       done: g.done,
       failed: g.failed,
       allTerminal: g.allTerminal,

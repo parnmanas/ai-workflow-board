@@ -236,6 +236,11 @@ export interface InstanceHeartbeatPayload {
   update_channel?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  // ticket 9408b308 — `scheduled` 정책이 운영자 승인을 기다리는 대상 버전.
+  // 대기 중이 아니면 null 로 보낸다. `null`(대기 없음)과 `undefined`(이 필드를
+  // 아예 모르는 구버전 매니저)를 서버가 구분할 수 있어야, 서버가 구버전 매니저의
+  // 침묵을 "승인 요청이 사라졌다"로 오독하지 않는다.
+  update_approval_pending_version?: string | null;
   open_breaker_count?: number;
   // ticket 3d180f85 — per-reason dispatch-suppression counts from the
   // provision-spanning twin guard. Omitted when nothing was suppressed.
@@ -421,6 +426,7 @@ export class InstanceHeartbeat {
               update_channel: updateStatus.update_channel,
               update_last_checked_at: updateStatus.last_checked_at,
               update_last_error: updateStatus.last_error,
+              update_approval_pending_version: updateStatus.update_approval_pending_version ?? null,
             }
           : {}),
       };

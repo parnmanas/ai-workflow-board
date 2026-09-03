@@ -238,6 +238,9 @@ export class AgentWorkloadService {
       // a ticket durably awaiting an external CI run must not anchor focus
       // either, for the same bound-parameter reasons as the two gates above.
       .andWhere('t.pending_ci_wait = :falseVal')
+      // 랜딩 lease 대기 제외 (ticket e630b530): 같은 논리 — 저장소 랜딩 구간을
+      // 기다리는 티켓도 focus 를 잡아둬서는 안 된다.
+      .andWhere('t.pending_merge_lease = :falseVal')
       // Archived tickets (ticket 9b44526b) are excluded for the same reason:
       // they're no longer actionable workflow items, so they must not anchor
       // focus or block backlog promotion. Trigger emission is also gated

@@ -40,6 +40,7 @@ import { WorkspaceScheduleService } from '../workspace-schedule/workspace-schedu
 import { FeaturesService } from '../features/features.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
+import { MergeLeaseService } from '../tickets/merge-lease.service';
 import { HandoffService } from '../handoff/handoff.service';
 import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
@@ -155,6 +156,7 @@ export class McpController implements OnModuleInit {
     private readonly featuresService: FeaturesService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly ciWaitService: CiWaitService,
+    private readonly mergeLeaseService: MergeLeaseService,
     private readonly handoffService: HandoffService,
     private readonly benchmarkService: BenchmarkService,
     private readonly workflowFunctionsService: WorkflowFunctionsService,
@@ -262,6 +264,7 @@ export class McpController implements OnModuleInit {
       triggerLoopService: this.triggerLoopService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       ciWaitService: this.ciWaitService,
+      mergeLeaseService: this.mergeLeaseService,
       handoffService: this.handoffService,
       benchmarkService: this.benchmarkService,
       workflowFunctionsService: this.workflowFunctionsService,

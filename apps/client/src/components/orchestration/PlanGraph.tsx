@@ -187,20 +187,25 @@ function StepCard({
         )}
         {node && node.kind !== 'task' && (
           <span
+            data-testid="node-kind-chip"
             style={{
               fontSize: 9,
               fontWeight: 700,
               letterSpacing: '0.04em',
               textTransform: 'uppercase',
-              color: tokens.colors.accent,
+              // confirm 은 "사람이 개입해야 하는 node" 라 나머지 kind(에이전트가 실행)와
+              // 다른 색을 쓴다 — 그래프만 보고 어디서 멈출지 알 수 있어야 한다.
+              color: node.kind === 'confirm' ? tokens.colors.warningLight : tokens.colors.accent,
             }}
             title={
               node.kind === 'evaluator'
                 ? 'Judges upstream work and reports a verdict that selects the next branch'
-                : 'Only picks a branch — every edge out of it is conditional'
+                : node.kind === 'confirm'
+                  ? 'A person answers Pass/Fail here — the mission pauses until they do'
+                  : 'Only picks a branch — every edge out of it is conditional'
             }
           >
-            {node.kind}
+            {node.kind === 'confirm' ? 'user confirm' : node.kind}
           </span>
         )}
         {node && node.max_visits > 1 && (

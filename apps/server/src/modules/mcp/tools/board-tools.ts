@@ -21,6 +21,7 @@ import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/har
 import { EffortPresetsConfigSchema, validateEffortPresetsInput, serializeEffortPresets } from '../../../common/effort-presets';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { MergeGateConfigSchema, serializeMergeGateConfig } from '../../../common/merge-gate-config';
+import { MergeLeaseConfigSchema, serializeMergeLeaseConfig } from '../../../common/merge-lease-config';
 import { RespawnStormConfigSchema, serializeRespawnStormConfig } from '../../../common/respawn-storm-config';
 import { BoardHardBudgetConfigSchema, serializeHardBudgetConfig } from '../../../common/hard-budget-config';
 import { DefaultRoleAssignmentsSchema, validateDefaultRoleAssignmentsInput, serializeDefaultRoleAssignments } from '../../../common/default-role-assignments-config';
@@ -265,6 +266,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         .describe('Per-board QA multi-phase model, e.g. phases: [{ id: "import", timeout_sec: 600 }, { id: "build", timeout_sec: 1800 }]. Array order = phase order; ids unique; timeout_sec a positive integer. When set (unless liveness_policy overrides it), the reaper auto-selects phase_timeouts: each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase). Scenario-level qa_phases overrides this. Pass null to clear (falls back to legacy single-running behavior).'),
       merge_gate_config: MergeGateConfigSchema.nullable().optional()
         .describe('Per-board merge/integration gate. When enabled, the server checks git invariants at the Merging boundary: Review→Merging blocks if the feature branch is BEHIND base (stale-base; require_fresh_base); Merging→Done blocks if the branch is not fully merged into base (partial-merge; require_full_merge). Each check is ON unless explicitly set false, and degrades to a pass (never a false block) when the repo/branch can\'t be resolved. Pass null (or enabled:false) to disable — reverts to prompt-driven merge with no server checks.'),
+      merge_lease_config: MergeLeaseConfigSchema.nullable().optional()
+        .describe('Per-board LANDING LEASE (ticket e630b530). Serializes the "start pre-landing CI verification → land" window per (repo, base branch), so the base cannot advance under a ticket\'s CI run and force it to rebase + re-verify the same change indefinitely. UNLIKE merge_gate_config this is ON BY DEFAULT — null means default-enabled, not disabled; pass {"enabled": false} to turn it off for this board (kill switch). Safety comes from fail-open, not from the default: an unresolvable repo, a service error, or exceeding max_wait_minutes all let the ticket proceed WITHOUT a lease rather than blocking it. Tunables: idle_timeout_minutes (liveness, not a work budget — an unresolved CI wait counts as progress), max_hold_minutes (absolute backstop), max_wait_minutes (waiter cap before fail-open), max_reverify_attempts (bounded retries before an explicit failure).'),
       respawn_storm_config: RespawnStormConfigSchema.nullable().optional()
         .describe('Per-board respawn-storm circuit breaker (ticket ab06eac2). Counts abnormal QUICK subagent deaths per (ticket,role) off the durable subagents table; past min_deaths inside window_minutes with ZERO forward progress (no fresh comment / column move), it auto-pends the ticket + alerts + writes a respawn_storm_halted activity. Cause-agnostic last line of defence against death-loops/twin-echo. Defaults are ON (30m window, 5 quick deaths, 120s quick-death) so an untouched board is protected. Pass null (or {}) to clear back to the env baseline; enabled:false opts out.'),
       hard_budget_config: BoardHardBudgetConfigSchema.nullable().optional()
@@ -282,7 +285,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         'resume inheriting. Takes effect on the next dispatch.'
       ),
     },
-    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile }) => {
+    async ({ board_id, name, description, routing_config, column_prompts, auto_archive_days, harness_config, effort_presets, language, environment_config, paused, liveness_policy, qa_phases, merge_gate_config, merge_lease_config, respawn_storm_config, hard_budget_config, default_role_assignments, worktree_mode, use_pr, cli_runtime_profile }) => {
       const boardRepo = dataSource.getRepository(Board);
       const board = await boardRepo.findOne({ where: { id: board_id } });
       if (!board) return err('Board not found');
@@ -384,6 +387,12 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       // empty object) clears the override back to "no gate" (prompt-driven merge).
       if (merge_gate_config !== undefined) {
         board.merge_gate_config = serializeMergeGateConfig(merge_gate_config);
+      }
+      // 랜딩 lease (ticket e630b530). 인자는 이미 strict 스키마를 통과했으므로
+      // 저장은 직렬화뿐이다. null(또는 빈 객체)은 **기본값(활성)** 으로 되돌리는
+      // 것이지 끄는 것이 아니다 — 끄려면 {"enabled": false}.
+      if (merge_lease_config !== undefined) {
+        board.merge_lease_config = serializeMergeLeaseConfig(merge_lease_config);
       }
       // Respawn-storm circuit breaker (ticket ab06eac2). Args already passed the
       // strict RespawnStormConfigSchema, so storage is a straight serialize; null

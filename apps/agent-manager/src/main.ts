@@ -1340,7 +1340,9 @@ async function runRuntime(
   // its own. A contended SIGUSR1 just gets a no-op summary back.
   process.on('SIGUSR1', async () => {
     try {
-      const result = await runSelfUpdate({ log, countInFlightSessions });
+      // ticket 9408b308: SIGUSR1 은 호스트에 접근 가능한 운영자의 명시적 지시다
+      // — `scheduled` 정책에서 이 개시를 승인으로 기록해 다음 창에 다시 묻지 않게 한다.
+      const result = await runSelfUpdate({ log, countInFlightSessions, approvalSource: 'sigusr1' });
       log(`Self-update: ${result.summary}`);
     } catch (err: any) {
       log(`Self-update failed: ${err?.stack || err?.message || err}`);
