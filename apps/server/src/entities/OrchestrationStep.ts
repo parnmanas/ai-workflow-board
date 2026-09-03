@@ -1,5 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
-import { ConfirmDecision } from '../modules/orchestration/orchestration.constants';
+import { ConfirmDecision, ConfirmNotice } from '../modules/orchestration/orchestration.constants';
 
 /**
  * One delegated unit of a Mission's plan — a node in the plan DAG.
@@ -230,6 +230,19 @@ export class OrchestrationStep {
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
   confirm_decision: ConfirmDecision | null;
+
+  /**
+   * 이 게이트의 대기 사실을 사람에게 알린 기록(티켓 a78cb566). null = 이 pass 에서 아직
+   * 보내지 않음. confirm 이 아닌 node 에서는 항상 null 이다.
+   *
+   * `confirm_decision` 과 달리 loop 재진입에서 **일부러 리셋하지 않는다** — 리셋은
+   * `openConfirmGate` 가 새 알림을 보내며 새 값으로 덮어쓰는 것으로 충분하고, 미리
+   * null 로 만들면 "그 사이에 알림이 이미 나갔는지" 를 판별할 근거가 사라진다.
+   *
+   * `orchestration.constants.ts` 의 `ConfirmNotice` 참고.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  confirm_notice: ConfirmNotice | null;
 
   @Column({ type: Date, nullable: true, default: null })
   dispatched_at: Date | null;

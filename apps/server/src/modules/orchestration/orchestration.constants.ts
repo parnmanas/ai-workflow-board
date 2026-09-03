@@ -145,6 +145,35 @@ export interface ConfirmDecision {
   visit: number;
 }
 
+/**
+ * confirm 게이트가 열렸다는 사실을 사람에게 **밖으로** 알린 기록(티켓 a78cb566).
+ *
+ * 타임라인 이벤트(`confirm_requested`)와 목적이 다르다: 그쪽은 "무엇을 근거로 물었나"를
+ * 남기고, 이쪽은 "누구에게 언제 나갔나"를 남겨 **중복 발송을 막는 키**로 쓰인다.
+ * 화면을 열어야만 알 수 있던 대기 상태를 밖으로 밀어내는 것이 이 필드의 존재 이유다.
+ *
+ * `visit`이 키의 핵심이다. 게이트는 loop 재진입으로 pass 를 바꿔가며 여러 번 열리는데,
+ * **각 pass 는 각각 알릴 가치가 있지만 같은 pass 는 한 번이면 된다**. 그래서 "보냈다"를
+ * 불리언이 아니라 pass 번호로 저장한다 — `notice.visit !== step.visit` 이면 새 pass 이므로
+ * 다시 보내고, 같으면 이미 보낸 pass 다.
+ *
+ * 메모리가 아니라 컬럼에 두는 이유: 서버가 재기동해도 이미 보낸 알림을 다시 보내면 안 된다.
+ * `awaiting_user` 자체가 프로세스 수명을 넘어 지속되는 상태이므로, 그 위에 얹는 발송 기록도
+ * 같은 수명을 가져야 한다.
+ */
+export interface ConfirmNotice {
+  /** 이 알림이 어느 pass 에 대한 것인가 — `step.visit` 과 대조한다. */
+  visit: number;
+  /** 최초 알림을 **시도**한 시각(ISO). 전송 성공 여부와 무관하다 — 아래 주석 참고. */
+  notified_at: string;
+  /** 장기 미응답 리마인더를 시도한 시각(ISO). 없으면 아직 보내지 않았다. */
+  reminded_at?: string;
+  /** 최초 시도에서 실제로 전달된 채널 수(관측용). 0 = 설정된 채널이 없거나 전부 실패. */
+  sent?: number;
+  /** 알림을 받은 사람 수(관측용). */
+  recipients?: number;
+}
+
 /** Satisfies a downstream `depends_on` edge. `skipped` counts — the orchestrator
  *  declared the work unnecessary, so dependents must not stay pending forever. */
 export const DEPENDENCY_SATISFYING_STATUSES: readonly StepStatus[] = ['done', 'skipped'];
@@ -218,6 +247,10 @@ export const ORCHESTRATION_EVENT_TYPES = [
   // 언제 어떤 판정을 왜 내렸는지를 남긴다. 중복 제출은 두 번째 이벤트를 만들지 않는다.
   'confirm_requested',
   'confirm_decided',
+  // 게이트 대기 사실을 밖으로 알린 기록(티켓 a78cb566). `confirm_requested` 가 "물었다"
+  // 라면 이쪽은 "사람에게 닿게 보냈다" 다 — 둘을 합치면 "화면을 아무도 안 열어서 멈춰
+  // 있었다" 를 사후에 판별할 수 있다. 전송 실패도 남긴다(sent=0).
+  'confirm_notified',
   'note',
   'error',
 ] as const;
