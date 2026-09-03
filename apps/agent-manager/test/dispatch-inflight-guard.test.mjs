@@ -1517,8 +1517,19 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
   const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
   const dispatched = spyDispatchTrigger(mgr);
 
+  // 재생 경로는 판단 직전에 반드시 티켓을 다시 조회한다 — 그 조회를 세어두면
+  // "아직 판단 전이라 dispatch 가 0" 과 "판단한 결과 dispatch 가 0" 을 구분할 수
+  // 있다. 고정 sleep 대신 이 관측 가능한 신호를 기다린다.
+  const outer = globalThis.fetch;
+  let ticketFetches = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/api/agent/tickets/')) ticketFetches++;
+    return outer(url, init);
+  };
+
   await dispatcher.handleCommentMention(reviewMentionEvJson());
   const onExit = calls.spawn[0].onExit;
+  const fetchesBeforeRelease = ticketFetches;
 
   // 트리거가 발행된 컬럼('c-review')과 지금 티켓이 있는 컬럼(전역 fetch 목의 'c1')이
   // 다르다 = 그 사이 누군가(멘션 strand 자신일 수 있다)가 이미 다음 단계로 옮겼다.
@@ -1529,7 +1540,8 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
 
   onExit();
 
-  await delay(400);
+  const decided = await waitFor(() => ticketFetches > fetchesBeforeRelease, { timeoutMs: 4000 });
+  assert.equal(decided, true, '재생 경로가 실제로 실행돼 티켓의 현재 컬럼을 다시 확인했다');
   assert.equal(dispatched.length, 0, '이미 이동한 티켓에 옛 컬럼 워크플로를 재생하지 않는다');
   assert.equal(mgr.spawnCount, 0, '세션도 뜨지 않았다');
 });
@@ -1548,10 +1560,18 @@ test('round 4: 멘션이 응답 중인 코멘트의 comment 팬아웃 트리거�
   await dispatcher.handleTrigger(evJson({ action: 'reviewer', trigger_source: 'comment', field_changed: 'trig-comment' }));
   assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, '억제 자체는 그대로 기록된다');
 
+  // onExit → seat.release() → onRelease 는 전부 동기다. 반환 시점에 "무엇을
+  // 재생할지" 판단은 이미 끝나 있으므로 sleep 으로 추정할 필요가 없다.
   onExit();
-
-  await delay(400);
+  assert.equal(
+    tracker.holderKind(KEY('t1', 'reviewer', 'a1')),
+    null,
+    'seat 가 해제되며 홀더 등록이 소비됐다 = 재생 판단이 끝난 시점이다',
+  );
   assert.equal(dispatched.length, 0, 'comment 소스는 재생 대상이 아니다');
+
+  await delay(250);
+  assert.equal(dispatched.length, 0, '뒤늦게 재생되지도 않는다');
   assert.equal(mgr.spawnCount, 0, '중복 디스패치가 생기지 않았다');
 });
 
@@ -1570,12 +1590,20 @@ test('round 4: 홀더가 컬럼 트리거이면 억제된 쌍둥이 column_move 
   await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-twin' }));
   assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, '쌍둥이가 억제됐다');
 
+  // 홀더가 끝나면 그 finally 가 seat 를 동기적으로 해제한다 — await 가 풀린 시점에
+  // 재생 판단은 이미 끝나 있다.
   gate.resolve();
   await pHolder;
-
-  await delay(400);
+  assert.equal(
+    tracker.holderKind(KEY('t1', 'reviewer', 'a1')),
+    null,
+    'seat 가 해제되며 홀더 등록이 소비됐다 = 재생 판단이 끝난 시점이다',
+  );
   assert.equal(dispatched.length, 1, '홀더의 1회 dispatch 뿐 — 억제된 쌍둥이는 재생되지 않는다');
   assert.equal(dispatched[0].triggerId, 'trig-holder');
+
+  await delay(250);
+  assert.equal(dispatched.length, 1, '뒤늦게 재생되지도 않는다');
   assert.equal(mgr.spawnCount, 1, '세션도 하나뿐이다');
 });
 
@@ -1604,6 +1632,14 @@ test('round 4: 같은 hold 에서 force_respawn 과 column_move 가 모두 억�
   assert.equal(dispatched[0].forceRespawn, true);
   await delay(200);
   assert.equal(dispatched.length, 1, '두 건이 재생 1회로 수렴한다 — 워크플로 이중 실행 없음');
+  // 재생을 둘 다 쏘면 두 번째는 첫 번째가 방금 잡은 seat 에 걸려 twin 으로 억제된다
+  // — dispatched 카운트만으로는 구분이 안 되므로(그쪽도 1로 보인다) 억제 횟수까지
+  // 못 박는다. 3이 되면 "재생을 두 번 시도했고 하나가 버려졌다" 는 뜻이다.
+  assert.equal(
+    tracker.suppressedCount('inflight_dispatch'),
+    2,
+    '재생 시도 자체가 1회뿐이다 — 두 번째 재생이 seat 에 걸려 버려지는 낭비도 없다',
+  );
 });
 
 // ───── Part F round 3 (reviewer 지적, e90294e7): a long-running one-shot outlives the TTL/safety-valve ─────
