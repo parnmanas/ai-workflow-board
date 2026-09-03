@@ -344,7 +344,13 @@ export default function MissionDetailPage() {
           }
         >
           <div style={{ height: 420, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            {/*
+              `key` 로 미션이 바뀌면 패널을 통째로 remount 한다 — 패널 내부에도 미션 경계
+              초기화가 있지만(리뷰 라운드3 P0), 호출부에서 한 번 더 못박아 두면 이후 이
+              패널을 다른 곳에서 재사용할 때도 미션 기록이 섞이지 않는다.
+            */}
             <MissionConversationPanel
+              key={mission.id}
               missionId={mission.id}
               workspaceId={wsId}
               roomId={mission.room_id}

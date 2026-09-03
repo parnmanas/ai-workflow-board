@@ -16,6 +16,8 @@
 //   • 과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실제로 렌더링된다(창이 뒤로 밀린다)
 //   • bare 멘션이 참여자 로스터로 해석돼 pill 로 렌더링된다
 //   • 참여자는 읽음 처리되고 관전자는 남의 방 읽음을 건드리지 않는다
+//   • 미션을 바꾸면 이전 미션의 대화·실행 이력이 한 프레임도 남지 않는다
+//   • 미션 A 의 늦은 응답이 B 의 화면을 덮어쓰지 않는다
 //   • needs_recovery step 이 "Waiting" 으로 조용히 오표시되지 않는다
 
 import test from 'node:test';
@@ -97,7 +99,7 @@ async function withPanel({ props, getChatRoomMessages, getChatRoom, listOrchestr
     // 패널이 로그인 사용자 id 로 "내 메시지"를 가르므로 AuthProvider 가 필요하다.
     const view = mountWithBoardStream(h(Panel, props), { withAuth: true });
     await settle();
-    await body({ view, es: () => FakeEventSource.instances[0], readCalls, eventPageCalls });
+    await body({ view, es: () => FakeEventSource.instances[0], readCalls, eventPageCalls, h, Panel });
     view.unmount();
   } finally {
     Object.assign(api, originals);
@@ -506,6 +508,135 @@ test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을
     },
     async ({ readCalls }) => {
       assert.deepEqual(readCalls, [], '관전자가 남의 방을 읽음 처리하면 그 방 참여자의 미읽음이 사라진다');
+    },
+  );
+});
+
+test('미션을 바꾸면 이전 미션의 대화·실행 이력이 한 프레임도 남지 않는다', async () => {
+  // 라우터는 미션 A → B 로 옮길 때 같은 컴포넌트 인스턴스를 재사용한다. 초기화하지 않으면
+  // A 에서 커서로 불러온 과거 이벤트가 B 의 events 앞에 그대로 합쳐져 렌더링된다 —
+  // 미션 기록/권한 경계가 깨지는 사용자 가시 결함이다(리뷰 라운드3 P0).
+  //
+  // 호출부에는 `key` 로 remount 하는 이중 안전장치가 있지만, 이 테스트는 **패널 자체**가
+  // props 변경만으로 올바른지 보려고 일부러 key 없이 rerender 한다 — 그래야 이 패널을
+  // 다른 곳에서 재사용해도 안전하다는 것이 실제로 검증된다.
+  const aEvents = Array.from({ length: 100 }, (_, i) =>
+    evt('a-recent-' + i, 'step_progress', 'A recent ' + i, new Date(Date.UTC(2026, 5, 1, 3, 0, i)).toISOString()),
+  );
+  const aOlder = Array.from({ length: 5 }, (_, i) =>
+    evt('a-old-' + i, 'note', 'A OLD ' + i, new Date(Date.UTC(2026, 5, 1, 1, 0, i)).toISOString()),
+  );
+  const bEvents = [evt('b-1', 'step_dispatched', 'B dispatched', '2026-06-02T00:00:00.000Z')];
+
+  const messagesByRoom = {
+    'room-a': [msg('a-msg', 'A 미션의 대화', { room_id: 'room-a' })],
+    'room-b': [msg('b-msg', 'B 미션의 대화', { room_id: 'room-b' })],
+  };
+  const pageCalls = [];
+
+  await withPanel(
+    {
+      props: { missionId: 'mission-A', workspaceId: 'ws-1', roomId: 'room-a', live: true, events: aEvents },
+      getChatRoomMessages: async (roomId) => messagesByRoom[roomId] ?? [],
+      listOrchestrationMissionEvents: async (id) => {
+        pageCalls.push(id);
+        return id === 'mission-A'
+          ? { events: [...aOlder].reverse(), has_more: false, next_cursor: null }
+          : { events: [], has_more: false, next_cursor: null };
+      },
+    },
+    async ({ view, h: create, Panel: Component }) => {
+      const scrollUp = async () => {
+        const el = view.container.querySelector('[data-testid="mission-conversation-scroll"]');
+        await act(async () => {
+          el.scrollTop = 0;
+          el.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+          await Promise.resolve();
+        });
+        await settle();
+      };
+
+      await scrollUp();
+      let text = textOf(view.container);
+      assert.ok(text.includes('A OLD 0'), '전제: A 의 과거 이벤트가 실제로 로드돼야 한다');
+      assert.ok(text.includes('A 미션의 대화'), '전제: A 의 메시지가 보여야 한다');
+      const callsAfterA = pageCalls.length;
+
+      // 미션 B 로 전환 — key 없이 같은 인스턴스를 rerender(라우터 재사용 재현).
+      view.rerender(
+        create(Component, {
+          missionId: 'mission-B',
+          workspaceId: 'ws-1',
+          roomId: 'room-b',
+          live: true,
+          events: bEvents,
+        }),
+      );
+
+      // B 의 조회가 끝나기 **전** 첫 프레임부터 A 가 없어야 한다.
+      text = textOf(view.container);
+      assert.ok(!text.includes('A OLD'), 'A 의 과거 실행 이력이 B 화면에 남으면 미션 기록 경계가 깨진다');
+      assert.ok(!text.includes('A 미션의 대화'), 'A 의 대화가 한 프레임이라도 B 화면에 남으면 안 된다');
+
+      await settle();
+      text = textOf(view.container);
+      assert.ok(!text.includes('A OLD'), '조회 완료 후에도 A 이력이 섞이면 안 된다');
+      assert.ok(!text.includes('A 미션의 대화'));
+      assert.ok(text.includes('B 미션의 대화'), 'B 의 대화는 새로 조회돼야 한다');
+      assert.ok(text.includes('B dispatched'), 'B 의 실행 이벤트가 보여야 한다');
+
+      await scrollUp();
+      for (const id of pageCalls.slice(callsAfterA)) {
+        assert.equal(id, 'mission-B', 'B 전환 후 A 의 mission_id 로 조회하면 커서가 남의 미션을 판다');
+      }
+    },
+  );
+});
+
+test('미션 A 의 늦은 응답이 B 의 화면을 덮어쓰지 않는다', async () => {
+  // 미션을 바꾼 뒤 A 의 조회가 뒤늦게 도착하는 경합. 클로저 캡처만으로는 못 막는다 —
+  // 응답을 **적용하는 시점**에 "지금 화면의 미션"과 대조해야 한다. 이 가드가 없으면
+  // B 를 보고 있는데 A 의 대화가 갑자기 튀어나온다.
+  let releaseA;
+  const aPending = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+
+  await withPanel(
+    {
+      props: { missionId: 'mission-A', workspaceId: 'ws-1', roomId: 'room-a', live: true, events: [] },
+      getChatRoomMessages: async (roomId) => {
+        if (roomId === 'room-a') return aPending; // 사용자가 옮길 때까지 응답하지 않는다
+        return [msg('b-msg', 'B 미션의 대화', { room_id: 'room-b' })];
+      },
+    },
+    async ({ view, h: create, Panel: Component }) => {
+      // A 의 조회는 아직 진행 중인 채로 B 로 전환한다.
+      view.rerender(
+        create(Component, {
+          missionId: 'mission-B',
+          workspaceId: 'ws-1',
+          roomId: 'room-b',
+          live: true,
+          events: [],
+        }),
+      );
+      await settle();
+      assert.ok(textOf(view.container).includes('B 미션의 대화'), '전제: B 의 조회는 정상 완료돼야 한다');
+
+      // 이제서야 A 의 응답이 도착한다.
+      await act(async () => {
+        releaseA([msg('a-late', 'A 의 지각 응답', { room_id: 'room-a' })]);
+        await Promise.resolve();
+      });
+      await settle();
+
+      const text = textOf(view.container);
+      assert.ok(
+        !text.includes('A 의 지각 응답'),
+        '미션을 옮긴 뒤 도착한 이전 미션의 응답이 화면에 반영되면 안 된다',
+      );
+      assert.ok(text.includes('B 미션의 대화'), 'B 의 대화가 지각 응답에 덮이면 안 된다');
     },
   );
 });

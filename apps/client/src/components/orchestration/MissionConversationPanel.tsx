@@ -156,8 +156,48 @@ export default function MissionConversationPanel({
   /** 과거 로드 직전의 스크롤 높이 — 로드 후 위치를 보정해 화면이 튀지 않게 한다. */
   const pendingAnchorRef = useRef<number | null>(null);
 
+  // ── 미션 경계 (리뷰 라운드3 P0) ─────────────────────────────────────────────
+  //
+  // 이 패널의 상태는 전부 **한 미션에 귀속**된다. 그런데 라우터는 미션 A → B 로 옮길 때
+  // 같은 컴포넌트 인스턴스를 재사용하므로, 초기화하지 않으면 A 에서 커서로 불러온
+  // `olderEvents` 가 B 의 `events` 앞에 그대로 합쳐져 렌더링된다 — 미션 기록 경계가
+  // 깨지는 사용자 가시 결함이다. `messages`/`observer`/`error` 도 B 의 조회가 끝날
+  // 때까지 A 값이 노출된다.
+  //
+  // 초기화를 `useEffect` 로 하지 않고 **렌더 단계**에서 하는 이유: effect 는 커밋 뒤에
+  // 돌기 때문에 A 의 데이터가 최소 한 프레임 그려진다. 아래 방식은 React 의 "props 가
+  // 바뀌면 렌더 중에 state 를 조정한다" 패턴이라, 낡은 화면이 한 프레임도 커밋되지 않는다.
+  const missionKey = `${missionId}|${roomId ?? ''}`;
+  const [renderedMissionKey, setRenderedMissionKey] = useState(missionKey);
+  // 늦게 도착하는 응답이 새 미션의 상태를 덮어쓰지 못하게 하는 출처 표식. 클로저 캡처만으로는
+  // 막을 수 없다 — 응답을 적용할 시점에 "지금 화면의 미션"과 대조해야 한다.
+  const activeMissionKeyRef = useRef(missionKey);
+  if (renderedMissionKey !== missionKey) {
+    setRenderedMissionKey(missionKey);
+    activeMissionKeyRef.current = missionKey;
+    setMessages([]);
+    setOlderEvents([]);
+    setEventCursor(null);
+    setHasMoreEvents(false);
+    setEventWindowEdge('latest');
+    setParticipants([]);
+    setParticipantCount(0);
+    setObserver(false);
+    setError(null);
+    setHasMore(false);
+    setLoading(true);
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    loadingEventsRef.current = false;
+    pendingAnchorRef.current = null;
+  }
+
   const load = useCallback(async () => {
     if (!roomId) return;
+    // 이 조회가 어느 미션의 것인지 박아둔다 — 응답이 늦게 오는 사이 사용자가 다른
+    // 미션으로 옮겼다면 그 결과를 적용하면 안 된다.
+    const issuedFor = `${missionId}|${roomId}`;
+    const stillCurrent = () => activeMissionKeyRef.current === issuedFor;
     setLoading(true);
     setError(null);
     try {
@@ -170,6 +210,7 @@ export default function MissionConversationPanel({
         rows = await api.getChatRoomMessages(roomId, PAGE_SIZE, undefined, true);
         asObserver = true;
       }
+      if (!stillCurrent()) return;
       setObserver(asObserver);
       setMessages(rows);
       setHasMore(rows.length >= PAGE_SIZE);
@@ -183,9 +224,11 @@ export default function MissionConversationPanel({
         // 새로 맞추려 들면 그 불일치를 이 파일에만 다르게 해석하는 셈이 된다.
         const detail: any = await api.getChatRoom(roomId, asObserver);
         const roster = projectParticipants(detail);
+        if (!stillCurrent()) return;
         setParticipants(roster);
         setParticipantCount(countUserParticipants(roster));
       } catch {
+        if (!stillCurrent()) return;
         setParticipants([]);
         setParticipantCount(0);
       }
@@ -193,12 +236,13 @@ export default function MissionConversationPanel({
       // 관전자는 남의 방 읽음 표시를 건드리면 안 된다(ChatPage 와 같은 규칙).
       if (!asObserver) api.markChatRoomRead(roomId).catch(() => {});
     } catch (e: any) {
+      if (!stillCurrent()) return;
       setError(e?.message || '대화를 불러오지 못했습니다');
       setMessages([]);
     } finally {
-      setLoading(false);
+      if (stillCurrent()) setLoading(false);
     }
-  }, [roomId]);
+  }, [missionId, roomId]);
 
   useEffect(() => {
     void load();
@@ -206,11 +250,13 @@ export default function MissionConversationPanel({
 
   const loadOlder = useCallback(async () => {
     if (!roomId || loadingOlderRef.current || !hasMore || messages.length === 0) return;
+    const issuedFor = `${missionId}|${roomId}`;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     pendingAnchorRef.current = scrollRef.current?.scrollHeight ?? null;
     try {
       const older = await api.getChatRoomMessages(roomId, PAGE_SIZE, messages[0].id, observer);
+      if (activeMissionKeyRef.current !== issuedFor) return;
       setHasMore(older.length >= PAGE_SIZE);
       if (older.length > 0) {
         setMessages((prev) => {
@@ -250,6 +296,7 @@ export default function MissionConversationPanel({
 
   const loadOlderEvents = useCallback(async () => {
     if (!workspaceId || loadingEventsRef.current || !hasMoreEvents || !eventCursor) return;
+    const issuedFor = `${missionId}|${roomId ?? ''}`;
     loadingEventsRef.current = true;
     try {
       const page = await api.listOrchestrationMissionEvents(missionId, workspaceId, {
@@ -257,6 +304,8 @@ export default function MissionConversationPanel({
         before_at: eventCursor.at,
         before_seq: eventCursor.seq,
       });
+      // 미션이 바뀐 뒤 도착한 페이지를 붙이면 남의 미션 이력이 섞인다.
+      if (activeMissionKeyRef.current !== issuedFor) return;
       // 서버는 최신 → 과거 순으로 준다. 화면은 과거 → 최신이므로 뒤집어 앞에 붙인다.
       const older = [...page.events].reverse();
       if (older.length > 0) {
