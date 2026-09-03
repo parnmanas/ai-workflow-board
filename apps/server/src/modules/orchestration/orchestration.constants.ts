@@ -476,7 +476,17 @@ export function computePlanProgress(steps: StepStateView[]): PlanProgress {
       out.done.push(s.step_key);
       continue;
     }
-    if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') {
+    // `needs_recovery` 가 여기 반드시 있어야 한다(티켓 4d065f82). 이 함수는
+    // TERMINAL_STEP_STATUSES 를 참조하지 않고 상태를 직접 나열해 분류하므로, 목록에
+    // 없는 상태는 아래 "pending / ready" 분기로 흘러 **dispatchable 로 분류된다** —
+    // 즉 자동 재실행을 금지하려고 만든 상태가 오히려 즉시 재디스패치를 부른다.
+    // 정확히 막으려던 비멱등 작업의 중복 실행이라 그냥 두면 기능이 반대로 동작한다.
+    if (
+      s.status === 'failed' ||
+      s.status === 'blocked' ||
+      s.status === 'cancelled' ||
+      s.status === 'needs_recovery'
+    ) {
       out.failed.push(s.step_key);
       continue;
     }
