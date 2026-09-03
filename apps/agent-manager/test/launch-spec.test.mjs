@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 
 import { computeAgentLaunchSpec, computeAgentLaunchSpecs } from '../dist/lib/launch-spec.js';
 import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
+import { resolveModelChain } from '../dist/lib/cli-adapters/base.js';
 
 const SECRET = 'sk-ant-api03-SUPERSECRETVALUE';
 
@@ -122,7 +123,8 @@ test('출처 귀속 — 모델 / 권한 / MCP 가 각자 자기 인자를 가져
 
   assert.deepEqual(bySource('model'), ['--model', 'claude-opus-5']);
   assert.deepEqual(bySource('permission'), ['--dangerously-skip-permissions']);
-  assert.deepEqual(bySource('mcp'), ['/cfg/mcp.json']);
+  // 값은 자리표시자다 — 실제 파일이 spawn 시점에 만들어지기 때문(전용 테스트 참조).
+  assert.deepEqual(bySource('mcp'), ['<MCP 설정: spawn 시 생성>']);
   // `--mcp-config` 플래그 자체는 mcpConfigPath 가 없어도 어댑터가 항상 내므로
   // 어댑터 기본값이 맞다 — 값만 mcp 로 귀속된다.
   assert.ok(bySource('adapter').includes('--mcp-config'));
@@ -168,8 +170,123 @@ test('런타임 프로파일 인자는 descriptor 뒤에 붙고 runtime_profile 
     model: 'qwen3-coder',
     arg_count: 2,
   });
-  // 프로파일 모델이 에이전트 모델을 이긴다 — spawn 사이트와 같은 우선순위.
-  assert.equal(spec.model, 'qwen3-coder');
+  // `--model` 은 프로파일 활성 시 **비어야** 한다 — 아래 전용 테스트 참조.
+  assert.equal(spec.model, null);
+  assert.equal(spec.runtime_profile.model, 'qwen3-coder');
+});
+
+test('프로파일 활성 시 raw profile model 이 argv 에 오르지 않는다', () => {
+  // 리뷰 P1. spawn 사이트 둘 다 `effectiveModel = claudeRuntimeProfile ? null : …` 라
+  // `--model` 을 의도적으로 생략한다(ticket 41dc37cb round 3) — profile.model 은
+  // raw provider id 라 CLI 가 `--model` 값으로 거부하고, 실제 라우팅은
+  // ANTHROPIC_MODEL 계열 env 로 간다. 여기에 profile.model 을 넣으면 화면이
+  // 실제로는 붙지 않는 플래그를 실행 명령이라고 주장하게 된다.
+  const RAW = 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  const spec = computeAgentLaunchSpec(ctx(), {
+    runtimeProfileOverride: {
+      id: 'vllm', protocol: 'openai-compatible', base_url: 'http://127.0.0.1:8000',
+      model: RAW,
+      // 폴백 후보가 있어도 프로파일 활성 세션에서는 무시된다(아래 체인 단언).
+    },
+  });
+
+  assert.equal(spec.model, null, '프로파일 활성인데 --model 값이 잡혔다');
+  for (const mode of spec.modes) {
+    assert.equal(mode.args.some((a) => a.value === '--model'), false, `${mode.mode} 에 --model 이 붙었다`);
+    assert.equal(mode.args.some((a) => a.value.includes('Qwen')), false, `${mode.mode} argv 에 raw model 이 샜다`);
+    assert.equal(mode.args.some((a) => a.source === 'model'), false);
+  }
+  // 서빙 모델은 사라지지 않고 backend 메타데이터로 남는다.
+  assert.equal(spec.runtime_profile.model, RAW);
+  // 그리고 CLI 가 실제로 model 을 받는 경로(env)가 화면에 드러나야 "왜 --model 이
+  // 없는지"가 설명된다.
+  const envKeys = spec.env.filter((e) => e.source === 'runtime_profile').map((e) => e.key);
+  assert.ok(envKeys.includes('ANTHROPIC_MODEL'));
+  // env 값도 원문을 싣지 않는다.
+  assert.equal(spec.env.some((e) => e.value.includes('Qwen')), false);
+});
+
+test('폴백 재시도 경로에서도 raw profile model 이 argv 후보에 없다', () => {
+  // 리뷰 P1 — 최초 spawn 만이 아니라 fallback-eligible 재시도까지 봐야 한다.
+  // 제품의 실제 헬퍼를 그대로 호출해 불변식을 고정한다: 프로파일이 있으면
+  // resolveModelChain 이 harness.fallback_models 를 통째로 버리고 `[null]` 만
+  // 남기므로, 어떤 재시도도 raw model 을 argv 에 올리지 못한다.
+  const profile = {
+    id: 'vllm', protocol: 'openai-compatible', base_url: 'http://x', model: 'raw-served-model',
+  };
+  const chain = resolveModelChain(null, profile, ['claude-opus-5', 'claude-sonnet-5']);
+  assert.deepEqual(chain, [null], '프로파일 활성 시 모델 체인은 [null] 이어야 한다');
+  assert.equal(chain.some((m) => m === 'raw-served-model'), false);
+
+  // 프로파일이 없을 때는 폴백이 살아 있어야 한다(이 테스트가 공허하지 않다는 증명).
+  assert.deepEqual(
+    resolveModelChain('claude-opus-5', null, ['claude-sonnet-5']),
+    ['claude-opus-5', 'claude-sonnet-5'],
+  );
+});
+
+test('MCP 설정 경로는 어느 경로에서도 정적 경로를 실행 명령에 넣지 않는다', () => {
+  // 리뷰 P1. persistent session 은 **항상** per-process 임시 사본을 쓰고,
+  // one-shot 도 티켓+역할 디스패치면 매번 새 임시 설정을 만든다. 정적 설정을
+  // 그대로 쓰는 건 역할 없는 채팅 one-shot 뿐이라, 복사 가능한 명령에 정적
+  // 경로를 넣으면 운영자가 그 값을 실효값으로 읽는다.
+  const spec = computeAgentLaunchSpec(ctx());
+
+  for (const mode of spec.modes) {
+    const i = mode.args.findIndex((a) => a.value === '--mcp-config');
+    assert.ok(i >= 0, `${mode.mode} 에 --mcp-config 가 없다`);
+    const value = mode.args[i + 1];
+    assert.equal(value.source, 'mcp');
+    assert.equal(value.placeholder, true, `${mode.mode} 의 MCP 값이 자리표시자가 아니다`);
+    assert.match(value.value, /spawn 시 생성/);
+    assert.equal(
+      mode.args.some((a) => a.value === '/cfg/mcp.json'),
+      false,
+      `${mode.mode} 실행 명령에 정적 MCP 경로가 들어갔다`,
+    );
+    // 두 경로가 어떻게 다른지는 argv 로 드러나지 않으므로 note 로 구분한다.
+    assert.ok(mode.notes.length > 0);
+  }
+  // 정적 경로 자체는 사라지지 않는다 — 채팅 one-shot 이 실제로 쓰는 값이다.
+  assert.equal(spec.mcp_config_path, '/cfg/mcp.json');
+  const oneshotNotes = spec.modes.find((m) => m.mode === 'oneshot').notes.join(' ');
+  assert.match(oneshotNotes, /채팅 one-shot/);
+  assert.match(oneshotNotes, /임시 MCP 설정/);
+});
+
+test('두 경로의 argv 가 실제 spawn 사이트 입력으로 만든 descriptor 와 일치한다', () => {
+  // 리뷰 요청: "두 경로를 실제 spawn descriptor 와 대조". spawn 사이트가
+  // 어댑터에 넘기는 값(프로파일 있으면 model=null, MCP 는 spawn 시 만든 경로)을
+  // 그대로 재현해 어댑터를 직접 돌리고, launch-spec 의 렌더 결과와 토큰 골격을
+  // 맞춘다. 여기가 어긋나면 화면이 실제로 안 도는 명령을 보여 준다는 뜻이다.
+  const adapter = new ClaudeCliAdapter();
+  const profile = {
+    id: 'vllm', protocol: 'openai-compatible', base_url: 'http://x', model: 'raw-served-model',
+  };
+  const spec = computeAgentLaunchSpec(ctx(), { runtimeProfileOverride: profile });
+
+  const spawnSiteSpec = {
+    rolePrompt: 'role',
+    mcpConfigPath: '/run/agent/cfg-1730000000-abc.json', // spawn 시 만들어지는 임시 경로
+    model: null,                                          // effectiveModel = profile ? null : …
+    harness: null,
+    effort: null,
+    permission: TRUSTED,
+  };
+  const realSession = adapter.buildSessionSpawn({
+    ...spawnSiteSpec, sessionMode: 'persistent', sessionId: 'sid',
+  }).args;
+  const realOneshot = adapter.buildOneshotSpawn({ ...spawnSiteSpec, taskText: 'task' }).args;
+
+  // 프로파일 인자는 spawn 사이트가 descriptor 뒤에 push 하므로 길이에 포함된다.
+  const profileArgCount = (profile.args ?? []).length;
+  assert.equal(argsOf(spec, 'session').length, realSession.length + profileArgCount);
+  assert.equal(argsOf(spec, 'oneshot').length, realOneshot.length + profileArgCount);
+
+  // 플래그 골격(값 자리를 뺀 알려진 플래그들)이 동일해야 한다.
+  const flagsOf = (list) => list.filter((v) => /^--[a-z]/i.test(v));
+  assert.deepEqual(flagsOf(argsOf(spec, 'session').map((a) => a.value)), flagsOf(realSession));
+  assert.deepEqual(flagsOf(argsOf(spec, 'oneshot').map((a) => a.value)), flagsOf(realOneshot));
 });
 
 test('cwd 는 프로파일이 고정했을 때만 exact 이고 그 외에는 base 다', () => {
@@ -218,10 +335,13 @@ test('마스킹 — 자격증명이 args·env 어디에도 원문으로 나오�
   assert.equal(env.AWB_PLAIN, `<${'plain-value-0123'.length}ch>`);
   // cli-home 경로는 비밀이 아니고 UI 가 이미 다른 곳에서 보여주므로 그대로 남는다.
   assert.equal(env.CLAUDE_CONFIG_DIR, '/home/agent/cli-home');
-  assert.deepEqual(
-    spec.env.map((e) => e.source).sort(),
-    ['cli_home', 'credential', 'credential', 'runtime_profile'],
-  );
+  // 프로파일이 활성이면 모델 라우팅 env(ANTHROPIC_MODEL 계열 4개)가 함께 실린다 —
+  // CLI 가 model 을 받는 실제 경로라 `--model` 부재를 설명하는 값이다.
+  const bySrc = (src) => spec.env.filter((e) => e.source === src).map((e) => e.key);
+  assert.deepEqual(bySrc('cli_home'), ['CLAUDE_CONFIG_DIR']);
+  assert.deepEqual(bySrc('credential').sort(), ['ANTHROPIC_API_KEY', 'AWB_PLAIN']);
+  assert.ok(bySrc('runtime_profile').includes('ANTHROPIC_MODEL'));
+  assert.ok(bySrc('runtime_profile').includes('PROFILE_AUTH_TOKEN'));
 });
 
 test('마스킹 — 알려진 안전값이라도 secret 모양이면 가린다', () => {
@@ -247,9 +367,14 @@ test('마스킹 — 알려진 안전값이라도 secret 모양이면 가린다',
 test('프롬프트 본문은 실리지 않고 자리표시자로 표시된다', () => {
   const spec = computeAgentLaunchSpec(ctx());
   const placeholders = argsOf(spec, 'oneshot').filter((a) => a.placeholder === true);
-  // 역할 프롬프트 + task text 두 자리.
-  assert.equal(placeholders.length, 2);
-  for (const p of placeholders) assert.match(p.value, /디스패치 시 생성/);
+  // 역할 프롬프트 + task text + MCP 설정 경로 세 자리.
+  assert.deepEqual(placeholders.map((a) => a.source).sort(), ['adapter', 'adapter', 'mcp']);
+  for (const p of placeholders) assert.match(p.value, /디스패치 시 생성|spawn 시 생성/);
+  // 프롬프트 자리 둘은 여전히 본문이 아니라 자리표시자다.
+  assert.equal(
+    placeholders.filter((a) => /디스패치 시 생성/.test(a.value)).length,
+    2,
+  );
   // 실행 시점 입력은 지어내지 않고 이름만 보고한다.
   assert.ok(spec.varies_per_dispatch.length > 0);
   assert.ok(spec.varies_per_dispatch.some((v) => v.includes('harness')));

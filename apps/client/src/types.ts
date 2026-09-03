@@ -2041,6 +2041,9 @@ export interface LaunchArgEntry {
 export interface LaunchModeSpec {
   mode: 'session' | 'oneshot';
   args: LaunchArgEntry[];
+  /** argv 만으로는 드러나지 않는 조건부 동작(예: 역할 고정 여부에 따라 MCP 설정
+   *  출처가 갈리는 것). 매니저가 계산해 보낸 문구를 그대로 보여준다. */
+  notes: string[];
 }
 
 export interface LaunchEnvEntry {

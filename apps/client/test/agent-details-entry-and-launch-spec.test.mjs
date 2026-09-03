@@ -177,6 +177,7 @@ const SPEC = {
     // 첫 항목이 기본 경로 — 실제 티켓 디스패치가 타는 지속 세션 쪽이다.
     {
       mode: 'session',
+      notes: ['MCP 설정은 spawn 마다 복사한 per-process 임시 경로입니다.'],
       args: [
         { value: '--session-id', source: 'session' },
         { value: '<세션 id: spawn 시 생성>', source: 'session', placeholder: true },
@@ -184,6 +185,8 @@ const SPEC = {
         { value: 'claude-opus-5', source: 'model' },
         { value: '--input-format', source: 'adapter' },
         { value: 'stream-json', source: 'adapter' },
+        { value: '--mcp-config', source: 'adapter' },
+        { value: '<MCP 설정: spawn 시 생성>', source: 'mcp', placeholder: true },
         { value: '--dangerously-skip-permissions', source: 'permission' },
         { value: '--settings', source: 'runtime_profile' },
         { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
@@ -191,6 +194,7 @@ const SPEC = {
     },
     {
       mode: 'oneshot',
+      notes: ['역할 없는 채팅 one-shot 만 정적 MCP 설정을 그대로 사용합니다.'],
       args: [
         { value: '--print', source: 'adapter' },
         { value: '--model', source: 'model' },
@@ -271,7 +275,7 @@ test('값 없음과 해석 실패를 구분해서 표시한다', () => {
       cwd: null,
       runtime_profile: null,
       env: [],
-      modes: [{ mode: 'oneshot', args: [] }],
+      modes: [{ mode: 'oneshot', args: [], notes: [] }],
     },
     managerFound: true,
     reported: true,
@@ -401,4 +405,32 @@ test('기준 작업 폴더를 실제 프로세스 cwd 인 것처럼 보여주지
   });
   assert.doesNotMatch(exact, /작업 폴더 \(기준\)/);
   assert.doesNotMatch(exact, /티켓별 worktree 가 이 아래에/);
+});
+
+test('경로별 단서와 모델 라우팅 설명이 화면에 드러난다', () => {
+  // 리뷰 P1 후속 — MCP 값이 왜 자리표시자인지, `--model` 이 왜 없는지는 argv 만
+  // 봐서는 알 수 없다. 그 이유가 화면에 없으면 운영자는 값이 누락된 것으로 읽는다.
+  const html = renderSection({ spec: SPEC, managerFound: true, reported: true });
+  assert.match(html, /data-testid="launch-spec-mode-notes"/);
+  assert.match(html, /per-process 임시 경로/);
+  // 정적 MCP 경로가 실행 명령에 들어가면 안 된다.
+  assert.match(html, /&lt;MCP 설정: spawn 시 생성&gt;/);
+
+  // 런타임 프로파일이 있으면 서빙 모델과 "플래그는 안 붙는다"는 사실을 함께 보여준다.
+  const profiled = renderSection({
+    spec: { ...SPEC, model: null },
+    managerFound: true,
+    reported: true,
+  });
+  assert.match(profiled, /qwen3/);
+  assert.match(profiled, /환경변수로 라우팅/);
+
+  // 프로파일이 없으면 종전대로 모델 값을 그대로 보여준다.
+  const plain = renderSection({
+    spec: { ...SPEC, runtime_profile: null },
+    managerFound: true,
+    reported: true,
+  });
+  assert.doesNotMatch(plain, /환경변수로 라우팅/);
+  assert.match(plain, /claude-opus-5/);
 });

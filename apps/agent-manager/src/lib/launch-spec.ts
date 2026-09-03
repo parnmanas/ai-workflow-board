@@ -51,6 +51,7 @@ import {
   type RuntimeProfileSpec,
 } from './cli-adapters/base.js';
 import { resolveBinOverride } from './cli-resolver.js';
+import { MODEL_ROUTING_ENV_KEYS } from './runtime-profiles.js';
 import {
   resolveEffectivePermissionPolicy,
   type EffectivePermissionPolicy,
@@ -86,6 +87,9 @@ export interface LaunchArgEntry {
 export interface LaunchModeSpec {
   mode: 'session' | 'oneshot';
   args: LaunchArgEntry[];
+  /** 이 경로에서만 성립하는 단서. argv 만으로는 드러나지 않는 조건부 동작
+   *  (예: 역할 고정 여부에 따라 MCP 설정 출처가 갈리는 것)을 적는다. */
+  notes: string[];
 }
 
 export interface LaunchEnvEntry {
@@ -141,6 +145,7 @@ const PLACEHOLDERS = Object.freeze({
   rolePrompt: '<역할 프롬프트: 디스패치 시 생성>',
   taskText: '<작업 내용: 디스패치 시 생성>',
   sessionId: '<세션 id: spawn 시 생성>',
+  mcpConfig: '<MCP 설정: spawn 시 생성>',
 });
 const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set(Object.values(PLACEHOLDERS));
 
@@ -148,6 +153,22 @@ const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set(Object.values(PLACEHOLDE
  *  UUID)으로 정규화하므로 결과 토큰을 문자열로 예측하지 않고, `sessionId: null`
  *  변형과의 차집합으로 위치만 찾아낸다. */
 const SESSION_ID_SENTINEL = 'awb-launch-spec-session-sentinel';
+
+/** MCP 설정 경로 변형을 만들기 위한 sentinel. 실제 경로를 넣지 않는 이유는
+ *  {@link PLACEHOLDERS.mcpConfig} 주석 참조 — 어느 spawn 경로든 이 값은
+ *  spawn 시점에 만들어지는 파일이라 정적 경로를 보여 주면 안 된다. */
+const MCP_CONFIG_SENTINEL = '/awb-launch-spec-mcp-sentinel.json';
+
+/** 경로별 단서. argv 만 봐서는 드러나지 않는 조건부 동작을 적는다. */
+const MODE_NOTES: Record<'session' | 'oneshot', string[]> = {
+  session: [
+    'MCP 설정은 spawn 마다 프로파일별 공유 설정을 복사한 per-process 임시 경로입니다 — 항상 새로 만들어집니다.',
+  ],
+  oneshot: [
+    '티켓과 역할이 지정된 디스패치는 spawn 마다 임시 MCP 설정을 새로 만듭니다(역할별 헤더가 들어가야 하므로 정적 설정을 재사용할 수 없습니다).',
+    '역할 없는 채팅 one-shot 만 아래 "MCP 설정" 의 정적 경로를 그대로 사용합니다.',
+  ],
+};
 
 /** 디스패치 시점에만 정해지는 입력들. 이름만 보고하고 값은 지어내지 않는다. */
 const PER_DISPATCH_INPUTS = Object.freeze([
@@ -287,6 +308,11 @@ function renderModeArgs(opts: {
     if (source === 'session' && !BARE_FLAG_NAME.test(arg)) {
       return { value: PLACEHOLDERS.sessionId, source, placeholder: true };
     }
+    // MCP 설정 경로도 같은 이유로 값 자리는 자리표시자다 — 어느 spawn 경로든
+    // 실제 파일은 spawn 시점에 만들어진다(commonSpec 주석 참조).
+    if (source === 'mcp' && !BARE_FLAG_NAME.test(arg)) {
+      return { value: PLACEHOLDERS.mcpConfig, source, placeholder: true };
+    }
     if (PLACEHOLDER_VALUES.has(arg)) {
       return { value: arg, source, placeholder: true };
     }
@@ -328,7 +354,22 @@ export function computeAgentLaunchSpec(
     // 그래서 이 사양의 permission.source 는 'agent_trust' 아니면 'default' 다.
     harnessMode: null,
   });
-  const model = profile?.model || ctx.model || null;
+  // `--model` 로 실제 내려가는 값. **프로파일이 있으면 null 이다** — 리뷰 P1.
+  //
+  // spawn 사이트 둘 다 `effectiveModel = claudeRuntimeProfile ? null : (...)` 다
+  // (`subagent-manager.ts` / `base-session-manager.ts`). 프로파일이 서빙하는
+  // model 은 raw provider id 라 CLI 가 `--model` 값으로 거부하므로, 대신
+  // `RuntimeLease.claudeEnv()` 가 ANTHROPIC_MODEL 계열 env 로 라우팅한다
+  // (ticket 41dc37cb round 3). 여기서 `profile.model` 을 `--model` 자리에 넣으면
+  // 실제로는 붙지 않는 플래그를 실행 명령이라고 보여 주게 된다.
+  //
+  // 폴백 체인도 같다: `resolveModelChain()` 이 프로파일 활성 시
+  // `buildModelChain(null, null)` → `[null]` 이라, 재시도 spawn 에서도 raw
+  // profile model 이 argv 에 오르지 않는다.
+  const model = profile ? null : (ctx.model || null);
+  // 프로파일이 서빙하는 backend model. argv 가 아니라 env 라우팅으로 전달되므로
+  // `model` 과 분리해 메타데이터로만 노출한다.
+  const servedModel = profile?.model || null;
 
   const base: AgentLaunchSpecEntry = {
     agent_id: ctx.agent_id,
@@ -349,7 +390,9 @@ export function computeAgentLaunchSpec(
       ? {
           id: profile.id,
           protocol: profile.protocol,
-          model: profile.model || null,
+          // backend 가 서빙하는 model. **argv 가 아니라 env 로 전달된다** —
+          // `--model` 자리에는 오지 않으므로 위 `model` 과 혼동하면 안 된다.
+          model: servedModel,
           arg_count: profile.args?.length ?? 0,
         }
       : null,
@@ -377,7 +420,10 @@ export function computeAgentLaunchSpec(
   }
 
   const profileArgs = (profile?.args ?? []).map((a) => String(a ?? ''));
-  const structuralSafe = [model, base.cwd, base.mcp_config_path, ctx.cli_home_dir];
+  // 정적 MCP 경로는 **의도적으로 빠져 있다** — 어느 spawn 경로도 그 값을 argv 에
+  // 쓰지 않으므로(commonSpec 주석) 표시 가능 집합에 남겨 둘 이유가 없고, 남겨 두면
+  // 귀속이 어긋난 토큰이 정적 경로와 우연히 일치할 때 그대로 렌더된다.
+  const structuralSafe = [model, base.cwd, ctx.cli_home_dir];
   // 권한은 "빼는" 변형이 성립하지 않는다 — null 을 넘기면 어댑터가 기본
   // 등급(trusted)으로 폴백해 결국 어떤 권한 플래그든 다시 붙기 때문이다.
   // 대신 **다른 등급**으로 지어 비교하면 등급에 따라 달라지는 토큰만 정확히
@@ -385,9 +431,18 @@ export function computeAgentLaunchSpec(
   // 그건 "이 CLI 에서 권한은 인자로 표현되지 않는다"는 올바른 답이다.
   const otherTier = permission.tier === 'trusted' ? ('strict' as const) : ('trusted' as const);
 
+  // MCP 설정 경로에 정적 `ctx.mcp_config_path` 를 넣지 않는다 — 리뷰 P1.
+  //
+  // 실제 경로는 spawn 시점에 만들어진다: persistent session 은 **항상** 프로파일별
+  // 공유 설정을 per-process 임시 파일로 복사해 쓰고(`base-session-manager.ts`),
+  // one-shot 은 티켓+역할이 지정된 디스패치(`needsSessionPin`)면 매번 새 임시
+  // 설정을 쓴다(`subagent-manager.ts`). 정적 설정을 그대로 쓰는 건 역할 없는
+  // 채팅 one-shot 뿐이다. 복사 가능한 "실행 명령"에 정적 경로가 들어가면
+  // 운영자가 그 값을 실효값으로 읽으므로, sentinel 을 넣고 렌더 단계에서
+  // 자리표시자로 바꾼다(정적 경로는 `mcp_config_path` 필드로 따로 남는다).
   const commonSpec = {
     rolePrompt: PLACEHOLDERS.rolePrompt,
-    mcpConfigPath: ctx.mcp_config_path || null,
+    mcpConfigPath: MCP_CONFIG_SENTINEL,
     model,
     harness: null,
     effort: null,
@@ -418,6 +473,7 @@ export function computeAgentLaunchSpec(
     if (full) {
       base.modes.push({
         mode: 'session',
+        notes: [...MODE_NOTES.session],
         args: renderModeArgs({
           full,
           variants: [
@@ -453,6 +509,7 @@ export function computeAgentLaunchSpec(
   if (oneshotFull) {
     base.modes.push({
       mode: 'oneshot',
+      notes: [...MODE_NOTES.oneshot],
       args: renderModeArgs({
         full: oneshotFull,
         variants: [
@@ -479,6 +536,14 @@ export function computeAgentLaunchSpec(
   }
   for (const key of Object.keys(ctx.extra_env ?? {}).sort()) {
     env.push({ key, value: maskEnvValue(String(ctx.extra_env?.[key] ?? '')), source: 'credential' });
+  }
+  if (profile) {
+    // 프로파일이 활성일 때 CLI 가 model 을 받는 **실제 경로**는 이 env 다
+    // (`RuntimeLease.claudeEnv()`). `--model` 이 왜 없는지 화면에서 설명이
+    // 되려면 여기 함께 보여야 한다. 값은 다른 env 와 같은 규칙으로 마스킹된다.
+    for (const key of MODEL_ROUTING_ENV_KEYS) {
+      env.push({ key, value: maskEnvValue(servedModel ?? ''), source: 'runtime_profile' });
+    }
   }
   for (const key of Object.keys(profile?.env ?? {}).sort()) {
     env.push({ key, value: maskEnvValue(String(profile?.env?.[key] ?? '')), source: 'runtime_profile' });

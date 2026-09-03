@@ -223,7 +223,19 @@ export default function AgentLaunchSpecSection({
               </div>
             )}
 
-            {activeMode && <Notice>{MODE_HINT[activeMode.mode]}</Notice>}
+            {activeMode && (
+              <Notice>
+                <div>{MODE_HINT[activeMode.mode]}</div>
+                {/* 매니저가 보낸 경로별 단서. argv 만으로는 드러나지 않는 조건부
+                    동작(역할 고정 여부에 따라 MCP 설정 출처가 갈리는 것 등)이라
+                    빠뜨리면 운영자가 자리표시자의 이유를 알 수 없다. */}
+                {activeMode.notes?.length > 0 && (
+                  <ul data-testid="launch-spec-mode-notes" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                    {activeMode.notes.map((n) => <li key={n}>{n}</li>)}
+                  </ul>
+                )}
+              </Notice>
+            )}
 
             <div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
@@ -331,7 +343,22 @@ export default function AgentLaunchSpecSection({
               <div style={{ color: tokens.colors.textMuted }}>MCP 설정</div>
               <div><Value value={spec.mcp_config_path} /></div>
               <div style={{ color: tokens.colors.textMuted }}>모델</div>
-              <div><Value value={spec.model} empty="(CLI 기본값)" /></div>
+              {/* 런타임 프로파일이 활성이면 `--model` 자체가 붙지 않는다 — 프로파일이
+                  서빙하는 model 은 raw provider id 라 CLI 가 플래그 값으로 거부하고,
+                  실제 라우팅은 ANTHROPIC_MODEL 계열 env 로 간다. "(CLI 기본값)" 만
+                  보여 주면 운영자는 어떤 모델이 도는지 알 수 없으므로 함께 적는다. */}
+              <div data-testid="launch-spec-model">
+                {spec.runtime_profile?.model ? (
+                  <>
+                    <span style={{ fontFamily: MONO }}>{spec.runtime_profile.model}</span>
+                    <span style={{ color: tokens.colors.textMuted, marginLeft: 8, fontSize: 11 }}>
+                      · 프로파일이 환경변수로 라우팅 ({'--model'} 플래그는 붙지 않음)
+                    </span>
+                  </>
+                ) : (
+                  <Value value={spec.model} empty="(CLI 기본값)" />
+                )}
+              </div>
               <div style={{ color: tokens.colors.textMuted }}>권한 등급</div>
               <div data-testid="launch-spec-permission">
                 <span style={{ fontFamily: MONO }}>{spec.permission.tier}</span>

@@ -126,7 +126,11 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
       modes: (Array.isArray(row.modes) ? row.modes : [])
         .filter((m: any) => m && typeof m === 'object' && MODES.has(m.mode))
         .slice(0, MAX_MODES)
-        .map((m: any) => ({ mode: m.mode, args: narrowArgs(m.args) })),
+        .map((m: any) => ({
+          mode: m.mode,
+          args: narrowArgs(m.args),
+          notes: (Array.isArray(m.notes) ? m.notes : []).slice(0, 10).map((n: any) => str(n, 400)),
+        })),
       cwd: strOrNull(row.cwd),
       // 모르는 값이면 더 보수적인 'base' 로 접는다 — 기준 경로를 실제 프로세스
       // cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시다.

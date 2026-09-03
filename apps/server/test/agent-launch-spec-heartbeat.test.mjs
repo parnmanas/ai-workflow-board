@@ -60,16 +60,19 @@ const VALID_SPEC = {
   modes: [
     {
       mode: 'session',
+      notes: ['MCP 설정은 spawn 마다 복사한 per-process 임시 경로입니다.'],
       args: [
         { value: '--session-id', source: 'session' },
         { value: '<세션 id: spawn 시 생성>', source: 'session', placeholder: true },
         { value: '--model', source: 'model' },
         { value: 'claude-opus-5', source: 'model' },
+        { value: '--mcp-config', source: 'adapter' },
+        { value: '<MCP 설정: spawn 시 생성>', source: 'mcp', placeholder: true },
         { value: '--dangerously-skip-permissions', source: 'permission' },
         { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
       ],
     },
-    { mode: 'oneshot', args: [{ value: '--print', source: 'adapter' }] },
+    { mode: 'oneshot', notes: [], args: [{ value: '--print', source: 'adapter' }] },
   ],
   cwd: '/srv/work',
   cwd_kind: 'base',
@@ -98,7 +101,12 @@ test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 �
   // 자리표시자로 잘못 표시한다.
   assert.deepEqual(
     record.agent_launch_specs[0].modes[0].args.map((a) => a.placeholder),
-    [undefined, true, undefined, undefined, undefined, true],
+    [undefined, true, undefined, undefined, undefined, true, undefined, true],
+  );
+  // 경로별 단서도 보존돼야 한다 — MCP 값이 왜 자리표시자인지의 유일한 설명이다.
+  assert.deepEqual(
+    record.agent_launch_specs[0].modes.map((m) => m.notes.length),
+    [1, 0],
   );
   // 모드 순서는 보존되어야 한다 — 첫 항목이 "실제로 도는 경로"라는 뜻이라
   // 재배치되면 UI 가 기본 경로를 잘못 고른다.
@@ -176,11 +184,12 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
               ...Array.from({ length: 400 }, () => ({ value: '--pad', source: 'adapter' })),
             ],
           },
-          ...Array.from({ length: 20 }, () => ({ mode: 'session', args: [] })),
+          ...Array.from({ length: 20 }, () => ({ mode: 'session', args: [], notes: [] })),
         ],
         permission: {},
         runtime_profile: { id: 'p', protocol: 'x', model: null, arg_count: -5 },
         env: [{ key: 'K', value: '<redacted>', source: '이상한-출처' }, { value: 'no-key' }],
+        notes: 'not-an-array',
         varies_per_dispatch: 'not-an-array',
         computed_at: 12345,
       },
@@ -207,6 +216,8 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
   assert.equal(row.runtime_profile.arg_count, 0);
   assert.deepEqual(row.env, [{ key: 'K', value: '<redacted>', source: 'credential' }]);
   assert.deepEqual(row.varies_per_dispatch, []);
+  // notes 가 배열이 아니면 빈 배열로 접고, 과한 개수·길이는 상한으로 자른다.
+  assert.deepEqual(row.modes[0].notes, []);
   // cwd_kind 는 모르는 값이면 보수적인 'base' 로 접는다 — 기준 경로를 실제
   // 프로세스 cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시이기 때문이다.
   assert.equal(row.cwd_kind, 'base');
