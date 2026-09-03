@@ -6,9 +6,15 @@
 // **프로덕션 UpdateChecker 의 tick 경로** 두 층에서 각각 단언한다 — 후자는
 // 주입한 개시 포트가 실제로 몇 번 불렸는지를 센다(0 번이어야 한다).
 //
-// 네트워크 없이 "새 버전이 올라왔다"를 만들기 위해 UpdateChecker 의 npmView
-// 포트를 주입한다. 그 외 경로(파싱, semver 비교, 상태 갱신, 게이트 호출)는 전부
-// 프로덕션 코드 그대로 돈다.
+// 네트워크 없이 "새 버전이 올라왔다"를 만들기 위해 UpdateChecker 의 npmView 와
+// verifyProvenance 포트를 주입한다. 그 외 경로(파싱, semver 비교, 상태 갱신,
+// 게이트 호출)는 전부 프로덕션 코드 그대로 돈다.
+//
+// 리뷰 라운드 1 에서 드러난 두 구멍도 여기서 막는다:
+//   P1 — 승인 요청이 provenance 검증 **전에** 나가던 문제. 순수 함수는 provenance
+//        를 입력으로 받지 않으므로 이 계약은 tick 경로에서만 검증된다.
+//   P2 — `channel=off` 판정 줄이 프로덕션에서 한 줄도 안 남던 문제(#tick 이 그 앞에서
+//        return). 개시 횟수만 세는 테스트로는 드러나지 않는다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -221,9 +227,26 @@ test('손상된 승인 기록은 승인으로 읽지 않는다 (안전한 실패
  * 프로덕션 UpdateChecker 를 네트워크 없이 구동한다. 개시 포트 호출을 세어
  * "설치를 개시했는가"를 부수효과 없이 관찰한다.
  */
-function makeChecker(t, { policy, window, latest, home, now = () => AT_10_00, channel = 'latest' }) {
+function makeChecker(
+  t,
+  {
+    policy,
+    window,
+    latest,
+    home,
+    now = () => AT_10_00,
+    channel = 'latest',
+    // 리뷰 P1: 승인 요청은 provenance 를 통과해야만 나간다. 기본 스텁은 npmView 가
+    // 보고하는 것과 같은 버전을 검증 통과로 돌려준다. provenance 를 주입하지 않으면
+    // 프로덕션 코드가 실제 레지스트리를 부르므로, 이 스텁이 없는 테스트는 곧
+    // 네트워크 테스트가 된다.
+    provenance,
+  },
+) {
   const starts = [];
   const logs = [];
+  const provenanceCalls = [];
+  const npmViewCalls = [];
   let latestVersion = latest;
   const checker = new UpdateChecker({
     installMode: 'npm-global',
@@ -234,14 +257,29 @@ function makeChecker(t, { policy, window, latest, home, now = () => AT_10_00, ch
     stateDir: home,
     now,
     log: (m) => logs.push(m),
-    npmView: async () => ({ ok: true, stdout: `${latestVersion}\n`, stderr: '' }),
+    npmView: async (spec) => {
+      npmViewCalls.push(spec);
+      return { ok: true, stdout: `${latestVersion}\n`, stderr: '' };
+    },
+    verifyProvenance: async (ch) => {
+      provenanceCalls.push(ch);
+      if (typeof provenance === 'function') return provenance(latestVersion);
+      return { ok: true, version: latestVersion, reason: `stub: v${latestVersion} carries provenance` };
+    },
     runUpdate: async (opts) => {
       starts.push(opts);
       return { changed: true, summary: 'stub install' };
     },
   });
   t.after(() => checker.stop());
-  return { checker, starts, logs, setLatest: (v) => { latestVersion = v; } };
+  return {
+    checker,
+    starts,
+    logs,
+    provenanceCalls,
+    npmViewCalls,
+    setLatest: (v) => { latestVersion = v; },
+  };
 }
 
 test('두 env 미설정(=manual)이면 tick 이 아무것도 개시하지 않는다 (완료 기준 1)', async (t) => {
@@ -369,4 +407,194 @@ test('같은 판정이 이어지면 로그는 한 번만, 판정이 바뀌면 �
     logs.some((l) => l.includes('requesting operator approval for v1.8.0')),
     '판정이 바뀌면 새 줄이 나온다',
   );
+});
+
+// ─── 리뷰 P1: 승인 요청은 provenance 를 통과한 뒤에만 나간다 ─────────────────
+//
+// 이 블록이 없으면 서명되지 않은(혹은 증명을 읽을 수 없는) 릴리스도 운영자에게
+// "승인해 달라"는 요청 + 감사행으로 먼저 표면화된다. 순수 판정 함수는 provenance
+// 를 입력으로 받지 않으므로, 이 계약은 **프로덕션 tick 경로에서만** 검증된다.
+
+test('scheduled: provenance 거부면 승인 대기 신호도 감사 대상도 만들지 않는다 (fail-closed)', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts, logs } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: () => ({ ok: false, version: '1.7.0', reason: 'no SLSA provenance attached' }),
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(status.update_approval_pending_version, null, '거부된 릴리스를 승인 요청으로 올리면 안 된다');
+  assert.equal(starts.length, 0, '설치도 개시하지 않는다');
+  assert.ok(
+    logs.some((l) => l.includes('approval NOT requested') && l.includes('no SLSA provenance attached')),
+    '거부 사유가 Self-update 로그로 남아야 한다',
+  );
+});
+
+test('scheduled: provenance 조회가 실패(throw)해도 fail-closed — 요청하지 않는다', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts, logs } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: () => { throw new Error('registry unreachable'); },
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(status.update_approval_pending_version, null);
+  assert.equal(starts.length, 0);
+  assert.ok(logs.some((l) => l.includes('provenance check threw') && l.includes('registry unreachable')));
+});
+
+test('scheduled: provenance 가 대상 버전을 못 집으면 요청하지 않는다', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: () => ({ ok: true, version: null, reason: 'attestation present but version unreadable' }),
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(status.update_approval_pending_version, null);
+  assert.equal(starts.length, 0);
+});
+
+test('요청하는 버전은 npm view 가 아니라 provenance 가 검증한 그 버전이다 (검증≡요청)', async (t) => {
+  const home = tempHome(t);
+  // dist-tag 가 두 조회 사이에 움직인 상황: npm view 는 1.7.0, 증명 조회는 1.7.1.
+  const { checker, starts } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: () => ({ ok: true, version: '1.7.1', reason: 'v1.7.1 carries SLSA provenance' }),
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(
+    status.update_approval_pending_version,
+    '1.7.1',
+    '승인 대상은 검증한 버전이어야 한다 — 검증하지 않은 1.7.0 을 요청하면 승인이 의미를 잃는다',
+  );
+  assert.equal(starts.length, 0);
+});
+
+test('검증된 버전이 이미 승인돼 있으면 그대로 개시한다 (재판정이 승인을 인식)', async (t) => {
+  const home = tempHome(t);
+  writeUpdateApproval({ version: '1.7.1', source: 'update_manager', approvedAtMs: 1 }, home);
+  const { checker, starts } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: () => ({ ok: true, version: '1.7.1', reason: 'v1.7.1 carries SLSA provenance' }),
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(starts.length, 1, '검증된 버전이 승인된 버전과 같으면 개시한다');
+  assert.equal(status.update_approval_pending_version, null);
+});
+
+test('검증된 버전이 현재보다 낮으면(태그 되감김) 개시도 요청도 하지 않는다', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    // 현재 버전은 1.6.0 — 1.5.0 은 다운그레이드다.
+    provenance: () => ({ ok: true, version: '1.5.0', reason: 'v1.5.0 carries SLSA provenance' }),
+  });
+
+  const status = await checker.checkNow();
+
+  assert.equal(starts.length, 0);
+  assert.equal(status.update_approval_pending_version, null);
+});
+
+test('거부 상태는 고착되지 않는다 — 다음 tick 에서 통과하면 요청이 다시 올라온다', async (t) => {
+  const home = tempHome(t);
+  let ok = false;
+  const { checker, starts } = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+    provenance: (v) =>
+      ok
+        ? { ok: true, version: v, reason: `v${v} carries SLSA provenance` }
+        : { ok: false, version: v, reason: 'transient: could not read publish provenance' },
+  });
+
+  assert.equal((await checker.checkNow()).update_approval_pending_version, null);
+  ok = true;
+  assert.equal((await checker.checkNow()).update_approval_pending_version, '1.7.0');
+  assert.equal(starts.length, 0, '요청이 올라왔다고 설치가 개시되면 안 된다');
+});
+
+test('auto 개시 경로는 tick 에서 provenance 를 다시 부르지 않는다 (runSelfUpdate 가 이미 fail-closed)', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts, provenanceCalls } = makeChecker(t, {
+    policy: 'auto', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home,
+  });
+
+  await checker.checkNow();
+
+  assert.equal(starts.length, 1);
+  assert.equal(
+    provenanceCalls.length,
+    0,
+    'auto 는 곧바로 runSelfUpdate 로 가므로 여기서 한 번 더 부르면 레지스트리 왕복만 두 배가 된다',
+  );
+});
+
+test('요청이 없는 판정(manual · 창 밖)에서는 provenance 를 아예 부르지 않는다', async (t) => {
+  const manualHome = tempHome(t);
+  const manual = makeChecker(t, {
+    policy: 'manual', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home: manualHome,
+  });
+  await manual.checker.checkNow();
+  assert.equal(manual.provenanceCalls.length, 0);
+
+  const outHome = tempHome(t);
+  const outside = makeChecker(t, {
+    policy: 'scheduled', window: WINDOW_CLOSED_AT_10, latest: '1.7.0', home: outHome,
+  });
+  await outside.checker.checkNow();
+  assert.equal(outside.provenanceCalls.length, 0);
+});
+
+// ─── 리뷰 P2: off 판정이 프로덕션 로그에 실제로 남는다 ──────────────────────
+//
+// evaluateUpdatePolicyGate 에 channel_off 문구가 있어도, tick 이 그 앞에서
+// return 하면 프로덕션에서는 한 줄도 남지 않는다 — 완료 기준 8 의 grep 계약이
+// 깨지는데 `starts.length` 만 보는 테스트로는 드러나지 않는다.
+
+test('off × 세 정책 모두 tick 에서 Self-update 판정 줄을 남기고, 레지스트리는 조회하지 않는다', async (t) => {
+  for (const policy of ['manual', 'scheduled', 'auto']) {
+    const home = tempHome(t);
+    const { checker, starts, logs, npmViewCalls, provenanceCalls } = makeChecker(t, {
+      policy, window: WINDOW_OPEN_AT_10, latest: '1.7.0', home, channel: UPDATE_CHANNEL_OFF,
+    });
+
+    const status = await checker.checkNow();
+
+    const decisionLines = logs.filter((l) => l.startsWith('Self-update: ') && l.includes('off'));
+    assert.equal(
+      decisionLines.length,
+      1,
+      `${policy} + off 는 Self-update 판정 줄을 정확히 한 줄 남겨야 한다 (실제: ${JSON.stringify(logs)})`,
+    );
+    assert.equal(starts.length, 0, `${policy} + off 는 개시하지 않는다`);
+    assert.equal(status.update_approval_pending_version, null, `${policy} + off 는 승인 요청도 없다`);
+    assert.equal(npmViewCalls.length, 0, 'off 는 레지스트리 조회 자체를 하지 않는다');
+    assert.equal(provenanceCalls.length, 0, 'off 는 provenance 조회도 하지 않는다');
+  }
+});
+
+test('off 는 주기 tick 이 아예 돌지 않으므로 start() 가 판정 줄을 남기는 유일한 지점이다', async (t) => {
+  const home = tempHome(t);
+  const { checker, logs, starts } = makeChecker(t, {
+    policy: 'auto', window: WINDOW_OPEN_AT_10, latest: '1.7.0', home, channel: UPDATE_CHANNEL_OFF,
+  });
+
+  checker.start();
+  // start() 안의 판정은 비동기로 예약된다 — 마이크로태스크가 비워질 때까지 기다린다.
+  await new Promise((r) => setImmediate(r));
+
+  assert.ok(
+    logs.some((l) => l.startsWith('Self-update: ') && l.includes('off')),
+    `start() 도 Self-update 판정 줄을 남겨야 한다 (실제: ${JSON.stringify(logs)})`,
+  );
+  assert.equal(starts.length, 0);
 });

@@ -37,6 +37,9 @@
 //   - 'manual'    — 현행 동작. 외부 트리거(`update_manager` SSE / SIGUSR1)만 개시.
 //   - 'scheduled' — 유지보수 창 안에서 운영자 **승인을 요청**하고, 승인이 있어야 개시.
 //   - 'auto'      — 유지보수 창 안에서 승인 없이 개시.
+// 'scheduled' 의 승인 요청은 대상 버전의 발행 provenance 를 통과한 뒤에만 나간다
+// (fail-closed) — 서명되지 않았거나 증명을 읽지 못한 릴리스를 운영자에게 "승인해
+// 달라"고 올리는 것은 게이트를 여는 방향의 실패다.
 // 창은 AWB_AGENT_MANAGER_UPDATE_WINDOW (`HH:MM-HH:MM`, 호스트 로컬)로 정하고,
 // 창이 미설정이면 'scheduled'/'auto' 는 보수적으로 'manual' 과 같게 동작한다.
 // `AWB_AGENT_MANAGER_UPDATE_CHANNEL=off` 는 이 셋 모두를 이기는 하드 핀이다.
@@ -681,6 +684,8 @@ export class UpdateChecker {
   #runUpdate: (opts: SelfUpdateOpts) => Promise<SelfUpdateResult>;
   /** 레지스트리 버전 조회. 프로덕션에서는 실제 `npm view`. */
   #npmView: (channelSpec: string) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+  /** 대상 버전의 발행 provenance 판정. 프로덕션에서는 실제 레지스트리 조회. */
+  #verifyProvenance: (channel: string) => Promise<ProvenanceVerdict>;
 
   constructor(
     opts: {
@@ -709,6 +714,9 @@ export class UpdateChecker {
        *  프로덕션 tick 경로 위에서 검증하려면 네트워크 없이 "새 버전이 올라왔다"를
        *  만들 수 있어야 한다. 생략하면 실제 npm 을 부른다. */
       npmView?: (channelSpec: string) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+      /** ticket 9408b308 리뷰 P1 — 승인 요청 전 provenance 검증 주입점.
+       *  runSelfUpdate 의 `ports.verifyProvenance` 와 같은 계약이다. */
+      verifyProvenance?: (channel: string) => Promise<ProvenanceVerdict>;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
@@ -719,6 +727,8 @@ export class UpdateChecker {
     this.#stateDir = opts.stateDir;
     this.#now = opts.now ?? (() => new Date());
     this.#runUpdate = opts.runUpdate ?? runSelfUpdate;
+    this.#verifyProvenance =
+      opts.verifyProvenance ?? ((channel) => verifyNpmGlobalProvenance(this.#log, channel));
     this.#npmView =
       opts.npmView ??
       (async (spec) => {
@@ -780,6 +790,11 @@ export class UpdateChecker {
         `UpdateChecker: ${UPDATE_CHANNEL_ENV}=${UPDATE_CHANNEL_OFF} — auto-update disabled, ` +
           `pinned to v${this.#status.current_version}`,
       );
+      // ticket 9408b308 리뷰 P2: 타이머는 띄우지 않지만 판정 한 줄은 남긴다.
+      // off 에서는 주기 tick 이 아예 돌지 않으므로, 이 일회성 호출이 프로덕션에서
+      // `Self-update:` 판정 줄이 나오는 유일한 지점이다. 위 #tick 가드 덕분에
+      // 이 호출은 레지스트리 조회도 설치도 하지 않는다.
+      this.#tick().catch(() => undefined);
       return;
     }
     // Fire once immediately (best-effort), then every interval.
@@ -813,7 +828,15 @@ export class UpdateChecker {
   async #tick(): Promise<void> {
     if (this.#stopped) return;
     if (this.#status.install_mode !== 'npm-global') return;
-    if (isAutoUpdateDisabled(this.#status.update_channel)) return;
+    if (isAutoUpdateDisabled(this.#status.update_channel)) {
+      // ticket 9408b308 리뷰 P2: 채널이 off 면 레지스트리 조회도 설치도 하지
+      // 않는다(이 기능 도입 전과 동일). 다만 판정 **로그 한 줄**은 남긴다 —
+      // 완료 기준 8 의 grep 계약은 "off 가 정책을 이겼다"는 사실도 확인할 수
+      // 있어야 성립하는데, 여기서 곧바로 return 하면 evaluateUpdatePolicyGate
+      // 의 channel_off 분기가 프로덕션에서 도달 불가능한 죽은 코드가 된다.
+      await this.#applyUpdatePolicy();
+      return;
+    }
     await this.#tickNpmGlobal();
     // ticket 9408b308: 갱신 개시 정책 판정. `manual`(기본)에서는 action='none'
     // 이라 아래 재시도 경로만 남고, 이 기능 도입 전과 동작이 같다.
@@ -852,31 +875,55 @@ export class UpdateChecker {
    * 한다: 판정 로그 한 줄, 승인 대기 상태 갱신, 그리고 개시.
    */
   async #applyUpdatePolicy(): Promise<boolean> {
-    const decision = evaluateUpdatePolicyGate({
+    const base = {
       policy: this.#policy,
       channel: this.#status.update_channel,
       windowRaw: this.#windowRaw,
       now: this.#now(),
+      approvedVersion: readUpdateApproval(this.#stateDir)?.version ?? null,
+    };
+    let decision = evaluateUpdatePolicyGate({
+      ...base,
       updateAvailable: this.#status.update_available,
       latestVersion: this.#status.latest_version,
-      approvedVersion: readUpdateApproval(this.#stateDir)?.version ?? null,
     });
 
-    // 완료 기준 8: 판정 결과를 `Self-update:` 접두사로 남긴다. 같은 판정이
-    // 이어지는 동안에는 한 번만 찍는다 — tick 은 기본 5분마다 도는데 기본값인
-    // `manual` 에서 매번 같은 줄을 찍으면 모든 호스트의 로그가 이 한 줄로
-    // 덮인다. 판정이 바뀔 때마다 새 줄이 나오므로 각 결과는 반드시 기록된다.
-    if (decision.logLine !== this.#lastPolicyLogLine) {
-      this.#lastPolicyLogLine = decision.logLine;
-      this.#log(`Self-update: ${decision.logLine}`);
+    // ticket 9408b308 리뷰 P1 — 승인 요청은 provenance 를 통과한 뒤에만 나간다.
+    //
+    // 티켓이 고정한 요청 시점은 "창 진입 + 실제 새 버전 + **provenance 검증
+    // 통과**"다. 위 판정의 입력인 latest_version 은 `npm view <spec> version`
+    // 한 줄이라 서명 여부를 전혀 모른다 — 그대로 요청을 내보내면 서명되지 않은
+    // 릴리스도 운영자에게 "승인해 달라"고 감사행까지 남기게 된다.
+    //
+    // 개시(start)에는 이 검증을 넣지 않는다. start 는 곧바로 runSelfUpdate 로
+    // 들어가고 그쪽이 이미 fail-closed 로 provenance 를 보므로, 여기서 한 번 더
+    // 부르면 레지스트리 왕복만 두 배가 되고 안전성은 그대로다.
+    if (decision.action === 'request_approval') {
+      const target = await this.#verifiedApprovalTarget();
+      if (!target) {
+        // fail-closed: 검증을 통과하지 못하면 대기 신호를 세우지 않는다.
+        // (사유 로그는 #verifiedApprovalTarget 이 남긴다.)
+        this.#setApprovalPending(null);
+        return false;
+      }
+      // 검증한 **그 버전**으로 판정을 다시 낸다 — 요청/승인 대상이 곧 검증한
+      // 대상이어야 한다. dist-tag 가 두 조회 사이에 움직였다면 여기서 흡수된다:
+      // 검증된 버전이 현재보다 낮으면 up_to_date 로, 이미 승인된 버전과 같으면
+      // start 로 자연히 떨어진다.
+      decision = evaluateUpdatePolicyGate({
+        ...base,
+        updateAvailable: compareSemver(target, this.#status.current_version) > 0,
+        latestVersion: target,
+      });
     }
+
+    this.#logPolicyDecision(decision.logLine);
 
     // 승인 대기 신호는 요청 중일 때만 실린다. 창을 벗어나면 다시 null 이 되고,
     // 다음 창에서 같은 버전이 여전히 미승인이면 다시 표면화된다(완료 기준 5).
-    const pending = decision.action === 'request_approval' ? decision.approvalVersion : null;
-    if (pending !== this.#status.update_approval_pending_version) {
-      this.#status = { ...this.#status, update_approval_pending_version: pending };
-    }
+    this.#setApprovalPending(
+      decision.action === 'request_approval' ? decision.approvalVersion : null,
+    );
 
     if (decision.action !== 'start') return false;
     try {
@@ -889,6 +936,70 @@ export class UpdateChecker {
       this.#log(`Self-update: policy-initiated update failed: ${err?.stack || err?.message || err}`);
     }
     return true;
+  }
+
+  /**
+   * 완료 기준 8: 판정 결과를 `Self-update:` 접두사로 한 줄 남긴다.
+   *
+   * 같은 판정이 이어지는 동안에는 한 번만 찍는다 — tick 은 기본 5분마다 도는데
+   * 기본값인 `manual` 에서 매번 같은 줄을 찍으면 모든 호스트의 로그가 이 한 줄로
+   * 덮인다. 판정이 바뀔 때마다 새 줄이 나오므로 각 결과는 반드시 기록된다.
+   */
+  #logPolicyDecision(line: string): void {
+    if (line === this.#lastPolicyLogLine) return;
+    this.#lastPolicyLogLine = line;
+    this.#log(`Self-update: ${line}`);
+  }
+
+  /** 하트비트가 나를 대기 신호로 광고할지 갱신한다. */
+  #setApprovalPending(version: string | null): void {
+    if (version === this.#status.update_approval_pending_version) return;
+    this.#status = { ...this.#status, update_approval_pending_version: version };
+  }
+
+  /**
+   * ticket 9408b308 리뷰 P1 — 승인을 요청해도 되는 대상 버전을 판정한다.
+   *
+   * 반환값은 **provenance 를 통과한 정확한 버전**이며, 통과하지 못하면 null 이다
+   * (fail-closed). 조회 자체가 실패한 경우도 null 이다 — 증명을 읽지 못한 릴리스를
+   * "승인해 달라"고 올리는 것은 게이트를 여는 방향의 실패다.
+   *
+   * 대상 버전을 `npm view` 결과가 아니라 provenance 판정이 해석한 버전에서 가져오는
+   * 이유: 승인 대상과 검증 대상이 같아야 승인이 의미를 갖는다.
+   */
+  async #verifiedApprovalTarget(): Promise<string | null> {
+    let verdict: ProvenanceVerdict;
+    try {
+      verdict = await this.#verifyProvenance(this.#status.update_channel);
+    } catch (err: any) {
+      this.#logPolicyDecision(
+        `update policy ${this.#policy} — approval NOT requested: provenance check threw ` +
+          `(${err?.message ?? err})`,
+      );
+      return null;
+    }
+    const bypassed = provenanceGateBypassed();
+    if (!verdict.ok && !bypassed) {
+      this.#logPolicyDecision(
+        `update policy ${this.#policy} — approval NOT requested: ${verdict.reason}`,
+      );
+      return null;
+    }
+    if (!verdict.version) {
+      // 우회가 켜져 있어도 대상 버전을 못 집으면 요청할 것이 없다.
+      this.#logPolicyDecision(
+        `update policy ${this.#policy} — approval NOT requested: provenance did not resolve a ` +
+          `target version on the ${this.#status.update_channel} channel`,
+      );
+      return null;
+    }
+    if (bypassed && !verdict.ok) {
+      this.#logPolicyDecision(
+        `update policy ${this.#policy} — ${PROVENANCE_BYPASS_ENV} set, requesting approval for ` +
+          `v${verdict.version} despite unverified provenance`,
+      );
+    }
+    return verdict.version;
   }
 
   /**

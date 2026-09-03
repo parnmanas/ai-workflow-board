@@ -39,7 +39,10 @@ function tempHome(t) {
 }
 
 /** 승인 대기 상태까지 실제로 몰아넣은 프로덕션 UpdateChecker. */
-async function checkerAt(t, { policy, home, latest = '1.7.0', window = WINDOW_OPEN_AT_10 }) {
+async function checkerAt(
+  t,
+  { policy, home, latest = '1.7.0', window = WINDOW_OPEN_AT_10, provenance },
+) {
   const starts = [];
   const checker = new UpdateChecker({
     installMode: 'npm-global',
@@ -51,6 +54,12 @@ async function checkerAt(t, { policy, home, latest = '1.7.0', window = WINDOW_OP
     now: () => AT_10_00,
     log: () => {},
     npmView: async () => ({ ok: true, stdout: `${latest}\n`, stderr: '' }),
+    // 리뷰 P1: 승인 요청은 provenance 통과가 전제다. 주입하지 않으면 프로덕션
+    // 코드가 실제 레지스트리를 부르므로 이 스텁이 곧 테스트의 격리선이다.
+    verifyProvenance: async () =>
+      provenance
+        ? provenance(latest)
+        : { ok: true, version: latest, reason: `stub: v${latest} carries provenance` },
     runUpdate: async (opts) => { starts.push(opts); return { changed: true, summary: 'stub' }; },
   });
   t.after(() => checker.stop());
@@ -133,4 +142,26 @@ test('updateChecker 없이 구성된 하트비트는 이 필드를 아예 보내
     false,
     'self-update 를 안 쓰는 구성은 필드 자체를 보내지 않아야 한다',
   );
+});
+
+test('provenance 를 통과하지 못한 릴리스는 하트비트에 승인 대기로 실리지 않는다 (리뷰 P1 와이어)', async (t) => {
+  const home = tempHome(t);
+  const { checker, starts } = await checkerAt(t, {
+    policy: 'scheduled',
+    home,
+    provenance: () => ({ ok: false, version: '1.7.0', reason: 'no SLSA provenance attached' }),
+  });
+  assert.equal(starts.length, 0);
+
+  const payloadPromise = stubFetch(t);
+  heartbeatFor(t, checker, 'approval-pending-5');
+  const payload = await payloadPromise;
+
+  // 서버는 이 값이 문자열일 때만 감사행을 쓴다 — null 이면 요청이 운영자에게
+  // 표면화되지 않는다. 즉 이 단언이 곧 "서명 안 된 릴리스는 승인 요청으로
+  // 올라가지 않는다"의 와이어 레벨 증거다.
+  assert.equal(payload.update_approval_pending_version, null);
+  // 새 버전 광고 자체는 그대로 — provenance 실패가 update_available 을 가리면 안 된다.
+  assert.equal(payload.latest_version, '1.7.0');
+  assert.equal(payload.update_available, true);
 });
