@@ -214,6 +214,12 @@ heartbeat 는 `last_heartbeat_at` 을 **매 progress 호출마다** 갱신하고
 orchestration 상태를 들고 있지 않으므로 그 축의 효과도 "그 호스트의 작업자들이 동시에 조용해진다"로
 나타날 뿐이다.
 
+> **테스트 강도에 대한 용어 구분** (reporter 확인, 티켓 4d065f82): agent-manager 축의 회귀 테스트는
+> 실제 agent-manager 프로세스를 종료·재기동하는 통합 테스트가 **아니라**, 그 재시작이 orchestration
+> 계층에 남기는 장애 상태를 재현하는 **시나리오 테스트**다. reporter 는 별도의 agent-manager 전용
+> 복구 상태기계를 만드는 대신 이 관측값을 서버의 단일 `reconcileStaleLease()` 경로로 수렴시키는
+> 설계를 수용했으나, 그 차이는 문서와 테스트 설명에 계속 명시적으로 남긴다.
+
 ### 재개 가능한 체크포인트
 
 `report_orchestration_progress(checkpoint:)` 로 저장하는 구조화 상태다. timeline 의 progress 메시지와는

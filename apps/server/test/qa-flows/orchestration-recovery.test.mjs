@@ -218,6 +218,12 @@ test('재시도로 밀려난 attempt 의 지각 보고가 MCP 표면에서 거�
  *   - **agent-manager 재시작**: AWB 서버는 살아 있고 그 호스트의 subagent 들이 죽는다.
  *     orchestration 이 관측하는 결과는 "작업자가 보고 없이 사라짐"이다 — agent-manager 는
  *     orchestration 상태를 들고 있지 않으므로 이게 이 축의 전부다.
+ *
+ *     **용어 주의(reporter 확인, 2026-09-03)**: 아래 축2 는 실제 agent-manager 프로세스를
+ *     종료·재기동하는 통합 테스트가 **아니다**. 그 재시작이 orchestration 계층에 남기는
+ *     장애 상태(같은 호스트 작업자들의 heartbeat 동시 단절)를 재현하는 **시나리오 테스트**다.
+ *     reporter 는 이 설계 대체를 수용했지만, 테스트 강도에 대한 판정은 reviewer 몫이므로
+ *     둘의 차이를 여기에 명시적으로 남긴다.
  *   - **orchestrator/worker 세션 사망**: 같은 관측이 개별 세션 단위로 일어난다.
  *
  * 세 축 모두 "in-flight step 의 생존 신호가 끊긴다"로 귀결되고, 그 하나를
@@ -302,10 +308,16 @@ test('축1(server 재시작): 부팅 스윕이 유예를 거쳐 새 attempt 로 
   assert.match(newOrder, /write the report/);
 });
 
-test('축2(agent-manager 재시작): 그 호스트의 작업자들이 보고 없이 사라져도 같은 경로로 재개된다', async (t) => {
+test('축2(agent-manager 재시작 시나리오 — 프로세스 재기동은 하지 않음): 같은 호스트 작업자들이 동시에 보고 없이 사라져도 같은 경로로 재개된다', async (t) => {
   // agent-manager 는 orchestration 상태를 들고 있지 않다 — 재시작의 관측 가능한 효과는
   // "그 호스트가 돌리던 subagent 들이 보고 없이 죽는다" 뿐이고, 그건 여러 in-flight step 이
   // 동시에 조용해지는 것으로 나타난다. 서버측 reconciliation 이 그 전부를 이어받아야 한다.
+  //
+  // 이 테스트가 하는 것과 하지 않는 것을 분명히 해둔다:
+  //   하는 것   — 그 장애 관측값(동시 heartbeat 단절)을 만들고, 단일 reconcile 경로가
+  //               두 step 을 모두 새 attempt 로 재개하는지 확인한다.
+  //   안 하는 것 — 실제 agent-manager 프로세스를 죽였다 살리지 않는다. 그건 이 저장소의
+  //               server e2e 하네스 밖(별도 호스트 프로세스)이라 여기서 다룰 수 없다.
   const s = await stage(t, { label: 'am' });
   const { ds, ws, missions, reaper, mission, worker, leadMcp } = s;
 
