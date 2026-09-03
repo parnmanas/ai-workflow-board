@@ -189,6 +189,20 @@ async function stage(t, { label } = {}) {
         missions,
         app.get(services.LogService),
       ),
+    /**
+     * 같은 DB 를 보는 **두 번째 서버의 러너**. 협력자는 이 앱의 것을 그대로 물려주되
+     * 인스턴스만 새로 만든다 — 그래야 `missionLocks`(프로세스 메모리)가 분리되어, 두
+     * 서버가 같은 게이트를 동시에 여는 상황이 실제로 재현된다. 주입 필드는 TS `private`
+     * 이지만 컴파일 후에는 평범한 프로퍼티라 그대로 읽어 넘길 수 있다.
+     */
+    secondServerRunner: (notifyOverride) =>
+      new services.OrchestrationRunnerService(
+        runner.missionRepo, runner.stepRepo, runner.teamRepo, runner.memberRepo,
+        runner.roomRepo, runner.participantRepo, runner.agentRepo, runner.actionRepo,
+        runner.actionRunRepo, runner.dataSource, runner.messaging, runner.missions,
+        runner.teams, runner.actionsService, runner.logService,
+        notifyOverride ?? runner.confirmNotify,
+      ),
     /** 이 스테이지의 소유자에게 간 발송만. 다른 테스트 미션의 리마인더를 걸러낸다. */
     mine: () => outbox.filter((o) => o.userId === HUMAN.id),
     /** step 엔티티를 직접 읽는다 — 선점 마커는 내부 상태라 API 뷰에 없다. */
@@ -544,6 +558,91 @@ test('서버가 둘이어도 같은 (step, visit) 은 정확히 1회만 나간�
     'status 가 awaiting_user 가 아니면 선점 조건에서 걸린다',
   );
   assert.equal(mine().length, 2, '판정 뒤에는 아무것도 나가지 않는다');
+});
+
+test('두 서버가 **실제 openConfirmGate 로** 같은 게이트를 열어도 발송은 1회다 (리뷰 라운드2)', async (t) => {
+  // 리뷰 라운드2 P1. 선점 UPDATE 자체는 원자적이지만, **그 앞에 있는 게이트 상태 저장이
+  // 선점을 무효화**할 수 있었다:
+  //
+  //   1. A 가 게이트를 열고 선점에 성공해 `confirm_notified_visit = 1` 을 기록한다.
+  //   2. B 는 아직 `confirm_notified_visit = null` 인 **낡은 엔티티**로 게이트를 연다.
+  //      full entity save 는 엔티티 전체를 쓰므로 A 의 마커를 null 로 되돌린다.
+  //   3. B 의 조건부 UPDATE 도 다시 성공한다 → 둘 다 보낸다.
+  //
+  // 앞선 경쟁 테스트는 `claimGateNotice()` 를 직접 불러서 이 save 를 지나지 않았다.
+  // 그래서 여기서는 **실제 `openConfirmGate()` 경로**를 두 서버가 각각 통과시킨다.
+  //
+  // 순서는 배리어로 전제를 못박은 뒤 **결정적으로 재생**한다. 위험한 인터리빙은 정확히
+  // "A 의 선점이 끝난 뒤 B 의 저장이 도착하는" 하나뿐이라, 스케줄러가 그 순서를 내주기를
+  // 바라는 대신 그 순서를 직접 만든다 — 고정 지연도, 운에 맡기는 경쟁도 아니다.
+  const s = await stage(t, { label: 'gate-race' });
+  const { ds, ws, missions, mission, runner, worker, leadMcp, notify, mine } = s;
+  const stepRepo = ds.getRepository('OrchestrationStep');
+  const missionRepo = ds.getRepository('OrchestrationMission');
+
+  await leadMcp.callTool('submit_orchestration_plan', { mission_id: mission.id, ...planFor(worker) });
+  await advanceToGate(s);
+  const { byKey } = await readSteps(missions, mission.id, ws.id);
+  const gateId = byKey.gate.id;
+  assert.equal(mine().length, 1, '평소 경로로는 1회');
+
+  step('두 서버가 게이트를 열기 직전 상태로 되돌린다 — 아직 아무도 선점하지 않았다');
+  // 타임라인은 비울 수 없으므로(감사 기록이다) 기준선을 재 두고 뒤에서 델타로 센다.
+  const initialEventsBefore = eventsOfType(
+    (await readSteps(missions, mission.id, ws.id)).detail,
+    'confirm_notified',
+  ).filter((e) => e.data?.kind === 'initial').length;
+  await stepRepo.update({ id: gateId }, { confirm_notified_visit: null, confirm_notified_at: null });
+  s.outbox.length = 0;
+
+  const serverB = s.secondServerRunner(s.secondServerNotify());
+  const freshMission = await missionRepo.findOne({ where: { id: mission.id } });
+  const allSteps = await stepRepo.find({ where: { mission_id: mission.id } });
+
+  const bothRead = barrier(2);
+  const snapshots = {};
+  const readStale = async (tag) => {
+    const snap = await stepRepo.findOne({ where: { id: gateId } });
+    assert.equal(
+      snap.confirm_notified_visit,
+      null,
+      `${tag}: 두 서버가 모두 "아직 안 보냈다"를 읽어야 이 테스트가 의미가 있다`,
+    );
+    snapshots[tag] = snap;
+    // 누구도 아직 쓰지 않았다는 사실을 못박는다(happens-before).
+    await bothRead();
+  };
+  await Promise.all([readStale('A'), readStale('B')]);
+
+  step('A 가 실제 openConfirmGate 로 게이트를 열고 선점한다');
+  await runner.openConfirmGate(freshMission, snapshots.A, allSteps);
+  await notify.settled();
+  assert.equal(
+    (await stepRepo.findOne({ where: { id: gateId } })).confirm_notified_visit,
+    1,
+    'A 의 선점이 DB 에 남아야 한다',
+  );
+
+  step('B 가 **낡은 스냅샷**으로 같은 경로를 통과한다 — 여기서 A 의 마커가 지워지면 안 된다');
+  await serverB.openConfirmGate(freshMission, snapshots.B, allSteps);
+  await notify.settled();
+  await s.secondServerNotify().settled();
+
+  const after = await stepRepo.findOne({ where: { id: gateId } });
+  assert.equal(after.confirm_notified_visit, 1, 'B 의 게이트 상태 저장이 A 의 선점을 되돌리면 안 된다');
+  assert.equal(after.status, 'awaiting_user', '게이트는 정상적으로 열려 있다');
+  assert.equal(mine().length, 1, '두 서버가 실제 경로를 통과해도 사람에게는 1회만 간다');
+
+  step('타임라인에도 이번 경쟁에서 늘어난 발송 기록은 하나뿐이다');
+  const { detail } = await readSteps(missions, mission.id, ws.id);
+  const initialEventsAfter = eventsOfType(detail, 'confirm_notified')
+    .filter((e) => e.data?.kind === 'initial').length;
+  assert.equal(
+    initialEventsAfter - initialEventsBefore,
+    1,
+    `두 서버가 열었지만 confirm_notified(initial) 은 1건만 늘어야 한다 ` +
+      `(before=${initialEventsBefore}, after=${initialEventsAfter})`,
+  );
 });
 
 test('실행 중 미션이 100개를 넘어도 뒤쪽 게이트가 후속 스윕에서 반드시 리마인드된다', async (t) => {

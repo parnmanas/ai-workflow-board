@@ -1693,7 +1693,29 @@ export class OrchestrationRunnerService {
     step.result_summary = '';
     step.artifacts = evidence.length > 0 ? evidence : null;
 
-    await this.stepRepo.save(step);
+    // **full entity save 를 쓰지 않는다**(리뷰 라운드2). 손에 든 엔티티는 게이트를 열기
+    // 직전에 읽은 스냅샷이라 `confirm_notified_visit` 이 `null` 인데, 그 사이 다른 서버가
+    // 이 pass 를 선점했을 수 있다. TypeORM 의 `save()` 는 엔티티 전체를 대상으로 쓰기 때문에
+    // **그 마커까지 null 로 되돌린다** — 그러면 뒤따르는 내 조건부 UPDATE 도 성공해 두 서버가
+    // 모두 발송한다. 선점 UPDATE 자체는 원자적인데, 그 앞의 낡은 full save 가 선점을
+    // 무효화해 버리는 것이다.
+    //
+    // 그래서 게이트 상태 전이만 **컬럼을 명시해** 쓴다. 여기 없는 컬럼(특히 선점 마커)은
+    // 이 쓰기가 절대 건드리지 않으므로, 다른 서버의 선점이 살아남는다.
+    await this.stepRepo.update(
+      { id: step.id },
+      {
+        status: step.status,
+        visit: step.visit,
+        dispatched_at: step.dispatched_at,
+        started_at: step.started_at,
+        finished_at: step.finished_at,
+        confirm_decision: step.confirm_decision,
+        verdict: step.verdict,
+        result_summary: step.result_summary,
+        artifacts: step.artifacts,
+      },
+    );
 
     // global budget 은 **node 실행 횟수**이지 subagent 스폰 횟수가 아니다. 게이트가
     // subagent 를 띄우지 않더라도 함께 세는 근거는 폭주 방지가 아니라 **예산 정의의
@@ -1734,8 +1756,9 @@ export class OrchestrationRunnerService {
     //
     // 선점 자체는 **await 한다** — 색인된 단일 UPDATE 라 매달릴 일이 없고, 여기서 승패가
     // 갈려야 두 번째 발송이 애초에 시작되지 않는다. 반대로 **발송은 await 하지 않는다**:
-    // 이 메서드는 미션 락 안에서 돌고 알림 provider 들은 요청 타임아웃이 없는 raw fetch 라,
-    // 응답하지 않는 엔드포인트 하나를 여기서 기다리면 그 미션의 락 체인이 통째로 멈춰
+    // 이 메서드는 미션 락 안에서 돌고, provider 의 요청 단위 상한(티켓 672ffcb5)이 있어도
+    // `dispatchForUser` 한 번은 바인딩 수만큼 팬아웃하며 재시도까지 겹쳐 총 소요가 그 몇
+    // 배가 된다. 그걸 여기서 기다리면 그 미션의 락 체인이 통째로 멈춰
     // **사용자가 판정을 제출하는 것조차 막힌다** — 알림을 못 보내는 것보다 훨씬 나쁜
     // 결과이고, 요구사항 6("알림 실패가 게이트 오픈을 죽이지 않는다")이 막으려는 실패의
     // 최악 형태다. `claimGateNotice` 는 던지지 않고, 실패하면 졌다고 본다(fail-closed).

@@ -59,9 +59,10 @@ const SEND_TIMEOUT_MS = 15_000;
 export class OrchestrationConfirmNotifyService {
   /**
    * 진행 중인 fire-and-forget 발송들. `openConfirmGate` 는 미션 락을 쥔 채로 불리므로
-   * 발송을 **await 하지 않는다** — provider 에 타임아웃이 없어서, 한 번 매달리면 그
-   * 미션의 락 체인이 통째로 멈추고 사용자가 판정을 제출하는 것조차 막힌다. 알림을
-   * 못 보내는 것보다 훨씬 나쁜 결과다.
+   * 발송을 **await 하지 않는다** — provider 의 요청 단위 상한(티켓 672ffcb5)이 있어도
+   * 한 번의 팬아웃 총 소요는 그 몇 배라(위 `SEND_TIMEOUT_MS` 주석 참고), 여기서 기다리면
+   * 그 미션의 락 체인이 멈추고 사용자가 판정을 제출하는 것조차 막힌다. 알림을 못 보내는
+   * 것보다 훨씬 나쁜 결과다.
    *
    * 대신 여기에 담아 두고 `settled()` 로 기다릴 수 있게 한다(테스트·graceful shutdown).
    */
@@ -339,7 +340,7 @@ export class OrchestrationConfirmNotifyService {
   }
 }
 
-/** provider 에 요청 타임아웃이 없어서 여기서 상한을 건다. 타이머는 항상 해제한다. */
+/** provider 의 요청 단위 상한과 별개로 **팬아웃 한 번 전체**를 끊는다(위 상수 주석 참고). */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
