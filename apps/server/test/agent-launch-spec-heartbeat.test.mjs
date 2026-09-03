@@ -81,6 +81,7 @@ const VALID_SPEC = {
   permission: { tier: 'trusted', source: 'agent_trust', harness_mode: null },
   runtime_profile: null,
   env: [{ key: 'CLAUDE_CONFIG_DIR', value: '/home/a/cli-home', source: 'cli_home' }],
+  last_spawn: null,
   varies_per_dispatch: ['보드·워크스페이스 harness (harness_config)'],
   computed_at: '2026-01-01T00:00:00.000Z',
 };

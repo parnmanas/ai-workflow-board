@@ -212,6 +212,7 @@ const SPEC = {
     { key: 'CLAUDE_CONFIG_DIR', value: '/home/a/cli-home', source: 'cli_home' },
     { key: 'ANTHROPIC_API_KEY', value: '<redacted>', source: 'credential' },
   ],
+  last_spawn: null,
   varies_per_dispatch: ['보드·워크스페이스 harness (harness_config)'],
   computed_at: '2026-01-01T00:00:00.000Z',
 };
@@ -433,4 +434,60 @@ test('경로별 단서와 모델 라우팅 설명이 화면에 드러난다', ()
   });
   assert.doesNotMatch(plain, /환경변수로 라우팅/);
   assert.match(plain, /claude-opus-5/);
+});
+
+test('마지막 실제 실행이 있으면 추정과 나란히 보여준다', () => {
+  // 리뷰 2R — 추정만 보여 주면 디스패치 시점 입력이 덮은 부분이 드러나지 않는다.
+  const withActual = renderSection({
+    spec: {
+      ...SPEC,
+      last_spawn: {
+        mode: 'session',
+        bin: '/usr/local/bin/claude',
+        args: [
+          { value: '--session-id', source: 'unattributed' },
+          { value: '--effort', source: 'unattributed' },
+          { value: 'max', source: 'unattributed' },
+        ],
+        cwd: '/srv/work/.awb/wt/repo/20fff298',
+        env: [{ key: 'ANTHROPIC_MODEL', value: '<6ch>', source: 'credential' }],
+        context: {
+          ticket_id: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
+          role: 'assignee',
+          harness_keys: ['permission_mode'],
+          effort: 'max',
+          runtime_profile_id: 'vllm-local',
+        },
+        recorded_at: '2026-02-02T03:04:05.000Z',
+      },
+    },
+    managerFound: true,
+    reported: true,
+  });
+
+  assert.match(withActual, /data-testid="launch-spec-actual"/);
+  assert.match(withActual, /마지막 실제 실행/);
+  // 실제 프로세스 cwd — 추정의 base 경로가 아니라 티켓별 worktree.
+  assert.match(withActual, /\.awb\/wt\/repo\/20fff298/);
+  // 추정에는 없는 effort 가 실제에는 있다.
+  assert.match(withActual, /--effort/);
+  // 추정 블록은 "예상" 으로 명시돼야 한다 — 실제와 혼동되면 안 된다.
+  assert.match(withActual, /다음 실행 예상/);
+  assert.match(withActual, /디스패치 시점 입력은 아직 반영되지 않았습니다/);
+  // 왜 달랐는지의 근거(문맥)가 함께 보인다.
+  assert.match(withActual, /harness \[permission_mode\]/);
+  assert.match(withActual, /프로파일 vllm-local/);
+
+  // 기록이 없으면 그 블록은 아예 렌더되지 않는다(빈 칸을 만들지 않는다).
+  const noActual = renderSection({ spec: SPEC, managerFound: true, reported: true });
+  assert.doesNotMatch(noActual, /data-testid="launch-spec-actual"/);
+  assert.match(noActual, /다음 실행 예상/);
+});
+
+test('복사 버튼이 셸 한 줄과 argv JSON 두 갈래로 제공된다', () => {
+  const html = renderSection({ spec: SPEC, managerFound: true, reported: true });
+  assert.match(html, /data-copy="sh"/);
+  assert.match(html, /data-copy="json"/);
+  // 대상 셸을 명시한다 — 인용 규칙이 셸마다 다르므로.
+  assert.match(html, /POSIX sh 인용/);
 });

@@ -57,6 +57,9 @@ import {
   type EffectivePermissionPolicy,
 } from './permission-policy.js';
 import type { ManagedAgentContext } from './managed-agent-context.js';
+import { lastActualLaunch, type RecordedLaunchSpec } from './launch-spec-recorder.js';
+
+export type { RecordedLaunchSpec };
 
 /** argv 토큰 하나의 출처. */
 export type LaunchArgSource =
@@ -133,7 +136,16 @@ export interface AgentLaunchSpecEntry {
     arg_count: number;
   } | null;
   env: LaunchEnvEntry[];
-  /** 디스패치 시점에만 정해져 이 사양에 반영되지 않은 입력들의 이름. */
+  /** **마지막으로 실제 spawn 된** 사양 (ticket 20fff298 리뷰 2R).
+   *
+   *  위 `modes` 는 heartbeat 시점 정보만으로 만든 **추정**이라, 디스패치 시점
+   *  입력(harness / 티켓 effort / 티켓별 프로파일)이 덮는 부분을 반영하지 못한다.
+   *  이 필드는 실제 spawn 사이트가 argv·env·cwd 를 확정한 직후 기록한
+   *  ground truth 이므로, 화면이 추정과 실제를 나란히 놓고 차이를 보여 줄 수 있다.
+   *  아직 spawn 된 적이 없으면 null. */
+  last_spawn: RecordedLaunchSpec | null;
+  /** 디스패치 시점에만 정해져 **추정(`modes`)** 에 반영되지 않은 입력들의 이름.
+   *  `last_spawn` 이 있으면 그쪽에는 이미 반영되어 있다. */
   varies_per_dispatch: string[];
   /** 사양을 계산한 시각(ISO). */
   computed_at: string;
@@ -397,6 +409,7 @@ export function computeAgentLaunchSpec(
         }
       : null,
     env: [],
+    last_spawn: lastActualLaunch(ctx.agent_id),
     varies_per_dispatch: [...PER_DISPATCH_INPUTS],
     computed_at: now,
   };

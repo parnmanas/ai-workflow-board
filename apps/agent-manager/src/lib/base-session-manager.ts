@@ -37,6 +37,7 @@ import {
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import { recordActualLaunch } from './launch-spec-recorder.js';
 import {
   decideApproveDispatch,
   describePermissionPolicy,
@@ -977,27 +978,48 @@ export class BaseSessionManager {
         `${this.#logTag} spawn argv: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
           `bin=${resolvedBin} args=${describeSpawnArgv(descriptor.args)}`,
       );
+      // env / cwd 를 변수로 뽑는 이유는 SubagentManager.spawn 사이트와 같다
+      // (ticket 20fff298) — 실행 사양 기록에 spawn 과 **완전히 같은** 값을 넘겨,
+      // 기록용 재조립이 실제와 갈라지지 않게 한다.
+      const spawnCwd = claudeRuntimeProfile?.cwd || effectiveCwd;
+      // harnessEnv merges LAST — see SubagentManager.spawn for why a
+      // per-dispatch harness model must beat the per-agent extra_env.
+      // Board env_vars (ticket 354d336b) merge right after baseEnv so they
+      // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
+      // / cli-home / per-agent credential / harness env layered on top.
+      const spawnEnv = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
+        ...baseEnv,
+        ...(envVars ?? {}),
+        AWB_API_KEY: effectiveApiKey,
+        ...cliHomeEnv,
+        ...credentialEnv,
+        ...adapter.harnessEnv(harness),
+        ...(runtimeLease?.claudeEnv() ?? {}),
+        ...(maxOutputResolution?.env ?? {}),
+      }).env;
       const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-        cwd: claudeRuntimeProfile?.cwd || effectiveCwd,
-        // harnessEnv merges LAST — see SubagentManager.spawn for why a
-        // per-dispatch harness model must beat the per-agent extra_env.
-        // Board env_vars (ticket 354d336b) merge right after baseEnv so they
-        // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
-        // / cli-home / per-agent credential / harness env layered on top.
-        env: resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
-          ...baseEnv,
-          ...(envVars ?? {}),
-          AWB_API_KEY: effectiveApiKey,
-          ...cliHomeEnv,
-          ...credentialEnv,
-          ...adapter.harnessEnv(harness),
-          ...(runtimeLease?.claudeEnv() ?? {}),
-          ...(maxOutputResolution?.env ?? {}),
-        }).env,
+        cwd: spawnCwd,
+        env: spawnEnv,
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
+      // 실제 spawn 사양 기록 (ticket 20fff298) — 가시성 용도이므로 자식이 이미
+      // 뜬 뒤에, throw 하지 않는 형태로만 호출한다.
+      recordActualLaunch({
+        agentId: agentContext?.agent_id,
+        mode: 'session',
+        bin: resolvedBin,
+        args: descriptor.args,
+        cwd: spawnCwd,
+        env: spawnEnv,
+        baseEnv,
+        ticketId: monitorMeta?.ticket_id ?? null,
+        role: monitorMeta?.role ?? null,
+        harness,
+        effort: effortFlag,
+        runtimeProfileId: claudeRuntimeProfile?.id ?? null,
+      });
       child.once('error', (err: any) => {
         log(
           `${this.#logTag} spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,

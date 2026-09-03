@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { AgentLaunchSpecEntry, LaunchArgEntry, LaunchEnvEntry, LaunchModeSpec } from '../types';
 import { tokens } from '../tokens';
+import { posixCommandLine, argvJson } from '../utils/shellQuote';
 
 /**
  * "실행 인자" 섹션 — 이 에이전트가 다음에 spawn 될 때 실제로 받는 실행 파일과
@@ -46,6 +47,11 @@ const MODE_LABEL: Record<LaunchModeSpec['mode'], string> = {
 const MODE_HINT: Record<LaunchModeSpec['mode'], string> = {
   session: '티켓·채팅 디스패치의 기본 경로입니다. 프로세스가 살아 있는 동안 여러 턴을 처리합니다.',
   oneshot: '한 번 실행하고 끝나는 경로입니다. 지속 세션을 지원하지 않는 CLI 나 꺼 둔 경우에 쓰입니다.',
+};
+
+const MODE_LABEL_ACTUAL: Record<LaunchModeSpec['mode'], string> = {
+  session: '지속 세션',
+  oneshot: '일회성 실행',
 };
 
 const SOURCE_COLOR: Record<LaunchArgEntry['source'], string> = {
@@ -109,20 +115,27 @@ export default function AgentLaunchSpecSection({
   managerFound,
   reported,
 }: AgentLaunchSpecSectionProps) {
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'sh' | 'json' | null>(null);
   // 어느 spawn 경로를 보고 있는지. 매니저가 보고한 순서의 첫 항목이 기본
   // 경로이므로 그것을 초깃값으로 쓴다.
   const [modeIndex, setModeIndex] = useState(0);
   const modes = spec?.modes ?? [];
   const activeMode: LaunchModeSpec | null = modes[modeIndex] ?? modes[0] ?? null;
 
-  // 복사용 한 줄. 값은 이미 마스킹된 상태라 그대로 이어 붙인다 — 공백이 든
-  // 토큰만 따옴표로 감싸 셸에 붙여 넣었을 때 토큰 경계가 유지되게 한다.
-  const commandLine = useMemo(() => {
-    if (!spec || !activeMode) return '';
-    const quote = (v: string) => (/\s/.test(v) ? JSON.stringify(v) : v);
-    return [spec.bin ?? `<${spec.cli} 실행 파일 미해석>`, ...activeMode.args.map((a) => quote(a.value))].join(' ');
-  }, [spec, activeMode]);
+  // 표시·복사용 문자열. **모든 토큰을 POSIX 홑따옴표로 인용한다** (리뷰 2R) —
+  // 예전에는 공백이 있을 때만 큰따옴표로 감쌌는데, 그러면 `$(…)`·백틱·`$VAR`·`;`
+  // 가 붙여넣는 순간 확장되고, 큰따옴표 안에서는 `$` 가 여전히 살아 있었다.
+  // 실행 파일 경로도 인용 대상이다(공백 든 설치 경로가 두 토큰으로 쪼개졌다).
+  const binToken = spec?.bin ?? `<${spec?.cli ?? 'cli'} 실행 파일 미해석>`;
+  const commandLine = useMemo(
+    () => (spec && activeMode ? posixCommandLine(binToken, activeMode.args.map((a) => a.value)) : ''),
+    [spec, activeMode, binToken],
+  );
+  // 기계로 옮길 때의 정답 형태 — 셸 문법이 없어 재해석될 여지가 없다.
+  const commandJson = useMemo(
+    () => (spec && activeMode ? argvJson(binToken, activeMode.args.map((a) => a.value)) : ''),
+    [spec, activeMode, binToken],
+  );
 
   const sectionLabelStyle: React.CSSProperties = {
     fontSize: 11,
@@ -142,11 +155,11 @@ export default function AgentLaunchSpecSection({
     lineHeight: 1.5,
   };
 
-  const copy = async () => {
+  const copy = async (text: string, which: 'sh' | 'json') => {
     try {
-      await navigator.clipboard?.writeText(commandLine);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard?.writeText(text);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 1500);
     } catch {
       // 클립보드 권한이 없으면 아래 <pre> 를 직접 선택해 복사하면 된다.
       // 실패를 토스트로 키우지 않는다 — 대체 경로가 화면에 이미 있다.
@@ -194,6 +207,60 @@ export default function AgentLaunchSpecSection({
               </div>
             )}
 
+            {/* 마지막 실제 실행 (ticket 20fff298 리뷰 2R).
+                아래 "예상" 은 heartbeat 시점 정보만으로 만든 추정이라 디스패치
+                시점 입력(harness / 티켓 effort / 티켓별 프로파일)이 덮는 부분을
+                반영하지 못한다. 이 블록은 spawn 사이트가 확정한 값을 그대로
+                기록한 것이라, 둘을 나란히 놓으면 무엇이 실제로 달라졌는지 보인다. */}
+            {spec.last_spawn && (
+              <div data-testid="launch-spec-actual">
+                <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
+                  마지막 실제 실행
+                  <span style={{ fontWeight: 500, color: tokens.colors.textMuted, marginLeft: 6 }}>
+                    · {MODE_LABEL_ACTUAL[spec.last_spawn.mode]} · {spec.last_spawn.recorded_at}
+                  </span>
+                </div>
+                <pre
+                  data-testid="launch-spec-actual-command"
+                  style={{
+                    margin: 0,
+                    padding: 10,
+                    background: tokens.colors.surfaceSubtle,
+                    border: `1px solid ${tokens.colors.success}`,
+                    borderRadius: tokens.radii.sm,
+                    fontFamily: MONO,
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                    userSelect: 'text',
+                  }}
+                >
+                  {posixCommandLine(
+                    spec.last_spawn.bin ?? '<실행 파일 미기록>',
+                    spec.last_spawn.args.map((a) => a.value),
+                  )}
+                </pre>
+                <div style={{ marginTop: 4, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
+                  cwd <span style={{ fontFamily: MONO }}>{spec.last_spawn.cwd ?? '(미기록)'}</span>
+                  {spec.last_spawn.context.ticket_id && <> · 티켓 {spec.last_spawn.context.ticket_id.slice(0, 8)}</>}
+                  {spec.last_spawn.context.role && <> · 역할 {spec.last_spawn.context.role}</>}
+                  {spec.last_spawn.context.effort && <> · effort {spec.last_spawn.context.effort}</>}
+                  {spec.last_spawn.context.runtime_profile_id && <> · 프로파일 {spec.last_spawn.context.runtime_profile_id}</>}
+                  {spec.last_spawn.context.harness_keys.length > 0 && (
+                    <> · harness [{spec.last_spawn.context.harness_keys.join(', ')}]</>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary }}>
+              다음 실행 예상
+              <span style={{ fontWeight: 500, color: tokens.colors.textMuted, marginLeft: 6 }}>
+                · 디스패치 시점 입력은 아직 반영되지 않았습니다
+              </span>
+            </div>
+
             {modes.length > 1 && (
               <div data-testid="launch-spec-modes" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {modes.map((m, i) => (
@@ -240,25 +307,37 @@ export default function AgentLaunchSpecSection({
             <div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                 <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary }}>
-                  실행 명령
+                  실행 명령 <span style={{ fontWeight: 500, color: tokens.colors.textMuted }}>(POSIX sh 인용)</span>
                 </span>
-                <button
-                  type="button"
-                  onClick={copy}
-                  style={{
-                    padding: '3px 10px',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    background: 'transparent',
-                    color: tokens.colors.textStrong,
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.sm,
-                    cursor: 'pointer',
-                    fontFamily: 'inherit',
-                  }}
-                >
-                  {copied ? '복사됨' : '복사'}
-                </button>
+                {/* 복사 두 갈래 (리뷰 2R): 셸 한 줄은 사람이 읽고 붙여넣는 용도라
+                    모든 토큰이 홑따옴표로 인용돼 있고, argv JSON 은 셸 문법이 전혀
+                    없어 기계로 옮길 때 재해석 위험이 없다. */}
+                <span style={{ display: 'inline-flex', gap: 6 }}>
+                  {([
+                    ['sh', 'sh 복사', commandLine],
+                    ['json', 'argv JSON 복사', commandJson],
+                  ] as const).map(([which, label, text]) => (
+                    <button
+                      key={which}
+                      type="button"
+                      data-copy={which}
+                      onClick={() => copy(text, which)}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: 'transparent',
+                        color: tokens.colors.textStrong,
+                        border: `1px solid ${tokens.colors.border}`,
+                        borderRadius: tokens.radii.sm,
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {copied === which ? '복사됨' : label}
+                    </button>
+                  ))}
+                </span>
               </div>
               <pre
                 data-testid="launch-spec-command"

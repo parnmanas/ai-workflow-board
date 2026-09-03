@@ -75,6 +75,27 @@ export interface LaunchEnvEntry {
   source: 'cli_home' | 'credential' | 'runtime_profile';
 }
 
+/** 실제로 spawn 된 한 번의 실행 사양 (ticket 20fff298 리뷰 2R).
+ *
+ *  `modes` 는 heartbeat 시점 정보만으로 만든 **추정**이라 디스패치 시점 입력
+ *  (harness / 티켓 effort / 티켓별 프로파일)이 덮는 부분을 반영하지 못한다.
+ *  이 필드는 spawn 사이트가 argv·env·cwd 를 확정한 직후 기록한 ground truth 다. */
+export interface RecordedLaunchSpec {
+  mode: 'session' | 'oneshot';
+  bin: string | null;
+  args: LaunchArgEntry[];
+  cwd: string | null;
+  env: LaunchEnvEntry[];
+  context: {
+    ticket_id: string | null;
+    role: string | null;
+    harness_keys: string[];
+    effort: string | null;
+    runtime_profile_id: string | null;
+  };
+  recorded_at: string;
+}
+
 /** 관리 대상 에이전트 하나의 "다음 spawn 시 실효 실행 사양" (ticket 20fff298). */
 export interface AgentLaunchSpecEntry {
   agent_id: string;
@@ -92,6 +113,8 @@ export interface AgentLaunchSpecEntry {
   permission: { tier: string; source: string; harness_mode: string | null };
   runtime_profile: { id: string; protocol: string; model: string | null; arg_count: number } | null;
   env: LaunchEnvEntry[];
+  /** 마지막 실제 spawn 사양 (ground truth). 아직 없으면 null. */
+  last_spawn: RecordedLaunchSpec | null;
   varies_per_dispatch: string[];
   computed_at: string;
 }

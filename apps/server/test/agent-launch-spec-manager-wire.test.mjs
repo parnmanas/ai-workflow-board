@@ -46,6 +46,26 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   }
   const { computeAgentLaunchSpecs } = await import(MANAGER_DIST);
 
+  // 실제 spawn 기록도 함께 태운다 (ticket 20fff298 리뷰 2R). 기록이 null 이면
+  // `last_spawn` 의 스키마 정합성이 이 교차 검증에서 빠져, 두 앱이 갈라져도
+  // 통과해 버린다 — 새 필드가 가드 밖에 남는 정확히 그 상황이다.
+  const recorderPath = join(REPO_ROOT, 'apps/agent-manager/dist/lib/launch-spec-recorder.js');
+  const { recordActualLaunch } = await import(recorderPath);
+  recordActualLaunch({
+    agentId: 'wire-agent',
+    mode: 'session',
+    bin: '/usr/local/bin/claude',
+    args: ['--session-id', 'sid', '--effort', 'max', '--dangerously-skip-permissions'],
+    cwd: '/srv/work/.awb/wt/repo/20fff298',
+    env: { PATH: '/usr/bin', ANTHROPIC_MODEL: 'served-model', AWB_API_KEY: SECRET },
+    baseEnv: { PATH: '/usr/bin' },
+    ticketId: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
+    role: 'assignee',
+    harness: { permission_mode: 'plan' },
+    effort: 'max',
+    runtimeProfileId: 'vllm-local',
+  });
+
   const specs = computeAgentLaunchSpecs([{
     agent_id: 'wire-agent', workspace_id: 'ws', name: 'T', cli: 'claude',
     working_dir: '/srv/work', mcp_config_path: '/cfg/mcp.json', api_key: SECRET,
@@ -93,6 +113,14 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
 
   const row = stored[0];
   assert.deepEqual(row.modes.map((m) => m.mode), ['session', 'oneshot']);
+  // 실제 spawn 기록이 손실 없이 건너왔는지 — 새 필드가 가드 안에 있음을 보장한다.
+  assert.ok(row.last_spawn, 'last_spawn 이 서버 수용 경로에서 사라졌다');
+  assert.equal(row.last_spawn.mode, 'session');
+  assert.equal(row.last_spawn.cwd, '/srv/work/.awb/wt/repo/20fff298');
+  assert.equal(row.last_spawn.context.effort, 'max');
+  assert.equal(row.last_spawn.context.runtime_profile_id, 'vllm-local');
+  assert.deepEqual(row.last_spawn.context.harness_keys, ['permission_mode']);
+  assert.ok(row.last_spawn.args.map((a) => a.value).includes('--effort'));
   assert.equal(row.modes.some((m) => m.args.some((a) => a.source === 'unattributed')), false,
     '서버가 매니저의 출처 값을 인식하지 못했다 — 두 쪽 source 집합이 갈라졌다');
   // 실제 실행되는 경로의 모양이 그대로 보존됐는지.

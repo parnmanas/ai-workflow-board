@@ -104,6 +104,15 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
   ]);
   const ENV_SOURCES = new Set(['cli_home', 'credential', 'runtime_profile']);
   const MODES = new Set(['session', 'oneshot']);
+  const narrowEnv = (raw: unknown): AgentLaunchSpecEntry['env'] =>
+    (Array.isArray(raw) ? raw : [])
+      .slice(0, MAX_ENV)
+      .filter((e: any) => e && typeof e === 'object' && typeof e.key === 'string' && e.key)
+      .map((e: any) => ({
+        key: str(e.key, 120),
+        value: str(e.value),
+        source: ENV_SOURCES.has(e.source) ? e.source : 'credential',
+      }));
   const narrowArgs = (raw: unknown): AgentLaunchSpecEntry['modes'][number]['args'] =>
     (Array.isArray(raw) ? raw : [])
       .slice(0, MAX_ARGS)
@@ -153,14 +162,31 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
                 : 0,
             }
           : null,
-      env: (Array.isArray(row.env) ? row.env : [])
-        .slice(0, MAX_ENV)
-        .filter((e: any) => e && typeof e === 'object' && typeof e.key === 'string' && e.key)
-        .map((e: any) => ({
-          key: str(e.key, 120),
-          value: str(e.value),
-          source: ENV_SOURCES.has(e.source) ? e.source : 'credential',
-        })),
+      // 마지막 실제 spawn 기록 (ticket 20fff298 리뷰 2R). 추정과 달리 이 값은
+      // 실제 실행의 ground truth 이므로, 모양이 깨졌으면 지어내지 않고 null 로
+      // 접는다 — 잘못된 ground truth 는 없는 것보다 나쁘다.
+      last_spawn: (() => {
+        const raw = row.last_spawn;
+        if (!raw || typeof raw !== 'object' || !MODES.has(raw.mode)) return null;
+        return {
+          mode: raw.mode,
+          bin: strOrNull(raw.bin),
+          args: narrowArgs(raw.args),
+          cwd: strOrNull(raw.cwd),
+          env: narrowEnv(raw.env),
+          context: {
+            ticket_id: strOrNull(raw?.context?.ticket_id),
+            role: strOrNull(raw?.context?.role),
+            harness_keys: (Array.isArray(raw?.context?.harness_keys) ? raw.context.harness_keys : [])
+              .slice(0, 20)
+              .map((k: any) => str(k, 60)),
+            effort: strOrNull(raw?.context?.effort),
+            runtime_profile_id: strOrNull(raw?.context?.runtime_profile_id),
+          },
+          recorded_at: str(raw.recorded_at, 40),
+        };
+      })(),
+      env: narrowEnv(row.env),
       varies_per_dispatch: (Array.isArray(row.varies_per_dispatch) ? row.varies_per_dispatch : [])
         .slice(0, 20)
         .map((v: any) => str(v, 200)),
