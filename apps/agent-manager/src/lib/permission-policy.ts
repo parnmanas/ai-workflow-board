@@ -37,7 +37,11 @@ export type PermissionSource =
   /** Agent trust 미설정 + board/workspace harness `permission_mode` 존재. */
   | 'harness'
   /** 둘 다 없음 — 매니저 기본값(= 최고 권한, 종전 동작). */
-  | 'default';
+  | 'default'
+  /** Agent trust 가 **비어 있지 않은데 인식할 수 없는 값**이다. 손상된 config,
+   *  손으로 편집한 DB, 매니저보다 새 서버가 보낸 미래의 등급 등. harness 나
+   *  기본값으로 폴백하지 않고 최소 권한으로 fail-closed 한다. */
+  | 'invalid_trust';
 
 export interface EffectivePermissionPolicy {
   /** 이번 spawn 에 적용할 권한 등급. */
@@ -54,6 +58,9 @@ export interface EffectivePermissionPolicy {
   harnessTier: PermissionTier;
   /** Agent trust 가 harness 가 요구한 tier 를 실제로 덮어썼는가. */
   harnessOverridden: boolean;
+  /** 거부된 Agent trust 원본 문자열(진단용, 길이 제한). 인식 가능한 값이거나
+   *  아예 미설정이면 null. `source === 'invalid_trust'` 와 항상 함께 설정된다. */
+  invalidTrust: string | null;
 }
 
 /**
@@ -93,6 +100,10 @@ export function normalizeTrust(trust?: string | null): PermissionTier | null {
     : null;
 }
 
+/** 진단 로그에 남길 거부 값의 최대 길이 — 원본이 아무리 길어도 로그를 부풀리지
+ *  않게 자른다. */
+const MAX_INVALID_TRUST_LEN = 64;
+
 /**
  * Agent trust 와 harness permission_mode 를 하나의 effective policy 로 합친다.
  *
@@ -101,23 +112,40 @@ export function normalizeTrust(trust?: string | null): PermissionTier | null {
  * 쓸지만 고른다(어댑터가 `harnessMode` 를 그렇게 소비한다). 그래서 trusted
  * 에이전트는 보드가 어떤 harness 값을 걸어도 최고 권한 플래그를 잃지 않는다.
  *
- * Agent trust 가 없는 legacy 에이전트는 예전 규칙(harness 문자열 → tier)을
- * 그대로 타므로, 이 티켓 이전 동작이 바이트 단위로 보존된다.
+ * Agent trust 가 **아예 없는**(null/undefined/공백) legacy 에이전트는 예전
+ * 규칙(harness 문자열 → tier)을 그대로 타므로 이 티켓 이전 동작이 바이트 단위로
+ * 보존된다.
+ *
+ * **fail-closed (리뷰 지적 #3)**: Agent trust 가 비어 있지는 않은데 인식할 수
+ * 없는 값이면 "미설정"으로 뭉뚱그리지 않는다. 그렇게 하면 손상된 config 한 줄,
+ * 손으로 편집한 DB row, 또는 매니저보다 새 서버가 보낸 미지의 등급 하나가
+ * harness/기본값 폴백을 타고 **최고 권한 플래그를 켤 수 있다**. 서버의
+ * `validateAgentRuntimeConfig` 가 쓰기 경로에서 이 값을 검증하므로 여기 도달하는
+ * 미인식 값은 이미 계약 위반이라는 뜻이고, 그 상태에서 권한을 올려주는 건
+ * 정확히 반대 방향이다. 그래서 최소 권한(`strict`)으로 내리고 `source` 를
+ * `invalid_trust` 로 표시해 로그에서 즉시 눈에 띄게 한다. spawn 자체를 거부하지
+ * 않는 이유는, 그러면 config 한 글자 오타가 티켓을 통째로 멈춰 세우는데 —
+ * `strict` 는 이미 이 코드베이스가 정의해 둔 "최소 권한/거부" 경로라 안전
+ * 경계로 충분하고 복구도 운영자가 값만 고치면 되기 때문이다.
  */
 export function resolveEffectivePermissionPolicy(input: {
   trust?: string | null;
   harnessMode?: string | null;
 }): EffectivePermissionPolicy {
+  const rawTrust = typeof input.trust === 'string' ? input.trust.trim() : '';
   const trust = normalizeTrust(input.trust);
+  const invalidTrust = !trust && rawTrust ? rawTrust.slice(0, MAX_INVALID_TRUST_LEN) : null;
   const rawHarnessMode = typeof input.harnessMode === 'string' ? input.harnessMode.trim() : '';
   const harnessMode = rawHarnessMode || null;
   const harnessTier = harnessModeTier(harnessMode);
-  const tier = trust ?? harnessTier;
+  const tier: PermissionTier = trust ?? (invalidTrust ? 'strict' : harnessTier);
   const source: PermissionSource = trust
     ? 'agent_trust'
-    : harnessMode
-      ? 'harness'
-      : 'default';
+    : invalidTrust
+      ? 'invalid_trust'
+      : harnessMode
+        ? 'harness'
+        : 'default';
   return {
     tier,
     source,
@@ -125,6 +153,7 @@ export function resolveEffectivePermissionPolicy(input: {
     harnessMode,
     harnessTier,
     harnessOverridden: source === 'agent_trust' && !!harnessMode && harnessTier !== tier,
+    invalidTrust,
   };
 }
 
@@ -171,10 +200,33 @@ export interface PermissionCapabilities {
   tiers: Readonly<Record<PermissionTier, PermissionTierSupport>>;
 }
 
-/** 세 tier 를 모두 전용 플래그로 표현하는 어댑터(claude/deepseek/codex)용. */
-export const FULL_PERMISSION_CAPABILITIES: PermissionCapabilities = Object.freeze({
-  native_approvals: false,
+/**
+ * 실행 중 권한 요청을 프로토콜로 노출해 AWB 승인 경로에 연결할 수 있는
+ * 런타임(현재 Hermes/ACP 뿐)용. 세 등급 모두 요구된 의미 그대로 구현된다 —
+ * `approve` 는 실제로 `RuntimeSupervisor.#requestApproval` 을 통해 AWB 에
+ * 승인을 요청하고, `strict` 는 요청을 거부(cancel)한다.
+ */
+export const NATIVE_APPROVAL_PERMISSION_CAPABILITIES: PermissionCapabilities = Object.freeze({
+  native_approvals: true,
   tiers: Object.freeze({ strict: 'native', approve: 'native', trusted: 'native' }),
+});
+
+/**
+ * 등급마다 전용 플래그는 있지만 승인 요청을 중계할 프로토콜 훅이 없는
+ * CLI(claude/deepseek/codex)용.
+ *
+ * 리뷰 지적 #2: 이전 버전은 이 조합을 `approve: 'native'` 로 선언했는데,
+ * 그건 "전용 플래그가 있다"는 뜻으로 쓴 것이지 "요구된 approve 의미(AWB 에
+ * 승인을 요청한다)를 구현한다"는 뜻이 아니었다. 두 의미가 한 값에 겹쳐
+ * 능력을 과장했다. `claude --print` 와 `codex exec` 는 실행 중 권한 요청을
+ * 밖으로 노출하는 훅이 없어(ACP 의 `session/request_permission` 에 해당하는
+ * 것이 없다) 어떤 승인도 **발생시키지 않는다** — 권한이 필요한 도구 호출은
+ * 물어보지 않고 그냥 거부된다. 그건 실재하는 안전 경계이긴 하지만 승인
+ * 경로는 아니므로 `approximated` 로 선언한다.
+ */
+export const TIER_FLAG_PERMISSION_CAPABILITIES: PermissionCapabilities = Object.freeze({
+  native_approvals: false,
+  tiers: Object.freeze({ strict: 'native', approve: 'approximated', trusted: 'native' }),
 });
 
 /** 최고 권한 플래그 하나만 있고, 나머지는 그 플래그를 빼서 근사하는
@@ -193,11 +245,13 @@ export function describePermissionPolicy(policy: EffectivePermissionPolicy): str
     `harness_mode=${policy.harnessMode ?? '-'}`,
   ];
   if (policy.harnessOverridden) parts.push(`harness_tier_overridden=${policy.harnessTier}`);
+  // 거부된 값은 열거형이 아니므로 인용해 로그에서 경계가 분명하게 보이게 한다.
+  if (policy.invalidTrust) parts.push(`invalid_trust=${JSON.stringify(policy.invalidTrust)}`);
   return parts.join(' ');
 }
 
 /**
- * 이 어댑터가 요청된 tier 를 얼마나 표현할 수 있는지 요약한다. 'native' 가
+ * 이 런타임이 요청된 tier 를 얼마나 표현할 수 있는지 요약한다. 'native' 가
  * 아니면 호출자가 로그로 반드시 드러내야 한다 — 조용한 downgrade/upgrade 는
  * 금지(ticket 5851e435 요구사항).
  */
@@ -207,15 +261,18 @@ export function describePermissionSupport(
   capabilities: PermissionCapabilities,
 ): string | null {
   const support = capabilities.tiers[policy.tier];
-  if (support === 'native') {
-    if (policy.tier !== 'approve' || capabilities.native_approvals) return null;
+  if (support === 'native') return null;
+  if (policy.tier === 'approve' && !capabilities.native_approvals) {
     return (
-      `cli=${cliType} tier=approve — 이 CLI 는 실행 중 권한 요청을 AWB 승인 경로로 ` +
-      `중계하지 못한다(native_approvals=false). 승인 대신 비대화형 제한 모드로 실행된다.`
+      `cli=${cliType} tier=approve support=${support} native_approvals=false — 이 런타임은 ` +
+      `실행 중 권한 요청을 밖으로 노출하는 훅이 없어 AWB 승인 요청을 아예 발생시키지 ` +
+      `못한다. 대신 승인이 필요한 도구 호출이 묻지 않고 거부되는 비대화형 제한 모드로 ` +
+      `실행된다. 사람이 승인하는 흐름이 필요하면 Agent 를 native_approvals 런타임으로 ` +
+      `옮기고, 무조건 허용/거부가 목적이라면 trust 를 trusted/strict 로 명시하라.`
     );
   }
   return (
-    `cli=${cliType} tier=${policy.tier} support=${support} — 이 CLI 에는 해당 등급의 ` +
+    `cli=${cliType} tier=${policy.tier} support=${support} — 이 런타임에는 해당 등급의 ` +
     `전용 옵션이 없다. 조용히 다른 등급으로 바꾸지 않고 가진 수단 중 가장 가까운 ` +
     `동작으로 실행한다.`
   );

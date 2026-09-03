@@ -171,4 +171,88 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
   assert.deepEqual(record.runtime_capabilities.hermes.profiles, ['coder', 'reviewer']);
 });
 
+// ticket 5851e435 — 권한 등급별 표현력(permission_tiers)이 heartbeat 를 통해
+// 운영자에게 보이는지. 로그만으로는 "이 런타임의 approve 는 승인 요청을 못
+// 만든다"는 사실을 운영자가 알 수 없으므로 capabilities 로 명시한다.
+test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', async (t) => {
+  const { app, port, modules } = await bootApp({
+    port: Number.parseInt(process.env.PORT, 10) + 2,
+  });
+  t.after(async () => { await app.close(); });
+
+  const { getDataSourceToken } = modules;
+  const workspace = await createWorkspace(app, getDataSourceToken, 'runtime-health-tiers');
+  const manager = await createAgent(app, getDataSourceToken, null, {
+    name: 'runtime-host-tiers',
+    type: 'manager',
+  });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, {
+    workspaceId: workspace.id,
+    label: 'runtime-health-tiers',
+  });
+  const base = {
+    protocol: 'jsonl',
+    session: 'oneshot',
+    native_mcp: true,
+    native_approvals: false,
+    steering: false,
+    cancellation: true,
+    usage: 'tokens',
+    collaboration: [],
+    skill_delivery: ['prompt'],
+  };
+  const health = (capabilities) => ({
+    installed: true, healthy: true, version: 'v1', reason: null, capabilities,
+  });
+
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/agent/instance-heartbeat`,
+    {
+      method: 'POST',
+      headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instance_id: 'runtime-host-test-tiers',
+        agent_id: manager.id,
+        workspace_id: workspace.id,
+        mode: 'manager',
+        hostname: 'test-host',
+        plugin_version: 'test',
+        cli: 'mixed',
+        cli_adapters: ['codex'],
+        runtime_capabilities: {
+          // 정상: 세 등급이 모두 알려진 support 값이다.
+          codex: health({
+            ...base,
+            permission_tiers: { strict: 'native', approve: 'approximated', trusted: 'native' },
+          }),
+          // 일부만 온 경우: 빠진 등급이 "미보고"인지 "미지원"인지 구분할 수
+          // 없으므로 필드째 버린다(부분 수용은 능력 선언을 애매하게 만든다).
+          pi: health({ ...base, permission_tiers: { strict: 'native' } }),
+          // 미지의 support 값이 섞인 경우도 마찬가지로 필드째 버린다.
+          antigravity: health({
+            ...base,
+            permission_tiers: { strict: 'native', approve: 'sometimes', trusted: 'native' },
+          }),
+          // 아예 보고하지 않는 구버전 Host: 서버가 기본값을 지어내지 않는다.
+          claude: health({ ...base }),
+        },
+        pid: 123,
+        started_at: new Date().toISOString(),
+      }),
+    },
+  );
+  assert.equal(response.status, 201, await response.text());
+
+  const caps = app.get(InstanceRegistryService).get('runtime-host-test-tiers').runtime_capabilities;
+  assert.deepEqual(caps.codex.capabilities.permission_tiers, {
+    strict: 'native', approve: 'approximated', trusted: 'native',
+  });
+  assert.equal(caps.pi.capabilities.permission_tiers, undefined, '부분 보고는 필드째 버린다');
+  assert.equal(caps.antigravity.capabilities.permission_tiers, undefined, '미지의 support 값도 필드째 버린다');
+  assert.equal(caps.claude.capabilities.permission_tiers, undefined, '미보고는 기본값을 지어내지 않는다');
+  // 나머지 capability 는 permission_tiers 유무와 무관하게 그대로 통과한다.
+  assert.equal(caps.pi.capabilities.protocol, 'jsonl');
+  assert.equal(caps.pi.healthy, true);
+});
+
 exitAfterTests();

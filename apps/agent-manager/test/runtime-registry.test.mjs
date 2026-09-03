@@ -49,6 +49,10 @@ test('Hermes descriptor declares ACP ownership and collaboration capabilities', 
       usage: 'tokens',
       collaboration: ['delegated', 'swarm'],
       skill_delivery: ['filesystem', 'native'],
+      // ticket 5851e435 — Hermes 만이 세 등급을 요구된 의미 그대로 구현한다:
+      // approve 는 실제로 AWB 승인을 요청하고(native_approvals), strict 는
+      // 요청을 거부한다. CLI 런타임은 approve 가 approximated 다.
+      permission_tiers: { strict: 'native', approve: 'native', trusted: 'native' },
     },
   });
 });

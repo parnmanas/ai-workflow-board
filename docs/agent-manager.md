@@ -151,6 +151,14 @@ resolve the policy the same way.
   before this ticket: unset/unrecognised/`bypassPermissions` → `trusted`,
   `plan` → `strict`, `acceptEdits`/`auto`/`default`/`dontAsk`/`manual` →
   `approve`.
+- Agent trust **present but unrecognised** (corrupt config, hand-edited row, a
+  newer server sending a tier this manager does not know) → fails **closed** to
+  `strict` with `source: invalid_trust`, never to the harness or the `trusted`
+  default. The server validates this field on write, so a value reaching the
+  manager unrecognised already means a contract violation; raising privilege on
+  it would be exactly backwards. The spawn itself is not refused — `strict` is
+  already the defined minimum-privilege/deny path, so a one-character typo
+  degrades the run instead of wedging the ticket.
 
 | runtime | `trusted` | `approve` | `strict` |
 | --- | --- | --- | --- |
@@ -158,15 +166,34 @@ resolve the policy the same way.
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write -c approval_policy="never"` | `--sandbox read-only -c approval_policy="never"` |
 | `antigravity` | `--dangerously-skip-permissions` | flag omitted (approximated) | flag omitted (approximated) |
 | `pi` | `--approve` | flag omitted (approximated) | flag omitted (approximated) |
-| `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path | ACP request cancelled |
+| `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path (the only `native` approve) | ACP request cancelled |
 
-Each CLI adapter declares how faithfully it can express a tier via
-`permissionCapabilities()`. Anything other than `native` is logged at the spawn
-site rather than silently applied — `antigravity`/`pi` have no per-tier option,
-so `approve`/`strict` are approximated by dropping their auto-approve flag
-(both run non-interactively, so this restricts rather than hangs). Only Hermes
-declares `native_approvals`, so an `approve` tier on a CLI runtime is recorded
-as "no AWB approval bridge, runs in a constrained non-interactive mode".
+Each runtime declares how faithfully it expresses a tier via
+`permissionCapabilities()` (adapter side) and `RuntimeCapabilities.permission_tiers`
+(reported to AWB on the instance heartbeat, so the gap is visible to an operator
+and not only in a log line). The two come from the same constants and a
+regression test enforces that they agree.
+
+**`approve` is `native` only on Hermes.** The requested meaning of `approve` is
+"raise an approval request to AWB", which is implemented by
+`RuntimeSupervisor.#requestApproval` over ACP `session/request_permission`.
+`claude --print` and `codex exec` expose no equivalent hook, so they cannot
+raise any approval at all — a tool call needing permission is simply denied
+without asking. That is a real safety boundary but not an approval path, so
+those runtimes declare `approve: 'approximated'` with `native_approvals: false`,
+and the spawn site logs what is missing plus the two ways out (move the agent to
+a `native_approvals` runtime, or state the intent explicitly with
+`trusted`/`strict`). Declaring it `native` because a dedicated flag exists would
+overstate the capability.
+
+`antigravity`/`pi` have no per-tier option at all, so `approve`/`strict` are
+approximated by dropping their auto-approve flag (both run non-interactively, so
+this restricts rather than hangs).
+
+A partially reported or unknown-valued `permission_tiers` is dropped whole by the
+server rather than partially accepted — otherwise a missing tier is
+indistinguishable from "unsupported". A manager that does not report the field
+at all leaves it `undefined`; the server never invents a default.
 
 Pending is never created for a CLI-internal permission/trust dialog. Claude's
 workspace-trust preflight (ticket 48aeab6e) now blocks only when the board
@@ -174,8 +201,16 @@ harness explicitly asked for a non-bypass mode **and** Agent trust did not
 override it to `trusted` — an agent whose trust alone is `approve`/`strict` on
 a board that never configured a harness is not gated.
 
-The effective policy and the spawned argv (prompt bodies folded to a length,
-secret-shaped tokens redacted) are written to the manager log on every spawn.
+The effective policy and the spawned argv are written to the manager log on
+every spawn. Argv redaction is **allowlist-based**, not keyword-based: flag
+names are always shown, a short allowlist of non-sensitive flags
+(`--model`, `--effort`, `--permission-mode`, `--sandbox`, `--output-format`,
+`--input-format`, plus `-c approval_policy=…`) keeps its value, and every other
+token — prompt bodies, task text, tool lists, paths, opaque tokens — is reduced
+to `<Nch>`. A length threshold would not do: `antigravity`/`pi` put the prompt
+directly in argv, and a token like `sk-…` matches no secret keyword, so both
+would have been logged verbatim. Secret-shaped tokens are replaced with
+`<redacted>` and do not even leak a length.
 
 ## Capability and health reporting
 

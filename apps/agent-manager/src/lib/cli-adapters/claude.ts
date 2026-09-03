@@ -27,7 +27,7 @@ import {
   type EffectivePermissionPolicy,
   type PermissionCapabilities,
   type PermissionTier,
-  FULL_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
   permissionPolicyOrDefault,
 } from '../permission-policy.js';
 
@@ -520,9 +520,11 @@ export class ClaudeCliAdapter extends CliAdapter {
     return { kind: 'subscription', expires_at_ms: expires, refresh_token_present };
   }
 
-  /** Claude 는 세 등급을 모두 전용 플래그로 표현한다 (ticket 5851e435). */
+  /** Claude 는 세 등급 모두 전용 플래그를 갖지만, 실행 중 권한 요청을 밖으로
+   *  노출하는 훅이 없어 `approve` 는 AWB 승인 요청을 만들지 못한다 —
+   *  {@link TIER_FLAG_PERMISSION_CAPABILITIES} 참고 (ticket 5851e435). */
   permissionCapabilities(): PermissionCapabilities {
-    return FULL_PERMISSION_CAPABILITIES;
+    return TIER_FLAG_PERMISSION_CAPABILITIES;
   }
 
   /**

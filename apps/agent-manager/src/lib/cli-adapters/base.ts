@@ -14,13 +14,13 @@ import {
   type EffectivePermissionPolicy,
   type PermissionCapabilities,
   BYPASS_ONLY_PERMISSION_CAPABILITIES,
-  FULL_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
   permissionPolicyOrDefault,
 } from '../permission-policy.js';
 
 export {
   BYPASS_ONLY_PERMISSION_CAPABILITIES,
-  FULL_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
   permissionPolicyOrDefault,
 };
 export type { EffectivePermissionPolicy, PermissionCapabilities };
@@ -302,30 +302,82 @@ export function describeHarness(harness: HarnessSpec): string {
   return parts.join(' ');
 }
 
-/** argv 토큰 중 그 자체가 secret 이거나 secret 을 품을 수 있는 모양. */
+/** argv 토큰 중 그 자체가 secret 이거나 secret 을 품을 수 있는 모양. 아래
+ *  allowlist 를 통과한 값에도 마지막으로 한 번 더 적용되는 안전망이다. */
 const SECRET_ARG_PATTERN = /(authorization|api[-_]?key|auth[-_]?token|access[-_]?token|bearer|secret|password|credential)/i;
 
-/** 이보다 긴 토큰은 값 대신 길이만 남긴다(프롬프트/시스템 프롬프트 본문). */
-const MAX_LOGGED_ARG_LEN = 60;
+/**
+ * **값까지** 로그에 남겨도 되는 플래그 (ticket 5851e435 리뷰 지적 #1).
+ *
+ * 전부 열거형이거나 짧은 모드/모델 식별자라 사용자 데이터를 담지 않는다. 이
+ * 목록에 없는 플래그의 값은 길이만 남긴다 — 길이 기반 휴리스틱(예: "60자 이하면
+ * 평문")은 **짧은 프롬프트와 짧은 토큰을 그대로 노출**하기 때문에 쓰지 않는다.
+ * antigravity/pi 는 프롬프트를 argv 에 직접 싣고(`-p <prompt>`), `sk-...` 류
+ * 토큰은 어떤 secret 키워드에도 걸리지 않는다.
+ */
+const LOGGABLE_FLAG_VALUES = new Set([
+  '--model',
+  '--effort',
+  '--permission-mode',
+  '--sandbox',
+  '--output-format',
+  '--input-format',
+]);
+
+/** codex 의 `-c` 는 임의의 config 오버라이드를 싣는 다목적 플래그라 플래그
+ *  이름만으로는 안전을 보장할 수 없다(같은 플래그로 MCP 헤더 테이블도 넘어간다).
+ *  값의 모양으로 판정해 권한 진단에 필요한 항목만 통과시킨다. */
+const LOGGABLE_CONFIG_OVERRIDES = /^approval_policy=/;
+
+/** 플래그가 아닌데도 값까지 남겨도 되는 리터럴(서브커맨드). 프롬프트 같은
+ *  positional 인자와 구분하기 위해 명시 목록으로만 허용한다. */
+const LOGGABLE_LITERALS = new Set(['exec']);
 
 /**
  * spawn argv 를 진단 로그에 남길 수 있는 형태로 축약한다 (ticket 5851e435).
  *
- * 플래그 자체는 그대로 보여야 권한 플래그가 실제로 붙었는지 로그만으로 확인할
- * 수 있다. 반대로 프롬프트 본문(역할 프롬프트, task text, --append-system-prompt)
- * 은 티켓/채팅 내용을 통째로 담고 있고, MCP 헤더 오버라이드에는 토큰 이름이
- * 섞일 수 있으므로 길이/`<redacted>` 로 접는다.
+ * 규칙은 **기본 차단(allowlist)** 이다:
+ *   - 플래그 이름(`-`/`--` 로 시작)은 그대로 — 권한 플래그가 실제로 붙었는지
+ *     로그만으로 확인할 수 있어야 한다.
+ *   - {@link LOGGABLE_FLAG_VALUES} 바로 뒤의 값과 허용된 `-c` 오버라이드,
+ *     {@link LOGGABLE_LITERALS} 만 값까지 남긴다.
+ *   - 그 밖의 모든 토큰(프롬프트 본문, task text, 도구 목록, 경로, 토큰 등)은
+ *     길이만 `<Nch>` 로 남긴다. 길이는 그 자체로 내용을 유출하지 않는다.
+ *   - 어디에 있든 secret 모양 토큰은 길이도 남기지 않고 `<redacted>` 로 바꾼다.
  */
 export function describeSpawnArgv(args: readonly string[] | null | undefined): string {
-  return (args ?? []).map(redactSpawnArg).join(' ');
+  const list = args ?? [];
+  return list.map((arg, i) => redactSpawnArg(String(arg ?? ''), String(list[i - 1] ?? ''))).join(' ');
 }
 
-function redactSpawnArg(arg: string): string {
-  const s = String(arg ?? '');
-  if (!s) return "''";
-  if (SECRET_ARG_PATTERN.test(s)) return '<redacted>';
-  if (s.length > MAX_LOGGED_ARG_LEN) return `<${s.length}ch>`;
-  return /\s/.test(s) ? JSON.stringify(s) : s;
+/** `--flag=value` 결합형에서 플래그 이름만 떼어낸다(결합형이 아니면 null). */
+function splitInlineFlag(arg: string): { flag: string; value: string } | null {
+  if (!arg.startsWith('-')) return null;
+  const eq = arg.indexOf('=');
+  return eq > 0 ? { flag: arg.slice(0, eq), value: arg.slice(eq + 1) } : null;
+}
+
+function redactSpawnArg(arg: string, previous: string): string {
+  if (!arg) return "''";
+  if (SECRET_ARG_PATTERN.test(arg)) return '<redacted>';
+
+  const inline = splitInlineFlag(arg);
+  if (inline) {
+    return LOGGABLE_FLAG_VALUES.has(inline.flag)
+      ? quoteIfNeeded(arg)
+      : `${inline.flag}=<${inline.value.length}ch>`;
+  }
+  // 플래그 이름 자체는 값이 아니므로 항상 보인다.
+  if (arg.startsWith('-')) return arg;
+
+  if (LOGGABLE_FLAG_VALUES.has(previous)) return quoteIfNeeded(arg);
+  if (previous === '-c' && LOGGABLE_CONFIG_OVERRIDES.test(arg)) return quoteIfNeeded(arg);
+  if (LOGGABLE_LITERALS.has(arg)) return arg;
+  return `<${arg.length}ch>`;
+}
+
+function quoteIfNeeded(value: string): string {
+  return /\s/.test(value) ? JSON.stringify(value) : value;
 }
 
 export interface OneshotSpec {

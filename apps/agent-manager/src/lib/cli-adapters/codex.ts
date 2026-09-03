@@ -28,7 +28,7 @@ import {
 import {
   type EffectivePermissionPolicy,
   type PermissionCapabilities,
-  FULL_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
   permissionPolicyOrDefault,
 } from '../permission-policy.js';
 
@@ -192,9 +192,11 @@ export class CodexCliAdapter extends CliAdapter {
     return ['system_prompt_append', 'model', 'permission_mode'];
   }
 
-  /** Codex 는 세 등급을 모두 전용 옵션으로 표현한다 (ticket 5851e435). */
+  /** Codex 도 세 등급 모두 전용 옵션이 있지만 `codex exec` 에는 승인 요청을
+   *  중계할 훅이 없다 — {@link TIER_FLAG_PERMISSION_CAPABILITIES} 참고
+   *  (ticket 5851e435). */
   permissionCapabilities(): PermissionCapabilities {
-    return FULL_PERMISSION_CAPABILITIES;
+    return TIER_FLAG_PERMISSION_CAPABILITIES;
   }
 
   buildOneshotSpawn({
