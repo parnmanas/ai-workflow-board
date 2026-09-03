@@ -29,6 +29,8 @@ import { installService, uninstallService, type ServicePlatform } from './lib/se
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
 import { InstanceHeartbeat } from './lib/instance-heartbeat.js';
 import type { WorktreeStatusEntry, RunWorkspaceStatusEntry } from './lib/instance-heartbeat.js';
+import { computeAgentLaunchSpecs } from './lib/launch-spec.js';
+import type { AgentLaunchSpecEntry } from './lib/launch-spec.js';
 import { spawnFailureTracker } from './lib/spawn-failure-tracker.js';
 import { EventStream } from './lib/event-stream.js';
 import { SubagentManager } from './lib/subagent-manager.js';
@@ -1189,6 +1191,14 @@ async function runRuntime(
         }
         return out;
       },
+      // 관리 대상 에이전트별 실효 실행 사양 (ticket 20fff298). 어댑터의 실제
+      // buildOneshotSpawn() 을 돌려 argv 를 뽑으므로 동기 계산이며, 개별
+      // 에이전트의 실패는 computeAgentLaunchSpecs 안에서 흡수된다.
+      agentLaunchSpecProvider: (): AgentLaunchSpecEntry[] =>
+        computeAgentLaunchSpecs(managedAgentContexts.list(), {
+          delegation: config.delegation,
+          runtimeProfileOverride,
+        }),
       // Live worktrees + pool-lease state across every supervised agent (ticket
       // 72fc244f). Best-effort/async like the credential provider — a git failure
       // or missing pool registry yields []. Reuses the SAME live-ticket view the
