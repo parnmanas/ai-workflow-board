@@ -2540,7 +2540,9 @@ export type OrchestrationStepStatus =
   | 'skipped'
   | 'cancelled'
   /** lease 만료 + retry_policy='manual' — 자동 재실행이 금지된 복구 대기 상태. */
-  | 'needs_recovery';
+  | 'needs_recovery'
+  /** confirm 노드가 사람의 Pass/Fail 판정을 기다리는 durable pause(티켓 5dbe4aa2). */
+  | 'awaiting_user';
 
 export interface OrchestrationTeamMember {
   id: string;
@@ -2618,6 +2620,21 @@ export interface OrchestrationCounts {
   failed: number;
   inFlight: number;
   pending: number;
+  /** 사람의 confirm 판정을 기다리는 step 수(티켓 5dbe4aa2). pending 과 별개 축. */
+  awaitingUser: number;
+}
+
+/** Mission 단위 사용자 확인 강도(티켓 5dbe4aa2). */
+export type OrchestrationConfirmPolicy = 'none' | 'auto' | 'key_steps' | 'every_step';
+
+/** confirm 노드에 사람이 내린 판정. */
+export interface OrchestrationConfirmDecision {
+  verdict: 'pass' | 'fail';
+  feedback: string;
+  decided_by_user_id: string;
+  decided_by_name: string;
+  decided_at: string;
+  visit: number;
 }
 
 export interface OrchestrationMissionListItem {
@@ -2670,11 +2687,13 @@ export interface OrchestrationStep {
   recovery_reason: string;
   /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
   last_heartbeat_at: string | null;
+  /** confirm 노드의 사용자 판정. null = 아직 판정 전/해당 없음. */
+  confirm_decision: OrchestrationConfirmDecision | null;
 }
 
 // ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────
 
-export type OrchestrationGraphNodeKind = 'task' | 'evaluator' | 'router';
+export type OrchestrationGraphNodeKind = 'task' | 'evaluator' | 'router' | 'confirm';
 export type OrchestrationGraphEdgeKind = 'sequence' | 'conditional' | 'loop_back';
 export type OrchestrationGraphJoinPolicy = 'all' | 'any';
 
@@ -2749,6 +2768,8 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   graph_spec: OrchestrationGraphSpec | null;
   /** 지금까지 소진된 node 실행 횟수(global budget). */
   total_visits: number;
+  /** 사용자 확인 강도 — 서버가 항상 정규화해 보낸다(티켓 5dbe4aa2). */
+  confirm_policy: OrchestrationConfirmPolicy;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

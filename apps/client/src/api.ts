@@ -98,6 +98,9 @@ import type {
   OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
   OrchestrationRepoRef,
+  OrchestrationConfirmDecision,
+  OrchestrationConfirmPolicy,
+  OrchestrationStepStatus,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2356,6 +2359,10 @@ export const api = {
     max_parallel_steps?: number;
     max_steps?: number;
     step_timeout_minutes?: number;
+    /** 실행 그래프(조건 분기/join/bounded loop) 사용 여부 — confirm 노드의 전제 조건이다. */
+    graph_enabled?: boolean;
+    /** 사용자 확인 강도(티켓 5dbe4aa2). graph_enabled 가 켜져야 실제로 동작한다. */
+    confirm_policy?: OrchestrationConfirmPolicy;
     /** Brief the orchestrator immediately instead of leaving the mission a draft. */
     start?: boolean;
   }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
@@ -2376,6 +2383,8 @@ export const api = {
       max_parallel_steps?: number;
       max_steps?: number;
       step_timeout_minutes?: number;
+      graph_enabled?: boolean;
+      confirm_policy?: OrchestrationConfirmPolicy;
     },
   ) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {
@@ -2407,6 +2416,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, reason: reason || '' }),
     }),
+  /**
+   * confirm 노드에 Pass/Fail 판정을 제출한다(티켓 5dbe4aa2).
+   *
+   * `visit` 은 화면이 본 pass 번호다 — 반드시 함께 보낸다. loop 가 재진입해 화면이
+   * stale 해진 상태에서 제출하면 서버가 409 로 거부하는데, 이 값을 빼면 그 방어가
+   * 통째로 무력해진다(생략을 허용하면 stale 한 화면이 값을 빼는 것만으로 우회한다).
+   */
+  submitOrchestrationStepConfirm: (
+    stepId: string,
+    data: { workspace_id: string; verdict: 'pass' | 'fail'; visit: number; feedback?: string },
+  ) =>
+    request<{
+      already_decided: boolean;
+      step_id: string;
+      step_key: string;
+      status: OrchestrationStepStatus;
+      confirm_decision: OrchestrationConfirmDecision | null;
+      dispatched: string[];
+      loop_reentered: string[];
+      orchestrator_woken: boolean;
+    }>(`/orchestration/steps/${stepId}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',

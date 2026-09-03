@@ -5,6 +5,7 @@ import type {
   Action,
   OrchestrationMissionDetail,
   OrchestrationMissionListItem,
+  OrchestrationConfirmPolicy,
   OrchestrationPostActionCondition,
   OrchestrationTeam,
   OrchestrationUpdateEvent,
@@ -225,6 +226,13 @@ function MissionRow({
         <span style={{ marginLeft: 'auto' }}>
           {mission.counts.done}/{mission.counts.total} steps
           {mission.counts.inFlight > 0 && ` · ${mission.counts.inFlight} working`}
+          {/* 목록에서도 보여야 한다 — 이 미션은 사람이 열어서 답하기 전에는 절대
+              스스로 진행되지 않으므로, 카드가 조용한 것과 구분되지 않으면 방치된다. */}
+          {mission.counts.awaitingUser > 0 && (
+            <span style={{ color: tokens.colors.warningLight }}>
+              {` · ${mission.counts.awaitingUser} needs your decision`}
+            </span>
+          )}
           {mission.counts.failed > 0 && ` · ${mission.counts.failed} failed`}
         </span>
       </div>
@@ -282,6 +290,8 @@ export function MissionFormModal({
   const [postActions, setPostActions] = useState<
     Array<{ action_id: string; order: number; condition: OrchestrationPostActionCondition }>
   >([]);
+  const [graphEnabled, setGraphEnabled] = useState(false);
+  const [confirmPolicy, setConfirmPolicy] = useState<OrchestrationConfirmPolicy>('auto');
   const [repoResourceId, setRepoResourceId] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [repoBranch, setRepoBranch] = useState('');
@@ -295,10 +305,12 @@ export function MissionFormModal({
     setContext(mission?.context || '');
     setCriteria(mission?.acceptance_criteria || '');
     setStartNow(true);
-    setShowAdvanced(!!mission && (!!mission.method || mission.completion_criteria.length > 0 || mission.post_actions.length > 0 || !!mission.workspace_folder || !!mission.repo_ref));
+    setShowAdvanced(!!mission && (!!mission.method || mission.completion_criteria.length > 0 || mission.post_actions.length > 0 || !!mission.workspace_folder || !!mission.repo_ref || !!mission.graph_enabled));
     setMethod(mission?.method || '');
     setWorkspaceFolder(mission?.workspace_folder || '');
     setCheckoutMode(mission?.checkout_mode || 'reuse');
+    setGraphEnabled(!!mission?.graph_enabled);
+    setConfirmPolicy(mission?.confirm_policy || 'auto');
     setCompletionCriteria((mission?.completion_criteria || []).map((c) => ({ key: c.key, description: c.description })));
     setPostActions((mission?.post_actions || []).map((p) => ({ action_id: p.action_id, order: p.order, condition: p.condition })));
     setRepoResourceId(mission?.repo_ref?.resource_id || '');
@@ -346,6 +358,8 @@ export function MissionFormModal({
             workspace_folder: workspaceFolder.trim(),
             repo_ref: repoRef,
             checkout_mode: checkoutMode,
+            graph_enabled: graphEnabled,
+            confirm_policy: confirmPolicy,
           })
         : await api.createOrchestrationMission({
             workspace_id: wsId,
@@ -360,6 +374,8 @@ export function MissionFormModal({
             workspace_folder: workspaceFolder.trim(),
             repo_ref: repoRef,
             checkout_mode: checkoutMode,
+            graph_enabled: graphEnabled,
+            confirm_policy: confirmPolicy,
             start: startNow,
           });
       if (!mission && saved.start_error) {
@@ -465,6 +481,43 @@ export function MissionFormModal({
               onChange={setMethod}
               rows={2}
             />
+
+            {/* 실행 그래프 + 사용자 확인(티켓 5dbe4aa2).
+                두 컨트롤을 반드시 **함께** 노출한다: confirm 노드는 graph 모드에서만
+                만들 수 있으므로, 정책만 내놓으면 골라도 아무 일도 일어나지 않는
+                죽은 컨트롤이 된다. */}
+            <div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
+                <input
+                  type="checkbox"
+                  checked={graphEnabled}
+                  onChange={(e) => setGraphEnabled(e.target.checked)}
+                />
+                Execution graph — let the orchestrator use conditional branches, join policies and bounded loops
+              </label>
+              <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
+                Off (default) runs the plain dependency plan. Required for user confirmation gates.
+              </div>
+            </div>
+
+            <div>
+              <Select
+                label="User confirmation"
+                options={[
+                  { value: 'none', label: 'None — never ask, run straight through' },
+                  { value: 'auto', label: 'Auto — the orchestrator decides where a person should look' },
+                  { value: 'key_steps', label: 'Key steps — before each deliverable and anything outward-facing' },
+                  { value: 'every_step', label: 'Every step — ask after each reviewable result' },
+                ]}
+                value={confirmPolicy}
+                onChange={(e) => setConfirmPolicy(e.target.value as OrchestrationConfirmPolicy)}
+              />
+              <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
+                {graphEnabled
+                  ? 'The mission pauses at each gate until you answer Pass or Fail in the mission page. It does not time out.'
+                  : 'Turn on the execution graph above for this to have any effect — confirmation gates only exist in graph mode.'}
+              </div>
+            </div>
             <div>
               <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
                 Structured completion criteria (optional)

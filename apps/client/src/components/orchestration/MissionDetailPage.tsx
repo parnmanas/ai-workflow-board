@@ -15,6 +15,7 @@ import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
 import PlanGraph from './PlanGraph';
+import ConfirmRequestPanel from './ConfirmRequestPanel';
 import MissionConversationPanel from './MissionConversationPanel';
 import { MissionFormModal } from './OrchestrationPage';
 import { eventColor, missionStyle, progressPercent, stepStyle } from './status';
@@ -199,6 +200,10 @@ export default function MissionDetailPage() {
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <StatusBanner mission={mission} />
+
+        {/* 미션 전체가 여기서 멈춰 있으므로 화면 맨 위에 둔다 — 계획 그래프 아래로
+            내려가면 "왜 아무것도 진행되지 않는가"를 찾는 데 스크롤이 필요해진다. */}
+        <ConfirmRequestPanel steps={mission.steps} wsId={wsId} onDecided={() => load({ silent: true })} />
 
         <Section title="Objective">
           <Prose text={mission.objective} />
@@ -529,7 +534,9 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
         )}
         <span style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
           {mission.counts.total > 0
-            ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
+            ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting` +
+              `${mission.counts.awaitingUser ? ` · ${mission.counts.awaitingUser} needs your decision` : ''}` +
+              `${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
             : 'No steps yet'}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }}>

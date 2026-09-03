@@ -95,6 +95,16 @@ export const STEP_STATUS_STYLES: Record<OrchestrationStepStatus, StatusStyle> = 
     background: `${tokens.colors.dangerBg}55`,
     live: false,
   },
+  // 사람이 답해야 진행되는 상태라 가장 눈에 띄어야 한다 — 대기(muted)나 진행중(info)과
+  // 같은 색이면 "누가 뭘 해야 하는가" 가 화면에서 사라진다(티켓 5dbe4aa2).
+  // live:false — 스스로 바뀌지 않는다(사람의 입력이 있어야 한다). pulse 를 켜면
+  // "곧 알아서 진행될 것" 처럼 읽혀 정확히 반대 의미가 된다.
+  awaiting_user: {
+    label: 'Needs your decision',
+    color: tokens.colors.warningLight,
+    background: `${tokens.colors.warningBg}55`,
+    live: false,
+  },
 };
 
 export function missionStyle(status: string): StatusStyle {
@@ -118,6 +128,10 @@ export function eventColor(type: string): string {
     return tokens.colors.warningLight;
   }
   if (type === 'edge_selected') return tokens.colors.infoLight;
+  // 사용자 확인(티켓 5dbe4aa2) — 요청은 사람이 개입해야 하는 신호라 경고색,
+  // 판정 완료는 진행이 재개된 것이므로 성공색.
+  if (type === 'confirm_requested') return tokens.colors.warningLight;
+  if (type === 'confirm_decided') return tokens.colors.successLight;
   return tokens.colors.textMuted;
 }
 
