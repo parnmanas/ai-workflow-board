@@ -132,8 +132,16 @@ test('the npm-global install path is gated and pins the verified exact version',
   // 1. 설치 전에 증명을 검증한다. 검증 대상은 활성 채널(latest / next / 고정
   //    버전)이어야 한다 — 채널을 무시하고 항상 @latest 를 검증하면 실제로 설치할
   //    tarball 과 다른 것을 검증하게 되어 게이트가 헛돈다.
-  assert.match(src, /await verifyNpmGlobalProvenance\(out, channel\)/,
+  // ticket 23753dc7: 이 호출은 주입 가능한 포트를 거치게 됐다(복귀 분기를 실제로
+  // 태우는 테스트를 만들기 위해). 게이트의 의미는 그대로여야 하므로 두 가지를
+  // 함께 본다 — 호출부가 **활성 채널**을 넘기는지, 그리고 그 포트의 기본 구현이
+  // 진짜 provenance 검증인지. 앞만 보면 포트가 조용히 no-op 이 돼도 통과한다.
+  // (이 소스 검사에 더해, self-update-boot-rollback.test.mjs 가 거부 판정을
+  //  주입해 "설치가 실제로 일어나지 않는지"를 동적으로 단언한다.)
+  assert.match(src, /await ports\.verifyProvenance\(channel\)/,
     'runNpmGlobalSelfUpdate must verify provenance for the ACTIVE channel before installing');
+  assert.match(src, /verifyProvenance: p\.verifyProvenance \?\? \(\(channel\) => verifyNpmGlobalProvenance\(out, channel\)\)/,
+    'the provenance port must default to the real verifier');
   assert.match(src, /\['view', npmChannelSpec\(channel\), 'version', 'dist\.attestations'/,
     'the provenance read must target the active channel spec');
 

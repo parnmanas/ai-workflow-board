@@ -1079,7 +1079,15 @@ test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된
 // 아래 분기를 한 줄도 실행하지 않는다. 그래서 가짜 npm 을 PATH 에 얹고 헬퍼를
 // 실제로 돌린다.
 
-/** 가짜 npm + 가짜 전역 루트를 만들고 헬퍼를 실제로 실행한다. */
+/**
+ * 가짜 npm + 가짜 전역 루트를 만들고 헬퍼를 실제로 실행한다.
+ *
+ * 진입점은 셸이 아니라 여기서 JS 로 직접 만든다 — 셸 printf 로 JS 를 찍으면
+ * 이스케이프가 어긋나 픽스처 자체가 구문 오류가 되고, 그러면 "프로브가 잡았다"가
+ * 아니라 "픽스처가 깨졌다"를 보게 된다(실제로 한 번 겪었다).
+ * 재기동된 진입점은 `--force` 를 보고 로그를 남기므로, 되돌린 매니저가 실제로
+ * 다시 떴는지를 간접 신호가 아니라 그 로그로 단언할 수 있다.
+ */
 function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) {
   const base = mkdtempSync(join(tmpdir(), 'awb-helper-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
@@ -1090,12 +1098,32 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
   mkdirSync(binDir, { recursive: true });
   mkdirSync(distDir, { recursive: true });
   const installLog = join(base, 'installs.txt');
+  const relaunchLog = join(base, 'relaunch.txt');
   const pinPath = join(base, 'self-update-pin.json');
   const entrypoint = join(distDir, 'main.js');
+  const versionFile = join(distDir, 'VERSION');
 
-  // 가짜 npm: install 은 spec 을 기록하고 그 버전의 진입점을 실제로 써 넣는다.
-  // badVersion 을 설치하면 뜨지 않는 진입점이 깔린다 — 헬퍼의 프로브가 그것을
-  // 관측해야 한다.
+  // 정상 진입점: --version 이면 버전을 찍고, --force(재기동)면 로그를 남긴다.
+  const goodTemplate = join(base, 'tpl-good.js');
+  writeFileSync(
+    goodTemplate,
+    [
+      "const { readFileSync, appendFileSync } = require('node:fs');",
+      "const { join } = require('node:path');",
+      "const version = readFileSync(join(__dirname, 'VERSION'), 'utf8').trim();",
+      "if (process.argv.includes('--force')) {",
+      "  appendFileSync(process.env.AWB_TEST_RELAUNCH_LOG, version + '\\n');",
+      '  process.exit(0);',
+      '}',
+      'console.log(version);',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  // 뜨지 않는 진입점: 모듈 로드 시점에 죽는다 — 이 티켓이 막으려는 실패 클래스.
+  const badTemplate = join(base, 'tpl-bad.js');
+  writeFileSync(badTemplate, "throw new Error('installed build cannot start');\n", 'utf8');
+
   const npmScript = [
     '#!/bin/sh',
     'if [ "$1" = "root" ]; then printf "%s\\n" "' + globalRoot + '"; exit 0; fi',
@@ -1104,10 +1132,11 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
     '  for a in "$@"; do case "$a" in awb-agent-manager@*) spec="$a";; esac; done',
     '  ver=${spec#awb-agent-manager@}',
     '  printf "%s\\n" "$ver" >> "' + installLog + '"',
+    '  printf "%s\\n" "$ver" > "' + versionFile + '"',
     '  if [ "$ver" = "' + String(badVersion) + '" ]; then',
-    '    printf "%s\\n" "throw new Error(\'installed build cannot start\');" > "' + entrypoint + '"',
+    '    cp "' + badTemplate + '" "' + entrypoint + '"',
     '  else',
-    '    printf "console.log(\'%s\');\\n" "$ver" > "' + entrypoint + '"',
+    '    cp "' + goodTemplate + '" "' + entrypoint + '"',
     '  fi',
     '  exit 0',
     'fi',
@@ -1135,17 +1164,33 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
     ],
     {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        AWB_TEST_RELAUNCH_LOG: relaunchLog,
+      },
       timeout: 60_000,
     },
   );
+
+  // 재기동은 detached spawn 이라 await 할 promise 가 없다. 상한은 정상 동기화
+  // 수단이 아니라 hang 진단용이며, 나타나는 즉시 빠져나온다.
+  const readRelaunch = () =>
+    existsSync(relaunchLog) ? readFileSync(relaunchLog, 'utf8').split('\n').filter(Boolean) : [];
+  const sleepSlot = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 15_000;
+  let relaunched = readRelaunch();
+  while (relaunched.length === 0 && Date.now() < deadline) {
+    Atomics.wait(sleepSlot, 0, 0, 25);
+    relaunched = readRelaunch();
+  }
 
   const installs = existsSync(installLog)
     ? readFileSync(installLog, 'utf8').split('\n').filter(Boolean)
     : [];
   const pin = existsSync(pinPath) ? JSON.parse(readFileSync(pinPath, 'utf8')) : null;
-  const finalEntrypoint = existsSync(entrypoint) ? readFileSync(entrypoint, 'utf8') : '';
-  return { status: r.status, installs, pin, finalEntrypoint, helperPath };
+  const finalVersion = existsSync(versionFile) ? readFileSync(versionFile, 'utf8').trim() : '';
+  return { status: r.status, installs, pin, finalVersion, relaunched, helperPath };
 }
 
 test('헬퍼: 새 빌드가 뜨지 않으면 이전 버전을 다시 설치하고 핀을 남긴다', (t) => {
@@ -1159,7 +1204,10 @@ test('헬퍼: 새 빌드가 뜨지 않으면 이전 버전을 다시 설치하�
   // 설치는 두 번: 새 버전, 그리고 프로브 실패 후 이전 버전.
   assert.deepEqual(r.installs, ['2.0.0', '1.0.0'], `설치 로그: ${JSON.stringify(r.installs)}`);
   // 디스크에 최종적으로 남은 것은 되돌린 빌드다.
-  assert.match(r.finalEntrypoint, /1\.0\.0/);
+  assert.equal(r.finalVersion, '1.0.0');
+  // 그리고 그 되돌린 매니저가 **실제로 다시 떴다** — 재기동된 프로세스가 남긴
+  // 로그로 직접 확인한다(헬퍼 자기삭제 같은 간접 신호가 아니다).
+  assert.deepEqual(r.relaunched, ['1.0.0'], '이전 버전 매니저가 재기동돼야 한다');
   // 핀이 남아 다음 tick 이 같은 불량 버전을 다시 집지 않는다.
   assert.ok(r.pin, '복귀했으면 핀이 있어야 한다');
   assert.equal(r.pin.version, '1.0.0');
@@ -1177,7 +1225,8 @@ test('헬퍼: 새 빌드가 정상이면 되돌리지 않고 핀도 만들지 �
   });
 
   assert.deepEqual(r.installs, ['2.0.0'], '정상 경로에서 복귀 설치가 일어나면 안 된다');
-  assert.match(r.finalEntrypoint, /2\.0\.0/);
+  assert.equal(r.finalVersion, '2.0.0');
+  assert.deepEqual(r.relaunched, ['2.0.0'], '정상 경로는 새 버전으로 재기동한다');
   assert.equal(r.pin, null, '정상 설치는 핀을 만들지 않는다');
   assert.equal(r.status, 0);
 });
@@ -1189,10 +1238,11 @@ test('헬퍼: 되돌릴 대상이 없으면(복귀 중) 프로브를 건너뛰�
     installSpec: 'awb-agent-manager@1.0.0',
     expectVersion: '',
     previousSpec: '',
-    badVersion: '1.0.0',
+    badVersion: 'never-matches',
   });
 
   assert.deepEqual(r.installs, ['1.0.0'], '복귀 중에는 추가 복귀 설치가 없어야 한다');
+  assert.deepEqual(r.relaunched, ['1.0.0'], '되돌린 매니저는 그대로 재기동된다');
   assert.equal(r.pin, null);
 });
 
@@ -1209,4 +1259,26 @@ test('헬퍼: 복귀 설치까지 실패해도 매니저 재기동은 그대로 
   // 헬퍼가 끝까지 돌아 자기 자신을 지웠다는 것은 4~5단계(재기동 + 정리)까지
   // 도달했다는 뜻이다. 중간에 던졌다면 파일이 남는다.
   assert.equal(existsSync(r.helperPath), false, '헬퍼가 재기동·정리 단계까지 도달해야 한다');
+});
+
+
+test('runSelfUpdate: provenance 가 거부하면 새 버전을 설치조차 하지 않는다', async (t) => {
+  // 위 소스 가드(self-update-provenance-gate.test.mjs)가 배선을 보는 것과 달리,
+  // 이쪽은 거부 판정을 실제로 주입해 **설치가 일어나지 않는지**를 본다.
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = fakePorts({
+    provenance: () => ({ ok: false, version: null, reason: 'no npm attestations (unsigned publish)' }),
+  });
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 0, '증명 없는 tarball 을 설치하면 정책 E 가 깨진다');
+  assert.equal(calls.probe, 0);
+  assert.equal(calls.restart, 0);
+  assert.equal(r.changed, false);
+  assert.match(r.summary, /refused/);
+  // 거부는 상태 기록도 남기지 않는다 — 설치를 시도조차 안 했기 때문이다.
+  assert.equal(readBootVerificationRecord(dir), null);
 });
