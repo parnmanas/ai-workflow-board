@@ -2538,7 +2538,9 @@ export type OrchestrationStepStatus =
   | 'failed'
   | 'blocked'
   | 'skipped'
-  | 'cancelled';
+  | 'cancelled'
+  /** lease 만료 + retry_policy='manual' — 자동 재실행이 금지된 복구 대기 상태. */
+  | 'needs_recovery';
 
 export interface OrchestrationTeamMember {
   id: string;
@@ -2662,6 +2664,12 @@ export interface OrchestrationStep {
   visit: number;
   /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
   verdict: string;
+  /** 'auto' | 'manual'. manual 이면 lease 만료 시 자동 재실행 대신 needs_recovery. */
+  retry_policy: string;
+  /** needs_recovery 사유. 다른 상태에서는 ''. */
+  recovery_reason: string;
+  /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
+  last_heartbeat_at: string | null;
 }
 
 // ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────

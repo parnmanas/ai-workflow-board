@@ -86,6 +86,15 @@ export const STEP_STATUS_STYLES: Record<OrchestrationStepStatus, StatusStyle> = 
     background: `${tokens.colors.border}30`,
     live: false,
   },
+  // 여기 없으면 stepStyle 의 fallback 이 걸려 가장 급한 상태가 조용히 "Waiting"
+  // (muted 회색)으로 그려진다 — 운영자가 개입해야 하는 상태를 대기 중으로 오인하게
+  // 만드는 조용한 오표시라, 상태 추가와 스타일 추가는 반드시 같이 가야 한다.
+  needs_recovery: {
+    label: 'Needs recovery',
+    color: tokens.colors.dangerLight,
+    background: `${tokens.colors.dangerBg}55`,
+    live: false,
+  },
 };
 
 export function missionStyle(status: string): StatusStyle {
