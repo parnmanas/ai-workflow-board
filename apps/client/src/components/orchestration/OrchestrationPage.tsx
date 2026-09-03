@@ -18,6 +18,7 @@ import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
 import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
+import { RepoRefPicker, buildRepoRefPayload } from '../admin/WorkspaceFolderOptions';
 
 /**
  * Mission list — the landing surface of Orchestration mode.
@@ -297,6 +298,18 @@ export function MissionFormModal({
   const [repoBranch, setRepoBranch] = useState('');
   const [actions, setActions] = useState<Action[]>([]);
 
+  // RepoRefPicker 는 평면 상태 + patch 한 벌로 말한다. 저장소를 바꿀 때
+  // { repoResourceId, repoBranch } 처럼 두 필드를 한 번에 보내므로 개별로 반영한다.
+  const repoRefState = useMemo(
+    () => ({ repoResourceId, repoUrl, repoBranch }),
+    [repoResourceId, repoUrl, repoBranch],
+  );
+  const patchRepoRef = useCallback((patch: Partial<typeof repoRefState>) => {
+    if (patch.repoResourceId !== undefined) setRepoResourceId(patch.repoResourceId);
+    if (patch.repoUrl !== undefined) setRepoUrl(patch.repoUrl);
+    if (patch.repoBranch !== undefined) setRepoBranch(patch.repoBranch);
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
     api.listActions(wsId).then(setActions).catch(() => setActions([]));
@@ -335,14 +348,8 @@ export function MissionFormModal({
     // 일부라 유일성이 실제로 중요하므로(리뷰 지적 반영, 티켓 2dc3c62f), 제출
     // 직전에 최종 배열 순서 그대로 0..N-1로 다시 매긴다.
     const cleanPostActions = postActions.filter((p) => p.action_id).map((p, idx) => ({ ...p, order: idx }));
-    const repoRef =
-      repoResourceId.trim() || repoUrl.trim() || repoBranch.trim()
-        ? {
-            ...(repoResourceId.trim() ? { resource_id: repoResourceId.trim() } : {}),
-            ...(repoUrl.trim() ? { url: repoUrl.trim() } : {}),
-            ...(repoBranch.trim() ? { branch: repoBranch.trim() } : {}),
-          }
-        : null;
+    // 생성/편집 두 경로가 같은 repoRef 를 쓰므로 규칙은 여기 한 번만 적용된다.
+    const repoRef = buildRepoRefPayload(repoRefState);
     setSaving(true);
     try {
       const saved = mission
@@ -638,32 +645,14 @@ export function MissionFormModal({
               onChange={(e) => setCheckoutMode(e.target.value as 'reuse' | 'fresh')}
             />
             <div>
-              <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong, marginBottom: 4 }}>
-                Repo (optional)
-              </span>
               <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-                Checked out for every step. Leave all blank to reuse the board/workspace environment_config repo.
+                Repo — checked out for every step.
               </span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  value={repoResourceId}
-                  placeholder="Resource id (preferred)"
-                  onChange={(e) => setRepoResourceId(e.target.value)}
-                  style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
-                />
-                <input
-                  value={repoUrl}
-                  placeholder="or raw git URL"
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                  style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
-                />
-                <input
-                  value={repoBranch}
-                  placeholder="branch (optional)"
-                  onChange={(e) => setRepoBranch(e.target.value)}
-                  style={{ width: 130, padding: '7px 9px', borderRadius: 6, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, fontFamily: 'inherit' }}
-                />
-              </div>
+              {/* Action/QA/Security 편집 폼과 같은 피커를 쓴다(티켓 eb9cdd1c) — 검색형
+                  리소스 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
+                  수동 입력 폴백까지 그대로 승계한다. 여기만 별도 입력을 두면 같은
+                  화면이 또 갈라진다. */}
+              <RepoRefPicker workspaceId={wsId} state={repoRefState} onChange={patchRepoRef} />
             </div>
           </div>
         )}

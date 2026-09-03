@@ -44,16 +44,44 @@ export function initWorkspaceFolderState(src: {
 }
 
 /**
- * 폼 상태를 create/update 페이로드 조각으로 변환한다. workspace_folder 는 항상
- * 보내고(빈 문자열 = 기본값 사용), repo_ref 는 resource_id 우선, 다음 url+branch,
- * 둘 다 비면 null(= env repo 재사용)으로 보낸다. 서버가 추가 정규화를 한다.
+ * `RepoRefPicker` 가 실제로 읽고 쓰는 필드만 추린 것. Orchestration Mission 모달처럼
+ * workspace_folder/build_mode 개념이 없는 폼도 repo 블록만 떼어 재사용할 수 있게,
+ * 넓은 `WorkspaceFolderFormState` 대신 이 좁은 타입을 요구한다(티켓 eb9cdd1c).
+ */
+export type RepoRefFormState = Pick<WorkspaceFolderFormState, 'repoResourceId' | 'repoUrl' | 'repoBranch'>;
+
+/**
+ * repo_ref 하나만 조립한다 — resource_id 우선, 다음 url, 둘 다 비면 null(= env repo
+ * 재사용). repo 블록을 단독으로 쓰는 폼이 같은 규칙을 두 번 구현하지 않도록 여기
+ * 한 곳에만 둔다(티켓 eb9cdd1c).
  *
- * branch 는 두 경로 모두에 실린다 — 서버 `resolveRunRepo()` 가 resource 경로에서도
- * `ref.branch || resource.default_branch` 순으로 읽기 때문이다
- * (apps/server/src/common/run-workspace-resolver.ts). 예전엔 resource 를 고르면
- * branch 를 통째로 버려서, MCP 로 저장된 `{resource_id, branch}` 레코드를 폼에서
+ * resource_id 와 url 은 배타적으로 내보낸다. 서버 `resolveRunRepo()` 는 url 을 먼저
+ * 보므로(run-workspace-resolver.ts tier 1), 둘 다 실어 보내면 "리소스를 고르면 URL 은
+ * 무시된다"는 이 폼의 안내와 서버 동작이 정확히 반대가 된다.
+ *
+ * branch 는 두 경로 모두에 실린다 — 서버가 resource 경로에서도
+ * `ref.branch || resource.default_branch` 순으로 읽기 때문이다. 예전엔 resource 를
+ * 고르면 branch 를 통째로 버려서, MCP 로 저장된 `{resource_id, branch}` 레코드를 폼에서
  * 한 번 저장하기만 해도 branch 가 조용히 사라졌다(티켓 af31e92d). 비어 있으면
  * 예전과 똑같이 `{resource_id}` 만 나가므로 기존 레코드의 페이로드는 그대로다.
+ *
+ * branch 만 있고 repo 지정이 없으면 null 이다. 그 조합은 서버에서 tier 3(env config
+ * 상속)으로 가는데, 거기서 쓰이는 branch 는 env config entry 의 것이라 `ref.branch` 는
+ * 체크아웃에 아무 영향을 주지 못한다 — 즉 저장해봐야 동작하지 않는 값이다.
+ */
+export function buildRepoRefPayload(state: RepoRefFormState): WorkspaceFolderRepoRef | null {
+  const resourceId = state.repoResourceId.trim();
+  const url = state.repoUrl.trim();
+  const branch = state.repoBranch.trim();
+  if (resourceId) return { resource_id: resourceId, ...(branch ? { branch } : {}) };
+  if (url) return { url, ...(branch ? { branch } : {}) };
+  return null;
+}
+
+/**
+ * 폼 상태를 create/update 페이로드 조각으로 변환한다. workspace_folder 는 항상
+ * 보내고(빈 문자열 = 기본값 사용), repo_ref 는 `buildRepoRefPayload` 규칙을 그대로
+ * 따른다. 서버가 추가 정규화를 한다.
  */
 export function buildWorkspaceFolderPayload(state: WorkspaceFolderFormState): {
   workspace_folder: string;
@@ -61,18 +89,9 @@ export function buildWorkspaceFolderPayload(state: WorkspaceFolderFormState): {
   checkout_mode: CheckoutMode;
   build_mode: BuildMode;
 } {
-  const resourceId = state.repoResourceId.trim();
-  const url = state.repoUrl.trim();
-  const branch = state.repoBranch.trim();
-  let repo_ref: WorkspaceFolderRepoRef | null = null;
-  if (resourceId) {
-    repo_ref = { resource_id: resourceId, ...(branch ? { branch } : {}) };
-  } else if (url) {
-    repo_ref = { url, ...(branch ? { branch } : {}) };
-  }
   return {
     workspace_folder: state.workspaceFolder.trim(),
-    repo_ref,
+    repo_ref: buildRepoRefPayload(state),
     checkout_mode: state.checkoutMode,
     build_mode: state.buildMode,
   };
@@ -122,8 +141,8 @@ const helpText: React.CSSProperties = {
 interface RepoRefPickerProps {
   /** 리소스/브랜치 조회에 쓸 workspace. 빈 문자열이면 조회를 건너뛴다. */
   workspaceId: string;
-  state: WorkspaceFolderFormState;
-  onChange: (patch: Partial<WorkspaceFolderFormState>) => void;
+  state: RepoRefFormState;
+  onChange: (patch: Partial<RepoRefFormState>) => void;
 }
 
 /**
@@ -140,7 +159,7 @@ interface RepoRefPickerProps {
  *  - url 직접 입력 경로는 리소스로 등록되지 않은 저장소용으로 남기되, 우선순위가
  *    낮다는 사실(resource 선택 시 무시)을 UI 로 드러낸다.
  */
-function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerProps) {
+export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerProps) {
   const [repos, setRepos] = useState<Resource[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
   const [reposError, setReposError] = useState('');
