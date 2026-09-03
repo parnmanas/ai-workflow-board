@@ -97,7 +97,8 @@ export type IntentReconcileAction = 'resolve' | 'dispatch' | 'defer';
  *   3. terminalOrUnrouted       — landed terminal, or its current column no
  *                                 longer routes to this role (responsibility moved).
  *   4. parked                   — pending_user_action / pending_on_tickets /
- *                                 pending_ci_wait (a human/prereq/CI-run gate;
+ *                                 pending_ci_wait / pending_merge_lease (a
+ *                                 human/prereq/CI-run/landing-lease gate;
  *                                 a fresh trigger re-records on resume).
  *   5. progressed               — forward progress (comment / move / claim /
  *                                 output-liveness) landed AFTER the intent was created.
