@@ -24,6 +24,7 @@
 
 import type { OrchestrationMission } from '../../entities/OrchestrationMission';
 import type { OrchestrationStep } from '../../entities/OrchestrationStep';
+import { normalizeConfirmPolicy } from './orchestration.constants';
 
 export interface RosterEntry {
   agent_id: string;
@@ -102,6 +103,13 @@ export function renderMissionPrompt(args: {
   }
   if (teamPrompt) lines.push(section('Team standing instructions', teamPrompt));
 
+  // 사용자 확인 게이트(티켓 5dbe4aa2). graph 모드에서만 confirm node 를 만들 수 있으므로
+  // graph 가 꺼진 미션에는 아예 노출하지 않는다 — 쓸 수도 없는 기능을 설명하면
+  // orchestrator 가 만들 수 없는 계획을 짜고 제출에서 거부당한다.
+  if (mission.graph_enabled) {
+    lines.push(section('User confirmation gates', renderConfirmPolicyGuidance(mission.confirm_policy)));
+  }
+
   lines.push(section('Your team', renderRoster(roster)));
 
   lines.push('## How this works');
@@ -156,6 +164,59 @@ export function renderMissionPrompt(args: {
   return lines.filter((l) => l !== '').join('\n');
 }
 
+/**
+ * 미션의 `confirm_policy` 를 orchestrator 가 계획에 반영할 수 있는 지시로 펼친다.
+ *
+ * `none` 만 서버가 강제한다(`validateGraphSpec` 이 confirm node 를 거부). 나머지는
+ * 여기서 전달되는 지시가 전부다 — "몇 개면 key_steps 를 만족하는가" 를 서버가 셀 수
+ * 없어서 정량 강제는 정상 계획까지 막는 브리틀한 게이트가 된다.
+ */
+export function renderConfirmPolicyGuidance(policy: string): string {
+  const normalized = normalizeConfirmPolicy(policy);
+  const intent = {
+    none:
+      `**This mission does NOT allow user confirmation gates.** Do not create any node with ` +
+      `\`kind: "confirm"\` — the plan will be rejected. Plan the work to run end to end on its own.`,
+    auto:
+      `Use a confirm node **where a human judgement genuinely changes the outcome**: irreversible or ` +
+      `outward-facing actions, work whose quality only a person can see (visual/UX output), and points ` +
+      `where you are materially uncertain. Do not gate routine internal steps — every gate stops the ` +
+      `mission until someone answers.`,
+    key_steps:
+      `Put a confirm node **before each key deliverable is locked in and before anything leaves the ` +
+      `system** — publishing, deploying, sending, or handing a result to another team. Intermediate ` +
+      `internal steps do not each need one.`,
+    every_step:
+      `Put a confirm node after **every step that produces a reviewable result**. The operator has asked ` +
+      `to see the work as it goes; prefer more gates over fewer, but still skip steps whose output a ` +
+      `person cannot meaningfully judge.`,
+  }[normalized];
+
+  if (normalized === 'none') return intent;
+
+  return [
+    `Current policy: **${normalized}**.`,
+    ``,
+    intent,
+    ``,
+    `How to write one:`,
+    `- Add a normal step for it (\`step_key\`, \`title\`, and \`instructions\` written as **the question you`,
+    `  are asking the person** — what to look at and what "pass" would mean). It needs **no assignee**.`,
+    `- In the graph, mark that node \`kind: "confirm"\`.`,
+    `- Give it **two outgoing edges**: one \`when: { verdict: ["pass"] }\` and one`,
+    `  \`when: { verdict: ["fail"] }\`. Both are required — a confirm node with only one routed answer is`,
+    `  rejected, because the other answer would silently dead-end the mission.`,
+    `- The usual shape for "fail" is a \`loop_back\` edge to the step that has to be redone. The person's`,
+    `  written feedback is handed to that step automatically when it re-runs.`,
+    `- Evidence is automatic: whatever \`artifacts\` the upstream steps reported (screenshots, video, URLs,`,
+    `  file paths) are attached to the confirm screen. If you want the person to see something specific,`,
+    `  tell the upstream step to report it as an artifact.`,
+    ``,
+    `The mission **pauses** at a confirm node until a person answers — it does not time out, and you are`,
+    `not woken for it. Budget for that wait when you decide how many gates to place.`,
+  ].join('\n');
+}
+
 export interface DependencyContext {
   step_key: string;
   title: string;
@@ -163,6 +224,24 @@ export interface DependencyContext {
   assignee_name: string;
   result_summary: string;
   artifacts: Array<{ kind: string; ref: string; label: string }>;
+}
+
+/**
+ * 이 step 에 도달할 수 있는 confirm node 가 사람에게서 받은 판정(티켓 5dbe4aa2).
+ *
+ * `dependencies` 와 **별개 축**이라 따로 받는다: 표준 형태인
+ * `build → confirm ─(fail, loop_back)→ build` 에서 build 의 `depends_on` 에는 confirm 이
+ * 없다(그 방향이면 순환이다). 그래서 dependency context 만으로는 사용자의 피드백이
+ * 재실행되는 build 에 절대 도달하지 못한다 — 요구사항 5가 깨지는 정확한 지점이다.
+ */
+export interface ConfirmFeedbackContext {
+  step_key: string;
+  title: string;
+  verdict: string;
+  feedback: string;
+  decided_by_name: string;
+  decided_at: string;
+  visit: number;
 }
 
 /**
@@ -190,6 +269,8 @@ export function renderStepPrompt(args: {
     /** 이 node에서 나가는 분기가 기대하는 verdict 값들. */
     verdicts: string[];
   } | null;
+  /** 이 step 으로 이어지는 confirm node 들의 사용자 판정(티켓 5dbe4aa2). */
+  confirmFeedback?: ConfirmFeedbackContext[];
 }): string {
   const { mission, step, teamName, orchestratorName, dependencies } = args;
   const lines: string[] = [];
@@ -266,6 +347,38 @@ export function renderStepPrompt(args: {
           `Read it before starting so you do not repeat the same failure.`,
       ),
     );
+  }
+
+  const confirmFeedback = args.confirmFeedback ?? [];
+  if (confirmFeedback.length > 0) {
+    const failed = confirmFeedback.filter((c) => c.verdict === 'fail');
+    const passed = confirmFeedback.filter((c) => c.verdict !== 'fail');
+    const render = (c: ConfirmFeedbackContext) =>
+      [
+        `### ${c.title} (\`${c.step_key}\`) — ${c.verdict.toUpperCase()}` +
+          `${c.decided_by_name ? `, by ${c.decided_by_name}` : ''} on pass ${c.visit}`,
+        c.feedback || '(no reason given)',
+      ].join('\n');
+    const body = [
+      ...(failed.length > 0
+        ? [
+            `A person reviewed this work and **rejected** it. Their feedback is the specification for this ` +
+              `pass — address it directly; do not re-submit the same result:`,
+            '',
+            failed.map(render).join('\n\n'),
+          ]
+        : []),
+      ...(failed.length > 0 && passed.length > 0 ? [''] : []),
+      ...(passed.length > 0
+        ? [
+            `A person already approved the work upstream of you. Treat their notes as constraints you must ` +
+              `not undo:`,
+            '',
+            passed.map(render).join('\n\n'),
+          ]
+        : []),
+    ].join('\n');
+    lines.push(section('User confirmation', body));
   }
 
   const graph = args.graphNode ?? null;

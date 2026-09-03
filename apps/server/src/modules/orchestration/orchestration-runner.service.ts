@@ -75,6 +75,7 @@ import {
   validatePlan,
 } from './orchestration.constants';
 import {
+  ConfirmFeedbackContext,
   DependencyContext,
   RosterEntry,
   renderMissionPrompt,
@@ -97,6 +98,7 @@ import {
   firedLoopBacks,
   graphFromWavePlan,
   loopBodyNodes,
+  reachableVia,
   selectOutgoingEdges,
   validateGraphSpec,
 } from './orchestration-graph';
@@ -908,10 +910,31 @@ export class OrchestrationRunnerService {
                 carried: !graphReplaced,
                 carried_nodes: graphCarriedNodes,
                 graph_revision: mission.graph_revision ?? 0,
+                confirm_nodes: graphSpec.nodes.filter((n) => n.kind === 'confirm').length,
               }
             : null,
         },
       });
+
+      // 정책이 확인을 요구하는데 확정된 그래프에 confirm 노드가 하나도 없다(티켓 5dbe4aa2).
+      // **거부하지 않는다** — "몇 개면 key_steps 를 만족하는가" 를 서버가 셀 방법이 없어
+      // 정량 강제는 정상 계획까지 막는 브리틀한 게이트가 되기 때문이다. 대신 운영자가
+      // 타임라인에서 "요청한 확인이 계획에 반영되지 않았다" 를 바로 볼 수 있게 남긴다.
+      const confirmPolicyNow = normalizeConfirmPolicy(mission.confirm_policy);
+      if (
+        graphSpec &&
+        (confirmPolicyNow === 'key_steps' || confirmPolicyNow === 'every_step') &&
+        graphSpec.nodes.every((n) => n.kind !== 'confirm')
+      ) {
+        await this.missions.recordEvent(mission, {
+          type: 'note',
+          message:
+            `This mission's confirm_policy is "${confirmPolicyNow}", but the submitted plan contains no user ` +
+            `confirmation gate. The mission will run to completion without asking anyone.`,
+          actor_type: 'system',
+          data: { confirm_policy: confirmPolicyNow, confirm_nodes: 0, plan_version: nextVersion },
+        });
+      }
 
       const pumped = await this.pump(mission);
       await this.wakeAfterPump(mission, pumped);
@@ -1557,6 +1580,50 @@ export class OrchestrationRunnerService {
   }
 
   /**
+   * 이 step 으로 이어지는 confirm node 들의 사용자 판정을 모은다(요구사항 5).
+   *
+   * `depends_on` 을 쓰지 않는 이유가 이 기능의 핵심 결함점이다. 표준 형태
+   * `build → confirm ─(fail, loop_back)→ build` 에서 build 의 `depends_on` 에는 confirm 이
+   * 없다 — 있으면 순환이라 계획 검증에서 거부된다. 그래서 dependency context 만 쓰면
+   * 사용자의 피드백은 재실행되는 build 에 **절대 도달하지 못한다**.
+   *
+   * 대신 그래프에서 "이 step 에 도달할 수 있는 confirm node" 를 loop_back 을 포함해 따라간다:
+   * confirm 이 이 step 으로 (재)진입시킬 수 있다면, 그 판정은 이 step 이 지금 무엇을 해야
+   * 하는지에 대한 근거다. 판정이 없는(아직 안 열렸거나 리셋된) 노드는 자연히 빠진다.
+   */
+  private confirmFeedbackFor(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    allSteps: OrchestrationStep[],
+  ): ConfirmFeedbackContext[] {
+    const spec = mission.graph_spec;
+    if (!spec) return [];
+    const confirmKeys = spec.nodes.filter((n) => n.kind === 'confirm').map((n) => n.key);
+    if (confirmKeys.length === 0) return [];
+
+    const byKey = new Map(allSteps.map((s) => [s.step_key, s]));
+    const out: ConfirmFeedbackContext[] = [];
+    for (const key of confirmKeys) {
+      if (key === step.step_key) continue;
+      const source = byKey.get(key);
+      const decision = source?.confirm_decision;
+      if (!source || !decision) continue;
+      // loop_back 을 포함해 도달 가능성을 본다 — fail 경로는 정의상 loop_back 이다.
+      if (!reachableVia(spec.edges, key, true).has(step.step_key)) continue;
+      out.push({
+        step_key: source.step_key,
+        title: source.title,
+        verdict: decision.verdict,
+        feedback: decision.feedback || '',
+        decided_by_name: decision.decided_by_name || '',
+        decided_at: decision.decided_at || '',
+        visit: decision.visit ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
    * confirm node 를 열어 사람의 판정을 기다리는 durable pause 로 보낸다.
    *
    * 요구사항 2의 "결과물을 사용자에게 제공" 은 여기서 성립한다: 만족된 incoming edge 의
@@ -2113,6 +2180,7 @@ export class OrchestrationRunnerService {
       teamName: team?.name ?? '',
       orchestratorName,
       dependencies,
+      confirmFeedback: this.confirmFeedbackFor(mission, step, allSteps),
       isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision.workspace_folder,
       graphNode: graphNode

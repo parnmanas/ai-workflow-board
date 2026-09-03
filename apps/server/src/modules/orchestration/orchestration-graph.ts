@@ -175,8 +175,12 @@ function normalizeCondition(raw: unknown): EdgeCondition | undefined {
   return out;
 }
 
-/** non-loop_back edge만 따라가며 `from`에서 도달 가능한 node 집합. */
-function reachableVia(edges: GraphEdge[], from: string, includeLoopBack = false): Set<string> {
+/**
+ * non-loop_back edge만 따라가며 `from`에서 도달 가능한 node 집합.
+ * `includeLoopBack`이면 재진입 edge까지 따라간다 — "이 node가 저 node를 (다시) 실행시킬
+ * 수 있는가"를 묻는 쪽(runner 의 confirm 피드백 전달)이 쓴다.
+ */
+export function reachableVia(edges: GraphEdge[], from: string, includeLoopBack = false): Set<string> {
   const adjacency = new Map<string, string[]>();
   for (const e of edges) {
     if (!includeLoopBack && e.kind === 'loop_back') continue;
