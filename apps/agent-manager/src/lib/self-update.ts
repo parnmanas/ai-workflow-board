@@ -45,6 +45,27 @@ import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
+import {
+  BOOT_VERIFY_TIMEOUT_MS,
+  MAX_INSTALL_ATTEMPTS,
+  clearBootVerificationRecord,
+  evaluateBootProbe,
+  evaluateBootVerification,
+  evaluateInstallRetryGate,
+  newInstallRecord,
+  readBootVerificationRecord,
+  readUpdatePin,
+  updatePinPath,
+  withAwaitingBoot,
+  withBootAttempt,
+  withInstallFailure,
+  withRollbackAttempt,
+  writeBootVerificationRecord,
+  writeUpdatePin,
+  type BootDecisionKind,
+  type BootVerificationRecord,
+  type UpdatePinRecord,
+} from './self-update-rollback.js';
 
 // Our own npm package name — the registry spec npm-global mode reads/installs.
 const MANAGER_PACKAGE_NAME = 'awb-agent-manager';
@@ -69,6 +90,10 @@ const BUILD_TIMEOUT_MS = 10 * 60_000;
  * getting rejected 410 even though the update itself succeeded.
  */
 export const SELF_UPDATE_DRAIN_MAX_WAIT_MS = 10 * 60_000;
+
+/** 복귀 재기동이 끝내 발화하지 않을 때 프로세스를 비정상 종료시키는 상한
+ *  (감독자가 다시 띄우게 한다). scheduleRollbackRestart 참고. */
+const ROLLBACK_RESTART_BACKSTOP_MS = 60_000;
 
 /** Env var selecting the update channel. See the file header for the values. */
 export const UPDATE_CHANNEL_ENV = 'AWB_AGENT_MANAGER_UPDATE_CHANNEL';
@@ -104,6 +129,30 @@ export function resolveUpdateChannel(raw?: string | null): string {
 /** True when the channel pins the current build (auto-update disabled). */
 export function isAutoUpdateDisabled(channel: string): boolean {
   return channel === UPDATE_CHANNEL_OFF;
+}
+
+/**
+ * 복귀 핀을 반영한 실효 채널 (ticket 23753dc7 — 정책 C·G).
+ *
+ * 부팅 검증에 실패해 이전 버전으로 되돌린 뒤에는 채널을 그 정확한 버전으로
+ * 고정한다. 이것이 "같은 나쁜 버전을 즉시 다시 집지 않는다"를 만드는 장치다:
+ * 채널이 dist-tag(`latest`) 로 남아 있으면 다음 tick 이 곧바로 같은 불량
+ * 버전을 다시 해석해 재설치 루프가 된다. 정확한 버전으로 고정하면 provenance
+ * 조회도 그 버전만 해석하고, 이어지는 `compareSemver(target, current) <= 0`
+ * 스킵에 걸려 아무것도 설치하지 않는다.
+ *
+ * `off` 는 핀보다도 우선한다 — 운영자가 건 하드 핀이 자동 복구가 건 핀에
+ * 덮이면 안 된다(정책 D).
+ *
+ * 핀 해제는 사람만 한다: 핀 파일을 지우는 것이 유일한 해제 수단이고, 이
+ * 코드베이스 어디에도 핀을 지우는 경로는 없다.
+ */
+export function resolveEffectiveUpdateChannel(
+  channel: string,
+  pin: UpdatePinRecord | null,
+): string {
+  if (channel === UPDATE_CHANNEL_OFF) return channel;
+  return pin?.version ? pin.version : channel;
 }
 
 /** `awb-agent-manager@<channel>` — the npm spec for the active channel. */
@@ -172,6 +221,16 @@ export interface SelfUpdateOpts {
   countInFlightSessions?: () => number;
   /** Test-only override for the drain wait cap (default SELF_UPDATE_DRAIN_MAX_WAIT_MS). */
   drainMaxWaitMs?: number;
+  /** 부팅 검증 상태 / 복귀 핀 파일을 둘 디렉터리. 생략하면 매니저 홈
+   *  (`$AWB_AGENT_MANAGER_HOME`). 테스트가 tmp 디렉터리로 격리하기 위한 주입점.  */
+  stateDir?: string;
+  /**
+   * 지금이 유지보수 창 안인지 (ticket 23753dc7 — 정책 G 의 설치 실패 재시도
+   * 게이트 입력). 창 자체를 정의하는 `AWB_AGENT_MANAGER_UPDATE_WINDOW` 는 형제
+   * 티켓 T1 의 범위라 여기서 도입하지 않는다 — 생략하면 `true`(항상 창 안)로
+   * 다뤄져 현행 동작이 그대로 유지된다.
+   */
+  withinWindow?: boolean;
 }
 
 interface RunResult {
@@ -384,13 +443,21 @@ export class UpdateChecker {
       /** See setCountInFlightSessions — accepted here too so a test can
        *  construct a fully-wired checker in one call. */
       countInFlightSessions?: () => number;
+      /** 복귀 핀 파일을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
+      stateDir?: string;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
     this.#countInFlightSessions = opts.countInFlightSessions ?? null;
     const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
-    const update_channel = resolveUpdateChannel(opts.updateChannel);
+    // ticket 23753dc7: 복귀 핀이 걸려 있으면 그 정확한 버전이 실효 채널이다.
+    // 체커가 광고하는 `update_available` 까지 핀을 반영해야, 되돌린 호스트의
+    // 대시보드가 방금 되돌린 불량 버전을 다시 "업데이트 가능"으로 띄우지 않는다.
+    const update_channel = resolveEffectiveUpdateChannel(
+      resolveUpdateChannel(opts.updateChannel),
+      readUpdatePin(opts.stateDir),
+    );
     // The build-time snapshot (dist/package.json) is the running code's own
     // version — frozen at build, so it always matches what is actually loaded.
     const current_version = opts.currentVersion ?? (readBundledVersion() || '0.0.0');
@@ -674,11 +741,21 @@ let _deferredSince: number | null = null;
  *  one-shot-flag idiom as _lastReExecScheduled. */
 let _lastDeferredDueToSessions = false;
 
-/** True while a self-update is deferred waiting for in-flight sessions to
- *  drain. UpdateChecker's periodic tick reads this to decide whether to
- *  retry runSelfUpdate on its own (see UpdateChecker#tick). */
-export function hasPendingSelfUpdate(): boolean {
-  return _deferredSince !== null;
+/**
+ * True while a self-update still has work pending that UpdateChecker's
+ * periodic tick should revisit (see UpdateChecker#tick). Two sources:
+ *
+ *  1. 진행 중 세션이 빠지길 기다리는 drain 연기 (_deferredSince, ticket b831b896).
+ *  2. ticket 23753dc7 — 설치가 실패했고 아직 재시도 상한이 남은 상태. 이 신호가
+ *     없으면 정책 G 의 백오프(5분 → 15분)를 소진할 주체가 없어 "재시도한다"가
+ *     선언에 그친다. 상태 파일을 읽으므로 **재기동을 넘어서도** 성립한다 —
+ *     Windows 경로에서는 실패를 관측한 프로세스와 재시도할 프로세스가 아예 다르다.
+ *     상한을 소진하면 phase 가 install_blocked 로 바뀌어 여기서 false 가 되고,
+ *     자동 시도는 그대로 멈춘다.
+ */
+export function hasPendingSelfUpdate(opts: { stateDir?: string } = {}): boolean {
+  if (_deferredSince !== null) return true;
+  return readBootVerificationRecord(opts.stateDir)?.phase === 'install_failed';
 }
 
 export interface NpmUpdateGateResult {
@@ -741,13 +818,24 @@ async function runSelfUpdateLocked(
   opts: SelfUpdateOpts,
   out: (msg: string) => void,
 ): Promise<SelfUpdateResult> {
-  const channel = resolveUpdateChannel();
-  if (isAutoUpdateDisabled(channel)) {
+  const rawChannel = resolveUpdateChannel();
+  if (isAutoUpdateDisabled(rawChannel)) {
     const summary =
       `self-update skipped: ${UPDATE_CHANNEL_ENV}=${UPDATE_CHANNEL_OFF} pins this build ` +
       `(v${readBundledVersion()})`;
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
+  }
+  // ticket 23753dc7: 복귀 핀이 있으면 채널을 그 정확한 버전으로 고정한다.
+  // 아래 provenance 조회와 already-latest 스킵이 이 채널을 그대로 쓰므로,
+  // 되돌린 뒤에는 같은 불량 버전이 다시 해석될 수 없다(루프 부재).
+  const pin = readUpdatePin(opts.stateDir);
+  const channel = resolveEffectiveUpdateChannel(rawChannel, pin);
+  if (pin) {
+    out(
+      `Self-update: channel pinned to v${pin.version} by rollback (${pin.reason || 'no reason recorded'}) — ` +
+        `delete ${updatePinPath(opts.stateDir)} to release`,
+    );
   }
   if (classifyInstallMode(detectNpmGlobalRoot()) !== 'npm-global') {
     const summary = 'self-update skipped: npm is not reachable (upgrade this build manually)';
@@ -1047,36 +1135,85 @@ async function runNpmGlobalSelfUpdate(
     return { changed: false, summary: gate.summary!, deferred: gate.deferred || undefined };
   }
 
+  // ticket 23753dc7 (정책 G): 이 버전에 대한 설치 실패가 누적돼 있으면 상한과
+  // 백오프를 먼저 본다. 카운터는 파일에 있으므로 재기동을 넘어 이어진다 —
+  // 메모리에 두면 매번 0부터 다시 세어 상한이 무의미해진다.
+  const targetVersion = verdict.version ?? '';
+  const nowMs = Date.now();
+  // 대상 버전을 특정하지 못하는 경우는 provenance 게이트를 명시적으로 우회한
+  // (AWB_SELF_UPDATE_ALLOW_UNVERIFIED) 경로뿐이다. 버전 이름이 없으면 "지금 도는
+  // 것이 새 빌드인가"를 다음 부팅에서 판정할 수 없으므로, 있지도 않은 기록을
+  // 남기는 대신 부팅 검증 없이 진행한다는 사실을 로그로 밝힌다.
+  const trackable = /^\d+\.\d+\.\d+/.test(targetVersion);
+  const priorRecord = trackable ? readBootVerificationRecord(opts.stateDir) : null;
+  const carried =
+    priorRecord && priorRecord.targetVersion === targetVersion ? priorRecord : null;
+  if (trackable) {
+    const retry = evaluateInstallRetryGate({
+      installFailures: carried?.installFailures ?? 0,
+      lastFailureAtMs: carried?.lastInstallFailureAtMs ?? null,
+      nowMs,
+      // 유지보수 창 판정은 형제 티켓 T1 의 범위다. 미지정이면 항상 창 안 —
+      // 창이 없는 현행 동작과 동등하다.
+      withinWindow: opts.withinWindow ?? true,
+    });
+    if (retry.summary) out(`Self-update: ${retry.summary}`);
+    if (!retry.proceed) {
+      return { changed: false, summary: retry.summary!, deferred: retry.stop ? undefined : true };
+    }
+  } else {
+    out(
+      'Self-update: install target version is unknown (provenance gate bypassed) — ' +
+        'proceeding without boot verification or rollback tracking',
+    );
+  }
+
+  // 설치 **전에** 현재 버전을 기록한다. 이 한 줄이 복귀 대상을 결정한다 —
+  // 설치가 끝난 뒤에는 "직전에 무엇이 돌고 있었는지"를 알 방법이 없다.
+  const installRecord = trackable
+    ? newInstallRecord({ previousVersion: current, targetVersion, nowMs, carryFrom: carried })
+    : null;
+  if (installRecord) {
+    writeBootVerificationRecord(installRecord, opts.stateDir);
+    out(
+      `Self-update: recorded rollback target v${current} before installing v${targetVersion} ` +
+        `(attempt ${installRecord.installFailures + 1} of ${MAX_INSTALL_ATTEMPTS})`,
+    );
+  }
+
   // POSIX can replace the package files while Node has the old modules mapped.
   // Install FIRST and restart only after npm succeeds. 이전의 범용 exit-first
   // 방식은 systemd의 Restart=on-failure와 경합했다: 분리된(detached) 헬퍼가
   // 아직 대기 중이거나 설치 중인데도 systemd가 5초 뒤 예전 패키지를 다시
   // 띄웠고, 그 시점엔 이미 명령이 성공을 보고한 뒤였다.
   if (process.platform !== 'win32') {
-    out(`Self-update: npm install -g --ignore-scripts ${installSpec}`);
-    // `--ignore-scripts` — provenance 게이트는 **우리 tarball 의 출처**만 보증한다.
-    // 그 아래 95개 전이 의존성은 `^` 범위로 그 시점 레지스트리에서 해석되므로,
-    // 그중 하나가 postinstall 을 달고 들어오면 CVE 없이도 이 호스트에서 매니저
-    // 권한으로 임의 코드가 돈다. 발행 트리의 install-script 패키지는 실측 0개이고
-    // (scripts/audit-published-deps.mjs 가 매 cron 마다 그 0 을 재확인한다), 위
-    // bin 링크는 lifecycle script 가 아니라 npm 코어 동작이라 이 플래그에 영향받지
-    // 않는다 — 실측: `--ignore-scripts` 로 설치해도 bin 심링크·실행 모두 정상.
-    const installed = await runAsync(
-      'npm',
-      ['install', '-g', '--ignore-scripts', installSpec],
-      tmpdir(),
-      BUILD_TIMEOUT_MS,
-      (line) => out(`  [npm-global] ${line}`),
-    );
+    const installed = await npmGlobalInstall(out, installSpec);
     if (!installed.ok) {
-      const detail = (installed.stderr.trim() || installed.stdout.trim())
-        .split('\n').filter(Boolean).pop() || `exit=${installed.exitCode}`;
-      const summary = `npm-global update failed: ${detail.slice(0, 240)}`;
+      // ticket 23753dc7 (정책 G): POSIX 는 설치를 인-프로세스로 돌아 실패를
+      // 직접 본다. 그 자리에서 카운터를 올려 영속화한다 — 다음 시도가 다른
+      // 프로세스일 수 있으므로 메모리에 남기면 상한이 성립하지 않는다.
+      if (installRecord) {
+        const failed = withInstallFailure(installRecord, Date.now(), installed.detail);
+        writeBootVerificationRecord(failed, opts.stateDir);
+        out(`Self-update: ${failed.reason}`);
+      }
+      const summary = `npm-global update failed: ${installed.detail}`;
       out(`Self-update: ${summary}`);
       return { changed: false, summary };
     }
+    // 설치 성공 — 이제부터는 "새 빌드가 하트비트 1회를 성공시키는가"가 남은
+    // 판정이다. 이 표시가 있어야 다음 부팅이 자신을 검증 대상으로 인식한다.
+    if (installRecord) {
+      writeBootVerificationRecord(withAwaitingBoot(installRecord, Date.now()), opts.stateDir);
+    }
     const summary = `npm-global update installed ${installSpec}; restarting manager`;
     out(`Self-update: ${summary}`);
+    if (installRecord) {
+      out(
+        `Self-update: boot verification armed for v${targetVersion} ` +
+          `(rollback target v${current} if no heartbeat succeeds)`,
+      );
+    }
     _lastReExecScheduled = true;
     _pendingRestartReason = 'self_update_restart';
     setTimeout(() => reExecManager(out), 1500).unref?.();
@@ -1090,6 +1227,14 @@ async function runNpmGlobalSelfUpdate(
     helperPath = writeNpmGlobalUpdater(out);
   } catch (err: any) {
     const summary = `npm-global update failed: could not stage updater helper: ${err?.message ?? err}`;
+    // 헬퍼를 못 띄웠으면 설치는 시작조차 못 했다 — 여기서 세고 phase 를
+    // install_failed 로 옮겨야 다음 부팅이 같은 실패를 두 번 세지 않는다.
+    if (installRecord) {
+      writeBootVerificationRecord(
+        withInstallFailure(installRecord, Date.now(), `could not stage updater helper: ${err?.message ?? err}`),
+        opts.stateDir,
+      );
+    }
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
@@ -1123,12 +1268,25 @@ async function runNpmGlobalSelfUpdate(
     child.unref();
   } catch (err: any) {
     const summary = `npm-global update failed: could not spawn updater helper: ${err?.message ?? err}`;
+    // 위 staging 실패와 같은 이유로 여기서 센다 — 설치는 시작되지 않았다.
+    if (installRecord) {
+      writeBootVerificationRecord(
+        withInstallFailure(installRecord, Date.now(), `could not spawn updater helper: ${err?.message ?? err}`),
+        opts.stateDir,
+      );
+    }
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
 
   const summary = `npm-global update scheduled: detached helper runs \`npm install -g --ignore-scripts ${installSpec}\` after exit, then restarts`;
   out(`Self-update: ${summary}`);
+  // 기록은 'installing' 인 채로 둔다. 부모는 여기서 종료하므로 설치 결과를 볼
+  // 수 없고, 판정은 다음 부팅이 "무슨 버전이 실제로 돌고 있는가"로 내린다:
+  // 새 버전이면 부팅 검증, 이전 버전이면 설치 실패 1회로 센다.
+  out(
+    `Self-update: rollback target v${current} recorded; next boot decides install outcome for v${targetVersion}`,
+  );
 
   // Same 1.5s tail as the git path: let the caller finish its ack POST + log
   // line, then shut down. The helper is already polling our pid. Keep the
@@ -1144,6 +1302,358 @@ async function runNpmGlobalSelfUpdate(
   }, 1500).unref?.();
 
   return { changed: true, summary, willReExec: true };
+}
+
+/**
+ * `npm install -g --ignore-scripts <spec>` 한 번. 정상 업데이트 경로와 복귀
+ * 경로가 **같은 설치 명령**을 쓰도록 여기 한 곳에 둔다 — 복귀에만 다른 플래그가
+ * 붙으면 "되돌린 버전에도 같은 게이트를 적용한다"는 정책 E 가 조용히 깨진다.
+ *
+ * `--ignore-scripts` — provenance 게이트는 **우리 tarball 의 출처**만 보증한다.
+ * 그 아래 95개 전이 의존성은 `^` 범위로 그 시점 레지스트리에서 해석되므로,
+ * 그중 하나가 postinstall 을 달고 들어오면 CVE 없이도 이 호스트에서 매니저
+ * 권한으로 임의 코드가 돈다. 발행 트리의 install-script 패키지는 실측 0개이고
+ * (scripts/audit-published-deps.mjs 가 매 cron 마다 그 0 을 재확인한다), bin
+ * 링크는 lifecycle script 가 아니라 npm 코어 동작이라 이 플래그에 영향받지
+ * 않는다 — 실측: `--ignore-scripts` 로 설치해도 bin 심링크·실행 모두 정상.
+ */
+async function npmGlobalInstall(
+  out: (msg: string) => void,
+  installSpec: string,
+): Promise<{ ok: boolean; detail: string }> {
+  out(`Self-update: npm install -g --ignore-scripts ${installSpec}`);
+  const installed = await runAsync(
+    'npm',
+    ['install', '-g', '--ignore-scripts', installSpec],
+    tmpdir(),
+    BUILD_TIMEOUT_MS,
+    (line) => out(`  [npm-global] ${line}`),
+  );
+  if (installed.ok) return { ok: true, detail: '' };
+  const detail =
+    (installed.stderr.trim() || installed.stdout.trim())
+      .split('\n')
+      .filter(Boolean)
+      .pop() || `exit=${installed.exitCode}`;
+  return { ok: false, detail: detail.slice(0, 240) };
+}
+
+export interface BootVerificationOutcome {
+  kind: BootDecisionKind;
+  /** 하트비트 1회 성공을 기다리는 상태로 들어갔는가 — main.ts 가 이때만
+   *  검증 타이머를 건다. */
+  armed: boolean;
+  /** 복귀 설치를 걸고 재기동을 예약했는가. */
+  willReExec: boolean;
+  summary: string | null;
+}
+
+/**
+ * 부팅 직후 판정 (ticket 23753dc7 — 정책 C·G).
+ *
+ * 이전 프로세스가 남긴 상태 파일과 "지금 실제로 돌고 있는 버전"만으로,
+ * 방금 설치한 빌드가 정상 부팅했는지 판정하고 필요하면 복귀를 실행한다.
+ * 매니저 부팅 경로에서 **일찍** 불려야 한다 — 나쁜 빌드가 죽기 전에 이 판정이
+ * 돌아야 되돌릴 수 있기 때문이다.
+ *
+ * 안전 실패 방향: 어떤 예외도 부팅을 막지 않는다. 되돌리려던 장치가 매니저를
+ * 못 뜨게 만드는 것이 이 티켓이 막으려는 상황보다 나쁘다.
+ */
+export async function runBootVerification(
+  opts: SelfUpdateOpts = {},
+): Promise<BootVerificationOutcome> {
+  const out = opts.log ?? log;
+  const none: BootVerificationOutcome = {
+    kind: 'none',
+    armed: false,
+    willReExec: false,
+    summary: null,
+  };
+  try {
+    const current = readBundledVersion();
+    const record = readBootVerificationRecord(opts.stateDir);
+    const decision = evaluateBootVerification({ record, currentVersion: current });
+    if (decision.summary) out(`Self-update: ${decision.summary}`);
+    const done = (kind: BootDecisionKind): BootVerificationOutcome => ({
+      kind,
+      armed: false,
+      willReExec: false,
+      summary: decision.summary,
+    });
+
+    switch (decision.kind) {
+      case 'none':
+        return { ...none, summary: decision.summary };
+
+      case 'stale':
+        clearBootVerificationRecord(opts.stateDir);
+        return done('stale');
+
+      case 'arm':
+        // 이 부팅을 세어 둔다. 새 빌드가 하트비트 1회 성공 전에 죽으면 다음
+        // 부팅이 bootAttempts>=1 을 보고 복귀로 간다 — 부팅 실패에 재시도가
+        // 없다는 정책 G 가 이 카운터 하나로 성립한다.
+        writeBootVerificationRecord(withBootAttempt(record!, Date.now()), opts.stateDir);
+        return { kind: 'arm', armed: true, willReExec: false, summary: decision.summary };
+
+      case 'install_failed': {
+        const failed = withInstallFailure(
+          record!,
+          Date.now(),
+          `install of v${record!.targetVersion} did not take effect (previous build came back)`,
+        );
+        writeBootVerificationRecord(failed, opts.stateDir);
+        out(`Self-update: ${failed.reason}`);
+        return done('install_failed');
+      }
+
+      case 'pin_only':
+      case 'rollback_landed':
+      case 'rollback_failed':
+        pinRolledBackVersion(
+          out,
+          opts,
+          decision.rollbackToVersion!,
+          record!.targetVersion,
+          decision.kind === 'rollback_failed'
+            ? `rollback install failed ${record!.rollbackAttempts} time(s)`
+            : `boot verification failed for v${record!.targetVersion}`,
+        );
+        clearBootVerificationRecord(opts.stateDir);
+        return done(decision.kind);
+
+      case 'rollback':
+        return await runRollbackInstall(opts, out, record!, decision.summary);
+
+      default:
+        return { ...none, summary: decision.summary };
+    }
+  } catch (err: any) {
+    out(`Self-update: boot verification failed to run: ${err?.stack || err?.message || err}`);
+    return none;
+  }
+}
+
+/**
+ * 채널을 되돌린 버전으로 핀한다. 핀은 **복귀 설치보다 먼저** 걸어야 한다 —
+ * 설치가 실패해도 다음 tick 이 같은 불량 버전을 다시 집으면 안 되기 때문이다
+ * (완료 기준 2: 루프 부재).
+ */
+function pinRolledBackVersion(
+  out: (msg: string) => void,
+  opts: SelfUpdateOpts,
+  version: string,
+  badVersion: string,
+  reason: string,
+): void {
+  writeUpdatePin(
+    { version, reason: `${reason} (bad build v${badVersion})`, pinnedAtMs: Date.now() },
+    opts.stateDir,
+  );
+  out(
+    `Self-update: update channel pinned to v${version} — v${badVersion} will not be reinstalled ` +
+      `automatically. Release by deleting ${updatePinPath(opts.stateDir)} (operator only).`,
+  );
+}
+
+/**
+ * 복귀 설치 — 기록해 둔 이전 버전을 다시 설치하고 재기동한다.
+ *
+ * 정책 E: 되돌린 버전에도 provenance 게이트를 **그대로** 적용한다. 이전 버전은
+ * 한 번 설치됐던 것이니 안전하다는 추론은 성립하지 않는다 — 그 사이 레지스트리의
+ * 해당 버전이 교체됐을 수 있고, 예외를 한 번 열면 그 경로가 곧 우회로가 된다.
+ */
+async function runRollbackInstall(
+  opts: SelfUpdateOpts,
+  out: (msg: string) => void,
+  record: BootVerificationRecord,
+  summary: string | null,
+): Promise<BootVerificationOutcome> {
+  const target = record.previousVersion;
+
+  // 1. 핀부터. 복귀 설치가 실패하더라도 불량 버전으로 되돌아가지 않는다.
+  pinRolledBackVersion(
+    out,
+    opts,
+    target,
+    record.targetVersion,
+    `boot verification failed for v${record.targetVersion}`,
+  );
+
+  // 2. 시도 카운터를 올려 영속화한다(무한 복귀 방지).
+  writeBootVerificationRecord(
+    withRollbackAttempt(
+      record,
+      Date.now(),
+      `rolling back to v${target} after boot verification failure`,
+    ),
+    opts.stateDir,
+  );
+
+  const stop = (msg: string): BootVerificationOutcome => {
+    out(`Self-update: ${msg}`);
+    return { kind: 'rollback', armed: false, willReExec: false, summary: msg };
+  };
+
+  if (opts.noReExec) {
+    return stop(`rollback to v${target}: install + restart skipped (noReExec)`);
+  }
+  if (classifyInstallMode(detectNpmGlobalRoot()) !== 'npm-global') {
+    return stop(
+      `rollback to v${target} not possible: npm is not reachable — ` +
+        `channel stays pinned, upgrade/downgrade manually`,
+    );
+  }
+
+  // 3. provenance 게이트 — 정책 E, 이전 버전이라는 이유의 예외는 없다.
+  const verdict = await verifyNpmGlobalProvenance(out, target);
+  if (!verdict.ok && !provenanceGateBypassed()) {
+    return stop(`rollback to v${target} refused: ${verdict.reason}`);
+  }
+  const installSpec = `${MANAGER_PACKAGE_NAME}@${verdict.ok && verdict.version ? verdict.version : target}`;
+
+  // 4. 설치 + 재기동. 플랫폼 분기는 정상 경로와 같은 이유로 갈린다:
+  //    POSIX 는 인-프로세스 설치 후 재기동, Windows 는 종료 후 헬퍼가 설치한다.
+  if (process.platform !== 'win32') {
+    const installed = await npmGlobalInstall(out, installSpec);
+    if (!installed.ok) {
+      // 매니저는 계속 돌고 있다(완료 기준 7). 핀도 그대로라 불량 버전으로
+      // 되돌아가지 않는다. 다음 부팅이 rollbackAttempts 를 보고 재시도하거나
+      // 상한에서 멈춘다.
+      return stop(`rollback install of ${installSpec} failed: ${installed.detail}`);
+    }
+    out(`Self-update: rolled back to ${installSpec}; restarting manager`);
+    scheduleRollbackRestart(out, () => reExecManager(out));
+    return {
+      kind: 'rollback',
+      armed: false,
+      willReExec: true,
+      summary: summary ?? `rolled back to ${installSpec}`,
+    };
+  }
+
+  let helperPath: string;
+  try {
+    helperPath = writeNpmGlobalUpdater(out);
+  } catch (err: any) {
+    return stop(`rollback to v${target} failed: could not stage updater helper: ${err?.message ?? err}`);
+  }
+  const baseArgs = (process.argv.slice(2) || []).filter((a) => a !== '--force' && a !== '-f');
+  try {
+    const child = spawn(
+      process.execPath,
+      [helperPath, String(process.pid), installSpec, process.execPath, process.argv[1] || '', ...baseArgs],
+      { detached: true, stdio: 'ignore', cwd: tmpdir(), env: process.env, shell: false, windowsHide: true },
+    );
+    child.unref();
+  } catch (err: any) {
+    return stop(`rollback to v${target} failed: could not spawn updater helper: ${err?.message ?? err}`);
+  }
+  out(`Self-update: rollback to ${installSpec} scheduled — detached helper installs it after exit`);
+  scheduleRollbackRestart(out, () => {
+    try {
+      shutdownForNpmGlobalUpdate(out);
+    } catch (err: any) {
+      out(`Self-update: shutdown for rollback failed: ${err?.stack || err?.message || err}`);
+    }
+  });
+  return {
+    kind: 'rollback',
+    armed: false,
+    willReExec: true,
+    summary: summary ?? `rollback to ${installSpec} scheduled`,
+  };
+}
+
+/**
+ * 복귀 뒤 재기동 예약.
+ *
+ * 정상 업데이트 경로와 달리 타이머를 **unref 하지 않는다.** 복귀는 부팅 직후에
+ * 실행될 수 있는데, 그 시점에는 이벤트 루프를 붙잡는 핸들(SSE·세션·하트비트)이
+ * 아직 하나도 없다. unref 타이머로 예약하면 재기동이 발화하기도 전에 프로세스가
+ * 그냥 끝나고, systemd 는 `Restart=on-failure` 라 정상 종료(exit 0)를 재시작
+ * 대상으로 보지 않는다 — 되돌리기는 성공했는데 운영자는 매니저 없는 상태로
+ * 남는다(완료 기준 7 위반). reExecManager 안의 SIGTERM 예약도 같은 이유로 unref
+ * 이므로 ref 된 최후 보루를 함께 건다.
+ */
+function scheduleRollbackRestart(out: (msg: string) => void, restart: () => void): void {
+  _lastReExecScheduled = true;
+  _pendingRestartReason = 'self_update_restart';
+  setTimeout(restart, 1500);
+  setTimeout(() => {
+    out('Self-update: rollback restart backstop — exiting non-zero so the supervisor respawns');
+    process.exit(1);
+  }, ROLLBACK_RESTART_BACKSTOP_MS);
+}
+
+/**
+ * 테스트 전용 탈출구: 실제 npm 설치 없이 복귀 재기동 예약만 구동한다.
+ * 검증 대상은 "예약이 이벤트 루프를 붙잡는가" 하나다 — unref 타이머로 돌아가면
+ * 부팅 직후 호출에서 콜백이 발화하기 전에 프로세스가 조용히 끝난다.
+ */
+export function _scheduleRollbackRestartForTests(restart: () => void): void {
+  scheduleRollbackRestart(() => {}, restart);
+}
+
+/**
+ * 하트비트가 1회 성공했다 — 부팅 검증 성공. 상태 기록을 지운다.
+ *
+ * **핀은 건드리지 않는다.** 성공한 부팅과 이미 걸린 핀은 별개 사실이고, 핀
+ * 해제는 사람만 한다(정책 G). 여러 번 불려도 안전하다.
+ */
+export function markBootVerified(opts: SelfUpdateOpts = {}): boolean {
+  const record = readBootVerificationRecord(opts.stateDir);
+  if (!record) return false;
+  if (record.phase !== 'awaiting_boot' && record.phase !== 'installing') return false;
+  const out = opts.log ?? log;
+  clearBootVerificationRecord(opts.stateDir);
+  out(`Self-update: boot verification passed for v${record.targetVersion} (heartbeat succeeded)`);
+  return true;
+}
+
+/**
+ * 무장된 부팅 검증의 상한 판정 — main.ts 가 건 타이머가 이 함수를 부른다.
+ * 하트비트 1회 성공 없이 상한을 넘기면 복귀를 실행한다(evaluateBootProbe 가
+ * 순수 판정이고 여기서는 그 결과만 집행한다).
+ */
+export async function runBootVerificationTimeout(
+  opts: SelfUpdateOpts & {
+    elapsedMs?: number;
+    timeoutMs?: number;
+    /** 이 프로세스가 애초에 하트비트를 보낼 수 있는 상태인가. 페어링 전
+     *  (agent.json 에 agent_id 없음)이면 InstanceHeartbeat 는 POST 자체를 하지
+     *  않으므로, 하트비트 부재를 부팅 실패의 증거로 쓸 수 없다. 생략하면 true. */
+    heartbeatEnabled?: boolean;
+  } = {},
+): Promise<BootVerificationOutcome> {
+  const timeoutMs = opts.timeoutMs ?? BOOT_VERIFY_TIMEOUT_MS;
+  const elapsedMs = opts.elapsedMs ?? timeoutMs;
+  const record = readBootVerificationRecord(opts.stateDir);
+  if (opts.heartbeatEnabled === false) {
+    // 판정 기준(하트비트 1회 성공)을 적용할 수 없는 호스트다. 멀쩡한 빌드를
+    // 되돌리지 않되, 기록도 남기지 않는다 — 남겨두면 나중에 무관한 재시작이
+    // 이 기록을 부팅 실패로 읽어 그제서야 복귀가 튀어나온다.
+    if (record) {
+      (opts.log ?? log)(
+        `Self-update: cannot verify boot of v${record.targetVersion} — this manager is not paired, ` +
+          `so no heartbeat is ever sent; discarding the record without rolling back`,
+      );
+      clearBootVerificationRecord(opts.stateDir);
+    }
+    return { kind: 'none', armed: false, willReExec: false, summary: null };
+  }
+  const heartbeatOk = !record || (record.phase !== 'awaiting_boot' && record.phase !== 'installing');
+  const probe = evaluateBootProbe({ heartbeatOk, elapsedMs, timeoutMs });
+  if (probe !== 'failed') {
+    return { kind: 'none', armed: probe === 'waiting', willReExec: false, summary: null };
+  }
+  const out = opts.log ?? log;
+  const summary =
+    `boot verification timed out for v${record!.targetVersion} after ` +
+    `${Math.round(elapsedMs / 60_000)}min with no successful heartbeat — ` +
+    `rolling back to v${record!.previousVersion} and pinning it`;
+  out(`Self-update: ${summary}`);
+  return await runRollbackInstall(opts, out, record!, summary);
 }
 
 /**

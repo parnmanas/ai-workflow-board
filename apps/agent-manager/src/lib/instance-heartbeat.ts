@@ -94,6 +94,11 @@ export interface InstanceMeta {
   // Windows `.cmd` shim 의 codex ENOENT) 관리자 대시보드에 "degraded" 배지를
   // 렌더하는 REST-only additive 필드.
   spawnFailureProvider?: (() => SpawnFailureSnapshot) | null;
+  // ticket 23753dc7 — 하트비트 POST 가 처음 성공했을 때 한 번 불린다. 자가
+  // 업데이트의 부팅 성공 판정 기준이 정확히 "재기동 후 하트비트 1회 성공"이라
+  // (정책 C), 그 사실을 아는 유일한 지점이 여기다. best-effort: 콜백이 던져도
+  // 하트비트는 계속 돈다.
+  onFirstPostSuccess?: (() => void) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -257,10 +262,13 @@ export class InstanceHeartbeat {
   #startedAt: string;
   #timer: NodeJS.Timeout | null = null;
   #stopped = false;
+  /** 첫 성공 POST 에서 한 번만 불리는 콜백 (ticket 23753dc7). */
+  #onFirstPostSuccess: (() => void) | null = null;
 
   constructor(config: AwbConfig, agentId: string | null, meta: InstanceMeta) {
     this.#config = config;
     this.#agentId = agentId;
+    this.#onFirstPostSuccess = meta?.onFirstPostSuccess ?? null;
     this.#instanceId = randomUUID();
     this.#startedAt = new Date().toISOString();
     const cliAdapters = Array.isArray(meta?.cliAdapters)
@@ -465,9 +473,27 @@ export class InstanceHeartbeat {
     });
     if (!resp.ok) {
       // 404 expected on older AWB servers — keep noise low.
-      if (resp.status === 404) return;
+      // 구버전 서버라 엔드포인트가 없는 것뿐이므로 "매니저가 부팅해 서버까지
+      // 말을 걸었다"는 사실은 성립한다 — 부팅 검증에는 성공으로 친다.
+      if (resp.status === 404) {
+        this.#notifyFirstSuccess();
+        return;
+      }
       throw new Error(`POST /api/agent/instance-heartbeat HTTP ${resp.status}`);
     }
     await resp.text().catch(() => null);
+    this.#notifyFirstSuccess();
+  }
+
+  /** 첫 성공에서만 콜백을 부르고 참조를 버린다(이후 tick 은 비용 0). */
+  #notifyFirstSuccess(): void {
+    const cb = this.#onFirstPostSuccess;
+    if (!cb) return;
+    this.#onFirstPostSuccess = null;
+    try {
+      cb();
+    } catch (err: any) {
+      log(`Instance heartbeat: boot-verification callback failed: ${err?.message ?? err}`);
+    }
   }
 }
