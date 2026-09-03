@@ -139,6 +139,17 @@ export default function MissionConversationPanel({
   const [eventCursor, setEventCursor] = useState<{ at: string; seq: number } | null>(null);
   const [hasMoreEvents, setHasMoreEvents] = useState(false);
   const loadingEventsRef = useRef(false);
+  /**
+   * 창이 어느 쪽 끝에 붙어 있는가.
+   *
+   * `latest`(기본) = 최신 끝. 새 이벤트를 따라간다.
+   * `history`      = 과거 끝. 사용자가 위로 스크롤해 과거를 불러온 상태다.
+   *
+   * 이 상태가 없으면 창을 항상 `slice(-N)` 으로 잡게 되는데, 그러면 방금 앞에 붙인
+   * 과거 페이지가 그 자리에서 잘려나가 **N건보다 오래된 이벤트는 영원히 볼 수 없다**.
+   * "창을 뒤로 민다"는 설명과 정반대 동작이 된다(리뷰 라운드2 P1 지적).
+   */
+  const [eventWindowEdge, setEventWindowEdge] = useState<'latest' | 'history'>('latest');
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingOlderRef = useRef(false);
@@ -253,6 +264,8 @@ export default function MissionConversationPanel({
           const known = new Set(prev.map((e) => e.id));
           return [...older.filter((e) => !known.has(e.id)), ...prev];
         });
+        // 방금 가져온 과거를 실제로 보여주려면 창이 과거 끝을 향해야 한다.
+        setEventWindowEdge('history');
       }
       setHasMoreEvents(page.has_more);
       if (page.next_cursor) setEventCursor(page.next_cursor);
@@ -269,16 +282,22 @@ export default function MissionConversationPanel({
     if (el.scrollTop < LOAD_OLDER_THRESHOLD) {
       void loadOlder();
       void loadOlderEvents();
+      return;
     }
+    // 맨 아래로 돌아오면 창을 다시 최신 끝에 붙인다 — 그래야 실시간 이벤트가 보인다.
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance <= NEAR_BOTTOM_THRESHOLD) setEventWindowEdge('latest');
   }, [loadOlder, loadOlderEvents]);
 
   // 새 메시지 자동 추종 — 사용자가 위쪽 이력을 읽는 중이면 끌어내리지 않는다.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // 과거를 파고 있는 중이면 새 이벤트가 와도 끌어내리지 않는다.
+    if (eventWindowEdge === 'history') return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distance <= NEAR_BOTTOM_THRESHOLD + 200) el.scrollTop = el.scrollHeight;
-  }, [messages.length, events.length]);
+  }, [messages.length, events.length, eventWindowEdge]);
 
   useBoardStreamEvent(
     'chat_room_message',
@@ -322,7 +341,15 @@ export default function MissionConversationPanel({
   // 잘려나간 과거는 위로 스크롤하면 커서로 다시 들어온다.
   const knownIds = new Set(events.map((e) => e.id));
   const allEvents = [...olderEvents.filter((e) => !knownIds.has(e.id)), ...events];
-  const windowedEvents = allEvents.length > EVENT_WINDOW ? allEvents.slice(-EVENT_WINDOW) : allEvents;
+  // DOM 상한은 어느 쪽 끝에 붙어 있든 EVENT_WINDOW 로 동일하다. 다른 것은 **어느 쪽을
+  // 버리는가**다: 최신을 보고 있으면 오래된 쪽을, 과거를 파고 있으면 최신 쪽을 버린다.
+  // 늘 `slice(-N)` 이면 과거 페이지를 불러오는 즉시 그게 잘려 창이 뒤로 밀리지 않는다.
+  const windowedEvents =
+    allEvents.length <= EVENT_WINDOW
+      ? allEvents
+      : eventWindowEdge === 'history'
+        ? allEvents.slice(0, EVENT_WINDOW)
+        : allEvents.slice(-EVENT_WINDOW);
   const tracks = buildConversationTracks(messages, windowedEvents);
 
   return (

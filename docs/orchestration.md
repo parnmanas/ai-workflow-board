@@ -214,6 +214,14 @@ heartbeat 는 `last_heartbeat_at` 을 **매 progress 호출마다** 갱신하고
 orchestration 상태를 들고 있지 않으므로 그 축의 효과도 "그 호스트의 작업자들이 동시에 조용해진다"로
 나타날 뿐이다.
 
+> **재시작 테스트 강도** (리뷰 라운드2 반영, 티켓 4d065f82): 서버 축은
+> `qa-flows/orchestration-restart-recovery.test.mjs` 에서 **실제로** 앱을 종료(`app.close()` →
+> onModuleDestroy 강제 flush)하고 같은 DB 파일 위에 새 NestFactory·새 DataSource 로 다시 부팅한 뒤,
+> 새 프로세스의 `OnModuleInit` 부팅 스윕이 **테스트가 리퍼를 부르지 않아도** 만료된 lease 를 관측하는지
+> 확인한다. orchestrator 세션 재시작(새 세션이 같은 미션 room 의 thread context 와 실행 상태를 되찾는지)도
+> 같은 파일에 있다. `qa-flows/orchestration-recovery.test.mjs` 의 축1 은 같은 프로세스에서 판정 로직만
+> 태우는 시뮬레이션이므로 그쪽을 재시작 근거로 인용하지 말 것.
+>
 > **테스트 강도에 대한 용어 구분** (reporter 확인, 티켓 4d065f82): agent-manager 축의 회귀 테스트는
 > 실제 agent-manager 프로세스를 종료·재기동하는 통합 테스트가 **아니라**, 그 재시작이 orchestration
 > 계층에 남기는 장애 상태를 재현하는 **시나리오 테스트**다. reporter 는 별도의 agent-manager 전용

@@ -13,6 +13,7 @@
 //   • 종료된 미션은 입력창이 없고 기록 보존 안내가 나온다
 //   • 미션이 시작 전(room 없음)이면 안내만 나오고 조회를 시도하지 않는다
 //   • 긴 로그는 창 크기로 bounded 되고, 위로 스크롤하면 커서로 과거를 이어 붙인다
+//   • 과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실제로 렌더링된다(창이 뒤로 밀린다)
 //   • bare 멘션이 참여자 로스터로 해석돼 pill 로 렌더링된다
 //   • 참여자는 읽음 처리되고 관전자는 남의 방 읽음을 건드리지 않는다
 //   • needs_recovery step 이 "Waiting" 으로 조용히 오표시되지 않는다
@@ -347,6 +348,77 @@ test('위로 스크롤하면 커서로 과거 실행 이벤트를 이어 붙인�
       const text = textOf(view.container);
       assert.ok(text.includes('older 0'), '커서로 가져온 과거 이벤트가 화면에 붙어야 한다');
       assert.ok(text.includes('older 2'));
+    },
+  );
+});
+
+test('과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실제로 렌더링된다 (창이 뒤로 밀린다)', async () => {
+  // 라운드1 테스트는 100+3=103 건만 써서 창 상한(200)을 **넘지 않았고**, 그래서
+  // `slice(-200)` 이 과거를 즉시 버리는 버그를 놓쳤다. 여기서는 상한을 확실히 넘겨
+  // 3페이지 이상 거슬러 올라간다.
+  const firstPage = Array.from({ length: 100 }, (_, i) =>
+    evt(`recent-${i}`, 'step_progress', `recent ${i}`, new Date(Date.UTC(2026, 5, 1, 3, 0, i)).toISOString()),
+  );
+  // 서버가 돌려줄 과거 페이지 3장(오래된 것부터 p0 → p1 → p2 순서로 거슬러 올라간다).
+  const pages = [
+    Array.from({ length: 100 }, (_, i) =>
+      evt(`p1-${i}`, 'note', `page1 ${i}`, new Date(Date.UTC(2026, 5, 1, 2, 0, i)).toISOString()),
+    ),
+    Array.from({ length: 100 }, (_, i) =>
+      evt(`p2-${i}`, 'note', `page2 ${i}`, new Date(Date.UTC(2026, 5, 1, 1, 0, i)).toISOString()),
+    ),
+    Array.from({ length: 100 }, (_, i) =>
+      evt(`p3-${i}`, 'note', `page3 ${i}`, new Date(Date.UTC(2026, 5, 1, 0, 0, i)).toISOString()),
+    ),
+  ];
+  let served = 0;
+
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: firstPage },
+      getChatRoomMessages: async () => [],
+      listOrchestrationMissionEvents: async () => {
+        const page = pages[served] ?? [];
+        served += 1;
+        return {
+          events: [...page].reverse(), // 서버는 최신 → 과거 순
+          has_more: served < pages.length,
+          next_cursor: { at: page[0].created_at, seq: 0 },
+        };
+      },
+    },
+    async ({ view }) => {
+      const scroller = view.container.querySelector('[data-testid="mission-conversation-scroll"]');
+      const scrollUp = async () => {
+        await act(async () => {
+          scroller.scrollTop = 0;
+          scroller.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+          await Promise.resolve();
+        });
+        await settle();
+      };
+
+      await scrollUp();
+      await scrollUp();
+      await scrollUp();
+
+      assert.equal(served, 3, '세 페이지를 모두 불러와야 이 경계를 검증할 수 있다');
+
+      const text = textOf(view.container);
+      assert.ok(
+        text.includes('page3 0'),
+        '가장 오래된 페이지가 렌더링되지 않으면 창이 뒤로 밀리지 않은 것이다 — 사용자는 최신 N건 너머를 영원히 볼 수 없다',
+      );
+
+      const rendered = view.container.querySelectorAll('[data-testid="mission-execution-event"]').length;
+      assert.ok(
+        rendered <= 200,
+        `DOM 상한은 유지돼야 한다 (렌더링된 수: ${rendered})`,
+      );
+      assert.ok(
+        !text.includes('recent 99'),
+        '과거를 파고 있으면 반대쪽(최신) 끝을 버려야 상한 안에서 과거를 볼 수 있다',
+      );
     },
   );
 });

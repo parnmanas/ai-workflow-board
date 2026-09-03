@@ -215,6 +215,9 @@ test('재시도로 밀려난 attempt 의 지각 보고가 MCP 표면에서 거�
  * 축마다 사라지는 것이 다르다:
  *   - **server 재시작**: 프로세스가 죽었다 살아난다. 진행 중이던 in-flight step 은 DB 에만
  *     남고, 부팅 스윕이 그 상태를 다시 읽어 이어받아야 한다.
+ *     **주의**: 아래 축1 은 같은 프로세스에서 판정 로직만 태우는 시뮬레이션이다. 프로세스를
+ *     실제로 종료·재기동하는 통합 테스트는 `orchestration-restart-recovery.test.mjs` 에 있다
+ *     (리뷰 라운드2 P0 반영) — 그쪽이 완료 기준 1 의 "server 재시작" 근거다.
  *   - **agent-manager 재시작**: AWB 서버는 살아 있고 그 호스트의 subagent 들이 죽는다.
  *     orchestration 이 관측하는 결과는 "작업자가 보고 없이 사라짐"이다 — agent-manager 는
  *     orchestration 상태를 들고 있지 않으므로 이게 이 축의 전부다.
@@ -247,7 +250,7 @@ async function expireGrace(ds, stepId, minutesAgo = 30) {
     .update({ id: stepId }, { lease_stale_since: new Date(Date.now() - minutesAgo * MIN) });
 }
 
-test('축1(server 재시작): 부팅 스윕이 유예를 거쳐 새 attempt 로 자동 재개한다', async (t) => {
+test('축1(server 재시작 판정 로직 — 실제 재기동은 orchestration-restart-recovery.test.mjs): 유예를 거쳐 새 attempt 로 자동 재개한다', async (t) => {
   const s = await stage(t, { label: 'restart' });
   const { ds, ws, missions, reaper, mission, worker, leadMcp, workerMcp } = s;
 
