@@ -20,7 +20,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { Button, Input, Modal, Select } from '../common';
-import { formatAgentDisplayName } from '../../utils/agentName';
+import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 
@@ -790,9 +790,25 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                 <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                   Agent identities supervised ({inst.agent_ids?.length ?? 0})
                 </dt>
+                {/* "identities" 라고 써 놓고 잘린 UUID 를 늘어놓고 있었다
+                    (ticket 20fff298) — 8자리 조각은 이름도 아니고 조회에 쓸 수도
+                    없다. 워크스페이스 스냅샷에서 이름을 찾을 수 있으면 표시 계약
+                    (`<Manager>/<Agent>`)대로 쓰고, 못 찾은 것만 "이름 미확인"으로
+                    남기되 전체 id 를 title 에 실어 지원 시 추적할 수 있게 한다. */}
                 <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', fontSize: 11 }}>
                   {inst.agent_ids && inst.agent_ids.length > 0
-                    ? inst.agent_ids.map((a) => a.slice(0, 8)).join(', ')
+                    ? inst.agent_ids.map((id, i) => {
+                        const label = agentIdentityLabel(
+                          workspaceAgents.find((agent) => agent.id === id),
+                          id,
+                        );
+                        return (
+                          <React.Fragment key={id}>
+                            {i > 0 ? ', ' : ''}
+                            <span title={label.title}>{label.text}</span>
+                          </React.Fragment>
+                        );
+                      })
                     : '—'}
                 </dd>
               </div>

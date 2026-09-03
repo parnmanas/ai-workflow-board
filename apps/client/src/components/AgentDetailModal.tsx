@@ -7,7 +7,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import type { Agent, AgentDetail, ActivityRow, AgentLiveSession, AgentManagerInstance, Credential, AgentCurrentTask } from '../types';
 import { tokens } from '../tokens';
-import { formatAgentDisplayName } from '../utils/agentName';
+import { formatAgentDisplayName, agentIdentityLabel } from '../utils/agentName';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
 import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
 import AgentFileBrowser from './AgentFileBrowser';
@@ -936,16 +936,25 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
               <div style={cardStyle}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 12, rowGap: 6 }}>
                   <div style={{ color: tokens.colors.textMuted }}>Manager</div>
-                  <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
-                    {detail.manager_name || detail.manager_agent_id || '-'}
+                  {/* 매니저 identity 자체는 상위 매니저가 없으므로 접두사 없는
+                      bare name 이 맞다. 이름을 못 찾았을 때 예전에는 agent id 를
+                      그 자리에 렌더했는데(ticket 20fff298), 화면에 뜬 UUID 가
+                      이름인지 id 인지 구분이 안 됐다 — id 는 title 로 내린다. */}
+                  <div
+                    style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}
+                    title={agentIdentityLabel({ name: detail.manager_name }, detail.manager_agent_id).title}
+                  >
+                    {agentIdentityLabel({ name: detail.manager_name }, detail.manager_agent_id).text}
                   </div>
                   <div style={{ color: tokens.colors.textMuted }}>CLI</div>
+                  {/* `|| 'unknown'` 은 "설정 안 됨"을 **보고된 값처럼** 보이게
+                      했다 — CLI 가 실제로 'unknown' 인 에이전트와 구분이 안 된다. */}
                   <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
-                    {detail.type || 'unknown'}
+                    {detail.type || <span style={{ color: tokens.colors.textMuted }}>(설정 없음)</span>}
                   </div>
                   <div style={{ color: tokens.colors.textMuted }}>Working dir</div>
                   <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
-                    {detail.working_dir || <span style={{ color: tokens.colors.textMuted }}>(not set)</span>}
+                    {detail.working_dir || <span style={{ color: tokens.colors.textMuted }}>(설정 없음)</span>}
                   </div>
                   <div style={{ color: tokens.colors.textMuted }}>Credential</div>
                   <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' }}>
@@ -1056,14 +1065,20 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4 }}>
                               <span>
                                 <span style={{ color: tokens.colors.textMuted }}>via: </span>
-                                <span style={{ fontFamily: 'monospace' }}>
-                                  {s.manager_name || (s.manager_agent_id ? s.manager_agent_id.slice(0, 8) : 'unknown')}
+                                {/* 잘린 UUID 를 매니저 이름 자리에 렌더하던 곳
+                                    (ticket 20fff298). 8자리 조각은 이름도 아니고
+                                    조회에 쓸 수 있는 id 도 아니라 두 번 쓸모없다. */}
+                                <span
+                                  style={{ fontFamily: 'monospace' }}
+                                  title={agentIdentityLabel({ name: s.manager_name }, s.manager_agent_id).title}
+                                >
+                                  {agentIdentityLabel({ name: s.manager_name }, s.manager_agent_id).text}
                                 </span>
                               </span>
                               <span>
                                 <span style={{ color: tokens.colors.textMuted }}>cli: </span>
                                 <span style={{ fontFamily: 'monospace' }}>
-                                  {s.cli || 'unknown'}
+                                  {s.cli || '(미보고)'}
                                   {s.cli_adapters && s.cli_adapters.length > 0
                                     ? ` (+${s.cli_adapters.length})`
                                     : ''}

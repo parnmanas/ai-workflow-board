@@ -18,9 +18,11 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 
 import { ManagedAgentsSection, InstanceDetail } from '../src/components/admin/AgentManagerPage.tsx';
 import AgentLaunchSpecSection from '../src/components/AgentLaunchSpecSection.tsx';
+import { agentIdentityLabel, AGENT_NAME_UNRESOLVED } from '../src/utils/agentName.ts';
 
 const MANAGER_ONLY_AGENT = {
   id: 'agent-not-in-snapshot',
@@ -259,4 +261,65 @@ test('값 없음과 해석 실패를 구분해서 표시한다', () => {
   assert.match(html, /추가 환경 변수가 없습니다/);
   // 실행 파일을 못 찾아도 명령 블록은 그리되 자리표시자를 쓴다.
   assert.match(html, /실행 파일 미해석/);
+});
+
+// ── 표시 정합성 감사 (요구사항 C) ───────────────────────────────────────────
+//
+// 감사에서 나온 공통 결함은 두 가지였다:
+//   (a) 이름을 못 찾으면 **raw / 잘린 agent id 를 이름 자리에 렌더**했다.
+//       표시 계약(`.claude/skills/awb-agent-display-name`)이 금지하는 형태이고,
+//       화면에 뜬 UUID 가 이름인지 id 인지 구분이 안 된다.
+//   (b) 값이 없으면 `'unknown'` 같은 **평범한 문자열로 메워** 보고된 값과
+//       구분되지 않았다.
+
+test('이름을 못 찾아도 agent id 를 이름 자리에 렌더하지 않는다', () => {
+  const withName = agentIdentityLabel({ name: 'Programmer', manager_name: 'Rolf' }, 'id-1');
+  assert.equal(withName.text, 'Rolf/Programmer');
+  assert.equal(withName.title, 'agent id: id-1');
+
+  // 이름을 모를 때 — 예전에는 여기서 id(또는 그 앞 8자리)가 이름 자리에 갔다.
+  for (const missing of [null, undefined, {}, { name: '' }, { name: '   ' }]) {
+    const label = agentIdentityLabel(missing, 'a1b2c3d4-e5f6-0000-0000-000000000000');
+    assert.equal(label.text, AGENT_NAME_UNRESOLVED);
+    assert.doesNotMatch(label.text, /a1b2c3d4/, 'id 가 이름 자리에 샜다');
+    // id 자체는 지원용으로 남되, 이름이 아니라 툴팁이다.
+    assert.equal(label.title, 'agent id: a1b2c3d4-e5f6-0000-0000-000000000000');
+  }
+
+  // id 조차 없으면 툴팁을 만들지 않는다 — 빈 툴팁은 정보가 아니라 잡음이다.
+  assert.equal(agentIdentityLabel(null, null).title, undefined);
+});
+
+test('감독 중인 identity 목록이 잘린 UUID 대신 이름을 보여준다', async (t) => {
+  const dom = setupDom(t, { '/agents/mgr-1': { id: 'mgr-1', name: 'manager', description: '' } });
+  const root = createRoot(document.getElementById('root'));
+  await act(async () => {
+    root.render(
+      React.createElement(InstanceDetail, {
+        inst: { ...INSTANCE, agent_ids: ['agent-known', 'agent-unknown'] },
+        workspaceAgents: [{ id: 'agent-known', name: 'Programmer', manager_name: 'Rolf' }],
+        onOpenAgent: () => {},
+      }),
+    );
+  });
+
+  const text = document.body.textContent;
+  assert.match(text, /Rolf\/Programmer/, '스냅샷에 있는 identity 는 표시 계약대로 그려야 한다');
+  assert.match(text, /이름 미확인/, '못 찾은 identity 는 그 사실이 보여야 한다');
+  // 잘린 UUID 가 이름 자리에 남아 있으면 안 된다.
+  assert.doesNotMatch(text, /agent-un,|agent-kn,/);
+
+  await act(async () => root.unmount());
+});
+
+test('CLI 미설정을 "unknown" 이라는 값처럼 보이게 하지 않는다', () => {
+  // AgentDetailModal 의 MANAGED AGENT 표에서 CLI 가 비었을 때의 표기.
+  // 값이 없다는 사실과, CLI 가 실제로 어떤 값이라는 주장은 다른 정보다.
+  const source = readFileSync(
+    new URL('../src/components/AgentDetailModal.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.doesNotMatch(source, /\{detail\.type \|\| 'unknown'\}/);
+  assert.doesNotMatch(source, /\{s\.cli \|\| 'unknown'\}/);
+  assert.doesNotMatch(source, /detail\.manager_name \|\| detail\.manager_agent_id/);
 });
