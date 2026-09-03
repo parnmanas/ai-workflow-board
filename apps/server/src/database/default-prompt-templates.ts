@@ -528,6 +528,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
 1. **Identify the default branch** — \`git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'\` (typically \`master\` or \`main\`).
 
 2. **Rebase onto the latest default and integrate**
+   - **Take the landing lease FIRST — before the fetch** — \`mcp__awb__await_merge_lease(ticket_id)\`. While you hold it, no other AWB ticket lands on this base, so the base cannot advance under your CI run and invalidate the SHA you are about to verify. \`granted\` → continue below. \`queued\` → comment that you are queued and **end your turn** (the server re-dispatches you when it is yours — never poll or sleep). \`degraded\` → continue below **without** a lease. Full semantics, the bounded retry budget, and release rules are in "Landing lease" further down.
    - \`git fetch origin --prune\`
    - \`git checkout <feature-branch>\`
    - If behind the default: \`git rebase origin/<default>\`.
@@ -543,7 +544,7 @@ This ticket is in the Merging column, which means Review approved the diff. Your
    - \`git checkout <default-branch>\`
    - \`git pull --ff-only origin <default-branch>\`
    - \`git merge --ff-only <feature-branch>\` — after step 2's rebase this fast-forwards cleanly.
-   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges — repeat until it fast-forwards, escalating only if you hit a genuinely big problem per the boundary below. If Review bounced this ticket back for overlapping main drift (\`check_review_drift\` recommended \`rebase_required\`), this rebase loop **is** that drift's single re-verification point — the episode's reverification budget is already spent, so Review will not bounce it again for the same reason.
+   - **If the ff fails** because the default moved again while you were rebasing: re-run step 2 (\`git checkout <feature-branch> && git rebase origin/<default>\`, integrating any fresh conflicts), then retry the ff. This loop is normal under concurrent merges, but it is **bounded, not open-ended**: while you hold the landing lease no other AWB ticket can move the base, so a repeat means something outside AWB did (a direct human push, another AWB instance on the same repo). Each re-entry into step 2 spends one attempt of the budget \`await_merge_lease\` reports; when it returns \`budget: "exhausted"\`, stop rebasing and fail explicitly per "Landing lease" below. Escalate earlier if you hit a genuinely big problem per the boundary below. If Review bounced this ticket back for overlapping main drift (\`check_review_drift\` recommended \`rebase_required\`), this rebase loop **is** that drift's single re-verification point — the episode's reverification budget is already spent, so Review will not bounce it again for the same reason.
 
 4. **Push to origin (required)**
    - \`git push origin <default-branch>\`
@@ -623,6 +624,22 @@ This board's \`ci.yml\` only runs automatically on \`pull_request\` / \`push:mai
 
 This board uses PRs (\`use_pr\`=true) — \`ci.yml\`'s \`pull_request\` trigger already runs the full matrix automatically against this branch's open PR, so there is nothing to dispatch here; a manual \`workflow_dispatch\` would just duplicate that run at extra CI cost every landing. Before proceeding to step 3 (which on this board is \`gh pr merge\`, per the \`use_pr\`=true block below), confirm the PR's own CI run is green: \`gh pr checks <pr>\` (or the PR's Checks tab). If the PR's check is stale — the branch was force-pushed since it last ran — wait for GitHub to re-trigger it, or push again to force a fresh run; never merge on a stale check. Record that run's URL + conclusion in the step-7 comment in place of a dispatch result.
 <!--/awb:pr-only-->
+
+## Landing lease
+
+The pre-landing CI run takes several minutes. On a busy default branch another ticket can land inside that window — then your fast-forward fails, you rebase, your SHA changes, and the green run you just waited for no longer describes the tree you are about to land. Re-verifying is the *correct* response, but with nothing serializing the window it can repeat without bound: one measured ticket ran the full CI matrix **three times for a diff that never changed**, because the default advanced 9 and then 3 commits during the two waits.
+
+\`await_merge_lease\` closes that window. While one ticket holds the lease for a (repo, base branch) pair, **no other AWB ticket lands on that branch** — so the base cannot advance under your CI run, and one green run is enough.
+
+**Call it once at the top of step 2, every time you enter step 2.** The three outcomes:
+
+- **\`granted\`** — you own the landing window. Continue with step 2.
+- **\`queued\`** — another ticket is landing right now. You are parked (\`pending_merge_lease\`, the same durable-wait shape as \`await_ci_run\`). **Leave a one-line comment saying you are queued, then end your turn.** Do **not** poll, sleep, or call ScheduleWakeup — the server re-dispatches this ticket's current-column role holders the moment the lease becomes yours. \`position\` and \`ahead_ticket_id\` in the response say where you are in line.
+- **\`degraded\`** — proceed **without** a lease, exactly as you would have before this mechanism existed. The board turned it off, the repo could not be resolved, the wait cap was hit, or the service errored. This is never a reason to stop or escalate: it only means the ordinary rebase/CI re-verification loop is possible again. Record the \`degrade_reason\` in your step-7 comment.
+
+**The retry budget is bounded, and exhausting it is an explicit failure.** A lease serializes AWB's own tickets; it cannot stop a human pushing straight to the base, or a second AWB instance watching the same repo. So each re-entry into step 2 while holding the lease spends one attempt, and the response reports \`attempt\` / \`max_attempts\` / \`budget\`. When \`budget\` comes back \`"exhausted"\`, **stop — do not rebase again.** Comment with how many attempts you made and what kept moving the base, then bounce to **In Progress** or \`pend_ticket\`. Ending explicitly is the intended outcome; looping is not.
+
+**You almost never release by hand.** Moving out of Merging — to Done after landing, bounced back to In Progress, or pended — releases the lease inside the *same* column-move transaction, server-side. Call \`mcp__awb__release_merge_lease(ticket_id)\` only when you are abandoning the landing attempt but staying in Merging, so the rest of the repo is not stuck behind you. And if your session dies holding the lease, the server reclaims it once there is no sign of progress — an unresolved \`await_ci_run\` **counts** as progress, so a slow CI matrix never costs you the lease mid-run.
 
 ## Cleanup failure recovery
 
