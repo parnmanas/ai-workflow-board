@@ -2119,7 +2119,14 @@ export class EventDispatcher {
       return;
     }
     if (pendingColumnWorkflowRaw) {
-      void this.#replayColumnWorkflowTrigger(pendingColumnWorkflowRaw, ticketId, role);
+      // Fire-and-forget (this runs inside a caller's finally / a child's onExit
+      // hook, which must not be extended by a dispatch), but NEVER as a bare
+      // `void`: the settled catch is the last line of defense so an unexpected
+      // fault in the replay cannot escape as an unhandled rejection — the
+      // mirror of the force path's `.catch()` above (review round 1).
+      void this.#replayColumnWorkflowTrigger(pendingColumnWorkflowRaw, ticketId, role).catch(
+        (err: any) => log(`[dispatch] column_workflow replay failed: ${err?.message ?? err}`),
+      );
     }
   }
 
@@ -2137,12 +2144,15 @@ export class EventDispatcher {
    *  (`TriggerLoopService._replayTransitionTrigger` re-resolves the CURRENT
    *  column before re-emitting, and skips a ticket that already moved on).
    *
-   *  Fails toward replaying: an event with no column snapshot, or a ticket fetch
-   *  that comes back empty, cannot prove staleness — and a needless dispatch
-   *  costs one spawn while a skipped one strands the ticket, which is the whole
-   *  bug. Re-enters with the event EXACTLY as the server emitted it (no
-   *  `force_respawn`): the mention's one-shot has already exited by the time its
-   *  seat releases, so there is no live session that needs replacing. */
+   *  Fails toward replaying: an event with no column snapshot, or a lookup that
+   *  comes back empty OR faults, cannot prove staleness — and a needless
+   *  dispatch costs one spawn while a skipped one strands the ticket, which is
+   *  the whole bug. Re-enters with the event EXACTLY as the server emitted it
+   *  (no `force_respawn`): the mention's one-shot has already exited by the time
+   *  its seat releases, so there is no live session that needs replacing.
+   *
+   *  Rejects only if the replay DISPATCH itself throws; the caller's settled
+   *  `.catch()` is the single handler for that (review round 1). */
   async #replayColumnWorkflowTrigger(raw: string, ticketId: string, role: string): Promise<void> {
     let parsed: any;
     try {
@@ -2152,8 +2162,26 @@ export class EventDispatcher {
     }
     const emittedColumnId = String(parsed?.current_column_id || '');
     if (emittedColumnId) {
-      const ticket = await fetchTicketContext(this.#config, ticketId);
-      const currentColumnId = String(ticket?.current_column_id || '');
+      // "Fails toward replaying" must be enforced HERE, not inherited (review
+      // round 1). `fetchTicketContext` is total today — it catches every
+      // failure (HTTP error, network, abort-timeout, JSON parse) and returns
+      // null (rest.ts) — so no exception can currently reach this frame. But
+      // this path's whole reason to exist is that a lost column trigger strands
+      // a ticket for good, and leaning on another module's internal catch to
+      // guarantee that would make a future change over there (e.g. propagating
+      // a transient error to let callers retry) silently convert a blip in the
+      // AWB API into the permanent stall this ticket fixes. So the fallback is
+      // stated locally: any lookup fault → log and replay.
+      let currentColumnId = '';
+      try {
+        const ticket = await fetchTicketContext(this.#config, ticketId);
+        currentColumnId = String(ticket?.current_column_id || '');
+      } catch (err: any) {
+        log(
+          `[dispatch] column_workflow replay freshness lookup failed — replaying anyway: ` +
+            `ticket=${ticketId.slice(0, 8)} role=${role || '_'} err=${err?.message ?? err}`,
+        );
+      }
       if (currentColumnId && currentColumnId !== emittedColumnId) {
         log(
           `[dispatch] suppressed column_workflow replay skipped — ticket already moved on: ` +
@@ -2167,9 +2195,10 @@ export class EventDispatcher {
       `[dispatch] replaying suppressed column_workflow trigger after mention seat released: ` +
         `ticket=${ticketId.slice(0, 8)} role=${role || '_'} source=${String(parsed?.trigger_source || '_')}`,
     );
-    await this.handleTrigger(raw).catch((err: any) =>
-      log(`[dispatch] column_workflow replay failed: ${err?.message ?? err}`),
-    );
+    // Deliberately un-caught here: the single settled catch lives at the call
+    // site, so one place handles EVERY fault on this path (a dispatch throw as
+    // well as anything unexpected above) instead of two partial guards.
+    await this.handleTrigger(raw);
   }
 
   async handleTrigger(

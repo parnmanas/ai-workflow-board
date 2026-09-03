@@ -1557,6 +1557,114 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
   assert.equal(mgr.spawnCount, 0, '세션도 뜨지 않았다');
 });
 
+// 리뷰 라운드1: stale 가드는 "판정 불가면 재생" 이어야 한다. 판정에 쓰는 티켓 조회가
+// 실패했는데 재생을 건너뛰면, 일시적인 AWB API 장애 한 번이 이 티켓이 없애려던 영구
+// 정체를 그대로 재현한다. 아래 두 테스트가 그 "판정 불가" 두 갈래를 각각 못 박는다.
+//
+// 비-공허성: 신선도 판정을 `if (currentColumnId !== emittedColumnId)` 로 (빈 값을
+// stale 로 취급하게) 바꾸면 둘 다 재생이 사라져 dispatched.length 가 0 에서 멈춘다.
+
+test('round 4 (리뷰 라운드1): 신선도 조회가 실패해도 컬럼 워크플로는 그대로 1회 재생된다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+  await dispatcher.handleTrigger(columnMoveEvJson());
+  assert.equal(dispatched.length, 0, '멘션이 seat 를 쥔 동안에는 억제된다');
+
+  // seat 해제 직후의 **첫** 티켓 조회 = 신선도 조회 하나만 네트워크 수준에서 reject
+  // 시킨다(일시적 AWB API 장애). 뒤이은 재생 dispatch 자신의 티켓 조회는 정상으로
+  // 돌려줘야 "신선도 판정 불가" 만 주입되고 재생 경로는 그대로 살아 있다.
+  const outer = globalThis.fetch;
+  let freshnessLookupFailed = false;
+  globalThis.fetch = async (url, init) => {
+    if (!freshnessLookupFailed && String(url).includes('/api/agent/tickets/')) {
+      freshnessLookupFailed = true;
+      throw new Error('AWB API 일시 장애');
+    }
+    return outer(url, init);
+  };
+
+  onExit();
+
+  const replayed = await waitFor(() => dispatched.length === 1, { timeoutMs: 4000 });
+  assert.equal(replayed, true, '조회 실패는 재생을 막지 않는다 — 정체 대신 여분의 dispatch 쪽으로 실패한다');
+  assert.equal(dispatched[0].triggerId, 'trig-column-move', '억제된 이벤트 자신의 신원으로 재생됐다');
+  assert.equal(dispatched[0].triggerSource, 'column_move');
+  await delay(250);
+  assert.equal(dispatched.length, 1, '정확히 1회');
+});
+
+test('round 4 (리뷰 라운드1): 조회한 티켓에 current_column_id 가 없어도 재생된다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+  await dispatcher.handleTrigger(columnMoveEvJson());
+
+  // 신선도 조회(첫 조회)만 200 OK 이되 컬럼 정보가 비어 있는 응답으로 바꾼다 — 조회는
+  // 성공했어도 stale 판정 근거가 없는 경우. 재생 dispatch 의 조회는 정상으로 둔다.
+  const outer = globalThis.fetch;
+  let columnlessServed = false;
+  globalThis.fetch = async (url, init) => {
+    if (!columnlessServed && String(url).includes('/api/agent/tickets/')) {
+      columnlessServed = true;
+      return { ok: true, status: 200, async json() { return { id: 't1', comments: [] }; }, async text() { return ''; } };
+    }
+    return outer(url, init);
+  };
+
+  onExit();
+
+  const replayed = await waitFor(() => dispatched.length === 1, { timeoutMs: 4000 });
+  assert.equal(replayed, true, '컬럼을 알 수 없으면 stale 로 단정하지 않고 재생한다');
+  assert.equal(dispatched[0].triggerId, 'trig-column-move');
+  await delay(250);
+  assert.equal(dispatched.length, 1, '정확히 1회');
+});
+
+// 리뷰 라운드1: 재생은 caller 의 finally / 자식 onExit 훅 안에서 fire-and-forget 으로
+// 도는 만큼, 예상 밖 오류가 미처리 rejection 으로 번지면 안 된다. 재생 dispatch 자체를
+// reject 시켜 호출부의 settled catch 가 실제로 잡는지 본다.
+//
+// 비-공허성: 호출부의 `.catch(...)` 를 지워 bare `void` 로 되돌리면 이 rejection 이
+// 미처리로 새고 node --test 가 이 파일을 통째로 red 로 만든다.
+test('round 4 (리뷰 라운드1): 재생 dispatch 가 throw 해도 미처리 rejection 으로 새지 않는다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+  await dispatcher.handleTrigger(columnMoveEvJson());
+
+  // 재생 경로는 public handleTrigger 로 재진입하므로 인스턴스 프로퍼티로 가로챌 수
+  // 있다(멘션 경로는 이 메서드를 쓰지 않으므로 seat claim 은 영향 없음).
+  const replayCalls = [];
+  dispatcher.handleTrigger = async (raw) => {
+    replayCalls.push(raw);
+    throw new Error('재생 dispatch 폭발');
+  };
+
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    onExit();
+    const attempted = await waitFor(() => replayCalls.length === 1, { timeoutMs: 4000 });
+    assert.equal(attempted, true, '재생이 시도됐다');
+    // rejection 은 다음 turn 들에 걸쳐 미처리로 승격되므로, 승격 창을 넘긴 뒤 본다.
+    await delay(300);
+    assert.deepEqual(unhandled, [], '호출부의 settled catch 가 잡아 미처리 rejection 이 없다');
+    assert.equal(replayCalls.length, 1, '재시도 루프도 없다 — 정확히 1회');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
 test('round 4: 멘션이 응답 중인 코멘트의 comment 팬아웃 트리거는 재생 대상이 아니다', async () => {
   const mgr = new RealTicketMgrStub(makeConfig());
   const { dispatcher, tracker, calls } = makeDispatcher({ ticketMgr: mgr });
