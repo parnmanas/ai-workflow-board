@@ -173,7 +173,7 @@ function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator
         return true;
       }),
   };
-  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog, noQuiesce);
+  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog, noQuiesce, { scheduleGateNotice: () => {}, sendReminder: async () => ({ recipients: 0, sent: 0, failed: 0 }), settled: async () => {} });
   return { svc, missionRepo, stepRepo, eventRepo, nudges, recordedEvents, clock };
 }
 

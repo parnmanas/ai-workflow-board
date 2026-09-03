@@ -53,6 +53,16 @@ import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 
+/**
+ * 한 스윕이 보낼 수 있는 confirm 리마인더 상한(티켓 a78cb566). 남은 것은 다음 스윕이
+ * 이어받는다 — 리마인더는 지연에 민감하지 않다.
+ *
+ * 상한이 필요한 이유: 알림 provider 는 요청 타임아웃이 없어 개별 발송에 최대 15초가
+ * 걸릴 수 있다. 대기 중인 게이트가 수십 개면 이 스윕 하나가 sweep 주기(기본 5분)를
+ * 넘겨 버리고, 그동안 step 타임아웃 같은 **다른 리퍼 임무가 조용히 밀린다**.
+ */
+const CONFIRM_REMINDERS_PER_SWEEP = 25;
+
 const PLANNING_NUDGE_LIMIT = 2;
 const RUNNING_STALL_NUDGE_LIMIT = 2;
 
@@ -508,6 +518,7 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
         // sendReminder 는 던지지 않는다(서비스 계약). 상한도 걸려 있어 스윕이 매달리지 않는다.
         await this.confirmNotify.sendReminder(mission, step, waitedMs);
         reminded += 1;
+        if (reminded >= CONFIRM_REMINDERS_PER_SWEEP) return reminded;
       }
     }
     return reminded;

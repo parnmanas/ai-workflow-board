@@ -141,10 +141,14 @@ export class OrchestrationRunnerService {
     private readonly missions: OrchestrationMissionService,
     private readonly teams: OrchestrationTeamService,
     private readonly actionsService: ActionsService,
+    private readonly logService: LogService,
     // 게이트 대기 사실을 AWB 화면 밖으로 내보낸다(티켓 a78cb566). 발송은 미션 락
     // 밖에서 배경으로 돈다 — 아래 openConfirmGate 주석 참고.
+    //
+    // **맨 뒤에 둔다.** 이 서비스는 여러 유닛 테스트가 스텁으로 직접 생성하므로,
+    // 중간에 끼우면 그 호출부의 뒤쪽 인자가 통째로 한 칸씩 밀려 `logService` 가
+    // undefined 가 된다(실제로 그렇게 깨졌다). 추가는 항상 뒤로.
     private readonly confirmNotify: OrchestrationConfirmNotifyService,
-    private readonly logService: LogService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */

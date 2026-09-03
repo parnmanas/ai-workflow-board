@@ -175,6 +175,22 @@ export class OrchestrationConfirmNotifyService {
   ): Promise<void> {
     const visit = step.visit ?? 1;
     const fresh = await this.stepRepo.findOne({ where: { id: step.id } }).catch(() => null);
+
+    // 발송은 미션 락 밖에서 돌기 때문에, 그 사이 사용자가 fail 을 내고 loop 가 재진입해
+    // 게이트가 **다음 pass 로 넘어가 있을 수 있다**. 그때 이 낡은 pass 의 기록을 쓰면 방금
+    // 커밋된 새 pass 의 marker 를 덮어써서 중복 방지 키가 어긋난다. 새 pass 의 기록이
+    // 권위 있으므로 컬럼 쓰기를 건너뛴다 — 타임라인 기록은 그대로 남긴다(발송은 실제로
+    // 일어났고, 어느 pass 에 대한 것이었는지는 이벤트 data.visit 에 있다).
+    if (fresh && (fresh.visit ?? 1) > visit) {
+      this.logService.info(
+        'Orchestration',
+        `confirm notice for step ${step.step_key} landed after the gate moved to pass ${fresh.visit} — not overwriting`,
+        { mission_id: mission.id },
+      );
+      await this.recordNotifiedEvent(mission, step, kind, result);
+      return;
+    }
+
     // 저장된 notice 는 **같은 pass 의 것일 때만** 이어붙인다. 다른 pass 의 값을 spread 하면
     // `visit` 이 옛 pass 로 남아 중복 방지 키가 통째로 어긋난다 — 다음 pump 가 "이 pass 는
     // 아직 안 알렸다" 로 읽고 같은 pass 에 두 번째 알림을 낸다.
@@ -198,6 +214,15 @@ export class OrchestrationConfirmNotifyService {
       );
     }
 
+    await this.recordNotifiedEvent(mission, step, kind, result);
+  }
+
+  private async recordNotifiedEvent(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    kind: 'initial' | 'reminder',
+    result: { recipients: number; sent: number; failed: number },
+  ): Promise<void> {
     await this.missions.recordEvent(mission, {
       type: 'confirm_notified',
       step_id: step.id,

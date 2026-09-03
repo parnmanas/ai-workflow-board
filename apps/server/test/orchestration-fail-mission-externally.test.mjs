@@ -126,6 +126,9 @@ function makeService({ missions = [], steps = [] } = {}) {
     inert,
     inert,
     noopLog,
+    // 티켓 a78cb566 — 게이트 대기 알림. 이 테스트가 confirm 게이트를 열지는 않지만,
+    // undefined 로 두면 나중에 그 경로를 타는 순간 조용히 터진다.
+    { scheduleGateNotice: () => {}, sendReminder: async () => ({ recipients: 0, sent: 0, failed: 0 }), settled: async () => {} },
   );
   return { runner, missionRepo, stepRepo, recordedEvents };
 }
