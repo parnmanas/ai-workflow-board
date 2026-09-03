@@ -322,21 +322,43 @@ jobs:
           NODE_OPTIONS: --import ./test/fixtures/pid-banner.mjs
         shell: pwsh
         run: |
+          # 네이티브 명령의 stderr 가 스크립트를 종료시키지 않도록 명시한다 —
+          # Actions 의 pwsh 기본값은 'Stop' 이라 파이프라인이 중간에 끊길 수 있다.
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
           $rounds = [int]'${{ inputs.flake_repro_rounds }}'
+          # 쫓는 시그니처: 파일 단위 TAP 항목이 실패한 것 (= 자식이 서브테스트를
+          # 하나도 못 내고 죽음). 그냥 exit code 만 보면 안 된다 — 첫 시도에서
+          # 하네스가 스위트를 오염시켜 라운드마다 32개가 결정적으로 실패했는데,
+          # exit code 만 세던 로직은 그걸 "4/4 재현" 으로 보고했다.
+          $sigPattern = '^not ok \d+ - test[\\/].+\.test\.mjs\s*$'
           $hits = 0
+          $broken = 0
           for ($i = 1; $i -le $rounds; $i++) {
+            $log = Join-Path $env:RUNNER_TEMP "flake-round-$i.log"
             Write-Host "::group::flake-repro shard ${{ matrix.shard }} round $i/$rounds"
-            node --test --test-force-exit 'test/*.test.mjs'
+            node --test --test-force-exit 'test/*.test.mjs' 2>&1 | Tee-Object -FilePath $log
             $code = $LASTEXITCODE
             Write-Host "::endgroup::"
-            if ($code -ne 0) {
+            if ($code -eq 0) { continue }
+            $victim = Select-String -LiteralPath $log -Pattern $sigPattern | Select-Object -First 1
+            if ($victim) {
               $hits++
-              Write-Host "FLAKE-REPRO-HIT shard=${{ matrix.shard }} round=$i exit=$code"
+              Write-Host "FLAKE-REPRO-HIT shard=${{ matrix.shard }} round=$i exit=$code victim=$($victim.Line.Trim())"
+            } else {
+              $broken++
+              Write-Host "FLAKE-REPRO-NOT-THE-FLAKE shard=${{ matrix.shard }} round=$i exit=$code (평범한 스위트 실패 — 하네스/회귀 의심)"
             }
           }
-          $summary = "shard=${{ matrix.shard }} rounds=$rounds hits=$hits"
+          $summary = "shard=${{ matrix.shard }} rounds=$rounds hits=$hits broken=$broken"
           Write-Host "FLAKE-REPRO-SUMMARY $summary"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- flake-repro $summary"
+          # 재현(hits)은 이 잡의 목적이라 초록으로 둔다. 반대로 시그니처가 아닌
+          # 실패는 표본이 아니라 하네스나 스위트가 깨졌다는 뜻이라 빨갛게 만든다.
+          if ($broken -gt 0) { exit 1 }
+          exit 0
 
   # 클라이언트 단위·상호작용 테스트 (티켓 98d0936e · F2-1). Phase 1 은 브라우저
   # 러너 부재로 카드 클릭·`?ticket=` 딥링크·모바일 패널·포커스트랩이 SSR/순수
