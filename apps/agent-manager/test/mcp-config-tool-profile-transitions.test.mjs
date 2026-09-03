@@ -34,6 +34,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -157,6 +159,31 @@ function withExitDeadline(promise, timeoutMs, message) {
   ]).finally(() => ac.abort());
 }
 
+/** 자식의 종료를 기다린다 — **리스너를 걸기 전에 이미 끝났는지부터 본다** (티켓 ef90520f).
+ *
+ *  `_spawnSession` 은 자식을 띄운 뒤에도 pid sidecar 쓰기(`await fsp.writeFile`)로
+ *  이벤트 루프에 양보한다. config 한 줄 읽고 끝나는 이 파일의 fixture 자식은 그
+ *  창 안에서 종료할 수 있고, 그러면 'exit' 은 **호출자가 리스너를 걸기 전에** 발화한다.
+ *  `once('exit')` 는 지나간 이벤트를 재전달하지 않으므로 그대로 두면 상한까지
+ *  기다리다 실패한다 — Windows CI 실측 `sess-bsm-concurrent-full (pid 900) did not
+ *  exit within 30000ms`. 위 `installExitRouter` 가 `already` 맵으로 이미 처리하는 것과
+ *  같은 레이스인데, BaseSessionManager 경로에만 그 처리가 빠져 있었다.
+ *
+ *  Node 는 `exitCode`/`signalCode` 를 세팅한 뒤 같은 동기 블록에서 'exit' 을 emit 하므로
+ *  아래 판정 도중 이벤트가 끼어들 수 없다: 이미 끝났으면 값이 있어 즉시 돌려주고,
+ *  아직이면 둘 다 null 이라 리스너가 반드시 잡는다. 상한은 그대로 hang 진단용이다 —
+ *  이 레이스를 상한 조정으로 덮으면 hang 이 느린 green 으로 위장될 뿐이다. */
+function awaitChildExit(child, message) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return withExitDeadline(
+    new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal }))),
+    EXIT_DEADLINE_MS,
+    message,
+  );
+}
+
 function installExitRouter(manager) {
   const already = new Map();
   const waiters = new Map();
@@ -202,15 +229,33 @@ async function spawnBaseSessionAndAwaitExit(manager, { agentContext, runtimeProf
     runtimeProfile,
   });
   assert.ok(sess, `_spawnSession(${sessionKey}) must succeed`);
-  const exitInfo = await withExitDeadline(
-    new Promise((resolve) => sess.child.once('exit', (code, signal) => resolve({ code, signal }))),
-    EXIT_DEADLINE_MS,
+  const exitInfo = await awaitChildExit(
+    sess.child,
     `${sessionKey} (pid ${sess.pid}) did not exit within ${EXIT_DEADLINE_MS}ms`,
   );
   liveChildren--;
   assert.equal(exitInfo.code, 0, `fixture for ${sessionKey} (pid ${sess.pid}) must exit 0`);
   return exitInfo;
 }
+
+// 위 헬퍼가 의존하는 `awaitChildExit` 의 계약을 고정한다 (티켓 ef90520f).
+//
+// 자식의 종료 시점을 벽시계로 추측하지 않는다: 실제 자식을 띄운 뒤 'exit' 을
+// **관측해서** 이미 종료한 상태를 만들고, 그 자식으로 헬퍼를 부른다. 그래서
+// 이 테스트는 플랫폼·부하와 무관하게 결정적이다.
+//
+// 수정 전(`once('exit')` 만 걸던 판)에는 지나간 이벤트를 받을 방법이 없어
+// EXIT_DEADLINE_MS 상한까지 기다리다 실패했다 — CI 가 본 그 실패다.
+test('awaitChildExit: 리스너를 걸기 전에 이미 종료한 자식의 종료 정보도 돌려준다', async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+  await once(child, 'exit');
+  // 전제 — 이 시점에서 'exit' 은 이미 발화했고 두 번 오지 않는다.
+  assert.notEqual(child.exitCode, null, '전제: 관측된 종료 뒤에는 exitCode 가 채워져 있어야 한다');
+
+  const info = await awaitChildExit(child, '이미 종료한 자식을 기다리다 상한에 걸렸다');
+  assert.equal(info.code, 0, '이미 종료한 자식의 종료 코드를 그대로 돌려줘야 한다');
+  assert.equal(info.signal, null, '정상 종료이므로 signal 은 없어야 한다');
+});
 
 // ─── SubagentManager: sequential transitions ────────────────────────────
 
