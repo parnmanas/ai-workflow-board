@@ -115,10 +115,15 @@ import {
   type AdapterMcpContext,
   CliAdapter,
   PARSE_STAGE,
+  type HarnessSpec,
   type OneshotSpec,
   type ParseResult,
   type SpawnDescriptor,
 } from './base.js';
+import {
+  type EffectivePermissionPolicy,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
 
 // Files the operator's real ~/.pi/agent/ home must lend a fresh per-agent
 // HOME so pi can actually authenticate — mirrors codex's
@@ -146,7 +151,13 @@ export class PiCliAdapter extends CliAdapter {
     return resolveCliBin('pi', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model }: OneshotSpec): SpawnDescriptor {
+  /** ticket 5851e435 — antigravity 와 같은 이유로 `permission_mode` 를
+   *  실제로 반영한다(예전에는 조용히 버려졌다). */
+  harnessKeys(): ReadonlyArray<keyof HarnessSpec> {
+    return ['model', 'permission_mode'];
+  }
+
+  buildOneshotSpawn({ rolePrompt, taskText, model, permission, harness }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     // `pi -p "<prompt>"` prints the response and exits — pi's documented
     // automation entry point. Non-interactive modes (-p / --mode json /
@@ -158,10 +169,25 @@ export class PiCliAdapter extends CliAdapter {
     // sandbox, so an interactive approval would be redundant even if one
     // were possible here). `--no-session` keeps one-shot ticket dispatches
     // from accumulating unbounded session history in the per-agent home.
+    //
+    // ticket 5851e435 — `--approve` 가 pi 의 `trusted` 매핑이다. pi 에는
+    // 등급을 세분화할 옵션이 없으므로 `approve`/`strict` 에서는 그 플래그를
+    // 빼서 근사한다(프로젝트 로컬 `.pi/` 확장이 자동 신뢰되지 않는다). 위에
+    // 적힌 대로 `-p` 비대화형 모드는 애초에 trust 프롬프트를 띄우지 않으므로
+    // 플래그를 빼도 사람 없이 멈추지 않는다. permissionCapabilities() 가 이
+    // 근사를 `approximated` 로 선언한다.
     // Per-agent default model (Agent.model) is omitted when unset so pi
     // keeps its own configured default — same as codex/antigravity.
     return {
-      args: ['-p', fullPrompt, ...(model ? ['--model', model] : []), '--approve', '--no-session'],
+      args: [
+        '-p',
+        fullPrompt,
+        ...(model ? ['--model', model] : []),
+        ...(permissionPolicyOrDefault(permission, harness?.permission_mode).tier === 'trusted'
+          ? ['--approve']
+          : []),
+        '--no-session',
+      ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,
       writePrompt: undefined,

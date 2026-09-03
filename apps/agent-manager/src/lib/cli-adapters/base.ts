@@ -10,6 +10,20 @@
 //     back to AWB through the manager's REST connection)
 
 import type { ChildProcess, StdioOptions } from 'node:child_process';
+import {
+  type EffectivePermissionPolicy,
+  type PermissionCapabilities,
+  BYPASS_ONLY_PERMISSION_CAPABILITIES,
+  FULL_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
+
+export {
+  BYPASS_ONLY_PERMISSION_CAPABILITIES,
+  FULL_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+};
+export type { EffectivePermissionPolicy, PermissionCapabilities };
 
 export const ADAPTER_CAPABILITIES = Object.freeze({
   /** Bidirectional stream-json over stdin/stdout, multi-turn over one process. */
@@ -288,6 +302,32 @@ export function describeHarness(harness: HarnessSpec): string {
   return parts.join(' ');
 }
 
+/** argv 토큰 중 그 자체가 secret 이거나 secret 을 품을 수 있는 모양. */
+const SECRET_ARG_PATTERN = /(authorization|api[-_]?key|auth[-_]?token|access[-_]?token|bearer|secret|password|credential)/i;
+
+/** 이보다 긴 토큰은 값 대신 길이만 남긴다(프롬프트/시스템 프롬프트 본문). */
+const MAX_LOGGED_ARG_LEN = 60;
+
+/**
+ * spawn argv 를 진단 로그에 남길 수 있는 형태로 축약한다 (ticket 5851e435).
+ *
+ * 플래그 자체는 그대로 보여야 권한 플래그가 실제로 붙었는지 로그만으로 확인할
+ * 수 있다. 반대로 프롬프트 본문(역할 프롬프트, task text, --append-system-prompt)
+ * 은 티켓/채팅 내용을 통째로 담고 있고, MCP 헤더 오버라이드에는 토큰 이름이
+ * 섞일 수 있으므로 길이/`<redacted>` 로 접는다.
+ */
+export function describeSpawnArgv(args: readonly string[] | null | undefined): string {
+  return (args ?? []).map(redactSpawnArg).join(' ');
+}
+
+function redactSpawnArg(arg: string): string {
+  const s = String(arg ?? '');
+  if (!s) return "''";
+  if (SECRET_ARG_PATTERN.test(s)) return '<redacted>';
+  if (s.length > MAX_LOGGED_ARG_LEN) return `<${s.length}ch>`;
+  return /\s/.test(s) ? JSON.stringify(s) : s;
+}
+
 export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
@@ -319,6 +359,12 @@ export interface OneshotSpec {
    *  task text so the spawned Claude Code subagent enters multi-agent
    *  orchestration. NOT a flag. Ignored by non-claude adapters. */
   ultracode?: boolean;
+  /** 이 spawn 의 effective permission policy (ticket 5851e435). Agent trust
+   *  (`runtime_config.permission_mode`)와 보드 harness `permission_mode` 를
+   *  spawn 사이트의 resolveEffectivePermissionPolicy() 가 하나로 합친 값이며,
+   *  어댑터는 `policy.tier` 를 자기 권한 플래그로 매핑한다. null/미설정이면
+   *  harness 로 폴백하고, 그마저 없으면 매니저의 종전 기본값(trusted)이다. */
+  permission?: EffectivePermissionPolicy | null;
 }
 
 export interface McpAttribution {
@@ -347,6 +393,9 @@ export interface SessionSpec {
    *  session the keyword is folded into the composed system prompt at session
    *  creation only. */
   ultracode?: boolean;
+  /** effective permission policy — OneshotSpec.permission 참고. 세션 생성
+   *  시점에만 적용된다(권한 플래그는 spawn 에서 고정). */
+  permission?: EffectivePermissionPolicy | null;
 }
 
 export interface SpawnDescriptor {
@@ -578,17 +627,35 @@ export abstract class CliAdapter {
   }
 
   /**
-   * True when the CLI would surface an interactive workspace-trust dialog for
-   * THIS dispatch — i.e. the CLI has a trust-dialog concept AND the resolved
-   * harness does not bypass it (ticket 48aeab6e's dispatch preflight consults
-   * this before spending an I/O read on {@link readTrustMeta}).
+   * 이 어댑터가 각 권한 등급을 얼마나 충실히 표현할 수 있는가
+   * (ticket 5851e435). 'native' 가 아닌 등급은 spawn 사이트가 반드시 로그로
+   * 드러낸다 — 조용한 downgrade/upgrade 금지가 이 티켓의 요구사항이다.
    *
-   * Base default false: codex / antigravity / pi always spawn under a
-   * hardcoded dangerously-bypass flag (see their buildOneshotSpawn) with no
-   * analogous trust gate at all, so trust is never a concern for them
-   * regardless of harness. ClaudeCliAdapter overrides.
+   * 베이스 기본값은 "최고 권한만 표현 가능": 이 어댑터 계열은 원래 하드코딩된
+   * bypass 플래그 하나로만 돌았기 때문이다. 세 등급을 모두 전용 플래그로
+   * 표현하는 claude/deepseek/codex 가 이를 오버라이드한다.
    */
-  requiresWorkspaceTrust(_harness?: HarnessSpec | null): boolean {
+  permissionCapabilities(): PermissionCapabilities {
+    return BYPASS_ONLY_PERMISSION_CAPABILITIES;
+  }
+
+  /**
+   * 이 디스패치에서 CLI 가 대화형 workspace-trust 대화상자를 띄우게 되는가
+   * (ticket 48aeab6e 의 dispatch preflight 가 {@link readTrustMeta} 의 I/O
+   * 읽기를 쓰기 전에 이 값을 먼저 본다).
+   *
+   * ticket 5851e435 — 인자가 harness 가 아니라 effective permission policy 다.
+   * 게이트가 걸리는 조건은 **보드 harness 가 명시적으로 비-bypass 모드를
+   * 요구했고(= 운영자가 사람이 직접 trust 를 승인하길 원했고), 그 위에 얹힌
+   * Agent trust 도 그 요구를 뒤집지 않은 경우**뿐이다. Agent trust 하나만으로
+   * 등급이 내려간 경우(예: legacy 백필로 `approve` 가 박힌 에이전트)는 폴더
+   * trust 와 무관하므로 게이트를 걸지 않는다 — 그 조합이 Pending 을 만들면
+   * 이 티켓이 없애려는 바로 그 실패 모드가 재현된다.
+   *
+   * 베이스 기본값 false: codex / antigravity / pi 에는 애초에 이에 대응하는
+   * trust 대화상자 개념이 없다. ClaudeCliAdapter 가 오버라이드한다.
+   */
+  requiresWorkspaceTrust(_policy?: EffectivePermissionPolicy | null): boolean {
     return false;
   }
 

@@ -25,6 +25,12 @@ import {
   type ParseResult,
   type SpawnDescriptor,
 } from './base.js';
+import {
+  type EffectivePermissionPolicy,
+  type PermissionCapabilities,
+  FULL_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
 
 // Files the per-agent codex home must inherit from the operator's main home
 // for spawned children to authenticate and pick up the operator's model /
@@ -47,20 +53,32 @@ function inlineTomlValue(value: unknown): string {
   return 'null';
 }
 
-function codexPermissionArgs(permissionMode?: string | null): string[] {
-  switch (permissionMode) {
-    case 'plan':
+/**
+ * effective permission policy → codex 실행 권한 플래그 (ticket 5851e435).
+ *
+ * 세 등급 모두 codex 자체 옵션으로 표현된다. `approval_policy="never"` 는
+ * 어느 등급에서도 유지한다 — codex 를 비대화형(`exec`)으로 스폰하므로
+ * 승인 프롬프트가 뜨면 답할 사람이 없어 그대로 멈춘다. 즉 `strict` 는
+ * "물어본다"가 아니라 "read-only sandbox 밖의 일은 그냥 거부된다"이고,
+ * `approve` 는 workspace-write 로 제한된 상태에서 그 밖의 escalation 이
+ * 거부되는 경로다.
+ *
+ * 등급별 argv 는 이 티켓 이전의 harness 문자열 매핑과 정확히 같은 것을
+ * 재사용한다(plan→read-only, acceptEdits/auto/dontAsk/default/manual→
+ * workspace-write, bypassPermissions/미설정→bypass). 달라진 건 "무엇이
+ * 등급을 정하는가"뿐이다 — 이제 Agent trust 가 기준이다.
+ */
+function codexPermissionArgs(
+  policy: EffectivePermissionPolicy | null | undefined,
+  harness: { permission_mode?: string } | null | undefined,
+): string[] {
+  const effective = permissionPolicyOrDefault(policy, harness?.permission_mode);
+  switch (effective.tier) {
+    case 'strict':
       return ['--sandbox', 'read-only', '-c', 'approval_policy="never"'];
-    case 'acceptEdits':
-    case 'auto':
-    case 'dontAsk':
-    case 'default':
-    case 'manual':
+    case 'approve':
       return ['--sandbox', 'workspace-write', '-c', 'approval_policy="never"'];
-    case 'bypassPermissions':
-    case undefined:
-    case null:
-    case '':
+    case 'trusted':
     default:
       return ['--dangerously-bypass-approvals-and-sandbox'];
   }
@@ -174,6 +192,11 @@ export class CodexCliAdapter extends CliAdapter {
     return ['system_prompt_append', 'model', 'permission_mode'];
   }
 
+  /** Codex 는 세 등급을 모두 전용 옵션으로 표현한다 (ticket 5851e435). */
+  permissionCapabilities(): PermissionCapabilities {
+    return FULL_PERMISSION_CAPABILITIES;
+  }
+
   buildOneshotSpawn({
     rolePrompt,
     taskText,
@@ -182,6 +205,7 @@ export class CodexCliAdapter extends CliAdapter {
     cwd,
     cliHomeDir,
     harness,
+    permission,
   }: OneshotSpec): SpawnDescriptor {
     const promptParts: string[] = [];
     if (harness?.system_prompt_append?.trim()) {
@@ -285,7 +309,7 @@ export class CodexCliAdapter extends CliAdapter {
         ...(model ? ['--model', model] : []),
         '--skip-git-repo-check',
         '--json',
-        ...codexPermissionArgs(harness?.permission_mode),
+        ...codexPermissionArgs(permission, harness),
       ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,
