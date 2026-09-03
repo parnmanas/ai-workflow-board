@@ -1,0 +1,190 @@
+// 회귀 테스트 — Agent trust 가 **실제로 스폰되는 프로세스의 argv 까지** 도달하는지
+// (ticket 5851e435).
+//
+// 어댑터 단위 테스트(permission-policy-matrix.test.mjs)는 "정책을 주면 argv 가
+// 맞다"만 고정한다. 정작 이 티켓의 버그는 그 사이 배선 — spawn 사이트가
+// Agent `runtime_config.permission_mode` 를 읽어 어댑터에 넘기는 단계 — 에
+// 있었으므로, 여기서는 가짜 `claude` 실행 파일을 delegation.claudeBin 으로
+// 물려 진짜 SubagentManager.spawn() / BaseSessionManager 세션 spawn 을 돌리고
+// 자식 프로세스가 스스로 기록한 argv 를 단언한다. 배선 한 줄만 빠져도 실패한다.
+
+import assert from 'node:assert/strict';
+import { mkdir, readFile, rm, writeFile, chmod } from 'node:fs/promises';
+import { join } from 'node:path';
+import test, { after } from 'node:test';
+
+import { SubagentManager } from '../dist/lib/subagent-manager.js';
+import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
+
+const fixtureRoot = join(process.cwd(), '.test-permission-wiring');
+const config = {
+  url: 'http://127.0.0.1:0',
+  apiKey: 'test-awb-key',
+  silentExitVerifyDelayMs: 0,
+  delegation: { enabled: true, persistentTicketSessions: false, maxConcurrent: 4, ttlMinutes: 1 },
+};
+
+after(async () => {
+  await rm(fixtureRoot, { recursive: true, force: true });
+});
+
+/** argv 를 캡처 파일에 쓰고 즉시 종료하는 가짜 claude 바이너리. */
+async function makeCaptureBin(name) {
+  await mkdir(fixtureRoot, { recursive: true });
+  const path = join(fixtureRoot, name);
+  await writeFile(
+    path,
+    `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.CAPTURE_FILE, JSON.stringify({ argv: process.argv.slice(2) }));
+// 부모가 exit 핸들러를 연결할 시간을 준다(runtime-profiles 픽스처와 동일 이유).
+await new Promise((r) => setTimeout(r, 30));
+`,
+    { mode: 0o755 },
+  );
+  await chmod(path, 0o755);
+  return path;
+}
+
+function makeAgentContext(cwd, permissionMode) {
+  return {
+    agent_id: 'agent-perm',
+    workspace_id: 'ws-perm',
+    api_key: 'agent-key',
+    cwd,
+    mcp_config_path: '',
+    cli: 'claude',
+    cli_home_dir: cwd,
+    model: null,
+    extra_env: {},
+    credential_provider: null,
+    credential_id: null,
+    runtime_config: permissionMode
+      ? { strategy: 'single', permission_mode: permissionMode }
+      : null,
+  };
+}
+
+/** 한 번의 one-shot spawn 을 끝까지 돌리고 자식이 기록한 argv 를 돌려준다. */
+async function captureOneshotArgv({ tag, permissionMode, harness }) {
+  const executable = await makeCaptureBin(`claude-${tag}.mjs`);
+  const captureFile = join(fixtureRoot, `${tag}.json`);
+  const cwd = join(fixtureRoot, `${tag}-home`);
+  await mkdir(cwd, { recursive: true });
+  const previous = process.env.CAPTURE_FILE;
+  process.env.CAPTURE_FILE = captureFile;
+  try {
+    const manager = new SubagentManager({
+      ...config,
+      delegation: { ...config.delegation, claudeBin: executable },
+    });
+    const exited = new Promise((resolve) => { manager.onExit = resolve; });
+    const result = await manager.spawn({
+      kind: 'trigger',
+      taskText: 'task',
+      rolePrompt: 'role',
+      triggerId: `trigger-${tag}`,
+      ticketId: `ticket-${tag}`,
+      agentId: 'agent-perm',
+      role: 'assignee',
+      agentContext: makeAgentContext(cwd, permissionMode),
+      harness,
+    });
+    assert.equal(result.spawned, true, `${tag}: spawn 실패`);
+    await exited;
+    return JSON.parse(await readFile(captureFile, 'utf8')).argv;
+  } finally {
+    if (previous === undefined) delete process.env.CAPTURE_FILE;
+    else process.env.CAPTURE_FILE = previous;
+  }
+}
+
+test('one-shot spawn: trusted Agent 는 harness=plan 을 이기고 실제 argv 에 최고 권한 플래그를 싣는다', async () => {
+  const argv = await captureOneshotArgv({
+    tag: 'trusted-vs-plan',
+    permissionMode: 'trusted',
+    harness: { permission_mode: 'plan' },
+  });
+  assert.ok(
+    argv.includes('--dangerously-skip-permissions'),
+    `실제 스폰 argv 에 최고 권한 플래그가 없다: ${argv.join(' ')}`,
+  );
+  assert.equal(
+    argv.includes('--permission-mode'),
+    false,
+    `trusted 인데 대화형 permission 모드로 내려갔다: ${argv.join(' ')}`,
+  );
+});
+
+test('one-shot spawn: strict Agent 는 harness 가 bypass 를 허용해도 실제 argv 에서 최소 권한으로 내려간다', async () => {
+  const argv = await captureOneshotArgv({
+    tag: 'strict-vs-bypass',
+    permissionMode: 'strict',
+    harness: { permission_mode: 'bypassPermissions' },
+  });
+  const i = argv.indexOf('--permission-mode');
+  assert.ok(i >= 0, `strict 인데 --permission-mode 가 없다: ${argv.join(' ')}`);
+  assert.equal(argv[i + 1], 'plan');
+  assert.equal(
+    argv.includes('--dangerously-skip-permissions'),
+    false,
+    `strict 인데 최고 권한 플래그가 실제 argv 에 남았다: ${argv.join(' ')}`,
+  );
+});
+
+test('one-shot spawn: Agent trust 미설정(legacy)은 harness 규칙 그대로 실제 argv 에 반영된다', async () => {
+  const argv = await captureOneshotArgv({
+    tag: 'legacy-harness',
+    permissionMode: null,
+    harness: { permission_mode: 'acceptEdits' },
+  });
+  const i = argv.indexOf('--permission-mode');
+  assert.ok(i >= 0, argv.join(' '));
+  assert.equal(argv[i + 1], 'acceptEdits');
+  assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('persistent 세션 spawn 도 같은 배선을 탄다 — trusted Agent 가 harness=acceptEdits 를 이긴다', async () => {
+  const executable = await makeCaptureBin('claude-session.mjs');
+  const captureFile = join(fixtureRoot, 'session.json');
+  const cwd = join(fixtureRoot, 'session-home');
+  await mkdir(cwd, { recursive: true });
+  const previous = process.env.CAPTURE_FILE;
+  process.env.CAPTURE_FILE = captureFile;
+  let manager;
+  try {
+    manager = new BaseSessionManager(
+      { ...config, delegation: { ...config.delegation, claudeBin: executable } },
+      { logTag: '[perm-test]', keyField: 'room_id' },
+    );
+    const record = await manager._spawnSession('room-perm', 'role', 'first turn', {
+      agentContext: makeAgentContext(cwd, 'trusted'),
+      harness: { permission_mode: 'acceptEdits' },
+    });
+    assert.ok(record, '세션 spawn 이 실패했다');
+    // 자식이 캡처 파일을 쓸 때까지 기다린다(가짜 바이너리는 30ms 뒤 종료).
+    for (let i = 0; i < 100; i += 1) {
+      try {
+        const argv = JSON.parse(await readFile(captureFile, 'utf8')).argv;
+        assert.ok(
+          argv.includes('--dangerously-skip-permissions'),
+          `세션 argv 에 최고 권한 플래그가 없다: ${argv.join(' ')}`,
+        );
+        assert.equal(
+          argv.includes('--permission-mode'),
+          false,
+          `세션이 대화형 permission 모드로 내려갔다: ${argv.join(' ')}`,
+        );
+        return;
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    assert.fail('세션 자식 프로세스가 argv 를 기록하지 않았다');
+  } finally {
+    await manager?.stopAll?.().catch?.(() => {});
+    if (previous === undefined) delete process.env.CAPTURE_FILE;
+    else process.env.CAPTURE_FILE = previous;
+  }
+});

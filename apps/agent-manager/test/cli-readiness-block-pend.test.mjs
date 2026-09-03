@@ -47,7 +47,7 @@ async function makeCliHomeDir() {
   return dir;
 }
 
-function makeCtx(cliHomeDir) {
+function makeCtx(cliHomeDir, runtimeConfig = null) {
   return {
     agent_id: AGENT,
     name: 'Rolf',
@@ -59,6 +59,9 @@ function makeCtx(cliHomeDir) {
     extra_env: {},
     credential_provider: null,
     model: null,
+    // ticket 5851e435 — Agent trust. null = trust 미설정(legacy agent), 그
+    // 경우 게이트는 종전대로 harness permission_mode 만 보고 판단한다.
+    runtime_config: runtimeConfig,
   };
 }
 
@@ -130,7 +133,7 @@ function makeSubagentManager(state) {
   };
 }
 
-function makeDispatcher(state, cliHomeDir) {
+function makeDispatcher(state, cliHomeDir, runtimeConfig = null) {
   const worktreeManager = {
     enabled: true,
     async resolveCwd() {
@@ -149,7 +152,7 @@ function makeDispatcher(state, cliHomeDir) {
     async removeTicketRunWorkspace() { return false; },
   };
   const managedAgentContexts = {
-    get: (id) => (id === AGENT ? makeCtx(cliHomeDir) : null),
+    get: (id) => (id === AGENT ? makeCtx(cliHomeDir, runtimeConfig) : null),
     has: (id) => id === AGENT,
     list: () => [{ working_dir: '/ws' }],
   };
@@ -345,4 +348,81 @@ test('ticket 152e3606: non-bypass permission_mode에서는 워크스페이스 tr
     false,
     'non-bypass 게이트가 활성인 동안은 .claude.json 자체가 새로 생기면 안 된다 — 이 분기에서는 시딩을 호출 자체를 하지 않아야 한다(ticket 48aeab6e 계약 보존)',
   );
+});
+
+// ── (5) ticket 5851e435: Agent trust 가 CLI 권한의 기준 ──────────────────────
+//
+// 요구사항: "Pending 은 실제 사람 승인/secret/irreversible-risk gate 에만
+// 생성하고, CLI 내부 permission/trust dialog 때문에 생성하지 않는다" +
+// "Claude workspace trust preflight 가 trusted 에서는 Pending 을 만들지 않음".
+// (1) 의 케이스와 **완전히 같은 조건**(빈 cli-home + non-bypass harness)에
+// Agent trust=trusted 만 얹어, 그 하나로 Pending 이 사라지는지 확인한다.
+
+test('ticket 5851e435: trusted Agent 는 non-bypass harness 에서도 Pending 없이 스폰된다', async () => {
+  const cliHomeDir = await makeCliHomeDir(); // (1) 과 동일하게 .claude.json 없음
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: 'trusted' });
+
+  // (1) 을 Pending 으로 몰아넣었던 바로 그 harness 값.
+  await d.handleTrigger(makeEvent({ harness_config: { permission_mode: 'default' }, field_changed: 'trusted-a1' }));
+
+  assert.equal(state.spawns.length, 1, 'trusted Agent 는 harness 값과 무관하게 실제로 스폰돼야 한다');
+  assert.equal(countTool('pend_ticket'), 0, 'CLI 내부 trust 대화상자 때문에 Pending 을 만들면 안 된다');
+  assert.equal(countTool('add_comment'), 0, 'blocker 코멘트도 남지 않는다');
+  assert.equal(ticketState.pending_user_action, false);
+
+  // trusted 는 스킵 플래그로 대화상자를 우회하므로, 시딩 경로도 (4) 와 같이
+  // 백그라운드로 돌아 이 폴더를 나중을 위해 trusted 로 남긴다.
+  await _drainTrustSeedLocksForTests();
+  const raw = JSON.parse(await fsp.readFile(join(cliHomeDir, '.claude.json'), 'utf8'));
+  assert.equal(raw.projects[CWD]?.hasTrustDialogAccepted, true);
+});
+
+test('ticket 5851e435: trusted Agent 는 harness 가 요구한 모든 비-bypass 모드에서 Pending 을 만들지 않는다', async () => {
+  for (const mode of ['default', 'acceptEdits', 'manual', 'plan', 'dontAsk', 'auto']) {
+    mcpToolCalls.length = 0;
+    addCommentContents.length = 0;
+    ticketState.pending_user_action = false;
+    const cliHomeDir = await makeCliHomeDir();
+    const state = newState();
+    const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: 'trusted' });
+
+    await d.handleTrigger(makeEvent({ harness_config: { permission_mode: mode }, field_changed: `t-${mode}` }));
+
+    assert.equal(state.spawns.length, 1, `harness=${mode}: trusted Agent 가 스폰되지 않았다`);
+    assert.equal(countTool('pend_ticket'), 0, `harness=${mode}: Pending 이 생성됐다`);
+  }
+});
+
+test('ticket 5851e435: Agent trust 가 approve/strict 라도 harness 를 안 건드린 보드에서는 새 Pending 이 생기지 않는다', async () => {
+  // legacy 백필(`{strategy:'single', permission_mode:'approve'}`)이 박힌
+  // 에이전트가 harness 설정이 전혀 없는 보드에서 도는 조합. 폴더 trust 는
+  // 도구 권한과 별개 축이므로, 등급이 내려갔다는 이유만으로 대화형 trust
+  // 게이트가 새로 생기면 안 된다 — 그러면 이 티켓이 없애려는 실패 모드가
+  // 그대로 재현된다.
+  for (const trust of ['approve', 'strict']) {
+    mcpToolCalls.length = 0;
+    ticketState.pending_user_action = false;
+    const cliHomeDir = await makeCliHomeDir();
+    const state = newState();
+    const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: trust });
+
+    await d.handleTrigger(makeEvent({ field_changed: `legacy-${trust}` }));
+
+    assert.equal(state.spawns.length, 1, `trust=${trust}: harness 없는 보드에서 스폰이 막혔다`);
+    assert.equal(countTool('pend_ticket'), 0, `trust=${trust}: Pending 이 생성됐다`);
+  }
+});
+
+test('ticket 5851e435: 운영자가 harness 로 사람 trust 승인을 요구한 보드에서는 approve/strict 게이트가 그대로 유지된다', async () => {
+  // (1) 이 고정한 ticket 48aeab6e 계약. Agent trust 가 trusted 가 아닌 이상
+  // harness 의 명시적 요구는 계속 살아 있어야 한다.
+  const cliHomeDir = await makeCliHomeDir();
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: 'approve' });
+
+  await d.handleTrigger(makeEvent({ harness_config: { permission_mode: 'plan' }, field_changed: 'gate-kept' }));
+
+  assert.equal(state.spawns.length, 0, 'harness 가 명시적으로 비-bypass 를 요구했고 trust 도 trusted 가 아니다');
+  assert.equal(countTool('pend_ticket'), 1, '기존 안전 경계가 유지돼야 한다');
 });
