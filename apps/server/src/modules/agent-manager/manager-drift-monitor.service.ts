@@ -30,6 +30,19 @@
  * When the condition clears (manager updated / checker recovered) the monitor
  * logs a one-line resolution and forgets the agent.
  *
+ * Disappearance is NOT resolution (ticket bfc34cd5). 매니저 하트비트가 끊기면
+ * InstanceRegistryService 가 90초 TTL 로 그 인스턴스를 스윕한다. 예전에는
+ * `registry.list()` 에서 인스턴스가 사라진 것과 인스턴스는 살아있는데 조건만
+ * 없어진 것을 구분하지 않아, 둘 다 "드리프트 해소"로 기록했다 — 나쁜 빌드가
+ * fleet 을 죽이는 바로 그 순간 대시보드가 밝아지는, 정확히 반대 신호였다.
+ * 이제 스윕은 세 갈래로 나뉜다:
+ *   1. 인스턴스가 살아있고 조건만 사라짐  → 진짜 해소. 기존대로 조용히 기록.
+ *   2. 추적 중이던 agent 의 인스턴스가 통째로 사라짐 → 경보로 승격 (WARN +
+ *      감사 행). 드리프트/체커오류를 안고 있던 매니저만 해당되므로, 건강한
+ *      매니저의 정상 종료·페어링 해제는 여기 걸리지 않는다.
+ *   3. 추적한 적 없는 agent 가 사라짐 → 예전과 같이 아무 것도 하지 않는다
+ *      (애초에 state 에 없어 순회 대상이 아니다).
+ *
  * This compresses the silent-stall detection window from days → hours without
  * touching the heartbeat wire contract or the agent-manager: it
  * consumes data the manager already ships on every heartbeat.
@@ -114,9 +127,27 @@ interface ConditionState {
   lastAlertedAt: number;
 }
 
+/**
+ * 마지막으로 관측된 인스턴스의 경보용 투영. agent 가 레지스트리에서 사라진
+ * 뒤에는 InstanceRecord 를 다시 읽을 수 없으므로, 사라짐 경보의 문구와 감사
+ * 행을 채울 근거는 이 스냅샷이 유일하다.
+ */
+interface LastSeenSnapshot {
+  instance_id: string;
+  hostname: string;
+  plugin_version: string;
+  latest_version: string | null;
+  update_channel: string | null;
+  update_last_error: string | null;
+  /** 이 스냅샷을 마지막으로 갱신한 스윕 시각(ms). */
+  at: number;
+}
+
 interface AgentDriftState {
   drift: ConditionState | null;
   error: ConditionState | null;
+  /** 조건을 관측할 때마다 갱신. 사라짐 경보가 참조한다. */
+  lastSeen: LastSeenSnapshot | null;
 }
 
 export interface DriftSweepStats {
@@ -124,6 +155,7 @@ export interface DriftSweepStats {
   agents: number;         // distinct manager agents
   driftAlerts: number;    // drift alerts emitted this sweep
   errorAlerts: number;    // checker-error alerts emitted this sweep
+  vanishedAlerts: number; // 이번 스윕에 통째로 사라진 추적 중이던 매니저 수
   resolved: number;       // conditions that cleared this sweep
   skipped_disabled: boolean;
 }
@@ -179,7 +211,7 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
    */
   async sweep(now: Date = new Date()): Promise<DriftSweepStats> {
     const stats: DriftSweepStats = {
-      scanned: 0, agents: 0, driftAlerts: 0, errorAlerts: 0, resolved: 0,
+      scanned: 0, agents: 0, driftAlerts: 0, errorAlerts: 0, vanishedAlerts: 0, resolved: 0,
       skipped_disabled: !this.config.enabled,
     };
     if (!this.config.enabled) return stats;
@@ -190,7 +222,13 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
     // agent as drifting / erroring if ANY of its manager instances reports it,
     // and keep a representative instance for the alert text.
     const byAgent = new Map<string, { drift: InstanceRecord | null; error: InstanceRecord | null }>();
+    // 프레즌스는 텔레메트리와 **무관하게** 별도로 모은다. 아래 `continue` 로
+    // 걸러지는 구버전 매니저도 엄연히 살아있는 인스턴스이므로, "조건만 사라짐"과
+    // "인스턴스가 통째로 사라짐"을 가르는 기준은 이 집합이어야 한다. byAgent 를
+    // 그 기준으로 쓰면 텔레메트리 중단을 사라짐으로 오인한다.
+    const liveAgentIds = new Set<string>();
     for (const inst of this.registry.list()) {
+      liveAgentIds.add(inst.agent_id);
       // Managers that don't ship update-checker telemetry (pre-update builds)
       // leave update_available undefined — nothing to evaluate.
       if (inst.update_available === undefined && !inst.update_last_error) continue;
@@ -209,8 +247,41 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
     const agentIds = new Set<string>([...byAgent.keys(), ...this.state.keys()]);
     for (const agentId of agentIds) {
       const agg = byAgent.get(agentId) ?? { drift: null, error: null };
-      const tracked = this.state.get(agentId) ?? { drift: null, error: null };
+      const tracked: AgentDriftState = this.state.get(agentId) ?? { drift: null, error: null, lastSeen: null };
+
+      // ── 사라짐(disappearance) 승격 ──────────────────────────────────
+      // 추적 중이던 매니저의 인스턴스가 레지스트리에서 통째로 없어졌다면 이건
+      // 해소가 아니다 — 하트비트가 끊겨 90초 TTL 로 스윕된 것이고, 나쁜 빌드가
+      // fleet 을 죽이는 순간이 정확히 이 모양이다. `agentIds` 는 byAgent 와
+      // this.state 의 합집합이므로, 여기 걸리는 agent 는 반드시 추적 중이던
+      // (= 드리프트나 체커오류를 안고 있던) agent 다. 건강한 매니저는 애초에
+      // state 에 없어 이 분기에 도달하지 않는다 — 정상 종료 오탐이 없는 이유.
+      if (!liveAgentIds.has(agentId)) {
+        this._emitVanished(agentId, tracked, nowMs, now);
+        stats.vanishedAlerts += 1;
+        // 한 번 쏘고 잊는다. 다음 스윕에는 registry 에도 state 에도 없으므로
+        // 이 agent 는 순회 대상에서 아예 빠진다 → 스윕마다 중복 발화 없음.
+        this.state.delete(agentId);
+        continue;
+      }
+
       let mutated = false;
+
+      // 살아있는 동안의 마지막 관측을 계속 갱신해 둔다 — 사라진 뒤 경보 문구와
+      // 감사 행이 참조할 유일한 근거다.
+      const representative = agg.drift ?? agg.error;
+      if (representative) {
+        tracked.lastSeen = {
+          instance_id: representative.instance_id,
+          hostname: representative.hostname,
+          plugin_version: representative.plugin_version,
+          latest_version: representative.latest_version ?? null,
+          update_channel: representative.update_channel ?? null,
+          update_last_error: representative.update_last_error ?? null,
+          at: nowMs,
+        };
+        mutated = true;
+      }
 
       // ── drift ──
       const driftRes = this._evaluateCondition('drift', agentId, agg.drift, tracked.drift, nowMs, now);
@@ -318,46 +389,140 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
       age_hours: Number(ageH),
     });
 
-    // Durable record — the retro's missing "영속 기록". Saved directly via the
-    // repository (not ActivityService) so it stays an audit row and fires no
-    // Discord / SSE notification fan-out. Best-effort: never let it break the
-    // sweep or hide the WARN above.
+    this._writeAuditRow({
+      agentId: inst.agent_id,
+      kind,
+      action: kind === 'drift' ? 'agent_manager_drift' : 'agent_manager_update_error',
+      fieldChanged: kind === 'drift' ? 'version_drift' : 'update_check_error',
+      oldValue: String(inst.plugin_version || ''),
+      payload: {
+        instance_id: inst.instance_id,
+        hostname: inst.hostname,
+        current_version: inst.plugin_version,
+        latest_version: inst.latest_version ?? null,
+        update_channel: inst.update_channel ?? null,
+        update_last_error: inst.update_last_error ?? null,
+        age_hours: Number(ageH),
+      },
+      now,
+    });
+  }
+
+  /**
+   * 추적 중이던 매니저가 레지스트리에서 통째로 사라졌을 때의 경보 (ticket
+   * bfc34cd5). `_emitAlert` 와 달리 살아있는 InstanceRecord 가 없으므로 마지막
+   * 관측 스냅샷으로 문구를 채운다.
+   *
+   * dedupe: 발화 직후 호출부가 이 agent 의 state 를 지우므로 사라짐 1회당 정확히
+   * 한 번만 발화한다 (`realertMs` 쿨다운은 "지속되는 조건"을 위한 것이라 여기엔
+   * 해당이 없다 — 사라짐은 지속 상태가 아니라 단발 전이다).
+   */
+  private _emitVanished(agentId: string, tracked: AgentDriftState, nowMs: number, now: Date): void {
+    const seen = tracked.lastSeen;
+    const conditions: string[] = [];
+    if (tracked.drift) conditions.push('version_drift');
+    if (tracked.error) conditions.push('update_check_error');
+
+    // 가장 먼저 시작된 조건을 기준으로 "이 상태로 얼마나 버티다 사라졌나"를 잰다.
+    const onsets = [tracked.drift?.since, tracked.error?.since]
+      .filter((v): v is number => typeof v === 'number');
+    const ageMs = onsets.length ? nowMs - Math.min(...onsets) : 0;
+    const ageH = (ageMs / 3_600_000).toFixed(1);
+    const hostname = seen?.hostname || 'unknown-host';
+    const who = `${hostname} (agent ${agentId.slice(0, 8)})`;
+    const version = seen?.plugin_version || '?';
+
+    this.logService.warn(
+      'AgentManager',
+      `agent-manager vanished while unhealthy: ${who} last reported v${version} with ` +
+      `[${conditions.join(', ') || 'unknown'}] for ${ageH}h and has now stopped heartbeating — ` +
+      `its instance aged out of the registry TTL. This is NOT a resolution: a failed ` +
+      `self-update or a bad build that kills the manager on boot looks exactly like this. ` +
+      `Check the host is up and the manager process is running. ` +
+      `(A deliberate operator shutdown of an already-drifting manager produces the same signal.)`,
+      {
+        kind: 'manager_vanished',
+        agent_id: agentId,
+        instance_id: seen?.instance_id ?? null,
+        hostname: seen?.hostname ?? null,
+        current_version: seen?.plugin_version ?? null,
+        latest_version: seen?.latest_version ?? null,
+        update_channel: seen?.update_channel ?? null,
+        update_last_error: seen?.update_last_error ?? null,
+        unresolved_conditions: conditions,
+        age_hours: Number(ageH),
+        last_seen_sweep_at: seen ? new Date(seen.at).toISOString() : null,
+      },
+    );
+
+    this._writeAuditRow({
+      agentId,
+      kind: 'vanished',
+      action: 'agent_manager_vanished',
+      fieldChanged: 'manager_vanished',
+      oldValue: String(seen?.plugin_version || ''),
+      payload: {
+        instance_id: seen?.instance_id ?? null,
+        hostname: seen?.hostname ?? null,
+        current_version: seen?.plugin_version ?? null,
+        latest_version: seen?.latest_version ?? null,
+        update_channel: seen?.update_channel ?? null,
+        update_last_error: seen?.update_last_error ?? null,
+        unresolved_conditions: conditions,
+        age_hours: Number(ageH),
+        last_seen_sweep_at: seen ? new Date(seen.at).toISOString() : null,
+      },
+      now,
+    });
+  }
+
+  /**
+   * 영속 기록 — 소스 티켓 회고가 없다고 지적했던 바로 그 durable record.
+   * ActivityService 가 아니라 repository 로 직접 저장하므로 감사 행으로만 남고
+   * Discord / SSE 팬아웃을 일으키지 않는다. best-effort 로 감싸서, DB 장애가
+   * 스윕을 멈추거나 바로 앞서 발화한 WARN 을 삼키지 못하게 한다.
+   */
+  private _writeAuditRow(input: {
+    agentId: string;
+    kind: string;
+    action: string;
+    fieldChanged: string;
+    oldValue: string;
+    payload: Record<string, unknown>;
+    now: Date;
+  }): void {
     try {
       const repo = this.dataSource.getRepository(ActivityLog);
       void repo.save(
         repo.create({
           // Managers are workspace-less; leave workspace_id at its '' default.
           entity_type: 'agent_manager',
-          entity_id: inst.agent_id,
-          action: kind === 'drift' ? 'agent_manager_drift' : 'agent_manager_update_error',
-          field_changed: kind === 'drift' ? 'version_drift' : 'update_check_error',
-          old_value: String(inst.plugin_version || ''),
-          new_value: JSON.stringify({
-            instance_id: inst.instance_id,
-            hostname: inst.hostname,
-            current_version: inst.plugin_version,
-            latest_version: inst.latest_version ?? null,
-            update_channel: inst.update_channel ?? null,
-            update_last_error: inst.update_last_error ?? null,
-            age_hours: Number(ageH),
-          }),
+          entity_id: input.agentId,
+          action: input.action,
+          field_changed: input.fieldChanged,
+          old_value: input.oldValue,
+          new_value: JSON.stringify(input.payload),
           actor_id: 'system',
           actor_name: 'ManagerDriftMonitor',
           trigger_source: 'system',
-          created_at: now,
+          created_at: input.now,
         }),
       ).catch?.((e: unknown) => {
         this.logService.warn('AgentManager', 'ManagerDriftMonitor audit-row write failed (continuing)', {
-          err: String(e), agent_id: inst.agent_id, kind,
+          err: String(e), agent_id: input.agentId, kind: input.kind,
         });
       });
     } catch (e) {
       this.logService.warn('AgentManager', 'ManagerDriftMonitor audit-row write threw (continuing)', {
-        err: String(e), agent_id: inst.agent_id, kind,
+        err: String(e), agent_id: input.agentId, kind: input.kind,
       });
     }
   }
 
+  /**
+   * 진짜 해소만 여기로 온다 — 호출부가 사라진 agent 를 먼저 걸러내므로 (ticket
+   * bfc34cd5), 이 시점의 agent 는 레지스트리에 살아있고 조건만 없어진 상태다.
+   */
   private _logResolved(kind: DriftKind, agentId: string, ageMs: number): void {
     const ageH = (ageMs / 3_600_000).toFixed(1);
     this.logService.info(
