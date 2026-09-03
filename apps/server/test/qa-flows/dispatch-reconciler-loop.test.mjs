@@ -37,10 +37,19 @@
 //      all → still seeds (self-healing preserved); (D) a same-timestamp
 //      `moved` burst still resolves a deterministic entry time (review
 //      blocker: `id` tiebreaker, not `created_at` alone).
+//  16. 15번의 스킵을 매니저 재시작 사실과 교차한다 (ticket 4f1f33c6). self-update
+//      가 drain 상한을 넘겨 진행 중 세션을 SIGTERM 하면 그 티켓은 "holder 가 이미
+//      응답했다"는 이유로 정확히 재시드가 억제되는 상태에 놓여 조용히 멈춘다.
+//      한 sweep 안에서 세 케이스를 함께 단언한다: (A) 재시작에 죽은 세션 → 재시드,
+//      (B) 같은 재시작이지만 세션이 정상 종료 → 재시드 안 됨(fec25d90 유지),
+//      (C) 죽은 세션이지만 매니저 재시작 없음 → 재시드 안 됨(재시작 사실이
+//      load-bearing). B 를 빼면 fec25d90 회귀를 되살리면서 통과하고, C 를 빼면
+//      "죽은 세션이면 무조건 재시드" 하는 구현도 통과한다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
@@ -758,6 +767,143 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     assert.equal(
       await intents.findOpenForTicketRole(burst.id, 'assignee'), null,
       'a same-timestamp moved burst still resolves a deterministic entry time — the later holder comment counts as progress, not re-seeded',
+    );
+  });
+
+  await t.test('16: 15번의 스킵을 매니저 재시작 사실과 교차한다 (ticket 4f1f33c6)', async () => {
+    // 이 보드의 관례는 착수 직후 claim + "작업을 시작합니다" 코멘트다. 그래서
+    // self-update 가 drain 상한을 넘겨 진행 중 세션을 `self_update_restart` 로
+    // SIGTERM 하면, 그 티켓은 15번이 만든 스킵 조건("holder 가 이미 응답했다")에
+    // 정확히 걸려 재시드되지 않고 조용히 멈춘다. 재시드 스킵을 매니저 재시작
+    // 사실과 교차해 그 구간에 걸린 in-flight role 만 되돌린다.
+    const instanceRegistry = app.get(
+      (await import('file://' + path.join(DIST_ROOT, 'modules', 'agent-manager', 'instance-registry.service.js')))
+        .InstanceRegistryService,
+    );
+    const subagentRepo = ds.getRepository('Subagent');
+    const activityLogRepo = ds.getRepository('ActivityLog');
+
+    const enteredAt = new Date(Date.now() - 12 * 60_000);
+    const respondedAt = new Date(Date.now() - 10 * 60_000);
+    const sessionStartedAt = new Date(Date.now() - 11 * 60_000);
+
+    const moveActivity = (ticketId, at) => activityLogRepo.save(activityLogRepo.create({
+      entity_type: 'ticket', entity_id: ticketId, ticket_id: ticketId, workspace_id: ws.id,
+      action: 'moved', field_changed: 'column', old_value: 'To Do', new_value: 'In Progress',
+      actor_id: 'system', actor_name: 'System', trigger_source: 'test', created_at: at,
+    }));
+    // "작업을 시작합니다" — 15번의 스킵을 발동시키는 holder 본인의 응답.
+    const startComment = (ticketId, authorId, authorName) => commentRepo.save(commentRepo.create({
+      ticket_id: ticketId, workspace_id: ws.id, author_type: 'agent', author: authorName,
+      author_id: authorId, content: '작업을 시작합니다 (assignee, To Do → In Progress).',
+      type: 'note', created_at: respondedAt,
+    }));
+    const session = (ticketId, agentId, over) => subagentRepo.save(subagentRepo.create({
+      subagent_id: randomUUID(), agent_id: agentId, workspace_id: ws.id, kind: 'ticket',
+      session_key: `${ticketId}:assignee`, pid: 4242, started_at: sessionStartedAt,
+      ticket_id: ticketId, role: 'assignee', ended_at: null, signal: null, exit_code: null,
+      line_count: 0, ...over,
+    }));
+    // 매니저는 재시작할 때마다 새 instance_id + 새 started_at 으로 등록한다.
+    const registerManager = (agentId, hostname, startedAt) => instanceRegistry.upsert({
+      instance_id: randomUUID(), agent_id: agentId, workspace_id: ws.id, mode: 'manager',
+      hostname, plugin_version: '1.0.0-test', cli: 'claude', cli_adapters: ['claude'],
+      pid: 999, started_at: startedAt.toISOString(),
+    });
+
+    // 두 agent 로 나누는 이유: 레지스트리는 agent 단위라 "재시작한 매니저"와
+    // "재시작하지 않은 매니저"를 같은 sweep 안에 공존시키려면 identity 를 분리해야
+    // 한다. C 가 A/B 와 같은 매니저를 쓰면 재시작 사실 조건을 단언할 수 없다.
+    const restartedAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'restart-victim' });
+    const steadyAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'no-restart' });
+    // 응답(10분 전) 이후인 6분 전에 부팅 = 그 응답을 낸 세션은 살아 있을 수 없다.
+    registerManager(restartedAgent.id, 'host-restarted', new Date(Date.now() - 6 * 60_000));
+    // 응답보다 먼저인 20분 전에 부팅 = 그 세션을 계속 안고 있었다.
+    registerManager(steadyAgent.id, 'host-steady', new Date(Date.now() - 20 * 60_000));
+
+    const mkFor = (title, agentId) => createTicket(app, getDataSourceToken, {
+      columnId: columns.inProgress.id, workspaceId: ws.id, title, assigneeId: agentId,
+    });
+
+    // --- A: 재시작에 죽은 세션. 매니저가 종료를 보고하기 전에 사라져 행이 열린
+    // 채로 남았다 — self-update 재시작의 가장 흔한 형태. ---
+    const killed = await mkFor('self-update 재시작에 끊긴 작업', restartedAgent.id);
+    await ticketRepo.update(killed.id, { created_at: enteredAt });
+    await moveActivity(killed.id, enteredAt);
+    await startComment(killed.id, restartedAgent.id, 'restart-victim');
+    await session(killed.id, restartedAgent.id, {});
+
+    // --- B (fec25d90 유지): 같은 매니저 재시작을 겪었지만, 세션은 그 전에 턴을
+    // 마치고 정상 종료했다. holder 의 침묵은 선택된 대기다. ---
+    const waiting = await mkFor('의도적으로 대기 중 — 세션은 정상 종료', restartedAgent.id);
+    await ticketRepo.update(waiting.id, { created_at: enteredAt });
+    await moveActivity(waiting.id, enteredAt);
+    await startComment(waiting.id, restartedAgent.id, 'restart-victim');
+    await session(waiting.id, restartedAgent.id, {
+      ended_at: new Date(Date.now() - 9 * 60_000), signal: null, exit_code: 0,
+    });
+
+    // --- C: 세션은 SIGTERM 으로 죽었지만 매니저는 재시작하지 않았다. 재시작 사실이
+    // 없으면 재시드하지 않는다 — 이 케이스가 없으면 "죽은 세션이면 무조건 재시드"
+    // 하는 구현도 통과한다. ---
+    const noRestart = await mkFor('세션은 죽었으나 매니저 재시작은 없었음', steadyAgent.id);
+    await ticketRepo.update(noRestart.id, { created_at: enteredAt });
+    await moveActivity(noRestart.id, enteredAt);
+    await startComment(noRestart.id, steadyAgent.id, 'no-restart');
+    await session(noRestart.id, steadyAgent.id, {
+      ended_at: new Date(Date.now() - 9 * 60_000), signal: 'SIGTERM', exit_code: null,
+    });
+
+    for (const tk of [killed, waiting, noRestart]) {
+      assert.equal(await intents.findOpenForTicketRole(tk.id, 'assignee'), null,
+        `${tk.title}: sweep 전에는 열린 intent 가 없다`);
+    }
+
+    await reconciler.reconcile(new Date());
+
+    const killedSeeded = await intents.findOpenForTicketRole(killed.id, 'assignee');
+    assert.ok(killedSeeded, 'A: 매니저 재시작 구간에 걸린 holder 는 이미 응답했더라도 재시드된다');
+    assert.equal(killedSeeded.trigger_source, 'reconcile_seed');
+    const killedAudit = await activityLogRepo.find({
+      where: { ticket_id: killed.id, action: 'dispatch_intent_seeded' },
+    });
+    assert.equal(killedAudit.length, 1, 'A: 재시드 감사 로그가 정확히 한 번 남는다');
+    assert.equal(
+      JSON.parse(killedAudit[0].new_value).reason, 'holder_session_lost_to_manager_restart',
+      'A: 감사 로그가 일반 idle 재시드가 아니라 재시작 사유를 구분해 남긴다',
+    );
+
+    assert.equal(
+      await intents.findOpenForTicketRole(waiting.id, 'assignee'), null,
+      'B: 같은 재시작을 겪었어도 세션이 정상 종료했다면 재시드하지 않는다 (fec25d90 유지)',
+    );
+    assert.equal(
+      (await activityLogRepo.find({ where: { ticket_id: waiting.id, action: 'dispatch_intent_seeded' } })).length, 0,
+      'B: 재시드 감사 로그도 남지 않는다',
+    );
+
+    assert.equal(
+      await intents.findOpenForTicketRole(noRestart.id, 'assignee'), null,
+      'C: 세션이 죽었어도 매니저 재시작 사실이 없으면 재시드하지 않는다',
+    );
+    assert.equal(
+      (await activityLogRepo.find({ where: { ticket_id: noRestart.id, action: 'dispatch_intent_seeded' } })).length, 0,
+      'C: 재시드 감사 로그도 남지 않는다',
+    );
+
+    // 재시드는 재시작 1회당 1회로 유한하다 — A 의 holder 가 재디스패치에 응답하면
+    // 그 응답이 재시작 시각보다 나중이라 다음 sweep 은 다시 재시드하지 않는다.
+    // 이 단언이 없으면 fec25d90 이 경계한 무한 재시드 루프를 되살린 구현도 통과한다.
+    await intentRepo.update(killedSeeded.id, { status: 'resolved', resolved_at: new Date() });
+    await commentRepo.save(commentRepo.create({
+      ticket_id: killed.id, workspace_id: ws.id, author_type: 'agent', author: 'restart-victim',
+      author_id: restartedAgent.id, content: '재시작 뒤 이어서 작업합니다', type: 'note',
+      created_at: new Date(Date.now() - 3 * 60_000),
+    }));
+    await reconciler.reconcile(new Date());
+    assert.equal(
+      await intents.findOpenForTicketRole(killed.id, 'assignee'), null,
+      'A-후속: 재시작 이후의 응답이 있으면 같은 재시작으로 다시 재시드하지 않는다 (루프 부재)',
     );
   });
 });
