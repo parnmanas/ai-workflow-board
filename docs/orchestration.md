@@ -634,11 +634,32 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 
 - 룸은 `chat_rooms.orchestration_mission_id` / `orchestration_step_id` 로 표시되고,
   일반 채팅 목록(`listRooms` / `listAllWorkspaceRooms`)에서 제외된다 — Action 룸과 같은 처리.
+  이 제외는 **사람이 참여자가 된 뒤에도 유지된다**: 미션 하나가 step 룸을 수십 개 열기
+  때문에, 접근 경로는 사이드바가 아니라 미션 상세 화면이어야 한다.
 - 같은 필드가 기존 `is_action_room` SSE 마커를 켠다. 오케스트레이션 룸은 대화가
   아니라 작업 실행이므로, subagent 는 "티켓을 만들어 미루지 말고 직접 하라" 지시를
   받아야 한다. 새 payload 필드를 만드는 대신 기존 플래그를 재사용해 contract 를 고정했다.
 - Retry 는 **매 시도마다 새 룸**을 판다. 실패한 시도의 대화가 히스토리로 재생되면
   subagent 가 자기 막다른 길을 그대로 반복한다.
+
+> **사람 참여자 (ticket f6a0de0e):** 룸 참여자는 원래 orchestrator agent 와 의사 user
+> `system` 둘뿐이었다. `sendMessage` 는 active participant 가 아니면 403 이므로, 사람은
+> 대화 UI 가 붙어 있어도 항상 관전으로 떨어졌다. 이제 **mission 룸에 한해** 미션
+> 생성자(`created_by_type='user'`)가 시작 시 함께 등록되고, 그 외의 사람은
+> `POST /orchestration/missions/:id/join-conversation`(멱등, `MANAGE_ACTIONS`)으로 들어온다
+> — 이 라우트 하나가 자동 등록이 없던 시절의 **과거 미션 백필**과 생성자가 아닌 운영자의
+> **초대**를 겸한다. 참여는 `chat_room_participants` 행이라 재시작·복구 뒤에도 유지된다.
+>
+> **step 룸에는 사람을 넣지 않는다.** attempt 마다 룸이 새로 열려 수가 불어나고, 그 룸의
+> 보고는 `lease_token` 을 쥔 assignee 만 할 수 있어 사람이 끼어들어도 step 상태를 바꿀 수
+> 없다. 사람의 지시는 mission 룸에서 orchestrator 에게 가고 step 을 통제하는 것은
+> orchestrator 다 — 창구를 하나로 모아야 "누가 이 step 에 지시했나"가 추적된다. step 룸
+> 열람은 기존 observer 경로(`?observer=true`)로 그대로 열려 있다.
+>
+> 사용자 발화가 orchestrator 를 깨우는 경로는 엔진 자신의 wake 와 **같다** — 둘 다
+> `sender_type:'user'` 로 룸에 글을 쓰고, 같은 `chat_room_message` 이벤트가 같은
+> `agent_member_ids` 로 나간다. 다른 것은 `sender_id` 가 `system` 이냐 실제 사용자
+> UUID 냐뿐이라, agent-manager 디스패치 계약은 손대지 않았다.
 
 > **Agent 작업공간 (ticket 2dc3c62f):** step 디스패치는 QA/Action 런과 동일한
 > `run_provision` 힌트(`kind:'orchestration'`)를 실어 보낸다 — agent-manager 가
@@ -808,7 +829,10 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   대화와 실행 이벤트는 한 스트림에 시간순으로 엮되 **서로 다른 렌더러**로 그린다 — 실행
   이벤트를 가짜 채팅 메시지로 만들어 `MessageList` 에 넣으면 첨부·발신자 그룹핑 같은 그
   컴포넌트의 계약이 전부 거짓이 되므로, 종류가 바뀌는 지점에서 구간을 끊는다.
-  참여자가 아니면 observer 로 강등돼 읽기만 되고, 종료된 미션은 입력이 닫힌다.
+  참여자가 아니면 observer 로 강등돼 읽기만 되지만, 거기서 끝나지 않는다 — 진행 중인
+  미션이면 **"대화에 참여" 버튼**이 함께 뜨고(ticket f6a0de0e), 누르면 위의 join 라우트를
+  거쳐 입력창이 열린다. 종료된 미션에는 그 버튼을 걸지 않는다: 참여에 성공해도 보낼
+  orchestrator 세션이 없어 아무 일도 못 하는 버튼이 되기 때문이다(입력은 그대로 닫힌다).
   긴 미션에서는 실행 이벤트를 창 크기(기본 200)로 bounded 하고, 위로 스크롤하면
   `GET /orchestration/missions/:id/events` 커서로 과거를 이어 붙인다 — 커서는
   `(created_at, write_seq)` 복합 keyset 이다. `created_at` 만으로는 fan-out 한 번에 수십 건이
