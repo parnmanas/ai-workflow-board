@@ -389,3 +389,65 @@ test('리소스 없이 URL 만 지정하면 url+branch 로 나간다', async (t)
     '리소스로 등록되지 않은 저장소는 url+branch 경로로 나간다',
   );
 });
+
+// ── 5. "지정 안 함" 은 실제로 환경설정 repo 재사용이어야 한다 (리뷰 지적) ──────
+//
+// 드롭다운의 빈 옵션 라벨은 "board/workspace 환경설정 repo 재사용" 이라고 말한다.
+// 그런데 저장소 선택을 비울 때 url 을 남겨두면 `buildRepoRefPayload` 가 그 url 을
+// 활성 repo 로 내보내서, 라벨과 정반대로 URL checkout 이 계속된다. 특히
+// `{resource_id + url}` 레코드에서는 그때까지 resource 에 가려져 있던 url 이
+// "지정 안 함" 을 고르는 순간 오히려 되살아난다.
+
+test('URL 로 지정된 미션에서 "지정 안 함" 을 고르면 repo_ref 가 null 이 된다', async (t) => {
+  const mission = baseMission({ repo_ref: { url: 'https://legacy.test/old.git', branch: 'main' } });
+  const { container, updated } = await mountModal(t, { mission });
+
+  assert.equal(
+    container.querySelector('input[aria-label="repo URL"]').value,
+    'https://legacy.test/old.git',
+    '기존 url 이 폼에 실려 있는 상태에서 시작한다',
+  );
+
+  change(repoSelect(container), '');
+  await flush();
+
+  click(button(container, 'Save'));
+  await flush();
+  assert.equal(
+    updated[0].data.repo_ref,
+    null,
+    '"지정 안 함" 은 환경설정 repo 재사용이어야 한다 — 남은 url 이 계속 체크아웃되면 안 된다',
+  );
+});
+
+test('resource_id 와 url 이 함께 저장된 미션에서 "지정 안 함" 을 골라도 url 이 되살아나지 않는다', async (t) => {
+  // MCP 등으로 두 필드가 함께 저장된 레코드. resource 선택 중에는 url 이 payload 에서
+  // 빠져 있다가, 선택을 비우는 순간 활성화되면 사용자가 지정한 적 없는 저장소를
+  // 체크아웃하게 된다.
+  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', url: 'https://legacy.test/old.git' } });
+  const { container, updated } = await mountModal(t, { mission });
+
+  assert.equal(repoSelect(container).value, 'repo-awb');
+  change(repoSelect(container), '');
+  await flush();
+
+  click(button(container, 'Save'));
+  await flush();
+  assert.equal(updated[0].data.repo_ref, null, '가려져 있던 url 이 다시 활성화되면 안 된다');
+});
+
+test('"지정 안 함" 을 고르면 URL 입력도 함께 비워져 화면과 payload 가 어긋나지 않는다', async (t) => {
+  // payload 만 맞추고 입력값을 남겨두면, 사용자는 URL 이 적힌 화면을 보면서 저장된
+  // 미션에는 repo 가 없는 상태를 갖게 된다.
+  const mission = baseMission({ repo_ref: { url: 'https://legacy.test/old.git' } });
+  const { container } = await mountModal(t, { mission });
+
+  change(repoSelect(container), '');
+  await flush();
+
+  assert.equal(
+    container.querySelector('input[aria-label="repo URL"]').value,
+    '',
+    '화면의 URL 입력도 비워진다',
+  );
+});

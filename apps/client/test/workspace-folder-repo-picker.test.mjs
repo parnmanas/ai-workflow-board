@@ -308,6 +308,28 @@ test('Actions: repo_ref 우선순위 — resource 없이 URL 만 있으면 url+b
   assert.deepEqual(updated[1].payload.repo_ref, { url: 'https://github.com/example/raw.git', branch: 'trunk' });
 });
 
+test('Actions: URL 이 남아 있어도 "지정 안 함" 을 고르면 repo_ref 가 null 이 된다', async (t) => {
+  // 빈 옵션 라벨은 "환경설정 repo 재사용" 이라고 말한다. 저장소 선택을 비울 때 url 을
+  // 남겨두면 그 url 이 활성 repo 로 나가서 라벨과 정반대로 동작하고, `{resource_id +
+  // url}` 레코드에서는 resource 에 가려져 있던 url 이 오히려 되살아난다
+  // (리뷰 지적, 티켓 eb9cdd1c). 이 피커는 미션 모달과 공유하므로 여기서도 고정한다.
+  const action = makeAction({ repo_ref: { resource_id: 'repo-awb', url: 'https://github.com/example/raw.git' } });
+  const { container, updated } = await renderActions(t, { actions: [action] });
+
+  click(button(container, 'Edit'));
+  await flush();
+  assert.equal(repoSelect(container).value, 'repo-awb');
+  assert.equal(container.querySelector('input[aria-label="repo URL"]').value, 'https://github.com/example/raw.git');
+
+  change(repoSelect(container), '');
+  await flush();
+  assert.equal(container.querySelector('input[aria-label="repo URL"]').value, '', '화면의 URL 입력도 함께 비워진다');
+
+  click(button(container, 'Save Changes'));
+  await flush();
+  assert.equal(updated[0].payload.repo_ref, null, '가려져 있던 url 이 다시 활성화되면 안 된다');
+});
+
 // ─── QA 시나리오 화면 ──────────────────────────────────────────────────────
 
 test('QA 시나리오 폼도 같은 드롭다운으로 repo 를 지정하고 알 수 없는 id 를 보존한다', async (t) => {

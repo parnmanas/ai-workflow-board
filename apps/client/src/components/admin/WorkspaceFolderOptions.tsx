@@ -289,8 +289,16 @@ export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerPro
           value={selectedRepoId}
           options={repoOptions}
           onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value;
             // 저장소가 바뀌면 이전 저장소에서 고른 브랜치는 의미가 없다.
-            onChange({ repoResourceId: (e.target as HTMLSelectElement).value, repoBranch: '' });
+            //
+            // 빈 값은 "board/workspace 환경설정 repo 재사용" 이라는 명시적 선택이므로
+            // url 도 함께 비운다. 남겨두면 buildRepoRefPayload 가 resource 가 빈 것을
+            // 보고 그 url 을 활성 repo 로 내보내서, 방금 고른 라벨과 정반대로 URL
+            // checkout 이 계속된다. `{resource_id + url}` 로 저장된 레코드에서는 더
+            // 나쁘다 — resource 에 가려져 있던 url 이 "지정 안 함" 을 고르는 순간
+            // 오히려 되살아난다(리뷰 지적, 티켓 eb9cdd1c).
+            onChange({ repoResourceId: next, repoBranch: '', ...(next ? {} : { repoUrl: '' }) });
           }}
         />
         {reposLoading && <div style={helpText}>저장소 리소스 목록을 불러오는 중…</div>}
