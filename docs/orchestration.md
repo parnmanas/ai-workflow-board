@@ -172,6 +172,45 @@ optional 로 두면 stale 한 pass 1 작업자가 `visit` 을 빼고 보내는 �
 `graph_spec` 이 없는 기존 wave 미션은 그대로 optional 이다 — 재진입 자체가 없어
 구분할 pass 가 없고, 기존 호출자를 깨뜨리지 않는다.
 
+### lease fencing 과 heartbeat (ticket 4d065f82)
+
+`visit` 은 **loop 재진입** 축만 막는다. 재시도는 `attempt` 만 올리고 `visit` 은 그대로
+두므로, attempt 1 의 살아있는 subagent 가 뒤늦게 보고해 attempt 2 의 in-flight 상태를
+덮어쓰는 경로는 wave·graph 미션 **양쪽 모두** 열려 있었다. 그 축을 `lease_token` 이 닫는다.
+
+- `dispatchStep` 이 디스패치마다 새 토큰을 발급해 work order 에 싣는다. 재진입이든
+  재시도든 **모든 재디스패치**에서 바뀌므로 두 축을 다 덮는다.
+- step 이 토큰을 들고 있으면 보고에도 **반드시** 있어야 한다. `visit` 과 같은 이유로
+  누락도 409 다 — optional 이면 stale 작업자가 빼는 것만으로 우회한다.
+- 토큰이 빈 step(이 기능 배포 이전에 나간 work order)만 예외로 통과시킨다. 그렇지
+  않으면 업그레이드 순간 진행 중이던 작업이 보고 자체를 못 하는 wedge 가 된다.
+- 세션을 잃은 agent 는 `list_my_orchestration_steps` / `get_orchestration_step` 으로
+  현재 토큰을 되찾는다. **이 두 경로가 토큰을 돌려주지 않으면 복구한 agent 가 영영
+  보고할 수 없다** — 토큰을 요구하기로 한 이상 되찾을 길은 반드시 함께 있어야 한다.
+- 거부는 `step_lease_rejected` 로 타임라인에 남는다. 이게 없으면 409 가 호출자에게만
+  보이고 "왜 내 결과가 반영 안 됐나"를 사후에 설명할 근거가 사라진다.
+
+heartbeat 는 `last_heartbeat_at` 을 **매 progress 호출마다** 갱신하고, 리퍼는
+`last_heartbeat_at ?? started_at ?? dispatched_at` 을 기준선으로 쓴다. 예전에는
+`started_at` 이 기준이었는데 그 값은 최초 progress 호출에서 한 번만 찍혀서, "heartbeat
+가 inactivity timeout 을 리셋한다"는 문서상 계약이 두 번째 호출부터 거짓이었다.
+
+### 복구 불가 작업 (needs_recovery)
+
+`retry_policy: 'manual'` 로 선언된 step 은 lease 만료 시 `failed`(오케스트레이터가 정상
+실패 처리로 다시 띄울 수 있는 상태)가 아니라 `needs_recovery` 로 가고 `recovery_reason`
+에 사유가 남는다. 배포·결제·외부 게시처럼 "한 번 더 실행"이 그 자체로 피해인 작업용이다.
+
+비멱등 여부는 step 의 instructions 안에만 있는 의미론이라 상태 머신이 사후에 알아낼 수
+없다 — 그래서 계획 시점에 오케스트레이터가 선언하고, 선언이 없으면(`auto`, 기본값) 기존
+동작 그대로다. 탈출구는 명시적 `update_orchestration_step(action:'retry')` 또는 재배정뿐이다.
+
+`needs_recovery` 는 `TERMINAL_STEP_STATUSES` 와 `DEPENDENCY_POISONING_STATUSES` 양쪽에
+들어가고, **`computePlanProgress` 의 terminal 분기에도 반드시 명시돼야 한다.** 그 함수는
+`TERMINAL_STEP_STATUSES` 를 참조하지 않고 상태를 직접 나열해 분류하므로, 목록에 빠진
+상태는 "pending / ready" 분기로 흘러 **dispatchable 로 집계된다** — 자동 재실행을
+금지하려고 만든 상태가 오히려 즉시 재디스패치를 부르는 정반대 동작이 된다.
+
 ### wave adapter 와 하위 호환
 
 `graphFromWavePlan()` 이 `depends_on` 을 forward edge 로 **전치**한다:
@@ -379,6 +418,9 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 | 반복 상한 | node 별 `max_visits` | evaluator→revision loop 가 영영 도는 것 (상한 도달 시 하류 blocked + 오케스트레이터 깨움) |
 | 실행 예산 | `max_total_visits` vs `total_visits` | 재시도·재진입을 합친 총 subagent 스폰 횟수 폭주 |
 | stale pass 거부 | `report_orchestration_step(visit:)` — graph 미션에서는 **필수** | 재진입으로 무효가 된 이전 pass 의 지각 보고가 새 pass 결과를 덮어쓰는 것 (누락도 409로 거부 — optional 이면 빼는 것만으로 우회된다) |
+| stale attempt 거부 (lease fencing) | `lease_token` — 모든 보고에서 step 이 토큰을 들고 있으면 **필수** | 재시도로 밀려난 이전 attempt 의 지각 보고 (`visit` 은 재시도로 안 바뀌어 이 축을 못 막는다) |
+| heartbeat lease | `last_heartbeat_at` + 리퍼 기준선 | 살아있는 장기 작업이 timeout 으로 죽는 것 / 죽은 세션이 시계를 계속 되돌리는 것 |
+| 비멱등 작업 자동 재실행 | `retry_policy='manual'` → `needs_recovery` | 배포·결제·게시처럼 "한 번 더"가 그 자체로 피해인 작업의 자동 재시도 |
 
 ### 권한
 
@@ -470,8 +512,8 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 ## 관찰 (UI)
 
 - **Missions**: 상태 배지 + 진행 바 + 카운트. `orchestration_update` SSE 로 행이 실시간 갱신.
-- **Mission 상세**: 3분할 — 헤더(살아있나/얼마나), Plan 그래프(누가 뭘, 무엇에 막혔나),
-  타임라인(무슨 일이 순서대로).
+- **Mission 상세**: 헤더(살아있나/얼마나), Plan 그래프(누가 뭘, 무엇에 막혔나),
+  대화 패널(지금 방향을 바꾸거나 물어보기), 타임라인(무슨 일이 순서대로).
 - **Plan 그래프**: step 을 **의존 깊이(wave)** 열로 배치한다. 같은 열 = 실제 병렬 작업.
   간선은 선 대신 `← key` 칩으로 그린다(step 10개 넘어가면 선은 읽을 수 없는 뭉치가 된다).
   graph 모드에서는 깊이를 `depends_on` 이 아니라 **forward edge** 로 계산한다 —
@@ -483,6 +525,17 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   이유와 함께** 남긴다(예: `"review" reported verdict "revise", not approve`).
   `node_revisited` 는 몇 번째 반복인지·상한이 얼마인지·무엇이 리셋됐는지를,
   `loop_exhausted` / `graph_budget_exhausted` 는 왜 멈췄는지를 남긴다.
+
+- **대화 패널** (ticket 4d065f82): 미션의 orchestrator ChatRoom(`mission.room_id`)에
+  붙는다 — 새 채팅 구현이 아니라 기존 Chat 의 `MessageList` / `ChatMessageInput` 을 그대로
+  재사용하므로 마크다운·첨부·멘션·ref 카드가 자동으로 따라온다. 여기서 보낸 지시는
+  orchestrator 세션의 대화 맥락에 그대로 들어가고 서버에 영속되므로 재시작 뒤에도 기록과
+  thread context 가 남는다.
+  대화와 실행 이벤트는 한 스트림에 시간순으로 엮되 **서로 다른 렌더러**로 그린다 — 실행
+  이벤트를 가짜 채팅 메시지로 만들어 `MessageList` 에 넣으면 첨부·발신자 그룹핑 같은 그
+  컴포넌트의 계약이 전부 거짓이 되므로, 종류가 바뀌는 지점에서 구간을 끊는다.
+  참여자가 아니면 observer 로 강등돼 읽기만 되고, 종료된 미션은 입력이 닫힌다. 긴 미션에서
+  패널이 멈추지 않도록 실행 이벤트는 최신 N건까지만 렌더링한다(전체 이력은 타임라인 섹션).
 
 `orchestration_update` 는 `consensus_update` 와 같은 **UI 전용** 이벤트다
 (`filter: identity.type === 'user'`). 헤드라인(상태·카운트·마지막 이벤트)만 싣고,
