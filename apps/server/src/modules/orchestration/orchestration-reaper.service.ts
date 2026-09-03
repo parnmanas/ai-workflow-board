@@ -51,6 +51,7 @@ import { InstanceQuiesceService } from '../../services/instance-quiesce.service'
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
+import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 
 const PLANNING_NUDGE_LIMIT = 2;
 const RUNNING_STALL_NUDGE_LIMIT = 2;
@@ -86,6 +87,22 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     24 * 60 * 60_000,
   );
 
+  /**
+   * confirm 게이트가 답을 못 받은 채 이만큼 지나면 **1회** 리마인더를 보낸다
+   * (티켓 a78cb566, 요구사항 5). 0 = 리마인더 끄기.
+   *
+   * 이건 타임아웃이 **아니다**. 리퍼가 confirm 대기 미션을 죽이지 않는다는 계약
+   * (`reapStalledRunning` 의 `isAwaitingUser` 가드)은 그대로다 — 이 스윕은 알림만
+   * 보내고 미션·step 의 상태를 한 글자도 바꾸지 않는다. 사람이 답할 때까지 미션은
+   * 계속 기다린다.
+   */
+  private readonly confirmReminderAfterMs = envMs(
+    'ORCHESTRATION_CONFIRM_REMINDER_MS',
+    24 * 60 * 60_000,
+    0,
+    30 * 24 * 60 * 60_000,
+  );
+
   constructor(
     @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
@@ -97,6 +114,8 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
+    // 장기 미응답 confirm 게이트 리마인더(티켓 a78cb566).
+    private readonly confirmNotify: OrchestrationConfirmNotifyService,
   ) {}
 
   onModuleInit(): void {
@@ -119,29 +138,31 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
   /** One sweep. Safe to call concurrently — overlapping calls are dropped. */
   async runOnce(
     now: Date = new Date(),
-  ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number; post_actions_recovered: number }> {
+  ): Promise<{ steps_failed: number; missions_nudged: number; missions_failed: number; post_actions_recovered: number; confirm_reminders: number }> {
     // Instance-wide quiesce gate (ticket 0f638509 — live pull import). See
     // QaScheduleService.runOnce's identical gate for the full rationale — the
     // 3 reap* methods below all end up dispatching via
     // OrchestrationRunnerService (failStepExternally/nudgeOrchestrator/
     // recoverPostActions → sendMessage), independent of _emitTrigger.
     if (await this.instanceQuiesce.isQuiesced()) {
-      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
+      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0, confirm_reminders: 0 };
     }
-    if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
+    if (this.sweeping) return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0, confirm_reminders: 0 };
     this.sweeping = true;
     try {
       const stepsFailed = await this.reapStuckSteps(now);
       const planning = await this.reapStalledPlanning(now);
       const running = await this.reapStalledRunning(now);
       const postActionsRecovered = await this.reapPendingPostActions(now);
+      const confirmReminders = await this.remindAwaitingConfirm(now);
       const nudged = planning.nudged + running.nudged;
       const failed = planning.failed + running.failed;
-      if (stepsFailed || nudged || failed || postActionsRecovered) {
+      if (stepsFailed || nudged || failed || postActionsRecovered || confirmReminders) {
         this.logService.info(
           'Orchestration',
           `reaper sweep: ${stepsFailed} step(s) timed out, ${nudged} mission(s) re-briefed, ${failed} failed, ` +
-            `${postActionsRecovered} mission(s)' post-actions recovered`,
+            `${postActionsRecovered} mission(s)' post-actions recovered, ` +
+            `${confirmReminders} confirm gate(s) reminded`,
         );
       }
       return {
@@ -149,10 +170,11 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
         missions_nudged: nudged,
         missions_failed: failed,
         post_actions_recovered: postActionsRecovered,
+        confirm_reminders: confirmReminders,
       };
     } catch (e: any) {
       this.logService.error('Orchestration', `reaper sweep failed: ${e?.message || e}`);
-      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 };
+      return { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0, confirm_reminders: 0 };
     } finally {
       this.sweeping = false;
     }
@@ -440,4 +462,55 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     }
     return { nudged, failed };
   }
+
+  /**
+   * 답을 오래 못 받은 confirm 게이트에 리마인더를 **1회** 보낸다(티켓 a78cb566, 요구사항 5).
+   *
+   * 이 스윕은 다른 reap* 들과 성질이 정반대다: **아무 상태도 바꾸지 않는다.** 미션도
+   * step 도 건드리지 않고 알림만 내보내며, 유일한 쓰기는 "리마인더를 보냈다"는
+   * `confirm_notice.reminded_at` 이다. `reapStalledRunning` 의 `isAwaitingUser` 가드가
+   * 보장하는 계약 — 리퍼는 confirm 대기 미션을 죽이지 않는다 — 은 그대로 유지된다.
+   * 재알림은 상태 전이가 아니라 알림이다.
+   *
+   * 대기 기준 시각은 최초 알림 시각이되, 그게 없으면(이 기능 이전에 열린 게이트이거나
+   * 최초 발송 기록이 유실된 경우) 게이트가 열린 `dispatched_at` 으로 떨어진다 — 최초
+   * 알림이 유실된 게이트야말로 리마인더가 가장 필요한 경우라 여기서 끊으면 안 된다.
+   */
+  private async remindAwaitingConfirm(now: Date): Promise<number> {
+    if (this.confirmReminderAfterMs <= 0) return 0;
+    const running = await this.missionRepo.find({ where: { status: 'running' }, take: 100 });
+    if (running.length === 0) return 0;
+
+    const nowMs = now.getTime();
+    let reminded = 0;
+
+    for (const mission of running) {
+      const steps = await this.stepRepo.find({ where: { mission_id: mission.id } });
+      for (const step of steps) {
+        if (!isAwaitingUser(step.status)) continue;
+
+        const visit = step.visit ?? 1;
+        const notice = step.confirm_notice;
+        const noticeIsForThisPass = !!notice && notice.visit === visit;
+        // pass 당 1회. loop 로 다음 pass 가 열리면 visit 이 달라져 다시 자격이 생긴다.
+        if (noticeIsForThisPass && notice!.reminded_at) continue;
+
+        const anchor = noticeIsForThisPass && notice!.notified_at
+          ? new Date(notice!.notified_at).getTime()
+          : step.dispatched_at
+            ? new Date(step.dispatched_at).getTime()
+            : 0;
+        if (!Number.isFinite(anchor) || anchor <= 0) continue;
+
+        const waitedMs = nowMs - anchor;
+        if (waitedMs < this.confirmReminderAfterMs) continue;
+
+        // sendReminder 는 던지지 않는다(서비스 계약). 상한도 걸려 있어 스윕이 매달리지 않는다.
+        await this.confirmNotify.sendReminder(mission, step, waitedMs);
+        reminded += 1;
+      }
+    }
+    return reminded;
+  }
+
 }
