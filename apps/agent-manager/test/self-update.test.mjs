@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -247,9 +247,14 @@ test('evaluateNpmUpdateGate: streak exceeds the cap → forces through (proceed,
   assert.match(r.summary, /cap .*exceeded — proceeding with 5 session/);
 });
 
-test('_resetSelfUpdateInFlightForTests clears hasPendingSelfUpdate too', () => {
+test('_resetSelfUpdateInFlightForTests clears hasPendingSelfUpdate too', (t) => {
   _resetSelfUpdateInFlightForTests();
-  assert.equal(hasPendingSelfUpdate(), false);
+  // ticket 23753dc7 이후 hasPendingSelfUpdate 는 drain 연기뿐 아니라 매니저 홈의
+  // 설치 실패 기록도 본다. 빈 디렉터리를 넘겨 이 단언이 "이 호스트에 실제로
+  // 실패한 자가 업데이트가 남아 있는가"에 좌우되지 않게 한다.
+  const dir = mkdtempSync(join(tmpdir(), 'awb-self-update-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(hasPendingSelfUpdate({ stateDir: dir }), false);
 });
 
 // ─── runSelfUpdate / restartManager integration (round 2) ──────────────────
@@ -260,10 +265,12 @@ test('_resetSelfUpdateInFlightForTests clears hasPendingSelfUpdate too', () => {
 // self-update mutex is released promptly enough that a concurrent operator
 // restart_manager is never silently swallowed.
 
-test('runSelfUpdate: channel=off never even calls countInFlightSessions (drain check is downstream of it)', async () => {
+test('runSelfUpdate: channel=off never even calls countInFlightSessions (drain check is downstream of it)', async (t) => {
   const prev = process.env[UPDATE_CHANNEL_ENV];
   process.env[UPDATE_CHANNEL_ENV] = UPDATE_CHANNEL_OFF;
   _resetSelfUpdateInFlightForTests();
+  const stateDir = mkdtempSync(join(tmpdir(), 'awb-self-update-'));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   try {
     let calls = 0;
     const r = await runSelfUpdate({
@@ -277,7 +284,8 @@ test('runSelfUpdate: channel=off never even calls countInFlightSessions (drain c
     assert.equal(calls, 0, 'an update that is off/refused must never cost a session-drain check');
     assert.equal(r.changed, false);
     assert.equal(r.deferred, undefined);
-    assert.equal(hasPendingSelfUpdate(), false);
+    // 위와 같은 이유로 격리된 상태 디렉터리를 쓴다(ticket 23753dc7).
+    assert.equal(hasPendingSelfUpdate({ stateDir }), false);
   } finally {
     if (prev === undefined) delete process.env[UPDATE_CHANNEL_ENV];
     else process.env[UPDATE_CHANNEL_ENV] = prev;
