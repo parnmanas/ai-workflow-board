@@ -209,6 +209,11 @@ export class OrchestrationMissionService {
       step_key: s.step_key,
       title: s.title,
       status: s.status,
+      // 세션을 잃은 agent 가 복구하는 바로 그 경로다 — 여기서 lease token 을 돌려주지
+      // 않으면, 재시작 뒤 살아난 agent 가 자기 work order 를 잃어버린 채 보고에 필요한
+      // 토큰을 어디서도 얻지 못해 **영원히 보고할 수 없게** 된다(티켓 4d065f82).
+      // 조회 자체가 assignee 본인으로 제한돼 있으므로 노출 범위는 늘지 않는다.
+      lease_token: s.lease_token || '',
       dispatched_at: s.dispatched_at,
       mission_id: s.mission_id,
       mission_title: missionById.get(s.mission_id)?.title ?? '',

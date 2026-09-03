@@ -596,6 +596,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           acceptance_criteria: step.acceptance_criteria,
           attempt: step.attempt,
           max_attempts: step.max_attempts,
+          // 세션이 죽어 work order 를 잃은 뒤 다시 읽는 경로 — 토큰을 함께 돌려주지
+          // 않으면 복구한 agent 가 보고를 할 수 없다(티켓 4d065f82). 위에서 이미
+          // assignee/orchestrator 로 호출자를 제한했다.
+          lease_token: step.lease_token || '',
           mission: {
             mission_id: mission.id,
             title: mission.title,

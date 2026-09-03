@@ -205,7 +205,16 @@ const planFor = (worker, critic, loopCap = 3) => ({
 
 /** MCP로 step을 보고한다. 실패하면 서버 메시지를 그대로 드러낸다. */
 async function report(mcp, stepId, body, { expectError = false } = {}) {
-  const result = await mcp.callTool('report_orchestration_step', { step_id: stepId, ...body });
+  // lease token 은 실제 작업자가 work order 에서 복사해 오는 값이다(티켓 4d065f82).
+  // 호출자가 명시하지 않으면 지금 유효한 값을 대신 채워 넣는다 — 일부러 stale 한
+  // 토큰을 보내는 테스트는 body 에 직접 넣어 이 기본값을 덮어쓴다.
+  const lease =
+    'lease_token' in body ? body.lease_token : (await mcp.callTool('get_orchestration_step', { step_id: stepId }))?.lease_token;
+  const result = await mcp.callTool('report_orchestration_step', {
+    step_id: stepId,
+    ...(lease ? { lease_token: lease } : {}),
+    ...body,
+  });
   if (expectError) {
     assert.ok(result?.isError, `expected the report to be rejected, got ${JSON.stringify(result)}`);
     return result;

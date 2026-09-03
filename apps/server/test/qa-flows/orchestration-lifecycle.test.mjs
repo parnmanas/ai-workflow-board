@@ -80,6 +80,19 @@ async function sharedApp(t) {
   return shared;
 }
 
+
+/**
+ * 이 step 의 현재 lease token 을 가져온다 — 실제 작업자가 자기 work order 에서 복사해
+ * 오는 그 값이다(티켓 4d065f82). 일부러 `get_orchestration_step` 을 거친다: 세션을 잃은
+ * agent 가 복구할 때 쓰는 바로 그 경로라, 이 헬퍼가 동작한다는 것 자체가 "복구한 agent 도
+ * 보고할 수 있다"는 계약의 증거가 된다.
+ */
+async function leaseFor(mcp, stepId) {
+  const read = await mcp.callTool('get_orchestration_step', { step_id: stepId });
+  assert.ok(!read?.isError, `work order 재조회 실패: ${JSON.stringify(read)}`);
+  return read.lease_token;
+}
+
 test('Orchestration: team → mission → plan → parallel dispatch → reports → completion', async (t) => {
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
@@ -244,6 +257,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   step('Backend heartbeats, then reports its step done');
   const progress = await backendMcp.callTool('report_orchestration_progress', {
     step_id: byKey.api.id,
+    lease_token: await leaseFor(backendMcp, byKey.api.id),
     message: 'endpoint scaffolded, writing the serializer',
   });
   assert.ok(!progress?.isError, `report_orchestration_progress failed: ${JSON.stringify(progress)}`);
@@ -251,6 +265,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
 
   const apiReport = await backendMcp.callTool('report_orchestration_step', {
     step_id: byKey.api.id,
+    lease_token: await leaseFor(backendMcp, byKey.api.id),
     status: 'done',
     summary: 'GET /api/billing/export ships CSV. Route name: billing.export.',
     artifacts: [{ kind: 'pr', ref: 'https://example.test/pr/1', label: 'CSV endpoint' }],
@@ -270,6 +285,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   step('Frontend reports its step, which unlocks the joining step');
   const uiReport = await frontendMcp.callTool('report_orchestration_step', {
     step_id: byKey.ui.id,
+    lease_token: await leaseFor(frontendMcp, byKey.ui.id),
     status: 'done',
     summary: 'Export button added at BillingPage.tsx:210.',
   });
@@ -300,6 +316,7 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   step('Last step reports; the orchestrator is woken rather than the mission auto-finishing');
   const shipReport = await frontendMcp.callTool('report_orchestration_step', {
     step_id: ship.id,
+    lease_token: await leaseFor(frontendMcp, ship.id),
     status: 'done',
     summary: 'Button wired, download verified against the ledger.',
   });
@@ -414,6 +431,7 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
   step('The head step fails');
   const failure = await workerMcp.callTool('report_orchestration_step', {
     step_id: migrate.id,
+    lease_token: await leaseFor(workerMcp, migrate.id),
     status: 'failed',
     summary: 'The new schema rejects the legacy currency column.',
   });
@@ -450,6 +468,7 @@ test('Orchestration: a failed step blocks its dependents and wakes the orchestra
   step('Attempts are capped — a second failure cannot be retried forever');
   await workerMcp.callTool('report_orchestration_step', {
     step_id: migrate.id,
+    lease_token: await leaseFor(workerMcp, migrate.id),
     status: 'failed',
     summary: 'still failing',
   });
@@ -922,6 +941,7 @@ test('Orchestration: an orchestrator who is also a roster member can self-assign
   const gather = afterPlan.steps.find((s) => s.step_key === 'gather');
   const reported = await orchMcp.callTool('report_orchestration_step', {
     step_id: gather.id,
+    lease_token: await leaseFor(orchMcp, gather.id),
     status: 'done',
     summary: 'Gathered the fact.',
   });
@@ -1096,6 +1116,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
   step('step을 done으로 보고하는 것만으로는 완료가 풀리지 않는다 — 구조화된 criterion이 여전히 unmet이다');
   const reported = await memberMcp.callTool('report_orchestration_step', {
     step_id: only.id, status: 'done', summary: 'Did the one thing.',
+    lease_token: await leaseFor(memberMcp, only.id),
   });
   assert.ok(!reported?.isError, `report 실패: ${JSON.stringify(reported)}`);
 
