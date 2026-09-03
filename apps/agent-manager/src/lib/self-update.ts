@@ -817,9 +817,17 @@ export class UpdateChecker {
     //
     // 정책 게이트가 이미 이번 tick 에서 개시를 시도했다면 건너뛴다 — 같은 tick 에
     // 두 번 부르면 두 번째는 in-flight 뮤텍스에 걸려 무의미한 실패 로그만 남긴다.
-    if (!startedByPolicy && this.#countInFlightSessions && hasPendingSelfUpdate()) {
+    if (
+      !startedByPolicy &&
+      this.#countInFlightSessions &&
+      hasPendingSelfUpdate({ stateDir: this.#stateDir })
+    ) {
       try {
-        await this.#runUpdate({ log: this.#log, countInFlightSessions: this.#countInFlightSessions });
+        await this.#runUpdate({
+          log: this.#log,
+          stateDir: this.#stateDir,
+          countInFlightSessions: this.#countInFlightSessions,
+        });
       } catch (err: any) {
         this.#log(`Self-update retry failed: ${err?.stack || err?.message || err}`);
       }
