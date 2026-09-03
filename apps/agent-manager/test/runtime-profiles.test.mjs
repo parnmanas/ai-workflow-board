@@ -231,6 +231,25 @@ function withHangDeadline(promise, failureMessage) {
   ]).finally(() => ac.abort());
 }
 
+/** 세션 자식의 종료를 기다린다. 기다리는 동안 그 자식이 이벤트 루프를 붙잡게
+ *  `ref()` 를 되돌려 놓는다.
+ *
+ *  `BaseSessionManager`/`SubagentManager` 는 spawn 한 자식을 `unref()` 한다 —
+ *  프로덕션에서 세션 자식이 매니저의 종료를 막지 않게 하려는 의도다. 그래서
+ *  테스트가 자식 종료를 기다릴 때 그 자식은 루프를 붙잡지 않고, 다른 핸들이
+ *  없으면 루프가 비어 node:test 가 남은 테스트를 통째로 취소한다("Promise
+ *  resolution is still pending but the event loop has already resolved").
+ *  이 발현은 **Node 22 에서만** 보인다 — Node 24 는 그대로 통과하므로 로컬만
+ *  보면 안 잡히고 CI(Node 22)에서만 red 가 된다.
+ *
+ *  종료 상한이 racing 하는 대기(withHangDeadline)는 그 타이머가 루프를 붙잡아
+ *  주지만, 상한 없이 그냥 `await` 하는 대기는 스스로 붙잡아야 한다. 이미 ref 된
+ *  자식에는 무해한 no-op 이다. */
+function awaitSessionChildExit(child) {
+  child.ref();
+  return once(child, 'exit');
+}
+
 async function waitFor(check, timeoutMs, failureMessage) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -611,7 +630,7 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const orphanPidPath = join(orphanDir, 'claude-session.pid');
   await copyFile(first.pidPath, orphanPidPath);
   await copyFile(first.configPath, join(orphanDir, 'claude-session.json'));
-  const firstExit = once(first.child, 'exit');
+  const firstExit = awaitSessionChildExit(first.child);
   const cleanup = await cleanupOrphanSubagents(orphanDir, false);
   assert.ok(cleanup.reaped >= 1, 'manager 재시작 orphan 회수가 이전 Claude 프로세스를 정리해야 한다');
   await firstExit;
@@ -637,8 +656,8 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const isolatedSpawn = (await readJsonLines(captureFile)).filter(e => e.type === 'spawn')[2];
   assert.deepEqual(isolatedSpawn.argv.slice(0, 2), ['--session-id', resolveClaudeSessionId(otherKey)]);
   assert.notEqual(isolatedSpawn.sessionId, sessionId);
-  const resumedExit = once(resumed.child, 'exit');
-  const otherExit = once(other.child, 'exit');
+  const resumedExit = awaitSessionChildExit(resumed.child);
+  const otherExit = awaitSessionChildExit(other.child);
   resumed.child.stdin.end();
   other.child.stdin.end();
   await Promise.all([resumedExit, otherExit]);
