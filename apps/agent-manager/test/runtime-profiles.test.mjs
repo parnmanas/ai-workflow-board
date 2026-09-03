@@ -169,7 +169,7 @@ async function spawnFixture(profile, captureFile, extra = {}) {
     },
   });
   assert.equal(result.spawned, true);
-  await Promise.race([exited, delay(5_000).then(() => assert.fail('Claude fixture did not exit'))]);
+  await withHangDeadline(exited, 'Claude fixture did not exit');
   return JSON.parse(await readFile(captureFile, 'utf8'));
 }
 
@@ -203,16 +203,32 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
   const result = new Promise(resolve => { sess.onResult = resolve; });
   const exited = once(sess.child, 'exit');
   const [captured, mainResult] = await Promise.all([
-    Promise.race([
+    withHangDeadline(
       exited.then(async () => JSON.parse(await readFile(captureFile, 'utf8'))),
-      delay(5_000).then(() => assert.fail('BaseSessionManager Claude fixture가 종료되지 않았다')),
-    ]),
-    Promise.race([
-      result,
-      delay(5_000).then(() => assert.fail('BaseSessionManager가 주 응답을 전달하지 않았다')),
-    ]),
+      'BaseSessionManager Claude fixture가 종료되지 않았다',
+    ),
+    withHangDeadline(result, 'BaseSessionManager가 주 응답을 전달하지 않았다'),
   ]);
   return { capture: captured, mainResult };
+}
+
+/** fixture 서브프로세스가 끝나기를 기다리되, hang 이면 무한 대기 대신 실패시킨다.
+ *
+ *  상한은 **성능 단언이 아니라 hang 진단용**이다. 예전에는 5초였는데, 이 파일의
+ *  테스트들은 실제 자식 프로세스를 띄우고 `node --test` 는 파일을
+ *  `os.availableParallelism()` 만큼 동시에 돌린다 — 4-vCPU Windows 러너에서는
+ *  정상 종료(측정 5172ms, 자식 exit code 0)가 그 상한을 그냥 넘겼다(main CI
+ *  run 33705300976). 실제 소요보다 넉넉히 잡고, 승부가 나면 AbortController 로
+ *  타이머를 취소한다 — 취소하지 않으면 `--test-force-exit` 없이 도는 로컬
+ *  `npm test` 가 남은 타이머만큼 늦게 끝난다. */
+const HANG_DEADLINE_MS = 30_000;
+
+function withHangDeadline(promise, failureMessage) {
+  const ac = new AbortController();
+  return Promise.race([
+    promise,
+    delay(HANG_DEADLINE_MS, null, { signal: ac.signal }).then(() => assert.fail(failureMessage)),
+  ]).finally(() => ac.abort());
 }
 
 async function waitFor(check, timeoutMs, failureMessage) {
@@ -749,10 +765,7 @@ test('ticket 41dc37cb: a Claude backend profile session never retries with a dif
     },
   });
   assert.equal(result.spawned, true);
-  await Promise.race([
-    firstExit,
-    delay(5_000).then(() => assert.fail('fallback-suppression fixture did not exit')),
-  ]);
+  await withHangDeadline(firstExit, 'fallback-suppression fixture did not exit');
   // A pre-fix build fires the second spawn synchronously inside the same
   // close-handler tick (attemptModel = the raw fallback string) — give it a
   // beat to land before asserting it never happened.
@@ -1149,7 +1162,7 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
       },
     });
     assert.equal(result.spawned, true);
-    await Promise.race([exited, delay(5_000).then(() => assert.fail('Codex fixture did not exit'))]);
+    await withHangDeadline(exited, 'Codex fixture did not exit');
     const capture = JSON.parse(await readFile(captureFile, 'utf8'));
     assert.equal(capture.cwd, originalCwd);
     assert.equal(capture.baseUrl, undefined);
