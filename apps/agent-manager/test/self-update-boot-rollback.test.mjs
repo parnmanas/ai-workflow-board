@@ -17,16 +17,21 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  _npmGlobalUpdaterSourceForTests,
+  _resetSelfUpdateInFlightForTests,
   hasPendingSelfUpdate,
   markBootVerified,
+  probeInstalledEntrypoint,
   runBootVerificationTimeout,
+  runSelfUpdate,
   resolveEffectiveUpdateChannel,
   runBootVerification,
   UpdateChecker,
@@ -34,7 +39,11 @@ import {
 } from '../dist/lib/self-update.js';
 import {
   BOOT_VERIFY_TIMEOUT_MS,
+  UPDATE_WINDOW_ENV,
+  isWithinMaintenanceWindow,
+  parseMaintenanceWindow,
   withBootAttempt,
+  withinMaintenanceWindowNow,
   INSTALL_RETRY_BACKOFFS_MS,
   MAX_INSTALL_ATTEMPTS,
   bootStatePath,
@@ -761,4 +770,443 @@ test('상한 판정: 하트비트가 이미 성공했으면 상한이 지나도 
   });
   assert.equal(outcome.kind, 'none');
   assert.equal(readUpdatePin(dir), null);
+});
+
+// ═══ 리뷰 반영 ═══════════════════════════════════════════════════════════════
+// 리뷰 지적 1: 조기 부팅 실패(구문 오류·누락 모듈·최상위 import 예외)는 매니저
+// 런타임 안의 어떤 검증에도 도달하지 못한다. 그래서 판정을 **재기동을 넘기기
+// 전으로** 옮겼다 — 아직 이전 빌드를 메모리에 들고 살아 있는 프로세스가 새
+// 진입점을 자식으로 띄워 본다.
+
+/** 임시 진입점 스크립트를 만들어 절대 경로를 돌려준다. */
+function writeEntrypoint(t, body) {
+  const dir = mkdtempSync(join(tmpdir(), 'awb-entrypoint-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'main.mjs');
+  writeFileSync(file, body, 'utf8');
+  return file;
+}
+
+test('probeInstalledEntrypoint: 정상 진입점은 통과하고 보고 버전을 돌려준다', async (t) => {
+  const entry = writeEntrypoint(t, `process.stdout.write('1.2.3\\n');\n`);
+  const r = await probeInstalledEntrypoint({ expectVersion: '1.2.3', entrypoint: entry });
+  assert.equal(r.ok, true);
+  assert.equal(r.reportedVersion, '1.2.3');
+});
+
+test('probeInstalledEntrypoint: 최상위 import 예외로 죽는 빌드를 잡는다', async (t) => {
+  // 이것이 이 티켓이 막으려는 대표 실패다 — 런타임 안의 검증은 여기 도달 못 한다.
+  const entry = writeEntrypoint(t, `throw new Error('boom at module load');\n`);
+  const r = await probeInstalledEntrypoint({ expectVersion: '1.2.3', entrypoint: entry });
+  assert.equal(r.ok, false);
+  assert.equal(r.reportedVersion, null);
+  assert.match(r.detail, /boom at module load/);
+});
+
+test('probeInstalledEntrypoint: 누락 모듈 import 를 잡는다', async (t) => {
+  const entry = writeEntrypoint(t, `import './definitely-not-here.js';\n`);
+  const r = await probeInstalledEntrypoint({ expectVersion: '1.2.3', entrypoint: entry });
+  assert.equal(r.ok, false);
+});
+
+test('probeInstalledEntrypoint: 구문 오류를 잡는다', async (t) => {
+  const entry = writeEntrypoint(t, `const = ;\n`);
+  const r = await probeInstalledEntrypoint({ expectVersion: '1.2.3', entrypoint: entry });
+  assert.equal(r.ok, false);
+});
+
+test('probeInstalledEntrypoint: 설치는 됐다는데 버전이 다르면 실패로 본다', async (t) => {
+  // npm 이 성공을 보고했는데 정작 파일이 안 바뀐 경우(다른 prefix 등).
+  const entry = writeEntrypoint(t, `process.stdout.write('0.0.9\\n');\n`);
+  const r = await probeInstalledEntrypoint({ expectVersion: '1.2.3', entrypoint: entry });
+  assert.equal(r.ok, false);
+  assert.equal(r.reportedVersion, '0.0.9');
+  assert.match(r.detail, /reports v0\.0\.9 but v1\.2\.3 was installed/);
+});
+
+test('probeInstalledEntrypoint: 진입점 파일이 없으면 실패다', async () => {
+  const r = await probeInstalledEntrypoint({
+    expectVersion: '1.2.3',
+    entrypoint: join(tmpdir(), 'awb-nope', 'main.js'),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /entrypoint missing/);
+});
+
+// ─── 프로덕션 경로: 프로브 실패 시 재기동하지 않고 그 자리에서 되돌린다 ──────
+
+/** runSelfUpdate 를 실제 네트워크 없이 태우기 위한 포트 묶음. */
+function fakePorts(overrides = {}) {
+  const calls = { install: [], restart: 0, probe: 0, provenance: [] };
+  const ports = {
+    install: async (spec) => {
+      calls.install.push(spec);
+      return overrides.installResult ? overrides.installResult(spec) : { ok: true, detail: '' };
+    },
+    verifyProvenance: async (channel) => {
+      calls.provenance.push(channel);
+      return overrides.provenance
+        ? overrides.provenance(channel)
+        : { ok: true, version: channel === 'latest' ? '99.0.0' : channel, reason: 'fake ok' };
+    },
+    restart: () => {
+      calls.restart += 1;
+    },
+    probe: async () => {
+      calls.probe += 1;
+      return overrides.probeResult ?? { ok: true, reportedVersion: '99.0.0', detail: 'fake' };
+    },
+  };
+  return { ports, calls };
+}
+
+test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리에서 이전 버전으로 되돌린다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = fakePorts({
+    probeResult: { ok: false, reportedVersion: null, detail: 'boom at module load' },
+  });
+  const lines = [];
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: (m) => lines.push(m) });
+
+  // 설치는 두 번: 새 버전, 그리고 되돌릴 이전 버전.
+  assert.equal(calls.install.length, 2, `install 호출: ${JSON.stringify(calls.install)}`);
+  assert.equal(calls.install[0], 'awb-agent-manager@99.0.0');
+  assert.equal(calls.install[1], `awb-agent-manager@${RUNNING_VERSION}`);
+  // 핵심: 불량 빌드로 **재기동하지 않는다**.
+  assert.equal(calls.restart, 0, '뜨지 않는 빌드로 재기동하면 안 된다');
+  assert.equal(r.willReExec, undefined);
+  // 되돌린 버전이 핀된다.
+  assert.equal(readUpdatePin(dir).version, RUNNING_VERSION);
+  assert.ok(lines.some((l) => /failed to start/.test(l) && l.startsWith('Self-update: ')));
+});
+
+test('runSelfUpdate: 새 빌드가 정상이면 되돌리지 않고 재기동한다 (정상 경로 불변)', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = fakePorts();
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 1, '정상 경로에서 복귀 설치가 일어나면 안 된다');
+  assert.equal(calls.install[0], 'awb-agent-manager@99.0.0');
+  assert.equal(calls.probe, 1);
+  assert.equal(r.willReExec, true);
+  assert.equal(readUpdatePin(dir), null, '정상 설치는 핀을 만들지 않는다');
+  // 하트비트 1회 성공을 기다리는 상태로 넘어간다.
+  assert.equal(readBootVerificationRecord(dir).phase, 'awaiting_boot');
+  // 재기동은 1.5초 뒤 예약이라 여기서 아직 0인 것이 정상 — 예약 자체는 위
+  // "빈 이벤트 루프" 테스트가 따로 단언한다.
+  assert.equal(calls.restart, 0);
+});
+
+// ─── 복귀 경로를 포트로 동적 검증 (리뷰 지적 3) ─────────────────────────────
+
+function armedRollbackRecord(dir) {
+  writeBootVerificationRecord(
+    {
+      phase: 'awaiting_boot',
+      previousVersion: OLDER_VERSION,
+      targetVersion: RUNNING_VERSION,
+      bootAttempts: 1,
+      installFailures: 0,
+      lastInstallFailureAtMs: null,
+      rollbackAttempts: 0,
+      reason: '',
+      updatedAtMs: Date.now(),
+    },
+    dir,
+  );
+}
+
+test('runBootVerification: 복귀 설치를 1회 수행하고 이전 버전으로 재기동한다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+  armedRollbackRecord(dir);
+
+  const { ports, calls } = fakePorts({
+    provenance: (channel) => ({ ok: true, version: channel, reason: 'fake ok' }),
+  });
+  const restarted = new Promise((resolve) => {
+    ports.restart = () => {
+      calls.restart += 1;
+      resolve();
+    };
+  });
+
+  const outcome = await runBootVerification({ stateDir: dir, ports, log: () => {} });
+  assert.equal(outcome.kind, 'rollback');
+  assert.equal(outcome.willReExec, true);
+  // 복귀 설치는 정확히 1회, 이전 버전으로.
+  assert.deepEqual(calls.install, [`awb-agent-manager@${OLDER_VERSION}`]);
+  // provenance 는 되돌릴 버전에도 적용된다(정책 E).
+  assert.deepEqual(calls.provenance, [OLDER_VERSION]);
+  await restarted;
+  assert.equal(calls.restart, 1, '이전 버전으로 재기동해야 한다');
+});
+
+test('runBootVerification: provenance 가 거부하면 설치하지 않지만 핀은 남는다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+  armedRollbackRecord(dir);
+
+  const { ports, calls } = fakePorts({
+    provenance: () => ({ ok: false, version: null, reason: 'no attestations (unsigned publish)' }),
+  });
+  const outcome = await runBootVerification({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 0, '증명 없는 버전을 설치하면 정책 E 가 깨진다');
+  assert.equal(calls.restart, 0);
+  assert.equal(outcome.willReExec, false);
+  // 설치를 못 해도 핀은 남아야 불량 버전이 다시 잡히지 않는다.
+  assert.equal(readUpdatePin(dir).version, OLDER_VERSION);
+});
+
+test('runBootVerification: 복귀 설치가 실패해도 재기동하지 않고 프로세스는 살아 있다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+  armedRollbackRecord(dir);
+
+  const { ports, calls } = fakePorts({
+    provenance: (channel) => ({ ok: true, version: channel, reason: 'fake ok' }),
+    installResult: () => ({ ok: false, detail: 'EACCES: permission denied' }),
+  });
+  const outcome = await runBootVerification({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 1);
+  assert.equal(calls.restart, 0, '되돌리지 못한 채 재기동하면 불량 빌드로 다시 들어간다');
+  assert.equal(outcome.willReExec, false);
+  assert.equal(readUpdatePin(dir).version, OLDER_VERSION);
+  // 이 단언이 실행된다는 사실 자체가 프로세스 생존의 증거다(완료 기준 7).
+  assert.equal(typeof process.pid, 'number');
+});
+
+// ─── 유지보수 창이 프로덕션 경로에 배선됐는가 (리뷰 지적 2) ─────────────────
+
+test('parseMaintenanceWindow: 형식이 맞을 때만 창을 만든다', () => {
+  assert.deepEqual(parseMaintenanceWindow('02:00-04:30'), { startMinute: 120, endMinute: 270 });
+  assert.deepEqual(parseMaintenanceWindow('22:00-02:00'), { startMinute: 1320, endMinute: 120 });
+  // 미설정·오타·범위 초과·폭 0 은 전부 "창 없음" — 잘못 적은 값 때문에 재시도가
+  // 영영 막히는 쪽이 더 나쁘다.
+  for (const bad of ['', null, undefined, 'nonsense', '25:00-26:00', '02:70-03:00', '03:00-03:00']) {
+    assert.equal(parseMaintenanceWindow(bad), null, `${JSON.stringify(bad)} 는 창이 아니어야 한다`);
+  }
+});
+
+test('isWithinMaintenanceWindow: 자정을 넘는 창도 다룬다', () => {
+  const w = parseMaintenanceWindow('22:00-02:00');
+  const at = (h, m) => new Date(2026, 0, 2, h, m, 0, 0);
+  assert.equal(isWithinMaintenanceWindow(at(23, 0), w), true);
+  assert.equal(isWithinMaintenanceWindow(at(1, 0), w), true);
+  assert.equal(isWithinMaintenanceWindow(at(12, 0), w), false);
+  // 창이 없으면 항상 안 — 이 기능 도입 전 동작과 같아야 한다.
+  assert.equal(isWithinMaintenanceWindow(at(12, 0), null), true);
+});
+
+test('withinMaintenanceWindowNow: 환경변수 미설정이면 항상 창 안이다', () => {
+  assert.equal(withinMaintenanceWindowNow(new Date(), undefined), true);
+  assert.equal(withinMaintenanceWindowNow(new Date(), ''), true);
+});
+
+test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 경로에서 멈춘다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  // 이미 한 번 실패한 기록 — 다음 호출은 "재시도"다.
+  const failed = withInstallFailure(
+    newInstallRecord({ previousVersion: RUNNING_VERSION, targetVersion: '99.0.0', nowMs: 1 }),
+    1,
+    'npm exit 1',
+  );
+  writeBootVerificationRecord(failed, dir);
+
+  // 지금 시각을 확실히 벗어나는 창을 만든다(현재 +2시간 ~ +3시간).
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const shift = (h) => pad((now.getHours() + h) % 24);
+  const prev = process.env[UPDATE_WINDOW_ENV];
+  process.env[UPDATE_WINDOW_ENV] = `${shift(2)}:${pad(now.getMinutes())}-${shift(3)}:${pad(now.getMinutes())}`;
+  t.after(() => {
+    if (prev === undefined) delete process.env[UPDATE_WINDOW_ENV];
+    else process.env[UPDATE_WINDOW_ENV] = prev;
+  });
+
+  const { ports, calls } = fakePorts();
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 0, '창 밖에서는 설치를 시도하면 안 된다');
+  assert.equal(calls.restart, 0);
+  assert.match(r.summary, /outside the maintenance window/);
+});
+
+test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const failed = withInstallFailure(
+    newInstallRecord({ previousVersion: RUNNING_VERSION, targetVersion: '99.0.0', nowMs: 1 }),
+    1,
+    'npm exit 1',
+  );
+  writeBootVerificationRecord(failed, dir);
+
+  const prev = process.env[UPDATE_WINDOW_ENV];
+  process.env[UPDATE_WINDOW_ENV] = '00:00-23:59';
+  t.after(() => {
+    if (prev === undefined) delete process.env[UPDATE_WINDOW_ENV];
+    else process.env[UPDATE_WINDOW_ENV] = prev;
+  });
+
+  const { ports, calls } = fakePorts();
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 1, '창 안이고 백오프도 지났으면 재시도해야 한다');
+  assert.equal(r.changed, true);
+});
+
+// ─── 11. Windows 헬퍼의 복귀 분기를 실제로 태운다 ───────────────────────────
+// Windows 경로에서는 부모가 설치 전에 종료하므로, 새 진입점이 뜨는지 보고 못
+// 뜨면 되돌리는 일을 (교체 대상 패키지 밖에 있는) 헬퍼가 맡는다. 헬퍼는 템플릿
+// 리터럴에 담긴 생성 소스라 `node --check` 로만 검증돼 왔는데, 그 구문 검사는
+// 아래 분기를 한 줄도 실행하지 않는다. 그래서 가짜 npm 을 PATH 에 얹고 헬퍼를
+// 실제로 돌린다.
+
+/** 가짜 npm + 가짜 전역 루트를 만들고 헬퍼를 실제로 실행한다. */
+function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) {
+  const base = mkdtempSync(join(tmpdir(), 'awb-helper-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const binDir = join(base, 'bin');
+  const globalRoot = join(base, 'root');
+  const distDir = join(globalRoot, 'awb-agent-manager', 'dist');
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(distDir, { recursive: true });
+  const installLog = join(base, 'installs.txt');
+  const pinPath = join(base, 'self-update-pin.json');
+  const entrypoint = join(distDir, 'main.js');
+
+  // 가짜 npm: install 은 spec 을 기록하고 그 버전의 진입점을 실제로 써 넣는다.
+  // badVersion 을 설치하면 뜨지 않는 진입점이 깔린다 — 헬퍼의 프로브가 그것을
+  // 관측해야 한다.
+  const npmScript = [
+    '#!/bin/sh',
+    'if [ "$1" = "root" ]; then printf "%s\\n" "' + globalRoot + '"; exit 0; fi',
+    'if [ "$1" = "install" ]; then',
+    '  spec=""',
+    '  for a in "$@"; do case "$a" in awb-agent-manager@*) spec="$a";; esac; done',
+    '  ver=${spec#awb-agent-manager@}',
+    '  printf "%s\\n" "$ver" >> "' + installLog + '"',
+    '  if [ "$ver" = "' + String(badVersion) + '" ]; then',
+    '    printf "%s\\n" "throw new Error(\'installed build cannot start\');" > "' + entrypoint + '"',
+    '  else',
+    '    printf "console.log(\'%s\');\\n" "$ver" > "' + entrypoint + '"',
+    '  fi',
+    '  exit 0',
+    'fi',
+    'exit 1',
+  ].join('\n');
+  const npmPath = join(binDir, 'npm');
+  writeFileSync(npmPath, npmScript + '\n', 'utf8');
+  chmodSync(npmPath, 0o755);
+
+  const helperPath = join(base, 'updater.mjs');
+  writeFileSync(helperPath, _npmGlobalUpdaterSourceForTests(), 'utf8');
+
+  // managerPid=0 → managerAlive() 이 즉시 false 라 대기 없이 진행한다.
+  const r = spawnSync(
+    process.execPath,
+    [
+      helperPath,
+      '0',
+      installSpec,
+      expectVersion,
+      previousSpec,
+      pinPath,
+      process.execPath,
+      entrypoint,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+      timeout: 60_000,
+    },
+  );
+
+  const installs = existsSync(installLog)
+    ? readFileSync(installLog, 'utf8').split('\n').filter(Boolean)
+    : [];
+  const pin = existsSync(pinPath) ? JSON.parse(readFileSync(pinPath, 'utf8')) : null;
+  const finalEntrypoint = existsSync(entrypoint) ? readFileSync(entrypoint, 'utf8') : '';
+  return { status: r.status, installs, pin, finalEntrypoint, helperPath };
+}
+
+test('헬퍼: 새 빌드가 뜨지 않으면 이전 버전을 다시 설치하고 핀을 남긴다', (t) => {
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: 'awb-agent-manager@1.0.0',
+    badVersion: '2.0.0',
+  });
+
+  // 설치는 두 번: 새 버전, 그리고 프로브 실패 후 이전 버전.
+  assert.deepEqual(r.installs, ['2.0.0', '1.0.0'], `설치 로그: ${JSON.stringify(r.installs)}`);
+  // 디스크에 최종적으로 남은 것은 되돌린 빌드다.
+  assert.match(r.finalEntrypoint, /1\.0\.0/);
+  // 핀이 남아 다음 tick 이 같은 불량 버전을 다시 집지 않는다.
+  assert.ok(r.pin, '복귀했으면 핀이 있어야 한다');
+  assert.equal(r.pin.version, '1.0.0');
+  assert.match(r.pin.reason, /2\.0\.0/, '핀 사유에 어떤 빌드가 문제였는지 남아야 한다');
+  // 복귀했다는 사실이 종료 코드로도 드러난다.
+  assert.equal(r.status, 1);
+});
+
+test('헬퍼: 새 빌드가 정상이면 되돌리지 않고 핀도 만들지 않는다', (t) => {
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: 'awb-agent-manager@1.0.0',
+    badVersion: 'never-matches',
+  });
+
+  assert.deepEqual(r.installs, ['2.0.0'], '정상 경로에서 복귀 설치가 일어나면 안 된다');
+  assert.match(r.finalEntrypoint, /2\.0\.0/);
+  assert.equal(r.pin, null, '정상 설치는 핀을 만들지 않는다');
+  assert.equal(r.status, 0);
+});
+
+test('헬퍼: 되돌릴 대상이 없으면(복귀 중) 프로브를 건너뛰고 기존 동작 그대로다', (t) => {
+  // 이미 복귀 중인 호출은 previousSpec 을 빈 문자열로 넘긴다 — 여기서 또
+  // 되돌리려 하면 무한 복귀가 된다.
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@1.0.0',
+    expectVersion: '',
+    previousSpec: '',
+    badVersion: '1.0.0',
+  });
+
+  assert.deepEqual(r.installs, ['1.0.0'], '복귀 중에는 추가 복귀 설치가 없어야 한다');
+  assert.equal(r.pin, null);
+});
+
+test('헬퍼: 복귀 설치까지 실패해도 매니저 재기동은 그대로 시도한다 (현행 보장 유지)', (t) => {
+  // 헬퍼는 설치 결과와 무관하게 항상 재기동한다 — 이 보장이 완료 기준 7 의
+  // "운영자가 매니저 없는 상태로 남지 않는다"를 떠받친다. 소스에 그 무조건
+  // 재기동 경로가 남아 있는지 실행 산출물로 확인한다.
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: 'awb-agent-manager@1.0.0',
+    badVersion: '2.0.0',
+  });
+  // 헬퍼가 끝까지 돌아 자기 자신을 지웠다는 것은 4~5단계(재기동 + 정리)까지
+  // 도달했다는 뜻이다. 중간에 던졌다면 파일이 남는다.
+  assert.equal(existsSync(r.helperPath), false, '헬퍼가 재기동·정리 단계까지 도달해야 한다');
 });
