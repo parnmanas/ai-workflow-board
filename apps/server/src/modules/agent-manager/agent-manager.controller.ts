@@ -34,6 +34,7 @@ import {
   type RuntimeCapabilityDescriptor,
   type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
+  type AgentLaunchSpecEntry,
 } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
@@ -78,6 +79,76 @@ function sanitizePermissionTiers(
 }
 
 const PERMISSION_TIER_SUPPORTS = new Set(['native', 'approximated', 'unsupported']);
+
+/** 매니저가 보고한 실효 실행 사양을 안전한 형태로 좁힌다 (ticket 20fff298).
+ *
+ *  마스킹은 **매니저 쪽에서 이미 끝나 있다** — 서버는 원문을 받지 않으므로 여기서
+ *  다시 가릴 것이 없고, 대신 신뢰할 수 없는 크기/모양으로부터 저장소와 관리자
+ *  화면을 보호한다. 상한을 넘는 부분은 조용히 잘라낸다(하트비트는 best-effort 라
+ *  한 행이 이상하다고 전체를 버리면 그게 더 나쁜 실패다).
+ *
+ *  `undefined` 반환은 "매니저가 이 필드를 보고하지 않음"을 그대로 보존한다 —
+ *  빈 배열(보고했지만 대상 없음)로 접으면 UI 가 두 상태를 구분할 수 없다. */
+function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const MAX_ROWS = 200;
+  const MAX_ARGS = 200;
+  const MAX_ENV = 100;
+  const MAX_TOKEN = 500;
+  const str = (v: unknown, max = MAX_TOKEN): string => String(v ?? '').slice(0, max);
+  const strOrNull = (v: unknown): string | null =>
+    typeof v === 'string' && v ? v.slice(0, MAX_TOKEN) : null;
+  const ARG_SOURCES = new Set(['adapter', 'model', 'permission', 'mcp', 'runtime_profile', 'unattributed']);
+  const ENV_SOURCES = new Set(['cli_home', 'credential', 'runtime_profile']);
+  return input
+    .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
+    .slice(0, MAX_ROWS)
+    .map((row: any) => ({
+      agent_id: str(row.agent_id, 64),
+      cli: typeof row.cli === 'string' && row.cli ? str(row.cli, 40) : 'unknown',
+      bin: strOrNull(row.bin),
+      bin_error: strOrNull(row.bin_error),
+      args: (Array.isArray(row.args) ? row.args : [])
+        .slice(0, MAX_ARGS)
+        .filter((a: any) => a && typeof a === 'object')
+        .map((a: any) => ({
+          value: str(a.value),
+          source: ARG_SOURCES.has(a.source) ? a.source : 'unattributed',
+          ...(a.placeholder === true ? { placeholder: true as const } : {}),
+        })),
+      cwd: strOrNull(row.cwd),
+      mcp_config_path: strOrNull(row.mcp_config_path),
+      model: strOrNull(row.model),
+      permission: {
+        tier: str(row?.permission?.tier, 40) || 'unknown',
+        source: str(row?.permission?.source, 40) || 'unknown',
+        harness_mode: strOrNull(row?.permission?.harness_mode),
+      },
+      runtime_profile:
+        row.runtime_profile && typeof row.runtime_profile === 'object'
+          ? {
+              id: str(row.runtime_profile.id, 120),
+              protocol: str(row.runtime_profile.protocol, 40),
+              model: strOrNull(row.runtime_profile.model),
+              arg_count: Number.isFinite(row.runtime_profile.arg_count)
+                ? Math.max(0, Math.trunc(Number(row.runtime_profile.arg_count)))
+                : 0,
+            }
+          : null,
+      env: (Array.isArray(row.env) ? row.env : [])
+        .slice(0, MAX_ENV)
+        .filter((e: any) => e && typeof e === 'object' && typeof e.key === 'string' && e.key)
+        .map((e: any) => ({
+          key: str(e.key, 120),
+          value: str(e.value),
+          source: ENV_SOURCES.has(e.source) ? e.source : 'credential',
+        })),
+      varies_per_dispatch: (Array.isArray(row.varies_per_dispatch) ? row.varies_per_dispatch : [])
+        .slice(0, 20)
+        .map((v: any) => str(v, 200)),
+      computed_at: str(row.computed_at, 40),
+    }));
+}
 
 function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -389,6 +460,13 @@ export class AgentManagerController {
     // version is the more likely cause than malice. The token itself is
     // NEVER on the wire, so the worst-case server-side mistake here is
     // showing a stale badge until the next heartbeat.
+    // 실효 실행 사양 (ticket 20fff298). REST-only 텔레메트리다 — active_worktrees
+    // / agent_credentials 와 같은 계약이라 SSE payload 에는 싣지 않는다.
+    // upsert 는 whole-record replace 라 `undefined` 는 다음 하트비트에서 필드가
+    // 레코드에서 사라진다는 뜻이 된다. 그게 맞는 의미론이다 — 매니저가 다운그레이드
+    // 되면 UI 도 즉시 "보고하지 않음"으로 돌아가야지, 옛 사양을 계속 보여주면 안 된다.
+    const agent_launch_specs = sanitizeAgentLaunchSpecs(body?.agent_launch_specs);
+
     const agent_credentials = Array.isArray(body?.agent_credentials)
       ? body.agent_credentials
           .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
@@ -579,6 +657,7 @@ export class AgentManagerController {
       working_dirs,
       paired_at,
       agent_credentials,
+      agent_launch_specs,
       active_worktrees,
       active_run_workspaces,
       available_models,

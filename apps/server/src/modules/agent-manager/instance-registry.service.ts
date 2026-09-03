@@ -49,6 +49,39 @@ export interface RuntimeHealthRecord {
 
 export type RuntimeCapabilityReport = Record<string, RuntimeHealthRecord>;
 
+/** 매니저가 보고한 argv 토큰 하나와 그 출처 (ticket 20fff298). `value` 는
+ *  매니저 쪽에서 이미 마스킹된 표시용 문자열이다 — 서버는 원문을 받지 않는다. */
+export interface LaunchArgEntry {
+  value: string;
+  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'runtime_profile' | 'unattributed';
+  /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
+  placeholder?: boolean;
+}
+
+export interface LaunchEnvEntry {
+  key: string;
+  /** 매니저 쪽에서 마스킹된 값. 자격증명 원문은 wire 에 오르지 않는다. */
+  value: string;
+  source: 'cli_home' | 'credential' | 'runtime_profile';
+}
+
+/** 관리 대상 에이전트 하나의 "다음 spawn 시 실효 실행 사양" (ticket 20fff298). */
+export interface AgentLaunchSpecEntry {
+  agent_id: string;
+  cli: string;
+  bin: string | null;
+  bin_error: string | null;
+  args: LaunchArgEntry[];
+  cwd: string | null;
+  mcp_config_path: string | null;
+  model: string | null;
+  permission: { tier: string; source: string; harness_mode: string | null };
+  runtime_profile: { id: string; protocol: string; model: string | null; arg_count: number } | null;
+  env: LaunchEnvEntry[];
+  varies_per_dispatch: string[];
+  computed_at: string;
+}
+
 export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
@@ -70,6 +103,12 @@ export interface InstanceRecord {
   // Older managers (pre credential-expiry telemetry) leave undefined; the
   // dashboard collapses to "no credential metadata" in that case.
   agent_credentials?: AgentCredentialEntry[];
+  // 관리 대상 에이전트별 실효 실행 사양 (ticket 20fff298). REST-only 텔레메트리
+  // — active_worktrees / agent_credentials 와 같은 계약이다(SSE 는 "다시 읽어라"
+  // 힌트로만 쓰인다). undefined 는 **매니저가 이 필드를 아예 보고하지 않음**을,
+  // `[]` 는 **보고했지만 대상 에이전트가 없음**을 뜻한다 — UI 가 "보고 안 함"과
+  // "값 없음"을 구분해야 하므로 서버는 이 둘을 절대 뭉개지 않는다.
+  agent_launch_specs?: AgentLaunchSpecEntry[];
   // Live worktrees + pool-lease state across the manager's supervised agents
   // (ticket 72fc244f — worktree visibility). One row per live/leased worktree
   // under each working_dir's `.awb/wt/`. Older managers leave undefined; the
