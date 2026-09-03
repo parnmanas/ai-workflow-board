@@ -179,6 +179,17 @@ export function renderStepPrompt(args: {
   isRetry: boolean;
   /** agent-manager가 스폰 전에 프로비저닝하는 working_dir-relative 폴더(티켓 2dc3c62f). */
   workspaceFolder?: string;
+  /**
+   * 그래프 모드에서 이 step이 맡은 node의 실행 계약(티켓 1ca9e49b). null이면
+   * 기존 wave 프롬프트와 한 글자도 다르지 않다.
+   */
+  graphNode?: {
+    kind: string;
+    visit: number;
+    max_visits: number;
+    /** 이 node에서 나가는 분기가 기대하는 verdict 값들. */
+    verdicts: string[];
+  } | null;
 }): string {
   const { mission, step, teamName, orchestratorName, dependencies } = args;
   const lines: string[] = [];
@@ -241,6 +252,19 @@ export function renderStepPrompt(args: {
     );
   }
 
+  const graph = args.graphNode ?? null;
+  if (graph && graph.max_visits > 1 && graph.visit > 1) {
+    lines.push(
+      section(
+        `Revision pass ${graph.visit} of at most ${graph.max_visits}`,
+        `An evaluator sent this work back for another pass. Everything you produced in the previous pass was ` +
+          `reset — redo the work with the evaluator's feedback (above, in the results of the steps you depend ` +
+          `on) applied. This loop stops after pass ${graph.max_visits} whether or not the evaluator is ` +
+          `satisfied, so treat this pass as the one that has to land.`,
+      ),
+    );
+  }
+
   lines.push('## Reporting (required)');
   lines.push(
     [
@@ -252,6 +276,21 @@ export function renderStepPrompt(args: {
       `- \`summary\`: what you did, what you changed, and anything the next agent must know. Downstream steps`,
       `  receive this text verbatim as their context, so write it for them, not for a human reader.`,
       `- \`artifacts\` (optional): PR urls, branch names, ticket ids, file paths you produced.`,
+      ...(graph
+        ? [
+            `- \`visit\`: \`${graph.visit}\` — copy this number verbatim. It identifies which pass of this step`,
+            `  you are reporting; a report carrying a stale number is rejected instead of overwriting a newer pass.`,
+          ]
+        : []),
+      ...(graph && graph.verdicts.length > 0
+        ? [
+            `- \`verdict\`: **required for this step** — one of ${graph.verdicts.map((v) => `\`"${v}"\``).join(', ')}.`,
+            `  The mission branches on this value: it decides which downstream step runs next, or whether the work`,
+            `  goes back for another pass. Choose it from what you actually found, and explain the choice in`,
+            `  \`summary\`. A missing or unrecognised verdict leaves every branch out of this step dead, which`,
+            `  stalls the mission.`,
+          ]
+        : []),
       ``,
       `For long work, call \`mcp__awb__report_orchestration_progress\` along the way so the mission board shows`,
       `you are alive — it does not end the step.`,

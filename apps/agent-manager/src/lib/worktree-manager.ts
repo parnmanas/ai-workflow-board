@@ -64,6 +64,7 @@ import {
 } from './dispatch-preflight.js';
 import {
   cloneWithRepoCredential,
+  type CloneWirePolicy,
   installRepoCredential,
   scrubOriginUrl,
   maskCredential,
@@ -331,6 +332,10 @@ export interface ResolveCwdArgs {
     url: string;
     branch?: string;
     credential?: { username?: string; token: string } | null;
+    /** 서버가 Repo Resource ⊕ Workspace 기본값으로 해석해 agent_trigger 에 실어보낸
+     *  clone 정책(ticket bddb63ee). 없으면 repo-credential 의 시스템 기본값
+     *  (60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다. */
+    clonePolicy?: CloneWirePolicy | null;
   } | null;
 }
 
@@ -475,6 +480,7 @@ export class WorktreeManager {
         dir: cloneDir,
         branch,
         credential: repo.credential,
+        policy: repo.clonePolicy,
       });
       if (!cloned.ok) {
         log(`[worktree] container base clone failed: ${maskCredential(cloned.stderr, repo.credential).trim()}`);
@@ -660,10 +666,16 @@ export class WorktreeManager {
           `[worktree] created ${wtPath} for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}${workSubpath ? ` subpath=${workSubpath}` : ''} (detached at base HEAD)`,
         );
       }
-      if (ens.created) {
-        const featureBranch = `ticket/${ticketId}-work`;
-        const switched = await git(wtPath, ['switch', '-c', featureBranch]);
-        if (!switched.ok) return fallback('branch_prepare_failed');
+      // 신규·재개 양쪽 모두 attach 를 보장한다. 재개 경로를 건너뛰면 detached
+      // HEAD 로 시작한 worktree 가 계속 detached 로 남아 커밋이 고아가 된다.
+      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${ticketId}-work`, baseRef);
+      if (!attached.ok) {
+        log(
+          `[worktree] branch attach failed for ticket=${String(ticketId).slice(0, 8)} role=${role} mode=${mode}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,
+        );
+        const result = fallback('branch_prepare_failed');
+        result.detail = attached.detail;
+        return result;
       }
       const repositoryContext = await this.#describeRepositoryContext(
         wtPath, resourceId || '', baseBranch, baseSha, !ens.created,
@@ -850,6 +862,190 @@ export class WorktreeManager {
     return { ok: true, created: true };
   }
 
+  /**
+   * `wtPath` 를 반드시 이름 있는 branch 에 붙인 상태로 남긴다 — detached HEAD 로
+   * 끝내지 않는다(ticket 15db8628). `git worktree add --detach` 는 모든 체크아웃을
+   * detached 로 시작하는데, 뒤따르는 `switch -c` 는 `ticket/<id>-work` 가 공유 refs
+   * 에 이미 있으면(worktree 디렉터리가 지워지거나 prune 돼도 ref 는 살아남는다)
+   * 그대로 실패한다. 그래서 디스패치가 base tip 에 detached 인 채, 옆에 stale
+   * branch 를 둔 상태로 도착했다. 그 상태에서 만든 커밋은 어느 branch 에도 안 붙는
+   * 고아 커밋이 되어 `git push` 에 보이지 않고 조용히 유실된다.
+   *
+   * 이미 `featureBranch` 위면 → 건드리지 않는다. 다른 branch 위면 티켓 전용
+   * worktree 의 보장이 깨진 상태이므로 `#attachFromOtherBranch` 가 되돌리거나
+   * 거부한다(Merging 이 지시하는 base branch 체크아웃은 예외로 인정).
+   *
+   * detached 면 → 에이전트 커밋을 절대 버리지 않는 순서로 복구한다:
+   *   - branch 없음                → HEAD 에서 `switch -c` (고아 커밋까지 흡수)
+   *   - HEAD 가 branch 보다 앞섬   → `switch -C` 로 stale ref 를 HEAD 까지 ff
+   *                                 (관측된 경우: worktree 가 새 base tip 에서
+   *                                 재생성되고 branch 만 뒤에 남은 상태)
+   *   - HEAD 에 고유 커밋이 없음   → branch 를 체크아웃한 뒤 전진시킨다:
+   *                                 base 를 넘는 커밋이 없으면 `merge --ff-only`,
+   *                                 있으면 base 위로 `rebase`
+   *   - 양쪽 모두 고유 커밋 보유   → 거부한다. 어느 쪽을 골라도 실제 작업이 사라지므로
+   *                                 `branch_prepare_failed` 로 올려 담당자가 직접
+   *                                 정리하게 둔다.
+   * attach 이후의 base 전진은 `#advanceOntoBase` 가 맡는다 — rebase 가 실패하면
+   * 복구 미완이므로 성공으로 보고하지 않는다. 예외를 던지지 않는다.
+   */
+  async #attachFeatureBranch(
+    wtPath: string,
+    featureBranch: string,
+    baseRef: string,
+  ): Promise<{ ok: boolean; action: string; detail?: string }> {
+    const current = await git(wtPath, ['branch', '--show-current']);
+    if (current.ok && current.stdout.trim()) {
+      const branch = current.stdout.trim();
+      if (branch === featureBranch) return { ok: true, action: 'already_attached' };
+      return this.#attachFromOtherBranch(wtPath, featureBranch, baseRef, branch);
+    }
+
+    const head = await git(wtPath, ['rev-parse', 'HEAD']);
+    if (!head.ok) return { ok: false, action: 'head_unresolved', detail: head.stderr.trim() };
+
+    const exists = await git(wtPath, ['show-ref', '--verify', '--quiet', `refs/heads/${featureBranch}`]);
+    if (!exists.ok) {
+      const created = await git(wtPath, ['switch', '-c', featureBranch]);
+      return created.ok
+        ? { ok: true, action: 'created' }
+        : { ok: false, action: 'create_failed', detail: created.stderr.trim() };
+    }
+
+    // detached HEAD 가 가진 고유 커밋 — feature branch 에도 base 에도 없는 것.
+    // 0 보다 크면 branch 를 그냥 체크아웃하는 순간 그 커밋들이 유실된다.
+    // `!== 0` 이므로 카운트 해석 실패(-1)도 "고아가 있을 수 있음"으로 취급한다 —
+    // 판단 불가일 때 커밋을 버릴 수 있는 쪽으로 기울지 않는다.
+    const orphans = await this.#countCommits(wtPath, ['HEAD', '--not', featureBranch, baseRef]);
+    if (orphans !== 0) {
+      const behindHead = await git(wtPath, ['merge-base', '--is-ancestor', featureBranch, 'HEAD']);
+      if (!behindHead.ok) {
+        return {
+          ok: false,
+          action: 'diverged',
+          detail: `detached HEAD and ${featureBranch} both hold unique commits — refusing to pick one`,
+        };
+      }
+      const forced = await git(wtPath, ['switch', '-C', featureBranch]);
+      return forced.ok
+        ? { ok: true, action: 'fast_forwarded' }
+        : { ok: false, action: 'attach_failed', detail: forced.stderr.trim() };
+    }
+
+    const switched = await git(wtPath, ['switch', featureBranch]);
+    if (!switched.ok) {
+      return { ok: false, action: 'attach_failed', detail: switched.stderr.trim() };
+    }
+    return this.#advanceOntoBase(wtPath, featureBranch, baseRef, 'attached');
+  }
+
+  /**
+   * 이미 `featureBranch` 에 붙은 worktree 를 base tip 위로 전진시킨다 —
+   * 자기 커밋이 없으면 `merge --ff-only`, 있으면 `rebase`(완료 기준의
+   * "커밋 0개 → ff attach / 커밋 있음 → rebase" 분기).
+   *
+   * rebase 실패는 **성공으로 보고하지 않는다.** 충돌이나 커미터 신원 부재로
+   * 실패한 상태는 attach 만 된 것이지 복구가 끝난 게 아니므로, 기준대로
+   * `branch_prepare_failed` 를 올려 담당 에이전트가 진단하게 한다. 다만 abort 로
+   * rebase 중간 상태만 걷어내고 **branch 는 붙은 채로** 남겨, 진단하러 온
+   * 에이전트가 최소한 고아 커밋 위험은 없는 worktree 를 만나게 한다.
+   */
+  async #advanceOntoBase(
+    wtPath: string,
+    featureBranch: string,
+    baseRef: string,
+    okAction: string,
+  ): Promise<{ ok: boolean; action: string; detail?: string }> {
+    const own = await this.#countCommits(wtPath, [featureBranch, '--not', baseRef]);
+    if (own === 0) {
+      // rebase 와 같은 기준으로 판정한다 — ff merge 가 거부되면(예: upstream 과
+      // 겹치는 tracked 파일에 미커밋 변경이 있는 경우) branch 는 stale 한 채로
+      // 남으므로 준비 성공이 아니다.
+      const merged = await git(wtPath, ['merge', '--ff-only', baseRef]);
+      if (!merged.ok) {
+        return {
+          ok: false,
+          action: 'merge_failed',
+          detail: `${featureBranch} attached but fast-forward onto ${baseRef} failed: ${merged.stderr.trim()}`,
+        };
+      }
+      return { ok: true, action: `${okAction}_ff` };
+    }
+    const rebased = await git(wtPath, ['rebase', baseRef]);
+    if (!rebased.ok) {
+      await git(wtPath, ['rebase', '--abort']);
+      return {
+        ok: false,
+        action: 'rebase_failed',
+        detail: `${featureBranch} attached but rebase onto ${baseRef} failed: ${rebased.stderr.trim()}`,
+      };
+    }
+    return { ok: true, action: `${okAction}_rebased` };
+  }
+
+  /**
+   * feature branch 가 아닌 **다른 branch** 에 붙어 있는 티켓 worktree 를 처리한다.
+   * 티켓 전용 worktree 이므로 그대로 승인하면 이후 커밋이 엉뚱한 branch 에 쌓인다.
+   *
+   *   - feature branch 가 살아 있고 tree 가 clean → 되돌려 붙인다(보장 복구).
+   *   - feature branch 가 살아 있는데 tree 가 dirty → 브랜치를 옮기면 작업물이
+   *     따라가거나 덮일 수 있어 자동 판단 불가 → `branch_prepare_failed`.
+   *   - feature branch 가 이미 없음 → 어떤 branch 위든 거부한다.
+   *
+   * 마지막 경우에 **branch 를 새로 만들지 않는다**는 점이 중요하다. Merging
+   * 가이드는 step 3 에서 base branch 를 체크아웃하고 step 5 에서 feature branch 를
+   * 지우라고 지시하므로, "base branch 위 + feature ref 없음" 은 Merging 이 끝난
+   * 뒤의 모양과 같다. 여기서 ref 를 다시 만들면 step 5 가 방금 지운 것을 되살려
+   * terminal-cleanup 이 기대하는 상태를 깨뜨린다 — 그래서 거부하되 ref 는 건드리지
+   * 않는다. 다만 이 계층에는 지금 어느 단계에서 호출됐는지 알려주는 신호가 없어
+   * "정말 Merging 이 끝난 것"과 "In Progress 인데 feature ref 가 실수로 사라진 것"
+   * 을 구분할 수 없다. 후자를 통과시키면 이후 커밋이 base branch 에 붙는 위험이
+   * 그대로 열리므로, 구분 불가일 때는 안전한 실패를 택한다(리뷰 결정).
+   */
+  async #attachFromOtherBranch(
+    wtPath: string,
+    featureBranch: string,
+    baseRef: string,
+    currentBranch: string,
+  ): Promise<{ ok: boolean; action: string; detail?: string }> {
+    const exists = await git(wtPath, ['show-ref', '--verify', '--quiet', `refs/heads/${featureBranch}`]);
+    if (!exists.ok) {
+      return {
+        ok: false,
+        action: 'feature_branch_missing',
+        detail: `worktree sits on '${currentBranch}' and ${featureBranch} no longer exists — refusing to guess`,
+      };
+    }
+
+    const status = await git(wtPath, ['status', '--porcelain']);
+    if (!status.ok || status.stdout.trim()) {
+      return {
+        ok: false,
+        action: 'other_branch_dirty',
+        detail: `worktree sits on '${currentBranch}' with uncommitted changes — cannot switch to ${featureBranch} safely`,
+      };
+    }
+
+    const switched = await git(wtPath, ['switch', featureBranch]);
+    if (!switched.ok) {
+      return {
+        ok: false,
+        action: 'other_branch_attach_failed',
+        detail: `could not switch from '${currentBranch}' to ${featureBranch}: ${switched.stderr.trim()}`,
+      };
+    }
+    return this.#advanceOntoBase(wtPath, featureBranch, baseRef, 'restored_from_other_branch');
+  }
+
+  /** `git rev-list --count <args>`. 카운트를 못 구하면 -1 을 돌려준다 — 호출부가
+   *  git 실패를 "커밋 0개"로 오인하지 않게 하기 위해서다. */
+  async #countCommits(cwd: string, args: string[]): Promise<number> {
+    const res = await git(cwd, ['rev-list', '--count', ...args]);
+    if (!res.ok) return -1;
+    const parsed = Number(res.stdout.trim());
+    return Number.isFinite(parsed) ? parsed : -1;
+  }
+
   async #describeRepositoryContext(
     cwd: string,
     resourceId: string,
@@ -932,6 +1128,16 @@ export class WorktreeManager {
         const wtPath = join(a.worktreesRoot, mine);
         const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
         if (ens.ok) {
+          // per_ticket 재개와 같은 이유로 slot 재부착에서도 attach 를 보장한다.
+          const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef);
+          if (!attached.ok) {
+            log(
+              `[worktree] branch attach failed for shared slot ${mine} ticket=${t8}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,
+            );
+            const failed = a.fallback('branch_prepare_failed');
+            failed.detail = attached.detail;
+            return failed;
+          }
           reg.slots[mine].active = true;
           reg.slots[mine].role = a.role;
           // Refresh leasedAt on reattach too: a re-dispatch (idle-reap respawn,
@@ -985,11 +1191,17 @@ export class WorktreeManager {
         baseRef: a.baseRef,
         baseBranch: a.baseBranch,
       });
-      const featureBranch = `ticket/${a.ticketId}-work`;
-      const currentBranch = await git(wtPath, ['branch', '--show-current']);
-      if (!currentBranch.ok || !currentBranch.stdout.trim()) {
-        const switched = await git(wtPath, ['switch', '-c', featureBranch]);
-        if (!switched.ok) return a.fallback('branch_prepare_failed');
+      // reset-on-acquire 가 HEAD 를 detach 해두므로 여기서 반드시 다시 붙인다.
+      // `switch -c` 단독으로는 이 티켓의 branch 가 다른 slot 에서 살아남은 경우
+      // "already exists" 로 실패해 slot 이 detached 로 남았다.
+      const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef);
+      if (!attached.ok) {
+        log(
+          `[worktree] branch attach failed for shared slot ${slotName} ticket=${t8}: ${attached.action}${attached.detail ? ` — ${attached.detail}` : ''}`,
+        );
+        const failed = a.fallback('branch_prepare_failed');
+        failed.detail = attached.detail;
+        return failed;
       }
 
       reg.slots[slotName] = {
@@ -1584,8 +1796,38 @@ export class WorktreeManager {
 
   /**
    * terminal 진입 시 티켓 전용 Git 흔적을 보수적으로 정리한다.
-   * 티켓 prefix와 worktree 경로가 함께 일치하고, checkout이 clean이며,
-   * 브랜치 tip이 base에 포함된 경우에만 worktree와 로컬/origin ref를 삭제한다.
+   *
+   * 판정은 **두 축**으로 나뉜다(ticket 7b384c10) — 하나로 뭉치면 Merging 가이드를
+   * 정확히 지킨 worktree가 회수되지 않는다:
+   *  1. **경로 소유권** → *checkout을 회수해도 되는가*. worktree 경로가 관리 루트
+   *     아래 있고 마지막 세그먼트가 이 티켓의 8자 slug(또는 이 티켓이 lease한
+   *     shared slot)일 때 확정된다.
+   *  2. **branch 소유권** → *ref를 지워도 되는가*. full UUID가 들어간
+   *     `ticket/<uuid>-*` ref만 인정해 8자 prefix 충돌로 남의 branch를 지우지
+   *     않는다.
+   *
+   * 1번이 확정된 worktree를 branch **이름**으로 다시 거부하지 않는다.
+   * `merging_workflow`가 step 3에서 base branch 체크아웃을, step 5에서 로컬
+   * feature branch 삭제를 지시하므로 `[main]`(또는 detached) 위 티켓 worktree는
+   * 절차를 정상 완료한 **기대 상태**이지 소유권 부정 근거가 아니다.
+   *
+   * 회수 조건은 어느 경우든 "이 checkout을 지워서 잃는 것이 없음"이다:
+   *  - working tree가 clean해야 한다(공통).
+   *  - branch 위 checkout은 worktree를 지워도 **ref가 저장소에 남으므로** 커밋이
+   *     도달 불가가 되지 않는다. 공용 branch(main·base 등)는 이 루틴이 삭제
+   *     대상으로 삼지도 않는다.
+   *  - detached HEAD만 참조가 사라져 커밋이 도달 불가가 될 수 있으므로 base에
+   *     포함된 커밋인지 확인한다.
+   *  - 삭제 대상인 우리 티켓 branch는 기존대로 로컬·원격 양쪽 tip이 base에
+   *     포함될 때만 지운다.
+   * 우리 티켓 것도 공용 branch도 아닌 ref(=다른 티켓 branch) 위 checkout은
+   * 그대로 보류·보고한다 — 다른 티켓이 작업 중인 checkout일 수 있다.
+   *
+   * **회수 범위**: 호출자가 넘긴 `baseWorkingDir` 하나. 매니저는 자기가 관리하는
+   * 모든 agent home 에 대해 이 함수를 부르지만(`#cleanupTerminalTicketWorktrees`),
+   * 관리 범위 **밖**의 home — 다른 매니저 인스턴스 소관이거나 이벤트 시점에
+   * 연결돼 있지 않던 home — 에는 회수 주체가 없다. 의도된 결론이며 근거와 운영
+   * 대응은 `docs/worktree-orphan-cleanup.md` → "잔여물 회수 주체 — 확정" 참조.
    */
   async cleanupTerminalTicketGit(opts: {
     baseWorkingDir: string;
@@ -1616,11 +1858,14 @@ export class WorktreeManager {
       const reportOnlyBranches = new Set<string>();
       let sharedSlotOwned = false;
       let sharedSlotReady = false;
-      const ownedSharedSlots = new Map<string, string>();
+      const ownedSharedSlots = new Map<string, string | null>();
       // 이름 스캔 결과가 아니라, 이번 실행에서 ticket 경로와 full UUID ref가 함께
       // 검증된 worktree의 브랜치만 삭제 경계 안에 둔다.
       const ownedBranches = new Set<string>();
-      const ownedTicketWorktrees = new Map<string, string>();
+      // 경로 소유권이 확정된 checkout을 **경로**로 키잉한다. 값은 그 checkout이
+      // 물고 있는 우리 티켓 branch이며, base branch 위이거나 detached면 null이다
+      // (회수 대상이지만 지울 ref는 없다).
+      const ownedTicketWorktrees = new Map<string, string | null>();
       await git(entry.repo, ['fetch', '--prune', 'origin']).catch(() => {});
       const baseRef = `refs/remotes/origin/${baseBranch}`;
       const baseExists = await git(entry.repo, ['show-ref', '--verify', '--quiet', baseRef]);
@@ -1647,36 +1892,53 @@ export class WorktreeManager {
         if (isSharedSlotSeg(seg) && !isOwnedSharedSlot) continue;
         if (!isSharedSlotSeg(seg) && seg !== ticket8 && !seg.startsWith(`${ticket8}-`)) continue;
         if (isOwnedSharedSlot) sharedSlotOwned = true;
-        if (!ownsBranch(w.branch) || protectedBranches.has(w.branch)) {
-          report.heldReasons.push(`worktree 소유권 불일치: ${w.path} (${w.branch ?? 'detached'})`);
-          if (w.branch) reportOnlyBranches.add(w.branch);
+        // 여기서부터 경로 소유권은 확정됐다. branch 이름은 "이 ref를 지워도
+        // 되는가"만 가르며 회수 자격을 다시 뒤집지 않는다(ticket 7b384c10).
+        const ownedBranch = ownsBranch(w.branch) && !protectedBranches.has(w.branch) ? w.branch : null;
+        const label = w.branch ?? (w.head ? `detached ${w.head.slice(0, 8)}` : 'detached');
+        if (!ownedBranch && w.branch && !protectedBranches.has(w.branch)) {
+          // 우리 티켓 것도 저장소 공용 branch도 아니다 — 다른 티켓이 작업 중인
+          // checkout일 수 있으므로 회수하지 않고 보고만 한다.
+          report.heldReasons.push(`worktree 소유권 불일치: ${w.path} (${w.branch})`);
+          reportOnlyBranches.add(w.branch);
           continue;
         }
-        ownedBranches.add(w.branch);
+        if (!w.branch && !w.head) {
+          // HEAD를 읽지 못하면 유실이 없음을 증명할 수 없다 — fail-closed.
+          report.heldReasons.push(`worktree HEAD 확인 불가: ${w.path}`);
+          continue;
+        }
+        if (ownedBranch) ownedBranches.add(ownedBranch);
         const dirty = await git(w.path, ['status', '--porcelain', '--untracked-files=normal']);
         if (!dirty.ok || dirty.stdout.trim()) {
-          report.heldReasons.push(`dirty worktree: ${w.path} (${w.branch})`);
-          blockedBranches.add(w.branch);
+          report.heldReasons.push(`dirty worktree: ${w.path} (${label})`);
+          if (ownedBranch) blockedBranches.add(ownedBranch);
           continue;
         }
-        const merged = await git(entry.repo, ['merge-base', '--is-ancestor', w.branch, baseRef]);
-        if (!merged.ok) {
-          report.heldReasons.push(`미병합/고유 커밋: ${w.branch}`);
-          blockedBranches.add(w.branch);
-          continue;
+        // 커밋 유실 가능성 확인. 공용 branch 위 checkout은 ref가 남아 회수만으로
+        // 잃는 것이 없으므로 검사 대상이 아니다. detached HEAD는 참조가 사라지고,
+        // 우리 티켓 branch는 아래에서 ref까지 지우므로 둘 다 base 포함을 요구한다.
+        const mergeCheckRev = ownedBranch ?? (w.branch ? null : w.head);
+        if (mergeCheckRev) {
+          const merged = await git(entry.repo, ['merge-base', '--is-ancestor', mergeCheckRev, baseRef]);
+          if (!merged.ok) {
+            report.heldReasons.push(`미병합/고유 커밋: ${ownedBranch ?? `${w.path} (${label})`}`);
+            if (ownedBranch) blockedBranches.add(ownedBranch);
+            continue;
+          }
         }
         if (isOwnedSharedSlot) {
           // 원격 ref가 로컬보다 전진했을 수 있으므로 여기서는 checkout을
           // 변경하지 않는다. 양쪽 ref의 병합 가능성을 모두 확정한 뒤에만
           // 아래에서 detach하여, 보류된 active lease와 실제 checkout이
           // 계속 같은 티켓 브랜치를 가리키게 한다.
-          ownedSharedSlots.set(w.branch, w.path);
+          ownedSharedSlots.set(w.path, ownedBranch);
           continue;
         }
         // 일반 티켓 worktree도 원격 ref가 로컬보다 전진했을 수 있다.
         // 로컬·원격 ref의 병합 가능성을 모두 확정하기 전에는 경로를 제거하지
         // 않아, 어느 한쪽이라도 보존 대상일 때 checkout과 ref를 함께 보존한다.
-        ownedTicketWorktrees.set(w.branch, w.path);
+        ownedTicketWorktrees.set(w.path, ownedBranch);
       }
 
       await this.prune(entry.repo);
@@ -1717,16 +1979,16 @@ export class WorktreeManager {
       // 테스트 seam을 포함한 알려진 worktree 제거 불가 상태도 원격 ref를
       // 건드리기 전에 확정한다. 실제 제거는 원격 lease 삭제 성공 뒤 수행한다.
       const worktreeRemovalAllowed = new Map<string, boolean>();
-      for (const [branch, worktreePath] of ownedTicketWorktrees) {
-        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+      for (const [worktreePath, branch] of ownedTicketWorktrees) {
+        if (branch && blockedBranches.has(branch)) continue;
         const injectedRemoval = this.#terminalCleanupHooks.removeWorktree;
         const allowed = injectedRemoval
           ? await Promise.resolve(injectedRemoval(entry.repo, worktreePath))
           : true;
-        worktreeRemovalAllowed.set(branch, allowed);
+        worktreeRemovalAllowed.set(worktreePath, allowed);
         if (!allowed) {
           report.heldReasons.push(`worktree 삭제 실패: ${worktreePath}`);
-          blockedBranches.add(branch);
+          if (branch) blockedBranches.add(branch);
         }
       }
 
@@ -1754,27 +2016,27 @@ export class WorktreeManager {
         }
       }
 
-      for (const [branch, worktreePath] of ownedSharedSlots) {
-        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
+      for (const [worktreePath, branch] of ownedSharedSlots) {
+        if (branch && blockedBranches.has(branch)) continue;
         // warm build 산출물과 slot 자체는 보존하되, 원격 삭제까지 성공한 뒤
         // 검증된 base tip에서 detach해 원격 경쟁 실패 시 checkout을 보존한다.
         const detached = await git(worktreePath, ['switch', '--detach', baseRef]);
         if (!detached.ok) {
-          report.heldReasons.push(`shared slot detach 실패: ${worktreePath} (${branch})`);
-          blockedBranches.add(branch);
+          report.heldReasons.push(`shared slot detach 실패: ${worktreePath} (${branch ?? 'detached'})`);
+          if (branch) blockedBranches.add(branch);
           continue;
         }
         sharedSlotReady = true;
       }
 
-      for (const [branch, worktreePath] of ownedTicketWorktrees) {
-        if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
-        const removed = worktreeRemovalAllowed.get(branch) !== false
+      for (const [worktreePath, branch] of ownedTicketWorktrees) {
+        if (branch && blockedBranches.has(branch)) continue;
+        const removed = worktreeRemovalAllowed.get(worktreePath) !== false
           ? await git(entry.repo, ['worktree', 'remove', worktreePath])
           : { ok: false, stdout: '', stderr: '주입된 worktree 삭제 실패' };
         if (!removed.ok && !/is not a working tree|No such file/i.test(removed.stderr)) {
           report.heldReasons.push(`worktree 삭제 실패: ${worktreePath}`);
-          blockedBranches.add(branch);
+          if (branch) blockedBranches.add(branch);
           continue;
         }
         report.removedWorktrees++;

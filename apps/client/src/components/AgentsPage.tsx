@@ -9,6 +9,11 @@ import DirectoryPicker from './admin/DirectoryPicker';
 import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
+import {
+  reconcileRuntimeProfileSelection,
+  runtimeProfileForManagedAgentCreate,
+  type RuntimeProfileLoadState,
+} from '../utils/claudeRuntimeProfile';
 import { Button, Input, Select, Modal } from './common';
 import RuntimeConfigFields, {
   buildRuntimeConfig,
@@ -148,6 +153,7 @@ export default function AgentsPage() {
   const [managerInstances, setManagerInstances] = useState<AgentManagerInstance[]>([]);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
+  const [runtimeProfilesState, setRuntimeProfilesState] = useState<RuntimeProfileLoadState>('idle');
   const [creatingManaged, setCreatingManaged] = useState(false);
   // ST-7 directory picker — opens a modal that browses the picked manager's
   // host filesystem via the existing /api/agents/:id/fs/* reverse-RPC, so
@@ -226,6 +232,7 @@ export default function AgentsPage() {
   useEffect(() => {
     if (!showManagedModal) return;
     let alive = true;
+    setRuntimeProfilesState('loading');
     api.listAgentManagers()
       .then((rows) => { if (alive) setManagers(rows); })
       .catch(() => { if (alive) setManagers([]); });
@@ -238,12 +245,26 @@ export default function AgentsPage() {
         .catch(() => { if (alive) setCredentials([]); });
       api.getWorkspaceClaudeBackendProfiles(wsId)
         .then((data) => {
-          if (alive) setRuntimeProfiles(data.profiles.filter(p => data.allowed_profile_ids.includes(p.id)));
+          if (!alive) return;
+          const profiles = data.profiles.filter(p => data.allowed_profile_ids.includes(p.id));
+          setRuntimeProfiles(profiles);
+          setManagedForm(form => ({
+            ...form,
+            runtime_profile: reconcileRuntimeProfileSelection(form.runtime_profile, profiles),
+          }));
+          setRuntimeProfilesState('ready');
         })
-        .catch(() => { if (alive) setRuntimeProfiles([]); });
+        .catch(() => {
+          if (!alive) return;
+          setRuntimeProfiles([]);
+          setManagedForm(form => ({ ...form, runtime_profile: '' }));
+          setRuntimeProfilesState('error');
+        });
     } else {
       setCredentials([]);
       setRuntimeProfiles([]);
+      setManagedForm(form => ({ ...form, runtime_profile: '' }));
+      setRuntimeProfilesState('error');
     }
     return () => { alive = false; };
   }, [showManagedModal, wsId]);
@@ -262,6 +283,21 @@ export default function AgentsPage() {
     return Object.entries(host?.runtime_capabilities || {})
       .filter(([, health]) => health.installed && health.healthy)
       .map(([runtimeId]) => runtimeId);
+  }, [managedForm.manager_agent_id, managerInstances]);
+
+  // ticket 5851e435 — 선택된 Host가 보고한 런타임별 권한 등급 표현력.
+  // RuntimeConfigFields가 approve 선택 시 경고를 띄우는 데 쓴다.
+  const selectedPermissionTiers = useMemo(() => {
+    if (!managedForm.manager_agent_id) return undefined;
+    const host = managerInstances.find(
+      (instance) => instance.agent_id === managedForm.manager_agent_id,
+    );
+    if (!host?.runtime_capabilities) return undefined;
+    return Object.fromEntries(
+      Object.entries(host.runtime_capabilities).map(
+        ([runtimeId, health]) => [runtimeId, health.capabilities?.permission_tiers],
+      ),
+    );
   }, [managedForm.manager_agent_id, managerInstances]);
 
   // undefined([]가 아님)는 선택된 Host가 아직 hermes 프로파일을 리포트하지
@@ -332,9 +368,12 @@ export default function AgentsPage() {
       // ManagedAgentDialog's create-mode resolution (sentinel 'none' opts
       // out of board/workspace inheritance; '' / other CLIs omit the field
       // so the server falls back to inherit).
-      const cli_runtime_profile = managedForm.runtime.runtime === 'claude' && managedForm.runtime_profile
-        ? managedForm.runtime_profile
-        : undefined;
+      const cli_runtime_profile = runtimeProfileForManagedAgentCreate(
+        managedForm.runtime.runtime,
+        managedForm.runtime_profile,
+        runtimeProfiles,
+        runtimeProfilesState,
+      );
       const body: ManagedAgentCreateBody = {
         name: managedForm.name.trim(),
         cli: managedForm.runtime.runtime,
@@ -377,6 +416,8 @@ export default function AgentsPage() {
     loadSnapshot,
     showToast,
     resetManagedForm,
+    runtimeProfiles,
+    runtimeProfilesState,
   ]);
 
   // ─── Render ───────────────────────────────────────────────────
@@ -430,6 +471,7 @@ export default function AgentsPage() {
                 !managedForm.manager_agent_id ||
                 !buildRuntimeConfig(managedForm.runtime) ||
                 (managedWorkingDirRequired && !managedForm.working_dir.trim()) ||
+                runtimeProfilesState === 'loading' ||
                 creatingManaged
               }
             >
@@ -473,6 +515,7 @@ export default function AgentsPage() {
             value={managedForm.runtime}
             availableRuntimeIds={selectedRuntimeIds}
             hermesProfiles={selectedHermesProfiles}
+              permissionTiers={selectedPermissionTiers}
             disabled={!managedForm.manager_agent_id}
             onChange={(runtime) => setManagedForm((form) => ({ ...form, runtime, credential_id: '' }))}
           />

@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { MANAGED_AGENTS_DIR } from './constants.js';
 import { resolveSelfCommand } from './self-path.js';
 import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
+import { normalizeCredentialFields } from './credential-fields.js';
 
 export interface ManagedAgentDiskConfig {
   agent_id: string;
@@ -114,10 +115,17 @@ export async function readAgentCredential(agentId: string): Promise<ManagedAgent
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     if (!raw || typeof raw !== 'object') return null;
     if (typeof raw.provider !== 'string' || !raw.provider) return null;
+    // Normalize on read as well as on write: snapshots written by an older
+    // build can still hold a secret with a line break pasted into it, and the
+    // restart-from-snapshot path (reload_config) never re-fetches from AWB, so
+    // this is the only place that repair can happen for those.
+    const { fields } = normalizeCredentialFields(
+      raw.fields && typeof raw.fields === 'object' ? raw.fields : {},
+    );
     return {
       credential_id: typeof raw.credential_id === 'string' ? raw.credential_id : '',
       provider: raw.provider,
-      fields: raw.fields && typeof raw.fields === 'object' ? raw.fields : {},
+      fields,
     };
   } catch {
     return null;
@@ -129,7 +137,9 @@ export async function writeAgentCredential(
   credential: ManagedAgentCredential,
 ): Promise<void> {
   await ensureManagedAgentDir(agentId);
-  await fsp.writeFile(credentialPathFor(agentId), JSON.stringify(credential, null, 2), { mode: 0o600 });
+  const { fields } = normalizeCredentialFields(credential.fields);
+  const snapshot: ManagedAgentCredential = { ...credential, fields };
+  await fsp.writeFile(credentialPathFor(agentId), JSON.stringify(snapshot, null, 2), { mode: 0o600 });
 }
 
 export async function eraseAgentCredential(agentId: string): Promise<void> {

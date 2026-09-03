@@ -42,6 +42,14 @@ export class Resource {
   @Column({ type: 'varchar', default: '' })
   default_branch: string;
 
+  // For type='repository': per-repo clone policy (ticket bddb63ee). JSON text,
+  // same convention as Workspace/Board `harness_config` — see
+  // common/clone-policy.ts for the schema and the Resource → Workspace →
+  // system-default key-level precedence. null (the default for every existing
+  // row) = no override, so the clone runs on the system defaults.
+  @Column({ type: 'text', nullable: true, default: null })
+  clone_policy: string | null;
+
   @Column({ type: 'text', default: '' })
   content: string;
 

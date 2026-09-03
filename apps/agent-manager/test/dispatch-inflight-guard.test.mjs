@@ -717,12 +717,30 @@ test('LIVE session + two concurrent force-respawns → exactly ONE respawn, the 
   const gate = deferred();
   mgr.spawnGate = gate;
 
-  const pF1 = dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f1' }));
-  const pF2 = dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f2' }));
+  // 어느 쪽이 홀더가 될지는 정해져 있지 않으므로 settle 여부로 식별한다: 진 쪽은
+  // spawn seam 에서 즉시 드롭돼 게이트와 무관하게 먼저 settle 하고, 이긴 쪽은
+  // 게이트에 걸려 settle 하지 못한다.
+  // 거절도 settle 로 센다 — 양쪽 핸들러를 다 붙여야 곁가지 체인이 unhandled
+  // rejection 으로 남지 않는다(실패는 아래 Promise.all 이 그대로 드러낸다).
+  let settled = 0;
+  const track = (p) => { void p.then(() => { settled++; }, () => { settled++; }); return p; };
+  const pF1 = track(dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f1' })));
+  const pF2 = track(dispatcher.handleTrigger(evJson({ force_respawn: true, field_changed: 'trig-f2' })));
 
   // One force wins and holds at the spawn gate (spawnCount → 2); the other is
   // dropped at the spawn seam. Neither is suppressed at the gate (live reuse).
-  await waitFor(() => mgr.spawnCount === 2, { timeoutMs: 3000 });
+  //
+  // spawnCount===2 만 기다리면 안 된다 — 그건 **이긴** force 가 게이트에 도달했다는
+  // 뜻일 뿐, 진 force 가 seam 가드에 도달했다는 보장이 아니다. 게이트 통과 뒤의
+  // provisioning(worktree resolve / credential fetch)은 실제 I/O 라 두 strand 의
+  // 완료 순서가 고정되지 않는다. 진 쪽이 아직 provisioning 중일 때 게이트를 풀면,
+  // 이긴 쪽이 spawn 을 끝내고 _inflight 예약을 반납한 **뒤에야** 진 쪽이 도착한다 —
+  // 그때는 seam 가드가 빈 상태라 통과해서 한 번 더 spawn 한다(부하가 높은 Windows
+  // CI 에서 실측: spawnCount 3). 최종 live 세션은 여전히 하나라 제품 결함은 아니고,
+  // "동시" 라는 이 테스트의 전제가 깨진 것이다. 진 쪽이 **이미 반환**한 것까지
+  // 확인하면 그 전제가 wall-clock 추측 없이 happens-before 로 고정된다.
+  const bothReachedSeam = await waitFor(() => mgr.spawnCount === 2 && settled === 1, { timeoutMs: 3000 });
+  assert.equal(bothReachedSeam, true, '한쪽은 게이트에서 대기하고 다른 쪽은 seam에서 드롭돼야 한다');
   assert.equal(tracker.suppressedCount('inflight_dispatch'), 0, 'live forces are NOT gate-suppressed (both saw live)');
 
   gate.resolve();

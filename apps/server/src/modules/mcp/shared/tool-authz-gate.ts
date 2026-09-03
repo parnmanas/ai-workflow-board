@@ -144,6 +144,17 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // 진짜 인가는 게이트가 아니라 runner service 안 updateCriteria()의
   // requireOrchestrator() 검사다.
   update_orchestration_criteria: 'caller',
+  // 티켓 2fc8f99a: 실행 그래프 patch + 템플릿 카탈로그. 둘 다 신규 등록이라
+  // KNOWN_EXISTING_TOOLS(동결 스냅샷)에 없고, 의식적으로 'caller'를 부여한다.
+  //   - patch_orchestration_graph: 진짜 인가는 runner service patchGraph()의
+  //     requireOrchestrator() 검사다(submit_orchestration_plan과 정확히 같은 경로).
+  //     게이트는 세션리스 caller만 걸러내면 된다.
+  //   - list_orchestration_graph_templates: 미션도 workspace도 건드리지 않는
+  //     순수 상수 카탈로그라 소유권 개념 자체가 없다. 그래도 'full'로 올리지
+  //     않는 이유는 오케스트레이터 에이전트가 계획 중 읽어야 하는 값이라서다 —
+  //     'caller'가 이 파일의 최소 하한선(세션리스 거부)을 그대로 적용한다.
+  patch_orchestration_graph: 'caller',
+  list_orchestration_graph_templates: 'caller',
 
   // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
   // what the handler already enforces on its own: it resolves the caller's

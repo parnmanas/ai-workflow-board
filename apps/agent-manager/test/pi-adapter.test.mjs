@@ -281,7 +281,9 @@ test('authEnvKeys is empty (no per-agent credential ever exists to protect from 
   assert.deepEqual(a.authEnvKeys(), []);
 });
 
-test('harnessKeys supports model only (inherits the base default, matches codex/antigravity)', () => {
+test('harnessKeys supports model + permission_mode (matches antigravity)', () => {
+  // ticket 5851e435 — permission_mode 를 실제로 반영한다. 예전에는 base
+  // 기본값(['model'])이라 보드 harness 의 permission_mode 가 조용히 버려졌다.
   const a = new PiCliAdapter();
-  assert.deepEqual(a.harnessKeys(), ['model']);
+  assert.deepEqual(a.harnessKeys(), ['model', 'permission_mode']);
 });

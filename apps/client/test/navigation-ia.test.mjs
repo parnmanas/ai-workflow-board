@@ -75,3 +75,16 @@ test('desktop always keeps the primary sidebar visible', () => {
   assert.match(appLayoutSource, /const drawerMode = isMobile;/);
   assert.doesNotMatch(appLayoutSource, /const drawerMode = isMobile \|\| mode === 'chat'/);
 });
+
+test('WORK 은 Teams / Orchestrations / Boards 를 독립 라우트로 갖고 예전 경로는 리다이렉트로 남는다', () => {
+  // 티켓 03ca8b5b — Teams 가 Orchestrations 하위에서 WORK 최상위로 승격됐다.
+  // 렌더 계약은 sidebar-work-hierarchy.test.mjs 가 실제 마운트로 검증하고,
+  // 여기서는 라우트 "등록" 자체(그 테스트가 볼 수 없는 부분)를 고정한다.
+  assert.match(appSource, /path="teams" element=\{<OrchestrationTeamsPage \/>\}/);
+  assert.match(appSource, /path="orchestration" element=\{<OrchestrationPage \/>\}/);
+  assert.match(appSource, /path="orchestration\/teams" element=\{<LegacyOrchestrationTeamsRedirect \/>\}/);
+  assert.match(appSource, /path="orchestration\/missions\/:missionId" element=\{<MissionDetailPage \/>\}/);
+
+  // 사이드바에는 단수 'Orchestration' 라벨이 남지 않는다.
+  assert.doesNotMatch(sidebarSource, /label: 'Orchestration'/);
+});

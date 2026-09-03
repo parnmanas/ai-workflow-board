@@ -71,13 +71,15 @@ test('partitionHarness: claude applies the full key set', () => {
   assert.deepEqual(skipped, []);
 });
 
-test('partitionHarness: model-only adapter keeps model, skips the rest', () => {
+test('partitionHarness: antigravity keeps model + permission_mode, skips the Claude-only tool lists', () => {
+  // ticket 5851e435 — permission_mode 가 harnessKeys() 에 들어왔다. 예전에는
+  // 조용히 skip 되어, 보드가 어떤 permission_mode 를 걸어도 agy 는 언제나
+  // --dangerously-skip-permissions 로 돌았다.
   const { applied, skipped } = partitionHarness(new AntigravityCliAdapter(), FULL_HARNESS);
-  assert.deepEqual(applied, { model: 'claude-sonnet-4-6' });
+  assert.deepEqual(applied, { model: 'claude-sonnet-4-6', permission_mode: 'acceptEdits' });
   assert.deepEqual(skipped.sort(), [
     'allowed_tools',
     'disallowed_tools',
-    'permission_mode',
     'system_prompt_append',
   ]);
 });

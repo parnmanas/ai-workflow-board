@@ -62,6 +62,7 @@ import { TicketDuplicateService } from './ticket-duplicate.service';
 import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { subtaskGateBlocksExit, subtaskGateBlocksMove } from './subtask-gate';
+import { emitFocusReleased } from '../agents/focus-eligibility';
 
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
@@ -1793,6 +1794,10 @@ export class TicketsController {
       field_changed: 'archived_at',
       new_value: new Date(ticket.archived_at).toISOString(),
     });
+
+    // MCP archive_ticket 과 동일 정책 (ticket 2cc54fde) — active 컬럼 티켓을
+    // 아카이브해 풀린 focus 슬롯을 backlog 승격이 즉시 재사용하게 한다.
+    await emitFocusReleased(this.dataSource, ticket, 'archived');
 
     const updated = await loadTicketFull(this.dataSource, ticket.id);
     return res.json({ ...updated, manual: true, on_terminal: isTerminal });

@@ -31,6 +31,7 @@ import { Ticket } from '../../entities/Ticket';
 import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityService } from '../../services/activity.service';
+import { emitFocusReleased } from '../agents/focus-eligibility';
 
 export type RepoScope = DataSource | EntityManager;
 
@@ -128,6 +129,11 @@ export class TicketPrerequisitesService {
       }
     }
 
+    // 선행 등록으로 lease 가 해제되는지 판정하려면 트랜잭션 이전 값이
+    // 필요하다 — 아래 클로저가 `ticket.pending_on_tickets` 를 제자리에서
+    // 갱신하기 때문에 커밋 뒤에는 이전 값을 알 수 없다 (ticket 2cc54fde).
+    const wasPendingOnTickets = !!ticket.pending_on_tickets;
+
     // Insert (idempotent via the composite PK) inside a transaction together
     // with the `pending_on_tickets` flip + activity log so observers see a
     // consistent state.
@@ -168,6 +174,15 @@ export class TicketPrerequisitesService {
         ticket.pending_reason = reason;
       }
     });
+
+    // 미완료 선행이 생겨 `pending_on_tickets` 가 켜졌다면 이 티켓은 방금
+    // focus 후보 집합에서 빠졌다 — 곧 lease 해제다 (ticket 2cc54fde,
+    // 요구사항 1). 위 트랜잭션이 커밋된 뒤에 브로드캐스트해서, 방금 열린
+    // 슬롯을 선행 티켓이 즉시 가져갈 수 있게 한다. 이게 없으면 교착이 풀린
+    // 뒤에도 다음 level sweep(기본 5분)까지 보드가 그대로 멈춰 있다.
+    if (!wasPendingOnTickets && ticket.pending_on_tickets) {
+      await emitFocusReleased(this.dataSource, ticket, 'pending_on_tickets');
+    }
 
     // Activity log — one row per add so the timeline reads naturally.
     for (const row of added) {

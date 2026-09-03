@@ -1,5 +1,5 @@
 import React from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { useToast } from '../contexts/ToastContext';
@@ -11,9 +11,18 @@ import { NavBadge } from './common/NavBadge';
 import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
 import {
   SIDEBAR_ROOMS_BASE_COUNT,
+  nextVisibleCount,
   nextVisibleRoomCount,
+  paginateSidebarItems,
   paginateSidebarRooms,
 } from './sidebarRoomsPaging';
+import {
+  activeWorkGroupKey,
+  buildWorkNavGroups,
+  type WorkNavGroup,
+  type WorkNavGroupKey,
+} from './workNavigation';
+import { useWorkNavLists } from '../hooks/useWorkNavLists';
 
 interface SidebarProps {
   overlay: boolean;
@@ -35,6 +44,10 @@ interface NavItem {
   /** What the badge number means, for the tooltip / screen reader. */
   badgeLabel?: string;
   exact?: boolean;
+  /** 경로 접두사 규칙으로 판정할 수 없을 때 모델이 계산한 active 를 그대로 쓴다. */
+  active?: boolean;
+  /** 이름이 길어 말줄임될 때 전체 이름을 보여줄 툴팁. */
+  title?: string;
 }
 
 function roomDisplayName(room: ChatRoomListItem): string {
@@ -65,9 +78,14 @@ export default function Sidebar({
   const { user, logout, hasPermission } = useAuth();
   const { counts, countsLoaded, markTicketsReadForBoard } = useNotifications();
   const { showToast } = useToast();
+  const { teams, missions, teamsLoading, missionsLoading } = useWorkNavLists(wsId);
   const navigate = useNavigate();
   const location = useLocation();
-  const [boardsExpanded, setBoardsExpanded] = React.useState(true);
+  const [searchParams] = useSearchParams();
+  // WORK 최상위 메뉴별 접기/펼치기. 기본은 모두 펼침 — 어느 메뉴 하나만 다르게
+  // 동작하지 않도록 세 그룹이 같은 state 모양을 쓴다.
+  const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey, boolean>>>({});
+  const [visibleGroupCounts, setVisibleGroupCounts] = React.useState<Partial<Record<WorkNavGroupKey, number>>>({});
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
@@ -95,6 +113,7 @@ export default function Sidebar({
   // 이 로컬 state 가 리셋되지 않고 유지된다.
   React.useEffect(() => {
     setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
+    setVisibleGroupCounts({});
   }, [wsId]);
 
   const isPathActive = (path: string): boolean =>
@@ -108,23 +127,10 @@ export default function Sidebar({
 
   const workspaceSections: Array<{ title: string; items: NavItem[] }> = [
     {
+      // Teams / Orchestrations / Boards 는 목록을 서브메뉴로 펴는 계층형 그룹이라
+      // 평평한 items 가 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
       items: [
-        {
-          key: 'boards',
-          path: `${workspaceBase}/boards`,
-          label: 'Boards',
-          icon: 'B',
-          badge: counts.tickets.total,
-          badgeLabel: `읽지 않은 티켓 코멘트 ${counts.tickets.total}건`,
-          exact: true,
-        },
-        {
-          key: 'orchestration',
-          path: `${workspaceBase}/orchestration`,
-          label: 'Orchestration',
-          icon: 'O',
-        },
         {
           key: 'agents',
           path: `${workspaceBase}/agents`,
@@ -285,12 +291,15 @@ export default function Sidebar({
   });
 
   const renderNavItem = (item: NavItem, nested = false) => {
-    const active = item.exact ? location.pathname === item.path : isPathActive(item.path);
+    const active =
+      item.active ?? (item.exact ? location.pathname === item.path : isPathActive(item.path));
     return (
       <button
         key={item.key}
         type="button"
         onClick={() => handleNavClick(item.path)}
+        aria-current={active ? 'page' : undefined}
+        title={item.title}
         style={navRowStyle(active, nested)}
         onMouseEnter={(event) => {
           if (!active) event.currentTarget.style.background = tokens.colors.surfaceHover;
@@ -305,6 +314,146 @@ export default function Sidebar({
         </span>
         {!!item.badge && item.badge > 0 && <NavBadge count={item.badge} label={item.badgeLabel} />}
       </button>
+    );
+  };
+
+  // WORK 계층 — Teams / Orchestrations / Boards 를 그 순서대로, 각자의 목록을
+  // 서브메뉴로 펴서 보여준다(티켓 03ca8b5b).
+  const workGroups = buildWorkNavGroups({
+    workspaceBase,
+    pathname: location.pathname,
+    selectedTeamId: searchParams.get('team'),
+    teams,
+    missions,
+    boards,
+    boardUnread: counts.tickets.perBoard,
+    ticketUnreadTotal: counts.tickets.total,
+    teamsLoading,
+    missionsLoading,
+  });
+
+  // 딥링크(미션 상세 등)나 다른 화면에서 어떤 그룹의 영역으로 들어오면 접혀 있던
+  // 그 그룹을 편다 — 그러지 않으면 현재 위치를 가리키는 서브 항목이 접힌 채 숨는다.
+  // 사용자가 직접 접은 다른 그룹은 그대로 둔다.
+  const activeGroupKey = activeWorkGroupKey(workGroups);
+  React.useEffect(() => {
+    if (!activeGroupKey) return;
+    setCollapsedGroups((prev) => (prev[activeGroupKey] ? { ...prev, [activeGroupKey]: false } : prev));
+  }, [activeGroupKey]);
+
+  const subListTextStyle: React.CSSProperties = {
+    padding: '6px 14px 8px 46px',
+    fontSize: 11,
+    color: tokens.colors.textMuted,
+  };
+
+  const renderWorkGroup = (group: WorkNavGroup) => {
+    const expanded = !collapsedGroups[group.key];
+    const visibleCount = visibleGroupCounts[group.key] ?? SIDEBAR_ROOMS_BASE_COUNT;
+    const activeChildId = group.children.find((child) => child.active)?.id ?? null;
+    const { visibleItems, hiddenItems } = paginateSidebarItems(group.children, visibleCount, activeChildId);
+    const showPager = group.children.length > SIDEBAR_ROOMS_BASE_COUNT;
+
+    return (
+      <React.Fragment key={group.key}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={() => handleNavClick(group.path)}
+            aria-current={group.active ? 'page' : undefined}
+            title={group.label}
+            style={{ ...navRowStyle(group.active), width: 'auto', flex: 1, minWidth: 0 }}
+            onMouseEnter={(event) => {
+              if (!group.active) event.currentTarget.style.background = tokens.colors.surfaceHover;
+            }}
+            onMouseLeave={(event) => {
+              if (!group.active) event.currentTarget.style.background = 'transparent';
+            }}
+          >
+            <span style={iconStyle(group.active)} aria-hidden="true">{group.icon}</span>
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {group.label}
+            </span>
+            {!!group.badge && group.badge > 0 && <NavBadge count={group.badge} label={group.badgeLabel} />}
+          </button>
+          <button
+            type="button"
+            aria-label={expanded ? `Collapse ${group.label} list` : `Expand ${group.label} list`}
+            aria-expanded={expanded}
+            onClick={() => setCollapsedGroups((prev) => ({ ...prev, [group.key]: expanded }))}
+            style={{
+              width: 24,
+              height: 24,
+              marginRight: 8,
+              border: 'none',
+              borderRadius: 6,
+              background: 'transparent',
+              color: tokens.colors.textMuted,
+              cursor: 'pointer',
+              fontSize: 10,
+              flexShrink: 0,
+            }}
+          >
+            {expanded ? '\u25BC' : '\u25B6'}
+          </button>
+        </div>
+
+        {expanded && (
+          <div aria-label={`${group.label} list`}>
+            {group.loading && group.children.length === 0 ? (
+              <div style={subListTextStyle}>{`Loading ${group.label.toLowerCase()}...`}</div>
+            ) : group.children.length === 0 ? (
+              <div style={subListTextStyle}>{group.emptyLabel}</div>
+            ) : (
+              visibleItems.map((child) =>
+                renderNavItem(
+                  {
+                    key: `${group.key}-${child.id}`,
+                    path: child.path,
+                    // 목록 이름은 임의 길이라 아이콘은 그룹 아이콘을 그대로 쓰고,
+                    // 잘린 이름 전체는 title 툴팁으로 보여준다.
+                    icon: group.icon,
+                    label: child.label,
+                    title: child.label,
+                    active: child.active,
+                    badge: child.badge,
+                    badgeLabel: child.badgeLabel,
+                  },
+                  true,
+                ),
+              )
+            )}
+            {showPager && (
+              <button
+                type="button"
+                onClick={() =>
+                  setVisibleGroupCounts((prev) => ({
+                    ...prev,
+                    [group.key]: nextVisibleCount(visibleCount, group.children.length, hiddenItems.length > 0),
+                  }))
+                }
+                aria-expanded={hiddenItems.length === 0}
+                aria-label={
+                  hiddenItems.length > 0
+                    ? `${group.label} 더보기, ${hiddenItems.length}개 더 보기`
+                    : `${group.label} 목록 접기`
+                }
+                style={navRowStyle(false, true)}
+                onMouseEnter={(event) => {
+                  event.currentTarget.style.background = tokens.colors.surfaceHover;
+                }}
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  {hiddenItems.length > 0 ? `더보기 (${hiddenItems.length})` : '접기'}
+                </span>
+              </button>
+            )}
+          </div>
+        )}
+      </React.Fragment>
     );
   };
 
@@ -557,51 +706,13 @@ export default function Sidebar({
                         {`${counts.tickets.total}\uAC74 \uBAA8\uB450 \uC77D\uC74C`}
                       </button>
                     )}
-                    <button
-                      type="button"
-                      aria-label={boardsExpanded ? 'Collapse board list' : 'Expand board list'}
-                      aria-expanded={boardsExpanded}
-                      onClick={() => setBoardsExpanded((value) => !value)}
-                      style={{
-                        width: 24,
-                        height: 24,
-                        border: 'none',
-                        borderRadius: 6,
-                        background: 'transparent',
-                        color: tokens.colors.textMuted,
-                        cursor: 'pointer',
-                        fontSize: 10,
-                      }}
-                    >
-                      {boardsExpanded ? '\u25BC' : '\u25B6'}
-                    </button>
                   </div>
                 )}
               </div>
 
-              {section.items.map((item) => (
-                <React.Fragment key={item.key}>
-                  {renderNavItem(item)}
-                  {item.key === 'boards' && boardsExpanded && (
-                    <div style={{ maxHeight: 160, overflowY: 'auto' }}>
-                      {boards.length === 0 ? (
-                        <div style={{ padding: '6px 14px 8px 46px', fontSize: 11, color: tokens.colors.textMuted }}>
-                          No boards yet
-                        </div>
-                      ) : (
-                        boards.map((board) => renderNavItem({
-                          key: `board-${board.id}`,
-                          path: `${workspaceBase}/boards/${board.id}`,
-                          label: board.name,
-                          icon: 'B',
-                          badge: counts.tickets.perBoard[board.id],
-                          badgeLabel: `${board.name} 읽지 않은 코멘트 ${counts.tickets.perBoard[board.id] || 0}건`,
-                        }, true))
-                      )}
-                    </div>
-                  )}
-                </React.Fragment>
-              ))}
+              {section.title === 'Work' && workGroups.map(renderWorkGroup)}
+
+              {section.items.map((item) => renderNavItem(item))}
             </section>
           ))}
 

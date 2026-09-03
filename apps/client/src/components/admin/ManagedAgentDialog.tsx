@@ -6,6 +6,13 @@ import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
+import {
+  reconcileRuntimeProfileSelection,
+  runtimeProfileForAgentUpdate,
+  runtimeProfileForManagedAgentCreate,
+  runtimeProfileSelectionReady,
+  type RuntimeProfileLoadState,
+} from '../../utils/claudeRuntimeProfile';
 import RuntimeConfigFields, {
   buildRuntimeConfig,
   EMPTY_RUNTIME_SELECTION,
@@ -86,6 +93,8 @@ export default function ManagedAgentDialog({
   const [model, setModel] = useState<string>('');
   const [runtimeProfile, setRuntimeProfile] = useState<string>('');
   const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
+  const [runtimeProfilesState, setRuntimeProfilesState] = useState<RuntimeProfileLoadState>('idle');
+  const [runtimeProfilesReloadKey, setRuntimeProfilesReloadKey] = useState(0);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
   // 이 manager의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
@@ -93,6 +102,10 @@ export default function ManagedAgentDialog({
   // RuntimeConfigFields가 빈 드롭다운 대신 자유 입력으로 폴백할 수 있도록
   // 의도적으로 구분한다.
   const [hermesProfiles, setHermesProfiles] = useState<string[] | undefined>(undefined);
+  // ticket 5851e435 — 런타임별 권한 등급 표현력. approve 선택 시 경고를 띄운다.
+  const [permissionTiers, setPermissionTiers] = useState<
+    Record<string, Record<'strict' | 'approve' | 'trusted', string> | undefined> | undefined
+  >(undefined);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -129,16 +142,30 @@ export default function ManagedAgentDialog({
     const wsId = (mode === 'edit' && agent?.workspace_id)
       ? agent.workspace_id
       : (getActiveWorkspaceId() || '');
-    if (!wsId) { setCredentials([]); return; }
+    setRuntimeProfilesState('loading');
+    if (!wsId) {
+      setCredentials([]);
+      setRuntimeProfiles([]);
+      setRuntimeProfilesState('error');
+      return;
+    }
     let alive = true;
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
     api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
-      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
-    }).catch(() => { if (alive) setRuntimeProfiles([]); });
+      if (!alive) return;
+      const profiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
+      setRuntimeProfiles(profiles);
+      setRuntimeProfile((selected) => reconcileRuntimeProfileSelection(selected, profiles));
+      setRuntimeProfilesState('ready');
+    }).catch(() => {
+      if (!alive) return;
+      setRuntimeProfiles([]);
+      setRuntimeProfilesState('error');
+    });
     return () => { alive = false; };
-  }, [isOpen, mode, agent?.workspace_id]);
+  }, [isOpen, mode, agent?.workspace_id, runtimeProfilesReloadKey]);
 
   // Pull the owning manager's reported model lists. The manager publishes one
   // `available_models` map (cliType → ids) per instance heartbeat; we locate
@@ -162,12 +189,22 @@ export default function ManagedAgentDialog({
             .map(([runtimeId]) => runtimeId),
         );
         setHermesProfiles(match?.runtime_capabilities?.hermes?.profiles);
+        setPermissionTiers(
+          match?.runtime_capabilities
+            ? Object.fromEntries(
+                Object.entries(match.runtime_capabilities).map(
+                  ([runtimeId, health]) => [runtimeId, health.capabilities?.permission_tiers],
+                ),
+              )
+            : undefined,
+        );
       })
       .catch(() => {
         if (alive) {
           setAvailableModelsByCli({});
           setAvailableRuntimeIds([]);
           setHermesProfiles(undefined);
+          setPermissionTiers(undefined);
         }
       });
     return () => { alive = false; };
@@ -202,6 +239,10 @@ export default function ManagedAgentDialog({
       showToast('Working directory is required when "Spawn after create" is on', 'error');
       return;
     }
+    if (!runtimeProfileSelectionReady(cli, runtimeProfilesState)) {
+      showToast('Claude 프로필 목록을 확인할 수 없습니다. 다시 시도한 뒤 저장해 주세요.', 'error');
+      return;
+    }
     setBusy(true);
     try {
       if (mode === 'edit') {
@@ -231,7 +272,9 @@ export default function ManagedAgentDialog({
           credential_id: supportsCredential && credentialId ? credentialId : null,
           // null clears (CLI default); custom CLIs have no model concept.
           model: cli !== 'hermes' && model.trim() ? model.trim() : null,
-          cli_runtime_profile: cli === 'claude' ? (runtimeProfile || null) : 'none',
+          cli_runtime_profile: runtimeProfileForAgentUpdate(
+            cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
+          ),
         });
         showToast(`Agent "${trimmedName}" updated`, 'success');
 
@@ -289,7 +332,9 @@ export default function ManagedAgentDialog({
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
           model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
-          cli_runtime_profile: cli === 'claude' && runtimeProfile ? runtimeProfile : undefined,
+          cli_runtime_profile: runtimeProfileForManagedAgentCreate(
+            cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
+          ),
         });
         showToast(`Agent "${trimmedName}" created`, 'success');
 
@@ -334,7 +379,11 @@ export default function ManagedAgentDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={submit} disabled={busy}>
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={busy || !runtimeProfileSelectionReady(cli, runtimeProfilesState)}
+          >
             {isEdit ? 'Save' : 'Create'}
           </Button>
         </>
@@ -385,6 +434,7 @@ export default function ManagedAgentDialog({
           value={runtimeSelection}
           availableRuntimeIds={availableRuntimeIds}
           hermesProfiles={hermesProfiles}
+          permissionTiers={permissionTiers}
           showRuntime={false}
           onChange={setRuntimeSelection}
         />
@@ -438,11 +488,25 @@ export default function ManagedAgentDialog({
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Claude backend profile
             </label>
-            <Select value={runtimeProfile} options={[
+            <Select disabled={runtimeProfilesState !== 'ready'} value={runtimeProfile} options={[
               { value: '', label: 'Inherit board/workspace' },
               { value: 'none', label: 'None — Anthropic default' },
               ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.name })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />
+            {runtimeProfilesState === 'error' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                <span style={{ fontSize: 11, color: tokens.colors.danger }}>
+                  프로필 목록을 불러오지 못했습니다. 기존 선택은 유지되며, 목록 확인 전에는 저장할 수 없습니다.
+                </span>
+                <Button
+                  variant="ghost"
+                  onClick={() => setRuntimeProfilesReloadKey((key) => key + 1)}
+                  disabled={busy}
+                >
+                  다시 시도
+                </Button>
+              </div>
+            )}
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
               Keeps the Claude CLI/tool loop and changes only its model backend.
               {isEdit ? ' Applies after restart.' : ' Applies on first spawn.'}

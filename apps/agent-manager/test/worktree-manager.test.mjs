@@ -232,6 +232,319 @@ test('재개 티켓은 dirty 변경과 기존 브랜치를 보존하고 ahead/be
   }
 });
 
+// ── detached HEAD 복구 (ticket 15db8628) ────────────────────────────────────
+//
+// `git worktree add --detach` 로 시작한 체크아웃을 feature branch 에 붙이는
+// 마지막 한 걸음이 빠지면 디스패치가 detached HEAD 로 도착한다. 실제로 관측된
+// 형태는 두 가지이고 (worktree 재생성 / 기존 worktree 재개) 둘 다 살아남은
+// stale branch 때문에 `switch -c` 가 "already exists" 로 실패하던 경우다.
+// detached 에서 만든 커밋은 어떤 branch 에도 안 붙어 조용히 유실되므로,
+// 복구 순서는 항상 "커밋을 버리지 않는 쪽"이 우선이다.
+
+const COMMIT_ID = ['-c', 'user.email=test@awb.local', '-c', 'user.name=AWB Test'];
+
+// 커밋된 파일은 checkout/rebase 로 다시 펼쳐질 때 Windows 러너의
+// core.autocrlf 를 타므로, 내용 단언은 줄바꿈을 정규화해서 비교한다.
+async function readNormalized(...segments) {
+  return (await fsp.readFile(join(...segments), 'utf8')).replace(/\r\n/g, '\n');
+}
+
+function commit(cwd, message) {
+  git(cwd, ['add', '.']);
+  git(cwd, [...COMMIT_ID, 'commit', '-q', '-m', message]);
+  return git(cwd, ['rev-parse', 'HEAD']);
+}
+
+async function detachedFixture(label) {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, `${label}-agent-dir`);
+  const bootstrapRepo = { resourceId: 'repo-detached', url: source.remote, branch: 'main' };
+  const wm = new WorktreeManager();
+  const resolve = () => wm.resolveCwd({
+    baseWorkingDir: workingDir,
+    ticketId: TICKET_A,
+    role: 'assignee',
+    bootstrapRepo,
+  });
+  const first = await resolve();
+  assert.equal(first.isWorktree, true);
+  assert.equal(first.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+  // 매니저의 base clone 은 커미터 신원을 심지 않고, CI 러너에는 global 신원이
+  // 없다. 복구 경로의 `git rebase` 는 커밋을 만들어야 하므로 신원이 없으면
+  // "Committer identity unknown" 으로 실패한다 — 실제 호스트에는 신원이 있으니
+  // 여기서 심어 그 환경을 맞춘다. worktree 는 base clone 의 config 를 공유한다.
+  const base = join(workingDir, '.awb', 'base', 'repo-detached');
+  git(base, ['config', 'user.email', 'test@awb.local']);
+  git(base, ['config', 'user.name', 'AWB Test']);
+  return {
+    source,
+    resolve,
+    first,
+    base,
+    branch: `ticket/${TICKET_A}-work`,
+    /** origin/main 을 전진시키고 새 tip 을 돌려준다 — stale branch 재현용. */
+    advanceBase: () => {
+      git(source.repo, ['push', '-q', 'origin', 'main']);
+      return git(source.remote, ['rev-parse', 'refs/heads/main']);
+    },
+  };
+}
+
+test('worktree 만 사라지고 살아남은 stale branch 는 재생성 시 detached 로 남지 않는다', async () => {
+  const fx = await detachedFixture('recreate');
+  try {
+    // 관측된 원인: worktree 디렉터리는 정리됐지만 branch ref 는 공유 .git 에
+    // 남아 다음 `worktree add --detach` + `switch -c` 를 "already exists" 로 깬다.
+    await fsp.rm(fx.first.cwd, { recursive: true, force: true });
+    git(fx.base, ['worktree', 'prune']);
+    assert.equal(git(fx.base, ['rev-parse', '--verify', `refs/heads/${fx.branch}`]).length, 40);
+    const remoteTip = fx.advanceBase();
+
+    const second = await fx.resolve();
+    assert.equal(second.isWorktree, true, 'branch_prepare_failed 로 떨어지지 않아야 한다');
+    assert.equal(second.reason, undefined);
+    assert.equal(git(second.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(second.cwd, ['rev-parse', 'HEAD']), remoteTip, 'stale branch 가 base tip 으로 ff 된다');
+    assert.equal(second.repositoryContext.workingBranch, fx.branch);
+    assert.equal(second.repositoryContext.behind, 0);
+    assert.equal(second.repositoryContext.ahead, 0);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('재개 시 detached HEAD + stale branch 조합은 ff attach 로 복구된다', async () => {
+  const fx = await detachedFixture('resume-detached');
+  try {
+    const remoteTip = fx.advanceBase();
+    // 디스패치가 실제로 마주친 상태: worktree 는 살아 있는데 HEAD 만 detached
+    // 이고 feature branch 는 뒤처진 채 체크아웃되어 있지 않다.
+    git(fx.first.cwd, ['checkout', '--detach']);
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'HEAD');
+    // 복구가 재개 worktree 의 작업 파일을 건드리지 않는지도 함께 고정한다.
+    await fsp.writeFile(join(fx.first.cwd, 'dirty.txt'), '보존할 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(resumed.cwd, fx.first.cwd);
+    assert.equal(resumed.repositoryContext.resumed, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), remoteTip);
+    assert.equal(resumed.repositoryContext.workingBranch, fx.branch);
+    assert.equal(resumed.repositoryContext.behind, 0);
+    assert.equal(await fsp.readFile(join(resumed.cwd, 'dirty.txt'), 'utf8'), '보존할 변경\n');
+    assert.equal(resumed.repositoryContext.dirty, true);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('detached HEAD 에서 만든 커밋은 버려지지 않고 feature branch 가 그 위로 전진한다', async () => {
+  const fx = await detachedFixture('orphan-rescue');
+  try {
+    git(fx.first.cwd, ['checkout', '--detach']);
+    await fsp.writeFile(join(fx.first.cwd, 'orphan.txt'), '유실되면 안 되는 작업\n');
+    const orphanSha = commit(fx.first.cwd, 'detached 상태에서 만든 커밋');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), orphanSha, 'branch 가 고아 커밋을 흡수한다');
+    assert.ok(git(resumed.cwd, ['branch', '--contains', orphanSha]).includes(fx.branch));
+    assert.equal(await readNormalized(resumed.cwd, 'orphan.txt'), '유실되면 안 되는 작업\n');
+    assert.equal(resumed.repositoryContext.ahead, 1);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('자기 커밋이 있는 feature branch 는 detached 재개 시 base 위로 rebase 되어 attach 된다', async () => {
+  const fx = await detachedFixture('rebase-branch');
+  try {
+    await fsp.writeFile(join(fx.first.cwd, 'work.txt'), '티켓 작업\n');
+    commit(fx.first.cwd, '티켓 작업 커밋');
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    // `remoteTip..HEAD` 만 세면 rebase 여부와 무관하게 1 이라 통과해버린다 —
+    // 새 base tip 이 HEAD 에 실제로 포함됐는지(반대 방향)를 함께 봐야 rebase 가 증명된다.
+    assert.equal(git(resumed.cwd, ['rev-list', '--count', `HEAD..${remoteTip}`]), '0', 'base tip 위로 rebase 된다');
+    assert.equal(git(resumed.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', '자기 커밋 1개만 남는다');
+    assert.equal(await readNormalized(resumed.cwd, 'work.txt'), '티켓 작업\n');
+    assert.equal(resumed.repositoryContext.ahead, 1);
+    assert.equal(resumed.repositoryContext.behind, 0);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('detached HEAD 와 feature branch 가 각자 고유 커밋을 가지면 어느 쪽도 버리지 않고 실패로 올린다', async () => {
+  const fx = await detachedFixture('diverged');
+  try {
+    await fsp.writeFile(join(fx.first.cwd, 'branch-work.txt'), 'branch 쪽 작업\n');
+    const branchTip = commit(fx.first.cwd, 'branch 커밋');
+    git(fx.first.cwd, ['checkout', '--detach', 'HEAD~1']);
+    await fsp.writeFile(join(fx.first.cwd, 'detached-work.txt'), 'detached 쪽 작업\n');
+    const headTip = commit(fx.first.cwd, 'detached 커밋');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // 자동 복구를 포기했을 뿐, 양쪽 커밋은 그대로 남아 수동 복구가 가능해야 한다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', 'HEAD']), headTip);
+    assert.equal(git(fx.base, ['rev-parse', fx.branch]), branchTip);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('rebase 가 충돌로 실패하면 attach 만 하고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('rebase-conflict');
+  try {
+    // feature branch 와 base 가 같은 파일을 서로 다르게 고쳐 rebase 를 반드시 충돌시킨다.
+    await fsp.writeFile(join(fx.first.cwd, 'README.md'), '# 브랜치 쪽 편집\n');
+    commit(fx.first.cwd, '충돌을 만들 브랜치 커밋');
+    await fsp.writeFile(join(fx.source.repo, 'README.md'), '# base 쪽 편집\n');
+    git(fx.source.repo, ['add', '.']);
+    git(fx.source.repo, [...COMMIT_ID, 'commit', '-q', '-m', 'base 쪽 충돌 커밋']);
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false, '복구 미완이므로 fallback 이어야 한다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // abort 로 rebase 중간 상태는 걷혔고, branch 에는 붙어 있어 고아 커밋 위험은 없다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(existsSync(join(fx.first.cwd, '.git', 'rebase-merge')), false);
+    assert.equal(git(fx.first.cwd, ['rev-list', '--count', `${remoteTip}..HEAD`]), '1', '브랜치 커밋이 보존된다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('feature branch 가 살아 있는데 다른 branch 에 있으면 feature branch 로 되돌린다', async () => {
+  const fx = await detachedFixture('other-branch-restore');
+  try {
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(git(resumed.cwd, ['rev-parse', 'HEAD']), remoteTip);
+    assert.equal(resumed.repositoryContext.workingBranch, fx.branch);
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('다른 branch 에 커밋되지 않은 변경이 있으면 옮기지 않고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('other-branch-dirty');
+  try {
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+    await fsp.writeFile(join(fx.first.cwd, 'dirty.txt'), '옮기면 안 되는 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    // 작업물도 branch 위치도 그대로 보존된다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'scratch/딴-브랜치');
+    assert.equal(await fsp.readFile(join(fx.first.cwd, 'dirty.txt'), 'utf8'), '옮기면 안 되는 변경\n');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('feature ref 가 없으면 base branch 위여도 승인하지 않고, ref 를 되살리지도 않는다', async () => {
+  const fx = await detachedFixture('post-merge-base');
+  try {
+    // Merging 가이드 step 3·5 와 같은 모양(default 체크아웃 + feature branch 삭제).
+    // 이 계층에는 단계 신호가 없어 "Merging 이 끝난 것"과 "In Progress 인데 ref 가
+    // 실수로 사라진 것"을 구분할 수 없으므로 안전하게 실패해야 한다.
+    git(fx.first.cwd, ['switch', '-q', 'main']);
+    git(fx.first.cwd, ['branch', '-D', fx.branch]);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false, '단계 구분이 불가하므로 승인하면 안 된다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(
+      git(fx.first.cwd, ['branch', '--list', fx.branch]), '',
+      'Merging step 5 가 지운 ref 를 되살리면 안 된다',
+    );
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main', '체크아웃도 그대로 둔다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('ff merge 가 거부되면 stale 한 채로 성공 보고하지 않고 branch_prepare_failed 로 올린다', async () => {
+  const fx = await detachedFixture('ff-merge-blocked');
+  try {
+    // upstream 이 바꾼 tracked 파일에 미커밋 변경을 남긴다 — ff merge 가 거부되는 조건.
+    const remoteTip = fx.advanceBase();
+    git(fx.first.cwd, ['checkout', '--detach']);
+    await fsp.writeFile(join(fx.first.cwd, 'README.md'), '# ff 를 막는 미커밋 변경\n');
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false, 'branch 가 stale 로 남았으므로 준비 성공이 아니다');
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(classifyWorktreeOutcome(resumed).blocked, true);
+    // attach 는 되어 고아 커밋 위험은 없고, 미커밋 변경도 보존된다.
+    assert.equal(git(fx.first.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), fx.branch);
+    assert.equal(await fsp.readFile(join(fx.first.cwd, 'README.md'), 'utf8'), '# ff 를 막는 미커밋 변경\n');
+    assert.notEqual(git(fx.first.cwd, ['rev-parse', 'HEAD']), remoteTip, 'stale 상태 그대로임을 확인');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('feature branch 가 없는 채 base 도 아닌 branch 에 있으면 추측하지 않고 거부한다', async () => {
+  const fx = await detachedFixture('unknown-branch');
+  try {
+    git(fx.first.cwd, ['switch', '-q', '-c', 'scratch/딴-브랜치']);
+    git(fx.first.cwd, ['branch', '-D', fx.branch]);
+
+    const resumed = await fx.resolve();
+    assert.equal(resumed.isWorktree, false);
+    assert.equal(resumed.reason, 'branch_prepare_failed');
+    assert.equal(git(fx.first.cwd, ['branch', '--list', fx.branch]), '', '브랜치를 새로 만들지 않는다');
+  } finally {
+    await fx.source.cleanup();
+  }
+});
+
+test('shared slot 재부착도 detached HEAD 를 남기지 않는다', async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'shared-detached-agent-dir');
+  try {
+    const wm = new WorktreeManager();
+    const args = {
+      baseWorkingDir: workingDir,
+      ticketId: TICKET_A,
+      role: 'assignee',
+      mode: 'shared',
+      poolSize: 1,
+      bootstrapRepo: { resourceId: 'repo-detached', url: source.remote, branch: 'main' },
+    };
+    const first = await wm.resolveCwd(args);
+    assert.equal(first.isWorktree, true);
+    git(first.cwd, ['checkout', '--detach']);
+
+    const resumed = await wm.resolveCwd(args);
+    assert.equal(resumed.isWorktree, true);
+    assert.equal(resumed.cwd, first.cwd);
+    assert.equal(git(resumed.cwd, ['rev-parse', '--abbrev-ref', 'HEAD']), `ticket/${TICKET_A}-work`);
+    assert.equal(resumed.repositoryContext.workingBranch, `ticket/${TICKET_A}-work`);
+  } finally {
+    await source.cleanup();
+  }
+});
+
 test('repo 미연결과 fetch 실패는 서로 다른 provisioning 진단을 반환한다', async () => {
   const source = await makeRepoWithRemote();
   const workingDir = join(source.root, 'failure-agent-dir');
@@ -796,6 +1109,140 @@ test('cleanupTerminalTicketGit: 티켓 경로의 소유권 불일치 branch를 �
   }
 });
 
+/**
+ * ticket 7b384c10 — `merging_workflow` 의 step 3(base branch 체크아웃)·step 5(로컬
+ * feature branch 삭제)를 실제로 재현한다. production 의 `#detachBaseRepoHead` 와
+ * 같도록 base repo 를 먼저 detach 해야 티켓 worktree 가 base branch 를 잡을 수
+ * 있다(branch 는 한 번에 한 worktree 에서만 체크아웃된다).
+ *
+ * @param shape 'base-branch' → `[main]` 형태 leftover, 'detached' → `(detached)` 형태.
+ * @param dropRefs step 5 까지 수행할지 — false 면 feature ref 가 그대로 남는다.
+ */
+function completeMergingWorkflow(fixture, { shape, dropRefs = true }) {
+  if (shape === 'base-branch') {
+    git(fixture.base, ['checkout', '--detach', '-q']);
+    git(fixture.wt, ['switch', '-q', 'main']);
+  } else {
+    git(fixture.wt, ['switch', '-q', '--detach', 'origin/main']);
+  }
+  if (dropRefs) {
+    git(fixture.base, ['branch', '-D', fixture.branch]);
+    git(fixture.base, ['push', '-q', 'origin', '--delete', fixture.branch]);
+  }
+}
+
+for (const shape of ['base-branch', 'detached']) {
+  const shown = shape === 'base-branch' ? '(main)' : '(detached)';
+  test(`cleanupTerminalTicketGit: Merging 절차를 그대로 따른 ${shown} 형태 worktree 를 회수한다`, async () => {
+    const fixture = await makeManagedTerminalRepo(TICKET_A);
+    try {
+      completeMergingWorkflow(fixture, { shape });
+
+      const result = await new WorktreeManager().cleanupTerminalTicketGit({
+        baseWorkingDir: fixture.workingDir,
+        ticketId: TICKET_A,
+        baseBranch: 'main',
+        repositoryResourceId: 'repo-resource',
+      });
+
+      // 완료 기준 1: 수동 개입 없이 worktree 가 회수된다.
+      assert.equal(result.removedWorktrees, 1, JSON.stringify(result));
+      assert.equal(existsSync(fixture.wt), false, `${shown} leftover 가 남았다`);
+      // 원래 증상의 두 줄이 사라졌는지 직접 단언한다 — 경로 소유권이 확정된 뒤
+      // branch 이름으로 다시 거부하면 여기서 보류 사유가 생긴다.
+      assert.deepEqual(result.heldReasons, [], JSON.stringify(result));
+      assert.deepEqual(result.remainingBranches, [], JSON.stringify(result));
+      // base branch 는 애초에 소유권 보고 대상이 아니다(`잔여 브랜치: main` 노이즈).
+      assert.equal(result.remainingBranches.includes('main'), false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+test('cleanupTerminalTicketGit: base branch 위 worktree 는 티켓 ref 가 남아 있어도 회수하되 ref 는 지우지 않는다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    // step 3 만 수행하고 step 5(로컬 branch 삭제)를 건너뛴 중간 상태.
+    completeMergingWorkflow(fixture, { shape: 'base-branch', dropRefs: false });
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    // checkout 회수는 ref 상태에 더 이상 좌우되지 않는다.
+    assert.equal(result.removedWorktrees, 1, JSON.stringify(result));
+    assert.equal(existsSync(fixture.wt), false);
+    // 반면 ref 삭제 권한은 그대로다 — worktree 가 물고 있던 full UUID ref 만
+    // 지우므로, 체크아웃돼 있지 않은 ref 는 이름만으로 지우지 않는다.
+    assert.deepEqual(result.removedLocalBranches, []);
+    assert.deepEqual(result.removedRemoteBranches, []);
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.ok(result.heldReasons.includes(`소유권 미확인 브랜치 보존: ${fixture.branch}`));
+    // base branch 는 보류 사유·잔여 목록 어디에도 등장하지 않는다.
+    assert.equal(result.heldReasons.some((reason) => reason.includes('(main)')), false, JSON.stringify(result));
+    assert.equal(result.remainingBranches.includes('main'), false, JSON.stringify(result));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: base branch 위 worktree 라도 dirty 면 회수하지 않는다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    completeMergingWorkflow(fixture, { shape: 'base-branch' });
+    await fsp.writeFile(join(fixture.wt, 'dirty.txt'), '저장하지 않은 작업\n');
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.equal(result.removedWorktrees, 0, JSON.stringify(result));
+    assert.equal(existsSync(fixture.wt), true);
+    assert.ok(result.heldReasons.some((reason) => reason.startsWith('dirty worktree:')), JSON.stringify(result));
+    assert.equal(await fsp.readFile(join(fixture.wt, 'dirty.txt'), 'utf8'), '저장하지 않은 작업\n');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: base 에 없는 커밋 위의 detached worktree 는 회수하지 않는다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    // detached HEAD 는 branch ref 가 없어 checkout 을 지우면 커밋이 도달 불가가
+    // 된다 — 유일한 안전망이 이 base 포함 검사다.
+    completeMergingWorkflow(fixture, { shape: 'detached' });
+    await fsp.writeFile(join(fixture.wt, 'unique.txt'), 'detached 고유 커밋\n');
+    git(fixture.wt, ['add', '.']);
+    git(fixture.wt, ['commit', '-q', '-m', 'detached 고유 커밋']);
+    const head = git(fixture.wt, ['rev-parse', 'HEAD']);
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.equal(result.removedWorktrees, 0, JSON.stringify(result));
+    assert.equal(existsSync(fixture.wt), true);
+    assert.ok(
+      result.heldReasons.some((reason) => reason.startsWith('미병합/고유 커밋:') && reason.includes('detached')),
+      JSON.stringify(result),
+    );
+    // 커밋이 여전히 도달 가능하다 — 회수했다면 참조가 사라졌을 것이다.
+    assert.equal(git(fixture.wt, ['rev-parse', 'HEAD']), head);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 async function makeSharedTerminalRepo(ticketId) {
   const fixture = await makeRepoWithRemote();
   const workingDir = join(fixture.root, 'agent-home');
@@ -884,6 +1331,39 @@ test('shared warm slot 재할당은 remote default가 아닌 티켓 지정 baseR
     assert.equal(existsSync(join(second.cwd, 'RELEASE.md')), true);
     assert.equal(second.repositoryContext.baseBranch, 'release');
     assert.equal(second.repositoryContext.baseSha, git(second.cwd, ['rev-parse', 'origin/release']));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 이미 detach 된 shared slot 도 lease 를 해제한다', async () => {
+  const fixture = await makeSharedTerminalRepo(TICKET_A);
+  try {
+    // 매니저 재시작으로 정리가 중간에 끊겼거나 이전 실행이 detach 까지만 마친
+    // 형태. lease 는 여전히 이 티켓 것이므로 branch 이름이 없다고 해서 슬롯을
+    // 붙잡아두면 warm pool 이 영구히 굶는다(ticket 7b384c10).
+    git(fixture.wt, ['switch', '-q', '--detach', 'origin/main']);
+    git(fixture.base, ['branch', '-D', fixture.branch]);
+    git(fixture.base, ['push', '-q', 'origin', '--delete', fixture.branch]);
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    // 이 슬롯 때문에 잡히는 보류 사유가 없어야 한다. (fixture 의 resolveCwd 가
+    // 만들어 둔 고아 `-work` ref 는 체크아웃돼 있지 않아 기존대로 보고만 된다.)
+    assert.equal(
+      result.heldReasons.some((reason) => reason.startsWith('worktree 소유권 불일치:') || reason.startsWith('shared slot detach 실패:')),
+      false,
+      JSON.stringify(result),
+    );
+    assert.equal(result.removedWorktrees, 0, 'shared slot 자체는 warm pool 로 보존한다');
+    assert.equal(existsSync(fixture.wt), true);
+    const registry = JSON.parse(await fsp.readFile(join(fixture.workingDir, '.awb', 'wt', 'repo-resource', '.pool-leases.json'), 'utf8'));
+    assert.equal(registry.slots['shared-0'].active, false, JSON.stringify(registry));
   } finally {
     await fixture.cleanup();
   }

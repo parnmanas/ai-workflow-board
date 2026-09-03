@@ -15,8 +15,8 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime } from '../../utils/time';
-import OrchestrationTabs from './OrchestrationTabs';
 import { missionStyle, progressPercent } from './status';
+import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
 
 /**
  * Mission list — the landing surface of Orchestration mode.
@@ -63,6 +63,12 @@ export default function OrchestrationPage() {
   // frame would thrash the list while the user is reading it.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
     if (!data || data.workspace_id !== wsId) return;
+    // 삭제된 미션은 제자리 패치가 아니라 목록에서 빼야 한다 — 아래 분기는
+    // "아는 미션이면 패치"라서, 그대로 두면 사라진 미션이 행으로 남는다.
+    if (data.deleted) {
+      setMissions((prev) => prev.filter((m) => m.id !== data.mission_id));
+      return;
+    }
     setMissions((prev) => {
       const idx = prev.findIndex((m) => m.id === data.mission_id);
       if (idx === -1) {
@@ -94,7 +100,7 @@ export default function OrchestrationPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
-        title="Orchestration"
+        title="Orchestrations"
         description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
         actions={
           <>
@@ -113,7 +119,6 @@ export default function OrchestrationPage() {
           </>
         }
       />
-      <OrchestrationTabs wsId={wsId} active="missions" />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {loading ? (
@@ -122,7 +127,7 @@ export default function OrchestrationPage() {
           <EmptyState
             title="No teams yet"
             description="A mission runs on a team: one orchestrator agent that plans, plus the members it delegates to. Create a team first."
-            action={<Button variant="primary" onClick={() => navigate(`/ws/${wsId}/orchestration/teams`)}>Create a team</Button>}
+            action={<Button variant="primary" onClick={() => navigate(`/ws/${wsId}/teams`)}>Create a team</Button>}
           />
         ) : visible.length === 0 ? (
           <EmptyState
@@ -362,6 +367,9 @@ export function MissionFormModal({
       } else {
         showToast(mission ? 'Mission updated' : startNow ? 'Mission briefed to the orchestrator' : 'Mission saved as a draft', 'success');
       }
+      // 사이드바 WORK > Orchestrations 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b).
+      // 생성/이름변경 모두 이 한 곳을 지나므로 여기서 방송한다.
+      window.dispatchEvent(new CustomEvent(MISSIONS_CHANGED_EVENT));
       onSaved(saved);
     } catch (e: any) {
       showToast(e?.message || 'Failed to save mission', 'error');

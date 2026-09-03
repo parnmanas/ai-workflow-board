@@ -18,10 +18,15 @@ import {
   type AdapterMcpContext,
   CliAdapter,
   PARSE_STAGE,
+  type HarnessSpec,
   type OneshotSpec,
   type ParseResult,
   type SpawnDescriptor,
 } from './base.js';
+import {
+  type EffectivePermissionPolicy,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
 
 // Antigravity stores its config under `<home>/.antigravity/`.
 const ANTIGRAVITY_SUBDIR = '.antigravity';
@@ -43,14 +48,29 @@ export class AntigravityCliAdapter extends CliAdapter {
     return resolveCliBin('agy', configured);
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, model }: OneshotSpec): SpawnDescriptor {
+  /** ticket 5851e435 — 보드 harness 의 `permission_mode` 도 실제로 반영한다.
+   *  예전에는 이 키가 harnessKeys() 밖이라 조용히 버려졌고, agy 는 harness
+   *  설정과 무관하게 언제나 최고 권한으로 돌았다. */
+  harnessKeys(): ReadonlyArray<keyof HarnessSpec> {
+    return ['model', 'permission_mode'];
+  }
+
+  buildOneshotSpawn({ rolePrompt, taskText, model, permission, harness }: OneshotSpec): SpawnDescriptor {
     const fullPrompt = rolePrompt ? `${rolePrompt}\n\n${taskText}` : taskText || '';
     // `agy -p "<prompt>"` runs in non-interactive print mode; the prompt
     // is passed as a positional arg after `-p`. For long prompts we pipe
     // through stdin to avoid argv limits.
     // `--dangerously-skip-permissions` auto-approves every tool call
     // (the spawn already runs in a per-agent sandbox so external
-    // approvals are redundant).
+    // approvals are redundant) — `trusted` 등급의 매핑이다.
+    //
+    // ticket 5851e435 — agy 에는 등급을 세분화할 옵션이 없다. `approve`/
+    // `strict` 에서는 그 플래그를 **빼는 것**이 가진 수단 중 가장 가까운
+    // 동작이다(권한이 필요한 도구 호출이 자동 승인되지 않는다). `-p` 는
+    // 비대화형 print 모드라 승인 대화상자가 뜨지 않으므로 사람 없이 멈추는
+    // 일도 없다. 이 근사는 permissionCapabilities() 가
+    // `approximated` 로 선언하며(베이스 기본값), spawn 사이트가 로그로
+    // 드러낸다 — 조용한 downgrade 가 아니다.
     // Per-agent default model (Agent.model). `agy` gained `--model` in v1.0.5
     // (alongside an `agy models` subcommand); inject it when set so a model
     // chosen in the admin UI actually reaches the CLI. Omitted when unset so
@@ -58,7 +78,14 @@ export class AntigravityCliAdapter extends CliAdapter {
     // matches the claude/codex injection pattern. Antigravity is oneshot-only
     // (no persistent session), so there is no session-spawn path to mirror.
     return {
-      args: ['-p', fullPrompt, ...(model ? ['--model', model] : []), '--dangerously-skip-permissions'],
+      args: [
+        '-p',
+        fullPrompt,
+        ...(model ? ['--model', model] : []),
+        ...(permissionPolicyOrDefault(permission, harness?.permission_mode).tier === 'trusted'
+          ? ['--dangerously-skip-permissions']
+          : []),
+      ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,
       writePrompt: undefined,

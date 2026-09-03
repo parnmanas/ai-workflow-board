@@ -8,6 +8,11 @@
 // 패턴: `const { app, port, modules } = await bootApp({ port: 7800 });`
 // 이후 파일 끝에서 `t.after(() => app.close())` + `exitAfterTests()`.
 //
+// `port: 0` 을 넘기면 OS 가 빈 포트를 골라주고, 반환된 `port` 는 실제로 바인딩된
+// 포트다 — 고정 포트를 쓰지 않으므로 같은 파일이 여러 번 부팅해도 앞 서버가
+// 아직 소켓을 놓지 못한 상태와 경합하지 않는다(ticket 6a9a3fe4). 한 파일이 같은
+// 고정 포트를 두 번 이상 바인딩해야 한다면 그건 `port: 0` 을 써야 한다는 신호다.
+//
 // bootAppModuleOnly() — HTTP listen 없이 DI 그래프만 인스턴스화하는 부팅
 // (아래 자체 doc comment 참고). nest-app-boot-smoke.test.mjs가 사용한다.
 
@@ -88,6 +93,10 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   // by defaulting to a unique temp DB keyed on pid+port. Callers that set
   // SQLJS_DB_PATH explicitly (qa.controller) keep their value. Start fresh so a
   // reused pid doesn't inherit a stale file.
+  // 격리 단위는 프로세스이지 부팅이 아니다 — 이 블록은 프로세스의 첫 bootApp()
+  // 에서만 실행되므로(env 가 이미 있으면 건너뜀) 같은 파일의 두 번째 부팅은
+  // 어차피 같은 DB 를 재사용한다. 그래서 `port: 0` 이라 키의 포트 자리가 늘
+  // 0 이 되어도 프로세스 간 유일성은 pid 가 그대로 보장한다.
   if (!process.env.SQLJS_DB_PATH) {
     const isolated = path.join(os.tmpdir(), `awb-qa-${process.pid}-${port}.db`);
     try { fs.rmSync(isolated, { force: true }); } catch { /* best-effort */ }
@@ -145,8 +154,14 @@ export async function bootApp({ port = 7800, logger = false } = {}) {
   exceptionFilter.setLogService(app.get(LogService));
   app.useGlobalFilters(exceptionFilter);
   await app.listen(port, '0.0.0.0');
-  traceEvent('boot-ok', { port, duration_ms: Date.now() - t0 });
-  return { app, port, modules };
+  // 요청 포트가 아니라 **실제로 바인딩된** 포트를 회수해 돌려준다. `port: 0`
+  // (OS 가 빈 포트 배정)을 호출자가 쓸 수 있게 하는 것이 목적이다 — 요청값을
+  // 그대로 되돌려주면 0 이 나가 URL 을 만들 수 없다(ticket 6a9a3fe4). 고정
+  // 포트를 넘긴 기존 호출자에게는 두 값이 같으므로 동작이 바뀌지 않는다.
+  const boundPort = app.getHttpServer().address()?.port ?? port;
+  process.env.PORT = String(boundPort);
+  traceEvent('boot-ok', { port: boundPort, requested_port: port, duration_ms: Date.now() - t0 });
+  return { app, port: boundPort, modules };
 }
 
 // 최소 부팅 — HTTP listen 없이 DI 그래프만 인스턴스화한다.

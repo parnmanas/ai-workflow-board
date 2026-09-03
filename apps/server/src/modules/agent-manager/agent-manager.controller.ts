@@ -6,6 +6,7 @@ import { DataSource, In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { Agent } from '../../entities/Agent';
 import { Credential } from '../../entities/Credential';
+import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
@@ -29,6 +30,7 @@ import { activityEvents } from '../../services/activity.service';
 import {
   InstanceRegistryService,
   type RuntimeCapabilityDescriptor,
+  type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
 } from './instance-registry.service';
 import { PairingService } from './pairing.service';
@@ -55,6 +57,25 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'update_manager',
   'restart_manager',
 ] as const);
+
+/** 세 등급이 모두 알려진 support 값일 때만 `permission_tiers` 를 남긴다.
+ *  하나라도 빠지거나 미지의 값이면 필드 자체를 생략해 "이 Host 는 보고하지
+ *  않았다"와 같은 상태로 만든다 (ticket 5851e435). */
+function sanitizePermissionTiers(
+  input: unknown,
+): { permission_tiers?: RuntimeCapabilityDescriptor['permission_tiers'] } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const raw = input as Record<string, unknown>;
+  const tiers = {} as NonNullable<RuntimeCapabilityDescriptor['permission_tiers']>;
+  for (const name of ['strict', 'approve', 'trusted'] as const) {
+    const value = raw[name];
+    if (typeof value !== 'string' || !PERMISSION_TIER_SUPPORTS.has(value)) return {};
+    tiers[name] = value as RuntimePermissionTierSupport;
+  }
+  return { permission_tiers: tiers };
+}
+
+const PERMISSION_TIER_SUPPORTS = new Set(['native', 'approximated', 'unsupported']);
 
 function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -107,6 +128,7 @@ function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | 
             .map(String)
             .filter((value): value is 'prompt' | 'filesystem' | 'native' => skillDelivery.has(value))
         : [],
+      ...sanitizePermissionTiers(capabilities.permission_tiers),
     };
     report[runtimeId] = {
       installed: status.installed === true,
@@ -1484,7 +1506,22 @@ export class AgentManagerController {
       try {
         const decoded = JSON.parse(plaintext);
         if (decoded && typeof decoded === 'object') {
-          fields = decoded as Record<string, string>;
+          // Heal paste damage on the way out too, not only on write: a row
+          // stored by an older build can carry a hard line break inside the
+          // secret (a wrapped terminal copy of `claude setup-token`), which
+          // the manager would export verbatim as CLAUDE_CODE_OAUTH_TOKEN and
+          // every spawn of every agent on that credential would fail auth.
+          const raw = decoded as Record<string, string>;
+          fields = normalizeCredentialFields(raw);
+          const repaired = Object.keys(fields).filter((k) => fields[k] !== raw[k]);
+          if (repaired.length > 0) {
+            this.logService.warn(
+              'AgentManager',
+              `Credential cred=${cred.id.slice(0, 8)} (provider=${cred.provider}) had whitespace inside ` +
+                `field(s) ${repaired.join(',')} — served normalized. Re-save it in Settings → Credentials ` +
+                `to fix it at rest.`,
+            );
+          }
         }
       } catch {
         // Plaintext didn't parse as JSON — treat as empty fields and warn.

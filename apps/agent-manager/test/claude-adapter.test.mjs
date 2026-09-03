@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import { ClaudeCliAdapter, resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
 import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
+import { resolveEffectivePermissionPolicy } from '../dist/lib/permission-policy.js';
 
 const tempDirs = [];
 
@@ -152,24 +153,72 @@ test('Claude provider transcript 존재 여부로 최초 생성과 resume를 구
 });
 
 // ── requiresWorkspaceTrust / readTrustMeta (ticket 48aeab6e dispatch preflight) ─
+//
+// ticket 5851e435: 인자가 harness 가 아니라 effective permission policy 다.
+// 아래 policy() 헬퍼는 실제 디스패처가 쓰는 것과 같은 resolver 를 통과시킨다.
+
+const policy = (harnessMode, trust) =>
+  resolveEffectivePermissionPolicy({ harnessMode, trust });
 
 test('requiresWorkspaceTrust: no harness permission_mode → false (the default --dangerously-skip-permissions bypasses the dialog)', () => {
   const adapter = new ClaudeCliAdapter();
   assert.equal(adapter.requiresWorkspaceTrust(), false);
   assert.equal(adapter.requiresWorkspaceTrust(null), false);
-  assert.equal(adapter.requiresWorkspaceTrust({}), false);
+  assert.equal(adapter.requiresWorkspaceTrust(policy()), false);
 });
 
 test('requiresWorkspaceTrust: permission_mode explicitly bypassPermissions → false (same effect as the skip flag)', () => {
   const adapter = new ClaudeCliAdapter();
-  assert.equal(adapter.requiresWorkspaceTrust({ permission_mode: 'bypassPermissions' }), false);
+  assert.equal(adapter.requiresWorkspaceTrust(policy('bypassPermissions')), false);
 });
 
 test('requiresWorkspaceTrust: any OTHER permission_mode → true (skip flag dropped, dialog becomes load-bearing)', () => {
   const adapter = new ClaudeCliAdapter();
   for (const mode of ['default', 'acceptEdits', 'plan']) {
-    assert.equal(adapter.requiresWorkspaceTrust({ permission_mode: mode }), true, `mode=${mode}`);
+    assert.equal(adapter.requiresWorkspaceTrust(policy(mode)), true, `mode=${mode}`);
   }
+});
+
+test('requiresWorkspaceTrust: trusted Agent 는 어떤 harness 값에서도 게이트에 걸리지 않는다 (ticket 5851e435)', () => {
+  const adapter = new ClaudeCliAdapter();
+  for (const mode of ['default', 'acceptEdits', 'plan', 'manual', 'dontAsk', 'auto']) {
+    assert.equal(
+      adapter.requiresWorkspaceTrust(policy(mode, 'trusted')),
+      false,
+      `harness=${mode} 인데도 trusted Agent 가 대화형 trust 게이트에 걸렸다 — ` +
+        '이 조합이 바로 티켓이 없애려는 Pending 경로다',
+    );
+  }
+});
+
+test('requiresWorkspaceTrust: Agent trust 만으로 등급이 내려간 경우엔 새 게이트를 만들지 않는다 (ticket 5851e435)', () => {
+  const adapter = new ClaudeCliAdapter();
+  // harness 를 건드린 적 없는 보드(= 운영자가 사람 trust 승인을 요구한 적이
+  // 없다)에서 legacy 백필로 approve/strict 가 박힌 에이전트. 폴더 trust 는
+  // 도구 권한과 별개 축이므로 게이트가 새로 생기면 안 된다.
+  for (const trust of ['approve', 'strict']) {
+    assert.equal(adapter.requiresWorkspaceTrust(policy(null, trust)), false, `trust=${trust}`);
+    assert.equal(
+      adapter.requiresWorkspaceTrust(policy('bypassPermissions', trust)),
+      false,
+      `trust=${trust} harness=bypassPermissions`,
+    );
+  }
+});
+
+test('requiresWorkspaceTrust: 미인식 harness 값은 argv 와 같은 판정을 받는다 (ticket 5851e435)', () => {
+  const adapter = new ClaudeCliAdapter();
+  // 예전 구현은 미인식 값에 true 를 냈지만 permissionArgs 는 같은 값에
+  // --dangerously-skip-permissions 를 붙였다 — 게이트가 걸려도 실제 spawn 은
+  // 대화상자를 우회하므로 순수 오탐 Pending 이었다.
+  const adapterArgs = adapter.buildOneshotSpawn({
+    rolePrompt: 'r',
+    taskText: 't',
+    mcpConfigPath: '/tmp/mcp.json',
+    harness: { permission_mode: 'future-mode' },
+  }).args;
+  assert.ok(adapterArgs.includes('--dangerously-skip-permissions'));
+  assert.equal(adapter.requiresWorkspaceTrust(policy('future-mode')), false);
 });
 
 test('readTrustMeta: no .claude.json at all → confident NOT trusted (never ran interactively)', async () => {

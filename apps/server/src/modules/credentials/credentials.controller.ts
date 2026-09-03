@@ -12,6 +12,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
+import { normalizeCredentialFields } from '../../common/credential-fields';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
@@ -374,7 +375,9 @@ export class CredentialsController {
     if (!provider) return res.status(400).json({ error: 'provider is required' });
     if (!credData || typeof credData !== 'object') return res.status(400).json({ error: 'credentials object is required' });
 
-    const plaintext = JSON.stringify(credData);
+    // Strip paste damage (a wrapped terminal copy puts a newline inside the
+    // token) before it ever reaches storage — see credential-fields.ts.
+    const plaintext = JSON.stringify(normalizeCredentialFields(credData));
     const encrypted = encrypt(plaintext);
     if (decryptStrict(encrypted) !== plaintext) {
       return res.status(500).json({ error: 'Credential encryption verification failed; credential was not saved' });
@@ -427,7 +430,9 @@ export class CredentialsController {
       for (const [key, value] of Object.entries(body.credentials) as [string, string][]) {
         if (value && !isMaskedValue(value)) merged[key] = value;
       }
-      cred.encrypted_data = encrypt(JSON.stringify(merged));
+      // Normalize the merged map, not just the incoming keys: an edit is also
+      // the operator's chance to heal a value stored damaged by an older build.
+      cred.encrypted_data = encrypt(JSON.stringify(normalizeCredentialFields(merged)));
     }
 
     const saved = await this.credRepo.save(cred);

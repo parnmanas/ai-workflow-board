@@ -137,6 +137,26 @@ async function readCapture(path) {
 // events by pid — and record an exit that arrives before its waiter is
 // registered (spawn() resolving races the child's own near-instant exit
 // for these fixtures) rather than assuming registration always wins.
+
+// ── 자식 종료 대기 상한 (티켓 6fd625bb) ─────────────────────────────────────
+//
+// 이 파일의 대기 상한은 **성능 단언이 아니라 hang 진단용**이다 — 검증 대상은
+// 자식이 관측한 헤더(capture)이지 "N ms 안에 끝나는가" 가 아니다. 5000ms 는 실제
+// node 자식을 여러 개 동시에 띄우는 부하 높은 러너에서 그대로 벽시계 추측이 됐다
+// (Windows CI 실측: `did not exit within 5000ms`). 상한을 넉넉히 잡아도 진짜 hang 은
+// 여전히 읽기 좋은 실패로 끝나고, 정상 실행은 상한에 닿지 않는다.
+const EXIT_DEADLINE_MS = 30_000;
+
+/** 마감 타이머를 레이스에 붙이되, 승부가 나면 타이머를 취소한다. 취소하지 않으면
+ *  `--test-force-exit` 없이 도는 로컬 `npm test` 가 남은 타이머만큼 늦게 끝난다. */
+function withExitDeadline(promise, timeoutMs, message) {
+  const ac = new AbortController();
+  return Promise.race([
+    promise,
+    delay(timeoutMs, null, { signal: ac.signal }).then(() => assert.fail(message)),
+  ]).finally(() => ac.abort());
+}
+
 function installExitRouter(manager) {
   const already = new Map();
   const waiters = new Map();
@@ -146,12 +166,13 @@ function installExitRouter(manager) {
     if (w) { waiters.delete(info.pid); w(info); }
     else already.set(info.pid, info);
   };
-  return function waitForPidExit(pid, timeoutMs = 5000) {
+  return function waitForPidExit(pid, timeoutMs = EXIT_DEADLINE_MS) {
     if (already.has(pid)) return Promise.resolve(already.get(pid));
-    return Promise.race([
+    return withExitDeadline(
       new Promise((resolve) => waiters.set(pid, resolve)),
-      delay(timeoutMs).then(() => assert.fail(`pid ${pid} did not exit within ${timeoutMs}ms`)),
-    ]);
+      timeoutMs,
+      `pid ${pid} did not exit within ${timeoutMs}ms`,
+    );
   };
 }
 
@@ -181,10 +202,11 @@ async function spawnBaseSessionAndAwaitExit(manager, { agentContext, runtimeProf
     runtimeProfile,
   });
   assert.ok(sess, `_spawnSession(${sessionKey}) must succeed`);
-  const exitInfo = await Promise.race([
+  const exitInfo = await withExitDeadline(
     new Promise((resolve) => sess.child.once('exit', (code, signal) => resolve({ code, signal }))),
-    delay(5000).then(() => assert.fail(`${sessionKey} (pid ${sess.pid}) did not exit within 5000ms`)),
-  ]);
+    EXIT_DEADLINE_MS,
+    `${sessionKey} (pid ${sess.pid}) did not exit within ${EXIT_DEADLINE_MS}ms`,
+  );
   liveChildren--;
   assert.equal(exitInfo.code, 0, `fixture for ${sessionKey} (pid ${sess.pid}) must exit 0`);
   return exitInfo;

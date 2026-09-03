@@ -32,10 +32,17 @@ import {
   type ResolvedEffortPreset,
   type TurnImage,
   describeHarness,
+  describeSpawnArgv,
   partitionHarness,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import {
+  decideApproveDispatch,
+  describePermissionPolicy,
+  describePermissionSupport,
+  resolveEffectivePermissionPolicy,
+} from './permission-policy.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import type { AwbConfig } from './rest.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
@@ -152,6 +159,11 @@ export interface SpawnOpts {
      *  overridden by the operator's shell environment. */
     credential_provider?: string | null;
     credential_id?: string | null;
+    /** Agent trust (ticket 5851e435). `permission_mode` 가 CLI 실행 권한의
+     *  기준이 된다 — 실제 호출자는 전부 AgentExecutionContext 를 넘기므로 이미
+     *  채워져 있고, 여기서는 이 필드를 모르는 호출자를 막지 않으려고 선택적으로
+     *  선언한다. */
+    runtime_config?: { permission_mode?: string | null } | null;
   };
   /** Per-turn image attachments for chat sessions. Only honored by adapters
    *  that support inline image content blocks (Claude); other adapters
@@ -668,6 +680,37 @@ export class BaseSessionManager {
         `${this.#logTag} harness applied: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ${describeHarness(harness)}`,
       );
     }
+    // ticket 5851e435 — SubagentManager.spawn 과 동일한 precedence: Agent
+    // trust 가 harness `permission_mode` 를 이긴다. partition 이전의 raw
+    // harness 로 계산하는 이유도 같다. 세션은 spawn 시점에 플래그가 고정되므로
+    // 후속 턴은 세션이 태어난 정책을 그대로 유지한다.
+    const permission = resolveEffectivePermissionPolicy({
+      trust: agentContext?.runtime_config?.permission_mode,
+      harnessMode: rawHarness?.permission_mode,
+    });
+    log(
+      `${this.#logTag} permission policy: ${this.#keyField}=${sessionKey} ` +
+        `cli=${adapter.cliType} ${describePermissionPolicy(permission)}`,
+    );
+    const permissionGap = describePermissionSupport(
+      adapter.cliType,
+      permission,
+      adapter.permissionCapabilities(),
+    );
+    if (permissionGap) log(`${this.#logTag} permission capability: ${permissionGap}`);
+    // 리뷰 라운드2 지적 #3 — SubagentManager.spawn 과 같은 게이트. 세션 경로도
+    // approve 를 승인 없이 실행하면 안 된다.
+    const approveGate = decideApproveDispatch(permission, {
+      id: adapter.cliType,
+      native_approvals: adapter.permissionCapabilities().native_approvals,
+    });
+    if (approveGate.blocked) {
+      log(
+        `${this.#logTag} spawn refused — ${approveGate.reason}: ${this.#keyField}=${sessionKey} ` +
+          `cli=${adapter.cliType} ${approveGate.detail}`,
+      );
+      return null;
+    }
     // Ticket-level effort preset (parallel channel to harness) — pick this
     // CLI's slice. slice.model is the board-level effort intent and WINS the
     // model precedence over the harness model and the per-agent Agent.model
@@ -783,6 +826,7 @@ export class BaseSessionManager {
         harness,
         effort: effortFlag,
         ultracode,
+        permission,
       }, sessionKey).descriptor;
 
       if (descriptor.needsMcpConfig) {
@@ -870,6 +914,7 @@ export class BaseSessionManager {
           harness,
           effort: effortFlag,
           ultracode,
+          permission,
         }, sessionKey).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
@@ -927,6 +972,11 @@ export class BaseSessionManager {
       // detached 가 POSIX 전용인 이유는 subagent-manager spawn 사이트 참고:
       // win32 의 DETACHED_PROCESS 는 CREATE_NO_WINDOW 와 충돌하며, resolved
       // 바이너리가 .cmd/.bat shim 일 때 cmd 콘솔이 번쩍인다.
+      // ticket 5851e435 — subagent 경로와 같은 진단 로그(secret 제외 argv).
+      log(
+        `${this.#logTag} spawn argv: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
+          `bin=${resolvedBin} args=${describeSpawnArgv(descriptor.args)}`,
+      );
       const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
@@ -1214,6 +1264,20 @@ export class BaseSessionManager {
   }
 
   #wireStdio(sess: SessionRecord): void {
+    // child stdin 은 EPIPE 를 동기 throw 가 아니라 스트림 'error' 이벤트로
+    // 보고한다 — `_writeTurn` 의 try/catch 는 그걸 잡지 못한다. 리스너가 하나도
+    // 없으면 Node 가 uncaughtException 으로 승격시켜 **매니저 프로세스 전체**를
+    // 죽인다. CLI 자식이 첫 턴 write 와 겹쳐 죽기만 해도 그렇다(Windows CI 에서
+    // `write EPIPE` uncaughtException 으로 실측). 세션 정리는 exit/close
+    // 핸들러가 이미 책임지므로 여기서는 로깅 후 흡수해 정상 종료 경로로 넘긴다.
+    if (sess.child.stdin) {
+      sess.child.stdin.on('error', (err: any) => {
+        log(
+          `${this.#logTag} stdin error ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid}: ` +
+            `${err?.code ?? err?.message ?? err}`,
+        );
+      });
+    }
     if (sess.child.stdout) {
       const rlOut = createInterface({ input: sess.child.stdout });
       const tag = this.#logTag.replace(/^\[|\]$/g, '');

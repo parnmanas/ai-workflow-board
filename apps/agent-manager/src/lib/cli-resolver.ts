@@ -29,6 +29,18 @@
 // `cmd.exe /d /s /c` 로 감싸되 인자를 PROPERLY ESCAPED 한다(순수 `shell: true` 는
 // 인자를 escape 없이 이어붙여 codex 의 inline-TOML `-c` attribution 인자를 망가뜨림).
 //
+// 죽은 shim 건너뛰기: shim 은 "파일이 존재한다"만으로 채택되지 않는다. 배치 shim
+// 본문에서 실행 대상을 파싱해(parseWindowsShimTargets) 그 대상이 디스크에 있을
+// 때만 후보로 인정한다(windowsShimIsUsable). 계기: Claude Code 자기 업데이트가
+// `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe` 를
+// `claude.exe.old.<ts>` 로 rename 해놓고 새 바이너리를 못 떨어뜨린 호스트에서,
+// `%APPDATA%\npm\claude.cmd` 는 멀쩡히 남아 well-known 후보로 먼저 매칭됐다.
+// 위 "PATH 우선순위" 규칙 때문에 이 죽은 shim 이 PATH 상의 정상 설치(nvm 전역,
+// 같은 CLI 의 최신 버전)를 이겨서, 모든 claude dispatch 가 cmd.exe 의 로케일
+// 의존적인 "내부 또는 외부 명령이 아닙니다" 로 죽었다. 대상까지 확인하면
+// 반쯤 업데이트된 설치는 건너뛰고 다음 후보로 넘어간다. 대상을 식별하지 못하는
+// shim(알 수 없는 레이아웃, 읽기 실패)은 보수적으로 그대로 채택한다.
+//
 // Memory pin (`feedback_windows_claude_exe_only`): 진짜 `.exe` 가 어떤 shim 보다
 // 반드시 우선하고, npm 이 shim 옆에 떨어뜨리는 MSYS/확장자 없는 bash 래퍼는 절대
 // 채택하지 않는다(오직 `.cmd`/`.bat`). selectBinary 는 두 불변식을 모두 지킨다 —
@@ -36,9 +48,9 @@
 // 있는 CLI 만 배치 래퍼로 fall through 한다.
 
 import { execSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, readlinkSync } from 'node:fs';
+import { accessSync, constants as fsConstants, readFileSync, readlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, basename, win32 } from 'node:path';
+import { join, basename, posix, win32 } from 'node:path';
 import { KNOWN_CLI_TYPES } from './constants.js';
 import { log } from './logging.js';
 
@@ -48,6 +60,64 @@ const WIN_EXE_EXT = /\.exe$/i;
 // 제외한다 — powershell 스크립트는 cross-spawn 의 cmd.exe 래퍼로 실행되지 않고, npm
 // 은 항상 `.ps1` 옆에 `.cmd` 를 함께 떨어뜨린다.
 const WIN_SHIM_EXT = /\.(cmd|bat)$/i;
+
+// npm 배치 shim 안에서 shim 자신의 디렉터리를 기준으로 쓰인 인용된 경로 토큰.
+// npm 7+ 는 `SET dp0=%~dp0` 후 `%dp0%` 를, npm 6 은 `%~dp0` 를 직접 쓴다.
+const WIN_SHIM_TARGET_RE = /"(%~?dp0%?[^"]*)"/gi;
+// shim 이 참조하지만 형제로 존재할 필요가 없는 인터프리터. npm 의 JS-entrypoint
+// shim 은 `%dp0%\node.exe` 가 없으면 PATH 의 `node` 로 fall back 하도록 쓰였다
+// (`IF EXIST … ELSE SET "_prog=node"`), 그러므로 부재가 고장이 아니다.
+const WIN_SHIM_OPTIONAL_TARGET = /^node(\.exe)?$/i;
+
+/** 배치 shim 본문에서 "이 shim 이 실행하려는 대상" 경로를 뽑아낸다(ticket에서
+ *  발견된 half-updated 설치 진단용). 순수 함수 — 파일 IO 없이 unit test 한다.
+ *
+ *  대입/가드 줄은 필수 대상이 아니다: `IF EXIST "%dp0%\node.exe" (` 와
+ *  `SET "_prog=%dp0%\node.exe"` 는 인터프리터 탐색의 두 갈래일 뿐이고, 실제
+ *  실행 대상은 마지막 호출 줄의 `%dp0%\node_modules\…\cli.js` 다. 확장자 없는
+ *  토큰과 node 인터프리터도 제외한다 — 남는 것은 "없으면 반드시 깨지는" 경로뿐. */
+export function parseWindowsShimTargets(contents: string, shimPath: string): string[] {
+  // 경로 조작은 반드시 win32.* 로 한다. 이 함수는 Windows 배치 shim 만 파싱하는데,
+  // 플랫폼 기본 path.* 를 쓰면 Linux(CI, POSIX 개발기)에서 백슬래시가 구분자로
+  // 취급되지 않아 dirname 이 "." 을 돌려주고 결과가 통째로 어긋난다.
+  const shimDir = win32.dirname(shimPath);
+  const targets: string[] = [];
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (/^@?if\s+exist\b/i.test(line) || /^@?set\b/i.test(line)) continue;
+    for (const match of line.matchAll(WIN_SHIM_TARGET_RE)) {
+      const token = match[1];
+      const rest = token.replace(/^%~?dp0%?/i, '');
+      if (!rest) continue;
+      const resolved = win32.normalize(win32.join(shimDir, rest));
+      if (!/\.[a-z0-9]+$/i.test(resolved)) continue;
+      if (WIN_SHIM_OPTIONAL_TARGET.test(win32.basename(resolved))) continue;
+      if (!targets.includes(resolved)) targets.push(resolved);
+    }
+  }
+  return targets;
+}
+
+/** 배치 shim 이 실제로 실행 가능한지 — 즉 그 shim 이 가리키는 대상이 디스크에
+ *  있는지 — 판정한다. `false` 는 "이 shim 은 고장났다"는 뜻이므로, 대상을 하나도
+ *  식별하지 못한 경우(알 수 없는 shim 레이아웃, 읽기 실패)는 보수적으로 `true`.
+ *
+ *  존재 이유: Claude Code 자기 업데이트가 `bin/claude.exe` 를 `claude.exe.old.<ts>`
+ *  로 rename 해놓고 새 바이너리를 못 떨어뜨리면, shim 파일 자체는 멀쩡히 남는다.
+ *  shim 의 존재만 보던 selectBinary 는 그 죽은 shim 을 well-known 후보라는 이유로
+ *  PATH 상의 멀쩡한 설치보다 우선 고정했고(ticket ce65cf25 의 well-known-first
+ *  순서), 모든 claude dispatch 가 cmd.exe 의 "내부 또는 외부 명령이 아닙니다"
+ *  로 죽었다. 대상까지 확인하면 반쯤 업데이트된 설치는 건너뛰고 다음 후보로 간다. */
+export function windowsShimIsUsable(
+  shimPath: string,
+  opts: { read: (p: string) => string | null; exists: (p: string) => boolean },
+): boolean {
+  const contents = opts.read(shimPath);
+  if (contents === null) return true;
+  const targets = parseWindowsShimTargets(contents, shimPath);
+  if (targets.length === 0) return true;
+  return targets.every((t) => opts.exists(t));
+}
 
 /** Windows 설정값에 붙은 외부 인용부호와 중복 구분자를 제거한다. spawn 계열 API는
  * 실행 파일과 인자를 별도로 받으므로 인용부호가 경로 문자열에 남아 있으면 안 된다. */
@@ -71,6 +141,15 @@ export function assertCliExecutable(bin: string, cliType: string): void {
       `[cli-resolver:${cliType}] resolved executable is missing or not executable before spawn: ${bin}`,
     );
   }
+  // 죽은 배치 shim 은 존재 검사를 통과하고 cmd.exe 안에서 로케일 의존적인
+  // "내부 또는 외부 명령이 아닙니다" 로만 실패한다 — 여기서 어떤 대상이 없는지
+  // 이름으로 짚어주는 편이 훨씬 진단 가능하다.
+  if (isWindows && WIN_SHIM_EXT.test(bin) && !shimUsable(bin)) {
+    const missing = parseWindowsShimTargets(readTextFile(bin) ?? '', bin).filter((t) => !fileExists(t));
+    throw new Error(
+      `[cli-resolver:${cliType}] batch shim points at a missing target before spawn: ${bin} -> ${missing.join(', ')}`,
+    );
+  }
 }
 
 /** fs 존재 + 실행 가능 여부 probe. Windows 에는 실행 비트 개념이 없어
@@ -86,6 +165,34 @@ function fileExecutable(p: string | null | undefined): p is string {
   }
 }
 
+/** shim 대상 존재 확인. 대상은 `.js` 처럼 실행 비트가 없는 파일일 수도 있으므로
+ *  X_OK 가 아니라 F_OK 로 본다. */
+function fileExists(p: string): boolean {
+  try {
+    accessSync(p, fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readTextFile(p: string): string | null {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** windowsShimIsUsable 을 실제 fs 에 바인딩한 것. 건너뛴 shim 은 로그로 남긴다 —
+ *  후보를 조용히 버리면 "왜 다른 설치가 선택됐는지" 를 추적할 수 없다. */
+function shimUsable(p: string): boolean {
+  if (windowsShimIsUsable(p, { read: readTextFile, exists: fileExists })) return true;
+  const missing = parseWindowsShimTargets(readTextFile(p) ?? '', p).filter((t) => !fileExists(t));
+  log(`[cli-resolver] skipping dead batch shim ${p} (missing target: ${missing.join(', ')})`);
+  return false;
+}
+
 export interface SelectedBinary {
   bin: string;
   kind: 'exe' | 'shim' | 'literal';
@@ -98,24 +205,79 @@ export interface SelectedBinary {
  *  Windows 에선 진짜 `.exe` 가 항상 이기고, 목록 어디에도 `.exe` 가 없을 때만
  *  `.cmd`/`.bat` shim 을 쓴다. POSIX 에선 실행 가능한 파일이면 무엇이든 이긴다.
  *  실행 가능한 것이 하나도 없으면 literal CLI 이름으로 fallback 한다(그 결과의
- *  ENOENT 는 호출자의 spawn error 리스너가 흡수). */
+ *  ENOENT 는 호출자의 spawn error 리스너가 흡수).
+ *
+ *  shim 은 존재만으로 채택되지 않는다 — `shimUsable` 로 그 shim 이 가리키는
+ *  대상까지 확인하고, 대상이 없는 죽은 shim(반쯤 끝난 자기 업데이트가 남긴
+ *  잔해)은 건너뛰어 다음 후보로 넘어간다. 기본값은 "항상 사용 가능" 이라 이
+ *  검사를 주입하지 않는 호출자의 동작은 그대로다. */
 export function selectBinary(
   cliType: string,
   sources: Array<string | null | undefined>,
-  opts: { isWindows: boolean; exists: (p: string) => boolean },
+  opts: {
+    isWindows: boolean;
+    exists: (p: string) => boolean;
+    shimUsable?: (p: string) => boolean;
+  },
 ): SelectedBinary {
+  // 모듈 스코프의 fs 바인딩 `shimUsable` 을 가리지 않도록 이름을 달리 둔다.
+  const isShimUsable = opts.shimUsable ?? (() => true);
   let shim: string | null = null;
   for (const p of sources) {
     if (!p) continue;
     if (opts.isWindows) {
       if (WIN_EXE_EXT.test(p) && opts.exists(p)) return { bin: p, kind: 'exe' };
-      if (!shim && WIN_SHIM_EXT.test(p) && opts.exists(p)) shim = p;
+      if (!shim && WIN_SHIM_EXT.test(p) && opts.exists(p) && isShimUsable(p)) shim = p;
     } else if (opts.exists(p)) {
       return { bin: p, kind: 'exe' };
     }
   }
   if (shim) return { bin: shim, kind: 'shim' };
   return { bin: cliType, kind: 'literal' };
+}
+
+/** `where` / `command -v` 를 쓰지 않는 순수 PATH 스캔. shell lookup 이 timeout
+ *  이나 spawn 실패로 빈손일 때만 쓰이는 fallback 이며, 같은 후보 목록을
+ *  서브프로세스 없이 만들어낸다.
+ *
+ *  Windows 에서는 PATHEXT 의 각 확장자를 순서대로 붙여 본다 — cmd.exe 가 bare
+ *  `codex` 를 찾을 때 쓰는 규칙과 같다. POSIX 에서는 확장자 없이 실행 비트만
+ *  본다. 순수 함수 + `exists` 주입이라 실제 호스트 설치 없이 unit test 할 수
+ *  있다(board lesson: CLI resolver 테스트는 호스트 설치에 의존하지 말 것). */
+export function scanPathForBinary(
+  cliType: string,
+  pathValue: string | null | undefined,
+  opts: {
+    isWindows: boolean;
+    pathExt?: string | null;
+    exists: (p: string) => boolean;
+  },
+): string[] {
+  if (!pathValue) return [];
+  const sep = opts.isWindows ? ';' : ':';
+  // 플랫폼 기본 `join` 이 아니라 **명시적으로** 분기한다 — win32 호스트에서
+  // 기본 join 은 POSIX 입력도 `\\` 로 붙여 버려, isWindows=false 계약이 호스트에
+  // 따라 달라진다(Windows CI 에서 실측한 실패).
+  const pathJoin = opts.isWindows ? win32.join : posix.join;
+  const suffixes = opts.isWindows
+    ? (opts.pathExt || '.COM;.EXE;.BAT;.CMD')
+        .split(';')
+        .map((ext) => ext.trim())
+        .filter(Boolean)
+    : [''];
+
+  const hits: string[] = [];
+  for (const rawDir of pathValue.split(sep)) {
+    // Windows PATH 항목은 인용부호가 붙어 있을 수 있고, 빈 항목(중복 구분자)은
+    // "현재 디렉터리" 로 해석되면 안 되므로 건너뛴다.
+    const dir = rawDir.trim().replace(/^"(.*)"$/, '$1');
+    if (!dir) continue;
+    for (const suffix of suffixes) {
+      const candidate = pathJoin(dir, `${cliType}${suffix}`);
+      if (opts.exists(candidate) && !hits.includes(candidate)) hits.push(candidate);
+    }
+  }
+  return hits;
 }
 
 /** well-known 설치 후보를 shell PATH lookup 결과보다 앞에 둔다(ticket ce65cf25).
@@ -250,11 +412,28 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
       if (t) pathHits.push(t);
     }
   } catch {
-    /* shell 또는 spawn 실패 — well-known candidate 로 계속 시도한다 */
+    /* shell 또는 spawn 실패 — 아래 순수 PATH 스캔으로 계속 시도한다 */
+  }
+
+  // 위 shell lookup 은 서브프로세스라 호스트 부하에 좌우된다. 부하가 높으면
+  // 2000ms timeout 에 걸려 빈손으로 돌아오고, well-known 위치에도 없는 CLI 는
+  // PATH 에 멀쩡히 설치돼 있는데도 "executable not found" 로 죽었다
+  // (Windows CI 실측: `where codex` 가 timeout → resolveCliBin throw). PATH 를
+  // 직접 훑는 fallback 은 서브프로세스 없이 같은 후보를 결정적으로 만들어낸다.
+  // 성공 경로의 순서·의미론은 그대로다 — shell lookup 이 결과를 낸 경우 이
+  // 스캔은 아예 돌지 않는다.
+  if (pathHits.length === 0) {
+    pathHits.push(
+      ...scanPathForBinary(ct, process.env.PATH, {
+        isWindows,
+        pathExt: process.env.PATHEXT,
+        exists: fileExecutable,
+      }),
+    );
   }
 
   const sources = orderResolutionSources(wellKnown, pathHits);
-  const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable });
+  const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable, shimUsable });
   cache.set(key, picked.bin);
   if (picked.kind === 'literal') {
     throw new Error(

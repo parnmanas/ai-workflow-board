@@ -19,8 +19,12 @@ const flush = async () => act(async () => { await new Promise(resolve => setTime
 
 function deferred() {
   let resolve;
-  const promise = new Promise(resolvePromise => { resolve = resolvePromise; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function change(element, value) {
@@ -66,6 +70,13 @@ function button(container, label) {
   return found;
 }
 
+function checkbox(container, label) {
+  const owner = [...container.querySelectorAll('label')].find(item => item.textContent?.includes(label));
+  const input = owner?.querySelector('input[type="checkbox"]');
+  assert.ok(input, `${label} 체크박스를 찾을 수 없습니다.`);
+  return input;
+}
+
 test('신규 Credential을 이름으로 검색·선택하고 create payload에는 UUID만 저장한다', async (t) => {
   const { container } = await renderManager(t);
   const calls = [];
@@ -76,7 +87,7 @@ test('신규 Credential을 이름으로 검색·선택하고 create payload에�
   typeInto(search, '개발');
   assert.deepEqual([...credentialSelect(container).options].map(option => option.textContent), ['선택하지 않음', '개발 API · anthropic']);
   change(credentialSelect(container), 'credential-b');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
 
   assert.equal(calls.length, 1);
@@ -92,7 +103,7 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
   click(button(container, '기존 프로필'));
   assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
   change(credentialSelect(container), 'credential-b');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
   assert.equal(calls[0].id, 'profile-1');
   assert.equal(calls[0].payload.credential_ref, 'credential-b');
@@ -100,9 +111,80 @@ test('기존 값의 이름을 표시하고 변경 및 해제를 PATCH UUID/null 
 
   click(button(container, '기존 프로필'));
   change(credentialSelect(container), '');
-  click(button(container, 'Save profile'));
+  click(button(container, '프로필 저장'));
   await flush();
   assert.equal(calls[1].payload.credential_ref, null);
+});
+
+test('Claude 고유 필드와 adapter JSON을 create payload에 손실 없이 전달한다', async (t) => {
+  const { container } = await renderManager(t);
+  const calls = [];
+  api.createClaudeBackendProfile = async payload => { calls.push(payload); };
+
+  typeInto(container.querySelector('input[aria-label="Stable ID"]'), 'new-profile');
+  typeInto(container.querySelector('input[aria-label="Name"]'), '신규 프로필');
+  typeInto(container.querySelector('input[aria-label="Model"]'), 'claude-new');
+  typeInto(container.querySelector('input[aria-label="Base URL"]'), 'https://new.example.test');
+  typeInto(container.querySelector('input[aria-label="Auth environment variable"]'), 'CUSTOM_CLAUDE_TOKEN');
+  click(checkbox(container, 'Credential required'));
+  click(checkbox(container, 'Do not set effort'));
+  typeInto(container.querySelector('textarea'), '{"request":{"model_field":"deployment"}}');
+  click(button(container, '프로필 저장'));
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].auth_env, 'CUSTOM_CLAUDE_TOKEN');
+  assert.equal(calls[0].credential_required, true);
+  assert.equal(calls[0].omit_effort, true);
+  assert.deepEqual(calls[0].adapter, { request: { model_field: 'deployment' } });
+});
+
+test('Claude 고유 필드와 adapter JSON을 update payload에 손실 없이 유지한다', async (t) => {
+  const profile = {
+    ...existingProfile,
+    protocol: 'openai-compatible',
+    credential_required: true,
+    omit_effort: true,
+    auth_env: 'CUSTOM_CLAUDE_TOKEN',
+    adapter: { request: { model_field: 'deployment' } },
+  };
+  const { container } = await renderManager(t, { profiles: [profile] });
+  const calls = [];
+  api.updateClaudeBackendProfile = async (id, payload) => { calls.push({ id, payload }); };
+
+  click(button(container, '기존 프로필'));
+  click(button(container, '프로필 저장'));
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, profile.id);
+  assert.equal(calls[0].payload.auth_env, 'CUSTOM_CLAUDE_TOKEN');
+  assert.equal(calls[0].payload.credential_required, true);
+  assert.equal(calls[0].payload.omit_effort, true);
+  assert.deepEqual(calls[0].payload.adapter, { request: { model_field: 'deployment' } });
+  assert.equal('credential_status' in calls[0].payload, false);
+});
+
+test('저장 중 버튼을 잠그고 실패 후 다시 저장할 수 있게 복구한다', async (t) => {
+  const { container } = await renderManager(t);
+  const pending = deferred();
+  let calls = 0;
+  api.createClaudeBackendProfile = () => {
+    calls += 1;
+    return pending.promise;
+  };
+
+  const save = button(container, '프로필 저장');
+  click(save);
+  assert.equal(calls, 1);
+  assert.equal(save.disabled, true);
+  assert.ok(save.querySelector('[aria-hidden="true"]'));
+  click(save);
+  assert.equal(calls, 1, '저장 중 중복 요청을 보내면 안 됩니다.');
+
+  await act(async () => { pending.reject(new Error('의도한 저장 실패')); });
+  assert.equal(save.disabled, false);
+  assert.equal(save.querySelector('[aria-hidden="true"]'), null);
 });
 
 test('유효하지 않은 기존 참조를 명시하고 다른 Credential 선택 또는 해제를 허용한다', async (t) => {
@@ -154,4 +236,23 @@ test('목록 로딩 중에도 기존 참조가 빈 선택으로 보이지 않는
     await pending.promise;
   });
   assert.equal(credentialSelect(container).selectedOptions[0].textContent, '운영 Claude · claude_oauth_token');
+});
+
+test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 편집 취소 시 신규 상태로 돌아간다', async (t) => {
+  const { container } = await renderManager(t, { profiles: [existingProfile] });
+
+  const manager = container.querySelector('[data-testid="claude-profile-manager"]');
+  const columns = container.querySelector('[data-layout="responsive-profile-columns"]');
+  assert.ok(manager);
+  assert.ok(columns);
+  assert.equal(columns.style.display, 'flex');
+  assert.equal(columns.style.flexWrap, 'wrap');
+  assert.ok(container.querySelector('input[aria-label="Stable ID"]'));
+  assert.ok(container.querySelector('select[aria-label="Protocol"]'));
+
+  click(button(container, '기존 프로필'));
+  assert.match(container.textContent, /기존 프로필 편집/);
+  click(button(container, '취소'));
+  assert.match(container.textContent, /프로필 만들기/);
+  assert.equal(container.querySelector('input[aria-label="Stable ID"]').value, '');
 });

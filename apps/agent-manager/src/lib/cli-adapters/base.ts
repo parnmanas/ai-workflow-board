@@ -10,6 +10,20 @@
 //     back to AWB through the manager's REST connection)
 
 import type { ChildProcess, StdioOptions } from 'node:child_process';
+import {
+  type EffectivePermissionPolicy,
+  type PermissionCapabilities,
+  BYPASS_ONLY_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
+
+export {
+  BYPASS_ONLY_PERMISSION_CAPABILITIES,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+};
+export type { EffectivePermissionPolicy, PermissionCapabilities };
 
 export const ADAPTER_CAPABILITIES = Object.freeze({
   /** Bidirectional stream-json over stdin/stdout, multi-turn over one process. */
@@ -288,6 +302,122 @@ export function describeHarness(harness: HarnessSpec): string {
   return parts.join(' ');
 }
 
+/** argv 토큰 중 그 자체가 secret 이거나 secret 을 품을 수 있는 모양. 아래
+ *  판정을 통과한 값에도 마지막으로 한 번 더 적용되는 안전망이다. */
+const SECRET_ARG_PATTERN = /(authorization|api[-_]?key|auth[-_]?token|access[-_]?token|bearer|secret|password|credential)/i;
+
+/**
+ * **다음 토큰을 값으로 소비하는** 플래그 (리뷰 라운드2 지적 #1).
+ *
+ * 이 목록이 필요한 이유: "`-` 로 시작하면 플래그"라는 판정은 값 위치에서 그대로
+ * 우회된다. antigravity/pi 는 `-p <prompt>` 로 프롬프트를 싣는데 그 프롬프트가
+ * `--`로 시작하면 본문 전체가 평문으로 찍혔다. 값 위치에서는 선행 `-` 를
+ * 절대 플래그로 재해석하지 않는다.
+ */
+const VALUE_FLAGS = new Set([
+  '-p', '-c', '--cd',
+  '--model', '--effort',
+  '--output-format', '--input-format',
+  '--mcp-config', '--allowedTools', '--disallowedTools', '--append-system-prompt',
+  '--permission-mode', '--sandbox',
+  '--resume', '--session-id',
+]);
+
+/** 값을 받지 않는 플래그. 이 둘 중 어디에도 없는 `-`로 시작하는 토큰은
+ *  플래그가 아니라 값으로 취급해 가린다(기본 차단). */
+const BOOLEAN_FLAGS = new Set([
+  '--print', '--verbose', '--strict-mcp-config',
+  '--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox',
+  '--skip-git-repo-check', '--json', '--approve', '--no-session',
+]);
+
+/**
+ * 값까지 남겨도 되는 플래그와 그 **허용 형식**. 전부 닫힌 열거형이라 사용자
+ * 데이터가 들어올 수 없다 — 형식 검증을 통과하지 못한 값은 열거형이 아니라는
+ * 뜻이므로 그대로 가린다.
+ *
+ * `--model` 은 일부러 빠져 있다: 모델 id 는 각 CLI 가 자체 검증하는 자유
+ * 문자열이라 `sk-ant-…` 같은 토큰과 형식으로 구분할 수 없다. 모델은 이미
+ * 별도 진단 로그 라인(Agent context / model chain)이 싣는다.
+ */
+const LOGGABLE_FLAG_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['--permission-mode', new Set(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])],
+  ['--sandbox', new Set(['read-only', 'workspace-write', 'danger-full-access'])],
+  ['--output-format', new Set(['stream-json', 'json', 'text'])],
+  ['--input-format', new Set(['stream-json', 'json', 'text'])],
+  ['--effort', new Set(['low', 'medium', 'high', 'max'])],
+]);
+
+/** codex 의 `-c` 는 임의 config 오버라이드를 싣는 다목적 플래그라(같은 플래그로
+ *  MCP 헤더 테이블도 넘어간다) 플래그 이름만으로는 안전을 보장할 수 없다.
+ *  권한 진단에 필요한 승인 정책만 값 모양으로 통과시킨다. */
+const LOGGABLE_CONFIG_OVERRIDE = /^approval_policy="(never|on-request|on-failure|untrusted)"$/;
+
+/** 플래그가 아닌데도 값까지 남겨도 되는 리터럴(서브커맨드). 프롬프트 같은
+ *  positional 인자와 구분하기 위해 명시 목록으로만 허용한다. */
+const LOGGABLE_LITERALS = new Set(['exec']);
+
+/**
+ * spawn argv 를 진단 로그에 남길 수 있는 형태로 축약한다 (ticket 5851e435).
+ *
+ * 규칙은 **기본 차단**이며, 토큰의 모양이 아니라 **위치**로 판정한다:
+ *   - 바로 앞 토큰이 {@link VALUE_FLAGS} 면 이번 토큰은 무조건 *값*이다. 선행
+ *     `-` 가 있어도 플래그로 재해석하지 않는다.
+ *   - 값 위치에서는 {@link LOGGABLE_FLAG_VALUES} 의 열거형 검증을 통과한
+ *     값과 허용된 `-c` 오버라이드만 남고, 나머지는 길이만 `<Nch>` 로 남는다.
+ *   - 값 위치가 아닌 토큰은 알려진 플래그 이름({@link VALUE_FLAGS} /
+ *     {@link BOOLEAN_FLAGS})이거나 {@link LOGGABLE_LITERALS} 일 때만 그대로
+ *     남는다. 그 밖은 — `-` 로 시작하든 아니든 — 전부 값으로 보고 가린다.
+ *   - 어디에 있든 secret 모양 토큰은 길이도 남기지 않고 `<redacted>` 다.
+ *
+ * 플래그 이름이 보여야 권한 플래그가 실제로 붙었는지 로그만으로 확인할 수 있고,
+ * 그 외 모든 것(프롬프트 본문, task text, 모델 id, 도구 목록, 경로, 토큰)은
+ * 내용을 드러내지 않는다.
+ */
+export function describeSpawnArgv(args: readonly string[] | null | undefined): string {
+  const list = args ?? [];
+  return list.map((arg, i) => redactSpawnArg(String(arg ?? ''), String(list[i - 1] ?? ''))).join(' ');
+}
+
+/** `--flag=value` 결합형에서 플래그 이름만 떼어낸다(결합형이 아니면 null). */
+function splitInlineFlag(arg: string): { flag: string; value: string } | null {
+  if (!arg.startsWith('-')) return null;
+  const eq = arg.indexOf('=');
+  return eq > 0 ? { flag: arg.slice(0, eq), value: arg.slice(eq + 1) } : null;
+}
+
+/** 이 값이 해당 플래그의 허용 형식인가. 플래그가 열거형을 갖지 않으면 항상 false. */
+function isLoggableValue(flag: string, value: string): boolean {
+  if (flag === '-c') return LOGGABLE_CONFIG_OVERRIDE.test(value);
+  return LOGGABLE_FLAG_VALUES.get(flag)?.has(value) === true;
+}
+
+function redactSpawnArg(arg: string, previous: string): string {
+  if (!arg) return "''";
+  if (SECRET_ARG_PATTERN.test(arg)) return '<redacted>';
+
+  // 값 위치 — 선행 `-` 를 플래그로 재해석하지 않는다.
+  if (VALUE_FLAGS.has(previous)) {
+    return isLoggableValue(previous, arg) ? quoteIfNeeded(arg) : `<${arg.length}ch>`;
+  }
+
+  const inline = splitInlineFlag(arg);
+  if (inline && (VALUE_FLAGS.has(inline.flag) || BOOLEAN_FLAGS.has(inline.flag))) {
+    return isLoggableValue(inline.flag, inline.value)
+      ? quoteIfNeeded(arg)
+      : `${inline.flag}=<${inline.value.length}ch>`;
+  }
+
+  // 알려진 플래그 이름만 그대로 남는다. 모르는 `-...` 토큰은 값으로 본다.
+  if (VALUE_FLAGS.has(arg) || BOOLEAN_FLAGS.has(arg)) return arg;
+  if (LOGGABLE_LITERALS.has(arg)) return arg;
+  return `<${arg.length}ch>`;
+}
+
+function quoteIfNeeded(value: string): string {
+  return /\s/.test(value) ? JSON.stringify(value) : value;
+}
+
 export interface OneshotSpec {
   rolePrompt: string;
   taskText: string;
@@ -319,6 +449,12 @@ export interface OneshotSpec {
    *  task text so the spawned Claude Code subagent enters multi-agent
    *  orchestration. NOT a flag. Ignored by non-claude adapters. */
   ultracode?: boolean;
+  /** 이 spawn 의 effective permission policy (ticket 5851e435). Agent trust
+   *  (`runtime_config.permission_mode`)와 보드 harness `permission_mode` 를
+   *  spawn 사이트의 resolveEffectivePermissionPolicy() 가 하나로 합친 값이며,
+   *  어댑터는 `policy.tier` 를 자기 권한 플래그로 매핑한다. null/미설정이면
+   *  harness 로 폴백하고, 그마저 없으면 매니저의 종전 기본값(trusted)이다. */
+  permission?: EffectivePermissionPolicy | null;
 }
 
 export interface McpAttribution {
@@ -347,6 +483,9 @@ export interface SessionSpec {
    *  session the keyword is folded into the composed system prompt at session
    *  creation only. */
   ultracode?: boolean;
+  /** effective permission policy — OneshotSpec.permission 참고. 세션 생성
+   *  시점에만 적용된다(권한 플래그는 spawn 에서 고정). */
+  permission?: EffectivePermissionPolicy | null;
 }
 
 export interface SpawnDescriptor {
@@ -578,17 +717,35 @@ export abstract class CliAdapter {
   }
 
   /**
-   * True when the CLI would surface an interactive workspace-trust dialog for
-   * THIS dispatch — i.e. the CLI has a trust-dialog concept AND the resolved
-   * harness does not bypass it (ticket 48aeab6e's dispatch preflight consults
-   * this before spending an I/O read on {@link readTrustMeta}).
+   * 이 어댑터가 각 권한 등급을 얼마나 충실히 표현할 수 있는가
+   * (ticket 5851e435). 'native' 가 아닌 등급은 spawn 사이트가 반드시 로그로
+   * 드러낸다 — 조용한 downgrade/upgrade 금지가 이 티켓의 요구사항이다.
    *
-   * Base default false: codex / antigravity / pi always spawn under a
-   * hardcoded dangerously-bypass flag (see their buildOneshotSpawn) with no
-   * analogous trust gate at all, so trust is never a concern for them
-   * regardless of harness. ClaudeCliAdapter overrides.
+   * 베이스 기본값은 "최고 권한만 표현 가능": 이 어댑터 계열은 원래 하드코딩된
+   * bypass 플래그 하나로만 돌았기 때문이다. 세 등급을 모두 전용 플래그로
+   * 표현하는 claude/deepseek/codex 가 이를 오버라이드한다.
    */
-  requiresWorkspaceTrust(_harness?: HarnessSpec | null): boolean {
+  permissionCapabilities(): PermissionCapabilities {
+    return BYPASS_ONLY_PERMISSION_CAPABILITIES;
+  }
+
+  /**
+   * 이 디스패치에서 CLI 가 대화형 workspace-trust 대화상자를 띄우게 되는가
+   * (ticket 48aeab6e 의 dispatch preflight 가 {@link readTrustMeta} 의 I/O
+   * 읽기를 쓰기 전에 이 값을 먼저 본다).
+   *
+   * ticket 5851e435 — 인자가 harness 가 아니라 effective permission policy 다.
+   * 게이트가 걸리는 조건은 **보드 harness 가 명시적으로 비-bypass 모드를
+   * 요구했고(= 운영자가 사람이 직접 trust 를 승인하길 원했고), 그 위에 얹힌
+   * Agent trust 도 그 요구를 뒤집지 않은 경우**뿐이다. Agent trust 하나만으로
+   * 등급이 내려간 경우(예: legacy 백필로 `approve` 가 박힌 에이전트)는 폴더
+   * trust 와 무관하므로 게이트를 걸지 않는다 — 그 조합이 Pending 을 만들면
+   * 이 티켓이 없애려는 바로 그 실패 모드가 재현된다.
+   *
+   * 베이스 기본값 false: codex / antigravity / pi 에는 애초에 이에 대응하는
+   * trust 대화상자 개념이 없다. ClaudeCliAdapter 가 오버라이드한다.
+   */
+  requiresWorkspaceTrust(_policy?: EffectivePermissionPolicy | null): boolean {
     return false;
   }
 

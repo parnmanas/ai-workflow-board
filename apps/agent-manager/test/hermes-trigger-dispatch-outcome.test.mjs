@@ -335,6 +335,9 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
     url: 'https://github.com/acme/GameClient.git',
     branch: 'master',
     credential: { username: 'game-token', token: 'secret' },
+    // ticket bddb63ee: wire 에 clone_policy 가 없으면 null 이 넘어가고, 매니저가
+    // 자신의 시스템 기본값(clone timeout 60분)을 쓴다 — 구버전 서버와 동일 동작.
+    clonePolicy: null,
   });
   assert.deepEqual(calls.checkout, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
   assert.deepEqual(calls.push, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
@@ -342,4 +345,61 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
   assert.match(repositoryCredentialRequests[0], /resources\/gameclient-resource\/git-credential/);
   assert.match(repositoryCredentialRequests[0], /workspace_id=txiv-board-workspace/);
   assert.deepEqual(dispatchAcks.map((ack) => ack.outcome), ['processed']);
+});
+
+test('wire consumer: flattened event 의 clone_policy 가 worktree bootstrap clone 까지 전달된다', async (t) => {
+  // ticket bddb63ee — 서버가 Repo Resource ⊕ Workspace 로 해석해 실어 보낸 clone
+  // 정책이 flattened agent_trigger 에서 bootstrapRepo 까지 살아 있어야 한다. 이
+  // 홉이 끊기면 repo별 timeout/전략이 조용히 사라지고 모든 저장소가 매니저
+  // 기본값으로만 clone 된다(증상이 clone 실패로만 보여 진단이 어렵다).
+  const calls = { resolve: [] };
+  const cwd = '/workspace/.awb/wt/gameclient/policy-ticket';
+  const worktreeManager = {
+    enabled: true,
+    async resolveCwd(args) {
+      calls.resolve.push(structuredClone(args));
+      return {
+        isWorktree: true, cwd, mode: 'per_ticket', reused: false,
+        repositoryContext: {
+          resourceId: 'gameclient-resource', cwd, baseBranch: 'master',
+          baseSha: 'base-sha', currentSha: 'head-sha', workingBranch: 'ticket/policy',
+          dirty: false, ahead: 0, behind: 0, resumed: false,
+        },
+      };
+    },
+    async verifyCheckout() { return { ok: true }; },
+    async verifyPushReadiness() { return { ok: true }; },
+    async removeTicketWorktrees() { return 0; },
+    async removeTicketRunWorkspace() { return false; },
+  };
+  const { dispatcher } = await harness(t, 'trusted', undefined, worktreeManager);
+  const wire = JSON.stringify({
+    event_type: 'agent_trigger', ticket_id: TICKET, action: 'assignee',
+    actor_name: AGENT, field_changed: 'clone-policy-trigger', trigger_source: 'column_move',
+    workspace_id: 'txiv-board-workspace', worktree_mode: 'per_ticket',
+    base_repo: {
+      id: 'gameclient-resource', url: 'https://github.com/acme/GameClient.git',
+      default_branch: 'master',
+    },
+    base_branch: 'master',
+    clone_policy: {
+      clone_timeout_seconds: 7200,
+      clone_idle_timeout_seconds: 900,
+      clone_depth: 1,
+      clone_filter: 'blob:none',
+      single_branch: true,
+    },
+  });
+
+  await dispatcher.handleTrigger(wire);
+  await waitForAck();
+
+  assert.equal(calls.resolve.length, 1);
+  assert.deepEqual(calls.resolve[0].bootstrapRepo.clonePolicy, {
+    clone_timeout_seconds: 7200,
+    clone_idle_timeout_seconds: 900,
+    clone_depth: 1,
+    clone_filter: 'blob:none',
+    single_branch: true,
+  });
 });

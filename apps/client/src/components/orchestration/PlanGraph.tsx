@@ -1,5 +1,5 @@
 import React from 'react';
-import type { OrchestrationStep } from '../../types';
+import type { OrchestrationGraphSpec, OrchestrationGraphEdge, OrchestrationStep } from '../../types';
 import { tokens } from '../../tokens';
 import { stepStyle } from './status';
 import { relativeTime } from '../../utils/time';
@@ -18,11 +18,29 @@ import { relativeTime } from '../../utils/time';
  * Edges look better on a whiteboard, but with 10+ steps and re-planning they
  * become an unreadable tangle in a scrolling panel, and a chip is
  * click-to-focus in a way a line is not.
+ *
+ * 그래프 모드(티켓 1ca9e49b)에서는 depth를 `depends_on`이 아니라 GraphSpec의
+ * forward edge로 계산한다 — 조건 분기는 depends_on에 나타나지 않으므로 그대로
+ * 두면 분기 하류가 전부 wave 1로 접혀 보인다. loop_back edge는 depth 계산에서
+ * 제외한다(정의상 상류로 돌아가므로 세면 열이 무한히 깊어진다).
  */
 
-export function computeDepths(steps: OrchestrationStep[]): Map<string, number> {
+export function computeDepths(
+  steps: OrchestrationStep[],
+  graph?: OrchestrationGraphSpec | null,
+): Map<string, number> {
   const byKey = new Map(steps.map((s) => [s.step_key, s]));
   const depth = new Map<string, number>();
+
+  // 그래프가 있으면 forward edge에서 역방향 인접(= 이 node가 기다리는 것들)을 만든다.
+  const graphDeps = new Map<string, string[]>();
+  if (graph) {
+    for (const e of graph.edges) {
+      if (e.kind === 'loop_back') continue;
+      if (!graphDeps.has(e.to)) graphDeps.set(e.to, []);
+      graphDeps.get(e.to)!.push(e.from);
+    }
+  }
 
   const resolve = (key: string, seen: Set<string>): number => {
     if (depth.has(key)) return depth.get(key)!;
@@ -31,8 +49,7 @@ export function computeDepths(steps: OrchestrationStep[]): Map<string, number> {
     // instead of recursing forever.
     if (seen.has(key)) return 0;
     seen.add(key);
-    const step = byKey.get(key);
-    const deps = step?.depends_on ?? [];
+    const deps = graph ? graphDeps.get(key) ?? [] : byKey.get(key)?.depends_on ?? [];
     const d = deps.length === 0 ? 0 : Math.max(...deps.map((k) => (byKey.has(k) ? resolve(k, seen) + 1 : 0)));
     depth.set(key, d);
     return d;
@@ -42,16 +59,27 @@ export function computeDepths(steps: OrchestrationStep[]): Map<string, number> {
   return depth;
 }
 
+/** edge 조건을 사람이 읽을 짧은 문구로. 없으면 null(무조건 edge). */
+export function describeEdgeCondition(edge: OrchestrationGraphEdge): string | null {
+  if (edge.label) return edge.label;
+  const bits: string[] = [];
+  if (edge.when?.verdict?.length) bits.push(edge.when.verdict.join(' / '));
+  if (edge.when?.status?.length) bits.push(edge.when.status.join(' / '));
+  return bits.length ? bits.join(' + ') : null;
+}
+
 export default function PlanGraph({
   steps,
   selectedId,
   onSelect,
+  graph = null,
 }: {
   steps: OrchestrationStep[];
   selectedId: string | null;
   onSelect: (step: OrchestrationStep) => void;
+  graph?: OrchestrationGraphSpec | null;
 }) {
-  const depths = computeDepths(steps);
+  const depths = computeDepths(steps, graph);
   const maxDepth = steps.reduce((max, s) => Math.max(max, depths.get(s.step_key) ?? 0), 0);
   const columns: OrchestrationStep[][] = Array.from({ length: maxDepth + 1 }, () => []);
   for (const s of steps) columns[depths.get(s.step_key) ?? 0].push(s);
@@ -71,12 +99,19 @@ export default function PlanGraph({
               paddingLeft: 2,
             }}
           >
-            {index === 0 ? 'Wave 1 · starts immediately' : `Wave ${index + 1} · after wave ${index}`}
+            {graph
+              ? index === 0
+                ? 'Entry · starts immediately'
+                : `Stage ${index + 1}`
+              : index === 0
+                ? 'Wave 1 · starts immediately'
+                : `Wave ${index + 1} · after wave ${index}`}
           </div>
           {col.map((step) => (
             <StepCard
               key={step.id}
               step={step}
+              graph={graph}
               selected={step.id === selectedId}
               onClick={() => onSelect(step)}
             />
@@ -89,14 +124,19 @@ export default function PlanGraph({
 
 function StepCard({
   step,
+  graph,
   selected,
   onClick,
 }: {
   step: OrchestrationStep;
+  graph: OrchestrationGraphSpec | null;
   selected: boolean;
   onClick: () => void;
 }) {
   const style = stepStyle(step.status);
+  const node = graph?.nodes.find((n) => n.key === step.step_key) ?? null;
+  const incoming = graph ? graph.edges.filter((e) => e.to === step.step_key && e.kind !== 'loop_back') : [];
+  const outgoing = graph ? graph.edges.filter((e) => e.from === step.step_key) : [];
   return (
     <button
       type="button"
@@ -145,6 +185,32 @@ function StepCard({
         {step.attempt > 1 && (
           <span style={{ fontSize: 9, color: tokens.colors.warningLight }}>retry {step.attempt}/{step.max_attempts}</span>
         )}
+        {node && node.kind !== 'task' && (
+          <span
+            style={{
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              color: tokens.colors.accent,
+            }}
+            title={
+              node.kind === 'evaluator'
+                ? 'Judges upstream work and reports a verdict that selects the next branch'
+                : 'Only picks a branch — every edge out of it is conditional'
+            }
+          >
+            {node.kind}
+          </span>
+        )}
+        {node && node.max_visits > 1 && (
+          <span
+            style={{ fontSize: 9, color: tokens.colors.textMuted }}
+            title={`This node may run up to ${node.max_visits} times (bounded loop)`}
+          >
+            pass {Math.max(step.visit, 1)}/{node.max_visits}
+          </span>
+        )}
       </div>
 
       <div style={{ marginTop: 5, fontSize: 12.5, fontWeight: 600, lineHeight: 1.35 }}>{step.title}</div>
@@ -182,24 +248,44 @@ function StepCard({
         </div>
       )}
 
-      {step.depends_on.length > 0 && (
-        <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-          {step.depends_on.map((key) => (
-            <span
-              key={key}
-              style={{
-                fontSize: 9,
-                fontFamily: 'monospace',
-                padding: '1px 5px',
-                borderRadius: 4,
-                background: `${tokens.colors.border}70`,
-                color: tokens.colors.textMuted,
-              }}
-            >
-              ← {key}
-            </span>
-          ))}
+      {step.verdict && (
+        <div style={{ marginTop: 6, fontSize: 10, color: tokens.colors.textSecondary }}>
+          verdict:{' '}
+          <span style={{ fontFamily: 'monospace', fontWeight: 700, color: tokens.colors.accent }}>{step.verdict}</span>
         </div>
+      )}
+
+      {graph ? (
+        (incoming.length > 0 || outgoing.length > 0) && (
+          <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {incoming.map((edge) => (
+              <EdgeChip key={`in-${edge.from}-${edge.kind}`} edge={edge} direction="in" />
+            ))}
+            {outgoing.map((edge) => (
+              <EdgeChip key={`out-${edge.to}-${edge.kind}`} edge={edge} direction="out" />
+            ))}
+          </div>
+        )
+      ) : (
+        step.depends_on.length > 0 && (
+          <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {step.depends_on.map((key) => (
+              <span
+                key={key}
+                style={{
+                  fontSize: 9,
+                  fontFamily: 'monospace',
+                  padding: '1px 5px',
+                  borderRadius: 4,
+                  background: `${tokens.colors.border}70`,
+                  color: tokens.colors.textMuted,
+                }}
+              >
+                ← {key}
+              </span>
+            ))}
+          </div>
+        )
       )}
 
       {step.finished_at && (
@@ -208,5 +294,41 @@ function StepCard({
         </div>
       )}
     </button>
+  );
+}
+
+/**
+ * 하나의 edge를 칩으로. 방향(들어옴/나감)·종류·조건을 한 눈에 구분할 수 있어야
+ * "이 node가 무엇을 기다리는지"와 "여기서 어디로 갈라지는지"가 카드에서 바로 읽힌다.
+ */
+function EdgeChip({ edge, direction }: { edge: OrchestrationGraphEdge; direction: 'in' | 'out' }) {
+  const condition = describeEdgeCondition(edge);
+  const color =
+    edge.kind === 'loop_back'
+      ? tokens.colors.warningLight
+      : edge.kind === 'conditional'
+        ? tokens.colors.accent
+        : tokens.colors.textMuted;
+  const peer = direction === 'in' ? edge.from : edge.to;
+  const arrow = edge.kind === 'loop_back' ? '↺' : direction === 'in' ? '←' : '→';
+  return (
+    <span
+      title={
+        `${edge.kind} edge ${edge.from} → ${edge.to}` +
+        (condition ? ` · taken when ${condition}` : ' · always taken once the source finishes')
+      }
+      style={{
+        fontSize: 9,
+        fontFamily: 'monospace',
+        padding: '1px 5px',
+        borderRadius: 4,
+        background: `${tokens.colors.border}70`,
+        border: edge.kind === 'sequence' ? 'none' : `1px solid ${color}55`,
+        color,
+      }}
+    >
+      {arrow} {peer}
+      {condition ? ` · ${condition}` : ''}
+    </span>
   );
 }
