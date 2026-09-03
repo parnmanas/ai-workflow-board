@@ -2599,6 +2599,17 @@ export class OrchestrationRunnerService {
     if (!mission.room_id) {
       throw orchestrationError(409, 'mission has not been started yet — there is no conversation room');
     }
+    // 종료된 미션에는 새로 참여시키지 않는다(리뷰 라운드1 지적 3). 참여에 성공해도 말을
+    // 걸 orchestrator 세션이 없어 아무 일도 일어나지 않으므로, 화면이 버튼을 숨기는 것과
+    // 서버가 거부하는 것이 같은 규칙이어야 한다 — 한쪽만 막으면 REST 를 직접 부르는
+    // 경로로 규칙이 새고, "과거 미션도 대화 가능"의 범위가 화면과 서버에서 갈린다.
+    // 기록 열람은 그대로 열려 있다: observer 경로는 참여자가 아니어도 읽을 수 있다.
+    if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+      throw orchestrationError(
+        409,
+        `mission is ${mission.status} — its conversation is closed, but the transcript is still readable`,
+      );
+    }
 
     const joined = await this.membership.ensureActiveParticipant(mission.room_id, 'user', actor.id);
     if (joined) {

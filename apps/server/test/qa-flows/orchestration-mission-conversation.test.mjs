@@ -173,7 +173,50 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     '사람의 발화와 시스템 wake 가 같은 agent 집합에 도달한다 — 디스패치 계약이 갈리지 않는다',
   );
 
-  // ── 2. 참여자 없는 미션 백필 ──────────────────────────────────────────────
+  // ── 2a. 진짜 레거시 상태 백필 — 변경 전에 만들어진 user-owned 미션 ────────────
+  //
+  // 리뷰 라운드1 지적 3: 아래 2b 의 agent-owned 미션은 "사람 소유자가 없는" 새 기능
+  // 경로일 뿐, **이 티켓 이전에 생성돼 사람 participant 가 통째로 빠진 데이터**를
+  // 재현하지 않는다. 그 상태를 직접 만든다 — user-owned 미션을 시작한 뒤 생성자
+  // participant 행을 지우면, 변경 전 코드가 남겨 놓았을 행 구성과 정확히 같아진다.
+  step('변경 전에 만들어진 user-owned 미션(사람 participant 없음)도 join 하면 대화가 된다');
+  const legacyMission = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Legacy user-owned mission',
+    objective: 'Created before human participants existed.',
+    created_by_type: 'user',
+    created_by: owner.id,
+  });
+  const legacyStarted = await runner.startMission(legacyMission.id, ws.id, {
+    type: 'user',
+    id: owner.id,
+    name: owner.name,
+  });
+  await ds.getRepository('ChatRoomParticipant').delete({
+    room_id: legacyStarted.room_id,
+    participant_id: owner.id,
+    participant_type: 'user',
+  });
+  assert.deepEqual(
+    await activeParticipants(ds, legacyStarted.room_id),
+    [`agent:${lead.id}`, 'user:system'].sort(),
+    '레거시 상태 재현 — 변경 전 코드가 남겼을 행 구성과 같다',
+  );
+
+  assert.equal(
+    (await say(legacyStarted.room_id, ownerToken, '이 미션 어떻게 됐어')).status,
+    403,
+    '백필 전에는 생성자조차 막힌다 — 이것이 사용자가 겪던 증상이다',
+  );
+  assert.equal((await join(legacyMission.id, ownerToken)).status, 201);
+  assert.equal(
+    (await say(legacyStarted.room_id, ownerToken, '이 미션 어떻게 됐어')).status,
+    201,
+    '백필 뒤에는 대화가 된다',
+  );
+
+  // ── 2b. 참여자 없는 미션 백필 ──────────────────────────────────────────────
   step('에이전트가 만든 미션(사람 참여자 없음)은 join 전에는 막히고 join 뒤에는 된다');
   const agentOwned = await missions.createMission({
     workspace_id: ws.id,
@@ -239,6 +282,69 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // 이 사용자는 CHAT_SEND 를 갖고 있다 — 그래도 막히는 이유가 참여자 게이트임을 못박는다.
   const deniedSay = await say(started.room_id, outsiderToken, '몰래 지시');
   assert.equal(deniedSay.status, 403, '참여자 게이트가 두 번째 방어선으로 남는다');
+
+  // ── 4a. 권한 경계는 join 순간이 아니라 발화 순간에도 유지된다 ────────────────
+  //
+  // 리뷰 라운드1 지적 1: participant 행은 한 번 생기면 남으므로, join 시점 검사만으로는
+  // 권한 회수가 반영되지 않는다. 강등된 계정이 계속 orchestrator 를 깨울 수 있었다.
+  step('join 뒤 권한이 회수되면 그 사용자는 더 이상 발화할 수 없다');
+  const demoted = await createUser(app, getDataSourceToken, { name: 'to-be-demoted' });
+  const demotedToken = auth.createSession(demoted.id);
+  assert.equal((await join(created.id, demotedToken)).status, 201, '강등 전에는 참여할 수 있다');
+  assert.equal(
+    (await say(started.room_id, demotedToken, '아직 권한이 있을 때')).status,
+    201,
+    '강등 전에는 발화할 수 있다',
+  );
+
+  // 권한만 회수한다 — participant 행은 그대로 둔다. 그게 이 회귀의 핵심이다.
+  await ds.getRepository('User').update({ id: demoted.id }, { role: 'user', permissions: '[]' });
+  const stillParticipant = await ds.getRepository('ChatRoomParticipant').find({
+    where: { room_id: started.room_id, participant_id: demoted.id, left_at: null },
+  });
+  assert.equal(stillParticipant.length, 1, 'participant 행은 남아 있다 — 게이트가 권한을 본다는 증거');
+
+  assert.equal(
+    (await say(started.room_id, demotedToken, '강등된 뒤에도 지시')).status,
+    403,
+    '권한이 회수되면 participant 행이 남아 있어도 발화가 막혀야 한다',
+  );
+
+  step('권한 회수는 엔진 자신의 발화나 일반 채팅방에는 영향을 주지 않는다');
+  frames.length = 0;
+  await runner.nudgeOrchestrator(created.id, ws.id, { type: 'user', id: owner.id, name: owner.name }, '계속');
+  assert.ok(
+    frames.some((f) => f.room_id === started.room_id && f.sender_id === 'system'),
+    '의사 user system 은 users 행이 없다 — 게이트가 엔진 wake 를 막으면 미션이 통째로 정지한다',
+  );
+
+  // ── 4b. 종료된 미션에는 새로 참여할 수 없다 ─────────────────────────────────
+  //
+  // 리뷰 라운드1 지적 3: 화면은 live=false 면 참여 버튼을 숨기는데 서버가 허용하면
+  // REST 를 직접 부르는 경로로 규칙이 샌다. 두 쪽을 같은 규칙으로 맞춘다.
+  step('종료된 미션의 join 은 거부된다 — 화면이 버튼을 숨기는 것과 같은 규칙');
+  const closed = await missions.createMission({
+    workspace_id: ws.id,
+    team_id: team.id,
+    title: 'Closed mission',
+    objective: 'Already over.',
+    created_by_type: 'user',
+    created_by: owner.id,
+  });
+  const closedStarted = await runner.startMission(closed.id, ws.id, {
+    type: 'user',
+    id: owner.id,
+    name: owner.name,
+  });
+  await runner.cancelMission(closed.id, ws.id, { type: 'user', id: owner.id, name: owner.name }, 'no longer needed');
+  const closedJoin = await join(closed.id, peerToken);
+  assert.equal(closedJoin.status, 409, '종료된 미션에는 참여시키지 않는다');
+  assert.match((await closedJoin.json()).error, /cancelled/, '왜 거부됐는지 사유가 전달된다');
+  assert.equal(
+    (await activeParticipants(ds, closedStarted.room_id)).includes(`user:${peer.id}`),
+    false,
+    '거부된 join 은 참여자를 남기지 않는다',
+  );
 
   // ── 5. 일반 채팅 목록 오염 없음 ───────────────────────────────────────────
   step('mission 방은 참여자가 생겨도 일반 채팅 목록에 나타나지 않는다');

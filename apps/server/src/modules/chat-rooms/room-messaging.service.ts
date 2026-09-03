@@ -387,6 +387,20 @@ export class RoomMessagingService {
   ): Promise<any> {
     await this.membership.requireActiveParticipant(roomId, senderId, senderType);
 
+    // 방 메타데이터: agent-manager는 이름이 비어 있을 때만 첫 chat-subagent
+    // 턴에 "제목을 생성하라"는 지시를 주입하고(그래서 이름 없는 방은 첫
+    // 대화 내용으로 이름이 붙는다), action_id를 읽어 Action Run을 일반
+    // 채팅과 구분한다(티켓 e6d32e9d).
+    //
+    // 조회를 여기로 올린 것은 아래 orchestration 게이트가 **쓰기 전에** 돌아야 하기
+    // 때문이다(티켓 f6a0de0e). 예전 위치는 메시지를 이미 저장한 뒤였다.
+    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
+
+    // participant 행만으로는 orchestration 방의 경계가 지속되지 않는다 —
+    // 권한이 회수된 뒤에도 행이 남기 때문이다. 서비스 계층에 두어 REST·MCP·
+    // agent-api 어느 진입점으로 들어와도 같은 판정을 받게 한다.
+    await this.membership.requireMissionRoomSpeaker(roomForName, senderType, senderId);
+
     const sanitizedMeta = sanitizeChatMessageMetadata(opts?.metadata);
 
     if (!CHAT_MESSAGE_TYPES.includes(type)) {
@@ -511,12 +525,6 @@ export class RoomMessagingService {
 
     // Update denormalized last_message_at for room list sort
     await this.roomRepo.update(roomId, { last_message_at: new Date() });
-
-    // 방 메타데이터: agent-manager는 이름이 비어 있을 때만 첫 chat-subagent
-    // 턴에 "제목을 생성하라"는 지시를 주입하고(그래서 이름 없는 방은 첫
-    // 대화 내용으로 이름이 붙는다), action_id를 읽어 Action Run을 일반
-    // 채팅과 구분한다(티켓 e6d32e9d).
-    const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
 
     // 티켓 9fd27487 — 일반 채팅방에는 애초에 run_provision이 전혀 없어서,
     // agent-manager가 이들을 working_dir 루트에서 디스패치했다(티켓

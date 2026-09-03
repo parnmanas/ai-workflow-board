@@ -1,12 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In } from 'typeorm';
+import { DataSource, Repository, In, IsNull } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 
 const PARTICIPANT_CAP = 50;
 
@@ -157,13 +158,24 @@ export class RoomMembershipService {
    * 재입장이 새 행을 만드는 것도 `addParticipants` 와 같은 정책이다 — 나갔던 이력을
    * 지우지 않는다.
    *
-   * 동시성: 검사와 삽입을 한 트랜잭션에 두지만, Postgres 의 READ COMMITTED 에서는 두
-   * 요청이 동시에 "없음"을 읽고 둘 다 넣을 수 있다(sql.js 는 트랜잭션 직렬화 큐가 있어
-   * 불가능). 그 결과인 중복 active 행은 이 경로에서 관찰 가능한 영향이 없다:
-   * `requireActiveParticipant` 는 `getOne` 이고 member_ids 는 Set 이며, 행 수가 곱해질
-   * 수 있는 유일한 곳인 `listRooms` 의 unread 서브쿼리는 mission room 을 애초에 제외한다.
-   * self-join 은 사람이 버튼을 한 번 누르는 행위라 경합 자체가 희박하다는 점도 함께
-   * 감안한 판단이다 — 이 메서드를 기계가 반복 호출하는 경로에 붙일 때는 재검토할 것.
+   * 동시성: check-then-insert 를 한 트랜잭션에 넣는 것만으로는 부족하다. Postgres 의
+   * READ COMMITTED 에서는 두 요청이 동시에 "없음"을 읽고 **둘 다** 넣을 수 있고, 그
+   * 중복 active 행은 관찰 가능한 고장을 만든다(리뷰 라운드1 지적 2): `leaveRoom` 이
+   * 한 행만 정리하면 다른 active 행이 남아 **사용자가 방을 떠날 수 없고**, 서로 다른
+   * 참여자의 동시 join 은 50인 cap 도 함께 넘길 수 있다.
+   *
+   * 그래서 방 단위 직렬화를 건다:
+   *   - Postgres — `pg_advisory_xact_lock` 으로 **roomId** 를 잠근다. 키를 (room,
+   *     participant) 로 좁히면 같은 사람의 중복은 막아도 cap 검사는 여전히 경합하므로,
+   *     둘 다 지키려면 방 전체가 락 단위여야 한다. 트랜잭션 스코프라 커밋/롤백에서
+   *     자동 해제되고, self-join 은 사람이 버튼을 누르는 빈도라 직렬화 비용이 없다.
+   *   - sql.js — `serializeSqljsTransactions` 가 이미 트랜잭션을 FIFO 로 직렬화한다
+   *     (db.ts). 락 문장을 보내면 그쪽 방언에 없어 실패하므로 걸지 않는다.
+   *
+   * 부분 UNIQUE 인덱스를 고르지 않은 이유: `addParticipants` 는 예전부터 중복 검사 없이
+   * 행을 넣어 왔으므로 **기존 DB 에 이미 중복 active 행이 있을 수 있고**, `synchronize`
+   * 가 인덱스를 만들려다 실패하면 부팅 자체가 깨진다. 락은 그 위험 없이 앞으로의
+   * 단일성을 보장하고, 이미 있는 중복은 아래 `leaveRoom` 이 전부 정리한다.
    */
   async ensureActiveParticipant(
     roomId: string,
@@ -171,6 +183,10 @@ export class RoomMembershipService {
     participantId: string,
   ): Promise<boolean> {
     const added = await this.participantRepo.manager.transaction(async (em) => {
+      if (this.dataSource.options.type === 'postgres') {
+        await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
+      }
+
       const existing = await em
         .createQueryBuilder(ChatRoomParticipant, 'p')
         .where('p.room_id = :roomId', { roomId })
@@ -219,21 +235,33 @@ export class RoomMembershipService {
 
   /**
    * Leave a room by soft-deleting the participant row (sets left_at).
+   *
+   * **모든** active 행을 한 문장으로 정리한다. 예전에는 `findOne` 으로 한 행만 골라
+   * `left_at` 을 찍었는데, 이 테이블은 같은 (room, user) 에 대해 행이 여러 개일 수 있어
+   * 두 가지로 고장났다(리뷰 라운드1 지적 2):
+   *
+   *   - 재입장은 정책상 **새 행**을 만든다(`addParticipants` 주석). 그러면 나갔던 옛
+   *     행과 지금의 active 행이 공존하는데, `findOne` 이 옛 행을 먼저 고르면
+   *     `left_at !== null` 이라 **active 참여자인데도 400** 이 났다.
+   *   - 동시 join 으로 active 행이 둘 생기면 하나만 정리돼 **나가지지 않았다**.
+   *
+   * 조건부 UPDATE 는 두 경우를 한꺼번에 없앤다 — `left_at IS NULL` 인 행만, 전부.
+   * `affected` 가 0 이면 애초에 active 행이 없었다는 뜻이므로 그대로 400 이다.
    */
   async leaveRoom(roomId: string, userId: string): Promise<void> {
-    const participant = await this.participantRepo.findOne({
-      where: {
+    const result = await this.participantRepo.update(
+      {
         room_id: roomId,
         participant_id: userId,
         participant_type: 'user',
+        left_at: IsNull(),
       },
-    });
+      { left_at: new Date() },
+    );
 
-    if (!participant || participant.left_at !== null) {
+    if (!result.affected) {
       throw makeError(400, 'Not an active participant in this room');
     }
-
-    await this.participantRepo.update(participant.id, { left_at: new Date() });
 
     // Get updated member IDs after the leave
     const memberIds = await this.getRoomMemberIds(roomId);
@@ -298,6 +326,46 @@ export class RoomMembershipService {
 
     if (!participant) {
       throw makeError(403, 'Not an active participant in this room');
+    }
+  }
+
+  /**
+   * Orchestration mission/step room 은 **발화 시점에도** 권한을 다시 본다 (티켓 f6a0de0e,
+   * 리뷰 라운드1 지적 1).
+   *
+   * participant 행은 한 번 생기면 남는다. 그래서 join 시점의 `MANAGE_ACTIONS` 검사만으로는
+   * 경계가 지속되지 않는다 — 관리자가 참여한 뒤 일반 사용자로 강등되거나 권한이 회수돼도
+   * 행이 그대로라 계속 발화하고 orchestrator 를 깨울 수 있었다. 티켓의 "권한 없는 사용자는
+   * 여전히 차단" 은 join 순간이 아니라 **매 발화**에 걸리는 조건이다.
+   *
+   * 권한을 세션 스냅샷이 아니라 `users` 행에서 직접 읽는 이유도 같다: 회수가 즉시 반영돼야
+   * 하고, 이 경로는 REST 세션 밖(MCP·agent-api)에서도 통과할 수 있어야 한다.
+   *
+   * 통과시키는 두 경우:
+   *   - agent 발화 — 신원 검사는 orchestration 런너가 lease/orchestrator id 로 따로 한다.
+   *     여기서 사람 권한을 요구하면 정상 디스패치가 죽는다.
+   *   - 의사 user `system` (비-uuid) — 엔진 자신의 브리핑·wake 발화다. `users` 행이 없다.
+   */
+  async requireMissionRoomSpeaker(
+    room: { orchestration_mission_id?: string | null } | null | undefined,
+    senderType: string,
+    senderId: string,
+  ): Promise<void> {
+    if (!room?.orchestration_mission_id) return;
+    if (senderType !== 'user') return;
+    if (!UUID_RE.test(senderId)) return;
+
+    const user = await this.userRepo.findOne({ where: { id: senderId } });
+    const customPermissions = (() => {
+      try {
+        const parsed = JSON.parse((user as any)?.permissions || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })();
+    if (!user || !hasPermission(user.role, customPermissions, PERMISSIONS.MANAGE_ACTIONS)) {
+      throw makeError(403, 'Not allowed to speak in this orchestration room');
     }
   }
 
