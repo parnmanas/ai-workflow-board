@@ -668,6 +668,8 @@ export class UpdateChecker {
   #now: () => Date;
   /** 개시 경로. 프로덕션에서는 runSelfUpdate 그대로. */
   #runUpdate: (opts: SelfUpdateOpts) => Promise<SelfUpdateResult>;
+  /** 레지스트리 버전 조회. 프로덕션에서는 실제 `npm view`. */
+  #npmView: (channelSpec: string) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
   constructor(
     opts: {
@@ -692,6 +694,10 @@ export class UpdateChecker {
       /** ticket 9408b308 — 정책 게이트가 개시를 결정했을 때 실제로 부를 함수.
        *  생략하면 runSelfUpdate. 테스트가 "개시했는가"를 부수효과 없이 관찰한다. */
       runUpdate?: (opts: SelfUpdateOpts) => Promise<SelfUpdateResult>;
+      /** ticket 9408b308 — `npm view <spec> version` 주입점. 정책 게이트를
+       *  프로덕션 tick 경로 위에서 검증하려면 네트워크 없이 "새 버전이 올라왔다"를
+       *  만들 수 있어야 한다. 생략하면 실제 npm 을 부른다. */
+      npmView?: (channelSpec: string) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
@@ -702,6 +708,13 @@ export class UpdateChecker {
     this.#stateDir = opts.stateDir;
     this.#now = opts.now ?? (() => new Date());
     this.#runUpdate = opts.runUpdate ?? runSelfUpdate;
+    this.#npmView =
+      opts.npmView ??
+      (async (spec) => {
+        // shell:true on Windows (npm.cmd). cwd is irrelevant for a registry read.
+        const r = await runAsync('npm', ['view', spec, 'version'], process.cwd(), NPM_VIEW_TIMEOUT_MS);
+        return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
+      });
     const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
     // ticket 23753dc7: 복귀 핀이 걸려 있으면 그 정확한 버전이 실효 채널이다.
     // 체커가 광고하는 `update_available` 까지 핀을 반영해야, 되돌린 호스트의
@@ -868,13 +881,7 @@ export class UpdateChecker {
    */
   async #tickNpmGlobal(): Promise<void> {
     try {
-      // shell:true on Windows (npm.cmd). cwd is irrelevant for a registry read.
-      const r = await runAsync(
-        'npm',
-        ['view', npmChannelSpec(this.#status.update_channel), 'version'],
-        process.cwd(),
-        NPM_VIEW_TIMEOUT_MS,
-      );
+      const r = await this.#npmView(npmChannelSpec(this.#status.update_channel));
       if (!r.ok) {
         const detail =
           (r.stderr.trim() || r.stdout.trim() || 'unknown')
