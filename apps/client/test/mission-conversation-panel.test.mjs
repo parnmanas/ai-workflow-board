@@ -10,6 +10,9 @@
 //   • 사용자가 보낸 메시지가 POST 응답과 SSE 브로드캐스트로 중복 도착해도 한 번만 그려진다
 //   • SSE 로 도착한 다른 방 메시지는 이 패널에 새지 않는다
 //   • 참여자가 아니면 observer 로 강등되고 입력창 대신 사유가 표시된다
+//   • 관전 상태에서 참여 버튼을 누르면 실제로 참여되어 입력창이 열린다(티켓 f6a0de0e)
+//   • 참여가 거부되면 사유가 보이고 입력창은 열리지 않는다
+//   • 종료된 미션에는 참여 버튼을 걸지 않는다
 //   • 종료된 미션은 입력창이 없고 기록 보존 안내가 나온다
 //   • 미션이 시작 전(room 없음)이면 안내만 나오고 조회를 시도하지 않는다
 //   • 긴 로그는 창 크기로 bounded 되고, 위로 스크롤하면 커서로 과거를 이어 붙인다
@@ -22,7 +25,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, React, act } from './helpers/jsdom.mjs';
+import { setupDom, React, act, click } from './helpers/jsdom.mjs';
 import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api } from '../src/api.ts';
 import Panel from '../src/components/orchestration/MissionConversationPanel.tsx';
@@ -68,7 +71,10 @@ function evt(id, type, message, createdAt) {
  * `getChatRoomMessages` 만 스텁하면 되므로 별도 DI 를 만들지 않고 api 모듈에 직접
  * 대입한다(이 저장소의 smoke-ticket-artifact-realtime.test.mjs 와 같은 관례).
  */
-async function withPanel({ props, getChatRoomMessages, getChatRoom, listOrchestrationMissionEvents }, body) {
+async function withPanel(
+  { props, getChatRoomMessages, getChatRoom, listOrchestrationMissionEvents, joinConversation },
+  body,
+) {
   const dom = setupDom({ width: 1280 });
   const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
@@ -79,9 +85,11 @@ async function withPanel({ props, getChatRoomMessages, getChatRoom, listOrchestr
     getChatRoom: api.getChatRoom,
     markChatRoomRead: api.markChatRoomRead,
     listOrchestrationMissionEvents: api.listOrchestrationMissionEvents,
+    joinOrchestrationMissionConversation: api.joinOrchestrationMissionConversation,
   };
   const readCalls = [];
   const eventPageCalls = [];
+  const joinCalls = [];
   if (getChatRoomMessages) api.getChatRoomMessages = getChatRoomMessages;
   api.getChatRoom = getChatRoom ?? (async () => ({ participants: [] }));
   api.markChatRoomRead = async (roomId) => {
@@ -93,13 +101,18 @@ async function withPanel({ props, getChatRoomMessages, getChatRoom, listOrchestr
       eventPageCalls.push(opts);
       return { events: [], has_more: false, next_cursor: null };
     });
+  api.joinOrchestrationMissionConversation = async (missionId, workspaceId) => {
+    joinCalls.push({ missionId, workspaceId });
+    if (!joinConversation) throw new Error('join stub not provided');
+    return joinConversation({ missionId, workspaceId });
+  };
 
   try {
     // 실제 App 트리와 같은 순서(AuthProvider 바깥 > BoardStreamProvider 안쪽)로 띄운다 —
     // 패널이 로그인 사용자 id 로 "내 메시지"를 가르므로 AuthProvider 가 필요하다.
     const view = mountWithBoardStream(h(Panel, props), { withAuth: true });
     await settle();
-    await body({ view, es: () => FakeEventSource.instances[0], readCalls, eventPageCalls, h, Panel });
+    await body({ view, es: () => FakeEventSource.instances[0], readCalls, eventPageCalls, joinCalls, h, Panel });
     view.unmount();
   } finally {
     Object.assign(api, originals);
@@ -237,6 +250,104 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
         view.container.querySelector('textarea'),
         null,
         '읽기 전용인데 입력창이 살아 있으면 보내지지 않는 지시를 쓰게 된다',
+      );
+    },
+  );
+});
+
+test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다', async () => {
+  // 티켓 f6a0de0e — 관전 안내만 있고 나갈 길이 없으면 사용자는 막힌 채로 끝난다.
+  // 참여자 미등록 → 참여 → 발화 가능이라는 실제 사용자 동작을 그대로 태운다.
+  let joined = false;
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
+        // 서버가 참여자로 인정하기 전까지만 거부한다 — join 이 실제로 상태를 바꿨는지가
+        // 이 스텁의 분기로 드러난다.
+        if (!joined && !observer) throw new Error('not a participant of this room');
+        return [msg('m1', '관전으로 읽던 메시지')];
+      },
+      joinConversation: async () => {
+        joined = true;
+        return { room_id: ROOM, joined: true };
+      },
+    },
+    async ({ view, joinCalls }) => {
+      const button = view.container.querySelector('[data-testid="mission-conversation-join"]');
+      assert.ok(button, '관전 상태에서는 참여 버튼이 있어야 한다');
+      assert.equal(view.container.querySelector('textarea'), null, '참여 전에는 입력창이 없다');
+
+      click(button);
+      await settle();
+
+      assert.deepEqual(
+        joinCalls,
+        [{ missionId: 'mission-1', workspaceId: 'ws-1' }],
+        '패널이 받은 미션·워크스페이스로 참여를 요청해야 한다',
+      );
+      assert.ok(
+        view.container.querySelector('textarea'),
+        '참여에 성공했으면 입력창이 열려야 한다 — 이것이 이 티켓의 사용자 가시 완료 기준이다',
+      );
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-join"]'),
+        null,
+        '참여한 뒤에도 버튼이 남아 있으면 이미 들어온 방에 또 들어가라고 권하는 셈이다',
+      );
+    },
+  );
+});
+
+test('참여가 거부되면 사유가 보이고 입력창은 열리지 않는다', async () => {
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] },
+      getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
+        if (!observer) throw new Error('not a participant of this room');
+        return [];
+      },
+      joinConversation: async () => {
+        throw new Error('Permission required: admin.actions');
+      },
+    },
+    async ({ view }) => {
+      click(view.container.querySelector('[data-testid="mission-conversation-join"]'));
+      await settle();
+
+      const error = view.container.querySelector('[data-testid="mission-conversation-join-error"]');
+      assert.ok(error, '조용히 실패하면 사용자는 버튼이 죽은 줄 안다');
+      assert.ok(
+        (error.textContent || '').includes('admin.actions'),
+        '서버가 준 사유를 그대로 보여줘야 왜 막혔는지 알 수 있다',
+      );
+      assert.equal(
+        view.container.querySelector('textarea'),
+        null,
+        '거부됐는데 입력창이 열리면 보내지지 않을 지시를 쓰게 된다',
+      );
+    },
+  );
+});
+
+test('종료된 미션의 관전 상태에는 참여 버튼을 걸지 않는다', async () => {
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: false, events: [] },
+      getChatRoomMessages: async (_roomId, _limit, _before, observer) => {
+        if (!observer) throw new Error('not a participant of this room');
+        return [msg('m1', '종료된 미션의 기록')];
+      },
+    },
+    async ({ view }) => {
+      assert.ok(
+        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
+        '관전 사유는 여전히 보여야 한다',
+      );
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-join"]'),
+        null,
+        '참여에 성공해도 보낼 orchestrator 세션이 없다 — 아무 일도 못 하는 버튼을 주면 안 된다',
       );
     },
   );
