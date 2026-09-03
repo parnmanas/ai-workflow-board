@@ -651,8 +651,15 @@ export class MergeLeaseService {
         const ticket = await tRepo.findOne({ where: { id: lease.ticket_id } });
         ticketForLog = ticket;
         if (!ticket?.pending_merge_lease) return;
+        // **정상 파싱된 컨텍스트가 정확히 이 lease 를 가리킬 때만** 정리한다.
+        // 컨텍스트 부재(빈 문자열)나 손상은 소유권 증명이 아니다 — 회수 판정
+        // 뒤 다른 경로가 같은 티켓을 파킹했는데 컨텍스트 기록이 아직 없거나
+        // 깨진 인터리빙에서, 옛 리퍼가 그 파킹을 지워버린다(리뷰 4R).
+        // 여기서 안 지워도 고아 플래그는 다른 경로가 치운다: 전달 경로
+        // (`claimWaiterDelivery`)와 Merging 이탈 훅(`releaseOpenLeaseRows`)이
+        // 둘 다 무조건 정리하므로, 보수적으로 두는 쪽의 비용이 없다.
         const ctx = parseMergeLeaseContext(ticket.merge_lease_context);
-        if (ctx && ctx.lease_id !== lease.id) return; // 새 대기 — 건드리지 않는다
+        if (ctx?.lease_id !== lease.id) return;
         await tRepo.update(
           { id: lease.ticket_id, pending_merge_lease: true } as any,
           { pending_merge_lease: false, merge_lease_context: '' },

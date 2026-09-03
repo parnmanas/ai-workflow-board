@@ -826,6 +826,52 @@ test('★ 회수 판정 뒤 같은 티켓이 새로 대기하면 옛 리퍼가 �
   assert.ok(t.merge_lease_context.includes(NEW_LEASE_ID), '새 대기 컨텍스트가 손상됐다');
 });
 
+test('★ 컨텍스트가 비었거나 손상됐으면 옛 리퍼가 파킹을 건드리지 않는다', async () => {
+  // 리뷰 4R. 컨텍스트 **부재는 소유권 증명이 아니다** — 회수 판정 뒤 다른
+  // 경로가 같은 티켓을 파킹했는데 컨텍스트 기록이 아직 없거나 깨진
+  // 인터리빙에서, 옛 리퍼가 그 파킹을 지우면 대기자가 잘못 깨어난다.
+  // 정상 파싱된 컨텍스트가 정확히 이 lease id 일 때만 정리해야 한다.
+  for (const [label, poisoned] of [['빈 문자열', ''], ['깨진 JSON', '{not json']]) {
+    await clearLeases();
+    const holder = await makeMergingTicket(`ctx-${label}`);
+    const res = await svc.acquire(holder.id);
+    await backdate(res.lease_id, {
+      last_progress_at: new Date(Date.now() - 60 * MIN),
+      acquired_at: new Date(Date.now() - 60 * MIN),
+    });
+
+    // 판정 직후 다른 경로가 파킹했지만 컨텍스트는 비었거나 깨졌다.
+    const realJudge = svc.judgeHolder.bind(svc);
+    let interposed = 0;
+    svc.judgeHolder = async (lease, config, now) => {
+      const verdict = await realJudge(lease, config, now);
+      if (verdict !== 'alive' && interposed === 0) {
+        interposed++;
+        await ticketRepo.update({ id: lease.ticket_id }, {
+          pending_merge_lease: true,
+          merge_lease_context: poisoned,
+        });
+      }
+      return verdict;
+    };
+    try {
+      await sweep.sweep();
+      assert.equal(interposed, 1, `${label}: 인터리빙이 재현되지 않았다 — 테스트가 공허하다`);
+    } finally {
+      svc.judgeHolder = realJudge;
+    }
+
+    const t = await ticketRepo.findOne({ where: { id: holder.id } });
+    assert.equal(t.pending_merge_lease, true,
+      `${label}: 컨텍스트가 소유권을 증명하지 않는데 옛 리퍼가 파킹을 지웠다`);
+    assert.equal(t.merge_lease_context, poisoned, `${label}: 컨텍스트가 손상됐다`);
+
+    // lease 회수 자체는 정상적으로 일어난다(보수적 정리가 회수를 막지는 않는다).
+    assert.ok((await leaseRepo.findOne({ where: { id: res.lease_id } })).released_at,
+      `${label}: 티켓 정리를 건너뛰느라 lease 회수까지 막혔다`);
+  }
+});
+
 // ── 6b. 스윕 단독 FIFO (리뷰 3R 지적 2) ────────────────────────────────────
 
 test('★ queued_at 이 같고 id 역순으로 들어와도 스윕 단독으로 진짜 선두가 승격된다', async () => {
