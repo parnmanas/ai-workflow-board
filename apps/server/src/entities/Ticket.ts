@@ -272,6 +272,30 @@ export class Ticket {
   @Column({ type: 'text', default: '' })
   ci_wait_context: string;
 
+  // "저장소 랜딩 lease 대기" 플래그 (ticket e630b530). `pending_user_action`
+  // (사람) / `pending_on_tickets`(다른 티켓) / `pending_ci_wait`(외부 CI run)
+  // 에 이은 **네 번째** pending flavor — 같은 저장소의 다른 티켓이 랜딩 구간을
+  // 점유하고 있어 이 티켓의 Merging 진행을 미룬 상태다. `await_merge_lease`
+  // MCP 툴이 세우고, MergeLeaseService 의 스윕이 FIFO 순서로 lease 를 부여하며
+  // 내린 뒤 현재 컬럼 role holder 를 재디스패치한다.
+  //
+  // 이 플래그는 무한정 유지되지 않는다: 대기 상한(기본 45분)을 넘기면 스윕이
+  // **fail-open** 으로 플래그를 내리고 lease 없이 진행시킨다 — 기아가 아니라
+  // "오늘 동작으로 회귀" 가 최악의 결과가 되도록.
+  //
+  // `pending_on_tickets` 가 검사되는 모든 곳(트리거 게이트, focus selector,
+  // allocation, backlog promotion, dispatch reconciler, stuck detector)에서
+  // 함께 검사된다 — 정확한 parity 는 그 호출부들 참고.
+  @Column({ type: 'boolean', default: false })
+  pending_merge_lease: boolean;
+
+  // 활성 lease 대기의 JSON 컨텍스트: {lease_id, repo_resource_id, base_branch,
+  // queued_at, requested_by, ahead_ticket_id}. pending_merge_lease 가 false 면
+  // 빈 문자열. `ci_wait_context` 와 같은 이유로 JSON-배열 컬럼이 아니라 JSON
+  // 문자열이다 — 항상 최대 한 객체이지 목록이 아니다.
+  @Column({ type: 'text', default: '' })
+  merge_lease_context: string;
+
   // Soft-archive timestamp for the ticket. When non-null the ticket is
   // considered archived: excluded from board GET / SSE payloads / supervisor
   // re-push / backlog promotion / focus selector by default, mutation paths

@@ -82,6 +82,22 @@ export class Board {
   @Column({ type: 'text', nullable: true, default: null })
   merge_gate_config: string | null;
 
+  // 보드별 랜딩 lease 설정 (ticket e630b530). MergeLeaseConfig 의 JSON 텍스트
+  // (common/merge-lease-config.ts): { enabled?, idle_timeout_minutes?,
+  // max_hold_minutes?, max_wait_minutes? }. Merging 의 "CI 검증 시작 → 랜딩"
+  // 구간을 저장소별로 직렬화해, CI 가 도는 동안 base 가 전진해 같은 변경을 다시
+  // 검증하게 되는 무한 루프를 끊는다.
+  //
+  // 위 merge_gate_config 와 달리 **null 이면 켜진 상태**다 — merge-gate 가
+  // "기본 OFF" 로 출시된 뒤 이 인스턴스의 모든 보드에서 한 번도 켜지지 않은
+  // 전례가 있어, 같은 기본값이면 이 기능도 실무상 동작하지 않는다. 안전성은
+  // 기본값이 아니라 fail-open 이 담보한다: 저장소 미해석 / 서비스 오류 / 대기
+  // 상한 초과는 전부 degraded 로 기록하고 lease 없이 통과시키므로, 최악의 버그가
+  // "오늘 동작으로 회귀" 이지 "보드 전역 랜딩 교착" 이 아니다. 끄려면 명시적으로
+  // {"enabled": false} 를 쓴다(킬 스위치).
+  @Column({ type: 'text', nullable: true, default: null })
+  merge_lease_config: string | null;
+
   // Per-board respawn-storm circuit breaker (ticket ab06eac2). JSON text of a
   // RespawnStormConfig (see common/respawn-storm-config.ts): { enabled?,
   // window_minutes?, min_deaths?, quick_death_seconds?, auto_pend?, notify?,

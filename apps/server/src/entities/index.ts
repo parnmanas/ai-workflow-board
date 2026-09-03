@@ -52,6 +52,11 @@ export { DispatchIntent } from './DispatchIntent';
 // Review episode is open. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly
 // like the two sibling tables above; no hand-written migration needed.
 export { ReviewDriftState } from './ReviewDriftState';
+// 저장소별 랜딩 lease 큐 (ticket e630b530) — Merging 의 "CI 검증 → 랜딩" 구간을
+// 직렬화해 고빈도 base 에서도 재검증 루프가 유한하게 끝나게 한다. 위 두 형제
+// 테이블과 마찬가지로 TypeORM `synchronize`(D-01)가 auto-DDL 하므로 손으로 쓴
+// 스키마 마이그레이션은 필요 없다(D-02: 마이그레이션은 DATA 전용).
+export { MergeLease } from './MergeLease';
 export type { DriftClassification } from './ReviewDriftState';
 export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
