@@ -367,11 +367,21 @@ test('the manager self-update consumes that provenance instead of installing bli
     path.join(REPO_ROOT, 'apps', 'agent-manager', 'src', 'lib', 'self-update.ts'),
     'utf8',
   );
+  // ticket 23753dc7: 이 호출은 주입 가능한 포트를 거치게 됐다(복귀 분기를 실제로
+  // 태우는 테스트를 만들기 위해). 공급망 관점의 보장은 그대로여야 하므로 둘을
+  // 함께 본다 — 호출부가 **활성 채널**을 넘기는지, 그리고 그 포트의 기본 구현이
+  // 진짜 provenance 검증인지. 앞만 보면 기본값을 no-op 으로 바꿔치기해도 통과한다.
   assert.match(
     src,
-    /await verifyNpmGlobalProvenance\(out, channel\)/,
+    /await ports\.verifyProvenance\(channel\)/,
     'the npm-global self-update path must verify published provenance before installing, ' +
       'for the ACTIVE update channel (verifying @latest while installing @next would be a hole)',
+  );
+  assert.match(
+    src,
+    /verifyProvenance: p\.verifyProvenance \?\? \(\(channel\) => verifyNpmGlobalProvenance\(out, channel\)\)/,
+    'the provenance port must default to the real verifier — an injectable seam must not become ' +
+      'a way to ship a no-op gate',
   );
   assert.match(
     src,
