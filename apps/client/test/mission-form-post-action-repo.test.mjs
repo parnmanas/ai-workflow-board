@@ -11,8 +11,12 @@
 // api.listActions는 실제 서버 없이(jsdom, 네트워크 없음) 항상 실패해 빈 배열로
 // 폴백한다(MissionFormModal 자체가 이미 .catch(() => setActions([]))로 처리) —
 // 그래서 여기서는 데이터 의존적인 action <select>의 옵션이 아니라, 실제 서버 응답과
-// 무관하게 항상 존재하는 고정 옵션(condition select)과 순수 텍스트 input(repo_ref)의
-// 값으로 라운드트립을 검증한다.
+// 무관하게 항상 존재하는 고정 옵션(condition select)과 repo_ref 필드의 값으로
+// 라운드트립을 검증한다.
+//
+// repo_ref 입력은 티켓 eb9cdd1c 에서 원시 텍스트 3개 → 공용 RepoRefPicker(검색형
+// 드롭다운)로 바뀌었다. 여기서는 목록을 빈 배열로 스텁해 폴백 경로를 결정적으로
+// 고정하고, 드롭다운 자체의 계약은 mission-form-repo-picker.test.mjs 가 다룬다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -89,8 +93,16 @@ const TEAMS = [
   },
 ];
 
-async function mountModal(t, { mission = null } = {}) {
+async function mountModal(t, { mission = null, listResources = async () => [], listRepoBranches = async () => ({ branches: [], default_branch: '' }) } = {}) {
   const dom = setupDom();
+  const originalListResources = api.listResources;
+  const originalListRepoBranches = api.listRepoBranches;
+  api.listResources = listResources;
+  api.listRepoBranches = listRepoBranches;
+  t.after(() => {
+    api.listResources = originalListResources;
+    api.listRepoBranches = originalListRepoBranches;
+  });
   const view = mount(
     React.createElement(MissionFormModal, {
       isOpen: true,
@@ -121,7 +133,7 @@ test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Adva
   const { container } = await mountModal(t, { mission });
 
   assert.match(container.textContent, /Post-completion actions/, 'Advanced 섹션이 자동으로 펼쳐져 post-action 편집기가 보인다');
-  assert.match(container.textContent, /Repo \(optional\)/);
+  assert.match(container.textContent, /repo_ref \(작업폴더로 체크아웃할 저장소/, '공용 repo 피커 블록이 렌더링된다');
 
   const conditionSelect = [...container.querySelectorAll('select')].find((s) =>
     [...s.options].some((o) => o.value === 'on_success'),
@@ -129,10 +141,14 @@ test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Adva
   assert.ok(conditionSelect, 'condition select가 렌더링된다');
   assert.equal(conditionSelect.value, 'on_success', '기존 post_action의 condition이 그대로 반영된다');
 
-  const resourceInput = [...container.querySelectorAll('input')].find((i) => i.value === 'res-42');
-  assert.ok(resourceInput, 'repo_ref.resource_id가 텍스트 input에 반영된다');
-  const branchInput = [...container.querySelectorAll('input')].find((i) => i.value === 'main');
-  assert.ok(branchInput, 'repo_ref.branch가 텍스트 input에 반영된다');
+  // 목록이 비어 있으면(권한 없음/등록된 repo 리소스 없음) 예전처럼 id 를 직접 넣을 수
+  // 있어야 하고, 저장된 값이 거기에 그대로 실려 있어야 한다.
+  const resourceInput = container.querySelector('input[aria-label="resource_id 직접 입력"]');
+  assert.ok(resourceInput, '리소스 목록이 비면 resource_id 수동 입력이 제공된다');
+  assert.equal(resourceInput.value, 'res-42', 'repo_ref.resource_id가 폼에 반영된다');
+  const branchSelect = container.querySelector('select[aria-label="브랜치 선택"]');
+  assert.ok(branchSelect, 'repo_ref.branch는 브랜치 드롭다운으로 편집한다');
+  assert.equal(branchSelect.value, 'main', 'repo_ref.branch가 폼에 반영된다');
 
   // Team select는 편집 중엔 바뀌면 안 되므로 비활성화되어 있어야 한다.
   const teamSelect = [...container.querySelectorAll('select')].find((s) => s.value === 'team-1');
@@ -148,6 +164,8 @@ test('새 미션 생성 — post-action 행을 추가하고 action/condition, re
   assert.ok(toggle, 'Advanced 토글 버튼이 있다');
   click(toggle);
   assert.match(container.textContent, /Post-completion actions/, '토글 후 post-action 편집기가 나타난다');
+  // 토글로 새로 마운트된 repo 피커의 목록 조회를 act 안에서 끝낸다.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
   const addPostAction = [...container.querySelectorAll('button')].find((b) => /Add post-action/.test(b.textContent || ''));
   assert.ok(addPostAction, '"+ Add post-action" 버튼이 있다 — 이전엔 이 입력 자체가 없었다');
@@ -159,9 +177,7 @@ test('새 미션 생성 — post-action 행을 추가하고 action/condition, re
   assert.ok(conditionSelect, '행 추가 후 condition select가 나타난다');
   assert.equal(conditionSelect.value, 'always', '새 post-action의 condition 기본값은 always다');
 
-  const repoUrlInput = [...container.querySelectorAll('input')].find(
-    (i) => i.placeholder === 'or raw git URL',
-  );
+  const repoUrlInput = container.querySelector('input[aria-label="repo URL"]');
   assert.ok(repoUrlInput, 'repo_ref용 URL input이 존재한다');
   typeInto(repoUrlInput, 'https://example.test/repo.git');
   assert.equal(repoUrlInput.value, 'https://example.test/repo.git', 'repo_ref URL을 타이핑으로 채울 수 있다');
@@ -205,6 +221,7 @@ test('새 미션 생성 — 실행 그래프 토글과 확인 강도 select 가 
 
   const toggle = [...container.querySelectorAll('button')].find((b) => /Advanced/.test(b.textContent || ''));
   click(toggle);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
   const graphCheckbox = [...container.querySelectorAll('input[type="checkbox"]')].find((i) =>
     /Execution graph/.test(i.closest('label')?.textContent || ''),
