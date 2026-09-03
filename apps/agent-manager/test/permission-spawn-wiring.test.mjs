@@ -24,9 +24,51 @@ const config = {
   delegation: { enabled: true, persistentTicketSessions: false, maxConcurrent: 4, ttlMinutes: 1 },
 };
 
+/**
+ * 픽스처 루트를 지운다 — Windows 의 핸들 해제 지연을 흡수하기 위해 재시도한다.
+ *
+ * Windows 는 어떤 프로세스의 **현재 작업 디렉터리인 폴더를 rmdir 할 수 없고**,
+ * 프로세스가 죽은 뒤에도 핸들이 실제로 닫히기까지 잠깐 시간이 걸린다. 그래서
+ * 자식 종료를 정확히 기다려도(아래 각 테스트가 그렇게 한다) 곧바로 지우면
+ * `EBUSY` 가 날 수 있다 — 실제로 CI 의 windows-latest 에서 테스트 6개가 모두
+ * 통과한 뒤 이 훅만 `EBUSY: rmdir ...\\session-home` 으로 실패했다(run
+ * 33705471237). POSIX 에서는 애초에 발생하지 않으므로 첫 시도에서 끝난다.
+ *
+ * 끝까지 실패하면 **삼키지 않고 throw** 한다 — 그 시점이면 무언가가 정말로
+ * 살아남아 있다는 뜻이고, 조용히 넘기면 다음 실행이 남은 픽스처를 물려받는다.
+ */
+async function removeFixtureRoot(attempts = 25, delayMs = 200) {
+  for (let i = 1; ; i += 1) {
+    try {
+      await rm(fixtureRoot, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      const transient = err?.code === 'EBUSY' || err?.code === 'EPERM' || err?.code === 'ENOTEMPTY';
+      if (!transient || i >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 after(async () => {
-  await rm(fixtureRoot, { recursive: true, force: true });
+  await removeFixtureRoot();
 });
+
+/** 자식 프로세스가 실제로 종료할 때까지 기다린다(ref 된 타이머로 루프 유지).
+ *  'close' 가 아니라 'exit' 을 쓴다 — 살아남은 손자가 stdio 를 붙들고 있으면
+ *  'close' 는 오지 않아 무한 대기가 된다. 이미 죽었으면 즉시 반환한다. */
+function waitForChildExit(child, tag, timeoutMs = 15_000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      reject(new Error(`${tag}: 세션 자식 프로세스 종료를 ${timeoutMs}ms 안에 감지하지 못했다`));
+    }, timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(deadline);
+      resolve();
+    });
+  });
+}
 
 /** argv 를 캡처 파일에 쓰고 즉시 종료하는 가짜 claude 바이너리. */
 async function makeCaptureBin(name) {
@@ -222,6 +264,7 @@ test('persistent 세션 spawn 도 같은 배선을 탄다 — trusted Agent 가 
   const previous = process.env.CAPTURE_FILE;
   process.env.CAPTURE_FILE = captureFile;
   let manager;
+  let child = null;
   try {
     manager = new BaseSessionManager(
       { ...config, delegation: { ...config.delegation, claudeBin: executable } },
@@ -232,28 +275,34 @@ test('persistent 세션 spawn 도 같은 배선을 탄다 — trusted Agent 가 
       harness: { permission_mode: 'acceptEdits' },
     });
     assert.ok(record, '세션 spawn 이 실패했다');
+    child = record.child ?? null;
     // 자식이 캡처 파일을 쓸 때까지 기다린다(가짜 바이너리는 30ms 뒤 종료).
-    for (let i = 0; i < 100; i += 1) {
+    let argv = null;
+    for (let i = 0; i < 100 && argv === null; i += 1) {
       try {
-        const argv = JSON.parse(await readFile(captureFile, 'utf8')).argv;
-        assert.ok(
-          argv.includes('--dangerously-skip-permissions'),
-          `세션 argv 에 최고 권한 플래그가 없다: ${argv.join(' ')}`,
-        );
-        assert.equal(
-          argv.includes('--permission-mode'),
-          false,
-          `세션이 대화형 permission 모드로 내려갔다: ${argv.join(' ')}`,
-        );
-        return;
+        argv = JSON.parse(await readFile(captureFile, 'utf8')).argv;
       } catch (err) {
         if (err?.code !== 'ENOENT') throw err;
         await new Promise((r) => setTimeout(r, 20));
       }
     }
-    assert.fail('세션 자식 프로세스가 argv 를 기록하지 않았다');
+    assert.ok(argv, '세션 자식 프로세스가 argv 를 기록하지 않았다');
+    assert.ok(
+      argv.includes('--dangerously-skip-permissions'),
+      `세션 argv 에 최고 권한 플래그가 없다: ${argv.join(' ')}`,
+    );
+    assert.equal(
+      argv.includes('--permission-mode'),
+      false,
+      `세션이 대화형 permission 모드로 내려갔다: ${argv.join(' ')}`,
+    );
   } finally {
     await manager?.stopAll?.().catch?.(() => {});
+    // 캡처 파일이 쓰였다고 자식이 죽은 것은 아니다 — 가짜 바이너리는 파일을 쓴
+    // 뒤에도 잠깐 더 산다. 자식의 cwd 가 픽스처 안(`session-home`)이라 살아 있는
+    // 채로 두면 Windows 의 after() 정리가 EBUSY 로 실패한다. 종료를 실제로
+    // 기다려 정리를 결정적으로 만든다.
+    await waitForChildExit(child, 'session-home');
     if (previous === undefined) delete process.env.CAPTURE_FILE;
     else process.env.CAPTURE_FILE = previous;
   }
