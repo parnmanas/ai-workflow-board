@@ -1004,22 +1004,6 @@ export class BaseSessionManager {
         cwd: spawnCwd,
         env: spawnEnv,
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
-      // 실제 spawn 사양 기록 (ticket 20fff298) — 가시성 용도이므로 자식이 이미
-      // 뜬 뒤에, throw 하지 않는 형태로만 호출한다.
-      recordActualLaunch({
-        agentId: agentContext?.agent_id,
-        mode: 'session',
-        bin: resolvedBin,
-        args: descriptor.args,
-        cwd: spawnCwd,
-        env: spawnEnv,
-        baseEnv,
-        ticketId: monitorMeta?.ticket_id ?? null,
-        role: monitorMeta?.role ?? null,
-        harness,
-        effort: effortFlag,
-        runtimeProfileId: claudeRuntimeProfile?.id ?? null,
-      });
       child.once('error', (err: any) => {
         log(
           `${this.#logTag} spawn error: code=${err?.code || ''} cli=${adapter.cliType} bin=${resolvedBin} msg=${err?.message}`,
@@ -1040,6 +1024,24 @@ export class BaseSessionManager {
       }
       // 살아있는 pid 는 이 CLI 의 spawn-failure 배지를 지운다(ticket e299c6b3).
       spawnFailureTracker.recordSuccess(adapter.cliType);
+      // 실제로 spawn 된 사양을 기록한다 (ticket 20fff298). one-shot 경로와 같이
+      // **pid 확인 뒤** 에 둔다 — pid 없이 돌아온 spawn 실패까지 기록하면 직전의
+      // 정상 기록을 덮어써서, 화면이 실행되지 않은 argv/cwd/env 를 ground truth
+      // 라고 주장하게 된다(리뷰 3R). recordActualLaunch 자체도 throw 하지 않는다.
+      recordActualLaunch({
+        agentId: agentContext?.agent_id,
+        mode: 'session',
+        bin: resolvedBin,
+        args: descriptor.args,
+        cwd: spawnCwd,
+        env: spawnEnv,
+        baseEnv,
+        ticketId: monitorMeta?.ticket_id ?? null,
+        role: monitorMeta?.role ?? null,
+        harness,
+        effort: effortFlag,
+        runtimeProfileId: claudeRuntimeProfile?.id ?? null,
+      });
       if (configPath && configPathIsTemp) {
         // Per-spawn pid sidecar so #sweep + orphan cleanup can find this
         // child by its tempfile. Skipped for the persistent agent-owned
