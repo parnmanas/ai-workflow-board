@@ -425,6 +425,99 @@ step 은 기존대로 고립 node 로 채워진다.
 
 ---
 
+### 사용자 확인 노드 (Human Confirm, ticket 5dbe4aa2)
+
+미션 도중 **사람에게 중간 결과물을 보여주고 명시적 판정을 받아** 다음 경로를 정한다.
+
+```
+build ──→ gate(confirm) ─(pass)────→ ship
+   ▲            │
+   └────────────┘  (fail, loop_back)
+```
+
+`kind: "confirm"` 은 **graph 모드 전용**이다. 새 분기 기계를 만들지 않고 기존
+`evaluator` + `verdict` edge 를 그대로 쓴다 — 사람이 evaluator 자리에 앉는 것과 같다.
+verdict 어휘는 `pass` / `fail` 고정.
+
+**작성 규칙** (`validateGraphSpec` 이 실행 전에 강제):
+
+- 나가는 edge 중 `when.verdict` 에 `pass` 를 포함한 것과 `fail` 을 포함한 것이 **각각
+  최소 하나** 있어야 한다(`loop_back` 도 fail 경로로 인정된다 — 재작업 루프가 표준
+  형태다). 한쪽만 라우팅하면 사용자가 그 답을 골랐을 때 나가는 edge 가 전부 dead 라
+  미션이 조용히 선다 — 사람에게 물어놓고 답을 버리는 셈이다.
+- assignee 가 **필요 없다**. 사람이 답하는 node 이므로 담당 에이전트가 없는 것이 정상이다.
+- 미션의 `confirm_policy` 가 `none` 이면 노드의 존재 자체가 거부된다.
+
+**실행**
+
+| 단계 | 무슨 일이 일어나는가 |
+| --- | --- |
+| 열림 | step 이 `awaiting_user` 로 전이. 만족된 상류 edge 의 `artifacts`(스크린샷·동영상·URL·경로)를 **복사**해 판정 근거로 붙이고 `confirm_requested` 이벤트를 남긴다 |
+| 대기 | subagent 를 띄우지 않는다. **병렬 슬롯을 쓰지 않으므로** 다른 분기는 계속 진행된다. 타임아웃도 없다 |
+| 판정 | `POST /api/orchestration/steps/:stepId/confirm` (사용자 세션 전용). verdict 를 `verdict` 컬럼에 실어 기존 edge 판정 기계를 그대로 태우고, `confirm_decided` 이벤트를 남긴 뒤 `reportStep` 과 **같은** 전이/차단/디스패치/wake 경로로 이어간다 |
+
+`awaiting_user` 는 `IN_FLIGHT_STEP_STATUSES` 에도 `TERMINAL_STEP_STATUSES` 에도 **없다**.
+in-flight 로 두면 병렬 슬롯을 먹고 `reapStuckSteps` 가 사람을 기다리는 노드를
+타임아웃으로 죽이며, terminal 로 두면 판정 전에 하류 edge 가 열린다. 대신
+`decideWake` 의 정지 판정과 리퍼의 `reapStalledRunning` 이 이 상태를 **명시적으로**
+센다 — 그러지 않으면 게이트가 열릴 때마다 오케스트레이터가 "stalled" 로 깨어나고,
+창이 지나면 리퍼가 답을 기다리던 미션을 `failed` 로 확정한다.
+
+상태가 DB 컬럼에 있으므로 **서버 재시작을 견딘다**(durable pause). 재기동 후의 pump 는
+위 명시 분기 때문에 게이트를 다시 열지 않는다.
+
+**멱등성과 감사** — 중복 클릭·새로고침·재접속은 전부 같은 경로로 들어온다. 판정이 이미
+있고 `(visit, verdict)` 가 같으면 재개하지 않고 기존 판정을 `already_decided: true` 로
+돌려준다. 그 외의 불일치(다른 verdict, loop 재진입으로 stale 해진 `visit`)는 전부 409 다 —
+조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로 진행되고 사후 재구성조차 되지 않는다.
+`confirm_requested` / `confirm_decided` 두 이벤트가 감사 기록이다.
+
+**fail 피드백의 전달** — 사용자가 쓴 사유는 재실행되는 step 의 work order 에
+`## User confirmation` 절로 실려 나간다. `depends_on` 으로는 도달할 수 없다는 점이
+핵심이다: 표준 형태에서 `build` 의 `depends_on` 에는 `gate` 가 없다(있으면 순환이라
+거부된다). 그래서 그래프에서 `loop_back` 을 포함해 "이 step 을 재실행시킬 수 있는
+confirm 노드" 를 따라가 수집한다. 같은 이유로 loop 재진입 리셋은 `verdict` 만 지우고
+`confirm_decision` 은 **보존**한다 — 지우면 피드백이 전달되기 직전에 사라진다. 다음
+pass 의 답이 막히지 않는 것은 멱등 검사가 `prior.visit === step.visit` 일 때만 발동하고,
+게이트가 실제로 다시 열릴 때 그 자리에서 초기화되기 때문이다.
+
+**MCP 툴은 없다.** 에이전트가 사람 대신 confirm 에 답할 수 있으면 기능 자체가
+무의미해지므로 판정 입구는 REST 하나뿐이다. 오케스트레이터가 게이트를 벗어나려면
+`update_orchestration_step` 의 `skip` 을 쓸 수 있으나, verdict 가 없어 pass/fail edge 가
+모두 dead 이므로 하류는 `blocked` 가 되고 오케스트레이터가 깨어난다(의도된 동작).
+
+### 사용자 확인 강도 (confirm_policy, ticket 5dbe4aa2)
+
+미션 단위 옵션. **기본값 `auto`.**
+
+| 값 | 의미 |
+| --- | --- |
+| `none` | confirm 노드 금지 — 그래프 제출 자체가 거부된다 |
+| `auto` | 위험·불확실·시각 검증이 필요한 지점만 오케스트레이터가 판단해 배치 |
+| `key_steps` | 주요 산출물 확정 직전, 외부로 나가는 작업 직전 |
+| `every_step` | 결과물이 생기는 단계마다 |
+
+기본값을 `auto` 로 둬도 **기존 미션의 동작은 한 글자도 바뀌지 않는다**: confirm 노드는
+graph 모드에서만 만들 수 있고 `graph_enabled` 기본값이 `false` 이므로, 기존 미션은
+정책값과 무관하게 게이트를 가질 수 없다. `none` 을 기본으로 두면 하위호환에 아무 이득
+없이 새 기능만 기본 off 가 된다.
+
+서버가 **강제하는 것은 `none` 뿐이다.** 나머지는 미션 브리핑에 지시로 실려 나간다 —
+"몇 개면 `key_steps` 를 만족하는가" 를 서버가 셀 방법이 없어 정량 강제는 정상 계획까지
+막는 브리틀한 게이트가 된다. 대신 `key_steps`/`every_step` 인데 확정 그래프에 게이트가
+0개면 거부 대신 timeline `note` 를 남겨 운영자가 미반영을 볼 수 있게 한다.
+
+정책은 **brief-lock 대상**이다(`graph_enabled` 와 같은 급) — 미션이 시작된 뒤 바꾸면
+오케스트레이터가 들은 계약과 어긋난다. 읽을 때는 항상 `normalizeConfirmPolicy()` 를
+거친다: DDL 마이그레이션 없이 엔티티 default 로 추가된 컬럼이라 기존 행이 `''`/NULL 로
+남을 수 있고, 그 값이 그대로 흐르면 어느 분기에도 걸리지 않아 기능이 영구 no-op 이 된다.
+
+정책 검사는 `validateGraphSpec` 안에 있고, `applyGraphPatch` 와
+`carryGraphThroughReplan` 이 결과 전체를 그 함수에 다시 통과시킨다 — 그래서 patch 로
+node kind 를 `confirm` 으로 바꾸거나 replan 으로 그래프를 이어받아도 정책을 우회할 수 없다.
+
+---
+
 ## 디스패치가 채팅룸을 재사용하는 이유
 
 QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성 → 참여자 등록 →
@@ -488,7 +581,8 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 ### 권한
 
 - REST(사람): `PERMISSIONS.MANAGE_ACTIONS` — Actions / QA / Security 와 같은
-  "자동화 저작" 권한군.
+  "자동화 저작" 권한군. confirm 판정(`POST /steps/:stepId/confirm`)도 이 게이트를
+  그대로 상속한다 — 아무도 가지지 않은 새 권한을 신설하면 기능이 기본 잠김으로 나간다.
 - MCP(Agent): **스코프가 아니라 신원**으로 검사한다. 변경 툴은 호출 Agent 가
   `mission.orchestrator_agent_id` 인지, 또는 `step.assignee_agent_id` 인지를
   런너에서 확인한다. full-scope API 키를 가진 Agent 도 남의 step 을 보고할 수 없다.
@@ -531,6 +625,11 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 직접 고치면 오케스트레이터가 가진 미션 모델과 DB 가 어긋나는데 이를 되맞출 채널이
 없다. 사람의 개입 경로는 **Start / Pause / Resume / Cancel / Nudge** 다 — Nudge 는
 미션 룸에 메모를 남기고 오케스트레이터를 깨우므로, 지시가 계획 소유자를 거쳐 반영된다.
+
+**유일한 예외는 confirm 노드의 판정**이다(ticket 5dbe4aa2). 모순이 아닌 이유: 게이트를
+세울지 말지는 여전히 오케스트레이터의 결정이고(정책은 그 결정의 상한일 뿐), 사람이
+바꾸는 것은 계획이 아니라 **자기 자신에게 요청된 판정값**이다. 그 값도 그래프가 미리
+선언한 `pass`/`fail` edge 로만 흐르므로 사람이 실행 경로를 즉흥적으로 만들어내지 못한다.
 
 ---
 
@@ -588,6 +687,14 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   이유와 함께** 남긴다(예: `"review" reported verdict "revise", not approve`).
   `node_revisited` 는 몇 번째 반복인지·상한이 얼마인지·무엇이 리셋됐는지를,
   `loop_exhausted` / `graph_budget_exhausted` 는 왜 멈췄는지를 남긴다.
+- **확인 요청 패널** (ticket 5dbe4aa2): `awaiting_user` step 이 있으면 미션 상세 **맨
+  위**에 카드로 뜬다 — 미션 전체가 거기서 멈춰 있으므로, 계획 그래프 아래로 내려가면
+  "왜 아무것도 진행되지 않는가" 를 찾는 데 스크롤이 필요해진다. 증거는 링크 나열이
+  아니라 판정 가능한 형태로 그린다(이미지는 인라인, 동영상은 재생 가능, 나머지 http(s)
+  는 새 탭 링크). Pass/Fail + 선택 사유 입력이며, 제출 payload 에는 화면이 본 `visit`
+  이 함께 실린다. 미션 목록·상세 헤더에도 `n needs your decision` 으로 노출된다 —
+  사람이 열어보지 않으면 절대 진행되지 않는 미션이 조용한 카드와 구분되지 않으면
+  방치되기 때문이다.
 
 - **대화 패널** (ticket 4d065f82): 미션의 orchestrator ChatRoom(`mission.room_id`)에
   붙는다 — 새 채팅 구현이 아니라 기존 Chat 의 `MessageList` / `ChatMessageInput` 을 그대로

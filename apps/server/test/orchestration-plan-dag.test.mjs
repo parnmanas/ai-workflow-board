@@ -23,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', 'dist');
 
-const { validatePlan, computePlanProgress } = await import(
+const { validatePlan, computePlanProgress, isAwaitingUser } = await import(
   pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration.constants.js')).href
 );
 
@@ -240,4 +240,45 @@ test('computePlanProgress — allTerminal only once nothing is open', () => {
 test('computePlanProgress — null depends_on behaves like an empty list', () => {
   const progress = computePlanProgress([{ step_key: 'a', status: 'pending', depends_on: null }]);
   assert.deepEqual(progress.dispatchable, ['a']);
+});
+
+// ── awaiting_user (confirm 게이트, 티켓 5dbe4aa2) ────────────────────────────
+//
+// `computePlanProgress`는 TERMINAL_STEP_STATUSES를 참조하지 않고 상태를 **직접
+// 나열해** 분류한다. 그래서 목록에 없는 상태는 전부 마지막 "pending / ready"
+// 분기로 흘러 dispatchable 로 집계된다 — `needs_recovery`가 정확히 그렇게 새서
+// 자동 재실행 금지 상태가 즉시 재디스패치를 부른 전례가 있다. confirm 게이트는
+// 같은 실수가 더 나쁘게 끝난다: 사람이 답하기도 전에 매 pump 마다 게이트가 다시
+// 열리고 이전 판정이 계속 지워진다.
+
+test('computePlanProgress — awaiting_user 는 dispatchable 이 아니라 awaitingUser 로 분류된다', () => {
+  const p = computePlanProgress([
+    { step_key: 'build', status: 'done', depends_on: [] },
+    { step_key: 'gate', status: 'awaiting_user', depends_on: ['build'] },
+    { step_key: 'ship', status: 'pending', depends_on: ['gate'] },
+  ]);
+  assert.deepEqual(p.awaitingUser, ['gate']);
+  assert.ok(!p.dispatchable.includes('gate'), 'confirm 게이트가 다시 디스패치 대상이 되면 안 된다');
+  assert.ok(!p.inFlight.includes('gate'), 'in-flight 로 세면 병렬 슬롯을 먹고 리퍼가 죽인다');
+  assert.ok(!p.done.includes('gate') && !p.failed.includes('gate'));
+  // 하류는 게이트가 만족되지 않았으므로 기다려야 한다 — 차단(blocked)은 아니다.
+  assert.deepEqual(p.waiting, ['ship']);
+  assert.deepEqual(p.newlyBlocked, []);
+});
+
+test('computePlanProgress — awaiting_user 가 하나라도 있으면 allTerminal 이 아니다', () => {
+  const p = computePlanProgress([
+    { step_key: 'build', status: 'done', depends_on: [] },
+    { step_key: 'gate', status: 'awaiting_user', depends_on: ['build'] },
+  ]);
+  // allTerminal 이 true 가 되면 decideWake 가 "모든 step 종료"로 오케스트레이터를
+  // 깨우고, 그 뒤엔 사람이 답해도 이어갈 미션이 남아있지 않을 수 있다.
+  assert.equal(p.allTerminal, false);
+});
+
+test('isAwaitingUser — 오직 awaiting_user 에만 참이다', () => {
+  assert.equal(isAwaitingUser('awaiting_user'), true);
+  for (const s of ['pending', 'ready', 'dispatched', 'running', 'done', 'failed', 'blocked', 'skipped', 'cancelled', 'needs_recovery', '']) {
+    assert.equal(isAwaitingUser(s), false, `${s} 는 사용자 대기가 아니다`);
+  }
 });
