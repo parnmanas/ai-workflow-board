@@ -67,11 +67,29 @@ export interface AcquireResult {
   degrade_reason?: string;
   scope?: MergeLeaseScope;
   config?: ResolvedMergeLease;
+  /**
+   * 이 lease 를 쥐고 몇 번째 검증 시도인지(1-기반). 최초 획득이 1 이고, 홀더인
+   * 채로 다시 획득하면(= ff 실패로 step 2 를 다시 도는 재검증 사이클) 증가한다.
+   */
+  attempt?: number;
+  /** 허용 최대 시도 횟수. */
+  max_attempts?: number;
+  /**
+   * 'continue' — 계속 진행해도 된다.
+   * 'exhausted' — 상한 소진. 조용히 더 돌지 말고 **명시적 실패**로 끝내야 한다
+   *   (완료 기준: "유한하게 랜딩하거나 명시적으로 실패한다").
+   */
+  budget?: 'continue' | 'exhausted';
 }
 
 export interface ReleaseResult {
   released: boolean;
   reason: string;
+}
+
+/** 최초 획득의 예산 표기 — 첫 시도이므로 소진일 수 없다. */
+function firstAttempt(config: ResolvedMergeLease): Pick<AcquireResult, 'attempt' | 'max_attempts' | 'budget'> {
+  return { attempt: 1, max_attempts: config.maxReverifyAttempts, budget: 'continue' };
 }
 
 /** 스코프 리소스 해석에 필요한 최소 정보. */
@@ -155,11 +173,24 @@ export class MergeLeaseService {
       // (1) 이 티켓의 열린 행이 이미 있는가 — 재진입/재개 경로.
       const mine = await leaseRepo.findOne({ where: { ticket_id: ticketId, released_at: IsNull() } });
       if (mine?.state === 'held') {
+        // 홀더인 채로 다시 부른다 = ff 가 실패해 step 2 를 다시 도는 **재검증
+        // 사이클**이다. lease 가 있어도 사람의 직접 push 나 같은 저장소를 보는
+        // 다른 AWB 인스턴스 때문에 이 일이 생길 수 있으므로, 여기서 예산을
+        // 깎아 루프가 유한하게 끝나도록 만든다.
+        const count = (mine.reverify_count || 0) + 1;
         await leaseRepo.update(
           { id: mine.id },
-          { last_progress_at: now, progress_note: 'reacquired' },
+          { reverify_count: count, last_progress_at: now, progress_note: `reverify:${count}` },
         );
-        return { outcome: 'granted', lease_id: mine.id, scope, config };
+        return {
+          outcome: 'granted',
+          lease_id: mine.id,
+          scope,
+          config,
+          attempt: count + 1,
+          max_attempts: config.maxReverifyAttempts,
+          budget: decideReverifyOutcome(count, config.maxReverifyAttempts),
+        };
       }
 
       // (2) 스코프의 죽은 홀더를 먼저 회수한다 — 같은 판정 규칙을 스윕과 공유한다.
@@ -169,7 +200,7 @@ export class MergeLeaseService {
       if (mine?.state === 'waiting') {
         if (await this._tryPromote(mine.id, now)) {
           await this._logLeaseActivity(ticket, 'granted', mine.id, opts);
-          return { outcome: 'granted', lease_id: mine.id, scope, config };
+          return { outcome: 'granted', lease_id: mine.id, scope, config, ...firstAttempt(config) };
         }
         const queued = await this._describeQueue(scope, mine);
         return { outcome: 'queued', lease_id: mine.id, scope, config, ...queued };
@@ -200,7 +231,7 @@ export class MergeLeaseService {
       const settled = await leaseRepo.findOne({ where: { ticket_id: ticketId, released_at: IsNull() } });
       if (settled?.id === heldId && settled.state === 'held') {
         await this._logLeaseActivity(ticket, 'granted', heldId, opts);
-        return { outcome: 'granted', lease_id: heldId, scope, config };
+        return { outcome: 'granted', lease_id: heldId, scope, config, ...firstAttempt(config) };
       }
 
       // (4) 졌다 — 대기 행을 만든다(이미 있으면 유니크 인덱스가 조용히 무시).
@@ -232,7 +263,7 @@ export class MergeLeaseService {
         return { outcome: 'degraded', degrade_reason: 'service_error', scope, config };
       }
       if (waiter.state === 'held') {
-        return { outcome: 'granted', lease_id: waiter.id, scope, config };
+        return { outcome: 'granted', lease_id: waiter.id, scope, config, ...firstAttempt(config) };
       }
 
       const queued = await this._describeQueue(scope, waiter);

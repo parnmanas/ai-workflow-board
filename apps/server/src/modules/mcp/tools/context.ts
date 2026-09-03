@@ -61,6 +61,7 @@ import type { WorkspaceScheduleService } from '../../workspace-schedule/workspac
 import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
+import { MergeLeaseService } from '../../tickets/merge-lease.service';
 import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
@@ -185,6 +186,10 @@ export interface ToolContext {
   // standalone-instantiation shape as ticketPrerequisitesService above. Used
   // by ci-wait-tools (await_ci_run / cancel_ci_wait).
   ciWaitService?: CiWaitService;
+  // Ticket e630b530: 저장소별 랜딩 lease. 위와 마찬가지로 dataSource +
+  // activityService 위에서 상태를 갖지 않아 두 모드 모두에서 present.
+  // merge-lease-tools (await_merge_lease / release_merge_lease) 가 쓴다.
+  mergeLeaseService?: MergeLeaseService;
   // Cross-board handoff pipeline (ticket ac21a745). Required by handoff-tools
   // (reject_handoff / get_handoff_pipeline). Present only in NestJS integrated
   // mode — the relay engine subscribes to the live activity bus, which the
@@ -302,6 +307,9 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // same standalone-instantiation shape as the prereq service above.
   const ciWaitService = new CiWaitService(dataSource as any, activityService);
 
+  // 랜딩 lease 서비스 — 위와 같은 standalone 인스턴스화 모양.
+  const mergeLeaseService = new MergeLeaseService(dataSource as any, activityService);
+
   // BenchmarkService is stateless over the DataSource (the @InjectDataSource
   // decorator is DI metadata only — calling the constructor directly is the
   // standalone equivalent of the DI singleton, matching the prereq service above).
@@ -328,6 +336,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     roomMessagingService,
     ticketPrerequisitesService,
     ciWaitService,
+    mergeLeaseService,
     benchmarkService,
     buildArtifactService,
     deploymentService,
