@@ -303,13 +303,25 @@ test('confirm 게이트: 같은 판정을 두 번 제출해도 정확히 한 번
   assert.equal(second.already_decided, true, '기존 판정을 그대로 돌려줘야 한다');
   assert.deepEqual(second.dispatched, [], '재개가 두 번 일어나면 안 된다');
 
-  step('재접속한 다른 사용자가 같은 답을 눌러도 마찬가지다');
+  step('재접속한 다른 사용자가 같은 답을 눌러도 마찬가지다(visit 은 그대로 실어야 한다)');
   const third = await runner.submitConfirmDecision(gateId, ws.id, OTHER_HUMAN, {
     verdict: 'pass',
-    // 화면이 visit 을 잃은 경우까지 흡수한다 — 이미 판정된 게이트라 재개는 없다.
-    visit: undefined,
+    visit: 1,
   });
   assert.equal(third.already_decided, true);
+
+  step('visit 을 빠뜨린 요청은 이미 판정된 게이트에서도 400 이다');
+  // 여기서 관대하게 흡수하면 "visit 없이 보내면 통과한다"가 클라이언트에게 학습된다.
+  // 그 습관이 재진입한 게이트에 그대로 적용되는 순간 stale 방어가 무력해지므로,
+  // 성공/실패 경로를 가리지 않고 입력 계약을 먼저 강제한다.
+  await assert.rejects(
+    () => runner.submitConfirmDecision(gateId, ws.id, OTHER_HUMAN, { verdict: 'pass' }),
+    (e) => {
+      assert.equal(e.status, 400);
+      assert.match(e.message, /"visit" is required/);
+      return true;
+    },
+  );
 
   const { detail } = await readSteps(missions, mission.id, ws.id);
   assert.equal(await roomCountFor(ds, byKey.ship.id), shipRooms, '하류 subagent 는 딱 한 번만 떴다');
@@ -418,6 +430,64 @@ test('confirm 게이트: fail 판정은 loop 로 되돌리고 사용자 피드�
   assert.equal(eventsOfType(detail, 'confirm_decided').length, 2, '판정도 두 번');
 });
 
+test('confirm 게이트: fail 의 중복 제출도 pass 와 똑같이 멱등이다', async (t) => {
+  // 플래너 반례(리뷰 라운드1). `fail` 은 같은 lock 안에서 loop 를 발화시키고
+  // `loopBodyNodes` 가 **게이트 자신을 본문에 포함**하므로, 반환 시점의 게이트는 이미
+  // `pending` + `visit=2` 다. 멱등 키가 "step 이 지금 몇 번째 pass 인가" 였을 때는 그 창의
+  // 중복 fail 이 `is pending` 409 로 떨어져, 요구사항 6의 "중복·새로고침·재접속" 이
+  // pass 에서만 성립했다. 실측으로 재현한 뒤 멱등 키를 `claimedVisit` 로 옮겨 고쳤다.
+  const s = await stage(t, { label: 'fail-idempotent' });
+  const { ds, ws, missions, runner, mission, worker, leadMcp } = s;
+
+  await leadMcp.callTool('submit_orchestration_plan', { mission_id: mission.id, ...planFor(worker) });
+  await advanceToGate(s);
+  let { byKey } = await readSteps(missions, mission.id, ws.id);
+  await report(s.workerMcp, byKey.docs.id, { status: 'done', summary: 'documented', visit: 1 });
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  const gateId = byKey.gate.id;
+
+  const first = await runner.submitConfirmDecision(gateId, ws.id, HUMAN, {
+    verdict: 'fail',
+    feedback: 'redo it',
+    visit: 1,
+  });
+  assert.equal(first.already_decided, false);
+  assert.deepEqual(first.dispatched, ['build'], '재작업이 한 번 나갔다');
+
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  // 전제 고정: 이 시점의 게이트는 awaiting_user 가 아니라 pending 이고 visit 은 이미 2다.
+  assert.equal(byKey.gate.status, 'pending');
+  assert.equal(byKey.gate.visit, 2);
+  const buildRooms = await roomCountFor(ds, byKey.build.id);
+
+  step('같은 fail 을 다시 보내도 409 가 아니라 멱등 200 이다');
+  const second = await runner.submitConfirmDecision(gateId, ws.id, HUMAN, {
+    verdict: 'fail',
+    feedback: 'redo it',
+    visit: 1,
+  });
+  assert.equal(second.already_decided, true, 'pass 와 fail 이 같은 계약을 받아야 한다');
+  assert.deepEqual(second.dispatched, [], '재개가 두 번 일어나면 안 된다');
+
+  ({ byKey } = await readSteps(missions, mission.id, ws.id));
+  assert.equal(await roomCountFor(ds, byKey.build.id), buildRooms, '재작업 subagent 는 한 번만 떴다');
+  assert.equal(byKey.build.visit, 2, 'loop 가 두 번 돌지 않았다');
+
+  const { detail } = await readSteps(missions, mission.id, ws.id);
+  assert.equal(eventsOfType(detail, 'confirm_decided').length, 1, '감사 로그에도 판정은 하나뿐이다');
+  assert.equal(eventsOfType(detail, 'node_revisited').length, 1, '재진입도 한 번뿐이다');
+
+  step('같은 pass 에 다른 답을 보내면 여전히 409 다 — 멱등이 관대함이 되면 안 된다');
+  await assert.rejects(
+    () => runner.submitConfirmDecision(gateId, ws.id, OTHER_HUMAN, { verdict: 'pass', visit: 1 }),
+    (e) => {
+      assert.equal(e.status, 409);
+      assert.match(e.message, /already decided "fail"/);
+      return true;
+    },
+  );
+});
+
 test('confirm 게이트: loop 재진입으로 stale 해진 화면의 제출은 409 로 거부된다', async (t) => {
   const s = await stage(t, { label: 'stale' });
   const { ws, missions, runner, mission, worker, leadMcp } = s;
@@ -451,6 +521,31 @@ test('confirm 게이트: loop 재진입으로 stale 해진 화면의 제출은 4
   assert.equal(after.byKey.gate.status, 'awaiting_user', '거부는 현재 pass 상태를 건드리지 않는다');
   assert.equal(after.byKey.gate.confirm_decision, null);
   assert.equal(after.byKey.ship.status, 'pending', '거부된 제출이 하류를 열지 않는다');
+
+  step('visit 을 아예 빼도 우회되지 않는다 — 이 방어의 유일한 구멍이었다(리뷰 라운드1)');
+  // optional 이던 시절에는 이 요청이 **성공**했다. 낡은 화면이 값을 빼는 것만으로
+  // 아래 stale 대조를 통째로 건너뛰고 pass 2 를 pass 1 의 판단으로 확정해버린다.
+  for (const bad of [{}, { visit: null }, { visit: '' }, { visit: 'two' }, { visit: 0 }, { visit: -1 }, { visit: 1.5 }, { visit: NaN }]) {
+    await assert.rejects(
+      () => runner.submitConfirmDecision(gateId, ws.id, HUMAN, { verdict: 'pass', ...bad }),
+      (e) => {
+        assert.equal(e.status, 400, `${JSON.stringify(bad)} 는 400 이어야 한다`);
+        assert.match(e.message, /"visit" is required/);
+        return true;
+      },
+      `${JSON.stringify(bad)} 가 통과하면 stale 방어가 무력해진다`,
+    );
+  }
+
+  const stillOpen = await readSteps(missions, mission.id, ws.id);
+  assert.equal(stillOpen.byKey.gate.status, 'awaiting_user', '거부들이 게이트를 건드리지 않았다');
+  assert.equal(stillOpen.byKey.gate.confirm_decision, null, '어떤 판정도 기록되지 않았다');
+  assert.equal(stillOpen.byKey.ship.status, 'pending');
+
+  step('정상 요청(현재 pass)은 그대로 통과한다 — 강제가 정상 경로를 막지 않는다');
+  const ok = await runner.submitConfirmDecision(gateId, ws.id, HUMAN, { verdict: 'pass', visit: 2 });
+  assert.equal(ok.already_decided, false);
+  assert.equal(ok.step.confirm_decision.visit, 2);
 });
 
 test('confirm 게이트: awaiting_user 미션을 리퍼가 정지로 오인해 죽이지 않는다', async (t) => {
@@ -657,6 +752,9 @@ test('confirm 게이트: 상반된 판정이 동시에 들어오면 하나만 �
   assert.equal(won.length, 1, '상반된 판정 중 하나만 기록돼야 한다');
   assert.equal(lost.length, 1, '나머지는 조용히 덮어쓰지 않고 거부돼야 한다');
   assert.equal(lost[0].reason.status, 409);
+  // 어느 쪽이 이기든 패자는 **같은 사유**를 받아야 한다. 멱등 키가 step.visit 기준이던
+  // 시절엔 fail 이 이겼을 때만 패자가 `is pending` 을 받아 이 단언이 순서에 의존했다 —
+  // sql.js 가 FIFO 로 풀어 배열 첫 번째(pass)가 항상 이겼기 때문에 가려져 있었다.
   assert.match(lost[0].reason.message, /already decided/);
 
   const { detail, byKey: finalByKey } = await readSteps(missions, mission.id, ws.id);

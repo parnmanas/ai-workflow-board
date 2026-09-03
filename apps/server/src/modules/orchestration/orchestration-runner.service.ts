@@ -1686,9 +1686,11 @@ export class OrchestrationRunnerService {
     step.artifacts = evidence.length > 0 ? evidence : null;
     await this.stepRepo.save(step);
 
-    // global budget 은 "이 미션이 몇 번 더 node 를 열 수 있는가" 를 센다. subagent 를
-    // 띄우지 않더라도 confirm 은 loop 를 한 바퀴 더 돌리는 실행이므로 함께 센다 —
-    // 그러지 않으면 confirm→fail→loop 가 예산을 소모하지 않고 무한히 돌 수 있다.
+    // global budget 은 **node 실행 횟수**이지 subagent 스폰 횟수가 아니다. 게이트가
+    // subagent 를 띄우지 않더라도 함께 세는 근거는 폭주 방지가 아니라 **예산 정의의
+    // 일관성**이다 — loop 자체는 `node.max_visits` 로 이미 개별 상한이 걸려 있어서
+    // 게이트가 예산을 안 써도 종료한다. 예산에 node kind 모양의 구멍을 내면 "왜 이
+    // 미션은 예산이 안 깎이지"를 나중에 아무도 재구성하지 못한다(리뷰 라운드1).
     mission.total_visits = (mission.total_visits ?? 0) + 1;
     await this.missionRepo.save(mission);
 
@@ -1729,7 +1731,7 @@ export class OrchestrationRunnerService {
     stepId: string,
     workspaceId: string,
     actor: ActorRef,
-    input: { verdict: string; feedback?: string; visit?: number },
+    input: { verdict: string; feedback?: string; visit: number },
   ): Promise<{
     step: OrchestrationStep;
     already_decided: boolean;
@@ -1740,6 +1742,20 @@ export class OrchestrationRunnerService {
     const verdict = String(input?.verdict ?? '').trim().toLowerCase();
     if (!(CONFIRM_VERDICTS as readonly string[]).includes(verdict)) {
       throw orchestrationError(400, `verdict must be one of ${CONFIRM_VERDICTS.join(', ')}`);
+    }
+    // `visit` 은 **필수**다(리뷰 라운드1). optional 로 두면 loop 재진입으로 화면이 낡은
+    // 클라이언트가 값을 그냥 빼는 것만으로 아래 stale 대조를 통째로 건너뛰고 새 pass 를
+    // 잘못 판정한다 — 있으나 마나인 방어가 된다. `reportStep` 이 graph 미션의 모든 보고에
+    // visit 을 요구하는 것과 정확히 같은 이유이고, 같은 이유로 여기서도 서버가 강제한다
+    // (클라이언트 타입이 required 인 것은 서버 계약이 아니다).
+    const claimedVisit = Number(input?.visit);
+    if (!Number.isInteger(claimedVisit) || claimedVisit < 1) {
+      throw orchestrationError(
+        400,
+        `"visit" is required and must be a whole number >= 1 — send the pass number shown on the confirmation ` +
+          `you are answering. Without it the server cannot tell a current decision apart from one made against ` +
+          `a screen that has since been superseded by a loop re-entry.`,
+      );
     }
     const feedback = String(input?.feedback ?? '').trim().slice(0, CONFIRM_FEEDBACK_MAX);
 
@@ -1764,13 +1780,24 @@ export class OrchestrationRunnerService {
       // status 검사보다 **먼저** 본다 — 성공한 판정은 step 을 `done` 으로 만들므로,
       // 순서를 뒤집으면 정상적인 중복 제출이 전부 "awaiting_user 가 아니다" 로 떨어진다.
       //
-      // **같은 pass 의 판정일 때만** 발동한다. loop 재진입은 기록을 보존한 채 visit 만
-      // 올리므로(applyGraphTransitions 참고), 이 조건이 없으면 지난 pass 의 판정이
-      // 새 pass 의 답을 영구히 막아 사람이 다시는 답할 수 없는 게이트가 된다.
+      // 멱등 키는 "step 이 지금 몇 번째 pass 인가"가 아니라 **"이 제출이 몇 번째 pass 에
+      // 답하는가"**(`claimedVisit`)다. 전자로 두면 `fail` 쪽만 비대칭으로 깨진다(리뷰
+      // 라운드1, 플래너 반례): `fail` 은 같은 lock 안에서 loop 를 발화시키고
+      // `loopBodyNodes` 가 **게이트 자신을 본문에 포함**하므로(loop.to 에서 forward 로
+      // 닿고 loop.from 에도 닿는다), 반환 시점의 게이트는 이미 `pending` + `visit=2` 다.
+      // 그 창에서 같은 `fail` 이 다시 들어오면 `prior.visit(1) !== step.visit(2)` 로 멱등
+      // 분기를 건너뛰고 `is pending` 409 가 나간다 — 재개가 두 번 되지는 않으니 안전하지만,
+      // 요구사항 6의 "중복·새로고침·재접속" 이 `pass` 에서만 성립하게 된다.
+      //
+      // 넓어지지 않는 근거: 이 분기는 `prior` 가 살아 있는 동안에만 발화하고, 게이트가
+      // 실제로 다시 열리는 순간 `openConfirmGate` 가 `confirm_decision = null` 로 만든다.
+      // 따라서 새 pass 의 제출은 `prior === null` 이라 정상 경로로 내려가고, stale 화면
+      // (visit 1 vs 현재 2)도 아래 stale 대조에 그대로 걸린다.
       const prior = step.confirm_decision;
-      if (prior && prior.visit === (step.visit ?? 0)) {
-        const sameVisit = input.visit === undefined || input.visit === null || Number(input.visit) === prior.visit;
-        if (sameVisit && prior.verdict === verdict) {
+      if (prior && claimedVisit === prior.visit) {
+        // 같은 답을 다시 보낸 것 = 중복 클릭 / 새로고침 / 네트워크 재시도. 재개하지 않고
+        // 기존 판정을 그대로 돌려준다.
+        if (prior.verdict === verdict) {
           return {
             step,
             already_decided: true,
@@ -1779,6 +1806,8 @@ export class OrchestrationRunnerService {
             orchestrator_woken: false,
           };
         }
+        // 같은 pass 에 다른 답을 보낸 것 — 조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로
+        // 진행되고 사후 재구성조차 안 된다.
         throw orchestrationError(
           409,
           `step "${step.step_key}" was already decided "${prior.verdict}" on pass ${prior.visit} by ` +
@@ -1794,10 +1823,10 @@ export class OrchestrationRunnerService {
         );
       }
       const current = step.visit ?? 0;
-      if (input.visit !== undefined && input.visit !== null && Number(input.visit) !== current) {
+      if (claimedVisit !== current) {
         throw orchestrationError(
           409,
-          `stale confirmation for step "${step.step_key}": you are answering pass ${input.visit} but the step ` +
+          `stale confirmation for step "${step.step_key}": you are answering pass ${claimedVisit} but the step ` +
             `is now on pass ${current}. The work was sent back for another round after your screen loaded — ` +
             `reload the mission and review the current result before deciding.`,
         );

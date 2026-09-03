@@ -735,3 +735,128 @@ test('computeGraphProgress — pass 판정 뒤에는 pass edge 만 열린다', (
   assert.deepEqual(p.dispatchable, ['ship']);
   assert.deepEqual(p.awaitingUser, []);
 });
+
+// ── confirm 분기가 **실제로** 갈라지는지 (리뷰 라운드1) ──────────────────────
+//
+// "pass 용 edge 와 fail 용 edge 가 각각 하나 이상 있다"만 재면 구멍이 둘 남는다.
+// 둘 다 검증은 통과하는데 사용자의 두 답이 실행상 구분되지 않아, 게이트가 분기가 아니라
+// 단순 "확인 버튼"이 된다 — 요구사항 5가 조용히 깨지는 형태다.
+
+test('validateGraphSpec — 한 edge 가 pass 와 fail 을 동시에 실으면 거부된다', () => {
+  // `{ verdict: ['pass','fail'] }` 하나뿐이면 어느 답을 골라도 같은 edge 를 탄다.
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass', 'fail'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r, '결합 verdict edge 는 분기를 만들지 못한다');
+  assert.match(r.error, /matches BOTH "pass" and "fail"/);
+  assert.match(r.error, /gate/);
+});
+
+test('validateGraphSpec — pass 와 fail 이 같은 node 로 가면 거부된다', () => {
+  // edge 는 둘로 갈라져 있지만 도착지가 같으면 그 node 는 사람이 무엇을 답하든 실행된다.
+  // 두 edge 모두 conditional 로 둔다 — loop_back 을 쓰면 "loop 를 닫지 않는다" 규칙에
+  // 먼저 걸려서 정작 재려던 규칙을 지나쳐버린다.
+  const r = validateGraphSpec(
+    confirmGraph([
+      { from: 'build', to: 'gate' },
+      { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+      { from: 'gate', to: 'ship', kind: 'sequence', when: { verdict: ['fail'] } },
+    ]),
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto' },
+  );
+  assert.ok('error' in r);
+  assert.match(r.error, /routes both "pass" and "fail" to "ship"/);
+});
+
+test('validateGraphSpec — 별도 edge + 별도 target 이면 수용된다(정상 형태)', () => {
+  // 이 파일 위쪽의 PASS_FAIL_EDGES 가 바로 그 형태다. 위 두 규칙이 정상 그래프를
+  // 잡아먹지 않는다는 것을 같은 자리에서 다시 고정한다.
+  const r = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in r), `정상 형태가 거부되면 안 된다: ${r.error}`);
+  const outgoing = r.spec.edges.filter((e) => e.from === 'gate');
+  const pass = outgoing.filter((e) => (e.when?.verdict ?? []).includes('pass'));
+  const fail = outgoing.filter((e) => (e.when?.verdict ?? []).includes('fail'));
+  assert.equal(pass.length, 1);
+  assert.equal(fail.length, 1);
+  assert.notEqual(pass[0].to, fail[0].to, '두 답이 서로 다른 node 를 연다');
+});
+
+test('validateGraphSpec — 두 답의 경로가 겹치지만 않으면 여러 갈래여도 수용된다', () => {
+  // 규칙은 "겹치지 마라"이지 "각각 하나여야 한다"가 아니다. fan-out 자체는 막지 않는다.
+  const r = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: [
+        { key: 'build', kind: 'task', max_visits: 3 },
+        { key: 'gate', kind: 'confirm', max_visits: 3 },
+        { key: 'ship', kind: 'task' },
+        { key: 'announce', kind: 'task' },
+      ],
+      edges: [
+        { from: 'build', to: 'gate' },
+        { from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass'] } },
+        { from: 'gate', to: 'announce', kind: 'conditional', when: { verdict: ['pass'] } },
+        { from: 'gate', to: 'build', kind: 'loop_back', when: { verdict: ['fail'] } },
+      ],
+      max_total_visits: 20,
+    },
+    { nodeKeys: ['build', 'gate', 'ship', 'announce'], confirmPolicy: 'auto' },
+  );
+  assert.ok(!('error' in r), `pass 쪽 fan-out 은 정상이다: ${r.error}`);
+});
+
+test('validateGraphSpec — evaluator 의 동의어 verdict 묶음은 여전히 허용된다', () => {
+  // 위 규칙은 confirm 전용이다. evaluator 에서 `['approve','ship-it']` 같은 동의어
+  // 묶음까지 막으면 기존 그래프가 깨진다.
+  const r = validateGraphSpec(
+    {
+      version: GRAPH_SPEC_VERSION,
+      nodes: [
+        { key: 'build', kind: 'task' },
+        { key: 'review', kind: 'evaluator' },
+        { key: 'ship', kind: 'task' },
+      ],
+      edges: [
+        { from: 'build', to: 'review' },
+        { from: 'review', to: 'ship', kind: 'conditional', when: { verdict: ['approve', 'ship-it'] } },
+      ],
+      max_total_visits: 10,
+    },
+    { nodeKeys: ['build', 'review', 'ship'], confirmPolicy: 'auto' },
+  );
+  assert.ok(!('error' in r), `evaluator 규칙은 바뀌지 않았다: ${r.error}`);
+});
+
+test('applyGraphPatch — patch 로도 결합 verdict edge 를 만들 수 없다', () => {
+  // 제출로 거부되는 그래프가 patch 로는 통과하면 두 경로가 갈라진다.
+  const base = validateGraphSpec(confirmGraph(PASS_FAIL_EDGES), {
+    nodeKeys: CONFIRM_KEYS,
+    confirmPolicy: 'auto',
+  });
+  assert.ok(!('error' in base));
+  const runtime = {
+    nodes: CONFIRM_KEYS.map((key) => ({ key, status: 'pending', visit: 0, verdict: '' })),
+    total_visits: 0,
+  };
+
+  const merged = applyGraphPatch(
+    base.spec,
+    {
+      remove_edges: [
+        { from: 'gate', to: 'ship' },
+        { from: 'gate', to: 'build' },
+      ],
+      add_edges: [{ from: 'gate', to: 'ship', kind: 'conditional', when: { verdict: ['pass', 'fail'] } }],
+    },
+    { nodeKeys: CONFIRM_KEYS, confirmPolicy: 'auto', runtime },
+  );
+  assert.ok('error' in merged);
+  assert.match(merged.error, /matches BOTH "pass" and "fail"/);
+});

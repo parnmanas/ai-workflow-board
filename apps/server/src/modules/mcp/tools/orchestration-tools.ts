@@ -195,9 +195,11 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
                       'router = only picks a branch; every edge out of it must be conditional. ' +
                       'confirm = a HUMAN answers Pass/Fail here — no assignee is needed, no subagent runs, and ' +
                       'the mission pauses (it does not time out) until a person decides in the web UI. A confirm ' +
-                      'node MUST have one outgoing edge with when.verdict ["pass"] and one with ["fail"] ' +
-                      '(a loop_back counts, and is the usual "fail" route); a node with only one routed answer ' +
-                      'is rejected. Whatever artifacts the upstream steps reported are shown to the person as ' +
+                      'node MUST have one outgoing edge with when.verdict ["pass"] and a SEPARATE one with ' +
+                      '["fail"] (a loop_back counts, and is the usual "fail" route). The two answers must lead ' +
+                      'somewhere different: a single edge carrying ["pass","fail"] is rejected, and so is routing ' +
+                      'both answers to the same node — either way the person\'s choice would change nothing. ' +
+                      'Whatever artifacts the upstream steps reported are shown to the person as ' +
                       'evidence, and their written feedback is handed to the steps the confirm node can re-run. ' +
                       "Allowed only when the mission's confirm_policy is not \"none\" — see the policy section " +
                       'of your brief.',
@@ -346,9 +348,9 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
               .enum(['task', 'evaluator', 'router', 'confirm'])
               .optional()
               .describe(
-                'Changing a node to "confirm" turns it into a human Pass/Fail gate — it then needs both a ' +
-                  'when.verdict ["pass"] and a ["fail"] outgoing edge in the resulting graph, and is rejected ' +
-                  "if the mission's confirm_policy is \"none\".",
+                'Changing a node to "confirm" turns it into a human Pass/Fail gate — the resulting graph then ' +
+                  'needs a when.verdict ["pass"] edge and a SEPARATE ["fail"] edge going to different nodes, ' +
+                  "and is rejected if the mission's confirm_policy is \"none\".",
               ),
             join: z.enum(['all', 'any']).optional(),
             max_visits: z.number().optional().describe('New iteration cap. Cannot go below what the node already used.'),

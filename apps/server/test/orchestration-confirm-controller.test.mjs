@@ -166,3 +166,75 @@ test('세션 사용자가 없어도 500 으로 터지지 않고 서비스까지 
   assert.deepEqual(seen, { type: 'user', id: '', name: '' });
   assert.equal(res.out.statusCode, 200);
 });
+
+// ── visit 필수 계약이 HTTP 계층까지 살아 있는가 (리뷰 라운드1) ───────────────
+//
+// 위 케이스들은 가짜 runner 로 "인자가 옮겨지는가"만 잰다. 그것만으로는 body 에서
+// `visit` 을 빼고 보냈을 때 **요청이 실제로 거부되는지** 알 수 없다 — 컨트롤러가
+// `body?.visit`(undefined)를 그대로 넘기고 서비스가 관대하면 200 이 나간다. 그래서
+// 여기서는 진짜 `OrchestrationRunnerService.prototype.submitConfirmDecision` 을
+// 최소 스텁 위에서 호출해 입력 검증 자체를 태운다(엔진/DB 는 그 앞에서 끝난다).
+
+const { OrchestrationRunnerService } = await import(
+  pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-runner.service.js')).href
+);
+
+/** 입력 검증까지만 도달시키는 최소 runner — 검증을 통과하면 그 사실을 드러내고 멈춘다. */
+function realValidationRunner() {
+  const runner = Object.create(OrchestrationRunnerService.prototype);
+  runner.missions = {
+    requireStep: async () => {
+      // 검증을 통과했다는 뜻 — 이 테스트에서는 그 자체가 실패다.
+      const e = new Error('REACHED_LOOKUP');
+      e.status = 599;
+      throw e;
+    },
+  };
+  return runner;
+}
+
+const visitRejections = [
+  ['생략', {}],
+  ['null', { visit: null }],
+  ['빈 문자열', { visit: '' }],
+  ['문자열', { visit: 'two' }],
+  ['0', { visit: 0 }],
+  ['음수', { visit: -1 }],
+  ['소수', { visit: 1.5 }],
+];
+
+for (const [label, body] of visitRejections) {
+  test(`POST steps/:id/confirm — visit ${label} 은 400 으로 거부된다`, async () => {
+    const controller = controllerWith(realValidationRunner());
+    const res = fakeRes();
+    await controller.confirmStep(
+      'step-1',
+      { workspace_id: 'ws-1', verdict: 'pass', ...body },
+      fakeReq({ id: 'u1', name: 'Operator' }),
+      res,
+    );
+    assert.equal(res.out.statusCode, 400, `visit ${label} 이 통과하면 stale 방어가 무력해진다`);
+    assert.match(res.out.body.error, /"visit" is required/);
+  });
+}
+
+test('POST steps/:id/confirm — 유효한 visit 은 검증을 통과해 조회 단계까지 간다', () => {
+  // 위 거부들이 "전부 400" 이라서 통과하는 게 아니라는 것을 고정한다 — 유효한 값이
+  // 같은 자리에서 막히면 정상 경로까지 죽은 것이고, 그건 별개의 회귀다.
+  const controller = controllerWith(realValidationRunner());
+  const res = fakeRes();
+  return controller
+    .confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'pass', visit: 2 }, fakeReq({}), res)
+    .then(() => {
+      assert.equal(res.out.statusCode, 599, '검증을 지나 step 조회까지 도달해야 한다');
+      assert.match(res.out.body.error, /REACHED_LOOKUP/);
+    });
+});
+
+test('POST steps/:id/confirm — verdict 도 같은 자리에서 강제된다', async () => {
+  const controller = controllerWith(realValidationRunner());
+  const res = fakeRes();
+  await controller.confirmStep('step-1', { workspace_id: 'ws-1', verdict: 'maybe', visit: 1 }, fakeReq({}), res);
+  assert.equal(res.out.statusCode, 400);
+  assert.match(res.out.body.error, /verdict must be one of/);
+});

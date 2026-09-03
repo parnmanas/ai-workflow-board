@@ -473,15 +473,56 @@ export function validateGraphSpec(
       // loop_back 하나뿐이면 그 제거는 이 규칙에 막힌다. 폭주 loop 의 탈출구가 사라지는
       // 것은 아니다 — 규칙 1의 "max_visits 를 현재 visit 으로 낮추기"가 그대로 남아 있고,
       // 그쪽이 오히려 사용자의 `fail` 답을 버리지 않으면서 재진입만 끊는 정확한 수단이다.
-      const routed = (verdict: string) =>
-        outgoing.some((e) => (e.when?.verdict ?? []).includes(verdict));
-      const missing = [CONFIRM_PASS, CONFIRM_FAIL].filter((v) => !routed(v));
+      const edgesFor = (verdict: string) => outgoing.filter((e) => (e.when?.verdict ?? []).includes(verdict));
+      const passEdges = edgesFor(CONFIRM_PASS);
+      const failEdges = edgesFor(CONFIRM_FAIL);
+      const missing = [
+        ...(passEdges.length === 0 ? [CONFIRM_PASS] : []),
+        ...(failEdges.length === 0 ? [CONFIRM_FAIL] : []),
+      ];
       if (missing.length > 0) {
         return {
           error:
             `confirm node "${node.key}" has no outgoing edge for verdict ${missing.map((v) => `"${v}"`).join(' or ')} — ` +
             `a user confirmation must route BOTH answers. Add an edge with ` +
             `{ when: { verdict: ["${missing[0]}"] } } (a loop_back counts, and is the usual way to route "fail").`,
+        };
+      }
+
+      // "양쪽에 edge 가 있다"만으로는 부족하다(리뷰 라운드1). 아래 두 규칙이 더 필요하다 —
+      // 없으면 검증은 통과하는데 **사용자의 두 답이 실행상 구분되지 않는** 그래프가 만들어지고,
+      // 게이트는 분기가 아니라 단순 "확인 버튼"으로 전락한다. 요구사항 5("Pass 와 Failure 를
+      // 각각 다른 후속 edge 로 라우팅")가 정확히 여기서 깨진다.
+      //
+      // 1. 한 edge 가 pass 와 fail 을 **동시에** 실어서는 안 된다. `{ verdict: ["pass","fail"] }`
+      //    하나만 있으면 어느 답을 골라도 같은 edge 를 타므로 분기가 존재하지 않는다.
+      //    evaluator 는 다르다 — 거기서 `["approve","ship-it"]` 은 동의어 묶음이라 정상이다.
+      //    confirm 은 답이 정확히 둘뿐이고 그 둘이 사람의 선택 그 자체라서 규칙이 다르다.
+      const bothOnOneEdge = outgoing.find(
+        (e) => (e.when?.verdict ?? []).includes(CONFIRM_PASS) && (e.when?.verdict ?? []).includes(CONFIRM_FAIL),
+      );
+      if (bothOnOneEdge) {
+        return {
+          error:
+            `confirm node "${node.key}" has an edge to "${bothOnOneEdge.to}" whose condition matches BOTH "pass" ` +
+            `and "fail" — the two answers would take the same edge, so asking the person changes nothing. Split ` +
+            `it into one edge with { when: { verdict: ["pass"] } } and another with { when: { verdict: ["fail"] } }.`,
+        };
+      }
+
+      // 2. pass 가 여는 node 집합과 fail 이 여는 node 집합이 겹쳐서는 안 된다. 겹치는 node 는
+      //    사람이 무엇을 답하든 실행되므로 그 하류에 한해 확인이 아무 효과도 내지 않고,
+      //    사용자는 그 사실을 화면에서 알 방법이 없다. "어느 쪽이든 하는 일"은 분기 지점이
+      //    아니라 하류 join 으로 표현해야 한다.
+      const passTargets = new Set(passEdges.map((e) => e.to));
+      const sharedTarget = failEdges.map((e) => e.to).find((to) => passTargets.has(to));
+      if (sharedTarget) {
+        return {
+          error:
+            `confirm node "${node.key}" routes both "pass" and "fail" to "${sharedTarget}" — that node runs ` +
+            `whatever the person decides, so the confirmation has no effect on it. Send the two answers to ` +
+            `different nodes (the usual shape is pass → the next step, fail → a loop_back to the work that must ` +
+            `be redone); if something must happen either way, put it downstream of both with join="any".`,
         };
       }
     }

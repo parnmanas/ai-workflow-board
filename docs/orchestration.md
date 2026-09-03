@@ -138,10 +138,14 @@ node/edge 는 거부된다.
 | `attempt` | 같은 pass 안에서 재디스패치될 때(재시도) | loop 재진입 시 0 |
 | `visit` | `loop_back` 으로 재진입할 때 | 없음 (미션 내내 누적) |
 
-`max_total_visits` 는 **재시도까지 포함해** 실제 디스패치 횟수를 센다 — 예산이
-답하는 질문이 "이 미션이 subagent 를 몇 번 더 띄울 수 있는가"이기 때문이다.
-소진되면 새 디스패치를 멈추고 `graph_budget_exhausted` 를 남긴다(step 을
-`failed` 로 바꾸지는 않는다 — 운영자가 상한을 올리면 그대로 재개돼야 한다).
+`max_total_visits` 는 **재시도까지 포함해 node 실행 횟수**를 센다 — 위 GraphSpec 표의
+정의(`미션 전체 node 실행 횟수의 hard budget`)와 같은 값이다. subagent 스폰 횟수가
+아니다: 사람이 답하는 `confirm` 게이트는 subagent 를 띄우지 않지만 오픈할 때 예산을
+1 소모한다(ticket 5dbe4aa2). node kind 모양의 구멍을 예산에 내면 "왜 이 미션은 예산이
+안 깎이지"를 나중에 재구성할 수 없기 때문이고, 폭주 방지가 근거는 아니다 — loop 는
+`node.max_visits` 로 이미 개별 상한이 걸려 있다. 소진되면 새 디스패치를 멈추고
+`graph_budget_exhausted` 를 남긴다(step 을 `failed` 로 바꾸지는 않는다 — 운영자가
+상한을 올리면 그대로 재개돼야 한다).
 
 예산은 `pump()` 의 후보 루프 **안에서 매 반복마다** 다시 확인한다. 진입 시 한 번만
 보면 fan-out 에서 상한을 넘긴다(남은 예산 1 + ready node 4개 + 병렬 슬롯 4개 →
@@ -445,6 +449,17 @@ verdict 어휘는 `pass` / `fail` 고정.
   최소 하나** 있어야 한다(`loop_back` 도 fail 경로로 인정된다 — 재작업 루프가 표준
   형태다). 한쪽만 라우팅하면 사용자가 그 답을 골랐을 때 나가는 edge 가 전부 dead 라
   미션이 조용히 선다 — 사람에게 물어놓고 답을 버리는 셈이다.
+- 두 답이 **실행상 실제로 갈라져야** 한다. 다음 둘은 거부된다:
+  - 한 edge 가 `{ verdict: ["pass","fail"] }` 로 둘을 함께 싣는 것 — 어느 답을 골라도
+    같은 edge 를 타므로 분기가 존재하지 않는다. (`evaluator` 는 다르다: 거기서
+    `["approve","ship-it"]` 은 동의어 묶음이라 정상이다. confirm 은 답이 정확히 둘뿐이고
+    그 둘이 사람의 선택 그 자체라서 규칙이 다르다.)
+  - pass 가 여는 node 와 fail 이 여는 node 가 겹치는 것 — 그 node 는 사람이 무엇을
+    답하든 실행되므로 그 하류에 한해 확인이 아무 효과도 내지 않는데, 사용자는 그 사실을
+    화면에서 알 방법이 없다. "어느 쪽이든 하는 일"은 분기 지점이 아니라 하류에서
+    `join="any"` 로 표현한다.
+  이 둘이 없으면 검증은 통과하는데 게이트가 분기가 아니라 단순 "확인 버튼"이 되어
+  요구사항 5가 조용히 깨진다.
 - assignee 가 **필요 없다**. 사람이 답하는 node 이므로 담당 에이전트가 없는 것이 정상이다.
 - 미션의 `confirm_policy` 가 `none` 이면 노드의 존재 자체가 거부된다.
 
@@ -452,9 +467,9 @@ verdict 어휘는 `pass` / `fail` 고정.
 
 | 단계 | 무슨 일이 일어나는가 |
 | --- | --- |
-| 열림 | step 이 `awaiting_user` 로 전이. 만족된 상류 edge 의 `artifacts`(스크린샷·동영상·URL·경로)를 **복사**해 판정 근거로 붙이고 `confirm_requested` 이벤트를 남긴다 |
+| 열림 | step 이 `awaiting_user` 로 전이. 만족된 상류 edge 의 `artifacts`(스크린샷·동영상·URL·경로)를 **복사**해 판정 근거로 붙이고 `confirm_requested` 이벤트를 남긴다. subagent 는 뜨지 않지만 `total_visits` 를 1 소모한다 — 예산은 node 실행 횟수이지 스폰 횟수가 아니다 |
 | 대기 | subagent 를 띄우지 않는다. **병렬 슬롯을 쓰지 않으므로** 다른 분기는 계속 진행된다. 타임아웃도 없다 |
-| 판정 | `POST /api/orchestration/steps/:stepId/confirm` (사용자 세션 전용). verdict 를 `verdict` 컬럼에 실어 기존 edge 판정 기계를 그대로 태우고, `confirm_decided` 이벤트를 남긴 뒤 `reportStep` 과 **같은** 전이/차단/디스패치/wake 경로로 이어간다 |
+| 판정 | `POST /api/orchestration/steps/:stepId/confirm` (사용자 세션 전용, body `{ workspace_id, verdict, visit, feedback? }`). verdict 를 `verdict` 컬럼에 실어 기존 edge 판정 기계를 그대로 태우고, `confirm_decided` 이벤트를 남긴 뒤 `reportStep` 과 **같은** 전이/차단/디스패치/wake 경로로 이어간다 |
 
 `awaiting_user` 는 `IN_FLIGHT_STEP_STATUSES` 에도 `TERMINAL_STEP_STATUSES` 에도 **없다**.
 in-flight 로 두면 병렬 슬롯을 먹고 `reapStuckSteps` 가 사람을 기다리는 노드를
@@ -471,6 +486,13 @@ in-flight 로 두면 병렬 슬롯을 먹고 `reapStuckSteps` 가 사람을 기�
 돌려준다. 그 외의 불일치(다른 verdict, loop 재진입으로 stale 해진 `visit`)는 전부 409 다 —
 조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로 진행되고 사후 재구성조차 되지 않는다.
 `confirm_requested` / `confirm_decided` 두 이벤트가 감사 기록이다.
+
+`visit` 은 **필수**이며 1 이상의 정수여야 한다(누락·`null`·`0`·소수·비수치는 400). optional
+로 두면 loop 재진입으로 화면이 낡은 클라이언트가 값을 그냥 빼는 것만으로 위 stale 대조를
+통째로 건너뛰고 새 pass 를 이전 pass 의 판단으로 확정한다 — 있으나 마나인 방어가 된다.
+`reportStep` 이 graph 미션의 모든 보고에 `visit` 을 요구하는 것과 정확히 같은 이유다.
+클라이언트 타입이 required 인 것은 서버 계약이 아니므로 검증은 서비스에 둔다(컨트롤러에
+중복으로 두면 두 곳이 어긋난다).
 
 **fail 피드백의 전달** — 사용자가 쓴 사유는 재실행되는 step 의 work order 에
 `## User confirmation` 절로 실려 나간다. `depends_on` 으로는 도달할 수 없다는 점이
