@@ -50,16 +50,20 @@ import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
-import { IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
+import { AWAITING_USER_STATUS, IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 
 /**
- * 한 스윕이 보낼 수 있는 confirm 리마인더 상한(티켓 a78cb566). 남은 것은 다음 스윕이
+ * 한 스윕이 가져오는 confirm 리마인더 후보 수 상한(티켓 a78cb566). 남은 것은 다음 스윕이
  * 이어받는다 — 리마인더는 지연에 민감하지 않다.
  *
  * 상한이 필요한 이유: 알림 provider 는 요청 타임아웃이 없어 개별 발송에 최대 15초가
  * 걸릴 수 있다. 대기 중인 게이트가 수십 개면 이 스윕 하나가 sweep 주기(기본 5분)를
  * 넘겨 버리고, 그동안 step 타임아웃 같은 **다른 리퍼 임무가 조용히 밀린다**.
+ *
+ * **선택 기준이 아니라 처리량 상한이다.** 후보 조건은 전부 SQL 이 판정하고 정렬은 오래
+ * 기다린 순이므로, 이 창에 못 든 후보는 다음 스윕에서 앞으로 당겨진다
+ * (`remindAwaitingConfirm` 의 기아 없음 불변식 참고).
  */
 const CONFIRM_REMINDERS_PER_SWEEP = 25;
 
@@ -477,49 +481,78 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
    * 답을 오래 못 받은 confirm 게이트에 리마인더를 **1회** 보낸다(티켓 a78cb566, 요구사항 5).
    *
    * 이 스윕은 다른 reap* 들과 성질이 정반대다: **아무 상태도 바꾸지 않는다.** 미션도
-   * step 도 건드리지 않고 알림만 내보내며, 유일한 쓰기는 "리마인더를 보냈다"는
-   * `confirm_notice.reminded_at` 이다. `reapStalledRunning` 의 `isAwaitingUser` 가드가
+   * step 도 건드리지 않고 알림만 내보내며, 유일한 쓰기는 "이 pass 의 리마인더를 선점했다"는
+   * `confirm_reminded_visit` 이다. `reapStalledRunning` 의 `isAwaitingUser` 가드가
    * 보장하는 계약 — 리퍼는 confirm 대기 미션을 죽이지 않는다 — 은 그대로 유지된다.
    * 재알림은 상태 전이가 아니라 알림이다.
    *
-   * 대기 기준 시각은 최초 알림 시각이되, 그게 없으면(이 기능 이전에 열린 게이트이거나
-   * 최초 발송 기록이 유실된 경우) 게이트가 열린 `dispatched_at` 으로 떨어진다 — 최초
-   * 알림이 유실된 게이트야말로 리마인더가 가장 필요한 경우라 여기서 끊으면 안 된다.
+   * ── 후보를 SQL 로 직접 고른다 (리뷰 지적 1) ────────────────────────────────
+   * 예전엔 `status='running'` 미션을 **무순서로** `take:100` 잘라 온 뒤 그 안에서 게이트를
+   * 찾았다. 실행 중 미션이 100개를 넘고 DB 가 매번 같은 100개를 돌려주면, 그 밖의 게이트는
+   * 아무리 오래 기다려도 **한 번도 검사되지 않는다**(영구 기아). 같은 파일의
+   * `reapPendingPostActions` 가 이미 같은 이유로 recency/take 선택을 버리고 후보 조건을
+   * 직접 필터링한다.
+   *
+   * 그래서 미션이 아니라 **만료된 게이트 자체**를 후보로 센다. 세 조건이 전부 SQL 안에서
+   * 판정되므로 `limit` 은 "이번 스윕이 처리할 양"일 뿐 **선택 기준이 아니다**:
+   *
+   *   - `step.status = 'awaiting_user'` AND `mission.status = 'running'`
+   *     — 미션 상태를 JOIN 으로 걸러, 자격 없는 행(예: paused 미션의 게이트)이 limit 창을
+   *       영원히 차지하지 못하게 한다. 애플리케이션에서 걸렀다면 그게 새 기아가 된다.
+   *   - 이 pass 의 리마인더를 아직 아무도 선점하지 않았다.
+   *   - 대기 시간이 창을 넘겼다.
+   *
+   * **기아가 없다는 불변식**: 후보를 "오래 기다린 것부터"(anchor 오름차순) 가져가고,
+   * 내보낸 것은 선점 마커가 찍혀 후보 집합에서 영구히 빠진다. 이번 스윕에 못 든 후보는
+   * 다음 스윕에서 더 오래된 축이 되어 앞으로 당겨지므로, 모든 후보가 **결국** 검사된다.
+   *
+   * 정렬·필터의 기준 시각은 최초 알림 선점 시각이되, 그게 없으면(이 기능 이전에 열린
+   * 게이트이거나 최초 선점이 실패한 경우) 게이트가 열린 `dispatched_at` 으로 떨어진다 —
+   * 최초 알림이 유실된 게이트야말로 리마인더가 가장 필요한 경우라 여기서 끊으면 안 된다.
+   * `COALESCE` 로 한 식에 묶는 것은 NULL 정렬 순서가 백엔드마다 다르기 때문이기도 하다
+   * (SQLite 는 ASC 에서 NULL 이 먼저, PostgreSQL 은 나중) — 그대로 두면 PostgreSQL 에서
+   * 정확히 가장 급한 행이 매번 뒤로 밀린다.
    */
   private async remindAwaitingConfirm(now: Date): Promise<number> {
     if (this.confirmReminderAfterMs <= 0) return 0;
-    const running = await this.missionRepo.find({ where: { status: 'running' }, take: 100 });
-    if (running.length === 0) return 0;
-
     const nowMs = now.getTime();
+    const cutoff = new Date(nowMs - this.confirmReminderAfterMs);
+    const anchor = 'COALESCE(step.confirm_notified_at, step.dispatched_at)';
+
+    const candidates = await this.stepRepo
+      .createQueryBuilder('step')
+      .innerJoin(OrchestrationMission, 'mission', 'mission.id = step.mission_id')
+      .where('step.status = :awaiting', { awaiting: AWAITING_USER_STATUS })
+      .andWhere('mission.status = :running', { running: 'running' })
+      .andWhere('(step.confirm_reminded_visit IS NULL OR step.confirm_reminded_visit <> step.visit)')
+      // anchor 가 양쪽 다 NULL 인 행은 이 비교에서 탈락한다. 어차피 대기 시간을 잴 수 없어
+      // 영원히 자격이 없으므로, 후보 창을 차지하지 않고 빠지는 편이 맞다.
+      .andWhere(`${anchor} <= :cutoff`, { cutoff })
+      .orderBy(anchor, 'ASC')
+      .limit(CONFIRM_REMINDERS_PER_SWEEP)
+      .getMany();
+    if (candidates.length === 0) return 0;
+
+    const missions = await this.missionRepo.find({
+      where: { id: In(Array.from(new Set(candidates.map((s) => s.mission_id)))) },
+    });
+    const missionById = new Map(missions.map((m) => [m.id, m]));
     let reminded = 0;
 
-    for (const mission of running) {
-      const steps = await this.stepRepo.find({ where: { mission_id: mission.id } });
-      for (const step of steps) {
-        if (!isAwaitingUser(step.status)) continue;
+    for (const step of candidates) {
+      const mission = missionById.get(step.mission_id);
+      if (!mission) continue;
 
-        const visit = step.visit ?? 1;
-        const notice = step.confirm_notice;
-        const noticeIsForThisPass = !!notice && notice.visit === visit;
-        // pass 당 1회. loop 로 다음 pass 가 열리면 visit 이 달라져 다시 자격이 생긴다.
-        if (noticeIsForThisPass && notice!.reminded_at) continue;
+      const visit = step.visit ?? 1;
+      // 선점 UPDATE 가 승자를 하나만 고른다(리뷰 지적 2). 여러 서버의 리퍼가 같은 주기에
+      // 스윕을 돌려도 실제 발송은 한 번이다. 판정이 그 사이 들어왔으면 status 조건에서
+      // 걸려 여기서 진다 — 판정 후 침묵(요구사항 4)도 같은 한 방이 보장한다.
+      if (!(await this.confirmNotify.claimReminder(step, visit))) continue;
 
-        const anchor = noticeIsForThisPass && notice!.notified_at
-          ? new Date(notice!.notified_at).getTime()
-          : step.dispatched_at
-            ? new Date(step.dispatched_at).getTime()
-            : 0;
-        if (!Number.isFinite(anchor) || anchor <= 0) continue;
-
-        const waitedMs = nowMs - anchor;
-        if (waitedMs < this.confirmReminderAfterMs) continue;
-
-        // sendReminder 는 던지지 않는다(서비스 계약). 상한도 걸려 있어 스윕이 매달리지 않는다.
-        await this.confirmNotify.sendReminder(mission, step, waitedMs);
-        reminded += 1;
-        if (reminded >= CONFIRM_REMINDERS_PER_SWEEP) return reminded;
-      }
+      const anchorMs = (step.confirm_notified_at ?? step.dispatched_at)?.getTime() ?? nowMs;
+      // sendReminder 는 던지지 않는다(서비스 계약). 상한도 걸려 있어 스윕이 매달리지 않는다.
+      await this.confirmNotify.sendReminder(mission, step, nowMs - anchorMs);
+      reminded += 1;
     }
     return reminded;
   }

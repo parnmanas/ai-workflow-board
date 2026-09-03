@@ -7,7 +7,7 @@ import { LogService } from '../../services/log.service';
 import { ReBACService } from '../../services/rebac.service';
 import { UserChannelDispatcherService } from '../../services/notification-providers';
 import { NotifyPayload } from '../../services/notification-providers/types';
-import { ConfirmNotice } from './orchestration.constants';
+import { AWAITING_USER_STATUS } from './orchestration.constants';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 
 /**
@@ -68,12 +68,84 @@ export class OrchestrationConfirmNotifyService {
   ) {}
 
   /**
+   * 이 pass 의 최초 알림을 **DB 에서** 선점한다. 이긴 호출만 `true` 를 받고, 그 호출만
+   * 발송한다. 진 호출은 아무것도 하지 않는다.
+   *
+   * ── 왜 읽고-판단하고-쓰기로는 안 되는가 ───────────────────────────────────
+   * 프로세스 메모리의 미션 락은 **한 서버 안에서만** 유효하다. 운영(PostgreSQL)에서
+   * 서버가 둘이면 두 pump 가 같은 pass 를 동시에 열 수 있고, 둘 다 "아직 안 보냈다"를
+   * 읽은 뒤 둘 다 저장하고 둘 다 보낸다 — 사람에게 같은 질문이 두 번 울린다.
+   * 승패를 애플리케이션이 아니라 **단일 UPDATE 의 WHERE 절**이 정하게 해서 막는다.
+   *
+   * ── 왜 발송 전에 쓰는가 ──────────────────────────────────────────────────
+   * 발송 성공을 기다렸다가 쓰면 그 사이가 통째로 창(window)이다. 선점을 먼저 커밋하면
+   * 최악의 경우가 "발송이 실패했는데 선점만 남는다"인데, 그건 리퍼의 리마인더 스윕이
+   * 뒤에서 주워 간다 — 중복 발송보다 언제나 낫다.
+   *
+   * ── 실패 시 왜 `false` 인가(fail-closed) ─────────────────────────────────
+   * `affected` 가 없거나 UPDATE 자체가 실패하면 **졌다고 본다**. 손에 든 낡은 스냅샷으로
+   * 추측해 이겼다고 치면 두 경쟁자가 모두 승자가 되어 단일 승자 보장이 깨진다
+   * (`ActionsService.completeRun` 이 같은 이유로 같은 선택을 한다). 여기서 지는 최악은
+   * 알림 1회 유실이고 그건 회복 가능하다(리마인더 스윕).
+   */
+  async claimGateNotice(step: OrchestrationStep, visit: number): Promise<boolean> {
+    return this.claim(step, visit, 'confirm_notified_visit', {
+      confirm_notified_visit: visit,
+      confirm_notified_at: new Date(),
+    });
+  }
+
+  /**
+   * 이 pass 의 리마인더를 선점한다. 여러 서버의 리퍼가 같은 주기에 스윕을 돌려도 한 번만
+   * 나간다. `claimGateNotice` 와 같은 계약이다(발송 전 커밋, fail-closed, 던지지 않음).
+   */
+  async claimReminder(step: OrchestrationStep, visit: number): Promise<boolean> {
+    return this.claim(step, visit, 'confirm_reminded_visit', { confirm_reminded_visit: visit });
+  }
+
+  /**
+   * 선점 UPDATE 한 방. 조건 셋이 전부 DB 안에서 판정된다:
+   *
+   *   - `visit = :visit`   — 그 사이 loop 로 다음 pass 가 열렸으면 이 선점은 무효다.
+   *   - `status = 'awaiting_user'` — 그 사이 사람이 판정을 제출했으면 보내지 않는다
+   *                          (요구사항 4). 판정 후 침묵을 애플리케이션 검사가 아니라
+   *                          선점 조건 자체가 보장한다.
+   *   - `<column> IS NULL OR <column> <> :visit` — 이 pass 를 아직 아무도 선점하지 않았다.
+   */
+  private async claim(
+    step: OrchestrationStep,
+    visit: number,
+    column: 'confirm_notified_visit' | 'confirm_reminded_visit',
+    patch: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const result = await this.stepRepo
+        .createQueryBuilder()
+        .update(OrchestrationStep)
+        .set(patch)
+        .where('id = :id', { id: step.id })
+        .andWhere('visit = :visit', { visit })
+        .andWhere('status = :status', { status: AWAITING_USER_STATUS })
+        .andWhere(`(${column} IS NULL OR ${column} <> :visit)`)
+        .execute();
+      return (result.affected ?? 0) > 0;
+    } catch (e: any) {
+      // 선점 실패가 게이트 오픈이나 리퍼 스윕을 죽이면 안 된다(요구사항 6). 알림만 잃는다.
+      this.logService.warn(
+        'Orchestration',
+        `confirm notice claim failed for step ${step.step_key} (visit ${visit}): ${e?.message || e}`,
+        { mission_id: step.mission_id },
+      );
+      return false;
+    }
+  }
+
+  /**
    * 게이트가 열렸음을 알린다 — **동기 반환**이고 발송은 배경에서 끝난다.
    *
-   * 호출자(`openConfirmGate`)는 이미 `step.confirm_notice` 로 이 pass 를 선점(claim)한
-   * 뒤에 부른다. 즉 중복 방지는 이 메서드가 아니라 **게이트 오픈과 같은 트랜잭션에
-   * 커밋된 컬럼**이 보장한다 — 발송이 배경에서 도는 동안 pump 가 다시 돌아도 이미
-   * 커밋된 marker 를 보고 두 번째 발송을 만들지 않는다.
+   * 호출자(`openConfirmGate`)는 `claimGateNotice` 로 이 pass 를 이긴 뒤에만 부른다. 즉
+   * 중복 방지는 이 메서드가 아니라 **DB 가 판정한 선점**이 보장한다 — 발송이 배경에서
+   * 도는 동안 pump 가 다시 돌든 다른 서버가 같은 pass 를 열든, 두 번째 선점이 실패한다.
    */
   scheduleGateNotice(mission: OrchestrationMission, step: OrchestrationStep): void {
     this.track(this.send(mission, step, 'initial', 0));
@@ -83,6 +155,9 @@ export class OrchestrationConfirmNotifyService {
    * 장기 미응답 리마인더(요구사항 5). **알림일 뿐 상태 전이가 아니다** — 리퍼가 미션을
    * 죽이지 않는다는 계약은 그대로다. 리퍼는 미션 락을 쥐고 있지 않으므로 await 해도
    * 안전하고, 상한(`SEND_TIMEOUT_MS`)이 걸려 있어 스윕이 매달리지 않는다.
+   *
+   * 호출자는 `claimReminder` 로 이 pass 를 이긴 뒤에만 부른다 — 여러 서버의 리퍼가 같은
+   * 주기에 돌아도 실제 발송은 한 번이다.
    */
   async sendReminder(
     mission: OrchestrationMission,
@@ -147,7 +222,7 @@ export class OrchestrationConfirmNotifyService {
         { mission_id: mission.id, workspace_id: mission.workspace_id },
       );
 
-      await this.recordOutcome(mission, step, kind, result);
+      await this.recordNotifiedEvent(mission, step, kind, result);
     } catch (e: any) {
       // 여기까지 온 예외는 수신자 해석(ReBAC 질의) 실패다. 게이트는 그대로 열려 있고
       // 미션 실행은 영향받지 않는다.
@@ -157,64 +232,6 @@ export class OrchestrationConfirmNotifyService {
       );
     }
     return result;
-  }
-
-  /**
-   * 발송 결과를 타임라인과 `confirm_notice` 에 남긴다.
-   *
-   * step 전체를 `save()` 하지 않고 `update()` 로 **이 컬럼만** 쓴다: 발송은 미션 락
-   * 밖에서 배경으로 돌기 때문에, 그 사이 사용자가 판정을 제출해 `status`/`verdict`/
-   * `confirm_decision` 이 바뀌었을 수 있다. 손에 든 낡은 엔티티를 통째로 저장하면 그
-   * 판정을 덮어써 되돌린다.
-   */
-  private async recordOutcome(
-    mission: OrchestrationMission,
-    step: OrchestrationStep,
-    kind: 'initial' | 'reminder',
-    result: { recipients: number; sent: number; failed: number },
-  ): Promise<void> {
-    const visit = step.visit ?? 1;
-    const fresh = await this.stepRepo.findOne({ where: { id: step.id } }).catch(() => null);
-
-    // 발송은 미션 락 밖에서 돌기 때문에, 그 사이 사용자가 fail 을 내고 loop 가 재진입해
-    // 게이트가 **다음 pass 로 넘어가 있을 수 있다**. 그때 이 낡은 pass 의 기록을 쓰면 방금
-    // 커밋된 새 pass 의 marker 를 덮어써서 중복 방지 키가 어긋난다. 새 pass 의 기록이
-    // 권위 있으므로 컬럼 쓰기를 건너뛴다 — 타임라인 기록은 그대로 남긴다(발송은 실제로
-    // 일어났고, 어느 pass 에 대한 것이었는지는 이벤트 data.visit 에 있다).
-    if (fresh && (fresh.visit ?? 1) > visit) {
-      this.logService.info(
-        'Orchestration',
-        `confirm notice for step ${step.step_key} landed after the gate moved to pass ${fresh.visit} — not overwriting`,
-        { mission_id: mission.id },
-      );
-      await this.recordNotifiedEvent(mission, step, kind, result);
-      return;
-    }
-
-    // 저장된 notice 는 **같은 pass 의 것일 때만** 이어붙인다. 다른 pass 의 값을 spread 하면
-    // `visit` 이 옛 pass 로 남아 중복 방지 키가 통째로 어긋난다 — 다음 pump 가 "이 pass 는
-    // 아직 안 알렸다" 로 읽고 같은 pass 에 두 번째 알림을 낸다.
-    const prior = fresh?.confirm_notice?.visit === visit ? fresh.confirm_notice : null;
-    const notice: ConfirmNotice = {
-      visit,
-      notified_at: prior?.notified_at ?? new Date().toISOString(),
-      ...(prior?.reminded_at ? { reminded_at: prior.reminded_at } : {}),
-      sent: result.sent,
-      recipients: result.recipients,
-    };
-    if (kind === 'reminder') notice.reminded_at = new Date().toISOString();
-
-    try {
-      await this.stepRepo.update({ id: step.id }, { confirm_notice: notice });
-    } catch (e: any) {
-      this.logService.warn(
-        'Orchestration',
-        `failed to persist confirm notice for step ${step.step_key}: ${e?.message || e}`,
-        { mission_id: mission.id },
-      );
-    }
-
-    await this.recordNotifiedEvent(mission, step, kind, result);
   }
 
   private async recordNotifiedEvent(

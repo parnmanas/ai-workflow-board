@@ -1693,15 +1693,6 @@ export class OrchestrationRunnerService {
     step.result_summary = '';
     step.artifacts = evidence.length > 0 ? evidence : null;
 
-    // 이 pass 의 알림을 **지금 선점한다**(티켓 a78cb566). 발송 자체는 아래에서 배경으로
-    // 돌지만, "이 pass 는 이미 알렸다" 는 사실은 상태 전이와 **같은 save 로** 커밋한다.
-    // 그래야 pump 가 몇 번을 더 돌아도, 서버가 그 사이 재기동해도 같은 pass 에 두 번째
-    // 알림이 나가지 않는다. `visit` 이 키라서 loop 로 다음 pass 가 열리면 값이 달라지고
-    // 새 알림이 나간다 — 각 pass 는 각각 알릴 가치가 있다.
-    const alreadyNotified = step.confirm_notice?.visit === (step.visit ?? 1);
-    if (!alreadyNotified) {
-      step.confirm_notice = { visit: step.visit ?? 1, notified_at: new Date().toISOString() };
-    }
     await this.stepRepo.save(step);
 
     // global budget 은 **node 실행 횟수**이지 subagent 스폰 횟수가 아니다. 게이트가
@@ -1735,12 +1726,20 @@ export class OrchestrationRunnerService {
     // 화면을 연 사람에게만 보이는 배지로는 부족하다 — 게이트 대기 사실을 기존 사용자
     // 알림 채널로 내보낸다(티켓 a78cb566).
     //
-    // **await 하지 않는다.** 이 메서드는 미션 락 안에서 돌고, 알림 provider 들은 요청
-    // 타임아웃이 없는 raw fetch 다. 응답하지 않는 엔드포인트 하나를 여기서 기다리면 그
-    // 미션의 락 체인이 통째로 멈춰 **사용자가 판정을 제출하는 것조차 막힌다** — 알림을
-    // 못 보내는 것보다 훨씬 나쁜 결과이고, 요구사항 6("알림 실패가 게이트 오픈을 죽이지
-    // 않는다")이 막으려는 실패의 최악 형태다.
-    if (!alreadyNotified) {
+    // **이 pass 를 DB 에서 선점한 호출만 보낸다.** 예전엔 손에 든 엔티티에서
+    // `confirm_notice` 를 읽어 판단했는데, 그 판단은 이 프로세스 안에서만 옳다 —
+    // `missionLocks` 는 프로세스 메모리라 운영(PostgreSQL)에서 서버가 둘이면 두 pump 가
+    // 같은 pass 를 동시에 열고, 둘 다 "아직 안 보냈다"를 읽어 둘 다 보낸다. 승패를 단일
+    // UPDATE 의 WHERE 절이 정하게 바꿔 한 호출만 이기게 한다.
+    //
+    // 선점 자체는 **await 한다** — 색인된 단일 UPDATE 라 매달릴 일이 없고, 여기서 승패가
+    // 갈려야 두 번째 발송이 애초에 시작되지 않는다. 반대로 **발송은 await 하지 않는다**:
+    // 이 메서드는 미션 락 안에서 돌고 알림 provider 들은 요청 타임아웃이 없는 raw fetch 라,
+    // 응답하지 않는 엔드포인트 하나를 여기서 기다리면 그 미션의 락 체인이 통째로 멈춰
+    // **사용자가 판정을 제출하는 것조차 막힌다** — 알림을 못 보내는 것보다 훨씬 나쁜
+    // 결과이고, 요구사항 6("알림 실패가 게이트 오픈을 죽이지 않는다")이 막으려는 실패의
+    // 최악 형태다. `claimGateNotice` 는 던지지 않고, 실패하면 졌다고 본다(fail-closed).
+    if (await this.confirmNotify.claimGateNotice(step, step.visit ?? 1)) {
       this.confirmNotify.scheduleGateNotice(mission, step);
     }
   }

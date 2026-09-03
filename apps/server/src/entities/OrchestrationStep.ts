@@ -1,5 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
-import { ConfirmDecision, ConfirmNotice } from '../modules/orchestration/orchestration.constants';
+import { ConfirmDecision } from '../modules/orchestration/orchestration.constants';
 
 /**
  * One delegated unit of a Mission's plan — a node in the plan DAG.
@@ -42,6 +42,9 @@ import { ConfirmDecision, ConfirmNotice } from '../modules/orchestration/orchest
 @Index('idx_orch_steps_mission', ['mission_id'])
 @Index('idx_orch_steps_assignee', ['assignee_agent_id'])
 @Index('idx_orch_steps_status', ['status'])
+// 리퍼의 confirm 리마인더 후보 스캔용(티켓 a78cb566). 후보는 `status='awaiting_user'` 로
+// 좁힌 뒤 선점 시각 순으로 오래 기다린 것부터 가져간다 — 그 두 컬럼이 그대로 이 색인이다.
+@Index('idx_orch_steps_confirm_gate', ['status', 'confirm_notified_at'])
 export class OrchestrationStep {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -231,18 +234,52 @@ export class OrchestrationStep {
   @Column({ type: 'simple-json', nullable: true, default: null })
   confirm_decision: ConfirmDecision | null;
 
+  // ── 게이트 대기 알림 선점(claim) 마커 (티켓 a78cb566) ─────────────────────
+  //
+  // 세 컬럼 모두 **스칼라**다. 예전엔 `confirm_notice` 라는 simple-json 한 덩어리였는데
+  // 두 가지를 못 했다:
+  //
+  //   1. **원자적 선점** — JSON blob 은 `WHERE` 절에서 이식성 있게 비교할 수 없어서
+  //      "읽고 → 판단하고 → 쓴다" 밖에 못 했다. 서버가 둘이면 둘 다 "아직 안 보냈다"를
+  //      읽고 둘 다 보낸다. 스칼라 컬럼이면 단일 UPDATE 의 `WHERE` 에 조건을 실어
+  //      **DB 가 승자를 하나만 고르게** 할 수 있다(SQLite·Postgres 공통).
+  //   2. **색인 가능한 후보 스캔** — 리퍼가 "리마인더 보낼 만료 게이트"를 SQL 로 직접
+  //      고를 수 있어야 한다. JSON 안에 든 값으로는 `WHERE`/`ORDER BY` 를 걸 수 없어,
+  //      예전엔 미션을 무순서로 잘라 온 뒤 애플리케이션에서 걸렀고 그게 기아를 만들었다.
+  //
+  // 관측용 수치(수신자 수·실제 전달 채널 수)는 여기 두지 않는다. 타임라인의
+  // `confirm_notified` 이벤트 `data` 에 이미 들어 있고, 두 곳에 두면 어긋난다.
+  //
+  // loop 재진입에서 **일부러 리셋하지 않는다**. 키가 pass 번호(`visit`)라서 새 pass 는
+  // 값이 저절로 달라져 다시 자격이 생긴다. 미리 null 로 밀면 "그 사이에 이미 나갔는지"
+  // 를 판별할 근거만 잃는다.
+
   /**
-   * 이 게이트의 대기 사실을 사람에게 알린 기록(티켓 a78cb566). null = 이 pass 에서 아직
-   * 보내지 않음. confirm 이 아닌 node 에서는 항상 null 이다.
+   * 최초 게이트 알림을 선점한 pass 번호. `visit` 과 같으면 이 pass 는 이미 누군가
+   * 선점했다(= 보내는 중이거나 보냈다). null = 아직 아무도 선점하지 않았다.
    *
-   * `confirm_decision` 과 달리 loop 재진입에서 **일부러 리셋하지 않는다** — 리셋은
-   * `openConfirmGate` 가 새 알림을 보내며 새 값으로 덮어쓰는 것으로 충분하고, 미리
-   * null 로 만들면 "그 사이에 알림이 이미 나갔는지" 를 판별할 근거가 사라진다.
-   *
-   * `orchestration.constants.ts` 의 `ConfirmNotice` 참고.
+   * "보냈다"가 아니라 "선점했다"인 것이 중요하다 — 발송은 배경에서 돌기 때문에 성공을
+   * 기다렸다가 쓰면 그 사이 두 번째 발송이 끼어든다. 발송 **전에** 쓴다.
    */
-  @Column({ type: 'simple-json', nullable: true, default: null })
-  confirm_notice: ConfirmNotice | null;
+  @Column({ type: 'int', nullable: true, default: null })
+  confirm_notified_visit: number | null;
+
+  /**
+   * 위 선점 시각. 리퍼의 리마인더 대기 시간을 재는 **기준점(anchor)** 이다.
+   *
+   * 선점에 실패했거나(발송 직전 프로세스가 죽는 등) 이 기능 이전에 열린 게이트는 null 인데,
+   * 그때 리퍼는 `dispatched_at` 으로 떨어진다 — 최초 알림이 유실된 게이트야말로 리마인더가
+   * 가장 필요한 경우라 여기서 끊으면 안 된다.
+   */
+  @Column({ type: Date, nullable: true, default: null })
+  confirm_notified_at: Date | null;
+
+  /**
+   * 장기 미응답 리마인더를 선점한 pass 번호. `visit` 과 같으면 이 pass 의 리마인더는
+   * 이미 나갔다. pass 당 1회이고, loop 로 다음 pass 가 열리면 값이 달라져 다시 자격이 생긴다.
+   */
+  @Column({ type: 'int', nullable: true, default: null })
+  confirm_reminded_visit: number | null;
 
   @Column({ type: Date, nullable: true, default: null })
   dispatched_at: Date | null;
