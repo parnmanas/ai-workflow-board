@@ -52,9 +52,13 @@ import {
   evaluateBootProbe,
   evaluateBootVerification,
   evaluateInstallRetryGate,
+  isWithinMaintenanceWindow,
   newInstallRecord,
+  parseMaintenanceWindow,
   readBootVerificationRecord,
+  readUpdateApproval,
   readUpdatePin,
+  updateApprovalPath,
   updatePinPath,
   withAwaitingBoot,
   withBootAttempt,
@@ -62,7 +66,9 @@ import {
   withRollbackAttempt,
   withinMaintenanceWindowNow,
   writeBootVerificationRecord,
+  writeUpdateApproval,
   writeUpdatePin,
+  UPDATE_WINDOW_ENV,
   type BootDecisionKind,
   type BootVerificationRecord,
   type UpdatePinRecord,
@@ -164,6 +170,179 @@ function npmChannelSpec(channel: string): string {
   return `${MANAGER_PACKAGE_NAME}@${channel}`;
 }
 
+// ─── 갱신 개시 정책 (ticket 9408b308 — 정책 D·F) ─────────────────────────────
+//
+// 유지보수 창은 *언제 물어볼지*를 정하지 *언제 무인 실행할지*를 정하지 않는다.
+// `scheduled` 를 "창에 들어오면 설치"로 구현하면 승인 없는 무인 재시작이 되어
+// 정책 A 의 전제를 깬다 — 그래서 창 안이라는 사실만으로 개시하는 값은 `auto`
+// 하나뿐이고, `scheduled` 는 승인 요청까지만 간다.
+
+/** 갱신 개시 방식을 고르는 환경변수. 값은 UpdatePolicy 참고. */
+export const UPDATE_POLICY_ENV = 'AWB_AGENT_MANAGER_UPDATE_POLICY';
+
+/**
+ * - `manual`    — 현행 동작. 외부 트리거(`update_manager` SSE / SIGUSR1)만 개시한다.
+ * - `scheduled` — 예약 **승인형**. 창 안에서 승인을 *요청*하고, 운영자 승인이
+ *                 있어야 개시한다. 시간이 지난다고 승격되지 않는다.
+ * - `auto`      — 창 안에서 승인 없이 개시한다.
+ */
+export type UpdatePolicy = 'manual' | 'scheduled' | 'auto';
+
+const KNOWN_UPDATE_POLICIES: readonly UpdatePolicy[] = ['manual', 'scheduled', 'auto'];
+
+/**
+ * 정책값을 해석한다. 미설정이거나 모르는 값이면 `manual` — 오타 하나로 호스트가
+ * 무인 재시작 모드에 들어가는 것이 반대 방향의 실패보다 훨씬 나쁘다.
+ */
+export function resolveUpdatePolicy(raw?: string | null): UpdatePolicy {
+  const v = String(raw ?? process.env[UPDATE_POLICY_ENV] ?? '').trim().toLowerCase();
+  return (KNOWN_UPDATE_POLICIES as readonly string[]).includes(v) ? (v as UpdatePolicy) : 'manual';
+}
+
+/** 정책 게이트가 내리는 행동. */
+export type UpdatePolicyAction =
+  /** 아무것도 하지 않는다(현행 수동 동작과 동등). */
+  | 'none'
+  /** 운영자 승인을 요청한다 — 설치는 개시하지 않는다. */
+  | 'request_approval'
+  /** 설치를 개시한다. */
+  | 'start';
+
+/** 왜 그 행동인가. 로그 문구와 테스트 단언이 함께 쓰는 판정 사유. */
+export type UpdatePolicyReason =
+  /** 채널이 `off` — 어떤 정책보다 우선하는 하드 핀. */
+  | 'channel_off'
+  /** 정책이 `manual` (기본값). */
+  | 'policy_manual'
+  /** 올라온 새 버전이 없다. */
+  | 'up_to_date'
+  /** 창이 미설정/형식 오류 — `scheduled`·`auto` 를 보수적으로 `manual` 로 떨어뜨린다. */
+  | 'no_window'
+  /** 창 밖이다. */
+  | 'outside_window'
+  /** `auto` + 창 안 — 승인 없이 개시. */
+  | 'auto_in_window'
+  /** `scheduled` + 창 안 + 이 버전이 이미 승인됨 — 개시. */
+  | 'approved'
+  /** `scheduled` + 창 안 + 미승인 — 승인 요청. */
+  | 'awaiting_approval';
+
+export interface UpdatePolicyGateResult {
+  action: UpdatePolicyAction;
+  reason: UpdatePolicyReason;
+  /** 승인을 요청/소비하는 대상 버전. 그 외 판정에서는 null. */
+  approvalVersion: string | null;
+  /** `Self-update:` 접두사 뒤에 붙일 한 줄. 운영 검증 스크립트가 grep 한다. */
+  logLine: string;
+}
+
+/**
+ * 지금 tick 에서 갱신을 개시할지 / 승인을 요청할지 / 아무것도 안 할지 판정한다.
+ *
+ * 부수효과 없는 동기 함수 — `evaluateNpmUpdateGate` 가 확립한 패턴을 따른다.
+ * 실제 개시 경로는 새 버전이 레지스트리에 실제로 올라온 상황에서만 도는데,
+ * 그 상황을 통합 테스트로 재현할 수 없으므로 판정만 떼어 직접 단위 테스트한다.
+ *
+ * 우선순위는 위에서부터 고정이다:
+ *   1. `channel=off`  — 운영자 하드 핀. `auto` 여도 이긴다.
+ *   2. `policy=manual`— 기본값. 외부 트리거만 개시한다.
+ *   3. 새 버전 없음   — 창을 따질 이유 자체가 없다.
+ *   4. 창 미설정      — `scheduled`·`auto` 를 `manual` 과 동일하게 떨어뜨린다.
+ *   5. 창 밖          — 아무것도 하지 않는다.
+ *   6. 창 안          — `auto` 는 개시, `scheduled` 는 (승인 있으면 개시 / 없으면 요청).
+ */
+export function evaluateUpdatePolicyGate(input: {
+  policy: UpdatePolicy;
+  /** 실효 채널 (`resolveEffectiveUpdateChannel` 결과). */
+  channel: string;
+  /** `AWB_AGENT_MANAGER_UPDATE_WINDOW` 원문. 미설정이면 null/빈 문자열. */
+  windowRaw: string | null | undefined;
+  now: Date;
+  updateAvailable: boolean;
+  latestVersion: string | null;
+  /** 이 호스트에 기록된 승인 대상 버전. 미승인이면 null. */
+  approvedVersion: string | null;
+}): UpdatePolicyGateResult {
+  const { policy, channel, windowRaw, now, updateAvailable, latestVersion, approvedVersion } = input;
+
+  if (isAutoUpdateDisabled(channel)) {
+    return {
+      action: 'none',
+      reason: 'channel_off',
+      approvalVersion: null,
+      logLine: `update policy ${policy} not initiated: ${UPDATE_CHANNEL_ENV}=${UPDATE_CHANNEL_OFF} pins this build`,
+    };
+  }
+  if (policy === 'manual') {
+    return {
+      action: 'none',
+      reason: 'policy_manual',
+      approvalVersion: null,
+      logLine: `update policy manual — not initiated (external trigger only)`,
+    };
+  }
+  if (!updateAvailable || !latestVersion) {
+    return {
+      action: 'none',
+      reason: 'up_to_date',
+      approvalVersion: null,
+      logLine: `update policy ${policy} not initiated: no newer version on the ${channel} channel`,
+    };
+  }
+
+  // 창 미설정/형식 오류는 "항상 창 안"이 아니라 **보수적으로 미개시**다. 재시도
+  // 게이트(evaluateInstallRetryGate)의 창 없음 기본값이 정반대인 것은 의도적이다
+  // — 그쪽은 "이미 승인·개시된 설치를 계속 끝낼지"를 정하므로 막는 쪽이 나쁘고,
+  // 여기는 "개시할지"를 정하므로 여는 쪽이 나쁘다.
+  const window = parseMaintenanceWindow(windowRaw);
+  if (!window) {
+    return {
+      action: 'none',
+      reason: 'no_window',
+      approvalVersion: null,
+      logLine:
+        `update policy ${policy} not initiated: ${UPDATE_WINDOW_ENV} is unset or malformed — ` +
+        `behaving as manual (target v${latestVersion})`,
+    };
+  }
+  if (!isWithinMaintenanceWindow(now, window)) {
+    return {
+      action: 'none',
+      reason: 'outside_window',
+      approvalVersion: null,
+      logLine: `update policy ${policy} outside the maintenance window — nothing initiated (target v${latestVersion})`,
+    };
+  }
+
+  if (policy === 'auto') {
+    return {
+      action: 'start',
+      reason: 'auto_in_window',
+      approvalVersion: null,
+      logLine: `update policy auto in the maintenance window — initiating update to v${latestVersion}`,
+    };
+  }
+
+  // policy === 'scheduled': 창은 "물어볼 시각"일 뿐이다.
+  if (approvedVersion && approvedVersion === latestVersion) {
+    return {
+      action: 'start',
+      reason: 'approved',
+      approvalVersion: latestVersion,
+      logLine: `update policy scheduled — v${latestVersion} approved by an operator, initiating update`,
+    };
+  }
+  return {
+    action: 'request_approval',
+    reason: 'awaiting_approval',
+    approvalVersion: latestVersion,
+    logLine:
+      `update policy scheduled — requesting operator approval for v${latestVersion}; ` +
+      `nothing is installed until it is approved` +
+      (approvedVersion ? ` (previous approval was for v${approvedVersion} — superseded)` : ''),
+  };
+}
+
 export interface UpdateStatus {
   /** Currently-running manager version (from package.json on disk). */
   current_version: string;
@@ -187,6 +366,10 @@ export interface UpdateStatus {
    *  Surfaced to operators so a silently-failing fetch is debuggable from the
    *  admin dashboard. */
   last_error: string | null;
+  /** ticket 9408b308 — `scheduled` 정책이 운영자 승인을 기다리고 있는 대상
+   *  버전. 승인 대기 중이 아니면 null. 하트비트가 이 값을 서버로 날라
+   *  관리자가 대시보드를 열지 않아도 요청이 감사 기록으로 남게 한다. */
+  update_approval_pending_version: string | null;
 }
 
 export interface SelfUpdateResult {
@@ -235,6 +418,19 @@ export interface SelfUpdateOpts {
    * 직접 넘길 수 있게 열어 둔다.
    */
   withinWindow?: boolean;
+  /**
+   * 이 호출이 **운영자의 명시적 개시 지시**임을 표시한다 (ticket 9408b308 —
+   * 정책 D 의 `scheduled` 승인). 값은 감사용 경로 이름(`update_manager`,
+   * `sigusr1`).
+   *
+   * 이 값이 있으면 provenance 를 통과한 대상 버전이 이 호스트의 승인 기록으로
+   * 남는다. 그래야 그 설치가 (세션 드레인 등으로) 지금 끝나지 못해도 다음 창의
+   * tick 이 **다시 묻지 않고** 이어서 개시할 수 있다. 승인은 그 버전에만
+   * 유효하므로, 더 새 버전이 올라오면 기록이 저절로 무효가 된다(완료 기준 6).
+   *
+   * 정책이 `manual` 인 호스트에서는 이 기록을 읽는 곳이 없어 무해하다.
+   */
+  approvalSource?: string;
   /**
    * 설치 / provenance / 재기동 / 진입점 프로브를 주입 가능한 포트로 뺀 것
    * (리뷰 지적 3). 복귀 경로는 실제 npm 레지스트리와 프로세스 종료를 요구해
@@ -459,6 +655,19 @@ export class UpdateChecker {
    *  construction, since the session managers it reads don't exist yet at
    *  the point UpdateChecker itself is constructed. */
   #countInFlightSessions: (() => number) | null = null;
+  /** ticket 9408b308 — 갱신 개시 정책과 유지보수 창. 생성 시점에 한 번 고정한다
+   *  (채널과 같은 수명): 호스트 로컬 설정이라 프로세스 중간에 바뀔 일이 없고,
+   *  tick 마다 env 를 다시 읽으면 판정 근거가 tick 사이에 흔들릴 수 있다. */
+  #policy: UpdatePolicy;
+  #windowRaw: string | null;
+  /** 승인 기록/핀을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
+  #stateDir: string | undefined;
+  /** 직전에 로그로 남긴 판정 — 같은 판정을 tick 마다 반복해 찍지 않기 위한 값. */
+  #lastPolicyLogLine: string | null = null;
+  /** 테스트 주입용 시계. 생략하면 실제 시각. */
+  #now: () => Date;
+  /** 개시 경로. 프로덕션에서는 runSelfUpdate 그대로. */
+  #runUpdate: (opts: SelfUpdateOpts) => Promise<SelfUpdateResult>;
 
   constructor(
     opts: {
@@ -475,11 +684,24 @@ export class UpdateChecker {
       countInFlightSessions?: () => number;
       /** 복귀 핀 파일을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
       stateDir?: string;
+      /** ticket 9408b308 — 정책/창 주입(테스트용). 생략하면 환경변수를 읽는다. */
+      updatePolicy?: string;
+      updateWindow?: string;
+      /** ticket 9408b308 — 창 판정에 쓰는 시계 주입(테스트용). */
+      now?: () => Date;
+      /** ticket 9408b308 — 정책 게이트가 개시를 결정했을 때 실제로 부를 함수.
+       *  생략하면 runSelfUpdate. 테스트가 "개시했는가"를 부수효과 없이 관찰한다. */
+      runUpdate?: (opts: SelfUpdateOpts) => Promise<SelfUpdateResult>;
     } = {},
   ) {
     this.#intervalMs = opts.intervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.#log = opts.log ?? log;
     this.#countInFlightSessions = opts.countInFlightSessions ?? null;
+    this.#policy = resolveUpdatePolicy(opts.updatePolicy);
+    this.#windowRaw = opts.updateWindow ?? process.env[UPDATE_WINDOW_ENV] ?? null;
+    this.#stateDir = opts.stateDir;
+    this.#now = opts.now ?? (() => new Date());
+    this.#runUpdate = opts.runUpdate ?? runSelfUpdate;
     const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
     // ticket 23753dc7: 복귀 핀이 걸려 있으면 그 정확한 버전이 실효 채널이다.
     // 체커가 광고하는 `update_available` 까지 핀을 반영해야, 되돌린 호스트의
@@ -504,6 +726,7 @@ export class UpdateChecker {
       update_channel,
       last_checked_at: null,
       last_error: null,
+      update_approval_pending_version: null,
     };
   }
 
@@ -568,6 +791,9 @@ export class UpdateChecker {
     if (this.#status.install_mode !== 'npm-global') return;
     if (isAutoUpdateDisabled(this.#status.update_channel)) return;
     await this.#tickNpmGlobal();
+    // ticket 9408b308: 갱신 개시 정책 판정. `manual`(기본)에서는 action='none'
+    // 이라 아래 재시도 경로만 남고, 이 기능 도입 전과 동작이 같다.
+    const startedByPolicy = await this.#applyUpdatePolicy();
     // ticket b831b896 round 2: retry a self-update that an earlier
     // runSelfUpdate() call (SIGUSR1 / SSE update_manager) deferred because
     // sessions were in flight — that call already returned immediately
@@ -575,13 +801,62 @@ export class UpdateChecker {
     // ever revisits it. runSelfUpdate owns the selfUpdateInFlight mutex and
     // the SELF_UPDATE_DRAIN_MAX_WAIT_MS wall-clock cap itself, so this is a
     // plain retry, not a special case.
-    if (this.#countInFlightSessions && hasPendingSelfUpdate()) {
+    //
+    // 정책 게이트가 이미 이번 tick 에서 개시를 시도했다면 건너뛴다 — 같은 tick 에
+    // 두 번 부르면 두 번째는 in-flight 뮤텍스에 걸려 무의미한 실패 로그만 남긴다.
+    if (!startedByPolicy && this.#countInFlightSessions && hasPendingSelfUpdate()) {
       try {
-        await runSelfUpdate({ log: this.#log, countInFlightSessions: this.#countInFlightSessions });
+        await this.#runUpdate({ log: this.#log, countInFlightSessions: this.#countInFlightSessions });
       } catch (err: any) {
         this.#log(`Self-update retry failed: ${err?.stack || err?.message || err}`);
       }
     }
+  }
+
+  /**
+   * ticket 9408b308 — 정책·창 판정을 적용한다. 개시를 시도했으면 true.
+   *
+   * 판정 자체는 순수 함수(evaluateUpdatePolicyGate)가 하고 여기서는 배선만
+   * 한다: 판정 로그 한 줄, 승인 대기 상태 갱신, 그리고 개시.
+   */
+  async #applyUpdatePolicy(): Promise<boolean> {
+    const decision = evaluateUpdatePolicyGate({
+      policy: this.#policy,
+      channel: this.#status.update_channel,
+      windowRaw: this.#windowRaw,
+      now: this.#now(),
+      updateAvailable: this.#status.update_available,
+      latestVersion: this.#status.latest_version,
+      approvedVersion: readUpdateApproval(this.#stateDir)?.version ?? null,
+    });
+
+    // 완료 기준 8: 판정 결과를 `Self-update:` 접두사로 남긴다. 같은 판정이
+    // 이어지는 동안에는 한 번만 찍는다 — tick 은 기본 5분마다 도는데 기본값인
+    // `manual` 에서 매번 같은 줄을 찍으면 모든 호스트의 로그가 이 한 줄로
+    // 덮인다. 판정이 바뀔 때마다 새 줄이 나오므로 각 결과는 반드시 기록된다.
+    if (decision.logLine !== this.#lastPolicyLogLine) {
+      this.#lastPolicyLogLine = decision.logLine;
+      this.#log(`Self-update: ${decision.logLine}`);
+    }
+
+    // 승인 대기 신호는 요청 중일 때만 실린다. 창을 벗어나면 다시 null 이 되고,
+    // 다음 창에서 같은 버전이 여전히 미승인이면 다시 표면화된다(완료 기준 5).
+    const pending = decision.action === 'request_approval' ? decision.approvalVersion : null;
+    if (pending !== this.#status.update_approval_pending_version) {
+      this.#status = { ...this.#status, update_approval_pending_version: pending };
+    }
+
+    if (decision.action !== 'start') return false;
+    try {
+      await this.#runUpdate({
+        log: this.#log,
+        stateDir: this.#stateDir,
+        ...(this.#countInFlightSessions ? { countInFlightSessions: this.#countInFlightSessions } : {}),
+      });
+    } catch (err: any) {
+      this.#log(`Self-update: policy-initiated update failed: ${err?.stack || err?.message || err}`);
+    }
+    return true;
   }
 
   /**
@@ -1176,6 +1451,27 @@ async function runNpmGlobalSelfUpdate(
     const summary = `npm-global update skipped: already on v${current} (registry has v${verdict.version})`;
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
+  }
+
+  // ticket 9408b308: 운영자가 명시적으로 지시한 개시라면, 여기서 확정된 대상
+  // 버전을 이 호스트의 승인으로 기록한다. 이 지점인 이유는 "승인 시점 = 새
+  // 버전이 실제로 있고 provenance 를 통과했을 때"라는 계약 그대로이기 때문이다
+  // — 위 두 게이트를 통과하지 못한 호출은 승인으로 남지 않는다.
+  if (opts.approvalSource && verdict.version) {
+    try {
+      writeUpdateApproval(
+        { version: verdict.version, source: opts.approvalSource, approvedAtMs: Date.now() },
+        opts.stateDir,
+      );
+      out(
+        `Self-update: recorded operator approval for v${verdict.version} via ${opts.approvalSource} ` +
+          `(${updateApprovalPath(opts.stateDir)})`,
+      );
+    } catch (err: any) {
+      // 승인 기록 실패가 설치 자체를 막아서는 안 된다 — 운영자가 방금 지시한
+      // 개시이고, 기록은 "다음 창에 다시 묻지 않기" 위한 편의일 뿐이다.
+      out(`Self-update: could not record operator approval (continuing): ${err?.message ?? err}`);
+    }
   }
 
   // 검증된 정확한 버전으로 설치 spec 을 고정한다. dist-tag(`@latest`/`@next`) 를

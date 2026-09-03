@@ -1072,6 +1072,11 @@ export const EVENT_TYPES: EventDefinition[] = [
             typeof inst.update_last_error === 'string' || inst.update_last_error === null
               ? inst.update_last_error
               : undefined,
+          update_approval_pending_version:
+            typeof inst.update_approval_pending_version === 'string' ||
+            inst.update_approval_pending_version === null
+              ? inst.update_approval_pending_version
+              : undefined,
         },
       };
       return {

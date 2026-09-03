@@ -36,6 +36,15 @@ import { AGENT_MANAGER_HOME } from './constants.js';
 const BOOT_STATE_FILE = 'self-update-boot.json';
 /** 복귀 핀 파일 이름. 같은 나쁜 버전을 즉시 다시 집지 않게 하는 하드 핀. */
 const PIN_FILE = 'self-update-pin.json';
+/**
+ * 운영자 승인 기록 파일 이름 (ticket 9408b308 — 정책 D 의 `scheduled`).
+ *
+ * 파일이 매니저 홈에 있다는 사실 자체가 승인의 "호스트" 축이고, 안에 적힌
+ * 버전이 "대상 버전" 축이다 — 그래서 승인이 (호스트 × 버전) 1회성이 된다.
+ * 다른 호스트는 자기 홈에 이 파일이 없고, 새 버전이 올라오면 적힌 버전과
+ * 달라져 승인이 자동으로 무효가 된다.
+ */
+const APPROVAL_FILE = 'self-update-approval.json';
 
 /**
  * 한 버전에 대해 허용하는 총 설치 시도 횟수 (최초 1회 + 추가 2회 = 3).
@@ -322,6 +331,54 @@ export function readUpdatePin(dir: string = AGENT_MANAGER_HOME): UpdatePinRecord
  */
 export function writeUpdatePin(pin: UpdatePinRecord, dir: string = AGENT_MANAGER_HOME): void {
   writeJsonFile(updatePinPath(dir), pin);
+}
+
+/**
+ * 운영자가 특정 버전의 설치를 승인했다는 기록 (ticket 9408b308 — 정책 D).
+ *
+ * 핀과 달리 이것은 **소비되는 기록이 아니라 일치 검사용 기록**이다: 정책
+ * 게이트는 `version` 이 지금 올라온 대상 버전과 정확히 같을 때만 승인으로
+ * 인정한다. 그래서 승인 뒤 더 새로운 버전이 올라오면 이 기록은 자동으로
+ * 무효가 되고 다시 승인을 요구하게 된다(완료 기준 6).
+ */
+export interface UpdateApprovalRecord {
+  /** 승인된 대상 버전. 정확히 이 버전에만 유효하다. */
+  version: string;
+  /** 승인이 도착한 경로 — 감사용(예: 'update_manager', 'sigusr1'). */
+  source: string;
+  /** 승인 시각(epoch ms). */
+  approvedAtMs: number;
+}
+
+/** 승인 기록 파일 경로. 테스트는 dir 을 직접 넘겨 격리한다. */
+export function updateApprovalPath(dir: string = AGENT_MANAGER_HOME): string {
+  return join(dir, APPROVAL_FILE);
+}
+
+/** 승인 기록을 읽는다. 없거나 모양이 어긋나면 null — 즉 "미승인". */
+export function readUpdateApproval(dir: string = AGENT_MANAGER_HOME): UpdateApprovalRecord | null {
+  const raw = readJsonFile(updateApprovalPath(dir));
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const version = typeof raw.version === 'string' ? raw.version.trim() : '';
+  // 버전 모양이 아니면 승인으로 치지 않는다. 손상된 기록을 승인으로 읽는 것은
+  // 이 게이트에서 가장 나쁜 방향의 실패다.
+  if (!/^\d+\.\d+\.\d+/.test(version)) return null;
+  return {
+    version,
+    source: typeof raw.source === 'string' ? raw.source : '',
+    approvedAtMs: Number.isFinite(Number(raw.approvedAtMs)) ? Math.trunc(Number(raw.approvedAtMs)) : 0,
+  };
+}
+
+/**
+ * 승인 기록을 남긴다. 덮어쓰기 — 한 호스트에서 유효한 승인은 언제나 최대 하나다
+ * (가장 최근에 운영자가 승인한 대상 버전).
+ */
+export function writeUpdateApproval(
+  approval: UpdateApprovalRecord,
+  dir: string = AGENT_MANAGER_HOME,
+): void {
+  writeJsonFile(updateApprovalPath(dir), approval);
 }
 
 /** 유지보수 창을 지정하는 환경변수. `HH:MM-HH:MM`(호스트 로컬 시각). */
