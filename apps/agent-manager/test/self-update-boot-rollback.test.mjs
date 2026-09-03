@@ -69,6 +69,19 @@ const RUNNING_VERSION = JSON.parse(
 ).version;
 const OLDER_VERSION = '0.0.1-previous';
 
+/**
+ * `runSelfUpdate` 가 **설치 단계까지 진행되는** 테스트는 win32 에서 건너뛴다.
+ *
+ * Windows 분기는 설치를 분리 헬퍼에 위임하므로 `ports.install` 이 호출되지 않고
+ * (단언이 어긋난다), 더 나쁘게는 실제 헬퍼가 떠서 테스트 프로세스에 SIGTERM 이
+ * 예약된다. 같은 판정의 Windows 쪽은 헬퍼 테스트가 플랫폼 무관하게 덮는다.
+ *
+ * **게이트에서 되돌아오는 테스트(설치까지 안 감)는 이 skip 이 필요 없다** —
+ * 예: provenance 거부, 창 밖, 복귀 대상 미확보. 그쪽은 양축에서 그대로 돈다.
+ */
+const SKIP_ON_WIN32 = process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다';
+
 function freshStateDir(t) {
   const dir = mkdtempSync(join(tmpdir(), 'awb-boot-rollback-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -861,10 +874,7 @@ function fakePorts(overrides = {}) {
   return { ports, calls };
 }
 
-test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리에서 이전 버전으로 되돌린다', {
-  skip: process.platform === 'win32' &&
-    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
-}, async (t) => {
+test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리에서 이전 버전으로 되돌린다', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -887,10 +897,7 @@ test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리�
   assert.ok(lines.some((l) => /failed to start/.test(l) && l.startsWith('Self-update: ')));
 });
 
-test('runSelfUpdate: 새 빌드가 정상이면 되돌리지 않고 재기동한다 (정상 경로 불변)', {
-  skip: process.platform === 'win32' &&
-    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
-}, async (t) => {
+test('runSelfUpdate: 새 빌드가 정상이면 되돌리지 않고 재기동한다 (정상 경로 불변)', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -929,10 +936,7 @@ function armedRollbackRecord(dir) {
   );
 }
 
-test('runBootVerification: 복귀 설치를 1회 수행하고 이전 버전으로 재기동한다', {
-  skip: process.platform === 'win32' &&
-    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
-}, async (t) => {
+test('runBootVerification: 복귀 설치를 1회 수행하고 이전 버전으로 재기동한다', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -977,10 +981,7 @@ test('runBootVerification: provenance 가 거부하면 설치하지 않지만 �
   assert.equal(readUpdatePin(dir).version, OLDER_VERSION);
 });
 
-test('runBootVerification: 복귀 설치가 실패해도 재기동하지 않고 프로세스는 살아 있다', {
-  skip: process.platform === 'win32' &&
-    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
-}, async (t) => {
+test('runBootVerification: 복귀 설치가 실패해도 재기동하지 않고 프로세스는 살아 있다', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1059,10 +1060,7 @@ test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 �
   assert.match(r.summary, /outside the maintenance window/);
 });
 
-test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', {
-  skip: process.platform === 'win32' &&
-    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
-}, async (t) => {
+test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1433,7 +1431,7 @@ test('runSelfUpdate: 검증된 복귀 대상이 없으면 설치를 시작하지
   assert.equal(typeof process.pid, 'number');
 });
 
-test('runSelfUpdate: 명시적 opt-in 이 있으면 미검증 복귀 대상이어도 진행한다', async (t) => {
+test('runSelfUpdate: 명시적 opt-in 이 있으면 미검증 복귀 대상이어도 진행한다', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1452,7 +1450,7 @@ test('runSelfUpdate: 명시적 opt-in 이 있으면 미검증 복귀 대상이�
   assert.equal(r.changed, true);
 });
 
-test('runSelfUpdate: 복귀 대상이 검증되면 평소대로 설치·프로브를 진행한다 (양성 대조)', async (t) => {
+test('runSelfUpdate: 복귀 대상이 검증되면 평소대로 설치·프로브를 진행한다 (양성 대조)', { skip: SKIP_ON_WIN32 }, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
