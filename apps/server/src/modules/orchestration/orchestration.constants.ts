@@ -37,6 +37,7 @@ export const STEP_STATUSES = [
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
 
@@ -50,14 +51,37 @@ export const TERMINAL_STEP_STATUSES: readonly StepStatus[] = [
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
 ];
+
+/**
+ * 재시도 정책(티켓 4d065f82) — lease 가 만료됐을 때 자동으로 다시 띄워도 되는가.
+ *
+ * `auto`(기본)는 기존 동작 그대로다: 리퍼가 `failed` 로 넘기고 orchestrator 가
+ * 정상 실패 처리 경로에서 재시도를 결정한다. `manual` 은 **비멱등·위험 작업**용이다 —
+ * 배포, 결제, 외부로 나가는 게시처럼 "한 번 더 실행"이 그 자체로 피해인 작업.
+ * 이 경우 리퍼는 자동 재실행 대신 `needs_recovery` 로 전환하고 사유를 남긴다.
+ *
+ * 판정을 서버가 추측하지 않고 계획 시점에 orchestrator 가 선언하게 둔 이유:
+ * 어떤 작업이 비멱등인지는 step 의 instructions 안에만 있는 의미론이라
+ * 상태 머신이 사후에 알아낼 방법이 없다. 선언되지 않으면 기존 동작을 유지한다.
+ */
+export const STEP_RETRY_POLICIES = ['auto', 'manual'] as const;
+export type StepRetryPolicy = (typeof STEP_RETRY_POLICIES)[number];
 
 /** Satisfies a downstream `depends_on` edge. `skipped` counts — the orchestrator
  *  declared the work unnecessary, so dependents must not stay pending forever. */
 export const DEPENDENCY_SATISFYING_STATUSES: readonly StepStatus[] = ['done', 'skipped'];
 
-/** Poisons downstream steps: a dependent can never run, so it goes `blocked`. */
-export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = ['failed', 'blocked', 'cancelled'];
+/** Poisons downstream steps: a dependent can never run, so it goes `blocked`.
+ *  `needs_recovery` 도 포함된다 — 사람이 손대기 전에는 절대 `done` 이 되지 않으므로
+ *  하류를 `pending` 으로 방치하면 미션이 조용히 멈춘 것처럼 보인다. */
+export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = [
+  'failed',
+  'blocked',
+  'cancelled',
+  'needs_recovery',
+];
 
 export function isInFlight(s: string): boolean {
   return (IN_FLIGHT_STEP_STATUSES as readonly string[]).includes(s);
@@ -80,6 +104,10 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'step_blocked',
   'step_skipped',
   'step_retried',
+  // 복구(티켓 4d065f82) — lease 만료로 자동 재실행이 금지된 step, 그리고 지각 보고가
+  // fencing 으로 거부된 순간. 후자는 "왜 내 결과가 반영 안 됐나"를 설명하는 유일한 근거다.
+  'step_needs_recovery',
+  'step_lease_rejected',
   'orchestrator_woken',
   'mission_paused',
   'mission_resumed',
@@ -293,6 +321,8 @@ export interface PlanStepInput {
   acceptance_criteria?: string;
   depends_on?: string[];
   assignee_agent_id?: string;
+  /** 'auto'(기본) | 'manual'. `StepRetryPolicy` 참고 — 티켓 4d065f82. */
+  retry_policy?: StepRetryPolicy;
 }
 
 export interface PlanValidationError {

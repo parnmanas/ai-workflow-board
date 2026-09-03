@@ -24,6 +24,9 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *   blocked    — member reported it cannot proceed, or an upstream step failed.
  *   skipped    — the orchestrator decided it is unnecessary.
  *   cancelled  — the mission was cancelled while this step was open.
+ *   needs_recovery — lease 가 만료됐지만 `retry_policy='manual'`(비멱등·위험 작업)이라
+ *               자동 재실행이 금지된 상태. `recovery_reason` 에 사유가 담기고,
+ *               사람 또는 orchestrator 의 명시적 `retry` 만이 이 상태를 벗어난다.
  *
  * `dispatched` and `running` are BOTH "in flight" for parallelism accounting —
  * the split exists only so the UI can distinguish "prompt sent, subagent may
@@ -101,6 +104,50 @@ export class OrchestrationStep {
 
   @Column({ type: 'int', default: 2 })
   max_attempts: number;
+
+  // ── lease / fencing (티켓 4d065f82) ────────────────────────────────────────
+
+  /**
+   * 이번 attempt 의 fencing token — `dispatchStep` 이 디스패치마다 새로 발급하고
+   * work order 에 실어 보낸다. 보고는 이 값을 그대로 되돌려줘야 받아들여진다.
+   *
+   * `visit`(그래프 loop 재진입 축)으로는 재시도를 막을 수 없어서 별도로 둔다:
+   * 재시도는 `attempt` 만 올리고 `visit` 은 그대로라, attempt 1 의 살아있는
+   * subagent 가 attempt 2 의 결과를 덮어쓰는 경로가 열려 있었다. 반대로 이 토큰은
+   * 재진입이든 재시도든 **모든 재디스패치**에서 새로 발급되므로 두 축을 모두 덮는다.
+   *
+   * `''` = 이 기능 이전에 디스패치돼 work order 에 토큰이 없는 step. 그 경우에만
+   * 토큰 없는 보고를 받아준다 — 업그레이드 시점에 이미 나가 있던 작업이 보고
+   * 자체를 못 하고 막히는 wedge 를 피하기 위함이다.
+   */
+  @Column({ type: 'varchar', default: '' })
+  lease_token: string;
+
+  /**
+   * 마지막 생존 신호 시각. `report_orchestration_progress` 가 **매 호출마다** 갱신한다.
+   *
+   * 리퍼의 타임아웃 기준선이며, 이 컬럼이 생기기 전에는 `started_at` 이 그 역할을
+   * 했다 — 그런데 `started_at` 은 최초 progress 호출에서 한 번만 찍히고(`?? new Date()`)
+   * 이후 갱신되지 않아서, "heartbeat 가 시계를 되돌린다"는 문서상 계약이 두 번째
+   * 호출부터는 거짓이었다. 1분마다 살아있다고 보고하는 step 도 결국 시간 초과로
+   * 죽었다. 이 컬럼이 그 계약을 실제로 성립시킨다.
+   */
+  @Column({ type: Date, nullable: true, default: null })
+  last_heartbeat_at: Date | null;
+
+  /**
+   * `auto`(기본) | `manual`. `manual` 이면 lease 만료 시 자동 재실행 대신
+   * `needs_recovery` 로 간다. `orchestration.constants.ts` 의 `StepRetryPolicy` 참고.
+   */
+  @Column({ type: 'varchar', default: 'auto' })
+  retry_policy: string;
+
+  /**
+   * `status === 'needs_recovery'` 일 때 왜 자동 복구가 불가능한지에 대한 사람이 읽을
+   * 사유. UI 와 orchestrator 브리핑에 그대로 노출된다. 다른 상태에서는 `''`.
+   */
+  @Column({ type: 'text', default: '' })
+  recovery_reason: string;
 
   // ── 그래프 실행 상태(티켓 1ca9e49b) ────────────────────────────────────────
 

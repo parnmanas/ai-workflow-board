@@ -821,6 +821,7 @@ export class OrchestrationRunnerService {
               plan_version: nextVersion,
               attempt: 0,
               max_attempts: 2,
+              retry_policy: s.retry_policy === 'manual' ? 'manual' : 'auto',
             }),
           );
           created.push(key);
@@ -1091,6 +1092,9 @@ export class OrchestrationRunnerService {
           }
           fresh.assignee_agent_id = input.assignee_agent_id;
           if (isTerminalStepStatus(fresh.status)) fresh.status = 'pending';
+          // 재배정은 needs_recovery 를 벗어나는 명시적 조치다 — 사유를 남겨두면
+          // UI 가 이미 처리된 복구 요청을 계속 띄운다.
+          fresh.recovery_reason = '';
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'step_assigned',
@@ -1119,6 +1123,10 @@ export class OrchestrationRunnerService {
           fresh.status = 'pending';
           fresh.finished_at = null;
           fresh.started_at = null;
+          // 명시적 retry 는 needs_recovery 의 유일한 정상 탈출구다 — `manual` 정책이
+          // 막는 것은 **자동** 재실행이지 사람/orchestrator 의 판단에 따른 재실행이
+          // 아니다. 사유를 지워 복구가 처리됐음을 남긴다.
+          fresh.recovery_reason = '';
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'step_retried',
@@ -1153,8 +1161,69 @@ export class OrchestrationRunnerService {
 
   // ── Member result intake ──────────────────────────────────────────────────
 
+  /**
+   * Lease fencing (티켓 4d065f82) — 이 보고가 **현재** attempt 의 것인지 확인한다.
+   *
+   * 재시도는 `attempt` 만 올리고 `visit` 은 그대로 두므로, 기존 `visit` 가드는 loop
+   * 재진입만 막고 재시도로 밀려난 attempt 의 지각 보고는 통과시켰다 — wave 미션이든
+   * graph 미션이든 마찬가지였다. 그 구멍을 이 토큰이 닫는다.
+   *
+   * a3958947 에서 얻은 교훈을 그대로 적용한다: **누락으로 우회할 수 없어야 한다.**
+   * step 이 토큰을 들고 있으면 보고에도 반드시 있어야 하고, 없으면 거부한다.
+   * 토큰이 빈 step(이 기능 이전에 나간 work order)만 예외로 통과시킨다.
+   */
+  private async requireFreshLease(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    callerAgentId: string,
+    presented: string | undefined | null,
+    what: string,
+  ): Promise<void> {
+    const held = String(step.lease_token || '');
+    if (!held) return; // 업그레이드 이전에 디스패치된 step — 토큰을 요구할 수 없다.
+    const shown = String(presented ?? '').trim();
+    if (shown === held) return;
+
+    // 거부를 타임라인에 남긴다. 이게 없으면 지각 보고는 호출자에게만 409 로 보이고
+    // 미션 기록에는 흔적이 남지 않아, 나중에 "왜 내 결과가 반영 안 됐나"를 설명할
+    // 근거가 사라진다 — 복구 동작을 사후에 감사할 수 있어야 한다는 게 이 기능의 요점이다.
+    const actorName = await this.agentName(callerAgentId);
+    await this.missions.recordEvent(mission, {
+      type: 'step_lease_rejected',
+      step_id: step.id,
+      step_key: step.step_key,
+      message:
+        `Refused a ${what} for "${step.title}" from ${actorName}: ` +
+        (shown ? `superseded lease token` : `no lease token`) +
+        ` (step is on attempt ${step.attempt})`,
+      actor_type: 'system',
+      data: { reason: shown ? 'superseded' : 'missing', attempt: step.attempt },
+    });
+
+    if (!shown) {
+      throw orchestrationError(
+        409,
+        `step "${step.step_key}" requires the lease token from your work order on every ${what}. ` +
+          `Copy the "lease_token" value from the work order verbatim. Without it the server cannot tell your ` +
+          `report apart from one sent by a superseded attempt, so it is refused rather than allowed to ` +
+          `overwrite newer work.`,
+      );
+    }
+    throw orchestrationError(
+      409,
+      `stale ${what} for step "${step.step_key}": your work order's lease token is no longer valid — the ` +
+        `step was re-dispatched (now on attempt ${step.attempt}) and your attempt was superseded. Stop work ` +
+        `on the old work order; the current attempt is handled in its own room.`,
+    );
+  }
+
   /** Non-terminal heartbeat from a member. Flips `dispatched` → `running`. */
-  async reportProgress(stepId: string, callerAgentId: string, message: string): Promise<OrchestrationStep> {
+  async reportProgress(
+    stepId: string,
+    callerAgentId: string,
+    message: string,
+    leaseToken?: string,
+  ): Promise<OrchestrationStep> {
     const step = await this.missions.requireStep(stepId);
     return this.withMissionLock(step.mission_id, async () => {
       const fresh = await this.missions.requireStep(stepId);
@@ -1163,11 +1232,15 @@ export class OrchestrationRunnerService {
       if (isTerminalStepStatus(fresh.status)) {
         throw orchestrationError(409, `step "${fresh.step_key}" is already ${fresh.status}`);
       }
+      await this.requireFreshLease(mission, fresh, callerAgentId, leaseToken, 'progress report');
       if (fresh.status === 'dispatched') {
         fresh.status = 'running';
-        fresh.started_at = fresh.started_at ?? new Date();
-        await this.stepRepo.save(fresh);
       }
+      // 매 호출마다 갱신한다 — 이게 "heartbeat 가 시계를 되돌린다"는 계약의 실체다.
+      // `started_at` 은 예전처럼 최초 1회만 찍어 "언제 실제로 착수했나"를 보존한다.
+      fresh.started_at = fresh.started_at ?? new Date();
+      fresh.last_heartbeat_at = new Date();
+      await this.stepRepo.save(fresh);
       await this.missions.recordEvent(mission, {
         type: 'step_progress',
         step_id: fresh.id,
@@ -1195,6 +1268,7 @@ export class OrchestrationRunnerService {
       artifacts?: Array<{ kind?: string; ref?: string; label?: string }>;
       verdict?: string;
       visit?: number;
+      lease_token?: string;
     },
   ): Promise<{
     step: OrchestrationStep;
@@ -1221,6 +1295,10 @@ export class OrchestrationRunnerService {
           `step "${step.step_key}" is already ${step.status}; a result was recorded for it already`,
         );
       }
+      // Lease fencing(티켓 4d065f82) — 아래 visit 가드보다 **먼저** 본다. visit 은
+      // 재시도로 바뀌지 않으므로 재시도로 밀려난 attempt 는 visit 만으로는 걸러지지
+      // 않는다. 두 가드는 서로 다른 축(재시도 / loop 재진입)을 막으므로 둘 다 남긴다.
+      await this.requireFreshLease(mission, step, callerAgentId, input.lease_token, 'result report');
       // 중복 실행 통제(티켓 1ca9e49b) — loop 재진입이 만드는 유일한 새 위험:
       // 같은 step_id가 iteration 2로 다시 디스패치된 뒤, iteration 1의 subagent가
       // 뒤늦게 보고하면 status가 terminal이 아니라 위 가드를 그대로 통과해
@@ -1667,11 +1745,20 @@ export class OrchestrationRunnerService {
     // visit은 loop 재진입 축이라 재시도로는 늘지 않는다(재진입 시
     // applyGraphTransitions가 올린다). 최초 디스패치만 0 → 1로 올린다.
     if ((step.visit ?? 0) < 1) step.visit = 1;
+    // 이번 attempt 의 fencing token 을 새로 발급한다(티켓 4d065f82). visit 과 달리
+    // **모든** 재디스패치에서 바뀌므로 재시도로 밀려난 이전 attempt 의 지각 보고까지
+    // 걸러낸다. 전송 전에 커밋하는 이유는 attempt 와 같다 — 포스트 도중 죽어도
+    // 이전 토큰은 이미 무효가 돼 있어야 한다.
+    step.lease_token = randomUUID();
     step.status = 'dispatched';
     step.room_id = room.id;
     step.dispatched_at = new Date();
     step.started_at = null;
     step.finished_at = null;
+    // 새 attempt 는 새 lease 다 — 이전 attempt 의 heartbeat 를 물려받으면 리퍼가
+    // 죽은 attempt 의 생존 신호를 기준으로 새 attempt 의 시계를 재버린다.
+    step.last_heartbeat_at = null;
+    step.recovery_reason = '';
     await this.stepRepo.save(step);
 
     // global budget은 재시도까지 포함해 "subagent를 몇 번 더 띄울 수 있는가"를
@@ -1929,16 +2016,31 @@ export class OrchestrationRunnerService {
       const mission = await this.missions.requireMission(step.mission_id);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) return;
 
-      step.status = 'failed';
+      // 비멱등·위험 작업(`retry_policy='manual'`)은 자동 재실행 경로로 보내지 않는다
+      // (티켓 4d065f82). `failed` 로 두면 orchestrator 가 정상 실패 처리로 다시 띄울 수
+      // 있는데, 배포·결제·외부 게시처럼 "한 번 더"가 그 자체로 피해인 작업에서는 그게
+      // 바로 막아야 할 동작이다. 대신 사유를 붙여 needs_recovery 로 세운다.
+      const manual = String(step.retry_policy || 'auto') === 'manual';
+      step.status = manual ? 'needs_recovery' : 'failed';
+      step.recovery_reason = manual
+        ? `${reason} 이 step 은 retry_policy='manual'(비멱등·위험 작업)로 선언돼 있어 자동으로 다시 ` +
+          `실행하지 않는다. 이미 어디까지 반영됐는지 사람이 확인한 뒤 update_orchestration_step(action='retry') ` +
+          `또는 재배정으로만 재개할 수 있다.`
+        : '';
       step.result_summary = reason.slice(0, SUMMARY_MAX);
       step.finished_at = new Date();
+      // lease 를 만료시킨다 — 뒤늦게 살아난 subagent 가 이 step 에 다시 쓰지 못하게.
+      step.lease_token = '';
       await this.stepRepo.save(step);
       await this.missions.recordEvent(mission, {
-        type: 'step_failed',
+        type: manual ? 'step_needs_recovery' : 'step_failed',
         step_id: step.id,
         step_key: step.step_key,
-        message: `Step "${step.title}" failed: ${reason.slice(0, 300)}`,
+        message: manual
+          ? `Step "${step.title}" needs manual recovery: ${reason.slice(0, 300)}`
+          : `Step "${step.title}" failed: ${reason.slice(0, 300)}`,
         actor_type: 'system',
+        data: manual ? { retry_policy: 'manual', recovery_reason: step.recovery_reason } : undefined,
       });
 
       const blocked = await this.propagateBlocking(mission);

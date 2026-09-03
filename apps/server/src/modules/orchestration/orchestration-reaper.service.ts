@@ -214,9 +214,15 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       if (!mission || mission.status !== 'running') continue;
       const timeoutMs = mission.step_timeout_minutes * 60_000;
       if (timeoutMs <= 0) continue;
-      // A member that reported progress resets the clock — `started_at` is
-      // stamped on the first progress call, so a long-but-alive step survives.
-      const baseline = step.started_at ?? step.dispatched_at;
+      // 마지막 생존 신호부터 잰다(티켓 4d065f82). `last_heartbeat_at` 은 progress 보고
+      // **매 호출**마다 갱신되므로 이제 heartbeat 가 실제로 시계를 되돌린다.
+      //
+      // 이전에는 `started_at ?? dispatched_at` 이었는데, `started_at` 은 최초 progress
+      // 호출에서 한 번만 찍히고 이후 갱신되지 않는다 — 즉 "progress 를 보고하면 살아남는다"는
+      // 계약이 두 번째 호출부터 거짓이었고, 1분마다 살아있다고 알리는 step 도 타임아웃에
+      // 걸려 죽었다. 세 값을 모두 fallback 으로 남겨 heartbeat 를 한 번도 안 보낸
+      // step(=디스패치 직후 죽은 경우)도 예전과 똑같이 잡힌다.
+      const baseline = step.last_heartbeat_at ?? step.started_at ?? step.dispatched_at;
       if (!baseline) continue;
       if (nowMs - new Date(baseline).getTime() < timeoutMs) continue;
 

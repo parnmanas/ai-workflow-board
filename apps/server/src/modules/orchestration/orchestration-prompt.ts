@@ -276,6 +276,14 @@ export function renderStepPrompt(args: {
       `- \`summary\`: what you did, what you changed, and anything the next agent must know. Downstream steps`,
       `  receive this text verbatim as their context, so write it for them, not for a human reader.`,
       `- \`artifacts\` (optional): PR urls, branch names, ticket ids, file paths you produced.`,
+      ...(step.lease_token
+        ? [
+            `- \`lease_token\`: \`${step.lease_token}\` — copy this verbatim. It proves you are the attempt that`,
+            `  is currently live. If this step gets re-dispatched while you work (a retry, or a loop re-entry),`,
+            `  your token stops being valid and your report is refused rather than allowed to overwrite the`,
+            `  newer attempt. Send it on progress heartbeats too.`,
+          ]
+        : []),
       ...(graph
         ? [
             `- \`visit\`: \`${graph.visit}\` — copy this number verbatim. It identifies which pass of this step`,

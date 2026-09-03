@@ -161,6 +161,15 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
                   'commands and constraints they need.',
               ),
             acceptance_criteria: z.string().optional().describe('How the assignee knows this step is done'),
+            retry_policy: z
+              .enum(['auto', 'manual'])
+              .optional()
+              .describe(
+                'Default "auto". Set "manual" for work that must NOT be re-run automatically if the assignee ' +
+                  'dies mid-flight — a deploy, a payment, a publish, anything whose second execution is itself ' +
+                  'the damage. Such a step is parked as needs_recovery with a reason instead of being failed ' +
+                  'into the normal retry path, and only an explicit retry/reassign resumes it.',
+              ),
             depends_on: z
               .array(z.string())
               .optional()
@@ -638,12 +647,20 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     {
       step_id: z.string(),
       message: z.string().describe('What you are doing right now, in one line'),
+      lease_token: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED whenever your work order printed a "Lease token". Copy that value verbatim. It proves this ' +
+            'heartbeat comes from the attempt that is currently live — omitting it, or sending a superseded ' +
+            'one, is refused. Only work orders issued before this field existed may leave it out.',
+        ),
     },
-    async ({ step_id, message }, extra) => {
+    async ({ step_id, message, lease_token }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const step = await svc.reportProgress(step_id, callerAgentId(extra), message);
+        const step = await svc.reportProgress(step_id, callerAgentId(extra), message, lease_token);
         return ok({ step_id: step.id, status: step.status });
       } catch (e: any) {
         return toolError(e, 'failed to report progress');
@@ -693,8 +710,17 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
             'number, is refused rather than allowed to overwrite a newer pass. Only plain dependency missions, ' +
             'whose work orders carry no visit number, may leave it out.',
         ),
+      lease_token: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED whenever your work order printed a "Lease token". Copy that value verbatim. It proves you ' +
+            'are the attempt that is currently live: if the step was re-dispatched (a retry, or a loop ' +
+            're-entry) your token is no longer valid and this report is refused instead of overwriting the ' +
+            'newer attempt\'s work. Only work orders issued before this field existed may leave it out.',
+        ),
     },
-    async ({ step_id, status, summary, artifacts, verdict, visit }, extra) => {
+    async ({ step_id, status, summary, artifacts, verdict, visit, lease_token }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
@@ -704,6 +730,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           artifacts: artifacts as any,
           verdict,
           visit,
+          lease_token,
         });
         return ok({
           step_id: result.step.id,

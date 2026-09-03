@@ -97,6 +97,12 @@ export interface MissionStepView {
   visit: number;
   /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
   verdict: string;
+  /** 'auto' | 'manual'. manual 이면 lease 만료 시 자동 재실행 대신 needs_recovery. */
+  retry_policy: string;
+  /** needs_recovery 사유. 다른 상태에서는 ''. */
+  recovery_reason: string;
+  /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
+  last_heartbeat_at: Date | null;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -644,6 +650,9 @@ export class OrchestrationMissionService {
           workspace_folder: `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
           visit: s.visit ?? 0,
           verdict: s.verdict ?? '',
+          retry_policy: s.retry_policy || 'auto',
+          recovery_reason: s.recovery_reason || '',
+          last_heartbeat_at: s.last_heartbeat_at ?? null,
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -740,6 +749,8 @@ export class OrchestrationMissionService {
         max_attempts: s.max_attempts,
         visit: s.visit ?? 0,
         verdict: s.verdict ?? '',
+        retry_policy: s.retry_policy || 'auto',
+        recovery_reason: s.recovery_reason || '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
       })),
