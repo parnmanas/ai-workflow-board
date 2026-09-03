@@ -1758,13 +1758,18 @@ async function runRollbackInstall(
     return stop(`rollback to v${target} failed: could not spawn updater helper: ${err?.message ?? err}`);
   }
   out(`Self-update: rollback to ${installSpec} scheduled — detached helper installs it after exit`);
-  scheduleRollbackRestart(out, () => {
-    try {
-      shutdownForNpmGlobalUpdate(out);
-    } catch (err: any) {
-      out(`Self-update: shutdown for rollback failed: ${err?.stack || err?.message || err}`);
-    }
-  });
+  scheduleRollbackRestart(
+    out,
+    () => {
+      try {
+        shutdownForNpmGlobalUpdate(out);
+      } catch (err: any) {
+        out(`Self-update: shutdown for rollback failed: ${err?.stack || err?.message || err}`);
+      }
+    },
+    // POSIX 분기와 같은 규칙 — 재기동 포트가 주입됐으면 프로세스 수명은 호출부 몫.
+    !opts.ports?.restart,
+  );
   return {
     kind: 'rollback',
     armed: false,

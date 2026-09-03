@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -860,7 +860,10 @@ function fakePorts(overrides = {}) {
   return { ports, calls };
 }
 
-test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리에서 이전 버전으로 되돌린다', async (t) => {
+test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리에서 이전 버전으로 되돌린다', {
+  skip: process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
+}, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -883,7 +886,10 @@ test('runSelfUpdate: 새 빌드가 뜨지 않으면 재기동 없이 그 자리�
   assert.ok(lines.some((l) => /failed to start/.test(l) && l.startsWith('Self-update: ')));
 });
 
-test('runSelfUpdate: 새 빌드가 정상이면 되돌리지 않고 재기동한다 (정상 경로 불변)', async (t) => {
+test('runSelfUpdate: 새 빌드가 정상이면 되돌리지 않고 재기동한다 (정상 경로 불변)', {
+  skip: process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
+}, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -922,7 +928,10 @@ function armedRollbackRecord(dir) {
   );
 }
 
-test('runBootVerification: 복귀 설치를 1회 수행하고 이전 버전으로 재기동한다', async (t) => {
+test('runBootVerification: 복귀 설치를 1회 수행하고 이전 버전으로 재기동한다', {
+  skip: process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
+}, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -967,7 +976,10 @@ test('runBootVerification: provenance 가 거부하면 설치하지 않지만 �
   assert.equal(readUpdatePin(dir).version, OLDER_VERSION);
 });
 
-test('runBootVerification: 복귀 설치가 실패해도 재기동하지 않고 프로세스는 살아 있다', async (t) => {
+test('runBootVerification: 복귀 설치가 실패해도 재기동하지 않고 프로세스는 살아 있다', {
+  skip: process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
+}, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1046,7 +1058,10 @@ test('runSelfUpdate: 창 밖에서는 설치 실패 재시도가 프로덕션 �
   assert.match(r.summary, /outside the maintenance window/);
 });
 
-test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', async (t) => {
+test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된다 (창 배선의 양성 대조)', {
+  skip: process.platform === 'win32' &&
+    'POSIX 인-프로세스 설치 경로 전용 — Windows 는 설치를 분리 헬퍼에 위임하므로 여기서 돌리면 실제 헬퍼가 뜨고 테스트 프로세스가 SIGTERM 된다. 같은 판정의 Windows 쪽은 아래 헬퍼 테스트가 덮는다',
+}, async (t) => {
   const dir = freshStateDir(t);
   _resetSelfUpdateInFlightForTests();
   t.after(() => _resetSelfUpdateInFlightForTests());
@@ -1124,27 +1139,45 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
   const badTemplate = join(base, 'tpl-bad.js');
   writeFileSync(badTemplate, "throw new Error('installed build cannot start');\n", 'utf8');
 
-  const npmScript = [
-    '#!/bin/sh',
-    'if [ "$1" = "root" ]; then printf "%s\\n" "' + globalRoot + '"; exit 0; fi',
-    'if [ "$1" = "install" ]; then',
-    '  spec=""',
-    '  for a in "$@"; do case "$a" in awb-agent-manager@*) spec="$a";; esac; done',
-    '  ver=${spec#awb-agent-manager@}',
-    '  printf "%s\\n" "$ver" >> "' + installLog + '"',
-    '  printf "%s\\n" "$ver" > "' + versionFile + '"',
-    '  if [ "$ver" = "' + String(badVersion) + '" ]; then',
-    '    cp "' + badTemplate + '" "' + entrypoint + '"',
-    '  else',
-    '    cp "' + goodTemplate + '" "' + entrypoint + '"',
-    '  fi',
-    '  exit 0',
-    'fi',
-    'exit 1',
-  ].join('\n');
+  // 가짜 npm 은 Node 스크립트 하나로 두고 얇은 shim 만 플랫폼별로 만든다.
+  // CI 의 agent-manager 잡은 ubuntu + windows-latest 양축에서 이 파일을 돌린다 —
+  // `#!/bin/sh` 스크립트는 Windows 에서 실행되지 않고, 헬퍼는 그쪽에서
+  // `shell:true` 로 `npm.cmd` 를 찾는다. 로직을 한 곳(Node)에 두면 양축이 같은
+  // 코드를 태우고, 다른 것은 두 줄짜리 shim 뿐이다.
+  const fakeNpmJs = join(base, 'fake-npm.js');
+  writeFileSync(
+    fakeNpmJs,
+    [
+      "const { appendFileSync, writeFileSync, copyFileSync } = require('node:fs');",
+      `const GLOBAL_ROOT = ${JSON.stringify(globalRoot)};`,
+      `const INSTALL_LOG = ${JSON.stringify(installLog)};`,
+      `const VERSION_FILE = ${JSON.stringify(versionFile)};`,
+      `const ENTRYPOINT = ${JSON.stringify(entrypoint)};`,
+      `const GOOD_TPL = ${JSON.stringify(goodTemplate)};`,
+      `const BAD_TPL = ${JSON.stringify(badTemplate)};`,
+      `const BAD_VERSION = ${JSON.stringify(String(badVersion))};`,
+      "const PREFIX = 'awb-agent-manager@';",
+      'const args = process.argv.slice(2);',
+      "if (args[0] === 'root') { process.stdout.write(GLOBAL_ROOT + '\\n'); process.exit(0); }",
+      "if (args[0] === 'install') {",
+      '  const spec = args.find((a) => a.startsWith(PREFIX)) || PREFIX;',
+      '  const ver = spec.slice(PREFIX.length);',
+      "  appendFileSync(INSTALL_LOG, ver + '\\n');",
+      "  writeFileSync(VERSION_FILE, ver + '\\n');",
+      '  copyFileSync(ver === BAD_VERSION ? BAD_TPL : GOOD_TPL, ENTRYPOINT);',
+      '  process.exit(0);',
+      '}',
+      'process.exit(1);',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const shim = `"${process.execPath}" "${fakeNpmJs}"`;
   const npmPath = join(binDir, 'npm');
-  writeFileSync(npmPath, npmScript + '\n', 'utf8');
+  writeFileSync(npmPath, `#!/bin/sh\n${shim} "$@"\n`, 'utf8');
   chmodSync(npmPath, 0o755);
+  // Windows 에서 헬퍼는 shell:true 로 돌아 PATHEXT 를 통해 npm.cmd 를 찾는다.
+  writeFileSync(join(binDir, 'npm.cmd'), `@echo off\r\n${shim} %*\r\n`, 'utf8');
 
   const helperPath = join(base, 'updater.mjs');
   writeFileSync(helperPath, _npmGlobalUpdaterSourceForTests(), 'utf8');
@@ -1166,7 +1199,7 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${binDir}:${process.env.PATH}`,
+        PATH: [binDir, process.env.PATH].join(delimiter),
         AWB_TEST_RELAUNCH_LOG: relaunchLog,
       },
       timeout: 60_000,
