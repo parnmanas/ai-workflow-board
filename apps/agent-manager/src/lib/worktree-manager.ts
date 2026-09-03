@@ -1822,6 +1822,12 @@ export class WorktreeManager {
    *     포함될 때만 지운다.
    * 우리 티켓 것도 공용 branch도 아닌 ref(=다른 티켓 branch) 위 checkout은
    * 그대로 보류·보고한다 — 다른 티켓이 작업 중인 checkout일 수 있다.
+   *
+   * **회수 범위**: 호출자가 넘긴 `baseWorkingDir` 하나. 매니저는 자기가 관리하는
+   * 모든 agent home 에 대해 이 함수를 부르지만(`#cleanupTerminalTicketWorktrees`),
+   * 관리 범위 **밖**의 home — 다른 매니저 인스턴스 소관이거나 이벤트 시점에
+   * 연결돼 있지 않던 home — 에는 회수 주체가 없다. 의도된 결론이며 근거와 운영
+   * 대응은 `docs/worktree-orphan-cleanup.md` → "잔여물 회수 주체 — 확정" 참조.
    */
   async cleanupTerminalTicketGit(opts: {
     baseWorkingDir: string;
