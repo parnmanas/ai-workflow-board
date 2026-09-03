@@ -127,6 +127,10 @@ export default function MissionConversationPanel({
    * 대신 왜 못 쓰는지 알려주기 위해서다.
    */
   const [observer, setObserver] = useState(false);
+  /** 참여 요청이 진행 중인가 — 버튼 중복 클릭을 막고 진행 상태를 보여준다. */
+  const [joining, setJoining] = useState(false);
+  /** 참여 실패 사유(권한 없음 등). 조용히 실패하면 사용자는 버튼이 죽은 줄 안다. */
+  const [joinError, setJoinError] = useState<string | null>(null);
   /**
    * 참여자 로스터 — 없으면 `MessageList` 가 `@[user:uuid|이름]` 을 pill 로 못 그리고
    * 읽음 수("Read by N")도 표시하지 못한다. 즉 "기존 Chat 의 멘션·읽음 UX 재사용"이
@@ -183,6 +187,8 @@ export default function MissionConversationPanel({
     setParticipants([]);
     setParticipantCount(0);
     setObserver(false);
+    setJoining(false);
+    setJoinError(null);
     setError(null);
     setHasMore(false);
     setLoading(true);
@@ -377,6 +383,31 @@ export default function MissionConversationPanel({
     setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
   }, []);
 
+  /**
+   * 관전 상태에서 대화에 참여한다(티켓 f6a0de0e).
+   *
+   * 관전으로 떨어지는 경우는 두 가지다 — 자동 등록이 없던 시절의 과거 미션이거나,
+   * 미션을 만들지 않은 다른 운영자거나. 둘 다 서버의 같은 멱등 엔드포인트로 해결되므로
+   * 화면은 어느 쪽인지 구분할 필요가 없다.
+   *
+   * 성공하면 `load()` 로 전체를 다시 읽는다. `observer` 만 내리면 로스터와 읽음 표시가
+   * 관전 시절 값 그대로 남아, 멘션 pill 이 안 그려지거나 미읽음이 안 내려가는 상태로
+   * 입력창만 열린다.
+   */
+  const join = useCallback(async () => {
+    if (!workspaceId) return;
+    setJoining(true);
+    setJoinError(null);
+    try {
+      await api.joinOrchestrationMissionConversation(missionId, workspaceId);
+      await load();
+    } catch (e: any) {
+      setJoinError(e?.message || '대화에 참여하지 못했습니다');
+    } finally {
+      setJoining(false);
+    }
+  }, [missionId, workspaceId, load]);
+
   if (!roomId) {
     return (
       <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>
@@ -446,13 +477,54 @@ export default function MissionConversationPanel({
         <div
           style={{
             padding: '8px 12px',
-            fontSize: 11,
-            color: tokens.colors.textMuted,
             borderTop: `1px solid ${tokens.colors.border}`,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
           }}
           data-testid="mission-conversation-observer-notice"
         >
-          이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+              {live
+                ? '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.'
+                : '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다. 종료된 미션이라 새로 참여할 수 없습니다.'}
+            </span>
+            {/*
+              종료된 미션에는 참여 버튼을 걸지 않는다 — 참여에 성공해도 보낼 orchestrator
+              세션이 없어 입력창이 바로 아래 "종료됨" 안내로 바뀐다. 아무 일도 못 하는
+              버튼을 주는 대신 이유를 문장으로 말한다.
+            */}
+            {live && (
+              <button
+                type="button"
+                onClick={() => void join()}
+                disabled={joining}
+                data-testid="mission-conversation-join"
+                style={{
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  borderRadius: 4,
+                  border: `1px solid ${tokens.colors.border}`,
+                  background: tokens.colors.surfaceHover,
+                  color: tokens.colors.textPrimary,
+                  cursor: joining ? 'default' : 'pointer',
+                  opacity: joining ? 0.6 : 1,
+                  flexShrink: 0,
+                }}
+              >
+                {joining ? '참여하는 중...' : '대화에 참여'}
+              </button>
+            )}
+          </div>
+          {joinError && (
+            <span
+              style={{ fontSize: 11, color: tokens.colors.danger }}
+              data-testid="mission-conversation-join-error"
+            >
+              {joinError}
+            </span>
+          )}
         </div>
       ) : live ? (
         <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>

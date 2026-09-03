@@ -2442,6 +2442,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, note: note || '' }),
     }),
+  /**
+   * 미션 대화방에 참여한다(티켓 f6a0de0e). 멱등하므로 이미 참여 중인지 몰라도 부를 수
+   * 있고, `joined` 로 이번 호출이 실제로 넣었는지 구분한다.
+   */
+  joinOrchestrationMissionConversation: (id: string, workspaceId: string) =>
+    request<{ room_id: string; joined: boolean }>(`/orchestration/missions/${id}/join-conversation`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    }),
 
   // ─── Ontology Graph (ticket d22b83b4) ─────────────────────
   getOntologyGraphStatus: (

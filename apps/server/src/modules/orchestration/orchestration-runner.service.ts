@@ -46,6 +46,7 @@ import { Agent } from '../../entities/Agent';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
@@ -149,6 +150,9 @@ export class OrchestrationRunnerService {
     // 중간에 끼우면 그 호출부의 뒤쪽 인자가 통째로 한 칸씩 밀려 `logService` 가
     // undefined 가 된다(실제로 그렇게 깨졌다). 추가는 항상 뒤로.
     private readonly confirmNotify: OrchestrationConfirmNotifyService,
+    // 같은 규칙에 따라 그 뒤에 붙인다(티켓 f6a0de0e) — mission 방 self-join 과 발화
+    // 시점 권한 재검사가 이 협력자를 쓴다.
+    private readonly membership: RoomMembershipService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */
@@ -209,7 +213,7 @@ export class OrchestrationRunnerService {
           orchestration_step_id: null,
         }),
       );
-      await this.addRoomParticipants(room.id, orchestrator.id);
+      await this.addRoomParticipants(room.id, orchestrator.id, missionHumanOwner(mission));
 
       mission.room_id = room.id;
       mission.orchestrator_agent_id = orchestrator.id;
@@ -2564,6 +2568,55 @@ export class OrchestrationRunnerService {
   }
 
   /**
+   * 사람을 mission 대화방의 active participant 로 넣는다 — 신규·과거 미션 공통 경로
+   * (티켓 f6a0de0e).
+   *
+   * 이 하나가 티켓의 두 요구사항을 동시에 만족한다. 시작 시 자동 등록되는 것은 미션
+   * **생성자**뿐이라, (a) 자동 등록이 없던 시절의 과거 미션과 (b) 생성자가 아닌 다른
+   * 운영자는 여기로 들어온다. 참여 사실이 `chat_room_participants` 행으로 남으므로
+   * 서버 재시작·복구 뒤에도 그대로 유지된다 — 메모리 캐시가 아니다.
+   *
+   * 권한: 이 메서드에 도달했다는 것 자체가 컨트롤러의 `MANAGE_ACTIONS` 게이트를 이미
+   * 통과했다는 뜻이고(팀·미션을 만들고 nudge/cancel 하는 것과 같은 관객), 여기서
+   * `requireMission(missionId, workspaceId)` 이 workspace 경계를 한 번 더 강제한다.
+   * `RoomMembershipService.ensureActiveParticipant` 는 호출자 자격을 검사하지 않으므로
+   * 그 앞의 이 두 겹이 유일한 방어선이다 — 이 메서드를 다른 곳에서 재사용할 때는 그
+   * 사실을 먼저 확인할 것.
+   *
+   * 미션 락을 잡지 않는다: 미션 상태 기계를 전혀 건드리지 않으며, 락을 잡으면
+   * orchestrator 가 긴 pump 를 도는 동안 사람이 대화에 들어오는 것 자체가 막힌다 —
+   * 정확히 이 기능이 필요한 순간에 못 쓰게 된다.
+   */
+  async joinMissionConversation(
+    missionId: string,
+    workspaceId: string,
+    actor: ActorRef,
+  ): Promise<{ room_id: string; joined: boolean }> {
+    if (actor.type !== 'user' || !actor.id) {
+      throw orchestrationError(400, 'only a signed-in user can join the mission conversation');
+    }
+    const mission = await this.missions.requireMission(missionId, workspaceId);
+    if (!mission.room_id) {
+      throw orchestrationError(409, 'mission has not been started yet — there is no conversation room');
+    }
+
+    const joined = await this.membership.ensureActiveParticipant(mission.room_id, 'user', actor.id);
+    if (joined) {
+      // 이미 참여 중이면 이벤트를 남기지 않는다 — 화면을 열 때마다 타임라인이 같은
+      // 줄로 채워지면 실행 trace 로서의 가치가 사라진다.
+      await this.missions.recordEvent(mission, {
+        type: 'note',
+        message: `${actor.name || 'A user'} joined the mission conversation`,
+        actor_type: actor.type,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        data: { reason: 'conversation_join' },
+      });
+    }
+    return { room_id: mission.room_id, joined };
+  }
+
+  /**
    * Fail a step from outside the member's own report (reaper timeout), then run
    * the same downstream handling a real failure report would.
    */
@@ -2936,10 +2989,32 @@ export class OrchestrationRunnerService {
       }));
   }
 
-  /** Agent participant + the synthetic `system` user that carries dispatch messages. */
-  private async addRoomParticipants(roomId: string, agentId: string): Promise<void> {
+  /**
+   * Agent participant + the synthetic `system` user that carries dispatch messages,
+   * plus — mission room 에 한해 — 미션을 만든 사람.
+   *
+   * `humanParticipantId` 는 **mission room 에만** 넘긴다(티켓 f6a0de0e). step room 에
+   * 넘기지 않는 것은 누락이 아니라 결정이다:
+   *
+   *   - step room 은 attempt 마다 새로 열린다("One room per ATTEMPT"). 미션 하나가
+   *     수십 개를 만들고, 사람을 전부 넣으면 참여자 행과 SSE 팬아웃이 그 수만큼 불어난다.
+   *   - 그 방의 대화는 assignee subagent 의 작업 로그이고, 보고는 lease token 을 쥔
+   *     assignee 만 할 수 있다. 사람이 끼어들어도 step 상태를 바꿀 수 없으므로 개입
+   *     지점으로서 의미가 없다.
+   *   - 사람의 지시는 mission room 에서 orchestrator 에게 가고, step 을 통제하는 것은
+   *     orchestrator 다. 창구를 하나로 모으는 편이 "누가 이 step 에 지시했나"를
+   *     추적 가능하게 만든다.
+   *
+   * step room 을 읽어야 할 때는 기존 observer 경로(`?observer=true`)가 그대로 열려 있다 —
+   * 막힌 것은 발화이지 열람이 아니다.
+   */
+  private async addRoomParticipants(
+    roomId: string,
+    agentId: string,
+    humanParticipantId?: string | null,
+  ): Promise<void> {
     const joinedAt = new Date();
-    await this.participantRepo.save([
+    const rows = [
       this.participantRepo.create({
         room_id: roomId,
         participant_type: 'agent',
@@ -2954,7 +3029,21 @@ export class OrchestrationRunnerService {
         last_read_at: joinedAt,
         left_at: null,
       }),
-    ]);
+    ];
+    // 의사 user 'system' 과 겹치지 않게 방어한다 — 겹치면 같은 방에 같은 participant_id
+    // 행이 둘 생겨 중복 팬아웃이 된다.
+    if (humanParticipantId && humanParticipantId !== SYSTEM_SENDER_ID) {
+      rows.push(
+        this.participantRepo.create({
+          room_id: roomId,
+          participant_type: 'user',
+          participant_id: humanParticipantId,
+          last_read_at: joinedAt,
+          left_at: null,
+        }),
+      );
+    }
+    await this.participantRepo.save(rows);
   }
 
   /**
@@ -2983,6 +3072,28 @@ export class OrchestrationRunnerService {
       { bypassContentLimit: true, ...(runProvision ? { runProvision } : {}) },
     );
   }
+}
+
+/**
+ * 미션의 "사람 소유자" — mission room 참여자로 자동 등록할 대상(티켓 f6a0de0e).
+ *
+ * MCP 로 만든 미션은 `created_by_type='agent'` 라 사람 소유자가 없다. 그 경우 자동
+ * 등록은 일어나지 않고, 사람은 join 경로(`joinMissionConversation`)로 명시적으로
+ * 들어온다 — 에이전트가 만든 미션의 방에 임의의 사람을 자동으로 밀어 넣는 것보다,
+ * 권한 게이트를 한 번 통과시키는 편이 감사 가능하기 때문이다.
+ *
+ * UUID 여부는 검사하지 않는다: `participant_id` 는 varchar 이고 이 방에는 이미
+ * 비-UUID 인 의사 user `system` 이 참여자로 들어 있으며, 이름 해석
+ * (`resolveParticipantName`)과 관전 뷰의 bulk 조회가 둘 다 비-UUID 를 이미 안전하게
+ * 다룬다. 여기서만 UUID 를 강제하면 그 기존 관용과 어긋난다.
+ */
+export function missionHumanOwner(mission: {
+  created_by_type?: string | null;
+  created_by?: string | null;
+}): string | null {
+  if (mission.created_by_type !== 'user') return null;
+  const id = (mission.created_by || '').trim();
+  return id ? id : null;
 }
 
 function normalizeArtifacts(

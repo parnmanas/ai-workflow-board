@@ -334,6 +334,34 @@ export class OrchestrationController {
     }
   }
 
+  /**
+   * 호출한 사람을 mission 대화방 참여자로 넣는다(티켓 f6a0de0e).
+   *
+   * 미션 생성자는 시작 시 자동 등록되므로 이 경로가 필요 없다. 여기로 오는 것은
+   * (a) 자동 등록이 없던 시절의 과거 미션과 (b) 생성자가 아닌 다른 운영자다 —
+   * 즉 이 라우트 하나가 백필과 초대 두 가지를 겸한다.
+   *
+   * 멱등하다: 이미 참여 중이면 `joined:false` 로 조용히 성공한다. 그래야 화면이
+   * 상태를 몰라도 부담 없이 부를 수 있다.
+   *
+   * 권한이 nudge/cancel 과 같은 `MANAGE_ACTIONS`(클래스 레벨)인 것은 의도된 선택이다.
+   * 미션 상세를 읽을 수 있는 관객과 orchestrator 에게 말을 걸 수 있는 관객을 다르게
+   * 두면, 지금 UI 에서 이미 가능한 nudge 보다 좁거나 넓은 두 번째 기준이 생긴다.
+   */
+  @Post('missions/:id/join-conversation')
+  async joinMissionConversation(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      return res.json(await this.runner.joinMissionConversation(id, body?.workspace_id, actorOf(req)));
+    } catch (e: any) {
+      return fail(res, e, 'Failed to join the mission conversation');
+    }
+  }
+
   // ── Steps — 사람의 확인 게이트(티켓 5dbe4aa2) ─────────────────────────────
 
   /**

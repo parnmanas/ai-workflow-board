@@ -143,6 +143,81 @@ export class RoomMembershipService {
   }
 
   /**
+   * 도메인이 소유한 room 에 참여자를 **멱등하게** 넣는다. 이미 active 면 아무것도 하지
+   * 않고 `false` 를, 새로 넣었으면 `true` 를 돌려준다.
+   *
+   * `addParticipants` 와 갈라지는 지점은 딱 하나, **호출자의 자격**이다. 그쪽은 "이미
+   * 방에 있는 사람이 남을 초대한다"라서 호출자의 active 참여를 요구하는데, 여기는
+   * 정의상 호출자가 아직 참여자가 아닌 self-join 경로다(티켓 f6a0de0e — orchestration
+   * mission 방에 사람이 들어가는 길). 그래서 호출자 검사를 하지 않는 대신 **권한 판정을
+   * 도메인이 이미 끝냈다는 것이 전제**다. 새 호출부를 만들 때는 그 앞단에 실제 권한
+   * 게이트가 있는지 먼저 확인할 것 — 게이트 없이 부르면 방 격리가 그대로 뚫린다.
+   *
+   * 50인 cap 은 그대로 적용한다: self-join 이라고 방 크기 계약을 면제받을 이유가 없다.
+   * 재입장이 새 행을 만드는 것도 `addParticipants` 와 같은 정책이다 — 나갔던 이력을
+   * 지우지 않는다.
+   *
+   * 동시성: 검사와 삽입을 한 트랜잭션에 두지만, Postgres 의 READ COMMITTED 에서는 두
+   * 요청이 동시에 "없음"을 읽고 둘 다 넣을 수 있다(sql.js 는 트랜잭션 직렬화 큐가 있어
+   * 불가능). 그 결과인 중복 active 행은 이 경로에서 관찰 가능한 영향이 없다:
+   * `requireActiveParticipant` 는 `getOne` 이고 member_ids 는 Set 이며, 행 수가 곱해질
+   * 수 있는 유일한 곳인 `listRooms` 의 unread 서브쿼리는 mission room 을 애초에 제외한다.
+   * self-join 은 사람이 버튼을 한 번 누르는 행위라 경합 자체가 희박하다는 점도 함께
+   * 감안한 판단이다 — 이 메서드를 기계가 반복 호출하는 경로에 붙일 때는 재검토할 것.
+   */
+  async ensureActiveParticipant(
+    roomId: string,
+    participantType: 'user' | 'agent',
+    participantId: string,
+  ): Promise<boolean> {
+    const added = await this.participantRepo.manager.transaction(async (em) => {
+      const existing = await em
+        .createQueryBuilder(ChatRoomParticipant, 'p')
+        .where('p.room_id = :roomId', { roomId })
+        .andWhere('p.participant_id = :participantId', { participantId })
+        .andWhere('p.participant_type = :participantType', { participantType })
+        .andWhere('p.left_at IS NULL')
+        .getOne();
+      if (existing) return false;
+
+      const currentCount = await em
+        .createQueryBuilder(ChatRoomParticipant, 'p')
+        .where('p.room_id = :roomId', { roomId })
+        .andWhere('p.left_at IS NULL')
+        .getCount();
+      if (currentCount + 1 > PARTICIPANT_CAP) {
+        throw makeError(400, 'This room is full (50 participant limit).');
+      }
+
+      // last_read_at 을 지금으로 두는 이유는 addParticipants 와 같다 — 참여 전 이력이
+      // 미읽음 배지로 쏟아지지 않게.
+      await em.save(
+        em.create(ChatRoomParticipant, {
+          room_id: roomId,
+          participant_type: participantType,
+          participant_id: participantId,
+          last_read_at: new Date(),
+          left_at: null,
+        }),
+      );
+      return true;
+    });
+
+    if (!added) return false;
+
+    const memberIds = await this.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
+    activityEvents.emit('chat_room_update', {
+      room_id: roomId,
+      update_type: 'participant_added',
+      participant_ids: [participantId],
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+    return true;
+  }
+
+  /**
    * Leave a room by soft-deleting the participant row (sets left_at).
    */
   async leaveRoom(roomId: string, userId: string): Promise<void> {
