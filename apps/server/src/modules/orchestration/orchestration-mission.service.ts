@@ -32,6 +32,7 @@ import {
   TERMINAL_MISSION_STATUSES,
   MissionCompletionCriterion,
   MissionPostAction,
+  isAwaitingUser,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
@@ -52,6 +53,11 @@ export interface MissionCounts {
   failed: number;
   inFlight: number;
   pending: number;
+  /**
+   * 사람의 confirm 판정을 기다리는 step 수(티켓 5dbe4aa2). `pending`에서 분리했다 —
+   * "아직 시작 안 함"과 "당신의 답을 기다리는 중"은 운영자가 해야 할 행동이 정반대다.
+   */
+  awaitingUser: number;
 }
 
 export interface MissionListItem {
@@ -978,11 +984,15 @@ export class OrchestrationMissionService {
 }
 
 export function countSteps(steps: Array<{ status: string }>): MissionCounts {
-  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0 };
+  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0 };
   for (const s of steps) {
     if (s.status === 'done' || s.status === 'skipped') counts.done += 1;
     else if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') counts.failed += 1;
     else if (isInFlight(s.status)) counts.inFlight += 1;
+    // `pending` 앞에 둔다 — awaiting_user 는 terminal 이 아니라서 그냥 두면 아래
+    // pending 으로 흡수되고, 운영자 화면에서 "당신의 답 대기 중"이 "아직 시작 안 함"과
+    // 구분되지 않는다(티켓 5dbe4aa2).
+    else if (isAwaitingUser(s.status)) counts.awaitingUser += 1;
     else if (!isTerminalStepStatus(s.status)) counts.pending += 1;
   }
   return counts;
