@@ -173,12 +173,30 @@ const SPEC = {
   cli: 'claude',
   bin: '/usr/local/bin/claude',
   bin_error: null,
-  args: [
-    { value: '--model', source: 'model' },
-    { value: 'claude-opus-5', source: 'model' },
-    { value: '--dangerously-skip-permissions', source: 'permission' },
-    { value: '--settings', source: 'runtime_profile' },
-    { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
+  modes: [
+    // 첫 항목이 기본 경로 — 실제 티켓 디스패치가 타는 지속 세션 쪽이다.
+    {
+      mode: 'session',
+      args: [
+        { value: '--session-id', source: 'session' },
+        { value: '<세션 id: spawn 시 생성>', source: 'session', placeholder: true },
+        { value: '--model', source: 'model' },
+        { value: 'claude-opus-5', source: 'model' },
+        { value: '--input-format', source: 'adapter' },
+        { value: 'stream-json', source: 'adapter' },
+        { value: '--dangerously-skip-permissions', source: 'permission' },
+        { value: '--settings', source: 'runtime_profile' },
+        { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
+      ],
+    },
+    {
+      mode: 'oneshot',
+      args: [
+        { value: '--print', source: 'adapter' },
+        { value: '--model', source: 'model' },
+        { value: 'claude-opus-5', source: 'model' },
+      ],
+    },
   ],
   cwd: '/srv/work',
   mcp_config_path: '/cfg/mcp.json',
@@ -199,8 +217,13 @@ const renderSection = (props) =>
 test('실행 인자 섹션이 실효 argv 를 출처와 함께 복사 가능한 형태로 보여준다', () => {
   const html = renderSection({ spec: SPEC, managerFound: true, reported: true });
 
-  // 복사용 한 줄에 실행 파일과 인자가 순서대로 들어간다.
-  assert.match(html, /\/usr\/local\/bin\/claude --model claude-opus-5 --dangerously-skip-permissions/);
+  // 복사용 한 줄에 실행 파일과 인자가 순서대로 들어간다. **기본 경로(session)**
+  // 가 먼저 그려져야 한다 — oneshot 을 보여 주면 실제로 실행되지 않는 명령
+  // (`--print`)을 실행 명령이라고 주장하게 된다.
+  assert.match(html, /\/usr\/local\/bin\/claude --session-id/);
+  assert.match(html, /--model claude-opus-5/);
+  assert.doesNotMatch(html, /claude --print/);
+  assert.match(html, /data-source="session"/);
   // 인자별 출처가 드러난다 — 이게 요구사항 A 의 핵심이다.
   assert.match(html, /data-source="model"/);
   assert.match(html, /data-source="permission"/);
@@ -247,7 +270,7 @@ test('값 없음과 해석 실패를 구분해서 표시한다', () => {
       cwd: null,
       runtime_profile: null,
       env: [],
-      args: [],
+      modes: [{ mode: 'oneshot', args: [] }],
     },
     managerFound: true,
     reported: true,
@@ -322,4 +345,42 @@ test('CLI 미설정을 "unknown" 이라는 값처럼 보이게 하지 않는다'
   assert.doesNotMatch(source, /\{detail\.type \|\| 'unknown'\}/);
   assert.doesNotMatch(source, /\{s\.cli \|\| 'unknown'\}/);
   assert.doesNotMatch(source, /detail\.manager_name \|\| detail\.manager_agent_id/);
+});
+
+test('두 spawn 경로를 모두 보여 주고 전환할 수 있다', async (t) => {
+  // 경로마다 argv 모양이 다르므로(session 은 --session-id, oneshot 은 --print)
+  // 하나만 보여 주면 나머지 경로에서 실행되지 않는 명령을 보여 주게 된다.
+  const dom = setupDom(t, {});
+  const root = createRoot(document.getElementById('root'));
+  await act(async () => {
+    root.render(
+      React.createElement(AgentLaunchSpecSection, { spec: SPEC, managerFound: true, reported: true }),
+    );
+  });
+
+  const modeButtons = Array.from(document.querySelectorAll('[data-testid="launch-spec-modes"] button'));
+  assert.deepEqual(modeButtons.map((b) => b.getAttribute('data-mode')), ['session', 'oneshot']);
+  // 기본 선택은 매니저가 앞에 둔 경로 = 실제로 도는 경로.
+  assert.equal(modeButtons[0].getAttribute('data-active'), 'true');
+  assert.match(document.querySelector('[data-testid="launch-spec-command"]').textContent, /--session-id/);
+
+  await act(async () => {
+    modeButtons[1].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  });
+  const command = document.querySelector('[data-testid="launch-spec-command"]').textContent;
+  assert.match(command, /--print/);
+  assert.doesNotMatch(command, /--session-id/);
+
+  await act(async () => root.unmount());
+});
+
+test('경로가 하나도 계산되지 않으면 빈 명령 대신 사유를 보여준다', () => {
+  const html = renderSection({
+    spec: { ...SPEC, modes: [], bin: null, bin_error: 'executable not found' },
+    managerFound: true,
+    reported: true,
+  });
+  assert.match(html, /실행 인자를 계산하지 못했습니다/);
+  assert.match(html, /executable not found/);
+  assert.doesNotMatch(html, /data-testid="launch-spec-command"/);
 });

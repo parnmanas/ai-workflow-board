@@ -2030,9 +2030,17 @@ export interface AgentLiveSession {
  *  `value` 는 매니저가 이미 마스킹한 표시용 문자열이다 — 원문이 아니다. */
 export interface LaunchArgEntry {
   value: string;
-  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'runtime_profile' | 'unattributed';
+  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'session' | 'runtime_profile' | 'unattributed';
   /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
   placeholder?: boolean;
+}
+
+/** spawn 경로 하나와 그 경로의 argv . 경로가 둘이고 argv 모양이 달라서
+ *  (session 은 `--session-id`/`--input-format`, oneshot 은 `--print`) 하나만
+ *  보여 주면 나머지 경로에서 실행되지 않는 명령을 보여 주게 된다. */
+export interface LaunchModeSpec {
+  mode: 'session' | 'oneshot';
+  args: LaunchArgEntry[];
 }
 
 export interface LaunchEnvEntry {
@@ -2049,7 +2057,8 @@ export interface AgentLaunchSpecEntry {
   /** 해석된 실행 파일 경로. resolve 실패 시 null 이고 사유가 bin_error 에. */
   bin: string | null;
   bin_error: string | null;
-  args: LaunchArgEntry[];
+  /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
+  modes: LaunchModeSpec[];
   cwd: string | null;
   mcp_config_path: string | null;
   model: string | null;

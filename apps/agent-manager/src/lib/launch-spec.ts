@@ -7,18 +7,31 @@
  *
  * ## 왜 argv 를 다시 조립하지 않는가
  *
- * 이 모듈은 플래그 이름을 하나도 알지 못한다 — 어댑터의 **실제**
- * `buildOneshotSpawn()` 을 호출해 나온 descriptor 를 읽을 뿐이다. 여기서
- * "claude 면 --model, codex 면 -c ..." 식으로 argv 를 재구성했다면 어댑터가
- * 바뀔 때마다 조용히 어긋나고, 화면은 실제로 실행되지 않는 명령을 보여주게
- * 된다. 화면의 목적이 "실제로 뭐가 붙었는지 확인"인 이상 그건 버그보다 나쁘다.
+ * 이 모듈은 플래그 이름을 하나도 알지 못한다 — 어댑터의 **실제** 빌더
+ * (`buildOneshotSpawn` / `buildSessionSpawn`)를 호출해 나온 descriptor 를 읽을
+ * 뿐이다. 여기서 "claude 면 --model, codex 면 -c ..." 식으로 argv 를 재구성했다면
+ * 어댑터가 바뀔 때마다 조용히 어긋나고, 화면은 실제로 실행되지 않는 명령을
+ * 보여주게 된다. 화면의 목적이 "실제로 뭐가 붙었는지 확인"인 이상 그건 버그보다
+ * 나쁘다.
+ *
+ * ## 왜 모드가 둘인가
+ *
+ * spawn 경로가 실제로 둘이고 **argv 모양이 다르다**:
+ *   - `session` — persistent 티켓/채팅 세션. `delegation.persistentTicketSessions`
+ *     기본값이 true 라 claude 계열 티켓 디스패치의 **기본 경로**다
+ *     (`base-session-manager.ts` → `buildSessionSpawn`). `--session-id` 와
+ *     `--input-format stream-json` 이 붙고 `--print` 는 없다.
+ *   - `oneshot` — 일회성 실행 (`subagent-manager.ts` → `buildOneshotSpawn`).
+ *     `--print` 가 붙고 task text 가 positional 로 들어간다.
+ *
+ * 하나만 보고하면 나머지 경로에서는 **실행되지 않는 명령**을 보여주게 된다.
+ * 그래서 지원하는 모드를 전부, 기본 경로를 앞에 두고 보고한다.
  *
  * ## 출처는 어떻게 붙이는가
  *
- * 같은 이유로 출처도 하드코딩하지 않는다. 입력 하나를 뺀 **변형(variant)** 을
- * 같은 빌더로 다시 만들어, 원본에는 있는데 변형에는 없는 토큰을 그 입력의
- * 것으로 귀속한다({@link attributeBy}). 어댑터가 플래그 철자를 바꿔도 귀속은
- * 따라간다.
+ * 출처도 하드코딩하지 않는다. 입력 하나를 뺀 **변형(variant)** 을 같은 빌더로
+ * 다시 만들어, 원본에는 있는데 변형에는 없는 토큰을 그 입력의 것으로 귀속한다
+ * ({@link attributeBy}). 어댑터가 플래그 철자를 바꿔도 귀속은 따라간다.
  *
  * ## 무엇이 여기 없는가
  *
@@ -28,13 +41,13 @@
  * 시점에는 알 수 없다 — 지어내지 않고 `varies_per_dispatch` 에 이름만 남긴다.
  */
 
+import { createAdapter } from './cli-adapters/index.js';
 import {
-  createAdapter,
-} from './cli-adapters/index.js';
-import {
+  ADAPTER_CAPABILITIES,
   looksLikeSecretArg,
   redactSpawnArgToken,
   type OneshotSpec,
+  type SessionSpec,
   type RuntimeProfileSpec,
 } from './cli-adapters/base.js';
 import { resolveBinOverride } from './cli-resolver.js';
@@ -54,6 +67,8 @@ export type LaunchArgSource =
   | 'permission'
   /** MCP 설정 파일 경로를 싣는 인자. */
   | 'mcp'
+  /** 세션 식별자를 싣는 인자 (session 모드 전용). */
+  | 'session'
   /** 런타임 프로파일이 descriptor 뒤에 덧붙인 인자. */
   | 'runtime_profile'
   /** 변형 비교로 출처를 가리지 못한 인자. 지어내는 대신 모른다고 말한다. */
@@ -65,6 +80,12 @@ export interface LaunchArgEntry {
   source: LaunchArgSource;
   /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id 등)를 메운 값. */
   placeholder?: boolean;
+}
+
+/** spawn 경로 하나와 그 경로의 argv. */
+export interface LaunchModeSpec {
+  mode: 'session' | 'oneshot';
+  args: LaunchArgEntry[];
 }
 
 export interface LaunchEnvEntry {
@@ -80,7 +101,8 @@ export interface AgentLaunchSpecEntry {
   /** 해석된 실행 파일 절대경로. resolve 가 실패하면 null 이고 사유가 아래에. */
   bin: string | null;
   bin_error: string | null;
-  args: LaunchArgEntry[];
+  /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
+  modes: LaunchModeSpec[];
   cwd: string | null;
   mcp_config_path: string | null;
   /** 이 spawn 에 적용될 모델 id. 미설정이면 null(= CLI 자체 기본값). */
@@ -113,13 +135,18 @@ const PLACEHOLDERS = Object.freeze({
 });
 const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set(Object.values(PLACEHOLDERS));
 
+/** session 변형을 만들기 위한 sentinel. 어댑터가 이 값을 자기 형식(claude 는
+ *  UUID)으로 정규화하므로 결과 토큰을 문자열로 예측하지 않고, `sessionId: null`
+ *  변형과의 차집합으로 위치만 찾아낸다. */
+const SESSION_ID_SENTINEL = 'awb-launch-spec-session-sentinel';
+
 /** 디스패치 시점에만 정해지는 입력들. 이름만 보고하고 값은 지어내지 않는다. */
 const PER_DISPATCH_INPUTS = Object.freeze([
   '보드·워크스페이스 harness (harness_config)',
   '티켓 effort preset',
   '티켓별 cli_runtime_profile',
   '프롬프트 본문 · task text',
-  '세션 id · MCP 설정 사본 경로',
+  'spawn 마다 새로 만들어지는 MCP 설정 사본 경로',
 ]);
 
 /**
@@ -190,9 +217,81 @@ function maskEnvValue(value: string): string {
   return `<${value.length}ch>`;
 }
 
+/**
+ * 한 spawn 모드의 argv 를 출처 붙은 표시용 배열로 만든다.
+ *
+ * `variants` 는 [출처, 그 입력을 뺀(또는 바꾼) argv] 쌍이고, `bare` 는 에이전트별
+ * 입력을 **전부** 뺀 argv 다 — 거기 남는 토큰은 정의상 어댑터 상수라 그대로
+ * 보여도 안전하다.
+ */
+function renderModeArgs(opts: {
+  full: string[];
+  variants: Array<[LaunchArgSource, string[] | null]>;
+  bare: string[] | null;
+  profileArgs: string[];
+  structuralSafe: Array<string | null | undefined>;
+}): LaunchArgEntry[] {
+  const { full, variants, bare, profileArgs, structuralSafe } = opts;
+
+  const sources = new Array<LaunchArgSource>(full.length).fill('adapter');
+  const assigned = new Array<boolean>(full.length).fill(false);
+  for (const [source, variantArgs] of variants) {
+    if (!variantArgs) continue;
+    for (const i of attributeBy(full, variantArgs)) {
+      if (assigned[i]) continue;
+      assigned[i] = true;
+      sources[i] = source;
+    }
+  }
+
+  // 프로파일 인자는 spawn 사이트가 descriptor 뒤에 push 하므로(base-session-manager /
+  // subagent-manager 의 `descriptor.args.push(...profile.args)`) 위치로 바로 귀속된다.
+  const allArgs = [...full, ...profileArgs];
+  const allSources: LaunchArgSource[] = [
+    ...sources,
+    ...profileArgs.map<LaunchArgSource>(() => 'runtime_profile'),
+  ];
+
+  // 표시해도 안전한 값 집합. 두 갈래로만 채운다 — 둘 다 "모양"이 아니라
+  // **출처**로 판정하므로, 사용자 자유 입력이 여기 들어올 길이 없다.
+  //  (1) 매니저가 구조적으로 알고 있고 UI 가 이미 다른 화면에서 보여주는 값.
+  const safeValues = new Set<string>(
+    structuralSafe.filter((v): v is string => typeof v === 'string' && v.length > 0),
+  );
+  //  (2) 어댑터 상수 — 에이전트별 입력을 전부 뺐는데도 남는 토큰은 정의상
+  //      어댑터가 CLI 종류만 보고 넣은 값이다(`stream-json`, allowedTools 패턴
+  //      등). 이런 값까지 `<Nch>` 로 가리면 화면의 존재 이유인 "실제로 뭐가
+  //      붙었는지"가 안 보이는데, 통과 근거가 "이 값에는 에이전트 정보가 들어갈
+  //      수 없다"는 구성적 사실이라 마스킹의 우회로가 되지 않는다.
+  for (const token of bare ?? []) {
+    if (!token || PLACEHOLDER_VALUES.has(token)) continue;
+    safeValues.add(token);
+  }
+
+  return allArgs.map((arg, i) => {
+    const source = allSources[i];
+    // 세션 id 는 어댑터가 자기 형식으로 정규화해 넣으므로 sentinel 문자열이
+    // 그대로 나오지 않는다. 값 자리(플래그 이름이 아닌 토큰)에 온 session 귀속
+    // 토큰은 그 정규화 결과이므로, 가짜 UUID 를 보여 주는 대신 자리표시자로
+    // 바꾼다 — 어느 어댑터에도 의존하지 않는 판정이다.
+    if (source === 'session' && !BARE_FLAG_NAME.test(arg)) {
+      return { value: PLACEHOLDERS.sessionId, source, placeholder: true };
+    }
+    if (PLACEHOLDER_VALUES.has(arg)) {
+      return { value: arg, source, placeholder: true };
+    }
+    const render = source === 'runtime_profile' ? displayProfileToken : displayToken;
+    return { value: render(arg, i > 0 ? allArgs[i - 1] : '', safeValues), source };
+  });
+}
+
 export interface ComputeLaunchSpecDeps {
-  /** `config.delegation` — CLI 별 오퍼레이터 바이너리 override. */
-  delegation?: { claudeBin?: string | null; codexBin?: string | null } | null;
+  /** `config.delegation` — CLI 별 오퍼레이터 바이너리 override 와 세션 정책. */
+  delegation?: {
+    claudeBin?: string | null;
+    codexBin?: string | null;
+    persistentTicketSessions?: boolean;
+  } | null;
   /** 인스턴스 단위 `--runtime-profile` 오버라이드. 티켓별 프로파일이 오면
    *  디스패치 시점에 대체되므로 `varies_per_dispatch` 에도 적힌다. */
   runtimeProfileOverride?: RuntimeProfileSpec | null;
@@ -226,7 +325,7 @@ export function computeAgentLaunchSpec(
     cli: ctx.cli,
     bin: null,
     bin_error: null,
-    args: [],
+    modes: [],
     cwd: profile?.cwd || ctx.working_dir || null,
     mcp_config_path: ctx.mcp_config_path || null,
     model,
@@ -266,98 +365,100 @@ export function computeAgentLaunchSpec(
     base.bin_error = String(err?.message ?? err);
   }
 
-  const specOf = (over: Partial<OneshotSpec>): OneshotSpec => ({
-    rolePrompt: PLACEHOLDERS.rolePrompt,
-    taskText: PLACEHOLDERS.taskText,
-    mcpConfigPath: ctx.mcp_config_path || null,
-    cwd: base.cwd,
-    cliHomeDir: ctx.cli_home_dir || null,
-    model,
-    harness: null,
-    effort: null,
-    permission,
-    ...over,
-  });
-
-  let adapterArgs: string[];
-  try {
-    adapterArgs = [...adapter.buildOneshotSpawn(specOf({})).args].map((a) => String(a ?? ''));
-  } catch (err: any) {
-    base.bin_error = base.bin_error
-      ?? `실행 인자를 계산할 수 없음: ${err?.message ?? err}`;
-    return base;
-  }
-
-  // 변형 빌드 — 실패하면 그 축의 귀속만 포기한다(전체를 버리지 않는다).
-  const variant = (over: Partial<OneshotSpec>): string[] | null => {
-    try {
-      return [...adapter.buildOneshotSpawn(specOf(over)).args].map((a) => String(a ?? ''));
-    } catch {
-      return null;
-    }
-  };
+  const profileArgs = (profile?.args ?? []).map((a) => String(a ?? ''));
+  const structuralSafe = [model, base.cwd, base.mcp_config_path, ctx.cli_home_dir];
   // 권한은 "빼는" 변형이 성립하지 않는다 — null 을 넘기면 어댑터가 기본
   // 등급(trusted)으로 폴백해 결국 어떤 권한 플래그든 다시 붙기 때문이다.
   // 대신 **다른 등급**으로 지어 비교하면 등급에 따라 달라지는 토큰만 정확히
   // 남는다. 두 등급 모두 아무 플래그도 안 내는 어댑터라면 차집합이 비고,
   // 그건 "이 CLI 에서 권한은 인자로 표현되지 않는다"는 올바른 답이다.
-  const otherTier = permission.tier === 'trusted' ? 'strict' : 'trusted';
-  const attribution: Array<[LaunchArgSource, string[] | null]> = [
-    ['permission', variant({ permission: { ...permission, tier: otherTier } })],
-    ['model', variant({ model: null })],
-    ['mcp', variant({ mcpConfigPath: null })],
-  ];
+  const otherTier = permission.tier === 'trusted' ? ('strict' as const) : ('trusted' as const);
 
-  const sources = new Array<LaunchArgSource>(adapterArgs.length).fill('adapter');
-  const assigned = new Array<boolean>(adapterArgs.length).fill(false);
-  for (const [source, variantArgs] of attribution) {
-    if (!variantArgs) continue;
-    for (const i of attributeBy(adapterArgs, variantArgs)) {
-      if (assigned[i]) continue;
-      assigned[i] = true;
-      sources[i] = source;
+  const commonSpec = {
+    rolePrompt: PLACEHOLDERS.rolePrompt,
+    mcpConfigPath: ctx.mcp_config_path || null,
+    model,
+    harness: null,
+    effort: null,
+    permission,
+  };
+
+  // ── session 모드 (기본 경로) ────────────────────────────────────────────
+  // `persistentTicketSessions` 기본값이 true 라 claude 계열은 이쪽으로 뜬다.
+  // 오퍼레이터가 껐거나 어댑터가 persistent session 을 지원하지 않으면 생략한다.
+  const sessionEnabled =
+    deps.delegation?.persistentTicketSessions !== false
+    && adapter.has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION);
+  if (sessionEnabled) {
+    const sessionSpecOf = (over: Partial<SessionSpec>): SessionSpec => ({
+      ...commonSpec,
+      sessionMode: 'persistent',
+      sessionId: SESSION_ID_SENTINEL,
+      ...over,
+    });
+    const buildSession = (over: Partial<SessionSpec>): string[] | null => {
+      try {
+        return [...adapter.buildSessionSpawn(sessionSpecOf(over)).args].map((a) => String(a ?? ''));
+      } catch {
+        return null;
+      }
+    };
+    const full = buildSession({});
+    if (full) {
+      base.modes.push({
+        mode: 'session',
+        args: renderModeArgs({
+          full,
+          variants: [
+            ['permission', buildSession({ permission: { ...permission, tier: otherTier } })],
+            ['model', buildSession({ model: null })],
+            ['mcp', buildSession({ mcpConfigPath: null })],
+            ['session', buildSession({ sessionId: undefined })],
+          ],
+          bare: buildSession({ model: null, mcpConfigPath: null, sessionId: undefined }),
+          profileArgs,
+          structuralSafe,
+        }),
+      });
     }
   }
 
-  // 프로파일 인자는 spawn 사이트가 descriptor 뒤에 push 하므로(base-session-manager /
-  // subagent-manager 의 `descriptor.args.push(...profile.args)`) 위치로 바로 귀속된다.
-  const profileArgs = (profile?.args ?? []).map((a) => String(a ?? ''));
-  const fullArgs = [...adapterArgs, ...profileArgs];
-  const fullSources: LaunchArgSource[] = [
-    ...sources,
-    ...profileArgs.map<LaunchArgSource>(() => 'runtime_profile'),
-  ];
-
-  // 표시해도 안전한 값 집합. 두 갈래로만 채운다 — 둘 다 "모양"이 아니라
-  // **출처**로 판정하므로, 사용자 자유 입력이 여기 들어올 길이 없다.
-  const safeValues = new Set<string>(
-    //  (1) 매니저가 구조적으로 알고 있고 UI 가 이미 다른 화면에서 보여주는 값.
-    [model, base.cwd, base.mcp_config_path, ctx.cli_home_dir].filter(
-      (v): v is string => typeof v === 'string' && v.length > 0,
-    ),
-  );
-  //  (2) 어댑터 상수 — 에이전트별 입력을 **전부** 뺐는데도 남는 토큰은 정의상
-  //      어댑터가 CLI 종류만 보고 넣은 값이다(`stream-json`, allowedTools 패턴
-  //      등). 이런 값까지 `<Nch>` 로 가리면 화면의 존재 이유인 "실제로 뭐가
-  //      붙었는지"가 안 보이는데, 통과 근거가 "이 값에는 에이전트 정보가 들어갈
-  //      수 없다"는 구성적 사실이라 마스킹의 우회로가 되지 않는다.
-  const bare = variant({ model: null, mcpConfigPath: null, cwd: null, cliHomeDir: null });
-  for (const token of bare ?? []) {
-    if (!token || PLACEHOLDER_VALUES.has(token)) continue;
-    safeValues.add(token);
+  // ── oneshot 모드 ────────────────────────────────────────────────────────
+  const oneshotSpecOf = (over: Partial<OneshotSpec>): OneshotSpec => ({
+    ...commonSpec,
+    taskText: PLACEHOLDERS.taskText,
+    cwd: base.cwd,
+    cliHomeDir: ctx.cli_home_dir || null,
+    ...over,
+  });
+  const buildOneshot = (over: Partial<OneshotSpec>): string[] | null => {
+    try {
+      return [...adapter.buildOneshotSpawn(oneshotSpecOf(over)).args].map((a) => String(a ?? ''));
+    } catch {
+      return null;
+    }
+  };
+  const oneshotFull = buildOneshot({});
+  if (oneshotFull) {
+    base.modes.push({
+      mode: 'oneshot',
+      args: renderModeArgs({
+        full: oneshotFull,
+        variants: [
+          ['permission', buildOneshot({ permission: { ...permission, tier: otherTier } })],
+          ['model', buildOneshot({ model: null })],
+          ['mcp', buildOneshot({ mcpConfigPath: null })],
+        ],
+        bare: buildOneshot({ model: null, mcpConfigPath: null, cwd: null, cliHomeDir: null }),
+        profileArgs,
+        structuralSafe,
+      }),
+    });
   }
 
-  base.args = fullArgs.map((arg, i) => {
-    const render = fullSources[i] === 'runtime_profile' ? displayProfileToken : displayToken;
-    const entry: LaunchArgEntry = {
-      value: PLACEHOLDER_VALUES.has(arg)
-        ? arg
-        : render(arg, i > 0 ? fullArgs[i - 1] : '', safeValues),
-      source: fullSources[i],
-    };
-    if (PLACEHOLDER_VALUES.has(arg)) entry.placeholder = true;
-    return entry;
-  });
+  if (base.modes.length === 0 && !base.bin_error) {
+    base.bin_error = '이 CLI 어댑터에서 실행 인자를 계산할 수 없습니다.';
+  }
 
   const env: LaunchEnvEntry[] = [];
   const cliHomeEnvKey = adapter.configDirEnv();

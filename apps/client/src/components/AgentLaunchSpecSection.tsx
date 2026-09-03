@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import type { AgentLaunchSpecEntry, LaunchArgEntry, LaunchEnvEntry } from '../types';
+import type { AgentLaunchSpecEntry, LaunchArgEntry, LaunchEnvEntry, LaunchModeSpec } from '../types';
 import { tokens } from '../tokens';
 
 /**
@@ -31,8 +31,21 @@ const SOURCE_LABEL: Record<LaunchArgEntry['source'], string> = {
   model: '모델 설정',
   permission: 'trust·권한 설정',
   mcp: 'MCP 설정',
+  session: '세션 식별자',
   runtime_profile: '런타임 프로파일',
   unattributed: '출처 불명',
+};
+
+/** spawn 경로 라벨. 어느 쪽이 실제로 도는 경로인지가 이 화면에서 가장 헷갈리는
+ *  지점이라, 이름만 쓰지 않고 무엇인지 함께 적는다. */
+const MODE_LABEL: Record<LaunchModeSpec['mode'], string> = {
+  session: '지속 세션',
+  oneshot: '일회성 실행',
+};
+
+const MODE_HINT: Record<LaunchModeSpec['mode'], string> = {
+  session: '티켓·채팅 디스패치의 기본 경로입니다. 프로세스가 살아 있는 동안 여러 턴을 처리합니다.',
+  oneshot: '한 번 실행하고 끝나는 경로입니다. 지속 세션을 지원하지 않는 CLI 나 꺼 둔 경우에 쓰입니다.',
 };
 
 const SOURCE_COLOR: Record<LaunchArgEntry['source'], string> = {
@@ -40,6 +53,7 @@ const SOURCE_COLOR: Record<LaunchArgEntry['source'], string> = {
   model: tokens.colors.accent,
   permission: tokens.colors.warning,
   mcp: tokens.colors.textSecondary,
+  session: tokens.colors.textSecondary,
   runtime_profile: tokens.colors.success,
   unattributed: tokens.colors.danger,
 };
@@ -96,14 +110,19 @@ export default function AgentLaunchSpecSection({
   reported,
 }: AgentLaunchSpecSectionProps) {
   const [copied, setCopied] = useState(false);
+  // 어느 spawn 경로를 보고 있는지. 매니저가 보고한 순서의 첫 항목이 기본
+  // 경로이므로 그것을 초깃값으로 쓴다.
+  const [modeIndex, setModeIndex] = useState(0);
+  const modes = spec?.modes ?? [];
+  const activeMode: LaunchModeSpec | null = modes[modeIndex] ?? modes[0] ?? null;
 
   // 복사용 한 줄. 값은 이미 마스킹된 상태라 그대로 이어 붙인다 — 공백이 든
   // 토큰만 따옴표로 감싸 셸에 붙여 넣었을 때 토큰 경계가 유지되게 한다.
   const commandLine = useMemo(() => {
-    if (!spec) return '';
+    if (!spec || !activeMode) return '';
     const quote = (v: string) => (/\s/.test(v) ? JSON.stringify(v) : v);
-    return [spec.bin ?? `<${spec.cli} 실행 파일 미해석>`, ...spec.args.map((a) => quote(a.value))].join(' ');
-  }, [spec]);
+    return [spec.bin ?? `<${spec.cli} 실행 파일 미해석>`, ...activeMode.args.map((a) => quote(a.value))].join(' ');
+  }, [spec, activeMode]);
 
   const sectionLabelStyle: React.CSSProperties = {
     fontSize: 11,
@@ -153,6 +172,13 @@ export default function AgentLaunchSpecSection({
             이 매니저가 이 에이전트의 실행 인자를 보고하지 않았습니다. 매니저가 현재 이
             에이전트를 감독하고 있지 않을 수 있습니다.
           </Notice>
+        ) : spec.modes.length === 0 ? (
+          // 사양 행은 왔는데 계산된 spawn 경로가 하나도 없는 경우 — 어댑터가
+          // 인자를 만들지 못했다는 뜻이므로 빈 명령을 그리는 대신 사유를 말한다.
+          <Notice>
+            이 매니저가 이 에이전트의 실행 인자를 계산하지 못했습니다.
+            {spec.bin_error ? ` (${spec.bin_error})` : ''}
+          </Notice>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {spec.bin_error && (
@@ -167,6 +193,37 @@ export default function AgentLaunchSpecSection({
                 실행 파일을 해석하지 못했습니다: <span style={{ fontFamily: MONO }}>{spec.bin_error}</span>
               </div>
             )}
+
+            {modes.length > 1 && (
+              <div data-testid="launch-spec-modes" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {modes.map((m, i) => (
+                  <button
+                    key={m.mode}
+                    type="button"
+                    data-mode={m.mode}
+                    data-active={i === modeIndex ? 'true' : 'false'}
+                    onClick={() => setModeIndex(i)}
+                    title={MODE_HINT[m.mode]}
+                    style={{
+                      padding: '3px 10px',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      background: i === modeIndex ? tokens.colors.surfaceSubtle : 'transparent',
+                      color: i === modeIndex ? tokens.colors.textStrong : tokens.colors.textMuted,
+                      border: `1px solid ${i === modeIndex ? tokens.colors.accent : tokens.colors.border}`,
+                      borderRadius: tokens.radii.sm,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {MODE_LABEL[m.mode]}
+                    {i === 0 && <span style={{ marginLeft: 6, fontWeight: 500 }}>{'\u00b7 기본'}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {activeMode && <Notice>{MODE_HINT[activeMode.mode]}</Notice>}
 
             <div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
@@ -219,7 +276,7 @@ export default function AgentLaunchSpecSection({
                 data-testid="launch-spec-args"
                 style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}
               >
-                {spec.args.map((arg, i) => (
+                {(activeMode?.args ?? []).map((arg, i) => (
                   <li
                     key={`${i}-${arg.value}`}
                     data-testid="launch-spec-arg"
