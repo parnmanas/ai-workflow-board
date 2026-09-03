@@ -50,6 +50,7 @@ import { ActionsService } from '../actions/actions.service';
 import { LogService } from '../../services/log.service';
 import { OrchestrationMissionService, countSteps } from './orchestration-mission.service';
 import { OrchestrationTeamService } from './orchestration-team.service';
+import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import {
@@ -140,6 +141,9 @@ export class OrchestrationRunnerService {
     private readonly missions: OrchestrationMissionService,
     private readonly teams: OrchestrationTeamService,
     private readonly actionsService: ActionsService,
+    // 게이트 대기 사실을 AWB 화면 밖으로 내보낸다(티켓 a78cb566). 발송은 미션 락
+    // 밖에서 배경으로 돈다 — 아래 openConfirmGate 주석 참고.
+    private readonly confirmNotify: OrchestrationConfirmNotifyService,
     private readonly logService: LogService,
   ) {}
 
@@ -1684,6 +1688,16 @@ export class OrchestrationRunnerService {
     step.verdict = '';
     step.result_summary = '';
     step.artifacts = evidence.length > 0 ? evidence : null;
+
+    // 이 pass 의 알림을 **지금 선점한다**(티켓 a78cb566). 발송 자체는 아래에서 배경으로
+    // 돌지만, "이 pass 는 이미 알렸다" 는 사실은 상태 전이와 **같은 save 로** 커밋한다.
+    // 그래야 pump 가 몇 번을 더 돌아도, 서버가 그 사이 재기동해도 같은 pass 에 두 번째
+    // 알림이 나가지 않는다. `visit` 이 키라서 loop 로 다음 pass 가 열리면 값이 달라지고
+    // 새 알림이 나간다 — 각 pass 는 각각 알릴 가치가 있다.
+    const alreadyNotified = step.confirm_notice?.visit === (step.visit ?? 1);
+    if (!alreadyNotified) {
+      step.confirm_notice = { visit: step.visit ?? 1, notified_at: new Date().toISOString() };
+    }
     await this.stepRepo.save(step);
 
     // global budget 은 **node 실행 횟수**이지 subagent 스폰 횟수가 아니다. 게이트가
@@ -1713,6 +1727,18 @@ export class OrchestrationRunnerService {
       `confirm gate opened for step ${step.step_key} (visit ${step.visit ?? 1})`,
       { mission_id: mission.id, workspace_id: mission.workspace_id },
     );
+
+    // 화면을 연 사람에게만 보이는 배지로는 부족하다 — 게이트 대기 사실을 기존 사용자
+    // 알림 채널로 내보낸다(티켓 a78cb566).
+    //
+    // **await 하지 않는다.** 이 메서드는 미션 락 안에서 돌고, 알림 provider 들은 요청
+    // 타임아웃이 없는 raw fetch 다. 응답하지 않는 엔드포인트 하나를 여기서 기다리면 그
+    // 미션의 락 체인이 통째로 멈춰 **사용자가 판정을 제출하는 것조차 막힌다** — 알림을
+    // 못 보내는 것보다 훨씬 나쁜 결과이고, 요구사항 6("알림 실패가 게이트 오픈을 죽이지
+    // 않는다")이 막으려는 실패의 최악 형태다.
+    if (!alreadyNotified) {
+      this.confirmNotify.scheduleGateNotice(mission, step);
+    }
   }
 
   /**

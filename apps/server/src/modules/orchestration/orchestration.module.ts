@@ -20,6 +20,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { OrchestrationController } from './orchestration.controller';
 import { OrchestrationTeamService } from './orchestration-team.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
+import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { OrchestrationReaperService } from './orchestration-reaper.service';
 
@@ -55,6 +56,10 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
   providers: [
     OrchestrationTeamService,
     OrchestrationMissionService,
+    // confirm 게이트 대기 알림(티켓 a78cb566). 의존하는 UserChannelDispatcherService 와
+    // ReBACService 는 이미 import 중인 SharedServicesModule 이 export 한다 —
+    // 새 모듈 배선이 필요 없다.
+    OrchestrationConfirmNotifyService,
     OrchestrationRunnerService,
     OrchestrationReaperService,
     AuthGuard,
