@@ -324,6 +324,68 @@ export function writeUpdatePin(pin: UpdatePinRecord, dir: string = AGENT_MANAGER
   writeJsonFile(updatePinPath(dir), pin);
 }
 
+/** 유지보수 창을 지정하는 환경변수. `HH:MM-HH:MM`(호스트 로컬 시각). */
+export const UPDATE_WINDOW_ENV = 'AWB_AGENT_MANAGER_UPDATE_WINDOW';
+
+export interface MaintenanceWindow {
+  /** 자정 기준 시작 분(0-1439). */
+  startMinute: number;
+  /** 자정 기준 종료 분(0-1439). start 보다 작으면 자정을 넘는 창이다. */
+  endMinute: number;
+}
+
+/**
+ * `HH:MM-HH:MM` 를 파싱한다. 형식이 어긋나면 null — 그 경우 호출부는 "창 없음"
+ * 으로 다루어 현행 동작(항상 창 안)을 유지한다. 잘못 적은 값 때문에 재시도가
+ * 영영 막히는 쪽이 더 나쁘기 때문이다.
+ */
+export function parseMaintenanceWindow(raw?: string | null): MaintenanceWindow | null {
+  const v = String(raw ?? '').trim();
+  if (!v) return null;
+  const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(v);
+  if (!m) return null;
+  const toMinute = (h: string, min: string): number | null => {
+    const hh = Number(h);
+    const mm = Number(min);
+    if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
+  };
+  const startMinute = toMinute(m[1], m[2]);
+  const endMinute = toMinute(m[3], m[4]);
+  if (startMinute === null || endMinute === null) return null;
+  // 시작과 끝이 같으면 폭이 0인 창이다 — 아무 때도 열리지 않는 창을 만드는 것은
+  // 오타일 가능성이 높으므로 "창 없음"으로 떨어뜨린다.
+  if (startMinute === endMinute) return null;
+  return { startMinute, endMinute };
+}
+
+/**
+ * 지금이 창 안인가. 창이 null 이면 **항상 true** — 창을 설정하지 않은 호스트의
+ * 동작이 이 기능 도입 전과 같아야 한다.
+ *
+ * 자정을 넘는 창(`22:00-02:00`)도 지원한다: end < start 이면 두 구간의 합집합.
+ */
+export function isWithinMaintenanceWindow(now: Date, window: MaintenanceWindow | null): boolean {
+  if (!window) return true;
+  const minute = now.getHours() * 60 + now.getMinutes();
+  const { startMinute, endMinute } = window;
+  return startMinute < endMinute
+    ? minute >= startMinute && minute < endMinute
+    : minute >= startMinute || minute < endMinute;
+}
+
+/**
+ * 환경변수에서 창을 읽어 지금이 창 안인지 판정한다. 프로덕션 호출부가 쓰는
+ * 진입점 — 순수 함수 두 개를 조합하기만 한다.
+ */
+export function withinMaintenanceWindowNow(
+  now: Date = new Date(),
+  raw: string | null | undefined = process.env[UPDATE_WINDOW_ENV],
+): boolean {
+  return isWithinMaintenanceWindow(now, parseMaintenanceWindow(raw));
+}
+
 /** evaluateBootVerification 이 내리는 판정의 종류. */
 export type BootDecisionKind =
   /** 검증 대기 중인 업데이트가 없다 — 평소 부팅. */
