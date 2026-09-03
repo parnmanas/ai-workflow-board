@@ -329,7 +329,7 @@ export function listGraphTemplates(): GraphTemplateInfo[] {
 export function expandGraphTemplate(
   name: string,
   params: Record<string, unknown> | null | undefined,
-  opts: { nodeKeys: string[] },
+  opts: { nodeKeys: string[]; confirmPolicy?: string | null },
 ): { spec: GraphSpec } | GraphValidationError {
   const template = BY_NAME.get(String(name ?? '').trim());
   if (!template) {
@@ -359,7 +359,7 @@ export function expandGraphTemplate(
     };
   }
 
-  const validated = validateGraphSpec(built, { nodeKeys: opts.nodeKeys });
+  const validated = validateGraphSpec(built, { nodeKeys: opts.nodeKeys, confirmPolicy: opts.confirmPolicy });
   if ('error' in validated) return { error: `graph template "${template.name}" produced an invalid graph: ${validated.error}` };
   return validated;
 }

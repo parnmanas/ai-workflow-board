@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { ConfirmDecision } from '../modules/orchestration/orchestration.constants';
 
 /**
  * One delegated unit of a Mission's plan — a node in the plan DAG.
@@ -27,6 +28,11 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *   needs_recovery — lease 가 만료됐지만 `retry_policy='manual'`(비멱등·위험 작업)이라
  *               자동 재실행이 금지된 상태. `recovery_reason` 에 사유가 담기고,
  *               사람 또는 orchestrator 의 명시적 `retry` 만이 이 상태를 벗어난다.
+ *   awaiting_user — graph 모드의 `confirm` node 가 **사람의 Pass/Fail 판정**을 기다리며
+ *               durable pause 중(티켓 5dbe4aa2). subagent 가 뜨지 않으므로 in-flight 가
+ *               아니고, 스스로 `done` 으로 전이하므로 terminal 도 아니다. 상태가 DB 에
+ *               있으므로 서버가 재시작해도 그대로 남고, 판정이 들어오면 그 자리에서
+ *               이어진다.
  *
  * `dispatched` and `running` are BOTH "in flight" for parallelism accounting —
  * the split exists only so the UI can distinguish "prompt sent, subagent may
@@ -207,6 +213,23 @@ export class OrchestrationStep {
    */
   @Column({ type: 'varchar', default: '' })
   verdict: string;
+
+  // ── 사용자 확인 게이트(티켓 5dbe4aa2) ──────────────────────────────────────
+
+  /**
+   * 이 confirm node 에 사람이 내린 판정. null = 아직 판정 전, 또는 loop 재진입으로
+   * 리셋됨. confirm 이 아닌 node 에서는 항상 null 이다.
+   *
+   * `verdict` 컬럼에도 같은 값이 복사되는데(그래야 `evaluateEdge` 의 분기 기계를
+   * 그대로 재사용한다), 이 컬럼은 그 위에 **누가·언제·왜·몇 번째 pass 에서** 를 얹는다.
+   * 특히 `visit` 이 중요하다: loop 가 재진입하면 같은 step 이 다음 iteration 으로 다시
+   * 열리는데, 브라우저에 떠 있던 이전 pass 의 화면이 그대로 제출되면 남의 pass 판정이
+   * 현재 pass 에 기록된다. 제출 시 이 값을 대조해 stale 화면을 거부한다.
+   *
+   * `orchestration.constants.ts` 의 `ConfirmDecision` 참고.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  confirm_decision: ConfirmDecision | null;
 
   @Column({ type: Date, nullable: true, default: null })
   dispatched_at: Date | null;

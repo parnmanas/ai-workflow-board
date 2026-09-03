@@ -53,6 +53,10 @@ import { OrchestrationTeamService } from './orchestration-team.service';
 import { orchestrationError } from './orchestration-errors';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import {
+  CONFIRM_FEEDBACK_MAX,
+  CONFIRM_VERDICTS,
+  ConfirmDecision,
+  ConfirmVerdict,
   DEPENDENCY_SATISFYING_STATUSES,
   MAX_ARTIFACTS_PER_STEP,
   MissionCompletionCriterion,
@@ -62,9 +66,11 @@ import {
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
   allCriteriaMet,
+  isAwaitingUser,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
+  normalizeConfirmPolicy,
   postActionApplies,
   validatePlan,
 } from './orchestration.constants';
@@ -77,6 +83,7 @@ import {
   renderWakePrompt,
 } from './orchestration-prompt';
 import {
+  GraphNode,
   GraphPatchChange,
   GraphPatchInput,
   GraphSpec,
@@ -86,6 +93,7 @@ import {
   applyGraphPatch,
   carryGraphThroughReplan,
   computeMissionProgress,
+  evaluateEdge,
   firedLoopBacks,
   graphFromWavePlan,
   loopBodyNodes,
@@ -743,13 +751,19 @@ export class OrchestrationRunnerService {
       let graphCarriedNodes: string[] = [];
       if (mission.graph_enabled) {
         const nodeKeys = validated.steps.map((st) => String(st.step_key).trim());
+        // confirm 정책은 **모든** 그래프 경로(신규/템플릿/보존)에 똑같이 적용된다 —
+        // 한 경로만 빠져도 `none` 미션이 그 경로로 confirm 게이트를 얻는다(티켓 5dbe4aa2).
+        const confirmPolicy = normalizeConfirmPolicy(mission.confirm_policy);
         if (input.graph_template) {
-          const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, { nodeKeys });
+          const expanded = expandGraphTemplate(input.graph_template.name, input.graph_template.params, {
+            nodeKeys,
+            confirmPolicy,
+          });
           if ('error' in expanded) throw orchestrationError(400, expanded.error);
           graphSpec = expanded.spec;
           graphReplaced = true;
         } else if (input.graph) {
-          const checked = validateGraphSpec(input.graph, { nodeKeys });
+          const checked = validateGraphSpec(input.graph, { nodeKeys, confirmPolicy });
           if ('error' in checked) throw orchestrationError(400, checked.error);
           graphSpec = checked.spec;
           graphReplaced = true;
@@ -758,7 +772,7 @@ export class OrchestrationRunnerService {
           // 고립 node로 편입한다(티켓 301018c5). 재생성하면 조건 분기·bounded loop·
           // 그동안 적용한 patch가 오류도 경고도 없이 사라진다 — step 병합이 additive인
           // 것과 같은 원칙을 그래프에도 적용한다. 버리고 싶으면 reset_graph로 명시한다.
-          const carried = carryGraphThroughReplan(graphSpec, { nodeKeys });
+          const carried = carryGraphThroughReplan(graphSpec, { nodeKeys, confirmPolicy });
           if ('error' in carried) {
             throw orchestrationError(
               409,
@@ -958,6 +972,7 @@ export class OrchestrationRunnerService {
       const steps = await this.missions.listSteps(mission.id);
       const applied = applyGraphPatch(mission.graph_spec, patch, {
         nodeKeys: steps.map((s) => s.step_key),
+        confirmPolicy: normalizeConfirmPolicy(mission.confirm_policy),
         runtime: {
           nodes: steps.map((s) => ({
             key: s.step_key,
@@ -1503,6 +1518,11 @@ export class OrchestrationRunnerService {
         bodyStep.verdict = '';
         bodyStep.result_summary = '';
         bodyStep.artifacts = null;
+        // confirm node 의 이전 판정도 반드시 지운다(티켓 5dbe4aa2). 남겨두면 재진입한
+        // 게이트가 지난 pass 의 판정을 들고 있어 submitConfirmDecision 의 "이미 판정됨"
+        // 분기에 먼저 걸리고, 새 pass 의 답이 409 로 거부된다 — 사람이 다시는 답할 수
+        // 없는 게이트가 된다.
+        bodyStep.confirm_decision = null;
         bodyStep.room_id = null;
         bodyStep.dispatched_at = null;
         bodyStep.started_at = null;
@@ -1525,6 +1545,242 @@ export class OrchestrationRunnerService {
 
     if (changed.length > 0) await this.stepRepo.save(changed);
     return Array.from(reentered);
+  }
+
+  // ── 사용자 확인 게이트(티켓 5dbe4aa2) ──────────────────────────────────────
+
+  /** 이 step 이 graph 모드의 `confirm` node 라면 그 node 를, 아니면 null. */
+  private confirmNodeOf(mission: OrchestrationMission, stepKey: string): GraphNode | null {
+    if (!mission.graph_spec) return null;
+    const node = mission.graph_spec.nodes.find((n) => n.key === stepKey);
+    return node && node.kind === 'confirm' ? node : null;
+  }
+
+  /**
+   * confirm node 를 열어 사람의 판정을 기다리는 durable pause 로 보낸다.
+   *
+   * 요구사항 2의 "결과물을 사용자에게 제공" 은 여기서 성립한다: 만족된 incoming edge 의
+   * 상류 step 들이 보고한 `artifacts`(스크린샷/영상/URL/파일 경로)를 이 step 으로 **복사**
+   * 해 둔다. 참조로 남겨 화면에서 그때그때 상류를 따라가지 않는 이유는 loop 때문이다 —
+   * 재진입하면 상류의 artifacts 가 리셋되므로, 스냅샷하지 않으면 "무엇을 보고 판정했는가"
+   * 가 사후에 사라진다.
+   *
+   * 호출자는 mission lock 을 쥐고 있어야 한다.
+   */
+  private async openConfirmGate(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    allSteps: OrchestrationStep[],
+  ): Promise<void> {
+    const spec = mission.graph_spec!;
+    const byKey = new Map(allSteps.map((s) => [s.step_key, s]));
+
+    const evidence: Array<{ kind: string; ref: string; label: string }> = [];
+    const sources: string[] = [];
+    const seen = new Set<string>();
+    for (const edge of spec.edges) {
+      if (edge.to !== step.step_key || edge.kind === 'loop_back') continue;
+      const source = byKey.get(edge.from);
+      if (!source) continue;
+      const evaluation = evaluateEdge(edge, {
+        key: source.step_key,
+        status: source.status,
+        visit: source.visit ?? 0,
+        verdict: source.verdict ?? '',
+      });
+      if (evaluation.state !== 'satisfied') continue;
+      sources.push(source.step_key);
+      for (const a of Array.isArray(source.artifacts) ? source.artifacts : []) {
+        const dedupe = `${a.kind}\u0000${a.ref}`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        if (evidence.length >= MAX_ARTIFACTS_PER_STEP) break;
+        evidence.push({ kind: a.kind, ref: a.ref, label: a.label });
+      }
+    }
+
+    step.status = 'awaiting_user';
+    // dispatchStep 과 같은 규칙: 최초 오픈만 0 → 1 로 올린다. 재진입은
+    // applyGraphTransitions 가 이미 올려두었다.
+    if ((step.visit ?? 0) < 1) step.visit = 1;
+    step.dispatched_at = new Date();
+    step.started_at = null;
+    step.finished_at = null;
+    step.confirm_decision = null;
+    // 이전 pass 의 verdict 가 남아 있으면 하류 edge 가 사람이 답하기도 전에 판정된다.
+    step.verdict = '';
+    step.result_summary = '';
+    step.artifacts = evidence.length > 0 ? evidence : null;
+    await this.stepRepo.save(step);
+
+    // global budget 은 "이 미션이 몇 번 더 node 를 열 수 있는가" 를 센다. subagent 를
+    // 띄우지 않더라도 confirm 은 loop 를 한 바퀴 더 돌리는 실행이므로 함께 센다 —
+    // 그러지 않으면 confirm→fail→loop 가 예산을 소모하지 않고 무한히 돌 수 있다.
+    mission.total_visits = (mission.total_visits ?? 0) + 1;
+    await this.missionRepo.save(mission);
+
+    await this.missions.recordEvent(mission, {
+      type: 'confirm_requested',
+      step_id: step.id,
+      step_key: step.step_key,
+      message:
+        `Waiting for a user decision on "${step.title}" (pass ${step.visit ?? 1})` +
+        (evidence.length > 0 ? ` — ${evidence.length} artifact(s) attached for review` : ''),
+      actor_type: 'system',
+      data: {
+        visit: step.visit ?? 1,
+        artifacts: evidence,
+        evidence_from: sources,
+      },
+    });
+    this.logService.info(
+      'Orchestration',
+      `confirm gate opened for step ${step.step_key} (visit ${step.visit ?? 1})`,
+      { mission_id: mission.id, workspace_id: mission.workspace_id },
+    );
+  }
+
+  /**
+   * 사람이 confirm node 에 Pass/Fail 을 제출한다 — 이 기능의 유일한 판정 입구다.
+   *
+   * MCP 툴은 일부러 만들지 않았다: 에이전트가 사람 대신 confirm 에 답할 수 있으면
+   * 게이트 자체가 무의미해진다. 그래서 REST(사용자 세션) 전용이다.
+   *
+   * ── 정확히 한 번 재개(요구사항 6) ─────────────────────────────────────────
+   * 중복 제출·새로고침·재접속 전부 같은 경로로 들어온다. 판정이 이미 있고 `(visit,
+   * verdict)` 가 같으면 **재개하지 않고** 기존 판정을 그대로 돌려준다(`already_decided`).
+   * 그 외의 불일치는 전부 409 다 — 조용히 덮어쓰면 사용자가 A 를 눌렀는데 B 로 진행되는,
+   * 사후에 재구성조차 안 되는 상태가 만들어진다.
+   */
+  async submitConfirmDecision(
+    stepId: string,
+    workspaceId: string,
+    actor: ActorRef,
+    input: { verdict: string; feedback?: string; visit?: number },
+  ): Promise<{
+    step: OrchestrationStep;
+    already_decided: boolean;
+    dispatched: string[];
+    loop_reentered: string[];
+    orchestrator_woken: boolean;
+  }> {
+    const verdict = String(input?.verdict ?? '').trim().toLowerCase();
+    if (!(CONFIRM_VERDICTS as readonly string[]).includes(verdict)) {
+      throw orchestrationError(400, `verdict must be one of ${CONFIRM_VERDICTS.join(', ')}`);
+    }
+    const feedback = String(input?.feedback ?? '').trim().slice(0, CONFIRM_FEEDBACK_MAX);
+
+    const found = await this.missions.requireStep(stepId);
+    return this.withMissionLock(found.mission_id, async () => {
+      // lock 안에서 다시 읽는다 — 동시 제출의 두 번째는 첫 번째가 커밋한 상태를 봐야
+      // idempotent 분기로 떨어진다.
+      const step = await this.missions.requireStep(stepId);
+      const mission = await this.missions.requireMission(step.mission_id, workspaceId);
+
+      if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+        throw orchestrationError(409, `mission is ${mission.status} — this decision is no longer being collected`);
+      }
+      if (!this.confirmNodeOf(mission, step.step_key)) {
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" is not a user confirmation node, so it does not take a Pass/Fail decision`,
+        );
+      }
+
+      // ── 이미 판정됨: 재제출/새로고침 ──────────────────────────────────────
+      // status 검사보다 **먼저** 본다 — 성공한 판정은 step 을 `done` 으로 만들므로,
+      // 순서를 뒤집으면 정상적인 중복 제출이 전부 "awaiting_user 가 아니다" 로 떨어진다.
+      const prior = step.confirm_decision;
+      if (prior) {
+        const sameVisit = input.visit === undefined || input.visit === null || Number(input.visit) === prior.visit;
+        if (sameVisit && prior.verdict === verdict) {
+          return {
+            step,
+            already_decided: true,
+            dispatched: [],
+            loop_reentered: [],
+            orchestrator_woken: false,
+          };
+        }
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" was already decided "${prior.verdict}" on pass ${prior.visit} by ` +
+            `${prior.decided_by_name || 'a user'}. A decision cannot be changed — if the work needs another ` +
+            `look, the mission has to route back through the graph.`,
+        );
+      }
+
+      if (!isAwaitingUser(step.status)) {
+        throw orchestrationError(
+          409,
+          `step "${step.step_key}" is ${step.status}, not waiting for a user decision`,
+        );
+      }
+      const current = step.visit ?? 0;
+      if (input.visit !== undefined && input.visit !== null && Number(input.visit) !== current) {
+        throw orchestrationError(
+          409,
+          `stale confirmation for step "${step.step_key}": you are answering pass ${input.visit} but the step ` +
+            `is now on pass ${current}. The work was sent back for another round after your screen loaded — ` +
+            `reload the mission and review the current result before deciding.`,
+        );
+      }
+
+      const decision: ConfirmDecision = {
+        verdict: verdict as ConfirmVerdict,
+        feedback,
+        decided_by_user_id: actor.id || '',
+        decided_by_name: actor.name || '',
+        decided_at: new Date().toISOString(),
+        visit: current,
+      };
+      step.confirm_decision = decision;
+      // `verdict` 컬럼에도 실어야 `evaluateEdge` 의 분기 기계가 그대로 작동한다 —
+      // confirm 전용 분기 로직을 새로 만들지 않는 이유가 이것이다.
+      step.verdict = decision.verdict;
+      step.result_summary = (
+        `User confirmation: ${decision.verdict.toUpperCase()}` +
+        (feedback ? `\n\n${feedback}` : '\n\n(no feedback given)')
+      ).slice(0, SUMMARY_MAX);
+      step.status = 'done';
+      step.started_at = step.started_at ?? new Date();
+      step.finished_at = new Date();
+      await this.stepRepo.save(step);
+
+      await this.missions.recordEvent(mission, {
+        type: 'confirm_decided',
+        step_id: step.id,
+        step_key: step.step_key,
+        message:
+          `${actor.name || 'A user'} answered ${decision.verdict.toUpperCase()} on "${step.title}" ` +
+          `(pass ${decision.visit})` + (feedback ? `: ${feedback.slice(0, 300)}` : ''),
+        actor_type: 'user',
+        actor_id: actor.id || '',
+        actor_name: actor.name || '',
+        data: {
+          verdict: decision.verdict,
+          visit: decision.visit,
+          has_feedback: feedback.length > 0,
+          feedback_length: feedback.length,
+        },
+      });
+
+      // 여기서부터는 `reportStep` 의 종료 처리와 **완전히 같은 경로**다. 별도 재개 경로를
+      // 만들지 않는 것이 "정확히 한 번 올바른 edge 로 재개된다" 의 근거다 — 이미 검증된
+      // 전이/차단/디스패치/wake 순서를 그대로 물려받는다.
+      const reentered = await this.applyGraphTransitions(mission, step);
+      const blocked = await this.propagateBlocking(mission);
+      const pumped = await this.pump(mission);
+      const woken = await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
+
+      return {
+        step,
+        already_decided: false,
+        dispatched: pumped.dispatched,
+        loop_reentered: reentered,
+        orchestrator_woken: woken,
+      };
+    });
   }
 
   // ── Engine internals ──────────────────────────────────────────────────────
@@ -1617,6 +1873,17 @@ export class OrchestrationRunnerService {
       if (this.remainingVisitBudget(mission) <= 0) {
         budgetExhausted = true;
         break;
+      }
+      // confirm node 는 **assignee 검사보다 먼저** 본다(티켓 5dbe4aa2). 사람이 답하는
+      // node 라 assignee 가 없는 게 정상인데, 아래 `!agentId` 분기에 먼저 걸리면 영원히
+      // `ready` 로 눌러앉아 "배정이 없어 아무것도 못 한다"는 stall wake 만 반복된다.
+      const confirmNode = this.confirmNodeOf(mission, step.step_key);
+      if (confirmNode) {
+        await this.openConfirmGate(mission, step, steps);
+        // `slots` 를 **차감하지 않는다**: subagent 가 뜨지 않으므로 병렬 상한과 무관하고,
+        // 사람이 답하는 동안 다른 분기는 계속 진행돼야 한다.
+        dispatched.push(step.step_key);
+        continue;
       }
       const agentId = step.assignee_agent_id;
       if (!agentId) {
@@ -1995,7 +2262,11 @@ export class OrchestrationRunnerService {
     const steps = await this.missions.listSteps(mission.id);
     const progress = this.progressOf(mission, steps);
     const counts = countSteps(steps);
-    const quiet = progress.inFlight.length === 0;
+    // 사람의 판정을 기다리는 것은 **정지가 아니다**(티켓 5dbe4aa2). 여기서 awaitingUser 를
+    // 세지 않으면 confirm 게이트가 열릴 때마다 "stalled" 로 판정돼 오케스트레이터가
+    // 깨어나고, 매번 subagent spawn 을 태우면서 "아무것도 디스패치할 수 없다" 는 잘못된
+    // 진단을 반복한다 — 실제로는 사용자의 답만 있으면 그대로 진행되는 상태다.
+    const quiet = progress.inFlight.length === 0 && progress.awaitingUser.length === 0;
     const failure = ctx.justFinished.status === 'failed' || ctx.justFinished.status === 'blocked';
 
     let reason: Parameters<typeof renderWakePrompt>[0]['reason'] | null = null;
@@ -2020,7 +2291,14 @@ export class OrchestrationRunnerService {
       // reaching here means nothing CAN be dispatched: either steps are
       // unassigned, or every remaining one waits on something that will never
       // resolve. Either way only the orchestrator can break the tie.
-      const unassigned = steps.filter((s) => !isTerminalStepStatus(s.status) && !s.assignee_agent_id);
+      // confirm node 는 사람이 답하는 게이트라 assignee 가 없는 게 정상이다 — 여기 섞이면
+      // 오케스트레이터에게 "이 step 에 담당자를 배정하라" 는 실행 불가능한 지시가 나간다.
+      const unassigned = steps.filter(
+        (s) =>
+          !isTerminalStepStatus(s.status) &&
+          !s.assignee_agent_id &&
+          !this.confirmNodeOf(mission, s.step_key),
+      );
       reason = 'stalled';
       detail = unassigned.length
         ? `These steps have no assignee, so nothing can be dispatched: ` +

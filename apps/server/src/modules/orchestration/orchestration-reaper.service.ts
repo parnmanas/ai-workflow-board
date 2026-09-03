@@ -50,7 +50,7 @@ import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
-import { IN_FLIGHT_STEP_STATUSES, isInFlight } from './orchestration.constants';
+import { IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
 
 const PLANNING_NUDGE_LIMIT = 2;
 const RUNNING_STALL_NUDGE_LIMIT = 2;
@@ -358,6 +358,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       const steps = await this.stepRepo.find({ where: { mission_id: mission.id } });
       // Legitimately busy — reapStuckSteps owns timing these out.
       if (steps.some((s) => isInFlight(s.status))) continue;
+      // 사람의 confirm 판정을 기다리는 중이면 정지가 아니다(티켓 5dbe4aa2). 이 가드가
+      // 없으면 리퍼가 사용자를 재촉하는 대신 **오케스트레이터**를 nudge 하고, 상한에
+      // 도달하면 미션 자체를 failed 로 확정한다 — 사람이 답할 시간을 주려고 만든
+      // durable pause 가 정확히 그 대기 시간 때문에 미션을 죽인다. `awaiting_user` 는
+      // IN_FLIGHT_STEP_STATUSES 에 없으므로 위 검사만으로는 걸러지지 않는다.
+      if (steps.some((s) => isAwaitingUser(s.status))) continue;
 
       // Baseline is the last time any step finished; if none ever has (every
       // step is still unassigned, say) fall back to when the mission started —
