@@ -247,6 +247,10 @@ export class RoomMembershipService {
    *
    * 조건부 UPDATE 는 두 경우를 한꺼번에 없앤다 — `left_at IS NULL` 인 행만, 전부.
    * `affected` 가 0 이면 애초에 active 행이 없었다는 뜻이므로 그대로 400 이다.
+   *
+   * 조건에 리터럴 `null` 이 아니라 `IsNull()` 을 쓰는 것은 필수다: 이 스택에서 where 의
+   * `left_at: null` 은 `IS NULL` 로 변환되지 않고 **조건 자체가 조용히 빠진다**(그러면
+   * 이 UPDATE 는 이미 나간 행까지 다시 건드린다).
    */
   async leaveRoom(roomId: string, userId: string): Promise<void> {
     const result = await this.participantRepo.update(

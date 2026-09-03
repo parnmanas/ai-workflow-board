@@ -42,20 +42,39 @@ async function loadServices() {
   const crud = await import(
     pathToFileURL(path.join(DIST, 'modules', 'chat-rooms', 'room-crud.service.js')).href
   );
+  const membership = await import(
+    pathToFileURL(path.join(DIST, 'modules', 'chat-rooms', 'room-membership.service.js')).href
+  );
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
     OrchestrationRunnerService: runner.OrchestrationRunnerService,
     RoomCrudService: crud.RoomCrudService,
+    RoomMembershipService: membership.RoomMembershipService,
   };
 }
 
-/** 이 방의 active 참여자 (participant_type, participant_id) 쌍. */
+/**
+ * 이 방의 active 참여자 (participant_type, participant_id) 쌍.
+ *
+ * where 조건으로 left_at 을 거르지 않는다 — 이 스택에서 리터럴 null 조건은 IS NULL 로
+ * 번역되지 않고 **조용히 빠져서** 이미 나간 참여자까지 세어 버린다(이 티켓에서 실측).
+ * 전부 가져와 JS 로 거르면 ORM 동작에 기대지 않는다.
+ */
 async function activeParticipants(ds, roomId) {
+  const rows = await ds.getRepository('ChatRoomParticipant').find({ where: { room_id: roomId } });
+  return rows
+    .filter((r) => r.left_at === null)
+    .map((r) => `${r.participant_type}:${r.participant_id}`)
+    .sort();
+}
+
+/** 이 방에서 이 사람의 active 참여자 행 (같은 이유로 JS 필터). */
+async function activeRowsFor(ds, roomId, participantId) {
   const rows = await ds
     .getRepository('ChatRoomParticipant')
-    .find({ where: { room_id: roomId, left_at: null } });
-  return rows.map((r) => `${r.participant_type}:${r.participant_id}`).sort();
+    .find({ where: { room_id: roomId, participant_id: participantId } });
+  return rows.filter((r) => r.left_at === null);
 }
 
 test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async (t) => {
@@ -68,6 +87,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const missions = app.get(services.OrchestrationMissionService);
   const runner = app.get(services.OrchestrationRunnerService);
   const rooms = app.get(services.RoomCrudService);
+  const membership = app.get(services.RoomMembershipService);
   const base = `http://127.0.0.1:${port}`;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'mission-conversation');
@@ -258,9 +278,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   assert.equal(joinEvents.length, 1, '두 번 눌러도 감사 기록은 한 줄이다');
 
   step('참여는 서버 재시작을 넘어 유지된다 — 메모리가 아니라 participant 행이다');
-  const persisted = await ds.getRepository('ChatRoomParticipant').find({
-    where: { room_id: agentStarted.room_id, participant_id: owner.id, left_at: null },
-  });
+  const persisted = await activeRowsFor(ds, agentStarted.room_id, owner.id);
   assert.equal(persisted.length, 1, 'DB 에 active 참여자 행으로 남는다');
 
   // ── 3. 생성자가 아닌 운영자 ───────────────────────────────────────────────
@@ -299,9 +317,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
 
   // 권한만 회수한다 — participant 행은 그대로 둔다. 그게 이 회귀의 핵심이다.
   await ds.getRepository('User').update({ id: demoted.id }, { role: 'user', permissions: '[]' });
-  const stillParticipant = await ds.getRepository('ChatRoomParticipant').find({
-    where: { room_id: started.room_id, participant_id: demoted.id, left_at: null },
-  });
+  const stillParticipant = await activeRowsFor(ds, started.room_id, demoted.id);
   assert.equal(stillParticipant.length, 1, 'participant 행은 남아 있다 — 게이트가 권한을 본다는 증거');
 
   assert.equal(
@@ -344,6 +360,65 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     (await activeParticipants(ds, closedStarted.room_id)).includes(`user:${peer.id}`),
     false,
     '거부된 join 은 참여자를 남기지 않는다',
+  );
+
+  // ── 4c. active membership 의 단일성 ─────────────────────────────────────────
+  //
+  // 리뷰 라운드1 지적 2. 여기서 고정하는 것은 락의 구현이 아니라 **제품 불변식**이다:
+  // 같은 (room, user) 의 active 행은 언제나 최대 하나이고, 사용자는 언제나 방을 떠날 수
+  // 있어야 한다. sql.js 는 트랜잭션 직렬화 큐가 있어 진짜 병렬을 재현하지 못하므로
+  // (CLAUDE.md), 경합 자체가 아니라 그 경합이 만들 수 있었던 **고장 상태**를 직접 만들어
+  // 검증한다 — 그래야 백엔드와 무관하게 유효하다.
+  step('같은 사용자가 동시에 두 번 참여해도 active 행은 하나다');
+  const racer = await createUser(app, getDataSourceToken, { name: 'racer' });
+  const racerToken = auth.createSession(racer.id);
+  const bothJoins = await Promise.all([join(created.id, racerToken), join(created.id, racerToken)]);
+  const joinedFlags = await Promise.all(bothJoins.map((r) => r.json().then((b) => b.joined)));
+  assert.equal(
+    joinedFlags.filter(Boolean).length,
+    1,
+    '두 번 눌러도 실제로 넣은 것은 한 번이어야 한다',
+  );
+  const racerRows = await activeRowsFor(ds, started.room_id, racer.id);
+  assert.equal(racerRows.length, 1, 'active 행이 둘이면 아래 leave 가 통째로 고장난다');
+
+  step('중복 active 행이 이미 있어도 사용자는 방을 떠날 수 있다');
+  // 예전 코드가 남겼을 수 있는 중복을 직접 심는다 — leaveRoom 이 findOne 이던 시절에는
+  // 한 행만 정리돼 사용자가 영영 참여자로 남았다.
+  const partRepo = ds.getRepository('ChatRoomParticipant');
+  await partRepo.save(
+    partRepo.create({
+      room_id: started.room_id,
+      participant_type: 'user',
+      participant_id: racer.id,
+      last_read_at: new Date(),
+      left_at: null,
+    }),
+  );
+  assert.equal(
+    (await activeRowsFor(ds, started.room_id, racer.id)).length,
+    2,
+    '고장 상태를 재현했다',
+  );
+  await membership.leaveRoom(started.room_id, racer.id);
+  assert.equal(
+    (await activeRowsFor(ds, started.room_id, racer.id)).length,
+    0,
+    'leave 는 남은 active 행을 하나도 남기지 않아야 한다',
+  );
+  assert.equal(
+    (await say(started.room_id, racerToken, '떠난 뒤에는 못 보낸다')).status,
+    403,
+    '떠났으면 실제로 발화가 막혀야 한다 — 행이 남으면 이 단언이 깨진다',
+  );
+
+  step('재입장한 사용자도 방을 떠날 수 있다 — 옛 left 행이 새 active 행을 가리지 않는다');
+  assert.equal((await join(created.id, racerToken)).status, 201, '재입장은 새 행을 만든다');
+  await membership.leaveRoom(started.room_id, racer.id);
+  assert.equal(
+    (await activeRowsFor(ds, started.room_id, racer.id)).length,
+    0,
+    '옛 left 행을 먼저 골라 400 을 내던 경로가 사라졌다',
   );
 
   // ── 5. 일반 채팅 목록 오염 없음 ───────────────────────────────────────────
