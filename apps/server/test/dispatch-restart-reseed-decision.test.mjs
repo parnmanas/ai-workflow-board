@@ -45,7 +45,7 @@ test('재시작이 없으면 holder 의 침묵은 선택된 대기다 — 재시
     session: session(),
   });
   assert.equal(d.reseed, false, '응답 이전에 부팅된 매니저는 재시작 근거가 아니다');
-  assert.equal(d.reason, 'no_manager_restart_since_holder_response');
+  assert.equal(d.reason, 'manager_instance_predates_holder_response');
   assert.equal(d.restartAtMs, 0, '재시작 판정이 없으므로 근거 시각도 없다');
 });
 
@@ -56,17 +56,47 @@ test('레지스트리가 비어 있으면(서버 재시작 직후 등) 재시드
     session: session(),
   });
   assert.equal(d.reseed, false);
-  assert.equal(d.reason, 'no_manager_restart_since_holder_response');
+  assert.equal(d.reason, 'no_live_manager_instance');
 });
 
-test('여러 인스턴스가 보고돼도 응답 이후의 가장 최근 부팅 시각을 근거로 삼는다', () => {
+// --- 다중 인스턴스: 한 agent identity 를 여러 호스트가 감독할 수 있다 ---
+// `listForAgent()` 는 노트북+VM 페어링이나 ST-5b 다중 agent 감독처럼 같은 agent 를
+// 감독하는 **여러 호스트**의 인스턴스를 돌려주고, supersede 제거는 같은
+// `agent_id + hostname` 에만 적용된다. 따라서 "하나라도 최신" 으로 판정하면
+// 살아서 진행 중인 세션을 재시드한다.
+
+test('리뷰 반례 — host A 가 세션을 계속 돌리는 중 host B 가 새로 등록해도 재시드하지 않는다', () => {
+  // host A: 응답 이전부터 계속 살아 있음 → 그 세션을 아직 안고 있을 수 있다.
+  // host B: 응답 이후 새로 부팅. 존재 한정으로 판정하면 여기서 재시드가 나버린다.
   const d = decideRestartReseed({
     holderProgressMs: HOLDER_RESPONDED_AT,
-    managerStartedAtMs: [T(2), T(30), T(20), Number.NaN],
+    managerStartedAtMs: [T(2), T(20)],
+    session: session({ endedAtMs: null }),   // host A 에서 진행 중인 열린 세션
+    });
+  assert.equal(d.reseed, false, '응답 시점부터 살아 있는 매니저가 하나라도 있으면 재시드 근거가 없다');
+  assert.equal(d.reason, 'manager_instance_predates_holder_response');
+  assert.equal(d.restartAtMs, 0);
+});
+
+test('전 인스턴스가 응답 이후 부팅했을 때만 재시드하고, 기준 시각은 그중 최솟값이다', () => {
+  const d = decideRestartReseed({
+    holderProgressMs: HOLDER_RESPONDED_AT,
+    managerStartedAtMs: [T(30), T(20), T(25)],
     session: session(),
   });
-  assert.equal(d.reseed, true);
-  assert.equal(d.restartAtMs, T(30), '응답 이후 값들 중 최댓값 — NaN 은 무시');
+  assert.equal(d.reseed, true, '응답 시점에 존재하던 매니저 프로세스가 하나도 남아 있지 않다');
+  assert.equal(d.restartAtMs, T(20), '최댓값이 아니라 최솟값 — 가장 이른 부팅조차 응답보다 나중이어야 한다');
+});
+
+test('부팅 시각을 파싱할 수 없는 인스턴스가 있으면 보수적으로 재시드하지 않는다', () => {
+  // "응답 이후임" 을 증명하지 못하는 인스턴스는 살아 있던 매니저일 수 있다.
+  const d = decideRestartReseed({
+    holderProgressMs: HOLDER_RESPONDED_AT,
+    managerStartedAtMs: [T(20), Number.NaN],
+    session: session(),
+  });
+  assert.equal(d.reseed, false);
+  assert.equal(d.reason, 'manager_instance_boot_time_unknown');
 });
 
 test('재시작이 있어도 세션 기록이 없으면 재시드하지 않는다 — 근거 없는 재디스패치 금지', () => {
@@ -157,5 +187,46 @@ test('재시작 사실은 필수 조건이다 — 죽은 세션만으로는 재�
     session: session({ endedAtMs: T(12), signal: 'SIGTERM' }),
   });
   assert.equal(d.reseed, false, '매니저가 재시작하지 않았다면 재시드 근거가 없다');
-  assert.equal(d.reason, 'no_manager_restart_since_holder_response');
+  assert.equal(d.reason, 'manager_instance_predates_holder_response');
+});
+
+// --- 세션 종료 시각과 재시작 시각의 선후 관계 (리뷰 지적 2) ---
+//
+// 리뷰는 `endedAtMs >= restartAtMs` 같은 시간 교차를 요구했지만, 그 술어를 그대로
+// 쓰면 **정상적인 self-update 케이스가 깨진다**: 매니저는 세션을 SIGTERM 하고
+// 그 종료를 보고한 뒤 re-exec 하므로, 죽은 세션의 `ended_at` 은 새 인스턴스의
+// `started_at` 보다 항상 **앞선다**. 아래 두 테스트가 그 경계를 고정한다.
+
+test('재시작에 죽은 세션의 ended_at 은 새 인스턴스 부팅보다 앞선다 — 그래도 재시드한다', () => {
+  // 매니저가 SIGTERM 을 보고한 뒤 re-exec 한 순서 그대로: ended(19) < boot(20).
+  const d = decideRestartReseed({
+    holderProgressMs: HOLDER_RESPONDED_AT,
+    managerStartedAtMs: [T(20)],
+    session: session({ startedAtMs: T(5), endedAtMs: T(19), signal: 'SIGTERM' }),
+  });
+  assert.equal(d.reseed, true, 'ended_at < restartAtMs 를 요구하면 이 주력 케이스가 깨진다');
+  assert.equal(d.reason, 'holder_session_lost_to_manager_restart');
+});
+
+test('재시작보다 한참 전에 비정상 종료한 세션도 재시드한다 — 그 매니저 세대가 사라졌기 때문', () => {
+  // 응답(10분) 직후 12분에 비정상 종료, 매니저는 한참 뒤 30분에 부팅.
+  // 전칭 조건이 이미 "응답 시점에 있던 매니저는 하나도 안 남았다" 를 보장하므로
+  // 그 세션은 확실히 죽었고 티켓은 그 뒤로 침묵했다 — 복구 대상이 맞다.
+  const d = decideRestartReseed({
+    holderProgressMs: HOLDER_RESPONDED_AT,
+    managerStartedAtMs: [T(30)],
+    session: session({ startedAtMs: T(5), endedAtMs: T(12), signal: 'SIGTERM' }),
+  });
+  assert.equal(d.reseed, true);
+  assert.equal(d.reason, 'holder_session_lost_to_manager_restart');
+
+  // 판별자는 종료 시각이 아니라 **종료 방식**이다: 같은 타이밍이어도 정상 종료면
+  // holder 가 스스로 턴을 마친 것이므로 재시드하지 않는다(fec25d90).
+  const normal = decideRestartReseed({
+    holderProgressMs: HOLDER_RESPONDED_AT,
+    managerStartedAtMs: [T(30)],
+    session: session({ startedAtMs: T(5), endedAtMs: T(12), signal: null, exitCode: 0 }),
+  });
+  assert.equal(normal.reseed, false, '같은 타이밍 + 정상 종료 → 선택된 대기');
+  assert.equal(normal.reason, 'session_completed_normally');
 });

@@ -43,8 +43,11 @@
 //      한 sweep 안에서 세 케이스를 함께 단언한다: (A) 재시작에 죽은 세션 → 재시드,
 //      (B) 같은 재시작이지만 세션이 정상 종료 → 재시드 안 됨(fec25d90 유지),
 //      (C) 죽은 세션이지만 매니저 재시작 없음 → 재시드 안 됨(재시작 사실이
-//      load-bearing). B 를 빼면 fec25d90 회귀를 되살리면서 통과하고, C 를 빼면
-//      "죽은 세션이면 무조건 재시드" 하는 구현도 통과한다.
+//      load-bearing), (D) 같은 agent 를 두 호스트가 감독하고 host A 의 세션이
+//      진행 중인데 host B 가 새로 등록 → 재시드 안 됨. B 를 빼면 fec25d90 회귀를
+//      되살리면서 통과하고, C 를 빼면 "죽은 세션이면 무조건 재시드" 하는 구현도
+//      통과하며, D 를 빼면 "하나라도 최신 인스턴스가 있으면 재시작" 이라는 존재
+//      한정 구현이 통과한다(살아서 일하는 holder 를 재시드하는 회귀).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -854,7 +857,20 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       ended_at: new Date(Date.now() - 9 * 60_000), signal: 'SIGTERM', exit_code: null,
     });
 
-    for (const tk of [killed, waiting, noRestart]) {
+    // --- D (리뷰 반례): 같은 agent identity 를 두 호스트가 감독한다. host A 는
+    // 응답 이전부터 계속 살아 있고 그 위에서 세션이 진행 중인데, host B 가 응답
+    // 이후 새로 등록했다. "하나라도 최신 인스턴스가 있으면 재시작" 으로 판정하면
+    // 살아서 일하는 holder 를 재시드해버린다 — fec25d90 회귀. ---
+    const multiHostAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'multi-host' });
+    registerManager(multiHostAgent.id, 'host-a', new Date(Date.now() - 20 * 60_000)); // 응답 이전부터 생존
+    registerManager(multiHostAgent.id, 'host-b', new Date(Date.now() - 6 * 60_000));  // 응답 이후 신규 등록
+    const multiHost = await mkFor('두 호스트가 감독 — host A 세션은 진행 중', multiHostAgent.id);
+    await ticketRepo.update(multiHost.id, { created_at: enteredAt });
+    await moveActivity(multiHost.id, enteredAt);
+    await startComment(multiHost.id, multiHostAgent.id, 'multi-host');
+    await session(multiHost.id, multiHostAgent.id, {});   // host A 에서 열려 있는 세션
+
+    for (const tk of [killed, waiting, noRestart, multiHost]) {
       assert.equal(await intents.findOpenForTicketRole(tk.id, 'assignee'), null,
         `${tk.title}: sweep 전에는 열린 intent 가 없다`);
     }
@@ -889,6 +905,15 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     assert.equal(
       (await activityLogRepo.find({ where: { ticket_id: noRestart.id, action: 'dispatch_intent_seeded' } })).length, 0,
       'C: 재시드 감사 로그도 남지 않는다',
+    );
+
+    assert.equal(
+      await intents.findOpenForTicketRole(multiHost.id, 'assignee'), null,
+      'D: 응답 시점부터 살아 있는 매니저가 하나라도 있으면, 다른 호스트가 새로 등록해도 재시드하지 않는다',
+    );
+    assert.equal(
+      (await activityLogRepo.find({ where: { ticket_id: multiHost.id, action: 'dispatch_intent_seeded' } })).length, 0,
+      'D: 재시드 감사 로그도 남지 않는다',
     );
 
     // 재시드는 재시작 1회당 1회로 유한하다 — A 의 holder 가 재디스패치에 응답하면

@@ -95,6 +95,10 @@ export interface RestartReseedDecision {
  * 해소되지 못한 채 재디스패치·에스컬레이션 루프가 된다.
  *
  * 그래서 **재시작 사실 × 그 시점의 in-flight 증거** 두 조건을 모두 요구한다.
+ * 재시작 사실은 "최신 인스턴스가 하나라도 있음"이 아니라 **live 인스턴스 전부가
+ * holder 응답 이후에 부팅했음**으로 판정한다 — 한 agent identity를 여러 호스트가
+ * 감독할 수 있어서, 존재 한정으로 열면 살아서 진행 중인 세션을 재시드한다
+ * (아래 본문 주석 참고).
  * in-flight 증거는 in-memory 신호가 아니라 durable한 `subagents` 행이며, 그
  * 행의 종료 방식이 "턴을 마치고 끝난 세션"과 "턴 도중 죽은 세션"을 가른다:
  *
@@ -116,14 +120,43 @@ export function decideRestartReseed(opts: {
   /** 이 (ticket, holder, role)의 가장 최근 세션 기록. 없으면 null. */
   session: RoleSessionSnapshot | null;
 }): RestartReseedDecision {
-  // holder 응답 이후에 부팅된 매니저 프로세스만 "그 응답을 낸 세션을 죽인
-  // 재시작"의 후보다. 응답보다 먼저 뜬 프로세스는 그 세션을 계속 안고 있었다.
-  let restartAtMs = 0;
-  for (const ms of opts.managerStartedAtMs) {
-    if (Number.isFinite(ms) && ms > opts.holderProgressMs && ms > restartAtMs) restartAtMs = ms;
+  // 이 agent를 감독 중인 live manager 인스턴스가 하나도 없으면 판정 근거가
+  // 없다(서버 재시작 직후 레지스트리가 비어 있는 구간 포함) — 재시드하지 않는다.
+  if (opts.managerStartedAtMs.length === 0) {
+    return { reseed: false, reason: 'no_live_manager_instance', restartAtMs: 0 };
   }
-  if (restartAtMs === 0) {
-    return { reseed: false, reason: 'no_manager_restart_since_holder_response', restartAtMs: 0 };
+
+  // **모든** live manager 인스턴스가 holder 응답 이후에 부팅했을 때에만 "그
+  // 응답을 낸 세션은 지금 살아 있을 수 없다"가 성립한다.
+  //
+  // 존재 한정("하나라도 최신")으로 열면 거짓양성이 난다: `listForAgent()`는 같은
+  // agent identity를 감독하는 **여러 호스트**의 인스턴스를 돌려주고(노트북+VM
+  // 페어링, ST-5b 다중 agent 감독), supersede 제거는 같은 `agent_id + hostname`
+  // 에만 적용된다. host A가 세션을 계속 돌리는 중에 host B가 새로 등록하면
+  // host B의 부팅 시각을 host A의 살아 있는 세션과 잘못 교차해 **진행 중인**
+  // holder를 재시드하게 된다 — 정확히 fec25d90이 막으려던 회귀다.
+  //
+  // 반대로 전 인스턴스가 응답 이후 부팅했다면, 응답 시점에 존재했던 매니저
+  // 프로세스는 하나도 남아 있지 않다(살아 있었다면 하트비트로 등록돼 이 목록에
+  // 있었을 것). 그 세션은 어떤 매니저의 감독도 받고 있지 않다. `subagents` 행에
+  // manager instance_id 연계가 없어도 서버 단독으로 증명되는 형태라 SSE
+  // contract를 건드리지 않는다.
+  //
+  // 기준 시각은 최댓값이 아니라 **최솟값**을 쓴다 — 가장 이른 부팅조차 응답보다
+  // 나중이어야 위 논증이 성립하고, 아래 "재시작 이후 시작된 세션" 판정도 가장
+  // 이른 부팅을 기준으로 해야 이미 재개된 작업을 다시 재시드하지 않는다.
+  let restartAtMs = Number.POSITIVE_INFINITY;
+  for (const ms of opts.managerStartedAtMs) {
+    // 파싱 불가한 부팅 시각은 "응답 이후임을 증명하지 못함"으로 취급한다.
+    if (!Number.isFinite(ms)) {
+      return { reseed: false, reason: 'manager_instance_boot_time_unknown', restartAtMs: 0 };
+    }
+    // 응답 시점에 이미 떠 있던 매니저가 하나라도 살아 있다 = 그 프로세스가 아직
+    // 그 세션을 안고 있을 수 있다 = 재시드 근거 없음.
+    if (ms <= opts.holderProgressMs) {
+      return { reseed: false, reason: 'manager_instance_predates_holder_response', restartAtMs: 0 };
+    }
+    if (ms < restartAtMs) restartAtMs = ms;
   }
 
   const s = opts.session;
@@ -621,10 +654,15 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
   /**
    * 이 holder들을 감독 중인 live manager 인스턴스들의 **프로세스 부팅 시각**
    * (epoch ms) 목록(ticket 4f1f33c6). 매니저는 재시작할 때마다 새 instance_id
-   * 와 새 `started_at`으로 등록하므로(`InstanceHeartbeat`가 생성 시점에
-   * 한 번 찍는 값), "이 값이 holder 응답보다 나중"이라는 사실이 곧 "그 응답을
-   * 낸 세션은 지금 살아 있을 수 없다"는 서버 단독 관측이 된다 — SSE contract
-   * 를 건드리지 않는다.
+   * 와 새 `started_at`으로 등록한다(`InstanceHeartbeat`가 생성 시점에 한 번
+   * 찍는 값).
+   *
+   * 목록을 **빠짐없이** 넘기는 것이 중요하다. `decideRestartReseed`는 이 중
+   * 하나가 아니라 **전부**가 holder 응답 이후에 부팅했는지를 보고 판정하며
+   * (같은 agent identity를 감독하는 호스트가 여럿일 수 있다 — 그 이유는 그쪽
+   * docstring 참고), 여기서 항목을 빠뜨리면 "응답 시점부터 살아 있던 매니저"를
+   * 못 보고 진행 중인 holder를 재시드하게 된다. 그래서 파싱 불가한
+   * `started_at`도 버리지 않고 그대로 넘겨 판정 쪽에서 보수적으로 처리한다.
    *
    * 레지스트리는 in-memory 라 서버 재시작 직후에는 비어 있을 수 있지만, 값
    * 자체는 매니저가 다음 하트비트(기본 ≤30초)에 다시 실어 보내는 자기 부팅
@@ -638,8 +676,8 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
       for (const inst of this.instanceRegistry.listForAgent(agentId)) {
         if (seen.has(inst.instance_id)) continue;
         seen.add(inst.instance_id);
-        const ms = new Date(inst.started_at).getTime();
-        if (Number.isFinite(ms)) out.push(ms);
+        // 파싱 불가여도 버리지 않는다 — 위 docstring 참고.
+        out.push(new Date(inst.started_at).getTime());
       }
     }
     return out;
