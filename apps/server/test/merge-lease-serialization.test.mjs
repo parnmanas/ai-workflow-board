@@ -616,6 +616,50 @@ test('★ 대기 상한을 넘긴 대기자는 fail-open 으로 풀려나 lease 
   await setBoardLeaseConfig(null);
 });
 
+test('★ 파킹된 대기자가 재획득으로 승격되면 파킹이 즉시 해제된다', async () => {
+  // 파킹이 안 풀리면 에이전트는 lease 를 받아 랜딩을 진행하는데 티켓은
+  // pending_merge_lease=true 로 남아, 이후 모든 트리거가 게이트에서 드롭된다 —
+  // "lease 는 받았는데 티켓이 조용히 멈추는" 상태.
+  await clearLeases();
+  const holder = await makeMergingTicket('h-park');
+  const waiter = await makeMergingTicket('w-park');
+
+  await svc.acquire(holder.id);
+  const q = await svc.acquire(waiter.id);
+  assert.equal(q.outcome, 'queued');
+  assert.equal((await ticketRepo.findOne({ where: { id: waiter.id } })).pending_merge_lease, true);
+
+  // 홀더가 랜딩해 스코프가 비었고, 스윕보다 먼저 대기자가 재디스패치돼
+  // 스스로 await_merge_lease 를 다시 부른 경우(정상적으로 일어난다).
+  await svc.release(holder.id, 'landed');
+  const again = await svc.acquire(waiter.id);
+  assert.equal(again.outcome, 'granted');
+  assert.equal(again.lease_id, q.lease_id, '승격이 아니라 새 lease 를 만들었다');
+
+  const t = await ticketRepo.findOne({ where: { id: waiter.id } });
+  assert.equal(t.pending_merge_lease, false, '승격됐는데 파킹이 남아 있다 — 이후 트리거가 전부 드롭된다');
+  assert.equal(t.merge_lease_context, '');
+});
+
+test('아직 차례가 아닌 대기자의 재획득은 파킹을 다시 세운다', async () => {
+  await clearLeases();
+  const holder = await makeMergingTicket('h-repark');
+  const waiter = await makeMergingTicket('w-repark');
+  await svc.acquire(holder.id);
+  const q = await svc.acquire(waiter.id);
+  assert.equal(q.outcome, 'queued');
+
+  // 외부 요인(리컨사일러 재디스패치 등)으로 파킹이 풀린 상태를 재현.
+  await ticketRepo.update({ id: waiter.id }, { pending_merge_lease: false, merge_lease_context: '' });
+
+  const again = await svc.acquire(waiter.id);
+  assert.equal(again.outcome, 'queued');
+  assert.equal(
+    (await ticketRepo.findOne({ where: { id: waiter.id } })).pending_merge_lease, true,
+    '차례가 아닌데 파킹이 복구되지 않으면 재디스패치 루프가 된다',
+  );
+});
+
 test('승격은 됐는데 전달 전에 죽은 경우, 다음 스윕이 전달만 다시 수행한다', async () => {
   await clearLeases();
   const holder = await makeMergingTicket('crash-holder');

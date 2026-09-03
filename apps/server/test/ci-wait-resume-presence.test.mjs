@@ -192,30 +192,35 @@ test('agents.module.ts wires CiWaitResumeService and CiWaitService', () => {
 test('the ten pre-existing pending_on_tickets gate sites also check pending_ci_wait', () => {
   // Same-shape parity guard as the 13160d20-lineage seat-contract lessons —
   // one flag added everywhere the sibling flag is checked, not just the
-  // headline chokepoint. Each entry pairs a file with a regex proving BOTH
+  // headline chokepoint. Each entry pairs a file with a regex proving the
   // flags appear in the same boolean expression / query chain.
+  //
+  // ticket e630b530 이 `pending_merge_lease`(랜딩 lease 대기)를 네 번째
+  // flavor 로 추가하면서 패턴을 확장했다 — CI-wait parity 요구는 그대로 두고
+  // 신규 flavor 를 **함께** 요구하도록 강화한 것이지 완화한 것이 아니다.
+  // 어느 한 flavor 라도 한 지점에서 빠지면 여기서 걸린다.
   const sites = [
     {
       file: path.join(SRC_DIR, 'modules', 'agents', 'trigger-loop.service.ts'),
       patterns: [
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait\) \{/, // _autoAdvanceUnassigned
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait\) \{\s*\n\s*this\.logService\.info\('MCP', 'dispatchCurrentColumn/,
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait\) throw new Error\('Pending ticket cannot be redispatched'\)/,
-        /!freshForGate\?\.pending_user_action && !freshForGate\?\.pending_on_tickets && !freshForGate\?\.pending_ci_wait\) return false/,
-        /fresh\.pending_user_action \|\| fresh\.pending_on_tickets \|\| fresh\.pending_ci_wait \|\| fresh\.archived_at/,
+        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) \{/, // _autoAdvanceUnassigned
+        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) \{\s*\n\s*this\.logService\.info\('MCP', 'dispatchCurrentColumn/,
+        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) throw new Error\('Pending ticket cannot be redispatched'\)/,
+        /!freshForGate\?\.pending_user_action && !freshForGate\?\.pending_on_tickets && !freshForGate\?\.pending_ci_wait && !freshForGate\?\.pending_merge_lease\) return false/,
+        /fresh\.pending_user_action \|\| fresh\.pending_on_tickets \|\| fresh\.pending_ci_wait \|\| fresh\.pending_merge_lease \|\| fresh\.archived_at/,
       ],
     },
     {
       file: path.join(SRC_DIR, 'modules', 'agents', 'dispatch-reconciler.service.ts'),
       patterns: [
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait\)/g,
+        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\)/g,
       ],
       minMatches: 2,
     },
     {
       file: path.join(SRC_DIR, 'modules', 'agents', 'stuck-ticket-detector.service.ts'),
       patterns: [
-        /pending_user_action \|\| liveTicket\.pending_on_tickets \|\| liveTicket\.pending_ci_wait\)/,
+        /pending_user_action \|\| liveTicket\.pending_on_tickets \|\| liveTicket\.pending_ci_wait \|\| liveTicket\.pending_merge_lease\)/,
         /if \(ticket\.pending_ci_wait\) return 'ci_wait'/,
       ],
     },

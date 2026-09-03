@@ -173,6 +173,9 @@ export class MergeLeaseService {
       // (1) 이 티켓의 열린 행이 이미 있는가 — 재진입/재개 경로.
       const mine = await leaseRepo.findOne({ where: { ticket_id: ticketId, released_at: IsNull() } });
       if (mine?.state === 'held') {
+        // 홀더인데 파킹돼 있는 조합(승격 뒤 전달 전 크래시)이면 여기서도 푼다 —
+        // 스윕의 자체 복구를 기다리지 않고 즉시 정상화한다.
+        await this._unparkTicket(ticketId);
         // 홀더인 채로 다시 부른다 = ff 가 실패해 step 2 를 다시 도는 **재검증
         // 사이클**이다. lease 가 있어도 사람의 직접 push 나 같은 저장소를 보는
         // 다른 AWB 인스턴스 때문에 이 일이 생길 수 있으므로, 여기서 예산을
@@ -199,10 +202,17 @@ export class MergeLeaseService {
       // (3) 대기 행이 이미 있으면 승격을 시도하고, 아니면 홀더 삽입을 시도한다.
       if (mine?.state === 'waiting') {
         if (await this._tryPromote(mine.id, now)) {
+          // ★ 파킹 해제가 없으면 에이전트는 lease 를 받아 진행하는데 티켓은
+          //   `pending_merge_lease=true` 로 남아, 이후 모든 트리거가 게이트에서
+          //   드롭된다(조용히 멈추는 티켓).
+          await this._unparkTicket(ticketId);
           await this._logLeaseActivity(ticket, 'granted', mine.id, opts);
           return { outcome: 'granted', lease_id: mine.id, scope, config, ...firstAttempt(config) };
         }
+        // 아직 차례가 아니다. 파킹이 풀려 있었다면(재디스패치로 되살아난 경우)
+        // 다시 파킹해 재디스패치 루프를 막는다.
         const queued = await this._describeQueue(scope, mine);
+        await this._parkTicket(ticket, mine, scope, queued.ahead_ticket_id || '', opts);
         return { outcome: 'queued', lease_id: mine.id, scope, config, ...queued };
       }
 
@@ -263,6 +273,7 @@ export class MergeLeaseService {
         return { outcome: 'degraded', degrade_reason: 'service_error', scope, config };
       }
       if (waiter.state === 'held') {
+        await this._unparkTicket(ticketId);
         return { outcome: 'granted', lease_id: waiter.id, scope, config, ...firstAttempt(config) };
       }
 
@@ -570,6 +581,18 @@ export class MergeLeaseService {
       position: idx >= 0 ? idx + 1 : waiters.length + 1,
       ahead_ticket_id: holder?.ticket_id || '',
     };
+  }
+
+  /**
+   * 파킹을 푼다. lease 를 부여받은 티켓이 파킹된 채로 남으면 트리거 게이트가
+   * 이후 모든 wake-up 을 드롭해 티켓이 조용히 멈춘다 — granted 를 돌려주는
+   * **모든** 경로가 이것을 통과해야 한다.
+   */
+  private async _unparkTicket(ticketId: string): Promise<void> {
+    await this.dataSource.getRepository(Ticket).update(
+      { id: ticketId, pending_merge_lease: true } as any,
+      { pending_merge_lease: false, merge_lease_context: '' },
+    );
   }
 
   /** 티켓을 lease 대기로 파킹한다(네 번째 pending flavor). */

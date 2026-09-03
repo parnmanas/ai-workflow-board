@@ -102,7 +102,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'TicketPrerequisite', // FK: Ticket ×2, 복합 PK
   'TicketCompletionVerification', 'TicketCompletionVerificationAttempt',
   'TicketReadState', 'TicketRoleAssignment', 'StuckTicketAlert', 'ReviewDriftState',
-  'UserMention', 'BenchmarkScore', 'CiRedAlert', 'DispatchIntent', 'ActionRun',
+  'UserMention', 'BenchmarkScore', 'CiRedAlert', 'DispatchIntent', 'MergeLease', 'ActionRun',
   'ActionApproval', 'Feature', 'WorkflowFunctionRun', 'CommentSummaryRun',
   'Subagent',
   'SubagentLogLine', // FK: Subagent
