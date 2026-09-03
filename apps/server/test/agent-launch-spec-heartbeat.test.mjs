@@ -72,6 +72,7 @@ const VALID_SPEC = {
     { mode: 'oneshot', args: [{ value: '--print', source: 'adapter' }] },
   ],
   cwd: '/srv/work',
+  cwd_kind: 'base',
   mcp_config_path: '/cfg/mcp.json',
   model: 'claude-opus-5',
   permission: { tier: 'trusted', source: 'agent_trust', harness_mode: null },
@@ -206,6 +207,9 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
   assert.equal(row.runtime_profile.arg_count, 0);
   assert.deepEqual(row.env, [{ key: 'K', value: '<redacted>', source: 'credential' }]);
   assert.deepEqual(row.varies_per_dispatch, []);
+  // cwd_kind 는 모르는 값이면 보수적인 'base' 로 접는다 — 기준 경로를 실제
+  // 프로세스 cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시이기 때문이다.
+  assert.equal(row.cwd_kind, 'base');
 });
 
 exitAfterTests();

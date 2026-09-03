@@ -81,6 +81,9 @@ export interface AgentLaunchSpecEntry {
   /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
   modes: LaunchModeSpec[];
   cwd: string | null;
+  /** `'exact'` = 이 경로에서 그대로 돈다(런타임 프로파일이 고정).
+   *  `'base'` = 기준 경로이고 티켓 디스패치는 그 아래 티켓별 worktree 에서 돈다. */
+  cwd_kind: 'exact' | 'base';
   mcp_config_path: string | null;
   model: string | null;
   permission: { tier: string; source: string; harness_mode: string | null };

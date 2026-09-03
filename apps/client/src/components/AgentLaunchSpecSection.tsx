@@ -314,8 +314,20 @@ export default function AgentLaunchSpecSection({
             <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 12, rowGap: 6, fontSize: 12 }}>
               <div style={{ color: tokens.colors.textMuted }}>실행 파일</div>
               <div><Value value={spec.bin} empty="(해석 실패)" /></div>
-              <div style={{ color: tokens.colors.textMuted }}>작업 폴더</div>
-              <div><Value value={spec.cwd} /></div>
+              <div style={{ color: tokens.colors.textMuted }}>
+                {spec.cwd_kind === 'exact' ? '작업 폴더' : '작업 폴더 (기준)'}
+              </div>
+              {/* base 를 그냥 "작업 폴더"로 쓰면 argv 옆의 경로가 실제 프로세스
+                  cwd 로 읽힌다. 티켓 디스패치는 이 아래 티켓별 worktree 에서
+                  돌므로 그 사실을 라벨과 툴팁에 남긴다. */}
+              <div title={spec.cwd_kind === 'base' ? '티켓 디스패치는 이 폴더 아래 티켓별 worktree 에서 실행됩니다.' : undefined}>
+                <Value value={spec.cwd} />
+                {spec.cwd_kind === 'base' && (
+                  <span style={{ color: tokens.colors.textMuted, marginLeft: 8, fontSize: 11 }}>
+                    · 티켓별 worktree 가 이 아래에 생성됩니다
+                  </span>
+                )}
+              </div>
               <div style={{ color: tokens.colors.textMuted }}>MCP 설정</div>
               <div><Value value={spec.mcp_config_path} /></div>
               <div style={{ color: tokens.colors.textMuted }}>모델</div>

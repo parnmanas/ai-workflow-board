@@ -104,6 +104,15 @@ export interface AgentLaunchSpecEntry {
   /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
   modes: LaunchModeSpec[];
   cwd: string | null;
+  /** `cwd` 의 의미 (ticket 20fff298).
+   *
+   *  - `'exact'` — 이 경로에서 그대로 돈다. 런타임 프로파일이 `cwd` 를 고정한
+   *    경우로, 프로파일 값이 다른 모든 것을 이긴다.
+   *  - `'base'` — **기준** 경로다. 티켓 디스패치는 이 아래 티켓별 worktree
+   *    (`<working_dir>/.awb/wt/<repo>/<ticket>`)에서 돌기 때문에 실제 프로세스
+   *    cwd 는 매번 다르다. 이걸 구분하지 않고 "작업 폴더"라고만 쓰면 argv 옆에
+   *    붙은 경로가 실제 프로세스 cwd 라고 읽히는데, 그건 틀린 정보다. */
+  cwd_kind: 'exact' | 'base';
   mcp_config_path: string | null;
   /** 이 spawn 에 적용될 모델 id. 미설정이면 null(= CLI 자체 기본값). */
   model: string | null;
@@ -147,6 +156,7 @@ const PER_DISPATCH_INPUTS = Object.freeze([
   '티켓별 cli_runtime_profile',
   '프롬프트 본문 · task text',
   'spawn 마다 새로 만들어지는 MCP 설정 사본 경로',
+  '티켓별 worktree 경로 (cwd 가 base 일 때 실제 프로세스 cwd)',
 ]);
 
 /**
@@ -327,6 +337,7 @@ export function computeAgentLaunchSpec(
     bin_error: null,
     modes: [],
     cwd: profile?.cwd || ctx.working_dir || null,
+    cwd_kind: profile?.cwd ? 'exact' : 'base',
     mcp_config_path: ctx.mcp_config_path || null,
     model,
     permission: {

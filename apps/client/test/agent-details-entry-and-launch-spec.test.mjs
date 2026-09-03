@@ -199,6 +199,7 @@ const SPEC = {
     },
   ],
   cwd: '/srv/work',
+  cwd_kind: 'base',
   mcp_config_path: '/cfg/mcp.json',
   model: 'claude-opus-5',
   permission: { tier: 'trusted', source: 'agent_trust', harness_mode: null },
@@ -383,4 +384,21 @@ test('경로가 하나도 계산되지 않으면 빈 명령 대신 사유를 보
   assert.match(html, /실행 인자를 계산하지 못했습니다/);
   assert.match(html, /executable not found/);
   assert.doesNotMatch(html, /data-testid="launch-spec-command"/);
+});
+
+test('기준 작업 폴더를 실제 프로세스 cwd 인 것처럼 보여주지 않는다', () => {
+  // base 는 티켓별 worktree 의 상위 경로일 뿐이다. 라벨이 그냥 "작업 폴더"면
+  // argv 옆의 경로가 실제 프로세스 cwd 로 읽힌다.
+  const base = renderSection({ spec: SPEC, managerFound: true, reported: true });
+  assert.match(base, /작업 폴더 \(기준\)/);
+  assert.match(base, /티켓별 worktree 가 이 아래에 생성됩니다/);
+
+  // 프로파일이 cwd 를 고정한 경우에는 그 경로가 실제 cwd 이므로 단서를 붙이지 않는다.
+  const exact = renderSection({
+    spec: { ...SPEC, cwd: '/opt/pinned', cwd_kind: 'exact' },
+    managerFound: true,
+    reported: true,
+  });
+  assert.doesNotMatch(exact, /작업 폴더 \(기준\)/);
+  assert.doesNotMatch(exact, /티켓별 worktree 가 이 아래에/);
 });

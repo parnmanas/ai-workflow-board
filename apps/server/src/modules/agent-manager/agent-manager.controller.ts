@@ -128,6 +128,9 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
         .slice(0, MAX_MODES)
         .map((m: any) => ({ mode: m.mode, args: narrowArgs(m.args) })),
       cwd: strOrNull(row.cwd),
+      // 모르는 값이면 더 보수적인 'base' 로 접는다 — 기준 경로를 실제 프로세스
+      // cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시다.
+      cwd_kind: row.cwd_kind === 'exact' ? 'exact' : 'base',
       mcp_config_path: strOrNull(row.mcp_config_path),
       model: strOrNull(row.model),
       permission: {

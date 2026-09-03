@@ -172,6 +172,28 @@ test('런타임 프로파일 인자는 descriptor 뒤에 붙고 runtime_profile 
   assert.equal(spec.model, 'qwen3-coder');
 });
 
+test('cwd 는 프로파일이 고정했을 때만 exact 이고 그 외에는 base 다', () => {
+  // 티켓 디스패치의 실제 프로세스 cwd 는 working_dir 아래 **티켓별 worktree** 다
+  // (base-session-manager 의 effectiveCwd = agentContext.cwd = repository.cwd).
+  // 그래서 working_dir 를 그대로 "작업 폴더"라고 부르면 argv 옆 경로가 실제
+  // 프로세스 cwd 로 읽힌다 — 구분이 필요하다.
+  const plain = computeAgentLaunchSpec(ctx());
+  assert.equal(plain.cwd, '/srv/work');
+  assert.equal(plain.cwd_kind, 'base');
+  assert.ok(plain.varies_per_dispatch.some((v) => v.includes('worktree')));
+
+  // 런타임 프로파일이 cwd 를 고정하면 그 값이 실제 cwd 다 — spawn 사이트도
+  // `claudeRuntimeProfile?.cwd || effectiveCwd` 로 프로파일을 먼저 본다.
+  const pinned = computeAgentLaunchSpec(ctx(), {
+    runtimeProfileOverride: {
+      id: 'p', protocol: 'openai-compatible', base_url: 'http://x',
+      model: 'm', cwd: '/opt/pinned',
+    },
+  });
+  assert.equal(pinned.cwd, '/opt/pinned');
+  assert.equal(pinned.cwd_kind, 'exact');
+});
+
 test('마스킹 — 자격증명이 args·env 어디에도 원문으로 나오지 않는다', () => {
   const spec = computeAgentLaunchSpec(
     ctx({ extra_env: { ANTHROPIC_API_KEY: SECRET, AWB_PLAIN: 'plain-value-0123' } }),
