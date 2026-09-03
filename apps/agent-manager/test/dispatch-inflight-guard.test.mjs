@@ -1517,9 +1517,10 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
   const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
   const dispatched = spyDispatchTrigger(mgr);
 
-  // 재생 경로는 판단 직전에 반드시 티켓을 다시 조회한다 — 그 조회를 세어두면
-  // "아직 판단 전이라 dispatch 가 0" 과 "판단한 결과 dispatch 가 0" 을 구분할 수
-  // 있다. 고정 sleep 대신 이 관측 가능한 신호를 기다린다.
+  // 티켓 조회 횟수가 이 테스트의 관측 신호다. 재생 경로는 판단 직전에 티켓을 한 번
+  // 조회하고(신선도 확인), 재생을 실제로 강행하면 #dispatchTriggerBody 가 한 번 더
+  // 조회한다. 따라서 "정확히 +1" = 판단까지 갔고 재생은 안 했다, "+2 이상" = 재생을
+  // 강행했다 로 갈린다 — dispatch 카운트만 보면 "아직 판단 전"과 구분되지 않는다.
   const outer = globalThis.fetch;
   let ticketFetches = 0;
   globalThis.fetch = async (url, init) => {
@@ -1542,6 +1543,16 @@ test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_
 
   const decided = await waitFor(() => ticketFetches > fetchesBeforeRelease, { timeoutMs: 4000 });
   assert.equal(decided, true, '재생 경로가 실제로 실행돼 티켓의 현재 컬럼을 다시 확인했다');
+  // 여기서부터는 "이후로 아무 일도 안 일어난다" 는 부정 단언이라 상한이 필요하다.
+  // 판단 지점에 도달한 것은 위에서 이미 관측했으므로, 이 delay 는 동기화 수단이
+  // 아니라 "강행됐다면 이 안에 반드시 드러난다" 는 상한이다 — 재생을 강행하는
+  // 경로는 여기서 곧바로 두 번째 티켓 조회와 dispatch 로 이어진다.
+  await delay(300);
+  assert.equal(
+    ticketFetches,
+    fetchesBeforeRelease + 1,
+    '신선도 확인 1회로 끝났다 — 재생을 강행했다면 #dispatchTriggerBody 의 조회가 더 붙는다',
+  );
   assert.equal(dispatched.length, 0, '이미 이동한 티켓에 옛 컬럼 워크플로를 재생하지 않는다');
   assert.equal(mgr.spawnCount, 0, '세션도 뜨지 않았다');
 });
