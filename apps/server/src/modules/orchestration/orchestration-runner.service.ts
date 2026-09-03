@@ -1541,11 +1541,17 @@ export class OrchestrationRunnerService {
         bodyStep.verdict = '';
         bodyStep.result_summary = '';
         bodyStep.artifacts = null;
-        // confirm node 의 이전 판정도 반드시 지운다(티켓 5dbe4aa2). 남겨두면 재진입한
-        // 게이트가 지난 pass 의 판정을 들고 있어 submitConfirmDecision 의 "이미 판정됨"
-        // 분기에 먼저 걸리고, 새 pass 의 답이 409 로 거부된다 — 사람이 다시는 답할 수
-        // 없는 게이트가 된다.
-        bodyStep.confirm_decision = null;
+        // `confirm_decision` 은 **일부러 지우지 않는다**(티켓 5dbe4aa2). verdict 와
+        // 정반대 이유다:
+        //   - `verdict` 는 라우팅을 여는 값이라 반드시 지워야 한다. 남으면 사람이 답하기
+        //     전에 하류 edge 가 이미 만족된 것으로 판정된다.
+        //   - `confirm_decision` 은 **왜 되돌아왔는지에 대한 기록**이고, 바로 다음 줄의
+        //     pump 가 재작업 step 을 디스패치할 때 work order 에 실려 나가야 하는 값이다.
+        //     여기서 지우면 사용자의 fail 피드백이 전달되기 **직전에** 사라져 요구사항 5가
+        //     조용히 깨진다(회귀 테스트가 이 순서를 직접 잡는다).
+        // 다음 pass 의 답을 막지 않는 것은 `submitConfirmDecision` 의 멱등 검사가
+        // `prior.visit === step.visit` 일 때만 발동하기 때문이고, 게이트가 실제로 다시
+        // 열릴 때 `openConfirmGate` 가 그 자리에서 null 로 되돌린다.
         bodyStep.room_id = null;
         bodyStep.dispatched_at = null;
         bodyStep.started_at = null;
@@ -1757,8 +1763,12 @@ export class OrchestrationRunnerService {
       // ── 이미 판정됨: 재제출/새로고침 ──────────────────────────────────────
       // status 검사보다 **먼저** 본다 — 성공한 판정은 step 을 `done` 으로 만들므로,
       // 순서를 뒤집으면 정상적인 중복 제출이 전부 "awaiting_user 가 아니다" 로 떨어진다.
+      //
+      // **같은 pass 의 판정일 때만** 발동한다. loop 재진입은 기록을 보존한 채 visit 만
+      // 올리므로(applyGraphTransitions 참고), 이 조건이 없으면 지난 pass 의 판정이
+      // 새 pass 의 답을 영구히 막아 사람이 다시는 답할 수 없는 게이트가 된다.
       const prior = step.confirm_decision;
-      if (prior) {
+      if (prior && prior.visit === (step.visit ?? 0)) {
         const sameVisit = input.visit === undefined || input.visit === null || Number(input.visit) === prior.visit;
         if (sameVisit && prior.verdict === verdict) {
           return {
@@ -1911,7 +1921,6 @@ export class OrchestrationRunnerService {
       }
     }
     let slots = mission.max_parallel_steps - progress.inFlight.length;
-    if (slots <= 0) return { dispatched: [], failed: [] };
 
     const dispatched: string[] = [];
     const failed: OrchestrationStep[] = [];
@@ -1919,6 +1928,13 @@ export class OrchestrationRunnerService {
       .map((k) => byKey.get(k)!)
       .filter(Boolean)
       .sort((a, b) => a.position - b.position);
+    // 슬롯이 없어도 **여기서 조기 반환하지 않는다**(티켓 5dbe4aa2): 아래 confirm 게이트
+    // 패스는 슬롯을 쓰지 않으므로, 병렬 상한에 걸린 미션에서 사람에게 묻는 일까지
+    // 미뤄질 이유가 없다. 슬롯이 없고 게이트도 없으면 아래 두 루프가 모두 no-op 이라
+    // 결과는 예전과 같다.
+    if (slots <= 0 && !candidates.some((step) => this.confirmNodeOf(mission, step.step_key))) {
+      return { dispatched: [], failed: [] };
+    }
 
     // graph 모드의 global budget은 **매 반복마다** 다시 본다.
     //
@@ -1933,24 +1949,41 @@ export class OrchestrationRunnerService {
     // 커밋하므로, 커밋 전에 던진 실패는 예산을 쓰지 않고 커밋 후 실패는 쓴다).
     // 미리 깎아두면 그 두 경우를 구분하지 못한다.
     let budgetExhausted = false;
+
+    // ── confirm 게이트를 먼저, 그리고 병렬 상한과 **무관하게** 연다(티켓 5dbe4aa2).
+    //
+    // 아래 디스패치 루프 안에 두면 안 된다. 그 루프는 `slots <= 0`에서 break 하는데,
+    // 게이트는 subagent 를 띄우지 않아 슬롯을 쓰지 않으므로 다른 step 이 슬롯을 다
+    // 쥐고 있다는 이유로 사람에게 묻는 것을 미룰 근거가 없다. 게다가 break 는 뒤에
+    // 남은 후보를 아예 보지 않으므로, 상한에 걸린 미션에서는 게이트가 열리지 않은 채
+    // "in-flight 는 있는데 아무도 답을 요구받지 않는" 상태로 늘어진다.
+    //
+    // 정상적인 assignee 검사보다 먼저 처리되는 것도 의도다 — 사람이 답하는 node 라
+    // 담당자가 없는 게 정상인데, `!agentId` 분기에 먼저 걸리면 영원히 `ready` 로
+    // 눌러앉아 "배정이 없어 아무것도 못 한다"는 stall wake 만 반복된다.
+    //
+    // 반면 global budget 은 그대로 적용받는다: 게이트도 node 실행이고 loop 를 한 바퀴
+    // 더 돌리므로, 예산에서 빼면 confirm→fail→loop 가 예산 없이 무한히 돌 수 있다.
+    const gates = candidates.filter((step) => this.confirmNodeOf(mission, step.step_key));
+    const regular = candidates.filter((step) => !this.confirmNodeOf(mission, step.step_key));
+    const withheldGates: string[] = [];
+    for (const step of gates) {
+      if (this.remainingVisitBudget(mission) <= 0) {
+        budgetExhausted = true;
+        withheldGates.push(step.step_key);
+        continue;
+      }
+      await this.openConfirmGate(mission, step, steps);
+      dispatched.push(step.step_key);
+    }
+
     let index = 0;
-    for (; index < candidates.length; index += 1) {
-      const step = candidates[index];
+    for (; index < regular.length; index += 1) {
+      const step = regular[index];
       if (slots <= 0) break;
       if (this.remainingVisitBudget(mission) <= 0) {
         budgetExhausted = true;
         break;
-      }
-      // confirm node 는 **assignee 검사보다 먼저** 본다(티켓 5dbe4aa2). 사람이 답하는
-      // node 라 assignee 가 없는 게 정상인데, 아래 `!agentId` 분기에 먼저 걸리면 영원히
-      // `ready` 로 눌러앉아 "배정이 없어 아무것도 못 한다"는 stall wake 만 반복된다.
-      const confirmNode = this.confirmNodeOf(mission, step.step_key);
-      if (confirmNode) {
-        await this.openConfirmGate(mission, step, steps);
-        // `slots` 를 **차감하지 않는다**: subagent 가 뜨지 않으므로 병렬 상한과 무관하고,
-        // 사람이 답하는 동안 다른 분기는 계속 진행돼야 한다.
-        dispatched.push(step.step_key);
-        continue;
       }
       const agentId = step.assignee_agent_id;
       if (!agentId) {
@@ -2007,7 +2040,7 @@ export class OrchestrationRunnerService {
       // 스텝을 failed로 바꾸지는 않는다 — 예산은 "지금 더 못 띄운다"이지 "이 작업이
       // 실패했다"가 아니고, 운영자가 max_total_visits를 올리면 그대로 재개돼야 한다.
       // 대신 이벤트를 남겨 decideWake가 정지 상태를 오케스트레이터에게 알리게 한다.
-      const withheld = candidates.slice(index).map((s) => s.step_key);
+      const withheld = [...withheldGates, ...regular.slice(index).map((s) => s.step_key)];
       await this.missions.recordEvent(mission, {
         type: 'graph_budget_exhausted',
         message:
