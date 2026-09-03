@@ -11,9 +11,17 @@ import { AWAITING_USER_STATUS } from './orchestration.constants';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 
 /**
- * 한 사람에게 보내는 데 허용하는 상한. providers 는 raw `fetch` 라 **요청 타임아웃이
- * 없다** — 응답하지 않는 Discord/Slack/Telegram 엔드포인트 하나가 이 호출을 영원히
- * 붙잡을 수 있다. 리퍼 스윕이 그걸 await 하면 스윕 자체가 영구 정지하므로 여기서 끊는다.
+ * **한 사람에게 보내는 전체**에 걸리는 상한. provider 쪽 상한(티켓 672ffcb5)과 축이 다르다.
+ *
+ * 그쪽은 `AWB_NOTIFY_HTTP_TIMEOUT_MS`(기본 15초, 최대 120초)로 **HTTP 요청 하나**를 끊는다.
+ * 반면 `dispatchForUser` 한 번은 그 사용자의 바인딩 수만큼 팬아웃하고, 바인딩마다 채널
+ * 해석 + 전송이 있으며 discord 는 429 에 **새 signal 로** 재시도한다 — 즉 요청 단위 상한이
+ * 걸려 있어도 이 호출의 총 소요는 그 몇 배가 될 수 있고, 운영자가 env 로 120초까지 올리면
+ * 그 배수가 그대로 커진다.
+ *
+ * 리퍼의 리마인더 스윕은 이 호출을 await 하므로, 상한이 없으면 스윕 하나가 sweep 주기를
+ * 훌쩍 넘겨 step 타임아웃 같은 **다른 리퍼 임무를 조용히 밀어낸다**. 그래서 요청 단위와
+ * 별개로 여기서 한 번 더 끊는다.
  */
 const SEND_TIMEOUT_MS = 15_000;
 
