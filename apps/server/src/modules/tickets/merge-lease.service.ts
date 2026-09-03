@@ -364,11 +364,16 @@ export class MergeLeaseService {
 
   /** 스윕이 훑을 대상 — 열린 lease 행이 있는 모든 스코프. */
   async listOpenScopes(): Promise<MergeLeaseScope[]> {
+    // `.select('DISTINCT …')` + `.addSelect(…)` 로 쓰면 TypeORM 이 컬럼 순서를
+    // 재배치해 `SELECT a, DISTINCT b` 라는 무효 SQL 을 만든다(sql.js 에서
+    // syntax error). DISTINCT 는 반드시 `.distinct(true)` 로 표현할 것 —
+    // 이 스윕 전체가 첫 tick 에서 죽던 실제 회귀다.
     const rows = await this.dataSource
       .getRepository(MergeLease)
       .createQueryBuilder('l')
-      .select('DISTINCT l.repo_resource_id', 'repo_resource_id')
+      .select('l.repo_resource_id', 'repo_resource_id')
       .addSelect('l.base_branch', 'base_branch')
+      .distinct(true)
       .where('l.released_at IS NULL')
       .getRawMany<{ repo_resource_id: string; base_branch: string }>();
     return rows.map((r) => ({ repoResourceId: r.repo_resource_id, baseBranch: r.base_branch }));
