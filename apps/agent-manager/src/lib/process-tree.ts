@@ -14,7 +14,7 @@
 // The parsing + tree-walk here are pure functions so they can be unit-tested
 // against synthetic process tables; the enumerate/reap edges shell out.
 
-import { hostPlatform, runCommand, runPowerShell } from './host-mcp/platform.js';
+import { hostPlatform, runCommand, runPowerShell, type RunResult } from './host-mcp/platform.js';
 import { log } from './logging.js';
 
 export interface ProcNode {
@@ -324,18 +324,106 @@ export async function reapProcessTrees(pids: number[], graceMs = 2000): Promise<
   return signalled;
 }
 
+/** 자식 프로세스 핸들에서 "아직 살아 있는가" 만 읽어 가는 최소 계약.
+ *  `ChildProcess` 가 구조적으로 이 모양을 만족하므로 호출부는 핸들을 그대로
+ *  넘기면 되고, 테스트는 가벼운 스텁을 넘길 수 있다. */
+export interface ExitObservableChild {
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+}
+
+/** 핸들이 이미 종료를 보고했는가. exitCode 는 정상 종료, signalCode 는 시그널
+ *  종료에서 채워지므로 둘 다 봐야 한다. */
+export function childHasExited(child: ExitObservableChild): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+export interface TerminateTreeOptions {
+  /** 이 pid 를 만들어 낸 자식 프로세스 핸들. **win32 에서만** 쓰인다.
+   *
+   *  Windows 는 프로세스 그룹이 없어 tree-kill 의 유일한 키가 pid 인데, pid 는
+   *  종료 즉시 OS 가 재사용한다. 즉 자식이 죽은 뒤의 `taskkill /PID <pid>` 는
+   *  "우리 트리"가 아니라 그 pid 를 물려받은 **남의 프로세스**를 죽일 수 있다.
+   *  pid 와 달리 ChildProcess 핸들은 재사용되지 않으므로, 재사용에 안전한
+   *  판정은 이 핸들뿐이다(POSIX 의 `isGroupLeaderReused` 에 대응하는 win32 측
+   *  가드가 여태 없었다 — ticket a992ce71).
+   *
+   *  넘기지 않으면 종전 그대로 pid 만 믿는 best-effort 경로로 동작한다. */
+  child?: ExitObservableChild;
+}
+
+/** taskkill 한 번의 결과를 로그에 남긴다. 남기는 값은 pid·pass·종료코드와
+ *  taskkill 자신의 짧은 메시지뿐 — 경로나 자격증명은 싣지 않는다. */
+function logTaskkill(pass: 'soft' | 'force', rootPid: number, res: RunResult): void {
+  const detail = res.spawnFailed
+    ? `spawnFailed=${res.spawnError}`
+    : `code=${res.code}${res.stderr.trim() ? ` stderr=${oneLine(res.stderr)}` : ''}`;
+  log(`[process-tree] win32 taskkill ${pass} pid=${rootPid} ${detail}`);
+}
+
+function oneLine(text: string, max = 120): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/** win32 전용 tree-kill. `deps` 는 테스트 이음매다 — process-tree.ts 는
+ *  `hostPlatform`/`runCommand` 를 정적 import 하므로, 이걸 주입할 수 없으면
+ *  리눅스에서 이 분기를 한 줄도 태울 수 없다. */
+export async function terminateWindowsProcessTree(
+  rootPid: number,
+  graceMs: number,
+  options: TerminateTreeOptions & {
+    run?: typeof runCommand;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const run = options.run ?? runCommand;
+  const sleep = options.sleep ?? delay;
+  const child = options.child;
+
+  // 이미 죽은 자식의 pid 로는 아무것도 죽여선 안 된다 — 그 pid 는 이미 남의
+  // 것일 수 있다. 죽은 자식의 손자를 못 거두는 손해보다 무고한 프로세스를
+  // 죽이는 손해가 크다(후자는 형제 테스트 파일이 출력 한 줄 없이 exit 1 로
+  // 죽는 CI flake 로 나타났다).
+  if (child && childHasExited(child)) {
+    log(`[process-tree] win32 tree-kill skipped: pid=${rootPid} already exited (pid may be recycled)`);
+    return;
+  }
+
+  logTaskkill('soft', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 }));
+  await sleep(graceMs);
+
+  // grace 동안 자식이 끝났으면 force 패스를 쏘지 않는다. 이 창(hermes 250ms,
+  // runtime-profiles 5000ms)이 pid 재사용이 실제로 일어나는 구간이고, `/F` 는
+  // soft 패스와 달리 콘솔 프로세스도 확실히 죽인다.
+  if (child && childHasExited(child)) {
+    log(`[process-tree] win32 force tree-kill skipped: pid=${rootPid} exited during the ${graceMs}ms grace`);
+    return;
+  }
+
+  logTaskkill('force', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 }));
+}
+
 /**
  * Drain a detached runtime and its complete process tree.  POSIX runtimes are
  * spawned as process-group leaders, so group signalling remains valid after
  * the leader exits and its children are reparented.  Windows uses taskkill's
  * native tree traversal.
+ *
+ * `options.child` 는 win32 분기의 pid 재사용 가드에만 쓰인다. POSIX 는 죽은
+ * 리더의 pgid 가 여전히 유효한 키이고(리페어런팅돼도 그룹은 남는다) 재사용
+ * 가드도 `isGroupLeaderReused` 로 이미 있으므로, 여기서 핸들로 조기 반환하면
+ * ticket 55d3063f/7b5f2572 가 세운 그룹 스윕을 오히려 되돌린다 — 그래서 POSIX
+ * 경로는 핸들을 보지 않는다.
  */
-export async function terminateDetachedProcessTree(rootPid: number, graceMs = 5000): Promise<void> {
+export async function terminateDetachedProcessTree(
+  rootPid: number,
+  graceMs = 5000,
+  options: TerminateTreeOptions = {},
+): Promise<void> {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return;
   if (hostPlatform() === 'win32') {
-    await runCommand('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 });
-    await delay(graceMs);
-    await runCommand('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 });
+    await terminateWindowsProcessTree(rootPid, graceMs, { child: options.child });
     return;
   }
 
