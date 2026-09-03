@@ -1265,9 +1265,13 @@ test('헬퍼: 새 빌드가 정상이면 되돌리지 않고 핀도 만들지 �
   assert.equal(r.status, 0);
 });
 
-test('헬퍼: 되돌릴 대상이 없으면(복귀 중) 프로브를 건너뛰고 기존 동작 그대로다', (t) => {
+test('헬퍼: 되돌릴 대상이 없으면(복귀 중·provenance 우회) 프로브를 건너뛴다', (t) => {
   // 이미 복귀 중인 호출은 previousSpec 을 빈 문자열로 넘긴다 — 여기서 또
-  // 되돌리려 하면 무한 복귀가 된다.
+  // 되돌리려 하면 무한 복귀가 된다. provenance 를 명시적으로 우회한 경로도
+  // 대상 버전을 특정할 수 없어 같은 모양이 된다.
+  //
+  // 주의: "복귀 대상 검증 실패" 는 더 이상 이 상태로 오지 않는다 — 그 경우
+  // 부모가 업데이트 자체를 거부하므로 헬퍼가 뜨지 않는다(아래 fail-closed 테스트).
   const r = runHelper(t, {
     installSpec: 'awb-agent-manager@1.0.0',
     expectVersion: '',
@@ -1280,10 +1284,11 @@ test('헬퍼: 되돌릴 대상이 없으면(복귀 중) 프로브를 건너뛰�
   assert.equal(r.pin, null);
 });
 
-test('헬퍼: 복귀 설치까지 실패해도 매니저 재기동은 그대로 시도한다 (현행 보장 유지)', (t) => {
-  // 헬퍼는 설치 결과와 무관하게 항상 재기동한다 — 이 보장이 완료 기준 7 의
-  // "운영자가 매니저 없는 상태로 남지 않는다"를 떠받친다. 소스에 그 무조건
-  // 재기동 경로가 남아 있는지 실행 산출물로 확인한다.
+test('헬퍼: 복귀 뒤에도 재기동·정리 단계까지 반드시 도달한다', (t) => {
+  // 헬퍼는 설치 결과와 무관하게 항상 재기동을 시도한다 — 이 무조건 경로가
+  // 완료 기준 7 을 떠받친다. 다만 아래 단언이 증명하는 것은 "매니저가 살아
+  // 있다"가 아니라 "헬퍼가 4~5단계(재기동 시도 + 자기 정리)까지 도달했다"
+  // 이다. 실제로 되살아났는지는 위 복귀 테스트의 relaunched 로그가 단언한다.
   const r = runHelper(t, {
     installSpec: 'awb-agent-manager@2.0.0',
     expectVersion: '2.0.0',
@@ -1367,35 +1372,6 @@ test('resolveVerifiedRollbackSpec: 명시적 opt-in 이 있을 때만 미검증 
   assert.equal(spec, 'awb-agent-manager@1.0.0');
 });
 
-test('헬퍼: provenance 가 거부한 이전 버전은 복귀 설치되지 않는다 (부모→헬퍼 전 구간)', async (t) => {
-  // 1단계 — 부모가 이전 버전의 provenance 를 조회했고 거부됐다.
-  const rollbackSpec = await resolveVerifiedRollbackSpec({
-    previousVersion: '1.0.0',
-    verifyProvenance: async () => ({ ok: false, version: null, reason: 'unsigned publish' }),
-    out: () => {},
-    bypassed: false,
-  });
-  assert.equal(rollbackSpec, '');
-
-  // 2단계 — 그 결과가 그대로 헬퍼 argv 가 된다. 새 빌드가 뜨지 않더라도
-  // 복귀 설치는 일어나지 않아야 한다.
-  const r = runHelper(t, {
-    installSpec: 'awb-agent-manager@2.0.0',
-    expectVersion: rollbackSpec ? '2.0.0' : '',
-    previousSpec: rollbackSpec,
-    badVersion: '2.0.0',
-  });
-
-  assert.deepEqual(
-    r.installs,
-    ['2.0.0'],
-    '증명되지 않은 이전 버전을 설치하면 정책 E 게이트가 우회된다',
-  );
-  assert.equal(r.pin, null, '설치하지 않았으면 그 버전으로 핀하지도 않는다');
-  // 완료 기준 7 — 되돌리지 못해도 매니저 재기동은 그대로다.
-  assert.equal(existsSync(r.helperPath), false, '헬퍼가 재기동·정리 단계까지 도달해야 한다');
-});
-
 test('헬퍼: provenance 를 통과한 이전 버전은 정상적으로 복귀된다 (위 테스트의 양성 대조)', async (t) => {
   const rollbackSpec = await resolveVerifiedRollbackSpec({
     previousVersion: '1.0.0',
@@ -1413,4 +1389,84 @@ test('헬퍼: provenance 를 통과한 이전 버전은 정상적으로 복귀�
   assert.deepEqual(r.installs, ['2.0.0', '1.0.0']);
   assert.equal(r.pin.version, '1.0.0');
   assert.deepEqual(r.relaunched, ['1.0.0']);
+});
+
+
+// ─── 13. 되돌릴 수 없는 업데이트는 시작하지 않는다 (리뷰 라운드 3) ──────────
+// 앞 라운드에서는 복귀 대상 검증에 실패하면 "복귀만 끄고 설치는 진행"했는데,
+// 그러면 헬퍼의 부팅 프로브까지 함께 꺼져 불량 빌드를 검증 없이 재기동한다.
+// 안전망을 끄느니 업데이트를 시작하지 않는 쪽이 맞다.
+
+/** 새 대상은 통과시키고 이전 버전만 거부하는 provenance 포트. */
+function portsRefusingRollbackTarget() {
+  return fakePorts({
+    provenance: (channel) =>
+      channel === 'latest'
+        ? { ok: true, version: '99.0.0', reason: 'signed' }
+        : { ok: false, version: null, reason: 'no npm attestations (unsigned publish)' },
+  });
+}
+
+test('runSelfUpdate: 검증된 복귀 대상이 없으면 설치를 시작하지 않는다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const { ports, calls } = portsRefusingRollbackTarget();
+  const lines = [];
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: (m) => lines.push(m) });
+
+  // 헬퍼도 뜨지 않고 새 버전 설치도 없다 — 되돌릴 수 없는 업데이트는 개시 자체를
+  // 하지 않는다.
+  assert.equal(calls.install.length, 0, '되돌릴 수 없는데 새 버전을 설치하면 안 된다');
+  assert.equal(calls.probe, 0);
+  assert.equal(calls.restart, 0, '기존 매니저를 종료·재기동하지 않는다');
+  assert.equal(r.changed, false);
+  assert.equal(r.willReExec, undefined);
+  assert.match(r.summary, /no verified rollback target/);
+  // 설치를 시작하지 않았으므로 부팅 검증 기록도 남기지 않는다 — 남기면 다음
+  // 부팅이 있지도 않은 설치 실패를 센다.
+  assert.equal(readBootVerificationRecord(dir), null);
+  assert.equal(readUpdatePin(dir), null);
+  assert.ok(lines.some((l) => l.startsWith('Self-update: ') && /refused/.test(l)));
+  // 이 단언이 실행된다는 사실 자체가 기존 프로세스 생존의 증거다(완료 기준 7).
+  assert.equal(typeof process.pid, 'number');
+});
+
+test('runSelfUpdate: 명시적 opt-in 이 있으면 미검증 복귀 대상이어도 진행한다', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  const prev = process.env.AWB_SELF_UPDATE_ALLOW_UNVERIFIED;
+  process.env.AWB_SELF_UPDATE_ALLOW_UNVERIFIED = '1';
+  t.after(() => {
+    if (prev === undefined) delete process.env.AWB_SELF_UPDATE_ALLOW_UNVERIFIED;
+    else process.env.AWB_SELF_UPDATE_ALLOW_UNVERIFIED = prev;
+  });
+
+  const { ports, calls } = portsRefusingRollbackTarget();
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 1, 'opt-in 은 예외로 남는다');
+  assert.equal(r.changed, true);
+});
+
+test('runSelfUpdate: 복귀 대상이 검증되면 평소대로 설치·프로브를 진행한다 (양성 대조)', async (t) => {
+  const dir = freshStateDir(t);
+  _resetSelfUpdateInFlightForTests();
+  t.after(() => _resetSelfUpdateInFlightForTests());
+
+  // fakePorts 기본값은 어떤 채널이든 통과시킨다 = 복귀 대상도 검증된다.
+  const { ports, calls } = fakePorts();
+  const r = await runSelfUpdate({ stateDir: dir, ports, log: () => {} });
+
+  assert.equal(calls.install.length, 1);
+  assert.equal(calls.probe, 1, '복귀 대상이 확보됐으면 부팅 프로브가 반드시 돈다');
+  assert.equal(r.willReExec, true);
+  // 복귀 대상 조회가 이전 버전 자체를 향했는지 확인한다.
+  assert.ok(
+    calls.provenance.includes(RUNNING_VERSION),
+    `복귀 대상 provenance 조회가 없다: ${JSON.stringify(calls.provenance)}`,
+  );
 });

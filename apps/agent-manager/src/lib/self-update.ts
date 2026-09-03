@@ -1244,6 +1244,33 @@ async function runNpmGlobalSelfUpdate(
     );
   }
 
+  // 리뷰 라운드 3 — **되돌릴 수 없는 업데이트는 시작하지 않는다.**
+  //
+  // 복귀 대상의 provenance 를 설치보다 먼저 확보한다. 확보하지 못하면 여기서
+  // 멈춘다. 앞선 라운드에서는 이 경우 "복귀만 끄고 설치는 진행"했는데, 그러면
+  // 헬퍼의 부팅 프로브까지 함께 꺼져 불량 빌드를 검증 없이 재기동하게 된다 —
+  // 미검증 이전 버전 설치는 막으면서 안전망 전체를 끄는 더 나쁜 교환이었다.
+  //
+  // 두 플랫폼 모두에 건다. Windows 는 부모가 종료한 뒤 헬퍼가 설치하므로 되돌릴
+  // 주체가 아예 없고, POSIX 도 프로브가 불량 빌드를 잡아낸 뒤 되돌리지 못하면
+  // 디스크에 불량 빌드가 남아 다음 재시작이 치명적이 된다. 정책 E 의 예외는
+  // 명시적 opt-in 하나뿐이며, 그 경우 resolveVerifiedRollbackSpec 이 spec 을
+  // 돌려주므로 이 게이트는 통과한다.
+  const rollbackSpec = trackable
+    ? await resolveVerifiedRollbackSpec({
+        previousVersion: current,
+        verifyProvenance: ports.verifyProvenance,
+        out,
+      })
+    : '';
+  if (trackable && !rollbackSpec) {
+    const summary =
+      `npm-global update refused: no verified rollback target for v${current} — ` +
+      `refusing to install a version that could not be rolled back`;
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
+  }
+
   // 설치 **전에** 현재 버전을 기록한다. 이 한 줄이 복귀 대상을 결정한다 —
   // 설치가 끝난 뒤에는 "직전에 무엇이 돌고 있었는지"를 알 방법이 없다.
   const installRecord = trackable
@@ -1343,22 +1370,16 @@ async function runNpmGlobalSelfUpdate(
   // 헬퍼는 부모가 종료한 뒤에 설치하므로, 프로브·복귀에 필요한 것을 전부 argv 로
   // 넘겨야 한다(리뷰 지적 1). 대상 버전을 특정할 수 없으면(provenance 우회 경로)
   // 빈 문자열을 넘겨 헬퍼가 프로브를 건너뛰고 기존 동작 그대로 돌게 한다.
-  // 복귀 대상의 provenance 를 **헬퍼를 띄우기 전에** 검증한다. 검증에 실패하면
-  // 빈 spec 이 넘어가고 헬퍼는 복귀를 시도하지 않는다(정책 E fail-closed).
-  const rollbackSpec = trackable
-    ? await resolveVerifiedRollbackSpec({
-        previousVersion: current,
-        verifyProvenance: ports.verifyProvenance,
-        out,
-      })
-    : '';
+  // rollbackSpec 은 위 게이트에서 이미 확보했다 — trackable 이면 반드시 비어
+  // 있지 않다(비었다면 업데이트 자체가 거부돼 여기까지 오지 않는다). 따라서
+  // 헬퍼는 항상 프로브와 복귀 대상을 함께 받는다.
   const helperArgs = [
     helperPath,
     String(process.pid),
     installSpec,
-    trackable && rollbackSpec ? targetVersion : '',
+    trackable ? targetVersion : '',
     rollbackSpec,
-    trackable && rollbackSpec ? updatePinPath(opts.stateDir) : '',
+    trackable ? updatePinPath(opts.stateDir) : '',
     nodePath,
     scriptPath,
     ...baseArgs,
