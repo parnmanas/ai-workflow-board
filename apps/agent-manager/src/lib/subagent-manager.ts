@@ -33,10 +33,16 @@ import {
   type CliProgressEvent,
   type CliUsageSnapshot,
   describeHarness,
+  describeSpawnArgv,
   partitionHarness,
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import {
+  describePermissionPolicy,
+  describePermissionSupport,
+  resolveEffectivePermissionPolicy,
+} from './permission-policy.js';
 import { accumulateUsage } from './cli-usage-accumulator.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { mcpConfigPathFor, writeMcpConfig } from './managed-agent-store.js';
@@ -629,6 +635,27 @@ export class SubagentManager implements SubagentManagerContract {
         `[subagent] harness applied: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ${describeHarness(harness)}`,
       );
     }
+    // ticket 5851e435: 실행 권한의 단일 기준. Agent trust
+    // (`runtime_config.permission_mode`)가 board/workspace harness
+    // `permission_mode` 를 이긴다 — 그래서 trusted 에이전트는 보드가 어떤
+    // harness 값을 걸어도 최고 권한 플래그를 잃지 않는다. 정책은 partition
+    // **이전**의 raw harness 로 계산한다: 어댑터가 permission_mode 를
+    // harnessKeys() 에 선언했는지와 무관하게 등급 자체는 항상 결정돼야 하기
+    // 때문이다(harnessMode 는 같은 등급 안의 모드 문자열 선택에만 쓰인다).
+    const permission = resolveEffectivePermissionPolicy({
+      trust: ctx?.runtime_config?.permission_mode,
+      harnessMode: spec.harness?.permission_mode,
+    });
+    log(
+      `[subagent] permission policy: ticket=${spec.ticketId.slice(0, 8) || '-'} ` +
+        `cli=${adapter.cliType} ${describePermissionPolicy(permission)}`,
+    );
+    const permissionGap = describePermissionSupport(
+      adapter.cliType,
+      permission,
+      adapter.permissionCapabilities(),
+    );
+    if (permissionGap) log(`[subagent] permission capability: ${permissionGap}`);
     // Ticket-level effort preset (parallel channel to harness). Pick this
     // adapter's slice: claude → { model?, effort?, ultracode? }; codex /
     // antigravity → { model? }; everything else → null. slice.model is the
@@ -747,6 +774,7 @@ export class SubagentManager implements SubagentManagerContract {
         harness,
         effort: effortFlag,
         ultracode,
+        permission,
       }).descriptor;
 
       if (descriptor.needsMcpConfig) {
@@ -831,6 +859,7 @@ export class SubagentManager implements SubagentManagerContract {
             harness,
             effort: effortFlag,
             ultracode,
+            permission,
           }).descriptor,
         );
       }
@@ -892,6 +921,13 @@ export class SubagentManager implements SubagentManagerContract {
       // cmd.exe shim 래퍼가 AllocConsole() 을 호출해 콘솔이 잠깐 번쩍인다. Windows
       // 자식은 기본적으로 부모보다 오래 사니 detached 는 이득이 없다. POSIX 에서만
       // 켜서 자식을 새 프로세스 그룹에 두고 터미널 SIGHUP 으로부터 보호한다.
+      // ticket 5851e435: 실제로 스폰되는 argv 를 secret 없이 남긴다 — 권한
+      // 플래그가 정말 붙었는지 로그만으로 확인할 수 있어야 한다. 프롬프트
+      // 본문과 secret 모양 토큰은 describeSpawnArgv 가 접는다.
+      log(
+        `[subagent] spawn argv: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ` +
+          `bin=${resolvedBin} args=${describeSpawnArgv(descriptor.args)}`,
+      );
       const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',

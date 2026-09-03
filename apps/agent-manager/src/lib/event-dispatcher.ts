@@ -33,6 +33,10 @@ import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFo
 import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-context-contract.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import {
+  describePermissionPolicy,
+  resolveEffectivePermissionPolicy,
+} from './permission-policy.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
 import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
@@ -2616,6 +2620,16 @@ export class EventDispatcher {
     // also read harness.permission_mode.
     const harness = parseHarnessConfig(ev.harness_config);
 
+    // ticket 5851e435: 이 디스패치의 effective permission policy. Agent trust
+    // (`runtime_config.permission_mode`)가 board/workspace harness
+    // `permission_mode` 를 이긴다. spawn 사이트(SubagentManager /
+    // BaseSessionManager)는 같은 함수로 같은 값을 다시 계산하므로, 게이트 ·
+    // 컨텍스트 계약 · 실제 argv 가 한 규칙을 공유한다.
+    const permissionPolicy = resolveEffectivePermissionPolicy({
+      trust: agentContext?.runtime_config?.permission_mode,
+      harnessMode: harness?.permission_mode,
+    });
+
     // ticket 48aeab6e: CLI workspace-trust / provider-auth readiness. Unlike
     // the push-credential gate below (assignee-only — only that role pushes),
     // this applies to EVERY role: any role's CLI spawn can hit an unapproved
@@ -2641,7 +2655,15 @@ export class EventDispatcher {
     // 분기에서 별도로 처리된다.
     if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
       const adapter = createRuntimeCliAdapter(agentContext.cli);
-      const trustRequired = adapter.requiresWorkspaceTrust(harness);
+      // ticket 5851e435: trust 게이트도 spawn argv 와 **같은** effective
+      // policy 를 본다. 예전엔 harness `permission_mode` 하나만 보고 판단해서,
+      // `trusted` 로 표시된 에이전트가 보드 harness 값 때문에 대화형 trust
+      // 대화상자 게이트에 걸려 Pending 으로 떨어졌다.
+      log(
+        `[cli-permission] ticket=${ev.ticket_id} role=${ev.action || ''} ` +
+          `cli=${agentContext.cli} ${describePermissionPolicy(permissionPolicy)}`,
+      );
+      const trustRequired = adapter.requiresWorkspaceTrust(permissionPolicy);
       // ticket 152e3606 리뷰 반영: bypassPermissions(harness 미설정 또는
       // 명시적 bypassPermissions — trustRequired=false)일 때만 워크스페이스
       // trust를 미리 시딩한다. 이 디스패치 자체엔 trust가 무관하지만(스킵
@@ -2907,7 +2929,11 @@ export class EventDispatcher {
         defaultBranch: selectedRepo?.defaultBranch ?? worktreeProvision.repositoryContext?.defaultBranch ?? null,
         credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
         credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
-        sandbox: harness?.permission_mode ?? 'managed-default',
+        // ticket 5851e435 — 에이전트가 보는 값도 실제 적용된 effective policy 로
+        // 통일한다. harness 문자열만 노출하면 Agent trust 로 결정된 실제 등급이
+        // 프롬프트에서 보이지 않는다.
+        permissionMode: permissionPolicy.tier,
+        sandbox: permissionPolicy.tier,
         requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
         mcpServers: activeMcpServers,
         relatedTickets: ticket.related_tickets ?? [],
@@ -2934,7 +2960,7 @@ export class EventDispatcher {
         `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
         `repositoryRequired=${repositoryContextRequired} ` +
         `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
-        `permission=${harness?.permission_mode || 'managed-default'} ` +
+        `permission=${describePermissionPolicy(permissionPolicy)} ` +
         `mcp=${activeMcpServers.join(',') || 'none'} session=${sessionMode}`,
       );
       return ticket;
