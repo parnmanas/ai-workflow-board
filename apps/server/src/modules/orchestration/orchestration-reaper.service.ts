@@ -515,6 +515,20 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
    */
   private async remindAwaitingConfirm(now: Date): Promise<number> {
     if (this.confirmReminderAfterMs <= 0) return 0;
+    try {
+      return await this.remindAwaitingConfirmInner(now);
+    } catch (e: any) {
+      // **자기 실패를 자기 안에서 삼킨다.** `runOnce` 의 바깥 try/catch 는 스윕 전체를
+      // 감싸고 있어서, 마지막에 도는 이 스윕이 던지면 **앞서 이미 성공한 스윕들의
+      // 결과까지 0 으로 지워진다** — step 타임아웃과 nudge 는 실제로 일어났는데
+      // 보고만 사라지는, 사후에 재구성 불가능한 상태다. 알림은 리퍼의 부수 임무이므로
+      // 여기서 실패해도 본업의 회계를 망가뜨리면 안 된다(요구사항 6 과 같은 성격).
+      this.logService.warn('Orchestration', `confirm reminder sweep failed: ${e?.message || e}`);
+      return 0;
+    }
+  }
+
+  private async remindAwaitingConfirmInner(now: Date): Promise<number> {
     const nowMs = now.getTime();
     const cutoff = new Date(nowMs - this.confirmReminderAfterMs);
     const anchor = 'COALESCE(step.confirm_notified_at, step.dispatched_at)';
