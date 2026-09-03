@@ -1388,6 +1388,224 @@ test('reverse order (round 2): once the mention\'s one-shot exits (onExit fires)
   assert.equal(mgr.spawnCount, 1, 'the seat was released on the one-shot\'s exit, so the later trigger dispatched normally');
 });
 
+// ───── Part F round 4 (ticket c249a47e): 멘션 seat 가 컬럼 워크플로를 삼키면 안 된다 ─────
+//
+// Round 2 는 "멘션이 먼저 seat 를 잡으면 뒤따르는 column_move 는 억제된다" 를
+// 트윈 방지의 성공으로 봤다. 그 억제 자체는 옳지만 — 두 dispatch 는 **완료 계약이
+// 다르다**. 멘션 프롬프트(composeCommentMentionPrompt)에는 컬럼 워크플로 가이드가
+// 아예 없고, agent_trigger 만 `column_prompt` 를 나른다. 그래서 멘션 strand 는
+// 코멘트에 답하고 끝나며 그 컬럼의 종료 단계(예: Review→Merging 이동)는 아무도
+// 수행하지 않는다.
+//
+// ebee0637 실측(2026-09-03) 활동 로그 — 이 티켓의 재현 근거:
+//   08:14:40.690  mention_audit_started     role=reviewer  trigger_source=mention:65e8911e…
+//   08:14:45.325  trigger_emitted           role=reviewer  trigger_source=column_move
+//   08:14:45.598  dispatch_twin_suppressed  role=reviewer  trigger_source=column_move
+//   08:16:58.900  승인 코멘트만 남고 Review→Merging 이동 없음 → Review 에 정체
+//
+// 서버측 자가치유도 안 걸린다: 억제 ack 는 intent 상태를 바꾸지 않고, 멘션이 남긴
+// 코멘트가 forward progress 로 잡혀 DispatchReconciler 가 intent 를 progressed 로
+// 닫는다. TriggerLoopService 의 in-flight 재생 큐는 **서버 자신이 드롭한** 트리거만
+// 담으므로 매니저가 억제한 이 건은 들어가지 않는다. 결국 삼켜진 트리거의 존재를
+// 아직 아는 곳은 억제한 매니저뿐이라, 재생도 여기서 해야 한다.
+//
+// 비-공허성(non-vacuous): dispatch-preflight.ts 의 `#pendingColumnWorkflow` 포착을
+// 지우거나 event-dispatcher.ts 의 `noteHolder(…, 'mention')` 을 지우면 아래 첫
+// 테스트의 재생이 사라져 dispatched.length 가 1 이 아니라 0 에서 멈춘다.
+
+function reviewMentionEvJson(fields = {}) {
+  return mentionEvJson({ role_shortcut: 'reviewer', dispatch_role: 'reviewer', ...fields });
+}
+
+// Review 컬럼 이동이 리뷰어에게 쏜 column_move 트리거. `column_prompt` 가 곧
+// "이 컬럼의 완료 계약" 이고, `current_column_id` 는 아래 stale 판정의 기준점이다
+// (전역 fetch 목이 돌려주는 티켓의 current_column_id 도 'c1').
+function columnMoveEvJson(fields = {}) {
+  return evJson({
+    action: 'reviewer',
+    trigger_source: 'column_move',
+    field_changed: 'trig-column-move',
+    current_column_id: 'c1',
+    column_prompt: { template_id: 'tpl-review', name: 'Review', content: '리뷰 워크플로 가이드' },
+    ...fields,
+  });
+}
+
+// dispatchTrigger 는 실제 프로덕션 경로다 — 인자를 가로채 기록만 하고 그대로
+// 위임한다. spawnCount 는 "세션이 떴는가" 만 알려주지만, 이 스파이는 **어떤 신원의
+// 어떤 컬럼 계약이** 전달됐는지까지 단언하게 해준다.
+function spyDispatchTrigger(mgr) {
+  const seen = [];
+  const orig = mgr.dispatchTrigger.bind(mgr);
+  mgr.dispatchTrigger = (args) => {
+    seen.push(args);
+    return orig(args);
+  };
+  return seen;
+}
+
+test('round 4: 멘션이 먼저 seat 를 잡아 억제된 column_move 는 멘션 one-shot 종료 뒤 정확히 1회 재생된다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, tracker, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  // happens-before ① — 리뷰 요청 코멘트의 @[role:reviewer] 멘션이 먼저 도착해
+  // (ticket=t1, role=reviewer, agent=a1) seat 를 claim 하고 one-shot 을 띄운다.
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  assert.equal(calls.spawn.length, 1, '멘션이 seat 를 선점하고 mention-audit one-shot 을 띄운다');
+  const onExit = calls.spawn[0].onExit;
+  assert.equal(typeof onExit, 'function', 'seat 는 one-shot 의 전 생애 동안 onExit 로 유지된다');
+
+  // happens-before ② — 뒤이어 Review 컬럼 이동의 column_move 트리거가 같은 seat 로
+  // 도착한다. 억제 자체는 유지돼야 한다(멘션 세션과 경쟁하는 쌍둥이 금지).
+  await dispatcher.handleTrigger(columnMoveEvJson());
+  assert.equal(mgr.spawnCount, 0, '멘션이 seat 를 쥔 동안 컬럼 트리거는 쌍둥이를 띄우지 않는다');
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, '억제가 기록됐다');
+  assert.equal(dispatched.length, 0, '억제 시점에는 컬럼 워크플로가 아직 실행되지 않았다');
+  assert.equal(tracker.holderKind(KEY('t1', 'reviewer', 'a1')), 'mention', 'seat 홀더는 멘션으로 등록돼 있다');
+
+  // 멘션 one-shot 프로세스 종료 = seat 해제.
+  onExit();
+
+  const replayed = await waitFor(() => dispatched.length === 1, { timeoutMs: 4000 });
+  assert.equal(replayed, true, '삼켜졌던 column_move 가 seat 해제 뒤 재생됐다');
+  assert.equal(dispatched[0].triggerSource, 'column_move', '재생된 것은 컬럼 워크플로 트리거다');
+  assert.equal(
+    dispatched[0].triggerId,
+    'trig-column-move',
+    '홀더의 신원이 아니라 억제된 이벤트 자신의 신원으로 재생된다 (duplicate_trigger 회피)',
+  );
+  assert.equal(dispatched[0].role, 'reviewer');
+  assert.equal(
+    dispatched[0].columnPrompt?.content,
+    '리뷰 워크플로 가이드',
+    '컬럼의 완료 계약(워크플로 가이드)이 그대로 전달됐다 — 이것이 실행되지 않던 것이 이 티켓의 결함이다',
+  );
+  assert.equal(dispatched[0].forceRespawn, false, '멘션 one-shot 은 이미 종료됐으므로 강제 respawn 이 아니다');
+
+  await delay(200);
+  assert.equal(dispatched.length, 1, '정확히 1회 — 재생 루프 없음');
+  assert.equal(mgr.spawnCount, 1, '컬럼 워크플로 세션은 딱 한 번 떴다');
+});
+
+test('round 4: 한 번의 멘션 hold 동안 억제된 column_move 다발은 1회 재생으로 합쳐진다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, tracker, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+
+  // 서버 재푸시로 같은 컬럼 트리거가 3번 도착 — 전부 억제되고, 재생 슬롯은 hold 당
+  // 하나뿐이라 **첫 도착**의 신원만 남는다 (#pendingForce 와 동일한 합치기 규칙).
+  await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-cm-1' }));
+  await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-cm-2' }));
+  await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-cm-3' }));
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 3, '세 건 모두 억제됐다');
+
+  onExit();
+
+  const replayed = await waitFor(() => dispatched.length === 1, { timeoutMs: 4000 });
+  assert.equal(replayed, true, '재생이 일어났다');
+  assert.equal(dispatched[0].triggerId, 'trig-cm-1', '첫 도착의 신원으로 합쳐졌다');
+  await delay(200);
+  assert.equal(dispatched.length, 1, '세 건이 정확히 1회 재생으로 합쳐졌다 — 폭주 없음');
+});
+
+test('round 4: 멘션 strand 가 이미 컬럼을 옮겼다면 stale 한 column_move 는 재생하지 않는다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+
+  // 트리거가 발행된 컬럼('c-review')과 지금 티켓이 있는 컬럼(전역 fetch 목의 'c1')이
+  // 다르다 = 그 사이 누군가(멘션 strand 자신일 수 있다)가 이미 다음 단계로 옮겼다.
+  // 매니저는 새 컬럼의 column_prompt 를 만들어낼 수 없으므로, 옛 컬럼 가이드를
+  // 다시 쏘는 대신 재생을 건너뛴다 — 서버측 _replayTransitionTrigger 와 같은 규칙.
+  await dispatcher.handleTrigger(columnMoveEvJson({ current_column_id: 'c-review' }));
+  assert.equal(dispatched.length, 0);
+
+  onExit();
+
+  await delay(400);
+  assert.equal(dispatched.length, 0, '이미 이동한 티켓에 옛 컬럼 워크플로를 재생하지 않는다');
+  assert.equal(mgr.spawnCount, 0, '세션도 뜨지 않았다');
+});
+
+test('round 4: 멘션이 응답 중인 코멘트의 comment 팬아웃 트리거는 재생 대상이 아니다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, tracker, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+
+  // 같은 코멘트 하나가 comment_mention 과 comment 팬아웃 트리거를 동시에 낳는 것이
+  // 가장 흔한 경로다. 멘션 strand 의 턴 자체가 그 코멘트에 대한 응답이므로, 이걸
+  // 재생하면 role-멘션 코멘트마다 디스패치가 2배가 된다.
+  await dispatcher.handleTrigger(evJson({ action: 'reviewer', trigger_source: 'comment', field_changed: 'trig-comment' }));
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, '억제 자체는 그대로 기록된다');
+
+  onExit();
+
+  await delay(400);
+  assert.equal(dispatched.length, 0, 'comment 소스는 재생 대상이 아니다');
+  assert.equal(mgr.spawnCount, 0, '중복 디스패치가 생기지 않았다');
+});
+
+test('round 4: 홀더가 컬럼 트리거이면 억제된 쌍둥이 column_move 는 재생되지 않는다', async () => {
+  const gate = deferred();
+  const mgr = new RealTicketMgrStub(makeConfig(), { spawnGate: gate });
+  const { dispatcher, tracker } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  // 홀더가 이미 **같은 컬럼 워크플로**를 돌고 있는 진짜 쌍둥이 상황. 여기서 재생하면
+  // 같은 워크플로를 두 번 돌린다 — 홀더 종류로 갈라내는 이유가 바로 이것이다.
+  const pHolder = dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-holder' }));
+  await waitFor(() => mgr.spawnCount === 1, { timeoutMs: 2000 });
+  assert.equal(tracker.holderKind(KEY('t1', 'reviewer', 'a1')), 'trigger', 'seat 홀더는 컬럼 트리거다');
+
+  await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-twin' }));
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 1, '쌍둥이가 억제됐다');
+
+  gate.resolve();
+  await pHolder;
+
+  await delay(400);
+  assert.equal(dispatched.length, 1, '홀더의 1회 dispatch 뿐 — 억제된 쌍둥이는 재생되지 않는다');
+  assert.equal(dispatched[0].triggerId, 'trig-holder');
+  assert.equal(mgr.spawnCount, 1, '세션도 하나뿐이다');
+});
+
+test('round 4: 같은 hold 에서 force_respawn 과 column_move 가 모두 억제되면 재생은 force 하나뿐이다', async () => {
+  const mgr = new RealTicketMgrStub(makeConfig());
+  const { dispatcher, tracker, calls } = makeDispatcher({ ticketMgr: mgr });
+  const dispatched = spyDispatchTrigger(mgr);
+
+  await dispatcher.handleCommentMention(reviewMentionEvJson());
+  const onExit = calls.spawn[0].onExit;
+
+  await dispatcher.handleTrigger(columnMoveEvJson({ field_changed: 'trig-column-move' }));
+  await dispatcher.handleTrigger(
+    columnMoveEvJson({ force_respawn: true, field_changed: 'trig-force-F' }),
+  );
+  assert.equal(tracker.suppressedCount('inflight_dispatch'), 2, '둘 다 억제됐다');
+
+  onExit();
+
+  // 둘 다 column_prompt 를 나르는 agent_trigger 라 둘 다 재생하면 컬럼 워크플로가
+  // 두 번 돈다. force 가 이긴다 — 컬럼 워크플로도 함께 재실행하는 더 강한 동작이라,
+  // force 가 억제된 경우의 동작은 이 티켓 이전과 완전히 동일하게 유지된다.
+  const replayed = await waitFor(() => dispatched.length === 1, { timeoutMs: 4000 });
+  assert.equal(replayed, true, '재생이 일어났다');
+  assert.equal(dispatched[0].triggerId, 'trig-force-F', 'force 쪽 신원으로 재생됐다');
+  assert.equal(dispatched[0].forceRespawn, true);
+  await delay(200);
+  assert.equal(dispatched.length, 1, '두 건이 재생 1회로 수렴한다 — 워크플로 이중 실행 없음');
+});
+
 // ───── Part F round 3 (reviewer 지적, e90294e7): a long-running one-shot outlives the TTL/safety-valve ─────
 //
 // Round 2 holds the claimed seat in the SAME `_inflight` map the column-move
@@ -2035,6 +2253,7 @@ const SEAT_CELLS = [
     makeHarness: () => makeSeatHarness(true),
     claim: (h) => h.dispatcher.handleTrigger(evJson()),
     probe: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    holderKind: 'trigger',
     tryReserve: (h) => h.mgr.tryReserveDispatch('t1', 'assignee', 'a1'),
   },
   {
@@ -2042,6 +2261,7 @@ const SEAT_CELLS = [
     makeHarness: () => makeSeatHarness(false),
     claim: (h) => h.dispatcher.handleTrigger(evJson()),
     probe: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
+    holderKind: 'trigger',
     tryReserve: (h) =>
       h.tracker.tryAcquireFallback(KEY('t1', 'assignee', 'a1'), {
         ticketId: 't1',
@@ -2054,6 +2274,7 @@ const SEAT_CELLS = [
     makeHarness: () => makeSeatHarness(true),
     claim: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
     probe: (h) => h.dispatcher.handleTrigger(evJson()),
+    holderKind: 'mention',
     tryReserve: (h) => h.mgr.tryReserveDispatch('t1', 'assignee', 'a1'),
   },
   {
@@ -2062,6 +2283,7 @@ const SEAT_CELLS = [
     makeHarness: () => makeSeatHarness(false),
     claim: (h) => h.dispatcher.handleCommentMention(mentionEvJson()),
     probe: (h) => h.dispatcher.handleTrigger(evJson()),
+    holderKind: 'mention',
     tryReserve: (h) =>
       h.tracker.tryAcquireFallback(KEY('t1', 'assignee', 'a1'), {
         ticketId: 't1',
@@ -2189,6 +2411,49 @@ for (const cell of SEAT_CELLS) {
       replayed,
       true,
       'the suppressed force_respawn replayed exactly once after the holder released its seat',
+    );
+  });
+
+  // ticket c249a47e: 패리티 테이블의 5번째 단언 — 억제된 **컬럼 워크플로**
+  // 트리거는 홀더가 MENTION 일 때만 seat 해제 후 재생돼야 한다. 홀더가 컬럼
+  // 트리거이면 그 홀더가 이미 같은 워크플로를 돌고 있으므로 재생은 이중 실행이
+  // 된다. 4칸 모두에 같은 probe(handleTrigger + column_move)를 쏘고 기대값만
+  // 홀더 종류로 가른다 — authoritative/fallback 두 모드 각각에서 홀더 판정이
+  // 살아있는지 확인하는 것이 요점이다(이 버그 계열은 한 칸씩 재발한다:
+  // 13160d20 → fdf6714e → f0d1da19 → 6de97a41 → 3b8f24ec).
+  //
+  // 비-공허성: noteHolder 등록을 지우면 홀더 종류가 항상 null 이 되어 3/4칸의
+  // 재생이 사라지고(2 대신 1), 반대로 홀더 종류 조건 없이 무조건 포착하도록
+  // 바꾸면 1/2칸이 재생돼(1 대신 2) 같은 워크플로를 두 번 돌린다.
+  test(`[8c15e7f7 seat parity] ${cell.label}: a column_move trigger suppressed while this seat is held replays on release ONLY for a mention holder`, async () => {
+    const h = cell.makeHarness();
+    await cell.claim(h);
+    assert.equal(h.calls.spawn.length, 1);
+    const onExit = h.calls.spawn[0].onExit;
+    assert.equal(typeof onExit, 'function');
+    assert.equal(
+      h.tracker.holderKind(KEY('t1', 'assignee', 'a1')),
+      cell.holderKind,
+      'seat 홀더 종류가 이 칸의 dispatch 경로대로 등록됐다',
+    );
+
+    await h.dispatcher.handleTrigger(
+      evJson({ trigger_source: 'column_move', field_changed: 'trig-column-move', current_column_id: 'c1' }),
+    );
+    assert.equal(h.calls.spawn.length, 1, 'seat 를 쥔 동안에는 홀더 종류와 무관하게 쌍둥이를 띄우지 않는다');
+    assert.equal(h.tracker.suppressedCount('inflight_dispatch'), 1, 'the suppression was recorded');
+
+    onExit();
+
+    const expected = cell.holderKind === 'mention' ? 2 : 1;
+    await waitFor(() => h.calls.spawn.length === expected, { timeoutMs: 4000 });
+    await delay(250);
+    assert.equal(
+      h.calls.spawn.length,
+      expected,
+      cell.holderKind === 'mention'
+        ? '멘션 홀더가 삼킨 컬럼 워크플로는 seat 해제 뒤 정확히 1회 재생된다'
+        : '컬럼 트리거 홀더가 이미 워크플로를 돌았으므로 억제된 쌍둥이는 재생되지 않는다',
     );
   });
 }

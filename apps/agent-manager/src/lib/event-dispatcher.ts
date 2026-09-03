@@ -228,6 +228,26 @@ const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'max']);
  *  dropped. */
 const LEGACY_EFFORT_ALIASES: Record<string, EffortLevel> = { xhigh: 'max' };
 
+/** `trigger_source`s whose work a MENTION holder either already does or that
+ *  re-fire on their own, so an `agent_trigger` suppressed against a mention seat
+ *  needs no release-time replay (ticket c249a47e).
+ *
+ *  A DENYLIST on purpose, not an allowlist: EVERY `agent_trigger` carries the
+ *  column workflow guide (`column_prompt`), so losing one to a mention seat
+ *  strands the ticket, while an unnecessary replay only costs one extra
+ *  dispatch. Defaulting a NEW/unknown source to "replay" therefore fails in the
+ *  cheap direction — an allowlist would silently go stale the next time the
+ *  server adds a source and re-open this exact bug.
+ *
+ *   - `comment`  — the mention holder was woken BY a comment and its whole turn
+ *                  is the response to it. The same comment routinely produces
+ *                  both a `comment_mention` and a `comment` fan-out trigger for
+ *                  the identical (ticket, role, agent) seat, so replaying would
+ *                  double-dispatch on the most common path of all.
+ *   - `supervisor` — the TicketSupervisor re-pushes on its own ~60s cadence, so
+ *                  the trigger is not lost; replaying only adds a spawn. */
+const MENTION_HOLDER_SERVES_TRIGGER_SOURCES = new Set(['comment', 'supervisor']);
+
 export const PI_TICKET_DISPATCH_BLOCK_REASON = 'pi_ticket_mcp_unsupported';
 export const PI_TICKET_DISPATCH_BLOCK_COMMENT =
   '⚠️ **PI 티켓 디스패치 차단** — PI CLI는 현재 MCP를 지원하지 않아 AWB의 ' +
@@ -822,8 +842,10 @@ export interface CreateDispatchSeatArgs {
    *  Required when kind==='fallback'. */
   inflightKey?: string | null;
   /** Extra step run AFTER the core release — e.g. the shared
-   *  #replayPendingForce force-respawn replay (ticket f0d1da19, shared with
-   *  handleCommentMention's mentionSeat since ticket 3b8f24ec). */
+   *  #replaySuppressedDispatch, which replays a single trigger suppressed during
+   *  the hold: a force-respawn (ticket f0d1da19) or a column-workflow trigger
+   *  swallowed by a mention seat (ticket c249a47e). Shared with
+   *  handleCommentMention's mentionSeat since ticket 3b8f24ec. */
   onReleased?: () => void;
 }
 
@@ -2053,29 +2075,101 @@ export class EventDispatcher {
    *  (the exact regression ticket f0d1da19 fixed). Always re-enters
    *  handleTrigger — a mention holder never registers a trigger identity with
    *  dispatchTrigger's own dedup set, so there is nothing here for the replay
-   *  to collide with. */
-  #replayPendingForce(inflightKey: string | null, ticketId: string, role: string): void {
+   *  to collide with.
+   *
+   *  ticket c249a47e widens this to a SECOND replay case with the identical
+   *  contract: a **column workflow trigger** suppressed while a MENTION held the
+   *  seat. The mention's prompt (`composeCommentMentionPrompt`) carries no column
+   *  guide, so once it answers the comment and exits, nobody ever runs the
+   *  destination column's workflow — the ticket sits on Review with an approval
+   *  comment and no Review→Merging move, and neither the server's in-flight
+   *  replay queue (it only queues triggers the SERVER dropped) nor
+   *  DispatchReconciler (the mention's comment reads as forward progress, closing
+   *  the intent as `progressed`) re-derives it. Replaying it here is the only
+   *  place that still knows the swallowed trigger existed.
+   *
+   *  AT MOST ONE replay per release: both candidates are `agent_trigger`s
+   *  carrying a `column_prompt`, so firing both would run the column workflow
+   *  twice. A pending force wins — it is strictly the stronger action (it also
+   *  re-enters the column workflow, just with a fresh session), which keeps this
+   *  path byte-identical to pre-c249a47e behaviour whenever a force was
+   *  suppressed. */
+  #replaySuppressedDispatch(inflightKey: string | null, ticketId: string, role: string): void {
     if (!inflightKey) return;
-    const { pendingForceRaw } = this.#inflightDispatch.onRelease(inflightKey);
-    if (!pendingForceRaw) return;
-    log(
-      `[dispatch] replaying suppressed force_respawn after holder released: ` +
-        `ticket=${ticketId.slice(0, 8)} role=${role || '_'}`,
-    );
-    let forcedRaw: string | null = null;
-    try {
-      forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
-    } catch {
-      forcedRaw = null;
-    }
-    if (forcedRaw) {
-      // Fire-and-forget so we don't extend the caller's finally/onExit; the
-      // replay re-enters handleTrigger cleanly (re-acquires the slot,
-      // force-respawns fresh).
-      this.handleTrigger(forcedRaw).catch((err: any) =>
-        log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
+    const { pendingForceRaw, pendingColumnWorkflowRaw } = this.#inflightDispatch.onRelease(inflightKey);
+    if (pendingForceRaw) {
+      log(
+        `[dispatch] replaying suppressed force_respawn after holder released: ` +
+          `ticket=${ticketId.slice(0, 8)} role=${role || '_'}`,
       );
+      let forcedRaw: string | null = null;
+      try {
+        forcedRaw = JSON.stringify({ ...JSON.parse(pendingForceRaw), force_respawn: true });
+      } catch {
+        forcedRaw = null;
+      }
+      if (forcedRaw) {
+        // Fire-and-forget so we don't extend the caller's finally/onExit; the
+        // replay re-enters handleTrigger cleanly (re-acquires the slot,
+        // force-respawns fresh).
+        this.handleTrigger(forcedRaw).catch((err: any) =>
+          log(`[dispatch] force_respawn replay failed: ${err?.message ?? err}`),
+        );
+      }
+      return;
     }
+    if (pendingColumnWorkflowRaw) {
+      void this.#replayColumnWorkflowTrigger(pendingColumnWorkflowRaw, ticketId, role);
+    }
+  }
+
+  /** Replay the column-workflow trigger a mention seat swallowed (ticket
+   *  c249a47e). Split from the force path because it needs one extra check the
+   *  force path deliberately does not do: the trigger is replayed ONLY while the
+   *  ticket is still sitting on the column the server emitted it for.
+   *
+   *  A mention strand CAN legitimately complete the column's work itself before
+   *  it exits (it is the same role holder, just with a different prompt). Then
+   *  the swallowed trigger is stale, and replaying it would dispatch the OLD
+   *  column's workflow guide onto a ticket that has already advanced — the
+   *  manager can't re-derive a fresh `column_prompt`, so the only safe move is
+   *  not to replay. This mirrors the server-side recovery's own rule
+   *  (`TriggerLoopService._replayTransitionTrigger` re-resolves the CURRENT
+   *  column before re-emitting, and skips a ticket that already moved on).
+   *
+   *  Fails toward replaying: an event with no column snapshot, or a ticket fetch
+   *  that comes back empty, cannot prove staleness — and a needless dispatch
+   *  costs one spawn while a skipped one strands the ticket, which is the whole
+   *  bug. Re-enters with the event EXACTLY as the server emitted it (no
+   *  `force_respawn`): the mention's one-shot has already exited by the time its
+   *  seat releases, so there is no live session that needs replacing. */
+  async #replayColumnWorkflowTrigger(raw: string, ticketId: string, role: string): Promise<void> {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const emittedColumnId = String(parsed?.current_column_id || '');
+    if (emittedColumnId) {
+      const ticket = await fetchTicketContext(this.#config, ticketId);
+      const currentColumnId = String(ticket?.current_column_id || '');
+      if (currentColumnId && currentColumnId !== emittedColumnId) {
+        log(
+          `[dispatch] suppressed column_workflow replay skipped — ticket already moved on: ` +
+            `ticket=${ticketId.slice(0, 8)} role=${role || '_'} ` +
+            `emitted_column=${emittedColumnId.slice(0, 8)} current_column=${currentColumnId.slice(0, 8)}`,
+        );
+        return;
+      }
+    }
+    log(
+      `[dispatch] replaying suppressed column_workflow trigger after mention seat released: ` +
+        `ticket=${ticketId.slice(0, 8)} role=${role || '_'} source=${String(parsed?.trigger_source || '_')}`,
+    );
+    await this.handleTrigger(raw).catch((err: any) =>
+      log(`[dispatch] column_workflow replay failed: ${err?.message ?? err}`),
+    );
   }
 
   async handleTrigger(
@@ -2228,7 +2322,15 @@ export class EventDispatcher {
         const { surface } = this.#inflightDispatch.recordSuppression(
           'inflight_dispatch',
           inflightKey,
-          { force: isForce, raw },
+          {
+            force: isForce,
+            raw,
+            // ticket c249a47e: this trigger's column workflow is owed a replay if
+            // the seat holder can't be running it. The tracker applies the
+            // holder-kind half of that test (mention only); this flag is the
+            // source half — see MENTION_HOLDER_SERVES_TRIGGER_SOURCES.
+            columnWorkflow: !MENTION_HOLDER_SERVES_TRIGGER_SOURCES.has(String(ev.trigger_source || '')),
+          },
         );
         this.#ackDispatch(ev, 'suppressed', 'inflight_dispatch');
         log(
@@ -2301,14 +2403,22 @@ export class EventDispatcher {
     // We placed a reservation to release only when live===false (a fresh spawn);
     // a live reuse placed nothing.
     const reservedFresh = !!reservation && reservation.acquired && !reservation.live;
+    // ticket c249a47e: record WHO holds this seat, so a trigger suppressed
+    // against it can tell "a twin of the column workflow already running"
+    // (nothing owed) from "a mention that will never run it" (replay owed).
+    // Only on a fresh reservation — a live-session REUSE places nothing to
+    // release, and its follow-up turn lands in the session the ORIGINAL trigger
+    // already started, so it must not overwrite that holder's kind.
+    if (inflightKey && reservedFresh) this.#inflightDispatch.noteHolder(inflightKey, 'trigger');
     // ticket f0d1da19: replay a single suppressed force-respawn once this
     // dispatch's hold on `inflightKey` ends — shared between the finally below
     // and (via the seat's `onReleased` hook, ticket 77b28217) the spawned
     // process's onExit hook, so whichever of them ends up firing the release
-    // runs this exactly once. Logic lives in #replayPendingForce (ticket
-    // 3b8f24ec), shared with handleCommentMention's mentionSeat.
-    const replayPendingForce = (): void =>
-      this.#replayPendingForce(inflightKey, ev.ticket_id, ev.action || '');
+    // runs this exactly once. Logic lives in #replaySuppressedDispatch (ticket
+    // 3b8f24ec, widened to column-workflow replays by ticket c249a47e), shared
+    // with handleCommentMention's mentionSeat.
+    const replaySuppressedDispatch = (): void =>
+      this.#replaySuppressedDispatch(inflightKey, ev.ticket_id, ev.action || '');
     // ticket f0d1da19: handleCommentMention holds its claimed seat via
     // SubagentSpawnArgs.onExit for the one-shot's FULL lifetime (ticket
     // e90294e7 round 2) — but handleTrigger's OWN fallback/authoritative
@@ -2341,7 +2451,7 @@ export class EventDispatcher {
           tsm: this.#ticketSessionManager,
           inflightDispatch: this.#inflightDispatch,
           inflightKey,
-          onReleased: replayPendingForce,
+          onReleased: replaySuppressedDispatch,
         })
       : null;
     // Release handle for THIS reservation, shared between the finally below
@@ -2355,7 +2465,7 @@ export class EventDispatcher {
       if (triggerSeat) {
         triggerSeat.release();
       } else {
-        replayPendingForce();
+        replaySuppressedDispatch();
       }
     };
     try {
@@ -3896,8 +4006,15 @@ export class EventDispatcher {
       // happens to consume it (mentionSeat previously omitted createDispatchSeat's
       // `onReleased` hook entirely).
       const mentionInflightKey = InflightDispatchTracker.key(ticketId, mention.role_shortcut, targetAgentId);
-      const replayPendingForceForMention = (): void =>
-        this.#replayPendingForce(mentionInflightKey, ticketId, mention.role_shortcut);
+      const replaySuppressedDispatchForMention = (): void =>
+        this.#replaySuppressedDispatch(mentionInflightKey, ticketId, mention.role_shortcut);
+      // ticket c249a47e: mark this seat as MENTION-held the moment we win it, so
+      // a column-workflow trigger suppressed against it is captured for a
+      // release-time replay. Must run before the spawn below (and before the
+      // await it hides), because the suppressed trigger can arrive at any point
+      // during the one-shot's whole lifetime — the very race this ticket fixes
+      // had the column trigger land 4.6s after the mention claimed the seat.
+      const claimMentionSeat = (): void => this.#inflightDispatch.noteHolder(mentionInflightKey, 'mention');
       const suppressForSeat = (): void => {
         const mentionTrigger = String(ev.dispatch_trigger_id || '');
         const mentionRole = String(ev.dispatch_role || '');
@@ -3958,6 +4075,7 @@ export class EventDispatcher {
         }
         // Fresh reservation — WE now own this seat until the one-shot spawned
         // below exits (or we bail out before spawning it).
+        claimMentionSeat();
         mentionSeat = createDispatchSeat({
           kind: 'authoritative',
           ticketId,
@@ -3966,7 +4084,7 @@ export class EventDispatcher {
           nonce: reservation.nonce,
           tsm,
           inflightDispatch: this.#inflightDispatch,
-          onReleased: replayPendingForceForMention,
+          onReleased: replaySuppressedDispatchForMention,
         });
       } else if (
         persistentTicket &&
@@ -4011,6 +4129,7 @@ export class EventDispatcher {
               `agent=${targetAgentId.slice(0, 8) || '_'}`,
           );
         }
+        claimMentionSeat();
         mentionSeat = createDispatchSeat({
           kind: 'fallback',
           ticketId,
@@ -4020,7 +4139,7 @@ export class EventDispatcher {
           tsm,
           inflightDispatch: this.#inflightDispatch,
           inflightKey: mentionInflightKey,
-          onReleased: replayPendingForceForMention,
+          onReleased: replaySuppressedDispatchForMention,
         });
       }
     }

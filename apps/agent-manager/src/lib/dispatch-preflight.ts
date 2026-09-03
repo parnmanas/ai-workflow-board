@@ -728,6 +728,21 @@ export interface InflightDispatchMeta {
  *  future second suppression cause slots in without churn). */
 export type DispatchSuppressReason = 'inflight_dispatch';
 
+/** 하나의 (ticket, role, agent) seat 를 쥔 dispatch 의 성격 (ticket c249a47e).
+ *  두 dispatch 경로가 같은 seat 를 공유하지만 **완료 계약이 다르다**:
+ *
+ *   - 'trigger' — `agent_trigger`. `dispatchTrigger({ …, columnPrompt })` 로
+ *                 현재 컬럼의 워크플로 가이드를 실어 보낸다 → 그 컬럼의
+ *                 완료 계약(예: Review 워크플로의 Review→Merging 전이)을 수행한다.
+ *   - 'mention' — `comment_mention`. `composeCommentMentionPrompt()` 는 컬럼
+ *                 가이드를 전혀 싣지 않는다 → "이 코멘트를 읽고 답하라" 가 전부다.
+ *
+ *  이 구분이 있어야 "멘션이 seat 를 선점한 사이 억제된 컬럼 트리거"를
+ *  "이미 같은 컬럼 워크플로를 돌고 있는 트리거에 억제된 쌍둥이"와 갈라낼 수
+ *  있다. 전자는 아무도 컬럼 워크플로를 수행하지 않으므로 재생해야 하고,
+ *  후자는 재생하면 같은 워크플로를 두 번 돌린다. */
+export type DispatchHolderKind = 'trigger' | 'mention';
+
 /** Provision-spanning single-flight coordinator for ticket triggers (ticket 3d180f85).
  *
  *  The twin bug it closes: `EventDispatcher.handleTrigger` awaits worktree
@@ -786,6 +801,17 @@ export class InflightDispatchTracker {
    *  the FIRST arrival (every force in the storm means the same "fresh session"
    *  ask, so one replay satisfies them all). */
   #pendingForce = new Map<string, string>();
+  /** 현재 seat 를 쥔 dispatch 의 성격 (ticket c249a47e). 어느 레지스트리가
+   *  예약을 들고 있든(authoritative `_inflight` / process-local fallback) 이
+   *  판단은 backend-agnostic 한 in-process 부기라, `#surfaced` / `#pendingForce`
+   *  와 같은 자리에 둔다. seat 를 실제로 잡은 쪽이 `noteHolder` 로 등록하고
+   *  `onRelease` 가 지운다. */
+  #holders = new Map<string, DispatchHolderKind>();
+  /** 멘션이 seat 를 쥔 동안 억제된 **컬럼 워크플로 트리거**의 RAW payload
+   *  (ticket c249a47e). `#pendingForce` 와 같은 "홀더가 놓으면 1회 재생" 계약이고,
+   *  같은 이유로 억제된 이벤트 **자신의** raw 를 담는다(홀더의 신원을 재생하면
+   *  `duplicate_trigger` 로 드롭된다). 한 hold 당 한 건만 — 첫 도착이 이긴다. */
+  #pendingColumnWorkflow = new Map<string, string>();
 
   /** Single-flight key. Mirrors TicketSessionManager.#makeKey / the
    *  SubagentManager (ticketId, role, agentId) dedup so the guard keys on the
@@ -882,6 +908,23 @@ export class InflightDispatchTracker {
     return this.#fallback.has(key);
   }
 
+  /** Register the KIND of dispatch that just won `key` (ticket c249a47e). Called
+   *  by both seat-claiming paths right after their reservation lands — by
+   *  `handleTrigger` on a fresh (non-live-reuse) reservation, and by
+   *  `handleCommentMention` on its `mentionSeat`. Idempotent overwrite: the seat
+   *  model itself is last-writer-wins, and only one dispatch can hold the key at
+   *  a time. Cleared by {@link onRelease}. */
+  noteHolder(key: string, kind: DispatchHolderKind): void {
+    this.#holders.set(key, kind);
+  }
+
+  /** Kind of the dispatch currently holding `key`, or null when unknown — no
+   *  reservation, or a live-session REUSE (which places no reservation and so
+   *  registers no holder). Test / observability. */
+  holderKind(key: string): DispatchHolderKind | null {
+    return this.#holders.get(key) ?? null;
+  }
+
   /** Record a suppressed twin trigger: bump the reason metric, capture a
    *  suppressed force-respawn's own payload to replay, and decide whether to
    *  surface an activity (throttled to one per hold-burst). Called for BOTH the
@@ -889,15 +932,32 @@ export class InflightDispatchTracker {
    *  backend-agnostic. `opts.raw` is the suppressed event's raw JSON (the caller
    *  passes the trigger it is dropping); it is stored ONLY for force triggers and
    *  ONLY for the first of a burst, so the replay re-enters with the force
-   *  event's real, un-deduped identity rather than the holder's. */
+   *  event's real, un-deduped identity rather than the holder's.
+   *
+   *  ticket c249a47e — `opts.columnWorkflow`: the suppressed trigger carries a
+   *  column workflow contract the CURRENT holder may not be running. It is
+   *  captured for a release-time replay ONLY when the holder is a `'mention'`:
+   *  a mention's prompt has no column guide at all, so nothing else will ever
+   *  run that column's workflow and the transition is lost for good (the ticket's
+   *  "승인 코멘트만 남고 Review→Merging 이동은 없음" stall). Against a `'trigger'`
+   *  holder the same suppression is a genuine twin — that holder IS running the
+   *  column workflow — so nothing is captured, exactly as before. */
   recordSuppression(
     reason: DispatchSuppressReason,
     key: string,
-    opts: { force: boolean; raw?: string },
+    opts: { force: boolean; raw?: string; columnWorkflow?: boolean },
   ): { surface: boolean } {
     this.#suppressCounts.set(reason, (this.#suppressCounts.get(reason) ?? 0) + 1);
     if (opts.force && opts.raw !== undefined && !this.#pendingForce.has(key)) {
       this.#pendingForce.set(key, opts.raw);
+    }
+    if (
+      opts.columnWorkflow &&
+      opts.raw !== undefined &&
+      this.#holders.get(key) === 'mention' &&
+      !this.#pendingColumnWorkflow.has(key)
+    ) {
+      this.#pendingColumnWorkflow.set(key, opts.raw);
     }
     const surface = !this.#surfaced.has(key);
     this.#surfaced.add(key);
@@ -905,14 +965,23 @@ export class InflightDispatchTracker {
   }
 
   /** Settle the holder's release: re-arm activity surfacing for the next storm
-   *  on this key, and hand back (clearing) the RAW payload of any suppressed
-   *  force-respawn so the caller replays that exact event once. `null` when no
-   *  force was suppressed during the hold. Idempotent per key. */
-  onRelease(key: string): { pendingForceRaw: string | null } {
+   *  on this key, forget the holder kind, and hand back (clearing) the RAW
+   *  payload of anything suppressed during the hold that owes a single replay —
+   *  a `force_respawn` (`pendingForceRaw`) and/or a column workflow trigger
+   *  swallowed by a mention holder (`pendingColumnWorkflowRaw`, ticket c249a47e).
+   *  Either is `null` when nothing of that kind was suppressed. Idempotent per
+   *  key. The caller replays AT MOST ONE of the two (see
+   *  `EventDispatcher.#replaySuppressedDispatch`) — both are `agent_trigger`s
+   *  carrying a column prompt, so replaying both would run the column workflow
+   *  twice. */
+  onRelease(key: string): { pendingForceRaw: string | null; pendingColumnWorkflowRaw: string | null } {
     this.#surfaced.delete(key);
+    this.#holders.delete(key);
     const pendingForceRaw = this.#pendingForce.get(key) ?? null;
     this.#pendingForce.delete(key);
-    return { pendingForceRaw };
+    const pendingColumnWorkflowRaw = this.#pendingColumnWorkflow.get(key) ?? null;
+    this.#pendingColumnWorkflow.delete(key);
+    return { pendingForceRaw, pendingColumnWorkflowRaw };
   }
 
   /** Suppression-reason metric. With no arg, the total across reasons. */
