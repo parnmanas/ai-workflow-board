@@ -1323,9 +1323,10 @@ test('runSelfUpdate: provenance 가 거부하면 새 버전을 설치조차 하�
 
 // ─── 12. Windows 복귀도 provenance 게이트를 통과해야 한다 (리뷰 라운드 2) ────
 // 헬퍼는 부모가 죽은 뒤에 돌아 레지스트리 판정을 스스로 할 수 없다. 그래서
-// 부모가 **헬퍼를 띄우기 전에** 이전 버전의 provenance 를 검증하고, 통과한
-// 정확한 버전만 넘긴다. 검증에 실패하면 빈 spec 이 넘어가 복귀 자체가 없다 —
-// 증명 없는 이전 버전을 설치하는 것은 정책 E 위반이기 때문이다.
+// 부모가 **설치를 개시하기 전에** 이전 버전의 provenance 를 검증하고, 통과한
+// 정확한 버전만 넘긴다. 검증에 실패하면 빈 spec 이 넘어가고, 호출자는 그것을
+// 받으면 업데이트 개시 자체를 거부한다 — 증명 없는 이전 버전을 설치하는 것도
+// (정책 E 위반), 되돌릴 수 없는 설치를 강행하는 것도(완료 기준 1·7) 안 된다.
 
 test('resolveVerifiedRollbackSpec: 검증에 통과하면 검증된 정확 버전을 넘긴다', async () => {
   const seen = [];
@@ -1341,7 +1342,7 @@ test('resolveVerifiedRollbackSpec: 검증에 통과하면 검증된 정확 버�
   assert.deepEqual(seen, ['1.0.0'], '되돌릴 버전 자체를 조회해야 한다(활성 채널이 아니라)');
 });
 
-test('resolveVerifiedRollbackSpec: 거부되면 빈 spec 을 넘겨 복귀를 포기한다', async () => {
+test('resolveVerifiedRollbackSpec: 거부되면 빈 spec — 호출자가 업데이트 개시를 거부하는 신호다', async () => {
   const lines = [];
   const spec = await resolveVerifiedRollbackSpec({
     previousVersion: '1.0.0',
@@ -1355,8 +1356,14 @@ test('resolveVerifiedRollbackSpec: 거부되면 빈 spec 을 넘겨 복귀를 �
   });
   assert.equal(spec, '', '증명 없는 이전 버전을 넘기면 헬퍼가 그대로 설치해버린다');
   assert.ok(
-    lines.some((l) => l.startsWith('Self-update: ') && /rollback to v1\.0\.0 is NOT available/.test(l)),
+    lines.some((l) => l.startsWith('Self-update: ') && /no verified rollback target for v1\.0\.0/.test(l)),
     `사유가 Self-update: 접두사로 남아야 한다: ${JSON.stringify(lines)}`,
+  );
+  // 이 함수는 판정만 한다 — 결말("설치한다"/"거부한다")을 여기서 단정하면 호출자의
+  // 실제 동작과 어긋난 문장이 운영 로그에 남는다.
+  assert.ok(
+    !lines.some((l) => /Installing anyway|will need manual recovery/.test(l)),
+    `거부 판정에 "그래도 설치한다"는 문구가 남으면 안 된다: ${JSON.stringify(lines)}`,
   );
 });
 
@@ -1427,6 +1434,16 @@ test('runSelfUpdate: 검증된 복귀 대상이 없으면 설치를 시작하지
   assert.equal(readBootVerificationRecord(dir), null);
   assert.equal(readUpdatePin(dir), null);
   assert.ok(lines.some((l) => l.startsWith('Self-update: ') && /refused/.test(l)));
+  // 완료 기준 8 — 운영 로그가 실제 동작과 일치해야 한다. 거부했는데 "그래도
+  // 설치한다"가 함께 남으면 사고 대응에서 정반대로 읽힌다.
+  assert.ok(
+    !lines.some((l) => /Installing anyway|will need manual recovery/.test(l)),
+    `거부 경로에 상반된 문구가 남았다: ${JSON.stringify(lines.filter((l) => /Self-update:/.test(l)))}`,
+  );
+  assert.ok(
+    lines.some((l) => /no verified rollback target for v/.test(l)),
+    '왜 거부됐는지(복귀 대상 미확보)가 로그에 남아야 한다',
+  );
   // 이 단언이 실행된다는 사실 자체가 기존 프로세스 생존의 증거다(완료 기준 7).
   assert.equal(typeof process.pid, 'number');
 });

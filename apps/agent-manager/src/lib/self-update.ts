@@ -1546,17 +1546,19 @@ function resolvePorts(opts: SelfUpdateOpts, out: (msg: string) => void): Require
 }
 
 /**
- * Windows 헬퍼에 넘길 **검증된** 복귀 spec (리뷰 라운드 2 지적).
+ * 설치를 개시하기 전에 확보해야 하는 **검증된** 복귀 spec.
  *
- * 헬퍼는 부모가 종료한 뒤에 돌기 때문에 스스로 provenance 를 확인할 수 없다 —
- * 확인하려면 SLSA 판정기를 의존성 없는 템플릿 문자열 안에 통째로 복제해야 하고,
- * 그러면 게이트가 두 곳에 생겨 한쪽만 틀어질 수 있다. 그래서 판정은 **부모가
- * 헬퍼를 띄우기 전에** 하고, 검증에 통과한 정확한 버전만 넘긴다.
+ * 복귀 대상에도 provenance 게이트를 그대로 적용한다(정책 E — 이전 버전이라는
+ * 이유의 예외는 없다). 판정을 여기서 미리 하는 이유는 Windows 헬퍼가 부모 종료
+ * 뒤에 돌아 스스로 레지스트리 판정을 할 수 없기 때문이다 — 헬퍼 안에서 하려면
+ * SLSA 판정기를 의존성 없는 템플릿 문자열에 복제해야 하고, 그러면 게이트가 두
+ * 곳에 생겨 한쪽만 틀어질 수 있다.
  *
- * 검증에 실패하면 빈 문자열을 돌려 헬퍼가 복귀를 아예 시도하지 않게 한다 —
- * 정책 E 는 "되돌린 버전이라는 이유로 예외를 두지 않는다"이므로, 증명 없는
- * 이전 버전을 설치하는 것보다 복귀를 포기하는 쪽이 정책에 맞는 실패 방향이다.
- * (그 경우에도 헬퍼의 무조건 재기동은 그대로라 매니저가 사라지지는 않는다.)
+ * **계약**: 빈 문자열은 "검증된 복귀 대상을 확보하지 못했다"는 뜻이고, 호출자는
+ * 그것을 받으면 **업데이트 개시 자체를 거부한다.** 되돌릴 수 없는 설치를
+ * 강행하지 않는다는 뜻이다 — 이 함수는 판정만 하고, 거부는 호출자가 로그로
+ * 남긴다. 유일한 예외는 명시적 opt-in(AWB_SELF_UPDATE_ALLOW_UNVERIFIED)이며,
+ * 그때는 미검증 버전이라도 spec 을 돌려준다.
  */
 export async function resolveVerifiedRollbackSpec(input: {
   previousVersion: string;
@@ -1578,9 +1580,11 @@ export async function resolveVerifiedRollbackSpec(input: {
     );
     return `${MANAGER_PACKAGE_NAME}@${previousVersion}`;
   }
+  // 이 함수는 판정만 한다 — "그래서 어떻게 할 것인가"는 호출자가 정하고 로그로
+  // 남긴다. 여기서 결말까지 적으면(예전의 "Installing anyway") 호출자가 거부로
+  // 바뀌었을 때 운영 로그에 정반대 문장이 나란히 남는다.
   out(
-    `Self-update: rollback to v${previousVersion} is NOT available for this update — ` +
-      `${verdict.reason}. Installing anyway; a bad build will need manual recovery.`,
+    `Self-update: no verified rollback target for v${previousVersion} — ${verdict.reason}`,
   );
   return '';
 }
