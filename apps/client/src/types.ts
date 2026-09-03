@@ -2026,6 +2026,90 @@ export interface AgentLiveSession {
   working_dir?: string;
 }
 
+/** 매니저가 보고한 argv 토큰 하나와 그 출처 (ticket 20fff298).
+ *  `value` 는 매니저가 이미 마스킹한 표시용 문자열이다 — 원문이 아니다. */
+export interface LaunchArgEntry {
+  value: string;
+  /** `harness`/`effort`/`prompt` 는 **디스패치 시점** 입력이라 추정(`modes`)에는
+   *  나타날 수 없고 `last_spawn` 의 실제 argv 에서만 귀속된다 (리뷰 3R). */
+  source:
+    | 'adapter' | 'model' | 'permission' | 'mcp' | 'session'
+    | 'harness' | 'effort' | 'prompt'
+    | 'runtime_profile' | 'unattributed';
+  /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
+  placeholder?: boolean;
+}
+
+/** spawn 경로 하나와 그 경로의 argv . 경로가 둘이고 argv 모양이 달라서
+ *  (session 은 `--session-id`/`--input-format`, oneshot 은 `--print`) 하나만
+ *  보여 주면 나머지 경로에서 실행되지 않는 명령을 보여 주게 된다. */
+export interface LaunchModeSpec {
+  mode: 'session' | 'oneshot';
+  args: LaunchArgEntry[];
+  /** argv 만으로는 드러나지 않는 조건부 동작(예: 역할 고정 여부에 따라 MCP 설정
+   *  출처가 갈리는 것). 매니저가 계산해 보낸 문구를 그대로 보여준다. */
+  notes: string[];
+}
+
+export interface LaunchEnvEntry {
+  key: string;
+  /** 매니저가 마스킹한 값. 자격증명 원문은 wire 에 오르지 않는다. */
+  value: string;
+  source: 'cli_home' | 'credential' | 'runtime_profile';
+}
+
+/** 실제로 spawn 된 한 번의 실행 사양 (ticket 20fff298 리뷰 2R).
+ *
+ *  `modes` 는 heartbeat 시점 정보만으로 만든 **추정**이라 디스패치 시점 입력
+ *  (harness / 티켓 effort / 티켓별 프로파일)이 덮는 부분을 반영하지 못한다.
+ *  이 필드는 spawn 사이트가 argv·env·cwd 를 확정한 직후 기록한 ground truth 다. */
+export interface RecordedLaunchSpec {
+  mode: 'session' | 'oneshot';
+  bin: string | null;
+  args: LaunchArgEntry[];
+  /** 인자별 출처를 붙일 수 있었나 (리뷰 3R). 서버가 모르는 값을 false 로 접으므로
+   *  구버전 매니저의 기록은 여기서 false 로 온다 — UI 는 그때 출처 열을 그리는
+   *  대신 왜 없는지 말해야 한다. */
+  args_attributed: boolean;
+  cwd: string | null;
+  env: LaunchEnvEntry[];
+  context: {
+    ticket_id: string | null;
+    role: string | null;
+    harness_keys: string[];
+    effort: string | null;
+    runtime_profile_id: string | null;
+  };
+  recorded_at: string;
+}
+
+/** 관리 대상 에이전트 하나의 "다음 spawn 시 실효 실행 사양" (ticket 20fff298). */
+export interface AgentLaunchSpecEntry {
+  agent_id: string;
+  cli: string;
+  /** 해석된 실행 파일 경로. resolve 실패 시 null 이고 사유가 bin_error 에. */
+  bin: string | null;
+  bin_error: string | null;
+  /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
+  modes: LaunchModeSpec[];
+  cwd: string | null;
+  /** `'exact'` = 이 경로에서 그대로 돈다(런타임 프로파일이 고정).
+   *  `'base'` = 기준 경로이고, 티켓 디스패치는 그 아래 티켓별 worktree 에서
+   *  돌기 때문에 실제 프로세스 cwd 는 매번 다르다. */
+  cwd_kind: 'exact' | 'base';
+  mcp_config_path: string | null;
+  model: string | null;
+  permission: { tier: string; source: string; harness_mode: string | null };
+  runtime_profile: { id: string; protocol: string; model: string | null; arg_count: number } | null;
+  env: LaunchEnvEntry[];
+  /** 마지막 실제 spawn 사양 (ground truth). 아직 없으면 null. */
+  last_spawn: RecordedLaunchSpec | null;
+  /** 디스패치 시점에만 정해져 **추정(`modes`)** 에 반영되지 않은 입력들의 이름.
+   *  `last_spawn` 에는 이미 반영되어 있다. */
+  varies_per_dispatch: string[];
+  computed_at: string;
+}
+
 // One Runtime Host instance heartbeating against AWB.
 export interface AgentManagerInstance {
   instance_id: string;
@@ -2053,6 +2137,11 @@ export interface AgentManagerInstance {
   // agent the manager could read auth state for. Older managers leave
   // this undefined; the UI degrades to "no credential metadata" then.
   agent_credentials?: AgentCredentialEntry[];
+  // 관리 대상 에이전트별 실효 실행 사양 (ticket 20fff298). REST 전용이라
+  // SSE 로는 오지 않는다 — `agent_instance_update` 는 재조회 힌트로만 쓴다.
+  // `undefined` 는 **매니저가 이 필드를 보고하지 않음**(구버전), `[]` 는
+  // **보고했지만 대상 에이전트가 없음**이다. 화면은 이 둘을 다르게 그려야 한다.
+  agent_launch_specs?: AgentLaunchSpecEntry[];
   // Live worktrees + pool-lease state across the manager's supervised agents
   // (ticket 72fc244f). One row per live/leased worktree under each working_dir's
   // `.awb/wt/`. `ticket_title` is joined server-side on the instance-list fetch.

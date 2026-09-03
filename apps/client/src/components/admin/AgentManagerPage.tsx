@@ -20,7 +20,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { Button, Input, Modal, Select } from '../common';
-import { formatAgentDisplayName } from '../../utils/agentName';
+import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 
@@ -496,7 +496,10 @@ interface InstanceDetailProps {
   onOpenAgent?: (agentId: string) => void;
 }
 
-function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDetailProps) {
+/** 회귀 테스트가 Details 진입 경로를 실제로 마운트해 검증할 수 있도록 노출한다
+ *  (ticket 20fff298). 페이지 전체를 띄우지 않고 이 컴포넌트만 렌더하면 되므로,
+ *  버튼 렌더 조건을 소스 정규식이 아니라 실제 DOM 으로 단언할 수 있다. */
+export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDetailProps) {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const degraded = degradedReason(inst);
@@ -787,9 +790,25 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
                 <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                   Agent identities supervised ({inst.agent_ids?.length ?? 0})
                 </dt>
+                {/* "identities" 라고 써 놓고 잘린 UUID 를 늘어놓고 있었다
+                    (ticket 20fff298) — 8자리 조각은 이름도 아니고 조회에 쓸 수도
+                    없다. 워크스페이스 스냅샷에서 이름을 찾을 수 있으면 표시 계약
+                    (`<Manager>/<Agent>`)대로 쓰고, 못 찾은 것만 "이름 미확인"으로
+                    남기되 전체 id 를 title 에 실어 지원 시 추적할 수 있게 한다. */}
                 <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', fontSize: 11 }}>
                   {inst.agent_ids && inst.agent_ids.length > 0
-                    ? inst.agent_ids.map((a) => a.slice(0, 8)).join(', ')
+                    ? inst.agent_ids.map((id, i) => {
+                        const label = agentIdentityLabel(
+                          workspaceAgents.find((agent) => agent.id === id),
+                          id,
+                        );
+                        return (
+                          <React.Fragment key={id}>
+                            {i > 0 ? ', ' : ''}
+                            <span title={label.title}>{label.text}</span>
+                          </React.Fragment>
+                        );
+                      })
                     : '—'}
                 </dd>
               </div>
@@ -849,7 +868,14 @@ function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDet
         </dl>
 
         <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
-          {onOpenAgent && dashboardAgent && (
+          {/* 워크스페이스 스냅샷에 그 agent 행이 있는지로 게이팅하지 않는다
+              (ticket 20fff298). Details 는 `/ws/:wsId/agents/:agentId` 라우트로
+              가고 그 화면이 id 로 단건 조회하므로, 스냅샷 행은 애초에 필요가
+              없었다. 게이팅 때문에 다른 워크스페이스 소속·글로벌·스냅샷이 아직
+              안 온 에이전트에서 버튼이 통째로 사라졌고 — 조회하면 열렸을 상세를
+              "없는 것"처럼 보이게 했다. 조회 실패는 목적지 화면이 사유와 함께
+              표시한다. AgentCard 의 "View details" 도 원래부터 무조건 렌더다. */}
+          {onOpenAgent && (
             <button
               onClick={() => onOpenAgent(inst.agent_id)}
               style={{
@@ -1658,7 +1684,9 @@ const MAINTENANCE_BUTTONS: {
   },
 ];
 
-function ManagedAgentsSection({
+/** InstanceDetail 과 같은 이유로 노출한다 (ticket 20fff298) — 이 목록이
+ *  "Details 버튼이 일부 에이전트에만 보인다"는 증상이 가장 크게 드러났던 자리다. */
+export function ManagedAgentsSection({
   inst,
   workspaceAgents = [],
   onOpenAgent,
@@ -1870,7 +1898,11 @@ function ManagedAgentsSection({
                     <CredentialExpiryBadge entry={credentialsByAgentId.get(a.id)} />
                   </div>
                   <div style={{ display: 'flex', gap: 4 }}>
-                    {onOpenAgent && dashboardAgent && (
+                    {/* 위 "Agent details" 와 같은 이유로 스냅샷 유무로 게이팅하지
+                        않는다 (ticket 20fff298). 이 목록은 매니저가 보고한
+                        에이전트를 그리므로, 여기 보이는 행은 전부 상세로 갈 수
+                        있어야 한다. */}
+                    {onOpenAgent && (
                       <Button
                         size="sm"
                         variant="ghost"

@@ -37,6 +37,7 @@ import {
   resolveModelChain,
   selectEffortSlice,
 } from './cli-adapters/base.js';
+import { recordActualLaunch } from './launch-spec-recorder.js';
 import {
   decideApproveDispatch,
   describePermissionPolicy,
@@ -819,15 +820,35 @@ export class BaseSessionManager {
       if (adapter.cliType === 'claude') {
         log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
       }
-      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
+      // spec 을 리터럴로 두 번 쓰지 않고 변수로 뽑는다 (ticket 20fff298 리뷰 3R) —
+      // SubagentManager.spawn 사이트와 같은 이유다. 실행 사양 기록이 **최종
+      // descriptor 를 만든 그 spec** 을 그대로 받아야 실제 argv 에 인자별 출처를
+      // 붙일 수 있고, 리터럴을 다시 적어 넘기면 두 조립이 갈라진다.
+      //
+      // `sessionId` 를 spec 에 함께 담는 이유: 어댑터 빌더에는 세션 id 가 별도
+      // 인자로 들어가는데(`buildSession(..., sessionKey)`), 귀속용 변형이 "세션
+      // id 를 뺀" argv 를 만들어야 하므로 그 값도 spec 을 통해 흘러야 한다.
+      // `prepareSession` 이 negotiate 결과로 덮으므로 실제 argv 는 그대로다.
+      let sessionSpec = {
         rolePrompt: rolePrompt || '',
-        mcpConfigPath: null,
+        mcpConfigPath: null as string | null,
         model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
         permission,
-      }, sessionKey).descriptor;
+        sessionId: sessionKey as string | undefined,
+      };
+      const buildSessionArgs = (spec: Record<string, unknown>) =>
+        this.#adapterResolver.buildSession(
+          adapter.cliType,
+          sessionMode,
+          spec as any,
+          spec.sessionId as string | undefined,
+        ).descriptor.args;
+      let descriptor = this.#adapterResolver.buildSession(
+        adapter.cliType, sessionMode, sessionSpec, sessionSpec.sessionId,
+      ).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-session config is required whenever the server needs to attribute
@@ -907,15 +928,10 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
-          rolePrompt: rolePrompt || '',
-          mcpConfigPath: configPath,
-          model: attemptModel,
-          harness,
-          effort: effortFlag,
-          ultracode,
-          permission,
-        }, sessionKey).descriptor;
+        sessionSpec = { ...sessionSpec, mcpConfigPath: configPath };
+        descriptor = this.#adapterResolver.buildSession(
+          adapter.cliType, sessionMode, sessionSpec, sessionSpec.sessionId,
+        ).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
         descriptor.args.push(...claudeRuntimeProfile.args);
@@ -977,26 +993,31 @@ export class BaseSessionManager {
         `${this.#logTag} spawn argv: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
           `bin=${resolvedBin} args=${describeSpawnArgv(descriptor.args)}`,
       );
+      // env / cwd 를 변수로 뽑는 이유는 SubagentManager.spawn 사이트와 같다
+      // (ticket 20fff298) — 실행 사양 기록에 spawn 과 **완전히 같은** 값을 넘겨,
+      // 기록용 재조립이 실제와 갈라지지 않게 한다.
+      const spawnCwd = claudeRuntimeProfile?.cwd || effectiveCwd;
+      // harnessEnv merges LAST — see SubagentManager.spawn for why a
+      // per-dispatch harness model must beat the per-agent extra_env.
+      // Board env_vars (ticket 354d336b) merge right after baseEnv so they
+      // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
+      // / cli-home / per-agent credential / harness env layered on top.
+      const spawnEnv = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
+        ...baseEnv,
+        ...(envVars ?? {}),
+        AWB_API_KEY: effectiveApiKey,
+        ...cliHomeEnv,
+        ...credentialEnv,
+        ...adapter.harnessEnv(harness),
+        ...(runtimeLease?.claudeEnv() ?? {}),
+        ...(maxOutputResolution?.env ?? {}),
+      }).env;
       const child = this.#adapterResolver.spawnProcess(resolvedBin, descriptor.args, {
         stdio: descriptor.stdio || ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-        cwd: claudeRuntimeProfile?.cwd || effectiveCwd,
-        // harnessEnv merges LAST — see SubagentManager.spawn for why a
-        // per-dispatch harness model must beat the per-agent extra_env.
-        // Board env_vars (ticket 354d336b) merge right after baseEnv so they
-        // can set non-secret config (NODE_ENV, …) but never shadow AWB_API_KEY
-        // / cli-home / per-agent credential / harness env layered on top.
-        env: resolveClaudeExecutionEffort(slice, claudeRuntimeProfile, {
-          ...baseEnv,
-          ...(envVars ?? {}),
-          AWB_API_KEY: effectiveApiKey,
-          ...cliHomeEnv,
-          ...credentialEnv,
-          ...adapter.harnessEnv(harness),
-          ...(runtimeLease?.claudeEnv() ?? {}),
-          ...(maxOutputResolution?.env ?? {}),
-        }).env,
+        cwd: spawnCwd,
+        env: spawnEnv,
       }) as ChildProcessByStdio<Writable, Readable, Readable>;
       child.once('error', (err: any) => {
         log(
@@ -1018,6 +1039,30 @@ export class BaseSessionManager {
       }
       // 살아있는 pid 는 이 CLI 의 spawn-failure 배지를 지운다(ticket e299c6b3).
       spawnFailureTracker.recordSuccess(adapter.cliType);
+      // 실제로 spawn 된 사양을 기록한다 (ticket 20fff298). one-shot 경로와 같이
+      // **pid 확인 뒤** 에 둔다 — pid 없이 돌아온 spawn 실패까지 기록하면 직전의
+      // 정상 기록을 덮어써서, 화면이 실행되지 않은 argv/cwd/env 를 ground truth
+      // 라고 주장하게 된다(리뷰 3R). recordActualLaunch 자체도 throw 하지 않는다.
+      recordActualLaunch({
+        agentId: agentContext?.agent_id,
+        mode: 'session',
+        bin: resolvedBin,
+        args: descriptor.args,
+        cwd: spawnCwd,
+        env: spawnEnv,
+        baseEnv,
+        ticketId: monitorMeta?.ticket_id ?? null,
+        role: monitorMeta?.role ?? null,
+        harness,
+        effort: effortFlag,
+        runtimeProfileId: claudeRuntimeProfile?.id ?? null,
+        // 실제 argv 의 인자별 출처 (리뷰 3R) — SubagentManager.spawn 과 동일 계약.
+        attribution: {
+          spec: sessionSpec,
+          build: buildSessionArgs,
+          profileArgs: claudeRuntimeProfile?.args ?? [],
+        },
+      });
       if (configPath && configPathIsTemp) {
         // Per-spawn pid sidecar so #sweep + orphan cleanup can find this
         // child by its tempfile. Skipped for the persistent agent-owned

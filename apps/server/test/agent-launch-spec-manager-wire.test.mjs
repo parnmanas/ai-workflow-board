@@ -1,0 +1,171 @@
+// 회귀 테스트 — 매니저가 **실제로 계산한** 사양이 서버 수용 경로를 손실 없이
+// 통과하는지 (ticket 20fff298).
+//
+// 왜 별도 파일인가: agent-launch-spec-heartbeat.test.mjs 는 손으로 만든 픽스처를
+// 쓴다. 그 픽스처는 서버가 기대하는 모양을 그대로 적은 것이라, 매니저 쪽 실제
+// 출력이 그 모양에서 벗어나도 잡지 못한다 — 두 앱은 타입을 공유하지 않고 각자
+// 자기 인터페이스를 선언하므로, 스키마가 갈라져도 **양쪽 다 타입체크는 통과한다.**
+// 여기서는 agent-manager 의 빌드 산출물을 직접 불러 계산시킨 결과를 그대로
+// 하트비트로 보낸다. 산출물이 없으면 **스스로 빌드한다** — skip 으로 넘기면
+// apps/server CI 잡(agent-manager 를 빌드하지 않는다)에서 이 가드가 한 번도 돌지
+// 않으면서 초록으로 보이기 때문이다.
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+import { bootApp, exitAfterTests } from './helpers/boot.mjs';
+import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
+import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
+
+process.env.PORT = process.env.AGENT_LAUNCH_SPEC_WIRE_PORT || '7946';
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const MANAGER_DIST = join(REPO_ROOT, 'apps/agent-manager/dist/lib/launch-spec.js');
+
+const SECRET = 'sk-ant-api03-WIRE-TEST-SECRET';
+
+test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이 통과한다', async (t) => {
+  // 산출물이 없으면 **직접 빌드한다**. skip 으로 넘어가지 않는 이유: 이 가드의
+  // 존재 이유가 "두 앱의 스키마가 갈라진 것을 잡는" 것인데, dist 가 없다고 조용히
+  // 넘어가면 가드가 사라진 줄도 모르고 초록으로 보인다 — 가드가 없는 것보다 나쁘다.
+  // apps/server 의 CI 잡은 apps/server 만 빌드하므로 여기서 스스로 챙겨야 한다
+  // (workflow 파일에 빌드 스텝을 얹는 방법은 이 저장소의 push 자격증명에
+  // `workflow` scope 이 없어 쓸 수 없다).
+  if (!existsSync(MANAGER_DIST)) {
+    // 워크스페이스는 경로로 지정한다 — 패키지 이름은 `awb-agent-manager` 라
+    // `-w agent-manager` 는 "No workspaces found" 로 실패한다.
+    execFileSync('npm', ['run', 'build', '-w', 'apps/agent-manager'], {
+      cwd: REPO_ROOT,
+      stdio: 'inherit',
+      timeout: 10 * 60_000,
+    });
+  }
+  const { computeAgentLaunchSpecs } = await import(MANAGER_DIST);
+
+  // 실제 spawn 기록도 함께 태운다 (ticket 20fff298 리뷰 2R). 기록이 null 이면
+  // `last_spawn` 의 스키마 정합성이 이 교차 검증에서 빠져, 두 앱이 갈라져도
+  // 통과해 버린다 — 새 필드가 가드 밖에 남는 정확히 그 상황이다.
+  //
+  // 기록의 **인자별 출처**까지 실제 어댑터로 만들어 태운다 (리뷰 3R). 손으로
+  // `source` 를 적으면 매니저가 실제로 내보내는 출처 집합과 갈라져도 통과한다 —
+  // `harness`/`effort`/`prompt` 처럼 기록 전용 출처가 정확히 그 위험에 있다.
+  const recorderPath = join(REPO_ROOT, 'apps/agent-manager/dist/lib/launch-spec-recorder.js');
+  const adaptersPath = join(REPO_ROOT, 'apps/agent-manager/dist/lib/cli-adapters/index.js');
+  const { recordActualLaunch } = await import(recorderPath);
+  const { createAdapter } = await import(adaptersPath);
+  const adapter = createAdapter('claude');
+  const spawnSpec = {
+    rolePrompt: '역할 프롬프트 본문', taskText: '작업 내용 본문',
+    mcpConfigPath: '/tmp/awb/cfg-wire.json', cwd: '/srv/work/.awb/wt/repo/20fff298',
+    cliHomeDir: '/home/x/cli-home', model: 'claude-opus-5',
+    harness: { permission_mode: 'plan', disallowed_tools: ['WebFetch'] },
+    effort: 'max', ultracode: false,
+    permission: { tier: 'trusted', source: 'agent_trust', harnessMode: 'plan', harnessTier: 'strict' },
+    sessionId: 'wire-session-key',
+  };
+  const buildSpawnArgs = (spec) =>
+    adapter.buildSessionSpawn({ ...spec, sessionMode: 'persistent' }).args;
+  recordActualLaunch({
+    agentId: 'wire-agent',
+    mode: 'session',
+    bin: '/usr/local/bin/claude',
+    args: buildSpawnArgs(spawnSpec),
+    cwd: '/srv/work/.awb/wt/repo/20fff298',
+    env: { PATH: '/usr/bin', ANTHROPIC_MODEL: 'served-model', AWB_API_KEY: SECRET },
+    baseEnv: { PATH: '/usr/bin' },
+    ticketId: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
+    role: 'assignee',
+    harness: spawnSpec.harness,
+    effort: 'max',
+    runtimeProfileId: 'vllm-local',
+    attribution: { spec: spawnSpec, build: buildSpawnArgs, profileArgs: [] },
+  });
+
+  const specs = computeAgentLaunchSpecs([{
+    agent_id: 'wire-agent', workspace_id: 'ws', name: 'T', cli: 'claude',
+    working_dir: '/srv/work', mcp_config_path: '/cfg/mcp.json', api_key: SECRET,
+    subagent_log_path: '/l', cli_home_dir: '/home/x/cli-home', model: 'claude-opus-5',
+    runtime_config: { strategy: 'single', permission_mode: 'trusted' },
+    extra_env: { ANTHROPIC_API_KEY: SECRET },
+    registered_at: '2026-01-01T00:00:00.000Z',
+  }]);
+  assert.equal(specs.length, 1);
+
+  const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
+  t.after(async () => { await app.close(); });
+  const { getDataSourceToken } = modules;
+  const workspace = await createWorkspace(app, getDataSourceToken, 'launch-spec-wire');
+  const manager = await createAgent(app, getDataSourceToken, null, {
+    name: 'launch-spec-wire', type: 'manager',
+  });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, {
+    workspaceId: workspace.id, label: 'launch-spec-wire',
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
+    method: 'POST',
+    headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'launch-spec-wire',
+      agent_id: manager.id,
+      workspace_id: workspace.id,
+      mode: 'manager',
+      hostname: 'test-host',
+      plugin_version: 'test',
+      cli: 'claude',
+      cli_adapters: ['claude'],
+      pid: 1,
+      started_at: new Date().toISOString(),
+      agent_launch_specs: specs,
+    }),
+  });
+  assert.equal(res.status, 201, await res.text());
+
+  const stored = app.get(InstanceRegistryService).get('launch-spec-wire').agent_launch_specs;
+  // 손실 없음 — sanitize 가 매니저의 실제 출력을 깎아내지 않아야 한다. 스키마가
+  // 갈라지면 여기서 필드가 사라지거나 unattributed 로 접히며 드러난다.
+  assert.deepEqual(stored, JSON.parse(JSON.stringify(specs)));
+
+  const row = stored[0];
+  assert.deepEqual(row.modes.map((m) => m.mode), ['session', 'oneshot']);
+  // 실제 spawn 기록이 손실 없이 건너왔는지 — 새 필드가 가드 안에 있음을 보장한다.
+  assert.ok(row.last_spawn, 'last_spawn 이 서버 수용 경로에서 사라졌다');
+  assert.equal(row.last_spawn.mode, 'session');
+  assert.equal(row.last_spawn.cwd, '/srv/work/.awb/wt/repo/20fff298');
+  assert.equal(row.last_spawn.context.effort, 'max');
+  assert.equal(row.last_spawn.context.runtime_profile_id, 'vllm-local');
+  assert.deepEqual(row.last_spawn.context.harness_keys, ['disallowed_tools', 'permission_mode']);
+  assert.ok(row.last_spawn.args.map((a) => a.value).includes('--effort'));
+  assert.equal(row.modes.some((m) => m.args.some((a) => a.source === 'unattributed')), false,
+    '서버가 매니저의 출처 값을 인식하지 못했다 — 두 쪽 source 집합이 갈라졌다');
+
+  // **기록 전용 출처**가 서버 수용 경로를 통과하는지 (리뷰 3R). 서버의 허용
+  // 집합에 새 값을 빠뜨리면 여기서 unattributed 로 접히며 드러난다 — 화면이
+  // 귀속에 성공한 인자를 "출처 불명"으로 표시하는 정확히 그 상황이다.
+  assert.equal(row.last_spawn.args_attributed, true, 'args_attributed 가 wire 에서 사라졌다');
+  const recordedSources = new Set(row.last_spawn.args.map((a) => a.source));
+  for (const expected of ['harness', 'effort', 'model', 'permission', 'prompt', 'session']) {
+    assert.ok(
+      recordedSources.has(expected),
+      `기록의 '${expected}' 출처가 서버 수용 경로에서 사라졌다: ${[...recordedSources].join(', ')}`,
+    );
+  }
+  assert.equal(recordedSources.has('unattributed'), false,
+    '서버가 기록 전용 출처를 인식하지 못했다 — 두 쪽 source 집합이 갈라졌다');
+  // 프롬프트 본문은 wire 어디에도 오르지 않는다.
+  assert.equal(JSON.stringify(stored).includes('역할 프롬프트 본문'), false);
+  assert.equal(JSON.stringify(stored).includes('작업 내용 본문'), false);
+  // 실제 실행되는 경로의 모양이 그대로 보존됐는지.
+  const session = row.modes[0].args.map((a) => a.value);
+  assert.ok(session.includes('--session-id'));
+  assert.ok(session.includes('--dangerously-skip-permissions'));
+  assert.equal(session.includes('--print'), false);
+  // 자격증명은 wire 어디에도 원문으로 오르지 않는다.
+  assert.equal(JSON.stringify(stored).includes(SECRET), false);
+});
+
+exitAfterTests();
