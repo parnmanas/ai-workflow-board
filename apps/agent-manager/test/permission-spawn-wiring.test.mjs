@@ -46,6 +46,30 @@ await new Promise((r) => setTimeout(r, 30));
   return path;
 }
 
+/**
+ * 자식이 종료할 때까지 기다린다.
+ *
+ * `SubagentManager` 는 자식을 POSIX 에서 detached 로 띄우고 곧바로
+ * `child.unref()` 한다 — 즉 스폰된 프로세스는 부모의 이벤트 루프를 잡아두지
+ * 않는다. 그래서 이 대기 구간에 ref 된 핸들이 하나도 없으면 루프가 그대로
+ * 비고, `node --test` 는 파일의 남은 테스트를 전부 `cancelled` 로 처리한다
+ * ("Promise resolution is still pending but the event loop has already
+ * resolved"). Node 22(CI 버전)에서 실제로 그렇게 됐다 — ubuntu·windows 양쪽
+ * 모두. 아래 `setTimeout` 은 ref 된 타이머라 대기 동안 루프를 붙잡는 역할을
+ * 겸하며, 동시에 상한을 둬서 배선이 깨졌을 때 조용히 멎지 않고 실패하게 한다.
+ */
+function waitForExit(manager, tag, timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      reject(new Error(`${tag}: 자식 프로세스 종료를 ${timeoutMs}ms 안에 감지하지 못했다`));
+    }, timeoutMs);
+    manager.onExit = () => {
+      clearTimeout(deadline);
+      resolve();
+    };
+  });
+}
+
 function makeAgentContext(cwd, permissionMode) {
   return {
     agent_id: 'agent-perm',
@@ -78,7 +102,7 @@ async function captureOneshotArgv({ tag, permissionMode, harness }) {
       ...config,
       delegation: { ...config.delegation, claudeBin: executable },
     });
-    const exited = new Promise((resolve) => { manager.onExit = resolve; });
+    const exited = waitForExit(manager, tag);
     const result = await manager.spawn({
       kind: 'trigger',
       taskText: 'task',
