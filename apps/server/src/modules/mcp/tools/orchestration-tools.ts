@@ -161,6 +161,15 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
                   'commands and constraints they need.',
               ),
             acceptance_criteria: z.string().optional().describe('How the assignee knows this step is done'),
+            retry_policy: z
+              .enum(['auto', 'manual'])
+              .optional()
+              .describe(
+                'Default "auto". Set "manual" for work that must NOT be re-run automatically if the assignee ' +
+                  'dies mid-flight — a deploy, a payment, a publish, anything whose second execution is itself ' +
+                  'the damage. Such a step is parked as needs_recovery with a reason instead of being failed ' +
+                  'into the normal retry path, and only an explicit retry/reassign resumes it.',
+              ),
             depends_on: z
               .array(z.string())
               .optional()
@@ -587,6 +596,13 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           acceptance_criteria: step.acceptance_criteria,
           attempt: step.attempt,
           max_attempts: step.max_attempts,
+          // 세션이 죽어 work order 를 잃은 뒤 다시 읽는 경로 — 토큰을 함께 돌려주지
+          // 않으면 복구한 agent 가 보고를 할 수 없다(티켓 4d065f82). 위에서 이미
+          // assignee/orchestrator 로 호출자를 제한했다.
+          lease_token: step.lease_token || '',
+          // 세션이 죽었다 살아난 작업자가 이어서 하려면 마지막 체크포인트가 필요하다.
+          checkpoint: step.checkpoint ?? null,
+          checkpoint_at: step.checkpoint_at ?? null,
           mission: {
             mission_id: mission.id,
             title: mission.title,
@@ -638,13 +654,37 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     {
       step_id: z.string(),
       message: z.string().describe('What you are doing right now, in one line'),
+      lease_token: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED whenever your work order printed a "Lease token". Copy that value verbatim. It proves this ' +
+            'heartbeat comes from the attempt that is currently live — omitting it, or sending a superseded ' +
+            'one, is refused. Only work orders issued before this field existed may leave it out.',
+        ),
+      checkpoint: z
+        .record(z.string(), z.any())
+        .optional()
+        .describe(
+          'Resumable state: the JSON a FRESH attempt of this step would need to continue from where you are ' +
+            'instead of starting over (files written, records processed, the next thing to do). Send it ' +
+            'whenever you pass a milestone in long work. If your session dies, the server hands your latest ' +
+            'checkpoint to the replacement attempt verbatim — the `message` field does not do this, it is only ' +
+            'a human-readable timeline line. Each send replaces the previous checkpoint.',
+        ),
     },
-    async ({ step_id, message }, extra) => {
+    async ({ step_id, message, lease_token, checkpoint }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const step = await svc.reportProgress(step_id, callerAgentId(extra), message);
-        return ok({ step_id: step.id, status: step.status });
+        const step = await svc.reportProgress(
+          step_id,
+          callerAgentId(extra),
+          message,
+          lease_token,
+          checkpoint as Record<string, any> | undefined,
+        );
+        return ok({ step_id: step.id, status: step.status, checkpoint_saved: !!checkpoint });
       } catch (e: any) {
         return toolError(e, 'failed to report progress');
       }
@@ -693,8 +733,17 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
             'number, is refused rather than allowed to overwrite a newer pass. Only plain dependency missions, ' +
             'whose work orders carry no visit number, may leave it out.',
         ),
+      lease_token: z
+        .string()
+        .optional()
+        .describe(
+          'REQUIRED whenever your work order printed a "Lease token". Copy that value verbatim. It proves you ' +
+            'are the attempt that is currently live: if the step was re-dispatched (a retry, or a loop ' +
+            're-entry) your token is no longer valid and this report is refused instead of overwriting the ' +
+            'newer attempt\'s work. Only work orders issued before this field existed may leave it out.',
+        ),
     },
-    async ({ step_id, status, summary, artifacts, verdict, visit }, extra) => {
+    async ({ step_id, status, summary, artifacts, verdict, visit, lease_token }, extra) => {
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
@@ -704,6 +753,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           artifacts: artifacts as any,
           verdict,
           visit,
+          lease_token,
         });
         return ok({
           step_id: result.step.id,

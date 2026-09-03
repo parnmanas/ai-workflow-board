@@ -160,7 +160,12 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
     execution: {
       model: input.harness?.model || input.runtimeProfile?.model || '',
       effort: input.effort ?? metadata.effort ?? null,
-      permissionMode: input.harness?.permission_mode || 'managed-default',
+      // ticket 5851e435 — 디스패처가 계산한 effective permission policy 의
+      // tier 를 우선한다(metadata.permissionMode). Agent trust 가 harness 를
+      // 이기므로 harness 문자열만 노출하면 실제 적용 등급과 어긋난다.
+      // metadata 를 채우지 않는 호출자(구버전 경로/테스트)는 종전대로
+      // harness 문자열로 폴백한다.
+      permissionMode: metadata.permissionMode ?? input.harness?.permission_mode ?? 'managed-default',
       sandbox: metadata.sandbox ?? input.harness?.permission_mode ?? 'managed-default',
       mcpAvailable: input.mcpAvailable !== false,
       mcpServers: Array.isArray(metadata.mcpServers) ? metadata.mcpServers : [],

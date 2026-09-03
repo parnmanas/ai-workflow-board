@@ -472,6 +472,10 @@ const DURABLE_BLOCKER_REASONS = new Set<string>([
   'cli_trust_required',          // workspace trust dialog unresolved (ticket 48aeab6e)
   'cli_credential_expired',      // OAuth session expired, no refresh token (ticket 48aeab6e)
   'invalid_mcp_transport',       // CLI config's mcp_servers.<name> has no resolvable transport (ticket da4358ee)
+  // ticket 5851e435: Agent trust 가 approve 인데 런타임이 승인 요청을 만들 수
+  // 없다. 운영자가 trust 를 바꾸거나 런타임을 옮기기 전에는 절대 자가 회복되지
+  // 않으므로 첫 중단에서 바로 pend 한다.
+  'approve_requires_approval_bridge',
 ]);
 
 /** True when a dispatch blocker `kind` is a DURABLE provisioning failure (needs

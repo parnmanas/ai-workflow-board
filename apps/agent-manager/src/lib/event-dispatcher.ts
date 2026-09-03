@@ -33,6 +33,12 @@ import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFo
 import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-context-contract.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
+import {
+  APPROVE_BLOCKER_REASON,
+  decideApproveDispatch,
+  describePermissionPolicy,
+  resolveEffectivePermissionPolicy,
+} from './permission-policy.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
 import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
@@ -43,7 +49,7 @@ import type {
 } from './runtime/runtime-supervisor.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 import { ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
-import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import { createRuntimeCliAdapter, getRuntimeDescriptor } from './runtime/runtime-registry.js';
 import {
   parseRunProvision,
   provisionRunWorkspace,
@@ -2616,6 +2622,16 @@ export class EventDispatcher {
     // also read harness.permission_mode.
     const harness = parseHarnessConfig(ev.harness_config);
 
+    // ticket 5851e435: 이 디스패치의 effective permission policy. Agent trust
+    // (`runtime_config.permission_mode`)가 board/workspace harness
+    // `permission_mode` 를 이긴다. spawn 사이트(SubagentManager /
+    // BaseSessionManager)는 같은 함수로 같은 값을 다시 계산하므로, 게이트 ·
+    // 컨텍스트 계약 · 실제 argv 가 한 규칙을 공유한다.
+    const permissionPolicy = resolveEffectivePermissionPolicy({
+      trust: agentContext?.runtime_config?.permission_mode,
+      harnessMode: harness?.permission_mode,
+    });
+
     // ticket 48aeab6e: CLI workspace-trust / provider-auth readiness. Unlike
     // the push-credential gate below (assignee-only — only that role pushes),
     // this applies to EVERY role: any role's CLI spawn can hit an unapproved
@@ -2641,7 +2657,15 @@ export class EventDispatcher {
     // 분기에서 별도로 처리된다.
     if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
       const adapter = createRuntimeCliAdapter(agentContext.cli);
-      const trustRequired = adapter.requiresWorkspaceTrust(harness);
+      // ticket 5851e435: trust 게이트도 spawn argv 와 **같은** effective
+      // policy 를 본다. 예전엔 harness `permission_mode` 하나만 보고 판단해서,
+      // `trusted` 로 표시된 에이전트가 보드 harness 값 때문에 대화형 trust
+      // 대화상자 게이트에 걸려 Pending 으로 떨어졌다.
+      log(
+        `[cli-permission] ticket=${ev.ticket_id} role=${ev.action || ''} ` +
+          `cli=${agentContext.cli} ${describePermissionPolicy(permissionPolicy)}`,
+      );
+      const trustRequired = adapter.requiresWorkspaceTrust(permissionPolicy);
       // ticket 152e3606 리뷰 반영: bypassPermissions(harness 미설정 또는
       // 명시적 bypassPermissions — trustRequired=false)일 때만 워크스페이스
       // trust를 미리 시딩한다. 이 디스패치 자체엔 trust가 무관하지만(스킵
@@ -2718,6 +2742,68 @@ export class EventDispatcher {
         }
         log(
           `Trigger aborted — CLI readiness check failed: ticket=${ev.ticket_id} role=${ev.action} reason=${blockerKind} cli=${agentContext.cli}`,
+        );
+        this.#ackDispatch(ev, 'nack', blockerKind);
+        return;
+      }
+    }
+
+    // 리뷰 라운드2 지적 #3: approve 는 "AWB 에 승인을 요청한다"는 뜻인데, 그
+    // 요청을 실제로 만들 수 있는 런타임은 ACP 승인 프로토콜을 가진 것뿐이다.
+    // 그런 훅이 없는 런타임에서 그냥 실행하면 운영자가 고른 의미가 조용히
+    // "묻지 않고 거부한다"로 바뀌므로, 정직한 capability 표기에 그치지 않고
+    // **실행 자체를 막고** 사람에게 결정을 넘긴다. 이 티켓의 "Pending 은 실제
+    // 사람 승인 gate 에만" 규칙을 어기는 게 아니라 그 사례다 — 런타임이 승인을
+    // 물을 수 없으니 사람이 trust 를 직접 정해야 한다.
+    if (ev.ticket_id && agentContext?.cli) {
+      let runtimeApprovals: boolean | null = null;
+      try {
+        runtimeApprovals = getRuntimeDescriptor(agentContext.cli).capabilities.native_approvals;
+      } catch {
+        // 미지의 런타임 id — 스폰은 어차피 자기 이유로 실패한다. 여기서 판정을
+        // 지어내지 않고 통과시킨다.
+      }
+      const approveGate = runtimeApprovals === null
+        ? { blocked: false as const }
+        : decideApproveDispatch(permissionPolicy, {
+            id: agentContext.cli,
+            native_approvals: runtimeApprovals,
+          });
+      if (approveGate.blocked) {
+        const blockerKind = approveGate.reason || APPROVE_BLOCKER_REASON;
+        this.#dispatchBlockTracker.record(blockerKind);
+        const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+        if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              `⚠️ **승인 경로 없는 approve 등급** — 이 Agent 의 trust 가 \`approve\` 인데 ` +
+              `런타임 \`${agentContext.cli}\` 는 실행 중 권한 요청을 AWB 승인 경로로 올릴 수 ` +
+              `없어(native_approvals=false) 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+              `승인 없이 제한 모드로 계속 실행하면 운영자가 고른 "사람이 승인한다"가 조용히 ` +
+              `"묻지 않고 거부한다"로 바뀝니다. 아래 중 하나로 의도를 명시해 주세요.\n\n` +
+              `1. Agent 의 \`runtime_config.permission_mode\` 를 \`trusted\` 로 — 명시적 허용\n` +
+              `2. \`strict\` 로 — 명시적 거부(최소 권한)\n` +
+              `3. 이 Agent 를 승인 요청을 지원하는 런타임(현재 \`hermes\`)으로 이동\n\n` +
+              `_동일 사유의 supervisor 자동 재트리거는 억제됩니다 — 값을 고친 뒤 티켓을 ` +
+              `unpend(User 탭의 ▶ Resume) 하세요._`,
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지
+          });
+        }
+        if (provisionBlock.shouldPend) {
+          await fireAndForgetTool(this.#config, 'pend_ticket', {
+            ticket_id: ev.ticket_id,
+            reason: provisioningPendReason({
+              kind: blockerKind,
+              reason: approveGate.reason,
+              detail: approveGate.detail,
+              count: provisionBlock.count,
+            }),
+          });
+        }
+        log(
+          `Trigger aborted — approve tier has no approval bridge: ticket=${ev.ticket_id} ` +
+            `role=${ev.action || ''} cli=${agentContext.cli} ${describePermissionPolicy(permissionPolicy)}`,
         );
         this.#ackDispatch(ev, 'nack', blockerKind);
         return;
@@ -2907,7 +2993,11 @@ export class EventDispatcher {
         defaultBranch: selectedRepo?.defaultBranch ?? worktreeProvision.repositoryContext?.defaultBranch ?? null,
         credentialAvailable: selectedRepo ? Boolean(repoCredential) : null,
         credentialFailure: selectedRepo ? repoCredentialStatus.failure : null,
-        sandbox: harness?.permission_mode ?? 'managed-default',
+        // ticket 5851e435 — 에이전트가 보는 값도 실제 적용된 effective policy 로
+        // 통일한다. harness 문자열만 노출하면 Agent trust 로 결정된 실제 등급이
+        // 프롬프트에서 보이지 않는다.
+        permissionMode: permissionPolicy.tier,
+        sandbox: permissionPolicy.tier,
         requestedGitOperation: ev.action === 'assignee' ? 'commit_and_push' : 'read_only',
         mcpServers: activeMcpServers,
         relatedTickets: ticket.related_tickets ?? [],
@@ -2934,7 +3024,7 @@ export class EventDispatcher {
         `dirty=${worktreeProvision.repositoryContext?.dirty ?? false} ` +
         `repositoryRequired=${repositoryContextRequired} ` +
         `model=${harness?.model || runtimeProfile?.model || agentContext?.model || ''} ` +
-        `permission=${harness?.permission_mode || 'managed-default'} ` +
+        `permission=${describePermissionPolicy(permissionPolicy)} ` +
         `mcp=${activeMcpServers.join(',') || 'none'} session=${sessionMode}`,
       );
       return ticket;

@@ -172,6 +172,106 @@ optional 로 두면 stale 한 pass 1 작업자가 `visit` 을 빼고 보내는 �
 `graph_spec` 이 없는 기존 wave 미션은 그대로 optional 이다 — 재진입 자체가 없어
 구분할 pass 가 없고, 기존 호출자를 깨뜨리지 않는다.
 
+### lease fencing 과 heartbeat (ticket 4d065f82)
+
+`visit` 은 **loop 재진입** 축만 막는다. 재시도는 `attempt` 만 올리고 `visit` 은 그대로
+두므로, attempt 1 의 살아있는 subagent 가 뒤늦게 보고해 attempt 2 의 in-flight 상태를
+덮어쓰는 경로는 wave·graph 미션 **양쪽 모두** 열려 있었다. 그 축을 `lease_token` 이 닫는다.
+
+- `dispatchStep` 이 디스패치마다 새 토큰을 발급해 work order 에 싣는다. 재진입이든
+  재시도든 **모든 재디스패치**에서 바뀌므로 두 축을 다 덮는다.
+- step 이 토큰을 들고 있으면 보고에도 **반드시** 있어야 한다. `visit` 과 같은 이유로
+  누락도 409 다 — optional 이면 stale 작업자가 빼는 것만으로 우회한다.
+- 토큰이 빈 step(이 기능 배포 이전에 나간 work order)만 예외로 통과시킨다. 그렇지
+  않으면 업그레이드 순간 진행 중이던 작업이 보고 자체를 못 하는 wedge 가 된다.
+- 세션을 잃은 agent 는 `list_my_orchestration_steps` / `get_orchestration_step` 으로
+  현재 토큰을 되찾는다. **이 두 경로가 토큰을 돌려주지 않으면 복구한 agent 가 영영
+  보고할 수 없다** — 토큰을 요구하기로 한 이상 되찾을 길은 반드시 함께 있어야 한다.
+- 거부는 `step_lease_rejected` 로 타임라인에 남는다. 이게 없으면 409 가 호출자에게만
+  보이고 "왜 내 결과가 반영 안 됐나"를 사후에 설명할 근거가 사라진다.
+
+heartbeat 는 `last_heartbeat_at` 을 **매 progress 호출마다** 갱신하고, 리퍼는
+`last_heartbeat_at ?? started_at ?? dispatched_at` 을 기준선으로 쓴다. 예전에는
+`started_at` 이 기준이었는데 그 값은 최초 progress 호출에서 한 번만 찍혀서, "heartbeat
+가 inactivity timeout 을 리셋한다"는 문서상 계약이 두 번째 호출부터 거짓이었다.
+
+### lease 만료 reconciliation — 유예 · 재연결 · 자동 재개
+
+리퍼는 만료를 보자마자 step 을 죽이지 않는다. `reconcileStaleLease()` 하나가 두 단계로 처리한다:
+
+1. **최초 관측** — `lease_stale_since` 를 찍고, 작업자의 online 상태를 조회해 trace 에 남기고,
+   그 attempt 의 방에 재연결 요청을 포스트한다. 살아 있는 작업자가 heartbeat 하나만 보내도
+   lease 가 되살아난다(`reportProgress` 가 `lease_stale_since` 를 지우고 `step_lease_recovered` 를 남긴다).
+2. **유예 경과** — 그래도 답이 없으면 **새 attempt 로 자동 재디스패치**한다. `dispatchStep` 그대로라
+   새 lease token 과 새 방을 받고, 이전 attempt 의 지각 결과는 fencing 이 이미 거부한다(= idempotent).
+   `retry_policy='manual'` 이거나 재시도 예산이 없으면 재실행하지 않고 종결한다.
+
+유예 길이는 `ORCHESTRATION_LEASE_GRACE_MS`(기본 5분). 이 경로는 **부팅 스윕과 주기 스윕이 같은
+메서드**를 부르므로, 재시작 복구와 정상 운용 중 장애 감지가 구조적으로 하나의 경로다.
+
+세 재시작 축(server / agent-manager / 작업자 세션)이 여기로 수렴한다 — orchestration 이 관측하는
+것은 어느 축이든 "in-flight step 의 생존 신호가 끊긴다" 하나이기 때문이다. agent-manager 는
+orchestration 상태를 들고 있지 않으므로 그 축의 효과도 "그 호스트의 작업자들이 동시에 조용해진다"로
+나타날 뿐이다.
+
+> **재시작 테스트 강도** (리뷰 라운드2 반영, 티켓 4d065f82): 서버 축은
+> `qa-flows/orchestration-restart-recovery.test.mjs` 에서 **실제로** 앱을 종료(`app.close()` →
+> onModuleDestroy 강제 flush)하고 같은 DB 파일 위에 새 NestFactory·새 DataSource 로 다시 부팅한 뒤,
+> 새 프로세스의 `OnModuleInit` 부팅 스윕이 **테스트가 리퍼를 부르지 않아도** 만료된 lease 를 관측하는지
+> 확인한다. orchestrator 세션 재시작(새 세션이 같은 미션 room 의 thread context 와 실행 상태를 되찾는지)도
+> 같은 파일에 있다. `qa-flows/orchestration-recovery.test.mjs` 의 축1 은 같은 프로세스에서 판정 로직만
+> 태우는 시뮬레이션이므로 그쪽을 재시작 근거로 인용하지 말 것.
+>
+> **테스트 강도에 대한 용어 구분** (reporter 확인, 티켓 4d065f82): agent-manager 축의 회귀 테스트는
+> 실제 agent-manager 프로세스를 종료·재기동하는 통합 테스트가 **아니라**, 그 재시작이 orchestration
+> 계층에 남기는 장애 상태를 재현하는 **시나리오 테스트**다. reporter 는 별도의 agent-manager 전용
+> 복구 상태기계를 만드는 대신 이 관측값을 서버의 단일 `reconcileStaleLease()` 경로로 수렴시키는
+> 설계를 수용했으나, 그 차이는 문서와 테스트 설명에 계속 명시적으로 남긴다.
+
+### 재개 가능한 체크포인트
+
+`report_orchestration_progress(checkpoint:)` 로 저장하는 구조화 상태다. timeline 의 progress 메시지와는
+다른 축이다 — 그쪽은 사람이 읽는 서술이라 재시작한 작업자가 어디서부터 이어갈지 프로그램적으로
+복원할 수 없다. 마지막 값만 step 에 보관하고(각 저장 시점은 `step_checkpoint` 이벤트로 append-only),
+자동 재디스패치 때 **work order 에 그대로 실려 나간다**. 세션을 잃은 작업자는
+`get_orchestration_step` / `list_my_orchestration_steps` 로 lease token 과 함께 되찾는다.
+
+### 상류 복구와 하류 차단 해제
+
+`propagateBlocking()` 은 원래 한 방향이었다 — pending → blocked 로만 가고 돌아오는 길이 없어서,
+실패한 상류를 retry 로 되살려도 그때 딸려 막힌 하류가 영원히 blocked 로 남았다(`blocked` 는 두
+판정기 모두에서 terminal 이라 다시 dispatchable 이 될 수도 없다). `unblockAutoBlockedDependents()` 가
+그 역방향을 만든다.
+
+**작업자가 스스로 보고한 blocked 는 절대 건드리지 않는다** — `auto_blocked` 플래그로 구분한다.
+그건 "내가 할 수 없다"는 판정이라 상류 복구와 무관하다.
+
+해제 여부는 직접 재계산하지 않고, 후보를 pending 으로 가정한 사본을 **같은 progress 판정기**에 다시
+태워 묻는다. 그래야 wave 와 graph(조건 분기·join policy 포함)가 각자의 규칙으로 답하고 이 메서드가
+세 번째 판정 분기가 되지 않는다.
+
+### 복구 불가 작업 (needs_recovery)
+
+`retry_policy: 'manual'` 로 선언된 step 은 lease 만료 시 `failed`(오케스트레이터가 정상
+실패 처리로 다시 띄울 수 있는 상태)가 아니라 `needs_recovery` 로 가고 `recovery_reason`
+에 사유가 남는다. 배포·결제·외부 게시처럼 "한 번 더 실행"이 그 자체로 피해인 작업용이다.
+
+비멱등 여부는 step 의 instructions 안에만 있는 의미론이라 상태 머신이 사후에 알아낼 수
+없다 — 그래서 계획 시점에 오케스트레이터가 선언하고, 선언이 없으면(`auto`, 기본값) 기존
+동작 그대로다. 탈출구는 명시적 `update_orchestration_step(action:'retry')` 또는 재배정뿐이다.
+
+**step 상태를 추가할 때는 판정기가 둘이라는 점을 반드시 볼 것.** wave 는
+`computePlanProgress`, graph 는 `computeGraphProgress` 가 각자 판정하는데, 둘 다 예전에는
+상태 목록을 **리터럴로 복제**해 갖고 있었다. 목록에 빠진 상태는 "pending / ready" 분기로 흘러
+**dispatchable 로 집계**되므로, 자동 재실행을 금지하려고 만든 `needs_recovery` 가 오히려 즉시
+재디스패치를 부르는 정반대 동작이 됐다 — wave 에서 한 번 겪고, 사본을 놓쳐 graph 에서 또 겪었다.
+지금은 graph 쪽 `isTerminal`/분류가 `TERMINAL_STEP_STATUSES` 단일 출처를 참조한다.
+
+새 상태를 추가하면 `TERMINAL_STEP_STATUSES` · `DEPENDENCY_POISONING_STATUSES` ·
+`computePlanProgress` 의 terminal 분기 · 클라이언트 `STEP_STATUS_STYLES` 를 함께 확인하라
+(마지막 것을 빠뜨리면 `stepStyle` fallback 이 걸려 가장 급한 상태가 muted "Waiting" 으로 조용히
+오표시된다).
+
 ### wave adapter 와 하위 호환
 
 `graphFromWavePlan()` 이 `depends_on` 을 forward edge 로 **전치**한다:
@@ -379,6 +479,11 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 | 반복 상한 | node 별 `max_visits` | evaluator→revision loop 가 영영 도는 것 (상한 도달 시 하류 blocked + 오케스트레이터 깨움) |
 | 실행 예산 | `max_total_visits` vs `total_visits` | 재시도·재진입을 합친 총 subagent 스폰 횟수 폭주 |
 | stale pass 거부 | `report_orchestration_step(visit:)` — graph 미션에서는 **필수** | 재진입으로 무효가 된 이전 pass 의 지각 보고가 새 pass 결과를 덮어쓰는 것 (누락도 409로 거부 — optional 이면 빼는 것만으로 우회된다) |
+| stale attempt 거부 (lease fencing) | `lease_token` — 모든 보고에서 step 이 토큰을 들고 있으면 **필수** | 재시도로 밀려난 이전 attempt 의 지각 보고 (`visit` 은 재시도로 안 바뀌어 이 축을 못 막는다) |
+| lease 유예 + 자동 재개 | `reconcileStaleLease()` (리퍼가 부르는 단일 진입점) | 세션이 죽은 step 이 orchestrator 의 수동 개입 전까지 멈춰 있는 것 |
+| 하류 자동차단 해제 | `unblockAutoBlockedDependents()` | 상류를 복구해도 그때 자동 차단된 하류가 blocked 로 남아 미션이 영영 완료되지 않는 것 |
+| heartbeat lease | `last_heartbeat_at` + 리퍼 기준선 | 살아있는 장기 작업이 timeout 으로 죽는 것 / 죽은 세션이 시계를 계속 되돌리는 것 |
+| 비멱등 작업 자동 재실행 | `retry_policy='manual'` → `needs_recovery` | 배포·결제·게시처럼 "한 번 더"가 그 자체로 피해인 작업의 자동 재시도 |
 
 ### 권한
 
@@ -470,8 +575,8 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 ## 관찰 (UI)
 
 - **Missions**: 상태 배지 + 진행 바 + 카운트. `orchestration_update` SSE 로 행이 실시간 갱신.
-- **Mission 상세**: 3분할 — 헤더(살아있나/얼마나), Plan 그래프(누가 뭘, 무엇에 막혔나),
-  타임라인(무슨 일이 순서대로).
+- **Mission 상세**: 헤더(살아있나/얼마나), Plan 그래프(누가 뭘, 무엇에 막혔나),
+  대화 패널(지금 방향을 바꾸거나 물어보기), 타임라인(무슨 일이 순서대로).
 - **Plan 그래프**: step 을 **의존 깊이(wave)** 열로 배치한다. 같은 열 = 실제 병렬 작업.
   간선은 선 대신 `← key` 칩으로 그린다(step 10개 넘어가면 선은 읽을 수 없는 뭉치가 된다).
   graph 모드에서는 깊이를 `depends_on` 이 아니라 **forward edge** 로 계산한다 —
@@ -484,6 +589,22 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   `node_revisited` 는 몇 번째 반복인지·상한이 얼마인지·무엇이 리셋됐는지를,
   `loop_exhausted` / `graph_budget_exhausted` 는 왜 멈췄는지를 남긴다.
 
+- **대화 패널** (ticket 4d065f82): 미션의 orchestrator ChatRoom(`mission.room_id`)에
+  붙는다 — 새 채팅 구현이 아니라 기존 Chat 의 `MessageList` / `ChatMessageInput` 을 그대로
+  재사용하므로 마크다운·첨부·멘션·ref 카드가 자동으로 따라온다. 여기서 보낸 지시는
+  orchestrator 세션의 대화 맥락에 그대로 들어가고 서버에 영속되므로 재시작 뒤에도 기록과
+  thread context 가 남는다.
+  대화와 실행 이벤트는 한 스트림에 시간순으로 엮되 **서로 다른 렌더러**로 그린다 — 실행
+  이벤트를 가짜 채팅 메시지로 만들어 `MessageList` 에 넣으면 첨부·발신자 그룹핑 같은 그
+  컴포넌트의 계약이 전부 거짓이 되므로, 종류가 바뀌는 지점에서 구간을 끊는다.
+  참여자가 아니면 observer 로 강등돼 읽기만 되고, 종료된 미션은 입력이 닫힌다.
+  긴 미션에서는 실행 이벤트를 창 크기(기본 200)로 bounded 하고, 위로 스크롤하면
+  `GET /orchestration/missions/:id/events` 커서로 과거를 이어 붙인다 — 커서는
+  `(created_at, write_seq)` 복합 keyset 이다. `created_at` 만으로는 fan-out 한 번에 수십 건이
+  같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 통째로 건너뛴다.
+  (미션 detail 응답 자체도 최신 N건만 싣는 bounded window 다 — 타임라인 섹션이 전체 이력을
+  갖고 있다는 전제는 사실이 아니므로, 과거 접근 수단은 이 커서가 유일하다.)
+
 `orchestration_update` 는 `consensus_update` 와 같은 **UI 전용** 이벤트다
 (`filter: identity.type === 'user'`). 헤드라인(상태·카운트·마지막 이벤트)만 싣고,
 상세는 클라이언트가 디바운스 후 REST 로 다시 당긴다. Agent 는 이 스트림을 소비하지
@@ -492,6 +613,8 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 ---
 
 ## 환경 변수
+
+- `ORCHESTRATION_LEASE_GRACE_MS` — lease 만료 관측 후 새 attempt 를 띄우기까지의 유예 (기본 5분, 10초~1시간)
 
 | 변수 | 기본 | 설명 |
 | --- | --- | --- |

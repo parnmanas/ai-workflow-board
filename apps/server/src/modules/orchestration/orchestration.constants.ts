@@ -37,6 +37,7 @@ export const STEP_STATUSES = [
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
 
@@ -50,14 +51,37 @@ export const TERMINAL_STEP_STATUSES: readonly StepStatus[] = [
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
 ];
+
+/**
+ * 재시도 정책(티켓 4d065f82) — lease 가 만료됐을 때 자동으로 다시 띄워도 되는가.
+ *
+ * `auto`(기본)는 기존 동작 그대로다: 리퍼가 `failed` 로 넘기고 orchestrator 가
+ * 정상 실패 처리 경로에서 재시도를 결정한다. `manual` 은 **비멱등·위험 작업**용이다 —
+ * 배포, 결제, 외부로 나가는 게시처럼 "한 번 더 실행"이 그 자체로 피해인 작업.
+ * 이 경우 리퍼는 자동 재실행 대신 `needs_recovery` 로 전환하고 사유를 남긴다.
+ *
+ * 판정을 서버가 추측하지 않고 계획 시점에 orchestrator 가 선언하게 둔 이유:
+ * 어떤 작업이 비멱등인지는 step 의 instructions 안에만 있는 의미론이라
+ * 상태 머신이 사후에 알아낼 방법이 없다. 선언되지 않으면 기존 동작을 유지한다.
+ */
+export const STEP_RETRY_POLICIES = ['auto', 'manual'] as const;
+export type StepRetryPolicy = (typeof STEP_RETRY_POLICIES)[number];
 
 /** Satisfies a downstream `depends_on` edge. `skipped` counts — the orchestrator
  *  declared the work unnecessary, so dependents must not stay pending forever. */
 export const DEPENDENCY_SATISFYING_STATUSES: readonly StepStatus[] = ['done', 'skipped'];
 
-/** Poisons downstream steps: a dependent can never run, so it goes `blocked`. */
-export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = ['failed', 'blocked', 'cancelled'];
+/** Poisons downstream steps: a dependent can never run, so it goes `blocked`.
+ *  `needs_recovery` 도 포함된다 — 사람이 손대기 전에는 절대 `done` 이 되지 않으므로
+ *  하류를 `pending` 으로 방치하면 미션이 조용히 멈춘 것처럼 보인다. */
+export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = [
+  'failed',
+  'blocked',
+  'cancelled',
+  'needs_recovery',
+];
 
 export function isInFlight(s: string): boolean {
   return (IN_FLIGHT_STEP_STATUSES as readonly string[]).includes(s);
@@ -80,6 +104,20 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'step_blocked',
   'step_skipped',
   'step_retried',
+  // 복구(티켓 4d065f82) — lease 만료로 자동 재실행이 금지된 step, 그리고 지각 보고가
+  // fencing 으로 거부된 순간. 후자는 "왜 내 결과가 반영 안 됐나"를 설명하는 유일한 근거다.
+  'step_needs_recovery',
+  'step_lease_rejected',
+  // 복구 reconciliation(리뷰 라운드1 P0-1) — lease 만료 관측 → 유예 → 재연결 성공
+  // 또는 새 attempt 자동 재디스패치. 각 단계가 왜 그렇게 됐는지 사후 재구성 가능해야 한다.
+  'step_lease_stale',
+  'step_lease_recovered',
+  'step_auto_redispatched',
+  // 재개 가능한 체크포인트 저장(리뷰 라운드1 P0-2) — 마지막 값은 step 에 있고,
+  // 각 저장 시점은 여기 append-only 로 남는다.
+  'step_checkpoint',
+  // 상류 복구로 자동 차단이 풀린 하류(리뷰 라운드1 P1-4).
+  'step_unblocked',
   'orchestrator_woken',
   'mission_paused',
   'mission_resumed',
@@ -293,6 +331,8 @@ export interface PlanStepInput {
   acceptance_criteria?: string;
   depends_on?: string[];
   assignee_agent_id?: string;
+  /** 'auto'(기본) | 'manual'. `StepRetryPolicy` 참고 — 티켓 4d065f82. */
+  retry_policy?: StepRetryPolicy;
 }
 
 export interface PlanValidationError {
@@ -446,7 +486,17 @@ export function computePlanProgress(steps: StepStateView[]): PlanProgress {
       out.done.push(s.step_key);
       continue;
     }
-    if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') {
+    // `needs_recovery` 가 여기 반드시 있어야 한다(티켓 4d065f82). 이 함수는
+    // TERMINAL_STEP_STATUSES 를 참조하지 않고 상태를 직접 나열해 분류하므로, 목록에
+    // 없는 상태는 아래 "pending / ready" 분기로 흘러 **dispatchable 로 분류된다** —
+    // 즉 자동 재실행을 금지하려고 만든 상태가 오히려 즉시 재디스패치를 부른다.
+    // 정확히 막으려던 비멱등 작업의 중복 실행이라 그냥 두면 기능이 반대로 동작한다.
+    if (
+      s.status === 'failed' ||
+      s.status === 'blocked' ||
+      s.status === 'cancelled' ||
+      s.status === 'needs_recovery'
+    ) {
       out.failed.push(s.step_key);
       continue;
     }

@@ -715,6 +715,9 @@ export interface AgentInstanceUpdatePayload {
         usage: 'none' | 'tokens' | 'tokens-and-cost';
         collaboration: Array<'delegated' | 'swarm'>;
         skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+        /** 등급별 표현력 (ticket 5851e435). 보고하지 않는 구버전 매니저에서는
+         *  undefined — 서버는 기본값을 지어내지 않는다. */
+        permission_tiers?: Record<'strict' | 'approve' | 'trusted', 'native' | 'approximated' | 'unsupported'>;
       };
       profiles?: string[];
     }>;

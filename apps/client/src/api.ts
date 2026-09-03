@@ -91,6 +91,7 @@ import type {
   OrchestrationTeam,
   OrchestrationMissionListItem,
   OrchestrationMissionDetail,
+  OrchestrationTimelineEvent,
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
@@ -2317,6 +2318,28 @@ export const api = {
     request<OrchestrationMissionDetail>(
       `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
     ),
+  /**
+   * 미션 타임라인 커서 페이지네이션(티켓 4d065f82). `getOrchestrationMission` 은 최신
+   * N건만 싣는 bounded window 라, 이전 이력은 이 경로로만 가져올 수 있다. 커서는
+   * `(at, seq)` 복합 keyset 이다 — 같은 타임스탬프에 몰린 fan-out 이벤트가 페이지
+   * 경계에서 통째로 누락되지 않게 하려면 seq 가 반드시 함께 가야 한다.
+   */
+  listOrchestrationMissionEvents: (
+    id: string,
+    workspaceId: string,
+    opts?: { limit?: number; before_at?: string; before_seq?: number },
+  ) => {
+    const parts = [`workspace_id=${encodeURIComponent(workspaceId)}`];
+    if (opts?.limit) parts.push(`limit=${opts.limit}`);
+    if (opts?.before_at) parts.push(`before_at=${encodeURIComponent(opts.before_at)}`);
+    if (opts?.before_seq !== undefined) parts.push(`before_seq=${opts.before_seq}`);
+    return request<{
+      events: OrchestrationTimelineEvent[];
+      has_more: boolean;
+      next_cursor: { at: string; seq: number } | null;
+    }>(`/orchestration/missions/${id}/events?${parts.join('&')}`);
+  },
+
   createOrchestrationMission: (data: {
     workspace_id: string;
     team_id: string;

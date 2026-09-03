@@ -285,6 +285,21 @@ export default function AgentsPage() {
       .map(([runtimeId]) => runtimeId);
   }, [managedForm.manager_agent_id, managerInstances]);
 
+  // ticket 5851e435 — 선택된 Host가 보고한 런타임별 권한 등급 표현력.
+  // RuntimeConfigFields가 approve 선택 시 경고를 띄우는 데 쓴다.
+  const selectedPermissionTiers = useMemo(() => {
+    if (!managedForm.manager_agent_id) return undefined;
+    const host = managerInstances.find(
+      (instance) => instance.agent_id === managedForm.manager_agent_id,
+    );
+    if (!host?.runtime_capabilities) return undefined;
+    return Object.fromEntries(
+      Object.entries(host.runtime_capabilities).map(
+        ([runtimeId, health]) => [runtimeId, health.capabilities?.permission_tiers],
+      ),
+    );
+  }, [managedForm.manager_agent_id, managerInstances]);
+
   // undefined([]가 아님)는 선택된 Host가 아직 hermes 프로파일을 리포트하지
   // 않았다는 뜻 — 그 경우 RuntimeConfigFields는 자유 입력으로 폴백한다.
   const selectedHermesProfiles = useMemo(() => {
@@ -500,6 +515,7 @@ export default function AgentsPage() {
             value={managedForm.runtime}
             availableRuntimeIds={selectedRuntimeIds}
             hermesProfiles={selectedHermesProfiles}
+              permissionTiers={selectedPermissionTiers}
             disabled={!managedForm.manager_agent_id}
             onChange={(runtime) => setManagedForm((form) => ({ ...form, runtime, credential_id: '' }))}
           />

@@ -102,6 +102,10 @@ export default function ManagedAgentDialog({
   // RuntimeConfigFields가 빈 드롭다운 대신 자유 입력으로 폴백할 수 있도록
   // 의도적으로 구분한다.
   const [hermesProfiles, setHermesProfiles] = useState<string[] | undefined>(undefined);
+  // ticket 5851e435 — 런타임별 권한 등급 표현력. approve 선택 시 경고를 띄운다.
+  const [permissionTiers, setPermissionTiers] = useState<
+    Record<string, Record<'strict' | 'approve' | 'trusted', string> | undefined> | undefined
+  >(undefined);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -185,12 +189,22 @@ export default function ManagedAgentDialog({
             .map(([runtimeId]) => runtimeId),
         );
         setHermesProfiles(match?.runtime_capabilities?.hermes?.profiles);
+        setPermissionTiers(
+          match?.runtime_capabilities
+            ? Object.fromEntries(
+                Object.entries(match.runtime_capabilities).map(
+                  ([runtimeId, health]) => [runtimeId, health.capabilities?.permission_tiers],
+                ),
+              )
+            : undefined,
+        );
       })
       .catch(() => {
         if (alive) {
           setAvailableModelsByCli({});
           setAvailableRuntimeIds([]);
           setHermesProfiles(undefined);
+          setPermissionTiers(undefined);
         }
       });
     return () => { alive = false; };
@@ -420,6 +434,7 @@ export default function ManagedAgentDialog({
           value={runtimeSelection}
           availableRuntimeIds={availableRuntimeIds}
           hermesProfiles={hermesProfiles}
+          permissionTiers={permissionTiers}
           showRuntime={false}
           onChange={setRuntimeSelection}
         />

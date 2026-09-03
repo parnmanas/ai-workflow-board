@@ -2116,6 +2116,9 @@ export interface RuntimeHealth {
     usage: 'none' | 'tokens' | 'tokens-and-cost';
     collaboration: Array<'delegated' | 'swarm'>;
     skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+    /** 등급별 표현력 (ticket 5851e435). Runtime Host 가 보고하지 않는 구버전
+     *  매니저에서는 undefined — "알 수 없음"이며 기본값을 지어내지 않는다. */
+    permission_tiers?: Record<'strict' | 'approve' | 'trusted', 'native' | 'approximated' | 'unsupported'>;
   };
   /** Hermes 전용: Runtime Host가 현재 열거할 수 있는 프로파일 이름 목록. */
   profiles?: string[];
@@ -2535,7 +2538,9 @@ export type OrchestrationStepStatus =
   | 'failed'
   | 'blocked'
   | 'skipped'
-  | 'cancelled';
+  | 'cancelled'
+  /** lease 만료 + retry_policy='manual' — 자동 재실행이 금지된 복구 대기 상태. */
+  | 'needs_recovery';
 
 export interface OrchestrationTeamMember {
   id: string;
@@ -2659,6 +2664,12 @@ export interface OrchestrationStep {
   visit: number;
   /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
   verdict: string;
+  /** 'auto' | 'manual'. manual 이면 lease 만료 시 자동 재실행 대신 needs_recovery. */
+  retry_policy: string;
+  /** needs_recovery 사유. 다른 상태에서는 ''. */
+  recovery_reason: string;
+  /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
+  last_heartbeat_at: string | null;
 }
 
 // ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────
@@ -2707,6 +2718,8 @@ export interface OrchestrationTimelineEvent {
   message: string;
   data: Record<string, any> | null;
   created_at: string;
+  /** 같은 created_at 안의 삽입 순서 — 커서 페이지네이션의 타이브레이커. */
+  write_seq?: number;
 }
 
 export interface OrchestrationMissionDetail extends OrchestrationMissionListItem {

@@ -72,6 +72,7 @@ import {
   DependencyContext,
   RosterEntry,
   renderMissionPrompt,
+  renderLeaseRecoveryNudge,
   renderStepPrompt,
   renderWakePrompt,
 } from './orchestration-prompt';
@@ -821,6 +822,7 @@ export class OrchestrationRunnerService {
               plan_version: nextVersion,
               attempt: 0,
               max_attempts: 2,
+              retry_policy: s.retry_policy === 'manual' ? 'manual' : 'auto',
             }),
           );
           created.push(key);
@@ -1091,6 +1093,9 @@ export class OrchestrationRunnerService {
           }
           fresh.assignee_agent_id = input.assignee_agent_id;
           if (isTerminalStepStatus(fresh.status)) fresh.status = 'pending';
+          // 재배정은 needs_recovery 를 벗어나는 명시적 조치다 — 사유를 남겨두면
+          // UI 가 이미 처리된 복구 요청을 계속 띄운다.
+          fresh.recovery_reason = '';
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'step_assigned',
@@ -1119,6 +1124,10 @@ export class OrchestrationRunnerService {
           fresh.status = 'pending';
           fresh.finished_at = null;
           fresh.started_at = null;
+          // 명시적 retry 는 needs_recovery 의 유일한 정상 탈출구다 — `manual` 정책이
+          // 막는 것은 **자동** 재실행이지 사람/orchestrator 의 판단에 따른 재실행이
+          // 아니다. 사유를 지워 복구가 처리됐음을 남긴다.
+          fresh.recovery_reason = '';
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'step_retried',
@@ -1139,6 +1148,12 @@ export class OrchestrationRunnerService {
       // whose upstream is still failed, or skipping one that was the only thing
       // blocking a subtree. Re-derive blocking before dispatching so the board
       // never shows a step as merely "waiting" when it can never run.
+      //
+      // 복원이 차단보다 **먼저** 와야 한다(리뷰 라운드1 P1-4): retry 가 상류를 pending
+      // 으로 되살린 직후이므로, 그때 자동 차단됐던 하류를 먼저 pending 으로 돌려놔야
+      // 이어지는 propagateBlocking/pump 가 그 하류를 정상 후보로 본다. 순서를 뒤집으면
+      // 하류는 blocked 인 채로 남아 미션이 영영 완료되지 않는다.
+      await this.unblockAutoBlockedDependents(mission);
       await this.propagateBlocking(mission);
       const pumped = await this.pump(mission);
       await this.wakeAfterPump(mission, pumped);
@@ -1153,8 +1168,70 @@ export class OrchestrationRunnerService {
 
   // ── Member result intake ──────────────────────────────────────────────────
 
+  /**
+   * Lease fencing (티켓 4d065f82) — 이 보고가 **현재** attempt 의 것인지 확인한다.
+   *
+   * 재시도는 `attempt` 만 올리고 `visit` 은 그대로 두므로, 기존 `visit` 가드는 loop
+   * 재진입만 막고 재시도로 밀려난 attempt 의 지각 보고는 통과시켰다 — wave 미션이든
+   * graph 미션이든 마찬가지였다. 그 구멍을 이 토큰이 닫는다.
+   *
+   * a3958947 에서 얻은 교훈을 그대로 적용한다: **누락으로 우회할 수 없어야 한다.**
+   * step 이 토큰을 들고 있으면 보고에도 반드시 있어야 하고, 없으면 거부한다.
+   * 토큰이 빈 step(이 기능 이전에 나간 work order)만 예외로 통과시킨다.
+   */
+  private async requireFreshLease(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    callerAgentId: string,
+    presented: string | undefined | null,
+    what: string,
+  ): Promise<void> {
+    const held = String(step.lease_token || '');
+    if (!held) return; // 업그레이드 이전에 디스패치된 step — 토큰을 요구할 수 없다.
+    const shown = String(presented ?? '').trim();
+    if (shown === held) return;
+
+    // 거부를 타임라인에 남긴다. 이게 없으면 지각 보고는 호출자에게만 409 로 보이고
+    // 미션 기록에는 흔적이 남지 않아, 나중에 "왜 내 결과가 반영 안 됐나"를 설명할
+    // 근거가 사라진다 — 복구 동작을 사후에 감사할 수 있어야 한다는 게 이 기능의 요점이다.
+    const actorName = await this.agentName(callerAgentId);
+    await this.missions.recordEvent(mission, {
+      type: 'step_lease_rejected',
+      step_id: step.id,
+      step_key: step.step_key,
+      message:
+        `Refused a ${what} for "${step.title}" from ${actorName}: ` +
+        (shown ? `superseded lease token` : `no lease token`) +
+        ` (step is on attempt ${step.attempt})`,
+      actor_type: 'system',
+      data: { reason: shown ? 'superseded' : 'missing', attempt: step.attempt },
+    });
+
+    if (!shown) {
+      throw orchestrationError(
+        409,
+        `step "${step.step_key}" requires the lease token from your work order on every ${what}. ` +
+          `Copy the "lease_token" value from the work order verbatim. Without it the server cannot tell your ` +
+          `report apart from one sent by a superseded attempt, so it is refused rather than allowed to ` +
+          `overwrite newer work.`,
+      );
+    }
+    throw orchestrationError(
+      409,
+      `stale ${what} for step "${step.step_key}": your work order's lease token is no longer valid — the ` +
+        `step was re-dispatched (now on attempt ${step.attempt}) and your attempt was superseded. Stop work ` +
+        `on the old work order; the current attempt is handled in its own room.`,
+    );
+  }
+
   /** Non-terminal heartbeat from a member. Flips `dispatched` → `running`. */
-  async reportProgress(stepId: string, callerAgentId: string, message: string): Promise<OrchestrationStep> {
+  async reportProgress(
+    stepId: string,
+    callerAgentId: string,
+    message: string,
+    leaseToken?: string,
+    checkpoint?: Record<string, any> | null,
+  ): Promise<OrchestrationStep> {
     const step = await this.missions.requireStep(stepId);
     return this.withMissionLock(step.mission_id, async () => {
       const fresh = await this.missions.requireStep(stepId);
@@ -1163,10 +1240,45 @@ export class OrchestrationRunnerService {
       if (isTerminalStepStatus(fresh.status)) {
         throw orchestrationError(409, `step "${fresh.step_key}" is already ${fresh.status}`);
       }
+      await this.requireFreshLease(mission, fresh, callerAgentId, leaseToken, 'progress report');
       if (fresh.status === 'dispatched') {
         fresh.status = 'running';
-        fresh.started_at = fresh.started_at ?? new Date();
-        await this.stepRepo.save(fresh);
+      }
+      // 매 호출마다 갱신한다 — 이게 "heartbeat 가 시계를 되돌린다"는 계약의 실체다.
+      // `started_at` 은 예전처럼 최초 1회만 찍어 "언제 실제로 착수했나"를 보존한다.
+      fresh.started_at = fresh.started_at ?? new Date();
+      fresh.last_heartbeat_at = new Date();
+      // 유예 중이었다면 이 heartbeat 가 곧 재연결 성공이다 — lease 를 되살린다.
+      const wasStale = !!fresh.lease_stale_since;
+      fresh.lease_stale_since = null;
+      // 체크포인트는 마지막 값만 보관한다(last-writer-wins). 재개의 근거이므로
+      // 보내지 않은 호출이 기존 값을 지우면 안 된다 — undefined 는 "변경 없음"이다.
+      if (checkpoint !== undefined && checkpoint !== null) {
+        fresh.checkpoint = checkpoint;
+        fresh.checkpoint_at = new Date();
+      }
+      await this.stepRepo.save(fresh);
+
+      if (wasStale) {
+        await this.missions.recordEvent(mission, {
+          type: 'step_lease_recovered',
+          step_id: fresh.id,
+          step_key: fresh.step_key,
+          message: `"${fresh.title}" reconnected — the assignee answered before the grace window expired`,
+          actor_type: 'agent',
+          actor_id: callerAgentId,
+        });
+      }
+      if (checkpoint !== undefined && checkpoint !== null) {
+        await this.missions.recordEvent(mission, {
+          type: 'step_checkpoint',
+          step_id: fresh.id,
+          step_key: fresh.step_key,
+          message: `Checkpoint saved for "${fresh.title}" — a new attempt would resume from here`,
+          actor_type: 'agent',
+          actor_id: callerAgentId,
+          data: { checkpoint },
+        });
       }
       await this.missions.recordEvent(mission, {
         type: 'step_progress',
@@ -1195,6 +1307,7 @@ export class OrchestrationRunnerService {
       artifacts?: Array<{ kind?: string; ref?: string; label?: string }>;
       verdict?: string;
       visit?: number;
+      lease_token?: string;
     },
   ): Promise<{
     step: OrchestrationStep;
@@ -1221,6 +1334,10 @@ export class OrchestrationRunnerService {
           `step "${step.step_key}" is already ${step.status}; a result was recorded for it already`,
         );
       }
+      // Lease fencing(티켓 4d065f82) — 아래 visit 가드보다 **먼저** 본다. visit 은
+      // 재시도로 바뀌지 않으므로 재시도로 밀려난 attempt 는 visit 만으로는 걸러지지
+      // 않는다. 두 가드는 서로 다른 축(재시도 / loop 재진입)을 막으므로 둘 다 남긴다.
+      await this.requireFreshLease(mission, step, callerAgentId, input.lease_token, 'result report');
       // 중복 실행 통제(티켓 1ca9e49b) — loop 재진입이 만드는 유일한 새 위험:
       // 같은 step_id가 iteration 2로 다시 디스패치된 뒤, iteration 1의 subagent가
       // 뒤늦게 보고하면 status가 terminal이 아니라 위 가드를 그대로 통과해
@@ -1604,6 +1721,7 @@ export class OrchestrationRunnerService {
     mission: OrchestrationMission,
     step: OrchestrationStep,
     allSteps: OrchestrationStep[],
+    opts?: { recovery?: boolean },
   ): Promise<void> {
     const agentId = step.assignee_agent_id!;
     const agent = await this.agentRepo.findOne({ where: { id: agentId } });
@@ -1667,11 +1785,23 @@ export class OrchestrationRunnerService {
     // visit은 loop 재진입 축이라 재시도로는 늘지 않는다(재진입 시
     // applyGraphTransitions가 올린다). 최초 디스패치만 0 → 1로 올린다.
     if ((step.visit ?? 0) < 1) step.visit = 1;
+    // 이번 attempt 의 fencing token 을 새로 발급한다(티켓 4d065f82). visit 과 달리
+    // **모든** 재디스패치에서 바뀌므로 재시도로 밀려난 이전 attempt 의 지각 보고까지
+    // 걸러낸다. 전송 전에 커밋하는 이유는 attempt 와 같다 — 포스트 도중 죽어도
+    // 이전 토큰은 이미 무효가 돼 있어야 한다.
+    step.lease_token = randomUUID();
     step.status = 'dispatched';
     step.room_id = room.id;
     step.dispatched_at = new Date();
     step.started_at = null;
     step.finished_at = null;
+    // 새 attempt 는 새 lease 다 — 이전 attempt 의 heartbeat 를 물려받으면 리퍼가
+    // 죽은 attempt 의 생존 신호를 기준으로 새 attempt 의 시계를 재버린다.
+    step.last_heartbeat_at = null;
+    step.lease_stale_since = null;
+    step.recovery_reason = '';
+    // `checkpoint` 는 **일부러 지우지 않는다** — 새 attempt 가 이어서 할 근거이고,
+    // 아래 renderStepPrompt 가 work order 에 그대로 실어 보낸다.
     await this.stepRepo.save(step);
 
     // global budget은 재시도까지 포함해 "subagent를 몇 번 더 띄울 수 있는가"를
@@ -1716,7 +1846,7 @@ export class OrchestrationRunnerService {
       teamName: team?.name ?? '',
       orchestratorName,
       dependencies,
-      isRetry: step.attempt > 1,
+      isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision.workspace_folder,
       graphNode: graphNode
         ? {
@@ -1772,6 +1902,9 @@ export class OrchestrationRunnerService {
       const s = byKey.get(key);
       if (!s || s.status === 'blocked') continue;
       s.status = 'blocked';
+      // 엔진이 자동으로 막았다는 표시 — 작업자가 스스로 "막혔다"고 보고한 blocked 와
+      // 구분해야 상류 복구 시 전자만 되살릴 수 있다(리뷰 라운드1 P1-4).
+      s.auto_blocked = true;
       s.finished_at = new Date();
       s.result_summary =
         s.result_summary ||
@@ -1788,6 +1921,59 @@ export class OrchestrationRunnerService {
       data: { blocked: changed.map((s) => s.step_key) },
     });
     return changed.map((s) => s.step_key);
+  }
+
+  /**
+   * 상류가 복구되면 **엔진이 자동으로 막았던** 하류를 다시 실행 가능하게 되돌린다
+   * (티켓 4d065f82, 리뷰 라운드1 P1-4).
+   *
+   * `propagateBlocking` 은 여태 한 방향뿐이었다 — pending → blocked 로만 갔고 돌아오는
+   * 경로가 없었다. 그래서 실패(또는 needs_recovery)한 step 을 retry 로 되살려도 그때
+   * 딸려 막힌 하류는 영원히 blocked 로 남아 미션이 완료될 수 없었다. `blocked` 는
+   * `computePlanProgress` 에서 terminal 로 분류되므로 다시 dispatchable 이 되는 길도 없다.
+   *
+   * **작업자가 스스로 보고한 blocked 는 절대 건드리지 않는다** (`auto_blocked=false`) —
+   * 그건 "내가 할 수 없다"는 사람/에이전트의 판정이라 상류 복구와 무관하다.
+   */
+  private async unblockAutoBlockedDependents(mission: OrchestrationMission): Promise<string[]> {
+    const steps = await this.missions.listSteps(mission.id);
+    const candidates = steps.filter((s) => s.status === 'blocked' && s.auto_blocked);
+    if (candidates.length === 0) return [];
+
+    // "지금 풀어도 되는가"를 직접 재계산하지 않는다. blocked 는 두 판정기 모두에서
+    // terminal 로 분류되므로 그 상태 그대로는 물어볼 수 없어서, 후보를 pending 으로
+    // **가정한 사본**을 만들어 같은 progress 판정기에 다시 태운다. 그래야 wave 와 graph
+    // (조건 분기·join policy 포함)가 각자의 규칙으로 답하고, 이 메서드가 세 번째 판정
+    // 분기가 되지 않는다 — CLAUDE.md 의 "판정 분기는 computeMissionProgress 한 곳에만".
+    const candidateKeys = new Set(candidates.map((s) => s.step_key));
+    const hypothetical = steps.map((s) =>
+      candidateKeys.has(s.step_key) ? { ...s, status: 'pending' as const } : s,
+    );
+    const progress = this.progressOf(mission, hypothetical as OrchestrationStep[]);
+    const stillBlocked = new Set(progress.newlyBlocked);
+
+    const restored: OrchestrationStep[] = [];
+    for (const s of candidates) {
+      if (stillBlocked.has(s.step_key)) continue;
+      s.status = 'pending';
+      s.auto_blocked = false;
+      s.finished_at = null;
+      // 자동 차단이 남긴 안내문만 지운다 — 작업자가 쓴 결과는 위 가드로 이미 제외됐다.
+      if (s.result_summary.startsWith('[auto-blocked]')) s.result_summary = '';
+      restored.push(s);
+    }
+    if (restored.length === 0) return [];
+
+    await this.stepRepo.save(restored);
+    await this.missions.recordEvent(mission, {
+      type: 'step_unblocked',
+      message:
+        `${restored.length} step(s) unblocked because the upstream failure was recovered: ` +
+        restored.map((s) => s.step_key).join(', '),
+      actor_type: 'system',
+      data: { unblocked: restored.map((s) => s.step_key) },
+    });
+    return restored.map((s) => s.step_key);
   }
 
   /**
@@ -1921,6 +2107,203 @@ export class OrchestrationRunnerService {
    * Fail a step from outside the member's own report (reaper timeout), then run
    * the same downstream handling a real failure report would.
    */
+  /**
+   * lease 만료 reconciliation — 리퍼가 in-flight step 마다 부르는 **단일 진입점**이다
+   * (티켓 4d065f82, 리뷰 라운드1 P0-1).
+   *
+   * 이전에는 만료를 보자마자 `failStepExternally` 로 넘겨 step 을 죽였다. 요구된
+   * "stale worker 재연결 · 상태조회 · 유예 후 새 attempt 재디스패치"가 통째로 없었고,
+   * 복구는 orchestrator 가 수동으로 retry 를 부를 때까지 일어나지 않았다.
+   *
+   * 이제 두 단계다:
+   *
+   *   1) **만료 최초 관측** — 죽이지 않는다. `lease_stale_since` 를 찍고, 그 작업자의
+   *      현재 상태(online 여부)를 조회해 trace 에 남기고, step room 에 재연결/상태보고
+   *      요청을 포스트한다. 작업자가 유예 안에 heartbeat 를 보내면 lease 가 그대로
+   *      되살아난다(`reportProgress` 가 `lease_stale_since` 를 지운다).
+   *
+   *   2) **유예 경과** — 그래도 응답이 없으면 새 attempt 로 **자동** 재디스패치한다.
+   *      재디스패치는 `dispatchStep` 그대로라 새 lease token 과 새 room 을 받고, 이전
+   *      attempt 의 지각 결과는 fencing 이 이미 거부한다(= idempotent). 예산이
+   *      남지 않았거나 `retry_policy='manual'` 이면 재실행하지 않고 종결한다.
+   *
+   * 이 경로는 "서버 재시작 직후 부팅 스윕"과 "정상 운용 중 주기 스윕"이 **같은**
+   * 메서드를 부르므로, 장애 감지와 재시작 복구가 실제로 하나의 reconciliation 경로다.
+   */
+  async reconcileStaleLease(
+    stepId: string,
+    now: Date,
+    graceMs: number,
+    timeoutMinutes: number,
+  ): Promise<'noticed' | 'redispatched' | 'terminal' | 'skipped'> {
+    const found = await this.missions.requireStep(stepId);
+    return this.withMissionLock(found.mission_id, async () => {
+      // 락 안에서 다시 읽는다 — 대기 중에 작업자가 보고를 마쳤을 수 있다.
+      const step = await this.missions.requireStep(stepId);
+      if (!isInFlight(step.status)) return 'skipped';
+      const mission = await this.missions.requireMission(step.mission_id);
+      if (mission.status !== 'running') return 'skipped';
+
+      const baseline = step.last_heartbeat_at ?? step.started_at ?? step.dispatched_at;
+      if (!baseline) return 'skipped';
+      const silentMs = now.getTime() - new Date(baseline).getTime();
+      if (silentMs < timeoutMinutes * 60_000) {
+        // 유예 중에 생존 신호가 돌아왔다 — lease 를 되살리고 흔적을 남긴다.
+        if (step.lease_stale_since) {
+          step.lease_stale_since = null;
+          await this.stepRepo.save(step);
+          await this.missions.recordEvent(mission, {
+            type: 'step_lease_recovered',
+            step_id: step.id,
+            step_key: step.step_key,
+            message: `"${step.title}" reconnected — the assignee resumed reporting before the grace window expired`,
+            actor_type: 'system',
+          });
+        }
+        return 'skipped';
+      }
+
+      // ── 1단계: 최초 관측 → 상태조회 + 재연결 요청 ──────────────────────────
+      if (!step.lease_stale_since) {
+        step.lease_stale_since = now;
+        await this.stepRepo.save(step);
+
+        const assignee = step.assignee_agent_id
+          ? await this.agentRepo.findOne({ where: { id: step.assignee_agent_id } })
+          : null;
+        const assigneeName = await this.agentName(step.assignee_agent_id);
+        await this.missions.recordEvent(mission, {
+          type: 'step_lease_stale',
+          step_id: step.id,
+          step_key: step.step_key,
+          message:
+            `"${step.title}" went silent for ${Math.round(silentMs / 60_000)}m — asking ${assigneeName} to ` +
+            `reconnect (assignee is ${assignee?.is_online ? 'online' : 'offline'}). ` +
+            `A new attempt is dispatched if there is no answer within the grace window.`,
+          actor_type: 'system',
+          data: {
+            assignee_online: !!assignee?.is_online,
+            silent_ms: silentMs,
+            grace_ms: graceMs,
+            attempt: step.attempt,
+            has_checkpoint: !!step.checkpoint,
+          },
+        });
+
+        // 재연결 요청은 그 attempt 의 방으로 보낸다 — 살아 있다면 여기서 읽는다.
+        if (step.room_id) {
+          try {
+            await this.postToRoom(
+              step.room_id,
+              mission.workspace_id,
+              renderLeaseRecoveryNudge({ step, silentMs, graceMs }),
+            );
+          } catch (e: any) {
+            this.logService.warn(
+              'Orchestration',
+              `failed to post reconnect request for step ${step.step_key}: ${e?.message || e}`,
+            );
+          }
+        }
+        return 'noticed';
+      }
+
+      // ── 2단계: 유예 경과 판정 ──────────────────────────────────────────────
+      if (now.getTime() - new Date(step.lease_stale_since).getTime() < graceMs) return 'noticed';
+
+      const manual = String(step.retry_policy || 'auto') === 'manual';
+      const budgetLeft = step.attempt < step.max_attempts;
+      const reason =
+        `[lease expired] no sign of life for ${Math.round(silentMs / 60_000)} minutes and no answer to the ` +
+        `reconnect request within the grace window.`;
+
+      if (manual || !budgetLeft) {
+        // 자동 재실행이 금지됐거나 예산이 없다 — 기존 종결 경로로 넘긴다.
+        await this.finalizeUnrecoverableStep(mission, step, reason, manual, budgetLeft);
+        return 'terminal';
+      }
+
+      // 새 attempt 로 자동 재디스패치. dispatchStep 이 attempt/lease/room 을 모두
+      // 새로 발급하므로 이전 attempt 의 지각 결과는 fencing 이 거부한다.
+      step.lease_stale_since = null;
+      await this.stepRepo.save(step);
+      await this.missions.recordEvent(mission, {
+        type: 'step_auto_redispatched',
+        step_id: step.id,
+        step_key: step.step_key,
+        message:
+          `"${step.title}" is being re-dispatched as attempt ${step.attempt + 1}/${step.max_attempts} — ` +
+          reason +
+          (step.checkpoint ? ' The new attempt resumes from the last saved checkpoint.' : ''),
+        actor_type: 'system',
+        data: { previous_attempt: step.attempt, resumed_from_checkpoint: !!step.checkpoint },
+      });
+
+      // 이전 실패로 하류가 자동 차단됐다면 지금 되살린다 — 이 step 이 다시 실행
+      // 중이므로 그 차단의 전제가 사라졌다.
+      await this.unblockAutoBlockedDependents(mission);
+      const allSteps = await this.missions.listSteps(mission.id);
+      try {
+        await this.dispatchStep(mission, step, allSteps, { recovery: true });
+      } catch (e: any) {
+        // budgetLeft 는 여기서 그대로 넘긴다 — 재디스패치가 실패한 것이지 재시도 예산이
+        // 바닥난 게 아니다. false 를 넘기면 사유에 "예산 3회를 모두 소진했다"가 붙어
+        // 운영자가 원인을 잘못 읽는다.
+        await this.finalizeUnrecoverableStep(
+          mission,
+          step,
+          `${reason} Re-dispatch also failed: ${e?.message || e}`,
+          manual,
+          budgetLeft,
+        );
+        return 'terminal';
+      }
+      return 'redispatched';
+    });
+  }
+
+  /**
+   * 자동 복구가 불가능하다고 확정됐을 때의 종결. `retry_policy='manual'` 이면
+   * needs_recovery, 아니면 failed 로 간다. 호출자는 mission lock 을 쥐고 있어야 한다.
+   */
+  private async finalizeUnrecoverableStep(
+    mission: OrchestrationMission,
+    step: OrchestrationStep,
+    reason: string,
+    manual: boolean,
+    budgetLeft: boolean,
+  ): Promise<void> {
+    const why = manual
+      ? `${reason} 이 step 은 retry_policy='manual'(비멱등·위험 작업)로 선언돼 있어 자동으로 다시 ` +
+        `실행하지 않는다. 이미 어디까지 반영됐는지 사람이 확인한 뒤 ` +
+        `update_orchestration_step(action='retry') 또는 재배정으로만 재개할 수 있다.`
+      : budgetLeft
+        ? reason
+        : `${reason} 재시도 예산 ${step.max_attempts}회를 모두 소진했다.`;
+
+    step.status = manual ? 'needs_recovery' : 'failed';
+    step.recovery_reason = manual ? why : '';
+    step.result_summary = why.slice(0, SUMMARY_MAX);
+    step.finished_at = new Date();
+    step.lease_token = '';
+    step.lease_stale_since = null;
+    await this.stepRepo.save(step);
+    await this.missions.recordEvent(mission, {
+      type: manual ? 'step_needs_recovery' : 'step_failed',
+      step_id: step.id,
+      step_key: step.step_key,
+      message: manual
+        ? `Step "${step.title}" needs manual recovery: ${why.slice(0, 300)}`
+        : `Step "${step.title}" failed: ${why.slice(0, 300)}`,
+      actor_type: 'system',
+      data: manual ? { retry_policy: 'manual', recovery_reason: why } : undefined,
+    });
+
+    const blocked = await this.propagateBlocking(mission);
+    const pumped = await this.pump(mission);
+    await this.wakeAfterPump(mission, pumped, { justFinished: step, blockedKeys: blocked });
+  }
+
   async failStepExternally(stepId: string, reason: string): Promise<void> {
     const found = await this.missions.requireStep(stepId);
     return this.withMissionLock(found.mission_id, async () => {
@@ -1929,16 +2312,31 @@ export class OrchestrationRunnerService {
       const mission = await this.missions.requireMission(step.mission_id);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) return;
 
-      step.status = 'failed';
+      // 비멱등·위험 작업(`retry_policy='manual'`)은 자동 재실행 경로로 보내지 않는다
+      // (티켓 4d065f82). `failed` 로 두면 orchestrator 가 정상 실패 처리로 다시 띄울 수
+      // 있는데, 배포·결제·외부 게시처럼 "한 번 더"가 그 자체로 피해인 작업에서는 그게
+      // 바로 막아야 할 동작이다. 대신 사유를 붙여 needs_recovery 로 세운다.
+      const manual = String(step.retry_policy || 'auto') === 'manual';
+      step.status = manual ? 'needs_recovery' : 'failed';
+      step.recovery_reason = manual
+        ? `${reason} 이 step 은 retry_policy='manual'(비멱등·위험 작업)로 선언돼 있어 자동으로 다시 ` +
+          `실행하지 않는다. 이미 어디까지 반영됐는지 사람이 확인한 뒤 update_orchestration_step(action='retry') ` +
+          `또는 재배정으로만 재개할 수 있다.`
+        : '';
       step.result_summary = reason.slice(0, SUMMARY_MAX);
       step.finished_at = new Date();
+      // lease 를 만료시킨다 — 뒤늦게 살아난 subagent 가 이 step 에 다시 쓰지 못하게.
+      step.lease_token = '';
       await this.stepRepo.save(step);
       await this.missions.recordEvent(mission, {
-        type: 'step_failed',
+        type: manual ? 'step_needs_recovery' : 'step_failed',
         step_id: step.id,
         step_key: step.step_key,
-        message: `Step "${step.title}" failed: ${reason.slice(0, 300)}`,
+        message: manual
+          ? `Step "${step.title}" needs manual recovery: ${reason.slice(0, 300)}`
+          : `Step "${step.title}" failed: ${reason.slice(0, 300)}`,
         actor_type: 'system',
+        data: manual ? { retry_policy: 'manual', recovery_reason: step.recovery_reason } : undefined,
       });
 
       const blocked = await this.propagateBlocking(mission);

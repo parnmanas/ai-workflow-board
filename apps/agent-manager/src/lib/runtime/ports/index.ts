@@ -6,11 +6,16 @@ export interface CliOneshotRequestPort {
   rolePrompt: string; taskText: string; mcpConfigPath: string | null; cwd?: string | null;
   cliHomeDir?: string | null; mcpAttribution?: any; model?: string | null; harness?: any;
   effort?: string | null; ultracode?: boolean;
+  /** effective permission policy (ticket 5851e435) — capability negotiation
+   *  이 이 값을 다시 쓰지 않으므로 어댑터의 argv builder 까지 그대로 전달된다. */
+  permission?: any;
 }
 export interface CliSessionRequestPort {
   rolePrompt: string; mcpConfigPath: string | null; model?: string | null; harness?: any;
   effort?: string | null; ultracode?: boolean;
   sessionMode?: 'persistent' | 'resume' | 'control'; sessionId?: string;
+  /** effective permission policy — CliOneshotRequestPort.permission 참고. */
+  permission?: any;
 }
 export interface CliExecutionAdapterPort {
   buildOneshotSpawn(spec: CliOneshotRequestPort): CliSpawnDescriptorPort;

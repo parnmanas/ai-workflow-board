@@ -19,7 +19,9 @@
  *                 already responded (comment / claim) since entering the
  *                 CURRENT column — that proves the dispatch was NOT lost, so
  *                 the ticket's silence since then is a chosen pause, not a
- *                 stall (ticket fec25d90).
+ *                 stall (ticket fec25d90) — UNLESS the session that produced
+ *                 that response was killed by a manager restart it did not
+ *                 survive (ticket 4f1f33c6, see `decideRestartReseed`).
  *
  * Because every decision is re-derived from committed DB state, the guarantee
  * survives a process restart (the next sweep re-discovers all open intents) and
@@ -37,10 +39,12 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { Agent } from '../../entities/Agent';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
+import { Subagent } from '../../entities/Subagent';
 import { Ticket } from '../../entities/Ticket';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { AgentStatusService } from './agent-status.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import {
@@ -53,6 +57,128 @@ import {
 function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
   try { return JSON.parse(val || JSON.stringify(fallback)) as T; }
   catch { return fallback; }
+}
+
+/**
+ * 한 role holder가 이 티켓·role 로 마지막에 돌린 CLI 세션의 서버측 durable
+ * 기록(`subagents` 행) 요약. `decideRestartReseed`가 순수 판정을 하도록
+ * DataSource 의존을 걷어낸 형태다(ticket 4f1f33c6).
+ */
+export interface RoleSessionSnapshot {
+  startedAtMs: number;
+  /** null = manager가 종료를 보고하기 전에 사라진 세션(= 아직 열린 행). */
+  endedAtMs: number | null;
+  /** 'SIGTERM' | 'disappeared' | … — 정상 종료면 null. */
+  signal: string | null;
+  exitCode: number | null;
+}
+
+export interface RestartReseedDecision {
+  reseed: boolean;
+  reason: string;
+  /** 판정 근거가 된 매니저 재시작 시각(epoch ms). 재시작이 없으면 0. */
+  restartAtMs: number;
+}
+
+/**
+ * "holder가 이미 응답했다"는 fec25d90 재시드 스킵을 **매니저 재시작 사실과
+ * 교차**하는 순수 판정(ticket 4f1f33c6).
+ *
+ * 문제: self-update는 drain 상한을 넘기면 진행 중 세션을 `self_update_restart`
+ * 로 SIGTERM한다. 이 보드의 관례상 담당자는 착수 직후 claim + "작업을
+ * 시작합니다" 코멘트를 남기므로, 장시간 작업 중 그렇게 죽는 세션은 **정확히
+ * 재시드가 억제되는 상태**에 놓인다 — 티켓이 조용히 멈춘다.
+ *
+ * 그렇다고 "재시작이 있었으면 무조건 재시드"로 열면 fec25d90 회귀다: 의도적으로
+ * 대기 중인 holder까지 매 재시작마다 재디스패치되고, 그 holder는 (보드 지침상)
+ * 같은 대기 코멘트를 반복하지 않으므로 재시드된 intent가 `progressed`로
+ * 해소되지 못한 채 재디스패치·에스컬레이션 루프가 된다.
+ *
+ * 그래서 **재시작 사실 × 그 시점의 in-flight 증거** 두 조건을 모두 요구한다.
+ * 재시작 사실은 "최신 인스턴스가 하나라도 있음"이 아니라 **live 인스턴스 전부가
+ * holder 응답 이후에 부팅했음**으로 판정한다 — 한 agent identity를 여러 호스트가
+ * 감독할 수 있어서, 존재 한정으로 열면 살아서 진행 중인 세션을 재시드한다
+ * (아래 본문 주석 참고).
+ * in-flight 증거는 in-memory 신호가 아니라 durable한 `subagents` 행이며, 그
+ * 행의 종료 방식이 "턴을 마치고 끝난 세션"과 "턴 도중 죽은 세션"을 가른다:
+ *
+ *   - 열린 행(`endedAtMs === null`)          → manager가 종료를 보고하지 못하고
+ *                                              사라진 것 = 재시작에 죽었다.
+ *   - `signal` 있음 / exit code ≠ 0          → SIGTERM·SIGKILL·disappeared =
+ *                                              턴을 마치지 못했다.
+ *   - signal 없고 exit code 0/미보고         → idle 타이머 등으로 **정상 종료** =
+ *                                              holder의 침묵은 선택된 대기다.
+ *
+ * 순수 함수라 `apps/server/test/dispatch-restart-reseed-decision.test.mjs`에서
+ * DataSource 없이 전 분기를 직접 단언한다.
+ */
+export function decideRestartReseed(opts: {
+  /** 이 role holder 본인의 최신 진행 신호 시각(epoch ms). */
+  holderProgressMs: number;
+  /** 이 holder를 감독 중인 live manager 인스턴스들의 프로세스 부팅 시각(epoch ms). */
+  managerStartedAtMs: number[];
+  /** 이 (ticket, holder, role)의 가장 최근 세션 기록. 없으면 null. */
+  session: RoleSessionSnapshot | null;
+}): RestartReseedDecision {
+  // 이 agent를 감독 중인 live manager 인스턴스가 하나도 없으면 판정 근거가
+  // 없다(서버 재시작 직후 레지스트리가 비어 있는 구간 포함) — 재시드하지 않는다.
+  if (opts.managerStartedAtMs.length === 0) {
+    return { reseed: false, reason: 'no_live_manager_instance', restartAtMs: 0 };
+  }
+
+  // **모든** live manager 인스턴스가 holder 응답 이후에 부팅했을 때에만 "그
+  // 응답을 낸 세션은 지금 살아 있을 수 없다"가 성립한다.
+  //
+  // 존재 한정("하나라도 최신")으로 열면 거짓양성이 난다: `listForAgent()`는 같은
+  // agent identity를 감독하는 **여러 호스트**의 인스턴스를 돌려주고(노트북+VM
+  // 페어링, ST-5b 다중 agent 감독), supersede 제거는 같은 `agent_id + hostname`
+  // 에만 적용된다. host A가 세션을 계속 돌리는 중에 host B가 새로 등록하면
+  // host B의 부팅 시각을 host A의 살아 있는 세션과 잘못 교차해 **진행 중인**
+  // holder를 재시드하게 된다 — 정확히 fec25d90이 막으려던 회귀다.
+  //
+  // 반대로 전 인스턴스가 응답 이후 부팅했다면, 응답 시점에 존재했던 매니저
+  // 프로세스는 하나도 남아 있지 않다(살아 있었다면 하트비트로 등록돼 이 목록에
+  // 있었을 것). 그 세션은 어떤 매니저의 감독도 받고 있지 않다. `subagents` 행에
+  // manager instance_id 연계가 없어도 서버 단독으로 증명되는 형태라 SSE
+  // contract를 건드리지 않는다.
+  //
+  // 기준 시각은 최댓값이 아니라 **최솟값**을 쓴다 — 가장 이른 부팅조차 응답보다
+  // 나중이어야 위 논증이 성립하고, 아래 "재시작 이후 시작된 세션" 판정도 가장
+  // 이른 부팅을 기준으로 해야 이미 재개된 작업을 다시 재시드하지 않는다.
+  let restartAtMs = Number.POSITIVE_INFINITY;
+  for (const ms of opts.managerStartedAtMs) {
+    // 파싱 불가한 부팅 시각은 "응답 이후임을 증명하지 못함"으로 취급한다.
+    if (!Number.isFinite(ms)) {
+      return { reseed: false, reason: 'manager_instance_boot_time_unknown', restartAtMs: 0 };
+    }
+    // 응답 시점에 이미 떠 있던 매니저가 하나라도 살아 있다 = 그 프로세스가 아직
+    // 그 세션을 안고 있을 수 있다 = 재시드 근거 없음.
+    if (ms <= opts.holderProgressMs) {
+      return { reseed: false, reason: 'manager_instance_predates_holder_response', restartAtMs: 0 };
+    }
+    if (ms < restartAtMs) restartAtMs = ms;
+  }
+
+  const s = opts.session;
+  // 세션 기록 자체가 없으면 "재시작에 죽었다"고 말할 근거가 없다 — 재시드하지
+  // 않는 쪽이 fec25d90 이전 동작과 같아 안전하다(subagent 모니터가 꺼진
+  // 배포에서도 동작이 나빠지지 않는다).
+  if (!s) return { reseed: false, reason: 'no_session_record_for_role', restartAtMs };
+
+  // 재시작 이후에 시작된 세션이 이미 있다 = 작업이 이미 재개됐다.
+  if (s.startedAtMs > restartAtMs) {
+    return { reseed: false, reason: 'session_started_after_restart', restartAtMs };
+  }
+  // 가장 최근 세션이 holder의 마지막 응답보다 먼저 끝났다면 그 응답을 낸 세션이
+  // 아니다 — 무엇이 응답을 냈는지 모르는 상태이므로 판단을 보류한다.
+  if (s.endedAtMs !== null && s.endedAtMs < opts.holderProgressMs) {
+    return { reseed: false, reason: 'session_predates_holder_response', restartAtMs };
+  }
+  // 정상 종료 = 턴을 마쳤다 = holder의 침묵은 선택된 대기(fec25d90).
+  if (s.endedAtMs !== null && s.signal === null && (s.exitCode === 0 || s.exitCode === null)) {
+    return { reseed: false, reason: 'session_completed_normally', restartAtMs };
+  }
+  return { reseed: true, reason: 'holder_session_lost_to_manager_restart', restartAtMs };
 }
 
 interface ReconcileStats {
@@ -76,6 +202,10 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
     private readonly intents: DispatchIntentService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
+    // ticket 4f1f33c6 — 매니저 재시작 사실(인스턴스 프로세스 부팅 시각)을 읽어
+    // 재시드 스킵과 교차한다. @Global() 이라(instance-registry.module.ts) 새
+    // 모듈 import 없이 주입된다 — TriggerLoopService 와 같은 DI 형태.
+    private readonly instanceRegistry: InstanceRegistryService,
   ) {
     this.config = this.intents.config;
   }
@@ -304,6 +434,12 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
    * 증거가 되지 못한다. 그 신호까지 합친 티켓 전체 `_latestForwardProgressMs`
    * 를 그대로 쓰면, assignee emit이 실제로 유실됐는데 reporter가 질문 코멘트만
    * 남긴 경우에도 영구히 재시드가 억제되는 정반대 방향의 회귀가 생긴다.
+   *
+   * 이 스킵은 다시 **매니저 재시작 사실과 교차**된다(ticket 4f1f33c6):
+   * holder가 응답했더라도 그 응답을 낸 세션이 매니저 재시작에 죽었다면
+   * (self-update의 `self_update_restart` SIGTERM 등) "디스패치가 유실되지
+   * 않았다"는 근거가 무너지므로 재시드 대상으로 되돌린다. 판정 규칙과 그것이
+   * fec25d90 회귀를 되살리지 않는 이유는 `decideRestartReseed` 참고.
    */
   private async _seedMissingIntents(now: Date, stats: ReconcileStats): Promise<void> {
     const colRepo = this.dataSource.getRepository(BoardColumn);
@@ -347,7 +483,20 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
         // fec25d90, 위 docstring 참고). 다른 role holder/제3자의 신호는 넣지
         // 않는다 — 있어도 "이 role"의 유실 디스패치는 여전히 seed돼야 한다.
         const holderProgressMs = await this._holderProgressMs(ticket, role, holders);
-        if (holderProgressMs > enteredAtMs) continue;
+        let seedReason = 'routed_ticket_idle_no_open_intent';
+        let restartDecision: RestartReseedDecision | null = null;
+        if (holderProgressMs > enteredAtMs) {
+          // …단, 그 응답을 낸 세션이 매니저 재시작에 죽었다면 얘기가 다르다
+          // (ticket 4f1f33c6). 재시작 사실과 durable in-flight 증거를 함께
+          // 요구해 "의도적 대기"와 "재시작에 끊긴 작업"을 가른다.
+          restartDecision = decideRestartReseed({
+            holderProgressMs,
+            managerStartedAtMs: this._managerStartedAtMs(holders),
+            session: await this._latestRoleSession(ticket.id, role, holders),
+          });
+          if (!restartDecision.reseed) continue;
+          seedReason = restartDecision.reason;
+        }
 
         await this.intents.createSeed({
           workspaceId: ticket.workspace_id,
@@ -358,8 +507,16 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
         });
         await this._writeAudit(ticket, { id: '', ticket_id: ticket.id, role, workspace_id: ticket.workspace_id, agent_id: holders[0], attempts: 0 } as any, 'dispatch_intent_seeded', {
           idle_ms: Math.round(idleMs),
-          reason: 'routed_ticket_idle_no_open_intent',
-          recovery: 'reconciler will dispatch this seeded intent on the next pass',
+          reason: seedReason,
+          ...(restartDecision
+            ? {
+              holder_progress_at: new Date(holderProgressMs).toISOString(),
+              manager_restarted_at: new Date(restartDecision.restartAtMs).toISOString(),
+            }
+            : {}),
+          recovery: restartDecision
+            ? 'the holder responded, but its session did not survive the manager restart — reconciler re-dispatches this role on the next pass'
+            : 'reconciler will dispatch this seeded intent on the next pass',
         });
         stats.seeded += 1;
       }
@@ -492,6 +649,77 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
     }
 
     return Math.max(commentMs, lockMs, outputMs);
+  }
+
+  /**
+   * 이 holder들을 감독 중인 live manager 인스턴스들의 **프로세스 부팅 시각**
+   * (epoch ms) 목록(ticket 4f1f33c6). 매니저는 재시작할 때마다 새 instance_id
+   * 와 새 `started_at`으로 등록한다(`InstanceHeartbeat`가 생성 시점에 한 번
+   * 찍는 값).
+   *
+   * 목록을 **빠짐없이** 넘기는 것이 중요하다. `decideRestartReseed`는 이 중
+   * 하나가 아니라 **전부**가 holder 응답 이후에 부팅했는지를 보고 판정하며
+   * (같은 agent identity를 감독하는 호스트가 여럿일 수 있다 — 그 이유는 그쪽
+   * docstring 참고), 여기서 항목을 빠뜨리면 "응답 시점부터 살아 있던 매니저"를
+   * 못 보고 진행 중인 holder를 재시드하게 된다. 그래서 파싱 불가한
+   * `started_at`도 버리지 않고 그대로 넘겨 판정 쪽에서 보수적으로 처리한다.
+   *
+   * 레지스트리는 in-memory 라 서버 재시작 직후에는 비어 있을 수 있지만, 값
+   * 자체는 매니저가 다음 하트비트(기본 ≤30초)에 다시 실어 보내는 자기 부팅
+   * 시각이라 복원된다. 비어 있는 동안에는 빈 배열 → 재시드 억제 유지(=기존
+   * 동작)로 안전하게 축퇴한다.
+   */
+  private _managerStartedAtMs(holderAgentIds: string[]): number[] {
+    const out: number[] = [];
+    const seen = new Set<string>();
+    for (const agentId of holderAgentIds) {
+      for (const inst of this.instanceRegistry.listForAgent(agentId)) {
+        if (seen.has(inst.instance_id)) continue;
+        seen.add(inst.instance_id);
+        // 파싱 불가여도 버리지 않는다 — 위 docstring 참고.
+        out.push(new Date(inst.started_at).getTime());
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 이 (ticket, holder, role)로 가장 최근에 돌았던 CLI 세션의 durable 기록
+   * (ticket 4f1f33c6). `subagents` 테이블은 세션 생명주기를 프로세스 밖에
+   * 보존하므로 — 열린 행 / `signal` / `exit_code` — "턴을 마치고 끝난 세션"과
+   * "턴 도중 죽은 세션"을 서버 혼자 구분할 수 있는 유일한 durable 신호다.
+   * output-liveness나 current_task 같은 in-memory 신호는 서버 재시작에 사라져
+   * 이 판정에 쓸 수 없다.
+   *
+   * role을 정확히 일치시킨다 — 한 agent가 같은 티켓에서 여러 role을 겸할 수
+   * 있어(이 보드에서 흔하다) role을 느슨하게 맞추면 다른 role의 세션 기록으로
+   * 이 role의 재시드를 좌우하게 된다. role을 보고하지 않는 구버전 manager는
+   * 매치가 없어 `null`이 되고, 판정은 "증거 없음 → 재시드 안 함"으로 안전하게
+   * 축퇴한다.
+   *
+   * `subagent_id: 'DESC'`를 결정적 타이브레이커로 함께 쓴다 — 같은 초에 여러
+   * 세션이 등록된 경우 `started_at` 단독 정렬은 어느 행을 고를지 정의돼 있지
+   * 않다(보드 런북: "created_at 단독 사용 금지"). 상한 없는 `take`로 잘라
+   * JS에서 다시 고르지 않고 DB가 한 행만 고르게 한다.
+   */
+  private async _latestRoleSession(
+    ticketId: string,
+    role: string,
+    holderAgentIds: string[],
+  ): Promise<RoleSessionSnapshot | null> {
+    if (holderAgentIds.length === 0) return null;
+    const row = await this.dataSource.getRepository(Subagent).findOne({
+      where: { ticket_id: ticketId, agent_id: In(holderAgentIds), role },
+      order: { started_at: 'DESC', subagent_id: 'DESC' },
+      select: ['subagent_id', 'started_at', 'ended_at', 'signal', 'exit_code'],
+    });
+    if (!row) return null;
+    return {
+      startedAtMs: new Date(row.started_at).getTime(),
+      endedAtMs: row.ended_at ? new Date(row.ended_at).getTime() : null,
+      signal: row.signal ?? null,
+      exitCode: row.exit_code ?? null,
+    };
   }
 
   private async _writeAudit(ticket: Ticket | null, intent: any, action: string, extra: Record<string, unknown>): Promise<void> {

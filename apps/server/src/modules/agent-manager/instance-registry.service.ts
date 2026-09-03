@@ -15,6 +15,10 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
  * fixing that needs Redis pub/sub and isn't worth doing until AWB scales out.
  */
 
+/** 런타임이 한 권한 등급을 얼마나 충실히 표현하는가 (ticket 5851e435).
+ *  agent-manager 쪽 `RuntimePermissionTierSupport` 와 같은 값 집합이다. */
+export type RuntimePermissionTierSupport = 'native' | 'approximated' | 'unsupported';
+
 export interface RuntimeCapabilityDescriptor {
   protocol: 'stream-json' | 'jsonl' | 'acp';
   session: 'oneshot' | 'persistent' | 'resumable';
@@ -25,6 +29,12 @@ export interface RuntimeCapabilityDescriptor {
   usage: 'none' | 'tokens' | 'tokens-and-cost';
   collaboration: Array<'delegated' | 'swarm'>;
   skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+  /**
+   * 등급별 표현력 (ticket 5851e435). Runtime Host 가 보고하지 않는 구버전
+   * 매니저에서는 undefined — 그 경우 "알 수 없음"이며, 임의의 기본값을 채워
+   * 넣지 않는다(채워 넣으면 보고한 적 없는 능력을 서버가 지어내는 셈이다).
+   */
+  permission_tiers?: Record<'strict' | 'approve' | 'trusted', RuntimePermissionTierSupport>;
 }
 
 export interface RuntimeHealthRecord {

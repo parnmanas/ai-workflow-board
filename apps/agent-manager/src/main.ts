@@ -15,11 +15,15 @@ import { installCrashHandlers, log } from './lib/logging.js';
 import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
 import {
   isSystemdReExecPending,
+  markBootVerified,
   pendingRestartReason,
   restartManager,
+  runBootVerification,
+  runBootVerificationTimeout,
   runSelfUpdate,
   UpdateChecker,
 } from './lib/self-update.js';
+import { BOOT_VERIFY_TIMEOUT_MS } from './lib/self-update-rollback.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
 import { PresenceHeartbeat } from './lib/presence-heartbeat.js';
@@ -441,6 +445,41 @@ async function runRuntime(
       );
     return id;
   });
+
+  // ticket 23753dc7 — 자가 업데이트의 부팅 검증. 이전 프로세스가 남긴 상태
+  // 파일을 읽어 "방금 설치한 빌드가 정상 부팅했는가"를 판정하고, 실패면 여기서
+  // 곧바로 이전 버전으로 되돌린 뒤 재기동한다. 락을 잡은 직후 — 즉 우리가
+  // 유일한 매니저임이 확정된 첫 지점 — 에 두는 이유는 나쁜 빌드가 죽기 전에
+  // 이 판정이 돌아야 되돌릴 수 있기 때문이다. 복귀가 재기동을 예약하면 아래
+  // 부팅 절차는 더 진행하지 않는다.
+  const bootVerification = await runBootVerification({ log });
+  if (bootVerification.willReExec) {
+    log('agent-manager: rolling back to the previous version — boot aborted');
+    // 락을 놓고 나간다. 이 시점에는 SIGTERM 핸들러가 아직 걸려 있지 않아
+    // 정상 종료 경로의 해제가 돌지 않는다 — 그냥 두면 되돌아온 프로세스가
+    // 죽은 pid 의 락 때문에 기다리게 된다.
+    lock.release();
+    return;
+  }
+  if (bootVerification.armed) {
+    // 하트비트 1회 성공이 오지 않으면 상한에서 복귀한다. unref 로 걸어 이
+    // 타이머 자체가 프로세스를 붙잡지 않게 한다.
+    setTimeout(() => {
+      // 페어링 전이면 InstanceHeartbeat 가 POST 자체를 하지 않는다 — 그 경우
+      // 하트비트 부재는 빌드가 나쁘다는 증거가 아니므로 되돌리지 않는다.
+      agentIdReady
+        .then((id) =>
+          runBootVerificationTimeout({
+            log,
+            elapsedMs: BOOT_VERIFY_TIMEOUT_MS,
+            heartbeatEnabled: Boolean(id),
+          }),
+        )
+        .catch((err: any) =>
+          log(`Self-update: boot verification timeout handler failed: ${err?.message ?? err}`),
+        );
+    }, BOOT_VERIFY_TIMEOUT_MS).unref?.();
+  }
 
   const presenceHeartbeat: { _real: PresenceHeartbeat | null } = { _real: null };
   const kickPresencePing = (): void => {
@@ -1029,6 +1068,11 @@ async function runRuntime(
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
+      // ticket 23753dc7 — 하트비트 1회 성공이 곧 부팅 검증 통과다(정책 C).
+      // 여기서 상태 기록을 지워야 다음 재기동이 이 부팅을 실패로 오판하지 않는다.
+      onFirstPostSuccess: () => {
+        markBootVerified({ log });
+      },
       // Manager hosts a mix of per-agent CLIs now (ST-7); the UI cli
       // field is a coarse label and 'mixed' beats picking one arbitrary
       // adapter that may not even be in use.

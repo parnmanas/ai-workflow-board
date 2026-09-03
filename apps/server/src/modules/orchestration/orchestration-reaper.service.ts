@@ -32,7 +32,8 @@
  * a restart clears standing phantoms within seconds, and `runOnce()` is public
  * so an operator can force a sweep over REST.
  *
- * Env: ORCHESTRATION_REAPER_ENABLED (default on),
+ * Env: ORCHESTRATION_LEASE_GRACE_MS (default 5m, clamped 10s..1h),
+ *      ORCHESTRATION_REAPER_ENABLED (default on),
  *      ORCHESTRATION_REAPER_SWEEP_MS (default 5m, clamped 30s..1h),
  *      ORCHESTRATION_PLANNING_TIMEOUT_MS (default 20m, clamped 1m..24h),
  *      ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS (default 20m, clamped 1m..24h).
@@ -72,6 +73,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     60_000,
     24 * 60 * 60_000,
   );
+  /**
+   * lease 만료를 관측한 뒤 새 attempt 를 띄우기까지 기다리는 유예(티켓 4d065f82).
+   * 이 창 안에 작업자가 heartbeat 를 하나라도 보내면 lease 가 그대로 되살아난다.
+   */
+  private readonly leaseGraceMs = envMs('ORCHESTRATION_LEASE_GRACE_MS', 5 * 60_000, 10_000, 60 * 60_000);
+
   private readonly runningStallTimeoutMs = envMs(
     'ORCHESTRATION_RUNNING_STALL_TIMEOUT_MS',
     20 * 60_000,
@@ -214,19 +221,31 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       if (!mission || mission.status !== 'running') continue;
       const timeoutMs = mission.step_timeout_minutes * 60_000;
       if (timeoutMs <= 0) continue;
-      // A member that reported progress resets the clock — `started_at` is
-      // stamped on the first progress call, so a long-but-alive step survives.
-      const baseline = step.started_at ?? step.dispatched_at;
+      // 마지막 생존 신호부터 잰다(티켓 4d065f82). `last_heartbeat_at` 은 progress 보고
+      // **매 호출**마다 갱신되므로 이제 heartbeat 가 실제로 시계를 되돌린다.
+      //
+      // 이전에는 `started_at ?? dispatched_at` 이었는데, `started_at` 은 최초 progress
+      // 호출에서 한 번만 찍히고 이후 갱신되지 않는다 — 즉 "progress 를 보고하면 살아남는다"는
+      // 계약이 두 번째 호출부터 거짓이었고, 1분마다 살아있다고 알리는 step 도 타임아웃에
+      // 걸려 죽었다. 세 값을 모두 fallback 으로 남겨 heartbeat 를 한 번도 안 보낸
+      // step(=디스패치 직후 죽은 경우)도 예전과 똑같이 잡힌다.
+      const baseline = step.last_heartbeat_at ?? step.started_at ?? step.dispatched_at;
       if (!baseline) continue;
-      if (nowMs - new Date(baseline).getTime() < timeoutMs) continue;
+      // 유예 중인 step 은 아직 타임아웃 창 안이 아니어도 재평가해야 한다 — 유예 만료
+      // 판정이 runner 쪽에 있기 때문이다. 그 외에는 종전처럼 창 안이면 건너뛴다.
+      if (!step.lease_stale_since && nowMs - new Date(baseline).getTime() < timeoutMs) continue;
 
-      await this.runner.failStepExternally(
+      // 즉시 죽이지 않는다(리뷰 라운드1 P0-1). 이 한 메서드가 관측 → 재연결 요청 →
+      // 유예 → 새 attempt 자동 재디스패치 → (불가 시) 종결까지 전부 담당한다. 부팅
+      // 스윕과 주기 스윕이 같은 메서드를 부르므로 장애 감지와 재시작 복구가 하나의
+      // reconciliation 경로다.
+      const outcome = await this.runner.reconcileStaleLease(
         step.id,
-        `[timed out] no result was reported within ${mission.step_timeout_minutes} minutes of the last sign of ` +
-          `life. The assignee's session most likely died before it could call report_orchestration_step. ` +
-          `Retry the step (possibly with a different assignee) or restructure the plan around it.`,
+        now,
+        this.leaseGraceMs,
+        mission.step_timeout_minutes,
       );
-      failed += 1;
+      if (outcome === 'terminal' || outcome === 'redispatched') failed += 1;
     }
     return failed;
   }

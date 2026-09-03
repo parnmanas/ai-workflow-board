@@ -129,3 +129,61 @@ node apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs \
 
 # 2. review the WOULD-REMOVE list, then add --execute
 ```
+
+## 잔여물 회수 주체 — 확정 (ticket 7b384c10)
+
+"다른 에이전트 home 에 남은 티켓 worktree / branch 는 누가 회수하는가"에 대한
+결정. 근거는 아래 네 경로의 실제 코드다 (경로는 repo root 기준).
+
+| 경로 | 대상 범위 | 무엇을 회수하나 |
+|---|---|---|
+| **terminal cleanup** — `EventDispatcher.#cleanupTerminalTicketWorktrees` → `WorktreeManager.cleanupTerminalTicketGit` (`apps/agent-manager/src/lib/event-dispatcher.ts`) | 그 매니저가 관리하는 **모든** agent 의 `working_dir` (`managedAgentContexts.list()` 를 순회하며 `working_dir` 로 dedupe) | 티켓 worktree + 그 worktree 가 물고 있던 로컬/origin `ticket/<uuid>-*` ref |
+| **archive 회수 (규약 ⑤)** — `EventDispatcher.#cleanupArchivedTicketWorkspace` → `WorktreeManager.removeTicketWorktrees` / `removeTicketRunWorkspace` | 위와 같은 범위 | 티켓 worktree + QA/Security run workspace. **branch ref 는 건드리지 않는다** |
+| **10분 주기 sweep** — `apps/agent-manager/src/main.ts` 의 `sweepWorktrees()` → `WorktreeManager.sweep` | 위와 같은 범위 | idle + clean 인 worktree **만**. branch ref 는 건드리지 않는다 |
+| **런북** — 이 문서의 `apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs` | 운영자가 지정한 repo | 수동 |
+
+즉 **ref 를 지우는 자동 경로는 terminal cleanup 하나뿐**이고, 나머지 셋은 전부
+checkout 만 회수한다.
+
+### 결정
+
+1. **회수 주체는 "그 home 을 관리하는 agent-manager 인스턴스"다.** assignee 세션도
+   AWB 서버도 아니다. terminal cleanup 을 여는 `board_update` 는 board 스코프
+   브로드캐스트다 — `apps/server/src/modules/events/event-registry.ts` 의
+   `filter: (env, id) => !id.boardId || env.scope.board_id === id.boardId` 는
+   인스턴스도 agent 도 타깃하지 않는다. 그래서 연결된 **모든** 매니저가 같은
+   terminal 이벤트를 받고, 각자 자기 관리 범위의 home 을 정리한다. 따라서 같은
+   매니저 아래 여러 agent home 이 있으면 그 전부가 이미 커버된다 — 이건 구멍이
+   아니다.
+
+2. **구멍은 "terminal 이벤트 시점에 연결돼 있지 않던 매니저의 home"이다.
+   여기에는 담당 주체가 없다 — 이것이 확정된 결론이며, 새 주체를 만들지 않는다.**
+   terminal 이벤트는 재생되지 않으므로 그 매니저가 나중에 떠도 지나간 티켓을 소급
+   정리하지 않는다 — 매니저는 재연결 때 `Last-Event-ID` 를 보내지만 AWB 서버(NestJS
+   `@Sse`, 라이브 rxjs Subject)는 `id:` 를 찍지도 그 헤더를 읽지도 않는다
+   (`apps/agent-manager/src/lib/event-stream.ts` 의 `#lastEventId` 주석 참조).
+   남는 안전망은 10분 sweep 과 archive 회수뿐이고 둘 다 worktree 만 회수하므로,
+   **그 범위의 잔여 `ticket/<uuid>-*` ref 는 자동 회수 대상이 아니다.** 운영자가
+   위 런북으로 처리한다.
+
+   새 주체를 만들지 않는 이유: 원격 호스트의 파일시스템에 접근할 수 있는 주체가
+   구조상 없다. AWB 서버는 매니저에게 명령만 보낼 수 있고, assignee 세션은 자기
+   worktree 밖을 건드리지 않는 것이 worktree 규약의 전제다. 남은 선택지는
+   "매니저 부팅 시 과거 terminal 티켓 전수 스캔"인데, 비용이 잔여물의 실제 피해
+   (디스크 몇 GB, 운영자 런북으로 회수 가능)에 비해 크다.
+
+3. **따라서 `로컬 브랜치 삭제 실패: ticket/<uuid>-…` 알림은 그 자체로 조치
+   대상이 아니다.** 알림을 낸 매니저가 자기 범위에서 실패했다는 뜻이므로 그 home
+   을 확인하면 되고, 자기 repo 에서 `git branch --list` / `git ls-remote` 가 둘 다
+   비어 있다면 **다른 매니저 범위의 사본**을 가리키는 관측 보고다. 티켓 담당자가
+   할 수 있는 일은 없다.
+
+### 회수되는 checkout 의 형태 (ticket 7b384c10)
+
+`merging_workflow` 는 step 3 에서 base branch 체크아웃을, step 5 에서 로컬 feature
+branch 삭제를 지시한다. 그래서 정상 완료한 티켓 worktree 는 `[main]`(또는
+detached) 상태로 남는다 — 이건 **기대 상태이지 소유권 부정 근거가 아니다.**
+terminal cleanup 은 경로 소유권과 branch 소유권을 분리해 판정한다: 경로가
+확정되면 checkout 을 회수하고, ref 삭제는 full UUID 가 들어간 `ticket/<uuid>-*`
+에만 허용한다. clean 이 아니거나, detached HEAD 가 base 에 포함되지 않거나,
+우리 티켓 것도 공용 branch 도 아닌 ref 위에 있으면 그대로 보류한다.

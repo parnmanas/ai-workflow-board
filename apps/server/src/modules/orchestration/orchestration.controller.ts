@@ -201,6 +201,32 @@ export class OrchestrationController {
     }
   }
 
+  /**
+   * 타임라인 커서 페이지네이션(리뷰 라운드1 P1-3). `missions/:id` 는 최신 N건만 싣는
+   * bounded window 라, 그 창을 과거로 미는 전용 경로가 따로 필요하다.
+   */
+  @Get('missions/:id/events')
+  async listMissionEvents(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('limit') limit: string,
+    @Query('before_at') beforeAt: string,
+    @Query('before_seq') beforeSeq: string,
+    @Res() res: Response,
+  ) {
+    try {
+      return res.json(
+        await this.missions.listMissionEvents(id, workspaceId, {
+          limit: limit ? parseInt(limit, 10) : undefined,
+          before_at: beforeAt || undefined,
+          before_seq: beforeSeq ? parseInt(beforeSeq, 10) : undefined,
+        }),
+      );
+    } catch (e: any) {
+      return fail(res, e, 'Mission not found');
+    }
+  }
+
   @Post('missions')
   async createMission(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {

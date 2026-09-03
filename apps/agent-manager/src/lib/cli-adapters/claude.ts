@@ -23,6 +23,13 @@ import {
   type SpawnDescriptor,
   type TurnImage,
 } from './base.js';
+import {
+  type EffectivePermissionPolicy,
+  type PermissionCapabilities,
+  type PermissionTier,
+  TIER_FLAG_PERMISSION_CAPABILITIES,
+  permissionPolicyOrDefault,
+} from '../permission-policy.js';
 
 const { PERSISTENT_SESSION, NATIVE_MCP } = ADAPTER_CAPABILITIES;
 
@@ -79,20 +86,59 @@ function disallowedToolsArgs(harness?: HarnessSpec | null): string[] {
   return list.length > 0 ? ['--disallowedTools', list.join(',')] : [];
 }
 
-/** A harness permission_mode REPLACES --dangerously-skip-permissions: the
- *  skip flag pins bypassPermissions, so passing both would make the
- *  configured mode a no-op. No permission_mode → the skip flag, exactly as
- *  before. */
-function permissionArgs(harness?: HarnessSpec | null): string[] {
-  const raw = harness?.permission_mode?.trim();
-  const normalized = raw === 'default'
-    ? 'auto'
-    : raw && new Set(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']).has(raw)
-      ? raw
-      : null;
-  return normalized
-    ? ['--permission-mode', normalized]
-    : ['--dangerously-skip-permissions'];
+/** claude CLI 가 실제로 받는 `--permission-mode` 값 집합. 여기 없는 값은
+ *  플래그를 만들지 않고(= CLI 하드 실패 방지) tier 의 대표 모드로 접힌다. */
+const CLAUDE_PERMISSION_MODES = new Set([
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+  'manual',
+  'dontAsk',
+  'plan',
+]);
+
+/** legacy harness 문자열 → claude 가 아는 모드. `default` 는 CLI 가 모르는
+ *  AWB 쪽 표기라 `auto` 로 정규화한다. 미인식 값은 null. */
+function normalizeClaudeMode(raw?: string | null): string | null {
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  if (!v) return null;
+  if (v === 'default') return 'auto';
+  return CLAUDE_PERMISSION_MODES.has(v) ? v : null;
+}
+
+/** tier 를 대표하는 claude 모드 — harness 가 같은 tier 의 구체적인 모드를
+ *  지정하지 않았을 때 쓴다. */
+const CLAUDE_TIER_MODE: Record<Exclude<PermissionTier, 'trusted'>, string> = {
+  strict: 'plan',
+  approve: 'acceptEdits',
+};
+
+/**
+ * effective permission policy → claude 실행 권한 플래그 (ticket 5851e435).
+ *
+ * `trusted` 는 항상 `--dangerously-skip-permissions` 다. 이 플래그가
+ * bypassPermissions 를 핀하므로 `--permission-mode` 와 함께 쓰면 후자가
+ * 무의미해진다 — 그래서 둘은 상호 배타적이다. 예전에는 harness
+ * `permission_mode` 가 하나라도 걸려 있으면 무조건 스킵 플래그를 버렸는데,
+ * 그 탓에 `trusted` 로 표시된 에이전트도 workspace trust 대화상자에 걸려
+ * Pending 으로 떨어졌다.
+ *
+ * `approve`/`strict` 는 `--permission-mode` 로 내려간다. 보드 harness 가
+ * **같은 tier 안의** 구체적 모드를 지정했으면 그 문자열을 그대로 쓰고(운영자
+ * 의도 보존 — legacy 경로에서는 항상 이쪽이라 종전 argv 가 그대로 재현된다),
+ * 아니면 tier 대표 모드를 쓴다.
+ */
+function permissionArgs(
+  policy: EffectivePermissionPolicy | null | undefined,
+  harness: HarnessSpec | null | undefined,
+): string[] {
+  const effective = permissionPolicyOrDefault(policy, harness?.permission_mode);
+  if (effective.tier === 'trusted') return ['--dangerously-skip-permissions'];
+  const harnessMode = normalizeClaudeMode(effective.harnessMode);
+  const mode = harnessMode && effective.harnessTier === effective.tier
+    ? harnessMode
+    : CLAUDE_TIER_MODE[effective.tier];
+  return ['--permission-mode', mode];
 }
 
 // Fallback ids used only when binary introspection can't read the installed
@@ -195,7 +241,7 @@ export class ClaudeCliAdapter extends CliAdapter {
     return HARNESS_SPEC_KEYS;
   }
 
-  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model, harness, effort, ultracode }: OneshotSpec): SpawnDescriptor {
+  buildOneshotSpawn({ rolePrompt, taskText, mcpConfigPath, model, harness, effort, ultracode, permission }: OneshotSpec): SpawnDescriptor {
     // Ticket-level effort preset → claude `--effort` (session-level flag).
     // Omitted when unset so the CLI keeps its default. `ultracode` is NOT a
     // flag — it's a prompt keyword: appending the literal word opts the
@@ -228,7 +274,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         '--append-system-prompt',
         composeSystemPrompt(rolePrompt, harness),
         ...disallowedToolsArgs(harness),
-        ...permissionArgs(harness),
+        ...permissionArgs(permission, harness),
         finalTaskText,
       ],
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -236,7 +282,7 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode, sessionMode, sessionId }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode, sessionMode, sessionId, permission }: SessionSpec): SpawnDescriptor {
     // Session ultracode is best-effort and applied at SESSION CREATION only:
     // a persistent session has no single "task text" arg, so we fold the
     // `ultracode` keyword into the composed system prompt here. Follow-up
@@ -267,7 +313,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         '--append-system-prompt',
         finalSystemPrompt,
         ...disallowedToolsArgs(harness),
-        ...permissionArgs(harness),
+        ...permissionArgs(permission, harness),
       ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: true,
@@ -474,19 +520,38 @@ export class ClaudeCliAdapter extends CliAdapter {
     return { kind: 'subscription', expires_at_ms: expires, refresh_token_present };
   }
 
+  /** Claude 는 세 등급 모두 전용 플래그를 갖지만, 실행 중 권한 요청을 밖으로
+   *  노출하는 훅이 없어 `approve` 는 AWB 승인 요청을 만들지 못한다 —
+   *  {@link TIER_FLAG_PERMISSION_CAPABILITIES} 참고 (ticket 5851e435). */
+  permissionCapabilities(): PermissionCapabilities {
+    return TIER_FLAG_PERMISSION_CAPABILITIES;
+  }
+
   /**
-   * `permissionArgs()` above emits `--dangerously-skip-permissions` whenever
-   * no harness `permission_mode` is configured, which also bypasses the
-   * interactive trust dialog — Claude Code merely WARNS "this workspace has
-   * not been trusted" and proceeds (observed on ticket b2e88390: a run that
-   * completed 44 turns despite the warning). Any OTHER `permission_mode`
-   * drops the skip flag, and the dialog becomes load-bearing — a
-   * non-interactive spawn can never satisfy it, so it hangs/fails instead.
-   * Mirrors `permissionArgs()`'s own branch so the two can never disagree
-   * about which mode is actually active.
+   * 위의 `permissionArgs()` 는 `trusted` 등급에 `--dangerously-skip-permissions`
+   * 를 붙이는데, 이 플래그는 대화형 trust 대화상자까지 우회한다 — Claude Code
+   * 는 "this workspace has not been trusted" 경고만 찍고 그대로 진행한다
+   * (ticket b2e88390 실측: 그 경고를 달고도 44턴을 완주했다). 다른 등급은
+   * 대신 `--permission-mode` 를 내보내므로 대화상자가 load-bearing 이 되고,
+   * 비대화형 spawn 은 그걸 만족시킬 방법이 없어 멈추거나 실패한다.
+   *
+   * ticket 5851e435 — 두 조건을 **모두** 만족할 때만 게이트를 건다:
+   *   (a) 보드/워크스페이스 harness 가 명시적으로 비-bypass 모드를 요구했다
+   *       (= 운영자가 사람의 trust 승인을 원한다는 ticket 48aeab6e 의 계약),
+   *   (b) 그 위의 Agent trust 가 그 요구를 `trusted` 로 뒤집지 않았다.
+   * 따라서 `trusted` 에이전트는 harness 값과 무관하게 절대 이 게이트에 걸리지
+   * 않고(이 티켓의 핵심 수정), 반대로 harness 를 건드린 적 없는 보드에서
+   * Agent trust 만으로 등급이 내려간 경우에도 게이트가 새로 생기지 않는다 —
+   * 폴더 trust 는 도구 권한과 별개의 축이기 때문이다.
+   *
+   * 참고: 예전 구현은 미인식 harness 값(예: `future-mode`)에 대해 true 를
+   * 냈지만 `permissionArgs()` 는 같은 값에 스킵 플래그를 붙였다. 즉 "둘이
+   * 절대 어긋나지 않는다"던 원래 주석과 달리 실제로 어긋나 있었다. 이제
+   * 양쪽 모두 harnessModeTier() 하나를 통해 판단하므로 구조적으로 일치한다.
    */
-  requiresWorkspaceTrust(harness?: HarnessSpec | null): boolean {
-    return !!harness?.permission_mode && harness.permission_mode !== 'bypassPermissions';
+  requiresWorkspaceTrust(policy?: EffectivePermissionPolicy | null): boolean {
+    const effective = permissionPolicyOrDefault(policy);
+    return effective.harnessTier !== 'trusted' && effective.tier !== 'trusted';
   }
 
   /**
