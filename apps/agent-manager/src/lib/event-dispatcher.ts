@@ -34,6 +34,8 @@ import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-conte
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import {
+  APPROVE_BLOCKER_REASON,
+  decideApproveDispatch,
   describePermissionPolicy,
   resolveEffectivePermissionPolicy,
 } from './permission-policy.js';
@@ -47,7 +49,7 @@ import type {
 } from './runtime/runtime-supervisor.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 import { ADAPTER_CAPABILITIES } from './cli-adapters/index.js';
-import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import { createRuntimeCliAdapter, getRuntimeDescriptor } from './runtime/runtime-registry.js';
 import {
   parseRunProvision,
   provisionRunWorkspace,
@@ -2740,6 +2742,68 @@ export class EventDispatcher {
         }
         log(
           `Trigger aborted — CLI readiness check failed: ticket=${ev.ticket_id} role=${ev.action} reason=${blockerKind} cli=${agentContext.cli}`,
+        );
+        this.#ackDispatch(ev, 'nack', blockerKind);
+        return;
+      }
+    }
+
+    // 리뷰 라운드2 지적 #3: approve 는 "AWB 에 승인을 요청한다"는 뜻인데, 그
+    // 요청을 실제로 만들 수 있는 런타임은 ACP 승인 프로토콜을 가진 것뿐이다.
+    // 그런 훅이 없는 런타임에서 그냥 실행하면 운영자가 고른 의미가 조용히
+    // "묻지 않고 거부한다"로 바뀌므로, 정직한 capability 표기에 그치지 않고
+    // **실행 자체를 막고** 사람에게 결정을 넘긴다. 이 티켓의 "Pending 은 실제
+    // 사람 승인 gate 에만" 규칙을 어기는 게 아니라 그 사례다 — 런타임이 승인을
+    // 물을 수 없으니 사람이 trust 를 직접 정해야 한다.
+    if (ev.ticket_id && agentContext?.cli) {
+      let runtimeApprovals: boolean | null = null;
+      try {
+        runtimeApprovals = getRuntimeDescriptor(agentContext.cli).capabilities.native_approvals;
+      } catch {
+        // 미지의 런타임 id — 스폰은 어차피 자기 이유로 실패한다. 여기서 판정을
+        // 지어내지 않고 통과시킨다.
+      }
+      const approveGate = runtimeApprovals === null
+        ? { blocked: false as const }
+        : decideApproveDispatch(permissionPolicy, {
+            id: agentContext.cli,
+            native_approvals: runtimeApprovals,
+          });
+      if (approveGate.blocked) {
+        const blockerKind = approveGate.reason || APPROVE_BLOCKER_REASON;
+        this.#dispatchBlockTracker.record(blockerKind);
+        const provisionBlock = this.#spawnSuppressor.note(ev.ticket_id, ev.action, blockerKind, Date.now());
+        if (this.#dispatchBlockers.shouldComment(ev.ticket_id, blockerKind)) {
+          await fireAndForgetTool(this.#config, 'add_comment', {
+            ticket_id: ev.ticket_id,
+            content:
+              `⚠️ **승인 경로 없는 approve 등급** — 이 Agent 의 trust 가 \`approve\` 인데 ` +
+              `런타임 \`${agentContext.cli}\` 는 실행 중 권한 요청을 AWB 승인 경로로 올릴 수 ` +
+              `없어(native_approvals=false) 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
+              `승인 없이 제한 모드로 계속 실행하면 운영자가 고른 "사람이 승인한다"가 조용히 ` +
+              `"묻지 않고 거부한다"로 바뀝니다. 아래 중 하나로 의도를 명시해 주세요.\n\n` +
+              `1. Agent 의 \`runtime_config.permission_mode\` 를 \`trusted\` 로 — 명시적 허용\n` +
+              `2. \`strict\` 로 — 명시적 거부(최소 권한)\n` +
+              `3. 이 Agent 를 승인 요청을 지원하는 런타임(현재 \`hermes\`)으로 이동\n\n` +
+              `_동일 사유의 supervisor 자동 재트리거는 억제됩니다 — 값을 고친 뒤 티켓을 ` +
+              `unpend(User 탭의 ▶ Resume) 하세요._`,
+            metadata: { auto_notice: true }, // ticket 3c8b8026 — 자기 재트리거 방지
+          });
+        }
+        if (provisionBlock.shouldPend) {
+          await fireAndForgetTool(this.#config, 'pend_ticket', {
+            ticket_id: ev.ticket_id,
+            reason: provisioningPendReason({
+              kind: blockerKind,
+              reason: approveGate.reason,
+              detail: approveGate.detail,
+              count: provisionBlock.count,
+            }),
+          });
+        }
+        log(
+          `Trigger aborted — approve tier has no approval bridge: ticket=${ev.ticket_id} ` +
+            `role=${ev.action || ''} cli=${agentContext.cli} ${describePermissionPolicy(permissionPolicy)}`,
         );
         this.#ackDispatch(ev, 'nack', blockerKind);
         return;

@@ -133,15 +133,61 @@ test('one-shot spawn: strict Agent 는 harness 가 bypass 를 허용해도 실�
 });
 
 test('one-shot spawn: Agent trust 미설정(legacy)은 harness 규칙 그대로 실제 argv 에 반영된다', async () => {
+  // harness `plan`(= strict 등급)을 쓴다. `acceptEdits`(= approve)는 이제
+  // 승인-브리지 게이트에 걸려 스폰 자체가 거부되므로(아래 전용 테스트) argv
+  // 배선을 확인하는 용도로는 쓸 수 없다.
   const argv = await captureOneshotArgv({
     tag: 'legacy-harness',
     permissionMode: null,
-    harness: { permission_mode: 'acceptEdits' },
+    harness: { permission_mode: 'plan' },
   });
   const i = argv.indexOf('--permission-mode');
   assert.ok(i >= 0, argv.join(' '));
-  assert.equal(argv[i + 1], 'acceptEdits');
+  assert.equal(argv[i + 1], 'plan');
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('one-shot spawn: approve 는 티켓 밖 경로(채팅/Action)에서도 스폰이 거부된다 (리뷰 라운드2 지적 #3)', async () => {
+  // event-dispatcher 의 게이트는 pend 할 티켓이 있을 때만 돈다. 채팅/멘션/
+  // Action·QA run 처럼 티켓이 없는 경로에서 조용히 실행되면 같은 의미 손실이
+  // 남으므로 spawn 사이트에도 같은 게이트를 둔다.
+  const executable = await makeCaptureBin('claude-approve.mjs');
+  const cwd = join(fixtureRoot, 'approve-home');
+  await mkdir(cwd, { recursive: true });
+  const manager = new SubagentManager({
+    ...config,
+    delegation: { ...config.delegation, claudeBin: executable },
+  });
+  const result = await manager.spawn({
+    kind: 'chat',
+    taskText: 'task',
+    rolePrompt: 'role',
+    ticketId: '',
+    agentId: 'agent-perm',
+    roomId: 'room-approve',
+    agentContext: makeAgentContext(cwd, 'approve'),
+  });
+  assert.equal(result.spawned, false, 'approve 가 승인 없이 스폰됐다');
+  assert.equal(result.reason, 'approve_requires_approval_bridge');
+  assert.ok(result.detail && result.detail.includes('trusted'), result.detail ?? '(none)');
+});
+
+test('persistent 세션 spawn 도 approve 를 거부한다 (리뷰 라운드2 지적 #3)', async () => {
+  const executable = await makeCaptureBin('claude-approve-session.mjs');
+  const cwd = join(fixtureRoot, 'approve-session-home');
+  await mkdir(cwd, { recursive: true });
+  const manager = new BaseSessionManager(
+    { ...config, delegation: { ...config.delegation, claudeBin: executable } },
+    { logTag: '[perm-test]', keyField: 'room_id' },
+  );
+  try {
+    const record = await manager._spawnSession('room-approve', 'role', 'first turn', {
+      agentContext: makeAgentContext(cwd, 'approve'),
+    });
+    assert.equal(record, null, 'approve 세션이 승인 없이 생성됐다');
+  } finally {
+    await manager?.stopAll?.().catch?.(() => {});
+  }
 });
 
 test('persistent 세션 spawn 도 같은 배선을 탄다 — trusted Agent 가 harness=acceptEdits 를 이긴다', async () => {

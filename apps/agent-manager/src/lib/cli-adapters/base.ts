@@ -303,31 +303,55 @@ export function describeHarness(harness: HarnessSpec): string {
 }
 
 /** argv 토큰 중 그 자체가 secret 이거나 secret 을 품을 수 있는 모양. 아래
- *  allowlist 를 통과한 값에도 마지막으로 한 번 더 적용되는 안전망이다. */
+ *  판정을 통과한 값에도 마지막으로 한 번 더 적용되는 안전망이다. */
 const SECRET_ARG_PATTERN = /(authorization|api[-_]?key|auth[-_]?token|access[-_]?token|bearer|secret|password|credential)/i;
 
 /**
- * **값까지** 로그에 남겨도 되는 플래그 (ticket 5851e435 리뷰 지적 #1).
+ * **다음 토큰을 값으로 소비하는** 플래그 (리뷰 라운드2 지적 #1).
  *
- * 전부 열거형이거나 짧은 모드/모델 식별자라 사용자 데이터를 담지 않는다. 이
- * 목록에 없는 플래그의 값은 길이만 남긴다 — 길이 기반 휴리스틱(예: "60자 이하면
- * 평문")은 **짧은 프롬프트와 짧은 토큰을 그대로 노출**하기 때문에 쓰지 않는다.
- * antigravity/pi 는 프롬프트를 argv 에 직접 싣고(`-p <prompt>`), `sk-...` 류
- * 토큰은 어떤 secret 키워드에도 걸리지 않는다.
+ * 이 목록이 필요한 이유: "`-` 로 시작하면 플래그"라는 판정은 값 위치에서 그대로
+ * 우회된다. antigravity/pi 는 `-p <prompt>` 로 프롬프트를 싣는데 그 프롬프트가
+ * `--`로 시작하면 본문 전체가 평문으로 찍혔다. 값 위치에서는 선행 `-` 를
+ * 절대 플래그로 재해석하지 않는다.
  */
-const LOGGABLE_FLAG_VALUES = new Set([
-  '--model',
-  '--effort',
-  '--permission-mode',
-  '--sandbox',
-  '--output-format',
-  '--input-format',
+const VALUE_FLAGS = new Set([
+  '-p', '-c', '--cd',
+  '--model', '--effort',
+  '--output-format', '--input-format',
+  '--mcp-config', '--allowedTools', '--disallowedTools', '--append-system-prompt',
+  '--permission-mode', '--sandbox',
+  '--resume', '--session-id',
 ]);
 
-/** codex 의 `-c` 는 임의의 config 오버라이드를 싣는 다목적 플래그라 플래그
- *  이름만으로는 안전을 보장할 수 없다(같은 플래그로 MCP 헤더 테이블도 넘어간다).
- *  값의 모양으로 판정해 권한 진단에 필요한 항목만 통과시킨다. */
-const LOGGABLE_CONFIG_OVERRIDES = /^approval_policy=/;
+/** 값을 받지 않는 플래그. 이 둘 중 어디에도 없는 `-`로 시작하는 토큰은
+ *  플래그가 아니라 값으로 취급해 가린다(기본 차단). */
+const BOOLEAN_FLAGS = new Set([
+  '--print', '--verbose', '--strict-mcp-config',
+  '--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox',
+  '--skip-git-repo-check', '--json', '--approve', '--no-session',
+]);
+
+/**
+ * 값까지 남겨도 되는 플래그와 그 **허용 형식**. 전부 닫힌 열거형이라 사용자
+ * 데이터가 들어올 수 없다 — 형식 검증을 통과하지 못한 값은 열거형이 아니라는
+ * 뜻이므로 그대로 가린다.
+ *
+ * `--model` 은 일부러 빠져 있다: 모델 id 는 각 CLI 가 자체 검증하는 자유
+ * 문자열이라 `sk-ant-…` 같은 토큰과 형식으로 구분할 수 없다. 모델은 이미
+ * 별도 진단 로그 라인(Agent context / model chain)이 싣는다.
+ */
+const LOGGABLE_FLAG_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['--permission-mode', new Set(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])],
+  ['--sandbox', new Set(['read-only', 'workspace-write', 'danger-full-access'])],
+  ['--output-format', new Set(['stream-json', 'json', 'text'])],
+  ['--input-format', new Set(['stream-json', 'json', 'text'])],
+  ['--effort', new Set(['low', 'medium', 'high', 'max'])],
+]);
+
+/** codex 의 `-c` 는 임의 config 오버라이드를 싣는 다목적 플래그라(같은 플래그로
+ *  MCP 헤더 테이블도 넘어간다) 플래그 이름만으로는 안전을 보장할 수 없다.
+ *  권한 진단에 필요한 승인 정책만 값 모양으로 통과시킨다. */
+const LOGGABLE_CONFIG_OVERRIDE = /^approval_policy="(never|on-request|on-failure|untrusted)"$/;
 
 /** 플래그가 아닌데도 값까지 남겨도 되는 리터럴(서브커맨드). 프롬프트 같은
  *  positional 인자와 구분하기 위해 명시 목록으로만 허용한다. */
@@ -336,14 +360,19 @@ const LOGGABLE_LITERALS = new Set(['exec']);
 /**
  * spawn argv 를 진단 로그에 남길 수 있는 형태로 축약한다 (ticket 5851e435).
  *
- * 규칙은 **기본 차단(allowlist)** 이다:
- *   - 플래그 이름(`-`/`--` 로 시작)은 그대로 — 권한 플래그가 실제로 붙었는지
- *     로그만으로 확인할 수 있어야 한다.
- *   - {@link LOGGABLE_FLAG_VALUES} 바로 뒤의 값과 허용된 `-c` 오버라이드,
- *     {@link LOGGABLE_LITERALS} 만 값까지 남긴다.
- *   - 그 밖의 모든 토큰(프롬프트 본문, task text, 도구 목록, 경로, 토큰 등)은
- *     길이만 `<Nch>` 로 남긴다. 길이는 그 자체로 내용을 유출하지 않는다.
- *   - 어디에 있든 secret 모양 토큰은 길이도 남기지 않고 `<redacted>` 로 바꾼다.
+ * 규칙은 **기본 차단**이며, 토큰의 모양이 아니라 **위치**로 판정한다:
+ *   - 바로 앞 토큰이 {@link VALUE_FLAGS} 면 이번 토큰은 무조건 *값*이다. 선행
+ *     `-` 가 있어도 플래그로 재해석하지 않는다.
+ *   - 값 위치에서는 {@link LOGGABLE_FLAG_VALUES} 의 열거형 검증을 통과한
+ *     값과 허용된 `-c` 오버라이드만 남고, 나머지는 길이만 `<Nch>` 로 남는다.
+ *   - 값 위치가 아닌 토큰은 알려진 플래그 이름({@link VALUE_FLAGS} /
+ *     {@link BOOLEAN_FLAGS})이거나 {@link LOGGABLE_LITERALS} 일 때만 그대로
+ *     남는다. 그 밖은 — `-` 로 시작하든 아니든 — 전부 값으로 보고 가린다.
+ *   - 어디에 있든 secret 모양 토큰은 길이도 남기지 않고 `<redacted>` 다.
+ *
+ * 플래그 이름이 보여야 권한 플래그가 실제로 붙었는지 로그만으로 확인할 수 있고,
+ * 그 외 모든 것(프롬프트 본문, task text, 모델 id, 도구 목록, 경로, 토큰)은
+ * 내용을 드러내지 않는다.
  */
 export function describeSpawnArgv(args: readonly string[] | null | undefined): string {
   const list = args ?? [];
@@ -357,21 +386,30 @@ function splitInlineFlag(arg: string): { flag: string; value: string } | null {
   return eq > 0 ? { flag: arg.slice(0, eq), value: arg.slice(eq + 1) } : null;
 }
 
+/** 이 값이 해당 플래그의 허용 형식인가. 플래그가 열거형을 갖지 않으면 항상 false. */
+function isLoggableValue(flag: string, value: string): boolean {
+  if (flag === '-c') return LOGGABLE_CONFIG_OVERRIDE.test(value);
+  return LOGGABLE_FLAG_VALUES.get(flag)?.has(value) === true;
+}
+
 function redactSpawnArg(arg: string, previous: string): string {
   if (!arg) return "''";
   if (SECRET_ARG_PATTERN.test(arg)) return '<redacted>';
 
+  // 값 위치 — 선행 `-` 를 플래그로 재해석하지 않는다.
+  if (VALUE_FLAGS.has(previous)) {
+    return isLoggableValue(previous, arg) ? quoteIfNeeded(arg) : `<${arg.length}ch>`;
+  }
+
   const inline = splitInlineFlag(arg);
-  if (inline) {
-    return LOGGABLE_FLAG_VALUES.has(inline.flag)
+  if (inline && (VALUE_FLAGS.has(inline.flag) || BOOLEAN_FLAGS.has(inline.flag))) {
+    return isLoggableValue(inline.flag, inline.value)
       ? quoteIfNeeded(arg)
       : `${inline.flag}=<${inline.value.length}ch>`;
   }
-  // 플래그 이름 자체는 값이 아니므로 항상 보인다.
-  if (arg.startsWith('-')) return arg;
 
-  if (LOGGABLE_FLAG_VALUES.has(previous)) return quoteIfNeeded(arg);
-  if (previous === '-c' && LOGGABLE_CONFIG_OVERRIDES.test(arg)) return quoteIfNeeded(arg);
+  // 알려진 플래그 이름만 그대로 남는다. 모르는 `-...` 토큰은 값으로 본다.
+  if (VALUE_FLAGS.has(arg) || BOOLEAN_FLAGS.has(arg)) return arg;
   if (LOGGABLE_LITERALS.has(arg)) return arg;
   return `<${arg.length}ch>`;
 }

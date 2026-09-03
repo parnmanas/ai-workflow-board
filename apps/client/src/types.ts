@@ -2116,6 +2116,9 @@ export interface RuntimeHealth {
     usage: 'none' | 'tokens' | 'tokens-and-cost';
     collaboration: Array<'delegated' | 'swarm'>;
     skill_delivery: Array<'prompt' | 'filesystem' | 'native'>;
+    /** 등급별 표현력 (ticket 5851e435). Runtime Host 가 보고하지 않는 구버전
+     *  매니저에서는 undefined — "알 수 없음"이며 기본값을 지어내지 않는다. */
+    permission_tiers?: Record<'strict' | 'approve' | 'trusted', 'native' | 'approximated' | 'unsupported'>;
   };
   /** Hermes 전용: Runtime Host가 현재 열거할 수 있는 프로파일 이름 목록. */
   profiles?: string[];

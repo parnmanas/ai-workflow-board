@@ -174,17 +174,34 @@ Each runtime declares how faithfully it expresses a tier via
 and not only in a log line). The two come from the same constants and a
 regression test enforces that they agree.
 
-**`approve` is `native` only on Hermes.** The requested meaning of `approve` is
-"raise an approval request to AWB", which is implemented by
-`RuntimeSupervisor.#requestApproval` over ACP `session/request_permission`.
-`claude --print` and `codex exec` expose no equivalent hook, so they cannot
-raise any approval at all — a tool call needing permission is simply denied
-without asking. That is a real safety boundary but not an approval path, so
-those runtimes declare `approve: 'approximated'` with `native_approvals: false`,
-and the spawn site logs what is missing plus the two ways out (move the agent to
-a `native_approvals` runtime, or state the intent explicitly with
-`trusted`/`strict`). Declaring it `native` because a dedicated flag exists would
-overstate the capability.
+**`approve` is `native` only on Hermes, and is BLOCKED elsewhere.** The
+requested meaning of `approve` is "raise an approval request to AWB", which is
+implemented by `RuntimeSupervisor.#requestApproval` over ACP
+`session/request_permission`. `claude --print` and `codex exec` expose no
+equivalent hook, so they cannot raise any approval at all — a tool call needing
+permission is simply denied without asking.
+
+Labelling that honestly (`approve: 'approximated'`) is necessary but not
+sufficient: running anyway would still silently turn the operator's "a human
+approves" into "denied without asking". So `decideApproveDispatch()` **refuses
+the spawn** whenever the effective tier is `approve` and the runtime reports
+`native_approvals: false`. On the ticket path the dispatcher posts one
+de-duplicated operator comment and pends the ticket
+(`approve_requires_approval_bridge` is a durable blocker); on ticket-less paths
+(chat, mention, Action/QA runs) `SubagentManager.spawn` and
+`BaseSessionManager` refuse with the same reason.
+
+This does not contradict "Pending only for a real human-approval gate" — it
+*is* one: the runtime cannot ask, so a person must decide. The comment names the
+three exits: set trust to `trusted` (grant), to `strict` (deny), or move the
+agent to a `native_approvals` runtime. The admin runtime-config form warns about
+the same combination before it is saved, using the reported
+`permission_tiers`.
+
+This is deliberately a loud stop rather than a quiet downgrade, including for
+agents whose `approve` came from the `BackfillAgentRuntimeConfig` migration
+default: each affected agent gets one explicit operator decision instead of a
+silent change in what its trust level means.
 
 `antigravity`/`pi` have no per-tier option at all, so `approve`/`strict` are
 approximated by dropping their auto-approve flag (both run non-interactively, so
@@ -193,7 +210,13 @@ this restricts rather than hangs).
 A partially reported or unknown-valued `permission_tiers` is dropped whole by the
 server rather than partially accepted — otherwise a missing tier is
 indistinguishable from "unsupported". A manager that does not report the field
-at all leaves it `undefined`; the server never invents a default.
+at all leaves it `undefined`; the server never invents a default, and the admin
+UI shows no warning for a runtime it has no report for.
+
+`permission_tiers` is carried end to end: agent-manager `RuntimeCapabilities` →
+instance heartbeat → server `RuntimeCapabilityDescriptor` → the
+`agent_manager_instance` stream payload → the client `RuntimeHealth` type → the
+managed-agent runtime-config form.
 
 Pending is never created for a CLI-internal permission/trust dialog. Claude's
 workspace-trust preflight (ticket 48aeab6e) now blocks only when the board
@@ -202,15 +225,28 @@ override it to `trusted` — an agent whose trust alone is `approve`/`strict` on
 a board that never configured a harness is not gated.
 
 The effective policy and the spawned argv are written to the manager log on
-every spawn. Argv redaction is **allowlist-based**, not keyword-based: flag
-names are always shown, a short allowlist of non-sensitive flags
-(`--model`, `--effort`, `--permission-mode`, `--sandbox`, `--output-format`,
-`--input-format`, plus `-c approval_policy=…`) keeps its value, and every other
-token — prompt bodies, task text, tool lists, paths, opaque tokens — is reduced
-to `<Nch>`. A length threshold would not do: `antigravity`/`pi` put the prompt
-directly in argv, and a token like `sk-…` matches no secret keyword, so both
-would have been logged verbatim. Secret-shaped tokens are replaced with
-`<redacted>` and do not even leak a length.
+every spawn. Argv redaction decides by **position, then schema** — never by the
+shape of the token:
+
+- A token immediately after a value-taking flag is a *value*, even if it starts
+  with `-`. Deciding "starts with `-` ⇒ flag" is bypassed the moment a prompt
+  begins with `--`, and `antigravity`/`pi` put the prompt straight into argv.
+- In value position only a closed enum passes: `--permission-mode`,
+  `--sandbox`, `--output-format`, `--input-format`, `--effort`, and
+  `-c approval_policy="…"`. Anything not in the enum is reduced to `<Nch>`.
+  `--model` is deliberately *not* loggable — a model id is free text a CLI
+  validates itself, so it cannot be told apart from `sk-…` by format; the model
+  is already carried by the separate Agent-context / model-chain log lines.
+- Outside value position, only known flag names and an explicit literal
+  allowlist (`exec`) render verbatim. An unrecognised `-…` token is treated as a
+  value and masked.
+- Secret-shaped tokens are replaced with `<redacted>` anywhere and do not even
+  leak a length.
+
+The effective-policy line is subject to the same rule. A rejected Agent trust
+value is arbitrary input that may itself be a token, so it is never quoted back:
+the log carries `len=<N> sha256=<8hex>` (correlation only, not a secrecy
+guarantee) and the raw string is not kept on the policy object at all.
 
 ## Capability and health reporting
 

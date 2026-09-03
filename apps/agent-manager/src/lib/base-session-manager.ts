@@ -38,6 +38,7 @@ import {
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import {
+  decideApproveDispatch,
   describePermissionPolicy,
   describePermissionSupport,
   resolveEffectivePermissionPolicy,
@@ -697,6 +698,19 @@ export class BaseSessionManager {
       adapter.permissionCapabilities(),
     );
     if (permissionGap) log(`${this.#logTag} permission capability: ${permissionGap}`);
+    // 리뷰 라운드2 지적 #3 — SubagentManager.spawn 과 같은 게이트. 세션 경로도
+    // approve 를 승인 없이 실행하면 안 된다.
+    const approveGate = decideApproveDispatch(permission, {
+      id: adapter.cliType,
+      native_approvals: adapter.permissionCapabilities().native_approvals,
+    });
+    if (approveGate.blocked) {
+      log(
+        `${this.#logTag} spawn refused — ${approveGate.reason}: ${this.#keyField}=${sessionKey} ` +
+          `cli=${adapter.cliType} ${approveGate.detail}`,
+      );
+      return null;
+    }
     // Ticket-level effort preset (parallel channel to harness) — pick this
     // CLI's slice. slice.model is the board-level effort intent and WINS the
     // model precedence over the harness model and the per-agent Agent.model

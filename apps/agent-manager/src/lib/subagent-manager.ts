@@ -39,6 +39,7 @@ import {
   selectEffortSlice,
 } from './cli-adapters/base.js';
 import {
+  decideApproveDispatch,
   describePermissionPolicy,
   describePermissionSupport,
   resolveEffectivePermissionPolicy,
@@ -656,6 +657,20 @@ export class SubagentManager implements SubagentManagerContract {
       adapter.permissionCapabilities(),
     );
     if (permissionGap) log(`[subagent] permission capability: ${permissionGap}`);
+    // 리뷰 라운드2 지적 #3 — 티켓 디스패치는 event-dispatcher 가 코멘트+pend 로
+    // 막지만, 채팅/멘션/Action·QA run 처럼 pend 할 티켓이 없는 경로도 있다.
+    // 그쪽에서 조용히 실행되면 같은 의미 손실이 그대로 남으므로 여기서도 막는다.
+    const approveGate = decideApproveDispatch(permission, {
+      id: adapter.cliType,
+      native_approvals: adapter.permissionCapabilities().native_approvals,
+    });
+    if (approveGate.blocked) {
+      log(
+        `[subagent] spawn refused — ${approveGate.reason}: ticket=${spec.ticketId.slice(0, 8) || '-'} ` +
+          `cli=${adapter.cliType} ${approveGate.detail}`,
+      );
+      return { spawned: false, reason: approveGate.reason, detail: approveGate.detail };
+    }
     // Ticket-level effort preset (parallel channel to harness). Pick this
     // adapter's slice: claude → { model?, effort?, ultracode? }; codex /
     // antigravity → { model? }; everything else → null. slice.model is the

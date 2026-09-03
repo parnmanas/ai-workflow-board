@@ -195,7 +195,14 @@ test('unapproved workspace trust under a non-bypass permission_mode pends on the
   const d = makeDispatcher(state, cliHomeDir);
   // A board harness permission_mode other than bypassPermissions drops
   // --dangerously-skip-permissions, making the trust dialog load-bearing.
-  const harness_config = { permission_mode: 'default' };
+  //
+  // ticket 5851e435: `plan`(= strict 등급)을 쓴다. 예전엔 `default` 였는데 그
+  // 값의 legacy 등급은 approve 이고, approve 는 이제 별도의 승인-브리지 게이트에
+  // 걸려 trust 를 승인해도 스폰되지 않는다 — 그러면 이 테스트가 검증하려는
+  // "trust 승인 후 복구" 계약이 approve 게이트에 가려 보이지 않는다. `plan` 은
+  // 비-bypass 라 trust 대화상자를 그대로 load-bearing 으로 만들면서 approve
+  // 게이트와는 무관하므로 원래 의도를 정확히 유지한다.
+  const harness_config = { permission_mode: 'plan' };
 
   await d.handleTrigger(makeEvent({ harness_config, field_changed: 'a1' }));
 
@@ -394,24 +401,96 @@ test('ticket 5851e435: trusted Agent 는 harness 가 요구한 모든 비-bypass
   }
 });
 
-test('ticket 5851e435: Agent trust 가 approve/strict 라도 harness 를 안 건드린 보드에서는 새 Pending 이 생기지 않는다', async () => {
-  // legacy 백필(`{strategy:'single', permission_mode:'approve'}`)이 박힌
-  // 에이전트가 harness 설정이 전혀 없는 보드에서 도는 조합. 폴더 trust 는
-  // 도구 권한과 별개 축이므로, 등급이 내려갔다는 이유만으로 대화형 trust
-  // 게이트가 새로 생기면 안 된다 — 그러면 이 티켓이 없애려는 실패 모드가
-  // 그대로 재현된다.
-  for (const trust of ['approve', 'strict']) {
+test('ticket 5851e435: strict Agent 는 harness 를 안 건드린 보드에서 대화형 trust 게이트에 걸리지 않는다', async () => {
+  // 폴더 trust 는 도구 권한과 별개 축이므로, Agent trust 만으로 등급이
+  // 내려갔다는 이유로 대화형 trust 게이트가 새로 생기면 안 된다 — 그러면
+  // 이 티켓이 없애려는 실패 모드가 그대로 재현된다. (approve 는 별도의
+  // 승인-브리지 게이트를 타므로 아래 테스트에서 따로 다룬다.)
+  const cliHomeDir = await makeCliHomeDir();
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: 'strict' });
+
+  await d.handleTrigger(makeEvent({ field_changed: 'legacy-strict' }));
+
+  assert.equal(state.spawns.length, 1, 'harness 없는 보드에서 strict 스폰이 막혔다');
+  assert.equal(countTool('pend_ticket'), 0, 'strict 만으로 Pending 이 생성됐다');
+});
+
+// ── (6) 리뷰 라운드2 지적 #3: 승인 브리지 없는 approve 는 실행을 차단한다 ──
+//
+// `approve` 의 요구된 의미는 "AWB 에 승인을 요청한다"인데, CLI 런타임에는 그
+// 요청을 만들 훅이 없다. 정직한 capability 표기만으로는 운영자가 고른 의미가
+// 조용히 "묻지 않고 거부한다"로 바뀌는 것을 막지 못하므로, 실행 자체를 막고
+// 사람에게 결정을 넘긴다. 이건 "Pending 은 실제 사람 승인 gate 에만" 규칙의
+// 위반이 아니라 그 사례다.
+
+/** trust 게이트(48aeab6e)가 approve 게이트보다 먼저 돌므로, approve 게이트만
+ *  격리해서 보려면 이 cwd 를 미리 trust 승인해 둔다. */
+async function makeTrustedCliHomeDir() {
+  const dir = await makeCliHomeDir();
+  await fsp.writeFile(
+    join(dir, '.claude.json'),
+    JSON.stringify({ projects: { [CWD]: { hasTrustDialogAccepted: true } } }),
+  );
+  return dir;
+}
+
+test('ticket 5851e435: 승인 브리지 없는 런타임의 approve Agent 는 스폰 없이 차단·pend 된다', async () => {
+  const cliHomeDir = await makeTrustedCliHomeDir();
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: 'approve' });
+
+  await d.handleTrigger(makeEvent({ field_changed: 'approve-a1' }));
+
+  assert.equal(state.spawns.length, 0, 'approve 가 승인 없이 그대로 실행됐다');
+  assert.equal(countTool('pend_ticket'), 1, '사람이 결정해야 하므로 첫 중단에서 pend 한다');
+  assert.equal(countTool('add_comment'), 1, '무엇을 고쳐야 하는지 코멘트가 한 번 남는다');
+  assert.equal(ticketState.pending_user_action, true);
+
+  // 코멘트가 세 가지 출구를 모두 제시해야 운영자가 한 번에 결정할 수 있다.
+  for (const exit of ['trusted', 'strict', 'hermes']) {
+    assert.ok(addCommentContents[0].includes(exit), `출구 ${exit} 가 코멘트에 없다`);
+  }
+  assert.match(addCommentContents[0], /unpend|Resume/, 'pend 를 푸는 방법도 알려야 한다');
+
+  // 같은 상태로 재트리거해도 코멘트/pend 를 반복하지 않는다.
+  await d.handleTrigger(makeEvent({ trigger_source: 'supervisor', field_changed: 'approve-sup' }));
+  assert.equal(countTool('pend_ticket'), 1);
+  assert.equal(countTool('add_comment'), 1);
+  assert.equal(state.spawns.length, 0);
+});
+
+test('ticket 5851e435: 운영자가 trust 를 정하면 approve 차단이 즉시 풀린다', async () => {
+  for (const [trust, label] of [['trusted', '명시적 허용'], ['strict', '명시적 거부']]) {
     mcpToolCalls.length = 0;
+    addCommentContents.length = 0;
     ticketState.pending_user_action = false;
     const cliHomeDir = await makeCliHomeDir();
     const state = newState();
     const d = makeDispatcher(state, cliHomeDir, { strategy: 'single', permission_mode: trust });
 
-    await d.handleTrigger(makeEvent({ field_changed: `legacy-${trust}` }));
+    await d.handleTrigger(makeEvent({ field_changed: `resolved-${trust}` }));
 
-    assert.equal(state.spawns.length, 1, `trust=${trust}: harness 없는 보드에서 스폰이 막혔다`);
-    assert.equal(countTool('pend_ticket'), 0, `trust=${trust}: Pending 이 생성됐다`);
+    assert.equal(state.spawns.length, 1, `${label}(${trust}) 인데도 차단됐다`);
+    assert.equal(countTool('pend_ticket'), 0, `${label}(${trust}) 인데 Pending 이 생성됐다`);
   }
+});
+
+test('ticket 5851e435: legacy(trust 미설정) + harness 가 approve 를 요구해도 같은 게이트를 탄다', async () => {
+  // harness `acceptEdits` 는 legacy 규칙상 approve 등급이다. 출처가 Agent
+  // trust 든 harness 든 "승인을 요청할 수 없다"는 사실은 같으므로 같은 결론.
+  // trust 는 미리 승인해 두어 approve 게이트만 격리한다.
+  const cliHomeDir = await makeTrustedCliHomeDir();
+  const state = newState();
+  const d = makeDispatcher(state, cliHomeDir, null);
+
+  await d.handleTrigger(makeEvent({
+    harness_config: { permission_mode: 'acceptEdits' },
+    field_changed: 'legacy-approve',
+  }));
+
+  assert.equal(state.spawns.length, 0);
+  assert.equal(countTool('pend_ticket'), 1);
 });
 
 test('ticket 5851e435: 운영자가 harness 로 사람 trust 승인을 요구한 보드에서는 approve/strict 게이트가 그대로 유지된다', async () => {

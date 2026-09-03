@@ -21,6 +21,8 @@
 //     tier 를 유도한다 — 기존 동작 보존.
 // 순수 함수만 두어 어댑터/디스패처 없이 단위 테스트할 수 있게 한다.
 
+import { createHash } from 'node:crypto';
+
 /** 정규화된 권한 등급. Agent `runtime_config.permission_mode` 와 같은 값 집합. */
 export type PermissionTier = 'strict' | 'approve' | 'trusted';
 
@@ -58,9 +60,18 @@ export interface EffectivePermissionPolicy {
   harnessTier: PermissionTier;
   /** Agent trust 가 harness 가 요구한 tier 를 실제로 덮어썼는가. */
   harnessOverridden: boolean;
-  /** 거부된 Agent trust 원본 문자열(진단용, 길이 제한). 인식 가능한 값이거나
-   *  아예 미설정이면 null. `source === 'invalid_trust'` 와 항상 함께 설정된다. */
-  invalidTrust: string | null;
+  /**
+   * 거부된 Agent trust 값의 **비밀 없는 서술자**(`len=<N> sha256=<8hex>`).
+   * 인식 가능한 값이거나 아예 미설정이면 null이며 `source === 'invalid_trust'`
+   * 와 항상 함께 설정된다.
+   *
+   * 리뷰 라운드2 지적 #2: 이 값은 계약 밖의 임의 입력이라 토큰이나 개인정보일
+   * 수 있다. 잘라내서 인용하는 것만으로는 "secret 없는 진단 로그" 요구사항을
+   * 지키지 못하므로 원문을 정책 객체에 아예 담지 않는다 — 담아두면 나중에
+   * 어떤 호출자가 그걸 로그에 찍는 순간 같은 결함이 되살아난다. 해시는 같은
+   * 오설정이 반복되는지 상관(correlate)하기 위한 것이지 비밀성 보장이 아니다.
+   */
+  invalidTrustDigest: string | null;
 }
 
 /**
@@ -100,9 +111,15 @@ export function normalizeTrust(trust?: string | null): PermissionTier | null {
     : null;
 }
 
-/** 진단 로그에 남길 거부 값의 최대 길이 — 원본이 아무리 길어도 로그를 부풀리지
- *  않게 자른다. */
-const MAX_INVALID_TRUST_LEN = 64;
+/**
+ * 거부된 trust 값을 원문 없이 서술한다 (리뷰 라운드2 지적 #2). 길이는 오타
+ * 여부를 가늠하게 해 주고, 짧은 해시는 "같은 오설정이 계속 도는 중"인지
+ * 구분하게 해 준다. 원문은 어디에도 남지 않는다.
+ */
+function describeInvalidTrust(raw: string): string {
+  const digest = createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 8);
+  return `len=${raw.length} sha256=${digest}`;
+}
 
 /**
  * Agent trust 와 harness permission_mode 를 하나의 effective policy 로 합친다.
@@ -134,14 +151,14 @@ export function resolveEffectivePermissionPolicy(input: {
 }): EffectivePermissionPolicy {
   const rawTrust = typeof input.trust === 'string' ? input.trust.trim() : '';
   const trust = normalizeTrust(input.trust);
-  const invalidTrust = !trust && rawTrust ? rawTrust.slice(0, MAX_INVALID_TRUST_LEN) : null;
+  const invalidTrustDigest = !trust && rawTrust ? describeInvalidTrust(rawTrust) : null;
   const rawHarnessMode = typeof input.harnessMode === 'string' ? input.harnessMode.trim() : '';
   const harnessMode = rawHarnessMode || null;
   const harnessTier = harnessModeTier(harnessMode);
-  const tier: PermissionTier = trust ?? (invalidTrust ? 'strict' : harnessTier);
+  const tier: PermissionTier = trust ?? (invalidTrustDigest ? 'strict' : harnessTier);
   const source: PermissionSource = trust
     ? 'agent_trust'
-    : invalidTrust
+    : invalidTrustDigest
       ? 'invalid_trust'
       : harnessMode
         ? 'harness'
@@ -153,7 +170,7 @@ export function resolveEffectivePermissionPolicy(input: {
     harnessMode,
     harnessTier,
     harnessOverridden: source === 'agent_trust' && !!harnessMode && harnessTier !== tier,
-    invalidTrust,
+    invalidTrustDigest,
   };
 }
 
@@ -245,8 +262,8 @@ export function describePermissionPolicy(policy: EffectivePermissionPolicy): str
     `harness_mode=${policy.harnessMode ?? '-'}`,
   ];
   if (policy.harnessOverridden) parts.push(`harness_tier_overridden=${policy.harnessTier}`);
-  // 거부된 값은 열거형이 아니므로 인용해 로그에서 경계가 분명하게 보이게 한다.
-  if (policy.invalidTrust) parts.push(`invalid_trust=${JSON.stringify(policy.invalidTrust)}`);
+  // 원문이 아니라 길이+해시만 남긴다 (리뷰 라운드2 지적 #2).
+  if (policy.invalidTrustDigest) parts.push(`invalid_trust=(${policy.invalidTrustDigest})`);
   return parts.join(' ');
 }
 
@@ -276,4 +293,54 @@ export function describePermissionSupport(
     `전용 옵션이 없다. 조용히 다른 등급으로 바꾸지 않고 가진 수단 중 가장 가까운 ` +
     `동작으로 실행한다.`
   );
+}
+
+// ── approve 실행 게이트 (리뷰 라운드2 지적 #3) ──────────────────────────────
+//
+// `approve` 의 요구된 의미는 "AWB 에 승인을 요청한다"이다. 그 요청을 실제로
+// 발생시킬 수 있는 런타임은 ACP 승인 프로토콜을 가진 것뿐이다
+// (`RuntimeSupervisor.#requestApproval`). 그런 훅이 없는 런타임에서 approve
+// 에이전트를 그냥 실행하면, 운영자가 고른 "사람이 승인한다"가 조용히 "묻지
+// 않고 거부한다"로 바뀐다 — capability 를 정직하게 표기하는 것만으로는 그
+// 의미 손실이 사라지지 않는다.
+//
+// 그래서 표기 대신 **실행을 막는다**. 이건 이 티켓의 "Pending 은 실제 사람
+// 승인 gate 에만" 규칙을 어기는 게 아니라 오히려 그 사례다: 런타임이 승인을
+// 물을 수 없으니 사람이 그 에이전트의 trust 를 직접 정해야 한다. 운영자에게는
+// 세 가지 출구가 있고(아래 detail 참고) 어느 쪽이든 한 번의 명시적 결정으로
+// 끝난다 — 조용한 대규모 동작 변경 대신 에이전트별 1회 결정이다.
+
+export interface ApproveDispatchDecision {
+  blocked: boolean;
+  /** blocker de-dup 이 키로 쓰는 안정 문자열. */
+  reason?: string;
+  /** 운영자 코멘트/pend 사유에 그대로 쓰이는 설명(비밀 없음). */
+  detail?: string;
+}
+
+/** approve 실행 게이트의 안정 blocker 키. */
+export const APPROVE_BLOCKER_REASON = 'approve_requires_approval_bridge';
+
+/**
+ * 이 런타임에서 이번 정책으로 스폰해도 되는지 판정한다. `approve` 가 아니거나
+ * 런타임이 승인 요청을 실제로 발생시킬 수 있으면 통과, 아니면 차단.
+ * 순수 함수 — 어댑터도 I/O 도 필요 없다.
+ */
+export function decideApproveDispatch(
+  policy: EffectivePermissionPolicy,
+  runtime: { id: string; native_approvals: boolean },
+): ApproveDispatchDecision {
+  if (policy.tier !== 'approve') return { blocked: false };
+  if (runtime.native_approvals) return { blocked: false };
+  return {
+    blocked: true,
+    reason: APPROVE_BLOCKER_REASON,
+    detail:
+      `Agent trust 가 approve 인데 런타임 '${runtime.id}' 는 실행 중 권한 요청을 ` +
+      `AWB 승인 경로로 올릴 수 없다(native_approvals=false). 승인 없이 제한 모드로 ` +
+      `계속 실행하면 운영자가 고른 "사람이 승인한다"가 조용히 "묻지 않고 거부한다"로 ` +
+      `바뀌므로 실행하지 않는다. 해결: (1) trust 를 trusted 로 바꿔 명시적으로 허용, ` +
+      `(2) trust 를 strict 로 바꿔 명시적으로 거부, (3) 이 Agent 를 승인 요청을 ` +
+      `지원하는 런타임(native_approvals=true, 현재 hermes)으로 옮긴다.`,
+  };
 }

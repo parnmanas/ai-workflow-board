@@ -74,6 +74,16 @@ interface RuntimeConfigFieldsProps {
   availableRuntimeIds?: string[];
   disabled?: boolean;
   showRuntime?: boolean;
+  /**
+   * 선택된 Runtime Host가 보고한 런타임별 권한 등급 표현력
+   * (`runtime_capabilities[<runtime>].capabilities.permission_tiers`,
+   * ticket 5851e435). `approve` 를 고르는 순간 그 런타임이 실제로 AWB 승인을
+   * 요청할 수 있는지 여기서 알려준다 — 아래 select 의 "Approve — ask through
+   * AWB" 라벨이 지키지 못하는 약속이 되는 경우가 있기 때문이다.
+   * `undefined` = Host가 아직 이 값을 보고하지 않음(구버전 매니저) → 경고를
+   * 띄우지 않는다(보고된 적 없는 사실을 지어내지 않는다).
+   */
+  permissionTiers?: Record<string, Record<'strict' | 'approve' | 'trusted', string> | undefined>;
   /** 선택된 Runtime Host의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
    *  `undefined` = Host가 아직 이 값을 리포트하지 않음(오프라인 Host, 또는 이
    *  기능보다 구버전 manager) — 편집이 막히지 않도록 자유 입력으로 폴백한다.
@@ -90,7 +100,16 @@ export default function RuntimeConfigFields({
   disabled = false,
   showRuntime = true,
   hermesProfiles,
+  permissionTiers,
 }: RuntimeConfigFieldsProps) {
+  // ticket 5851e435 — approve 를 골랐는데 그 런타임이 승인 요청을 실제로
+  // 만들지 못하면(native 가 아니면) 경고한다. 매니저는 이 조합의 spawn 을
+  // 거부하므로, 저장 후 디스패치가 막히기 전에 여기서 먼저 알린다.
+  const approveUnsupported =
+    value.permissionMode === 'approve'
+    && !!value.runtime
+    && !!permissionTiers?.[value.runtime]
+    && permissionTiers[value.runtime]!.approve !== 'native';
   const available = availableRuntimeIds
     ? new Set(availableRuntimeIds)
     : null;
@@ -150,6 +169,24 @@ export default function RuntimeConfigFields({
           onChange({ ...value, permissionMode: event.target.value as RuntimePermissionMode | '' });
         }}
       />
+      {approveUnsupported && (
+        <div
+          data-testid="approve-unsupported-warning"
+          style={{
+            padding: 10,
+            border: `1px solid ${tokens.colors.border}`,
+            borderRadius: tokens.radii.md,
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          {`⚠️ 런타임 "${value.runtime}" 는 실행 중 권한 요청을 AWB 승인 경로로 올릴 수 없습니다. `
+            + `이 조합으로 저장하면 디스패치가 실행되지 않고 차단됩니다 — 승인 대신 조용히 `
+            + `제한 모드로 도는 일을 막기 위해서입니다. 명시적으로 허용하려면 Trusted, `
+            + `거부하려면 Strict 를 고르거나, 승인 요청을 지원하는 런타임(Hermes ACP)으로 `
+            + `옮기세요.`}
+        </div>
+      )}
       {value.runtime === 'hermes' && (
         <div style={{
           display: 'grid',
