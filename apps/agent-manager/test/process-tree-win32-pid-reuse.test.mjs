@@ -104,12 +104,25 @@ test('src/lib 의 모든 terminateDetachedProcessTree 호출부가 child 핸들�
       : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);
 
   const offenders = [];
+  let parsed = 0;
+  let mentions = 0;
   for (const file of tsFiles(libRoot)) {
     if (file.endsWith(join('lib', 'process-tree.ts'))) continue; // 정의 파일
     const source = readFileSync(file, 'utf8');
+    // import 절은 이름 뒤에 `(` 가 없어 여기 걸리지 않는다 — 호출만 센다.
+    mentions += [...source.matchAll(/terminateDetachedProcessTree\(/g)].length;
     for (const match of source.matchAll(/terminateDetachedProcessTree\(([^;]*?)\)\s*[;.]/gs)) {
+      parsed += 1;
       if (!/\bchild\b/.test(match[1])) offenders.push(`${file}: ${match[0].trim()}`);
     }
   }
   assert.deepEqual(offenders, [], `pid 재사용 가드 없이 tree-kill 하는 호출부:\n${offenders.join('\n')}`);
+
+  // 이 검사는 함수 이름을 문자열로 찾으므로 아무것도 못 찾아도 초록으로 끝난다
+  // (실측: 세 호출부의 이름을 바꾸면 offenders 가 비어 6/6 통과). 그러면 가드가
+  // 사라진 걸 아무도 모르므로 "찾았다"까지 단언한다.
+  assert.ok(parsed > 0, 'terminateDetachedProcessTree 호출부를 하나도 못 찾았다 — 함수가 rename 됐거나 호출이 래핑됐다면 이 검사도 새 이름으로 옮겨야 한다');
+  // 정규식은 `)` 뒤에 `;` 나 `.` 가 오는 호출만 파싱한다. 파싱 못 한 호출이
+  // 남으면 그 호출부는 검사 없이 통과하므로, 개수 불일치 자체를 실패로 본다.
+  assert.equal(parsed, mentions, `파싱하지 못한 호출 형태가 있다 (발견 ${mentions} / 검사 ${parsed}) — 위 정규식을 그 형태까지 넓혀야 한다`);
 });
