@@ -2026,6 +2026,41 @@ export interface AgentLiveSession {
   working_dir?: string;
 }
 
+/** 매니저가 보고한 argv 토큰 하나와 그 출처 (ticket 20fff298).
+ *  `value` 는 매니저가 이미 마스킹한 표시용 문자열이다 — 원문이 아니다. */
+export interface LaunchArgEntry {
+  value: string;
+  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'runtime_profile' | 'unattributed';
+  /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
+  placeholder?: boolean;
+}
+
+export interface LaunchEnvEntry {
+  key: string;
+  /** 매니저가 마스킹한 값. 자격증명 원문은 wire 에 오르지 않는다. */
+  value: string;
+  source: 'cli_home' | 'credential' | 'runtime_profile';
+}
+
+/** 관리 대상 에이전트 하나의 "다음 spawn 시 실효 실행 사양" (ticket 20fff298). */
+export interface AgentLaunchSpecEntry {
+  agent_id: string;
+  cli: string;
+  /** 해석된 실행 파일 경로. resolve 실패 시 null 이고 사유가 bin_error 에. */
+  bin: string | null;
+  bin_error: string | null;
+  args: LaunchArgEntry[];
+  cwd: string | null;
+  mcp_config_path: string | null;
+  model: string | null;
+  permission: { tier: string; source: string; harness_mode: string | null };
+  runtime_profile: { id: string; protocol: string; model: string | null; arg_count: number } | null;
+  env: LaunchEnvEntry[];
+  /** 디스패치 시점에만 정해져 이 사양에 반영되지 않은 입력들의 이름. */
+  varies_per_dispatch: string[];
+  computed_at: string;
+}
+
 // One Runtime Host instance heartbeating against AWB.
 export interface AgentManagerInstance {
   instance_id: string;
@@ -2053,6 +2088,11 @@ export interface AgentManagerInstance {
   // agent the manager could read auth state for. Older managers leave
   // this undefined; the UI degrades to "no credential metadata" then.
   agent_credentials?: AgentCredentialEntry[];
+  // 관리 대상 에이전트별 실효 실행 사양 (ticket 20fff298). REST 전용이라
+  // SSE 로는 오지 않는다 — `agent_instance_update` 는 재조회 힌트로만 쓴다.
+  // `undefined` 는 **매니저가 이 필드를 보고하지 않음**(구버전), `[]` 는
+  // **보고했지만 대상 에이전트가 없음**이다. 화면은 이 둘을 다르게 그려야 한다.
+  agent_launch_specs?: AgentLaunchSpecEntry[];
   // Live worktrees + pool-lease state across the manager's supervised agents
   // (ticket 72fc244f). One row per live/leased worktree under each working_dir's
   // `.awb/wt/`. `ticket_title` is joined server-side on the instance-list fetch.

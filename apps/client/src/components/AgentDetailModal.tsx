@@ -15,6 +15,7 @@ import AgentSubagentsPanel from './AgentSubagentsPanel';
 import HermesChildRunsPanel from './HermesChildRunsPanel';
 import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
 import AgentLifecycleControls from './AgentLifecycleControls';
+import AgentLaunchSpecSection from './AgentLaunchSpecSection';
 import ManagedAgentDialog from './admin/ManagedAgentDialog';
 import { useParams } from 'react-router-dom';
 
@@ -305,6 +306,25 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
     }
     return best;
   }, [detail?.manager_agent_id, managerInstances]);
+
+  // 이 에이전트의 실효 실행 사양 (ticket 20fff298). 소유 매니저의 REST 인스턴스
+  // 레코드에서 골라낸다 — SSE 에는 싣지 않는 REST-only 텔레메트리라, 위
+  // `agent_instance_update` 구독이 재조회를 걸어 주는 것으로 신선도가 유지된다.
+  //
+  // 세 신호를 각각 따로 넘긴다. 하나로 접으면 화면이 "매니저가 없다" / "매니저가
+  // 구버전이다" / "매니저가 이 에이전트를 감독하지 않는다" 를 구분하지 못하고,
+  // 그 뭉개짐이 정확히 이 티켓이 고치는 오표시다.
+  const launchSpecState = useMemo(() => {
+    const inst = ownerManagerInstance;
+    if (!inst) return { spec: null, managerFound: false, reported: false };
+    const rows = inst.agent_launch_specs;
+    if (!Array.isArray(rows)) return { spec: null, managerFound: true, reported: false };
+    return {
+      spec: rows.find((r) => r.agent_id === agentId) ?? null,
+      managerFound: true,
+      reported: true,
+    };
+  }, [ownerManagerInstance, agentId]);
 
   // Resolve credential_id → credential.name for the MANAGED AGENT card.
   // Skipped on non-managed agents and on agents with no credential. Errors
@@ -960,6 +980,23 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                 )}
               </div>
             </section>
+          )}
+
+          {/* 실행 인자 (ticket 20fff298) — 이 에이전트가 다음에 spawn 될 때 실제로
+              받는 실행 파일과 argv. MANAGED AGENT 바로 뒤에 두는 이유는 CLI /
+              working_dir / credential 을 방금 읽은 맥락에서 "그래서 실제로 뭐가
+              붙나"가 이어지는 질문이기 때문이다. 관리 대상 에이전트에만 해당한다
+              (매니저가 spawn 하지 않는 identity 에는 실행 사양 자체가 없다).
+
+              admin 게이팅은 같은 카드의 LIFECYCLE 과 같은 이유다: 사양의 유일한
+              소스인 매니저 인스턴스 목록이 admin 전용이라, 비-admin 에게 렌더하면
+              권한 부족을 "매니저를 찾을 수 없음"으로 잘못 설명하게 된다. */}
+          {isManaged && detail && isAdmin && (
+            <AgentLaunchSpecSection
+              spec={launchSpecState.spec}
+              managerFound={launchSpecState.managerFound}
+              reported={launchSpecState.reported}
+            />
           )}
 
           {/* Runtime Host sessions currently able to execute this Agent. */}
