@@ -52,6 +52,12 @@ export const MergeLeaseConfigSchema = z
      * degraded 로 기록하고 lease 없이 진행시킨다(기아 방지의 최종 방어선).
      */
     max_wait_minutes: z.number().int().positive().max(24 * 60).optional(),
+    /**
+     * lease 를 쥔 채 허용하는 CI 재검증 최대 횟수. lease 가 있어도 사람의 직접
+     * push 나 같은 저장소를 보는 다른 AWB 인스턴스 때문에 ff 가 실패할 수 있어,
+     * 소진하면 조용히 계속 도는 대신 **명시적 실패**로 끝낸다.
+     */
+    max_reverify_attempts: z.number().int().positive().max(20).optional(),
   })
   .strict();
 
@@ -62,6 +68,7 @@ export const MERGE_LEASE_CONFIG_KEYS = [
   'idle_timeout_minutes',
   'max_hold_minutes',
   'max_wait_minutes',
+  'max_reverify_attempts',
 ] as const;
 
 /** 무진행 판정 기본값 — CI 대기는 진행 증거로 치므로 "에이전트 사망" 감지용. */
@@ -70,12 +77,15 @@ export const DEFAULT_IDLE_TIMEOUT_MINUTES = 20;
 export const DEFAULT_MAX_HOLD_MINUTES = 120;
 /** 대기 상한 기본값 — 초과 시 fail-open. */
 export const DEFAULT_MAX_WAIT_MINUTES = 45;
+/** lease 보호 하 재검증 상한 기본값 — 소진 시 명시적 실패. */
+export const DEFAULT_MAX_REVERIFY_ATTEMPTS = 3;
 
 export interface ResolvedMergeLease {
   enabled: boolean;
   idleTimeoutMs: number;
   maxHoldMs: number;
   maxWaitMs: number;
+  maxReverifyAttempts: number;
 }
 
 /**
@@ -112,6 +122,12 @@ export function resolveMergeLease(raw: string | null | undefined): ResolvedMerge
     idleTimeoutMs: minutes(cfg?.idle_timeout_minutes, DEFAULT_IDLE_TIMEOUT_MINUTES),
     maxHoldMs: minutes(cfg?.max_hold_minutes, DEFAULT_MAX_HOLD_MINUTES),
     maxWaitMs: minutes(cfg?.max_wait_minutes, DEFAULT_MAX_WAIT_MINUTES),
+    maxReverifyAttempts:
+      typeof cfg?.max_reverify_attempts === 'number'
+        && Number.isFinite(cfg.max_reverify_attempts)
+        && cfg.max_reverify_attempts > 0
+        ? cfg.max_reverify_attempts
+        : DEFAULT_MAX_REVERIFY_ATTEMPTS,
   };
 }
 
