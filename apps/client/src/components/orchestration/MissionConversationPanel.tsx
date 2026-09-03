@@ -3,8 +3,11 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatRoomMessageItem, OrchestrationTimelineEvent } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
+import { useAuth } from '../../contexts/AuthContext';
 import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
+import { projectParticipants, countUserParticipants } from '../chat/utils/participantFlow';
+import type { MentionParticipant } from '../chat/utils/markdown';
 import { eventColor } from './status';
 import { relativeTime } from '../../utils/time';
 
@@ -97,6 +100,10 @@ export default function MissionConversationPanel({
   live,
   currentUserId,
 }: MissionConversationPanelProps) {
+  const { user } = useAuth();
+  // 프롭이 있으면 그걸 쓰고, 없으면 로그인 사용자를 쓴다 — "내 메시지" 정렬/스타일이
+  // 이 값으로 갈린다.
+  const viewerId = currentUserId ?? user?.id;
   const [messages, setMessages] = useState<ChatRoomMessageItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -108,6 +115,13 @@ export default function MissionConversationPanel({
    * 대신 왜 못 쓰는지 알려주기 위해서다.
    */
   const [observer, setObserver] = useState(false);
+  /**
+   * 참여자 로스터 — 없으면 `MessageList` 가 `@[user:uuid|이름]` 을 pill 로 못 그리고
+   * 읽음 수("Read by N")도 표시하지 못한다. 즉 "기존 Chat 의 멘션·읽음 UX 재사용"이
+   * 로스터 없이는 성립하지 않는다.
+   */
+  const [participants, setParticipants] = useState<MentionParticipant[]>([]);
+  const [participantCount, setParticipantCount] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingOlderRef = useRef(false);
@@ -131,6 +145,25 @@ export default function MissionConversationPanel({
       setObserver(asObserver);
       setMessages(rows);
       setHasMore(rows.length >= PAGE_SIZE);
+
+      // 로스터는 멘션 pill 렌더링과 읽음 수에 쓰인다. 실패해도 대화 자체는 계속
+      // 보여준다 — 부가 정보 때문에 본문을 막을 이유가 없다.
+      try {
+        // `any` 캐스팅은 ChatPage 와 같은 이유다: 서버 wire 는 평평한 `name` 을
+        // 내려주는데 선언 타입 `ChatRoomDetail.participants` 는 `participant_name` 을
+        // 쓰는 기존 불일치가 있다(participantFlow.ts 주석 참고). 여기서 타입을
+        // 새로 맞추려 들면 그 불일치를 이 파일에만 다르게 해석하는 셈이 된다.
+        const detail: any = await api.getChatRoom(roomId, asObserver);
+        const roster = projectParticipants(detail);
+        setParticipants(roster);
+        setParticipantCount(countUserParticipants(roster));
+      } catch {
+        setParticipants([]);
+        setParticipantCount(0);
+      }
+
+      // 관전자는 남의 방 읽음 표시를 건드리면 안 된다(ChatPage 와 같은 규칙).
+      if (!asObserver) api.markChatRoomRead(roomId).catch(() => {});
     } catch (e: any) {
       setError(e?.message || '대화를 불러오지 못했습니다');
       setMessages([]);
@@ -197,8 +230,11 @@ export default function MissionConversationPanel({
         // POST 응답과 SSE 브로드캐스트 중 어느 쪽이 먼저 와도 한 번만 그린다
         // (ChatPage 의 3203bbaf "Chat Echo back" 가드와 같은 이유).
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        // 패널을 열어 둔 채로 받은 메시지는 읽은 것이다 — 안 그러면 미읽음 배지가
+        // 눈앞에서 계속 쌓인다.
+        if (!observer) api.markChatRoomRead(roomId).catch(() => {});
       },
-      [roomId],
+      [roomId, observer],
     ),
   );
 
@@ -255,8 +291,9 @@ export default function MissionConversationPanel({
             <MessageList
               key={`m-${track.messages[0].id}`}
               messages={track.messages}
-              participantCount={0}
-              currentUserId={currentUserId}
+              participantCount={participantCount}
+              participants={participants}
+              currentUserId={viewerId}
             />
           ) : (
             <ExecutionEventRun key={`e-${track.at}-${index}`} events={track.events} />

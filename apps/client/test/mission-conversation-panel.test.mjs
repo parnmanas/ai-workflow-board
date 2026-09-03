@@ -13,6 +13,8 @@
 //   • 종료된 미션은 입력창이 없고 기록 보존 안내가 나온다
 //   • 미션이 시작 전(room 없음)이면 안내만 나오고 조회를 시도하지 않는다
 //   • 긴 로그는 잘라 렌더링해 패널이 멈추지 않는다(pagination 상한)
+//   • bare 멘션이 참여자 로스터로 해석돼 pill 로 렌더링된다
+//   • 참여자는 읽음 처리되고 관전자는 남의 방 읽음을 건드리지 않는다
 //   • needs_recovery step 이 "Waiting" 으로 조용히 오표시되지 않는다
 
 import test from 'node:test';
@@ -63,22 +65,33 @@ function evt(id, type, message, createdAt) {
  * `getChatRoomMessages` 만 스텁하면 되므로 별도 DI 를 만들지 않고 api 모듈에 직접
  * 대입한다(이 저장소의 smoke-ticket-artifact-realtime.test.mjs 와 같은 관례).
  */
-async function withPanel({ props, getChatRoomMessages }, body) {
+async function withPanel({ props, getChatRoomMessages, getChatRoom }, body) {
   const dom = setupDom({ width: 1280 });
   const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
 
-  const original = api.getChatRoomMessages;
+  const originals = {
+    getChatRoomMessages: api.getChatRoomMessages,
+    getChatRoom: api.getChatRoom,
+    markChatRoomRead: api.markChatRoomRead,
+  };
+  const readCalls = [];
   if (getChatRoomMessages) api.getChatRoomMessages = getChatRoomMessages;
+  api.getChatRoom = getChatRoom ?? (async () => ({ participants: [] }));
+  api.markChatRoomRead = async (roomId) => {
+    readCalls.push(roomId);
+  };
 
   try {
-    const view = mountWithBoardStream(h(Panel, props), { withAuth: false });
+    // 실제 App 트리와 같은 순서(AuthProvider 바깥 > BoardStreamProvider 안쪽)로 띄운다 —
+    // 패널이 로그인 사용자 id 로 "내 메시지"를 가르므로 AuthProvider 가 필요하다.
+    const view = mountWithBoardStream(h(Panel, props), { withAuth: true });
     await settle();
-    await body({ view, es: () => FakeEventSource.instances[0] });
+    await body({ view, es: () => FakeEventSource.instances[0], readCalls });
     view.unmount();
   } finally {
-    api.getChatRoomMessages = original;
+    Object.assign(api, originals);
     uninstall();
     dom.cleanup();
   }
@@ -280,6 +293,66 @@ test('긴 실행 로그는 상한까지만 렌더링해 패널이 멈추지 않�
         textOf(view.container).includes('progress 499'),
         '가장 최근 이벤트가 잘려나가면 지금 무슨 일이 벌어지는지 볼 수 없다',
       );
+    },
+  );
+});
+
+test('참여자 로스터가 있어야 bare 멘션이 pill 로 해석된다', async () => {
+  // 구조화 토큰 `@[user:id|이름]` 은 표시명을 자기가 들고 있어 로스터 없이도 pill 이 된다.
+  // 로스터가 실제로 갈리는 지점은 **bare `@name`** 이다 — 참여자와 이름이 맞아야 pill 이
+  // 되고, 못 맞추면 "unresolved" 무채색 평문으로 떨어진다(markdown.tsx Step 1c).
+  // 그래서 이 테스트는 bare 형태로 단언한다. 구조화 토큰으로 쓰면 로스터를 떼도 통과해
+  // 아무것도 지키지 못한다(실제로 그렇게 썼다가 변이 검증에서 걸렀다).
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      getChatRoomMessages: async () => [msg('m1', '@jeongmin 이 부분 확인 부탁해요')],
+      getChatRoom: async () => ({
+        participants: [
+          { participant_id: 'user-9', participant_type: 'user', name: 'jeongmin' },
+          { participant_id: 'user-1', participant_type: 'user', name: 'Operator' },
+        ],
+      }),
+    },
+    async ({ view }) => {
+      const pill = view.container.querySelector('[aria-label="Mention: @jeongmin"]');
+      assert.ok(
+        pill,
+        '로스터를 넘기지 않으면 멘션이 pill 이 아니라 무채색 평문으로 떨어진다 — 기존 Chat 의 멘션 UX 재사용이 성립하지 않는다',
+      );
+      assert.ok(textOf(view.container).includes('이 부분 확인 부탁해요'), '본문도 함께 렌더링돼야 한다');
+    },
+  );
+});
+
+test('참여자로 열면 읽음 처리하고, 관전자는 남의 방 읽음을 건드리지 않는다', async () => {
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      getChatRoomMessages: async () => [],
+    },
+    async ({ view, es, readCalls }) => {
+      assert.deepEqual(readCalls, [ROOM], '패널을 열면 그 방은 읽은 것이다');
+
+      await act(async () => {
+        es().emit('chat_room_message', msg('new-1', '새 메시지'));
+        await Promise.resolve();
+      });
+      await settle();
+      assert.equal(readCalls.length, 2, '열어 둔 채 받은 메시지도 읽음 처리해야 배지가 안 쌓인다');
+    },
+  );
+
+  await withPanel(
+    {
+      props: { missionId: 'mission-1', roomId: ROOM, live: true, events: [] },
+      getChatRoomMessages: async (_r, _l, _b, observer) => {
+        if (!observer) throw new Error('not a participant');
+        return [];
+      },
+    },
+    async ({ readCalls }) => {
+      assert.deepEqual(readCalls, [], '관전자가 남의 방을 읽음 처리하면 그 방 참여자의 미읽음이 사라진다');
     },
   );
 });
