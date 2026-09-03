@@ -330,6 +330,11 @@ export async function reapProcessTrees(pids: number[], graceMs = 2000): Promise<
 export interface ExitObservableChild {
   readonly exitCode: number | null;
   readonly signalCode: NodeJS.Signals | null;
+  /** 'exit' 구독. 있으면 종료를 **기다릴** 수 있다 — kill 직후 핸들은 아직
+   *  exitCode 가 null 이라(이벤트가 다음 턴에 온다) 동기 확인만으로는 이미
+   *  죽은 자식을 죽었다고 판정할 수 없다. `ChildProcess` 가 이 모양을 만족한다. */
+  once?(event: 'exit', listener: () => void): unknown;
+  off?(event: 'exit', listener: () => void): unknown;
 }
 
 /** 핸들이 이미 종료를 보고했는가. exitCode 는 정상 종료, signalCode 는 시그널
@@ -366,6 +371,39 @@ function oneLine(text: string, max = 120): string {
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
+/** 진입 시점에 자식의 종료를 관측하는 데 쓰는 예산. grace 에서 떼어 쓰므로
+ *  전체 대기 시간은 늘지 않는다. kill 직후의 'exit' 는 다음 턴에 오므로 이만큼
+ *  이면 충분하다. */
+const EXIT_OBSERVE_MS = 50;
+
+/** 자식이 종료하거나 `budgetMs` 가 지날 때까지 기다린다. 핸들이 'exit' 를
+ *  구독시켜 주지 않으면(스텁 등) 그냥 예산만큼 잔다 — 그래야 핸들 없는 호출부의
+ *  종전 타이밍이 유지된다. */
+async function waitForChildExit(
+  child: ExitObservableChild,
+  budgetMs: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  if (budgetMs <= 0 || childHasExited(child)) return;
+  if (typeof child.once !== 'function') {
+    await sleep(budgetMs);
+    return;
+  }
+  // 리스너는 settle 이 확정된 **뒤에** 등록한다. 순서가 뒤바뀌면 그 사이에 온
+  // 'exit' 이 빈 함수로 흘러가 아무도 깨우지 못한다.
+  let settle: () => void = () => {};
+  const exited = new Promise<void>(resolve => { settle = resolve; });
+  const onExit = () => settle();
+  child.once('exit', onExit);
+  try {
+    await Promise.race([exited, sleep(budgetMs)]);
+  } finally {
+    // 예산이 먼저 끝난 경우 리스너가 남는다. 이 핸들은 곧 버려지지만, 정리할
+    // 수단이 있으면 정리한다.
+    child.off?.('exit', onExit);
+  }
+}
+
 /** win32 전용 tree-kill. `deps` 는 테스트 이음매다 — process-tree.ts 는
  *  `hostPlatform`/`runCommand` 를 정적 import 하므로, 이걸 주입할 수 없으면
  *  리눅스에서 이 분기를 한 줄도 태울 수 없다. */
@@ -384,14 +422,30 @@ export async function terminateWindowsProcessTree(
   // 이미 죽은 자식의 pid 로는 아무것도 죽여선 안 된다 — 그 pid 는 이미 남의
   // 것일 수 있다. 죽은 자식의 손자를 못 거두는 손해보다 무고한 프로세스를
   // 죽이는 손해가 크다(후자는 형제 테스트 파일이 출력 한 줄 없이 exit 1 로
-  // 죽는 CI flake 로 나타났다).
-  if (child && childHasExited(child)) {
-    log(`[process-tree] win32 tree-kill skipped: pid=${rootPid} already exited (pid may be recycled)`);
-    return;
+  // 죽는 CI flake 로 나타났다). 덧붙여, 리더가 이미 죽었으면 `taskkill /T` 는
+  // 트리를 걸어갈 시작점이 없어 어차피 아무것도 거두지 못한다(windows CI 실측:
+  // 이 경로의 soft 패스는 전부 `code=128 not found` 였다) — 건너뛰어도 잃는 게
+  // 없다.
+  //
+  // 호출부는 자식에게 kill 을 보낸 직후 우리를 부른다. 그 시점의 핸들은 아직
+  // exitCode 가 null 이다('exit' 는 다음 턴에 온다) — 그래서 동기 확인만으로는
+  // 이 가드가 실전에서 한 번도 발동하지 못했다(같은 실측: 진입 게이트 0회 대
+  // 무의미한 soft taskkill 29회). 짧게 기다려서 관측한다. 이 예산은 아래 grace
+  // 에서 떼어 쓰므로 총 대기 시간은 종전과 같다.
+  let remainingGraceMs = graceMs;
+  if (child) {
+    const observeMs = Math.min(graceMs, EXIT_OBSERVE_MS);
+    await waitForChildExit(child, observeMs, sleep);
+    remainingGraceMs -= observeMs;
+    if (childHasExited(child)) {
+      log(`[process-tree] win32 tree-kill skipped: pid=${rootPid} already exited (pid may be recycled)`);
+      return;
+    }
   }
 
   logTaskkill('soft', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 }));
-  await sleep(graceMs);
+  if (child) await waitForChildExit(child, remainingGraceMs, sleep);
+  else await sleep(remainingGraceMs);
 
   // grace 동안 자식이 끝났으면 force 패스를 쏘지 않는다. 이 창(hermes 250ms,
   // runtime-profiles 5000ms)이 pid 재사용이 실제로 일어나는 구간이고, `/F` 는

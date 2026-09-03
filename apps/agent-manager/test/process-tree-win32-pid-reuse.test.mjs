@@ -31,9 +31,32 @@ function recordingRun(calls) {
   };
 }
 
-/** ChildProcess 의 종료 관측 부분만 흉내낸 스텁. */
+/** ChildProcess 의 종료 관측 부분만 흉내낸 스텁. `once` 가 없으므로 구현은
+ *  "기다릴 수 없는 핸들" 경로(예산만큼 sleep)로 떨어진다. */
 function fakeChild({ exitCode = null, signalCode = null } = {}) {
   return { exitCode, signalCode };
+}
+
+/** 'exit' 를 구독시켜 주는 핸들 — 실제 ChildProcess 에 대응한다. `emitExit()`
+ *  로 종료를 발생시키면 대기 중이던 쪽이 예산을 다 쓰지 않고 깨어난다. */
+function fakeEventChild() {
+  const listeners = new Set();
+  return {
+    exitCode: null,
+    signalCode: null,
+    once(event, listener) { if (event === 'exit') listeners.add(listener); },
+    off(event, listener) { if (event === 'exit') listeners.delete(listener); },
+    get listenerCount() { return listeners.size; },
+    emitExit(code = 0) {
+      this.exitCode = code;
+      for (const l of [...listeners]) { listeners.delete(l); l(); }
+    },
+  };
+}
+
+/** sleep 호출 예산을 기록하는 스텁. 실제로 기다리지는 않는다. */
+function recordingSleep(budgets, onSleep) {
+  return async (ms) => { budgets.push(ms); if (onSleep) await onSleep(budgets.length); };
 }
 
 test('이미 종료된 자식의 pid 로는 taskkill 을 한 번도 쏘지 않는다', async () => {
@@ -55,16 +78,62 @@ test('이미 종료된 자식의 pid 로는 taskkill 을 한 번도 쏘지 않�
   assert.deepEqual(bySignal, []);
 });
 
-test('grace 도중 자식이 끝나면 force 패스를 쏘지 않는다', async () => {
+// 호출부는 kill 을 보낸 직후 우리를 부르므로 그 시점 핸들은 아직 exitCode 가
+// null 이다. 이걸 기다려서 관측하지 않으면 가드가 실전에서 발동하지 못한다 —
+// windows CI 실측에서 진입 게이트 0회 대 무의미한 soft taskkill 29회였다.
+test('진입 직후엔 아직 exit 를 못 봤어도, 관측 예산 안에 끝나면 taskkill 을 안 쏜다', async () => {
   const calls = [];
+  const budgets = [];
   const child = fakeChild();
   await terminateWindowsProcessTree(4321, 250, {
     child,
     run: recordingRun(calls),
-    // grace 를 실제로 기다리는 대신, 그 사이 자식이 종료한 상황을 만든다.
-    sleep: async () => { child.exitCode = 0; },
+    // 관측 예산 동안 자식이 종료한 상황.
+    sleep: recordingSleep(budgets, () => { child.exitCode = 0; }),
+  });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(budgets, [50], '진입 관측은 EXIT_OBSERVE_MS 만 쓴다');
+});
+
+test('soft 이후 남은 grace 도중 자식이 끝나면 force 패스를 쏘지 않는다', async () => {
+  const calls = [];
+  const budgets = [];
+  const child = fakeChild();
+  await terminateWindowsProcessTree(4321, 250, {
+    child,
+    run: recordingRun(calls),
+    // 1번째 sleep(진입 관측)엔 살아 있고, 2번째(남은 grace)에 종료한다.
+    sleep: recordingSleep(budgets, (nth) => { if (nth === 2) child.exitCode = 0; }),
   });
   assert.deepEqual(calls, ['taskkill /PID 4321 /T']);
+  // 관측 예산은 grace 에서 떼어 쓴다 — 총 대기는 종전(graceMs)과 같아야 한다.
+  assert.deepEqual(budgets, [50, 200]);
+  assert.equal(budgets.reduce((a, b) => a + b, 0), 250);
+});
+
+test("'exit' 를 구독시켜 주는 핸들은 예산을 다 쓰지 않고 깨어난다", async () => {
+  const calls = [];
+  const child = fakeEventChild();
+  // sleep 은 영원히 안 끝난다 — 그래도 'exit' 로 진행돼야 한다.
+  const sleep = () => new Promise(() => {});
+  const done = terminateWindowsProcessTree(4321, 250, { child, run: recordingRun(calls), sleep });
+  await new Promise(resolve => setImmediate(resolve));
+  child.emitExit(0);
+  await done;
+  assert.deepEqual(calls, [], '진입 관측 중 exit 를 받았으므로 taskkill 은 없다');
+  assert.equal(child.listenerCount, 0, "'exit' 리스너를 남기지 않는다");
+});
+
+test('grace 를 관측 예산보다 짧게 준 호출부도 총 대기가 grace 를 넘지 않는다', async () => {
+  const calls = [];
+  const budgets = [];
+  await terminateWindowsProcessTree(4321, 20, {
+    child: fakeChild(),
+    run: recordingRun(calls),
+    sleep: recordingSleep(budgets),
+  });
+  assert.deepEqual(calls, ['taskkill /PID 4321 /T', 'taskkill /PID 4321 /T /F']);
+  assert.equal(budgets.reduce((a, b) => a + b, 0), 20, 'grace(20ms) 를 초과 대기하지 않는다');
 });
 
 test('grace 내내 살아 있으면 soft·force 를 모두 쏜다', async () => {
@@ -79,11 +148,14 @@ test('grace 내내 살아 있으면 soft·force 를 모두 쏜다', async () => 
 
 test('핸들을 못 주는 호출부는 종전 best-effort 경로 그대로다', async () => {
   const calls = [];
+  const budgets = [];
   await terminateWindowsProcessTree(4321, 250, {
     run: recordingRun(calls),
-    sleep: async () => {},
+    sleep: recordingSleep(budgets),
   });
   assert.deepEqual(calls, ['taskkill /PID 4321 /T', 'taskkill /PID 4321 /T /F']);
+  // 관측할 핸들이 없으면 진입 관측도 없다 — soft 가 곧바로 나가고 grace 한 번만 잔다.
+  assert.deepEqual(budgets, [250]);
 });
 
 test('childHasExited 는 정상 종료와 시그널 종료를 모두 종료로 본다', () => {
