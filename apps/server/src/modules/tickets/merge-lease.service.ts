@@ -48,6 +48,15 @@ import {
   parseMergeLeaseContext,
 } from './merge-lease';
 
+/**
+ * FIFO 정렬 키 — **`_tryPromoteFifo` 의 원자 UPDATE 가 쓰는 순서와 반드시
+ * 같아야 한다**(리뷰 3R). 조회는 `queued_at` 만 보고 승격 판정은
+ * `(queued_at, id)` 를 보면, 같은 시각의 더 큰 id 가 먼저 반환될 때 스윕이
+ * 그 행만 시도하고 UPDATE 는 거절 — 진짜 선두는 `i > 0` 이라 시도조차 되지
+ * 않아 스윕만으로는 영원히 승격되지 않는다. 상수 하나로 묶어 드리프트를 막는다.
+ */
+export const FIFO_ORDER = { queued_at: 'ASC', id: 'ASC' } as const;
+
 export interface MergeLeaseScope {
   repoResourceId: string;
   baseBranch: string;
@@ -222,8 +231,38 @@ export class MergeLeaseService {
       await this._logLeaseActivity(ticket, 'queued', waiter.id, opts);
       return { outcome: 'queued', lease_id: waiter.id, scope, config, ...queued };
     } catch (e) {
-      // fail-open: 여기서 무엇이 터지든 랜딩을 막지 않는다.
-      return { outcome: 'degraded', degrade_reason: 'service_error' };
+      // fail-open 이되 **예산은 반드시 쓴다**(리뷰 3R). 여기서 예산 없이
+      // degraded 를 돌려주면, 파킹·활동기록 등에서 반복 예외가 나는 동안
+      // 에이전트가 상한 없이 계속 진행해 유한 종료 계약이 다시 깨진다.
+      return this._degradedAfterThrow(ticketId);
+    }
+  }
+
+  /**
+   * 예기치 못한 예외 뒤의 fail-open. 예산을 쓸 수 있으면 쓰고 그 결과를 붙인다.
+   *
+   * **예산 기록 자체가 실패한 경계의 정책(리뷰 3R):** 카운터를 못 쓰면 반복
+   * 횟수를 셀 수 없고, 셀 수 없으면 "유한하게 끝난다" 를 약속할 수 없다.
+   * 그래서 이때는 진행 허가를 주지 않고 `budget: 'exhausted'` +
+   * `degrade_reason: 'budget_unavailable'` 로 **명시적 실패**를 지시한다.
+   * 이것은 하드 블록이 아니다 — 도구는 git 을 막지 못하며, 에이전트는 여전히
+   * 코멘트를 남기고 바운스·pend 하거나 사람이 개입할 수 있다. 무한 루프와
+   * 명시적 실패 중 하나를 골라야 한다면 후자가 옳다.
+   */
+  private async _degradedAfterThrow(ticketId: string): Promise<AcquireResult> {
+    try {
+      const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
+      const config = ticket ? await this.resolveConfigForTicket(ticket) : resolveMergeLease(null);
+      const budget = await this._spendAttempt(ticketId, config);
+      return { outcome: 'degraded', degrade_reason: 'service_error', config, ...budget };
+    } catch {
+      return {
+        outcome: 'degraded',
+        degrade_reason: 'budget_unavailable',
+        attempt: 0,
+        max_attempts: 0,
+        budget: 'exhausted',
+      };
     }
   }
 
@@ -497,7 +536,7 @@ export class MergeLeaseService {
         state: 'waiting',
         released_at: IsNull(),
       },
-      order: { queued_at: 'ASC' },
+      order: FIFO_ORDER,
     });
   }
 
@@ -583,26 +622,45 @@ export class MergeLeaseService {
    */
   private async _releaseIfUnchanged(lease: MergeLease, reason: string): Promise<boolean> {
     try {
-      const now = new Date();
-      const res = await this.dataSource.getRepository(MergeLease).update(
-        {
-          id: lease.id,
-          released_at: IsNull(),
-          last_progress_at: lease.last_progress_at,
-        } as any,
-        {
-          released_at: now,
-          release_reason: reason,
-          progress_note: `released:${reason}`,
-        },
-      );
-      if ((res.affected || 0) === 0) return false;
-      await this.dataSource.getRepository(Ticket).update(
-        { id: lease.ticket_id, pending_merge_lease: true } as any,
-        { pending_merge_lease: false, merge_lease_context: '' },
-      );
-      const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: lease.ticket_id } });
-      if (ticket) await this._logLeaseActivity(ticket, `released:${reason}`, lease.id, {});
+      let won = false;
+      let ticketForLog: Ticket | null = null;
+
+      // CAS 와 티켓 정리는 **한 트랜잭션**이다(리뷰 3R). 둘을 따로 커밋하면
+      // 사이에서 죽었을 때 "released lease + 영구 파킹된 티켓" 이 남고, 그
+      // 티켓의 트리거는 영원히 드롭된다.
+      await this.dataSource.transaction(async (manager) => {
+        const res = await manager.getRepository(MergeLease).update(
+          {
+            id: lease.id,
+            released_at: IsNull(),
+            last_progress_at: lease.last_progress_at,
+          } as any,
+          {
+            released_at: new Date(),
+            release_reason: reason,
+            progress_note: `released:${reason}`,
+          },
+        );
+        if ((res.affected || 0) === 0) return; // 진행이 기록됨 / 이미 해제됨 — 회수 포기
+        won = true;
+
+        // 티켓 정리는 **이 lease 를 가리키고 있을 때만** 한다. 회수 판정 이후
+        // 같은 티켓이 새 waiting 행을 만들어 다시 파킹됐다면, 옛 리퍼가 그
+        // 새 컨텍스트를 지워 대기자를 잘못 깨우는 일이 생긴다(리뷰 3R).
+        const tRepo = manager.getRepository(Ticket);
+        const ticket = await tRepo.findOne({ where: { id: lease.ticket_id } });
+        ticketForLog = ticket;
+        if (!ticket?.pending_merge_lease) return;
+        const ctx = parseMergeLeaseContext(ticket.merge_lease_context);
+        if (ctx && ctx.lease_id !== lease.id) return; // 새 대기 — 건드리지 않는다
+        await tRepo.update(
+          { id: lease.ticket_id, pending_merge_lease: true } as any,
+          { pending_merge_lease: false, merge_lease_context: '' },
+        );
+      });
+
+      if (!won) return false;
+      if (ticketForLog) await this._logLeaseActivity(ticketForLog, `released:${reason}`, lease.id, {});
       return true;
     } catch {
       return false;
@@ -660,7 +718,7 @@ export class MergeLeaseService {
           state: 'waiting',
           released_at: IsNull(),
         },
-        order: { queued_at: 'ASC' },
+        order: FIFO_ORDER,
       }),
     ]);
     const idx = waiters.findIndex((w) => w.id === mine.id);

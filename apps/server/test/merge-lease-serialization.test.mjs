@@ -749,6 +749,124 @@ test('★ 판정과 해제 사이에 진행이 기록되면 리퍼가 회수를 
   assert.equal(stats2.reaped, 1);
 });
 
+test('★ 리퍼의 CAS 와 티켓 정리는 원자적이다 — 롤백되면 둘 다 남는다', async () => {
+  // 리뷰 3R 지적 1. 둘을 따로 커밋하면 사이에서 죽었을 때 "released lease +
+  // 영구 파킹된 티켓" 이 남고 그 티켓의 트리거는 영원히 드롭된다.
+  await clearLeases();
+  const holder = await makeMergingTicket('atomic-reap');
+  const res = await svc.acquire(holder.id);
+  await backdate(res.lease_id, {
+    last_progress_at: new Date(Date.now() - 60 * MIN),
+    acquired_at: new Date(Date.now() - 60 * MIN),
+  });
+  // 승격 뒤 전달 전 크래시 창을 재현 — 홀더인데 파킹된 상태.
+  await ticketRepo.update({ id: holder.id }, {
+    pending_merge_lease: true,
+    merge_lease_context: JSON.stringify({ lease_id: res.lease_id, repo_resource_id: RESOURCE_ID }),
+  });
+
+  // 트랜잭션 커밋 직전에 죽는 상황을 결정론적으로 만든다.
+  const realTx = ds.transaction.bind(ds);
+  ds.transaction = async (cb) => realTx(async (m) => { await cb(m); throw new Error('커밋 직전 크래시'); });
+  try {
+    const stats = await sweep.sweep();
+    assert.equal(stats.reaped, 0, '롤백됐는데 회수로 집계됐다');
+  } finally {
+    ds.transaction = realTx;
+  }
+
+  // 둘 다 원래대로여야 한다 — 한쪽만 커밋됐으면 불일치가 남는다.
+  const lease = await leaseRepo.findOne({ where: { id: res.lease_id } });
+  assert.equal(lease.released_at, null, 'lease 만 해제되고 티켓 정리는 롤백됐다');
+  const t = await ticketRepo.findOne({ where: { id: holder.id } });
+  assert.equal(t.pending_merge_lease, true, '티켓 정리만 커밋되고 lease 해제는 롤백됐다');
+
+  // 정상 경로에서는 둘 다 반영된다(가드가 회수 자체를 막지 않는다는 비공허성).
+  const stats2 = await sweep.sweep();
+  assert.equal(stats2.reaped, 1);
+  assert.ok((await leaseRepo.findOne({ where: { id: res.lease_id } })).released_at);
+  assert.equal((await ticketRepo.findOne({ where: { id: holder.id } })).pending_merge_lease, false);
+});
+
+test('★ 회수 판정 뒤 같은 티켓이 새로 대기하면 옛 리퍼가 그 컨텍스트를 지우지 않는다', async () => {
+  // 리뷰 3R 지적 1 의 더 나쁜 쪽 — 옛 리퍼가 새 대기 컨텍스트를 지우면
+  // 대기자가 잘못 깨어난다.
+  await clearLeases();
+  const holder = await makeMergingTicket('stale-reaper');
+  const res = await svc.acquire(holder.id);
+  await backdate(res.lease_id, {
+    last_progress_at: new Date(Date.now() - 60 * MIN),
+    acquired_at: new Date(Date.now() - 60 * MIN),
+  });
+
+  // 판정 직후, 같은 티켓이 **다른** lease 를 가리키는 새 대기 상태가 됐다.
+  const NEW_LEASE_ID = '00000000-0000-4000-8000-00000000ffff';
+  const realJudge = svc.judgeHolder.bind(svc);
+  let interposed = 0;
+  svc.judgeHolder = async (lease, config, now) => {
+    const verdict = await realJudge(lease, config, now);
+    if (verdict !== 'alive' && interposed === 0) {
+      interposed++;
+      await ticketRepo.update({ id: lease.ticket_id }, {
+        pending_merge_lease: true,
+        merge_lease_context: JSON.stringify({ lease_id: NEW_LEASE_ID, repo_resource_id: RESOURCE_ID }),
+      });
+    }
+    return verdict;
+  };
+  try {
+    await sweep.sweep();
+    assert.equal(interposed, 1, '인터리빙이 재현되지 않았다 — 테스트가 공허하다');
+  } finally {
+    svc.judgeHolder = realJudge;
+  }
+
+  const t = await ticketRepo.findOne({ where: { id: holder.id } });
+  assert.equal(t.pending_merge_lease, true, '옛 리퍼가 새 대기 파킹을 지웠다 — 대기자가 잘못 깨어난다');
+  assert.ok(t.merge_lease_context.includes(NEW_LEASE_ID), '새 대기 컨텍스트가 손상됐다');
+});
+
+// ── 6b. 스윕 단독 FIFO (리뷰 3R 지적 2) ────────────────────────────────────
+
+test('★ queued_at 이 같고 id 역순으로 들어와도 스윕 단독으로 진짜 선두가 승격된다', async () => {
+  // 조회는 queued_at 만, 승격 판정은 (queued_at, id) 를 보면 — 같은 시각의 더
+  // 큰 id 가 먼저 반환될 때 스윕은 그 행만 시도하고 원자 UPDATE 는 거절하며,
+  // 진짜 선두는 i>0 이라 시도조차 되지 않는다. 반환 순서가 반복되면 스윕
+  // 단독으로는 영원히 승격되지 않는다.
+  await clearLeases();
+  const bigger = await makeMergingTicket('same-ts-bigger-id');
+  const smaller = await makeMergingTicket('same-ts-smaller-id');
+
+  const SAME_TS = new Date(Date.now() - 1 * MIN);
+  const BIG_ID = 'ffffffff-0000-4000-8000-000000000001';
+  const SMALL_ID = '00000000-0000-4000-8000-000000000001';
+  const base = {
+    workspace_id: WS_ID, board_id: BOARD_ID,
+    repo_resource_id: RESOURCE_ID, base_branch: 'main',
+    state: 'waiting', queued_at: SAME_TS, last_progress_at: SAME_TS,
+  };
+  // 큰 id 를 **먼저** 삽입한다 — queued_at 만으로 정렬하면 삽입 순서가 그대로
+  // 나와 큰 id 가 i===0 이 된다.
+  await leaseRepo.insert({ id: BIG_ID, ticket_id: bigger.id, ...base });
+  await leaseRepo.insert({ id: SMALL_ID, ticket_id: smaller.id, ...base });
+  for (const t of [bigger, smaller]) {
+    await ticketRepo.update({ id: t.id }, {
+      pending_merge_lease: true,
+      merge_lease_context: JSON.stringify({
+        lease_id: t.id === bigger.id ? BIG_ID : SMALL_ID, repo_resource_id: RESOURCE_ID,
+      }),
+    });
+  }
+
+  dispatched.length = 0;
+  const stats = await sweep.sweep();
+
+  assert.equal(stats.granted, 1, '스윕 단독으로 아무도 승격되지 않았다 — FIFO 교착');
+  const promoted = await leaseRepo.findOne({ where: { state: 'held', released_at: IsNull() } });
+  assert.equal(promoted.id, SMALL_ID, '(queued_at, id) 기준 선두가 아닌 행이 승격됐다');
+  assert.equal((await ticketRepo.findOne({ where: { id: smaller.id } })).pending_merge_lease, false);
+});
+
 // ── 7. 이동 ↔ 해제 원자성 (설계 보정 D) ────────────────────────────────────
 
 test('★ 컬럼 이동 트랜잭션이 롤백되면 lease 해제도 함께 롤백된다', async () => {
@@ -828,6 +946,54 @@ test('대기자가 Merging 을 떠나면 대기 플래그도 함께 정리된다
 });
 
 // ── 8. fail-open ────────────────────────────────────────────────────────────
+
+test('★ 반복되는 service_error 도 예산을 쓰고 정확한 상한에서 exhausted 된다', async () => {
+  // 리뷰 3R 지적 3. 바깥 catch 가 예산 없이 degraded 를 돌려주면, 반복 예외가
+  // 나는 동안 에이전트가 상한 없이 계속 진행해 유한 종료가 다시 깨진다.
+  await clearLeases();
+  await setBoardLeaseConfig('{"max_reverify_attempts":3}');
+  const t = await makeMergingTicket('always-throws');
+
+  const realReap = svc.reapStaleHolders.bind(svc);
+  svc.reapStaleHolders = async () => { throw new Error('주입된 내부 오류'); };
+  try {
+    const seen = [];
+    for (let i = 0; i < 6; i++) {
+      const r = await svc.acquire(t.id);
+      assert.equal(r.outcome, 'degraded');
+      assert.equal(r.degrade_reason, 'service_error');
+      seen.push(r.budget);
+      if (r.budget === 'exhausted') break;
+    }
+    assert.deepEqual(seen, ['continue', 'continue', 'continue', 'exhausted'],
+      '예외 경로가 예산을 우회했다 — 상한 없이 계속 진행 가능');
+  } finally {
+    svc.reapStaleHolders = realReap;
+  }
+  assert.equal((await ticketRepo.findOne({ where: { id: t.id } })).merge_landing_attempts, 4);
+  await setBoardLeaseConfig(null);
+});
+
+test('★ 예산 기록 자체가 실패하면 진행 허가 대신 명시적 실패를 지시한다', async () => {
+  // 카운터를 못 쓰면 반복을 셀 수 없고, 셀 수 없으면 유한 종료를 약속할 수
+  // 없다. 그 경계에서는 무한 루프 대신 명시적 실패를 고른다.
+  await clearLeases();
+  const t = await makeMergingTicket('budget-store-down');
+
+  const realReap = svc.reapStaleHolders.bind(svc);
+  const realSpend = svc._spendAttempt.bind(svc);
+  svc.reapStaleHolders = async () => { throw new Error('주입된 내부 오류'); };
+  svc._spendAttempt = async () => { throw new Error('예산 저장소 다운'); };
+  try {
+    const r = await svc.acquire(t.id);
+    assert.equal(r.outcome, 'degraded');
+    assert.equal(r.degrade_reason, 'budget_unavailable');
+    assert.equal(r.budget, 'exhausted', '예산을 못 세는데 진행 허가를 줬다 — 무한 루프 가능');
+  } finally {
+    svc.reapStaleHolders = realReap;
+    svc._spendAttempt = realSpend;
+  }
+});
 
 test('보드가 껐으면 degraded 로 통과시킨다 (킬 스위치)', async () => {
   await clearLeases();
