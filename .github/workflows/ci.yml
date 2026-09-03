@@ -68,6 +68,19 @@ on:
   # permissions: contents: read 는 트리거 종류와 무관하게 이 워크플로의 모든 잡에
   # 그대로 적용된다.
   workflow_dispatch:
+    inputs:
+      # 티켓 070d8f0b — windows 잔여 flake 재현 하네스. 기본값 '0' 이라 평소
+      # dispatch(=병합 직전 매트릭스 증빙)에서는 아래 flake-repro 잡이 통째로
+      # 스킵된다. push / pull_request 경로는 이 입력을 아예 볼 일이 없다.
+      #
+      # 이 flake 는 잡 1회당 약 1/10 로 재현된다. 한 잡 안에서 15회 직렬로 도는
+      # 대신 샤드 5개 × 회차 N 으로 쪼갠 이유는 순전히 벽시계다 — 샤드는 병렬로
+      # 돌아 15회 직렬(약 55분)이 4회 × 5샤드(=20표본, 약 15분)로 줄고 표본은
+      # 오히려 늘어난다.
+      flake_repro_rounds:
+        description: 'agent-manager windows flake 재현: 샤드당 스위트 반복 횟수 (0 = 끄기)'
+        required: false
+        default: '0'
 
 # 최소권한 GITHUB_TOKEN (2026-08-12 의존성 감사에서 발견).
 #
@@ -256,6 +269,74 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+  # agent-manager windows flake 재현 하네스 (티켓 070d8f0b) — 수동 dispatch 전용.
+  #
+  # 쫓는 증상: windows 축에서 테스트 파일 하나가 서브테스트 0개 · 출력 전무 ·
+  # exit 1 / signal null 로 죽는다. exit 1 + signal null 은 Windows 외부 종료
+  # 서명이고(커밋 81d7f377 에 같은 기록), 실패 잡 로그 전체에 스택이 0줄이라
+  # import/부팅 crash 는 배제됐다. 남은 가설은 "동시 실행 중인 다른 테스트가
+  # 이 자식 pid 를 쐈다" 뿐이고, 그걸 확정하려면 죽은 자식의 pid 와 kill 사이트가
+  # 찍은 대상 pid 를 같은 로그 안에서 대조해야 한다.
+  #
+  # 그래서 두 가지를 켠다:
+  #  - NODE_OPTIONS 의 pid-banner 훅 → 모든 테스트 자식이 시작 직후 자기 pid 를
+  #    남긴다(자식 stderr 는 러너가 TAP '#' 주석으로 흘려준다).
+  #  - process-tree.ts 의 win32 tree-kill 로그 → 쏜 대상 pid 가 남는다.
+  #    (이건 제품 코드라 이 잡 밖에서도 항상 켜져 있다.)
+  #
+  # 잡은 실패해도 non-zero 로 끝내지 않는다 — 목적이 게이팅이 아니라 표본 수집이라
+  # 첫 히트에서 멈추면 나머지 회차를 잃는다. 신호는 스텝 요약과 FLAKE-REPRO-HIT
+  # 줄로 읽는다.
+  agent-manager-flake-repro:
+    name: agent-manager windows flake repro (shard ${{ matrix.shard }})
+    # `inputs.*` 만으로 게이트하면 안 된다: push / pull_request 에서는 `inputs` 가
+    # null 이라 `inputs.flake_repro_rounds != '0'` 이 **참**이 되어 모든 push 마다
+    # 이 잡이 돈다. 그래서 event_name 을 먼저 확인한다.
+    # `!= 'schedule'` 은 `== 'workflow_dispatch'` 에 이미 함의되지만, cron-coverage
+    # 가드(scripts/audit-cron-coverage.mjs)가 잡마다 이 문자열 자체를 찾는다 —
+    # 함의에 기대지 않고 명시해 두는 편이 그 가드의 취지에 맞다.
+    if: github.event_name == 'workflow_dispatch' && github.event_name != 'schedule' && inputs.flake_repro_rounds != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    runs-on: windows-latest
+    # green 1회가 약 217초다. 회차 입력이 커도 러너를 무한정 점유하지 않도록 상한을
+    # 건다 — 상한에 걸리면 그때까지의 회차 로그는 그대로 남는다.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build agent-manager (suite imports dist/)
+        working-directory: apps/agent-manager
+        run: npm run build
+      - name: Repeat suite and collect flake samples
+        working-directory: apps/agent-manager
+        env:
+          NODE_OPTIONS: --import ./test/fixtures/pid-banner.mjs
+        shell: pwsh
+        run: |
+          $rounds = [int]'${{ inputs.flake_repro_rounds }}'
+          $hits = 0
+          for ($i = 1; $i -le $rounds; $i++) {
+            Write-Host "::group::flake-repro shard ${{ matrix.shard }} round $i/$rounds"
+            node --test --test-force-exit 'test/*.test.mjs'
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) {
+              $hits++
+              Write-Host "FLAKE-REPRO-HIT shard=${{ matrix.shard }} round=$i exit=$code"
+            }
+          }
+          $summary = "shard=${{ matrix.shard }} rounds=$rounds hits=$hits"
+          Write-Host "FLAKE-REPRO-SUMMARY $summary"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- flake-repro $summary"
 
   # 클라이언트 단위·상호작용 테스트 (티켓 98d0936e · F2-1). Phase 1 은 브라우저
   # 러너 부재로 카드 클릭·`?ticket=` 딥링크·모바일 패널·포커스트랩이 SSR/순수
