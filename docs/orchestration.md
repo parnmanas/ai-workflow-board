@@ -535,10 +535,36 @@ owner/member 로 넓힌다. 넓혀도 실제 소음은 작다 — 채널 바인�
 그 자리에서 no-op 이다. `AWB_PUBLIC_URL` 이 없으면 링크 없이 나간다(무엇이 왜 멈췄는지는
 여전히 전달된다).
 
-**중복 방지는 컬럼이 한다.** `OrchestrationStep.confirm_notice = { visit, notified_at,
-reminded_at?, sent?, recipients? }` 를 게이트 오픈과 **같은 save 로** 커밋한다. 키가 `visit`
-이라서 같은 pass 는 pump 가 몇 번을 돌든(서버가 재기동하든) 한 번이고, loop 재진입으로
-pass 가 올라가면 새 알림이 나간다. 메모리 카운터로 두면 재기동이 곧 재발송이 된다.
+**중복 방지는 DB 가 판정하는 선점(claim)이다.** 승패를 애플리케이션이 아니라 **단일
+UPDATE 의 `WHERE` 절**이 정한다 — 이긴 호출만 보내고, 진 호출은 아무것도 하지 않는다.
+
+```
+UPDATE orchestration_steps SET confirm_notified_visit = :visit, confirm_notified_at = now()
+ WHERE id = :id AND visit = :visit AND status = 'awaiting_user'
+   AND (confirm_notified_visit IS NULL OR confirm_notified_visit <> :visit)
+```
+
+읽고-판단하고-쓰기로는 안 된다. `missionLocks` 는 **프로세스 메모리**라 한 서버 안에서만
+유효하고, 운영(PostgreSQL)에서 서버가 둘이면 두 pump 가 같은 pass 를 동시에 열어 둘 다
+"아직 안 보냈다"를 읽고 둘 다 보낸다 — 사람에게 같은 질문이 두 번 울린다.
+
+세부 규칙 셋:
+
+- **발송 전에 선점한다.** 발송 성공을 기다렸다 쓰면 그 사이가 통째로 창이다. 먼저 커밋하면
+  최악이 "발송 실패했는데 선점만 남는다"인데, 그건 리마인더 스윕이 뒤에서 주워 간다 —
+  중복 발송보다 언제나 낫다.
+- **실패하면 진다(fail-closed).** `affected` 가 없거나 UPDATE 가 던지면 졌다고 본다. 낡은
+  스냅샷으로 이겼다고 추측하면 두 경쟁자가 모두 승자가 되어 단일 승자 보장이 깨진다
+  (`ActionsService.completeRun` 이 같은 이유로 같은 선택을 한다).
+- **판정 후 침묵도 같은 한 방이 보장한다.** `status = 'awaiting_user'` 가 선점 조건이라,
+  그 사이 사람이 답했으면 선점 자체가 실패한다(요구사항 4).
+
+키가 pass 번호(`visit`)라서 같은 pass 는 pump 가 몇 번을 돌든(서버가 재기동하든) 한 번이고,
+loop 재진입으로 pass 가 올라가면 값이 달라져 새 알림이 나간다. 리마인더는 별도 컬럼
+(`confirm_reminded_visit`)이라 최초 알림과 서로를 막지 않는다.
+
+**JSON 한 덩어리가 아니라 스칼라 컬럼 셋인 이유**가 여기 있다 — JSON blob 은 `WHERE` 에서
+이식성 있게 비교할 수도, 색인해 후보를 고를 수도 없다.
 
 **발송은 미션 락 밖에서 배경으로 돈다.** 알림 provider 는 요청 타임아웃이 없는 raw
 `fetch` 라, 응답하지 않는 엔드포인트를 `openConfirmGate` 안에서 기다리면 그 미션의 락
@@ -548,8 +574,21 @@ pass 가 올라가면 새 알림이 나간다. 메모리 카운터로 두면 재
 이벤트로 남는다(실패도 `sent: 0` 으로 남는다).
 
 **리마인더는 알림이지 상태 전이가 아니다.** 리퍼의 `remindAwaitingConfirm` 스윕은 미션·step
-상태를 한 글자도 바꾸지 않고 `confirm_notice.reminded_at` 만 쓴다. `reapStalledRunning` 의
-`isAwaitingUser` 가드 — 리퍼는 confirm 대기 미션을 죽이지 않는다 — 는 그대로다.
+상태를 한 글자도 바꾸지 않고 선점 마커(`confirm_reminded_visit`)만 쓴다. `reapStalledRunning`
+의 `isAwaitingUser` 가드 — 리퍼는 confirm 대기 미션을 죽이지 않는다 — 는 그대로다.
+
+**후보는 SQL 이 직접 고른다 — 기아가 없어야 하기 때문이다.** 미션을 무순서로 잘라 온 뒤
+애플리케이션에서 게이트를 거르면, 실행 중 미션이 창 크기를 넘는 순간 그 밖의 게이트는 아무리
+오래 기다려도 **한 번도 검사되지 않는다**. 그래서 미션이 아니라 **만료된 게이트 자체**를
+후보로 세고, 세 조건(`step.status='awaiting_user'` + `mission.status='running'` + 이 pass 를
+아직 아무도 선점하지 않음 + 대기 시간이 창 초과)을 전부 SQL 안에서 판정한다.
+
+`CONFIRM_REMINDERS_PER_SWEEP`(25)은 **선택 기준이 아니라 처리량 상한**이다. 후보를 오래
+기다린 순(`COALESCE(confirm_notified_at, dispatched_at)` 오름차순)으로 가져가고 내보낸 것은
+선점 마커가 찍혀 후보 집합에서 영구히 빠지므로, 이번 창에 못 든 후보는 다음 스윕에서 더
+오래된 축이 되어 앞으로 당겨진다 — **모든 후보가 결국 검사된다**. `COALESCE` 로 한 식에
+묶는 것은 NULL 정렬 순서가 백엔드마다 다르기 때문이기도 하다(SQLite 는 ASC 에서 NULL 이
+먼저, PostgreSQL 은 나중). 인덱스는 `idx_orch_steps_confirm_gate`.
 
 ### 사용자 확인 강도 (confirm_policy, ticket 5dbe4aa2)
 

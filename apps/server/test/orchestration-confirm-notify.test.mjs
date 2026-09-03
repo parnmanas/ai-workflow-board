@@ -8,7 +8,10 @@
 //   - 수신자 해석: 사람 소유자 우선, 에이전트가 만든 미션은 워크스페이스 owner/member.
 //   - payload 에 미션명·질문(instructions)·판정 화면 링크가 실제로 들어간다(요구사항 2).
 //   - 어떤 실패도 던지지 않는다(요구사항 6) — dispatcher 가 던져도, ReBAC 이 던져도,
-//     step 저장이 실패해도 호출자에게 예외가 새지 않는다.
+//     선점 UPDATE 가 실패해도 호출자에게 예외가 새지 않는다.
+//   - 선점(claim)은 **DB 가 판정한다** — 무엇을 SET 하고 무엇을 WHERE 에 거는지, 그리고
+//     `affected` 가 0 이거나 없을 때 반드시 진다는 fail-closed 규칙(단일 승자 보장).
+//     여러 서버가 실제로 경쟁했을 때의 결과는 qa-flow e2e 가 잰다.
 //   - `notify_mention` 키로 나간다 — 기본값이 0 인 `notify_ticket` 을 쓰면 이 기능이
 //     기본 침묵으로 출시되어 티켓이 고치려는 실패 모드가 그대로 남는다.
 
@@ -46,7 +49,9 @@ const STEP = {
   visit: 1,
   status: 'awaiting_user',
   dispatched_at: new Date(),
-  confirm_notice: { visit: 1, notified_at: new Date().toISOString() },
+  confirm_notified_visit: 1,
+  confirm_notified_at: new Date(),
+  confirm_reminded_visit: null,
 };
 
 /** 관측 가능한 스텁 묶음. 각 테스트가 필요한 부분만 덮어쓴다. */
@@ -56,6 +61,10 @@ function makeService(ServiceClass, overrides = {}) {
   const events = [];
   const logs = { warn: [], error: [], info: [] };
 
+  // 선점(claim)은 QueryBuilder 한 방이라, 무엇을 SET 하고 무엇을 WHERE 에 걸었는지
+  // 그대로 받아 적는 가짜를 둔다. `affected` 는 테스트가 정한다 — 승패를 정하는 것이
+  // 애플리케이션이 아니라 DB 라는 사실이 이 스텁으로 드러난다.
+  const claims = [];
   const stepRepo = {
     async findOne() {
       return overrides.freshStep !== undefined ? overrides.freshStep : { ...STEP };
@@ -63,6 +72,23 @@ function makeService(ServiceClass, overrides = {}) {
     async update(where, patch) {
       if (overrides.updateThrows) throw new Error('db down');
       updates.push({ where, patch });
+    },
+    createQueryBuilder() {
+      const record = { patch: null, conditions: [], params: {} };
+      const qb = {
+        update() { return qb; },
+        set(patch) { record.patch = patch; return qb; },
+        where(sql, params) { record.conditions.push(sql); Object.assign(record.params, params); return qb; },
+        andWhere(sql, params) { record.conditions.push(sql); Object.assign(record.params, params); return qb; },
+        async execute() {
+          if (overrides.claimThrows) throw new Error('db down');
+          claims.push(record);
+          // `'claimAffected' in overrides` 로 본다 — 값을 채우지 않는 드라이버(affected:
+          // undefined)를 표현해야 하는데 `?? 1` 로 받으면 그 경우가 사라진다.
+          return { affected: 'claimAffected' in overrides ? overrides.claimAffected : 1 };
+        },
+      };
+      return qb;
     },
   };
   const dispatcher = {
@@ -90,7 +116,7 @@ function makeService(ServiceClass, overrides = {}) {
   };
 
   const svc = new ServiceClass(stepRepo, dispatcher, rebac, missions, logService);
-  return { svc, calls, updates, events, logs };
+  return { svc, calls, updates, events, logs, claims };
 }
 
 test('알림 payload 에 미션명·질문·판정 화면 링크가 모두 들어간다 (요구사항 2)', async () => {
@@ -238,51 +264,91 @@ test('수신자 해석(ReBAC)이 던져도 예외가 새지 않는다', async ()
   assert.ok(logs.error.length >= 1, '해석 실패는 error 로그로 드러난다');
 });
 
-test('confirm_notice 저장이 실패해도 예외가 새지 않는다', async () => {
+test('발송 경로는 step 테이블에 아무것도 쓰지 않는다 — 선점이 이미 끝냈다', async () => {
   const ServiceClass = await loadService();
-  const { svc, events, logs } = makeService(ServiceClass, { updateThrows: true });
+  const { svc, updates, events } = makeService(ServiceClass);
   svc.scheduleGateNotice(MISSION, STEP);
   await svc.settled();
 
-  assert.ok(logs.warn.length >= 1);
-  assert.equal(events.length, 1, '컬럼 저장이 실패해도 타임라인 기록은 이어진다');
+  // 발송은 미션 락 밖에서 배경으로 돈다. 그 사이 사람이 판정을 제출할 수 있으므로, 발송이
+  // 끝난 뒤에 step 을 쓰면 그 판정을 덮어쓸 위험이 생긴다. 이제 쓰기는 발송 **전**의 선점
+  // 한 방뿐이고, 발송 경로는 타임라인 기록만 남긴다.
+  assert.deepEqual(updates, [], '발송 후에는 step 을 건드리지 않는다');
+  assert.equal(events.length, 1, '남기는 것은 타임라인 기록뿐이다');
+  assert.equal(events[0].type, 'confirm_notified');
+  assert.equal(events[0].data.sent, 1, '관측용 수치는 컬럼이 아니라 이벤트에 있다');
 });
 
-test('발송 결과는 step 전체 save 가 아니라 confirm_notice 컬럼만 update 한다', async () => {
+test('최초 알림 선점은 (visit, awaiting_user, 아직 미선점) 셋을 전부 DB 에 건다', async () => {
   const ServiceClass = await loadService();
-  const { svc, updates } = makeService(ServiceClass);
-  svc.scheduleGateNotice(MISSION, STEP);
+  const { svc, claims } = makeService(ServiceClass);
+
+  assert.equal(await svc.claimGateNotice({ ...STEP }, 1), true, 'affected>0 이면 이겼다');
+  assert.equal(claims.length, 1);
+  const [claim] = claims;
+
+  assert.equal(claim.patch.confirm_notified_visit, 1, '선점 키는 pass 번호다');
+  assert.ok(claim.patch.confirm_notified_at instanceof Date, '리마인더 기준 시각을 함께 찍는다');
+  assert.equal(claim.params.visit, 1);
+  assert.equal(claim.params.status, 'awaiting_user');
+
+  const sql = claim.conditions.join(' AND ');
+  assert.match(sql, /visit = :visit/, 'loop 로 pass 가 넘어갔으면 이 선점은 무효다');
+  assert.match(sql, /status = :status/, '판정이 들어왔으면 보내지 않는다 (요구사항 4)');
+  assert.match(
+    sql,
+    /confirm_notified_visit IS NULL OR confirm_notified_visit <> :visit/,
+    '이 pass 를 아직 아무도 선점하지 않았을 때만 이긴다',
+  );
+});
+
+test('리마인더 선점은 별도 컬럼을 쓴다 — 최초 알림과 서로를 막지 않는다', async () => {
+  const ServiceClass = await loadService();
+  const { svc, claims } = makeService(ServiceClass);
+
+  assert.equal(await svc.claimReminder({ ...STEP }, 1), true);
+  const [claim] = claims;
+  assert.deepEqual(Object.keys(claim.patch), ['confirm_reminded_visit']);
+  assert.equal(claim.patch.confirm_reminded_visit, 1);
+  assert.match(
+    claim.conditions.join(' AND '),
+    /confirm_reminded_visit IS NULL OR confirm_reminded_visit <> :visit/,
+  );
+});
+
+test('선점에서 지면 false — 진 쪽은 아무것도 보내지 않는다', async () => {
+  const ServiceClass = await loadService();
+  const { svc, calls } = makeService(ServiceClass, { claimAffected: 0 });
+
+  assert.equal(await svc.claimGateNotice({ ...STEP }, 1), false);
+  assert.equal(await svc.claimReminder({ ...STEP }, 1), false);
   await svc.settled();
-
-  assert.equal(updates.length, 1);
-  assert.deepEqual(Object.keys(updates[0].patch), ['confirm_notice'], '판정을 덮어쓸 수 있는 전체 저장은 금지');
-  assert.equal(updates[0].where.id, 'step-gate');
-  assert.equal(updates[0].patch.confirm_notice.visit, 1);
-  assert.equal(updates[0].patch.confirm_notice.sent, 1);
-  assert.equal(updates[0].patch.confirm_notice.reminded_at, undefined, '최초 알림은 리마인더가 아니다');
+  assert.equal(calls.length, 0, '패자가 보내면 중복 방지 자체가 무의미하다');
 });
 
-test('저장된 notice 가 다른 pass 의 것이면 이어붙이지 않는다 — 중복 방지 키가 어긋난다', async () => {
+test('선점 UPDATE 가 던져도 예외가 새지 않고 졌다고 본다 (fail-closed)', async () => {
   const ServiceClass = await loadService();
-  // DB 에는 pass 1 의 기록이 남아 있는데 지금 알리는 것은 pass 2 다.
-  const { svc, updates } = makeService(ServiceClass, {
-    freshStep: { ...STEP, visit: 2, confirm_notice: { visit: 1, notified_at: '2020-01-01T00:00:00.000Z', reminded_at: '2020-01-02T00:00:00.000Z' } },
-  });
-  svc.scheduleGateNotice(MISSION, { ...STEP, visit: 2 });
-  await svc.settled();
+  const { svc, logs } = makeService(ServiceClass, { claimThrows: true });
 
-  const notice = updates[0].patch.confirm_notice;
-  assert.equal(notice.visit, 2, '현재 pass 로 기록돼야 다음 pump 가 재발송하지 않는다');
-  assert.notEqual(notice.notified_at, '2020-01-01T00:00:00.000Z', '옛 pass 의 시각을 물려받으면 안 된다');
-  assert.equal(notice.reminded_at, undefined, '옛 pass 의 리마인더 기록이 새 pass 를 막으면 안 된다');
+  // 낡은 스냅샷으로 추측해 "이겼다"고 치면 두 경쟁자가 모두 승자가 되어 단일 승자 보장이
+  // 깨진다. 여기서 지는 최악은 알림 1회 유실이고 그건 리마인더 스윕이 주워 간다.
+  assert.equal(await svc.claimGateNotice({ ...STEP }, 1), false);
+  assert.equal(await svc.claimReminder({ ...STEP }, 1), false);
+  assert.ok(logs.warn.length >= 2, '선점 실패는 warn 으로 드러난다');
 });
 
-test('리마인더는 같은 pass 기록 위에 reminded_at 만 얹는다 (요구사항 5)', async () => {
+test('affected 를 채우지 않는 드라이버에서도 이겼다고 가정하지 않는다', async () => {
   const ServiceClass = await loadService();
-  const firstAt = '2026-09-01T00:00:00.000Z';
-  const { svc, calls, updates, events } = makeService(ServiceClass, {
-    freshStep: { ...STEP, confirm_notice: { visit: 1, notified_at: firstAt } },
-  });
+  const { svc } = makeService(ServiceClass, { claimAffected: undefined });
+
+  // `?? 0` 이 아니라 `|| true` 같은 관대한 처리를 쓰면, 값을 안 채우는 드라이버에서 두
+  // 경쟁자가 모두 이긴다. 알림 유실(회복 가능) < 중복 발송(사람에게 두 번 울림).
+  assert.equal(await svc.claimGateNotice({ ...STEP }, 1), false);
+});
+
+test('리마인더 payload 는 대기 시간과 질문을 함께 싣는다 (요구사항 5)', async () => {
+  const ServiceClass = await loadService();
+  const { svc, calls, updates, events } = makeService(ServiceClass);
 
   const result = await svc.sendReminder(MISSION, STEP, 26 * 60 * 60_000);
   assert.equal(result.sent, 1);
@@ -292,10 +358,7 @@ test('리마인더는 같은 pass 기록 위에 reminded_at 만 얹는다 (요�
   assert.match(calls[0].payload.body, /26h/, '얼마나 기다렸는지 알려준다');
   assert.match(calls[0].payload.body, /Compare the screenshot/, '리마인더에도 질문이 그대로 실린다');
 
-  const notice = updates[0].patch.confirm_notice;
-  assert.equal(notice.visit, 1);
-  assert.equal(notice.notified_at, firstAt, '최초 알림 시각은 보존된다');
-  assert.ok(notice.reminded_at, '리마인더를 보냈다는 사실이 남아야 두 번 가지 않는다');
+  assert.deepEqual(updates, [], '리마인더도 발송 뒤에 step 을 쓰지 않는다 — 선점이 이미 끝냈다');
   assert.equal(events[0].data.kind, 'reminder');
 });
 
