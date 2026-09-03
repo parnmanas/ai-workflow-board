@@ -32,10 +32,21 @@
 //                     The install stays 'npm-global' (it sits under `npm root
 //                     -g`), so everything except auto-update behaves normally.
 //
+// Update policy (AWB_AGENT_MANAGER_UPDATE_POLICY, default 'manual') decides who
+// may START an install; the channel above only decides WHAT would be installed:
+//   - 'manual'    — 현행 동작. 외부 트리거(`update_manager` SSE / SIGUSR1)만 개시.
+//   - 'scheduled' — 유지보수 창 안에서 운영자 **승인을 요청**하고, 승인이 있어야 개시.
+//   - 'auto'      — 유지보수 창 안에서 승인 없이 개시.
+// 창은 AWB_AGENT_MANAGER_UPDATE_WINDOW (`HH:MM-HH:MM`, 호스트 로컬)로 정하고,
+// 창이 미설정이면 'scheduled'/'auto' 는 보수적으로 'manual' 과 같게 동작한다.
+// `AWB_AGENT_MANAGER_UPDATE_CHANNEL=off` 는 이 셋 모두를 이기는 하드 핀이다.
+// 판정 전체는 evaluateUpdatePolicyGate 한 곳에 모여 있다.
+//
 // Cadence:
 //   - UpdateChecker (slow timer, default 5 min) refreshes the cached
 //     `latest_version` / `update_available` snapshot so InstanceHeartbeat can
 //     attach it to every payload without paying the network cost each tick.
+//     그 tick 이 위 정책 게이트도 함께 적용한다.
 //   - runSelfUpdate() (one-shot, fired by `update_manager` SSE command or
 //     SIGUSR1) does the heavy lifting.
 

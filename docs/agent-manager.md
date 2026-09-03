@@ -397,11 +397,23 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
 | 변수 | 상태 | 의미 |
 |---|---|---|
 | `AWB_AGENT_MANAGER_UPDATE_CHANNEL` | **구현됨** | 추적할 채널 — `latest`(기본) · dist-tag · 정확한 버전 · `off`(현재 빌드 핀). 값별 설명은 `apps/agent-manager/README.md` → "Update channel" 참조 |
-| `AWB_AGENT_MANAGER_UPDATE_POLICY` | **미구현(계획)** | `manual`(기본, 외부 트리거만) / `scheduled`(창에서 승인 요청 → 승인 시 개시) / `auto`(창 안에서 승인 없이 개시) |
-| `AWB_AGENT_MANAGER_UPDATE_WINDOW` | **미구현(계획)** | `HH:MM-HH:MM` 호스트 로컬 유지보수 창. `scheduled` 와 `auto` 가 함께 쓴다 |
+| `AWB_AGENT_MANAGER_UPDATE_POLICY` | **구현됨** | `manual`(기본, 외부 트리거만) / `scheduled`(창에서 승인 요청 → 승인 시 개시) / `auto`(창 안에서 승인 없이 개시). 모르는 값은 `manual` 로 떨어진다 |
+| `AWB_AGENT_MANAGER_UPDATE_WINDOW` | **구현됨** | `HH:MM-HH:MM` 호스트 로컬 유지보수 창(자정 넘김 지원). `scheduled` 와 `auto` 가 함께 쓴다 |
 
-뒤의 둘은 **아직 코드에 존재하지 않는다 — 지금 설정해도 아무 효과가 없다.** 도입은
-후속 티켓 소관이며, 도입 시점에도 미설정 기본값은 현행 수동 동작과 동일해야 한다.
+**기본값은 `manual` 이고, 두 변수를 설정하지 않으면 동작은 이 기능 도입 전과 동일하다.**
+정책 전환(어느 호스트에 `auto` 를 켤지)은 운영자 판단이며, 아래 사각지대가 닫히기 전에는
+무인 재시작을 켜지 않는 것이 전제다.
+
+우선순위는 고정이다: `AWB_AGENT_MANAGER_UPDATE_CHANNEL=off` > `policy=manual` > 새 버전
+없음 > 창 미설정 > 창 밖 > 창 안. 즉 **`off` 는 `auto` 여도 이기는 하드 핀**이고, 창을
+설정하지 않은 `scheduled`·`auto` 는 보수적으로 `manual` 과 똑같이 동작한다.
+
+창은 *언제 물어볼지*를 정하지 *언제 무인 실행할지*를 정하지 않는다 — `scheduled` 는 창
+안에서 **승인을 요청만** 하고, 운영자가 `update_manager` 를 낼 때까지 아무것도 설치하지
+않는다. 승인은 **(호스트 × 대상 버전) 1회성**이라 다음 릴리스에는 다시 요청한다. 요청은
+하트비트의 `update_approval_pending_version` 으로 서버에 실려 `activity_logs` 감사행
+(`agent_manager_update_approval_requested`)으로 남으므로, 관리자가 대시보드를 열지 않아도
+확인할 수 있다.
 
 ### 알려진 사각지대
 
