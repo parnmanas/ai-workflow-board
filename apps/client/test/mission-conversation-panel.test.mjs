@@ -10,6 +10,7 @@
 //   • 사용자가 보낸 메시지가 POST 응답과 SSE 브로드캐스트로 중복 도착해도 한 번만 그려진다
 //   • SSE 로 도착한 다른 방 메시지는 이 패널에 새지 않는다
 //   • 참여자가 아니면 observer 로 강등되고 입력창 대신 사유가 표시된다
+//   • 시스템 nudge 와 사람 발화가 한 스트림에서 구분돼 보인다(티켓 f6a0de0e)
 //   • 관전 상태에서 참여 버튼을 누르면 실제로 참여되어 입력창이 열린다(티켓 f6a0de0e)
 //   • 참여가 거부되면 사유가 보이고 입력창은 열리지 않는다
 //   • 종료된 미션에는 참여 버튼을 걸지 않는다
@@ -251,6 +252,55 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
         null,
         '읽기 전용인데 입력창이 살아 있으면 보내지지 않는 지시를 쓰게 된다',
       );
+    },
+  );
+});
+
+test('시스템 nudge 와 사람 발화가 한 스트림에서 구분돼 보인다', async () => {
+  // 티켓 f6a0de0e — 이 조합은 이 티켓 이전에는 **발생할 수 없었다**. mission 룸에 사람이
+  // 참여자로 들어갈 수 없어 사람 발화 자체가 없었기 때문이다. 사람을 참여자로 넣은 지금
+  // 비로소 두 종류가 같은 방에 공존하므로, 구분이 실제로 보이는지 여기서 고정한다.
+  //
+  // 서버 쪽에서 둘은 `sender_id` 로만 갈린다 — 엔진의 wake 는 의사 user 'system' 이고
+  // 사람 발화는 실제 UUID 다(`sender_type` 은 둘 다 'user' 여야 agent-manager 가 작업을
+  // 실행한다). 그 한 필드가 화면의 구분으로 이어지는지가 요점이다.
+  await withPanel(
+    {
+      props: {
+        missionId: 'mission-1',
+        workspaceId: 'ws-1',
+        roomId: ROOM,
+        live: true,
+        events: [],
+        currentUserId: 'user-1',
+      },
+      getChatRoomMessages: async () => [
+        msg('sys-1', '[Orchestration] 미션을 재평가하고 다음 행동을 하세요', {
+          sender_id: 'system',
+          sender_name: 'Orchestration',
+          created_at: '2026-06-01T00:00:10.000Z',
+        }),
+        msg('me-1', '수출 형식을 XLSX 로 바꿔줘', {
+          sender_id: 'user-1',
+          sender_name: 'Operator',
+          created_at: '2026-06-01T00:00:20.000Z',
+        }),
+      ],
+    },
+    async ({ view }) => {
+      const text = textOf(view.container);
+      assert.ok(text.includes('Orchestration'), '시스템 발신자 이름이 보여야 한다');
+      assert.ok(text.includes('Operator'), '사람 발신자 이름이 보여야 한다');
+
+      const sys = view.container.querySelector('[data-message-id="sys-1"]');
+      const mine = view.container.querySelector('[data-message-id="me-1"]');
+      assert.ok(sys && mine, '두 메시지가 모두 렌더링돼야 한다');
+      assert.notEqual(
+        sys.style.justifyContent,
+        mine.style.justifyContent,
+        '이름만 같은 줄에 흘리면 누가 말했는지 흐려진다 — 내 발화와 시스템 발화는 정렬로도 갈려야 한다',
+      );
+      assert.equal(mine.style.justifyContent, 'flex-end', '내 발화가 "내 쪽"으로 붙는다');
     },
   );
 });
