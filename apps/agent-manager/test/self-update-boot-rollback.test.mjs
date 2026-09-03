@@ -30,6 +30,7 @@ import {
   hasPendingSelfUpdate,
   markBootVerified,
   probeInstalledEntrypoint,
+  resolveVerifiedRollbackSpec,
   runBootVerificationTimeout,
   runSelfUpdate,
   resolveEffectiveUpdateChannel,
@@ -1314,4 +1315,102 @@ test('runSelfUpdate: provenance 가 거부하면 새 버전을 설치조차 하�
   assert.match(r.summary, /refused/);
   // 거부는 상태 기록도 남기지 않는다 — 설치를 시도조차 안 했기 때문이다.
   assert.equal(readBootVerificationRecord(dir), null);
+});
+
+
+// ─── 12. Windows 복귀도 provenance 게이트를 통과해야 한다 (리뷰 라운드 2) ────
+// 헬퍼는 부모가 죽은 뒤에 돌아 레지스트리 판정을 스스로 할 수 없다. 그래서
+// 부모가 **헬퍼를 띄우기 전에** 이전 버전의 provenance 를 검증하고, 통과한
+// 정확한 버전만 넘긴다. 검증에 실패하면 빈 spec 이 넘어가 복귀 자체가 없다 —
+// 증명 없는 이전 버전을 설치하는 것은 정책 E 위반이기 때문이다.
+
+test('resolveVerifiedRollbackSpec: 검증에 통과하면 검증된 정확 버전을 넘긴다', async () => {
+  const seen = [];
+  const spec = await resolveVerifiedRollbackSpec({
+    previousVersion: '1.0.0',
+    verifyProvenance: async (channel) => {
+      seen.push(channel);
+      return { ok: true, version: '1.0.0', reason: 'signed' };
+    },
+    out: () => {},
+  });
+  assert.equal(spec, 'awb-agent-manager@1.0.0');
+  assert.deepEqual(seen, ['1.0.0'], '되돌릴 버전 자체를 조회해야 한다(활성 채널이 아니라)');
+});
+
+test('resolveVerifiedRollbackSpec: 거부되면 빈 spec 을 넘겨 복귀를 포기한다', async () => {
+  const lines = [];
+  const spec = await resolveVerifiedRollbackSpec({
+    previousVersion: '1.0.0',
+    verifyProvenance: async () => ({
+      ok: false,
+      version: null,
+      reason: 'no npm attestations (unsigned publish)',
+    }),
+    out: (m) => lines.push(m),
+    bypassed: false,
+  });
+  assert.equal(spec, '', '증명 없는 이전 버전을 넘기면 헬퍼가 그대로 설치해버린다');
+  assert.ok(
+    lines.some((l) => l.startsWith('Self-update: ') && /rollback to v1\.0\.0 is NOT available/.test(l)),
+    `사유가 Self-update: 접두사로 남아야 한다: ${JSON.stringify(lines)}`,
+  );
+});
+
+test('resolveVerifiedRollbackSpec: 명시적 opt-in 이 있을 때만 미검증 복귀를 허용한다', async () => {
+  const spec = await resolveVerifiedRollbackSpec({
+    previousVersion: '1.0.0',
+    verifyProvenance: async () => ({ ok: false, version: null, reason: 'unsigned' }),
+    out: () => {},
+    bypassed: true,
+  });
+  assert.equal(spec, 'awb-agent-manager@1.0.0');
+});
+
+test('헬퍼: provenance 가 거부한 이전 버전은 복귀 설치되지 않는다 (부모→헬퍼 전 구간)', async (t) => {
+  // 1단계 — 부모가 이전 버전의 provenance 를 조회했고 거부됐다.
+  const rollbackSpec = await resolveVerifiedRollbackSpec({
+    previousVersion: '1.0.0',
+    verifyProvenance: async () => ({ ok: false, version: null, reason: 'unsigned publish' }),
+    out: () => {},
+    bypassed: false,
+  });
+  assert.equal(rollbackSpec, '');
+
+  // 2단계 — 그 결과가 그대로 헬퍼 argv 가 된다. 새 빌드가 뜨지 않더라도
+  // 복귀 설치는 일어나지 않아야 한다.
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: rollbackSpec ? '2.0.0' : '',
+    previousSpec: rollbackSpec,
+    badVersion: '2.0.0',
+  });
+
+  assert.deepEqual(
+    r.installs,
+    ['2.0.0'],
+    '증명되지 않은 이전 버전을 설치하면 정책 E 게이트가 우회된다',
+  );
+  assert.equal(r.pin, null, '설치하지 않았으면 그 버전으로 핀하지도 않는다');
+  // 완료 기준 7 — 되돌리지 못해도 매니저 재기동은 그대로다.
+  assert.equal(existsSync(r.helperPath), false, '헬퍼가 재기동·정리 단계까지 도달해야 한다');
+});
+
+test('헬퍼: provenance 를 통과한 이전 버전은 정상적으로 복귀된다 (위 테스트의 양성 대조)', async (t) => {
+  const rollbackSpec = await resolveVerifiedRollbackSpec({
+    previousVersion: '1.0.0',
+    verifyProvenance: async () => ({ ok: true, version: '1.0.0', reason: 'signed' }),
+    out: () => {},
+  });
+  assert.equal(rollbackSpec, 'awb-agent-manager@1.0.0');
+
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: rollbackSpec,
+    badVersion: '2.0.0',
+  });
+  assert.deepEqual(r.installs, ['2.0.0', '1.0.0']);
+  assert.equal(r.pin.version, '1.0.0');
+  assert.deepEqual(r.relaunched, ['1.0.0']);
 });

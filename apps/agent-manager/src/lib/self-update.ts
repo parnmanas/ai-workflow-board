@@ -917,6 +917,9 @@ function globalRoot() {
   const r = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: isWin, windowsHide: true });
   return r.status === 0 ? String(r.stdout || '').trim() : '';
 }
+// previousSpec 은 부모가 provenance 를 이미 검증한 정확한 버전만 온다(검증 실패
+// 시 빈 문자열). 헬퍼는 부모가 죽은 뒤에 돌아 레지스트리 판정을 스스로 할 수
+// 없으므로, 이 계약을 깨고 임의 spec 을 넘기면 정책 E 게이트가 우회된다.
 // 새로 설치된 진입점을 실제로 띄워 본다. --version 은 런타임을 시작하지 않지만
 // 정적 import 그래프는 전부 로드하므로, 구문 오류/누락 모듈/최상위 import 예외로
 // 죽는 빌드가 여기서 드러난다. 부모는 이미 종료했으므로 Windows 에서 이 판정을
@@ -1340,13 +1343,22 @@ async function runNpmGlobalSelfUpdate(
   // 헬퍼는 부모가 종료한 뒤에 설치하므로, 프로브·복귀에 필요한 것을 전부 argv 로
   // 넘겨야 한다(리뷰 지적 1). 대상 버전을 특정할 수 없으면(provenance 우회 경로)
   // 빈 문자열을 넘겨 헬퍼가 프로브를 건너뛰고 기존 동작 그대로 돌게 한다.
+  // 복귀 대상의 provenance 를 **헬퍼를 띄우기 전에** 검증한다. 검증에 실패하면
+  // 빈 spec 이 넘어가고 헬퍼는 복귀를 시도하지 않는다(정책 E fail-closed).
+  const rollbackSpec = trackable
+    ? await resolveVerifiedRollbackSpec({
+        previousVersion: current,
+        verifyProvenance: ports.verifyProvenance,
+        out,
+      })
+    : '';
   const helperArgs = [
     helperPath,
     String(process.pid),
     installSpec,
-    trackable ? targetVersion : '',
-    trackable ? `${MANAGER_PACKAGE_NAME}@${current}` : '',
-    trackable ? updatePinPath(opts.stateDir) : '',
+    trackable && rollbackSpec ? targetVersion : '',
+    rollbackSpec,
+    trackable && rollbackSpec ? updatePinPath(opts.stateDir) : '',
     nodePath,
     scriptPath,
     ...baseArgs,
@@ -1510,6 +1522,46 @@ function resolvePorts(opts: SelfUpdateOpts, out: (msg: string) => void): Require
     restart: p.restart ?? (() => reExecManager(out)),
     probe: p.probe ?? ((input) => probeInstalledEntrypoint(input)),
   };
+}
+
+/**
+ * Windows 헬퍼에 넘길 **검증된** 복귀 spec (리뷰 라운드 2 지적).
+ *
+ * 헬퍼는 부모가 종료한 뒤에 돌기 때문에 스스로 provenance 를 확인할 수 없다 —
+ * 확인하려면 SLSA 판정기를 의존성 없는 템플릿 문자열 안에 통째로 복제해야 하고,
+ * 그러면 게이트가 두 곳에 생겨 한쪽만 틀어질 수 있다. 그래서 판정은 **부모가
+ * 헬퍼를 띄우기 전에** 하고, 검증에 통과한 정확한 버전만 넘긴다.
+ *
+ * 검증에 실패하면 빈 문자열을 돌려 헬퍼가 복귀를 아예 시도하지 않게 한다 —
+ * 정책 E 는 "되돌린 버전이라는 이유로 예외를 두지 않는다"이므로, 증명 없는
+ * 이전 버전을 설치하는 것보다 복귀를 포기하는 쪽이 정책에 맞는 실패 방향이다.
+ * (그 경우에도 헬퍼의 무조건 재기동은 그대로라 매니저가 사라지지는 않는다.)
+ */
+export async function resolveVerifiedRollbackSpec(input: {
+  previousVersion: string;
+  verifyProvenance: (channel: string) => Promise<ProvenanceVerdict>;
+  out: (msg: string) => void;
+  bypassed?: boolean;
+}): Promise<string> {
+  const { previousVersion, out } = input;
+  if (!/^\d+\.\d+\.\d+/.test(previousVersion)) return '';
+  const verdict = await input.verifyProvenance(previousVersion);
+  if (verdict.ok) {
+    return `${MANAGER_PACKAGE_NAME}@${verdict.version ?? previousVersion}`;
+  }
+  const bypassed = input.bypassed ?? provenanceGateBypassed();
+  if (bypassed) {
+    out(
+      `Self-update: ${PROVENANCE_BYPASS_ENV} set — allowing unverified rollback target ` +
+        `v${previousVersion} (${verdict.reason})`,
+    );
+    return `${MANAGER_PACKAGE_NAME}@${previousVersion}`;
+  }
+  out(
+    `Self-update: rollback to v${previousVersion} is NOT available for this update — ` +
+      `${verdict.reason}. Installing anyway; a bad build will need manual recovery.`,
+  );
+  return '';
 }
 
 export interface BootVerificationOutcome {

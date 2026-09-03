@@ -169,4 +169,16 @@ test('the npm-global install path is gated and pins the verified exact version',
   // 4. Windows 헬퍼도 같은 pinned spec 을 받아야 한다 (POSIX 만 막으면 반쪽).
   assert.match(src, /String\(process\.pid\),\s*\n\s*installSpec,/,
     'the Windows detached updater helper must receive the pinned spec too');
+
+  // 5. 헬퍼의 **복귀** 설치도 같은 게이트를 타야 한다 (ticket 23753dc7 리뷰 2).
+  //    헬퍼는 부모가 죽은 뒤 돌아 레지스트리 판정을 스스로 못 하므로, 복귀 대상은
+  //    부모가 미리 검증한 spec 이어야 한다. 여기서 raw 템플릿(`@${current}` 등)이
+  //    다시 들어오면 증명 없는 이전 버전이 설치될 수 있다.
+  assert.match(src, /rollbackSpec = trackable\s*\n?\s*\? await resolveVerifiedRollbackSpec\(/,
+    'the Windows helper rollback target must come from the verified-spec resolver');
+  assert.doesNotMatch(
+    src,
+    /helperArgs = \[[\s\S]*?`\$\{MANAGER_PACKAGE_NAME\}@\$\{current\}`/,
+    'the helper must not receive an unverified rollback spec built straight from the running version',
+  );
 });
