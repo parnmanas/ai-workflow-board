@@ -155,8 +155,14 @@ export class MergeLeaseSweepService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async _sweepScope(scope: MergeLeaseScope, now: Date, stats: MergeLeaseSweepStats): Promise<void> {
-    // 설정은 홀더/대기자의 보드에서 읽는다. 스코프에 티켓이 하나도 없으면
-    // 기본값(활성)으로 떨어지지만, 그 경우 처리할 행도 없다.
+    // 설정은 스코프의 앵커 티켓(홀더 우선, 없으면 FIFO 머리)의 보드에서 읽는다.
+    // 스코프는 (저장소, base branch) 라 서로 다른 보드의 티켓이 한 스코프에서
+    // 경쟁할 수 있는데, 그때 타이밍 값은 앵커 보드의 것을 쓴다 — 보드마다 다른
+    // 값을 섞어 적용하면 같은 큐에 서로 다른 상한이 공존해 판정이 불안정해진다.
+    // 킬 스위치(enabled)는 acquire 시점에 각 티켓의 보드로 이미 판정되므로,
+    // 끈 보드의 티켓은 애초에 이 큐에 들어오지 않는다.
+    // 스코프에 티켓이 하나도 없으면 기본값(활성)으로 떨어지지만, 그 경우
+    // 처리할 행도 없다.
     const waiters = await this.mergeLeaseService.listWaiters(scope);
     const holder = await this.mergeLeaseService.findHolder(scope);
     const anchorTicketId = holder?.ticket_id || waiters[0]?.ticket_id || '';

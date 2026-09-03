@@ -454,6 +454,53 @@ test('★ 미해소 CI 대기를 가진 홀더는 idle 상한을 훨씬 넘겨�
   assert.equal(reaped.release_reason, 'reap_idle');
 });
 
+test('★ pend 된 홀더의 lease 는 스윕이 회수하고 대기자가 이어받는다', async () => {
+  // pend_ticket 은 컬럼을 옮기지 않으므로 이동 트랜잭션의 해제 훅이 걸리지
+  // 않는다. 사람 답을 무기한 기다리는 티켓이 저장소 전체의 랜딩 구간을 쥐고
+  // 있으면 그 저장소의 모든 랜딩이 리퍼 상한까지 멈춘다.
+  await clearLeases();
+  const holder = await makeMergingTicket('pended-holder');
+  const waiter = await makeMergingTicket('waiter-after-pend');
+  const h = await svc.acquire(holder.id);
+  const w = await svc.acquire(waiter.id);
+  assert.equal(h.outcome, 'granted');
+  assert.equal(w.outcome, 'queued');
+
+  // 홀더가 사람을 기다리며 pend. 컬럼은 그대로 Merging, 진행 시각도 방금이라
+  // idle 상한으로는 절대 걸리지 않는 상태.
+  await ticketRepo.update({ id: holder.id }, {
+    pending_user_action: true,
+    pending_reason: '자격증명 필요 — 사람만 해결 가능',
+  });
+
+  dispatched.length = 0;
+  const stats = await sweep.sweep();
+  assert.equal(stats.reaped, 1, 'pend 된 홀더의 lease 가 회수되지 않았다');
+  const reaped = await leaseRepo.findOne({ where: { id: h.lease_id } });
+  assert.equal(reaped.release_reason, 'reap_blocked');
+
+  assert.equal(stats.granted, 1, '회수된 자리를 대기자가 이어받지 못했다');
+  assert.equal((await leaseRepo.findOne({ where: { id: w.lease_id } })).state, 'held');
+  assert.equal((await ticketRepo.findOne({ where: { id: waiter.id } })).pending_merge_lease, false);
+
+  // 정리: 다음 테스트에 pend 상태가 새지 않도록.
+  await ticketRepo.update({ id: holder.id }, { pending_user_action: false, pending_reason: '' });
+});
+
+test('다른 티켓을 기다리는(prerequisite) 홀더의 lease 도 회수된다', async () => {
+  await clearLeases();
+  const holder = await makeMergingTicket('prereq-blocked');
+  const h = await svc.acquire(holder.id);
+  await ticketRepo.update({ id: holder.id }, { pending_on_tickets: true });
+
+  await sweep.sweep();
+  assert.equal(
+    (await leaseRepo.findOne({ where: { id: h.lease_id } })).release_reason,
+    'reap_blocked',
+  );
+  await ticketRepo.update({ id: holder.id }, { pending_on_tickets: false });
+});
+
 test('절대 상한(백스톱)은 CI 대기 중이어도 회수한다', async () => {
   await clearLeases();
   await setBoardLeaseConfig('{"max_hold_minutes":30}');

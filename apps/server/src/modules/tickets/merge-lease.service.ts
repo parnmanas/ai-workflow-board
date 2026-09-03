@@ -518,7 +518,7 @@ export class MergeLeaseService {
     lease: MergeLease,
     config: ResolvedMergeLease,
     now: Date,
-  ): Promise<'alive' | 'reap_not_merging' | 'reap_max_hold' | 'reap_idle'> {
+  ): Promise<'alive' | 'reap_not_merging' | 'reap_blocked' | 'reap_max_hold' | 'reap_idle'> {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: lease.ticket_id } });
     if (!ticket) return 'reap_not_merging';
     const column = ticket.column_id
@@ -527,6 +527,7 @@ export class MergeLeaseService {
     return decideLeaseLiveness({
       inMergingColumn: (column as any)?.kind === 'merging',
       hasActiveCiWait: hasUnresolvedCiWait(ticket),
+      blockedOnOther: !!ticket.pending_user_action || !!ticket.pending_on_tickets,
       acquiredAtMs: lease.acquired_at ? new Date(lease.acquired_at).getTime() : null,
       lastProgressAtMs: new Date(lease.last_progress_at).getTime(),
       nowMs: now.getTime(),

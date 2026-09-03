@@ -46,6 +46,7 @@ function livenessInput(overrides = {}) {
   return {
     inMergingColumn: true,
     hasActiveCiWait: false,
+    blockedOnOther: false,
     acquiredAtMs: NOW - 1 * MIN,
     lastProgressAtMs: NOW - 1 * MIN,
     nowMs: NOW,
@@ -113,6 +114,22 @@ test('holder liveness', async (t) => {
     assert.equal(
       decideLeaseLiveness(livenessInput({ acquiredAtMs: null, lastProgressAtMs: NOW })),
       'alive',
+    );
+  });
+
+  // ★ pend_ticket 은 컬럼을 옮기지 않아 이동 트랜잭션의 해제 훅이 걸리지 않는다.
+  //   사람의 답을 무기한 기다리는 티켓이 저장소 전체의 랜딩 구간을 쥐고 있으면
+  //   안 되므로, liveness 규칙 한 곳에서 처리한다.
+  await t.test('사람/다른 티켓을 기다리는 홀더는 진행 증거와 무관하게 회수된다', () => {
+    assert.equal(
+      decideLeaseLiveness(livenessInput({ blockedOnOther: true })),
+      'reap_blocked',
+    );
+    // CI 가 돌고 있어도(가장 강한 진행 증거) 차단이 이긴다 — 사람 대기 중에
+    // CI 결과가 와도 그 티켓은 진행할 수 없다.
+    assert.equal(
+      decideLeaseLiveness(livenessInput({ blockedOnOther: true, hasActiveCiWait: true })),
+      'reap_blocked',
     );
   });
 

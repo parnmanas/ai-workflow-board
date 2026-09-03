@@ -35,13 +35,28 @@ import type { ResolvedMergeLease } from '../../common/merge-lease-config';
  * **백스톱**이라 CI 증거보다 우선한다. 회수의 최악 결과는 fail-open(= 오늘
  * 동작으로 회귀)이지 데이터 손상이 아니므로 이 우선순위가 안전하다.
  */
-export type LeaseLivenessVerdict = 'alive' | 'reap_not_merging' | 'reap_max_hold' | 'reap_idle';
+export type LeaseLivenessVerdict = 'alive' | 'reap_not_merging' | 'reap_blocked' | 'reap_max_hold' | 'reap_idle';
 
 export interface LeaseLivenessInput {
   /** 홀더 티켓이 아직 merging kind 컬럼에 있는가. */
   inMergingColumn: boolean;
   /** 미해소 CI 대기가 걸려 있는가(가장 강한 진행 증거). */
   hasActiveCiWait: boolean;
+  /**
+   * 랜딩과 무관한 다른 사유로 차단됐는가 — `pending_user_action`(사람 대기)
+   * 또는 `pending_on_tickets`(다른 티켓 대기).
+   *
+   * `pend_ticket` 은 컬럼을 옮기지 않으므로 이동 트랜잭션의 해제 훅이 걸리지
+   * 않는다. 그런데 사람의 답을 무기한 기다리는 티켓이 저장소 전체의 랜딩
+   * 구간을 쥐고 있는 것은 명백히 틀렸다. 그래서 해제 훅을 pend 표면마다
+   * 새로 다는 대신, **liveness 규칙 한 곳**에서 처리한다 — 새 pending 종류가
+   * 생겨도 여기만 보면 된다.
+   *
+   * `pending_merge_lease` 자체는 여기 포함하지 **않는다**: 승격 직후 전달
+   * 전 크래시 창에서는 홀더가 잠시 파킹된 채로 남는데, 그것까지 차단으로
+   * 보면 방금 부여한 lease 를 즉시 회수해 버린다.
+   */
+  blockedOnOther: boolean;
   /** 획득 시각(ms). null 이면 백스톱 판정을 건너뛴다. */
   acquiredAtMs: number | null;
   /** 마지막으로 관측된 진행 시각(ms). */
@@ -56,6 +71,9 @@ export function decideLeaseLiveness(input: LeaseLivenessInput): LeaseLivenessVer
   // 트랜잭션이 이미 해제했을 것이므로(설계 보정 D), 여기 걸린다는 것은 그
   // 해제를 놓친 행이 남았다는 뜻 — 리퍼가 백스톱으로 정리한다.
   if (!input.inMergingColumn) return 'reap_not_merging';
+
+  // 사람/다른 티켓을 기다리는 동안 랜딩 구간을 쥐고 있을 이유가 없다.
+  if (input.blockedOnOther) return 'reap_blocked';
 
   if (input.acquiredAtMs != null && input.nowMs - input.acquiredAtMs >= input.maxHoldMs) {
     return 'reap_max_hold';
