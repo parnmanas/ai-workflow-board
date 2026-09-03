@@ -53,7 +53,12 @@ export type RuntimeCapabilityReport = Record<string, RuntimeHealthRecord>;
  *  매니저 쪽에서 이미 마스킹된 표시용 문자열이다 — 서버는 원문을 받지 않는다. */
 export interface LaunchArgEntry {
   value: string;
-  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'session' | 'runtime_profile' | 'unattributed';
+  /** `harness`/`effort`/`prompt` 는 **디스패치 시점** 입력이라 추정(`modes`)에는
+   *  나타날 수 없고 `last_spawn` 의 실제 argv 에서만 귀속된다 (리뷰 3R). */
+  source:
+    | 'adapter' | 'model' | 'permission' | 'mcp' | 'session'
+    | 'harness' | 'effort' | 'prompt'
+    | 'runtime_profile' | 'unattributed';
   /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
   placeholder?: boolean;
 }
@@ -84,6 +89,9 @@ export interface RecordedLaunchSpec {
   mode: 'session' | 'oneshot';
   bin: string | null;
   args: LaunchArgEntry[];
+  /** 인자별 출처를 붙일 수 있었나 (리뷰 3R). false 면 모든 항목이
+   *  `unattributed` 다 — "귀속 실패"와 "귀속했더니 출처 불명"은 다른 상태다. */
+  args_attributed: boolean;
   cwd: string | null;
   env: LaunchEnvEntry[];
   context: {

@@ -81,7 +81,37 @@ const VALID_SPEC = {
   permission: { tier: 'trusted', source: 'agent_trust', harness_mode: null },
   runtime_profile: null,
   env: [{ key: 'CLAUDE_CONFIG_DIR', value: '/home/a/cli-home', source: 'cli_home' }],
-  last_spawn: null,
+  // 실제 spawn 기록 — **기록 전용 출처**(harness/effort/prompt)가 포함된다.
+  // 추정(`modes`)에는 나타날 수 없는 값들이라 여기서만 검증할 수 있다.
+  last_spawn: {
+    mode: 'session',
+    bin: '/usr/local/bin/claude',
+    args: [
+      { value: '--session-id', source: 'session' },
+      { value: 'sid-1', source: 'session' },
+      { value: '--model', source: 'model' },
+      { value: 'claude-opus-5', source: 'model' },
+      { value: '--effort', source: 'effort' },
+      { value: 'max', source: 'effort' },
+      { value: '--disallowedTools', source: 'harness' },
+      { value: '<8ch>', source: 'harness' },
+      { value: '--append-system-prompt', source: 'adapter' },
+      { value: '<프롬프트 본문: 표시하지 않음>', source: 'prompt', placeholder: true },
+      { value: '--dangerously-skip-permissions', source: 'permission' },
+      { value: '--settings', source: 'runtime_profile' },
+    ],
+    args_attributed: true,
+    cwd: '/srv/work/.awb/wt/repo/20fff298',
+    env: [{ key: 'ANTHROPIC_MODEL', value: '<12ch>', source: 'credential' }],
+    context: {
+      ticket_id: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
+      role: 'assignee',
+      harness_keys: ['disallowed_tools', 'permission_mode'],
+      effort: 'max',
+      runtime_profile_id: 'vllm-local',
+    },
+    recorded_at: '2026-01-01T00:00:01.000Z',
+  },
   varies_per_dispatch: ['보드·워크스페이스 harness (harness_config)'],
   computed_at: '2026-01-01T00:00:00.000Z',
 };
@@ -112,6 +142,15 @@ test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 �
   // 모드 순서는 보존되어야 한다 — 첫 항목이 "실제로 도는 경로"라는 뜻이라
   // 재배치되면 UI 가 기본 경로를 잘못 고른다.
   assert.deepEqual(record.agent_launch_specs[0].modes.map((m) => m.mode), ['session', 'oneshot']);
+
+  // 기록 전용 출처가 살아 있어야 한다 (리뷰 3R) — 허용 집합에서 빠지면
+  // unattributed 로 접히며 화면이 "출처 불명"을 줄줄이 그린다.
+  const recorded = record.agent_launch_specs[0].last_spawn;
+  assert.equal(recorded.args_attributed, true);
+  assert.deepEqual(
+    [...new Set(recorded.args.map((a) => a.source))].sort(),
+    ['adapter', 'effort', 'harness', 'model', 'permission', 'prompt', 'runtime_profile', 'session'],
+  );
 });
 
 test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 (빈 배열로 접지 않는다)', async (t) => {
@@ -189,6 +228,18 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
         ],
         permission: {},
         runtime_profile: { id: 'p', protocol: 'x', model: null, arg_count: -5 },
+        last_spawn: {
+          mode: 'session',
+          bin: null,
+          args: [{ value: '--x', source: '기록에만-있는-척하는-출처' }],
+          // boolean 이 아닌 값은 false 로 접혀야 한다 — 귀속됐다고 잘못
+          // 주장하는 쪽이 그 반대보다 나쁜 오표시다.
+          args_attributed: 'yes',
+          cwd: null,
+          env: [],
+          context: {},
+          recorded_at: 0,
+        },
         env: [{ key: 'K', value: '<redacted>', source: '이상한-출처' }, { value: 'no-key' }],
         notes: 'not-an-array',
         varies_per_dispatch: 'not-an-array',
@@ -222,6 +273,11 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
   // cwd_kind 는 모르는 값이면 보수적인 'base' 로 접는다 — 기준 경로를 실제
   // 프로세스 cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시이기 때문이다.
   assert.equal(row.cwd_kind, 'base');
+  // 기록도 같은 규칙으로 좁혀진다 — 모르는 출처는 unattributed, 참이 아닌
+  // args_attributed 는 false.
+  assert.equal(row.last_spawn.args_attributed, false);
+  assert.equal(row.last_spawn.args[0].source, 'unattributed');
+  assert.equal(row.last_spawn.context.harness_keys.length, 0);
 });
 
 exitAfterTests();

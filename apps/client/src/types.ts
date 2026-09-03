@@ -2030,7 +2030,12 @@ export interface AgentLiveSession {
  *  `value` 는 매니저가 이미 마스킹한 표시용 문자열이다 — 원문이 아니다. */
 export interface LaunchArgEntry {
   value: string;
-  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'session' | 'runtime_profile' | 'unattributed';
+  /** `harness`/`effort`/`prompt` 는 **디스패치 시점** 입력이라 추정(`modes`)에는
+   *  나타날 수 없고 `last_spawn` 의 실제 argv 에서만 귀속된다 (리뷰 3R). */
+  source:
+    | 'adapter' | 'model' | 'permission' | 'mcp' | 'session'
+    | 'harness' | 'effort' | 'prompt'
+    | 'runtime_profile' | 'unattributed';
   /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
   placeholder?: boolean;
 }
@@ -2062,6 +2067,10 @@ export interface RecordedLaunchSpec {
   mode: 'session' | 'oneshot';
   bin: string | null;
   args: LaunchArgEntry[];
+  /** 인자별 출처를 붙일 수 있었나 (리뷰 3R). 서버가 모르는 값을 false 로 접으므로
+   *  구버전 매니저의 기록은 여기서 false 로 온다 — UI 는 그때 출처 열을 그리는
+   *  대신 왜 없는지 말해야 한다. */
+  args_attributed: boolean;
   cwd: string | null;
   env: LaunchEnvEntry[];
   context: {

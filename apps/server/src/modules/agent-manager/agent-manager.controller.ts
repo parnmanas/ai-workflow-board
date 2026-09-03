@@ -99,8 +99,13 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
   const str = (v: unknown, max = MAX_TOKEN): string => String(v ?? '').slice(0, max);
   const strOrNull = (v: unknown): string | null =>
     typeof v === 'string' && v ? v.slice(0, MAX_TOKEN) : null;
+  // `harness`/`effort`/`prompt` 는 실제 spawn 기록에서만 나오는 출처다 (리뷰 3R) —
+  // 여기 빠뜨리면 그 토큰들이 조용히 'unattributed' 로 접혀, 화면이 귀속에
+  // 성공한 인자를 출처 불명으로 표시한다.
   const ARG_SOURCES = new Set([
-    'adapter', 'model', 'permission', 'mcp', 'session', 'runtime_profile', 'unattributed',
+    'adapter', 'model', 'permission', 'mcp', 'session',
+    'harness', 'effort', 'prompt',
+    'runtime_profile', 'unattributed',
   ]);
   const ENV_SOURCES = new Set(['cli_home', 'credential', 'runtime_profile']);
   const MODES = new Set(['session', 'oneshot']);
@@ -172,6 +177,9 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
           mode: raw.mode,
           bin: strOrNull(raw.bin),
           args: narrowArgs(raw.args),
+          // 모르는 값은 false 로 접는다 — 귀속됐다고 잘못 주장하는 쪽이 그
+          // 반대보다 나쁜 오표시다(구버전 매니저는 이 필드를 안 보낸다).
+          args_attributed: raw.args_attributed === true,
           cwd: strOrNull(raw.cwd),
           env: narrowEnv(raw.env),
           context: {

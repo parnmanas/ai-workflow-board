@@ -779,10 +779,16 @@ export class SubagentManager implements SubagentManagerContract {
       const attributedSpec = mentionAudit
         ? { ...spec, triggerSource: mentionAudit.run_token }
         : spec;
-      const descriptor = this.#adapterResolver.buildOneshot(adapter.cliType, {
+      // spec 을 리터럴로 두 번 쓰지 않고 변수로 뽑는다 (ticket 20fff298 리뷰 3R).
+      // 두 가지를 얻는다: (1) MCP 설정이 필요할 때의 두 번째 빌드가 첫 번째와
+      // 한 필드(`mcpConfigPath`)만 다르다는 사실이 코드에 드러나고, (2) 실행
+      // 사양 기록이 **최종 descriptor 를 만든 그 spec** 을 그대로 받아 실제
+      // argv 에 인자별 출처를 붙일 수 있다. 리터럴을 다시 적어 넘기면 두 조립이
+      // 갈라져 화면이 실제와 다른 출처를 주장하게 된다.
+      let oneshotSpec = {
         rolePrompt: spec.rolePrompt || '',
         taskText: spec.taskText,
-        mcpConfigPath: null,
+        mcpConfigPath: null as string | null,
         cwd: effectiveCwd,
         cliHomeDir: ctx?.cli_home_dir ?? null,
         mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
@@ -791,7 +797,8 @@ export class SubagentManager implements SubagentManagerContract {
         effort: effortFlag,
         ultracode,
         permission,
-      }).descriptor;
+      };
+      const descriptor = this.#adapterResolver.buildOneshot(adapter.cliType, oneshotSpec).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-spawn role pin — same contract BaseSessionManager._spawnSession
@@ -862,21 +869,10 @@ export class SubagentManager implements SubagentManagerContract {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
+        oneshotSpec = { ...oneshotSpec, mcpConfigPath: configPath };
         Object.assign(
           descriptor,
-          this.#adapterResolver.buildOneshot(adapter.cliType, {
-            rolePrompt: spec.rolePrompt || '',
-            taskText: spec.taskText,
-            mcpConfigPath: configPath,
-            cwd: effectiveCwd,
-            cliHomeDir: ctx?.cli_home_dir ?? null,
-            mcpAttribution: this.#mcpAttribution(attributedSpec, !!ctx, String(reservationId)),
-            model: attemptModel,
-            harness,
-            effort: effortFlag,
-            ultracode,
-            permission,
-          }).descriptor,
+          this.#adapterResolver.buildOneshot(adapter.cliType, oneshotSpec).descriptor,
         );
       }
       if (claudeRuntimeProfile?.args?.length) {
@@ -1020,6 +1016,16 @@ export class SubagentManager implements SubagentManagerContract {
         harness,
         effort: effortFlag,
         runtimeProfileId: claudeRuntimeProfile?.id ?? null,
+        // 실제 argv 의 인자별 출처 (리뷰 3R). 최종 descriptor 를 만든 spec 과
+        // **같은 빌더**를 넘겨, 기록 쪽이 실제 입력으로 변형을 다시 만들어
+        // 귀속한다 — 그래서 harness·effort 처럼 디스패치 시점에만 정해지는
+        // 입력도 실제 토큰에 귀속된다.
+        attribution: {
+          spec: oneshotSpec,
+          build: (s: Record<string, unknown>) =>
+            this.#adapterResolver.buildOneshot(adapter.cliType, s as any).descriptor.args,
+          profileArgs: claudeRuntimeProfile?.args ?? [],
+        },
       });
 
       if (typeof descriptor.writePrompt === 'function') {

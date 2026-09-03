@@ -33,6 +33,11 @@ const SOURCE_LABEL: Record<LaunchArgEntry['source'], string> = {
   permission: 'trust·권한 설정',
   mcp: 'MCP 설정',
   session: '세션 식별자',
+  // 아래 셋은 **디스패치 시점** 입력이라 추정에는 나타날 수 없고 실제 실행
+  // 기록에서만 귀속된다 (리뷰 3R). 라벨을 빠뜨리면 배지가 빈칸이 된다.
+  harness: '보드·워크스페이스 하네스',
+  effort: '티켓 effort preset',
+  prompt: '프롬프트 본문',
   runtime_profile: '런타임 프로파일',
   unattributed: '출처 불명',
 };
@@ -60,6 +65,9 @@ const SOURCE_COLOR: Record<LaunchArgEntry['source'], string> = {
   permission: tokens.colors.warning,
   mcp: tokens.colors.textSecondary,
   session: tokens.colors.textSecondary,
+  harness: tokens.colors.warning,
+  effort: tokens.colors.accent,
+  prompt: tokens.colors.textMuted,
   runtime_profile: tokens.colors.success,
   unattributed: tokens.colors.danger,
 };
@@ -110,12 +118,91 @@ function Notice({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** 인자별 출처 목록.
+ *
+ *  추정 블록과 "마지막 실제 실행" 블록이 **같은 컴포넌트**를 쓴다 — 각자 그리면
+ *  같은 토큰이 두 블록에서 다른 모양으로 나오고, 한쪽에 출처 배지를 붙이는 것을
+ *  잊기 쉽다(실제로 리뷰 3R 에서 실제 실행 블록에 출처가 없던 것이 지적됐다). */
+function ArgSourceList({ args, testId }: { args: LaunchArgEntry[]; testId: string }) {
+  return (
+    <ul
+      data-testid={testId}
+      style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}
+    >
+      {args.map((arg, i) => (
+        <li
+          key={`${i}-${arg.value}`}
+          data-testid="launch-spec-arg"
+          data-source={arg.source}
+          style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}
+        >
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontFamily: MONO,
+              wordBreak: 'break-all',
+              color: arg.placeholder ? tokens.colors.textMuted : tokens.colors.textStrong,
+              fontStyle: arg.placeholder ? 'italic' : 'normal',
+            }}
+          >
+            {arg.value}
+          </span>
+          <span
+            style={{
+              flexShrink: 0,
+              fontSize: 10,
+              fontWeight: 600,
+              color: SOURCE_COLOR[arg.source],
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {SOURCE_LABEL[arg.source]}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** 주입 환경 변수 목록. 값은 매니저가 이미 마스킹해 보낸 것이다. */
+function EnvList({
+  env,
+  testId,
+  empty,
+}: {
+  env: LaunchEnvEntry[];
+  testId: string;
+  empty: string;
+}) {
+  if (env.length === 0) return <Notice>{empty}</Notice>;
+  return (
+    <ul
+      data-testid={testId}
+      style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}
+    >
+      {env.map((e) => (
+        <li key={e.key} style={{ display: 'flex', gap: 8, fontSize: 12, fontFamily: MONO }}>
+          <span style={{ color: tokens.colors.textStrong }}>{e.key}</span>
+          <span style={{ color: tokens.colors.textMuted, flex: 1, minWidth: 0, wordBreak: 'break-all' }}>
+            {e.value}
+          </span>
+          <span style={{ fontSize: 10, color: ENV_SOURCE_COLOR[e.source], fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+            {ENV_SOURCE_LABEL[e.source]}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function AgentLaunchSpecSection({
   spec,
   managerFound,
   reported,
 }: AgentLaunchSpecSectionProps) {
-  const [copied, setCopied] = useState<'sh' | 'json' | null>(null);
+  type CopyKey = 'sh' | 'json' | 'actual-sh' | 'actual-json';
+  const [copied, setCopied] = useState<CopyKey | null>(null);
   // 어느 spawn 경로를 보고 있는지. 매니저가 보고한 순서의 첫 항목이 기본
   // 경로이므로 그것을 초깃값으로 쓴다.
   const [modeIndex, setModeIndex] = useState(0);
@@ -137,6 +224,19 @@ export default function AgentLaunchSpecSection({
     [spec, activeMode, binToken],
   );
 
+  // 실제 실행 기록의 명령 문자열. 추정과 **같은 인용 헬퍼**를 쓴다 — 한쪽만
+  // 인용 규칙이 달라지면 그 블록이 셸 안전하지 않게 된다(리뷰 2R 의 원인).
+  const actual = spec?.last_spawn ?? null;
+  const actualBinToken = actual?.bin ?? '<실행 파일 미기록>';
+  const actualCommandLine = useMemo(
+    () => (actual ? posixCommandLine(actualBinToken, actual.args.map((a) => a.value)) : ''),
+    [actual, actualBinToken],
+  );
+  const actualCommandJson = useMemo(
+    () => (actual ? argvJson(actualBinToken, actual.args.map((a) => a.value)) : ''),
+    [actual, actualBinToken],
+  );
+
   const sectionLabelStyle: React.CSSProperties = {
     fontSize: 11,
     fontWeight: 600,
@@ -155,7 +255,7 @@ export default function AgentLaunchSpecSection({
     lineHeight: 1.5,
   };
 
-  const copy = async (text: string, which: 'sh' | 'json') => {
+  const copy = async (text: string, which: CopyKey) => {
     try {
       await navigator.clipboard?.writeText(text);
       setCopied(which);
@@ -220,6 +320,35 @@ export default function AgentLaunchSpecSection({
                     · {MODE_LABEL_ACTUAL[spec.last_spawn.mode]} · {spec.last_spawn.recorded_at}
                   </span>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginBottom: 4 }}>
+                  {/* 추정 블록과 같은 두 갈래 복사. 운영자가 실제로 재현하고 싶은
+                      것은 추정이 아니라 이 ground truth 쪽이므로, 여기에도 같은
+                      POSIX 인용 · argv JSON 을 둔다. */}
+                  {([
+                    ['actual-sh', 'sh 복사', actualCommandLine],
+                    ['actual-json', 'argv JSON 복사', actualCommandJson],
+                  ] as const).map(([which, label, text]) => (
+                    <button
+                      key={which}
+                      type="button"
+                      data-copy={which}
+                      onClick={() => copy(text, which)}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: 'transparent',
+                        color: tokens.colors.textStrong,
+                        border: `1px solid ${tokens.colors.border}`,
+                        borderRadius: tokens.radii.sm,
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {copied === which ? '복사됨' : label}
+                    </button>
+                  ))}
+                </div>
                 <pre
                   data-testid="launch-spec-actual-command"
                   style={{
@@ -236,12 +365,43 @@ export default function AgentLaunchSpecSection({
                     userSelect: 'text',
                   }}
                 >
-                  {posixCommandLine(
-                    spec.last_spawn.bin ?? '<실행 파일 미기록>',
-                    spec.last_spawn.args.map((a) => a.value),
-                  )}
+                  {actualCommandLine}
                 </pre>
-                <div style={{ marginTop: 4, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
+
+                {/* 실제 argv 의 인자별 출처 (리뷰 3R). 이게 없으면 출처가 붙은
+                    쪽은 디스패치 입력을 반영하지 못하는 추정뿐이라, 요구사항의
+                    "실효 실행 인자 전체 + 인자별 출처" 가 어느 블록에서도
+                    충족되지 않는다. */}
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
+                    인자별 출처 (실제)
+                  </div>
+                  {spec.last_spawn.args_attributed ? (
+                    <ArgSourceList args={spec.last_spawn.args} testId="launch-spec-actual-args" />
+                  ) : (
+                    // "귀속 실패"와 "귀속했더니 출처 불명"은 다른 상태다. 출처
+                    // 불명 배지를 줄줄이 세워 후자처럼 보이게 하지 않는다.
+                    <Notice>
+                      이 실행의 인자별 출처를 확인하지 못했습니다 — 재구성한 argv 가 실제와
+                      달라 출처를 지어내지 않았습니다. 아래 실행 명령 자체는 실제 값입니다.
+                    </Notice>
+                  )}
+                </div>
+
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
+                    환경 변수 (실제)
+                  </div>
+                  {/* 매니저가 baseEnv 위에 **덧붙인** 키만 온다 — 상속된 운영자 셸
+                      변수까지 보고하면 무관한 값 수백 개가 화면을 덮는다. */}
+                  <EnvList
+                    env={spec.last_spawn.env}
+                    testId="launch-spec-actual-env"
+                    empty="이 실행에서 매니저가 덧붙인 환경 변수가 없습니다."
+                  />
+                </div>
+
+                <div style={{ marginTop: 6, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
                   cwd <span style={{ fontFamily: MONO }}>{spec.last_spawn.cwd ?? '(미기록)'}</span>
                   {spec.last_spawn.context.ticket_id && <> · 티켓 {spec.last_spawn.context.ticket_id.slice(0, 8)}</>}
                   {spec.last_spawn.context.role && <> · 역할 {spec.last_spawn.context.role}</>}
@@ -363,43 +523,7 @@ export default function AgentLaunchSpecSection({
               <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
                 인자별 출처
               </div>
-              <ul
-                data-testid="launch-spec-args"
-                style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}
-              >
-                {(activeMode?.args ?? []).map((arg, i) => (
-                  <li
-                    key={`${i}-${arg.value}`}
-                    data-testid="launch-spec-arg"
-                    data-source={arg.source}
-                    style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}
-                  >
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        fontFamily: MONO,
-                        wordBreak: 'break-all',
-                        color: arg.placeholder ? tokens.colors.textMuted : tokens.colors.textStrong,
-                        fontStyle: arg.placeholder ? 'italic' : 'normal',
-                      }}
-                    >
-                      {arg.value}
-                    </span>
-                    <span
-                      style={{
-                        flexShrink: 0,
-                        fontSize: 10,
-                        fontWeight: 600,
-                        color: SOURCE_COLOR[arg.source],
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {SOURCE_LABEL[arg.source]}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <ArgSourceList args={activeMode?.args ?? []} testId="launch-spec-args" />
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 12, rowGap: 6, fontSize: 12 }}>
@@ -462,26 +586,11 @@ export default function AgentLaunchSpecSection({
               <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textSecondary, marginBottom: 6 }}>
                 환경 변수
               </div>
-              {spec.env.length === 0 ? (
-                <Notice>이 에이전트에 주입되는 추가 환경 변수가 없습니다.</Notice>
-              ) : (
-                <ul
-                  data-testid="launch-spec-env"
-                  style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}
-                >
-                  {spec.env.map((e) => (
-                    <li key={e.key} style={{ display: 'flex', gap: 8, fontSize: 12, fontFamily: MONO }}>
-                      <span style={{ color: tokens.colors.textStrong }}>{e.key}</span>
-                      <span style={{ color: tokens.colors.textMuted, flex: 1, minWidth: 0, wordBreak: 'break-all' }}>
-                        {e.value}
-                      </span>
-                      <span style={{ fontSize: 10, color: ENV_SOURCE_COLOR[e.source], fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
-                        {ENV_SOURCE_LABEL[e.source]}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <EnvList
+                env={spec.env}
+                testId="launch-spec-env"
+                empty="이 에이전트에 주입되는 추가 환경 변수가 없습니다."
+              />
             </div>
 
             {spec.varies_per_dispatch.length > 0 && (

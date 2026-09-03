@@ -217,6 +217,35 @@ const SPEC = {
   computed_at: '2026-01-01T00:00:00.000Z',
 };
 
+/** 실제 spawn 기록이 있는 사양. 리뷰 3R 이후 기록에도 인자별 출처가 붙는다. */
+const SPEC_WITH_ACTUAL = {
+  ...SPEC,
+  last_spawn: {
+    mode: 'session',
+    bin: '/usr/local/bin/claude',
+    args: [
+      { value: '--session-id', source: 'session' },
+      { value: 'sid-1', source: 'session' },
+      { value: '--effort', source: 'effort' },
+      { value: 'max', source: 'effort' },
+      { value: '--disallowedTools', source: 'harness' },
+      { value: '<8ch>', source: 'harness' },
+      { value: '<프롬프트 본문: 표시하지 않음>', source: 'prompt', placeholder: true },
+    ],
+    args_attributed: true,
+    cwd: '/srv/work/.awb/wt/repo/20fff298',
+    env: [{ key: 'ANTHROPIC_MODEL', value: '<6ch>', source: 'credential' }],
+    context: {
+      ticket_id: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
+      role: 'assignee',
+      harness_keys: ['permission_mode'],
+      effort: 'max',
+      runtime_profile_id: 'vllm-local',
+    },
+    recorded_at: '2026-02-02T03:04:05.000Z',
+  },
+};
+
 const renderSection = (props) =>
   renderToStaticMarkup(React.createElement(AgentLaunchSpecSection, props));
 
@@ -439,28 +468,7 @@ test('경로별 단서와 모델 라우팅 설명이 화면에 드러난다', ()
 test('마지막 실제 실행이 있으면 추정과 나란히 보여준다', () => {
   // 리뷰 2R — 추정만 보여 주면 디스패치 시점 입력이 덮은 부분이 드러나지 않는다.
   const withActual = renderSection({
-    spec: {
-      ...SPEC,
-      last_spawn: {
-        mode: 'session',
-        bin: '/usr/local/bin/claude',
-        args: [
-          { value: '--session-id', source: 'unattributed' },
-          { value: '--effort', source: 'unattributed' },
-          { value: 'max', source: 'unattributed' },
-        ],
-        cwd: '/srv/work/.awb/wt/repo/20fff298',
-        env: [{ key: 'ANTHROPIC_MODEL', value: '<6ch>', source: 'credential' }],
-        context: {
-          ticket_id: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
-          role: 'assignee',
-          harness_keys: ['permission_mode'],
-          effort: 'max',
-          runtime_profile_id: 'vllm-local',
-        },
-        recorded_at: '2026-02-02T03:04:05.000Z',
-      },
-    },
+    spec: SPEC_WITH_ACTUAL,
     managerFound: true,
     reported: true,
   });
@@ -482,6 +490,51 @@ test('마지막 실제 실행이 있으면 추정과 나란히 보여준다', ()
   const noActual = renderSection({ spec: SPEC, managerFound: true, reported: true });
   assert.doesNotMatch(noActual, /data-testid="launch-spec-actual"/);
   assert.match(noActual, /다음 실행 예상/);
+});
+
+test('마지막 실제 실행도 인자별 출처를 보여준다 (리뷰 3R)', () => {
+  // 리뷰 3R — 출처가 붙은 쪽이 디스패치 입력을 반영하지 못하는 "추정" 뿐이라면
+  // 요구사항의 "실효 실행 인자 전체 + 인자별 출처"는 어느 블록에서도 충족되지
+  // 않는다. 실제 실행 블록에도 토큰별 출처 배지가 있어야 한다.
+  const html = renderSection({ spec: SPEC_WITH_ACTUAL, managerFound: true, reported: true });
+
+  assert.match(html, /data-testid="launch-spec-actual-args"/);
+  assert.match(html, /인자별 출처 \(실제\)/);
+  // **디스패치 시점 입력**의 출처 라벨이 실제로 그려진다 — 추정에는 존재할 수
+  // 없는 출처라, 라벨 맵에서 빠지면 배지가 빈칸이 된다.
+  assert.match(html, /data-source="harness"/);
+  assert.match(html, /data-source="effort"/);
+  assert.match(html, /data-source="prompt"/);
+  assert.match(html, /보드·워크스페이스 하네스/);
+  assert.match(html, /티켓 effort preset/);
+  // 실제 기록의 env 도 보여준다 — 매니저가 덧붙인 키만 온다.
+  assert.match(html, /data-testid="launch-spec-actual-env"/);
+  assert.match(html, /ANTHROPIC_MODEL/);
+  // 실제 명령도 복사 가능해야 한다(운영자가 재현하려는 것은 추정이 아니다).
+  assert.match(html, /data-copy="actual-sh"/);
+  assert.match(html, /data-copy="actual-json"/);
+});
+
+test('귀속에 실패한 기록은 "출처 불명" 을 줄줄이 그리지 않고 사유를 말한다', () => {
+  // "귀속 실패"와 "귀속했더니 출처 불명"은 다른 상태다 — 뭉개면 이 티켓이
+  // 고치려는 "틀린 정보로 읽히는 표시"가 된다.
+  const html = renderSection({
+    spec: {
+      ...SPEC_WITH_ACTUAL,
+      last_spawn: {
+        ...SPEC_WITH_ACTUAL.last_spawn,
+        args_attributed: false,
+        args: SPEC_WITH_ACTUAL.last_spawn.args.map((a) => ({ value: a.value, source: 'unattributed' })),
+      },
+    },
+    managerFound: true,
+    reported: true,
+  });
+
+  assert.doesNotMatch(html, /data-testid="launch-spec-actual-args"/);
+  assert.match(html, /출처를 확인하지 못했습니다|출처를 지어내지 않았습니다/);
+  // 실행 명령 자체는 여전히 보여준다 — ground truth 를 잃지 않는다.
+  assert.match(html, /data-testid="launch-spec-actual-command"/);
 });
 
 test('복사 버튼이 셸 한 줄과 argv JSON 두 갈래로 제공된다', () => {

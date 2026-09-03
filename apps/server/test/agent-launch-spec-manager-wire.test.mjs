@@ -49,21 +49,40 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   // 실제 spawn 기록도 함께 태운다 (ticket 20fff298 리뷰 2R). 기록이 null 이면
   // `last_spawn` 의 스키마 정합성이 이 교차 검증에서 빠져, 두 앱이 갈라져도
   // 통과해 버린다 — 새 필드가 가드 밖에 남는 정확히 그 상황이다.
+  //
+  // 기록의 **인자별 출처**까지 실제 어댑터로 만들어 태운다 (리뷰 3R). 손으로
+  // `source` 를 적으면 매니저가 실제로 내보내는 출처 집합과 갈라져도 통과한다 —
+  // `harness`/`effort`/`prompt` 처럼 기록 전용 출처가 정확히 그 위험에 있다.
   const recorderPath = join(REPO_ROOT, 'apps/agent-manager/dist/lib/launch-spec-recorder.js');
+  const adaptersPath = join(REPO_ROOT, 'apps/agent-manager/dist/lib/cli-adapters/index.js');
   const { recordActualLaunch } = await import(recorderPath);
+  const { createAdapter } = await import(adaptersPath);
+  const adapter = createAdapter('claude');
+  const spawnSpec = {
+    rolePrompt: '역할 프롬프트 본문', taskText: '작업 내용 본문',
+    mcpConfigPath: '/tmp/awb/cfg-wire.json', cwd: '/srv/work/.awb/wt/repo/20fff298',
+    cliHomeDir: '/home/x/cli-home', model: 'claude-opus-5',
+    harness: { permission_mode: 'plan', disallowed_tools: ['WebFetch'] },
+    effort: 'max', ultracode: false,
+    permission: { tier: 'trusted', source: 'agent_trust', harnessMode: 'plan', harnessTier: 'strict' },
+    sessionId: 'wire-session-key',
+  };
+  const buildSpawnArgs = (spec) =>
+    adapter.buildSessionSpawn({ ...spec, sessionMode: 'persistent' }).args;
   recordActualLaunch({
     agentId: 'wire-agent',
     mode: 'session',
     bin: '/usr/local/bin/claude',
-    args: ['--session-id', 'sid', '--effort', 'max', '--dangerously-skip-permissions'],
+    args: buildSpawnArgs(spawnSpec),
     cwd: '/srv/work/.awb/wt/repo/20fff298',
     env: { PATH: '/usr/bin', ANTHROPIC_MODEL: 'served-model', AWB_API_KEY: SECRET },
     baseEnv: { PATH: '/usr/bin' },
     ticketId: '20fff298-e752-4b9a-92d9-3f37b7e355ea',
     role: 'assignee',
-    harness: { permission_mode: 'plan' },
+    harness: spawnSpec.harness,
     effort: 'max',
     runtimeProfileId: 'vllm-local',
+    attribution: { spec: spawnSpec, build: buildSpawnArgs, profileArgs: [] },
   });
 
   const specs = computeAgentLaunchSpecs([{
@@ -119,10 +138,27 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   assert.equal(row.last_spawn.cwd, '/srv/work/.awb/wt/repo/20fff298');
   assert.equal(row.last_spawn.context.effort, 'max');
   assert.equal(row.last_spawn.context.runtime_profile_id, 'vllm-local');
-  assert.deepEqual(row.last_spawn.context.harness_keys, ['permission_mode']);
+  assert.deepEqual(row.last_spawn.context.harness_keys, ['disallowed_tools', 'permission_mode']);
   assert.ok(row.last_spawn.args.map((a) => a.value).includes('--effort'));
   assert.equal(row.modes.some((m) => m.args.some((a) => a.source === 'unattributed')), false,
     '서버가 매니저의 출처 값을 인식하지 못했다 — 두 쪽 source 집합이 갈라졌다');
+
+  // **기록 전용 출처**가 서버 수용 경로를 통과하는지 (리뷰 3R). 서버의 허용
+  // 집합에 새 값을 빠뜨리면 여기서 unattributed 로 접히며 드러난다 — 화면이
+  // 귀속에 성공한 인자를 "출처 불명"으로 표시하는 정확히 그 상황이다.
+  assert.equal(row.last_spawn.args_attributed, true, 'args_attributed 가 wire 에서 사라졌다');
+  const recordedSources = new Set(row.last_spawn.args.map((a) => a.source));
+  for (const expected of ['harness', 'effort', 'model', 'permission', 'prompt', 'session']) {
+    assert.ok(
+      recordedSources.has(expected),
+      `기록의 '${expected}' 출처가 서버 수용 경로에서 사라졌다: ${[...recordedSources].join(', ')}`,
+    );
+  }
+  assert.equal(recordedSources.has('unattributed'), false,
+    '서버가 기록 전용 출처를 인식하지 못했다 — 두 쪽 source 집합이 갈라졌다');
+  // 프롬프트 본문은 wire 어디에도 오르지 않는다.
+  assert.equal(JSON.stringify(stored).includes('역할 프롬프트 본문'), false);
+  assert.equal(JSON.stringify(stored).includes('작업 내용 본문'), false);
   // 실제 실행되는 경로의 모양이 그대로 보존됐는지.
   const session = row.modes[0].args.map((a) => a.value);
   assert.ok(session.includes('--session-id'));

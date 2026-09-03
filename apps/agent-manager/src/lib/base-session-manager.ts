@@ -820,15 +820,35 @@ export class BaseSessionManager {
       if (adapter.cliType === 'claude') {
         log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
       }
-      let descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
+      // spec 을 리터럴로 두 번 쓰지 않고 변수로 뽑는다 (ticket 20fff298 리뷰 3R) —
+      // SubagentManager.spawn 사이트와 같은 이유다. 실행 사양 기록이 **최종
+      // descriptor 를 만든 그 spec** 을 그대로 받아야 실제 argv 에 인자별 출처를
+      // 붙일 수 있고, 리터럴을 다시 적어 넘기면 두 조립이 갈라진다.
+      //
+      // `sessionId` 를 spec 에 함께 담는 이유: 어댑터 빌더에는 세션 id 가 별도
+      // 인자로 들어가는데(`buildSession(..., sessionKey)`), 귀속용 변형이 "세션
+      // id 를 뺀" argv 를 만들어야 하므로 그 값도 spec 을 통해 흘러야 한다.
+      // `prepareSession` 이 negotiate 결과로 덮으므로 실제 argv 는 그대로다.
+      let sessionSpec = {
         rolePrompt: rolePrompt || '',
-        mcpConfigPath: null,
+        mcpConfigPath: null as string | null,
         model: attemptModel,
         harness,
         effort: effortFlag,
         ultracode,
         permission,
-      }, sessionKey).descriptor;
+        sessionId: sessionKey as string | undefined,
+      };
+      const buildSessionArgs = (spec: Record<string, unknown>) =>
+        this.#adapterResolver.buildSession(
+          adapter.cliType,
+          sessionMode,
+          spec as any,
+          spec.sessionId as string | undefined,
+        ).descriptor.args;
+      let descriptor = this.#adapterResolver.buildSession(
+        adapter.cliType, sessionMode, sessionSpec, sessionSpec.sessionId,
+      ).descriptor;
 
       if (descriptor.needsMcpConfig) {
         // Per-session config is required whenever the server needs to attribute
@@ -908,15 +928,10 @@ export class BaseSessionManager {
           await fsp.writeFile(configPath, JSON.stringify(mcpConfig), { mode: 0o600 });
         }
 
-        descriptor = this.#adapterResolver.buildSession(adapter.cliType, sessionMode, {
-          rolePrompt: rolePrompt || '',
-          mcpConfigPath: configPath,
-          model: attemptModel,
-          harness,
-          effort: effortFlag,
-          ultracode,
-          permission,
-        }, sessionKey).descriptor;
+        sessionSpec = { ...sessionSpec, mcpConfigPath: configPath };
+        descriptor = this.#adapterResolver.buildSession(
+          adapter.cliType, sessionMode, sessionSpec, sessionSpec.sessionId,
+        ).descriptor;
       }
       if (claudeRuntimeProfile?.args?.length) {
         descriptor.args.push(...claudeRuntimeProfile.args);
@@ -1041,6 +1056,12 @@ export class BaseSessionManager {
         harness,
         effort: effortFlag,
         runtimeProfileId: claudeRuntimeProfile?.id ?? null,
+        // 실제 argv 의 인자별 출처 (리뷰 3R) — SubagentManager.spawn 과 동일 계약.
+        attribution: {
+          spec: sessionSpec,
+          build: buildSessionArgs,
+          profileArgs: claudeRuntimeProfile?.args ?? [],
+        },
       });
       if (configPath && configPathIsTemp) {
         // Per-spawn pid sidecar so #sweep + orphan cleanup can find this
