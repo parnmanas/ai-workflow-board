@@ -650,6 +650,21 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 > — 이 라우트 하나가 자동 등록이 없던 시절의 **과거 미션 백필**과 생성자가 아닌 운영자의
 > **초대**를 겸한다. 참여는 `chat_room_participants` 행이라 재시작·복구 뒤에도 유지된다.
 >
+> **참여 대상은 진행 중인 미션뿐이다.** 종료(`completed`/`failed`/`cancelled`)된 미션의
+> join 은 서버가 409 로 거부하고 화면도 참여 버튼을 숨긴다 — 참여에 성공해도 말을 걸
+> orchestrator 세션이 없어 아무 일도 일어나지 않으므로, 한쪽만 막으면 REST 를 직접 부르는
+> 경로로 규칙이 샌다. 종료된 미션의 기록은 observer 경로로 그대로 읽을 수 있다. 즉 "과거
+> 미션도 백필 후 대화 가능"은 **이전에 만들어졌지만 아직 진행 중인** 미션을 뜻한다.
+>
+> **권한은 join 순간이 아니라 매 발화에 걸린다.** participant 행은 한 번 생기면 남으므로,
+> join 시점 검사만으로는 강등되거나 권한이 회수된 계정이 계속 orchestrator 를 깨울 수
+> 있었다(리뷰 지적). `RoomMembershipService.requireMissionRoomSpeaker` 가 orchestration
+> 룸으로 가는 모든 사람 발화에 대해 `users` 행에서 `MANAGE_ACTIONS` 를 다시 읽는다 —
+> 세션 스냅샷이 아니라 DB 를 보므로 회수가 즉시 반영된다. 게이트를 컨트롤러가 아니라
+> 서비스에 둔 것은 REST·MCP·agent-api 어느 진입점이든 같은 판정을 받게 하기 위해서다.
+> agent 발화와 의사 user `system` 은 통과시킨다: 전자는 런너가 lease/orchestrator id 로
+> 신원을 따로 검사하고, 후자를 막으면 엔진 자신의 브리핑·wake 가 죽어 미션이 통째로 멈춘다.
+>
 > **step 룸에는 사람을 넣지 않는다.** attempt 마다 룸이 새로 열려 수가 불어나고, 그 룸의
 > 보고는 `lease_token` 을 쥔 assignee 만 할 수 있어 사람이 끼어들어도 step 상태를 바꿀 수
 > 없다. 사람의 지시는 mission 룸에서 orchestrator 에게 가고 step 을 통제하는 것은
@@ -833,6 +848,8 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   미션이면 **"대화에 참여" 버튼**이 함께 뜨고(ticket f6a0de0e), 누르면 위의 join 라우트를
   거쳐 입력창이 열린다. 종료된 미션에는 그 버튼을 걸지 않는다: 참여에 성공해도 보낼
   orchestrator 세션이 없어 아무 일도 못 하는 버튼이 되기 때문이다(입력은 그대로 닫힌다).
+  서버도 같은 규칙으로 종료 미션의 join 을 409 로 거부하므로, 화면을 우회해 REST 를 직접
+  불러도 결과가 같다.
   긴 미션에서는 실행 이벤트를 창 크기(기본 200)로 bounded 하고, 위로 스크롤하면
   `GET /orchestration/missions/:id/events` 커서로 과거를 이어 붙인다 — 커서는
   `(created_at, write_seq)` 복합 keyset 이다. `created_at` 만으로는 fan-out 한 번에 수십 건이
