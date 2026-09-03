@@ -4,7 +4,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
-import { terminateDetachedProcessTree } from './process-tree.js';
+import { childHasExited, terminateDetachedProcessTree } from './process-tree.js';
 
 interface AdapterLaunch {
   bin: string;
@@ -486,10 +486,13 @@ export class RuntimeLease {
   async terminate(managerDrain = false): Promise<void> {
     if (!this.child || this.profile.adapter?.lifecycle === 'reuse') return;
     if (!managerDrain && this.profile.adapter?.lifecycle === 'manager_exit') return;
-    const exited = this.child.exitCode !== null || this.child.signalCode !== null
+    const child = this.child;
+    const exited = childHasExited(child)
       ? Promise.resolve()
-      : new Promise<void>(resolveExit => this.child!.once('exit', () => resolveExit()));
-    if (this.child.pid) await terminateDetachedProcessTree(this.child.pid);
+      : new Promise<void>(resolveExit => child.once('exit', () => resolveExit()));
+    // 핸들을 같이 넘겨 win32 tree-kill 이 pid 재사용을 밟지 않게 한다. 여기는
+    // graceMs 가 기본값(5000ms)이라 soft 와 force 사이의 창이 특히 넓다.
+    if (child.pid) await terminateDetachedProcessTree(child.pid, undefined, { child });
     await Promise.race([exited, new Promise<void>(resolveWait => setTimeout(resolveWait, 1_000))]);
   }
 }
