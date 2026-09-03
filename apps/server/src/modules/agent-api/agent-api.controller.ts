@@ -39,6 +39,7 @@ import {
   TerminalReopenError,
   TicketArchivedError,
 } from '../mcp/shared/archive-helpers';
+import { releaseMergeLeaseForMove } from '../mcp/shared/merge-lease-move';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
 import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
 import { findOrFail } from '../../common/find-or-fail';
@@ -943,6 +944,7 @@ export class AgentApiController {
         ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
         : null;
       await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, col);
+      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceCol, col);
     });
 
     return res.json({ success: true, ticketId, movedTo: toColumn });
@@ -1095,6 +1097,7 @@ export class AgentApiController {
                 ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
                 : null;
               await applyTerminalEnteredAtForMove(tRepo, t.id, sourceCol, col);
+              await releaseMergeLeaseForMove(tRepo, t.id, sourceCol, col);
 
               results.push({ success: true, ticketId: op.ticketId, movedTo: op.toColumn });
               break;

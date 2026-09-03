@@ -40,6 +40,7 @@ import { ActivityService } from '../../services/activity.service';
 import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { pickBaseRepoResourceId, EnvRepoRef } from '../../common/base-repo-binding';
 import { ResolvedMergeLease, resolveMergeLease } from '../../common/merge-lease-config';
+import { releaseOpenLeaseRows } from '../mcp/shared/merge-lease-move';
 import {
   decideLeaseLiveness,
   decideReverifyOutcome,
@@ -280,18 +281,9 @@ export class MergeLeaseService {
    * 대기 상태로 남아 트리거가 계속 드롭되는 것을 막는다.
    */
   async releaseWithinTx(manager: EntityManager, ticketId: string, reason: string): Promise<boolean> {
-    const leaseRepo = manager.getRepository(MergeLease);
-    const now = new Date();
-    const result = await leaseRepo.update(
-      { ticket_id: ticketId, released_at: IsNull() } as any,
-      { released_at: now, release_reason: reason, last_progress_at: now, progress_note: `released:${reason}` },
-    );
-    // 대기 플래그는 lease 행이 없었더라도 정리한다(고아 플래그 자체 치유).
-    await manager.getRepository(Ticket).update(
-      { id: ticketId, pending_merge_lease: true } as any,
-      { pending_merge_lease: false, merge_lease_context: '' },
-    );
-    return (result.affected || 0) > 0;
+    // 이동 경로와 **같은 구현**을 쓴다 — 두 벌로 갈라지면 한쪽만 고쳐 서로
+    // 다르게 동작하는 것이 이 종류 버그의 단골이다.
+    return releaseOpenLeaseRows(manager, ticketId, reason);
   }
 
   /**
