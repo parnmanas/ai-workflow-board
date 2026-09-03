@@ -132,6 +132,10 @@ export function eventColor(type: string): string {
   // 판정 완료는 진행이 재개된 것이므로 성공색.
   if (type === 'confirm_requested') return tokens.colors.warningLight;
   if (type === 'confirm_decided') return tokens.colors.successLight;
+  // 대기 알림 발송(티켓 a78cb566)은 사람에게 무엇을 요구하는 신호가 아니라 시스템이
+  // 이미 처리한 부수 기록이라 정보색이다 — 경고색을 주면 confirm_requested 와 나란히
+  // 떠서 "답해야 할 것이 두 개" 로 읽힌다.
+  if (type === 'confirm_notified') return tokens.colors.infoLight;
   return tokens.colors.textMuted;
 }
 
