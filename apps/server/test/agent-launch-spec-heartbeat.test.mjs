@@ -57,11 +57,19 @@ const VALID_SPEC = {
   cli: 'claude',
   bin: '/usr/local/bin/claude',
   bin_error: null,
-  args: [
-    { value: '--model', source: 'model' },
-    { value: 'claude-opus-5', source: 'model' },
-    { value: '--dangerously-skip-permissions', source: 'permission' },
-    { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
+  modes: [
+    {
+      mode: 'session',
+      args: [
+        { value: '--session-id', source: 'session' },
+        { value: '<세션 id: spawn 시 생성>', source: 'session', placeholder: true },
+        { value: '--model', source: 'model' },
+        { value: 'claude-opus-5', source: 'model' },
+        { value: '--dangerously-skip-permissions', source: 'permission' },
+        { value: '<역할 프롬프트: 디스패치 시 생성>', source: 'adapter', placeholder: true },
+      ],
+    },
+    { mode: 'oneshot', args: [{ value: '--print', source: 'adapter' }] },
   ],
   cwd: '/srv/work',
   mcp_config_path: '/cfg/mcp.json',
@@ -88,9 +96,12 @@ test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 �
   // placeholder 는 true 일 때만 실린다 — 나머지 인자에 붙으면 UI 가 실제 인자를
   // 자리표시자로 잘못 표시한다.
   assert.deepEqual(
-    record.agent_launch_specs[0].args.map((a) => a.placeholder),
-    [undefined, undefined, undefined, true],
+    record.agent_launch_specs[0].modes[0].args.map((a) => a.placeholder),
+    [undefined, true, undefined, undefined, undefined, true],
   );
+  // 모드 순서는 보존되어야 한다 — 첫 항목이 "실제로 도는 경로"라는 뜻이라
+  // 재배치되면 UI 가 기본 경로를 잘못 고른다.
+  assert.deepEqual(record.agent_launch_specs[0].modes.map((m) => m.mode), ['session', 'oneshot']);
 });
 
 test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 (빈 배열로 접지 않는다)', async (t) => {
@@ -130,6 +141,7 @@ test('매니저가 다운그레이드되면 다음 하트비트에서 사양이 
     agent_launch_specs: [VALID_SPEC],
   });
   assert.equal(registry.get('launch-spec-dg').agent_launch_specs.length, 1);
+  assert.equal(registry.get('launch-spec-dg').agent_launch_specs[0].modes.length, 2);
 
   // 같은 instance_id 로 필드 없는 하트비트가 오면(= 구버전으로 롤백) 옛 사양을
   // 계속 보여주면 안 된다 — 화면이 이미 존재하지 않는 실행 계획을 주장하게 된다.
@@ -151,11 +163,19 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
         cli: 12345,
         bin: null,
         bin_error: undefined,
-        args: [
-          { value: '--flag', source: '완전히-모르는-출처' },
+        modes: [
+          { mode: '모르는-모드', args: [{ value: '--x', source: 'adapter' }] },
           'not-an-object',
-          { value: 'x'.repeat(2000), source: 'adapter' },
-          ...Array.from({ length: 400 }, () => ({ value: '--pad', source: 'adapter' })),
+          {
+            mode: 'oneshot',
+            args: [
+              { value: '--flag', source: '완전히-모르는-출처' },
+              'not-an-object',
+              { value: 'x'.repeat(2000), source: 'adapter' },
+              ...Array.from({ length: 400 }, () => ({ value: '--pad', source: 'adapter' })),
+            ],
+          },
+          ...Array.from({ length: 20 }, () => ({ mode: 'session', args: [] })),
         ],
         permission: {},
         runtime_profile: { id: 'p', protocol: 'x', model: null, arg_count: -5 },
@@ -172,11 +192,16 @@ test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않�
   const row = specs[0];
   assert.equal(row.agent_id, 'agent-ok');
   assert.equal(row.cli, 'unknown');
+  // 모르는 mode 와 객체가 아닌 항목은 버려지고, 모드 개수도 상한으로 잘린다.
+  assert.ok(row.modes.length <= 4);
+  assert.equal(row.modes.some((m) => m.mode === '모르는-모드'), false);
+  assert.equal(row.modes[0].mode, 'oneshot');
+  const args = row.modes[0].args;
   // 모르는 출처는 지어내지 않고 unattributed 로 접는다.
-  assert.equal(row.args[0].source, 'unattributed');
+  assert.equal(args[0].source, 'unattributed');
   // 객체가 아닌 항목은 버려지고, 과한 길이·개수는 상한으로 잘린다.
-  assert.equal(row.args.some((a) => a.value.length > 500), false);
-  assert.ok(row.args.length <= 200);
+  assert.equal(args.some((a) => a.value.length > 500), false);
+  assert.ok(args.length <= 200);
   assert.equal(row.permission.tier, 'unknown');
   assert.equal(row.runtime_profile.arg_count, 0);
   assert.deepEqual(row.env, [{ key: 'K', value: '<redacted>', source: 'credential' }]);

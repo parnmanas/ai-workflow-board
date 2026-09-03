@@ -92,14 +92,27 @@ const PERMISSION_TIER_SUPPORTS = new Set(['native', 'approximated', 'unsupported
 function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | undefined {
   if (!Array.isArray(input)) return undefined;
   const MAX_ROWS = 200;
+  const MAX_MODES = 4;
   const MAX_ARGS = 200;
   const MAX_ENV = 100;
   const MAX_TOKEN = 500;
   const str = (v: unknown, max = MAX_TOKEN): string => String(v ?? '').slice(0, max);
   const strOrNull = (v: unknown): string | null =>
     typeof v === 'string' && v ? v.slice(0, MAX_TOKEN) : null;
-  const ARG_SOURCES = new Set(['adapter', 'model', 'permission', 'mcp', 'runtime_profile', 'unattributed']);
+  const ARG_SOURCES = new Set([
+    'adapter', 'model', 'permission', 'mcp', 'session', 'runtime_profile', 'unattributed',
+  ]);
   const ENV_SOURCES = new Set(['cli_home', 'credential', 'runtime_profile']);
+  const MODES = new Set(['session', 'oneshot']);
+  const narrowArgs = (raw: unknown): AgentLaunchSpecEntry['modes'][number]['args'] =>
+    (Array.isArray(raw) ? raw : [])
+      .slice(0, MAX_ARGS)
+      .filter((a: any) => a && typeof a === 'object')
+      .map((a: any) => ({
+        value: str(a.value),
+        source: ARG_SOURCES.has(a.source) ? a.source : 'unattributed',
+        ...(a.placeholder === true ? { placeholder: true as const } : {}),
+      }));
   return input
     .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
     .slice(0, MAX_ROWS)
@@ -108,14 +121,12 @@ function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | unde
       cli: typeof row.cli === 'string' && row.cli ? str(row.cli, 40) : 'unknown',
       bin: strOrNull(row.bin),
       bin_error: strOrNull(row.bin_error),
-      args: (Array.isArray(row.args) ? row.args : [])
-        .slice(0, MAX_ARGS)
-        .filter((a: any) => a && typeof a === 'object')
-        .map((a: any) => ({
-          value: str(a.value),
-          source: ARG_SOURCES.has(a.source) ? a.source : 'unattributed',
-          ...(a.placeholder === true ? { placeholder: true as const } : {}),
-        })),
+      // 모드 순서는 보존한다 — 첫 항목이 "실제로 도는 경로"라는 의미를 지니므로
+      // 정렬하거나 재배치하면 UI 가 기본 경로를 잘못 고른다.
+      modes: (Array.isArray(row.modes) ? row.modes : [])
+        .filter((m: any) => m && typeof m === 'object' && MODES.has(m.mode))
+        .slice(0, MAX_MODES)
+        .map((m: any) => ({ mode: m.mode, args: narrowArgs(m.args) })),
       cwd: strOrNull(row.cwd),
       mcp_config_path: strOrNull(row.mcp_config_path),
       model: strOrNull(row.model),

@@ -53,9 +53,16 @@ export type RuntimeCapabilityReport = Record<string, RuntimeHealthRecord>;
  *  매니저 쪽에서 이미 마스킹된 표시용 문자열이다 — 서버는 원문을 받지 않는다. */
 export interface LaunchArgEntry {
   value: string;
-  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'runtime_profile' | 'unattributed';
+  source: 'adapter' | 'model' | 'permission' | 'mcp' | 'session' | 'runtime_profile' | 'unattributed';
   /** 실행 시점에만 정해지는 자리(프롬프트 본문, 세션 id)를 메운 값. */
   placeholder?: boolean;
+}
+
+/** spawn 경로 하나와 그 경로의 argv (ticket 20fff298). 경로가 둘이고 argv 모양이
+ *  다르다 — session 은 `--session-id`/`--input-format`, oneshot 은 `--print`. */
+export interface LaunchModeSpec {
+  mode: 'session' | 'oneshot';
+  args: LaunchArgEntry[];
 }
 
 export interface LaunchEnvEntry {
@@ -71,7 +78,8 @@ export interface AgentLaunchSpecEntry {
   cli: string;
   bin: string | null;
   bin_error: string | null;
-  args: LaunchArgEntry[];
+  /** 이 CLI 가 지원하는 spawn 경로들. **첫 항목이 기본 경로**다. */
+  modes: LaunchModeSpec[];
   cwd: string | null;
   mcp_config_path: string | null;
   model: string | null;
