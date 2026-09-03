@@ -587,11 +587,23 @@ test('confirm 게이트: awaiting_user 미션을 리퍼가 정지로 오인해 �
     postsBefore,
     '게이트가 열린 동안 오케스트레이터를 깨우는 포스트가 하나도 없어야 한다(subagent spawn 낭비)',
   );
-  assert.equal(
-    after.detail.events.length,
-    eventCountBefore,
-    `리퍼가 이 미션에 이벤트를 남기면 안 된다. 새로 생긴 것: ` +
-      JSON.stringify(after.detail.events.slice(0, after.detail.events.length - eventCountBefore).map((e) => e.type)),
+  // 리퍼가 이 미션에 남길 수 있는 것은 **대기 알림뿐**이다(티켓 a78cb566).
+  //
+  // 예전에는 "이벤트가 하나도 늘면 안 된다"였는데, 그건 "리퍼가 이 미션에 손대지
+  // 않는다"의 대용값이었다. 이제 리퍼는 장기 미응답 게이트에 리마인더를 보내고 그
+  // 사실을 `confirm_notified` 로 남긴다 — 이건 **알림이지 상태 전이가 아니다**(위
+  // status/verdict/판정 단언과 아래 금지 목록이 그걸 계속 지킨다). 대용값을 느슨하게
+  // 푸는 대신, 늘어난 이벤트가 정확히 무엇인지를 직접 단언한다.
+  const newEventTypes = after.detail.events
+    .filter((e) => !detail.events.some((old) => old.id === e.id))
+    .map((e) => e.type);
+  assert.ok(
+    newEventTypes.every((t) => t === 'confirm_notified'),
+    `리퍼는 대기 알림 외의 이벤트를 이 미션에 남기면 안 된다. 새로 생긴 것: ${JSON.stringify(newEventTypes)}`,
+  );
+  assert.ok(
+    after.detail.events.length - eventCountBefore <= 1,
+    '리마인더는 pass 당 1회다 — 스윕을 세 번 돌려도 알림이 쌓이면 안 된다',
   );
   for (const forbidden of ['orchestrator_woken', 'mission_failed', 'step_failed', 'step_needs_recovery']) {
     assert.equal(eventsOfType(after.detail, forbidden).length, 0, `${forbidden} 이벤트가 생기면 안 된다`);

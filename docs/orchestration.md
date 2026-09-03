@@ -508,6 +508,49 @@ pass 의 답이 막히지 않는 것은 멱등 검사가 `prior.visit === step.v
 `update_orchestration_step` 의 `skip` 을 쓸 수 있으나, verdict 가 없어 pass/fail edge 가
 모두 dead 이므로 하류는 `blocked` 가 되고 오케스트레이터가 깨어난다(의도된 동작).
 
+### 게이트 대기 알림 (ticket a78cb566)
+
+게이트는 타임아웃 없이 멈추므로, **아무도 통보받지 않으면 미션은 며칠이고 선다.** 미션
+목록·상세 헤더의 `n needs your decision` 배지는 이미 화면을 연 사람에게만 도달한다.
+confirm 은 "가만히 두면 언젠가 진행된다" 가 성립하지 않는 유일한 상태라, 대기 사실을
+화면 밖으로 밀어내는 것이 기능의 일부다.
+
+| 언제 | 무엇이 나가는가 |
+| --- | --- |
+| 게이트가 열릴 때 | `(step, visit)` 당 **1회**. 제목에 미션명, 본문에 step 제목 + 질문(`instructions`), 링크는 판정 화면(`/ws/<ws>/orchestration/missions/<id>`) |
+| N시간 무응답 | 같은 pass 에 **1회** 리마인더(`ORCHESTRATION_CONFIRM_REMINDER_MS`, 기본 24시간, `0` = 끔) |
+| 판정 이후 | 없음 — `awaiting_user` 가 아니면 리마인더 대상이 아니다 |
+
+**경로는 기존 UserChannel 팬아웃을 그대로 쓴다**(`UserChannelDispatcherService`) — 새 알림
+채널을 만들지 않는다. discord 바인딩의 `target` 은 DM 뿐 아니라 채널 id 도 될 수 있어
+"푸시" 와 "Discord 채널" 이 같은 한 경로로 커버된다. 플래그는 `notify_mention` 이다:
+`notify_ticket` 은 UI 라벨이 "Ticket activity" 이고 Mission 은 의도적으로 Ticket 이 아니며,
+기본값이 `0` 이라 그 키를 쓰면 기능이 기본 침묵으로 출시되어 이 절이 고치려는 실패가
+그대로 남는다. 게이트는 시스템이 **당신을 콕 집어** 답을 요구하는 자리라 미션 쪽 @-mention 에
+해당한다.
+
+**수신자** — 미션 소유자(`created_by_type='user'` 인 미션의 `created_by`)가 1순위다. 에이전트가
+`create_orchestration_mission` 으로 만든 미션은 사람 소유자가 없으므로 워크스페이스의
+owner/member 로 넓힌다. 넓혀도 실제 소음은 작다 — 채널 바인딩이 없는 사용자는 팬아웃이
+그 자리에서 no-op 이다. `AWB_PUBLIC_URL` 이 없으면 링크 없이 나간다(무엇이 왜 멈췄는지는
+여전히 전달된다).
+
+**중복 방지는 컬럼이 한다.** `OrchestrationStep.confirm_notice = { visit, notified_at,
+reminded_at?, sent?, recipients? }` 를 게이트 오픈과 **같은 save 로** 커밋한다. 키가 `visit`
+이라서 같은 pass 는 pump 가 몇 번을 돌든(서버가 재기동하든) 한 번이고, loop 재진입으로
+pass 가 올라가면 새 알림이 나간다. 메모리 카운터로 두면 재기동이 곧 재발송이 된다.
+
+**발송은 미션 락 밖에서 배경으로 돈다.** 알림 provider 는 요청 타임아웃이 없는 raw
+`fetch` 라, 응답하지 않는 엔드포인트를 `openConfirmGate` 안에서 기다리면 그 미션의 락
+체인이 통째로 멈춰 **사용자가 판정을 제출하는 것조차 막힌다** — 알림을 못 보내는 것보다
+나쁜 결과다. 그래서 발송은 `scheduleGateNotice()` 로 던져두고(개별 발송에는 15초 상한),
+공개 메서드는 `recordEvent` 와 같이 **절대 던지지 않는다**. 발송 결과는 `confirm_notified`
+이벤트로 남는다(실패도 `sent: 0` 으로 남는다).
+
+**리마인더는 알림이지 상태 전이가 아니다.** 리퍼의 `remindAwaitingConfirm` 스윕은 미션·step
+상태를 한 글자도 바꾸지 않고 `confirm_notice.reminded_at` 만 쓴다. `reapStalledRunning` 의
+`isAwaitingUser` 가드 — 리퍼는 confirm 대기 미션을 죽이지 않는다 — 는 그대로다.
+
 ### 사용자 확인 강도 (confirm_policy, ticket 5dbe4aa2)
 
 미션 단위 옵션. **기본값 `auto`.**
