@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { LogService } from '../log.service';
 import { INotificationProvider, NotifyPayload, ProviderResult } from './types';
+import { describeHttpError, fetchWithTimeout, notifyHttpTimeoutMs, readJsonBody, readTextBody } from './http';
 
 /**
  * Telegram per-user delivery via the Bot API `sendMessage`.
@@ -22,29 +23,42 @@ export class TelegramUserProvider implements INotificationProvider {
     if (!token) return { ok: false, error: 'Missing bot_token credential' };
     if (!target) return { ok: false, error: 'Missing target' };
 
-    const text = this._formatText(payload);
-    const res = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: target, text, parse_mode: 'HTML', disable_web_page_preview: true }),
-    });
+    const timeoutMs = notifyHttpTimeoutMs();
+    try {
+      const text = this._formatText(payload);
+      const res = await fetchWithTimeout(`https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: target, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      }, timeoutMs);
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { ok: false, error: `Telegram HTTP ${res.status}: ${body.slice(0, 200)}` };
+      if (!res.ok) {
+        const body = await readTextBody(res);
+        return { ok: false, error: `Telegram HTTP ${res.status}: ${body.slice(0, 200)}` };
+      }
+      const data = await readJsonBody<{ ok?: boolean; description?: string }>(res);
+      if (!data?.ok) {
+        return { ok: false, error: `Telegram API error: ${data?.description || 'unknown'}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      // `INotificationProvider.send` 계약대로 상한 초과·소켓 오류를 ok:false 로 정규화한다.
+      return { ok: false, error: `Telegram send failed: ${describeHttpError(err, timeoutMs)}` };
     }
-    const data = await res.json().catch(() => null) as { ok?: boolean; description?: string } | null;
-    if (!data?.ok) {
-      return { ok: false, error: `Telegram API error: ${data?.description || 'unknown'}` };
-    }
-    return { ok: true };
   }
 
   async test(target: string, credentials: Record<string, string>): Promise<ProviderResult> {
     const token = credentials.bot_token;
     if (!token) return { ok: false, error: 'Missing bot_token credential' };
-    const meRes = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`);
-    const meData = await meRes.json().catch(() => null) as { ok?: boolean; description?: string } | null;
+    const timeoutMs = notifyHttpTimeoutMs();
+    let meData: { ok?: boolean; description?: string } | null;
+    try {
+      const meRes = await fetchWithTimeout(`https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`, {}, timeoutMs);
+      meData = await readJsonBody<{ ok?: boolean; description?: string }>(meRes);
+    } catch (err) {
+      // send() 와 같은 이유 — REST 의 채널 테스트가 이 결과를 그대로 await 한다.
+      return { ok: false, error: `Telegram getMe failed: ${describeHttpError(err, timeoutMs)}` };
+    }
     if (!meData?.ok) {
       return { ok: false, error: `Telegram getMe failed: ${meData?.description || 'unknown'}` };
     }
