@@ -68,6 +68,16 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const BULK_ADVISORY_PATH = '/-/npm/v1/security/advisories/bulk';
+
+/**
+ * 이 저장소에는 `.npmrc` 가 없고 lockfile 의 `resolved` 가 전부 registry.npmjs.org 다
+ * (2026-09-04 기준 604개 전부). 그래서 기본 레지스트리를 그대로 쓴다 — 인증 헤더도
+ * 붙이지 않는다.
+ *
+ * 사설 레지스트리를 도입한다면 `fetchAdvisories({ registry })` 로 주소를 넘기고 인증을
+ * 함께 붙여야 한다. 주소만 바꾸고 인증을 빠뜨리면 401 로 **조회 실패** 가 되는데,
+ * 그건 fail-closed 라 조용히 통과하지는 않는다(빨갛게 죽는다).
+ */
 export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
 /** npm 과 같은 순서. 인덱스가 곧 심각도다. */
@@ -84,10 +94,17 @@ export const DEFAULT_ATTEMPTS = 4;
  * 20.0s / 193.9s / 104.2s 로 **뒤로 갈수록 느려졌다**. 크기가 아니라 연속 호출이
  * 스로틀을 부른다. 그래서 쪼개지 않고 한 번에 보내고, 재시도는 간격을 벌린다.
  *
- * 최악의 경우 90s*4 + 백오프(5+15+30) ≈ 6.8분이다. 지금은 그 자리에서 약 7분을 쓰고
+ * 최악의 경우 90s*4 + 백오프(5+20+30) ≈ 6.9분이다. 지금은 그 자리에서 약 7분을 쓰고
  * **확정적으로 실패**하므로(위 티켓 로그), 같은 시간을 쓰더라도 통과할 수 있는 쪽이 낫다.
  */
 export const DEFAULT_TIMEOUT_MS = 90_000;
+
+/**
+ * 재시도 간격: 5s / 20s / 30s. 위 실측대로 연속 호출이 스로틀을 부르므로 촘촘한
+ * 재시도는 상황을 악화시킨다 — 간격을 벌린다. 상수로 빼 둔 건 문서와 코드가 갈라지지
+ * 않게 테스트가 실제 스케줄을 단언할 수 있게 하려는 것이다.
+ */
+export const DEFAULT_BACKOFF_MS = (attempt) => Math.min(5000 * attempt ** 2, 30_000);
 
 /**
  * `severity` 가 `level` 이상인가. 모르는 심각도 문자열은 **가장 높게** 취급한다 —
@@ -190,7 +207,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * bulk 엔드포인트를 재시도와 함께 조회한다. 전부 실패하면 throw — 호출부가
  * fail-closed 로 처리한다.
  *
- * 재시도 간격은 오히려 **벌린다**(5s / 15s / 30s). 위 DEFAULT_TIMEOUT_MS 주석의 실측처럼
+ * 재시도 간격은 오히려 **벌린다**(5s / 20s / 30s). 위 DEFAULT_TIMEOUT_MS 주석의 실측처럼
  * 연속 호출이 스로틀을 부르므로, 촘촘한 재시도는 상황을 악화시킨다. 여기서 흡수하려는 건
  * 레지스트리의 일시적 저하이지 장기 장애가 아니다 — 장기 장애라면 어차피 다른 잡의
  * `npm ci` 가 먼저 죽으므로 여기서 눈감아도 병합 경로가 열리지 않는다.
@@ -203,7 +220,7 @@ export async function fetchAdvisories(
     timeoutMs = DEFAULT_TIMEOUT_MS,
     fetchImpl = globalThis.fetch,
     onRetry = () => {},
-    backoffMs = (attempt) => Math.min(5000 * attempt ** 2, 30_000),
+    backoffMs = DEFAULT_BACKOFF_MS,
   } = {},
 ) {
   const url = `${registry.replace(/\/+$/, '')}${BULK_ADVISORY_PATH}`;

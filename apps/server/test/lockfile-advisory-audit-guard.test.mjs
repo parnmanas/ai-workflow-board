@@ -30,6 +30,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DEFAULT_ATTEMPTS,
+  DEFAULT_BACKOFF_MS,
+  DEFAULT_TIMEOUT_MS,
   SEVERITY_ORDER,
   atOrAboveLevel,
   auditLockfile,
@@ -198,6 +201,18 @@ test('일시적 실패는 재시도로 흡수한다 — 이번 사고에서 실�
   assert.deepEqual(body, { ok: true });
   assert.equal(calls, 3);
   assert.deepEqual(retries, [1, 2]);
+});
+
+test('기본 재시도 예산은 주석에 적힌 그대로다 (문서-코드 드리프트 차단)', () => {
+  // 이 숫자들은 실측으로 정한 값이라 주석에 근거가 붙어 있다. 코드만 바뀌고 주석이
+  // 남으면 다음 사람이 잘못된 근거를 읽게 되므로 여기서 값을 고정한다.
+  assert.equal(DEFAULT_ATTEMPTS, 4);
+  assert.equal(DEFAULT_TIMEOUT_MS, 90_000);
+  assert.deepEqual([1, 2, 3].map(DEFAULT_BACKOFF_MS), [5000, 20_000, 30_000]);
+  // 최악의 경우 벽시계 상한 — 다른 잡(약 10분)보다 짧게 유지한다.
+  const worstMs = DEFAULT_ATTEMPTS * DEFAULT_TIMEOUT_MS +
+    [1, 2, 3].map(DEFAULT_BACKOFF_MS).reduce((a, b) => a + b, 0);
+  assert.ok(worstMs < 8 * 60_000, `최악 ${Math.round(worstMs / 1000)}s — 너무 길다`);
 });
 
 test('전부 실패하면 통과시키지 않고 시도별 사유를 남긴다 (fail-closed)', async () => {
