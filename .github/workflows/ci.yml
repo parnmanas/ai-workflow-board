@@ -96,8 +96,11 @@ jobs:
   # 방식이라 감사와 감사 사이에 취약한 의존성이 조용히 랜딩할 수 있었다. 실제로
   # react-router 건은 그 공백에서 발견됐다. 이 잡이 그 공백을 닫는다.
   #
-  # 여섯 가지를 본다:
-  #   1) npm audit — lockfile 대비 advisory. moderate 이상이면 실패시킨다.
+  # 여섯 가지를 본다 (오프라인 가드가 먼저, 네트워크 의존 검사가 나중 — 아래 스텝
+  # 블록 주석 참조):
+  #   1) 취약점 감사 — lockfile 대비 advisory. moderate 이상이면 실패시킨다.
+  #      `npm audit` 이 아니라 bulk advisory 엔드포인트를 직접 조회한다
+  #      (scripts/audit-lockfile-advisories.mjs, ticket 1019e57d).
   #      (현재 트리는 main/production.private 모두 0건이므로 이 문턱은 새로 들어오는
   #       취약점만 잡는다. `npm audit fix` 는 금지 — 루트 overrides 를 날린다.)
   #   2) install-script 허용목록 — `npm ci` 가 실행하게 될 서드파티 스크립트 집합이
@@ -124,8 +127,18 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-      - name: npm audit (moderate 이상 실패)
-        run: npm audit --audit-level=moderate
+      # ── 오프라인 가드 먼저 ──
+      #
+      # 스텝 순서는 미학이 아니라 가드다(ticket 1019e57d). 예전엔 네트워크에 의존하는
+      # `npm audit` 이 첫 스텝이었는데, 레지스트리가 흔들려 그게 죽자 **뒤따르는
+      # 공급망 가드 5종이 전부 skipped** 됐다(run 33823224505: 스텝 4 failure,
+      # 스텝 5~11 skipped). 즉 취약점 게이트 하나가 아니라 install-script 허용목록·
+      # 액션 SHA 고정까지 통째로 침묵했다.
+      #
+      # 아래 다섯은 순수 오프라인·수 밀리초라 레지스트리 상태와 무관하게 판정할 수
+      # 있다. 앞에 두면 "레지스트리 날씨가 공급망 가드를 끈다" 는 결합이 사라진다.
+      # 새 오프라인 가드를 추가할 때도 반드시 이 블록 안에 넣을 것 —
+      # lockfile-advisory-audit-guard.test.mjs 가 이 순서를 강제한다.
       - name: install-script 허용목록 가드
         run: node scripts/audit-install-scripts.mjs
       - name: 액션 SHA 고정 가드
@@ -141,6 +154,19 @@ jobs:
       # 구멍의 폭을 직접 키우므로 cron 을 기다리지 않고 PR 에서 막는다.
       - name: 발행 패키지 선언 범위 가드
         run: node scripts/audit-published-deps.mjs --offline
+
+      # ── 여기부터 네트워크 의존 ──
+      #
+      # `npm audit` 을 쓰지 않고 bulk advisory 엔드포인트를 직접 조회한다. 이유는
+      # scripts/audit-lockfile-advisories.mjs 헤더 참조 — 요약하면 CI 의 npm(Node 22
+      # 번들 10.9.x)은 bulk 가 흔들리면 **은퇴 대상인 quick 엔드포인트로 폴백**하고,
+      # 그 엔드포인트는 이 저장소의 workspaces lockfile 에 400 을 돌려주므로 폴백이
+      # 성공할 수 있는 경우가 없다. 재시도를 우리가 걸어야 흡수된다.
+      #
+      # 판정 자체는 그대로 fail-closed 다 — moderate 이상 advisory 가 있으면 실패하고,
+      # 조회를 끝내 못 하면 "확인 못 했다" 를 통과로 바꾸지 않는다.
+      - name: 취약점 감사 (bulk advisory 엔드포인트, moderate 이상 실패)
+        run: node scripts/audit-lockfile-advisories.mjs --audit-level=moderate
       # schedule 전용 — cron 은 기본 브랜치(main)에서만 돌므로, 이 스텝이 없으면
       # 배포 브랜치는 "다음 push" 까지 새 advisory 를 한 번도 평가받지 못한다.
       # push/PR 에서는 그 브랜치 자신의 dependency-audit 이 이미 돌므로 불필요.
