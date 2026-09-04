@@ -49,9 +49,13 @@
  *
  * 설계 선택:
  *   - **설치하지 않는다.** `npm install --package-lock-only --ignore-scripts` 로 해석만
- *     하고 그 lockfile 에 `npm audit` 을 돌린다. 취약점을 찾는 잡이 그 취약점의
- *     install script 를 먼저 실행하는 순서 문제가 원천적으로 사라진다
+ *     하고 그 lockfile 을 감사한다. 취약점을 찾는 잡이 그 취약점의 install script 를
+ *     먼저 실행하는 순서 문제가 원천적으로 사라진다
  *     (ci.yml dependency-audit / audit-deploy-branch-deps.mjs 와 같은 원칙).
+ *   - **`npm audit` 을 쓰지 않는다** (ticket 1019e57d). CI 의 npm 은 bulk advisory
+ *     엔드포인트가 흔들리면 은퇴 대상인 quick 엔드포인트로 폴백하는데, 그쪽은 이
+ *     저장소의 workspaces lockfile 에 400 을 돌려준다 — 폴백이 성공할 수 있는 경우가
+ *     없다. audit-lockfile-advisories.mjs 가 bulk 를 직접, 재시도와 함께 조회한다.
  *   - **fail-closed.** 네트워크·해석·audit 어느 단계가 실패해도 통과시키지 않는다.
  *     "확인 못 했다" 를 "문제 없다" 로 바꿔 읽는 게 이 계열 가드의 가장 위험한
  *     실패 모드다(이 저장소의 다른 감사 스크립트와 동일한 규약).
@@ -74,6 +78,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { auditLockfile, formatFindings } from './audit-lockfile-advisories.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_LEVEL = 'moderate';
@@ -257,7 +262,7 @@ export function driftRows(lockVersions, resolvedVersions) {
  * 반환: { versions: Map<name, version>, packageCount }
  * 실패하면 throw — 호출부가 fail-closed 로 처리한다.
  */
-export function resolveAndAudit(label, manifest) {
+export async function resolveAndAudit(label, manifest) {
   const dir = mkdtempSync(join(tmpdir(), `awb-published-${label}-`));
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2));
@@ -276,16 +281,14 @@ export function resolveAndAudit(label, manifest) {
     const versions = lockfileVersions(lock);
     const installScripts = installScriptPackages(lock);
 
-    try {
-      execFileSync('npm', ['audit', `--audit-level=${AUDIT_LEVEL}`], {
-        cwd: dir,
-        stdio: 'pipe',
-        encoding: 'utf8',
-      });
-    } catch (e) {
-      const out = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim();
-      const err = new Error(`npm audit 에서 ${AUDIT_LEVEL} 이상 취약점`);
-      err.auditOutput = out;
+    // `npm audit` 이 아니라 bulk advisory 엔드포인트를 직접 조회한다 (ticket 1019e57d).
+    // CI 의 npm 은 bulk 가 흔들리면 은퇴 대상인 quick 엔드포인트로 폴백하고, 그쪽은
+    // workspaces lockfile 에 400 을 돌려줘 폴백이 성공할 수 있는 경우가 없다.
+    // 조회 실패는 그대로 throw — 아래 호출부가 fail-closed 로 받는다.
+    const { findings } = await auditLockfile(lock, { level: AUDIT_LEVEL });
+    if (findings.length > 0) {
+      const err = new Error(`${AUDIT_LEVEL} 이상 취약점 ${findings.length}건`);
+      err.auditOutput = formatFindings(findings);
       throw err;
     }
 
@@ -296,9 +299,9 @@ export function resolveAndAudit(label, manifest) {
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) main();
+if (isMain) await main();
 
-function main() {
+async function main() {
   const offlineOnly = process.argv.includes('--offline');
   const failures = [];
 
@@ -377,7 +380,7 @@ function main() {
   for (const t of targets) {
     let res;
     try {
-      res = resolveAndAudit(t.label, t.manifest);
+      res = await resolveAndAudit(t.label, t.manifest);
     } catch (e) {
       console.log(`FAIL ${t.label} — ${e.message}`);
       console.log(`     대상: ${t.what}`);
