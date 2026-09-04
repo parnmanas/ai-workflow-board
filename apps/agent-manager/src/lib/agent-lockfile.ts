@@ -16,6 +16,11 @@
 //                  SIGTERM the owner, wait briefly, overwrite the lock.
 //      판정이 애매하면 stale 로 보지 않는다 — 상호 배제가 자가 복구보다 우선이다.
 //   3. Garbage on disk (unparseable JSON / pid=0): treat as stale, remove.
+//   3-1. 회수 가드(agent.lock.recovery) 자체도 같은 판정을 받는다. 가드를 쥔 채
+//      전원이 나가면 디렉터리가 남는데, 그 owner 판정이 pid liveness 뿐이면 주 락을
+//      아무리 정확히 stale 로 판정해도 회수 경로가 가드 앞에서 영원히 대기한다
+//      (25ms 루프). 가드 owner 에도 부팅 세대를 적고, boot 필드가 없는 구버전
+//      owner 는 가드 디렉터리 mtime 이 이번 부팅보다 이른지로 가른다.
 //   4. 2·3 의 회수(remove→create)는 회수 가드로 직렬화되지만, 그 가드는 회수
 //      경로에 들어온 contender 만 붙잡는다 — 1번 happy path 의 create 는 가드를
 //      거치지 않으므로 remove 와 create 사이를 파고들 수 있다. 그렇게 create 가
@@ -111,32 +116,41 @@ interface AcquireOptions {
   force?: boolean;
 }
 
+/** 주 lock 과 회수 가드 owner.json 이 같은 페이로드 규칙을 쓰도록 파싱을 공유한다.
+ *  둘이 갈라지면 한쪽만 부팅 세대를 담게 되고, 그게 정확히 이 버그의 재발 경로다. */
+function parseLockPayload(parsed: any): ParsedLock | null {
+  const pid = Number.isFinite(parsed?.pid) ? parsed.pid : 0;
+  if (!(pid > 0)) return null;
+  return {
+    pid,
+    role: parsed.role,
+    started_at: parsed.started_at,
+    version: parsed.version,
+    boot_id: typeof parsed.boot_id === 'string' && parsed.boot_id ? parsed.boot_id : undefined,
+    boot_time_ms: Number.isFinite(parsed.boot_time_ms) ? parsed.boot_time_ms : undefined,
+    pid_start_ticks: Number.isFinite(parsed.pid_start_ticks) ? parsed.pid_start_ticks : undefined,
+  };
+}
+
 function readLock(): ParsedLock | null {
   try {
-    const raw = readFileSync(LOCK_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    const pid = Number.isFinite(parsed?.pid) ? parsed.pid : 0;
-    return pid > 0
-      ? {
-          pid,
-          role: parsed.role,
-          started_at: parsed.started_at,
-          version: parsed.version,
-          boot_id: typeof parsed.boot_id === 'string' && parsed.boot_id ? parsed.boot_id : undefined,
-          boot_time_ms: Number.isFinite(parsed.boot_time_ms) ? parsed.boot_time_ms : undefined,
-          pid_start_ticks: Number.isFinite(parsed.pid_start_ticks)
-            ? parsed.pid_start_ticks
-            : undefined,
-        }
-      : null;
+    return parseLockPayload(JSON.parse(readFileSync(LOCK_PATH, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+function readRecoveryOwner(): ParsedLock | null {
+  try {
+    return parseLockPayload(JSON.parse(readFileSync(RECOVERY_OWNER_PATH, 'utf8')));
   } catch {
     return null;
   }
 }
 
 /** "그 번호를 쓰는 프로세스가 하나라도 있는가" 만 답한다. 인수(force) 경로의 kill
- *  대기와 회수 가드 회수처럼 **소유자 신원이 아니라 번호의 점유 여부**가 질문인
- *  곳에서만 쓴다. lock 소유권 판정에는 쓰지 말 것 — EPERM 을 곧바로 "살아있는
+ *  대기처럼 **소유자 신원이 아니라 번호의 점유 여부**가 질문인 곳에서만 쓴다.
+ *  소유권 판정(주 lock 이든 회수 가드든)에는 쓰지 말 것 — EPERM 을 곧바로 "살아있는
  *  매니저"로 승격시키는 것이 바로 이 티켓의 버그다. 그 판정은 judgeLockOwner. */
 function isPidAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
@@ -229,7 +243,7 @@ function compareBootGeneration(lock: ParsedLock, facts: LockOwnerFacts): BootGen
       reason: 'lock_predates_boot',
       detail:
         `구버전 lock(boot 필드 없음)의 started_at=${lock.started_at} 이 ` +
-        `이번 부팅(${new Date(facts.bootTimeMs).toISOString()})보다 이름`,
+        `이번 부팅(${new Date(facts.bootTimeMs).toISOString()})보다 이른 시각`,
     };
   }
   return { same: null, detail: '구버전 lock(boot 필드 없음) — 부팅 세대를 판별할 수 없음' };
@@ -311,6 +325,117 @@ export function probeLockOwner(lock: ParsedLock): LockOwnerFacts {
     pidPresence: probePidPresence(lock.pid),
     pidStartTicks,
     pidStartedAtMs: processStartTimeMs(pidStartTicks, boot.approxBootTimeMs),
+  };
+}
+
+export interface RecoveryGuardFacts {
+  /** owner.json 파싱 결과. 못 읽거나 pid 가 유효하지 않으면 null. */
+  owner: ParsedLock | null;
+  /** owner 가 있을 때 그 pid 에 대한 OS 사실. 없으면 null. */
+  ownerFacts: LockOwnerFacts | null;
+  /** 가드 디렉터리 mtime(epoch ms). stat 실패면 null(= 이미 사라짐). */
+  guardMtimeMs: number | null;
+  bootTimeMs: number;
+  nowMs: number;
+}
+
+export type RecoveryGuardVerdict =
+  | { reclaim: true; reason: 'guard_gone' | 'owner_stale' | 'guard_predates_boot' | 'guard_expired'; detail: string }
+  | { reclaim: false; detail: string };
+
+/** 가드 디렉터리 자체가 이번 부팅보다 확실히 이른가. boot 필드가 없는 구버전
+ *  owner.json 이 남았을 때의 최후 판별자다 — 이전 부팅에 만들어진 디렉터리가
+ *  이번 부팅보다 나중일 수는 없다. */
+function guardPredatesBoot(facts: RecoveryGuardFacts): boolean {
+  return facts.guardMtimeMs !== null && facts.guardMtimeMs < facts.bootTimeMs - BOOT_TIME_TOLERANCE_MS;
+}
+
+function guardAgeMs(facts: RecoveryGuardFacts): number | null {
+  return facts.guardMtimeMs === null ? null : facts.nowMs - facts.guardMtimeMs;
+}
+
+/** owner.json 이 부팅 세대를 담고 있는가. 이 수정 이후 만들어진 가드는 항상 담는다. */
+function hasBootGeneration(owner: ParsedLock): boolean {
+  return owner.boot_id !== undefined || owner.boot_time_ms !== undefined;
+}
+
+/** 회수 가드를 회수해도 되는지. 주 lock 과 **같은 보수적 판정**을 쓴다.
+ *
+ *  가드를 쥔 채 전원이 나가면 디렉터리가 남는데, 그 owner 를 pid liveness 로만 보면
+ *  재부팅 뒤 그 번호를 물려받은 프로세스 때문에 영원히 회수되지 않는다. 그러면 주
+ *  lock 을 아무리 정확히 stale 로 판정해도 `acquireAfterStaleCleanup` 이 가드 앞에서
+ *  25ms 루프를 무한히 돌아, "반창고 없이 스스로 기동" 이 성립하지 않는다. */
+export function judgeRecoveryGuard(facts: RecoveryGuardFacts): RecoveryGuardVerdict {
+  if (facts.owner && facts.ownerFacts) {
+    const verdict = judgeLockOwner(facts.owner, facts.ownerFacts);
+    if (verdict.stale) {
+      return { reclaim: true, reason: 'owner_stale', detail: `${verdict.reason}: ${verdict.detail}` };
+    }
+    if (guardPredatesBoot(facts)) {
+      return {
+        reclaim: true,
+        reason: 'guard_predates_boot',
+        detail:
+          `가드 디렉터리 mtime(${new Date(facts.guardMtimeMs as number).toISOString()})이 ` +
+          `이번 부팅(${new Date(facts.bootTimeMs).toISOString()})보다 이른 시각`,
+      };
+    }
+
+    // 부팅 세대를 담지 않는 구버전 owner.json 은 "이번 부팅의 살아 있는 가드" 임을
+    // 증명할 수 없다. 그래서 owner 를 아예 못 읽는 가드와 **동일한 벽시계 상한**을
+    // 적용한다 — 그러지 않으면 재부팅 뒤 그 pid 가 재사용됐을 때 회수 경로가 영원히
+    // 대기한다. 상한(60s)은 --force 인수가 가드를 정당하게 쥐는 최대 시간
+    // (SIGTERM 유예 30s + 확인 5s)보다 넉넉히 크고, 이 수정 이후 만들어진 가드는
+    // 항상 부팅 세대를 담으므로 애초에 이 경로를 타지 않는다.
+    const legacyAgeMs = guardAgeMs(facts);
+    if (!hasBootGeneration(facts.owner) && legacyAgeMs !== null && legacyAgeMs >= RECOVERY_LOCK_STALE_MS) {
+      return {
+        reclaim: true,
+        reason: 'guard_expired',
+        detail:
+          `부팅 세대가 없는 구버전 가드(owner pid=${facts.owner.pid})가 ` +
+          `${Math.round(legacyAgeMs / 1000)}s 경과 (상한 ${RECOVERY_LOCK_STALE_MS / 1000}s)`,
+      };
+    }
+    return { reclaim: false, detail: `가드 owner pid=${facts.owner.pid} 를 회수할 근거 없음` };
+  }
+
+  // owner.json 을 못 읽는다 — 디렉터리 자체로만 판정한다.
+  if (facts.guardMtimeMs === null) {
+    return { reclaim: true, reason: 'guard_gone', detail: '가드 디렉터리가 이미 사라짐' };
+  }
+  if (guardPredatesBoot(facts)) {
+    return {
+      reclaim: true,
+      reason: 'guard_predates_boot',
+      detail: `owner 미상 가드의 mtime(${new Date(facts.guardMtimeMs).toISOString()})이 이번 부팅보다 이른 시각`,
+    };
+  }
+  const ageMs = guardAgeMs(facts) as number;
+  if (ageMs >= RECOVERY_LOCK_STALE_MS) {
+    return {
+      reclaim: true,
+      reason: 'guard_expired',
+      detail: `owner 미상 가드가 ${Math.round(ageMs / 1000)}s 경과 (상한 ${RECOVERY_LOCK_STALE_MS / 1000}s)`,
+    };
+  }
+  return { reclaim: false, detail: `owner 미상 가드가 아직 ${Math.round(ageMs / 1000)}s 밖에 안 됨` };
+}
+
+function probeRecoveryGuard(): RecoveryGuardFacts {
+  const owner = readRecoveryOwner();
+  let guardMtimeMs: number | null = null;
+  try {
+    guardMtimeMs = statSync(RECOVERY_LOCK_PATH).mtimeMs;
+  } catch {
+    guardMtimeMs = null;
+  }
+  return {
+    owner,
+    ownerFacts: owner ? probeLockOwner(owner) : null,
+    guardMtimeMs,
+    bootTimeMs: currentBootIdentity().approxBootTimeMs,
+    nowMs: Date.now(),
   };
 }
 
@@ -523,7 +648,20 @@ async function acquireRecoveryLock(): Promise<() => void> {
   for (;;) {
     try {
       mkdirSync(RECOVERY_LOCK_PATH);
-      writeFileSync(RECOVERY_OWNER_PATH, JSON.stringify({ pid: process.pid }));
+      // 주 lock 과 같은 페이로드를 적는다 — 부팅 세대가 없으면 이 가드가 다음
+      // 부팅에서 회수 불가능한 유령이 된다.
+      const guardBoot = currentBootIdentity();
+      writeFileSync(
+        RECOVERY_OWNER_PATH,
+        JSON.stringify({
+          pid: process.pid,
+          role: 'recovery-guard',
+          started_at: new Date().toISOString(),
+          boot_id: guardBoot.id,
+          boot_time_ms: guardBoot.approxBootTimeMs,
+          pid_start_ticks: readProcessStartTicks(process.pid),
+        }),
+      );
       return () => {
         try {
           rmSync(RECOVERY_LOCK_PATH, { recursive: true, force: true });
@@ -541,20 +679,10 @@ async function acquireRecoveryLock(): Promise<() => void> {
 }
 
 function reclaimStaleRecoveryLock(): boolean {
-  let ownerPid = 0;
-  let ageMs = 0;
-  try {
-    const parsed = JSON.parse(readFileSync(RECOVERY_OWNER_PATH, 'utf8'));
-    ownerPid = Number.isFinite(parsed?.pid) ? parsed.pid : 0;
-  } catch {
-    try {
-      ageMs = Date.now() - statSync(RECOVERY_LOCK_PATH).mtimeMs;
-    } catch {
-      return true;
-    }
-  }
-  if ((ownerPid > 0 && isPidAlive(ownerPid)) || (ownerPid === 0 && ageMs < RECOVERY_LOCK_STALE_MS)) {
-    return false;
+  const verdict = judgeRecoveryGuard(probeRecoveryGuard());
+  if (!verdict.reclaim) return false;
+  if (verdict.reason !== 'guard_gone') {
+    log(`[lockfile] reclaiming stale recovery guard — ${verdict.reason}: ${verdict.detail}`);
   }
 
   const quarantine = `${RECOVERY_LOCK_PATH}.stale-${process.pid}-${Date.now()}`;

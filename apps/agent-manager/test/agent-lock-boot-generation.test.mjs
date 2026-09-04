@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { judgeLockOwner } from '../dist/lib/agent-lockfile.js';
+import { judgeLockOwner, judgeRecoveryGuard } from '../dist/lib/agent-lockfile.js';
 import {
   currentBootIdentity,
   processStartTimeMs,
@@ -232,7 +232,7 @@ test('환산 결과가 부팅~현재 범위를 크게 벗어나면 추측하지 
 
 // ── 실제 acquireAgentLock 경로 ────────────────────────────────────────────
 
-async function acquireInChild(home) {
+async function acquireInChild(home, timeoutMs = 15_000) {
   const source = `
     const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
     try {
@@ -249,6 +249,11 @@ async function acquireInChild(home) {
   });
   let stdout = '';
   let stderr = '';
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, timeoutMs);
   child.stdout.on('data', (chunk) => {
     stdout += chunk;
   });
@@ -258,7 +263,8 @@ async function acquireInChild(home) {
     process.stderr.write(chunk);
   });
   const code = await new Promise((resolve) => child.on('close', resolve));
-  return { code, stdout, stderr };
+  clearTimeout(timer);
+  return { code, stdout, stderr, timedOut };
 }
 
 async function writeLock(home, payload) {
@@ -354,4 +360,153 @@ test('boot 필드 없는 구버전 lock 이라도 살아 있는 owner 면 유지
 
   const { stdout } = await acquireInChild(home);
   assert.match(stdout, /REJECTED:EAGENTLOCKED/, `구버전 lock 이라고 밀어내면 안 된다: ${stdout}`);
+});
+
+// ── 회수 가드(agent.lock.recovery) — 리뷰 P1 ───────────────────────────────
+//
+// 주 lock 판정만 고치면 부족하다. `acquireAfterStaleCleanup` 은 **항상** 회수
+// 가드를 먼저 잡는데, 그 가드의 owner 판정이 pid liveness 뿐이면 같은 함정에 빠진다:
+// 가드를 쥔 채 전원이 나가 디렉터리가 남고, 다음 부팅에서 그 pid 번호를 다른
+// 프로세스가 물려받으면 가드가 영원히 회수되지 않아 25ms 루프가 끝나지 않는다.
+// 주 lock 을 정확히 stale 로 판정해 놓고도 그 다음 줄에서 고착하므로, "반창고 없이
+// 스스로 기동" 이 성립하지 않는다.
+
+function guardFacts(overrides = {}) {
+  return {
+    owner: null,
+    ownerFacts: null,
+    guardMtimeMs: NOW - 1_000,
+    bootTimeMs: BOOT_TIME,
+    nowMs: NOW,
+    ...overrides,
+  };
+}
+
+test('가드 owner 가 이전 부팅 것이면 pid 가 살아 있어도 회수한다', () => {
+  const verdict = judgeRecoveryGuard(
+    guardFacts({ owner: lockOf({ boot_id: PREVIOUS_BOOT }), ownerFacts: facts() }),
+  );
+  assert.equal(verdict.reclaim, true);
+  assert.equal(verdict.reason, 'owner_stale');
+  assert.match(verdict.detail, /boot_id_mismatch/, '주 lock 과 같은 사유 코드를 그대로 실어야 한다');
+});
+
+test('가드 owner 가 이번 부팅에서 살아 있으면 회수하지 않는다 — 직렬화 유지', () => {
+  const verdict = judgeRecoveryGuard(guardFacts({ owner: lockOf(), ownerFacts: facts() }));
+  assert.equal(verdict.reclaim, false);
+});
+
+test('부팅 세대 없는 구버전 가드는 디렉터리 mtime 이 이번 부팅보다 이르면 회수한다', () => {
+  const verdict = judgeRecoveryGuard(
+    guardFacts({
+      owner: legacyLockOf({ started_at: undefined }),
+      ownerFacts: facts(),
+      guardMtimeMs: BOOT_TIME - 24 * 3_600_000,
+    }),
+  );
+  assert.equal(verdict.reclaim, true);
+  assert.equal(verdict.reason, 'guard_predates_boot');
+});
+
+test('부팅 세대 없는 구버전 가드는 상한을 넘기면 회수한다 — 무한 대기 금지', () => {
+  // 이 경로가 없으면 "이번 부팅에 만들어진 것처럼 보이는" 구버전 가드에 갇힌다.
+  const verdict = judgeRecoveryGuard(
+    guardFacts({
+      owner: legacyLockOf({ started_at: undefined }),
+      ownerFacts: facts(),
+      guardMtimeMs: NOW - 90_000,
+    }),
+  );
+  assert.equal(verdict.reclaim, true);
+  assert.equal(verdict.reason, 'guard_expired');
+});
+
+test('부팅 세대 없는 구버전 가드라도 상한 안이면 회수하지 않는다', () => {
+  // --force 인수는 SIGTERM 유예 30s + 확인 5s 동안 가드를 정당하게 쥔다. 상한(60s)
+  // 안에서 뺏으면 그 인수를 반토막 내는 것이라, 가드가 막으려던 레이스가 되돌아온다.
+  const verdict = judgeRecoveryGuard(
+    guardFacts({
+      owner: legacyLockOf({ started_at: undefined }),
+      ownerFacts: facts(),
+      guardMtimeMs: NOW - 40_000,
+    }),
+  );
+  assert.equal(verdict.reclaim, false);
+});
+
+test('부팅 세대를 담은 가드는 아무리 오래 쥐고 있어도 상한으로 뺏기지 않는다', () => {
+  // 이 수정 이후의 가드는 부팅 세대로 신원이 증명되므로 벽시계 상한 대상이 아니다.
+  const verdict = judgeRecoveryGuard(
+    guardFacts({ owner: lockOf(), ownerFacts: facts(), guardMtimeMs: NOW - 10 * 60_000 }),
+  );
+  assert.equal(verdict.reclaim, false);
+});
+
+test('owner.json 을 못 읽는 가드는 기존 규칙(상한 60s)을 그대로 유지한다', () => {
+  assert.equal(judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 30_000 })).reclaim, false);
+  const expired = judgeRecoveryGuard(guardFacts({ guardMtimeMs: NOW - 90_000 }));
+  assert.equal(expired.reclaim, true);
+  assert.equal(expired.reason, 'guard_expired');
+});
+
+test('가드 디렉터리가 이미 사라졌으면 곧바로 재시도한다', () => {
+  const verdict = judgeRecoveryGuard(guardFacts({ guardMtimeMs: null }));
+  assert.equal(verdict.reclaim, true);
+  assert.equal(verdict.reason, 'guard_gone');
+});
+
+async function writeRecoveryGuard(home, owner, mtime) {
+  const dir = join(home, 'agent.lock.recovery');
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(join(dir, 'owner.json'), JSON.stringify(owner));
+  if (mtime) await fsp.utimes(dir, mtime, mtime);
+  return dir;
+}
+
+test('이전 부팅의 회수 가드가 남아 있어도 고착하지 않고 기동한다 (리뷰 P1)', async () => {
+  const home = await makeHome('guard-prev-boot');
+  const boot = currentBootIdentity();
+  await writeLock(home, {
+    pid: process.pid,
+    role: 'manager',
+    version: 'previous-boot',
+    started_at: new Date(Date.now() - 30 * 24 * 3_600_000).toISOString(),
+    boot_id: '00000000-0000-4000-8000-000000000000',
+    boot_time_ms: Date.now() - 30 * 24 * 3_600_000,
+  });
+  // 주 lock 과 같은 이전 부팅의 가드. pid 는 지금 살아 있는 번호(테스트 러너)라
+  // 수정 전에는 여기서 25ms 루프에 영원히 갇혔다.
+  await writeRecoveryGuard(home, {
+    pid: process.pid,
+    role: 'recovery-guard',
+    started_at: new Date(Date.now() - 30 * 24 * 3_600_000).toISOString(),
+    boot_id: '00000000-0000-4000-8000-000000000000',
+    boot_time_ms: Date.now() - 30 * 24 * 3_600_000,
+  });
+
+  const { stdout, stderr, timedOut } = await acquireInChild(home);
+  assert.equal(timedOut, false, `회수 가드에서 고착하면 안 된다:\n${stderr}`);
+  assert.match(stdout, /ACQUIRED:/, `가드를 회수하고 기동해야 한다: ${stdout}`);
+  assert.match(stderr, /reclaiming stale recovery guard — owner_stale/, '가드 회수 근거도 로그에 남아야 한다');
+  // 새 가드 owner 에도 부팅 세대가 실려야 다음 부팅에서 같은 판정을 할 수 있다.
+  assert.match(stderr, /boot_id_mismatch/);
+  assert.equal(boot.approxBootTimeMs <= Date.now(), true);
+});
+
+test('부팅 세대 없는 구버전 회수 가드도 이전 부팅 것이면 회수하고 기동한다', async () => {
+  const home = await makeHome('guard-legacy');
+  await writeLock(home, {
+    pid: process.pid,
+    role: 'manager',
+    version: 'legacy',
+    started_at: '2020-01-01T00:00:00.000Z',
+  });
+  // 이 수정 이전 버전이 남긴 가드 — owner.json 에 pid 뿐이다. 디렉터리 mtime 이
+  // 이번 부팅보다 이르다는 사실만으로 이전 부팅 산물임을 확정한다.
+  await writeRecoveryGuard(home, { pid: process.pid }, new Date('2020-01-01T00:00:00.000Z'));
+
+  const { stdout, stderr, timedOut } = await acquireInChild(home);
+  assert.equal(timedOut, false, `구버전 가드에서 고착하면 안 된다:\n${stderr}`);
+  assert.match(stdout, /ACQUIRED:/, `가드를 회수하고 기동해야 한다: ${stdout}`);
+  assert.match(stderr, /reclaiming stale recovery guard — guard_predates_boot/);
 });
