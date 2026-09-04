@@ -219,9 +219,10 @@ export interface ChatRoomUpdateDispatchDeps {
  *
  * 서버는 `{ event_type, payload, scope, timestamp }` 봉투 또는 평평한 payload 를
  * 보낸다 — 두 shape 모두 지원한다. 분기(동작 보존):
- *  - renamed          → 방 목록의 해당 방 이름만 갱신
+ *  - renamed            → 방 목록의 해당 방 이름만 갱신
  *  - participant_added/left → reflectParticipantChange (방 목록 + 활성 방 로스터)
- *  - read(본인)       → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
+ *  - read(본인)         → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
+ *  - open_join_changed  → 방 목록의 open_join 플래그 갱신 (ticket 995a9519)
  */
 export function dispatchChatRoomUpdate(
   deps: ChatRoomUpdateDispatchDeps,
@@ -248,6 +249,13 @@ export function dispatchChatRoomUpdate(
         refreshActiveRoomParticipants: deps.refreshActiveRoomParticipants,
       },
       payload.room_id,
+    );
+  } else if (payload.update_type === 'open_join_changed' && payload.room_id) {
+    // 자유 참여 토글 (ticket 995a9519). 이 이벤트는 방 구성원에게만 간다 — 아직
+    // 참여하지 않은 사용자의 사이드바에서 열린 방이 나타나거나 사라지는 것은 다음
+    // 방 목록 조회에서 반영된다.
+    deps.setRooms((prev) =>
+      prev.map((r) => (r.id === payload.room_id ? { ...r, open_join: !!payload.open_join } : r)),
     );
   } else if (
     payload.update_type === 'read' &&

@@ -1739,6 +1739,13 @@ export interface ChatRoomListItem {
     participant_id: string;
     name: string;
   }>;
+  // 자유 참여(open join, ticket 995a9519). 켜진 방은 참여자가 아닌 사용자에게도
+  // 이 목록에 실리므로, 방 하나가 두 상태로 올 수 있다:
+  //   open_join && is_participant  — 이미 참여 중인 열린 방
+  //   open_join && !is_participant — 아직 참여하지 않은 열린 방 (첫 발언 시 auto-join)
+  // 서버가 항상 채워 보내지만, 이 필드 이전 응답과 섞이지 않게 optional 로 둔다.
+  open_join?: boolean;
+  is_participant?: boolean;
 }
 
 export interface ChatRoomDetail {
@@ -1754,6 +1761,9 @@ export interface ChatRoomDetail {
   last_message_at?: string | null;
   created_at: string;
   participants: ChatRoomParticipantInfo[];
+  // ChatRoomListItem 과 같은 의미 (ticket 995a9519).
+  open_join?: boolean;
+  is_participant?: boolean;
 }
 
 export interface ChatRoomParticipantInfo {

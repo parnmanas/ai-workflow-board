@@ -626,6 +626,14 @@ export default function ChatPage() {
     );
   }
 
+  // 자유 참여 토글 결과 반영 (ticket 995a9519). 서버의 open_join_changed SSE 는
+  // 다른 클라이언트를 갱신하고, 누른 본인은 이 경로로 즉시 갱신된다.
+  function handleOpenJoinChanged(roomId: string, openJoin: boolean) {
+    setRooms((prev) =>
+      prev.map((r) => (r.id === roomId ? { ...r, open_join: openJoin } : r)),
+    );
+  }
+
   function handleRoomCleared(roomId: string) {
     // Per-viewer Clear (ticket 1ae77f55) — drop the local message buffer and
     // zero this room's sidebar metadata so the active-room view + room list
@@ -735,6 +743,7 @@ export default function ChatPage() {
         onMessageSent={handleMessageSent}
         onLeaveRoom={handleLeaveRoom}
         onRoomRenamed={handleRoomRenamed}
+        onOpenJoinChanged={handleOpenJoinChanged}
         onParticipantsAdded={handleParticipantsAdded}
         onRoomCleared={handleRoomCleared}
         isMobile={isMobile}

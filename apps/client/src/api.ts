@@ -2139,6 +2139,15 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  // 자유 참여(open join) 토글 (ticket 995a9519). 방의 active participant 면 호출할 수
+  // 있고, DM 과 시스템 소유 방(Action Run / orchestration / QA·security run)은 서버가
+  // 400 으로 거부한다.
+  setChatRoomOpenJoin: (roomId: string, openJoin: boolean) =>
+    request<{ ok: boolean; room_id: string; open_join: boolean }>(`/chat-rooms/${roomId}/open-join`, {
+      method: 'PATCH',
+      body: JSON.stringify({ open_join: openJoin }),
+    }),
+
   addChatRoomParticipants: (roomId: string, participants: { participant_type: string; participant_id: string }[]) =>
     request<void>(`/chat-rooms/${roomId}/participants`, {
       method: 'POST',
