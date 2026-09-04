@@ -239,18 +239,12 @@ export function registerAgentTools(server: McpServer, ctx: ToolContext): void {
         agent.workspace_id = normalizedWorkspaceId;
       }
 
-      // Must run AFTER the workspace_id block above so a profile is checked
-      // against the agent's FINAL (possibly just-reassigned) workspace, not
-      // its pre-update one — otherwise a profile valid only in the old
-      // workspace would slip through on a combined reassign+pin call.
+      // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 검증 결과가 agent 의
+      // workspace 재배정 여부에 좌우되지 않는다 — 예전에 이 블록을
+      // workspace_id 블록 뒤에 두어야 했던 제약은 사라졌다.
       const prevProfile = agent.cli_runtime_profile;
       if (cli_runtime_profile !== undefined) {
-        const workspace = agent.workspace_id
-          ? await dataSource.getRepository(Workspace).findOne({ where: { id: agent.workspace_id } })
-          : null;
-        const checked = await validateCliRuntimeProfileSelection(
-          dataSource, workspace, cli_runtime_profile, 'agent workspace',
-        );
+        const checked = await validateCliRuntimeProfileSelection(dataSource, cli_runtime_profile);
         if (!checked.ok) return err(checked.error);
         agent.cli_runtime_profile = checked.value;
       }

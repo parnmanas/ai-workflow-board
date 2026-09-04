@@ -5,8 +5,6 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { Agent } from '../../../entities/Agent';
 import { ClaudeBackendProfile } from '../../../entities/ClaudeBackendProfile';
 import { Credential } from '../../../entities/Credential';
-import { Workspace } from '../../../entities/Workspace';
-import { WorkspaceClaudeBackendProfile } from '../../../entities/WorkspaceClaudeBackendProfile';
 import {
   profileEntityToRuntime,
   publicProfile,
@@ -22,8 +20,8 @@ const REGISTRY_GATE_ERROR =
 
 const profileOperationTails = new Map<string, Promise<void>>();
 const profileQueueBypassDataSources = new WeakSet<DataSource>();
-let profileLockHook: ((operation: 'update' | 'assign', profileId: string) => Promise<void>) | undefined;
-let profileLockAttemptHook: ((operation: 'update' | 'assign', profileId: string) => void) | undefined;
+let profileLockHook: ((operation: 'update', profileId: string) => Promise<void>) | undefined;
+let profileLockAttemptHook: ((operation: 'update', profileId: string) => void) | undefined;
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as {
@@ -44,14 +42,14 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 export function setProfileLockHookForTests(
-  hook?: (operation: 'update' | 'assign', profileId: string) => Promise<void>,
+  hook?: (operation: 'update', profileId: string) => Promise<void>,
 ): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
   profileLockHook = hook;
 }
 
 export function setProfileLockAttemptHookForTests(
-  hook?: (operation: 'update' | 'assign', profileId: string) => void,
+  hook?: (operation: 'update', profileId: string) => void,
 ): void {
   if (process.env.NODE_ENV !== 'test') throw new Error('profile lock hook is test-only');
   profileLockAttemptHook = hook;
@@ -66,7 +64,7 @@ export function setProfileQueueBypassForTests(dataSource: DataSource, enabled = 
 async function withProfileWriteLock<T>(
   dataSource: DataSource,
   profileId: string,
-  operationName: 'update' | 'assign',
+  operationName: 'update',
   operation: (manager: EntityManager) => Promise<T>,
 ): Promise<T> {
   const bypassQueue = profileQueueBypassDataSources.has(dataSource);
@@ -219,24 +217,13 @@ export async function updateClaudeBackendProfile(
         : { credential_ref: input.credential_ref }),
   });
 
+  // 프로필은 인스턴스 전역이라 "배정된 워크스페이스" 개념이 없다(티켓 e616dbfc).
+  // 예전의 배정-소유권 대조는 대조할 대상 자체가 사라져 존재 검사만 남는다.
   if (runtime.credential_ref) {
     const credential = await manager.getRepository(Credential).findOne({
       where: { id: runtime.credential_ref },
     });
     if (!credential) throw new Error('credential_ref does not identify an existing Credential');
-    if (credential.workspace_id !== null) {
-      const assignments = await manager
-        .getRepository(WorkspaceClaudeBackendProfile)
-        .find({
-          where: { profile_id: profileId },
-          select: { workspace_id: true },
-        });
-      if (assignments.some(link => link.workspace_id !== credential.workspace_id)) {
-        throw new Error(
-          'Claude backend profile credential is not owned by every assigned workspace',
-        );
-      }
-    }
   }
 
   const next = runtimeToProfileEntity(runtime, name);
@@ -262,98 +249,11 @@ export async function updateClaudeBackendProfile(
   });
 }
 
-export async function assignWorkspaceBackendProfile(
-  dataSource: DataSource,
-  workspaceId: string,
-  profileId: string,
-  setDefault: boolean,
-) {
-  // 프로필별 임계 구역에 진입하기 전 공개 검증 순서를 유지한다.
-  // 트랜잭션 안에서는 workspace를 다시 조회한다.
-  const requestedWorkspace = await dataSource.getRepository(Workspace).findOne({
-    where: { id: workspaceId },
-  });
-  if (!requestedWorkspace) throw new Error('Workspace not found');
-  return withProfileWriteLock(dataSource, profileId, 'assign', async manager => {
-  const workspaceRepo = manager.getRepository(Workspace);
-  const workspace = await workspaceRepo.findOne({
-    where: { id: workspaceId },
-  });
-  if (!workspace) throw new Error('Workspace not found');
-  const profile = await manager.getRepository(ClaudeBackendProfile).findOne({
-    where: { id: profileId },
-  });
-  if (!profile) throw new Error('Claude backend profile not found');
-  if (profile.credential_ref) {
-    const credential = await manager.getRepository(Credential).findOne({
-      where: { id: profile.credential_ref },
-    });
-    if (
-      !credential ||
-      (credential.workspace_id !== null && credential.workspace_id !== workspaceId)
-    ) {
-      throw new Error('Claude backend profile credential is not owned by this workspace');
-    }
-  }
-
-  const linkRepo = manager.getRepository(WorkspaceClaudeBackendProfile);
-  const inserted = await linkRepo.createQueryBuilder()
-    .insert()
-    .values({
-      workspace_id: workspaceId,
-      profile_id: profileId,
-    })
-    .orIgnore()
-    .execute();
-  let changed = (
-    inserted.raw?.changes ??
-    (Array.isArray(inserted.raw) ? inserted.raw.length : 0)
-  ) > 0;
-
-  if (setDefault && workspace.default_claude_backend_profile_id !== profileId) {
-    workspace.default_claude_backend_profile_id = profileId;
-    workspace.default_cli_runtime_profile = profileId;
-    changed = true;
-  }
-  if (!workspace.claude_backend_profiles_migrated) {
-    workspace.claude_backend_profiles_migrated = true;
-    changed = true;
-  }
-  if (changed) await workspaceRepo.save(workspace);
-
-  const links = await linkRepo.find({ where: { workspace_id: workspaceId } });
-  return {
-    changed,
-    workspace_id: workspaceId,
-    profile: publicProfile(profile),
-    allowed_profile_ids: links.map(link => link.profile_id).sort(),
-    default_profile_id: workspace.default_claude_backend_profile_id,
-  };
-  });
-}
-
-export async function listClaudeBackendProfiles(
-  dataSource: DataSource,
-  workspaceId?: string,
-) {
+export async function listClaudeBackendProfiles(dataSource: DataSource) {
   const rows = await dataSource.getRepository(ClaudeBackendProfile).find({
     order: { name: 'ASC' },
   });
-  if (!workspaceId) return { profiles: rows.map(publicProfile) };
-
-  const workspace = await dataSource.getRepository(Workspace).findOne({
-    where: { id: workspaceId },
-  });
-  if (!workspace) throw new Error('Workspace not found');
-  const links = await dataSource.getRepository(WorkspaceClaudeBackendProfile).find({
-    where: { workspace_id: workspaceId },
-  });
-  return {
-    profiles: rows.map(publicProfile),
-    workspace_id: workspaceId,
-    allowed_profile_ids: links.map(link => link.profile_id).sort(),
-    default_profile_id: workspace.default_claude_backend_profile_id,
-  };
+  return { profiles: rows.map(publicProfile) };
 }
 
 export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolContext): void {
@@ -409,33 +309,12 @@ export function registerClaudeBackendProfileTools(server: McpServer, ctx: ToolCo
   );
 
   server.tool(
-    'assign_workspace_backend_profile',
-    'Idempotently add a Claude backend profile to a workspace allow-set and optionally make it the workspace default. Existing unrelated assignments are preserved. DB-backed, full-scope Agent MCP only.',
-    {
-      workspace_id: z.string().uuid(),
-      profile_id: z.string().min(1),
-      set_default: z.boolean().optional().default(true),
-    },
-    async ({ workspace_id, profile_id, set_default }, extra) => gated(
-      extra,
-      () => assignWorkspaceBackendProfile(
-        ctx.dataSource,
-        workspace_id,
-        profile_id,
-        set_default,
-      ),
-    ),
-  );
-
-  server.tool(
     'list_claude_backend_profiles',
-    'List safe Claude backend profile metadata and, when workspace_id is supplied, its assignment/default verification state. Credential references and secrets are omitted. DB-backed, full-scope Agent MCP only.',
-    {
-      workspace_id: z.string().uuid().optional(),
-    },
-    async ({ workspace_id }, extra) => gated(
+    'List safe Claude backend profile metadata. Profiles are instance-global — there is no per-workspace assignment or default. Credential references and secrets are omitted. DB-backed, full-scope Agent MCP only.',
+    {},
+    async (_args, extra) => gated(
       extra,
-      () => listClaudeBackendProfiles(ctx.dataSource, workspace_id),
+      () => listClaudeBackendProfiles(ctx.dataSource),
     ),
   );
 }

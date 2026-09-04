@@ -81,7 +81,6 @@ export { Feature } from './Feature';
 // injected into dispatch prompts.
 export { BoardLesson } from './BoardLesson';
 export { ClaudeBackendProfile } from './ClaudeBackendProfile';
-export { WorkspaceClaudeBackendProfile } from './WorkspaceClaudeBackendProfile';
 export { Skill } from './Skill';
 export { SkillVersion } from './SkillVersion';
 export { SkillTap } from './SkillTap';

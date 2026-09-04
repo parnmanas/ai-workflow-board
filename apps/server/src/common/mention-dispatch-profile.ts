@@ -90,10 +90,7 @@ export async function resolveMentionDispatchExtras(
   let runtimeProfile: CliRuntimeProfile | null;
   try {
     const runtimeBoard = await resolveBoardForColumn(dataSource, ticket.column_id);
-    const runtimeWorkspace = ticket.workspace_id
-      ? await dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
-      : null;
-    runtimeProfile = await resolveClaudeBackendProfileForDispatch(dataSource, runtimeWorkspace, [
+    runtimeProfile = await resolveClaudeBackendProfileForDispatch(dataSource, [
       { source: 'run', value: ticket.cli_runtime_profile },
       { source: 'agent', value: agent.cli_runtime_profile },
       { source: 'board', value: runtimeBoard?.cli_runtime_profile },

@@ -436,10 +436,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         board.use_pr = use_pr;
       }
       if (cli_runtime_profile !== undefined) {
-        const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
-        const checked = await validateCliRuntimeProfileSelection(
-          dataSource, workspace, cli_runtime_profile, `workspace ${board.workspace_id}`,
-        );
+        const checked = await validateCliRuntimeProfileSelection(dataSource, cli_runtime_profile);
         if (!checked.ok) return err(checked.error);
         board.cli_runtime_profile = checked.value;
       }

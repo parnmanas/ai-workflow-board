@@ -46,7 +46,7 @@ import {
   validateAgentRuntimeConfig,
 } from '../../common/runtime-config';
 import { agentIsVisibleInWorkspace, normalizeAgentWorkspaceId } from '../../common/agent-workspace-scope';
-import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 
 const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'spawn_agent',
@@ -1437,12 +1437,9 @@ export class AgentManagerController {
       ? null
       : String(body.cli_runtime_profile);
     if (cli_runtime_profile && cli_runtime_profile !== 'none') {
-      const workspace = agentWorkspaceId
-        ? await this.workspaceRepo.findOne({ where: { id: agentWorkspaceId } })
-        : null;
-      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+      const profiles = await globalRuntimeProfiles(this.dataSource);
       if (!profiles.some(profile => profile.id === cli_runtime_profile)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${cli_runtime_profile}" does not exist in agent workspace` });
+        return res.status(400).json({ error: `cli_runtime_profile "${cli_runtime_profile}" does not exist` });
       }
     }
 
