@@ -225,7 +225,7 @@ export default function BoardSettingsPage() {
         <section style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
           <h3 style={{ marginTop: 0 }}>Claude backend profile</h3>
           <p style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
-            Board default for Claude agents. “Inherit” uses the workspace default; “None” keeps Claude's normal Anthropic backend.
+            Board default for Claude agents. Profiles are instance-global — “Inherit” falls through to the global default; “None” keeps Claude's normal Anthropic backend.
           </p>
           <select value={board.cli_runtime_profile || ''} onChange={async event => {
             try {

@@ -1426,11 +1426,11 @@ export class AgentManagerController {
         return res.status(400).json({ error: 'credential_id does not exist in this workspace or globally' });
       }
     }
-    // Mirrors AgentsController's PATCH :id validation — accepts a Claude
-    // backend profile id or the 'none' sentinel, scoped to whatever profiles
-    // this agent's workspace can see. null/omitted = inherit board/workspace
-    // default at dispatch time (see resolveCliRuntimeProfile). This is the
-    // create-time counterpart the ManagedAgentDialog "create" flow posts to;
+    // AgentsController 의 PATCH :id 검증과 같은 규칙 — Claude backend profile
+    // id 또는 'none' sentinel 을 받는다. 프로필은 인스턴스 전역이라 워크스페이스
+    // 스코프가 없다(티켓 e616dbfc). null/생략 = 디스패치 시점에 board 핀 →
+    // 전역 기본값 순으로 상속(resolveCliRuntimeProfile 참조).
+    // 이건 ManagedAgentDialog 의 "create" 흐름이 POST 하는 생성 시점 짝이다;
     // without it the UI's profile selector silently had no effect on new
     // agents (ticket 29ea479c).
     const cli_runtime_profile = body?.cli_runtime_profile === undefined || body?.cli_runtime_profile === null

@@ -489,7 +489,7 @@ export default function ManagedAgentDialog({
               Claude backend profile
             </label>
             <Select disabled={runtimeProfilesState !== 'ready'} value={runtimeProfile} options={[
-              { value: '', label: 'Inherit board/workspace' },
+              { value: '', label: 'Inherit board / global default' },
               { value: 'none', label: 'None — Anthropic default' },
               ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.name })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />

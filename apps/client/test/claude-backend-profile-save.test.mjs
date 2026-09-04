@@ -36,7 +36,7 @@ function change(element, value) {
   });
 }
 
-async function renderManager(t, { profiles = [], listCredentials = async () => credentials } = {}) {
+async function renderManager(t, { profiles = [], listCredentials = async () => credentials, getProfiles } = {}) {
   const dom = setupDom();
   const originals = {
     getClaudeBackendProfiles: api.getClaudeBackendProfiles,
@@ -44,7 +44,7 @@ async function renderManager(t, { profiles = [], listCredentials = async () => c
     createClaudeBackendProfile: api.createClaudeBackendProfile,
     updateClaudeBackendProfile: api.updateClaudeBackendProfile,
   };
-  api.getClaudeBackendProfiles = async () => ({ profiles, default_profile_id: null });
+  api.getClaudeBackendProfiles = getProfiles || (async () => ({ profiles, default_profile_id: null }));
   api.listCredentials = listCredentials;
   api.createClaudeBackendProfile = async () => {};
   api.updateClaudeBackendProfile = async () => {};
@@ -121,13 +121,13 @@ test('Claude 고유 필드와 adapter JSON을 create payload에 손실 없이 �
   const calls = [];
   api.createClaudeBackendProfile = async payload => { calls.push(payload); };
 
-  typeInto(container.querySelector('input[aria-label="Stable ID"]'), 'new-profile');
-  typeInto(container.querySelector('input[aria-label="Name"]'), '신규 프로필');
-  typeInto(container.querySelector('input[aria-label="Model"]'), 'claude-new');
+  typeInto(container.querySelector('input[aria-label="고정 ID"]'), 'new-profile');
+  typeInto(container.querySelector('input[aria-label="이름"]'), '신규 프로필');
+  typeInto(container.querySelector('input[aria-label="모델"]'), 'claude-new');
   typeInto(container.querySelector('input[aria-label="Base URL"]'), 'https://new.example.test');
-  typeInto(container.querySelector('input[aria-label="Auth environment variable"]'), 'CUSTOM_CLAUDE_TOKEN');
-  click(checkbox(container, 'Credential required'));
-  click(checkbox(container, 'Do not set effort'));
+  typeInto(container.querySelector('input[aria-label="인증 환경 변수"]'), 'CUSTOM_CLAUDE_TOKEN');
+  click(checkbox(container, 'Credential 필수'));
+  click(checkbox(container, 'effort 미전달'));
   typeInto(container.querySelector('textarea'), '{"request":{"model_field":"deployment"}}');
   click(button(container, '프로필 저장'));
   await flush();
@@ -247,12 +247,79 @@ test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 �
   assert.ok(columns);
   assert.equal(columns.style.display, 'flex');
   assert.equal(columns.style.flexWrap, 'wrap');
-  assert.ok(container.querySelector('input[aria-label="Stable ID"]'));
+  assert.ok(container.querySelector('input[aria-label="고정 ID"]'));
   assert.ok(container.querySelector('select[aria-label="Protocol"]'));
 
   click(button(container, '기존 프로필'));
   assert.match(container.textContent, /기존 프로필 편집/);
   click(button(container, '취소'));
   assert.match(container.textContent, /프로필 만들기/);
-  assert.equal(container.querySelector('input[aria-label="Stable ID"]').value, '');
+  assert.equal(container.querySelector('input[aria-label="고정 ID"]').value, '');
+});
+
+// ── UI 표준화 회귀 (티켓 e616dbfc) ─────────────────────────────────────────
+// 이 화면은 window.confirm / 평문 div / 인라인 textarea 를 쓰던 임시 UI 였고,
+// 다른 관리 화면과 톤이 달랐다. 아래 세 테스트는 공통 컴포넌트로 옮긴 상태가
+// 되돌아가지 않도록 고정한다.
+
+test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범위를 보여준다', async (t) => {
+  const { container } = await renderManager(t, { profiles: [existingProfile] });
+  const impact = { global_default: false, workspaces: ['w1'], boards: [{ id: 'b1' }], agents: [], runs: [] };
+  const deleted = [];
+  let confirmCalls = 0;
+  const originalConfirm = window.confirm;
+  window.confirm = () => { confirmCalls += 1; return true; };
+  const originalImpact = api.getClaudeBackendProfileImpact;
+  const originalDelete = api.deleteClaudeBackendProfile;
+  api.getClaudeBackendProfileImpact = async () => impact;
+  api.deleteClaudeBackendProfile = async (id, options) => { deleted.push({ id, options }); };
+  t.after(() => {
+    window.confirm = originalConfirm;
+    api.getClaudeBackendProfileImpact = originalImpact;
+    api.deleteClaudeBackendProfile = originalDelete;
+  });
+
+  click(button(container, '삭제'));
+  await flush();
+
+  // 브라우저 네이티브 확인창은 더 이상 쓰지 않는다.
+  assert.equal(confirmCalls, 0, 'window.confirm 을 호출하면 안 됩니다.');
+  // 다이얼로그 본문에 프로필 이름과 참조 요약이 함께 있어야 한다.
+  assert.match(document.body.textContent, /프로필을 삭제할까요\?/);
+  assert.match(document.body.textContent, /워크스페이스 1개/);
+  assert.match(document.body.textContent, /보드 1개/);
+  assert.equal(deleted.length, 0, '확인 전에는 삭제하지 않아야 합니다.');
+
+  const confirmButton = [...document.body.querySelectorAll('button')]
+    .find(item => item.textContent?.trim() === '프로필 삭제');
+  assert.ok(confirmButton, '확인 버튼을 찾을 수 없습니다.');
+  click(confirmButton);
+  await flush();
+
+  assert.deepEqual(deleted, [{ id: 'profile-1', options: { detach: true } }]);
+});
+
+test('프로필이 0건이면 EmptyState 를, 목록 로드가 실패하면 ErrorState 를 렌더한다', async (t) => {
+  const { container } = await renderManager(t, { profiles: [] });
+  assert.match(container.textContent, /등록된 프로필이 없습니다/);
+  // EmptyState 는 경보 시맨틱이 없다 — role="alert" 가 붙으면 안 된다.
+  assert.equal(container.querySelector('[role="alert"]'), null);
+
+  // 기본값 셀렉트 변경 실패 경로가 아니라, 목록 조회 실패 경로를 태운다.
+  const failing = await renderManager(t, {
+    getProfiles: async () => { throw new Error('목록 조회 실패'); },
+  });
+  assert.ok(failing.container.querySelector('[role="alert"]'), 'ErrorState 가 렌더되어야 합니다.');
+  assert.match(failing.container.textContent, /목록 조회 실패/);
+});
+
+test('Adapter 설정은 공통 Textarea 로 렌더되어 가로 리사이즈를 허용하지 않는다', async (t) => {
+  const { container } = await renderManager(t);
+  const textarea = container.querySelector('textarea');
+  assert.ok(textarea);
+  assert.equal(textarea.getAttribute('aria-label'), 'Adapter 설정 (JSON)');
+  // 가로 리사이즈를 열어두면 좁은 폭에서 컨테이너를 밀어내 가로 스크롤이 생긴다.
+  assert.equal(textarea.style.resize, 'vertical');
+  assert.equal(textarea.style.width, '100%');
+  assert.equal(textarea.style.boxSizing, 'border-box');
 });

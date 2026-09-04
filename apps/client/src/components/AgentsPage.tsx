@@ -589,7 +589,7 @@ export default function AgentsPage() {
                 value={managedForm.runtime_profile}
                 onChange={e => setManagedForm(f => ({ ...f, runtime_profile: (e.target as HTMLSelectElement).value }))}
                 options={[
-                  { value: '', label: 'Inherit board/workspace' },
+                  { value: '', label: 'Inherit board / global default' },
                   { value: 'none', label: 'None — Anthropic default' },
                   ...runtimeProfiles.map(p => ({ value: p.id, label: p.name })),
                 ]}

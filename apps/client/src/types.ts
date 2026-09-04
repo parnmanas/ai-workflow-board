@@ -2418,7 +2418,7 @@ export interface ManagedAgentCreateBody {
   credential_id?: string | null;
   /** Optional per-agent default model — see Agent.model. */
   model?: string | null;
-  /** Optional Claude backend profile id ('' / undefined = inherit board/workspace, 'none' = Anthropic default) — see Agent.cli_runtime_profile. */
+  /** Optional Claude backend profile id ('' / undefined = inherit board / global default, 'none' = Anthropic default) — see Agent.cli_runtime_profile. */
   cli_runtime_profile?: string | null;
 }
 
