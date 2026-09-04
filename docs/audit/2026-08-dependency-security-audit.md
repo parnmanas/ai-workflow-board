@@ -1656,3 +1656,37 @@ install-script 허용목록·액션 SHA 고정까지 통째로 침묵하고, 배
 **남은 조건:** 이 감사는 `production.private`의 게이트 복구를 PR로 올렸을 뿐 병합하지
 않았다. 병합 전까지 배포 브랜치의 `dependency-audit`은 레지스트리가 흔들릴 때마다
 계속 죽는다.
+
+### 관찰 — 이중 출처 폴백이 CI 에서는 rate limit 에 걸린다 (후속 과제)
+
+PR #8 의 CI 에서 `취약점 감사` 스텝이 한 번 실패했고, 그 로그가 오늘 조치의 남은
+구멍을 그대로 보여준다:
+
+```
+[npm]    bulk advisory 엔드포인트: 2회 모두 실패 — timeout
+[github] GitHub advisory 조회:    2회 모두 실패 — HTTP 403 rate limit exceeded
+```
+
+판정 자체는 **의도대로 fail-closed** 였다 — "확인 못 했다" 를 통과로 바꾸지 않고
+exit 1 로 죽었다. 문제는 폴백이 **정작 필요한 순간에 못 받쳐준다**는 것이다. npm 축이
+죽어야 GitHub 축을 쓰는데, 그 축은 의도적으로 비인증(unauthenticated)이라
+GitHub Actions 러너의 공유 IP 풀에서 403 을 맞는다. 요청량 문제가 아니다 — 우리
+lockfile 기준 stage-1 요청은 **4건**뿐으로, 비인증 한도(시간당 60회)에 한참 못 미친다.
+러너 IP 가 공유라 예산을 우리가 통제하지 못하는 것이다.
+
+재실행하니 같은 커밋에서 통과했으므로(출처 하나가 살아나면 됨) 상시 장애는 아니고,
+"npm 이 흔들리는 동안 CI 가 간헐적으로 red" 가 된다. `main` 도 같은 조건이다
+(2026-09-04 `main` 런: 03:10 green, 02:43 red).
+
+비인증을 택한 건 실수가 아니라 **의도된 트레이드오프**다 — `ci.yml` 은
+`pull_request` 에서 PR 이 저작한 코드를 그대로 실행하므로 여기에 토큰을 두면
+supply-chain-integrity-guard 의 "ci.yml now references a secret" 단언이 지키는 선을
+넘는다. `${{ github.token }}` 은 그 정규식(`secrets\.`)을 우회할 뿐 노출 표면은
+동일하므로 우회로 삼아선 안 된다. 즉 이건 **버그가 아니라 미해결 설계 과제**이며,
+이번 감사에서는 관찰만 기록하고 문서화된 결정을 임의로 뒤집지 않았다.
+
+가능한 방향(택일은 소유자 판단): advisory 조회를 `pull_request` 가 아닌 별도
+워크플로(`schedule`/`push` 전용, PR 코드 미실행)로 분리해 거기서만 토큰을 쓰거나,
+GitHub 축 실패를 npm 축 재시도 예산 확대로 흡수하거나, 폴백 실패 시 merge 를 막지
+않는 별도 신호로 강등하는 것. 어느 쪽도 fail-closed 규약을 무르지 않는 선에서
+설계돼야 한다.
