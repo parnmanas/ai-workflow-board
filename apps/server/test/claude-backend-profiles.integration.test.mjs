@@ -84,7 +84,6 @@ before(async () => {
       base_url: 'http://legacy.invalid',
       model: 'legacy-model',
     }]),
-    claude_backend_profiles_migrated: true,
   }));
   await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: workspace.id });
   await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'workspace', id: workspace.id });
@@ -92,11 +91,26 @@ before(async () => {
   board = await ds.getRepository('Board').save(ds.getRepository('Board').create({
     workspace_id: workspace.id, name: 'Profiles board',
   }));
+  // PATCH /agents/:id 는 cli_runtime_profile 검증을 통과한 뒤 runtime host /
+  // runtime_config 도 재검증한다. 프로필 핀이 실제로 저장되는 경로를 보려면
+  // 이 에이전트가 그 검증까지 통과해야 하므로 manager 와 최소 config 를 준다.
+  const profilesManager = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
+    name: 'Profiles manager', type: 'manager', workspace_id: null,
+  }));
   agent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-    workspace_id: workspace.id, name: 'Profiles agent', type: 'claude',
+    workspace_id: workspace.id,
+    name: 'Profiles agent',
+    type: 'claude',
+    manager_agent_id: profilesManager.id,
+    runtime_config: { strategy: 'single', permission_mode: 'trusted' },
+  }));
+  // 루트 티켓은 컬럼에 놓여 있어야 한다 — PATCH /tickets/:id 의 후속 처리가
+  // 컬럼을 전제하므로, 컬럼 없는 티켓으로는 프로필 핀 저장 경로를 볼 수 없다.
+  const column = await ds.getRepository('BoardColumn').save(ds.getRepository('BoardColumn').create({
+    board_id: board.id, name: 'To Do', position: 0, kind: 'active',
   }));
   ticket = await ds.getRepository('Ticket').save(ds.getRepository('Ticket').create({
-    workspace_id: workspace.id, title: 'Profiles run',
+    workspace_id: workspace.id, title: 'Profiles run', column_id: column.id,
   }));
 
   await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
@@ -112,13 +126,6 @@ before(async () => {
   response = await createProfile(adminToken, 'profile-b', 'Profile B');
   assert.equal(response.status, 201, JSON.stringify(response.data));
   profileB = response.data;
-
-  response = await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles`, {
-    token: ownerToken,
-    method: 'PATCH',
-    body: { allowed_profile_ids: [profileA.id], default_profile_id: profileA.id },
-  });
-  assert.equal(response.status, 200, JSON.stringify(response.data));
 });
 
 after(async () => {
@@ -126,7 +133,10 @@ after(async () => {
 });
 
 describe('Claude backend profile integration', () => {
-  it('enforces AdminGuard and member/owner workspace response scopes', async () => {
+  // 티켓 e616dbfc — 워크스페이스 스코프가 사라진 자리. 쓰기는 여전히 관리자
+  // 전용이고, 읽기는 워크스페이스 배정과 무관하게 로그인한 사용자면 누구나
+  // 같은 전역 목록을 본다. 자격증명 값·참조는 어느 표면에도 실리지 않는다.
+  it('쓰기는 AdminGuard, 읽기는 로그인만 — 전역 카탈로그는 모두에게 같은 목록', async () => {
     for (const token of [ownerToken, memberToken, outsiderToken]) {
       const denied = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token });
       assert.equal(denied.status, 403);
@@ -136,35 +146,29 @@ describe('Claude backend profile integration', () => {
     assert.equal(JSON.stringify(adminRead.data).includes(secretCredentialId), false);
     assert.equal(JSON.stringify(adminRead.data).includes('TOP-SECRET-CIPHERTEXT'), false);
 
-    const memberRead = await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles`, {
-      token: memberToken,
-    });
-    assert.equal(memberRead.status, 200);
-    assert.deepEqual(memberRead.data.profiles.map(row => row.id), [profileA.id]);
-    assert.equal(JSON.stringify(memberRead.data).includes(profileB.id), false);
-
-    const memberCatalog = await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles/catalog`, {
-      token: memberToken,
-    });
-    assert.equal(memberCatalog.status, 403);
-    const ownerCatalog = await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles/catalog`, {
-      token: ownerToken,
-    });
-    assert.equal(ownerCatalog.status, 200);
-    assert.deepEqual(new Set(ownerCatalog.data.profiles.map(row => row.id)), new Set([profileA.id, profileB.id]));
-    assert.equal((await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles/catalog`, {
-      token: adminToken,
-    })).status, 200);
+    // 비관리자 읽기 표면. 이게 없으면 프로필 핀 드롭다운이 비관리자에게
+    // 통째로 빈 목록이 된다(관리자 라우트는 AdminGuard 라서 403).
+    const expected = new Set([profileA.id, profileB.id]);
+    for (const [label, token] of [['owner', ownerToken], ['member', memberToken], ['outsider', outsiderToken]]) {
+      const catalog = await apiRequest(baseUrl, '/claude-backend-profiles', { token });
+      assert.equal(catalog.status, 200, `${label}: ${JSON.stringify(catalog.data)}`);
+      const ids = new Set(catalog.data.profiles.map(row => row.id));
+      assert.ok([...expected].every(id => ids.has(id)), `${label} 은 전역 프로필을 모두 봐야 합니다.`);
+      // 워크스페이스 배정 흔적이 응답에 남으면 안 된다.
+      assert.equal('allowed_profile_ids' in catalog.data, false);
+      const serialized = JSON.stringify(catalog.data);
+      assert.equal(serialized.includes(secretCredentialId), false, `${label}: credential_ref 가 새면 안 됩니다.`);
+      assert.equal(serialized.includes('TOP-SECRET-CIPHERTEXT'), false);
+      assert.equal(serialized.includes('credential_status'), true, '설정 여부는 상태 문자열로만 노출한다');
+    }
+    // 인증 없는 호출은 여전히 거부.
+    assert.equal((await apiRequest(baseUrl, '/claude-backend-profiles', {})).status, 401);
   });
 
-  it('treats an intentionally empty allow-set as authoritative for Board, Agent, run and dispatch reads', async () => {
-    const cleared = await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles`, {
-      token: ownerToken,
-      method: 'PATCH',
-      body: { allowed_profile_ids: [], default_profile_id: null },
-    });
-    assert.equal(cleared.status, 200);
-
+  // 예전에는 워크스페이스 allow-set 이 Board/Agent/run 핀의 권위였고, 비워두면
+  // 전역에 존재하는 프로필이라도 거부됐다. 이제 권위는 전역 목록 하나뿐이므로
+  // (a) 전역에 없는 id 는 여전히 400 이고 (b) 전역에 있으면 배정 없이도 통과한다.
+  it('전역 목록이 Board/Agent/run 핀의 유일한 권위다', async () => {
     for (const [pathName, body] of [
       [`/boards/${board.id}`, { cli_runtime_profile: 'legacy-profile' }],
       [`/agents/${agent.id}`, { cli_runtime_profile: 'legacy-profile' }],
@@ -174,12 +178,30 @@ describe('Claude backend profile integration', () => {
         token: adminToken, method: 'PATCH', body,
       });
       assert.equal(denied.status, 400, `${pathName}: ${JSON.stringify(denied.data)}`);
+      assert.match(denied.data.error, /does not exist$/, '에러 문구에 워크스페이스 스코프가 남으면 안 됩니다.');
     }
 
-    const { authoritativeWorkspaceRuntimeProfiles } = await import('../dist/common/claude-backend-registry.js');
-    const refreshed = await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id });
-    assert.equal(refreshed.claude_backend_profiles_migrated, true);
-    assert.deepEqual(await authoritativeWorkspaceRuntimeProfiles(ds, refreshed), []);
+    // profileB 는 어떤 워크스페이스에도 배정된 적이 없다 — 예전 계약이라면 400.
+    for (const pathName of [`/boards/${board.id}`, `/agents/${agent.id}`, `/tickets/${ticket.id}`]) {
+      const accepted = await apiRequest(baseUrl, pathName, {
+        token: adminToken, method: 'PATCH', body: { cli_runtime_profile: profileB.id },
+      });
+      assert.equal(accepted.status, 200, `${pathName}: ${JSON.stringify(accepted.data)}`);
+    }
+    assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
+    assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, profileB.id);
+    assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
+
+    const { globalRuntimeProfiles } = await import('../dist/common/claude-backend-registry.js');
+    const ids = (await globalRuntimeProfiles(ds)).map(row => row.id);
+    assert.ok(ids.includes(profileA.id) && ids.includes(profileB.id));
+
+    // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
+    for (const pathName of [`/boards/${board.id}`, `/agents/${agent.id}`, `/tickets/${ticket.id}`]) {
+      await apiRequest(baseUrl, pathName, {
+        token: adminToken, method: 'PATCH', body: { cli_runtime_profile: null },
+      });
+    }
   });
 
   it('rejects a missing credential_ref, accepts an existing credential, and clears an optional selection', async () => {
@@ -280,56 +302,7 @@ describe('Claude backend profile integration', () => {
     assert.equal(reloaded.omit_effort, false);
   });
 
-  it('converges legacy-only and mismatched workspace defaults when replacing a profile', async () => {
-    let response = await createProfile(adminToken, 'profile-legacy-b', 'Profile Legacy B');
-    assert.equal(response.status, 201, JSON.stringify(response.data));
-    const legacyProfile = response.data;
-    response = await createProfile(adminToken, 'profile-authoritative-c', 'Profile Authoritative C');
-    assert.equal(response.status, 201, JSON.stringify(response.data));
-    const replacementProfile = response.data;
-
-    const workspaceRepo = ds.getRepository('Workspace');
-    const legacyOnly = await workspaceRepo.save(workspaceRepo.create({
-      name: 'Legacy-only default workspace',
-      default_claude_backend_profile_id: null,
-      default_cli_runtime_profile: legacyProfile.id,
-      claude_backend_profiles_migrated: true,
-    }));
-    const mismatched = await workspaceRepo.save(workspaceRepo.create({
-      name: 'Mismatched default workspace',
-      default_claude_backend_profile_id: replacementProfile.id,
-      default_cli_runtime_profile: legacyProfile.id,
-      claude_backend_profiles_migrated: true,
-    }));
-
-    const replaced = await apiRequest(baseUrl, `/admin/claude-backend-profiles/${legacyProfile.id}`, {
-      token: adminToken,
-      method: 'DELETE',
-      body: { replacement_profile_id: replacementProfile.id },
-    });
-    assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
-
-    for (const workspaceId of [legacyOnly.id, mismatched.id]) {
-      const converged = await workspaceRepo.findOneByOrFail({ id: workspaceId });
-      assert.equal(converged.default_claude_backend_profile_id, replacementProfile.id);
-      assert.equal(converged.default_cli_runtime_profile, replacementProfile.id);
-    }
-
-    const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
-    const resolved = await resolveClaudeBackendProfileForDispatch(
-      ds,
-      await workspaceRepo.findOneByOrFail({ id: legacyOnly.id }),
-      [],
-    );
-    assert.equal(resolved?.id, replacementProfile.id);
-  });
-
-  it('blocks referenced deletion, then replaces every selector/default/allow reference transactionally', async () => {
-    await apiRequest(baseUrl, `/workspaces/${workspace.id}/claude-backend-profiles`, {
-      token: ownerToken,
-      method: 'PATCH',
-      body: { allowed_profile_ids: [profileA.id], default_profile_id: profileA.id },
-    });
+  it('blocks referenced deletion, then replaces every selector/default reference transactionally', async () => {
     await ds.getRepository('Board').update({ id: board.id }, { cli_runtime_profile: profileA.id });
     await ds.getRepository('Agent').update({ id: agent.id }, { cli_runtime_profile: profileA.id });
     await ds.getRepository('Ticket').update({ id: ticket.id }, { cli_runtime_profile: profileA.id });
@@ -350,14 +323,9 @@ describe('Claude backend profile integration', () => {
     });
     assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
     assert.equal(await ds.getRepository('ClaudeBackendProfile').countBy({ id: profileA.id }), 0);
-    assert.equal((await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id })).default_claude_backend_profile_id, profileB.id);
-    assert.equal((await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id })).default_cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
-    assert.equal(await ds.getRepository('WorkspaceClaudeBackendProfile').countBy({
-      workspace_id: workspace.id, profile_id: profileB.id,
-    }), 1);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
     })).value, profileB.id);
@@ -373,21 +341,16 @@ describe('Claude backend profile integration', () => {
       token: adminToken, method: 'DELETE', body: { detach: true },
     });
     assert.equal(detached.status, 200, JSON.stringify(detached.data));
-    const detachedWorkspace = await ds.getRepository('Workspace').findOneByOrFail({ id: workspace.id });
-    assert.equal(detachedWorkspace.default_claude_backend_profile_id, null);
-    assert.equal(detachedWorkspace.default_cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, null);
-    assert.equal(await ds.getRepository('WorkspaceClaudeBackendProfile').countBy({
-      workspace_id: workspace.id,
-    }), 0);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
     })).value, globalProfile.id);
 
+    // detach 뒤에는 어떤 핀도 남지 않으므로 전역 기본값으로 떨어져야 한다.
     const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
-    const resolved = await resolveClaudeBackendProfileForDispatch(ds, detachedWorkspace, [
+    const resolved = await resolveClaudeBackendProfileForDispatch(ds, [
       { source: 'run', value: null },
       { source: 'agent', value: null },
       { source: 'board', value: null },
@@ -404,7 +367,6 @@ describe('Claude backend profile integration', () => {
         base_url: 'http://legacy-a.invalid', model: 'a',
       }]),
       default_cli_runtime_profile: 'same-id',
-      claude_backend_profiles_migrated: false,
     }));
     const legacyB = await wsRepo.save(wsRepo.create({
       name: 'legacy collision B',
@@ -413,22 +375,27 @@ describe('Claude backend profile integration', () => {
         base_url: 'http://legacy-b.invalid', model: 'b',
       }]),
       default_cli_runtime_profile: 'same-id',
-      claude_backend_profiles_migrated: false,
     }));
     const { BackfillGlobalClaudeBackendProfiles1760000000066 } =
       await import('../dist/database/migrations/1760000000066-BackfillGlobalClaudeBackendProfiles.js');
     const runner = ds.createQueryRunner();
     await new BackfillGlobalClaudeBackendProfiles1760000000066().up(runner);
-    const migratedA = await wsRepo.findOneByOrFail({ id: legacyA.id });
-    const migratedB = await wsRepo.findOneByOrFail({ id: legacyB.id });
-    assert.equal(migratedA.claude_backend_profiles_migrated, true);
-    assert.equal(migratedB.claude_backend_profiles_migrated, true);
-    assert.notEqual(migratedA.default_claude_backend_profile_id, migratedB.default_claude_backend_profile_id);
-    const rows = await ds.getRepository('ClaudeBackendProfile').findByIds([
-      migratedA.default_claude_backend_profile_id,
-      migratedB.default_claude_backend_profile_id,
-    ]);
-    assert.deepEqual(new Set(rows.map(row => row.base_url)), new Set(['http://legacy-a.invalid', 'http://legacy-b.invalid']));
+    // 워크스페이스 기본값 포인터가 사라졌으므로(티켓 e616dbfc) 승격된 전역 행을
+    // 직접 확인한다. 같은 레거시 id 라도 payload 가 다르면 별개 행이어야 한다 —
+    // 하나가 다른 하나를 덮어쓰면 프로필 정의가 조용히 유실된다.
+    const promoted = await ds.getRepository('ClaudeBackendProfile').find();
+    const promotedA = promoted.find(row => row.base_url === 'http://legacy-a.invalid');
+    const promotedB = promoted.find(row => row.base_url === 'http://legacy-b.invalid');
+    assert.ok(promotedA, 'legacy A payload 가 승격되지 않았습니다.');
+    assert.ok(promotedB, 'legacy B payload 가 승격되지 않았습니다.');
+    assert.notEqual(promotedA.id, promotedB.id, '충돌한 레거시 id 는 서로 다른 전역 id 로 갈라져야 합니다.');
+    assert.equal(promotedA.model, 'a');
+    assert.equal(promotedB.model, 'b');
+
+    // 멱등성: 다시 돌려도 fingerprint dedupe 로 행이 늘지 않아야 한다.
+    const before = promoted.length;
+    await new BackfillGlobalClaudeBackendProfiles1760000000066().up(runner);
+    assert.equal(await ds.getRepository('ClaudeBackendProfile').count(), before);
 
     const adminList = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token: adminToken });
     const serialized = JSON.stringify(adminList.data);
@@ -447,13 +414,6 @@ describe('Claude backend profile integration', () => {
     const wsRepo = ds.getRepository('Workspace');
     const createWorkspace = await wsRepo.save(wsRepo.create({ name: 'Create-agent profile workspace' }));
     await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: createWorkspace.id });
-    const assigned = await apiRequest(baseUrl, `/workspaces/${createWorkspace.id}/claude-backend-profiles`, {
-      token: ownerToken,
-      method: 'PATCH',
-      body: { allowed_profile_ids: [createProfileRow.id], default_profile_id: createProfileRow.id },
-    });
-    assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
-
     const managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
       name: 'Create-agent manager', type: 'manager',
     }));
@@ -516,13 +476,6 @@ describe('Claude backend profile integration', () => {
     const wsRepo = ds.getRepository('Workspace');
     const createWorkspace = await wsRepo.save(wsRepo.create({ name: 'Create-managed-agent profile workspace' }));
     await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: createWorkspace.id });
-    const assigned = await apiRequest(baseUrl, `/workspaces/${createWorkspace.id}/claude-backend-profiles`, {
-      token: ownerToken,
-      method: 'PATCH',
-      body: { allowed_profile_ids: [createProfileRow.id], default_profile_id: createProfileRow.id },
-    });
-    assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
-
     const managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
       name: 'Create-managed-agent manager', type: 'manager',
     }));

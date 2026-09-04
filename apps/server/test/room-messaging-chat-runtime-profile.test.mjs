@@ -45,16 +45,9 @@ function makeQueryBuilder() {
   return qb;
 }
 
-// Minimal DataSource stand-in for resolveClaudeBackendProfileForDispatch:
-// every repo lookup misses (SystemSetting global default, and the
-// registry-backed WorkspaceClaudeBackendProfile/ClaudeBackendProfile paths
-// this test doesn't exercise — workspace.claude_backend_profiles_migrated
-// stays falsy so resolution reads workspace.cli_runtime_profiles instead).
-const dataSource = {
-  getRepository() {
-    return { async findOne() { return null; }, async find() { return []; } };
-  },
-};
+const { ClaudeBackendProfile } = await import(
+  'file://' + path.join(DIST_ROOT, 'entities', 'index.js')
+);
 
 const LOCAL_PROFILE = {
   id: 'local-anthropic',
@@ -63,7 +56,32 @@ const LOCAL_PROFILE = {
   model: 'model-a',
 };
 
-function makeSvc({ agent, workspace }) {
+/** 런타임 프로필 정의를 claude_backend_profiles 행 모양으로 옮긴다. */
+function profileRow(runtime) {
+  const { id, protocol, base_url: baseUrl, model, credential_ref: credentialRef, ...rest } = runtime;
+  return {
+    id, protocol, base_url: baseUrl, model,
+    credential_ref: credentialRef ?? null,
+    config: JSON.stringify(rest),
+  };
+}
+
+// resolveClaudeBackendProfileForDispatch 용 최소 DataSource. 프로필은 인스턴스
+// 전역이므로(티켓 e616dbfc) claude_backend_profiles 테이블이 유일한 소스다 —
+// 예전처럼 workspace.cli_runtime_profiles 를 읽지 않는다. SystemSetting(전역
+// 기본값)은 findOne() → null 로 "미설정"이 된다.
+function makeDataSource(profiles = [LOCAL_PROFILE]) {
+  const rows = profiles.map(profileRow);
+  return {
+    getRepository(entity) {
+      if (entity === ClaudeBackendProfile) return { async find() { return rows; }, async findOne() { return null; } };
+      return { async findOne() { return null; }, async find() { return []; } };
+    },
+  };
+}
+
+function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
+  const dataSource = makeDataSource(profiles);
   const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
     async findOne() { return dmRoom; },
@@ -121,7 +139,7 @@ function captureEmit() {
   };
 }
 
-const optedOutWs = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([LOCAL_PROFILE]) };
+const optedOutWs = { id: 'ws-1' };
 
 test('DM to a Claude agent with a resolvable profile: chat_request carries cli_runtime_profile', async () => {
   const agent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
@@ -175,9 +193,8 @@ test('DM to a Claude agent with no cli_runtime_profile configured: chat_request 
 
 test('DM to a Claude agent whose resolved profile requires a credential it does not have: omitted + warns instead of dispatching a broken profile', async () => {
   const guardedProfile = { ...LOCAL_PROFILE, id: 'needs-cred', credential_required: true, credential_ref: '11111111-1111-4111-8111-111111111111' };
-  const ws = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([guardedProfile]) };
   const agent = { id: 'agent-4', type: 'claude', role_prompt: '', cli_runtime_profile: 'needs-cred', credential_id: null };
-  const svc = makeSvc({ agent, workspace: ws });
+  const svc = makeSvc({ agent, workspace: optedOutWs, profiles: [guardedProfile] });
   const capture = captureEmit();
   warnLogs.length = 0;
   try {
@@ -193,17 +210,20 @@ test('DM to a Claude agent whose resolved profile requires a credential it does 
 
 test('DM profile 조회 실패는 profile 미지정으로 축약하지 않고 디스패치를 중단한다', async () => {
   const malformedProfile = { ...LOCAL_PROFILE, id: 'malformed', credential_required: true, credential_ref: '잘못된-id' };
-  const workspace = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([malformedProfile]) };
   const agent = { id: 'agent-5', type: 'claude', role_prompt: '', cli_runtime_profile: 'malformed', credential_id: null };
-  const svc = makeSvc({ agent, workspace });
+  const svc = makeSvc({ agent, workspace: optedOutWs, profiles: [malformedProfile] });
   const capture = captureEmit();
   errorLogs.length = 0;
   try {
+    // 검증하는 불변식은 "조용히 무프로필로 축약하지 않고 디스패치를 중단한다"
+    // 이다. 프로필 파싱은 ClaudeBackendProfileSchema(zod)가 하므로 예외 문구는
+    // 라이브러리 버전에 따라 달라진다 — 문구가 아니라 (1) 거부됐다 (2) 아무것도
+    // emit 되지 않았다 (3) 오류가 기록됐다 는 관찰 가능한 사실만 단언한다.
     await assert.rejects(
       svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hello agent'),
-      /Invalid Claude backend profiles/,
+      (error) => error instanceof Error,
     );
-    assert.equal(capture.get(), null);
+    assert.equal(capture.get(), null, '해석에 실패했으면 chat_request 가 나가면 안 됩니다');
     assert.ok(errorLogs.length > 0);
   } finally {
     capture.off();
@@ -228,7 +248,8 @@ function captureRoomMessageEmit() {
   };
 }
 
-function makeGroupSvc({ agents, workspace, onAgentFind }) {
+function makeGroupSvc({ agents, workspace, onAgentFind, profiles = [LOCAL_PROFILE] }) {
+  const dataSource = makeDataSource(profiles);
   const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
     async findOne() { return groupRoom; },
@@ -305,7 +326,7 @@ test('Group room broadcast: cli_runtime_profiles carries only the Claude-type me
 
 test('Group room broadcast: cli_runtime_profiles is omitted entirely when no member resolves a profile', async () => {
   const claudeAgentNoProfile = { id: 'agent-3', type: 'claude', role_prompt: '', cli_runtime_profile: null, credential_id: null };
-  const emptyWs = { id: 'ws-2', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([]) };
+  const emptyWs = { id: 'ws-2' };
   const svc = makeGroupSvc({ agents: [claudeAgentNoProfile], workspace: emptyWs });
   const capture = captureRoomMessageEmit();
   try {
