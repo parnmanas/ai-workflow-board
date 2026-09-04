@@ -110,10 +110,28 @@ export class BackfillGlobalClaudeBackendProfiles1760000000066 implements Migrati
     }
   }
 
-  // 레거시 컬럼은 의도적으로 남겨두므로, 롤백은 이 마이그레이션이 만든 전역
-  // 레지스트리 데이터만 지운다(스키마 자체는 synchronize 소유).
-  async down(queryRunner: QueryRunner): Promise<void> {
-    if (!(await queryRunner.hasTable('claude_backend_profiles'))) return;
-    await queryRunner.query('DELETE FROM claude_backend_profiles');
+  /**
+   * 명시적 no-op — 되돌릴 수 없어서가 아니라, **안전하게** 되돌릴 수 없어서다.
+   *
+   * 이 마이그레이션의 up() 은 두 가지를 한다: (a) 레거시 JSON 을 전역
+   * `claude_backend_profiles` 행으로 승격하고, (b) 레거시 id 가 다른 전역 id 로
+   * 접힐 때 board/agent/ticket 의 프로필 핀을 리맵한다. 둘 다 되돌리려면 무엇이
+   * 이 마이그레이션 산물인지 식별할 수 있어야 하는데, 그럴 방법이 없다.
+   *
+   * - 승격된 행은 대개 레거시 id 를 **그대로** 쓴다(충돌할 때만 `legacy-` 접두).
+   *   즉 운영자가 관리 UI/MCP 로 직접 만든 전역 프로필과 행 모양이 구분되지 않는다.
+   *   `DELETE FROM claude_backend_profiles` 로 지우면 이 마이그레이션과 무관하게
+   *   존재하던 운영자 프로필까지 함께 사라진다.
+   * - 리맵된 핀은 이전 값을 어디에도 기록하지 않으므로 복원할 수 없다. 행만 지우면
+   *   board/agent/ticket 에 존재하지 않는 프로필을 가리키는 dangling selector 가
+   *   남아, 디스패치가 fail-closed 로 막힌다.
+   *
+   * 생성 provenance 컬럼이 생기기 전까지는 "아무것도 하지 않는 것"이 가장 안전한
+   * 롤백이다. 승격된 행이 남아 있어도 무해하다 — 재실행 시 fingerprint dedupe 가
+   * 같은 payload 를 다시 만들지 않는다. 스키마 자체는 synchronize 소유이므로
+   * (db.ts D-01/D-02) 여기서 되돌릴 DDL 도 없다.
+   */
+  async down(): Promise<void> {
+    // 의도적으로 비어 있다. 위 주석의 근거 없이 삭제 구문을 되살리지 말 것.
   }
 }

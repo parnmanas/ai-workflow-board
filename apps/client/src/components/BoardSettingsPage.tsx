@@ -234,7 +234,7 @@ export default function BoardSettingsPage() {
               showToast('Board Claude backend profile saved', 'success');
             } catch (err: any) { showToast(err?.message || 'Failed to save Claude backend profile', 'error'); }
           }}>
-            <option value="">Inherit workspace</option><option value="none">None</option>
+            <option value="">Inherit global default</option><option value="none">None</option>
             {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
           </select>
         </section>

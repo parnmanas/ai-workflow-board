@@ -406,6 +406,50 @@ describe('Claude backend profile integration', () => {
     assert.equal(JSON.stringify(invalid.data).includes('plaintext-secret-value'), false);
   });
 
+  // 리뷰 지적 P0 (티켓 e616dbfc) — down() 이 `DELETE FROM claude_backend_profiles`
+  // 였을 때는 이 마이그레이션과 무관하게 존재하던 운영자 생성 전역 프로필까지
+  // 함께 지워졌고, up() 이 리맵한 핀은 복원되지 않아 dangling selector 가 남았다.
+  // 생성 provenance 가 없어 특정 행만 안전하게 식별할 수 없으므로 down() 은
+  // 명시적 no-op 이다. 그 계약을 여기서 고정한다.
+  it('마이그레이션 down() 은 기존 전역 프로필과 핀을 지우지 않는다 (no-op)', async () => {
+    const created = await createProfile(adminToken, 'operator-made-profile', 'Operator Made Profile');
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const operatorProfile = created.data;
+
+    // 운영자 프로필을 board / agent / ticket 에 각각 핀으로 걸어둔다.
+    const boardRepo = ds.getRepository('Board');
+    const agentRepo = ds.getRepository('Agent');
+    const ticketRepo = ds.getRepository('Ticket');
+    await boardRepo.update({ id: board.id }, { cli_runtime_profile: operatorProfile.id });
+    await agentRepo.update({ id: agent.id }, { cli_runtime_profile: operatorProfile.id });
+    await ticketRepo.update({ id: ticket.id }, { cli_runtime_profile: operatorProfile.id });
+
+    const profileRepo = ds.getRepository('ClaudeBackendProfile');
+    const { BackfillGlobalClaudeBackendProfiles1760000000066 } =
+      await import('../dist/database/migrations/1760000000066-BackfillGlobalClaudeBackendProfiles.js');
+    const migration = new BackfillGlobalClaudeBackendProfiles1760000000066();
+    const runner = ds.createQueryRunner();
+    await migration.up(runner);
+
+    const countAfterUp = await profileRepo.count();
+    await migration.down(runner);
+
+    assert.equal(await profileRepo.count(), countAfterUp, 'down() 이 전역 프로필 행을 지우면 안 됩니다.');
+    assert.ok(
+      await profileRepo.findOneBy({ id: operatorProfile.id }),
+      '운영자가 직접 만든 전역 프로필이 롤백으로 사라지면 안 됩니다.',
+    );
+    // 핀이 살아 있어야 dangling selector 가 생기지 않는다.
+    assert.equal((await boardRepo.findOneByOrFail({ id: board.id })).cli_runtime_profile, operatorProfile.id);
+    assert.equal((await agentRepo.findOneByOrFail({ id: agent.id })).cli_runtime_profile, operatorProfile.id);
+    assert.equal((await ticketRepo.findOneByOrFail({ id: ticket.id })).cli_runtime_profile, operatorProfile.id);
+
+    // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
+    for (const [repo, id] of [[boardRepo, board.id], [agentRepo, agent.id], [ticketRepo, ticket.id]]) {
+      await repo.update({ id }, { cli_runtime_profile: null });
+    }
+  });
+
   it('validates and persists cli_runtime_profile on POST /agents (create), mirroring PATCH', async () => {
     const response = await createProfile(adminToken, 'profile-create-agent', 'Profile Create Agent');
     assert.equal(response.status, 201, JSON.stringify(response.data));

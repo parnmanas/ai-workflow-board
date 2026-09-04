@@ -323,3 +323,42 @@ test('Adapter 설정은 공통 Textarea 로 렌더되어 가로 리사이즈를 
   assert.equal(textarea.style.width, '100%');
   assert.equal(textarea.style.boxSizing, 'border-box');
 });
+
+// ── 사라진 워크스페이스 스코프 문구 재등장 방지 (리뷰 지적 P1, 티켓 e616dbfc) ──
+// 배정/상속 계층을 코드에서 지워도 사용자에게 보이는 설명이 남으면 화면이 거짓말을
+// 한다. 실제로 탭 설명은 "current Workspace assignment", 보드 셀렉트는 "Inherit
+// workspace" 로 남아 있었다. 렌더 트리 전체를 세우는 대신 소스 문자열을 직접
+// 단언한다 — 목적이 "이 문구가 다시 들어오지 않는 것" 자체이기 때문이다.
+test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화면에 남아 있지 않다', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (rel) => readFile(join(here, '..', 'src', 'components', rel), 'utf8');
+
+  const managementPage = await read('WorkspaceManagementPage.tsx');
+  assert.equal(
+    managementPage.includes('current Workspace assignment'), false,
+    'Claude Backend Profiles 탭 설명이 사라진 워크스페이스 배정을 계속 약속하면 안 됩니다.',
+  );
+  assert.match(managementPage, /Profiles are global/, '전역 단일 스코프임을 설명해야 합니다.');
+
+  const boardSettings = await read('BoardSettingsPage.tsx');
+  assert.equal(
+    boardSettings.includes('Inherit workspace'), false,
+    '보드 프로필 셀렉트의 상속 대상은 더 이상 워크스페이스가 아닙니다.',
+  );
+  assert.match(boardSettings, /Inherit global default/, '상속 대상은 전역 기본값이어야 합니다.');
+
+  // 해석 체인에서 사라진 단계를 다시 약속하는 셀렉트가 없어야 한다.
+  for (const [label, source] of [
+    ['AgentsPage', await read('AgentsPage.tsx')],
+    ['ManagedAgentDialog', await read('admin/ManagedAgentDialog.tsx')],
+    ['TicketPanel', await read('TicketPanel.tsx')],
+  ]) {
+    assert.equal(
+      /Inherit[^'"<]*[Ww]orkspace/.test(source), false,
+      `${label} 의 프로필 셀렉트가 워크스페이스 상속을 약속하면 안 됩니다.`,
+    );
+  }
+});

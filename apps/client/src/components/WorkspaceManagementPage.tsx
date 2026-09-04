@@ -36,7 +36,7 @@ const PAGE_INFO: Record<WorkspaceManagementKind, { title: string; description: s
   qa: { title: 'QA', description: 'QA scenarios and schedules owned by the current Workspace.' },
   security: { title: 'Security', description: 'Security profiles and schedules owned by the current Workspace.' },
   schedules: { title: 'Schedules', description: 'Scheduled agent tasks owned by the current Workspace.' },
-  'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Global backend definitions and their current Workspace assignment.' },
+  'claude-backend-profiles': { title: 'Claude Backend Profiles', description: 'Instance-wide backend definitions. Profiles are global — every Workspace sees the same list.' },
 };
 
 export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManagementKind }) {
