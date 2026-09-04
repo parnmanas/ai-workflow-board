@@ -32,6 +32,7 @@ const OUTSIDER = '44444444-4444-4444-8444-444444444444';
 const AGENT = '55555555-5555-4555-8555-555555555555';
 
 const TX_FAILURE = 'INJECTED_TRANSACTION_FAILURE';
+const EMIT_FAILURE = 'INJECTED_EMIT_FAILURE';
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
 /**
@@ -39,6 +40,14 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
  * 던져서 롤백시킨다 — 첨부 CAS 충돌(409)이나 DB 오류로 저장이 실패하는 상황의 대역이다.
  */
 let failInTx = false;
+
+/**
+ * `emitParticipantAdded` 실패 주입 스위치 (리뷰 라운드2 P1). 이 알림은 커밋 **뒤**에
+ * 일어나는 부가 작업이고 수신자 집합을 만들려고 DB 를 읽으므로 일시적으로 실패할 수 있다.
+ * 그 실패가 이미 영속된 메시지를 실패 응답으로 뒤집으면 호출자가 재시도해 같은 내용이
+ * 두 번 저장된다.
+ */
+let failEmit = false;
 
 let dataSource;
 let membership;
@@ -110,6 +119,14 @@ describe('chat 방 자유 참여(open_join)', () => {
     membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource);
     crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, noopLog, membership);
 
+    // 실제 membership 을 그대로 쓰되 `emitParticipantAdded` 만 실패시킬 수 있게 감싼다.
+    // 프로토타입 체인을 유지해야 나머지 메서드가 실제 구현 그대로 동작한다.
+    const emitFailingMembership = Object.create(membership);
+    emitFailingMembership.emitParticipantAdded = async (...args) => {
+      if (failEmit) throw new Error(EMIT_FAILURE);
+      return membership.emitParticipantAdded(...args);
+    };
+
     // messageRepo 스텁 — 트랜잭션은 **진짜**로 열고, 커밋 직전에만 실패를 주입할 수
     // 있게 감싼다. 그래야 "auto-join 이 메시지 저장과 같은 트랜잭션에서 롤백되는가"를
     // 실제로 확인할 수 있다.
@@ -138,7 +155,7 @@ describe('chat 방 자유 참여(open_join)', () => {
       { async findOne() { return null; } }, // workspaceRepo
       dataSource,        // dataSource
       noopLog,           // logService
-      membership,        // membership
+      emitFailingMembership, // membership (emitParticipantAdded 만 주입 가능하게 감쌈)
       // mentionService — 성공 경로는 커밋 뒤 본문의 @멘션을 훑는다. 이 테스트의 본문에는
       // 멘션이 없으므로 "찾은 것 없음"으로 답해 그 뒤 경로를 그대로 지나가게 한다.
       { parseMentions: () => [], async resolveMentions() { return []; } }, // mentionService
@@ -152,6 +169,7 @@ describe('chat 방 자유 참여(open_join)', () => {
 
   beforeEach(async () => {
     failInTx = false;
+    failEmit = false;
     await dataSource.getRepository(ChatRoomParticipant).clear();
     await dataSource.getRepository(ChatRoomMessage).clear();
     await dataSource.getRepository(ChatRoom).clear();
@@ -231,6 +249,39 @@ describe('chat 방 자유 참여(open_join)', () => {
       '옵션이 꺼진 방의 403 은 그대로 유지된다',
     );
     assert.equal((await activeRows(room.id, OUTSIDER)).length, 0, '거부된 발언은 참여자 행을 만들지 않는다');
+  });
+
+  it('옵션 ON: 커밋 뒤 알림이 실패해도 저장은 성공으로 끝난다 (리뷰 라운드2 P1)', async () => {
+    // `emitParticipantAdded` 는 커밋 **뒤**의 부가 작업이다. 한때 이 호출이 `onPersisted`
+    // 앞에 있었고 실패가 그대로 전파돼, 메시지와 참여자 행이 이미 커밋됐는데도 호출자는
+    // 예외를 받고 `onPersisted` 도 못 받았다 — 통합 호출자가 재시도하면 같은 내용이 두 번
+    // 저장된다. 알림 하나를 놓치는 것과 메시지가 중복되는 것은 비교 대상이 아니다.
+    const room = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
+
+    const persisted = [];
+    failEmit = true;
+    try {
+      const msg = await messaging.sendMessage(
+        room.id, WS, 'user', OUTSIDER, 'Sender', 'hello',
+        undefined, undefined, 'message',
+        { onPersisted: (id) => persisted.push(id) },
+      );
+
+      assert.ok(msg?.id, '알림이 실패해도 sendMessage 는 저장 성공으로 끝난다');
+      assert.deepEqual(persisted, [msg.id], 'onPersisted 가 호출된다 — 재시도 안전성의 신호다');
+      assert.equal(
+        await dataSource.getRepository(ChatRoomMessage).count({ where: { room_id: room.id } }),
+        1,
+        '메시지는 정확히 하나 남는다',
+      );
+      assert.equal(
+        (await activeRows(room.id, OUTSIDER)).length,
+        1,
+        'auto-join 도 커밋된 그대로 남는다 — 알림 실패가 되돌리지 않는다',
+      );
+    } finally {
+      failEmit = false;
+    }
   });
 
   it('옵션 ON: 에이전트 발신자는 완화되지 않는다 (유저 전용)', async () => {

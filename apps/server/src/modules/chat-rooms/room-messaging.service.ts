@@ -585,15 +585,34 @@ export class RoomMessagingService {
       return { savedMsg: created, attachments: projected, autoJoined: joined };
     });
 
-    // 커밋에 성공했을 때만 참여를 알린다 (티켓 995a9519 리뷰 라운드1 P1-1).
-    // 실패하면 위 트랜잭션이 참여자 행과 함께 통째로 롤백되므로 이 줄에 도달하지 않는다.
-    if (autoJoined) {
-      await this.membership.emitParticipantAdded(roomId, senderId);
-    }
     // Everything below is post-commit enrichment / dispatch. Let integrated
     // callers distinguish a durable message from a transaction failure so a
     // retry cannot bind the same pending artifact to a second row.
+    //
+    // 이 호출이 커밋 직후 **가장 먼저**여야 한다(티켓 995a9519 리뷰 라운드2 P1). 잠깐
+    // 아래의 participant_added 발행을 이 앞에 두었더니, 그 발행이 실패하면 메시지가 이미
+    // 커밋됐는데도 호출자가 예외를 받고 `onPersisted` 도 못 받는 회귀가 생겼다 — 바로 이
+    // 주석이 약속하는 "durable message 와 transaction failure 의 구분"이 깨진 것이다.
+    // 커밋 이후의 어떤 부가 작업도 이 신호보다 앞설 수 없다.
     opts?.onPersisted?.(savedMsg.id);
+
+    // 커밋에 성공했을 때만 참여를 알린다 (티켓 995a9519 리뷰 라운드1 P1-1).
+    // 실패하면 위 트랜잭션이 참여자 행과 함께 통째로 롤백되므로 이 블록에 도달하지 않는다.
+    //
+    // best-effort 인 이유(리뷰 라운드2 P1): `emitParticipantAdded` 는 수신자 집합을 만들려고
+    // DB 를 두 번 읽는다. 그 일시적 실패가 **이미 영속된** 메시지를 실패 응답으로 뒤집으면
+    // 안 된다 — 호출자가 재시도하면 같은 내용이 두 번 저장된다. 알림을 놓치는 쪽이 훨씬
+    // 가볍다: 참여자 행은 이미 커밋됐으므로 다음 방 목록/상세 조회에서 그대로 드러난다.
+    if (autoJoined) {
+      try {
+        await this.membership.emitParticipantAdded(roomId, senderId);
+      } catch (e: any) {
+        this.logService.warn(
+          'ChatRooms',
+          `participant_added fan-out failed after auto-join (room ${roomId}, user ${senderId}): ${e?.message || e}`,
+        );
+      }
+    }
 
     // Progress messages are ephemeral tool-call heartbeats; they update
     // last_message_at so the room list sort reflects activity but skip
