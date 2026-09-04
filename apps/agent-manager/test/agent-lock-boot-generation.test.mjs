@@ -279,6 +279,7 @@ async function makeHome(tag) {
 
 test('하드 리부팅으로 남은 lock 은 pid 가 살아 있어도 스스로 회수하고 기동한다', async () => {
   const home = await makeHome('reboot');
+  const boot = currentBootIdentity();
   // 이전 부팅의 유령 lock. pid 에는 **지금 확실히 살아 있는 번호**(이 테스트
   // 러너 자신)를 적는다 — 재부팅 뒤 그 낮은 번호를 다른 데몬이 차지해
   // `process.kill(pid, 0)` 이 성공/EPERM 을 내는 상황과 같은 관측값이다.
@@ -298,8 +299,10 @@ test('하드 리부팅으로 남은 lock 은 pid 가 살아 있어도 스스로 
   assert.match(stdout, /ACQUIRED:/, `이전 부팅 lock 에 갇히면 안 된다: ${stdout}`);
   assert.match(
     stderr,
-    /reusing stale lock — boot_(id|time)_mismatch/,
-    '무엇을 근거로 회수했는지가 로그에 남아야 한다',
+    boot.id === null
+      ? /reusing stale lock — boot_time_mismatch/
+      : /reusing stale lock — boot_id_mismatch/,
+    `회수 근거가 플랫폼 계약과 다르다 (boot_id=${boot.id}):\n${stderr}`,
   );
 
   // 새 lock 에는 부팅 세대가 항상 실려야 다음 부팅에서 같은 판정을 할 수 있다.
@@ -487,10 +490,18 @@ test('이전 부팅의 회수 가드가 남아 있어도 고착하지 않고 기
   const { stdout, stderr, timedOut } = await acquireInChild(home);
   assert.equal(timedOut, false, `회수 가드에서 고착하면 안 된다:\n${stderr}`);
   assert.match(stdout, /ACQUIRED:/, `가드를 회수하고 기동해야 한다: ${stdout}`);
-  assert.match(stderr, /reclaiming stale recovery guard — owner_stale/, '가드 회수 근거도 로그에 남아야 한다');
-  // 새 가드 owner 에도 부팅 세대가 실려야 다음 부팅에서 같은 판정을 할 수 있다.
-  assert.match(stderr, /boot_id_mismatch/);
-  assert.equal(boot.approxBootTimeMs <= Date.now(), true);
+  // 가드 회수 근거가 로그에 남아야 하고, 그 **사유는 플랫폼별로 갈린다** — 어느 쪽도
+  // 조용히 통과하지 않도록 기대값을 명시한다. Linux 는 커널 boot_id 로 확정 판정하고,
+  // boot_id 를 못 읽는 Windows/macOS 는 부팅 시각 근사치 폴백으로 같은 결론에 도달해야
+  // 한다. (예전엔 `/boot_id_mismatch/` 로 못박아 Windows CI 에서만 red 였다 —
+  // 제품은 정상이었고 단언이 Linux 전용이었다.)
+  assert.match(
+    stderr,
+    boot.id === null
+      ? /reclaiming stale recovery guard — owner_stale: boot_time_mismatch/
+      : /reclaiming stale recovery guard — owner_stale: boot_id_mismatch/,
+    `가드 회수 근거가 플랫폼 계약과 다르다 (boot_id=${boot.id}):\n${stderr}`,
+  );
 });
 
 test('부팅 세대 없는 구버전 회수 가드도 이전 부팅 것이면 회수하고 기동한다', async () => {
