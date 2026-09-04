@@ -33,7 +33,12 @@ import {
   DEFAULT_ATTEMPTS,
   DEFAULT_BACKOFF_MS,
   DEFAULT_TIMEOUT_MS,
+  GITHUB_AFFECTS_MAX_CHARS,
   SEVERITY_ORDER,
+  affectsChunks,
+  candidateNames,
+  fetchGithubAdvisories,
+  githubReportFor,
   atOrAboveLevel,
   auditLockfile,
   bulkPayload,
@@ -206,13 +211,17 @@ test('일시적 실패는 재시도로 흡수한다 — 이번 사고에서 실�
 test('기본 재시도 예산은 주석에 적힌 그대로다 (문서-코드 드리프트 차단)', () => {
   // 이 숫자들은 실측으로 정한 값이라 주석에 근거가 붙어 있다. 코드만 바뀌고 주석이
   // 남으면 다음 사람이 잘못된 근거를 읽게 되므로 여기서 값을 고정한다.
-  assert.equal(DEFAULT_ATTEMPTS, 4);
-  assert.equal(DEFAULT_TIMEOUT_MS, 90_000);
+  assert.equal(DEFAULT_ATTEMPTS, 2);
+  assert.equal(DEFAULT_TIMEOUT_MS, 60_000);
   assert.deepEqual([1, 2, 3].map(DEFAULT_BACKOFF_MS), [5000, 20_000, 30_000]);
-  // 최악의 경우 벽시계 상한 — 다른 잡(약 10분)보다 짧게 유지한다.
-  const worstMs = DEFAULT_ATTEMPTS * DEFAULT_TIMEOUT_MS +
-    [1, 2, 3].map(DEFAULT_BACKOFF_MS).reduce((a, b) => a + b, 0);
-  assert.ok(worstMs < 8 * 60_000, `최악 ${Math.round(worstMs / 1000)}s — 너무 길다`);
+
+  // npm 축이 죽었을 때 GitHub 폴백까지 가는 데 드는 최악 벽시계.
+  //
+  // 예산을 작게 잡은 근거가 여기 있다: 폴백이 생기기 전에는 4회*90s 였는데, 그게 CI 에서
+  // 415초를 통째로 태우고 실패했다(run 33826709579 step 9). 이제 두 번째 출처가 몇 초에
+  // 답을 주므로 npm 에서 오래 버틸 이유가 없다.
+  const npmWorstMs = DEFAULT_ATTEMPTS * DEFAULT_TIMEOUT_MS + DEFAULT_BACKOFF_MS(1);
+  assert.ok(npmWorstMs <= 130_000, `npm 축 최악 ${Math.round(npmWorstMs / 1000)}s — 너무 길다`);
 });
 
 test('전부 실패하면 통과시키지 않고 시도별 사유를 남긴다 (fail-closed)', async () => {
@@ -328,6 +337,213 @@ test('advisory 가 없으면 findings 는 비고 패키지 수는 실제로 센 
   );
   assert.deepEqual(result.findings, []);
   assert.equal(result.packageCount, 2);
+});
+
+// ───────────────── GitHub Advisory Database 폴백 축 ─────────────────
+//
+// npm 축이 죽었을 때의 두 번째 출처. 이게 없으면 npm 측 장애가 곧 저장소 전체의 병합
+// 차단이다 — 실제로 2026-09-04 npm bulk 는 200초 동안 0바이트를 돌려줬고, 같은 시각
+// GitHub 은 청크당 0.5초에 응답했다.
+
+const reg = (n, v) => ({ version: v, resolved: `https://registry.npmjs.org/${n}/-/${n}-${v}.tgz` });
+const ghAdvisory = (over = {}) => ({
+  ghsa_id: 'GHSA-test',
+  severity: 'high',
+  summary: '테스트 advisory',
+  html_url: 'https://github.com/advisories/GHSA-test',
+  withdrawn_at: null,
+  vulnerabilities: [],
+  ...over,
+});
+
+test('affects 청크는 URL 길이 한계 아래로 유지된다 (전체를 보내면 HTTP 414)', () => {
+  // 실측한 414 경계: 5,632자(200쌍)는 200, 6,523자(250쌍)는 414. 전체 580쌍은 12,688자다.
+  const byName = lockfilePackages(readRealLock());
+  const chunks = affectsChunks(byName);
+  assert.ok(chunks.length > 1, '실제 lockfile 이 한 청크에 들어갔다 — 414 를 다시 밟는다');
+  for (const c of chunks) {
+    assert.ok(
+      c.join(',').length <= GITHUB_AFFECTS_MAX_CHARS,
+      `청크가 ${c.join(',').length}자 — 예산 ${GITHUB_AFFECTS_MAX_CHARS} 초과`,
+    );
+  }
+  assert.ok(GITHUB_AFFECTS_MAX_CHARS < 5632, '예산이 실측된 통과 상한보다 커졌다');
+  // 쌍은 하나도 빠지지 않는다.
+  const total = [...byName.values()].reduce((n, set) => n + set.size, 0);
+  assert.equal(chunks.flat().length, total);
+});
+
+test('청크는 개수가 아니라 문자 예산으로 잘린다 (긴 scoped 이름 대비)', () => {
+  // 개수로 자르면 이름이 긴 lockfile 에서 같은 개수라도 길이가 한계를 넘는다.
+  const long = (i) => `@very-long-scope-name/package-with-a-long-name-${i}`;
+  const byName = new Map(Array.from({ length: 40 }, (_, i) => [long(i), new Set(['1.0.0'])]));
+  const chunks = affectsChunks(byName, 200);
+  assert.ok(chunks.length > 1, '예산을 넘겼는데 한 청크로 뭉쳤다');
+  for (const c of chunks) assert.ok(c.join(',').length <= 200, `${c.join(',').length}자`);
+  assert.equal(chunks.flat().length, 40);
+});
+
+test('한 쌍이 예산보다 길어도 잃어버리지 않는다', () => {
+  // 예산보다 긴 단일 쌍은 쪼갤 수 없다 — 버리면 그 패키지가 조용히 감사에서 빠진다.
+  const byName = new Map([['@scope/really-long-package-name', new Set(['1.0.0'])]]);
+  const chunks = affectsChunks(byName, 5);
+  assert.deepEqual(chunks, [['@scope/really-long-package-name@1.0.0']]);
+});
+
+test('affectsChunks 는 scoped 패키지를 name@version 그대로 싣는다', () => {
+  const byName = lockfilePackages({
+    packages: { 'node_modules/@babel/traverse': reg('@babel/traverse', '7.23.1') },
+  });
+  assert.deepEqual(affectsChunks(byName), [['@babel/traverse@7.23.1']]);
+});
+
+test('candidateNames 는 철회된 advisory 와 우리 목록 밖 패키지를 뺀다', () => {
+  const byName = new Map([['lodash', new Set(['4.17.21'])]]);
+  const advisories = [
+    ghAdvisory({ vulnerabilities: [{ package: { name: 'lodash' } }, { package: { name: 'lodash-es' } }] }),
+    ghAdvisory({ withdrawn_at: '2026-05-05T12:59:17Z', vulnerabilities: [{ package: { name: 'lodash' } }] }),
+  ];
+  // lodash-es 는 우리 lockfile 에 없고, 철회된 건은 통째로 무시된다.
+  assert.deepEqual([...candidateNames(advisories, byName)], ['lodash']);
+});
+
+test('githubReportFor 는 medium 을 npm 어휘의 moderate 로 옮긴다', () => {
+  const rows = githubReportFor('lodash', [
+    ghAdvisory({
+      severity: 'medium',
+      vulnerabilities: [
+        { package: { name: 'lodash' }, vulnerable_version_range: '<= 4.17.23' },
+        { package: { name: 'lodash-es' }, vulnerable_version_range: '< 1.0.0' },
+      ],
+    }),
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].severity, 'moderate');
+  // 동반 패키지의 범위가 아니라 **이 패키지의** 범위를 실어야 한다.
+  assert.equal(rows[0].vulnerableVersions ?? rows[0].vulnerable_versions, '<= 4.17.23');
+});
+
+test('githubReportFor 는 철회된 advisory 를 버린다', () => {
+  // 이걸 안 거르면 npm 축과 판정이 갈린다 — 실제 사례: GHSA-qmq6-f8pr-cx5x (uuid,
+  // 2026-05-05 철회). npm bulk 는 안 주는데 GitHub 은 준다.
+  const rows = githubReportFor('uuid', [
+    ghAdvisory({
+      withdrawn_at: '2026-05-05T12:59:17Z',
+      vulnerabilities: [{ package: { name: 'uuid' }, vulnerable_version_range: '< 14.0.0' }],
+    }),
+  ]);
+  assert.deepEqual(rows, []);
+});
+
+/** GitHub `/advisories` 대역. affects 쿼리별로 응답을 지정한다. */
+function githubFetchStub(byAffects) {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const affects = new URL(url).searchParams.get('affects');
+    calls.push(affects);
+    return { ok: true, status: 200, json: async () => byAffects[affects] ?? [] };
+  };
+  return { fetchImpl, calls };
+}
+
+test('동반 패키지를 위양성으로 보고하지 않는다 — 쌍 단위로 다시 물어 확정한다', async () => {
+  // 실제로 관측된 함정: 안전한 lodash@4.17.21 과 취약한 lodash-es@4.17.15 를 한 청크로
+  // 물으면, lodash-es 때문에 온 GHSA-35jh(`<4.17.21`) 의 vulnerabilities 에 lodash 도
+  // 들어 있다. 그대로 믿으면 안전한 lodash 를 취약하다고 보고하게 된다.
+  const byName = new Map([
+    ['lodash', new Set(['4.17.21'])],
+    ['lodash-es', new Set(['4.17.15'])],
+  ]);
+  const shared = ghAdvisory({
+    ghsa_id: 'GHSA-35jh',
+    vulnerabilities: [
+      { package: { name: 'lodash' }, vulnerable_version_range: '< 4.17.21' },
+      { package: { name: 'lodash-es' }, vulnerable_version_range: '< 4.17.21' },
+    ],
+  });
+  const { fetchImpl, calls } = githubFetchStub({
+    'lodash-es@4.17.15,lodash@4.17.21': [shared], // 넓은 청크 질의
+    'lodash-es@4.17.15': [shared], // 쌍 단위: 실제로 취약
+    'lodash@4.17.21': [], // 쌍 단위: 안전
+  });
+
+  const report = await fetchGithubAdvisories(byName, { fetchImpl, attempts: 1, backoffMs: () => 0 });
+  assert.deepEqual(Object.keys(report), ['lodash-es'], `lodash 가 위양성으로 들어갔다: ${calls}`);
+  // 넓은 질의 1회 + 후보 2개에 대한 쌍 단위 재질의 2회.
+  assert.equal(calls.length, 3);
+});
+
+test('후보가 없으면 쌍 단위 재질의를 아예 하지 않는다 (정상 상태의 비용)', async () => {
+  const byName = new Map([['a', new Set(['1.0.0'])]]);
+  const { fetchImpl, calls } = githubFetchStub({ 'a@1.0.0': [] });
+  const report = await fetchGithubAdvisories(byName, { fetchImpl, attempts: 1, backoffMs: () => 0 });
+  assert.deepEqual(report, {});
+  assert.equal(calls.length, 1, `재질의가 돌았다: ${calls}`);
+});
+
+test('npm 축이 죽으면 GitHub 축으로 넘어가고, 출처를 밝힌다', async () => {
+  const byName = { packages: { 'node_modules/a': reg('a', '1.0.0') } };
+  const fallbacks = [];
+  const fetchImpl = async (url) => {
+    if (url.includes('registry.npmjs.org')) throw new Error('The operation was aborted due to timeout');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [
+        ghAdvisory({
+          severity: 'critical',
+          vulnerabilities: [{ package: { name: 'a' }, vulnerable_version_range: '< 2.0.0' }],
+        }),
+      ],
+    };
+  };
+  const res = await auditLockfile(byName, {
+    level: 'moderate',
+    fetchImpl,
+    attempts: 1,
+    backoffMs: () => 0,
+    onSourceFallback: (e) => fallbacks.push(e.message),
+  });
+  assert.equal(res.source, 'github');
+  assert.equal(res.findings.length, 1);
+  assert.equal(res.findings[0].severity, 'critical');
+  assert.equal(fallbacks.length, 1, '폴백이 조용히 일어났다 — 로그에 남아야 한다');
+});
+
+test('npm 축이 살아 있으면 GitHub 을 아예 부르지 않는다', async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(new URL(url).host);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const res = await auditLockfile(
+    { packages: { 'node_modules/a': reg('a', '1.0.0') } },
+    { fetchImpl, attempts: 1, backoffMs: () => 0 },
+  );
+  assert.equal(res.source, 'npm');
+  assert.deepEqual(seen, ['registry.npmjs.org']);
+});
+
+test('두 출처가 모두 죽으면 통과가 아니라 실패다 (fail-closed)', async () => {
+  await assert.rejects(
+    auditLockfile(
+      { packages: { 'node_modules/a': reg('a', '1.0.0') } },
+      {
+        fetchImpl: async (url) => {
+          throw new Error(url.includes('api.github.com') ? 'github 503' : 'npm timeout');
+        },
+        attempts: 1,
+        backoffMs: () => 0,
+      },
+    ),
+    (e) => {
+      assert.match(e.message, /두 곳이 모두 실패/);
+      assert.match(e.message, /npm timeout/);
+      assert.match(e.message, /github 503/);
+      assert.equal(e.sourceErrors.length, 2);
+      return true;
+    },
+  );
 });
 
 // ───────────────────── ci.yml 스텝 순서 회귀 가드 ─────────────────────

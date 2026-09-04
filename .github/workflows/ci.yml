@@ -157,15 +157,26 @@ jobs:
 
       # ── 여기부터 네트워크 의존 ──
       #
-      # `npm audit` 을 쓰지 않고 bulk advisory 엔드포인트를 직접 조회한다. 이유는
+      # `npm audit` 을 쓰지 않고 advisory 엔드포인트를 직접 조회한다. 이유는
       # scripts/audit-lockfile-advisories.mjs 헤더 참조 — 요약하면 CI 의 npm(Node 22
       # 번들 10.9.x)은 bulk 가 흔들리면 **은퇴 대상인 quick 엔드포인트로 폴백**하고,
       # 그 엔드포인트는 이 저장소의 workspaces lockfile 에 400 을 돌려주므로 폴백이
       # 성공할 수 있는 경우가 없다. 재시도를 우리가 걸어야 흡수된다.
       #
+      # 출처가 둘이다: npm bulk 를 먼저 보고, 죽어 있으면 GitHub Advisory Database 로
+      # 넘어간다. npm 축 하나만 두면 npm 측 장애가 곧 저장소 전체의 병합 차단이다 —
+      # 실제로 2026-09-04 npm bulk 는 200초 동안 0바이트를 돌려줬다.
+      #
       # 판정 자체는 그대로 fail-closed 다 — moderate 이상 advisory 가 있으면 실패하고,
-      # 조회를 끝내 못 하면 "확인 못 했다" 를 통과로 바꾸지 않는다.
-      - name: 취약점 감사 (bulk advisory 엔드포인트, moderate 이상 실패)
+      # **두 출처가 모두** 조회에 실패하면 "확인 못 했다" 를 통과로 바꾸지 않는다.
+      #
+      # 폴백 축에 GITHUB_TOKEN 을 **일부러 넘기지 않는다.** `/advisories` 는 공개
+      # 엔드포인트라 비인증으로도 돌고, 이 워크플로는 `pull_request` 에서 PR 이 저작한
+      # 코드를 그대로 실행한다 — 여기에 secret 을 넣으면 그 코드가 만질 수 있는 자리에
+      # 두는 셈이다. supply-chain-integrity-guard.test.mjs 의 "ci.yml now references a
+      # secret" 단언이 지키는 선이 바로 이것이라 넘지 않는다. 비인증 한도(시간당 60회)에
+      # 걸리면 통과가 아니라 fail-closed 로 죽는다.
+      - name: 취약점 감사 (advisory 조회, moderate 이상 실패)
         run: node scripts/audit-lockfile-advisories.mjs --audit-level=moderate
       # schedule 전용 — cron 은 기본 브랜치(main)에서만 돌므로, 이 스텝이 없으면
       # 배포 브랜치는 "다음 push" 까지 새 advisory 를 한 번도 평가받지 못한다.
