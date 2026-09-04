@@ -855,8 +855,8 @@ export default function TicketPanel({
   useEffect(() => {
     if (!workspaceId) { setRuntimeProfiles([]); return; }
     let alive = true;
-    api.getWorkspaceClaudeBackendProfiles(workspaceId).then(data => {
-      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
+    api.listClaudeBackendProfiles().then(data => {
+      if (alive) setRuntimeProfiles(data.profiles);
     }).catch(() => { if (alive) setRuntimeProfiles([]); });
     return () => { alive = false; };
   }, [workspaceId]);

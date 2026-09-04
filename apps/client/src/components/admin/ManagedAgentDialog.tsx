@@ -153,9 +153,9 @@ export default function ManagedAgentDialog({
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
-    api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
+    api.listClaudeBackendProfiles().then(data => {
       if (!alive) return;
-      const profiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
+      const profiles = data.profiles;
       setRuntimeProfiles(profiles);
       setRuntimeProfile((selected) => reconcileRuntimeProfileSelection(selected, profiles));
       setRuntimeProfilesState('ready');

@@ -53,8 +53,8 @@ export default function BoardSettingsPage() {
       .then((list) => { if (!cancelled) setDefaultPromptTemplates(list); })
       .catch(() => { if (!cancelled) setDefaultPromptTemplates([]); });
     api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
-    api.getWorkspaceClaudeBackendProfiles(wsId)
-      .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles.filter(p => value.allowed_profile_ids.includes(p.id))); })
+    api.listClaudeBackendProfiles()
+      .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles); })
       .catch(() => { if (!cancelled) setRuntimeProfiles([]); });
     return () => { cancelled = true; };
   }, [wsId]);

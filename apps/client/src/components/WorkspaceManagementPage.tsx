@@ -14,7 +14,7 @@ import QaManager from './admin/QaManager';
 import SecurityManager from './admin/SecurityManager';
 import WorkspaceSchedulesEditor from './WorkspaceSchedulesEditor';
 import ClaudeBackendProfilesManager from './admin/ClaudeBackendProfilesManager';
-import WorkspaceClaudeBackendProfilesEditor from './WorkspaceClaudeBackendProfilesEditor';
+import { PermissionNotice } from './common';
 
 export type WorkspaceManagementKind =
   | 'functions'
@@ -78,16 +78,18 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
       case 'schedules':
         return <WorkspaceSchedulesEditor workspaceId={wsId} />;
       case 'claude-backend-profiles':
-        return (
-          <>
-            {hasPermission('admin.access') && (
-              <div style={{ marginBottom: 20 }}>
-                <ClaudeBackendProfilesManager workspaceId={wsId} />
-              </div>
-            )}
-            <WorkspaceClaudeBackendProfilesEditor workspaceId={wsId} />
-          </>
-        );
+        // 프로필은 인스턴스 전역이라 워크스페이스 배정/기본값 UI 가 없다
+        // (티켓 e616dbfc). 관리는 관리자 전용이므로 비관리자에게는 탭을
+        // 숨기는 대신 다른 탭과 같은 방식으로 권한 안내를 렌더한다 — 탭만
+        // 사라지면 이 화면에서 유일하게 동작이 달라진다.
+        return hasPermission('admin.access')
+          ? <ClaudeBackendProfilesManager workspaceId={wsId} />
+          : (
+            <PermissionNotice
+              title="관리자 권한이 필요합니다"
+              message="Claude backend 프로필은 인스턴스 전역 설정이라 관리자만 편집할 수 있습니다."
+            />
+          );
     }
   })();
 

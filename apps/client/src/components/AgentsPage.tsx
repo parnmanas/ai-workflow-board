@@ -243,10 +243,10 @@ export default function AgentsPage() {
       api.listCredentials(wsId)
         .then((rows) => { if (alive) setCredentials(rows); })
         .catch(() => { if (alive) setCredentials([]); });
-      api.getWorkspaceClaudeBackendProfiles(wsId)
+      api.listClaudeBackendProfiles()
         .then((data) => {
           if (!alive) return;
-          const profiles = data.profiles.filter(p => data.allowed_profile_ids.includes(p.id));
+          const profiles = data.profiles;
           setRuntimeProfiles(profiles);
           setManagedForm(form => ({
             ...form,
