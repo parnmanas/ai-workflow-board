@@ -116,6 +116,21 @@ function RoomHeaderActions({
     );
   }
 
+  // 아직 참여하지 않은 자유 참여 방(ticket 995a9519). 방은 목록에 보이고 읽을 수도
+  // 있지만, 참여자 전용 동작(초대·이름 변경·내 이력 지우기·나가기·옵션 토글)은 서버가
+  // 전부 거부한다. 눌러도 실패할 버튼을 주는 대신 감추고, 어떻게 참여하는지 알려준다.
+  // `false` 일 때만 감춘다 — 값이 없는(구버전) 응답은 예전처럼 참여자로 본다.
+  if (room.is_participant === false) {
+    return (
+      <span
+        data-testid="room-open-join-hint"
+        style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}
+      >
+        Open room — send a message to join
+      </span>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', gap: tokens.spacing.sm }}>
       {/* Add People stays group-only — DMs are fixed at 2 participants. */}
