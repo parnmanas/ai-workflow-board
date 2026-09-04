@@ -282,6 +282,27 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+/** `delay()` 와 같지만 타이머 핸들을 끌 수 있다.
+ *
+ *  레이스에서 지는 쪽 대기에는 **반드시** 이 형태를 써야 한다. `delay()` 의
+ *  타이머는 위 주석대로 의도적으로 ref 상태라, `Promise.race` 에서 져도 남은
+ *  시간 동안 이벤트 루프를 계속 붙잡는다. `terminateWindowsProcessTree` 의
+ *  grace 는 호출부에 따라 최대 5,000ms(runtime-profiles 기본값)이므로, 자식
+ *  종료를 즉시 관측해 함수가 곧바로 반환해도 프로세스는 그만큼 더 살아 있었다
+ *  — 매니저 종료와 테스트 프로세스 수명이 그대로 늘어난다. */
+function cancellableDelay(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+}
+
 /** Best-effort kill of the given pids. The caller passes the FULL transitive
  *  non-benign descendant set (collectNonBenignDescendants already flattens the
  *  subtree), so every process is signalled by pid explicitly — reparent-to-init
@@ -382,11 +403,12 @@ const EXIT_OBSERVE_MS = 50;
 async function waitForChildExit(
   child: ExitObservableChild,
   budgetMs: number,
-  sleep: (ms: number) => Promise<void>,
+  injectedSleep?: (ms: number) => Promise<void>,
 ): Promise<void> {
   if (budgetMs <= 0 || childHasExited(child)) return;
   if (typeof child.once !== 'function') {
-    await sleep(budgetMs);
+    // 레이스가 아니라 예산을 통째로 쓰는 경로 — 취소할 것이 없다.
+    await (injectedSleep ? injectedSleep(budgetMs) : delay(budgetMs));
     return;
   }
   // 리스너는 settle 이 확정된 **뒤에** 등록한다. 순서가 뒤바뀌면 그 사이에 온
@@ -395,9 +417,18 @@ async function waitForChildExit(
   const exited = new Promise<void>(resolve => { settle = resolve; });
   const onExit = () => settle();
   child.once('exit', onExit);
+  // 주입된 sleep 은 테스트 이음매라 취소 수단이 없다 — 그건 그대로 두고, 실제로
+  // 타이머를 만드는 기본 경로만 취소 가능한 대기를 쓴다. 이게 없으면 'exit' 가
+  // 이겨도 진 타이머가 남은 grace 동안 이벤트 루프를 붙잡는다.
+  const wait = injectedSleep
+    ? { promise: injectedSleep(budgetMs), cancel: () => {} }
+    : cancellableDelay(budgetMs);
   try {
-    await Promise.race([exited, sleep(budgetMs)]);
+    await Promise.race([exited, wait.promise]);
   } finally {
+    // 'exit' 가 이겼으면 남은 타이머를 끈다. 예산이 이겼으면 이미 만료된
+    // 타이머라 clearTimeout 이 무해하다.
+    wait.cancel();
     // 예산이 먼저 끝난 경우 리스너가 남는다. 이 핸들은 곧 버려지지만, 정리할
     // 수단이 있으면 정리한다.
     child.off?.('exit', onExit);
@@ -416,7 +447,10 @@ export async function terminateWindowsProcessTree(
   } = {},
 ): Promise<void> {
   const run = options.run ?? runCommand;
-  const sleep = options.sleep ?? delay;
+  // 주입 여부를 그대로 넘긴다 — waitForChildExit 은 주입이 없을 때만 취소 가능한
+  // 타이머를 쓸 수 있고, 여기서 `?? delay` 로 미리 묶으면 그 구분이 사라진다.
+  const injectedSleep = options.sleep;
+  const sleep = injectedSleep ?? delay;
   const child = options.child;
 
   // 이미 죽은 자식의 pid 로는 아무것도 죽여선 안 된다 — 그 pid 는 이미 남의
@@ -435,7 +469,7 @@ export async function terminateWindowsProcessTree(
   let remainingGraceMs = graceMs;
   if (child) {
     const observeMs = Math.min(graceMs, EXIT_OBSERVE_MS);
-    await waitForChildExit(child, observeMs, sleep);
+    await waitForChildExit(child, observeMs, injectedSleep);
     remainingGraceMs -= observeMs;
     if (childHasExited(child)) {
       log(`[process-tree] win32 tree-kill skipped: pid=${rootPid} already exited (pid may be recycled)`);
@@ -444,7 +478,7 @@ export async function terminateWindowsProcessTree(
   }
 
   logTaskkill('soft', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 }));
-  if (child) await waitForChildExit(child, remainingGraceMs, sleep);
+  if (child) await waitForChildExit(child, remainingGraceMs, injectedSleep);
   else await sleep(remainingGraceMs);
 
   // grace 동안 자식이 끝났으면 force 패스를 쏘지 않는다. 이 창(hermes 250ms,

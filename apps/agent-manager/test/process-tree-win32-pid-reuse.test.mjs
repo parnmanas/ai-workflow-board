@@ -198,3 +198,79 @@ test('src/lib 의 모든 terminateDetachedProcessTree 호출부가 child 핸들�
   // 남으면 그 호출부는 검사 없이 통과하므로, 개수 불일치 자체를 실패로 본다.
   assert.equal(parsed, mentions, `파싱하지 못한 호출 형태가 있다 (발견 ${mentions} / 검사 ${parsed}) — 위 정규식을 그 형태까지 넓혀야 한다`);
 });
+
+// -- 남은 grace 타이머 정리 (리뷰 지적) ---------------------------------------
+//
+// 위 테스트들은 sleep 을 주입해 예산만 기록한다 — 가짜 sleep 은 타이머를 아예
+// 만들지 않으므로 "레이스에서 진 타이머가 남는지"를 볼 수 없다. 그런데 실제
+// `delay()` 의 타이머는 의도적으로 ref 상태라(process-tree.ts 의 delay 주석),
+// 'exit' 가 이겨 함수가 즉시 반환해도 남은 grace 동안 이벤트 루프를 붙잡는다.
+// runtime-profiles 기본 경로는 grace 가 5,000ms 라 매니저 종료/테스트 프로세스
+// 수명이 그만큼 늘어난다. 그래서 여기서는 **sleep 을 주입하지 않고** 진짜
+// 타이머를 태운 뒤, 활성 핸들 수로 판정한다.
+
+/** 이 프로세스가 실제로 붙잡고 있는 Timeout 핸들 수. */
+function activeTimerCount() {
+  return process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+}
+
+/** 'exit' 구독 시점을 알려주는 핸들. n번째 구독이 등록될 때까지 기다릴 수 있어
+ *  고정 sleep 없이 happens-before 를 고정한다 — 구독 전에 exit 를 내면 대기가
+ *  아예 시작되지 않아(childHasExited 조기 반환) 테스트가 공허해진다. */
+function subscribableChild() {
+  const listeners = new Set();
+  const waiters = new Map();
+  let subscriptions = 0;
+  return {
+    exitCode: null,
+    signalCode: null,
+    once(event, listener) {
+      if (event !== 'exit') return;
+      listeners.add(listener);
+      subscriptions += 1;
+      const resolve = waiters.get(subscriptions);
+      if (resolve) { waiters.delete(subscriptions); resolve(); }
+    },
+    off(event, listener) { if (event === 'exit') listeners.delete(listener); },
+    /** n번째 'exit' 구독이 등록될 때까지. */
+    subscription(n) {
+      if (subscriptions >= n) return Promise.resolve();
+      return new Promise((resolve) => waiters.set(n, resolve));
+    },
+    emitExit(code = 0) {
+      this.exitCode = code;
+      for (const l of [...listeners]) { listeners.delete(l); l(); }
+    },
+  };
+}
+
+test('남은 grace 도중 exit 로 깨어나면 진 타이머를 즉시 끈다 (실제 타이머/활성 핸들 기준)', async () => {
+  const child = subscribableChild();
+  const calls = [];
+  const run = async (cmd, args) => { calls.push(`${cmd} ${args.join(' ')}`); return { ...OK }; };
+
+  const before = activeTimerCount();
+  // sleep 을 주입하지 않는다 → 기본 경로의 진짜 setTimeout 을 태운다.
+  // grace 는 runtime-profiles 기본값과 같은 5,000ms.
+  const done = terminateWindowsProcessTree(4321, 5000, { child, run });
+
+  // 1번째 구독은 진입 관측(50ms), 2번째가 soft 이후 남은 grace(4,950ms) 대기다.
+  // 그 구독이 걸린 뒤에 exit 를 내야 실제로 "레이스에서 이긴" 경로를 태운다.
+  await child.subscription(2);
+  const during = activeTimerCount();
+  assert.ok(
+    during > before,
+    '남은 grace 타이머가 만들어지지 않았다 — 이 테스트가 누수 경로를 태우지 못한다(공허)',
+  );
+
+  child.emitExit(0);
+  await done;
+
+  const after = activeTimerCount();
+  assert.deepEqual(calls, ['taskkill /PID 4321 /T'], 'grace 중 종료했으므로 force 패스는 없다');
+  assert.ok(after < during, '조기 반환 뒤에도 grace 타이머가 그대로 살아 있다');
+  assert.equal(
+    after, before,
+    'Promise.race 에서 진 타이머를 끄지 않아 남은 grace 만큼 이벤트 루프를 붙잡는다',
+  );
+});
