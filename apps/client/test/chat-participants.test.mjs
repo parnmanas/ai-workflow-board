@@ -515,3 +515,39 @@ test('projectParticipants / countUserParticipants: wire → 로스터 투영과 
   assert.deepEqual(projectParticipants(null), [], 'null 방어');
   assert.deepEqual(projectParticipants({ id: 'A' }), [], 'participants 누락 방어');
 });
+
+test('dispatchChatRoomUpdate: open_join_changed 는 해당 방의 플래그만 갱신한다 (ticket 995a9519)', async () => {
+  const roomsState = makeRoomsState([
+    roomListItem('A', { open_join: false, unread_count: 3 }),
+    roomListItem('B', { open_join: true }),
+  ]);
+  let listCalls = 0;
+  let rosterRefreshed = false;
+  const deps = {
+    currentUserId: 'u-self',
+    getActiveRoomId: () => 'A',
+    listChatRooms: () => {
+      listCalls++;
+      return Promise.resolve([]);
+    },
+    setRooms: roomsState.setRooms,
+    refreshActiveRoomParticipants: () => {
+      rosterRefreshed = true;
+    },
+  };
+
+  dispatchChatRoomUpdate(deps, { payload: { update_type: 'open_join_changed', room_id: 'A', open_join: true } });
+  await flush();
+
+  assert.equal(roomsState.get()[0].open_join, true, '대상 방의 open_join 이 켜진다');
+  assert.equal(roomsState.get()[0].unread_count, 3, '다른 필드는 건드리지 않는다');
+  assert.equal(roomsState.get()[1].open_join, true, '다른 방은 그대로다');
+  assert.equal(listCalls, 0, '플래그 하나 바뀌는 데 방 목록 전체를 다시 부르지 않는다');
+  assert.equal(rosterRefreshed, false, '참여자 로스터와는 무관한 이벤트다');
+
+  // 끄는 방향도 같은 경로로 반영된다 — 서버는 false 도 그대로 실어 보낸다.
+  dispatchChatRoomUpdate(deps, { payload: { update_type: 'open_join_changed', room_id: 'B', open_join: false } });
+  await flush();
+  assert.equal(roomsState.get()[1].open_join, false, '끄는 변경도 반영된다');
+  assert.equal(roomsState.get()[0].open_join, true, '앞선 변경이 되돌아가지 않는다');
+});
