@@ -84,20 +84,22 @@ export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 export const SEVERITY_ORDER = ['info', 'low', 'moderate', 'high', 'critical'];
 
 export const DEFAULT_AUDIT_LEVEL = 'moderate';
-export const DEFAULT_ATTEMPTS = 4;
 
 /**
- * 요청 하나의 상한. 실측(2026-09-04, 537개 payload)으로 정한 값이다 — 정상 응답이
- * 14.5s / 18.7s / 43.0s 로 편차가 크다. 30s 로 잡았더니 정상 응답을 두 번 잘라냈다.
+ * npm 쪽 예산. 정상일 때 응답은 14.5s / 18.7s / 43.0s 였다(2026-09-04, 537개 payload
+ * 실측) — 편차가 커서 30s 로 잡았더니 정상 응답을 두 번 잘라냈다. 60s 면 관측된
+ * 정상 응답을 전부 덮는다.
  *
  * payload 를 쪼개면 빨라질 것 같지만 반대다: 150개씩 4조각으로 나눠 연속 호출하니
  * 20.0s / 193.9s / 104.2s 로 **뒤로 갈수록 느려졌다**. 크기가 아니라 연속 호출이
- * 스로틀을 부른다. 그래서 쪼개지 않고 한 번에 보내고, 재시도는 간격을 벌린다.
+ * 스로틀을 부른다. 그래서 쪼개지 않고 한 번에 보낸다.
  *
- * 최악의 경우 90s*4 + 백오프(5+20+30) ≈ 6.9분이다. 지금은 그 자리에서 약 7분을 쓰고
- * **확정적으로 실패**하므로(위 티켓 로그), 같은 시간을 쓰더라도 통과할 수 있는 쪽이 낫다.
+ * 시도를 2회로 줄인 건 **폴백이 생겼기 때문**이다. 아래 GitHub 축이 약 3초에 같은
+ * 답을 주므로, npm 이 죽었을 때 여기서 오래 버틸 이유가 없다. 실제로 4회*90s 예산은
+ * CI 에서 415초를 통째로 태우고 실패했다(run 33826709579 step 9).
  */
-export const DEFAULT_TIMEOUT_MS = 90_000;
+export const DEFAULT_ATTEMPTS = 2;
+export const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
  * 재시도 간격: 5s / 20s / 30s. 위 실측대로 연속 호출이 스로틀을 부르므로 촘촘한
@@ -105,6 +107,31 @@ export const DEFAULT_TIMEOUT_MS = 90_000;
  * 않게 테스트가 실제 스케줄을 단언할 수 있게 하려는 것이다.
  */
 export const DEFAULT_BACKOFF_MS = (attempt) => Math.min(5000 * attempt ** 2, 30_000);
+
+export const GITHUB_API = 'https://api.github.com';
+
+/**
+ * `affects` 는 쿼리스트링이라 길이 제한이 있다. 실측한 414 경계(2026-09-04):
+ *
+ *     5,632자(200쌍) → HTTP 200
+ *     6,523자(250쌍) → HTTP 414 Request-URL too long
+ *
+ * 그래서 **개수가 아니라 문자 예산**으로 쪼갠다. 개수로 자르면 scoped 이름이 많은
+ * lockfile 에서 같은 개수라도 길이가 훌쩍 넘어 414 를 다시 밟는다 — 길이가 실제 한계고
+ * 개수는 그 대리 변수일 뿐이다. 4,000자면 경계까지 여유가 충분하고, 지금 트리(12,688자)
+ * 기준 4조각이라 비인증 rate limit(시간당 60회) 관점에서도 값싸다.
+ */
+export const GITHUB_AFFECTS_MAX_CHARS = 4000;
+export const GITHUB_PER_PAGE = 100;
+export const GITHUB_MAX_PAGES = 20;
+
+/** GitHub 은 npm 의 'moderate' 를 'medium' 이라 부른다. 나머지 등급은 이름이 같다. */
+export const GITHUB_SEVERITY = {
+  low: 'low',
+  medium: 'moderate',
+  high: 'high',
+  critical: 'critical',
+};
 
 /**
  * `severity` 가 `level` 이상인가. 모르는 심각도 문자열은 **가장 높게** 취급한다 —
@@ -203,60 +230,216 @@ export function collectFindings(report, byName, level = DEFAULT_AUDIT_LEVEL) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** HTTP 로 JSON 하나를 받아온다. 비-2xx 와 JSON 아님은 전부 throw — 조용히 넘어가지 않는다. */
+async function requestJson(
+  url,
+  { method = 'GET', headers = {}, body, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = globalThis.fetch } = {},
+) {
+  const res = await fetchImpl(url, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText ?? ''}`.trim());
+  return res.json();
+}
+
 /**
- * bulk 엔드포인트를 재시도와 함께 조회한다. 전부 실패하면 throw — 호출부가
- * fail-closed 로 처리한다.
+ * 재시도 래퍼. 전부 실패하면 시도별 사유를 담아 throw — 호출부가 fail-closed 로 처리한다.
  *
  * 재시도 간격은 오히려 **벌린다**(5s / 20s / 30s). 위 DEFAULT_TIMEOUT_MS 주석의 실측처럼
- * 연속 호출이 스로틀을 부르므로, 촘촘한 재시도는 상황을 악화시킨다. 여기서 흡수하려는 건
- * 레지스트리의 일시적 저하이지 장기 장애가 아니다 — 장기 장애라면 어차피 다른 잡의
- * `npm ci` 가 먼저 죽으므로 여기서 눈감아도 병합 경로가 열리지 않는다.
+ * 연속 호출이 스로틀을 부르므로, 촘촘한 재시도는 상황을 악화시킨다.
  */
-export async function fetchAdvisories(
-  payload,
-  {
-    registry = DEFAULT_REGISTRY,
-    attempts = DEFAULT_ATTEMPTS,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    fetchImpl = globalThis.fetch,
-    onRetry = () => {},
-    backoffMs = DEFAULT_BACKOFF_MS,
-  } = {},
+export async function withRetries(
+  label,
+  fn,
+  { attempts = DEFAULT_ATTEMPTS, onRetry = () => {}, backoffMs = DEFAULT_BACKOFF_MS } = {},
 ) {
-  const url = `${registry.replace(/\/+$/, '')}${BULK_ADVISORY_PATH}`;
   const errors = [];
-
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const res = await fetchImpl(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'npm-command': 'audit' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText ?? ''}`.trim());
-      }
-      const body = await res.json();
-      if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        throw new Error(`advisory 응답이 객체가 아니다: ${JSON.stringify(body)?.slice(0, 200)}`);
-      }
-      return body;
+      return await fn(attempt);
     } catch (e) {
       errors.push(`시도 ${attempt}/${attempts}: ${e?.message ?? e}`);
       if (attempt < attempts) {
-        onRetry(attempt, e);
+        onRetry(attempt, e, label);
         await sleep(backoffMs(attempt));
       }
     }
   }
-
   const err = new Error(
-    `bulk advisory 엔드포인트 조회에 ${attempts}회 모두 실패했다:\n` +
-      errors.map((m) => `  - ${m}`).join('\n'),
+    `${label}: ${attempts}회 모두 실패했다:\n` + errors.map((m) => `  - ${m}`).join('\n'),
   );
   err.attemptErrors = errors;
   throw err;
+}
+
+/** npm 의 bulk advisory 엔드포인트를 재시도와 함께 조회한다. */
+export async function fetchAdvisories(payload, options = {}) {
+  const { registry = DEFAULT_REGISTRY, ...rest } = options;
+  const url = `${registry.replace(/\/+$/, '')}${BULK_ADVISORY_PATH}`;
+  return withRetries(
+    'bulk advisory 엔드포인트 조회',
+    async () => {
+      const body = await requestJson(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'npm-command': 'audit' },
+        body: JSON.stringify(payload),
+        ...rest,
+      });
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw new Error(`advisory 응답이 객체가 아니다: ${JSON.stringify(body)?.slice(0, 200)}`);
+      }
+      return body;
+    },
+    rest,
+  );
+}
+
+/**
+ * ── 폴백 축: GitHub Advisory Database ──
+ *
+ * npm 의 bulk 엔드포인트가 죽으면 여기로 넘어온다. 왜 이게 필요한지는 실측이 말한다
+ * (2026-09-04): npm bulk 는 200초 동안 **0바이트**를 돌려줬고, 같은 시각 GitHub 은
+ * 청크당 0.5초에 응답했다. npm 축만 있으면 npm 측 장애가 곧 저장소 전체의 병합 차단이다.
+ *
+ * 같은 데이터의 상류이기도 하다 — npm 의 advisory 는 GHSA 를 받아 쓴다. 실제로 우리
+ * lockfile 에 대해 두 축의 판정이 일치했다(둘 다 0건). 단, **withdrawn 을 걸러야**
+ * 일치한다: GitHub 은 철회된 중복 advisory(GHSA-qmq6-f8pr-cx5x, uuid, 2026-05-05 철회)
+ * 도 돌려주는데 npm 은 안 준다.
+ *
+ * 이건 fail-open 이 아니다. 두 축이 **모두** 실패하면 그대로 실패시킨다.
+ */
+export function affectsChunks(byName, maxChars = GITHUB_AFFECTS_MAX_CHARS) {
+  const pairs = [];
+  for (const [name, versions] of byName) for (const v of versions) pairs.push(`${name}@${v}`);
+  pairs.sort();
+
+  const chunks = [];
+  let current = [];
+  let length = 0;
+  for (const pair of pairs) {
+    const added = current.length === 0 ? pair.length : pair.length + 1; // 구분자 ','
+    if (current.length > 0 && length + added > maxChars) {
+      chunks.push(current);
+      current = [];
+      length = 0;
+    }
+    current.push(pair);
+    length += current.length === 1 ? pair.length : pair.length + 1;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * 응답에서 **우리 lockfile 에 있는** 패키지명만 뽑는다.
+ *
+ * 여기서 바로 findings 를 만들면 안 된다 — advisory 의 `vulnerabilities[]` 에는 같은
+ * 취약점을 공유하는 **동반 패키지**가 함께 실린다. 예를 들어 안전한 lodash@4.17.21 과
+ * 취약한 lodash-es@4.17.15 를 한 청크로 물으면, lodash-es 때문에 온 GHSA-35jh-r3h4-6jhm
+ * (`<4.17.21`)의 목록에 lodash 도 들어 있다(실측). 그대로 믿으면 안전한 lodash 를
+ * 취약하다고 보고하는 **위양성**이 된다. 그래서 이건 '후보' 일 뿐이고, 확정은 아래
+ * 쌍 단위 재질의가 한다.
+ */
+export function candidateNames(advisories, byName) {
+  const names = new Set();
+  for (const adv of advisories ?? []) {
+    if (adv?.withdrawn_at) continue;
+    for (const v of adv?.vulnerabilities ?? []) {
+      const name = v?.package?.name;
+      if (name && byName.has(name)) names.add(name);
+    }
+  }
+  return names;
+}
+
+/** GitHub advisory 목록을 npm bulk 와 같은 `{ 패키지명: [advisory...] }` 형태로. */
+export function githubReportFor(name, advisories) {
+  const rows = [];
+  for (const adv of advisories ?? []) {
+    if (adv?.withdrawn_at) continue;
+    const hit = (adv.vulnerabilities ?? []).find((v) => v?.package?.name === name);
+    if (!hit) continue;
+    rows.push({
+      severity: GITHUB_SEVERITY[adv.severity] ?? adv.severity,
+      title: adv.summary ?? adv.ghsa_id ?? '(제목 없음)',
+      url: adv.html_url ?? (adv.ghsa_id ? `https://github.com/advisories/${adv.ghsa_id}` : ''),
+      vulnerable_versions: hit.vulnerable_version_range ?? '',
+    });
+  }
+  return rows;
+}
+
+/** `/advisories` 한 질의(페이지네이션 포함). */
+async function githubQuery(affects, opts) {
+  const { api = GITHUB_API, token, perPage = GITHUB_PER_PAGE, maxPages = GITHUB_MAX_PAGES } = opts;
+  const headers = {
+    accept: 'application/vnd.github+json',
+    'x-github-api-version': '2022-11-28',
+    'user-agent': 'awb-audit-lockfile-advisories',
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const all = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const qs = new URLSearchParams({
+      ecosystem: 'npm',
+      affects,
+      per_page: String(perPage),
+      page: String(page),
+    });
+    const body = await requestJson(`${api}/advisories?${qs}`, { headers, ...opts });
+    if (!Array.isArray(body)) throw new Error('advisory 목록이 배열이 아니다');
+    all.push(...body);
+    if (body.length < perPage) return all;
+  }
+  throw new Error(`advisory 페이지가 ${maxPages}쪽을 넘었다 — 질의가 너무 넓다`);
+}
+
+/**
+ * GitHub 축으로 lockfile 을 감사해 npm bulk 와 같은 형태의 report 를 만든다.
+ *
+ * 2단계다: (1) 청크로 넓게 훑어 후보 패키지명을 얻고, (2) 후보의 **설치된 버전마다**
+ * 한 쌍씩 다시 물어 정확히 귀속한다. 2단계는 GitHub 자신의 버전 매칭을 그대로 쓰므로
+ * 우리가 semver 범위를 해석할 필요가 없다 — 직접 구현하면 그게 새 버그 표면이 된다.
+ * 후보가 없으면 2단계는 아예 돌지 않으므로(정상 상태) 비용은 청크 수만큼이다.
+ */
+export async function fetchGithubAdvisories(byName, options = {}) {
+  const {
+    // 토큰은 **ci.yml 에서 넘기지 않는다.** `/advisories` 는 공개 엔드포인트라 없어도
+    // 돌고, ci.yml 은 `pull_request` 에서 PR 이 저작한 코드를 그대로 실행하므로 거기에
+    // secret 을 넣으면 supply-chain-integrity-guard 가 막는 노출 표면이 생긴다
+    // (그 가드의 "ci.yml now references a secret" 단언). 비인증은 시간당 60회 제한이
+    // 있지만 이 축은 npm 이 죽었을 때만, 그것도 몇 회만 부른다. 한도에 걸리면 조용히
+    // 통과하지 않고 fail-closed 로 죽는다.
+    //
+    // 환경변수로 들어오면 쓴다 — ci.yml 밖(로컬·수동 실행)에서 한도를 늘리는 용도다.
+    token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '',
+    chunkSize = GITHUB_AFFECTS_MAX_CHARS,
+    attempts = DEFAULT_ATTEMPTS,
+    ...rest
+  } = options;
+  const opts = { token, attempts, ...rest };
+
+  const candidates = new Set();
+  for (const chunk of affectsChunks(byName, chunkSize)) {
+    const advisories = await withRetries('GitHub advisory 조회', () =>
+      githubQuery(chunk.join(','), opts), opts);
+    for (const name of candidateNames(advisories, byName)) candidates.add(name);
+  }
+
+  const report = {};
+  for (const name of candidates) {
+    for (const version of byName.get(name) ?? []) {
+      const advisories = await withRetries(`GitHub advisory 재질의(${name}@${version})`, () =>
+        githubQuery(`${name}@${version}`, opts), opts);
+      const rows = githubReportFor(name, advisories);
+      if (rows.length > 0) (report[name] ??= []).push(...rows);
+    }
+  }
+  return report;
 }
 
 /**
@@ -272,8 +455,34 @@ export async function auditLockfile(lock, { level = DEFAULT_AUDIT_LEVEL, ...fetc
       'lockfile 에서 레지스트리 패키지를 하나도 읽지 못했다 — 파서가 깨졌거나 lockfile 이 비었다',
     );
   }
-  const report = await fetchAdvisories(bulkPayload(byName), fetchOptions);
+
+  // npm 을 먼저 본다 — `npm audit` 과 같은 출처라 판정이 그대로 이어진다.
+  // 실패하면 GitHub 축으로 넘어간다. 둘 다 실패해야 실패다 (fail-closed).
+  let report;
+  let source;
+  const failures = [];
+  try {
+    report = await fetchAdvisories(bulkPayload(byName), fetchOptions);
+    source = 'npm';
+  } catch (npmError) {
+    failures.push(npmError);
+    fetchOptions.onSourceFallback?.(npmError);
+    try {
+      report = await fetchGithubAdvisories(byName, fetchOptions);
+      source = 'github';
+    } catch (githubError) {
+      failures.push(githubError);
+      const err = new Error(
+        'advisory 출처 두 곳이 모두 실패했다 — 통과시키지 않는다.\n' +
+          failures.map((e) => `[${e === npmError ? 'npm' : 'github'}] ${e.message}`).join('\n'),
+      );
+      err.sourceErrors = failures;
+      throw err;
+    }
+  }
+
   return {
+    source,
     findings: collectFindings(report, byName, level),
     packageCount: byName.size,
     versionCount: [...byName.values()].reduce((n, s) => n + s.size, 0),
@@ -334,27 +543,29 @@ async function main() {
   try {
     result = await auditLockfile(lock, {
       level: opts.level,
-      onRetry: (attempt, e) =>
-        console.log(`재시도 ${attempt} — bulk advisory 조회 실패: ${e?.message ?? e}`),
+      onRetry: (attempt, e, label) => console.log(`재시도 ${attempt} — ${label} 실패: ${e?.message ?? e}`),
+      onSourceFallback: (e) =>
+        console.log(
+          `npm advisory 축 실패 — GitHub Advisory Database 로 폴백한다.\n${e.message}`,
+        ),
     });
   } catch (e) {
     console.error(`취약점 감사를 완료하지 못했다 — 통과시키지 않는다.\n${e.message}`);
     process.exit(1);
   }
 
-  const { findings, packageCount, versionCount } = result;
+  const { source, findings, packageCount, versionCount } = result;
+  const scope = `패키지 ${packageCount}개 / 버전 ${versionCount}개, 출처 ${source}`;
   if (findings.length > 0) {
     console.error(
-      `${opts.level} 이상 취약점 ${findings.length}건 (패키지 ${packageCount}개 / 버전 ${versionCount}개 검사):\n` +
+      `${opts.level} 이상 취약점 ${findings.length}건 (${scope}):\n` +
         formatFindings(findings) +
         `\n\`npm audit fix\` 는 금지 — 루트 overrides 를 날린다. 해당 의존성을 직접 올릴 것.`,
     );
     process.exit(1);
   }
 
-  console.log(
-    `ok   ${opts.level} 이상 취약점 0건 — 패키지 ${packageCount}개 / 버전 ${versionCount}개 검사 (bulk advisory 엔드포인트).`,
-  );
+  console.log(`ok   ${opts.level} 이상 취약점 0건 — ${scope}.`);
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
