@@ -211,6 +211,16 @@ export class OrchestrationRunnerService {
           last_message_at: null,
           orchestration_mission_id: mission.id,
           orchestration_step_id: null,
+          // 자유 참여 ON (티켓 995a9519) — Mission 화면의 대화는 참여자로 등록되지 않은
+          // 운영자도 바로 끼어들 수 있어야 한다는 것이 이 기능의 요청 자체다. 이 방을
+          // 만들 때 참여자로 들어가는 것은 orchestrator 에이전트와 미션 소유자뿐이라,
+          // 옵션이 없으면 다른 운영자는 `joinMissionConversation` 을 명시적으로 부르기
+          // 전까지 읽기만 가능했다.
+          //
+          // 발화 권한이 함께 열리는 것은 아니다 — `requireMissionRoomSpeaker` 의
+          // MANAGE_ACTIONS 검사(티켓 f6a0de0e)가 매 발화마다 그대로 돈다. 자유 참여는
+          // "참여자 명단에 없어도 된다"까지만 뜻한다.
+          open_join: true,
         }),
       );
       await this.addRoomParticipants(room.id, orchestrator.id, missionHumanOwner(mission));
@@ -2200,6 +2210,15 @@ export class OrchestrationRunnerService {
 
     // One room per ATTEMPT, not per step: a retry must not inherit the failed
     // attempt's conversation, or the subagent replays its own dead end as history.
+    //
+    // step 방은 자유 참여(open_join)를 **켜지 않는다** (티켓 995a9519). 사용자 요청은
+    // "Mission 화면에 나오는 Chat"이고 그것은 mission 방 하나다. step 방은 성격이 다르다:
+    //   - 사람이 읽는 대화가 아니라 멤버 에이전트 한 명에게 내리는 작업 지시 채널이고,
+    //     attempt 마다 새로 열려 미션 하나가 수십 개를 만든다.
+    //   - Mission 화면도 이 방들을 대화로 띄우지 않는다(대화 패널은 `mission.room_id`
+    //     하나만 연다). 켜 봐야 사람이 들어갈 표면 자체가 없다.
+    // 필요해지면 그때 켜는 것이 안전하다 — 반대 방향(수십 개를 열어놓고 되돌리기)은
+    // 이미 auto-join 된 참여자 행이 남아 되돌려도 깨끗해지지 않는다.
     const room = await this.roomRepo.save(
       this.roomRepo.create({
         workspace_id: mission.workspace_id,

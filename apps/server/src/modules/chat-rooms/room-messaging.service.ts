@@ -45,6 +45,14 @@ const SYSTEM_DISPATCH_CONTENT_MAX = 100000;
 // loop because the plugin caps long before this many turns.
 const AGENT_CHAIN_LOOKBACK = 8;
 
+/**
+ * RFC-4122 shape — sibling services keep the same guard (room-crud,
+ * room-membership). 여기서 쓰는 곳은 자유 참여(open_join) 완화 하나다: 의사 user
+ * `system` 처럼 uuid 가 아닌 발신자는 완화 대상에서 제외해, 참여자 테이블에
+ * uuid 아닌 행이 새로 생기지 않게 한다.
+ */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 // Whitelisted message-type discriminators accepted from external callers
 // (REST / MCP). 'system' is intentionally excluded — only the in-process
 // sendSystemMessage path may stamp that value.
@@ -268,19 +276,33 @@ export class RoomMessagingService {
     userId: string,
     limit: number,
     before?: string,
-    options?: { observer?: boolean; excludeProgress?: boolean },
+    options?: { observer?: boolean; excludeProgress?: boolean; workspaceId?: string },
   ): Promise<any[]> {
     // v0.32: observer mode skips the active-participant gate so admins can
     // read agent-to-agent rooms they're not a member of (workspace-wide chat
     // monitoring). Caller (controller) must enforce its own permission check
     // before passing observer=true; this service trusts that flag.
+    //
+    // 자유 참여 방(티켓 995a9519)도 참여자 게이트를 건너뛴다. 목록에는 보이는데 열면
+    // 403 이면 "참여자가 아니어도 대화에 참여할 수 있다"가 성립하지 않는다 — 발화만
+    // 열고 읽기를 막으면 사용자는 빈 방을 보게 된다.
+    //
+    // `workspaceId` 를 받은 호출부에서만 완화한다. 참여자 행이 없어도 되게 만드는
+    // 순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, sendMessage 와 같은
+    // 규칙으로 방의 workspace_id 를 직접 대조한다. 넘기지 않은 호출부(에이전트 경로
+    // 등)는 완화 없이 예전 그대로 동작한다.
     let clearedAt: Date | null = null;
     if (!options?.observer) {
-      await this.membership.requireActiveParticipant(roomId, userId);
+      const openJoinRelaxed = await this._isOpenJoinReadable(roomId, options?.workspaceId);
+      if (!openJoinRelaxed) {
+        await this.membership.requireActiveParticipant(roomId, userId);
+      }
       // Per-viewer Clear cutoff (ticket 1ae77f55). When set, drop messages
       // older than the cut so the user sees a fresh thread until new
       // messages arrive. Observer mode bypasses (admins monitoring a room
       // they're not in have no participant row of their own to honour).
+      // 자유 참여 방을 아직 참여하지 않은 채로 읽는 사용자도 마찬가지로 자기 행이
+      // 없다 — 그때는 cut 이 없는 것이 맞다(null).
       const participant = await this.participantRepo.findOne({
         where: { room_id: roomId, participant_id: userId, participant_type: 'user', left_at: IsNull() },
       });
@@ -385,20 +407,53 @@ export class RoomMessagingService {
       onPersisted?: (messageId: string) => void;
     },
   ): Promise<any> {
-    await this.membership.requireActiveParticipant(roomId, senderId, senderType);
-
     // 방 메타데이터: agent-manager는 이름이 비어 있을 때만 첫 chat-subagent
     // 턴에 "제목을 생성하라"는 지시를 주입하고(그래서 이름 없는 방은 첫
     // 대화 내용으로 이름이 붙는다), action_id를 읽어 Action Run을 일반
     // 채팅과 구분한다(티켓 e6d32e9d).
     //
     // 조회를 여기로 올린 것은 아래 orchestration 게이트가 **쓰기 전에** 돌아야 하기
-    // 때문이다(티켓 f6a0de0e). 예전 위치는 메시지를 이미 저장한 뒤였다.
+    // 때문이다(티켓 f6a0de0e). 예전 위치는 메시지를 이미 저장한 뒤였다. 티켓
+    // 995a9519 에서 참여자 게이트보다도 앞으로 다시 올렸다 — 그 게이트를 완화할지
+    // 자체가 이 방의 `open_join` 값에 달려 있기 때문이다.
     const roomForName = await this.roomRepo.findOne({ where: { id: roomId } });
+
+    // ── 자유 참여(open join) 완화 — 티켓 995a9519 ───────────────────────────
+    //
+    // 이 완화가 성립하려면 **네 조건이 모두** 참이어야 한다. 하나라도 빠지면 기존
+    // 403 게이트가 그대로 돈다:
+    //
+    //   1. `open_join` 이 켜진 방일 것. 꺼진 방은 이 기능 도입 전과 완전히 같다.
+    //   2. 발신자가 **유저**일 것. 에이전트는 기존대로 참여자 행을 요구한다 — 여기서
+    //      풀어주면 MCP `send_chat_room_message` 를 든 에이전트가 워크스페이스의 아무
+    //      열린 방에나 난입할 수 있다.
+    //   3. 발신자 id 가 실제 uuid 일 것. 의사 user `system`(QA·orchestration 엔진 발화)
+    //      은 자기 방에 이미 참여자로 seed 되어 있으므로 완화가 필요 없고, 완화 경로로
+    //      흘리면 uuid 아닌 participant 행을 새로 만든다.
+    //   4. 방이 **호출자의 워크스페이스** 소속일 것. 참여자 행이 없어도 되게 만드는
+    //      순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, 여기서 직접
+    //      대조한다. `workspaceId` 가 비어 들어오면(경계를 확인할 수 없으면) 완화하지
+    //      않는다 — 모르면 닫는 쪽이 안전한 실패다.
+    const openJoinRelaxed =
+      !!roomForName?.open_join &&
+      senderType === 'user' &&
+      UUID_RE.test(senderId) &&
+      !!workspaceId &&
+      roomForName.workspace_id === workspaceId;
+
+    if (!openJoinRelaxed) {
+      await this.membership.requireActiveParticipant(roomId, senderId, senderType);
+    }
 
     // participant 행만으로는 orchestration 방의 경계가 지속되지 않는다 —
     // 권한이 회수된 뒤에도 행이 남기 때문이다. 서비스 계층에 두어 REST·MCP·
     // agent-api 어느 진입점으로 들어와도 같은 판정을 받게 한다.
+    //
+    // 이 검사가 auto-join 보다 **앞**이라는 순서가 중요하다(티켓 995a9519). mission
+    // 방은 open_join 이 켜진 채로 생성되지만 발화에는 여전히 MANAGE_ACTIONS 가
+    // 필요하다 — 자유 참여가 푸는 것은 "참여자인가"이지 "권한이 있는가"가 아니다.
+    // 뒤집으면 권한 없는 사용자가 403 을 받으면서도 참여자 행과 participant_added
+    // 이벤트만 남기고 간다.
     await this.membership.requireMissionRoomSpeaker(roomForName, senderType, senderId);
 
     const sanitizedMeta = sanitizeChatMessageMetadata(opts?.metadata);
@@ -449,6 +504,20 @@ export class RoomMessagingService {
     if (senderType === 'agent') {
       const display = await resolveAgentDisplayName(this.agentRepo, senderId);
       if (display) senderName = display;
+    }
+
+    // 자유 참여 방의 첫 발언 — 여기서 참여자로 등록한다(티켓 995a9519).
+    //
+    // 위치가 검증 뒤인 이유: 내용 길이·첨부 소유권 검사에서 튕길 발언 때문에 참여자
+    // 행과 `participant_added` 팬아웃이 생기면 안 된다. "발언 시 참여"는 실제로 발언이
+    // 성립할 때의 이야기다.
+    //
+    // 재입장 경로(`addParticipants`)와 같은 규약을 쓴다 — `ensureActiveParticipant` 가
+    // `last_read_at` 을 지금으로 찍어 참여 전 이력이 미읽음 배지로 쏟아지지 않게 하고,
+    // 50인 cap 을 그대로 적용하며, 이미 active 면 아무것도 하지 않는다(멱등). 그래서
+    // 이미 참여 중인 사용자가 열린 방에 계속 말해도 행이 늘지 않는다.
+    if (openJoinRelaxed) {
+      await this.membership.ensureActiveParticipant(roomId, 'user', senderId);
     }
 
     // CAS-style transactional claim: save the message and bind the
@@ -1059,6 +1128,23 @@ export class RoomMessagingService {
       out.set(row.owner_id, list);
     }
     return out;
+  }
+
+  /**
+   * 이 방이 호출자에게 **자유 참여로 열려 있는가** (티켓 995a9519).
+   *
+   * `sendMessage` 의 완화 조건과 같은 두 축을 본다 — 방의 `open_join` 이 켜져 있고,
+   * 방이 호출자의 워크스페이스 소속일 것. `workspaceId` 를 모르면(넘기지 않은 호출부)
+   * 경계를 확인할 수 없으므로 완화하지 않는다: 모르면 닫는 쪽이 안전한 실패다.
+   *
+   * 읽기 전용 판정이라 발신자 종류는 보지 않는다. 에이전트 호출부는 애초에 이
+   * `workspaceId` 를 넘기지 않으며(observer 모드로 읽는다), 발신 완화는 sendMessage
+   * 쪽에서 유저로 따로 좁힌다.
+   */
+  private async _isOpenJoinReadable(roomId: string, workspaceId?: string): Promise<boolean> {
+    if (!workspaceId) return false;
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    return !!room?.open_join && room.workspace_id === workspaceId;
   }
 
   private async _validatePendingAttachments(

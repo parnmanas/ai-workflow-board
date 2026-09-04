@@ -168,8 +168,14 @@ export class ChatRoomsController {
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const before = req.query.before as string | undefined;
     const observer = req.query.observer === 'true';
+    // workspaceId 를 넘기면 서비스가 자유 참여 방(티켓 995a9519)의 읽기를 허용한다 —
+    // 그 완화는 방이 이 워크스페이스 소속일 때만 성립하므로 경계를 함께 넘겨야 한다.
+    const wsId = req.headers['x-workspace-id'] as string;
     try {
-      const messages = await this.messaging.getMessages(roomId, user.id, limit, before, { observer });
+      const messages = await this.messaging.getMessages(roomId, user.id, limit, before, {
+        observer,
+        workspaceId: wsId,
+      });
       return res.json(messages);
     } catch (err: any) {
       return res.status(err.status || 403).json({ error: err.message });
@@ -373,6 +379,28 @@ export class ChatRoomsController {
     try {
       await this.crud.renameRoom(roomId, user.id, name);
       return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
+  // 자유 참여(open join) 토글 — 티켓 995a9519. 켜면 같은 워크스페이스의 모든 유저에게
+  // 방이 보이고, 참여자가 아니어도 첫 발언 시점에 auto-join 되어 대화에 낄 수 있다.
+  // 권한 범위(방의 active participant 누구나)와 DM·시스템 소유 방 거부의 근거는
+  // RoomCrudService.setOpenJoin 주석에 있다. rename 과 같은 CHAT_SEND 를 요구한다 —
+  // 둘 다 "방 설정을 바꾸는" 같은 등급의 동작이다.
+  @Patch(':roomId/open-join')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async setOpenJoin(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
+    const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+    if (typeof body?.open_join !== 'boolean') {
+      return res.status(400).json({ error: 'open_join must be a boolean' });
+    }
+    try {
+      const result = await this.crud.setOpenJoin(roomId, wsId, user.id, body.open_join);
+      return res.json({ ok: true, ...result });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });
     }

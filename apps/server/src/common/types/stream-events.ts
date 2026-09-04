@@ -471,10 +471,15 @@ export interface ChatRoomMessagePayload {
 
 export interface ChatRoomUpdatePayload {
   room_id: string;
-  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'read';
+  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'read' | 'open_join_changed';
   new_name?: string;
   participant_id?: string;
   participant_ids?: string[];
+
+  // 자유 참여 옵션의 새 값 (ticket 995a9519). `open_join_changed` 에만 실린다.
+  // 수신 범위는 다른 chat_room_update 와 같은 방 구성원 — 아직 참여하지 않은
+  // 사용자의 목록은 다음 조회에서 갱신된다(room-crud.setOpenJoin 주석 참조).
+  open_join?: boolean;
 
   // B3 fix: `read` events carry the reader's identity + the new marker so that
   // other tabs / devices of the same user can sync their local unread_count

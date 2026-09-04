@@ -397,6 +397,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         name: p.room?.name || null,
         type: p.room?.type || 'group',
         last_message_at: p.room?.last_message_at || null,
+        // 자유 참여 여부(ticket 995a9519). 에이전트의 발신 규약은 이 값과 무관하게
+        // 그대로 참여자 행을 요구한다 — 완화는 유저 전용이다. 여기 실리는 것은
+        // 방의 성격을 알리는 메타데이터일 뿐이다.
+        open_join: !!p.room?.open_join,
       })));
     }
   );

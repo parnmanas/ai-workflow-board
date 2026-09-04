@@ -569,6 +569,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         new_name: event.new_name,
         participant_id: event.participant_id,
         participant_ids: event.participant_ids,
+        // 자유 참여 옵션 변경(ticket 995a9519) — `open_join_changed` 에만 채워진다.
+        open_join: event.open_join,
         // B3: read-event reader identity + marker, populated only when present.
         participant_type: event.participant_type,
         last_read_at: event.last_read_at,
