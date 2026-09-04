@@ -522,7 +522,8 @@ export default function ChatPage() {
     return () => clearTimeout(timer);
   }, [typingAgents]);
 
-  // SSE: chat_room_update — 봉투 unwrap + update_type 분기(renamed/participant_*/read)
+  // SSE: chat_room_update — 봉투 unwrap + update_type 분기
+  // (renamed / participant_* / read / open_join_changed)
   // 디스패치는 participantFlow.dispatchChatRoomUpdate 에 있고, 회귀 테스트
   // (apps/client/test/chat-participants.test.mjs)가 실제 이벤트 페이로드로 그 코드를
   // 직접 구동한다. 여기선 ChatPage 의 ref/세터/스코프만 주입한다.
@@ -537,6 +538,10 @@ export default function ChatPage() {
         listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
         setRooms,
         refreshActiveRoomParticipants,
+        // open_join_changed 는 워크스페이스 전체로 나가므로 스코프 대조가 필요하다
+        // (ticket 995a9519). ambient getActiveWorkspaceId() 대신 URL 의 wsId 를 쓰는
+        // 이유는 아래 방 목록 조회와 같다 — 탭마다 다른 워크스페이스를 볼 수 있다.
+        getCurrentWorkspaceId: () => wsId ?? null,
       },
       data,
     );

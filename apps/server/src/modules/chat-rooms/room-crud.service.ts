@@ -553,14 +553,18 @@ export class RoomCrudService {
 
       const memberIds = await this.membership.getRoomMemberIds(roomId);
       const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
-      // 수신 범위는 방 구성원이다(`roomMemberFilter`). 아직 참여하지 않은 사용자의
-      // 사이드바는 이 이벤트가 아니라 다음 방 목록 조회에서 갱신된다 — 자유 참여 방의
-      // 등장/사라짐은 참여자 목록에 없는 사람 전원에게 실시간으로 밀 만한 사건이 아니고,
-      // 그러려면 워크스페이스 전체 브로드캐스트라는 별도의 팬아웃 축이 필요하다.
+      // 이 이벤트만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나간다
+      // (티켓 995a9519 리뷰 라운드1 P1-2, `chatRoomUpdateFilter` 참조). 변경의 실제
+      // 영향 대상이 비참여자이기 때문이다 — ON 이면 방이 새로 보여야 하고 OFF 면
+      // 사이드바에서 사라져야 한다. `workspace_id` 는 수신 측이 "지금 보고 있는
+      // 워크스페이스의 일인가"를 판정하는 근거이므로 반드시 함께 싣는다.
+      // member_ids / agent_member_ids 는 다른 update_type 과 봉투 모양을 맞추기 위해
+      // 그대로 둔다(이 타입에서는 필터가 쓰지 않는다).
       activityEvents.emit('chat_room_update', {
         room_id: roomId,
         update_type: 'open_join_changed',
         open_join: next,
+        workspace_id: room.workspace_id,
         member_ids: memberIds,
         agent_member_ids: agentMemberIds,
       });

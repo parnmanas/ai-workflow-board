@@ -506,20 +506,6 @@ export class RoomMessagingService {
       if (display) senderName = display;
     }
 
-    // 자유 참여 방의 첫 발언 — 여기서 참여자로 등록한다(티켓 995a9519).
-    //
-    // 위치가 검증 뒤인 이유: 내용 길이·첨부 소유권 검사에서 튕길 발언 때문에 참여자
-    // 행과 `participant_added` 팬아웃이 생기면 안 된다. "발언 시 참여"는 실제로 발언이
-    // 성립할 때의 이야기다.
-    //
-    // 재입장 경로(`addParticipants`)와 같은 규약을 쓴다 — `ensureActiveParticipant` 가
-    // `last_read_at` 을 지금으로 찍어 참여 전 이력이 미읽음 배지로 쏟아지지 않게 하고,
-    // 50인 cap 을 그대로 적용하며, 이미 active 면 아무것도 하지 않는다(멱등). 그래서
-    // 이미 참여 중인 사용자가 열린 방에 계속 말해도 행이 늘지 않는다.
-    if (openJoinRelaxed) {
-      await this.membership.ensureActiveParticipant(roomId, 'user', senderId);
-    }
-
     // CAS-style transactional claim: save the message and bind the
     // attachments inside one transaction. The UPDATE re-asserts the
     // pending state (`owner_type='chat_room' AND owner_id=:roomId`) so
@@ -531,9 +517,27 @@ export class RoomMessagingService {
     // update wins and the first sender's POST/SSE response references
     // attachment rows whose persisted owner_id points at the OTHER
     // message — review finding P1 on ticket 92082b55.
-    const { savedMsg, attachments } = await this.messageRepo.manager.transaction(async (em) => {
+    const { savedMsg, attachments, autoJoined } = await this.messageRepo.manager.transaction(async (em) => {
       const messageRepoTx = em.getRepository(ChatRoomMessage);
       const attachmentRepoTx = em.getRepository(TicketAttachment);
+
+      // 자유 참여 방의 첫 발언 — 참여자 등록을 **메시지 저장과 같은 트랜잭션**에 넣는다
+      // (티켓 995a9519, 리뷰 라운드1 P1-1).
+      //
+      // 예전에는 이 등록이 트랜잭션 앞에서 자체 커밋됐다. 그러면 바로 아래 첨부 CAS
+      // 충돌(409)이나 저장 오류로 메시지가 남지 않아도 참여자 행은 살아남는다 —
+      // "첫 발언 시 참여자로 등록"이 "발언을 시도만 해도 등록"이 되고, 되돌릴 경로도
+      // 없다. 같은 트랜잭션에 넣으면 실패가 둘을 함께 되돌린다.
+      //
+      // 재입장 경로(`addParticipants`)와 같은 규약은 그대로다 — `last_read_at` 을 지금으로
+      // 찍어 참여 전 이력이 미읽음 배지로 쏟아지지 않게 하고, 50인 cap 을 적용하며, 이미
+      // active 면 아무것도 하지 않는다(멱등).
+      //
+      // SSE 는 여기서 내지 않는다. 트랜잭션 안에서 emit 하면 롤백된 참여를 알리는
+      // 이벤트가 나가므로, 커밋에 성공한 뒤 아래에서 `emitParticipantAdded` 를 부른다.
+      const joined = openJoinRelaxed
+        ? await this.membership.ensureActiveParticipantInTransaction(em, roomId, 'user', senderId)
+        : false;
 
       const created = await messageRepoTx.save(
         messageRepoTx.create({
@@ -578,8 +582,14 @@ export class RoomMessagingService {
           .map(r => projectChatAttachment(r, { includeData: false }));
       }
 
-      return { savedMsg: created, attachments: projected };
+      return { savedMsg: created, attachments: projected, autoJoined: joined };
     });
+
+    // 커밋에 성공했을 때만 참여를 알린다 (티켓 995a9519 리뷰 라운드1 P1-1).
+    // 실패하면 위 트랜잭션이 참여자 행과 함께 통째로 롤백되므로 이 줄에 도달하지 않는다.
+    if (autoJoined) {
+      await this.membership.emitParticipantAdded(roomId, senderId);
+    }
     // Everything below is post-commit enrichment / dispatch. Let integrated
     // callers distinguish a durable message from a transaction failure so a
     // retry cannot bind the same pending artifact to a second row.

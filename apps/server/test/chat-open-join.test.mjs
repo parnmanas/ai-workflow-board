@@ -5,10 +5,12 @@
 // 스텁으로는 둘 다 검증되지 않는다 — 조인을 INNER 로 되돌리거나 auto-join 을 빼도
 // 스텁 기반 테스트는 그대로 통과한다.
 //
-// RoomMessagingService 만 부분 스텁이다: messageRepo.manager.transaction 이 sentinel 을
-// 던진다. auto-join 은 그 트랜잭션 **직전**에 일어나므로, sentinel 로 거부된 뒤에도
-// 참여자 행이 실제로 DB 에 있는지 확인할 수 있다. 나머지(roomRepo / participantRepo /
-// membership)는 전부 실제 리포지토리다.
+// RoomMessagingService 의 messageRepo 만 부분 스텁인데, 그 스텁도 **진짜 트랜잭션**으로
+// 위임한다(`failInTx` 로 커밋 직전 실패를 주입할 수 있게만 감쌌다). auto-join 이 메시지
+// 저장과 같은 트랜잭션 안에 있는지가 이 기능의 핵심 계약이라(리뷰 라운드1 P1-1), 가짜
+// 트랜잭션으로는 그 계약을 전혀 검증할 수 없다 — 저장이 실패해도 참여자 행이 남는
+// 예전 결함이 그대로 통과한다. 나머지(roomRepo / participantRepo / membership)는 전부
+// 실제 리포지토리다.
 
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -29,8 +31,14 @@ const MEMBER = '33333333-3333-4333-8333-333333333333';
 const OUTSIDER = '44444444-4444-4444-8444-444444444444';
 const AGENT = '55555555-5555-4555-8555-555555555555';
 
-const REACHED_TX = 'REACHED_TRANSACTION_SENTINEL';
+const TX_FAILURE = 'INJECTED_TRANSACTION_FAILURE';
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
+
+/**
+ * 커밋 직전 실패 주입 스위치. `true` 면 메시지 저장 트랜잭션이 본문을 모두 실행한 뒤
+ * 던져서 롤백시킨다 — 첨부 CAS 충돌(409)이나 DB 오류로 저장이 실패하는 상황의 대역이다.
+ */
+let failInTx = false;
 
 let dataSource;
 let membership;
@@ -67,6 +75,18 @@ function activeRows(roomId, participantId) {
   });
 }
 
+/**
+ * `chat_room_update` 이벤트를 모으는 리스너. 반환 배열이 곧 수집 결과이고, `stop()` 으로
+ * 해제한다 — 전역 emitter 라 테스트가 끝나면 반드시 떼야 다음 테스트를 오염시키지 않는다.
+ */
+function captureRoomUpdates() {
+  const seen = [];
+  const listener = (e) => seen.push(e);
+  activityEvents.on('chat_room_update', listener);
+  seen.stop = () => activityEvents.off('chat_room_update', listener);
+  return seen;
+}
+
 /** sendMessage 를 유저 발신으로 호출한다. */
 const sendAsUser = (roomId, workspaceId, senderId) =>
   messaging.sendMessage(roomId, workspaceId, 'user', senderId, 'Sender', 'hello');
@@ -90,9 +110,18 @@ describe('chat 방 자유 참여(open_join)', () => {
     membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource);
     crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, noopLog, membership);
 
-    // messageRepo 만 스텁 — 트랜잭션에 도달했다는 것이 "게이트를 전부 통과했다"는 신호다.
+    // messageRepo 스텁 — 트랜잭션은 **진짜**로 열고, 커밋 직전에만 실패를 주입할 수
+    // 있게 감싼다. 그래야 "auto-join 이 메시지 저장과 같은 트랜잭션에서 롤백되는가"를
+    // 실제로 확인할 수 있다.
     const stubMessageRepo = {
-      manager: { async transaction() { throw new Error(REACHED_TX); } },
+      manager: {
+        transaction: (fn) =>
+          dataSource.manager.transaction(async (em) => {
+            const result = await fn(em);
+            if (failInTx) throw new Error(TX_FAILURE);
+            return result;
+          }),
+      },
       createQueryBuilder: () => msgRepo.createQueryBuilder('m'),
     };
     const empty = {};
@@ -104,11 +133,15 @@ describe('chat 방 자유 참여(open_join)', () => {
       empty,             // ticketRepo
       empty,             // userMentionRepo
       empty,             // attachmentRepo
-      empty,             // workspaceRepo
+      // workspaceRepo — 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다.
+      // 이 테스트의 관심사가 아니므로 "설정 없음"으로 답한다.
+      { async findOne() { return null; } }, // workspaceRepo
       dataSource,        // dataSource
       noopLog,           // logService
       membership,        // membership
-      empty,             // mentionService
+      // mentionService — 성공 경로는 커밋 뒤 본문의 @멘션을 훑는다. 이 테스트의 본문에는
+      // 멘션이 없으므로 "찾은 것 없음"으로 답해 그 뒤 경로를 그대로 지나가게 한다.
+      { parseMentions: () => [], async resolveMentions() { return []; } }, // mentionService
       empty,             // connectivity
     );
   });
@@ -118,6 +151,7 @@ describe('chat 방 자유 참여(open_join)', () => {
   });
 
   beforeEach(async () => {
+    failInTx = false;
     await dataSource.getRepository(ChatRoomParticipant).clear();
     await dataSource.getRepository(ChatRoomMessage).clear();
     await dataSource.getRepository(ChatRoom).clear();
@@ -130,19 +164,62 @@ describe('chat 방 자유 참여(open_join)', () => {
 
     assert.equal((await activeRows(room.id, OUTSIDER)).length, 0, '사전 조건: 아직 참여자가 아니다');
 
-    await assert.rejects(
-      () => sendAsUser(room.id, WS, OUTSIDER),
-      new RegExp(REACHED_TX),
-      '참여자 403 게이트를 통과해 저장 단계까지 도달해야 한다',
-    );
+    const events = captureRoomUpdates();
+    try {
+      const msg = await sendAsUser(room.id, WS, OUTSIDER);
+      assert.ok(msg?.id, '메시지가 실제로 저장된다');
 
-    const rows = await activeRows(room.id, OUTSIDER);
-    assert.equal(rows.length, 1, '발언 시점에 참여자 행이 정확히 하나 생긴다');
-    assert.equal(rows[0].participant_type, 'user');
-    assert.equal(rows[0].left_at, null, 'active 행이어야 한다');
-    // 재입장 경로와 같은 규약: 참여 전 이력이 미읽음으로 쏟아지지 않게 last_read_at 을 찍는다.
-    assert.ok(rows[0].last_read_at instanceof Date, 'last_read_at 이 세팅된다');
-    assert.ok(rows[0].joined_at instanceof Date, 'joined_at 이 세팅된다');
+      const rows = await activeRows(room.id, OUTSIDER);
+      assert.equal(rows.length, 1, '발언 시점에 참여자 행이 정확히 하나 생긴다');
+      assert.equal(rows[0].participant_type, 'user');
+      assert.equal(rows[0].left_at, null, 'active 행이어야 한다');
+      // 재입장 경로와 같은 규약: 참여 전 이력이 미읽음으로 쏟아지지 않게 last_read_at 을 찍는다.
+      assert.ok(rows[0].last_read_at instanceof Date, 'last_read_at 이 세팅된다');
+      assert.ok(rows[0].joined_at instanceof Date, 'joined_at 이 세팅된다');
+
+      // 커밋에 성공했으므로 참여 알림이 나가야 한다.
+      const added = events.filter(e => e.room_id === room.id && e.update_type === 'participant_added');
+      assert.equal(added.length, 1, '커밋 뒤 participant_added 가 한 번 나간다');
+      assert.deepEqual(added[0].participant_ids, [OUTSIDER]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it('옵션 ON: 메시지 저장이 실패하면 auto-join 도 함께 롤백되고 이벤트도 나가지 않는다', async () => {
+    // 리뷰 라운드1 P1-1. 예전에는 참여자 등록이 저장 트랜잭션 **앞**에서 자체 커밋돼,
+    // 첨부 CAS 충돌(409)이나 DB 오류로 메시지가 남지 않아도 참여자 행과 SSE 는 남았다 —
+    // "첫 발언 시 등록"이 "시도만 해도 등록"이 되고 되돌릴 경로도 없었다.
+    const room = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
+
+    const events = captureRoomUpdates();
+    failInTx = true;
+    try {
+      await assert.rejects(
+        () => sendAsUser(room.id, WS, OUTSIDER),
+        new RegExp(TX_FAILURE),
+        '저장 실패는 그대로 호출자에게 전달된다',
+      );
+
+      assert.equal(
+        (await activeRows(room.id, OUTSIDER)).length,
+        0,
+        '저장이 롤백되면 참여자 행도 남지 않아야 한다',
+      );
+      assert.equal(
+        await dataSource.getRepository(ChatRoomMessage).count({ where: { room_id: room.id } }),
+        0,
+        '메시지도 남지 않는다 — 둘이 같은 트랜잭션이라는 증거',
+      );
+      assert.deepEqual(
+        events.filter(e => e.room_id === room.id && e.update_type === 'participant_added'),
+        [],
+        '롤백된 참여를 알리는 이벤트가 새어 나가면 안 된다',
+      );
+    } finally {
+      failInTx = false;
+      events.stop();
+    }
   });
 
   it('옵션 OFF: 비참여자 유저는 기존대로 403 이고 참여자 행도 생기지 않는다', async () => {
@@ -191,10 +268,20 @@ describe('chat 방 자유 참여(open_join)', () => {
   it('옵션 ON: 이미 참여 중인 유저가 다시 보내도 참여자 행이 늘지 않는다 (멱등)', async () => {
     const room = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
 
-    for (let i = 0; i < 3; i++) {
-      await assert.rejects(() => sendAsUser(room.id, WS, MEMBER), new RegExp(REACHED_TX));
+    const events = captureRoomUpdates();
+    try {
+      for (let i = 0; i < 3; i++) {
+        assert.ok((await sendAsUser(room.id, WS, MEMBER))?.id);
+      }
+      assert.equal((await activeRows(room.id, MEMBER)).length, 1, 'auto-join 은 멱등이어야 한다');
+      assert.deepEqual(
+        events.filter(e => e.room_id === room.id && e.update_type === 'participant_added'),
+        [],
+        '이미 참여 중이면 새 참여 이벤트를 내지 않는다',
+      );
+    } finally {
+      events.stop();
     }
-    assert.equal((await activeRows(room.id, MEMBER)).length, 1, 'auto-join 은 멱등이어야 한다');
   });
 
   it('옵션 ON: 의사 user "system" 은 완화 대상이 아니다 (uuid 아닌 참여자 행을 만들지 않는다)', async () => {

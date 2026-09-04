@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In, IsNull } from 'typeorm';
+import { DataSource, EntityManager, Repository, In, IsNull } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
@@ -182,45 +182,81 @@ export class RoomMembershipService {
     participantType: 'user' | 'agent',
     participantId: string,
   ): Promise<boolean> {
-    const added = await this.participantRepo.manager.transaction(async (em) => {
-      if (this.dataSource.options.type === 'postgres') {
-        await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
-      }
-
-      const existing = await em
-        .createQueryBuilder(ChatRoomParticipant, 'p')
-        .where('p.room_id = :roomId', { roomId })
-        .andWhere('p.participant_id = :participantId', { participantId })
-        .andWhere('p.participant_type = :participantType', { participantType })
-        .andWhere('p.left_at IS NULL')
-        .getOne();
-      if (existing) return false;
-
-      const currentCount = await em
-        .createQueryBuilder(ChatRoomParticipant, 'p')
-        .where('p.room_id = :roomId', { roomId })
-        .andWhere('p.left_at IS NULL')
-        .getCount();
-      if (currentCount + 1 > PARTICIPANT_CAP) {
-        throw makeError(400, 'This room is full (50 participant limit).');
-      }
-
-      // last_read_at 을 지금으로 두는 이유는 addParticipants 와 같다 — 참여 전 이력이
-      // 미읽음 배지로 쏟아지지 않게.
-      await em.save(
-        em.create(ChatRoomParticipant, {
-          room_id: roomId,
-          participant_type: participantType,
-          participant_id: participantId,
-          last_read_at: new Date(),
-          left_at: null,
-        }),
-      );
-      return true;
-    });
+    const added = await this.participantRepo.manager.transaction((em) =>
+      this.ensureActiveParticipantInTransaction(em, roomId, participantType, participantId),
+    );
 
     if (!added) return false;
 
+    await this.emitParticipantAdded(roomId, participantId);
+    return true;
+  }
+
+  /**
+   * `ensureActiveParticipant` 의 알맹이 — **호출자가 연 트랜잭션 안에서** 실행한다
+   * (티켓 995a9519 리뷰 라운드1 P1-1).
+   *
+   * 분리한 이유는 하나다: 참여자 등록이 **그것을 정당화한 쓰기와 함께 커밋되거나 함께
+   * 롤백되어야** 하기 때문이다. sendMessage 의 자유 참여 auto-join 이 자체 트랜잭션으로
+   * 먼저 커밋되면, 뒤이은 메시지 저장이 첨부 CAS 충돌(409)이나 DB 오류로 실패해도
+   * 참여자 행은 남는다 — "첫 발언 시 참여자로 등록"이 아니라 "발언을 시도만 해도 등록"이
+   * 되고, 되돌릴 경로도 없다.
+   *
+   * SSE 를 여기서 내지 않는 것도 같은 이유다. 트랜잭션 안에서 emit 하면 롤백된 참여를
+   * 알리는 이벤트가 나가 버린다. 호출자가 **커밋에 성공한 뒤** `emitParticipantAdded` 를
+   * 부른다.
+   *
+   * 동시성 규약(방 단위 직렬화)은 `ensureActiveParticipant` 주석 그대로다 — 락은 여전히
+   * 트랜잭션 스코프이고, 이제 그 트랜잭션이 호출자의 것일 뿐이다.
+   */
+  async ensureActiveParticipantInTransaction(
+    em: EntityManager,
+    roomId: string,
+    participantType: 'user' | 'agent',
+    participantId: string,
+  ): Promise<boolean> {
+    if (this.dataSource.options.type === 'postgres') {
+      await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
+    }
+
+    const existing = await em
+      .createQueryBuilder(ChatRoomParticipant, 'p')
+      .where('p.room_id = :roomId', { roomId })
+      .andWhere('p.participant_id = :participantId', { participantId })
+      .andWhere('p.participant_type = :participantType', { participantType })
+      .andWhere('p.left_at IS NULL')
+      .getOne();
+    if (existing) return false;
+
+    const currentCount = await em
+      .createQueryBuilder(ChatRoomParticipant, 'p')
+      .where('p.room_id = :roomId', { roomId })
+      .andWhere('p.left_at IS NULL')
+      .getCount();
+    if (currentCount + 1 > PARTICIPANT_CAP) {
+      throw makeError(400, 'This room is full (50 participant limit).');
+    }
+
+    // last_read_at 을 지금으로 두는 이유는 addParticipants 와 같다 — 참여 전 이력이
+    // 미읽음 배지로 쏟아지지 않게.
+    await em.save(
+      em.create(ChatRoomParticipant, {
+        room_id: roomId,
+        participant_type: participantType,
+        participant_id: participantId,
+        last_read_at: new Date(),
+        left_at: null,
+      }),
+    );
+    return true;
+  }
+
+  /**
+   * 참여자 추가를 방에 알린다. `ensureActiveParticipantInTransaction` 을 직접 쓴 호출자가
+   * **커밋 성공 뒤에** 부르는 짝이다 — 트랜잭션 안에서 부르면 롤백된 참여가 이벤트로
+   * 새어 나간다.
+   */
+  async emitParticipantAdded(roomId: string, participantId: string): Promise<void> {
     const memberIds = await this.getRoomMemberIds(roomId);
     const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
     activityEvents.emit('chat_room_update', {
@@ -230,7 +266,6 @@ export class RoomMembershipService {
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
-    return true;
   }
 
   /**

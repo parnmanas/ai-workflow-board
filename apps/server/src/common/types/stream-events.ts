@@ -477,9 +477,13 @@ export interface ChatRoomUpdatePayload {
   participant_ids?: string[];
 
   // 자유 참여 옵션의 새 값 (ticket 995a9519). `open_join_changed` 에만 실린다.
-  // 수신 범위는 다른 chat_room_update 와 같은 방 구성원 — 아직 참여하지 않은
-  // 사용자의 목록은 다음 조회에서 갱신된다(room-crud.setOpenJoin 주석 참조).
+  // 이 update type 만 방 구성원이 아니라 워크스페이스의 모든 사용자에게 나간다 —
+  // 변경의 영향 대상이 정확히 비참여자이기 때문이다(event-registry 의
+  // `chatRoomUpdateFilter` 주석 참조).
   open_join?: boolean;
+  // 위 브로드캐스트의 스코프 판정 근거. 수신 측이 지금 보고 있는 워크스페이스와
+  // 대조해 남의 워크스페이스 이벤트를 버린다. `open_join_changed` 에만 채워진다.
+  workspace_id?: string;
 
   // B3 fix: `read` events carry the reader's identity + the new marker so that
   // other tabs / devices of the same user can sync their local unread_count
