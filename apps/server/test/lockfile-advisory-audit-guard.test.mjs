@@ -664,10 +664,37 @@ test('ci.yml 은 취약점 게이트로 audit-lockfile-advisories.mjs 를 돌린
   assert.match(gate.run, /--audit-level=moderate/, '문턱이 moderate 가 아니다');
 });
 
+/** 전체-줄 주석을 걷어낸 ci.yml. 이 저장소의 ci.yml 주석은 전부 전체-줄 형식이다. */
+function ciWithoutComments() {
+  return readCi()
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l));
+}
+
 test('ci.yml 에 `npm audit` 직접 호출이 다시 들어오지 않는다', () => {
   // 되돌아가면 죽은 quick 엔드포인트 폴백 경로로 복귀한다 (ticket 1019e57d).
-  const offenders = readCi()
-    .split('\n')
-    .filter((l) => /^\s*run:.*\bnpm audit\b/.test(l));
+  //
+  // `run:` 한 줄만 보면 안 된다 — 여러 줄 `run: |` 블록 안에 넣으면 그대로 빠져나간다.
+  // ci.yml 에는 실제로 그런 블록이 있다(agent-manager-flake-repro 의 pwsh 스크립트).
+  // 그래서 주석만 걷어내고 **본문 전체**를 훑는다.
+  const offenders = ciWithoutComments().filter((l) => /\bnpm audit\b/.test(l));
   assert.deepEqual(offenders, []);
+});
+
+test('그 스캔은 여러 줄 run 블록 안의 호출도 잡는다 (가드의 공허성 차단)', () => {
+  // 위 검사가 실제로 FAIL 할 수 있는지 — `run:` 줄 정규식만 쓰던 초안은 이 형태를
+  // 통째로 놓쳤다.
+  const inBlock = ['      - name: x', '        run: |', '          npm ci', '          npm audit --audit-level=moderate'];
+  const legacyRunLineOnly = inBlock.filter((l) => /^\s*run:.*\bnpm audit\b/.test(l));
+  assert.deepEqual(legacyRunLineOnly, [], '픽스처가 구 정규식에 걸려버려 대조가 성립하지 않는다');
+
+  const scanned = inBlock.filter((l) => !/^\s*#/.test(l)).filter((l) => /\bnpm audit\b/.test(l));
+  assert.deepEqual(scanned, ['          npm audit --audit-level=moderate']);
+});
+
+test('주석 안의 `npm audit` 언급은 오탐하지 않는다', () => {
+  // 이 저장소의 ci.yml 은 왜 `npm audit` 을 쓰지 않는지를 주석으로 길게 설명한다.
+  // 그걸 위반으로 읽으면 가드가 영구 red 가 된다.
+  assert.ok(readCi().includes('npm audit'), '주석에서조차 npm audit 언급이 사라졌다 — 픽스처 전제 확인');
+  assert.deepEqual(ciWithoutComments().filter((l) => /\bnpm audit\b/.test(l)), []);
 });
