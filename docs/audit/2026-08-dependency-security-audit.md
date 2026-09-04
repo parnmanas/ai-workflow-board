@@ -1605,3 +1605,54 @@ drift도 모두 advisory 0건이었다.
 lockfile drift가 없어 패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는
 사용하지 않았고 root `overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지
 않았으며, 기존 테스트가 `package.json` 스크립트에 전부 등록된 상태를 확인했다.
+
+## 재검증 로그 — 2026-09-04 (`main` @ `7998ff8d`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`930670d3`)를 함께 감사했다. 두 브랜치의 `package-lock.json`,
+루트 `package.json`, client·agent-manager manifest는 **blob 단위로 동일**했다.
+`apps/server/package.json`만 다르지만 `dependencies`/`devDependencies`/
+`peerDependencies`/`optionalDependencies`/`overrides`가 전부 동일하고 스크립트 키
+집합도 같아, 차이는 이후 추가된 테스트의 등록 목록뿐이다 — **의존성 drift 없음**.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개)이었다. 이번엔 판정을
+`npm audit`이 아니라 `scripts/audit-lockfile-advisories.mjs`로 냈고(ticket
+1019e57d), npm bulk 축과 GitHub Advisory 축에서 **각각 한 번씩 성공해 양쪽 출처가
+같은 결론**을 냈다. lockfile 커버리지도 직접 재계산해 확인했다 — 엔트리 611개 =
+루트 1 + workspace 심링크 3 + workspace 디렉터리 3 + 레지스트리 604개이고, 그 604개가
+이름 537개 / 이름@버전 580개로 접힌다. 즉 npm이 세던 610과의 차이는 **중복 제거일
+뿐 커버리지 공백이 아니다.**
+
+루트 `overrides`가 실제로 먹었는지도 lockfile에서 직접 확인했다 — multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3(+4.3.1), picomatch 4.0.5로 **취약 버전이 되살아난
+흔적 없음**. 레지스트리 서명 105개와 attestation 13개도 검증됐다. 발행 트리는
+live/next 각각 93/92 packages, moderate 이상 0건 및 install script 0개였고, lockfile
+대비 12건의 버전 drift도 전부 advisory 0건이었다. 액션 참조 19개는 전부 커밋 SHA
+고정, install-script 3개는 전부 허용목록 내였다. 가드 **87/87** 통과.
+
+### 조치 — 배포 브랜치의 의존성 감사 게이트가 죽어 있었다
+
+이번 감사의 유일한 실제 문제다. `production.private`는 push 시 `dependency-audit`
+**하나만** 도는데(나머지는 의도적 skip), 그 잡의 **첫 스텝**이 `npm audit
+--audit-level=moderate`였다. npm bulk advisory 엔드포인트가 불안정해 이 스텝이
+exit 1로 죽고 — 감사 중 조회 타임아웃으로 실제 재현됐다 — 첫 스텝이라 **뒤따르는
+오프라인 공급망 가드 5종이 전부 skipped** 된다. 취약점 게이트 하나가 아니라
+install-script 허용목록·액션 SHA 고정까지 통째로 침묵하고, 배포된 트리에 대한 CI
+신호가 전부 사라진다.
+
+`main`은 오늘 ticket 1019e57d로 이미 조치했으나 `production.private`가 그 커밋을
+아직 받지 않은 상태였다. `main`을 통째로 병합하면 관련 없는 기능 커밋까지 배포
+브랜치로 넘어가므로, **해당 수정만 범위를 좁혀 cherry-pick**해 PR #8
+(`fix/prod-dependency-audit-gate` → `production.private`)로 올렸다: 이중 출처 감사
+스크립트, 오프라인 가드를 네트워크 감사보다 먼저 두는 스텝 재정렬, 순서 회귀 가드와
+그 `test` 스크립트 등록. 해당 브랜치에서 잡의 모든 스텝을 로컬 실행해 오프라인 가드
+5종 PASS, 취약점 0건, 가드 87/87 PASS를 확인했다.
+
+취약점이나 lockfile drift는 없어 패키지 변경과 lockfile 재생성은 하지 않았다.
+`npm audit fix`는 사용하지 않았고 루트 `overrides`도 유지했다. `apps/server`에 새
+테스트를 추가한 것은 배포 브랜치 쪽 PR뿐이며, 그 테스트는 `package.json`의 `test`
+스크립트에 등록했다.
+
+**남은 조건:** 이 감사는 `production.private`의 게이트 복구를 PR로 올렸을 뿐 병합하지
+않았다. 병합 전까지 배포 브랜치의 `dependency-audit`은 레지스트리가 흔들릴 때마다
+계속 죽는다.
