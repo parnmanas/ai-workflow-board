@@ -123,9 +123,14 @@ test('[review round 1 P2] OrchestrationReaperService.runOnce short-circuits whil
   const svc = new OrchestrationReaperService(
     /* missionRepo */ {}, /* stepRepo */ {}, /* eventRepo */ {}, /* teamRepo */ {},
     /* missions */ {}, /* runner */ {}, logStub, quiescedTrue,
+    /* confirmNotify */ { scheduleGateNotice: () => {}, sendReminder: async () => ({ recipients: 0, sent: 0, failed: 0 }), settled: async () => {} },
   );
   const result = await svc.runOnce();
-  assert.deepEqual(result, { steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0 });
+  assert.deepEqual(result, {
+    steps_failed: 0, missions_nudged: 0, missions_failed: 0, post_actions_recovered: 0,
+    // 티켓 a78cb566 — 대기 알림 리마인더 스윕도 quiesce 되면 아무것도 하지 않는다.
+    confirm_reminders: 0,
+  });
 });
 
 test('[review round 1 P2] OutreachPollingService.runOnce short-circuits while quiesced, before touching any channel row', async () => {

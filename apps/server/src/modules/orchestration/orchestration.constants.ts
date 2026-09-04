@@ -37,27 +37,133 @@ export const STEP_STATUSES = [
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
+  'awaiting_user',
 ] as const;
 export type StepStatus = (typeof STEP_STATUSES)[number];
 
-/** In flight: a subagent may be working on it right now. Counts against parallelism. */
+/**
+ * In flight: a subagent may be working on it right now. Counts against parallelism.
+ *
+ * `awaiting_user`(confirm 노드의 durable pause, 티켓 5dbe4aa2)는 **의도적으로 빠져
+ * 있다**. 넣으면 두 가지가 동시에 깨진다: (a) 사람이 답할 때까지 병렬 슬롯 하나를
+ * 계속 잡아 다른 분기의 진행을 막고, (b) `reapStuckSteps`가 이 목록으로 대상을
+ * 질의하므로 `step_timeout_minutes`(기본 90분) 뒤 사람을 기다리던 노드를 failed 로
+ * 죽인다 — durable pause 라는 요구 자체가 무너진다.
+ */
 export const IN_FLIGHT_STEP_STATUSES: readonly StepStatus[] = ['dispatched', 'running'];
 
-/** Terminal: will never transition again without explicit orchestrator/operator action. */
+/**
+ * Terminal: will never transition again without explicit orchestrator/operator action.
+ *
+ * `awaiting_user`도 여기 없다 — 사람이 판정을 제출하면 스스로 `done`으로 전이하는
+ * **비종료** 상태다. 넣으면 `computeGraphProgress`가 confirm 노드를 끝난 것으로 읽고
+ * 하류 edge를 판정해버려, 사람이 답하기 전에 다음 노드가 나간다.
+ */
 export const TERMINAL_STEP_STATUSES: readonly StepStatus[] = [
   'done',
   'failed',
   'blocked',
   'skipped',
   'cancelled',
+  'needs_recovery',
 ];
+
+/**
+ * 사람의 판정을 기다리며 durable pause 중인 step 의 status. SQL `WHERE` 절에 직접
+ * 실리기 때문에(리퍼 후보 스캔, 알림 선점 UPDATE) 리터럴을 흩뿌리지 않고 여기 둔다.
+ */
+export const AWAITING_USER_STATUS = 'awaiting_user';
+
+/** 사람의 판정을 기다리며 durable pause 중인가(티켓 5dbe4aa2). */
+export function isAwaitingUser(s: string): boolean {
+  return s === AWAITING_USER_STATUS;
+}
+
+/**
+ * 재시도 정책(티켓 4d065f82) — lease 가 만료됐을 때 자동으로 다시 띄워도 되는가.
+ *
+ * `auto`(기본)는 기존 동작 그대로다: 리퍼가 `failed` 로 넘기고 orchestrator 가
+ * 정상 실패 처리 경로에서 재시도를 결정한다. `manual` 은 **비멱등·위험 작업**용이다 —
+ * 배포, 결제, 외부로 나가는 게시처럼 "한 번 더 실행"이 그 자체로 피해인 작업.
+ * 이 경우 리퍼는 자동 재실행 대신 `needs_recovery` 로 전환하고 사유를 남긴다.
+ *
+ * 판정을 서버가 추측하지 않고 계획 시점에 orchestrator 가 선언하게 둔 이유:
+ * 어떤 작업이 비멱등인지는 step 의 instructions 안에만 있는 의미론이라
+ * 상태 머신이 사후에 알아낼 방법이 없다. 선언되지 않으면 기존 동작을 유지한다.
+ */
+export const STEP_RETRY_POLICIES = ['auto', 'manual'] as const;
+export type StepRetryPolicy = (typeof STEP_RETRY_POLICIES)[number];
+
+// ── 사용자 확인 강도(티켓 5dbe4aa2) ──────────────────────────────────────────
+
+/**
+ * Mission 단위 "사람에게 얼마나 자주 확인을 받을 것인가" 정책.
+ *
+ * - `none`       — confirm 노드 금지. `validateGraphSpec`이 그래프를 아예 거부한다.
+ * - `auto`       — 위험도/불확실성/시각 검증 필요성을 보고 orchestrator가 판단(기본값).
+ * - `key_steps`  — 주요 산출물 확정 직전, 외부로 나가는 작업 직전에 확인.
+ * - `every_step` — 결과물이 생기는 단계마다 가능한 한 확인.
+ *
+ * 강제되는 것은 `none`뿐이다. 나머지는 프롬프트로 orchestrator에게 전달되는 지시이며,
+ * `key_steps`/`every_step`인데 confirm 노드가 하나도 없으면 거부 대신 timeline `note`를
+ * 남긴다 — "몇 개면 충분한가"를 서버가 셀 방법이 없어서, 정량 강제는 정상 계획까지
+ * 막는 브리틀한 게이트가 된다. 운영자 가시성만 확보하는 쪽을 택했다.
+ */
+export const CONFIRM_POLICIES = ['none', 'auto', 'key_steps', 'every_step'] as const;
+export type ConfirmPolicy = (typeof CONFIRM_POLICIES)[number];
+
+/** 기본 정책. 아래 `normalizeConfirmPolicy`의 fallback 이자 엔티티 컬럼 default. */
+export const DEFAULT_CONFIRM_POLICY: ConfirmPolicy = 'auto';
+
+/**
+ * 저장된 값을 **읽을 때마다** 방어적으로 정규화한다.
+ *
+ * DDL 마이그레이션 대신 엔티티 default + `synchronize`로 컬럼을 추가하므로, 백엔드/타이밍에
+ * 따라 기존 행이 `''`이나 NULL 로 남을 수 있다. 그 값을 그대로 정책으로 쓰면 어느 분기에도
+ * 걸리지 않아 기능이 영구 no-op 이 된다 — 미지값·빈값은 전부 기본값으로 접는다.
+ */
+export function normalizeConfirmPolicy(value: unknown): ConfirmPolicy {
+  const v = String(value ?? '').trim().toLowerCase();
+  return (CONFIRM_POLICIES as readonly string[]).includes(v) ? (v as ConfirmPolicy) : DEFAULT_CONFIRM_POLICY;
+}
+
+/** confirm 노드가 내려받을 수 있는 판정값. `EdgeCondition.verdict`와 같은 어휘를 쓴다. */
+export const CONFIRM_VERDICTS = ['pass', 'fail'] as const;
+export type ConfirmVerdict = (typeof CONFIRM_VERDICTS)[number];
+
+/** 사용자 피드백 저장 상한 — `result_summary`(SUMMARY_MAX)보다 훨씬 짧게 잡는다. */
+export const CONFIRM_FEEDBACK_MAX = 4000;
+
+/**
+ * confirm 노드에 기록되는 사람의 판정. `null` = 아직 판정 전(또는 loop 재진입으로 리셋됨).
+ *
+ * `visit`을 함께 저장하는 이유: loop가 재진입하면 같은 step이 iteration 2로 다시 열리는데,
+ * 브라우저에 떠 있던 iteration 1 화면이 그대로 제출되면 **다른 pass의 판정**이 현재 pass에
+ * 기록된다. 제출 시 이 값을 대조해 stale 화면을 409로 거부한다.
+ */
+export interface ConfirmDecision {
+  verdict: ConfirmVerdict;
+  feedback: string;
+  decided_by_user_id: string;
+  decided_by_name: string;
+  decided_at: string;
+  visit: number;
+}
 
 /** Satisfies a downstream `depends_on` edge. `skipped` counts — the orchestrator
  *  declared the work unnecessary, so dependents must not stay pending forever. */
 export const DEPENDENCY_SATISFYING_STATUSES: readonly StepStatus[] = ['done', 'skipped'];
 
-/** Poisons downstream steps: a dependent can never run, so it goes `blocked`. */
-export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = ['failed', 'blocked', 'cancelled'];
+/** Poisons downstream steps: a dependent can never run, so it goes `blocked`.
+ *  `needs_recovery` 도 포함된다 — 사람이 손대기 전에는 절대 `done` 이 되지 않으므로
+ *  하류를 `pending` 으로 방치하면 미션이 조용히 멈춘 것처럼 보인다. */
+export const DEPENDENCY_POISONING_STATUSES: readonly StepStatus[] = [
+  'failed',
+  'blocked',
+  'cancelled',
+  'needs_recovery',
+];
 
 export function isInFlight(s: string): boolean {
   return (IN_FLIGHT_STEP_STATUSES as readonly string[]).includes(s);
@@ -80,6 +186,20 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'step_blocked',
   'step_skipped',
   'step_retried',
+  // 복구(티켓 4d065f82) — lease 만료로 자동 재실행이 금지된 step, 그리고 지각 보고가
+  // fencing 으로 거부된 순간. 후자는 "왜 내 결과가 반영 안 됐나"를 설명하는 유일한 근거다.
+  'step_needs_recovery',
+  'step_lease_rejected',
+  // 복구 reconciliation(리뷰 라운드1 P0-1) — lease 만료 관측 → 유예 → 재연결 성공
+  // 또는 새 attempt 자동 재디스패치. 각 단계가 왜 그렇게 됐는지 사후 재구성 가능해야 한다.
+  'step_lease_stale',
+  'step_lease_recovered',
+  'step_auto_redispatched',
+  // 재개 가능한 체크포인트 저장(리뷰 라운드1 P0-2) — 마지막 값은 step 에 있고,
+  // 각 저장 시점은 여기 append-only 로 남는다.
+  'step_checkpoint',
+  // 상류 복구로 자동 차단이 풀린 하류(리뷰 라운드1 P1-4).
+  'step_unblocked',
   'orchestrator_woken',
   'mission_paused',
   'mission_resumed',
@@ -99,6 +219,15 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'post_action_dispatched',
   'post_action_dispatch_failed',
   'post_action_skipped',
+  // 사람의 확인 게이트(티켓 5dbe4aa2) — 이 두 이벤트 쌍이 요구사항 6의 감사 로그다.
+  // `confirm_requested`는 무엇을 근거(artifacts)로 물었는지, `confirm_decided`는 누가
+  // 언제 어떤 판정을 왜 내렸는지를 남긴다. 중복 제출은 두 번째 이벤트를 만들지 않는다.
+  'confirm_requested',
+  'confirm_decided',
+  // 게이트 대기 사실을 밖으로 알린 기록(티켓 a78cb566). `confirm_requested` 가 "물었다"
+  // 라면 이쪽은 "사람에게 닿게 보냈다" 다 — 둘을 합치면 "화면을 아무도 안 열어서 멈춰
+  // 있었다" 를 사후에 판별할 수 있다. 전송 실패도 남긴다(sent=0).
+  'confirm_notified',
   'note',
   'error',
 ] as const;
@@ -293,6 +422,8 @@ export interface PlanStepInput {
   acceptance_criteria?: string;
   depends_on?: string[];
   assignee_agent_id?: string;
+  /** 'auto'(기본) | 'manual'. `StepRetryPolicy` 참고 — 티켓 4d065f82. */
+  retry_policy?: StepRetryPolicy;
 }
 
 export interface PlanValidationError {
@@ -419,6 +550,14 @@ export interface PlanProgress {
   /** Non-terminal, but a dependency reached a poisoning status → can never run. */
   newlyBlocked: string[];
   inFlight: string[];
+  /**
+   * confirm 노드가 사람의 판정을 기다리며 durable pause 중(티켓 5dbe4aa2).
+   *
+   * `inFlight`와 분리한 이유는 두 소비자가 정반대로 써야 하기 때문이다:
+   * 병렬 슬롯 계산(`pump`)은 이걸 세면 안 되고, "미션이 멈춘 것인가" 판정
+   * (`decideWake`·리퍼)은 반드시 세야 한다. 하나로 합치면 둘 중 하나가 틀린다.
+   */
+  awaitingUser: string[];
   done: string[];
   failed: string[];
   allTerminal: boolean;
@@ -431,6 +570,7 @@ export function computePlanProgress(steps: StepStateView[]): PlanProgress {
     waiting: [],
     newlyBlocked: [],
     inFlight: [],
+    awaitingUser: [],
     done: [],
     failed: [],
     allTerminal: true,
@@ -442,11 +582,30 @@ export function computePlanProgress(steps: StepStateView[]): PlanProgress {
       out.allTerminal = false;
       continue;
     }
+    // `awaiting_user`는 여기서 **명시적으로** 걸러야 한다(티켓 5dbe4aa2). 이 함수는
+    // 상태를 직접 나열해 분류하므로, 목록에 없는 상태는 아래 "pending / ready" 분기로
+    // 흘러 **dispatchable 로 집계**된다 — 즉 사람을 기다리라고 만든 상태가 매 pump 마다
+    // confirm 노드를 다시 열어버린다(`needs_recovery`가 겪은 것과 같은 실패 형태).
+    if (isAwaitingUser(s.status)) {
+      out.awaitingUser.push(s.step_key);
+      out.allTerminal = false;
+      continue;
+    }
     if (s.status === 'done' || s.status === 'skipped') {
       out.done.push(s.step_key);
       continue;
     }
-    if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') {
+    // `needs_recovery` 가 여기 반드시 있어야 한다(티켓 4d065f82). 이 함수는
+    // TERMINAL_STEP_STATUSES 를 참조하지 않고 상태를 직접 나열해 분류하므로, 목록에
+    // 없는 상태는 아래 "pending / ready" 분기로 흘러 **dispatchable 로 분류된다** —
+    // 즉 자동 재실행을 금지하려고 만든 상태가 오히려 즉시 재디스패치를 부른다.
+    // 정확히 막으려던 비멱등 작업의 중복 실행이라 그냥 두면 기능이 반대로 동작한다.
+    if (
+      s.status === 'failed' ||
+      s.status === 'blocked' ||
+      s.status === 'cancelled' ||
+      s.status === 'needs_recovery'
+    ) {
       out.failed.push(s.step_key);
       continue;
     }

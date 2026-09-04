@@ -4,7 +4,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import type { RuntimeProfileSpec } from './cli-adapters/base.js';
-import { terminateDetachedProcessTree } from './process-tree.js';
+import { childHasExited, terminateDetachedProcessTree } from './process-tree.js';
 
 interface AdapterLaunch {
   bin: string;
@@ -165,7 +165,10 @@ async function healthy(url: string): Promise<boolean> {
  * ANTHROPIC_SMALL_FAST_MODEL=haiku를 주입하고, DEFAULT_HAIKU override가 같은
  * raw served model로 라우팅한다. ANTHROPIC_DEFAULT_FABLE_MODEL은 주입하지 않는다.
  */
-const MODEL_ROUTING_ENV_KEYS = [
+/** ticket 20fff298 — launch-spec 이 "프로파일 활성 시 `--model` 이 왜 없는지"를
+ *  화면에서 설명하려면 이 키 목록을 그대로 읽어야 한다. 목록을 그쪽에 다시
+ *  적으면 여기와 갈라지므로 export 한다. */
+export const MODEL_ROUTING_ENV_KEYS = [
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
@@ -483,10 +486,13 @@ export class RuntimeLease {
   async terminate(managerDrain = false): Promise<void> {
     if (!this.child || this.profile.adapter?.lifecycle === 'reuse') return;
     if (!managerDrain && this.profile.adapter?.lifecycle === 'manager_exit') return;
-    const exited = this.child.exitCode !== null || this.child.signalCode !== null
+    const child = this.child;
+    const exited = childHasExited(child)
       ? Promise.resolve()
-      : new Promise<void>(resolveExit => this.child!.once('exit', () => resolveExit()));
-    if (this.child.pid) await terminateDetachedProcessTree(this.child.pid);
+      : new Promise<void>(resolveExit => child.once('exit', () => resolveExit()));
+    // 핸들을 같이 넘겨 win32 tree-kill 이 pid 재사용을 밟지 않게 한다. 여기는
+    // graceMs 가 기본값(5000ms)이라 soft 와 force 사이의 창이 특히 넓다.
+    if (child.pid) await terminateDetachedProcessTree(child.pid, undefined, { child });
     await Promise.race([exited, new Promise<void>(resolveWait => setTimeout(resolveWait, 1_000))]);
   }
 }

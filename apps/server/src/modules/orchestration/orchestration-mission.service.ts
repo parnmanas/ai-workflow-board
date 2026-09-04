@@ -23,17 +23,23 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
 import { GraphSpec, computeMissionProgress } from './orchestration-graph';
+import { renderConfirmPolicyGuidance } from './orchestration-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
+import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
   MAX_PARALLEL_CEILING,
   MAX_STEPS_CEILING,
   TERMINAL_MISSION_STATUSES,
+  ConfirmDecision,
+  ConfirmPolicy,
   MissionCompletionCriterion,
   MissionPostAction,
+  isAwaitingUser,
   isInFlight,
   isTerminalStepStatus,
   normalizeCompletionCriteria,
+  normalizeConfirmPolicy,
   normalizePostActions,
 } from './orchestration.constants';
 import {
@@ -51,6 +57,11 @@ export interface MissionCounts {
   failed: number;
   inFlight: number;
   pending: number;
+  /**
+   * 사람의 confirm 판정을 기다리는 step 수(티켓 5dbe4aa2). `pending`에서 분리했다 —
+   * "아직 시작 안 함"과 "당신의 답을 기다리는 중"은 운영자가 해야 할 행동이 정반대다.
+   */
+  awaitingUser: number;
 }
 
 export interface MissionListItem {
@@ -97,6 +108,14 @@ export interface MissionStepView {
   visit: number;
   /** 마지막으로 보고된 verdict — 조건 분기의 근거. '' = 없음. */
   verdict: string;
+  /** 'auto' | 'manual'. manual 이면 lease 만료 시 자동 재실행 대신 needs_recovery. */
+  retry_policy: string;
+  /** needs_recovery 사유. 다른 상태에서는 ''. */
+  recovery_reason: string;
+  /** 마지막 생존 신호 시각 — 리퍼 타임아웃의 기준선. */
+  last_heartbeat_at: Date | null;
+  /** confirm node 에 사람이 내린 판정(티켓 5dbe4aa2). null = 아직 판정 전/해당 없음. */
+  confirm_decision: ConfirmDecision | null;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -129,6 +148,8 @@ export interface MissionDetail extends MissionListItem {
   graph_revision: number;
   /** 지금까지 소진된 node 실행 횟수(global budget). */
   total_visits: number;
+  /** 사용자 확인 강도 — 항상 정규화된 값이다(티켓 5dbe4aa2). */
+  confirm_policy: ConfirmPolicy;
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -141,6 +162,7 @@ export interface MissionDetail extends MissionListItem {
     message: string;
     data: Record<string, any> | null;
     created_at: Date;
+    write_seq: number;
   }>;
 }
 
@@ -203,6 +225,13 @@ export class OrchestrationMissionService {
       step_key: s.step_key,
       title: s.title,
       status: s.status,
+      // 세션을 잃은 agent 가 복구하는 바로 그 경로다 — 여기서 lease token 을 돌려주지
+      // 않으면, 재시작 뒤 살아난 agent 가 자기 work order 를 잃어버린 채 보고에 필요한
+      // 토큰을 어디서도 얻지 못해 **영원히 보고할 수 없게** 된다(티켓 4d065f82).
+      // 조회 자체가 assignee 본인으로 제한돼 있으므로 노출 범위는 늘지 않는다.
+      lease_token: s.lease_token || '',
+      checkpoint: s.checkpoint ?? null,
+      checkpoint_at: s.checkpoint_at ?? null,
       dispatched_at: s.dispatched_at,
       mission_id: s.mission_id,
       mission_title: missionById.get(s.mission_id)?.title ?? '',
@@ -231,6 +260,8 @@ export class OrchestrationMissionService {
     step_timeout_minutes?: number;
     /** 실행 그래프(조건 분기/join/bounded loop) 사용 여부 — 티켓 1ca9e49b. */
     graph_enabled?: boolean;
+    /** 사용자 확인 강도 — 'none' | 'auto'(기본) | 'key_steps' | 'every_step'. 티켓 5dbe4aa2. */
+    confirm_policy?: string;
     created_by_type?: string;
     created_by?: string;
     /**
@@ -327,6 +358,7 @@ export class OrchestrationMissionService {
         max_plan_versions: clampInt(input.max_plan_versions, 6, 1, 50),
         step_timeout_minutes: clampInt(input.step_timeout_minutes, 90, 0, 60 * 24 * 7),
         graph_enabled: input.graph_enabled === true,
+        confirm_policy: normalizeConfirmPolicy(input.confirm_policy),
         created_by_type: input.created_by_type || 'user',
         created_by: input.created_by || '',
       }),
@@ -362,6 +394,7 @@ export class OrchestrationMissionService {
       max_plan_versions?: number;
       step_timeout_minutes?: number;
       graph_enabled?: boolean;
+      confirm_policy?: string;
     },
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, workspaceId);
@@ -392,7 +425,12 @@ export class OrchestrationMissionService {
       // graph_enabled도 브리핑 계약의 일부다: 미션이 이미 시작된 뒤 켜면
       // orchestrator는 자기가 분기/loop를 쓸 수 있다는 사실을 들은 적이 없고,
       // 끄면 이미 확정된 graph_spec이 실행 규칙과 어긋난다.
-      patch.graph_enabled !== undefined;
+      patch.graph_enabled !== undefined ||
+      // confirm_policy 도 브리핑 계약이다(티켓 5dbe4aa2): orchestrator 는 브리핑에서 들은
+      // 정책대로 그래프를 짜므로, 미션이 시작된 뒤 조이면 이미 확정된 confirm 노드가
+      // 실행 규칙과 어긋나고, 풀면 orchestrator 는 게이트를 쓸 수 있다는 사실을 들은 적이
+      // 없어 정책이 아무 효과도 내지 못한다.
+      patch.confirm_policy !== undefined;
     if (briefLocked && touchesBrief) {
       throw orchestrationError(
         409,
@@ -438,6 +476,7 @@ export class OrchestrationMissionService {
       mission.max_plan_versions = clampInt(patch.max_plan_versions, mission.max_plan_versions, 1, 50);
     }
     if (patch.graph_enabled !== undefined) mission.graph_enabled = patch.graph_enabled === true;
+    if (patch.confirm_policy !== undefined) mission.confirm_policy = normalizeConfirmPolicy(patch.confirm_policy);
     if (patch.step_timeout_minutes !== undefined) {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
@@ -618,6 +657,10 @@ export class OrchestrationMissionService {
       graph_spec: mission.graph_spec ?? null,
       graph_revision: mission.graph_revision ?? 0,
       total_visits: mission.total_visits ?? 0,
+      // 읽기는 항상 정규화를 거친다 — DDL 마이그레이션 없이 추가된 컬럼이라 기존 행이
+      // 빈 문자열/NULL 로 남아 있을 수 있고, 그 값이 그대로 UI 셀렉트에 들어가면 어느
+      // 옵션에도 걸리지 않는 "선택 없음" 상태가 된다.
+      confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
       steps: steps.map((s) => {
         const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
         return {
@@ -644,6 +687,10 @@ export class OrchestrationMissionService {
           workspace_folder: `${resolveWorkspaceFolder(mission.workspace_folder, 'orchestration', mission.id)}/${s.step_key}`,
           visit: s.visit ?? 0,
           verdict: s.verdict ?? '',
+          retry_policy: s.retry_policy || 'auto',
+          recovery_reason: s.recovery_reason || '',
+          last_heartbeat_at: s.last_heartbeat_at ?? null,
+          confirm_decision: s.confirm_decision ?? null,
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -659,6 +706,9 @@ export class OrchestrationMissionService {
         message: e.message,
         data: e.data,
         created_at: e.created_at,
+        // 커서의 타이브레이커 — 이 값이 없으면 클라이언트가 첫 페이지 끝에서
+        // 이어받을 정확한 지점을 만들 수 없다.
+        write_seq: e.write_seq ?? 0,
       })),
     };
   }
@@ -710,11 +760,14 @@ export class OrchestrationMissionService {
       counts: countSteps(steps),
       dispatchable_now: progress.dispatchable,
       waiting_on_dependencies: progress.waiting,
+      confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
       graph: mission.graph_enabled
         ? {
             enabled: true,
             spec: mission.graph_spec ?? null,
             revision: mission.graph_revision ?? 0,
+            confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
+            confirm_note: renderConfirmPolicyGuidance(mission.confirm_policy),
             budget: {
               total_visits: mission.total_visits ?? 0,
               max_total_visits: mission.graph_spec?.max_total_visits ?? null,
@@ -740,8 +793,11 @@ export class OrchestrationMissionService {
         max_attempts: s.max_attempts,
         visit: s.visit ?? 0,
         verdict: s.verdict ?? '',
+        retry_policy: s.retry_policy || 'auto',
+        recovery_reason: s.recovery_reason || '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
+        confirm_decision: s.confirm_decision ?? null,
       })),
       recent_timeline: events
         .reverse()
@@ -789,6 +845,7 @@ export class OrchestrationMissionService {
           actor_name: actorName,
           message: (input.message || '').slice(0, 4000),
           data: input.data ?? null,
+          write_seq: await this.nextEventWriteSeq(mission.id),
         }),
       );
     } catch (e: any) {
@@ -797,6 +854,96 @@ export class OrchestrationMissionService {
       this.logService.error('Orchestration', `failed to record event for mission ${mission.id}: ${e?.message || e}`);
     }
     this.emitUpdate(mission, { type: input.type, message: input.message, step_key: input.step_key || '' });
+  }
+
+  /**
+   * 미션 타임라인의 **커서 페이지네이션**(티켓 4d065f82, 리뷰 라운드1 P1-3).
+   *
+   * `getMissionDetail` 은 최신 N건만 실어주는 bounded window 라, 긴 미션의 이전 이력은
+   * 어떤 API 로도 가져올 수 없었다. 이 메서드가 그 창을 뒤로 밀 수 있게 한다.
+   *
+   * 커서는 `(created_at, write_seq)` 복합 keyset 이다. `created_at` 단독으로는 안 된다 —
+   * fan-out 한 번이면 수십 건이 같은 타임스탬프를 갖고, 그러면 `created_at < cursor` 는
+   * 그 그룹을 통째로 건너뛰고 `<=` 는 무한히 되돌린다. 표준 keyset 술어로 전순서를 만든다.
+   *
+   * 최신 → 과거 순(DESC)으로 돌려준다. 호출자가 화면에 붙일 때 뒤집는다.
+   */
+  async listMissionEvents(
+    missionId: string,
+    workspaceId: string,
+    opts?: { limit?: number; before_at?: string; before_seq?: number },
+  ): Promise<{ events: OrchestrationEvent[]; has_more: boolean; next_cursor: { at: string; seq: number } | null }> {
+    const mission = await this.requireMission(missionId);
+    if (workspaceId && mission.workspace_id !== workspaceId) {
+      throw orchestrationError(404, 'mission not found in this workspace');
+    }
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+
+    const qb = this.eventRepo
+      .createQueryBuilder('e')
+      .where('e.mission_id = :missionId', { missionId })
+      .orderBy('e.created_at', 'DESC')
+      .addOrderBy('e.write_seq', 'DESC')
+      // 한 건 더 읽어 has_more 를 별도 COUNT 없이 판정한다.
+      .take(limit + 1);
+
+    if (opts?.before_at) {
+      const beforeSeq = Number.isFinite(Number(opts.before_seq)) ? Number(opts.before_seq) : 0;
+      qb.andWhere(
+        '(e.created_at < :beforeAt OR (e.created_at = :beforeAtEq AND e.write_seq < :beforeSeq))',
+        {
+          beforeAt: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
+          beforeAtEq: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
+          beforeSeq,
+        },
+      );
+    }
+
+    const rows = await qb.getMany();
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      events: page,
+      has_more: hasMore,
+      next_cursor: last ? { at: new Date(last.created_at).toISOString(), seq: last.write_seq ?? 0 } : null,
+    };
+  }
+
+  /**
+   * 다음 이벤트의 `write_seq` 를 **DB 상태에서** 유도한다(티켓 4d065f82).
+   *
+   * comment-tools.ts 의 `_comment_write_seq` 와 같은 tied-group 기법이다: 이 미션의
+   * 가장 최근 `created_at` 을 찾고, 그와 **정확히 같은** created_at 을 가진 row 를
+   * LIMIT 없이 전부 가져와 그 안의 최댓값 + 1 을 쓴다. 같은 타임스탬프에 몇 건이 몰리든
+   * 개수와 무관하게 전량을 보므로 burst 크기에 영향받지 않고, 프로세스 메모리에
+   * 의존하지 않으므로 재시작에도 리셋되지 않는다.
+   *
+   * 이 값이 필요한 이유는 커서 페이지네이션이다 — `created_at` 만으로는 fan-out 한 번에
+   * 수십 건이 같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 건너뛴다.
+   */
+  private async nextEventWriteSeq(missionId: string): Promise<number> {
+    try {
+      const mostRecent = await this.eventRepo.findOne({
+        where: { mission_id: missionId },
+        order: { created_at: 'DESC' },
+      });
+      if (!mostRecent) return 1;
+      const tied = await this.eventRepo
+        .createQueryBuilder('e')
+        .where('e.mission_id = :missionId', { missionId })
+        .andWhere('e.created_at = :tiedAt', {
+          tiedAt: sinceBoundaryParam(this.dataSource, mostRecent.created_at),
+        })
+        .getMany();
+      let max = 0;
+      for (const e of tied) if ((e.write_seq ?? 0) > max) max = e.write_seq ?? 0;
+      return max + 1;
+    } catch {
+      // seq 유도 실패가 타임라인 기록 자체를 막으면 안 된다 — 0 은 "순서 미상"이고
+      // 커서는 created_at 으로만 비교하게 되어 예전 동작으로 우아하게 후퇴한다.
+      return 0;
+    }
   }
 
   /**
@@ -864,11 +1011,15 @@ export class OrchestrationMissionService {
 }
 
 export function countSteps(steps: Array<{ status: string }>): MissionCounts {
-  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0 };
+  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0 };
   for (const s of steps) {
     if (s.status === 'done' || s.status === 'skipped') counts.done += 1;
     else if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') counts.failed += 1;
     else if (isInFlight(s.status)) counts.inFlight += 1;
+    // `pending` 앞에 둔다 — awaiting_user 는 terminal 이 아니라서 그냥 두면 아래
+    // pending 으로 흡수되고, 운영자 화면에서 "당신의 답 대기 중"이 "아직 시작 안 함"과
+    // 구분되지 않는다(티켓 5dbe4aa2).
+    else if (isAwaitingUser(s.status)) counts.awaitingUser += 1;
     else if (!isTerminalStepStatus(s.status)) counts.pending += 1;
   }
   return counts;

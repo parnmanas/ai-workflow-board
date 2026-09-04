@@ -8,6 +8,7 @@ import { useMentionViewportReader } from '../../hooks/useMentionViewportReader';
 import { useNotifications } from '../../contexts/NotificationContext';
 import NewChatModal from './ParticipantPicker';
 import { useConfirm } from '../../contexts/ConfirmContext';
+import { useToast } from '../../contexts/ToastContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
 import ActiveTaskStrip from './ActiveTaskStrip';
@@ -24,6 +25,10 @@ interface RoomHeaderActionsProps {
   onLeave: () => void;
   onClear: () => void;
   onAddPeople: () => void;
+  /** 자유 참여(open join) 토글 — ticket 995a9519. */
+  onToggleOpenJoin: () => void;
+  /** 토글 요청이 진행 중인가. 중복 클릭을 막고 진행 상태를 보여준다. */
+  openJoinPending: boolean;
 }
 
 function RoomHeaderActions({
@@ -35,6 +40,8 @@ function RoomHeaderActions({
   onLeave,
   onClear,
   onAddPeople,
+  onToggleOpenJoin,
+  openJoinPending,
 }: RoomHeaderActionsProps) {
   const [renameValue, setRenameValue] = useState(room.name || '');
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -109,12 +116,54 @@ function RoomHeaderActions({
     );
   }
 
+  // 아직 참여하지 않은 자유 참여 방(ticket 995a9519). 방은 목록에 보이고 읽을 수도
+  // 있지만, 참여자 전용 동작(초대·이름 변경·내 이력 지우기·나가기·옵션 토글)은 서버가
+  // 전부 거부한다. 눌러도 실패할 버튼을 주는 대신 감추고, 어떻게 참여하는지 알려준다.
+  // `false` 일 때만 감춘다 — 값이 없는(구버전) 응답은 예전처럼 참여자로 본다.
+  if (room.is_participant === false) {
+    return (
+      <span
+        data-testid="room-open-join-hint"
+        style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}
+      >
+        Open room — send a message to join
+      </span>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', gap: tokens.spacing.sm }}>
       {/* Add People stays group-only — DMs are fixed at 2 participants. */}
       {room.type === 'group' && (
         <button onClick={onAddPeople} style={ghostButton}>
           Add People
+        </button>
+      )}
+      {/* 자유 참여(open join, ticket 995a9519) — group 전용. DM 은 정확히 2인
+          불변식이라 서버가 이 옵션을 거부하므로 토글 자체를 걸지 않는다. 켜면 같은
+          워크스페이스의 모든 유저에게 방이 보이고, 참여자가 아니어도 첫 발언 시점에
+          자동으로 참여자가 된다. */}
+      {room.type === 'group' && (
+        <button
+          onClick={onToggleOpenJoin}
+          disabled={openJoinPending}
+          aria-pressed={!!room.open_join}
+          data-testid="room-open-join-toggle"
+          title={
+            room.open_join
+              ? 'Anyone in this workspace can see and join this room. Click to close it to participants only.'
+              : 'Only participants can see this room. Click to let anyone in this workspace see and join it.'
+          }
+          style={{
+            ...ghostButton,
+            cursor: openJoinPending ? 'default' : 'pointer',
+            opacity: openJoinPending ? 0.6 : 1,
+            ...(room.open_join
+              ? { borderColor: tokens.colors.accent, color: tokens.colors.accent }
+              : null),
+          }}
+        >
+          {room.open_join ? 'Open Join: On' : 'Open Join: Off'}
         </button>
       )}
       {/* Rename is allowed for DMs too so users can tag multi-rooms with
@@ -160,6 +209,10 @@ export interface ChatRoomViewProps {
   // Per-viewer Clear (ticket 1ae77f55) — parent wipes local message state
   // for the room and zeroes its sidebar metadata.
   onRoomCleared: (roomId: string) => void;
+  // 자유 참여 토글 결과를 방 목록에 반영한다 (ticket 995a9519). 서버의
+  // chat_room_update(open_join_changed) 는 **다른** 클라이언트를 위한 것이고,
+  // 누른 본인의 화면은 이 콜백으로 즉시 갱신된다.
+  onOpenJoinChanged: (roomId: string, openJoin: boolean) => void;
   isMobile: boolean;
   onBack?: () => void;
   participantCount?: number;
@@ -200,6 +253,7 @@ export default function ChatRoomView({
   onRoomRenamed,
   onParticipantsAdded,
   onRoomCleared,
+  onOpenJoinChanged,
   isMobile,
   onBack,
   participantCount = 0,
@@ -211,9 +265,12 @@ export default function ChatRoomView({
   onSelectTask = () => {},
 }: ChatRoomViewProps) {
   const confirm = useConfirm();
+  const { showToast } = useToast();
   const { noteMentionsCleared } = useNotifications();
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
+  /** 자유 참여 토글 요청이 진행 중인가 (ticket 995a9519). */
+  const [openJoinPending, setOpenJoinPending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -378,6 +435,23 @@ export default function ChatRoomView({
     onRoomRenamed(room.id, name);
   }
 
+  async function handleToggleOpenJoin() {
+    if (!room || openJoinPending) return;
+    const next = !room.open_join;
+    setOpenJoinPending(true);
+    try {
+      const result = await api.setChatRoomOpenJoin(room.id, next);
+      // 서버가 확정한 값을 쓴다 — 낙관적 토글이 서버 판정과 갈리면 화면이 거짓말한다.
+      onOpenJoinChanged(room.id, result.open_join);
+    } catch (e: any) {
+      // 서버가 거부하는 경우(시스템 소유 방 등)를 조용히 삼키면 버튼이 죽은 것처럼
+      // 보인다. 사유를 그대로 띄우고 상태는 건드리지 않는다.
+      showToast(e?.message || 'Could not change the open-join setting', 'error');
+    } finally {
+      setOpenJoinPending(false);
+    }
+  }
+
   async function handleClear() {
     if (!room) return;
     const confirmed = await confirm({
@@ -436,6 +510,8 @@ export default function ChatRoomView({
       onLeave={handleLeave}
       onClear={handleClear}
       onAddPeople={() => setShowAddPeople(true)}
+      onToggleOpenJoin={handleToggleOpenJoin}
+      openJoinPending={openJoinPending}
     />
   );
 
@@ -478,6 +554,8 @@ export default function ChatRoomView({
             onLeave={handleLeave}
             onClear={handleClear}
             onAddPeople={() => setShowAddPeople(true)}
+            onToggleOpenJoin={handleToggleOpenJoin}
+            openJoinPending={openJoinPending}
           />
         </div>
       ) : (

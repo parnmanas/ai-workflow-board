@@ -53,6 +53,32 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 /**
+ * `runtime_config.permission_mode` 옆에 붙는 해설 (ticket 6705d39b).
+ *
+ * 이 값은 운영자가 에이전트에 **설정한** trust 일 뿐, 그 에이전트가 spawn 될 때
+ * 실제로 받는 권한 등급이 아니다. 실효 등급은 매니저의
+ * `resolveEffectivePermissionPolicy()`(`apps/agent-manager/src/lib/permission-policy.ts`)
+ * 가 디스패치 시점에 판정하며, 여기 표시된 값과 갈리는 경로가 실재한다 —
+ * trust 가 인식 불가능한 값이면 `strict` 로 fail-closed 강등되고, trust 가 아예
+ * 없으면 보드·워크스페이스 harness 의 `permission_mode` 가 등급을 정한다. 등급이
+ * 그대로여도 런타임이 그 등급을 native 로 표현하지 못해 근사되거나(antigravity/pi
+ * 의 strict), `approve` 처럼 승인 브릿지가 없는 런타임에서는 spawn 자체가 차단된다.
+ *
+ * 그래서 라벨만 "Permission" 이면 운영자가 이 값을 "이 에이전트가 실제로 갖는
+ * 권한"으로 읽는다. 라벨을 설정값 쪽으로 좁히고(`Trust 설정`) 실효 등급과 갈릴 수
+ * 있다는 사실을 값 옆에 함께 노출한다. 용어는 Agent details 가 실효값을 부르는
+ * "권한 등급" 과 겹치지 않게 골랐다 — 두 화면이 서로 다른 것을 보여준다는 점이
+ * 이름에서 드러나야 한다.
+ */
+const TRUST_CONFIGURED_NOTE = '설정값 — 실효 등급과 다를 수 있음';
+// 툴팁은 origin/main 에 실재하는 것만 가리킨다 — 아직 안 올라온 화면으로 안내하면
+// 그것 자체가 이 티켓이 고치는 오표시가 된다.
+const TRUST_CONFIGURED_HINT =
+  '에이전트에 설정된 trust 값입니다. 실제 적용되는 권한 등급은 디스패치 시점에 매니저가 판정합니다 — '
+  + 'trust 가 유효하지 않으면 strict 로 강등되고, trust 가 없으면 보드·워크스페이스 harness 설정이 '
+  + '등급을 정합니다. 런타임이 해당 등급을 그대로 표현하지 못하면 근사되거나 실행이 차단될 수도 있습니다.';
+
+/**
  * 순수 표현 컴포넌트 — 부수효과 없음. TicketArtifactView 와 동일하게 컨테이너가
  * 상태/네비게이션 콜백을 props 로 주입한다.
  */
@@ -93,7 +119,17 @@ export function AgentArtifactView({
           {a.type && <InfoRow label="Runtime" value={a.type} />}
           {a.runtime_config?.strategy && <InfoRow label="Strategy" value={a.runtime_config.strategy} />}
           {a.runtime_config?.permission_mode && (
-            <InfoRow label="Permission" value={a.runtime_config.permission_mode} />
+            <InfoRow
+              label="Trust 설정"
+              value={
+                <span title={TRUST_CONFIGURED_HINT}>
+                  {a.runtime_config.permission_mode}
+                  <span style={{ color: tokens.colors.textMuted, marginLeft: 8 }}>
+                    {TRUST_CONFIGURED_NOTE}
+                  </span>
+                </span>
+              }
+            />
           )}
           {a.working_dir && <InfoRow label="Working dir" value={a.working_dir} />}
         </div>

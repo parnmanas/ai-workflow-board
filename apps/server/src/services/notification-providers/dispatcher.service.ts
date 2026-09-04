@@ -40,6 +40,10 @@ interface ChatRoomMessageEvent {
   // Upstream forwards the Set returned by RoomMembershipService.getRoomMemberIds()
   // unchanged; allow either shape and normalize at the listener.
   member_ids?: Set<string> | string[];
+  // Action Run / Orchestration mission·step room 마커. `sendMessage` 가 이미 실어
+  // 보내던 필드인데 여기 선언이 없어 타입에서만 빠져 있었다 — `_handleChat` 이 이걸
+  // 읽는다.
+  is_action_room?: boolean;
   created_at: string;
 }
 
@@ -171,6 +175,23 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     // Progress heartbeats (tool-call narration) are visible live in the room
     // but not actionable chat — never fire external notifications for them.
     if (ev.type === 'progress') return;
+
+    // Action Run / Orchestration 방은 대화가 아니라 **작업 실행**이다(`is_action_room`
+    // 마커의 원래 의미). 그 방의 발화는 대부분 엔진이 기계적으로 포스트하는 브리핑·wake·
+    // step 디스패치라, 미션 하나가 수십 건을 만든다 — 그걸 전부 Discord/Slack 푸시로
+    // 내보내면 알림 폭탄이 된다. 같은 이유로 이 방들은 일반 채팅 목록에서도 제외돼 있다.
+    //
+    // 이 경로는 티켓 f6a0de0e 이전에는 **실제로 열린 적이 없었다**: mission 방 참여자가
+    // orchestrator agent 와 의사 user 'system' 뿐이라 팬아웃 대상 사람이 0명이었다.
+    // 그 티켓이 미션 생성자를 참여자로 넣으면서 비로소 도달 가능해졌고, 넣자마자
+    // qa-flows/orchestration-confirm-notify 가 "게이트가 열리기 전에는 아무것도 나가지
+    // 않는다"에서 깨져 이 구멍을 드러냈다.
+    //
+    // 사람이 이 방의 새 메시지를 놓치지 않는 수단은 따로 있다 — 미션 상세 화면이 SSE 로
+    // 실시간 렌더링하고, 사람의 판단이 꼭 필요한 confirm 게이트는 전용 알림 경로
+    // (OrchestrationConfirmNotifyService)가 별도로 보낸다. 즉 여기서 막는 것은 중복이자
+    // 소음이지, 유일한 통지 수단이 아니다.
+    if (ev.is_action_room) return;
 
     const memberIds = Array.from(ev.member_ids || []).filter((id) => !!id && id !== ev.sender_id);
     if (memberIds.length === 0) return;

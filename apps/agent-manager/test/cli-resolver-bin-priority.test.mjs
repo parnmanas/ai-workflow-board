@@ -13,11 +13,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { accessSync, constants as fsConstants } from 'node:fs';
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { accessSync, constants as fsConstants, realpathSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join, normalize } from 'node:path';
+import { delimiter, join, normalize, win32 } from 'node:path';
 import {
+  canonicalizeResolvedBin,
   orderResolutionSources,
   resolveBinOverride,
   scanPathForBinary,
@@ -118,6 +119,57 @@ async function withCodexOnPath(run) {
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+// ── canonicalizeResolvedBin ──────────────────────────────────────────────
+//
+// resolveCliBin 은 결과를 만드는 분기가 둘이고(shell lookup / PATH 스캔), 부하가
+// 높은 Windows 러너에서는 같은 프로세스의 연속 두 호출이 서로 다른 분기를 타
+// 표기가 다른 같은 경로를 돌려줬다 — `...runneradmin...codex.exe`(where) 대
+// `...RUNNER~1...codex.EXE`(8.3 단축명 + PATHEXT 표기). 아래 sentinel 테스트가
+// main CI 에서 그 차이로 red 였다. 정규화는 반환 직전 한 번 접는 것으로 해결하고,
+// 여기서는 그 접는 함수 자체의 계약을 플랫폼 무관하게 고정한다.
+
+test('canonicalizeResolvedBin: windows 축은 간접 경로를 디스크의 실제 경로로 편다', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'awb-canon-'));
+  try {
+    const realDir = join(root, 'real');
+    await mkdir(realDir);
+    const executable = join(realDir, 'codex.exe');
+    await writeFile(executable, '');
+    const linkDir = join(root, 'link');
+    await symlink(realDir, linkDir, 'junction');
+
+    // 같은 파일을 가리키는 두 표기(실제 경로 / 링크 경유)가 한 값으로 접혀야 한다.
+    const viaLink = canonicalizeResolvedBin(join(linkDir, 'codex.exe'), true);
+    const viaReal = canonicalizeResolvedBin(executable, true);
+    assert.equal(viaLink, viaReal);
+    assert.equal(viaReal, realpathSync.native(executable));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('canonicalizeResolvedBin: 존재하지 않는 경로에서도 throw 하지 않고 정규화만 한다', () => {
+  // 정규화는 표기 통일일 뿐이라, 경로 조회 실패가 resolve 자체를 깨면 안 된다.
+  const missing = 'C:\\nope\\..\\nope\\codex.exe';
+  assert.equal(canonicalizeResolvedBin(missing, true), win32.normalize(missing));
+});
+
+test('canonicalizeResolvedBin: POSIX 축은 값을 그대로 통과시킨다', async () => {
+  // POSIX 는 두 분기가 같은 join(PATH 항목, 이름) 을 만들어 갈리지 않는다. 여기서
+  // realpath 를 태우면 npm bin 래퍼 symlink 를 풀어 spawn 대상이 바뀌므로, 통과
+  // 시키는 것이 계약이다 — symlink 를 줘도 접히지 않아야 한다.
+  const root = await mkdtemp(join(tmpdir(), 'awb-canon-posix-'));
+  try {
+    const target = join(root, 'codex-real');
+    await writeFile(target, '');
+    const wrapper = join(root, 'codex');
+    await symlink(target, wrapper);
+    assert.equal(canonicalizeResolvedBin(wrapper, false), wrapper);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('resolveCliBin: the codexBin sentinel default ("codex") is ignored, same as claudeBin\'s "claude"', async () => {
   // DELEGATION_DEFAULTS.codexBin defaults to the literal CLI name "codex" —

@@ -10,6 +10,7 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
 import { Resource } from '../../entities/Resource';
 import { Workspace } from '../../entities/Workspace';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { decrypt } from '../../services/encryption.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
@@ -29,9 +30,11 @@ import { SubagentMonitorService } from '../../services/subagent-monitor.service'
 import { activityEvents } from '../../services/activity.service';
 import {
   InstanceRegistryService,
+  type InstanceRecord,
   type RuntimeCapabilityDescriptor,
   type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
+  type AgentLaunchSpecEntry,
 } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
@@ -76,6 +79,128 @@ function sanitizePermissionTiers(
 }
 
 const PERMISSION_TIER_SUPPORTS = new Set(['native', 'approximated', 'unsupported']);
+
+/** 매니저가 보고한 실효 실행 사양을 안전한 형태로 좁힌다 (ticket 20fff298).
+ *
+ *  마스킹은 **매니저 쪽에서 이미 끝나 있다** — 서버는 원문을 받지 않으므로 여기서
+ *  다시 가릴 것이 없고, 대신 신뢰할 수 없는 크기/모양으로부터 저장소와 관리자
+ *  화면을 보호한다. 상한을 넘는 부분은 조용히 잘라낸다(하트비트는 best-effort 라
+ *  한 행이 이상하다고 전체를 버리면 그게 더 나쁜 실패다).
+ *
+ *  `undefined` 반환은 "매니저가 이 필드를 보고하지 않음"을 그대로 보존한다 —
+ *  빈 배열(보고했지만 대상 없음)로 접으면 UI 가 두 상태를 구분할 수 없다. */
+function sanitizeAgentLaunchSpecs(input: unknown): AgentLaunchSpecEntry[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const MAX_ROWS = 200;
+  const MAX_MODES = 4;
+  const MAX_ARGS = 200;
+  const MAX_ENV = 100;
+  const MAX_TOKEN = 500;
+  const str = (v: unknown, max = MAX_TOKEN): string => String(v ?? '').slice(0, max);
+  const strOrNull = (v: unknown): string | null =>
+    typeof v === 'string' && v ? v.slice(0, MAX_TOKEN) : null;
+  // `harness`/`effort`/`prompt` 는 실제 spawn 기록에서만 나오는 출처다 (리뷰 3R) —
+  // 여기 빠뜨리면 그 토큰들이 조용히 'unattributed' 로 접혀, 화면이 귀속에
+  // 성공한 인자를 출처 불명으로 표시한다.
+  const ARG_SOURCES = new Set([
+    'adapter', 'model', 'permission', 'mcp', 'session',
+    'harness', 'effort', 'prompt',
+    'runtime_profile', 'unattributed',
+  ]);
+  const ENV_SOURCES = new Set(['cli_home', 'credential', 'runtime_profile']);
+  const MODES = new Set(['session', 'oneshot']);
+  const narrowEnv = (raw: unknown): AgentLaunchSpecEntry['env'] =>
+    (Array.isArray(raw) ? raw : [])
+      .slice(0, MAX_ENV)
+      .filter((e: any) => e && typeof e === 'object' && typeof e.key === 'string' && e.key)
+      .map((e: any) => ({
+        key: str(e.key, 120),
+        value: str(e.value),
+        source: ENV_SOURCES.has(e.source) ? e.source : 'credential',
+      }));
+  const narrowArgs = (raw: unknown): AgentLaunchSpecEntry['modes'][number]['args'] =>
+    (Array.isArray(raw) ? raw : [])
+      .slice(0, MAX_ARGS)
+      .filter((a: any) => a && typeof a === 'object')
+      .map((a: any) => ({
+        value: str(a.value),
+        source: ARG_SOURCES.has(a.source) ? a.source : 'unattributed',
+        ...(a.placeholder === true ? { placeholder: true as const } : {}),
+      }));
+  return input
+    .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
+    .slice(0, MAX_ROWS)
+    .map((row: any) => ({
+      agent_id: str(row.agent_id, 64),
+      cli: typeof row.cli === 'string' && row.cli ? str(row.cli, 40) : 'unknown',
+      bin: strOrNull(row.bin),
+      bin_error: strOrNull(row.bin_error),
+      // 모드 순서는 보존한다 — 첫 항목이 "실제로 도는 경로"라는 의미를 지니므로
+      // 정렬하거나 재배치하면 UI 가 기본 경로를 잘못 고른다.
+      modes: (Array.isArray(row.modes) ? row.modes : [])
+        .filter((m: any) => m && typeof m === 'object' && MODES.has(m.mode))
+        .slice(0, MAX_MODES)
+        .map((m: any) => ({
+          mode: m.mode,
+          args: narrowArgs(m.args),
+          notes: (Array.isArray(m.notes) ? m.notes : []).slice(0, 10).map((n: any) => str(n, 400)),
+        })),
+      cwd: strOrNull(row.cwd),
+      // 모르는 값이면 더 보수적인 'base' 로 접는다 — 기준 경로를 실제 프로세스
+      // cwd 라고 주장하는 쪽이 그 반대보다 나쁜 오표시다.
+      cwd_kind: row.cwd_kind === 'exact' ? 'exact' : 'base',
+      mcp_config_path: strOrNull(row.mcp_config_path),
+      model: strOrNull(row.model),
+      permission: {
+        tier: str(row?.permission?.tier, 40) || 'unknown',
+        source: str(row?.permission?.source, 40) || 'unknown',
+        harness_mode: strOrNull(row?.permission?.harness_mode),
+      },
+      runtime_profile:
+        row.runtime_profile && typeof row.runtime_profile === 'object'
+          ? {
+              id: str(row.runtime_profile.id, 120),
+              protocol: str(row.runtime_profile.protocol, 40),
+              model: strOrNull(row.runtime_profile.model),
+              arg_count: Number.isFinite(row.runtime_profile.arg_count)
+                ? Math.max(0, Math.trunc(Number(row.runtime_profile.arg_count)))
+                : 0,
+            }
+          : null,
+      // 마지막 실제 spawn 기록 (ticket 20fff298 리뷰 2R). 추정과 달리 이 값은
+      // 실제 실행의 ground truth 이므로, 모양이 깨졌으면 지어내지 않고 null 로
+      // 접는다 — 잘못된 ground truth 는 없는 것보다 나쁘다.
+      last_spawn: (() => {
+        const raw = row.last_spawn;
+        if (!raw || typeof raw !== 'object' || !MODES.has(raw.mode)) return null;
+        return {
+          mode: raw.mode,
+          bin: strOrNull(raw.bin),
+          args: narrowArgs(raw.args),
+          // 모르는 값은 false 로 접는다 — 귀속됐다고 잘못 주장하는 쪽이 그
+          // 반대보다 나쁜 오표시다(구버전 매니저는 이 필드를 안 보낸다).
+          args_attributed: raw.args_attributed === true,
+          cwd: strOrNull(raw.cwd),
+          env: narrowEnv(raw.env),
+          context: {
+            ticket_id: strOrNull(raw?.context?.ticket_id),
+            role: strOrNull(raw?.context?.role),
+            harness_keys: (Array.isArray(raw?.context?.harness_keys) ? raw.context.harness_keys : [])
+              .slice(0, 20)
+              .map((k: any) => str(k, 60)),
+            effort: strOrNull(raw?.context?.effort),
+            runtime_profile_id: strOrNull(raw?.context?.runtime_profile_id),
+          },
+          recorded_at: str(raw.recorded_at, 40),
+        };
+      })(),
+      env: narrowEnv(row.env),
+      varies_per_dispatch: (Array.isArray(row.varies_per_dispatch) ? row.varies_per_dispatch : [])
+        .slice(0, 20)
+        .map((v: any) => str(v, 200)),
+      computed_at: str(row.computed_at, 40),
+    }));
+}
 
 function sanitizeRuntimeCapabilities(input: unknown): RuntimeCapabilityReport | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
@@ -192,6 +317,90 @@ export class AgentManagerController {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
+  /**
+   * ticket 9408b308 — 직전 하트비트가 광고하던 승인 대기 버전.
+   *
+   * 같은 instance_id 를 먼저 보고, 없으면 같은 (agent_id, hostname) 의 살아있는
+   * manager 인스턴스를 본다. 매니저가 재기동하면 instance_id 가 새로 발급되는데
+   * (upsert 가 그 전임자를 supersede 한다), 그때마다 "새 요청"으로 읽으면 재기동
+   * 한 번에 감사행이 하나씩 늘어난다 — 승인이 안 된 채 매니저가 몇 번 돌면
+   * 같은 버전에 대한 요청이 로그를 뒤덮는다.
+   */
+  private _previousApprovalPendingVersion(
+    instanceId: string,
+    agentId: string,
+    hostname: string,
+  ): string | null {
+    const direct = this.registry.get(instanceId);
+    if (direct) return direct.update_approval_pending_version ?? null;
+    for (const prev of this.registry.list()) {
+      if (prev.mode === 'manager' && prev.agent_id === agentId && prev.hostname === hostname) {
+        return prev.update_approval_pending_version ?? null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * ticket 9408b308 — 승인 요청을 운영자에게 표면화한다.
+   *
+   * WARN 로그(고신호) + `activity_logs` 감사행. ManagerDriftMonitorService 와
+   * 같은 계약을 의도적으로 따른다: ActivityService 가 아니라 repository 로 직접
+   * 저장해 Discord/SSE 팬아웃을 일으키지 않는다. 이 요청은 "지금 사람을 깨우는
+   * 알림"이 아니라 "관리자 페이지를 열지 않아도 남아 있는 기록"이 목적이다.
+   *
+   * best-effort — DB 가 흔들려도 하트비트 처리를 실패시키지 않는다.
+   */
+  private _surfaceUpdateApprovalRequest(rec: InstanceRecord, targetVersion: string): void {
+    const who = `${rec.hostname} (agent ${rec.agent_id.slice(0, 8)})`;
+    const message =
+      `agent-manager update approval requested: ${who} running v${rec.plugin_version} is asking an ` +
+      `operator to approve v${targetVersion} before installing it ` +
+      `(AWB_AGENT_MANAGER_UPDATE_POLICY=scheduled). Nothing installs until an update_manager ` +
+      `command is issued for this host — the request re-surfaces every maintenance window.`;
+    this.logService.warn('AgentManager', message, {
+      kind: 'update_approval_requested',
+      agent_id: rec.agent_id,
+      instance_id: rec.instance_id,
+      hostname: rec.hostname,
+      current_version: rec.plugin_version,
+      target_version: targetVersion,
+      update_channel: rec.update_channel ?? null,
+    });
+    try {
+      const repo = this.dataSource.getRepository(ActivityLog);
+      void repo
+        .save(
+          repo.create({
+            entity_type: 'agent_manager',
+            entity_id: rec.agent_id,
+            action: 'agent_manager_update_approval_requested',
+            field_changed: 'update_approval_pending_version',
+            old_value: String(rec.plugin_version || ''),
+            new_value: JSON.stringify({
+              instance_id: rec.instance_id,
+              hostname: rec.hostname,
+              current_version: rec.plugin_version,
+              target_version: targetVersion,
+              update_channel: rec.update_channel ?? null,
+            }),
+            actor_id: 'system',
+            actor_name: 'AgentManagerHeartbeat',
+            trigger_source: 'system',
+          }),
+        )
+        .catch?.((e: unknown) => {
+          this.logService.warn('AgentManager', 'update-approval audit-row write failed (continuing)', {
+            err: String(e), agent_id: rec.agent_id, target_version: targetVersion,
+          });
+        });
+    } catch (e) {
+      this.logService.warn('AgentManager', 'update-approval audit-row write threw (continuing)', {
+        err: String(e), agent_id: rec.agent_id, target_version: targetVersion,
+      });
+    }
+  }
+
   // ─── Agent Manager → Server ──────────────────────────────────────────────
 
   @ApiSecurity('agent-api-key')
@@ -303,6 +512,13 @@ export class AgentManagerController {
     // version is the more likely cause than malice. The token itself is
     // NEVER on the wire, so the worst-case server-side mistake here is
     // showing a stale badge until the next heartbeat.
+    // 실효 실행 사양 (ticket 20fff298). REST-only 텔레메트리다 — active_worktrees
+    // / agent_credentials 와 같은 계약이라 SSE payload 에는 싣지 않는다.
+    // upsert 는 whole-record replace 라 `undefined` 는 다음 하트비트에서 필드가
+    // 레코드에서 사라진다는 뜻이 된다. 그게 맞는 의미론이다 — 매니저가 다운그레이드
+    // 되면 UI 도 즉시 "보고하지 않음"으로 돌아가야지, 옛 사양을 계속 보여주면 안 된다.
+    const agent_launch_specs = sanitizeAgentLaunchSpecs(body?.agent_launch_specs);
+
     const agent_credentials = Array.isArray(body?.agent_credentials)
       ? body.agent_credentials
           .filter((row: any) => row && typeof row === 'object' && typeof row.agent_id === 'string' && row.agent_id)
@@ -399,6 +615,15 @@ export class AgentManagerController {
     const update_last_error = hasField('update_last_error')
       ? (typeof body.update_last_error === 'string' ? body.update_last_error : null)
       : undefined;
+    // ticket 9408b308 — `scheduled` 정책의 승인 대기 대상 버전. 위 update_* 와
+    // 같은 absent-vs-null 규율: `null` 은 "이 매니저는 이 필드를 알고 있고 지금은
+    // 대기 없음"이고, undefined 는 "필드를 모르는 구버전 매니저"다. 둘을 섞으면
+    // 구버전 매니저의 침묵이 "요청이 해소됐다"로 읽힌다.
+    const update_approval_pending_version = hasField('update_approval_pending_version')
+      ? (typeof body.update_approval_pending_version === 'string'
+          ? body.update_approval_pending_version.slice(0, 64)
+          : null)
+      : undefined;
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
@@ -460,12 +685,19 @@ export class AgentManagerController {
       dispatch_block_counts = out;
     }
 
+    // ticket 9408b308 — 승인 요청이 "운영자에게 도달"하려면 관리자가 대시보드를
+    // 열지 않아도 남는 신호가 필요하다. upsert 전에 직전 값을 집어 두고, 대상
+    // 버전이 새로 대기 상태로 바뀌는 **전이에서만** 경보 + 감사행을 남긴다
+    // (하트비트는 30초마다 오므로 값이 같은 동안 다시 쓰면 안 된다).
+    const hostname = typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
+    const previousApprovalPending = this._previousApprovalPendingVersion(instance_id, agent_id, hostname);
+
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
       workspace_id: null,
       mode,
-      hostname: typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown',
+      hostname,
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
       cli: typeof body?.cli === 'string' && body.cli ? body.cli : 'claude',
       cli_adapters,
@@ -477,6 +709,7 @@ export class AgentManagerController {
       working_dirs,
       paired_at,
       agent_credentials,
+      agent_launch_specs,
       active_worktrees,
       active_run_workspaces,
       available_models,
@@ -486,6 +719,7 @@ export class AgentManagerController {
       update_channel,
       update_last_checked_at,
       update_last_error,
+      update_approval_pending_version,
       open_breaker_count,
       dispatch_suppression_counts,
       dispatch_block_counts,
@@ -494,6 +728,14 @@ export class AgentManagerController {
       last_spawn_error_cli,
       last_spawn_error_at,
     });
+
+    if (
+      typeof update_approval_pending_version === 'string' &&
+      update_approval_pending_version &&
+      update_approval_pending_version !== previousApprovalPending
+    ) {
+      this._surfaceUpdateApprovalRequest(rec, update_approval_pending_version);
+    }
 
     // Mark every managed agent the manager is supervising as alive. Managed
     // agents have no long-running process of their own — they only spawn

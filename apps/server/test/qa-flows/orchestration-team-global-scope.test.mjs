@@ -524,7 +524,14 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   assert.equal(beforeCount, 1, 'sanity: only the initial brief is in the mission room before the report');
 
   const [firstStep] = await missions.listSteps(mission.id).then((all) => all.filter((s) => s.step_key === 'first'));
-  const report = await runner.reportStep(firstStep.id, first.id, { status: 'done', summary: 'done' });
+  // lease token 은 dispatchStep 이 attempt 마다 발급해 work order 에 실어 보낸다 —
+  // 실제 작업자가 그걸 복사해 오듯, 여기서도 현재 값을 그대로 되돌려준다(티켓 4d065f82).
+  const freshFirst = await missions.requireStep(firstStep.id);
+  const report = await runner.reportStep(firstStep.id, first.id, {
+    status: 'done',
+    summary: 'done',
+    lease_token: freshFirst.lease_token,
+  });
   assert.equal(report.orchestrator_woken, true, 'the newly-dispatchable-but-illegal step must still trigger a wake');
 
   const stepsAfter = await missions.listSteps(mission.id);

@@ -376,7 +376,27 @@ const LOGGABLE_LITERALS = new Set(['exec']);
  */
 export function describeSpawnArgv(args: readonly string[] | null | undefined): string {
   const list = args ?? [];
-  return list.map((arg, i) => redactSpawnArg(String(arg ?? ''), String(list[i - 1] ?? ''))).join(' ');
+  return list.map((arg, i) => redactSpawnArgToken(String(arg ?? ''), String(list[i - 1] ?? ''))).join(' ');
+}
+
+/** {@link describeSpawnArgv} 의 토큰 단위 형태 (ticket 20fff298).
+ *
+ *  launch-spec 은 argv 를 한 줄 문자열이 아니라 **토큰별 출처가 붙은 배열**로
+ *  보고해야 해서 join 전 단계가 필요하다. 마스킹 규칙을 거기서 다시 구현하면
+ *  두 구현이 갈라져 한쪽에만 뚫린 구멍이 생기므로, 규칙은 이 함수 하나에만
+ *  둔다 — `describeSpawnArgv` 자신도 이 함수를 map 할 뿐이다.
+ *
+ *  `previous` 는 argv 상 바로 앞 토큰이다(값 위치 판정에 쓰인다). 첫 토큰이면
+ *  빈 문자열을 넘긴다. */
+export function redactSpawnArgToken(arg: string, previous: string): string {
+  return redactSpawnArg(arg, previous);
+}
+
+/** 이 토큰이 그 자체로 secret 모양인가. launch-spec 처럼 **알려진 안전값을
+ *  통과**시키는 호출부가, 통과 판정 전에 secret 안전망을 먼저 적용할 수 있게
+ *  노출한다 — 안전망을 우회하는 passthrough 를 만들지 않기 위한 것이다. */
+export function looksLikeSecretArg(arg: string): boolean {
+  return SECRET_ARG_PATTERN.test(arg);
 }
 
 /** `--flag=value` 결합형에서 플래그 이름만 떼어낸다(결합형이 아니면 null). */

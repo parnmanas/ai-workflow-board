@@ -91,12 +91,16 @@ import type {
   OrchestrationTeam,
   OrchestrationMissionListItem,
   OrchestrationMissionDetail,
+  OrchestrationTimelineEvent,
   OrchestrationAssignableAgent,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
   OntologyGraphSnapshotResponse,
   OrchestrationPostActionCondition,
   OrchestrationRepoRef,
+  OrchestrationConfirmDecision,
+  OrchestrationConfirmPolicy,
+  OrchestrationStepStatus,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
@@ -2135,6 +2139,15 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  // 자유 참여(open join) 토글 (ticket 995a9519). 방의 active participant 면 호출할 수
+  // 있고, DM 과 시스템 소유 방(Action Run / orchestration / QA·security run)은 서버가
+  // 400 으로 거부한다.
+  setChatRoomOpenJoin: (roomId: string, openJoin: boolean) =>
+    request<{ ok: boolean; room_id: string; open_join: boolean }>(`/chat-rooms/${roomId}/open-join`, {
+      method: 'PATCH',
+      body: JSON.stringify({ open_join: openJoin }),
+    }),
+
   addChatRoomParticipants: (roomId: string, participants: { participant_type: string; participant_id: string }[]) =>
     request<void>(`/chat-rooms/${roomId}/participants`, {
       method: 'POST',
@@ -2317,6 +2330,28 @@ export const api = {
     request<OrchestrationMissionDetail>(
       `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
     ),
+  /**
+   * 미션 타임라인 커서 페이지네이션(티켓 4d065f82). `getOrchestrationMission` 은 최신
+   * N건만 싣는 bounded window 라, 이전 이력은 이 경로로만 가져올 수 있다. 커서는
+   * `(at, seq)` 복합 keyset 이다 — 같은 타임스탬프에 몰린 fan-out 이벤트가 페이지
+   * 경계에서 통째로 누락되지 않게 하려면 seq 가 반드시 함께 가야 한다.
+   */
+  listOrchestrationMissionEvents: (
+    id: string,
+    workspaceId: string,
+    opts?: { limit?: number; before_at?: string; before_seq?: number },
+  ) => {
+    const parts = [`workspace_id=${encodeURIComponent(workspaceId)}`];
+    if (opts?.limit) parts.push(`limit=${opts.limit}`);
+    if (opts?.before_at) parts.push(`before_at=${encodeURIComponent(opts.before_at)}`);
+    if (opts?.before_seq !== undefined) parts.push(`before_seq=${opts.before_seq}`);
+    return request<{
+      events: OrchestrationTimelineEvent[];
+      has_more: boolean;
+      next_cursor: { at: string; seq: number } | null;
+    }>(`/orchestration/missions/${id}/events?${parts.join('&')}`);
+  },
+
   createOrchestrationMission: (data: {
     workspace_id: string;
     team_id: string;
@@ -2333,6 +2368,10 @@ export const api = {
     max_parallel_steps?: number;
     max_steps?: number;
     step_timeout_minutes?: number;
+    /** 실행 그래프(조건 분기/join/bounded loop) 사용 여부 — confirm 노드의 전제 조건이다. */
+    graph_enabled?: boolean;
+    /** 사용자 확인 강도(티켓 5dbe4aa2). graph_enabled 가 켜져야 실제로 동작한다. */
+    confirm_policy?: OrchestrationConfirmPolicy;
     /** Brief the orchestrator immediately instead of leaving the mission a draft. */
     start?: boolean;
   }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
@@ -2353,6 +2392,8 @@ export const api = {
       max_parallel_steps?: number;
       max_steps?: number;
       step_timeout_minutes?: number;
+      graph_enabled?: boolean;
+      confirm_policy?: OrchestrationConfirmPolicy;
     },
   ) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {
@@ -2384,10 +2425,40 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, reason: reason || '' }),
     }),
+  /**
+   * confirm 노드에 Pass/Fail 판정을 제출한다(티켓 5dbe4aa2).
+   *
+   * `visit` 은 화면이 본 pass 번호다 — 반드시 함께 보낸다. loop 가 재진입해 화면이
+   * stale 해진 상태에서 제출하면 서버가 409 로 거부하는데, 이 값을 빼면 그 방어가
+   * 통째로 무력해진다(생략을 허용하면 stale 한 화면이 값을 빼는 것만으로 우회한다).
+   */
+  submitOrchestrationStepConfirm: (
+    stepId: string,
+    data: { workspace_id: string; verdict: 'pass' | 'fail'; visit: number; feedback?: string },
+  ) =>
+    request<{
+      already_decided: boolean;
+      step_id: string;
+      step_key: string;
+      status: OrchestrationStepStatus;
+      confirm_decision: OrchestrationConfirmDecision | null;
+      dispatched: string[];
+      loop_reentered: string[];
+      orchestrator_woken: boolean;
+    }>(`/orchestration/steps/${stepId}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',
       body: JSON.stringify({ workspace_id: workspaceId, note: note || '' }),
+    }),
+  /**
+   * 미션 대화방에 참여한다(티켓 f6a0de0e). 멱등하므로 이미 참여 중인지 몰라도 부를 수
+   * 있고, `joined` 로 이번 호출이 실제로 넣었는지 구분한다.
+   */
+  joinOrchestrationMissionConversation: (id: string, workspaceId: string) =>
+    request<{ room_id: string; joined: boolean }>(`/orchestration/missions/${id}/join-conversation`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId }),
     }),
 
   // ─── Ontology Graph (ticket d22b83b4) ─────────────────────

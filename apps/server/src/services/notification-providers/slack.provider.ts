@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { LogService } from '../log.service';
 import { INotificationProvider, NotifyPayload, ProviderResult } from './types';
+import { describeHttpError, fetchWithTimeout, notifyHttpTimeoutMs, readJsonBody } from './http';
 
 /**
  * Slack per-user delivery via `chat.postMessage`.
@@ -22,22 +23,28 @@ export class SlackUserProvider implements INotificationProvider {
     if (!token) return { ok: false, error: 'Missing bot_token credential' };
     if (!target) return { ok: false, error: 'Missing target' };
 
-    const text = this._formatText(payload);
-    const res = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ channel: target, text, mrkdwn: true }),
-    });
+    const timeoutMs = notifyHttpTimeoutMs();
+    try {
+      const text = this._formatText(payload);
+      const res = await fetchWithTimeout('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ channel: target, text, mrkdwn: true }),
+      }, timeoutMs);
 
-    if (!res.ok) {
-      return { ok: false, error: `Slack HTTP ${res.status}` };
-    }
+      if (!res.ok) {
+        return { ok: false, error: `Slack HTTP ${res.status}` };
+      }
 
-    const data = await res.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-    if (!data?.ok) {
-      return { ok: false, error: `Slack API error: ${data?.error || 'unknown'}` };
+      const data = await readJsonBody<{ ok?: boolean; error?: string }>(res);
+      if (!data?.ok) {
+        return { ok: false, error: `Slack API error: ${data?.error || 'unknown'}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      // `INotificationProvider.send` 계약대로 상한 초과·소켓 오류를 ok:false 로 정규화한다.
+      return { ok: false, error: `Slack send failed: ${describeHttpError(err, timeoutMs)}` };
     }
-    return { ok: true };
   }
 
   async test(target: string, credentials: Record<string, string>): Promise<ProviderResult> {
@@ -46,11 +53,19 @@ export class SlackUserProvider implements INotificationProvider {
     // up with a real send so the user gets a "your channel works" ping.
     const token = credentials.bot_token;
     if (!token) return { ok: false, error: 'Missing bot_token credential' };
-    const authRes = await fetch('https://slack.com/api/auth.test', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const authData = await authRes.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+    const timeoutMs = notifyHttpTimeoutMs();
+    let authData: { ok?: boolean; error?: string } | null;
+    try {
+      const authRes = await fetchWithTimeout('https://slack.com/api/auth.test', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }, timeoutMs);
+      authData = await readJsonBody<{ ok?: boolean; error?: string }>(authRes);
+    } catch (err) {
+      // 이 probe 는 REST 의 "채널 테스트" 버튼이 그대로 await 한다. 던지면
+      // 엔드포인트가 500 을 내므로 여기서도 ok:false 로 정규화한다.
+      return { ok: false, error: `Slack auth failed: ${describeHttpError(err, timeoutMs)}` };
+    }
     if (!authData?.ok) {
       return { ok: false, error: `Slack auth failed: ${authData?.error || 'unknown'}` };
     }

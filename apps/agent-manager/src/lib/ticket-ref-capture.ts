@@ -65,6 +65,11 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   // register/cancel directions, same precedent as 'prereq'.
   await_ci_run: 'ci_wait',
   cancel_ci_wait: 'ci_wait',
+  // ticket e630b530: 저장소별 랜딩 lease. 위 CI 대기와 똑같이 "티켓 row 의
+  // 차단 플래그(pending_merge_lease)" 를 세우고 내리는 모양이라, 획득/해제
+  // 양방향을 한 카테고리가 덮는다 — 'prereq' / 'ci_wait' 와 같은 선례.
+  await_merge_lease: 'merge_lease',
+  release_merge_lease: 'merge_lease',
   handoff_to_agent: 'handoff',
   propose_move: 'propose',
   record_agreement: 'consensus',

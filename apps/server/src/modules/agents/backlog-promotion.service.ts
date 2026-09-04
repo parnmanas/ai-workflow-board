@@ -435,6 +435,9 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
       // the trigger emit gate drops every wake-up for a ticket durably
       // awaiting an external CI run.
       .andWhere('t.pending_ci_wait = :falseVal', { falseVal: false })
+      // 랜딩 lease 대기 제외 (ticket e630b530): 같은 논리 — 트리거 emit 게이트가
+      // 저장소 랜딩 lease 를 기다리는 티켓의 모든 wake-up 을 드롭한다.
+      .andWhere('t.pending_merge_lease = :falseVal', { falseVal: false })
       // Archived intake tickets (ticket 9b44526b) must not consume a
       // promotion slot — same reasoning as the pending_user_action
       // exclusion: the trigger emit gate downstream would drop every
@@ -894,7 +897,8 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
           .orWhere('t.canonical_ticket_id IS NOT NULL')
           .orWhere('t.pending_user_action = :trueVal')
           .orWhere('t.pending_on_tickets = :trueVal')
-          .orWhere('t.pending_ci_wait = :trueVal')))
+          .orWhere('t.pending_ci_wait = :trueVal')
+          .orWhere('t.pending_merge_lease = :trueVal')))
         // sqlite 는 boolean 을 0/1 로 저장하므로 리터럴 대신 바인드 파라미터를
         // 쓴다 — 후보 쿼리의 `:falseVal` 과 같은 이유.
         .setParameter('trueVal', true)

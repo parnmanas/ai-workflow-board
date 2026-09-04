@@ -12,13 +12,18 @@
  * 새로 나온 advisory 는 배포된 트리에 대해 한 번도 평가되지 않는다 — 정작 돌고 있는
  * 코드가 그쪽인데.
  *
- * 이 스크립트가 그 구멍을 메운다: 배포 브랜치의 package.json / package-lock.json 만
- * 꺼내 격리된 임시 디렉터리에서 `npm audit` 을 돌린다.
+ * 이 스크립트가 그 구멍을 메운다: 배포 브랜치의 package-lock.json 만 꺼내 그대로
+ * 감사한다.
  *
- * 두 가지 설계 선택:
+ * 세 가지 설계 선택:
  *   - **`npm ci` 를 하지 않는다.** lockfile 만 있으면 audit 은 돈다. 설치를 생략하면
  *     "취약점을 찾는 잡이 그 취약점의 install script 를 먼저 실행하는" 순서 문제가
  *     사라진다(ci.yml dependency-audit 과 같은 원칙).
+ *   - **`npm audit` 을 쓰지 않는다** (ticket 1019e57d). CI 의 npm 은 bulk advisory
+ *     엔드포인트가 흔들리면 은퇴 대상인 quick 엔드포인트로 폴백하는데, 그쪽은 이
+ *     저장소의 workspaces lockfile 에 400 을 돌려준다 — 폴백이 성공할 수 있는 경우가
+ *     없다. audit-lockfile-advisories.mjs 가 bulk 를 직접, 재시도와 함께 조회한다.
+ *     그래서 임시 디렉터리도 더 이상 필요 없다 — lockfile 을 파싱해 넘기면 끝이다.
  *   - **lockfile 이 로컬과 동일하면 건너뛴다.** 같은 바이트면 방금 돈 감사가 이미
  *     그 트리를 판정했다 — 중복 실행이 아니라 '동일함을 증명하고 스킵' 이다.
  *
@@ -28,12 +33,12 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 import { deployBranches } from './audit-ci-branch-coverage.mjs';
+import { auditLockfile, formatFindings } from './audit-lockfile-advisories.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_LEVEL = 'moderate';
@@ -67,9 +72,9 @@ function showFromBranch(branch, file) {
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) main();
+if (isMain) await main();
 
-function main() {
+async function main() {
   const branches = deployBranches();
   const here = currentBranch();
   const failures = [];
@@ -80,7 +85,7 @@ function main() {
 
   for (const branch of branches) {
     if (branch === here) {
-      console.log(`ok   ${branch} — 지금 체크아웃된 브랜치 (메인 npm audit 이 이미 판정)`);
+      console.log(`ok   ${branch} — 지금 체크아웃된 브랜치 (메인 취약점 감사가 이미 판정)`);
       continue;
     }
 
@@ -98,6 +103,8 @@ function main() {
     }
 
     const lock = showFromBranch(branch, 'package-lock.json');
+    // package.json 은 감사에 쓰이지 않지만(lockfile 만 보면 된다) 존재는 확인한다 —
+    // 배포 브랜치에 매니페스트가 없다면 그 자체가 신호다.
     const manifest = showFromBranch(branch, 'package.json');
     if (!lock || !manifest) {
       console.log(`FAIL ${branch} — package.json/package-lock.json 을 읽지 못했다`);
@@ -110,25 +117,27 @@ function main() {
       continue;
     }
 
-    const dir = mkdtempSync(join(tmpdir(), `awb-audit-${branch.replace(/[^\w.-]/g, '_')}-`));
+    let result;
     try {
-      writeFileSync(join(dir, 'package.json'), manifest);
-      writeFileSync(join(dir, 'package-lock.json'), lock);
-      execFileSync('npm', ['audit', `--audit-level=${AUDIT_LEVEL}`], {
-        cwd: dir,
-        stdio: 'pipe',
-        encoding: 'utf8',
-      });
-      audited += 1;
-      console.log(`ok   ${branch} — npm audit 통과 (${AUDIT_LEVEL} 이상 0건)`);
+      result = await auditLockfile(JSON.parse(lock), { level: AUDIT_LEVEL });
     } catch (e) {
-      const out = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim();
-      console.log(`FAIL ${branch} — npm audit 실패`);
-      if (out) console.log(out);
-      failures.push(`${branch}: npm audit 에서 ${AUDIT_LEVEL} 이상 취약점 (위 출력 참고)`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // 조회 자체를 못 끝냈다 — fail-closed. 통과로 바꿔 읽지 않는다.
+      console.log(`FAIL ${branch} — 취약점 감사를 완료하지 못했다`);
+      console.log(String(e.message));
+      failures.push(`${branch}: 취약점 감사를 완료하지 못했다 (위 출력 참고)`);
+      continue;
     }
+
+    audited += 1;
+    if (result.findings.length > 0) {
+      console.log(`FAIL ${branch} — ${AUDIT_LEVEL} 이상 취약점 ${result.findings.length}건`);
+      console.log(formatFindings(result.findings));
+      failures.push(`${branch}: ${AUDIT_LEVEL} 이상 취약점 ${result.findings.length}건 (위 출력 참고)`);
+      continue;
+    }
+    console.log(
+      `ok   ${branch} — ${AUDIT_LEVEL} 이상 0건 (패키지 ${result.packageCount}개 검사)`,
+    );
   }
 
   if (failures.length > 0) {

@@ -489,12 +489,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     // and wait for a human. The trigger-emit gate below also drops events for
     // pending tickets, but `_autoAdvanceUnassigned` is a separate side-channel
     // (it doesn't call `_emitTrigger`) so it needs its own short-circuit here.
-    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait) {
+    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait || ticket.pending_merge_lease) {
       this.logService.info('MCP', 'auto_advance skipped (ticket pending)', {
         ticket_id: ticket.id, current_column_id: col.id,
         pending_user_action: !!ticket.pending_user_action,
         pending_on_tickets: !!ticket.pending_on_tickets,
         pending_ci_wait: !!ticket.pending_ci_wait,
+        pending_merge_lease: !!ticket.pending_merge_lease,
       });
       return;
     }
@@ -633,6 +634,8 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       duplicate.pending_user_action = false;
       duplicate.pending_ci_wait = false;
       duplicate.ci_wait_context = '';
+      duplicate.pending_merge_lease = false;
+      duplicate.merge_lease_context = '';
       duplicate.locked_at = null;
       duplicate.locked_by_agent_id = null;
       await repo.save(duplicate);
@@ -1532,12 +1535,13 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       return { emitted: 0 };
     }
 
-    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait) {
+    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait || ticket.pending_merge_lease) {
       this.logService.info('MCP', 'dispatchCurrentColumn skipped (ticket still pending)', {
         ticket_id: ticket.id, source: triggerSource,
         pending_user_action: !!ticket.pending_user_action,
         pending_on_tickets: !!ticket.pending_on_tickets,
         pending_ci_wait: !!ticket.pending_ci_wait,
+        pending_merge_lease: !!ticket.pending_merge_lease,
       });
       return { emitted: 0 };
     }
@@ -1597,7 +1601,7 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticketId } });
     if (!ticket || !ticket.column_id) throw new Error('Ticket has no dispatchable board column');
     if (ticket.canonical_ticket_id) throw new Error('Duplicate ticket cannot be dispatched independently');
-    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait) throw new Error('Pending ticket cannot be redispatched');
+    if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait || ticket.pending_merge_lease) throw new Error('Pending ticket cannot be redispatched');
 
     const column = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
     if (!column || (column as any).is_terminal === true || (column as any).kind === 'terminal') {
@@ -2097,27 +2101,35 @@ candidate's branch or move the ticket.
     const freshForGate = await this.dataSource
       .getRepository(Ticket)
       .findOne({ where: { id: ticket.id } });
-    // Three distinct pending flavors funnel through this one gate (ticket
-    // 48d14fff, widened by ticket 778b6dc7): `pending_user_action` (waiting
-    // on a human), `pending_on_tickets` (blocked behind prerequisite
-    // tickets), and `pending_ci_wait` (blocked on one external CI run,
-    // resolved by CiWaitResumeService). Any one drops the trigger. The audit
-    // action is suffixed so a grep can tell the three apart — `_pending_user`
-    // vs `_pending_tickets` vs `_pending_ci`.
-    if (!freshForGate?.pending_user_action && !freshForGate?.pending_on_tickets && !freshForGate?.pending_ci_wait) return false;
+    // Four distinct pending flavors funnel through this one gate (ticket
+    // 48d14fff, widened by tickets 778b6dc7 and e630b530):
+    // `pending_user_action` (waiting on a human), `pending_on_tickets`
+    // (blocked behind prerequisite tickets), `pending_ci_wait` (blocked on
+    // one external CI run, resolved by CiWaitResumeService), and
+    // `pending_merge_lease` (queued behind another ticket's landing window on
+    // the same repo, resolved by MergeLeaseService). Any one drops the
+    // trigger. The audit action is suffixed so a grep can tell them apart —
+    // `_pending_user` vs `_pending_tickets` vs `_pending_ci` vs
+    // `_pending_merge_lease`.
+    if (!freshForGate?.pending_user_action && !freshForGate?.pending_on_tickets && !freshForGate?.pending_ci_wait && !freshForGate?.pending_merge_lease) return false;
 
     const onCiWait = !freshForGate.pending_user_action && !freshForGate.pending_on_tickets && !!freshForGate.pending_ci_wait;
+    const onMergeLease = !freshForGate.pending_user_action && !freshForGate.pending_on_tickets
+      && !freshForGate.pending_ci_wait && !!freshForGate.pending_merge_lease;
     const onTickets = !freshForGate.pending_user_action && !!freshForGate.pending_on_tickets;
     const dropAction = onCiWait
       ? 'agent_trigger_dropped_pending_ci'
-      : onTickets
-        ? 'agent_trigger_dropped_pending_tickets'
-        : 'agent_trigger_dropped_pending_user';
+      : onMergeLease
+        ? 'agent_trigger_dropped_pending_merge_lease'
+        : onTickets
+          ? 'agent_trigger_dropped_pending_tickets'
+          : 'agent_trigger_dropped_pending_user';
     this.logService.info('MCP', 'agent_trigger dropped (ticket pending)', {
       ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
       pending_user_action: !!freshForGate.pending_user_action,
       pending_on_tickets: !!freshForGate.pending_on_tickets,
       pending_ci_wait: !!freshForGate.pending_ci_wait,
+      pending_merge_lease: !!freshForGate.pending_merge_lease,
       pending_set_at: freshForGate.pending_set_at
         ? new Date(freshForGate.pending_set_at).toISOString()
         : null,
@@ -3518,7 +3530,7 @@ candidate's branch or move the ticket.
     const fresh = await this.dataSource.getRepository(Ticket).findOne({
       where: { id: ticket.id },
     });
-    if (!fresh || fresh.pending_user_action || fresh.pending_on_tickets || fresh.pending_ci_wait || fresh.archived_at) {
+    if (!fresh || fresh.pending_user_action || fresh.pending_on_tickets || fresh.pending_ci_wait || fresh.pending_merge_lease || fresh.archived_at) {
       this.logService.info('MCP', 'base_repo guard: dispatch skipped, ticket already parked (ticket 8c3befa8)', {
         ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
       });

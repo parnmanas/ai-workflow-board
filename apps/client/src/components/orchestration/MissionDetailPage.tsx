@@ -15,6 +15,8 @@ import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
 import PlanGraph from './PlanGraph';
+import ConfirmRequestPanel from './ConfirmRequestPanel';
+import MissionConversationPanel from './MissionConversationPanel';
 import { MissionFormModal } from './OrchestrationPage';
 import { eventColor, missionStyle, progressPercent, stepStyle } from './status';
 
@@ -199,6 +201,10 @@ export default function MissionDetailPage() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <StatusBanner mission={mission} />
 
+        {/* 미션 전체가 여기서 멈춰 있으므로 화면 맨 위에 둔다 — 계획 그래프 아래로
+            내려가면 "왜 아무것도 진행되지 않는가"를 찾는 데 스크롤이 필요해진다. */}
+        <ConfirmRequestPanel steps={mission.steps} wsId={wsId} onDecided={() => load({ silent: true })} />
+
         <Section title="Objective">
           <Prose text={mission.objective} />
           {mission.context && (
@@ -327,6 +333,37 @@ export default function MissionDetailPage() {
             </div>
           </Section>
         )}
+
+        {/*
+          진행 중인 orchestrator 와 직접 주고받는 자리. Timeline 이 "무슨 일이
+          있었나"를 보여준다면 여기는 "지금 방향을 바꾸거나 물어보는" 곳이다.
+          실행 이벤트를 대화와 시간순으로 엮되 서로 다른 렌더러로 그려, 내 지시
+          직후에 무엇이 디스패치됐는지가 한 흐름에서 읽힌다.
+        */}
+        <Section
+          title="Conversation"
+          right={
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+              {isLive ? 'orchestrator 에게 질문하거나 방향을 지시할 수 있습니다' : '종료됨 · 기록 보존'}
+            </span>
+          }
+        >
+          <div style={{ height: 420, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            {/*
+              `key` 로 미션이 바뀌면 패널을 통째로 remount 한다 — 패널 내부에도 미션 경계
+              초기화가 있지만(리뷰 라운드3 P0), 호출부에서 한 번 더 못박아 두면 이후 이
+              패널을 다른 곳에서 재사용할 때도 미션 기록이 섞이지 않는다.
+            */}
+            <MissionConversationPanel
+              key={mission.id}
+              missionId={mission.id}
+              workspaceId={wsId}
+              roomId={mission.room_id}
+              events={mission.events}
+              live={isLive}
+            />
+          </div>
+        </Section>
 
         <Section title="Timeline" right={<span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{mission.events.length} events</span>}>
           <Timeline events={mission.events} onSelectStep={(stepId) => setSelectedStepId(stepId)} />
@@ -497,7 +534,9 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
         )}
         <span style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
           {mission.counts.total > 0
-            ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
+            ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting` +
+              `${mission.counts.awaitingUser ? ` · ${mission.counts.awaitingUser} needs your decision` : ''}` +
+              `${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
             : 'No steps yet'}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }}>
@@ -666,7 +705,39 @@ function StepDetailModal({ step, onClose }: { step: OrchestrationStep | null; on
           <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
             attempt {step.attempt}/{step.max_attempts}
           </span>
+          {step.retry_policy === 'manual' && (
+            <span
+              data-testid="step-retry-policy-manual"
+              style={{ fontSize: 10, color: tokens.colors.warningLight, fontWeight: 700, textTransform: 'uppercase' }}
+            >
+              manual recovery only
+            </span>
+          )}
         </div>
+
+        {/*
+          복구 사유는 needs_recovery 의 존재 이유다 — 상태만 보여주고 왜 자동으로
+          재실행하지 않는지 숨기면 운영자는 그냥 멈춘 step 과 구분할 수 없다.
+        */}
+        {step.recovery_reason && (
+          <div
+            data-testid="step-recovery-reason"
+            style={{
+              padding: '10px 12px',
+              borderRadius: 6,
+              border: `1px solid ${tokens.colors.dangerLight}55`,
+              background: `${tokens.colors.dangerBg}30`,
+              fontSize: 12,
+              color: tokens.colors.textSecondary,
+              lineHeight: 1.6,
+            }}
+          >
+            <div style={{ fontWeight: 700, color: tokens.colors.dangerLight, marginBottom: 4 }}>
+              자동 복구 불가 — 사람의 확인이 필요합니다
+            </div>
+            {step.recovery_reason}
+          </div>
+        )}
 
         {step.workspace_folder && (
           <div style={{ fontSize: 11, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>

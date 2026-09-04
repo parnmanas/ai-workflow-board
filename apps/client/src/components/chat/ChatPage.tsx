@@ -522,7 +522,8 @@ export default function ChatPage() {
     return () => clearTimeout(timer);
   }, [typingAgents]);
 
-  // SSE: chat_room_update — 봉투 unwrap + update_type 분기(renamed/participant_*/read)
+  // SSE: chat_room_update — 봉투 unwrap + update_type 분기
+  // (renamed / participant_* / read / open_join_changed)
   // 디스패치는 participantFlow.dispatchChatRoomUpdate 에 있고, 회귀 테스트
   // (apps/client/test/chat-participants.test.mjs)가 실제 이벤트 페이로드로 그 코드를
   // 직접 구동한다. 여기선 ChatPage 의 ref/세터/스코프만 주입한다.
@@ -537,6 +538,10 @@ export default function ChatPage() {
         listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
         setRooms,
         refreshActiveRoomParticipants,
+        // open_join_changed 는 워크스페이스 전체로 나가므로 스코프 대조가 필요하다
+        // (ticket 995a9519). ambient getActiveWorkspaceId() 대신 URL 의 wsId 를 쓰는
+        // 이유는 아래 방 목록 조회와 같다 — 탭마다 다른 워크스페이스를 볼 수 있다.
+        getCurrentWorkspaceId: () => wsId ?? null,
       },
       data,
     );
@@ -623,6 +628,14 @@ export default function ChatPage() {
   function handleRoomRenamed(roomId: string, name: string) {
     setRooms((prev) =>
       prev.map((r) => (r.id === roomId ? { ...r, name } : r)),
+    );
+  }
+
+  // 자유 참여 토글 결과 반영 (ticket 995a9519). 서버의 open_join_changed SSE 는
+  // 다른 클라이언트를 갱신하고, 누른 본인은 이 경로로 즉시 갱신된다.
+  function handleOpenJoinChanged(roomId: string, openJoin: boolean) {
+    setRooms((prev) =>
+      prev.map((r) => (r.id === roomId ? { ...r, open_join: openJoin } : r)),
     );
   }
 
@@ -735,6 +748,7 @@ export default function ChatPage() {
         onMessageSent={handleMessageSent}
         onLeaveRoom={handleLeaveRoom}
         onRoomRenamed={handleRoomRenamed}
+        onOpenJoinChanged={handleOpenJoinChanged}
         onParticipantsAdded={handleParticipantsAdded}
         onRoomCleared={handleRoomCleared}
         isMobile={isMobile}

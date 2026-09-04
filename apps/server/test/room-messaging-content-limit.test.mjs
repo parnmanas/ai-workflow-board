@@ -22,14 +22,18 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 const REACHED_TX = 'REACHED_TRANSACTION_SENTINEL';
 
 function makeSvc() {
-  const membership = { async requireActiveParticipant() {} };
+  // requireMissionRoomSpeaker: 티켓 f6a0de0e 의 orchestration 발화 게이트. 이 스텁의 방은
+  // mission 룸이 아니라 no-op 이지만, sendMessage 가 무조건 부르므로 있어야 한다.
+  const membership = { async requireActiveParticipant() {}, async requireMissionRoomSpeaker() {} };
+  // 같은 게이트가 방을 조회한다 — mission 룸이 아님을 알리려면 null 을 돌려주면 된다.
+  const roomRepo = { async findOne() { return null; } };
   const messageRepo = {
     manager: { async transaction() { throw new Error(REACHED_TX); } },
   };
   // Remaining constructor deps are never reached on these paths.
   const empty = {};
   return new RoomMessagingService(
-    empty,        // roomRepo
+    roomRepo,     // roomRepo
     empty,        // participantRepo
     messageRepo,  // messageRepo
     empty,        // agentRepo

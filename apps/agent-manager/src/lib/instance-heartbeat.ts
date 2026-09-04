@@ -23,6 +23,7 @@ import type { AwbConfig } from './rest.js';
 import type { UpdateChecker } from './self-update.js';
 import type { SpawnFailureSnapshot } from './spawn-failure-tracker.js';
 import type { RuntimeCapabilityReport } from './runtime/runtime-health.js';
+import type { AgentLaunchSpecEntry } from './launch-spec.js';
 
 export type InstanceMode = 'manager';
 
@@ -94,6 +95,16 @@ export interface InstanceMeta {
   // Windows `.cmd` shim 의 codex ENOENT) 관리자 대시보드에 "degraded" 배지를
   // 렌더하는 REST-only additive 필드.
   spawnFailureProvider?: (() => SpawnFailureSnapshot) | null;
+  // 관리 대상 에이전트별 실효 실행 사양 provider (ticket 20fff298). 다른
+  // provider 들과 달리 **결과가 비어도 필드를 싣는다** — provider 가 배선된
+  // 신규 매니저의 `[]`("보고했고 대상이 없음")와 구버전 매니저의 필드 부재
+  // ("실행 인자를 보고하지 않음")를 UI 가 구분해야 하기 때문이다.
+  agentLaunchSpecProvider?: AgentLaunchSpecProvider | null;
+  // ticket 23753dc7 — 하트비트 POST 가 처음 성공했을 때 한 번 불린다. 자가
+  // 업데이트의 부팅 성공 판정 기준이 정확히 "재기동 후 하트비트 1회 성공"이라
+  // (정책 C), 그 사실을 아는 유일한 지점이 여기다. best-effort: 콜백이 던져도
+  // 하트비트는 계속 돈다.
+  onFirstPostSuccess?: (() => void) | null;
 }
 
 /** Tiny duck-typed read-only snapshot of ManagedAgentRegistry. */
@@ -178,6 +189,11 @@ export interface RunWorkspaceStatusEntry {
  *  async / best-effort 계약을 따른다. */
 export type RunWorkspaceStatusProvider = () => Promise<RunWorkspaceStatusEntry[]>;
 
+/** 관리 대상 에이전트별 실효 실행 사양을 매 tick 열거하는 provider
+ *  (ticket 20fff298). AgentCredentialMetaProvider 와 동일한 best-effort 계약 —
+ *  throw 하면 이번 tick 은 필드를 통째로 생략하고 다음 tick 이 다시 시도한다. */
+export type AgentLaunchSpecProvider = () => AgentLaunchSpecEntry[];
+
 export interface InstanceHeartbeatPayload {
   instance_id: string;
   agent_id: string | null;
@@ -208,6 +224,12 @@ export interface InstanceHeartbeatPayload {
   // agent, only when the heartbeat factory was given a provider. See
   // AgentCredentialEntry for the field semantics.
   agent_credentials?: AgentCredentialEntry[];
+  // 관리 대상 에이전트별 "다음 spawn 시 실효 실행 사양" (ticket 20fff298).
+  // agent_credentials 와 같은 presence 계약 — provider 가 배선돼 있고 row 를
+  // 반환할 때만 실린다. 이 필드를 모르는 구버전 AWB 서버는 무시하고, 반대로
+  // 구버전 매니저는 아예 보내지 않으므로 서버/UI 는 `undefined`(보고 안 함)와
+  // `[]`(보고했는데 대상 없음)를 구분할 수 있어야 한다.
+  agent_launch_specs?: AgentLaunchSpecEntry[];
   // Live worktrees + pool-lease state across all supervised agents (ticket
   // 72fc244f). Only present when the worktree provider is wired and returns
   // rows. Older AWB servers ignore it; newer ones render the "Live worktrees"
@@ -231,6 +253,11 @@ export interface InstanceHeartbeatPayload {
   update_channel?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  // ticket 9408b308 — `scheduled` 정책이 운영자 승인을 기다리는 대상 버전.
+  // 대기 중이 아니면 null 로 보낸다. `null`(대기 없음)과 `undefined`(이 필드를
+  // 아예 모르는 구버전 매니저)를 서버가 구분할 수 있어야, 서버가 구버전 매니저의
+  // 침묵을 "승인 요청이 사라졌다"로 오독하지 않는다.
+  update_approval_pending_version?: string | null;
   open_breaker_count?: number;
   // ticket 3d180f85 — per-reason dispatch-suppression counts from the
   // provision-spanning twin guard. Omitted when nothing was suppressed.
@@ -257,10 +284,13 @@ export class InstanceHeartbeat {
   #startedAt: string;
   #timer: NodeJS.Timeout | null = null;
   #stopped = false;
+  /** 첫 성공 POST 에서 한 번만 불리는 콜백 (ticket 23753dc7). */
+  #onFirstPostSuccess: (() => void) | null = null;
 
   constructor(config: AwbConfig, agentId: string | null, meta: InstanceMeta) {
     this.#config = config;
     this.#agentId = agentId;
+    this.#onFirstPostSuccess = meta?.onFirstPostSuccess ?? null;
     this.#instanceId = randomUUID();
     this.#startedAt = new Date().toISOString();
     const cliAdapters = Array.isArray(meta?.cliAdapters)
@@ -286,6 +316,7 @@ export class InstanceHeartbeat {
     const dispatchSuppressionCountsProvider = meta?.dispatchSuppressionCountsProvider ?? null;
     const dispatchBlockCountsProvider = meta?.dispatchBlockCountsProvider ?? null;
     const spawnFailureProvider = meta?.spawnFailureProvider ?? null;
+    const agentLaunchSpecProvider = meta?.agentLaunchSpecProvider ?? null;
     this.#payloadFactory = async () => {
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
@@ -331,6 +362,18 @@ export class InstanceHeartbeat {
         } catch (err: any) {
           log(`Instance heartbeat: spawn-failure provider failed: ${err?.message ?? err}`);
           spawnFailure = null;
+        }
+      }
+      // 같은 best-effort 계약. 다만 실패는 `[]`(빈 보고)가 아니라 null 로
+      // 접어 필드를 통째로 생략한다 — 계산에 실패한 tick 을 "실행 인자가
+      // 없는 매니저"로 보이게 하면 그게 곧 요구사항 C 가 금지하는 오표시다.
+      let agentLaunchSpecs: AgentLaunchSpecEntry[] | null = null;
+      if (agentLaunchSpecProvider) {
+        try {
+          agentLaunchSpecs = agentLaunchSpecProvider();
+        } catch (err: any) {
+          log(`Instance heartbeat: launch-spec provider failed: ${err?.message ?? err}`);
+          agentLaunchSpecs = null;
         }
       }
       // Best-effort: a provider that throws should never wedge the
@@ -388,6 +431,7 @@ export class InstanceHeartbeat {
           ? { available_models: availableModels }
           : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
+        ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
         ...(activeRunWorkspaces.length ? { active_run_workspaces: activeRunWorkspaces } : {}),
         ...(openBreakerCountProvider ? { open_breaker_count: openBreakerCount } : {}),
@@ -413,6 +457,7 @@ export class InstanceHeartbeat {
               update_channel: updateStatus.update_channel,
               update_last_checked_at: updateStatus.last_checked_at,
               update_last_error: updateStatus.last_error,
+              update_approval_pending_version: updateStatus.update_approval_pending_version ?? null,
             }
           : {}),
       };
@@ -465,9 +510,27 @@ export class InstanceHeartbeat {
     });
     if (!resp.ok) {
       // 404 expected on older AWB servers — keep noise low.
-      if (resp.status === 404) return;
+      // 구버전 서버라 엔드포인트가 없는 것뿐이므로 "매니저가 부팅해 서버까지
+      // 말을 걸었다"는 사실은 성립한다 — 부팅 검증에는 성공으로 친다.
+      if (resp.status === 404) {
+        this.#notifyFirstSuccess();
+        return;
+      }
       throw new Error(`POST /api/agent/instance-heartbeat HTTP ${resp.status}`);
     }
     await resp.text().catch(() => null);
+    this.#notifyFirstSuccess();
+  }
+
+  /** 첫 성공에서만 콜백을 부르고 참조를 버린다(이후 tick 은 비용 0). */
+  #notifyFirstSuccess(): void {
+    const cb = this.#onFirstPostSuccess;
+    if (!cb) return;
+    this.#onFirstPostSuccess = null;
+    try {
+      cb();
+    } catch (err: any) {
+      log(`Instance heartbeat: boot-verification callback failed: ${err?.message ?? err}`);
+    }
   }
 }

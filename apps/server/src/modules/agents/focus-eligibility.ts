@@ -37,7 +37,8 @@ export type FocusIneligibilityReason =
   | 'duplicate_link'
   | 'pending_user_action'
   | 'pending_on_tickets'
-  | 'pending_ci_wait';
+  | 'pending_ci_wait'
+  | 'pending_merge_lease';
 
 /**
  * 위 union 의 런타임 목록. focus 후보 SQL 과 이 헬퍼가 같은 사유 집합을 보고
@@ -50,6 +51,7 @@ export const FOCUS_INELIGIBILITY_REASONS: readonly FocusIneligibilityReason[] = 
   'pending_user_action',
   'pending_on_tickets',
   'pending_ci_wait',
+  'pending_merge_lease',
 ];
 
 /**
@@ -62,6 +64,7 @@ export const FOCUS_INELIGIBILITY_COLUMNS: Readonly<Record<FocusIneligibilityReas
   pending_user_action: 'pending_user_action',
   pending_on_tickets: 'pending_on_tickets',
   pending_ci_wait: 'pending_ci_wait',
+  pending_merge_lease: 'pending_merge_lease',
 };
 
 /**
@@ -77,6 +80,7 @@ export interface FocusEligibilityInput {
   pending_user_action?: boolean | number | null;
   pending_on_tickets?: boolean | number | null;
   pending_ci_wait?: boolean | number | null;
+  pending_merge_lease?: boolean | number | null;
 }
 
 // sqlite 는 boolean 을 0/1 로 저장한다. 엔티티를 통해 읽으면 boolean 으로
@@ -98,6 +102,7 @@ export function focusIneligibilityReason(
   if (isTrue(ticket.pending_user_action)) return 'pending_user_action';
   if (isTrue(ticket.pending_on_tickets)) return 'pending_on_tickets';
   if (isTrue(ticket.pending_ci_wait)) return 'pending_ci_wait';
+  if (isTrue(ticket.pending_merge_lease)) return 'pending_merge_lease';
   return null;
 }
 

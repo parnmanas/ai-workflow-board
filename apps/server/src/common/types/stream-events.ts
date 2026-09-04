@@ -471,10 +471,19 @@ export interface ChatRoomMessagePayload {
 
 export interface ChatRoomUpdatePayload {
   room_id: string;
-  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'read';
+  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'read' | 'open_join_changed';
   new_name?: string;
   participant_id?: string;
   participant_ids?: string[];
+
+  // 자유 참여 옵션의 새 값 (ticket 995a9519). `open_join_changed` 에만 실린다.
+  // 이 update type 만 방 구성원이 아니라 워크스페이스의 모든 사용자에게 나간다 —
+  // 변경의 영향 대상이 정확히 비참여자이기 때문이다(event-registry 의
+  // `chatRoomUpdateFilter` 주석 참조).
+  open_join?: boolean;
+  // 위 브로드캐스트의 스코프 판정 근거. 수신 측이 지금 보고 있는 워크스페이스와
+  // 대조해 남의 워크스페이스 이벤트를 버린다. `open_join_changed` 에만 채워진다.
+  workspace_id?: string;
 
   // B3 fix: `read` events carry the reader's identity + the new marker so that
   // other tabs / devices of the same user can sync their local unread_count
@@ -742,6 +751,10 @@ export interface AgentInstanceUpdatePayload {
     update_channel?: string | null;
     update_last_checked_at?: string | null;
     update_last_error?: string | null;
+    // ticket 9408b308 — target version the manager's `scheduled` policy is
+    // waiting for an operator to approve. null = reported but nothing
+    // pending; undefined = manager predates the field.
+    update_approval_pending_version?: string | null;
   };
 }
 

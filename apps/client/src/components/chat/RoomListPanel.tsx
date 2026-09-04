@@ -681,6 +681,28 @@ function RoomListRow({ room, isActive, onClick, currentUserId }: RoomListRowProp
           >
             {displayName}
           </span>
+          {/* 아직 참여하지 않은 자유 참여 방임을 표시한다 (ticket 995a9519). 이 방들은
+              참여자가 아니어도 목록에 실리므로, 표시가 없으면 "내가 낀 대화"와 구분되지
+              않는다. 참여 중인 방은 이미 내 대화이므로 굳이 라벨을 달지 않는다. */}
+          {room.open_join && room.is_participant === false && (
+            <span
+              aria-label="Open room you have not joined"
+              data-testid="room-open-join-badge"
+              style={{
+                flexShrink: 0,
+                fontSize: 10,
+                fontWeight: 600,
+                color: tokens.colors.accent,
+                background: 'transparent',
+                border: `1px solid ${tokens.colors.accent}`,
+                borderRadius: tokens.radii.lg,
+                padding: '0 6px',
+                lineHeight: '16px',
+              }}
+            >
+              Open
+            </span>
+          )}
           {/* 그룹 방 참여자 수 뱃지 — 한눈에 인원 규모를 보여준다 */}
           {room.type === 'group' && memberCount > 0 && (
             <span

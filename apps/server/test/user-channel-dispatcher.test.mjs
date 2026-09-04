@@ -114,6 +114,62 @@ test('_handleChat accepts string[] member_ids (legacy interface shape)', async (
   assert.equal(findCalls[0].where.user_id, 'u-alice');
 });
 
+test('_handleChat 은 orchestration / Action Run 방(is_action_room)에는 팬아웃하지 않는다', async () => {
+  // 티켓 f6a0de0e. 이 방들은 대화가 아니라 작업 실행이라 엔진이 브리핑·wake·step
+  // 디스패치를 기계적으로 쏟아낸다 — 미션 하나가 수십 건이다. 그걸 전부 외부 푸시로
+  // 내보내면 알림 폭탄이 된다.
+  //
+  // 이 경로는 그 티켓 전에는 도달 불가였다: mission 방 참여자가 orchestrator agent 와
+  // 의사 user 'system' 뿐이라 사람 수신자가 0명이었다. 미션 생성자를 참여자로 넣는
+  // 순간 열렸고, qa-flows/orchestration-confirm-notify 가 이 회귀를 잡았다.
+  const UserChannelDispatcherService = await loadDispatcher();
+  const findCalls = [];
+  const svc = makeService(UserChannelDispatcherService, { findCalls });
+
+  const ev = {
+    room_id: 'room-mission-1',
+    workspace_id: 'ws-1',
+    message_id: 'msg-brief-1',
+    sender_type: 'user',
+    // 엔진의 브리핑은 의사 user 'system' 이 쓴다 — 사람 참여자는 전부 수신 대상이 된다.
+    sender_id: 'system',
+    sender_name: 'Orchestration',
+    content: 'You are the orchestrator for mission ... submit_orchestration_plan',
+    member_ids: new Set(['u-owner', 'u-operator']),
+    is_action_room: true,
+    created_at: new Date().toISOString(),
+  };
+
+  await svc._handleChat(ev);
+
+  assert.equal(
+    findCalls.length,
+    0,
+    'orchestration 방의 기계 발화는 외부 채널로 나가면 안 된다 — 마커를 무시하면 참여자 수만큼 푸시가 나간다',
+  );
+});
+
+test('_handleChat 은 일반 방에서는 그대로 팬아웃한다 (위 제외가 과하지 않다)', async () => {
+  const UserChannelDispatcherService = await loadDispatcher();
+  const findCalls = [];
+  const svc = makeService(UserChannelDispatcherService, { findCalls });
+
+  await svc._handleChat({
+    room_id: 'room-plain-1',
+    workspace_id: 'ws-1',
+    message_id: 'msg-2',
+    sender_type: 'user',
+    sender_id: 'u-sender',
+    sender_name: 'Sender',
+    content: '오늘 배포 언제 하나요',
+    member_ids: new Set(['u-sender', 'u-alice']),
+    // is_action_room 없음 = 평범한 채팅방
+    created_at: new Date().toISOString(),
+  });
+
+  assert.deepEqual(findCalls.map((c) => c.where.user_id), ['u-alice'], '일반 방 팬아웃은 유지된다');
+});
+
 test('_handleChat skips when content is only @-mentions (delegated to mention dispatcher)', async () => {
   const UserChannelDispatcherService = await loadDispatcher();
   const findCalls = [];

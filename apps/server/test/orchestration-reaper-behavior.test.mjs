@@ -64,6 +64,21 @@ function makeRepo(rows) {
     async findOne({ where }) {
       return rows.find((r) => matches(r, where)) ?? null;
     },
+    // confirm 리마인더 스윕(티켓 a78cb566)은 후보를 SQL 로 직접 고른다. 이 픽스처에는
+    // confirm 게이트가 없으므로 빈 결과가 정답이다 — 다만 **메서드가 없으면 스윕이
+    // 던지고**, `runOnce` 의 바깥 catch 가 앞선 스윕들의 카운트까지 0 으로 지워서
+    // 이 파일의 nudge 단언이 통째로 무너진다(실제로 그렇게 4건이 붉어졌다).
+    createQueryBuilder() {
+      const qb = {
+        innerJoin: () => qb,
+        where: () => qb,
+        andWhere: () => qb,
+        orderBy: () => qb,
+        limit: () => qb,
+        async getMany() { return []; },
+      };
+      return qb;
+    },
     // Rows returned by find()/findOne() are the same object references stored
     // in `rows`, so the service's in-place mutations are already reflected;
     // save() only needs to record that a write happened (mirrors the QA/
@@ -173,7 +188,7 @@ function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator
         return true;
       }),
   };
-  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog, noQuiesce);
+  const svc = new OrchestrationReaperService(missionRepo, stepRepo, eventRepo, teamRepo, missionsStub, runnerStub, noopLog, noQuiesce, { scheduleGateNotice: () => {}, sendReminder: async () => ({ recipients: 0, sent: 0, failed: 0 }), settled: async () => {} });
   return { svc, missionRepo, stepRepo, eventRepo, nudges, recordedEvents, clock };
 }
 
@@ -208,6 +223,32 @@ test('reapStalledRunning: nudges exactly the stale zero-in-flight mission; fresh
   assert.equal(byId['fresh-done'].status, 'running', 'within the timeout window — untouched');
   assert.equal(byId['busy'].status, 'running', 'in-flight work present — left to reapStuckSteps');
   assert.equal(byId['paused-mission'].status, 'paused', 'not running — never selected');
+});
+
+test('confirm 리마인더 스윕이 터져도 앞선 스윕들의 회계가 살아남는다 (티켓 a78cb566)', async () => {
+  // `runOnce` 의 바깥 try/catch 는 스윕 **전체**를 감싼다. 마지막에 도는 리마인더 스윕이
+  // 던지면 앞서 이미 일어난 nudge/타임아웃이 보고에서 통째로 사라진다 — 부수효과는
+  // 남았는데 반환값만 0 이라 사후에 재구성이 안 되는 상태다. 알림은 리퍼의 부수 임무이므로
+  // 자기 실패는 자기 안에서 삼켜야 한다.
+  //
+  // 이 회귀는 실제로 전체 스위트에서 4건을 붉혔다: 스텁 repo 에 `createQueryBuilder` 가
+  // 없어 스윕이 TypeError 를 던졌고, nudge 단언이 전부 0 으로 무너졌다.
+  const NOW = new Date('2026-06-22T21:00:00Z');
+  const missions = [makeMission('stale-done', { started_at: new Date(NOW.getTime() - 200 * MIN) })];
+  const steps = [makeStep('s-stale', 'stale-done', 'done', { finished_at: new Date(NOW.getTime() - 100 * MIN) })];
+  const h = makeHarness({ missions, steps, events: [] });
+  h.clock.now = NOW;
+
+  // 후보 질의가 터지도록 만든다(DB 장애·스키마 드리프트를 대신한다).
+  h.stepRepo.createQueryBuilder = () => {
+    throw new Error('candidate query exploded');
+  };
+
+  const result = await h.svc.runOnce(NOW);
+
+  assert.equal(result.missions_nudged, 1, '리마인더 스윕이 터져도 nudge 회계는 그대로다');
+  assert.equal(result.confirm_reminders, 0, '터진 스윕 자신은 0 을 보고한다');
+  assert.deepEqual(h.nudges.map((n) => n.missionId), ['stale-done'], '부수효과도 실제로 일어났다');
 });
 
 test('reapStalledRunning: a wake of ANY kind inside the timeout window backs off reaper action', async () => {

@@ -277,7 +277,7 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
 
     if (ticket) {
       archived = !!ticket.archived_at;
-      parked = !!(ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait);
+      parked = !!(ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait || ticket.pending_merge_lease);
       const col = ticket.column_id
         ? await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
         : null;
@@ -458,7 +458,7 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
       .getMany();
 
     for (const ticket of tickets) {
-      if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait) continue;
+      if (ticket.pending_user_action || ticket.pending_on_tickets || ticket.pending_ci_wait || ticket.pending_merge_lease) continue;
       const col = colById.get(ticket.column_id as string);
       if (!col) continue;
       const roles = safeJsonParse<string[]>((col as any).role_routing, []);

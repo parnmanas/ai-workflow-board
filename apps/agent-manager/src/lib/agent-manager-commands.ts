@@ -319,7 +319,15 @@ export class AgentManagerCommandHandler {
    * refused or failed.
    */
   async #updateManager(): Promise<string> {
-    const result = await runSelfUpdate({ log, countInFlightSessions: this.#deps.countInFlightSessions });
+    // ticket 9408b308: 이 명령을 낼 수 있는 주체가 곧 정책 D 가 말하는 승인
+    // 주체(workspace admin)다 — 새 권한 축을 만들지 않고 이 명령 자체를 승인으로
+    // 기록한다. `scheduled` 호스트에서 이 설치가 지금 끝나지 못하더라도 다음 창의
+    // tick 이 같은 버전을 다시 묻지 않고 이어서 개시한다.
+    const result = await runSelfUpdate({
+      log,
+      countInFlightSessions: this.#deps.countInFlightSessions,
+      approvalSource: 'update_manager',
+    });
     if (!result.changed && !result.deferred) {
       throw new Error(`update_manager: ${result.summary}`);
     }

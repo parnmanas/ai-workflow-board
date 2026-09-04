@@ -169,7 +169,7 @@ async function spawnFixture(profile, captureFile, extra = {}) {
     },
   });
   assert.equal(result.spawned, true);
-  await Promise.race([exited, delay(5_000).then(() => assert.fail('Claude fixture did not exit'))]);
+  await withHangDeadline(exited, 'Claude fixture did not exit');
   return JSON.parse(await readFile(captureFile, 'utf8'));
 }
 
@@ -203,16 +203,51 @@ async function spawnBaseSessionFixture(profile, captureFile, extra = {}) {
   const result = new Promise(resolve => { sess.onResult = resolve; });
   const exited = once(sess.child, 'exit');
   const [captured, mainResult] = await Promise.all([
-    Promise.race([
+    withHangDeadline(
       exited.then(async () => JSON.parse(await readFile(captureFile, 'utf8'))),
-      delay(5_000).then(() => assert.fail('BaseSessionManager Claude fixture가 종료되지 않았다')),
-    ]),
-    Promise.race([
-      result,
-      delay(5_000).then(() => assert.fail('BaseSessionManager가 주 응답을 전달하지 않았다')),
-    ]),
+      'BaseSessionManager Claude fixture가 종료되지 않았다',
+    ),
+    withHangDeadline(result, 'BaseSessionManager가 주 응답을 전달하지 않았다'),
   ]);
   return { capture: captured, mainResult };
+}
+
+/** fixture 서브프로세스가 끝나기를 기다리되, hang 이면 무한 대기 대신 실패시킨다.
+ *
+ *  상한은 **성능 단언이 아니라 hang 진단용**이다. 예전에는 5초였는데, 이 파일의
+ *  테스트들은 실제 자식 프로세스를 띄우고 `node --test` 는 파일을
+ *  `os.availableParallelism()` 만큼 동시에 돌린다 — 4-vCPU Windows 러너에서는
+ *  정상 종료(측정 5172ms, 자식 exit code 0)가 그 상한을 그냥 넘겼다(main CI
+ *  run 33705300976). 실제 소요보다 넉넉히 잡고, 승부가 나면 AbortController 로
+ *  타이머를 취소한다 — 취소하지 않으면 `--test-force-exit` 없이 도는 로컬
+ *  `npm test` 가 남은 타이머만큼 늦게 끝난다. */
+const HANG_DEADLINE_MS = 30_000;
+
+function withHangDeadline(promise, failureMessage) {
+  const ac = new AbortController();
+  return Promise.race([
+    promise,
+    delay(HANG_DEADLINE_MS, null, { signal: ac.signal }).then(() => assert.fail(failureMessage)),
+  ]).finally(() => ac.abort());
+}
+
+/** 세션 자식의 종료를 기다린다. 기다리는 동안 그 자식이 이벤트 루프를 붙잡게
+ *  `ref()` 를 되돌려 놓는다.
+ *
+ *  `BaseSessionManager`/`SubagentManager` 는 spawn 한 자식을 `unref()` 한다 —
+ *  프로덕션에서 세션 자식이 매니저의 종료를 막지 않게 하려는 의도다. 그래서
+ *  테스트가 자식 종료를 기다릴 때 그 자식은 루프를 붙잡지 않고, 다른 핸들이
+ *  없으면 루프가 비어 node:test 가 남은 테스트를 통째로 취소한다("Promise
+ *  resolution is still pending but the event loop has already resolved").
+ *  이 발현은 **Node 22 에서만** 보인다 — Node 24 는 그대로 통과하므로 로컬만
+ *  보면 안 잡히고 CI(Node 22)에서만 red 가 된다.
+ *
+ *  종료 상한이 racing 하는 대기(withHangDeadline)는 그 타이머가 루프를 붙잡아
+ *  주지만, 상한 없이 그냥 `await` 하는 대기는 스스로 붙잡아야 한다. 이미 ref 된
+ *  자식에는 무해한 no-op 이다. */
+function awaitSessionChildExit(child) {
+  child.ref();
+  return once(child, 'exit');
 }
 
 async function waitFor(check, timeoutMs, failureMessage) {
@@ -595,7 +630,7 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const orphanPidPath = join(orphanDir, 'claude-session.pid');
   await copyFile(first.pidPath, orphanPidPath);
   await copyFile(first.configPath, join(orphanDir, 'claude-session.json'));
-  const firstExit = once(first.child, 'exit');
+  const firstExit = awaitSessionChildExit(first.child);
   const cleanup = await cleanupOrphanSubagents(orphanDir, false);
   assert.ok(cleanup.reaped >= 1, 'manager 재시작 orphan 회수가 이전 Claude 프로세스를 정리해야 한다');
   await firstExit;
@@ -621,8 +656,8 @@ test('Claude 세션은 최초 transcript 생성, 활성 stdin 후속 turn, 종�
   const isolatedSpawn = (await readJsonLines(captureFile)).filter(e => e.type === 'spawn')[2];
   assert.deepEqual(isolatedSpawn.argv.slice(0, 2), ['--session-id', resolveClaudeSessionId(otherKey)]);
   assert.notEqual(isolatedSpawn.sessionId, sessionId);
-  const resumedExit = once(resumed.child, 'exit');
-  const otherExit = once(other.child, 'exit');
+  const resumedExit = awaitSessionChildExit(resumed.child);
+  const otherExit = awaitSessionChildExit(other.child);
   resumed.child.stdin.end();
   other.child.stdin.end();
   await Promise.all([resumedExit, otherExit]);
@@ -749,10 +784,7 @@ test('ticket 41dc37cb: a Claude backend profile session never retries with a dif
     },
   });
   assert.equal(result.spawned, true);
-  await Promise.race([
-    firstExit,
-    delay(5_000).then(() => assert.fail('fallback-suppression fixture did not exit')),
-  ]);
+  await withHangDeadline(firstExit, 'fallback-suppression fixture did not exit');
   // A pre-fix build fires the second spawn synchronously inside the same
   // close-handler tick (attemptModel = the raw fallback string) — give it a
   // beat to land before asserting it never happened.
@@ -1149,7 +1181,7 @@ process.stdout.write(JSON.stringify({type:'turn.completed'}) + '\\n');
       },
     });
     assert.equal(result.spawned, true);
-    await Promise.race([exited, delay(5_000).then(() => assert.fail('Codex fixture did not exit'))]);
+    await withHangDeadline(exited, 'Codex fixture did not exit');
     const capture = JSON.parse(await readFile(captureFile, 'utf8'));
     assert.equal(capture.cwd, originalCwd);
     assert.equal(capture.baseUrl, undefined);
