@@ -7,6 +7,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *     `target_agent_id` 는 **삭제하지 않고** 대표 대상 미러로 남긴다.
  *   - action_runs.agent_id      — 이 run을 수행하는 에이전트(에이전트별 감사).
  *   - action_runs.batch_id      — 같은 트리거에서 fan-out된 run들의 묶음 키.
+ *   - action_runs.batch_resume_claimed — 배치 재개 1회성 클레임 플래그.
  *
  * SQLite(개발)는 엔티티 synchronize=true 로 이 컬럼들을 얻는다. 이 DDL은
  * synchronize가 꺼져 있는 Postgres(운영) 에서만 돈다. 전부
@@ -43,6 +44,9 @@ export class AddActionFanOutTargets1760000000084 implements MigrationInterface {
     );
     await queryRunner.query(
       "ALTER TABLE action_runs ADD COLUMN IF NOT EXISTS batch_id VARCHAR NOT NULL DEFAULT ''",
+    );
+    await queryRunner.query(
+      'ALTER TABLE action_runs ADD COLUMN IF NOT EXISTS batch_resume_claimed BOOLEAN NOT NULL DEFAULT FALSE',
     );
     await queryRunner.query(
       'CREATE INDEX IF NOT EXISTS idx_action_runs_batch_id ON action_runs (batch_id)',
