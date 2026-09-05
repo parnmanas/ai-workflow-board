@@ -101,11 +101,16 @@ function allParticipantRows(roomId, participantId) {
 
 async function runBackfill() {
   const queryRunner = dataSource.createQueryRunner();
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => { lines.push(args.join(' ')); };
   try {
     await new BackfillMissionRoomUserChat1760000000084().up(queryRunner);
   } finally {
+    console.log = original;
     await queryRunner.release();
   }
+  return lines.find((l) => l.includes('survey:')) ?? '';
 }
 
 before(async () => {
@@ -412,5 +417,34 @@ describe('백필 마이그레이션', () => {
       0,
       'MCP 로 만든 미션에는 사람 소유자가 없다 — missionHumanOwner 와 같은 규칙이어야 한다',
     );
+  });
+
+  it("전수 조사 수치를 한 줄로 낸다 — 0건이어도 낸다", async () => {
+    // 이 줄이 요구사항 B 의 "전수 조사" 산출물이다. 워크스페이스 전체 미션을 열어 주는
+    // 표면이 에이전트 쪽에 없어(팀 스코프 도구뿐) 조사를 백필과 같은 순회에 얹었으므로,
+    // 그 줄이 실제로 나오고 수치가 맞는지가 곧 요구사항의 검증이다.
+    const empty = await runBackfill();
+    assert.match(empty, /missions=0 /, '미션이 없어도 조사 결과(0건)는 나와야 한다');
+
+    // running(open, 소유자 있음) · terminal(off) · draft(방 없음) 세 종류를 섞는다.
+    await seedMission({ user_chat_mode: '' }, { open_join: false });
+    await seedMission({ user_chat_mode: 'off', status: 'completed' }, { open_join: true });
+    const missionRepo = dataSource.getRepository(OrchestrationMission);
+    await missionRepo.save(missionRepo.create({
+      workspace_id: WS, team_id: 'team-1', title: 'draft', objective: 'x',
+      status: 'draft', created_by_type: 'user', created_by: ADMIN,
+    }));
+
+    const line = await runBackfill();
+    assert.match(line, /missions=3 /, '미션 총수');
+    assert.match(line, /started=2 /, 'draft(방 없음)는 시작된 것으로 세지 않는다');
+    assert.match(line, /terminal=1 /, '종료 미션 수');
+    assert.match(line, /mode\(open=2 participants_only=0 off=1\)/, '정규화된 모드 분포');
+    // 1 이지 2 가 아니다: 세 번째 미션은 엔티티를 통해 만들어져 TypeORM 이 컬럼 default
+    // 'open' 을 채운다. ''/NULL 로 남는 것은 **컬럼이 없던 시절에 만들어진 행**뿐이고,
+    // 그 구분이 곧 "백필 대상"의 정의다.
+    assert.match(line, /legacy_unset_mode=1 /, "''/NULL 로 남은 기존 행 수 — 백필 대상의 근거다");
+    assert.match(line, /open_join_aligned=2 /, '실제로 정렬된 방 수(하나는 켜고 하나는 끈다)');
+    assert.match(line, /owners_registered=2$/, '실제로 등록된 소유자 수');
   });
 });
