@@ -1690,3 +1690,79 @@ supply-chain-integrity-guard 의 "ci.yml now references a secret" 단언이 지�
 GitHub 축 실패를 npm 축 재시도 예산 확대로 흡수하거나, 폴백 실패 시 merge 를 막지
 않는 별도 신호로 강등하는 것. 어느 쪽도 fail-closed 규약을 무르지 않는 선에서
 설계돼야 한다.
+
+## 재검증 로그 — 2026-09-05 (`main` @ `d4b3fa5f`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`930670d3`)를 함께 감사했다. `package-lock.json`, 루트
+`package.json`, client·agent-manager manifest는 **blob 단위로 동일**했다.
+`apps/server/package.json`만 다르고, 그 차이는 `main`에 이후 랜딩한 테스트
+4건(`chat-open-join`, `chat-open-join-sse-fanout`,
+`orchestration-mission-room-open-join`, `lockfile-advisory-audit-guard`)의 등록
+목록뿐이다 — 의존성 필드는 전부 동일하므로 **의존성 drift 없음**.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개, 출처 npm)이었다. 판정은
+`scripts/audit-lockfile-advisories.mjs --audit-level=moderate`로 냈다.
+`audit-deploy-branch-deps`는 배포 브랜치 lockfile이 현재 트리와 동일함을 확인해
+같은 결론을 승계했다. 발행 트리는 live/next 모두 moderate 이상 0건 + install script
+0개였고, lockfile 대비 12건의 버전 drift도 전부 advisory 0건이었다. 액션 참조 19개는
+전부 커밋 SHA 고정, install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`)는 전부
+허용목록 내였다. 루트 `overrides`도 lockfile에서 직접 확인했다 — multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3(+cosmiconfig 하위 4.3.1), picomatch 4.0.5로
+**취약 버전이 되살아난 흔적 없음**. 가드 **87/87** 통과.
+
+패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는 사용하지 않았고 root
+`overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았으며, 기존 테스트의
+`package.json` 등록 완전성은 `test-registration-completeness`로 확인했다.
+
+### 정정 — "배포 브랜치의 게이트가 죽어 있었다"는 과장이었다
+
+어제 항목은 `production.private`의 `dependency-audit`이 **죽어 있다(dead)**고 적었고,
+운영 메모에는 "CI의 npm 10이 retired `quick` 엔드포인트로 폴백해 400을 뱉으므로 이
+monorepo에서 `npm audit`은 **결코 성공할 수 없다**"고 남아 있었다. 오늘 실제 CI 실행
+이력을 세어 보니 **둘 다 사실이 아니다.**
+
+- `production.private`의 최근 CI 런 **27건이 전부 success**다. 최신 런(`33817872378`)의
+  스텝별 결론을 봐도 `npm audit (moderate 이상 실패)` = **success**이고, 뒤따르는
+  오프라인 가드 5종도 전부 success다. 이 브랜치에서 가드가 실제로 skip된 적은 없다.
+- `main`에서도 수정 전 18개 런 중 **16건이 success**였다. 즉 `npm audit`은
+  *간헐적으로* 실패할 뿐 상시 실패가 아니다.
+
+동시에, **스텝 순서 결함 자체는 실재하며 실제로 재현됐다.** 수정 전 `main`의 실패
+런 2건(`33823224505` @ 00:47Z, `33830569471` @ 02:43Z)은 첫 스텝 `npm audit`이 failure로
+죽었고, 같은 잡의 `배포 브랜치 감사 커버리지 가드`·`정기 감사 커버리지 가드` 등
+**뒤따르는 오프라인 가드가 전부 skipped**로 남았다. 수정이 랜딩한 뒤의 런
+(`33832257372` 이후)은 취약점 감사가 success이면서 오프라인 가드도 모두 success다.
+
+정리하면 어제의 **조치 방향은 옳았고 근거도 재현됐지만, 심각도 서술이 틀렸다**:
+배포 브랜치의 게이트는 "죽어 있는" 것이 아니라 **간헐적 네트워크 실패에 오프라인
+가드까지 함께 침묵당하는 잠재 결함**이다. 발생 빈도는 `main` 기준 하루 18런 중 2회
+수준이고 `production.private`에서는 아직 0회다. 상시 장애가 아니므로 **긴급하지
+않다** — 이 정정의 실질적 의미는 아래 이월 항목의 처리 시급성을 낮춘다는 것이다.
+
+### 이월 — PR #8 병합은 운영자 결정 사항 (프로덕션 배포를 유발)
+
+배포 브랜치의 위 순서 결함을 고치는 PR #8(`fix/prod-dependency-audit-gate` →
+`production.private`)은 여전히 **OPEN**이다. 상태는 `MERGEABLE`/`mergeStateStatus:
+CLEAN`이고 체크 8종 전부 SUCCESS로, 기술적으로는 지금 병합 가능하다. 변경 범위도
+`.github/workflows/ci.yml`, `scripts/audit-lockfile-advisories.mjs`,
+`apps/server/test/lockfile-advisory-audit-guard.test.mjs`,
+`apps/server/package.json`(테스트 등록) 4개 파일뿐으로 **런타임 코드는 건드리지
+않는다.**
+
+그럼에도 이번 감사에서 **병합하지 않았다.** `production.private`에는 `main`에 없는
+`deploy.yml`이 있고, 이 브랜치로의 push는 곧바로 **Docker 이미지 빌드 + GHCR push +
+NAS SSH 배포**를 실행한다. 즉 병합은 CI 설정 변경으로 끝나지 않고 **실제 운영
+서비스의 재배포**를 유발한다. 애플리케이션 소스가 동일하므로 기능적 변화는 없을
+것으로 보이나, 컨테이너 교체를 수반하는 되돌리기 어려운 외부 영향이고, 위 정정대로
+긴급성도 없다. 따라서 자동 감사 루프가 단독으로 실행할 일이 아니라고 판단해
+**운영자 승인 대기 상태로 남긴다.**
+
+승인 시 조치는 PR #8 병합 한 번으로 끝난다(배포 창을 고려해 시점만 택하면 된다).
+
+### 이월 (변동 없음) — 이중 출처 폴백의 CI rate limit
+
+2026-09-04 항목의 "이중 출처 폴백이 CI에서는 rate limit에 걸린다"는 미해결 설계
+과제 그대로다. 오늘 `main`의 취약점 감사 런은 모두 success였고 로컬 실행도 npm 축
+단독으로 통과해 새로 관찰된 사실은 없다. 문서화된 트레이드오프(=`ci.yml`은
+`pull_request`에서 PR 코드를 실행하므로 토큰을 두지 않는다)를 임의로 뒤집지 않았다.
