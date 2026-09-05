@@ -643,11 +643,17 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadRuns = useCallback(async () => {
-    const list = await api.listActionRuns(action.id, workspaceId, 20);
+    // fan-out (티켓 fc3906c5): 트리거 1회가 대상 수만큼 run 을 만드므로, 고정
+    // 20건으로 가져오면 대상이 5개일 때 트리거 4회치밖에 안 보이고 경계에 걸린
+    // 배치는 일부 run 만 실려 와 "전체 성공" 으로 잘못 보일 수 있다. 대상 수에
+    // 비례해 늘려 배치 단위가 온전히 들어오게 한다(서버가 100 으로 캡한다).
+    const targetCount = Math.max(1, actionTargets(action).length);
+    const limit = Math.min(100, 20 * targetCount);
+    const list = await api.listActionRuns(action.id, workspaceId, limit);
     setRuns(list);
     // Default selection: the most recent run.
     setActiveRunId((cur) => cur ?? (list[0]?.id ?? null));
-  }, [action.id, workspaceId]);
+  }, [action, workspaceId]);
 
   const activeRun = runs.find((r) => r.id === activeRunId) || null;
   const roomId = activeRun?.room_id || null;
