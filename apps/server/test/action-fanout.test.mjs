@@ -260,16 +260,80 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const copyBlock = src.slice(src.indexOf('copy ws-level action'), src.indexOf('copy ws-level action') + 1200);
     assert.match(copyBlock, /target_agent_ids: src\.target_agent_ids/, 'Action 복사가 대상 배열을 빠뜨렸다');
 
-    const warnBlock = src.slice(src.indexOf('warnForeignAgentActions'));
+    // 호출부가 아니라 **메서드 정의**에 앵커링한다 — 첫 번째 등장은 호출
+    // 지점이라 본문이 창 안에 들어오지 않는다.
+    const defIdx = src.indexOf('private async warnForeignAgentActions');
+    assert.ok(defIdx > -1, 'warnForeignAgentActions 정의를 찾지 못했다');
+    const warnBlock = src.slice(defIdx, defIdx + 1200);
     assert.match(
-      warnBlock.slice(0, 2000),
+      warnBlock,
       /actionTargetAgentIds\(a\)\.includes\(agent\.id\)/,
       'cross-workspace 경고가 대표 대상만 보고 있다 — 비대표 대상이 누락된다',
     );
     assert.doesNotMatch(
-      warnBlock.slice(0, 2000),
+      warnBlock,
       /find\(\{ where: \{ target_agent_id: agent\.id \} \}\)/,
       '컬럼 매칭으로 되돌아가면 다중 대상 Action 이 안 잡힌다',
+    );
+  });
+
+  it('cron 스케줄과 on_ticket_done 훅이 같은 dispatch() 를 거쳐 fan-out 을 상속한다', () => {
+    // 두 트리거는 대상 순회를 스스로 하지 않고 dispatch() 에 위임한다 — 그래서
+    // fan-out 이 자동으로 적용된다. 어느 한쪽이 자체 경로로 갈라지면 그 트리거만
+    // 조용히 단일 대상으로 되돌아가므로 호출 형태를 고정한다.
+    for (const rel of [
+      '../src/modules/actions/action-scheduler.service.ts',
+      '../src/modules/actions/on-ticket-done-action.service.ts',
+    ]) {
+      const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      assert.match(
+        src,
+        /await this\.actionsService\.dispatch\(\{/,
+        `${rel} 이 actionsService.dispatch() 를 거치지 않는다 — fan-out 을 상속하지 못한다`,
+      );
+      assert.doesNotMatch(
+        src,
+        /roomRepo\.save\(|runRepo\.save\(/,
+        `${rel} 이 run/방을 직접 만들고 있다 — dispatch() 우회는 fan-out 과 예산 가드를 모두 건너뛴다`,
+      );
+    }
+  });
+
+  it('MCP run_action 응답이 레거시 키와 신규 배치 키를 모두 싣는다', () => {
+    const src = readFileSync(
+      new URL('../src/modules/mcp/tools/action-tools.ts', import.meta.url),
+      'utf8',
+    );
+    const runActionIdx = src.indexOf("'run_action'");
+    assert.ok(runActionIdx > -1, 'run_action 도구를 찾지 못했다');
+    const block = src.slice(runActionIdx, src.indexOf("'complete_action_run'"));
+    // 하위 호환 키 — 이게 빠지면 기존 에이전트 호출자가 run 을 못 찾는다.
+    for (const legacy of ['run_id: result.run.id', 'room_id: result.room_id', 'prompt: result.prompt']) {
+      assert.ok(block.includes(legacy), `run_action 이 하위 호환 키를 잃었다: ${legacy}`);
+    }
+    // 신규 배치 키.
+    for (const added of ['batch_id: result.batch_id', 'runs: result.runs.map', 'failures: result.failures']) {
+      assert.ok(block.includes(added), `run_action 이 fan-out 필드를 노출하지 않는다: ${added}`);
+    }
+  });
+
+  it('MCP list_action_runs 가 에이전트 표시명과 배치 키를 노출한다', () => {
+    const src = readFileSync(
+      new URL('../src/modules/mcp/tools/action-tools.ts', import.meta.url),
+      'utf8',
+    );
+    const idx = src.indexOf("'list_action_runs'");
+    assert.ok(idx > -1, 'list_action_runs 도구를 찾지 못했다');
+    const block = src.slice(idx, idx + 3000);
+    for (const field of ['agent_id:', 'agent_name:', 'batch_id:']) {
+      assert.ok(block.includes(field), `list_action_runs 프로젝션에 ${field} 가 없다`);
+    }
+    // 표시명은 반드시 해석기를 거쳐야 한다 — bare name 은 같은 leaf 이름을 쓰는
+    // 두 호스트를 구분하지 못해 이 티켓의 감사 요구사항 자체를 못 채운다.
+    assert.match(
+      block,
+      /resolveAgentDisplayNamesByIds/,
+      'agent_name 이 <Manager>/<Agent> 해석기를 거치지 않는다',
     );
   });
 

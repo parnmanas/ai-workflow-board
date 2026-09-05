@@ -309,6 +309,9 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   // `<Manager>/<Agent>` — never the bare name, so two managers running an
   // agent with the same short name stay distinguishable.
   const agentName = (id: string): string => {
+    // 대상이 아예 없는 Action(설정 이상)에서 빈 문자열이 그대로 렌더돼
+    // "Target: " 만 남는 것을 막는다.
+    if (!id) return '(대상 없음)';
     const a = agents.find((x) => x.id === id);
     return a ? formatAgentDisplayName(a) : id.slice(0, 8);
   };
