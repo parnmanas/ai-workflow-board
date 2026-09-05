@@ -35,7 +35,7 @@ import { createWorkspace } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_PROMPT_AUDIT_REFRESH_PORT || '7910';
+process.env.PORT = process.env.QA_PROMPT_AUDIT_REFRESH_PORT || '0';
 
 const ALL_SEVEN = [
   'backlog_workflow', 'todo_workflow', 'plan_workflow', 'in_progress_workflow',

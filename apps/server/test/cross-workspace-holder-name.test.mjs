@@ -28,7 +28,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', 'dist');
 
-const BASE_PORT = parseInt(process.env.QA_XWS_HOLDER_NAME_PORT || '7869', 10);
+const BASE_PORT = parseInt(process.env.QA_XWS_HOLDER_NAME_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 test('cross-workspace assigned agent → <Manager>/<Agent>, never a raw id', async (t) => {

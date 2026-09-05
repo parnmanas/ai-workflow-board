@@ -27,7 +27,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-const BASE_PORT = parseInt(process.env.QA_MANAGER_NOOP_PORT || '7899', 10);
+const BASE_PORT = parseInt(process.env.QA_MANAGER_NOOP_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 test('manager agent is never a role holder / trigger target / chat participant', async (t) => {

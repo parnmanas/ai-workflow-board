@@ -35,7 +35,7 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // earlier leak files leave agents/workspaces behind in a shared db).
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-agents-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.AGENTS_LEAK_PORT || '7796';
+process.env.PORT = process.env.AGENTS_LEAK_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

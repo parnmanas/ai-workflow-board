@@ -10,7 +10,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.WS_SCHED_MCP_PORT || '7842';
+process.env.PORT = process.env.WS_SCHED_MCP_PORT || '0';
 
 test('Workspace schedule MCP: create → run_now → list round-trip', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

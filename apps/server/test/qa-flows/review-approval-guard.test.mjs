@@ -28,7 +28,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_REVIEW_APPROVAL_PORT || '7849';
+process.env.PORT = process.env.QA_REVIEW_APPROVAL_PORT || '0';
 
 test('move_ticket rejects Review→Merging without a reviewer-authored comment unless force=true', async (t) => {
   step('Boot NestJS app on test port');

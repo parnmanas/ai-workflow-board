@@ -28,7 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 
 // Unique port slot — dispatch uses 7825, scoring 7824.
-process.env.PORT = process.env.QA_BENCHMARK_LIFECYCLE_PORT || '7826';
+process.env.PORT = process.env.QA_BENCHMARK_LIFECYCLE_PORT || '0';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

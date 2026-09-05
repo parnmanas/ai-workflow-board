@@ -14,7 +14,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
-process.env.PORT = process.env.AGENT_LAUNCH_SPEC_HEARTBEAT_PORT || '7942';
+process.env.PORT = process.env.AGENT_LAUNCH_SPEC_HEARTBEAT_PORT || '0';
 
 async function bootWithManager(t, port, label) {
   const { app, port: boundPort, modules } = await bootApp({ port });

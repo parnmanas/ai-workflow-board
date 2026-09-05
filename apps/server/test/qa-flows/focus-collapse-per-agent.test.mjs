@@ -39,7 +39,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_FOCUS_COLLAPSE_PORT || '7864';
+process.env.PORT = process.env.QA_FOCUS_COLLAPSE_PORT || '0';
 
 // Minimal Express Response stand-in: capture the JSON body the controller
 // hands back. The focus-tickets handler only calls res.json(...), so this

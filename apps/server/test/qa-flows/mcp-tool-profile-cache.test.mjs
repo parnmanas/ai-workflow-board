@@ -23,7 +23,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_MCP_TOOL_PROFILE_PORT || '7945';
+process.env.PORT = process.env.QA_MCP_TOOL_PROFILE_PORT || '0';
 
 // Mirrors the >=150 floor already used by mcp-tool-schema-budget.test.mjs /
 // qa-flows/mcp-tools-surface.test.mjs's completeness guards — catches the

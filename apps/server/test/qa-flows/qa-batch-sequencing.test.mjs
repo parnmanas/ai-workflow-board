@@ -23,7 +23,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_BATCH_SEQ_PORT || '7861';
+process.env.PORT = process.env.QA_BATCH_SEQ_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

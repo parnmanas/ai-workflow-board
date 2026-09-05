@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_COMMENT_PROJECTION_PORT || '7811';
+process.env.PORT = process.env.QA_COMMENT_PROJECTION_PORT || '0';
 
 // Fields the light board projection is allowed to expose. Kept in lockstep
 // with BoardCardComment (apps/server/src/modules/boards/boards.controller.ts

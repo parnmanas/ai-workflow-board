@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7891';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 async function seedGroupRoom(ds, { workspaceId, participants }) {
   const roomRepo = ds.getRepository('ChatRoom');

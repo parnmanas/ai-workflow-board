@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { createAgent, setupKanbanScene } from './helpers/fixtures.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_SKILL_GLOBAL_PORT || '7894', 10);
+const BASE_PORT = parseInt(process.env.QA_SKILL_GLOBAL_PORT || '0', 10);
 
 const { app, modules } = await bootApp({ port: BASE_PORT });
 after(() => { void app.close().catch(() => {}); });

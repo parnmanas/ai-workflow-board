@@ -26,7 +26,7 @@ import {
   createAgent,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_WS_MOVE_PORT || '7841';
+process.env.PORT = process.env.QA_WS_MOVE_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');

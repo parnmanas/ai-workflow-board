@@ -35,7 +35,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-const PORT = parseInt(process.env.QA_SKIP_DEFAULT_ASSIGN_WARN_PORT || '7927', 10);
+const PORT = parseInt(process.env.QA_SKIP_DEFAULT_ASSIGN_WARN_PORT || '0', 10);
 process.env.PORT = String(PORT);
 
 test('create_ticket warns when skip_default_assignments likely means the opposite of what was intended', async (t) => {

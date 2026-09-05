@@ -44,7 +44,7 @@ const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 // suspenders against any future fixture accidentally seeding one.
 process.env.QA_SCHEDULER_ENABLED = 'false';
 process.env.QA_BATCH_REAPER_ENABLED = 'false';
-process.env.PORT = process.env.QA_BATCH_AD_HOC_REAPER_PORT || '7935';
+process.env.PORT = process.env.QA_BATCH_AD_HOC_REAPER_PORT || '0';
 
 function scenarioPayload(wsId, agentId, name) {
   return {

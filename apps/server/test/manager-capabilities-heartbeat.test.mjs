@@ -15,7 +15,7 @@ import {
 } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
-process.env.PORT = process.env.MANAGER_CAPABILITIES_HEARTBEAT_PORT || '7918';
+process.env.PORT = process.env.MANAGER_CAPABILITIES_HEARTBEAT_PORT || '0';
 
 test('Manager heartbeat with manager_capabilities stores it verbatim on the instance record', async (t) => {
   const { app, port, modules } = await bootApp({

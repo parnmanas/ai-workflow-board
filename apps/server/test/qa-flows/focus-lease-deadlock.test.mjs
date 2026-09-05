@@ -58,7 +58,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_FOCUS_LEASE_PORT || '7948';
+process.env.PORT = process.env.QA_FOCUS_LEASE_PORT || '0';
 
 test('focus lease 교착 — 중복/선행/archive 가 슬롯을 놓고 canonical·선행 티켓이 자동 복구된다', async (t) => {
   try {

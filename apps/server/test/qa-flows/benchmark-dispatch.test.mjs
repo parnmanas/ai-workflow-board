@@ -40,7 +40,7 @@ import {
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 // Unique port slot — benchmark-scoring uses 7824, unpend-trigger 7836.
-process.env.PORT = process.env.QA_BENCHMARK_DISPATCH_PORT || '7825';
+process.env.PORT = process.env.QA_BENCHMARK_DISPATCH_PORT || '0';
 
 test('benchmark dispatch: create_benchmark_run wakes candidates; review landing wakes evaluators', async (t) => {
   step('Boot NestJS app + benchmark_mode kanban');

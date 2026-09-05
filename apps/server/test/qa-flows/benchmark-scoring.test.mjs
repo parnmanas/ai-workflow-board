@@ -21,7 +21,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_BENCHMARK_PORT || '7824';
+process.env.PORT = process.env.QA_BENCHMARK_PORT || '0';
 
 test('benchmark: create_benchmark_run → submit_benchmark_score → leaderboards', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

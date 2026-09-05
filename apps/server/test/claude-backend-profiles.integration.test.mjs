@@ -7,7 +7,7 @@ import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
 
 process.env.DB_TYPE = 'sqlite';
 process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), `awb-claude-profiles-${process.pid}-${Date.now()}.db`);
-process.env.PORT = '7837';
+process.env.PORT = '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

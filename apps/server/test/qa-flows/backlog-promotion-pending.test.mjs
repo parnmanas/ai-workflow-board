@@ -41,7 +41,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Port 7834 — unique slot, doesn't collide with workflow-state-cap (7822),
 // board-pause (7820) or backlog-promotion-chain (7821).
-process.env.PORT = process.env.QA_BACKLOG_PENDING_PORT || '7834';
+process.env.PORT = process.env.QA_BACKLOG_PENDING_PORT || '0';
 
 test('BacklogPromotion skips pending_user_action tickets and promotes the next eligible candidate', async (t) => {
   step('Boot NestJS app on test port');

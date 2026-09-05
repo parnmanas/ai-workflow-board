@@ -22,7 +22,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_CHAT_READ_PORT || '7814';
+process.env.PORT = process.env.QA_CHAT_READ_PORT || '0';
 
 // Insert a chat room, its participants, and a spaced-out message history
 // directly via repositories — there is no chat fixture helper, and the read

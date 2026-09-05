@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
 import { createWorkspace, createAgent, createApiKey } from './helpers/fixtures.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7791';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 // Minimal SSE parser for fetch Response streams. Parses only the fields this
 // test needs: `event:` and `data:`. Yields { event, data } objects per frame.

@@ -63,7 +63,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_DISPATCH_PORT || '7835';
+process.env.PORT = process.env.QA_DISPATCH_PORT || '0';
 // suppressed ACK의 manager provenance를 검증하므로 dev-mode 인증 우회를 끈다.
 process.env.AGENT_API_KEY = 'qa-dispatch-reconciler-static-fallback';
 process.env.STUCK_DETECTOR_ENABLED = 'false';       // isolate the dispatch loop
@@ -79,8 +79,7 @@ const HOUR = 3_600_000;
 
 test('Durable dispatch outbox — full closed loop', async (t) => {
   step('Boot NestJS app on test port');
-  const port = parseInt(process.env.PORT, 10);
-  const { app, modules } = await bootApp({ port });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());

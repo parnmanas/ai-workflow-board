@@ -20,7 +20,7 @@ import {
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 import { openSseStream } from '../helpers/sse-listener.mjs';
 
-process.env.PORT = process.env.QA_CHAT_PORT || '7806';
+process.env.PORT = process.env.QA_CHAT_PORT || '0';
 
 test('chat_room_message is delivered only to the room participants', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

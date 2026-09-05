@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { bootApp } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createTicket } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_MENTION_AUDIT_PORT || '7894';
+process.env.PORT = process.env.QA_MENTION_AUDIT_PORT || '0';
 
 async function post(port, path, body) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {

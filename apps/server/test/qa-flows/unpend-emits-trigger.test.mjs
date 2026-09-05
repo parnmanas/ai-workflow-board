@@ -53,7 +53,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 // Unique port slot — picked above existing QA flows
 // (mcp-roundtrip 7810, backlog-promotion-pending 7834).
-process.env.PORT = process.env.QA_UNPEND_TRIGGER_PORT || '7836';
+process.env.PORT = process.env.QA_UNPEND_TRIGGER_PORT || '0';
 
 test('Unpending a ticket: MCP unpend_ticket is rejected (human-only), REST PATCH still wakes the role holder', async (t) => {
   step('Boot NestJS app on test port');

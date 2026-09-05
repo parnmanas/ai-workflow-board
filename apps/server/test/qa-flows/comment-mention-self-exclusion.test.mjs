@@ -30,7 +30,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 // Each test boots its own app on a distinct port so a not-yet-released listener
 // from the prior test can't collide (EADDRINUSE).
-const BASE_PORT = parseInt(process.env.QA_MENTION_SELF_EXCL_PORT || '7853', 10);
+const BASE_PORT = parseInt(process.env.QA_MENTION_SELF_EXCL_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 async function seedTwoAssigneeScene(app, getDataSourceToken, port, wsName) {

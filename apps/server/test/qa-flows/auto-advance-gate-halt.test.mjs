@@ -28,7 +28,7 @@ import {
   createTicket,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_AUTO_ADVANCE_GATE_PORT || '7813';
+process.env.PORT = process.env.QA_AUTO_ADVANCE_GATE_PORT || '0';
 
 // Give the async activityEvents cascade a beat to run, then prove the ticket
 // settled at the expected active column and did NOT cross into a gate.

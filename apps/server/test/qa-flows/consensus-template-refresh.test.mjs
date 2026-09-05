@@ -30,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // 포트 7877 — 다른 QA flow 와 미충돌(7871 consensus-gate, 7838 prompt-refresh 등).
-process.env.PORT = process.env.QA_CONSENSUS_TPL_REFRESH_PORT || '7877';
+process.env.PORT = process.env.QA_CONSENSUS_TPL_REFRESH_PORT || '0';
 
 const REFRESHED_NAMES = [
   'todo_workflow',

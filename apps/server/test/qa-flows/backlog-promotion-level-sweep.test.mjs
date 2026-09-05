@@ -52,7 +52,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Port 7797 — unique slot, verified against every `process.env.PORT = ...`
 // assignment under test/ at the time this file was added.
-process.env.PORT = process.env.QA_BACKLOG_LEVEL_SWEEP_PORT || '7797';
+process.env.PORT = process.env.QA_BACKLOG_LEVEL_SWEEP_PORT || '0';
 
 test('BacklogPromotion level-triggered backstop + role-unfilled skip audit', async (t) => {
   step('Boot NestJS app on test port');

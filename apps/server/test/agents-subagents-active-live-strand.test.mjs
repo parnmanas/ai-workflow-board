@@ -35,7 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-subagents-active-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.SUBAGENTS_ACTIVE_PORT || '7797';
+process.env.PORT = process.env.SUBAGENTS_ACTIVE_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

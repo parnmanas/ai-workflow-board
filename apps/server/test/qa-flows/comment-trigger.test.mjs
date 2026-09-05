@@ -16,7 +16,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_COMMENT_PORT || '7802';
+process.env.PORT = process.env.QA_COMMENT_PORT || '0';
 
 test('Comment on In Progress ticket triggers assignee (trigger_source=comment)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
@@ -95,7 +95,7 @@ test('Comment on In Progress ticket triggers assignee (trigger_source=comment)',
 // 아래 테스트는 이 부정 경로를 TriggerLoopService까지 종단간 확인한 다음,
 // 일반 코멘트는 여전히 트리거된다는 양성 대조로 테스트의 비공허성을 증명한다.
 test('a system-actor comment (auto-notice shape) does not trigger the routed role; an ordinary comment right after still does', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.QA_COMMENT_SYSTEM_PORT || '7815', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.QA_COMMENT_SYSTEM_PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;
 

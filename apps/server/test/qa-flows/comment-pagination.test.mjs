@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_COMMENT_PAGINATION_PORT || '7814';
+process.env.PORT = process.env.QA_COMMENT_PAGINATION_PORT || '0';
 
 const TOTAL = 120;
 const PAGE = 50; // DETAIL_COMMENT_PAGE 와 동일

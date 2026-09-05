@@ -9,7 +9,7 @@ import {
 } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
-process.env.PORT = process.env.RUNTIME_CAPABILITIES_HEARTBEAT_PORT || '7908';
+process.env.PORT = process.env.RUNTIME_CAPABILITIES_HEARTBEAT_PORT || '0';
 
 test('Runtime Host heartbeat stores structured runtime health and capabilities', async (t) => {
   const { app, port, modules } = await bootApp({

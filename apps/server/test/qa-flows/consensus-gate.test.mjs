@@ -30,7 +30,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_CONSENSUS_GATE_PORT || '7871', 10);
+const BASE_PORT = parseInt(process.env.QA_CONSENSUS_GATE_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 async function mcpFor(port, apiKey) {

@@ -53,7 +53,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createUser, createWorkspace } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.ORCHESTRATION_CONVERSATION_PORT || '7893';
+process.env.PORT = process.env.ORCHESTRATION_CONVERSATION_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', '..', 'dist');

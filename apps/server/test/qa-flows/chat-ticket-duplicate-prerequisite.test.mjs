@@ -6,7 +6,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '7861';
+process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '0';
 
 test('prerequisite completion cannot redispatch a linked chat duplicate', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });

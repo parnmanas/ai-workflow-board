@@ -26,7 +26,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 // Each test boots its own app; use distinct ports so a not-yet-released
 // listener from the prior test can't collide (EADDRINUSE).
-const BASE_PORT = parseInt(process.env.QA_MULTI_HOLDER_FANOUT_PORT || '7841', 10);
+const BASE_PORT = parseInt(process.env.QA_MULTI_HOLDER_FANOUT_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 test('multi-holder fan-out: two assignee holders both get triggered', async (t) => {

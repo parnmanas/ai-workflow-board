@@ -31,7 +31,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // 포트 7883 — 다른 QA flow 와 미충돌(7877 consensus-refresh, 7881, 7899 등).
-process.env.PORT = process.env.QA_WORK_FOLDER_TPL_REFRESH_PORT || '7883';
+process.env.PORT = process.env.QA_WORK_FOLDER_TPL_REFRESH_PORT || '0';
 
 const REFRESHED_NAMES = [
   'backlog_workflow',

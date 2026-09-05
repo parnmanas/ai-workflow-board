@@ -37,7 +37,7 @@ function fakeRes() {
 }
 
 test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관리자 403', async (t) => {
-  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT || '7883', 10) });
+  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
 

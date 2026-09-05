@@ -43,7 +43,7 @@ import {
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-process.env.PORT = process.env.QA_REVIEW_DRIFT_PORT || '7923';
+process.env.PORT = process.env.QA_REVIEW_DRIFT_PORT || '0';
 
 const DIST_REVIEW_DRIFT = 'file://' + path.resolve(
   __dirname, '..', '..', 'dist', 'modules', 'mcp', 'shared', 'review-drift.js',

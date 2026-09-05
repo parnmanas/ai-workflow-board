@@ -18,7 +18,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_SECURITY_FAIL_PORT || '7837';
+process.env.PORT = process.env.QA_SECURITY_FAIL_PORT || '0';
 
 const SHA_BASE = 'b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0';
 const SHA_HEAD = 'c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1';

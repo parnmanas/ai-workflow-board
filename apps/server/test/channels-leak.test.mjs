@@ -32,7 +32,7 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // + back-to-back npm `test` chain would otherwise share database/data.db).
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-channels-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.CHANNELS_LEAK_PORT || '7794';
+process.env.PORT = process.env.CHANNELS_LEAK_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

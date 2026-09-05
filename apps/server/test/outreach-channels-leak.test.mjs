@@ -32,7 +32,7 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // share database/data.db across files).
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-outreach-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.OUTREACH_LEAK_PORT || '7795';
+process.env.PORT = process.env.OUTREACH_LEAK_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

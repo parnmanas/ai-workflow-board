@@ -46,7 +46,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 const IS_PG = (process.env.DB_TYPE || 'sqlite') === 'postgres';
 const SKIP = IS_PG ? false : 'requires DB_TYPE=postgres (CI test:qa:pg matrix only)';
 
-process.env.PORT = process.env.QA_PG_SLOT_RACE_PORT || '7949';
+process.env.PORT = process.env.QA_PG_SLOT_RACE_PORT || '0';
 
 test('Postgres: 같은 담당자의 두 후보를 동시에 승격해도 cap=1 이 지켜진다', { skip: SKIP }, async (t) => {
   const { bootApp, exitAfterTests, step } = await import('../helpers/boot.mjs');

@@ -44,7 +44,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Port 7924 — unique slot, verified unused across test/ at the time this
 // file was added.
-process.env.PORT = process.env.QA_BACKLOG_ROLE_BACKFILL_PORT || '7924';
+process.env.PORT = process.env.QA_BACKLOG_ROLE_BACKFILL_PORT || '0';
 
 test('BacklogPromotion vacant-role auto-backfill from board default_role_assignments', async (t) => {
   step('Boot NestJS app on test port');

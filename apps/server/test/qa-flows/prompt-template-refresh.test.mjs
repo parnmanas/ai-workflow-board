@@ -42,7 +42,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Port 7838 — unique slot, doesn't collide with unpend-emits-trigger (7836),
 // backlog-promotion-pending (7834), or other QA flows.
-process.env.PORT = process.env.QA_PROMPT_REFRESH_PORT || '7838';
+process.env.PORT = process.env.QA_PROMPT_REFRESH_PORT || '0';
 
 // Exact v0.34.2 (pre-7722527) content for one of the refreshed templates.
 // Match must be byte-exact, so reproduced verbatim from

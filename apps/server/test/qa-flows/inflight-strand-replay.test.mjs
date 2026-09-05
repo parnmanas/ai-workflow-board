@@ -62,7 +62,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_INFLIGHT_REPLAY_PORT || '7861';
+process.env.PORT = process.env.QA_INFLIGHT_REPLAY_PORT || '0';
 
 test('Transition-trigger preservation: a dropped column_move is replayed when the blocking strand exits', async (t) => {
   step('Boot NestJS app on test port');

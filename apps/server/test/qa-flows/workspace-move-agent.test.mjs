@@ -34,7 +34,7 @@ import {
 // 각 서브테스트는 자체 app 을 부팅한다. 첫 부팅만 이 포트를 쓰고 나머지는 port: 0
 // 이다 — consensus-gate / consensus-record-agreement / comment-mention-self-exclusion
 // 등 멀티부팅 파일과 동일한 관례.
-const BASE_PORT = parseInt(process.env.QA_WS_MOVE_AGENT_PORT || '7843', 10);
+const BASE_PORT = parseInt(process.env.QA_WS_MOVE_AGENT_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

@@ -35,7 +35,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Port 7840 — unique slot, doesn't collide with prompt-template-refresh
 // (7838) or the other QA flows.
-process.env.PORT = process.env.QA_PROMPT_REFRESH_INTEGRATE_PORT || '7840';
+process.env.PORT = process.env.QA_PROMPT_REFRESH_INTEGRATE_PORT || '0';
 
 const CUSTOM_CONTENT = `# Merging — Custom workflow with operator tweaks
 

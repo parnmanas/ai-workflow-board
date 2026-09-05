@@ -45,7 +45,7 @@ import {
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-process.env.PORT = process.env.QA_MERGE_GATE_PORT || '7861';
+process.env.PORT = process.env.QA_MERGE_GATE_PORT || '0';
 
 const DIST_MERGE_GATE = 'file://' + path.resolve(
   __dirname, '..', '..', 'dist', 'modules', 'mcp', 'shared', 'merge-gate.js',

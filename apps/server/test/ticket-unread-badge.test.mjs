@@ -37,7 +37,7 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // database/data.db and leak rows into each other's assertions.
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-ticket-unread-badge-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.TICKET_UNREAD_BADGE_PORT || '7798';
+process.env.PORT = process.env.TICKET_UNREAD_BADGE_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';

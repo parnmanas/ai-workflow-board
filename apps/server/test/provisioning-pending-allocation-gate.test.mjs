@@ -41,7 +41,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
 
 // Port 7847 — unique slot (see the free-port scan in the sibling QA tests).
-process.env.PORT = process.env.QA_PROV_PENDING_GATE_PORT || '7847';
+process.env.PORT = process.env.QA_PROV_PENDING_GATE_PORT || '0';
 
 test('pending_user_action drops a ticket from getAllocatedTickets — the server gate the supervisor consumes for BOTH normal and forced triggers', async (t) => {
   step('Boot NestJS app on test port');

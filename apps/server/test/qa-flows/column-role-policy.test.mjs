@@ -33,7 +33,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_COLUMN_POLICY_PORT || '7833';
+process.env.PORT = process.env.QA_COLUMN_POLICY_PORT || '0';
 
 async function backdate(repo, id, fields) {
   const updates = {};

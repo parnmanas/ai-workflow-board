@@ -47,7 +47,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // Unique port slot (above unpend-emits-trigger 7836).
-process.env.PORT = process.env.QA_BASE_REPO_BIND_PORT || '7842';
+process.env.PORT = process.env.QA_BASE_REPO_BIND_PORT || '0';
 
 test('base repo binding: env backfill reaches the wire; repo-less + unresolvable dispatch pends (ticket 8c3befa8)', async (t) => {
   step('Boot NestJS app on test port');

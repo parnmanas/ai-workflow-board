@@ -14,7 +14,7 @@ import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.m
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 import { ActivityLog } from '../dist/entities/ActivityLog.js';
 
-process.env.PORT = process.env.MANAGER_UPDATE_APPROVAL_PORT || '7931';
+process.env.PORT = process.env.MANAGER_UPDATE_APPROVAL_PORT || '0';
 
 const APPROVAL_ACTION = 'agent_manager_update_approval_requested';
 

@@ -25,7 +25,7 @@ import {
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_BOARD_PAUSE_PORT || '7820';
+process.env.PORT = process.env.QA_BOARD_PAUSE_PORT || '0';
 
 test('Paused board drops agent triggers; resume restores them', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

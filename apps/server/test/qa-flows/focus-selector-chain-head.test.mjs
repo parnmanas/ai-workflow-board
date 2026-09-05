@@ -50,7 +50,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_FOCUS_CHAIN_HEAD_PORT || '7824';
+process.env.PORT = process.env.QA_FOCUS_CHAIN_HEAD_PORT || '0';
 
 test('Focus selector chain-head tiebreak — predecessor-aware step 2 (ticket ee0324ac)', async (t) => {
   try {

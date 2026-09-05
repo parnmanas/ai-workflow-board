@@ -27,7 +27,7 @@ import {
   createTicket,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_HANDOFF_PORT || '7861';
+process.env.PORT = process.env.QA_HANDOFF_PORT || '0';
 
 // Simulate a real terminal landing: the move path stamps terminal_entered_at on
 // the non-terminal → terminal crossing, then logs a `moved` activity. We do the

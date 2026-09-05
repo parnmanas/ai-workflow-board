@@ -35,7 +35,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_STUCK_DETECTOR_PORT || '7831';
+process.env.PORT = process.env.QA_STUCK_DETECTOR_PORT || '0';
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 

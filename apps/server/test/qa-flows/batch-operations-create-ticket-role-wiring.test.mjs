@@ -39,7 +39,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-const PORT = parseInt(process.env.QA_BATCH_CREATE_ROLE_WIRING_PORT || '7926', 10);
+const PORT = parseInt(process.env.QA_BATCH_CREATE_ROLE_WIRING_PORT || '0', 10);
 process.env.PORT = String(PORT);
 
 test('batch_operations create-ticket: role wiring + board default backfill parity', async (t) => {

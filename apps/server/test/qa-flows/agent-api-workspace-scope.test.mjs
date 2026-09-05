@@ -31,7 +31,7 @@ function getTicket(port, ticketId, rawKey) {
 }
 
 test('agent-api enforces workspace scoping on the legacy /api/agent surface', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '7866', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 

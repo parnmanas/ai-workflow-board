@@ -35,7 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 // 포트 7931 — 기존 qa-flow 최대치(7930) 다음 번호, 미충돌.
-process.env.PORT = process.env.QA_PROMPT_TEMPLATE_DRIFT_PORT || '7931';
+process.env.PORT = process.env.QA_PROMPT_TEMPLATE_DRIFT_PORT || '0';
 
 const MIGRATION_NAME = 'RefreshDefaultPromptTemplatesCiDispatchGate1760000000076';
 const TEMPLATE_NAME = 'merging_workflow';

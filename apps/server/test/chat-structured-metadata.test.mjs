@@ -21,7 +21,7 @@ import { bootApp } from './helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7799';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 async function seedDmRoom(ds, { workspaceId, participants }) {
   const roomRepo = ds.getRepository('ChatRoom');

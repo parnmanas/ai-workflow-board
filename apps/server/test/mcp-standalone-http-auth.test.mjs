@@ -17,8 +17,9 @@
 //
 // Runs against compiled dist/ (requires `npm run build`, satisfied by the
 // test script). Uses an isolated SQLJS_DB_PATH temp file so it never touches
-// the shared dev database/data.db, and a dedicated high port far from both
-// the live-infra-shared 770x range and the qa-flows 78xx/79xx range.
+// the shared dev database/data.db, and a free port picked at runtime — this
+// server takes its port from MCP_PORT and never exposes the http.Server, so
+// `port: 0` 의 실제 바인딩 포트를 회수할 수 없다(ticket f2d82793).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,10 +29,15 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 
+import { findFreePort } from './helpers/boot.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', 'dist');
 
-const PORT = parseInt(process.env.MCP_STANDALONE_AUTH_TEST_PORT || '17812', 10);
+// 고정 리터럴을 쓰지 않는다 — 동시 세션이나 데스크톱 앱이 그 번호를 잡고
+// 있으면 그대로 죽는다. 이 서버는 바인딩 핸들을 안 주므로 port: 0 대신
+// findFreePort() 를 쓴다(그 한계는 helpers/boot.mjs 주석 참고).
+const PORT = parseInt(process.env.MCP_STANDALONE_AUTH_TEST_PORT || '0', 10) || (await findFreePort());
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-mcp-http-auth-'));
 
 // Must be set BEFORE importing mcp-server.js — its main() reads these at

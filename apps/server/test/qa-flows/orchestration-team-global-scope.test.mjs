@@ -30,7 +30,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.ORCHESTRATION_TEAM_GLOBAL_SCOPE_PORT || '7940';
+process.env.PORT = process.env.ORCHESTRATION_TEAM_GLOBAL_SCOPE_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', '..', 'dist');

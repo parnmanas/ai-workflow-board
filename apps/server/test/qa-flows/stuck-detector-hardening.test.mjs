@@ -26,7 +26,7 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 const HOUR = 3_600_000;
 const MIN = 60_000;
 
-process.env.PORT = process.env.QA_STUCK_HARDENING_PORT || '7836';
+process.env.PORT = process.env.QA_STUCK_HARDENING_PORT || '0';
 process.env.STUCK_DETECTOR_ENABLED = 'true';
 process.env.STUCK_DETECTOR_SWEEP_MS = '900000';
 process.env.STUCK_DETECTOR_MIN_AGE_MS = String(2 * HOUR);
@@ -41,8 +41,7 @@ function systemMsgs(messages) {
 
 test('StuckTicketDetector hardening — stale claim / durable delivery / progress def', async (t) => {
   step('Boot NestJS app on test port');
-  const port = parseInt(process.env.PORT, 10);
-  const { app, modules } = await bootApp({ port });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
