@@ -21,6 +21,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Action } from '../../../entities/Action';
 import { ActionRun } from '../../../entities/ActionRun';
+import { Agent } from '../../../entities/Agent';
+import { resolveAgentDisplayNamesByIds } from '../../../utils/agent-name';
+import { actionTargetAgentIds } from '../../../common/action-targets';
 import { ok, err, withArtifactRef } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import { repoRefSchema, checkoutModeSchema } from '../../../common/workspace-folder-options';
@@ -34,7 +37,10 @@ function actionToJson(a: Action) {
     name: a.name,
     description: a.description,
     prompt: a.prompt,
+    // 대표 대상(레거시 미러) + 실제 대상 전체 (티켓 fc3906c5). 기존 키를 그대로
+    // 두어 target_agent_id 만 읽던 소비자를 깨지 않는다.
     target_agent_id: a.target_agent_id,
+    target_agent_ids: actionTargetAgentIds(a),
     schedule_cron: a.schedule_cron,
     trigger: a.trigger,
     trigger_label: a.trigger_label,
@@ -97,7 +103,8 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       name: z.string().describe('Action name'),
       description: z.string().optional().describe('Short description'),
       prompt: z.string().optional().describe('Prompt template with {{var}} interpolation'),
-      target_agent_id: z.string().optional().describe('Target agent ID (required when creating; optional when updating)'),
+      target_agent_id: z.string().optional().describe('Single target agent ID. Legacy/compat form — prefer `target_agent_ids`. Required when creating unless `target_agent_ids` is given.'),
+      target_agent_ids: z.array(z.string()).optional().describe('Target agent IDs. One trigger fans out to an INDEPENDENT run per agent, each in its own room. Takes precedence over `target_agent_id` when both are given; the first entry is mirrored back into `target_agent_id`. Every id must be an agent in this workspace (or a global agent) — one bad id rejects the whole save.'),
       schedule_cron: z.string().optional().describe('5-field cron (e.g. "0 9 * * 1" for Mon 9am); empty = manual'),
       trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket reaches a terminal column)"),
       trigger_label: z.string().optional().describe("For trigger='on_ticket_done': only fire when the finished ticket carries this label. Empty = any label."),
@@ -108,7 +115,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       repo_ref: repoRefSchema.nullable().optional().describe('Repo to check out into the Run folder. Omit/null → no clone, the provisioner just ensures the folder exists.'),
       checkout_mode: checkoutModeSchema.optional(),
     },
-    async ({ workspace_id, id, name, description, prompt, target_agent_id, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs, workspace_folder, repo_ref, checkout_mode }) => {
+    async ({ workspace_id, id, name, description, prompt, target_agent_id, target_agent_ids, schedule_cron, trigger, trigger_label, enabled, high_impact, max_runs, workspace_folder, repo_ref, checkout_mode }) => {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         if (id) {
@@ -117,6 +124,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             description,
             prompt,
             target_agent_id,
+            target_agent_ids,
             board_id: null,
             schedule_cron,
             trigger,
@@ -130,7 +138,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           } as any);
           return ok(actionToJson(updated));
         }
-        if (!target_agent_id) return err('target_agent_id is required when creating an action');
+        // 둘 중 하나만 있어도 생성된다 — 서비스가 배열을 정본으로 삼고 단일
+        // 필드를 그 첫 원소로 흡수한다 (티켓 fc3906c5).
+        if (!target_agent_id && !(target_agent_ids && target_agent_ids.length > 0)) {
+          return err('target_agent_id (or target_agent_ids) is required when creating an action');
+        }
         const created = await actionsService.create({
           workspace_id,
           board_id: null,
@@ -138,6 +150,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           description: description ?? '',
           prompt: prompt ?? '',
           target_agent_id,
+          target_agent_ids,
           schedule_cron: schedule_cron ?? '',
           trigger: trigger ?? '',
           trigger_label: trigger_label ?? '',
@@ -178,6 +191,12 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Dispatch a Run for an action. Creates a new chat room with the target agent, ' +
     'sends the rendered prompt, and FIFO-prunes older rooms past Action.max_runs. ' +
     'Returns the run id + room id so the caller can monitor the conversation. ' +
+    'FAN-OUT: an Action may target SEVERAL agents. One call then creates one INDEPENDENT run ' +
+    'per target agent, each in its own room, and they execute in parallel. `run_id`/`room_id` ' +
+    'stay pointed at the first run for backward compatibility — read `runs[]` for the per-agent ' +
+    'list, `batch_id` for the group, and `failures[]` for targets that could not be dispatched ' +
+    '(one agent failing never blocks the others). When a `source_ticket_id` is linked, the ticket ' +
+    'is resumed ONCE after EVERY run in the batch has settled, with a per-agent outcome summary. ' +
     'Pass `source_ticket_id` when you run an Action to clear a blocker on a ticket ' +
     'you are working: the run is linked back to that ticket, the target agent is told ' +
     'to report its outcome via `complete_action_run`, and on success the ticket ' +
@@ -210,11 +229,19 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           triggeredById: caller?.agentId ?? '',
           sourceTicketId: source_ticket_id,
         });
+        // 하위 호환 키(run_id/room_id/prompt)는 첫 run 을 계속 가리킨다.
         return ok({
           run_id: result.run.id,
           room_id: result.room_id,
           prompt: result.prompt,
           source_ticket_id: result.run.source_ticket_id || '',
+          batch_id: result.batch_id,
+          runs: result.runs.map((r) => ({
+            run_id: r.run.id,
+            agent_id: r.agent_id,
+            room_id: r.room_id,
+          })),
+          failures: result.failures,
         });
       } catch (e: any) {
         return err(e?.message || 'Failed to run action');
@@ -292,7 +319,13 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_action_runs',
-    'List runs for an action (most recent first), capped at limit.',
+    'List runs for an action (most recent first), capped at limit. ' +
+    'Each row carries `agent_id` + `agent_name` (the `<Manager>/<Agent>` display name) so a ' +
+    'fan-out Action\'s runs can be told apart by which host executed them, and `batch_id` ' +
+    'grouping the runs that came from one trigger — group by it to see per-batch ' +
+    'all-succeeded / partial / all-failed. Runs dispatched before multi-agent support carry ' +
+    'an empty agent_id/batch_id (not backfilled: the Action\'s target may have been edited ' +
+    'since, so any value would be invented rather than recorded).',
     {
       workspace_id: z.string().describe('Workspace ID (scope boundary)'),
       action_id: z.string().describe('Action ID'),
@@ -302,10 +335,21 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       if (!actionsService) return err('Actions service unavailable in this MCP context');
       try {
         const runs = await actionsService.listRuns(action_id, workspace_id, limit ?? 20);
+        // `<Manager>/<Agent>` 표시명은 배치로 한 번에 해석한다
+        // (.claude/skills/awb-agent-display-name — bare name 은 계약 위반이다:
+        // 같은 leaf 이름이 여러 매니저 아래 존재할 수 있어서, 접두사가 없으면
+        // 어느 호스트가 실행했는지 구분할 수 없다).
+        const agentNames = await resolveAgentDisplayNamesByIds(
+          dataSource.getRepository(Agent),
+          runs.map((r: ActionRun) => r.agent_id),
+        );
         return ok(runs.map((r: ActionRun) => ({
           id: r.id,
           action_id: r.action_id,
           workspace_id: r.workspace_id,
+          agent_id: r.agent_id || '',
+          agent_name: agentNames.get(r.agent_id || '') || '',
+          batch_id: r.batch_id || '',
           room_id: r.room_id,
           triggered_by_type: r.triggered_by_type,
           triggered_by_id: r.triggered_by_id,
