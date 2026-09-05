@@ -20,6 +20,7 @@ import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
 import { Agent } from '../dist/entities/Agent.js';
+import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
@@ -104,7 +105,7 @@ describe('chat 방 자유 참여(open_join)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent],
+      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, OrchestrationMission],
       synchronize: true,
       logging: false,
     });
@@ -116,7 +117,10 @@ describe('chat 방 자유 참여(open_join)', () => {
     const userRepo = dataSource.getRepository(User);
     const agentRepo = dataSource.getRepository(Agent);
 
-    membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource);
+    // missionRepo 는 mission 방 발화 게이트가 미션의 user_chat_mode 를 읽는 데 쓴다
+    // (티켓 9cfd8161). 이 스위트의 방은 대부분 일반 방이라 그 경로를 타지 않지만,
+    // 실제 저장소를 넘겨야 mission 방 케이스가 조용히 다른 코드로 새지 않는다.
+    membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource, dataSource.getRepository(OrchestrationMission));
     crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, noopLog, membership);
 
     // 실제 membership 을 그대로 쓰되 `emitParticipantAdded` 만 실패시킬 수 있게 감싼다.

@@ -43,11 +43,15 @@ function pgUuidColumnRepo(rows = []) {
   };
 }
 
-// RoomMembershipService ctor: (roomRepo, participantRepo, userRepo, agentRepo, dataSource)
+// RoomMembershipService ctor:
+//   (roomRepo, participantRepo, userRepo, agentRepo, dataSource, missionRepo)
+// 이 파일은 resolveParticipantName 만 exercise 하므로 쓰지 않는 저장소는 기존 스타일대로
+// null 을 넘긴다 — missionRepo 는 mission 방 발화 게이트에서만 읽히고(티켓 9cfd8161),
+// 여기서는 그 경로에 들어가지 않는다.
 function makeService({ users = [], agents = [] } = {}) {
   const userRepo = pgUuidColumnRepo(users);
   const agentRepo = pgUuidColumnRepo(agents);
-  return new RoomMembershipService(null, null, userRepo, agentRepo, null);
+  return new RoomMembershipService(null, null, userRepo, agentRepo, null, null);
 }
 
 const REAL_UUID = '11111111-2222-3333-4444-555555555555';
