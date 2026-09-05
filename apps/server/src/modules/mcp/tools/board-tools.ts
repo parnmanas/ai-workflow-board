@@ -279,8 +279,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       use_pr: z.boolean().optional()
         .describe('Per-board PR usage (worktree 규약 chain, ticket 4ba844ea): false (default) does a direct fast-forward merge on the Merging boundary; true opts into the PR create/merge path. Omit to leave unchanged.'),
       cli_runtime_profile: z.string().nullable().optional().describe(
-        "Claude backend profile id this board's dispatch pins to. 'none' = explicit opt-out (stop inheriting the " +
-        'workspace/global default); null = clear the pin and inherit again. Empty string is preserved for REST ' +
+        "Claude backend profile id this board's dispatch pins to. Profiles are instance-global. 'none' = explicit " +
+        'opt-out (stop inheriting the global default); null = clear the pin and inherit again. Empty string is preserved for REST ' +
         "compatibility and also stops inheritance (behaves like 'none') — pass null if you actually want to " +
         'resume inheriting. Takes effect on the next dispatch.'
       ),
@@ -436,10 +436,7 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
         board.use_pr = use_pr;
       }
       if (cli_runtime_profile !== undefined) {
-        const workspace = await dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
-        const checked = await validateCliRuntimeProfileSelection(
-          dataSource, workspace, cli_runtime_profile, `workspace ${board.workspace_id}`,
-        );
+        const checked = await validateCliRuntimeProfileSelection(dataSource, cli_runtime_profile);
         if (!checked.ok) return err(checked.error);
         board.cli_runtime_profile = checked.value;
       }

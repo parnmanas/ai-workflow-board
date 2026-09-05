@@ -53,8 +53,8 @@ export default function BoardSettingsPage() {
       .then((list) => { if (!cancelled) setDefaultPromptTemplates(list); })
       .catch(() => { if (!cancelled) setDefaultPromptTemplates([]); });
     api.getWorkspace(wsId).then(value => { if (!cancelled) setWorkspace(value); }).catch(() => {});
-    api.getWorkspaceClaudeBackendProfiles(wsId)
-      .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles.filter(p => value.allowed_profile_ids.includes(p.id))); })
+    api.listClaudeBackendProfiles()
+      .then(value => { if (!cancelled) setRuntimeProfiles(value.profiles); })
       .catch(() => { if (!cancelled) setRuntimeProfiles([]); });
     return () => { cancelled = true; };
   }, [wsId]);
@@ -225,7 +225,7 @@ export default function BoardSettingsPage() {
         <section style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
           <h3 style={{ marginTop: 0 }}>Claude backend profile</h3>
           <p style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
-            Board default for Claude agents. “Inherit” uses the workspace default; “None” keeps Claude's normal Anthropic backend.
+            Board default for Claude agents. Profiles are instance-global — “Inherit” falls through to the global default; “None” keeps Claude's normal Anthropic backend.
           </p>
           <select value={board.cli_runtime_profile || ''} onChange={async event => {
             try {
@@ -234,7 +234,7 @@ export default function BoardSettingsPage() {
               showToast('Board Claude backend profile saved', 'success');
             } catch (err: any) { showToast(err?.message || 'Failed to save Claude backend profile', 'error'); }
           }}>
-            <option value="">Inherit workspace</option><option value="none">None</option>
+            <option value="">Inherit global default</option><option value="none">None</option>
             {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
           </select>
         </section>

@@ -14,7 +14,7 @@
 // The parsing + tree-walk here are pure functions so they can be unit-tested
 // against synthetic process tables; the enumerate/reap edges shell out.
 
-import { hostPlatform, runCommand, runPowerShell } from './host-mcp/platform.js';
+import { hostPlatform, runCommand, runPowerShell, type RunResult } from './host-mcp/platform.js';
 import { log } from './logging.js';
 
 export interface ProcNode {
@@ -282,6 +282,27 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+/** `delay()` 와 같지만 타이머 핸들을 끌 수 있다.
+ *
+ *  레이스에서 지는 쪽 대기에는 **반드시** 이 형태를 써야 한다. `delay()` 의
+ *  타이머는 위 주석대로 의도적으로 ref 상태라, `Promise.race` 에서 져도 남은
+ *  시간 동안 이벤트 루프를 계속 붙잡는다. `terminateWindowsProcessTree` 의
+ *  grace 는 호출부에 따라 최대 5,000ms(runtime-profiles 기본값)이므로, 자식
+ *  종료를 즉시 관측해 함수가 곧바로 반환해도 프로세스는 그만큼 더 살아 있었다
+ *  — 매니저 종료와 테스트 프로세스 수명이 그대로 늘어난다. */
+function cancellableDelay(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+}
+
 /** Best-effort kill of the given pids. The caller passes the FULL transitive
  *  non-benign descendant set (collectNonBenignDescendants already flattens the
  *  subtree), so every process is signalled by pid explicitly — reparent-to-init
@@ -324,18 +345,173 @@ export async function reapProcessTrees(pids: number[], graceMs = 2000): Promise<
   return signalled;
 }
 
+/** 자식 프로세스 핸들에서 "아직 살아 있는가" 만 읽어 가는 최소 계약.
+ *  `ChildProcess` 가 구조적으로 이 모양을 만족하므로 호출부는 핸들을 그대로
+ *  넘기면 되고, 테스트는 가벼운 스텁을 넘길 수 있다. */
+export interface ExitObservableChild {
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+  /** 'exit' 구독. 있으면 종료를 **기다릴** 수 있다 — kill 직후 핸들은 아직
+   *  exitCode 가 null 이라(이벤트가 다음 턴에 온다) 동기 확인만으로는 이미
+   *  죽은 자식을 죽었다고 판정할 수 없다. `ChildProcess` 가 이 모양을 만족한다. */
+  once?(event: 'exit', listener: () => void): unknown;
+  off?(event: 'exit', listener: () => void): unknown;
+}
+
+/** 핸들이 이미 종료를 보고했는가. exitCode 는 정상 종료, signalCode 는 시그널
+ *  종료에서 채워지므로 둘 다 봐야 한다. */
+export function childHasExited(child: ExitObservableChild): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+export interface TerminateTreeOptions {
+  /** 이 pid 를 만들어 낸 자식 프로세스 핸들. **win32 에서만** 쓰인다.
+   *
+   *  Windows 는 프로세스 그룹이 없어 tree-kill 의 유일한 키가 pid 인데, pid 는
+   *  종료 즉시 OS 가 재사용한다. 즉 자식이 죽은 뒤의 `taskkill /PID <pid>` 는
+   *  "우리 트리"가 아니라 그 pid 를 물려받은 **남의 프로세스**를 죽일 수 있다.
+   *  pid 와 달리 ChildProcess 핸들은 재사용되지 않으므로, 재사용에 안전한
+   *  판정은 이 핸들뿐이다(POSIX 의 `isGroupLeaderReused` 에 대응하는 win32 측
+   *  가드가 여태 없었다 — ticket a992ce71).
+   *
+   *  넘기지 않으면 종전 그대로 pid 만 믿는 best-effort 경로로 동작한다. */
+  child?: ExitObservableChild;
+}
+
+/** taskkill 한 번의 결과를 로그에 남긴다. 남기는 값은 pid·pass·종료코드와
+ *  taskkill 자신의 짧은 메시지뿐 — 경로나 자격증명은 싣지 않는다. */
+function logTaskkill(pass: 'soft' | 'force', rootPid: number, res: RunResult): void {
+  const detail = res.spawnFailed
+    ? `spawnFailed=${res.spawnError}`
+    : `code=${res.code}${res.stderr.trim() ? ` stderr=${oneLine(res.stderr)}` : ''}`;
+  log(`[process-tree] win32 taskkill ${pass} pid=${rootPid} ${detail}`);
+}
+
+function oneLine(text: string, max = 120): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/** 진입 시점에 자식의 종료를 관측하는 데 쓰는 예산. grace 에서 떼어 쓰므로
+ *  전체 대기 시간은 늘지 않는다. kill 직후의 'exit' 는 다음 턴에 오므로 이만큼
+ *  이면 충분하다. */
+const EXIT_OBSERVE_MS = 50;
+
+/** 자식이 종료하거나 `budgetMs` 가 지날 때까지 기다린다. 핸들이 'exit' 를
+ *  구독시켜 주지 않으면(스텁 등) 그냥 예산만큼 잔다 — 그래야 핸들 없는 호출부의
+ *  종전 타이밍이 유지된다. */
+async function waitForChildExit(
+  child: ExitObservableChild,
+  budgetMs: number,
+  injectedSleep?: (ms: number) => Promise<void>,
+): Promise<void> {
+  if (budgetMs <= 0 || childHasExited(child)) return;
+  if (typeof child.once !== 'function') {
+    // 레이스가 아니라 예산을 통째로 쓰는 경로 — 취소할 것이 없다.
+    await (injectedSleep ? injectedSleep(budgetMs) : delay(budgetMs));
+    return;
+  }
+  // 리스너는 settle 이 확정된 **뒤에** 등록한다. 순서가 뒤바뀌면 그 사이에 온
+  // 'exit' 이 빈 함수로 흘러가 아무도 깨우지 못한다.
+  let settle: () => void = () => {};
+  const exited = new Promise<void>(resolve => { settle = resolve; });
+  const onExit = () => settle();
+  child.once('exit', onExit);
+  // 주입된 sleep 은 테스트 이음매라 취소 수단이 없다 — 그건 그대로 두고, 실제로
+  // 타이머를 만드는 기본 경로만 취소 가능한 대기를 쓴다. 이게 없으면 'exit' 가
+  // 이겨도 진 타이머가 남은 grace 동안 이벤트 루프를 붙잡는다.
+  const wait = injectedSleep
+    ? { promise: injectedSleep(budgetMs), cancel: () => {} }
+    : cancellableDelay(budgetMs);
+  try {
+    await Promise.race([exited, wait.promise]);
+  } finally {
+    // 'exit' 가 이겼으면 남은 타이머를 끈다. 예산이 이겼으면 이미 만료된
+    // 타이머라 clearTimeout 이 무해하다.
+    wait.cancel();
+    // 예산이 먼저 끝난 경우 리스너가 남는다. 이 핸들은 곧 버려지지만, 정리할
+    // 수단이 있으면 정리한다.
+    child.off?.('exit', onExit);
+  }
+}
+
+/** win32 전용 tree-kill. `deps` 는 테스트 이음매다 — process-tree.ts 는
+ *  `hostPlatform`/`runCommand` 를 정적 import 하므로, 이걸 주입할 수 없으면
+ *  리눅스에서 이 분기를 한 줄도 태울 수 없다. */
+export async function terminateWindowsProcessTree(
+  rootPid: number,
+  graceMs: number,
+  options: TerminateTreeOptions & {
+    run?: typeof runCommand;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const run = options.run ?? runCommand;
+  // 주입 여부를 그대로 넘긴다 — waitForChildExit 은 주입이 없을 때만 취소 가능한
+  // 타이머를 쓸 수 있고, 여기서 `?? delay` 로 미리 묶으면 그 구분이 사라진다.
+  const injectedSleep = options.sleep;
+  const sleep = injectedSleep ?? delay;
+  const child = options.child;
+
+  // 이미 죽은 자식의 pid 로는 아무것도 죽여선 안 된다 — 그 pid 는 이미 남의
+  // 것일 수 있다. 죽은 자식의 손자를 못 거두는 손해보다 무고한 프로세스를
+  // 죽이는 손해가 크다(후자는 형제 테스트 파일이 출력 한 줄 없이 exit 1 로
+  // 죽는 CI flake 로 나타났다). 덧붙여, 리더가 이미 죽었으면 `taskkill /T` 는
+  // 트리를 걸어갈 시작점이 없어 어차피 아무것도 거두지 못한다(windows CI 실측:
+  // 이 경로의 soft 패스는 전부 `code=128 not found` 였다) — 건너뛰어도 잃는 게
+  // 없다.
+  //
+  // 호출부는 자식에게 kill 을 보낸 직후 우리를 부른다. 그 시점의 핸들은 아직
+  // exitCode 가 null 이다('exit' 는 다음 턴에 온다) — 그래서 동기 확인만으로는
+  // 이 가드가 실전에서 한 번도 발동하지 못했다(같은 실측: 진입 게이트 0회 대
+  // 무의미한 soft taskkill 29회). 짧게 기다려서 관측한다. 이 예산은 아래 grace
+  // 에서 떼어 쓰므로 총 대기 시간은 종전과 같다.
+  let remainingGraceMs = graceMs;
+  if (child) {
+    const observeMs = Math.min(graceMs, EXIT_OBSERVE_MS);
+    await waitForChildExit(child, observeMs, injectedSleep);
+    remainingGraceMs -= observeMs;
+    if (childHasExited(child)) {
+      log(`[process-tree] win32 tree-kill skipped: pid=${rootPid} already exited (pid may be recycled)`);
+      return;
+    }
+  }
+
+  logTaskkill('soft', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 }));
+  if (child) await waitForChildExit(child, remainingGraceMs, injectedSleep);
+  else await sleep(remainingGraceMs);
+
+  // grace 동안 자식이 끝났으면 force 패스를 쏘지 않는다. 이 창(hermes 250ms,
+  // runtime-profiles 5000ms)이 pid 재사용이 실제로 일어나는 구간이고, `/F` 는
+  // soft 패스와 달리 콘솔 프로세스도 확실히 죽인다.
+  if (child && childHasExited(child)) {
+    log(`[process-tree] win32 force tree-kill skipped: pid=${rootPid} exited during the ${graceMs}ms grace`);
+    return;
+  }
+
+  logTaskkill('force', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 }));
+}
+
 /**
  * Drain a detached runtime and its complete process tree.  POSIX runtimes are
  * spawned as process-group leaders, so group signalling remains valid after
  * the leader exits and its children are reparented.  Windows uses taskkill's
  * native tree traversal.
+ *
+ * `options.child` 는 win32 분기의 pid 재사용 가드에만 쓰인다. POSIX 는 죽은
+ * 리더의 pgid 가 여전히 유효한 키이고(리페어런팅돼도 그룹은 남는다) 재사용
+ * 가드도 `isGroupLeaderReused` 로 이미 있으므로, 여기서 핸들로 조기 반환하면
+ * ticket 55d3063f/7b5f2572 가 세운 그룹 스윕을 오히려 되돌린다 — 그래서 POSIX
+ * 경로는 핸들을 보지 않는다.
  */
-export async function terminateDetachedProcessTree(rootPid: number, graceMs = 5000): Promise<void> {
+export async function terminateDetachedProcessTree(
+  rootPid: number,
+  graceMs = 5000,
+  options: TerminateTreeOptions = {},
+): Promise<void> {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return;
   if (hostPlatform() === 'win32') {
-    await runCommand('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 });
-    await delay(graceMs);
-    await runCommand('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 });
+    await terminateWindowsProcessTree(rootPid, graceMs, { child: options.child });
     return;
   }
 

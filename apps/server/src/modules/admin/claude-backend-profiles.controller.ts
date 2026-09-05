@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { Response } from 'express';
 import { DataSource } from 'typeorm';
 import { AdminGuard } from '../../common/guards/admin.guard';
+import { AuthGuard } from '../../common/guards/auth.guard';
 import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import {
   profileEntityToRuntime, publicProfile, runtimeToProfileEntity,
@@ -12,8 +13,6 @@ import { Board } from '../../entities/Board';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
 import { SystemSetting } from '../../entities/SystemSetting';
-import { Workspace } from '../../entities/Workspace';
-import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBackendProfile';
 import { Ticket } from '../../entities/Ticket';
 
 const DEFAULT_KEY = 'claude_backend_profiles.default';
@@ -27,11 +26,11 @@ export class ClaudeBackendProfilesController {
     return (await this.dataSource.getRepository(SystemSetting).findOne({ where: { key: DEFAULT_KEY } }))?.value || null;
   }
 
+  // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 워크스페이스 배정·기본값을
+  // 조회하던 3개 쿼리는 사라졌다. 남은 `workspaces` 는 실제 참조자(board /
+  // agent / ticket 핀)가 어느 워크스페이스에 걸쳐 있는지를 알려주는 파생값이다.
   private async impact(id: string) {
-    const [links, workspaces, legacyWorkspaces, boards, agents, runs, defaultId] = await Promise.all([
-      this.dataSource.getRepository(WorkspaceClaudeBackendProfile).find({ where: { profile_id: id } }),
-      this.dataSource.getRepository(Workspace).find({ where: { default_claude_backend_profile_id: id } }),
-      this.dataSource.getRepository(Workspace).find({ where: { default_cli_runtime_profile: id } }),
+    const [boards, agents, runs, defaultId] = await Promise.all([
       this.dataSource.getRepository(Board).find({ where: { cli_runtime_profile: id } }),
       this.dataSource.getRepository(Agent).find({ where: { cli_runtime_profile: id } }),
       this.dataSource.getRepository(Ticket).find({ where: { cli_runtime_profile: id } }),
@@ -40,9 +39,6 @@ export class ClaudeBackendProfilesController {
     return {
       global_default: defaultId === id,
       workspaces: Array.from(new Set([
-        ...links.map(x => x.workspace_id),
-        ...workspaces.map(x => x.id),
-        ...legacyWorkspaces.map(x => x.id),
         ...boards.map(x => x.workspace_id).filter(Boolean),
         ...agents.map(x => x.workspace_id).filter((value): value is string => Boolean(value)),
         ...runs.map(x => x.workspace_id).filter(Boolean),
@@ -145,39 +141,43 @@ export class ClaudeBackendProfilesController {
     }
     await this.dataSource.transaction(async manager => {
       const next = replacement || null; // detach means inherit
-      const affectedDefaultWorkspaces = await manager.getRepository(Workspace).find({
-        where: [
-          { default_claude_backend_profile_id: id },
-          { default_cli_runtime_profile: id },
-        ],
-      });
-      for (const workspace of affectedDefaultWorkspaces) {
-        // The new selector is authoritative when it already points elsewhere.
-        // Otherwise replace/detach the deleted selector and converge the
-        // one-release legacy mirror to the same final value.
-        const finalDefault = workspace.default_claude_backend_profile_id
-          && workspace.default_claude_backend_profile_id !== id
-          ? workspace.default_claude_backend_profile_id
-          : next;
-        await manager.update(Workspace, { id: workspace.id }, {
-          default_claude_backend_profile_id: finalDefault,
-          default_cli_runtime_profile: finalDefault,
-        });
-      }
       await manager.update(Board, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Agent, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       await manager.update(Ticket, { cli_runtime_profile: id }, { cli_runtime_profile: next });
-      await manager.delete(WorkspaceClaudeBackendProfile, { profile_id: id });
-      if (replacement) {
-        for (const workspaceId of impact.workspaces) {
-          await manager.upsert(WorkspaceClaudeBackendProfile, { workspace_id: workspaceId, profile_id: replacement }, ['workspace_id', 'profile_id']);
-        }
-      }
       if (impact.global_default) {
         await manager.update(SystemSetting, { key: DEFAULT_KEY }, { value: next || '' });
       }
       await manager.delete(ClaudeBackendProfile, { id });
     });
     return res.json({ deleted: true, replacement_profile_id: replacement });
+  }
+}
+
+/**
+ * 비관리자도 읽을 수 있는 전역 프로필 카탈로그 (티켓 e616dbfc).
+ *
+ * 프로필 핀 드롭다운(에이전트 / 보드 / 티켓 / ManagedAgentDialog)이 목록을
+ * 채우던 워크스페이스 엔드포인트를 대체한다. 위의 관리자 컨트롤러는 같은
+ * 목록을 주지만 `AdminGuard` 라서, 그대로 갈아끼우면 비관리자에게는 드롭다운이
+ * 통째로 빈 목록이 된다 — 그래서 읽기 전용 표면을 따로 둔다. 쓰기(생성 /
+ * 수정 / 삭제 / 기본값 지정)는 계속 `api/admin/claude-backend-profiles` 에만
+ * 있다. 응답은 반드시 `publicProfile()` 을 거쳐 `credential_ref` 를 떨어뜨리고
+ * `credential_status` 만 노출한다 — 자격증명 값 자체는 `Credential` 에만 둔다.
+ */
+@Controller('api/claude-backend-profiles')
+@UseGuards(AuthGuard)
+export class ClaudeBackendProfileCatalogController {
+  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+
+  @Get()
+  async list() {
+    const [rows, defaultSetting] = await Promise.all([
+      this.dataSource.getRepository(ClaudeBackendProfile).find({ order: { name: 'ASC' } }),
+      this.dataSource.getRepository(SystemSetting).findOne({ where: { key: DEFAULT_KEY } }),
+    ]);
+    return {
+      profiles: rows.map(publicProfile),
+      default_profile_id: defaultSetting?.value || null,
+    };
   }
 }

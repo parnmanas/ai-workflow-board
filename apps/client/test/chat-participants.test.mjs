@@ -515,3 +515,89 @@ test('projectParticipants / countUserParticipants: wire → 로스터 투영과 
   assert.deepEqual(projectParticipants(null), [], 'null 방어');
   assert.deepEqual(projectParticipants({ id: 'A' }), [], 'participants 누락 방어');
 });
+
+test('dispatchChatRoomUpdate: open_join_changed 는 같은 워크스페이스면 방 목록을 재조회한다 (ticket 995a9519)', async () => {
+  // 리뷰 라운드1 P1-2. 이 이벤트의 핵심 수신자는 **아직 참여하지 않은 사용자**이고,
+  // 그들에게 필요한 것은 플래그 갱신이 아니라 방이 목록에 새로 나타나거나(ON) 사라지는
+  // 것(OFF)이다. 그래서 플래그만 손대면 부족하고 목록을 다시 받아야 한다.
+  const roomsState = makeRoomsState([roomListItem('A', { open_join: false })]);
+  let listCalls = 0;
+  let rosterRefreshed = false;
+  // 재조회 결과에 새 방 B 가 들어 있다 — 비참여자에게 열린 방이 "등장"하는 경우.
+  const refetched = [
+    roomListItem('A', { open_join: false }),
+    roomListItem('B', { open_join: true, is_participant: false }),
+  ];
+  const deps = {
+    currentUserId: 'u-self',
+    getActiveRoomId: () => 'A',
+    listChatRooms: () => {
+      listCalls++;
+      return Promise.resolve(refetched);
+    },
+    setRooms: roomsState.setRooms,
+    refreshActiveRoomParticipants: () => {
+      rosterRefreshed = true;
+    },
+    getCurrentWorkspaceId: () => 'ws-1',
+  };
+
+  dispatchChatRoomUpdate(deps, {
+    payload: { update_type: 'open_join_changed', room_id: 'B', open_join: true, workspace_id: 'ws-1' },
+  });
+  await flush();
+
+  assert.equal(listCalls, 1, '같은 워크스페이스의 변경은 목록 재조회를 부른다');
+  assert.deepEqual(
+    roomsState.get().map((r) => r.id),
+    ['A', 'B'],
+    '재조회 결과로 목록이 교체돼 새 열린 방이 나타난다',
+  );
+  assert.equal(rosterRefreshed, false, '참여자 로스터와는 무관한 이벤트다');
+});
+
+test('dispatchChatRoomUpdate: open_join_changed 가 다른 워크스페이스면 무시한다 (ticket 995a9519)', async () => {
+  // 이 update type 만 워크스페이스 전체로 나가므로(서버 chatRoomUpdateFilter) 스코프를
+  // 수신 측이 좁혀야 한다 — users 가 워크스페이스에 소속되지 않아 서버가 판정할 수 없다.
+  const roomsState = makeRoomsState([roomListItem('A', { open_join: false })]);
+  let listCalls = 0;
+  const deps = {
+    currentUserId: 'u-self',
+    getActiveRoomId: () => 'A',
+    listChatRooms: () => {
+      listCalls++;
+      return Promise.resolve([]);
+    },
+    setRooms: roomsState.setRooms,
+    refreshActiveRoomParticipants: () => {},
+    getCurrentWorkspaceId: () => 'ws-1',
+  };
+
+  dispatchChatRoomUpdate(deps, {
+    payload: { update_type: 'open_join_changed', room_id: 'Z', open_join: true, workspace_id: 'ws-OTHER' },
+  });
+  await flush();
+
+  assert.equal(listCalls, 0, '남의 워크스페이스 변경으로 내 목록을 재조회하면 안 된다');
+  assert.deepEqual(roomsState.get().map((r) => r.id), ['A'], '목록이 그대로다');
+});
+
+test('dispatchChatRoomUpdate: open_join_changed 재조회 실패는 조용히 넘어간다 (ticket 995a9519)', async () => {
+  // 네트워크 실패로 화면이 깨지면 안 된다 — 다음 이벤트나 화면 전환에서 다시 맞춰진다.
+  const roomsState = makeRoomsState([roomListItem('A', { open_join: false })]);
+  const deps = {
+    currentUserId: 'u-self',
+    getActiveRoomId: () => 'A',
+    listChatRooms: () => Promise.reject(new Error('network down')),
+    setRooms: roomsState.setRooms,
+    refreshActiveRoomParticipants: () => {},
+    getCurrentWorkspaceId: () => 'ws-1',
+  };
+
+  dispatchChatRoomUpdate(deps, {
+    payload: { update_type: 'open_join_changed', room_id: 'A', open_join: true, workspace_id: 'ws-1' },
+  });
+  await flush();
+
+  assert.deepEqual(roomsState.get().map((r) => r.id), ['A'], '실패해도 기존 목록을 유지한다');
+});

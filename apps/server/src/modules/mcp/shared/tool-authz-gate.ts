@@ -258,7 +258,7 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'add_board_lesson', 'add_chat_message_attachment', 'add_chat_participants',
   'add_comment', 'add_ticket_attachment', 'add_ticket_prerequisites',
   'answer_question', 'approve_feature', 'archive_ticket', 'ask_question',
-  'assign_workspace_backend_profile', 'attach_qa_artifact', 'attach_security_artifact',
+  'attach_qa_artifact', 'attach_security_artifact',
   'batch_operations', 'check_review_drift', 'claim_ticket', 'clear_current_task',
   'complete_action_run', 'complete_comment_summary', 'complete_qa_run', 'complete_security_run',
   'correct_confirmed_ticket_duplicate', 'create_agent', 'create_api_key', 'create_benchmark_run',

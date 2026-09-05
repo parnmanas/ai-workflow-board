@@ -208,6 +208,15 @@ export interface ChatRoomUpdateDispatchDeps {
   setRooms: ChatRoomListSetter;
   /** makeRefreshActiveRoomParticipants 가 만든 활성 방 로스터 재조회 함수. */
   refreshActiveRoomParticipants: (roomId: string) => void;
+  /**
+   * 지금 보고 있는 워크스페이스 id (ticket 995a9519).
+   *
+   * `open_join_changed` 는 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나가는
+   * 유일한 chat_room_update 다(서버 `chatRoomUpdateFilter`). 이 스택에서 users 는
+   * 워크스페이스에 소속되지 않아 서버 필터가 스코프를 판정할 근거가 없으므로, 대조는
+   * 여기서 한다 — 남의 워크스페이스에서 난 변경으로 내 방 목록을 재조회하면 안 된다.
+   */
+  getCurrentWorkspaceId: () => string | null;
 }
 
 /**
@@ -219,9 +228,12 @@ export interface ChatRoomUpdateDispatchDeps {
  *
  * 서버는 `{ event_type, payload, scope, timestamp }` 봉투 또는 평평한 payload 를
  * 보낸다 — 두 shape 모두 지원한다. 분기(동작 보존):
- *  - renamed          → 방 목록의 해당 방 이름만 갱신
+ *  - renamed            → 방 목록의 해당 방 이름만 갱신
  *  - participant_added/left → reflectParticipantChange (방 목록 + 활성 방 로스터)
- *  - read(본인)       → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
+ *  - read(본인)         → 해당 방 unread 를 0 으로 (다른 탭/기기 동기화)
+ *  - open_join_changed  → 같은 워크스페이스면 방 목록 재조회 (ticket 995a9519).
+ *                         플래그 갱신이 아니라 재조회인 것은 이 이벤트의 핵심 수신자가
+ *                         비참여자이고, 그들에겐 방의 추가/제거가 반영돼야 하기 때문이다.
  */
 export function dispatchChatRoomUpdate(
   deps: ChatRoomUpdateDispatchDeps,
@@ -249,6 +261,25 @@ export function dispatchChatRoomUpdate(
       },
       payload.room_id,
     );
+  } else if (payload.update_type === 'open_join_changed' && payload.room_id) {
+    // 자유 참여 토글 (ticket 995a9519, 리뷰 라운드1 P1-2).
+    //
+    // 이 이벤트는 워크스페이스의 모든 사용자에게 나가므로 **스코프를 여기서 좁힌다**:
+    // 남의 워크스페이스에서 난 변경은 버린다(서버가 판정할 수 없는 이유는 deps 의
+    // getCurrentWorkspaceId 주석 참조).
+    if (payload.workspace_id && payload.workspace_id !== deps.getCurrentWorkspaceId()) return;
+
+    // 목록을 **재조회**한다. 플래그만 갱신하면 부족하다 — 이 이벤트의 핵심 수신자는
+    // 아직 참여하지 않은 사용자이고, 그들에게 필요한 것은 방이 목록에 **새로 나타나거나
+    // 사라지는 것**이기 때문이다(ON: 새로 보임 / OFF: 사라져야 함. 안 지우면 새로고침
+    // 전까지 닫힌 방을 계속 보다가 읽기·발화 403 을 맞는다). 이미 목록에 있는 방이면
+    // 재조회 결과에 갱신된 open_join 이 그대로 실려 온다.
+    void deps
+      .listChatRooms()
+      .then((rooms) => deps.setRooms(rooms))
+      .catch(() => {
+        // 재조회 실패는 조용히 넘긴다 — 다음 이벤트나 화면 전환에서 다시 맞춰진다.
+      });
   } else if (
     payload.update_type === 'read' &&
     payload.room_id &&

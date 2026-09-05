@@ -65,22 +65,33 @@ export class RoomCrudService {
   ) {}
 
   /**
-   * List all rooms the current user actively participates in.
+   * List the rooms visible to the current user: the ones they actively
+   * participate in, plus every `open_join` room in the workspace (ticket
+   * 995a9519) whether or not they have joined it yet.
    * Returns rooms sorted by last_message_at DESC (COALESCE for SQLite safety).
    * Includes unread_count (datetime comparison, not UUID) and dm_partner_name for DMs.
    */
   async listRooms(workspaceId: string, userId: string): Promise<any[]> {
     const t = (col: string) => this.membership.toText(col);
-    // Join on active participant row for calling user
+    // Join on active participant row for calling user.
+    //
+    // LEFT (not INNER) since ticket 995a9519: an `open_join` room is listed for
+    // every user in the workspace, so the caller may legitimately have no
+    // participant row yet. The membership predicate stays in the JOIN's ON
+    // clause — moving it to WHERE would turn the outer join back into an inner
+    // one and silently drop the open rooms this branch exists to surface.
     const rawResult = await this.roomRepo
       .createQueryBuilder('r')
-      .innerJoin(
+      .leftJoin(
         'chat_room_participants',
         'p',
         `${t('p.room_id')} = ${t('r.id')} AND p.participant_id = :userId AND p.participant_type = 'user' AND p.left_at IS NULL`,
         { userId },
       )
       .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      // 자유 참여 방은 참여자가 아니어도 목록에 실린다. 이 조건이 없으면 위 LEFT JOIN
+      // 은 워크스페이스의 **모든** 방을 흘려보낸다 — 완화 대상은 open_join 방 하나뿐이다.
+      .andWhere('(p.id IS NOT NULL OR r.open_join = :openJoin)', { openJoin: true })
       // Action-Run rooms (action_id IS NOT NULL) are surfaced inside the
       // Actions detail view, not the global chat list — hiding them here
       // keeps the chat sidebar from filling up with one row per Run as the
@@ -90,6 +101,12 @@ export class RoomCrudService {
       // detail view for the same reason Action-Run rooms are hidden here: a
       // single mission can open a dozen step rooms, which would bury the
       // user's real conversations in the sidebar.
+      //
+      // `open_join` does NOT pierce these two surface filters (ticket 995a9519).
+      // Mission rooms ship with the option ON, and the Mission screen opens them
+      // directly by `mission.room_id` — it never goes through this list. Letting
+      // them through here would dump every mission's room into the sidebar of
+      // every user in the workspace, which is exactly what the filters prevent.
       .andWhere('r.orchestration_mission_id IS NULL')
       // Unread count: messages after last_read_at (datetime comparison per CHAT-12).
       // Progress rows are agent-manager tool-call heartbeats — the user
@@ -100,13 +117,21 @@ export class RoomCrudService {
       // per-room Clear cutoff don't count toward unread either, so wiping a
       // chat takes the badge to zero immediately and keeps it there until a
       // genuinely new message arrives.
+      //
+      // `p.id IS NOT NULL` 가드(티켓 995a9519): open_join 방을 아직 참여하지 않은
+      // 채로 보는 사용자는 p 쪽이 전부 NULL 이라 `p.last_read_at IS NULL` 이 참이
+      // 되어 **방의 전체 메시지 수**가 미읽음 배지로 뜬다. 읽은 적 없는 게 아니라
+      // 애초에 참여자가 아닌 것이므로 0 이 맞다.
       .addSelect(
-        `(SELECT COUNT(*) FROM chat_room_messages m WHERE ${t('m.room_id')} = ${t('r.id')} AND m.type <> 'progress' AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at) AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at))`,
+        `(SELECT COUNT(*) FROM chat_room_messages m WHERE p.id IS NOT NULL AND ${t('m.room_id')} = ${t('r.id')} AND m.type <> 'progress' AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at) AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at))`,
         'unread_count',
       )
       // Surface the caller's cleared_at into the raw projection so the
       // last_message_preview pick below can skip messages older than the cut.
       .addSelect('p.cleared_at', 'cleared_at')
+      // 참여 여부 — open_join 방은 비참여자도 목록에 실리므로 응답이 둘을 구분해야
+      // 클라이언트가 "참여 중" / "자유 참여 방" 을 다르게 그릴 수 있다.
+      .addSelect('p.id', 'participant_row_id')
       .orderBy("COALESCE(r.last_message_at, '1970-01-01')", 'DESC')
       .getRawAndEntities();
 
@@ -218,6 +243,9 @@ export class RoomCrudService {
     const results = rooms.map((room, idx) => {
       const raw = raws[idx];
       const unreadCount = parseInt(raw['unread_count'] ?? '0', 10) || 0;
+      // open_join 방은 아직 참여하지 않은 사용자에게도 실린다 — 응답이 두 상태를
+      // 구분해야 클라이언트가 "나가기" 같은 참여자 전용 동작을 잘못 그리지 않는다.
+      const isParticipant = raw['participant_row_id'] != null;
 
       // DM partner snapshot for the client-side fallback when the room has no
       // custom name. We expose it separately from `name` so the client can
@@ -264,6 +292,8 @@ export class RoomCrudService {
         last_message_preview: lastMessagePreview,
         unread_count: unreadCount,
         participants: participantProjection,
+        open_join: !!room.open_join,
+        is_participant: isParticipant,
         created_at: room.created_at,
         updated_at: room.updated_at,
       };
@@ -429,6 +459,12 @@ export class RoomCrudService {
       name: room.name || '',
       dm_partner_name: dmPartnerName,
       last_message_at: room.last_message_at,
+      open_join: !!room.open_join,
+      // 자유 참여 방은 비참여자도 조회할 수 있으므로(이 메서드는 원래부터 비참여
+      // viewer 를 허용한다 — observer 흐름), 참여 여부를 응답에 명시한다.
+      is_participant: participants.some(
+        p => p.participant_type === 'user' && p.participant_id === userId,
+      ),
       created_at: room.created_at,
       updated_at: room.updated_at,
       participants: resolvedParticipants,
@@ -466,6 +502,76 @@ export class RoomCrudService {
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
+  }
+
+  /**
+   * 자유 참여(open join) 옵션을 켜고 끈다 (티켓 995a9519).
+   *
+   * 권한 — **방의 active participant 라면 누구나**. `renameRoom` / `addParticipants` /
+   * `clearRoomForUser` 가 모두 같은 규약이고, `chat_rooms` 에는 생성자 컬럼이 아예 없어
+   * "생성자만" 은 구현할 수단이 없다(생성자는 참여자 행 하나로만 남는다). 관리자 전용으로
+   * 올리는 쪽도 맞지 않는다 — 자기가 만든 그룹 방을 열어두는 것은 일상적인 채팅 설정이지
+   * 운영 권한이 아니다. 방을 여는 것으로 넘어가는 것은 **같은 워크스페이스 안의 읽기·발화**
+   * 뿐이고 워크스페이스 경계는 아래에서 그대로 강제된다.
+   *
+   * 거부하는 두 부류:
+   *
+   *   1. **DM** — `type='dm'` 은 정확히 2인 불변식이다. 자유 참여로 3번째 사람이 들어오면
+   *      그 불변식이 깨지고, DM 이름/상대 표시(`dm_partner_name`)부터 참여자 추가 금지까지
+   *      DM 을 전제로 한 규칙이 통째로 어긋난다.
+   *   2. **시스템 소유 방** — Action Run / orchestration / QA·security run 방. 이 방들의
+   *      open_join 은 서버가 정하는 정책 값이다. mission 방은 기본 ON 으로 만들어지는데
+   *      (이 기능의 요청 자체가 그것이다) 사람이 auto-join 한 뒤 그걸 끌 수 있으면 다른
+   *      운영자의 미션 참여를 막을 수 있다 — 권한 상승이 아니라 권한 박탈 경로다.
+   */
+  async setOpenJoin(
+    roomId: string,
+    workspaceId: string,
+    actorId: string,
+    openJoin: boolean,
+    actorType: string = 'user',
+  ): Promise<{ room_id: string; open_join: boolean }> {
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `requireRoomAccess` 와 같은 규칙.
+    if (!room || room.workspace_id !== workspaceId) {
+      throw makeError(404, 'Room not found');
+    }
+    if (room.type === 'dm') {
+      throw makeError(400, 'Open join cannot be enabled on a direct message');
+    }
+    if (room.action_id || room.orchestration_mission_id || room.run_kind) {
+      throw makeError(400, 'This room is managed by the system — its open-join setting cannot be changed');
+    }
+
+    await this.membership.requireActiveParticipant(roomId, actorId, actorType);
+
+    const next = !!openJoin;
+    // 값이 그대로면 UPDATE 도 SSE 도 내보내지 않는다 — 토글을 두 번 눌러 원래대로
+    // 돌아왔을 때 다른 클라이언트가 의미 없는 변경 이벤트를 받을 이유가 없다.
+    if (!!room.open_join !== next) {
+      await this.roomRepo.update(roomId, { open_join: next });
+
+      const memberIds = await this.membership.getRoomMemberIds(roomId);
+      const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+      // 이 이벤트만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나간다
+      // (티켓 995a9519 리뷰 라운드1 P1-2, `chatRoomUpdateFilter` 참조). 변경의 실제
+      // 영향 대상이 비참여자이기 때문이다 — ON 이면 방이 새로 보여야 하고 OFF 면
+      // 사이드바에서 사라져야 한다. `workspace_id` 는 수신 측이 "지금 보고 있는
+      // 워크스페이스의 일인가"를 판정하는 근거이므로 반드시 함께 싣는다.
+      // member_ids / agent_member_ids 는 다른 update_type 과 봉투 모양을 맞추기 위해
+      // 그대로 둔다(이 타입에서는 필터가 쓰지 않는다).
+      activityEvents.emit('chat_room_update', {
+        room_id: roomId,
+        update_type: 'open_join_changed',
+        open_join: next,
+        workspace_id: room.workspace_id,
+        member_ids: memberIds,
+        agent_member_ids: agentMemberIds,
+      });
+      this.logService.info('ChatRooms', `Room ${roomId} open_join set to ${next} by ${actorType} ${actorId}`);
+    }
+
+    return { room_id: roomId, open_join: next };
   }
 
   /**
@@ -541,6 +647,7 @@ export class RoomCrudService {
         type: r.type,
         name: r.name || (parts.map(p => p.name).join(', ') || '(unnamed)'),
         last_message_at: r.last_message_at,
+        open_join: !!r.open_join,
         participants: parts,
         last_message: last
           ? {

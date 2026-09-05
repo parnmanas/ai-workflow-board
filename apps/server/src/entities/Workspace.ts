@@ -96,21 +96,18 @@ export class Workspace {
   @Column({ type: 'text', nullable: true, default: null })
   harness_config: string | null;
 
+  // dormant, no reader (티켓 e616dbfc) — Claude backend profile 이 인스턴스
+  // 전역 단일 스코프로 확정되면서 이 두 레거시 컬럼을 읽거나 쓰는 코드는
+  // 전부 사라졌다. 그럼에도 컬럼을 남기는 이유는 synchronize 가 하드코딩으로
+  // 켜져 있어(db.ts D-01) 엔티티에서 지우는 순간 다음 부팅에 즉시·불가역으로
+  // DROP 되는데, 이 JSON 이 마이그레이션 1760000000066 을 아직 실행하지 않은
+  // DB 에서는 레거시 프로필 페이로드의 유일한 사본이기 때문이다. 실제 제거는
+  // 그 백필이 전 환경에서 완료됐음을 확인한 뒤 별도 티켓에서 판단한다.
   @Column({ type: 'text', nullable: true, default: null })
   cli_runtime_profiles: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   default_cli_runtime_profile: string | null;
-
-  // Global-registry selector. null inherits the instance default; "none"
-  // explicitly selects the native Anthropic endpoint.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  default_claude_backend_profile_id: string | null;
-
-  // Distinguishes an intentionally empty registry allow-set from a database
-  // that has not run the legacy JSON backfill yet.
-  @Column({ type: 'boolean', default: false })
-  claude_backend_profiles_migrated: boolean;
 
   // Workspace-wide default environment setup (ticket 354d336b). Same JSON shape
   // as Board.environment_config; boards override it per top-level key via

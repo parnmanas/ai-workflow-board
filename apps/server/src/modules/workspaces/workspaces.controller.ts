@@ -28,15 +28,10 @@ import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateClonePolicyInput, serializeClonePolicy } from '../../common/clone-policy';
 import { validateHardBudgetConfigInput, serializeHardBudgetConfig } from '../../common/hard-budget-config';
-import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import { hasPermission } from '../../common/types/permissions';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { Credential } from '../../entities/Credential';
-import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBackendProfile';
-import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
-import { publicProfile } from '../../common/claude-backend-registry';
 import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
 
 @ApiBearerAuth('user-session')
@@ -78,75 +73,6 @@ export class WorkspacesController {
       await this.rebacService.check(subject, 'member', object);
     if (!allowed) res.status(403).json({ error: 'workspace_access_denied' });
     return allowed;
-  }
-
-  @Get(':id/claude-backend-profiles')
-  async listClaudeProfiles(
-    @Param('id') id: string,
-    @Res() res: Response,
-    @CurrentUser() user: CurrentUserData,
-  ) {
-    if (!(await this.requireWorkspaceAccess(user, id, res))) return;
-    const links = await this.dataSource.getRepository(WorkspaceClaudeBackendProfile).find({ where: { workspace_id: id } });
-    const rows = links.length
-      ? await this.dataSource.getRepository(ClaudeBackendProfile).find({
-          where: { id: In(links.map(link => link.profile_id)) },
-          order: { name: 'ASC' },
-        })
-      : [];
-    const workspace = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
-    return res.json({
-      profiles: rows.map(publicProfile),
-      allowed_profile_ids: links.map(link => link.profile_id),
-      default_profile_id: workspace.default_claude_backend_profile_id,
-    });
-  }
-
-  @Get(':id/claude-backend-profiles/catalog')
-  async listClaudeProfileCatalog(
-    @Param('id') id: string,
-    @Res() res: Response,
-    @CurrentUser() user: CurrentUserData,
-  ) {
-    if (!(await this.requireOwner(user, id, res))) return;
-    const rows = await this.dataSource.getRepository(ClaudeBackendProfile).find({ order: { name: 'ASC' } });
-    return res.json({ profiles: rows.map(publicProfile) });
-  }
-
-  @Patch(':id/claude-backend-profiles')
-  async setClaudeProfiles(
-    @Param('id') id: string,
-    @Body() body: any,
-    @Res() res: Response,
-    @CurrentUser() user: CurrentUserData,
-  ) {
-    if (!(await this.requireOwner(user, id, res))) return;
-    const workspace = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
-    const allowed: string[] = Array.from(new Set<string>(
-      (Array.isArray(body?.allowed_profile_ids) ? body.allowed_profile_ids : []).map(String),
-    ));
-    const selected = body?.default_profile_id == null ? null : String(body.default_profile_id);
-    const existing = allowed.length
-      ? await this.dataSource.getRepository(ClaudeBackendProfile).findByIds(allowed)
-      : [];
-    if (existing.length !== allowed.length) return res.status(400).json({ error: 'allowed_profile_ids contains an unknown profile' });
-    if (selected && selected !== 'none' && !allowed.includes(selected)) {
-      return res.status(400).json({ error: 'Workspace default must be in the allow-set' });
-    }
-    await this.dataSource.transaction(async manager => {
-      await manager.delete(WorkspaceClaudeBackendProfile, { workspace_id: id });
-      if (allowed.length) {
-        await manager.save(WorkspaceClaudeBackendProfile, allowed.map(profile_id =>
-          manager.create(WorkspaceClaudeBackendProfile, { workspace_id: id, profile_id }),
-        ));
-      }
-      workspace.default_claude_backend_profile_id = selected;
-      workspace.claude_backend_profiles_migrated = true;
-      // Keep the old selector populated for one-release read compatibility.
-      workspace.default_cli_runtime_profile = selected;
-      await manager.save(workspace);
-    });
-    return res.json({ allowed_profile_ids: allowed, default_profile_id: selected });
   }
 
   @Get()
@@ -264,7 +190,6 @@ export class WorkspacesController {
       claim_verification_enabled, claim_verification_grace_ms,
       chat_workspace_folder_enabled,
       harness_config, environment_config, assistant_agent_id,
-      cli_runtime_profiles, default_cli_runtime_profile,
       hard_budget_config, clone_policy,
     } = body;
     if (name !== undefined) ws.name = name;
@@ -339,28 +264,6 @@ export class WorkspacesController {
         if (!checked.ok) return res.status(400).json({ error: checked.error });
         ws.hard_budget_config = serializeHardBudgetConfig(checked.value);
       }
-    }
-
-    if (cli_runtime_profiles !== undefined) {
-      const checked = validateCliRuntimeProfiles(cli_runtime_profiles ?? []);
-      if (!checked.ok) return res.status(400).json({ error: checked.error });
-      for (const profile of checked.value) {
-        if (!profile.credential_ref) continue;
-        const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: profile.credential_ref } });
-        if (!credential || (credential.workspace_id !== null && credential.workspace_id !== ws.id)) {
-          return res.status(400).json({ error: `credential_ref for profile "${profile.id}" is not owned by this workspace` });
-        }
-      }
-      ws.cli_runtime_profiles = checked.value.length ? JSON.stringify(checked.value) : null;
-    }
-    if (default_cli_runtime_profile !== undefined) {
-      const selected = default_cli_runtime_profile == null ? null : String(default_cli_runtime_profile);
-      const checked = validateCliRuntimeProfiles(JSON.parse(ws.cli_runtime_profiles || '[]'));
-      if (!checked.ok) return res.status(400).json({ error: checked.error });
-      if (selected && selected !== 'none' && !checked.value.some(profile => profile.id === selected)) {
-        return res.status(400).json({ error: `default_cli_runtime_profile "${selected}" does not exist` });
-      }
-      ws.default_cli_runtime_profile = selected;
     }
 
     // Workspace-wide default environment setup (ticket 354d336b; simplified in

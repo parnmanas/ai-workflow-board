@@ -63,6 +63,33 @@ function roomMemberFilter(envelope: StreamEvent<any>, identity: SubscriberIdenti
   return false;
 }
 
+/**
+ * `chat_room_update` 의 수신 범위 (티켓 995a9519, 리뷰 라운드1 P1-2).
+ *
+ * `open_join_changed` 만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 간다.
+ * 이 변경이 실제로 영향을 주는 대상이 정확히 비참여자이기 때문이다 — ON 이면 그들에게
+ * 방이 새로 보여야 하고, OFF 면 그들의 사이드바에서 사라져야 한다. 방 구성원만 받으면
+ * 정작 상태가 바뀐 쪽은 아무것도 못 받고, OFF 뒤에도 새로고침 전까지 닫힌 방을 계속
+ * 보다가 읽기·발화 403 을 맞는다.
+ *
+ * 워크스페이스 대조를 **수신 측**이 하는 이유: 이 스택에서 `users` 는 워크스페이스에
+ * 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다 — `requested_workspace_id` 는 가입 시
+ * 선택값일 뿐이다), SSE identity 에도 워크스페이스가 없다(events.controller 는 boardId 만
+ * 받는다). 그래서 서버 필터가 동기적으로 판정할 근거가 없다. 대신 payload 에
+ * `workspace_id` 를 실어 보내고 수신 측이 지금 보고 있는 워크스페이스와 대조한다 —
+ * `subagent_registered` / `subagent_log` / `subagent_ended` 가 이미 쓰는 방식과 같다
+ * ("Workspace scoping happens at the page (REST) level; SSE filter only checks the
+ * identity kind"). 에이전트에게는 보내지 않는다: 이 옵션은 사람의 방 목록 가시성에만
+ * 관계하고, 에이전트의 발신 규약은 이 값과 무관하게 참여자 행을 그대로 요구한다.
+ *
+ * 나머지 update_type(renamed / participant_* / read)은 전과 똑같이 방 구성원 전용이다.
+ */
+function chatRoomUpdateFilter(envelope: StreamEvent<any>, identity: SubscriberIdentity): boolean {
+  const updateType = (envelope.payload as ChatRoomUpdatePayload | undefined)?.update_type;
+  if (updateType === 'open_join_changed') return identity.type === 'user';
+  return roomMemberFilter(envelope, identity);
+}
+
 // ── The registry ──────────────────────────────────────────────────────────
 
 export const EVENT_TYPES: EventDefinition[] = [
@@ -569,6 +596,12 @@ export const EVENT_TYPES: EventDefinition[] = [
         new_name: event.new_name,
         participant_id: event.participant_id,
         participant_ids: event.participant_ids,
+        // 자유 참여 옵션 변경(ticket 995a9519) — `open_join_changed` 에만 채워진다.
+        open_join: event.open_join,
+        // 같은 이벤트에만 실린다. 이 update type 은 워크스페이스 전체로 나가므로
+        // 수신 측이 "지금 보고 있는 워크스페이스의 일인가"를 이 값으로 판정한다
+        // (chatRoomUpdateFilter 주석 참조).
+        workspace_id: event.workspace_id,
         // B3: read-event reader identity + marker, populated only when present.
         participant_type: event.participant_type,
         last_read_at: event.last_read_at,
@@ -582,10 +615,11 @@ export const EVENT_TYPES: EventDefinition[] = [
           room_id: event.room_id,
           member_ids: event.member_ids,
           agent_member_ids: event.agent_member_ids,
+          workspace_id: event.workspace_id,
         },
       };
     },
-    filter: roomMemberFilter,
+    filter: chatRoomUpdateFilter,
     flatten: (env) => env.payload,
   },
 

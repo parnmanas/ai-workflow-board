@@ -201,9 +201,13 @@ export class HermesProcess {
     const client = this.#client;
     this.#client = null;
     this.#healthy = false;
-    const pid = client?.process.pid;
+    const child = client?.process;
+    const pid = child?.pid;
     client?.close();
-    if (pid) await terminateDetachedProcessTree(pid, 250);
+    // close() 가 이미 자식에게 kill 을 보냈다. 그 뒤의 pid 기반 tree-kill 은
+    // pid 가 아직 우리 것일 때만 안전하므로 핸들을 함께 넘긴다 — win32 에서
+    // 이 핸들이 유일한 pid 재사용 가드다(terminateDetachedProcessTree 주석).
+    if (pid && child) await terminateDetachedProcessTree(pid, 250, { child });
     await fsp.unlink(join(this.stateDir, 'runtime-owner.json')).catch(() => undefined);
   }
 

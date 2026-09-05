@@ -44,3 +44,7 @@ graphify-out/
 
 # 기타 AI CLI 세션 산출물(의도적으로 추적하지 않으며 CLAUDE.md와 별도 관리)
 # AGENTS.md는 CLAUDE.md에서 생성하며 의도적으로 버전 관리합니다.
+
+# Playwright e2e 산출물(스크린샷·trace) — 커밋 대상 아님
+apps/client/test-results/
+apps/client/playwright-report/

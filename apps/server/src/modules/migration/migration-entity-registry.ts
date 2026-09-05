@@ -69,7 +69,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // 독립 루트
   'Workspace', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
   'WorkspaceRole', 'Channel', 'Credential', 'WorkflowFunction', 'Resource',
-  'PromptTemplate', 'WorkspaceClaudeBackendProfile',
+  'PromptTemplate',
 
   // Workspace/Credential에 의존
   'Agent',

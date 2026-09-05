@@ -1,10 +1,8 @@
-import { DataSource, In } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { ClaudeBackendProfile } from '../entities/ClaudeBackendProfile';
-import { WorkspaceClaudeBackendProfile } from '../entities/WorkspaceClaudeBackendProfile';
-import { Workspace } from '../entities/Workspace';
 import { SystemSetting } from '../entities/SystemSetting';
 import {
-  CLI_RUNTIME_NONE, CliRuntimeProfile, ClaudeBackendProfileSchema, parseCliRuntimeProfiles, resolveCliRuntimeProfile,
+  CLI_RUNTIME_NONE, CliRuntimeProfile, ClaudeBackendProfileSchema, resolveCliRuntimeProfile,
 } from './cli-runtime-profiles';
 
 const CORE_KEYS = new Set(['id', 'name', 'protocol', 'base_url', 'model', 'credential_ref']);
@@ -50,73 +48,56 @@ export function publicProfile(row: ClaudeBackendProfile) {
   };
 }
 
-export async function workspaceRuntimeProfiles(dataSource: DataSource, workspaceId: string) {
-  const links = await dataSource.getRepository(WorkspaceClaudeBackendProfile).find({
-    where: { workspace_id: workspaceId },
-  });
-  if (!links.length) return [];
-  const rows = await dataSource.getRepository(ClaudeBackendProfile).find({
-    where: { id: In(links.map(link => link.profile_id)) },
-  });
+/**
+ * Claude backend profile 은 인스턴스 전역 단일 스코프다 — 워크스페이스 배정
+ * 계층은 존재하지 않는다(티켓 e616dbfc). 이 함수가 프로필 목록의 유일한
+ * 소스이며, 검증·디스패치 해석 양쪽이 같은 목록을 본다.
+ */
+export async function globalRuntimeProfiles(dataSource: DataSource): Promise<CliRuntimeProfile[]> {
+  const rows = await dataSource.getRepository(ClaudeBackendProfile).find();
   return rows.map(profileEntityToRuntime);
 }
 
-export async function authoritativeWorkspaceRuntimeProfiles(
-  dataSource: DataSource,
-  workspace: Workspace | null | undefined,
-) {
-  if (!workspace) return [];
-  const registryProfiles = await workspaceRuntimeProfiles(dataSource, workspace.id);
-  return workspace.claude_backend_profiles_migrated
-    ? registryProfiles
-    : parseCliRuntimeProfiles(workspace.cli_runtime_profiles);
-}
-
 /**
- * Validates a `cli_runtime_profile` write against the workspace's
- * authoritative profile list — the same fail-closed check the REST
- * PATCH handlers (agents.controller.ts / boards.controller.ts) run inline.
- * `null`/undefined clears the pin (inherit again); CLI_RUNTIME_NONE is the
- * explicit opt-out sentinel and is accepted without a list lookup; anything
- * else must match an authoritative profile id or the write is rejected.
+ * `cli_runtime_profile` 쓰기를 전역 프로필 목록에 대해 검증한다 — REST PATCH
+ * 핸들러(agents.controller.ts / boards.controller.ts)가 인라인으로 도는 것과
+ * 같은 fail-closed 검사다. `null`/undefined 는 핀을 지운다(= 다시 상속),
+ * CLI_RUNTIME_NONE 은 명시적 옵트아웃 sentinel 이라 목록 조회 없이 통과하며,
+ * 그 외 값은 전역 프로필 id 와 일치해야 하고 아니면 쓰기를 거부한다.
  */
 export async function validateCliRuntimeProfileSelection(
   dataSource: DataSource,
-  workspace: Workspace | null | undefined,
   raw: unknown,
-  scopeLabel: string,
 ): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
   const selected = raw == null ? null : String(raw);
   if (selected && selected !== CLI_RUNTIME_NONE) {
-    const profiles = await authoritativeWorkspaceRuntimeProfiles(dataSource, workspace);
+    const profiles = await globalRuntimeProfiles(dataSource);
     if (!profiles.some(profile => profile.id === selected)) {
-      return { ok: false, error: `cli_runtime_profile "${selected}" does not exist in ${scopeLabel}` };
+      return { ok: false, error: `cli_runtime_profile "${selected}" does not exist` };
     }
   }
   return { ok: true, value: selected };
 }
 
+/**
+ * 디스패치 시점의 프로필 해석 — 체인은 **핀 → 전역 기본값** 2단계다.
+ * 예전에 있던 워크스페이스 단계는 제거됐다(티켓 e616dbfc): 워크스페이스
+ * 기본값이 그 워크스페이스의 무관한 claude 에이전트에게 새어나가던 경로가
+ * 이 단계와 함께 사라진다.
+ *
+ * 상속 시맨틱은 그대로다 — `null`/undefined 핀은 다음 selector 로 넘어가고,
+ * `'none'`(CLI_RUNTIME_NONE)은 명시적 옵트아웃이라 그 자리에서 null 로 끝난다.
+ */
 export async function resolveClaudeBackendProfileForDispatch(
   dataSource: DataSource,
-  workspace: Workspace | null | undefined,
   selectors: Array<{ source: string; value: string | null | undefined }>,
 ) {
-  const profiles = await authoritativeWorkspaceRuntimeProfiles(dataSource, workspace);
+  const profiles = await globalRuntimeProfiles(dataSource);
   const globalDefault = (await dataSource.getRepository(SystemSetting).findOne({
     where: { key: CLAUDE_BACKEND_DEFAULT_KEY },
   }))?.value || null;
-  if (globalDefault && globalDefault !== 'none' && !profiles.some(profile => profile.id === globalDefault)) {
-    const globalRow = await dataSource.getRepository(ClaudeBackendProfile).findOne({
-      where: { id: globalDefault },
-    });
-    if (globalRow) profiles.push(profileEntityToRuntime(globalRow));
-  }
   return resolveCliRuntimeProfile(profiles, [
     ...selectors,
-    {
-      source: 'workspace',
-      value: workspace?.default_claude_backend_profile_id ?? workspace?.default_cli_runtime_profile,
-    },
     { source: 'global', value: globalDefault },
   ]);
 }

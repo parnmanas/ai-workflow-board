@@ -13,9 +13,27 @@
 //   2. 그 전송이 orchestrator 를 깨우는 계약을 실제로 만족한다 — 디스패치 팬아웃에
 //      orchestrator 가 들어가고, 엔진 자신의 wake 와 **같은 모양**의 이벤트가 나간다.
 //   3. 참여자가 없는 과거/에이전트 생성 미션도 join 백필 뒤 대화가 된다.
-//   4. 권한 없는 사용자는 여전히 막힌다(join 은 권한 가드, 발화는 참여자 게이트).
+//   4. 권한 없는 사용자는 여전히 막힌다(join 은 권한 가드, 발화는 권한 게이트).
 //   5. mission room 은 일반 채팅 목록에 나타나지 않는다.
 //   6. step room 에는 사람이 참여자로 들어가지 않는다(설계 결정).
+//
+// ── 티켓 995a9519 이후의 계약 변화 ──────────────────────────────────────────
+//
+// mission 방이 이제 `open_join: true` 로 만들어진다. 그래서 **참여자 게이트**는 mission
+// 방에서 더 이상 두 번째 방어선이 아니다 — MANAGE_ACTIONS 를 가진 운영자는 join 을 먼저
+// 누르지 않아도 바로 말할 수 있고, 그 발화 시점에 참여자로 auto-join 된다. 그것이 이
+// 기능의 요청 자체다("mission 화면의 Chat 에 참여자가 아니어도 낄 수 있어야 한다").
+//
+// f6a0de0e 가 지키려던 불변식은 그대로 살아 있고 이 파일이 계속 단언한다:
+//   - 권한 없는 사용자는 join 도 발화도 못 한다 (이제 유일한 방어선은 권한 게이트다).
+//   - join 뒤 권한이 회수되면 participant 행이 남아 있어도 발화가 막힌다.
+//   - join 은 멱등하고 타임라인을 한 줄만 남긴다.
+//   - 종료된 미션에는 새로 참여할 수 없다.
+//   - 같은 (room, user) 의 active 행은 최대 하나이고 언제나 떠날 수 있다.
+//
+// join 경로 자체도 그대로 필요하다: 이 옵션 **이전에** 만들어진 mission 방은
+// open_join=false 이므로 여전히 join 으로만 들어간다. 아래 레거시 블록들은 그 상태를
+// 방의 open_join 을 직접 꺼서 재현한다 — 그래야 진짜 과거 데이터의 경로를 검증한다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -145,6 +163,14 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   });
   assert.ok(started.room_id, 'mission 방이 만들어졌다');
 
+  // 티켓 995a9519 — mission 방은 자유 참여로 열린 채 만들어진다. 아래 3번 블록의
+  // "참여자가 아닌 운영자가 바로 말할 수 있다"가 성립하는 근거가 이 값이다.
+  assert.equal(
+    (await ds.getRepository('ChatRoom').findOne({ where: { id: started.room_id } })).open_join,
+    true,
+    'mission 방은 open_join 이 켜진 채로 생성된다',
+  );
+
   assert.deepEqual(
     await activeParticipants(ds, started.room_id),
     [`agent:${lead.id}`, `user:${owner.id}`, 'user:system'].sort(),
@@ -218,6 +244,11 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     participant_id: owner.id,
     participant_type: 'user',
   });
+  // 자유 참여(티켓 995a9519)도 함께 끈다. 그 옵션은 **이 티켓 이후에 만들어진** 방에만
+  // 켜져 있으므로, 참여자 행만 지우는 것으로는 과거 데이터를 재현하지 못한다 — 옵션이
+  // 켜진 채로 두면 참여자 게이트를 아예 통과해 버려서, 이 블록이 검증하려는 join 백필
+  // 경로를 지나가지도 않는다.
+  await ds.getRepository('ChatRoom').update({ id: legacyStarted.room_id }, { open_join: false });
   assert.deepEqual(
     await activeParticipants(ds, legacyStarted.room_id),
     [`agent:${lead.id}`, 'user:system'].sort(),
@@ -256,9 +287,12 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     [`agent:${lead.id}`, 'user:system'].sort(),
     '사람 소유자가 없으면 아무 사람도 자동 등록되지 않는다',
   );
+  // 위 레거시 블록과 같은 이유로 자유 참여를 끈다 — 이 블록이 고정하는 것은 명시적
+  // join 백필 경로이고, 그 경로는 옵션이 꺼진 과거 방에서 여전히 유일한 입구다.
+  await ds.getRepository('ChatRoom').update({ id: agentStarted.room_id }, { open_join: false });
 
   const beforeJoin = await say(agentStarted.room_id, ownerToken, '들어가도 될까');
-  assert.equal(beforeJoin.status, 403, '참여자가 아니면 여전히 403 이다');
+  assert.equal(beforeJoin.status, 403, '자유 참여가 꺼진 방에서는 참여자가 아니면 여전히 403 이다');
 
   const joined = await join(agentOwned.id, ownerToken);
   // NestJS 의 @Post() 기본 상태 코드 — start/pause/nudge 등 이 컨트롤러의 다른 POST 와 같다.
@@ -282,11 +316,43 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   assert.equal(persisted.length, 1, 'DB 에 active 참여자 행으로 남는다');
 
   // ── 3. 생성자가 아닌 운영자 ───────────────────────────────────────────────
-  step('생성자가 아닌 운영자도 같은 경로로 들어온다');
-  const peerBefore = await say(started.room_id, peerToken, '나도 한마디');
-  assert.equal(peerBefore.status, 403, '자동 등록 대상은 생성자뿐이다');
-  assert.equal((await join(created.id, peerToken)).status, 201);
-  assert.equal((await say(started.room_id, peerToken, '나도 한마디')).status, 201);
+  //
+  // 티켓 995a9519 로 이 블록의 계약이 바뀌었다. 예전에는 join 을 먼저 눌러야 했지만
+  // (자동 등록 대상은 생성자뿐이었다), mission 방이 open_join 으로 열리면서 참여자가
+  // 아닌 운영자도 **바로** 말할 수 있고 그 발화가 참여자 등록을 겸한다. 사용자의 원래
+  // 요청("mission 화면의 Chat 에 참여자가 아니어도 낄 수 있어야 한다")이 정확히 이것이다.
+  step('생성자가 아닌 운영자는 join 없이 바로 말할 수 있고, 그 발화로 참여자가 된다');
+  assert.deepEqual(
+    await activeRowsFor(ds, started.room_id, peer.id),
+    [],
+    '사전 조건 — peer 는 아직 이 방의 참여자가 아니다',
+  );
+  const peerFirstSay = await say(started.room_id, peerToken, '나도 한마디');
+  assert.equal(
+    peerFirstSay.status,
+    201,
+    `자유 참여 방에서는 참여자가 아니어도 발화가 된다 (${await peerFirstSay.clone().text()})`,
+  );
+  const peerRows = await activeRowsFor(ds, started.room_id, peer.id);
+  assert.equal(peerRows.length, 1, '첫 발화 시점에 참여자 행이 정확히 하나 생긴다 (auto-join)');
+  assert.ok(peerRows[0].last_read_at, '재입장 규약과 같이 last_read_at 이 찍힌다');
+
+  // auto-join 은 멱등이다 — 계속 말해도 행이 늘지 않는다.
+  assert.equal((await say(started.room_id, peerToken, '한마디 더')).status, 201);
+  assert.equal(
+    (await activeRowsFor(ds, started.room_id, peer.id)).length,
+    1,
+    '이어지는 발화가 참여자 행을 중복 생성하지 않는다',
+  );
+
+  // 명시적 join 경로도 그대로 살아 있다 — 이미 참여 중이므로 joined:false 로 응답한다.
+  const peerJoinAfter = await join(created.id, peerToken);
+  assert.equal(peerJoinAfter.status, 201);
+  assert.deepEqual(
+    await peerJoinAfter.json(),
+    { room_id: started.room_id, joined: false },
+    'auto-join 뒤의 명시적 join 은 아무것도 바꾸지 않는다',
+  );
 
   // ── 4. 권한 없는 사용자는 여전히 차단 ─────────────────────────────────────
   step('MANAGE_ACTIONS 가 없는 사용자는 join 도 발화도 못 한다');
@@ -297,9 +363,18 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     [`agent:${lead.id}`, `user:${owner.id}`, `user:${peer.id}`, 'user:system'].sort(),
     '거부된 join 은 참여자를 남기지 않는다',
   );
-  // 이 사용자는 CHAT_SEND 를 갖고 있다 — 그래도 막히는 이유가 참여자 게이트임을 못박는다.
+  // 이 사용자는 CHAT_SEND 를 갖고 있다 — 그래도 막힌다. 티켓 995a9519 이후 이 방은
+  // 자유 참여로 열려 있으므로 참여자 게이트는 더 이상 막아주지 않는다: 남은 방어선은
+  // MANAGE_ACTIONS 를 보는 orchestration 발화 게이트 하나뿐이고, 그것으로 충분해야 한다.
   const deniedSay = await say(started.room_id, outsiderToken, '몰래 지시');
-  assert.equal(deniedSay.status, 403, '참여자 게이트가 두 번째 방어선으로 남는다');
+  assert.equal(deniedSay.status, 403, '권한 없는 사용자는 열린 mission 방에서도 발화가 막힌다');
+  // 그리고 거부된 발화는 auto-join 도 남기지 않아야 한다 — 권한 게이트가 참여자 등록
+  // **앞**에 있다는 뜻이다. 순서가 뒤집히면 403 을 받은 사용자가 참여자 명단에만 남는다.
+  assert.deepEqual(
+    await activeRowsFor(ds, started.room_id, outsider.id),
+    [],
+    '거부된 발화는 참여자 행을 만들지 않는다',
+  );
 
   // ── 4a. 권한 경계는 join 순간이 아니라 발화 순간에도 유지된다 ────────────────
   //
@@ -406,11 +481,24 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     0,
     'leave 는 남은 active 행을 하나도 남기지 않아야 한다',
   );
+  // 예전에는 이 자리에서 "떠난 뒤에는 발화가 403" 을 확인해 행이 정말 사라졌음을 간접
+  // 재확인했다. 티켓 995a9519 이후 mission 방은 자유 참여로 열려 있어 그 간접 신호가
+  // 성립하지 않는다 — 나갔던 사람이 다시 말하면 다시 들어오는 것이 이 옵션의 정의다.
+  // 바로 위에서 active 행이 0 임을 **직접** 단언했으므로 원래 불변식은 이미 고정돼 있고,
+  // 여기서는 그 재진입이 행을 정확히 하나만 만드는지까지 확인해 더 좁게 못박는다.
   assert.equal(
-    (await say(started.room_id, racerToken, '떠난 뒤에는 못 보낸다')).status,
-    403,
-    '떠났으면 실제로 발화가 막혀야 한다 — 행이 남으면 이 단언이 깨진다',
+    (await say(started.room_id, racerToken, '떠났다가 다시 한마디')).status,
+    201,
+    '자유 참여 방은 떠난 사람이 다시 말하면 다시 들어온다',
   );
+  assert.equal(
+    (await activeRowsFor(ds, started.room_id, racer.id)).length,
+    1,
+    '재진입은 active 행을 정확히 하나만 만든다 — 옛 left 행이 되살아나지 않는다',
+  );
+  // 다음 블록이 "join 으로 재입장"을 검증하므로 상태를 다시 비워 둔다.
+  await membership.leaveRoom(started.room_id, racer.id);
+  assert.equal((await activeRowsFor(ds, started.room_id, racer.id)).length, 0);
 
   step('재입장한 사용자도 방을 떠날 수 있다 — 옛 left 행이 새 active 행을 가리지 않는다');
   assert.equal((await join(created.id, racerToken)).status, 201, '재입장은 새 행을 만든다');

@@ -135,16 +135,10 @@ describe('Claude backend profile MCP operations', () => {
     );
   });
 
-  it('updates an existing profile without changing its UUID or assignments', async () => {
+  it('updates an existing profile without changing its UUID', async () => {
     const current = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
       name: 'Local vLLM - qwen3-coder-next',
     });
-    await ds.getRepository('WorkspaceClaudeBackendProfile').save(
-      ds.getRepository('WorkspaceClaudeBackendProfile').create({
-        workspace_id: workspace.id,
-        profile_id: current.id,
-      }),
-    );
 
     const result = await tools.updateClaudeBackendProfile(ds, current.id, {
       base_url: 'http://127.0.0.1:8000',
@@ -173,8 +167,10 @@ describe('Claude backend profile MCP operations', () => {
       },
     });
     assert.equal(retry.changed, false);
-    const listed = await tools.listClaudeBackendProfiles(ds, workspace.id);
-    assert.equal(listed.allowed_profile_ids.includes(current.id), true);
+    // 프로필은 인스턴스 전역이라 목록에 워크스페이스 인자가 없다(티켓 e616dbfc).
+    const listed = await tools.listClaudeBackendProfiles(ds);
+    assert.equal(listed.profiles.some(item => item.id === current.id), true);
+    assert.equal('allowed_profile_ids' in listed, false, '워크스페이스 allow-set 은 응답에 없어야 합니다.');
   });
 
   it('rejects an invalid update without changing the stored profile', async () => {
@@ -240,12 +236,13 @@ describe('Claude backend profile MCP operations', () => {
     );
   });
 
-  it('rejects a workspace credential incompatible with existing assignments without changing the profile', async () => {
+  // 티켓 e616dbfc 로 시맨틱이 뒤집힌 자리다. 예전에는 프로필이 여러 워크스페이스에
+  // 배정될 수 있어서, 특정 워크스페이스 소유 credential 을 붙이면 "모든 배정
+  // 워크스페이스가 소유하지는 않는다"며 거부했다. 배정 개념이 사라진 지금은
+  // 대조할 대상이 없으므로, 존재하는 credential 이면 그대로 저장된다.
+  it('워크스페이스 소유 credential 도 전역 프로필에 그대로 붙는다', async () => {
     const ownerWorkspace = await ds.getRepository('Workspace').save(
       ds.getRepository('Workspace').create({ name: 'Credential owner workspace' }),
-    );
-    const otherWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Other assigned workspace' }),
     );
     const profile = await tools.upsertClaudeBackendProfile(ds, {
       name: 'Shared assigned profile',
@@ -253,8 +250,6 @@ describe('Claude backend profile MCP operations', () => {
       model: 'shared-model',
       protocol: 'anthropic-compatible',
     });
-    await tools.assignWorkspaceBackendProfile(ds, ownerWorkspace.id, profile.profile.id, false);
-    await tools.assignWorkspaceBackendProfile(ds, otherWorkspace.id, profile.profile.id, false);
     const credential = await ds.getRepository('Credential').save(
       ds.getRepository('Credential').create({
         workspace_id: ownerWorkspace.id,
@@ -264,242 +259,92 @@ describe('Claude backend profile MCP operations', () => {
       }),
     );
 
-    await assert.rejects(
-      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
-        base_url: 'http://must-not-be-saved.invalid',
-        credential_ref: credential.id,
-      }),
-      /credential is not owned by every assigned workspace/,
-    );
+    const result = await tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+      base_url: 'http://now-saved.invalid',
+      credential_ref: credential.id,
+    });
+    assert.equal(result.changed, true);
     const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
       id: profile.profile.id,
     });
-    assert.equal(stored.base_url, 'http://shared.invalid');
-    assert.equal(stored.credential_ref, null);
+    assert.equal(stored.base_url, 'http://now-saved.invalid');
+    assert.equal(stored.credential_ref, credential.id);
+    // 자격증명 참조는 응답 DTO 에 절대 실리지 않는다.
+    assert.equal('credential_ref' in result.profile, false);
+    assert.equal(result.profile.credential_status, 'configured');
+
+    // 존재하지 않는 credential 은 여전히 fail-closed.
+    await assert.rejects(
+      tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        credential_ref: '00000000-0000-0000-0000-000000000000',
+      }),
+      /credential_ref does not identify an existing Credential/,
+    );
   });
 
-  it('serializes an assignment behind an in-flight credential update', async () => {
-    const ownerWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Racing credential owner' }),
-    );
-    const otherWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Racing assignment workspace' }),
-    );
+  // 프로필별 쓰기 임계 구역은 assign 경로가 사라진 뒤에도 지켜져야 한다.
+  // 겹치는 두 update 가 순차로만 진입하는지를 happens-before 로 관찰한다 — 고정
+  // 지연 없이 첫 번째가 락을 잡은 사실과 두 번째의 진입 시도를 각각 이벤트로
+  // 기다리고, timeout 은 hang 진단용 상한으로만 둔다.
+  it('같은 프로필에 대한 겹친 update 두 건을 직렬화한다', async () => {
     const profile = await tools.upsertClaudeBackendProfile(ds, {
       name: 'Contended profile',
       base_url: 'http://contended.invalid',
       model: 'contended-model',
       protocol: 'anthropic-compatible',
     });
-    const credential = await ds.getRepository('Credential').save(
-      ds.getRepository('Credential').create({
-        workspace_id: ownerWorkspace.id,
-        name: 'Racing owner credential',
-        provider: 'anthropic',
-        encrypted_data: 'test-only',
-      }),
-    );
 
-    let releaseUpdate;
-    const updateBlocked = new Promise(resolve => { releaseUpdate = resolve; });
-    let updateHasLock;
-    const lockObserved = new Promise(resolve => { updateHasLock = resolve; });
-    let assignmentAttempted;
-    const assignmentAttemptObserved = new Promise(resolve => { assignmentAttempted = resolve; });
-    let assignmentEntered = false;
-    tools.setProfileLockAttemptHookForTests((operation, profileId) => {
-      if (operation === 'assign' && profileId === profile.profile.id) assignmentAttempted();
+    let releaseFirst;
+    const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+    let firstHasLock;
+    const lockObserved = new Promise(resolve => { firstHasLock = resolve; });
+    let secondAttempted;
+    const secondAttemptObserved = new Promise(resolve => { secondAttempted = resolve; });
+    let attempts = 0;
+    let entered = 0;
+    tools.setProfileLockAttemptHookForTests((_operation, profileId) => {
+      if (profileId !== profile.profile.id) return;
+      attempts += 1;
+      if (attempts === 2) secondAttempted();
     });
-    tools.setProfileLockHookForTests(async (operation, profileId) => {
-      if (operation === 'update' && profileId === profile.profile.id) {
-        updateHasLock();
-        await updateBlocked;
+    tools.setProfileLockHookForTests(async (_operation, profileId) => {
+      if (profileId !== profile.profile.id) return;
+      entered += 1;
+      if (entered === 1) {
+        firstHasLock();
+        await firstBlocked;
       }
-      if (operation === 'assign' && profileId === profile.profile.id) assignmentEntered = true;
     });
 
     try {
-      const update = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
-        credential_ref: credential.id,
+      const first = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        base_url: 'http://contended.invalid:8001',
       });
-      await withTimeout(lockObserved, 'timed out waiting for update lock');
+      await withTimeout(lockObserved, 'timed out waiting for the first update lock');
 
-      let assignmentSettled = false;
-      const assignment = tools.assignWorkspaceBackendProfile(
-        ds,
-        otherWorkspace.id,
-        profile.profile.id,
-        false,
-      ).finally(() => { assignmentSettled = true; });
-      await withTimeout(
-        assignmentAttemptObserved,
-        'timed out waiting for assignment lock attempt',
-      );
-      assert.equal(assignmentEntered, false, 'assignment must not enter before update releases');
-      assert.equal(assignmentSettled, false, 'assignment must not settle before update releases');
+      let secondSettled = false;
+      const second = tools.updateClaudeBackendProfile(ds, profile.profile.id, {
+        model: 'contended-model-v2',
+      }).finally(() => { secondSettled = true; });
+      await withTimeout(secondAttemptObserved, 'timed out waiting for the second update lock attempt');
+      assert.equal(entered, 1, '두 번째 update 는 첫 번째가 락을 놓기 전에 진입하면 안 됩니다.');
+      assert.equal(secondSettled, false, '두 번째 update 는 첫 번째가 끝나기 전에 완료되면 안 됩니다.');
 
-      releaseUpdate();
-      await withTimeout(update, 'timed out waiting for credential update');
-      await assert.rejects(
-        withTimeout(assignment, 'timed out waiting for assignment'),
-        /credential is not owned by this workspace/,
-      );
-      assert.equal(
-        await ds.getRepository('WorkspaceClaudeBackendProfile').count({
-          where: { workspace_id: otherWorkspace.id, profile_id: profile.profile.id },
-        }),
-        0,
-      );
+      releaseFirst();
+      await withTimeout(first, 'timed out waiting for the first update');
+      await withTimeout(second, 'timed out waiting for the second update');
+      assert.equal(entered, 2);
+
+      // 두 쓰기가 모두 반영돼야 한다 — 뒤엣것이 앞엣것을 덮어써 유실되면 안 된다.
+      const stored = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
+        id: profile.profile.id,
+      });
+      assert.equal(stored.base_url, 'http://contended.invalid:8001');
+      assert.equal(stored.model, 'contended-model-v2');
     } finally {
-      releaseUpdate?.();
+      releaseFirst?.();
       tools.setProfileLockAttemptHookForTests();
       tools.setProfileLockHookForTests();
     }
-  });
-
-  it('assigns idempotently, preserves other links, and exposes safe verification', async () => {
-    const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
-      name: 'Local vLLM - qwen3-coder-next',
-    });
-    const other = await tools.upsertClaudeBackendProfile(ds, {
-      name: 'Other profile',
-      base_url: 'http://other.invalid',
-      model: 'other-model',
-      protocol: 'anthropic-compatible',
-    });
-    await tools.assignWorkspaceBackendProfile(
-      ds,
-      workspace.id,
-      other.profile.id,
-      false,
-    );
-
-    const first = await tools.assignWorkspaceBackendProfile(
-      ds,
-      workspace.id,
-      primary.id,
-      true,
-    );
-    const retry = await tools.assignWorkspaceBackendProfile(
-      ds,
-      workspace.id,
-      primary.id,
-      true,
-    );
-    assert.equal(first.changed, true);
-    assert.equal(retry.changed, false);
-    assert.deepEqual(
-      new Set(retry.allowed_profile_ids),
-      new Set([primary.id, other.profile.id]),
-    );
-    assert.equal(retry.default_profile_id, primary.id);
-
-    const listed = await tools.listClaudeBackendProfiles(ds, workspace.id);
-    assert.equal(listed.default_profile_id, primary.id);
-    assert.equal(
-      listed.profiles.some(profile => 'credential_ref' in profile),
-      false,
-    );
-  });
-
-  it('assigns concurrent retries successfully with exactly one link', async () => {
-    const concurrentWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({
-        name: 'Concurrent profile assignment workspace',
-      }),
-    );
-    const primary = await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({
-      name: 'Local vLLM - qwen3-coder-next',
-    });
-
-    const results = await Promise.all([
-      tools.assignWorkspaceBackendProfile(
-        ds,
-        concurrentWorkspace.id,
-        primary.id,
-        true,
-      ),
-      tools.assignWorkspaceBackendProfile(
-        ds,
-        concurrentWorkspace.id,
-        primary.id,
-        true,
-      ),
-    ]);
-
-    assert.equal(results.length, 2);
-    assert.equal(
-      results.every(result =>
-        result.allowed_profile_ids.includes(primary.id) &&
-        result.default_profile_id === primary.id
-      ),
-      true,
-    );
-    assert.equal(
-      await ds.getRepository('WorkspaceClaudeBackendProfile').count({
-        where: {
-          workspace_id: concurrentWorkspace.id,
-          profile_id: primary.id,
-        },
-      }),
-      1,
-    );
-  });
-
-  it('rejects missing workspace and profile ids without writing links', async () => {
-    const count = await ds.getRepository('WorkspaceClaudeBackendProfile').count();
-    await assert.rejects(
-      tools.assignWorkspaceBackendProfile(
-        ds,
-        '00000000-0000-0000-0000-000000000000',
-        'missing',
-        true,
-      ),
-      /Workspace not found/,
-    );
-    await assert.rejects(
-      tools.assignWorkspaceBackendProfile(ds, workspace.id, 'missing', true),
-      /profile not found/,
-    );
-    assert.equal(
-      await ds.getRepository('WorkspaceClaudeBackendProfile').count(),
-      count,
-    );
-  });
-
-  it('rejects assigning a profile backed by another workspace credential', async () => {
-    const otherWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Credential owner' }),
-    );
-    const credential = await ds.getRepository('Credential').save(
-      ds.getRepository('Credential').create({
-        workspace_id: otherWorkspace.id,
-        name: 'Foreign credential',
-        provider: 'anthropic',
-        encrypted_data: 'test-only',
-      }),
-    );
-    const foreign = await tools.upsertClaudeBackendProfile(ds, {
-      name: 'Foreign credential profile',
-      base_url: 'http://foreign.invalid',
-      model: 'foreign-model',
-      protocol: 'anthropic-compatible',
-      credential_ref: credential.id,
-    });
-    const count = await ds.getRepository('WorkspaceClaudeBackendProfile').count();
-
-    await assert.rejects(
-      tools.assignWorkspaceBackendProfile(
-        ds,
-        workspace.id,
-        foreign.profile.id,
-        false,
-      ),
-      /credential is not owned by this workspace/,
-    );
-    assert.equal(
-      await ds.getRepository('WorkspaceClaudeBackendProfile').count(),
-      count,
-    );
   });
 });

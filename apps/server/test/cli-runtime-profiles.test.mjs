@@ -53,14 +53,14 @@ const migrationSource = await readFile(
   'utf8',
 );
 
-test('validates a configuration-only backend catalog and resolves Agent > Board > Workspace', () => {
+test('validates a configuration-only backend catalog and resolves Agent > Board', () => {
   const checked = validateCliRuntimeProfiles(profiles);
   assert.equal(checked.ok, true);
   assert.equal(checked.value.length, 2, 'a second backend/model requires only another profile');
   assert.equal(resolveCliRuntimeProfile(checked.value, [
     { source: 'agent', value: null },
     { source: 'board', value: 'local-openai' },
-    { source: 'workspace', value: 'local-anthropic' },
+    { source: 'global', value: 'local-anthropic' },
   ]).id, 'local-openai');
   assert.equal(resolveCliRuntimeProfile(checked.value, [
     { source: 'run', value: 'none' },
@@ -68,12 +68,11 @@ test('validates a configuration-only backend catalog and resolves Agent > Board 
   ]), null);
 });
 
-test('resolves run > Agent > Board > Workspace > Global and explicit none stops inheritance', () => {
+test('resolves run > Agent > Board > Global and explicit none stops inheritance', () => {
   assert.equal(resolveCliRuntimeProfile(profiles, [
     { source: 'run', value: null },
     { source: 'agent', value: null },
     { source: 'board', value: null },
-    { source: 'workspace', value: null },
     { source: 'global', value: 'local-anthropic' },
   ]).id, 'local-anthropic');
   assert.equal(resolveCliRuntimeProfile(profiles, [
@@ -278,16 +277,40 @@ test('global CRUD is AdminGuard-protected and referenced deletion is transaction
   assert.match(adminControllerSource, /delete merged\.credential_ref/);
 });
 
-test('workspace assignment requires owner for writes and masks credential refs for reads', () => {
-  assert.match(workspaceControllerSource, /@Patch\(':id\/claude-backend-profiles'\)[\s\S]*?requireOwner/);
-  assert.match(workspaceControllerSource, /Workspace default must be in the allow-set/);
-  assert.match(workspaceControllerSource, /rows\.map\(publicProfile\)/);
+// 티켓 e616dbfc — 워크스페이스 배정/기본값 표면은 제거됐다. 예전 단언(소유자
+// 검사·allow-set 검증·publicProfile 매핑)은 그 표면이 존재한다는 전제였으므로,
+// 표면이 되살아나는 것 자체를 잡는 방향으로 뒤집는다.
+test('workspaces controller no longer exposes any claude-backend-profile surface', () => {
+  assert.doesNotMatch(workspaceControllerSource, /claude-backend-profiles/);
+  assert.doesNotMatch(workspaceControllerSource, /WorkspaceClaudeBackendProfile/);
+  assert.doesNotMatch(workspaceControllerSource, /allowed_profile_ids/);
+  assert.doesNotMatch(workspaceControllerSource, /default_claude_backend_profile_id/);
+  // 레거시 JSON 컬럼은 dormant 로 남지만 쓰기 경로는 사라져야 한다.
+  assert.doesNotMatch(workspaceControllerSource, /ws\.cli_runtime_profiles =/);
+  assert.doesNotMatch(workspaceControllerSource, /ws\.default_cli_runtime_profile =/);
 });
 
-test('legacy migration dedupes exact canonical payload plus credential ref and preserves defaults', () => {
+// 새 비관리자 읽기 표면 — 관리자 전용 라우트를 그대로 갈아끼우면 비관리자
+// 드롭다운이 빈 목록이 되므로 AuthGuard 짜리 카탈로그가 따로 있어야 한다.
+test('a non-admin catalog route exists and still masks credential refs', () => {
+  assert.match(adminControllerSource, /@Controller\('api\/claude-backend-profiles'\)/);
+  assert.match(adminControllerSource, /@UseGuards\(AuthGuard\)/);
+  assert.match(adminControllerSource, /profiles: rows\.map\(publicProfile\)/);
+});
+
+test('legacy migration dedupes exact canonical payload plus credential ref and stays entity-free', () => {
   assert.match(migrationSource, /createHash\('sha256'\)/);
   assert.match(migrationSource, /credential_ref: candidate\.credential_ref/);
   assert.match(migrationSource, /fingerprintToId/);
-  assert.match(migrationSource, /default_claude_backend_profile_id/);
   assert.match(migrationSource, /cli_runtime_profiles/);
+  // 마이그레이션은 synchronize 이후에 돈다(db.ts D-02). 엔티티 리포지토리로
+  // 컬럼을 읽으면 이미 DROP 된 컬럼을 건드려 부팅이 터지므로, 테이블명 기반
+  // 쿼리 + 존재 가드만 써야 한다.
+  // 엔티티를 단 하나도 import 하지 않아야 한다(주석 언급은 무관 — import 줄만 본다).
+  const entityImports = migrationSource
+    .split('\n')
+    .filter(line => /^import /.test(line) && /entities\//.test(line));
+  assert.deepEqual(entityImports, [], `마이그레이션이 엔티티를 import 하면 안 됩니다: ${entityImports.join(' | ')}`);
+  assert.doesNotMatch(migrationSource, /getRepository\((?:Workspace|ClaudeBackendProfile|Board|Agent|Ticket)\)/);
+  assert.match(migrationSource, /hasColumn\('workspaces', 'cli_runtime_profiles'\)/);
 });

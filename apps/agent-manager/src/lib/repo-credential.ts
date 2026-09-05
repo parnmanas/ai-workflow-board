@@ -267,7 +267,10 @@ function runCloneProcess(gitArgs: string[], timeoutMs: number, idleTimeoutMs: nu
       if (typeof pid === 'number' && pid > 0) {
         // 2) 그룹 전체 정리(SIGTERM → grace → SIGKILL + 생존자 스윕). 시그널은 즉시
         //    발사되고, 완료 대기는 아래 (4) 가 맡는다.
-        killPromise = terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS).catch(() => {});
+        //    핸들을 함께 넘긴다 — win32 는 pid 가 tree-kill 의 유일한 키인데
+        //    (1) 의 kill 이 먼저 들어갔으므로, grace 뒤의 `/F` 패스는 이미 남의
+        //    것이 된 pid 를 때릴 수 있다.
+        killPromise = terminateDetachedProcessTree(pid, CLONE_KILL_GRACE_MS, { child }).catch(() => {});
       }
       // 3) backstop — SIGTERM 을 무시하는 리더가 있어도 반드시 종료시킨다.
       killBackstop = setTimeout(() => {

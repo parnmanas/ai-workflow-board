@@ -153,9 +153,9 @@ export default function ManagedAgentDialog({
     api.listCredentials(wsId)
       .then((rows) => { if (alive) setCredentials(rows); })
       .catch(() => { if (alive) setCredentials([]); });
-    api.getWorkspaceClaudeBackendProfiles(wsId).then(data => {
+    api.listClaudeBackendProfiles().then(data => {
       if (!alive) return;
-      const profiles = data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id));
+      const profiles = data.profiles;
       setRuntimeProfiles(profiles);
       setRuntimeProfile((selected) => reconcileRuntimeProfileSelection(selected, profiles));
       setRuntimeProfilesState('ready');
@@ -489,7 +489,7 @@ export default function ManagedAgentDialog({
               Claude backend profile
             </label>
             <Select disabled={runtimeProfilesState !== 'ready'} value={runtimeProfile} options={[
-              { value: '', label: 'Inherit board/workspace' },
+              { value: '', label: 'Inherit board / global default' },
               { value: 'none', label: 'None — Anthropic default' },
               ...runtimeProfiles.map(profile => ({ value: profile.id, label: profile.name })),
             ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setRuntimeProfile(e.target.value)} />

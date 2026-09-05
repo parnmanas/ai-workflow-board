@@ -3100,12 +3100,11 @@ candidate's branch or move the ticket.
       ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: effectiveWorkspaceId } })
       : null;
     // Claude backend profiles must be invisible to every other CLI. In
-    // particular, a workspace/board default must not alter Codex/Antigravity
-    // spawn model/cwd or make their dispatch depend on a Claude credential.
+    // particular, a board default must not alter Codex/Antigravity spawn
+    // model/cwd or make their dispatch depend on a Claude credential.
     if (agent?.type === 'claude') {
       runtimeProfile = await resolveClaudeBackendProfileForDispatch(
         this.dataSource,
-        runtimeWorkspace,
         [
           { source: 'run', value: ticket.cli_runtime_profile },
           { source: 'agent', value: agent.cli_runtime_profile },

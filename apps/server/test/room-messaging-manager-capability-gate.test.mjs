@@ -100,11 +100,31 @@ function makeQueryBuilder() {
   return qb;
 }
 
-const dataSource = {
-  getRepository() {
-    return { async findOne() { return null; }, async find() { return []; } };
-  },
-};
+const { ClaudeBackendProfile } = await import(
+  'file://' + path.join(DIST_ROOT, 'entities', 'index.js')
+);
+
+/** 런타임 프로필 정의를 claude_backend_profiles 행 모양으로 옮긴다. */
+function profileRow(runtime) {
+  const { id, protocol, base_url: baseUrl, model, credential_ref: credentialRef, ...rest } = runtime;
+  return {
+    id, protocol, base_url: baseUrl, model,
+    credential_ref: credentialRef ?? null,
+    config: JSON.stringify(rest),
+  };
+}
+
+// 프로필은 인스턴스 전역이라(티켓 e616dbfc) claude_backend_profiles 테이블이
+// 유일한 소스다 — 예전처럼 workspace.cli_runtime_profiles 를 읽지 않는다.
+function makeDataSource(profiles) {
+  const rows = profiles.map(profileRow);
+  return {
+    getRepository(entity) {
+      if (entity === ClaudeBackendProfile) return { async find() { return rows; }, async findOne() { return null; } };
+      return { async findOne() { return null; }, async find() { return []; } };
+    },
+  };
+}
 
 // vLLM-shaped profile — the exact field (context_window) that opts a profile
 // into requiring MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP.
@@ -120,7 +140,8 @@ const VLLM_PROFILE = {
 const OLD_MANAGER_INSTANCE = { plugin_version: '1.6.30' }; // predates capability reporting
 const NEW_MANAGER_INSTANCE = { plugin_version: '1.6.94', manager_capabilities: ['context_window_clamp'] };
 
-function makeSvc({ agent, workspace, instanceRegistry }) {
+function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE] }) {
+  const dataSource = makeDataSource(profiles);
   const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1' };
   const roomRepo = {
     async findOne() { return dmRoom; },
@@ -182,7 +203,7 @@ function captureOnce(eventName) {
   };
 }
 
-const wsWithVllmProfile = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([VLLM_PROFILE]) };
+const wsWithVllmProfile = { id: 'ws-1' };
 
 test('DM dispatch to an OLD manager (no manager_capabilities) for a context_window profile: chat_request is suppressed, a system message explains why', async () => {
   const agent = { id: 'agent-old', type: 'claude', role_prompt: '', cli_runtime_profile: 'vllm-qwen3-coder', credential_id: null };
@@ -259,10 +280,10 @@ test('DM dispatch when instanceRegistry itself is undefined (hand-constructed ca
 
 test('DM dispatch for a profile WITHOUT context_window: never gates, even against an old manager', async () => {
   const plainProfile = { id: 'plain-anthropic', protocol: 'anthropic-compatible', base_url: 'http://127.0.0.1:9001', model: 'model-a' };
-  const ws = { id: 'ws-1', claude_backend_profiles_migrated: 0, cli_runtime_profiles: JSON.stringify([plainProfile]) };
+  const ws = { id: 'ws-1' };
   const agent = { id: 'agent-plain', type: 'claude', role_prompt: '', cli_runtime_profile: 'plain-anthropic', credential_id: null };
   const instanceRegistry = { listForAgent: () => [OLD_MANAGER_INSTANCE] };
-  const svc = makeSvc({ agent, workspace: ws, instanceRegistry });
+  const svc = makeSvc({ agent, workspace: ws, instanceRegistry, profiles: [plainProfile] });
 
   const chatRequest = captureOnce('chat_request');
   try {
@@ -295,7 +316,8 @@ function captureRoomMessageOnce() {
   };
 }
 
-function makeGroupSvc({ agents, workspace, instanceRegistry }) {
+function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PROFILE] }) {
+  const dataSource = makeDataSource(profiles);
   const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
     async findOne() { return groupRoom; },
