@@ -23,6 +23,8 @@ import { Button, Input, Modal, Select } from '../common';
 import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
+// ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
+import { summarizeModelCounts, waitForFreshHeartbeat } from './agentManagerModelRefresh';
 
 /**
  * Runtime Host administration and observability.
@@ -40,45 +42,6 @@ import ManagedAgentDialog from './ManagedAgentDialog';
  */
 
 const REFRESH_FALLBACK_MS = 15_000;
-// ticket 40110b64 — refresh_available_models 를 보낸 뒤 "즉시 하트비트"가 도착할
-// 때까지 인스턴스 목록을 재조회하는 창. 매니저 쪽 재열거는 어댑터별 4초
-// 타임아웃을 병렬로 도는 best-effort 스캔이라 최악의 경우 몇 초가 걸린다.
-const REFRESH_MODELS_POLL_MS = 800;
-const REFRESH_MODELS_POLL_ATTEMPTS = 15;
-
-/** 갱신된 하트비트가 서버 레지스트리에 반영될 때까지 짧게 재조회한다
- *  (ticket 40110b64). `last_seen_at` 이 직전에 본 값과 달라지면 그 인스턴스의
- *  하트비트가 새로 도착한 것이다 — 클라이언트/서버 시계 차이에 기대지 않으려고
- *  절대 시각 비교 대신 "값이 바뀌었는가"로 판정한다. 창 안에 못 받으면 null 을
- *  돌려주며, 이는 실패가 아니라 "아직"이다: 정기 하트비트가 최대 30초 안에 같은
- *  값을 싣고 온다. */
-async function waitForFreshHeartbeat(
-  instanceId: string,
-  seenBefore: string,
-): Promise<AgentManagerInstance | null> {
-  for (let attempt = 0; attempt < REFRESH_MODELS_POLL_ATTEMPTS; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, REFRESH_MODELS_POLL_MS));
-    let rows: AgentManagerInstance[];
-    try {
-      rows = await api.listAgentManagerInstances();
-    } catch {
-      // 일시적인 조회 실패는 창을 소모할 뿐 결과를 바꾸지 않는다.
-      continue;
-    }
-    const row = rows.find((r) => r.instance_id === instanceId);
-    if (row && row.last_seen_at !== seenBefore) return row;
-  }
-  return null;
-}
-
-/** cliType → 모델 수 요약 ("claude=12, codex=8"). */
-function summarizeModelCounts(models: Record<string, string[]> | undefined): string {
-  return Object.entries(models || {})
-    .map(([cli, list]) => [cli, Array.isArray(list) ? list.length : 0] as const)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([cli, count]) => `${cli}=${count}`)
-    .join(', ');
-}
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
 
 interface AgentManagerPageProps {

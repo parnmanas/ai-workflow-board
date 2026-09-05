@@ -5,6 +5,8 @@ import type { Agent, ClaudeBackendProfile, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
+// ticket 40110b64 — Runtime Hosts 화면과 같은 모델 리프레시 흐름.
+import { summarizeModelCounts, waitForFreshHeartbeat } from './agentManagerModelRefresh';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
 import {
   reconcileRuntimeProfileSelection,
@@ -96,6 +98,11 @@ export default function ManagedAgentDialog({
   const [runtimeProfilesState, setRuntimeProfilesState] = useState<RuntimeProfileLoadState>('idle');
   const [runtimeProfilesReloadKey, setRuntimeProfilesReloadKey] = useState(0);
   const [availableModelsByCli, setAvailableModelsByCli] = useState<Record<string, string[]>>({});
+  // ticket 40110b64 — 매니저 호스트에서 CLI 를 업그레이드한 직후 이 화면을 열면
+  // 목록이 낡아 있다. 아래 effect 가 찾아낸 인스턴스 id 를 들고 있다가 여기서
+  // 바로 재열거를 걸 수 있게 한다(Runtime Hosts 화면까지 다녀오지 않아도 되도록).
+  const [resolvedInstanceId, setResolvedInstanceId] = useState<string | null>(null);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
   // 이 manager의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
   // `undefined`(`[]`이 아님)는 "Host가 아직 이 값을 리포트하지 않음"을 뜻하며,
@@ -182,6 +189,7 @@ export default function ManagedAgentDialog({
           (managerInstanceId && instances.find((i) => i.instance_id === managerInstanceId)) ||
           instances.find((i) => i.agent_id === managerAgentId) ||
           null;
+        setResolvedInstanceId(match?.instance_id ?? null);
         setAvailableModelsByCli(match?.available_models || {});
         setAvailableRuntimeIds(
           Object.entries(match?.runtime_capabilities || {})
@@ -201,6 +209,7 @@ export default function ManagedAgentDialog({
       })
       .catch(() => {
         if (alive) {
+          setResolvedInstanceId(null);
           setAvailableModelsByCli({});
           setAvailableRuntimeIds([]);
           setHermesProfiles(undefined);
@@ -209,6 +218,47 @@ export default function ManagedAgentDialog({
       });
     return () => { alive = false; };
   }, [isOpen, managerInstanceId, managerAgentId]);
+
+  // ticket 40110b64 — 이 다이얼로그에서 바로 모델 목록을 다시 열거한다. 매니저
+  // 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다. 매니저가 재열거
+  // 직후 즉시 하트비트 1회를 보내므로, 그게 레지스트리에 반영될 때까지만 짧게
+  // 기다렸다가 이 화면의 후보 목록을 그 값으로 교체한다.
+  const handleRefreshModels = async () => {
+    if (!resolvedInstanceId || refreshingModels) return;
+    setRefreshingModels(true);
+    try {
+      const rows = await api.listAgentManagerInstances();
+      const current = rows.find((r) => r.instance_id === resolvedInstanceId);
+      if (!current) {
+        showToast('이 agent 를 관리하는 Runtime Host 를 찾지 못했습니다.', 'error');
+        return;
+      }
+      await api.sendAgentManagerCommand(resolvedInstanceId, {
+        command: 'refresh_available_models',
+      });
+      const fresh = await waitForFreshHeartbeat(resolvedInstanceId, current.last_seen_at);
+      if (!fresh) {
+        showToast(
+          '모델 재열거를 요청했지만 갱신된 하트비트가 아직 도착하지 않았습니다. ' +
+            '잠시 뒤 이 창을 다시 열면 반영돼 있습니다.',
+          'info',
+        );
+        return;
+      }
+      setAvailableModelsByCli(fresh.available_models || {});
+      const summary = summarizeModelCounts(fresh.available_models);
+      showToast(
+        summary
+          ? `모델 목록 갱신 완료 — ${summary}`
+          : '모델 목록 갱신 완료 — 모델을 보고한 CLI 가 없습니다.',
+        'success',
+      );
+    } catch (err: any) {
+      showToast(`모델 목록 갱신 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setRefreshingModels(false);
+    }
+  };
 
   const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
   // Candidate models for the selected CLI. When the manager reported a list we
@@ -481,6 +531,16 @@ export default function ManagedAgentDialog({
                 : 'This manager reported no model list for this CLI — type a model id the CLI accepts, or leave blank for its default.'}
               {' '}A running agent must be restarted (restart_agent) to pick up a model change.
             </div>
+            {resolvedInstanceId && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                <Button variant="ghost" onClick={handleRefreshModels} disabled={refreshingModels || busy}>
+                  {refreshingModels ? '모델 갱신 중…' : '모델 목록 새로고침'}
+                </Button>
+                <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+                  호스트에서 CLI 를 업그레이드했다면 눌러서 다시 열거하세요. 매니저는 재시작되지 않습니다.
+                </span>
+              </div>
+            )}
           </div>
         )}
         {cli === 'claude' && (
