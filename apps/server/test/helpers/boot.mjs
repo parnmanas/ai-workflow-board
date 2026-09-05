@@ -22,6 +22,7 @@
 // (아래 자체 doc comment 참고). nest-app-boot-smoke.test.mjs가 사용한다.
 
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -201,6 +202,27 @@ export async function bootAppModuleOnly({ logger = false } = {}) {
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('file://' + path.join(DIST_ROOT, 'app.module.js'));
   return NestFactory.create(AppModule, { logger, abortOnError: false });
+}
+
+// 빈 포트를 미리 하나 골라 돌려준다 — **최후의 수단**이다.
+//
+// 기본은 언제나 `bootApp({ port: 0 })` 이다: OS 가 빈 포트를 고르고 바인딩된
+// 번호를 그대로 돌려주므로 고를 때와 잡을 때 사이에 틈이 없다. 이 함수는 포트를
+// env 로만 받고 서버 핸들을 노출하지 않아 **실제 바인딩 포트를 회수할 방법이
+// 없는** 대상(예: dist/mcp-server.js 의 startHttp)에만 쓴다.
+//
+// 한계를 분명히 해둔다: probe 를 닫은 뒤 대상이 그 번호를 잡기까지 아주 짧은
+// 창이 있어 원리적으로 경합할 수 있다(TOCTOU). 그래도 고정 리터럴과 달리
+// 동시에 도는 다른 세션이 같은 번호를 **선언**해두는 일은 없어진다.
+export async function findFreePort() {
+  const probe = net.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '0.0.0.0', resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
 }
 
 export async function closeTestApp(app) {
