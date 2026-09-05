@@ -23,7 +23,7 @@ import {
   createWorkspace,
 } from './helpers/fixtures.mjs';
 
-process.env.PORT = process.env.REFRESH_AVAILABLE_MODELS_PORT || '7951';
+process.env.PORT = process.env.REFRESH_AVAILABLE_MODELS_PORT || '0';
 
 const INSTANCE_ID = 'refresh-models-instance';
 
