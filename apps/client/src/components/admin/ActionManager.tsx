@@ -22,12 +22,28 @@ interface AgentOption {
 /**
  * 이 Action 의 대상 에이전트 목록 (티켓 fc3906c5).
  *
- * 서버는 `target_agent_ids` 를 항상 채워 보내지만, 그 필드가 없던 시절의 응답을
- * 캐시했거나 구버전 서버를 보고 있으면 비어 있을 수 있다. 그때는 레거시 단일
- * 필드로 폴백한다 — 서버 쪽 actionTargetAgentIds() 와 같은 규칙이다.
+ * 서버 REST 경로는 `actionToWireJson` 으로 배열을 내보내지만, 이 헬퍼는 **문자열
+ * 형태도 받아낸다**: 이 컬럼은 DB 에 JSON 문자열로 저장되므로, 엔티티를 그대로
+ * 흘려보내는 경로가 하나라도 생기면(또는 이 필드가 없던 시절 응답이 캐시돼
+ * 있으면) 여기로 `'["a","b"]'` 가 들어온다. 문자열에 `.filter` 를 부르면 화면이
+ * 통째로 터지므로, 방어를 진입점 한 곳에 모아 둔다.
+ *
+ * 배열이 비면 레거시 단일 필드로 폴백한다 — 서버 쪽 actionTargetAgentIds() 와
+ * 같은 규칙이다.
  */
 function actionTargets(a: Pick<Action, 'target_agent_id' | 'target_agent_ids'>): string[] {
-  const many = (a.target_agent_ids || []).filter(Boolean);
+  const raw: unknown = a.target_agent_ids;
+  let many: string[] = [];
+  if (Array.isArray(raw)) {
+    many = raw.filter(Boolean);
+  } else if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) many = parsed.filter(Boolean);
+    } catch {
+      many = [];
+    }
+  }
   if (many.length > 0) return many;
   return a.target_agent_id ? [a.target_agent_id] : [];
 }

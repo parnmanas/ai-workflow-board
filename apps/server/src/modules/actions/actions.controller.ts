@@ -7,6 +7,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { ActionsService } from './actions.service';
 import { ActionRunReaperService } from './action-run-reaper.service';
+import { actionToWireJson } from '../../common/action-targets';
 
 @ApiBearerAuth('user-session')
 @ApiTags('actions')
@@ -26,14 +27,16 @@ export class ActionsController {
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
     const rows = await this.actionsService.list(workspaceId);
-    return res.json(rows);
+    // target_agent_ids 는 DB 에 JSON 문자열로 저장되므로 엔티티를 그대로
+    // 내보내면 클라이언트가 배열 대신 문자열을 받는다 (티켓 fc3906c5).
+    return res.json(rows.map(actionToWireJson));
   }
 
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response) {
     try {
       const row = await this.actionsService.get(id);
-      return res.json(row);
+      return res.json(actionToWireJson(row));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'Action not found' });
     }
@@ -43,7 +46,7 @@ export class ActionsController {
   async create(@Body() body: any, @Res() res: Response) {
     try {
       const row = await this.actionsService.create(body);
-      return res.status(201).json(row);
+      return res.status(201).json(actionToWireJson(row));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to create action' });
     }
@@ -53,7 +56,7 @@ export class ActionsController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
       const row = await this.actionsService.update(id, body?.workspace_id, body);
-      return res.json(row);
+      return res.json(actionToWireJson(row));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update action' });
     }

@@ -88,6 +88,33 @@ test('배치는 최신 실행이 위로 정렬된다', () => {
   assert.deepEqual(batches.map((b) => b.key), ['b-new', 'b-old']);
 });
 
+test('목록이 target_agent_ids 를 JSON 문자열로 받아도 화면이 터지지 않는다', async () => {
+  setupDom();
+  const originals = { listActions: api.listActions, getAgents: api.getAgents };
+  // 정규화를 빠뜨린 서버 경로(또는 캐시된 구 응답)를 재현한다 — 이 컬럼은 DB 에
+  // JSON 문자열로 저장되므로 엔티티가 그대로 흘러나오면 이 형태가 된다.
+  api.listActions = async () => [{
+    id: 'action-1', workspace_id: 'ws-1', board_id: null, name: 'CLI 최신화',
+    description: '', prompt: '', target_agent_id: 'agent-a',
+    target_agent_ids: '["agent-a","agent-b"]',
+    schedule_cron: '', trigger: '', trigger_label: '', enabled: true, max_runs: 10,
+    last_run_at: null, workspace_folder: '', repo_ref: null, checkout_mode: 'reuse',
+    created_at: '2026-09-05T00:00:00.000Z', updated_at: '2026-09-05T00:00:00.000Z',
+  }];
+  api.getAgents = async () => AGENTS;
+
+  try {
+    const { container, unmount } = mount(React.createElement(ActionManager, { workspaceId: 'ws-1' }));
+    await flush();
+    // 문자열에 .filter 를 부르면 렌더가 통째로 죽어 이름조차 안 보인다.
+    assert.match(container.textContent, /CLI 최신화/);
+    assert.match(container.textContent, /2개 에이전트/, '문자열도 대상 2개로 해석돼야 한다');
+    unmount();
+  } finally {
+    Object.assign(api, originals);
+  }
+});
+
 test('편집 화면에서 대상 2개를 선택해 저장하면 target_agent_ids 로 나간다', async () => {
   setupDom();
   const saved = [];

@@ -19,6 +19,7 @@
 // 단언이 의미를 갖는다.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { Action } from '../dist/entities/Action.js';
@@ -34,6 +35,7 @@ import * as ALL_ENTITIES from '../dist/entities/index.js';
 import { ActionsService } from '../dist/modules/actions/actions.service.js';
 import {
   actionTargetAgentIds,
+  actionToWireJson,
   agentScopedWorkspaceFolder,
   normalizeTargetAgentIds,
 } from '../dist/common/action-targets.js';
@@ -204,6 +206,47 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('대상을 0개로 만드는 update 는 거부된다', async () => {
     const created = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_A });
     await assert.rejects(service.update(created.id, WS, { target_agent_ids: [] }), /at least one target/);
+  });
+
+  it('REST 로 내보내는 형태는 JSON 문자열이 아니라 진짜 배열이다', async () => {
+    const created = await service.create({
+      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+    });
+    // 엔티티 자체는 JSON 문자열을 들고 있다 (SQLite/Postgres 패리티 관례).
+    assert.equal(typeof created.target_agent_ids, 'string');
+    // 그대로 res.json() 하면 클라이언트가 배열 대신 '["a","b"]' 를 받아
+    // .filter 호출 시 화면이 터진다 — 모든 REST 읽기 경로가 이 정규화를 탄다.
+    const wire = actionToWireJson(created);
+    assert.ok(Array.isArray(wire.target_agent_ids));
+    assert.deepEqual(wire.target_agent_ids, [AGENT_A, AGENT_B]);
+    assert.equal(wire.target_agent_id, AGENT_A, '레거시 키도 대표 대상으로 정규화된다');
+  });
+
+  it('REST 정규화는 배열이 빈 레거시 행도 단일 대상 배열로 채운다', () => {
+    const wire = actionToWireJson({ target_agent_id: AGENT_B, target_agent_ids: '[]' });
+    assert.deepEqual(wire.target_agent_ids, [AGENT_B]);
+  });
+
+  it('actions.controller 의 모든 Action 읽기 경로가 정규화를 통과한다', () => {
+    // awb-field-wiring 이 경고하는 "한 셀만 빠뜨림" 회귀 가드 — 새 읽기 경로를
+    // 추가하면서 정규화를 빼먹으면 여기서 걸린다.
+    const src = readFileSync(
+      new URL('../src/modules/actions/actions.controller.ts', import.meta.url),
+      'utf8',
+    );
+    const actionReads = [
+      'const rows = await this.actionsService.list(workspaceId);',
+      'const row = await this.actionsService.get(id);',
+      'const row = await this.actionsService.create(body);',
+      'const row = await this.actionsService.update(id, body?.workspace_id, body);',
+    ];
+    for (const read of actionReads) {
+      const idx = src.indexOf(read);
+      assert.ok(idx > -1, `읽기 경로가 사라졌다(테스트를 갱신할 것): ${read}`);
+      // 그 직후 응답 구문이 actionToWireJson 을 거쳐야 한다.
+      const after = src.slice(idx, idx + 400);
+      assert.match(after, /actionToWireJson/, `정규화를 거치지 않는 읽기 경로: ${read}`);
+    }
   });
 
   // ── 2. fan-out 실행 ─────────────────────────────────────────────────────
