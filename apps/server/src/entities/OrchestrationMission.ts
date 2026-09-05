@@ -170,6 +170,32 @@ export class OrchestrationMission {
   @Column({ type: 'varchar', default: 'auto' })
   confirm_policy: string;
 
+  // ── 미션 대화의 사용자 chat 옵션(티켓 9cfd8161) ───────────────────────────
+
+  /**
+   * 이 미션의 대화방에서 사람이 발화할 수 있는가 —
+   * `open`(기본) | `participants_only` | `off`.
+   * 어휘와 근거는 `orchestration.constants.ts` 의 `USER_CHAT_MODES` 참고.
+   *
+   * 이 값이 미션 대화의 **단일 기준**이다. 방의 `ChatRoom.open_join` 은 여기서 파생돼
+   * 동기화되는 캐시이고, 발화 게이트(`requireMissionRoomSpeaker`)는 방 플래그가 아니라
+   * 이 컬럼을 직접 읽는다 — 그래서 옵션을 바꾸면 **이미 실행 중인 미션 방에도 즉시**
+   * 반영된다.
+   *
+   * `confirm_policy` / `graph_enabled` 와 달리 **브리핑 계약이 아니다**. 저 둘은
+   * orchestrator 가 브리핑에서 들은 대로 그래프를 짜므로 시작 뒤 바꾸면 실행 규칙과
+   * 어긋나지만, 이 옵션은 "사람이 이 방에서 말할 수 있는가"만 정할 뿐 orchestrator 가
+   * 들은 내용을 한 글자도 바꾸지 않는다. 그래서 `updateMission` 의 draft 잠금
+   * (`touchesBrief`)에서 의도적으로 빠져 있고, running 중에도 편집 가능하다.
+   *
+   * `confirm_policy` 와 같은 이유로 DDL 마이그레이션은 쓰지 않는다 — 이 저장소의
+   * `db.ts` 는 전 백엔드에서 `synchronize` 를 켜고 migration 은 DATA 전용이다. 대신
+   * 읽는 쪽이 항상 `normalizeUserChatMode()` 를 거쳐 빈 문자열/NULL 로 남은 기존 행도
+   * 기본값으로 접힌다.
+   */
+  @Column({ type: 'varchar', default: 'open' })
+  user_chat_mode: string;
+
   @Column({ type: 'varchar', default: 'draft' })
   status: string;
 

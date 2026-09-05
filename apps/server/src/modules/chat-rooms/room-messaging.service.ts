@@ -434,8 +434,18 @@ export class RoomMessagingService {
     //      순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, 여기서 직접
     //      대조한다. `workspaceId` 가 비어 들어오면(경계를 확인할 수 없으면) 완화하지
     //      않는다 — 모르면 닫는 쪽이 안전한 실패다.
+    //
+    // 조건 1 의 근거는 mission 방에서만 달라진다(티켓 9cfd8161). 그 방의 자유 참여 여부는
+    // 방 플래그가 아니라 **미션의 `user_chat_mode`** 가 정한다 — 방 플래그는 그 옵션에서
+    // 파생돼 동기화되는 캐시일 뿐이라, 판정까지 캐시에 걸면 둘이 어긋난 순간(백필 이전
+    // 행, 수동 수정, 부분 실패) 사용자가 보는 옵션과 실제 동작이 갈라진다. mission 방이
+    // 아니면 종전대로 방 플래그를 본다.
+    const missionChat = await this.membership.resolveMissionChatPolicy(roomForName);
+    const openJoinAllowed = missionChat ? missionChat.mode === 'open' : !!roomForName?.open_join;
+
     const openJoinRelaxed =
-      !!roomForName?.open_join &&
+      !!roomForName &&
+      openJoinAllowed &&
       senderType === 'user' &&
       UUID_RE.test(senderId) &&
       !!workspaceId &&
@@ -454,7 +464,7 @@ export class RoomMessagingService {
     // 필요하다 — 자유 참여가 푸는 것은 "참여자인가"이지 "권한이 있는가"가 아니다.
     // 뒤집으면 권한 없는 사용자가 403 을 받으면서도 참여자 행과 participant_added
     // 이벤트만 남기고 간다.
-    await this.membership.requireMissionRoomSpeaker(roomForName, senderType, senderId);
+    await this.membership.requireMissionRoomSpeaker(roomForName, senderType, senderId, missionChat);
 
     const sanitizedMeta = sanitizeChatMessageMetadata(opts?.metadata);
 
