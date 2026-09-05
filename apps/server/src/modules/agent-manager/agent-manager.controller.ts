@@ -59,6 +59,9 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'refresh_mcp_config',
   'update_manager',
   'restart_manager',
+  // ticket 40110b64 — CLI 모델 목록 재열거. 매니저 재시작 없이 끝나는 읽기성
+  // 작업이라 restart_manager 와 달리 파괴적이지 않다.
+  'refresh_available_models',
 ] as const);
 
 /** 세 등급이 모두 알려진 support 값일 때만 `permission_tiers` 를 남긴다.

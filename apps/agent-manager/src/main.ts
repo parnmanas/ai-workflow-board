@@ -412,6 +412,34 @@ async function main(): Promise<void> {
   );
 }
 
+/**
+ * 설치된 CLI 들이 받아들이는 모델 id 를 어댑터별 `listModels()` 로 열거한다
+ * (cliType → 모델 id 목록).
+ *
+ * best-effort 계약: 어댑터마다 자체 타임아웃이 있고 절대 throw 하지 않으므로,
+ * 한 CLI 의 열거가 실패해도 나머지 결과는 그대로 살아남는다(실패한 CLI 는
+ * 결과 맵에서 키가 빠질 뿐이다). 느린 바이너리 스캔이 나머지를 직렬화하지
+ * 않도록 병렬로 돈다.
+ *
+ * ticket 40110b64 로 부팅 블록에서 모듈 레벨로 추출했다 — `refresh_available_models`
+ * 커맨드가 매니저 재시작 없이 같은 열거를 다시 돌릴 수 있어야 하기 때문이다.
+ * 지역 상태를 캡처하지 않는다.
+ */
+async function gatherAvailableModels(): Promise<Record<string, string[]>> {
+  const availableModels: Record<string, string[]> = {};
+  await Promise.all(
+    KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
+      try {
+        const models = await createAdapter(cli).listModels();
+        if (Array.isArray(models) && models.length) availableModels[cli] = models;
+      } catch (err: any) {
+        log(`listModels failed for cli=${cli}: ${err?.message ?? err}`);
+      }
+    }),
+  );
+  return availableModels;
+}
+
 async function runRuntime(
   config: SessionAwareConfig & SubagentAwareConfig,
   version: string,
@@ -661,6 +689,13 @@ async function runRuntime(
   // per manager process (enforced by CliLoginManager.isBusy/#startCliLogin).
   const cliLoginManager = new CliLoginManager(config);
 
+  // ticket 40110b64 — 설치된 CLI 별 모델 목록(cliType → 모델 id). 부팅 시 한 번
+  // 채우고, `refresh_available_models` 커맨드가 매니저 재시작 없이 통째로
+  // 교체한다. 하트비트는 이 값을 생성자에서 스냅샷하지 않고 provider 로 매
+  // tick 읽어 가므로(instance-heartbeat.ts `availableModelsProvider`), 교체
+  // 즉시 다음 전송분부터 새 목록이 실린다.
+  let availableModels: Record<string, string[]> = {};
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -680,6 +715,17 @@ async function runRuntime(
     // runSelfUpdate's drain-wait gate.
     countInFlightSessions,
     getInstanceId: () => instanceHeartbeat._real?.instanceId ?? null,
+    // ticket 40110b64 — 호스트에서 CLI 를 업그레이드한 뒤 매니저를 재시작하지
+    // 않고 모델 목록만 갱신하는 경로. 재열거 자체가 best-effort 라 일부 CLI 가
+    // 실패해도 나머지는 갱신된다. 재열거 직후 즉시 하트비트 1회를 보내 다음
+    // 정기 tick(최대 30초)을 기다리지 않고 서버 레지스트리에 반영한다 —
+    // 그 전송이 실패하더라도 다음 정기 tick 이 같은 값을 다시 싣고 가므로
+    // 커맨드를 실패시키지 않고 결과에만 표시한다.
+    refreshAvailableModels: async () => {
+      availableModels = await gatherAvailableModels();
+      const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
+      return { models: availableModels, heartbeatPosted };
+    },
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
       const next = loadConfig();
@@ -1032,12 +1078,6 @@ async function runRuntime(
     if (!agentId) return;
     presenceHeartbeat._real = new PresenceHeartbeat(config, agentId);
     presenceHeartbeat._real.start();
-    // Enumerate each installed CLI's accepted models once at boot. Best-effort
-    // (every adapter's listModels has its own timeout and never throws); run in
-    // parallel so a slow binary scan doesn't serialize the others. Shipped on
-    // every heartbeat as `available_models` so AWB's per-agent model selector
-    // reflects the CLIs actually installed on this host.
-    const availableModels: Record<string, string[]> = {};
     const runtimeCapabilities = await discoverRuntimeCapabilities();
     // ticket 49c173c8 — PATH를 명시 고정하는 systemd 드롭인이 두 번째로 어떤
     // 디렉터리(codex용 ~/.npm-global/bin, gh용 ~/.local/bin)를 조용히 빠뜨렸는데도
@@ -1057,16 +1097,9 @@ async function runRuntime(
       ),
     );
     log(`boot CLI resolution: ${formatCliResolutionSummary(cliResolutionChecks)}`);
-    await Promise.all(
-      KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
-        try {
-          const models = await createAdapter(cli).listModels();
-          if (Array.isArray(models) && models.length) availableModels[cli] = models;
-        } catch (err: any) {
-          log(`listModels failed for cli=${cli}: ${err?.message ?? err}`);
-        }
-      }),
-    );
+    // 설치된 CLI 별 모델 목록을 부팅 시 한 번 채운다. 이후 갱신은
+    // `refresh_available_models` 커맨드가 같은 열거를 다시 돌려 통째로 교체한다.
+    availableModels = await gatherAvailableModels();
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
@@ -1087,8 +1120,11 @@ async function runRuntime(
       // (currently just context_window_clamp) so the server can refuse to
       // dispatch a profile whose clamp an old manager would silently ignore.
       managerCapabilities: MANAGER_CAPABILITIES as string[],
-      // Per-CLI model lists gathered just above (cliType → model ids).
-      availableModels,
+      // Per-CLI model lists (cliType → model ids). Provider 로 넘기는 이유는
+      // ticket 40110b64 — 정적 값으로 넘기면 생성자가 부팅 시점 스냅샷을
+      // 캡처해 버려서, `refresh_available_models` 로 교체한 목록이 매니저를
+      // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
+      availableModelsProvider: () => availableModels,
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,

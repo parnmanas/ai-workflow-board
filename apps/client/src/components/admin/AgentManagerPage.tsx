@@ -40,6 +40,45 @@ import ManagedAgentDialog from './ManagedAgentDialog';
  */
 
 const REFRESH_FALLBACK_MS = 15_000;
+// ticket 40110b64 — refresh_available_models 를 보낸 뒤 "즉시 하트비트"가 도착할
+// 때까지 인스턴스 목록을 재조회하는 창. 매니저 쪽 재열거는 어댑터별 4초
+// 타임아웃을 병렬로 도는 best-effort 스캔이라 최악의 경우 몇 초가 걸린다.
+const REFRESH_MODELS_POLL_MS = 800;
+const REFRESH_MODELS_POLL_ATTEMPTS = 15;
+
+/** 갱신된 하트비트가 서버 레지스트리에 반영될 때까지 짧게 재조회한다
+ *  (ticket 40110b64). `last_seen_at` 이 직전에 본 값과 달라지면 그 인스턴스의
+ *  하트비트가 새로 도착한 것이다 — 클라이언트/서버 시계 차이에 기대지 않으려고
+ *  절대 시각 비교 대신 "값이 바뀌었는가"로 판정한다. 창 안에 못 받으면 null 을
+ *  돌려주며, 이는 실패가 아니라 "아직"이다: 정기 하트비트가 최대 30초 안에 같은
+ *  값을 싣고 온다. */
+async function waitForFreshHeartbeat(
+  instanceId: string,
+  seenBefore: string,
+): Promise<AgentManagerInstance | null> {
+  for (let attempt = 0; attempt < REFRESH_MODELS_POLL_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, REFRESH_MODELS_POLL_MS));
+    let rows: AgentManagerInstance[];
+    try {
+      rows = await api.listAgentManagerInstances();
+    } catch {
+      // 일시적인 조회 실패는 창을 소모할 뿐 결과를 바꾸지 않는다.
+      continue;
+    }
+    const row = rows.find((r) => r.instance_id === instanceId);
+    if (row && row.last_seen_at !== seenBefore) return row;
+  }
+  return null;
+}
+
+/** cliType → 모델 수 요약 ("claude=12, codex=8"). */
+function summarizeModelCounts(models: Record<string, string[]> | undefined): string {
+  return Object.entries(models || {})
+    .map(([cli, list]) => [cli, Array.isArray(list) ? list.length : 0] as const)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([cli, count]) => `${cli}=${count}`)
+    .join(', ');
+}
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
 
 interface AgentManagerPageProps {
@@ -508,6 +547,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [restartPending, setRestartPending] = useState(false);
   const [restartAllPending, setRestartAllPending] = useState(false);
   const [updatePending, setUpdatePending] = useState(false);
+  const [refreshModelsPending, setRefreshModelsPending] = useState(false);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -647,6 +687,47 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       showToast(`update_manager failed: ${err?.message || err}`, 'error');
     } finally {
       setUpdatePending(false);
+    }
+  };
+
+  // ticket 40110b64 — 호스트에서 claude / codex CLI 를 업그레이드한 뒤, 매니저를
+  // 재시작하지 않고 모델 목록만 다시 열거한다. 매니저 프로세스와 실행 중인 세션은
+  // 그대로 유지된다(재열거는 어댑터 introspection 일 뿐이다).
+  //
+  // 매니저는 재열거 직후 즉시 하트비트 1회를 보내므로 다음 정기 tick(30초)을
+  // 기다릴 필요가 없다. 커맨드 ack detail 은 서버 로그로만 흐르고 UI 로 되돌아오는
+  // 릴레이가 없으므로, 여기서는 그 하트비트가 레지스트리에 반영될 때까지 짧게
+  // 재조회한 뒤 **레지스트리가 실제로 받은** CLI별 모델 수를 보여준다 — 그게
+  // Agent 생성/편집 다이얼로그의 모델 드롭다운이 읽는 바로 그 값이다.
+  const handleRefreshModels = async () => {
+    if (refreshModelsPending) return;
+    setRefreshModelsPending(true);
+    const seenBefore = inst.last_seen_at;
+    try {
+      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+        command: 'refresh_available_models',
+      });
+      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
+      const fresh = await waitForFreshHeartbeat(inst.instance_id, seenBefore);
+      if (!fresh) {
+        showToast(
+          `refresh_available_models 전송됨${idTail} — 갱신된 하트비트가 아직 도착하지 ` +
+            `않았습니다. 다음 하트비트(최대 30초)에 반영됩니다.`,
+          'info',
+        );
+        return;
+      }
+      const summary = summarizeModelCounts(fresh.available_models);
+      showToast(
+        summary
+          ? `모델 목록 갱신 완료${idTail} — ${summary}`
+          : `모델 목록 갱신 완료${idTail} — 모델을 보고한 CLI 가 없습니다.`,
+        'success',
+      );
+    } catch (err: any) {
+      showToast(`refresh_available_models failed: ${err?.message || err}`, 'error');
+    } finally {
+      setRefreshModelsPending(false);
     }
   };
 
@@ -938,6 +1019,31 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {updatePending
                 ? 'Updating…'
                 : `Update → v${inst.latest_version || '?'}`}
+            </button>
+          )}
+          {inst.mode === 'manager' && (
+            <button
+              onClick={handleRefreshModels}
+              disabled={refreshModelsPending}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: 'transparent',
+                color: tokens.colors.textStrong,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                cursor: refreshModelsPending ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+                opacity: refreshModelsPending ? 0.6 : 1,
+              }}
+              title={
+                '이 호스트에 설치된 CLI 들의 모델 목록을 다시 열거합니다. ' +
+                '매니저는 재시작되지 않고 실행 중인 세션도 끊기지 않습니다. ' +
+                'CLI 를 업그레이드한 뒤 Agent 생성/편집 화면의 모델 드롭다운을 갱신할 때 쓰세요.'
+              }
+            >
+              {refreshModelsPending ? '모델 갱신 중…' : 'Refresh models'}
             </button>
           )}
           <button

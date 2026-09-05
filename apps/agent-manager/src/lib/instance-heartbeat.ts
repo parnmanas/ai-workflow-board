@@ -50,7 +50,16 @@ export interface InstanceMeta {
   // `available_models` so AWB can populate a per-agent model selector from the
   // CLIs actually installed on this host. Optional so callers that don't
   // gather models still build a valid heartbeat.
+  //
+  // 정적 스냅샷이다 — 생성자가 값을 캡처하므로 이후 바뀌지 않는다. 실행 중
+  // 갱신이 필요한 호출부는 아래 availableModelsProvider 를 쓸 것.
   availableModels?: Record<string, string[]> | null;
+  // ticket 40110b64 — 매 tick 현재 모델 목록을 읽는 provider. 호스트에서 CLI 를
+  // 업그레이드한 뒤 매니저를 재시작하지 않고 목록만 갱신할 수 있어야 하는데,
+  // 위의 정적 availableModels 는 부팅 시점 값에 영원히 고정되기 때문이다.
+  // 배선되면 정적 값보다 우선하고, 다른 provider 들과 같은 best-effort 계약을
+  // 따른다(throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다).
+  availableModelsProvider?: (() => Record<string, string[]> | null) | null;
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
@@ -301,6 +310,7 @@ export class InstanceHeartbeat {
       meta?.availableModels && typeof meta.availableModels === 'object'
         ? meta.availableModels
         : null;
+    const availableModelsProvider = meta?.availableModelsProvider ?? null;
     const runtimeCapabilities =
       meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
         ? meta.runtimeCapabilities
@@ -410,6 +420,20 @@ export class InstanceHeartbeat {
           activeRunWorkspaces = [];
         }
       }
+      // ticket 40110b64 — provider 가 배선돼 있으면 부팅 시점 스냅샷 대신 매
+      // tick 현재 값을 읽는다(그래야 refresh_available_models 로 교체한 목록이
+      // 재시작 없이 다음 하트비트에 실린다). 다른 provider 들과 같은 best-effort
+      // 계약: throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다.
+      let models = availableModels;
+      if (availableModelsProvider) {
+        try {
+          const live = availableModelsProvider();
+          models = live && typeof live === 'object' ? live : null;
+        } catch (err: any) {
+          log(`Instance heartbeat: available-models provider failed: ${err?.message ?? err}`);
+          models = availableModels;
+        }
+      }
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -427,9 +451,7 @@ export class InstanceHeartbeat {
         // and non-empty; legacy AWB servers (pre-ST-4) don't expect them.
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
-        ...(availableModels && Object.keys(availableModels).length
-          ? { available_models: availableModels }
-          : {}),
+        ...(models && Object.keys(models).length ? { available_models: models } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),
@@ -473,12 +495,7 @@ export class InstanceHeartbeat {
     this.#post().catch((err) =>
       log(`Instance heartbeat (initial) failed: ${err?.message ?? err}`),
     );
-    this.#timer = setInterval(() => {
-      this.#post().catch((err) =>
-        log(`Instance heartbeat failed: ${err?.message ?? err}`),
-      );
-    }, HEARTBEAT_INTERVAL_MS);
-    this.#timer.unref?.();
+    this.#armTimer();
     log(`Instance heartbeat started (instance=${this.#instanceId.slice(0, 8)}…)`);
   }
 
@@ -492,6 +509,46 @@ export class InstanceHeartbeat {
 
   get instanceId(): string {
     return this.#instanceId;
+  }
+
+  /**
+   * 정기 tick 을 기다릴 수 없는 호출자를 위한 즉시 1회 전송 (ticket 40110b64 —
+   * `refresh_available_models` 로 모델 목록을 재열거한 직후). 이게 없으면 갱신된
+   * 목록이 서버 레지스트리에 닿기까지 최대 HEARTBEAT_INTERVAL_MS(30초) 걸린다.
+   *
+   * 절대 throw 하지 않고 성공 여부만 돌려준다: 즉시 전송이 실패해도 다음 정기
+   * tick 이 같은 값을 다시 싣고 가므로, 이걸 호출한 커맨드까지 실패시킬 이유가
+   * 없다. start() 전이거나 stop() 이후, 혹은 페어링 전(agent_id 없음)이면
+   * 아무것도 보내지 않고 false 를 돌려준다.
+   *
+   * 이중 전송 방지: 전송 뒤 정기 타이머를 재무장해, 방금 보낸 것과 몇 초 간격의
+   * tick 이 곧바로 따라붙지 않고 온전한 한 주기 뒤에 오게 한다.
+   */
+  async postNow(): Promise<boolean> {
+    if (this.#stopped || !this.#agentId) return false;
+    try {
+      await this.#post();
+      return true;
+    } catch (err: any) {
+      log(`Instance heartbeat (immediate) failed: ${err?.message ?? err}`);
+      return false;
+    } finally {
+      if (!this.#stopped && this.#timer) {
+        clearInterval(this.#timer);
+        this.#armTimer();
+      }
+    }
+  }
+
+  /** 정기 tick 타이머를 건다. start() 와 postNow() 의 재무장이 같은 주기를
+   *  쓰도록 한 곳에 모아 둔다. */
+  #armTimer(): void {
+    this.#timer = setInterval(() => {
+      this.#post().catch((err) =>
+        log(`Instance heartbeat failed: ${err?.message ?? err}`),
+      );
+    }, HEARTBEAT_INTERVAL_MS);
+    this.#timer.unref?.();
   }
 
   async #post(): Promise<void> {

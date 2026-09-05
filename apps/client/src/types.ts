@@ -2398,7 +2398,10 @@ export type AgentManagerCommandKind =
   | 'update_plugins'
   | 'refresh_mcp_config'
   | 'update_manager'
-  | 'restart_manager';
+  | 'restart_manager'
+  // ticket 40110b64 — 호스트에 설치된 CLI 들의 모델 목록을 다시 열거한다.
+  // 매니저 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
+  | 'refresh_available_models';
 
 export interface AgentManagerCommandResult {
   ok: boolean;
