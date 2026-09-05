@@ -551,10 +551,21 @@ export class ActionsService {
     // resume/retry, no double retry-count. This is the scope-5 idempotency
     // lever for high-impact Actions where a duplicated re-dispatch is unsafe.
     const completedAt = new Date();
+    // 재시도 예정 여부를 **전이 전에** 확정한다 (티켓 fc3906c5, 리뷰 P1-1).
+    // 예전에는 action 을 전이 뒤에 읽어서, "실패 확정 ~ 재시도 행 삽입" 창 동안
+    // 배치가 완료된 것처럼 보였다. 이제 같은 UPDATE 로 `retry_pending` 을 함께
+    // 세워 그 창을 원자적으로 닫는다.
+    const action = await this.actionRepo.findOne({ where: { id: run.action_id } });
+    const highImpact = isHighImpactAction(action);
+    const preSourceTicketId = (run.source_ticket_id || '').trim();
+    const willRetry = args.status === 'failed'
+      && !!preSourceTicketId
+      && !highImpact
+      && (run.attempt ?? 1) < ActionsService.MAX_RUN_ATTEMPTS;
     const claim = await this.runRepo
       .createQueryBuilder()
       .update(ActionRun)
-      .set({ status: args.status, result_summary: summary, completed_at: completedAt })
+      .set({ status: args.status, result_summary: summary, completed_at: completedAt, retry_pending: willRetry })
       .where('id = :id', { id: run.id })
       .andWhere('workspace_id = :ws', { ws: workspaceId })
       .andWhere("status = 'running'")
@@ -594,9 +605,9 @@ export class ActionsService {
     run.result_summary = summary;
     run.completed_at = completedAt;
 
-    const action = await this.actionRepo.findOne({ where: { id: run.action_id } });
+    run.retry_pending = willRetry;
     const actionName = action?.name || run.action_id;
-    const sourceTicketId = (run.source_ticket_id || '').trim();
+    const sourceTicketId = preSourceTicketId;
 
     // No source ticket → this was a cron / manual / on-ticket-done run. Record
     // the terminal state and stop; there is nothing to resume or annotate.
@@ -649,8 +660,8 @@ export class ActionsService {
     // auto-retry, carrying the run's idempotency key so the target can dedupe.
     // Uses the same effective classification as the approval gate (explicit flag
     // OR name heuristic) so a misclassified deploy/publish is not auto-retried.
-    const highImpact = isHighImpactAction(action);
-    if (!highImpact && run.attempt < ActionsService.MAX_RUN_ATTEMPTS) {
+    // `highImpact` / `willRetry` 는 전이 이전에 이미 계산돼 있다(위 참고).
+    if (willRetry) {
       const nextAttempt = run.attempt + 1;
       let retryRunId = '';
       try {
@@ -682,6 +693,12 @@ export class ActionsService {
         // stuck waiting on a retry that never launched.
         this.logService.warn('Actions', `retry re-dispatch failed for run ${run.id}: ${e?.message || e}`);
       }
+      // 예약 해제 (티켓 fc3906c5, 리뷰 P1-1). 재시도 행이 생겼으면 그 running
+      // run 이 이제 배치를 붙들므로 해제해도 창이 열리지 않는다. 재시도가 아예
+      // 못 떴으면 붙들 것이 없으니 반드시 풀어야 배치가 영영 미완으로 남지
+      // 않는다(그 경우 아래에서 exhausted 로 이어진다).
+      await this.runRepo.update({ id: run.id }, { retry_pending: false });
+      run.retry_pending = false;
       if (retryRunId) {
         await this._postRunComment(
           sourceTicketId, run.workspace_id, actor,
@@ -767,7 +784,12 @@ export class ActionsService {
       return { shouldResume: true, comment: soloComment };
     }
 
-    const stillRunning = siblings.filter((r) => (r.status || 'running') === 'running');
+    // 아직 안 끝난 것 = 실행 중인 run + **재시도가 예약된 run** (리뷰 P1-1).
+    // 후자를 빼면 실패 확정과 재시도 행 삽입 사이의 창에서 배치가 완료된 것처럼
+    // 보여 조기 재개가 난다.
+    const stillRunning = siblings.filter(
+      (r) => (r.status || 'running') === 'running' || r.retry_pending === true,
+    );
     if (stillRunning.length > 0) {
       // 아직 미완 — 이 에이전트 결과만 진행 상황으로 남긴다.
       const who = await this._agentLabel(run.agent_id);
@@ -1222,14 +1244,21 @@ export class ActionsService {
       throw makeError(400, 'none of the requested agents is a target of this action');
     }
 
-    // 대상 에이전트 행을 미리 다 읽는다. 하나라도 없으면 **디스패치 전체를
-    // 거부**한다 — 부분 실행 후 "일부 대상이 사라졌다"를 나중에 알게 되는 것보다
-    // 설정을 고치게 하는 편이 낫고, 승인 grant도 아직 태우지 않은 상태다.
+    // 대상 에이전트 행을 미리 다 읽는다. 없어진 대상은 **그 대상만** 실패로
+    // 격리한다 (티켓 fc3906c5, 리뷰 P1-2). 예전에는 하나라도 없으면 전체를
+    // throw 했는데, 그러면 운영자가 대상 5개 중 1개를 지운 순간 나머지 4개까지
+    // 영영 안 돌아 "한 에이전트가 실패해도 나머지는 정상 완료" 기준을 깬다.
+    // 다만 **하나도 남지 않으면** 던진다 — 할 일이 없고, 승인 grant 도 아직
+    // 태우지 않은 상태라 fail-fast 가 안전하다.
     const agents: Agent[] = [];
+    const missingTargets: string[] = [];
     for (const agentId of targets) {
       const found = await this.agentRepo.findOne({ where: { id: agentId } });
-      if (!found) throw makeError(400, `target agent not found: ${agentId}`);
-      agents.push(found);
+      if (found) agents.push(found);
+      else missingTargets.push(agentId);
+    }
+    if (agents.length === 0) {
+      throw makeError(400, `no target agent of this action exists any more: ${missingTargets.join(', ')}`);
     }
 
     // Source-ticket workspace boundary (ticket 524bb434, reviewer req 1). When
@@ -1261,7 +1290,7 @@ export class ActionsService {
     // fan-out이면 대상마다 하나씩 미리 발급한다. 승인 grant에 찍는 값은 여전히
     // **첫 run의 id**다(아래) — 단일 대상일 때 fan-out 이전과 완전히 같은 값이
     // 남고, fan-out이어도 그 run의 batch_id로 나머지를 다 찾을 수 있다.
-    const runIds = targets.map(() => randomUUID());
+    const runIds = agents.map(() => randomUUID());
     // 같은 트리거에서 나온 run들을 묶는 배치 키. 대상이 하나뿐이어도 크기 1짜리
     // 배치를 발급해 경로를 하나로 유지한다. 재시도는 원래 배치를 승계한다.
     const batchId = (args.batchId || '').trim() || randomUUID();
@@ -1335,6 +1364,17 @@ export class ActionsService {
     const runs: DispatchedRun[] = [];
     const failures: DispatchFailure[] = [];
     const fanOut = allTargets.length > 1;
+
+    // 조회 단계에서 사라진 대상도 배치의 terminal 기록으로 남긴다 — 그래야
+    // 실행 이력이 이 배치를 "부분 실패"로 집계한다 (리뷰 P1-2).
+    for (const agentId of missingTargets) {
+      const message = `target agent not found: ${agentId}`;
+      failures.push({ agent_id: agentId, error: message });
+      await this._recordFailedTarget({
+        action, agentId, batchId, sourceTicketId, args, error: message,
+      });
+    }
+
     for (let i = 0; i < agents.length; i++) {
       const agent = agents[i];
       try {
@@ -1352,6 +1392,13 @@ export class ActionsService {
         failures.push({ agent_id: agent.id, error: message });
         this.logService.warn('Actions', 'fan-out dispatch failed for one agent (continuing)', {
           action_id: action.id, agent_id: agent.id, batch_id: batchId, err: message,
+        });
+        // 디스패치에 실패한 대상도 terminal run 으로 남긴다 (리뷰 P1-2).
+        // 남기지 않으면 실행 이력은 저장된 성공 run 만 집계해 실제 부분 실패를
+        // "전체 성공" 으로 표시하고, "대상 각각에 독립 ActionRun 생성" 기준도
+        // 충족하지 못한다.
+        await this._recordFailedTarget({
+          action, agentId: agent.id, batchId, sourceTicketId, args, error: message,
         });
       }
     }
@@ -1387,6 +1434,60 @@ export class ActionsService {
       runs,
       failures,
     };
+  }
+
+  /**
+   * 디스패치에 실패한 대상을 배치의 **terminal ActionRun 행**으로 남긴다
+   * (티켓 fc3906c5, 리뷰 P1-2).
+   *
+   * 이 행이 없으면 실행 이력이 성공 run 만 보고 배치를 "전체 성공" 으로
+   * 집계한다 — 실제로는 그 호스트에서 아무것도 실행되지 않았는데도. 배치 재개
+   * 판정도 이 행을 세므로, 실패 대상이 기록돼야 요약의 x/N 분모가 맞는다.
+   *
+   * `room_id` 는 null 이다: 예산 초과나 삭제된 에이전트처럼 방을 만들기 **전에**
+   * 끝난 실패라 붙일 방이 없다. Postgres 에서 이 컬럼은 uuid 라 '' 를 쓸 수 없어
+   * 컬럼을 nullable 로 열었다.
+   *
+   * 기록 자체가 실패해도 삼킨다 — 감사 행 하나 때문에 나머지 대상의 디스패치를
+   * 막는 것은 본말전도다(다른 best-effort 감사 경로와 같은 자세).
+   */
+  private async _recordFailedTarget(input: {
+    action: Action;
+    agentId: string;
+    batchId: string;
+    sourceTicketId: string;
+    args: DispatchActionArgs;
+    error: string;
+  }): Promise<void> {
+    const { action, agentId, batchId, sourceTicketId, args, error } = input;
+    try {
+      await this.runRepo.save(this.runRepo.create({
+        id: randomUUID(),
+        action_id: action.id,
+        workspace_id: action.workspace_id,
+        agent_id: agentId,
+        batch_id: batchId,
+        room_id: null,
+        triggered_by_type: args.triggeredByType,
+        triggered_by_id: args.triggeredById || '',
+        prompt_rendered: '',
+        source_ticket_id: sourceTicketId,
+        idempotency_key: '',
+        // 프롬프트가 전달된 적이 없으므로 완료 계약도 주입되지 않았다. false 라
+        // ActionRunReaperService 후보에도 들지 않는다(애초에 terminal 이라 무관).
+        completion_contract_injected: false,
+        approved_by: '',
+        approved_at: null,
+        status: 'failed',
+        result_summary: `dispatch failed: ${error}`.slice(0, 2000),
+        attempt: typeof args.attempt === 'number' && args.attempt > 0 ? Math.floor(args.attempt) : 1,
+        completed_at: new Date(),
+      }));
+    } catch (e: any) {
+      this.logService.warn('Actions', 'failed-target audit row could not be written (continuing)', {
+        action_id: action.id, agent_id: agentId, batch_id: batchId, err: String(e?.message || e),
+      });
+    }
   }
 
   /**

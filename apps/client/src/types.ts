@@ -381,7 +381,12 @@ export interface ActionRun {
   agent_id?: string;
   /** 같은 트리거 1회에서 나온 run 들의 묶음 키. 레거시 run 은 ''. */
   batch_id?: string;
-  room_id: string;
+  /**
+   * 이 run 의 대화방. 디스패치가 방을 만들기 **전에** 실패한 대상(예산 초과,
+   * 삭제된 에이전트)은 null 이다 — 그 run 은 실행이 시작되지도 못했다는 뜻이라
+   * 빈 대화가 아니라 실패로 표시해야 한다 (티켓 fc3906c5).
+   */
+  room_id: string | null;
   triggered_by_type: 'user' | 'system' | 'agent';
   triggered_by_id: string;
   prompt_rendered: string;

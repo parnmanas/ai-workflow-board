@@ -15,6 +15,10 @@ import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
 import { api } from '../src/api.ts';
 import ActionManager, { groupRunsIntoBatches } from '../src/components/admin/ActionManager.tsx';
 import { formatAgentDisplayName } from '../src/utils/agentName.ts';
+// ActionDetail 은 useAuth() 를 쓰므로 상세 화면을 여는 테스트는 AuthProvider 가
+// 필요하다(목록만 보는 테스트는 불필요).
+import { AuthProvider } from '../src/contexts/AuthContext.tsx';
+import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 
 const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
@@ -30,7 +34,7 @@ function run(over = {}) {
     id: over.id || 'run-1',
     action_id: 'action-1',
     workspace_id: 'ws-1',
-    room_id: over.room_id || 'room-1',
+    room_id: 'room_id' in over ? over.room_id : 'room-1',
     triggered_by_type: 'system',
     triggered_by_id: '',
     prompt_rendered: '',
@@ -109,6 +113,73 @@ test('목록이 target_agent_ids 를 JSON 문자열로 받아도 화면이 터�
     // 문자열에 .filter 를 부르면 렌더가 통째로 죽어 이름조차 안 보인다.
     assert.match(container.textContent, /CLI 최신화/);
     assert.match(container.textContent, /2개 에이전트/, '문자열도 대상 2개로 해석돼야 한다');
+    unmount();
+  } finally {
+    Object.assign(api, originals);
+  }
+});
+
+test('디스패치 실패 run(room_id=null)은 빈 대화가 아니라 실패로 표시된다', async () => {
+  // AuthProvider 가 localStorage 를 읽으므로 jsdom 의 것을 전역에 연결한다
+  // (sidebar-work-hierarchy 테스트와 같은 방식).
+  const dom = setupDom();
+  globalThis.localStorage = dom.window.localStorage;
+  // ToastProvider 가 알림음을 만들지만 jsdom 에는 Audio 가 없다 — 무해한 스텁.
+  globalThis.Audio = class { play() { return Promise.resolve(); } };
+  // jsdom 은 scrollIntoView 를 구현하지 않는다 — 대화 패널이 하단으로 스크롤할 때 필요.
+  dom.window.HTMLElement.prototype.scrollIntoView = function scrollIntoView() {};
+  const originals = {
+    listActions: api.listActions, getAgents: api.getAgents,
+    listActionRuns: api.listActionRuns, getChatRoomMessages: api.getChatRoomMessages,
+    getChatRoom: api.getChatRoom,
+  };
+  const action = {
+    id: 'action-1', workspace_id: 'ws-1', board_id: null, name: 'CLI 최신화',
+    description: '', prompt: '', target_agent_id: 'agent-a', target_agent_ids: ['agent-a', 'agent-b'],
+    schedule_cron: '', trigger: '', trigger_label: '', enabled: true, max_runs: 10,
+    last_run_at: null, workspace_folder: '', repo_ref: null, checkout_mode: 'reuse',
+    created_at: '2026-09-05T00:00:00.000Z', updated_at: '2026-09-05T00:00:00.000Z',
+  };
+  api.listActions = async () => [action];
+  api.getAgents = async () => AGENTS;
+  api.getChatRoomMessages = async () => [];
+  api.getChatRoom = async () => ({ participants: [] });
+  // 배치: agent-b 는 성공, agent-a 는 디스패치 실패(방 없음).
+  api.listActionRuns = async () => [
+    run({ id: 'failed-a', batch_id: 'b-1', agent_id: 'agent-a', status: 'failed', room_id: null,
+          result_summary: 'dispatch failed: run budget exceeded' }),
+    run({ id: 'ok-b', batch_id: 'b-1', agent_id: 'agent-b', status: 'succeeded', room_id: 'room-b' }),
+  ];
+
+  try {
+    const { container, unmount } = mount(
+      React.createElement(
+        ToastProvider, null,
+        React.createElement(AuthProvider, null,
+          React.createElement(ActionManager, { workspaceId: 'ws-1' })),
+      ),
+    );
+    await flush();
+    // Action 상세로 진입한다.
+    const openButton = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('CLI 최신화'));
+    assert.ok(openButton, 'Action 을 열 수 없다');
+    click(openButton);
+    await flush();
+
+    // 배치가 부분 실패로 집계되어야 한다 — 실패 run 이 이력에 있어야만 가능하다.
+    const history = container.querySelector('[data-testid="action-run-history"]');
+    assert.ok(history, '실행 이력이 없다');
+    assert.match(history.textContent, /부분 실패 \(1\/2\)/);
+
+    // 실패 run 을 선택하면 "빈 대화" 가 아니라 실패 사유가 보여야 한다.
+    const failedRow = [...history.querySelectorAll('button')].find((b) => b.textContent.includes('failed-a'.slice(0, 8)));
+    assert.ok(failedRow, '실패 run 행이 없다');
+    click(failedRow);
+    await flush();
+
+    const panel = container.querySelector('[data-testid="action-run-dispatch-failed"]');
+    assert.ok(panel, '방 없는 run 이 실패로 표시되지 않는다 — 빈 대화와 구분이 안 된다');
+    assert.match(panel.textContent, /run budget exceeded/);
     unmount();
   } finally {
     Object.assign(api, originals);
