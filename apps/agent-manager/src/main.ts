@@ -47,7 +47,10 @@ import {
 } from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
-import { KNOWN_ADAPTER_CLI_TYPES, createAdapter } from './lib/cli-adapters/index.js';
+import { createAdapter } from './lib/cli-adapters/index.js';
+// ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
+// 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
+import { gatherAvailableModels } from './lib/available-models.js';
 import {
   checkAuxiliaryCli,
   discoverRuntimeCapabilities,
@@ -410,34 +413,6 @@ async function main(): Promise<void> {
     argv,
     runtimeProfileOverride,
   );
-}
-
-/**
- * 설치된 CLI 들이 받아들이는 모델 id 를 어댑터별 `listModels()` 로 열거한다
- * (cliType → 모델 id 목록).
- *
- * best-effort 계약: 어댑터마다 자체 타임아웃이 있고 절대 throw 하지 않으므로,
- * 한 CLI 의 열거가 실패해도 나머지 결과는 그대로 살아남는다(실패한 CLI 는
- * 결과 맵에서 키가 빠질 뿐이다). 느린 바이너리 스캔이 나머지를 직렬화하지
- * 않도록 병렬로 돈다.
- *
- * ticket 40110b64 로 부팅 블록에서 모듈 레벨로 추출했다 — `refresh_available_models`
- * 커맨드가 매니저 재시작 없이 같은 열거를 다시 돌릴 수 있어야 하기 때문이다.
- * 지역 상태를 캡처하지 않는다.
- */
-async function gatherAvailableModels(): Promise<Record<string, string[]>> {
-  const availableModels: Record<string, string[]> = {};
-  await Promise.all(
-    KNOWN_ADAPTER_CLI_TYPES.map(async (cli) => {
-      try {
-        const models = await createAdapter(cli).listModels();
-        if (Array.isArray(models) && models.length) availableModels[cli] = models;
-      } catch (err: any) {
-        log(`listModels failed for cli=${cli}: ${err?.message ?? err}`);
-      }
-    }),
-  );
-  return availableModels;
 }
 
 async function runRuntime(
