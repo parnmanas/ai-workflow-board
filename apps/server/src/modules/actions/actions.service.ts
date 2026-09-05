@@ -29,6 +29,12 @@ import { parseCron } from './cron';
 import { enforceRunBudget } from '../../common/run-budget-guard';
 import { normalizeWorkspaceFolder, normalizeCheckoutMode, normalizeRepoRef } from '../../common/workspace-folder-options';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
+import {
+  actionTargetAgentIds,
+  agentScopedWorkspaceFolder,
+  normalizeTargetAgentIds,
+  serializeTargetAgentIds,
+} from '../../common/action-targets';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -161,6 +167,18 @@ export interface DispatchActionArgs {
   // the target operation can dedupe. Undefined on a first ticket-driven
   // dispatch, where `dispatch` mints a fresh key.
   idempotencyKey?: string;
+  // fan-out 대상 좁히기 (티켓 fc3906c5). 비우면 Action에 설정된 대상 **전체**로
+  // fan-out한다(정상 트리거). `completeRun`의 재시도만 이 필드를 채워 실패한
+  // 그 에이전트 하나로 좁힌다 — 재시도가 배치를 통째로 다시 돌리면 이미 성공한
+  // 에이전트에서 외부 작업이 두 번 실행된다. 여기 넣은 id 중 Action의 실제
+  // 대상이 아닌 것은 무시되고, 교집합이 비면 디스패치가 거부된다(있지도 않은
+  // 대상을 실행 시점에 주입하는 경로가 되지 않도록 — 대상은 여전히 Action
+  // 정의에 선언적으로 고정된다).
+  onlyAgentIds?: string[];
+  // fan-out 재시도가 원래 배치를 승계하기 위한 키 (티켓 fc3906c5). 비우면 새
+  // 배치를 발급한다. 재시도 run이 새 배치로 떨어지면 원래 배치가 "전원 종료"로
+  // 보여 티켓이 조기 재개된다.
+  batchId?: string;
   // NOTE: there is deliberately NO `approvedByUserId` here. High-impact approval
   // is NOT something a dispatch caller (an agent) may assert (ticket 524bb434,
   // scope 5, reviewer req). `dispatch` instead atomically consumes a human-made
@@ -186,10 +204,35 @@ export interface CreateApprovalArgs {
   ttlMinutes?: number;
 }
 
+/** fan-out 배치 안에서 성공적으로 만들어진 run 하나 (티켓 fc3906c5). */
+export interface DispatchedRun {
+  run: ActionRun;
+  agent_id: string;
+  room_id: string;
+  prompt: string;
+}
+
+/** 배치 안에서 디스패치에 실패한 대상 하나 — 나머지는 그대로 진행됐다. */
+export interface DispatchFailure {
+  agent_id: string;
+  error: string;
+}
+
 export interface DispatchActionResult {
+  // ── 하위 호환 (fan-out 이전 형태, 티켓 fc3906c5) ─────────────────────────
+  // 첫 번째 **성공한** run. 대상이 하나뿐인 Action에서는 fan-out 도입 전과
+  // 완전히 같은 값이라, 이 세 키만 읽던 호출부는 손대지 않아도 그대로 맞다.
+  // 대상이 여럿이면 `runs`/`batch_id`를 볼 것.
   run: ActionRun;
   room_id: string;
   prompt: string;
+  // ── fan-out ────────────────────────────────────────────────────────────
+  /** 이 트리거가 만든 배치 키. run이 하나뿐이어도 항상 발급된다. */
+  batch_id: string;
+  /** 성공한 run들 (대상 순서 유지). 최소 1개 — 전원 실패면 dispatch가 던진다. */
+  runs: DispatchedRun[];
+  /** 실패한 대상들. 비어 있으면 전원 성공. */
+  failures: DispatchFailure[];
 }
 
 export interface CompleteRunArgs {
@@ -296,19 +339,21 @@ export class ActionsService {
     return findOrFail(this.actionRepo, { where: { id } }, 'Action not found');
   }
 
-  async create(input: Partial<Action> & { workspace_id: string; name: string; target_agent_id: string }): Promise<Action> {
+  async create(input: Partial<Action> & { workspace_id: string; name: string; target_agent_id?: string }): Promise<Action> {
     if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    if (!input.target_agent_id) throw makeError(400, 'target_agent_id is required');
+
+    // 대상은 배열이 정본이고 레거시 단일 필드는 그 첫 원소로 흡수된다
+    // (티켓 fc3906c5). 둘 중 어느 쪽으로 들어와도 같은 목록으로 수렴한다.
+    const targetIds = actionTargetAgentIds(input);
+    if (targetIds.length === 0) throw makeError(400, 'target_agent_id is required');
 
     // Scope check: the target agent must live in this workspace (or be global —
     // workspace_id null/empty means global). Cross-workspace dispatch would
     // bypass our SSE recipient filter and silently never deliver.
-    const agent = await this.agentRepo.findOne({ where: { id: input.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, input.workspace_id)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
-    }
+    // fan-out이면 **모든** 대상을 검사한다 — 하나라도 타 워크스페이스면 저장
+    // 자체를 거부해서, 절대 전달되지 않을 대상이 설정에 남지 않게 한다.
+    await this._assertTargetAgentsVisible(targetIds, input.workspace_id);
 
     if (input.board_id) {
       throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
@@ -330,7 +375,9 @@ export class ActionsService {
       name: input.name.trim(),
       description: input.description ?? '',
       prompt: input.prompt ?? '',
-      target_agent_id: input.target_agent_id,
+      // 두 컬럼은 항상 함께 쓴다 — 배열이 정본, 단일은 첫 원소 미러.
+      target_agent_id: targetIds[0],
+      target_agent_ids: serializeTargetAgentIds(targetIds),
       schedule_cron: input.schedule_cron ?? '',
       enabled: input.enabled !== false,
       high_impact: input.high_impact === true,
@@ -354,13 +401,18 @@ export class ActionsService {
     }
     if (patch.description !== undefined) existing.description = patch.description;
     if (patch.prompt !== undefined) existing.prompt = patch.prompt;
-    if (patch.target_agent_id !== undefined) {
-      const agent = await this.agentRepo.findOne({ where: { id: patch.target_agent_id } });
-      if (!agent) throw makeError(400, 'target agent not found');
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-        throw makeError(400, 'target agent belongs to a different workspace');
-      }
-      existing.target_agent_id = patch.target_agent_id;
+    // 대상 갱신 (티켓 fc3906c5). 배열이 오면 배열이 이기고, 레거시 단일 필드만
+    // 오면 그것이 단일 대상 배열로 해석된다. 어느 쪽이든 두 컬럼을 같이 쓴다 —
+    // 배열만 갱신하고 단일 미러를 방치하면 레거시 컬럼만 읽는 코드가 지워진
+    // 대상을 계속 보게 된다.
+    if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
+      const nextIds = patch.target_agent_ids !== undefined
+        ? normalizeTargetAgentIds(patch.target_agent_ids)
+        : normalizeTargetAgentIds([patch.target_agent_id]);
+      if (nextIds.length === 0) throw makeError(400, 'at least one target agent is required');
+      await this._assertTargetAgentsVisible(nextIds, workspaceId);
+      existing.target_agent_id = nextIds[0];
+      existing.target_agent_ids = serializeTargetAgentIds(nextIds);
     }
     if (patch.board_id !== undefined) {
       if ((patch.board_id || null) !== existing.board_id) {
@@ -397,6 +449,25 @@ export class ActionsService {
   // opts into the lifecycle hook (OnTicketDoneActionService).
   private _isValidTrigger(trigger: string): boolean {
     return trigger === '' || trigger === 'on_ticket_done';
+  }
+
+  /**
+   * 대상 에이전트 목록 전체가 이 워크스페이스에서 보이는지 검사한다
+   * (티켓 fc3906c5 — 단일 대상 시절의 검사를 배열로 확장).
+   *
+   * 하나라도 없거나 타 워크스페이스면 **저장을 통째로 거부**한다. 부분 저장을
+   * 허용하면 사용자가 고른 대상 중 일부가 조용히 빠진 Action이 남고, 이후 모든
+   * 실행이 사용자 의도와 다른 범위로 돌게 된다. 어느 id가 문제인지 메시지에
+   * 담아 UI에서 바로 고칠 수 있게 한다.
+   */
+  private async _assertTargetAgentsVisible(agentIds: string[], workspaceId: string): Promise<void> {
+    for (const agentId of agentIds) {
+      const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+      if (!agent) throw makeError(400, `target agent not found: ${agentId}`);
+      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
+        throw makeError(400, `target agent belongs to a different workspace: ${agentId}`);
+      }
+    }
   }
 
   async remove(id: string, workspaceId: string): Promise<void> {
@@ -960,15 +1031,43 @@ export class ActionsService {
     // completeRun) so a retry that trips this guard is naturally caught by
     // completeRun's existing try/catch and treated as exhaustion — no
     // separate retry-bypass flag needed (ticket a51ec6d9 plan "정정 2").
+    //
+    // fan-out(티켓 fc3906c5) 이후에도 이 호출은 여기 남는다. run 한 건당 실제
+    // 계수는 `_dispatchOne`이 하지만(대상 N개 = run N개 = 예산 N 소모), 이
+    // 헤드 체크는 **승인 grant를 소모하기 전에** fail-fast 하는 역할이 따로
+    // 있다: 이미 상한을 넘긴 상태에서 아래 승인 게이트를 통과시키면
+    // 일회용 grant만 태우고 run은 한 건도 못 만든 채 끝나, 사람이 승인을 다시
+    // 발급해야 하는 상태로 빠진다.
     await enforceRunBudget(
       { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
       'action',
       action.workspace_id,
     );
-    if (!action.target_agent_id) throw makeError(400, 'Action has no target agent set');
 
-    const agent = await this.agentRepo.findOne({ where: { id: action.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
+    // ── 대상 해석 (티켓 fc3906c5) ────────────────────────────────────────
+    // 대상은 Action 정의에 선언적으로 고정돼 있고, 그 수가 1이 아니라 N일 수
+    // 있다. `onlyAgentIds`는 completeRun의 재시도가 **실패한 그 에이전트만**
+    // 다시 돌리기 위해 쓰는 필터다 — 재시도가 배치 전체를 다시 fan-out 하면
+    // 이미 성공한 에이전트에서 외부 작업이 두 번 실행된다.
+    const allTargets = actionTargetAgentIds(action);
+    if (allTargets.length === 0) throw makeError(400, 'Action has no target agent set');
+    const onlyFilter = normalizeTargetAgentIds(args.onlyAgentIds);
+    const targets = onlyFilter.length > 0
+      ? allTargets.filter((id) => onlyFilter.includes(id))
+      : allTargets;
+    if (targets.length === 0) {
+      throw makeError(400, 'none of the requested agents is a target of this action');
+    }
+
+    // 대상 에이전트 행을 미리 다 읽는다. 하나라도 없으면 **디스패치 전체를
+    // 거부**한다 — 부분 실행 후 "일부 대상이 사라졌다"를 나중에 알게 되는 것보다
+    // 설정을 고치게 하는 편이 낫고, 승인 grant도 아직 태우지 않은 상태다.
+    const agents: Agent[] = [];
+    for (const agentId of targets) {
+      const found = await this.agentRepo.findOne({ where: { id: agentId } });
+      if (!found) throw makeError(400, `target agent not found: ${agentId}`);
+      agents.push(found);
+    }
 
     // Source-ticket workspace boundary (ticket 524bb434, reviewer req 1). When
     // a ticket dispatches this run, the ticket MUST exist and live in the same
@@ -995,7 +1094,14 @@ export class ActionsService {
     // widened action_runs.room_id from varchar to uuid — Postgres rejects '' with
     // `invalid input syntax for type uuid: ""`. Generating the id here lets us
     // write a complete row up front and avoid the empty-string sentinel entirely.
-    const runId = randomUUID();
+    //
+    // fan-out이면 대상마다 하나씩 미리 발급한다. 승인 grant에 찍는 값은 여전히
+    // **첫 run의 id**다(아래) — 단일 대상일 때 fan-out 이전과 완전히 같은 값이
+    // 남고, fan-out이어도 그 run의 batch_id로 나머지를 다 찾을 수 있다.
+    const runIds = targets.map(() => randomUUID());
+    // 같은 트리거에서 나온 run들을 묶는 배치 키. 대상이 하나뿐이어도 크기 1짜리
+    // 배치를 발급해 경로를 하나로 유지한다. 재시도는 원래 배치를 승계한다.
+    const batchId = (args.batchId || '').trim() || randomUUID();
 
     // ── High-impact pre-execution approval gate (ticket 524bb434, scope 5) ──
     // A high-impact Action (explicit flag OR name heuristic) has irreversible
@@ -1013,10 +1119,16 @@ export class ActionsService {
     // auto-execution — is what unblocks it (completion criterion: "승인이 반드시
     // 필요한 경우만 Pending"). On consume, the run's approver/time are copied FROM
     // the grant (the real human), so the audit attribution can't be forged.
+    //
+    // 승인 범위 = **트리거 1회 = 승인 1회**(티켓 fc3906c5). grant는 이미
+    // `(action, source_ticket)` 단위라 배치 경계와 자연히 일치하므로, 여기서
+    // 한 번 소모한 결과를 배치의 모든 run이 공유한다. 에이전트별로 grant를
+    // 요구하면 운영자가 같은 배포를 호스트 수만큼 승인해야 하고, 그 사이
+    // 일부만 승인된 어중간한 상태가 생긴다.
     const highImpact = isHighImpactAction(action);
     let approval: { userId: string; userName: string; at: Date } | null = null;
     if (sourceTicketId && highImpact && args.triggeredByType !== 'user') {
-      approval = await this._consumeApproval(action.id, action.workspace_id, sourceTicketId, runId);
+      approval = await this._consumeApproval(action.id, action.workspace_id, sourceTicketId, runIds[0]);
       if (!approval) {
         await this._parkForApproval(sourceTicketId, action, args.triggeredById);
         throw makeError(
@@ -1043,6 +1155,7 @@ export class ActionsService {
     // Build a render context the user can interpolate against. Resolve the
     // optional pieces best-effort — missing fields render as empty string in
     // the template, which is friendlier than failing the whole Run.
+    // 배치 공통 조각이라 루프 밖에서 한 번만 읽는다(대상 N개여도 쿼리는 1회씩).
     const workspace = await this.workspaceRepo.findOne({ where: { id: action.workspace_id } });
     const board = args.ticketContext?.board_id
       ? await this.boardRepo.findOne({ where: { id: args.ticketContext.board_id } })
@@ -1050,6 +1163,105 @@ export class ActionsService {
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
       : null;
+
+    // ── fan-out 루프 ────────────────────────────────────────────────────
+    // 대상마다 독립적으로 디스패치하고, **한 대상의 실패가 나머지를 막지 않게**
+    // per-agent try/catch로 감싼다(선례: on-ticket-done-action.service.ts의
+    // per-action 루프). 오프라인/삭제된 에이전트, 방 생성 실패, 예산 초과가
+    // 모두 여기로 떨어져 그 에이전트만 failures[]에 남는다.
+    const runs: DispatchedRun[] = [];
+    const failures: DispatchFailure[] = [];
+    const fanOut = allTargets.length > 1;
+    for (let i = 0; i < agents.length; i++) {
+      const agent = agents[i];
+      try {
+        runs.push(await this._dispatchOne({
+          action, agent, args, workspace, board, user,
+          runId: runIds[i],
+          batchId,
+          sourceTicketId,
+          approval,
+          highImpact,
+          fanOut,
+        }));
+      } catch (e: any) {
+        const message = String(e?.message || e);
+        failures.push({ agent_id: agent.id, error: message });
+        this.logService.warn('Actions', 'fan-out dispatch failed for one agent (continuing)', {
+          action_id: action.id, agent_id: agent.id, batch_id: batchId, err: message,
+        });
+      }
+    }
+
+    // 전원 실패면 던진다 — 호출부(스케줄러, 재시도, MCP)는 예전부터 "디스패치
+    // 실패는 throw"를 전제로 try/catch 하고 있고, 성공한 run이 하나도 없는데
+    // 성공처럼 반환하면 그 계약이 조용히 깨진다. 첫 실패 사유를 그대로 올려
+    // 단일 대상 Action에서는 메시지가 fan-out 이전과 같게 유지된다.
+    if (runs.length === 0) {
+      const detail = failures.map((f) => `${f.agent_id}: ${f.error}`).join('; ');
+      throw makeError(502, failures.length === 1 ? failures[0].error : `all ${failures.length} targets failed to dispatch — ${detail}`);
+    }
+
+    // Update Action.last_run_at so the scheduler doesn't double-fire on the
+    // same minute boundary. 배치당 한 번(run마다가 아니라).
+    await this.actionRepo.update(action.id, { last_run_at: new Date() });
+
+    // FIFO prune: drop rooms beyond max_runs, oldest first. Run AFTER we
+    // saved the new rooms so we never accidentally delete one we just created.
+    await this._pruneOldRuns(action.id, action.max_runs);
+
+    if (fanOut) {
+      this.logService.info('Actions', `fan-out dispatched action ${action.id} batch ${batchId} — ${runs.length} ok, ${failures.length} failed`);
+    }
+
+    const first = runs[0];
+    return {
+      // 하위 호환 키: 첫 성공 run. 단일 대상 Action에서는 fan-out 이전과 동일.
+      run: first.run,
+      room_id: first.room_id,
+      prompt: first.prompt,
+      batch_id: batchId,
+      runs,
+      failures,
+    };
+  }
+
+  /**
+   * 대상 에이전트 **한 명**에 대한 실제 디스패치 (티켓 fc3906c5에서 `dispatch()`
+   * 로부터 분해). 방 생성 → run 행 저장 → 참여자 등록 → 첫 메시지 전송까지가
+   * 여기 있고, 배치 공통 판단(승인 소모, 대상 해석, 프루닝)은 호출자인
+   * `dispatch()`에 남는다.
+   *
+   * 던지면 그 에이전트 하나만 실패로 기록되고 배치의 나머지는 계속 진행된다.
+   */
+  private async _dispatchOne(input: {
+    action: Action;
+    agent: Agent;
+    args: DispatchActionArgs;
+    workspace: Workspace | null;
+    board: Board | null;
+    user: User | null;
+    runId: string;
+    batchId: string;
+    sourceTicketId: string;
+    approval: { userId: string; userName: string; at: Date } | null;
+    highImpact: boolean;
+    /** 이 Action의 대상이 2개 이상인가 — 작업폴더를 에이전트별로 가를지 판단. */
+    fanOut: boolean;
+  }): Promise<DispatchedRun> {
+    const { action, agent, args, workspace, board, user, runId, batchId, sourceTicketId, approval, highImpact, fanOut } = input;
+
+    // run 단위 예산 계수 (티켓 fc3906c5). `dispatch()` 헤드 체크는 승인 소모
+    // 전 fail-fast 용이고, 실제 계수는 여기서 run 하나당 한 번 일어난다 —
+    // fan-out은 트리거 1회에 run N건이라 자원도 N배 쓰기 때문이다(방 N개,
+    // 에이전트 spawn N회). 트리거 단위로 세면 fan-out이 폭주 위험을 가장 키우는
+    // 지점에서 가드가 무력해진다. 배치 도중 상한을 넘으면 그 에이전트만 실패로
+    // 남고 이미 만들어진 run은 정상 진행된다.
+    await enforceRunBudget(
+      { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
+      'action',
+      action.workspace_id,
+    );
 
     const ctx = buildRenderContext({
       workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
@@ -1070,13 +1282,22 @@ export class ActionsService {
     // 위에서 여전히 `board`를 해석해두므로, 그 id를 넘기면 repo_ref가 비어있을
     // 때 그 board의 environment_config repo를 티켓 트리거와 동일하게 상속받을
     // 수 있다.
+    //
+    // fan-out 작업폴더 분리 (티켓 fc3906c5): 기본 폴더는 `.awb/act/<action8>`로
+    // **action 단위**라, 같은 매니저 아래 두 에이전트가 fan-out되면 둘이 같은
+    // 체크아웃을 공유해 서로의 작업 트리를 밟는다. 대상이 2개 이상일 때만 leaf에
+    // 에이전트 접미사를 붙여 가른다 — 단일 대상 Action의 폴더는 글자 하나
+    // 안 바뀌므로 기존 warm checkout이 그대로 유지된다.
+    const workspaceFolder = fanOut
+      ? agentScopedWorkspaceFolder(action.workspace_folder, action.id, agent.id)
+      : action.workspace_folder;
     const runProvision = await buildRunProvision(this.dataSource, {
       kind: 'action',
       id: action.id,
       runId,
       workspaceId: action.workspace_id,
       boardId: board?.id ?? null,
-      workspaceFolder: action.workspace_folder,
+      workspaceFolder,
       repoRef: action.repo_ref,
       checkoutMode: action.checkout_mode,
     });
@@ -1094,9 +1315,16 @@ export class ActionsService {
     // failed run's key so the whole chain shares one (scope 5). Only ticket-
     // driven runs get a key — cron/manual runs never retry, so there is
     // nothing to dedupe against.
-    const idempotencyKey = sourceTicketId
-      ? (args.idempotencyKey || '').trim() || randomUUID()
+    //
+    // 키는 **에이전트마다 따로** 발급한다 (티켓 fc3906c5). fan-out의 각 run은
+    // 서로 다른 호스트에서 도는 서로 다른 작업이므로, 배치가 키를 공유하면
+    // 대상 쪽 dedupe가 에이전트 B의 실행을 A의 재전송으로 오인해 건너뛸 수
+    // 있다. 호출자가 넘긴 키는 대상이 정확히 하나로 좁혀졌을 때(= 재시도)만
+    // 존중한다 — 그래야 그 에이전트의 재시도 체인이 하나의 키를 공유한다.
+    const inheritedKey = normalizeTargetAgentIds(args.onlyAgentIds).length === 1
+      ? (args.idempotencyKey || '').trim()
       : '';
+    const idempotencyKey = sourceTicketId ? inheritedKey || randomUUID() : '';
     const rendered = sourceTicketId
       ? `${withLanguage}${renderCompletionContract(runId, action.workspace_id, sourceTicketId, idempotencyKey, highImpact)}`
       : `${withLanguage}${renderStandaloneCompletionContract(runId, action.workspace_id)}`;
@@ -1120,6 +1348,10 @@ export class ActionsService {
       id: runId,
       action_id: action.id,
       workspace_id: action.workspace_id,
+      // 에이전트별 감사 + 배치 묶음 (티켓 fc3906c5). 재시도 run은 호출자가
+      // 같은 batchId를 넘겨주므로 원래 배치를 승계한다.
+      agent_id: agent.id,
+      batch_id: batchId,
       room_id: room.id,
       triggered_by_type: args.triggeredByType,
       triggered_by_id: args.triggeredById || '',
@@ -1167,14 +1399,9 @@ export class ActionsService {
     }
     await this.participantRepo.save(rows);
 
-    // Update Action.last_run_at so the scheduler doesn't double-fire on the
-    // same minute boundary.
-    await this.actionRepo.update(action.id, { last_run_at: new Date() });
-
-    // FIFO prune: drop rooms beyond max_runs, oldest first. Run AFTER we
-    // saved the new room so we never accidentally delete the one we just
-    // created.
-    await this._pruneOldRuns(action.id, action.max_runs);
+    // `last_run_at` 갱신과 FIFO 프루닝은 배치당 한 번이므로 호출자(`dispatch()`)가
+    // 루프를 마친 뒤 수행한다 — run마다 프루닝하면 같은 배치의 형제 run을
+    // 방금 만들자마자 잘라낼 수 있다.
 
     // Send the rendered prompt as the user's first message — chat_room_message
     // is what the agent-manager listens on to route the prompt into the target
@@ -1222,21 +1449,49 @@ export class ActionsService {
 
     this.logService.info('Actions', `dispatched action ${action.id} run ${tempRun.id} → agent ${agent.id} room ${room.id}`);
 
-    return { run: tempRun, room_id: room.id, prompt: rendered };
+    return { run: tempRun, agent_id: agent.id, room_id: room.id, prompt: rendered };
   }
 
   // ── Internals ──────────────────────────────────────────────────────────
 
+  /**
+   * FIFO 프루닝 — `max_runs` 를 **에이전트별로** 적용한다 (티켓 fc3906c5).
+   *
+   * 예전엔 `action_id` 하나로 셌다. 대상이 N개가 되면 트리거 1회에 run이 N건
+   * 생기므로, action 단위로 세면 보존 기간이 N배 빨리 잘려 `max_runs=10`
+   * 짜리 Action이 fan-out 5개 기준 트리거 2회치 이력만 남긴다. 에이전트별로
+   * 세면 "각 호스트의 최근 10회"라는 원래 의미가 대상 수와 무관하게 유지된다.
+   * 대상이 하나뿐인 Action에서는 그룹이 하나라 예전과 완전히 같은 결과다.
+   *
+   * `agent_id`가 빈 레거시 run은 하나의 그룹으로 묶여 예전과 같은 상한을
+   * 적용받는다.
+   *
+   * 아직 `running`인 run은 **자르지 않는다**. 프루닝은 순수히 최신순이라
+   * 진행 중인 배치의 형제 run을 지울 수 있고, 그러면 그 배치는 영영 "전원
+   * 종료"에 도달하지 못하거나(재개 유실) 남은 run만으로 조기에 종료된 것처럼
+   * 보인다 — 배치 재개 판정이 run 행을 세기 때문이다. 스턱 run은
+   * ActionRunReaperService가 TTL로 종결시키고, 그 뒤엔 정상적으로 프루닝
+   * 대상이 된다.
+   */
   private async _pruneOldRuns(actionId: string, max: number): Promise<void> {
     const cap = Math.max(1, max || 10);
     const runs = await this.runRepo.find({
       where: { action_id: actionId },
       order: { created_at: 'DESC' },
     });
-    if (runs.length <= cap) return;
-    const toDelete = runs.slice(cap);
-    for (const r of toDelete) {
-      await this._deleteRunWithRoom(r);
+    const perAgent = new Map<string, ActionRun[]>();
+    for (const r of runs) {
+      const key = r.agent_id || '';
+      const bucket = perAgent.get(key);
+      if (bucket) bucket.push(r);
+      else perAgent.set(key, [r]);
+    }
+    for (const bucket of perAgent.values()) {
+      if (bucket.length <= cap) continue;
+      for (const r of bucket.slice(cap)) {
+        if ((r.status || 'running') === 'running') continue;
+        await this._deleteRunWithRoom(r);
+      }
     }
   }
 
