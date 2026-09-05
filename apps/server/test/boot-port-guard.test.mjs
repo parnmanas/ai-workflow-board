@@ -318,3 +318,89 @@ test('비공허성: 파라미터 기본값 형태도 잡힌다 (격리 tmpdir)',
   assert.equal(violations.length, 1, `기본값 리터럴만 잡혀야 한다: ${JSON.stringify(violations)}`);
   assert.match(violations[0], /^helper-default\.mjs:1:/);
 });
+
+// ── 규칙 3: 부팅 전에 굳힌 포트 (ticket f2d82793) ──────────────────────────
+//
+// 규칙 2 로 선언이 0 이 되면 새 함정이 생긴다. `process.env.PORT` 는 **부팅한 뒤에야**
+// 실제 번호가 되는데, 모듈 최상단에서 그 값을 읽어 URL 로 굳혀버리면 `:0` 이 박힌다.
+//
+//   const BASE_URL = makeBaseUrl(parseInt(process.env.PORT, 10));   // ← 아직 0 이다
+//   ...
+//   await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');
+//
+// 이 티켓에서 실제로 8 개 파일이 이렇게 깨졌고(leak 계열 7 + claude-backend-profiles),
+// 증상이 "요청 실패" 가 아니라 부모 테스트가 죽으면서 서브테스트가 통째로
+// `cancelled` 되는 형태라 원인이 한눈에 안 보였다. bootApp 호출부는 반환값을 쓰므로
+// 무사했고, **NestJS 를 인라인으로 띄우는 파일만** 걸렸다.
+//
+// 판정은 줄 순서 휴리스틱이다 — 첫 부팅 줄보다 위에서 env.PORT 를 **읽는** 줄이 있으면
+// 위반. 대입(`process.env.PORT = ...`)은 설정이므로 제외한다. 부팅 뒤에 읽는 것은
+// 정상이다(bootApp 이 실제 포트로 덮어써 둔다).
+const BOOT_CALL_RE = /bootApp\(|\.listen\(/;
+const ENV_PORT_ASSIGN_RE = /^\s*process\.env\.PORT\s*=/;
+const ENV_PORT_READ_RE = /process\.env\.PORT/;
+
+function scanPortsFrozenBeforeBoot(dir, suffix = '.test.mjs') {
+  const violations = [];
+  let scannedFiles = 0;
+  for (const entry of fs.readdirSync(dir).sort()) {
+    if (!entry.endsWith(suffix)) continue;
+    if (dir === TOP_LEVEL_DIR && entry === SELF_BASENAME) continue;
+    scannedFiles += 1;
+    const lines = fs.readFileSync(path.join(dir, entry), 'utf8').split('\n');
+    const bootLine = lines.findIndex((l) => !isCommentLine(l) && BOOT_CALL_RE.test(l));
+    if (bootLine < 0) continue;
+    for (let i = 0; i < bootLine; i += 1) {
+      const line = lines[i];
+      if (isCommentLine(line)) continue;
+      if (line.includes(ALLOW_MARKER)) continue;
+      if (ENV_PORT_ASSIGN_RE.test(line)) continue;
+      if (!ENV_PORT_READ_RE.test(line)) continue;
+      violations.push(`${entry}:${i + 1}: ${line.trim()}`);
+    }
+  }
+  return { violations, scannedFiles };
+}
+
+const FROZEN_REMEDY =
+  'process.env.PORT 를 부팅 전에 읽어 URL 로 굳히지 마라 — 그 시점 값은 0 이다. ' +
+  'bootApp 은 반환된 port 를, 인라인 NestJS 는 listen 뒤 ' +
+  'app.getHttpServer().address().port 를 써라. ticket f2d82793';
+
+for (const [label, dir] of [['test', TOP_LEVEL_DIR], ['test/qa-flows', QA_FLOWS_DIR]]) {
+  test(`${label}/*.test.mjs 어디에도 부팅 전에 굳힌 포트가 없다`, () => {
+    const { violations, scannedFiles } = scanPortsFrozenBeforeBoot(dir);
+    assert.ok(scannedFiles > 50, `${label} 스캔이 ${scannedFiles} 개 파일만 봤다 — 경로가 틀렸다`);
+    assert.deepEqual(violations, [], `${FROZEN_REMEDY}\n${violations.join('\n')}`);
+  });
+}
+
+test('비공허성: 부팅 전에 굳힌 포트를 담은 합성 파일은 잡히고, 부팅 후 읽기는 안 잡힌다', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-port-frozen-guard-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // 이 티켓에서 실제로 깨졌던 형태 그대로.
+  fs.writeFileSync(
+    path.join(dir, 'frozen.test.mjs'),
+    [
+      "process.env.PORT = process.env.QA_X_PORT || '0';",
+      'const BASE_URL = makeBaseUrl(parseInt(process.env.PORT, 10));',
+      "await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');",
+    ].join('\n') + '\n',
+  );
+  // 정상형 두 가지: 반환 포트 사용, 그리고 부팅 **뒤** env.PORT 읽기.
+  fs.writeFileSync(
+    path.join(dir, 'clean.test.mjs'),
+    [
+      "process.env.PORT = process.env.QA_X_PORT || '0';",
+      'const { app, port } = await bootApp({ port: parseInt(process.env.PORT, 10) });',
+      'const BASE_URL = makeBaseUrl(parseInt(process.env.PORT, 10));',
+      'const other = `http://localhost:${port}`;',
+    ].join('\n') + '\n',
+  );
+
+  const { violations, scannedFiles } = scanPortsFrozenBeforeBoot(dir);
+  assert.equal(scannedFiles, 2);
+  assert.equal(violations.length, 1, `굳힌 쪽만 잡혀야 한다: ${JSON.stringify(violations)}`);
+  assert.match(violations[0], /^frozen\.test\.mjs:2:/);
+});
