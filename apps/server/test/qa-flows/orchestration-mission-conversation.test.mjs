@@ -31,9 +31,20 @@
 //   - 종료된 미션에는 새로 참여할 수 없다.
 //   - 같은 (room, user) 의 active 행은 최대 하나이고 언제나 떠날 수 있다.
 //
-// join 경로 자체도 그대로 필요하다: 이 옵션 **이전에** 만들어진 mission 방은
-// open_join=false 이므로 여전히 join 으로만 들어간다. 아래 레거시 블록들은 그 상태를
-// 방의 open_join 을 직접 꺼서 재현한다 — 그래야 진짜 과거 데이터의 경로를 검증한다.
+// ── 티켓 9cfd8161 이후의 계약 변화 ──────────────────────────────────────────
+//
+// 발화 가부의 근거가 **방의 `open_join` 에서 미션의 `user_chat_mode` 로 옮겨졌다.** 방
+// 플래그는 이제 그 옵션에서 파생된 캐시이고, 게이트도 자유 참여 완화도 미션 값을 직접 읽는다.
+//
+// 그래서 아래 레거시 블록들의 재현 방식이 바뀌었다. 예전에는 방의 open_join 만 끄면 "과거
+// 데이터"가 재현됐지만, 이제 그것만으로는 아무것도 닫히지 않는다 — 미션 옵션이 여전히
+// 기본값 open 이기 때문이다. 두 가지를 나눠 단언한다:
+//
+//   - **진짜 과거 행**(user_chat_mode=`''`, open_join=false, 참여자 없음)은 백필을
+//     기다리지 않고 **바로 발화된다**. 이것이 이 티켓의 사용자 가시 결과다. 예전에 여기서
+//     나던 403 이 사용자가 겪던 증상이었다.
+//   - **참여를 실제로 요구하는 상태**는 이제 `participants_only` 모드다. join 경로는 그
+//     모드에서 여전히 유일한 입구이고, 아래 블록들이 그것을 계속 고정한다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -244,27 +255,50 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     participant_id: owner.id,
     participant_type: 'user',
   });
-  // 자유 참여(티켓 995a9519)도 함께 끈다. 그 옵션은 **이 티켓 이후에 만들어진** 방에만
-  // 켜져 있으므로, 참여자 행만 지우는 것으로는 과거 데이터를 재현하지 못한다 — 옵션이
-  // 켜진 채로 두면 참여자 게이트를 아예 통과해 버려서, 이 블록이 검증하려는 join 백필
-  // 경로를 지나가지도 않는다.
+  // 과거 데이터 재현은 세 조각이다: 참여자 행 없음 + 방의 자유 참여 꺼짐 + 미션의
+  // user_chat_mode 가 아직 없던 시절이라 `''` (티켓 9cfd8161 이전에 만들어진 행). 컬럼은
+  // DDL 없이 추가되므로 진짜 과거 행은 정확히 이 모양이다.
   await ds.getRepository('ChatRoom').update({ id: legacyStarted.room_id }, { open_join: false });
+  await ds
+    .getRepository('OrchestrationMission')
+    .update({ id: legacyMission.id }, { user_chat_mode: '' });
   assert.deepEqual(
     await activeParticipants(ds, legacyStarted.room_id),
     [`agent:${lead.id}`, 'user:system'].sort(),
     '레거시 상태 재현 — 변경 전 코드가 남겼을 행 구성과 같다',
   );
 
+  // 티켓 9cfd8161 이 바꾼 지점이다. 예전에는 여기서 403 이 났고 그것이 사용자가 겪던
+  // 증상이었다 — 방의 open_join 이 발화 가부를 정했기 때문이다. 이제는 미션의
+  // user_chat_mode 가 단일 기준이고 `''` 는 기본값 open 으로 접히므로, **백필이 방
+  // 플래그를 맞추기 전에도** 생성자가 바로 말할 수 있다. 백필은 발화를 여는 것이 아니라
+  // 읽기·목록 표면이 보는 캐시를 정렬하는 일이 된다.
+  assert.equal(
+    (await say(legacyStarted.room_id, ownerToken, '이 미션 어떻게 됐어')).status,
+    201,
+    '과거 미션도 백필을 기다리지 않고 바로 대화가 된다 — 이 티켓의 사용자 가시 결과다',
+  );
+
+  // 위 발화가 auto-join 으로 참여자 행을 만들었다. join 경로를 검증하려면 다시 비참여
+  // 상태로 돌리고, **참여를 실제로 요구하는 모드**로 바꾼다 — 이제 그것을 정하는 것은
+  // 방 플래그가 아니라 미션 옵션이므로, open_join 만 꺼서는 재현되지 않는다.
+  await ds.getRepository('ChatRoomParticipant').delete({
+    room_id: legacyStarted.room_id,
+    participant_id: owner.id,
+    participant_type: 'user',
+  });
+  await missions.updateMission(legacyMission.id, ws.id, { user_chat_mode: 'participants_only' });
+
   assert.equal(
     (await say(legacyStarted.room_id, ownerToken, '이 미션 어떻게 됐어')).status,
     403,
-    '백필 전에는 생성자조차 막힌다 — 이것이 사용자가 겪던 증상이다',
+    'participants_only 에서는 참여자가 아니면 막힌다 — join 경로가 여전히 유일한 입구다',
   );
   assert.equal((await join(legacyMission.id, ownerToken)).status, 201);
   assert.equal(
     (await say(legacyStarted.room_id, ownerToken, '이 미션 어떻게 됐어')).status,
     201,
-    '백필 뒤에는 대화가 된다',
+    'join 뒤에는 대화가 된다',
   );
 
   // ── 2b. 참여자 없는 미션 백필 ──────────────────────────────────────────────
@@ -287,12 +321,13 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     [`agent:${lead.id}`, 'user:system'].sort(),
     '사람 소유자가 없으면 아무 사람도 자동 등록되지 않는다',
   );
-  // 위 레거시 블록과 같은 이유로 자유 참여를 끈다 — 이 블록이 고정하는 것은 명시적
-  // join 백필 경로이고, 그 경로는 옵션이 꺼진 과거 방에서 여전히 유일한 입구다.
-  await ds.getRepository('ChatRoom').update({ id: agentStarted.room_id }, { open_join: false });
+  // 이 블록이 고정하는 것은 명시적 join 경로이므로, 참여를 실제로 요구하는 모드로 둔다.
+  // 방의 open_join 만 꺼서는 재현되지 않는다 — 티켓 9cfd8161 이후 그 판정의 근거는 방
+  // 플래그가 아니라 미션의 user_chat_mode 이고, 플래그는 거기서 파생된 캐시일 뿐이다.
+  await missions.updateMission(agentOwned.id, ws.id, { user_chat_mode: 'participants_only' });
 
   const beforeJoin = await say(agentStarted.room_id, ownerToken, '들어가도 될까');
-  assert.equal(beforeJoin.status, 403, '자유 참여가 꺼진 방에서는 참여자가 아니면 여전히 403 이다');
+  assert.equal(beforeJoin.status, 403, 'participants_only 방에서는 참여자가 아니면 여전히 403 이다');
 
   const joined = await join(agentOwned.id, ownerToken);
   // NestJS 의 @Post() 기본 상태 코드 — start/pause/nudge 등 이 컨트롤러의 다른 POST 와 같다.
