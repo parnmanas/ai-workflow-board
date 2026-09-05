@@ -1443,3 +1443,326 @@ UI 문자열 2개는 자동 업데이트가 **실제로 실행하는 명령**을
   아니라 일관성이 없다. 다만 다이제스트로 고정하면 **OS 패키지 보안 패치가 멈추는**
   반대 방향 위험이 생기므로, 자동 범프 수단(Dependabot 등) 없이 단독으로 고정하는
   건 순 손해다. 둘을 같이 도입할지는 운영자 판단 사항이라 조치하지 않고 기록만 한다.
+
+## 재검증 로그 — 2026-08-26 (`main` @ `5c6b95e2`)
+
+의존성 변경 없이 새 advisory 와 배포 브랜치 lockfile 드리프트를 다시 점검했다.
+`npm audit fix` 는 사용하지 않았으며 루트 `overrides` 도 그대로 유지했다.
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (`main`) | **0 vulnerabilities** (prod 276 / dev 307 / optional 85, total 606) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| `production.private` (`df1cfe47`) | **0 vulnerabilities**, root/workspace manifest와 lockfile이 `main`과 동일 |
+| 레지스트리 서명 | 105개 서명 및 13개 attestation 검증, 실패 0건 |
+| lockfile install script | 3개 (`@scarf/scarf`/`esbuild`/`fsevents`), 전부 허용목록 내 |
+| 발행 트리 (live/next) | 93 / 92 패키지, moderate 이상 0건, install script 0개 |
+| 공급망·감사·테스트 등록 가드 | **48/48 pass** |
+
+발행 트리에는 lockfile 대비 11개 버전 드리프트가 있었지만 live/next 양쪽 모두
+advisory 0건이고 install script도 없었다. `production.private`의 의존성 파일은
+`main`과 바이트 동일하므로 별도 수정이나 lockfile 재생성은 필요하지 않았다.
+새 `apps/server` 테스트 파일을 추가하지 않았고, 등록 완전성 가드로 기존 테스트가
+모두 `package.json`의 `test` 스크립트에 포함된 것도 확인했다.
+
+## 재검증 로그 — 2026-08-27 (`main` @ `0815a7a5`)
+
+최신 원격 refs를 다시 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`70ff4066`)를 함께 감사했다. `npm audit fix`는 사용하지
+않았으며 루트 `overrides`도 그대로 유지했다.
+
+| 항목 | 결과 |
+| --- | --- |
+| `npm audit` (`main`) | **0 vulnerabilities** (prod 280 / dev 306 / optional 85 / peer 1, total 610) |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| `production.private` | **0 vulnerabilities**, lockfile과 세 workspace manifest가 `main`과 바이트 동일 |
+| 레지스트리 서명 | 105개 서명 및 13개 attestation 검증, 실패 0건 |
+| lockfile install script | 3개 (`@scarf/scarf`/`esbuild`/`fsevents`), 전부 허용목록 내 |
+| 발행 트리 (live/next) | 93 / 92 패키지, moderate 이상 0건, install script 0개 |
+| 공급망·감사·테스트 등록 가드 | **48/48 pass** |
+
+발행 트리의 lockfile 대비 11개 버전 드리프트도 live/next 양쪽 모두 advisory
+0건이었다. 배포 브랜치의 루트 `package.json`은 배포와 무관한 agent instruction
+동기화 스크립트 두 개만 없고 의존성 선언과 lockfile은 동일하다. 따라서 패키지
+업데이트나 lockfile 재생성은 필요하지 않았다. 새 `apps/server` 테스트 파일을
+추가하지 않았으며, 등록 완전성 가드로 기존 테스트 전부가 각 `package.json`의
+`test` 스크립트에 포함된 것도 재확인했다.
+
+## 재검증 로그 — 2026-08-28 (`main` @ `d45c701a`)
+
+최신 `main`과 배포 브랜치 `production.private`(`344d415a`)를 fetch해 함께 감사했다.
+두 브랜치의 root/workspace manifest, lockfile, Dockerfile, `turbo.json`은 모두 동일했다.
+`npm audit`과 `npm audit --omit=dev`는 각각 0건이었고, 발행 패키지 live/next 트리도
+moderate 이상 0건 및 install script 0개였다. 발행 트리의 lockfile 대비 11개 버전
+드리프트는 모두 advisory 0건이었다.
+
+액션 SHA 고정, install-script 허용목록, CI 배포 브랜치·cron 커버리지, 발행 의존성
+범위 가드와 테스트 등록 완전성을 포함한 보안 가드 48건도 모두 통과했다. 취약점이나
+의존성 드리프트가 없어 패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는
+사용하지 않았고 root `overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-08-29 (`main` @ `d0b0986f`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치 `production.private`(`344d415a`)를
+함께 감사했다. 두 브랜치의 root/workspace manifest와 lockfile은 바이트 단위로
+동일했다. `npm audit`과 `npm audit --omit=dev`는 각각 0건(총 610 packages)이었고,
+레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 13개 버전 드리프트도 모두 advisory 0건이었다.
+install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron 커버리지, 발행 의존성
+범위 및 테스트 등록 가드 48건이 모두 통과했고, agent-manager build와 전체 테스트도
+통과했다. 취약점이나 lockfile drift가 없어 의존성 변경이나 lockfile 재생성은 하지
+않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-08-30 (`main` @ `e62ce2e5`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`344d415a`)를 함께 감사했다. root 및 세 workspace의
+manifest와 lockfile blob은 두 브랜치에서 모두 동일해 lockfile drift가 없었다.
+`npm audit`과 `npm audit --omit=dev`는 각각 **0 vulnerabilities**(총 610
+packages)였으며, 레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도 통과했다.
+취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지 않았다.
+`npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-08-31 (`main` @ `e62ce2e5`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`c1625315`)를 함께 감사했다. root 및 세 workspace의
+manifest와 lockfile blob은 두 브랜치에서 모두 동일해 lockfile drift가 없었다.
+`npm audit`과 `npm audit --omit=dev`는 각각 **0 vulnerabilities**(총 610
+packages)였으며, 레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도 통과했다.
+취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지 않았다.
+`npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-09-01 (`main` @ `875cf3e7`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`2f332c93`)를 함께 감사했다. root 및 세 workspace의
+manifest와 lockfile blob은 두 브랜치에서 모두 동일해 lockfile drift가 없었다.
+`npm audit`과 `npm audit --omit=dev`는 각각 **0 vulnerabilities**였으며,
+레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 공급망 무결성, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도
+통과했다. 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지
+않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+## 재검증 로그 — 2026-09-02 (`main` @ `26541422`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 배포 브랜치
+`production.private`(`cdb6d75f`)를 함께 감사했다. `production.private`가 해당
+`main` 커밋을 포함하고 있으며 root 및 세 workspace의 manifest와 lockfile은
+바이트 단위로 동일해 lockfile drift가 없었다. `npm audit`과
+`npm audit --omit=dev`는 각각 **0 vulnerabilities**(총 610 packages)였고,
+레지스트리 서명 105개와 attestation 13개도 모두 검증됐다.
+
+실제 발행 패키지의 live/next 트리는 각각 93/92 packages, moderate 이상 0건,
+install script 0개였다. lockfile 대비 14개 버전 드리프트도 모두 advisory
+0건이었다. install-script 허용목록, 액션 SHA 고정, CI 배포 브랜치·cron
+커버리지, 공급망 무결성, 발행 의존성 범위 및 테스트 등록 가드 **48/48**도
+통과했다. 취약점이나 의존성 drift가 없어 패키지 변경과 lockfile 재생성은 하지
+않았다. `npm audit fix`는 사용하지 않았고 root `overrides`도 유지했다. 새
+`apps/server` 테스트는 추가하지 않았다.
+
+로컬 공유 `node_modules`가 최신 `main`보다 오래돼 `@ast-grep/napi`,
+`web-tree-sitter`, `@node-rs/xxhash`가 없어 전체 server test의 선행 build는
+실행할 수 없었다. 세 패키지는 manifest와 lockfile에 정상 등록돼 있으며, 이번
+감사의 독립 보안 가드 48건은 build 없이 직접 실행해 모두 통과했다.
+
+## 재검증 로그 — 2026-09-03 (`main` @ `fe593f61`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`1b34451a`)를 함께 감사했다. 두 브랜치의 lockfile과 의존성
+선언은 동일했다. 배포 브랜치의 workspace manifest 차이는 이후 추가된 테스트의
+스크립트 등록뿐이며, 의존성이나 해석 트리 drift는 없다.
+
+`npm audit`과 `npm audit --omit=dev`는 각각 **0 vulnerabilities**였고,
+`production.private`에 대한 별도 `npm audit`도 moderate 이상 0건이었다. 레지스트리
+서명 105개와 attestation 13개를 모두 검증했다. lockfile install script 3개는 전부
+허용목록 내였고, 실제 발행 패키지의 live/next 트리는 각각 93/92 packages,
+moderate 이상 0건 및 install script 0개였다. 발행 트리의 lockfile 대비 12개 버전
+drift도 모두 advisory 0건이었다.
+
+액션 SHA 고정, CI 배포 브랜치·cron 커버리지, 공급망 무결성, 발행 의존성 범위와
+테스트 등록 완전성을 포함한 보안 가드 **48/48**도 통과했다. 취약점이나 의존성
+lockfile drift가 없어 패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는
+사용하지 않았고 root `overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지
+않았으며, 기존 테스트가 `package.json` 스크립트에 전부 등록된 상태를 확인했다.
+
+## 재검증 로그 — 2026-09-04 (`main` @ `7998ff8d`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`930670d3`)를 함께 감사했다. 두 브랜치의 `package-lock.json`,
+루트 `package.json`, client·agent-manager manifest는 **blob 단위로 동일**했다.
+`apps/server/package.json`만 다르지만 `dependencies`/`devDependencies`/
+`peerDependencies`/`optionalDependencies`/`overrides`가 전부 동일하고 스크립트 키
+집합도 같아, 차이는 이후 추가된 테스트의 등록 목록뿐이다 — **의존성 drift 없음**.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개)이었다. 이번엔 판정을
+`npm audit`이 아니라 `scripts/audit-lockfile-advisories.mjs`로 냈고(ticket
+1019e57d), npm bulk 축과 GitHub Advisory 축에서 **각각 한 번씩 성공해 양쪽 출처가
+같은 결론**을 냈다. lockfile 커버리지도 직접 재계산해 확인했다 — 엔트리 611개 =
+루트 1 + workspace 심링크 3 + workspace 디렉터리 3 + 레지스트리 604개이고, 그 604개가
+이름 537개 / 이름@버전 580개로 접힌다. 즉 npm이 세던 610과의 차이는 **중복 제거일
+뿐 커버리지 공백이 아니다.**
+
+루트 `overrides`가 실제로 먹었는지도 lockfile에서 직접 확인했다 — multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3(+4.3.1), picomatch 4.0.5로 **취약 버전이 되살아난
+흔적 없음**. 레지스트리 서명 105개와 attestation 13개도 검증됐다. 발행 트리는
+live/next 각각 93/92 packages, moderate 이상 0건 및 install script 0개였고, lockfile
+대비 12건의 버전 drift도 전부 advisory 0건이었다. 액션 참조 19개는 전부 커밋 SHA
+고정, install-script 3개는 전부 허용목록 내였다. 가드 **87/87** 통과.
+
+### 조치 — 배포 브랜치의 의존성 감사 게이트가 죽어 있었다
+
+이번 감사의 유일한 실제 문제다. `production.private`는 push 시 `dependency-audit`
+**하나만** 도는데(나머지는 의도적 skip), 그 잡의 **첫 스텝**이 `npm audit
+--audit-level=moderate`였다. npm bulk advisory 엔드포인트가 불안정해 이 스텝이
+exit 1로 죽고 — 감사 중 조회 타임아웃으로 실제 재현됐다 — 첫 스텝이라 **뒤따르는
+오프라인 공급망 가드 5종이 전부 skipped** 된다. 취약점 게이트 하나가 아니라
+install-script 허용목록·액션 SHA 고정까지 통째로 침묵하고, 배포된 트리에 대한 CI
+신호가 전부 사라진다.
+
+`main`은 오늘 ticket 1019e57d로 이미 조치했으나 `production.private`가 그 커밋을
+아직 받지 않은 상태였다. `main`을 통째로 병합하면 관련 없는 기능 커밋까지 배포
+브랜치로 넘어가므로, **해당 수정만 범위를 좁혀 cherry-pick**해 PR #8
+(`fix/prod-dependency-audit-gate` → `production.private`)로 올렸다: 이중 출처 감사
+스크립트, 오프라인 가드를 네트워크 감사보다 먼저 두는 스텝 재정렬, 순서 회귀 가드와
+그 `test` 스크립트 등록. 해당 브랜치에서 잡의 모든 스텝을 로컬 실행해 오프라인 가드
+5종 PASS, 취약점 0건, 가드 87/87 PASS를 확인했다.
+
+취약점이나 lockfile drift는 없어 패키지 변경과 lockfile 재생성은 하지 않았다.
+`npm audit fix`는 사용하지 않았고 루트 `overrides`도 유지했다. `apps/server`에 새
+테스트를 추가한 것은 배포 브랜치 쪽 PR뿐이며, 그 테스트는 `package.json`의 `test`
+스크립트에 등록했다.
+
+**남은 조건:** 이 감사는 `production.private`의 게이트 복구를 PR로 올렸을 뿐 병합하지
+않았다. 병합 전까지 배포 브랜치의 `dependency-audit`은 레지스트리가 흔들릴 때마다
+계속 죽는다.
+
+### 관찰 — 이중 출처 폴백이 CI 에서는 rate limit 에 걸린다 (후속 과제)
+
+PR #8 의 CI 에서 `취약점 감사` 스텝이 한 번 실패했고, 그 로그가 오늘 조치의 남은
+구멍을 그대로 보여준다:
+
+```
+[npm]    bulk advisory 엔드포인트: 2회 모두 실패 — timeout
+[github] GitHub advisory 조회:    2회 모두 실패 — HTTP 403 rate limit exceeded
+```
+
+판정 자체는 **의도대로 fail-closed** 였다 — "확인 못 했다" 를 통과로 바꾸지 않고
+exit 1 로 죽었다. 문제는 폴백이 **정작 필요한 순간에 못 받쳐준다**는 것이다. npm 축이
+죽어야 GitHub 축을 쓰는데, 그 축은 의도적으로 비인증(unauthenticated)이라
+GitHub Actions 러너의 공유 IP 풀에서 403 을 맞는다. 요청량 문제가 아니다 — 우리
+lockfile 기준 stage-1 요청은 **4건**뿐으로, 비인증 한도(시간당 60회)에 한참 못 미친다.
+러너 IP 가 공유라 예산을 우리가 통제하지 못하는 것이다.
+
+재실행하니 같은 커밋에서 통과했으므로(출처 하나가 살아나면 됨) 상시 장애는 아니고,
+"npm 이 흔들리는 동안 CI 가 간헐적으로 red" 가 된다. `main` 도 같은 조건이다
+(2026-09-04 `main` 런: 03:10 green, 02:43 red).
+
+비인증을 택한 건 실수가 아니라 **의도된 트레이드오프**다 — `ci.yml` 은
+`pull_request` 에서 PR 이 저작한 코드를 그대로 실행하므로 여기에 토큰을 두면
+supply-chain-integrity-guard 의 "ci.yml now references a secret" 단언이 지키는 선을
+넘는다. `${{ github.token }}` 은 그 정규식(`secrets\.`)을 우회할 뿐 노출 표면은
+동일하므로 우회로 삼아선 안 된다. 즉 이건 **버그가 아니라 미해결 설계 과제**이며,
+이번 감사에서는 관찰만 기록하고 문서화된 결정을 임의로 뒤집지 않았다.
+
+가능한 방향(택일은 소유자 판단): advisory 조회를 `pull_request` 가 아닌 별도
+워크플로(`schedule`/`push` 전용, PR 코드 미실행)로 분리해 거기서만 토큰을 쓰거나,
+GitHub 축 실패를 npm 축 재시도 예산 확대로 흡수하거나, 폴백 실패 시 merge 를 막지
+않는 별도 신호로 강등하는 것. 어느 쪽도 fail-closed 규약을 무르지 않는 선에서
+설계돼야 한다.
+
+## 재검증 로그 — 2026-09-05 (`main` @ `d4b3fa5f`)
+
+최신 원격 refs를 fetch한 뒤 `main`과 실제 배포 브랜치
+`production.private`(`930670d3`)를 함께 감사했다. `package-lock.json`, 루트
+`package.json`, client·agent-manager manifest는 **blob 단위로 동일**했다.
+`apps/server/package.json`만 다르고, 그 차이는 `main`에 이후 랜딩한 테스트
+4건(`chat-open-join`, `chat-open-join-sse-fanout`,
+`orchestration-mission-room-open-join`, `lockfile-advisory-audit-guard`)의 등록
+목록뿐이다 — 의존성 필드는 전부 동일하므로 **의존성 drift 없음**.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개, 출처 npm)이었다. 판정은
+`scripts/audit-lockfile-advisories.mjs --audit-level=moderate`로 냈다.
+`audit-deploy-branch-deps`는 배포 브랜치 lockfile이 현재 트리와 동일함을 확인해
+같은 결론을 승계했다. 발행 트리는 live/next 모두 moderate 이상 0건 + install script
+0개였고, lockfile 대비 12건의 버전 drift도 전부 advisory 0건이었다. 액션 참조 19개는
+전부 커밋 SHA 고정, install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`)는 전부
+허용목록 내였다. 루트 `overrides`도 lockfile에서 직접 확인했다 — multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3(+cosmiconfig 하위 4.3.1), picomatch 4.0.5로
+**취약 버전이 되살아난 흔적 없음**. 가드 **87/87** 통과.
+
+패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는 사용하지 않았고 root
+`overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았으며, 기존 테스트의
+`package.json` 등록 완전성은 `test-registration-completeness`로 확인했다.
+
+### 정정 — "배포 브랜치의 게이트가 죽어 있었다"는 과장이었다
+
+어제 항목은 `production.private`의 `dependency-audit`이 **죽어 있다(dead)**고 적었고,
+운영 메모에는 "CI의 npm 10이 retired `quick` 엔드포인트로 폴백해 400을 뱉으므로 이
+monorepo에서 `npm audit`은 **결코 성공할 수 없다**"고 남아 있었다. 오늘 실제 CI 실행
+이력을 세어 보니 **둘 다 사실이 아니다.**
+
+- `production.private`의 최근 CI 런 **27건이 전부 success**다. 최신 런(`33817872378`)의
+  스텝별 결론을 봐도 `npm audit (moderate 이상 실패)` = **success**이고, 뒤따르는
+  오프라인 가드 5종도 전부 success다. 이 브랜치에서 가드가 실제로 skip된 적은 없다.
+- `main`에서도 수정 전 18개 런 중 **16건이 success**였다. 즉 `npm audit`은
+  *간헐적으로* 실패할 뿐 상시 실패가 아니다.
+
+동시에, **스텝 순서 결함 자체는 실재하며 실제로 재현됐다.** 수정 전 `main`의 실패
+런 2건(`33823224505` @ 00:47Z, `33830569471` @ 02:43Z)은 첫 스텝 `npm audit`이 failure로
+죽었고, 같은 잡의 `배포 브랜치 감사 커버리지 가드`·`정기 감사 커버리지 가드` 등
+**뒤따르는 오프라인 가드가 전부 skipped**로 남았다. 수정이 랜딩한 뒤의 런
+(`33832257372` 이후)은 취약점 감사가 success이면서 오프라인 가드도 모두 success다.
+
+정리하면 어제의 **조치 방향은 옳았고 근거도 재현됐지만, 심각도 서술이 틀렸다**:
+배포 브랜치의 게이트는 "죽어 있는" 것이 아니라 **간헐적 네트워크 실패에 오프라인
+가드까지 함께 침묵당하는 잠재 결함**이다. 발생 빈도는 `main` 기준 하루 18런 중 2회
+수준이고 `production.private`에서는 아직 0회다. 상시 장애가 아니므로 **긴급하지
+않다** — 이 정정의 실질적 의미는 아래 이월 항목의 처리 시급성을 낮춘다는 것이다.
+
+### 이월 — PR #8 병합은 운영자 결정 사항 (프로덕션 배포를 유발)
+
+배포 브랜치의 위 순서 결함을 고치는 PR #8(`fix/prod-dependency-audit-gate` →
+`production.private`)은 여전히 **OPEN**이다. 상태는 `MERGEABLE`/`mergeStateStatus:
+CLEAN`이고 체크 8종 전부 SUCCESS로, 기술적으로는 지금 병합 가능하다. 변경 범위도
+`.github/workflows/ci.yml`, `scripts/audit-lockfile-advisories.mjs`,
+`apps/server/test/lockfile-advisory-audit-guard.test.mjs`,
+`apps/server/package.json`(테스트 등록) 4개 파일뿐으로 **런타임 코드는 건드리지
+않는다.**
+
+그럼에도 이번 감사에서 **병합하지 않았다.** `production.private`에는 `main`에 없는
+`deploy.yml`이 있고, 이 브랜치로의 push는 곧바로 **Docker 이미지 빌드 + GHCR push +
+NAS SSH 배포**를 실행한다. 즉 병합은 CI 설정 변경으로 끝나지 않고 **실제 운영
+서비스의 재배포**를 유발한다. 애플리케이션 소스가 동일하므로 기능적 변화는 없을
+것으로 보이나, 컨테이너 교체를 수반하는 되돌리기 어려운 외부 영향이고, 위 정정대로
+긴급성도 없다. 따라서 자동 감사 루프가 단독으로 실행할 일이 아니라고 판단해
+**운영자 승인 대기 상태로 남긴다.**
+
+승인 시 조치는 PR #8 병합 한 번으로 끝난다(배포 창을 고려해 시점만 택하면 된다).
+
+### 이월 (변동 없음) — 이중 출처 폴백의 CI rate limit
+
+2026-09-04 항목의 "이중 출처 폴백이 CI에서는 rate limit에 걸린다"는 미해결 설계
+과제 그대로다. 오늘 `main`의 취약점 감사 런은 모두 success였고 로컬 실행도 npm 축
+단독으로 통과해 새로 관찰된 사실은 없다. 문서화된 트레이드오프(=`ci.yml`은
+`pull_request`에서 PR 코드를 실행하므로 토큰을 두지 않는다)를 임의로 뒤집지 않았다.
