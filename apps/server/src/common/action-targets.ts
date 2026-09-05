@@ -91,6 +91,25 @@ export function isFanOutAction(
 }
 
 /**
+ * Action 행을 클라이언트로 내보내기 위한 정규화 (티켓 fc3906c5).
+ *
+ * `target_agent_ids` 는 DB 에 JSON **문자열**로 저장된다(SQLite/Postgres 패리티
+ * 관례). 엔티티를 그대로 `res.json()` 하면 클라이언트는 배열이 아니라
+ * `'["a","b"]'` 문자열을 받는다 — `.filter` 를 부르는 순간 화면이 터지거나,
+ * 운이 좋아야 리터럴 문자열이 그대로 렌더된다(awb-field-wiring 스킬이 말하는
+ * 바로 그 실패 모드). 모든 REST 읽기 경로가 이 함수를 통과해야 한다.
+ *
+ * 레거시 단일 컬럼도 함께 정규화해서, 두 필드가 어긋난 행(백필 전)이라도
+ * 클라이언트는 항상 일관된 값을 본다.
+ */
+export function actionToWireJson<T extends { target_agent_id?: string | null; target_agent_ids?: unknown }>(
+  action: T,
+): Omit<T, 'target_agent_ids'> & { target_agent_id: string; target_agent_ids: string[] } {
+  const ids = actionTargetAgentIds(action);
+  return { ...action, target_agent_id: ids[0] || '', target_agent_ids: ids };
+}
+
+/**
  * fan-out 시 **에이전트별** 작업폴더 leaf (티켓 fc3906c5).
  *
  * Action의 기본 작업폴더는 `.awb/act/<action8>` 로 **action 단위**다 — 한
