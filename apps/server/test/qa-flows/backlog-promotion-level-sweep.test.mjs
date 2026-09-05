@@ -50,8 +50,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// Port 7797 — unique slot, verified against every `process.env.PORT = ...`
-// assignment under test/ at the time this file was added.
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
 process.env.PORT = process.env.QA_BACKLOG_LEVEL_SWEEP_PORT || '0';
 
 test('BacklogPromotion level-triggered backstop + role-unfilled skip audit', async (t) => {

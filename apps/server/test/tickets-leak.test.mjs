@@ -18,7 +18,8 @@
 //   - Boots NestJS app in-process from compiled dist/. Requires `npm run build` (satisfied by test script).
 //   - Uses SQLite with auto-created database/data.db.
 //   - Creates test data directly via TypeORM repositories (no HTTP auth flow needed for seeding).
-//   - Test port: 7793 (avoids collision with existing tests on 7791/7792).
+//   - Test port: OS-assigned (declared 0). The per-file port ledger was retired
+//     in ticket f2d82793 — set this file's *_PORT env var to pin a number.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';

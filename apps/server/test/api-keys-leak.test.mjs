@@ -15,7 +15,8 @@
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/.
-//   - Test port: 7795 (avoids collision with other leak tests and 7791/7792/7793/7794).
+//   - Test port: OS-assigned (declared 0). The per-file port ledger was retired
+//     in ticket f2d82793 — set this file's *_PORT env var to pin a number.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
