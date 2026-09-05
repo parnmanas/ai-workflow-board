@@ -665,13 +665,22 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const handleRefreshModels = async () => {
     if (refreshModelsPending) return;
     setRefreshModelsPending(true);
-    const seenBefore = inst.last_seen_at;
     try {
+      // 기준 시각은 렌더 시점의 `inst` 가 아니라 **지금 서버가 들고 있는 값**이어야
+      // 한다. 이 목록은 15초 폴백 주기로 갱신되므로, 클릭 직전에 정기 하트비트가
+      // 하나 지나갔다면 prop 의 last_seen_at 은 이미 낡았고 — 그러면 첫 폴링이
+      // 곧바로 "바뀌었다"고 판정해 리프레시 이전 수치를 갱신 결과로 보고한다.
+      const rows = await api.listAgentManagerInstances();
+      const current = rows.find((row) => row.instance_id === inst.instance_id);
+      if (!current) {
+        showToast('이 Runtime Host 가 목록에서 사라졌습니다 (TTL 만료 또는 종료).', 'error');
+        return;
+      }
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'refresh_available_models',
       });
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
-      const fresh = await waitForFreshHeartbeat(inst.instance_id, seenBefore);
+      const fresh = await waitForFreshHeartbeat(inst.instance_id, current.last_seen_at);
       if (!fresh) {
         showToast(
           `refresh_available_models 전송됨${idTail} — 갱신된 하트비트가 아직 도착하지 ` +

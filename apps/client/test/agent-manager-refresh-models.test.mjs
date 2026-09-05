@@ -62,18 +62,22 @@ test('Runtime Hosts 화면의 "Refresh models" 는 해당 인스턴스로 refres
   t.after(() => dom.cleanup());
 
   const commands = [];
+  const callOrder = [];
   let listCalls = 0;
   stubApi(t, {
     getAgentManagerInstanceSubagents: async () => [],
     getAgentManagerInstanceLogs: async () => [],
     getAgent: async () => ({ id: MANAGER_AGENT_ID, name: 'manager', description: '' }),
     sendAgentManagerCommand: async (instanceId, body) => {
+      callOrder.push('command');
       commands.push({ instanceId, body });
       return { ok: true, command_id: 'cmd-abcdef12', issued_at: new Date().toISOString() };
     },
     listAgentManagerInstances: async () => {
       listCalls += 1;
-      // 첫 조회는 커맨드 직후(아직 갱신 전), 이후부터 즉시 하트비트가 도착한 상태.
+      callOrder.push('list');
+      // 첫 조회는 커맨드 직전의 기준값(아직 갱신 전), 이후부터 즉시 하트비트가
+      // 도착한 상태를 흉내낸다.
       return [
         instanceRow({
           lastSeenAt: listCalls === 1 ? '2026-09-05T00:00:10.000Z' : '2026-09-05T00:00:12.000Z',
@@ -106,6 +110,11 @@ test('Runtime Hosts 화면의 "Refresh models" 는 해당 인스턴스로 refres
   assert.equal(commands.length, 1, '클릭 한 번에 커맨드 한 건');
   assert.equal(commands[0].instanceId, INSTANCE_ID, '다른 인스턴스로 새면 안 된다');
   assert.deepEqual(commands[0].body, { command: 'refresh_available_models' });
+  // 기준 last_seen_at 은 렌더 시점 prop 이 아니라 클릭 시점에 서버에서 읽어야
+  // 한다 — 이 목록은 15초 폴백 주기로 갱신되므로, prop 을 쓰면 클릭 직전에
+  // 지나간 정기 하트비트 때문에 첫 폴링이 곧바로 "갱신됐다"고 오판한다.
+  assert.equal(callOrder[0], 'list', '커맨드 전에 현재 기준값을 먼저 읽어야 한다');
+  assert.equal(callOrder[1], 'command');
 });
 
 test('Agent 다이얼로그의 "모델 목록 새로고침" 이 드롭다운 후보를 갱신된 목록으로 바꾼다', async (t) => {
