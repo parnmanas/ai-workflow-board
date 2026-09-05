@@ -238,7 +238,9 @@ test('legacy backend-launch rows fail with an actionable migration error', () =>
     type: 'server',
     model: 'demo',
     module: 'vllm.entrypoints.openai.api_server',
-    port: 8000,
+    // 이 테스트는 이 값을 바인딩하지 않는다 — 폐기된 vLLM 프로필을 재현해
+    // 마이그레이션 거부 메시지만 확인하는 설정 픽스처다.
+    port: 8000, // port-guard-allow: 바인딩하지 않는 설정 픽스처
   }];
   const checked = validateCliRuntimeProfiles(legacyVllm);
   assert.equal(checked.ok, false);
