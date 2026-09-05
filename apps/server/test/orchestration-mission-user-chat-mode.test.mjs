@@ -545,6 +545,19 @@ describe('백필 마이그레이션', () => {
     const d = await seedMission({ created_by_type: 'agent', created_by: AGENT }, { open_join: true });
     await addParticipant(d.room.id, 'system');
 
+    // ⓖ 모드는 off 인데 방이 열려 있다 → **끄는 방향**의 정렬 대상. 이 픽스처가 없으면
+    // to_off 가 늘 0 이라 그 축을 검증하지 못한다.
+    await seedMission({ user_chat_mode: 'off' }, { open_join: true });
+
+    // ⓗ participants_only + 방도 이미 꺼짐 → **off 이지만 정렬 대상이 아니다.**
+    // 이 픽스처가 이 테스트의 판별력 그 자체다: 이것이 없으면 off 수(2)와 대상 수(2)가
+    // 우연히 같아져, "off 수를 대상 수로 보고"하는 잘못된 구현도 통과해 버린다.
+    // 소유자 축을 흔들지 않도록 에이전트 생성으로 둔다.
+    await seedMission(
+      { user_chat_mode: 'participants_only', created_by_type: 'agent', created_by: AGENT },
+      { open_join: false },
+    );
+
     // ⓕ 종료된 미션 → terminal 축을 실제로 채운다. 0 인 채로 두면 그 카운터가 늘 맞는
     // 것처럼 보인다. 생성자를 에이전트로 둬 owner 축은 흔들지 않는다.
     await seedMission(
@@ -561,25 +574,33 @@ describe('백필 마이그레이션', () => {
 
     const line = await runBackfill();
 
-    assert.match(line, /missions=6 /, '미션 총수');
-    assert.match(line, /started=5 /, 'draft(방 없음)는 시작된 것으로 세지 않는다');
+    assert.match(line, /missions=8 /, '미션 총수');
+    assert.match(line, /started=7 /, 'draft(방 없음)는 시작된 것으로 세지 않는다');
     assert.match(line, /terminal=1 /, 'ⓕ 만 종료 상태다');
 
     // 세 축 — 전부 **변경 전** 값이어야 한다. 정렬한 뒤에 세면 ⓐ 가 on 으로 보인다.
-    assert.match(line, /before_open_join\(on=3 off=2\)/, 'ⓑⓓⓕ 가 on, ⓐⓒ 가 off');
+    assert.match(line, /before_open_join\(on=4 off=3\)/, 'ⓑⓓⓕⓖ 가 on, ⓐⓒⓗ 가 off');
     assert.match(
       line,
-      /human_participant\(with=1 without=4\)/,
+      /human_participant\(with=1 without=6\)/,
       'ⓑ 만 활성 사람 참여자가 있다 — ⓒ 는 탈퇴, ⓓ 는 의사 user system 이라 사람이 아니다',
     );
 
     // 생성자 행 상태가 넷으로 갈린다 — 뭉뚱그리면 "이미 참여 중"과 "스스로 나감"이 섞인다.
-    assert.match(line, /owner\(active=1 left=1 absent=1 none=2\)/, 'ⓑ active · ⓒ left · ⓐ absent · ⓓⓕ none');
+    assert.match(line, /owner\(active=1 left=1 absent=2 none=3\)/, 'ⓑ active · ⓒ left · ⓐⓖ absent · ⓓⓕⓗ none');
 
-    // 실제 수행량은 대상 수와 따로 찍힌다. ⓐ 만 어긋나 있다 — ⓒ 는 participants_only 라
-    // 꺼진 것이 정답이고, ⓓⓕ 는 기본 open 이라 켜진 것이 이미 정답이다.
-    assert.match(line, /open_join_aligned=1 /, 'ⓐ 하나만 정렬 대상이다');
-    assert.match(line, /owners_registered=1$/, 'ⓐ 만 등록 대상이다 — ⓒ 의 탈퇴는 되돌리지 않는다');
+    // **정렬 대상 수는 off 수가 아니다**(리뷰 지적). off 는 3 인데(ⓐⓒⓗ) 대상은 2 다 —
+    // ⓒⓗ 는 participants_only 라 꺼진 것이 이미 정답이기 때문이다. 두 수가 **다르다는 것**이
+    // 이 단언의 요점이다: 같으면 잘못된 구현도 통과한다. 대상은 "현재값 ≠ 모드가 요구하는
+    // 값"이고 방향까지 갈린다 — ⓐ 는 켜야 하고(to_on) ⓖ 는 꺼야 한다(to_off).
+    assert.match(line, /open_join_misaligned\(total=2 to_on=1 to_off=1\)/, '대상은 ⓐ 와 ⓖ 둘이다');
+    assert.doesNotMatch(
+      line,
+      /open_join_misaligned\(total=3/,
+      'off 수(3)를 대상 수로 보고하면 안 된다 — 이것이 리뷰에서 지적된 오집계다',
+    );
+    assert.match(line, /open_join_aligned=2 /, '대상 전부를 실제로 정렬했다');
+    assert.match(line, /owners_registered=2$/, 'ⓐⓖ 가 등록 대상 — ⓒ 의 탈퇴는 되돌리지 않는다');
   });
 
   it("mode_column_unset 은 백필 대상 수가 아니다 — 엔티티로 만든 행은 기본값이 채워진다", async () => {

@@ -665,7 +665,12 @@ auto-join 이 그 플래그를 보기 때문이고, 방 생성·옵션 변경·�
 조사는 요구된 세 축을 **변경 전 값으로** 찍는다: 방 `open_join` 분포, 활성 **사람** 참여자
 유무(의사 user `system` 은 사람으로 세지 않는다), 미션 상태. 생성자 행은 활성/탈퇴/없음으로
 쪼개 센다 — 뭉뚱그리면 "이미 참여 중"과 "스스로 나감"이 한 수에 섞인다.
-`before_open_join` 의 off 수와 `owner(absent=…)` 가 백필 대상 수이고, `mode_column_unset` 은
+백필 대상 수는 `open_join_misaligned`(방향별 `to_on`/`to_off`)와 `owner(absent=…)` 다.
+`before_open_join` 의 off 수는 **대상 수가 아니다** — 현재 상태의 분포일 뿐이고, 정렬 대상은
+"현재값이 그 미션의 모드가 요구하는 값과 다른 방"이다. `participants_only`/`off` 미션의 방은
+`open_join=false` 가 이미 정답이라 off 에 세어져도 고칠 것이 없다. 모드 분포와 on/off 분포는
+각각 주변분포라 교차표가 아니어서 둘을 조합해도 불일치 수를 복원할 수 없고, 그래서 불일치를
+쓰기 전에 직접 센다(리뷰 지적). `mode_column_unset` 은
 **대상 수가 아니다** — `synchronize` 가 컬럼을 default 로 추가하며 기존 행까지 채우므로 보통
 0 이다(그 값을 레거시 미션 수로 읽으려던 초안이 틀렸다, 리뷰 지적).
 

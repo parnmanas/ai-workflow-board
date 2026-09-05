@@ -76,9 +76,15 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
  * 여기에 생성자 행의 상태를 셋으로 쪼개 붙인다 — `owner_active`(이미 활성 참여자),
  * `owner_left`(스스로 나감 → 되돌리지 않음), `owner_absent`(행 없음 → 등록 대상).
  *
- * **`before_open_join_off` 와 `owner_absent` 가 곧 백필 대상 수다.** 실제로 수행한 양
+ * **백필 대상 수는 `open_join_misaligned` 와 `owner_absent` 다.** 실제로 수행한 양
  * (`open_join_aligned` / `owners_registered`)과 따로 찍어 둬야 "대상이 있었는데 안 했다" 를
- * 구분할 수 있다. 반대로 `mode_column_unset` 은 **대상 수가 아니다** — `synchronize` 가
+ * 구분할 수 있다.
+ *
+ * `before_open_join` 의 off 수는 **대상 수가 아니다**(리뷰 지적). 그것은 현재 상태의 분포일
+ * 뿐이고, 정렬 대상은 "현재값이 그 미션의 모드가 요구하는 값과 다른 방"이다 —
+ * `participants_only`/`off` 미션의 방은 `open_join=false` 가 이미 정답이라 off 에 세어져도
+ * 고칠 것이 없다. 모드 분포와 on/off 분포는 각각의 주변분포(marginal)라 교차표가 아니므로,
+ * 둘을 조합해도 불일치 수를 복원할 수 없다. 그래서 불일치를 **쓰기 전에 직접** 센다. 반대로 `mode_column_unset` 은 **대상 수가 아니다** — `synchronize` 가
  * 컬럼을 default `'open'` 으로 추가하면서 기존 행까지 채우므로 보통 0 이다. 레거시 미션 수를
  * 이 값으로 식별하려던 초안이 틀렸고(리뷰 지적 2), 진단용으로만 남긴다.
  *
@@ -126,6 +132,11 @@ export class BackfillMissionRoomUserChat1760000000084 implements MigrationInterf
     let ownerLeft = 0;     // 생성자 행은 있으나 스스로 나감 — 되돌리지 않는다
     let ownerAbsent = 0;   // 생성자 행이 아예 없음 = 등록 대상
 
+    // 정렬 **대상** 수 — 현재값이 모드가 요구하는 값과 다른 방. 쓰기 전에 센다.
+    // 방향까지 나눠 두면 "닫혀 있던 것을 열었다"와 "열려 있던 것을 닫았다"가 구분된다.
+    let misalignedToOn = 0;   // 현재 false → true 로 켜야 함
+    let misalignedToOff = 0;  // 현재 true → false 로 꺼야 함
+
     for (const mission of missions) {
       const mode = normalizeUserChatMode(mission.user_chat_mode);
       modeCounts[mode] = (modeCounts[mode] ?? 0) + 1;
@@ -157,6 +168,8 @@ export class BackfillMissionRoomUserChat1760000000084 implements MigrationInterf
 
       const desired = openJoinForUserChatMode(mode);
       if (room.open_join !== desired) {
+        if (desired) misalignedToOn++;
+        else misalignedToOff++;
         await roomRepo.update(room.id, { open_join: desired });
         openJoinAligned++;
       }
@@ -205,6 +218,8 @@ export class BackfillMissionRoomUserChat1760000000084 implements MigrationInterf
         `missions=${missions.length} started=${started} terminal=${terminal} room_missing=${missingRoom} ` +
         `mode(open=${modeCounts.open} participants_only=${modeCounts.participants_only} off=${modeCounts.off}) ` +
         `before_open_join(on=${beforeOpenJoinOn} off=${beforeOpenJoinOff}) ` +
+        `open_join_misaligned(total=${misalignedToOn + misalignedToOff} ` +
+        `to_on=${misalignedToOn} to_off=${misalignedToOff}) ` +
         `human_participant(with=${withHumanParticipant} without=${withoutHumanParticipant}) ` +
         `owner(active=${ownerActive} left=${ownerLeft} absent=${ownerAbsent} none=${noHumanOwner}) ` +
         `mode_column_unset=${modeColumnUnset} | ` +
