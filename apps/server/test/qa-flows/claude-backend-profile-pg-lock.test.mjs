@@ -90,11 +90,11 @@ test('Postgres row lock serializes update and assign across independent connecti
   const { buildDataSourceOptions } = await import(pathToFileURL(path.join(DIST, 'db.js')));
   const toolUrl = pathToFileURL(path.join(DIST, 'modules', 'mcp', 'tools', 'claude-backend-profile-tools.js')).href;
   // 두 번째 DataSource는 프로세스 로컬 큐를 우회해 별도 서버 프로세스를 모델링한다.
-  const tools1 = await import(`${toolUrl}?instance=update`);
-  const tools2 = await import(`${toolUrl}?instance=assign`);
+  const tools1 = await import(`${toolUrl}?instance=first`);
+  const tools2 = await import(`${toolUrl}?instance=second`);
   ds1 = new DataSource(buildDataSourceOptions());
-  const assignApplicationName = `qa-profile-assign-${process.pid}`;
-  ds2 = new DataSource({ ...buildDataSourceOptions(), applicationName: assignApplicationName });
+  const contenderApplicationName = `qa-profile-contender-${process.pid}`;
+  ds2 = new DataSource({ ...buildDataSourceOptions(), applicationName: contenderApplicationName });
   await ds1.initialize();
   await ds2.initialize();
   tools2.setProfileQueueBypassForTests(ds2);
@@ -103,7 +103,6 @@ test('Postgres row lock serializes update and assign across independent connecti
 
   const workspaceRepo = ds1.getRepository('Workspace');
   const owner = await workspaceRepo.save(workspaceRepo.create({ name: 'PG credential owner' }));
-  const foreign = await workspaceRepo.save(workspaceRepo.create({ name: 'PG foreign workspace' }));
   const created = await tools1.upsertClaudeBackendProfile(ds1, {
     name: 'Postgres contended profile', base_url: 'http://pg-contended.invalid',
     model: 'pg-contended-model', protocol: 'anthropic-compatible',
@@ -113,9 +112,12 @@ test('Postgres row lock serializes update and assign across independent connecti
     workspace_id: owner.id, name: 'PG owner credential', provider: 'anthropic', encrypted_data: 'test-only',
   }));
 
-  let assignEntered = false;
-  tools2.setProfileLockHookForTests(async (operation, profileId) => {
-    if (operation === 'assign' && profileId === created.profile.id) assignEntered = true;
+  // 티켓 e616dbfc — 경합 상대가 assign 에서 두 번째 update 로 바뀌었다. 검증
+  // 대상은 그대로다: PostgreSQL 행 잠금이 **다른 프로세스**의 프로필 쓰기를
+  // 실제로 막는가(프로세스 로컬 큐로는 잡히지 않는 축).
+  let contenderEntered = false;
+  tools2.setProfileLockHookForTests(async (_operation, profileId) => {
+    if (profileId === created.profile.id) contenderEntered = true;
   });
 
   const updateRunner = ds1.createQueryRunner();
@@ -131,33 +133,33 @@ test('Postgres row lock serializes update and assign across independent connecti
       { id: created.profile.id },
       { credential_ref: credential.id },
     );
-    const assignment = tools2.assignWorkspaceBackendProfile(ds2, foreign.id, created.profile.id, false);
-    let assignmentSettled = false;
-    assignment.then(
-      () => { assignmentSettled = true; },
-      () => { assignmentSettled = true; },
+    const contender = tools2.updateClaudeBackendProfile(ds2, created.profile.id, {
+      model: 'pg-contended-model-v2',
+    });
+    let contenderSettled = false;
+    contender.then(
+      () => { contenderSettled = true; },
+      () => { contenderSettled = true; },
     );
     const lockWait = await Promise.race([
-      waitForProfileUpdateLockWait(assignApplicationName),
-      assignment.then(
-        () => { throw new Error('assignment settled before PostgreSQL lock wait was observed'); },
+      waitForProfileUpdateLockWait(contenderApplicationName),
+      contender.then(
+        () => { throw new Error('contender settled before PostgreSQL lock wait was observed'); },
         error => { throw error; },
       ),
     ]);
     assert.equal(lockWait.wait_event_type, 'Lock');
-    assert.ok(lockWait.blocking_pids.length > 0, 'assign backend must have a PostgreSQL blocker');
-    assert.equal(assignEntered, false, 'assign entered while update held the row lock');
-    assert.equal(assignmentSettled, false, 'assign settled while its UPDATE was waiting on the row lock');
+    assert.ok(lockWait.blocking_pids.length > 0, 'contender backend must have a PostgreSQL blocker');
+    assert.equal(contenderEntered, false, 'contender entered while the first update held the row lock');
+    assert.equal(contenderSettled, false, 'contender settled while its UPDATE was waiting on the row lock');
 
     await updateRunner.commitTransaction();
-    await assert.rejects(
-      withTimeout(assignment, 'assignment did not finish after row-lock release'),
-      /credential is not owned by this workspace/,
-    );
-    assert.equal(assignEntered, true, 'assign must enter after the update commits');
-    assert.equal(await ds1.getRepository('WorkspaceClaudeBackendProfile').count({
-      where: { workspace_id: foreign.id, profile_id: created.profile.id },
-    }), 0, 'foreign workspace link must not be inserted');
+    await withTimeout(contender, 'contender did not finish after row-lock release');
+    assert.equal(contenderEntered, true, 'contender must enter after the first update commits');
+    // 두 쓰기가 모두 살아남아야 한다 — 잠금이 순서를 강제할 뿐 유실을 만들면 안 된다.
+    const stored = await ds1.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: created.profile.id });
+    assert.equal(stored.credential_ref, credential.id, 'first writer 의 credential_ref 가 유실되면 안 됩니다');
+    assert.equal(stored.model, 'pg-contended-model-v2', 'contender 의 model 쓰기가 반영되어야 합니다');
   } finally {
     if (updateRunner.isTransactionActive) await updateRunner.rollbackTransaction();
     await updateRunner.release();

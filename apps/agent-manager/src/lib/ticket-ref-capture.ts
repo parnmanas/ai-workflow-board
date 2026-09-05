@@ -674,7 +674,6 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // non-ticket
   add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
   add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
-  assign_workspace_backend_profile: 'non-ticket',
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
   complete_action_run: 'non-ticket', complete_comment_summary: 'non-ticket',
   complete_qa_run: 'non-ticket',

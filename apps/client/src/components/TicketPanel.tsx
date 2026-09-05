@@ -855,8 +855,8 @@ export default function TicketPanel({
   useEffect(() => {
     if (!workspaceId) { setRuntimeProfiles([]); return; }
     let alive = true;
-    api.getWorkspaceClaudeBackendProfiles(workspaceId).then(data => {
-      if (alive) setRuntimeProfiles(data.profiles.filter(profile => data.allowed_profile_ids.includes(profile.id)));
+    api.listClaudeBackendProfiles().then(data => {
+      if (alive) setRuntimeProfiles(data.profiles);
     }).catch(() => { if (alive) setRuntimeProfiles([]); });
     return () => { alive = false; };
   }, [workspaceId]);
@@ -2613,7 +2613,7 @@ export default function TicketPanel({
                     borderRadius: tokens.radii.md, padding: '5px 8px',
                     color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 600, width: '100%',
                   }}>
-                  <option value="">Inherit Agent / Board / Workspace</option>
+                  <option value="">Inherit Agent / Board / Global default</option>
                   <option value="none">Anthropic default (explicit)</option>
                   {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
                 </select>

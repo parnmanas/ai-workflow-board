@@ -56,10 +56,10 @@ async function stubApi(page) {
       body = { profiles: [profile], default_profile_id: profile.id };
     } else if (path === '/credentials') {
       body = [];
-    } else if (path === `/workspaces/${workspace.id}/claude-backend-profiles/catalog`) {
-      body = { profiles: [profile] };
-    } else if (path === `/workspaces/${workspace.id}/claude-backend-profiles`) {
-      body = { profiles: [profile], allowed_profile_ids: [profile.id], default_profile_id: profile.id };
+    } else if (path === '/claude-backend-profiles') {
+      // 티켓 e616dbfc — 워크스페이스 스코프 라우트 2개가 이 전역 카탈로그
+      // 하나로 대체됐다(비관리자 읽기 표면).
+      body = { profiles: [profile], default_profile_id: profile.id };
     } else if (path === '/agents/dashboard') {
       body = [];
     } else if (path === '/admin/agent-manager/managers') {

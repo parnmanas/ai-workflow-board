@@ -25,9 +25,19 @@ const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
 const { resolveMentionDispatchExtras } = await import(
   'file://' + path.join(DIST_ROOT, 'common', 'mention-dispatch-profile.js')
 );
-const { Board, Workspace, BoardColumn } = await import(
+const { Board, Workspace, BoardColumn, ClaudeBackendProfile } = await import(
   'file://' + path.join(DIST_ROOT, 'entities', 'index.js')
 );
+
+/** 런타임 프로필 정의를 claude_backend_profiles 행 모양으로 옮긴다. */
+function profileRow(runtime) {
+  const { id, protocol, base_url: baseUrl, model, credential_ref: credentialRef, ...rest } = runtime;
+  return {
+    id, protocol, base_url: baseUrl, model,
+    credential_ref: credentialRef ?? null,
+    config: JSON.stringify(rest),
+  };
+}
 
 const LOCAL_PROFILE = {
   id: 'local-anthropic',
@@ -53,25 +63,25 @@ const WORKSPACE = {
   id: 'ws-1',
   harness_config: null,
   environment_config: null,
-  claude_backend_profiles_migrated: 0,
-  cli_runtime_profiles: JSON.stringify([LOCAL_PROFILE]),
 };
 const TICKET = { column_id: 'col-1', workspace_id: 'ws-1', effort_preset: 'high', cli_runtime_profile: null };
 
-// Entity-class-keyed stub — resolveClaudeBackendProfileForDispatch also calls
-// getRepository() for the registry-backed path (SystemSetting /
-// WorkspaceClaudeBackendProfile / ClaudeBackendProfile); this test doesn't
-// exercise that path (WORKSPACE.claude_backend_profiles_migrated stays 0, so
-// resolution reads workspace.cli_runtime_profiles instead — same fixture
-// pattern as room-messaging-chat-runtime-profile.test.mjs), so every other
-// entity type falls through to the blanket empty stub.
-function makeDataSource({ boardColumn = BOARD_COLUMN, board = BOARD, workspace = WORKSPACE, throwOn } = {}) {
+// 엔티티 클래스로 분기하는 stub. 프로필은 인스턴스 전역이라(티켓 e616dbfc)
+// 해석기가 claude_backend_profiles 를 통째로 읽는다 — 예전처럼 workspace 의
+// 레거시 JSON 을 읽지 않으므로 픽스처도 전역 행으로 준다. SystemSetting
+// (전역 기본값)은 blanket stub 의 findOne() → null 로 "미설정"이 된다.
+function makeDataSource({
+  boardColumn = BOARD_COLUMN, board = BOARD, workspace = WORKSPACE,
+  profiles = [LOCAL_PROFILE], throwOn,
+} = {}) {
+  const rows = profiles.map(profileRow);
   return {
     getRepository(entity) {
       if (throwOn === entity) throw new Error('simulated DataSource failure');
       if (entity === BoardColumn) return { async findOne() { return boardColumn; } };
       if (entity === Board) return { async findOne() { return board; } };
       if (entity === Workspace) return { async findOne() { return workspace; } };
+      if (entity === ClaudeBackendProfile) return { async find() { return rows; }, async findOne() { return null; } };
       return { async findOne() { return null; }, async find() { return []; } };
     },
   };
@@ -105,8 +115,7 @@ test('resolveMentionDispatchExtras: non-Claude agent never gets a runtime profil
 
 test('resolveMentionDispatchExtras: a profile requiring a credential the agent lacks rejects the dispatch', async () => {
   const guardedProfile = { ...LOCAL_PROFILE, id: 'needs-cred', credential_required: true, credential_ref: '11111111-1111-4111-8111-111111111111' };
-  const workspace = { ...WORKSPACE, cli_runtime_profiles: JSON.stringify([guardedProfile]) };
-  const dataSource = makeDataSource({ workspace });
+  const dataSource = makeDataSource({ profiles: [guardedProfile] });
   const agent = { type: 'claude', cli_runtime_profile: 'needs-cred', credential_id: null };
   const warnings = [];
   const originalWarn = console.warn;

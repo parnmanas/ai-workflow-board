@@ -27,7 +27,7 @@ import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instan
 import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
-import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import {
   type AgentRuntimeConfig,
   AgentRuntimeConfigError,
@@ -575,17 +575,17 @@ export class AgentsController {
       if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
     }
 
-    // Mirrors the PATCH handler's cli_runtime_profile validation — accepts a
-    // Claude backend profile id or the 'none' sentinel, scoped to whatever
-    // profiles this agent's workspace can see. null/omitted = inherit
-    // board/workspace default at dispatch time (see resolveCliRuntimeProfile).
+    // PATCH 핸들러의 cli_runtime_profile 검증과 같은 규칙 — Claude backend
+    // profile id 또는 'none' sentinel 을 받는다. 프로필은 인스턴스 전역이라
+    // 워크스페이스 스코프가 없다(티켓 e616dbfc). null/생략 = 디스패치 시점에
+    // board 핀 → 전역 기본값 순으로 상속(resolveCliRuntimeProfile 참조).
     let resolvedRuntimeProfile: string | null = null;
     if (cli_runtime_profile !== undefined && cli_runtime_profile !== null) {
       const selected = String(cli_runtime_profile);
       if (selected && selected !== 'none') {
-        const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+        const profiles = await globalRuntimeProfiles(this.dataSource);
         if (!profiles.some(profile => profile.id === selected)) {
-          return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in agent workspace` });
+          return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist` });
         }
       }
       resolvedRuntimeProfile = selected || null;
@@ -723,12 +723,9 @@ export class AgentsController {
     }
     if (cli_runtime_profile !== undefined) {
       const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
-      const workspace = agent.workspace_id
-        ? await this.dataSource.getRepository(Workspace).findOne({ where: { id: agent.workspace_id } })
-        : null;
-      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+      const profiles = await globalRuntimeProfiles(this.dataSource);
       if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in agent workspace` });
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist` });
       }
       agent.cli_runtime_profile = selected;
     }

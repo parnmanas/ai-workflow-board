@@ -60,7 +60,7 @@ import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
 import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-profile';
 import { TicketDuplicateService } from './ticket-duplicate.service';
-import { workspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { subtaskGateBlocksExit, subtaskGateBlocksMove } from './subtask-gate';
 import { emitFocusReleased } from '../agents/focus-eligibility';
@@ -868,11 +868,9 @@ export class TicketsController {
     }
     if (cli_runtime_profile !== undefined) {
       const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
-      const profiles = ticket.workspace_id
-        ? await workspaceRuntimeProfiles(this.dataSource, ticket.workspace_id)
-        : [];
+      const profiles = await globalRuntimeProfiles(this.dataSource);
       if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${selected}" is not allowed in this workspace` });
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist` });
       }
       ticket.cli_runtime_profile = selected;
     }

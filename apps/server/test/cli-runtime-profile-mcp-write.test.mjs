@@ -1,5 +1,5 @@
 // 티켓 0d2c53bf — MCP `update_agent` / `update_board` 에 cli_runtime_profile
-// 쓰기 필드가 없어서 워크스페이스 기본 backend/runtime 프로파일을 opt-out
+// 쓰기 필드가 없어서 기본 backend/runtime 프로파일을 opt-out
 // (`'none'`) 으로 핀하려면 REST/웹 UI 개입이 항상 필요했던 문제의 회귀
 // 테스트. 검증 로직은 새 헬퍼 validateCliRuntimeProfileSelection
 // (apps/server/src/common/claude-backend-registry.ts) 이 agents.controller.ts
@@ -82,22 +82,23 @@ before(async () => {
   profile = await ds.getRepository('ClaudeBackendProfile').save(
     ds.getRepository('ClaudeBackendProfile').create({
       id: randomUUID(),
-      name: 'Workspace default vLLM',
+      name: 'Global default vLLM',
       protocol: 'anthropic-compatible',
       base_url: 'http://vllm.invalid:8000',
       model: 'qwen3-coder-next',
       config: '{}',
     }),
   );
-  await ds.getRepository('WorkspaceClaudeBackendProfile').save(
-    ds.getRepository('WorkspaceClaudeBackendProfile').create({
-      workspace_id: workspace.id,
-      profile_id: profile.id,
+  // 프로필은 인스턴스 전역이라 워크스페이스 배정이 없다(티켓 e616dbfc).
+  // 상속의 마지막 단계는 SystemSetting 의 전역 기본값 하나뿐이다.
+  await ds.getRepository('SystemSetting').save(
+    ds.getRepository('SystemSetting').create({
+      key: 'claude_backend_profiles.default',
+      value: profile.id,
+      description: 'Instance default Claude backend profile',
+      is_secret: 0,
     }),
   );
-  workspace.claude_backend_profiles_migrated = true;
-  workspace.default_claude_backend_profile_id = profile.id;
-  await ds.getRepository('Workspace').save(workspace);
 
   callerSessionId = `session-${randomUUID()}`;
   const transport = { close: async () => {} };
@@ -162,37 +163,37 @@ describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
     assert.equal(stored.cli_runtime_profile, 'none');
   });
 
-  it("agent-level 'none' stops dispatch from inheriting the workspace default (success criterion 4)", async () => {
+  it("agent-level 'none' stops dispatch from inheriting the global default (success criterion 4)", async () => {
     const agent = await makeAgent();
     await tools.update_agent.handler({ agent_id: agent.id, cli_runtime_profile: 'none' }, agentExtra());
     const stored = await ds.getRepository('Agent').findOneByOrFail({ id: agent.id });
 
-    const withoutOptOut = await resolveClaudeBackendProfileForDispatch(ds, workspace, [
+    const withoutOptOut = await resolveClaudeBackendProfileForDispatch(ds, [
       { source: 'run', value: null },
       { source: 'agent', value: null },
       { source: 'board', value: null },
     ]);
-    assert.equal(withoutOptOut?.id, profile.id, 'sanity: workspace default resolves when nothing pins it');
+    assert.equal(withoutOptOut?.id, profile.id, 'sanity: 아무 핀도 없으면 전역 기본값으로 해석된다');
 
-    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, workspace, [
+    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, [
       { source: 'run', value: null },
       { source: 'agent', value: stored.cli_runtime_profile },
       { source: 'board', value: null },
     ]);
-    assert.equal(withOptOut, null, "agent 'none' must not inherit the workspace default");
+    assert.equal(withOptOut, null, "agent 'none' must not inherit the global default");
   });
 
-  it("board-level 'none' stops dispatch from inheriting the workspace default (success criterion 4)", async () => {
+  it("board-level 'none' stops dispatch from inheriting the global default (success criterion 4)", async () => {
     const board = await makeBoard();
     await tools.update_board.handler({ board_id: board.id, cli_runtime_profile: 'none' }, {});
     const stored = await ds.getRepository('Board').findOneByOrFail({ id: board.id });
 
-    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, workspace, [
+    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, [
       { source: 'run', value: null },
       { source: 'agent', value: null },
       { source: 'board', value: stored.cli_runtime_profile },
     ]);
-    assert.equal(withOptOut, null, "board 'none' must not inherit the workspace default");
+    assert.equal(withOptOut, null, "board 'none' must not inherit the global default");
   });
 
   it('rejects a nonexistent profile id and leaves the stored value unchanged (fail-closed)', async () => {
@@ -249,22 +250,40 @@ describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
     );
   });
 
-  it('validates against the DESTINATION workspace when workspace_id is reassigned in the same call (Step 2 order guard)', async () => {
+  // 티켓 e616dbfc 로 시맨틱이 뒤집힌 자리다. 예전에는 프로필이 워크스페이스에
+  // 배정돼 있어야 해서, 같은 호출에서 workspace_id 를 옮기면 목적지 워크스페이스
+  // 기준으로 검증해야 했고 미배정이면 거부가 정답이었다. 이제 프로필은 인스턴스
+  // 전역이라 어느 워크스페이스로 옮기든 같은 목록을 보므로 **통과**가 정답이다.
+  it('workspace_id 를 같은 호출에서 재배정해도 전역 프로필 핀은 거부되지 않는다', async () => {
     const otherWorkspace = await ds.getRepository('Workspace').save(
       ds.getRepository('Workspace').create({ name: 'Other workspace (no profile link)' }),
     );
     const agent = await makeAgent();
 
-    // profile.id is authoritative in `workspace` but NOT linked to
-    // otherWorkspace — if validation ran against the agent's PRE-update
-    // workspace, this would wrongly succeed.
     const result = await tools.update_agent.handler(
       { agent_id: agent.id, workspace_id: otherWorkspace.id, cli_runtime_profile: profile.id },
       agentExtra(),
     );
-    assert.equal(result.isError, true);
+    assert.equal(result.isError, undefined);
     const stored = await ds.getRepository('Agent').findOneByOrFail({ id: agent.id });
-    assert.equal(stored.cli_runtime_profile, null, 'rejected profile must not have been saved');
+    assert.equal(stored.workspace_id, otherWorkspace.id);
+    assert.equal(stored.cli_runtime_profile, profile.id, '전역 프로필은 목적지 워크스페이스와 무관하게 저장된다');
+  });
+
+  it('전역 기본값이 비어 있으면 아무 핀도 없을 때 null 로 해석한다', async () => {
+    const settings = ds.getRepository('SystemSetting');
+    const saved = await settings.findOneByOrFail({ key: 'claude_backend_profiles.default' });
+    try {
+      await settings.update({ key: 'claude_backend_profiles.default' }, { value: '' });
+      const resolved = await resolveClaudeBackendProfileForDispatch(ds, [
+        { source: 'run', value: null },
+        { source: 'agent', value: null },
+        { source: 'board', value: null },
+      ]);
+      assert.equal(resolved, null, '상속 체인이 모두 비면 프로필 없이 디스패치한다');
+    } finally {
+      await settings.update({ key: 'claude_backend_profiles.default' }, { value: saved.value });
+    }
   });
 
   it('REST PATCH /boards/:id and the MCP update_board tool reach the same verdict for a bogus profile id', async () => {
@@ -284,7 +303,7 @@ describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
     const res = fakeRes();
     await controller.update(board.id, { cli_runtime_profile: 'does-not-exist' }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /cli_runtime_profile "does-not-exist" does not exist in workspace/);
+    assert.match(res.body.error, /cli_runtime_profile "does-not-exist" does not exist$/);
 
     const mcpResult = await tools.update_board.handler(
       { board_id: board.id, cli_runtime_profile: 'does-not-exist' },

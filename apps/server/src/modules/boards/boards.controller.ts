@@ -31,7 +31,7 @@ import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { Workspace } from '../../entities/Workspace';
-import { authoritativeWorkspaceRuntimeProfiles } from '../../common/claude-backend-registry';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { validateMergeGateConfigInput, serializeMergeGateConfig } from '../../common/merge-gate-config';
 import { validateMergeLeaseConfigInput, serializeMergeLeaseConfig } from '../../common/merge-lease-config';
 import { validateRespawnStormConfigInput, serializeRespawnStormConfig } from '../../common/respawn-storm-config';
@@ -545,10 +545,9 @@ export class BoardsController {
     }
     if (cli_runtime_profile !== undefined) {
       const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
-      const workspace = await this.dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
-      const profiles = await authoritativeWorkspaceRuntimeProfiles(this.dataSource, workspace);
+      const profiles = await globalRuntimeProfiles(this.dataSource);
       if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist in workspace ${board.workspace_id}` });
+        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist` });
       }
       board.cli_runtime_profile = selected;
     }

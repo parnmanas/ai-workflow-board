@@ -56,7 +56,6 @@ import type {
   AgentManagerCommandResult,
   ManagedAgentCreateBody,
   Agent,
-  RuntimeProfileConfig,
   TicketAttachmentMeta,
   TicketPrerequisiteRow,
   UserNotificationChannel,
@@ -80,7 +79,6 @@ import type {
   WorkflowHealthRollup,
   WorkflowHealthLongTermUsage,
   ClaudeBackendProfile,
-  WorkspaceClaudeBackendProfiles,
   Skill,
   SkillDetail,
   SkillProposal,
@@ -270,7 +268,7 @@ export const api = {
   getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
   createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
     request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; clone_policy?: ClonePolicy | null; assistant_agent_id?: string | null; cli_runtime_profiles?: RuntimeProfileConfig[]; default_cli_runtime_profile?: string | null }) =>
+  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; clone_policy?: ClonePolicy | null; assistant_agent_id?: string | null }) =>
     request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspace: (id: string) =>
     request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
@@ -286,16 +284,11 @@ export const api = {
     }),
   removeWorkspaceMember: (wsId: string, userId: string) =>
     request<any>(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
-  getWorkspaceClaudeBackendProfiles: (wsId: string) =>
-    request<WorkspaceClaudeBackendProfiles>(`/workspaces/${wsId}/claude-backend-profiles`),
-  getWorkspaceClaudeBackendProfileCatalog: (wsId: string) =>
-    request<{ profiles: ClaudeBackendProfile[] }>(`/workspaces/${wsId}/claude-backend-profiles/catalog`),
-  updateWorkspaceClaudeBackendProfiles: (
-    wsId: string,
-    data: { allowed_profile_ids: string[]; default_profile_id: string | null },
-  ) => request<WorkspaceClaudeBackendProfiles>(`/workspaces/${wsId}/claude-backend-profiles`, {
-    method: 'PATCH', body: JSON.stringify(data),
-  }),
+  // 프로필 핀 드롭다운용 전역 카탈로그(티켓 e616dbfc). 프로필은 인스턴스
+  // 전역이라 워크스페이스 인자가 없다. getClaudeBackendProfiles 는 관리자
+  // 전용 라우트라 비관리자에게는 빈 목록이 되므로 읽기는 이쪽을 쓴다.
+  listClaudeBackendProfiles: () =>
+    request<{ profiles: ClaudeBackendProfile[]; default_profile_id: string | null }>('/claude-backend-profiles'),
   getClaudeBackendProfiles: () =>
     request<{ profiles: ClaudeBackendProfile[]; default_profile_id: string | null }>('/admin/claude-backend-profiles'),
   createClaudeBackendProfile: (data: ClaudeBackendProfile) =>

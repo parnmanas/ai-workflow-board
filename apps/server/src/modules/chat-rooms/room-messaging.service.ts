@@ -1223,10 +1223,7 @@ export class RoomMessagingService {
   ): Promise<CliRuntimeProfile | null> {
     if (agent.type !== 'claude') return null;
     try {
-      const workspace = workspaceId
-        ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
-        : null;
-      return await this._resolveChatRuntimeProfileCore(agent, workspace);
+      return await this._resolveChatRuntimeProfileCore(agent);
     } catch (err) {
       this.logService.error('ChatRooms', 'Claude backend profile 해석 실패로 채팅 디스패치를 중단합니다', {
         err: String(err), agent_id: agent.id,
@@ -1270,12 +1267,9 @@ export class RoomMessagingService {
     if (agentIds.length === 0) return { profiles, incompatibleAgentIds };
     const agents = await this.agentRepo.find({ where: { id: In(agentIds), type: 'claude' } });
     if (agents.length === 0) return { profiles, incompatibleAgentIds };
-    const workspace = workspaceId
-      ? await this.workspaceRepo.findOne({ where: { id: workspaceId } })
-      : null;
     for (const agent of agents) {
       try {
-        const profile = await this._resolveChatRuntimeProfileCore(agent, workspace);
+        const profile = await this._resolveChatRuntimeProfileCore(agent);
         if (!profile) continue;
         const instances = this.instanceRegistry?.listForAgent(agent.id) ?? [];
         const verdict = checkManagerCapabilityForDispatch(profile, instances);
@@ -1307,9 +1301,8 @@ export class RoomMessagingService {
    *  한다. */
   private async _resolveChatRuntimeProfileCore(
     agent: Agent,
-    workspace: Workspace | null,
   ): Promise<CliRuntimeProfile | null> {
-    const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, workspace, [
+    const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, [
       { source: 'agent', value: agent.cli_runtime_profile },
     ]);
     if (!profile) return null;

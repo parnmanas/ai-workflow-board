@@ -15,13 +15,12 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentsModule } from '../agents/agents.module';
-import { ClaudeBackendProfilesController } from './claude-backend-profiles.controller';
+import { ClaudeBackendProfileCatalogController, ClaudeBackendProfilesController } from './claude-backend-profiles.controller';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
-import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBackendProfile';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, Workspace, Board, BoardColumn, SystemSetting, ClaudeBackendProfile, WorkspaceClaudeBackendProfile]),
+    TypeOrmModule.forFeature([User, Workspace, Board, BoardColumn, SystemSetting, ClaudeBackendProfile]),
     // AgentsModule exports StuckTicketDetectorService, which the new
     // /api/admin/stuck-tickets controller consults for current alert
     // rows / re-alert / dismiss. forwardRef defends against any future
@@ -37,6 +36,7 @@ import { WorkspaceClaudeBackendProfile } from '../../entities/WorkspaceClaudeBac
     StuckTicketsController,
     WorkflowHealthController,
     ClaudeBackendProfilesController,
+    ClaudeBackendProfileCatalogController,
   ],
   providers: [AuthGuard, AdminGuard, PermissionGuard],
 })

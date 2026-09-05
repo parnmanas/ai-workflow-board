@@ -1582,9 +1582,6 @@ export interface Workspace {
   // Workspace 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
   // JSON 문자열로 내려오며, Repo Resource 가 키 단위로 덮는다.
   clone_policy?: string | null;
-  cli_runtime_profiles?: string | null;
-  default_cli_runtime_profile?: string | null;
-  default_claude_backend_profile_id?: string | null;
   // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
   // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
   // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.
@@ -1596,12 +1593,6 @@ export interface Workspace {
 export interface ClaudeBackendProfile extends RuntimeProfileConfig {
   name: string;
   credential_status?: 'configured' | 'missing';
-}
-
-export interface WorkspaceClaudeBackendProfiles {
-  profiles: ClaudeBackendProfile[];
-  allowed_profile_ids: string[];
-  default_profile_id: string | null;
 }
 
 // Phase 2 chat types — backed by server ChatMessage entity and ChatService aggregations.
@@ -2427,7 +2418,7 @@ export interface ManagedAgentCreateBody {
   credential_id?: string | null;
   /** Optional per-agent default model — see Agent.model. */
   model?: string | null;
-  /** Optional Claude backend profile id ('' / undefined = inherit board/workspace, 'none' = Anthropic default) — see Agent.cli_runtime_profile. */
+  /** Optional Claude backend profile id ('' / undefined = inherit board / global default, 'none' = Anthropic default) — see Agent.cli_runtime_profile. */
   cli_runtime_profile?: string | null;
 }
 
