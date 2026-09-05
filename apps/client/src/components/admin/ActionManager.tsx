@@ -19,6 +19,74 @@ interface AgentOption {
   manager_name?: string | null;
 }
 
+/**
+ * 이 Action 의 대상 에이전트 목록 (티켓 fc3906c5).
+ *
+ * 서버는 `target_agent_ids` 를 항상 채워 보내지만, 그 필드가 없던 시절의 응답을
+ * 캐시했거나 구버전 서버를 보고 있으면 비어 있을 수 있다. 그때는 레거시 단일
+ * 필드로 폴백한다 — 서버 쪽 actionTargetAgentIds() 와 같은 규칙이다.
+ */
+function actionTargets(a: Pick<Action, 'target_agent_id' | 'target_agent_ids'>): string[] {
+  const many = (a.target_agent_ids || []).filter(Boolean);
+  if (many.length > 0) return many;
+  return a.target_agent_id ? [a.target_agent_id] : [];
+}
+
+/** 배치의 종합 판정 — 전체 성공 / 부분 실패 / 전체 실패 / 진행 중. */
+type BatchVerdict = 'running' | 'succeeded' | 'partial' | 'failed';
+
+/**
+ * 같은 batch_id 의 run 들을 하나로 묶는다. 한 에이전트에 run 이 여럿이면
+ * (재시도 체인) `attempt` 가 가장 큰 것이 그 에이전트의 최종 결과다 —
+ * created_at 이 아니라 attempt 로 고르는 이유는 재시도가 항상 attempt+1 로
+ * 생성돼 배치·에이전트 안에서 유일하고 단조이기 때문이다.
+ *
+ * batch_id 가 없는 레거시 run 은 각자 자기 자신만의 배치로 취급한다.
+ */
+interface RunBatch {
+  key: string;
+  /** 표시 순서용 — 배치에서 가장 최근 run 의 created_at. */
+  latestAt: string;
+  runs: ActionRun[];
+  /** 에이전트별 최종 run (재시도 체인의 마지막 시도). */
+  finals: ActionRun[];
+  verdict: BatchVerdict;
+  succeeded: number;
+  total: number;
+}
+
+export function groupRunsIntoBatches(runs: ActionRun[]): RunBatch[] {
+  const byKey = new Map<string, ActionRun[]>();
+  for (const r of runs) {
+    const key = r.batch_id || `run:${r.id}`;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.push(r);
+    else byKey.set(key, [r]);
+  }
+  const batches: RunBatch[] = [];
+  for (const [key, bucketRuns] of byKey) {
+    const latestByAgent = new Map<string, ActionRun>();
+    for (const r of bucketRuns) {
+      const agentKey = r.agent_id || `legacy:${r.id}`;
+      const prev = latestByAgent.get(agentKey);
+      if (!prev || (r.attempt ?? 1) > (prev.attempt ?? 1)) latestByAgent.set(agentKey, r);
+    }
+    const finals = [...latestByAgent.values()];
+    const anyRunning = bucketRuns.some((r) => (r.status || 'running') === 'running');
+    const succeeded = finals.filter((r) => r.status === 'succeeded').length;
+    const verdict: BatchVerdict = anyRunning
+      ? 'running'
+      : succeeded === finals.length
+        ? 'succeeded'
+        : succeeded === 0
+          ? 'failed'
+          : 'partial';
+    const latestAt = bucketRuns.reduce((acc, r) => (r.created_at > acc ? r.created_at : acc), bucketRuns[0].created_at);
+    batches.push({ key, latestAt, runs: bucketRuns, finals, verdict, succeeded, total: finals.length });
+  }
+  return batches.sort((a, b) => (a.latestAt < b.latestAt ? 1 : a.latestAt > b.latestAt ? -1 : 0));
+}
+
 interface ActionManagerProps {
   workspaceId?: string;
 }
@@ -41,7 +109,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formPrompt, setFormPrompt] = useState('');
-  const [formAgentId, setFormAgentId] = useState('');
+  // 대상은 배열이다 (티켓 fc3906c5) — 한 Action 을 여러 에이전트가 각자 실행한다.
+  const [formAgentIds, setFormAgentIds] = useState<string[]>([]);
   const [formCron, setFormCron] = useState('');
   const [formEnabled, setFormEnabled] = useState(true);
   const [formMaxRuns, setFormMaxRuns] = useState(10);
@@ -96,7 +165,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormName('');
     setFormDescription('');
     setFormPrompt('');
-    setFormAgentId(agents[0]?.id ?? '');
+    setFormAgentIds(agents[0] ? [agents[0].id] : []);
     setFormCron('');
     setFormEnabled(true);
     setFormMaxRuns(10);
@@ -112,7 +181,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormName(a.name);
     setFormDescription(a.description);
     setFormPrompt(a.prompt);
-    setFormAgentId(a.target_agent_id);
+    setFormAgentIds(actionTargets(a));
     setFormCron(a.schedule_cron);
     setFormEnabled(a.enabled);
     setFormMaxRuns(a.max_runs);
@@ -132,7 +201,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const handleSave = async () => {
     const errs: { name?: string; agent?: string } = {};
     if (!formName.trim()) errs.name = 'Name is required';
-    if (!formAgentId) errs.agent = 'Pick a target agent';
+    if (formAgentIds.length === 0) errs.agent = '대상 에이전트를 1개 이상 선택하세요';
     setFormErrors(errs);
     if (errs.name || errs.agent) return;
     setSaving(true);
@@ -150,7 +219,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
-          target_agent_id: formAgentId,
+          target_agent_ids: formAgentIds,
           schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
@@ -165,7 +234,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           name: formName.trim(),
           description: formDescription,
           prompt: formPrompt,
-          target_agent_id: formAgentId,
+          target_agent_ids: formAgentIds,
           schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
@@ -200,7 +269,17 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setRunning(a.id);
     try {
       const result = await api.runAction(a.id);
-      showToast(`Run dispatched (room ${result.room_id.slice(0, 8)})`, 'success');
+      // fan-out (티켓 fc3906c5): 대상 일부가 디스패치에 실패해도 나머지는 떴다.
+      // 성공한 것처럼만 알리면 실패한 호스트를 운영자가 놓친다.
+      const dispatched = result.runs?.length ?? 1;
+      const failed = result.failures?.length ?? 0;
+      if (failed > 0) {
+        showToast(`${dispatched}개 대상 실행, ${failed}개 실패 — 실행 이력에서 확인하세요`, 'error');
+      } else if (dispatched > 1) {
+        showToast(`${dispatched}개 대상에 실행을 디스패치했습니다`, 'success');
+      } else {
+        showToast(`Run dispatched (room ${result.room_id.slice(0, 8)})`, 'success');
+      }
       await loadActions();
       // Select the action so the user sees the new run appear in history.
       setSelected(a);
@@ -304,7 +383,15 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               </div>
 
               <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6 }}>
-                Target: <span style={{ color: tokens.colors.textSecondary }}>{agentName(a.target_agent_id)}</span>
+                Target: <span
+                  style={{ color: tokens.colors.textSecondary }}
+                  title={actionTargets(a).map(agentName).join('\n')}
+                >
+                  {/* 대상이 여럿이면 요약 + 툴팁으로 전체 목록 (티켓 fc3906c5). */}
+                  {actionTargets(a).length > 1
+                    ? `${actionTargets(a).length}개 에이전트`
+                    : agentName(actionTargets(a)[0] || '')}
+                </span>
                 {a.trigger === 'on_ticket_done' ? (
                   <> · <Badge variant="info">on_ticket_done</Badge>
                     {a.trigger_label && <> · label: <span style={{ color: tokens.colors.textSecondary }}>{a.trigger_label}</span></>}
@@ -349,27 +436,59 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           />
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
-              Target Agent {formErrors.agent && <span style={{ color: tokens.colors.danger }}>· {formErrors.agent}</span>}
+              대상 에이전트 {formErrors.agent && <span style={{ color: tokens.colors.danger }}>· {formErrors.agent}</span>}
             </label>
-            <select
-              value={formAgentId}
-              onChange={(e) => setFormAgentId(e.target.value)}
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+              여러 개를 고르면 실행 1회가 대상마다 독립적인 run 을 만들어 각자의 방에서 병렬로 돕니다.
+              한 대상이 실패해도 나머지는 그대로 진행됩니다.
+            </div>
+            <div
+              data-testid="action-target-agents"
               style={{
-                width: '100%',
+                maxHeight: 180,
+                overflowY: 'auto',
                 background: tokens.colors.surface,
-                border: `1px solid ${tokens.colors.border}`,
+                border: `1px solid ${formErrors.agent ? tokens.colors.danger : tokens.colors.border}`,
                 borderRadius: tokens.radii.md,
-                padding: '8px 10px',
-                color: tokens.colors.textStrong,
-                fontSize: 13,
-                fontFamily: 'inherit',
+                padding: '6px 8px',
               }}
             >
-              <option value="">— select an agent —</option>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>{formatAgentDisplayName(a)}</option>
-              ))}
-            </select>
+              {agents.length === 0 && (
+                <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '6px 2px' }}>
+                  이 워크스페이스에 선택 가능한 에이전트가 없습니다.
+                </div>
+              )}
+              {agents.map((a) => {
+                const checked = formAgentIds.includes(a.id);
+                return (
+                  <label
+                    key={a.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '5px 2px',
+                      fontSize: 13,
+                      color: tokens.colors.textStrong,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => setFormAgentIds((prev) => (
+                        prev.includes(a.id) ? prev.filter((id) => id !== a.id) : [...prev, a.id]
+                      ))}
+                    />
+                    {/* `<Manager>/<Agent>` — bare name 은 계약 위반이다(utils/agentName.ts). */}
+                    <span>{formatAgentDisplayName(a)}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
+              선택됨: {formAgentIds.length}개
+            </div>
           </div>
           <div>
             <label style={{ display: 'block', fontSize: 12, color: tokens.colors.textSecondary, marginBottom: 4 }}>
@@ -595,7 +714,18 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
     await loadRuns();
   };
 
-  const agentName = (id: string): string => agents.find((a) => a.id === id)?.name ?? id.slice(0, 8);
+  // `<Manager>/<Agent>` — bare `a.name` 은 계약 위반이다
+  // (.claude/skills/awb-agent-display-name): 같은 leaf 이름이 여러 매니저 아래
+  // 존재할 수 있어, fan-out 이력에서 어느 호스트가 실행했는지 구분하려면
+  // 접두사가 반드시 있어야 한다.
+  const agentName = (id: string): string => {
+    if (!id) return '(에이전트 기록 없음)';
+    const a = agents.find((x) => x.id === id);
+    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+  };
+
+  const targetLabels = actionTargets(action).map(agentName);
+  const batches = groupRunsIntoBatches(runs);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -624,39 +754,85 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
           <div style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted }}>
             Recent runs ({runs.length}/{action.max_runs})
           </div>
-          <div style={{ flex: 1, overflow: 'auto', padding: 4 }}>
+          {/* 실행 이력은 배치(트리거 1회) 단위로 묶어 보여준다 (티켓 fc3906c5) —
+              fan-out 이면 한 번의 실행이 run 을 여러 건 만들기 때문에, 평평한
+              목록으로는 "이번 실행이 어디까지 성공했나" 를 읽을 수 없다. */}
+          <div data-testid="action-run-history" style={{ flex: 1, overflow: 'auto', padding: 4 }}>
             {runs.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: 12 }}>
                 No runs yet. Click <strong>Run now</strong> to dispatch one.
               </div>
-            ) : runs.map((r) => {
-              const active = r.id === activeRunId;
+            ) : batches.map((batch) => {
+              const multi = batch.total > 1;
+              const verdictLabel = batch.verdict === 'running'
+                ? '진행 중'
+                : batch.verdict === 'succeeded'
+                  ? '전체 성공'
+                  : batch.verdict === 'failed'
+                    ? '전체 실패'
+                    : `부분 실패 (${batch.succeeded}/${batch.total})`;
+              const verdictVariant: 'success' | 'danger' | 'warning' | 'neutral' = batch.verdict === 'succeeded'
+                ? 'success'
+                : batch.verdict === 'failed'
+                  ? 'danger'
+                  : batch.verdict === 'partial'
+                    ? 'warning'
+                    : 'neutral';
+              const head = batch.runs[0];
               return (
-                <button
-                  key={r.id}
-                  onClick={() => setActiveRunId(r.id)}
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    textAlign: 'left',
-                    padding: '8px 10px',
-                    background: active ? tokens.colors.surfaceHover : 'transparent',
-                    border: 'none',
-                    borderRadius: tokens.radii.sm,
-                    color: active ? tokens.colors.textStrong : tokens.colors.textSecondary,
-                    cursor: 'pointer',
-                    fontFamily: 'inherit',
-                    fontSize: 12,
-                    marginBottom: 2,
-                  }}
-                >
-                  <div style={{ fontWeight: active ? 600 : 500 }}>
-                    Run {r.id.slice(0, 8)}
-                  </div>
-                  <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
-                    {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? 'scheduler' : r.triggered_by_type === 'agent' ? 'agent' : 'manual'}
-                  </div>
-                </button>
+                <div key={batch.key} style={{ marginBottom: 6 }}>
+                  {multi && (
+                    <div
+                      data-testid="action-run-batch-header"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '6px 8px 2px',
+                        fontSize: 11,
+                        color: tokens.colors.textMuted,
+                      }}
+                    >
+                      <span>{relativeTime(batch.latestAt)} · {head.triggered_by_type === 'system' ? 'scheduler' : head.triggered_by_type === 'agent' ? 'agent' : 'manual'}</span>
+                      <Badge variant={verdictVariant}>{verdictLabel}</Badge>
+                    </div>
+                  )}
+                  {batch.runs.map((r) => {
+                    const active = r.id === activeRunId;
+                    const status = r.status || 'running';
+                    const icon = status === 'succeeded' ? '✅' : status === 'failed' ? '❌' : '⏳';
+                    return (
+                      <button
+                        key={r.id}
+                        onClick={() => setActiveRunId(r.id)}
+                        style={{
+                          display: 'block',
+                          width: '100%',
+                          textAlign: 'left',
+                          padding: '8px 10px',
+                          paddingLeft: multi ? 18 : 10,
+                          background: active ? tokens.colors.surfaceHover : 'transparent',
+                          border: 'none',
+                          borderRadius: tokens.radii.sm,
+                          color: active ? tokens.colors.textStrong : tokens.colors.textSecondary,
+                          cursor: 'pointer',
+                          fontFamily: 'inherit',
+                          fontSize: 12,
+                          marginBottom: 2,
+                        }}
+                      >
+                        <div style={{ fontWeight: active ? 600 : 500 }}>
+                          {icon} {agentName(r.agent_id || '')}
+                        </div>
+                        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>
+                          Run {r.id.slice(0, 8)}
+                          {(r.attempt ?? 1) > 1 && <> · {r.attempt}회 시도</>}
+                          {!multi && <> · {relativeTime(r.created_at)} · {r.triggered_by_type === 'system' ? 'scheduler' : r.triggered_by_type === 'agent' ? 'agent' : 'manual'}</>}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               );
             })}
           </div>
@@ -676,7 +852,16 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
         }}>
           <div style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}`, fontSize: 12, color: tokens.colors.textMuted, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
             <span>
-              Conversation with <strong>{agentName(action.target_agent_id)}</strong>
+              {/* 선택된 run 의 담당 에이전트를 우선 보여준다 — 대상이 여럿인
+                  Action 에서 action 의 대표 대상만 박아두면 지금 보고 있는
+                  대화의 상대와 어긋난다 (티켓 fc3906c5). */}
+              Conversation with <strong>{
+                activeRun?.agent_id
+                  ? agentName(activeRun.agent_id)
+                  : targetLabels.length > 1
+                    ? `${targetLabels.length}개 에이전트`
+                    : targetLabels[0] || '(대상 없음)'
+              }</strong>
             </span>
             <Button variant="secondary" size="sm" onClick={() => loadMessages()}>Refresh</Button>
           </div>
