@@ -33,8 +33,10 @@ import {
   actionTargetAgentIds,
   agentScopedWorkspaceFolder,
   normalizeTargetAgentIds,
+  primaryTargetAgentId,
   serializeTargetAgentIds,
 } from '../../common/action-targets';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -618,12 +620,18 @@ export class ActionsService {
     };
 
     if (args.status === 'succeeded') {
-      await this._postRunComment(
-        sourceTicketId, run.workspace_id, actor,
-        `✅ Action **${actionName}** run \`${run.id.slice(0, 8)}\` succeeded` +
-        `${summary ? ` — ${summary}` : ''}. Resuming this ticket.`,
-      );
       await this._logRunActivity(sourceTicketId, run, actor, 'succeeded', summary);
+      // fan-out 배치는 **모든 run이 종료된 뒤** 한 번만 재개한다 (티켓 fc3906c5).
+      // 아직 형제 run이 돌고 있으면 진행 상황만 남기고 재개하지 않는다.
+      const gate = await this._resolveBatchResume(run, actionName, actor, sourceTicketId);
+      if (!gate.shouldResume) {
+        return {
+          run, sourceTicketId, status: 'succeeded',
+          previouslyCompleted: false, retried: false, retryRunId: '', exhausted: false,
+          shouldResume: false,
+        };
+      }
+      await this._postRunComment(sourceTicketId, run.workspace_id, actor, gate.comment);
       return {
         run, sourceTicketId, status: 'succeeded',
         previouslyCompleted: false, retried: false, retryRunId: '', exhausted: false,
@@ -646,6 +654,15 @@ export class ActionsService {
       const nextAttempt = run.attempt + 1;
       let retryRunId = '';
       try {
+        // 재시도는 **실패한 그 에이전트 하나만** 다시 돌린다 (티켓 fc3906c5).
+        // 배치 전체를 다시 fan-out 하면 이미 성공한 에이전트에서 외부 작업이
+        // 두 번 실행된다. 그리고 원래 batch_id를 승계해야 재시도가 떠 있는 동안
+        // 배치가 "전원 종료"로 보이지 않는다.
+        //
+        // agent_id가 빈 레거시 run은 Action의 대표 대상으로 되돌린다 — fan-out
+        // 이전의 dispatch가 정확히 `action.target_agent_id` 하나를 쓰던 것과
+        // 같은 동작이라, 옛 run의 재시도가 갑자기 여러 대상으로 번지지 않는다.
+        const retryAgentId = run.agent_id || primaryTargetAgentId(action);
         const retry = await this.dispatch({
           actionId: run.action_id,
           triggeredByType: actor.type,
@@ -655,6 +672,8 @@ export class ActionsService {
           // Carry the same idempotency key across the retry chain so the
           // target operation can dedupe a redelivered external effect.
           idempotencyKey: run.idempotency_key || undefined,
+          onlyAgentIds: retryAgentId ? [retryAgentId] : undefined,
+          batchId: run.batch_id || undefined,
         });
         retryRunId = retry.run.id;
       } catch (e: any) {
@@ -679,6 +698,10 @@ export class ActionsService {
 
     // High-impact failure (no auto-retry) or the retry cap reached (or a
     // re-dispatch that could not launch): surface + resume so a human decides.
+    //
+    // fan-out 배치라면 이 에이전트가 최종 실패했다는 사실만으로 티켓을 재개하지
+    // 않는다 (티켓 fc3906c5) — 아직 도는 형제 run이 있으면 그쪽 결과까지 모아
+    // 마지막 run이 요약과 함께 한 번만 재개한다. 실패는 그 요약에 명시된다.
     const surface = highImpact
       ? `❌ HIGH-IMPACT Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed` +
         `${summary ? ` — ${summary}` : ''}. NOT auto-retried (a blind re-run could double a deploy/publish effect). ` +
@@ -687,12 +710,152 @@ export class ActionsService {
       : `❌ Action **${actionName}** run \`${run.id.slice(0, 8)}\` failed after ${run.attempt} attempt(s)` +
         `${summary ? ` — ${summary}` : ''}. Resuming this ticket so the assignee can fix the inputs and retry, ` +
         `or \`pend_ticket\` with a specific \`no_action_reason\` if it genuinely needs a human.`;
-    await this._postRunComment(sourceTicketId, run.workspace_id, actor, surface);
+    const gate = await this._resolveBatchResume(run, actionName, actor, sourceTicketId, surface);
+    if (!gate.shouldResume) {
+      return {
+        run, sourceTicketId, status: 'failed',
+        previouslyCompleted: false, retried: false, retryRunId: '', exhausted: true,
+        shouldResume: false,
+      };
+    }
+    await this._postRunComment(sourceTicketId, run.workspace_id, actor, gate.comment);
     return {
       run, sourceTicketId, status: 'failed',
       previouslyCompleted: false, retried: false, retryRunId: '', exhausted: true,
       shouldResume: true,
     };
+  }
+
+  /**
+   * 배치 재개 게이트 (티켓 fc3906c5) — "지금 이 run의 종료로 소스 티켓을 재개해도
+   * 되는가", 그리고 그때 티켓에 남길 코멘트를 결정한다.
+   *
+   * 세 갈래:
+   *   1. `batch_id`가 없는 레거시 run, 또는 배치 크기가 1(단일 대상) — fan-out
+   *      이전과 **완전히 동일**하게 즉시 재개하고, 코멘트도 호출자가 만든
+   *      단일 run 문구를 그대로 쓴다.
+   *   2. 배치에 아직 `running`인 run이 남아 있음 — 재개하지 않는다. 대신 이
+   *      에이전트의 결과만 진행 상황 코멘트로 남겨 운영자가 중간 상태를 볼 수
+   *      있게 한다.
+   *   3. 이 run이 배치의 마지막 — 1회성 클레임을 따낸 쪽만 재개하고, 에이전트별
+   *      최종 결과를 모은 요약 코멘트를 돌려준다(부분 실패 포함).
+   *
+   * `singleComment`는 (1)에서 쓸 기존 문구다. 성공 경로는 넘기지 않고 여기서
+   * 만든다(예전 문구와 동일하게 재구성).
+   */
+  private async _resolveBatchResume(
+    run: ActionRun,
+    actionName: string,
+    actor: { type: string; id: string; name: string },
+    sourceTicketId: string,
+    singleComment?: string,
+  ): Promise<{ shouldResume: boolean; comment: string }> {
+    const succeededComment =
+      `✅ Action **${actionName}** run \`${run.id.slice(0, 8)}\` succeeded` +
+      `${run.result_summary ? ` — ${run.result_summary}` : ''}. Resuming this ticket.`;
+    const soloComment = singleComment ?? succeededComment;
+
+    const batchId = (run.batch_id || '').trim();
+    if (!batchId) return { shouldResume: true, comment: soloComment };
+
+    const siblings = await this.runRepo.find({
+      where: { batch_id: batchId, workspace_id: run.workspace_id },
+    });
+    // 배치를 못 찾거나 나 혼자면 단일 run과 동일하게 처리한다.
+    const agentIds = new Set(siblings.map((r) => r.agent_id || ''));
+    if (siblings.length <= 1 || agentIds.size <= 1) {
+      return { shouldResume: true, comment: soloComment };
+    }
+
+    const stillRunning = siblings.filter((r) => (r.status || 'running') === 'running');
+    if (stillRunning.length > 0) {
+      // 아직 미완 — 이 에이전트 결과만 진행 상황으로 남긴다.
+      const who = await this._agentLabel(run.agent_id);
+      const icon = run.status === 'succeeded' ? '✅' : '❌';
+      await this._postRunComment(
+        sourceTicketId, run.workspace_id, actor,
+        `${icon} Action **${actionName}** — ${who} ${run.status === 'succeeded' ? '성공' : '실패'}` +
+        `${run.result_summary ? ` — ${run.result_summary}` : ''}. ` +
+        `배치의 남은 ${stillRunning.length}건이 끝나면 결과를 모아 이 티켓을 재개합니다.`,
+      );
+      return { shouldResume: false, comment: '' };
+    }
+
+    // 마지막 run — 재개 권한을 1회성으로 확보한다. affected > 0 인 쪽만 이긴다.
+    const claim = await this.runRepo
+      .createQueryBuilder()
+      .update(ActionRun)
+      .set({ batch_resume_claimed: true })
+      .where('batch_id = :b', { b: batchId })
+      .andWhere('workspace_id = :ws', { ws: run.workspace_id })
+      .andWhere('batch_resume_claimed = :claimed', { claimed: false })
+      .execute();
+    if ((claim.affected ?? 0) <= 0) {
+      // 다른 형제가 이미 재개를 가져갔다(또는 드라이버가 affected를 안 채웠다).
+      // 종료 전이와 같은 fail-closed 자세 — 재개를 중복시키느니 건너뛴다.
+      return { shouldResume: false, comment: '' };
+    }
+
+    return { shouldResume: true, comment: await this._renderBatchSummary(actionName, siblings) };
+  }
+
+  /**
+   * 에이전트별 **최종** 결과를 모은 배치 요약. 전체 성공 / 부분 실패 / 전체
+   * 실패를 구분해 첫 줄에 적는다.
+   *
+   * 같은 에이전트에 run이 여럿이면(재시도 체인) `attempt`가 가장 큰 것이 그
+   * 에이전트의 최종 결과다. `created_at`이 아니라 `attempt`로 고르는 이유는
+   * 재시도가 항상 attempt+1로 생성돼 배치·에이전트 안에서 유일하고 단조라,
+   * 같은 타임스탬프가 몰려도 판정이 흔들리지 않기 때문이다.
+   */
+  private async _renderBatchSummary(actionName: string, siblings: ActionRun[]): Promise<string> {
+    const latestByAgent = new Map<string, ActionRun>();
+    for (const r of siblings) {
+      const key = r.agent_id || '';
+      const prev = latestByAgent.get(key);
+      if (!prev || (r.attempt ?? 1) > (prev.attempt ?? 1)) latestByAgent.set(key, r);
+    }
+    const finals = [...latestByAgent.entries()];
+    const labels = await this._agentLabelMap(finals.map(([agentId]) => agentId));
+
+    const okCount = finals.filter(([, r]) => r.status === 'succeeded').length;
+    const total = finals.length;
+    const headline = okCount === total
+      ? `✅ Action **${actionName}** — 대상 ${total}개 에이전트 전체 성공`
+      : okCount === 0
+        ? `❌ Action **${actionName}** — 대상 ${total}개 에이전트 전체 실패`
+        : `⚠️ Action **${actionName}** — 부분 실패 (${okCount}/${total} 성공)`;
+
+    const lines = finals.map(([agentId, r]) => {
+      const icon = r.status === 'succeeded' ? '✅' : '❌';
+      const who = labels.get(agentId) || '(에이전트 기록 없음)';
+      const attemptNote = (r.attempt ?? 1) > 1 ? ` (${r.attempt}회 시도)` : '';
+      return `- ${icon} ${who}${attemptNote} — \`${r.id.slice(0, 8)}\`${r.result_summary ? `: ${r.result_summary}` : ''}`;
+    });
+
+    return `${headline}\n\n${lines.join('\n')}\n\n이 티켓을 재개합니다.`;
+  }
+
+  /** 단일 에이전트의 `<Manager>/<Agent>` 표시명 (없으면 정직하게 표기). */
+  private async _agentLabel(agentId: string): Promise<string> {
+    const labels = await this._agentLabelMap([agentId]);
+    return labels.get(agentId || '') || '(에이전트 기록 없음)';
+  }
+
+  /**
+   * agent id → `<Manager>/<Agent>` 표시명 배치 조회.
+   * `.claude/skills/awb-agent-display-name` 계약대로 bare name을 쓰지 않는다 —
+   * 같은 leaf 이름이 여러 매니저 아래 정당하게 존재하므로 접두사가 없으면
+   * 어느 호스트가 실행했는지 구분할 수 없고, 그게 이 티켓의 핵심 요구사항이다.
+   */
+  private async _agentLabelMap(agentIds: string[]): Promise<Map<string, string>> {
+    const ids = agentIds.filter(Boolean);
+    if (ids.length === 0) return new Map();
+    try {
+      return await resolveAgentDisplayNamesByIds(this.agentRepo, ids);
+    } catch {
+      return new Map();
+    }
   }
 
   /** Post a `note` comment on the source ticket recording a run outcome. */

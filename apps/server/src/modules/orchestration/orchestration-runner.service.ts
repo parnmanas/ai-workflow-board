@@ -627,6 +627,11 @@ export class OrchestrationRunnerService {
           triggeredByType: 'system',
           triggeredById: this.postActionTriggerId(mission.id, pa.order),
         });
+        // fan-out (티켓 fc3906c5): 대상이 여럿인 Action이면 이 한 번의
+        // post-action 발화가 run을 여러 건 만든다. pa.run_id/pa.room_id는
+        // 타입 모양을 바꾸지 않고 첫 run을 계속 가리키고(크래시 복구 조회도
+        // 이 한 건이면 "실제로 디스패치됐다"를 확정하기에 충분하다), 나머지는
+        // 자유 형식인 이벤트 data에 배치 정보로 남겨 감사에서 잃지 않는다.
         pa.status = 'dispatched';
         pa.run_id = result.run.id;
         pa.room_id = result.room_id;
@@ -635,9 +640,18 @@ export class OrchestrationRunnerService {
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatched',
-          message: `Post-action "${action.name}" dispatched (run ${result.run.id})`,
+          message: result.runs.length > 1
+            ? `Post-action "${action.name}" dispatched to ${result.runs.length} agents (batch ${result.batch_id})`
+            : `Post-action "${action.name}" dispatched (run ${result.run.id})`,
           actor_type: 'system',
-          data: { action_id: action.id, run_id: result.run.id, room_id: result.room_id },
+          data: {
+            action_id: action.id,
+            run_id: result.run.id,
+            room_id: result.room_id,
+            batch_id: result.batch_id,
+            runs: result.runs.map((r) => ({ run_id: r.run.id, agent_id: r.agent_id, room_id: r.room_id })),
+            failed_targets: result.failures,
+          },
         });
       } catch (e: any) {
         pa.status = 'dispatch_failed';

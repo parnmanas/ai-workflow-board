@@ -477,10 +477,19 @@ export class WorkflowFunctionsService implements OnModuleInit {
         triggeredById: args.actorId || '',
         sourceTicketId: args.ticketId,
       });
+      // fan-out (티켓 fc3906c5): action_run_id/room_id는 첫 run으로 유지해 기존
+      // Function 소비자를 깨지 않고, 대상별 run 목록을 함께 돌려준다.
       return {
         dispatched: true,
         action_run_id: dispatched.run.id,
         room_id: dispatched.room_id,
+        batch_id: dispatched.batch_id,
+        action_runs: dispatched.runs.map((r) => ({
+          action_run_id: r.run.id,
+          agent_id: r.agent_id,
+          room_id: r.room_id,
+        })),
+        failed_targets: dispatched.failures,
         note: 'This Function run records successful dispatch; the Action run owns asynchronous completion.',
       };
     }

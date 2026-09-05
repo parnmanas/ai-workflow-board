@@ -47,6 +47,23 @@ export class ActionRun {
   @Column({ type: 'varchar', default: '' })
   batch_id: string;
 
+  // 배치 재개 1회성 클레임 (티켓 fc3906c5). source_ticket_id가 있는 fan-out
+  // 배치는 **모든 run이 종료된 뒤 한 번만** 티켓을 재개해야 하는데, "내가
+  // 마지막인가" 판정은 내 종료 전이(原子적)와 별개의 읽기라 경합이 난다:
+  // run A와 B가 각자 종료를 커밋한 뒤 둘 다 "남은 running 0"을 보면 둘 다
+  // 재개해 티켓이 두 번 디스패치된다.
+  //
+  // 그래서 재개 직전에 `batch_id = ? AND batch_resume_claimed = false` 를
+  // 가드로 한 UPDATE를 배치 전체에 날리고, affected > 0 인 쪽만 재개한다
+  // (기존 종료 전이와 같은 guarded-UPDATE 기법). 클레임은 남은 running이
+  // 0일 때만 시도하므로, 클레임 이후 새 재시도 run이 배치에 합류하는 일은
+  // 없다 — 합류하려면 그 시점에 실패할 run이 남아 있어야 한다.
+  //
+  // 크기 1짜리 배치(단일 대상)는 완료 호출 자체가 한 번뿐이라 경합이 없어
+  // 클레임을 아예 건너뛴다 — 그 경로는 fan-out 이전과 동일하게 유지된다.
+  @Column({ type: 'boolean', default: false })
+  batch_resume_claimed: boolean;
+
   // The ChatRoom hosting the agent ↔ user conversation for this Run.
   @Column({ type: 'varchar' })
   room_id: string;

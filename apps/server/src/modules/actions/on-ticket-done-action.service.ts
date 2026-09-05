@@ -171,8 +171,12 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
           ticketContext,
         });
         dispatched++;
+        // fan-out (티켓 fc3906c5): 대상이 여럿이면 이 한 번의 훅 발화가 run을
+        // 여러 건 만든다. run_id/room_id는 첫 run으로 두고 배치 규모를 함께
+        // 남겨, 로그만 보고도 몇 개 호스트로 퍼졌는지 알 수 있게 한다.
         this.logService.info('Actions', 'on_ticket_done hook dispatched action', {
           ticket_id: ticket.id, action_id: action.id, run_id: result.run.id, room_id: result.room_id,
+          batch_id: result.batch_id, run_count: result.runs.length, failed_targets: result.failures.length,
         });
       } catch (e) {
         this.logService.warn('Actions', 'on_ticket_done hook dispatch failed (continuing)', {

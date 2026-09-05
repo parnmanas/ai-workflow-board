@@ -84,10 +84,19 @@ export class ActionsController {
         triggeredByType: 'user',
         triggeredById: user?.id || '',
       });
+      // fan-out (티켓 fc3906c5): run_id/room_id/prompt는 첫 run으로 그대로 두어
+      // 기존 클라이언트가 깨지지 않게 하고, 배치 정보를 덧붙인다.
       return res.status(201).json({
         run_id: result.run.id,
         room_id: result.room_id,
         prompt: result.prompt,
+        batch_id: result.batch_id,
+        runs: result.runs.map((r) => ({
+          run_id: r.run.id,
+          agent_id: r.agent_id,
+          room_id: r.room_id,
+        })),
+        failures: result.failures,
       });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run action' });
