@@ -24,7 +24,7 @@ import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentNam
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
-import { summarizeModelCounts, waitForFreshHeartbeat } from './agentManagerModelRefresh';
+import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
 
 /**
  * Runtime Host administration and observability.
@@ -657,43 +657,38 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // 재시작하지 않고 모델 목록만 다시 열거한다. 매니저 프로세스와 실행 중인 세션은
   // 그대로 유지된다(재열거는 어댑터 introspection 일 뿐이다).
   //
-  // 매니저는 재열거 직후 즉시 하트비트 1회를 보내므로 다음 정기 tick(30초)을
-  // 기다릴 필요가 없다. 커맨드 ack detail 은 서버 로그로만 흐르고 UI 로 되돌아오는
-  // 릴레이가 없으므로, 여기서는 그 하트비트가 레지스트리에 반영될 때까지 짧게
-  // 재조회한 뒤 **레지스트리가 실제로 받은** CLI별 모델 수를 보여준다 — 그게
-  // Agent 생성/편집 다이얼로그의 모델 드롭다운이 읽는 바로 그 값이다.
+  // 완료 판정은 **발급된 command_id 의 ack** 로만 한다. 202 는 디스패치 수락일
+  // 뿐이고, 하트비트는 30초마다 알아서 돌기 때문에 "하트비트가 왔다" 를 완료로
+  // 쓰면 커맨드와 무관한 정기 하트비트가 조건을 충족시켜 재열거 전 값을 성공으로
+  // 오표시한다(리뷰 지적). 성공 ack 이후에만 인스턴스 목록을 다시 읽는다.
   const handleRefreshModels = async () => {
     if (refreshModelsPending) return;
     setRefreshModelsPending(true);
     try {
-      // 기준 시각은 렌더 시점의 `inst` 가 아니라 **지금 서버가 들고 있는 값**이어야
-      // 한다. 이 목록은 15초 폴백 주기로 갱신되므로, 클릭 직전에 정기 하트비트가
-      // 하나 지나갔다면 prop 의 last_seen_at 은 이미 낡았고 — 그러면 첫 폴링이
-      // 곧바로 "바뀌었다"고 판정해 리프레시 이전 수치를 갱신 결과로 보고한다.
-      const rows = await api.listAgentManagerInstances();
-      const current = rows.find((row) => row.instance_id === inst.instance_id);
-      if (!current) {
-        showToast('이 Runtime Host 가 목록에서 사라졌습니다 (TTL 만료 또는 종료).', 'error');
-        return;
-      }
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'refresh_available_models',
       });
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
-      const fresh = await waitForFreshHeartbeat(inst.instance_id, current.last_seen_at);
-      if (!fresh) {
+      const ack = await waitForCommandAck(resp.command_id);
+      if (ack.state === 'error') {
+        showToast(`모델 목록 갱신 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
         showToast(
-          `refresh_available_models 전송됨${idTail} — 갱신된 하트비트가 아직 도착하지 ` +
-            `않았습니다. 다음 하트비트(최대 30초)에 반영됩니다.`,
+          `refresh_available_models 전송됨${idTail} — 매니저 응답을 아직 받지 못했습니다` +
+            `${ack.state === 'unknown' ? ' (ack 창 만료)' : ''}. 매니저가 처리하면 다음 ` +
+            `하트비트에 반영됩니다.`,
           'info',
         );
         return;
       }
-      const summary = summarizeModelCounts(fresh.available_models);
+      // 성공 ack 이후에만 레지스트리를 다시 읽는다.
+      const fresh = await reloadInstance(inst.instance_id);
+      const registrySummary = summarizeModelCounts(fresh?.available_models);
       showToast(
-        summary
-          ? `모델 목록 갱신 완료${idTail} — ${summary}`
-          : `모델 목록 갱신 완료${idTail} — 모델을 보고한 CLI 가 없습니다.`,
+        `모델 목록 갱신 완료${idTail} — ${ack.detail || '매니저가 결과를 보고하지 않았습니다'}` +
+          (registrySummary ? ` (레지스트리 반영: ${registrySummary})` : ''),
         'success',
       );
     } catch (err: any) {

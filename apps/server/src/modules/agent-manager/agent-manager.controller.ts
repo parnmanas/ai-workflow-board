@@ -930,6 +930,11 @@ export class AgentManagerController {
 
     const detail = typeof body?.detail === 'string' ? body.detail.slice(0, 2000) : '';
 
+    // ticket 40110b64 — 이 커맨드의 종단 결과를 조회 가능하게 남긴다. `consume()`
+    // 이 원장 레코드를 지운 직후의 **같은 동기 구간**이어야 한다: 사이에 await 가
+    // 끼면 폴링 중인 클라이언트가 "레코드도 결과도 없는" 찰나를 만나 만료로 오판한다.
+    this.commandLedger.recordOutcome(record, status, detail);
+
     // Spawn-failure closed loop (ticket 1f750878). The manager already acks a
     // failed spawn_agent (working_dir empty / apiKey provisioning / codex prep /
     // pool exhausted …) with status='error' + the thrown message as `detail` —
@@ -1349,6 +1354,60 @@ export class AgentManagerController {
     // ledger before emitting (ack-race safety).
     const { command_id, issued_at } = await this.commands.issue(inst, command, args, user.id);
     return res.status(202).json({ ok: true, command_id, issued_at });
+  }
+
+  /**
+   * 위 디스패치가 돌려준 `command_id` 의 종단 결과를 조회한다 (ticket 40110b64).
+   *
+   * 202 는 "SSE 로 실어 보냈다" 는 수락 신호일 뿐이라, 화면이 완료를 판정하려면
+   * 그 커맨드의 ack 를 명시적으로 봐야 한다. 하트비트 도착 같은 간접 신호로
+   * 대신하면 커맨드와 무관한 정기 하트비트(30초 주기)가 조건을 충족시켜, 매니저가
+   * 아직 처리도 안 했는데 "완료" 와 예전 값을 보여주게 된다.
+   *
+   * 상태 3종:
+   *   - `pending`  원장에 레코드가 살아 있고 ack 가 아직 안 왔다
+   *   - `ok`/`error`  매니저가 ack 했다. `detail` 은 매니저가 보고한 결과 문자열
+   *   - `unknown`  그런 command_id 를 모른다(오타) 또는 ack 없이 TTL 이 지났다
+   *
+   * `unknown` 도 200 으로 돌려준다 — 폴링하는 쪽이 "만료" 와 "네트워크 실패" 를
+   * 구분할 수 있어야 하기 때문이다.
+   */
+  @ApiBearerAuth('user-session')
+  @Get('api/admin/agent-manager/commands/:commandId')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '디스패치한 제어 커맨드의 ack 결과 조회 (pending|ok|error|unknown)' })
+  async getCommandOutcome(
+    @Param('commandId') commandId: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const outcome = this.commandLedger.getOutcome(commandId);
+    if (outcome) {
+      return res.json({
+        state: outcome.status,
+        command_id: outcome.command_id,
+        instance_id: outcome.instance_id,
+        command: outcome.command,
+        detail: outcome.detail,
+        issued_at: outcome.issued_at,
+        acked_at: outcome.acked_at,
+      });
+    }
+    const pending = this.commandLedger.get(commandId);
+    if (pending) {
+      return res.json({
+        state: 'pending',
+        command_id: pending.command_id,
+        instance_id: pending.instance_id,
+        command: pending.command,
+        detail: '',
+        issued_at: pending.issued_at,
+        acked_at: null,
+      });
+    }
+    return res.json({ state: 'unknown', command_id: commandId, detail: '', acked_at: null });
   }
 
   // ─── ST-4 admin → server: agent identity CRUD scoped for the manager ────

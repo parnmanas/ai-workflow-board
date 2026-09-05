@@ -53,6 +53,7 @@ import type {
   PairingTokenMint,
   PairingTokenSafe,
   AgentManagerCommandKind,
+  AgentManagerCommandOutcome,
   AgentManagerCommandResult,
   ManagedAgentCreateBody,
   Agent,
@@ -1685,6 +1686,13 @@ export const api = {
     request<AgentManagerCommandResult>(
       `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/command`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  // ticket 40110b64 — 위 디스패치가 돌려준 command_id 의 ack 결과 조회.
+  // 202 는 수락 신호일 뿐이므로, 완료 판정은 반드시 이 조회의 state 로 한다.
+  getAgentManagerCommandOutcome: (commandId: string) =>
+    request<AgentManagerCommandOutcome>(
+      `/admin/agent-manager/commands/${encodeURIComponent(commandId)}`,
     ),
 
   // Create an agent identity that the manager will spawn. Differs from the

@@ -2409,6 +2409,26 @@ export interface AgentManagerCommandResult {
   issued_at: string;
 }
 
+/**
+ * 디스패치한 제어 커맨드의 종단 결과 (ticket 40110b64).
+ *
+ * `AgentManagerCommandResult` 의 202 는 "SSE 로 실어 보냈다" 는 수락 신호일 뿐이다.
+ * 화면이 완료를 판정하려면 그 `command_id` 의 ack 를 직접 조회해야 한다 — 하트비트
+ * 도착 같은 간접 신호는 커맨드와 무관한 정기 하트비트로도 충족되기 때문이다.
+ *
+ * `unknown` = 서버가 그 id 를 모른다(오타) 또는 ack 없이 원장 TTL 이 지났다.
+ */
+export interface AgentManagerCommandOutcome {
+  state: 'pending' | 'ok' | 'error' | 'unknown';
+  command_id: string;
+  instance_id?: string;
+  command?: string;
+  /** 매니저가 ack 에 실어 보낸 결과 문자열. pending/unknown 이면 빈 문자열. */
+  detail: string;
+  issued_at?: string;
+  acked_at: string | null;
+}
+
 export interface ManagedAgentCreateBody {
   name: string;
   cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'hermes';

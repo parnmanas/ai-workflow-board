@@ -6,7 +6,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
 // ticket 40110b64 — Runtime Hosts 화면과 같은 모델 리프레시 흐름.
-import { summarizeModelCounts, waitForFreshHeartbeat } from './agentManagerModelRefresh';
+import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
 import {
   reconcileRuntimeProfileSelection,
@@ -220,37 +220,41 @@ export default function ManagedAgentDialog({
   }, [isOpen, managerInstanceId, managerAgentId]);
 
   // ticket 40110b64 — 이 다이얼로그에서 바로 모델 목록을 다시 열거한다. 매니저
-  // 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다. 매니저가 재열거
-  // 직후 즉시 하트비트 1회를 보내므로, 그게 레지스트리에 반영될 때까지만 짧게
-  // 기다렸다가 이 화면의 후보 목록을 그 값으로 교체한다.
+  // 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
+  //
+  // 완료 판정은 발급된 command_id 의 ack 로만 한다 — 하트비트 도착을 완료로 쓰면
+  // 커맨드와 무관한 30초 정기 하트비트가 조건을 충족시켜 재열거 전 목록을 "갱신됨"
+  // 으로 보여준다(리뷰 지적). 성공 ack 이후에만 목록을 다시 읽어 후보를 교체한다.
   const handleRefreshModels = async () => {
     if (!resolvedInstanceId || refreshingModels) return;
     setRefreshingModels(true);
     try {
-      const rows = await api.listAgentManagerInstances();
-      const current = rows.find((r) => r.instance_id === resolvedInstanceId);
-      if (!current) {
-        showToast('이 agent 를 관리하는 Runtime Host 를 찾지 못했습니다.', 'error');
-        return;
-      }
-      await api.sendAgentManagerCommand(resolvedInstanceId, {
+      const resp = await api.sendAgentManagerCommand(resolvedInstanceId, {
         command: 'refresh_available_models',
       });
-      const fresh = await waitForFreshHeartbeat(resolvedInstanceId, current.last_seen_at);
-      if (!fresh) {
+      const ack = await waitForCommandAck(resp.command_id);
+      if (ack.state === 'error') {
+        showToast(`모델 목록 갱신 실패 — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
         showToast(
-          '모델 재열거를 요청했지만 갱신된 하트비트가 아직 도착하지 않았습니다. ' +
+          '모델 재열거를 요청했지만 매니저 응답을 아직 받지 못했습니다. ' +
             '잠시 뒤 이 창을 다시 열면 반영돼 있습니다.',
           'info',
         );
         return;
       }
+      const fresh = await reloadInstance(resolvedInstanceId);
+      if (!fresh) {
+        showToast('이 agent 를 관리하는 Runtime Host 를 찾지 못했습니다.', 'error');
+        return;
+      }
       setAvailableModelsByCli(fresh.available_models || {});
-      const summary = summarizeModelCounts(fresh.available_models);
+      const registrySummary = summarizeModelCounts(fresh.available_models);
       showToast(
-        summary
-          ? `모델 목록 갱신 완료 — ${summary}`
-          : '모델 목록 갱신 완료 — 모델을 보고한 CLI 가 없습니다.',
+        `모델 목록 갱신 완료 — ${ack.detail || '매니저가 결과를 보고하지 않았습니다'}` +
+          (registrySummary ? ` (레지스트리 반영: ${registrySummary})` : ''),
         'success',
       );
     } catch (err: any) {
