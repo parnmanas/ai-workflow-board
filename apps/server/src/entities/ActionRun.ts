@@ -55,18 +55,44 @@ export class ActionRun {
   //
   // 그래서 재개 직전에 `batch_id = ? AND batch_resume_claimed = false` 를
   // 가드로 한 UPDATE를 배치 전체에 날리고, affected > 0 인 쪽만 재개한다
-  // (기존 종료 전이와 같은 guarded-UPDATE 기법). 클레임은 남은 running이
-  // 0일 때만 시도하므로, 클레임 이후 새 재시도 run이 배치에 합류하는 일은
-  // 없다 — 합류하려면 그 시점에 실패할 run이 남아 있어야 한다.
+  // (기존 종료 전이와 같은 guarded-UPDATE 기법).
+  //
+  // "클레임 이후 새 재시도 run 이 합류할 수 없다" 는 전제는 **`retry_pending`
+  // 이 있어야만** 성립한다(리뷰 P1-1 지적). 실패 run 은 terminal 커밋과 재시도
+  // 행 삽입 사이에 잠깐 "종료됐지만 재시도 예정" 상태가 되는데, 그 창에서
+  // 형제가 완료되면 running=0 으로 보여 조기 클레임이 난다. 그 창은
+  // `retry_pending` 을 실패 전이와 같은 UPDATE 로 세워 닫는다 — 완료 판정이
+  // `status='running' OR retry_pending` 이므로 재시도 행이 아직 없어도 배치는
+  // 미완이고, 따라서 클레임 시점에는 더 이상 합류할 run 이 없다.
   //
   // 크기 1짜리 배치(단일 대상)는 완료 호출 자체가 한 번뿐이라 경합이 없어
   // 클레임을 아예 건너뛴다 — 그 경로는 fan-out 이전과 동일하게 유지된다.
   @Column({ type: 'boolean', default: false })
   batch_resume_claimed: boolean;
 
+  // "이 run 의 재시도가 곧 생성된다" 예약 표식 (티켓 fc3906c5, 리뷰 P1-1).
+  //
+  // completeRun 은 실패 run 을 먼저 terminal 로 커밋한 뒤 `dispatch()` 로 재시도
+  // run 을 삽입한다. 그 사이(커밋 완료 ~ 재시도 행 저장 전)에 형제 run 이 완료되면
+  // 배치에 `running` 이 하나도 없어 보여 조기에 재개 클레임을 가져가고, 뒤늦게
+  // 합류한 재시도 run 의 최종 결과는 영영 재개에 반영되지 못한다.
+  //
+  // 그래서 이 플래그를 **실패 전이와 같은 UPDATE 로 원자적으로** 세운다. 배치
+  // 완료 판정은 `status='running' OR retry_pending` 을 세므로, 재시도 행이
+  // 아직 없어도 배치는 미완으로 남는다. 재시도 행이 만들어진 뒤(또는 재시도
+  // 자체가 못 뜬 것이 확정된 뒤) 해제한다.
+  @Column({ type: 'boolean', default: false })
+  retry_pending: boolean;
+
   // The ChatRoom hosting the agent ↔ user conversation for this Run.
-  @Column({ type: 'varchar' })
-  room_id: string;
+  //
+  // nullable (티켓 fc3906c5, 리뷰 P1-2): 디스패치가 방을 만들기 **전에** 실패한
+  // 대상(예산 초과, 삭제된 에이전트)도 배치의 명시적 terminal 기록으로 남기기
+  // 때문에, 방이 끝내 없는 run 행이 존재한다. 빈 문자열을 쓰지 않는 이유는
+  // Postgres 에서 이 컬럼이 uuid 라 ''를 거부하기 때문이다(아래 dispatch 주석
+  // 참고). 정상 run 은 예전과 동일하게 항상 방 id 를 갖는다.
+  @Column({ type: 'varchar', nullable: true })
+  room_id: string | null;
 
   // 'user' | 'system' (scheduler) | 'agent' (future: agent-triggered runs)
   @Column({ type: 'varchar', default: 'user' })

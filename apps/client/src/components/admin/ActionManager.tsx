@@ -896,6 +896,19 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
                 Pick a run on the left to view its conversation.
               </div>
+            ) : !activeRun.room_id ? (
+              /* 디스패치 자체가 실패한 대상 — 방이 만들어지기 전에 끝나서 볼
+                 대화가 없다. 빈 목록으로 두면 "아직 응답 없음" 과 구분되지 않아
+                 실패를 놓친다 (티켓 fc3906c5). */
+              <div
+                data-testid="action-run-dispatch-failed"
+                style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24, maxWidth: 420, textAlign: 'center', lineHeight: 1.6 }}
+              >
+                이 대상은 <strong>실행이 시작되지 못했습니다</strong> — 방이 만들어지기 전에 디스패치가 실패했습니다.
+                {activeRun.result_summary && (
+                  <div style={{ marginTop: 8, color: tokens.colors.danger }}>{activeRun.result_summary}</div>
+                )}
+              </div>
             ) : loadingMessages && messages.length === 0 ? (
               <div style={{ fontSize: 12, color: tokens.colors.textMuted, alignSelf: 'center', marginTop: 24 }}>
                 Loading…

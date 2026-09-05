@@ -118,7 +118,12 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       get(target, prop, receiver) {
         if (prop === 'save') {
           return async (entity) => {
-            if (failRunSaveFor && entity?.agent_id === failRunSaveFor) {
+            // 디스패치 경로의 run 삽입(status='running')만 실패시킨다.
+            // 실패 대상을 기록하는 감사 행(status='failed')까지 막으면 DB 전체가
+            // 죽은 상황을 흉내내는 셈이라, 검증하려는 "디스패치 실패" 시나리오와
+            // 다르다 — 그 경우 감사 행 기록은 의도적으로 best-effort 다.
+            const isDispatchInsert = (entity?.status ?? 'running') === 'running';
+            if (failRunSaveFor && entity?.agent_id === failRunSaveFor && isDispatchInsert) {
               throw new Error(`injected run-save failure for ${entity.agent_id}`);
             }
             return realRunRepo.save(entity);
@@ -604,6 +609,144 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const summary = comments.at(-1).content;
     assert.match(summary, /전체 성공/, '에이전트별 최종 결과는 마지막 시도 기준이어야 한다');
     assert.match(summary, /2회 시도/);
+  });
+
+  // ── 6b. 리뷰 P1 회귀 ────────────────────────────────────────────────────
+
+  it('P1-1: 재시도 행이 삽입되기 전에 형제가 끝나도 배치가 조기 재개되지 않는다', async () => {
+    const ticketId = seedTicket('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const result = await service.dispatch({
+      actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
+    });
+    const a = result.runs.find((r) => r.agent_id === AGENT_A);
+    const b = result.runs.find((r) => r.agent_id === AGENT_B);
+
+    // A 의 실패 처리 도중, 재시도 run 이 저장되기 **직전** 에 B 를 완료시킨다 —
+    // 리뷰가 지적한 정확히 그 창이다. dispatch 를 가로채 그 틈을 재현한다.
+    const realDispatch = service.dispatch.bind(service);
+    let bOutcome = null;
+    service.dispatch = async (dispatchArgs) => {
+      // 재시도 호출 시점: A 는 이미 failed 로 커밋됐고 재시도 행은 아직 없다.
+      bOutcome = await service.completeRun(b.run.id, WS, { status: 'succeeded', summary: 'B ok' });
+      return realDispatch(dispatchArgs);
+    };
+    let aOutcome;
+    try {
+      aOutcome = await service.completeRun(a.run.id, WS, { status: 'failed', summary: 'A boom' });
+    } finally {
+      service.dispatch = realDispatch;
+    }
+
+    assert.equal(
+      bOutcome.shouldResume, false,
+      '재시도가 예약된 상태에서 형제 완료가 배치를 끝내면 재시도 결과가 재개에 영영 반영되지 않는다',
+    );
+    assert.equal(aOutcome.retried, true, 'A 는 재시도되어야 한다');
+
+    // 재시도가 끝나야 비로소 재개된다 — 그리고 그 재개는 A 의 최종 결과를 담는다.
+    const retryDone = await service.completeRun(aOutcome.retryRunId, WS, { status: 'succeeded', summary: 'A 재시도 ok' });
+    assert.equal(retryDone.shouldResume, true, '마지막 run 이 재개를 책임져야 한다');
+    assert.match(comments.at(-1).content, /전체 성공/);
+  });
+
+  it('P1-1: 재시도가 아예 못 뜨면 예약이 풀려 배치가 종료된다', async () => {
+    const ticketId = seedTicket('cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const result = await service.dispatch({
+      actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
+    });
+    const a = result.runs.find((r) => r.agent_id === AGENT_A);
+    const b = result.runs.find((r) => r.agent_id === AGENT_B);
+
+    await service.completeRun(b.run.id, WS, { status: 'succeeded', summary: 'B ok' });
+
+    // 재시도 디스패치가 실패하는 상황(예: Action 이 그 사이 삭제됨)을 주입한다.
+    const realDispatch = service.dispatch.bind(service);
+    service.dispatch = async () => { throw new Error('injected retry dispatch failure'); };
+    let aOutcome;
+    try {
+      aOutcome = await service.completeRun(a.run.id, WS, { status: 'failed', summary: 'A boom' });
+    } finally {
+      service.dispatch = realDispatch;
+    }
+
+    assert.equal(aOutcome.retried, false);
+    assert.equal(aOutcome.exhausted, true);
+    assert.equal(aOutcome.shouldResume, true, '예약이 안 풀리면 배치가 영영 미완으로 남는다');
+
+    const rows = await dataSource.getRepository(ActionRun).find({ where: { batch_id: a.run.batch_id } });
+    assert.ok(rows.every((r) => r.retry_pending === false), 'retry_pending 이 남아 있으면 안 된다');
+  });
+
+  it('P1-2: 디스패치에 실패한 대상도 terminal ActionRun 으로 남는다', async () => {
+    const action = await service.create({
+      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+    });
+    failRunSaveFor = AGENT_A;
+
+    const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
+    assert.equal(result.runs.length, 1);
+    assert.equal(result.failures.length, 1);
+
+    const rows = await dataSource.getRepository(ActionRun).find({ where: { action_id: action.id } });
+    assert.equal(rows.length, 2, '실패 대상이 DB 에 없으면 이력이 부분 실패를 "전체 성공" 으로 집계한다');
+
+    const failed = rows.find((r) => r.agent_id === AGENT_A);
+    assert.ok(failed, '실패 대상의 run 행이 없다');
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.batch_id, result.batch_id, '실패 행도 같은 배치에 속해야 x/N 분모가 맞는다');
+    assert.equal(failed.room_id, null, '방이 만들어지기 전에 끝났으므로 room_id 는 null');
+    assert.ok(failed.completed_at, 'terminal 행이므로 completed_at 이 있어야 한다');
+    assert.match(failed.result_summary, /dispatch failed/);
+  });
+
+  it('P1-2: 삭제된 대상 하나가 나머지 대상의 실행을 막지 않는다', async () => {
+    const action = await service.create({
+      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+    });
+    // AGENT_A 가 사라진 상황을 만든다.
+    await dataSource.getRepository(Agent).delete({ id: AGENT_A });
+
+    const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
+
+    assert.equal(result.runs.length, 1, '남은 대상은 정상 실행되어야 한다');
+    assert.equal(result.runs[0].agent_id, AGENT_B);
+    assert.equal(result.failures.length, 1);
+    assert.equal(result.failures[0].agent_id, AGENT_A);
+
+    const rows = await dataSource.getRepository(ActionRun).find({ where: { action_id: action.id } });
+    assert.equal(rows.length, 2, '사라진 대상도 감사 행으로 남아야 한다');
+    assert.equal(rows.find((r) => r.agent_id === AGENT_A).status, 'failed');
+  });
+
+  it('P1-2: 대상이 모두 사라졌으면 던진다 (승인 grant 를 태우기 전 fail-fast)', async () => {
+    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    await dataSource.getRepository(Agent).delete({ id: AGENT_A });
+    await dataSource.getRepository(Agent).delete({ id: AGENT_B });
+
+    await assert.rejects(
+      service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' }),
+      /no target agent of this action exists any more/,
+    );
+    assert.equal(await dataSource.getRepository(ActionRun).count(), 0, '할 일이 없으면 감사 행도 만들지 않는다');
+  });
+
+  it('P1-2: 실패 대상이 배치 재개의 x/N 분모에 포함된다', async () => {
+    const ticketId = seedTicket('dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+    const action = await service.create({
+      workspace_id: WS, name: 'deploy', target_agent_ids: [AGENT_A, AGENT_B], high_impact: true,
+    });
+    failRunSaveFor = AGENT_A;
+    const result = await service.dispatch({
+      actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
+    });
+    assert.equal(result.runs.length, 1);
+
+    const done = await service.completeRun(result.runs[0].run.id, WS, { status: 'succeeded', summary: 'B ok' });
+    assert.equal(done.shouldResume, true);
+    const summary = comments.at(-1).content;
+    assert.match(summary, /부분 실패 \(1\/2 성공\)/, '실패 대상이 분모에서 빠지면 "전체 성공" 으로 보고된다');
   });
 
   // ── 7. 예산 ─────────────────────────────────────────────────────────────

@@ -8,6 +8,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   - action_runs.agent_id      — 이 run을 수행하는 에이전트(에이전트별 감사).
  *   - action_runs.batch_id      — 같은 트리거에서 fan-out된 run들의 묶음 키.
  *   - action_runs.batch_resume_claimed — 배치 재개 1회성 클레임 플래그.
+ *   - action_runs.retry_pending — 재시도 예약 표식(배치 조기 완료 방지).
+ *   - action_runs.room_id — NOT NULL 해제(방 생성 전 실패한 대상 기록용).
  *
  * SQLite(개발)는 엔티티 synchronize=true 로 이 컬럼들을 얻는다. 이 DDL은
  * synchronize가 꺼져 있는 Postgres(운영) 에서만 돈다. 전부
@@ -48,6 +50,12 @@ export class AddActionFanOutTargets1760000000084 implements MigrationInterface {
     await queryRunner.query(
       'ALTER TABLE action_runs ADD COLUMN IF NOT EXISTS batch_resume_claimed BOOLEAN NOT NULL DEFAULT FALSE',
     );
+    await queryRunner.query(
+      'ALTER TABLE action_runs ADD COLUMN IF NOT EXISTS retry_pending BOOLEAN NOT NULL DEFAULT FALSE',
+    );
+    // 방을 만들기 전에 실패한 대상도 terminal run 으로 남기므로 room_id 가
+    // 비는 행이 생긴다. 기존 행은 전부 값이 있으므로 NOT NULL 해제는 무손실이다.
+    await queryRunner.query('ALTER TABLE action_runs ALTER COLUMN room_id DROP NOT NULL');
     await queryRunner.query(
       'CREATE INDEX IF NOT EXISTS idx_action_runs_batch_id ON action_runs (batch_id)',
     );
