@@ -6,6 +6,7 @@ import type {
   OrchestrationMissionDetail,
   OrchestrationMissionListItem,
   OrchestrationConfirmPolicy,
+  OrchestrationUserChatMode,
   OrchestrationPostActionCondition,
   OrchestrationTeam,
   OrchestrationUpdateEvent,
@@ -293,6 +294,7 @@ export function MissionFormModal({
   >([]);
   const [graphEnabled, setGraphEnabled] = useState(false);
   const [confirmPolicy, setConfirmPolicy] = useState<OrchestrationConfirmPolicy>('auto');
+  const [userChatMode, setUserChatMode] = useState<OrchestrationUserChatMode>('open');
   const [repoResourceId, setRepoResourceId] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [repoBranch, setRepoBranch] = useState('');
@@ -324,6 +326,7 @@ export function MissionFormModal({
     setCheckoutMode(mission?.checkout_mode || 'reuse');
     setGraphEnabled(!!mission?.graph_enabled);
     setConfirmPolicy(mission?.confirm_policy || 'auto');
+    setUserChatMode(mission?.user_chat_mode || 'open');
     setCompletionCriteria((mission?.completion_criteria || []).map((c) => ({ key: c.key, description: c.description })));
     setPostActions((mission?.post_actions || []).map((p) => ({ action_id: p.action_id, order: p.order, condition: p.condition })));
     setRepoResourceId(mission?.repo_ref?.resource_id || '');
@@ -367,6 +370,7 @@ export function MissionFormModal({
             checkout_mode: checkoutMode,
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
+            user_chat_mode: userChatMode,
           })
         : await api.createOrchestrationMission({
             workspace_id: wsId,
@@ -383,6 +387,7 @@ export function MissionFormModal({
             checkout_mode: checkoutMode,
             graph_enabled: graphEnabled,
             confirm_policy: confirmPolicy,
+            user_chat_mode: userChatMode,
             start: startNow,
           });
       if (!mission && saved.start_error) {
@@ -523,6 +528,33 @@ export function MissionFormModal({
                 {graphEnabled
                   ? 'The mission pauses at each gate until you answer Pass or Fail in the mission page. It does not time out.'
                   : 'Turn on the execution graph above for this to have any effect — confirmation gates only exist in graph mode.'}
+              </div>
+            </div>
+
+            {/*
+              미션 대화의 chat 옵션(티켓 9cfd8161). confirm 정책 바로 아래에 둔 이유는
+              둘 다 "사람이 이 미션에 얼마나 개입하는가" 축이기 때문이다 — confirm 은
+              미션이 사람에게 묻는 쪽, 이건 사람이 미션에게 말하는 쪽이다.
+
+              여기서 바꾼 값은 draft 에만 적용된다. 이미 시작된 미션은 Mission 화면의
+              Conversation 섹션에서 바로 바꾼다 — 이 모달의 Edit 버튼 자체가 draft 에서만
+              뜨고, 실행 중 변경이 이 옵션의 요구사항이기 때문이다.
+            */}
+            <div>
+              <Select
+                label="User chat"
+                options={[
+                  { value: 'open', label: 'Open — any operator here can join the conversation and speak' },
+                  { value: 'participants_only', label: 'Participants only — only people added to the room can speak' },
+                  { value: 'off', label: 'Off — read-only, nobody can send messages' },
+                ]}
+                value={userChatMode}
+                onChange={(e) => setUserChatMode(e.target.value as OrchestrationUserChatMode)}
+              />
+              <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.4 }}>
+                Controls who can talk to the orchestrator in the mission conversation. Reading the transcript
+                is always allowed. Speaking also requires the Manage Actions permission — this option does not
+                grant it. You can change this later while the mission runs.
               </div>
             </div>
             <div>

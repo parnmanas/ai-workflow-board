@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { ChatRoomMessageItem, OrchestrationTimelineEvent } from '../../types';
+import type { ChatRoomMessageItem, OrchestrationTimelineEvent, OrchestrationUserChatMode } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useAuth } from '../../contexts/AuthContext';
 import MessageList from '../chat/MessageList';
@@ -10,6 +10,13 @@ import { projectParticipants, countUserParticipants } from '../chat/utils/partic
 import type { MentionParticipant } from '../chat/utils/markdown';
 import { eventColor } from './status';
 import { relativeTime } from '../../utils/time';
+
+/**
+ * 서버 `PERMISSIONS.MANAGE_ACTIONS` 와 같은 문자열. 클라이언트에는 권한 상수 모듈이 없어
+ * 다른 화면들도 리터럴을 쓴다(`hasPermission('admin.access')` 등) — 그 관행을 따르되,
+ * 이 값이 서버 상수와 짝이라는 사실을 여기 한 곳에 적어 둔다.
+ */
+const MANAGE_ACTIONS = 'admin.actions';
 
 /**
  * Mission 화면의 대화 패널 — 진행 중인 orchestrator 에게 직접 묻고 방향을 바꾸는 곳.
@@ -101,6 +108,11 @@ interface MissionConversationPanelProps {
   events: OrchestrationTimelineEvent[];
   /** 종료된 미션에서는 입력을 막는다(보낼 orchestrator 세션이 없다). */
   live: boolean;
+  /**
+   * 미션의 chat 옵션(티켓 9cfd8161). 서버 게이트와 **같은 값**을 보고 같은 순서로
+   * 판정해야, 화면이 입력창을 열어놓고 전송 순간에만 403 이 뜨는 일이 없다.
+   */
+  userChatMode?: OrchestrationUserChatMode;
   currentUserId?: string;
 }
 
@@ -110,9 +122,10 @@ export default function MissionConversationPanel({
   roomId,
   events,
   live,
+  userChatMode = 'open',
   currentUserId,
 }: MissionConversationPanelProps) {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   // 프롭이 있으면 그걸 쓰고, 없으면 로그인 사용자를 쓴다 — "내 메시지" 정렬/스타일이
   // 이 값으로 갈린다.
   const viewerId = currentUserId ?? user?.id;
@@ -408,6 +421,57 @@ export default function MissionConversationPanel({
     }
   }, [missionId, workspaceId, load]);
 
+  /**
+   * 왜 발화가 막혀 있는가 — 없으면 발화 가능(티켓 9cfd8161, 요구사항 C).
+   *
+   * 예전에는 화면이 이유를 하나만 알았다: 읽기가 403 이면 "참여자가 아님". 그래서
+   * 권한이 없어 막히는 사용자에게도 "참여자가 아니어서 읽기만 할 수 있습니다"라고
+   * 말했고, 참여 버튼을 눌러 참여에 성공한 뒤에도 발화가 계속 막혀 이유를 알 수 없었다.
+   * 자유 참여가 켜진 방에서는 더 나빴다 — 읽기가 성공하므로 관전으로도 안 떨어지고,
+   * 입력창이 열린 채 전송 순간에만 403 이 떴다.
+   *
+   * **판정 순서는 서버 게이트와 같아야 한다**(room-membership.service.ts의
+   * `requireMissionRoomSpeaker`): 종료 → chat off → 권한 → 참여자. 순서가 어긋나면
+   * 화면이 대는 이유와 서버가 실제로 막는 이유가 갈린다.
+   */
+  const speakBlock: { reason: string; testId: string; canJoin: boolean } | null = (() => {
+    if (!live) {
+      return {
+        reason: '종료된 미션이라 새 지시를 보낼 수 없습니다. 기록은 그대로 보존됩니다.',
+        testId: 'mission-conversation-closed-notice',
+        canJoin: false,
+      };
+    }
+    if (userChatMode === 'off') {
+      return {
+        reason:
+          '이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ' +
+          'Open 또는 Participants only 로 바꾸면 다시 대화할 수 있습니다.',
+        testId: 'mission-conversation-chat-off-notice',
+        canJoin: false,
+      };
+    }
+    // 서버가 매 발화마다 users 행에서 직접 확인하는 것과 같은 권한이다
+    // (PERMISSIONS.MANAGE_ACTIONS = 'admin.actions').
+    if (!hasPermission(MANAGE_ACTIONS)) {
+      return {
+        reason:
+          'orchestration 대화에 발화하려면 Manage Actions 권한이 필요합니다. 참여자 등록 여부와는 ' +
+          '무관하며, 워크스페이스 관리자에게 권한을 요청해야 합니다. 읽기는 그대로 가능합니다.',
+        testId: 'mission-conversation-permission-notice',
+        canJoin: false,
+      };
+    }
+    if (observer) {
+      return {
+        reason: '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.',
+        testId: 'mission-conversation-observer-notice',
+        canJoin: true,
+      };
+    }
+    return null;
+  })();
+
   if (!roomId) {
     return (
       <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>
@@ -473,7 +537,7 @@ export default function MissionConversationPanel({
         )}
       </div>
 
-      {observer ? (
+      {speakBlock ? (
         <div
           style={{
             padding: '8px 12px',
@@ -482,20 +546,16 @@ export default function MissionConversationPanel({
             flexDirection: 'column',
             gap: 6,
           }}
-          data-testid="mission-conversation-observer-notice"
+          data-testid={speakBlock.testId}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-              {live
-                ? '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다.'
-                : '이 미션의 대화방 참여자가 아니어서 읽기만 할 수 있습니다. 종료된 미션이라 새로 참여할 수 없습니다.'}
-            </span>
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{speakBlock.reason}</span>
             {/*
-              종료된 미션에는 참여 버튼을 걸지 않는다 — 참여에 성공해도 보낼 orchestrator
-              세션이 없어 입력창이 바로 아래 "종료됨" 안내로 바뀐다. 아무 일도 못 하는
-              버튼을 주는 대신 이유를 문장으로 말한다.
+              참여 버튼은 **참여가 실제로 문제를 푸는 경우에만** 건다. 종료된 미션이나
+              chat off, 권한 부족에서는 참여에 성공해도 발화가 그대로 막히므로, 아무 일도
+              못 하는 버튼을 주는 대신 이유를 문장으로 말한다.
             */}
-            {live && (
+            {speakBlock.canJoin && (
               <button
                 type="button"
                 onClick={() => void join()}
@@ -526,21 +586,9 @@ export default function MissionConversationPanel({
             </span>
           )}
         </div>
-      ) : live ? (
+      ) : (
         <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
           <ChatMessageInput roomId={roomId} onSent={handleSent} isMobile={false} />
-        </div>
-      ) : (
-        <div
-          style={{
-            padding: '8px 12px',
-            fontSize: 11,
-            color: tokens.colors.textMuted,
-            borderTop: `1px solid ${tokens.colors.border}`,
-          }}
-          data-testid="mission-conversation-closed-notice"
-        >
-          종료된 미션이라 새 지시를 보낼 수 없습니다. 기록은 그대로 보존됩니다.
         </div>
       )}
     </div>

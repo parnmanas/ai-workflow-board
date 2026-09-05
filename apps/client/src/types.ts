@@ -2740,6 +2740,14 @@ export interface OrchestrationCounts {
 /** Mission 단위 사용자 확인 강도(티켓 5dbe4aa2). */
 export type OrchestrationConfirmPolicy = 'none' | 'auto' | 'key_steps' | 'every_step';
 
+/**
+ * 미션 대화에서 사람이 발화할 수 있는가 — 티켓 9cfd8161.
+ *
+ * `open`(기본) 워크스페이스 운영자면 참여자가 아니어도 발화 · `participants_only`
+ * 참여자만 발화 · `off` 아무도 발화 불가(읽기 전용). 세 값 모두 읽기는 막지 않는다.
+ */
+export type OrchestrationUserChatMode = 'open' | 'participants_only' | 'off';
+
 /** confirm 노드에 사람이 내린 판정. */
 export interface OrchestrationConfirmDecision {
   verdict: 'pass' | 'fail';
@@ -2883,6 +2891,8 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   total_visits: number;
   /** 사용자 확인 강도 — 서버가 항상 정규화해 보낸다(티켓 5dbe4aa2). */
   confirm_policy: OrchestrationConfirmPolicy;
+  /** 미션 대화의 사용자 chat 옵션 — 서버가 항상 정규화해 보낸다(티켓 9cfd8161). */
+  user_chat_mode: OrchestrationUserChatMode;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

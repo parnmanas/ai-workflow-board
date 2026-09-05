@@ -99,6 +99,7 @@ import type {
   OrchestrationRepoRef,
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
+  OrchestrationUserChatMode,
   OrchestrationStepStatus,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
@@ -2373,6 +2374,8 @@ export const api = {
     graph_enabled?: boolean;
     /** 사용자 확인 강도(티켓 5dbe4aa2). graph_enabled 가 켜져야 실제로 동작한다. */
     confirm_policy?: OrchestrationConfirmPolicy;
+    /** 미션 대화에서 사람이 발화할 수 있는가(티켓 9cfd8161). 기본 'open'. */
+    user_chat_mode?: OrchestrationUserChatMode;
     /** Brief the orchestrator immediately instead of leaving the mission a draft. */
     start?: boolean;
   }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
@@ -2395,6 +2398,14 @@ export const api = {
       step_timeout_minutes?: number;
       graph_enabled?: boolean;
       confirm_policy?: OrchestrationConfirmPolicy;
+      /**
+       * 미션 대화의 사용자 chat 옵션(티켓 9cfd8161).
+       *
+       * 다른 브리핑 필드와 달리 **running 미션에서도 단독 PATCH 가 허용된다** — 서버의
+       * draft 잠금(touchesBrief)에서 빠져 있다. 다만 브리핑 필드를 함께 실어 보내면
+       * running 미션에서는 그쪽이 409 를 내므로, 실행 중 변경은 이 필드만 보낼 것.
+       */
+      user_chat_mode?: OrchestrationUserChatMode;
     },
   ) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {
