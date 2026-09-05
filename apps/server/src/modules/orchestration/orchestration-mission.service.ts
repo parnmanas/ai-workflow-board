@@ -11,7 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In, Not } from 'typeorm';
+import { DataSource, EntityManager, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
@@ -183,9 +183,6 @@ export class OrchestrationMissionService {
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
-    // 새 의존성은 **맨 뒤에** 덧붙인다 — 중간에 끼워 넣으면 이 서비스를 위치 인자로
-    // 만드는 테스트들이 조용히 한 칸씩 밀려 logService 가 undefined 가 된다.
-    @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
   ) {}
 
   // ── Lookups ───────────────────────────────────────────────────────────────
@@ -500,10 +497,16 @@ export class OrchestrationMissionService {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
 
-    await this.missionRepo.save(mission);
-    // 방 플래그는 미션 옵션에서 파생된 캐시다 — 옵션 저장 **뒤에** 맞춰 둬야
-    // "실행 중인 미션 방에도 즉시 반영" 이 성립한다(티켓 9cfd8161).
-    await this.syncMissionRoomOpenJoin(mission);
+    // 미션 저장과 파생 캐시(방 플래그) 갱신을 **한 트랜잭션**으로 묶는다
+    // (티켓 9cfd8161 리뷰 지적 3). 예전에는 미션을 먼저 커밋하고 방을 따로 갱신해서,
+    // 두 번째 쓰기가 실패하면 호출자는 실패 응답을 받는데 `user_chat_mode` 만 바뀐 채
+    // 남았다 — 옵션과 방 플래그가 갈린 상태로 영속되고, 되돌릴 신호도 없다.
+    // "옵션을 바꾸면 즉시 반영된다"는 계약은 둘이 함께 성립하거나 함께 실패해야 한다.
+    await this.dataSource.transaction(async (em) => {
+      await em.save(OrchestrationMission, mission);
+      await this.syncMissionRoomOpenJoin(em, mission);
+    });
+    // SSE 는 커밋 **뒤**에 낸다 — 트랜잭션 안에서 내면 롤백된 변경을 알리는 프레임이 나간다.
     this.emitUpdate(mission);
     return mission;
   }
@@ -516,16 +519,20 @@ export class OrchestrationMissionService {
    * 보기 때문이다(관전 없이 읽기를 허용하는 `_isOpenJoinReadable`, 첫 발화 시 auto-join).
    * 맞춰 두지 않으면 발화는 되는데 읽기는 관전으로 떨어지는 식으로 표면끼리 어긋난다.
    *
+   * 방 저장소를 주입받지 않고 호출자의 `EntityManager` 로만 접근한다 — 주입된 저장소를 쓰면
+   * 그 쓰기가 트랜잭션 **밖**에서 일어나 함께 롤백되지 않는다. 원자성이 이 메서드의 존재
+   * 이유이므로, 틀리게 쓸 수 있는 경로를 아예 두지 않고 seam 을 인자로 강제한다.
+   *
    * 아직 시작되지 않은(방이 없는) 미션은 조용히 넘어간다 — `startMission` 이 방을 만들 때
    * 같은 `openJoinForUserChatMode` 로 초기값을 계산하므로 여기서 미리 할 일이 없다.
    * 값이 이미 같으면 쓰지 않는다(재호출 무해).
    */
-  private async syncMissionRoomOpenJoin(mission: OrchestrationMission): Promise<void> {
+  private async syncMissionRoomOpenJoin(em: EntityManager, mission: OrchestrationMission): Promise<void> {
     if (!mission.room_id) return;
     const desired = openJoinForUserChatMode(normalizeUserChatMode(mission.user_chat_mode));
-    const room = await this.roomRepo.findOne({ where: { id: mission.room_id } });
+    const room = await em.getRepository(ChatRoom).findOne({ where: { id: mission.room_id } });
     if (!room || room.open_join === desired) return;
-    await this.roomRepo.update(room.id, { open_join: desired });
+    await em.update(ChatRoom, room.id, { open_join: desired });
   }
 
   async deleteMission(missionId: string, workspaceId: string): Promise<void> {

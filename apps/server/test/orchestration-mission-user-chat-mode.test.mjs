@@ -99,6 +99,39 @@ function allParticipantRows(roomId, participantId) {
   });
 }
 
+const ROOM_WRITE_FAILURE = 'INJECTED_ROOM_WRITE_FAILURE';
+
+/**
+ * 트랜잭션 안의 **ChatRoom 쓰기만** 실패시킨다(티켓 9cfd8161 리뷰 지적 3).
+ *
+ * 커밋 직전에 통째로 던지는 방식이 아니라 방 갱신 지점만 겨냥한다 — 검증하려는 계약이
+ * "파생 캐시 갱신이 실패하면 미션 값도 함께 롤백된다" 이므로, 실패 지점이 실제로 그
+ * 쓰기여야 테스트가 계약을 말한다. 나머지 코드는 전부 실제 구현 그대로 돈다.
+ */
+async function withRoomWriteFailure(fn) {
+  const original = dataSource.transaction;
+  dataSource.transaction = function patched(cb) {
+    return original.call(this, async (em) => {
+      const realUpdate = em.update.bind(em);
+      em.update = async (target, ...rest) => {
+        const name = typeof target === 'function' ? target.name : String(target);
+        if (name === 'ChatRoom') throw new Error(ROOM_WRITE_FAILURE);
+        return realUpdate(target, ...rest);
+      };
+      try {
+        return await cb(em);
+      } finally {
+        em.update = realUpdate;
+      }
+    });
+  };
+  try {
+    return await fn();
+  } finally {
+    dataSource.transaction = original;
+  }
+}
+
 async function runBackfill() {
   const queryRunner = dataSource.createQueryRunner();
   const lines = [];
@@ -164,7 +197,6 @@ before(async () => {
     agentRepo,
     dataSource,
     noopLog,
-    roomRepo,
   );
 });
 
@@ -316,6 +348,77 @@ describe('미션 chat 옵션이 발화를 지배한다', () => {
     assert.ok(bySystem?.id, '의사 user system(엔진 자신)의 발화도 막히면 안 된다');
   });
 
+  // ── 사유 순서: 비참여자에게도 미션 규칙이 먼저 보여야 한다 (리뷰 지적 1) ──
+  //
+  // 이 세 케이스가 이전 구현의 실제 구멍이었다. 참여자 검사가 먼저 돌아서, **비참여자**는
+  // 종료 미션이든 off 든 권한 부족이든 전부 "참여자가 아님" 하나로 뭉뚱그려졌다. 그러면
+  // 사용자는 참여 버튼을 눌러 성공한 뒤 같은 자리에서 다시 막히고, 화면이 선언한 사유
+  // 순서(종료 → off → 권한 → 참여자)와 서버가 내는 사유가 갈린다. 앞선 테스트들이 이
+  // 조합을 비껴간 이유는 off 를 **참여자**로만, participants_only 를 **권한 있는** 사용자로만
+  // 시험했기 때문이다 — 두 축을 겹쳐야 순서가 드러난다.
+
+  it("종료 미션에서는 비참여자도 참여 문제가 아니라 종료를 사유로 받는다", async () => {
+    // 모드를 participants_only 로 둔다. `open` 이면 자유 참여 완화가 참여자 검사를 아예
+    // 건너뛰어서 예전 순서로도 "finished" 가 나오고 — 즉 순서를 시험하지 못한다.
+    // 참여자 검사가 실제로 돌 수 있는 모드여야 두 순서가 갈린다.
+    const { room } = await seedMission(
+      { status: 'completed', user_chat_mode: 'participants_only' },
+      { open_join: false },
+    );
+    // ADMIN 은 참여자가 아니다. 예전 순서라면 여기서 "not an active participant" 가 났다.
+    const err = await sendAsUser(room.id, ADMIN).catch((e) => e);
+    assert.equal(err.status, 403);
+    assert.match(err.message, /finished/i, '참여해도 풀리지 않는 차단은 참여 문제로 설명하면 안 된다');
+    assert.doesNotMatch(err.message, /not an active participant/i);
+  });
+
+  it("off 에서는 비참여자도 참여 문제가 아니라 chat off 를 사유로 받는다", async () => {
+    const { room } = await seedMission({ user_chat_mode: 'off' }, { open_join: false });
+    const err = await sendAsUser(room.id, ADMIN).catch((e) => e);
+    assert.equal(err.status, 403);
+    assert.match(err.message, /chat is turned off/i, 'off 는 참여로 풀리지 않는다 — 참여 버튼을 찾아 헤매게 하면 안 된다');
+    assert.doesNotMatch(err.message, /not an active participant/i);
+  });
+
+  it("participants_only 에서 권한도 없는 비참여자는 권한 부족을 사유로 받는다", async () => {
+    const { room } = await seedMission({ user_chat_mode: 'participants_only' }, { open_join: false });
+    // PLAIN 은 참여자도 아니고 MANAGE_ACTIONS 도 없다. 두 사유가 동시에 참인데, 선언된
+    // 순서상 권한이 먼저다 — 참여만 해결해도 여전히 막히기 때문이다.
+    const err = await sendAsUser(room.id, PLAIN).catch((e) => e);
+    assert.equal(err.status, 403);
+    assert.match(err.message, /not allowed to speak/i, '참여로 풀리지 않는 쪽을 먼저 말해야 한다');
+    assert.doesNotMatch(err.message, /not an active participant/i);
+
+    // 대조군: 권한이 있는 비참여자는 그대로 참여자 사유를 받는다 — 그쪽은 참여로 풀린다.
+    const participantErr = await sendAsUser(room.id, ADMIN).catch((e) => e);
+    assert.match(participantErr.message, /not an active participant/i);
+  });
+
+  // ── 원자성 (리뷰 지적 3) ───────────────────────────────────────────────
+  it("방 갱신이 실패하면 미션의 옵션 변경도 함께 롤백된다", async () => {
+    const { mission, room } = await seedMission({ user_chat_mode: 'open' }, { open_join: true });
+
+    await assert.rejects(
+      () => withRoomWriteFailure(() => missionService.updateMission(mission.id, WS, { user_chat_mode: 'off' })),
+      (e) => e.message === ROOM_WRITE_FAILURE,
+      '방 쓰기 실패는 호출자에게 그대로 전달돼야 한다',
+    );
+
+    const missionAfter = await dataSource.getRepository(OrchestrationMission).findOne({ where: { id: mission.id } });
+    const roomAfter = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room.id } });
+    assert.equal(
+      missionAfter.user_chat_mode,
+      'open',
+      '미션만 커밋되면 옵션과 방 플래그가 갈린 채 영속된다 — 실패 응답을 받은 호출자는 그것을 알 방법이 없다',
+    );
+    assert.equal(roomAfter.open_join, true, '방 플래그도 그대로여야 한다');
+
+    // 롤백 뒤에도 정상 경로가 그대로 동작한다(트랜잭션이 열린 채 남지 않는다).
+    await missionService.updateMission(mission.id, WS, { user_chat_mode: 'off' });
+    const healed = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room.id } });
+    assert.equal(healed.open_join, false, '재시도는 두 쓰기를 함께 반영해야 한다');
+  });
+
   it("step 방의 계약은 이 옵션이 바꾸지 않는다", async () => {
     // step 방에도 orchestration_mission_id 는 찍힌다. 그것만 보고 정책을 적용하면
     // 이 티켓이 들여다본 적 없는 에이전트 작업 채널의 동작까지 바뀐다.
@@ -419,16 +522,37 @@ describe('백필 마이그레이션', () => {
     );
   });
 
-  it("전수 조사 수치를 한 줄로 낸다 — 0건이어도 낸다", async () => {
+  it("전수 조사가 변경 전 상태를 세 축으로 찍는다 — open_join 분포·사람 참여자 유무·미션 상태", async () => {
     // 이 줄이 요구사항 B 의 "전수 조사" 산출물이다. 워크스페이스 전체 미션을 열어 주는
     // 표면이 에이전트 쪽에 없어(팀 스코프 도구뿐) 조사를 백필과 같은 순회에 얹었으므로,
-    // 그 줄이 실제로 나오고 수치가 맞는지가 곧 요구사항의 검증이다.
+    // 그 줄의 **의미가 맞는지**가 곧 요구사항의 검증이다.
     const empty = await runBackfill();
     assert.match(empty, /missions=0 /, '미션이 없어도 조사 결과(0건)는 나와야 한다');
 
-    // running(open, 소유자 있음) · terminal(off) · draft(방 없음) 세 종류를 섞는다.
+    // ⓐ 레거시: 방 닫힘 + 사람 참여자 없음 + 생성자 행 없음 → 정렬·등록 둘 다 대상.
     await seedMission({ user_chat_mode: '' }, { open_join: false });
-    await seedMission({ user_chat_mode: 'off', status: 'completed' }, { open_join: true });
+
+    // ⓑ 이미 열려 있고 생성자가 활성 참여자 → 대상 아님. 사람 참여자 "있음"으로 잡혀야 한다.
+    const b = await seedMission({}, { open_join: true });
+    await addParticipant(b.room.id, ADMIN);
+
+    // ⓒ 생성자가 스스로 나간 방 → 되돌리지 않으며 owner_left 로 분류. 활성 사람 참여자는 없다.
+    const c = await seedMission({ user_chat_mode: 'participants_only' }, { open_join: false });
+    const leftRow = await addParticipant(c.room.id, ADMIN);
+    await dataSource.getRepository(ChatRoomParticipant).update(leftRow.id, { left_at: new Date() });
+
+    // ⓓ 의사 user system 만 있는 방 → 엔진 자신이므로 "사람 참여자 없음" 이어야 한다.
+    const d = await seedMission({ created_by_type: 'agent', created_by: AGENT }, { open_join: true });
+    await addParticipant(d.room.id, 'system');
+
+    // ⓕ 종료된 미션 → terminal 축을 실제로 채운다. 0 인 채로 두면 그 카운터가 늘 맞는
+    // 것처럼 보인다. 생성자를 에이전트로 둬 owner 축은 흔들지 않는다.
+    await seedMission(
+      { status: 'completed', created_by_type: 'agent', created_by: AGENT },
+      { open_join: true },
+    );
+
+    // ⓔ 아직 시작되지 않은 draft → started 에서 빠지고 방 관련 축에도 안 잡힌다.
     const missionRepo = dataSource.getRepository(OrchestrationMission);
     await missionRepo.save(missionRepo.create({
       workspace_id: WS, team_id: 'team-1', title: 'draft', objective: 'x',
@@ -436,15 +560,45 @@ describe('백필 마이그레이션', () => {
     }));
 
     const line = await runBackfill();
-    assert.match(line, /missions=3 /, '미션 총수');
-    assert.match(line, /started=2 /, 'draft(방 없음)는 시작된 것으로 세지 않는다');
-    assert.match(line, /terminal=1 /, '종료 미션 수');
-    assert.match(line, /mode\(open=2 participants_only=0 off=1\)/, '정규화된 모드 분포');
-    // 1 이지 2 가 아니다: 세 번째 미션은 엔티티를 통해 만들어져 TypeORM 이 컬럼 default
-    // 'open' 을 채운다. ''/NULL 로 남는 것은 **컬럼이 없던 시절에 만들어진 행**뿐이고,
-    // 그 구분이 곧 "백필 대상"의 정의다.
-    assert.match(line, /legacy_unset_mode=1 /, "''/NULL 로 남은 기존 행 수 — 백필 대상의 근거다");
-    assert.match(line, /open_join_aligned=2 /, '실제로 정렬된 방 수(하나는 켜고 하나는 끈다)');
-    assert.match(line, /owners_registered=2$/, '실제로 등록된 소유자 수');
+
+    assert.match(line, /missions=6 /, '미션 총수');
+    assert.match(line, /started=5 /, 'draft(방 없음)는 시작된 것으로 세지 않는다');
+    assert.match(line, /terminal=1 /, 'ⓕ 만 종료 상태다');
+
+    // 세 축 — 전부 **변경 전** 값이어야 한다. 정렬한 뒤에 세면 ⓐ 가 on 으로 보인다.
+    assert.match(line, /before_open_join\(on=3 off=2\)/, 'ⓑⓓⓕ 가 on, ⓐⓒ 가 off');
+    assert.match(
+      line,
+      /human_participant\(with=1 without=4\)/,
+      'ⓑ 만 활성 사람 참여자가 있다 — ⓒ 는 탈퇴, ⓓ 는 의사 user system 이라 사람이 아니다',
+    );
+
+    // 생성자 행 상태가 넷으로 갈린다 — 뭉뚱그리면 "이미 참여 중"과 "스스로 나감"이 섞인다.
+    assert.match(line, /owner\(active=1 left=1 absent=1 none=2\)/, 'ⓑ active · ⓒ left · ⓐ absent · ⓓⓕ none');
+
+    // 실제 수행량은 대상 수와 따로 찍힌다. ⓐ 만 어긋나 있다 — ⓒ 는 participants_only 라
+    // 꺼진 것이 정답이고, ⓓⓕ 는 기본 open 이라 켜진 것이 이미 정답이다.
+    assert.match(line, /open_join_aligned=1 /, 'ⓐ 하나만 정렬 대상이다');
+    assert.match(line, /owners_registered=1$/, 'ⓐ 만 등록 대상이다 — ⓒ 의 탈퇴는 되돌리지 않는다');
+  });
+
+  it("mode_column_unset 은 백필 대상 수가 아니다 — 엔티티로 만든 행은 기본값이 채워진다", async () => {
+    // 초안이 이 값을 "백필 대상 수"로 보고했는데 틀렸다(리뷰 지적 2). 운영 DB 에서는
+    // synchronize 가 컬럼을 default 'open' 으로 추가하며 기존 행까지 채우므로 보통 0 이다.
+    // 여기서는 그 성질을 엔티티 경로로 재현한다 — 값을 주지 않아도 'open' 이 들어간다.
+    const missionRepo = dataSource.getRepository(OrchestrationMission);
+    const viaEntity = await missionRepo.save(missionRepo.create({
+      workspace_id: WS, team_id: 'team-1', title: 'via entity', objective: 'x',
+      status: 'draft', created_by_type: 'user', created_by: ADMIN,
+    }));
+    assert.equal(viaEntity.user_chat_mode, 'open', '엔티티 default 가 채워진다');
+
+    const line = await runBackfill();
+    assert.match(line, /mode_column_unset=0 /, "값이 채워진 행은 unset 으로 잡히지 않는다");
+
+    // 진짜로 비어 있는 행(컬럼이 없던 시절의 데이터)만 잡힌다.
+    await missionRepo.update({ id: viaEntity.id }, { user_chat_mode: '' });
+    const line2 = await runBackfill();
+    assert.match(line2, /mode_column_unset=1 /, "''/NULL 로 남은 행만 진단용으로 센다");
   });
 });
