@@ -677,7 +677,8 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       if (ack.state !== 'ok') {
         showToast(
           `refresh_available_models 전송됨${idTail} — 매니저 응답을 아직 받지 못했습니다` +
-            `${ack.state === 'unknown' ? ' (ack 창 만료)' : ''}. 매니저가 처리하면 다음 ` +
+            `${ack.state === 'unknown' ? ' (서버가 이 command_id 를 더 이상 알지 못합니다)' : ''}` +
+            `. 매니저가 처리하면 다음 ` +
             `하트비트에 반영됩니다.`,
           'info',
         );
