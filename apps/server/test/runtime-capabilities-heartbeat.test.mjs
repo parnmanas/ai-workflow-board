@@ -99,7 +99,11 @@ test('Runtime Host heartbeat stores structured runtime health and capabilities',
 
 test('Runtime Host heartbeat carries hermes profiles through, sanitized', async (t) => {
   const { app, port, modules } = await bootApp({
-    port: Number.parseInt(process.env.PORT, 10) + 1,
+    // 고정 포트를 산술로 파생(PORT+n)하지 않고 OS 가 고른 빈 포트를 쓴다 (ticket 5db0964a).
+    // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
+    // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한
+    // 번호에서 밀리기까지 했다. 실제 포트는 bootApp 의 반환값을 그대로 쓴다.
+    port: 0,
   });
   t.after(async () => { await app.close(); });
 
@@ -176,7 +180,7 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
 // 만든다"는 사실을 운영자가 알 수 없으므로 capabilities 로 명시한다.
 test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', async (t) => {
   const { app, port, modules } = await bootApp({
-    port: Number.parseInt(process.env.PORT, 10) + 2,
+    port: 0,
   });
   t.after(async () => { await app.close(); });
 

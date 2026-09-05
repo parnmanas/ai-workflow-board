@@ -19,7 +19,7 @@ process.env.PORT = process.env.MANAGER_UPDATE_APPROVAL_PORT || '7931';
 const APPROVAL_ACTION = 'agent_manager_update_approval_requested';
 
 async function setup(t, port, label) {
-  const { app, modules } = await bootApp({ port });
+  const { app, port: boundPort, modules } = await bootApp({ port });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
   const workspace = await createWorkspace(app, getDataSourceToken, label);
@@ -32,7 +32,7 @@ async function setup(t, port, label) {
     label,
   });
   const dataSource = app.get(getDataSourceToken());
-  return { app, port, workspace, manager, key, dataSource };
+  return { app, port: boundPort, workspace, manager, key, dataSource };
 }
 
 async function heartbeat(port, key, manager, workspace, body) {
@@ -68,8 +68,9 @@ async function approvalRows(dataSource, agentId, { expect } = {}) {
 }
 
 test('승인 대기 버전을 실은 하트비트가 레지스트리에 저장되고 감사행을 남긴다', async (t) => {
-  const port = Number.parseInt(process.env.PORT, 10);
-  const { manager, workspace, key, dataSource, app } = await setup(t, port, 'update-approval');
+  const { port, manager, workspace, key, dataSource, app } = await setup(
+    t, Number.parseInt(process.env.PORT, 10), 'update-approval',
+  );
 
   await heartbeat(port, key, manager, workspace, {
     instance_id: 'update-approval-1',
@@ -94,8 +95,11 @@ test('승인 대기 버전을 실은 하트비트가 레지스트리에 저장�
 });
 
 test('같은 요청이 반복되는 하트비트는 감사행을 새로 쌓지 않고, 새 버전은 새로 남긴다', async (t) => {
-  const port = Number.parseInt(process.env.PORT, 10) + 1;
-  const { manager, workspace, key, dataSource } = await setup(t, port, 'update-approval-dedupe');
+  // 고정 포트를 산술로 파생(PORT+n)하지 않고 OS 가 고른 빈 포트를 쓴다 (ticket 5db0964a).
+  // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
+  // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 이 파일의 세 번째·네 번째
+  // 부팅은 7933·7934 가 아니라 7934·7937 로 밀려 있었다.
+  const { port, manager, workspace, key, dataSource } = await setup(t, 0, 'update-approval-dedupe');
 
   const base = {
     instance_id: 'update-approval-dedupe-1',
@@ -128,8 +132,7 @@ test('같은 요청이 반복되는 하트비트는 감사행을 새로 쌓지 �
 });
 
 test('매니저 재기동으로 instance_id 가 바뀌어도 같은 요청은 다시 기록하지 않는다', async (t) => {
-  const port = Number.parseInt(process.env.PORT, 10) + 2;
-  const { manager, workspace, key, dataSource } = await setup(t, port, 'update-approval-restart');
+  const { port, manager, workspace, key, dataSource } = await setup(t, 0, 'update-approval-restart');
 
   const pending = {
     latest_version: '1.7.0',
@@ -150,8 +153,7 @@ test('매니저 재기동으로 instance_id 가 바뀌어도 같은 요청은 �
 });
 
 test('승인 대기가 아닌 하트비트는 감사행을 남기지 않고, 구버전 매니저는 필드가 undefined 로 남는다', async (t) => {
-  const port = Number.parseInt(process.env.PORT, 10) + 3;
-  const { manager, workspace, key, dataSource, app } = await setup(t, port, 'update-approval-absent');
+  const { port, manager, workspace, key, dataSource, app } = await setup(t, 0, 'update-approval-absent');
 
   // 1) 필드를 아는 매니저지만 대기 없음 → null
   await heartbeat(port, key, manager, workspace, {

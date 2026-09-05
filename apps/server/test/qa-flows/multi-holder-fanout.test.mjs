@@ -89,7 +89,11 @@ test('multi-holder fan-out: two assignee holders both get triggered', async (t) 
 });
 
 test('per-holder self-guard: actor holder is skipped, other holder still fans out', async (t) => {
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 1 });
+  // 두 번째 부팅부터는 BASE_PORT 에서 산술로 파생하지 않고 OS 가 고른 빈 포트를
+  // 쓴다 (ticket 5db0964a). 파생 번호는 소스 검색에 잡히지 않아 다른 파일이 자기
+  // 기본 포트로 같은 번호를 선언해도 아무도 눈치채지 못하고, 데스크톱 앱이 인접
+  // 번호를 잡고 있으면 그대로 EADDRINUSE 로 죽는다. 실제 포트는 반환값을 쓴다.
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 

@@ -71,12 +71,16 @@ test('회귀 대조군: root 옵션 없이 절대경로로 sendFile하면 같은
       if (err) res.status(404).json({ message: err.message });
     });
   });
-  const port = BASE_PORT + 1;
-  const server = app.listen(port);
+  // 두 번째 리스너는 BASE_PORT 에서 산술로 파생하지 않고 OS 가 고른 빈 포트를 쓴다
+  // (ticket 5db0964a). 파생 번호는 소스 검색에 잡히지 않아 다른 파일이 같은 번호를
+  // 자기 기본 포트로 선언해도 드러나지 않는다. bootApp 과 달리 여기는 raw express
+  // 라 실제 포트를 server.address() 로 회수한다.
+  const server = app.listen(0);
   await new Promise((resolve, reject) => {
     server.once('listening', resolve);
     server.once('error', reject);
   });
+  const port = server.address().port;
   t.after(() => new Promise((resolve) => server.close(resolve)));
 
   const res = await fetch(`http://127.0.0.1:${port}/ws/abc/boards`);

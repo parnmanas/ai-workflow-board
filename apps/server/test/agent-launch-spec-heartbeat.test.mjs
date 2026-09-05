@@ -155,7 +155,11 @@ test('실효 실행 사양이 손상 없이 레지스트리와 REST 응답에 �
 
 test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 (빈 배열로 접지 않는다)', async (t) => {
   const { app, port, workspace, manager, key } = await bootWithManager(
-    t, Number.parseInt(process.env.PORT, 10) + 1, 'launch-spec-legacy',
+    // 고정 포트를 산술로 파생(PORT+n)하지 않고 OS 가 고른 빈 포트를 쓴다 (ticket 5db0964a).
+    // 파생 포트는 소스 grep 에도 포트 목록에도 잡히지 않는 데다, bootApp 이 부팅마다
+    // process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한
+    // 번호에서 밀리기까지 했다. 실제 포트는 bootApp 의 반환값을 그대로 쓴다.
+    t, 0, 'launch-spec-legacy',
   );
 
   // 신규 필드를 전혀 모르는 매니저의 하트비트.
@@ -182,7 +186,7 @@ test('구버전 매니저가 필드를 안 보내면 undefined 로 보존된다 
 
 test('매니저가 다운그레이드되면 다음 하트비트에서 사양이 사라진다', async (t) => {
   const { app, port, workspace, manager, key } = await bootWithManager(
-    t, Number.parseInt(process.env.PORT, 10) + 2, 'launch-spec-downgrade',
+    t, 0, 'launch-spec-downgrade',
   );
   const registry = app.get(InstanceRegistryService);
 
@@ -200,7 +204,7 @@ test('매니저가 다운그레이드되면 다음 하트비트에서 사양이 
 
 test('신뢰할 수 없는 모양은 좁혀지되 전체가 버려지지는 않는다', async (t) => {
   const { app, port, workspace, manager, key } = await bootWithManager(
-    t, Number.parseInt(process.env.PORT, 10) + 3, 'launch-spec-hostile',
+    t, 0, 'launch-spec-hostile',
   );
 
   const res = await heartbeat(port, key, manager, workspace, 'launch-spec-hostile', {

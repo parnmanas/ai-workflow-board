@@ -122,7 +122,11 @@ test('T5 핵심: 2홀더 직접이동 차단 → propose_move → 전원 승인 
 });
 
 test('subtask 게이트: 합의가 성립해도 열린 재귀 child가 있으면 자동 이동하지 않는다', async (t) => {
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 6 });
+  // 두 번째 부팅부터는 BASE_PORT 에서 산술로 파생하지 않고 OS 가 고른 빈 포트를
+  // 쓴다 (ticket 5db0964a). 파생 번호는 소스 검색에 잡히지 않아 다른 파일이 자기
+  // 기본 포트로 같은 번호를 선언해도 아무도 눈치채지 못하고, 데스크톱 앱이 인접
+  // 번호를 잡고 있으면 그대로 EADDRINUSE 로 죽는다. 실제 포트는 반환값을 쓴다.
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const { ws, columns, trio, holderB, ticket } = await twoHolderScene(app, getDataSourceToken, 'consensus-subtask-gate');
@@ -154,7 +158,7 @@ test('회귀(T7 리뷰): 소진된 제안의 표는 다음 멀티홀더 컬럼 �
   // 제안"으로 잡으면 실행(소진)된 P1 의 표가 Review 이탈 게이트까지 만족시켜 —
   // 새 제안 전까지 무게이트 통과, 합의가 티켓당 사실상 1회로 붕괴한다. 게이트는
   // 열린 제안(없으면 null) 앵커로만 판정해야 한다.
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 3 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
@@ -200,7 +204,7 @@ test('이슈#1: 보드 간 이동(move_ticket_to_board)도 컬럼 이탈이라 �
   // move_ticket / REST /move 는 게이트를 타지만 보드 간 이동은 예외였다 — 멀티홀더
   // 티켓을 다른 보드로 옮기는 방식의 우회 경로. 소스 컬럼(In Progress → assignee 2홀더)
   // 라우팅으로 판정하므로 목적지 보드/컬럼 라우팅과 무관하게 차단되어야 한다.
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 4 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
 
@@ -252,7 +256,7 @@ test('이슈#2: 제안 없이 던진 null-agree 표는 ≥2홀더 게이트를 �
   // null-agree 하면 순수 판정으로는 satisfied 이지만, 이 null 표는 (제안과 달리)
   // 소진 메커니즘이 없어 게이트가 인정하면 다음 컬럼에서도 계속 열린다. 게이트는
   // 열린 제안 앵커의 합의로만 통과해야 한다(null 앵커 satisfied 는 blocked 유지).
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 5 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
@@ -289,7 +293,7 @@ test('이슈#2: 제안 없이 던진 null-agree 표는 ≥2홀더 게이트를 �
 });
 
 test('force / reporter override 는 게이트를 우회한다', async (t) => {
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 1 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
@@ -306,7 +310,7 @@ test('force / reporter override 는 게이트를 우회한다', async (t) => {
 });
 
 test('홀더 ≤1 무회귀: 직접 move_ticket 작동 + propose_move 는 안내', async (t) => {
-  const { app, port, modules } = await bootApp({ port: BASE_PORT + 2 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
