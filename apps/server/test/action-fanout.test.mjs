@@ -249,6 +249,30 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     }
   });
 
+  it('workspace-move 는 다중 대상을 두 컬럼 모두 복사하고, 비대표 대상도 경고 대상으로 잡는다', () => {
+    // 정적 가드 — 이 두 곳은 fan-out 이전 형태(단일 컬럼 매칭)로 되돌아가기 쉬운
+    // 지점이고, 되돌아가면 (1) 복사된 Action 이 조용히 대상 1개로 줄고
+    // (2) 대표가 아닌 대상으로 걸린 에이전트의 cross-workspace 경고가 사라진다.
+    const src = readFileSync(
+      new URL('../src/services/workspace-move.service.ts', import.meta.url),
+      'utf8',
+    );
+    const copyBlock = src.slice(src.indexOf('copy ws-level action'), src.indexOf('copy ws-level action') + 1200);
+    assert.match(copyBlock, /target_agent_ids: src\.target_agent_ids/, 'Action 복사가 대상 배열을 빠뜨렸다');
+
+    const warnBlock = src.slice(src.indexOf('warnForeignAgentActions'));
+    assert.match(
+      warnBlock.slice(0, 2000),
+      /actionTargetAgentIds\(a\)\.includes\(agent\.id\)/,
+      'cross-workspace 경고가 대표 대상만 보고 있다 — 비대표 대상이 누락된다',
+    );
+    assert.doesNotMatch(
+      warnBlock.slice(0, 2000),
+      /find\(\{ where: \{ target_agent_id: agent\.id \} \}\)/,
+      '컬럼 매칭으로 되돌아가면 다중 대상 Action 이 안 잡힌다',
+    );
+  });
+
   // ── 2. fan-out 실행 ─────────────────────────────────────────────────────
 
   it('실행 1회가 대상 수만큼 run 을 만들고 각 run 이 자기 방을 쓴다', async () => {
