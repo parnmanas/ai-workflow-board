@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOP_LEVEL_DIR = __dirname;
 const QA_FLOWS_DIR = path.join(__dirname, 'qa-flows');
+const HELPERS_DIR = path.join(__dirname, 'helpers');
 // 이 파일 자신은 스캔에서 뺀다 — 아래 비공허성 테스트가 금지 패턴을 픽스처
 // 문자열로 들고 있어서 스스로에게 걸린다. test-registration-completeness 가
 // 같은 이유로 쓰는 SELF_BASENAME 관용구와 동일하다. 이 파일은 앱을 부팅하지
@@ -70,11 +71,11 @@ function isCommentLine(line) {
 // "미등록 테스트 파일" 로 오탐한다.
 // 두 규칙이 같은 순회를 쓴다 — 디렉터리 훑기, 자기 제외, 주석 건너뛰기가
 // 규칙마다 따로 놀면 한쪽만 고쳐지고 다른 쪽이 조용히 stale 해진다.
-function scanTestFiles(dir, rule) {
+function scanTestFiles(dir, rule, suffix = '.test.mjs') {
   const violations = [];
   let scannedFiles = 0;
   for (const entry of fs.readdirSync(dir).sort()) {
-    if (!entry.endsWith('.test.mjs')) continue;
+    if (!entry.endsWith(suffix)) continue;
     if (dir === TOP_LEVEL_DIR && entry === SELF_BASENAME) continue;
     scannedFiles += 1;
     const lines = fs.readFileSync(path.join(dir, entry), 'utf8').split('\n');
@@ -175,6 +176,7 @@ test('비공허성 반대편: 정상 코드와 설명 주석은 잡히지 않는
 const PORT_LITERAL_STRUCTURAL_RE = new RegExp(
   [
     String.raw`\bport:\s*\d{4,5}\b`,                          // bootApp({ port: 7896 })
+    String.raw`\bport\s*=\s*\d{4,5}\b`,                       // function bootApp({ port = 7800 })
     String.raw`\.listen\(\s*\d{4,5}\b`,                       // app.listen(7799)
     String.raw`process\.env\.[A-Z0-9_]*PORT\s*=\s*'?\d{4,5}\b`, // process.env.PORT = '7842'
   ].join('|'),
@@ -287,4 +289,32 @@ test('예외 마커는 그 줄만 면제한다 (격리 tmpdir)', (t) => {
   const { violations } = scanTestFiles(dir, hasFixedPortLiteral);
   assert.equal(violations.length, 1, `마커가 없는 줄만 남아야 한다: ${JSON.stringify(violations)}`);
   assert.match(violations[0], /marker\.test\.mjs:2:/, '마커 줄(1행)이 아니라 다음 줄(2행)이 잡혀야 한다');
+});
+
+// helpers/ 는 .test.mjs 가 아니라 위 두 스캔이 닿지 않는다. 그런데 bootApp 의
+// **기본 포트**가 사는 곳이 정확히 여기라서, 여기가 비어 있으면 "선언은 다 0" 이라는
+// 이 티켓의 결론이 헬퍼 한 줄로 조용히 무너진다.
+test('test/helpers/*.mjs 에도 고정 부팅 포트 리터럴이 없다 (bootApp 기본값 포함)', () => {
+  const { violations, scannedFiles } = scanTestFiles(HELPERS_DIR, hasFixedPortLiteral, '.mjs');
+  assert.ok(scannedFiles > 3, `helpers 스캔이 ${scannedFiles} 개 파일만 봤다 — 경로가 틀렸다`);
+  assert.deepEqual(violations, [], `${LITERAL_REMEDY}\n${violations.join('\n')}`);
+});
+
+test('비공허성: 파라미터 기본값 형태도 잡힌다 (격리 tmpdir)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-port-literal-guard-default-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  fs.writeFileSync(
+    path.join(dir, 'helper-default.mjs'),
+    'export async function bootApp({ port = 7800, logger = false } = {}) {\n',
+  );
+  fs.writeFileSync(
+    path.join(dir, 'helper-clean.mjs'),
+    'export async function bootApp({ port = 0, logger = false } = {}) {\n',
+  );
+
+  const { violations, scannedFiles } = scanTestFiles(dir, hasFixedPortLiteral, '.mjs');
+  assert.equal(scannedFiles, 2);
+  assert.equal(violations.length, 1, `기본값 리터럴만 잡혀야 한다: ${JSON.stringify(violations)}`);
+  assert.match(violations[0], /^helper-default\.mjs:1:/);
 });

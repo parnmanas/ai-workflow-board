@@ -1,7 +1,7 @@
 # QA Flow Tests
 
 End-to-end QA tests that simulate real agents behind AWB's MCP/SSE contract.
-Each test boots its own NestJS app on a unique port, provisions a scene via
+Each test boots its own NestJS app on an OS-assigned port, provisions a scene via
 fixtures, and drives it with `VirtualAgent` instances.
 
 ## Running
@@ -21,25 +21,27 @@ npm run test:qa:fast
 node --test --test-force-exit test/qa-flows/ticket-lifecycle.test.mjs
 ```
 
-Tests are intentionally sequential: each file spins up its own NestJS app and
-allocates a dedicated port (7801–7806) to avoid interference.
+Tests are intentionally sequential: each file spins up its own NestJS app. Ports
+are **not** assigned by hand — every file boots with `port: 0` and the OS hands
+back a free one, so two files (or two whole test sessions) can never collide.
+There is no port ledger to keep in sync (ticket f2d82793).
 
 ## What each file covers
 
-| File                               | Port | Covers                                                                |
-| ---------------------------------- | ---- | --------------------------------------------------------------------- |
-| `ticket-lifecycle.test.mjs`        | 7801 | Reporter → Assignee → Reviewer routing; terminal column suppresses trigger |
-| `self-trigger-guard.test.mjs`      | 7807 | `actor_id === targetAgentId` skips emission (no self-loops)            |
-| `comment-trigger.test.mjs`         | 7802 | A new comment on a routed column fires `trigger_source='comment'`      |
-| `comment-mention.test.mjs`         | 7808 | `comment_mention` only reaches the mentioned agent (ws-scoped)         |
-| `mcp-tools-surface.test.mjs`       | 7803 | MCP initialize + `tools/list` returns the expected AWB tool surface    |
-| `mcp-schema-version.test.mjs`      | 7809 | Missing `experimental.awb/schemaVersion` → JSON-RPC `-32000`           |
-| `mcp-agent-roundtrip.test.mjs`     | 7810 | Virtual agent reacts to `agent_trigger` by calling `add_comment` + `move_ticket`; DB state reflects the tool calls |
-| `multi-agent-concurrency.test.mjs` | 7804 | 5 agents × 4 tickets: every trigger lands at its owner, no cross-agent leak under parallel load |
-| `multi-user-chat.test.mjs`         | 7806 | `chat_room_message` SSE fan-out is scoped to room participants only    |
-| `large-data.test.mjs`              | 7805 | 200 tickets, 200 moves: stream keeps pace, no drops, no duplicates     |
+| File                               | Covers                                                                |
+| ---------------------------------- | --------------------------------------------------------------------- |
+| `ticket-lifecycle.test.mjs`        | Reporter → Assignee → Reviewer routing; terminal column suppresses trigger |
+| `self-trigger-guard.test.mjs`      | `actor_id === targetAgentId` skips emission (no self-loops)            |
+| `comment-trigger.test.mjs`         | A new comment on a routed column fires `trigger_source='comment'`      |
+| `comment-mention.test.mjs`         | `comment_mention` only reaches the mentioned agent (ws-scoped)         |
+| `mcp-tools-surface.test.mjs`       | MCP initialize + `tools/list` returns the expected AWB tool surface    |
+| `mcp-schema-version.test.mjs`      | Missing `experimental.awb/schemaVersion` → JSON-RPC `-32000`           |
+| `mcp-agent-roundtrip.test.mjs`     | Virtual agent reacts to `agent_trigger` by calling `add_comment` + `move_ticket`; DB state reflects the tool calls |
+| `multi-agent-concurrency.test.mjs` | 5 agents × 4 tickets: every trigger lands at its owner, no cross-agent leak under parallel load |
+| `multi-user-chat.test.mjs`         | `chat_room_message` SSE fan-out is scoped to room participants only    |
+| `large-data.test.mjs`              | 200 tickets, 200 moves: stream keeps pace, no drops, no duplicates     |
 
-Each file boots its own NestJS app on its own port and runs exactly one
+Each file boots its own NestJS app on an OS-assigned port and runs exactly one
 `test()` block that ends with `exitAfterTests()` — this is the only shape
 that plays nicely with the unreffed NestJS timers + TypeORM pool handles
 (mixing multiple `test()` blocks in one file can hang the `node --test`
@@ -106,7 +108,9 @@ import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgentTrio, createTicket } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_MY_PORT || '7810';
+// 포트는 선언하지 않는다 — 0 을 넘기면 OS 가 빈 포트를 고르고 bootApp 이 실제
+// 바인딩된 번호를 돌려준다. 특정 번호에 붙어 디버깅할 때만 env 로 덮어쓴다.
+process.env.PORT = process.env.QA_MY_PORT || '0';
 
 test('my scenario', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
@@ -174,10 +178,12 @@ test('my scenario', async (t) => {
   Always fire-and-forget: `t.after(() => { void app.close().catch(() => {}); });`.
   Awaiting client-side teardown (`VirtualAgent.stop()`, `mcp.close()`) is fine —
   those resolve.
-- **Port collisions.** Pick a port in the 7800–7899 range and update the
-  `PORT` env fallback at the top of your file. The `test:qa` npm script
-  runs files sequentially, but other locally-running dev servers can steal
-  a port.
+- **포트를 고르지 마라.** 새 파일은 번호를 선언하지 않고 `port: 0` 으로 부팅한다
+  — OS 가 빈 포트를 고르고 `bootApp()` 이 **실제로 바인딩된** 번호를 돌려준다.
+  예전에는 7800–7899 에서 하나 골라 대장에 적으라고 했는데, 그 대장은 유지되지
+  않았다 — 152 개 파일이 선언한 고유값 105 개 중 32 개가 이미 중복이었고(최다
+  7842 는 7 개 파일 공유), 순차 러너가 가려주고 있었을 뿐이다(ticket f2d82793).
+  특정 번호에 붙어 디버깅해야 할 때만 env(`QA_MY_PORT=7842`)로 덮어쓰면 된다.
   **한 파일에서 앱을 두 번 이상 부팅한다면 고정 포트를 재사용하지 말 것**
   (ticket 6a9a3fe4). 바로 위 항목대로 teardown 은 `void app.close()` 라
   앞 서버가 실제로 소켓을 놓을 때까지 기다리지 않으므로, 다음 부팅이 같은
@@ -189,7 +195,9 @@ test('my scenario', async (t) => {
   (ticket 5db0964a) — 그렇게 실제로 점유되는 번호가 소스 어디에도 문자열로 없어서
   다른 파일이 같은 번호를 선언해도 드러나지 않고, bootApp 이 부팅마다 env.PORT 를
   실제 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한 번호에서 밀리기까지 한다.
-  `test/boot-port-derivation-guard.test.mjs` 가 이 패턴을 정적으로 막는다.
+  `test/boot-port-guard.test.mjs` 가 산술 파생과 고정 리터럴 선언을 모두 정적으로
+  막고, `test/boot-concurrent-sessions.test.mjs` 가 두 세션 동시 부팅을 실제
+  프로세스로 검증한다.
 - **SSE subscriptions are async.** After starting a `VirtualAgent`, give
   it ~200ms before emitting the event under test — the subscription
   attaches asynchronously and events fired before attach are lost.
