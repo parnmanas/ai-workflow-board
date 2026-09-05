@@ -6,6 +6,9 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // the room where the back-and-forth happened.
 @Entity('action_runs')
 @Index(['action_id', 'created_at'])
+// 배치 완료 판정(completeRun)과 이력의 배치 묶음 조회가 batch_id로 run을
+// 훑으므로 인덱스를 둔다 (티켓 fc3906c5).
+@Index(['batch_id'])
 export class ActionRun {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -15,6 +18,34 @@ export class ActionRun {
 
   @Column({ type: 'varchar' })
   workspace_id: string;
+
+  // 이 run을 수행하는 대상 에이전트 (티켓 fc3906c5). fan-out 이전에는 run에
+  // 에이전트 식별자가 아예 없어서 방 참여자로만 역추적할 수 있었고, 한 Action의
+  // 대상이 하나뿐이라 그래도 됐다. 이제는 같은 Action의 run들이 서로 다른
+  // 에이전트에 속하므로 실행 이력을 에이전트별로 구분·감사하려면 run 자체에
+  // 필요하다.
+  //
+  // 이 컬럼이 생기기 전 행은 ''로 남는다 — 그 시점의 Action 대상으로 소급
+  // 백필하지 **않는다**. Action의 대상은 그 뒤로 편집됐을 수 있어서 현재 값을
+  // 과거 run에 적어 넣으면 감사 기록을 지어내는 셈이 되기 때문이다. UI는 빈
+  // 값을 "기록 없음"으로 정직하게 표시한다.
+  @Column({ type: 'varchar', default: '' })
+  agent_id: string;
+
+  // 같은 트리거 1회에서 fan-out된 run들을 묶는 배치 키 (티켓 fc3906c5).
+  // 디스패치마다 새로 발급되며, 대상이 1개뿐인 Action도 크기 1짜리 배치를
+  // 받는다(경로를 하나로 유지). 실패한 run의 재시도는 **같은 batch_id를
+  // 승계**하므로, 재시도가 떠 있는 동안 배치는 아직 미완으로 취급된다.
+  //
+  // 쓰임새 두 가지:
+  //   1. source_ticket_id가 있는 배치는 **모든 run이 종료된 뒤 한 번만** 티켓을
+  //      재개한다(ActionsService.completeRun).
+  //   2. 실행 이력을 배치 단위로 묶어 전체 성공 / 부분 실패 / 전체 실패를
+  //      구분해 보여준다.
+  // 이 컬럼이 생기기 전 행은 ''이고, 그 경우 completeRun은 배치 로직을 타지
+  // 않고 종전과 완전히 동일한 단일 run 경로로 동작한다.
+  @Column({ type: 'varchar', default: '' })
+  batch_id: string;
 
   // The ChatRoom hosting the agent ↔ user conversation for this Run.
   @Column({ type: 'varchar' })

@@ -34,8 +34,25 @@ export class Action {
   // Required: which agent receives the rendered prompt on every Run. Per the
   // ticket-locked decision (Q1=a) Actions are pinned to one agent at create
   // time; the "pick agent at run time" alternative was rejected.
+  //
+  // 티켓 fc3906c5 이후로 이 컬럼은 **레거시 미러**다 — 대상은 아래
+  // `target_agent_ids` 가 정본이고, 여기에는 항상 그 배열의 첫 원소(대표
+  // 대상)가 복사된다. 삭제하지 않는 이유는 이 컬럼만 읽는 기존 코드/쿼리가
+  // 계속 유효한 값을 보게 하기 위해서다. 읽기는 반드시
+  // `common/action-targets.ts` 의 `actionTargetAgentIds()` 를 통할 것.
   @Column({ type: 'varchar' })
   target_agent_id: string;
+
+  // 다중 대상 (티켓 fc3906c5). 한 번의 트리거가 여기 나열된 에이전트 **각각**
+  // 에 대해 독립적인 ActionRun을 만든다(fan-out). 대상은 여전히 Action 정의에
+  // 선언적으로 고정되며, 다만 그 수가 1이 아니라 N일 수 있다.
+  //
+  // `Ticket.on_done_action_ids` 와 같은 JSON 문자열 배열 관례(varchar + '[]'
+  // 기본값)로 SQLite/Postgres 패리티를 맞춘다. '[]' = 미설정 → 위 레거시 단일
+  // 컬럼으로 폴백한다. 그래서 백필이 돌지 않은 DB에서도 기존 단일 대상
+  // Action이 그대로 동작한다.
+  @Column({ type: 'varchar', default: '[]' })
+  target_agent_ids: string;
 
   // Optional cron-style schedule. Empty string = manual-only. Format: a
   // simple subset (minute hour dom month dow with `*` and integer values).
