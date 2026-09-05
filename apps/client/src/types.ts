@@ -341,7 +341,18 @@ export interface Action {
   name: string;
   description: string;
   prompt: string;
+  /**
+   * 대표 대상(레거시 미러). 항상 `target_agent_ids[0]` 과 같다 — 서버가 두 컬럼을
+   * 함께 쓴다. 대상 전체가 필요하면 아래 배열을 볼 것 (티켓 fc3906c5).
+   */
   target_agent_id: string;
+  /**
+   * 대상 에이전트 전체. 한 번의 트리거가 여기 나열된 에이전트 **각각**에 대해
+   * 독립적인 run 을 만든다(fan-out). 서버가 항상 채워 보내지만, 이 필드가
+   * 추가되기 전 응답을 캐시한 클라이언트를 위해 optional 로 둔다 — 비어 있으면
+   * `target_agent_id` 단일 값으로 읽으면 된다.
+   */
+  target_agent_ids?: string[];
   schedule_cron: string;
   trigger: string;
   trigger_label: string;
@@ -362,10 +373,31 @@ export interface ActionRun {
   id: string;
   action_id: string;
   workspace_id: string;
+  /**
+   * 이 run 을 수행한 에이전트 (티켓 fc3906c5). fan-out 이전에 만들어진 run 은
+   * '' 다 — 그 시점의 대상은 이후 편집됐을 수 있어 소급 백필하지 않는다.
+   * 빈 값은 "기록 없음"으로 표시할 것.
+   */
+  agent_id?: string;
+  /** 같은 트리거 1회에서 나온 run 들의 묶음 키. 레거시 run 은 ''. */
+  batch_id?: string;
   room_id: string;
   triggered_by_type: 'user' | 'system' | 'agent';
   triggered_by_id: string;
   prompt_rendered: string;
+  /**
+   * run 수명주기. 'running' 에서 시작해 complete_action_run 이 한 번만
+   * 'succeeded'/'failed' 로 확정한다. 이 컬럼이 생기기 전 행은 'running' 으로
+   * 읽힌다.
+   */
+  status?: 'running' | 'succeeded' | 'failed';
+  /** 완료 에이전트가 남긴 성공 요약 또는 실패 사유. */
+  result_summary?: string;
+  /** 1-based 시도 횟수. 재시도가 attempt+1 로 새 run 을 만든다. */
+  attempt?: number;
+  /** 이 run 을 띄운 티켓(있으면). 배치 전원 종료 후 한 번 재개된다. */
+  source_ticket_id?: string;
+  completed_at?: string | null;
   created_at: string;
 }
 

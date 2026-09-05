@@ -1128,7 +1128,10 @@ export const api = {
     name: string;
     description?: string;
     prompt?: string;
-    target_agent_id: string;
+    /** 레거시 단일 대상. 신규 코드는 `target_agent_ids` 를 쓴다 (티켓 fc3906c5). */
+    target_agent_id?: string;
+    /** 대상 에이전트 전체 — 트리거 1회가 각각에 대해 독립 run 을 만든다. */
+    target_agent_ids?: string[];
     schedule_cron?: string;
     trigger?: string;
     trigger_label?: string;
@@ -1147,6 +1150,8 @@ export const api = {
       description?: string;
       prompt?: string;
       target_agent_id?: string;
+      /** 대상 전체 교체 — 배열이 오면 단일 필드보다 우선한다 (티켓 fc3906c5). */
+      target_agent_ids?: string[];
       schedule_cron?: string;
       trigger?: string;
       trigger_label?: string;
@@ -1162,8 +1167,17 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/actions/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  // fan-out (티켓 fc3906c5): run_id/room_id/prompt 는 첫 run 을 가리키고,
+  // runs[] 가 대상별 run 전체, failures[] 가 디스패치에 실패한 대상이다.
   runAction: (id: string) =>
-    request<{ run_id: string; room_id: string; prompt: string }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
+    request<{
+      run_id: string;
+      room_id: string;
+      prompt: string;
+      batch_id: string;
+      runs: Array<{ run_id: string; agent_id: string; room_id: string }>;
+      failures: Array<{ agent_id: string; error: string }>;
+    }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
   listActionRuns: (id: string, workspaceId: string, limit = 20) => {
     const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
     return request<ActionRun[]>(`/actions/${id}/runs?${params.toString()}`);
