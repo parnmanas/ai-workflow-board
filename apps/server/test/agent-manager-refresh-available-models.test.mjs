@@ -133,6 +133,26 @@ test('refresh_available_models 는 관리자 command 엔드포인트로 디스�
     '재열거된 목록이 레지스트리를 통째로 교체해야 한다 — 모델 드롭다운이 읽는 값이다',
   );
 
+  // 매니저가 재열거 결과를 ack 하는 왕복. detail 에 CLI별 갱신 결과가 담긴다.
+  const ackOnce = (commandId, detail) =>
+    fetch(`http://127.0.0.1:${port}/api/agent-manager/command/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command_id: commandId, status: 'ok', detail }),
+    });
+
+  // 이 컨트롤러의 @Post 핸들러는 명시적 status 를 주지 않으면 201 로 응답한다
+  // (instance-heartbeat 도 동일) — 명시적으로 status 를 세팅하는 거부 경로만 4xx 다.
+  const acked = await readJson(
+    await ackOnce(dispatchBody.command_id, 'refreshed 2 CLI(s): claude=3, codex=2'),
+    201,
+  );
+  assert.equal(acked.ok, true);
+
+  // 같은 command_id 를 두 번째로 ack 하면 원장에서 이미 소비돼 410 이다 —
+  // 만료된(혹은 알 수 없는) 커맨드의 기존 거부 경로가 새 verb 에서도 그대로다.
+  await readJson(await ackOnce(dispatchBody.command_id, '중복 ack'), 410);
+
   // 오타/미등록 verb 에 대한 기존 거부 경로는 그대로여야 한다.
   const typo = await readJson(await sendCommand('refresh_avaliable_models'), 400);
   assert.match(typo.error, /unknown command/);
