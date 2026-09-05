@@ -12,6 +12,11 @@
 // 포트다 — 고정 포트를 쓰지 않으므로 같은 파일이 여러 번 부팅해도 앞 서버가
 // 아직 소켓을 놓지 못한 상태와 경합하지 않는다(ticket 6a9a3fe4). 한 파일이 같은
 // 고정 포트를 두 번 이상 바인딩해야 한다면 그건 `port: 0` 을 써야 한다는 신호다.
+// `BASE_PORT + n` 이나 `parseInt(process.env.PORT, 10) + n` 으로 번호를 파생하는
+// 것은 답이 아니다 — 그 번호는 소스 검색에 잡히지 않고, 아래에서 이 함수가 매
+// 부팅마다 process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째
+// 파생부터는 의도한 번호에서 밀린다. test/boot-port-derivation-guard.test.mjs 가
+// 이 패턴을 정적으로 막는다 (ticket 5db0964a).
 //
 // bootAppModuleOnly() — HTTP listen 없이 DI 그래프만 인스턴스화하는 부팅
 // (아래 자체 doc comment 참고). nest-app-boot-smoke.test.mjs가 사용한다.

@@ -182,10 +182,14 @@ test('my scenario', async (t) => {
   (ticket 6a9a3fe4). 바로 위 항목대로 teardown 은 `void app.close()` 라
   앞 서버가 실제로 소켓을 놓을 때까지 기다리지 않으므로, 다음 부팅이 같은
   포트를 bind 하면 EADDRINUSE 가 난다 — 한가한 머신에서는 통과하고 부하가
-  걸린 전체 스위트에서만 터지는 flake 가 된다. 부팅마다 포트를 달리 하거나
-  (`BASE_PORT + n`), 아예 `bootApp({ port: 0 })` 으로 OS 에 빈 포트를 받아라.
-  `bootApp()` 은 **실제로 바인딩된** 포트를 돌려주므로 반환값을 그대로 URL 에
-  쓰면 된다. 고정 지연(sleep)으로 덮지 말 것.
+  걸린 전체 스위트에서만 터지는 flake 가 된다. 두 번째 부팅부터는 `bootApp({ port: 0 })`
+  으로 OS 에 빈 포트를 받아라. `bootApp()` 은 **실제로 바인딩된** 포트를 돌려주므로
+  반환값을 그대로 URL 에 쓰면 된다. 고정 지연(sleep)으로 덮지 말 것.
+  `BASE_PORT + n` / `parseInt(process.env.PORT, 10) + n` 같은 **산술 파생은 쓰지 마라**
+  (ticket 5db0964a) — 그렇게 실제로 점유되는 번호가 소스 어디에도 문자열로 없어서
+  다른 파일이 같은 번호를 선언해도 드러나지 않고, bootApp 이 부팅마다 env.PORT 를
+  실제 포트로 덮어쓰기 때문에 두 번째 파생부터는 의도한 번호에서 밀리기까지 한다.
+  `test/boot-port-derivation-guard.test.mjs` 가 이 패턴을 정적으로 막는다.
 - **SSE subscriptions are async.** After starting a `VirtualAgent`, give
   it ~200ms before emitting the event under test — the subscription
   attaches asynchronously and events fired before attach are lost.
