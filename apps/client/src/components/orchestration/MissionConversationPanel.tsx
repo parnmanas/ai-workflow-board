@@ -453,7 +453,12 @@ export default function MissionConversationPanel({
     }
     // 서버가 매 발화마다 users 행에서 직접 확인하는 것과 같은 권한이다
     // (PERMISSIONS.MANAGE_ACTIONS = 'admin.actions').
-    if (!hasPermission(MANAGE_ACTIONS)) {
+    //
+    // `user` 가 아직 없으면(프로필 로딩 중 등) **권한 문제라고 말하지 않는다**. 그때
+    // `hasPermission` 은 "권한 없음"이 아니라 "모름"을 false 로 돌려주므로, 그것을 근거로
+    // 배너를 띄우면 멀쩡한 사용자에게 없는 문제를 지어내게 된다. 실제 차단은 어차피 서버가
+    // 하므로, 모를 때는 조용히 통과시키고 전송 시 서버 사유를 그대로 받는 편이 정확하다.
+    if (user && !hasPermission(MANAGE_ACTIONS)) {
       return {
         reason:
           'orchestration 대화에 발화하려면 Manage Actions 권한이 필요합니다. 참여자 등록 여부와는 ' +

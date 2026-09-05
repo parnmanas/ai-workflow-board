@@ -73,7 +73,7 @@ function evt(id, type, message, createdAt) {
  * 대입한다(이 저장소의 smoke-ticket-artifact-realtime.test.mjs 와 같은 관례).
  */
 async function withPanel(
-  { props, getChatRoomMessages, getChatRoom, listOrchestrationMissionEvents, joinConversation },
+  { props, getChatRoomMessages, getChatRoom, listOrchestrationMissionEvents, joinConversation, me },
   body,
 ) {
   const dom = setupDom({ width: 1280 });
@@ -82,12 +82,17 @@ async function withPanel(
   localStorage.setItem('auth_token', 'test-token');
 
   const originals = {
+    getMe: api.getMe,
     getChatRoomMessages: api.getChatRoomMessages,
     getChatRoom: api.getChatRoom,
     markChatRoomRead: api.markChatRoomRead,
     listOrchestrationMissionEvents: api.listOrchestrationMissionEvents,
     joinOrchestrationMissionConversation: api.joinOrchestrationMissionConversation,
   };
+  // `me` 를 주지 않으면 로그인 사용자가 없는 상태다 — AuthProvider 는 그대로 두고
+  // getMe 만 실패시킨다(기존 테스트들이 이미 그 상태에서 돌고 있었다).
+  if (me) api.getMe = async () => me;
+
   const readCalls = [];
   const eventPageCalls = [];
   const joinCalls = [];
@@ -390,9 +395,12 @@ test('종료된 미션의 관전 상태에는 참여 버튼을 걸지 않는다'
       },
     },
     async ({ view }) => {
+      // 티켓 9cfd8161 이후 종료가 참여 여부보다 **앞선 사유**다. 서버도 이제 종료 미션의
+      // 발화를 참여자에게까지 거부하므로(requireMissionRoomSpeaker), 관전자에게 "참여자가
+      // 아님"을 먼저 말하면 참여해도 풀리지 않는 문제를 참여 문제처럼 설명하게 된다.
       assert.ok(
-        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
-        '관전 사유는 여전히 보여야 한다',
+        view.container.querySelector('[data-testid="mission-conversation-closed-notice"]'),
+        '종료된 미션에서는 종료가 사유여야 한다',
       );
       assert.equal(
         view.container.querySelector('[data-testid="mission-conversation-join"]'),
@@ -816,4 +824,120 @@ test('needs_recovery step 이 조용히 "Waiting" 으로 오표시되지 않는�
   );
   assert.match(recovery.label, /recovery/i);
   assert.notEqual(recovery.color, waiting.color, '색까지 달라야 목록에서 눈에 띈다');
+});
+
+// ─── 발화 차단 사유의 구분 (티켓 9cfd8161, 요구사항 C) ────────────────────────
+//
+// 이 패널의 실패 형태는 "이유를 하나만 아는 것"이었다. 읽기가 403 이면 무조건
+// "참여자가 아님"이라고 말했고, 자유 참여가 켜진 방에서는 읽기가 성공하니 관전으로도
+// 안 떨어져 입력창이 열린 채 전송 순간에만 403 이 떴다. 그래서 아래 테스트들은
+// "어떤 문구가 뜨는가"가 아니라 **다른 사유가 서로 다른 것으로 구분되는가**를 본다.
+
+/** MANAGE_ACTIONS 를 가진(또는 못 가진) 로그인 사용자 한 명. */
+function meWith(permissions) {
+  return {
+    id: 'user-1',
+    email: 'op@x',
+    name: 'Operator',
+    role: permissions.length ? 'admin' : 'user',
+    resolved_permissions: permissions,
+    status: 'active',
+    workspaces: [{ id: 'ws-1', name: 'WS', slug: 'ws', relations: ['member'] }],
+  };
+}
+
+const OPEN_ROOM_READ = async () => [msg('m1', '기록')];
+
+test('chat 옵션이 off 면 권한이 있어도 읽기 전용이고, 사유가 참여 문제와 구분된다', async () => {
+  await withPanel(
+    {
+      props: {
+        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        userChatMode: 'off',
+      },
+      me: meWith(['admin.actions']),
+      getChatRoomMessages: OPEN_ROOM_READ,
+    },
+    async ({ view }) => {
+      assert.ok(
+        view.container.querySelector('[data-testid="mission-conversation-chat-off-notice"]'),
+        'off 는 그 자체가 사유로 보여야 한다 — 옵션을 끈 사람만이 되돌릴 수 있는 상태다',
+      );
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
+        null,
+        '참여 문제가 아닌데 참여 문제라고 말하면 사용자는 참여 버튼을 찾아 헤맨다',
+      );
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-join"]'),
+        null,
+        '참여해도 풀리지 않는 차단에 참여 버튼을 걸면 안 된다',
+      );
+      assert.equal(
+        view.container.querySelector('textarea'),
+        null,
+        'off 에서 입력창이 열려 있으면 전송 순간에만 403 이 뜬다',
+      );
+      assert.ok(textOf(view.container).includes('읽기 전용'), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
+    },
+  );
+});
+
+test('MANAGE_ACTIONS 가 없으면 "참여자 아님"이 아니라 권한 부족으로 표시된다', async () => {
+  await withPanel(
+    {
+      props: {
+        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        userChatMode: 'open',
+      },
+      me: meWith([]), // 로그인은 됐지만 MANAGE_ACTIONS 가 없다
+      // 자유 참여가 켜진 방이라 읽기는 성공한다 — 예전이라면 관전으로도 안 떨어져
+      // 입력창이 그냥 열렸을 상황이다.
+      getChatRoomMessages: OPEN_ROOM_READ,
+    },
+    async ({ view }) => {
+      assert.ok(
+        view.container.querySelector('[data-testid="mission-conversation-permission-notice"]'),
+        '권한 부족은 권한 부족이라고 말해야 한다 — 이것이 요구사항 C 다',
+      );
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
+        null,
+        '권한 문제를 참여 문제로 뭉뚱그리면 참여에 성공한 뒤에도 왜 막히는지 알 수 없다',
+      );
+      assert.equal(
+        view.container.querySelector('textarea'),
+        null,
+        '보낼 수 없는 입력창을 열어두면 전송 순간에만 사유를 알게 된다',
+      );
+      assert.ok(
+        textOf(view.container).includes('Manage Actions'),
+        '어떤 권한이 필요한지 말해야 관리자에게 요청할 수 있다',
+      );
+    },
+  );
+});
+
+test('권한이 있고 옵션이 열려 있으면 참여자가 아니어도 입력창이 열린다', async () => {
+  await withPanel(
+    {
+      props: {
+        missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [],
+        userChatMode: 'open',
+      },
+      me: meWith(['admin.actions']),
+      getChatRoomMessages: OPEN_ROOM_READ,
+    },
+    async ({ view }) => {
+      assert.equal(
+        view.container.querySelector('[data-testid="mission-conversation-permission-notice"]'),
+        null,
+        '권한이 있는데 권한 배너를 띄우면 없는 문제를 지어내는 것이다',
+      );
+      assert.ok(
+        view.container.querySelector('textarea'),
+        '자유 참여가 켜진 방에서 권한 있는 운영자는 참여 등록 없이 바로 말할 수 있어야 한다',
+      );
+    },
+  );
 });
