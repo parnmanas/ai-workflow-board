@@ -1766,3 +1766,68 @@ NAS SSH 배포**를 실행한다. 즉 병합은 CI 설정 변경으로 끝나지
 과제 그대로다. 오늘 `main`의 취약점 감사 런은 모두 success였고 로컬 실행도 npm 축
 단독으로 통과해 새로 관찰된 사실은 없다. 문서화된 트레이드오프(=`ci.yml`은
 `pull_request`에서 PR 코드를 실행하므로 토큰을 두지 않는다)를 임의로 뒤집지 않았다.
+
+## 재검증 로그 — 2026-09-06 (`main` @ `4d5298b6`)
+
+최신 원격 refs를 fetch한 뒤 `main`(`4d5298b6`)과 실제 배포 브랜치
+`production.private`(`0ddec72f`)를 함께 감사했다. 두 브랜치 모두 어제 이후 움직였다.
+
+**의존성 드리프트 없음.** `package-lock.json`, 루트 `package.json`,
+agent-manager manifest는 두 브랜치 간 **blob 단위로 동일**했다. 차이가 나는 것은
+`apps/server/package.json`과 `apps/client/package.json` 둘뿐이고, 그 차이는 전부
+테스트 등록 목록(`test`/`pretest` 스크립트)이다 — 의존성 필드는 완전히 동일하다.
+`package-lock.json`은 어제 기준점(`d4b3fa5f`)과도 blob이 같아, 이번 주기에 새로
+편입된 의존성 표면 자체가 없다.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개, 출처 npm)이었다. 판정은
+`scripts/audit-lockfile-advisories.mjs --audit-level=moderate`로 냈다.
+`audit-deploy-branch-deps`는 배포 브랜치 lockfile이 현재 트리와 동일함을 확인해 같은
+결론을 승계했다. 발행 트리는 live/next 모두 moderate 이상 0건 + install script 0개였고,
+lockfile 대비 12건의 버전 drift도 전부 advisory 0건이었다. 액션 참조 19개는 전부 커밋
+SHA 고정, install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`)는 전부 허용목록
+내였다. 루트 `overrides`도 lockfile에서 직접 확인했다 — multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3(+cosmiconfig 하위 4.3.1), picomatch 4.0.5로
+**취약 버전이 되살아난 흔적 없음**. 가드 **87/87** 통과.
+
+패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는 사용하지 않았고 root
+`overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았으며, 기존 테스트의
+`package.json` 등록 완전성은 `test-registration-completeness`로 확인했다.
+
+### 해소 — 배포 브랜치의 스텝 순서 결함은 PR #8 없이 닫혔다
+
+어제 "운영자 승인 대기"로 남겨둔 이월 항목(PR #8 병합)은 **더 이상 필요하지 않다.**
+`production.private`가 그 사이 `main`을 정상 병합했고(`0ddec72f`, "Merge
+remote-tracking branch 'origin/main' into production.private"), `main`에는 이미 고친
+`ci.yml`·감사 스크립트·가드 테스트가 들어 있었다. 그래서 PR #8이 하려던 변경이
+**일반 병합 경로로 이미 배포 브랜치에 도달했다.**
+
+blob 단위로 확인한 결과:
+
+- `.github/workflows/ci.yml` — `main`과 `production.private`가 **완전히 동일**
+  (`79070ad3`). 배포 브랜치의 `dependency-audit`도 이제 오프라인 가드 5종을 먼저
+  돌리고 네트워크 의존 스텝을 뒤에 둔다.
+- `scripts/audit-lockfile-advisories.mjs`(`563eefef`),
+  `apps/server/test/lockfile-advisory-audit-guard.test.mjs`(`a7b1d203`) — 양쪽 동일.
+- `apps/server/package.json`에 `lockfile-advisory-audit-guard` 등록도 존재.
+
+즉 PR #8의 파일 4개가 전부 배포 브랜치에 반영돼 있다. 실제 실행으로도 확인했다 —
+병합 push가 띄운 CI 런 `33963883801`의 `dependency audit` 잡은 스텝 순서가 고쳐진
+형태(install-script → 액션 SHA → 배포 브랜치 커버리지 → 정기 감사 커버리지 → 발행
+범위 → 취약점 감사)로 **전 스텝 success**였고, `schedule` 전용 두 스텝만 의도대로
+skipped였다. 같은 커밋의 `Deploy AI Workflow Board`도 success다. CI 이력은
+`main` 최근 10런 전부 success, `production.private` 최근 10런 전부 success다.
+
+**PR #8은 이제 중복이라 `CONFLICTING`/`DIRTY` 상태다** — 같은 파일이 두 경로로
+추가돼 충돌한다. 어제 이 PR을 병합하지 않은 판단(= 배포 브랜치 push가 곧 운영
+재배포이므로 감사 루프가 단독 실행할 일이 아니다)은 결과적으로 옳았다: 정규 릴리스
+흐름이 같은 내용을 실어 날랐고, 감사 루프가 별도의 배포를 유발하지 않았다.
+**남은 조치는 PR #8을 닫는 것뿐이며, 이는 코드 영향이 없다.** 다만 PR 상태 변경도
+외부에 보이는 조작이라 이번 감사에서는 실행하지 않고 운영자 판단으로 남긴다.
+
+### 이월 (변동 없음) — 이중 출처 폴백의 CI rate limit
+
+2026-09-04 항목의 "이중 출처 폴백이 CI에서는 rate limit에 걸린다"는 미해결 설계
+과제 그대로다. 오늘 `main`·`production.private` 양쪽의 취약점 감사 런이 모두
+success였고 로컬 실행도 npm 축 단독으로 통과해, 새로 관찰된 사실은 없다.
+문서화된 트레이드오프(=`ci.yml`은 `pull_request`에서 PR 코드를 실행하므로 토큰을
+두지 않는다)를 임의로 뒤집지 않았다.
