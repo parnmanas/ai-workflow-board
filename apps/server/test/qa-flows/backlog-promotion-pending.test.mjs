@@ -39,9 +39,9 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// Port 7834 — unique slot, doesn't collide with workflow-state-cap (7822),
-// board-pause (7820) or backlog-promotion-chain (7821).
-process.env.PORT = process.env.QA_BACKLOG_PENDING_PORT || '7834';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_BACKLOG_PENDING_PORT || '0';
 
 test('BacklogPromotion skips pending_user_action tickets and promotes the next eligible candidate', async (t) => {
   step('Boot NestJS app on test port');

@@ -11,13 +11,14 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository, In, Not } from 'typeorm';
+import { DataSource, EntityManager, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { Agent } from '../../entities/Agent';
+import { ChatRoom } from '../../entities/ChatRoom';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -41,6 +42,9 @@ import {
   normalizeCompletionCriteria,
   normalizeConfirmPolicy,
   normalizePostActions,
+  UserChatMode,
+  normalizeUserChatMode,
+  openJoinForUserChatMode,
 } from './orchestration.constants';
 import {
   CheckoutMode,
@@ -150,6 +154,8 @@ export interface MissionDetail extends MissionListItem {
   total_visits: number;
   /** 사용자 확인 강도 — 항상 정규화된 값이다(티켓 5dbe4aa2). */
   confirm_policy: ConfirmPolicy;
+  /** 미션 대화의 사용자 chat 옵션 — 항상 정규화된 값이다(티켓 9cfd8161). */
+  user_chat_mode: UserChatMode;
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -262,6 +268,8 @@ export class OrchestrationMissionService {
     graph_enabled?: boolean;
     /** 사용자 확인 강도 — 'none' | 'auto'(기본) | 'key_steps' | 'every_step'. 티켓 5dbe4aa2. */
     confirm_policy?: string;
+    /** 미션 대화의 사용자 chat 옵션 — 'open'(기본) | 'participants_only' | 'off'. 티켓 9cfd8161. */
+    user_chat_mode?: string;
     created_by_type?: string;
     created_by?: string;
     /**
@@ -359,6 +367,7 @@ export class OrchestrationMissionService {
         step_timeout_minutes: clampInt(input.step_timeout_minutes, 90, 0, 60 * 24 * 7),
         graph_enabled: input.graph_enabled === true,
         confirm_policy: normalizeConfirmPolicy(input.confirm_policy),
+        user_chat_mode: normalizeUserChatMode(input.user_chat_mode),
         created_by_type: input.created_by_type || 'user',
         created_by: input.created_by || '',
       }),
@@ -395,6 +404,7 @@ export class OrchestrationMissionService {
       step_timeout_minutes?: number;
       graph_enabled?: boolean;
       confirm_policy?: string;
+      user_chat_mode?: string;
     },
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, workspaceId);
@@ -431,6 +441,11 @@ export class OrchestrationMissionService {
       // 실행 규칙과 어긋나고, 풀면 orchestrator 는 게이트를 쓸 수 있다는 사실을 들은 적이
       // 없어 정책이 아무 효과도 내지 못한다.
       patch.confirm_policy !== undefined;
+    // `user_chat_mode` 는 **의도적으로 이 목록에 없다**(티켓 9cfd8161). 위 필드들이 잠기는
+    // 이유는 전부 "orchestrator 가 브리핑에서 들은 내용과 어긋난다" 인데, 이 옵션은
+    // orchestrator 가 들은 내용을 바꾸지 않는다 — 사람이 이 방에서 말할 수 있는지만
+    // 정한다. 오히려 요구사항이 "옵션을 바꾸면 실행 중인 미션 방에도 즉시 반영" 이므로
+    // running 중 편집이 가능해야 하며, 여기 넣으면 그 요구가 draft 미션에서만 성립한다.
     if (briefLocked && touchesBrief) {
       throw orchestrationError(
         409,
@@ -477,13 +492,47 @@ export class OrchestrationMissionService {
     }
     if (patch.graph_enabled !== undefined) mission.graph_enabled = patch.graph_enabled === true;
     if (patch.confirm_policy !== undefined) mission.confirm_policy = normalizeConfirmPolicy(patch.confirm_policy);
+    if (patch.user_chat_mode !== undefined) mission.user_chat_mode = normalizeUserChatMode(patch.user_chat_mode);
     if (patch.step_timeout_minutes !== undefined) {
       mission.step_timeout_minutes = clampInt(patch.step_timeout_minutes, mission.step_timeout_minutes, 0, 60 * 24 * 7);
     }
 
-    await this.missionRepo.save(mission);
+    // 미션 저장과 파생 캐시(방 플래그) 갱신을 **한 트랜잭션**으로 묶는다
+    // (티켓 9cfd8161 리뷰 지적 3). 예전에는 미션을 먼저 커밋하고 방을 따로 갱신해서,
+    // 두 번째 쓰기가 실패하면 호출자는 실패 응답을 받는데 `user_chat_mode` 만 바뀐 채
+    // 남았다 — 옵션과 방 플래그가 갈린 상태로 영속되고, 되돌릴 신호도 없다.
+    // "옵션을 바꾸면 즉시 반영된다"는 계약은 둘이 함께 성립하거나 함께 실패해야 한다.
+    await this.dataSource.transaction(async (em) => {
+      await em.save(OrchestrationMission, mission);
+      await this.syncMissionRoomOpenJoin(em, mission);
+    });
+    // SSE 는 커밋 **뒤**에 낸다 — 트랜잭션 안에서 내면 롤백된 변경을 알리는 프레임이 나간다.
     this.emitUpdate(mission);
     return mission;
+  }
+
+  /**
+   * 미션의 `user_chat_mode` 를 그 미션 방의 `ChatRoom.open_join` 에 반영한다(티켓 9cfd8161).
+   *
+   * 발화 가부의 **판정 자체는 이 플래그에 의존하지 않는다** — 게이트는 미션 컬럼을 직접
+   * 읽는다. 그런데도 방 플래그를 맞추는 이유는 채팅 레이어의 다른 표면들이 이 플래그를
+   * 보기 때문이다(관전 없이 읽기를 허용하는 `_isOpenJoinReadable`, 첫 발화 시 auto-join).
+   * 맞춰 두지 않으면 발화는 되는데 읽기는 관전으로 떨어지는 식으로 표면끼리 어긋난다.
+   *
+   * 방 저장소를 주입받지 않고 호출자의 `EntityManager` 로만 접근한다 — 주입된 저장소를 쓰면
+   * 그 쓰기가 트랜잭션 **밖**에서 일어나 함께 롤백되지 않는다. 원자성이 이 메서드의 존재
+   * 이유이므로, 틀리게 쓸 수 있는 경로를 아예 두지 않고 seam 을 인자로 강제한다.
+   *
+   * 아직 시작되지 않은(방이 없는) 미션은 조용히 넘어간다 — `startMission` 이 방을 만들 때
+   * 같은 `openJoinForUserChatMode` 로 초기값을 계산하므로 여기서 미리 할 일이 없다.
+   * 값이 이미 같으면 쓰지 않는다(재호출 무해).
+   */
+  private async syncMissionRoomOpenJoin(em: EntityManager, mission: OrchestrationMission): Promise<void> {
+    if (!mission.room_id) return;
+    const desired = openJoinForUserChatMode(normalizeUserChatMode(mission.user_chat_mode));
+    const room = await em.getRepository(ChatRoom).findOne({ where: { id: mission.room_id } });
+    if (!room || room.open_join === desired) return;
+    await em.update(ChatRoom, room.id, { open_join: desired });
   }
 
   async deleteMission(missionId: string, workspaceId: string): Promise<void> {
@@ -661,6 +710,7 @@ export class OrchestrationMissionService {
       // 빈 문자열/NULL 로 남아 있을 수 있고, 그 값이 그대로 UI 셀렉트에 들어가면 어느
       // 옵션에도 걸리지 않는 "선택 없음" 상태가 된다.
       confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
+      user_chat_mode: normalizeUserChatMode(mission.user_chat_mode),
       steps: steps.map((s) => {
         const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
         return {

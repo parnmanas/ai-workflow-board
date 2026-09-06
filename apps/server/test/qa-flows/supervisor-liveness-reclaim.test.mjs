@@ -52,7 +52,7 @@ async function waitFor(fn, timeoutMs = 2500) {
 }
 
 test('supervisor liveness reclaim: live strand protected, killed strand reclaimed+re-dispatched exactly once, durable across restart', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '7867', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());

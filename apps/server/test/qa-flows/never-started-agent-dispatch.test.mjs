@@ -21,7 +21,7 @@ import { setupKanbanScene, createAgent, createTicket, addRoleHolder } from '../h
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-const BASE_PORT = parseInt(process.env.QA_NEVER_STARTED_PORT || '7913', 10);
+const BASE_PORT = parseInt(process.env.QA_NEVER_STARTED_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 test('never-started agent ticket dispatch → activity + comment + spawn_agent auto-start', async (t) => {

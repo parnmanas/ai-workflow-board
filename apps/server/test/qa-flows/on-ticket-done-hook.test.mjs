@@ -27,7 +27,7 @@ import {
   createTicket,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_ON_DONE_HOOK_PORT || '7842';
+process.env.PORT = process.env.QA_ON_DONE_HOOK_PORT || '0';
 
 async function createAction(ds, fields) {
   const repo = ds.getRepository('Action');

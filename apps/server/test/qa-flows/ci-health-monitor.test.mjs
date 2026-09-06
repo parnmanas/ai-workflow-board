@@ -30,7 +30,7 @@ import { createWorkspace, createBoard, createColumn } from '../helpers/fixtures.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_CI_HEALTH_MONITOR_PORT || '7930';
+process.env.PORT = process.env.QA_CI_HEALTH_MONITOR_PORT || '0';
 
 // ─── fake GitHub REST API ───────────────────────────────────────────────
 

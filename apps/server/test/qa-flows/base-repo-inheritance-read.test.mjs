@@ -37,8 +37,9 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-// 고유 port 슬롯(base-repo-binding-dispatch 7842보다 위; 관측된 최고값 7913).
-process.env.PORT = process.env.QA_BASE_REPO_READ_PORT || '7920';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_BASE_REPO_READ_PORT || '0';
 
 test('base repo inheritance on read: get_ticket resolves ticket > board > workspace, matching the dispatch-side backfill (ticket 112ea3c5)', async (t) => {
   step('Boot NestJS app on test port');

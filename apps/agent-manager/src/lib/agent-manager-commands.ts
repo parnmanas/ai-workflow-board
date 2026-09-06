@@ -90,7 +90,11 @@ type CommandKind =
   // { session_id, cli }. #startCliLogin은 프로세스 spawn 확인 즉시 ack하고,
   // 실제 진행/완료는 CliLoginManager가 postCliLoginProgress로 별도 릴레이한다.
   | 'cli_login_start'
-  | 'cli_login_cancel';
+  | 'cli_login_cancel'
+  // ticket 40110b64 — 호스트의 CLI 를 업그레이드한 뒤 매니저 재시작 없이 모델
+  // 목록만 다시 열거한다. args 없음. 재열거 직후 즉시 하트비트 1회를 보내
+  // 서버 레지스트리가 다음 정기 tick(최대 30초)을 기다리지 않게 한다.
+  | 'refresh_available_models';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -125,6 +129,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'release_chat_keepalive',
   'cli_login_start',
   'cli_login_cancel',
+  'refresh_available_models',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -197,6 +202,21 @@ export interface CommandHandlerDeps {
    *  a login manager) keeps wiring up; #startCliLogin throws a clear error
    *  if a cli_login_start arrives with none wired. */
   cliLoginManager?: Pick<CliLoginManager, 'isBusy' | 'start' | 'cancel'> | null;
+  /** ticket 40110b64 — 설치된 CLI 들의 모델 목록을 다시 열거해 하트비트가 싣는
+   *  캐시를 교체하고, 즉시 하트비트 1회를 보낸다. 열거·전송 모두 main.ts 가
+   *  소유하므로(어댑터 레지스트리 · InstanceHeartbeat 인스턴스) 여기서는 배선된
+   *  콜백만 부른다. Optional 이라 이 dep 없이 만든 레거시 테스트 하네스도 그대로
+   *  동작한다 — 대신 그 경우 커맨드는 명확한 사유와 함께 error 로 ack 된다. */
+  refreshAvailableModels?: (() => Promise<RefreshAvailableModelsResult>) | null;
+}
+
+/** refresh_available_models 한 번의 결과. */
+export interface RefreshAvailableModelsResult {
+  /** cliType → 모델 id 목록. 열거에 실패했거나 모델이 없는 CLI 는 키가 없다. */
+  models: Record<string, string[]>;
+  /** 즉시 하트비트 1회가 실제로 서버에 도달했는지. false 여도 커맨드는 성공이며,
+   *  다음 정기 하트비트(최대 30초)가 같은 값을 다시 싣고 간다. */
+  heartbeatPosted: boolean;
 }
 
 export class AgentManagerCommandHandler {
@@ -281,7 +301,36 @@ export class AgentManagerCommandHandler {
         return this.#startCliLogin(payload);
       case 'cli_login_cancel':
         return this.#cancelCliLogin(payload);
+      case 'refresh_available_models':
+        return this.#refreshAvailableModels();
     }
+  }
+
+  /**
+   * ticket 40110b64 — 설치된 CLI 들의 모델 목록을 다시 열거해, 하트비트가 싣는
+   * 캐시를 매니저 재시작 없이 교체한다. 재열거 자체는 어댑터별 try/catch 로
+   * 감싼 best-effort 라, 일부 CLI 의 listModels() 가 실패해도 나머지는 갱신되고
+   * 커맨드 전체는 성공으로 ack 된다 — 실패한 CLI 는 결과 맵에서 키가 빠질 뿐이다.
+   *
+   * 즉시 하트비트 전송이 실패한 경우도 커맨드는 성공이다(다음 정기 tick 이 같은
+   * 값을 다시 싣고 간다). 다만 운영자가 "왜 아직 UI 에 안 보이지"를 묻지 않도록
+   * ack detail 에 그 사실을 덧붙인다.
+   */
+  async #refreshAvailableModels(): Promise<string> {
+    const refresh = this.#deps.refreshAvailableModels;
+    if (!refresh) {
+      throw new Error('refresh_available_models is not wired on this manager');
+    }
+    const result = await refresh();
+    const entries = Object.entries(result?.models ?? {})
+      .map(([cli, models]) => [cli, Array.isArray(models) ? models.length : 0] as const)
+      .sort(([a], [b]) => a.localeCompare(b));
+    const summary = entries.length
+      ? `refreshed ${entries.length} CLI(s): ${entries.map(([cli, n]) => `${cli}=${n}`).join(', ')}`
+      : 'refreshed 0 CLI(s): no installed CLI reported any model';
+    return result?.heartbeatPosted
+      ? summary
+      : `${summary} (immediate heartbeat post failed — the next periodic heartbeat carries it)`;
   }
 
   /**

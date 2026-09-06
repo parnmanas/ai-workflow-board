@@ -73,6 +73,8 @@ import {
   isTerminalStepStatus,
   normalizeCompletionCriteria,
   normalizeConfirmPolicy,
+  normalizeUserChatMode,
+  openJoinForUserChatMode,
   postActionApplies,
   validatePlan,
 } from './orchestration.constants';
@@ -211,16 +213,21 @@ export class OrchestrationRunnerService {
           last_message_at: null,
           orchestration_mission_id: mission.id,
           orchestration_step_id: null,
-          // 자유 참여 ON (티켓 995a9519) — Mission 화면의 대화는 참여자로 등록되지 않은
+          // 자유 참여 (티켓 995a9519) — Mission 화면의 대화는 참여자로 등록되지 않은
           // 운영자도 바로 끼어들 수 있어야 한다는 것이 이 기능의 요청 자체다. 이 방을
           // 만들 때 참여자로 들어가는 것은 orchestrator 에이전트와 미션 소유자뿐이라,
           // 옵션이 없으면 다른 운영자는 `joinMissionConversation` 을 명시적으로 부르기
           // 전까지 읽기만 가능했다.
           //
+          // 예전에는 여기서 `true` 를 하드코딩했다. 이제는 미션의 `user_chat_mode` 에서
+          // 계산한다(티켓 9cfd8161) — 방 플래그를 미션 옵션의 파생값으로 만들어야
+          // 생성·옵션변경·백필 세 경로가 같은 한 줄을 지나 서로 어긋나지 않는다.
+          // 기본 모드가 `open` 이므로 옵션을 건드리지 않은 미션의 동작은 종전과 같다.
+          //
           // 발화 권한이 함께 열리는 것은 아니다 — `requireMissionRoomSpeaker` 의
           // MANAGE_ACTIONS 검사(티켓 f6a0de0e)가 매 발화마다 그대로 돈다. 자유 참여는
           // "참여자 명단에 없어도 된다"까지만 뜻한다.
-          open_join: true,
+          open_join: openJoinForUserChatMode(normalizeUserChatMode(mission.user_chat_mode)),
         }),
       );
       await this.addRoomParticipants(room.id, orchestrator.id, missionHumanOwner(mission));
@@ -627,6 +634,11 @@ export class OrchestrationRunnerService {
           triggeredByType: 'system',
           triggeredById: this.postActionTriggerId(mission.id, pa.order),
         });
+        // fan-out (티켓 fc3906c5): 대상이 여럿인 Action이면 이 한 번의
+        // post-action 발화가 run을 여러 건 만든다. pa.run_id/pa.room_id는
+        // 타입 모양을 바꾸지 않고 첫 run을 계속 가리키고(크래시 복구 조회도
+        // 이 한 건이면 "실제로 디스패치됐다"를 확정하기에 충분하다), 나머지는
+        // 자유 형식인 이벤트 data에 배치 정보로 남겨 감사에서 잃지 않는다.
         pa.status = 'dispatched';
         pa.run_id = result.run.id;
         pa.room_id = result.room_id;
@@ -635,9 +647,18 @@ export class OrchestrationRunnerService {
         await this.missionRepo.save(mission);
         await this.missions.recordEvent(mission, {
           type: 'post_action_dispatched',
-          message: `Post-action "${action.name}" dispatched (run ${result.run.id})`,
+          message: result.runs.length > 1
+            ? `Post-action "${action.name}" dispatched to ${result.runs.length} agents (batch ${result.batch_id})`
+            : `Post-action "${action.name}" dispatched (run ${result.run.id})`,
           actor_type: 'system',
-          data: { action_id: action.id, run_id: result.run.id, room_id: result.room_id },
+          data: {
+            action_id: action.id,
+            run_id: result.run.id,
+            room_id: result.room_id,
+            batch_id: result.batch_id,
+            runs: result.runs.map((r) => ({ run_id: r.run.id, agent_id: r.agent_id, room_id: r.room_id })),
+            failed_targets: result.failures,
+          },
         });
       } catch (e: any) {
         pa.status = 'dispatch_failed';

@@ -24,7 +24,7 @@ import {
   resolveBoardUsePr,
 } from '../../dist/common/worktree-config.js';
 
-process.env.PORT = process.env.QA_WORKTREE_CONVENTION_PORT || '7842';
+process.env.PORT = process.env.QA_WORKTREE_CONVENTION_PORT || '0';
 
 test('update_board round-trips worktree_mode + use_pr; defaults regress to per_ticket/false', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

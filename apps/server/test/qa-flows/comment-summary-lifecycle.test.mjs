@@ -17,7 +17,7 @@ import { apiRequest, makeBaseUrl } from '../test-helpers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
-process.env.PORT = process.env.QA_COMMENT_SUMMARY_PORT || '7898';
+process.env.PORT = process.env.QA_COMMENT_SUMMARY_PORT || '0';
 
 test('comment summary is workspace-scoped, idempotent, and preserves originals on every failure path', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });

@@ -41,7 +41,7 @@ import { DispatchReconcilerService } from '../dist/modules/agents/dispatch-recon
 import { DISPATCH_RECONCILER_DEFAULTS } from '../dist/modules/agents/dispatch-intent.service.js';
 import { BackfillRootTicketStatusFromColumn1760000000075 } from '../dist/database/migrations/1760000000075-BackfillRootTicketStatusFromColumn.js';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7859';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 test('terminal-column ticket create/move keeps status consistent with the column', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });

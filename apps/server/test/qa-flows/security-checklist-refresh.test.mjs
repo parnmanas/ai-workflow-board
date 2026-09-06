@@ -17,7 +17,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_SECURITY_REFRESH_PORT || '7837';
+process.env.PORT = process.env.QA_SECURITY_REFRESH_PORT || '0';
 
 test('security checklist: source/added_at model + refresh_security_checklist dispatch + writeback', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

@@ -28,7 +28,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_TERMINAL_REOPEN_PORT || '7842';
+process.env.PORT = process.env.QA_TERMINAL_REOPEN_PORT || '0';
 
 test('move_ticket rejects a backward move out of a terminal column unless force=true', async (t) => {
   step('Boot NestJS app on test port');

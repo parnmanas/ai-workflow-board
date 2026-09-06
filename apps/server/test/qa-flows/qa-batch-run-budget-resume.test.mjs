@@ -41,7 +41,7 @@ const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 // Silence the background auto-tick — only the explicit runOnce(now) calls below
 // should drive the sweep, so the multi-tick sequence stays deterministic.
 process.env.QA_SCHEDULER_ENABLED = 'false';
-process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_RESUME_PORT || '7916';
+process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_RESUME_PORT || '0';
 
 function scenarioPayload(wsId, agentId, name) {
   return {

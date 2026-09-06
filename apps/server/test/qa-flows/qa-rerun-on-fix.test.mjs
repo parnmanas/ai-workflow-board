@@ -26,7 +26,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_RERUN_ON_FIX_PORT || '7851';
+process.env.PORT = process.env.QA_RERUN_ON_FIX_PORT || '0';
 
 // Simulate a real terminal landing (see on-ticket-done-hook.test.mjs).
 async function moveToDone(ds, activityService, ticketId, doneColId, { restamp = true } = {}) {

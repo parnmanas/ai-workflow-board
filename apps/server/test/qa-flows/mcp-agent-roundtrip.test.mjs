@@ -14,7 +14,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_MCP_ROUNDTRIP_PORT || '7810';
+process.env.PORT = process.env.QA_MCP_ROUNDTRIP_PORT || '0';
 
 test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_comment', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

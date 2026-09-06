@@ -27,7 +27,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_ACTIONS_RRR_PORT || '7902';
+process.env.PORT = process.env.QA_ACTIONS_RRR_PORT || '0';
 
 const { loadPendActionCandidates } = await import(
   'file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'shared', 'pend-action-scope.js')

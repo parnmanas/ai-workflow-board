@@ -27,7 +27,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_SECURITY_SCHED_REFRESH_PORT || '7838';
+process.env.PORT = process.env.QA_SECURITY_SCHED_REFRESH_PORT || '0';
 
 test('security schedule kind=checklist_refresh: tick refreshes profiles, creates no run row; run-now is kind-discriminated', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

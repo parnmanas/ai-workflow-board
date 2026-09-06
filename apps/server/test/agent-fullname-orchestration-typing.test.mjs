@@ -30,9 +30,10 @@ import {
 import { McpClient } from './helpers/mcp-client.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_FULLNAME_ORCH_PORT || '7889', 10);
+// 부팅 포트는 OS 가 배정한다(0). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+const REQUESTED_PORT = parseInt(process.env.QA_FULLNAME_ORCH_PORT || '0', 10);
 
-const { app, modules } = await bootApp({ port: BASE_PORT });
+const { app, port, modules } = await bootApp({ port: REQUESTED_PORT });
 after(() => { void app.close().catch(() => {}); });
 const { getDataSourceToken } = modules;
 const ds = app.get(getDataSourceToken());
@@ -193,11 +194,11 @@ test('agent_typing SSE: actor_name is <Manager>/<Agent>, never the raw agent id'
   });
 
   const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-sub' });
-  const sse = await openSseStream(BASE_PORT, subKey.raw_key, {});
+  const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
   const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'typing-caller' });
-  const client = new McpClient({ baseUrl: `http://127.0.0.1:${BASE_PORT}`, apiKey: callerKey.raw_key });
+  const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: callerKey.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const res = await client.callTool('set_typing', {
@@ -246,12 +247,12 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
       joined_at: new Date(),
     }),
   );
-  const sse = await openSseStream(BASE_PORT, subKey.raw_key, {});
+  const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
   const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'chat-typing-caller' });
   const resp = await fetch(
-    `http://127.0.0.1:${BASE_PORT}/api/agent/chat-rooms/${room.id}/typing`,
+    `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/typing`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Agent-Key': callerKey.raw_key },
@@ -302,13 +303,13 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
       joined_at: new Date(),
     }),
   );
-  const sse = await openSseStream(BASE_PORT, subKey.raw_key, {});
+  const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
   const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'chat-status-caller' });
   const keepAliveUntilMs = Date.now() + 8 * 60_000;
   const resp = await fetch(
-    `http://127.0.0.1:${BASE_PORT}/api/agent/chat-rooms/${room.id}/session-status`,
+    `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/session-status`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Agent-Key': callerKey.raw_key },

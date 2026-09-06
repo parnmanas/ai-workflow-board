@@ -31,7 +31,7 @@ import {
   createTicket,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_SELF_IMPROVEMENT_AUTH_PORT || '7820';
+process.env.PORT = process.env.QA_SELF_IMPROVEMENT_AUTH_PORT || '0';
 
 const PROTOCOL_VERSION = '2024-11-05';
 

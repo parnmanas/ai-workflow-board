@@ -33,9 +33,9 @@ import { createWorkspace } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// Port 7840 — unique slot, doesn't collide with prompt-template-refresh
-// (7838) or the other QA flows.
-process.env.PORT = process.env.QA_PROMPT_REFRESH_INTEGRATE_PORT || '7840';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_PROMPT_REFRESH_INTEGRATE_PORT || '0';
 
 const CUSTOM_CONTENT = `# Merging — Custom workflow with operator tweaks
 

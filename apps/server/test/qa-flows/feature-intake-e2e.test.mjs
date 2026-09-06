@@ -22,7 +22,7 @@ import { setupKanbanScene, createAgent } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.FEATURE_INTAKE_E2E_PORT || '7846';
+process.env.PORT = process.env.FEATURE_INTAKE_E2E_PORT || '0';
 
 const REQUIREMENT = [
   '보드 카드에 마감일(due date)을 붙이고, 지난 카드를 빨갛게 표시하고,',

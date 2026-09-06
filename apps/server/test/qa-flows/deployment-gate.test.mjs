@@ -29,7 +29,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.DEPLOYMENT_GATE_PORT || '7853';
+process.env.PORT = process.env.DEPLOYMENT_GATE_PORT || '0';
 
 // A commit that plays the role of "the fix commit" (40-hex, matched exactly).
 const FIX_SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';

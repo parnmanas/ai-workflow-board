@@ -30,7 +30,7 @@ import {
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 import { evaluateManagerCapability } from '../dist/common/manager-capability-gate.js';
 
-process.env.PORT = process.env.INSTANCE_REGISTRY_LIST_FOR_AGENT_PORT || '7919';
+process.env.PORT = process.env.INSTANCE_REGISTRY_LIST_FOR_AGENT_PORT || '0';
 
 async function heartbeat(port, key, body) {
   const response = await fetch(

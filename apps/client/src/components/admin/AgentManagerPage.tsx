@@ -23,6 +23,8 @@ import { Button, Input, Modal, Select } from '../common';
 import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentName';
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
+// ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
+import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
 
 /**
  * Runtime Host administration and observability.
@@ -508,6 +510,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [restartPending, setRestartPending] = useState(false);
   const [restartAllPending, setRestartAllPending] = useState(false);
   const [updatePending, setUpdatePending] = useState(false);
+  const [refreshModelsPending, setRefreshModelsPending] = useState(false);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -647,6 +650,52 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       showToast(`update_manager failed: ${err?.message || err}`, 'error');
     } finally {
       setUpdatePending(false);
+    }
+  };
+
+  // ticket 40110b64 — 호스트에서 claude / codex CLI 를 업그레이드한 뒤, 매니저를
+  // 재시작하지 않고 모델 목록만 다시 열거한다. 매니저 프로세스와 실행 중인 세션은
+  // 그대로 유지된다(재열거는 어댑터 introspection 일 뿐이다).
+  //
+  // 완료 판정은 **발급된 command_id 의 ack** 로만 한다. 202 는 디스패치 수락일
+  // 뿐이고, 하트비트는 30초마다 알아서 돌기 때문에 "하트비트가 왔다" 를 완료로
+  // 쓰면 커맨드와 무관한 정기 하트비트가 조건을 충족시켜 재열거 전 값을 성공으로
+  // 오표시한다(리뷰 지적). 성공 ack 이후에만 인스턴스 목록을 다시 읽는다.
+  const handleRefreshModels = async () => {
+    if (refreshModelsPending) return;
+    setRefreshModelsPending(true);
+    try {
+      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+        command: 'refresh_available_models',
+      });
+      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
+      const ack = await waitForCommandAck(resp.command_id);
+      if (ack.state === 'error') {
+        showToast(`모델 목록 갱신 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
+        showToast(
+          `refresh_available_models 전송됨${idTail} — 매니저 응답을 아직 받지 못했습니다` +
+            `${ack.state === 'unknown' ? ' (서버가 이 command_id 를 더 이상 알지 못합니다)' : ''}` +
+            `. 매니저가 처리하면 다음 ` +
+            `하트비트에 반영됩니다.`,
+          'info',
+        );
+        return;
+      }
+      // 성공 ack 이후에만 레지스트리를 다시 읽는다.
+      const fresh = await reloadInstance(inst.instance_id);
+      const registrySummary = summarizeModelCounts(fresh?.available_models);
+      showToast(
+        `모델 목록 갱신 완료${idTail} — ${ack.detail || '매니저가 결과를 보고하지 않았습니다'}` +
+          (registrySummary ? ` (레지스트리 반영: ${registrySummary})` : ''),
+        'success',
+      );
+    } catch (err: any) {
+      showToast(`refresh_available_models failed: ${err?.message || err}`, 'error');
+    } finally {
+      setRefreshModelsPending(false);
     }
   };
 
@@ -938,6 +987,31 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {updatePending
                 ? 'Updating…'
                 : `Update → v${inst.latest_version || '?'}`}
+            </button>
+          )}
+          {inst.mode === 'manager' && (
+            <button
+              onClick={handleRefreshModels}
+              disabled={refreshModelsPending}
+              style={{
+                padding: '6px 14px',
+                fontSize: 12,
+                fontWeight: 600,
+                background: 'transparent',
+                color: tokens.colors.textStrong,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                cursor: refreshModelsPending ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+                opacity: refreshModelsPending ? 0.6 : 1,
+              }}
+              title={
+                '이 호스트에 설치된 CLI 들의 모델 목록을 다시 열거합니다. ' +
+                '매니저는 재시작되지 않고 실행 중인 세션도 끊기지 않습니다. ' +
+                'CLI 를 업그레이드한 뒤 Agent 생성/편집 화면의 모델 드롭다운을 갱신할 때 쓰세요.'
+              }
+            >
+              {refreshModelsPending ? '모델 갱신 중…' : 'Refresh models'}
             </button>
           )}
           <button

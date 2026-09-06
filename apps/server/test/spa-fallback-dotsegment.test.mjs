@@ -25,7 +25,8 @@ import express from 'express';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', 'dist');
-const BASE_PORT = Number(process.env.TEST_SERVER_PORT || 7935);
+// 부팅 포트는 OS 가 배정한다(0). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+const REQUESTED_PORT = Number(process.env.TEST_SERVER_PORT || 0);
 
 const { applySpaFallback } = await import(
   'file://' + path.join(DIST_ROOT, 'common', 'spa-fallback.js')
@@ -46,14 +47,17 @@ test.after(() => {
 test('applySpaFallback: dot-segment(.awb/wt/...) 경로에서도 root 옵션 덕분에 index.html이 정상 반환된다', async (t) => {
   const app = express();
   applySpaFallback(app, DOTSEG_DIST);
-  const server = app.listen(BASE_PORT);
+  const server = app.listen(REQUESTED_PORT);
   await new Promise((resolve, reject) => {
     server.once('listening', resolve);
     server.once('error', reject);
   });
+  // raw express 라 bootApp 과 달리 실제 바인딩 포트를 server.address() 로 회수한다
+  // — REQUESTED_PORT 는 기본값이 0 이므로 그대로 URL 에 쓸 수 없다.
+  const port = server.address().port;
   t.after(() => new Promise((resolve) => server.close(resolve)));
 
-  const res = await fetch(`http://127.0.0.1:${BASE_PORT}/ws/abc/boards`);
+  const res = await fetch(`http://127.0.0.1:${port}/ws/abc/boards`);
   assert.equal(res.status, 200, 'dot-segment 경로 아래에서도 SPA fallback이 200이어야 한다');
   const body = await res.text();
   assert.ok(body.includes(INDEX_MARKER), 'index.html 본문을 받아야 한다');
@@ -71,12 +75,16 @@ test('회귀 대조군: root 옵션 없이 절대경로로 sendFile하면 같은
       if (err) res.status(404).json({ message: err.message });
     });
   });
-  const port = BASE_PORT + 1;
-  const server = app.listen(port);
+  // 두 번째 리스너도 첫 번째에서 산술로 파생하지 않고 OS 가 고른 빈 포트를 쓴다
+  // (ticket 5db0964a). 파생 번호는 소스 검색에 잡히지 않아 다른 파일이 같은 번호를
+  // 자기 기본 포트로 선언해도 드러나지 않는다. bootApp 과 달리 여기는 raw express
+  // 라 실제 포트를 server.address() 로 회수한다.
+  const server = app.listen(0);
   await new Promise((resolve, reject) => {
     server.once('listening', resolve);
     server.once('error', reject);
   });
+  const port = server.address().port;
   t.after(() => new Promise((resolve) => server.close(resolve)));
 
   const res = await fetch(`http://127.0.0.1:${port}/ws/abc/boards`);

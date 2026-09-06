@@ -7,12 +7,15 @@ import { apiRequest, makeBaseUrl } from './test-helpers.mjs';
 
 process.env.DB_TYPE = 'sqlite';
 process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), `awb-claude-profiles-${process.pid}-${Date.now()}.db`);
-process.env.PORT = '7837';
+process.env.PORT = '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';
 
-const baseUrl = makeBaseUrl(Number(process.env.PORT));
+// 요청 포트가 0(OS 배정)이라 listen 전에는 URL 을 만들 수 없다 — 이 파일은
+// bootApp 을 쓰지 않고 NestJS 를 인라인으로 띄우므로, 바인딩된 뒤 실제 포트로
+// 직접 채운다(ticket f2d82793).
+let baseUrl;
 let app;
 let ds;
 let auth;
@@ -66,6 +69,7 @@ before(async () => {
   const { ReBACService } = await import('../dist/services/rebac.service.js');
   app = await NestFactory.create(AppModule, { logger: false });
   await app.listen(Number(process.env.PORT), '0.0.0.0');
+  baseUrl = makeBaseUrl(app.getHttpServer().address().port);
   ds = app.get(getDataSourceToken());
   auth = app.get(AuthService);
   rebac = app.get(ReBACService);

@@ -203,6 +203,12 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
           // ActionRun is the only Run-type entity with a real "resume the ticket
           // that dispatched me" contract. Mirrors what the complete_action_run
           // MCP tool does for an agent-reported completion (action-tools.ts).
+          //
+          // fan-out 배치(티켓 fc3906c5)도 여기서 따로 다룰 게 없다 — 배치 완료
+          // 판정은 completeRun 안에 있고, 이 스윕은 그 결과인 `shouldResume`만
+          // 본다. 죽은 에이전트의 run을 reap해도 형제 run이 아직 돌고 있으면
+          // shouldResume=false로 내려와 티켓을 조기 재개하지 않고, 그 배치의
+          // 마지막 run이 종료될 때 한 번만 재개된다.
           if (result.shouldResume && result.sourceTicketId) {
             await this.triggerLoopService
               .dispatchCurrentColumn(result.sourceTicketId, 'action_run_reaped', '')

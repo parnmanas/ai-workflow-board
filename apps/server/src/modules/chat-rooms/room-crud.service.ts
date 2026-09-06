@@ -523,6 +523,12 @@ export class RoomCrudService {
    *      open_join 은 서버가 정하는 정책 값이다. mission 방은 기본 ON 으로 만들어지는데
    *      (이 기능의 요청 자체가 그것이다) 사람이 auto-join 한 뒤 그걸 끌 수 있으면 다른
    *      운영자의 미션 참여를 막을 수 있다 — 권한 상승이 아니라 권한 박탈 경로다.
+   *
+   *      티켓 9cfd8161 이후로는 두 번째 이유가 붙는다: mission 방의 open_join 은 미션의
+   *      `user_chat_mode` 에서 파생된 캐시이고 발화 게이트는 그 미션 값을 직접 읽는다.
+   *      여기서 방 플래그만 뒤집으면 옵션과 어긋난 채 다음 동기화 때 되돌아가고, 그동안에도
+   *      발화 판정은 바뀌지 않는다 — 즉 켜지는 것도 꺼지는 것도 아닌 죽은 컨트롤이 된다.
+   *      미션 대화를 여닫는 정당한 경로는 미션 옵션(`PATCH /orchestration/missions/:id`)이다.
    */
   async setOpenJoin(
     roomId: string,

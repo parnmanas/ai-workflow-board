@@ -21,7 +21,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.SECURITY_BATCH_SEQ_PORT || '7864';
+process.env.PORT = process.env.SECURITY_BATCH_SEQ_PORT || '0';
 
 function profilePayload(wsId, agentId, name) {
   return {

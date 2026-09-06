@@ -13,7 +13,7 @@ import {
 import { AgentStatusService } from '../dist/modules/agents/agent-status.service.js';
 import { AgentManagerCommandService } from '../dist/modules/agent-manager/agent-manager-command.service.js';
 
-process.env.PORT = process.env.RUNTIME_HOST_ONLY_PORT || '7909';
+process.env.PORT = process.env.RUNTIME_HOST_ONLY_PORT || '0';
 const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
 
 test('only Runtime Hosts can advertise execution presence or receive dispatch streams', async (t) => {

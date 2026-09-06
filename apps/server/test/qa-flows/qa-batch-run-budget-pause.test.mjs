@@ -25,7 +25,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_PORT || '7913';
+process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_PORT || '0';
 
 function scenarioPayload(wsId, agentId, name) {
   return {
@@ -99,7 +99,7 @@ test('QA batch: a run-budget breach on the next index leaves the batch running, 
 // (and does get resumed — see qa-batch-run-budget-resume.test.mjs).
 test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejection, not a silent empty-batch success', async (t) => {
   step('Boot app + MCP');
-  const { app, port, modules } = await bootApp({ port: 7917 });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());

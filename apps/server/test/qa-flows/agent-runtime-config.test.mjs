@@ -10,7 +10,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.AGENT_RUNTIME_CONFIG_PORT || '7907';
+process.env.PORT = process.env.AGENT_RUNTIME_CONFIG_PORT || '0';
 
 function makeClient(port, token, workspaceId) {
   return async (body) => {

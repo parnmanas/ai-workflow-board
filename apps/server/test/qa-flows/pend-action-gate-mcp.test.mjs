@@ -20,7 +20,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_PEND_GATE_MCP_PORT || '7906';
+process.env.PORT = process.env.QA_PEND_GATE_MCP_PORT || '0';
 
 test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with no_action_reason', async (t) => {
   step('Boot app + MCP');

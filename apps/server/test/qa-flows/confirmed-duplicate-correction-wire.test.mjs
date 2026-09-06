@@ -7,7 +7,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-process.env.PORT = process.env.QA_DUPLICATE_CORRECTION_PORT || '7854';
+process.env.PORT = process.env.QA_DUPLICATE_CORRECTION_PORT || '0';
 const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist');
 
 async function waitForNoWire() {

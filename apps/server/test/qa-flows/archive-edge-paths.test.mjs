@@ -41,7 +41,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_ARCHIVE_EDGE_PORT || '7842';
+process.env.PORT = process.env.QA_ARCHIVE_EDGE_PORT || '0';
 
 async function seedAgentComment(commentRepo, ticketId, workspaceId, author, content, createdAt) {
   const saved = await commentRepo.save(commentRepo.create({
@@ -74,8 +74,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   process.env.STUCK_DETECTOR_MIN_AGE_MS = String(2 * 60 * 60_000);
   process.env.STUCK_DETECTOR_REALERT_MS = String(24 * 60 * 60_000);
 
-  const port = parseInt(process.env.PORT, 10);
-  const { app, modules } = await bootApp({ port });
+  const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());

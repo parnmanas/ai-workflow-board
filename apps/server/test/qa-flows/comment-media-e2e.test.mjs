@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
 import { setupKanbanScene, createUser, createTicket, createWorkspace } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_COMMENT_MEDIA_PORT || '7834';
+process.env.PORT = process.env.QA_COMMENT_MEDIA_PORT || '0';
 
 test('comment media e2e: large upload, reference-by-id, range stream, clean 413', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

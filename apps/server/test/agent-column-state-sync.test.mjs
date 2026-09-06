@@ -12,7 +12,7 @@ import { McpClient } from './helpers/mcp-client.mjs';
 import { loadTicketFull } from '../dist/modules/mcp/shared/ticket-parsing.js';
 import { EVENT_TYPES } from '../dist/modules/events/event-registry.js';
 
-const { app, modules, port } = await bootApp({ port: 7896 });
+const { app, modules, port } = await bootApp({ port: 0 });
 after(async () => { await app.close(); });
 const ds = app.get(modules.getDataSourceToken());
 

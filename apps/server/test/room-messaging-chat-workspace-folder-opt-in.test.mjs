@@ -83,6 +83,9 @@ function makeSvc({ room, workspace }) {
     // 티켓 f6a0de0e — orchestration 룸은 발화 시점에도 권한을 다시 본다. 이 스텁의
     // 방은 mission 룸이 아니므로 no-op 이지만, 메서드가 없으면 sendMessage 가 터진다.
     async requireMissionRoomSpeaker() {},
+    // resolveMissionChatPolicy: 티켓 9cfd8161 — sendMessage 가 자유 참여 완화를 계산하려고
+    // 미션 chat 옵션을 먼저 읽는다. 이 스텁의 방은 mission 방이 아니므로 null 이 정답이다.
+    async resolveMissionChatPolicy() { return null; },
     async getRoomMemberIds() { return ['user-1']; },
     async getRoomAgentMemberIds() { return ['agent-1']; },
   };

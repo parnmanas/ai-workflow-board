@@ -7,6 +7,7 @@ import type {
   OrchestrationTeam,
   OrchestrationTimelineEvent,
   OrchestrationUpdateEvent,
+  OrchestrationUserChatMode,
 } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
@@ -343,9 +344,51 @@ export default function MissionDetailPage() {
         <Section
           title="Conversation"
           right={
-            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-              {isLive ? 'orchestrator 에게 질문하거나 방향을 지시할 수 있습니다' : '종료됨 · 기록 보존'}
-            </span>
+            /*
+              chat 옵션을 대화 바로 위에 둔다(티켓 9cfd8161). 미션 폼 모달의 Edit 버튼은
+              draft 에서만 뜨므로, 실행 중인 미션의 옵션을 바꿀 자리가 여기 말고는 없다 —
+              "옵션을 바꾸면 실행 중인 미션 방에도 즉시 반영된다"가 요구사항이다.
+
+              종료된 미션에서는 셀렉트를 감춘다: 종료 미션의 대화는 모드와 무관하게 읽기
+              전용이므로(서버 게이트가 그렇게 판정한다), 여기서 바꿔도 아무 일이 일어나지
+              않는 죽은 컨트롤이 된다. 서버도 종료 미션의 편집을 409 로 거부한다.
+            */
+            isLive ? (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}>
+                User chat
+                <select
+                  value={mission.user_chat_mode}
+                  disabled={busy}
+                  data-testid="mission-user-chat-mode"
+                  onChange={(e) =>
+                    act(
+                      () =>
+                        api.updateOrchestrationMission(mission.id, {
+                          workspace_id: wsId,
+                          // 이 필드 하나만 보낸다 — 브리핑 필드를 함께 실으면 running
+                          // 미션에서 서버의 draft 잠금이 409 를 낸다.
+                          user_chat_mode: e.target.value as OrchestrationUserChatMode,
+                        }),
+                      'User chat updated',
+                    )
+                  }
+                  style={{
+                    fontSize: 11,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    border: `1px solid ${tokens.colors.border}`,
+                    background: tokens.colors.surface,
+                    color: tokens.colors.textPrimary,
+                  }}
+                >
+                  <option value="open">Open</option>
+                  <option value="participants_only">Participants only</option>
+                  <option value="off">Off (read-only)</option>
+                </select>
+              </label>
+            ) : (
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>종료됨 · 기록 보존</span>
+            )
           }
         >
           <div style={{ height: 420, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -361,6 +404,7 @@ export default function MissionDetailPage() {
               roomId={mission.room_id}
               events={mission.events}
               live={isLive}
+              userChatMode={mission.user_chat_mode}
             />
           </div>
         </Section>

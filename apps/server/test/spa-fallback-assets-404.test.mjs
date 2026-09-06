@@ -35,7 +35,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7830';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');

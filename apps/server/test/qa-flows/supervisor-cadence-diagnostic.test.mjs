@@ -20,7 +20,7 @@ const FLOOR = 120_000; // 2 min liveness floor
 const TTL = 900_000; // 15 min current_task TTL
 
 test('supervisor-cadence diagnostic: exposes per-workspace configured/default/effective + elevated + recovery thresholds/bounds', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '7873', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
 
