@@ -1831,3 +1831,103 @@ skipped였다. 같은 커밋의 `Deploy AI Workflow Board`도 success다. CI 이
 success였고 로컬 실행도 npm 축 단독으로 통과해, 새로 관찰된 사실은 없다.
 문서화된 트레이드오프(=`ci.yml`은 `pull_request`에서 PR 코드를 실행하므로 토큰을
 두지 않는다)를 임의로 뒤집지 않았다.
+
+## 재검증 로그 — 2026-09-08 (`main` @ `4d5298b6`)
+
+최신 원격 refs를 fetch한 뒤 `main`(`4d5298b6`)과 실제 배포 브랜치
+`production.private`(`0ddec72f`)를 함께 감사했다. **두 브랜치 모두 어제 이후 움직이지
+않았다** — 어제 기록한 sha 그대로다.
+
+**의존성 드리프트 없음.** `package-lock.json`, 루트 `package.json`,
+agent-manager manifest는 두 브랜치 간 **blob 단위로 동일**했고(`37538a2e` /
+`a3cc6b2c` / `0161cfdf`), 어제 기준점과도 같다. 차이가 나는 것은
+`apps/server/package.json`과 `apps/client/package.json` 둘뿐인데, 이번에는 눈으로
+보지 않고 **manifest를 파싱해 의존성 필드만 비교**했다 — `dependencies` /
+`devDependencies` / `peerDependencies` / `optionalDependencies` / `overrides` /
+`resolutions` / `engines` 7개 필드가 두 브랜치에서 전부 동일했고, 스크립트 키 집합도
+동일하며 본문이 다른 것은 `server`의 `test`와 `client`의 `pretest` 둘뿐이다. 즉
+드리프트의 정체는 테스트 등록 목록이며 **의존성 표면 차이는 0**이다.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개, 출처 npm)이었다. 이번에는
+한 단계 더 내려 `--audit-level=low`로도 돌렸고 **low 이상도 0건**이었다 — 평소 게이트가
+가리고 있을 수 있는 저심각도 잔여물조차 없다는 뜻이다. `audit-deploy-branch-deps`는
+배포 브랜치 lockfile이 현재 트리와 동일함을 확인해 같은 결론을 승계했다. 발행 트리는
+live/next 모두 moderate 이상 0건 + install script 0개였고, lockfile 대비 12건의 버전
+drift도 전부 advisory 0건이었다. 액션 참조 19개는 전부 커밋 SHA 고정, install-script
+3개(`@scarf/scarf`, `esbuild`, `fsevents`)는 전부 허용목록 내였다. 가드 **87/87** 통과.
+
+패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는 사용하지 않았고 root
+`overrides`도 유지했다. 새 `apps/server` 테스트는 추가하지 않았으며(아래 "확인 —
+가드 공백 없음" 참조), 기존 테스트의 `package.json` 등록 완전성은
+`test-registration-completeness`로 확인했다.
+
+### 확인 — root `overrides` 4개가 각각 아직 일을 하고 있는지 역추적했다
+
+여태 재검증은 "override가 의도한 버전으로 해석됐는가"만 봤다(multer 2.2.0,
+@hono/node-server 2.1.0, js-yaml 5.2.3, picomatch 4.0.5 — 오늘도 동일). 이번엔 반대
+방향으로, **lockfile에서 그 4개를 요구하는 쪽을 전부 뽑아** override가 실제로 범위를
+다시 쓰고 있는지 봤다:
+
+- `js-yaml` — `@nestjs/swagger`가 **정확히 `5.2.1`을 핀**한다. override가 없으면
+  5.2.1이 그대로 들어온다. **여전히 load-bearing.**
+- `picomatch` — `@angular-devkit/core`(및 `@nestjs/schematics` 하위 사본)가 **정확히
+  `4.0.4`를 핀**한다. `vite`는 이제 스스로 `^4.0.5`를 요구한다. **여전히 load-bearing.**
+- `@hono/node-server` — `@modelcontextprotocol/sdk`가 `^1.19.9 || ^2.0.5`를 받는다.
+  override(`^2.0.10`)가 1.x 갈래를 막고 2.1.0으로 고정한다. **여전히 load-bearing.**
+- `multer` — `@nestjs/platform-express`가 이제 **정확히 `2.2.0`을 요구**한다. 즉 상류가
+  스스로 안전 버전으로 올라와, 이 override는 **현재로선 중복**이다.
+
+`multer` override는 **그대로 둔다.** 중복이라는 것은 "지금 이 상류 버전 기준으로"만
+참이고, `@nestjs/platform-express`가 다음 릴리스에서 범위를 넓히면 즉시 다시
+load-bearing이 된다. 제거해서 얻는 것은 없고(해석 결과가 동일하다) 잃는 것은 회귀
+차단선이다. 이 항목은 "지워도 되는 것"이 아니라 **defense-in-depth로 유지 중**임을
+기록해 두는 것이 목적이다.
+
+### 확인 — ontology 추출용 네이티브 의존성도 감사 집합 안에 있다
+
+`@node-rs/xxhash`와 tree-sitter 계열은 lockfile에 있으나 공유 `node_modules`에는 없어
+"감사에서 새는 것 아니냐"를 확인했다. `lockfilePackages()`를 직접 호출해 감사 집합을
+열어 본 결과 전부 포함돼 있다 — `@node-rs/xxhash@1.7.7`과 **플랫폼 바이너리 13개**
+(android/darwin/freebsd/linux/win32 전 조합), `web-tree-sitter@0.25.10`,
+`tree-sitter-wasms@0.1.13`. 감사 스크립트는 `resolved`가 레지스트리 URL인 엔트리를
+dev/optional 구분 없이 전부 담기 때문이며, 이들 모두 advisory 0건이다. 덧붙여 이
+네이티브 패키지들은 **prebuilt 바이너리라 install script가 없어** 허용목록이 3개로
+유지된다 — 네이티브 의존성이 늘었는데 install-script 표면은 늘지 않았다.
+
+### 진단 — 로컬 빌드 실패는 저장소 결함이 아니라 공유 `node_modules` 노후화다
+
+`npm test -w server`가 `nest build` 단계에서 5건의 TS 에러로 죽는다
+(`Cannot find module '@node-rs/xxhash'` 외). **저장소 문제가 아니다.** 감사 워크트리의
+`node_modules`는 공유 체크아웃(`/mnt/data/awb-agents/awb/repo/node_modules`)으로 가는
+심링크인데, 그 트리가 현재 lockfile보다 낡았다. 근거 두 가지: (1) lockfile에 있는
+`@node-rs/xxhash`·`tree-sitter`·`web-tree-sitter`가 설치 트리에 아예 없고, (2) 설치된
+`picomatch`가 **4.0.4**인데 lockfile은 **4.0.5**다. 실제 CI는 양쪽 브랜치 최근 런이
+전부 success이므로 빌드는 정상이다. 워크폴더 정책상 새 install을 돌리지 않았고, 감사
+판정은 어차피 `node_modules`가 아니라 **lockfile을 직접 읽어** 내므로 결론에 영향이
+없다. 가드 테스트들은 빌드를 우회해 직접 실행해 87/87을 확인했다. **다음 감사에서
+같은 증상을 저장소 회귀로 오인하지 말 것.**
+
+### 확인 — 가드 공백 없음 (레지스트리 호스트 / integrity)
+
+lockfile의 `resolved` 호스트와 integrity 해시를 손으로 훑어 **604개 엔트리 전부가
+`registry.npmjs.org`로 https resolve되고 integrity 해시를 갖는다**를 확인했다(대체
+레지스트리 주입·dependency confusion 흔적 0건, `lockfileVersion: 3`). 이걸 새 가드로
+추가하려다 확인해 보니 **이미 `supply-chain-integrity-guard.test.mjs`가 강제하고
+있었다**(전제 2번). 중복 가드를 만들지 않았다 — 새 테스트를 추가하지 않은 이유가
+이것이고, 따라서 `package.json` 등록 대상도 없다.
+
+### 정기 감사 런 확인
+
+`main`의 최신 cron 런(`34105558246`, 2026-09-07)은 `dependency audit` 잡 **11개 스텝
+전부 success**였고, 순서도 고쳐진 형태(install-script → 액션 SHA → 배포 브랜치 커버리지
+→ 정기 감사 커버리지 → 발행 범위 → 취약점 감사) 그대로였다. `schedule` 전용 두 스텝
+(배포 브랜치 lockfile 재감사, 발행 트리 재감사)도 이번엔 cron이라 실제로 **실행되어
+success**였다. 나머지 잡은 설계대로 skipped.
+
+### 이월 (변동 없음) — PR #8 정리와 이중 출처 폴백의 CI rate limit
+
+PR #8은 여전히 열려 있고 `CONFLICTING`이다. 어제 확인한 대로 그 내용은 이미 정규 병합
+경로로 배포 브랜치에 도달했으므로 **남은 조치는 닫는 것뿐이고, 코드 영향은 없다.** PR
+상태 변경은 외부에 보이는 조작이라 이번에도 실행하지 않고 운영자 판단으로 남긴다.
+이중 출처 폴백의 CI rate limit 설계 과제도 그대로다 — 오늘 로컬 실행이 npm 축 단독으로
+통과했고 CI 런도 success라 새로 관찰된 사실이 없다.
