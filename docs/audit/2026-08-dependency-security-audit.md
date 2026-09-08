@@ -1931,3 +1931,63 @@ PR #8은 여전히 열려 있고 `CONFLICTING`이다. 어제 확인한 대로 �
 상태 변경은 외부에 보이는 조작이라 이번에도 실행하지 않고 운영자 판단으로 남긴다.
 이중 출처 폴백의 CI rate limit 설계 과제도 그대로다 — 오늘 로컬 실행이 npm 축 단독으로
 통과했고 CI 런도 success라 새로 관찰된 사실이 없다.
+
+## 재검증 로그 — 2026-09-09 (`main` @ `4d5298b6`)
+
+최신 원격 refs를 fetch한 뒤 `main`(`4d5298b6`)과 실제 배포 브랜치
+`production.private`(`0ddec72f`)를 함께 감사했다. **두 브랜치 모두 이틀째 움직이지
+않았다** — 09-08에 기록한 sha 그대로다.
+
+**의존성 드리프트 없음.** `package-lock.json`, 루트 `package.json`, agent-manager
+manifest는 두 브랜치 간 **blob 단위로 동일**했고(`37538a2e` / `a3cc6b2c` /
+`0161cfdf`), 어제 기준점과도 같다. 차이가 나는 manifest는 여전히
+`apps/server/package.json`과 `apps/client/package.json` 둘뿐이며, 본문 차이는
+`server`의 `test`와 `client`의 `pretest` **한 줄씩**뿐이다 — 배포 브랜치가 아직
+병합하지 않은 신규 테스트 등록분이라 **의존성 표면 차이는 0**이다.
+
+취약점은 **moderate 이상 0건**(패키지 537개 / 버전 580개, 출처 npm)이었고, 어제와
+같이 `--audit-level=low`로도 내려 돌려 **low 이상도 0건**을 확인했다.
+`audit-deploy-branch-deps`는 배포 브랜치 lockfile이 현재 트리와 동일함을 확인해 같은
+결론을 승계했다. 액션 참조 19개는 전부 커밋 SHA 고정, install-script
+3개(`@scarf/scarf`, `esbuild`, `fsevents`)는 전부 허용목록 내였다. root `overrides`
+4종도 의도한 버전으로 그대로 해석됐다(multer 2.2.0, @hono/node-server 2.1.0,
+js-yaml 5.2.3, picomatch 4.0.5). 가드 **87/87** 통과
+(16 + 16 + 39 + 6 + 6 + 4).
+
+패키지 변경과 lockfile 재생성은 하지 않았다. `npm audit fix`는 사용하지 않았고 root
+`overrides`도 유지했다. **새 `apps/server` 테스트를 추가하지 않았으므로
+`package.json`의 `test` 스크립트에 등록할 대상도 없다** — 기존 등록의 완전성은
+`test-registration-completeness` 4건으로 확인했다.
+
+### 신규 확인 — 배포 전용 `deploy.yml`은 `main` 쪽 감사가 구조적으로 볼 수 없다
+
+`audit-action-pins.mjs`는 `readdirSync(.github/workflows)`로 **체크아웃된 트리에
+존재하는** 워크플로만 훑는다(스크립트 45행). 그런데 `deploy.yml`은
+`production.private`에만 있는 파일이므로, `main`에서 돌린 오늘의 "액션 참조 19개
+전부 고정"이라는 결과는 **`deploy.yml`을 한 번도 보지 않은 숫자**다. 여태 재검증이
+이 숫자를 배포 표면까지 포괄하는 것처럼 읽어 온 여지가 있어 명시해 둔다.
+
+빈 구멍은 아니다. `audit-ci-branch-coverage`가 보장하듯 `production.private` push는
+같은 `ci.yml`의 dependency-audit 잡을 태우고, 그 체크아웃에는 `deploy.yml`이 있으므로
+거기서는 실제로 스캔된다. 다만 그건 CI가 대신 봐 준다는 뜻이지 이쪽 런이 봤다는
+뜻은 아니라서, 오늘은 `git show origin/production.private:.github/workflows/deploy.yml`로
+**직접 꺼내 손으로 검증**했다:
+
+- `uses:` 5개 — `actions/checkout`, `docker/setup-buildx-action`,
+  `docker/login-action`, `docker/build-push-action`, `appleboy/ssh-action` —
+  **전부 40자 커밋 SHA 고정**(각 줄에 `# vX.Y.Z` 주석 병기). 태그/브랜치 참조 0건.
+- `permissions:`는 `contents: read` 단 하나. GHCR push가 있는데도 `packages: write`가
+  없다 — 레지스트리 로그인을 `GITHUB_TOKEN`이 아니라 별도 시크릿으로 하기 때문이며,
+  결과적으로 워크플로 토큰 권한은 **최소 상태**다.
+
+즉 배포 브랜치를 `main`과 나란히 놓고 보면 공급망 표면은 `deploy.yml` 208줄이
+전부이고, 그 208줄이 오늘 기준 고정·최소권한을 만족한다. `ci.yml`,
+`publish-agent-manager.yml`, `scripts/audit-*.mjs`는 두 브랜치 간 blob 동일이라
+추가로 볼 것이 없었다.
+
+### 이월 (변동 없음) — PR #8 정리
+
+PR #8은 여전히 열려 있고 `CONFLICTING`이다. 내용이 이미 정규 병합 경로로 배포
+브랜치에 도달했다는 판단은 그대로이므로 **남은 조치는 닫는 것뿐이고 코드 영향은
+없다.** PR 상태 변경은 외부에 보이는 조작이라 이번에도 운영자 판단으로 남긴다.
+감사 기록 PR #9는 열려 있고 `MERGEABLE`이다.
