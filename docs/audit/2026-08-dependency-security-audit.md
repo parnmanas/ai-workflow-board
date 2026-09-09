@@ -1991,3 +1991,118 @@ PR #8은 여전히 열려 있고 `CONFLICTING`이다. 내용이 이미 정규 �
 브랜치에 도달했다는 판단은 그대로이므로 **남은 조치는 닫는 것뿐이고 코드 영향은
 없다.** PR 상태 변경은 외부에 보이는 조작이라 이번에도 운영자 판단으로 남긴다.
 감사 기록 PR #9는 열려 있고 `MERGEABLE`이다.
+
+## 재검증 로그 — 2026-09-10 (`main` @ `4d5298b6`)
+
+**이번 주기는 조용하지 않았다 — moderate 이상 7건이 새로 떴고, 실제로 고쳤다.**
+09-08·09-09 두 번의 재검증이 "0건"이었는데 lockfile은 그때와 blob 단위로 동일하다.
+즉 **우리 트리가 움직인 게 아니라 advisory DB가 움직였다** — 어제까지 존재하지
+않던 advisory 7건이 그 사이 공개돼 기존 버전에 소급 적용된 것이다. 재검증 루프를
+"어제 0건이었으니 오늘도 0건"으로 건너뛰면 안 되는 이유가 이 주기에 실증됐다.
+
+### 탐지된 7건과 유입 경로
+
+| 패키지 | 설치됨 | 취약 범위 | 심각도 | 유입 경로 |
+| --- | --- | --- | --- | --- |
+| `multer` | 2.2.0 | `<2.3.0` / `=2.2.0` / `<2.3.0` (3건) | high | `@nestjs/platform-express` 가 `2.2.0` 을 **정확 고정** |
+| `hono` | 4.13.0 | `<4.13.5` (3건) | moderate | `@modelcontextprotocol/sdk` → `hono@^4.11.4` |
+| `js-yaml` | 4.3.1 | `>=4.0.0 <4.3.2` | high | `@nestjs/cli` → `fork-ts-checker-webpack-plugin` → `cosmiconfig` → `js-yaml@^4.1.0` |
+
+`js-yaml` 항목의 출력에 `설치됨: 4.3.1, 5.2.3` 으로 두 버전이 찍히는데, 취약 범위
+`>=4.0.0 <4.3.2` 에 걸리는 건 **`cosmiconfig` 밑의 4.3.1 하나뿐**이다. 루트의 5.2.3
+(`@nestjs/swagger` override 로 올려둔 것)은 무관하며, 스크립트가 패키지명 단위로
+설치 버전을 모아 찍기 때문에 같이 보이는 것이다.
+
+`multer` 3건은 전부 DoS 이고 이 앱은 실제로 `@nestjs/platform-express` 의 파일
+업로드 경로를 쓰므로 **런타임 노출이 있는 실 취약점**이다. `hono` 3건은
+MCP SDK 가 끌고 오는 것으로, 이 저장소는 Hono 서버를 직접 띄우지 않아 `toSSG()` /
+`parseBody()` 경로는 닿지 않지만 트리에 있는 이상 올린다.
+
+### 조치 — root `overrides` 3곳 + lockfile 전체 재생성
+
+`npm audit fix` 는 이번에도 쓰지 않았다(루트 `overrides` 를 파괴한다). 대신
+`package.json` 의 `overrides` 를 고쳐 하한을 올리고 lockfile 을 통째로 재생성했다.
+
+```
+  "multer": "^2.2.0"  →  "^2.3.0"
+  (신규)              →  "hono": "^4.13.5"
+  (신규)              →  "cosmiconfig": { "js-yaml": "^4.3.2" }
+```
+
+`multer` 는 `@nestjs/platform-express` 가 `2.2.0` 을 정확 고정하므로 override 없이는
+절대 올라가지 않는다. `hono` 는 `@hono/node-server` 만 override 돼 있었고 `hono`
+본체는 비어 있어 새로 추가했다 — MCP SDK 의 선언 범위 `^4.11.4` 와 충돌하지 않는다.
+`js-yaml` 은 `cosmiconfig` 의 선언 범위가 `^4.1.0` 이라 5.x 로 올리면 API 가정이
+깨질 수 있어, **같은 4.x 안의 수정판 4.3.2** 로만 올리는 중첩 override 를 썼다.
+기존 `@nestjs/swagger` → `js-yaml` override 와 같은 형태다.
+
+결과 해결 버전: `multer` 2.2.0 → **2.3.0**, `hono` 4.13.0 → **4.13.7**,
+`cosmiconfig/js-yaml` 4.3.1 → **4.3.2**.
+
+### 재생성의 파급 범위 (숨기지 않고 적어 둔다)
+
+lockfile 전체 재생성이라 **120개 패키지가 함께 움직였다** (추가 2 / 제거 4,
+총 610 → 608 항목). 전부 기존 선언 범위 안의 patch·minor 상향이고 major 이동은
+0건이지만, 취약점 3종만 고친 최소 변경이 아니라는 점은 분명히 해 둔다. 눈에 띄는
+동반 상향은 `@nestjs/common`·`core`·`platform-express` 11.1.28 → 11.2.3(minor),
+`vite` 8.2.0 → 8.2.2, `pg` 8.22.0 → 8.23.0, `zod` 4.4.3 → 4.5.4,
+`playwright` 1.62.1 → 1.63.0, `esbuild` 0.28.1 → 0.28.2 등이다. 선언 범위를 손대지
+않았으므로 CI 의 `npm ci` 가 어차피 다음 재해결에서 집었을 버전들이다.
+
+### 함정 — 액션 워크트리에서 lockfile 을 재생성하면 조용히 오염된다
+
+처음 `npm install --package-lock-only` 를 그대로 돌렸더니 재생성된 lockfile 의
+경로가 전부 `../../../repo/node_modules/...` 로 나왔다. 이 워크트리의
+`node_modules` 는 공유 체크아웃(`/mnt/data/awb-agents/awb/repo/node_modules`)을
+가리키는 **심링크**라서, npm 이 그걸 따라가 **프로젝트 루트 밖을 가리키는 트리**를
+lockfile 로 받아쓴 것이다. 게다가 그 공유 트리는 브랜치 lockfile보다 오래돼
+(`hono` 가 4.13.1 로 찍히는 등) 내용마저 틀렸다.
+
+증상이 "에러" 가 아니라 "그럴듯한 lockfile" 이라 그대로 커밋될 수 있었다.
+조치는 재생성 동안만 심링크를 옆으로 치우는 것:
+
+```
+mv node_modules node_modules.awbtmp
+rm -f package-lock.json && npm install --package-lock-only --ignore-scripts
+mv node_modules.awbtmp node_modules      # trap 으로 실패 시에도 복원
+```
+
+이렇게 하면 npm 이 레지스트리에서 새로 해결하고, 경로도 정상 `node_modules/...`
+로 나온다. 공유 트리는 건드리지 않으며 실제 `node_modules` 설치도 발생하지 않는다
+(`--package-lock-only`). 재생성 후 `../../../repo` 문자열이 lockfile 에 0건인지
+확인하는 것을 검증 절차로 삼을 것.
+
+### 게이트 결과
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건** (low 까지 내려도 깨끗)
+- `audit-install-scripts` — install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`) 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` / `audit-cron-coverage` — 통과
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **87/87** 통과 (16 + 16 + 39 + 6 + 6 + 4)
+
+새 `apps/server` 테스트를 추가하지 않았으므로 `package.json` 의 `test` 스크립트에
+등록할 대상은 없다 — 기존 등록의 완전성은 `test-registration-completeness` 4건으로
+확인했다.
+
+### 배포 브랜치 `production.private` — **현재 취약. 병합 필요**
+
+`audit-deploy-branch-deps` 가 `production.private`(`0ddec72f`) 에 대해 **FAIL —
+moderate 이상 7건**을 반환했다. 위 7건과 정확히 같은 목록이다. 이 브랜치의
+lockfile 은 수정 전 `main` 과 blob 동일(`37538a2e`)이라 당연한 결과다.
+
+지금까지의 재검증에서 `production.private` 는 "drift 없음 = 문제 없음" 이었지만,
+**이번엔 실제로 취약한 트리가 배포돼 돌고 있는 상태**다. 이전 주기들과 성격이 다르다.
+
+다만 그 브랜치로의 병합은 `deploy.yml` 을 태워 GHCR 이미지 빌드 + NAS SSH 배포까지
+자동 실행하는 **되돌리기 어려운 외부 조작**이므로, 이번에도 감사 런이 독단으로
+하지 않고 **운영자 승인 사항으로 남긴다.** 과거 주기의 교훈대로 정규 릴리스 경로
+(`main` → `production.private` 정기 병합)를 타면 이 수정도 그대로 따라간다. 다만
+이번 건은 성격상 **다음 정기 병합을 기다릴지, 앞당길지를 운영자가 판단**해야 한다.
+
+### 이월 (변동 없음) — PR #8 정리
+
+PR #8 은 여전히 열려 있고 `CONFLICTING` 이며, 내용은 이미 정규 병합 경로로 배포
+브랜치에 도달했다. 남은 조치는 닫는 것뿐이고 코드 영향은 없다 — 이번에도 운영자
+판단으로 남긴다.
