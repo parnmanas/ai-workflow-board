@@ -33,7 +33,7 @@ import { McpClient } from './helpers/mcp-client.mjs';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
 import { TriggerLoopService } from '../dist/modules/agents/trigger-loop.service.js';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7792';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 // Seed a DM room with the given participants directly via repositories — there
 // is no chat-room fixture helper and the round-trip only needs the persisted

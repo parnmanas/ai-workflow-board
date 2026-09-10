@@ -35,7 +35,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_HALT_POLICY_BACKFILL_PORT || '7946';
+process.env.PORT = process.env.QA_HALT_POLICY_BACKFILL_PORT || '0';
 
 // Give the async activityEvents listener a beat to run — same pattern as the
 // sibling auto-advance-*.test.mjs flows (no synchronous point to assert at).

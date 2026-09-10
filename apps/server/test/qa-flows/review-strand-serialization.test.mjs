@@ -47,7 +47,7 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_REVIEW_STRAND_PORT || '7853';
+process.env.PORT = process.env.QA_REVIEW_STRAND_PORT || '0';
 
 // Fire a comment-created activity authored by `user` (NOT the worker, so the
 // self-trigger guard doesn't short-circuit) on the Review ticket. That routes

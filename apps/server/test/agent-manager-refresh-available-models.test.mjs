@@ -1,0 +1,235 @@
+// ticket 40110b64 — 서버측 `refresh_available_models` 경로.
+//
+// 이 티켓 전까지 `available_models` 를 덮는 서버 테스트가 하나도 없었다. 여기서
+// 두 가지를 실제 REST 로 검증한다:
+//
+//   1) 관리자용 제네릭 command 엔드포인트가 새 verb 를 받아들이고(ALLOWED_COMMANDS
+//      허용목록 회귀 가드) 매니저 SSE 로 실어 보낸다. 허용목록에 빠지면 버튼은
+//      400 "unknown command" 로 죽고, 그 실패는 매니저 쪽에선 보이지 않는다.
+//   2) 완료 판정이 **발급된 command_id 의 ack** 에만 걸린다 — 커맨드 처리 전에
+//      무관한 정기 하트비트가 들어와도 pending 을 유지하고, 같은 command_id 의
+//      ack 가 온 뒤에야 ok + detail 이 조회된다.
+//   3) 갱신된 하트비트가 인스턴스 레지스트리의 available_models 를 실제로
+//      교체한다 — Agent 생성/편집 다이얼로그의 모델 드롭다운이 읽는 값이 바로 이것이다.
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { bootApp, exitAfterTests } from './helpers/boot.mjs';
+import {
+  createAgent,
+  createApiKey,
+  createUser,
+  createWorkspace,
+} from './helpers/fixtures.mjs';
+
+process.env.PORT = process.env.REFRESH_AVAILABLE_MODELS_PORT || '0';
+
+const INSTANCE_ID = 'refresh-models-instance';
+
+function heartbeatBody(managerId, availableModels) {
+  return {
+    instance_id: INSTANCE_ID,
+    agent_id: managerId,
+    mode: 'manager',
+    hostname: 'refresh-models-host',
+    plugin_version: 'test',
+    cli: 'mixed',
+    cli_adapters: ['claude', 'codex'],
+    pid: 4242,
+    started_at: new Date().toISOString(),
+    ...(availableModels ? { available_models: availableModels } : {}),
+  };
+}
+
+test('refresh_available_models 는 무관한 하트비트가 아니라 같은 command_id 의 ack 로만 완료 판정되고, 그 detail 과 갱신된 목록이 조회된다', async (t) => {
+  const { app, port, modules } = await bootApp({
+    port: Number.parseInt(process.env.PORT, 10),
+  });
+  t.after(async () => {
+    await app.close();
+  });
+
+  const { AuthService, getDataSourceToken } = modules;
+  const workspace = await createWorkspace(app, getDataSourceToken, 'refresh-available-models');
+  const manager = await createAgent(app, getDataSourceToken, null, {
+    name: 'refresh-models-manager',
+    type: 'manager',
+  });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
+    workspaceId: workspace.id,
+    label: 'refresh-models-manager-key',
+  });
+  const admin = await createUser(app, getDataSourceToken, {
+    name: 'refresh-models-admin',
+    role: 'admin',
+  });
+  const token = app.get(AuthService).createSession(admin.id);
+
+  const postHeartbeat = (availableModels) =>
+    fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': managerKey.raw_key,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(heartbeatBody(manager.id, availableModels)),
+    });
+
+  // 본문은 한 번만 읽을 수 있으므로 먼저 text 로 받고 나서 단언·파싱한다
+  // (assert 의 message 인자로 `await resp.text()` 를 넘기면 통과하는 경우에도
+  //  본문이 소비돼 뒤따르는 json() 이 "Body is unusable" 로 죽는다).
+  const readJson = async (resp, expectedStatus) => {
+    const body = await resp.text();
+    assert.equal(resp.status, expectedStatus, body);
+    return body ? JSON.parse(body) : null;
+  };
+
+  const listInstances = async () => {
+    const resp = await fetch(`http://127.0.0.1:${port}/api/admin/agent-manager/instances`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return readJson(resp, 200);
+  };
+
+  const sendCommand = (command) =>
+    fetch(
+      `http://127.0.0.1:${port}/api/admin/agent-manager/instances/${INSTANCE_ID}/command`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      },
+    );
+
+  const readOutcome = (commandId) =>
+    fetch(
+      `http://127.0.0.1:${port}/api/admin/agent-manager/commands/${encodeURIComponent(commandId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    ).then((resp) => readJson(resp, 200));
+
+  // 이 컨트롤러의 @Post 핸들러는 명시적 status 를 주지 않으면 201 로 응답한다
+  // (instance-heartbeat 도 동일) — 명시적으로 status 를 세팅하는 거부 경로만 4xx 다.
+  const ackOnce = (commandId, detail, status = 'ok') =>
+    fetch(`http://127.0.0.1:${port}/api/agent-manager/command/ack`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command_id: commandId, status, detail }),
+    });
+
+  const modelsInRegistry = async () =>
+    (await listInstances()).find((row) => row.instance_id === INSTANCE_ID)?.available_models;
+
+  // 부팅 시점의 모델 목록 — 호스트의 codex 가 아직 구버전이라 모델이 2개다.
+  await readJson(await postHeartbeat({ claude: ['opus', 'sonnet'], codex: ['gpt-5'] }), 201);
+  assert.deepEqual(
+    await modelsInRegistry(),
+    { claude: ['opus', 'sonnet'], codex: ['gpt-5'] },
+    '하트비트를 보낸 인스턴스가 관리자 목록에 부팅 시점 목록과 함께 보여야 한다',
+  );
+
+  // 운영자가 관리 화면에서 "Refresh models" 를 누른 상황.
+  const dispatchBody = await readJson(await sendCommand('refresh_available_models'), 202);
+  assert.equal(dispatchBody.ok, true);
+  assert.ok(dispatchBody.command_id, '허용목록을 통과한 커맨드는 command_id 를 돌려준다');
+
+  // ── ack 상관 순서 (리뷰 지적 회귀 가드) ─────────────────────────────────
+  //
+  // 202 는 "SSE 로 실어 보냈다" 는 디스패치 수락일 뿐이다. 하트비트는 30초마다
+  // 알아서 도므로, "하트비트가 왔다" 를 완료 신호로 쓰면 커맨드와 무관한 정기
+  // 하트비트가 조건을 충족시켜 재열거 전 목록을 성공으로 오표시한다. 아래 세
+  // 단계의 순서 자체가 이 회귀의 가드다.
+
+  // (1) 디스패치 직후 — 아직 완료가 아니다.
+  const pendingBefore = await readOutcome(dispatchBody.command_id);
+  assert.equal(pendingBefore.state, 'pending', '디스패치만으로는 완료가 아니다');
+  assert.equal(pendingBefore.command, 'refresh_available_models');
+  assert.equal(pendingBefore.acked_at, null);
+
+  // (2) 커맨드 처리 전에 무관한 정기 하트비트가 들어와 last_seen_at 만 갱신한다.
+  //     모델 목록은 부팅 시점 그대로다.
+  await readJson(await postHeartbeat({ claude: ['opus', 'sonnet'], codex: ['gpt-5'] }), 201);
+  assert.deepEqual(
+    await modelsInRegistry(),
+    { claude: ['opus', 'sonnet'], codex: ['gpt-5'] },
+    '무관한 하트비트는 옛 목록을 그대로 싣고 온다',
+  );
+  const stillPending = await readOutcome(dispatchBody.command_id);
+  assert.equal(
+    stillPending.state,
+    'pending',
+    '하트비트가 하나 지나갔다고 커맨드가 완료된 것은 아니다',
+  );
+
+  // (3) 매니저가 재열거를 마치고 즉시 하트비트 + 같은 command_id 로 ack 한다.
+  await readJson(
+    await postHeartbeat({
+      claude: ['opus', 'sonnet', 'haiku'],
+      codex: ['gpt-5', 'gpt-5-codex'],
+    }),
+    201,
+  );
+  const acked = await readJson(
+    await ackOnce(dispatchBody.command_id, 'refreshed 2 CLI(s): claude=3, codex=2'),
+    201,
+  );
+  assert.equal(acked.ok, true);
+
+  const acknowledged = await readOutcome(dispatchBody.command_id);
+  assert.equal(acknowledged.state, 'ok', 'ack 가 도착한 뒤에야 완료다');
+  assert.equal(
+    acknowledged.detail,
+    'refreshed 2 CLI(s): claude=3, codex=2',
+    'UI 가 노출할 값은 매니저가 보고한 ack detail 자체여야 한다',
+  );
+  assert.equal(acknowledged.command_id, dispatchBody.command_id);
+  assert.ok(acknowledged.acked_at, 'ack 시각이 기록된다');
+
+  // 성공 ack 이후 다시 읽은 레지스트리에 새 목록이 반영돼 있다 — 모델 드롭다운이
+  // 읽는 값이 바로 이것이다.
+  assert.deepEqual(
+    await modelsInRegistry(),
+    { claude: ['opus', 'sonnet', 'haiku'], codex: ['gpt-5', 'gpt-5-codex'] },
+    '재열거된 목록이 레지스트리를 통째로 교체해야 한다',
+  );
+
+  // 같은 command_id 를 두 번째로 ack 하면 원장에서 이미 소비돼 410 이다 —
+  // 만료된(혹은 알 수 없는) 커맨드의 기존 거부 경로가 새 verb 에서도 그대로다.
+  // 중복 ack 가 거부돼도 먼저 기록된 결과는 덮이지 않는다.
+  await readJson(await ackOnce(dispatchBody.command_id, '중복 ack'), 410);
+  const afterDuplicate = await readOutcome(dispatchBody.command_id);
+  assert.equal(afterDuplicate.state, 'ok');
+  assert.equal(afterDuplicate.detail, 'refreshed 2 CLI(s): claude=3, codex=2');
+
+  // 모르는 command_id 는 200 + state=unknown — 폴링하는 쪽이 "만료" 와 "네트워크
+  // 실패" 를 구분할 수 있어야 한다.
+  const unknown = await readOutcome('no-such-command-id');
+  assert.equal(unknown.state, 'unknown');
+
+  // 실패 ack 는 error 로 노출되고 사유가 detail 에 담긴다.
+  const failing = await readJson(await sendCommand('refresh_available_models'), 202);
+  await readJson(
+    await ackOnce(failing.command_id, 'refresh_available_models is not wired on this manager', 'error'),
+    201,
+  );
+  const failed = await readOutcome(failing.command_id);
+  assert.equal(failed.state, 'error');
+  assert.match(failed.detail, /not wired/);
+
+  // 오타/미등록 verb 에 대한 기존 거부 경로는 그대로여야 한다.
+  const typo = await readJson(await sendCommand('refresh_avaliable_models'), 400);
+  assert.match(typo.error, /unknown command/);
+
+  // 알 수 없는 인스턴스에 대한 기존 404 경로도 그대로다.
+  const unknownInstance = await fetch(
+    `http://127.0.0.1:${port}/api/admin/agent-manager/instances/no-such-instance/command`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'refresh_available_models' }),
+    },
+  );
+  await readJson(unknownInstance, 404);
+});
+
+exitAfterTests();

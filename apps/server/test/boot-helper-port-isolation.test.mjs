@@ -11,24 +11,9 @@
 // bootApp() 이 다시 "요청한 포트를 그대로 되돌려주는" 구현으로 돌아가면
 // 반환값이 0 이 되어 아래 단언과 HTTP 요청이 즉시 깨진다.
 
-import net from 'node:net';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-
-// 하드코딩된 포트 상수를 새로 만들지 않기 위한 빈 포트 탐색. 커넥션을 한 번도
-// 받지 않은 리스닝 소켓이라 close() 가 끝나면 포트가 곧바로 다시 바인딩 가능한
-// 상태가 된다(TIME_WAIT 는 established 커넥션에만 걸린다).
-async function findFreePort() {
-  const probe = net.createServer();
-  await new Promise((resolve, reject) => {
-    probe.once('error', reject);
-    probe.listen(0, '0.0.0.0', resolve);
-  });
-  const { port } = probe.address();
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
+import { bootApp, exitAfterTests, findFreePort } from './helpers/boot.mjs';
 
 test('bootApp({ port: 0 }) 는 실제 바인딩 포트를 돌려주고, 앞 서버를 닫지 않은 채 다음 부팅이 이어져도 포트가 겹치지 않는다', async (t) => {
   const first = await bootApp({ port: 0 });

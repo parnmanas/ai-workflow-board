@@ -28,7 +28,7 @@ function fakeRes() {
 }
 
 test('workspace config-change audit: cadence PATCH writes config_changed rows with actor + old→new + source', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '7871', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
 
@@ -101,7 +101,7 @@ test('MCP update_workspace: writes config_changed (source=mcp, caller actor) AND
   // surface so the caller-actor resolution, source=mcp stamping, AND the
   // audit-or-nothing transaction are all exercised end-to-end on the non-REST
   // write path — the reviewer's "MCP 경로에도 audit-write failure 회귀 테스트" AC.
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.WS_AUDIT_MCP_PORT || '7874', 10) });
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.WS_AUDIT_MCP_PORT || '0', 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const activityRepo = ds.getRepository('ActivityLog');

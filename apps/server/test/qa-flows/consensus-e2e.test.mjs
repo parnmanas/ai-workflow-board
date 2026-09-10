@@ -29,7 +29,7 @@ import {
 import { McpClient } from '../helpers/mcp-client.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_CONSENSUS_E2E_PORT || '7881', 10);
+const BASE_PORT = parseInt(process.env.QA_CONSENSUS_E2E_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 async function mcpFor(port, apiKey) {

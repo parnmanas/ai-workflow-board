@@ -40,9 +40,9 @@ import { createWorkspace } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// Port 7838 — unique slot, doesn't collide with unpend-emits-trigger (7836),
-// backlog-promotion-pending (7834), or other QA flows.
-process.env.PORT = process.env.QA_PROMPT_REFRESH_PORT || '7838';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_PROMPT_REFRESH_PORT || '0';
 
 // Exact v0.34.2 (pre-7722527) content for one of the refreshed templates.
 // Match must be byte-exact, so reproduced verbatim from

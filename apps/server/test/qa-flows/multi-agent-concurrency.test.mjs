@@ -37,7 +37,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_CONCURRENCY_PORT || '7804';
+process.env.PORT = process.env.QA_CONCURRENCY_PORT || '0';
 
 const NUM_ASSIGNEES = 5;
 const TICKETS_PER_ASSIGNEE = 4;
@@ -178,7 +178,7 @@ const OVER_CAP = 2;
 const OWNED_OVER_CAP = 4;
 
 test(`over-cap: 1 assignee owns ${OWNED_OVER_CAP} tickets, cap=${OVER_CAP} → exactly ${OVER_CAP} admitted, surplus dropped`, async (t) => {
-  const port = parseInt(process.env.QA_CONCURRENCY_OVERCAP_PORT || '7805', 10);
+  const port = parseInt(process.env.QA_CONCURRENCY_OVERCAP_PORT || '0', 10);
   const { app, port: boundPort, modules } = await bootApp({ port });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, ActivityService } = modules;

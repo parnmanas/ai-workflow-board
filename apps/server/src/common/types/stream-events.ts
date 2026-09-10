@@ -787,7 +787,12 @@ export type AgentManagerCommand =
   // 의 10분 TTL을 넘길 수 있다. 이후 진행/완료는
   // POST /api/agent-manager/cli-login/:sessionId/progress 로 별도 보고한다.
   | 'cli_login_start'
-  | 'cli_login_cancel'; // 세션 취소 — 이미 끝난 세션이면 매니저가 no-op으로 처리
+  | 'cli_login_cancel' // 세션 취소 — 이미 끝난 세션이면 매니저가 no-op으로 처리
+  // ticket 40110b64 — 호스트에 설치된 CLI 들의 모델 목록을 다시 열거한다. args
+  // 없음. 매니저 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
+  // 재열거 직후 매니저가 즉시 하트비트 1회를 보내므로, 갱신된 available_models
+  // 가 다음 정기 하트비트(30초)를 기다리지 않고 인스턴스 레지스트리에 반영된다.
+  | 'refresh_available_models';
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

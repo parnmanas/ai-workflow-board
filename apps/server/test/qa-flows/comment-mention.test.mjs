@@ -17,7 +17,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_MENTION_PORT || '7808';
+process.env.PORT = process.env.QA_MENTION_PORT || '0';
 
 test('comment_mention is delivered only to the mentioned agent (workspace-scoped)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

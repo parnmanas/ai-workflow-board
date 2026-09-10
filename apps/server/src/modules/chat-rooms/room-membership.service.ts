@@ -5,11 +5,31 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
 import { Agent } from '../../entities/Agent';
+import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
+import {
+  UserChatMode,
+  isTerminalMissionStatus,
+  normalizeUserChatMode,
+} from '../orchestration/orchestration.constants';
 
 const PARTICIPANT_CAP = 50;
+
+/**
+ * mission 방 하나에 대해 해석된 chat 정책(티켓 9cfd8161).
+ *
+ * `mode` 는 미션의 `user_chat_mode` 를 정규화한 값이고, `terminal` 은 미션이 이미
+ * 끝났는가다. 둘을 한 번에 돌려주는 이유는 호출부(발화 게이트, 자유 참여 완화)가
+ * 항상 둘 다 필요로 하는데 미션 조회는 한 번이면 충분하기 때문이다.
+ */
+export interface MissionChatPolicy {
+  mission_id: string;
+  mode: UserChatMode;
+  /** 미션이 completed/failed/cancelled 인가 — 그렇다면 대화는 읽기 전용이다. */
+  terminal: boolean;
+}
 
 /**
  * RFC-4122 shape. A participant/sender id that isn't a uuid (the synthetic
@@ -52,6 +72,12 @@ export class RoomMembershipService {
     private readonly agentRepo: Repository<Agent>,
 
     @InjectDataSource() private readonly dataSource: DataSource,
+
+    // 새 의존성은 **맨 뒤에** 붙인다 — 이 서비스를 위치 인자로 만드는 테스트가 있어
+    // 중간 삽입은 뒤 인자를 한 칸씩 밀어 조용히 undefined 를 만든다.
+    // 서비스가 아니라 **엔티티 저장소**만 가져오므로 orchestration 모듈과의 순환은 없다.
+    @InjectRepository(OrchestrationMission)
+    private readonly missionRepo: Repository<OrchestrationMission>,
   ) {}
 
   /** Wraps a column reference with ::text on postgres to avoid varchar/uuid mismatch */
@@ -369,6 +395,36 @@ export class RoomMembershipService {
   }
 
   /**
+   * 이 방을 지배하는 미션 chat 정책을 읽는다 — mission 방이 아니면 `null` (티켓 9cfd8161).
+   *
+   * **단일 기준은 미션 컬럼이지 방의 `open_join` 이 아니다.** 방 플래그는 옵션에서 파생돼
+   * 동기화되는 캐시라, 판정까지 거기에 걸면 둘이 어긋난 순간(수동 DDL, 백필 이전 행,
+   * 부분 실패) 사용자가 보는 옵션과 실제 동작이 갈라진다. 그래서 게이트도, 자유 참여
+   * 완화도 이 함수 하나를 통해 미션 값을 직접 읽는다.
+   *
+   * step 방은 대상이 아니다 — `orchestration_step_id` 가 있는 방은 사람이 읽는 대화가
+   * 아니라 멤버 에이전트에게 내리는 작업 지시 채널이고, 미션 하나가 수십 개를 만든다
+   * (티켓 995a9519 의 판단 그대로).
+   *
+   * 미션 행이 사라졌는데 방이 아직 그것을 가리키는 경우 `null` 을 돌려준다 — 정책을 알 수
+   * 없을 때 완화하지 않는 것이 안전한 실패이고, 뒤따르는 MANAGE_ACTIONS 검사는 그대로 돈다.
+   */
+  async resolveMissionChatPolicy(
+    room: { orchestration_mission_id?: string | null; orchestration_step_id?: string | null } | null | undefined,
+  ): Promise<MissionChatPolicy | null> {
+    const missionId = room?.orchestration_mission_id;
+    if (!missionId) return null;
+    if (room?.orchestration_step_id) return null;
+    const mission = await this.missionRepo.findOne({ where: { id: missionId } });
+    if (!mission) return null;
+    return {
+      mission_id: mission.id,
+      mode: normalizeUserChatMode(mission.user_chat_mode),
+      terminal: isTerminalMissionStatus(mission.status),
+    };
+  }
+
+  /**
    * Orchestration mission/step room 은 **발화 시점에도** 권한을 다시 본다 (티켓 f6a0de0e,
    * 리뷰 라운드1 지적 1).
    *
@@ -384,15 +440,53 @@ export class RoomMembershipService {
    *   - agent 발화 — 신원 검사는 orchestration 런너가 lease/orchestrator id 로 따로 한다.
    *     여기서 사람 권한을 요구하면 정상 디스패치가 죽는다.
    *   - 의사 user `system` (비-uuid) — 엔진 자신의 브리핑·wake 발화다. `users` 행이 없다.
+   *
+   * 티켓 9cfd8161 이후로는 권한 앞에 **미션 단위 규칙 두 개**가 더 붙는다 — 미션이 이미
+   * 끝났는가, 그리고 미션의 `user_chat_mode` 가 `off` 인가. 셋은 서로 다른 사유이므로 서로
+   * 다른 메시지를 던진다: 화면이 "참여자가 아님"으로 뭉뚱그리던 것이 바로 그 티켓의
+   * 요구사항 C 였다.
+   *
+   * 그 두 규칙의 적용 범위는 **mission 방 하나**다. step 방(`orchestration_step_id` 가
+   * 있는 방)에도 `orchestration_mission_id` 가 찍히지만, 그쪽은 사람이 읽는 대화가 아니라
+   * 에이전트 작업 지시 채널이라 이 옵션이 다루는 표면이 아니다 —
+   * `resolveMissionChatPolicy` 가 step 방에 `null` 을 돌려주므로 step 방의 계약은
+   * 이 티켓 이전과 정확히 같게 남는다(MANAGE_ACTIONS 검사는 그대로).
    */
   async requireMissionRoomSpeaker(
-    room: { orchestration_mission_id?: string | null } | null | undefined,
+    room: { orchestration_mission_id?: string | null; orchestration_step_id?: string | null } | null | undefined,
     senderType: string,
     senderId: string,
+    /**
+     * 호출자가 이미 해석해 둔 정책(`resolveMissionChatPolicy` 의 결과). `sendMessage` 는
+     * 자유 참여 완화를 계산하느라 어차피 한 번 읽으므로, 같은 요청 안에서 미션을 두 번
+     * 조회하지 않도록 넘겨받는다. 생략하면 여기서 직접 읽는다 — 다른 호출부와 테스트가
+     * 기존 3-인자 시그니처 그대로 동작해야 하기 때문이다.
+     */
+    policy?: MissionChatPolicy | null,
   ): Promise<void> {
     if (!room?.orchestration_mission_id) return;
     if (senderType !== 'user') return;
     if (!UUID_RE.test(senderId)) return;
+
+    // ── 미션 단위 chat 옵션(티켓 9cfd8161) ─────────────────────────────────
+    //
+    // 사용자 개인의 권한보다 **먼저** 본다. 이 두 규칙은 관리자에게도 똑같이 걸리는
+    // 미션 전체의 상태라서, 사유로서 더 정확하고 더 쓸모 있다 — "당신에게 권한이
+    // 없다"보다 "이 방에서는 아무도 말할 수 없다"가 사용자가 할 수 있는 행동을
+    // 정확히 알려준다(요구사항 C: 실제 사유를 드러낼 것).
+    const resolved = policy !== undefined ? policy : await this.resolveMissionChatPolicy(room);
+    if (resolved) {
+      // 종료된 미션은 읽기 전용이다. `joinMissionConversation` 이 이미 같은 규칙으로
+      // 종료 미션 참여를 409 로 거부하고 화면도 입력창을 감추는데, 발화 경로만 이
+      // 규칙을 몰라 REST 를 직접 부르면 새 지시가 들어갔다. 세 표면이 같은 말을
+      // 하도록 여기서 닫는다. 기록 열람은 관전 경로로 그대로 열려 있다.
+      if (resolved.terminal) {
+        throw makeError(403, 'This mission has finished — its conversation is read-only');
+      }
+      if (resolved.mode === 'off') {
+        throw makeError(403, 'User chat is turned off for this mission');
+      }
+    }
 
     const user = await this.userRepo.findOne({ where: { id: senderId } });
     const customPermissions = (() => {

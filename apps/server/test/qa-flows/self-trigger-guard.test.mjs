@@ -16,7 +16,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_SELF_TRIGGER_PORT || '7807';
+process.env.PORT = process.env.QA_SELF_TRIGGER_PORT || '0';
 
 test('Agent acting on its own ticket does not receive a self-trigger', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

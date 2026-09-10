@@ -51,7 +51,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_BACKLOG_CHAIN_PORT || '7821';
+process.env.PORT = process.env.QA_BACKLOG_CHAIN_PORT || '0';
 
 test('BacklogPromotion chain prefix: chain target beats higher-priority outsider, audit row tagged, no-chain regression intact', async (t) => {
   step('Boot NestJS app on test port');

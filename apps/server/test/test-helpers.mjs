@@ -20,7 +20,8 @@ export function makeBaseUrl(port) {
 /**
  * Make an authenticated API request with optional X-Workspace-Id header.
  *
- * @param {string} baseUrl - Server base URL e.g. 'http://localhost:7793'
+ * @param {string} baseUrl - Server base URL built from the actual bound port,
+ *   e.g. makeBaseUrl(app.getHttpServer().address().port)
  * @param {string} path - API path without /api prefix, e.g. '/auth/login'
  * @param {object} opts
  * @param {string} [opts.token] - Bearer token

@@ -20,7 +20,7 @@ import { bootApp } from './helpers/boot.mjs';
 import { setupKanbanScene, createTicket, createWorkspace } from './helpers/fixtures.mjs';
 import { loadTicketFull } from '../dist/modules/mcp/shared/ticket-parsing.js';
 
-const { app, modules } = await bootApp({ port: 7921 });
+const { app, modules } = await bootApp({ port: 0 });
 after(async () => { await app.close(); });
 const ds = app.get(modules.getDataSourceToken());
 

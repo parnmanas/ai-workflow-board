@@ -23,7 +23,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_SILENT_EXIT_PORT || '7822';
+process.env.PORT = process.env.QA_SILENT_EXIT_PORT || '0';
 
 async function postSilentExit(port, ticketId, body) {
   const resp = await fetch(

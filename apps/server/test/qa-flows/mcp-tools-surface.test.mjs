@@ -15,7 +15,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_MCP_SURFACE_PORT || '7803';
+process.env.PORT = process.env.QA_MCP_SURFACE_PORT || '0';
 
 const EXPECTED_TOOLS = [
   'get_ticket',

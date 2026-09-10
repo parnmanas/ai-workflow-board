@@ -35,12 +35,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-subagents-active-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.SUBAGENTS_ACTIVE_PORT || '7797';
+process.env.PORT = process.env.SUBAGENTS_ACTIVE_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';
 
-const BASE_URL = makeBaseUrl(parseInt(process.env.PORT, 10));
+// 요청 포트가 0(OS 배정)이라 listen 전에는 URL 을 만들 수 없다 — 이 파일은
+// bootApp 을 쓰지 않고 NestJS 를 인라인으로 띄우므로, 바인딩된 뒤 실제 포트로
+// 직접 채운다(ticket f2d82793).
+let BASE_URL;
 
 async function loadServerModules() {
   const distRoot = path.join(__dirname, '..', 'dist');
@@ -100,6 +103,7 @@ describe('agents subagents.active — hasLiveRoleStrand cross-check (ticket 6793
 
     app = await NestFactory.create(AppModule, { logger: false });
     await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');
+    BASE_URL = makeBaseUrl(app.getHttpServer().address().port);
 
     const authService = app.get(AuthService);
     agentStatus = app.get(AgentStatusService);

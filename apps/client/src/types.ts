@@ -341,7 +341,18 @@ export interface Action {
   name: string;
   description: string;
   prompt: string;
+  /**
+   * 대표 대상(레거시 미러). 항상 `target_agent_ids[0]` 과 같다 — 서버가 두 컬럼을
+   * 함께 쓴다. 대상 전체가 필요하면 아래 배열을 볼 것 (티켓 fc3906c5).
+   */
   target_agent_id: string;
+  /**
+   * 대상 에이전트 전체. 한 번의 트리거가 여기 나열된 에이전트 **각각**에 대해
+   * 독립적인 run 을 만든다(fan-out). 서버가 항상 채워 보내지만, 이 필드가
+   * 추가되기 전 응답을 캐시한 클라이언트를 위해 optional 로 둔다 — 비어 있으면
+   * `target_agent_id` 단일 값으로 읽으면 된다.
+   */
+  target_agent_ids?: string[];
   schedule_cron: string;
   trigger: string;
   trigger_label: string;
@@ -362,10 +373,36 @@ export interface ActionRun {
   id: string;
   action_id: string;
   workspace_id: string;
-  room_id: string;
+  /**
+   * 이 run 을 수행한 에이전트 (티켓 fc3906c5). fan-out 이전에 만들어진 run 은
+   * '' 다 — 그 시점의 대상은 이후 편집됐을 수 있어 소급 백필하지 않는다.
+   * 빈 값은 "기록 없음"으로 표시할 것.
+   */
+  agent_id?: string;
+  /** 같은 트리거 1회에서 나온 run 들의 묶음 키. 레거시 run 은 ''. */
+  batch_id?: string;
+  /**
+   * 이 run 의 대화방. 디스패치가 방을 만들기 **전에** 실패한 대상(예산 초과,
+   * 삭제된 에이전트)은 null 이다 — 그 run 은 실행이 시작되지도 못했다는 뜻이라
+   * 빈 대화가 아니라 실패로 표시해야 한다 (티켓 fc3906c5).
+   */
+  room_id: string | null;
   triggered_by_type: 'user' | 'system' | 'agent';
   triggered_by_id: string;
   prompt_rendered: string;
+  /**
+   * run 수명주기. 'running' 에서 시작해 complete_action_run 이 한 번만
+   * 'succeeded'/'failed' 로 확정한다. 이 컬럼이 생기기 전 행은 'running' 으로
+   * 읽힌다.
+   */
+  status?: 'running' | 'succeeded' | 'failed';
+  /** 완료 에이전트가 남긴 성공 요약 또는 실패 사유. */
+  result_summary?: string;
+  /** 1-based 시도 횟수. 재시도가 attempt+1 로 새 run 을 만든다. */
+  attempt?: number;
+  /** 이 run 을 띄운 티켓(있으면). 배치 전원 종료 후 한 번 재개된다. */
+  source_ticket_id?: string;
+  completed_at?: string | null;
   created_at: string;
 }
 
@@ -2398,12 +2435,35 @@ export type AgentManagerCommandKind =
   | 'update_plugins'
   | 'refresh_mcp_config'
   | 'update_manager'
-  | 'restart_manager';
+  | 'restart_manager'
+  // ticket 40110b64 — 호스트에 설치된 CLI 들의 모델 목록을 다시 열거한다.
+  // 매니저 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
+  | 'refresh_available_models';
 
 export interface AgentManagerCommandResult {
   ok: boolean;
   command_id: string;
   issued_at: string;
+}
+
+/**
+ * 디스패치한 제어 커맨드의 종단 결과 (ticket 40110b64).
+ *
+ * `AgentManagerCommandResult` 의 202 는 "SSE 로 실어 보냈다" 는 수락 신호일 뿐이다.
+ * 화면이 완료를 판정하려면 그 `command_id` 의 ack 를 직접 조회해야 한다 — 하트비트
+ * 도착 같은 간접 신호는 커맨드와 무관한 정기 하트비트로도 충족되기 때문이다.
+ *
+ * `unknown` = 서버가 그 id 를 모른다(오타) 또는 ack 없이 원장 TTL 이 지났다.
+ */
+export interface AgentManagerCommandOutcome {
+  state: 'pending' | 'ok' | 'error' | 'unknown';
+  command_id: string;
+  instance_id?: string;
+  command?: string;
+  /** 매니저가 ack 에 실어 보낸 결과 문자열. pending/unknown 이면 빈 문자열. */
+  detail: string;
+  issued_at?: string;
+  acked_at: string | null;
 }
 
 export interface ManagedAgentCreateBody {
@@ -2717,6 +2777,14 @@ export interface OrchestrationCounts {
 /** Mission 단위 사용자 확인 강도(티켓 5dbe4aa2). */
 export type OrchestrationConfirmPolicy = 'none' | 'auto' | 'key_steps' | 'every_step';
 
+/**
+ * 미션 대화에서 사람이 발화할 수 있는가 — 티켓 9cfd8161.
+ *
+ * `open`(기본) 워크스페이스 운영자면 참여자가 아니어도 발화 · `participants_only`
+ * 참여자만 발화 · `off` 아무도 발화 불가(읽기 전용). 세 값 모두 읽기는 막지 않는다.
+ */
+export type OrchestrationUserChatMode = 'open' | 'participants_only' | 'off';
+
 /** confirm 노드에 사람이 내린 판정. */
 export interface OrchestrationConfirmDecision {
   verdict: 'pass' | 'fail';
@@ -2860,6 +2928,8 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   total_visits: number;
   /** 사용자 확인 강도 — 서버가 항상 정규화해 보낸다(티켓 5dbe4aa2). */
   confirm_policy: OrchestrationConfirmPolicy;
+  /** 미션 대화의 사용자 chat 옵션 — 서버가 항상 정규화해 보낸다(티켓 9cfd8161). */
+  user_chat_mode: OrchestrationUserChatMode;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

@@ -53,6 +53,7 @@ import type {
   PairingTokenMint,
   PairingTokenSafe,
   AgentManagerCommandKind,
+  AgentManagerCommandOutcome,
   AgentManagerCommandResult,
   ManagedAgentCreateBody,
   Agent,
@@ -98,6 +99,7 @@ import type {
   OrchestrationRepoRef,
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
+  OrchestrationUserChatMode,
   OrchestrationStepStatus,
 } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
@@ -1128,7 +1130,10 @@ export const api = {
     name: string;
     description?: string;
     prompt?: string;
-    target_agent_id: string;
+    /** 레거시 단일 대상. 신규 코드는 `target_agent_ids` 를 쓴다 (티켓 fc3906c5). */
+    target_agent_id?: string;
+    /** 대상 에이전트 전체 — 트리거 1회가 각각에 대해 독립 run 을 만든다. */
+    target_agent_ids?: string[];
     schedule_cron?: string;
     trigger?: string;
     trigger_label?: string;
@@ -1147,6 +1152,8 @@ export const api = {
       description?: string;
       prompt?: string;
       target_agent_id?: string;
+      /** 대상 전체 교체 — 배열이 오면 단일 필드보다 우선한다 (티켓 fc3906c5). */
+      target_agent_ids?: string[];
       schedule_cron?: string;
       trigger?: string;
       trigger_label?: string;
@@ -1162,8 +1169,17 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/actions/${id}?${params.toString()}`, { method: 'DELETE' });
   },
+  // fan-out (티켓 fc3906c5): run_id/room_id/prompt 는 첫 run 을 가리키고,
+  // runs[] 가 대상별 run 전체, failures[] 가 디스패치에 실패한 대상이다.
   runAction: (id: string) =>
-    request<{ run_id: string; room_id: string; prompt: string }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
+    request<{
+      run_id: string;
+      room_id: string;
+      prompt: string;
+      batch_id: string;
+      runs: Array<{ run_id: string; agent_id: string; room_id: string }>;
+      failures: Array<{ agent_id: string; error: string }>;
+    }>(`/actions/${id}/run`, { method: 'POST', body: '{}' }),
   listActionRuns: (id: string, workspaceId: string, limit = 20) => {
     const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(limit) });
     return request<ActionRun[]>(`/actions/${id}/runs?${params.toString()}`);
@@ -1685,6 +1701,13 @@ export const api = {
     request<AgentManagerCommandResult>(
       `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/command`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  // ticket 40110b64 — 위 디스패치가 돌려준 command_id 의 ack 결과 조회.
+  // 202 는 수락 신호일 뿐이므로, 완료 판정은 반드시 이 조회의 state 로 한다.
+  getAgentManagerCommandOutcome: (commandId: string) =>
+    request<AgentManagerCommandOutcome>(
+      `/admin/agent-manager/commands/${encodeURIComponent(commandId)}`,
     ),
 
   // Create an agent identity that the manager will spawn. Differs from the
@@ -2365,6 +2388,8 @@ export const api = {
     graph_enabled?: boolean;
     /** 사용자 확인 강도(티켓 5dbe4aa2). graph_enabled 가 켜져야 실제로 동작한다. */
     confirm_policy?: OrchestrationConfirmPolicy;
+    /** 미션 대화에서 사람이 발화할 수 있는가(티켓 9cfd8161). 기본 'open'. */
+    user_chat_mode?: OrchestrationUserChatMode;
     /** Brief the orchestrator immediately instead of leaving the mission a draft. */
     start?: boolean;
   }) => request<OrchestrationMissionDetail>('/orchestration/missions', { method: 'POST', body: JSON.stringify(data) }),
@@ -2387,6 +2412,14 @@ export const api = {
       step_timeout_minutes?: number;
       graph_enabled?: boolean;
       confirm_policy?: OrchestrationConfirmPolicy;
+      /**
+       * 미션 대화의 사용자 chat 옵션(티켓 9cfd8161).
+       *
+       * 다른 브리핑 필드와 달리 **running 미션에서도 단독 PATCH 가 허용된다** — 서버의
+       * draft 잠금(touchesBrief)에서 빠져 있다. 다만 브리핑 필드를 함께 실어 보내면
+       * running 미션에서는 그쪽이 409 를 내므로, 실행 중 변경은 이 필드만 보낼 것.
+       */
+      user_chat_mode?: OrchestrationUserChatMode;
     },
   ) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}`, {

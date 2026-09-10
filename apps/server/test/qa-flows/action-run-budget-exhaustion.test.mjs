@@ -26,7 +26,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_ACTION_BUDGET_EXHAUSTION_PORT || '7912';
+process.env.PORT = process.env.QA_ACTION_BUDGET_EXHAUSTION_PORT || '0';
 
 test('Action retry blocked by an exhausted workspace run-budget surfaces as exhaustion and resumes the source ticket', async (t) => {
   step('Boot app + MCP');

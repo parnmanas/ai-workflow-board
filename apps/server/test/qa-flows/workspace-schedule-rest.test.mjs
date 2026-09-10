@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createUser } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.WS_SCHED_REST_PORT || '7843';
+process.env.PORT = process.env.WS_SCHED_REST_PORT || '0';
 
 function makeClient(port, token) {
   const base = `http://localhost:${port}/api/workspace-schedules`;

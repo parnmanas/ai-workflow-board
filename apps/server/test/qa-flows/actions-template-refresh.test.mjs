@@ -21,7 +21,7 @@ import { createWorkspace } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_ACTIONS_REFRESH_PORT || '7904';
+process.env.PORT = process.env.QA_ACTIONS_REFRESH_PORT || '0';
 
 const REFRESHED = ['todo_workflow', 'plan_workflow', 'in_progress_workflow'];
 const CUSTOM_CONTENT = `# To Do — Custom workflow with operator tweaks

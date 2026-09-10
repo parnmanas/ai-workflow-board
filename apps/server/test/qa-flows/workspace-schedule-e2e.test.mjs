@@ -39,7 +39,7 @@ const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
 // idempotency / duplicate-room checks racy. The CRUD + runOnce methods work
 // regardless of the tick being planted.
 process.env.WORKSPACE_SCHEDULER_ENABLED = 'false';
-process.env.PORT = process.env.WS_SCHED_E2E_PORT || '7844';
+process.env.PORT = process.env.WS_SCHED_E2E_PORT || '0';
 
 const TASK_PROMPT = 'E2E: run the scheduled task.';
 

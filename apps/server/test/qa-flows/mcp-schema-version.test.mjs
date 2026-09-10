@@ -14,7 +14,7 @@ import {
   createApiKey,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_MCP_SCHEMA_PORT || '7809';
+process.env.PORT = process.env.QA_MCP_SCHEMA_PORT || '0';
 
 test('MCP initialize without experimental.awb/schemaVersion is rejected with code -32000', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });

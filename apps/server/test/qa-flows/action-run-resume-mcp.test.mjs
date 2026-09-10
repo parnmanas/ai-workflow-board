@@ -36,7 +36,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_ACTION_RESUME_PORT || '7908';
+process.env.PORT = process.env.QA_ACTION_RESUME_PORT || '0';
 
 // Find the single run whose id is `runId` from a list_action_runs payload.
 function findRun(runs, runId) {

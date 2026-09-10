@@ -17,7 +17,7 @@ function fakeRes() {
 }
 
 test('agent workspace mutation stores explicit global scope as null', async (t) => {
-  const { app, modules } = await bootApp({ port: 7897 });
+  const { app, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const ws = await createWorkspace(app, modules.getDataSourceToken, 'global-mutation');

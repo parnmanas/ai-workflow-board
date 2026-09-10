@@ -39,8 +39,9 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-// Unique port slot — benchmark-scoring uses 7824, unpend-trigger 7836.
-process.env.PORT = process.env.QA_BENCHMARK_DISPATCH_PORT || '7825';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_BENCHMARK_DISPATCH_PORT || '0';
 
 test('benchmark dispatch: create_benchmark_run wakes candidates; review landing wakes evaluators', async (t) => {
   step('Boot NestJS app + benchmark_mode kanban');

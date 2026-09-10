@@ -30,7 +30,7 @@ process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), __testDbName);
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createWorkspace, createUser } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_CHAT_ATTACH_PORT || '7831';
+process.env.PORT = process.env.QA_CHAT_ATTACH_PORT || '0';
 
 // 8 bytes of "hello!\n" base64 — minimal valid payload.
 const TINY_TXT = Buffer.from('hello!\n').toString('base64');

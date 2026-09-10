@@ -1,22 +1,34 @@
 // 공용 NestFactory 부팅 헬퍼.
 //
 // bootApp() — QA 테스트용 전체 HTTP 부팅. 모든 QA 테스트는 독립적으로 실행될
-// 수 있도록 각자 고유 포트에 자신만의 NestJS 앱을 부팅한다. 이 모듈은
+// 수 있도록 OS 가 배정한 빈 포트에 자신만의 NestJS 앱을 부팅한다. 이 모듈은
 // proxy-passthrough.test.mjs / chat-roundtrip.test.mjs에 인라인으로 중복돼
 // 있던 부팅/모듈로드 코드를 하나로 모은 것이다.
 //
-// 패턴: `const { app, port, modules } = await bootApp({ port: 7800 });`
+// 패턴: `const { app, port, modules } = await bootApp({ port: 0 });`
 // 이후 파일 끝에서 `t.after(() => app.close())` + `exitAfterTests()`.
 //
 // `port: 0` 을 넘기면 OS 가 빈 포트를 골라주고, 반환된 `port` 는 실제로 바인딩된
 // 포트다 — 고정 포트를 쓰지 않으므로 같은 파일이 여러 번 부팅해도 앞 서버가
 // 아직 소켓을 놓지 못한 상태와 경합하지 않는다(ticket 6a9a3fe4). 한 파일이 같은
 // 고정 포트를 두 번 이상 바인딩해야 한다면 그건 `port: 0` 을 써야 한다는 신호다.
+// `BASE_PORT + n` 이나 `parseInt(process.env.PORT, 10) + n` 으로 번호를 파생하는
+// 것은 답이 아니다 — 그 번호는 소스 검색에 잡히지 않고, 아래에서 이 함수가 매
+// 부팅마다 process.env.PORT 를 실제 바인딩 포트로 덮어쓰기 때문에 두 번째
+// 파생부터는 의도한 번호에서 밀린다 (ticket 5db0964a).
+//
+// 고정 리터럴로 **선언**하는 것도 답이 아니다 — 사람이 손으로 유지하는 포트
+// 대장은 반드시 어긋난다. f2d82793 착수 시점 실측으로 152 개 파일이 선언한
+// 고유값 105 개 중 32 개가 이미 중복이었다(최다 7842 는 7 개 파일 공유).
+// test/boot-port-guard.test.mjs 가 파생과 고정 리터럴을 모두 정적으로 막고,
+// test/boot-concurrent-sessions.test.mjs 가 두 세션 동시 부팅을 실제 프로세스로
+// 검증한다.
 //
 // bootAppModuleOnly() — HTTP listen 없이 DI 그래프만 인스턴스화하는 부팅
 // (아래 자체 doc comment 참고). nest-app-boot-smoke.test.mjs가 사용한다.
 
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,7 +90,10 @@ async function prepareIsolatedPgSchema(schema) {
   traceEvent('pg-schema-isolated', { schema });
 }
 
-export async function bootApp({ port = 7800, logger = false } = {}) {
+// 기본값이 0 인 것은 의도다 — 인자를 잊은 호출자가 조용히 고정 포트를 잡는 대신
+// OS 가 고른 빈 포트를 받게 한다. 예전 기본값 7800 은 아무도 안 쓰는 죽은 값이면서
+// (무인자 호출 0건) 실수 한 번이면 곧바로 겹침을 만드는 지뢰였다(ticket f2d82793).
+export async function bootApp({ port = 0, logger = false } = {}) {
   process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
   process.env.NODE_ENV = 'test';
   process.env.MCP_DEV_MODE = process.env.MCP_DEV_MODE || 'true';
@@ -196,6 +211,27 @@ export async function bootAppModuleOnly({ logger = false } = {}) {
   const { NestFactory } = await import('@nestjs/core');
   const { AppModule } = await import('file://' + path.join(DIST_ROOT, 'app.module.js'));
   return NestFactory.create(AppModule, { logger, abortOnError: false });
+}
+
+// 빈 포트를 미리 하나 골라 돌려준다 — **최후의 수단**이다.
+//
+// 기본은 언제나 `bootApp({ port: 0 })` 이다: OS 가 빈 포트를 고르고 바인딩된
+// 번호를 그대로 돌려주므로 고를 때와 잡을 때 사이에 틈이 없다. 이 함수는 포트를
+// env 로만 받고 서버 핸들을 노출하지 않아 **실제 바인딩 포트를 회수할 방법이
+// 없는** 대상(예: dist/mcp-server.js 의 startHttp)에만 쓴다.
+//
+// 한계를 분명히 해둔다: probe 를 닫은 뒤 대상이 그 번호를 잡기까지 아주 짧은
+// 창이 있어 원리적으로 경합할 수 있다(TOCTOU). 그래도 고정 리터럴과 달리
+// 동시에 도는 다른 세션이 같은 번호를 **선언**해두는 일은 없어진다.
+export async function findFreePort() {
+  const probe = net.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '0.0.0.0', resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
 }
 
 export async function closeTestApp(app) {

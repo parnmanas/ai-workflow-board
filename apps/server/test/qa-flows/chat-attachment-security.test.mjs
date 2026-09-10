@@ -34,7 +34,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createWorkspace, createUser, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_CHAT_ATTACH_SEC_PORT || '7832';
+process.env.PORT = process.env.QA_CHAT_ATTACH_SEC_PORT || '0';
 
 // Real PNG signature + a couple of IHDR bytes — sniffer matches "image/png".
 const FAKE_PNG = Buffer.from([

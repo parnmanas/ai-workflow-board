@@ -36,7 +36,7 @@ import { setupKanbanScene, createAgent, createTicket } from '../helpers/fixtures
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_INFLIGHT_REPLAY_ANY_SOURCE_PORT || '7862';
+process.env.PORT = process.env.QA_INFLIGHT_REPLAY_ANY_SOURCE_PORT || '0';
 
 /** Bounded poll for an ActivityLog row matching `where` — mirrors the
  *  VirtualAgent._waitOnBuffer pattern (tick + deadline), just against the DB

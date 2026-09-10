@@ -56,6 +56,7 @@ import { Agent } from '../entities/Agent';
 import { ApiKey } from '../entities/ApiKey';
 import { Credential } from '../entities/Credential';
 import { ActivityService } from './activity.service';
+import { actionTargetAgentIds } from '../common/action-targets';
 
 export type RepoScope = DataSource | EntityManager;
 
@@ -791,7 +792,10 @@ export class WorkspaceMoveService {
     if (apply) {
       const created = await repo.save(repo.create({
         workspace_id: targetWsId, board_id: null, name: src.name, description: src.description,
-        prompt: src.prompt, target_agent_id: src.target_agent_id, schedule_cron: src.schedule_cron,
+        // 대상은 두 컬럼을 함께 복사한다 (티켓 fc3906c5) — 배열을 빠뜨리면
+        // 다중 대상 Action이 복사되면서 조용히 대표 대상 하나짜리로 줄어든다.
+        prompt: src.prompt, target_agent_id: src.target_agent_id,
+        target_agent_ids: src.target_agent_ids, schedule_cron: src.schedule_cron,
         trigger: src.trigger, trigger_label: src.trigger_label, enabled: src.enabled, max_runs: src.max_runs,
       }));
       destId = created.id;
@@ -1137,15 +1141,23 @@ export class WorkspaceMoveService {
   }
 
   /**
-   * (D) Actions in workspaces OTHER than dest whose `target_agent_id` = this
-   * agent become cross-workspace after the move. Actions are operator config
-   * (not auto-migrated, to avoid duplicating scheduled jobs), so they are
-   * surfaced as warnings only.
+   * (D) Actions in workspaces OTHER than dest that target this agent become
+   * cross-workspace after the move. Actions are operator config (not
+   * auto-migrated, to avoid duplicating scheduled jobs), so they are surfaced
+   * as warnings only.
+   *
+   * 대상 판정은 `target_agent_id` 컬럼 매칭이 아니라
+   * `actionTargetAgentIds()` 로 한다 (티켓 fc3906c5). 다중 대상 Action에서 이
+   * 에이전트가 **대표(첫 원소)가 아닌** 위치에 있으면 컬럼 매칭으로는 안 잡혀,
+   * 정작 경고가 필요한 cross-workspace 상황이 조용히 넘어간다. 대상 배열은 JSON
+   * 문자열이라 SQL 로 정확히 매칭하기 어렵고 Action 행 수는 작으므로, 전부 읽어
+   * 메모리에서 정확히 거른다.
    */
   private async warnForeignAgentActions(
     mgr: RepoScope, agent: Agent, targetWsId: string, items: MovePreviewItem[],
   ): Promise<void> {
-    const actions = await mgr.getRepository(Action).find({ where: { target_agent_id: agent.id } });
+    const allActions = await mgr.getRepository(Action).find();
+    const actions = allActions.filter((a) => actionTargetAgentIds(a).includes(agent.id));
     for (const a of actions) {
       if ((a.workspace_id || '') === targetWsId) continue; // already lands in dest — fine
       items.push({ kind: 'warn', entity: 'action', id: a.id, detail: `action "${a.name}" (ws ${a.workspace_id}) targets this agent — becomes cross-workspace; review/move it manually` });

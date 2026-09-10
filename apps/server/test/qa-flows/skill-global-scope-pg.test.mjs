@@ -18,7 +18,7 @@ import path from 'node:path';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
 import { setupKanbanScene } from '../helpers/fixtures.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_SKILL_PG_PORT || '7895', 10);
+const BASE_PORT = parseInt(process.env.QA_SKILL_PG_PORT || '0', 10);
 
 const { app, modules } = await bootApp({ port: BASE_PORT });
 after(() => { void app.close().catch(() => {}); });

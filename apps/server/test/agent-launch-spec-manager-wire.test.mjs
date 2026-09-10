@@ -21,7 +21,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
-process.env.PORT = process.env.AGENT_LAUNCH_SPEC_WIRE_PORT || '7946';
+process.env.PORT = process.env.AGENT_LAUNCH_SPEC_WIRE_PORT || '0';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const MANAGER_DIST = join(REPO_ROOT, 'apps/agent-manager/dist/lib/launch-spec.js');

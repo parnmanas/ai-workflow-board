@@ -30,8 +30,9 @@ import { createWorkspace } from '../helpers/fixtures.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// 포트 7883 — 다른 QA flow 와 미충돌(7877 consensus-refresh, 7881, 7899 등).
-process.env.PORT = process.env.QA_WORK_FOLDER_TPL_REFRESH_PORT || '7883';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_WORK_FOLDER_TPL_REFRESH_PORT || '0';
 
 const REFRESHED_NAMES = [
   'backlog_workflow',

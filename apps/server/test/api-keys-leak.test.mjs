@@ -15,7 +15,8 @@
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/.
-//   - Test port: 7795 (avoids collision with other leak tests and 7791/7792/7793/7794).
+//   - Test port: OS-assigned (declared 0). The per-file port ledger was retired
+//     in ticket f2d82793 — set this file's *_PORT env var to pin a number.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,12 +33,15 @@ process.env.DB_TYPE = process.env.DB_TYPE || 'sqlite';
 // + back-to-back npm `test` chain would otherwise share database/data.db).
 process.env.SQLJS_DB_PATH =
   process.env.SQLJS_DB_PATH || path.join(os.tmpdir(), `awb-leak-apikeys-${Date.now()}-${process.pid}.db`);
-process.env.PORT = process.env.API_KEYS_LEAK_PORT || '7795';
+process.env.PORT = process.env.API_KEYS_LEAK_PORT || '0';
 process.env.NODE_ENV = 'test';
 process.env.MCP_DEV_MODE = 'true';
 process.env.AGENT_DEV_MODE = 'true';
 
-const BASE_URL = makeBaseUrl(parseInt(process.env.PORT, 10));
+// 요청 포트가 0(OS 배정)이라 listen 전에는 URL 을 만들 수 없다 — 이 파일은
+// bootApp 을 쓰지 않고 NestJS 를 인라인으로 띄우므로, 바인딩된 뒤 실제 포트로
+// 직접 채운다(ticket f2d82793).
+let BASE_URL;
 
 async function loadServerModules() {
   const distRoot = path.join(__dirname, '..', 'dist');
@@ -72,6 +76,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
 
     app = await NestFactory.create(AppModule, { logger: false });
     await app.listen(parseInt(process.env.PORT, 10), '0.0.0.0');
+    BASE_URL = makeBaseUrl(app.getHttpServer().address().port);
 
     const authService = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());

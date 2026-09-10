@@ -27,7 +27,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import { setupKanbanScene, createAgent, createApiKey, createTicket } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.TEST_SERVER_PORT || '7930';
+process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
 test('get_my_tickets status=in_progress resolves root tickets via column kind, not stale legacy status', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });

@@ -24,7 +24,7 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
-process.env.PORT = process.env.QA_STEP_GATE_PORT || '7844';
+process.env.PORT = process.env.QA_STEP_GATE_PORT || '0';
 
 async function makeScenario(mcp, seedKey, { ws, board, agent, seed }) {
   const [payload] = seed.buildScenarioCreatePayloads({

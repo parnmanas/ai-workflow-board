@@ -33,9 +33,10 @@ import {
 import { McpClient } from './helpers/mcp-client.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
-const BASE_PORT = parseInt(process.env.QA_AGENT_FULLNAME_PORT || '7881', 10);
+// 부팅 포트는 OS 가 배정한다(0). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+const REQUESTED_PORT = parseInt(process.env.QA_AGENT_FULLNAME_PORT || '0', 10);
 
-const { app, modules } = await bootApp({ port: BASE_PORT });
+const { app, port, modules } = await bootApp({ port: REQUESTED_PORT });
 after(() => { void app.close().catch(() => {}); });
 const { getDataSourceToken, ActivityService } = modules;
 const ds = app.get(getDataSourceToken());
@@ -135,7 +136,7 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
 // ─── User (pending) tab (WRITE-side stamp), end-to-end via /mcp ──────────────
 test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async () => {
   const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, label: 'pend' });
-  const client = new McpClient({ baseUrl: `http://127.0.0.1:${BASE_PORT}`, apiKey: key.raw_key });
+  const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const pendTicket = await createTicket(app, getDataSourceToken, {
@@ -165,7 +166,7 @@ test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async (
 // persisted row carry the canonical name.
 test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/<Agent>', async () => {
   const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, label: 'upd-pend' });
-  const client = new McpClient({ baseUrl: `http://127.0.0.1:${BASE_PORT}`, apiKey: key.raw_key });
+  const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const updTicket = await createTicket(app, getDataSourceToken, {
@@ -201,7 +202,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/
 test('Realtime board_update SSE: actor_name is canonical <Manager>/<Agent>', async () => {
   const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'sse-sub' });
   // No boardId → the board_update filter (`!id.boardId || …`) delivers all.
-  const sse = await openSseStream(BASE_PORT, key.raw_key, {});
+  const sse = await openSseStream(port, key.raw_key, {});
   after(() => sse.close());
 
   const activityService = app.get(ActivityService);

@@ -34,7 +34,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(__dirname, '..', 'dist');
 
-const BASE_PORT = parseInt(process.env.QA_ASSIGNEE_SOT_PORT || '7873', 10);
+const BASE_PORT = parseInt(process.env.QA_ASSIGNEE_SOT_PORT || '0', 10);
 process.env.PORT = String(BASE_PORT);
 
 test('role_assignments is SoT — flat assignee columns stay in lockstep (write-back + backfill)', async (t) => {

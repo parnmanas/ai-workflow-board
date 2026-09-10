@@ -29,7 +29,7 @@ import {
   createTicket,
 } from '../helpers/fixtures.mjs';
 
-process.env.PORT = process.env.QA_AUTO_ADVANCE_HALT_PORT || '7812';
+process.env.PORT = process.env.QA_AUTO_ADVANCE_HALT_PORT || '0';
 
 // Poll a ticket row until `predicate(row)` holds or the deadline passes.
 // The cascade runs off the async activityEvents listener, so there is no

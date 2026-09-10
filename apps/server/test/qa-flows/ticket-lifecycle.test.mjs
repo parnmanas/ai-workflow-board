@@ -23,7 +23,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_LIFECYCLE_PORT || '7801';
+process.env.PORT = process.env.QA_LIFECYCLE_PORT || '0';
 
 test('Ticket lifecycle: Todo → In Progress → Review → Done routes triggers by role', async (t) => {
   step('Boot NestJS app on test port');

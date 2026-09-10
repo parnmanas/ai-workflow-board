@@ -70,6 +70,7 @@ import type { ArtifactRefsService } from '../../artifact-refs/artifact-refs.serv
 import type { ClassificationBridgeService } from '../../outreach/classifier/classification-bridge.service';
 import type { OrchestrationRunnerService } from '../../orchestration/orchestration-runner.service';
 import type { OrchestrationMissionService } from '../../orchestration/orchestration-mission.service';
+import { OrchestrationMission as OrchestrationMissionEntity } from '../../../entities/OrchestrationMission';
 import type { OrchestrationTeamService } from '../../orchestration/orchestration-team.service';
 import type { AgentManagerCommandService } from '../../agent-manager/agent-manager-command.service';
 import type { OntologyLifecycleService } from '../../ontology/ontology-lifecycle.service';
@@ -279,6 +280,9 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(User),
     dataSource.getRepository(Agent),
     dataSource,
+    // 발화 게이트가 미션의 `user_chat_mode` 를 읽는다(티켓 9cfd8161). standalone MCP 도
+    // 같은 판정을 받아야 하므로 여기서도 넘긴다 — 빠지면 MCP 경로만 옵션을 무시한다.
+    dataSource.getRepository(OrchestrationMissionEntity),
   );
   const roomMessagingService = new RoomMessagingService(
     dataSource.getRepository(ChatRoom),

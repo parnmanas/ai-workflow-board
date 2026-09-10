@@ -55,7 +55,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_WORKFLOW_STATE_PORT || '7822';
+process.env.PORT = process.env.QA_WORKFLOW_STATE_PORT || '0';
 
 test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns no-op, cross-board independent', async (t) => {
   step('Boot NestJS app on test port');

@@ -29,7 +29,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_LARGE_PORT || '7805';
+process.env.PORT = process.env.QA_LARGE_PORT || '0';
 
 const N_TICKETS = 200;
 const BULK_BUDGET_MS = 60_000; // 200 activities on SQLite should comfortably fit.

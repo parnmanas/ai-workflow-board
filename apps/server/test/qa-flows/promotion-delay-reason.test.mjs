@@ -33,7 +33,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_PROMOTION_DELAY_REASON_PORT || '7925';
+process.env.PORT = process.env.QA_PROMOTION_DELAY_REASON_PORT || '0';
 
 function systemMsgs(messages) {
   return messages.filter(m => m.sender_type === 'system');

@@ -46,8 +46,9 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-// Unique port slot (above unpend-emits-trigger 7836).
-process.env.PORT = process.env.QA_BASE_REPO_BIND_PORT || '7842';
+// 포트는 OS 가 배정한다(선언은 0) — 파일마다 번호를 손으로 고르던 대장은
+// 폐기됐다(ticket f2d82793). 특정 번호에 붙어야 할 때만 env 로 고정한다.
+process.env.PORT = process.env.QA_BASE_REPO_BIND_PORT || '0';
 
 test('base repo binding: env backfill reaches the wire; repo-less + unresolvable dispatch pends (ticket 8c3befa8)', async (t) => {
   step('Boot NestJS app on test port');

@@ -128,6 +128,63 @@ export function normalizeConfirmPolicy(value: unknown): ConfirmPolicy {
   return (CONFIRM_POLICIES as readonly string[]).includes(v) ? (v as ConfirmPolicy) : DEFAULT_CONFIRM_POLICY;
 }
 
+// ── 미션 대화의 사용자 chat 옵션(티켓 9cfd8161) ─────────────────────────────
+
+/**
+ * 이 미션의 **대화방에서 사람이 말할 수 있는가**를 정하는 미션 단위 옵션.
+ *
+ * - `open`(기본)        — 워크스페이스의 운영자면 참여자로 등록되지 않았어도 바로 발화.
+ * - `participants_only` — 참여자 명단에 있는 사람만 발화. 관전(읽기)은 그대로 열려 있다.
+ * - `off`               — 사람은 아무도 발화할 수 없다. 읽기 전용(관전)만 허용.
+ *
+ * 이 값이 **단일 기준(source of truth)** 이다. 방의 `ChatRoom.open_join` 은 여기서
+ * 파생된 캐시일 뿐이고(`openJoinForUserChatMode`), 발화 게이트는 방 플래그가 아니라
+ * 이 값을 직접 읽는다 — 그래야 옵션을 바꾼 순간 실행 중인 방에도 즉시 반영되고,
+ * 두 값이 어긋나도 미션 쪽 의도가 이긴다.
+ *
+ * 세 모드 모두 **읽기는 막지 않는다**. 관전 경로(`observer=true`)는 참여자가 아니어도
+ * 읽을 수 있고 이 옵션을 보지 않는다 — 요구사항이 "off 는 읽기 전용(관전)만 허용"이라
+ * 발화만 닫는 것이 이 옵션의 전 범위다.
+ *
+ * 이 옵션이 여는 것은 "참여자인가"까지다. `MANAGE_ACTIONS` 권한 검사는 `open` 에서도
+ * 매 발화마다 그대로 돈다(티켓 f6a0de0e) — 권한을 대신 열어주는 스위치가 아니다.
+ */
+export const USER_CHAT_MODES = ['open', 'participants_only', 'off'] as const;
+export type UserChatMode = (typeof USER_CHAT_MODES)[number];
+
+/**
+ * 기본 모드. 아래 `normalizeUserChatMode`의 fallback 이자 엔티티 컬럼 default 다.
+ *
+ * `open` 을 기본으로 둔 이유: 이 옵션이 도입되기 전 **새로 시작된 미션 방은 이미
+ * `open_join: true` 로 만들어지고 있었다**(티켓 995a9519). 기본을 좁히면 옵션을
+ * 추가했다는 이유만으로 이미 동작하던 방들의 계약이 바뀐다. 기존 동작을 그대로
+ * 이름 붙인 값이 기본이어야 한다.
+ */
+export const DEFAULT_USER_CHAT_MODE: UserChatMode = 'open';
+
+/**
+ * 저장된 값을 **읽을 때마다** 방어적으로 정규화한다 — `normalizeConfirmPolicy`와 같은 이유다.
+ *
+ * DDL 마이그레이션 대신 엔티티 default + `synchronize`로 컬럼을 추가하므로, 백엔드/타이밍에
+ * 따라 기존 행이 `''`이나 NULL 로 남을 수 있다. 그 값을 그대로 모드로 쓰면 어느 분기에도
+ * 걸리지 않아 대화가 영영 열리지 않는다 — 미지값·빈값은 전부 기본값으로 접는다.
+ */
+export function normalizeUserChatMode(value: unknown): UserChatMode {
+  const v = String(value ?? '').trim().toLowerCase();
+  return (USER_CHAT_MODES as readonly string[]).includes(v) ? (v as UserChatMode) : DEFAULT_USER_CHAT_MODE;
+}
+
+/**
+ * 이 모드에서 미션 방의 `ChatRoom.open_join` 이 켜져 있어야 하는가.
+ *
+ * `open_join` 은 채팅 레이어의 "참여자 명단에 없어도 된다" 플래그이므로 `open` 에서만 켠다.
+ * `participants_only`/`off` 는 참여자 요구를 유지해야 하니 끈다. 방 플래그를 미션 옵션에서
+ * **계산**해 두면 백필·옵션 변경·방 생성이 전부 같은 한 줄을 지나 서로 어긋날 수 없다.
+ */
+export function openJoinForUserChatMode(mode: UserChatMode): boolean {
+  return mode === 'open';
+}
+
 /** confirm 노드가 내려받을 수 있는 판정값. `EdgeCondition.verdict`와 같은 어휘를 쓴다. */
 export const CONFIRM_VERDICTS = ['pass', 'fail'] as const;
 export type ConfirmVerdict = (typeof CONFIRM_VERDICTS)[number];

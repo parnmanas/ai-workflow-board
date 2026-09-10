@@ -31,7 +31,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_RESPAWN_STORM_PORT || '7841';
+process.env.PORT = process.env.QA_RESPAWN_STORM_PORT || '0';
 
 let subCounter = 0;
 

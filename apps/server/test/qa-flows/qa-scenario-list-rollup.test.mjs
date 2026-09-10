@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, step, exitAfterTests } from '../helpers/boot.mjs';
 
-process.env.PORT = process.env.QA_LIST_ROLLUP_PORT || '7843';
+process.env.PORT = process.env.QA_LIST_ROLLUP_PORT || '0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', '..', 'dist');

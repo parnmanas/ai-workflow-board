@@ -41,7 +41,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
-process.env.PORT = process.env.QA_FOCUS_SELECTOR_PORT || '7823';
+process.env.PORT = process.env.QA_FOCUS_SELECTOR_PORT || '0';
 
 test('WorkflowFocusSelector — emit gate + promotion gate + ranking + isolation', async (t) => {
   // node:test's spec/tap reporters swallow inner assertion messages and

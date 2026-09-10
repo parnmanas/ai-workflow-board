@@ -27,7 +27,7 @@ import {
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-process.env.PORT = process.env.QA_SINGLE_CONCURRENCY_PORT || '7806';
+process.env.PORT = process.env.QA_SINGLE_CONCURRENCY_PORT || '0';
 
 const TICKETS = 3;
 const CAP = 3;
