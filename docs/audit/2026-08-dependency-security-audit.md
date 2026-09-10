@@ -2106,3 +2106,100 @@ lockfile 은 수정 전 `main` 과 blob 동일(`37538a2e`)이라 당연한 결�
 PR #8 은 여전히 열려 있고 `CONFLICTING` 이며, 내용은 이미 정규 병합 경로로 배포
 브랜치에 도달했다. 남은 조치는 닫는 것뿐이고 코드 영향은 없다 — 이번에도 운영자
 판단으로 남긴다.
+
+## 재검증 로그 — 2026-09-11 (`main` @ `ef98b93b`)
+
+**`main` 은 깨끗해졌고, 배포 브랜치는 아직 아니다.** 어제(09-10) 고친 7건이 PR #9
+로 `main` 에 들어왔고(`ef98b93b`, 병합 2026-09-10T07:37+09:00), 오늘 재검증에서
+`main` 은 `--audit-level=moderate` **0건**, 내려서 `--audit-level=low` 로도
+**0건**이었다(패키지 538개 / 버전 579개, 출처 npm). 반면
+`production.private`(`0ddec72f`) 은 **어제와 똑같은 7건을 그대로 안고 있다.**
+
+### 이번 주기의 핵심 — 드리프트가 "없음" 에서 "있음" 으로 바뀌었다
+
+여태 재검증에서 `production.private` 는 lockfile 이 `main` 과 blob 동일이라
+"드리프트 없음 = 결론 승계" 로 끝났다. **오늘부터는 아니다.** 의존성 표면 자체가
+갈라졌다:
+
+| 파일 | `production.private` | `main` | |
+|---|---|---|---|
+| `package.json` | `a3cc6b2c` | `17cbfa8b` | **DIFF** |
+| `package-lock.json` | `37538a2e` | `e464f1db` | **DIFF** |
+| `apps/server/package.json` | `eb3560ac` | `2fcf291c` | DIFF |
+| `apps/client/package.json` | `f3585229` | `ae324662` | DIFF |
+| `apps/agent-manager/package.json` | `0161cfdf` | `0161cfdf` | SAME |
+
+앞의 둘이 실제 취약점 축이다. 루트 `package.json` 차이는 정확히 **어제의 override
+수정분**이다 — `multer ^2.2.0 → ^2.3.0`, `hono ^4.13.5` 신규,
+`cosmiconfig → js-yaml ^4.3.2` 신규. 배포 브랜치에는 이 세 줄이 없으므로 lockfile 도
+수정 전 상태 그대로다.
+
+`audit-deploy-branch-deps` 결과는 **FAIL — moderate 이상 7건**, 어제 `main` 에서
+봤던 것과 정확히 같은 목록이다:
+
+- `[high] multer` 2.2.0 — DoS 3건 (GHSA-wc9g-mqfw-jrwm / GHSA-qfvm-cv95-jqjf / GHSA-535w-7cp7-47q4)
+- `[high] js-yaml` 4.3.1 — `maxTotalMergeKeys` CPU 소진 (GHSA-2883-xcg3-v3hh)
+- `[moderate] hono` 4.13.0 — `toSSG()` 경로 탈출 / `parseBody()` 메모리 소진 / 쿼리 파서 differential (GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc, GHSA-crvj-82cr-hjcx)
+
+### 알람은 이미 울리고 있다 — 그리고 병합 전까지 계속 붉다
+
+`main` 의 **정기(schedule) CI 가 어제부터 실패 중**이고, 오늘 원인을 스텝 단위로
+확인해 두었다. 두 번의 실패는 원인이 서로 다르다:
+
+- run `34332063974` (09-09 08:58Z) — 실패 스텝 **`취약점 감사`**. 즉 그 시점엔
+  `main` 자신이 취약했다(7건이 막 공개된 직후).
+- run `34457959150` (09-10 08:57Z) — 앞의 오프라인 가드 5종과 `취약점 감사` 는 전부
+  **success**, 실패는 오직 **`배포 브랜치 lockfile 재감사 (schedule 전용)`** 하나다.
+
+두 번째 run 은 이미 병합된 `ef98b93b` 위에서 돌았다. 다시 말해 **`main` 의 야간
+CI 가 지금 붉은 이유는 100% `production.private` 때문**이며, 그 브랜치를 갱신하기
+전까지 매일 밤 같은 자리에서 계속 실패한다. 이건 게이트 고장이 아니라 게이트가
+설계대로 작동하는 모습이다 — `audit-deploy-branch-deps` 는 `if: github.event_name
+== 'schedule'` 이라 push/PR 에서는 돌지 않으므로, 배포 브랜치의 시간축 취약점을
+잡아 주는 축은 이 cron 하나뿐이다.
+
+### 조치 — 릴리스 PR 을 열어 두었다 (병합은 하지 않음)
+
+`production.private` 를 고치는 방법은 lockfile 을 그 브랜치에서 따로 만지는 게
+아니라 **`main` 을 정규 릴리스 경로로 병합하는 것**이다. 수정본이 이미 `main` 에
+있고, 두 브랜치 차이는 226개 파일인데 **배포 브랜치에만 있는 파일은
+`.github/workflows/deploy.yml` 하나뿐**이라 병합이 그것을 지우지 않는다.
+
+다만 `production.private` 로의 **push** 는 `deploy.yml` 을 태워 GHCR 이미지 빌드 +
+NAS SSH 배포까지 자동 실행하는 되돌리기 어려운 외부 조작이다. 그래서 이번에도
+감사 런이 병합을 직접 하지는 않는다. 대신 한 단계 앞까지만 진행했다 —
+`main` → `production.private` **릴리스 PR 을 열어 두었다.** `deploy.yml` 의 트리거를
+직접 확인한 결과 `on: push: branches: [production.private]` 와 `workflow_dispatch`
+뿐이므로 **PR 을 여는 것만으로는 배포가 일어나지 않는다.** 배포를 트리거하는 것은
+merge 버튼이고, 그 클릭은 운영자 몫으로 남긴다.
+
+지난 주기의 교훈("정규 병합을 기다리면 감사 수정도 공짜로 따라간다")은 그대로
+유효하지만, 이번 건은 **기다리는 동안 실제 취약 트리가 배포돼 돌고 있다**는 점이
+다르다. 그래서 "기다린다" 가 아니라 "운영자가 즉시 판단할 수 있도록 PR 로 올려
+둔다" 로 한 칸만 옮겼다.
+
+### 게이트 결과 (`main` @ `ef98b93b`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 7건** (`production.private`, 위 참조)
+- `audit-install-scripts` — install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`) 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` / `audit-cron-coverage` — 통과
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **87/87** 통과 (16 + 16 + 39 + 6 + 6 + 4)
+
+root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 2.3.0,
+`@hono/node-server` 2.1.1, `hono` 4.13.7, `js-yaml` 4.3.2 / 5.4.1,
+`picomatch` 4.0.7.
+
+패키지 변경과 lockfile 재생성은 하지 않았다(`main` 이 이미 0건이라 고칠 것이 없다).
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. **새 `apps/server`
+테스트를 추가하지 않았으므로 `package.json` 의 `test` 스크립트에 등록할 대상도
+없다** — 기존 등록의 완전성은 `test-registration-completeness` 4건으로 확인했다.
+
+### 이월 (변동 없음) — PR #8 정리
+
+PR #8 은 여전히 열려 있고 `CONFLICTING` 이며, 내용은 이미 정규 병합 경로로 배포
+브랜치에 도달했다. 남은 조치는 닫는 것뿐이고 코드 영향은 없다 — 이번에도 운영자
+판단으로 남긴다.
