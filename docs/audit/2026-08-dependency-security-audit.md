@@ -2203,3 +2203,109 @@ root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 
 PR #8 은 여전히 열려 있고 `CONFLICTING` 이며, 내용은 이미 정규 병합 경로로 배포
 브랜치에 도달했다. 남은 조치는 닫는 것뿐이고 코드 영향은 없다 — 이번에도 운영자
 판단으로 남긴다.
+
+---
+
+## 재검증 로그 — 2026-09-12 (`main` @ `ef98b93b`)
+
+**`main` 은 이틀째 0건, 배포 브랜치는 이틀째 같은 7건이다.** 두 브랜치 모두 팁이
+어제와 같고(`main` `ef98b93b`, `production.private` `0ddec72f`), 재검증 결과도
+그대로다 — `main` 은 `--audit-level=moderate` **0건**, 내려서 `--audit-level=low`
+로도 **0건**(패키지 538개 / 버전 579개, 출처 npm). `production.private` 의
+lockfile 을 직접 감사하면 **FAIL — moderate 이상 7건**, 어제와 문자 그대로 같은
+목록이다:
+
+- `[high] multer` 2.2.0 — DoS 3건 (GHSA-wc9g-mqfw-jrwm / GHSA-qfvm-cv95-jqjf / GHSA-535w-7cp7-47q4)
+- `[high] js-yaml` 4.3.1 — `maxTotalMergeKeys` CPU 소진 (GHSA-2883-xcg3-v3hh)
+- `[moderate] hono` 4.13.0 — `toSSG()` 경로 탈출 / `parseBody()` 메모리 소진 / 쿼리 파서 differential (GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc, GHSA-crvj-82cr-hjcx)
+
+`main` 에는 고칠 것이 없으므로 **패키지 변경도 lockfile 재생성도 하지 않았다.**
+이 주기의 실질 산출물은 두 가지 정밀화다.
+
+### 1. 드리프트 축을 좁혔다 — 취약점 축은 루트 두 파일뿐이다
+
+어제 표는 워크스페이스 manifest 세 개가 모두 DIFF 라고만 적었다. 오늘 그 DIFF 의
+내용을 직접 열어 보니 **`apps/server` 와 `apps/client` 의 차이는 의존성이 아니다** —
+양쪽 다 `test` / `pretest` 스크립트의 **테스트 등록 줄** 차이이고, `main` 쪽에만
+`action-fanout`, `agent-manager-refresh-*`, `boot-port-guard`,
+`orchestration-mission-user-chat-mode` 등이 더 등록돼 있다. 즉 배포 브랜치가
+아직 안 받은 기능 커밋의 흔적이지 의존성 표면이 아니다. `dependencies` /
+`devDependencies` 블록은 두 브랜치가 동일하다.
+
+| 파일 | `production.private` | `main` | 판정 |
+|---|---|---|---|
+| `package.json` | `a3cc6b2c` | `17cbfa8b` | **DIFF — 취약점 축 (override 3줄)** |
+| `package-lock.json` | `37538a2e` | `e464f1db` | **DIFF — 취약점 축** |
+| `apps/server/package.json` | `eb3560ac` | `2fcf291c` | DIFF — `test` 등록 줄만 |
+| `apps/client/package.json` | `f3585229` | `ae324662` | DIFF — `pretest` 등록 줄만 |
+| `apps/agent-manager/package.json` | `0161cfdf` | `0161cfdf` | SAME |
+
+그래서 **배포 트리의 취약점은 정확히 루트 `overrides` 세 줄의 부재**로 환원된다 —
+`multer ^2.2.0`(→`^2.3.0` 미적용), `hono ^4.13.5` 없음, `cosmiconfig → js-yaml
+^4.3.2` 없음. 그 밖의 드리프트는 보안적으로 중립이다.
+
+### 2. 게이트 자체는 배포 브랜치에서도 최신이다 (오독 방지)
+
+"배포 브랜치가 취약하다" 를 "배포 브랜치의 감사 게이트가 낡았다" 로 읽지 않도록
+도구 쪽도 blob 으로 확인했다 — **전부 SAME** 이다:
+
+| 파일 | 판정 |
+|---|---|
+| `.github/workflows/ci.yml` | SAME (`79070ad3`) |
+| `scripts/audit-lockfile-advisories.mjs` | SAME (`563eefef`) |
+| `scripts/audit-deploy-branch-deps.mjs` | SAME (`6e9d30d7`) |
+| `apps/server/test/lockfile-advisory-audit-guard.test.mjs` | SAME (`a7b1d203`) |
+
+`0ddec72f` 에서 정규 병합으로 이미 넘어간 대로다(09-06 기록 참조). **드리프트는
+의존성 표면 한 곳에만 있고, 감시 장치는 양쪽 다 현행**이다.
+
+### 야간 CI — 예측대로 3일째, 같은 한 스텝에서만 붉다
+
+어제 기록한 신호("모든 스텝이 green 인데 `main` 야간 CI 만 붉으면 그건 배포 브랜치
+때문")가 그대로 재현됐다. 최신 schedule run `34581581878`(09-11 08:55Z)의 스텝별
+결과:
+
+- `install-script 허용목록 가드` … `취약점 감사 (advisory 조회, moderate 이상 실패)` — **6개 전부 success**
+- **`배포 브랜치 lockfile 재감사 (schedule 전용)` — failure** ← 유일한 실패
+- `발행 트리 재감사 (schedule 전용)` — skipped (앞 스텝 실패로 도달 못 함)
+
+09-09(`34332063974`, 그때는 `main` 자신이 취약)→09-10(`34457959150`)→09-11
+(`34581581878`) 로 3연속 실패이며, 09-10 부터는 원인이 배포 브랜치 하나로 고정됐다.
+**PR #11 이 병합되기 전까지 매일 밤 같은 자리에서 계속 실패한다** — 게이트 고장이
+아니라 설계대로의 동작이다. 오늘(09-12) 분 cron 은 아직 돌기 전이며, 같은 실패를
+예상한다.
+
+### 조치 — PR #11 은 여전히 `CLEAN`, 병합은 운영자 몫
+
+`main` → `production.private` 릴리스 PR **#11** 을 다시 확인했다:
+`mergeable: MERGEABLE`, `mergeStateStatus: **CLEAN**`. 어제 이후 리베이스나 충돌
+해소가 필요 없어졌거나 새로 생기지도 않았다는 뜻이고, **운영자가 merge 버튼만
+누르면 7건이 그대로 해소된다.** 이 감사 런은 이번에도 병합하지 않았다 —
+`production.private` 로의 push 는 `deploy.yml` 을 태워 GHCR 빌드 + NAS SSH 배포까지
+자동 실행하는 되돌리기 어려운 외부 조작이기 때문이다. 대신 PR #11 에 **2일째
+잔존 중임을 알리는 상태 코멘트만 남겼다**(코드·배포 영향 없음).
+
+### 게이트 결과 (`main` @ `ef98b93b`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` 상당 (`--lockfile` 로 `production.private` lockfile 직접 감사) — **FAIL 7건**
+- `audit-install-scripts` — install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`) 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — 배포 브랜치 1개 전부 커버
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **87/87** 통과 (16 + 16 + 39 + 6 + 6 + 4)
+
+root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 2.3.0,
+`@hono/node-server` 2.1.1, `hono` 4.13.7, `js-yaml` 4.3.2 / 5.4.1,
+`picomatch` 4.0.7 (`cosmiconfig` 8.3.6 하위의 js-yaml 이 4.3.2 로 끌어올려진 상태).
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. **새 `apps/server`
+테스트를 추가하지 않았으므로 `package.json` 의 `test` 스크립트에 등록할 대상도
+없다** — 기존 등록의 완전성은 `test-registration-completeness` 4건으로 확인했다.
+
+### 이월 (변동 없음)
+
+- **PR #10** — 09-11 감사 기록. 아직 열려 있고 `MERGEABLE`, CI 전 잡 green. 오늘 기록도 같은 브랜치에 얹었다.
+- **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외에 남은 조치 없음 — 운영자 판단.
