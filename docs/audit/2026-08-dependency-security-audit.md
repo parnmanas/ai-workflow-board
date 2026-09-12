@@ -2309,3 +2309,92 @@ root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 
 
 - **PR #10** — 09-11 감사 기록. 아직 열려 있고 `MERGEABLE`, CI 전 잡 green. 오늘 기록도 같은 브랜치에 얹었다.
 - **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외에 남은 조치 없음 — 운영자 판단.
+
+## 재검증 로그 — 2026-09-13 (`main` @ `ef98b93b`)
+
+정기 의존성 감사 3일째. **`main` 은 moderate/low 양쪽 모두 0건**이고, 배포 브랜치
+`production.private` @ `0ddec72f` 의 **7건은 사흘째 그대로**다. 양쪽 tip 모두 어제와
+동일해(`ef98b93b` / `0ddec72f`) 새로 유입된 advisory 도, 해소된 항목도 없다.
+
+이번 회차에서 **새로 코드/의존성을 고친 것은 없다** — `main` 에 고칠 것이 남아 있지
+않기 때문이다. 남은 위험은 전부 "이미 `main` 에서 고친 것이 배포 트리에 아직 도달하지
+않았다" 한 줄로 환원되며, 그 해소 경로는 PR #11 병합(운영자 권한)뿐이다.
+
+### 1. 드리프트 범위 재확인 — 여전히 루트 `overrides` 세 줄뿐
+
+manifest blob 이 DIFF 로 나오는 것만 보고 "의존성이 드리프트했다" 고 적지 않도록,
+올해 09-12 기록의 교훈대로 **내용을 파싱해** 비교했다. `dependencies` +
+`devDependencies` 객체를 JSON 으로 정규화해 비교한 결과:
+
+| 파일 | blob | `dependencies`/`devDependencies` 실내용 |
+|---|---|---|
+| `package.json` | DIFF | **IDENTICAL** (차이는 `overrides` 세 줄뿐) |
+| `apps/server/package.json` | DIFF | **IDENTICAL** (차이는 `test` 등록 줄뿐) |
+| `apps/client/package.json` | DIFF | **IDENTICAL** (차이는 `pretest` 등록 줄뿐) |
+| `apps/agent-manager/package.json` | SAME | — |
+
+즉 워크스페이스 manifest 의 DIFF 두 건은 **보안적으로 중립인 테스트 등록 줄**이고
+(main 쪽 기능 커밋들이 추가한 것), 취약점 축은 정확히 루트 `overrides` 의
+`multer ^2.3.0` / `hono ^4.13.5` / `cosmiconfig → js-yaml ^4.3.2` 부재로 환원된다.
+
+### 2. 게이트는 배포 브랜치에서도 현행 — 이번엔 9개 파일로 확대 확인
+
+"배포 트리가 취약하다" 를 "배포 트리의 감사 게이트가 낡았다" 로 오독하지 않도록,
+어제의 4개에서 **감사 도구 전체 9개로 범위를 넓혀** blob 을 비교했다. **전부 SAME**:
+
+`ci.yml`, `audit-lockfile-advisories.mjs`, `audit-deploy-branch-deps.mjs`,
+`lockfile-advisory-audit-guard.test.mjs`, `audit-ci-branch-coverage.mjs`,
+`audit-cron-coverage.mjs`, `audit-install-scripts.mjs`, `audit-published-deps.mjs`,
+`audit-action-pins.mjs`.
+
+**감시 장치는 양쪽 다 최신이고, 드리프트는 의존성 표면 한 곳에만 있다.**
+
+### 3. 야간 CI — 어제의 예측이 그대로 적중
+
+어제 기록은 "오늘(09-12) 분 cron 은 아직 돌기 전이며 같은 실패를 예상한다" 로 끝났다.
+그 run(`34683798507`, 09-12 08:38Z)이 돌았고, **예측대로 같은 한 스텝에서만 붉다**:
+
+- `install-script 허용목록 가드` … `취약점 감사 (advisory 조회, moderate 이상 실패)` — **6개 전부 success**
+- **`배포 브랜치 lockfile 재감사 (schedule 전용)` — failure** ← 유일한 실패
+- `발행 트리 재감사 (schedule 전용)` — skipped (앞 스텝 실패로 미도달)
+
+`34332063974`(09-09) → `34457959150`(09-10) → `34581581878`(09-11) →
+`34683798507`(09-12) 로 **4연속 실패**이며, 09-10 부터는 원인이 배포 브랜치 하나로
+고정됐다. 다시 확인하지만 이는 **게이트 고장이 아니라 설계대로의 동작**이고, PR #11
+이 병합되기 전까지 매일 밤 같은 자리에서 계속 실패한다.
+
+### 4. 조치 — PR #11 `CLEAN` 유지, 병합은 운영자 몫
+
+`main` → `production.private` 릴리스 PR **#11** 재확인: `mergeable: MERGEABLE`,
+`mergeStateStatus: **CLEAN**`. **병합 버튼 한 번으로 7건이 그대로 해소된다.**
+
+이 감사 런은 이번에도 병합하지 않았다 — `production.private` 로의 push 는 `deploy.yml`
+을 태워 GHCR 빌드 + NAS SSH 배포까지 자동 실행하는, 되돌리기 어려운 외부 조작이기
+때문이다. 대신 PR #11 에 **3일째 잔존 상태 코멘트**를 남겼다(코드·배포 영향 없음).
+
+### 게이트 결과 (`main` @ `ef98b93b`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 7건** (`production.private`, 목록 어제와 동일)
+- `audit-install-scripts` — install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`) 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — 배포 브랜치 1개 전부 커버
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **87/87** 통과 (16 + 16 + 39 + 6 + 6 + 4)
+
+root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 2.3.0,
+`@hono/node-server` 2.1.1, `hono` 4.13.7, `js-yaml` 4.3.2 / 5.4.1,
+`picomatch` 4.0.7, `cosmiconfig` 8.3.6(하위 js-yaml 이 4.3.2 로 상승).
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성도
+불필요했다(변경 없음). **새 `apps/server` 테스트를 추가하지 않았으므로 `package.json`
+의 `test` 스크립트에 등록할 대상도 없다** — 기존 등록의 완전성은
+`test-registration-completeness` 4건으로 확인했다.
+
+### 이월 (변동 없음)
+
+- **PR #10** — 09-11~09-12 감사 기록. 아직 열려 있고 `MERGEABLE`. 오늘 기록도 같은 브랜치에 얹었다.
+- **PR #11** — `main` → `production.private` 릴리스. `MERGEABLE`/`CLEAN`, 3일째 대기. **운영자 병합 필요.**
+- **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외 남은 조치 없음 — 운영자 판단.
