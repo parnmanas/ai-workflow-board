@@ -2487,3 +2487,96 @@ root `overrides` 는 의도한 버전으로 그대로 해석됐다 — `multer` 
 - **PR #10** — 09-11~09-14 감사 기록. 아직 열려 있고 `MERGEABLE`/`CLEAN`. 오늘 기록도 같은 브랜치에 얹었다.
 - **PR #11** — `main` → `production.private` 릴리스. `MERGEABLE`/`CLEAN`, 4일째 대기. **운영자 병합 필요.**
 - **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외 남은 조치 없음 — 운영자 판단.
+
+## 재검증 로그 — 2026-09-15 (`main` @ `ef98b93b`)
+
+정기 의존성 감사 5일째. 결론은 어제와 같다 — **`main` 은 moderate/low 양쪽 모두 0건**,
+배포 브랜치 `production.private` @ `0ddec72f` 의 **7건은 닷새째 그대로**. 양쪽 tip 모두
+어제와 동일하므로(`ef98b93b` / `0ddec72f`) 새로 유입된 advisory 도, 해소된 항목도 없다.
+
+이번 회차에도 **새로 고친 코드·의존성은 없다** — `main` 에 고칠 것이 남아 있지 않기
+때문이다. 남은 위험은 전부 "이미 `main` 에서 고친 것이 배포 트리에 아직 도달하지
+않았다" 한 줄로 환원되고, 해소 경로는 PR #11 병합(운영자 권한)뿐이다.
+
+### 1. 드리프트 범위 — 여전히 루트 `overrides` 세 줄뿐
+
+manifest blob 의 DIFF 를 곧바로 "의존성 드리프트" 로 적지 않도록 이번에도 **파싱해서**
+비교했다(`dependencies` + `devDependencies` 정규화 후 비교):
+
+| 파일 | blob | `dependencies`/`devDependencies` 실내용 |
+|---|---|---|
+| `package.json` | DIFF | **IDENTICAL** (차이는 `overrides` 세 줄뿐) |
+| `apps/server/package.json` | DIFF | **IDENTICAL** (차이는 `test` 등록 줄뿐) |
+| `apps/client/package.json` | DIFF | **IDENTICAL** (차이는 `pretest` 등록 줄뿐) |
+| `apps/agent-manager/package.json` | SAME | — |
+
+`overrides` 객체도 양쪽을 나란히 출력해 **이번 회차의 브랜치 tip 에서 다시 유도**했다
+(09-10 수정 커밋에서 물려받은 주장을 반복하지 않기 위함). 배포 브랜치에 없는 것은
+정확히 세 가지: `multer` 가 `^2.2.0` 에 머물러 있고(main 은 `^2.3.0`), `hono` 항목과
+`cosmiconfig → js-yaml ^4.3.2` 항목이 아예 부재하다. 나머지 다섯 항목
+(`@hono/node-server`, `@nestjs/swagger → js-yaml`, `picomatch` 3종)은 양쪽 동일하다.
+**취약점 축은 이 세 줄로 정확히 환원된다.**
+
+### 2. 게이트는 배포 브랜치에서도 현행 (9개 파일 재확인)
+
+"배포 트리가 취약하다" 를 "배포 트리의 감사 게이트가 낡았다" 로 오독하지 않도록 감사
+도구 9개의 blob 을 다시 비교했다 — **전부 SAME**: `ci.yml`,
+`audit-lockfile-advisories.mjs`, `audit-deploy-branch-deps.mjs`,
+`audit-ci-branch-coverage.mjs`, `audit-cron-coverage.mjs`,
+`audit-install-scripts.mjs`, `audit-published-deps.mjs`, `audit-action-pins.mjs`,
+`lockfile-advisory-audit-guard.test.mjs`.
+
+**감시 장치는 양쪽 다 최신이고, 드리프트는 의존성 표면 한 곳에만 있다.**
+
+### 3. 야간 CI — 예측 6연속 적중
+
+어제 기록의 예측("같은 한 스텝에서만 붉을 것")이 또 맞았다. 새 run `34830287705`
+(09-14 09:53Z) 의 `dependency audit` 잡 스텝별 결과:
+
+- 오프라인 가드 5개 + `취약점 감사 (advisory 조회, moderate 이상 실패)` — **6개 전부 success**
+- **`배포 브랜치 lockfile 재감사 (schedule 전용)` — failure** ← 유일한 실패
+- `발행 트리 재감사 (schedule 전용)` — skipped (앞 스텝 실패로 미도달)
+
+`34332063974`(09-09) → `34457959150` → `34581581878` → `34683798507` →
+`34749722678` → `34830287705`(09-14) 로 **6연속**이며, 09-10 이후 원인은 배포 브랜치
+하나로 고정됐다. 반복하지만 이는 **게이트 고장이 아니라 설계대로의 동작**이고,
+PR #11 이 병합되기 전까지 매일 밤 같은 자리에서 계속 실패한다. 따라서 **다른 스텝이
+모두 초록인 채 이 한 스텝만 붉은 야간 CI 는 "저장소 회귀" 가 아니라 "배포 브랜치가
+병합을 기다린다" 는 신호로 읽어야 한다.**
+
+### 4. 조치 — PR #11 `CLEAN` 유지, 병합은 운영자 몫
+
+`main` → `production.private` 릴리스 PR **#11** 재확인: `mergeable: MERGEABLE`,
+`mergeStateStatus: **CLEAN**`. **병합 버튼 한 번으로 7건이 그대로 해소된다.**
+
+이 감사 런은 이번에도 병합하지 않았다 — `production.private` 로의 push 는 `deploy.yml`
+을 태워 GHCR 빌드 + NAS SSH 배포까지 자동 실행하는, 되돌리기 어려운 외부 조작이기
+때문이다. 대신 PR #11 에 **5일째 잔존 상태 코멘트**를 남겼다(코드·배포 영향 없음).
+
+### 게이트 결과 (`main` @ `ef98b93b`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 7건** (`production.private`, 목록 어제와 동일: multer DoS 3건 · js-yaml 1건 · hono 3건)
+- `audit-install-scripts` — install-script 3개 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — 배포 브랜치 1개 전부 커버
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **87/87** 통과 (16 + 16 + 39 + 6 + 6 + 4)
+
+root `overrides` 의 실제 해석 버전도 lockfile 에서 다시 추출해 확인했다 — `multer`
+2.3.0, `hono` 4.13.7, `@hono/node-server` 2.1.1, `js-yaml` 4.3.2 / 5.4.1,
+`picomatch` 4.0.7, `cosmiconfig` 8.3.6(하위 js-yaml 이 4.3.2 로 상승). 전부 의도한
+범위 안이다.
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성도
+불필요했다(`main` 0건, 변경 없음). **새 `apps/server` 테스트를 추가하지 않았으므로
+`package.json` 의 `test` 스크립트에 등록할 대상도 없다** — 기존 등록의 완전성은
+`test-registration-completeness` 4건으로 확인했다.
+
+### 이월 (변동 없음)
+
+- **PR #10** — 09-11~09-15 감사 기록. 아직 열려 있고 `MERGEABLE`/`CLEAN`. 오늘 기록도 같은 브랜치에 얹었다.
+- **PR #11** — `main` → `production.private` 릴리스. `MERGEABLE`/`CLEAN`, 5일째 대기. **운영자 병합 필요.**
+- **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외 남은 조치 없음 — 운영자 판단.
