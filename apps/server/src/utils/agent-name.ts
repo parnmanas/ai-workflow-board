@@ -1,6 +1,6 @@
 // Server-side mirror of apps/client/src/utils/agentName.ts.
 //
-// CONTRACT + CHECKLIST: .claude/skills/awb-agent-display-name/SKILL.md — read it
+// CONTRACT + CHECKLIST: docs/runbooks/agent-display-name.md — read it
 // before adding any surface that renders an agent name. Rendering a bare
 // `agent.name` (or a raw agent id) is a bug: the same leaf name legitimately
 // exists under multiple managers, so the prefix is what disambiguates them.

@@ -315,7 +315,7 @@ needs a scale decision per the paragraph above before assuming
 ## 6. MCP tool registration path — exact files and steps
 
 Full checklist already exists as a project skill —
-`.claude/skills/awb-mcp-tool-wiring/SKILL.md` — verified below against the
+`docs/runbooks/mcp-tool-wiring.md` — verified below against the
 live source (no drift found; the skill's cited line numbers matched).
 
 **(a) Register the tool** — new file

@@ -1,9 +1,3 @@
-<!-- scripts/sync-agent-instructions.mjs가 CLAUDE.md에서 생성했습니다. 수동으로 편집하지 마세요. -->
-
-## Codex 전용 참고 사항
-
-Codex는 저장소 루트부터 현재 작업 디렉터리까지 AGENTS.md를 탐색합니다. 더 가까운 AGENTS.md에서 이 지침을 구체화할 수 있지만, 시스템 정책과 AWB 역할 정책이 항상 우선합니다.
-
 ## Project
 
 **AI Workflow Board (AWB)**
@@ -18,7 +12,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **MCP 호환**: @modelcontextprotocol/sdk 기반 Streamable HTTP 유지
 - **DB 호환**: SQLite(개발) + PostgreSQL(운영) 이중 지원 유지
 - **Agent 독립성**: AWB는 Agent의 내부 구현에 의존하지 않음 — MCP 인터페이스만 사용
-- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `.claude/skills/awb-agent-manager-release/SKILL.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Board/Workspace 별 CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
+- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Board/Workspace 별 CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
 
 ## Technology Stack
 
@@ -294,14 +288,17 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - 동기화는 **append-only**: 변경은 새 불변 버전을 추가할 뿐이고, assignment는 특정 버전을 핀하므로 이미 배정된 에이전트가 읽는 내용은 절대 바뀌지 않는다. `quarantined` 는 운영자 거부권이라 동기화가 되살리지 않는다.
 - 새 SKILL.md 레이아웃/스코프/동기화 규칙은 `docs/skills.md`, 스코프 모델 전반은 `docs/catalog-scopes.md`.
 
-## Project Skills
+## Development runbooks
 
-Skills live in `.claude/skills/<name>/SKILL.md` (added with the agent-harness work, ticket 040afa10):
+Longer procedures live in `docs/runbooks/` as plain Markdown, readable by every
+agent rather than only the one whose vendor directory they used to sit in. Each
+opens with a **When:** line saying what pulls you into it.
 
-- **awb-ticket-recovery** — stuck / never-dispatching ticket runbook (edge-triggered dispatch, terminal-column births, async create-dispatch, duplicate-instance check)
-- **awb-agent-manager-release** — agent-manager build-verify + same-PR SSE contract rule (버전은 publish 시 자동 계산 — 손 범프 금지)
-- **awb-field-wiring** — 5-touch-point checklist for Ticket JSON-array columns
-- **awb-mcp-tool-wiring** — 7-touch-point checklist for new MCP tool registration (TOOL_AUTHZ_TABLE tier classification, plus agent-manager ticket-ref-capture classification — skipping the former ships a tool that always denies, skipping the latter ships one whose card silently vanishes from chat)
-- **awb-agent-display-name** — the `<Manager>/<Agent>` display contract: 6 touch points for ANY surface that shows an agent (picker, roster, typing/status indicator, timeline, SSE frame, agent-facing prompt). Rendering a bare `agent.name` — or a raw agent id — is a bug: the same leaf name legitimately exists under multiple managers. **Read this before adding any agent picker or agent-name label.**
+- **[field-wiring](docs/runbooks/field-wiring.md)** — 5-touch-point checklist for Ticket JSON-array columns. Missing one makes the client receive a raw string or silently fail to save.
+- **[mcp-tool-wiring](docs/runbooks/mcp-tool-wiring.md)** — registering a new MCP tool. The `TOOL_AUTHZ_TABLE` tier decision and the agent-manager ticket-ref-capture classification are the two easy misses: skip the first and the tool always denies, skip the second and its card silently vanishes from chat.
+- **[agent-manager-release](docs/runbooks/agent-manager-release.md)** — build-verify for `apps/agent-manager` and the same-PR SSE contract rule. Versions are computed at publish time; never bump by hand.
+- **[agent-display-name](docs/runbooks/agent-display-name.md)** — the `<Manager>/<Agent>` display contract across all 6 surfaces that show an agent. Rendering a bare `agent.name`, or a raw agent id, is a bug: the same leaf name legitimately exists under several managers. **Read this before adding any agent picker or agent-name label.**
 
-`.claude/settings.json` carries the read-only permission allowlist generated via `/fewer-permission-prompts` — extend it there rather than ad-hoc allowing in session.
+`.claude/settings.json` stays Claude-specific on purpose — it is a permission
+allowlist for that CLI, not instructions, and has no cross-vendor equivalent.
+Extend it there rather than granting permissions ad hoc in a session.

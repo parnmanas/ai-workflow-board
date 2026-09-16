@@ -3011,7 +3011,7 @@ export class OrchestrationRunnerService {
    * Canonical `<Manager>/<Agent>` display for an agent id. EVERY user-visible
    * agent name the runner produces (timeline actor, dispatch message, prompt
    * roster) must come through here or resolveAgentDisplayMap — never through a
-   * bare `agent.name`. See .claude/skills/awb-agent-display-name.
+   * bare `agent.name`. See docs/runbooks/agent-display-name.md.
    */
   private async agentName(agentId: string | null | undefined): Promise<string> {
     if (!agentId) return '';

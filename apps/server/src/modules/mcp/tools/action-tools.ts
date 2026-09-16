@@ -336,7 +336,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       try {
         const runs = await actionsService.listRuns(action_id, workspace_id, limit ?? 20);
         // `<Manager>/<Agent>` 표시명은 배치로 한 번에 해석한다
-        // (.claude/skills/awb-agent-display-name — bare name 은 계약 위반이다:
+        // (docs/runbooks/agent-display-name.md — bare name 은 계약 위반이다:
         // 같은 leaf 이름이 여러 매니저 아래 존재할 수 있어서, 접두사가 없으면
         // 어느 호스트가 실행했는지 구분할 수 없다).
         const agentNames = await resolveAgentDisplayNamesByIds(
