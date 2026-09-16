@@ -23,6 +23,8 @@ import {
   type WorkNavGroupKey,
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
+import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
+import { describeSessionStatus, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 
 interface SidebarProps {
   overlay: boolean;
@@ -87,6 +89,9 @@ export default function Sidebar({
   const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey, boolean>>>({});
   const [visibleGroupCounts, setVisibleGroupCounts] = React.useState<Partial<Record<WorkNavGroupKey, number>>>({});
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
+  // Agent Session(CLI 직접 세션) — Chat 위에 오는 주 작업 표면. 권한이 없는 사용자에겐
+  // 섹션 자체를 그리지 않는다(요청도 하지 않는다).
+  const [visibleSessionCount, setVisibleSessionCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
   // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — 보드 스코프 버전은
@@ -107,12 +112,15 @@ export default function Sidebar({
 
   const workspaceBase = wsId ? `/ws/${wsId}` : '';
   const canAdmin = hasPermission('admin.access');
+  const canUseSessions = hasPermission('agent_sessions.use');
+  const { sessions: agentSessions, loading: agentSessionsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
 
   // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
   // chat-rooms-changed 이벤트로 rooms 배열만 갱신될 때는 wsId 가 그대로이므로
   // 이 로컬 state 가 리셋되지 않고 유지된다.
   React.useEffect(() => {
     setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
+    setVisibleSessionCount(SIDEBAR_ROOMS_BASE_COUNT);
     setVisibleGroupCounts({});
   }, [wsId]);
 
@@ -457,6 +465,11 @@ export default function Sidebar({
     );
   };
 
+  const activeSessionId = agentSessions.find((session) => location.pathname === `${workspaceBase}/sessions/${session.id}`)?.id ?? null;
+  const { visibleItems: displaySessions, hiddenItems: hiddenSessions } = paginateSidebarItems(agentSessions, visibleSessionCount, activeSessionId);
+  const showSessionsPager = agentSessions.length > SIDEBAR_ROOMS_BASE_COUNT;
+  const handleToggleSessionsPager = () =>
+    setVisibleSessionCount((count) => nextVisibleCount(count, agentSessions.length, hiddenSessions.length > 0));
   const activeRoomId = rooms.find((room) => location.pathname === `${workspaceBase}/chat/${room.id}`)?.id ?? null;
   const { displayRooms, hiddenRooms } = paginateSidebarRooms(rooms, visibleRoomCount, activeRoomId);
   // One source of truth once the counts have loaded. Taking the max of the
@@ -537,6 +550,91 @@ export default function Sidebar({
         aria-label="Primary navigation"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
+        {canUseSessions && (
+          <section aria-labelledby="sidebar-sessions-heading">
+            <div style={sectionHeaderStyle}>
+              <span id="sidebar-sessions-heading">Sessions</span>
+              <button
+                type="button"
+                aria-label="New session"
+                title="New session"
+                onClick={() => handleNavClick(`${workspaceBase}/sessions?new=1`)}
+                style={{
+                  width: 24,
+                  height: 24,
+                  border: 'none',
+                  borderRadius: 6,
+                  background: 'transparent',
+                  color: tokens.colors.textSecondary,
+                  cursor: 'pointer',
+                  fontSize: 17,
+                  lineHeight: 1,
+                }}
+              >
+                +
+              </button>
+            </div>
+
+            {renderNavItem({
+              key: 'all-sessions',
+              path: `${workspaceBase}/sessions`,
+              label: 'All sessions',
+              icon: '>_',
+              exact: true,
+            })}
+
+            <div aria-label="Agent sessions" style={{ paddingBottom: 4 }}>
+              {agentSessionsLoading && agentSessions.length === 0 ? (
+                <div style={subListTextStyle}>Loading sessions...</div>
+              ) : agentSessions.length === 0 ? (
+                <div style={subListTextStyle}>No sessions yet</div>
+              ) : (
+                displaySessions.map((session) => {
+                  const sessionPath = `${workspaceBase}/sessions/${session.id}`;
+                  const status = describeSessionStatus(session.status);
+                  const label = sessionDisplayTitle(session);
+                  return renderNavItem(
+                    {
+                      key: `session-${session.id}`,
+                      path: sessionPath,
+                      label,
+                      title: `${label} — ${session.agent_name} (${status.label})`,
+                      icon: status.live ? '●' : '○',
+                      active: location.pathname === sessionPath,
+                    },
+                    true,
+                  );
+                })
+              )}
+              {showSessionsPager && (
+                <button
+                  type="button"
+                  onClick={handleToggleSessionsPager}
+                  aria-expanded={hiddenSessions.length === 0}
+                  aria-label={
+                    hiddenSessions.length > 0
+                      ? `세션 더보기, ${hiddenSessions.length}개 더 보기`
+                      : '세션 목록 접기'
+                  }
+                  style={navRowStyle(false, true)}
+                  onMouseEnter={(event) => {
+                    event.currentTarget.style.background = tokens.colors.surfaceHover;
+                  }}
+                  onMouseLeave={(event) => {
+                    event.currentTarget.style.background = 'transparent';
+                  }}
+                >
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    {hiddenSessions.length > 0 ? `더보기 (${hiddenSessions.length})` : '접기'}
+                  </span>
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
+        {canUseSessions && <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border }} />}
+
         <section aria-labelledby="sidebar-chat-heading">
           <div style={sectionHeaderStyle}>
             <span id="sidebar-chat-heading">Chat</span>

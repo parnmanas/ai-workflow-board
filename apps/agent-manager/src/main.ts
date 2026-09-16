@@ -74,6 +74,7 @@ import {
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
+import { AgentSessionRunner } from './lib/agent-session-runner.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
   setRestOutbox,
@@ -584,6 +585,13 @@ async function runRuntime(
   // spawn_agent, drained by stop_agent, read by EventDispatcher to route
   // managed-agent-targeted events under the right identity.
   const managedAgentContexts = new ManagedAgentContextRegistry();
+  // Agent Session(CLI 직접 세션) — 세션당 ACP 어댑터 프로세스를 소유하고 스트림을
+  // 서버 트랜스크립트로 릴레이한다(docs/agent-sessions.md). 기존 chat/ticket
+  // 세션 매니저와 독립적이며 `agent_session_request` SSE 만 소비한다.
+  const agentSessionRunner = new AgentSessionRunner(config, {
+    idleMinutes: Number((config as any)?.agent_sessions?.idle_minutes) || undefined,
+    clientVersion: version,
+  });
   const runtimeSupervisor = new RuntimeSupervisor({
     rootDir: MANAGED_AGENTS_DIR,
     awbUrl: config.url,
@@ -648,7 +656,8 @@ async function runRuntime(
   const countInFlightSessions = (): number =>
     subagentManager._snapshot().length +
     chatSessionManager._snapshot().length +
-    ticketSessionManager._snapshot().length;
+    ticketSessionManager._snapshot().length +
+    agentSessionRunner.countInFlight();
   // ticket b831b896 round 2: updateChecker was constructed earlier (before
   // these session managers existed), so it's wired late via the setter
   // instead of a constructor opt — lets its periodic tick retry a
@@ -871,6 +880,7 @@ async function runRuntime(
       sessionLimitDeferStore,
       runtimeProfileOverride,
       runtimeSupervisor,
+      agentSessionRunner,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
@@ -1330,6 +1340,11 @@ async function runRuntime(
       await shutdownRuntimeProfiles();
     } catch (err: any) {
       log(`shutdown (runtime profiles): ${err?.message ?? err}`);
+    }
+    try {
+      await agentSessionRunner.stopAll(stopReason);
+    } catch (err: any) {
+      log(`shutdown (agent sessions): ${err?.message ?? err}`);
     }
     try {
       await runtimeSupervisor.stopAll();

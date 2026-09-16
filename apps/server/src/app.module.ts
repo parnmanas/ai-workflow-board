@@ -43,6 +43,7 @@ import { OutreachModule } from './modules/outreach/outreach.module';
 import { OrchestrationModule } from './modules/orchestration/orchestration.module';
 import { OntologyModule } from './modules/ontology/ontology.module';
 import { MigrationModule } from './modules/migration/migration.module';
+import { AgentSessionsModule } from './modules/agent-sessions/agent-sessions.module';
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { MigrationModule } from './modules/migration/migration.module';
     AdminModule,
     EventsModule,
     ChatRoomsModule,
+    AgentSessionsModule,
     ResourcesModule,
     ActionsModule,
     CredentialsModule,

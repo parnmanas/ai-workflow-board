@@ -38,6 +38,9 @@ import {
   TicketReadsClearedPayload,
   CliLoginProgressPayload,
   OntologyGraphProgressPayload,
+  AgentSessionRequestPayload,
+  AgentSessionUpdatePayload,
+  AgentSessionEventPayload,
 } from '../../common/types/stream-events';
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { EventDefinition, SubscriberIdentity } from './types';
@@ -1320,4 +1323,86 @@ export const EVENT_TYPES: EventDefinition[] = [
       timestamp: env.timestamp,
     }),
   },
+  // ───────── agent_session_request ─────────
+  // Agent Session(CLI 직접 세션): 서버 → agent-manager 제어 요청. chat_request 와
+  // 같은 방식으로 envelope 그대로(비-flatten) 소비하며, scope.agent_id 가 대상
+  // agent 이다 — 매니저 식별자 재작성(events.controller `effectiveIdentity`)이
+  // 관리 agent 로 넓혀 준다. 사용자에게는 절대 가지 않는다.
+  {
+    eventType: 'agent_session_request',
+    emitterEvent: 'agent_session_request',
+    map(event: any) {
+      const payload: AgentSessionRequestPayload = {
+        session_id: event.session_id,
+        workspace_id: event.workspace_id,
+        agent_id: event.agent_id,
+        owner_user_id: event.owner_user_id,
+        op: event.op,
+        runtime: event.runtime,
+        cwd: event.cwd ?? '',
+        native_session_id: event.native_session_id ?? null,
+        permission_policy: event.permission_policy ?? 'ask',
+        turn_id: event.turn_id,
+        text: event.text,
+        request_id: event.request_id,
+        option_id: event.option_id,
+        mode_id: event.mode_id,
+        issued_at: event.issued_at,
+      };
+      return {
+        payload,
+        scope: { agent_id: event.agent_id, workspace_id: event.workspace_id },
+        timestamp: event.issued_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+  },
+
+  // ───────── agent_session_update ─────────
+  // Agent Session 레코드 변경. UI 전용 — 세션 소유자에게만. flatten 되어 UI 가
+  // `session` 스냅샷을 그대로 상태에 넣는다(재조회 불필요).
+  {
+    eventType: 'agent_session_update',
+    emitterEvent: 'agent_session_update',
+    map(event: any) {
+      const payload: AgentSessionUpdatePayload = {
+        session: event.session,
+        reason: event.reason || 'updated',
+      };
+      return {
+        payload,
+        scope: { user_id: event.session?.owner_user_id, workspace_id: event.session?.workspace_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'agent_session_update', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── agent_session_event ─────────
+  // Agent Session 트랜스크립트 이벤트 1건(text 청크 / tool call / permission …).
+  // UI 전용 — 세션 소유자에게만. 매니저가 REST 로 append 한 행을 그대로 싣는다.
+  {
+    eventType: 'agent_session_event',
+    emitterEvent: 'agent_session_event',
+    map(event: any) {
+      const payload: AgentSessionEventPayload = {
+        session_id: event.session_id,
+        workspace_id: event.workspace_id,
+        owner_user_id: event.owner_user_id,
+        event: event.event,
+      };
+      return {
+        payload,
+        scope: { user_id: event.owner_user_id, workspace_id: event.workspace_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'agent_session_event', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
 ];

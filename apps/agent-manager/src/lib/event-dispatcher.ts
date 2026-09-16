@@ -8,6 +8,7 @@
 // fail closed and are logged.
 
 import { log } from './logging.js';
+import type { AgentSessionRunner, AgentSessionRequest } from './agent-session-runner.js';
 import { loadAgentInfo } from './config.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -942,6 +943,9 @@ export interface EventDispatcherDeps {
   /** Process-lifetime CLI override. undefined inherits the event snapshot;
    * null explicitly disables runtimes. Never persists to the server. */
   runtimeProfileOverride?: RuntimeProfileSpec | null;
+  // Agent Session(CLI 직접 세션) 러너 — `agent_session_request` SSE 를 처리한다.
+  // 선택적이라 러너 없는 하네스/테스트는 그 이벤트를 조용히 버린다.
+  agentSessionRunner?: AgentSessionRunner | null;
   fsBrowser?: FsBrowser | null;
   prompts?: PromptComposer | null;
   // ST-5b — handler for agent_manager_command SSE events. Optional so the
@@ -1003,6 +1007,7 @@ export class EventDispatcher {
   #worktreeManager: WorktreeManager | null;
   #runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
   #runtimeSupervisor: RuntimeSupervisor | null;
+  #agentSessionRunner: AgentSessionRunner | null;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -1212,6 +1217,7 @@ export class EventDispatcher {
     this.#worktreeManager = deps.worktreeManager ?? null;
     this.#runtimeProfileOverride = deps.runtimeProfileOverride;
     this.#runtimeSupervisor = deps.runtimeSupervisor ?? null;
+    this.#agentSessionRunner = deps.agentSessionRunner ?? null;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
@@ -1989,6 +1995,7 @@ export class EventDispatcher {
       case 'comment_mention':
       case 'fs_request':
       case 'agent_manager_command':
+      case 'agent_session_request':
         recordEvent(eventType, raw);
         break;
       default:
@@ -2011,7 +2018,35 @@ export class EventDispatcher {
         return this.#agentManagerCommandHandler
           ? this.#agentManagerCommandHandler.handle(raw)
           : undefined;
+      case 'agent_session_request':
+        return this.handleAgentSessionRequest(raw);
     }
+  }
+
+  /**
+   * Agent Session(CLI 직접 세션) 제어 요청. chat_request 와 같은 envelope-native
+   * 이벤트(ev.payload.*). 대상 agent 의 실행 컨텍스트(api_key / cwd / cli_home)를
+   * 해석해 러너에 넘긴다 — 컨텍스트가 없으면 러너가 서버에 error 로 남긴다.
+   */
+  async handleAgentSessionRequest(raw: string): Promise<void> {
+    if (!this.#agentSessionRunner) return;
+    let ev: any;
+    try {
+      ev = JSON.parse(raw);
+    } catch (err: any) {
+      log(`Failed to parse agent_session_request: ${err?.message ?? err}`);
+      return;
+    }
+    const payload = (ev?.payload ?? ev ?? {}) as AgentSessionRequest;
+    if (!payload.session_id || !payload.agent_id) return;
+    let agentContext = this.#resolveAgentContext(payload.agent_id);
+    agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
+    if (!agentContext) {
+      const missReason = this.#agentContextMissReason(payload.agent_id);
+      this.#reportAgentContextMiss('Agent session', missReason, payload.agent_id);
+      if (missReason === 'unmanaged') return; // 다른 매니저의 agent — 우리 일이 아니다
+    }
+    await this.#agentSessionRunner.handle(payload, agentContext);
   }
 
   async handleFsRequest(raw: string): Promise<void> {

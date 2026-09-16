@@ -42,6 +42,7 @@ AppModule
 ├── AdminModule             /api/admin/*   (admin gated)
 ├── EventsModule            /api/events/stream (SSE)
 ├── ChatRoomsModule         /api/chat-rooms/*
+├── AgentSessionsModule     /api/agent-sessions/* + /api/agent/sessions/*
 ├── ResourcesModule         /api/resources/*
 ├── CredentialsModule       /api/credentials/*
 ├── AgentLogsModule         /api/agent-logs/*
@@ -160,6 +161,13 @@ connection, and status state.
 - Imports: `TypeOrmModule.forFeature([Channel])`
 - Controllers: `ChannelsController`
 - Providers: `AuthGuard`, `PermissionGuard`
+
+### `AgentSessionsModule`
+- Imports: `TypeOrmModule.forFeature([AgentSession, AgentSessionEvent, Agent])`
+- Controllers: `AgentSessionsController` (`/api/agent-sessions/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
+- Providers: `AgentSessionsService`, `AuthGuard`, `PermissionGuard`, `AgentAuthGuard`
+- Exports: `AgentSessionsService`
+- Agent Session (CLI 직접 세션) — ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
 
 ### `ChatRoomsModule`
 - Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention])`, `SharedServicesModule`
