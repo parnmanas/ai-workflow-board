@@ -1158,24 +1158,33 @@ export async function requestManagerTriggerRepush(
 
 // ─── Agent Session (CLI 직접 세션) ──────────────────────────────────────────
 // 서버 contract: apps/server/src/modules/agent-sessions/agent-sessions-agent.controller.ts.
-// 매니저는 세션 agent 의 키(+ 매니저 키 fallback)로 ACP 스트림을 append 하고 세션
-// 레코드를 patch 한다. 라이브 스트림은 시간 민감 트래픽이라 outbox 에 넣지 않는다
-// (실패하면 로그만 — 다음 flush 가 이어 붙고, 트랜스크립트 유실은 UI 가 seq 갭으로
-// 알 수 있다). `agent_id` 는 dev 모드(AGENT_DEV_MODE, 키 검증 생략)에서 서버가
-// 호출자 identity 로 읽는다.
+// 매니저 자신의 키로 (1) list/history/open RPC 응답, (2) 라이브 스트림 중계,
+// (3) 상태 patch 를 보낸다. 라이브 트래픽은 시간 민감이라 outbox 에 넣지 않는다 —
+// 기록은 CLI 홈에 있으므로 유실돼도 history 로 다시 읽힌다. `manager_id` 는 dev 모드
+// (AGENT_DEV_MODE, 키 검증 생략)에서 서버가 호출자 identity 로 읽는다.
+
+export interface AgentSessionRef {
+  manager_id: string;
+  cli: string;
+  session_id: string;
+}
 
 export interface AgentSessionEventInput {
   type: string;
   payload: Record<string, unknown>;
   turn_id?: string;
+  seq?: number;
+  id?: string;
+  created_at?: string;
 }
 
-export interface AgentSessionPatch {
+export interface AgentSessionStatePatch {
   status?: string;
-  native_session_id?: string | null;
-  resume_supported?: boolean;
+  cwd?: string;
+  title?: string;
   current_mode?: string | null;
   available_modes?: Array<{ id: string; name: string; description?: string }> | null;
+  resume_supported?: boolean;
   last_error?: string | null;
   reason?: string;
 }
@@ -1194,26 +1203,15 @@ async function sendAgentSessionRequest(
   label: string,
 ): Promise<AgentSessionRestResult> {
   try {
-    const send = (apiKey: string) => fetch(url, {
+    const resp = await fetch(url, {
       method,
-      headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: payload,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    let resp = await send(config.apiKey);
-    if (
-      !resp.ok
-      && (resp.status === 401 || resp.status === 403)
-      && config.retryApiKey
-      && config.retryApiKey !== config.apiKey
-    ) {
-      resp = await send(config.retryApiKey);
-    }
     let body: any = null;
     try { body = await resp.json(); } catch { body = null; }
-    if (!resp.ok) {
-      log(`agent-session ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
-    }
+    if (!resp.ok) log(`agent-session ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
     return { ok: resp.ok, status: resp.status, body };
   } catch (err: any) {
     log(`agent-session ${label} ${method} error: ${err?.message ?? err}`);
@@ -1221,27 +1219,74 @@ async function sendAgentSessionRequest(
   }
 }
 
-export async function postAgentSessionEvents(
-  config: AwbConfig,
-  sessionId: string,
-  agentId: string,
-  events: AgentSessionEventInput[],
-  patch?: AgentSessionPatch | null,
-): Promise<AgentSessionRestResult> {
-  if (!sessionId || (events.length === 0 && !patch)) return { ok: true, status: 204 };
-  const url = `${trimSlash(config.url)}/api/agent/sessions/${encodeURIComponent(sessionId)}/events`;
-  const payload = JSON.stringify({ agent_id: agentId, events, patch: patch ?? undefined });
-  return sendAgentSessionRequest(config, 'POST', url, payload, `events(${sessionId.slice(0, 8)})`);
+function agentSessionPath(ref: AgentSessionRef): string {
+  return `${encodeURIComponent(ref.manager_id)}/${encodeURIComponent(ref.cli)}/${encodeURIComponent(ref.session_id)}`;
 }
 
-export async function patchAgentSession(
+export async function postAgentSessionRpcResponse(
   config: AwbConfig,
-  sessionId: string,
-  agentId: string,
-  patch: AgentSessionPatch,
+  managerId: string,
+  requestId: string,
+  body: { ok: boolean; result?: unknown; error?: string; code?: string },
 ): Promise<AgentSessionRestResult> {
-  if (!sessionId) return { ok: false, status: 0 };
-  const url = `${trimSlash(config.url)}/api/agent/sessions/${encodeURIComponent(sessionId)}`;
-  const payload = JSON.stringify({ agent_id: agentId, ...patch });
-  return sendAgentSessionRequest(config, 'PATCH', url, payload, `patch(${sessionId.slice(0, 8)})`);
+  if (!requestId) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/sessions/rpc/${encodeURIComponent(requestId)}`;
+  return sendAgentSessionRequest(config, 'POST', url, JSON.stringify({ manager_id: managerId, ...body }), `rpc(${requestId.slice(0, 8)})`);
+}
+
+export async function postAgentSessionEvents(
+  config: AwbConfig,
+  ref: AgentSessionRef,
+  events: AgentSessionEventInput[],
+  state?: AgentSessionStatePatch | null,
+): Promise<AgentSessionRestResult> {
+  if (!ref.session_id || (events.length === 0 && !state)) return { ok: true, status: 204 };
+  const url = `${trimSlash(config.url)}/api/agent/sessions/${agentSessionPath(ref)}/events`;
+  const payload = JSON.stringify({ manager_id: ref.manager_id, events, state: state ?? undefined });
+  return sendAgentSessionRequest(config, 'POST', url, payload, `events(${ref.session_id.slice(0, 8)})`);
+}
+
+export async function patchAgentSessionState(
+  config: AwbConfig,
+  ref: AgentSessionRef,
+  state: AgentSessionStatePatch,
+): Promise<AgentSessionRestResult> {
+  if (!ref.session_id) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/sessions/${agentSessionPath(ref)}`;
+  return sendAgentSessionRequest(config, 'PATCH', url, JSON.stringify({ manager_id: ref.manager_id, ...state }), `state(${ref.session_id.slice(0, 8)})`);
+}
+
+/** CLI 설정으로 이 매니저에 묶인 credential 원문(복호화됨). 204/403/404 → null (운영자 로그인으로 진행). */
+export async function fetchSessionCredential(
+  config: AwbConfig,
+  managerId: string,
+  credentialId: string,
+  workspaceId: string,
+): Promise<{ credential_id: string; provider: string; fields: Record<string, string> } | null> {
+  if (!credentialId) return null;
+  try {
+    const qs = new URLSearchParams({ workspace_id: workspaceId || '', manager_id: managerId });
+    const url = `${trimSlash(config.url)}/api/agent/sessions/credential/${encodeURIComponent(credentialId)}?${qs}`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (resp.status === 204) return null;
+    if (!resp.ok) {
+      let detail = '';
+      try { detail = (await resp.json())?.error ?? ''; } catch { /* ignore */ }
+      log(`agent-session credential fetch failed: HTTP ${resp.status} ${detail}`.trim());
+      const err = new Error(`Credential fetch failed (HTTP ${resp.status}${detail ? ` ${detail}` : ''})`);
+      (err as any).code = detail || `http_${resp.status}`;
+      throw err;
+    }
+    const body = await resp.json();
+    if (!body || typeof body.provider !== 'string') return null;
+    return { credential_id: String(body.credential_id ?? credentialId), provider: body.provider, fields: body.fields && typeof body.fields === 'object' ? body.fields : {} };
+  } catch (err: any) {
+    if (err?.code) throw err;
+    log(`agent-session credential fetch error: ${err?.message ?? err}`);
+    throw Object.assign(new Error(`Credential fetch error: ${err?.message ?? err}`), { code: 'credential_fetch_error' });
+  }
 }

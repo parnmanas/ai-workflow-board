@@ -1,29 +1,44 @@
 /**
- * Agent Session 목록 순수 로직 — 사이드바/목록 페이지가 공유. React 없이
- * node:test 로 구동한다(hooks/useAgentSessionsNav.ts 가 재수출).
+ * Agent Session 목록 순수 로직 — 사이드바/목록 페이지 공유. React 없이 node:test 로 구동.
  */
-import type { AgentSessionSnapshot, AgentSessionUpdateEvent } from '../../types';
+import type { AgentSessionHost, AgentSessionSummary } from '../../types';
 
-function activityOf(s: AgentSessionSnapshot): number {
-  const raw = s.last_activity_at || s.updated_at || s.created_at;
-  const t = raw ? new Date(raw).getTime() : 0;
-  return Number.isNaN(t) ? 0 : t;
+export function sortSessionsByActivity(list: AgentSessionSummary[]): AgentSessionSummary[] {
+  return [...list].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
 }
 
-export function sortSessionsByActivity(list: AgentSessionSnapshot[]): AgentSessionSnapshot[] {
-  return [...list].sort((a, b) => activityOf(b) - activityOf(a));
+export interface HostCliEntry {
+  key: string;
+  manager_id: string;
+  cli: string;
+  host_name: string;
+  label: string;
+  path: string;
 }
 
-/** SSE 한 건을 목록에 반영한 새 배열 — 삭제는 제거, 나머지는 upsert. */
-export function applySessionUpdate(
-  list: AgentSessionSnapshot[],
-  update: AgentSessionUpdateEvent,
-): AgentSessionSnapshot[] {
-  const session = update?.session;
-  if (!session?.id) return list;
-  if (update.reason === 'deleted') return list.filter((s) => s.id !== session.id);
-  const idx = list.findIndex((s) => s.id === session.id);
-  const next = idx === -1 ? [session, ...list] : list.map((s, i) => (i === idx ? session : s));
-  return sortSessionsByActivity(next);
+/** 사이드바 행: 호스트 × CLI. 경로는 `/ws/:wsId/sessions/:managerId/:cli`. */
+export function hostCliEntries(hosts: AgentSessionHost[], workspaceBase: string, cliLabel: (cli: string) => string): HostCliEntry[] {
+  const out: HostCliEntry[] = [];
+  for (const host of hosts) {
+    for (const cli of host.clis) {
+      out.push({
+        key: `${host.manager_id}:${cli}`,
+        manager_id: host.manager_id,
+        cli,
+        host_name: host.name,
+        label: `${host.name} · ${cliLabel(cli)}`,
+        path: `${workspaceBase}/sessions/${host.manager_id}/${cli}`,
+      });
+    }
+  }
+  return out;
 }
 
+export function sessionPath(workspaceBase: string, managerId: string, cli: string, sessionId: string): string {
+  return `${workspaceBase}/sessions/${managerId}/${cli}/${encodeURIComponent(sessionId)}`;
+}
+
+/** 새 세션 cwd 기억 — 호스트×CLI 별 localStorage 키. */
+export function lastCwdStorageKey(managerId: string, cli: string): string {
+  return `awb.sessions.lastCwd.${managerId}.${cli}`;
+}

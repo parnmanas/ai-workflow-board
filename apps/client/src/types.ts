@@ -3057,17 +3057,17 @@ export interface OntologyGraphProgressEvent {
 }
 
 // ─── Agent Session (CLI 직접 세션) ───────────────────────────────────────
-// 서버 contract: apps/server/src/common/types/stream-events.ts (AgentSessionSnapshot
-// / AgentSessionEventRecord) 와 common/types/agent-sessions.ts (열거). 기존 Chat
-// 타입과 의도적으로 분리 — 세션은 방(room)이 아니라 (owner, agent) 1:1 이다.
+// 세션 단위는 (Runtime Host, CLI, 네이티브 세션 id). 서버 contract:
+// apps/server/src/common/types/stream-events.ts + common/types/agent-sessions.ts.
+// AWB 는 세션 내용을 저장하지 않는다 — 목록/기록은 매니저 장비의 CLI 홈에서 온다.
 export type AgentSessionStatus =
+  | 'idle'
   | 'starting'
   | 'ready'
   | 'busy'
   | 'awaiting_permission'
-  | 'suspended'
-  | 'closed'
-  | 'error';
+  | 'error'
+  | 'closed';
 
 export type AgentSessionEventType =
   | 'user_prompt'
@@ -3088,26 +3088,62 @@ export interface AgentSessionModeOption {
   description?: string;
 }
 
-export interface AgentSessionSnapshot {
+/** CLI 설정에 묶인 credential 의 공개 투영(비밀 없음). */
+export interface AgentSessionCredentialRef {
   id: string;
-  workspace_id: string;
-  agent_id: string;
-  /** `<Manager>/<Agent>` 표시명 — 그대로 렌더한다(awb-agent-display-name). */
-  agent_name: string;
-  owner_user_id: string;
-  runtime: string;
-  title: string;
+  name: string;
+  provider: string;
+  scope: 'global' | 'workspace';
+}
+
+/** 세션을 열 수 있는 Runtime Host 한 대. */
+export interface AgentSessionHost {
+  manager_id: string;
+  instance_id: string;
+  hostname: string;
+  name: string;
+  clis: string[];
+  plugin_version: string;
+  last_seen_at: string;
+  /** cli → 이 워크스페이스의 CLI 설정(credential). 없거나 null 이면 장비 운영자 로그인. */
+  cli_settings?: Record<string, AgentSessionCredentialRef | null>;
+}
+
+export interface AgentSessionCliSettings {
+  manager_id: string;
+  cli: string;
+  supports_credential: boolean;
+  credential: AgentSessionCredentialRef | null;
+  candidates: AgentSessionCredentialRef[];
+  updated_at: string | null;
+}
+
+/** 장비의 CLI 홈에서 읽은 세션 한 줄. */
+export interface AgentSessionSummary {
+  cli: string;
+  session_id: string;
   cwd: string;
+  title: string;
+  created_at: string | null;
+  updated_at: string;
+  source: 'cli' | 'awb';
+  size_bytes?: number;
+  live_status?: AgentSessionStatus | string;
+}
+
+export interface AgentSessionLiveSnapshot {
+  manager_id: string;
+  manager_name: string;
+  cli: string;
+  session_id: string;
+  cwd: string;
+  title: string;
   status: AgentSessionStatus | string;
-  native_session_id: string | null;
-  resume_supported: boolean;
   current_mode: string | null;
   available_modes: AgentSessionModeOption[];
-  permission_policy: 'ask' | 'auto_allow' | string;
+  resume_supported: boolean;
   last_error: string | null;
-  last_event_seq: number;
-  last_activity_at: string | null;
-  created_at: string;
+  driver_user_id: string | null;
   updated_at: string;
 }
 
@@ -3120,30 +3156,25 @@ export interface AgentSessionEventRecord {
   created_at: string;
 }
 
-/** GET /api/agent-sessions/agents — 새 세션 피커 후보. */
-export interface AgentSessionAgentOption {
-  id: string;
-  name: string;
-  type: string;
-  working_dir: string;
-  is_online: number;
-  manager_agent_id: string | null;
-  supported: boolean;
-  reason: string | null;
+export interface AgentSessionDetail {
+  session: AgentSessionSummary | null;
+  live: AgentSessionLiveSnapshot;
+  events: AgentSessionEventRecord[];
 }
 
 export interface AgentSessionUpdateEvent {
   event_type: 'agent_session_update';
-  session: AgentSessionSnapshot;
+  session: AgentSessionLiveSnapshot;
   reason: string;
   timestamp: string;
 }
 
 export interface AgentSessionEventEvent {
   event_type: 'agent_session_event';
+  manager_id: string;
+  cli: string;
   session_id: string;
-  workspace_id: string;
-  owner_user_id: string;
+  driver_user_id: string;
   event: AgentSessionEventRecord;
   timestamp: string;
 }

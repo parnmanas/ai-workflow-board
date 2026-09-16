@@ -2025,8 +2025,8 @@ export class EventDispatcher {
 
   /**
    * Agent Session(CLI 직접 세션) 제어 요청. chat_request 와 같은 envelope-native
-   * 이벤트(ev.payload.*). 대상 agent 의 실행 컨텍스트(api_key / cwd / cli_home)를
-   * 해석해 러너에 넘긴다 — 컨텍스트가 없으면 러너가 서버에 error 로 남긴다.
+   * 이벤트(ev.payload.*). 세션은 AWB Agent 가 아니라 **이 매니저 장비의 CLI** 에
+   * 속하므로 agent 실행 컨텍스트를 해석하지 않는다 — 매니저 identity 만 대조한다.
    */
   async handleAgentSessionRequest(raw: string): Promise<void> {
     if (!this.#agentSessionRunner) return;
@@ -2038,15 +2038,10 @@ export class EventDispatcher {
       return;
     }
     const payload = (ev?.payload ?? ev ?? {}) as AgentSessionRequest;
-    if (!payload.session_id || !payload.agent_id) return;
-    let agentContext = this.#resolveAgentContext(payload.agent_id);
-    agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
-    if (!agentContext) {
-      const missReason = this.#agentContextMissReason(payload.agent_id);
-      this.#reportAgentContextMiss('Agent session', missReason, payload.agent_id);
-      if (missReason === 'unmanaged') return; // 다른 매니저의 agent — 우리 일이 아니다
-    }
-    await this.#agentSessionRunner.handle(payload, agentContext);
+    if (!payload.manager_id || !payload.cli || !payload.op) return;
+    const self = loadAgentInfo()?.agent_id || '';
+    if (self && payload.manager_id !== self) return; // 다른 매니저 앞으로 온 요청
+    await this.#agentSessionRunner.handle(payload);
   }
 
   async handleFsRequest(raw: string): Promise<void> {

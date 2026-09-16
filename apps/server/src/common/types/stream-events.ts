@@ -930,31 +930,34 @@ export interface OntologyGraphProgressPayload {
 }
 
 // ── Agent Session (CLI 직접 세션, docs/agent-sessions.md) ─────────────────
-// ChatRoom 계열과 별개의 contract. 세션은 (owner_user, agent) 1:1 이고,
-// 매니저는 ACP 스트림을 그대로 `agent_session_events` 로 흘려보낸다.
+// 세션 단위는 (Runtime Host, CLI, 네이티브 세션 id). AWB 는 내용을 저장하지 않고
+// 매니저에 reverse RPC 로 묻거나(list/history/open) 라이브 스트림만 중계한다.
 // 상수/열거는 common/types/agent-sessions.ts 가 단일 원천이다.
 
-/** 서버 → agent-manager. `chat_request` 처럼 envelope 그대로(비-flatten) 소비하며
- *  scope.agent_id 로 대상 agent(또는 그 agent 를 소유한 매니저)에게만 간다. */
+/** 서버 → agent-manager. envelope 그대로(비-flatten) 소비하며 scope.agent_id 는
+ *  **매니저 자신의 identity(manager_id)** 다. `request_id` 가 있으면 매니저는
+ *  `POST /api/agent/sessions/rpc/:request_id` 로 응답한다(fs_request 와 같은 패턴). */
 export interface AgentSessionRequestPayload {
-  session_id: string;
+  manager_id: string;
+  /** 요청을 낸 워크스페이스 — credential 조회 스코프. */
   workspace_id: string;
-  agent_id: string;
-  owner_user_id: string;
-  op: 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
-  /** 세션 생성 시점의 Agent.type 스냅샷 — 매니저가 ACP 어댑터 명령을 고른다. */
-  runtime: string;
-  /** '' 이면 매니저가 Agent.working_dir 를 쓴다. */
-  cwd: string;
-  /** 이전에 열렸던 ACP 세션 id — 있으면 매니저가 session/load 를 먼저 시도한다. */
-  native_session_id: string | null;
-  permission_policy: string;
-  // op 별 부가 필드
-  turn_id?: string;        // prompt
-  text?: string;           // prompt
-  request_id?: string;     // permission
-  option_id?: string | null; // permission (null = cancelled)
-  mode_id?: string;        // set_mode
+  cli: string;
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  request_id?: string;
+  /** open(신규)일 때만 null. */
+  session_id?: string | null;
+  cwd?: string;
+  title?: string;
+  turn_id?: string;
+  text?: string;
+  permission_request_id?: string;
+  option_id?: string | null;
+  mode_id?: string;
+  /** CLI 설정에 묶인 워크스페이스 Credential — open/prompt 에만 실린다. 매니저는
+   *  `GET /api/agent/sessions/credential/:id` 로 원문을 받아 세션 cli-home 에 적용한다. */
+  credential_id?: string | null;
+  /** 스트림을 받을 사용자 — 마지막으로 open/prompt 한 사람. */
+  driver_user_id: string;
   issued_at: string;
 }
 
@@ -964,34 +967,26 @@ export interface AgentSessionModeOption {
   description?: string;
 }
 
-/** 세션 레코드의 UI 투영. REST(GET /api/agent-sessions/:id) 와 SSE 가 같은 모양을 쓴다. */
-export interface AgentSessionSnapshot {
-  id: string;
-  workspace_id: string;
-  agent_id: string;
-  /** `<Manager>/<Agent>` 표시명 (awb-agent-display-name 규약). */
-  agent_name: string;
-  owner_user_id: string;
-  runtime: string;
-  title: string;
+/** 서버 메모리의 라이브 상태 투영. 프로세스가 없으면 status 'idle'. */
+export interface AgentSessionLiveSnapshot {
+  manager_id: string;
+  manager_name: string;
+  cli: string;
+  session_id: string;
   cwd: string;
+  title: string;
   status: string;
-  native_session_id: string | null;
-  resume_supported: boolean;
   current_mode: string | null;
   available_modes: AgentSessionModeOption[];
-  permission_policy: string;
+  resume_supported: boolean;
   last_error: string | null;
-  last_event_seq: number;
-  last_activity_at: string | null;
-  created_at: string;
+  driver_user_id: string | null;
   updated_at: string;
 }
 
-/** UI 전용(소유자만). flatten 되어 `{ event_type, session, reason, timestamp }` 로 나간다. */
+/** UI 전용(driver 만). flatten 되어 `{ event_type, session, reason, timestamp }` 로 나간다. */
 export interface AgentSessionUpdatePayload {
-  session: AgentSessionSnapshot;
-  /** 'created' | 'status' | 'renamed' | 'closed' | 'deleted' | 'manager_patch' | … */
+  session: AgentSessionLiveSnapshot;
   reason: string;
 }
 
@@ -1004,10 +999,11 @@ export interface AgentSessionEventRecord {
   created_at: string;
 }
 
-/** UI 전용(소유자만). flatten 되어 `{ event_type, session_id, event, … }` 로 나간다. */
+/** UI 전용(driver 만). flatten 되어 `{ event_type, manager_id, cli, session_id, event, … }` 로 나간다. */
 export interface AgentSessionEventPayload {
+  manager_id: string;
+  cli: string;
   session_id: string;
-  workspace_id: string;
-  owner_user_id: string;
+  driver_user_id: string;
   event: AgentSessionEventRecord;
 }

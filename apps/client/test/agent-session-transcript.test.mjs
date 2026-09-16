@@ -4,15 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  appendLiveEvent,
   buildTranscript,
   canPrompt,
   describeSessionStatus,
-  hasSeqGap,
-  mergeIncomingEvent,
   pendingPermission,
   sessionDisplayTitle,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
-import { applySessionUpdate, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
+import { hostCliEntries, sessionPath, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
 
 let seq = 0;
 function ev(type, payload, turn_id = 't1') {
@@ -72,39 +71,45 @@ test('text chunks from different turns never merge', () => {
   assert.equal(blocks.length, 2);
 });
 
-test('mergeIncomingEvent appends in seq order, ignores duplicates, and hasSeqGap detects loss', () => {
-  const base = [{ id: 'a', seq: 1, turn_id: '', type: 'system', payload: {}, created_at: '' }];
-  const withTwo = mergeIncomingEvent(base, { id: 'b', seq: 2, turn_id: '', type: 'system', payload: {}, created_at: '' });
-  assert.equal(withTwo.length, 2);
-  assert.equal(mergeIncomingEvent(withTwo, { id: 'b', seq: 2, turn_id: '', type: 'system', payload: {}, created_at: '' }), withTwo, 'duplicate id is a no-op');
-  const outOfOrder = mergeIncomingEvent(mergeIncomingEvent(base, { id: 'd', seq: 4, turn_id: '', type: 'system', payload: {}, created_at: '' }), { id: 'c', seq: 3, turn_id: '', type: 'system', payload: {}, created_at: '' });
-  assert.deepEqual(outOfOrder.map((e) => e.seq), [1, 3, 4]);
-  assert.equal(hasSeqGap(outOfOrder), true);
-  assert.equal(hasSeqGap(withTwo), false);
+test('appendLiveEvent appends in arrival order, renumbers display seq, and drops duplicate ids', () => {
+  const history = [
+    { id: 's:1', seq: 1, turn_id: '', type: 'user_prompt', payload: { text: 'a' }, created_at: '' },
+    { id: 's:2', seq: 2, turn_id: '', type: 'text', payload: { text: 'b' }, created_at: '' },
+  ];
+  // 라이브 seq 는 프로세스마다 1 부터 — 기록의 seq 와 겹쳐도 순서를 바꾸지 않는다
+  const withLive = appendLiveEvent(history, { id: 's:live:ab12:1', seq: 1, turn_id: 't', type: 'turn', payload: { phase: 'started' }, created_at: '' });
+  assert.deepEqual(withLive.map((e) => e.id), ['s:1', 's:2', 's:live:ab12:1']);
+  assert.equal(withLive[2].seq, 3, 'display seq continues after history');
+  assert.equal(appendLiveEvent(withLive, { id: 's:live:ab12:1', seq: 1, turn_id: 't', type: 'turn', payload: {}, created_at: '' }), withLive, 'duplicate id is a no-op');
+  assert.equal(appendLiveEvent(withLive, { id: '', seq: 9, turn_id: '', type: 'text', payload: {}, created_at: '' }), withLive, 'events without an id are ignored');
 });
 
 test('status helpers mirror the server prompt rules', () => {
   assert.equal(canPrompt('ready'), true);
-  assert.equal(canPrompt('suspended'), true, 'a suspended session reopens on prompt');
+  assert.equal(canPrompt('idle'), true, 'an idle session reopens on prompt');
+  assert.equal(canPrompt('closed'), true, 'a stopped session reopens on prompt');
   assert.equal(canPrompt('error'), true);
   assert.equal(canPrompt('busy'), false);
   assert.equal(canPrompt('awaiting_permission'), false);
-  assert.equal(canPrompt('closed'), false);
+  assert.equal(canPrompt('starting'), false);
   assert.equal(describeSessionStatus('awaiting_permission').tone, 'warning');
-  assert.equal(describeSessionStatus('closed').live, false);
-  assert.equal(sessionDisplayTitle({ title: '', agent_name: 'ralf/coder', runtime: 'claude' }), 'ralf/coder · claude');
-  assert.equal(sessionDisplayTitle({ title: 'Fix login', agent_name: 'ralf/coder', runtime: 'claude' }), 'Fix login');
+  assert.equal(describeSessionStatus('idle').live, false);
+  assert.equal(describeSessionStatus(undefined).label, 'Unknown');
+  assert.equal(sessionDisplayTitle({ title: '', cli: 'claude', session_id: '11111111-2222' }), 'Claude Code · 11111111');
+  assert.equal(sessionDisplayTitle({ title: 'Fix login', cli: 'claude', session_id: 'x' }), 'Fix login');
 });
 
-test('session list: SSE update upserts, deletes, and keeps most-recent-activity order', () => {
-  const s = (id, last) => ({ id, workspace_id: 'ws', last_activity_at: last, updated_at: last, created_at: last, status: 'ready', title: id, agent_name: 'a', runtime: 'claude' });
-  const sorted = sortSessionsByActivity([s('old', '2026-09-01T00:00:00Z'), s('new', '2026-09-10T00:00:00Z')]);
-  assert.deepEqual(sorted.map((x) => x.id), ['new', 'old']);
-  const upserted = applySessionUpdate(sorted, { event_type: 'agent_session_update', reason: 'status', timestamp: '', session: { ...s('old', '2026-09-20T00:00:00Z'), status: 'busy' } });
-  assert.deepEqual(upserted.map((x) => x.id), ['old', 'new']);
-  assert.equal(upserted[0].status, 'busy');
-  const added = applySessionUpdate(upserted, { event_type: 'agent_session_update', reason: 'created', timestamp: '', session: s('fresh', '2026-09-21T00:00:00Z') });
-  assert.equal(added[0].id, 'fresh');
-  const removed = applySessionUpdate(added, { event_type: 'agent_session_update', reason: 'deleted', timestamp: '', session: s('old', '') });
-  assert.deepEqual(removed.map((x) => x.id), ['fresh', 'new']);
+test('session list helpers: activity sort, host×cli sidebar rows, canonical paths', () => {
+  const sorted = sortSessionsByActivity([
+    { cli: 'claude', session_id: 'old', cwd: '/a', title: 'old', created_at: null, updated_at: '2026-09-01T00:00:00Z', source: 'cli' },
+    { cli: 'claude', session_id: 'new', cwd: '/a', title: 'new', created_at: null, updated_at: '2026-09-10T00:00:00Z', source: 'cli' },
+  ]);
+  assert.deepEqual(sorted.map((s) => s.session_id), ['new', 'old']);
+  const rows = hostCliEntries([
+    { manager_id: 'm1', instance_id: 'i1', hostname: 'rolf.local', name: 'rolf', clis: ['claude', 'codex'], plugin_version: '1', last_seen_at: '' },
+    { manager_id: 'm2', instance_id: 'i2', hostname: 'ralf', name: 'ralf', clis: [], plugin_version: '1', last_seen_at: '' },
+  ], '/ws/w1', (cli) => cli.toUpperCase());
+  assert.deepEqual(rows.map((r) => r.label), ['rolf · CLAUDE', 'rolf · CODEX']);
+  assert.equal(rows[0].path, '/ws/w1/sessions/m1/claude');
+  assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
 });

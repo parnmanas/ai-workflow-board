@@ -100,7 +100,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, AgentSessionSnapshot, AgentSessionEventRecord, AgentSessionAgentOption } from './types';
+  OrchestrationStepStatus, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2029,49 +2029,54 @@ export const api = {
   // see getChannels above for why callers reacting to a workspaceId prop change
   // need this instead of relying on the ambient header.
   // ─── Agent Sessions (CLI 직접 세션) ────────────────────────────────────
-  // 서버: apps/server/src/modules/agent-sessions. 워크스페이스는 X-Workspace-Id
-  // 헤더(기본은 현재 활성 워크스페이스)로 스코프한다. Chat API 와 별개 표면.
-  listAgentSessions: (workspaceId?: string) => {
+  // 서버: apps/server/src/modules/agent-sessions. 모든 경로가 (Runtime Host, CLI)
+  // 아래에 있고, 목록/기록은 매니저 장비의 CLI 홈에서 reverse RPC 로 온다.
+  listAgentSessionHosts: (workspaceId?: string) => {
     const init: RequestInit = {};
     if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    return request<AgentSessionSnapshot[]>('/agent-sessions', init);
+    return request<AgentSessionHost[]>('/agent-sessions/hosts', init);
   },
-  listAgentSessionAgents: (workspaceId?: string) => {
-    const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    return request<AgentSessionAgentOption[]>('/agent-sessions/agents', init);
-  },
-  createAgentSession: (
-    input: { agent_id: string; cwd?: string; title?: string; permission_policy?: string },
-    workspaceId?: string,
-  ) => {
-    const init: RequestInit = { method: 'POST', body: JSON.stringify(input) };
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    return request<AgentSessionSnapshot>('/agent-sessions', init);
-  },
-  getAgentSession: (id: string) => request<AgentSessionSnapshot>(`/agent-sessions/${id}`),
-  listAgentSessionEvents: (id: string, afterSeq = 0, limit = 500) =>
-    request<AgentSessionEventRecord[]>(`/agent-sessions/${id}/events?after_seq=${afterSeq}&limit=${limit}`),
-  promptAgentSession: (id: string, text: string) =>
-    request<{ turn_id: string; session: AgentSessionSnapshot }>(`/agent-sessions/${id}/prompt`, {
-      method: 'POST',
-      body: JSON.stringify({ text }),
+  getHostCliSettings: (managerId: string, cli: string) =>
+    request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`),
+  setHostCliSettings: (managerId: string, cli: string, credentialId: string | null) =>
+    request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ credential_id: credentialId }),
     }),
-  decideAgentSessionPermission: (id: string, requestId: string, optionId: string | null) =>
-    request<AgentSessionSnapshot>(`/agent-sessions/${id}/permission`, {
+  listHostSessions: (managerId: string, cli: string) =>
+    request<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),
+  openHostSession: (managerId: string, cli: string, input: { session_id?: string | null; cwd?: string; title?: string }) =>
+    request<AgentSessionLiveSnapshot>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`, {
       method: 'POST',
-      body: JSON.stringify({ request_id: requestId, option_id: optionId }),
+      body: JSON.stringify(input),
     }),
-  cancelAgentSession: (id: string) =>
-    request<AgentSessionSnapshot>(`/agent-sessions/${id}/cancel`, { method: 'POST' }),
-  setAgentSessionMode: (id: string, modeId: string) =>
-    request<AgentSessionSnapshot>(`/agent-sessions/${id}/mode`, { method: 'POST', body: JSON.stringify({ mode_id: modeId }) }),
-  renameAgentSession: (id: string, title: string) =>
-    request<AgentSessionSnapshot>(`/agent-sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
-  closeAgentSession: (id: string) =>
-    request<AgentSessionSnapshot>(`/agent-sessions/${id}/close`, { method: 'POST' }),
-  deleteAgentSession: (id: string) =>
-    request<{ ok: boolean }>(`/agent-sessions/${id}`, { method: 'DELETE' }),
+  getHostSession: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}`),
+  promptHostSession: (managerId: string, cli: string, sessionId: string, text: string) =>
+    request<{ turn_id: string; live: AgentSessionLiveSnapshot }>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/prompt`,
+      { method: 'POST', body: JSON.stringify({ text }) },
+    ),
+  decideHostSessionPermission: (managerId: string, cli: string, sessionId: string, requestId: string, optionId: string | null) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/permission`,
+      { method: 'POST', body: JSON.stringify({ request_id: requestId, option_id: optionId }) },
+    ),
+  cancelHostSession: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      { method: 'POST' },
+    ),
+  setHostSessionMode: (managerId: string, cli: string, sessionId: string, modeId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,
+      { method: 'POST', body: JSON.stringify({ mode_id: modeId }) },
+    ),
+  closeHostSession: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/close`,
+      { method: 'POST' },
+    ),
 
   listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
     const init: RequestInit = {};

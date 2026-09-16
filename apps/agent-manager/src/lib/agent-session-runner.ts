@@ -1,75 +1,59 @@
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
-// AWB 서버가 `agent_session_request` SSE 로 보내는 제어 요청(open / prompt /
-// permission / cancel / set_mode / close)을 받아, 세션당 하나의 ACP 에이전트
-// 프로세스(claude-agent-acp / codex-acp / hermes-acp / 사용자 지정 명령)를 띄우고
-// 그 스트림(text · reasoning · tool call · permission · usage)을 **가공 없이**
-// 서버의 append-only 트랜스크립트로 릴레이한다.
+// 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
+// `agent_session_request` SSE 로 (1) list / history / open 을 RPC 로 묻고, (2) prompt /
+// permission / cancel / set_mode / close 를 fire-and-forget 으로 보낸다. 러너는
+//   - 목록·기록은 AgentSessionStore(CLI 홈의 세션 파일)에서 읽어 RPC 로 응답하고,
+//   - 세션당 하나의 ACP 어댑터 프로세스(claude-agent-acp / codex-acp / hermes-acp /
+//     사용자 지정)를 띄워 **운영자의 CLI 홈 그대로** session/load 또는 session/new 로 연 뒤,
+//   - 스트림(text · reasoning · tool call · permission · usage)을 가공 없이 서버로 중계한다.
 //
-// 기존 ChatSessionManager 와 의도적으로 다른 점:
-//   - 프롬프트 래핑 없음. 사용자의 텍스트가 그대로 session/prompt 로 간다.
-//   - 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
-//   - 세션 id 는 서버 레코드(AgentSession.id)이며 방(room)과 무관하다.
-//   - 권한 요청(session/request_permission)은 사용자에게 릴레이해 결정을 기다린다.
-//
-// 프로세스 수명: 유휴(idleMinutes) 또는 close 시 종료. 종료된 세션은 서버에서
-// `suspended` 로 표시되고, 다음 prompt 가 오면 native_session_id 로 session/load
-// (어댑터가 지원할 때)를 시도한 뒤 아니면 새 세션을 연다 — 트랜스크립트는 서버에
-// 남아 있으므로 UI 쪽 히스토리는 어느 경우든 보존된다.
+// 기존 chat/ticket 세션 매니저와 달리 AWB Agent identity·프롬프트 래핑·히스토리 재조립이
+// 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
-import { access, constants as fsConstants } from 'node:fs/promises';
+import { access, constants as fsConstants, lstat, mkdir, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
-import { createAdapter } from './cli-adapters/index.js';
+import { AgentSessionStore, resolveClaudeHome, resolveCodexHome, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { AGENT_MANAGER_HOME } from './constants.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import {
-  patchAgentSession,
+  fetchSessionCredential,
+  patchAgentSessionState,
   postAgentSessionEvents,
+  postAgentSessionRpcResponse,
   type AgentSessionEventInput,
-  type AgentSessionPatch,
+  type AgentSessionRef,
+  type AgentSessionStatePatch,
   type AwbConfig,
 } from './rest.js';
+import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
-import type {
-  AcpMcpServer,
-  AcpPermissionOutcome,
-  AcpPermissionRequest,
-} from './runtime/acp/acp-types.js';
+import type { AcpMcpServer, AcpPermissionOutcome, AcpPermissionRequest } from './runtime/acp/acp-types.js';
 import { resolveHermesAcpCommand } from './runtime/hermes/hermes-command.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 
 /** 서버 payload (apps/server/src/common/types/stream-events.ts AgentSessionRequestPayload). */
 export interface AgentSessionRequest {
-  session_id: string;
-  workspace_id: string;
-  agent_id: string;
-  owner_user_id: string;
-  op: 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
-  runtime: string;
-  cwd: string;
-  native_session_id: string | null;
-  permission_policy: string;
+  manager_id: string;
+  workspace_id?: string;
+  cli: string;
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  request_id?: string;
+  session_id?: string | null;
+  cwd?: string;
+  title?: string;
   turn_id?: string;
   text?: string;
-  request_id?: string;
+  permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** CLI 설정에 묶인 워크스페이스 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
+  credential_id?: string | null;
+  driver_user_id: string;
   issued_at: string;
-}
-
-/** 디스패처의 AgentExecutionContext 중 러너가 쓰는 부분(순환 import 방지용 구조 타입). */
-export interface AgentSessionAgentContext {
-  agent_id: string;
-  workspace_id: string;
-  api_key: string;
-  cwd: string;
-  cli: string;
-  cli_home_dir: string;
-  extra_env?: Record<string, string>;
-  model?: string | null;
-  runtime_config?: { extra?: Record<string, unknown> } | null;
 }
 
 export interface ResolvedAcpCommand {
@@ -78,21 +62,50 @@ export interface ResolvedAcpCommand {
 }
 
 export interface AgentSessionRunnerOptions {
-  /** 30분 유휴 시 프로세스 회수(세션 레코드는 suspended 로 유지). */
+  /** 매니저 자신의 agent identity — 서버 라우팅/응답 소유 검증에 쓴다. */
+  getManagerId: () => string;
+  store?: AgentSessionStore;
+  /** 30분 유휴 시 프로세스 회수(세션은 CLI 홈에 남아 있으므로 다음 prompt 가 다시 연다). */
   idleMinutes?: number;
-  /** 사용자가 permission 을 결정하지 않으면 cancelled 로 응답하는 상한. */
   permissionTimeoutMs?: number;
-  /** initialize / session/new 등 제어 요청의 타임아웃. prompt 는 별도(promptTimeoutMs). */
   requestTimeoutMs?: number;
-  /** 한 프롬프트 턴 상한(툴 승인 대기 포함). 기본 6시간. */
   promptTimeoutMs?: number;
-  /** 텍스트 청크 합치기 간격. */
   flushIntervalMs?: number;
   /** 테스트용 명령 해석 override. */
-  commandResolver?: (runtime: string, ctx: AgentSessionAgentContext) => Promise<ResolvedAcpCommand>;
-  /** 테스트용 env override(없으면 process.env 기반). */
+  commandResolver?: (cli: string) => Promise<ResolvedAcpCommand>;
   baseEnv?: NodeJS.ProcessEnv;
   clientVersion?: string;
+  /** 세션 프로세스에 주입할 AWB MCP 서버 — 기본은 매니저 키로 인증하는 http 서버. */
+  mcpServers?: (sessionId: string) => AcpMcpServer[];
+  /** credential 이 묶인 세션의 전용 cli-home 루트. 기본 `$AWB_AGENT_MANAGER_HOME/session-homes`. */
+  sessionHomesDir?: string;
+  /** 테스트용 credential 조회 override. */
+  credentialFetcher?: (credentialId: string, workspaceId: string) => Promise<SessionCredential | null>;
+}
+
+export interface SessionCredential {
+  credential_id: string;
+  provider: string;
+  fields: Record<string, string>;
+}
+
+/** CLI → 호환 credential provider 접두어(서버 SESSION_CLI_CREDENTIAL_PREFIX 와 같은 규약). */
+export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = {
+  claude: 'claude_',
+  codex: 'codex_',
+};
+
+/** CLI 홈 안에서 세션 기록이 사는 하위 디렉터리 — 세션 전용 홈에서 운영자 홈으로 링크한다. */
+const SESSION_STORE_SUBDIR: Record<string, string> = {
+  claude: 'projects',
+  codex: 'sessions',
+};
+
+interface SessionAuth {
+  label: string;
+  env: Record<string, string>;
+  stripEnvKeys: string[];
+  cliHome: string | null;
 }
 
 interface PendingPermission {
@@ -101,24 +114,24 @@ interface PendingPermission {
 }
 
 interface LiveSession {
+  cli: string;
   sessionId: string;
-  agentId: string;
-  workspaceId: string;
-  runtime: string;
   cwd: string;
+  title: string;
   client: AcpClient;
-  nativeSessionId: string;
   loadSupported: boolean;
-  permissionPolicy: string;
-  rest: AwbConfig;
+  /** session/load 가 기록을 재생하는 동안 true — 재생 이벤트는 UI 가 이미 history 로 가졌으므로 버린다. */
+  loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   turn: { turnId: string; startedAt: number } | null;
   textBuffer: string;
   reasoningBuffer: string;
   flushTimer: NodeJS.Timeout | null;
   idleTimer: NodeJS.Timeout | null;
-  /** 세션당 REST 전송을 직렬화해 서버 seq 가 스트림 순서와 일치하게 한다. */
   postChain: Promise<void>;
+  seq: number;
+  /** 프로세스마다 다른 id 접두어 — 라이브 seq 는 프로세스마다 1 부터라 id 만으로 중복을 걸러야 한다. */
+  nonce: string;
   closing: boolean;
   exited: boolean;
 }
@@ -128,16 +141,15 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const DEFAULT_FLUSH_INTERVAL_MS = 150;
-/** 툴 input/output 문자열 상한 — 서버 payload 상한(256k) 아래로 여유 있게. */
 const MAX_TOOL_TEXT_CHARS = 16_000;
 const MAX_PAYLOAD_CHARS = 200_000;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
+export const ACP_SESSION_CLIS = ['claude', 'codex', 'hermes'] as const;
 
 function truncateText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}\n…[truncated ${value.length - max} chars]` : value;
 }
 
-/** 툴 input/output 을 JSON 안전 + 크기 제한된 값으로. */
 function boundedValue(value: unknown, depth = 0): unknown {
   if (value === undefined) return undefined;
   if (typeof value === 'string') return truncateText(value, MAX_TOOL_TEXT_CHARS);
@@ -158,7 +170,7 @@ function boundedPayload(payload: Record<string, unknown>): Record<string, unknow
   return { truncated: true, preview: serialized.slice(0, 4_000) };
 }
 
-async function findOnPath(name: string): Promise<string | null> {
+export async function findOnPath(name: string): Promise<string | null> {
   const candidates = process.platform === 'win32' ? [`${name}.cmd`, `${name}.exe`, name] : [name];
   for (const dir of (process.env.PATH || '').split(delimiter)) {
     if (!dir) continue;
@@ -181,56 +193,54 @@ function parseCommandLine(line: string): ResolvedAcpCommand {
 }
 
 /**
- * 런타임별 ACP 어댑터 명령. 우선순위:
- *   1. Agent.runtime_config.extra.acp_command (+ acp_args) — 운영자 명시
- *   2. env AWB_ACP_COMMAND_<RUNTIME> (예: AWB_ACP_COMMAND_CLAUDE="node /opt/acp.js")
- *   3. 런타임 기본값: PATH 의 어댑터 바이너리, 없으면 npx --yes <패키지>
- * 어느 것도 없으면 throw — 서버 쪽 resolveAgentSessionRuntime 과 같은 집합이다.
+ * CLI 별 ACP 어댑터 명령. 우선순위:
+ *   1. env AWB_ACP_COMMAND_<CLI> (예: AWB_ACP_COMMAND_CLAUDE="node /opt/acp.js")
+ *   2. PATH 의 어댑터 바이너리(claude-agent-acp / codex-acp / hermes-acp)
+ *   3. npx --yes <패키지> (claude / codex)
  */
-export async function resolveAcpCommandForRuntime(
-  runtime: string,
-  ctx: AgentSessionAgentContext,
-): Promise<ResolvedAcpCommand> {
-  const extra = (ctx.runtime_config?.extra ?? {}) as Record<string, unknown>;
-  if (typeof extra.acp_command === 'string' && extra.acp_command.trim()) {
-    const args = Array.isArray(extra.acp_args) ? extra.acp_args.map((a) => String(a)) : [];
-    return { command: extra.acp_command.trim(), args };
-  }
-  const envOverride = process.env[`AWB_ACP_COMMAND_${runtime.toUpperCase()}`]?.trim();
+export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpCommand> {
+  const envOverride = process.env[`AWB_ACP_COMMAND_${cli.toUpperCase()}`]?.trim();
   if (envOverride) return parseCommandLine(envOverride);
-  switch (runtime) {
-    case 'claude':
-    case 'deepseek': {
+  switch (cli) {
+    case 'claude': {
       const found = await findOnPath('claude-agent-acp');
-      return found
-        ? { command: found, args: [] }
-        : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
+      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
     }
     case 'codex': {
       const found = await findOnPath('codex-acp');
-      return found
-        ? { command: found, args: [] }
-        : { command: 'npx', args: ['--yes', '@zed-industries/codex-acp'] };
+      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@zed-industries/codex-acp'] };
     }
     case 'hermes': {
       const resolved = await resolveHermesAcpCommand();
       return { command: resolved.command, args: [...resolved.argsPrefix] };
     }
     default:
-      throw new Error(`No ACP adapter is known for runtime "${runtime}". Set runtime_config.extra.acp_command on the agent.`);
+      throw new Error(`No ACP adapter is known for CLI "${cli}".`);
   }
+}
+
+/** 이 장비에서 세션을 열 수 있는 CLI — 하트비트 `acp_session_clis`. PATH 만 본다(spawn 없음). */
+export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
+  const out: string[] = [];
+  if (env.AWB_ACP_COMMAND_CLAUDE || await findOnPath('claude-agent-acp') || await findOnPath('claude')) out.push('claude');
+  if (env.AWB_ACP_COMMAND_CODEX || await findOnPath('codex-acp') || await findOnPath('codex')) out.push('codex');
+  if (env.AWB_ACP_COMMAND_HERMES || env.HERMES_ACP_COMMAND || await findOnPath('hermes-acp') || await findOnPath('hermes')) out.push('hermes');
+  return out;
 }
 
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
-  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs'>>
-    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion'>;
+  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir'>>
+    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher'>;
+  readonly #store: AgentSessionStore;
   readonly #live = new Map<string, LiveSession>();
   readonly #opening = new Map<string, Promise<LiveSession>>();
 
-  constructor(config: AwbConfig, options: AgentSessionRunnerOptions = {}) {
+  constructor(config: AwbConfig, options: AgentSessionRunnerOptions) {
     this.#config = config;
+    this.#store = options.store ?? new AgentSessionStore();
     this.#options = {
+      getManagerId: options.getManagerId,
       idleMinutes: options.idleMinutes ?? DEFAULT_IDLE_MINUTES,
       permissionTimeoutMs: options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
@@ -239,15 +249,20 @@ export class AgentSessionRunner {
       commandResolver: options.commandResolver,
       baseEnv: options.baseEnv,
       clientVersion: options.clientVersion,
+      mcpServers: options.mcpServers,
+      sessionHomesDir: options.sessionHomesDir ?? join(AGENT_MANAGER_HOME, 'session-homes'),
+      credentialFetcher: options.credentialFetcher,
     };
   }
 
-  /** self-update drain / 하트비트용: 턴이 진행 중인 세션. */
-  _snapshot(): Array<{ session_id: string; agent_id: string; runtime: string; busy: boolean; pid: number | null }> {
+  get store(): AgentSessionStore {
+    return this.#store;
+  }
+
+  _snapshot(): Array<{ cli: string; session_id: string; busy: boolean; pid: number | null }> {
     return Array.from(this.#live.values()).map((live) => ({
+      cli: live.cli,
       session_id: live.sessionId,
-      agent_id: live.agentId,
-      runtime: live.runtime,
       busy: live.turn !== null || live.pendingPermissions.size > 0,
       pid: live.client.process.pid ?? null,
     }));
@@ -257,153 +272,170 @@ export class AgentSessionRunner {
     return this._snapshot().filter((s) => s.busy).length;
   }
 
-  /** 디스패처 진입점. ctx 가 없으면(이 매니저가 부트스트랩하지 않은 agent) 서버에 error 로 남긴다. */
-  async handle(request: AgentSessionRequest, ctx: AgentSessionAgentContext | undefined): Promise<void> {
-    const sid = request.session_id;
-    if (!sid || !request.agent_id) return;
-    const tag = `[agent-session ${sid.slice(0, 8)}]`;
-    if (!ctx) {
-      if (request.op === 'open' || request.op === 'prompt' || request.op === 'set_mode') {
-        log(`${tag} ${request.op}: agent ${request.agent_id.slice(0, 8)} has no bootstrapped context on this manager`);
-        await patchAgentSession(this.#config, sid, request.agent_id, {
-          status: 'error',
-          last_error: 'This agent is registered on the Runtime Host but its runtime context is not bootstrapped (missing api key / working_dir). Spawn or restart the agent from the AI Agents page, then prompt again.',
-          reason: 'agent_context_missing',
-        });
-      }
+  #ref(cli: string, sessionId: string): AgentSessionRef {
+    return { manager_id: this.#options.getManagerId(), cli, session_id: sessionId };
+  }
+
+  #key(cli: string, sessionId: string): string {
+    return `${cli}:${sessionId}`;
+  }
+
+  // ─── 디스패처 진입점 ──────────────────────────────────────────────────
+
+  async handle(request: AgentSessionRequest): Promise<void> {
+    const cli = String(request.cli || '').toLowerCase();
+    const sessionId = request.session_id || '';
+    const tag = `[agent-session ${cli}${sessionId ? ` ${sessionId.slice(0, 8)}` : ''}]`;
+    if (request.request_id) {
+      await this.#handleRpc(request, cli, sessionId, tag);
       return;
     }
-    const rest: AwbConfig = { ...this.#config, apiKey: ctx.api_key, retryApiKey: this.#config.apiKey };
-    // op 도중 프로세스가 죽어 live 가 맵에서 빠져도 그 세션의 전송 체인은 같은 객체에
-    // 이어 붙으므로, 여기서 잡아 둔 핸들로 끝까지 기다릴 수 있다.
-    const liveBefore = this.#live.get(sid);
+    const liveBefore = sessionId ? this.#live.get(this.#key(cli, sessionId)) : undefined;
     try {
       switch (request.op) {
-        case 'open':
-          await this.#ensureLive(request, ctx, rest);
-          return;
         case 'prompt': {
-          const live = await this.#ensureLive(request, ctx, rest);
+          if (!sessionId) return;
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
           await this.#runPrompt(live, request.turn_id || randomUUID(), request.text || '');
           return;
         }
         case 'permission':
-          this.#resolvePermission(sid, request.request_id || '', request.option_id ?? null);
+          this.#resolvePermission(cli, sessionId, request.permission_request_id || '', request.option_id ?? null);
           return;
         case 'cancel': {
-          const live = this.#live.get(sid);
-          if (!live) return;
-          await live.client.cancel(live.nativeSessionId).catch(() => undefined);
+          const live = this.#live.get(this.#key(cli, sessionId));
+          if (live) await live.client.cancel(live.sessionId).catch(() => undefined);
           return;
         }
         case 'set_mode': {
-          const live = await this.#ensureLive(request, ctx, rest);
+          const live = this.#live.get(this.#key(cli, sessionId));
           const modeId = request.mode_id || '';
-          if (!modeId) return;
-          await live.client.request('session/set_mode', { sessionId: live.nativeSessionId, modeId }, { timeoutMs: this.#options.requestTimeoutMs });
+          if (!live || !modeId) return;
+          await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId }, { timeoutMs: this.#options.requestTimeoutMs });
           this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeId}.` } }], { current_mode: modeId, reason: 'mode' });
           return;
         }
         case 'close':
-          await this.#closeLive(sid, 'closed');
+          await this.#closeLive(cli, sessionId, 'closed');
           return;
         default:
-          log(`${tag} unknown op ${String((request as any).op)}`);
+          log(`${tag} unknown op ${String(request.op)}`);
       }
-      // 호출자(디스패처/테스트)가 돌아왔을 때 서버가 이미 행을 가진 상태이도록,
-      // 이 op 가 큐에 넣은 전송까지 기다린다. 스트림은 세션당 FIFO 라 순서는 그대로다.
-      const settled = this.#live.get(sid) ?? liveBefore;
+      const settled = this.#live.get(this.#key(cli, sessionId)) ?? liveBefore;
       if (settled) await settled.postChain;
     } catch (err: any) {
       const message = err?.message ?? String(err);
       log(`${tag} ${request.op} failed: ${message}`);
-      const live = this.#live.get(sid);
+      const live = this.#live.get(this.#key(cli, sessionId));
+      const failure: AgentSessionEventInput = { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: request.turn_id };
+      const state: AgentSessionStatePatch = { status: live?.turn ? 'busy' : 'error', last_error: message, reason: `${request.op}_failed` };
       if (live) {
-        this.#enqueue(live, [{ type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: request.turn_id }], {
-          status: live.turn ? 'busy' : 'error',
-          last_error: message,
-          reason: `${request.op}_failed`,
-        });
-      } else {
-        await postAgentSessionEvents(rest, sid, ctx.agent_id, [{ type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: request.turn_id }], {
-          status: 'error',
-          last_error: message,
-          reason: `${request.op}_failed`,
-        });
+        this.#enqueue(live, [failure], state);
+        await live.postChain;
+      } else if (sessionId) {
+        await postAgentSessionEvents(this.#config, this.#ref(cli, sessionId), [{ ...failure, seq: 0, id: `${sessionId}:err:${Date.now()}`, created_at: new Date().toISOString() }], state);
       }
     }
   }
 
+  async #handleRpc(request: AgentSessionRequest, cli: string, sessionId: string, tag: string): Promise<void> {
+    const requestId = request.request_id!;
+    const managerId = this.#options.getManagerId();
+    try {
+      switch (request.op) {
+        case 'list': {
+          const sessions = await this.#store.listSessions(cli);
+          const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
+          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { sessions: withLive } });
+          return;
+        }
+        case 'history': {
+          if (!sessionId) throw Object.assign(new Error('session_id is required'), { code: 'not_found' });
+          const history = await this.#store.readHistory(cli, sessionId);
+          const live = this.#live.get(this.#key(cli, sessionId));
+          if (!history.session && !live) {
+            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
+            return;
+          }
+          await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
+            ok: true,
+            result: {
+              session: history.session ?? (live ? this.#summaryOf(live) : null),
+              events: history.events,
+              truncated: history.truncated,
+              live: live ? this.#stateOf(live) : null,
+            },
+          });
+          return;
+        }
+        case 'open': {
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
+          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: this.#stateOf(live) });
+          return;
+        }
+        default:
+          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: `Unknown RPC op ${String(request.op)}`, code: 'bad_request' });
+      }
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      log(`${tag} ${request.op} rpc failed: ${message}`);
+      await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: message, code: err?.code ?? 'manager_error' });
+    }
+  }
+
   async stopAll(reason = 'manager_shutdown'): Promise<void> {
-    const ids = Array.from(this.#live.keys());
-    await Promise.all(ids.map((id) => this.#closeLive(id, 'suspended', reason).catch(() => undefined)));
+    const keys = Array.from(this.#live.values()).map((l) => [l.cli, l.sessionId] as const);
+    await Promise.all(keys.map(([cli, id]) => this.#closeLive(cli, id, 'idle', reason).catch(() => undefined)));
   }
 
   // ─── 프로세스/세션 열기 ───────────────────────────────────────────────
 
-  async #ensureLive(request: AgentSessionRequest, ctx: AgentSessionAgentContext, rest: AwbConfig): Promise<LiveSession> {
-    const sid = request.session_id;
-    const existing = this.#live.get(sid);
-    if (existing && !existing.exited && !existing.closing) return existing;
-    const inFlight = this.#opening.get(sid);
-    if (inFlight) return inFlight;
-    const opening = this.#open(request, ctx, rest).finally(() => this.#opening.delete(sid));
-    this.#opening.set(sid, opening);
+  async #ensureLive(cli: string, sessionId: string, cwd: string, title: string, request: AgentSessionRequest): Promise<LiveSession> {
+    if (sessionId) {
+      const existing = this.#live.get(this.#key(cli, sessionId));
+      if (existing && !existing.exited && !existing.closing) return existing;
+      const inFlight = this.#opening.get(this.#key(cli, sessionId));
+      if (inFlight) return inFlight;
+    }
+    const opening = this.#open(cli, sessionId, cwd, title, request);
+    if (sessionId) {
+      this.#opening.set(this.#key(cli, sessionId), opening);
+      opening.finally(() => this.#opening.delete(this.#key(cli, sessionId))).catch(() => undefined);
+    }
     return opening;
   }
 
-  async #open(request: AgentSessionRequest, ctx: AgentSessionAgentContext, rest: AwbConfig): Promise<LiveSession> {
-    const sid = request.session_id;
-    const tag = `[agent-session ${sid.slice(0, 8)}]`;
-    const runtime = (request.runtime || ctx.cli || 'claude').toLowerCase();
-    const cwd = (request.cwd || ctx.cwd || '').trim();
-    if (!cwd) throw new Error('No working directory: set cwd on the session or working_dir on the agent.');
+  async #open(cli: string, requestedSessionId: string, requestedCwd: string, title: string, request: AgentSessionRequest): Promise<LiveSession> {
+    const tag = `[agent-session ${cli}${requestedSessionId ? ` ${requestedSessionId.slice(0, 8)}` : ' new'}]`;
+    let cwd = requestedCwd.trim();
+    if (requestedSessionId && !cwd) {
+      // 기존 세션은 원래 cwd 로 열어야 한다(Claude Code 는 cwd 별 폴더에 기록을 둔다).
+      const history = await this.#store.readHistory(cli, requestedSessionId).catch(() => null);
+      cwd = history?.session?.cwd || '';
+    }
+    if (!cwd) throw new Error('No working directory: pass cwd for a new session.');
     try {
       await access(cwd, fsConstants.R_OK);
     } catch {
       throw new Error(`Working directory does not exist on this Runtime Host: ${cwd}`);
     }
-    const resolver = this.#options.commandResolver ?? resolveAcpCommandForRuntime;
-    const { command, args } = await resolver(runtime, ctx);
-    const env = this.#buildEnv(runtime, ctx, sid);
-    log(`${tag} spawning ACP adapter runtime=${runtime} cmd=${command} ${args.join(' ')} cwd=${cwd}`);
+    const resolver = this.#options.commandResolver ?? resolveAcpCommandForCli;
+    const { command, args } = await resolver(cli);
+    const auth = await this.#prepareAuth(cli, cwd, request);
+    log(`${tag} spawning ACP adapter cmd=${command} ${args.join(' ')} cwd=${cwd} auth=${auth.label}`);
 
+    let live: LiveSession | null = null;
     const client = await AcpClient.spawn({
       command,
       args,
       cwd,
-      env,
+      env: this.#buildEnv(cli, requestedSessionId || 'new', auth),
       requestTimeoutMs: this.#options.requestTimeoutMs,
-      onEvent: (event) => this.#onEvent(sid, event),
-      onPermissionRequest: (permission) => this.#onPermission(sid, permission),
+      onEvent: (event) => { if (live) this.#onEvent(live, event); },
+      onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
       onStderr: (line) => log(`${tag} stderr: ${line}`),
       spawnOptions: { detached: process.platform !== 'win32' },
     });
-
-    const live: LiveSession = {
-      sessionId: sid,
-      agentId: ctx.agent_id,
-      workspaceId: request.workspace_id,
-      runtime,
-      cwd,
-      client,
-      nativeSessionId: '',
-      loadSupported: false,
-      permissionPolicy: request.permission_policy || 'ask',
-      rest,
-      pendingPermissions: new Map(),
-      turn: null,
-      textBuffer: '',
-      reasoningBuffer: '',
-      flushTimer: null,
-      idleTimer: null,
-      postChain: Promise.resolve(),
-      closing: false,
-      exited: false,
-    };
-    // 이벤트 콜백이 live 를 찾을 수 있도록 세션 협상 전에 등록한다.
-    this.#live.set(sid, live);
-    client.process.once('exit', (code, signal) => this.#onProcessExit(sid, code, signal));
 
     try {
       const initialized = await client.initialize({
@@ -411,88 +443,155 @@ export class AgentSessionRunner {
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
       });
       const caps = (initialized?.agentCapabilities ?? {}) as Record<string, unknown>;
-      live.loadSupported = caps.loadSession === true;
+      const loadSupported = caps.loadSession === true;
+      const sessionIdForMcp = requestedSessionId || 'new';
+      const mcpServers = this.#options.mcpServers ? this.#options.mcpServers(sessionIdForMcp) : this.#defaultMcpServers(sessionIdForMcp);
 
-      const mcpServers = this.#mcpServers(ctx, sid);
+      live = {
+        cli,
+        sessionId: requestedSessionId,
+        cwd,
+        title,
+        client,
+        loadSupported,
+        loading: false,
+        pendingPermissions: new Map(),
+        turn: null,
+        textBuffer: '',
+        reasoningBuffer: '',
+        flushTimer: null,
+        idleTimer: null,
+        postChain: Promise.resolve(),
+        seq: 0,
+        nonce: randomUUID().slice(0, 8),
+        closing: false,
+        exited: false,
+      };
+
+      let modes: unknown;
       let resumed = false;
-      let modes: unknown = undefined;
-      if (request.native_session_id && live.loadSupported) {
+      if (requestedSessionId) {
+        if (!loadSupported) {
+          throw Object.assign(new Error(`The ${cli} ACP adapter cannot resume existing sessions (no loadSession capability).`), { code: 'resume_unsupported' });
+        }
+        live.loading = true;
         try {
-          const loaded = await client.loadSession({ sessionId: request.native_session_id, cwd, mcpServers });
-          live.nativeSessionId = request.native_session_id;
+          const loaded = await client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers });
           modes = (loaded as any)?.modes;
           resumed = true;
-        } catch (err: any) {
-          log(`${tag} session/load failed (${err?.message ?? err}); opening a fresh session`);
+        } finally {
+          live.loading = false;
         }
-      }
-      if (!resumed) {
+      } else {
         const created = await client.newSession({ cwd, mcpServers });
-        live.nativeSessionId = created.sessionId;
+        live.sessionId = created.sessionId;
         modes = created.modes;
+        await this.#store.recordAwbSession({ cli, session_id: live.sessionId, cwd, title }).catch(() => undefined);
       }
+      if (!live.sessionId) throw new Error('ACP adapter returned no session id.');
+      const key = this.#key(cli, live.sessionId);
+      this.#live.set(key, live);
+      client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
       const modeInfo = this.#parseModes(modes);
       this.#enqueue(live, [{
         type: 'system',
         payload: {
-          text: resumed
-            ? `Session resumed (${runtime}, ${cwd}).`
-            : `Session opened (${runtime}, ${cwd}).`,
-          runtime,
-          cwd,
-          resumed,
-          command: `${command} ${args.join(' ')}`.trim(),
+          text: resumed ? `Session resumed (${cli}, ${cwd}).` : `Session opened (${cli}, ${cwd}).`,
+          cli, cwd, resumed, command: `${command} ${args.join(' ')}`.trim(),
         },
       }], {
         status: 'ready',
-        native_session_id: live.nativeSessionId,
-        resume_supported: live.loadSupported,
+        cwd,
+        ...(title ? { title } : {}),
         current_mode: modeInfo.current,
         available_modes: modeInfo.available,
+        resume_supported: loadSupported,
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
       });
       this.#touch(live);
       return live;
     } catch (err) {
-      this.#live.delete(sid);
-      await this.#killClient(live).catch(() => undefined);
+      const child = client.process;
+      client.close();
+      if (child?.pid) await terminateDetachedProcessTree(child.pid, 250, { child }).catch(() => undefined);
       throw err;
     }
   }
 
-  #buildEnv(runtime: string, ctx: AgentSessionAgentContext, sessionId: string): NodeJS.ProcessEnv {
+  #buildEnv(cli: string, sessionId: string, auth: SessionAuth): NodeJS.ProcessEnv {
+    // 기본은 운영자의 CLI 홈 그대로 — 장비에 이미 있는 세션을 그 CLI 로 이어 쓰는 것이
+    // 목적이다. CLI 설정에 credential 이 묶여 있으면 세션 전용 cli-home(기록 디렉터리만
+    // 운영자 홈으로 링크)과 credential env 로 바꿔 끼운다.
     const env: NodeJS.ProcessEnv = { ...(this.#options.baseEnv ?? process.env) };
-    if (runtime === 'hermes') {
-      // HermesRuntime 과 같은 격리 상태 디렉터리(<MANAGED_AGENTS_DIR>/<agent>/hermes)를
-      // 공유한다 — cli_home_dir 은 <MANAGED_AGENTS_DIR>/<agent>/cli-home 이므로 형제 경로.
-      if (ctx.cli_home_dir) env.HERMES_HOME = join(dirname(ctx.cli_home_dir), 'hermes');
-    } else if (ctx.cli_home_dir) {
-      try {
-        const adapter = createAdapter(runtime === 'deepseek' ? 'deepseek' : runtime);
-        const configDirEnv = adapter.configDirEnv();
-        if (configDirEnv) env[configDirEnv] = ctx.cli_home_dir;
-      } catch {
-        /* 알 수 없는 런타임(사용자 지정 명령) — CLI 홈 주입 없음 */
-      }
-    }
-    Object.assign(env, ctx.extra_env ?? {});
-    env.AWB_AGENT_ID = ctx.agent_id;
-    env.AWB_SESSION_ID = sessionId;
-    env.AWB_API_KEY = ctx.api_key;
+    for (const key of auth.stripEnvKeys) delete env[key];
+    Object.assign(env, auth.env);
     env.AWB_URL = this.#config.url;
+    env.AWB_MANAGER_ID = this.#options.getManagerId();
+    env.AWB_SESSION_CLI = cli;
+    env.AWB_SESSION_ID = sessionId;
     return env;
   }
 
-  #mcpServers(ctx: AgentSessionAgentContext, sessionId: string): AcpMcpServer[] {
+  /**
+   * CLI 설정의 credential 을 세션 프로세스에 적용한다. 운영자 홈의 로그인 파일은 절대
+   * 건드리지 않는다: credential 이 있으면 `<session-homes>/<cli>/<credential_id>` 를
+   * 세션 전용 cli-home 으로 만들고(어댑터 prepareCliHome 이 자격증명 파일/env 를
+   * 만든다), 그 안의 기록 디렉터리(projects / sessions)만 운영자 홈으로 심볼릭 링크해
+   * 기존 세션이 그대로 보이고 이어지게 한다.
+   */
+  async #prepareAuth(cli: string, cwd: string, request: AgentSessionRequest): Promise<SessionAuth> {
+    const none: SessionAuth = { label: 'operator-login', env: {}, stripEnvKeys: [], cliHome: null };
+    const credentialId = request.credential_id || '';
+    if (!credentialId) return none;
+    const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
+    if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
+    const fetcher = this.#options.credentialFetcher
+      ?? ((id: string, ws: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, ws));
+    const credential = await fetcher(credentialId, request.workspace_id || '');
+    if (!credential) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
+    if (!credential.provider.startsWith(prefix)) {
+      throw Object.assign(new Error(`CLI settings credential provider ${credential.provider} does not match ${cli}.`), { code: 'credential_provider_mismatch' });
+    }
+    const adapter = createRuntimeCliAdapter(cli);
+    const cliHome = join(this.#options.sessionHomesDir, cli, credential.credential_id);
+    await mkdir(cliHome, { recursive: true, mode: 0o700 });
+    await this.#linkSessionStore(cli, cliHome);
+    const prep = await adapter.prepareCliHome(cliHome, credential, null);
+    const env: Record<string, string> = { ...(prep.extraEnv ?? {}) };
+    const configDirEnv = adapter.configDirEnv();
+    if (configDirEnv) env[configDirEnv] = cliHome;
+    // 운영자 셸의 API 키(ANTHROPIC_API_KEY / OPENAI_API_KEY …)가 credential 을 덮지 않게 걷어낸다.
+    const stripEnvKeys = adapter.authEnvKeys().filter((key) => !(key in env));
+    await adapter.ensureWorkspaceTrust(cliHome, cwd).catch((err: any) => log(`[agent-session ${cli}] trust seed failed: ${err?.message ?? err}`));
+    return { label: `credential:${credential.provider}`, env, stripEnvKeys, cliHome };
+  }
+
+  /** 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등). */
+  async #linkSessionStore(cli: string, cliHome: string): Promise<void> {
+    const subdir = SESSION_STORE_SUBDIR[cli];
+    if (!subdir) return;
+    const operatorHome = cli === 'claude' ? resolveClaudeHome(this.#options.baseEnv ?? process.env) : resolveCodexHome(this.#options.baseEnv ?? process.env);
+    const target = join(operatorHome, subdir);
+    const linkPath = join(cliHome, subdir);
+    await mkdir(target, { recursive: true });
+    try {
+      const existing = await lstat(linkPath);
+      if (existing.isSymbolicLink() || existing.isDirectory()) return; // 이미 링크됐거나 실제 디렉터리
+    } catch {
+      /* 없음 → 만든다 */
+    }
+    await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+
+  #defaultMcpServers(sessionId: string): AcpMcpServer[] {
     return [{
       type: 'http',
       name: 'awb',
       url: `${this.#config.url.replace(/\/$/, '')}/mcp`,
       headers: [
-        { name: 'Authorization', value: `Bearer ${ctx.api_key}` },
+        { name: 'Authorization', value: `Bearer ${this.#config.apiKey}` },
         { name: 'X-AWB-Client-Type', value: 'agent-session' },
-        { name: 'X-AWB-Agent-Id', value: ctx.agent_id },
         { name: 'X-AWB-Session-Id', value: sessionId },
       ],
     }];
@@ -514,6 +613,28 @@ export class AgentSessionRunner {
     return { current, available };
   }
 
+  #statusOf(live: LiveSession): string {
+    if (live.exited || live.closing) return 'idle';
+    if (live.pendingPermissions.size > 0) return 'awaiting_permission';
+    if (live.turn) return 'busy';
+    return 'ready';
+  }
+
+  #summaryOf(live: LiveSession): SessionSummary {
+    const now = new Date().toISOString();
+    return { cli: live.cli, session_id: live.sessionId, cwd: live.cwd, title: live.title, created_at: now, updated_at: now, source: 'awb' };
+  }
+
+  #stateOf(live: LiveSession): Record<string, unknown> {
+    return {
+      session_id: live.sessionId,
+      cwd: live.cwd,
+      title: live.title,
+      status: this.#statusOf(live),
+      resume_supported: live.loadSupported,
+    };
+  }
+
   // ─── 턴 실행 ──────────────────────────────────────────────────────────
 
   async #runPrompt(live: LiveSession, turnId: string, text: string): Promise<void> {
@@ -523,10 +644,14 @@ export class AgentSessionRunner {
     }
     live.turn = { turnId, startedAt: Date.now() };
     this.#clearIdle(live);
-    this.#enqueue(live, [{ type: 'turn', payload: { phase: 'started' }, turn_id: turnId }], { status: 'busy', reason: 'turn_started' });
+    if (!live.title) {
+      live.title = text.trim().replace(/\s+/g, ' ').slice(0, 80);
+      await this.#store.touchAwbSession(live.cli, live.sessionId, { title: live.title }).catch(() => undefined);
+    }
+    this.#enqueue(live, [{ type: 'turn', payload: { phase: 'started' }, turn_id: turnId }], { status: 'busy', title: live.title, reason: 'turn_started' });
     try {
       const response = await live.client.prompt(
-        { sessionId: live.nativeSessionId, prompt: [{ type: 'text', text }] },
+        { sessionId: live.sessionId, prompt: [{ type: 'text', text }] },
         { timeoutMs: this.#options.promptTimeoutMs },
       );
       this.#flushBuffers(live, turnId);
@@ -546,24 +671,25 @@ export class AgentSessionRunner {
       }
       events.push({ type: 'turn', payload: { phase: 'finished', stop_reason: response?.stopReason || 'end_turn' }, turn_id: turnId });
       this.#enqueue(live, events, { status: 'ready', last_error: null, reason: 'turn_finished' });
+      await this.#store.touchAwbSession(live.cli, live.sessionId).catch(() => undefined);
     } catch (err: any) {
       this.#flushBuffers(live, turnId);
       const message = err?.message ?? String(err);
       this.#enqueue(live, [
         { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: turnId },
         { type: 'turn', payload: { phase: 'finished', stop_reason: 'error' }, turn_id: turnId },
-      ], { status: live.exited ? 'suspended' : 'error', last_error: message, reason: 'turn_failed' });
+      ], { status: live.exited ? 'idle' : 'error', last_error: message, reason: 'turn_failed' });
     } finally {
       live.turn = null;
       this.#touch(live);
+      await live.postChain;
     }
   }
 
   // ─── ACP 스트림 → 서버 ───────────────────────────────────────────────
 
-  #onEvent(sessionId: string, event: RuntimeEvent): void {
-    const live = this.#live.get(sessionId);
-    if (!live) return;
+  #onEvent(live: LiveSession, event: RuntimeEvent): void {
+    if (live.loading) return; // session/load 재생분 — history 가 이미 UI 에 있다
     const turnId = live.turn?.turnId;
     switch (event.type) {
       case 'message_delta':
@@ -586,7 +712,7 @@ export class AgentSessionRunner {
         return;
       }
       case 'tool_updated':
-      case 'tool_completed': {
+      case 'tool_completed':
         this.#flushBuffers(live, turnId);
         this.#enqueue(live, [{
           type: 'tool_update',
@@ -594,22 +720,14 @@ export class AgentSessionRunner {
           turn_id: turnId,
         }]);
         return;
-      }
       case 'child_finished':
         this.#flushBuffers(live, turnId);
-        this.#enqueue(live, [{
-          type: 'tool_update',
-          payload: { tool_call_id: event.childRunId, status: event.status, output: boundedValue(event.output) },
-          turn_id: turnId,
-        }]);
+        this.#enqueue(live, [{ type: 'tool_update', payload: { tool_call_id: event.childRunId, status: event.status, output: boundedValue(event.output) }, turn_id: turnId }]);
         return;
       case 'usage':
         this.#enqueue(live, [{
           type: 'usage',
-          payload: {
-            input_tokens: event.inputTokens, output_tokens: event.outputTokens, total_tokens: event.totalTokens,
-            cached_read_tokens: event.cachedReadTokens, thought_tokens: event.thoughtTokens,
-          },
+          payload: { input_tokens: event.inputTokens, output_tokens: event.outputTokens, total_tokens: event.totalTokens, cached_read_tokens: event.cachedReadTokens, thought_tokens: event.thoughtTokens },
           turn_id: turnId,
         }]);
         return;
@@ -621,8 +739,7 @@ export class AgentSessionRunner {
           if (modeId) this.#enqueue(live, [], { current_mode: modeId, reason: 'mode' });
           return;
         }
-        // available_commands_update 등 나머지는 로그만 — UI 계약에 없는 정보.
-        log(`[agent-session ${sessionId.slice(0, 8)}] diagnostic ${event.method}${kind ? ` (${kind})` : ''}`);
+        log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] diagnostic ${event.method}${kind ? ` (${kind})` : ''}`);
         return;
       }
       default:
@@ -630,14 +747,13 @@ export class AgentSessionRunner {
     }
   }
 
-  async #onPermission(sessionId: string, permission: AcpPermissionRequest): Promise<AcpPermissionOutcome> {
-    const live = this.#live.get(sessionId);
-    if (!live) return { outcome: 'cancelled' };
+  async #onPermission(live: LiveSession, permission: AcpPermissionRequest): Promise<AcpPermissionOutcome> {
+    if (live.loading) return { outcome: 'cancelled' };
     const turnId = live.turn?.turnId;
     this.#flushBuffers(live, turnId);
     const requestId = randomUUID();
     const options = (permission.options ?? []).map((o) => ({ option_id: o.optionId, name: o.name, kind: o.kind }));
-    const requestEvent: AgentSessionEventInput = {
+    this.#enqueue(live, [{
       type: 'permission_request',
       payload: {
         request_id: requestId,
@@ -648,19 +764,7 @@ export class AgentSessionRunner {
         raw_input: boundedValue((permission.toolCall as any)?.rawInput ?? (permission.toolCall as any)?.raw_input),
       },
       turn_id: turnId,
-    };
-
-    if (live.permissionPolicy === 'auto_allow') {
-      const pick = (permission.options ?? []).find((o) => ALLOW_KINDS.has(o.kind)) ?? permission.options?.[0];
-      this.#enqueue(live, [requestEvent, {
-        type: 'permission_decision',
-        payload: { request_id: requestId, outcome: pick ? 'selected' : 'cancelled', option_id: pick?.optionId ?? null, decided_by: 'policy' },
-        turn_id: turnId,
-      }]);
-      return pick ? { outcome: 'selected', optionId: pick.optionId } : { outcome: 'cancelled' };
-    }
-
-    this.#enqueue(live, [requestEvent], { status: 'awaiting_permission', reason: 'permission' });
+    }], { status: 'awaiting_permission', reason: 'permission' });
     return new Promise<AcpPermissionOutcome>((resolve) => {
       const timer = setTimeout(() => {
         live.pendingPermissions.delete(requestId);
@@ -676,17 +780,22 @@ export class AgentSessionRunner {
     });
   }
 
-  #resolvePermission(sessionId: string, requestId: string, optionId: string | null): void {
-    const live = this.#live.get(sessionId);
+  #resolvePermission(cli: string, sessionId: string, requestId: string, optionId: string | null): void {
+    const live = this.#live.get(this.#key(cli, sessionId));
     if (!live) return;
     const pending = live.pendingPermissions.get(requestId);
     if (!pending) {
-      log(`[agent-session ${sessionId.slice(0, 8)}] permission ${requestId.slice(0, 8)} not pending (late or duplicate decision)`);
+      log(`[agent-session ${cli} ${sessionId.slice(0, 8)}] permission ${requestId.slice(0, 8)} not pending (late or duplicate decision)`);
       return;
     }
     clearTimeout(pending.timer);
     live.pendingPermissions.delete(requestId);
-    // 결정 행(permission_decision, decided_by=user)은 서버가 소유자 경로에서 이미 썼다.
+    const allowed = !!optionId && (ALLOW_KINDS.size > 0);
+    this.#enqueue(live, [{
+      type: 'permission_decision',
+      payload: { request_id: requestId, outcome: optionId ? 'selected' : 'cancelled', option_id: optionId, decided_by: 'user' },
+      turn_id: live.turn?.turnId,
+    }], { status: 'busy', reason: allowed ? 'permission_allowed' : 'permission_denied' });
     pending.resolve(optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' });
   }
 
@@ -717,11 +826,18 @@ export class AgentSessionRunner {
     if (events.length) this.#enqueue(live, events);
   }
 
-  /** 세션당 FIFO 로 서버에 보낸다 — 서버 seq 가 스트림 순서와 일치해야 UI 병합이 맞는다. */
-  #enqueue(live: LiveSession, events: AgentSessionEventInput[], patch?: AgentSessionPatch): void {
-    const bounded = events.map((e) => ({ ...e, payload: boundedPayload(e.payload) }));
+  /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. */
+  #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): void {
+    const now = new Date().toISOString();
+    const stamped = events.map((e) => {
+      live.seq += 1;
+      return { ...e, payload: boundedPayload(e.payload), seq: live.seq, id: `${live.sessionId}:live:${live.nonce}:${live.seq}`, created_at: now };
+    });
+    const ref = this.#ref(live.cli, live.sessionId);
     live.postChain = live.postChain
-      .then(() => postAgentSessionEvents(live.rest, live.sessionId, live.agentId, bounded, patch ?? null))
+      .then(() => (stamped.length || state
+        ? postAgentSessionEvents(this.#config, ref, stamped, state ?? null)
+        : Promise.resolve({ ok: true, status: 204 })))
       .then(() => undefined, () => undefined);
   }
 
@@ -737,7 +853,7 @@ export class AgentSessionRunner {
         this.#touch(live);
         return;
       }
-      void this.#closeLive(live.sessionId, 'suspended', 'idle');
+      void this.#closeLive(live.cli, live.sessionId, 'idle', 'idle');
     }, ms);
     live.idleTimer.unref?.();
   }
@@ -749,8 +865,8 @@ export class AgentSessionRunner {
     }
   }
 
-  #onProcessExit(sessionId: string, code: number | null, signal: NodeJS.Signals | null): void {
-    const live = this.#live.get(sessionId);
+  #onProcessExit(key: string, code: number | null, signal: NodeJS.Signals | null): void {
+    const live = this.#live.get(key);
     if (!live) return;
     live.exited = true;
     for (const [id, pending] of live.pendingPermissions) {
@@ -759,22 +875,19 @@ export class AgentSessionRunner {
       live.pendingPermissions.delete(id);
     }
     this.#clearIdle(live);
-    if (live.closing) return; // #closeLive 가 상태를 보고한다
-    this.#live.delete(sessionId);
+    if (live.closing) return;
+    this.#live.delete(key);
     const detail = `Agent process exited (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}).`;
-    log(`[agent-session ${sessionId.slice(0, 8)}] ${detail}`);
+    log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] ${detail}`);
     this.#flushBuffers(live, live.turn?.turnId);
-    // 턴 진행 중이면 #runPrompt 의 catch 가 error/turn 행을 쓴다(prompt 요청이 peer 종료로 reject).
     this.#enqueue(live, [{ type: 'system', payload: { text: `${detail} The next prompt reopens the session.` } }],
-      live.turn ? undefined : { status: 'suspended', reason: 'process_exit' });
+      live.turn ? undefined : { status: 'idle', reason: 'process_exit' });
   }
 
-  async #closeLive(sessionId: string, finalStatus: 'closed' | 'suspended', reason: string = finalStatus): Promise<void> {
-    const live = this.#live.get(sessionId);
-    if (!live) {
-      if (finalStatus === 'closed') return; // 서버가 이미 closed 로 표시했다
-      return;
-    }
+  async #closeLive(cli: string, sessionId: string, finalStatus: 'closed' | 'idle', reason: string = finalStatus): Promise<void> {
+    const key = this.#key(cli, sessionId);
+    const live = this.#live.get(key);
+    if (!live) return;
     live.closing = true;
     this.#clearIdle(live);
     for (const [id, pending] of live.pendingPermissions) {
@@ -782,28 +895,20 @@ export class AgentSessionRunner {
       pending.resolve({ outcome: 'cancelled' });
       live.pendingPermissions.delete(id);
     }
-    if (live.turn) await live.client.cancel(live.nativeSessionId).catch(() => undefined);
+    if (live.turn) await live.client.cancel(live.sessionId).catch(() => undefined);
     this.#flushBuffers(live, live.turn?.turnId);
-    if (!live.exited && live.nativeSessionId) {
-      await live.client.closeSession(live.nativeSessionId).catch(() => undefined);
-    }
-    this.#live.delete(sessionId);
-    await this.#killClient(live);
+    if (!live.exited) await live.client.closeSession(live.sessionId).catch(() => undefined);
+    this.#live.delete(key);
+    const child = live.client.process;
+    const pid = child?.pid;
+    live.client.close();
+    if (pid && child) await terminateDetachedProcessTree(pid, 250, { child }).catch(() => undefined);
     const text = finalStatus === 'closed'
       ? 'Agent process stopped.'
       : reason === 'idle'
         ? `Idle for ${this.#options.idleMinutes} min — agent process stopped. The next prompt reopens the session.`
         : `Agent process stopped (${reason}). The next prompt reopens the session.`;
-    this.#enqueue(live, [{ type: 'system', payload: { text } }], finalStatus === 'closed'
-      ? { reason: 'process_stopped' }
-      : { status: 'suspended', reason });
+    this.#enqueue(live, [{ type: 'system', payload: { text } }], { status: finalStatus, reason });
     await live.postChain;
-  }
-
-  async #killClient(live: LiveSession): Promise<void> {
-    const child = live.client.process;
-    const pid = child?.pid;
-    live.client.close();
-    if (pid && child) await terminateDetachedProcessTree(pid, 250, { child }).catch(() => undefined);
   }
 }

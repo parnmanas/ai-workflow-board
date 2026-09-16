@@ -74,7 +74,8 @@ import {
 import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
-import { AgentSessionRunner } from './lib/agent-session-runner.js';
+import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
+import { loadAgentInfo } from './lib/config.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
   setRestOutbox,
@@ -589,9 +590,13 @@ async function runRuntime(
   // 서버 트랜스크립트로 릴레이한다(docs/agent-sessions.md). 기존 chat/ticket
   // 세션 매니저와 독립적이며 `agent_session_request` SSE 만 소비한다.
   const agentSessionRunner = new AgentSessionRunner(config, {
+    getManagerId: () => loadAgentInfo()?.agent_id || '',
     idleMinutes: Number((config as any)?.agent_sessions?.idle_minutes) || undefined,
     clientVersion: version,
   });
+  // 하트비트 `acp_session_clis` — 이 장비에서 세션을 열 수 있는 CLI(PATH 만 본다).
+  const acpSessionClis = await detectAcpSessionClis();
+  log(`agent sessions: ACP-capable CLIs on this host = ${acpSessionClis.join(', ') || '(none)'}`);
   const runtimeSupervisor = new RuntimeSupervisor({
     rootDir: MANAGED_AGENTS_DIR,
     awbUrl: config.url,
@@ -1110,6 +1115,7 @@ async function runRuntime(
       // 캡처해 버려서, `refresh_available_models` 로 교체한 목록이 매니저를
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
+      acpSessionClis,
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,

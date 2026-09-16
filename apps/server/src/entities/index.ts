@@ -155,8 +155,7 @@ export { CliLoginSession } from './CliLoginSession';
 // TypeORM `synchronize` (D-01) exactly like the sibling tables above; no
 // hand-written migration needed.
 export { MigrationRun } from './MigrationRun';
-// Agent Session (CLI 직접 세션) — 한 사용자 ↔ 한 CLI 에이전트의 ACP 세션과 그
-// append-only 트랜스크립트. ChatRoom 과 의도적으로 분리된 별개 표면
-// (docs/agent-sessions.md). Auto-DDL'd by TypeORM `synchronize` (D-01).
-export { AgentSession } from './AgentSession';
-export { AgentSessionEvent } from './AgentSessionEvent';
+// Agent Session(CLI 직접 세션) CLI 설정 — Runtime Host × CLI 가 어떤 워크스페이스
+// Credential 로 인증할지. 세션 내용은 저장하지 않는다(docs/agent-sessions.md).
+// Auto-DDL'd by TypeORM `synchronize` (D-01).
+export { AgentSessionCliSetting } from './AgentSessionCliSetting';

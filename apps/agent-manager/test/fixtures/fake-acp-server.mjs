@@ -58,6 +58,13 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     argv: process.argv.slice(2),
     HERMES_HOME: process.env.HERMES_HOME ?? null,
     HERMES_PROFILE: process.env.HERMES_PROFILE ?? null,
+    // Agent Session credential 적용 검증용(agent-session-runner.test.mjs) — 다른 테스트는 읽지 않는다.
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null,
+    CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
+    CODEX_HOME: process.env.CODEX_HOME ?? null,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    cwd: process.cwd(),
   }));
 }
 

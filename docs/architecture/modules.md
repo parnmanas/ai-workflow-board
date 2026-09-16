@@ -163,11 +163,11 @@ connection, and status state.
 - Providers: `AuthGuard`, `PermissionGuard`
 
 ### `AgentSessionsModule`
-- Imports: `TypeOrmModule.forFeature([AgentSession, AgentSessionEvent, Agent])`
-- Controllers: `AgentSessionsController` (`/api/agent-sessions/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
+- Imports: `TypeOrmModule.forFeature([Agent])` (+ global `InstanceRegistryService`)
+- Controllers: `AgentSessionsController` (`/api/agent-sessions/hosts/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
 - Providers: `AgentSessionsService`, `AuthGuard`, `PermissionGuard`, `AgentAuthGuard`
 - Exports: `AgentSessionsService`
-- Agent Session (CLI 직접 세션) — ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
+- Agent Session (CLI 직접 세션) — 엔티티 없는 상태 없는 중계자(reverse RPC + 라이브 SSE). ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
 
 ### `ChatRoomsModule`
 - Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention])`, `SharedServicesModule`

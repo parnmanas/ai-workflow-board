@@ -1324,34 +1324,34 @@ export const EVENT_TYPES: EventDefinition[] = [
     }),
   },
   // ───────── agent_session_request ─────────
-  // Agent Session(CLI 직접 세션): 서버 → agent-manager 제어 요청. chat_request 와
-  // 같은 방식으로 envelope 그대로(비-flatten) 소비하며, scope.agent_id 가 대상
-  // agent 이다 — 매니저 식별자 재작성(events.controller `effectiveIdentity`)이
-  // 관리 agent 로 넓혀 준다. 사용자에게는 절대 가지 않는다.
+  // Agent Session(CLI 직접 세션): 서버 → agent-manager. scope.agent_id 는 매니저
+  // 자신의 identity 라 매니저 SSE 연결(identity.agentId === manager_id)에만 간다.
+  // 사용자에게는 절대 가지 않는다. `request_id` 가 있으면 RPC(응답은 REST).
   {
     eventType: 'agent_session_request',
     emitterEvent: 'agent_session_request',
     map(event: any) {
       const payload: AgentSessionRequestPayload = {
-        session_id: event.session_id,
+        manager_id: event.manager_id,
         workspace_id: event.workspace_id,
-        agent_id: event.agent_id,
-        owner_user_id: event.owner_user_id,
+        cli: event.cli,
         op: event.op,
-        runtime: event.runtime,
-        cwd: event.cwd ?? '',
-        native_session_id: event.native_session_id ?? null,
-        permission_policy: event.permission_policy ?? 'ask',
+        request_id: event.request_id,
+        session_id: event.session_id ?? null,
+        cwd: event.cwd,
+        title: event.title,
         turn_id: event.turn_id,
         text: event.text,
-        request_id: event.request_id,
+        permission_request_id: event.permission_request_id,
         option_id: event.option_id,
         mode_id: event.mode_id,
+        credential_id: event.credential_id ?? null,
+        driver_user_id: event.driver_user_id,
         issued_at: event.issued_at,
       };
       return {
         payload,
-        scope: { agent_id: event.agent_id, workspace_id: event.workspace_id },
+        scope: { agent_id: event.manager_id },
         timestamp: event.issued_at,
       };
     },
@@ -1362,8 +1362,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   },
 
   // ───────── agent_session_update ─────────
-  // Agent Session 레코드 변경. UI 전용 — 세션 소유자에게만. flatten 되어 UI 가
-  // `session` 스냅샷을 그대로 상태에 넣는다(재조회 불필요).
+  // 라이브 상태 변경(status/mode/title/…). UI 전용 — 세션을 모는 사용자(driver)에게만.
   {
     eventType: 'agent_session_update',
     emitterEvent: 'agent_session_update',
@@ -1374,34 +1373,35 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { user_id: event.session?.owner_user_id, workspace_id: event.session?.workspace_id },
+        scope: { user_id: event.session?.driver_user_id || event.driver_user_id },
         timestamp: event.timestamp,
       };
     },
-    filter: (env, identity) => identity.type === 'user' && env.scope.user_id === identity.userId,
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'agent_session_update', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
   // ───────── agent_session_event ─────────
-  // Agent Session 트랜스크립트 이벤트 1건(text 청크 / tool call / permission …).
-  // UI 전용 — 세션 소유자에게만. 매니저가 REST 로 append 한 행을 그대로 싣는다.
+  // 라이브 트랜스크립트 이벤트 1건(text 청크 / tool call / permission …). UI 전용 —
+  // driver 에게만. 저장하지 않는다 — 기록은 CLI 홈에 있고 history RPC 로 다시 읽는다.
   {
     eventType: 'agent_session_event',
     emitterEvent: 'agent_session_event',
     map(event: any) {
       const payload: AgentSessionEventPayload = {
+        manager_id: event.manager_id,
+        cli: event.cli,
         session_id: event.session_id,
-        workspace_id: event.workspace_id,
-        owner_user_id: event.owner_user_id,
+        driver_user_id: event.driver_user_id,
         event: event.event,
       };
       return {
         payload,
-        scope: { user_id: event.owner_user_id, workspace_id: event.workspace_id },
+        scope: { user_id: event.driver_user_id },
         timestamp: event.timestamp,
       };
     },
-    filter: (env, identity) => identity.type === 'user' && env.scope.user_id === identity.userId,
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'agent_session_event', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
