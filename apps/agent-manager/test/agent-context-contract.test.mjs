@@ -213,10 +213,30 @@ test('remote URL의 credential과 query를 redaction한다', () => {
   assert.doesNotMatch(rendered, /user|secret|token=/);
 });
 
-test('AGENTS.md는 CLAUDE.md 공통 원본에서 생성된 상태다', async () => {
+// AGENTS.md는 모든 에이전트가 읽는 **유일한** 원본이고, CLAUDE.md는 Claude Code가
+// 같은 내용을 집어가게 하는 얇은 포인터일 뿐이다. 예전에는 CLAUDE.md가 원본이고
+// AGENTS.md가 스크립트로 생성된 26KB 사본이었는데, 사본은 갈라지고 갈라진 걸
+// 아무도 모른 채 에이전트가 낡은 쪽을 따른다(실제로 `.agents/skills/`가 그렇게
+// 만들어져 존재하지 않는 경로와 틀린 커밋 설명을 담고 있었다).
+//
+// 그래서 이 테스트가 막는 건 "CLAUDE.md에 내용이 다시 자라나는 것"이다.
+test('CLAUDE.md는 AGENTS.md를 가리키기만 하고 내용을 복제하지 않는다', async () => {
   const root = new URL('../../../', import.meta.url);
-  const source = await readFile(new URL('CLAUDE.md', root), 'utf8');
+  const claude = await readFile(new URL('CLAUDE.md', root), 'utf8');
   const agents = await readFile(new URL('AGENTS.md', root), 'utf8');
-  assert.ok(agents.endsWith(source));
-  assert.match(agents, /scripts\/sync-agent-instructions\.mjs가 CLAUDE\.md에서 생성했습니다/);
+
+  assert.match(claude, /^@AGENTS\.md$/m, 'CLAUDE.md는 @AGENTS.md import를 유지해야 한다');
+  assert.ok(
+    claude.length < 1024,
+    `CLAUDE.md가 ${claude.length}바이트다 — 포인터가 아니라 내용을 담기 시작했다는 뜻이다. `
+    + '지침은 AGENTS.md 한 곳에만 둔다.',
+  );
+
+  // 원본 쪽은 실제로 내용을 들고 있어야 한다. 반대로 뒤집혀도(AGENTS.md가 빈
+  // 포인터가 돼도) 위 두 단언은 통과하므로 여기서 같이 잡는다.
+  assert.ok(agents.length > 10_000, 'AGENTS.md가 원본이며 실제 지침을 담고 있어야 한다');
+  for (const heading of ['## Project', '## Conventions', '## Architecture']) {
+    assert.ok(agents.includes(heading), `AGENTS.md에 "${heading}" 절이 있어야 한다`);
+    assert.ok(!claude.includes(heading), `"${heading}"가 CLAUDE.md에도 있다 — 사본이 다시 생겼다`);
+  }
 });

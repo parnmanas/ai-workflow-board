@@ -1,9 +1,6 @@
----
-name: awb-mcp-tool-wiring
-description: Checklist for adding a new MCP tool under apps/server/src/modules/mcp/tools/*-tools.ts — registration, the TOOL_AUTHZ_TABLE tier decision, service-layer ownership checks, description authoring, agent-manager ticket-ref-capture classification, and which tests to rerun. Use whenever a new server.tool(...) call is added, or an existing tool's authorization is revisited — skipping the tier-classification step ships a tool that always returns "Unauthorized", regardless of caller; skipping the capture-classification step ships one whose card silently vanishes from chat instead.
----
-
 # MCP Tool Wiring Checklist
+
+**When:** Checklist for adding a new MCP tool under apps/server/src/modules/mcp/tools/*-tools.ts — registration, the TOOL_AUTHZ_TABLE tier decision, service-layer ownership checks, description authoring, agent-manager ticket-ref-capture classification, and which tests to rerun. Use whenever a new server.tool(...) call is added, or an existing tool's authorization is revisited — skipping the tier-classification step ships a tool that always returns "Unauthorized", regardless of caller; skipping the capture-classification step ships one whose card silently vanishes from chat instead.
 
 새 MCP 도구 하나를 추가하는 데 필요한 전부다. 특히 (b)를 빠뜨리면 그 도구는 **어떤 caller로도 절대 성공하지 않는다** — 그것도 빌드는 green인 채로, 조용히.
 
@@ -139,4 +136,4 @@ cd apps/agent-manager && npm run build && node --test --test-force-exit test/too
 
 ## Related
 
-- `.claude/skills/awb-agent-display-name/SKILL.md` — if the tool returns, stamps, or emits an agent name (`actor_name`, `agent_name`, `assignee_name`, `pending_set_by`, …), it must be the canonical `<Manager>/<Agent>` display, resolved through `apps/server/src/utils/agent-name.ts`. A bare `agent.name` is a bug.
+- `docs/runbooks/agent-display-name.md` — if the tool returns, stamps, or emits an agent name (`actor_name`, `agent_name`, `assignee_name`, `pending_set_by`, …), it must be the canonical `<Manager>/<Agent>` display, resolved through `apps/server/src/utils/agent-name.ts`. A bare `agent.name` is a bug.

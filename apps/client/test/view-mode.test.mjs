@@ -17,8 +17,8 @@ import {
 
 // ─── 1. 라우팅 기본 섹션 (단일 진실) ──────────────────────────────────────────
 
-test('defaultSectionForMode: chat → assistant(Chat-first 홈)', () => {
-  assert.equal(defaultSectionForMode('chat'), 'assistant');
+test('defaultSectionForMode: chat → sessions(Agent Session 목록 — CLI 직접 세션이 주 표면)', () => {
+  assert.equal(defaultSectionForMode('chat'), 'sessions');
 });
 
 test('defaultSectionForMode: advanced → boards(기존 Board)', () => {

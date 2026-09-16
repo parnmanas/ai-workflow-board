@@ -100,8 +100,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus,
-} from './types';
+  OrchestrationStepStatus, AgentSessionSnapshot, AgentSessionEventRecord, AgentSessionAgentOption } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2029,6 +2028,51 @@ export const api = {
   // workspaceId overrides the ambient X-Workspace-Id header for this one call —
   // see getChannels above for why callers reacting to a workspaceId prop change
   // need this instead of relying on the ambient header.
+  // ─── Agent Sessions (CLI 직접 세션) ────────────────────────────────────
+  // 서버: apps/server/src/modules/agent-sessions. 워크스페이스는 X-Workspace-Id
+  // 헤더(기본은 현재 활성 워크스페이스)로 스코프한다. Chat API 와 별개 표면.
+  listAgentSessions: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<AgentSessionSnapshot[]>('/agent-sessions', init);
+  },
+  listAgentSessionAgents: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<AgentSessionAgentOption[]>('/agent-sessions/agents', init);
+  },
+  createAgentSession: (
+    input: { agent_id: string; cwd?: string; title?: string; permission_policy?: string },
+    workspaceId?: string,
+  ) => {
+    const init: RequestInit = { method: 'POST', body: JSON.stringify(input) };
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<AgentSessionSnapshot>('/agent-sessions', init);
+  },
+  getAgentSession: (id: string) => request<AgentSessionSnapshot>(`/agent-sessions/${id}`),
+  listAgentSessionEvents: (id: string, afterSeq = 0, limit = 500) =>
+    request<AgentSessionEventRecord[]>(`/agent-sessions/${id}/events?after_seq=${afterSeq}&limit=${limit}`),
+  promptAgentSession: (id: string, text: string) =>
+    request<{ turn_id: string; session: AgentSessionSnapshot }>(`/agent-sessions/${id}/prompt`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  decideAgentSessionPermission: (id: string, requestId: string, optionId: string | null) =>
+    request<AgentSessionSnapshot>(`/agent-sessions/${id}/permission`, {
+      method: 'POST',
+      body: JSON.stringify({ request_id: requestId, option_id: optionId }),
+    }),
+  cancelAgentSession: (id: string) =>
+    request<AgentSessionSnapshot>(`/agent-sessions/${id}/cancel`, { method: 'POST' }),
+  setAgentSessionMode: (id: string, modeId: string) =>
+    request<AgentSessionSnapshot>(`/agent-sessions/${id}/mode`, { method: 'POST', body: JSON.stringify({ mode_id: modeId }) }),
+  renameAgentSession: (id: string, title: string) =>
+    request<AgentSessionSnapshot>(`/agent-sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  closeAgentSession: (id: string) =>
+    request<AgentSessionSnapshot>(`/agent-sessions/${id}/close`, { method: 'POST' }),
+  deleteAgentSession: (id: string) =>
+    request<{ ok: boolean }>(`/agent-sessions/${id}`, { method: 'DELETE' }),
+
   listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
     const init: RequestInit = {};
     if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };

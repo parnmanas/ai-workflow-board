@@ -8,6 +8,7 @@
 //   - chat_room_message: chat room message
 //   - comment_mention:  user @-mentioned this agent
 //   - fs_request:       remote fs operation request
+//   - agent_session_request: Agent Session(CLI 직접 세션) 제어 — open/prompt/permission/cancel/set_mode/close
 //   - agent_typing:     ignored
 //
 // Responsibilities are narrow by design:

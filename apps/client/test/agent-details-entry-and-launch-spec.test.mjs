@@ -325,7 +325,7 @@ test('값 없음과 해석 실패를 구분해서 표시한다', () => {
 //
 // 감사에서 나온 공통 결함은 두 가지였다:
 //   (a) 이름을 못 찾으면 **raw / 잘린 agent id 를 이름 자리에 렌더**했다.
-//       표시 계약(`.claude/skills/awb-agent-display-name`)이 금지하는 형태이고,
+//       표시 계약(`docs/runbooks/agent-display-name.md`)이 금지하는 형태이고,
 //       화면에 뜬 UUID 가 이름인지 id 인지 구분이 안 된다.
 //   (b) 값이 없으면 `'unknown'` 같은 **평범한 문자열로 메워** 보고된 값과
 //       구분되지 않았다.

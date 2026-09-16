@@ -1155,3 +1155,93 @@ export async function requestManagerTriggerRepush(
     return null;
   }
 }
+
+// ─── Agent Session (CLI 직접 세션) ──────────────────────────────────────────
+// 서버 contract: apps/server/src/modules/agent-sessions/agent-sessions-agent.controller.ts.
+// 매니저는 세션 agent 의 키(+ 매니저 키 fallback)로 ACP 스트림을 append 하고 세션
+// 레코드를 patch 한다. 라이브 스트림은 시간 민감 트래픽이라 outbox 에 넣지 않는다
+// (실패하면 로그만 — 다음 flush 가 이어 붙고, 트랜스크립트 유실은 UI 가 seq 갭으로
+// 알 수 있다). `agent_id` 는 dev 모드(AGENT_DEV_MODE, 키 검증 생략)에서 서버가
+// 호출자 identity 로 읽는다.
+
+export interface AgentSessionEventInput {
+  type: string;
+  payload: Record<string, unknown>;
+  turn_id?: string;
+}
+
+export interface AgentSessionPatch {
+  status?: string;
+  native_session_id?: string | null;
+  resume_supported?: boolean;
+  current_mode?: string | null;
+  available_modes?: Array<{ id: string; name: string; description?: string }> | null;
+  last_error?: string | null;
+  reason?: string;
+}
+
+export interface AgentSessionRestResult {
+  ok: boolean;
+  status: number;
+  body?: any;
+}
+
+async function sendAgentSessionRequest(
+  config: AwbConfig,
+  method: 'POST' | 'PATCH',
+  url: string,
+  payload: string,
+  label: string,
+): Promise<AgentSessionRestResult> {
+  try {
+    const send = (apiKey: string) => fetch(url, {
+      method,
+      headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: payload,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    let resp = await send(config.apiKey);
+    if (
+      !resp.ok
+      && (resp.status === 401 || resp.status === 403)
+      && config.retryApiKey
+      && config.retryApiKey !== config.apiKey
+    ) {
+      resp = await send(config.retryApiKey);
+    }
+    let body: any = null;
+    try { body = await resp.json(); } catch { body = null; }
+    if (!resp.ok) {
+      log(`agent-session ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
+    }
+    return { ok: resp.ok, status: resp.status, body };
+  } catch (err: any) {
+    log(`agent-session ${label} ${method} error: ${err?.message ?? err}`);
+    return { ok: false, status: 0 };
+  }
+}
+
+export async function postAgentSessionEvents(
+  config: AwbConfig,
+  sessionId: string,
+  agentId: string,
+  events: AgentSessionEventInput[],
+  patch?: AgentSessionPatch | null,
+): Promise<AgentSessionRestResult> {
+  if (!sessionId || (events.length === 0 && !patch)) return { ok: true, status: 204 };
+  const url = `${trimSlash(config.url)}/api/agent/sessions/${encodeURIComponent(sessionId)}/events`;
+  const payload = JSON.stringify({ agent_id: agentId, events, patch: patch ?? undefined });
+  return sendAgentSessionRequest(config, 'POST', url, payload, `events(${sessionId.slice(0, 8)})`);
+}
+
+export async function patchAgentSession(
+  config: AwbConfig,
+  sessionId: string,
+  agentId: string,
+  patch: AgentSessionPatch,
+): Promise<AgentSessionRestResult> {
+  if (!sessionId) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/sessions/${encodeURIComponent(sessionId)}`;
+  const payload = JSON.stringify({ agent_id: agentId, ...patch });
+  return sendAgentSessionRequest(config, 'PATCH', url, payload, `patch(${sessionId.slice(0, 8)})`);
+}
