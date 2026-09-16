@@ -1,5 +1,5 @@
 import { ApiTags } from '@nestjs/swagger';
-import { Controller, All, Req, Res, OnModuleInit } from '@nestjs/common';
+import { Controller, All, Req, Res, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Request, Response } from 'express';
@@ -126,7 +126,7 @@ function captureToolsListBodyIfFirst(profile: ToolProfile, bodyStr: string): voi
 
 @ApiTags('mcp')
 @Controller()
-export class McpController implements OnModuleInit {
+export class McpController implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly apiKeyService: ApiKeyService,
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -280,6 +280,20 @@ export class McpController implements OnModuleInit {
 
   private createMcpServer(profile: ToolProfile = 'full'): McpServer {
     return createMcpServerForContext(this.buildToolContext(), profile);
+  }
+
+  /**
+   * Release the MCP sessions that would otherwise keep the process alive.
+   *
+   * Every live session owns an open `text/event-stream` response, so
+   * `server.close()` blocks on them and systemd SIGKILLs the process at its
+   * stop timeout. Completing the EventsController streams was necessary but not
+   * sufficient — these are a separate set of responses on a separate code path
+   * (verified 2026-09-16: with only an MCP session held open the server never
+   * exited; with none it exited in ~1s).
+   */
+  onModuleDestroy(): void {
+    sessionStore.closeAll();
   }
 
   @All('mcp')
