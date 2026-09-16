@@ -3,8 +3,9 @@
 // 티켓 98d0936e · F2-1 · §회귀 안전망 ②(딥링크).
 //
 // - TicketArtifactController 가 `?ticket=<id>` 를 관찰해 패널을 열고 파라미터를 제거.
-// - App 의 WorkspaceSectionRedirect 가 `/ws/:wsId?ticket=..` → `assistant?ticket=..` 로
-//   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함).
+// - App 의 WorkspaceSectionRedirect 가 `/ws/:wsId?ticket=..` → `sessions?ticket=..` 로
+//   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함). chat 모드의
+//   기본 랜딩은 Agent Session 목록(sessions)이다 — viewMode.defaultSectionForMode.
 //
 // 실행:  node --import tsx --test apps/client/test/smoke-deeplink.test.mjs
 import test from 'node:test';
@@ -93,9 +94,9 @@ test('MINOR-1: /ws/:wsId?ticket= 리다이렉트가 쿼리스트링을 보존한
           h(
             Routes,
             null,
-            // chat 기본 모드 → assistant 로 리다이렉트하며 search 를 실어 나른다
+            // chat 기본 모드 → sessions 로 리다이렉트하며 search 를 실어 나른다
             h(Route, { path: '/ws/:wsId', element: h(WorkspaceSectionRedirect) }),
-            h(Route, { path: '/ws/:wsId/assistant', element: h(LocationProbe) }),
+            h(Route, { path: '/ws/:wsId/sessions', element: h(LocationProbe) }),
           ),
         ),
       ),

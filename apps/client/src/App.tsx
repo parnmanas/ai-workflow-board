@@ -30,6 +30,8 @@ const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsP
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
+// Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 chat 모드의 기본 랜딩.
+const SessionsPage = lazy(() => import('./components/sessions/SessionsPage'));
 // 오케스트레이션 모드 — 칸반 보드와 같은 최상위 작업 표면.
 const OrchestrationPage = lazy(() => import('./components/orchestration/OrchestrationPage'));
 const OrchestrationTeamsPage = lazy(() => import('./components/orchestration/OrchestrationTeamsPage'));
@@ -64,7 +66,7 @@ export function WorkspacedRedirect({ to }: { to: string }) {
 }
 
 // Redirects / to the workspace's mode-aware default section once auth resolves
-// (Chat-first → assistant, Advanced → boards). Carries the query string through
+// (Chat-first → sessions, Advanced → boards). Carries the query string through
 // so a bookmarked `/?ticket=<id>` deep-link reaches the shell (에픽 리뷰 MINOR-1).
 export function WorkspaceDefaultRedirect() {
   const { currentWorkspaceId } = useAuth();
@@ -201,6 +203,7 @@ function AppContent() {
             <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
             <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
             <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
+            <Route path="sessions" element={<WorkspacedRedirect to="sessions" />} />
             <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
 
             {/* Admin routes — all management pages live here */}
@@ -210,6 +213,8 @@ function AppContent() {
             <Route path="ws/:wsId">
               <Route index element={<WorkspaceSectionRedirect />} />
               <Route path="assistant" element={<ChatFirstHome />} />
+              <Route path="sessions" element={<SessionsPage />} />
+              <Route path="sessions/:sessionId" element={<SessionsPage />} />
               <Route path="boards" element={<BoardsIndexPage />} />
               <Route path="boards/:boardId" element={<Board />} />
               <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />

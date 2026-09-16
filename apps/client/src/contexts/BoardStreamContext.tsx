@@ -46,7 +46,9 @@ type StreamNamedEventType =
   | 'orchestration_update'  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
   | 'ticket_reads_cleared'  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
   | 'cli_login_progress'  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
-  | 'ontology_graph_progress';  // 티켓 964014f5 — Ontology Graph 증분 갱신 진행 + graph_status
+  | 'ontology_graph_progress'  // 티켓 964014f5 — Ontology Graph 증분 갱신 진행 + graph_status
+  | 'agent_session_update'   // Agent Session(CLI 직접 세션) — 세션 레코드 변경(소유자만)
+  | 'agent_session_event';   // Agent Session — 트랜스크립트 이벤트 1건(소유자만)
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -243,6 +245,15 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // 재조회 없이 카운터를 직접 증가/치환한다.
       eventSource.addEventListener('ontology_graph_progress', (event: MessageEvent) => {
         dispatch('ontology_graph_progress', event.data);
+      });
+
+      // Agent Session(CLI 직접 세션) — 서버 event-registry 가 소유자(user_id)로 좁혀
+      // 보내며 flatten 되어 온다. 세션 페이지/사이드바가 session_id 로 한 번 더 거른다.
+      eventSource.addEventListener('agent_session_update', (event: MessageEvent) => {
+        dispatch('agent_session_update', event.data);
+      });
+      eventSource.addEventListener('agent_session_event', (event: MessageEvent) => {
+        dispatch('agent_session_event', event.data);
       });
 
       eventSource.onerror = () => {

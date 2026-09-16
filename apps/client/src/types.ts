@@ -3055,3 +3055,95 @@ export interface OntologyGraphProgressEvent {
   error: string | null;
   timestamp: string;
 }
+
+// ─── Agent Session (CLI 직접 세션) ───────────────────────────────────────
+// 서버 contract: apps/server/src/common/types/stream-events.ts (AgentSessionSnapshot
+// / AgentSessionEventRecord) 와 common/types/agent-sessions.ts (열거). 기존 Chat
+// 타입과 의도적으로 분리 — 세션은 방(room)이 아니라 (owner, agent) 1:1 이다.
+export type AgentSessionStatus =
+  | 'starting'
+  | 'ready'
+  | 'busy'
+  | 'awaiting_permission'
+  | 'suspended'
+  | 'closed'
+  | 'error';
+
+export type AgentSessionEventType =
+  | 'user_prompt'
+  | 'text'
+  | 'reasoning'
+  | 'tool_call'
+  | 'tool_update'
+  | 'permission_request'
+  | 'permission_decision'
+  | 'usage'
+  | 'turn'
+  | 'error'
+  | 'system';
+
+export interface AgentSessionModeOption {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface AgentSessionSnapshot {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  /** `<Manager>/<Agent>` 표시명 — 그대로 렌더한다(awb-agent-display-name). */
+  agent_name: string;
+  owner_user_id: string;
+  runtime: string;
+  title: string;
+  cwd: string;
+  status: AgentSessionStatus | string;
+  native_session_id: string | null;
+  resume_supported: boolean;
+  current_mode: string | null;
+  available_modes: AgentSessionModeOption[];
+  permission_policy: 'ask' | 'auto_allow' | string;
+  last_error: string | null;
+  last_event_seq: number;
+  last_activity_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentSessionEventRecord {
+  id: string;
+  seq: number;
+  turn_id: string;
+  type: AgentSessionEventType | string;
+  payload: Record<string, any>;
+  created_at: string;
+}
+
+/** GET /api/agent-sessions/agents — 새 세션 피커 후보. */
+export interface AgentSessionAgentOption {
+  id: string;
+  name: string;
+  type: string;
+  working_dir: string;
+  is_online: number;
+  manager_agent_id: string | null;
+  supported: boolean;
+  reason: string | null;
+}
+
+export interface AgentSessionUpdateEvent {
+  event_type: 'agent_session_update';
+  session: AgentSessionSnapshot;
+  reason: string;
+  timestamp: string;
+}
+
+export interface AgentSessionEventEvent {
+  event_type: 'agent_session_event';
+  session_id: string;
+  workspace_id: string;
+  owner_user_id: string;
+  event: AgentSessionEventRecord;
+  timestamp: string;
+}

@@ -280,6 +280,12 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **replan 은 그래프도 additive(ticket 301018c5)**: `submit_orchestration_plan`이 `graph`/`graph_template` 없이 다시 들어오면 확정된 `graph_spec`을 **보존**하고 새 step만 고립 node로 편입한다(`carryGraphThroughReplan()`). 예전엔 `graphFromWavePlan`으로 통째 재생성해 conditional/loop_back과 그동안의 patch가 오류·경고 없이 사라졌다. 보존 경로도 patch와 마찬가지로 전용 검증을 만들지 말고 결과 전체를 `validateGraphSpec()`에 다시 통과시킬 것 — 누락 step을 고립 node로 채우는 건 검증기가 이미 하는 일이다. 이 보존이 성립하는 근거는 **plan에서 step이 사라지지 않는다**는 불변식(재제출은 누락 키 보존, `cancel`은 status만 변경, `listSteps`는 상태 미필터)이므로, step을 실제 삭제하는 경로를 만들면 여기도 함께 고쳐야 한다. 폐기는 `reset_graph: true`로만 명시하고, 그때만 `graph_revision`이 0으로 리셋된다.
 - Reference: `docs/orchestration.md`
 
+## Agent Sessions (CLI 직접 세션)
+
+- Chat 과 **별개 표면**: 한 사용자 ↔ 한 CLI 에이전트(Claude Code / Codex / Hermes)의 ACP 세션을 직접 몬다. 앞으로의 주 작업 표면이라 chat 모드 기본 랜딩이 `/ws/:wsId/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.
+- 이름 규약: 엔티티 `AgentSession`/`AgentSessionEvent`, 모듈 `modules/agent-sessions`, REST `/api/agent-sessions`(사용자) · `/api/agent/sessions`(매니저), SSE `agent_session_request`(→manager) · `agent_session_update`/`agent_session_event`(→UI, 소유자만), 권한 `agent_sessions.use`, 클라이언트 `components/sessions/*`, 매니저 `agent-session-runner.ts`. 상수 단일 원천은 `apps/server/src/common/types/agent-sessions.ts`.
+- `agent_session_request` payload 와 `/api/agent/sessions/*` 바디는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/agent-sessions.md`.
+
 ## Skills (AWB 기능)
 
 - Global(`workspace_id NULL`) / Workspace 2계층. 같은 slug면 Workspace가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.

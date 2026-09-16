@@ -35,8 +35,12 @@ export function persistMode(mode: ViewMode): void {
 
 /**
  * 주어진 모드의 기본 랜딩 섹션 — 라우팅과 토글이 공유하는 단일 진실.
- * chat → 'assistant'(Chat-first 홈), advanced → 'boards'(기존 Board 경험).
+ * chat → 'sessions'(Agent Session, CLI 직접 세션 목록), advanced → 'boards'(기존 Board 경험).
+ *
+ * 예전 랜딩이던 Chat-first 홈('assistant')은 Chat 섹션 아래에 그대로 남아 있다 —
+ * 보드 컨시어지 대화가 필요할 때 사이드바 Chat 에서 들어간다. 주 작업 표면은
+ * 이제 CLI 와의 직접 세션이다(docs/agent-sessions.md).
  */
-export function defaultSectionForMode(mode: ViewMode): 'assistant' | 'boards' {
-  return mode === 'chat' ? 'assistant' : 'boards';
+export function defaultSectionForMode(mode: ViewMode): 'sessions' | 'boards' {
+  return mode === 'chat' ? 'sessions' : 'boards';
 }

@@ -36,7 +36,10 @@ export type StreamEventType =
   | 'orchestration_update'  // 오케스트레이션: Mission/Step 상태 변화 (UI 전용, agent 비소비)
   | 'ticket_reads_cleared'  // 티켓 628f4b39: 티켓 코멘트 일괄 읽음 처리 — 다른 탭/기기의 뱃지 동기화용
   | 'cli_login_progress'  // 티켓 b2e79108: CLI 자동 로그인(device-auth) 진행 상태 — UI 전용, agent-manager 비소비
-  | 'ontology_graph_progress'; // 티켓 964014f5: Ontology Graph 증분 갱신 진행 + graph_status 상태 — UI 전용, agent-manager 비소비
+  | 'ontology_graph_progress' // 티켓 964014f5: Ontology Graph 증분 갱신 진행 + graph_status 상태 — UI 전용, agent-manager 비소비
+  | 'agent_session_request'  // Agent Session(CLI 직접 세션): 서버 → agent-manager 제어(open/prompt/permission/cancel/set_mode/close) — 대상 agent 스코프
+  | 'agent_session_update'   // Agent Session: 세션 레코드 변경(status/title/mode/…) — UI 전용, 소유자만
+  | 'agent_session_event';   // Agent Session: 트랜스크립트 이벤트 1건(text/tool/permission/…) — UI 전용, 소유자만
 
 export interface StreamEventScope {
   board_id?: string;
@@ -924,4 +927,87 @@ export interface OntologyGraphProgressPayload {
    *  표시할 수 있게. */
   short_circuited: boolean;
   error: string | null;
+}
+
+// ── Agent Session (CLI 직접 세션, docs/agent-sessions.md) ─────────────────
+// ChatRoom 계열과 별개의 contract. 세션은 (owner_user, agent) 1:1 이고,
+// 매니저는 ACP 스트림을 그대로 `agent_session_events` 로 흘려보낸다.
+// 상수/열거는 common/types/agent-sessions.ts 가 단일 원천이다.
+
+/** 서버 → agent-manager. `chat_request` 처럼 envelope 그대로(비-flatten) 소비하며
+ *  scope.agent_id 로 대상 agent(또는 그 agent 를 소유한 매니저)에게만 간다. */
+export interface AgentSessionRequestPayload {
+  session_id: string;
+  workspace_id: string;
+  agent_id: string;
+  owner_user_id: string;
+  op: 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  /** 세션 생성 시점의 Agent.type 스냅샷 — 매니저가 ACP 어댑터 명령을 고른다. */
+  runtime: string;
+  /** '' 이면 매니저가 Agent.working_dir 를 쓴다. */
+  cwd: string;
+  /** 이전에 열렸던 ACP 세션 id — 있으면 매니저가 session/load 를 먼저 시도한다. */
+  native_session_id: string | null;
+  permission_policy: string;
+  // op 별 부가 필드
+  turn_id?: string;        // prompt
+  text?: string;           // prompt
+  request_id?: string;     // permission
+  option_id?: string | null; // permission (null = cancelled)
+  mode_id?: string;        // set_mode
+  issued_at: string;
+}
+
+export interface AgentSessionModeOption {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** 세션 레코드의 UI 투영. REST(GET /api/agent-sessions/:id) 와 SSE 가 같은 모양을 쓴다. */
+export interface AgentSessionSnapshot {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  /** `<Manager>/<Agent>` 표시명 (awb-agent-display-name 규약). */
+  agent_name: string;
+  owner_user_id: string;
+  runtime: string;
+  title: string;
+  cwd: string;
+  status: string;
+  native_session_id: string | null;
+  resume_supported: boolean;
+  current_mode: string | null;
+  available_modes: AgentSessionModeOption[];
+  permission_policy: string;
+  last_error: string | null;
+  last_event_seq: number;
+  last_activity_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** UI 전용(소유자만). flatten 되어 `{ event_type, session, reason, timestamp }` 로 나간다. */
+export interface AgentSessionUpdatePayload {
+  session: AgentSessionSnapshot;
+  /** 'created' | 'status' | 'renamed' | 'closed' | 'deleted' | 'manager_patch' | … */
+  reason: string;
+}
+
+export interface AgentSessionEventRecord {
+  id: string;
+  seq: number;
+  turn_id: string;
+  type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+/** UI 전용(소유자만). flatten 되어 `{ event_type, session_id, event, … }` 로 나간다. */
+export interface AgentSessionEventPayload {
+  session_id: string;
+  workspace_id: string;
+  owner_user_id: string;
+  event: AgentSessionEventRecord;
 }
