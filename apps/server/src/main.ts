@@ -139,6 +139,40 @@ async function bootstrap() {
   const PORT = process.env.PORT || 7701;
   await app.listen(PORT, '0.0.0.0');
 
+  // ── Make a graceful stop actually stop ──────────────────────────────────
+  //
+  // `server.close()` waits for every open connection, and this server's clients
+  // hold connections open by design: the EventsController SSE stream and each
+  // MCP session are long-lived `text/event-stream` responses. The destroy hooks
+  // on both (EventsController.shutdown$, sessionStore.closeAll) end the ones
+  // that exist when shutdown begins — but every agent manager reconnects within
+  // milliseconds of losing its stream, so a fresh request lands on a still-open
+  // keep-alive socket right after those hooks ran and blocks the close all over
+  // again. Measured on rolf 2026-09-16/17: with the hooks alone the process
+  // still burned the full stop timeout and was SIGKILLed on every restart,
+  // while the same build with a single non-reconnecting client exited in ~1s.
+  //
+  // So once a signal arrives, keep destroying whatever sockets remain until the
+  // process is gone. The timer is unref'd — it can never be the thing keeping
+  // the loop alive — and it is harmless after `app.close()` has closed the
+  // listener, since no new connection can be accepted by then. Clients simply
+  // reconnect to the replacement process.
+  const httpServer = app.getHttpServer();
+  const dropLingeringSockets = () => {
+    const sweep = setInterval(() => {
+      // Node >= 18.2. Optional-called so a stripped-down adapter in tests or a
+      // future http/2 server cannot turn shutdown into a crash.
+      httpServer.closeAllConnections?.();
+    }, 250);
+    sweep.unref?.();
+  };
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    // `once`, and additive: NestJS's enableShutdownHooks() has its own listener
+    // for these signals and must keep running — this only removes the sockets
+    // that its `app.close()` would otherwise wait on forever.
+    process.once(signal, dropLingeringSockets);
+  }
+
   // Boot-time deployment self-report (ticket 8ce72b18, "배포 인지" DoD 2). Record
   // THIS server's own build commit as a GLOBAL deployment so a board that treats
   // the AWB server itself as the SUT can gate QA reruns on the deployment fact.

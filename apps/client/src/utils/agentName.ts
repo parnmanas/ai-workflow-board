@@ -1,6 +1,6 @@
 // ─── Agent display name (ST-7) ───────────────────────────────────────
 //
-// CONTRACT + CHECKLIST: .claude/skills/awb-agent-display-name/SKILL.md — read it
+// CONTRACT + CHECKLIST: docs/runbooks/agent-display-name.md — read it
 // before adding any agent picker, roster, or label. Never render `{a.name}` and
 // never hand-roll `${a.manager_name}/${a.name}`; always call
 // formatAgentDisplayName. Note the usual trap: mapping an agent list to

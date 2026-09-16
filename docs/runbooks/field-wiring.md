@@ -1,9 +1,6 @@
----
-name: awb-field-wiring
-description: Checklist for adding or changing a JSON-array column on the Ticket entity (e.g. labels, channel_ids, on_done_action_ids). Use whenever a Ticket field stored as a JSON string array is added, renamed, or starts flowing through a new surface — missing any of the 5 touch points makes the client receive a raw string or silently fail to save.
----
-
 # Ticket JSON-Array Field Wiring Checklist
+
+**When:** Checklist for adding or changing a JSON-array column on the Ticket entity (e.g. labels, channel_ids, on_done_action_ids). Use whenever a Ticket field stored as a JSON string array is added, renamed, or starts flowing through a new surface — missing any of the 5 touch points makes the client receive a raw string or silently fail to save.
 
 Ticket columns that hold arrays are stored as JSON **strings** in the DB and must be serialized on every write path and parsed on every read path. There are exactly **5 touch points** — wire all of them or the field breaks in a non-obvious way.
 

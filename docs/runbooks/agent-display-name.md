@@ -1,9 +1,6 @@
----
-name: awb-agent-display-name
-description: The `<Manager>/<Agent>` display-name contract for every surface that shows an agent — pickers, dropdowns, rosters, typing/status indicators, timelines, SSE frames, prompts. Use whenever code renders an agent's name, adds an agent picker, denormalizes an agent name into a payload or a DB column, or emits an event carrying an actor/agent name. Rendering a bare `agent.name` (or a raw agent id) is a bug, not a style choice — the same leaf name legitimately exists under multiple managers, so the prefix is the only thing that makes them distinguishable.
----
-
 # Agent Display Name (`<Manager>/<Agent>`) Contract
+
+**When:** The `<Manager>/<Agent>` display-name contract for every surface that shows an agent — pickers, dropdowns, rosters, typing/status indicators, timelines, SSE frames, prompts. Use whenever code renders an agent's name, adds an agent picker, denormalizes an agent name into a payload or a DB column, or emits an event carrying an actor/agent name. Rendering a bare `agent.name` (or a raw agent id) is a bug, not a style choice — the same leaf name legitimately exists under multiple managers, so the prefix is the only thing that makes them distinguishable.
 
 ## The rule
 
@@ -96,4 +93,4 @@ grep -rn "_name: .*\.name" --include=*.ts apps/server/src \
 - `apps/server/test/agent-fullname-display.test.mjs` — activity / pending / SSE
 - `apps/server/test/agent-fullname-orchestration-typing.test.mjs` — orchestration + both typing indicators
 - `apps/agent-manager/test/chat-typing-attribution.test.mjs` — responder attribution
-- `.claude/skills/awb-mcp-tool-wiring/SKILL.md` — new MCP tools that return an agent name go through this contract too
+- `docs/runbooks/mcp-tool-wiring.md` — new MCP tools that return an agent name go through this contract too

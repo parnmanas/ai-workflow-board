@@ -866,7 +866,7 @@ export class ActionsService {
 
   /**
    * agent id → `<Manager>/<Agent>` 표시명 배치 조회.
-   * `.claude/skills/awb-agent-display-name` 계약대로 bare name을 쓰지 않는다 —
+   * `docs/runbooks/agent-display-name.md` 계약대로 bare name을 쓰지 않는다 —
    * 같은 leaf 이름이 여러 매니저 아래 정당하게 존재하므로 접두사가 없으면
    * 어느 호스트가 실행했는지 구분할 수 없고, 그게 이 티켓의 핵심 요구사항이다.
    */

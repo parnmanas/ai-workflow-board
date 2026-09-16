@@ -878,7 +878,7 @@ export class OrchestrationMissionService {
     // caller passed (MCP `agentName`, a bare `agent.name`, or nothing at all) is
     // replaced by the canonical `<Manager>/<Agent>` display. Doing it here means
     // no recordEvent call site can ever regress the format — see
-    // utils/agent-name.ts and .claude/skills/awb-agent-display-name.
+    // utils/agent-name.ts and docs/runbooks/agent-display-name.md.
     let actorName = input.actor_name || '';
     if (input.actor_type === 'agent' && input.actor_id) {
       actorName = (await resolveAgentDisplayName(this.agentRepo, input.actor_id)) || actorName;

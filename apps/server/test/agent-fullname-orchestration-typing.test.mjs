@@ -1,7 +1,7 @@
 // Regression: the `<Manager>/<Agent>` display contract on the surfaces added
 // after ticket 51b1519d — Orchestration mode and the two typing indicators.
 //
-// The rule (docs/agent-display-name.md, .claude/skills/awb-agent-display-name):
+// The rule (docs/runbooks/agent-display-name.md):
 // EVERY user-visible agent name renders as `<Manager>/<Agent>`, resolved
 // through utils/agent-name.ts on the server or utils/agentName.ts on the
 // client. Never a bare `agent.name`, never a raw agent id.

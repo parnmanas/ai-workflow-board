@@ -66,5 +66,6 @@ explains three of four symptoms is the wrong cause, or there are two bugs.
   next role needs the cause, not just the diff.
 - If the cause turns out to be in another component, do not silently widen your
   ticket. State it, and let the reporter decide whether to split.
-- `.claude/skills/awb-ticket-recovery` covers the specific case of a ticket
-  that never dispatches — check it before debugging the agent loop by hand.
+- A ticket that never dispatches at all is usually not a bug in your change —
+  check the ticket's column, its activity trail, and whether two agent instances
+  hold it, before you start debugging the agent loop by hand.

@@ -50,10 +50,9 @@ reasoning that produced the bug you are currently fixing.
 
 ## In AWB
 
-- Server tests live in `apps/server/test/*.test.mjs` and run through
-  `node test/run-suite.mjs <file>`; agent-manager tests are `node --test`.
-- Tests import the **compiled** server from `dist/`, so run `npm run build`
-  before the suite or you will test the previous revision.
+- Find the project's own test command before inventing one, and check whether
+  its suite runs against compiled output — if it does, build first or you will
+  be testing the previous revision and reading its green as yours.
 - Say in your ticket comment which test you added and that you saw it fail
   first. "Tests pass" alone does not tell the reviewer whether the test is
   load-bearing.

@@ -52,7 +52,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const timestamp = new Date().toISOString();
       // Resolve the canonical `<Manager>/<Agent>` display once, at emit time.
       // The ticket panel used to render the raw agent UUID here because the
-      // event carried no name at all — see .claude/skills/awb-agent-display-name.
+      // event carried no name at all — see docs/runbooks/agent-display-name.md.
       const agentName =
         (await resolveAgentDisplayName(dataSource.getRepository(Agent), agent_id)) || 'Agent';
       activityEvents.emit('agent_typing', { agent_id, agent_name: agentName, ticket_id, is_typing, timestamp });

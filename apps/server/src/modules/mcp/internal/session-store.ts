@@ -207,6 +207,30 @@ class SessionStore {
   }
 
   /**
+   * Close every live session — shutdown only.
+   *
+   * Each MCP session holds an open `text/event-stream` response, pumped by the
+   * `while (true) reader.read()` loop in express-bridge. Nothing ended those on
+   * shutdown, so `server.close()` waited on them forever and systemd SIGKILLed
+   * the process at its stop timeout on every restart. Closing the transports
+   * ends the underlying streams, the pump loop sees `done`, and the responses
+   * finish.
+   *
+   * Eviction hooks are deliberately NOT fired: they mark agents offline, and a
+   * shutting-down process should not be issuing writes as its DB connections
+   * are being torn down. The agents are about to reconnect to the new process
+   * anyway, and idle cleanup — which is what the hooks exist for — is a
+   * different situation.
+   */
+  closeAll(): void {
+    const entries = Array.from(this.sessions.values());
+    this.sessions.clear();
+    for (const entry of entries) {
+      entry.transport.close().catch(() => { /* best-effort: we are exiting */ });
+    }
+  }
+
+  /**
    * True iff any currently-registered session carries the given agentId in its
    * auth context. Used by the eviction hook to avoid marking an agent offline
    * when a stale session idles out but other live sessions for the same agent
