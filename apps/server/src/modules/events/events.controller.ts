@@ -2,7 +2,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
-import { Observable, Subject, filter, map, finalize, of, merge, interval } from 'rxjs';
+import { Observable, Subject, filter, map, finalize, of, merge, interval, takeUntil } from 'rxjs';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { randomUUID } from 'crypto';
@@ -95,6 +95,18 @@ interface SseSessionDetail {
 @Controller('api/events')
 export class EventsController implements OnModuleDestroy {
   private readonly eventSubject = new Subject<StreamEvent>();
+  /**
+   * Fires once on shutdown to end every live SSE stream.
+   *
+   * `stream()` returns `merge(versionEvent, keepalive, eventSubject…)`, and
+   * `merge` completes only when **every** source completes. `keepalive` is an
+   * `interval(15s)` that never does, so completing `eventSubject` in
+   * `onModuleDestroy` was not enough: each connected agent kept an open
+   * response, `server.close()` waited on them forever, and systemd SIGKILLed
+   * the process at the stop timeout on every restart (observed on rolf
+   * 2026-09-16 — the full 90s default, then `status=9/KILL`).
+   */
+  private readonly shutdown$ = new Subject<void>();
   private clientCount = 0;
   // Runtime Host API-key SSE connections keyed by the Host Agent identity.
   // Executable Agent identities are never added to this map.
@@ -196,6 +208,12 @@ export class EventsController implements OnModuleDestroy {
       activityEvents.removeListener(def.emitterEvent, handler);
     }
     this.listeners.length = 0;
+    // Order matters only in that both must happen: shutdown$ ends the
+    // never-completing keepalive, eventSubject.complete() ends the event feed.
+    // Each live stream then completes, Nest ends the response, and the sockets
+    // holding server.close() open are released.
+    this.shutdown$.next();
+    this.shutdown$.complete();
     this.eventSubject.complete();
   }
 
@@ -510,7 +528,10 @@ export class EventsController implements OnModuleDestroy {
         }),
         finalize(() => cleanup('finalize')),
       ),
-    );
+      // Applied to the merged stream rather than to `keepalive` alone, so any
+      // source added here later is covered by the same shutdown guarantee.
+      // Completing this way still runs the `finalize` cleanup above.
+    ).pipe(takeUntil(this.shutdown$));
   }
 
   /** Runtime Host sessions synthesized per supervised executable Agent. */

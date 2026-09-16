@@ -537,7 +537,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
 
     const candidates = await this.stepRepo
       .createQueryBuilder('step')
-      .innerJoin(OrchestrationMission, 'mission', 'mission.id = step.mission_id')
+      // OrchestrationMission.id 는 PostgreSQL 에서 uuid 지만 step.mission_id 는 두 백엔드
+      // 공통 varchar 다. 캐스트 없이 비교하면 PostgreSQL 이 `uuid = character varying` 을
+      // 거부해 스윕 전체가 매 주기 warn 만 남기고 통째로 죽는다 — 위 catch 가 실패를
+      // 삼키는 탓에 리마인더가 한 번도 안 나가는데도 조용하다. ontology 그래프 쿼리와
+      // 같은 처방(커밋 55689cbe).
+      .innerJoin(OrchestrationMission, 'mission', 'CAST(mission.id AS varchar) = step.mission_id')
       .where('step.status = :awaiting', { awaiting: AWAITING_USER_STATUS })
       .andWhere('mission.status = :running', { running: 'running' })
       .andWhere('(step.confirm_reminded_visit IS NULL OR step.confirm_reminded_visit <> step.visit)')
