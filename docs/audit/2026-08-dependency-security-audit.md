@@ -2708,3 +2708,145 @@ root `overrides` 의 실제 해석 버전도 lockfile 에서 다시 추출해 �
 - **PR #11** — `main` → `production.private` 릴리스. `MERGEABLE`/`CLEAN`, 6일째 대기. **운영자 병합 필요.**
 - **PR #8** — 여전히 `CONFLICTING`, 내용은 이미 정규 병합 경로로 배포 브랜치에 도달했다. 닫는 것 외 남은 조치 없음 — 운영자 판단.
 - **신규 관찰** — 09-15 야간 cron 미실행(3절). 09-16 분 실행 여부가 다음 회차의 판정 기준.
+
+## 재검증 로그 — 2026-09-17 (`main` @ `dd862665`)
+
+정기 의존성 감사 7일째. **의존성 판정 자체는 어제와 같다 — `main` 은 moderate/low 양쪽
+모두 0건.** 그런데 이번 회차는 6일 만에 처음으로 *구조*가 바뀌었다: 배포 브랜치
+`production.private` 이 **원격에서 삭제됐다**. 취약점이 해소된 것이 아니라 **추적 경로가
+사라진 것**이라, 아래 2~4절에 나눠 적는다.
+
+### 1. `main` — 0건, 의존성 트리는 어제와 바이트 단위로 동일
+
+`main` 이 `ef98b93b` → `dd862665` 로 20여 커밋 전진했지만(Agent Session 표면, chat
+아키텍처 리팩터 등) **`package-lock.json` blob 은 `e464f1db` 로 변함이 없다.** 매니페스트
+변경분도 파싱해서 비교했고 — 루트는 `workspaces` 포매팅 + `sync:agent-instructions`
+스크립트 2줄 삭제, `apps/server`·`apps/client` 는 테스트 등록 줄 — **`dependencies` /
+`devDependencies` 실내용은 세 파일 모두 IDENTICAL**. 즉 새로 유입된 의존성이 없고, 어제의
+0건 판정이 그대로 유효하다. 그럼에도 advisory 조회는 새로 돌렸다(신규 advisory 유입
+여부는 tip 이 같아도 달라질 수 있다): **moderate 0건 / low 0건, 패키지 538 / 버전 579.**
+
+root `overrides` 의 실제 해석 버전도 lockfile 에서 다시 추출했다 — `multer` 2.3.0,
+`hono` 4.13.7, `@hono/node-server` 2.1.1, `js-yaml` 4.3.2 / 5.4.1, `picomatch` 4.0.7,
+`cosmiconfig` 8.3.6. 전부 의도한 범위 안이다.
+
+### 2. 배포 브랜치 `production.private` 이 삭제됐다 (2026-09-16 ~14:20 UTC)
+
+`git ls-remote` 와 REST API 양쪽으로 확인했다 — **`refs/heads/production.private` 이 없다**
+(`GET /branches/production.private` → **404**). 원격에 남은 브랜치는 7개이고 그중 배포
+브랜치는 없다.
+
+같은 시각 대기 중이던 PR 두 건이 함께 닫혔다. 이것은 누가 검토해서 닫은 것이 아니라
+**base 브랜치 삭제에 따른 GitHub 의 자동 close** 다 — 둘 다 base 가
+`production.private` 이고, `updatedAt` 이 `14:20:15Z` / `14:20:16Z` 로 1초 차이이며,
+상태가 `CLOSED` + `CONFLICTING`/`DIRTY` 로 함께 뒤집혔다:
+
+- **PR #11** — `main` → `production.private` 릴리스 PR. **7건을 한 번에 해소하는 경로였는데 닫혔다.**
+- **PR #8** — 이미 정규 병합 경로로 도달해 잉여였던 PR. 닫힌 것 자체는 무해하다.
+
+### 3. 그래서 위험은 줄지 않았다 — 배포된 트리는 그대로 돌고 있다
+
+**브랜치 삭제는 배포를 되돌리지 않는다.** `deploy.yml` 실행 이력상 마지막 배포는
+**2026-09-05, `production.private` @ `0ddec72f`** 이고 그 뒤로 배포가 없다. 즉 NAS 에서
+지금 돌고 있는 이미지는 여전히 `0ddec72f` 에서 빌드된 것이고, 그 트리의 **moderate 이상
+7건(multer DoS 3건 · js-yaml 1건 · hono 3건)은 7일째 그대로 서비스 중**이라고 봐야 한다.
+
+달라진 것은 위험의 크기가 아니라 **가시성**이다. 어제까지는 "PR #11 을 병합하면 해소" 라는
+단일 경로와, 그 상태를 매일 알려주는 cron 게이트가 있었다. 오늘은 둘 다 없다 — 병합 대상
+브랜치가 없어졌고, 배포 트리의 lockfile 을 꺼내 볼 방법도 없어졌다. **취약한 트리가 감사
+대상에서만 빠진 상태**가 가장 정확한 요약이다.
+
+### 4. 조치 — 게이트가 이 상황을 '일시적 네트워크 오류' 로 보고하던 것을 고쳤다
+
+`scripts/audit-deploy-branch-deps.mjs` 를 그대로 돌려 보니 이렇게 나왔다:
+
+```
+FAIL production.private — fetch 실패
+  - production.private: git fetch 실패 (Command failed: git fetch --no-tags --depth=1 origin production.private)
+  ... main 에서 고친 뒤 production.private 로 머지할 것.
+```
+
+판정(FAIL)은 옳지만 **문장이 틀렸다.** 이 출력은 재시도하면 되는 일시적 네트워크 오류와
+구분되지 않고, 붙어 나오는 권고("`production.private` 로 머지할 것")는 **이제 불가능한
+조치**를 지시한다. 배포 트리가 영구히 감사 불가가 된 사건이 네트워크 플레이크로 읽혀
+묻히기 딱 좋다.
+
+그래서 **원인을 갈라서 보고하도록** 고쳤다(`remoteBranchExists()` 추가 — `ls-remote` 로
+있음/없음/모름 3상태):
+
+```
+FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)
+  - production.private: 원격에 없다 — 배포 브랜치가 삭제/개명됐다. 브랜치가 사라져도
+    이미 배포된 이미지는 그대로 돌아간다: 마지막 배포분이 계속 서비스 중이면서 감사
+    대상에서만 빠진 상태일 수 있다.
+```
+
+**fail-closed 는 그대로다** — 세 경우 모두 여전히 exit 1 이다. 이번 변경은 판정이 아니라
+진단을 고친 것이고, 조회 자체가 실패했을 때는 `null`(모름)로 두어 "삭제됨" 으로 단정하지
+않는다. 푸터의 권고도 브랜치명 하드코딩을 걷어내고, **배포 브랜치 목록에서 그냥 빼면
+게이트는 초록이 되지만 배포된 트리는 여전히 감사되지 않는다**는 경고를 덧붙였다.
+
+회귀 테스트 `apps/server/test/deploy-branch-audit-guard.test.mjs` **4건**을 추가했다 —
+임시 로컬 bare 저장소를 origin 으로 써서 네트워크 없이 3상태를 실제로 단언하고, 마지막
+1건은 "'없음' 이 통과 경로가 되지 않는다"는 fail-closed 계약을 지킨다. 표준 절차대로
+`apps/server/package.json` 의 `test` 스크립트에도 등록했고
+(`test-registration-completeness` 4건 통과로 확인), 가드 합계는 **87 → 91** 이 됐다.
+
+**일부러 하지 않은 것 두 가지** — 둘 다 운영자 판단이다:
+
+- **`production.private` 재생성/푸시 안 함.** 그 브랜치로의 push 는 `deploy.yml` 을 태워
+  GHCR 빌드 + NAS SSH 배포까지 자동 실행한다. 되돌리기 어려운 외부 조작이라 감사 런이
+  단독으로 할 일이 아니다.
+- **배포 브랜치 목록에서 제거 안 함.** `ci.yml` / `deployBranches()` 에서 빼면 cron 은
+  즉시 초록이 되지만, 그건 **배포 트리가 취약하다는 유일한 자동 신호를 끄는 것**이다.
+  브랜치 삭제가 배포 파이프라인 은퇴인지 실수인지부터 확인돼야 한다. 참고로 `main` 의
+  `README.md`, `ci.yml`, `audit-ci-branch-coverage.mjs`, 가드 테스트는 **여전히
+  `production.private` 을 배포 브랜치로 문서화/단언**하고 있다 — 은퇴였다면 같이
+  정리됐을 것이므로, 현재로선 **의도적 은퇴로 보기 어렵다.**
+
+### 5. 어제 남긴 cron 미실행 건 — one-off 로 종결
+
+09-15 에 야간 cron 이 아예 돌지 않은 건의 판정 기준은 "09-16 분이 뜨는가" 였다.
+**떴다** — 스케줄 실행 `35078672216` (2026-09-16T09:18:34Z). 따라서 09-15 미실행은
+GitHub 쪽 best-effort 스케줄 유실의 **일회성 사건**으로 종결하고, cron 설정은 건드리지
+않는다(한 건의 데이터로 튜닝하지 않는다는 어제 판단 유지).
+
+그 실행의 실패 서명도 예상과 정확히 일치했다: 오프라인 가드 5종 + `main` advisory 단계
+전부 green, **10번 단계 `배포 브랜치 lockfile 재감사` 만 red**. 이 실행은 브랜치 삭제
+(14:20Z) *이전*인 09:18Z 라 아직 "7건" 으로 실패한 것이다. **다음 cron 부터는 같은 단계가
+'원격에 이 브랜치가 없다' 로 바뀐다** — 이번 회차의 예측이자 다음 회차의 확인 항목이다.
+(부수 관찰: 10번이 실패하면서 11번 `발행 트리 재감사` 가 skip 됐다. 알려진 단계 순서
+취약성이 같은 잡 안에 아직 남아 있다.)
+
+### 6. `main` push CI 의 red 두 건은 의존성과 무관
+
+09-16 의 `main` push 실행 중 두 건이 red 인데, 실패 잡은
+`agent-manager tests (windows-latest)` 와 `apps/server full test suite (sqlite)` 다.
+**`dependency audit` 잡은 해당 실행들에서 전부 green** 이므로 이번 감사의 결론에 영향이
+없다. 기능 테스트 쪽 이슈라 이 감사의 범위 밖으로 둔다.
+
+### 게이트 결과 (`main` @ `dd862665`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 1건** (`production.private` 원격에 없음 — 2·3·4절)
+- `audit-install-scripts` — install-script 3개(`@scarf/scarf`, `esbuild`, `fsevents`) 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — 배포 브랜치 1개 커버 (단, *설정상* 커버일 뿐 대상 브랜치는 이제 존재하지 않는다 — 4절)
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **91/91** 통과 (16 + 16 + 39 + 6 + 6 + 4 + **4 신규**)
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성도
+불필요했다(`main` 0건, lockfile blob 무변화).
+
+### 이월
+
+- **운영자 결정 필요 (신규·최우선)** — `production.private` 삭제가 **의도된 은퇴인가, 실수인가.**
+  - 은퇴라면: `README.md`·`ci.yml`·`audit-ci-branch-coverage.mjs`·가드 테스트에서 배포 브랜치
+    참조를 함께 걷어내야 하고, **새 배포 트리를 무엇으로 감사할지**가 같이 정해져야 한다.
+  - 실수라면: 브랜치 복원 후 옛 PR #11 에 해당하는 릴리스를 다시 태워야 **7건이 해소된다.**
+  - 어느 쪽이든 **지금 NAS 에서 도는 이미지는 `0ddec72f` (7건 포함)** 라는 사실은 변하지 않는다.
+- **PR #10** — 09-11~09-17 감사 기록. 열려 있고 base `main`. 오늘 기록도 같은 브랜치에 얹었다.
+- **PR #11 / #8** — base 브랜치 삭제로 **자동 CLOSED**. #11 은 재개하려면 브랜치 복원이 선행돼야 한다.
+- **다음 회차 확인 항목** — cron 10번 단계의 실패 문구가 '원격에 이 브랜치가 없다' 로 바뀌었는지(5절).

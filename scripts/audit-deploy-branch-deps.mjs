@@ -43,6 +43,29 @@ import { auditLockfile, formatFindings } from './audit-lockfile-advisories.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_LEVEL = 'moderate';
 
+/**
+ * 원격에 그 브랜치가 아직 있는지. `true`=있음, `false`=없음(삭제됨),
+ * `null`=ls-remote 자체가 실패(네트워크/인증 문제라 존재 여부를 모른다).
+ *
+ * fetch 실패를 한 덩어리로 보고하면 "일시적 네트워크 오류" 와 "배포 브랜치가
+ * 통째로 사라졌다" 가 같은 문장으로 나온다. 후자는 **배포된 트리를 앞으로 영원히
+ * 감사할 수 없다**는 뜻이라 대응이 완전히 다른데, 전자로 오해하면 재시도하면
+ * 되겠거니 하고 넘기게 된다(2026-09-16 production.private 삭제 때 실제로 그렇게
+ * 읽혔다). 그래서 둘을 갈라서 보고한다 — 판정은 양쪽 다 그대로 FAIL 이다.
+ */
+export function remoteBranchExists(branch, cwd = root) {
+  try {
+    const out = execFileSync('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], {
+      cwd,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return out.trim().length > 0;
+  } catch {
+    return null;
+  }
+}
+
 /** 현재 체크아웃된 브랜치명(detached 면 빈 문자열). */
 function currentBranch() {
   try {
@@ -97,8 +120,24 @@ async function main() {
         stdio: 'pipe',
       });
     } catch (e) {
+      // fail-closed 는 유지하되 원인을 갈라서 보고한다(remoteBranchExists 주석 참조).
+      const exists = remoteBranchExists(branch);
+      if (exists === false) {
+        console.log(`FAIL ${branch} — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)`);
+        failures.push(
+          `${branch}: 원격에 없다 — 배포 브랜치가 삭제/개명됐다. ` +
+            `브랜치가 사라져도 이미 배포된 이미지는 그대로 돌아간다: ` +
+            `마지막 배포분이 계속 서비스 중이면서 감사 대상에서만 빠진 상태일 수 있다.`,
+        );
+        continue;
+      }
+      const detail = String(e.message).split('\n')[0];
       console.log(`FAIL ${branch} — fetch 실패`);
-      failures.push(`${branch}: git fetch 실패 (${String(e.message).split('\n')[0]})`);
+      failures.push(
+        exists === null
+          ? `${branch}: git fetch 실패, 원격 조회도 실패해 존재 여부를 확인하지 못했다 (${detail})`
+          : `${branch}: 원격에는 있는데 git fetch 실패 (${detail})`,
+      );
       continue;
     }
 
@@ -145,7 +184,11 @@ async function main() {
       `\n배포 브랜치 감사 문제 ${failures.length}건:\n` +
         failures.map((f) => `  - ${f}`).join('\n') +
         `\n\n이 브랜치들은 실제로 배포돼 돌고 있는 트리다. \`npm audit fix\` 는 금지 —` +
-        ` 루트 overrides 를 날린다. main 에서 고친 뒤 production.private 로 머지할 것.`,
+        ` 루트 overrides 를 날린다. main 에서 고친 뒤 배포 브랜치로 머지할 것.` +
+        `\n브랜치가 '원격에 없다' 로 나왔다면 머지할 대상 자체가 사라진 것이다 —` +
+        ` 배포 파이프라인이 은퇴한 것인지 실수로 지워진 것인지 먼저 확인할 것.` +
+        ` 배포 브랜치 목록(scripts/audit-ci-branch-coverage.mjs)에서 그냥 빼면` +
+        ` 이 게이트는 초록으로 바뀌지만 배포된 트리는 여전히 감사되지 않는다.`,
     );
     process.exit(1);
   }
