@@ -280,7 +280,34 @@ for (const fixture of [
         console.log('REJECTED:' + error.code);
       }
     `;
-    const outputs = (await raceContenders(contenderSource, env)).map(({ output }) => output);
+    // ── 회수 진입 배리어 ──────────────────────────────────────────────────
+    //
+    // READY/go 배리어는 두 contender 의 **출발**만 맞춘다. 출발한 뒤 회수 경로에
+    // 닿기까지 수백 ms 밀리면(4-vCPU Windows 러너 실측) 늦은 쪽은 이미 이긴
+    // 동료가 300ms 보유 후 풀어준 **빈 lock** 을 만나 정당하게 취득한다 — 그건
+    // 동시 회수가 아니라 순차 취득이라, 제품이 아니라 이 테스트의 전제만 깨진다.
+    // 실측 로그가 정확히 그 모양이었다: acquire(pid=10588) → released →
+    // acquire(pid=10356) → released 로 겹침이 0 이고, 그래서 ACQUIRED 가 2 였다.
+    // (같은 run 의 stale fixture 는 "reusing stale lock" 이 두 번 찍혀 실제로
+    // 겹쳤고 취득은 1 이었다 — 상호배제 자체는 그때도 지켜졌다.)
+    //
+    // 그래서 형제 --force 테스트와 같은 방식으로 회수 가드를 테스트가 먼저 잡아
+    // 둔다. 가드를 쥐고 있는 동안에는 아무도 회수를 끝낼 수 없으므로, 두
+    // contender 가 모두 "가드 대기" 를 찍은 것을 확인한 뒤 놓아 주면 둘 다 자기
+    // 첫 O_EXCL create 를 이미 실패한 채 회수 경로 안에 들어와 있음이 벽시계
+    // 추측이 아니라 happens-before 로 고정된다. 가드 owner pid 를 이 테스트
+    // 프로세스로 적어 두면 stale 회수 대상이 아니다.
+    const recoveryLock = join(home, 'agent.lock.recovery');
+    await fsp.mkdir(recoveryLock);
+    await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+    const awaitingGuard = 'waiting for recovery guard before stale-cleanup';
+
+    const outputs = (
+      await raceContenders(contenderSource, env, async (contenders) => {
+        await Promise.all(contenders.map((c) => c.awaitStderr(awaitingGuard)));
+        await fsp.rm(recoveryLock, { recursive: true, force: true });
+      })
+    ).map(({ output }) => output);
     assert.equal(outputs.filter((output) => output.includes('ACQUIRED')).length, 1);
     // 진 쪽은 반드시 소유권 오류(EAGENTLOCKED)여야 한다. 회수 경로가 create
     // 레이스에서 지면 예전에는 raw `EEXIST` 가 그대로 새어 나왔다 — 그 누수를

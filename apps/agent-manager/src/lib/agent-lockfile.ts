@@ -581,6 +581,12 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
 }
 
 async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandle> {
+  // 회수 경로에 들어섰다는 사실을 가드 획득 **전에** 남긴다. `--force` 경로는
+  // 같은 지점에서 이미 "waiting for takeover guard" 를 찍는데 이쪽만 조용해서,
+  // 읽을 수 없는 lock 을 회수하려다 가드 앞 25ms 루프에 들어간 매니저가 로그상
+  // 완전히 멎은 것처럼 보였다(성공할 때까지 단 한 줄도 안 남음). 회수는 드문
+  // 경로라 항상 남겨도 소음이 되지 않는다.
+  log(`[lockfile] waiting for recovery guard before stale-cleanup (role=${payload.role} pid=${process.pid})`);
   const releaseRecovery = await acquireRecoveryLock();
   try {
     // 가드를 잡는 사이 lock 이 바뀌었을 수 있으니 다시 읽어 판정한다. 여기서
