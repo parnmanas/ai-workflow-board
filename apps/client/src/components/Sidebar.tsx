@@ -27,6 +27,38 @@ import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
 import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 
+// ─── 사이드바 폴드 상태 localStorage 저장 ────────────────────────────────────
+
+const SIDEBAR_FOLD_KEY = 'awb.sidebar.fold';
+
+interface SidebarFoldSnapshot {
+  sessions?: boolean;
+  chats?: boolean;
+  sections?: Record<string, boolean>;
+  hosts?: string[];
+}
+
+function loadSidebarFold(): Required<SidebarFoldSnapshot> {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_FOLD_KEY);
+    const parsed: SidebarFoldSnapshot = raw ? (JSON.parse(raw) as SidebarFoldSnapshot) : {};
+    return {
+      sessions: parsed.sessions ?? false,
+      chats: parsed.chats ?? false,
+      sections: parsed.sections ?? {},
+      hosts: parsed.hosts ?? [],
+    };
+  } catch {
+    return { sessions: false, chats: false, sections: {}, hosts: [] };
+  }
+}
+
+function saveSidebarFold(snap: Required<SidebarFoldSnapshot>): void {
+  try {
+    localStorage.setItem(SIDEBAR_FOLD_KEY, JSON.stringify(snap));
+  } catch { /* best-effort */ }
+}
+
 interface SidebarProps {
   overlay: boolean;
   isOpen: boolean;
@@ -92,10 +124,12 @@ export default function Sidebar({
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
-  // Sessions 트리 — 섹션/호스트/cwd 폴드 상태 + 세션 캐시
-  const [sessionsCollapsed, setSessionsCollapsed] = React.useState(false);
-  const [chatsCollapsed, setChatsCollapsed] = React.useState(false);
-  const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set());
+  // 사이드바 폴드 상태 — localStorage 에서 초기화
+  const [foldInit] = React.useState(loadSidebarFold);
+  const [sessionsCollapsed, setSessionsCollapsed] = React.useState(() => foldInit.sessions);
+  const [chatsCollapsed, setChatsCollapsed] = React.useState(() => foldInit.chats);
+  const [sectionCollapsed, setSectionCollapsed] = React.useState<Record<string, boolean>>(() => foldInit.sections);
+  const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set(foldInit.hosts));
   const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set());
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
@@ -129,6 +163,7 @@ export default function Sidebar({
   React.useEffect(() => {
     setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
     setVisibleGroupCounts({});
+    // 워크스페이스 전환 시 세션 캐시만 초기화 (폴드 상태는 localStorage 유지)
     loadAttemptedRef.current.clear();
     setHostSessions({});
   }, [wsId]);
@@ -306,6 +341,20 @@ export default function Sidebar({
       return next;
     });
   }, [loadHostSessions]);
+
+  // 폴드 상태를 localStorage에 저장
+  React.useEffect(() => {
+    saveSidebarFold({
+      sessions: sessionsCollapsed,
+      chats: chatsCollapsed,
+      sections: sectionCollapsed,
+      hosts: Array.from(collapsedHosts),
+    });
+  }, [sessionsCollapsed, chatsCollapsed, sectionCollapsed, collapsedHosts]);
+
+  const toggleSection = React.useCallback((key: string) => {
+    setSectionCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
   const toggleCwd = React.useCallback((cwdKey: string) => {
     setCollapsedHostCwds((prev) => {
@@ -925,56 +974,67 @@ export default function Sidebar({
         <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border }} />
 
         <div style={{ paddingBottom: 8 }}>
-          {workspaceSections.map((section) => (
-            <section key={section.title} aria-labelledby={`sidebar-${section.title.toLowerCase()}`}>
-              <div style={sectionHeaderStyle}>
-                <span id={`sidebar-${section.title.toLowerCase()}`}>{section.title}</span>
-                {section.title === 'Work' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {/* \uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4 \uC804\uCCB4 \uC77C\uAD04 \uC77D\uC74C(\uC694\uAD6C\uC0AC\uD56D 2) \u2014 \uC9C0\uC6B8 \uAC8C \uC788\uC744
-                       \uB54C\uB9CC \uB178\uCD9C\uD55C\uB2E4. \uC139\uC158 \uC81C\uBAA9\uACFC \uD55C \uD589\uC744 \uACF5\uC720\uD558\uBBC0\uB85C \uB300\uBB38\uC790\uB97C
-                       \uC4F0\uC9C0 \uC54A\uC544 \uC2DC\uAC01\uC801\uC73C\uB85C \uC81C\uBAA9\uACFC \uACBD\uC7C1\uD558\uC9C0 \uC54A\uAC8C \uD55C\uB2E4. */}
-                    {counts.tickets.total > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleMarkAllTicketsRead}
-                        disabled={markingAllTicketsRead}
-                        title={`\uC6CC\uD06C\uC2A4\uD398\uC774\uC2A4 \uC804\uCCB4 \uC77D\uC9C0 \uC54A\uC740 \uD2F0\uCF13 \uCF54\uBA58\uD2B8 ${counts.tickets.total}\uAC74\uC744 \uBAA8\uB450 \uC77D\uC74C\uC73C\uB85C \uD45C\uC2DC`}
-                        style={{
-                          border: 'none',
-                          background: 'transparent',
-                          color: tokens.colors.accent,
-                          fontSize: 10,
-                          fontWeight: 700,
-                          textTransform: 'none',
-                          letterSpacing: 'normal',
-                          cursor: markingAllTicketsRead ? 'default' : 'pointer',
-                          opacity: markingAllTicketsRead ? 0.5 : 1,
-                          padding: '2px 4px',
-                        }}
-                      >
-                        {/* \uCEA1\uB418\uC9C0 \uC54A\uC740 \uC815\uD655\uD55C \uC218\uCE58\uB97C \uD3C9\uBB38\uC73C\uB85C(\uC694\uAD6C\uC0AC\uD56D 3) \u2014
-                           \uC544\uB798 \uBC30\uC9C0\uC758 "99+" \uD544\uC740 \uC2E4\uC81C \uC218\uCE58\uB97C \uD638\uBC84 \uD234\uD301 \uB4A4\uC5D0
-                           \uC228\uAE30\uC9C0\uB9CC, \uC774 \uBC84\uD2BC\uC740 \uADF8\uB7EC\uC9C0 \uC54A\uB294\uB2E4. */}
-                        {`${counts.tickets.total}\uAC74 \uBAA8\uB450 \uC77D\uC74C`}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+          {workspaceSections.map((section) => {
+            const sKey = section.title.toLowerCase();
+            const isCollapsed = sectionCollapsed[sKey] ?? false;
+            return (
+              <section key={section.title} aria-labelledby={`sidebar-${sKey}`}>
+                <div style={sectionHeaderStyle}>
+                  <button
+                    type="button"
+                    aria-expanded={!isCollapsed}
+                    onClick={() => toggleSection(sKey)}
+                    style={sectionFoldButtonStyle}
+                  >
+                    <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
+                      {isCollapsed ? '▶' : '▼'}
+                    </span>
+                    <span id={`sidebar-${sKey}`}>{section.title}</span>
+                  </button>
+                  {section.title === 'Work' && !isCollapsed && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {counts.tickets.total > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleMarkAllTicketsRead}
+                          disabled={markingAllTicketsRead}
+                          title={`워크스페이스 전체 읽지 않은 티켓 코멘트 ${counts.tickets.total}건을 모두 읽음으로 표시`}
+                          style={{
+                            border: 'none', background: 'transparent', color: tokens.colors.accent,
+                            fontSize: 10, fontWeight: 700, textTransform: 'none', letterSpacing: 'normal',
+                            cursor: markingAllTicketsRead ? 'default' : 'pointer',
+                            opacity: markingAllTicketsRead ? 0.5 : 1, padding: '2px 4px',
+                          }}
+                        >
+                          {`${counts.tickets.total}건 모두 읽음`}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
 
-              {section.title === 'Work' && workGroups.map(renderWorkGroup)}
-
-              {section.items.map((item) => renderNavItem(item))}
-            </section>
-          ))}
+                {!isCollapsed && section.title === 'Work' && workGroups.map(renderWorkGroup)}
+                {!isCollapsed && section.items.map((item) => renderNavItem(item))}
+              </section>
+            );
+          })}
 
           {canAdmin && (
             <section aria-labelledby="sidebar-operations">
               <div style={sectionHeaderStyle}>
-                <span id="sidebar-operations">Operations</span>
+                <button
+                  type="button"
+                  aria-expanded={!(sectionCollapsed['operations'] ?? false)}
+                  onClick={() => toggleSection('operations')}
+                  style={sectionFoldButtonStyle}
+                >
+                  <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
+                    {(sectionCollapsed['operations'] ?? false) ? '▶' : '▼'}
+                  </span>
+                  <span id="sidebar-operations">Operations</span>
+                </button>
               </div>
-              {operations.map((item) => renderNavItem(item))}
+              {!(sectionCollapsed['operations'] ?? false) && operations.map((item) => renderNavItem(item))}
             </section>
           )}
         </div>
