@@ -119,6 +119,7 @@ test/migration-export-audit.test.mjs
 test/migration-instance-quiesce-gates.test.mjs
 test/migration-preflight.test.mjs
 test/migration-pull-idempotency.test.mjs
+test/migration-registry-completeness.test.mjs
 test/migration-sqlite-dialect-guard.test.mjs
 test/misc-tools-batch-comment-budget.test.mjs
 test/nest-app-boot-smoke.test.mjs

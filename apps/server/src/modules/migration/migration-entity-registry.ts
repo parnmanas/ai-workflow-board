@@ -41,13 +41,25 @@
  */
 export const MIGRATION_EXCLUDED_TABLE_PREFIX = 'ontology_';
 
-// migration_runs(MigrationRun)는 이관 대상 데이터가 아니라 이 기능 자신의
-// 제어 테이블이다 — 소스가 자기 DataSource의 entityMetadatas를 그대로
-// 보고하면 MigrationRun도 함께 잡히는데, MIGRATION_ENTITY_ORDER에는
-// 의도적으로 없으므로 필터링하지 않으면 "entities_unknown_to_dest"에
-// 걸려 동일 빌드끼리도 프리플라이트가 항상 실패한다(리뷰 라운드1 P1 —
-// 소스/도착지 어느 쪽이든 이 이름으로 걸러야 한다).
-export const MIGRATION_CONTROL_ENTITY_NAMES = new Set(['MigrationRun']);
+// 이관 대상 데이터가 아니라 이 기능 자신의 제어 테이블 — 소스가 자기
+// DataSource의 entityMetadatas를 그대로 보고하면 이 이름도 함께 잡히는데,
+// MIGRATION_ENTITY_ORDER에는 의도적으로 없으므로 필터링하지 않으면
+// "entities_unknown_to_dest"에 걸려 동일 빌드끼리도 프리플라이트가 항상
+// 실패한다(리뷰 라운드1 P1 — 소스/도착지 어느 쪽이든 이 이름으로 걸러야 한다).
+//
+// ⚠️ 여기에 이름을 추가하는 것은 "그 테이블을 인스턴스 이관에서 영구히 뺀다"는
+// 뜻이다 — 새 엔티티를 등록하다 프리플라이트가 빨개졌을 때의 도피처가 아니다
+// (ticket 3391b2cc). comparePreflight()가 CONTROL 이름을 **소스 쪽에서 먼저**
+// 걸러내므로, 누락 엔티티를 여기 넣으면 양방향 차집합이 모두 비면서 테스트는
+// 그대로 green이 되고 그 테이블만 조용히 이관에서 사라진다. 그래서 값이 아니라
+// 사유까지 받는 Record로 두어(타입 레벨에서 사유 작성을 강제), 왜 이관 대상이
+// 아닌지가 항상 소스에 남게 한다. test/migration-registry-completeness.test.mjs가
+// 이 집합을 핀으로 고정하므로 늘리려면 레지스트리와 그 가드를 함께 고쳐야 한다.
+export const MIGRATION_CONTROL_ENTITY_REASONS: Record<string, string> = {
+  MigrationRun: 'migration_runs는 "이 이관 실행" 자신의 진행 상태라 이관 대상 데이터가 아니다. 도착지에서 새 run으로 다시 생성되므로 옮길 필요도 없다.',
+};
+
+export const MIGRATION_CONTROL_ENTITY_NAMES = new Set(Object.keys(MIGRATION_CONTROL_ENTITY_REASONS));
 
 // 완료 기준 7(스킵 플래그) 대상 — MigrationRun.phase='core' 패스에서
 // skip_attachments=1이면 이 목록만 건너뛰고, 이후 pull-attachments
