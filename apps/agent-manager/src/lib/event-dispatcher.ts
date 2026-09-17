@@ -449,17 +449,17 @@ export const AGENT_CHAIN_DEPTH_CAP = 3;
 // couldn't free a slot). Deliberately NOT the "유효한 Git 체크아웃" broken-checkout
 // copy: pool exhaustion is a transient, self-healing condition, so this states that
 // recovery is autonomous (no operator action needed unless it persists).
-/** terminal 정리 완료 키의 보관 상한(FIFO) — 오래 뜬 매니저에서 무한 증가를 막는다.
- *  키는 (ticketId, terminal_entered_at) 라 티켓 수만큼만 늘고, 넘치면 가장 오래된
- *  것부터 버린다. 버려진 키의 티켓에 뒤늦게 같은 이동 이벤트가 또 오면 정리가 한 번
- *  더 도는데, 정리 자체가 멱등이고 알림은 서버의 dedupe_key 합치기가 흡수한다. */
-const TERMINAL_CLEANUP_DONE_LIMIT = 512;
-
 const POOL_EXHAUSTED_RETRY_COMMENT =
   `⚠️ **shared worktree 풀 고갈 (pool_exhausted)** — 공유 warm-pool 의 모든 슬롯이 활성 lease 라 에이전트를 실행하지 않고 디스패치를 보류했습니다.\n\n` +
   `on-demand lease 재조정을 즉시 시도했지만 회수 가능한 슬롯이 없었습니다 (reclaim grace(20분) 이내의 lease 이거나, 같은 working_dir 를 공유하는 다른 보드와의 일시적 경합).\n\n` +
   `매니저가 이 트리거를 **자동 재시도 큐**에 넣었습니다 — 백오프로 재시도하며, 활성 티켓이 끝나 슬롯을 반납하거나(또는 주기/부팅 재조정이 leaked lease 를 회수하는) 즉시 재프로비저닝합니다. **서버 재푸시가 필요 없습니다.**\n\n` +
   `재시도 한도까지 계속 고갈이면 운영자 확인을 위해 자동으로 pend 되며, max_concurrent_tickets_per_agent(풀 크기 N)와 이 working_dir 를 공유하는 보드 구성을 점검하세요.`;
+
+/** terminal 정리 완료 키의 보관 상한(FIFO) — 오래 뜬 매니저에서 무한 증가를 막는다.
+ *  키는 (ticketId, terminal_entered_at) 라 티켓 수만큼만 늘고, 넘치면 가장 오래된
+ *  것부터 버린다. 버려진 키의 티켓에 뒤늦게 같은 이동 이벤트가 또 오면 정리가 한 번
+ *  더 도는데, 정리 자체가 멱등이고 알림은 서버의 dedupe_key 합치기가 흡수한다. */
+const TERMINAL_CLEANUP_DONE_LIMIT = 512;
 
 // ─── ST-6 per-call agent execution context ──────────────────────────────
 // Manager-side multi-tenancy. When an event targets a managed agent the
