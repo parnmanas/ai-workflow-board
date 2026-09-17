@@ -7,7 +7,7 @@
 //   5. 없는 cwd / 알 수 없는 CLI 는 RPC 오류로 응답한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +55,32 @@ function request(op, extra = {}) {
   return { manager_id: MANAGER, cli: 'claude', op, driver_user_id: 'user-1', issued_at: new Date().toISOString(), ...extra };
 }
 
+/** `root` 아래를 cwd 로 물고 있는 살아 있는 프로세스의 pid. Linux 에서만 답할 수
+ *  있다(/proc). Windows 에서는 그런 프로세스가 있으면 rmdir 이 EBUSY 로 실패하므로
+ *  rm 자체가 검출기다 — 이 함수는 그 **Windows 전용 결함을 ubuntu 축에서도 빨갛게**
+ *  만들려고 있다(ticket 445453a7). 러너를 어떻게 만들었든 상관없이 OS 에 직접 묻기
+ *  때문에, 하네스가 정리 등록을 빠뜨려도 그대로 잡힌다.
+ *  (죽은 직후 zombie 는 cwd 링크를 읽을 수 없어 자연히 제외된다.) */
+async function pidsHoldingCwd(root) {
+  let entries;
+  try {
+    entries = await readdir('/proc');
+  } catch {
+    return []; // /proc 이 없는 축 — 여기서는 검출할 수 없다.
+  }
+  const holders = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const cwd = await readlink(`/proc/${entry}/cwd`);
+      if (cwd === root || cwd.startsWith(`${root}/`)) holders.push(entry);
+    } catch {
+      /* 이미 사라졌거나 읽을 권한이 없는 프로세스 */
+    }
+  }
+  return holders;
+}
+
 async function harness(t, runnerOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'awb-agent-session-'));
   const cwd = join(root, 'work');
@@ -82,12 +108,40 @@ async function harness(t, runnerOptions = {}) {
       ...runnerOptions,
     },
   );
+  // root 를 cwd 로 물고 있는 러너를 모두 여기 모은다. node:test 의 t.after 는
+  // 등록 순서(FIFO)로 돌기 때문에, 중첩 하네스가 자기 러너를 별도 t.after 로 걸면
+  // **여기 있는 rm(root) 이 먼저** 돌아 자식이 cwd 를 문 채로 삭제된다. Windows 는
+  // 프로세스의 cwd 가 디렉터리 핸들을 잡으므로 그 rmdir 이 EBUSY 로 실패한다
+  // (POSIX 는 열린 cwd 여도 unlink 가 성공해 조용히 지나간다 — ticket 445453a7).
+  const rootHolders = [runner];
   t.after(async () => {
-    await runner.stopAll('test');
+    for (const holder of [...rootHolders].reverse()) await holder.stopAll('test').catch(() => undefined);
+    // 진단은 rm 전에 걷고, **단언은 정리를 다 끝낸 뒤에** 한다. 훅 도중에 던지면
+    // 남은 정리(server.restore · rm · 아직 안 멈춘 러너)가 통째로 건너뛰어져,
+    // 살아남은 자식 때문에 테스트 러너가 종료하지 못하고 hang 처럼 보인다.
+    const leaked = rootHolders.flatMap((holder) => holder._snapshot());
+    const holding = await pidsHoldingCwd(root);
+    // 진단만 하고 두면 그 프로세스가 러너의 이벤트 루프를 붙잡아, 실패가 읽을 수
+    // 있는 단언이 아니라 hang 으로 나타난다(실측: 149s 뒤 timeout). 정리까지 여기서
+    // 끝내고 단언은 그 뒤에 한다 — root 는 이 하네스만 쓰는 mkdtemp 라 이 pid 들은
+    // 정의상 우리가 띄운 자식이다.
+    for (const pid of holding) {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* 이미 사라졌다 */ }
+    }
     server.restore();
-    await rm(root, { recursive: true, force: true });
+    const rmError = await rm(root, { recursive: true, force: true }).then(() => null, (err) => err);
+
+    // 좁은 진단부터 넓은 진단 순으로 단언한다.
+    assert.deepEqual(leaked, [], `rm(root) 전에 살아 있는 세션이 남았다: ${JSON.stringify(leaked)}`);
+    // 위 단언은 **등록된** 러너만 본다 — 등록을 빠뜨린 하네스는 그냥 통과한다.
+    // 그래서 등록과 무관하게 OS 에 직접 묻는 이 검사가 실제 게이트다.
+    assert.deepEqual(holding, [], `rm(root) 전에 root 를 cwd 로 쥔 프로세스가 남았다 (pid ${holding.join(', ')})`);
+    // Windows 는 위 두 단언이 못 보는 잠금까지 여기서 드러난다(EBUSY).
+    assert.equal(rmError, null, `임시 root 를 지우지 못했다: ${rmError?.message ?? ''}`);
   });
-  return { root, cwd, store, server, runner };
+  // 이 root 를 공유하는 러너를 추가로 등록한다 — 자기 t.after 를 따로 걸지 말 것.
+  const holdsRoot = (extra) => { rootHolders.push(extra); };
+  return { root, cwd, store, server, runner, holdsRoot };
 }
 
 test('list / history RPCs answer from the CLI home store', async (t) => {
@@ -221,7 +275,7 @@ test('command resolution: env override, npx fallback, unknown cli; detectAcpSess
 // ─── CLI 설정 credential 적용 ───────────────────────────────────────────────
 // credential 이 묶이면 운영자 홈 대신 세션 전용 cli-home 을 쓰되, 기록 디렉터리는
 // 운영자 홈으로 링크해 기존 세션이 그대로 보이고 이어진다. 운영자 홈 파일은 불변.
-import { lstat, readFile, readlink, stat as statFile } from 'node:fs/promises';
+import { lstat, readFile, stat as statFile } from 'node:fs/promises';
 
 async function credentialHarness(t, provider, fields, cli = 'claude') {
   const base = await harness(t);
@@ -249,7 +303,7 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
       flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
     },
   );
-  t.after(() => runner.stopAll('test'));
+  base.holdsRoot(runner);
   const capture = async () => JSON.parse(await readFile(captureFile, 'utf8'));
   return { ...base, runner, sessionHomesDir, captureFile, capture, fetches, cli, server: base.server };
 }
