@@ -11,7 +11,12 @@ import {
   pendingPermission,
   sessionDisplayTitle,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
-import { sessionPath, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
+import {
+  cwdBaseName,
+  groupSessionsByCwd,
+  sessionPath,
+  sortSessionsByActivity,
+} from '../src/components/sessions/sessionList.logic.ts';
 
 let seq = 0;
 function ev(type, payload, turn_id = 't1') {
@@ -106,4 +111,59 @@ test('session list helpers: activity sort, canonical paths', () => {
   ]);
   assert.deepEqual(sorted.map((s) => s.session_id), ['new', 'old']);
   assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
+});
+
+test('cwdBaseName 은 표시용 마지막 경로 요소를 뽑는다 — POSIX·Windows·후행 구분자·빈 입력', () => {
+  assert.equal(cwdBaseName(''), '(unknown)', '빈 cwd 는 자리표시자로 대체된다');
+  assert.equal(cwdBaseName('/a/b'), 'b');
+  assert.equal(cwdBaseName('/a/b/'), 'b', '후행 구분자는 무시한다');
+  assert.equal(cwdBaseName('a/b'), 'b', '상대 경로도 마지막 요소를 뽑는다');
+  assert.equal(cwdBaseName('C:\\a\\b'), 'b', 'Windows 구분자');
+  assert.equal(cwdBaseName('C:\\a\\b\\'), 'b', 'Windows 후행 구분자');
+  assert.equal(cwdBaseName('project'), 'project', '구분자가 없으면 입력이 곧 이름이다');
+  // 루트는 후행 구분자를 떼고 나면 남는 요소가 없어 cwd 원문으로 되돌아간다.
+  // '(unknown)' 이 아니라 '/' 인 것이 이 폴백의 유일한 관측 지점이다.
+  assert.equal(cwdBaseName('/'), '/');
+});
+
+// groupSessionsByCwd 픽스처 — 실제 페이로드 모양(AgentSessionSummary 필수 필드)을 유지한다.
+// updated_at 은 전부 다르게 둔다: 동률 tie-break 은 열거 순서에 의존해 단언 대상이 아니다.
+function sessionsByCliFixture() {
+  return {
+    claude: [
+      { cli: 'claude', session_id: 'alpha-claude', cwd: '/repo/alpha', title: 'alpha (claude)', created_at: null, updated_at: '2026-09-01T00:00:00Z', source: 'cli' },
+      { cli: 'claude', session_id: 'beta-claude', cwd: '/repo/beta', title: 'beta (claude)', created_at: null, updated_at: '2026-09-09T00:00:00Z', source: 'cli' },
+    ],
+    codex: [
+      { cli: 'codex', session_id: 'alpha-codex', cwd: '/repo/alpha', title: 'alpha (codex)', created_at: null, updated_at: '2026-09-05T00:00:00Z', source: 'cli' },
+      { cli: 'codex', session_id: 'blank-cwd', cwd: '', title: 'cwd 가 빈 문자열', created_at: null, updated_at: '2026-09-03T00:00:00Z', source: 'cli' },
+      { cli: 'codex', session_id: 'no-cwd', title: 'cwd 키 자체가 없음', created_at: null, updated_at: '2026-09-02T00:00:00Z', source: 'cli' },
+    ],
+  };
+}
+
+test('groupSessionsByCwd 는 그룹을 각 그룹 최신 세션 기준 내림차순으로 놓는다', () => {
+  const groups = groupSessionsByCwd(sessionsByCliFixture());
+  assert.deepEqual(
+    groups.map((g) => g.cwd),
+    ['/repo/beta', '/repo/alpha', ''],
+    'beta(09-09) > alpha(09-05) > 빈 cwd(09-03) — 사이드바와 목록 페이지가 공유하는 그룹 경계',
+  );
+  assert.deepEqual(groups.map((g) => g.cwdLabel), ['beta', 'alpha', '(unknown)']);
+});
+
+test('groupSessionsByCwd 는 그룹 안에서 CLI 가 섞여도 updated_at 내림차순을 지키고 cli 를 보존한다', () => {
+  const alpha = groupSessionsByCwd(sessionsByCliFixture()).find((g) => g.cwd === '/repo/alpha');
+  // cli 는 sessionPath 가 URL 을 만드는 데 쓰므로 그룹핑을 거쳐도 살아남아야 한다.
+  assert.deepEqual(
+    alpha.sessions.map((s) => [s.cli, s.session_id]),
+    [['codex', 'alpha-codex'], ['claude', 'alpha-claude']],
+  );
+});
+
+test('groupSessionsByCwd 는 cwd 가 빈 문자열이거나 없는 세션을 하나의 (unknown) 그룹으로 묶는다', () => {
+  const unknown = groupSessionsByCwd(sessionsByCliFixture()).filter((g) => g.cwd === '');
+  assert.equal(unknown.length, 1, '빈 cwd 와 누락 cwd 가 그룹을 나눠 가지면 안 된다');
+  assert.equal(unknown[0].cwdLabel, '(unknown)');
+  assert.deepEqual(unknown[0].sessions.map((s) => s.session_id), ['blank-cwd', 'no-cwd']);
 });
