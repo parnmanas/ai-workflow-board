@@ -48,3 +48,6 @@ graphify-out/
 # Playwright e2e 산출물(스크린샷·trace) — 커밋 대상 아님
 apps/client/test-results/
 apps/client/playwright-report/
+
+# 로컬 MCP 설정 (API 키 포함 — 커밋 금지)
+.mcp.json

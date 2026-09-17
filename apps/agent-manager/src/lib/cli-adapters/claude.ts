@@ -10,6 +10,7 @@ import { scanBinaryStrings, latestPerFamily, dedupe } from './model-introspect.j
 import {
   ADAPTER_CAPABILITIES,
   type AdapterCredential,
+  type AdapterMcpContext,
   type AgentCredentialMeta,
   CliAdapter,
   type CliTrustMeta,
@@ -652,6 +653,7 @@ export class ClaudeCliAdapter extends CliAdapter {
   async prepareCliHome(
     cliHomeDir: string,
     credential?: AdapterCredential | null,
+    mcp?: AdapterMcpContext | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
     // Always start from a clean slate so a switch between
     // operator-default → subscription → api_key takes effect on the
@@ -663,6 +665,8 @@ export class ClaudeCliAdapter extends CliAdapter {
       if (err?.code !== 'ENOENT') throw err;
     }
 
+    let extraEnv: Record<string, string> = {};
+
     if (credential && credential.provider === 'claude_subscription') {
       // Operator pasted the literal `.credentials.json` content into the
       // AWB UI; replay it verbatim. Mode 0600 because OAuth tokens are
@@ -671,10 +675,7 @@ export class ClaudeCliAdapter extends CliAdapter {
       if (body) {
         await fsp.writeFile(dst, body, { mode: 0o600 });
       }
-      return { extraEnv: {} };
-    }
-
-    if (credential && credential.provider === 'claude_oauth_token') {
+    } else if (credential && credential.provider === 'claude_oauth_token') {
       // `claude setup-token` output — a non-rotating, ~1-year OAuth token
       // (sk-ant-oat...). Injected as CLAUDE_CODE_OAUTH_TOKEN, which the CLI
       // honors directly (auth precedence #5) WITHOUT touching the rotating
@@ -686,44 +687,78 @@ export class ClaudeCliAdapter extends CliAdapter {
       // OAuth token is never shadowed. Don't add CLAUDE_CODE_OAUTH_TOKEN to
       // authEnvKeys — it's the key we inject, not an operator override.
       const token = credential.fields?.oauth_token ?? '';
-      return { extraEnv: token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {} };
-    }
-
-    if (credential && credential.provider === 'claude_api_key') {
+      if (token) extraEnv = { CLAUDE_CODE_OAUTH_TOKEN: token };
+    } else if (credential && credential.provider === 'claude_api_key') {
       // ANTHROPIC_API_KEY overrides the credentials.json path inside the
       // claude CLI; skipping the operator-HOME symlink keeps the env-var
       // path unambiguous so an operator-side `claude login` change can't
       // accidentally take precedence.
       const apiKey = credential.fields?.api_key ?? '';
-      return { extraEnv: apiKey ? { ANTHROPIC_API_KEY: apiKey } : {} };
-    }
-
-    // No per-agent credential — fall back to the operator's main HOME
-    // (legacy behaviour). Source resolution mirrors constants.ts:
-    // $CLAUDE_CONFIG_DIR if the operator has redirected the manager's
-    // main claude home, else ~/.claude. Skip silently when the source
-    // doesn't exist — the operator simply hasn't `claude login`-ed yet,
-    // and claude itself will surface a clearer "not authenticated" error.
-    const mainHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
-    const src = join(mainHome, '.credentials.json');
-    try {
-      await fsp.access(src);
-    } catch {
-      return { extraEnv: {} };
-    }
-    try {
-      await fsp.symlink(src, dst);
-    } catch (err: any) {
-      // Windows CreateSymbolicLink requires admin or Developer Mode;
-      // without that privilege fs.symlink fails with EPERM. Fall back
-      // to a plain copy — this hook reruns on every spawn, so the
-      // operator's next `claude login` propagates on the next restart.
-      if (err?.code === 'EPERM' || err?.code === 'EACCES') {
-        await fsp.copyFile(src, dst);
-      } else {
-        throw err;
+      if (apiKey) extraEnv = { ANTHROPIC_API_KEY: apiKey };
+    } else {
+      // No per-agent credential — fall back to the operator's main HOME
+      // (legacy behaviour). Source resolution mirrors constants.ts:
+      // $CLAUDE_CONFIG_DIR if the operator has redirected the manager's
+      // main claude home, else ~/.claude. Skip silently when the source
+      // doesn't exist — the operator simply hasn't `claude login`-ed yet,
+      // and claude itself will surface a clearer "not authenticated" error.
+      const mainHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+      const src = join(mainHome, '.credentials.json');
+      try {
+        await fsp.access(src);
+        try {
+          await fsp.symlink(src, dst);
+        } catch (err: any) {
+          // Windows CreateSymbolicLink requires admin or Developer Mode;
+          // without that privilege fs.symlink fails with EPERM. Fall back
+          // to a plain copy — this hook reruns on every spawn, so the
+          // operator's next `claude login` propagates on the next restart.
+          if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+            await fsp.copyFile(src, dst);
+          } else {
+            throw err;
+          }
+        }
+      } catch {
+        /* operator hasn't logged in yet — claude will surface the error */
       }
     }
-    return { extraEnv: {} };
+
+    if (mcp?.url) {
+      await this.#writeSessionMcp(cliHomeDir, mcp);
+    }
+
+    return { extraEnv };
+  }
+
+  /**
+   * Writes AWB MCP server config into `<cliHomeDir>/settings.json` so
+   * Claude Code picks it up automatically as user-level MCP without needing
+   * a per-session `--mcp-config` flag. Called only when an explicit
+   * `AdapterMcpContext` is provided (i.e. managed sessions, not the
+   * operator-HOME fallback path where we must not touch the main home).
+   */
+  async #writeSessionMcp(cliHomeDir: string, mcp: AdapterMcpContext): Promise<void> {
+    const settingsPath = join(cliHomeDir, 'settings.json');
+    let settings: Record<string, unknown> = {};
+    try {
+      const raw = await fsp.readFile(settingsPath, 'utf8');
+      settings = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      /* file absent or unparseable — start fresh */
+    }
+    const mcpUrl = `${mcp.url.replace(/\/$/, '')}/mcp`;
+    settings.mcpServers = {
+      ...((settings.mcpServers as Record<string, unknown> | undefined) ?? {}),
+      awb: {
+        type: 'http',
+        url: mcpUrl,
+        headers: {
+          Authorization: `Bearer ${mcp.apiKey}`,
+          'X-AWB-Client-Type': 'agent-session',
+        },
+      },
+    };
+    await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
   }
 }

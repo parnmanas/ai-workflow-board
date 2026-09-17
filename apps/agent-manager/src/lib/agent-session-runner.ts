@@ -599,7 +599,7 @@ export class AgentSessionRunner {
     const cliHome = join(this.#options.sessionHomesDir, cli, credential.credential_id);
     await mkdir(cliHome, { recursive: true, mode: 0o700 });
     await this.#linkSessionStore(cli, cliHome);
-    const prep = await adapter.prepareCliHome(cliHome, credential, null);
+    const prep = await adapter.prepareCliHome(cliHome, credential, { url: this.#config.url, apiKey: this.#config.apiKey });
     const env: Record<string, string> = { ...(prep.extraEnv ?? {}) };
     const configDirEnv = adapter.configDirEnv();
     if (configDirEnv) env[configDirEnv] = cliHome;
