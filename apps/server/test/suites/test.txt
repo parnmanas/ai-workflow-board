@@ -239,6 +239,7 @@ test/terminal-pend-gate.test.mjs
 test/terminal-reopen-guard.test.mjs
 test/test-harness-gate.test.mjs
 test/test-registration-completeness.test.mjs
+test/test-registration-merge.test.mjs
 test/ticket-terminal-status-consistency.test.mjs
 test/ticket-unread-badge.test.mjs
 test/tickets-leak.test.mjs
