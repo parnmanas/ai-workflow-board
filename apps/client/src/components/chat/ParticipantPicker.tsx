@@ -24,9 +24,15 @@ export interface NewChatModalProps {
   addToRoomId?: string;
   /** Participants already in the room (excluded from picker) */
   existingParticipantIds?: string[];
+  /**
+   * 이 초대가 DM 을 group 으로 승격시키는가 (티켓 70e62a9d). 되돌릴 수 없는 전이라
+   * 확정 전에 알려야 한다 — 별도 confirm 다이얼로그를 띄우지 않고 이 모달 안에서
+   * 경고 한 줄과 버튼 라벨로 처리한다(새 레이아웃/새 모달 금지).
+   */
+  promotesDmToGroup?: boolean;
 }
 
-export default function NewChatModal({ open, onClose, onCreated, addToRoomId, existingParticipantIds = [] }: NewChatModalProps) {
+export default function NewChatModal({ open, onClose, onCreated, addToRoomId, existingParticipantIds = [], promotesDmToGroup = false }: NewChatModalProps) {
   const { user: currentUser } = useAuth();
   const [participants, setParticipants] = useState<PickerParticipant[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -123,9 +129,11 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
   if (!open) return null;
 
   const titleId = `${modalId}-title`;
+  // 승격 경고는 "Add People" 모드에서 DM 방일 때만 의미가 있다.
+  const showPromotionNotice = isAddMode && promotesDmToGroup;
   const title = isAddMode ? 'Add People' : 'New Chat';
   const createBtnLabel = isAddMode
-    ? (creating ? 'Adding…' : 'Add to Room')
+    ? (creating ? 'Adding…' : showPromotionNotice ? 'Convert to Group & Add' : 'Add to Room')
     : isDM
     ? (creating ? 'Creating…' : 'Start Chat')
     : (creating ? 'Creating…' : 'Create Group');
@@ -235,6 +243,28 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                 </button>
               </span>
             ))}
+          </div>
+        )}
+
+        {/* DM → group 승격 경고 (티켓 70e62a9d). 되돌릴 수 없고, 초대받은 사람은
+            스크롤하면 이전 대화를 전부 볼 수 있다는 점까지 확정 전에 알린다. */}
+        {showPromotionNotice && (
+          <div
+            data-testid="dm-promotion-notice"
+            style={{
+              margin: '8px 16px 0',
+              padding: '8px 12px',
+              border: `1px solid ${tokens.colors.warning}`,
+              borderRadius: tokens.radii.sm,
+              color: tokens.colors.warning,
+              fontSize: tokens.typography.fontSizeXs,
+              lineHeight: 1.5,
+              flexShrink: 0,
+            }}
+          >
+            이 대화는 1:1 DM 입니다. 사람을 추가하면 <strong>그룹 대화로 바뀌며 되돌릴 수
+            없습니다.</strong> 지금까지의 대화 기록은 그대로 남고, 초대된 사람도 스크롤하면
+            이전 내용을 볼 수 있습니다.
           </div>
         )}
 
