@@ -171,17 +171,25 @@ async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) 
 // 정확히 이 모양이었고, 실패 덤프의 `actual: false`(= null 이 아님)가 "기록은
 // 있는데 값이 남의 것" 임을 그대로 보여준다.
 //
-// 대신 호출을 전부 기록하고 **이 세션의 pid 가 실제 종료 신호를 받았는가** 로만
+// 대신 호출을 전부 기록하고 **이 세션의 pid 가 SIGTERM 을 받았는가** 로만
 // 판정한다. 순서·출처에 무관해지므로 주변 잡음이 늘어도 판정이 흔들리지 않는다.
+//
+// 왜 하필 SIGTERM 하나만 보는가 — 잡음의 종류가 둘이기 때문이다.
+//  1. 신호 0 (`process.kill(pid, 0)`)은 liveness 프로브라 애초에 종료가 아니다.
+//  2. SIGKILL 은 제품이 **언제나 SIGTERM 뒤 유예(STOP_GRACE_MS)로만** 보낸다
+//     (`#forceTerminate`·`#killUnhealthy` 둘 다 동일). 이 파일의 여러 테스트가
+//     같은 out-of-range sentinel(`DEAD_PID`)을 쓰므로, 앞 테스트가 예약해 둔
+//     그 늦은 SIGKILL 이 뒤 테스트의 창으로 흘러들어올 수 있다. 종료 여부의
+//     증인을 SIGTERM 으로 고정하면 그 유입이 판정을 바꾸지 못한다.
 function stubProcessKill() {
   const original = process.kill;
   const calls = [];
   process.kill = (pid, sig) => { calls.push({ pid, sig }); };
+  const sigterms = (pid) => calls.filter((c) => c.pid === pid && c.sig === 'SIGTERM');
   return {
     calls,
-    /** 신호 0 은 "이 pid 살아 있나?" 프로브라 종료가 아니다 — 세지 않는다. */
-    terminationSignals: (pid) => calls.filter((c) => c.pid === pid && c.sig !== 0),
-    sawTermination: (pid, sig) => calls.some((c) => c.pid === pid && c.sig === sig),
+    sigterms,
+    sawSigterm: (pid) => sigterms(pid).length > 0,
     restore: () => { process.kill = original; },
   };
 }
@@ -469,7 +477,7 @@ test('P0 regression: unhealthy time-threshold hit but fresh cli-home activity �
 
     await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
     assert.deepEqual(
-      kill.terminationSignals(DEAD_PID),
+      kill.sigterms(DEAD_PID),
       [],
       'must NOT SIGTERM a session with fresh cli-home (in-process Workflow) evidence',
     );
@@ -485,8 +493,8 @@ test('P0 regression: unhealthy turn-threshold hit but active keep-alive → defe
   const mgr = new Harness(makeConfig({ chatKeepAliveMaxMinutes: 120 }));
   // applyKeepAlive 는 `_getLiveSession` 의 OS 레벨 liveness 프로브
   // (`process.kill(pid, 0)`, 신호 0 — "이 pid 있나?", 진짜 kill 이 아님)를
-  // 거친다. `terminationSignals` 가 신호 0 을 빼고 pid 로도 좁혀 주므로,
-  // 이 프로브와 다른 세션의 잡음 양쪽 모두에 걸리지 않는다.
+  // 거친다. `sigterms` 가 SIGTERM 만, 그것도 이 pid 것만 세므로 그 프로브와
+  // 다른 세션의 잡음 양쪽 모두에 걸리지 않는다.
   const kill = stubProcessKill();
   try {
     // applyKeepAlive resolves through the OS-level _getLiveSession check —
@@ -499,7 +507,7 @@ test('P0 regression: unhealthy turn-threshold hit but active keep-alive → defe
 
     await mgr.checkUnhealthy(sess, '5 consecutive turns without an LLM response');
     assert.deepEqual(
-      kill.terminationSignals(process.pid),
+      kill.sigterms(process.pid),
       [],
       'must NOT SIGTERM a session with an active keep-alive grant',
     );
@@ -518,7 +526,7 @@ test('P0 control: unhealthy hit + zero progress evidence + no keep-alive → sti
     mgr._sessions.set(sess.sessionKey, sess);
     await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
     assert.ok(
-      kill.sawTermination(DEAD_PID, 'SIGTERM'),
+      kill.sawSigterm(DEAD_PID),
       'a genuinely silent session is still SIGTERM-ed',
     );
     assert.equal(sess.unhealthyKilled, true);
@@ -565,7 +573,7 @@ test('P0 integration: 5 consecutive unresponded turns via _writeTurn + fresh cli
     await waitUntil(() => sess._lastBackgroundTaskCount !== undefined);
 
     assert.deepEqual(
-      kill.terminationSignals(DEAD_PID),
+      kill.sigterms(DEAD_PID),
       [],
       'progress evidence must defer the kill even through the real dispatch path',
     );
@@ -593,11 +601,12 @@ test('P0 integration control: 5 consecutive unresponded turns via _writeTurn + z
     // 예전의 `killed !== null` 배리어는 여기서 곧장 통과해 버렸고, 그 다음
     // 단언이 남의 pid 를 보고 깨졌다.
     fireForeignLivenessProbe();
-    await waitUntil(() => kill.terminationSignals(DEAD_PID).length > 0);
+    await waitUntil(() => kill.sawSigterm(DEAD_PID));
 
-    assert.deepEqual(
-      kill.terminationSignals(DEAD_PID),
-      [{ pid: DEAD_PID, sig: 'SIGTERM' }],
+    // 배리어와 같은 술어를 다시 단언한다 — 중복이지만, 타임아웃 시 나오는
+    // 일반 메시지 대신 무엇을 기대했는지가 실패 출력에 남는다.
+    assert.ok(
+      kill.sawSigterm(DEAD_PID),
       'a genuinely silent session at the turn threshold is still SIGTERM-ed',
     );
     assert.equal(sess.unhealthyKilled, true);
@@ -704,7 +713,7 @@ test('keep-alive ceiling reached → force-terminates the session and posts a ro
     fireForeignLivenessProbe();
 
     assert.ok(
-      kill.sawTermination(DEAD_PID, 'SIGTERM'),
+      kill.sawSigterm(DEAD_PID),
       'ceiling breach signals the CLI child',
     );
     assert.equal(mgr._sessions.has(key), false, 'session record dropped immediately (drop-first, like #killUnhealthy)');
