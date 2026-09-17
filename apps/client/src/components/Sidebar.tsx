@@ -134,6 +134,7 @@ export default function Sidebar({
   const [sectionCollapsed, setSectionCollapsed] = React.useState<Record<string, boolean>>(() => foldInit.sections);
   const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set(foldInit.hosts));
   const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set());
+  const [expandedOlderCwds, setExpandedOlderCwds] = React.useState<Set<string>>(() => new Set());
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
 
@@ -776,45 +777,77 @@ export default function Sidebar({
                                       <span style={{ fontSize: 10, color: tokens.colors.textMuted, flexShrink: 0 }}>{group.sessions.length}</span>
                                     </button>
                                     {/* 세션 행 */}
-                                    {cwdExpanded && group.sessions.map((s) => {
-                                      const sPath = sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id);
-                                      const sActive = location.pathname === sPath;
-                                      const statusColor = s.live_status === 'busy' || s.live_status === 'starting'
-                                        ? tokens.colors.warningLight
-                                        : s.live_status === 'error' ? tokens.colors.dangerLight
-                                        : s.live_status === 'ready' || s.live_status === 'awaiting_permission' ? tokens.colors.successLight
-                                        : null;
+                                    {cwdExpanded && (() => {
+                                      const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+                                      const recent = group.sessions.filter((s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff);
+                                      const older = group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff);
+                                      const alwaysVisible = recent.length > 0 ? recent : group.sessions.slice(0, 1);
+                                      const hidden = recent.length > 0 ? older : group.sessions.slice(1);
+                                      const olderExpanded = expandedOlderCwds.has(cwdKey);
+                                      const displayed = olderExpanded ? group.sessions : alwaysVisible;
                                       return (
-                                        <button
-                                          key={s.session_id}
-                                          type="button"
-                                          onClick={() => handleNavClick(sPath)}
-                                          aria-current={sActive ? 'page' : undefined}
-                                          title={sessionDisplayTitle(s)}
-                                          style={{
-                                            width: '100%', textAlign: 'left', border: 'none',
-                                            borderLeft: `3px solid ${sActive ? tokens.colors.accent : 'transparent'}`,
-                                            background: sActive ? tokens.colors.surfaceHover : 'transparent',
-                                            display: 'flex', alignItems: 'center', gap: 6,
-                                            padding: '2px 10px 2px 50px',
-                                            color: sActive ? tokens.colors.textPrimary : tokens.colors.textSecondary,
-                                            cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', minHeight: 26,
-                                          }}
-                                          onMouseEnter={(e) => { if (!sActive) e.currentTarget.style.background = tokens.colors.surfaceHover; }}
-                                          onMouseLeave={(e) => { if (!sActive) e.currentTarget.style.background = 'transparent'; }}
-                                        >
-                                          <span style={{ fontSize: 9, fontWeight: 700, color: sActive ? tokens.colors.accent : tokens.colors.textMuted, whiteSpace: 'nowrap', fontFamily: MONO, flexShrink: 0 }}>
-                                            {runtimeLabel(s.cli).slice(0, 2).toUpperCase()}
-                                          </span>
-                                          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {sessionDisplayTitle(s)}
-                                          </span>
-                                          {statusColor && (
-                                            <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: statusColor }} />
+                                        <>
+                                          {displayed.map((s) => {
+                                            const sPath = sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id);
+                                            const sActive = location.pathname === sPath;
+                                            const statusColor = s.live_status === 'busy' || s.live_status === 'starting'
+                                              ? tokens.colors.warningLight
+                                              : s.live_status === 'error' ? tokens.colors.dangerLight
+                                              : s.live_status === 'ready' || s.live_status === 'awaiting_permission' ? tokens.colors.successLight
+                                              : null;
+                                            return (
+                                              <button
+                                                key={s.session_id}
+                                                type="button"
+                                                onClick={() => handleNavClick(sPath)}
+                                                aria-current={sActive ? 'page' : undefined}
+                                                title={sessionDisplayTitle(s)}
+                                                style={{
+                                                  width: '100%', textAlign: 'left', border: 'none',
+                                                  borderLeft: `3px solid ${sActive ? tokens.colors.accent : 'transparent'}`,
+                                                  background: sActive ? tokens.colors.surfaceHover : 'transparent',
+                                                  display: 'flex', alignItems: 'center', gap: 6,
+                                                  padding: '2px 10px 2px 50px',
+                                                  color: sActive ? tokens.colors.textPrimary : tokens.colors.textSecondary,
+                                                  cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', minHeight: 26,
+                                                }}
+                                                onMouseEnter={(e) => { if (!sActive) e.currentTarget.style.background = tokens.colors.surfaceHover; }}
+                                                onMouseLeave={(e) => { if (!sActive) e.currentTarget.style.background = 'transparent'; }}
+                                              >
+                                                <span style={{ fontSize: 9, fontWeight: 700, color: sActive ? tokens.colors.accent : tokens.colors.textMuted, whiteSpace: 'nowrap', fontFamily: MONO, flexShrink: 0 }}>
+                                                  {runtimeLabel(s.cli).slice(0, 2).toUpperCase()}
+                                                </span>
+                                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                  {sessionDisplayTitle(s)}
+                                                </span>
+                                                {statusColor && (
+                                                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: statusColor }} />
+                                                )}
+                                              </button>
+                                            );
+                                          })}
+                                          {hidden.length > 0 && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setExpandedOlderCwds((prev) => {
+                                                const next = new Set(prev);
+                                                if (next.has(cwdKey)) next.delete(cwdKey); else next.add(cwdKey);
+                                                return next;
+                                              })}
+                                              style={{
+                                                width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
+                                                padding: '2px 10px 2px 50px', color: tokens.colors.textMuted,
+                                                cursor: 'pointer', fontSize: 10.5, fontFamily: 'inherit', minHeight: 22,
+                                              }}
+                                              onMouseEnter={(e) => { e.currentTarget.style.color = tokens.colors.textSecondary; }}
+                                              onMouseLeave={(e) => { e.currentTarget.style.color = tokens.colors.textMuted; }}
+                                            >
+                                              {olderExpanded ? '접기 ↑' : `+${hidden.length}개 더 보기`}
+                                            </button>
                                           )}
-                                        </button>
+                                        </>
                                       );
-                                    })}
+                                    })()}
                                   </React.Fragment>
                                 );
                               })
