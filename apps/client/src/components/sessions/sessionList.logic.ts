@@ -1,37 +1,10 @@
 /**
  * Agent Session 목록 순수 로직 — 사이드바/목록 페이지 공유. React 없이 node:test 로 구동.
  */
-import type { AgentSessionHost, AgentSessionSummary } from '../../types';
+import type { AgentSessionSummary } from '../../types';
 
 export function sortSessionsByActivity(list: AgentSessionSummary[]): AgentSessionSummary[] {
   return [...list].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
-}
-
-export interface HostCliEntry {
-  key: string;
-  manager_id: string;
-  cli: string;
-  host_name: string;
-  label: string;
-  path: string;
-}
-
-/** 사이드바 행: 호스트 수준 경로 (`/sessions/:managerId`). */
-export function hostCliEntries(hosts: AgentSessionHost[], workspaceBase: string, cliLabel: (cli: string) => string): HostCliEntry[] {
-  const out: HostCliEntry[] = [];
-  for (const host of hosts) {
-    for (const cli of host.clis) {
-      out.push({
-        key: `${host.manager_id}:${cli}`,
-        manager_id: host.manager_id,
-        cli,
-        host_name: host.name,
-        label: `${host.name} · ${cliLabel(cli)}`,
-        path: `${workspaceBase}/sessions/${host.manager_id}`,
-      });
-    }
-  }
-  return out;
 }
 
 export function sessionPath(workspaceBase: string, managerId: string, cli: string, sessionId: string): string {

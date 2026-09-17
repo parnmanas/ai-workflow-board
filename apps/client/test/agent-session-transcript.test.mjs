@@ -11,7 +11,7 @@ import {
   pendingPermission,
   sessionDisplayTitle,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
-import { hostCliEntries, sessionPath, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
+import { sessionPath, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
 
 let seq = 0;
 function ev(type, payload, turn_id = 't1') {
@@ -99,18 +99,11 @@ test('status helpers mirror the server prompt rules', () => {
   assert.equal(sessionDisplayTitle({ title: 'Fix login', cli: 'claude', session_id: 'x' }), 'Fix login');
 });
 
-test('session list helpers: activity sort, host×cli sidebar rows, canonical paths', () => {
+test('session list helpers: activity sort, canonical paths', () => {
   const sorted = sortSessionsByActivity([
     { cli: 'claude', session_id: 'old', cwd: '/a', title: 'old', created_at: null, updated_at: '2026-09-01T00:00:00Z', source: 'cli' },
     { cli: 'claude', session_id: 'new', cwd: '/a', title: 'new', created_at: null, updated_at: '2026-09-10T00:00:00Z', source: 'cli' },
   ]);
   assert.deepEqual(sorted.map((s) => s.session_id), ['new', 'old']);
-  const rows = hostCliEntries([
-    { manager_id: 'm1', instance_id: 'i1', hostname: 'rolf.local', name: 'rolf', clis: ['claude', 'codex'], plugin_version: '1', last_seen_at: '' },
-    { manager_id: 'm2', instance_id: 'i2', hostname: 'ralf', name: 'ralf', clis: [], plugin_version: '1', last_seen_at: '' },
-  ], '/ws/w1', (cli) => cli.toUpperCase());
-  assert.deepEqual(rows.map((r) => r.label), ['rolf · CLAUDE', 'rolf · CODEX']);
-  // 사이드바 행은 이제 managerId 수준(cwd 그룹 뷰)을 가리킨다 — 이전의 :managerId/:cli 대신
-  assert.equal(rows[0].path, '/ws/w1/sessions/m1');
   assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
 });
