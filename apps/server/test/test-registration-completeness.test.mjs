@@ -28,6 +28,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   listSuiteNames,
@@ -180,5 +181,39 @@ test('매니페스트 파서는 주석과 빈 줄을 버린다', () => {
   assert.deepEqual(
     parseSuiteManifest('# 머리말\n\n  test/a.test.mjs  \n\n#끝\nnpm run test:qa\n'),
     ['test/a.test.mjs', 'npm run test:qa'],
+  );
+  assert.deepEqual(parseSuiteManifest('# 주석뿐\n\n'), [], '주석만 있으면 step 이 없다');
+});
+
+// 목록이 package.json 을 떠났으니, 매니페스트를 못 읽는 상황이 곧 "아무 테스트도
+// 안 도는 상황" 이다. 그때 run-suite 가 0 으로 끝나면 CI 는 초록인데 커버리지는
+// 0 이 된다 — 등록 완전성 가드가 막으려던 것과 같은 결과이므로 여기서 함께 막는다.
+function runSuiteExitCode(...args) {
+  const res = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'run-suite.mjs'), ...args],
+    { cwd: SERVER_ROOT, encoding: 'utf8' },
+  );
+  return res.status;
+}
+
+test('없는 스위트를 부르면 run-suite 가 0 이 아닌 코드로 죽는다', () => {
+  assert.notEqual(
+    runSuiteExitCode('--suite', '__5dc241d8-존재하지-않는-스위트__'),
+    0,
+    '매니페스트가 없는데 성공으로 끝났다 — step 0 개를 돌고 CI 가 초록이 된다',
+  );
+});
+
+test('빈 매니페스트도 성공으로 끝나지 않는다', (t) => {
+  const suite = '__5dc241d8-빈-매니페스트__';
+  const file = suiteManifestPath(suite);
+  t.after(() => fs.rmSync(file, { force: true }));
+
+  fs.writeFileSync(file, '# step 이 한 줄도 없다\n\n');
+  assert.notEqual(
+    runSuiteExitCode('--suite', suite),
+    0,
+    '빈 매니페스트가 성공으로 끝났다 — 아무것도 안 돌고 통과로 보인다',
   );
 });

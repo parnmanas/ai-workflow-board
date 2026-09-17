@@ -52,7 +52,9 @@ function gitAllowFailure(cwd, ...args) {
 
 function makeRepo(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-5dc241d8-merge-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Windows 에서는 방금 끝난 git 이 .git 안의 핸들을 놓기 전이라 첫 rm 이 EBUSY 로
+  // 튈 수 있다. 재시도를 주면 정리 실패가 테스트 실패로 둔갑하지 않는다.
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   git(dir, 'init', '-q');
   // CI 러너에는 전역 git 신원이 없다. 없으면 commit 이 그대로 죽는다.
   git(dir, 'config', 'user.email', 'suite-merge-test@example.invalid');
