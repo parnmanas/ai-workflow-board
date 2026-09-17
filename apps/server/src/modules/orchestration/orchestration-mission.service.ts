@@ -26,7 +26,7 @@ import { orchestrationError } from './orchestration-errors';
 import { GraphSpec, computeMissionProgress } from './orchestration-graph';
 import { renderConfirmPolicyGuidance } from './orchestration-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
-import { sinceBoundaryParam } from '../../common/created-at-since-param';
+import { sinceBoundaryParam, tiedCreatedAtWhere } from '../../common/created-at-since-param';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
   MAX_PARALLEL_CEILING,
@@ -939,11 +939,21 @@ export class OrchestrationMissionService {
 
     if (opts?.before_at) {
       const beforeSeq = Number.isFinite(Number(opts.before_seq)) ? Number(opts.before_seq) : 0;
+      const cursorAt = new Date(opts.before_at);
+      // tie-break 절의 "같은 시각" 도 등호로 물으면 안 된다(티켓 85efcb69). 커서의 `at` 은
+      // 아래에서 `new Date(...).toISOString()` 으로 만들어져 밀리초까지만 남는데 Postgres 의
+      // created_at 은 마이크로초라, 등호는 커서 행 자신을 포함해 한 행도 집지 못한다. 그러면
+      // 이 절이 영영 비어 커서와 같은 밀리초에 몰린 나머지 이벤트가 페이지 경계에서 통째로
+      // 사라진다 — write_seq 컬럼이 존재하는 이유가 바로 그 손실을 막는 것이므로, 생산자쪽
+      // seq 를 고쳐도 여기를 같이 고치지 않으면 결함이 그대로 남는다.
+      // 두 분기는 서로소다: 첫 분기는 `< t`, tie-break 는 sqljs 가 `= t`(초 단위),
+      // 그 외 드라이버가 `[t, t+1ms)` 라 같은 행이 두 번 반환되지 않는다.
+      const tied = tiedCreatedAtWhere(this.dataSource, 'e', cursorAt);
       qb.andWhere(
-        '(e.created_at < :beforeAt OR (e.created_at = :beforeAtEq AND e.write_seq < :beforeSeq))',
+        `(e.created_at < :beforeAt OR ((${tied.clause}) AND e.write_seq < :beforeSeq))`,
         {
-          beforeAt: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
-          beforeAtEq: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
+          beforeAt: sinceBoundaryParam(this.dataSource, cursorAt),
+          ...tied.params,
           beforeSeq,
         },
       );
@@ -964,10 +974,11 @@ export class OrchestrationMissionService {
    * 다음 이벤트의 `write_seq` 를 **DB 상태에서** 유도한다(티켓 4d065f82).
    *
    * comment-tools.ts 의 `_comment_write_seq` 와 같은 tied-group 기법이다: 이 미션의
-   * 가장 최근 `created_at` 을 찾고, 그와 **정확히 같은** created_at 을 가진 row 를
-   * LIMIT 없이 전부 가져와 그 안의 최댓값 + 1 을 쓴다. 같은 타임스탬프에 몇 건이 몰리든
-   * 개수와 무관하게 전량을 보므로 burst 크기에 영향받지 않고, 프로세스 메모리에
-   * 의존하지 않으므로 재시작에도 리셋되지 않는다.
+   * 가장 최근 `created_at` 을 찾고, 그와 **같은 시각**의 row 를 LIMIT 없이 전부 가져와
+   * 그 안의 최댓값 + 1 을 쓴다. 같은 타임스탬프에 몇 건이 몰리든 개수와 무관하게 전량을
+   * 보므로 burst 크기에 영향받지 않고, 프로세스 메모리에 의존하지 않으므로 재시작에도
+   * 리셋되지 않는다. "같은 시각" 판정은 드라이버 저장 정밀도에 맞춰야 한다 —
+   * 아래 `tiedCreatedAtWhere` 주석 참고(티켓 85efcb69).
    *
    * 이 값이 필요한 이유는 커서 페이지네이션이다 — `created_at` 만으로는 fan-out 한 번에
    * 수십 건이 같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 건너뛴다.
@@ -979,15 +990,26 @@ export class OrchestrationMissionService {
         order: { created_at: 'DESC' },
       });
       if (!mostRecent) return 1;
-      const tied = await this.eventRepo
+      // "같은 created_at" 을 등호 하나로 물으면 Postgres 에서 0건이 된다(티켓 85efcb69).
+      // `@CreateDateColumn` 은 마이크로초로 저장되는데 엔티티로 읽으면 JS `Date` 라
+      // 밀리초까지만 남아, 그 값을 파라미터로 되돌리면 **자기 자신조차** 일치하지 않는다.
+      // 그러면 max 가 늘 0 이라 write_seq 가 영구히 1 에 고정되고, 커서의 타이브레이커가
+      // 통째로 사라진다. sqljs 는 초 단위 문자열이라 이 실패 모드가 재현되지 않으므로
+      // 단위 테스트만으로는 드러나지 않는다.
+      const tied = tiedCreatedAtWhere(this.dataSource, 'e', mostRecent.created_at);
+      const tiedRows = await this.eventRepo
         .createQueryBuilder('e')
         .where('e.mission_id = :missionId', { missionId })
-        .andWhere('e.created_at = :tiedAt', {
-          tiedAt: sinceBoundaryParam(this.dataSource, mostRecent.created_at),
-        })
+        .andWhere(`(${tied.clause})`, tied.params)
         .getMany();
+      // fail-safe: mostRecent 는 정의상 이 미션의 최대 created_at row 이므로 tied group 의
+      // 원소여야 한다. 조회가 그것조차 놓치면 "이벤트가 하나도 없다" 와 구별되지 않아 seq 가
+      // 조용히 1 로 되돌아간다 — 이번 결함의 실패 모드 그 자체다. 항상 포함시켜 막는다.
+      const tiedGroup = tiedRows.some((e) => e.id === mostRecent.id)
+        ? tiedRows
+        : [...tiedRows, mostRecent];
       let max = 0;
-      for (const e of tied) if ((e.write_seq ?? 0) > max) max = e.write_seq ?? 0;
+      for (const e of tiedGroup) if ((e.write_seq ?? 0) > max) max = e.write_seq ?? 0;
       return max + 1;
     } catch {
       // seq 유도 실패가 타임라인 기록 자체를 막으면 안 된다 — 0 은 "순서 미상"이고
