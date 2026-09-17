@@ -54,6 +54,21 @@ function fakeEventChild() {
   };
 }
 
+/** `promise` 가 `ms` 안에 안 끝나면 이유를 밝히며 실패한다. 회귀가 무한 hang 이
+ *  아니라 읽을 수 있는 실패로 나오게 하는 장치다 — 기다리는 신호 자체가 사라지는
+ *  회귀에서는 `await` 가 영영 안 풀려 테스트가 timeout 될 때까지 멈춘다. */
+async function within(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${ms}ms 안에 ${label}`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** sleep 호출 예산을 기록하는 스텁. 실제로 기다리지는 않는다. */
 function recordingSleep(budgets, onSleep) {
   return async (ms) => { budgets.push(ms); if (onSleep) await onSleep(budgets.length); };
@@ -106,9 +121,11 @@ test('soft 이후 남은 grace 도중 자식이 끝나면 force 패스를 쏘지
     sleep: recordingSleep(budgets, (nth) => { if (nth === 2) child.exitCode = 0; }),
   });
   assert.deepEqual(calls, ['taskkill /PID 4321 /T']);
-  // 관측 예산은 grace 에서 떼어 쓴다 — 총 대기는 종전(graceMs)과 같아야 한다.
-  assert.deepEqual(budgets, [50, 200]);
-  assert.equal(budgets.reduce((a, b) => a + b, 0), 250);
+  // 두 관측 예산(진입 50 · force 뒤 reap 50)은 모두 grace 에서 떼어 쓴다. 그래서
+  // soft 이후 대기는 250-50-50=150 이고, 여기서 자식이 끝나 force 를 안 쏘면
+  // reap 예산은 쓰이지 않은 채 남는다 — 총 대기는 grace 를 넘지 않는다.
+  assert.deepEqual(budgets, [50, 150]);
+  assert.ok(budgets.reduce((a, b) => a + b, 0) <= 250);
 });
 
 test("'exit' 를 구독시켜 주는 핸들은 예산을 다 쓰지 않고 깨어난다", async () => {
@@ -144,6 +161,50 @@ test('grace 내내 살아 있으면 soft·force 를 모두 쏜다', async () => 
     sleep: async () => {},
   });
   assert.deepEqual(calls, ['taskkill /PID 4321 /T', 'taskkill /PID 4321 /T /F']);
+});
+
+// -- force 패스 뒤 종료 관측 (ticket 445453a7) ---------------------------------
+//
+// `taskkill /F` 는 kill 을 접수하면 돌아올 뿐, grace 안에 안 죽던 자식이 실제로
+// 사라지는 것까지 보장하지 않는다. 그런데 Windows 는 프로세스가 완전히 사라질
+// 때까지 cwd 디렉터리 핸들을 놓지 않으므로, 여기서 안 기다리고 반환하면 드레인이
+// 끝난 줄 안 호출부의 rmdir 이 EBUSY 로 실패한다. 확정 기준은 "kill 호출" 이
+// 아니라 "종료 관측" 이어야 한다.
+
+test('force 패스 뒤에도 자식의 실제 종료를 기다린다', async () => {
+  const calls = [];
+  const budgets = [];
+  const child = fakeChild();
+  await terminateWindowsProcessTree(4321, 250, {
+    child,
+    run: recordingRun(calls),
+    // 진입 관측(1) · soft 이후(2) 까지는 살아 있고, force 뒤(3) 에야 죽는다.
+    sleep: recordingSleep(budgets, (nth) => { if (nth === 3) child.exitCode = 0; }),
+  });
+  assert.deepEqual(calls, ['taskkill /PID 4321 /T', 'taskkill /PID 4321 /T /F']);
+  assert.deepEqual(budgets, [50, 150, 50], 'force 뒤 reap 예산을 실제로 쓴다');
+  assert.equal(childHasExited(child), true, '종료를 관측하지 못한 채 반환했다');
+  // reap 예산은 grace 에서 떼어 쓴 것이므로 총 대기는 늘지 않는다.
+  assert.equal(budgets.reduce((a, b) => a + b, 0), 250);
+});
+
+test("force 뒤 대기는 고정 지연이 아니라 'exit' 관측이다", async () => {
+  const calls = [];
+  const budgets = [];
+  const child = subscribableChild();
+  // 3번째 대기(force 뒤 reap)는 예산이 영원히 안 끝난다 — 'exit' 로만 풀려야 한다.
+  const sleep = async (ms) => { budgets.push(ms); if (budgets.length >= 3) await new Promise(() => {}); };
+  const done = terminateWindowsProcessTree(4321, 250, { child, run: recordingRun(calls), sleep });
+  await within(
+    child.subscription(3),
+    1000,
+    "force 뒤 'exit' 구독이 등록되지 않았다 — force 패스 뒤에 종료를 기다리지 않는다",
+  );
+  child.emitExit(0);
+  await done;
+  assert.deepEqual(calls, ['taskkill /PID 4321 /T', 'taskkill /PID 4321 /T /F']);
+  assert.deepEqual(budgets, [50, 150, 50]);
+  assert.equal(child.listenerCount, 0, "'exit' 리스너를 남기지 않는다");
 });
 
 test('핸들을 못 주는 호출부는 종전 best-effort 경로 그대로다', async () => {
@@ -232,6 +293,7 @@ function subscribableChild() {
       if (resolve) { waiters.delete(subscriptions); resolve(); }
     },
     off(event, listener) { if (event === 'exit') listeners.delete(listener); },
+    get listenerCount() { return listeners.size; },
     /** n번째 'exit' 구독이 등록될 때까지. */
     subscription(n) {
       if (subscriptions >= n) return Promise.resolve();
