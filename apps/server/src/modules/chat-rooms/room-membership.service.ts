@@ -222,9 +222,13 @@ export class RoomMembershipService {
         .where('p.room_id = :roomId', { roomId })
         .andWhere('p.left_at IS NULL')
         .orderBy('p.joined_at', 'ASC')
-        // joined_at 은 같은 밀리초에 여러 행이 생길 수 있어 전순서가 아니다. 자동 이름이
-        // 실행마다 달라지지 않도록 DB 가 보존하는 결정적 타이브레이커를 함께 건다.
-        .addOrderBy('p.id', 'ASC')
+        // joined_at 은 전순서가 아니다 — sql.js 의 `datetime('now')` 는 초 단위라 같은
+        // 방의 참여자 행들이 흔히 같은 값을 갖는다. 타이브레이커로 행 `id` 를 쓰면 안
+        // 된다: 랜덤 UUID 라 순서가 실행마다 달라져 자동 이름이 뒤바뀐다(실제로 이
+        // 테스트가 그렇게 흔들렸다). `participant_id` 는 active 행 사이에서 방마다
+        // 유일하므로(이 메서드가 지키는 불변식) 둘을 합치면 전순서가 되고, 같은 참여자
+        // 구성이면 언제나 같은 이름이 나온다.
+        .addOrderBy('p.participant_id', 'ASC')
         .getMany();
       const activeKeys = new Set(
         activeRows.map(r => participantKey(r.participant_type, r.participant_id)),
