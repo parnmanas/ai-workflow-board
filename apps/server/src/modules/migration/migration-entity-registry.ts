@@ -82,6 +82,12 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'ColumnRolePolicy', 'BoardLesson', 'UserChannel', 'Deployment',
   'OrchestrationTeam', 'Action', 'QaScenario', 'SecurityProfile', 'OutreachChannel',
   'CliLoginSession',
+  // Agent Session(CLI 직접 세션)의 Runtime Host × CLI 설정. 세션 내용은 장비의
+  // CLI 홈이 원본이라 저장하지 않지만 이 바인딩은 설정이라 이관 대상이다.
+  // @ManyToOne/@JoinColumn 이 없어(workspace_id/manager_id/cli/credential_id 전부
+  // 평문 varchar) 실FK 가 없으므로 위 11개 제약과 무관하다 — (연성) 의존하는
+  // Workspace·Agent·Credential 이 모두 앞에 있으니 여기 둔다.
+  'AgentSessionCliSetting',
   'ResourceEmbedding', // (연성) Resource 의존, 위에서 이미 삽입됨
 
   // Skill 체인 / 배치-런
