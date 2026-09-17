@@ -174,6 +174,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Services provided to modules via `providers` array for dependency injection
 - Example from `boards.module.ts`:
 - `apps/server/src/entities/index.ts` exports all entity types
+- 단, 엔티티 배럴은 **혼자 완결되지 않는다** — 이관 레지스트리 등록이 한 쌍으로 따라온다. 아래 "Entity Naming (Database)" 참고.
 - Each module has its own file structure without explicit barrel files (imports done directly)
 ## Entity Naming (Database)
 - `@Entity('table_name')` for table mapping
@@ -182,6 +183,10 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - `@CreateDateColumn()` and `@UpdateDateColumn()` for timestamps
 - `@ManyToOne()`, `@OneToMany()` for relationships
 - `@JoinColumn()` for foreign key specification
+- **배럴 export 와 이관 레지스트리 등록은 한 쌍이다.** `apps/server/src/entities/index.ts` 에 `export { Foo } from './Foo';` 를 넣었으면 **같은 커밋에서** `apps/server/src/modules/migration/migration-entity-registry.ts` 의 `MIGRATION_ENTITY_ORDER` 에도 클래스명을 추가하라. 빠뜨리면 (1) **동일 빌드끼리도** migration preflight 가 항상 실패해 main CI 가 red 가 되고, (2) `resolveMigrationEntity()` 가 그 이름을 거부해 해당 테이블이 인스턴스 이관에서 **조용히** 빠진다.
+- 배치 위치는 FK 위상 순서(부모 먼저)를 따른다. 실제 DB FK 는 11개뿐이고 그 목록은 레지스트리 파일 상단 주석에 있다 — `@ManyToOne`/`@JoinColumn` 없이 평문 varchar 로만 참조하는 엔티티라면 순서는 사실상 자유다.
+- ⚠️ `MIGRATION_CONTROL_ENTITY_REASONS` 는 **도피처가 아니다.** 누락 엔티티를 여기 넣으면 preflight 는 green 이 되지만(`comparePreflight()` 가 CONTROL 이름을 소스 쪽에서 먼저 걸러낸다) 그 테이블은 이관에서 **영구히** 빠진다. 이관 기능 자신의 제어 상태이고 도착지에서 재생성되는 테이블에만 쓰고, 사유를 함께 적어라.
+- 이 한 쌍은 `apps/server/test/migration-registry-completeness.test.mjs` 가 배럴 ↔ 레지스트리 양방향 차집합으로 강제한다(CONTROL 집합은 핀으로 고정). 누락 시 엔티티 이름·소스 파일·조치법을 그 실패 메시지가 찍어 준다. 온톨로지 그래프 테이블(`ontology_` 접두)만 의도적 제외 대상이다.
 
 ## Architecture
 
