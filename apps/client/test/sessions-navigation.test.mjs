@@ -1,6 +1,7 @@
 // Agent Session(CLI 직접 세션) 표면의 IA 계약 — 소스 텍스트 단언.
 //   - 사이드바에서 Sessions 섹션이 Chat 섹션보다 위에 온다(주 작업 표면), 행은 Runtime Host × CLI.
-//   - 세션 라우트(/sessions, /sessions/:managerId/:cli, /sessions/:managerId/:cli/:sessionId)가 등록돼 있다.
+//   - 세션 라우트(/sessions, /sessions/:managerId, /sessions/:managerId/:cli/:sessionId)가 등록돼 있다.
+//     * 중간 레벨이 managerId 단위로 바뀌었다: cwd 기준 그룹 뷰.
 //   - chat 모드의 기본 랜딩이 sessions 다.
 //   - SSE 컨텍스트가 agent_session_update / agent_session_event 를 구독한다.
 //   - Sessions 는 ChatRoom API 를 재사용하지 않고, 세션 내용을 AWB 에 저장하는 API 가 없다.
@@ -32,9 +33,10 @@ test('sidebar puts Sessions above Chat, with host×CLI rows and its own New acti
   assert.match(sidebar, /useAgentSessionsNav\(/);
 });
 
-test('routes: hosts index, host×cli list, and session detail render SessionsPage; chat mode lands on sessions', () => {
+test('routes: hosts index, host projects view, and session detail render SessionsPage; chat mode lands on sessions', () => {
   assert.match(app, /path="sessions" element=\{<SessionsPage \/>\}/);
-  assert.match(app, /path="sessions\/:managerId\/:cli" element=\{<SessionsPage \/>\}/);
+  // 중간 레벨: managerId 단위 (cwd 기준 그룹 뷰) — 이전의 :managerId/:cli 라우트를 대체
+  assert.match(app, /path="sessions\/:managerId" element=\{<SessionsPage \/>\}/);
   assert.match(app, /path="sessions\/:managerId\/:cli\/:sessionId" element=\{<SessionsPage \/>\}/);
   assert.match(app, /<Route path="sessions" element=\{<WorkspacedRedirect to="sessions" \/>\} \/>/);
   assert.match(viewMode, /return mode === 'chat' \? 'sessions' : 'boards';/);

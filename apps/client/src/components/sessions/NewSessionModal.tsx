@@ -3,6 +3,7 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
 import { Button, Input, Modal } from '../common';
+import DirectoryPicker from '../admin/DirectoryPicker';
 import { lastCwdStorageKey } from './sessionList.logic';
 import { runtimeLabel } from './sessionTranscript.logic';
 
@@ -17,6 +18,8 @@ export interface NewSessionModalProps {
   hosts: AgentSessionHost[];
   initialManagerId?: string;
   initialCli?: string;
+  /** 그룹 헤더의 "+ New" 버튼에서 전달되는 cwd 프리필 값. */
+  initialCwd?: string;
   onCreated: (live: AgentSessionLiveSnapshot) => void;
 }
 
@@ -53,13 +56,14 @@ function rememberCwd(managerId: string, cli: string, cwd: string): void {
   }
 }
 
-export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, onCreated }: NewSessionModalProps) {
+export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, initialCwd, onCreated }: NewSessionModalProps) {
   const [managerId, setManagerId] = useState(initialManagerId || '');
   const [cli, setCli] = useState(initialCli || '');
   const [cwd, setCwd] = useState('');
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -70,8 +74,9 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     const nextCli = host && initialCli && host.clis.includes(initialCli) ? initialCli : host?.clis[0] || '';
     setManagerId(nextManager);
     setCli(nextCli);
-    setCwd(nextManager && nextCli ? readLastCwd(nextManager, nextCli) : '');
-  }, [open, hosts, initialManagerId, initialCli]);
+    // initialCwd(그룹 헤더 "+ New")가 있으면 우선 적용, 없으면 마지막 기억 cwd
+    setCwd(initialCwd || (nextManager && nextCli ? readLastCwd(nextManager, nextCli) : ''));
+  }, [open, hosts, initialManagerId, initialCli, initialCwd]);
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
 
@@ -143,12 +148,36 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           </select>
         </div>
 
-        <Input
-          label="Working directory (on the Runtime Host)"
-          value={cwd}
-          placeholder="/path/to/repo"
-          onChange={(e) => setCwd(e.target.value)}
-        />
+        <div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+            <div style={{ flex: 1 }}>
+              <Input
+                label="Working directory (on the Runtime Host)"
+                value={cwd}
+                placeholder="/path/to/repo"
+                onChange={(e) => setCwd(e.target.value)}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!managerId}
+              onClick={() => setPickerOpen(true)}
+              style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
+            >
+              Browse…
+            </Button>
+          </div>
+        </div>
+        {managerId && (
+          <DirectoryPicker
+            isOpen={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            managerAgentId={managerId}
+            initialPath={cwd.trim() || undefined}
+            onPick={(picked) => setCwd(picked)}
+          />
+        )}
 
         <Input
           label="Title (optional)"
